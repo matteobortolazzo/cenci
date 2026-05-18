@@ -1,0 +1,19 @@
+{
+    "id": "muxwatch",
+    "name": "MuxWatch",
+    "description": "Live counts of Claude Code tmux sessions (running / need-input / done / stopped / idle).",
+    "version": "0.1.0",
+    "author": "Matteo Bortolazzo",
+    "type": "widget",
+    "capabilities": ["dankbar-widget", "monitoring"],
+    "component": "./MuxWatchWidget.qml",
+    "settings": "./MuxWatchSettings.qml",
+    "icon": "smart_toy",
+    "requires_dms": ">=0.1.0",
+    "requires": ["muxwatch"],
+    "permissions": [
+        "settings_read",
+        "settings_write",
+        "process"
+    ]
+}
