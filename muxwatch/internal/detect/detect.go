@@ -5,12 +5,12 @@ import (
 	"unicode/utf8"
 )
 
-// Status represents the detected state of a Claude Code session.
+// Status represents the detected state of an agent session.
 type Status int
 
 const (
 	StatusUnknown   Status = iota
-	StatusIdle             // claude running but no active task (fresh prompt)
+	StatusIdle             // agent running but no active task (fresh prompt)
 	StatusDone             // idle, waiting for next prompt
 	StatusStopped          // user interrupted (ESC) mid-generation
 	StatusRunning          // actively generating/thinking/tool use
@@ -34,11 +34,15 @@ func (s Status) String() string {
 	}
 }
 
-// TaskName extracts the task description from a pane title by stripping the status prefix.
+// TaskName extracts the task description from a pane title.
+// Claude Code prefixes pane titles with a status glyph; other agents may not.
 func TaskName(title string) string {
-	_, size := utf8.DecodeRuneInString(title)
+	r, size := utf8.DecodeRuneInString(title)
 	if size == 0 {
 		return title
+	}
+	if !IsStatusSymbol(r) {
+		return strings.TrimSpace(title)
 	}
 	rest := title[size:]
 	return strings.TrimSpace(rest)

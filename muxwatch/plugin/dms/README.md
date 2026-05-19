@@ -1,6 +1,6 @@
 # MuxWatch — DankMaterialShell bar widget
 
-Live counts of Claude Code tmux sessions in your DankMaterialShell (DMS) bar. Polls `muxwatch waybar` and renders the snapshot.
+Live counts of Claude Code and Codex tmux sessions in your DankMaterialShell (DMS) bar. Polls `muxwatch waybar` and renders the snapshot.
 
 ## Requirements
 
@@ -43,6 +43,6 @@ Then open Settings (`dms ipc call settings toggle`) → **Plugins** → enable *
 
 ## Troubleshooting
 
-- **Pill never appears**: confirm `muxwatch waybar` prints JSON in a shell. If `"class": "none"` it means no live sessions — start a Claude Code tmux pane and try again.
+- **Pill never appears**: confirm `muxwatch waybar` prints JSON in a shell. If `"class": "none"` it means no live sessions — start a Claude Code or Codex tmux pane and try again.
 - **Pill is stuck**: check the muxwatch daemon (`pgrep -a muxwatch`); the daemon is started by tmux (`run-shell -b "muxwatch"` in `~/.config/tmux/tmux.conf`).
 - **Logs**: `journalctl --user -u dms -f` or wherever your DMS unit writes.

@@ -59,7 +59,7 @@ func Format(snap *ipc.StateSnapshot, cfg Config) output {
 	if len(snap.Windows) == 0 {
 		return output{
 			Text:    "",
-			Tooltip: "no Claude sessions",
+			Tooltip: "no agent sessions",
 			Class:   "none",
 			Alt:     "none",
 		}

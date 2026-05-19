@@ -1,7 +1,7 @@
 {
     "id": "muxwatch",
     "name": "MuxWatch",
-    "description": "Live counts of Claude Code tmux sessions (running / need-input / done / stopped / idle).",
+    "description": "Live counts of Claude Code and Codex tmux sessions (running / need-input / done / stopped / idle).",
     "version": "0.1.0",
     "author": "Matteo Bortolazzo",
     "type": "widget",

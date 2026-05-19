@@ -100,6 +100,49 @@ func TestDaemon_FullLifecycleWithPermission(t *testing.T) {
 	}
 }
 
+func TestDaemon_CodexLifecycleWithoutSessionEndRestoresAfterExit(t *testing.T) {
+	mc := &mockClient{
+		panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "zsh", PaneIndex: "0",
+				PaneCurrentCmd: "codex", PaneTitle: "Codex", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
+	if name, _ := lastRename(mc.renames, "main:0"); name != "Codex" {
+		t.Errorf("after SessionStart: expected 'Codex', got %q", name)
+	}
+
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "PermissionRequest", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
+	if v, ok := findWindowOpt(mc.windowOpts, "main:0", "@muxwatch-symbol"); !ok || v != "!" {
+		t.Errorf("expected @muxwatch-symbol=! after PermissionRequest, got %q (found=%v)", v, ok)
+	}
+
+	d.handleEvent(ipc.HookEvent{EventType: "PostToolUse", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "Stop", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
+	if v, ok := findWindowOpt(mc.windowOpts, "main:0", "@muxwatch-symbol"); !ok || v != "✓" {
+		t.Errorf("expected @muxwatch-symbol=✓ after Stop, got %q (found=%v)", v, ok)
+	}
+
+	// Codex does not currently document a SessionEnd hook. When the process
+	// exits back to the user's shell, sweep should restore the original window.
+	mc.panes[0].PaneCurrentCmd = "zsh"
+	mc.renames = nil
+	mc.windowOpts = nil
+
+	d.sweepStale()
+
+	if len(mc.renames) != 1 || mc.renames[0].name != "zsh" {
+		t.Fatalf("expected restore to 'zsh' after Codex exit, got %v", mc.renames)
+	}
+	if len(d.windows) != 0 {
+		t.Errorf("expected windows map empty after Codex exit cleanup, got %d entries", len(d.windows))
+	}
+}
+
 func TestDaemon_DaemonRestartRediscoversSession(t *testing.T) {
 	mc := &mockClient{
 		panes: []tmux.PaneInfo{

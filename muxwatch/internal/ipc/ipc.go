@@ -22,6 +22,7 @@ type WindowState struct {
 	WindowName    string `json:"window_name"`
 	TaskName      string `json:"task_name"`
 	Status        string `json:"status"`
+	Agent         string `json:"agent,omitempty"`
 	ManuallyNamed bool   `json:"manually_named"`
 }
 

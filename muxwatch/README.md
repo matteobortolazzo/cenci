@@ -1,23 +1,23 @@
 # muxwatch
 
-An event-driven tmux watcher that monitors Claude Code sessions via hooks and shows live status in the tmux status bar:
+An event-driven tmux watcher that monitors Claude Code and OpenAI Codex sessions via hooks and shows live status in the tmux status bar:
 
 - **▶ blue** — running (generating, tool use, thinking)
 - **✓ green** — done (finished, waiting for next prompt)
 - **! red** — need input (permission dialog)
 - **~ dim** — idle (fresh prompt, no task yet)
 
-When Claude Code exits or muxwatch stops, the original window name is restored.
+When the agent exits or muxwatch stops, the original window name is restored.
 
 ## Architecture
 
 ```
-Claude Code hooks  →  muxwatch notify  →  event socket  →  daemon
+Claude/Codex hooks  →  muxwatch notify  →  event socket  →  daemon
                                                              |
                                           broadcast socket → waybar
 ```
 
-No polling. Claude Code hooks push state changes to the daemon instantly via a Unix socket.
+No polling for normal state changes. Agent hooks push state changes to the daemon instantly via a Unix socket; the daemon only sweeps periodically for stale/exited sessions.
 
 ## Install
 
@@ -35,7 +35,9 @@ make build
 
 ## Setup
 
-### 1. Enable the plugin
+### 1. Enable hooks
+
+#### Claude Code
 
 **Via marketplace (recommended):**
 
@@ -53,6 +55,28 @@ To update later: `claude plugin update muxwatch`
 
 ```bash
 claude --plugin-dir /path/to/muxwatch/plugin
+```
+
+#### OpenAI Codex
+
+Codex support uses the hook config in `plugin/codex/hooks.json`.
+
+If you do not already have a Codex hooks file:
+
+```bash
+mkdir -p ~/.codex
+cp /path/to/claude-tools/muxwatch/plugin/codex/hooks.json ~/.codex/hooks.json
+```
+
+If `~/.codex/hooks.json` already exists, merge the `hooks` entries from `plugin/codex/hooks.json` instead of replacing the file.
+
+Codex will ask you to review/trust new hooks. Use `/hooks` in Codex if the hooks are listed as pending review.
+
+This repository also includes a Codex plugin manifest at `plugin/codex/.codex-plugin/plugin.json`. Codex plugin-bundled hooks currently require this feature flag in `~/.codex/config.toml`:
+
+```toml
+[features]
+plugin_hooks = true
 ```
 
 ### 2. Start the daemon
@@ -134,6 +158,8 @@ The module sets a `class` based on the highest-priority status: `need-input` > `
 
 ### Hook-to-status mapping
 
+#### Claude Code
+
 | Hook Event | Status | Notes |
 |------------|--------|-------|
 | `SessionStart` | Idle | Fresh session, no task yet |
@@ -143,9 +169,22 @@ The module sets a `class` based on the highest-priority status: `need-input` > `
 | `Stop` | Done | Claude finished responding |
 | `SessionEnd` | Remove | Restore window, clean up |
 
+#### OpenAI Codex
+
+| Hook Event | Status | Notes |
+|------------|--------|-------|
+| `SessionStart` | Idle | Fresh session, no task yet |
+| `UserPromptSubmit` | Running | User just submitted a prompt |
+| `PermissionRequest` | NeedInput | Approval prompt shown |
+| `PreToolUse` | Running | Codex is about to run a tool |
+| `PostToolUse` | Running | Codex completed a tool call and is still working |
+| `Stop` | Done | Codex finished responding |
+
+Codex does not currently document a `SessionEnd` hook. muxwatch restores tracked Codex windows during the stale sweep once the pane returns to a non-Codex command after a completed/idle turn.
+
 ### Stale session sweep
 
-Every 30s (configurable), the daemon checks if tracked pane IDs still exist in tmux. If a pane is gone (e.g. Claude crashed without firing `SessionEnd`), the window is restored.
+Every 30s (configurable), the daemon checks if tracked pane IDs still exist in tmux. If a pane is gone (e.g. an agent crashed without firing a cleanup hook), the window is restored. For Codex, the sweep also restores the window after a completed session exits back to the user's shell.
 
 ### Custom status-format integration
 
@@ -171,20 +210,20 @@ For users with the default tmux status format, muxwatch automatically prepends `
 muxwatch respects manually set window names:
 
 - If a window has `automatic-rename` set to `off` (i.e. you renamed it with `Ctrl+b ,`), muxwatch will show status indicators but keep your window name.
-- If you rename a window while Claude is running, muxwatch detects the change and stops overriding your name.
-- When Claude exits, manually-named windows keep their name (indicators are removed).
+- If you rename a window while an agent is running, muxwatch detects the change and stops overriding your name.
+- When the agent exits, manually-named windows keep their name (indicators are removed).
 
 ### Daemon restart
 
-If the daemon restarts while Claude sessions are active, it re-discovers them on the next hook event — a `ListPanes` call maps the `$TMUX_PANE` to the correct window.
+If the daemon restarts while agent sessions are active, it re-discovers them on the next hook event — a `ListPanes` call maps the `$TMUX_PANE` to the correct window.
 
 ## Troubleshooting
 
-**No status updates**: Ensure the plugin is loaded (`claude plugin list` or `claude --plugin-dir ./plugin`). Check that `muxwatch notify` can reach the event socket (`muxwatch -v` shows the socket path).
+**No status updates**: Ensure the hook/plugin is loaded (`claude plugin list`, `claude --plugin-dir ./plugin`, or Codex `/hooks`). Check that `muxwatch notify` can reach the event socket (`muxwatch -v` shows the socket path).
 
 **Names not restoring**: muxwatch restores names on clean exit (Ctrl+C / SIGTERM) and via the stale sweep. If it was killed with SIGKILL, manually rename windows or restart tmux.
 
-**Daemon not running**: `muxwatch notify` fails silently (exit 0) — Claude Code is never blocked.
+**Daemon not running**: `muxwatch notify` fails silently (exit 0) — the agent is never blocked.
 
 ### Verbose mode
 

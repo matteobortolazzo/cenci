@@ -42,6 +42,7 @@ func (d *Daemon) buildSnapshot() ipc.StateSnapshot {
 			WindowName:    winName,
 			TaskName:      ws.TaskName,
 			Status:        status,
+			Agent:         ws.Agent,
 			ManuallyNamed: ws.ManuallyNamed,
 		})
 

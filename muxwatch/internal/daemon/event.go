@@ -132,6 +132,11 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 		}
 	}
 	ws.SessionID = event.SessionID
+	if event.Agent != "" {
+		ws.Agent = event.Agent
+	} else if ws.Agent == "" {
+		ws.Agent = inferAgent(paneInfo.PaneCurrentCmd)
+	}
 
 	// Map event to status.
 	status := d.mapEventToStatus(event)
@@ -174,7 +179,7 @@ func (d *Daemon) mapEventToStatus(event ipc.HookEvent) detect.Status {
 		case "AskUserQuestion", "EnterPlanMode", "ExitPlanMode":
 			return detect.StatusNeedInput
 		}
-		// Any non-input tool means Claude is actively working.
+		// Any non-input tool means the agent is actively working.
 		return detect.StatusRunning
 	case "PermissionRequest":
 		return detect.StatusNeedInput
@@ -184,7 +189,7 @@ func (d *Daemon) mapEventToStatus(event ipc.HookEvent) detect.Status {
 		if event.IsInterrupt {
 			return detect.StatusStopped
 		}
-		// Tool failed but Claude retries — still running.
+		// Tool failed but the agent may retry — still running.
 		return detect.StatusRunning
 	case "Stop":
 		return detect.StatusDone

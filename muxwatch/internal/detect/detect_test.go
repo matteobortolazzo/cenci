@@ -10,7 +10,8 @@ func TestTaskName(t *testing.T) {
 		{"⠋ writing tests", "writing tests"},
 		{"✳ fixing auth bug", "fixing auth bug"},
 		{"✶ reading files", "reading files"},
-		{"plain title", "lain title"}, // no status prefix, strips first rune
+		{"plain title", "plain title"},
+		{"Codex", "Codex"},
 		{"", ""},
 	}
 	for _, tt := range tests {
@@ -31,9 +32,9 @@ func TestIsStatusSymbol(t *testing.T) {
 		{'✶', true},  // six-pointed star
 		{'✻', true},  // teardrop star
 		{'✳', true},  // idle marker
-		{'a', false},  // regular char
-		{'!', false},  // punctuation
-		{'~', false},  // tilde
+		{'a', false}, // regular char
+		{'!', false}, // punctuation
+		{'~', false}, // tilde
 	}
 	for _, tt := range tests {
 		got := IsStatusSymbol(tt.r)

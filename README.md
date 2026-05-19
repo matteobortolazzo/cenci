@@ -1,6 +1,6 @@
 # claude-tools
 
-Claude Code plugins and tooling.
+Claude Code and Codex plugins and tooling.
 
 ## Plugins
 
@@ -15,7 +15,7 @@ claude plugin install ccflow
 
 ### [muxwatch](./muxwatch)
 
-Event-driven tmux watcher that monitors Claude Code sessions and displays live status in window titles and waybar.
+Event-driven tmux watcher that monitors Claude Code and OpenAI Codex sessions and displays live status in window titles and waybar.
 
 ```bash
 claude plugin marketplace add matteobortolazzo/claude-tools

@@ -1,6 +1,6 @@
 # MuxWatch — noctalia-shell bar widget
 
-Live counts of Claude Code tmux sessions in your noctalia bar. Polls `muxwatch waybar` and renders the snapshot.
+Live counts of Claude Code and Codex tmux sessions in your noctalia bar. Polls `muxwatch waybar` and renders the snapshot.
 
 ## Requirements
 

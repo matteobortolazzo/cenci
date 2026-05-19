@@ -21,7 +21,8 @@ type windowState struct {
 	ManuallyNamed         bool   // true = user set name manually, don't touch
 	LastSetName           string // last name muxwatch set, for detecting mid-session renames
 	PaneID                string // tmux pane ID (e.g. %5) for sweep validation
-	SessionID             string // Claude session ID for correlating events
+	SessionID             string // agent session ID for correlating events
+	Agent                 string // agent name, if known
 }
 
 const symbolPrefix = "#{@muxwatch-symbol} "
@@ -72,6 +73,7 @@ func (d *Daemon) trackWindow(windowTarget string, paneInfo *tmux.PaneInfo, sessi
 		ManuallyNamed:         manuallyNamed,
 		PaneID:                paneInfo.PaneID,
 		SessionID:             sessionID,
+		Agent:                 inferAgent(paneInfo.PaneCurrentCmd),
 	}
 	d.windows[windowTarget] = ws
 
@@ -95,6 +97,25 @@ func (d *Daemon) trackWindow(windowTarget string, paneInfo *tmux.PaneInfo, sessi
 	}
 
 	return ws
+}
+
+func inferAgent(cmd string) string {
+	switch strings.ToLower(strings.TrimSpace(cmd)) {
+	case "claude", "claude-code":
+		return "claude"
+	case "codex", "codex-cli":
+		return "codex"
+	default:
+		return ""
+	}
+}
+
+func agentCommandMatches(agent, cmd string) bool {
+	inferred := inferAgent(cmd)
+	if agent == "" {
+		return inferred != ""
+	}
+	return inferred == agent
 }
 
 // stripMuxwatchPrefix removes any leading muxwatch symbol + space from a window name.
@@ -240,12 +261,22 @@ func (d *Daemon) sweepStale() {
 		paneByID[panes[i].PaneID] = &panes[i]
 	}
 	var idleDetected int
+	var exitedDetected int
 	for wt, ws := range d.windows {
-		if ws.Status != detect.StatusRunning {
-			continue
-		}
 		p, ok := paneByID[ws.PaneID]
 		if !ok {
+			continue
+		}
+		if ws.Agent != "" && ws.Status != detect.StatusRunning && ws.Status != detect.StatusNeedInput && !agentCommandMatches(ws.Agent, p.PaneCurrentCmd) {
+			if d.cfg.Verbose {
+				log.Printf("sweep: pane %s no longer running %s (current command %q), restoring window %s", ws.PaneID, ws.Agent, p.PaneCurrentCmd, wt)
+			}
+			delete(d.panes, ws.PaneID)
+			d.restoreWindow(wt)
+			exitedDetected++
+			continue
+		}
+		if ws.Status != detect.StatusRunning {
 			continue
 		}
 		r, _ := utf8.DecodeRuneInString(p.PaneTitle)
@@ -260,7 +291,7 @@ func (d *Daemon) sweepStale() {
 		}
 	}
 
-	if len(migrations) > 0 || len(stale) > 0 || idleDetected > 0 {
+	if len(migrations) > 0 || len(stale) > 0 || idleDetected > 0 || exitedDetected > 0 {
 		d.broadcast()
 	}
 }

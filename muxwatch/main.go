@@ -95,6 +95,7 @@ func runDaemon(args []string) {
 func runNotify(args []string) {
 	fs := flag.NewFlagSet("notify", flag.ExitOnError)
 	socketPath := fs.String("event-socket", ipc.DefaultEventSocketPath(), "event socket path")
+	agent := fs.String("agent", "", "agent name (claude or codex)")
 	_ = fs.Parse(args)
 
 	// Read hook JSON from stdin.
@@ -128,6 +129,7 @@ func runNotify(args []string) {
 	event := ipc.HookEvent{
 		EventType:        hookInput.HookEventName,
 		SessionID:        hookInput.SessionID,
+		Agent:            strings.ToLower(strings.TrimSpace(*agent)),
 		TmuxPane:         tmuxPane,
 		NotificationType: hookInput.Notification.Type,
 		ToolName:         hookInput.ToolName,
