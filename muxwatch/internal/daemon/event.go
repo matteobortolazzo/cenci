@@ -144,9 +144,9 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 		return
 	}
 
-	// Resolve task name from pane title (sanitize immediately to protect
-	// all downstream consumers: IPC broadcast, Waybar, and tmux rename).
-	taskName := sanitizeWindowName(detect.TaskName(paneInfo.PaneTitle))
+	// Resolve task name from hook payloads or pane title (sanitize immediately
+	// to protect downstream consumers: IPC broadcast, Waybar, and tmux rename).
+	taskName := d.taskNameForEvent(event, ws, paneInfo)
 
 	// Detect mid-session user renames.
 	if !ws.ManuallyNamed && ws.LastSetName != "" && paneInfo.WindowName != ws.LastSetName {
@@ -159,6 +159,18 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 
 	d.applyStatus(windowTarget, ws, status, taskName)
 	d.broadcast()
+}
+
+func (d *Daemon) taskNameForEvent(event ipc.HookEvent, ws *windowState, paneInfo *tmux.PaneInfo) string {
+	if event.TaskName != "" {
+		return sanitizeWindowName(event.TaskName)
+	}
+	if ws.Agent == "codex" {
+		// Codex pane titles often contain only the cwd/repo name. Preserve the
+		// existing label instead of renaming windows to that generic title.
+		return ws.TaskName
+	}
+	return sanitizeWindowName(detect.TaskName(paneInfo.PaneTitle))
 }
 
 // mapEventToStatus converts a hook event to a detect.Status.

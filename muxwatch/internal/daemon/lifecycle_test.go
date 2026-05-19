@@ -104,27 +104,36 @@ func TestDaemon_CodexLifecycleWithoutSessionEndRestoresAfterExit(t *testing.T) {
 	mc := &mockClient{
 		panes: []tmux.PaneInfo{
 			{SessionName: "main", WindowIndex: "0", WindowName: "zsh", PaneIndex: "0",
-				PaneCurrentCmd: "codex", PaneTitle: "Codex", PaneID: "%0"},
+				PaneCurrentCmd: "codex", PaneTitle: "claude-tools", PaneID: "%0"},
 		},
 	}
 
 	d := newTestDaemon(mc)
 
 	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
-	if name, _ := lastRename(mc.renames, "main:0"); name != "Codex" {
-		t.Errorf("after SessionStart: expected 'Codex', got %q", name)
+	if name, _ := lastRename(mc.renames, "main:0"); name != "zsh" {
+		t.Errorf("after SessionStart: expected original name 'zsh', got %q", name)
 	}
 
-	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0", TaskName: "inspect this repo"})
+	if name, _ := lastRename(mc.renames, "main:0"); name != "inspect this repo" {
+		t.Errorf("after UserPromptSubmit: expected prompt task name, got %q", name)
+	}
 	d.handleEvent(ipc.HookEvent{EventType: "PermissionRequest", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
 	if v, ok := findWindowOpt(mc.windowOpts, "main:0", "@muxwatch-symbol"); !ok || v != "!" {
 		t.Errorf("expected @muxwatch-symbol=! after PermissionRequest, got %q (found=%v)", v, ok)
+	}
+	if name, _ := lastRename(mc.renames, "main:0"); name != "inspect this repo" {
+		t.Errorf("after PermissionRequest: expected retained prompt task name, got %q", name)
 	}
 
 	d.handleEvent(ipc.HookEvent{EventType: "PostToolUse", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
 	d.handleEvent(ipc.HookEvent{EventType: "Stop", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
 	if v, ok := findWindowOpt(mc.windowOpts, "main:0", "@muxwatch-symbol"); !ok || v != "✓" {
 		t.Errorf("expected @muxwatch-symbol=✓ after Stop, got %q (found=%v)", v, ok)
+	}
+	if name, _ := lastRename(mc.renames, "main:0"); name != "inspect this repo" {
+		t.Errorf("after Stop: expected retained prompt task name, got %q", name)
 	}
 
 	// Codex does not currently document a SessionEnd hook. When the process
