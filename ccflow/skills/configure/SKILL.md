@@ -650,6 +650,8 @@ The `ccflow` field is optional. If present, preserve existing user values during
 - `reviewConcurrency` — `"parallel"` runs security, code, and silent-failure reviews together; `"sequential"` runs the same reviews one after another to smooth usage limits. Default: `"parallel"`.
 - `diffContextMode` — `"inline"` passes small diffs directly to reviewers; `"file"` writes the diff to `/tmp/claude/ccflow-diff.patch` and passes paths so reviewers read targeted hunks. Default: `"inline"`.
 
+Optional external usage reducer: RTK (`https://github.com/rtk-ai/rtk`) can compress shell command output before it reaches Claude Code. It is not required for ccflow and should not be installed automatically, but it is worth recommending when users are hitting usage limits from command-heavy sessions. After separate installation, `rtk init -g` enables Claude Code Bash command rewriting where supported. Built-in tools like `Read`, `Grep`, and `Glob` do not pass through RTK hooks.
+
 The `cicd` field is only present when the user selected Yes in question 8. Schema:
 - `cicd.enabled` — `true` if user opted in, omit `cicd` entirely if declined
 - `cicd.platform` — `"github-actions"`

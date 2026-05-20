@@ -193,6 +193,28 @@ For lower limit pressure without removing quality gates, add optional settings t
 - `reviewConcurrency: "sequential"` runs the same security, code, and silent-failure reviewers one after another instead of in parallel.
 - `diffContextMode: "file"` passes reviewers a patch file path and changed-file list for large diffs instead of duplicating the full diff in every prompt.
 
+### Optional: RTK command-output compression
+
+ccflow also benefits from external command-output compression tools such as [RTK](https://github.com/rtk-ai/rtk). RTK is a CLI proxy that filters common development command output before it enters the LLM context, with claimed 60-90% reductions on commands such as `git diff`, `rg`, test runners, build tools, Docker, and GitHub CLI.
+
+RTK is especially useful for ccflow phases that run command-heavy verification and review:
+
+- Phase 3-5: test, build, lint, and type-check output
+- Phase 6-7: `git diff`, changed-file lists, and reviewer context
+- Phase 9: `git status`, `git log`, `gh`, push/rebase diagnostics
+
+Install and initialize RTK separately:
+
+```bash
+# Linux/macOS quick install
+curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
+
+# Initialize for Claude Code
+rtk init -g
+```
+
+After restarting Claude Code, Bash commands are rewritten through RTK automatically where supported. Claude Code built-in tools such as `Read`, `Grep`, and `Glob` do not pass through RTK hooks, so keep using ccflow's lazy phase files and concise agent outputs for context reduction inside the plugin itself.
+
 ## Ticket Splitting
 
 When a ticket is sized M or L during `/ccflow:refine`, the skill suggests splitting it into numbered child tickets (e.g., "(1/3)", "(2/3)", "(3/3)") with explicit dependency ordering — which children can be implemented in parallel and which are sequential. Each child references the parent in its body and the parent tracks all children in a "Child Tickets" checklist with dependencies. When `/ccflow:implement` creates a PR for the last open child, it auto-closes the parent alongside the child.
