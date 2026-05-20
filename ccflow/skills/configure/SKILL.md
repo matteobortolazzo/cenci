@@ -633,12 +633,22 @@ For each MCP selected in question 5:
     "mode": "editor"
   },
   "autoCompactDisabled": true,
+  "ccflow": {
+    "compactImplementation": false,
+    "reviewConcurrency": "parallel",
+    "diffContextMode": "inline"
+  },
   "cicd": {
     "enabled": true,
     "platform": "github-actions"
   }
 }
 ```
+
+The `ccflow` field is optional. If present, preserve existing user values during reconfiguration. Schema:
+- `compactImplementation` — `true` allows small, low-risk tickets to combine red/green/refactor into one implementer subagent turn while preserving all TDD/reporting gates. Default: `false`.
+- `reviewConcurrency` — `"parallel"` runs security, code, and silent-failure reviews together; `"sequential"` runs the same reviews one after another to smooth usage limits. Default: `"parallel"`.
+- `diffContextMode` — `"inline"` passes small diffs directly to reviewers; `"file"` writes the diff to `/tmp/claude/ccflow-diff.patch` and passes paths so reviewers read targeted hunks. Default: `"inline"`.
 
 The `cicd` field is only present when the user selected Yes in question 8. Schema:
 - `cicd.enabled` — `true` if user opted in, omit `cicd` entirely if declined

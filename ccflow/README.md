@@ -175,6 +175,24 @@ When you run `/ccflow:implement <ticket-id>`, the pipeline executes these phases
 8. **Capture Lessons** — Lessons collector routes genuine mistakes into the relevant `docs/<topic>.md` or `CLAUDE.md` (opt-in; most sessions capture nothing)
 9. **Create PR** — Rebases on latest main, commits, pushes, and creates a pull request
 
+### Usage controls
+
+For lower limit pressure without removing quality gates, add optional settings to `.claude/config.json`:
+
+```json
+{
+  "ccflow": {
+    "compactImplementation": false,
+    "reviewConcurrency": "parallel",
+    "diffContextMode": "inline"
+  }
+}
+```
+
+- `compactImplementation: true` lets small, low-risk tickets combine red/green/refactor into one implementer turn while still requiring red failures, green implementation, refactor, and final build/test reporting.
+- `reviewConcurrency: "sequential"` runs the same security, code, and silent-failure reviewers one after another instead of in parallel.
+- `diffContextMode: "file"` passes reviewers a patch file path and changed-file list for large diffs instead of duplicating the full diff in every prompt.
+
 ## Ticket Splitting
 
 When a ticket is sized M or L during `/ccflow:refine`, the skill suggests splitting it into numbered child tickets (e.g., "(1/3)", "(2/3)", "(3/3)") with explicit dependency ordering — which children can be implemented in parallel and which are sequential. Each child references the parent in its body and the parent tracks all children in a "Child Tickets" checklist with dependencies. When `/ccflow:implement` creates a PR for the last open child, it auto-closes the parent alongside the child.

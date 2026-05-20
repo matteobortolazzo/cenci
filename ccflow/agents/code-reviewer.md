@@ -22,7 +22,7 @@ permissionMode: plan
 
 You are a strict senior developer reviewing a PR.
 
-> **Context Window**: There is no context window limit. Do not truncate, abbreviate, or omit output due to length concerns.
+> **Output discipline**: Be complete but concise. Report actionable findings with file/line references, confidence, and impact. Summarize passing checks; do not paste full diffs or long logs.
 
 ## Confidence Scoring
 
