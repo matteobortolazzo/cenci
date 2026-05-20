@@ -108,7 +108,7 @@ func runNotify(args []string) {
 	var hookInput struct {
 		HookEventName string `json:"hook_event_name"`
 		SessionID     string `json:"session_id"`
-		Prompt        string `json:"prompt"`
+		TaskName      string `json:"task_name"`
 		// Notification fields
 		Notification struct {
 			Type string `json:"type"`
@@ -132,7 +132,7 @@ func runNotify(args []string) {
 		SessionID:        hookInput.SessionID,
 		Agent:            strings.ToLower(strings.TrimSpace(*agent)),
 		TmuxPane:         tmuxPane,
-		TaskName:         taskNameFromPrompt(hookInput.Prompt),
+		TaskName:         hookInput.TaskName,
 		NotificationType: hookInput.Notification.Type,
 		ToolName:         hookInput.ToolName,
 		IsInterrupt:      hookInput.IsInterrupt,
@@ -141,16 +141,6 @@ func runNotify(args []string) {
 
 	// Send event to daemon, ignore errors (daemon might not be running).
 	_ = ipc.SendEvent(*socketPath, event)
-}
-
-func taskNameFromPrompt(prompt string) string {
-	for _, line := range strings.Split(prompt, "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			return line
-		}
-	}
-	return ""
 }
 
 func runWaybar(args []string) {

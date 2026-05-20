@@ -64,6 +64,14 @@ func TestDaemon_UserPromptSubmitSetsRunning(t *testing.T) {
 	}
 }
 
+func TestCompactTaskNameCapsWindowLabel(t *testing.T) {
+	got := compactTaskName("abcdefghijklmnopqrstuvwxyz0123456789")
+	want := "abcdefghijklmnopqrstuvwxyz0..."
+	if got != want {
+		t.Errorf("compactTaskName() = %q, want %q", got, want)
+	}
+}
+
 func TestDaemon_NotificationPermissionSetsNeedInput(t *testing.T) {
 	mc := &mockClient{
 		panes: []tmux.PaneInfo{

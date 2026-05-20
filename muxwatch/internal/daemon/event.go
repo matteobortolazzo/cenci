@@ -10,7 +10,10 @@ import (
 	"github.com/matteobortolazzo/claude-tools/muxwatch/internal/tmux"
 )
 
-const logMaxLen = 50
+const (
+	logMaxLen      = 50
+	taskNameMaxLen = 30
+)
 
 // truncateForLog shortens s to maxLen runes for safe log output,
 // appending "..." if truncated.
@@ -37,6 +40,24 @@ func sanitizeWindowName(name string) string {
 		s = string(runes[:200])
 	}
 	return s
+}
+
+func compactTaskName(name string) string {
+	s := strings.Join(strings.Fields(sanitizeWindowName(name)), " ")
+	if utf8.RuneCountInString(s) <= taskNameMaxLen {
+		return s
+	}
+
+	runes := []rune(s)
+	cutoff := taskNameMaxLen - 3
+	if cutoff < 1 {
+		cutoff = 1
+	}
+	short := strings.TrimRight(string(runes[:cutoff]), " \t\n\r.,;:-")
+	if short == "" {
+		short = string(runes[:cutoff])
+	}
+	return short + "..."
 }
 
 func (d *Daemon) handleEvent(event ipc.HookEvent) {
@@ -162,15 +183,13 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 }
 
 func (d *Daemon) taskNameForEvent(event ipc.HookEvent, ws *windowState, paneInfo *tmux.PaneInfo) string {
-	if event.TaskName != "" {
-		return sanitizeWindowName(event.TaskName)
-	}
 	if ws.Agent == "codex" {
-		// Codex pane titles often contain only the cwd/repo name. Preserve the
-		// existing label instead of renaming windows to that generic title.
-		return ws.TaskName
+		return compactTaskName(detect.TaskName(paneInfo.PaneTitle))
 	}
-	return sanitizeWindowName(detect.TaskName(paneInfo.PaneTitle))
+	if event.TaskName != "" {
+		return compactTaskName(event.TaskName)
+	}
+	return compactTaskName(detect.TaskName(paneInfo.PaneTitle))
 }
 
 // mapEventToStatus converts a hook event to a detect.Status.
