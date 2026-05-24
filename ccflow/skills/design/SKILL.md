@@ -291,14 +291,15 @@ If the user requested responsive designs:
 For each screen/component created:
 
 1. Capture a visual snapshot:
-   - **CLI mode**: Call `export_nodes` to save screenshots to disk, then Read the exported PNG:
+   - **CLI mode**: Call `export_nodes` to save screenshots to a scratch directory **outside the repo**, then Read the exported PNG. These are local validation artifacts only — never committed.
      ```bash
+     mkdir -p "$TMPDIR/ccflow-design/screenshots"
      pencil interactive -a desktop <<'EOF'
-     export_nodes({ nodeIds: ["<node-id>"], outputDir: "$WORKTREE_PATH/<designPath>/screenshots", format: "png" })
+     export_nodes({ nodeIds: ["<node-id>"], outputDir: "$TMPDIR/ccflow-design/screenshots", format: "png" })
      snapshot_layout({ parentId: "<node-id>", problemsOnly: true })
      EOF
      ```
-     Then: `Read("$WORKTREE_PATH/<designPath>/screenshots/<node-id>.png")` to view and analyze.
+     Then: `Read("$TMPDIR/ccflow-design/screenshots/<node-id>.png")` to view and analyze.
    - **Editor mode**: Call `get_screenshot(nodeId)` to receive the image inline.
 2. **Analyze the screenshot** for:
    - Alignment issues (elements not lined up properly)
@@ -437,47 +438,18 @@ Options: "Saved, proceed", "Cancel commit"
 - **"Saved, proceed"** → continue to Step 6A.
 - **"Cancel commit"** → **Stop.** Do not commit.
 
-### Step 6A: Capture Design Screenshots
+### Step 6A: Commit
+
+Stage and commit the design artifacts on the current branch. **Do not stage screenshots** — the `.pen` file is the source of truth and any `screenshots/` directory inside `<designPath>` is local-only scratch.
 
 ```bash
-mkdir -p $WORKTREE_PATH/<designPath>/screenshots
-```
-
-**CLI mode**: Export all screens in a single call:
-```bash
-pencil interactive -a desktop <<'EOF'
-export_nodes({ nodeIds: ["<id1>", "<id2>", ...], outputDir: "$WORKTREE_PATH/<designPath>/screenshots", format: "png" })
-EOF
-```
-Files are written as `<node-id>.png`. Rename them to human-readable names:
-```bash
-mv $WORKTREE_PATH/<designPath>/screenshots/<node-id>.png $WORKTREE_PATH/<designPath>/screenshots/<screen-name>.png
-```
-
-**Editor mode**: Export all screens via the `export_nodes` MCP tool:
-Call `export_nodes` with `filePath`, `nodeIds` (all screen/component IDs), `outputDir: "$WORKTREE_PATH/<designPath>/screenshots"`, and `format: "png"`. Files are written as `<node-id>.png`. Rename them to human-readable names:
-```bash
-mv $WORKTREE_PATH/<designPath>/screenshots/<node-id>.png $WORKTREE_PATH/<designPath>/screenshots/<screen-name>.png
-```
-
-**Slides/presentation PDF export**: If the design type is `slides/presentation`, also export a combined PDF:
-- **CLI mode**: `export_nodes({ nodeIds: [<all-slide-ids>], outputDir: "$WORKTREE_PATH/<designPath>/screenshots", format: "pdf" })` — all slides are combined into a single multi-page PDF.
-- **Editor mode**: Call `export_nodes` with `format: "pdf"` and all slide node IDs. The tool combines them into one PDF document.
-
-**Both modes**: If screenshots cannot be saved to files, prepare textual descriptions of each screen for the PR body instead. For each screen, write a brief textual description (2–3 sentences) covering layout, key elements, and visual style — these go in the PR body regardless of whether image files are available.
-
-### Step 6B: Commit
-
-Stage and commit all design artifacts on the current branch:
-
-```bash
-git add <designPath>/ && git commit -m "feat(design): <description>"
+git add <designPath>/*.pen <designPath>/DESIGN.md && git commit -m "feat(design): <description>"
 ```
 
 - **If ticket mode:** Include ticket ref in the commit body: `#<ticket-id>`
 - **If ticketless mode:** Use the design description slug in the commit message
 
-### Step 6C: Label Ticket
+### Step 6B: Label Ticket
 
 **If ticketless mode:** Skip labeling.
 
@@ -486,7 +458,7 @@ git add <designPath>/ && git commit -m "feat(design): <description>"
 gh issue edit <number> --repo <owner>/<repo> --add-label "Designed" --remove-label "Working"
 ```
 
-### Step 6D: Error Recovery
+### Step 6C: Error Recovery
 
 - **Commit fails** → Display the `git add` / `git commit` commands and ask the user to run them manually. Do not retry automatically.
 - **Label update fails** → Report the failure and continue; do not block on it.
