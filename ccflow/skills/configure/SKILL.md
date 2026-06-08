@@ -55,6 +55,7 @@ If user context was provided, use it to steer the configuration (e.g., skip cert
 | 5b. Pencil design | `pencil` | Pre-select based on `pencil.enabled`; if field absent, ask normally |
 | 6. LSP Servers | `lspServers` | Pre-select servers where value is `true`; if field absent, ask normally |
 | 7. Auto-compact | `autoCompactDisabled` | Pre-select Yes/No |
+| 7b. Force 200K context | `force200KContext` | Pre-select Yes/No |
 | 8. CI/CD pipeline | `cicd` | Pre-select Yes/No based on `cicd.enabled` |
 
 Ask these questions one at a time using the AskUserQuestion tool when possible:
@@ -263,6 +264,17 @@ Include the server in `.lsp.json` regardless — it activates once the binary is
    - Default: Yes
    - If Yes: merge `{"env": {"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "1"}}` into `~/.claude/settings.json` using jq (create the file if it doesn't exist). This sets compaction to trigger at 1% — effectively manual-only.
    - If No: remove the `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` key from the `env` object in `~/.claude/settings.json` (if present)
+
+7b. **Force 200K context (disable 1M)**: "Do you want to force the standard 200K context window
+    (disable Claude Code's 1M context)? ccflow delegates work to subagents, and 1M-context
+    sessions block that delegation — every subagent inherits the session's 1M flag but not its
+    extra-usage entitlement, so reviews fail with 'Usage credits required for 1M context'
+    (Claude Code bug #51060). Disabling 1M keeps subagent reviews working. (Recommended: Yes —
+    disable 1M)"
+   - Default: Yes
+   - If Yes: merge `{"env": {"CLAUDE_CODE_DISABLE_1M_CONTEXT": "1"}}` into `~/.claude/settings.json` using jq (create the file if it doesn't exist). This removes 1M model variants from the picker for new sessions.
+   - If No: remove the `CLAUDE_CODE_DISABLE_1M_CONTEXT` key from the `env` object in `~/.claude/settings.json` (if present)
+   - **Caveat (state regardless of answer)**: this only affects **new** sessions. If the current session model ID ends in `[1m]`, tell the user to run `/model opus` (or `/model sonnet`) or restart now — otherwise subagent delegation stays gated for this session.
 
 8. **CI/CD pipeline**: "Do you want to generate a CI/CD pipeline?"
    - Options: "Yes — generate a CI workflow", "No — skip"
@@ -543,6 +555,22 @@ For each MCP selected in question 5:
      ```
    This writes to `~/.claude/settings.json` (user-level Claude Code settings).
 
+5c-bis. **Force 200K context** (from question 7b):
+   - If disabled (force 200K): merge the env var into `~/.claude/settings.json`:
+     ```bash
+     mkdir -p ~/.claude && \
+     [ -f ~/.claude/settings.json ] \
+       && jq '. * {"env": {"CLAUDE_CODE_DISABLE_1M_CONTEXT": "1"}}' ~/.claude/settings.json > ~/.claude/settings.json.tmp \
+       && mv ~/.claude/settings.json.tmp ~/.claude/settings.json \
+       || echo '{"env": {"CLAUDE_CODE_DISABLE_1M_CONTEXT": "1"}}' > ~/.claude/settings.json
+     ```
+   - If allowing 1M (re-enable): remove the env var key:
+     ```bash
+     jq 'del(.env.CLAUDE_CODE_DISABLE_1M_CONTEXT) | if .env == {} then del(.env) else . end' ~/.claude/settings.json > ~/.claude/settings.json.tmp \
+       && mv ~/.claude/settings.json.tmp ~/.claude/settings.json
+     ```
+   This writes to `~/.claude/settings.json` (user-level Claude Code settings). Takes effect on **new** sessions only — remind the user to `/model opus` or restart if the current session is on a `[1m]` model.
+
 5d. **Generate CI/CD pipeline** (from question 8, only if user selected Yes):
 
    **GitHub Actions** — write `.github/workflows/ci.yml`:
@@ -633,6 +661,7 @@ For each MCP selected in question 5:
     "mode": "editor"
   },
   "autoCompactDisabled": true,
+  "force200KContext": true,
   "ccflow": {
     "compactImplementation": false,
     "reviewConcurrency": "parallel",
@@ -698,6 +727,7 @@ Omit `pencil` entirely if no frontend framework was detected.
     "shared": true
   },
   "autoCompactDisabled": true,
+  "force200KContext": true,
   "cicd": {
     "enabled": true,
     "platform": "github-actions"

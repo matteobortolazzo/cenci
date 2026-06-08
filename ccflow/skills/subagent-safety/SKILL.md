@@ -21,3 +21,14 @@ Subagents (Task tool) cannot surface permission prompts, authentication errors, 
 - `gh` commands — require auth tokens
 - PR creation, ticket updates, comment replies — require auth tokens
 - Any operation that may trigger a permission prompt
+
+## 1M-context sessions block delegation
+
+Before delegating, check your current session model ID (shown in your environment). If it contains `[1m]` (e.g. `claude-opus-4-8[1m]`), **stop** — do not delegate and do not silently run the pipeline inline.
+
+The 1M flag is session-level: every subagent inherits it but not the session's extra-usage entitlement, so `Task` delegation fails with "Usage credits required for 1M context" — even with a `model: sonnet` override and even with usage credits enabled (Claude Code bug #51060 / #57249). ccflow requires 200K context.
+
+Tell the user, substituting the real model ID:
+> "Your session is on a 1M-context model (`<model-id>`), which blocks ccflow subagent delegation (Claude Code bug #51060). Run `/model opus` (or `/model sonnet`) to switch this session to 200K, then re-invoke. To make it permanent, run `/ccflow:configure` — it sets `CLAUDE_CODE_DISABLE_1M_CONTEXT` so new sessions start at 200K."
+
+Then stop and wait for the user to switch.

@@ -262,6 +262,14 @@ Run `gh auth login` and follow the prompts. Verify with `gh auth status`.
 ### Agent prompts for file edit permissions
 This should not happen with the default settings. Verify `.claude/settings.json` includes `Write(*)` and `Edit(*)` in `permissions.allow`. Running `/ccflow:implement` will auto-detect missing permissions and offer to fix them, or you can re-run `/ccflow:configure` to regenerate settings.
 
+### Subagent reviews blocked: "Usage credits required for 1M context"
+The pipeline ran inline and skipped the dedicated reviewer agents (security-reviewer, code-reviewer, silent-failure-hunter). This happens when your session runs a **1M-context** model (model ID ends in `[1m]`, e.g. `claude-opus-4-8[1m]`).
+
+The `[1m]` flag is session-level: every subagent inherits it but **not** the session's extra-usage entitlement, so `Task` delegation is gated — even with a `model: sonnet` override and even with usage credits enabled (Claude Code bug [#51060](https://github.com/anthropics/claude-code/issues/51060) / [#57249](https://github.com/anthropics/claude-code/issues/57249)). ccflow needs the standard 200K context.
+
+- **Now (this session):** run `/model opus` (or `/model sonnet`) to switch to 200K, then re-invoke the skill.
+- **Permanently:** run `/ccflow:configure` and answer **Yes** to "Force 200K context" — it sets `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` in `~/.claude/settings.json` so new sessions start at 200K and never offer a 1M variant.
+
 ## Project Structure
 
 ```
