@@ -55,6 +55,7 @@ If user context was provided, use it to steer the configuration (e.g., skip cert
 | 5b. Pencil design | `pencil` | Pre-select based on `pencil.enabled`; if field absent, ask normally |
 | 6. LSP Servers | `lspServers` | Pre-select servers where value is `true`; if field absent, ask normally |
 | 7. Auto-compact | `autoCompactDisabled` | Pre-select Yes/No |
+| 7b. Pin subagents to 200K | `pinSubagents200K` | Pre-select Yes/No |
 | 8. CI/CD pipeline | `cicd` | Pre-select Yes/No based on `cicd.enabled` |
 
 Ask these questions one at a time using the AskUserQuestion tool when possible:
@@ -263,6 +264,17 @@ Include the server in `.lsp.json` regardless — it activates once the binary is
    - Default: Yes
    - If Yes: merge `{"env": {"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "1"}}` into `~/.claude/settings.json` using jq (create the file if it doesn't exist). This sets compaction to trigger at 1% — effectively manual-only.
    - If No: remove the `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` key from the `env` object in `~/.claude/settings.json` (if present)
+
+7b. **Pin subagents to 200K context**: "Do you want to pin ccflow's subagents to a 200K-context
+    model? ccflow delegates reviews to subagents, and on 1M-context sessions that delegation can be
+    gated — every subagent inherits the session's 1M flag but not its extra-usage entitlement, so
+    reviews fail with 'Usage credits required for 1M context' (Claude Code bug #51060). Pinning
+    subagents to Sonnet 200K keeps reviews working while your main session keeps its 1M context.
+    (Recommended: Yes)"
+   - Default: Yes
+   - If Yes: merge `{"env": {"CLAUDE_CODE_SUBAGENT_MODEL": "claude-sonnet-4-6"}}` into `~/.claude/settings.json` using jq (create the file if it doesn't exist). This runs all `Task` subagents on Sonnet 200K regardless of the main session model. (Pin Sonnet, not Opus — Opus is auto-upgraded to 1M on Max/Team/Enterprise plans and would re-trigger the gate.)
+   - If No: remove the `CLAUDE_CODE_SUBAGENT_MODEL` key from the `env` object in `~/.claude/settings.json` (if present)
+   - **Caveat (state regardless of answer)**: this only affects **new** sessions — restart after configuring. If subagent reviews still fail with the 1M gate even after pinning (the pin didn't strip `[1m]`), run `/model sonnet` for the current session, which always yields 200K.
 
 8. **CI/CD pipeline**: "Do you want to generate a CI/CD pipeline?"
    - Options: "Yes — generate a CI workflow", "No — skip"
@@ -543,6 +555,22 @@ For each MCP selected in question 5:
      ```
    This writes to `~/.claude/settings.json` (user-level Claude Code settings).
 
+5c-bis. **Pin subagents to 200K context** (from question 7b):
+   - If enabled (pin subagents): merge the env var into `~/.claude/settings.json`:
+     ```bash
+     mkdir -p ~/.claude && \
+     [ -f ~/.claude/settings.json ] \
+       && jq '. * {"env": {"CLAUDE_CODE_SUBAGENT_MODEL": "claude-sonnet-4-6"}}' ~/.claude/settings.json > ~/.claude/settings.json.tmp \
+       && mv ~/.claude/settings.json.tmp ~/.claude/settings.json \
+       || echo '{"env": {"CLAUDE_CODE_SUBAGENT_MODEL": "claude-sonnet-4-6"}}' > ~/.claude/settings.json
+     ```
+   - If disabled (unpin): remove the env var key:
+     ```bash
+     jq 'del(.env.CLAUDE_CODE_SUBAGENT_MODEL) | if .env == {} then del(.env) else . end' ~/.claude/settings.json > ~/.claude/settings.json.tmp \
+       && mv ~/.claude/settings.json.tmp ~/.claude/settings.json
+     ```
+   This writes to `~/.claude/settings.json` (user-level Claude Code settings). Takes effect on **new** sessions only — remind the user to restart if the current session is on a `[1m]` model.
+
 5d. **Generate CI/CD pipeline** (from question 8, only if user selected Yes):
 
    **GitHub Actions** — write `.github/workflows/ci.yml`:
@@ -633,6 +661,7 @@ For each MCP selected in question 5:
     "mode": "editor"
   },
   "autoCompactDisabled": true,
+  "pinSubagents200K": true,
   "ccflow": {
     "compactImplementation": false,
     "reviewConcurrency": "parallel",
@@ -698,6 +727,7 @@ Omit `pencil` entirely if no frontend framework was detected.
     "shared": true
   },
   "autoCompactDisabled": true,
+  "pinSubagents200K": true,
   "cicd": {
     "enabled": true,
     "platform": "github-actions"
