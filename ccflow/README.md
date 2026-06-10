@@ -265,10 +265,10 @@ This should not happen with the default settings. Verify `.claude/settings.json`
 ### Subagent reviews blocked: "Usage credits required for 1M context"
 The pipeline ran inline and skipped the dedicated reviewer agents (security-reviewer, code-reviewer, silent-failure-hunter). This happens when your session runs a **1M-context** model (model ID ends in `[1m]`, e.g. `claude-opus-4-8[1m]`).
 
-The `[1m]` flag is session-level: every subagent inherits it but **not** the session's extra-usage entitlement, so `Task` delegation is gated — even with a `model: sonnet` override and even with usage credits enabled (Claude Code bug [#51060](https://github.com/anthropics/claude-code/issues/51060) / [#57249](https://github.com/anthropics/claude-code/issues/57249)). ccflow needs the standard 200K context.
+The `[1m]` flag is session-level: every subagent inherits it but **not** the session's extra-usage entitlement, so `Task` delegation is gated — even with a `model: sonnet` override and even with usage credits enabled (Claude Code bug [#51060](https://github.com/anthropics/claude-code/issues/51060) / [#57249](https://github.com/anthropics/claude-code/issues/57249)). ccflow's reviewers need the standard 200K context.
 
-- **Now (this session):** run `/model opus` (or `/model sonnet`) to switch to 200K, then re-invoke the skill.
-- **Permanently:** run `/ccflow:configure` and answer **Yes** to "Force 200K context" — it sets `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` in `~/.claude/settings.json` so new sessions start at 200K and never offer a 1M variant.
+- **Permanently (keeps your main session on 1M):** run `/ccflow:configure` and answer **Yes** to "Pin subagents to 200K" — it sets `CLAUDE_CODE_SUBAGENT_MODEL=claude-sonnet-4-6` in `~/.claude/settings.json` so every subagent runs on Sonnet 200K while your main session keeps 1M. Restart for it to take effect. (Pin Sonnet, not Opus: Opus auto-upgrades to 1M on Max/Team/Enterprise plans and would re-trigger the gate.)
+- **Now (this session), or if pinning doesn't clear the gate:** run `/model sonnet` to put the whole session on 200K, then re-invoke the skill. Note `/model opus` will *not* drop you to 200K on a plan that auto-upgrades Opus to 1M.
 
 ## Project Structure
 

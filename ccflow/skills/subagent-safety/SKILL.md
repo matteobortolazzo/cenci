@@ -22,13 +22,18 @@ Subagents (Task tool) cannot surface permission prompts, authentication errors, 
 - PR creation, ticket updates, comment replies — require auth tokens
 - Any operation that may trigger a permission prompt
 
-## 1M-context sessions block delegation
+## 1M-context sessions and delegation
 
-Before delegating, check your current session model ID (shown in your environment). If it contains `[1m]` (e.g. `claude-opus-4-8[1m]`), **stop** — do not delegate and do not silently run the pipeline inline.
+A 1M-context session (model ID ends in `[1m]`, e.g. `claude-opus-4-8[1m]`) can gate `Task` delegation: the `[1m]` flag is session-level and attaches to every subagent request, but subagents don't inherit the session's extra-usage entitlement — so delegation can fail with "Usage credits required for 1M context", even with a `model: sonnet` override (Claude Code bug #51060 / #57249).
 
-The 1M flag is session-level: every subagent inherits it but not the session's extra-usage entitlement, so `Task` delegation fails with "Usage credits required for 1M context" — even with a `model: sonnet` override and even with usage credits enabled (Claude Code bug #51060 / #57249). ccflow requires 200K context.
+ccflow's fix is to pin subagents to a 200K model with `CLAUDE_CODE_SUBAGENT_MODEL`, so the main session keeps 1M while reviews run at 200K. Before delegating from a `[1m]` session, verify the pin is set — run:
 
-Tell the user, substituting the real model ID:
-> "Your session is on a 1M-context model (`<model-id>`), which blocks ccflow subagent delegation (Claude Code bug #51060). Run `/model opus` (or `/model sonnet`) to switch this session to 200K, then re-invoke. To make it permanent, run `/ccflow:configure` — it sets `CLAUDE_CODE_DISABLE_1M_CONTEXT` so new sessions start at 200K."
+```bash
+echo "${CLAUDE_CODE_SUBAGENT_MODEL:-unset}"
+```
 
-Then stop and wait for the user to switch.
+- **Set to a non-`[1m]` model** (e.g. `claude-sonnet-4-6`) → proceed; subagents run at 200K.
+- **`unset`** → delegation may be gated. Tell the user (substituting the real model ID), then stop — do not silently run the pipeline inline:
+  > "Your session is on a 1M-context model (`<model-id>`) and subagents aren't pinned to 200K, so ccflow delegation may be gated (Claude Code bug #51060). Run `/ccflow:configure` (sets `CLAUDE_CODE_SUBAGENT_MODEL=claude-sonnet-4-6`) and restart, or run `/model sonnet` for this session, then re-invoke."
+
+If a subagent still fails with "Usage credits required for 1M context" **even with the pin set**, the pin didn't strip `[1m]`. Stop and tell the user to run `/model sonnet` for this session, then re-invoke.
