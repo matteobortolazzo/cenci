@@ -21,7 +21,7 @@ Mandatory stops:
 2. Present every plan for approval with `AskUserQuestion` and end the turn.
 3. After approval, persist the plan and stop. Implementation resumes by invoking `/ccflow:implement .plans/<filename>` in a fresh session.
 
-Never begin Phase 2 in the same turn as a planning question or plan approval.
+Never begin Phase 2 in a session that created a new plan — not in the same turn, and not in a later turn. Phases 2–9 require invocation with a plan-file argument.
 
 ## Optional Deep Exploration
 
@@ -137,6 +137,8 @@ planCommitSha: abc123def
 ```
 
 Record `planCommitSha` from `git rev-parse HEAD`. For ticketless mode, omit ticket fields.
+
+After writing the plan file, the **only remaining action** is the final message below — no other tool calls, and never read `phases/phase-2-worktree.md` or any later phase file in this session. The session that created a plan always ends here; implementation runs in a fresh session.
 
 Stop and tell the user:
 
