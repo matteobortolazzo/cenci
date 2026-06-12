@@ -4,6 +4,7 @@ description: Refine a ticket interactively until it's ready for planning
 argument-hint: <ticket-id> [additional context]
 user-invocable: true
 disable-model-invocation: true
+model: opus
 allowed-tools: Read, Glob, Bash, AskUserQuestion, WebFetch
 ---
 
