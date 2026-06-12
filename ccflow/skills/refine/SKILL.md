@@ -178,8 +178,9 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 ## Update Ticket
 
 > **CRITICAL**: This section is mandatory after refinement. Do NOT skip it.
+> All questions in this section MUST use the `AskUserQuestion` tool — never ask as plain text.
 
-10. **Ask using `AskUserQuestion`**: "Do you want me to update the ticket in GitHub with this refined information?"
+10. **Using `AskUserQuestion`**, ask: "Do you want me to update the ticket in GitHub with this refined information?"
 
    - If the user says **no** → skip to the label step below (step 12)
    - If the user says **yes** → proceed to step 11
@@ -260,7 +261,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
    - Otherwise:
      `gh issue edit <number> --repo <owner>/<repo> --add-label "Refined" --remove-label "Working"`
    - If re-refining and `browserRequired` is false but the issue currently has the `Browser` label, also add `--remove-label "Browser"`
-   - If the user declined the ticket update in step 10, still ask: "Do you want me to mark this ticket as Refined?" and apply just the label if yes.
+   - If the user declined the ticket update in step 10, use `AskUserQuestion` to ask: "Do you want me to mark this ticket as Refined?" and apply just the label if yes.
 
 13. **Auto-label `ui:visual-check` for visual/layout tickets:**
    If the ticket description, acceptance criteria, or answers during refinement mention visual/layout signals — CSS, layout, responsive, theme, design tokens, styling, visual polish, animations, or appearance changes — add the `ui:visual-check` label:
