@@ -8,7 +8,7 @@ Delegate to the `implementer` agent to make failing tests pass.
 
 If `pencil.enabled` and `pencilAvailable` are true, the main agent pre-reads relevant design structure because subagents cannot use Pencil tools reliably.
 
-Identify affected screen node IDs from the ticket and plan.
+Identify affected screen node IDs from the plan file's `## Design Context` section — the `designScreenIds` and `designComponentMap` lists at the top of that section (written there by the context-gatherer). Narrow to the screens the plan actually touches.
 
 CLI-app mode: batch reads in one invocation:
 

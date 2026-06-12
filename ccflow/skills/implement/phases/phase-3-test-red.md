@@ -25,7 +25,7 @@ Pass:
 - Files to modify/create and planner notes.
 - Acceptance criteria, edge cases, and error scenarios.
 - Attachment paths if relevant.
-- Design Components table and Design Tokens if `designSpec` was loaded.
+- Design Components table and Design Tokens from the plan file's `## Design Context` section, if present.
 
 ## Test Priorities
 

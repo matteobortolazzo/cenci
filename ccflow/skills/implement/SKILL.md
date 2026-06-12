@@ -24,24 +24,17 @@ Read the `claudeMdLocation` field from `.claude/config.json` to determine where 
 
 If `isMonorepo` is `true` in `.claude/config.json`:
 
-1. **Determine affected project(s)**: From the ticket description and file paths, match against the `projects` array in config to identify which project(s) the ticket affects.
-2. **Read per-project CLAUDE.md**: For each affected project, read `<project-path>/CLAUDE.md` for project-specific stack details and conventions.
-3. **Use project-specific commands**: When delegating to subagents, use the project's `buildCommand` and `testCommand` from config instead of inferring them globally.
-4. **Pass project context to subagents**: When delegating to planner/implementer, include the per-project CLAUDE.md content. Tell the subagent to read relevant `docs/<topic>.md` files (and the legacy `.claude/rules/lessons-learned.md` or `.claude/rules/lessons-learned-<slug>.md` if those legacy files exist). Do not pre-read those in the main agent.
+1. **Do not read per-project CLAUDE.md files in the main agent.** The context-gatherer (see Context Gathering below) determines affected project(s) and bundles their CLAUDE.md content into the context bundle; pass it the `projects` array from config.
+2. **Use project-specific commands**: When delegating to subagents, use the affected project's `buildCommand` and `testCommand` from config instead of inferring them globally (the digest names the affected projects).
+3. **Point subagents at context, don't paste it**: When delegating to planner/implementer, pass the bundle path (or plan file path) for project context. Tell the subagent to read relevant `docs/<topic>.md` files (and the legacy `.claude/rules/lessons-learned.md` or `.claude/rules/lessons-learned-<slug>.md` if those legacy files exist). Do not pre-read those in the main agent.
 
 ### Design Context Loading
 
 If `pencil.enabled` is `true` in `.claude/config.json`:
 
-1. **Determine design path**: Read `pencil.designPath` from config. If the project is a monorepo with `pencil.shared: false`, use the per-project `designPath` from the affected project's entry in the `projects` array.
-2. **Load DESIGN.md**: If `<designPath>/DESIGN.md` exists, read it and store as `designSpec`. This contains screen-to-route mappings, component-to-code mappings, design tokens, and naming conventions.
-3. **Note .pen file path**: Record the `.pen` file path from the DESIGN.md header for planner reference. Do not read the `.pen` file yet — subagents cannot use Pencil tools, so `.pen` content must be pre-read by the main agent if needed.
-4. **Parse design structure from DESIGN.md** (if loaded):
-   - Extract screen node IDs from the Screens table (these are Pencil node identifiers)
-   - Extract component node IDs and their framework component mappings from the Components table
-   - Extract design token references (CSS custom properties) from the Design Tokens section
-   - Store these parsed values as `designScreenIds`, `designComponentMap`, and `designTokens` for use in Phase 1 (planner) and Phase 4 (implementer)
-5. **Pencil availability probe**: Read `pencil.mode` from config (default: `"editor"`). Store as `$PENCIL_MODE`. Before any Pencil calls later in the pipeline, attempt a lightweight probe:
+1. **Determine design path**: Read `pencil.designPath` from config. If the project is a monorepo with `pencil.shared: false`, pass all per-project `designPath` entries to the context-gatherer — it determines the affected project(s) and resolves which design path applies.
+2. **Do not read or parse DESIGN.md in the main agent.** Pass the design path to the context-gatherer (see Context Gathering below), which loads DESIGN.md, parses screen/component node IDs and design tokens, and writes them into the bundle's `## Design Context` section. The digest reports whether a design was found and the `.pen` path. Phase 4 sources `designScreenIds`, `designComponentMap`, and `designTokens` from the plan file's `## Design Context` section. Do not read the `.pen` file — subagents cannot use Pencil tools, so `.pen` content must be pre-read by the main agent only when needed (Phase 4).
+3. **Pencil availability probe**: Read `pencil.mode` from config (default: `"editor"`). Store as `$PENCIL_MODE`. Before any Pencil calls later in the pipeline, attempt a lightweight probe:
 
    **CLI-app mode** (`pencil.mode` is `"cli-app"`):
    ```bash
@@ -92,60 +85,15 @@ The determined mode (ticket or ticketless) governs conditional behavior througho
 - **"Use existing plan"** — switch to plan file mode, set `hasPlanFile = true`, read the plan file
 - **"Re-plan from scratch"** — ignore the plan file, proceed with normal ticket mode
 
-**If ticket mode:** Fetch the ticket:
-Extract owner/repo from `git remote get-url origin` (e.g. `git@github.com:owner/repo.git` → `owner/repo`), then run:
-```bash
-gh issue view <number> --repo <owner>/<repo> --json number,title,body,labels,state,assignees,milestone,comments
-```
+**If ticket mode:** Do **not** fetch the ticket in the main agent (single exception: the stale-plan re-fetch in plan-file mode, Phase 1). Extract owner/repo from `git remote get-url origin` (e.g. `git@github.com:owner/repo.git` → `owner/repo`) for later commands; the ticket itself is fetched by the context-gatherer (see Context Gathering below) after the pre-flight check.
 
-**If ticketless mode:** Skip ticket fetching. The task description from `$ARGUMENTS` is the primary input.
-
-## Parent-Child Detection
-
-**If ticketless mode:** Skip this section entirely.
-
-**If ticket mode:** After fetching the ticket, detect whether this is a child ticket created by `/ccflow:refine` splitting:
-
-1. **Identify parent**: Parse the ticket body for `Related to #<number>`. If found, this is a child ticket — extract the parent ID.
-
-2. **Fetch the parent ticket**: Use the same fetch command as above (`gh issue view`). Check the parent's `state` — if already closed, set `isChild = true`, `isLastChild = false`, `parentId = <id>` and skip to Attachments (don't try to close an already-closed parent).
-
-3. **Find siblings**: Look for a `### Child Tickets` section in the parent's body. Extract sibling issue numbers from lines matching `- [ ] #<number>` or `- [x] #<number>`.
-
-   **Fallback** if no `### Child Tickets` section exists: search for siblings via:
-   ```bash
-   gh issue list --repo <owner>/<repo> --search "\"Related to #<parentId>\"" --state all --json number
-   ```
-
-4. **Determine if last child**: Check how many siblings are still open (excluding the current ticket):
-   ```bash
-   gh issue list --repo <owner>/<repo> --search "\"Related to #<parentId>\"" --state open --json number
-   ```
-   If the only open sibling is the current ticket → `isLastChild = true`
-
-5. **Store state** for later use in commit, PR body, and labeling:
-   - `isChild` — whether this ticket has a parent
-   - `isLastChild` — whether this is the last open child (triggers parent auto-close)
-   - `parentId` — the parent ticket number/ID
-
-**Edge cases:**
-- Parent already closed → `isLastChild = false` (skip auto-close)
-- No `### Child Tickets` section on parent → use search fallback
-- Some siblings manually closed → they don't count as open, don't block last-child detection
-
-## Attachments
-
-**If ticketless mode:** Skip the Attachments section entirely and proceed to Pre-flight Check.
-
-**If ticket mode:** Read the `attachments` reference skill and follow its 4-step procedure to discover, present, download, and load ticket attachments. If no attachments are found or the user selects none, proceed to Pre-flight Check.
-
-Store each attachment's file path for passing to subagents (subagents share the filesystem and can read attachments directly via `Read`).
+**If ticketless mode:** No ticket to fetch. The task description from `$ARGUMENTS` is the primary input.
 
 ## Pre-flight Check
 
 ### Settings Verification
 
-**Before fetching the ticket (or before proceeding in ticketless mode)**, read `.claude/settings.json` and `.claude/config.json` and verify the required permissions are present:
+**Before delegating to the context-gatherer (or before proceeding in ticketless mode)**, read `.claude/settings.json` and `.claude/config.json` and verify the required permissions are present. This check is mandatory before any context gathering: the gatherer runs read-only `gh` commands in a subagent, which is only safe once `Bash(gh *)` permission and `gh` authentication are verified here in the main agent.
 
 1. Check `permissions.allow` in `.claude/settings.json` contains **at minimum**:
    - `Write(*)`
@@ -178,29 +126,71 @@ If the user declines the auto-fix:
 
 If the user says no → stop. If yes → proceed.
 
-### Ticket Readiness
+## Context Gathering (Delegated)
+
+Runs **after** the Pre-flight Check above — the settings verification and `gh auth status` check are the precondition that makes read-only `gh` safe inside a subagent (see the `subagent-safety` skill).
+
+**If plan file mode** (`hasPlanFile = true`): skip this delegation entirely — the plan file already contains the bundled context, and `isChild`/`isLastChild`/`parentId` come from its front matter. The stale-plan re-fetch in Phase 1 (a single read-only `gh issue view`) is the explicit exception to the no-fetch rule and runs in the main agent after pre-flight.
+
+**If ticket mode:** Delegate to the `context-gatherer` agent. Pass:
+
+- The ticket number and `owner/repo`
+- The bundle output path: `/tmp/claude/ccflow-context-<ticket-id>.md`
+- Config facts: `claudeMdLocation`, `isMonorepo` and the `projects` array (if monorepo), and the design path (if `pencil.enabled`)
+
+The gatherer fetches the ticket and comments, performs parent-child detection, discovers attachments, loads design and per-project context, writes the bundle file, and returns a compact digest. From the digest, store:
+
+- `isChild`, `isLastChild`, `parentId` — for commit, PR body, and labeling
+- `labels` — for the Ticket Readiness checks
+- The attachment list — for the Attachments step
+- `bundlePath` — passed to the planner and appended to the plan file in Phase 1
+
+If the digest reports errors (ticket not found, auth failure), surface them to the user and stop. Do **not** re-fetch the ticket or re-read DESIGN.md in the main agent — the digest and bundle are the source of truth.
+
+**If ticketless mode:** Delegate to the `context-gatherer` only when there is context to bundle (design enabled or monorepo), with the task description in place of the ticket and bundle path `/tmp/claude/ccflow-context-<slug>.md`. Otherwise skip — the task description is the entire input.
+
+**Parent-child edge cases** (resolved inside the gatherer, recorded here for downstream phases):
+- Parent already closed → `isLastChild = false` (skip auto-close)
+- No `### Child Tickets` section on parent → gatherer uses the search fallback
+- Some siblings manually closed → they don't count as open, don't block last-child detection
+
+## Attachments
+
+Runs after Context Gathering (which itself runs after the Pre-flight Check). The effective order is: mode detection → Pre-flight Check → Context Gathering → Attachments → Ticket Readiness.
+
+**If ticketless mode:** Skip the Attachments section entirely.
+
+**If plan file mode:** Skip — attachment summaries are already in the plan file.
+
+**If ticket mode:** The context-gatherer digest already contains the discovered attachment list (Step 1 of the procedure). Read the `attachments` reference skill and follow Steps 2–4 (present, download, load) using that list. If the digest reports no attachments or the user selects none, proceed.
+
+Store each attachment's file path for passing to subagents (subagents share the filesystem and can read attachments directly via `Read`).
+
+## Ticket Readiness
 
 **If ticketless mode:** Skip the Ticket Readiness check entirely and proceed to the Pipeline.
 
-**If ticket mode:** After fetching the ticket, inspect its labels/tags before starting the pipeline:
+**If plan file mode:** Skip this check — readiness was verified when the plan was created.
 
-Check the issue's `labels` array.
+**If ticket mode:** After context gathering, inspect the ticket's labels/tags before starting the pipeline:
+
+Check the `labels` line from the context-gatherer digest.
 
 If the ticket does **not** have a "Refined" label/tag, display a warning:
 > "This ticket hasn't been refined yet. Consider running `/ccflow:refine <ticket-id>` first for better results. Do you want to proceed anyway?"
 
 If the user says no → stop. If yes → proceed with the pipeline.
 
-#### Design Check (soft)
+### Design Check (soft)
 
-If the ticket is classified as frontend — its title, description, or acceptance criteria mention UI components, pages, views, layouts, forms, modals, visual design, styling, CSS, animations, themes, or frontend frameworks (React, Angular, Vue, Svelte, etc.) — and does **not** have a "Designed" label/tag **and** `designSpec` was not loaded (no DESIGN.md found), display a suggestion:
+If the ticket is classified as frontend — its title or the digest summary mention UI components, pages, views, layouts, forms, modals, visual design, styling, CSS, animations, themes, or frontend frameworks (React, Angular, Vue, Svelte, etc.) — and does **not** have a "Designed" label/tag **and** the digest reports no design (`design: none`), display a suggestion:
 > "This frontend ticket hasn't been designed yet. Consider running `/ccflow:design <ticket-id>` first for a visual reference. Do you want to proceed anyway?"
 
-If the ticket lacks the "Designed" label but a `DESIGN.md` exists (loaded as `designSpec`), skip the suggestion — the design spec is sufficient context.
+If the ticket lacks the "Designed" label but the digest reports a bundled `DESIGN.md`, skip the suggestion — the design spec is sufficient context.
 
 If the user says no → stop. If yes → proceed with the pipeline. This is a soft-check — it never blocks implementation.
 
-#### Visual Check Reminder
+### Visual Check Reminder
 
 If the ticket has a `ui:visual-check` or `Browser` label, display a reminder:
 > "This ticket has the `ui:visual-check` label. Ensure `playwright-cli` is available for visual verification (`playwright-cli screenshot`, `playwright-cli snapshot`)."
