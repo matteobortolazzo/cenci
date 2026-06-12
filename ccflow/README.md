@@ -232,6 +232,8 @@ The plugin uses specialized agents with isolated contexts:
 | **code-reviewer** | PR-style quality review | sonnet | plan (read-only) |
 | **lessons-collector** | Routes genuine mistakes to `docs/<topic>.md` or `CLAUDE.md` | haiku | acceptEdits |
 
+**Model tiering**: Opus where judgment is concentrated — `/ccflow:refine` and `/ccflow:design` pin `model: opus` because scope, acceptance criteria, splits, and UX structure drive everything downstream. Sonnet for pipeline orchestration and implementation (`/ccflow:implement` pins `model: sonnet`). Haiku for mechanical collection (lessons-collector). These pins are visible in each skill's frontmatter and override the session model for that skill only.
+
 External integrations use the `gh` CLI rather than MCP servers, keeping permissions simple and avoiding token overhead. Optional MCP servers: Context7 (live documentation lookup) and Pencil (design file creation via `/ccflow:design`).
 
 ## Known Limitations
