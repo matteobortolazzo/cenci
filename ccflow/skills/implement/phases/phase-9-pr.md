@@ -2,6 +2,8 @@
 
 Read this file only when Phase 9 starts.
 
+This phase is pre-approved — commit, push, and create the PR without asking for confirmation. The only exceptions are the error cases defined below (rebase conflicts, test failures after rebase, push auth/network failures).
+
 Prerequisites: all required reviews complete, Must Fix/Critical/High items resolved, build and tests pass.
 
 Read `<worktree-path>/docs/git-workflow.md`; if absent, read legacy `<worktree-path>/.claude/rules/git-workflow.md`.

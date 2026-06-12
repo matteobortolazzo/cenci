@@ -208,7 +208,9 @@ gh issue edit <number> --repo <owner>/<repo> --add-label "Working"
 
 ## Pipeline
 
-This pipeline has 9 phases. Execute them in order. Between major phases, report progress to the user. **Read each phase file only when you reach that phase** — do not read all files upfront.
+This pipeline has 9 phases. Execute them in order without stopping for confirmation — the user pre-approved all phases, including commit, push, and PR creation, by invoking this skill. Between major phases, give a one-line status update and immediately continue to the next phase; do not wait for acknowledgment. **Read each phase file only when you reach that phase** — do not read all files upfront.
+
+The only reasons to stop mid-pipeline are explicit error gates defined within individual phases (rebase conflicts, repeated build failures, push auth errors, unclear reviewer findings). If no error gate fires, complete all 9 phases.
 
 **Hard stop after planning**: Phases 2–9 run only when the skill was invoked with a plan-file argument (`hasPlanFile` set during mode detection). A session that creates a new plan **always ends at Phase 1** — after persisting the plan file, do not read `phases/phase-2-worktree.md` or any later phase file. Implementation resumes via `/ccflow:implement .plans/<filename>` in a fresh session.
 
