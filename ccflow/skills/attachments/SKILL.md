@@ -12,6 +12,8 @@ After fetching the ticket, check for attachments that may provide additional con
 
 ### Step 1: Discover Attachments
 
+If the calling skill already provides a discovered attachment list (e.g. from the `context-gatherer` digest), use it and skip the scan below — continue at Step 2.
+
 Scan `body` and each `comments[].body` for URLs matching these domain patterns, embedded with either `![alt](url)` (image embed) or `[text](url)` (link) markdown syntax:
 - `https://user-images.githubusercontent.com/...`
 - `https://github.com/<owner>/<repo>/assets/...`
