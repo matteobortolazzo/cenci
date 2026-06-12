@@ -1,7 +1,7 @@
 {
   "name": "ccflow",
   "description": "Ticket refinement and automated implementation pipeline for GitHub",
-  "version": "2.2.3",
+  "version": "2.2.4",
   "author": {
     "name": "Matteo Bortolazzo"
   },
