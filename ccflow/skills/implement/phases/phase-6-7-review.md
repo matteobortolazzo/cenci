@@ -6,7 +6,7 @@ These quality gates are mandatory. `ccflow.reviewConcurrency` controls only whet
 
 ## Shared Context
 
-Gather context once:
+Gather context once. The worktree must be the CWD first — run a standalone `cd <worktree-path>` before these commands so the `git diff` calls resolve against the worktree and stay auto-approved:
 
 ```bash
 git diff > /tmp/claude/ccflow-diff.patch

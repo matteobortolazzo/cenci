@@ -87,6 +87,8 @@ network unreachable for domains not in allowedDomains):
 ## Working Directory
 When given a worktree path, `cd` into it once at the start of your session. CWD persists between Bash calls — do not prefix subsequent commands with `cd <path> &&`.
 
+See the `shell-rules` skill's "Worktree & Command Patterns" section for full guidance: one command per Bash call, no `&&`-chaining of unrelated commands, and no conditional shell scripts (`bash -c '…'`, `if/then`, loops, or command substitution) — they never match the allow-list and always force a manual approval prompt.
+
 ## Verification
 Run build and tests after each significant change.
 Check for LSP diagnostics on modified files — fix any type errors or unused code warnings.
