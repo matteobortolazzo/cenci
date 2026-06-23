@@ -13,6 +13,9 @@
     "allow": [
       "Write",
       "Edit",
+      "Read(~/.claude/plugins/**)",
+      "Read(//tmp/claude*/**)",
+      "Write(//tmp/claude*/**)",
       "Bash(cd:*)",
       "Bash(dotnet:*)",
       "Bash(npm:*)",
