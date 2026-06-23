@@ -10,6 +10,8 @@ Read `<worktree-path>/docs/git-workflow.md`; if absent, read legacy `<worktree-p
 
 Source `ticketId`, `slug`, `isChild`, `isLastChild`, and `parentId` from plan front matter when `hasPlanFile` is true.
 
+The worktree must be the CWD first — run a standalone `cd <worktree-path>` before the rebase/commit/push commands below so they resolve against the worktree and stay auto-approved.
+
 ## Rebase
 
 Fetch and rebase:

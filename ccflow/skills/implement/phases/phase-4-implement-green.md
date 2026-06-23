@@ -28,7 +28,7 @@ Pass design hierarchy, token values, and screenshot references to the implemente
 
 Pass:
 
-- Worktree path. First Bash command must be `cd <worktree-path>`.
+- Worktree path. Tell the agent: enter it with a standalone `cd <worktree-path>` as the first Bash call (CWD persists for later calls) — do **not** prefix every command with `cd <path> &&`. See the `shell-rules` skill for command patterns.
 - Plan file sections: `## Ticket Details`, `## Implementation Plan`, `## Architectural Context`, and relevant `## Design Context`.
 - The failing tests and their failure output.
 - Attachment paths if relevant.

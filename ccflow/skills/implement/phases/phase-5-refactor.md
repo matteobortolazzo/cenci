@@ -8,7 +8,7 @@ Delegate to the `implementer` agent for focused cleanup of touched code only.
 
 Pass:
 
-- Worktree path. First Bash command must be `cd <worktree-path>`.
+- Worktree path. Tell the agent: enter it with a standalone `cd <worktree-path>` as the first Bash call (CWD persists for later calls) — do **not** prefix every command with `cd <path> &&`. See the `shell-rules` skill for command patterns.
 - Changed file list.
 - LSP diagnostic reminder if configured.
 
