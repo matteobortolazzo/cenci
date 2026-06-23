@@ -40,6 +40,15 @@ The caller (Phase 8 of `/ccflow:implement`) MUST supply a `<project-root>` absol
 
 If `<project-root>` was not provided, stop and ask the caller for it — do not fall back to relative paths.
 
+### Worktree precondition (hard gate)
+
+Before performing **any** `Write` or `Edit`, verify `<project-root>`:
+
+1. It MUST be an **absolute** path (starts with `/`).
+2. It MUST contain a `/.worktrees/` segment (the feature worktree, e.g. `…/.worktrees/<id>-<desc>`).
+
+If either check fails — a relative path, or an absolute path with **no** `/.worktrees/` segment (i.e. it resolves to the main worktree) — **stop immediately and report**. Do NOT write, do NOT edit, and do NOT attempt to "rescue" a stranded edit with Bash (`git checkout --`, `git apply`, `git stash`, copying files). Output a one-line failure: `Blocked: <project-root> is not a feature worktree (must be an absolute path containing /.worktrees/). No lessons written.` and end the run. A stranded docs edit must never be created.
+
 ## Process
 
 1. Read `<project-root>/.claude/config.json` — note `claudeMdLocation` (defaults to `.claude/CLAUDE.md`).

@@ -6,6 +6,8 @@ Default action: skip. Only run a sub-step when its trigger fired.
 
 All file edits must land inside `<worktree-path>`. Use absolute paths rooted at the worktree when reading/writing or delegating.
 
+Before any sub-step writes or delegates, verify `<worktree-path>` (from Phase 2) is an **absolute** path containing a `/.worktrees/` segment. If it is relative or has no `/.worktrees/` segment, do not delegate — stop and report, since any edit would be stranded in the main worktree.
+
 ## Capture Lessons
 
 Run `lessons-collector` only if at least one occurred:
@@ -17,7 +19,7 @@ Run `lessons-collector` only if at least one occurred:
 
 Do not run for smooth sessions, normal TDD red/green progression, or obvious findings already covered by existing rules.
 
-Pass `<worktree-path>` as project root. The collector routes to existing `docs/<topic>.md`, `CLAUDE.md` Critical Rules for project-wide invariants, or a new topic doc only when multiple findings cluster. It never writes to `.claude/rules/lessons-learned.md`.
+Pass that exact verified `<worktree-path>` as `<project-root>`. The collector routes to existing `docs/<topic>.md`, `CLAUDE.md` Critical Rules for project-wide invariants, or a new topic doc only when multiple findings cluster. It never writes to `.claude/rules/lessons-learned.md`.
 
 Lessons must be specific, actionable, non-duplicate, and worth keeping permanently.
 

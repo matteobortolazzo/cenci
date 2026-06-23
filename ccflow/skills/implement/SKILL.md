@@ -55,7 +55,7 @@ If `pencil.enabled` is `true` in `.claude/config.json`:
 
 If `pencil.enabled` is not `true` or `pencil` is absent, skip this section.
 
-**Shell rules**: Read the `shell-rules` skill before running any `gh` commands (covers heredoc temp-file pattern).
+**Shell rules**: Read the `shell-rules` skill before generating any shell in this pipeline — it covers the heredoc temp-file pattern, zsh-safe portability (no bash associative arrays), and the rule against `cd <dir> && …` compounds and hand-rescuing stranded worktree edits.
 
 **Parse `$ARGUMENTS` — Mode Detection:**
 
