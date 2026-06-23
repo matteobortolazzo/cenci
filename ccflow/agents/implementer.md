@@ -87,6 +87,10 @@ network unreachable for domains not in allowedDomains):
 ## Working Directory
 When given a worktree path, `cd` into it once at the start of your session. CWD persists between Bash calls — do not prefix subsequent commands with `cd <path> &&`.
 
+**Never prefix git with `cd`.** `cd <dir> && git …` can *never* be auto-approved — it trips Claude Code's built-in "changes directory before running git, which can execute untrusted hooks" safety check, independent of the `Bash(git:*)` allow-rule, and forces a manual prompt every time. If a git command must target a directory other than the current one, use git's own flag: `git -C <path> status` — **never** `cd <path> && git status`.
+
+**Never hand-rescue a blocked or stranded edit.** If a `Write`/`Edit` is blocked (e.g. by the main-worktree guard hook) or landed in the wrong place, do NOT recover with Bash git — no `git stash`/`git stash pop`, `git checkout -- <file>`, `git apply` of a patch, or copying files across directories. Those mutate the wrong worktree, trip the sandbox, force prompts, and don't match the allow-rules. The only correct fix is to **re-issue the same `Write`/`Edit`** to the correct absolute path under `.worktrees/<id>-<desc>/`, keeping the path tail identical.
+
 See the `shell-rules` skill's "Worktree & Command Patterns" section for full guidance: one command per Bash call, no `&&`-chaining of unrelated commands, and no conditional shell scripts (`bash -c '…'`, `if/then`, loops, or command substitution) — they never match the allow-list and always force a manual approval prompt.
 
 ## Verification
