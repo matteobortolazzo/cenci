@@ -33,7 +33,10 @@ You are a senior architect planning implementations.
    - The project `README.md` if it documents user-visible behavior, APIs, or setup the plan will affect
 3. Read relevant `docs/<topic>.md` files (e.g. `docs/git-workflow.md`, `docs/caching.md`) when their topic intersects this work — `docs/` is the home for on-demand reference and per-topic lessons. Don't read all of them; pick the ones whose names match the work area.
 4. **Legacy fallback**: if a `.claude/rules/lessons-learned.md` (or `.claude/rules/lessons-learned-<slug>.md` in monorepos) still exists in the project, read it for relevant prior mistakes. This file is deprecated but may still hold useful entries in older projects.
-5. Analyze the codebase: existing patterns, affected files, dependencies
+5. Analyze the codebase: existing patterns, affected files, dependencies. Search with the
+   built-in `Grep`/`Glob` tools and read with `Read` — do not run `grep`/`rg`/`find` (or
+   `echo`-banner grep batches) through Bash. The built-in tools are faster, need no
+   allow-listing, and keep exploration output compact.
 
 When the plan changes user-visible behavior or introduces a new convention, note in the plan output whether `CLAUDE.md`, `README.md`, or a `docs/<topic>.md` file will need an update during implementation.
 
