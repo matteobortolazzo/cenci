@@ -12,6 +12,14 @@ Bash auto-approval matches on the **first token** of a command and splits compou
 - **One command per Bash call.** Don't `&&`-chain unrelated commands; run them as separate calls so each matches an allow-list prefix. Avoid pipes to non-allow-listed tools (`grep`/`sed`/`wc`) inside command lines you need auto-approved.
 - **No conditional shell scripts.** Never wrap logic in `bash -c '…'`, `if/then`, loops, or command substitution that returns a string. Run the command, read its output, and branch in your reasoning. Scripts start with `bash`/`sh`/`(` and never match the tool-name allow-list — they always prompt.
 
+## Searching the codebase
+
+Use the built-in `Grep`, `Glob`, and `Read` tools to search and read code — not `grep`,
+`rg`, `find`, `ls`, or `cat` through Bash, and never `echo "=== label ===" && grep …`
+banner batches. The built-in tools need no allow-listing, never trigger a permission
+prompt, and return compact, structured results. Reserve Bash for actions with no tool
+equivalent: builds, tests, `git`, `gh`, and file moves.
+
 ## Heredoc Temp-File Pattern
 
 Heredocs (`cat <<'EOF'`) fail in the sandbox (read-only filesystem can't create temp files). For any `gh` command that accepts `--body` or `--description`, write the content to a temp file first, then read it back:
