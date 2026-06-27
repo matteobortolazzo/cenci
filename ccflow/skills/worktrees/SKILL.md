@@ -19,12 +19,14 @@ project-root/          # Main worktree — stays on main, read-only for implemen
 
 ## Commands
 ```bash
-# Create worktree for a feature
-git worktree add .worktrees/<id>-<desc> -b feature/<id>-<desc>
+# Create worktree for a feature — use git -C from the repo root, no cd compound
+git -C <repo-root> worktree add .worktrees/<id>-<desc> -b feature/<id>-<desc> main
 
 # List worktrees
-git worktree list
+git -C <repo-root> worktree list
 ```
+
+To inspect the new worktree (e.g. check for `node_modules`), use separate bare `ls`/`git -C` calls — never `cd <repo>; … 2>/dev/null` in one line. A single Bash call combining a `cd` with a redirection or write hits a built-in guard that no setting can disable (see `shell-rules` → the `cd`+redirection guard).
 
 ## .gitignore
 Ensure `.worktrees/` is in `.gitignore`.
