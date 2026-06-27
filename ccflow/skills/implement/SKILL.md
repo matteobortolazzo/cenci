@@ -98,6 +98,9 @@ The determined mode (ticket or ticketless) governs conditional behavior througho
 1. Check `permissions.allow` in `.claude/settings.json` contains **at minimum**:
    - `Write(*)`
    - `Edit(*)`
+   - `Read(~/.claude/plugins/**)`   (reads the pipeline's own phase files without prompting)
+   - `Read(//tmp/claude*/**)`        (reads context bundles / diffs / scratchpad)
+   - `Write(//tmp/claude*/**)`       (Write-tool temp files, e.g. context bundle)
 2. Read `.claude/config.json` and check feature-specific permissions in `permissions.allow`:
    - If `mcpServers` exists in config, for each server where value is `true`:
      verify its tool permissions exist in `permissions.allow`
