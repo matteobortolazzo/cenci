@@ -133,6 +133,8 @@ If the user says no → stop. If yes → proceed.
 
 Runs **after** the Pre-flight Check above — the settings verification and `gh auth status` check are the precondition that makes read-only `gh` safe inside a subagent (see the `subagent-safety` skill).
 
+> **Blocking delegation — do not background or poll.** Invoke the `context-gatherer` as a single, foreground `Task` call and wait for its result inline. Do **not** run it in the background, do **not** announce that you'll "wait for it to complete," and do **not** call any monitoring/polling tool to check on it — the `Task` call returns the digest directly when the subagent finishes. The next pipeline step reads that returned digest; there is nothing to poll.
+
 **If plan file mode** (`hasPlanFile = true`): skip this delegation entirely — the plan file already contains the bundled context, and `isChild`/`isLastChild`/`parentId` come from its front matter. The stale-plan re-fetch in Phase 1 (a single read-only `gh issue view`) is the explicit exception to the no-fetch rule and runs in the main agent after pre-flight.
 
 **If ticket mode:** Delegate to the `context-gatherer` agent. Pass:
