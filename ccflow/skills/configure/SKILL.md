@@ -410,35 +410,23 @@ After gathering answers:
    **Other settings:**
    - If user declined sandboxing: set `sandbox.enabled: false`
 
-   **SessionStart hook** — add a hook that detects pending implementation plans on session start:
+   **Pending-plans detection** — no per-project setup required. The pending-plans
+   SessionStart hook is shipped plugin-side (`${CLAUDE_PLUGIN_ROOT}/hooks/scripts/check-pending-plans.sh`,
+   registered in `ccflow/hooks/hooks.json`) and runs automatically wherever ccflow is
+   enabled. Do **not** add a SessionStart entry to `.claude/settings.json` or copy any
+   script into `.claude/hooks/`.
 
-   Merge a `hooks.SessionStart` entry into `.claude/settings.json`:
-
-   ```json
-   {
-     "hooks": {
-       "SessionStart": [
-         {
-           "matcher": "",
-           "hooks": [
-             {
-               "type": "command",
-               "command": ".claude/hooks/check-pending-plans.sh",
-               "timeout": 5000
-             }
-           ]
-         }
-       ]
-     }
-   }
-   ```
-
-   If `hooks` or `hooks.SessionStart` already exists, append to the existing array — do not overwrite.
-
-   Then deploy the hook script:
-   1. `mkdir -p .claude/hooks/`
-   2. Copy `${CLAUDE_PLUGIN_ROOT}/templates/hooks/check-pending-plans.sh` to `.claude/hooks/check-pending-plans.sh`
-   3. `chmod +x .claude/hooks/check-pending-plans.sh`
+   **Legacy cleanup** — heal projects configured by an older ccflow that installed the
+   hook per-project (a fragile cwd-relative path that errored in worktrees and
+   subdirectories):
+   1. If `.claude/settings.json` has a `hooks.SessionStart` hook whose `command` is
+      `.claude/hooks/check-pending-plans.sh`, remove that hook entry. If its enclosing
+      block's `hooks` array becomes empty, remove the block too; if `SessionStart`
+      becomes empty, remove it. Preserve every other SessionStart entry untouched.
+   2. Delete the orphaned script if present: `rm -f .claude/hooks/check-pending-plans.sh`.
+      Then remove the directory only if it is now empty: `rmdir .claude/hooks 2>/dev/null || true`
+      (the `|| true` keeps it non-fatal when the dir is absent or still holds other hooks;
+      run as its own Bash call, never compounded with a `cd` — see `ccflow:shell-rules`).
 
 ### MCP Server Configuration
 
