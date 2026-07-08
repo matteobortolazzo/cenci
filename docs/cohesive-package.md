@@ -1,6 +1,6 @@
 # Proposal: one cohesive package
 
-Status: draft for review · 2026-07-08
+Status: accepted · 2026-07-08 (decisions in §4)
 
 The repo today ships three good tools with three unrelated install stories and no shared
 security model. This proposal turns them into one package with a single principle:
@@ -100,15 +100,13 @@ claude plugin update --all
 Everything versions independently (existing per-plugin version-bump CI extends to the
 sandbox plugin), but installs and updates through one mechanism.
 
-## 4. Decisions needed (human in the loop 🙂)
+## 4. Decisions (resolved 2026-07-08)
 
-1. **New name for muxwatch** — recommendation: `agentwatch` (says what it does; keeps
-   `watch`; agent-agnostic like the code). Alternatives: `codewatch`, `pulse`, keep
-   `muxwatch`.
-2. **dev-sandbox as a plugin** — recommended yes (versioned, updatable, discoverable);
-   alternative is keeping the symlink script and documenting it better.
-3. **goal/loop scope** — both (goal for implement autopilot + loop for babysit), or
-   start with one.
+1. **muxwatch renames to `agentwatch`** — says what it does; agent-agnostic like the
+   code; tmux becomes one frontend among waybar/noctalia/dms.
+2. **dev-sandbox becomes a plugin** (`sandbox`) — versioned, marketplace-installed,
+   updated via `claude plugin update` like the others.
+3. **goal AND loop** — `/goal` for the implement autopilot, `/loop` for PR babysitting.
 
 ## 5. Migration plan (1 ticket = 1 PR)
 
@@ -116,9 +114,9 @@ sandbox plugin), but installs and updates through one mechanism.
 |---|--------|-------|
 | 1 | ✅ dev-sandbox: full permissions in container | this branch |
 | 2 | sandbox plugin packaging | plugin manifest, `/sandbox:setup` skill, version-bump CI, marketplace entry |
-| 3 | rename muxwatch → *(name)* | Go module path, binaries, plugin/marketplace names, CI workflows, goreleaser, docs; keep `muxwatch/v*` tags frozen, start `<name>/v*` |
-| 4 | *(name)*: binary bootstrap + daemon autostart | SessionStart hook downloads release binary + starts daemon; remove manual install steps |
-| 5 | *(name)*: tmux as one frontend | `internal/frontend/tmux`, drop `$TMUX_PANE` gate in notify |
+| 3 | rename muxwatch → agentwatch | Go module path, binaries, plugin/marketplace names, CI workflows, goreleaser, docs; keep `muxwatch/v*` tags frozen, start `agentwatch/v*` |
+| 4 | agentwatch: binary bootstrap + daemon autostart | SessionStart hook downloads release binary + starts daemon; remove manual install steps |
+| 5 | agentwatch: tmux as one frontend | `internal/frontend/tmux`, drop `$TMUX_PANE` gate in notify |
 | 6 | ccflow: container profile in configure | sandbox detection, profile generation, docs |
 | 7 | ccflow: goal-driven autopilot | set/clear goal around phases 2–9 |
 | 8 | ccflow: babysit skill | `/loop`-based PR babysitting via address-review |
