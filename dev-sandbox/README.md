@@ -21,7 +21,7 @@ claude-sand --build
 ## Usage
 
 ```bash
-# Launch Claude Code (all tools pre-approved, no permission prompts)
+# Launch Claude Code (full permissions — the container is the security boundary)
 claude-sand
 
 # Pass additional args to Claude Code
@@ -96,6 +96,10 @@ docker build --build-arg DOTNET_SDK_VERSION=10.0.200 \
 ```
 
 ## Architecture
+
+### Permission model
+
+Claude Code runs with `--dangerously-skip-permissions` inside the container: no permission prompts, no tool allowlists. Isolation comes from the container itself, not from Claude Code's permission system. This is the supported use of the flag (it refuses to run as root; the container user is `dev`, UID 1000). Human-in-the-loop control moves up a layer — to workflow gates (plan approval, `AskUserQuestion`) rather than per-command approval.
 
 ### Isolation
 
