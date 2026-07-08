@@ -107,17 +107,22 @@ sandbox plugin), but installs and updates through one mechanism.
 2. **dev-sandbox becomes a plugin** (`sandbox`) — versioned, marketplace-installed,
    updated via `claude plugin update` like the others.
 3. **goal AND loop** — `/goal` for the implement autopilot, `/loop` for PR babysitting.
+4. **Codex is a first-class target** — the package should properly support OpenAI Codex
+   alongside Claude Code (agentwatch already watches both). The repo itself will be
+   renamed later (owner action) to drop the Claude-only branding; until then, avoid
+   baking `claude-` into new identifiers. Scope definition tracked in #33.
 
 ## 5. Migration plan (1 ticket = 1 PR)
 
-| # | Ticket | Scope |
-|---|--------|-------|
-| 1 | ✅ dev-sandbox: full permissions in container | this branch |
-| 2 | sandbox plugin packaging | plugin manifest, `/sandbox:setup` skill, version-bump CI, marketplace entry |
-| 3 | rename muxwatch → agentwatch | Go module path, binaries, plugin/marketplace names, CI workflows, goreleaser, docs; keep `muxwatch/v*` tags frozen, start `agentwatch/v*` |
-| 4 | agentwatch: binary bootstrap + daemon autostart | SessionStart hook downloads release binary + starts daemon; remove manual install steps |
-| 5 | agentwatch: tmux as one frontend | `internal/frontend/tmux`, drop `$TMUX_PANE` gate in notify |
-| 6 | ccflow: container profile in configure | sandbox detection, profile generation, docs |
-| 7 | ccflow: goal-driven autopilot | set/clear goal around phases 2–9 |
-| 8 | ccflow: babysit skill | `/loop`-based PR babysitting via address-review |
-| 9 | docs: one-package README | root README rewrite around the three layers + single install path |
+| # | Ticket | Issue | Scope |
+|---|--------|-------|-------|
+| 1 | ✅ dev-sandbox: full permissions in container | this branch | — |
+| 2 | sandbox plugin packaging | [#25](https://github.com/matteobortolazzo/claude-tools/issues/25) | plugin manifest, `/sandbox:setup` skill, version-bump CI, marketplace entry |
+| 3 | rename muxwatch → agentwatch | [#26](https://github.com/matteobortolazzo/claude-tools/issues/26) | Go module path, binaries, plugin/marketplace names, CI workflows, goreleaser, docs; keep `muxwatch/v*` tags frozen, start `agentwatch/v*` |
+| 4 | agentwatch: binary bootstrap + daemon autostart | [#27](https://github.com/matteobortolazzo/claude-tools/issues/27) | SessionStart hook downloads release binary + starts daemon; remove manual install steps |
+| 5 | agentwatch: tmux as one frontend | [#28](https://github.com/matteobortolazzo/claude-tools/issues/28) | `internal/frontend/tmux`, drop `$TMUX_PANE` gate in notify |
+| 6 | ccflow: container profile in configure | [#29](https://github.com/matteobortolazzo/claude-tools/issues/29) | sandbox detection, profile generation, docs |
+| 7 | ccflow: goal-driven autopilot | [#30](https://github.com/matteobortolazzo/claude-tools/issues/30) | set/clear goal around phases 2–9 |
+| 8 | ccflow: babysit skill | [#31](https://github.com/matteobortolazzo/claude-tools/issues/31) | `/loop`-based PR babysitting via address-review |
+| 9 | docs: one-package README | [#32](https://github.com/matteobortolazzo/claude-tools/issues/32) | root README rewrite around the three layers + single install path |
+| 10 | codex: first-class support audit | [#33](https://github.com/matteobortolazzo/claude-tools/issues/33) | define proper Codex support per layer → follow-up tickets |
