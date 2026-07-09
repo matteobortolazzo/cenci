@@ -2,14 +2,28 @@ package ipc
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
+// tempSocketDir returns a bind-safe temp directory. macOS caps sun_path at 104
+// bytes and t.TempDir() embeds the (long) test name, so build a short dir here.
+func tempSocketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "aw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
+// tempSocket returns a bind-safe Unix socket path (see tempSocketDir).
 func tempSocket(t *testing.T) string {
 	t.Helper()
-	return filepath.Join(t.TempDir(), "test.sock")
+	return filepath.Join(tempSocketDir(t), "s.sock")
 }
 
 func TestServer_BroadcastToClient(t *testing.T) {
