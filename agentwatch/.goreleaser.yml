@@ -1,0 +1,31 @@
+version: 2
+
+builds:
+  - binary: agentwatch
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+
+archives:
+  - formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: 'checksums.txt'
+  algorithm: sha256
+
+project_name: agentwatch
+
+release:
+  github:
+    owner: matteobortolazzo
+    name: claude-tools

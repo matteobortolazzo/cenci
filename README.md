@@ -13,19 +13,19 @@ claude plugin marketplace add matteobortolazzo/claude-tools
 claude plugin install ccflow
 ```
 
-### [muxwatch](./muxwatch)
+### [agentwatch](./agentwatch)
 
-Event-driven tmux watcher that monitors Claude Code and OpenAI Codex sessions and displays live status in window titles and waybar.
+Event-driven watcher that monitors Claude Code and OpenAI Codex sessions and surfaces live status across tmux, waybar, noctalia, and DMS. tmux is one frontend among several.
 
 ```bash
 claude plugin marketplace add matteobortolazzo/claude-tools
-claude plugin install muxwatch
+claude plugin install agentwatch
 ```
 
 Binary install:
 
 ```bash
-go install github.com/matteobortolazzo/claude-tools/muxwatch@latest
+go install github.com/matteobortolazzo/claude-tools/agentwatch@latest
 ```
 
 ### [sandbox](./dev-sandbox)

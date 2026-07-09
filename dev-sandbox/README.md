@@ -167,14 +167,19 @@ The entrypoint automatically detects the socket's group ownership and adds the `
 
 **Security note**: The `--docker` flag grants the container access to the host's Docker daemon. Any container started from within the sandbox runs on the host, with full Docker privileges. This is why it is opt-in.
 
-### Muxwatch (optional)
+### Agentwatch (optional)
 
-If `muxwatch` is installed on the host and the daemon is running, the script automatically:
-- Bind-mounts the `muxwatch` binary (read-only)
+If `agentwatch` is installed on the host and the daemon is running, the script automatically:
+- Bind-mounts the `agentwatch` binary (read-only)
 - Bind-mounts the events socket so hooks can reach the host daemon
 - Passes `$TMUX_PANE` for tmux window status updates
 
-Install the muxwatch plugin inside the container: `claude plugin install muxwatch`
+Install the agentwatch plugin inside the container: `claude plugin install agentwatch`
+
+> **Renamed from muxwatch.** The event socket moved from `muxwatch-events.sock` to
+> `agentwatch-events.sock`. If you previously ran the `muxwatch` daemon, rebuild/reinstall
+> the `agentwatch` binary and restart the daemon so it creates the new socket the launcher
+> now bind-mounts — otherwise agentwatch is silently skipped inside the container.
 
 ### Container lifecycle
 

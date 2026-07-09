@@ -5,8 +5,8 @@
 .env.*
 
 # Go
-muxwatch/muxwatch
-muxwatch/dist/
+agentwatch/agentwatch
+agentwatch/dist/
 
 # Node
 node_modules/

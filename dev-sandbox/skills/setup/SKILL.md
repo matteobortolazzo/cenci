@@ -74,4 +74,4 @@ Summarize what was done and point the user at usage:
 - `claude-sand --shell` — open a shell for manual setup / troubleshooting
 - `claude-sand --build` — rebuild the image after changing the Dockerfile
 
-See `${CLAUDE_PLUGIN_ROOT}/README.md` for auth, MCP, muxwatch, and Docker-in-Docker details.
+See `${CLAUDE_PLUGIN_ROOT}/README.md` for auth, MCP, agentwatch, and Docker-in-Docker details.
