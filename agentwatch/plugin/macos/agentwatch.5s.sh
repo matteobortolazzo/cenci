@@ -38,13 +38,13 @@ resolve_bin() {
     /opt/homebrew/bin/agentwatch
     /usr/local/bin/agentwatch
   )
-  # Plugin bootstrap installs the binary into the plugin's bin/ dir. The exact
-  # nesting under ~/.claude/plugins depends on the marketplace layout, so glob
-  # a couple of depths.
+  # Plugin bootstrap installs the binary at <plugin-root>/bin/agentwatch. An
+  # installed plugin lives at ~/.claude/plugins/cache/<marketplace>/agentwatch/<version>/,
+  # and the marketplace checkout keeps the repo's plugin/ layout — cover both.
   local g
   for g in \
-    "$HOME"/.claude/plugins/*/agentwatch/plugin/bin/agentwatch \
-    "$HOME"/.claude/plugins/*/*/agentwatch/plugin/bin/agentwatch; do
+    "$HOME"/.claude/plugins/cache/*/agentwatch/*/bin/agentwatch \
+    "$HOME"/.claude/plugins/marketplaces/*/agentwatch/plugin/bin/agentwatch; do
     [ -x "$g" ] && candidates+=("$g")
   done
 
