@@ -23,6 +23,16 @@
         "name": "Matteo Bortolazzo"
       },
       "repository": "https://github.com/matteobortolazzo/claude-tools"
+    },
+    {
+      "name": "sandbox",
+      "source": "./dev-sandbox",
+      "description": "Isolated Docker/Podman container for running Claude Code with full permissions — the container is the security boundary",
+      "version": "0.1.0",
+      "author": {
+        "name": "Matteo Bortolazzo"
+      },
+      "repository": "https://github.com/matteobortolazzo/claude-tools"
     }
   ]
 }
