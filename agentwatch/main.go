@@ -16,6 +16,7 @@ import (
 
 	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/config"
 	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/daemon"
+	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/dispatch"
 	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/frontend/status"
 	tmuxfe "github.com/matteobortolazzo/claude-tools/agentwatch/internal/frontend/tmux"
 	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/ipc"
@@ -37,6 +38,8 @@ func main() {
 		runNotify(os.Args[2:])
 	case "run":
 		runRun(os.Args[2:])
+	case "dispatch":
+		runDispatch(os.Args[2:])
 	default:
 		if strings.HasPrefix(os.Args[1], "-") {
 			// Flags like -v go to daemon.
@@ -201,6 +204,30 @@ func runRun(args []string) {
 		fmt.Fprintf(os.Stderr, "agentwatch run: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func runDispatch(args []string) {
+	fs := flag.NewFlagSet("dispatch", flag.ExitOnError)
+	once := fs.Bool("once", false, "run a single dispatch pass then exit (default)")
+	interval := fs.Duration("interval", 0, "run continuously on this interval (e.g. 5m); mutually exclusive with --once")
+	dryRun := fs.Bool("dry-run", false, "print the decision table without dispatching")
+	configPath := fs.String("config", "", "path to config.json (default: $XDG_CONFIG_HOME/agentwatch/config.json)")
+	_ = fs.Parse(args)
+
+	cfg, err := dispatch.LoadConfig(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentwatch dispatch: %v\n", err)
+		os.Exit(1)
+	}
+
+	ctrl := &tmux.ExecClient{}
+	// --interval self-loops; otherwise a single pass. --once wins if both given.
+	if *interval > 0 && !*once {
+		dispatch.RunLoop(cfg, ctrl, *interval, os.Stdout)
+		return
+	}
+	prior := 0
+	dispatch.RunOnce(cfg, ctrl, *dryRun, os.Stdout, &prior)
 }
 
 func runStatus(args []string) {

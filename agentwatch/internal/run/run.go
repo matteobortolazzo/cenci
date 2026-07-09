@@ -34,6 +34,10 @@ type Opts struct {
 	Slug       string // --slug
 	ConfigPath string // --config
 	DryRun     bool   // --dry-run
+	// Dir, when set, is the working directory the window starts in: a
+	// `cd <dir> &&` prefix is prepended to the built command so a dispatched
+	// session lands in its repo (finding that repo's .plans/ and git tree).
+	Dir string
 
 	// GHTitle overrides the gh title lookup; nil uses the real gh CLI. Set in
 	// tests to keep window-name resolution deterministic.
@@ -78,6 +82,13 @@ func Run(opts Opts, ctrl Controller) error {
 		return err
 	}
 	shellCommand := shellJoin(argv)
+
+	// When a start directory is requested, cd into it first so the session
+	// lands in its repo. The directory rides in the command string, so no
+	// Controller change is needed.
+	if dir := strings.TrimSpace(opts.Dir); dir != "" {
+		shellCommand = "cd " + shellQuote(dir) + " && " + shellCommand
+	}
 
 	// 3. Resolve target session: flag > current tmux session.
 	session := strings.TrimSpace(opts.Session)

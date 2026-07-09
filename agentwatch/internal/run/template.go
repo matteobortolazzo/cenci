@@ -96,6 +96,11 @@ func Load(path string) (FileConfig, error) {
 	return merge(base, fromFile), nil
 }
 
+// DefaultConfigPath returns the default config.json location, or "" if no home
+// is known. It is a thin exported wrapper over defaultConfigPath so sibling
+// packages (e.g. dispatch) resolve the same path in one place.
+func DefaultConfigPath() string { return defaultConfigPath() }
+
 // defaultConfigPath resolves the XDG config path, or "" if no home is known.
 func defaultConfigPath() string {
 	dir := os.Getenv("XDG_CONFIG_HOME")
