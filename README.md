@@ -1,42 +1,100 @@
 # claude-tools
 
-Claude Code and Codex plugins and tooling.
+Three layers that let a coding agent implement on autopilot while a human keeps the
+decisions — an **isolation** boundary, a **workflow** with human gates, and an
+**attention** router that taps you only when a decision is needed. One marketplace,
+one install, one update.
 
-## Plugins
+## The pitch
 
-### [ccflow](./ccflow)
+```
+┌────────────────────────────────────────────────────────┐
+│  attention layer   (agentwatch)                        │
+│  hooks → daemon → tmux · waybar · noctalia · dms       │
+│  "the agent needs YOU" → routed to every surface       │
+├────────────────────────────────────────────────────────┤
+│  workflow layer    (ccflow)                            │
+│  human gates: refine · design · plan approval · AUQ    │
+│  autopilot:  /goal-driven phases → PR → CI green       │
+│  babysit:    /loop → address-review until merged       │
+├────────────────────────────────────────────────────────┤
+│  isolation layer   (dev-sandbox)                       │
+│  Docker/Podman + full permissions                      │
+│  the ONLY security boundary; no prompt friction inside │
+└────────────────────────────────────────────────────────┘
+```
 
-Ticket refinement and automated implementation pipeline for GitHub. Provides skills for planning, TDD implementation, code review, and PR creation.
+An optional orchestration board ([lazyboards](https://github.com/matteobortolazzo/lazyboards))
+sits on top and dispatches work to these layers — it lives in its own repo.
+
+**Humans decide; the agent implements.** You refine the ticket, reason through the
+design, approve the plan, and answer the questions that come up (`AskUserQuestion`).
+Everything between those gates runs on autopilot — with *all* permissions, because the
+agent is locked inside a container and the container is the only thing standing between
+it and your host. Full permissions remove the *mechanical* prompts, not the *decisions*:
+the decision model lives one layer up, in the workflow's gates. And because an
+autonomous agent working behind a wall is easy to forget, the attention layer taps you
+on the shoulder the moment it needs an answer — "the agent needs YOU," on whatever
+surface you happen to be looking at. The agent is Claude Code today, Codex when the work
+fits it better; the isolation and attention layers don't care which.
+
+## Install
 
 ```bash
 claude plugin marketplace add matteobortolazzo/claude-tools
-claude plugin install ccflow
+claude plugin install ccflow agentwatch sandbox
+/sandbox:setup   # container layer only — symlink claude-sand + build the image
+# later:
+claude plugin update --all
 ```
 
-### [agentwatch](./agentwatch)
+Each layer versions independently, but they install and update through this one
+mechanism.
 
-Event-driven watcher that monitors Claude Code and OpenAI Codex sessions and surfaces live status across tmux, waybar, noctalia, and DMS. tmux is one frontend among several.
+## The three layers
 
-```bash
-claude plugin marketplace add matteobortolazzo/claude-tools
-claude plugin install agentwatch
-```
+### Isolation — [dev-sandbox](./dev-sandbox) (plugin: `sandbox`)
 
-Binary install:
+A Docker/Podman container that runs the agent with `--dangerously-skip-permissions` and
+mounts only `~/Repos`. It exists so autopilot is *safe*: the container is the single
+security boundary, which is what lets every layer above it drop per-command approval
+without exposing the host. `/sandbox:setup` symlinks the `claude-sand` launcher and
+builds the image.
 
-```bash
-go install github.com/matteobortolazzo/claude-tools/agentwatch@latest
-```
+### Workflow — [ccflow](./ccflow) (plugin: `ccflow`)
 
-### [sandbox](./dev-sandbox)
+The GitHub ticket → PR pipeline, and the home of every human decision gate: interactive
+`/ccflow:refine` and `/ccflow:design`, plan approval as the hard stop, and
+`AskUserQuestion` from the main agent. Once you approve the plan, `/goal`-driven phases
+run unattended to an open PR with green CI, and `/ccflow:babysit` loops on review
+comments until the PR merges. It detects the sandbox and drops host-only friction inside it.
 
-Docker/Podman container for running Claude Code in isolation with full permissions — the container is the security boundary. Includes .NET, Node.js, Go, and common dev tools.
+### Attention — [agentwatch](./agentwatch) (plugin: `agentwatch`)
 
-```bash
-claude plugin marketplace add matteobortolazzo/claude-tools
-claude plugin install sandbox
-/sandbox:setup   # symlink the claude-sand launcher and build the image
-```
+An event-driven watcher that turns agent hooks into live status across tmux, waybar,
+noctalia, DMS, and the macOS menu bar. Its whole job is to route "the agent needs YOU"
+to wherever you're looking, so an agent working autonomously behind the container wall
+never waits silently. The plugin self-bootstraps its binary and daemon on first session.
+
+## Agent-agnostic (Claude Code + Codex)
+
+One marketplace serves both agents. Codex deliberately consumes Claude-format plugin
+infrastructure: it reads `.claude-plugin/marketplace.json`, accepts
+`.claude-plugin/plugin.json` as a manifest, loads `hooks.json`, and sets
+`CLAUDE_PLUGIN_ROOT`. So "support both agents" reduces to *one* marketplace, not two —
+the same install path above works from Codex.
+
+**Codex `/hooks` trust note.** Codex hash-pins `hooks.json`, so every plugin update that
+changes it changes the hash and requires re-trusting the hooks via `/hooks` in Codex.
+This is a per-update step for Codex users only.
+
+Per-layer Codex status is honest about where each layer stands today:
+
+| Layer | Codex today | Roadmap |
+|-------|-------------|---------|
+| attention (agentwatch) | ✅ watched — self-bootstrapping Codex hooks, `/hooks` trust step | `agentwatch run --agent codex` launch templates ([#33](https://github.com/matteobortolazzo/claude-tools/issues/33)) |
+| workflow (ccflow) | Claude Code only | documented `AGENTS.md` equivalent ([#19](https://github.com/matteobortolazzo/claude-tools/issues/19)) |
+| isolation (sandbox) | Claude-only launcher | `claude-sand --agent codex` ([#18](https://github.com/matteobortolazzo/claude-tools/issues/18)) |
 
 ## License
 
