@@ -206,9 +206,9 @@ Resolved 2026-07-09 (orchestration layer):
 | 14 | docs: board-orchestration recipe | [#42](https://github.com/matteobortolazzo/claude-tools/issues/42) | `docs/orchestration.md`: state machine, example board config, join-key convention, multi-agent notes |
 | 15 | lazyboards: agent status on cards | [lazyboards#255](https://github.com/matteobortolazzo/lazyboards/issues/255) | subscribe via ticket 11's client, badge cards, NeedInput loudest, status-bar summary |
 | 16 | lazyboards: jump to card's session | [lazyboards#256](https://github.com/matteobortolazzo/lazyboards/issues/256) | keybinding to focus the card's tmux window |
-| 17 | agentwatch: self-contained Codex bootstrap parity | TBD | Codex SessionStart hook downloads the version-matched binary with SHA-256 verification + autostarts the daemon (like #27); symlinks the binary onto `$PATH`; redirects the "#33" pointers in both READMEs. From §6 audit |
-| 18 | sandbox: launch Codex in the container | TBD | `claude-sand --agent claude\|codex`: mount host `codex`, stage `~/.codex/auth.json`/`OPENAI_API_KEY`, swap in Codex's full-permission flag; Dockerfile unchanged. Distinct from #40's dispatch launcher. From §6 audit |
-| 19 | ccflow: documented Codex workflow equivalent | TBD | `AGENTS.md` template carrying TDD/review/worktree/PR conventions as prose + the Codex command template #40 uses for `--agent codex`; NOT a port of the skill/subagent pipeline. Feeds decision 7. From §6 audit |
+| 17 | agentwatch: self-contained Codex bootstrap parity | [#54](https://github.com/matteobortolazzo/claude-tools/issues/54) | Codex SessionStart hook downloads the version-matched binary with SHA-256 verification + autostarts the daemon (like #27); symlinks the binary onto `$PATH`; redirects the "#33" pointers in both READMEs. From §6 audit |
+| 18 | sandbox: launch Codex in the container | [#55](https://github.com/matteobortolazzo/claude-tools/issues/55) | `claude-sand --agent claude\|codex`: mount host `codex`, stage `~/.codex/auth.json`/`OPENAI_API_KEY`, swap in Codex's full-permission flag; Dockerfile unchanged. Distinct from #40's dispatch launcher. From §6 audit |
+| 19 | ccflow: documented Codex workflow equivalent | [#56](https://github.com/matteobortolazzo/claude-tools/issues/56) | `AGENTS.md` template carrying TDD/review/worktree/PR conventions as prose + the Codex command template #40 uses for `--agent codex`; NOT a port of the skill/subagent pipeline. Feeds decision 7. From §6 audit |
 
 ## 6. Codex first-class support (audit)
 
@@ -246,14 +246,14 @@ UserPromptSubmit, PermissionRequest, PreToolUse, PostToolUse, Stop — all firin
 and confirming `Notification` vs `PermissionRequest` equivalence. These are hook-spec
 correctness, which #36 already owns.
 
-**Real gap → Ticket 17.** Claude's SessionStart hook runs `plugin/hooks/bootstrap.sh`
+**Real gap → Ticket 17 (#54).** Claude's SessionStart hook runs `plugin/hooks/bootstrap.sh`
 (downloads the versioned binary with SHA-256 verification, starts the daemon). The Codex
 `SessionStart` hook only calls a bare `agentwatch` and relies on the Claude plugin having
 already bootstrapped — so a Codex-only install is silently non-functional. Because Codex
 invokes `agentwatch` on `$PATH` (not `${CLAUDE_PLUGIN_ROOT}/bin`), parity also requires
 symlinking/copying the binary onto `$PATH`. Both `agentwatch/README.md:80` and
 `plugin/codex/README.md` currently carry a dangling "tracked in #33" pointer for this;
-Ticket 17 redirects them to its own number. Distinct from #36 (hook-spec) and #27
+Ticket 17 (#54) redirects them to its own number. Distinct from #36 (hook-spec) and #27
 (Claude-only bootstrap).
 
 ### 6.2 Layer 2 — dev-sandbox
@@ -267,7 +267,7 @@ fresh-start and attach paths). Auth is staged by ro-mounting
 anywhere**.
 
 The Dockerfile needs no change — Codex mounts the same way. Adding Codex is
-launcher-only work → **Ticket 18**: add `--agent claude|codex` (default claude), mount
+launcher-only work → **Ticket 18 (#55)**: add `--agent claude|codex` (default claude), mount
 host `codex` via `readlink -f $(which codex)`, stage Codex auth (`~/.codex/auth.json`
 for ChatGPT sign-in and/or forward `OPENAI_API_KEY`) using the same ro-mount-then-copy
 pattern, and swap the Claude-only `--dangerously-skip-permissions` for Codex's
@@ -286,7 +286,7 @@ review conventions, the worktree + `gh` PR flow — is portable, and only as pro
 skill/subagent/AskUserQuestion pipeline is out of scope. Instead ship an `AGENTS.md`-based
 Codex recipe carrying the conventions, which the #40 dispatch launcher invokes for
 `--agent codex`. This aligns with decision 7 ("Codex templates defined in #33"). →
-**Ticket 19**.
+**Ticket 19 (#56)**.
 
 ### 6.4 Summary
 
@@ -295,6 +295,6 @@ Codex recipe carrying the conventions, which the #40 dispatch launcher invokes f
 | Distribution | Solved (Codex consumes Claude-format infra) | One marketplace; `/hooks` note → #32 |
 | agentwatch — cleanup | Covered by two daemon sweeps | Document; no ticket |
 | agentwatch — hooks | Gaps (`PostToolUseFailure`, `Notification`) | Routed to #36 |
-| agentwatch — bootstrap | Gap (Codex install non-functional standalone) | **Ticket 17** |
-| dev-sandbox | Gap (launcher is `claude`-only) | **Ticket 18** |
-| ccflow | Claude-Code-coupled; only logic is portable | **Ticket 19** (documented equivalent) |
+| agentwatch — bootstrap | Gap (Codex install non-functional standalone) | **Ticket 17 (#54)** |
+| dev-sandbox | Gap (launcher is `claude`-only) | **Ticket 18 (#55)** |
+| ccflow | Claude-Code-coupled; only logic is portable | **Ticket 19 (#56)** (documented equivalent) |
