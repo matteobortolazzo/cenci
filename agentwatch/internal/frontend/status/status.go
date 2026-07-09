@@ -1,4 +1,4 @@
-package waybar
+package status
 
 import (
 	"encoding/json"
@@ -84,12 +84,20 @@ func Format(snap *ipc.StateSnapshot, cfg Config) output {
 	}
 	text := strings.Join(parts, "  ")
 
-	// Build tooltip: one line per window.
+	// Build tooltip: one line per session.
 	var lines []string
 	for _, w := range snap.Windows {
 		name := w.WindowName
 		if !w.ManuallyNamed && w.TaskName != "" {
 			name = w.TaskName
+		}
+		if name == "" {
+			name = w.Agent
+		}
+		if w.Session == "" {
+			// Paneless session (no tmux window) — no target prefix.
+			lines = append(lines, fmt.Sprintf("%s (%s)", name, w.Status))
+			continue
 		}
 		lines = append(lines, fmt.Sprintf("%s:%s - %s (%s)", w.Session, w.WindowIndex, name, w.Status))
 	}
