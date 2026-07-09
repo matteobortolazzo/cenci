@@ -85,13 +85,13 @@ if [[ ! -x "${CLAUDE_BIN}" ]]; then
     exit 1
 fi
 
-# ── Resolve muxwatch (optional) ─────────────────────────────────
-MUXWATCH_BIN="$(readlink -f "$(which muxwatch)" 2>/dev/null || true)"
-MUXWATCH_EVENTS_SOCKET="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/muxwatch-events.sock"
-MUXWATCH_AVAILABLE=false
+# ── Resolve agentwatch (optional) ─────────────────────────────────
+AGENTWATCH_BIN="$(readlink -f "$(which agentwatch)" 2>/dev/null || true)"
+AGENTWATCH_EVENTS_SOCKET="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/agentwatch-events.sock"
+AGENTWATCH_AVAILABLE=false
 
-if [[ -x "${MUXWATCH_BIN}" && -S "${MUXWATCH_EVENTS_SOCKET}" ]]; then
-    MUXWATCH_AVAILABLE=true
+if [[ -x "${AGENTWATCH_BIN}" && -S "${AGENTWATCH_EVENTS_SOCKET}" ]]; then
+    AGENTWATCH_AVAILABLE=true
 fi
 
 # ── Build claude command args ────────────────────────────────────
@@ -152,11 +152,11 @@ for gitconfig in "${HOME}/.config/git/config" "${HOME}/.gitconfig"; do
     fi
 done
 
-# Muxwatch (optional)
-if "${MUXWATCH_AVAILABLE}"; then
+# Agentwatch (optional)
+if "${AGENTWATCH_AVAILABLE}"; then
     RUN_ARGS+=(
-        -v "${MUXWATCH_BIN}:/usr/local/bin/muxwatch:ro"
-        -v "${MUXWATCH_EVENTS_SOCKET}:/run/user/1000/muxwatch-events.sock"
+        -v "${AGENTWATCH_BIN}:/usr/local/bin/agentwatch:ro"
+        -v "${AGENTWATCH_EVENTS_SOCKET}:/run/user/1000/agentwatch-events.sock"
         -e "XDG_RUNTIME_DIR=/run/user/1000"
         -e "TMUX_PANE=${TMUX_PANE:-}"
     )

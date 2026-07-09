@@ -6,7 +6,7 @@ GitHub Issues for tracking. GitHub for code and PRs.
 ## Projects
 
 - `ccflow/` — Claude Code plugin: markdown skills, agents, shell hooks
-- `muxwatch/` — Go binary + Claude Code plugin: tmux session monitoring
+- `agentwatch/` — Go binary + Claude Code plugin: coding-agent session monitoring (tmux, waybar, noctalia, DMS)
 - `dev-sandbox/` — Docker/Podman container for isolated Claude Code sessions
 
 Each project has its own `.claude/CLAUDE.md` with project-specific context.
@@ -19,10 +19,10 @@ Each project has its own `.claude/CLAUDE.md` with project-specific context.
 
 ## Build & Test
 
-### muxwatch
-- Build: `cd muxwatch && make build`
-- Test: `cd muxwatch && make test` or `cd muxwatch && go test ./...`
-- Lint: `cd muxwatch && make lint`
+### agentwatch
+- Build: `cd agentwatch && make build`
+- Test: `cd agentwatch && make test` or `cd agentwatch && go test ./...`
+- Lint: `cd agentwatch && make lint`
 
 ### ccflow
 - No build step (markdown/shell plugin)
@@ -31,4 +31,4 @@ Each project has its own `.claude/CLAUDE.md` with project-specific context.
 
 Each plugin versions independently:
 - ccflow: auto-bumped on push to main (paths: `ccflow/**`), tags: `ccflow/v*`
-- muxwatch: auto-bumped on push to main (paths: `muxwatch/**`), tags: `muxwatch/v*`
+- agentwatch: auto-bumped on push to main (paths: `agentwatch/**`), tags: `agentwatch/v*`
