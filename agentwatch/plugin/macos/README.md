@@ -26,17 +26,57 @@ If none resolve, the plugin emits nothing (the menu bar item stays hidden).
 
 ## Install
 
-Symlink the script into the SwiftBar Plugin Folder (default
-`~/Library/Application Support/SwiftBar/Plugins/`) and refresh SwiftBar:
+First get the daemon + binary, then wire up SwiftBar.
+
+### 1. agentwatch daemon + binary
+
+If you installed the [Claude Code plugin](../../README.md#install-claude-code), the
+macOS binary and daemon auto-bootstrap on your first session — nothing else to do:
 
 ```sh
-ln -s "$PWD/plugin/macos/agentwatch.5s.sh" \
-  "$HOME/Library/Application Support/SwiftBar/Plugins/agentwatch.5s.sh"
-chmod +x plugin/macos/agentwatch.5s.sh
+claude plugin marketplace add matteobortolazzo/claude-tools
+claude plugin install agentwatch   # or: claude plugin update agentwatch
 ```
 
-Then in SwiftBar choose **Refresh All** (or restart it). The `.5s.` in the filename
-is the refresh interval — rename the segment (`.2s.`, `.10s.`) to change the cadence.
+Confirm it works (prints Waybar JSON when a session is live, nothing when idle):
+
+```sh
+agentwatch status
+```
+
+Codex-only or hacking on the source? Install the binary by hand and start the daemon
+per the [main README](../../README.md#advanced--development).
+
+### 2. SwiftBar
+
+```sh
+brew install swiftbar
+```
+
+Launch SwiftBar once and pick a Plugin Folder (default
+`~/Library/Application Support/SwiftBar/Plugins/`).
+
+### 3. Symlink the plugin
+
+Point SwiftBar at the script, then **Refresh All** (or restart SwiftBar).
+
+From a **marketplace install** (the `*` resolves the marketplace subdir):
+
+```sh
+ln -s "$HOME"/.claude/plugins/*/agentwatch/plugin/macos/agentwatch.5s.sh \
+  "$HOME/Library/Application Support/SwiftBar/Plugins/agentwatch.5s.sh"
+```
+
+From a **repo checkout** (run inside `agentwatch/`):
+
+```sh
+chmod +x plugin/macos/agentwatch.5s.sh
+ln -s "$PWD/plugin/macos/agentwatch.5s.sh" \
+  "$HOME/Library/Application Support/SwiftBar/Plugins/agentwatch.5s.sh"
+```
+
+The `.5s.` in the filename is the refresh interval — rename the segment
+(`.2s.`, `.10s.`) to change the cadence.
 
 ## Behavior
 
