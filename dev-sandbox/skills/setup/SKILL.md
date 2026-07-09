@@ -51,7 +51,18 @@ Skip this step when `--build-only` was passed.
      overwrite it — report it and ask the user (`AskUserQuestion`) whether to replace it.
    - If it is a symlink (even a stale one), `ln -sf` refreshes it; that is fine.
 
-3. Confirm: `ls -l "$HOME/.local/bin/claude-sand"` and `command -v claude-sand`.
+3. Create a sibling `codex-sand` symlink to the **same** launcher (same pattern, same
+   non-symlink-overwrite guard). The launcher detects its invoked name, so `codex-sand`
+   defaults to `--agent codex` with no extra flags:
+   ```bash
+   ln -sf "$(cd "${CLAUDE_PLUGIN_ROOT}" && pwd)/claude-sand" "$HOME/.local/bin/codex-sand"
+   ```
+   - If a `codex-sand` already exists at the target and is **not** a symlink, do not
+     overwrite it — report it and ask the user (`AskUserQuestion`) whether to replace it.
+   - If it is a symlink (even a stale one), `ln -sf` refreshes it; that is fine.
+
+4. Confirm: `ls -l "$HOME/.local/bin/claude-sand" "$HOME/.local/bin/codex-sand"` and
+   `command -v claude-sand codex-sand`.
 
 ### Step 2 — Build the image
 
@@ -71,6 +82,7 @@ the SDKs). Report the outcome. On failure, surface the runtime's error output an
 
 Summarize what was done and point the user at usage:
 - `claude-sand` — launch Claude Code in the sandbox (full permissions inside the container)
+- `codex-sand` (or `claude-sand --agent codex`) — launch Codex in the sandbox instead
 - `claude-sand --shell` — open a shell for manual setup / troubleshooting
 - `claude-sand --build` — rebuild the image after changing the Dockerfile
 

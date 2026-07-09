@@ -67,6 +67,13 @@ if [[ -f /tmp/host-gh-config/hosts.yml ]]; then
     chmod 600 /home/dev/.config/gh/hosts.yml
 fi
 
+# Codex OAuth credentials (ChatGPT sign-in)
+if [[ -f /tmp/host-codex-creds/auth.json ]]; then
+    mkdir -p /home/dev/.codex
+    cp /tmp/host-codex-creds/auth.json /home/dev/.codex/auth.json
+    chmod 600 /home/dev/.codex/auth.json
+fi
+
 # ── Docker socket group alignment (DooD) ────────────────────────────
 if [[ -S /var/run/docker.sock ]]; then
     SOCK_GID=$(stat -c '%g' /var/run/docker.sock)

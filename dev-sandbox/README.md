@@ -49,6 +49,11 @@ claude-sand
 claude-sand -p "fix the tests"
 claude-sand --model sonnet
 
+# Launch Codex instead of Claude Code
+claude-sand --agent codex
+codex-sand              # equivalent — the codex-sand symlink defaults to --agent codex
+codex-sand -p "fix the tests"
+
 # Open a bash shell for manual setup / troubleshooting
 claude-sand --shell
 
@@ -70,9 +75,38 @@ The container starts in the directory matching your host `$PWD` (mapped through 
 
 If a container with the same name is already running, the script attaches to it instead of creating a new one.
 
+### Choosing an agent
+
+`claude-sand` launches Claude Code by default. Pass `--agent codex` (or use the `codex-sand`
+symlink, which detects its invoked name) to launch Codex instead. Both agents run at full
+permission inside the container — Claude with `--dangerously-skip-permissions`, Codex with
+`--dangerously-bypass-approvals-and-sandbox`.
+
+Containers and home volumes are **namespaced by agent**, so the two never collide:
+`claude-sand` uses `claude-sand-<name>` / `claude-sand-home-<name>`; `codex-sand` (or
+`--agent codex`) uses `codex-sand-<name>` / `codex-sand-home-<name>`. The Dockerfile is
+unchanged — the agent binary is bind-mounted from the host (like Claude), so Codex needs no
+image rebuild.
+
 ## First-Run Setup
 
 If `~/.claude/.credentials.json` and `~/.config/gh/hosts.yml` exist on the host, they are automatically injected into the container on each start. **No manual auth needed.**
+
+### Codex auth
+
+When launching Codex (`--agent codex` / `codex-sand`), auth is staged from the host:
+
+- `~/.codex/auth.json` — the ChatGPT sign-in credentials created by `codex login` on the
+  host. Injected read-only and copied to `/home/dev/.codex/auth.json` (mode 600) on start.
+- `OPENAI_API_KEY` — forwarded into the container when set in your host environment.
+
+At least one of these must be present. If neither is, `claude-sand --agent codex` fails
+hard with a clear message and does **not** create a container:
+
+```
+Error: --agent codex requires Codex auth. Run 'codex login' on the host
+(creates ~/.codex/auth.json) or export OPENAI_API_KEY.
+```
 
 If host credentials are not available, open a shell for manual setup:
 
@@ -122,6 +156,8 @@ docker build --build-arg DOTNET_SDK_VERSION=10.0.200 \
 
 Claude Code runs with `--dangerously-skip-permissions` inside the container: no permission prompts, no tool allowlists. Isolation comes from the container itself, not from Claude Code's permission system. This is the supported use of the flag (it refuses to run as root; the container user is `dev`, UID 1000). Human-in-the-loop control moves up a layer — to workflow gates (plan approval, `AskUserQuestion`) rather than per-command approval.
 
+Codex (`--agent codex`) runs with the direct analog, `--dangerously-bypass-approvals-and-sandbox`: it skips all confirmation prompts and runs commands without Codex's own sandbox, since the flag is intended for externally-sandboxed environments. It is container-safe by the same reasoning as Claude's flag — the container is the security boundary, and we run as `dev`, UID 1000. Unlike Claude's bypass mode there is no persisted "accept" dialog to seed, so the entrypoint does no Codex settings-seeding.
+
 Bypass mode is **fully unattended**. The entrypoint seeds `/home/dev/.claude/settings.json` with `skipDangerousModePermissionPrompt: true` and `permissions.defaultMode: bypassPermissions` (and the image sets `IS_SANDBOX=1`), so even a brand-new `--name` instance on a fresh home volume reaches the prompt with no "Yes, I accept" bypass dialog, and headless `claude -p` runs report `bypassPermissions` instead of silently downgrading to `default`. The settings are deep-merged into any existing file, so unrelated keys survive.
 
 **Security invariant — container-only.** The `skipDangerousModePermissionPrompt` / `defaultMode: bypassPermissions` pair lives *only* in the container home volume (`/home/dev/.claude/settings.json`). It must **never** be added to the host `~/.claude/settings.json`, and `claude-sand` never mounts the host `~/.claude` config dir (staging `.credentials.json` read-only is the single exception). The container boundary is the only thing that makes bypass mode safe — if a dialog ever shows where it shouldn't, the fix is always container-side, never host-side.
@@ -137,6 +173,7 @@ Bypass mode is **fully unattended**. The entrypoint seeds `/home/dev/.claude/set
 | Path | Contents |
 |------|----------|
 | `/home/dev/.claude/` | Claude Code config, plugins, session data |
+| `/home/dev/.codex/` | Codex config, auth, session data |
 | `/home/dev/.npm/` | npm package cache |
 | `/home/dev/.nuget/` | NuGet package cache |
 | `/home/dev/.dotnet/` | .NET user-level config |
@@ -148,9 +185,10 @@ Bypass mode is **fully unattended**. The entrypoint seeds `/home/dev/.claude/set
 
 | Host path | Container path | Purpose |
 |-----------|---------------|---------|
-| Claude binary | `/usr/local/bin/claude` | Always matches host version |
+| Agent binary (`claude` or `codex`) | `/usr/local/bin/<agent>` | Always matches host version |
 | `~/.config/git/config` or `~/.gitconfig` | `/home/dev/.gitconfig` | Git identity |
 | `~/.claude/.credentials.json` | `/tmp/host-claude-creds/` (staging) | Claude OAuth tokens (copied to home on start) |
+| `~/.codex/auth.json` (Codex only) | `/tmp/host-codex-creds/` (staging) | Codex OAuth tokens (copied to home on start) |
 | `~/.config/gh/hosts.yml` | `/tmp/host-gh-config/` (staging) | GitHub CLI tokens (copied to home on start) |
 
 ### MCP servers
