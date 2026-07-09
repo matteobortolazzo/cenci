@@ -2,11 +2,13 @@
   "hooks": {
     "SessionStart": [
       {
+        "matcher": "startup|resume|clear",
         "hooks": [
           {
             "type": "command",
             "command": "agentwatch notify -agent codex 2>/dev/null || true",
-            "timeout": 5
+            "timeout": 5,
+            "async": true
           }
         ]
       }
@@ -17,7 +19,8 @@
           {
             "type": "command",
             "command": "agentwatch notify -agent codex 2>/dev/null || true",
-            "timeout": 5
+            "timeout": 5,
+            "async": true
           }
         ]
       }
@@ -28,7 +31,8 @@
           {
             "type": "command",
             "command": "agentwatch notify -agent codex 2>/dev/null || true",
-            "timeout": 5
+            "timeout": 5,
+            "async": true
           }
         ]
       }
@@ -39,7 +43,8 @@
           {
             "type": "command",
             "command": "agentwatch notify -agent codex 2>/dev/null || true",
-            "timeout": 5
+            "timeout": 5,
+            "async": true
           }
         ]
       }
@@ -50,7 +55,8 @@
           {
             "type": "command",
             "command": "agentwatch notify -agent codex 2>/dev/null || true",
-            "timeout": 5
+            "timeout": 5,
+            "async": true
           }
         ]
       }
@@ -61,7 +67,8 @@
           {
             "type": "command",
             "command": "agentwatch notify -agent codex 2>/dev/null || true",
-            "timeout": 5
+            "timeout": 5,
+            "async": true
           }
         ]
       }

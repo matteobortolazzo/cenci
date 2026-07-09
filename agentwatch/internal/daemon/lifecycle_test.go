@@ -116,7 +116,7 @@ func TestDaemon_CodexLifecycleWithoutSessionEndRestoresAfterExit(t *testing.T) {
 		t.Errorf("after SessionStart: expected native pane title 'claude-tools', got %q", name)
 	}
 
-	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0", TaskName: "inspect this repo"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
 	if name, _ := lastRename(mc.Renames, "main:0"); name != "claude-tools" {
 		t.Errorf("after UserPromptSubmit: expected native pane title, got %q", name)
 	}

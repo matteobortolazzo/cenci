@@ -105,9 +105,9 @@ func (f *Frontend) OnEvent(sess *frontend.SessionState, event ipc.HookEvent) fro
 	}
 	obs.AgentHint = ws.Agent
 
-	// Resolve task name from hook payloads or pane title (sanitize immediately
-	// to protect downstream consumers: IPC broadcast, status output, and rename).
-	taskName := f.taskNameForEvent(event, ws, paneInfo)
+	// Resolve task name from the pane title (sanitize immediately to protect
+	// downstream consumers: IPC broadcast, status output, and rename).
+	taskName := taskNameFromPane(paneInfo)
 	obs.TaskNameHint = taskName
 
 	// Detect mid-session user renames.
@@ -123,13 +123,10 @@ func (f *Frontend) OnEvent(sess *frontend.SessionState, event ipc.HookEvent) fro
 	return obs
 }
 
-func (f *Frontend) taskNameForEvent(event ipc.HookEvent, ws *windowState, paneInfo *tmuxc.PaneInfo) string {
-	if ws.Agent == "codex" {
-		return frontend.CompactTaskName(detect.TaskName(paneInfo.PaneTitle))
-	}
-	if event.TaskName != "" {
-		return frontend.CompactTaskName(event.TaskName)
-	}
+// taskNameFromPane derives the display task name from the pane title. The pane
+// title is the only task-name source — neither Claude nor Codex sends one in the
+// hook payload.
+func taskNameFromPane(paneInfo *tmuxc.PaneInfo) string {
 	return frontend.CompactTaskName(detect.TaskName(paneInfo.PaneTitle))
 }
 

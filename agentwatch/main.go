@@ -114,7 +114,6 @@ func runNotify(args []string) {
 	var hookInput struct {
 		HookEventName string `json:"hook_event_name"`
 		SessionID     string `json:"session_id"`
-		TaskName      string `json:"task_name"`
 		// Notification fields
 		Notification struct {
 			Type string `json:"type"`
@@ -137,7 +136,6 @@ func runNotify(args []string) {
 		SessionID:        hookInput.SessionID,
 		Agent:            strings.ToLower(strings.TrimSpace(*agent)),
 		TmuxPane:         tmuxPane,
-		TaskName:         hookInput.TaskName,
 		NotificationType: hookInput.Notification.Type,
 		ToolName:         hookInput.ToolName,
 		IsInterrupt:      hookInput.IsInterrupt,

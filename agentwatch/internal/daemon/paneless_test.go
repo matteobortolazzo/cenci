@@ -13,7 +13,7 @@ func TestDaemon_PanelessEventCreatesSessionWithoutTmux(t *testing.T) {
 	mc := &tmuxtest.MockClient{}
 	d := newTestDaemon(mc)
 
-	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TaskName: "fix the build"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1"})
 
 	if mc.ListCalls != 0 {
 		t.Errorf("expected zero ListPanes calls for paneless event, got %d", mc.ListCalls)
@@ -30,11 +30,12 @@ func TestDaemon_PanelessEventCreatesSessionWithoutTmux(t *testing.T) {
 	if w.Session != "" || w.WindowIndex != "" {
 		t.Errorf("expected empty session/window_index for paneless entry, got %q:%q", w.Session, w.WindowIndex)
 	}
-	if w.WindowName != "fix the build" {
-		t.Errorf("expected WindowName 'fix the build', got %q", w.WindowName)
+	// Paneless sessions have no pane title, so there is no task-name source.
+	if w.WindowName != "" {
+		t.Errorf("expected empty WindowName for paneless entry, got %q", w.WindowName)
 	}
-	if w.TaskName != "fix the build" {
-		t.Errorf("expected TaskName 'fix the build', got %q", w.TaskName)
+	if w.TaskName != "" {
+		t.Errorf("expected empty TaskName for paneless entry, got %q", w.TaskName)
 	}
 	if w.Status != "running" {
 		t.Errorf("expected status 'running', got %q", w.Status)
@@ -48,7 +49,7 @@ func TestDaemon_PanelessSessionEndRemovesSession(t *testing.T) {
 	mc := &tmuxtest.MockClient{}
 	d := newTestDaemon(mc)
 
-	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TaskName: "fix the build"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1"})
 	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sess1"})
 
 	snap := d.buildSnapshot()
@@ -71,22 +72,6 @@ func TestDaemon_EventWithoutSessionIDOrPaneDropped(t *testing.T) {
 	}
 	if len(d.buildSnapshot().Windows) != 0 {
 		t.Error("expected empty snapshot")
-	}
-}
-
-func TestDaemon_PanelessKeepsLastTaskName(t *testing.T) {
-	mc := &tmuxtest.MockClient{}
-	d := newTestDaemon(mc)
-
-	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TaskName: "fix the build"})
-	d.handleEvent(ipc.HookEvent{EventType: "PostToolUse", SessionID: "sess1"})
-
-	snap := d.buildSnapshot()
-	if len(snap.Windows) != 1 {
-		t.Fatalf("expected 1 snapshot entry, got %d", len(snap.Windows))
-	}
-	if snap.Windows[0].TaskName != "fix the build" {
-		t.Errorf("expected task name kept across events without one, got %q", snap.Windows[0].TaskName)
 	}
 }
 
@@ -161,7 +146,7 @@ func TestDaemon_MixedPanedAndPanelessSnapshot(t *testing.T) {
 	d := newTestDaemon(mc)
 
 	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
-	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess2", TaskName: "sandbox task"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess2"})
 
 	snap := d.buildSnapshot()
 	if len(snap.Windows) != 2 {
@@ -171,8 +156,9 @@ func TestDaemon_MixedPanedAndPanelessSnapshot(t *testing.T) {
 	if snap.Windows[0].Session != "main" {
 		t.Errorf("expected tmux entry first, got session %q", snap.Windows[0].Session)
 	}
-	if snap.Windows[1].Session != "" || snap.Windows[1].WindowName != "sandbox task" {
-		t.Errorf("expected paneless entry second with name 'sandbox task', got %+v", snap.Windows[1])
+	// Paneless entry has no pane title, so no task-name/window-name source.
+	if snap.Windows[1].Session != "" || snap.Windows[1].WindowName != "" {
+		t.Errorf("expected paneless entry second with empty name, got %+v", snap.Windows[1])
 	}
 	if snap.Summary.Total != 2 || snap.Summary.Running != 2 {
 		t.Errorf("expected summary total=2 running=2, got %+v", snap.Summary)
@@ -185,7 +171,7 @@ func TestDaemon_TTLSweepExpiresIdlePaneless(t *testing.T) {
 	base := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
 	d.now = func() time.Time { return base }
 
-	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TaskName: "crashed task"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1"})
 
 	// Advance past the TTL (default 2h).
 	d.now = func() time.Time { return base.Add(2*time.Hour + time.Minute) }
@@ -207,7 +193,7 @@ func TestDaemon_TTLRefreshedByEvents(t *testing.T) {
 	base := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
 	d.now = func() time.Time { return base }
 
-	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TaskName: "long task"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1"})
 
 	// Event at +1h refreshes the deadline.
 	d.now = func() time.Time { return base.Add(time.Hour) }

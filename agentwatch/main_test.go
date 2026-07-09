@@ -2,6 +2,7 @@ package main_test
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +30,57 @@ func TestMain(m *testing.M) {
 	}
 
 	os.Exit(m.Run())
+}
+
+// TestCodexHooksJSONHasNoUnknownKeys guards against Claude-only keys leaking
+// into the Codex hooks file. Codex parses hooks.json with deny_unknown_fields,
+// so any extra key would break loading for every Codex user.
+func TestCodexHooksJSONHasNoUnknownKeys(t *testing.T) {
+	// main_test runs with cwd = package dir (repo root), so this resolves.
+	data, err := os.ReadFile(filepath.Join("plugin", "codex", "hooks.json"))
+	if err != nil {
+		t.Fatalf("read codex hooks.json: %v", err)
+	}
+
+	var root struct {
+		Hooks map[string][]map[string]json.RawMessage `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatalf("parse codex hooks.json: %v", err)
+	}
+	if len(root.Hooks) == 0 {
+		t.Fatal("expected at least one event group in codex hooks.json")
+	}
+
+	allowedGroupKeys := map[string]bool{"matcher": true, "hooks": true}
+	allowedHookKeys := map[string]bool{"type": true, "command": true, "timeout": true, "async": true}
+
+	for event, groups := range root.Hooks {
+		for i, group := range groups {
+			for key := range group {
+				if !allowedGroupKeys[key] {
+					t.Errorf("%s[%d]: unexpected group key %q (allowed: matcher, hooks)", event, i, key)
+				}
+			}
+			raw, ok := group["hooks"]
+			if !ok {
+				t.Errorf("%s[%d]: missing required \"hooks\" key", event, i)
+				continue
+			}
+			var hooks []map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &hooks); err != nil {
+				t.Errorf("%s[%d]: parse hooks array: %v", event, i, err)
+				continue
+			}
+			for j, hook := range hooks {
+				for key := range hook {
+					if !allowedHookKeys[key] {
+						t.Errorf("%s[%d].hooks[%d]: unexpected hook key %q (allowed: type, command, timeout, async)", event, i, j, key)
+					}
+				}
+			}
+		}
+	}
 }
 
 func TestUnknownSubcommand_ExitCode2(t *testing.T) {

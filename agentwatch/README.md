@@ -70,12 +70,12 @@ If `~/.codex/hooks.json` already exists, merge the `hooks` entries from `plugin/
 
 Codex will ask you to review/trust new hooks. Use `/hooks` in Codex if the hooks are listed as pending review.
 
-This repository also includes a Codex plugin manifest at `plugin/codex/.codex-plugin/plugin.json`. Codex plugin-bundled hooks currently require this feature flag in `~/.codex/config.toml`:
+**Trust model:** Codex hash-pins `hooks.json`, so every plugin update that changes
+the file changes its hash and requires re-trusting the hooks via `/hooks` in Codex.
 
-```toml
-[features]
-plugin_hooks = true
-```
+This repository also includes a Codex plugin manifest at `plugin/codex/.codex-plugin/plugin.json`.
+Plugins and their bundled hooks are stable and enabled by default in current Codex
+releases — no feature flag is required.
 
 Full self-contained Codex bootstrap is tracked in
 [#33](https://github.com/matteobortolazzo/claude-tools/issues/33).
