@@ -99,8 +99,8 @@ func TestSecureSocketDir_RejectsInsecureXDG(t *testing.T) {
 }
 
 func TestSafeListen_RejectsSymlink(t *testing.T) {
-	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "test.sock")
+	dir := tempSocketDir(t)
+	socketPath := filepath.Join(dir, "s.sock")
 	target := filepath.Join(dir, "evil-target")
 
 	// Create a symlink at the socket path.
@@ -119,8 +119,8 @@ func TestSafeListen_RejectsSymlink(t *testing.T) {
 }
 
 func TestSafeListen_WorksWithCleanPath(t *testing.T) {
-	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "test.sock")
+	dir := tempSocketDir(t)
+	socketPath := filepath.Join(dir, "s.sock")
 
 	ln, err := safeListen(socketPath)
 	if err != nil {
@@ -137,8 +137,8 @@ func TestSafeListen_WorksWithCleanPath(t *testing.T) {
 }
 
 func TestSafeListen_RemovesStaleSocket(t *testing.T) {
-	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "test.sock")
+	dir := tempSocketDir(t)
+	socketPath := filepath.Join(dir, "s.sock")
 
 	// Simulate a stale non-symlink file left behind (e.g., from a crash).
 	if err := os.WriteFile(socketPath, nil, 0600); err != nil {
