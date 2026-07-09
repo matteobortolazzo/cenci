@@ -16,7 +16,9 @@ import (
 
 	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/config"
 	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/daemon"
+	tmuxfe "github.com/matteobortolazzo/claude-tools/agentwatch/internal/frontend/tmux"
 	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/ipc"
+	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/tmux"
 	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/waybar"
 )
 
@@ -87,7 +89,10 @@ func runDaemon(args []string) {
 		cancel()
 	}()
 
-	if err := daemon.Run(ctx, cfg); err != nil {
+	// tmux is the one interactive frontend; it is constructed here and
+	// injected so the daemon core stays tmux-free.
+	fe := tmuxfe.New(cfg, &tmux.ExecClient{})
+	if err := daemon.Run(ctx, cfg, fe); err != nil {
 		fmt.Fprintf(os.Stderr, "agentwatch: %v\n", err)
 		os.Exit(1)
 	}

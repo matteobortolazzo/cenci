@@ -55,8 +55,9 @@ type Frontend interface {
 
 // Observations carries facts a frontend learned while handling an event.
 type Observations struct {
-	TaskNameHint string // task name resolved from the pane (title-derived; codex path)
-	AgentHint    string // agent inferred from the pane's running command
+	TaskNameHint string   // task name resolved from the pane (title-derived; codex path)
+	AgentHint    string   // agent inferred from the pane's running command
+	EvictedKeys  []string // core sessions whose presentation state was discarded (dead panes)
 }
 
 // SweepAction asks the core to update or remove a session after a sweep.

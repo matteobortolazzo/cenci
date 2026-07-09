@@ -6,19 +6,20 @@ import (
 
 	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/ipc"
 	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/tmux"
+	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/tmux/tmuxtest"
 )
 
 func TestDaemon_PanelessEventCreatesSessionWithoutTmux(t *testing.T) {
-	mc := &mockClient{}
+	mc := &tmuxtest.MockClient{}
 	d := newTestDaemon(mc)
 
 	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TaskName: "fix the build"})
 
-	if mc.listCalls != 0 {
-		t.Errorf("expected zero ListPanes calls for paneless event, got %d", mc.listCalls)
+	if mc.ListCalls != 0 {
+		t.Errorf("expected zero ListPanes calls for paneless event, got %d", mc.ListCalls)
 	}
-	if len(mc.renames) != 0 || len(mc.windowOpts) != 0 {
-		t.Errorf("expected zero tmux calls for paneless event, got %d renames, %d opts", len(mc.renames), len(mc.windowOpts))
+	if len(mc.Renames) != 0 || len(mc.WindowOpts) != 0 {
+		t.Errorf("expected zero tmux calls for paneless event, got %d renames, %d opts", len(mc.Renames), len(mc.WindowOpts))
 	}
 
 	snap := d.buildSnapshot()
@@ -44,7 +45,7 @@ func TestDaemon_PanelessEventCreatesSessionWithoutTmux(t *testing.T) {
 }
 
 func TestDaemon_PanelessSessionEndRemovesSession(t *testing.T) {
-	mc := &mockClient{}
+	mc := &tmuxtest.MockClient{}
 	d := newTestDaemon(mc)
 
 	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TaskName: "fix the build"})
@@ -54,13 +55,13 @@ func TestDaemon_PanelessSessionEndRemovesSession(t *testing.T) {
 	if len(snap.Windows) != 0 {
 		t.Errorf("expected no snapshot entries after SessionEnd, got %d", len(snap.Windows))
 	}
-	if len(mc.renames) != 0 || len(mc.windowOpts) != 0 {
-		t.Errorf("expected zero tmux calls, got %d renames, %d opts", len(mc.renames), len(mc.windowOpts))
+	if len(mc.Renames) != 0 || len(mc.WindowOpts) != 0 {
+		t.Errorf("expected zero tmux calls, got %d renames, %d opts", len(mc.Renames), len(mc.WindowOpts))
 	}
 }
 
 func TestDaemon_EventWithoutSessionIDOrPaneDropped(t *testing.T) {
-	mc := &mockClient{}
+	mc := &tmuxtest.MockClient{}
 	d := newTestDaemon(mc)
 
 	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit"})
@@ -74,7 +75,7 @@ func TestDaemon_EventWithoutSessionIDOrPaneDropped(t *testing.T) {
 }
 
 func TestDaemon_PanelessKeepsLastTaskName(t *testing.T) {
-	mc := &mockClient{}
+	mc := &tmuxtest.MockClient{}
 	d := newTestDaemon(mc)
 
 	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TaskName: "fix the build"})
@@ -90,8 +91,8 @@ func TestDaemon_PanelessKeepsLastTaskName(t *testing.T) {
 }
 
 func TestDaemon_EmptyPaneEventDoesNotDowngradeKnownPane(t *testing.T) {
-	mc := &mockClient{
-		panes: []tmux.PaneInfo{
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
 			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
 				PaneCurrentCmd: "claude", PaneTitle: "⠋ writing tests", PaneID: "%0"},
 		},
@@ -120,8 +121,8 @@ func TestDaemon_EmptyPaneEventDoesNotDowngradeKnownPane(t *testing.T) {
 }
 
 func TestDaemon_PanelessUpgradesToPaneOnLaterEvent(t *testing.T) {
-	mc := &mockClient{
-		panes: []tmux.PaneInfo{
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
 			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
 				PaneCurrentCmd: "claude", PaneTitle: "⠋ writing tests", PaneID: "%0"},
 		},
@@ -137,7 +138,7 @@ func TestDaemon_PanelessUpgradesToPaneOnLaterEvent(t *testing.T) {
 	}
 
 	// tmux tracking should have started on the pane-carrying event.
-	if name, ok := lastRename(mc.renames, "main:0"); !ok || name != "writing tests" {
+	if name, ok := lastRename(mc.Renames, "main:0"); !ok || name != "writing tests" {
 		t.Errorf("expected window rename to 'writing tests' after upgrade, got %q (found=%v)", name, ok)
 	}
 
@@ -151,8 +152,8 @@ func TestDaemon_PanelessUpgradesToPaneOnLaterEvent(t *testing.T) {
 }
 
 func TestDaemon_MixedPanedAndPanelessSnapshot(t *testing.T) {
-	mc := &mockClient{
-		panes: []tmux.PaneInfo{
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
 			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
 				PaneCurrentCmd: "claude", PaneTitle: "⠋ writing tests", PaneID: "%0"},
 		},
@@ -179,7 +180,7 @@ func TestDaemon_MixedPanedAndPanelessSnapshot(t *testing.T) {
 }
 
 func TestDaemon_TTLSweepExpiresIdlePaneless(t *testing.T) {
-	mc := &mockClient{}
+	mc := &tmuxtest.MockClient{}
 	d := newTestDaemon(mc)
 	base := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
 	d.now = func() time.Time { return base }
@@ -201,7 +202,7 @@ func TestDaemon_TTLSweepExpiresIdlePaneless(t *testing.T) {
 }
 
 func TestDaemon_TTLRefreshedByEvents(t *testing.T) {
-	mc := &mockClient{}
+	mc := &tmuxtest.MockClient{}
 	d := newTestDaemon(mc)
 	base := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
 	d.now = func() time.Time { return base }
@@ -223,8 +224,8 @@ func TestDaemon_TTLRefreshedByEvents(t *testing.T) {
 }
 
 func TestDaemon_TTLSweepIgnoresPaneBackedSessions(t *testing.T) {
-	mc := &mockClient{
-		panes: []tmux.PaneInfo{
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
 			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
 				PaneCurrentCmd: "claude", PaneTitle: "⠋ writing tests", PaneID: "%0"},
 		},
