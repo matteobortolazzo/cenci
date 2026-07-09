@@ -11,6 +11,7 @@ Ticket refinement and automated implementation pipeline for GitHub.
 | `/ccflow:design <ticket-id \| description>` | Interactive design reasoning and `.pen` file creation using Pencil |
 | `/ccflow:implement <ticket-id>` | Full pipeline: plan, test, implement, refactor, security review, code review, lessons, PR |
 | `/ccflow:address-review <pr-number>` | Address PR review comments — fetch, evaluate, fix, reply, push, re-request review |
+| `/ccflow:babysit <pr-number>` | Loop-driven PR follow-through — periodically checks CI and new review comments and drives them to resolution until the PR merges or closes |
 | `/ccflow:sync` | Pull latest main, rebase active worktrees, prune stale remotes, clean up merged branches |
 
 ## Prerequisites
@@ -192,6 +193,35 @@ When Claude Code is **≥ 2.1.139**, the pipeline closes that gap with the nativ
 - **Graceful on older runtimes.** Below 2.1.139 (or if `/goal` is unavailable) the pipeline behaves exactly as before — it just prints a one-line notice and runs without the completion guarantee.
 - **Opt out** with `"ccflow": { "goalAutopilot": false }` in `.claude/config.json`.
 
+### Babysitting a PR
+
+Once a PR is open, `/ccflow:babysit <pr-number>` keeps it moving while you're away. It does
+one **tick** immediately, then arms a self-paced Claude Code [`/loop`](https://code.claude.com/docs/en/loop)
+that repeats the tick (~15 minutes by default; pass a second argument to change it, e.g.
+`/ccflow:babysit 42 10m`). Each tick:
+
+1. **Fetches PR state** — if the PR has **merged or closed**, it reports a final summary,
+   stops the loop, and cleans up.
+2. **Auto-fixes red CI** — diagnoses the failing checks, pushes a fix (never force-pushes),
+   and retries up to a per-commit cap. When the cap is hit or the cause is ambiguous
+   (flaky/infra/external), it escalates to you via a question instead of looping blindly.
+3. **Drives new review comments** through [`/ccflow:address-review`](#what-it-does), which
+   keeps its own approval gate — you still confirm the plan before any fix is pushed. A
+   watermark tracks already-handled comments so the same feedback is never re-addressed.
+
+A quiet tick (green CI, no new comments) just reports one line and schedules the next check.
+
+- **Session-scoped, 7-day expiry.** The `/loop` lives as long as the Claude Code session and
+  at most 7 days. If the session ends, re-run `/ccflow:babysit <pr>` to resume.
+- **Self-paced pacing needs native support.** On Bedrock / Vertex / Foundry, self-paced
+  `/loop` falls back to a fixed ~10-minute schedule, so the custom interval is best-effort
+  there.
+- **Human gates preserved.** The `address-review` approval, the CI-escalation question, and
+  the never-force-push rule all hold — babysit automates the checking and the safe fixes,
+  not the decisions.
+
+Board-state transitions on merge (`In Review` → `Implemented`) are handled separately.
+
 ### UI tickets
 
 UI implementations are the most error-prone, so the pipeline adds two guards for tickets classified as frontend:
@@ -323,6 +353,7 @@ ccflow/
 │   │   ├── SKILL.md
 │   │   └── phases/
 │   ├── address-review/SKILL.md
+│   ├── babysit/SKILL.md
 │   ├── worktrees/SKILL.md
 │   ├── testing/SKILL.md
 │   ├── stack-dotnet/SKILL.md
