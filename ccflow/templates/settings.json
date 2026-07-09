@@ -23,7 +23,8 @@
       "Bash(go:*)",
       "Bash(git:*)",
       "Bash(gh:*)",
-      "SlashCommand(/goal:*)"
+      "SlashCommand(/goal:*)",
+      "SlashCommand(/loop:*)"
     ],
     "deny": [
       "Bash(git push --force:*)",

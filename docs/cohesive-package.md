@@ -197,7 +197,7 @@ Resolved 2026-07-09 (orchestration layer):
 | 5 | agentwatch: tmux as one frontend | [#28](https://github.com/matteobortolazzo/claude-tools/issues/28) | `internal/frontend/tmux`, drop `$TMUX_PANE` gate in notify |
 | 6 | ccflow: container profile in configure | [#29](https://github.com/matteobortolazzo/claude-tools/issues/29) | sandbox detection, profile generation, docs |
 | 7 | ccflow: goal-driven autopilot | [#30](https://github.com/matteobortolazzo/claude-tools/issues/30) | set/clear goal around phases 2–9 |
-| 8 | ccflow: babysit skill | [#31](https://github.com/matteobortolazzo/claude-tools/issues/31) | `/loop`-based PR babysitting via address-review |
+| 8 | ✅ ccflow: babysit skill | [#31](https://github.com/matteobortolazzo/claude-tools/issues/31) | `/loop`-based PR babysitting via address-review |
 | 9 | docs: one-package README | [#32](https://github.com/matteobortolazzo/claude-tools/issues/32) | root README rewrite around the layers + single install path |
 | 10 | codex: first-class support audit | [#33](https://github.com/matteobortolazzo/claude-tools/issues/33) | define proper Codex support per layer → follow-up tickets; includes Codex launcher templates for ticket 12 |
 | 11 | agentwatch: public status client package | [#39](https://github.com/matteobortolazzo/claude-tools/issues/39) | export read-side snapshot types + subscribe client (`pkg/watch`); additive-only JSON contract |
