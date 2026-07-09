@@ -1,7 +1,8 @@
 # Proposal: one cohesive package
 
 Status: accepted · 2026-07-08 (decisions in §4) · updated 2026-07-09: orchestration
-layer added (§2.4, decisions 5–8, tickets 11–16)
+layer added (§2.4, decisions 5–8, tickets 11–16); Codex first-class support audit
+added (§6, tickets 17–19)
 
 The repo today ships three good tools with three unrelated install stories and no shared
 security model. This proposal turns them into one package with a single principle:
@@ -205,3 +206,95 @@ Resolved 2026-07-09 (orchestration layer):
 | 14 | docs: board-orchestration recipe | [#42](https://github.com/matteobortolazzo/claude-tools/issues/42) | `docs/orchestration.md`: state machine, example board config, join-key convention, multi-agent notes |
 | 15 | lazyboards: agent status on cards | [lazyboards#255](https://github.com/matteobortolazzo/lazyboards/issues/255) | subscribe via ticket 11's client, badge cards, NeedInput loudest, status-bar summary |
 | 16 | lazyboards: jump to card's session | [lazyboards#256](https://github.com/matteobortolazzo/lazyboards/issues/256) | keybinding to focus the card's tmux window |
+| 17 | agentwatch: self-contained Codex bootstrap parity | TBD | Codex SessionStart hook downloads the version-matched binary with SHA-256 verification + autostarts the daemon (like #27); symlinks the binary onto `$PATH`; redirects the "#33" pointers in both READMEs. From §6 audit |
+| 18 | sandbox: launch Codex in the container | TBD | `claude-sand --agent claude\|codex`: mount host `codex`, stage `~/.codex/auth.json`/`OPENAI_API_KEY`, swap in Codex's full-permission flag; Dockerfile unchanged. Distinct from #40's dispatch launcher. From §6 audit |
+| 19 | ccflow: documented Codex workflow equivalent | TBD | `AGENTS.md` template carrying TDD/review/worktree/PR conventions as prose + the Codex command template #40 uses for `--agent codex`; NOT a port of the skill/subagent pipeline. Feeds decision 7. From §6 audit |
+
+## 6. Codex first-class support (audit)
+
+Decision 4 made Codex a first-class target; #33 scoped what that means, layer by
+layer. This section is the audit's output. It is deliberately **docs-only** — its
+deliverable is this writeup plus the three drafted follow-up tickets (17–19 above).
+
+**Distribution is already solved and needs no port.** Verified against `openai/codex`
+`rust-v0.143.0`: Codex deliberately consumes Claude-format plugin infrastructure. It
+reads `.claude-plugin/marketplace.json`, accepts `.claude-plugin/plugin.json` as a
+manifest fallback, loads `hooks/hooks.json`, and sets `CLAUDE_PLUGIN_ROOT`. So "proper
+support" for distribution reduces to **one marketplace, not two**: keep plugin layouts
+Codex-clean (its `hooks.json` parser is `deny_unknown_fields` — no stray keys), and
+document the `/hooks` trust re-approval step. That `/hooks` note folds into the
+one-package README (#32); hook-spec correctness is tracked in #36. No new ticket.
+
+### 6.1 Layer 1 — agentwatch (closest today)
+
+A Codex plugin already exists at `agentwatch/plugin/codex/` (`hooks.json`,
+`.codex-plugin/plugin.json`, `README.md`). It wires 6 events — SessionStart,
+UserPromptSubmit, PermissionRequest, PreToolUse, PostToolUse, Stop — all firing
+`agentwatch notify -agent codex`.
+
+**Already covered (no ticket):**
+
+- **Session cleanup.** Codex has no `SessionEnd` upstream, but the daemon's two sweeps
+  cover it. The tmux pane-based sweep (`internal/frontend/tmux/frontend.go` Phase 3,
+  `agentCommandMatches`) restores the window when Codex exits to the shell; the paneless
+  TTL sweep (`daemon.go` `ttlSweep`, default 2h) expires paneless sessions. Covered by
+  `TestDaemon_CodexLifecycleWithoutSessionEndRestoresAfterExit`. The trade-off is ~30s
+  latency vs instant — expected behavior, not a gap.
+
+**Routed to #36 (not re-ticketed):** hook-coverage gaps — missing `PostToolUseFailure`
+(interrupt/ESC detection, without which an interrupted session stays stuck at Running)
+and confirming `Notification` vs `PermissionRequest` equivalence. These are hook-spec
+correctness, which #36 already owns.
+
+**Real gap → Ticket 17.** Claude's SessionStart hook runs `plugin/hooks/bootstrap.sh`
+(downloads the versioned binary with SHA-256 verification, starts the daemon). The Codex
+`SessionStart` hook only calls a bare `agentwatch` and relies on the Claude plugin having
+already bootstrapped — so a Codex-only install is silently non-functional. Because Codex
+invokes `agentwatch` on `$PATH` (not `${CLAUDE_PLUGIN_ROOT}/bin`), parity also requires
+symlinking/copying the binary onto `$PATH`. Both `agentwatch/README.md:80` and
+`plugin/codex/README.md` currently carry a dangling "tracked in #33" pointer for this;
+Ticket 17 redirects them to its own number. Distinct from #36 (hook-spec) and #27
+(Claude-only bootstrap).
+
+### 6.2 Layer 2 — dev-sandbox
+
+The `claude-sand` launcher is hardcoded to `claude` at every invocation
+(`CLAUDE_CMD_ARGS=(--dangerously-skip-permissions)`, literal `claude` in both the
+fresh-start and attach paths). Auth is staged by ro-mounting
+`~/.claude/.credentials.json` + `gh` `hosts.yml` and copying them into place in
+`entrypoint.sh`; the `claude` binary is bind-mounted from the host
+(`readlink -f $(which claude)`), not baked into the image. There is **no `codex`
+anywhere**.
+
+The Dockerfile needs no change — Codex mounts the same way. Adding Codex is
+launcher-only work → **Ticket 18**: add `--agent claude|codex` (default claude), mount
+host `codex` via `readlink -f $(which codex)`, stage Codex auth (`~/.codex/auth.json`
+for ChatGPT sign-in and/or forward `OPENAI_API_KEY`) using the same ro-mount-then-copy
+pattern, and swap the Claude-only `--dangerously-skip-permissions` for Codex's
+full-permission flag. This is the *interactive* launcher, distinct from #40's
+`agentwatch run --agent` dispatch launcher.
+
+### 6.3 Layer 3 — ccflow (workflow)
+
+ccflow has zero Codex mentions and is architecturally Claude-Code-only at every layer:
+the plugin/skill system, the `Task` tool for subagents, `AskUserQuestion` gates, the
+hook lifecycle (`PreToolUse`/`PreCompact`/`SessionStart`/`Stop`), `CLAUDE_PLUGIN_ROOT`,
+and `.claude/settings.json`. Only the workflow *logic* — TDD red/green/refactor, the
+review conventions, the worktree + `gh` PR flow — is portable, and only as prose.
+
+**Decision (owner): a documented equivalent, not a port.** Porting the
+skill/subagent/AskUserQuestion pipeline is out of scope. Instead ship an `AGENTS.md`-based
+Codex recipe carrying the conventions, which the #40 dispatch launcher invokes for
+`--agent codex`. This aligns with decision 7 ("Codex templates defined in #33"). →
+**Ticket 19**.
+
+### 6.4 Summary
+
+| Layer | State | Outcome |
+|-------|-------|---------|
+| Distribution | Solved (Codex consumes Claude-format infra) | One marketplace; `/hooks` note → #32 |
+| agentwatch — cleanup | Covered by two daemon sweeps | Document; no ticket |
+| agentwatch — hooks | Gaps (`PostToolUseFailure`, `Notification`) | Routed to #36 |
+| agentwatch — bootstrap | Gap (Codex install non-functional standalone) | **Ticket 17** |
+| dev-sandbox | Gap (launcher is `claude`-only) | **Ticket 18** |
+| ccflow | Claude-Code-coupled; only logic is portable | **Ticket 19** (documented equivalent) |
