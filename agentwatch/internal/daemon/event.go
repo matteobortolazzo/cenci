@@ -69,10 +69,6 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 	}
 	if obs.TaskNameHint != "" {
 		sess.TaskName = obs.TaskNameHint
-	} else if tn := frontend.CompactTaskName(event.TaskName); tn != "" {
-		// No pane-derived name — the hook payload is the only task-name
-		// source. Keep the last non-empty name across events without one.
-		sess.TaskName = tn
 	}
 
 	d.broadcast()
@@ -86,9 +82,13 @@ func (d *Daemon) mapEventToStatus(event ipc.HookEvent) detect.Status {
 	case "UserPromptSubmit":
 		return detect.StatusRunning
 	case "Notification":
-		if event.NotificationType == "permission_prompt" {
+		switch event.NotificationType {
+		case "permission_prompt", "agent_needs_input", "elicitation_dialog":
 			return detect.StatusNeedInput
+		case "agent_completed":
+			return detect.StatusDone
 		}
+		// Unmapped notification subtypes are dropped.
 		return detect.StatusUnknown
 	case "PreToolUse":
 		// Tools that pause for user input, same as permission prompts.
@@ -100,9 +100,15 @@ func (d *Daemon) mapEventToStatus(event ipc.HookEvent) detect.Status {
 		return detect.StatusRunning
 	case "PermissionRequest":
 		return detect.StatusNeedInput
+	case "PermissionDenied":
+		// Tool call denied by the auto-mode classifier; the agent proceeds.
+		return detect.StatusRunning
 	case "PostToolUse":
 		return detect.StatusRunning
 	case "PostToolUseFailure":
+		// is_interrupt (user pressed ESC) is undocumented in the Claude hook
+		// spec — it works today but is fragile. The pane-title sweep in
+		// internal/frontend/tmux/frontend.go (Phase 3) remains the backstop.
 		if event.IsInterrupt {
 			return detect.StatusStopped
 		}
@@ -110,6 +116,10 @@ func (d *Daemon) mapEventToStatus(event ipc.HookEvent) detect.Status {
 		return detect.StatusRunning
 	case "Stop":
 		return detect.StatusDone
+	case "StopFailure":
+		// Turn died on an API error (rate_limit, overloaded, billing). Reuse
+		// the Stopped state — there is no separate Attention status.
+		return detect.StatusStopped
 	default:
 		return detect.StatusUnknown
 	}

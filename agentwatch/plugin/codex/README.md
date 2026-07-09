@@ -43,11 +43,13 @@ Codex will ask you to review/trust new hooks. Use `/hooks` in Codex if the hooks
 
 ## Plugin install
 
-This directory also includes a Codex plugin manifest. Plugin-bundled hooks currently require:
+This directory also includes a Codex plugin manifest. Plugins and their bundled
+hooks are stable and enabled by default in current Codex releases — no feature
+flag is required.
 
-```toml
-[features]
-plugin_hooks = true
-```
+## Trust model
 
-in your Codex `config.toml`.
+Codex hash-pins `hooks.json`: it records a hash of the file it trusted. Every
+plugin update that changes `hooks.json` changes that hash, so Codex marks the
+hooks as pending review and you must re-trust them via `/hooks` in Codex before
+they run again.

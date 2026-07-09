@@ -94,6 +94,105 @@ func TestDaemon_NotificationPermissionSetsNeedInput(t *testing.T) {
 	}
 }
 
+func TestDaemon_NotificationAgentNeedsInputSetsNeedInput(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "✳ writing files", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{
+		EventType:        "Notification",
+		SessionID:        "sess1",
+		TmuxPane:         "%0",
+		NotificationType: "agent_needs_input",
+	})
+
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "window-status-style"); !ok || v != "fg=red,dim" {
+		t.Errorf("expected window-status-style=fg=red,dim, got %q (found=%v)", v, ok)
+	}
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); !ok || v != "!" {
+		t.Errorf("expected @agentwatch-symbol=!, got %q (found=%v)", v, ok)
+	}
+}
+
+func TestDaemon_NotificationElicitationDialogSetsNeedInput(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "✳ writing files", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{
+		EventType:        "Notification",
+		SessionID:        "sess1",
+		TmuxPane:         "%0",
+		NotificationType: "elicitation_dialog",
+	})
+
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "window-status-style"); !ok || v != "fg=red,dim" {
+		t.Errorf("expected window-status-style=fg=red,dim, got %q (found=%v)", v, ok)
+	}
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); !ok || v != "!" {
+		t.Errorf("expected @agentwatch-symbol=!, got %q (found=%v)", v, ok)
+	}
+}
+
+func TestDaemon_NotificationAgentCompletedSetsDone(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "✳ writing tests", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{
+		EventType:        "Notification",
+		SessionID:        "sess1",
+		TmuxPane:         "%0",
+		NotificationType: "agent_completed",
+	})
+
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "window-status-style"); !ok || v != "fg=green,dim" {
+		t.Errorf("expected window-status-style=fg=green,dim, got %q (found=%v)", v, ok)
+	}
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); !ok || v != "✓" {
+		t.Errorf("expected @agentwatch-symbol=✓, got %q (found=%v)", v, ok)
+	}
+}
+
+func TestDaemon_StopFailureSetsStopped(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "✳ writing tests", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "StopFailure", SessionID: "sess1", TmuxPane: "%0"})
+
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "window-status-style"); !ok || v != "fg=yellow,dim" {
+		t.Errorf("expected window-status-style=fg=yellow,dim, got %q (found=%v)", v, ok)
+	}
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); !ok || v != "⏹" {
+		t.Errorf("expected @agentwatch-symbol=⏹, got %q (found=%v)", v, ok)
+	}
+}
+
 func TestDaemon_PreToolUseClearsNeedInput(t *testing.T) {
 	mc := &tmuxtest.MockClient{
 		Panes: []tmux.PaneInfo{
