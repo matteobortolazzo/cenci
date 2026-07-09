@@ -28,16 +28,14 @@ Binary install:
 go install github.com/matteobortolazzo/claude-tools/agentwatch@latest
 ```
 
-## Tooling
+### [sandbox](./dev-sandbox)
 
-### [dev-sandbox](./dev-sandbox)
-
-Docker/Podman container for running Claude Code in isolation. Includes .NET, Node.js, Go, and common dev tools.
+Docker/Podman container for running Claude Code in isolation with full permissions — the container is the security boundary. Includes .NET, Node.js, Go, and common dev tools.
 
 ```bash
-ln -s "$(pwd)/dev-sandbox/claude-sand" ~/.local/bin/claude-sand
-claude-sand --build  # Build image
-claude-sand          # Launch Claude Code in container
+claude plugin marketplace add matteobortolazzo/claude-tools
+claude plugin install sandbox
+/sandbox:setup   # symlink the claude-sand launcher and build the image
 ```
 
 ## License

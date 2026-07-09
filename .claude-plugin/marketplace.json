@@ -18,7 +18,17 @@
       "name": "agentwatch",
       "source": "./agentwatch/plugin",
       "description": "Watch your coding agents (Claude Code, Codex) — live session status across tmux, waybar, noctalia, and DMS",
-      "version": "1.1.3",
+      "version": "1.1.4",
+      "author": {
+        "name": "Matteo Bortolazzo"
+      },
+      "repository": "https://github.com/matteobortolazzo/claude-tools"
+    },
+    {
+      "name": "sandbox",
+      "source": "./dev-sandbox",
+      "description": "Isolated Docker/Podman container for running Claude Code with full permissions — the container is the security boundary",
+      "version": "0.2.0",
       "author": {
         "name": "Matteo Bortolazzo"
       },

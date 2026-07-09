@@ -32,3 +32,4 @@ Each project has its own `.claude/CLAUDE.md` with project-specific context.
 Each plugin versions independently:
 - ccflow: auto-bumped on push to main (paths: `ccflow/**`), tags: `ccflow/v*`
 - agentwatch: auto-bumped on push to main (paths: `agentwatch/**`), tags: `agentwatch/v*`
+- sandbox: auto-bumped on push to main (paths: `dev-sandbox/**`), tags: `sandbox/v*`
