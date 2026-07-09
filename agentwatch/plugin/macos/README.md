@@ -19,7 +19,7 @@ resolves the binary in this order:
 
 1. `$AGENTWATCH_BIN` (env var, or a SwiftBar variable — set this if the item never appears)
 2. `/opt/homebrew/bin/agentwatch`, `/usr/local/bin/agentwatch`
-3. `~/.claude/plugins/*/agentwatch/plugin/bin/agentwatch` (bootstrap install)
+3. `~/.claude/plugins/cache/*/agentwatch/*/bin/agentwatch` (bootstrap install)
 4. bare `agentwatch` on `PATH`
 
 If none resolve, the plugin emits nothing (the menu bar item stays hidden).
@@ -53,26 +53,40 @@ per the [main README](../../README.md#advanced--development).
 brew install swiftbar
 ```
 
-Launch SwiftBar once and pick a Plugin Folder (default
-`~/Library/Application Support/SwiftBar/Plugins/`).
+On first launch SwiftBar asks for a **Plugin Folder**. It can be *any* directory —
+SwiftBar's default suggestion lives under `~/Library`, which the macOS open panel
+hides and won't let you navigate to normally. Two easy ways around it:
+
+- Pick (or make) an ordinary visible folder, e.g. `mkdir -p ~/SwiftBarPlugins` and
+  choose that — **recommended**, and what the commands below assume.
+- Or, in the folder picker, press `⌘⇧G` and paste a path (e.g.
+  `~/Library/Application Support/SwiftBar/Plugins`).
+
+You can see/change it later in SwiftBar → **Preferences** → *Plugin Folder*.
 
 ### 3. Symlink the plugin
 
-Point SwiftBar at the script, then **Refresh All** (or restart SwiftBar).
-
-From a **marketplace install** (the `*` resolves the marketplace subdir):
+Symlink the script into whatever Plugin Folder you chose, then **Refresh All** (or
+restart SwiftBar):
 
 ```sh
-ln -s "$HOME"/.claude/plugins/*/agentwatch/plugin/macos/agentwatch.5s.sh \
-  "$HOME/Library/Application Support/SwiftBar/Plugins/agentwatch.5s.sh"
+PLUGIN_DIR="$HOME/SwiftBarPlugins"   # the folder you picked in step 2
+```
+
+From a **marketplace install** — point at the marketplace checkout, which is a
+stable path (unlike the versioned `cache/…/agentwatch/<version>/` copy, it survives
+plugin updates without re-linking); the `*` resolves the marketplace name:
+
+```sh
+ln -sf "$HOME"/.claude/plugins/marketplaces/*/agentwatch/plugin/macos/agentwatch.5s.sh \
+  "$PLUGIN_DIR/agentwatch.5s.sh"
 ```
 
 From a **repo checkout** (run inside `agentwatch/`):
 
 ```sh
 chmod +x plugin/macos/agentwatch.5s.sh
-ln -s "$PWD/plugin/macos/agentwatch.5s.sh" \
-  "$HOME/Library/Application Support/SwiftBar/Plugins/agentwatch.5s.sh"
+ln -sf "$PWD/plugin/macos/agentwatch.5s.sh" "$PLUGIN_DIR/agentwatch.5s.sh"
 ```
 
 The `.5s.` in the filename is the refresh interval — rename the segment
