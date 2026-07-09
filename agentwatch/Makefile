@@ -6,10 +6,20 @@ PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 
 LDFLAGS := -s -w
 
-.PHONY: build clean test lint $(PLATFORMS)
+PLUGIN_JSON := plugin/.claude-plugin/plugin.json
+PLUGIN_VERSION := $(shell sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' $(PLUGIN_JSON) | head -n1)
+
+.PHONY: build clean test lint plugin-bin $(PLATFORMS)
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) .
+
+# plugin-bin builds the current source into the plugin's bin/ and stamps the
+# version marker so `claude --plugin-dir ./plugin` uses the local build instead
+# of triggering a download of the (possibly unreleased) plugin version.
+plugin-bin:
+	go build -ldflags "$(LDFLAGS)" -o plugin/bin/$(BINARY) .
+	printf '%s\n' "$(PLUGIN_VERSION)" > plugin/bin/.agentwatch-version
 
 test:
 	go test ./...
@@ -27,3 +37,4 @@ lint:
 clean:
 	rm -f $(BINARY)
 	rm -rf dist/
+	rm -rf plugin/bin/
