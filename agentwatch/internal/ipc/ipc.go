@@ -1,12 +1,25 @@
 package ipc
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"os"
 	"path/filepath"
+	"time"
 )
+
+// ErrAlreadyRunning is returned by safeListen (and the constructors that use it)
+// when a live listener is already bound to the target socket path. Callers can
+// treat this as a signal that another daemon owns the socket and back off
+// instead of stealing it.
+var ErrAlreadyRunning = errors.New("agentwatch: daemon already running")
+
+// aliveDialTimeout bounds the probe that checks whether an existing socket has a
+// live listener. It is short because the socket is local and a stale socket has
+// no one to answer.
+const aliveDialTimeout = 200 * time.Millisecond
 
 // StateSnapshot is the top-level message broadcast to IPC clients.
 type StateSnapshot struct {
@@ -68,7 +81,14 @@ func safeListen(socketPath string) (net.Listener, error) {
 		if info.Mode()&os.ModeSymlink != 0 {
 			return nil, fmt.Errorf("refusing to bind: %s is a symlink", socketPath)
 		}
-		// Exists but not a symlink — remove stale socket.
+		// Something exists at the path. Probe it before removing: a live daemon
+		// answers a dial, and stealing its socket would break it. Only remove
+		// the file when the probe fails (stale socket or non-socket leftover).
+		if conn, derr := net.DialTimeout("unix", socketPath, aliveDialTimeout); derr == nil {
+			_ = conn.Close()
+			return nil, ErrAlreadyRunning
+		}
+		// Not answering — treat as stale and remove.
 		if err := os.Remove(socketPath); err != nil {
 			return nil, err
 		}

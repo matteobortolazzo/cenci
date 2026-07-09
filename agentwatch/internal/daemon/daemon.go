@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"time"
@@ -37,6 +38,10 @@ func Run(ctx context.Context, cfg config.Config) error {
 	// Start event receiver.
 	recv, err := ipc.NewEventReceiver(cfg.EventSocketPath)
 	if err != nil {
+		if errors.Is(err, ipc.ErrAlreadyRunning) {
+			log.Printf("daemon already running; nothing to do")
+			return nil
+		}
 		return err
 	}
 	go recv.Accept(ctx)

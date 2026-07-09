@@ -19,27 +19,10 @@ Claude/Codex hooks  →  agentwatch notify  →  event socket  →  daemon
 
 No polling for normal state changes. Agent hooks push state changes to the daemon instantly via a Unix socket; the daemon only sweeps periodically for stale/exited sessions.
 
-## Install
+## Install (Claude Code)
 
-```bash
-go install github.com/matteobortolazzo/claude-tools/agentwatch@latest
-```
-
-Or build from source:
-
-```bash
-git clone https://github.com/matteobortolazzo/claude-tools.git
-cd claude-tools/agentwatch
-make build
-```
-
-## Setup
-
-### 1. Enable hooks
-
-#### Claude Code
-
-**Via marketplace (recommended):**
+Install the plugin from the marketplace — the binary and daemon auto-bootstrap on
+your first session, so this is all you need:
 
 ```bash
 # Register the repo as a marketplace (works with private repos too)
@@ -49,15 +32,21 @@ claude plugin marketplace add matteobortolazzo/claude-tools
 claude plugin install agentwatch
 ```
 
-To update later: `claude plugin update agentwatch`
+On the first `SessionStart` after install, the plugin downloads the `agentwatch`
+binary matching the plugin version (with checksum verification) into the plugin's
+`bin/` directory and starts the daemon. Bootstrap runs detached and never blocks
+the agent, so the very first session may take a moment before status appears; the
+daemon then persists for all later sessions.
 
-**Manual (per-session):**
+To update later: `claude plugin update agentwatch` (the next session re-bootstraps
+the matching binary).
 
-```bash
-claude --plugin-dir /path/to/agentwatch/plugin
-```
+## Setup (OpenAI Codex)
 
-#### OpenAI Codex
+Codex reuses the same host daemon and binary provisioned by the Claude Code
+plugin — the Codex hooks call `agentwatch` on `$PATH`. If you only use Codex,
+install the binary manually (see [Advanced / development](#advanced--development))
+and start the daemon once; both agents then share it.
 
 Codex support uses the hook config in `plugin/codex/hooks.json`.
 
@@ -79,12 +68,52 @@ This repository also includes a Codex plugin manifest at `plugin/codex/.codex-pl
 plugin_hooks = true
 ```
 
-### 2. Start the daemon
+Full self-contained Codex bootstrap is tracked in
+[#33](https://github.com/matteobortolazzo/claude-tools/issues/33).
+
+## Advanced / development
+
+The marketplace install above provisions the binary and daemon automatically. You
+only need this section to install the binary by hand (e.g. Codex-only setups),
+hack on agentwatch, or run against a local plugin directory.
+
+### Install the binary manually
+
+```bash
+go install github.com/matteobortolazzo/claude-tools/agentwatch@latest
+```
+
+Or build from source:
+
+```bash
+git clone https://github.com/matteobortolazzo/claude-tools.git
+cd claude-tools/agentwatch
+make build
+```
+
+### Run against a local plugin directory
+
+`make plugin-bin` builds the current source into `plugin/bin/agentwatch` and stamps
+the version marker, so `claude --plugin-dir ./plugin` uses your local build instead
+of downloading a released artifact:
+
+```bash
+make plugin-bin
+claude --plugin-dir /path/to/agentwatch/plugin
+```
+
+### Start the daemon manually
+
+When you install the binary by hand, start the daemon once (the marketplace plugin
+does this for you):
 
 ```bash
 agentwatch        # run in background or a dedicated pane
 agentwatch -v     # verbose logging
 ```
+
+A second `agentwatch daemon` is a safe no-op — it detects the running daemon, logs
+"daemon already running", and exits without disturbing it.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -220,6 +249,13 @@ If the daemon restarts while agent sessions are active, it re-discovers them on 
 ## Troubleshooting
 
 **No status updates**: Ensure the hook/plugin is loaded (`claude plugin list`, `claude --plugin-dir ./plugin`, or Codex `/hooks`). Check that `agentwatch notify` can reach the event socket (`agentwatch -v` shows the socket path).
+
+**Binary/daemon didn't bootstrap**: The SessionStart bootstrap fails silently so it
+never blocks the agent. Check the bootstrap log at
+`${TMPDIR:-/tmp}/agentwatch-bootstrap.log` — it records download, checksum, arch,
+and network failures (e.g. no release published yet, or an unsupported OS/arch). If
+bootstrap can't run, install the binary manually and start the daemon (see
+[Advanced / development](#advanced--development)).
 
 **Names not restoring**: agentwatch restores names on clean exit (Ctrl+C / SIGTERM) and via the stale sweep. If it was killed with SIGKILL, manually rename windows or restart tmux.
 

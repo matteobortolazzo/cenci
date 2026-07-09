@@ -1,0 +1,9 @@
+# Compiled binary (root build target)
+/agentwatch
+
+# Cross-compiled release artifacts
+/dist/
+
+# Plugin-local binary: downloaded at bootstrap or built via `make plugin-bin`.
+# Never committed — provisioned per machine.
+/plugin/bin/
