@@ -18,13 +18,13 @@ Claude/Codex hooks  →  agentwatch notify  →  event socket  →  daemon (sess
                                                               window rename/style
                                                                        |
                                                     broadcast socket → agentwatch status
-                                                                    (waybar, noctalia, dms)
+                                                          (waybar, noctalia, dms, macOS menu bar)
 ```
 
 The core daemon keys state by agent session id, maps hook events to statuses, and owns the paneless TTL sweep. All window work is delegated to an injected frontend:
 
 - **tmux frontend** (`internal/frontend/tmux/`): the one interactive frontend — window rename, style, pane-based stale sweep, renumber migration.
-- **status JSON** (`internal/frontend/status/`): read-only broadcast in the [Waybar custom module protocol](https://github.com/Alexays/Waybar/wiki/Module:-Custom); consumed by `agentwatch status` and the waybar, noctalia, and dms display widgets.
+- **status JSON** (`internal/frontend/status/`): read-only broadcast in the [Waybar custom module protocol](https://github.com/Alexays/Waybar/wiki/Module:-Custom); consumed by `agentwatch status` and the waybar, noctalia, dms, and macOS menu bar ([SwiftBar](https://swiftbar.app), `plugin/macos/`) display widgets.
 
 No polling for normal state changes. Agent hooks push state changes to the daemon instantly via a Unix socket; the daemon sweeps periodically for stale/exited sessions.
 
@@ -192,6 +192,14 @@ The module sets a `class` based on the highest-priority status: `need-input` > `
     color: #6c7086;
 }
 ```
+
+#### macOS menu bar (SwiftBar)
+
+macOS users get the same status surface via a [SwiftBar](https://swiftbar.app)
+plugin that consumes the identical `agentwatch status` JSON — no daemon changes. It
+shows the counts in the menu bar (loud red on `need-input`) and a per-session
+dropdown, and hides when no sessions are live. See
+[`plugin/macos/README.md`](plugin/macos/README.md) for install and settings.
 
 ## How it works
 
