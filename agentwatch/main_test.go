@@ -95,3 +95,24 @@ func TestNoArgs_NotUnknownSubcommand(t *testing.T) {
 		t.Errorf("expected no-args NOT to trigger unknown subcommand error, got:\n%s", output)
 	}
 }
+
+func TestStatusAndWaybarSubcommandsBothRoute(t *testing.T) {
+	// Both "status" and its hidden alias "waybar" must route to the status
+	// frontend. With no daemon on the socket they exit 1 with no output —
+	// never the "unknown subcommand" error.
+	for _, sub := range []string{"status", "waybar"} {
+		cmd := exec.Command(binaryPath, sub, "-socket", filepath.Join(t.TempDir(), "nope.sock"))
+		output, err := cmd.CombinedOutput()
+
+		if strings.Contains(string(output), "unknown subcommand") {
+			t.Errorf("%s: expected routing to status frontend, got:\n%s", sub, output)
+		}
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("%s: expected exit error (daemon not running), got %T: %v", sub, err, err)
+		}
+		if exitErr.ExitCode() != 1 {
+			t.Errorf("%s: expected exit code 1 when daemon not running, got %d", sub, exitErr.ExitCode())
+		}
+	}
+}

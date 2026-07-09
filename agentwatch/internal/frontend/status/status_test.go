@@ -1,4 +1,4 @@
-package waybar
+package status
 
 import (
 	"testing"
@@ -290,5 +290,61 @@ func TestFormat_AllStatusesIncludingStopped(t *testing.T) {
 	}
 	if out.Class != "need-input" {
 		t.Errorf("expected class 'need-input' (highest priority), got %q", out.Class)
+	}
+}
+
+func TestFormat_PanelessTooltipLine(t *testing.T) {
+	snap := &ipc.StateSnapshot{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Windows: []ipc.WindowState{
+			{WindowName: "sandbox task", TaskName: "sandbox task", Status: "running"},
+		},
+		Summary: ipc.StatusSummary{Total: 1, Running: 1},
+	}
+	out := Format(snap, testConfig())
+
+	// No "sess:idx - " prefix for paneless entries.
+	expected := "sandbox task (running)"
+	if out.Tooltip != expected {
+		t.Errorf("expected tooltip %q, got %q", expected, out.Tooltip)
+	}
+	if out.Text != "▶ 1" {
+		t.Errorf("expected '▶ 1', got %q", out.Text)
+	}
+}
+
+func TestFormat_PanelessTooltipFallsBackToAgent(t *testing.T) {
+	snap := &ipc.StateSnapshot{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Windows: []ipc.WindowState{
+			{Status: "running", Agent: "claude"},
+		},
+		Summary: ipc.StatusSummary{Total: 1, Running: 1},
+	}
+	out := Format(snap, testConfig())
+
+	expected := "claude (running)"
+	if out.Tooltip != expected {
+		t.Errorf("expected tooltip %q, got %q", expected, out.Tooltip)
+	}
+}
+
+func TestFormat_MixedPanedAndPanelessTooltip(t *testing.T) {
+	snap := &ipc.StateSnapshot{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Windows: []ipc.WindowState{
+			{Session: "main", WindowIndex: "0", TaskName: "writing tests", Status: "running"},
+			{WindowName: "sandbox task", TaskName: "sandbox task", Status: "need-input"},
+		},
+		Summary: ipc.StatusSummary{Total: 2, Running: 1, NeedInput: 1},
+	}
+	out := Format(snap, testConfig())
+
+	expected := "main:0 - writing tests (running)\nsandbox task (need-input)"
+	if out.Tooltip != expected {
+		t.Errorf("expected tooltip:\n%s\ngot:\n%s", expected, out.Tooltip)
+	}
+	if out.Class != "need-input" {
+		t.Errorf("expected class 'need-input', got %q", out.Class)
 	}
 }

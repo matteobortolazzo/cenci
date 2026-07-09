@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/detect"
@@ -19,46 +18,64 @@ func (d *Daemon) buildSnapshot() ipc.StateSnapshot {
 	snap := ipc.StateSnapshot{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	}
-	targets := make([]string, 0, len(d.windows))
-	for wt := range d.windows {
-		targets = append(targets, wt)
+
+	type entry struct {
+		w        ipc.WindowState
+		paneless bool
+		sortKey  string
 	}
-	sort.Strings(targets)
-
-	for _, wt := range targets {
-		ws := d.windows[wt]
-		parts := strings.SplitN(wt, ":", 2)
-		session, winIdx := parts[0], parts[1]
-
-		// Use clean names (without symbol prefix) for IPC output.
-		winName := ws.OriginalName
-		if !ws.ManuallyNamed && ws.TaskName != "" {
-			winName = ws.TaskName
+	entries := make([]entry, 0, len(d.sessions))
+	for key, sess := range d.sessions {
+		w := ipc.WindowState{
+			TaskName: sess.TaskName,
+			Status:   sess.Status.String(),
+			Agent:    sess.Agent,
 		}
-		status := ws.Status.String()
-		snap.Windows = append(snap.Windows, ipc.WindowState{
-			Session:       session,
-			WindowIndex:   winIdx,
-			WindowName:    winName,
-			TaskName:      ws.TaskName,
-			Status:        status,
-			Agent:         ws.Agent,
-			ManuallyNamed: ws.ManuallyNamed,
-		})
+		e := entry{sortKey: key, paneless: true}
+		if wi := d.frontend.WindowInfo(key); wi != nil {
+			w.Session = wi.Session
+			w.WindowIndex = wi.WindowIndex
+			w.WindowName = wi.WindowName
+			w.ManuallyNamed = wi.ManuallyNamed
+			e.paneless = false
+			e.sortKey = wi.Session + ":" + wi.WindowIndex
+		} else {
+			// Paneless (or window unknown): no tmux fields; the task name is
+			// the only display name available.
+			w.WindowName = sess.TaskName
+		}
+		e.w = w
+		entries = append(entries, e)
 
 		snap.Summary.Total++
-		switch ws.Status {
-		case detect.StatusIdle:
-			snap.Summary.Idle++
-		case detect.StatusRunning:
-			snap.Summary.Running++
-		case detect.StatusDone:
-			snap.Summary.Done++
-		case detect.StatusStopped:
-			snap.Summary.Stopped++
-		case detect.StatusNeedInput:
-			snap.Summary.NeedInput++
+		countStatus(&snap.Summary, sess.Status)
+	}
+
+	// tmux entries first, ordered by session:index; paneless entries after,
+	// ordered by session key for stable output.
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].paneless != entries[j].paneless {
+			return !entries[i].paneless
 		}
+		return entries[i].sortKey < entries[j].sortKey
+	})
+	for _, e := range entries {
+		snap.Windows = append(snap.Windows, e.w)
 	}
 	return snap
+}
+
+func countStatus(sum *ipc.StatusSummary, s detect.Status) {
+	switch s {
+	case detect.StatusIdle:
+		sum.Idle++
+	case detect.StatusRunning:
+		sum.Running++
+	case detect.StatusDone:
+		sum.Done++
+	case detect.StatusStopped:
+		sum.Stopped++
+	case detect.StatusNeedInput:
+		sum.NeedInput++
+	}
 }

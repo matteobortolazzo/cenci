@@ -16,8 +16,10 @@ import (
 
 	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/config"
 	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/daemon"
+	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/frontend/status"
+	tmuxfe "github.com/matteobortolazzo/claude-tools/agentwatch/internal/frontend/tmux"
 	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/ipc"
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/waybar"
+	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/tmux"
 )
 
 func main() {
@@ -28,8 +30,8 @@ func main() {
 	switch os.Args[1] {
 	case "daemon":
 		runDaemon(os.Args[2:])
-	case "waybar":
-		runWaybar(os.Args[2:])
+	case "status", "waybar": // "waybar" is a hidden alias for existing consumers
+		runStatus(os.Args[2:])
 	case "notify":
 		runNotify(os.Args[2:])
 	default:
@@ -53,6 +55,7 @@ func runDaemon(args []string) {
 
 	var sweepSec int
 	fs.IntVar(&sweepSec, "sweep", 30, "stale session sweep interval in seconds")
+	fs.DurationVar(&cfg.SessionTTL, "session-ttl", cfg.SessionTTL, "idle expiry for sessions outside tmux (e.g. 2h)")
 
 	fs.StringVar(&cfg.StyleIdle, "style-idle", cfg.StyleIdle, "tmux style for idle state")
 	fs.StringVar(&cfg.StyleRunning, "style-running", cfg.StyleRunning, "tmux style for running state")
@@ -86,7 +89,10 @@ func runDaemon(args []string) {
 		cancel()
 	}()
 
-	if err := daemon.Run(ctx, cfg); err != nil {
+	// tmux is the one interactive frontend; it is constructed here and
+	// injected so the daemon core stays tmux-free.
+	fe := tmuxfe.New(cfg, &tmux.ExecClient{})
+	if err := daemon.Run(ctx, cfg, fe); err != nil {
 		fmt.Fprintf(os.Stderr, "agentwatch: %v\n", err)
 		os.Exit(1)
 	}
@@ -122,10 +128,9 @@ func runNotify(args []string) {
 		os.Exit(0) // fail silently
 	}
 
+	// TMUX_PANE may be empty: sessions outside tmux (plain terminals,
+	// dev-sandbox) are still tracked by the daemon as paneless sessions.
 	tmuxPane := os.Getenv("TMUX_PANE")
-	if tmuxPane == "" {
-		os.Exit(0) // not in tmux, nothing to do
-	}
 
 	event := ipc.HookEvent{
 		EventType:        hookInput.HookEventName,
@@ -143,10 +148,10 @@ func runNotify(args []string) {
 	_ = ipc.SendEvent(*socketPath, event)
 }
 
-func runWaybar(args []string) {
-	fs := flag.NewFlagSet("waybar", flag.ExitOnError)
+func runStatus(args []string) {
+	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	defaults := config.Default()
-	wcfg := waybar.Config{
+	wcfg := status.Config{
 		SymbolIdle:      defaults.SymbolIdle,
 		SymbolRunning:   defaults.SymbolRunning,
 		SymbolDone:      defaults.SymbolDone,
@@ -161,11 +166,11 @@ func runWaybar(args []string) {
 	fs.StringVar(&wcfg.SymbolStopped, "symbol-stopped", wcfg.SymbolStopped, "symbol for stopped (interrupted) state")
 	_ = fs.Parse(args)
 
-	if err := waybar.Run(wcfg); err != nil {
-		if errors.Is(err, waybar.ErrNoOutput) {
+	if err := status.Run(wcfg); err != nil {
+		if errors.Is(err, status.ErrNoOutput) {
 			os.Exit(1)
 		}
-		fmt.Fprintf(os.Stderr, "agentwatch waybar: %v\n", err)
+		fmt.Fprintf(os.Stderr, "agentwatch status: %v\n", err)
 		os.Exit(1)
 	}
 }
