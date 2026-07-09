@@ -1,5 +1,8 @@
 # ccflow — Claude Code Workflow Plugin
 
+> Part of [claude-tools](../README.md) — the **workflow layer**. See the root README for
+> the one-command install and how the isolation, workflow, and attention layers fit together.
+
 Ticket refinement and automated implementation pipeline for GitHub.
 
 ## What it does

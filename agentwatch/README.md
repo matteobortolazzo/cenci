@@ -1,5 +1,8 @@
 # agentwatch
 
+> Part of [claude-tools](../README.md) — the **attention layer**. See the root README for
+> the one-command install and how the isolation, workflow, and attention layers fit together.
+
 An event-driven tmux watcher that monitors Claude Code and OpenAI Codex sessions via hooks and shows live status in the tmux status bar:
 
 - **▶ blue** — running (generating, tool use, thinking)
