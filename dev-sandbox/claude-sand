@@ -13,21 +13,36 @@ fi
 
 # ── Configuration ────────────────────────────────────────────────
 IMAGE="claude-sandbox:latest"
-CONTAINER_PREFIX="claude-sand"
 WORKSPACE_HOST="${HOME}/Repos"
 WORKSPACE_CONTAINER="/workspace"
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 # ── Parse options ────────────────────────────────────────────────
+# Default agent from the invoked name so a `codex-sand` symlink Just Works.
+INVOKED_NAME="$(basename "$0")"
+if [[ "${INVOKED_NAME}" == codex-sand ]]; then
+    AGENT=codex
+else
+    AGENT=claude
+fi
+
 INSTANCE_NAME="default"
 BUILD_ONLY=false
 SHELL_ONLY=false
 HOST_NETWORK=false
 DOCKER_SOCKET=false
-CLAUDE_ARGS=()
+AGENT_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --agent)
+            AGENT="$2"
+            shift 2
+            ;;
+        --agent=*)
+            AGENT="${1#*=}"
+            shift
+            ;;
         --name)
             INSTANCE_NAME="$2"
             shift 2
@@ -53,12 +68,23 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         *)
-            CLAUDE_ARGS+=("$1")
+            AGENT_ARGS+=("$1")
             shift
             ;;
     esac
 done
 
+# Validate the selected agent.
+case "${AGENT}" in
+    claude|codex) ;;
+    *)
+        echo "Error: unknown agent '${AGENT}'. Valid agents: claude, codex." >&2
+        exit 1
+        ;;
+esac
+
+# ── Namespacing (per-agent, so containers/volumes never collide) ──
+CONTAINER_PREFIX="${AGENT}-sand"
 CONTAINER_NAME="${CONTAINER_PREFIX}-${INSTANCE_NAME}"
 VOLUME_NAME="${CONTAINER_PREFIX}-home-${INSTANCE_NAME}"
 
@@ -78,10 +104,10 @@ if ! "${RUNTIME}" image inspect "${IMAGE}" &>/dev/null; then
     build_image
 fi
 
-# ── Resolve Claude binary ───────────────────────────────────────
-CLAUDE_BIN="$(readlink -f "$(which claude)" 2>/dev/null || true)"
-if [[ ! -x "${CLAUDE_BIN}" ]]; then
-    echo "Error: claude binary not found. Install Claude Code first." >&2
+# ── Resolve agent binary ────────────────────────────────────────
+AGENT_BIN="$(readlink -f "$(which "${AGENT}")" 2>/dev/null || true)"
+if [[ ! -x "${AGENT_BIN}" ]]; then
+    echo "Error: ${AGENT} binary not found. Install ${AGENT} on the host first." >&2
     exit 1
 fi
 
@@ -94,14 +120,19 @@ if [[ -x "${AGENTWATCH_BIN}" && -S "${AGENTWATCH_EVENTS_SOCKET}" ]]; then
     AGENTWATCH_AVAILABLE=true
 fi
 
-# ── Build claude command args ────────────────────────────────────
-# The container is the security boundary: Claude runs with full
+# ── Build agent command args ─────────────────────────────────────
+# The container is the security boundary: the agent runs with full
 # permissions inside it (rejected if root — we run as uid 1000 'dev').
-CLAUDE_CMD_ARGS=(--dangerously-skip-permissions)
+if [[ "${AGENT}" == codex ]]; then
+    AGENT_CMD_ARGS=(--dangerously-bypass-approvals-and-sandbox)
+else
+    AGENT_CMD_ARGS=(--dangerously-skip-permissions)
+fi
 
 # ── Exec env forwarding (for attach path) ───────────────────────
 EXEC_ENV_ARGS=(-e "TMUX_PANE=${TMUX_PANE:-}" -e "CLAUDE_SAND=1")
 [[ -n "${CONTEXT7_API_KEY:-}" ]] && EXEC_ENV_ARGS+=(-e "CONTEXT7_API_KEY=${CONTEXT7_API_KEY}")
+[[ -n "${OPENAI_API_KEY:-}" ]] && EXEC_ENV_ARGS+=(-e "OPENAI_API_KEY=${OPENAI_API_KEY}")
 
 # ── Attach to running container ─────────────────────────────────
 if "${RUNTIME}" ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$"; then
@@ -109,7 +140,7 @@ if "${RUNTIME}" ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAM
         echo "Attaching shell to running '${CONTAINER_NAME}'..."
         "${RUNTIME}" exec -it "${EXEC_ENV_ARGS[@]}" "${CONTAINER_NAME}" /bin/bash
     else
-        "${RUNTIME}" exec -it "${EXEC_ENV_ARGS[@]}" "${CONTAINER_NAME}" claude "${CLAUDE_CMD_ARGS[@]}" "${CLAUDE_ARGS[@]}"
+        "${RUNTIME}" exec -it "${EXEC_ENV_ARGS[@]}" "${CONTAINER_NAME}" "${AGENT}" "${AGENT_CMD_ARGS[@]}" "${AGENT_ARGS[@]}"
     fi
     exit $?
 fi
@@ -137,8 +168,8 @@ RUN_ARGS=(
     # Persistent home
     -v "${VOLUME_NAME}:/home/dev"
 
-    # Claude binary (read-only)
-    -v "${CLAUDE_BIN}:/usr/local/bin/claude:ro"
+    # Agent binary (read-only)
+    -v "${AGENT_BIN}:/usr/local/bin/${AGENT}:ro"
 
     # Terminal
     -e "TERM=${TERM:-xterm-256color}"
@@ -169,6 +200,14 @@ fi
 CLAUDE_CREDS="${HOME}/.claude/.credentials.json"
 if [[ -f "${CLAUDE_CREDS}" ]]; then
     RUN_ARGS+=(-v "${CLAUDE_CREDS}:/tmp/host-claude-creds/.credentials.json:ro")
+fi
+
+# Codex credentials (ChatGPT sign-in and/or API key — fail hard if neither present)
+if [[ "${AGENT}" == codex ]]; then
+    has_auth=false
+    [[ -f "${HOME}/.codex/auth.json" ]] && { RUN_ARGS+=(-v "${HOME}/.codex/auth.json:/tmp/host-codex-creds/auth.json:ro"); has_auth=true; }
+    [[ -n "${OPENAI_API_KEY:-}" ]]      && { RUN_ARGS+=(-e "OPENAI_API_KEY=${OPENAI_API_KEY}"); has_auth=true; }
+    "${has_auth}" || { echo "Error: --agent codex requires Codex auth. Run 'codex login' on the host (creates ~/.codex/auth.json) or export OPENAI_API_KEY." >&2; exit 1; }
 fi
 
 # GitHub CLI credentials (read-only staging — entrypoint copies to /home/dev)
@@ -204,5 +243,5 @@ fi
 if "${SHELL_ONLY}"; then
     "${RUNTIME}" run "${RUN_ARGS[@]}" "${IMAGE}"
 else
-    "${RUNTIME}" run "${RUN_ARGS[@]}" "${IMAGE}" -c 'claude "$@"' _ "${CLAUDE_CMD_ARGS[@]}" "${CLAUDE_ARGS[@]}"
+    "${RUNTIME}" run "${RUN_ARGS[@]}" "${IMAGE}" -c 'exec "$@"' _ "${AGENT}" "${AGENT_CMD_ARGS[@]}" "${AGENT_ARGS[@]}"
 fi
