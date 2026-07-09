@@ -15,7 +15,8 @@ Each project has its own `.claude/CLAUDE.md` with project-specific context.
 - ALWAYS read the relevant project's `.claude/rules/` files before working on any layer.
 - Test-first: integration tests that assert behavior, not implementation details.
 - Keep tickets well-scoped. 1 ticket = 1 PR.
-- Use git worktrees for all feature work. Never modify code in main worktree.
+- ALWAYS work in a git worktree — for any change (code, docs, config), not just feature work. Never modify files in the main worktree.
+- Deliver every change as a PR unless told otherwise: commit in the worktree, push the branch, open a PR. Never commit directly to main.
 
 ## Build & Test
 
