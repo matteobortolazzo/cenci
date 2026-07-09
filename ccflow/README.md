@@ -182,6 +182,19 @@ When you run `/ccflow:implement <ticket-id>`, the pipeline executes these phases
 8. **Capture Lessons** — Lessons collector routes genuine mistakes into the relevant `docs/<topic>.md` or `CLAUDE.md` (opt-in; most sessions capture nothing)
 9. **Create PR** — Rebases on latest main, commits, pushes, and creates a pull request; UI tickets get a `## Screenshots` section in the PR body
 
+### Board lifecycle
+
+The skills drive a ticket through a label-based state machine (`gh issue edit`). Each label maps to a board column:
+
+| State | Applied by | Meaning |
+|---|---|---|
+| `Refined` | `/ccflow:refine` | Scoped and ready for design/implementation |
+| `Designed` | `/ccflow:design` | UI design spec approved (frontend tickets) |
+| `In Review` | `/ccflow:implement` — Phase 9, at PR-open | PR is open, under review / CI running |
+| `Implemented` | `/ccflow:babysit` — on PR merge | PR merged — done |
+
+Full lifecycle: `New → Refined → Designed → In Review → Implemented`. Opening the PR (Phase 9) only advances the ticket to **`In Review`**; the transition to **`Implemented`** happens when the PR merges — [babysit](#babysitting-a-pr) performs that swap using the merged PR's `closingIssuesReferences`. (`configure` documents these labels but does not create them; add the matching columns to your board.)
+
 ### Autopilot (goal-driven completion)
 
 Planning stops for your approval (Phase 1); once approved, phases 2–9 run unattended through to an open PR. But a turn that stops mid-phase — a context limit, a transient tool error — would otherwise just end the run with the work half-done.
@@ -201,7 +214,9 @@ that repeats the tick (~15 minutes by default; pass a second argument to change 
 `/ccflow:babysit 42 10m`). Each tick:
 
 1. **Fetches PR state** — if the PR has **merged or closed**, it reports a final summary,
-   stops the loop, and cleans up.
+   stops the loop, and cleans up. On **merge**, it also performs the `In Review → Implemented`
+   board transition, relabeling every issue the PR closed (from `closingIssuesReferences`).
+   A PR closed **without** merging leaves labels untouched.
 2. **Auto-fixes red CI** — diagnoses the failing checks, pushes a fix (never force-pushes),
    and retries up to a per-commit cap. When the cap is hit or the cause is ambiguous
    (flaky/infra/external), it escalates to you via a question instead of looping blindly.
@@ -220,7 +235,7 @@ A quiet tick (green CI, no new comments) just reports one line and schedules the
   the never-force-push rule all hold — babysit automates the checking and the safe fixes,
   not the decisions.
 
-Board-state transitions on merge (`In Review` → `Implemented`) are handled separately.
+On merge, babysit performs the `In Review → Implemented` board transition (see the terminal-tick behavior above and the [Board lifecycle](#board-lifecycle) table) — relabeling each issue closed by the merged PR.
 
 ### UI tickets
 

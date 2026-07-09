@@ -188,6 +188,11 @@ If the ticket does **not** have a "Refined" label/tag, display a warning:
 
 If the user says no → stop. If yes → proceed with the pipeline.
 
+If the digest's `labels` already include **"In Review"** or **"Implemented"**, a PR already exists for this ticket (open or merged). Display a soft, non-blocking warning via `AskUserQuestion` — mirror the "not refined" tone:
+> "This ticket already has an open PR (In Review)." — or, for "Implemented" — "This ticket's PR has already merged (Implemented). Re-implementing will open a second PR for the same ticket. Do you want to proceed anyway?"
+
+If the user says no → stop. If yes → proceed with the pipeline. This is a warning only — it does not block.
+
 ### Design Check (hard gate)
 
 If the ticket is classified as frontend — its title or the digest summary mention UI components, pages, views, layouts, forms, modals, visual design, styling, CSS, animations, themes, or frontend frameworks (React, Angular, Vue, Svelte, etc.) — set `isUiTicket = true`. Phase 4 and Phase 9 use this flag for screenshot capture and PR embedding.
