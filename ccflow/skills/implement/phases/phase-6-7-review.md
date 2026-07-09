@@ -4,6 +4,8 @@ Read this file only when Phase 6 + 7 starts.
 
 These quality gates are mandatory. `ccflow.reviewConcurrency` controls only whether reviewers run in parallel or sequentially.
 
+Any point below that stops for the user — an unclear security fix, a code-review human decision, an issue that persists after 2 fix attempts — is an error gate: clear the Goal Autopilot first (`/goal clear` via `SlashCommand`, a no-op if none is armed — see `SKILL.md`), then stop and ask. Otherwise the goal restarts the turn instead of waiting for the decision.
+
 ## Shared Context
 
 Gather context once. The worktree must be the CWD first — run a standalone `cd <worktree-path>` before these commands so the `git diff` calls resolve against the worktree and stay auto-approved:

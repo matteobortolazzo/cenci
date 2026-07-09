@@ -4,6 +4,8 @@ Read this file only when Phase 9 starts.
 
 This phase is pre-approved — commit, push, and create the PR without asking for confirmation. The only exceptions are the error cases defined below (rebase conflicts, test failures after rebase, push auth/network failures).
 
+**Goal Autopilot**: if a goal was armed at Phase 2 (see `SKILL.md` → Goal Autopilot), it must be cleared here. Clear it on success (right after the PR is created, before plan-file cleanup) **and** before any of this phase's error gates hands control back to the user — an un-cleared goal restarts the turn and would loop on an unrecoverable state (a rebase conflict, a failed push). Run `/goal clear` (via the `SlashCommand` tool) at those points; it is a safe no-op if no goal was armed or `/goal` is unavailable.
+
 Prerequisites: all required reviews complete, Must Fix/Critical/High items resolved, build and tests pass.
 
 Read `<worktree-path>/docs/git-workflow.md`; if absent, read legacy `<worktree-path>/.claude/rules/git-workflow.md`.
@@ -21,9 +23,9 @@ git fetch origin main
 git rebase origin/main
 ```
 
-If rebase succeeds, rerun full build and tests. If tests fail, stop and report the rebase-induced failure.
+If rebase succeeds, rerun full build and tests. If tests fail, clear the goal (`/goal clear`), then stop and report the rebase-induced failure.
 
-If rebase conflicts, abort, report conflicting files, and stop:
+If rebase conflicts, abort, clear the goal (`/goal clear`), report conflicting files, and stop:
 
 ```bash
 git rebase --abort
@@ -58,7 +60,7 @@ Push the branch:
 - Ticket mode: `git push -u origin feature/<ticket-id>-<description>`
 - Ticketless mode: `git push -u origin feature/<auto-slug>`
 
-If push fails due to sandbox/network/auth, show the exact command and wait for user confirmation after they push manually.
+If push fails due to sandbox/network/auth, clear the goal (`/goal clear`), show the exact command, and wait for user confirmation after they push manually.
 
 ## Screenshots (UI Work)
 
@@ -137,4 +139,12 @@ If `isLastChild`, also add "Implemented" to the parent.
 
 ## Cleanup
 
-After successful PR creation, delete the consumed plan file. If `.plans/` is empty, remove it. If the pipeline fails before PR creation, preserve the plan file for retry.
+After successful PR creation, first clear the Goal Autopilot condition — the PR now exists, so the goal is met:
+
+```
+/goal clear
+```
+
+Run it via the `SlashCommand` tool; it is a no-op if no goal was armed. Clearing before the plan-file deletion below keeps the two "work is done" signals in sync: the goal's condition references `.plans/<filename>`, which is removed next.
+
+Then delete the consumed plan file. If `.plans/` is empty, remove it. If the pipeline fails before PR creation, preserve the plan file for retry (and, as above, clear the goal at whichever error gate stopped the run).

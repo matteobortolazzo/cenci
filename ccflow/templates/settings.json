@@ -22,7 +22,8 @@
       "Bash(ng:*)",
       "Bash(go:*)",
       "Bash(git:*)",
-      "Bash(gh:*)"
+      "Bash(gh:*)",
+      "SlashCommand(/goal:*)"
     ],
     "deny": [
       "Bash(git push --force:*)",

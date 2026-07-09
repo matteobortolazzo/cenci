@@ -181,6 +181,17 @@ When you run `/ccflow:implement <ticket-id>`, the pipeline executes these phases
 8. **Capture Lessons** — Lessons collector routes genuine mistakes into the relevant `docs/<topic>.md` or `CLAUDE.md` (opt-in; most sessions capture nothing)
 9. **Create PR** — Rebases on latest main, commits, pushes, and creates a pull request; UI tickets get a `## Screenshots` section in the PR body
 
+### Autopilot (goal-driven completion)
+
+Planning stops for your approval (Phase 1); once approved, phases 2–9 run unattended through to an open PR. But a turn that stops mid-phase — a context limit, a transient tool error — would otherwise just end the run with the work half-done.
+
+When Claude Code is **≥ 2.1.139**, the pipeline closes that gap with the native [`/goal`](https://code.claude.com/docs/en/goal) command. At the start of Phase 2 (plan-file mode only) it arms a completion condition — "the plan `.plans/<id>.md` is implemented and a PR exists" — so any mid-phase stop restarts instead of ending. The goal is cleared automatically in Phase 9 once the PR is created, and at any error gate that hands control back to you (rebase conflict, repeated build failure, an ambiguous reviewer finding), so a genuine blocker never loops.
+
+- **Plan approval is the human gate that arms it.** No goal is ever set in a planning session — approving the plan authorizes the autonomous run, and the goal is armed only when you launch `/ccflow:implement .plans/<id>.md`.
+- **The condition references the plan file**, matching the SessionStart hook that reminds you of pending `.plans/` — a still-present plan file means "not done."
+- **Graceful on older runtimes.** Below 2.1.139 (or if `/goal` is unavailable) the pipeline behaves exactly as before — it just prints a one-line notice and runs without the completion guarantee.
+- **Opt out** with `"ccflow": { "goalAutopilot": false }` in `.claude/config.json`.
+
 ### UI tickets
 
 UI implementations are the most error-prone, so the pipeline adds two guards for tickets classified as frontend:
@@ -197,7 +208,8 @@ For lower limit pressure without removing quality gates, add optional settings t
   "ccflow": {
     "compactImplementation": false,
     "reviewConcurrency": "parallel",
-    "diffContextMode": "inline"
+    "diffContextMode": "inline",
+    "goalAutopilot": true
   }
 }
 ```
@@ -205,6 +217,7 @@ For lower limit pressure without removing quality gates, add optional settings t
 - `compactImplementation: true` lets small, low-risk tickets combine red/green/refactor into one implementer turn while still requiring red failures, green implementation, refactor, and final build/test reporting.
 - `reviewConcurrency: "sequential"` runs the same security, code, and silent-failure reviewers one after another instead of in parallel.
 - `diffContextMode: "file"` passes reviewers a patch file path and changed-file list for large diffs instead of duplicating the full diff in every prompt.
+- `goalAutopilot: false` disables the [goal-driven autopilot](#autopilot-goal-driven-completion) (armed by default on Claude Code ≥ 2.1.139).
 
 ### Optional: RTK command-output compression
 
