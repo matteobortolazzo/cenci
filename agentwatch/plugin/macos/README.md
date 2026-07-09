@@ -19,7 +19,7 @@ resolves the binary in this order:
 
 1. `$AGENTWATCH_BIN` (env var, or a SwiftBar variable — set this if the item never appears)
 2. `/opt/homebrew/bin/agentwatch`, `/usr/local/bin/agentwatch`
-3. `~/.claude/plugins/*/agentwatch/plugin/bin/agentwatch` (bootstrap install)
+3. `~/.claude/plugins/cache/*/agentwatch/*/bin/agentwatch` (bootstrap install)
 4. bare `agentwatch` on `PATH`
 
 If none resolve, the plugin emits nothing (the menu bar item stays hidden).
@@ -60,10 +60,12 @@ Launch SwiftBar once and pick a Plugin Folder (default
 
 Point SwiftBar at the script, then **Refresh All** (or restart SwiftBar).
 
-From a **marketplace install** (the `*` resolves the marketplace subdir):
+From a **marketplace install** — point at the marketplace checkout, which is a
+stable path (unlike the versioned `cache/…/agentwatch/<version>/` copy, it survives
+plugin updates without re-linking); the `*` resolves the marketplace name:
 
 ```sh
-ln -s "$HOME"/.claude/plugins/*/agentwatch/plugin/macos/agentwatch.5s.sh \
+ln -sf "$HOME"/.claude/plugins/marketplaces/*/agentwatch/plugin/macos/agentwatch.5s.sh \
   "$HOME/Library/Application Support/SwiftBar/Plugins/agentwatch.5s.sh"
 ```
 
