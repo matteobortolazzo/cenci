@@ -19,18 +19,18 @@ fi
 # Check against sensitive file patterns
 case "$FILE_PATH" in
   *.env|*.env.*|*/.env|*/.env.*)
-    echo "BLOCKED: Refusing to write to environment file: $FILE_PATH"
-    echo "Environment files may contain secrets. Edit manually if needed."
+    echo "BLOCKED: Refusing to write to environment file: $FILE_PATH" >&2
+    echo "Environment files may contain secrets. Edit manually if needed." >&2
     exit 2
     ;;
   *credentials*|*secrets*|*secret.*|*.pem|*.key|*.pfx|*.p12)
-    echo "BLOCKED: Refusing to write to sensitive file: $FILE_PATH"
-    echo "This file may contain credentials or keys. Edit manually if needed."
+    echo "BLOCKED: Refusing to write to sensitive file: $FILE_PATH" >&2
+    echo "This file may contain credentials or keys. Edit manually if needed." >&2
     exit 2
     ;;
   *id_rsa*|*id_ed25519*|*id_ecdsa*|*.keystore|*.jks)
-    echo "BLOCKED: Refusing to write to key file: $FILE_PATH"
-    echo "This file contains cryptographic keys. Edit manually if needed."
+    echo "BLOCKED: Refusing to write to key file: $FILE_PATH" >&2
+    echo "This file contains cryptographic keys. Edit manually if needed." >&2
     exit 2
     ;;
 esac
