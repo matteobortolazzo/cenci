@@ -12,12 +12,21 @@ When the agent exits or agentwatch stops, the original window name is restored.
 ## Architecture
 
 ```
-Claude/Codex hooks  →  agentwatch notify  →  event socket  →  daemon
-                                                             |
-                                          broadcast socket → waybar
+Claude/Codex hooks  →  agentwatch notify  →  event socket  →  daemon (session-keyed)
+                                                                       |
+                                                              [tmux frontend]
+                                                              window rename/style
+                                                                       |
+                                                    broadcast socket → agentwatch status
+                                                                    (waybar, noctalia, dms)
 ```
 
-No polling for normal state changes. Agent hooks push state changes to the daemon instantly via a Unix socket; the daemon only sweeps periodically for stale/exited sessions.
+The core daemon keys state by agent session id, maps hook events to statuses, and owns the paneless TTL sweep. All window work is delegated to an injected frontend:
+
+- **tmux frontend** (`internal/frontend/tmux/`): the one interactive frontend — window rename, style, pane-based stale sweep, renumber migration.
+- **status JSON** (`internal/frontend/status/`): read-only broadcast in the [Waybar custom module protocol](https://github.com/Alexays/Waybar/wiki/Module:-Custom); consumed by `agentwatch status` and the waybar, noctalia, and dms display widgets.
+
+No polling for normal state changes. Agent hooks push state changes to the daemon instantly via a Unix socket; the daemon sweeps periodically for stale/exited sessions.
 
 ## Install (Claude Code)
 
@@ -121,6 +130,7 @@ A second `agentwatch daemon` is a safe no-op — it detects the running daemon, 
 | `-event-socket` | `$XDG_RUNTIME_DIR/agentwatch-events.sock` | Event socket for hook notifications |
 | `-socket` | `$XDG_RUNTIME_DIR/agentwatch.sock` | Broadcast socket for waybar clients |
 | `-sweep` | `30` | Stale session sweep interval in seconds |
+| `-session-ttl` | `2h` | Idle TTL for paneless sessions (Go duration); sessions without a pane are expired after this duration if no `SessionEnd` fires |
 | `-style-running` | `fg=blue,dim` | tmux style for running state (inactive windows) |
 | `-style-done` | `fg=green,dim` | tmux style for done state (inactive windows) |
 | `-style-input` | `fg=red,dim` | tmux style for need-input state (inactive windows) |
@@ -130,12 +140,12 @@ A second `agentwatch daemon` is a safe no-op — it detects the running daemon, 
 | `-symbol-input` | `!` | Symbol shown in status bar indicator |
 | `-symbol-idle` | `~` | Symbol shown in status bar indicator |
 
-### Waybar module
+### Status / Waybar module
 
-`agentwatch waybar` connects to the daemon's broadcast socket, reads the current state, prints a single line of JSON in the [Waybar custom module protocol](https://github.com/Alexays/Waybar/wiki/Module:-Custom), and exits.
+`agentwatch status` connects to the daemon's broadcast socket, reads the current state, prints a single line of JSON in the [Waybar custom module protocol](https://github.com/Alexays/Waybar/wiki/Module:-Custom), and exits. (`agentwatch waybar` is a backwards-compatible alias.)
 
 ```bash
-agentwatch waybar
+agentwatch status
 ```
 
 | Flag | Default | Description |
@@ -149,7 +159,7 @@ agentwatch waybar
 
 ```jsonc
 "custom/agentwatch": {
-    "exec": "agentwatch waybar",
+    "exec": "agentwatch status",
     "return-type": "json",
     "interval": 1
 }
@@ -213,7 +223,17 @@ Codex does not currently document a `SessionEnd` hook. agentwatch restores track
 
 ### Stale session sweep
 
-Every 30s (configurable), the daemon checks if tracked pane IDs still exist in tmux. If a pane is gone (e.g. an agent crashed without firing a cleanup hook), the window is restored. For Codex, the sweep also restores the window after a completed session exits back to the user's shell.
+The daemon has two sweep mechanisms:
+
+**Pane-based sweep (tmux-backed sessions)**: Every 30s (configurable with `-sweep`), the tmux frontend checks if tracked pane IDs still exist in tmux. If a pane is gone (e.g. an agent crashed without firing a cleanup hook), the window is restored. For Codex, the sweep also restores the window after a completed session exits back to the user's shell.
+
+**Paneless TTL sweep**: Sessions without a tmux pane (plain terminals, dev-sandbox without a pane) are tracked by session id only. They are removed on `SessionEnd`; if no `SessionEnd` fires (e.g. a crash or a Codex session), the daemon expires them after the idle TTL (default `2h`, configurable with `-session-ttl`).
+
+### Paneless sessions
+
+`agentwatch notify` accepts events even when `$TMUX_PANE` is unset. Sessions running in plain terminals or dev-sandbox without a tmux pane appear in `agentwatch status` output with empty `session` and `window_index` fields; their tooltip line reads `name (status)` rather than `sess:idx - name (status)`.
+
+**Caveat**: for paneless sessions the task name comes only from the hook payload's `task_name` field — there is no pane title to read. Paneless Codex sessions may therefore show no task name.
 
 ### Custom status-format integration
 
