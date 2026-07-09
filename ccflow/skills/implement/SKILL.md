@@ -173,9 +173,9 @@ Store each attachment's file path for passing to subagents (subagents share the 
 
 ## Ticket Readiness
 
-**If ticketless mode:** Skip the Ticket Readiness check entirely and proceed to the Pipeline.
+**If ticketless mode:** Skip the Ticket Readiness check entirely and proceed to the Pipeline. Still set `isUiTicket = true` when the task description matches the frontend classification in the Design Check below (there are no labels to gate on, so the gate itself is skipped, but Phases 4 and 9 use the flag for screenshots).
 
-**If plan file mode:** Skip this check — readiness was verified when the plan was created.
+**If plan file mode:** Skip this check — readiness was verified when the plan was created. Set `isUiTicket` from the plan's ticket title/requirements using the same frontend classification.
 
 **If ticket mode:** After context gathering, inspect the ticket's labels/tags before starting the pipeline:
 
@@ -186,14 +186,22 @@ If the ticket does **not** have a "Refined" label/tag, display a warning:
 
 If the user says no → stop. If yes → proceed with the pipeline.
 
-### Design Check (soft)
+### Design Check (hard gate)
 
-If the ticket is classified as frontend — its title or the digest summary mention UI components, pages, views, layouts, forms, modals, visual design, styling, CSS, animations, themes, or frontend frameworks (React, Angular, Vue, Svelte, etc.) — and does **not** have a "Designed" label/tag **and** the digest reports no design (`design: none`), display a suggestion:
-> "This frontend ticket hasn't been designed yet. Consider running `/ccflow:design <ticket-id>` first for a visual reference. Do you want to proceed anyway?"
+If the ticket is classified as frontend — its title or the digest summary mention UI components, pages, views, layouts, forms, modals, visual design, styling, CSS, animations, themes, or frontend frameworks (React, Angular, Vue, Svelte, etc.) — set `isUiTicket = true`. Phase 4 and Phase 9 use this flag for screenshot capture and PR embedding.
 
-If the ticket lacks the "Designed" label but the digest reports a bundled `DESIGN.md`, skip the suggestion — the design spec is sufficient context.
+If `isUiTicket` is true and the ticket does **not** have a "Designed" label/tag, **stop and ask** before starting the pipeline. UI tickets implemented without an approved design are the most error-prone, even with a design system in place.
 
-If the user says no → stop. If yes → proceed with the pipeline. This is a soft-check — it never blocks implementation.
+A bundled `DESIGN.md` does **not** satisfy this gate on its own: the design path persists across tickets, so an existing `DESIGN.md` may describe a previous ticket's design. Only the "Designed" label on this ticket counts.
+
+Ask via `AskUserQuestion`:
+
+> "This UI ticket has no "Designed" label. [If the digest reports a bundled `DESIGN.md`, add: A `DESIGN.md` was found at `<path>`, but it may belong to an earlier ticket.] How do you want to proceed?"
+
+- **"Stop — design first (Recommended)"** — stop the pipeline. Tell the user to run `/ccflow:design <ticket-id>` and re-run `/ccflow:implement` once the ticket carries the "Designed" label.
+- **"Proceed without design"** — continue the pipeline. Record the choice; Phase 9 notes "implemented without design spec" in the PR body.
+
+Do not proceed past this gate without an explicit answer.
 
 ### Visual Check Reminder
 

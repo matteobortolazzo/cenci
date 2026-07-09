@@ -168,12 +168,19 @@ When you run `/ccflow:implement <ticket-id>`, the pipeline executes these phases
 1. **Plan** — Context-gatherer agent bundles the ticket, design, and project context into a file (only a short digest enters the main context); planner agent reads the bundle, analyzes the codebase, and proposes an implementation plan (waits for your approval).
 2. **Worktree Setup** — Creates an isolated git worktree for the feature branch
 3. **Test First (Red)** — Implementer agent writes failing tests
-4. **Implement (Green)** — Implementer agent makes tests pass
+4. **Implement (Green)** — Implementer agent makes tests pass; UI tickets also get visual verification, with final screenshots persisted for the PR
 5. **Refactor** — Implementer agent simplifies and cleans up
 6. **Security Review** — Security reviewer agent checks for OWASP vulnerabilities
 7. **Code Review** — Code reviewer agent does a final PR-style review
 8. **Capture Lessons** — Lessons collector routes genuine mistakes into the relevant `docs/<topic>.md` or `CLAUDE.md` (opt-in; most sessions capture nothing)
-9. **Create PR** — Rebases on latest main, commits, pushes, and creates a pull request
+9. **Create PR** — Rebases on latest main, commits, pushes, and creates a pull request; UI tickets get a `## Screenshots` section in the PR body
+
+### UI tickets
+
+UI implementations are the most error-prone, so the pipeline adds two guards for tickets classified as frontend:
+
+- **Design gate (hard)** — a UI ticket without the `Designed` label stops the pipeline and asks whether to design first (`/ccflow:design`) or proceed anyway. An existing `DESIGN.md` doesn't bypass the gate, since the design path persists across tickets.
+- **PR screenshots** — screenshots captured during visual verification (`playwright-cli`) are embedded in the PR body to speed up review. They're hosted in a temporary **secret gist** rather than committed to the repo; delete it after merge with `gh gist delete <gist-id>` (the PR body includes the command).
 
 ### Usage controls
 

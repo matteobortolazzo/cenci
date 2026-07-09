@@ -62,3 +62,7 @@ For frontend plans with visual components:
 - If no browser tooling is available, note that visual verification was not performed.
 
 If Pencil is available, compare implementation screenshots against design screenshots and inspect `snapshot_layout(..., problemsOnly: true)` for clipping, overflow, and misalignment. Fix significant discrepancies or get explicit user acceptance before Phase 5.
+
+### Persist Screenshots For The PR
+
+If `isUiTicket` is true, save a final screenshot of every affected screen/state to `/tmp/claude/ccflow-screenshots/<ticket-id-or-slug>/` with descriptive kebab-case filenames (e.g. `login-form-error-state.png`). Capture with `playwright-cli screenshot` against the running dev build, or copy the relevant Playwright Test `toHaveScreenshot` output. Capture **after** visual verification passes so the images show the final state — Phase 9 uploads them and embeds them in the PR body as review aids. If no browser tooling is available, skip this step; Phase 9 will note the gap in the PR.

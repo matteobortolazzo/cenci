@@ -60,6 +60,33 @@ Push the branch:
 
 If push fails due to sandbox/network/auth, show the exact command and wait for user confirmation after they push manually.
 
+## Screenshots (UI Work)
+
+Skip this section unless `isUiTicket` is true.
+
+Screenshots are temporary review aids — never commit them to the repo. Host them in a **secret GitHub gist**: it lives under the user's account, is unlisted, and is disposable (`gh gist delete <gist-id>` after merge).
+
+1. **Collect**: use the images Phase 4 persisted to `/tmp/claude/ccflow-screenshots/<ticket-id-or-slug>/`. If the directory is missing or empty and `playwright-cli` is available, capture the affected screens now against the dev build. If capture is not possible, skip the upload and use the fallback body in step 5.
+2. **Privacy check**: secret gists are unlisted but readable by anyone with the URL. Screenshots must show only local/dev data — no real user data, tokens, or internal URLs. Crop or re-capture rather than upload.
+3. **Create the gist** (gists require a text file at creation; images are pushed via git afterwards):
+
+   ```bash
+   printf 'Screenshots for %s — temporary, delete after merge.\n' "<branch>" > /tmp/claude/ccflow-screenshots/README.md
+   gh gist create --desc "ccflow screenshots: <owner/repo> <branch>" /tmp/claude/ccflow-screenshots/README.md
+   ```
+
+   The command prints the gist URL; extract `<gist-id>` from it. Do not pass `--public` — the gist must stay secret.
+4. **Push the images** through the gist's git remote (no `cd` compounds — see the `shell-rules` skill):
+
+   ```bash
+   gh gist clone <gist-id> /tmp/claude/ccflow-gist-<gist-id>
+   cp /tmp/claude/ccflow-screenshots/<ticket-id-or-slug>/*.png /tmp/claude/ccflow-gist-<gist-id>/
+   git -C /tmp/claude/ccflow-gist-<gist-id> add -A
+   git -C /tmp/claude/ccflow-gist-<gist-id> commit -m "PR screenshots"
+   git -C /tmp/claude/ccflow-gist-<gist-id> push
+   ```
+5. **Build embed URLs**: `https://gist.githubusercontent.com/<gh-user>/<gist-id>/raw/<filename>.png`, where `<gh-user>` comes from `gh api user -q .login`. These go into the PR body's `## Screenshots` section (template below). If any gist step fails (auth, network), do not block PR creation — write `## Screenshots` with "Not uploaded (<reason>); local copies at `/tmp/claude/ccflow-screenshots/<ticket-id-or-slug>/`" instead.
+
 ## PR
 
 Create the PR with `gh pr create`. Write body content to `/tmp/claude/pr-body.md` first and read it back; do not use heredocs or a large inline body string.
@@ -79,6 +106,12 @@ Ticket mode body includes:
 ## Testing
 <commands and results>
 
+## Screenshots
+_Temporary secret gist, not part of the repo — delete after merge: `gh gist delete <gist-id>`_
+
+### <screen or state name>
+![<screen or state name>](https://gist.githubusercontent.com/<gh-user>/<gist-id>/raw/<filename>.png)
+
 ## Checklist
 - [x] Tests pass
 - [x] Security review done
@@ -89,6 +122,8 @@ Ticket mode body includes:
 ```
 
 For child tickets that are not last child, use `Related to #<parentId>` for the parent so it is not auto-closed. For ticketless mode, omit `## Ticket`.
+
+`## Screenshots` appears only when `isUiTicket` is true: one `### <name>` + image per captured screen/state, or the fallback note from the Screenshots section above. Omit the section entirely for non-UI work. If the user chose "Proceed without design" at the Design Check, add "Implemented without design spec — extra visual review recommended." to `## Notes`.
 
 ## Labels
 
