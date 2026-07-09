@@ -1,0 +1,117 @@
+package dispatch
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/run"
+	"github.com/matteobortolazzo/claude-tools/agentwatch/pkg/watch"
+)
+
+// RunOnce gathers inputs (tickets, plans, snapshot, clock), runs the pure
+// engine, logs every decision, then dispatches each ActionDispatch via run.Run
+// (unless dryRun). prior, when non-nil, is the daily-quota tally: it is read in
+// and incremented per successful dispatch. It returns the full decision table.
+func RunOnce(cfg Config, ctrl run.Controller, dryRun bool, out io.Writer, prior *int) []Decision {
+	if out == nil {
+		out = os.Stdout
+	}
+
+	dirByRepo := make(map[string]string, len(cfg.Repos))
+	for _, rc := range cfg.Repos {
+		dirByRepo[rc.Repo] = rc.Dir
+	}
+
+	tickets, err := CollectTickets(cfg.Repos)
+	if err != nil {
+		logf(out, "dispatch: collecting tickets: %v\n", err)
+	}
+
+	var plans []Plan
+	for _, rc := range cfg.Repos {
+		ps, err := ReadPlans(rc.Repo, rc.Dir, nil)
+		if err != nil {
+			logf(out, "dispatch: reading plans in %s: %v\n", rc.Dir, err)
+			continue
+		}
+		plans = append(plans, ps...)
+	}
+
+	snap, _ := ReadSnapshot(watch.DefaultSocketPath()) // nil on error ⇒ Decide skips safely
+
+	priorVal := 0
+	if prior != nil {
+		priorVal = *prior
+	}
+
+	decisions := Decide(Inputs{
+		Tickets:  tickets,
+		Plans:    plans,
+		Snapshot: snap,
+		Budgets:  FloorProvider{Floors: cfg.AgentBudgetFloors},
+		Now:      time.Now(),
+		Prior:    priorVal,
+		Config:   cfg,
+	})
+
+	for _, d := range decisions {
+		logf(out, "%s\n", formatDecision(d))
+	}
+
+	if dryRun {
+		return decisions
+	}
+
+	for _, d := range decisions {
+		if d.Action != ActionDispatch || d.Plan == nil {
+			continue
+		}
+		err := run.Run(run.Opts{
+			Workflow: "implement",
+			Ticket:   filepath.Join(".plans", filepath.Base(d.Plan.Path)),
+			Agent:    d.Agent,
+			Session:  cfg.Session,
+			Dir:      dirByRepo[d.Ticket.Repo],
+		}, ctrl)
+		if err != nil {
+			logf(out, "dispatch: #%d run failed: %v\n", d.Ticket.Number, err)
+			continue
+		}
+		if prior != nil {
+			*prior++
+		}
+	}
+	return decisions
+}
+
+// RunLoop runs RunOnce immediately and then on every interval tick, threading
+// the daily-quota tally in memory (it resets on process restart — acceptable for
+// #45). It blocks until the process exits.
+func RunLoop(cfg Config, ctrl run.Controller, interval time.Duration, out io.Writer) {
+	prior := 0
+	RunOnce(cfg, ctrl, false, out, &prior)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		RunOnce(cfg, ctrl, false, out, &prior)
+	}
+}
+
+// logf writes a formatted progress line, ignoring write errors (logging to a
+// terminal must never abort a dispatch pass).
+func logf(out io.Writer, format string, args ...any) {
+	_, _ = fmt.Fprintf(out, format, args...)
+}
+
+// formatDecision renders one decision as a single log line. Dispatch lines carry
+// the resolved agent and plan file so the table is self-explanatory.
+func formatDecision(d Decision) string {
+	if d.Action == ActionDispatch && d.Plan != nil {
+		return fmt.Sprintf("#%d dispatch (%s, %s): %s",
+			d.Ticket.Number, d.Agent, filepath.Base(d.Plan.Path), d.Reason)
+	}
+	return fmt.Sprintf("#%d skip: %s", d.Ticket.Number, d.Reason)
+}

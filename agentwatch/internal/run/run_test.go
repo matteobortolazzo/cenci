@@ -78,6 +78,28 @@ func TestRunSpawnsWindowAndPinsName(t *testing.T) {
 	}
 }
 
+func TestRunPrependsDir(t *testing.T) {
+	m := &mockCtrl{session: "work"}
+	opts := noConfigOpts(t)
+	opts.Workflow, opts.Ticket = "implement", "40"
+	opts.Dir = "/repos/my project"
+
+	if err := Run(opts, m); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(m.windows) != 1 {
+		t.Fatalf("expected 1 NewWindow, got %d", len(m.windows))
+	}
+	cmd := m.windows[0].cmd
+	// The command must start by cd'ing into the (quoted) dir, then run the agent.
+	if !strings.HasPrefix(cmd, "cd '/repos/my project' && ") {
+		t.Errorf("command missing cd prefix: %q", cmd)
+	}
+	if !strings.Contains(cmd, "/ccflow:implement 40") {
+		t.Errorf("command dropped the workflow: %q", cmd)
+	}
+}
+
 func TestRunRefusesGroupedSession(t *testing.T) {
 	m := &mockCtrl{session: "work", grouped: true}
 	opts := noConfigOpts(t)

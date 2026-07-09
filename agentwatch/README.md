@@ -187,6 +187,105 @@ Only the built-in Claude templates ship today; Codex command templates are track
 [#33](https://github.com/matteobortolazzo/claude-tools/issues/33). Until one is
 configured, `--agent codex` exits with a helpful "no launch template" error.
 
+## Auto-dispatch (`agentwatch dispatch`)
+
+Once planning is human-gated and an approved plan shows up on the board as the
+`Planned` state, *picking it up* is pure policy — no LLM in the dispatcher.
+`agentwatch dispatch` walks the configured repos, matches each `Planned` ticket to
+its approved `.plans/<id>-*.md` file, checks capacity/budget gates, and — for every
+ticket that clears them — runs exactly what a human would press:
+`agentwatch run implement .plans/<file> --agent <chosen>`. The intelligence stays
+inside the dispatched sessions; the dispatcher is config plus a pure decision
+function.
+
+```bash
+# Print the decision table without spawning anything
+agentwatch dispatch --dry-run
+# #45 skip: not Planned
+# #78 dispatch (claude, 78-add-cache.md): dispatch
+
+# Run a single pass
+agentwatch dispatch --once
+
+# Run continuously, re-evaluating every 5 minutes
+agentwatch dispatch --interval 5m
+```
+
+| Flag | Purpose |
+|------|---------|
+| `--once` | Run a single dispatch pass then exit (the default when neither `--once` nor `--interval` is given) |
+| `--interval <dur>` | Re-run on this interval (e.g. `5m`); mutually exclusive with `--once` |
+| `--dry-run` | Print the full decision table and dispatch nothing |
+| `--config <path>` | Config file (default: `$XDG_CONFIG_HOME/agentwatch/config.json`) |
+
+Every ticket yields exactly one logged decision — dispatched or skipped, always with
+a reason — so nothing fails silently.
+
+### Pickup rules and gates
+
+A ticket is dispatched only when **all** of these hold, evaluated in order (the first
+failing gate is the logged skip reason):
+
+1. carries `Planned`, not `Blocked`, and has no open linked PR;
+2. a matching plan for the ticket exists with `status: approved`;
+3. the plan is fresh — default-branch commits since its `planCommitSha` are within
+   `planStalenessTolerance` (else `plan stale, re-plan`);
+4. **siblings serialize** — if the plan is a child (`isChild: true`), it waits while
+   any sibling (same `parentId`) is active (`Working`, an open PR, or a running
+   window) or was already dispatched this pass, so at most one child per parent runs
+   at a time;
+5. the daemon is reachable (else `daemon unreachable` — never dispatch on unknown
+   state);
+6. fewer than `needInputThreshold` windows are awaiting input;
+7. `running + dispatched-this-pass` is below `concurrencyCap`;
+8. the daily quota is not yet spent;
+9. the current local time is outside `quietHours`;
+10. the resolved agent still has budget.
+
+### Configuration
+
+Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` block
+(defaults apply when it is absent):
+
+```json
+{
+  "dispatch": {
+    "repos": [
+      { "repo": "owner/name", "dir": "/path/to/repo" }
+    ],
+    "session": "work",
+    "concurrencyCap": 3,
+    "needInputThreshold": 1,
+    "dailyQuota": 20,
+    "quietHours": { "startHour": 22, "endHour": 7 },
+    "planStalenessTolerance": 5,
+    "defaultAgent": "claude",
+    "agentBudgetFloors": { "claude": 0 }
+  }
+}
+```
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `repos` | — | Repos to scan; each `dir` holds that repo's `.plans/` and git tree, and a dispatched session `cd`s into it |
+| `session` | current | Target tmux session for dispatched windows |
+| `concurrencyCap` | `3` | Max concurrent running sessions (counts in-flight windows plus this pass's dispatches) |
+| `needInputThreshold` | `1` | Pause dispatch when at least this many windows await input |
+| `dailyQuota` | `20` | Max dispatches per process run (resets on restart) |
+| `quietHours` | none | Local-clock window to suppress dispatch; `startHour > endHour` wraps midnight, `start == end` disables |
+| `planStalenessTolerance` | `5` | Max commits a plan may fall behind before it is skipped as stale |
+| `defaultAgent` | `claude` | Agent used when a ticket has no `agent:<name>` label |
+| `agentBudgetFloors` | none | Per-agent headroom floor; `0` pins an agent to "budget exhausted" (a stub until real usage accounting lands) |
+
+An agent is routed per ticket from an `agent:<name>` label, falling back to
+`defaultAgent`.
+
+> **Known limitation:** shipped alone, a failed dispatch stalls silently — a dead
+> session leaves its ticket in `Working`, and pickup requires `Planned`. Failure
+> reconciliation and daemon-embedded scheduling are tracked separately
+> ([#46](https://github.com/matteobortolazzo/claude-tools/issues/46)); real per-agent
+> usage accounting is [#77](https://github.com/matteobortolazzo/claude-tools/issues/77).
+
 ## Advanced / development
 
 The marketplace install above provisions the binary and daemon automatically. You
