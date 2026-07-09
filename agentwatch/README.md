@@ -77,8 +77,8 @@ This repository also includes a Codex plugin manifest at `plugin/codex/.codex-pl
 Plugins and their bundled hooks are stable and enabled by default in current Codex
 releases — no feature flag is required.
 
-Full self-contained Codex bootstrap is tracked in
-[#33](https://github.com/matteobortolazzo/claude-tools/issues/33).
+The Codex hooks self-bootstrap the binary and daemon on `SessionStart` (parity
+with the Claude plugin) — see the [Codex plugin README](plugin/codex/README.md#binary-and-daemon-self-bootstrapping).
 
 ## Advanced / development
 

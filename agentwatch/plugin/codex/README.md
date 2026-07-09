@@ -8,25 +8,29 @@ Forwards Codex lifecycle hooks to `agentwatch notify` so the agentwatch daemon c
 - `agentwatch` daemon running in the same tmux/server environment
 - Codex hooks enabled (default in current Codex releases)
 
-## Binary and daemon (reuse from the Claude Code plugin)
+## Binary and daemon (self-bootstrapping)
 
-Unlike the Claude Code plugin, these Codex hooks do **not** bootstrap the binary
-themselves — they call a bare `agentwatch` on `$PATH` and rely on a shared host
-daemon. Provision it one of two ways:
+These Codex hooks bootstrap themselves — no manual setup and no dependency on the
+Claude Code plugin. On `SessionStart`, `bootstrap.sh` runs detached and:
 
-- **Recommended:** install the Claude Code plugin
-  (`claude plugin install agentwatch`). Its SessionStart hook downloads the
-  `agentwatch` binary and starts the daemon; Codex then reuses that same daemon.
-  (Note: the plugin installs the binary into the plugin's `bin/`, not `$PATH`, so
-  for Codex you still need `agentwatch` reachable on `$PATH` — symlink or copy the
-  plugin binary, or use the manual install below.)
-- **Codex-only:** install the binary manually
-  (`go install github.com/matteobortolazzo/claude-tools/agentwatch@latest` or
-  `make build`) and start the daemon once (`agentwatch`). See the main
-  [README](../../README.md#advanced--development).
+- downloads the release binary matching the plugin version and SHA-256-verifies it
+  against the release `checksums.txt`;
+- installs it to the plugin's `bin/` and symlinks it onto `$PATH` (preferring the
+  first existing writable `$PATH` entry, falling back to `~/.local/bin` with a
+  one-line "add it to your PATH" hint in the log) so the hooks' bare `agentwatch`
+  resolves;
+- autostarts the daemon.
 
-Full self-contained Codex bootstrap (matching the Claude plugin) is tracked in
-[#33](https://github.com/matteobortolazzo/claude-tools/issues/33).
+It is idempotent: once the version-matched binary and daemon are provisioned, a
+re-run is a no-op (including the common case where the Claude Code plugin already
+bootstrapped the shared daemon). Everything is non-fatal — failures log one line to
+`${TMPDIR:-/tmp}/agentwatch-bootstrap.log` and never block the session. If a machine
+also runs the Claude plugin, both share the same host daemon.
+
+**Manual / Codex-only install** (alternative): install the binary yourself
+(`go install github.com/matteobortolazzo/claude-tools/agentwatch@latest` or
+`make build`) and start the daemon once (`agentwatch`). See the main
+[README](../../README.md#advanced--development).
 
 ## Manual hook install
 
