@@ -148,6 +148,59 @@ func TestNoArgs_NotUnknownSubcommand(t *testing.T) {
 	}
 }
 
+func TestRunSubcommandRoutes(t *testing.T) {
+	// `run` with no workflow is a usage error (exit 2) — but must never be
+	// mistaken for an unknown subcommand.
+	cmd := exec.Command(binaryPath, "run")
+	output, _ := cmd.CombinedOutput()
+	if strings.Contains(string(output), "unknown subcommand") {
+		t.Errorf("run must route to the launcher, got:\n%s", output)
+	}
+}
+
+func TestRunDryRunPrintsCommandAndWindowName(t *testing.T) {
+	noCfg := filepath.Join(t.TempDir(), "none.json")
+	cmd := exec.Command(binaryPath, "run", "implement", "40",
+		"--slug", "agentwatch-run", "--session", "demo", "--config", noCfg, "--dry-run")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dry-run failed: %v\n%s", err, output)
+	}
+	s := string(output)
+	if !strings.Contains(s, "40-agentwatch-run") {
+		t.Errorf("expected window name 40-agentwatch-run, got:\n%s", s)
+	}
+	if !strings.Contains(s, "claude") || !strings.Contains(s, "/ccflow:implement 40") {
+		t.Errorf("expected claude command with the ccflow skill, got:\n%s", s)
+	}
+}
+
+func TestRunDryRunSandboxUsesSandboxCommand(t *testing.T) {
+	noCfg := filepath.Join(t.TempDir(), "none.json")
+	cmd := exec.Command(binaryPath, "run", "refine", "40",
+		"--slug", "demo", "--session", "demo", "--config", noCfg, "--sandbox", "--dry-run")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandbox dry-run failed: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "claude-sand") {
+		t.Errorf("expected claude-sand command, got:\n%s", output)
+	}
+}
+
+func TestRunCodexWithoutTemplateErrors(t *testing.T) {
+	noCfg := filepath.Join(t.TempDir(), "none.json")
+	cmd := exec.Command(binaryPath, "run", "implement", "40",
+		"--agent", "codex", "--session", "demo", "--config", noCfg, "--dry-run")
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected non-zero exit when no codex template exists")
+	}
+	if !strings.Contains(strings.ToLower(string(output)), "codex") {
+		t.Errorf("expected an error mentioning codex, got:\n%s", output)
+	}
+}
+
 func TestStatusAndWaybarSubcommandsBothRoute(t *testing.T) {
 	// Both "status" and its hidden alias "waybar" must route to the status
 	// frontend. With no daemon on the socket they exit 1 with no output —

@@ -67,6 +67,39 @@ func (c *ExecClient) GetWindowOption(target string, key string) (string, error) 
 	return strings.TrimSpace(out), nil
 }
 
+// CurrentSession returns the name of the tmux session the caller is inside.
+// It errors when not run within a tmux client.
+//
+// These launcher-facing methods are intentionally kept OFF the daemon-facing
+// Client interface so the frontend seam stays unchanged; the run package
+// defines its own small consumer interface that *ExecClient satisfies.
+func (c *ExecClient) CurrentSession() (string, error) {
+	out, err := tmuxCmd("display-message", "-p", "#{session_name}")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// IsGroupedSession reports whether the given session is part of a session
+// group. New windows propagate to every session in a group, so the launcher
+// refuses to spawn into one.
+func (c *ExecClient) IsGroupedSession(session string) (bool, error) {
+	out, err := tmuxCmd("display-message", "-t", session, "-p", "#{session_grouped}")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) == "1", nil
+}
+
+// NewWindow creates a detached window named name in the given session running
+// shellCommand. shellCommand is passed to tmux as a single argument, so it must
+// already be a valid shell command line (see run.shellJoin).
+func (c *ExecClient) NewWindow(session, name, shellCommand string) error {
+	_, err := tmuxCmd("new-window", "-d", "-t", session+":", "-n", name, shellCommand)
+	return err
+}
+
 func tmuxCmd(args ...string) (string, error) {
 	cmd := exec.Command("tmux", args...)
 	var stdout, stderr bytes.Buffer

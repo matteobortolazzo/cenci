@@ -112,12 +112,16 @@ back as `window_name` in its status snapshots.
 
 What's missing is ownership of that contract (gap 7). Three pieces close it:
 
-- **A launcher instead of personal scripts** — `agentwatch run <workflow> <ticket>
-  [--agent claude|codex]` (ticket 12): config-driven mapping of (agent, workflow) →
-  command template, owns the `<number>-<slug>` naming, chooses sandbox vs host, wires
-  `/goal`. A board action shrinks to `command: "agentwatch run implement {number}"`.
-  Which agent implements is a per-dispatch choice — Claude Code or Codex today
-  depending on the work; opencode later is pure config, no code. This is also the
+- **A launcher instead of personal scripts** — `agentwatch run <workflow> [ticket]
+  [--agent claude|codex]` (ticket 12, ✅ delivered): built-in Go templates cover claude
+  refine/design/implement zero-config, with an optional
+  `~/.config/agentwatch/config.json` overriding them and adding agents/workflows. It
+  owns the `<number>-<slug>` naming (setting `automatic-rename off` so the daemon
+  preserves the join key), chooses sandbox vs host (`claude`→`claude-sand`), and refuses
+  grouped sessions. A board action shrinks to
+  `command: "agentwatch run implement {number}"`. Which agent implements is a
+  per-dispatch choice — Claude Code or Codex today depending on the work; opencode later
+  is pure config, no code. This is also the
   future *agent-orchestrator* interface: a `/loop`-driven policy ("dispatch implement
   for every card in Designed, cap concurrency at N") calls the same CLI a human
   keypress does — human gates stay inside the dispatched sessions (refine/design
@@ -201,7 +205,7 @@ Resolved 2026-07-09 (orchestration layer):
 | 9 | docs: one-package README | [#32](https://github.com/matteobortolazzo/claude-tools/issues/32) | root README rewrite around the layers + single install path |
 | 10 | codex: first-class support audit | [#33](https://github.com/matteobortolazzo/claude-tools/issues/33) | define proper Codex support per layer → follow-up tickets; includes Codex launcher templates for ticket 12 |
 | 11 | agentwatch: public status client package | [#39](https://github.com/matteobortolazzo/claude-tools/issues/39) | export read-side snapshot types + subscribe client (`pkg/watch`); additive-only JSON contract |
-| 12 | agentwatch: `run` launcher subcommand | [#40](https://github.com/matteobortolazzo/claude-tools/issues/40) | agent-agnostic dispatch (claude/codex), session naming, sandbox choice, `/goal` wiring; replaces personal scripts |
+| 12 | ✅ agentwatch: `run` launcher subcommand | [#40](https://github.com/matteobortolazzo/claude-tools/issues/40) | agent-agnostic dispatch (claude/codex), session naming, sandbox choice, `/goal` wiring; replaces personal scripts |
 | 13 | ccflow: `In Review` board state | [#41](https://github.com/matteobortolazzo/claude-tools/issues/41) | phase 9 sets `In Review` at PR-open; babysit sets `Implemented` on merge |
 | 14 | docs: board-orchestration recipe | [#42](https://github.com/matteobortolazzo/claude-tools/issues/42) | `docs/orchestration.md`: state machine, example board config, join-key convention, multi-agent notes |
 | 15 | lazyboards: agent status on cards | [lazyboards#255](https://github.com/matteobortolazzo/lazyboards/issues/255) | subscribe via ticket 11's client, badge cards, NeedInput loudest, status-bar summary |

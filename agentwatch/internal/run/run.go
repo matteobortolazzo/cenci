@@ -1,0 +1,167 @@
+package run
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"strings"
+)
+
+// Controller is the small consumer-side tmux interface the launcher needs.
+// *tmux.ExecClient satisfies it structurally (SetWindowOption already exists;
+// CurrentSession/IsGroupedSession/NewWindow are added alongside it). Tests use
+// their own mock.
+type Controller interface {
+	CurrentSession() (string, error)
+	IsGroupedSession(session string) (bool, error)
+	NewWindow(session, name, shellCommand string) error
+	SetWindowOption(target, key, value string) error
+}
+
+// Opts holds the resolved launcher inputs, mirroring the `run` flags.
+type Opts struct {
+	Workflow   string
+	Ticket     string
+	Agent      string // --agent; empty falls back to config defaultAgent then "claude"
+	Sandbox    bool   // resolved --sandbox value; only honored when SandboxSet
+	SandboxSet bool   // whether --sandbox/--no-sandbox was passed (flag > config)
+	Model      string // --model
+	Session    string // --session; empty uses the current tmux session
+	Slug       string // --slug
+	ConfigPath string // --config
+	DryRun     bool   // --dry-run
+
+	// GHTitle overrides the gh title lookup; nil uses the real gh CLI. Set in
+	// tests to keep window-name resolution deterministic.
+	GHTitle func(number string) string
+	// Out receives dry-run output; nil defaults to os.Stdout.
+	Out io.Writer
+}
+
+// Run resolves the (agent, workflow) command and spawns a detached tmux window
+// named <number>-<slug> running it. The window is set automatic-rename off so
+// the daemon later preserves the join key instead of overwriting it with a
+// detected task name. With DryRun it prints the resolution and spawns nothing.
+func Run(opts Opts, ctrl Controller) error {
+	out := opts.Out
+	if out == nil {
+		out = os.Stdout
+	}
+
+	cfg, err := Load(opts.ConfigPath)
+	if err != nil {
+		return err
+	}
+
+	// 1. Resolve agent: flag > config defaultAgent > "claude".
+	agent := strings.TrimSpace(opts.Agent)
+	if agent == "" {
+		agent = cfg.DefaultAgent
+	}
+	if agent == "" {
+		agent = "claude"
+	}
+
+	// Resolve sandbox: explicit flag wins, else config default (else host).
+	sandbox := opts.Sandbox
+	if !opts.SandboxSet && cfg.Sandbox != nil {
+		sandbox = *cfg.Sandbox
+	}
+
+	// 2 + 5. Resolve template and build the launcher command.
+	argv, err := cfg.BuildCommand(agent, opts.Workflow, opts.Ticket, opts.Model, sandbox)
+	if err != nil {
+		return err
+	}
+	shellCommand := shellJoin(argv)
+
+	// 3. Resolve target session: flag > current tmux session.
+	session := strings.TrimSpace(opts.Session)
+	if session == "" {
+		s, serr := ctrl.CurrentSession()
+		s = strings.TrimSpace(s)
+		switch {
+		case serr == nil && s != "":
+			session = s
+		case opts.DryRun:
+			session = "(current tmux session)"
+		default:
+			return fmt.Errorf("not inside a tmux session; pass --session <name> or run from within tmux")
+		}
+	}
+
+	// 6. Compute the window join key.
+	titleFn := opts.GHTitle
+	if titleFn == nil {
+		titleFn = ghTitle
+	}
+	gh := ""
+	if opts.Slug == "" && isNumeric(opts.Ticket) {
+		gh = titleFn(opts.Ticket)
+	}
+	name := windowName(opts.Ticket, opts.Slug, gh)
+	if name == "" {
+		name = slugify(opts.Workflow)
+	}
+
+	// 7. Dry-run: print the resolution and stop before touching tmux state.
+	if opts.DryRun {
+		_, err := fmt.Fprintf(out, "session: %s\nwindow:  %s\ncommand: %s\n", session, name, shellCommand)
+		return err
+	}
+
+	// 4. Safety guard: refuse grouped sessions — a new window would propagate
+	// to every session in the group.
+	grouped, err := ctrl.IsGroupedSession(session)
+	if err != nil {
+		return fmt.Errorf("checking session %q: %w", session, err)
+	}
+	if grouped {
+		return fmt.Errorf("refusing to spawn into grouped session %q: new windows propagate to all sessions in the group; target an ungrouped session with --session", session)
+	}
+
+	if err := ctrl.NewWindow(session, name, shellCommand); err != nil {
+		return fmt.Errorf("creating window %q in session %q: %w", name, session, err)
+	}
+	// Pin the name so the daemon flags the window ManuallyNamed and preserves
+	// the join key instead of renaming it to the detected task.
+	target := session + ":" + name
+	if err := ctrl.SetWindowOption(target, "automatic-rename", "off"); err != nil {
+		return fmt.Errorf("setting automatic-rename off on %q: %w", target, err)
+	}
+	return nil
+}
+
+// shellJoin quotes each arg and joins them into a single POSIX shell command
+// line suitable for tmux new-window (which runs it via the shell).
+func shellJoin(argv []string) string {
+	quoted := make([]string, len(argv))
+	for i, a := range argv {
+		quoted[i] = shellQuote(a)
+	}
+	return strings.Join(quoted, " ")
+}
+
+// shellQuote single-quotes s when it contains anything outside a conservative
+// safe set, escaping embedded single quotes. Safe words pass through unquoted.
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	for _, r := range s {
+		if !isShellSafe(r) {
+			return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+		}
+	}
+	return s
+}
+
+// isShellSafe reports whether r may appear unquoted in a POSIX shell word.
+func isShellSafe(r rune) bool {
+	switch {
+	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		return true
+	default:
+		return strings.ContainsRune("-_./:=@%+", r)
+	}
+}

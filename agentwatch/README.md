@@ -80,6 +80,95 @@ releases — no feature flag is required.
 Full self-contained Codex bootstrap is tracked in
 [#33](https://github.com/matteobortolazzo/claude-tools/issues/33).
 
+## Dispatching workflows (`agentwatch run`)
+
+`agentwatch run` launches a coding-agent CLI for a workflow in a detached tmux
+window, owning the `<number>-<slug>` window name that ties board cards, tmux windows,
+and watcher snapshots together. It replaces the personal dispatch scripts that used to
+live in `~/.config/lazyboards/scripts/`.
+
+```bash
+# Refine/design/implement ticket 40 with Claude in the current tmux session
+agentwatch run implement 40
+
+# Inspect the resolution without spawning anything
+agentwatch run implement 40 --slug my-feature --dry-run
+# session: my-tmux-session
+# window:  40-my-feature
+# command: claude -- '/ccflow:implement 40'
+```
+
+Positional args are `<workflow> [ticket]`; flags may follow them.
+
+| Flag | Purpose |
+|------|---------|
+| `--agent <name>` | Agent to launch (`claude`, `codex`, …); default from config, else `claude` |
+| `--sandbox` / `--no-sandbox` | Force the sandbox command (`claude`→`claude-sand`) or a host launch; overrides the config default |
+| `--model <model>` | Model override passed to the agent (substituted into `{model}`, else appended as `--model`) |
+| `--session <name>` | Target tmux session (default: the current session) |
+| `--slug <slug>` | Window-name slug (default: the gh issue title, else the bare ticket) |
+| `--config <path>` | Config file (default: `$XDG_CONFIG_HOME/agentwatch/config.json`) |
+| `--dry-run` | Print the resolved session, window name, and command without spawning |
+
+A board column action shrinks to a single line:
+
+```yaml
+command: "agentwatch run implement {number}"
+```
+
+### The join key survives the daemon
+
+`run` creates the window with `automatic-rename off`. When the daemon later tracks it,
+it sees the window is manually named and preserves `<number>-<slug>` instead of
+overwriting it with the detected task name — so the join key flows through to the
+status snapshot's `window_name`.
+
+### Grouped-session guard
+
+New windows propagate to every session in a tmux session group, so `run` refuses to
+spawn into a grouped session (non-zero exit, no window created). Pass an ungrouped
+`--session` to target a specific session.
+
+### Configuration
+
+Built-in Go templates cover Claude `refine`/`design`/`implement` with zero config. An
+optional `config.json` (respecting `$XDG_CONFIG_HOME`, or `--config`) overrides the
+defaults and adds agents or workflows — the tokens `{ticket}` and `{model}` are
+substituted at launch:
+
+```json
+{
+  "defaultAgent": "claude",
+  "sandbox": false,
+  "agents": {
+    "claude": {
+      "command": "claude",
+      "sandboxCommand": "claude-sand",
+      "workflows": {
+        "implement": { "args": ["--", "/ccflow:implement {ticket}"] }
+      }
+    },
+    "codex": {
+      "command": "codex",
+      "model": "gpt-5-codex",
+      "workflows": {
+        "implement": { "args": ["exec", "/ccflow:implement {ticket}"] }
+      }
+    },
+    "opencode": {
+      "command": "opencode",
+      "workflows": {
+        "implement": { "args": ["run", "implement {ticket}"] }
+      }
+    }
+  }
+}
+```
+
+Only the built-in Claude templates ship today; Codex command templates are tracked in
+[#33](https://github.com/matteobortolazzo/claude-tools/issues/33). Until one is
+configured, `--agent codex` exits with a helpful "no launch template" error.
+
 ## Advanced / development
 
 The marketplace install above provisions the binary and daemon automatically. You
