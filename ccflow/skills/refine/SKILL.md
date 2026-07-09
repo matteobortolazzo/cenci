@@ -50,6 +50,7 @@ If any of these conditions are true, warn the user and ask for confirmation usin
 |-----------|---------|
 | Ticket is closed/resolved | "This ticket is closed/resolved. Do you still want to refine it?" |
 | Has "Refined" label/tag | "This ticket is already marked as Refined. Do you want to re-refine it?" |
+| Has "Planned" label/tag | "This ticket already has an approved plan (Planned). Do you want to re-refine it?" |
 | Has "Working" label/tag | "This ticket is currently being worked on. Do you want to re-refine it?" |
 | Has "In Review" label/tag | "This ticket has an open PR (In Review). Do you want to re-refine it?" |
 | Has "Implemented" label/tag | "This ticket is already marked as Implemented (its PR merged). Do you want to re-refine it?" |

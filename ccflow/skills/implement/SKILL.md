@@ -193,6 +193,11 @@ If the digest's `labels` already include **"In Review"** or **"Implemented"**, a
 
 If the user says no → stop. If yes → proceed with the pipeline. This is a warning only — it does not block.
 
+If the digest's `labels` include **"Planned"** but this run is **not** plan-file mode (`hasPlanFile` is false — e.g. the plan file was deleted or lives on another host), an approved plan was recorded for this ticket but no plan-file argument reached this run. Display a soft, non-blocking note via `AskUserQuestion` — mirror the tone above:
+> "This ticket is marked `Planned` (an approved plan was persisted), but you didn't pass a plan file. If the plan file still exists under `.plans/`, re-run as `/ccflow:implement .plans/<file>` to pick it up (the plan-file auto-detection also offers this when a matching file is found); otherwise you can re-plan from scratch. Proceed with a fresh plan anyway?"
+
+If the user says no → stop. If yes → proceed (a fresh plan re-applies `Planned` at the end). This is a warning only — it does not block.
+
 ### Design Check (hard gate)
 
 If the ticket is classified as frontend — its title or the digest summary mention UI components, pages, views, layouts, forms, modals, visual design, styling, CSS, animations, themes, or frontend frameworks (React, Angular, Vue, Svelte, etc.) — set `isUiTicket = true`. Phase 4 and Phase 9 use this flag for screenshot capture and PR embedding.
@@ -219,12 +224,19 @@ This is informational only — it does not block the pipeline.
 
 ## Label "Working"
 
-**If ticketless mode:** Skip this section.
+**If ticketless mode:** Skip this section entirely — ticketless mode applies no board labels.
 
-**If ticket mode:** Before starting the pipeline, add the "Working" label to signal work in progress:
-```bash
-gh issue edit <number> --repo <owner>/<repo> --add-label "Working"
-```
+**If ticket mode:** Before starting the pipeline, add the "Working" label to signal work in progress. The exact swap depends on how this run entered the pipeline:
+
+- **Plan-file mode** (`hasPlanFile` true): this is the approved-plan pickup. The ticket carries `Planned` from when the plan was persisted, so swap it for `Working`:
+  ```bash
+  gh issue edit <number> --repo <owner>/<repo> --add-label "Working" --remove-label "Planned"
+  ```
+- **New-plan ticket mode** (`hasPlanFile` false): add `Working`:
+  ```bash
+  gh issue edit <number> --repo <owner>/<repo> --add-label "Working"
+  ```
+  If this session was entered via **"Re-plan from scratch"** over an existing plan (the plan-file auto-detection offered "Use existing plan" / "Re-plan from scratch" and the user chose to re-plan), the ticket still carries `Planned` from the discarded plan — also remove it: `--add-label "Working" --remove-label "Planned"`. In a new-plan session `Working` is short-lived: Phase 1 swaps it for `Planned` again when it persists the fresh approved plan and stops.
 
 ## Pipeline
 
@@ -281,6 +293,7 @@ Read `.claude/config.json` for optional `ccflow` settings:
 - `ccflow.reviewConcurrency: "sequential"` — run the same Phase 6 + 7 reviewers one after another instead of in parallel. Quality gates are unchanged; this only smooths usage limits. Default is `"parallel"`.
 - `ccflow.diffContextMode: "file"` — before Phase 6 + 7, write the full diff to `/tmp/claude/ccflow-diff.patch` and pass reviewers the path plus changed file list and stat. Reviewers read only the hunks they need. Default is `"inline"` for small diffs.
 - `ccflow.goalAutopilot: false` — opt out of the Goal Autopilot (see the Pipeline section). Default (unset or `true`) arms a `/goal` completion condition at Phase 2 start when Claude Code ≥ 2.1.139, so a mid-phase stop resumes instead of ending the run. This is not a cost control — it trades a small evaluation overhead per turn for the completion guarantee; set it `false` to run phases 2–9 without one.
+- `ccflow.planComment: true` — not a cost control. When `true`, Phase 1 also posts the approved plan as a ticket comment (ticket mode only) for audit / off-host visibility after marking the ticket `Planned`; `.plans/` stays the executable source of truth. Default (unset or `false`): no comment. Canonical schema lives in `/ccflow:configure`.
 
 If a cost-control setting conflicts with quality, ignore the setting and explain why.
 
