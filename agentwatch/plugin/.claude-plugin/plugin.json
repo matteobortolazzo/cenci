@@ -1,5 +1,5 @@
 {
   "name": "agentwatch",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Watch your coding agents (Claude Code, Codex) — live session status across tmux, waybar, noctalia, DMS, and the macOS menu bar"
 }
