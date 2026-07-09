@@ -95,6 +95,8 @@ The determined mode (ticket or ticketless) governs conditional behavior througho
 
 **Before delegating to the context-gatherer (or before proceeding in ticketless mode)**, read `.claude/settings.json` and `.claude/config.json` and verify the required permissions are present. This check is mandatory before any context gathering: the gatherer runs read-only `gh` commands in a subagent, which is only safe once `Bash(gh *)` permission and `gh` authentication are verified here in the main agent.
 
+**Container-profile fast-path**: After reading `.claude/config.json`, if `profile == "container"`, **skip steps 1 and 2 below** — under `--dangerously-skip-permissions` Claude Code ignores `permissions.allow/deny`, so permission verification and auto-fix are moot. Run **only step 3** (`gh auth status`): auth failures in the context-gatherer subagent deadlock silently regardless of the permission model, so this check is still required. Host profile or absent `profile` → run steps 1–3 unchanged.
+
 1. Check `permissions.allow` in `.claude/settings.json` contains **at minimum**:
    - `Write(*)`
    - `Edit(*)`

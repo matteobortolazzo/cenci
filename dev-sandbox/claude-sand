@@ -100,7 +100,7 @@ fi
 CLAUDE_CMD_ARGS=(--dangerously-skip-permissions)
 
 # ── Exec env forwarding (for attach path) ───────────────────────
-EXEC_ENV_ARGS=(-e "TMUX_PANE=${TMUX_PANE:-}")
+EXEC_ENV_ARGS=(-e "TMUX_PANE=${TMUX_PANE:-}" -e "CLAUDE_SAND=1")
 [[ -n "${CONTEXT7_API_KEY:-}" ]] && EXEC_ENV_ARGS+=(-e "CONTEXT7_API_KEY=${CONTEXT7_API_KEY}")
 
 # ── Attach to running container ─────────────────────────────────
@@ -142,6 +142,9 @@ RUN_ARGS=(
 
     # Terminal
     -e "TERM=${TERM:-xterm-256color}"
+
+    # Container marker (both docker & podman) — ccflow configure detects this
+    -e "CLAUDE_SAND=1"
 )
 
 # Git config (read-only, if exists)

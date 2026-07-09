@@ -41,12 +41,18 @@ gh auth login
 ```
 The `gh` CLI stores credentials in `~/.config/gh/hosts.yml`. It also respects `GITHUB_TOKEN`/`GH_TOKEN` env vars as a fallback for non-interactive environments.
 
-### Sandbox support (Linux / WSL2)
-Sandboxing provides OS-level filesystem and network isolation for autonomous execution. It requires:
+### Sandbox support (host profile — Linux / WSL2)
+
+ccflow runs under one of two **profiles**, auto-detected by `/ccflow:configure`:
+
+- **host** (default) — Claude Code runs on the host and its own sandbox is the boundary. The prerequisites below apply.
+- **container** — Claude Code runs inside the [`dev-sandbox`](../dev-sandbox) `claude-sand` container with `--dangerously-skip-permissions`. The **container is the boundary**, so configure auto-detects it (via the `CLAUDE_SAND=1` env var, or `/.dockerenv`) and uses the container profile: the host sandbox is skipped, along with Bash allowlists and permission auto-fix. No bubblewrap/socat needed. You can force it with `/ccflow:configure container` (or `/ccflow:configure host` to opt back out).
+
+The **host-profile** sandbox provides OS-level filesystem and network isolation for autonomous execution. It requires:
 - **bubblewrap** (`bwrap`): `sudo apt install bubblewrap` (or `sudo pacman -S bubblewrap`)
 - **socat**: `sudo apt install socat` (or `sudo pacman -S socat`)
 
-macOS sandbox support is built into Claude Code and requires no extra packages.
+macOS host-profile sandbox support is built into Claude Code and requires no extra packages.
 
 ## Installation
 
