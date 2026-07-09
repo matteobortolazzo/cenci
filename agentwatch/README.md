@@ -98,7 +98,22 @@ agentwatch run implement 40 --slug my-feature --dry-run
 # command: claude -- '/ccflow:implement 40'
 ```
 
-Positional args are `<workflow> [ticket]`; flags may follow them.
+Positional args are `<workflow> [ticket-id | task description] [additional context]`;
+flags may follow them. Everything after the workflow is forwarded verbatim as the
+skill argument (`/ccflow:<workflow> $ARGUMENTS`), so the same free-text forms the skills
+accept work here too — no quoting needed:
+
+```bash
+# Ticket id plus additional context → window 40-focus-on-the-api-layer
+agentwatch run implement 40 focus on the API layer
+
+# Ticketless task description → window add-dark-mode-toggle
+agentwatch run implement add dark mode toggle
+```
+
+The window name uses the first token as the `<number>-` prefix when it is a numeric
+ticket id (with the slug from `--slug`, else the gh title, else the trailing context);
+a non-numeric first token means the whole description is slugified.
 
 | Flag | Purpose |
 |------|---------|

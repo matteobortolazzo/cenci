@@ -32,32 +32,51 @@ func slugify(s string) string {
 	return strings.Join(parts, "-")
 }
 
-// windowName computes the <number>-<slug> join key. For a numeric ticket the
-// slug is used when present, otherwise a slugified gh title, otherwise the bare
-// number. A non-numeric ticket is itself slugified. The result is sanitized and
-// length-capped, keeping the leading number intact.
-func windowName(ticket, slug, ghTitle string) string {
-	effSlug := slugify(slug)
-	if effSlug == "" {
-		effSlug = slugify(ghTitle)
+// windowName computes the <number>-<slug> join key from the full workflow
+// argument (which mirrors the skills' `<ticket-id | task description>
+// [additional context]`). When the first token is a numeric ticket id, the slug
+// is taken from --slug, else a gh title, else any trailing context; the result
+// is `<number>-<slug>` or the bare number. A non-numeric argument (a free-text
+// task description) is slugified whole. The result is sanitized and capped,
+// keeping the leading number intact.
+func windowName(ticketArg, slug, ghTitle string) string {
+	fields := strings.Fields(ticketArg)
+	id := ""
+	if len(fields) > 0 {
+		id = strings.TrimPrefix(fields[0], "#")
 	}
 
-	var name string
-	switch {
-	case isNumeric(ticket):
+	if isNumeric(id) {
+		effSlug := slugify(slug)
+		if effSlug == "" {
+			effSlug = slugify(ghTitle)
+		}
+		if effSlug == "" && len(fields) > 1 {
+			effSlug = slugify(strings.Join(fields[1:], " "))
+		}
+		name := id
 		if effSlug != "" {
-			name = ticket + "-" + effSlug
-		} else {
-			name = ticket
+			name = id + "-" + effSlug
 		}
-	default:
-		name = slugify(ticket)
-		if name == "" {
-			name = effSlug
-		}
+		return capName(frontend.SanitizeName(name))
 	}
 
+	// Free-text task description: an explicit slug wins, else slugify it all.
+	name := slugify(slug)
+	if name == "" {
+		name = slugify(ticketArg)
+	}
 	return capName(frontend.SanitizeName(name))
+}
+
+// ticketID returns the first whitespace token of a workflow argument with any
+// leading '#' stripped — the ticket number the skills and gh operate on.
+func ticketID(ticketArg string) string {
+	fields := strings.Fields(ticketArg)
+	if len(fields) == 0 {
+		return ""
+	}
+	return strings.TrimPrefix(fields[0], "#")
 }
 
 func isNumeric(s string) bool {

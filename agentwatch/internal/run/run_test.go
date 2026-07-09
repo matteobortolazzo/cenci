@@ -171,11 +171,55 @@ func TestWindowName(t *testing.T) {
 		t.Errorf("non-numeric ticket = %q, want feature-x", got)
 	}
 
+	// Ticket id plus trailing context (the skills' `[additional context]`):
+	// the number stays the prefix, the context becomes the slug.
+	if got := windowName("42 focus on the API layer", "", ""); got != "42-focus-on-the-api-layer" {
+		t.Errorf("id+context = %q, want 42-focus-on-the-api-layer", got)
+	}
+	// A leading '#' on the id is stripped.
+	if got := windowName("#1 focus on API", "", ""); got != "1-focus-on-api" {
+		t.Errorf("hash id+context = %q, want 1-focus-on-api", got)
+	}
+	// Free-text task description (implement's ticketless mode).
+	if got := windowName("add dark mode toggle", "", ""); got != "add-dark-mode-toggle" {
+		t.Errorf("task description = %q, want add-dark-mode-toggle", got)
+	}
+	// gh title still wins over trailing context for the slug.
+	if got := windowName("42 raw context", "", "Nice Title"); got != "42-nice-title" {
+		t.Errorf("gh title should win = %q, want 42-nice-title", got)
+	}
+	// Explicit --slug beats everything.
+	if got := windowName("42 raw context", "chosen", "Nice Title"); got != "42-chosen" {
+		t.Errorf("explicit slug should win = %q, want 42-chosen", got)
+	}
+
 	long := windowName("40", strings.Repeat("a", 100), "")
 	if len([]rune(long)) > windowNameMaxLen {
 		t.Errorf("windowName not capped: len=%d (%q)", len([]rune(long)), long)
 	}
 	if !strings.HasPrefix(long, "40-") {
 		t.Errorf("cap dropped the numeric prefix: %q", long)
+	}
+}
+
+func TestRunForwardsFullTicketArgument(t *testing.T) {
+	m := &mockCtrl{session: "work"}
+	opts := noConfigOpts(t)
+	opts.Workflow = "implement"
+	opts.Ticket = "42 focus on the API layer"
+
+	if err := Run(opts, m); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(m.windows) != 1 {
+		t.Fatalf("expected 1 NewWindow, got %d", len(m.windows))
+	}
+	w := m.windows[0]
+	// The whole argument reaches the skill, not just the first token.
+	if !strings.Contains(w.cmd, "/ccflow:implement 42 focus on the API layer") {
+		t.Errorf("command dropped context: %q", w.cmd)
+	}
+	if w.name != "42-focus-on-the-api-layer" {
+		t.Errorf("window name = %q, want 42-focus-on-the-api-layer", w.name)
 	}
 }

@@ -186,8 +186,11 @@ func runRun(args []string) {
 		ConfigPath: *configPath,
 		DryRun:     *dryRun,
 	}
+	// Everything after the workflow is the skill argument: a ticket id or task
+	// description plus optional context (mirrors `/ccflow:<workflow> $ARGUMENTS`).
+	// Join so unquoted multi-word context survives shell splitting.
 	if len(positionals) >= 2 {
-		opts.Ticket = positionals[1]
+		opts.Ticket = strings.Join(positionals[1:], " ")
 	}
 	if *sandbox || *noSandbox {
 		opts.SandboxSet = true

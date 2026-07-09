@@ -20,7 +20,11 @@ type Controller interface {
 
 // Opts holds the resolved launcher inputs, mirroring the `run` flags.
 type Opts struct {
-	Workflow   string
+	Workflow string
+	// Ticket is the full skill argument: a ticket id or task description plus
+	// any additional context (e.g. "42 focus on the API layer"). It is
+	// substituted whole into {ticket}; only the first token drives gh lookup
+	// and the numeric window-name prefix.
 	Ticket     string
 	Agent      string // --agent; empty falls back to config defaultAgent then "claude"
 	Sandbox    bool   // resolved --sandbox value; only honored when SandboxSet
@@ -96,8 +100,8 @@ func Run(opts Opts, ctrl Controller) error {
 		titleFn = ghTitle
 	}
 	gh := ""
-	if opts.Slug == "" && isNumeric(opts.Ticket) {
-		gh = titleFn(opts.Ticket)
+	if id := ticketID(opts.Ticket); opts.Slug == "" && isNumeric(id) {
+		gh = titleFn(id)
 	}
 	name := windowName(opts.Ticket, opts.Slug, gh)
 	if name == "" {

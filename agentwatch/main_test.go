@@ -175,6 +175,27 @@ func TestRunDryRunPrintsCommandAndWindowName(t *testing.T) {
 	}
 }
 
+func TestRunForwardsUnquotedCustomText(t *testing.T) {
+	// Unquoted multi-word context (id + additional context) must all reach the
+	// skill argument, not just the first token.
+	// Use a non-existent issue number so the gh title lookup yields nothing and
+	// the trailing context deterministically drives the slug.
+	noCfg := filepath.Join(t.TempDir(), "none.json")
+	cmd := exec.Command(binaryPath, "run", "implement", "99999999", "focus", "on", "the", "API", "layer",
+		"--session", "demo", "--config", noCfg, "--dry-run")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("custom-text dry-run failed: %v\n%s", err, output)
+	}
+	s := string(output)
+	if !strings.Contains(s, "/ccflow:implement 99999999 focus on the API layer") {
+		t.Errorf("expected full argument forwarded, got:\n%s", s)
+	}
+	if !strings.Contains(s, "99999999-focus-on-the-api-layer") {
+		t.Errorf("expected window name 99999999-focus-on-the-api-layer, got:\n%s", s)
+	}
+}
+
 func TestRunDryRunSandboxUsesSandboxCommand(t *testing.T) {
 	noCfg := filepath.Join(t.TempDir(), "none.json")
 	cmd := exec.Command(binaryPath, "run", "refine", "40",
