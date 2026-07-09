@@ -73,3 +73,11 @@ jobs:
           gh api repos/${{ github.repository }}/git/refs \
             -f ref="refs/tags/agentwatch/v${NEW_VERSION}" \
             -f sha="$(git rev-parse HEAD)"
+
+          # Trigger the release. A tag pushed with GITHUB_TOKEN does NOT fire the
+          # release workflow's `on: push: tags` (recursion guard), but dispatching
+          # it IS allowed with GITHUB_TOKEN. Run the workflow definition from main
+          # (latest); it checks out the tag's commit to build.
+          gh workflow run agentwatch-release.yml \
+            --ref main \
+            -f version="${NEW_VERSION}"

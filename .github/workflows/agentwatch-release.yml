@@ -1,6 +1,17 @@
 name: agentwatch — Release
 
+# Triggered two ways:
+#   * push of an `agentwatch/v*` tag (manual/local tag pushes with a real token), and
+#   * workflow_dispatch from the version-bump job, which is how the automated path
+#     works: a tag *pushed by GITHUB_TOKEN* does NOT fire `on: push: tags` (GitHub's
+#     recursion guard), but workflow_dispatch/repository_dispatch ARE allowed with
+#     GITHUB_TOKEN — so the bump job dispatches this workflow explicitly.
 on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. 1.6.0 (no "agentwatch/v" prefix)'
+        required: true
   push:
     tags:
       - 'agentwatch/v*'
@@ -11,20 +22,57 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: agentwatch
     steps:
+      - name: Resolve version and tag
+        id: v
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#agentwatch/v}"
+          fi
+          VERSION="${VERSION#v}"   # tolerate a stray leading v
+          if [ -z "$VERSION" ]; then
+            echo "could not resolve version" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >>"$GITHUB_OUTPUT"
+          echo "tag=agentwatch/v${VERSION}" >>"$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
         with:
+          # Always build from the tag's commit, regardless of which ref dispatched us.
+          ref: refs/tags/agentwatch/v${{ steps.v.outputs.version }}
           fetch-depth: 0
+
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25.x'
-      - uses: goreleaser/goreleaser-action@v6
+
+      - name: Build release artifacts
+        uses: goreleaser/goreleaser-action@v6
         with:
           version: '~> v2'
-          args: release --clean
+          # OSS GoReleaser can't strip a monorepo tag prefix (agentwatch/vX.Y.Z) —
+          # that's Pro-only — so feed it a clean semver via GORELEASER_CURRENT_TAG,
+          # skip publish/validate, and publish to the prefixed tag ourselves below.
+          args: release --clean --skip=publish,validate
           workdir: agentwatch
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: v${{ steps.v.outputs.version }}
+
+      - name: Publish release to the agentwatch/v* tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.v.outputs.tag }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          assets=(agentwatch/dist/agentwatch_*.tar.gz agentwatch/dist/checksums.txt)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$TAG" "${assets[@]}" \
+              --title "agentwatch v${VERSION}" \
+              --notes "Automated release of agentwatch v${VERSION}."
+          fi
