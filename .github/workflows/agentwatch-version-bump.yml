@@ -63,9 +63,11 @@ jobs:
           # Update plugin.json and root marketplace.json
           jq --arg v "$NEW_VERSION" '.version = $v' agentwatch/plugin/.claude-plugin/plugin.json > tmp.json && mv tmp.json agentwatch/plugin/.claude-plugin/plugin.json
           jq --arg v "$NEW_VERSION" '(.plugins[] | select(.name == "agentwatch")).version = $v' .claude-plugin/marketplace.json > tmp.json && mv tmp.json .claude-plugin/marketplace.json
+          # Keep the Codex plugin manifest in sync so its self-bootstrap downloads the matching release
+          jq --arg v "$NEW_VERSION" '.version = $v' agentwatch/plugin/codex/.codex-plugin/plugin.json > tmp.json && mv tmp.json agentwatch/plugin/codex/.codex-plugin/plugin.json
 
           # Commit and push
-          git add agentwatch/plugin/.claude-plugin/plugin.json .claude-plugin/marketplace.json
+          git add agentwatch/plugin/.claude-plugin/plugin.json .claude-plugin/marketplace.json agentwatch/plugin/codex/.codex-plugin/plugin.json
           git commit -m "chore(release): agentwatch/v${NEW_VERSION}"
           git push
 
