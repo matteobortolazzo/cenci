@@ -47,18 +47,42 @@ func (d *Daemon) buildSnapshot() ipc.StateSnapshot {
 		})
 
 		snap.Summary.Total++
-		switch ws.Status {
-		case detect.StatusIdle:
-			snap.Summary.Idle++
-		case detect.StatusRunning:
-			snap.Summary.Running++
-		case detect.StatusDone:
-			snap.Summary.Done++
-		case detect.StatusStopped:
-			snap.Summary.Stopped++
-		case detect.StatusNeedInput:
-			snap.Summary.NeedInput++
+		countStatus(&snap.Summary, ws.Status)
+	}
+
+	// Paneless sessions render after tmux entries, with empty tmux fields.
+	keys := make([]string, 0, len(d.sessions))
+	for key, sess := range d.sessions {
+		if sess.TmuxPane == "" {
+			keys = append(keys, key)
 		}
 	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		sess := d.sessions[key]
+		snap.Windows = append(snap.Windows, ipc.WindowState{
+			WindowName: sess.TaskName,
+			TaskName:   sess.TaskName,
+			Status:     sess.Status.String(),
+			Agent:      sess.Agent,
+		})
+		snap.Summary.Total++
+		countStatus(&snap.Summary, sess.Status)
+	}
 	return snap
+}
+
+func countStatus(sum *ipc.StatusSummary, s detect.Status) {
+	switch s {
+	case detect.StatusIdle:
+		sum.Idle++
+	case detect.StatusRunning:
+		sum.Running++
+	case detect.StatusDone:
+		sum.Done++
+	case detect.StatusStopped:
+		sum.Stopped++
+	case detect.StatusNeedInput:
+		sum.NeedInput++
+	}
 }

@@ -11,6 +11,7 @@ import (
 // mockClient implements tmux.Client for testing.
 type mockClient struct {
 	panes           []tmux.PaneInfo
+	listCalls       int
 	renames         []renameCall
 	windowOpts      []windowOptCall
 	windowOptValues map[string]string // key: "target:key" → value
@@ -32,6 +33,7 @@ type windowOptCall struct {
 }
 
 func (m *mockClient) ListPanes() ([]tmux.PaneInfo, error) {
+	m.listCalls++
 	return m.panes, m.listErr
 }
 

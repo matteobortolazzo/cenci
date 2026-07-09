@@ -8,28 +8,33 @@ import (
 	"time"
 
 	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/config"
+	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/frontend"
 	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/ipc"
 	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/tmux"
 )
 
-// Daemon manages the event-driven loop and per-window state.
+// Daemon manages the event-driven loop and per-session state.
 type Daemon struct {
-	cfg     config.Config
-	client  tmux.Client
-	windows map[string]*windowState // key: window target (session:windowIdx)
-	panes   map[string]string       // key: pane ID (%5) → window target
-	ipc     *ipc.Server             // nil if IPC not enabled
-	events  <-chan ipc.HookEvent
+	cfg      config.Config
+	client   tmux.Client
+	sessions map[string]*frontend.SessionState // key: session ID (fallback "pane:<id>")
+	windows  map[string]*windowState           // key: window target (session:windowIdx)
+	panes    map[string]string                 // key: pane ID (%5) → window target
+	ipc      *ipc.Server                       // nil if IPC not enabled
+	events   <-chan ipc.HookEvent
+	now      func() time.Time // injectable clock for TTL tests
 }
 
 // newDaemon creates a Daemon with the given dependencies.
 func newDaemon(cfg config.Config, client tmux.Client, events <-chan ipc.HookEvent) *Daemon {
 	return &Daemon{
-		cfg:     cfg,
-		client:  client,
-		windows: make(map[string]*windowState),
-		panes:   make(map[string]string),
-		events:  events,
+		cfg:      cfg,
+		client:   client,
+		sessions: make(map[string]*frontend.SessionState),
+		windows:  make(map[string]*windowState),
+		panes:    make(map[string]string),
+		events:   events,
+		now:      time.Now,
 	}
 }
 
@@ -84,9 +89,39 @@ func (d *Daemon) loop(ctx context.Context) error {
 		case event := <-d.events:
 			d.handleEvent(event)
 		case <-sweep.C:
-			d.sweepStale()
+			changed := d.sweepStale()
+			if d.ttlSweep() {
+				changed = true
+			}
+			if changed {
+				d.broadcast()
+			}
 		}
 	}
+}
+
+// ttlSweep expires paneless sessions that have been idle past the configured
+// TTL. Pane-backed sessions are covered by the tmux pane sweep instead.
+// Reports whether any session was removed.
+func (d *Daemon) ttlSweep() bool {
+	if d.cfg.SessionTTL <= 0 {
+		return false
+	}
+	now := d.now()
+	changed := false
+	for key, sess := range d.sessions {
+		if sess.TmuxPane != "" {
+			continue
+		}
+		if now.Sub(sess.LastEvent) > d.cfg.SessionTTL {
+			if d.cfg.Verbose {
+				log.Printf("sweep: paneless session %s idle past TTL, removing", key)
+			}
+			delete(d.sessions, key)
+			changed = true
+		}
+	}
+	return changed
 }
 
 // cleanup restores all tracked windows.

@@ -178,10 +178,11 @@ func (d *Daemon) restoreWindowIndicators(target string, ws *windowState) {
 	d.setWindowOpt(target, "@agentwatch-symbol", "", "error clearing @agentwatch-symbol")
 }
 
-// sweepStale migrates renumbered panes and cleans up panes that no longer exist.
-func (d *Daemon) sweepStale() {
+// sweepStale migrates renumbered panes and cleans up panes that no longer
+// exist. Reports whether visible state changed (caller rebroadcasts).
+func (d *Daemon) sweepStale() bool {
 	if len(d.windows) == 0 {
-		return
+		return false
 	}
 
 	panes, err := d.client.ListPanes()
@@ -189,7 +190,7 @@ func (d *Daemon) sweepStale() {
 		if d.cfg.Verbose {
 			log.Printf("sweep: error listing panes: %v", err)
 		}
-		return
+		return false
 	}
 
 	// Build paneID → current target map.
@@ -291,9 +292,7 @@ func (d *Daemon) sweepStale() {
 		}
 	}
 
-	if len(migrations) > 0 || len(stale) > 0 || idleDetected > 0 || exitedDetected > 0 {
-		d.broadcast()
-	}
+	return len(migrations) > 0 || len(stale) > 0 || idleDetected > 0 || exitedDetected > 0
 }
 
 // discardStaleWindow removes stale state for a window target without restoring

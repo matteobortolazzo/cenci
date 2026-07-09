@@ -6,6 +6,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/detect"
+	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/frontend"
 	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/ipc"
 	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/tmux"
 )
@@ -60,27 +61,87 @@ func compactTaskName(name string) string {
 	return short + "..."
 }
 
+// sessionKeyForEvent returns the key for the daemon's sessions map: the agent
+// session ID when present, otherwise a pane-derived fallback. Events carrying
+// neither are dropped.
+func sessionKeyForEvent(event ipc.HookEvent) string {
+	if event.SessionID != "" {
+		return event.SessionID
+	}
+	if event.TmuxPane != "" {
+		return "pane:" + event.TmuxPane
+	}
+	return ""
+}
+
 func (d *Daemon) handleEvent(event ipc.HookEvent) {
-	if event.TmuxPane == "" {
+	key := sessionKeyForEvent(event)
+	if key == "" {
 		if d.cfg.Verbose {
-			log.Printf("event: dropping %s event with empty tmux_pane", event.EventType)
+			log.Printf("event: dropping %s event with empty session_id and tmux_pane", event.EventType)
 		}
 		return
 	}
 
-	// Call ListPanes once for the entire event.
+	sess := d.sessions[key]
+	if sess == nil {
+		sess = &frontend.SessionState{SessionID: event.SessionID}
+		d.sessions[key] = sess
+	}
+	sess.LastEvent = d.now()
+	// Upgrade paneless→pane when a later event carries a pane; never clear a
+	// known pane on an empty-pane event.
+	if event.TmuxPane != "" {
+		sess.TmuxPane = event.TmuxPane
+	}
+	if event.Agent != "" {
+		sess.Agent = event.Agent
+	}
+
+	if event.EventType == "SessionEnd" {
+		delete(d.sessions, key)
+		if sess.TmuxPane == "" {
+			d.broadcast()
+			return
+		}
+		d.handleTmuxSessionEnd(sess)
+		return
+	}
+
+	status := d.mapEventToStatus(event)
+
+	if sess.TmuxPane == "" {
+		if status == detect.StatusUnknown {
+			return
+		}
+		sess.Status = status
+		// No pane title exists — the hook payload is the only task-name
+		// source. Keep the last non-empty name across events without one.
+		if tn := compactTaskName(event.TaskName); tn != "" {
+			sess.TaskName = tn
+		}
+		d.broadcast()
+		return
+	}
+
+	d.handleTmuxEvent(sess, event, status)
+}
+
+// handleTmuxSessionEnd restores the window owned by the ended session.
+func (d *Daemon) handleTmuxSessionEnd(sess *frontend.SessionState) {
+	pane := sess.TmuxPane
 	panes, err := d.client.ListPanes()
 	if err != nil {
 		if d.cfg.Verbose {
-			log.Printf("event: error listing panes for %s: %v", event.TmuxPane, err)
+			log.Printf("event: error listing panes for %s: %v", pane, err)
 		}
+		d.broadcast()
 		return
 	}
 
-	// Find paneInfo for the event's pane.
 	var paneInfo *tmux.PaneInfo
 	for i := range panes {
-		if panes[i].PaneID == event.TmuxPane {
+		if panes[i].PaneID == pane {
 			paneInfo = &panes[i]
 			break
 		}
@@ -90,58 +151,79 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 	var windowTarget string
 	if paneInfo != nil {
 		windowTarget = paneInfo.WindowTarget()
-		d.panes[event.TmuxPane] = windowTarget
-		d.migratePaneIfRenumbered(windowTarget, event.TmuxPane)
+		d.panes[pane] = windowTarget
+		d.migratePaneIfRenumbered(windowTarget, pane)
 	} else {
-		// Pane no longer in tmux. Use cached target for SessionEnd cleanup.
-		windowTarget = d.panes[event.TmuxPane]
+		// Pane no longer in tmux. Use cached target for cleanup.
+		windowTarget = d.panes[pane]
 		if windowTarget == "" {
 			if d.cfg.Verbose {
-				log.Printf("event: pane %s not found in tmux", event.TmuxPane)
+				log.Printf("event: pane %s not found in tmux", pane)
 			}
-			return
-		}
-	}
-
-	// Handle SessionEnd: restore and clean up.
-	if event.EventType == "SessionEnd" {
-		ws := d.windows[windowTarget]
-		if ws != nil && ws.PaneID != event.TmuxPane {
-			// Late SessionEnd for a dead pane — don't touch the new window.
-			delete(d.panes, event.TmuxPane)
 			d.broadcast()
 			return
 		}
-		// When the pane is gone, check if another pane now occupies the
-		// cached window target (renumber-windows). If so, discard state
-		// without restoring to avoid overwriting the surviving window.
-		if paneInfo == nil {
-			for _, p := range panes {
-				if p.WindowTarget() == windowTarget {
-					delete(d.windows, windowTarget)
-					delete(d.panes, event.TmuxPane)
-					d.broadcast()
-					return
-				}
-			}
-		}
-		d.restoreWindow(windowTarget)
-		delete(d.panes, event.TmuxPane)
+	}
+
+	ws := d.windows[windowTarget]
+	if ws != nil && ws.PaneID != pane {
+		// Late SessionEnd for a dead pane — don't touch the new window.
+		delete(d.panes, pane)
 		d.broadcast()
 		return
 	}
-
-	// For non-SessionEnd events, we need paneInfo.
+	// When the pane is gone, check if another pane now occupies the
+	// cached window target (renumber-windows). If so, discard state
+	// without restoring to avoid overwriting the surviving window.
 	if paneInfo == nil {
+		for _, p := range panes {
+			if p.WindowTarget() == windowTarget {
+				delete(d.windows, windowTarget)
+				delete(d.panes, pane)
+				d.broadcast()
+				return
+			}
+		}
+	}
+	d.restoreWindow(windowTarget)
+	delete(d.panes, pane)
+	d.broadcast()
+}
+
+// handleTmuxEvent tracks and styles the tmux window behind a pane-backed session.
+func (d *Daemon) handleTmuxEvent(sess *frontend.SessionState, event ipc.HookEvent, status detect.Status) {
+	pane := sess.TmuxPane
+
+	// Call ListPanes once for the entire event.
+	panes, err := d.client.ListPanes()
+	if err != nil {
 		if d.cfg.Verbose {
-			log.Printf("event: pane %s not found in tmux", event.TmuxPane)
+			log.Printf("event: error listing panes for %s: %v", pane, err)
 		}
 		return
 	}
 
+	var paneInfo *tmux.PaneInfo
+	for i := range panes {
+		if panes[i].PaneID == pane {
+			paneInfo = &panes[i]
+			break
+		}
+	}
+	if paneInfo == nil {
+		if d.cfg.Verbose {
+			log.Printf("event: pane %s not found in tmux", pane)
+		}
+		return
+	}
+
+	windowTarget := paneInfo.WindowTarget()
+	d.panes[pane] = windowTarget
+	d.migratePaneIfRenumbered(windowTarget, pane)
+
 	// Ensure window is tracked (first event or daemon restart).
 	ws := d.windows[windowTarget]
-	if ws != nil && ws.PaneID != event.TmuxPane {
+	if ws != nil && ws.PaneID != pane {
 		// Window index reused by a different pane — discard stale state.
 		d.discardStaleWindow(windowTarget, ws.PaneID)
 		ws = nil
@@ -158,9 +240,10 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 	} else if ws.Agent == "" {
 		ws.Agent = inferAgent(paneInfo.PaneCurrentCmd)
 	}
+	if sess.Agent == "" {
+		sess.Agent = ws.Agent
+	}
 
-	// Map event to status.
-	status := d.mapEventToStatus(event)
 	if status == detect.StatusUnknown {
 		return
 	}
@@ -168,6 +251,8 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 	// Resolve task name from hook payloads or pane title (sanitize immediately
 	// to protect downstream consumers: IPC broadcast, Waybar, and tmux rename).
 	taskName := d.taskNameForEvent(event, ws, paneInfo)
+	sess.Status = status
+	sess.TaskName = taskName
 
 	// Detect mid-session user renames.
 	if !ws.ManuallyNamed && ws.LastSetName != "" && paneInfo.WindowName != ws.LastSetName {

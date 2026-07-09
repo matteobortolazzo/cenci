@@ -297,24 +297,6 @@ func TestDaemon_NoStatusChangeNoOp(t *testing.T) {
 	}
 }
 
-func TestDaemon_EmptyPaneIDDropsEvent(t *testing.T) {
-	mc := &mockClient{
-		panes: []tmux.PaneInfo{},
-	}
-
-	d := newTestDaemon(mc)
-	d.cfg.Verbose = true
-	d.handleEvent(ipc.HookEvent{
-		EventType: "SessionStart",
-		SessionID: "sess1",
-		TmuxPane:  "",
-	})
-
-	if len(mc.renames) != 0 {
-		t.Errorf("expected no renames for empty pane ID, got %d", len(mc.renames))
-	}
-}
-
 func TestDaemon_SymbolVariableAcrossAllStatuses(t *testing.T) {
 	mc := &mockClient{
 		panes: []tmux.PaneInfo{

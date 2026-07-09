@@ -53,6 +53,7 @@ func runDaemon(args []string) {
 
 	var sweepSec int
 	fs.IntVar(&sweepSec, "sweep", 30, "stale session sweep interval in seconds")
+	fs.DurationVar(&cfg.SessionTTL, "session-ttl", cfg.SessionTTL, "idle expiry for sessions outside tmux (e.g. 2h)")
 
 	fs.StringVar(&cfg.StyleIdle, "style-idle", cfg.StyleIdle, "tmux style for idle state")
 	fs.StringVar(&cfg.StyleRunning, "style-running", cfg.StyleRunning, "tmux style for running state")
@@ -122,10 +123,9 @@ func runNotify(args []string) {
 		os.Exit(0) // fail silently
 	}
 
+	// TMUX_PANE may be empty: sessions outside tmux (plain terminals,
+	// dev-sandbox) are still tracked by the daemon as paneless sessions.
 	tmuxPane := os.Getenv("TMUX_PANE")
-	if tmuxPane == "" {
-		os.Exit(0) // not in tmux, nothing to do
-	}
 
 	event := ipc.HookEvent{
 		EventType:        hookInput.HookEventName,
