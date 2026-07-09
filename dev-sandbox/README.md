@@ -10,6 +10,22 @@ Isolated Docker/Podman container for running Claude Code with full permissions. 
 
 ## Setup
 
+Install the plugin from the marketplace, then run the setup skill — it symlinks the
+`claude-sand` launcher onto your PATH and builds the container image:
+
+```bash
+claude plugin marketplace add matteobortolazzo/claude-tools
+claude plugin install sandbox
+/sandbox:setup
+```
+
+`/sandbox:setup` accepts `--link-only` (symlink only, skip the build) or `--build-only`
+(rebuild the image, skip the symlink). Update later with `claude plugin update sandbox`,
+then re-run `/sandbox:setup --build-only` if the Dockerfile changed.
+
+<details>
+<summary>Manual setup (without the plugin)</summary>
+
 ```bash
 # Symlink the launcher to your PATH
 ln -s "$(pwd)/dev-sandbox/claude-sand" ~/.local/bin/claude-sand
@@ -17,6 +33,8 @@ ln -s "$(pwd)/dev-sandbox/claude-sand" ~/.local/bin/claude-sand
 # Build the image
 claude-sand --build
 ```
+
+</details>
 
 ## Usage
 
