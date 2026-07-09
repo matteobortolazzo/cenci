@@ -9,7 +9,7 @@ LDFLAGS := -s -w
 PLUGIN_JSON := plugin/.claude-plugin/plugin.json
 PLUGIN_VERSION := $(shell sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' $(PLUGIN_JSON) | head -n1)
 
-.PHONY: build clean test lint plugin-bin $(PLATFORMS)
+.PHONY: build clean test test-macos lint plugin-bin $(PLATFORMS)
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) .
@@ -23,6 +23,10 @@ plugin-bin:
 
 test:
 	go test ./...
+
+# Smoke test for the macOS SwiftBar frontend (macOS-only; skips without osascript).
+test-macos:
+	./plugin/macos/test.sh
 
 $(PLATFORMS):
 	$(eval GOOS := $(word 1,$(subst /, ,$@)))
