@@ -9,6 +9,12 @@ ARG GO_VERSION=1.24.1
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Signal to Claude Code that it runs inside a sandbox container: skips the
+# bypass-mode confirmation dialog and the root check (defense-in-depth
+# alongside the settings.json seeded in entrypoint.sh). Container-scoped, so
+# the host `claude` is unaffected.
+ENV IS_SANDBOX=1
+
 # ── System packages ──────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl wget gnupg2 \

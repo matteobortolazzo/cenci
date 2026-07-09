@@ -15,6 +15,15 @@ fi
 # The home volume may retain stale symlinks from previous runs where
 # Claude Code pointed these paths at the host filesystem.  Replace any
 # dangling symlink with a real directory / file so plugin installs work.
+#
+# Seed the bypass-mode settings so --dangerously-skip-permissions never
+# prompts ("Yes, I accept") on fresh instances and never silently
+# downgrades to `default` in headless (`claude -p`) runs.  These keys are
+# CONTAINER-ONLY: the container boundary is what makes bypass mode safe
+# (see docs/cohesive-package.md §2.1).  They must never reach the host
+# ~/.claude/settings.json.
+
+BYPASS_SETTINGS='{"skipDangerousModePermissionPrompt":true,"permissions":{"defaultMode":"bypassPermissions"}}'
 
 if [[ -L /home/dev/.claude ]]; then
     rm -f /home/dev/.claude
@@ -25,7 +34,21 @@ if [[ -L /home/dev/.claude/settings.json ]]; then
     rm -f /home/dev/.claude/settings.json
 fi
 if [[ ! -f /home/dev/.claude/settings.json ]]; then
-    echo '{}' > /home/dev/.claude/settings.json
+    # Fresh volume → write the bypass settings.
+    echo "${BYPASS_SETTINGS}" > /home/dev/.claude/settings.json
+elif jq -e . /home/dev/.claude/settings.json >/dev/null 2>&1; then
+    # Valid JSON → deep-merge our keys in (ours win on conflict; every
+    # other top-level key, including permissions.*, is preserved).  This
+    # upgrades old `{}` volumes and is idempotent.
+    if jq --argjson bypass "${BYPASS_SETTINGS}" '. * $bypass' \
+        /home/dev/.claude/settings.json > /home/dev/.claude/settings.json.tmp; then
+        mv /home/dev/.claude/settings.json.tmp /home/dev/.claude/settings.json
+    else
+        rm -f /home/dev/.claude/settings.json.tmp
+    fi
+else
+    # Present but not valid JSON → overwrite with a safe default.
+    echo "${BYPASS_SETTINGS}" > /home/dev/.claude/settings.json
 fi
 
 # ── Inject host credentials (staged read-only mounts → writable copies) ──
