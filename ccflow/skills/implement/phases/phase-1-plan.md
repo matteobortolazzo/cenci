@@ -167,3 +167,5 @@ To implement, start a fresh session and run:
 
 The SessionStart hook will also remind you of pending plans.
 ```
+
+Approving this plan is the human gate for the autopilot: the plan-file run you launch next arms a `/goal` completion condition (Claude Code ≥ 2.1.139) so phases 2–9 resume through to an open PR instead of stalling on a mid-phase stop. Do **not** set any goal in this planning session — it ends here, and goals are session-scoped. See the **Goal Autopilot** section of `SKILL.md`.

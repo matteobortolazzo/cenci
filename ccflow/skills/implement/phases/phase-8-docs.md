@@ -6,7 +6,7 @@ Default action: skip. Only run a sub-step when its trigger fired.
 
 All file edits must land inside `<worktree-path>`. Use absolute paths rooted at the worktree when reading/writing or delegating.
 
-Before any sub-step writes or delegates, verify `<worktree-path>` (from Phase 2) is an **absolute** path containing a `/.worktrees/` segment. If it is relative or has no `/.worktrees/` segment, do not delegate — stop and report, since any edit would be stranded in the main worktree.
+Before any sub-step writes or delegates, verify `<worktree-path>` (from Phase 2) is an **absolute** path containing a `/.worktrees/` segment. If it is relative or has no `/.worktrees/` segment, do not delegate — clear the Goal Autopilot (`/goal clear` via `SlashCommand`, a no-op if none is armed — see `SKILL.md`), then stop and report, since any edit would be stranded in the main worktree.
 
 ## Capture Lessons
 

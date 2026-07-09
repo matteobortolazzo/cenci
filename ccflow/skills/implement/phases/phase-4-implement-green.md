@@ -51,7 +51,7 @@ After implementation:
 2. Run the full test suite.
 3. Report exact commands and results.
 
-If build/tests fail, analyze root cause, fix, and rerun. Retry up to 3 times, then stop and report exact errors, attempts, and best hypothesis.
+If build/tests fail, analyze root cause, fix, and rerun. Retry up to 3 times, then clear the Goal Autopilot (`/goal clear` via `SlashCommand`, a no-op if none is armed — see `SKILL.md`) and stop, reporting exact errors, attempts, and best hypothesis. Clearing prevents the goal from restarting the turn straight back into the same failing build.
 
 ## Visual Verification
 

@@ -52,4 +52,4 @@ If any new test passes before implementation, investigate whether it actually co
 
 ## Error Recovery
 
-If tests cannot be written, identify the blocker. Fix missing test infrastructure or dependencies when safe. If requirements are unclear, stop and ask the user.
+If tests cannot be written, identify the blocker. Fix missing test infrastructure or dependencies when safe. If requirements are unclear, clear the Goal Autopilot first (`/goal clear` via `SlashCommand`, a no-op if none is armed — see `SKILL.md`), then stop and ask the user.

@@ -13,6 +13,16 @@ Verify:
 
 If either check fails, stop and tell the user to run `/ccflow:implement .plans/<filename>` in a fresh session.
 
+## Arm Goal Autopilot
+
+The Gate Check passing means this session is committed to running phases 2–9. Arm the completion goal now, following the **Goal Autopilot (plan-file mode)** section of `SKILL.md`:
+
+1. If `.claude/config.json` sets `ccflow.goalAutopilot: false`, skip — proceed to Create Worktree.
+2. Otherwise run `claude --version` and version-gate on ≥ 2.1.139. If older, unparseable, or the command is unavailable, print the one-line unavailable notice and proceed without a goal.
+3. If available, invoke `/goal` (via the `SlashCommand` tool) with the plan-file-referencing condition from `SKILL.md`, substituting the actual `.plans/<filename>` for this run. If `SlashCommand` is unavailable or errors, proceed without a goal.
+
+This runs once, here — do not re-arm in later phases. Phase 9 clears the goal after the PR is created; any error gate that stops for user input clears it first (see `SKILL.md`).
+
 ## Create Worktree
 
 Verify at least one commit exists:

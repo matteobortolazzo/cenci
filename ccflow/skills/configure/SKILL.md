@@ -653,7 +653,8 @@ For each MCP selected in question 5:
   "ccflow": {
     "compactImplementation": false,
     "reviewConcurrency": "parallel",
-    "diffContextMode": "inline"
+    "diffContextMode": "inline",
+    "goalAutopilot": true
   },
   "cicd": {
     "enabled": true,
@@ -666,6 +667,7 @@ The `ccflow` field is optional. If present, preserve existing user values during
 - `compactImplementation` — `true` allows small, low-risk tickets to combine red/green/refactor into one implementer subagent turn while preserving all TDD/reporting gates. Default: `false`.
 - `reviewConcurrency` — `"parallel"` runs security, code, and silent-failure reviews together; `"sequential"` runs the same reviews one after another to smooth usage limits. Default: `"parallel"`.
 - `diffContextMode` — `"inline"` passes small diffs directly to reviewers; `"file"` writes the diff to `/tmp/claude/ccflow-diff.patch` and passes paths so reviewers read targeted hunks. Default: `"inline"`.
+- `goalAutopilot` — `true` arms a native `/goal` completion condition at Phase 2 start (Claude Code ≥ 2.1.139) so implement phases 2–9 resume through to an open PR after a mid-phase stop; `false` opts out. Default (unset): enabled where supported, a graceful no-op on older runtimes.
 
 Optional external usage reducer: RTK (`https://github.com/rtk-ai/rtk`) can compress shell command output before it reaches Claude Code. It is not required for ccflow and should not be installed automatically, but it is worth recommending when users are hitting usage limits from command-heavy sessions. After separate installation, `rtk init -g` enables Claude Code Bash command rewriting where supported. Built-in tools like `Read`, `Grep`, and `Glob` do not pass through RTK hooks.
 
