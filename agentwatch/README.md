@@ -201,6 +201,38 @@ shows the counts in the menu bar (loud red on `need-input`) and a per-session
 dropdown, and hides when no sessions are live. See
 [`plugin/macos/README.md`](plugin/macos/README.md) for install and settings.
 
+## Consuming status from your own tool
+
+The daemon broadcasts live status as newline-delimited JSON over a Unix socket.
+The public `pkg/watch` package lets any Go tool subscribe to that stream — for
+example to badge kanban cards or dashboards with per-window agent status.
+
+```bash
+go get github.com/matteobortolazzo/claude-tools/agentwatch
+```
+
+It versions via the existing `agentwatch/v*` submodule tags.
+
+```go
+import "github.com/matteobortolazzo/claude-tools/agentwatch/pkg/watch"
+
+c, err := watch.Dial(watch.DefaultSocketPath())
+// ... handle err; defer c.Close()
+for {
+    snap, err := c.ReadSnapshot()
+    if err != nil {
+        break // net.ErrClosed on daemon shutdown
+    }
+    for _, w := range snap.Windows {
+        fmt.Printf("%s: %s\n", w.WindowName, w.Status) // join your cards on WindowName
+    }
+}
+```
+
+The JSON schema is a stable, additive-only contract: fields are only ever added,
+never renamed, removed, or repurposed, and unknown fields must be ignored (Go's
+`encoding/json` does this by default).
+
 ## How it works
 
 ### Hook-to-status mapping
