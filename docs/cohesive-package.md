@@ -1,7 +1,7 @@
 # Proposal: one cohesive package
 
 Status: accepted · 2026-07-08 (decisions in §4) · updated 2026-07-09: orchestration
-layer added (§2.4, decisions 5–8, tickets 11–16)
+layer + autonomous pickup added (§2.4–2.5, decisions 5–10, tickets 11–19)
 
 The repo today ships three good tools with three unrelated install stories and no shared
 security model. This proposal turns them into one package with a single principle:
@@ -37,7 +37,7 @@ consuming contracts this repo exports (§2.4).
 ┌────────────────────────────────────────────────────────┐
 │  orchestration layer   (lazyboards — separate repo)    │
 │  board = state machine: columns ↔ ticket labels        │
-│  keypress (later: agent policy) → agentwatch run       │
+│  keypress · dispatch policy (§2.5) → agentwatch run    │
 │  cards show live status; NeedInput → jump to session   │
 ├────────────────────────────────────────────────────────┤
 │  attention layer   (renamed muxwatch)                  │
@@ -129,8 +129,8 @@ What's missing is ownership of that contract (gap 7). Three pieces close it:
 - **One missing board state** — `Implemented` is applied at PR-*open*, so "review
   looping" and "merged" are indistinguishable. Phase 9 moves to `In Review`; babysit
   applies `Implemented` on merge (ticket 13). Full machine:
-  New → Refined → Designed → In Review → Implemented, with `Working` as the
-  transient marker.
+  New → Refined → [Designed] → Planned → In Review → Implemented, with `Working` as
+  the transient marker (`Planned` arrives with §2.5).
 
 **lazyboards stays a separate repo — deliberately.** It is a general-purpose kanban
 TUI with its own audience and install path, and its README correctly never mentions
@@ -139,6 +139,39 @@ that is itself slated for a rename (§4.4). The earlier mistake was not the sepa
 — it was that *neither* repo owned the integration. With the launcher, the exported
 client package, and a documented recipe (ticket 14) living here, lazyboards becomes a
 well-behaved consumer over versioned contracts.
+
+### 2.5 Autonomous pickup — planned tickets dispatch themselves under budget
+
+ccflow already separates planning from implementation: implement Phase 1 produces a
+plan, gets human approval (`AskUserQuestion`), persists `.plans/<id>-<slug>.md` with
+`status: approved` + `planCommitSha` front matter, and hard-stops; phases 2–9 run
+unattended only when invoked with the plan-file path. That *is* the human-review gate
+the autopilot needs — it just isn't visible outside the local filesystem. Three
+tickets close the loop:
+
+- **`Planned` on the ticket** (ticket 17): persisting an approved plan labels the
+  ticket `Planned`; starting phases 2–9 swaps it to `Working`; abandoning or
+  re-planning removes it. The ready-for-pickup column becomes machine-readable.
+- **Deterministic dispatch** (ticket 18): `agentwatch dispatch` picks up `Planned`
+  tickets whose plan file exists, is approved, and isn't stale (`planCommitSha`
+  tolerance — stale plans get a comment, not a doomed launch), then makes the exact
+  call a human keypress would: `agentwatch run implement .plans/<file>`. Gates, in
+  order: concurrency from the daemon's own snapshots (pickup pauses while NeedInput
+  sessions pile up — never queue work behind attention that isn't being given), daily
+  quota + quiet hours, and per-agent usage budget — remaining Claude 5h/weekly window
+  headroom vs the Codex equivalent routes each dispatch to whichever agent has budget,
+  honoring per-ticket preference. **No LLM in the dispatcher**: intelligence stays
+  inside the dispatched sessions; a model can later *reorder* the queue, but caps and
+  budget stay deterministic.
+- **Failure reconciliation** (ticket 19): `Working` ticket + no live window + no PR,
+  after a grace period → swap back to `Planned` (the plan file survives — phase 9
+  deletes it only after a successful PR), record the attempt on the ticket, retry
+  within a bounded budget, then `dispatch-failed`, surfaced like NeedInput. Never
+  silent thrash, never infinite retries.
+
+Human gates are untouched: refinement, design, and plan approval all happen *before*
+`Planned`; ambiguous review comments, stale plans, and exhausted retries all come back
+to a human — on the board.
 
 ## 3. One install, one update
 
@@ -184,6 +217,15 @@ Resolved 2026-07-09 (orchestration layer):
 8. **Board state machine gains `In Review`** — PR-open sets `In Review`, merge sets
    `Implemented` (via babysit), so the babysit loop has a visible home state and
    column cleanup can reap its window on merge.
+9. **Planning is a separate, ticket-visible state** — Phase 1's human-approved plan
+   files (`.plans/`, `status: approved`) already exist and hard-stop before
+   implementation; the `Planned` label makes that gate machine-readable so planned
+   tickets can be picked up automatically.
+10. **The dispatcher is deterministic, never an LLM** — pickup, capacity, budget, and
+    failure policy are agentwatch config; per-agent usage windows route work between
+    Claude Code and Codex; bounded retries end in `dispatch-failed` surfaced like
+    NeedInput. Model-driven *prioritization* may reorder the queue later, but caps and
+    budget enforcement stay code.
 
 ## 5. Migration plan (1 ticket = 1 PR)
 
@@ -205,3 +247,6 @@ Resolved 2026-07-09 (orchestration layer):
 | 14 | docs: board-orchestration recipe | [#42](https://github.com/matteobortolazzo/claude-tools/issues/42) | `docs/orchestration.md`: state machine, example board config, join-key convention, multi-agent notes |
 | 15 | lazyboards: agent status on cards | [lazyboards#255](https://github.com/matteobortolazzo/lazyboards/issues/255) | subscribe via ticket 11's client, badge cards, NeedInput loudest, status-bar summary |
 | 16 | lazyboards: jump to card's session | [lazyboards#256](https://github.com/matteobortolazzo/lazyboards/issues/256) | keybinding to focus the card's tmux window |
+| 17 | ccflow: `Planned` board state | [#44](https://github.com/matteobortolazzo/claude-tools/issues/44) | approved plan → `Planned` label; phases 2–9 start → `Working`; re-plan removes it |
+| 18 | agentwatch: dispatch engine | [#45](https://github.com/matteobortolazzo/claude-tools/issues/45) | deterministic auto-pickup of `Planned` tickets: plan-file + staleness checks, concurrency/quota/quiet-hours, per-agent usage budget routing |
+| 19 | agentwatch: failure reconciliation | [#46](https://github.com/matteobortolazzo/claude-tools/issues/46) | dead-session detection → requeue with bounded retries → `dispatch-failed` surfaced like NeedInput |
