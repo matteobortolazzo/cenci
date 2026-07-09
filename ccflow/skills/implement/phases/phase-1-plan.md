@@ -7,7 +7,7 @@ Read this file only when Phase 1 starts.
 If `hasPlanFile` is true, skip new planning:
 
 1. The plan file was already read and parsed during mode detection. Source ticket details, user context, Q&A, implementation plan, architectural context, design context, and attachment summaries from it.
-2. Compare `planCommitSha` from front matter to `git rev-parse HEAD`. If they differ, warn: "The codebase has changed since this plan was created (`planCommitSha` vs current HEAD). The plan may be stale. Continue anyway?" Use `AskUserQuestion` with "Continue with existing plan" and "Re-plan from scratch". If re-planning, delete the plan file and run normal planning.
+2. Compare `planCommitSha` from front matter to `git rev-parse HEAD`. If they differ, warn: "The codebase has changed since this plan was created (`planCommitSha` vs current HEAD). The plan may be stale. Continue anyway?" Use `AskUserQuestion` with "Continue with existing plan" and "Re-plan from scratch". If re-planning, delete the plan file and run normal planning. No board-label removal is needed here: this is a plan-file-mode run, so the `Planned → Working` swap already happened at pipeline start (see the **Label "Working"** section of `SKILL.md`); the re-run's new-plan path re-applies `Planned` at the end when it persists the fresh approved plan.
 3. In ticket mode, re-fetch the ticket and compare state/body with `## Ticket Details`. If changed, warn the user and require confirmation before continuing. (This single read-only `gh issue view` is the sanctioned exception to the "no ticket fetch in the main agent" rule — it runs after the pre-flight check, and the context-gatherer is not used in plan file mode.)
 4. Proceed to Phase 2 with context from the plan file.
 
@@ -154,7 +154,25 @@ planCommitSha: abc123def
 
 Record `planCommitSha` from `git rev-parse HEAD`. Source `isChild`, `isLastChild`, and `parentId` from the context-gatherer digest stored earlier in this session. For ticketless mode, omit ticket fields.
 
-After writing the plan file, the **only remaining action** is the final message below — no other tool calls, and never read `phases/phase-2-worktree.md` or any later phase file in this session. The session that created a plan always ends here; implementation runs in a fresh session.
+### Mark the ticket `Planned` (ticket mode only)
+
+After the plan file is written, signal on the board that an approved plan is now waiting to be picked up. **Ticket mode only** — skip this entirely in ticketless mode (there is no ticket to label):
+
+```bash
+gh issue edit <number> --repo <owner>/<repo> --add-label "Planned" --remove-label "Working"
+```
+
+`Planned` means "an approved plan exists on disk (`.plans/<id>-*.md`), ready to pick up." The planning session applied `Working` at pipeline start; this swap replaces it so the board no longer shows the ticket as actively in flight. The `Planned → Working` swap happens later, at the start of the plan-file implementation run (see the **Label "Working"** section of `SKILL.md`).
+
+If `.claude/config.json` has `ccflow.planComment: true`, also post the approved plan as a ticket comment for audit / off-host visibility (ticket mode only), immediately after the label swap. `.plans/` remains the executable source of truth; the comment is a convenience copy:
+
+```bash
+gh issue comment <number> --repo <owner>/<repo> --body-file .plans/<filename>
+```
+
+If `ccflow.planComment` is absent or `false`, skip the comment.
+
+After the plan file is written and (in ticket mode) the label swap and any optional comment are done, the **only remaining actions** are those one-or-two `gh` calls plus the final message below — no other tool calls, and never read `phases/phase-2-worktree.md` or any later phase file in this session. The session that created a plan always ends here; implementation runs in a fresh session.
 
 Stop and tell the user:
 

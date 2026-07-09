@@ -703,7 +703,8 @@ For each MCP selected in question 5:
     "compactImplementation": false,
     "reviewConcurrency": "parallel",
     "diffContextMode": "inline",
-    "goalAutopilot": true
+    "goalAutopilot": true,
+    "planComment": false
   },
   "cicd": {
     "enabled": true,
@@ -717,6 +718,7 @@ The `ccflow` field is optional. If present, preserve existing user values during
 - `reviewConcurrency` — `"parallel"` runs security, code, and silent-failure reviews together; `"sequential"` runs the same reviews one after another to smooth usage limits. Default: `"parallel"`.
 - `diffContextMode` — `"inline"` passes small diffs directly to reviewers; `"file"` writes the diff to `/tmp/claude/ccflow-diff.patch` and passes paths so reviewers read targeted hunks. Default: `"inline"`.
 - `goalAutopilot` — `true` arms a native `/goal` completion condition at Phase 2 start (Claude Code ≥ 2.1.139) so implement phases 2–9 resume through to an open PR after a mid-phase stop; `false` opts out. Default (unset): enabled where supported, a graceful no-op on older runtimes.
+- `planComment` — `true` makes implement Phase 1 also post the approved plan as a ticket comment (ticket mode only) right after marking the ticket `Planned`, for audit / off-host visibility; `.plans/` stays the executable source of truth. Default: `false` (no comment).
 
 The `profile` field records which security model this project runs under and is **auto-detected each run** (never asked as a question). Values:
 - `"host"` (default; also assumed when the field is **absent** — fully backward-compatible) — Claude Code runs on the host with its own sandbox. Configure writes the full sandbox block (or `enabled: false` if the user declined sandboxing in Q4).
@@ -806,10 +808,11 @@ mirror it as columns on their board:
 | `Working` | refine / implement (at start) | Actively being refined or implemented |
 | `Refined` | refine | Ready for design/implementation |
 | `Designed` | design | UI design spec approved |
+| `Planned` | implement Phase 1 (approved plan persisted) | Approved plan on disk, ready to pick up |
 | `In Review` | implement Phase 9 (at PR-open) | PR is open, under review / CI running |
 | `Implemented` | babysit (on PR merge) | PR merged — done |
 
-Lifecycle: `New → Refined → Designed → In Review → Implemented`.
+Lifecycle: `New → Refined → [Designed] → Planned → Working → In Review → Implemented`.
 
 **Migration note for existing boards** (state this when re-configuring a project that predates
 `In Review`): add an **`In Review`** column/label. Previously, tickets dropped straight into
@@ -817,3 +820,11 @@ Lifecycle: `New → Refined → Designed → In Review → Implemented`.
 `/ccflow:babysit` promotes them to `Implemented` when the PR actually merges. Existing tickets
 that carry `Implemented` from before this change but whose PRs are still open can be relabeled to
 `In Review` by hand; new work follows the split automatically.
+
+**Migration note for existing boards** (state this when re-configuring a project that predates
+`Planned`): add a **`Planned`** column/label between `Designed` and `Working`. Previously, a
+planning session applied `Working` at pipeline start and then stopped once the plan was approved —
+so the board showed `Working` on a ticket nobody was actively working. Now a planning session
+lands the ticket on `Planned` ("an approved plan exists on disk, ready to pick up"); the swap to
+`Working` happens when the plan-file implementation run begins. New work follows this
+automatically.

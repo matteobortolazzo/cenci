@@ -193,10 +193,12 @@ The skills drive a ticket through a label-based state machine (`gh issue edit`).
 |---|---|---|
 | `Refined` | `/ccflow:refine` | Scoped and ready for design/implementation |
 | `Designed` | `/ccflow:design` | UI design spec approved (frontend tickets) |
+| `Planned` | `/ccflow:implement` — Phase 1, at plan approval | Approved plan on disk (`.plans/`), ready to pick up |
+| `Working` | `/ccflow:implement` — at pipeline start | Actively being implemented |
 | `In Review` | `/ccflow:implement` — Phase 9, at PR-open | PR is open, under review / CI running |
 | `Implemented` | `/ccflow:babysit` — on PR merge | PR merged — done |
 
-Full lifecycle: `New → Refined → Designed → In Review → Implemented`. Opening the PR (Phase 9) only advances the ticket to **`In Review`**; the transition to **`Implemented`** happens when the PR merges — [babysit](#babysitting-a-pr) performs that swap using the merged PR's `closingIssuesReferences`. (`configure` documents these labels but does not create them; add the matching columns to your board.)
+Full lifecycle: `New → Refined → [Designed] → Planned → Working → In Review → Implemented`. A planning session ends on **`Planned`** — an approved plan sits in `.plans/`, waiting; picking it up with `/ccflow:implement .plans/<file>` swaps `Planned → Working`. Opening the PR (Phase 9) only advances the ticket to **`In Review`**; the transition to **`Implemented`** happens when the PR merges — [babysit](#babysitting-a-pr) performs that swap using the merged PR's `closingIssuesReferences`. (`configure` documents these labels but does not create them; add the matching columns to your board.)
 
 ### Autopilot (goal-driven completion)
 
