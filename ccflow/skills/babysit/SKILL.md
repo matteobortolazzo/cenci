@@ -16,6 +16,11 @@ Read the `shell-rules` skill before running any `gh` commands (covers the heredo
 through `/ccflow:address-review`. It arms a self-paced Claude Code `/loop` so the tick
 repeats (~15m by default) and stops itself when the PR merges or closes.
 
+On the terminal tick, when the PR **merges**, babysit also performs the board-state
+transition that Phase 9 deferred: it swaps each closed issue's `In Review` label for
+`Implemented` (Phase 9 applies `In Review` at PR-open; merge is what makes it done). A
+PR that closes **without** merging leaves the labels untouched.
+
 This skill is **model-invocable on purpose** (note the deliberate absence of
 `disable-model-invocation` in the frontmatter): a scheduled loop fire re-delivers the
 `/ccflow:babysit <pr>` command, which only runs if the skill can be invoked by the model.
@@ -67,12 +72,26 @@ re-fire alike.
 ### 1. Fetch PR state
 
 ```bash
-gh pr view <pr> --repo <owner>/<repo> --json number,title,state,headRefName,headRefOid,mergedAt
+gh pr view <pr> --repo <owner>/<repo> --json number,title,state,headRefName,headRefOid,mergedAt,closingIssuesReferences
 ```
 
 ### 2. Terminal check (stop the loop)
 
 If `state` is `MERGED` or `CLOSED`:
+- **On `MERGED` only** (never on a `CLOSED`-unmerged PR): promote the board state of every
+  issue this PR closes. For each issue in `closingIssuesReferences`, swap its label from
+  `In Review` to `Implemented` — this is the `In Review → Implemented` board transition that
+  Phase 9 deferred to merge:
+
+  ```bash
+  gh issue edit <n> --repo <owner>/<repo> --add-label "Implemented" --remove-label "In Review"
+  ```
+
+  Run one `gh issue edit` per issue as its own Bash call (per `shell-rules`' one-command-per-call
+  rule). This is a **mutating `gh` call**, so it stays in the **main agent** per `subagent-safety` —
+  never delegate it. GitHub's `Fixes #<n>` reference has already auto-closed each issue; the relabel
+  only moves it into the done column. A `CLOSED`-unmerged PR abandons the work, so it must **not**
+  relabel anything to `Implemented`.
 - Report a final one-paragraph summary (merged vs. closed, title, link).
 - If a loop was armed (state file exists / `armed: true`), call
   `ScheduleWakeup(stop: true)` to end the self-paced loop. If nothing was armed this is a

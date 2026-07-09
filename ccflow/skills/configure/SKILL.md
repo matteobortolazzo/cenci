@@ -794,3 +794,26 @@ When migrating from an older config that has `ticketSystem`, `prSystem`, `ticket
 - When `pencil.shared` is `false` (separate): `pencil.designPath` is omitted. Each frontend project in the `projects` array gets a `designPath` field (e.g., `"apps/web-client/designs/"`). Non-frontend projects do not get `designPath`.
 
 Report what was created and suggest next steps (e.g., "Try `/ccflow:refine <ticket-id>` on a ticket").
+
+### Board lifecycle labels
+
+configure does **not** create labels — the skills apply them via `gh issue edit` as a ticket
+moves through the workflow. Document the label set in the completion summary so the user can
+mirror it as columns on their board:
+
+| Label | Applied by | Meaning |
+|---|---|---|
+| `Working` | refine / implement (at start) | Actively being refined or implemented |
+| `Refined` | refine | Ready for design/implementation |
+| `Designed` | design | UI design spec approved |
+| `In Review` | implement Phase 9 (at PR-open) | PR is open, under review / CI running |
+| `Implemented` | babysit (on PR merge) | PR merged — done |
+
+Lifecycle: `New → Refined → Designed → In Review → Implemented`.
+
+**Migration note for existing boards** (state this when re-configuring a project that predates
+`In Review`): add an **`In Review`** column/label. Previously, tickets dropped straight into
+`Implemented` the moment the PR was opened; now PR-open lands them in `In Review`, and
+`/ccflow:babysit` promotes them to `Implemented` when the PR actually merges. Existing tickets
+that carry `Implemented` from before this change but whose PRs are still open can be relabeled to
+`In Review` by hand; new work follows the split automatically.

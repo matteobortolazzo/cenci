@@ -129,13 +129,15 @@ For child tickets that are not last child, use `Related to #<parentId>` for the 
 
 ## Labels
 
-Ticket mode: after PR creation, replace "Working" with "Implemented":
+Ticket mode: after PR creation, replace "Working" with "In Review" (the PR is open but not yet merged):
 
 ```bash
-gh issue edit <number> --repo <owner>/<repo> --add-label "Implemented" --remove-label "Working"
+gh issue edit <number> --repo <owner>/<repo> --add-label "In Review" --remove-label "Working"
 ```
 
-If `isLastChild`, also add "Implemented" to the parent.
+If `isLastChild`, also add "In Review" to the parent. The parent's real completion — the transition to "Implemented" — arrives when this last child's PR merges: the last-child commit carries `Fixes #<parentId>` (see Commit above), so the parent appears in the PR's `closingIssuesReferences` and babysit relabels it on merge.
+
+The `Working` → `In Review` → `Implemented` progression finishes on merge: babysit swaps `In Review` for `Implemented` on any issue closed by the merged PR (see the babysit skill's terminal check). PR-open never applies `Implemented`.
 
 ## Cleanup
 
