@@ -17,6 +17,8 @@ Ticket refinement and automated implementation pipeline for GitHub.
 | `/ccflow:babysit <pr-number>` | Loop-driven PR follow-through — periodically checks CI and new review comments and drives them to resolution until the PR merges or closes |
 | `/ccflow:sync` | Pull latest main, rebase active worktrees, prune stale remotes, clean up merged branches |
 
+**Codex support**: the implementation workflow is also available to OpenAI Codex as a documented prose equivalent (an `AGENTS.md` recipe) — see [`docs/codex.md`](docs/codex.md).
+
 ## Prerequisites
 
 ### Required
@@ -380,12 +382,17 @@ ccflow/
 │   └── stack-angular/SKILL.md
 ├── hooks/
 │   └── hooks.json
+├── docs/
+│   ├── git-workflow.md        # On-demand reference (read by skills as needed)
+│   └── codex.md               # What ccflow offers OpenAI Codex, and how it wires
 ├── templates/
 │   ├── claudeignore
 │   ├── claude-md-root.md
 │   ├── claude-md-root-monorepo.md
 │   ├── claude-md-project.md
 │   ├── settings.json
+│   ├── agents-md-codex.md          # AGENTS.md recipe: ccflow workflow as prose for Codex
+│   ├── agentwatch-codex-config.json # Codex agent block for agentwatch's run launcher
 │   └── docs/
 │       └── git-workflow.md
 └── README.md
