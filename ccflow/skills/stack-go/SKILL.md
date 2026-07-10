@@ -93,4 +93,4 @@ When working with BubbleTea (`github.com/charmbracelet/bubbletea`) TUI apps:
 - Use `html/template` (not `text/template`) for HTML output — it auto-escapes
 - Validate and sanitize all user input at handler boundaries
 
-Read `.claude/rules/` for project-specific Go conventions (if they exist).
+Read the project's `CLAUDE.md` and relevant `docs/<topic>.md` files for project-specific Go conventions (if they exist).

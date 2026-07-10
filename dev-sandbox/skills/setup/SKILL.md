@@ -43,9 +43,12 @@ Skip this step when `--build-only` was passed.
    `export PATH="$HOME/.local/bin:$PATH"` in their shell profile) for `claude-sand` to
    be found.
 
-2. Create the symlink, resolving the launcher to an absolute path:
+2. Create the symlink, resolving the launcher to an absolute path with `realpath` — do
+   **not** use a `$(cd … && pwd)` substitution: combining `cd` with a write command in one
+   compound trips Claude Code's built-in `cd-compound-write` guard and forces a manual
+   prompt every run:
    ```bash
-   ln -sf "$(cd "${CLAUDE_PLUGIN_ROOT}" && pwd)/claude-sand" "$HOME/.local/bin/claude-sand"
+   ln -sf "$(realpath "${CLAUDE_PLUGIN_ROOT}")/claude-sand" "$HOME/.local/bin/claude-sand"
    ```
    - If a `claude-sand` already exists at the target and is **not** a symlink, do not
      overwrite it — report it and ask the user (`AskUserQuestion`) whether to replace it.
@@ -55,7 +58,7 @@ Skip this step when `--build-only` was passed.
    non-symlink-overwrite guard). The launcher detects its invoked name, so `codex-sand`
    defaults to `--agent codex` with no extra flags:
    ```bash
-   ln -sf "$(cd "${CLAUDE_PLUGIN_ROOT}" && pwd)/claude-sand" "$HOME/.local/bin/codex-sand"
+   ln -sf "$(realpath "${CLAUDE_PLUGIN_ROOT}")/claude-sand" "$HOME/.local/bin/codex-sand"
    ```
    - If a `codex-sand` already exists at the target and is **not** a symlink, do not
      overwrite it — report it and ask the user (`AskUserQuestion`) whether to replace it.

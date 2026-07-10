@@ -3,6 +3,7 @@ name: babysit
 description: Loop-driven PR follow-through — periodically check CI and new review comments on an open PR and drive them to resolution until it merges or closes. Runs only when the user invokes /ccflow:babysit or a babysit loop fires for a specific PR number.
 argument-hint: <pr-number> [interval e.g. 15m]
 user-invocable: true
+model: sonnet
 allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Task, AskUserQuestion, SlashCommand, ScheduleWakeup
 ---
 
@@ -161,14 +162,9 @@ gh api repos/<owner>/<repo>/pulls/<pr>/reviews
 gh api repos/<owner>/<repo>/pulls/<pr>/comments
 ```
 
-Apply `address-review`'s **actionable filter** (copied verbatim so the watermark matches
-what address-review would act on):
-
-**Include**: unresolved comments/threads, comments requesting changes, inline code-review
-comments with suggestions.
-**Exclude**: bot-generated comments (`github-actions[bot]`, `dependabot[bot]`, etc.),
-already-resolved threads, purely-informational comments with no action requested, outdated
-comments (GitHub `outdated` flag).
+Read the `pr-comment-filter` reference skill and apply its include/exclude filter — the
+same single source of truth `address-review` Step 1D uses, so the watermark matches
+exactly what address-review would act on.
 
 Then apply the **watermark** — keep only comments that are **both**:
 - newer than `lastCommentTimestamp` (by `created_at`/`updated_at`), **and**

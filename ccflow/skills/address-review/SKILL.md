@@ -67,18 +67,7 @@ gh api repos/<owner>/<repo>/pulls/<number>/comments
 
 ## Step 1D: Filter to Actionable Comments
 
-From the fetched comments, filter to actionable items:
-
-**Include**:
-- Unresolved comments/threads
-- Comments requesting changes (not approvals or neutral comments with no actionable content)
-- Inline code review comments with suggestions
-
-**Exclude**:
-- Bot-generated comments (author is a known bot: `github-actions[bot]`, `dependabot[bot]`, etc.)
-- Already-resolved threads
-- Comments that are purely informational with no action requested
-- Outdated comments on code that no longer exists (GitHub `outdated` flag)
+Read the `pr-comment-filter` reference skill and apply its include/exclude filter to the fetched comments. That skill is the single source of truth for this filter — `babysit` applies the same one, and its watermark only works if the two match.
 
 If **no actionable comments** remain after filtering → report "No actionable review comments found on this PR." and stop.
 
@@ -153,7 +142,7 @@ For each comment/thread, evaluate using these principles:
 1. **Verify before implementing** — check the reviewer's claim against the actual codebase. Is the issue real?
 2. **Technically sound?** — does the suggestion make sense for this codebase's patterns and constraints?
 3. **YAGNI check** — is the suggestion adding unnecessary complexity, over-engineering, or premature abstraction?
-4. **Conflict check** — does it conflict with prior architectural decisions documented in `CLAUDE.md` or `.claude/rules/`?
+4. **Conflict check** — does it conflict with prior architectural decisions documented in `CLAUDE.md` or `docs/<topic>.md`?
 5. **Clarity check** — is the feedback clear enough to implement, or is it ambiguous?
 
 ## Step 3D: Recommend Actions

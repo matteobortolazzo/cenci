@@ -53,19 +53,19 @@ gh pr view <number> --repo <owner>/<repo> --json title,body,headRefName
 
 ### File Mode (file paths provided)
 
-Read each specified file. If glob patterns are provided, expand them first with the Glob tool.
-
-Collect the list of files and their contents.
+Expand any glob patterns with the Glob tool and collect the **list of file paths**. Do **not** read the file contents in the main agent — all three reviewers have `Read` and read the files they need themselves. Pasting contents here would duplicate every file into the main context plus each of the three Task prompts.
 
 ## Phase 2: Parallel Review
 
+**Prepare shared context by path, not by paste.** For diff/PR mode: if the diff is small (roughly under 200 lines), it may be passed inline; otherwise write it once to `/tmp/claude/ccflow-review-diff.patch` (plus the changed-file list from `git diff --name-only`) and pass reviewers the path — the same `diffContextMode: "file"` discipline the implement pipeline uses. For file mode: pass the file path list only.
+
 Launch **all three reviewers as parallel Task tool calls in a SINGLE message**:
 
-1. **security-reviewer** agent — pass the diff or file contents, list of files
-2. **code-reviewer** agent — pass the diff or file contents, any PR context if available
-3. **silent-failure-hunter** agent — pass the diff or file contents, list of files
+1. **security-reviewer** agent — pass the diff (inline or patch path) or file path list
+2. **code-reviewer** agent — pass the diff (inline or patch path) or file path list, plus any PR context if available
+3. **silent-failure-hunter** agent — pass the diff (inline or patch path) or file path list
 
-All agents receive the same pre-gathered context so none need to fetch it independently.
+Tell each reviewer to read only the hunks/files relevant to its focus.
 
 Wait for all three to complete.
 
