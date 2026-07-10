@@ -15,7 +15,7 @@ description: |
   <commentary>Test file analysis identifies oversized test files, mixed test types, and shared fixture opportunities.</commentary>
   </example>
 tools: Read, Grep, Glob, Bash
-model: sonnet
+model: haiku
 color: cyan
 permissionMode: plan
 ---

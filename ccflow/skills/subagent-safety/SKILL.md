@@ -47,11 +47,15 @@ first delegation is that the pin is set. Run once:
 echo "${CLAUDE_CODE_SUBAGENT_MODEL:-unset}"
 ```
 
-- **Returns a model id** (e.g. `claude-sonnet-4-6`) → the pin is set; delegation is safe.
+- **Returns a model id** (e.g. `claude-sonnet-5`) → the pin is set; delegation is safe.
   Proceed silently — do not comment on your model, the pin, or "1M context".
 - **Returns `unset`** → proceed, but if a subagent then fails with "Usage credits required
   for 1M context", stop and tell the user:
   > "ccflow delegation is gated: this session is on a 1M-context model and subagents aren't
   > pinned to 200K (Claude Code bug #51060). Run `/ccflow:configure` (sets
-  > `CLAUDE_CODE_SUBAGENT_MODEL=claude-sonnet-4-6`) and restart, or run `/model sonnet` for
+  > `CLAUDE_CODE_SUBAGENT_MODEL=claude-sonnet-5`) and restart, or run `/model sonnet` for
   > this session, then re-invoke."
+
+Note: while `CLAUDE_CODE_SUBAGENT_MODEL` is set it overrides every agent's `model:`
+frontmatter, flattening ccflow's model tiering onto the pinned model. The pin exists
+only to work around the 1M gate — on a standard 200K session it should be unset.

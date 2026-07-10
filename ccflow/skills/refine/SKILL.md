@@ -77,7 +77,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 
 3. **If user context was provided**, treat it as additional steering input. Focus your analysis and questions on the areas the user highlighted. Mention the user's context when it's relevant to your questions or analysis.
 
-4. **Classify ticket type**: Determine if this ticket involves frontend/UI work — check whether the title, description, or acceptance criteria mention UI components, pages, views, layouts, forms, modals, visual design, styling, CSS, animations, themes, or frontend frameworks (React, Angular, Vue, Svelte, etc.). If yes, activate **design-aware refinement** for this session. If purely backend/infrastructure/data, skip design-specific analysis.
+4. **Classify ticket type**: Read the `frontend-classification` reference skill and apply its rule to determine if this ticket involves frontend/UI work. If yes, activate **design-aware refinement** for this session. If purely backend/infrastructure/data, skip design-specific analysis.
 
    **Design Coverage Check** (if frontend ticket AND `pencil.enabled` is `true` in `.claude/config.json`):
 
@@ -125,7 +125,9 @@ ticket is unambiguous, well-scoped, and ready for implementation.
    - Ask another question, OR
    - Declare the ticket refined
 
-8. **Before producing the summary**, ask one final infrastructure question using `AskUserQuestion`:
+8. **Before producing the summary**, ask one final infrastructure question — but only when it can plausibly apply. Ask it if the ticket was classified frontend/UI in step 4, **or** the ticket/answers mention web scraping, browser automation, or manual browser testing. For pure backend/infrastructure/data tickets with none of those signals, skip the question and set `browserRequired: false`.
+
+   Using `AskUserQuestion`:
    "Does this story need interactive browser access during implementation? (e.g., for visual verification, form testing, or web scraping). If yes, the implementer should ensure `playwright-cli` is installed (`npm i -g @playwright/cli`)."
    - If **yes** → note `browserRequired: true` for the labeling step
    - If **no** → proceed normally
@@ -266,7 +268,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
    - If the user declined the ticket update in step 10, use `AskUserQuestion` to ask: "Do you want me to mark this ticket as Refined?" and apply just the label if yes.
 
 13. **Auto-label `ui:visual-check` for visual/layout tickets:**
-   If the ticket description, acceptance criteria, or answers during refinement mention visual/layout signals — CSS, layout, responsive, theme, design tokens, styling, visual polish, animations, or appearance changes — add the `ui:visual-check` label:
+   If the ticket description, acceptance criteria, or answers during refinement match the **visual-check signals** subset in the `frontend-classification` reference skill, add the `ui:visual-check` label:
    `gh issue edit <number> --repo <owner>/<repo> --add-label "ui:visual-check"`
 
    This label signals to the implement skill that interactive browser verification via Playwright CLI should be used.

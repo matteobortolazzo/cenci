@@ -72,25 +72,24 @@ Launch all 3 analyzers as parallel Task tool calls in a **SINGLE message**.
 <details>
 <summary>Phase details</summary>
 
-1. **Gather shared context ONCE** before launching analyzers:
-   - The file list with metadata from Phase 2
-   - Full file contents for all in-scope files (read them before launching subagents — subagents should not need to re-read)
-   - Stack info and CLAUDE.md conventions
+1. **Gather shared context ONCE** before launching analyzers — **by path, not by paste**:
+   - The file list with metadata (paths, line counts, languages, test-file flags) from Phase 2
+   - Stack info and CLAUDE.md conventions (short summaries, not full file dumps)
+
+   Do **not** read full file contents in the main agent. All three analyzers have `Read`/`Grep`/`Glob` and read the files they need themselves — pasting contents would duplicate the scope into the main context plus each of the three Task prompts.
 
 2. **Launch ALL THREE analyzers as three parallel Task tool calls in a SINGLE message:**
-   - Task 1: **duplication-analyzer** agent — pass file list + full file contents for scope
-   - Task 2: **security-analyzer** agent — pass file list + stack info + CLAUDE.md conventions
-   - Task 3: **structure-analyzer** agent — pass file list + line counts + test file identification
+   - Task 1: **duplication-analyzer** agent — pass the file path list; it reads and compares code blocks itself
+   - Task 2: **security-analyzer** agent — pass the file path list + stack info + CLAUDE.md conventions
+   - Task 3: **structure-analyzer** agent — pass the file path list + line counts + test file identification
 
 3. **Wait for all 3 to complete**, then proceed to Phase 4.
 
-**Note on file contents**: For large scopes (20+ files), prioritize reading files that are most likely to have findings:
+**Note on large scopes** (20+ files): tell each analyzer which files to prioritize rather than reading them yourself:
 - Files over 200 lines
 - Files modified recently (from git log)
 - Test files over 300 lines
 - Files with common vulnerability patterns (controllers, routes, auth, API handlers)
-
-Pass full contents to the duplication analyzer (it needs to compare code blocks). For security and structure analyzers, pass file paths and key sections — they can read files themselves if needed.
 
 </details>
 

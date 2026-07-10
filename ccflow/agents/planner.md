@@ -15,7 +15,7 @@ description: |
   <commentary>Complex tasks need architectural analysis and breakdown before any code is written.</commentary>
   </example>
 tools: Read, Grep, Glob, Bash, mcp__context7
-model: sonnet
+model: opus
 color: blue
 permissionMode: plan
 ---

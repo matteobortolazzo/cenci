@@ -200,7 +200,7 @@ If the user says no → stop. If yes → proceed (a fresh plan re-applies `Plann
 
 ### Design Check (hard gate)
 
-If the ticket is classified as frontend — its title or the digest summary mention UI components, pages, views, layouts, forms, modals, visual design, styling, CSS, animations, themes, or frontend frameworks (React, Angular, Vue, Svelte, etc.) — set `isUiTicket = true`. Phase 4 and Phase 9 use this flag for screenshot capture and PR embedding.
+Read the `frontend-classification` reference skill and apply its rule to the ticket title and digest summary. If the ticket is classified as frontend, set `isUiTicket = true`. Phase 4 and Phase 9 use this flag for screenshot capture and PR embedding.
 
 If `isUiTicket` is true and the ticket does **not** have a "Designed" label/tag, **stop and ask** before starting the pipeline. UI tickets implemented without an approved design are the most error-prone, even with a design system in place.
 

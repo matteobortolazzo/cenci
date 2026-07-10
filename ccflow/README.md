@@ -303,14 +303,18 @@ The plugin uses specialized agents with isolated contexts:
 
 | Agent | Role | Model | Permission Mode |
 |-------|------|-------|-----------------|
-| **context-gatherer** | Bundles ticket, design, and project context into a file for the planner | sonnet | acceptEdits |
-| **planner** | Analyzes tickets, produces implementation plans | inherit | plan (read-only) |
-| **implementer** | TDD: writes tests first, then implementation | inherit | acceptEdits |
-| **security-reviewer** | OWASP-focused security review | sonnet | plan (read-only) |
+| **context-gatherer** | Bundles ticket, design, and project context into a file for the planner | haiku | acceptEdits |
+| **planner** | Analyzes tickets, produces implementation plans | opus | plan (read-only) |
+| **implementer** | TDD: writes tests first, then implementation | sonnet | acceptEdits |
+| **security-reviewer** | OWASP-focused security review | opus | plan (read-only) |
 | **code-reviewer** | PR-style quality review | sonnet | plan (read-only) |
+| **silent-failure-hunter** | Swallowed-error and silent-fallback detection | sonnet | plan (read-only) |
+| **duplication-analyzer** | Copy-paste and extraction analysis for `/ccflow:refactor` | sonnet | plan (read-only) |
+| **structure-analyzer** | File-size and test-organization analysis for `/ccflow:refactor` | haiku | plan (read-only) |
+| **security-analyzer** | OWASP audit for `/ccflow:refactor` | sonnet | plan (read-only) |
 | **lessons-collector** | Routes genuine mistakes to `docs/<topic>.md` or `CLAUDE.md` | haiku | acceptEdits |
 
-**Model tiering**: Opus where judgment is concentrated — `/ccflow:refine` and `/ccflow:design` pin `model: opus` because scope, acceptance criteria, splits, and UX structure drive everything downstream. Sonnet for pipeline orchestration and implementation (`/ccflow:implement` pins `model: sonnet`). Haiku for mechanical collection (lessons-collector). These pins are visible in each skill's frontmatter and override the session model for that skill only.
+**Model tiering**: Opus where judgment is concentrated — `/ccflow:refine` and `/ccflow:design` pin `model: opus` because scope, acceptance criteria, splits, and UX structure drive everything downstream, and the **planner** and **security-reviewer** agents run opus because the approved plan steers the whole unattended pipeline and a missed vulnerability is the costliest review failure. Sonnet for pipeline orchestration and implementation (`/ccflow:implement` pins `model: sonnet`; `/ccflow:babysit` pins `model: sonnet` so long-lived loop ticks stay cheap). Haiku for mechanical work — context-gatherer, structure-analyzer, lessons-collector, and `/ccflow:sync`. These pins are visible in each skill's and agent's frontmatter and override the session model for that skill/agent only. **Caveat**: the `CLAUDE_CODE_SUBAGENT_MODEL` pin (see Troubleshooting) overrides agent frontmatter and flattens this tiering — set it only on 1M-context sessions where the delegation gate applies.
 
 External integrations use the `gh` CLI rather than MCP servers, keeping permissions simple and avoiding token overhead. Optional MCP servers: Context7 (live documentation lookup) and Pencil (design file creation via `/ccflow:design`).
 
@@ -348,7 +352,7 @@ The pipeline ran inline and skipped the dedicated reviewer agents (security-revi
 
 The `[1m]` flag is session-level: every subagent inherits it but **not** the session's extra-usage entitlement, so `Task` delegation is gated — even with a `model: sonnet` override and even with usage credits enabled (Claude Code bug [#51060](https://github.com/anthropics/claude-code/issues/51060) / [#57249](https://github.com/anthropics/claude-code/issues/57249)). ccflow's reviewers need the standard 200K context.
 
-- **Permanently (keeps your main session on 1M):** run `/ccflow:configure` and answer **Yes** to "Pin subagents to 200K" — it sets `CLAUDE_CODE_SUBAGENT_MODEL=claude-sonnet-4-6` in `~/.claude/settings.json` so every subagent runs on Sonnet 200K while your main session keeps 1M. Restart for it to take effect. (Pin Sonnet, not Opus: Opus auto-upgrades to 1M on Max/Team/Enterprise plans and would re-trigger the gate.)
+- **Permanently (keeps your main session on 1M):** run `/ccflow:configure` and answer **Yes** to "Pin subagents to 200K" — it sets `CLAUDE_CODE_SUBAGENT_MODEL=claude-sonnet-5` in `~/.claude/settings.json` so every subagent runs on Sonnet 200K while your main session keeps 1M. Restart for it to take effect. (Pin Sonnet, not Opus: Opus auto-upgrades to 1M on Max/Team/Enterprise plans and would re-trigger the gate. Note the pin overrides agent `model:` frontmatter, flattening ccflow's model tiering while set — unset it on standard 200K sessions.)
 - **Now (this session), or if pinning doesn't clear the gate:** run `/model sonnet` to put the whole session on 200K, then re-invoke the skill. Note `/model opus` will *not* drop you to 200K on a plan that auto-upgrades Opus to 1M.
 
 ## Project Structure
@@ -365,6 +369,10 @@ ccflow/
 │   ├── implementer.md
 │   ├── security-reviewer.md
 │   ├── code-reviewer.md
+│   ├── silent-failure-hunter.md
+│   ├── duplication-analyzer.md
+│   ├── security-analyzer.md
+│   ├── structure-analyzer.md
 │   └── lessons-collector.md
 ├── skills/
 │   ├── configure/SKILL.md
@@ -374,12 +382,20 @@ ccflow/
 │   ├── implement/
 │   │   ├── SKILL.md
 │   │   └── phases/
+│   ├── review/SKILL.md
+│   ├── refactor/SKILL.md
 │   ├── address-review/SKILL.md
 │   ├── babysit/SKILL.md
 │   ├── worktrees/SKILL.md
 │   ├── testing/SKILL.md
+│   ├── shell-rules/SKILL.md
+│   ├── subagent-safety/SKILL.md
+│   ├── attachments/SKILL.md
+│   ├── pr-comment-filter/SKILL.md
+│   ├── frontend-classification/SKILL.md
 │   ├── stack-dotnet/SKILL.md
-│   └── stack-angular/SKILL.md
+│   ├── stack-angular/SKILL.md
+│   └── stack-go/SKILL.md
 ├── hooks/
 │   └── hooks.json
 ├── docs/
