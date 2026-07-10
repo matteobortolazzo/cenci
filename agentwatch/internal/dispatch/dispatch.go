@@ -47,12 +47,14 @@ func RunOnce(cfg Config, ctrl run.Controller, dryRun bool, out io.Writer, prior 
 		priorVal = *prior
 	}
 
+	now := time.Now()
+
 	decisions := Decide(Inputs{
 		Tickets:  tickets,
 		Plans:    plans,
 		Snapshot: snap,
-		Budgets:  FloorProvider{Floors: cfg.AgentBudgetFloors},
-		Now:      time.Now(),
+		Budgets:  buildBudgetProvider(cfg, now),
+		Now:      now,
 		Prior:    priorVal,
 		Config:   cfg,
 	})
@@ -97,6 +99,41 @@ func RunLoop(cfg Config, ctrl run.Controller, interval time.Duration, out io.Wri
 	defer ticker.Stop()
 	for range ticker.C {
 		RunOnce(cfg, ctrl, false, out, &prior)
+	}
+}
+
+// buildBudgetProvider returns a UsageProvider when AgentLimits are configured,
+// falling back to the #45 FloorProvider otherwise.
+func buildBudgetProvider(cfg Config, now time.Time) BudgetProvider {
+	if len(cfg.AgentLimits) == 0 {
+		return FloorProvider{Floors: cfg.AgentBudgetFloors}
+	}
+
+	readers := make(map[string]TokenReader, len(cfg.AgentLimits))
+	for agent := range cfg.AgentLimits {
+		switch agent {
+		case "claude":
+			dir := cfg.ClaudeSessionDir
+			if dir == "" {
+				home, _ := os.UserHomeDir()
+				dir = filepath.Join(home, ".claude", "projects")
+			}
+			readers[agent] = &ClaudeTokenReader{BaseDir: dir}
+		case "codex":
+			dbPath := cfg.CodexDBPath
+			if dbPath == "" {
+				home, _ := os.UserHomeDir()
+				dbPath = filepath.Join(home, ".codex", "state_5.sqlite")
+			}
+			readers[agent] = &CodexTokenReader{DBPath: dbPath}
+		}
+	}
+
+	return &UsageProvider{
+		Readers: readers,
+		Limits:  cfg.AgentLimits,
+		Floors:  cfg.AgentBudgetFloors,
+		Now:     now,
 	}
 }
 
