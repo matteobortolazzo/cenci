@@ -51,6 +51,11 @@ type Config struct {
 	ClaudeSessionDir       string
 	CodexDBPath            string
 	Session                string // target tmux session for dispatched windows
+
+	// Reconciler (#46) policy.
+	GracePeriod    time.Duration // how long the failure signal must hold before recovery (default 5m)
+	RetryBudget    int           // retries before a ticket is marked dispatch-failed (default 2)
+	DaemonInterval time.Duration // embedded dispatch+reconcile loop interval; 0 disables it
 }
 
 // DefaultConfig returns the built-in policy used when no config file (or no
@@ -62,6 +67,8 @@ func DefaultConfig() Config {
 		DailyQuota:             20,
 		PlanStalenessTolerance: 5,
 		DefaultAgent:           "claude",
+		GracePeriod:            5 * time.Minute,
+		RetryBudget:            2,
 	}
 }
 
@@ -81,6 +88,9 @@ type dispatchFile struct {
 	ClaudeSessionDir       string                `json:"claudeSessionDir"`
 	CodexDBPath            string                `json:"codexDBPath"`
 	Session                string                `json:"session"`
+	GracePeriod            string                `json:"gracePeriod"`    // Go duration string, e.g. "5m"
+	RetryBudget            *int                  `json:"retryBudget"`    // pointer so an explicit 0 (no retries) is distinguishable from unset
+	DaemonInterval         string                `json:"daemonInterval"` // Go duration string, e.g. "5m"; empty/0 disables the embedded loop
 }
 
 // LoadConfig returns the default policy with the config.json "dispatch" block
@@ -154,6 +164,15 @@ func mergeConfig(base Config, o dispatchFile) Config {
 	}
 	if o.Session != "" {
 		base.Session = o.Session
+	}
+	if d, err := time.ParseDuration(o.GracePeriod); o.GracePeriod != "" && err == nil {
+		base.GracePeriod = d
+	}
+	if o.RetryBudget != nil {
+		base.RetryBudget = *o.RetryBudget
+	}
+	if d, err := time.ParseDuration(o.DaemonInterval); o.DaemonInterval != "" && err == nil {
+		base.DaemonInterval = d
 	}
 	return base
 }

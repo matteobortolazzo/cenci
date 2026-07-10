@@ -22,6 +22,11 @@ type Daemon struct {
 	ipc      *ipc.Server                       // nil if IPC not enabled
 	events   <-chan ipc.HookEvent
 	now      func() time.Time // injectable clock for TTL tests
+
+	// attention is the reconciler's overlay of synthetic "failed" windows
+	// (#46). It is appended to every snapshot until the next overlay replaces
+	// it. Empty when the embedded dispatch loop is disabled.
+	attention []ipc.WindowState
 }
 
 // newDaemon creates a Daemon with the given dependencies.
@@ -36,8 +41,10 @@ func newDaemon(cfg config.Config, fe frontend.Frontend, events <-chan ipc.HookEv
 }
 
 // Run starts the event-driven daemon with the given interactive frontend.
-// It blocks until ctx is cancelled, then cleans up.
-func Run(ctx context.Context, cfg config.Config, fe frontend.Frontend) error {
+// It blocks until ctx is cancelled, then cleans up. attention is the optional
+// channel of reconciler failure overlays (#46); pass nil to leave the daemon's
+// behavior unchanged.
+func Run(ctx context.Context, cfg config.Config, fe frontend.Frontend, attention <-chan []ipc.WindowState) error {
 	// Start event receiver.
 	recv, err := ipc.NewEventReceiver(cfg.EventSocketPath)
 	if err != nil {
@@ -71,11 +78,12 @@ func Run(ctx context.Context, cfg config.Config, fe frontend.Frontend) error {
 			log.Printf("broadcast socket: %s", cfg.SocketPath)
 		}
 	}
-	return d.loop(ctx)
+	return d.loop(ctx, attention)
 }
 
-// loop is the main event-driven loop.
-func (d *Daemon) loop(ctx context.Context) error {
+// loop is the main event-driven loop. A nil attention channel never fires in
+// the select, so the extra case is a no-op when the embedded loop is disabled.
+func (d *Daemon) loop(ctx context.Context, attention <-chan []ipc.WindowState) error {
 	sweep := time.NewTicker(d.cfg.SweepInterval)
 	defer sweep.Stop()
 
@@ -88,6 +96,9 @@ func (d *Daemon) loop(ctx context.Context) error {
 			d.handleEvent(event)
 		case <-sweep.C:
 			d.runSweep()
+		case overlay := <-attention:
+			d.attention = overlay
+			d.broadcast()
 		}
 	}
 }

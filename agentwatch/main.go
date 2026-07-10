@@ -98,7 +98,20 @@ func runDaemon(args []string) {
 	// tmux is the one interactive frontend; it is constructed here and
 	// injected so the daemon core stays tmux-free.
 	fe := tmuxfe.New(cfg, &tmux.ExecClient{})
-	if err := daemon.Run(ctx, cfg, fe); err != nil {
+
+	// When dispatch.daemonInterval is configured, run the embedded dispatch +
+	// reconcile loop in one process and feed its failure overlay into the daemon
+	// snapshot. Interval 0 (the default) leaves daemon behavior unchanged.
+	var attention <-chan []ipc.WindowState
+	if dcfg, err := dispatch.LoadConfig(""); err != nil {
+		log.Printf("dispatch config: %v (embedded loop disabled)", err)
+	} else if dcfg.DaemonInterval > 0 {
+		ch := make(chan []ipc.WindowState, 1)
+		attention = ch
+		go dispatch.RunCombinedLoop(ctx, dcfg, &tmux.ExecClient{}, &dispatch.GHMutator{}, dcfg.DaemonInterval, os.Stdout, ch)
+	}
+
+	if err := daemon.Run(ctx, cfg, fe, attention); err != nil {
 		fmt.Fprintf(os.Stderr, "agentwatch: %v\n", err)
 		os.Exit(1)
 	}
@@ -211,6 +224,7 @@ func runDispatch(args []string) {
 	once := fs.Bool("once", false, "run a single dispatch pass then exit (default)")
 	interval := fs.Duration("interval", 0, "run continuously on this interval (e.g. 5m); mutually exclusive with --once")
 	dryRun := fs.Bool("dry-run", false, "print the decision table without dispatching")
+	reconcile := fs.Bool("reconcile", false, "run a single failure-reconciliation pass instead of a dispatch pass (cron path)")
 	configPath := fs.String("config", "", "path to config.json (default: $XDG_CONFIG_HOME/agentwatch/config.json)")
 	_ = fs.Parse(args)
 
@@ -218,6 +232,13 @@ func runDispatch(args []string) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "agentwatch dispatch: %v\n", err)
 		os.Exit(1)
+	}
+
+	// --reconcile runs the recovery pass once (cron path). It is independent of
+	// the dispatch/loop flags.
+	if *reconcile {
+		dispatch.RunReconcileOnce(cfg, &dispatch.GHMutator{}, *dryRun, os.Stdout, dispatch.NewStateStore(""))
+		return
 	}
 
 	ctrl := &tmux.ExecClient{}
@@ -239,6 +260,7 @@ func runStatus(args []string) {
 		SymbolDone:      defaults.SymbolDone,
 		SymbolNeedInput: defaults.SymbolNeedInput,
 		SymbolStopped:   defaults.SymbolStopped,
+		SymbolFailed:    defaults.SymbolFailed,
 	}
 	fs.StringVar(&wcfg.SocketPath, "socket", ipc.DefaultSocketPath(), "IPC socket path")
 	fs.StringVar(&wcfg.SymbolIdle, "symbol-idle", wcfg.SymbolIdle, "symbol for idle state")
@@ -246,6 +268,7 @@ func runStatus(args []string) {
 	fs.StringVar(&wcfg.SymbolDone, "symbol-done", wcfg.SymbolDone, "symbol for done state")
 	fs.StringVar(&wcfg.SymbolNeedInput, "symbol-input", wcfg.SymbolNeedInput, "symbol for need-input state")
 	fs.StringVar(&wcfg.SymbolStopped, "symbol-stopped", wcfg.SymbolStopped, "symbol for stopped (interrupted) state")
+	fs.StringVar(&wcfg.SymbolFailed, "symbol-failed", wcfg.SymbolFailed, "symbol for dispatch-failed state")
 	_ = fs.Parse(args)
 
 	if err := status.Run(wcfg); err != nil {

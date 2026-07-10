@@ -18,6 +18,7 @@ type Config struct {
 	SymbolDone      string
 	SymbolNeedInput string
 	SymbolStopped   string
+	SymbolFailed    string
 }
 
 func Default() Config {
@@ -35,5 +36,6 @@ func Default() Config {
 		SymbolDone:      "✓",
 		SymbolNeedInput: "!",
 		SymbolStopped:   "⏹",
+		SymbolFailed:    "✗",
 	}
 }

@@ -24,7 +24,8 @@ type WindowState struct {
 	// TaskName is the human-readable task extracted for the window, if any.
 	TaskName string `json:"task_name"`
 	// Status is the window's current status (for example "idle", "running",
-	// "done", "stopped", or "need_input").
+	// "done", "stopped", "need_input", or "failed"). "failed" marks a synthetic
+	// entry for a dispatch-failed or plan-invalid ticket that has no live window.
 	Status string `json:"status"`
 	// Agent identifies the coding agent detected in the window, if known.
 	// Omitted from the JSON when empty.
@@ -48,4 +49,7 @@ type StatusSummary struct {
 	Stopped int `json:"stopped"`
 	// NeedInput counts windows awaiting user input.
 	NeedInput int `json:"need_input"`
+	// Failed counts synthetic entries for dispatch-failed or plan-invalid
+	// tickets surfaced by the reconciler (they have no live window).
+	Failed int `json:"failed"`
 }
