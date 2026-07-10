@@ -40,6 +40,28 @@ fits it better; the isolation and attention layers don't care which.
 
 ## Install
 
+Three plugins, **one installer**. It detects your platform (Linux, macOS, WSL2),
+checks prerequisites, walks you through what to install (default: everything), and
+does the post-install setup — sandbox launcher + image build, macOS menu bar wiring:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/claude-tools/main/install.sh | bash
+```
+
+```bash
+# update everything later:
+curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/claude-tools/main/install.sh | bash -s -- update
+
+# just check what's missing, change nothing:
+curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/claude-tools/main/install.sh | bash -s -- doctor
+```
+
+New here? Read **[Getting started](./docs/getting-started.md)** — prerequisites per
+platform, your first session, troubleshooting, uninstall.
+
+<details>
+<summary>Manual install (what the script does)</summary>
+
 ```bash
 claude plugin marketplace add matteobortolazzo/claude-tools
 claude plugin install ccflow agentwatch sandbox
@@ -47,6 +69,8 @@ claude plugin install ccflow agentwatch sandbox
 # later:
 claude plugin update --all
 ```
+
+</details>
 
 Each layer versions independently, but they install and update through this one
 mechanism.
