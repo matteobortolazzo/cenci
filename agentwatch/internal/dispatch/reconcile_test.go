@@ -231,6 +231,57 @@ func TestReconcilePlannedNoPlanIsInvalid(t *testing.T) {
 	}
 }
 
+func TestReconcilePlanInvalidGraceNotElapsed(t *testing.T) {
+	in := workingInputs()
+	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Planned"}}}
+	in.Plans = nil
+	// No prior observation: the missing plan was just seen. A plan mid-write or
+	// living on another host must not be flipped to plan-invalid on sight.
+	in.Observations = map[string]time.Time{}
+	res := Reconcile(in)
+
+	if len(res.Recoveries) != 0 {
+		t.Fatalf("plan-invalid must wait out grace, got %+v", res.Recoveries)
+	}
+	if hasFailed(res, "o/r", 42) {
+		t.Error("a within-grace Planned ticket must not be surfaced as failed")
+	}
+	if ts, ok := res.NextObservations["o/r#42"]; !ok || !ts.Equal(reconcileNow) {
+		t.Errorf("expected a fresh observation at %v, got %v (present=%v)", reconcileNow, ts, ok)
+	}
+}
+
+func TestReconcilePlanInvalidNilSnapshotNeverBlind(t *testing.T) {
+	in := workingInputs()
+	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Planned"}}}
+	in.Plans = nil
+	in.Snapshot = nil
+	res := Reconcile(in)
+
+	if len(res.Recoveries) != 0 {
+		t.Fatalf("nil snapshot must never escalate plan-invalid, got %+v", res.Recoveries)
+	}
+	// The prior (elapsed) observation is preserved, not acted on.
+	if _, ok := res.NextObservations["o/r#42"]; !ok {
+		t.Error("nil snapshot must preserve the pending plan-invalid observation")
+	}
+}
+
+func TestReconcileAttemptsUnknownDefers(t *testing.T) {
+	in := workingInputs()
+	// Grace has elapsed and the window is gone, but the durable attempt count
+	// could not be read this pass — defer rather than act on an assumed zero.
+	in.AttemptsUnknown = map[string]bool{"o/r#42": true}
+	res := Reconcile(in)
+
+	if len(res.Recoveries) != 0 {
+		t.Fatalf("unknown attempt count must defer, got %+v", res.Recoveries)
+	}
+	if ts, ok := res.NextObservations["o/r#42"]; !ok || !ts.Equal(reconcileNow.Add(-10*time.Minute)) {
+		t.Errorf("deferring must preserve the original first-seen time, got %v (present=%v)", ts, ok)
+	}
+}
+
 func TestReconcilePlannedUnapprovedPlanLeftAlone(t *testing.T) {
 	in := workingInputs()
 	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Planned"}}}

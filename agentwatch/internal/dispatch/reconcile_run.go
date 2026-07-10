@@ -62,12 +62,14 @@ func (GHMutator) Comment(repo string, number int, body string) error {
 
 // countAttempts tallies durable attempt markers on a ticket's comment thread.
 // It is called only for Working candidate tickets (few at a time), so the extra
-// gh call per candidate is cheap.
-func countAttempts(repo string, number int) int {
+// gh call per candidate is cheap. An error is returned rather than swallowed to
+// 0: the caller must not confuse "no attempts yet" with "could not read", since
+// the count gates the retry-vs-fail decision.
+func countAttempts(repo string, number int) (int, error) {
 	out, err := exec.Command("gh", "issue", "view", strconv.Itoa(number),
 		"--repo", repo, "--json", "comments").Output()
 	if err != nil {
-		return 0
+		return 0, fmt.Errorf("gh issue view #%d in %s: %w", number, repo, err)
 	}
 	var v struct {
 		Comments []struct {
@@ -75,7 +77,7 @@ func countAttempts(repo string, number int) int {
 		} `json:"comments"`
 	}
 	if err := json.Unmarshal(out, &v); err != nil {
-		return 0
+		return 0, fmt.Errorf("parsing comments for #%d in %s: %w", number, repo, err)
 	}
 	n := 0
 	for _, c := range v.Comments {
@@ -83,7 +85,7 @@ func countAttempts(repo string, number int) int {
 			n++
 		}
 	}
-	return n
+	return n, nil
 }
 
 // stateStore persists the grace-observation map as JSON on disk.
@@ -150,11 +152,12 @@ func (s *stateStore) Save(obs map[string]time.Time) error {
 // reconcileDeps are the collected, impure inputs to a reconcile pass. Separating
 // them from RunReconcileOnce lets applyReconcile be exercised without gh.
 type reconcileDeps struct {
-	Tickets  []Ticket
-	Plans    []Plan
-	Snapshot *watch.StateSnapshot
-	Attempts map[string]int
-	Now      time.Time
+	Tickets         []Ticket
+	Plans           []Plan
+	Snapshot        *watch.StateSnapshot
+	Attempts        map[string]int
+	AttemptsUnknown map[string]bool
+	Now             time.Time
 }
 
 // RunReconcileOnce collects tickets, plans, the daemon snapshot, and durable
@@ -184,20 +187,30 @@ func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer,
 	snap, _ := ReadSnapshot(watch.DefaultSocketPath()) // nil on error ⇒ Reconcile never reconciles blind
 
 	// Count durable attempts only for Working candidate tickets — the only ones
-	// the failure path can act on.
+	// the failure path can act on. A gh read error marks the ticket unknown so
+	// Reconcile defers rather than acting on an assumed-zero count.
 	attempts := make(map[string]int)
+	attemptsUnknown := make(map[string]bool)
 	for _, t := range tickets {
-		if hasLabel(t.Labels, labelWorking) {
-			attempts[planKey(t.Repo, t.Number)] = countAttempts(t.Repo, t.Number)
+		if !hasLabel(t.Labels, labelWorking) {
+			continue
 		}
+		n, err := countAttempts(t.Repo, t.Number)
+		if err != nil {
+			logf(out, "reconcile: #%d counting attempts: %v\n", t.Number, err)
+			attemptsUnknown[planKey(t.Repo, t.Number)] = true
+			continue
+		}
+		attempts[planKey(t.Repo, t.Number)] = n
 	}
 
 	return applyReconcile(cfg, reconcileDeps{
-		Tickets:  tickets,
-		Plans:    plans,
-		Snapshot: snap,
-		Attempts: attempts,
-		Now:      time.Now(),
+		Tickets:         tickets,
+		Plans:           plans,
+		Snapshot:        snap,
+		Attempts:        attempts,
+		AttemptsUnknown: attemptsUnknown,
+		Now:             time.Now(),
 	}, mut, dryRun, out, store)
 }
 
@@ -216,13 +229,14 @@ func applyReconcile(cfg Config, deps reconcileDeps, mut TicketMutator, dryRun bo
 	}
 
 	result := Reconcile(ReconcileInputs{
-		Tickets:      deps.Tickets,
-		Plans:        deps.Plans,
-		Snapshot:     deps.Snapshot,
-		Now:          deps.Now,
-		Observations: obs,
-		Attempts:     deps.Attempts,
-		Config:       cfg,
+		Tickets:         deps.Tickets,
+		Plans:           deps.Plans,
+		Snapshot:        deps.Snapshot,
+		Now:             deps.Now,
+		Observations:    obs,
+		Attempts:        deps.Attempts,
+		AttemptsUnknown: deps.AttemptsUnknown,
+		Config:          cfg,
 	})
 
 	for _, rec := range result.Recoveries {

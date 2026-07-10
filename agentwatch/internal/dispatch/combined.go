@@ -64,14 +64,25 @@ func failedWindows(failed []Ticket) []watch.WindowState {
 	return out
 }
 
+// failedWindowMaxLen mirrors run.windowNameMaxLen so a synthetic failed entry
+// carries the same bounded "<number>-<slug>" join key as a real dispatched
+// window, keeping external name matching consistent.
+const failedWindowMaxLen = 40
+
 // failedWindowName builds the "<number>-<slug>" window name external tools join
-// on, falling back to the bare number when the title yields no slug.
+// on, falling back to the bare number when the title yields no slug. The result
+// is capped to failedWindowMaxLen with the leading number kept intact (slugify
+// output is ASCII, so a byte cap is a rune cap).
 func failedWindowName(t Ticket) string {
 	slug := slugify(t.Title)
 	if slug == "" {
 		return strconv.Itoa(t.Number)
 	}
-	return fmt.Sprintf("%d-%s", t.Number, slug)
+	name := fmt.Sprintf("%d-%s", t.Number, slug)
+	if len(name) > failedWindowMaxLen {
+		name = strings.TrimRight(name[:failedWindowMaxLen], "-")
+	}
+	return name
 }
 
 // slugify lowercases s and collapses runs of non-alphanumeric characters into

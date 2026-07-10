@@ -56,7 +56,12 @@ type ReconcileInputs struct {
 	Now          time.Time            // injected clock value
 	Observations map[string]time.Time // ticketKey → first-seen-failing
 	Attempts     map[string]int       // ticketKey → prior attempt-comment count
-	Config       Config
+	// AttemptsUnknown holds ticket keys whose durable attempt count could not be
+	// read this pass (a gh error). Reconcile refuses to pick retry-vs-fail on an
+	// assumed-zero count for these — acting blind would exceed the retry budget —
+	// so it preserves the grace clock and defers the decision to a later pass.
+	AttemptsUnknown map[string]bool
+	Config          Config
 }
 
 // ReconcileResult is Reconcile's output. NextObservations is the grace map to
@@ -115,17 +120,38 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 		// no matched plan. A plan that exists but is not approved is a normal
 		// human-in-loop state — left alone.
 		if hasLabel(t.Labels, labelPlanned) {
-			if planByTicket[key] == nil {
-				res.Recoveries = append(res.Recoveries, Recovery{
-					Ticket:       t,
-					Kind:         RecoveryPlanInvalid,
-					AddLabels:    []string{labelPlanInvalid},
-					RemoveLabels: []string{labelPlanned},
-					Comment:      planInvalidComment(),
-					Detail:       "Planned ticket has no parseable plan file",
-				})
-				res.Failed = append(res.Failed, t)
+			if planByTicket[key] != nil {
+				continue
 			}
+			// A Planned ticket with no local plan file is not always a leak: plan
+			// files are ephemeral and may be mid-write, or the plan legitimately
+			// lives on another host (ccflow treats "Planned, no local plan" as a
+			// normal state). So this path mirrors the failure path's guards —
+			// never act blind on a nil snapshot, and require the signal to hold
+			// past the grace period before escalating to plan-invalid.
+			if in.Snapshot == nil {
+				if ts, ok := in.Observations[key]; ok {
+					res.NextObservations[key] = ts
+				}
+				continue
+			}
+			firstSeen, ok := in.Observations[key]
+			if !ok {
+				firstSeen = in.Now
+			}
+			if in.Now.Sub(firstSeen) < in.Config.GracePeriod {
+				res.NextObservations[key] = firstSeen
+				continue
+			}
+			res.Recoveries = append(res.Recoveries, Recovery{
+				Ticket:       t,
+				Kind:         RecoveryPlanInvalid,
+				AddLabels:    []string{labelPlanInvalid},
+				RemoveLabels: []string{labelPlanned},
+				Comment:      planInvalidComment(),
+				Detail:       "Planned ticket has no parseable plan file",
+			})
+			res.Failed = append(res.Failed, t)
 			continue
 		}
 
@@ -165,6 +191,13 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 		}
 
 		// Grace elapsed: recover. Durable attempt count chooses retry vs fail.
+		// If the count could not be read this pass, defer rather than act on an
+		// assumed zero (which would re-dispatch past the retry budget and could
+		// keep a genuinely-failed ticket from ever reaching dispatch-failed).
+		if in.AttemptsUnknown[key] {
+			res.NextObservations[key] = firstSeen
+			continue
+		}
 		attempts := in.Attempts[key]
 		win := matchingWindow(t.Number, in.Snapshot)
 		name, lastStatus := windowDetail(t.Number, win)
