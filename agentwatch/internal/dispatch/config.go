@@ -46,6 +46,10 @@ type Config struct {
 	PlanStalenessTolerance int // commits
 	DefaultAgent           string
 	AgentBudgetFloors      map[string]float64
+	AgentLimits            map[string]AgentLimit
+	AgentPreference        []string
+	ClaudeSessionDir       string
+	CodexDBPath            string
 	Session                string // target tmux session for dispatched windows
 }
 
@@ -64,15 +68,19 @@ func DefaultConfig() Config {
 // dispatchFile is the on-disk "dispatch" block. Numeric fields are pointers so
 // an explicit 0 (e.g. concurrencyCap: 0 to pause) is distinguishable from unset.
 type dispatchFile struct {
-	Repos                  []RepoConfig       `json:"repos"`
-	ConcurrencyCap         *int               `json:"concurrencyCap"`
-	NeedInputThreshold     *int               `json:"needInputThreshold"`
-	DailyQuota             *int               `json:"dailyQuota"`
-	QuietHours             *QuietHours        `json:"quietHours"`
-	PlanStalenessTolerance *int               `json:"planStalenessTolerance"`
-	DefaultAgent           string             `json:"defaultAgent"`
-	AgentBudgetFloors      map[string]float64 `json:"agentBudgetFloors"`
-	Session                string             `json:"session"`
+	Repos                  []RepoConfig          `json:"repos"`
+	ConcurrencyCap         *int                  `json:"concurrencyCap"`
+	NeedInputThreshold     *int                  `json:"needInputThreshold"`
+	DailyQuota             *int                  `json:"dailyQuota"`
+	QuietHours             *QuietHours           `json:"quietHours"`
+	PlanStalenessTolerance *int                  `json:"planStalenessTolerance"`
+	DefaultAgent           string                `json:"defaultAgent"`
+	AgentBudgetFloors      map[string]float64    `json:"agentBudgetFloors"`
+	AgentLimits            map[string]AgentLimit `json:"agentLimits"`
+	AgentPreference        []string              `json:"agentPreference"`
+	ClaudeSessionDir       string                `json:"claudeSessionDir"`
+	CodexDBPath            string                `json:"codexDBPath"`
+	Session                string                `json:"session"`
 }
 
 // LoadConfig returns the default policy with the config.json "dispatch" block
@@ -131,6 +139,18 @@ func mergeConfig(base Config, o dispatchFile) Config {
 	}
 	if o.AgentBudgetFloors != nil {
 		base.AgentBudgetFloors = o.AgentBudgetFloors
+	}
+	if o.AgentLimits != nil {
+		base.AgentLimits = o.AgentLimits
+	}
+	if o.AgentPreference != nil {
+		base.AgentPreference = o.AgentPreference
+	}
+	if o.ClaudeSessionDir != "" {
+		base.ClaudeSessionDir = o.ClaudeSessionDir
+	}
+	if o.CodexDBPath != "" {
+		base.CodexDBPath = o.CodexDBPath
 	}
 	if o.Session != "" {
 		base.Session = o.Session

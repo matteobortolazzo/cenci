@@ -122,11 +122,8 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 		return skip("quiet hours")
 	}
 
-	agent := t.Agent
+	agent := resolveAgent(t, in)
 	if agent == "" {
-		agent = in.Config.DefaultAgent
-	}
-	if b := in.Budgets.Budget(agent); !b.Unlimited && b.Remaining <= 0 {
 		return skip("budget exhausted")
 	}
 
@@ -197,6 +194,51 @@ func ticketByNumber(tickets []Ticket, repo string, n int) *Ticket {
 		}
 	}
 	return nil
+}
+
+// resolveAgent walks the agent preference list — ticket label, then config
+// preferences — and returns the first agent with budget. An empty return means
+// all agents are exhausted.
+func resolveAgent(t Ticket, in Inputs) string {
+	for _, agent := range agentPreference(t, in.Config) {
+		b := in.Budgets.Budget(agent)
+		if b.Unlimited || b.Remaining > 0 {
+			return agent
+		}
+	}
+	return ""
+}
+
+// agentPreference builds the ordered list of agents to try for a ticket.
+// The ticket's agent: label (or config default) comes first, then the config
+// AgentPreference list with duplicates removed.
+func agentPreference(t Ticket, cfg Config) []string {
+	var prefs []string
+	primary := t.Agent
+	if primary == "" {
+		primary = cfg.DefaultAgent
+	}
+	if primary != "" {
+		prefs = append(prefs, primary)
+	}
+	for _, a := range cfg.AgentPreference {
+		if !containsStr(prefs, a) {
+			prefs = append(prefs, a)
+		}
+	}
+	if len(prefs) == 0 && cfg.DefaultAgent != "" {
+		prefs = append(prefs, cfg.DefaultAgent)
+	}
+	return prefs
+}
+
+func containsStr(ss []string, s string) bool {
+	for _, v := range ss {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 func hasLabel(labels []string, name string) bool {

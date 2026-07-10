@@ -183,6 +183,53 @@ func TestDecideAgentRouting(t *testing.T) {
 	assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "opencode"}})
 }
 
+func TestDecideAgentFallback(t *testing.T) {
+	exhausted := func(agents ...string) BudgetProvider {
+		floors := make(map[string]float64, len(agents))
+		for _, a := range agents {
+			floors[a] = 0
+		}
+		return FloorProvider{Floors: floors}
+	}
+
+	t.Run("primary exhausted falls back to preference list", func(t *testing.T) {
+		in := baseInputs()
+		in.Budgets = exhausted("claude")
+		in.Config.AgentPreference = []string{"claude", "codex"}
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "codex"}})
+	})
+
+	t.Run("all agents exhausted skips", func(t *testing.T) {
+		in := baseInputs()
+		in.Budgets = exhausted("claude", "codex")
+		in.Config.AgentPreference = []string{"claude", "codex"}
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "budget exhausted", ""}})
+	})
+
+	t.Run("ticket label overrides default, falls back through prefs", func(t *testing.T) {
+		in := baseInputs()
+		in.Tickets[0].Agent = "codex"
+		in.Budgets = exhausted("codex")
+		in.Config.AgentPreference = []string{"claude", "codex"}
+		// codex exhausted, falls back to claude (next in pref list not yet tried)
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+	})
+
+	t.Run("no preference list uses default agent only", func(t *testing.T) {
+		in := baseInputs()
+		in.Budgets = exhausted("claude")
+		// No AgentPreference set; default agent exhausted → skip
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "budget exhausted", ""}})
+	})
+
+	t.Run("unlimited agent always passes", func(t *testing.T) {
+		in := baseInputs()
+		in.Budgets = FloorProvider{} // all unlimited
+		in.Config.AgentPreference = []string{"claude", "codex"}
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+	})
+}
+
 func TestDecideOrderingDeterminism(t *testing.T) {
 	in := baseInputs()
 	// Supplied out of order; output must be sorted by ticket number.
