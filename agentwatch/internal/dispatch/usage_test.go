@@ -1,8 +1,11 @@
 package dispatch
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -275,6 +278,114 @@ func TestClaudeTokenReaderSkipsStaleFiles(t *testing.T) {
 	}
 	if tokens != 0 {
 		t.Errorf("tokens = %d, want 0 (stale file skipped)", tokens)
+	}
+}
+
+// --- CodexTokenReader tests with a real SQLite DB ---
+
+// buildCodexDB creates a threads table at path and inserts the given rows,
+// each a (tokens_used, updated_at_ms) pair, via the sqlite3 CLI.
+func buildCodexDB(t *testing.T, path string, rows [][2]int64) {
+	t.Helper()
+	stmts := "CREATE TABLE threads (tokens_used INTEGER, updated_at_ms INTEGER);\n"
+	for _, r := range rows {
+		stmts += fmt.Sprintf("INSERT INTO threads VALUES (%d, %d);\n", r[0], r[1])
+	}
+	cmd := exec.Command("sqlite3", path)
+	cmd.Stdin = strings.NewReader(stmts)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("building codex db: %v\n%s", err, out)
+	}
+}
+
+func TestCodexTokenReaderSumsWithinWindow(t *testing.T) {
+	if _, err := exec.LookPath("sqlite3"); err != nil {
+		t.Skip("sqlite3 not on PATH")
+	}
+	since := time.Date(2026, 7, 10, 11, 0, 0, 0, time.UTC)
+	sinceMS := since.UnixMilli()
+
+	db := filepath.Join(t.TempDir(), "state.sqlite")
+	buildCodexDB(t, db, [][2]int64{
+		{100, sinceMS + 1000},   // in window
+		{200, sinceMS + 60_000}, // in window
+		{999, sinceMS - 60_000}, // before window → excluded
+		{50, sinceMS},           // boundary (>=) → included
+	})
+
+	reader := &CodexTokenReader{DBPath: db}
+	tokens, err := reader.TokensInWindow(since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tokens != 350 {
+		t.Errorf("tokens = %d, want 350 (100+200+50, stale row excluded)", tokens)
+	}
+}
+
+func TestCodexTokenReaderEmptyTable(t *testing.T) {
+	if _, err := exec.LookPath("sqlite3"); err != nil {
+		t.Skip("sqlite3 not on PATH")
+	}
+	db := filepath.Join(t.TempDir(), "state.sqlite")
+	buildCodexDB(t, db, nil)
+
+	reader := &CodexTokenReader{DBPath: db}
+	tokens, err := reader.TokensInWindow(time.Date(2026, 7, 10, 11, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tokens != 0 {
+		t.Errorf("tokens = %d, want 0 (empty table)", tokens)
+	}
+}
+
+func TestCodexTokenReaderMissingDBReturnsZeroAndCreatesNoFile(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "nonexistent.sqlite")
+
+	reader := &CodexTokenReader{DBPath: db}
+	tokens, err := reader.TokensInWindow(time.Now())
+	if err != nil {
+		t.Fatalf("missing db should not error: %v", err)
+	}
+	if tokens != 0 {
+		t.Errorf("tokens = %d, want 0 (missing db)", tokens)
+	}
+	if _, err := os.Stat(db); !os.IsNotExist(err) {
+		t.Errorf("missing-db path must not create a file, got stat err %v", err)
+	}
+}
+
+// --- UsageProvider memoization ---
+
+// countingReader records how many times TokensInWindow is invoked.
+type countingReader struct {
+	tokens int64
+	calls  *int
+}
+
+func (c countingReader) TokensInWindow(time.Time) (int64, error) {
+	*c.calls++
+	return c.tokens, nil
+}
+
+func TestUsageProviderMemoizesBudget(t *testing.T) {
+	calls := 0
+	p := &UsageProvider{
+		Readers: map[string]TokenReader{"claude": countingReader{tokens: 1000, calls: &calls}},
+		Limits:  map[string]AgentLimit{"claude": {FiveHourTokens: 10000, WeeklyTokens: 100000}},
+		Now:     time.Now(),
+		cache:   make(map[string]Budget),
+	}
+	first := p.Budget("claude")
+	second := p.Budget("claude")
+	if first != second {
+		t.Errorf("cached budget mismatch: %+v vs %+v", first, second)
+	}
+	// Two windows (5h + weekly) are read once on the first call; the second call
+	// must be served from cache with no further reads.
+	if calls != 2 {
+		t.Errorf("reader called %d times, want 2 (cached after first Budget)", calls)
 	}
 }
 

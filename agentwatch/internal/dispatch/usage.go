@@ -33,11 +33,30 @@ type AgentLimit struct {
 type UsageProvider struct {
 	Readers map[string]TokenReader
 	Limits  map[string]AgentLimit
-	Floors  map[string]float64
-	Now     time.Time
+	// Floors carries a dual meaning per agent: when a reader+limit exist it is
+	// subtracted as a threshold from the computed headroom; in the no-reader
+	// fallback it is used directly as Remaining (matching FloorProvider).
+	Floors map[string]float64
+	Now    time.Time
+	// cache memoizes Budget results within a single RunOnce pass. Budget does
+	// live I/O (dir walks, sqlite3 spawns) and Decide calls it once per agent
+	// per ticket; a fresh UsageProvider is built per pass so staleness is bounded
+	// to the pass. Populated lazily; safe because Decide is single-threaded.
+	cache map[string]Budget
 }
 
 func (p *UsageProvider) Budget(agent string) Budget {
+	if b, ok := p.cache[agent]; ok {
+		return b
+	}
+	b := p.computeBudget(agent)
+	if p.cache != nil {
+		p.cache[agent] = b
+	}
+	return b
+}
+
+func (p *UsageProvider) computeBudget(agent string) Budget {
 	reader, hasReader := p.Readers[agent]
 	limit, hasLimit := p.Limits[agent]
 	if !hasReader || !hasLimit {
@@ -87,9 +106,9 @@ type ClaudeTokenReader struct {
 
 // claudeEntry is the minimal structure parsed from each JSONL line.
 type claudeEntry struct {
-	Type      string       `json:"type"`
-	Timestamp string       `json:"timestamp"`
-	Message   claudeUsage  `json:"message"`
+	Type      string      `json:"type"`
+	Timestamp string      `json:"timestamp"`
+	Message   claudeUsage `json:"message"`
 }
 
 type claudeUsage struct {
@@ -126,10 +145,10 @@ func (r *ClaudeTokenReader) TokensInWindow(since time.Time) (int64, error) {
 			if err != nil || info.ModTime().UnixMilli() < sinceMS {
 				continue
 			}
-			tokens, err := scanClaudeJSONL(filepath.Join(dir, e.Name()), since)
-			if err != nil {
-				continue
-			}
+			// scanClaudeJSONL returns its partial sum alongside any error; add
+			// the partial rather than discarding it. Dropping already-counted
+			// tokens would undercount usage and risk over-dispatching.
+			tokens, _ := scanClaudeJSONL(filepath.Join(dir, e.Name()), since)
 			total += tokens
 		}
 	}
@@ -177,6 +196,16 @@ type CodexTokenReader struct {
 }
 
 func (r *CodexTokenReader) TokensInWindow(since time.Time) (int64, error) {
+	// Guard the missing-DB case explicitly: sqlite3 exits non-zero (not an
+	// os.IsNotExist error) on a missing file and leaves a stray 0-byte DB
+	// behind, which would mark codex permanently budget-exhausted.
+	if _, err := os.Stat(r.DBPath); err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("stat codex db: %w", err)
+	}
+
 	sinceMS := since.UnixMilli()
 	query := fmt.Sprintf(
 		"SELECT COALESCE(SUM(tokens_used), 0) FROM threads WHERE updated_at_ms >= %d",
@@ -184,9 +213,6 @@ func (r *CodexTokenReader) TokensInWindow(since time.Time) (int64, error) {
 	)
 	out, err := exec.Command("sqlite3", r.DBPath, query).Output()
 	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil
-		}
 		return 0, fmt.Errorf("querying codex db: %w", err)
 	}
 	n, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)

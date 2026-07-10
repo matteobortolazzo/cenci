@@ -134,6 +134,7 @@ func buildBudgetProvider(cfg Config, now time.Time) BudgetProvider {
 		Limits:  cfg.AgentLimits,
 		Floors:  cfg.AgentBudgetFloors,
 		Now:     now,
+		cache:   make(map[string]Budget),
 	}
 }
 
