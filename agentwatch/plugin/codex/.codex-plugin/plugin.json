@@ -1,6 +1,6 @@
 {
   "name": "agentwatch",
-  "version": "1.10.0",
+  "version": "1.11.0",
   "description": "Send Codex lifecycle events to the agentwatch tmux status daemon.",
   "author": {
     "name": "Matteo Bortolazzo",
