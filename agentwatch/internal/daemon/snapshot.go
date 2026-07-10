@@ -62,6 +62,14 @@ func (d *Daemon) buildSnapshot() ipc.StateSnapshot {
 	for _, e := range entries {
 		snap.Windows = append(snap.Windows, e.w)
 	}
+
+	// Append the reconciler's synthetic failure overlay (#46). These entries
+	// have no backing session, so they are counted here, after the real ones.
+	for _, w := range d.attention {
+		snap.Windows = append(snap.Windows, w)
+		snap.Summary.Total++
+		snap.Summary.Failed++
+	}
 	return snap
 }
 

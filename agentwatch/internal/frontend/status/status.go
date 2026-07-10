@@ -21,6 +21,7 @@ type Config struct {
 	SymbolDone      string
 	SymbolNeedInput string
 	SymbolStopped   string
+	SymbolFailed    string
 }
 
 // output is the Waybar custom module JSON protocol.
@@ -65,8 +66,12 @@ func Format(snap *ipc.StateSnapshot, cfg Config) output {
 		}
 	}
 
-	// Build text: counts for non-zero statuses.
+	// Build text: counts for non-zero statuses. Failed leads — it is the loudest
+	// and highest-priority state.
 	var parts []string
+	if snap.Summary.Failed > 0 {
+		parts = append(parts, fmt.Sprintf("%s %d", cfg.SymbolFailed, snap.Summary.Failed))
+	}
 	if snap.Summary.Running > 0 {
 		parts = append(parts, fmt.Sprintf("%s %d", cfg.SymbolRunning, snap.Summary.Running))
 	}
@@ -116,6 +121,9 @@ func Format(snap *ipc.StateSnapshot, cfg Config) output {
 
 // highestClass returns the CSS class for the highest-priority status.
 func highestClass(snap *ipc.StateSnapshot) string {
+	if snap.Summary.Failed > 0 {
+		return "failed"
+	}
 	if snap.Summary.NeedInput > 0 {
 		return "need-input"
 	}

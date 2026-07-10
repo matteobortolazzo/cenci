@@ -13,6 +13,45 @@ func testConfig() Config {
 		SymbolDone:      "✓",
 		SymbolNeedInput: "!",
 		SymbolStopped:   "⏹",
+		SymbolFailed:    "✗",
+	}
+}
+
+func TestFormat_FailedOnly(t *testing.T) {
+	snap := &ipc.StateSnapshot{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Windows: []ipc.WindowState{
+			{WindowName: "42-fix-thing", Status: "failed"},
+		},
+		Summary: ipc.StatusSummary{Total: 1, Failed: 1},
+	}
+	out := Format(snap, testConfig())
+
+	if out.Text != "✗ 1" {
+		t.Errorf("expected '✗ 1', got %q", out.Text)
+	}
+	if out.Class != "failed" {
+		t.Errorf("expected class 'failed', got %q", out.Class)
+	}
+}
+
+func TestFormat_FailedWinsHighestClass(t *testing.T) {
+	snap := &ipc.StateSnapshot{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Windows: []ipc.WindowState{
+			{Session: "s", WindowIndex: "0", TaskName: "a", Status: "running"},
+			{Session: "s", WindowIndex: "1", TaskName: "b", Status: "need-input"},
+			{WindowName: "42-x", Status: "failed"},
+		},
+		Summary: ipc.StatusSummary{Total: 3, Running: 1, NeedInput: 1, Failed: 1},
+	}
+	out := Format(snap, testConfig())
+
+	if out.Class != "failed" {
+		t.Errorf("expected class 'failed' (highest priority, above need-input), got %q", out.Class)
+	}
+	if out.Text != "✗ 1  ▶ 1  ! 1" {
+		t.Errorf("expected failed count to lead, got %q", out.Text)
 	}
 }
 

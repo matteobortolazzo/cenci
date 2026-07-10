@@ -32,6 +32,7 @@ Item {
 
   function iconForClass(c) {
     switch (c) {
+      case "failed":     return "alert-octagon"
       case "need-input": return "alert-triangle"
       case "running":    return "robot"
       case "done":       return "circle-check"
@@ -43,6 +44,7 @@ Item {
 
   function colorForClass(c) {
     switch (c) {
+      case "failed":     return Color.mError
       case "need-input": return Color.mError
       case "running":    return Color.mPrimary
       case "done":       return Color.mTertiary

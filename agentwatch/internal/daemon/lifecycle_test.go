@@ -184,7 +184,7 @@ func TestDaemon_LoopExitsOnCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- d.loop(ctx)
+		done <- d.loop(ctx, nil)
 	}()
 
 	time.Sleep(50 * time.Millisecond)

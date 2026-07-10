@@ -209,13 +209,17 @@ agentwatch dispatch --once
 
 # Run continuously, re-evaluating every 5 minutes
 agentwatch dispatch --interval 5m
+
+# Run a single failure-reconciliation pass (recover stranded dispatched work)
+agentwatch dispatch --reconcile
 ```
 
 | Flag | Purpose |
 |------|---------|
 | `--once` | Run a single dispatch pass then exit (the default when neither `--once` nor `--interval` is given) |
 | `--interval <dur>` | Re-run on this interval (e.g. `5m`); mutually exclusive with `--once` |
-| `--dry-run` | Print the full decision table and dispatch nothing |
+| `--reconcile` | Run one failure-reconciliation pass instead of a dispatch pass (see [Failure reconciliation](#failure-reconciliation)); pair with a cron entry |
+| `--dry-run` | Print the decision (or reconciliation) table and mutate nothing |
 | `--config <path>` | Config file (default: `$XDG_CONFIG_HOME/agentwatch/config.json`) |
 
 Every ticket yields exactly one logged decision — dispatched or skipped, always with
@@ -261,6 +265,9 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
     "dailyQuota": 20,
     "quietHours": { "startHour": 22, "endHour": 7 },
     "planStalenessTolerance": 5,
+    "gracePeriod": "5m",
+    "retryBudget": 2,
+    "daemonInterval": "5m",
     "defaultAgent": "claude",
     "agentPreference": ["claude", "codex"],
     "agentBudgetFloors": { "claude": 0.1, "codex": 0.1 },
@@ -281,6 +288,9 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 | `dailyQuota` | `20` | Max dispatches per process run (resets on restart) |
 | `quietHours` | none | Local-clock window to suppress dispatch; `startHour > endHour` wraps midnight, `start == end` disables |
 | `planStalenessTolerance` | `5` | Max commits a plan may fall behind before it is skipped as stale |
+| `gracePeriod` | `5m` | How long the failure signal must hold continuously before the reconciler recovers a stranded ticket (Go duration string) |
+| `retryBudget` | `2` | Retries (`Working` → `Planned`) a stranded ticket gets before it is marked `dispatch-failed`; an explicit `0` disables retries |
+| `daemonInterval` | none | When set, the daemon runs the embedded dispatch + reconcile loop on this interval (Go duration string); unset leaves daemon behavior unchanged |
 | `defaultAgent` | `claude` | Agent used when a ticket has no `agent:<name>` label |
 | `agentPreference` | none | Fallback agent order tried when the primary agent (label or `defaultAgent`) is out of budget; first agent with budget wins |
 | `agentBudgetFloors` | none | Per-agent budget floor (see [Usage budgets](#usage-budgets)); with `agentLimits` it is a headroom safety margin, without it a static `Remaining` where `0` pins the agent to "budget exhausted" |
@@ -309,10 +319,47 @@ modes, chosen per agent by whether `agentLimits` is configured:
   positive value lets it dispatch. An agent with neither a limit nor a floor is
   unlimited.
 
-> **Known limitation:** shipped alone, a failed dispatch stalls silently — a dead
-> session leaves its ticket in `Working`, and pickup requires `Planned`. Failure
-> reconciliation and daemon-embedded scheduling are tracked separately
-> ([#46](https://github.com/matteobortolazzo/claude-tools/issues/46)).
+### Failure reconciliation
+
+Auto-pickup alone stalls silently on failure: a dispatched session that dies mid-flight
+leaves its ticket in `Working`, and pickup requires `Planned`, so the ticket is stranded
+forever. Reconciliation is the recovery half — a pass that detects stranded work and
+either re-queues or surfaces it.
+
+A `Working` ticket is treated as stranded only when **all** hold: it has no live tmux
+window (gone, or `stopped`), no open linked PR, and that signal has held continuously for
+`gracePeriod`. When it strands:
+
+- **under `retryBudget`** → `Working` → `Planned` plus an attempt comment; the plan file
+  still exists, so the ticket re-enters the dispatch queue naturally;
+- **at `retryBudget`** → `Working` → `dispatch-failed`, surfaced for a human and never
+  touched again.
+
+The inverse leak — a `Planned` ticket whose approved plan file cannot be read — becomes
+`plan-invalid` (also grace-gated, to tolerate a plan that is mid-write or has not yet
+synced). An orphan `.plans/` file whose ticket is not open is reported in the log only, no
+mutation.
+
+`dispatch-failed` and `plan-invalid` tickets have no tmux window, so the reconciler feeds
+the daemon synthetic `failed` entries that the status output and the noctalia/dms widgets
+render loud (`failed` outranks every other state). Attempt counts are stored as durable
+hidden-marker comments on the ticket, so recovery survives cron invocations and daemon
+restarts. A pass never acts blind: if the daemon snapshot or a ticket's attempt count
+cannot be read, it defers rather than guess.
+
+Run it two ways:
+
+```bash
+# Cron path: one recovery pass per invocation
+agentwatch dispatch --reconcile
+
+# Daemon-embedded: set dispatch.daemonInterval and the daemon runs the combined
+# dispatch + reconcile loop itself, on that interval
+```
+
+> **Host requirement:** reconciliation reads each repo's local `.plans/` directory, so run
+> it on the host where plans are persisted. A `Planned` ticket whose plan file lives only
+> on another host is grace-gated but will eventually be marked `plan-invalid`.
 
 ## Advanced / development
 

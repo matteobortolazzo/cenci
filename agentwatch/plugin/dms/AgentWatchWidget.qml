@@ -26,6 +26,7 @@ PluginComponent {
 
     function iconForClass(c) {
         switch (c) {
+        case "failed":     return "error"
         case "need-input": return "priority_high"
         case "running":    return "smart_toy"
         case "done":       return "check_circle"
@@ -37,6 +38,7 @@ PluginComponent {
 
     function colorForClass(c) {
         switch (c) {
+        case "failed":     return Theme.error
         case "need-input": return Theme.error
         case "running":    return Theme.primary
         case "done":       return Theme.tertiary
