@@ -240,7 +240,9 @@ failing gate is the logged skip reason):
 7. `running + dispatched-this-pass` is below `concurrencyCap`;
 8. the daily quota is not yet spent;
 9. the current local time is outside `quietHours`;
-10. the resolved agent still has budget.
+10. the resolved agent still has budget (see [Usage budgets](#usage-budgets) — when
+    `agentLimits` is set this is computed from real token usage, otherwise from the
+    static `agentBudgetFloors`).
 
 ### Configuration
 
@@ -260,7 +262,12 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
     "quietHours": { "startHour": 22, "endHour": 7 },
     "planStalenessTolerance": 5,
     "defaultAgent": "claude",
-    "agentBudgetFloors": { "claude": 0 }
+    "agentPreference": ["claude", "codex"],
+    "agentBudgetFloors": { "claude": 0.1, "codex": 0.1 },
+    "agentLimits": {
+      "claude": { "fiveHourTokens": 20000000, "weeklyTokens": 300000000 },
+      "codex":  { "fiveHourTokens": 15000000, "weeklyTokens": 200000000 }
+    }
   }
 }
 ```
@@ -275,16 +282,37 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 | `quietHours` | none | Local-clock window to suppress dispatch; `startHour > endHour` wraps midnight, `start == end` disables |
 | `planStalenessTolerance` | `5` | Max commits a plan may fall behind before it is skipped as stale |
 | `defaultAgent` | `claude` | Agent used when a ticket has no `agent:<name>` label |
-| `agentBudgetFloors` | none | Per-agent headroom floor; `0` pins an agent to "budget exhausted" (a stub until real usage accounting lands) |
+| `agentPreference` | none | Fallback agent order tried when the primary agent (label or `defaultAgent`) is out of budget; first agent with budget wins |
+| `agentBudgetFloors` | none | Per-agent budget floor (see [Usage budgets](#usage-budgets)); with `agentLimits` it is a headroom safety margin, without it a static `Remaining` where `0` pins the agent to "budget exhausted" |
+| `agentLimits` | none | Per-agent token caps enabling real usage accounting; each agent takes `fiveHourTokens` and/or `weeklyTokens` (omit or `0` to disable that window) |
+| `claudeSessionDir` | `~/.claude/projects` | Override for the Claude session-JSONL directory scanned for output-token usage |
+| `codexDBPath` | `~/.codex/state_5.sqlite` | Override for the Codex SQLite DB queried for per-thread token usage (requires the `sqlite3` CLI) |
 
 An agent is routed per ticket from an `agent:<name>` label, falling back to
-`defaultAgent`.
+`defaultAgent`, then to the `agentPreference` list.
+
+### Usage budgets
+
+Each candidate agent must clear a budget gate before it can be dispatched. There are two
+modes, chosen per agent by whether `agentLimits` is configured:
+
+- **Real usage accounting** (when `agentLimits[agent]` is set) — agentwatch reads the
+  agent's own local session data to compute how much of each rolling window remains:
+  Claude from output-token counts in its session JSONL (`claudeSessionDir`), Codex from
+  per-thread `tokens_used` in its SQLite DB (`codexDBPath`, via the `sqlite3` CLI). The
+  tightest window's headroom (`0.0`–`1.0`) minus the agent's `agentBudgetFloors` value
+  is the remaining budget; a positive value passes. Set the floor as a safety margin to
+  stop dispatching before the true cap. A missing/unreadable data source is treated as
+  the safe direction (no budget) rather than dispatching blind.
+- **Static floor** (no `agentLimits[agent]`) — the `agentBudgetFloors` value is used
+  directly as the remaining budget, so `0` pins the agent to "budget exhausted" and any
+  positive value lets it dispatch. An agent with neither a limit nor a floor is
+  unlimited.
 
 > **Known limitation:** shipped alone, a failed dispatch stalls silently — a dead
 > session leaves its ticket in `Working`, and pickup requires `Planned`. Failure
 > reconciliation and daemon-embedded scheduling are tracked separately
-> ([#46](https://github.com/matteobortolazzo/claude-tools/issues/46)); real per-agent
-> usage accounting is [#77](https://github.com/matteobortolazzo/claude-tools/issues/77).
+> ([#46](https://github.com/matteobortolazzo/claude-tools/issues/46)).
 
 ## Advanced / development
 
