@@ -485,6 +485,10 @@ setup_agentwatch_linux_path() {
 		ok "/usr/local/bin/agentwatch already links to ~/.local/bin/agentwatch (GUI bars can resolve it)"
 		return 0
 	fi
+	if [ -e /usr/local/bin/agentwatch ] && [ ! -L /usr/local/bin/agentwatch ]; then
+		warn "/usr/local/bin/agentwatch exists and is not a symlink — left untouched; remove it manually or configure the widget's agentwatch path"
+		return 0
+	fi
 
 	local manual="sudo ln -sf \"$user_link\" /usr/local/bin/agentwatch"
 	if [ "$INTERACTIVE" -eq 1 ] &&
