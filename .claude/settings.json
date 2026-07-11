@@ -1,28 +1,25 @@
 {
   "sandbox": {
-    "enabled": true,
-    "autoAllowBashIfSandboxed": true,
-    "allowUnsandboxedCommands": false,
-    "excludedCommands": ["docker", "podman"],
-    "network": {
-      "allowedDomains": [
-        "github.com",
-        "api.github.com",
-        "proxy.golang.org",
-        "sum.golang.org"
-      ],
-      "allowLocalBinding": true
-    }
+    "enabled": false
   },
   "permissions": {
     "allow": [
       "Write(*)",
       "Edit(*)",
+      "Read(~/.claude/plugins/**)",
+      "Read(//tmp/claude*/**)",
+      "Write(//tmp/claude*/**)",
+      "Bash(cd:*)",
       "Bash(go *)",
+      "Bash(go:*)",
       "Bash(make *)",
       "Bash(golangci-lint *)",
       "Bash(git *)",
+      "Bash(git:*)",
       "Bash(gh *)",
+      "Bash(gh:*)",
+      "SlashCommand(/goal:*)",
+      "SlashCommand(/loop:*)",
       "mcp__plugin_agentflow_context7__resolve-library-id",
       "mcp__plugin_agentflow_context7__query-docs"
     ],

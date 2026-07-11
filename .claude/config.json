@@ -1,0 +1,46 @@
+{
+  "branchPattern": "feature/<id>-<description>",
+  "isMonorepo": true,
+  "stack": {
+    "backend": "go1.25",
+    "testing": ["go-testing", "shellcheck"]
+  },
+  "projects": [
+    {
+      "slug": "agentflow",
+      "path": "agentflow",
+      "name": "agentflow",
+      "description": "Claude Code plugin: markdown skills, agents, shell hooks",
+      "stack": { "framework": "markdown-shell" },
+      "buildCommand": "",
+      "testCommand": ""
+    },
+    {
+      "slug": "agentwatch",
+      "path": "agentwatch",
+      "name": "agentwatch",
+      "description": "Go binary + Claude Code plugin: coding-agent session monitoring (tmux, waybar, noctalia, DMS)",
+      "stack": { "framework": "go1.25", "testing": "go-testing" },
+      "buildCommand": "make build",
+      "testCommand": "make test"
+    },
+    {
+      "slug": "dev-sandbox",
+      "path": "dev-sandbox",
+      "name": "dev-sandbox",
+      "description": "Docker/Podman container for isolated Claude Code sessions",
+      "stack": { "framework": "docker-shell", "testing": "shellcheck" },
+      "buildCommand": "docker build",
+      "testCommand": ""
+    }
+  ],
+  "claudeMdLocation": "CLAUDE.md",
+  "mcpServers": {
+    "context7": true
+  },
+  "lspServers": {
+    "gopls": true
+  },
+  "autoCompactDisabled": true,
+  "pinSubagents200K": true
+}
