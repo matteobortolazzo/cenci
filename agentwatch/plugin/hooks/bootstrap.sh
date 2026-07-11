@@ -1,12 +1,15 @@
 #!/bin/sh
-# agentwatch bootstrap — provisions the plugin-local binary and starts the daemon.
+# agentwatch bootstrap — provisions the plugin-local binary, puts it on $PATH,
+# and starts the daemon.
 #
 # Runs detached from the SessionStart hook, so it MUST never block the agent and
 # MUST never exit non-zero: every failure path logs one line and exits 0. When
 # the release artifact matching the plugin version is missing from bin/, it is
-# downloaded (with sha256 verification) from the GitHub release. The daemon is
-# then started if it isn't already (the daemon's own already-running guard makes
-# a redundant start a harmless no-op).
+# downloaded (with sha256 verification) from the GitHub release. The binary is
+# then symlinked onto $PATH so bare `agentwatch` invocations (tmux run-shell,
+# shell-spawned bar widgets) resolve it even though the plugin cache is on no
+# login PATH. The daemon is finally started if it isn't already (the daemon's
+# own already-running guard makes a redundant start a harmless no-op).
 
 set -u
 
@@ -137,6 +140,53 @@ install_binary() {
 	return 0
 }
 
+# install_on_path symlinks $BIN onto $PATH so bare `agentwatch` invocations
+# resolve it (tmux run-shell, shell-spawned bar widgets). Idempotent and
+# non-fatal. Prefers the first existing writable $PATH entry; otherwise falls
+# back to ~/.local/bin and logs a PATH hint. Uses `ln -sf` so the link
+# re-points automatically on version bumps.
+install_on_path() {
+	[ -x "$BIN" ] || return 0
+
+	# Already resolvable to our binary (directly or via an equivalent symlink)?
+	existing=$(command -v agentwatch 2>/dev/null || true)
+	if [ -n "$existing" ]; then
+		if [ "$existing" = "$BIN" ]; then
+			return 0
+		fi
+		if [ -L "$existing" ] && [ "$(readlink "$existing" 2>/dev/null)" = "$BIN" ]; then
+			return 0
+		fi
+	fi
+
+	# Pick the first existing, writable directory on $PATH. set -f disables glob
+	# expansion so a PATH entry is never mistaken for a filename pattern.
+	set -f
+	IFS=:
+	for dir in $PATH; do
+		[ -n "$dir" ] || continue
+		if [ -d "$dir" ] && [ -w "$dir" ] && ln -sf "$BIN" "$dir/agentwatch" 2>/dev/null; then
+			unset IFS
+			set +f
+			log "linked agentwatch onto PATH at $dir/agentwatch"
+			return 0
+		fi
+	done
+	unset IFS
+	set +f
+
+	# Fallback: ~/.local/bin, which may not be on $PATH yet.
+	fallback="$HOME/.local/bin"
+	mkdir -p "$fallback" 2>/dev/null || true
+	if ln -sf "$BIN" "$fallback/agentwatch" 2>/dev/null; then
+		log "linked agentwatch at $fallback/agentwatch; add \"$fallback\" to your PATH so bare agentwatch invocations resolve"
+		return 0
+	fi
+	log "could not place agentwatch on PATH; symlink $BIN into a directory on your PATH manually"
+	return 0
+}
+
 install_binary || true
+install_on_path || true
 start_daemon
 exit 0

@@ -6,7 +6,11 @@ Live counts of Claude Code and Codex tmux sessions in your DankMaterialShell (DM
 
 - [DankMaterialShell](https://danklinux.com/docs/dankmaterialshell/) (recent build with the plugin system)
 - [agentwatch](https://github.com/matteobortolazzo/agent-stack/tree/main/agentwatch) daemon running on your tmux server
-- `agentwatch` binary on `$PATH` (or set `agentwatchPath` in plugin settings)
+- `agentwatch` binary on `$PATH`. The plugin bootstrap auto-links it onto your
+  writable PATH (`~/.local/bin`) on every session, and `install.sh` sets up
+  visibility for GUI bars by offering a one-time `/usr/local/bin` link (see
+  below). If your bar still can't find it, set `agentwatchPath` to the binary's
+  full path in plugin settings.
 
 ## Install (local dev)
 
@@ -43,6 +47,10 @@ Then open Settings (`dms ipc call settings toggle`) → **Plugins** → enable *
 
 ## Troubleshooting
 
-- **Pill never appears**: confirm `agentwatch waybar` prints JSON in a shell. If `"class": "none"` it means no live sessions — start a Claude Code or Codex tmux pane and try again.
+- **Pill never appears**: first confirm the bar can *find* the binary. GUI/compositor bars inherit the **login** PATH, which typically lacks `~/.local/bin` — so a bare `agentwatch` the daemon set up for your shell may be invisible to DMS. Reproduce the bar's environment with a minimal PATH:
+  ```sh
+  env -i HOME=$HOME XDG_RUNTIME_DIR=/run/user/$(id -u) PATH=/usr/local/bin:/usr/bin sh -c 'agentwatch waybar'
+  ```
+  If that says "command not found", link the binary onto the login PATH (re-run `install.sh` and accept the GUI-bar prompt, or `sudo ln -sf "$HOME/.local/bin/agentwatch" /usr/local/bin/agentwatch`) or set `agentwatchPath` to its full path. If it prints `"class": "none"` there are no live sessions — start a Claude Code or Codex tmux pane and try again.
 - **Pill is stuck**: check the agentwatch daemon (`pgrep -a agentwatch`); the daemon is started by tmux (`run-shell -b "agentwatch"` in `~/.config/tmux/tmux.conf`).
 - **Logs**: `journalctl --user -u dms -f` or wherever your DMS unit writes.

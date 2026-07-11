@@ -6,7 +6,11 @@ Live counts of Claude Code and Codex tmux sessions in your noctalia bar. Polls `
 
 - [noctalia-shell](https://noctalia.dev/) ≥ 4.4.1
 - [agentwatch](https://github.com/matteobortolazzo/agent-stack/tree/main/agentwatch) daemon running on your tmux server
-- `agentwatch` binary on `$PATH` (or set `agentwatchPath` in plugin settings)
+- `agentwatch` binary on `$PATH`. The plugin bootstrap auto-links it onto your
+  writable PATH (`~/.local/bin`) on every session, and `install.sh` sets up
+  visibility for GUI bars by offering a one-time `/usr/local/bin` link (see
+  Troubleshooting). If your bar still can't find it, set `agentwatchPath` to the
+  binary's full path in plugin settings.
 
 ## Install (local dev)
 
@@ -38,3 +42,11 @@ Then open Settings (SUPER+R) → Bar, and add the **AgentWatch** widget to a sec
 |---|---|---|
 | `pollIntervalMs` | `2000` | How often to call `agentwatch waybar` |
 | `agentwatchPath` | `agentwatch` | Path or command name for the agentwatch binary |
+
+## Troubleshooting
+
+- **Widget never appears**: first confirm the bar can *find* the binary. GUI/compositor bars inherit the **login** PATH, which typically lacks `~/.local/bin` — so a bare `agentwatch` the daemon set up for your shell may be invisible to noctalia. Reproduce the bar's environment with a minimal PATH:
+  ```sh
+  env -i HOME=$HOME XDG_RUNTIME_DIR=/run/user/$(id -u) PATH=/usr/local/bin:/usr/bin sh -c 'agentwatch waybar'
+  ```
+  If that says "command not found", link the binary onto the login PATH (re-run `install.sh` and accept the GUI-bar prompt, or `sudo ln -sf "$HOME/.local/bin/agentwatch" /usr/local/bin/agentwatch`) or set `agentwatchPath` to its full path. If it prints `"class": "none"` there are no live sessions — start a Claude Code or Codex tmux pane and try again.

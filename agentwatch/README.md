@@ -53,9 +53,19 @@ claude plugin install agentwatch
 
 On the first `SessionStart` after install, the plugin downloads the `agentwatch`
 binary matching the plugin version (with checksum verification) into the plugin's
-`bin/` directory and starts the daemon. Bootstrap runs detached and never blocks
-the agent, so the very first session may take a moment before status appears; the
-daemon then persists for all later sessions.
+`bin/` directory, symlinks it onto your writable `$PATH` (`~/.local/bin`), and
+starts the daemon. Bootstrap runs detached and never blocks the agent, so the
+very first session may take a moment before status appears; the daemon then
+persists for all later sessions.
+
+The on-`$PATH` symlink is re-pointed on every session (so it follows version
+bumps) and lets bare `agentwatch` invocations resolve — shell, tmux `run-shell`,
+Codex hooks, and waybar-from-shell. **GUI/compositor bars** (DMS, noctalia) are
+different: they inherit the *login* PATH, which usually lacks `~/.local/bin`. To
+make them find the binary, `install.sh` offers a one-time `sudo` link into
+`/usr/local/bin` (which every GUI login PATH includes) chained through the
+`~/.local/bin` link, so it too survives version bumps. Decline it and the bar
+widgets fall back to their `agentwatchPath` / `AGENTWATCH_BIN` overrides.
 
 To update later: `claude plugin update agentwatch` (the next session re-bootstraps
 the matching binary).
