@@ -2,7 +2,8 @@
 
 Status: accepted · 2026-07-08 (decisions in §4) · updated 2026-07-09: orchestration
 layer added (§2.4, decisions 5–8, tickets 11–16); Codex first-class support audit
-added (§6, tickets 17–19)
+added (§6, tickets 17–19) · superseded 2026-07-11: the host profile described in §2.2
+was removed (#99) — see addendum below §2.2
 
 The repo today ships three good tools with three unrelated install stories and no shared
 security model. This proposal turns them into one package with a single principle:
@@ -74,6 +75,13 @@ image) travel with `claude plugin install` / `claude plugin update`.
   config, no Bash allowlists, no permission auto-fix phases, HTTPS git remotes
   assumed. Host profile (current behavior) remains for people not using the sandbox —
   but the sandbox becomes the documented default.
+
+  > **Addendum (2026-07-11), supersedes the paragraph above:** the host profile was
+  > removed entirely (#99 / commit 51f368a). `agent-sand` (the container) is now the
+  > only supported runtime — there is no non-sandbox profile to fall back to. This
+  > reflects zero external users and a decision to ship one supported install path
+  > rather than maintain two security models. The original text above is kept for
+  > historical record of the design reasoning, not as current behavior.
 - **Keep every human gate exactly where it is**: refine/design interactivity, plan
   approval as the hard stop, `AskUserQuestion` only from the main agent. Nothing about
   full permissions changes the *decision* model — it only removes *mechanical* prompts.

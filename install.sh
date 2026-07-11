@@ -14,7 +14,6 @@
 #   curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
 #
 # Flags:
-#   --plugins agentflow,agentwatch,sandbox   preselect plugins (skips the picker)
 #   --yes                                 accept defaults, never prompt
 #   --build / --no-build                  force / skip the sandbox image build
 #   --help                                this text
@@ -178,6 +177,14 @@ run_doctor() {
 		"install Claude Code first: https://code.claude.com/docs/en/overview" \
 		command -v claude
 	check "git" required "install git from your package manager" command -v git
+	if [ "$OS" = macos ]; then
+		check "Docker or Podman" required \
+			"install Docker Desktop (https://docker.com/products/docker-desktop) or Podman" \
+			container_runtime
+	else
+		check "Docker or Podman" required \
+			"install docker or podman from your package manager" container_runtime
+	fi
 	check "codex CLI" optional \
 		"install Codex to add the same plugins there; Claude setup still works without it" \
 		command -v codex
@@ -190,15 +197,9 @@ run_doctor() {
 		check "gh authenticated" optional "run: gh auth login" gh auth status
 	fi
 
-	say ""
-	say "  ${BOLD}For sandbox (isolation)${RESET}"
-	if [ "$OS" = macos ]; then
-		check "Docker or Podman" optional \
-			"install Docker Desktop (https://docker.com/products/docker-desktop) or Podman" \
-			container_runtime
-	else
-		check "Docker or Podman" optional \
-			"install docker or podman from your package manager" container_runtime
+	if [ "$OS" = linux ]; then
+		say ""
+		say "  ${BOLD}For sandbox (isolation)${RESET}"
 		check "host UID is 1000" optional \
 			"your UID is $(id -u); the container maps files as UID 1000 (see dev-sandbox/README.md)" \
 			test "$(id -u)" = 1000
@@ -215,17 +216,6 @@ run_doctor() {
 			test -d /Applications/SwiftBar.app
 	fi
 
-	if [ "$OS" = linux ]; then
-		say ""
-		say "  ${BOLD}For agentflow WITHOUT the sandbox (host profile)${RESET}"
-		check "bubblewrap" optional \
-			"only needed if you run agentflow outside the container: sudo apt install bubblewrap" \
-			command -v bwrap
-		check "socat" optional \
-			"only needed if you run agentflow outside the container: sudo apt install socat" \
-			command -v socat
-	fi
-
 	say ""
 	if [ "$DOCTOR_FAILED" -eq 1 ]; then
 		say "${RED}Missing required tools — fix the ✗ items above, then re-run.${RESET}"
@@ -237,42 +227,9 @@ run_doctor() {
 
 # ----------------------------------------------------------------- wizard ----
 
-SELECTED=""
+SELECTED="$ALL_PLUGINS"
 
 selected() { case " $SELECTED " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
-
-choose_plugins() {
-	if [ -n "$SELECTED" ]; then
-		return
-	fi
-	if [ "$INTERACTIVE" -eq 0 ] || [ "$ASSUME_YES" -eq 1 ]; then
-		SELECTED="$ALL_PLUGINS"
-		return
-	fi
-
-	say ""
-	say "${BOLD}agent-stack is one system in three plugins:${RESET}"
-	say ""
-	say "  ${BOLD}agentflow${RESET}      workflow  — ticket → plan approval → autopilot → PR"
-	say "  ${BOLD}agentwatch${RESET}  attention — live agent status in tmux/waybar/menu bar"
-	say "  ${BOLD}sandbox${RESET}     isolation — Docker/Podman container, full permissions inside"
-	say ""
-	say "They are designed to be used together — installing all three is recommended."
-	say ""
-
-	if ask_yn "Install all three?" y; then
-		SELECTED="$ALL_PLUGINS"
-		return
-	fi
-	SELECTED=""
-	for p in $ALL_PLUGINS; do
-		if ask_yn "  Install ${BOLD}$p${RESET}?" y; then
-			SELECTED="$SELECTED $p"
-		fi
-	done
-	SELECTED="${SELECTED# }"
-	[ -n "$SELECTED" ] || die "nothing selected"
-}
 
 # ------------------------------------------------------------ install steps ----
 
@@ -418,10 +375,11 @@ step_sandbox_setup() {
 	local runtime
 	if ! runtime=$(container_runtime); then
 		if [ "$OS" = macos ]; then
-			warn "no container runtime found — install Docker Desktop (https://docker.com/products/docker-desktop) or Podman, then run: agent-sand --build"
+			fail "no container runtime found — install Docker Desktop (https://docker.com/products/docker-desktop) or Podman, then run: agent-sand --build"
 		else
-			warn "no container runtime found — install docker or podman, then run: agent-sand --build"
+			fail "no container runtime found — install docker or podman, then run: agent-sand --build"
 		fi
+		INSTALL_FAILED=1
 		return 0
 	fi
 
@@ -536,7 +494,6 @@ Usage:
   curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
 
 Flags:
-  --plugins agentflow,agentwatch,sandbox   preselect plugins (skips the picker)
   --yes                                 accept defaults, never prompt
   --build / --no-build                  force / skip the sandbox image build
   --help                                this text
@@ -547,17 +504,6 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 	update | --update) MODE=update ;;
 	doctor | --doctor) MODE=doctor ;;
-	--plugins)
-		shift
-		[ $# -gt 0 ] || die "--plugins needs a value, e.g. --plugins agentflow,sandbox"
-		SELECTED=$(printf '%s' "$1" | tr ',' ' ')
-		for p in $SELECTED; do
-			case " $ALL_PLUGINS " in
-			*" $p "*) ;;
-			*) die "unknown plugin '$p' (valid: $ALL_PLUGINS)" ;;
-			esac
-		done
-		;;
 	--yes | -y) ASSUME_YES=1 ;;
 	--build) BUILD_IMAGE=yes ;;
 	--no-build) BUILD_IMAGE=no ;;
@@ -590,7 +536,6 @@ have claude || die "the 'claude' CLI is required. Install Claude Code first:
 then re-run this script."
 
 if [ "$MODE" = update ]; then
-	[ -n "$SELECTED" ] || SELECTED="$ALL_PLUGINS"
 	step_update_plugins
 	prune_selected_to_installed
 	step_sandbox_setup
@@ -604,7 +549,6 @@ run_doctor || {
 		exit 1
 	fi
 }
-choose_plugins
 step_marketplace
 step_install_plugins
 prune_selected_to_installed

@@ -234,11 +234,6 @@ If `agentwatch` is installed on the host and the daemon is running, the script a
 
 Install the agentwatch plugin inside the container: `claude plugin install agentwatch`
 
-> **Renamed from muxwatch.** The event socket moved from `muxwatch-events.sock` to
-> `agentwatch-events.sock`. If you previously ran the `muxwatch` daemon, rebuild/reinstall
-> the `agentwatch` binary and restart the daemon so it creates the new socket the launcher
-> now bind-mounts — otherwise agentwatch is silently skipped inside the container.
-
 ### Container lifecycle
 
 - Containers are created with `--rm` — removed automatically on exit
@@ -261,25 +256,28 @@ Just update Claude Code on the host. The binary is bind-mounted, so the containe
 
 ### Reset an instance
 
-Delete the home volume to start fresh (caches, auth, config all cleared):
+Delete the home volume to start fresh (caches, auth, config all cleared). Claude Code
+instances use `claude-sand-home-<name>`; Codex instances use `codex-sand-home-<name>`:
 
 ```bash
 docker volume rm claude-sand-home-default
 # or for a named instance:
 docker volume rm claude-sand-home-myproject
+# Codex instances:
+docker volume rm codex-sand-home-default
 ```
 
 ### List instances
 
 ```bash
-docker volume ls --filter name=claude-sand-home
+docker volume ls --filter name=sand-home
 ```
 
 ### Clean up everything
 
 ```bash
-# Remove all sandbox volumes
-docker volume ls --filter name=claude-sand-home -q | xargs docker volume rm
+# Remove all sandbox volumes (both Claude Code and Codex instances)
+docker volume ls --filter name=sand-home -q | xargs docker volume rm
 
 # Remove the image
 docker rmi agent-sandbox:latest
