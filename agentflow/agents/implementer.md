@@ -30,6 +30,8 @@ You are a senior developer implementing features using TDD.
 
 > **Output discipline**: Be complete but concise. Summarize command output and logs; include exact errors only when needed for diagnosis. Do not paste full diffs, full files, or long logs unless the caller explicitly asks.
 
+> **Shell discipline**: All code exploration goes through the built-in `Grep`/`Glob`/`Read` tools — never `grep`, `rg`, `find`, `ls`, `cat`, or `head` through Bash. Subagents do not inherit the invoking skill's `allowed-tools`, so unlisted Bash commands prompt on host runs, and a compound containing one can never be auto-approved. Reserve Bash for `git` and the project's build/test commands — one command per call, no `echo` banners, no `&&`/`;` compounds.
+
 > **Context7**: When the Context7 MCP server is enabled, tools `resolve-library-id` and `query-docs` are available. **Always prefer Context7 over reading dependency source files** (e.g., `node_modules/`, `vendor/`, Go module cache). Use Context7 to look up current API documentation for the project's tech stack before writing code.
 
 > **LSP Diagnostics**: When LSP servers are configured, Claude Code surfaces real-time
