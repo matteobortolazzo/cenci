@@ -229,13 +229,14 @@ The skills drive a ticket through a label-based state machine (`gh issue edit`).
 | State | Applied by | Meaning |
 |---|---|---|
 | `Refined` | `/agentflow:refine` | Scoped and ready for design/implementation |
-| `Designed` | `/agentflow:design` | UI design spec approved (frontend tickets) |
+| `Design` | `/agentflow:refine` | Design-only ticket — the deliverable is a design spec, not code |
+| `Designed` | `/agentflow:design` | Design spec approved — propagated from the completed design ticket to the implementation tickets that depend on it |
 | `Planned` | `/agentflow:implement` — Phase 1, at plan approval | Approved plan on disk (`.plans/`), ready to pick up |
 | `Working` | `/agentflow:implement` — at pipeline start | Actively being implemented |
 | `In Review` | `/agentflow:implement` — Phase 9, at PR-open | PR is open, under review / CI running |
 | `Implemented` | `/agentflow:babysit` — on PR merge | PR merged — done |
 
-Full lifecycle: `New → Refined → [Designed] → Planned → Working → In Review → Implemented`. A planning session ends on **`Planned`** — an approved plan sits in `.plans/`, waiting; picking it up with `/agentflow:implement .plans/<file>` swaps `Planned → Working`. Opening the PR (Phase 9) only advances the ticket to **`In Review`**; the transition to **`Implemented`** happens when the PR merges — [babysit](#babysitting-a-pr) performs that swap using the merged PR's `closingIssuesReferences`. (`configure` documents these labels but does not create them; add the matching columns to your board.)
+Full lifecycle: `New → Refined → [Designed] → Planned → Working → In Review → Implemented`. **Design always happens on a dedicated design ticket**: when a frontend ticket lacks an approved design, `/agentflow:refine` creates a `Design`-labeled companion ticket (or leads a split with a design child) that the implementation ticket depends on. `/agentflow:implement` redirects `Design` tickets to `/agentflow:design`, which commits the spec on main, propagates `Designed` to the dependent implementation tickets (satisfying implement's design gate), and closes the design ticket (`New → Refined → Designed → closed`; no PR — the one exception to "1 ticket = 1 PR"). On the board, the `Designed` column holds implementation tickets whose design is ready. A planning session ends on **`Planned`** — an approved plan sits in `.plans/`, waiting; picking it up with `/agentflow:implement .plans/<file>` swaps `Planned → Working`. Opening the PR (Phase 9) only advances the ticket to **`In Review`**; the transition to **`Implemented`** happens when the PR merges — [babysit](#babysitting-a-pr) performs that swap using the merged PR's `closingIssuesReferences`. (`configure` documents these labels but does not create them; add the matching columns to your board.)
 
 ### Autopilot (goal-driven completion)
 
@@ -283,7 +284,7 @@ On merge, babysit performs the `In Review → Implemented` board transition (see
 
 UI implementations are the most error-prone, so the pipeline adds two guards for tickets classified as frontend:
 
-- **Design gate (hard)** — a UI ticket without the `Designed` label stops the pipeline and asks whether to design first (`/agentflow:design`) or proceed anyway. An existing `DESIGN.md` doesn't bypass the gate, since the design path persists across tickets.
+- **Design gate (hard)** — a UI ticket without the `Designed` label stops the pipeline and points at the feature's design ticket: run `/agentflow:design <design-ticket-id>` if one exists (completing it propagates `Designed` here), or `/agentflow:refine` to create one — or proceed anyway. An existing `DESIGN.md` doesn't bypass the gate, since the design path persists across tickets.
 - **PR screenshots** — screenshots captured during visual verification (`playwright-cli`) are embedded in the PR body to speed up review. They're hosted in a temporary **secret gist** rather than committed to the repo; delete it after merge with `gh gist delete <gist-id>` (the PR body includes the command).
 
 ### Usage controls

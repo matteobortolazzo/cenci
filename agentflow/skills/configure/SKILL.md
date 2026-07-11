@@ -743,14 +743,17 @@ mirror it as columns on their board:
 
 | Label | Applied by | Meaning |
 |---|---|---|
-| `Working` | refine / implement (at start) | Actively being refined or implemented |
+| `Working` | refine / design / implement (at start) | Actively being refined, designed, or implemented |
 | `Refined` | refine | Ready for design/implementation |
-| `Designed` | design | UI design spec approved |
+| `Design` | refine | Design-only ticket — deliverable is a design spec; implement redirects to `/agentflow:design` |
+| `Designed` | design | Design spec approved — propagated from the completed design ticket to the implementation tickets that depend on it |
 | `Planned` | implement Phase 1 (approved plan persisted) | Approved plan on disk, ready to pick up |
 | `In Review` | implement Phase 9 (at PR-open) | PR is open, under review / CI running |
 | `Implemented` | babysit (on PR merge) | PR merged — done |
 
 Lifecycle: `New → Refined → [Designed] → Planned → Working → In Review → Implemented`.
+
+Design always happens on a dedicated design ticket — refine creates one (companion ticket, or first child of a split) whenever a frontend ticket lacks an approved design. Design tickets (labeled `Design`) follow a shorter path: `New → Refined → Designed → closed` — `/agentflow:design` commits the spec on main, propagates `Designed` to the implementation tickets that depend on it (that propagated label is what satisfies implement's Design gate), and closes the design ticket; no plan, no PR (the one exception to "1 ticket = 1 PR"). `/agentflow:implement` redirects `Design`-labeled tickets to `/agentflow:design`. On a board, the `Designed` column therefore holds implementation tickets whose design is ready, not design tickets.
 
 **Migration note for existing boards** (state this when re-configuring a project that predates
 `In Review`): add an **`In Review`** column/label. Previously, tickets dropped straight into

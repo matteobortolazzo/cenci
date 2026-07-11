@@ -152,6 +152,19 @@ Store each attachment's file path for passing to subagents (subagents share the 
 
 Check the `labels` line from the context-gatherer digest.
 
+### Design-Ticket Router (first check)
+
+If the labels include **"Design"**, this is a design-only ticket — its deliverable is a design spec (`.pen` + `DESIGN.md`) produced by `/agentflow:design`, not code. Ask via `AskUserQuestion`:
+
+> "This ticket is labeled `Design` — its deliverable is a design spec, not a code change. It should be run through `/agentflow:design <ticket-id>` instead. How do you want to proceed?"
+
+- **"Stop — route to /agentflow:design (Recommended)"** — stop the pipeline immediately. Tell the user to run `/agentflow:design <ticket-id>`. No labels change (the "Working" label has not been applied yet at this point).
+- **"Proceed with implementation anyway"** — the label may be stale or wrong. Continue with the remaining readiness checks below, and tell the user to remove the `Design` label (or re-run `/agentflow:refine`) if the ticket genuinely includes implementation work.
+
+Do not proceed past this check without an explicit answer. (Plan-file mode skips Ticket Readiness entirely, which is fine — a design-only ticket never produces a plan file.)
+
+### Remaining Readiness Checks
+
 If the ticket does **not** have a "Refined" label/tag, display a warning:
 > "This ticket hasn't been refined yet. Consider running `/agentflow:refine <ticket-id>` first for better results. Do you want to proceed anyway?"
 
@@ -179,7 +192,7 @@ Ask via `AskUserQuestion`:
 
 > "This UI ticket has no "Designed" label. [If the digest reports a bundled `DESIGN.md`, add: A `DESIGN.md` was found at `<path>`, but it may belong to an earlier ticket.] How do you want to proceed?"
 
-- **"Stop — design first (Recommended)"** — stop the pipeline. Tell the user to run `/agentflow:design <ticket-id>` and re-run `/agentflow:implement` once the ticket carries the "Designed" label.
+- **"Stop — design first (Recommended)"** — stop the pipeline. Design lives on a dedicated design ticket, so tell the user: if this ticket already depends on a `Design`-labeled ticket (look for a `Depends on #<n>` line in the ticket body / digest summary), run `/agentflow:design <design-ticket-id>` — completing it closes the design ticket and propagates `Designed` to this one. If no design ticket exists, re-run `/agentflow:refine <ticket-id>` to create the companion design ticket. Re-run `/agentflow:implement` once this ticket carries the "Designed" label.
 - **"Proceed without design"** — continue the pipeline. Record the choice; Phase 9 notes "implemented without design spec" in the PR body.
 
 Do not proceed past this gate without an explicit answer.
