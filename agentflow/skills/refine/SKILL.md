@@ -98,8 +98,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
       - Are component-to-code mappings documented? (Does the Components table link design components to framework components?)
    d. Report any gaps as informational findings — these are **not blocking**:
       - "Design coverage: N screens mapped, M components mapped, behavior annotations present/missing for [screen names]."
-   e. If coverage is insufficient (no `.pen` files found, no DESIGN.md, or significant gaps in mappings), suggest:
-      "Consider running `/agentflow:design <ticket-id>` to generate a design spec before implementation."
+   e. If coverage is insufficient (no `.pen` files found, no DESIGN.md, or significant gaps in mappings), set `designNeeded = true`. **Design always happens on a dedicated design ticket, never on the implementation ticket itself** — the design ticket is created later, either as the first child of a split (see **Design-first splits**) or as a companion ticket (see **Companion design ticket** in the Update Ticket section).
 
 5. **Analyze** what's missing or ambiguous. Consider:
    - Are acceptance criteria specific and testable?
@@ -188,7 +187,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 
    When analyzing the split, determine which child tickets have data/API/schema dependencies on others (sequential) vs. which touch independent areas (parallel). Annotate each ticket accordingly.
 
-   **Design-first splits** (if frontend feature AND `pencil.enabled` is `true` AND no approved design exists): consider making the first child a **design-only ticket** (e.g., "Design <feature> screens") that the implementation children depend on. Mark it as design-only in the split — it gets the `Design` label in Pass 1, is executed via `/agentflow:design`, and produces a committed design spec rather than a PR (the one exception to "1 ticket = 1 PR").
+   **Design-first splits** (if frontend feature AND `pencil.enabled` is `true` AND `designNeeded` is true): make the first child a **design-only ticket** (e.g., "Design <feature> screens") that every UI implementation child depends on. Mark it as design-only in the split — it gets the `Design` label in Pass 1, its body includes the `### Design Direction` section from this refinement, it is executed via `/agentflow:design`, and it produces a committed design spec rather than a PR (the one exception to "1 ticket = 1 PR"). When `/agentflow:design` completes it, the `Designed` label is propagated to the implementation children that depend on it, satisfying implement's Design gate.
 
 ## Update Ticket
 
@@ -247,7 +246,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 
    Omit `Depends on` / `Parallel with` lines that don't apply (e.g. the first child typically has no dependencies).
 
-   Design-only children (see **Design-first splits** above) additionally get `--label "Design"`.
+   Design-only children (see **Design-first splits** above) additionally get `--label "Design"`, and their body includes the `### Design Direction` section from this refinement (that's where `/agentflow:design` reads it from).
 
    #### Pass 2: Update parent with tracking section
 
@@ -271,6 +270,31 @@ ticket is unambiguous, well-scoped, and ready for implementation.
    BODY=$(cat /tmp/claude/issue-<original-number>.md)
    gh issue edit <original-number> --repo <owner>/<repo> --body "$BODY"
    ```
+
+   #### Companion design ticket (frontend tickets, no split)
+
+   If `designNeeded` is true, the ticket is **not** being split, and `isDesignTicket` is false, create a dedicated design ticket — design never runs on the implementation ticket itself:
+
+   ```bash
+   printf '%s' 'Related to #<number>
+   Blocks #<number>
+
+   ### Goal
+   Produce the design spec (`.pen` + `DESIGN.md`) for #<number> via `/agentflow:design`.
+
+   ### Design Direction
+   <the Design Direction section from this refinement>' > /tmp/claude/issue-design.md
+   BODY=$(cat /tmp/claude/issue-design.md)
+   gh issue create --repo <owner>/<repo> --title "Design: <feature title>" --label "Refined" --label "Design" --body "$BODY"
+   ```
+
+   Parse the new issue number `<D>` from the output URL, then append a dependency line to the implementation ticket's body:
+
+   ```
+   Depends on #<D> (design)
+   ```
+
+   When `/agentflow:design <D>` completes, it closes #<D> and propagates the `Designed` label to this ticket, satisfying implement's Design gate. If the user declined the ticket update in step 10, still offer to create the companion design ticket via `AskUserQuestion` (skip the `Depends on` body edit if declined).
 
 12. **Add the "Refined" label and remove "Working":**
    - If `isDesignTicket` is true:

@@ -118,6 +118,13 @@ Extract owner/repo from `git remote get-url origin` (e.g. `git@github.com:owner/
 gh issue view <number> --repo <owner>/<repo> --json number,title,body,labels,state,assignees,milestone,comments
 ```
 
+**Dedicated-ticket check:** if the fetched ticket does **not** carry the `Design` label, note that the workflow expects design work on a dedicated design ticket (created by `/agentflow:refine` as a companion or design-first split child). Ask via `AskUserQuestion`:
+
+> "This ticket isn't labeled `Design` — the workflow expects design on a dedicated design ticket so the implementation ticket stays separate. Design directly on this ticket anyway?"
+
+- **"Stop — create a design ticket first (Recommended)"** — stop. Tell the user to re-run `/agentflow:refine <ticket-id>` (which creates the companion design ticket) or create one manually with the `Design` label.
+- **"Proceed on this ticket"** — continue; the ticket will be labeled `Designed` but not closed (legacy mixed flow).
+
 Read the ticket body and look for a **Design Direction** section (produced by `/agentflow:refine` for frontend tickets). Store it for use in Phase 2.
 
 **If ticketless mode:** Skip ticket fetching. The design description from `$ARGUMENTS` is the primary input.
@@ -460,10 +467,28 @@ git add <designPath>/*.pen <designPath>/DESIGN.md && git commit -m "feat(design)
 gh issue edit <number> --repo <owner>/<repo> --add-label "Designed" --remove-label "Working"
 ```
 
-**If the ticket carries the "Design" label** (a design-only ticket from `/agentflow:refine` — the design spec *is* the deliverable, no implementation follows), also close it:
-```bash
-gh issue close <number> --repo <owner>/<repo> --comment "Design delivered: \`<designPath>/<pen-file-name>\` + \`<designPath>/DESIGN.md\`, committed on main."
-```
+**If the ticket carries the "Design" label** (a design-only ticket from `/agentflow:refine` — the design spec *is* the deliverable, no implementation follows), additionally:
+
+1. **Find the implementation tickets this design blocks.** Union of:
+   - Any `Blocks #<n>` lines in the design ticket's body
+   - Open issues whose body declares the dependency:
+     ```bash
+     gh issue list --repo <owner>/<repo> --state open --search "\"Depends on #<number>\" in:body" --json number,title
+     ```
+   Deduplicate the two lists.
+
+2. **Propagate `Designed` to each dependent.** This is what satisfies implement's Design gate — the gate checks the label on the ticket being implemented:
+   ```bash
+   gh issue edit <dependent> --repo <owner>/<repo> --add-label "Designed"
+   ```
+   Also append the same `### Design Reference` section (from Phase 5.5 Step D) to each dependent's body so the implement pipeline finds the spec from the ticket itself.
+
+3. **Close the design ticket** — its deliverable is done:
+   ```bash
+   gh issue close <number> --repo <owner>/<repo> --comment "Design delivered: \`<designPath>/<pen-file-name>\` + \`<designPath>/DESIGN.md\`, committed on main. Propagated \`Designed\` to: <#list or 'none found'>."
+   ```
+
+If no dependents are found, still close the ticket — just note it in the closing comment so a missing `Depends on` link is visible.
 
 ### Step 6C: Error Recovery
 
@@ -478,6 +503,6 @@ gh issue close <number> --repo <owner>/<repo> --comment "Design delivered: \`<de
 - Suggest next steps beyond telling the user to run `/agentflow:implement` when ready
 
 Final message:
-- **Ticket mode (design-only ticket — has the "Design" label):** "Design committed on `main`. Ticket #<ticket-id> closed — the design spec was the deliverable."
-- **Ticket mode (otherwise):** "Design committed on `main`. Run `/agentflow:implement <ticket-id>` when ready to implement."
+- **Ticket mode (design-only ticket — has the "Design" label):** "Design committed on `main`. Ticket #<ticket-id> closed; `Designed` propagated to <#list>. Run `/agentflow:implement <dependent-id>` when ready to implement."
+- **Ticket mode (otherwise — legacy mixed flow):** "Design committed on `main`. Run `/agentflow:implement <ticket-id>` when ready to implement."
 - **Ticketless mode:** "Design committed on `main`."
