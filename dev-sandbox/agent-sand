@@ -17,6 +17,20 @@ WORKSPACE_HOST="${HOME}/Repos"
 WORKSPACE_CONTAINER="/workspace"
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
+# ── Resolve BASE_VERSION from plugin.json ────────────────────────
+# No hard `jq` dependency: fall back to a sed pattern when jq isn't on PATH.
+PLUGIN_JSON="${SCRIPT_DIR}/.claude-plugin/plugin.json"
+if command -v jq &>/dev/null; then
+    BASE_VERSION="$(jq -r '.version' "${PLUGIN_JSON}")"
+else
+    BASE_VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${PLUGIN_JSON}" | head -n1)"
+fi
+if [[ -z "${BASE_VERSION}" || "${BASE_VERSION}" == "null" ]]; then
+    echo "Error: could not resolve BASE_VERSION from ${PLUGIN_JSON}." >&2
+    exit 1
+fi
+BASE_IMAGE="agent-sandbox-base:${BASE_VERSION}"
+
 # ── Parse options ────────────────────────────────────────────────
 # Default agent from the invoked name so a `codex-sand` symlink Just Works.
 INVOKED_NAME="$(basename "$0")"
@@ -28,6 +42,7 @@ fi
 
 INSTANCE_NAME="default"
 BUILD_ONLY=false
+BUILD_BASE_ONLY=false
 SHELL_ONLY=false
 HOST_NETWORK=false
 DOCKER_SOCKET=false
@@ -53,6 +68,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --build)
             BUILD_ONLY=true
+            shift
+            ;;
+        --build-base)
+            BUILD_BASE_ONLY=true
             shift
             ;;
         --shell)
@@ -89,11 +108,25 @@ CONTAINER_NAME="${CONTAINER_PREFIX}-${INSTANCE_NAME}"
 VOLUME_NAME="${CONTAINER_PREFIX}-home-${INSTANCE_NAME}"
 
 # ── Build ────────────────────────────────────────────────────────
-build_image() {
-    echo "Building ${IMAGE} with ${RUNTIME}..."
-    "${RUNTIME}" build -t "${IMAGE}" "${SCRIPT_DIR}"
+build_base_image() {
+    echo "Building ${BASE_IMAGE} with ${RUNTIME}..."
+    "${RUNTIME}" build -f "${SCRIPT_DIR}/Dockerfile.base" -t "${BASE_IMAGE}" "${SCRIPT_DIR}"
     echo "Done."
 }
+
+build_image() {
+    if ! "${RUNTIME}" image inspect "${BASE_IMAGE}" &>/dev/null; then
+        build_base_image
+    fi
+    echo "Building ${IMAGE} with ${RUNTIME}..."
+    "${RUNTIME}" build --build-arg "BASE_VERSION=${BASE_VERSION}" -t "${IMAGE}" -f "${SCRIPT_DIR}/Dockerfile" "${SCRIPT_DIR}"
+    echo "Done."
+}
+
+if "${BUILD_BASE_ONLY}"; then
+    build_base_image
+    exit 0
+fi
 
 if "${BUILD_ONLY}"; then
     build_image

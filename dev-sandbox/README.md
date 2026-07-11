@@ -78,6 +78,9 @@ agent-sand --name myproject
 # Rebuild the image (after changing Dockerfile or SDK versions)
 agent-sand --build
 
+# Rebuild only the base image (after changing Dockerfile.base)
+agent-sand --build-base
+
 # Enable Docker socket mounting (for TestContainers, docker build, etc.)
 agent-sand --docker --shell
 agent-sand --docker -p "run the integration tests"
@@ -182,6 +185,26 @@ docker build --build-arg DOTNET_SDK_VERSION=10.0.200 \
 
 ## Architecture
 
+### Two-image model: base + monolith
+
+The image is built in two layers:
+
+- **`Dockerfile.base`** → `agent-sandbox-base:<version>` (version comes from
+  `.claude-plugin/plugin.json`). Stack-agnostic: Ubuntu 24.04, system packages, locale,
+  `uv`, GitHub CLI, Docker CLI, the non-root `dev` user, and the entrypoint. No language
+  runtimes. Rebuilt only when the base itself changes; `agent-sand --build-base` builds
+  it explicitly, and `agent-sand --build` / `agent-sand` builds it automatically the
+  first time (or whenever `agent-sandbox-base:<version>` is missing locally).
+- **`Dockerfile`** → `agent-sandbox:latest`, `FROM agent-sandbox-base:${BASE_VERSION}`.
+  Layers the runtime stacks on top: .NET SDK, Node.js, Codex CLI, Go. This is the image
+  `agent-sand` actually runs.
+
+`dev-sandbox/fragments/*.dockerfile` holds the same per-stack blocks (`dotnet`, `node`,
+`go`, `python`, `rust`) as standalone snippets for future per-project image composition.
+They are **not** built or composed automatically yet — that lands in a follow-up PR. Until
+then, each fragment and its corresponding block in `Dockerfile` are kept byte-identical by
+hand; when you change one, change the other the same way.
+
 ### Permission model
 
 Claude Code runs with `--dangerously-skip-permissions` inside the container: no permission prompts, no tool allowlists. Isolation comes from the container itself, not from Claude Code's permission system. This is the supported use of the flag (it refuses to run as root; the container user is `dev`, UID 1000). Human-in-the-loop control moves up a layer — to workflow gates (plan approval, `AskUserQuestion`) rather than per-command approval.
@@ -266,8 +289,14 @@ the same time.
 
 ### Update SDK versions
 
-Edit the `ARG` lines at the top of the `Dockerfile` (`DOTNET_SDK_VERSION`, `NODE_MAJOR`,
-`GO_VERSION`, `CODEX_VERSION`, `UV_VERSION`), then rebuild:
+Edit the `ARG` line for the stack you want to bump:
+
+- `DOTNET_SDK_VERSION`, `NODE_MAJOR`, `CODEX_VERSION`, `GO_VERSION` live in `Dockerfile`
+  (the monolith layers on top of the base).
+- `UV_VERSION` lives in `Dockerfile.base` — bump it and run `agent-sand --build-base`
+  first, then rebuild the monolith.
+
+Then rebuild:
 
 ```bash
 agent-sand --build
