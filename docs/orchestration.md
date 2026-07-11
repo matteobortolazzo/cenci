@@ -157,19 +157,29 @@ selected card) may not use `{number}`, `{title}`, `{tags}`, or `{session}`.
 
 ## Dispatching into the sandbox
 
-To run a card's agent inside the dev-sandbox container
-([#29](https://github.com/matteobortolazzo/agent-stack/issues/29)) instead of on the
-host, add `--sandbox` to the dispatch (or set `"sandbox": true` in agentwatch's
-`~/.config/agentwatch/config.json`):
+Sandboxed dispatch is the **default** — the dev-sandbox container
+([#29](https://github.com/matteobortolazzo/agent-stack/issues/29)) is the mandatory
+runtime and the security boundary. A bare `agentwatch run implement {number}` already
+launches inside the container, so a board action needs no extra flag:
 
 ```yaml
       I:
-        name: Implement (sandboxed)
+        name: Implement
         type: shell
-        command: "agentwatch run implement {number} --sandbox"
+        command: "agentwatch run implement {number}"
 ```
 
-This swaps the launch command to `agent-sand`, running the agent under
+To escape to a host launch instead, pass `--no-sandbox` (or set `"sandbox": false` in
+agentwatch's `~/.config/agentwatch/config.json`):
+
+```yaml
+      H:
+        name: Implement (host)
+        type: shell
+        command: "agentwatch run implement {number} --no-sandbox"
+```
+
+The default swaps the launch command to `agent-sand`, running the agent under
 `--dangerously-skip-permissions` with the container as the security boundary. Status
 still surfaces on the **host** board: `agent-sand` mounts the host
 `agentwatch-events.sock` into the container and forwards `TMUX_PANE`, so the agent's

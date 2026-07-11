@@ -130,7 +130,7 @@ a non-numeric first token means the whole description is slugified.
 | Flag | Purpose |
 |------|---------|
 | `--agent <name>` | Agent to launch (`claude`, `codex`, …); default from config, else `claude` |
-| `--sandbox` / `--no-sandbox` | Force the sandbox command (`claude`→`agent-sand`) or a host launch; overrides the config default |
+| `--sandbox` / `--no-sandbox` | Sandbox is the default (`claude`→`agent-sand`, the container being the mandatory runtime); `--no-sandbox` is the host opt-out. Both override the config default |
 | `--model <model>` | Model override passed to the agent (substituted into `{model}`, else appended as `--model`) |
 | `--session <name>` | Target tmux session (default: the current session) |
 | `--slug <slug>` | Window-name slug (default: the gh issue title, else the bare ticket) |
@@ -161,7 +161,9 @@ spawn into a grouped session (non-zero exit, no window created). Pass an ungroup
 Built-in Go templates cover Claude `refine`/`design`/`implement` with zero config. An
 optional `config.json` (respecting `$XDG_CONFIG_HOME`, or `--config`) overrides the
 defaults and adds agents or workflows — the tokens `{ticket}` and `{model}` are
-substituted at launch:
+substituted at launch. Launches run inside the dev-sandbox container by default; the
+`"sandbox"` field below is optional and, when set to `false`, opts every launch out to
+the host (the same as passing `--no-sandbox`):
 
 ```json
 {
@@ -192,9 +194,9 @@ substituted at launch:
 }
 ```
 
-Only the built-in Claude templates ship today; Codex command templates are tracked in
-[#33](https://github.com/matteobortolazzo/agent-stack/issues/33). Until one is
-configured, `--agent codex` exits with a helpful "no launch template" error.
+Only the built-in Claude templates ship today; Codex and opencode require a
+`config.json` entry. Until one is configured, `--agent codex` exits with a helpful "no
+launch template" error.
 
 ## Auto-dispatch (`agentwatch dispatch`)
 

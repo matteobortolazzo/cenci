@@ -170,8 +170,26 @@ func TestRunDryRunPrintsCommandAndWindowName(t *testing.T) {
 	if !strings.Contains(s, "40-agentwatch-run") {
 		t.Errorf("expected window name 40-agentwatch-run, got:\n%s", s)
 	}
+	// No flag and no config default → the sandbox launcher (#98).
+	if !strings.Contains(s, "agent-sand") || !strings.Contains(s, "/agentflow:implement 40") {
+		t.Errorf("expected agent-sand command with the agentflow skill, got:\n%s", s)
+	}
+}
+
+func TestRunDryRunNoSandboxUsesHostCommand(t *testing.T) {
+	noCfg := filepath.Join(t.TempDir(), "none.json")
+	cmd := exec.Command(binaryPath, "run", "implement", "40",
+		"--slug", "agentwatch-run", "--session", "demo", "--config", noCfg, "--no-sandbox", "--dry-run")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("no-sandbox dry-run failed: %v\n%s", err, output)
+	}
+	s := string(output)
+	if strings.Contains(s, "agent-sand") {
+		t.Errorf("--no-sandbox must not use the sandbox launcher, got:\n%s", s)
+	}
 	if !strings.Contains(s, "claude") || !strings.Contains(s, "/agentflow:implement 40") {
-		t.Errorf("expected claude command with the agentflow skill, got:\n%s", s)
+		t.Errorf("expected host claude command with the agentflow skill, got:\n%s", s)
 	}
 }
 
