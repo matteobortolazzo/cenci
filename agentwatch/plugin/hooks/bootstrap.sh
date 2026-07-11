@@ -1,12 +1,15 @@
 #!/bin/sh
-# agentwatch bootstrap — provisions the plugin-local binary and starts the daemon.
+# agentwatch bootstrap — provisions the plugin-local binary, puts it on $PATH,
+# and starts the daemon.
 #
 # Runs detached from the SessionStart hook, so it MUST never block the agent and
 # MUST never exit non-zero: every failure path logs one line and exits 0. When
 # the release artifact matching the plugin version is missing from bin/, it is
-# downloaded (with sha256 verification) from the GitHub release. The daemon is
-# then started if it isn't already (the daemon's own already-running guard makes
-# a redundant start a harmless no-op).
+# downloaded (with sha256 verification) from the GitHub release. The binary is
+# then symlinked onto $PATH so bare `agentwatch` invocations (tmux run-shell,
+# shell-spawned bar widgets) resolve it even though the plugin cache is on no
+# login PATH. The daemon is finally started if it isn't already (the daemon's
+# own already-running guard makes a redundant start a harmless no-op).
 
 set -u
 
@@ -137,6 +140,30 @@ install_binary() {
 	return 0
 }
 
+# install_on_path maintains one predictable launcher at ~/.local/bin/agentwatch.
+# Symlinks are re-pointed on version bumps; regular files and directories are
+# never overwritten. The operation is idempotent and non-fatal.
+install_on_path() {
+	[ -x "$BIN" ] || return 0
+	dir="$HOME/.local/bin"
+	dest="$dir/agentwatch"
+	mkdir -p "$dir" 2>/dev/null || true
+	if [ -e "$dest" ] && [ ! -L "$dest" ]; then
+		log "$dest exists and is not a symlink; left untouched"
+		return 0
+	fi
+	if ! ln -sf "$BIN" "$dest" 2>/dev/null; then
+		log "could not link agentwatch at $dest"
+		return 0
+	fi
+	case ":$PATH:" in
+	*":$dir:"*) log "linked agentwatch at $dest" ;;
+	*) log "linked agentwatch at $dest; add \"$dir\" to your PATH so bare agentwatch invocations resolve" ;;
+	esac
+	return 0
+}
+
 install_binary || true
+install_on_path || true
 start_daemon
 exit 0

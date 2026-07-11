@@ -402,17 +402,36 @@ step_sandbox_setup() {
 	fi
 }
 
+# newest_cache_binary — path to the most recent agentwatch binary in the
+# version-pinned plugin cache, or empty if none is present yet (the plugin
+# bootstrap installs it on the first agent session). Mirrors the cache glob the
+# macOS SwiftBar widget's resolve_bin uses.
+newest_cache_binary() {
+	local newest="" g
+	for g in "$HOME"/.claude/plugins/cache/*/agentwatch/*/bin/agentwatch; do
+		[ -x "$g" ] || continue
+		if [ -z "$newest" ] || [ "$g" -nt "$newest" ]; then
+			newest="$g"
+		fi
+	done
+	[ -n "$newest" ] && printf '%s\n' "$newest"
+}
+
 step_agentwatch_setup() {
 	selected agentwatch || return 0
 	step "Setting up agentwatch"
 
-	ok "nothing to do on $(platform_label) — the binary and daemon self-bootstrap on your first agent session"
+	ok "the binary and daemon self-bootstrap on your first agent session"
 	say "  ${DIM}first session may take a moment before status appears; log: \${TMPDIR:-/tmp}/agentwatch-bootstrap.log${RESET}"
 
-	[ "$OS" = macos ] || return 0
+	if [ "$OS" != macos ]; then
+		setup_agentwatch_linux_path
+		return 0
+	fi
 
 	# macOS menu bar (SwiftBar) — optional, and the fiddliest manual step, so
-	# offer to wire it up here.
+	# offer to wire it up here. SwiftBar's own resolve_bin already covers
+	# /usr/local/bin and the plugin cache glob, so no PATH linking is needed.
 	local script
 	if ! script=$(find_plugin_path "agentwatch/plugin/macos/agentwatch.5s.sh"); then
 		return 0
@@ -430,6 +449,61 @@ step_agentwatch_setup() {
 	ln -sf "$script" "$HOME/SwiftBarPlugins/agentwatch.5s.sh"
 	ok "linked menu bar widget → ~/SwiftBarPlugins/agentwatch.5s.sh"
 	say "  in SwiftBar: set the Plugin Folder to ~/SwiftBarPlugins (Preferences → Plugin Folder), then Refresh All"
+}
+
+# setup_agentwatch_linux_path makes bar widgets (DMS, noctalia, waybar) able to
+# resolve a bare `agentwatch`. The binary lives in the version-pinned plugin
+# cache (~/.claude/plugins/cache/.../agentwatch/<version>/bin), which is on no
+# login PATH — so a widget spawned by the compositor can't find it and hides
+# itself. We keep a stable link on the user's writable PATH and, for GUI bars
+# that don't inherit ~/.local/bin, offer a one-time /usr/local/bin link.
+setup_agentwatch_linux_path() {
+	local user_link="$HOME/.local/bin/agentwatch" cache_bin
+	cache_bin="$(newest_cache_binary || true)"
+
+	# Ensure the bootstrap-maintained user link exists now. The plugin bootstrap
+	# re-points it on version bumps, so pinning the current cache path is fine;
+	# if the binary isn't cached yet, the first agent session creates the link.
+	if [ -n "$cache_bin" ]; then
+		link_launcher agentwatch "$cache_bin" || true
+	else
+		say "  ${DIM}agentwatch binary not in the plugin cache yet — the first agent session links it onto ~/.local/bin automatically${RESET}"
+	fi
+
+	case ":$PATH:" in
+	*":$HOME/.local/bin:"*) ;;
+	*) warn "~/.local/bin is not on your PATH — add it to your shell profile:
+      export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
+	esac
+
+	# GUI/compositor bars inherit the login PATH, which usually lacks
+	# ~/.local/bin but always includes /usr/local/bin. A root link there, chained
+	# through the bootstrap-maintained ~/.local/bin link, lets them resolve
+	# agentwatch and survives version bumps with no re-run.
+	if [ -L /usr/local/bin/agentwatch ] &&
+		[ "$(readlink /usr/local/bin/agentwatch 2>/dev/null)" = "$user_link" ]; then
+		ok "/usr/local/bin/agentwatch already links to ~/.local/bin/agentwatch (GUI bars can resolve it)"
+		return 0
+	fi
+	if [ -e /usr/local/bin/agentwatch ] && [ ! -L /usr/local/bin/agentwatch ]; then
+		warn "/usr/local/bin/agentwatch exists and is not a symlink — left untouched; remove it manually or configure the widget's agentwatch path"
+		return 0
+	fi
+
+	local manual="sudo ln -sf \"$user_link\" /usr/local/bin/agentwatch"
+	if [ "$INTERACTIVE" -eq 1 ] &&
+		ask_yn "Link agentwatch into /usr/local/bin so GUI bar widgets (DMS, noctalia) can find it? (one-time sudo)" y; then
+		if sudo ln -sf "$user_link" /usr/local/bin/agentwatch; then
+			ok "linked /usr/local/bin/agentwatch → ~/.local/bin/agentwatch"
+		else
+			warn "could not create the /usr/local/bin link — run it yourself:
+      $manual"
+		fi
+	else
+		say "  ${DIM}skipped the GUI-bar PATH link. If a bar widget stays hidden, run:${RESET}"
+		say "      $manual"
+		say "  ${DIM}or point the widget at the binary directly (agentwatchPath for DMS/noctalia, AGENTWATCH_BIN for SwiftBar).${RESET}"
+	fi
 }
 
 step_agentflow_notes() {
