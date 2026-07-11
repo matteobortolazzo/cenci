@@ -188,7 +188,11 @@ Which agent runs a card is a **per-dispatch** choice — pass `--agent`:
 ```
 
 The state-machine labels are agent-neutral, so a board can dispatch some cards to
-Claude Code and others to Codex and both drive the same columns. `agentwatch run`
+Claude Code and others to Codex and both drive the same columns. Instructions are
+shared: each directory's `CLAUDE.md` (canonical) is read by Claude Code natively and by
+Codex via `project_doc_fallback_filenames = ["CLAUDE.md"]` in `~/.codex/config.toml` (a
+one-time, user-level line — a committed repo-level `.codex/config.toml` is ignored), so a
+dispatched Codex card sees the same project context as a Claude Code card. `agentwatch run`
 ships built-in templates for **claude** (`refine`/`design`/`implement`) only;
 **codex** and **opencode** are added by dropping an entry into
 `~/.config/agentwatch/config.json` (opencode is future config, not code). Codex

@@ -112,6 +112,26 @@ the same install path above works from Codex.
 changes it changes the hash and requires re-trusting the hooks via `/hooks` in Codex.
 This is a per-update step for Codex users only.
 
+**One instructions file per directory.** `CLAUDE.md` is canonical, and it lives at the
+root of each directory (`CLAUDE.md`, `agentwatch/CLAUDE.md`, `agentflow/CLAUDE.md`) so
+both tools discover it. Claude Code reads directory-root `CLAUDE.md` natively. Codex reads
+it through its `project_doc_fallback_filenames` config key, which extends Codex's
+git-root→cwd discovery walk to extra filenames. That key is only honored from the
+*user-level* config (`~/.codex/config.toml`) — a committed repo-level `.codex/config.toml`
+is silently ignored — so Codex users add it once:
+
+```toml
+# ~/.codex/config.toml
+project_doc_fallback_filenames = ["CLAUDE.md"]
+```
+
+Discovery is nested: the fallback applies at every level of the walk, so running Codex
+inside `agentwatch/` picks up both root `CLAUDE.md` and `agentwatch/CLAUDE.md` (verified
+with `codex debug prompt-input`). **Revisit trigger:** once Claude Code reads `AGENTS.md`
+natively ([anthropics/claude-code#6235](https://github.com/anthropics/claude-code/issues/6235)),
+rename these to `AGENTS.md` — the AAIF/Linux Foundation standard — so Cursor, Copilot, and
+Gemini benefit without per-tool config.
+
 Per-layer Codex status is honest about where each layer stands today:
 
 | Layer | Codex today | Roadmap |
