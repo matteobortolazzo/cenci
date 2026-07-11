@@ -1,4 +1,4 @@
-# claude-tools
+# agent-stack
 
 Three layers that let a coding agent implement on autopilot while a human keeps the
 decisions — an **isolation** boundary, a **workflow** with human gates, and an
@@ -45,15 +45,15 @@ checks prerequisites, walks you through what to install (default: everything), a
 does the post-install setup — sandbox launcher + image build, macOS menu bar wiring:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/claude-tools/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
 ```
 
 ```bash
 # update everything later:
-curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/claude-tools/main/install.sh | bash -s -- update
+curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash -s -- update
 
 # just check what's missing, change nothing:
-curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/claude-tools/main/install.sh | bash -s -- doctor
+curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash -s -- doctor
 ```
 
 New here? Read **[Getting started](./docs/getting-started.md)** — prerequisites per
@@ -63,7 +63,7 @@ platform, your first session, troubleshooting, uninstall.
 <summary>Manual install (what the script does)</summary>
 
 ```bash
-claude plugin marketplace add matteobortolazzo/claude-tools
+claude plugin marketplace add matteobortolazzo/agent-stack
 claude plugin install ccflow agentwatch sandbox
 /sandbox:setup   # container layer only — symlink claude-sand + build the image
 # later:
@@ -116,9 +116,9 @@ Per-layer Codex status is honest about where each layer stands today:
 
 | Layer | Codex today | Roadmap |
 |-------|-------------|---------|
-| attention (agentwatch) | ✅ watched — self-bootstrapping Codex hooks, `/hooks` trust step | `agentwatch run --agent codex` launch templates ([#33](https://github.com/matteobortolazzo/claude-tools/issues/33)) |
-| workflow (ccflow) | Claude Code only | documented `AGENTS.md` equivalent ([#19](https://github.com/matteobortolazzo/claude-tools/issues/19)) |
-| isolation (sandbox) | Claude-only launcher | `claude-sand --agent codex` ([#18](https://github.com/matteobortolazzo/claude-tools/issues/18)) |
+| attention (agentwatch) | ✅ watched — self-bootstrapping Codex hooks, `/hooks` trust step | `agentwatch run --agent codex` launch templates ([#33](https://github.com/matteobortolazzo/agent-stack/issues/33)) |
+| workflow (ccflow) | Claude Code only | documented `AGENTS.md` equivalent ([#19](https://github.com/matteobortolazzo/agent-stack/issues/19)) |
+| isolation (sandbox) | Claude-only launcher | `claude-sand --agent codex` ([#18](https://github.com/matteobortolazzo/agent-stack/issues/18)) |
 
 ## License
 

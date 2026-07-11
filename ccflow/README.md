@@ -1,6 +1,6 @@
 # ccflow — Claude Code Workflow Plugin
 
-> Part of [claude-tools](../README.md) — the **workflow layer**. See the root README for
+> Part of [agent-stack](../README.md) — the **workflow layer**. See the root README for
 > the one-command install and how the isolation, workflow, and attention layers fit together.
 
 Ticket refinement and automated implementation pipeline for GitHub.
@@ -62,20 +62,20 @@ macOS host-profile sandbox support is built into Claude Code and requires no ext
 
 ## Installation
 
-### Via the claude-tools installer (recommended)
+### Via the agent-stack installer (recommended)
 
 The [one-command installer](../docs/getting-started.md) installs ccflow together with
 the other layers, checks prerequisites, and walks you through the setup:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/claude-tools/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
 ```
 
 ### Via marketplace
 
 ```bash
 # Register the repo as a marketplace (works with private repos too)
-claude plugin marketplace add matteobortolazzo/claude-tools
+claude plugin marketplace add matteobortolazzo/agent-stack
 
 # Install the plugin (persists across sessions)
 claude plugin install ccflow

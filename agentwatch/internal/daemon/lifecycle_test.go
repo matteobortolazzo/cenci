@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/ipc"
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/tmux"
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/tmux/tmuxtest"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/ipc"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/tmux"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/tmux/tmuxtest"
 )
 
 func TestDaemon_FullLifecycle(t *testing.T) {
@@ -105,26 +105,26 @@ func TestDaemon_CodexLifecycleWithoutSessionEndRestoresAfterExit(t *testing.T) {
 	mc := &tmuxtest.MockClient{
 		Panes: []tmux.PaneInfo{
 			{SessionName: "main", WindowIndex: "0", WindowName: "zsh", PaneIndex: "0",
-				PaneCurrentCmd: "codex", PaneTitle: "claude-tools", PaneID: "%0"},
+				PaneCurrentCmd: "codex", PaneTitle: "agent-stack", PaneID: "%0"},
 		},
 	}
 
 	d := newTestDaemon(mc)
 
 	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
-	if name, _ := lastRename(mc.Renames, "main:0"); name != "claude-tools" {
-		t.Errorf("after SessionStart: expected native pane title 'claude-tools', got %q", name)
+	if name, _ := lastRename(mc.Renames, "main:0"); name != "agent-stack" {
+		t.Errorf("after SessionStart: expected native pane title 'agent-stack', got %q", name)
 	}
 
 	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
-	if name, _ := lastRename(mc.Renames, "main:0"); name != "claude-tools" {
+	if name, _ := lastRename(mc.Renames, "main:0"); name != "agent-stack" {
 		t.Errorf("after UserPromptSubmit: expected native pane title, got %q", name)
 	}
 	d.handleEvent(ipc.HookEvent{EventType: "PermissionRequest", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
 	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); !ok || v != "!" {
 		t.Errorf("expected @agentwatch-symbol=! after PermissionRequest, got %q (found=%v)", v, ok)
 	}
-	if name, _ := lastRename(mc.Renames, "main:0"); name != "claude-tools" {
+	if name, _ := lastRename(mc.Renames, "main:0"); name != "agent-stack" {
 		t.Errorf("after PermissionRequest: expected retained native pane title, got %q", name)
 	}
 
@@ -133,7 +133,7 @@ func TestDaemon_CodexLifecycleWithoutSessionEndRestoresAfterExit(t *testing.T) {
 	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); !ok || v != "✓" {
 		t.Errorf("expected @agentwatch-symbol=✓ after Stop, got %q (found=%v)", v, ok)
 	}
-	if name, _ := lastRename(mc.Renames, "main:0"); name != "claude-tools" {
+	if name, _ := lastRename(mc.Renames, "main:0"); name != "agent-stack" {
 		t.Errorf("after Stop: expected retained native pane title, got %q", name)
 	}
 

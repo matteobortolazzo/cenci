@@ -1,4 +1,4 @@
-# claude-tools
+# agent-stack
 
 Monorepo for Claude Code plugins and development tooling.
 GitHub Issues for tracking. GitHub for code and PRs.

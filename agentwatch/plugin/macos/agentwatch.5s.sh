@@ -8,7 +8,7 @@
 # <swiftbar.author.github>matteobortolazzo</swiftbar.author.github>
 # <swiftbar.desc>Live Claude Code / Codex session status in the macOS menu bar, via the agentwatch daemon.</swiftbar.desc>
 # <swiftbar.dependencies>agentwatch</swiftbar.dependencies>
-# <swiftbar.abouturl>https://github.com/matteobortolazzo/claude-tools/tree/main/agentwatch</swiftbar.abouturl>
+# <swiftbar.abouturl>https://github.com/matteobortolazzo/agent-stack/tree/main/agentwatch</swiftbar.abouturl>
 # <swiftbar.hideAbout>false</swiftbar.hideAbout>
 # <swiftbar.hideRunInTerminal>true</swiftbar.hideRunInTerminal>
 # <swiftbar.hideLastUpdated>true</swiftbar.hideLastUpdated>

@@ -8,11 +8,11 @@ import (
 	"log"
 	"strings"
 
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/config"
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/detect"
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/frontend"
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/ipc"
-	tmuxc "github.com/matteobortolazzo/claude-tools/agentwatch/internal/tmux"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/config"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/detect"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/frontend"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/ipc"
+	tmuxc "github.com/matteobortolazzo/agent-stack/agentwatch/internal/tmux"
 )
 
 // Frontend styles tmux windows to mirror agent session state.

@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/run"
-	"github.com/matteobortolazzo/claude-tools/agentwatch/pkg/watch"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/run"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/pkg/watch"
 )
 
 // RunOnce gathers inputs (tickets, plans, snapshot, clock), runs the pure

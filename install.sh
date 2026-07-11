@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# claude-tools installer — one command for the whole package.
+# agent-stack installer — one command for the whole package.
 #
-# Installs or updates the three claude-tools plugins (ccflow, agentwatch,
+# Installs or updates the three agent-stack plugins (ccflow, agentwatch,
 # sandbox) as a single system: registers the marketplace, installs the
 # plugins, and runs the post-install setup that used to be manual (sandbox
 # launcher symlink + image build, macOS menu bar wiring).
@@ -11,7 +11,7 @@
 #   ./install.sh update         update installed plugins (+ optional rebuild)
 #   ./install.sh doctor         check prerequisites, change nothing
 #
-#   curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/claude-tools/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
 #
 # Flags:
 #   --plugins ccflow,agentwatch,sandbox   preselect plugins (skips the picker)
@@ -21,8 +21,8 @@
 
 set -u
 
-MARKETPLACE_REPO="matteobortolazzo/claude-tools"
-MARKETPLACE_NAME="claude-tools"
+MARKETPLACE_REPO="matteobortolazzo/agent-stack"
+MARKETPLACE_NAME="agent-stack"
 ALL_PLUGINS="ccflow agentwatch sandbox"
 
 # ---------------------------------------------------------------- output ----
@@ -76,7 +76,7 @@ detect_platform() {
 	case "$(uname -s)" in
 	Linux) OS=linux ;;
 	Darwin) OS=macos ;;
-	*) die "unsupported OS '$(uname -s)' — claude-tools supports Linux, macOS, and WSL2" ;;
+	*) die "unsupported OS '$(uname -s)' — agent-stack supports Linux, macOS, and WSL2" ;;
 	esac
 	case "$(uname -m)" in
 	x86_64 | amd64) ARCH=amd64 ;;
@@ -237,7 +237,7 @@ choose_plugins() {
 	fi
 
 	say ""
-	say "${BOLD}claude-tools is one system in three plugins:${RESET}"
+	say "${BOLD}agent-stack is one system in three plugins:${RESET}"
 	say ""
 	say "  ${BOLD}ccflow${RESET}      workflow  — ticket → plan approval → autopilot → PR"
 	say "  ${BOLD}agentwatch${RESET}  attention — live agent status in tmux/waybar/menu bar"
@@ -263,7 +263,7 @@ choose_plugins() {
 # ------------------------------------------------------------ install steps ----
 
 step_marketplace() {
-	step "Registering the claude-tools marketplace"
+	step "Registering the agent-stack marketplace"
 	if marketplace_registered; then
 		ok "marketplace '$MARKETPLACE_NAME' already registered"
 		return
@@ -460,14 +460,14 @@ INSTALL_FAILED=0
 
 usage() {
 	cat <<'EOF'
-claude-tools installer — one command for the whole package.
+agent-stack installer — one command for the whole package.
 
 Usage:
   ./install.sh                interactive wizard (install)
   ./install.sh update         update installed plugins (+ optional rebuild)
   ./install.sh doctor         check prerequisites, change nothing
 
-  curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/claude-tools/main/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
 
 Flags:
   --plugins ccflow,agentwatch,sandbox   preselect plugins (skips the picker)
@@ -512,7 +512,7 @@ fi
 detect_platform
 
 say ""
-say "${BOLD}claude-tools installer${RESET} — $(platform_label)"
+say "${BOLD}agent-stack installer${RESET} — $(platform_label)"
 
 if [ "$MODE" = doctor ]; then
 	run_doctor

@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/claude-tools/agentwatch/pkg/watch"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/pkg/watch"
 )
 
 // testConfig has generous caps so no gate trips unless a case sets it.

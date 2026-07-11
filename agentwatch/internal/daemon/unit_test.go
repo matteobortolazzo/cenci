@@ -3,8 +3,8 @@ package daemon
 import (
 	"testing"
 
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/detect"
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/ipc"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/detect"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/ipc"
 )
 
 func TestDaemon_MapEventToStatus(t *testing.T) {

@@ -5,7 +5,7 @@ Live counts of Claude Code and Codex tmux sessions in your DankMaterialShell (DM
 ## Requirements
 
 - [DankMaterialShell](https://danklinux.com/docs/dankmaterialshell/) (recent build with the plugin system)
-- [agentwatch](https://github.com/matteobortolazzo/claude-tools/tree/main/agentwatch) daemon running on your tmux server
+- [agentwatch](https://github.com/matteobortolazzo/agent-stack/tree/main/agentwatch) daemon running on your tmux server
 - `agentwatch` binary on `$PATH` (or set `agentwatchPath` in plugin settings)
 
 ## Install (local dev)

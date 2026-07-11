@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/matteobortolazzo/claude-tools/agentwatch/pkg/watch"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/pkg/watch"
 )
 
 // CollectTickets gathers open issues across the configured repos via the gh CLI,

@@ -28,4 +28,4 @@ project_name: agentwatch
 release:
   github:
     owner: matteobortolazzo
-    name: claude-tools
+    name: agent-stack

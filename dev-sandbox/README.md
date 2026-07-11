@@ -1,6 +1,6 @@
 # Dev Sandbox (claude-sand)
 
-> Part of [claude-tools](../README.md) — the **isolation layer**. See the root README for
+> Part of [agent-stack](../README.md) — the **isolation layer**. See the root README for
 > the one-command install and how the isolation, workflow, and attention layers fit together.
 
 Isolated Docker/Podman container for running Claude Code with full permissions. Your host OS stays clean — only `~/Repos` is shared with the container.
@@ -17,14 +17,14 @@ The easiest path is the [one-command installer](../docs/getting-started.md), whi
 installs the plugin, symlinks the launchers, and offers to build the image:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/claude-tools/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
 ```
 
 Or install the plugin from the marketplace, then run the setup skill — it symlinks the
 `claude-sand` launcher onto your PATH and builds the container image:
 
 ```bash
-claude plugin marketplace add matteobortolazzo/claude-tools
+claude plugin marketplace add matteobortolazzo/agent-stack
 claude plugin install sandbox
 /sandbox:setup
 ```

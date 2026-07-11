@@ -78,7 +78,7 @@ install_binary() {
 		;;
 	esac
 
-	base="https://github.com/matteobortolazzo/claude-tools/releases/download/agentwatch/v${VERSION}"
+	base="https://github.com/matteobortolazzo/agent-stack/releases/download/agentwatch/v${VERSION}"
 	tarball="agentwatch_${VERSION}_${os}_${arch}.tar.gz"
 
 	tmp=$(mktemp -d 2>/dev/null) || {

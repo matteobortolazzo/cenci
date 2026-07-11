@@ -1,6 +1,6 @@
 # Getting started
 
-claude-tools looks like three plugins, but it's **one system** — you install it once,
+agent-stack looks like three plugins, but it's **one system** — you install it once,
 with one command, and update it the same way. This guide takes you from nothing to a
 working setup on Linux, macOS, or WSL2.
 
@@ -32,7 +32,7 @@ missing and why it matters:
 Not sure? Run the check first — it changes nothing:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/claude-tools/main/install.sh | bash -s -- doctor
+curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash -s -- doctor
 ```
 
 ## Install
@@ -41,14 +41,14 @@ One command. It detects your platform, checks prerequisites, asks which plugins 
 want (default: all three), and does the post-install setup that used to be manual:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/claude-tools/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
 ```
 
 Or from a clone:
 
 ```bash
-git clone https://github.com/matteobortolazzo/claude-tools.git
-cd claude-tools && ./install.sh
+git clone https://github.com/matteobortolazzo/agent-stack.git
+cd agent-stack && ./install.sh
 ```
 
 What it does, concretely:
@@ -69,7 +69,7 @@ Run `./install.sh --help` for all flags.
 <summary>Prefer to do it by hand?</summary>
 
 ```bash
-claude plugin marketplace add matteobortolazzo/claude-tools
+claude plugin marketplace add matteobortolazzo/agent-stack
 claude plugin install ccflow agentwatch sandbox
 ```
 
@@ -153,7 +153,7 @@ so). agentwatch re-bootstraps its matching binary on the next session automatica
 
 ```bash
 claude plugin uninstall ccflow agentwatch sandbox
-claude plugin marketplace remove claude-tools
+claude plugin marketplace remove agent-stack
 rm -f ~/.local/bin/claude-sand ~/.local/bin/codex-sand
 # sandbox leftovers, if you built the image:
 docker rmi claude-sandbox:latest

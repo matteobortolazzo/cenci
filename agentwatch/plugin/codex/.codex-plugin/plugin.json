@@ -6,8 +6,8 @@
     "name": "Matteo Bortolazzo",
     "url": "https://github.com/matteobortolazzo"
   },
-  "homepage": "https://github.com/matteobortolazzo/claude-tools/tree/main/agentwatch",
-  "repository": "https://github.com/matteobortolazzo/claude-tools",
+  "homepage": "https://github.com/matteobortolazzo/agent-stack/tree/main/agentwatch",
+  "repository": "https://github.com/matteobortolazzo/agent-stack",
   "license": "MIT",
   "keywords": [
     "codex",
@@ -26,7 +26,7 @@
       "Hooks",
       "Monitoring"
     ],
-    "websiteURL": "https://github.com/matteobortolazzo/claude-tools/tree/main/agentwatch",
+    "websiteURL": "https://github.com/matteobortolazzo/agent-stack/tree/main/agentwatch",
     "brandColor": "#3B82F6"
   }
 }

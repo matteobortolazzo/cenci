@@ -1,5 +1,5 @@
 {
-  "name": "claude-tools",
+  "name": "agent-stack",
   "owner": {
     "name": "Matteo Bortolazzo"
   },
@@ -12,7 +12,7 @@
       "author": {
         "name": "Matteo Bortolazzo"
       },
-      "repository": "https://github.com/matteobortolazzo/claude-tools"
+      "repository": "https://github.com/matteobortolazzo/agent-stack"
     },
     {
       "name": "agentwatch",
@@ -22,7 +22,7 @@
       "author": {
         "name": "Matteo Bortolazzo"
       },
-      "repository": "https://github.com/matteobortolazzo/claude-tools"
+      "repository": "https://github.com/matteobortolazzo/agent-stack"
     },
     {
       "name": "sandbox",
@@ -32,7 +32,7 @@
       "author": {
         "name": "Matteo Bortolazzo"
       },
-      "repository": "https://github.com/matteobortolazzo/claude-tools"
+      "repository": "https://github.com/matteobortolazzo/agent-stack"
     }
   ]
 }

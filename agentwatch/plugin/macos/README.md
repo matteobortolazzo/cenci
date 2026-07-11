@@ -8,7 +8,7 @@ there are no daemon or Go changes.
 ## Requirements
 
 - [SwiftBar](https://swiftbar.app) — `brew install swiftbar`
-- [agentwatch](https://github.com/matteobortolazzo/claude-tools/tree/main/agentwatch) daemon running
+- [agentwatch](https://github.com/matteobortolazzo/agent-stack/tree/main/agentwatch) daemon running
 - The `agentwatch` binary reachable from SwiftBar (see the PATH note below)
 
 ### The GUI-PATH gotcha
@@ -34,7 +34,7 @@ If you installed the [Claude Code plugin](../../README.md#install-claude-code), 
 macOS binary and daemon auto-bootstrap on your first session — nothing else to do:
 
 ```sh
-claude plugin marketplace add matteobortolazzo/claude-tools
+claude plugin marketplace add matteobortolazzo/agent-stack
 claude plugin install agentwatch   # or: claude plugin update agentwatch
 ```
 
