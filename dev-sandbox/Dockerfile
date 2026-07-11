@@ -6,6 +6,7 @@ FROM ubuntu:24.04
 ARG DOTNET_SDK_VERSION=10.0.100
 ARG NODE_MAJOR=24
 ARG GO_VERSION=1.24.1
+ARG CODEX_VERSION=0.144.1
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -45,6 +46,12 @@ ENV DOTNET_NOLOGO=1
 RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
+
+# ── Codex CLI ────────────────────────────────────────────────────
+# Baked into the image (unlike Claude, which is bind-mounted from the host):
+# Codex ships as an npm launcher that resolves a nested native binary, which a
+# single-file bind-mount can't carry. Update by bumping CODEX_VERSION + rebuild.
+RUN npm install -g @openai/codex@${CODEX_VERSION}
 
 # ── Go ───────────────────────────────────────────────────────────
 RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" \

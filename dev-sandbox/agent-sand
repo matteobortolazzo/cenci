@@ -105,10 +105,15 @@ if ! "${RUNTIME}" image inspect "${IMAGE}" &>/dev/null; then
 fi
 
 # ── Resolve agent binary ────────────────────────────────────────
-AGENT_BIN="$(readlink -f "$(which "${AGENT}")" 2>/dev/null || true)"
-if [[ ! -x "${AGENT_BIN}" ]]; then
-    echo "Error: ${AGENT} binary not found. Install ${AGENT} on the host first." >&2
-    exit 1
+# Claude is a self-contained binary bind-mounted from the host; Codex is baked
+# into the image (npm launcher + nested native binary can't be single-file
+# mounted), so only Claude needs a host binary here.
+if [[ "${AGENT}" == claude ]]; then
+    AGENT_BIN="$(readlink -f "$(which "${AGENT}")" 2>/dev/null || true)"
+    if [[ ! -x "${AGENT_BIN}" ]]; then
+        echo "Error: ${AGENT} binary not found. Install ${AGENT} on the host first." >&2
+        exit 1
+    fi
 fi
 
 # ── Resolve agentwatch (optional) ─────────────────────────────────
@@ -168,15 +173,17 @@ RUN_ARGS=(
     # Persistent home
     -v "${VOLUME_NAME}:/home/dev"
 
-    # Agent binary (read-only)
-    -v "${AGENT_BIN}:/usr/local/bin/${AGENT}:ro"
-
     # Terminal
     -e "TERM=${TERM:-xterm-256color}"
 
     # Container marker (both docker & podman) — agentflow configure detects this
     -e "AGENT_SAND=1"
 )
+
+# Claude binary (read-only); Codex is baked into the image instead
+if [[ "${AGENT}" == claude ]]; then
+    RUN_ARGS+=(-v "${AGENT_BIN}:/usr/local/bin/claude:ro")
+fi
 
 # Git config (read-only, if exists)
 for gitconfig in "${HOME}/.config/git/config" "${HOME}/.gitconfig"; do

@@ -9,7 +9,9 @@ Isolated Docker/Podman container for running Claude Code with full permissions. 
 
 - Docker or Podman installed on the host
 - Claude Code installed on the host (`claude` in PATH)
-- Codex installed on the host when using `--agent codex` (`codex` in PATH)
+- Codex auth on the host when using `--agent codex` — run `codex login` to create
+  `~/.codex/auth.json`, or export `OPENAI_API_KEY`. Codex itself is baked into the
+  image, so it does **not** need to be installed on the host.
 - Host user UID must be 1000 (standard Linux default)
 
 ## Setup
@@ -97,9 +99,12 @@ permission inside the container — Claude with `--dangerously-skip-permissions`
 
 Containers and home volumes are **namespaced by agent**, so the two never collide:
 the **Claude agent** uses `claude-sand-<name>` / `claude-sand-home-<name>`; `codex-sand` (or
-`agent-sand --agent codex`) uses `codex-sand-<name>` / `codex-sand-home-<name>`. The Dockerfile is
-unchanged — the agent binary is bind-mounted from the host (like Claude), so Codex needs no
-image rebuild.
+`agent-sand --agent codex`) uses `codex-sand-<name>` / `codex-sand-home-<name>`. The two agents
+are provisioned differently: **Claude** is bind-mounted from the host (self-contained binary,
+so the container always matches your host version). **Codex** is baked into the image — it ships
+as an npm launcher that resolves a native binary nested in its own `node_modules`, which a
+single-file bind-mount can't carry. Updating Codex therefore means bumping `CODEX_VERSION` in
+the Dockerfile and rebuilding (`agent-sand --build`), whereas updating Claude needs no rebuild.
 
 ## First-Run Setup
 
@@ -159,6 +164,7 @@ Everything persists in the home volume — only needs to happen once per instanc
 | .NET SDK | 10.0.100 | `DOTNET_SDK_VERSION` |
 | Node.js | 24.x | `NODE_MAJOR` |
 | Go | 1.24.1 | `GO_VERSION` |
+| Codex CLI | 0.144.1 | `CODEX_VERSION` |
 | GitHub CLI | latest | — |
 | git, ripgrep, jq, curl | latest | — |
 | build-essential | latest | — |
@@ -209,7 +215,7 @@ Bypass mode is **fully unattended**. The entrypoint seeds `/home/dev/.claude/set
 
 | Host path | Container path | Purpose |
 |-----------|---------------|---------|
-| Agent binary (`claude` or `codex`) | `/usr/local/bin/<agent>` | Always matches host version |
+| `claude` binary (Claude only) | `/usr/local/bin/claude` | Always matches host version (Codex is baked into the image instead) |
 | `~/.config/git/config` or `~/.gitconfig` | `/home/dev/.gitconfig` | Git identity |
 | `~/.claude/.credentials.json` | `/tmp/host-claude-creds/` (staging) | Claude OAuth tokens (copied to home on start) |
 | `~/.codex/auth.json` (Codex only) | `/tmp/host-codex-creds/` (staging) | Codex OAuth tokens (copied to home on start) |
@@ -260,7 +266,8 @@ the same time.
 
 ### Update SDK versions
 
-Edit the `ARG` lines at the top of the `Dockerfile`, then rebuild:
+Edit the `ARG` lines at the top of the `Dockerfile` (`DOTNET_SDK_VERSION`, `NODE_MAJOR`,
+`GO_VERSION`, `CODEX_VERSION`, `UV_VERSION`), then rebuild:
 
 ```bash
 agent-sand --build
@@ -268,7 +275,13 @@ agent-sand --build
 
 ### Update Claude Code
 
-Just update Claude Code on the host. The binary is bind-mounted, so the container always uses the host version.
+Just update Claude Code on the host. The binary is bind-mounted, so the container always uses the host version — no rebuild needed.
+
+### Update Codex
+
+Codex is baked into the image, so updating it means bumping `CODEX_VERSION` in the
+`Dockerfile` and rebuilding (`agent-sand --build`). Unlike Claude, updating Codex on the host
+has no effect on the container.
 
 ### Reset an instance
 
