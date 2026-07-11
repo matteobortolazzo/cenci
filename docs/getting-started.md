@@ -12,22 +12,22 @@ working setup on Linux, macOS, or WSL2.
 | `agentwatch` | attention | Shows live agent status wherever you're looking — tmux bar, waybar, macOS menu bar — and shouts when the agent needs you |
 | `sandbox` | isolation | Runs the agent inside a Docker/Podman container with full permissions, so autopilot is safe |
 
-You can install any subset, but they're designed to work together: the sandbox makes
-autopilot safe, agentflow runs the autopilot, agentwatch tells you when it needs you.
+They ship and install together, as one unit: the sandbox makes autopilot safe,
+agentflow runs the autopilot, agentwatch tells you when it needs you.
 
 ## Before you start
 
-The only hard requirements are **[Claude Code](https://code.claude.com/docs/en/overview)**
-and **git**. Everything else is per-feature and the installer tells you exactly what's
-missing and why it matters:
+The hard requirements are **[Claude Code](https://code.claude.com/docs/en/overview)**,
+**git**, and **Docker or Podman** (the sandbox container is the only supported runtime).
+Everything else is per-feature and the installer tells you exactly what's missing and
+why it matters:
 
 | You want… | You need… |
 |-----------|-----------|
+| agent-stack (required) | Docker or Podman (macOS: [Docker Desktop](https://docker.com/products/docker-desktop) or Podman) |
 | agentflow (issues & PRs) | [GitHub CLI](https://cli.github.com) (`gh`), authenticated via `gh auth login` |
-| sandbox | Docker or Podman (macOS: [Docker Desktop](https://docker.com/products/docker-desktop) or Podman) |
 | agentwatch in the tmux status bar | tmux |
 | agentwatch in the macOS menu bar | [SwiftBar](https://swiftbar.app) (`brew install swiftbar`) — optional |
-| agentflow *without* the sandbox (Linux host profile) | `bubblewrap` + `socat` — skip if you use the sandbox |
 
 Not sure? Run the check first — it changes nothing:
 
@@ -37,8 +37,8 @@ curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/i
 
 ## Install
 
-One command. It detects your platform, checks prerequisites, asks which plugins you
-want (default: all three), and does the post-install setup that used to be manual:
+One command. It detects your platform, checks prerequisites, installs all three
+plugins, and does the post-install setup that used to be manual:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
@@ -64,7 +64,7 @@ What it does, concretely:
    menu bar widget for you.
 5. **agentflow**: checks `gh` auth and points you at the one-time `/agentflow:configure`.
 
-Non-interactive (CI, dotfiles scripts): `bash -s -- --yes --plugins agentflow,agentwatch`.
+Non-interactive (CI, dotfiles scripts): `bash -s -- --yes`.
 Run `./install.sh --help` for all flags.
 
 **Codex users — one-time config.** Project instructions live in `CLAUDE.md` files (one per
@@ -98,7 +98,7 @@ image. agentwatch needs nothing. For the macOS menu bar widget, see
 ## Your first session
 
 ```bash
-# 1. Launch Claude Code inside the sandbox (or plain `claude` if you skipped it)
+# 1. Launch Claude Code inside the sandbox
 agent-sand
 
 # 2. One-time project setup — detects your stack, writes CLAUDE.md and settings
@@ -117,9 +117,8 @@ agentwatch needs no commands at all — once a session starts, your tmux window 
 
 ### Linux
 
-Everything works natively. If you skip the sandbox and run agentflow on the host, install
-`bubblewrap` and `socat` (its host-profile isolation). Waybar/noctalia/DMS widgets for
-agentwatch are documented in [agentwatch/README.md](../agentwatch/README.md).
+Everything works natively. Waybar/noctalia/DMS widgets for agentwatch are documented in
+[agentwatch/README.md](../agentwatch/README.md).
 
 ### macOS
 
@@ -130,8 +129,6 @@ agentwatch are documented in [agentwatch/README.md](../agentwatch/README.md).
   handles for you: SwiftBar's default plugin folder lives under `~/Library`, which
   Finder hides — the installer uses `~/SwiftBarPlugins` instead. Point SwiftBar at it
   in *Preferences → Plugin Folder*.
-- **agentflow** host-profile sandboxing is built into Claude Code on macOS — no extra
-  packages.
 
 ### WSL2
 
@@ -152,25 +149,6 @@ Treated as Linux. Two things to know:
 This updates every installed plugin in each available client, refreshes the launcher
 symlinks, and offers to rebuild the sandbox image when needed. AgentWatch
 re-bootstraps its matching binary on the next session automatically.
-
-## Renamed from ccflow
-
-The workflow plugin was formerly `ccflow`; it is now **`agentflow`** (matching
-`agentwatch`). If you installed the old plugin, migrate once:
-
-```bash
-claude plugin uninstall ccflow
-claude plugin install agentflow
-codex plugin remove ccflow@agent-stack 2>/dev/null || true
-codex plugin add agentflow@agent-stack
-```
-
-- Skills moved namespace: `/ccflow:*` → `/agentflow:*` (e.g. `/agentflow:refine`,
-  `/agentflow:implement`, `/agentflow:babysit`).
-- Re-run `/agentflow:configure` to regenerate each project's `.claude/config.json` —
-  config keys moved from `ccflow.*` to `agentflow.*`, so the old block is not read.
-- If a lazyboards / orchestration board dispatches `/ccflow:*`, switch those column
-  actions to the `/agentflow:*` namespace.
 
 ## Troubleshooting
 
@@ -197,7 +175,7 @@ codex plugin marketplace remove agent-stack
 rm -f ~/.local/bin/agent-sand ~/.local/bin/codex-sand
 # sandbox leftovers, if you built the image:
 docker rmi agent-sandbox:latest
-docker volume ls --filter name=claude-sand-home -q | xargs -r docker volume rm
+docker volume ls --filter name=sand-home -q | xargs -r docker volume rm
 # macOS menu bar widget, if wired:
 rm -f ~/SwiftBarPlugins/agentwatch.5s.sh
 ```

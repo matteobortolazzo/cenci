@@ -41,8 +41,8 @@ fits it better; the isolation and attention layers don't care which.
 ## Install
 
 Three plugins, **one installer**. It detects your platform (Linux, macOS, WSL2),
-checks prerequisites, walks you through what to install (default: everything), and
-does the post-install setup — sandbox launcher + image build, macOS menu bar wiring:
+checks prerequisites, installs all three plugins, and does the post-install setup —
+sandbox launcher + image build, macOS menu bar wiring:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
