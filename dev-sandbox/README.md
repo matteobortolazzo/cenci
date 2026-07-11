@@ -105,6 +105,26 @@ image rebuild.
 
 If `~/.claude/.credentials.json` and `~/.config/gh/hosts.yml` exist on the host, they are automatically injected into the container on each start. **No manual auth needed.**
 
+### Plugin provisioning
+
+On every launch the entrypoint registers the `matteobortolazzo/agent-stack`
+marketplace inside the container's home volume and installs the `agentflow` and
+`agentwatch` plugins if they are missing, so `/agentflow:implement` and the
+agentwatch status hooks work out of the box.
+
+- **Idempotent** — once both plugins are present the check is two local reads and
+  makes no network calls, so it does not slow steady-state launches.
+- **Container-only** — every write lands in `/home/dev/.claude` (the home
+  volume), never the host `~/.claude`, and it never pins a model.
+- **Best-effort** — the marketplace lives on GitHub, so provisioning needs
+  network. If GitHub is unreachable the launch continues with a warning and
+  retries on the next launch.
+- Only the `claude` agent bind-mounts the CLI, so this is skipped for Codex
+  launches.
+
+To force a re-install (e.g. to pick up a newer plugin version), reset the
+instance's home volume — see [Reset an instance](#reset-an-instance).
+
 ### Codex auth
 
 When launching Codex (`--agent codex` / `codex-sand`), auth is staged from the host:
@@ -129,8 +149,10 @@ agent-sand --shell
 # Inside the container:
 gh auth login              # GitHub CLI auth
 claude                     # Claude Code auth (first launch)
-claude plugin install ...  # Install any plugins you need
 ```
+
+(The agent-stack plugins are installed automatically — see
+[Plugin provisioning](#plugin-provisioning).)
 
 For OAuth flows that require a browser callback, use host network mode:
 
@@ -232,7 +254,9 @@ If `agentwatch` is installed on the host and the daemon is running, the script a
 - Bind-mounts the events socket so hooks can reach the host daemon
 - Passes `$TMUX_PANE` for tmux window status updates
 
-Install the agentwatch plugin inside the container: `claude plugin install agentwatch`
+The agentwatch **plugin** (hooks that report session status) is installed
+automatically on launch — see [Plugin provisioning](#plugin-provisioning). No
+manual `claude plugin install` needed.
 
 ### Container lifecycle
 

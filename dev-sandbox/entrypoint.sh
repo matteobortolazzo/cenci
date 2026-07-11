@@ -74,6 +74,69 @@ if [[ -f /tmp/host-codex-creds/auth.json ]]; then
     chmod 600 /home/dev/.codex/auth.json
 fi
 
+# ── Provision agent-stack plugins (idempotent, best-effort) ─────────
+# Register the matteobortolazzo/agent-stack marketplace and install the
+# agentflow + agentwatch plugins into the container's home volume so
+# slash commands like /agentflow:implement work out of the box.  This
+# used to be a manual per-volume step (see dev-sandbox/README.md), which
+# is why volumes rotted after the plugins were renamed.
+#
+# CONTAINER-ONLY: every write here lands in /home/dev/.claude (the
+# persistent volume), never the host ~/.claude.  It never pins a model.
+#
+# Best-effort: the marketplace lives on GitHub, so provisioning needs
+# network.  If GitHub is unreachable we warn and continue — a missing
+# plugin must never block the launch (there is deliberately no `set -e`
+# in this script).  `timeout` guards against a hang on an offline host.
+#
+# Only the `claude` agent bind-mounts the CLI (codex launches don't), so
+# skip entirely when `claude` is absent.
+provision_agent_stack_plugins() {
+    command -v claude >/dev/null 2>&1 || return 0
+
+    local marketplace_repo="matteobortolazzo/agent-stack"
+    local marketplace_name="agent-stack"
+    local plugins="agentflow agentwatch"
+    local p
+
+    # Fast path: if the marketplace is registered and every plugin is
+    # already installed, there is nothing to do — skip all network calls
+    # so steady-state launches only pay for two local list reads.
+    local need_provision=false
+    if ! claude plugin marketplace list 2>/dev/null | grep -q "${marketplace_name}"; then
+        need_provision=true
+    else
+        for p in ${plugins}; do
+            if ! claude plugin list 2>/dev/null | grep -q "${p}"; then
+                need_provision=true
+                break
+            fi
+        done
+    fi
+    "${need_provision}" || return 0
+
+    echo "Provisioning agent-stack plugins (${plugins})..."
+
+    if ! claude plugin marketplace list 2>/dev/null | grep -q "${marketplace_name}"; then
+        if ! timeout 60 claude plugin marketplace add "${marketplace_repo}" >/dev/null 2>&1; then
+            echo "  ! Could not register the '${marketplace_name}' marketplace (offline?). Plugins will retry next launch." >&2
+            return 0
+        fi
+    fi
+
+    for p in ${plugins}; do
+        claude plugin list 2>/dev/null | grep -q "${p}" && continue
+        if timeout 120 claude plugin install "${p}@${marketplace_name}" >/dev/null 2>&1 ||
+           timeout 120 claude plugin install "${p}" >/dev/null 2>&1; then
+            echo "  ✓ installed ${p}"
+        else
+            echo "  ! Could not install ${p} (offline?). It will retry next launch." >&2
+        fi
+    done
+}
+
+provision_agent_stack_plugins
+
 # ── Docker socket group alignment (DooD) ────────────────────────────
 if [[ -S /var/run/docker.sock ]]; then
     SOCK_GID=$(stat -c '%g' /var/run/docker.sock)
