@@ -23,9 +23,9 @@ Subagents (Task tool) cannot surface permission prompts, authentication errors, 
 - PR creation, ticket updates, comment replies — require auth tokens
 - Any operation that may trigger a permission prompt
 
-## Container profile (claude-sand)
+## Container profile (agent-sand)
 
-When ccflow runs under the **container profile** (`.claude/config.json` has `profile: "container"`, set when configure detects the `claude-sand` container), Claude Code runs with `--dangerously-skip-permissions`. This changes two things about the rules above, but leaves the deadlock rules intact:
+When ccflow runs under the **container profile** (`.claude/config.json` has `profile: "container"`, set when configure detects the `agent-sand` container), Claude Code runs with `--dangerously-skip-permissions`. This changes two things about the rules above, but leaves the deadlock rules intact:
 
 - **Permission prompts cannot occur** — skip-permissions suppresses them. The `Bash(gh *)` allow-rule check that normally gates read-only `gh` in subagents is therefore **moot**.
 - **`gh auth status` is still required before delegation.** Auth is orthogonal to the permission model: an unauthenticated `gh` call in the context-gatherer subagent still deadlocks silently. The implement pre-flight keeps this check on the container profile.

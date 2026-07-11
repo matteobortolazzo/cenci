@@ -169,9 +169,9 @@ host, add `--sandbox` to the dispatch (or set `"sandbox": true` in agentwatch's
         command: "agentwatch run implement {number} --sandbox"
 ```
 
-This swaps the launch command to `claude-sand`, running the agent under
+This swaps the launch command to `agent-sand`, running the agent under
 `--dangerously-skip-permissions` with the container as the security boundary. Status
-still surfaces on the **host** board: `claude-sand` mounts the host
+still surfaces on the **host** board: `agent-sand` mounts the host
 `agentwatch-events.sock` into the container and forwards `TMUX_PANE`, so the agent's
 hook events reach the host daemon and the join key flows through unchanged. The card
 badges exactly as a host dispatch would.

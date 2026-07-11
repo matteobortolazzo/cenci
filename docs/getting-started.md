@@ -55,7 +55,7 @@ What it does, concretely:
 
 1. Registers this repo as a Claude Code plugin marketplace.
 2. Installs the plugins you pick with `claude plugin install`.
-3. **sandbox**: symlinks the `claude-sand` / `codex-sand` launchers into
+3. **sandbox**: symlinks the `agent-sand` / `codex-sand` launchers into
    `~/.local/bin` and offers to build the container image (a few minutes, one time).
 4. **agentwatch**: nothing to do — the binary and daemon self-bootstrap on your first
    Claude Code session. On macOS, if SwiftBar is installed it offers to wire up the
@@ -83,7 +83,7 @@ image. agentwatch needs nothing. For the macOS menu bar widget, see
 
 ```bash
 # 1. Launch Claude Code inside the sandbox (or plain `claude` if you skipped it)
-claude-sand
+agent-sand
 
 # 2. One-time project setup — detects your stack, writes CLAUDE.md and settings
 /ccflow:configure
@@ -142,7 +142,7 @@ so). agentwatch re-bootstraps its matching binary on the next session automatica
 | Symptom | Fix |
 |---------|-----|
 | `claude: command not found` | Install [Claude Code](https://code.claude.com/docs/en/overview) first — the installer can't do this for you |
-| `claude-sand: command not found` after install | `~/.local/bin` isn't on your PATH — add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile |
+| `agent-sand: command not found` after install | `~/.local/bin` isn't on your PATH — add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile |
 | No status in tmux after installing agentwatch | The first session bootstraps the binary in the background — give it a moment, then check `${TMPDIR:-/tmp}/agentwatch-bootstrap.log` |
 | macOS menu bar item never appears | Usually the SwiftBar GUI-PATH gotcha — see [the SwiftBar README](../agentwatch/plugin/macos/README.md#the-gui-path-gotcha) |
 | Sandbox build fails / permission errors on `/workspace` | On Linux your UID must be 1000 (`id -u`); see [dev-sandbox/README.md](../dev-sandbox/README.md#troubleshooting) |
@@ -154,9 +154,9 @@ so). agentwatch re-bootstraps its matching binary on the next session automatica
 ```bash
 claude plugin uninstall ccflow agentwatch sandbox
 claude plugin marketplace remove agent-stack
-rm -f ~/.local/bin/claude-sand ~/.local/bin/codex-sand
+rm -f ~/.local/bin/agent-sand ~/.local/bin/codex-sand
 # sandbox leftovers, if you built the image:
-docker rmi claude-sandbox:latest
+docker rmi agent-sandbox:latest
 docker volume ls --filter name=claude-sand-home -q | xargs -r docker volume rm
 # macOS menu bar widget, if wired:
 rm -f ~/SwiftBarPlugins/agentwatch.5s.sh

@@ -12,7 +12,7 @@ else
 fi
 
 # ── Configuration ────────────────────────────────────────────────
-IMAGE="claude-sandbox:latest"
+IMAGE="agent-sandbox:latest"
 WORKSPACE_HOST="${HOME}/Repos"
 WORKSPACE_CONTAINER="/workspace"
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -130,7 +130,7 @@ else
 fi
 
 # ── Exec env forwarding (for attach path) ───────────────────────
-EXEC_ENV_ARGS=(-e "TMUX_PANE=${TMUX_PANE:-}" -e "CLAUDE_SAND=1")
+EXEC_ENV_ARGS=(-e "TMUX_PANE=${TMUX_PANE:-}" -e "AGENT_SAND=1")
 [[ -n "${CONTEXT7_API_KEY:-}" ]] && EXEC_ENV_ARGS+=(-e "CONTEXT7_API_KEY=${CONTEXT7_API_KEY}")
 [[ -n "${OPENAI_API_KEY:-}" ]] && EXEC_ENV_ARGS+=(-e "OPENAI_API_KEY=${OPENAI_API_KEY}")
 
@@ -175,7 +175,7 @@ RUN_ARGS=(
     -e "TERM=${TERM:-xterm-256color}"
 
     # Container marker (both docker & podman) — ccflow configure detects this
-    -e "CLAUDE_SAND=1"
+    -e "AGENT_SAND=1"
 )
 
 # Git config (read-only, if exists)

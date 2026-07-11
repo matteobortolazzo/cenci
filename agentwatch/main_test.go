@@ -204,8 +204,8 @@ func TestRunDryRunSandboxUsesSandboxCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sandbox dry-run failed: %v\n%s", err, output)
 	}
-	if !strings.Contains(string(output), "claude-sand") {
-		t.Errorf("expected claude-sand command, got:\n%s", output)
+	if !strings.Contains(string(output), "agent-sand") {
+		t.Errorf("expected agent-sand command, got:\n%s", output)
 	}
 }
 

@@ -1,4 +1,4 @@
-# Dev Sandbox (claude-sand)
+# Dev Sandbox (agent-sand)
 
 > Part of [agent-stack](../README.md) — the **isolation layer**. See the root README for
 > the one-command install and how the isolation, workflow, and attention layers fit together.
@@ -21,7 +21,7 @@ curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/i
 ```
 
 Or install the plugin from the marketplace, then run the setup skill — it symlinks the
-`claude-sand` launcher onto your PATH and builds the container image:
+`agent-sand` launcher onto your PATH and builds the container image:
 
 ```bash
 claude plugin marketplace add matteobortolazzo/agent-stack
@@ -38,10 +38,10 @@ then re-run `/sandbox:setup --build-only` if the Dockerfile changed.
 
 ```bash
 # Symlink the launcher to your PATH
-ln -s "$(pwd)/dev-sandbox/claude-sand" ~/.local/bin/claude-sand
+ln -s "$(pwd)/dev-sandbox/agent-sand" ~/.local/bin/agent-sand
 
 # Build the image
-claude-sand --build
+agent-sand --build
 ```
 
 </details>
@@ -50,32 +50,32 @@ claude-sand --build
 
 ```bash
 # Launch Claude Code (full permissions — the container is the security boundary)
-claude-sand
+agent-sand
 
 # Pass additional args to Claude Code
-claude-sand -p "fix the tests"
-claude-sand --model sonnet
+agent-sand -p "fix the tests"
+agent-sand --model sonnet
 
 # Launch Codex instead of Claude Code
-claude-sand --agent codex
+agent-sand --agent codex
 codex-sand              # equivalent — the codex-sand symlink defaults to --agent codex
 codex-sand -p "fix the tests"
 
 # Open a bash shell for manual setup / troubleshooting
-claude-sand --shell
+agent-sand --shell
 
 # Run a named instance (separate home volume)
-claude-sand --name myproject
+agent-sand --name myproject
 
 # Rebuild the image (after changing Dockerfile or SDK versions)
-claude-sand --build
+agent-sand --build
 
 # Enable Docker socket mounting (for TestContainers, docker build, etc.)
-claude-sand --docker --shell
-claude-sand --docker -p "run the integration tests"
+agent-sand --docker --shell
+agent-sand --docker -p "run the integration tests"
 
 # Use host networking for manual OAuth (browser callback)
-claude-sand --host-network --shell
+agent-sand --host-network --shell
 ```
 
 The container starts in the directory matching your host `$PWD` (mapped through `~/Repos` → `/workspace`).
@@ -84,14 +84,14 @@ If a container with the same name is already running, the script attaches to it 
 
 ### Choosing an agent
 
-`claude-sand` launches Claude Code by default. Pass `--agent codex` (or use the `codex-sand`
+`agent-sand` launches Claude Code by default. Pass `--agent codex` (or use the `codex-sand`
 symlink, which detects its invoked name) to launch Codex instead. Both agents run at full
 permission inside the container — Claude with `--dangerously-skip-permissions`, Codex with
 `--dangerously-bypass-approvals-and-sandbox`.
 
 Containers and home volumes are **namespaced by agent**, so the two never collide:
-`claude-sand` uses `claude-sand-<name>` / `claude-sand-home-<name>`; `codex-sand` (or
-`--agent codex`) uses `codex-sand-<name>` / `codex-sand-home-<name>`. The Dockerfile is
+the **Claude agent** uses `claude-sand-<name>` / `claude-sand-home-<name>`; `codex-sand` (or
+`agent-sand --agent codex`) uses `codex-sand-<name>` / `codex-sand-home-<name>`. The Dockerfile is
 unchanged — the agent binary is bind-mounted from the host (like Claude), so Codex needs no
 image rebuild.
 
@@ -107,7 +107,7 @@ When launching Codex (`--agent codex` / `codex-sand`), auth is staged from the h
   host. Injected read-only and copied to `/home/dev/.codex/auth.json` (mode 600) on start.
 - `OPENAI_API_KEY` — forwarded into the container when set in your host environment.
 
-At least one of these must be present. If neither is, `claude-sand --agent codex` fails
+At least one of these must be present. If neither is, `agent-sand --agent codex` fails
 hard with a clear message and does **not** create a container:
 
 ```
@@ -118,7 +118,7 @@ Error: --agent codex requires Codex auth. Run 'codex login' on the host
 If host credentials are not available, open a shell for manual setup:
 
 ```bash
-claude-sand --shell
+agent-sand --shell
 
 # Inside the container:
 gh auth login              # GitHub CLI auth
@@ -129,7 +129,7 @@ claude plugin install ...  # Install any plugins you need
 For OAuth flows that require a browser callback, use host network mode:
 
 ```bash
-claude-sand --host-network --shell
+agent-sand --host-network --shell
 # Inside the container, run: claude
 ```
 
@@ -154,7 +154,7 @@ Override versions at build time:
 ```bash
 docker build --build-arg DOTNET_SDK_VERSION=10.0.200 \
              --build-arg GO_VERSION=1.25.0 \
-             -t claude-sandbox:latest dev-sandbox/
+             -t agent-sandbox:latest dev-sandbox/
 ```
 
 ## Architecture
@@ -167,7 +167,7 @@ Codex (`--agent codex`) runs with the direct analog, `--dangerously-bypass-appro
 
 Bypass mode is **fully unattended**. The entrypoint seeds `/home/dev/.claude/settings.json` with `skipDangerousModePermissionPrompt: true` and `permissions.defaultMode: bypassPermissions` (and the image sets `IS_SANDBOX=1`), so even a brand-new `--name` instance on a fresh home volume reaches the prompt with no "Yes, I accept" bypass dialog, and headless `claude -p` runs report `bypassPermissions` instead of silently downgrading to `default`. The settings are deep-merged into any existing file, so unrelated keys survive.
 
-**Security invariant — container-only.** The `skipDangerousModePermissionPrompt` / `defaultMode: bypassPermissions` pair lives *only* in the container home volume (`/home/dev/.claude/settings.json`). It must **never** be added to the host `~/.claude/settings.json`, and `claude-sand` never mounts the host `~/.claude` config dir (staging `.credentials.json` read-only is the single exception). The container boundary is the only thing that makes bypass mode safe — if a dialog ever shows where it shouldn't, the fix is always container-side, never host-side.
+**Security invariant — container-only.** The `skipDangerousModePermissionPrompt` / `defaultMode: bypassPermissions` pair lives *only* in the container home volume (`/home/dev/.claude/settings.json`). It must **never** be added to the host `~/.claude/settings.json`, and `agent-sand` never mounts the host `~/.claude` config dir (staging `.credentials.json` read-only is the single exception). The container boundary is the only thing that makes bypass mode safe — if a dialog ever shows where it shouldn't, the fix is always container-side, never host-side.
 
 ### Isolation
 
@@ -207,7 +207,7 @@ MCP servers are picked up from project-scoped `.mcp.json` files inside the works
 Mount the host Docker/Podman socket into the container for Docker-outside-of-Docker (DooD):
 
 ```bash
-claude-sand --docker
+agent-sand --docker
 ```
 
 This enables:
@@ -246,7 +246,7 @@ Install the agentwatch plugin inside the container: `claude plugin install agent
 Edit the `ARG` lines at the top of the `Dockerfile`, then rebuild:
 
 ```bash
-claude-sand --build
+agent-sand --build
 ```
 
 ### Update Claude Code
@@ -276,7 +276,7 @@ docker volume ls --filter name=claude-sand-home
 docker volume ls --filter name=claude-sand-home -q | xargs docker volume rm
 
 # Remove the image
-docker rmi claude-sandbox:latest
+docker rmi agent-sandbox:latest
 ```
 
 ## Sharing the Image
@@ -284,20 +284,20 @@ docker rmi claude-sandbox:latest
 ### Via container registry
 
 ```bash
-docker tag claude-sandbox:latest ghcr.io/YOUR_ORG/claude-sandbox:latest
-docker push ghcr.io/YOUR_ORG/claude-sandbox:latest
+docker tag agent-sandbox:latest ghcr.io/YOUR_ORG/agent-sandbox:latest
+docker push ghcr.io/YOUR_ORG/agent-sandbox:latest
 ```
 
-Recipients pull the image and only need the `claude-sand` script.
+Recipients pull the image and only need the `agent-sand` script.
 
 ### Via file export
 
 ```bash
 # Export
-docker save claude-sandbox:latest | gzip > claude-sandbox.tar.gz
+docker save agent-sandbox:latest | gzip > agent-sandbox.tar.gz
 
 # Import on another machine
-docker load < claude-sandbox.tar.gz
+docker load < agent-sandbox.tar.gz
 ```
 
 ## Troubleshooting
@@ -314,4 +314,4 @@ The script auto-detects `podman` first, then falls back to `docker`.
 **Claude Code says "request not found" during OAuth**
 The OAuth callback can't reach the container. Either:
 1. Ensure `~/.claude/.credentials.json` exists on the host (run `claude` on the host first to authenticate), or
-2. Use `claude-sand --host-network --shell` and run `claude` to complete the OAuth flow with host networking.
+2. Use `agent-sand --host-network --shell` and run `claude` to complete the OAuth flow with host networking.

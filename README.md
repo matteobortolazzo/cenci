@@ -65,7 +65,7 @@ platform, your first session, troubleshooting, uninstall.
 ```bash
 claude plugin marketplace add matteobortolazzo/agent-stack
 claude plugin install ccflow agentwatch sandbox
-/sandbox:setup   # container layer only — symlink claude-sand + build the image
+/sandbox:setup   # container layer only — symlink agent-sand + build the image
 # later:
 claude plugin update --all
 ```
@@ -82,7 +82,7 @@ mechanism.
 A Docker/Podman container that runs the agent with `--dangerously-skip-permissions` and
 mounts only `~/Repos`. It exists so autopilot is *safe*: the container is the single
 security boundary, which is what lets every layer above it drop per-command approval
-without exposing the host. `/sandbox:setup` symlinks the `claude-sand` launcher and
+without exposing the host. `/sandbox:setup` symlinks the `agent-sand` launcher and
 builds the image.
 
 ### Workflow — [ccflow](./ccflow) (plugin: `ccflow`)
@@ -118,7 +118,7 @@ Per-layer Codex status is honest about where each layer stands today:
 |-------|-------------|---------|
 | attention (agentwatch) | ✅ watched — self-bootstrapping Codex hooks, `/hooks` trust step | `agentwatch run --agent codex` launch templates ([#33](https://github.com/matteobortolazzo/agent-stack/issues/33)) |
 | workflow (ccflow) | Claude Code only | documented `AGENTS.md` equivalent ([#19](https://github.com/matteobortolazzo/agent-stack/issues/19)) |
-| isolation (sandbox) | Claude-only launcher | `claude-sand --agent codex` ([#18](https://github.com/matteobortolazzo/agent-stack/issues/18)) |
+| isolation (sandbox) | Claude-only launcher | `agent-sand --agent codex` ([#18](https://github.com/matteobortolazzo/agent-stack/issues/18)) |
 
 ## License
 

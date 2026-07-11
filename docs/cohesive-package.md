@@ -21,7 +21,7 @@ attention layers must not care which (§4.4, §4.7).
 | # | Gap | Detail |
 |---|-----|--------|
 | 1 | **Two competing security models** | ccflow is built around Claude Code's *host* sandbox (bubblewrap, `allowedDomains`, Bash allowlists, deny rules) while dev-sandbox isolates via Docker with a tool allowlist. Running ccflow inside the sandbox means double isolation: SSH-push failures, `go` env workarounds, permission auto-fix prompts — friction that exists only because the plugin doesn't know a container is already protecting the host. |
-| 2 | **dev-sandbox is invisible** | Not a plugin, not versioned, not in the marketplace. Install is a manual symlink; update is `git pull` + rebuild. ccflow and muxwatch never mention it (muxwatch integration exists only as an undocumented-in-ccflow mount in `claude-sand`). |
+| 2 | **dev-sandbox is invisible** | Not a plugin, not versioned, not in the marketplace. Install is a manual symlink; update is `git pull` + rebuild. ccflow and muxwatch never mention it (muxwatch integration exists only as an undocumented-in-ccflow mount in `agent-sand`). |
 | 3 | **muxwatch is two installs and a manual daemon** | The plugin ships only hooks; the binary comes separately via `go install`/releases, and the user must start the daemon themselves. Marketplace install alone produces a silently non-functional plugin. |
 | 4 | **muxwatch's name undersells it** | The core (daemon, IPC, status model, waybar/noctalia/dms frontends) is display-agnostic and already watches two agents (Claude Code + Codex). tmux is one adapter behind the `tmux.Client` interface — but the name, docs, and plugin description are all tmux-branded. |
 | 5 | **No shared story for human-in-the-loop** | ccflow has decision gates (plan approval, `AskUserQuestion`), muxwatch has `NeedInput` signaling, dev-sandbox removes prompts — but nothing documents that these three things are the same feature seen from three sides. |
@@ -58,7 +58,7 @@ consuming contracts this repo exports (§2.4).
 
 ### 2.1 Isolation layer — Docker with full permissions ✅ (this branch)
 
-`claude-sand` now launches `claude --dangerously-skip-permissions` instead of an
+`agent-sand` now launches `claude --dangerously-skip-permissions` instead of an
 `--allowedTools` list. The flag is container-safe by design (rejected as root; we run
 as `dev`/1000). Only `~/Repos` is mounted; the host stays clean.
 
@@ -69,7 +69,7 @@ image) travel with `claude plugin install` / `claude plugin update`.
 
 ### 2.2 Workflow layer — ccflow becomes container-native
 
-- **`/ccflow:configure` detects the sandbox** (e.g. `/.dockerenv` or a `CLAUDE_SAND=1`
+- **`/ccflow:configure` detects the sandbox** (e.g. `/.dockerenv` or a `AGENT_SAND=1`
   env set by the launcher) and generates a container profile: no bubblewrap sandbox
   config, no Bash allowlists, no permission auto-fix phases, HTTPS git remotes
   assumed. Host profile (current behavior) remains for people not using the sandbox —
@@ -117,7 +117,7 @@ What's missing is ownership of that contract (gap 7). Three pieces close it:
   refine/design/implement zero-config, with an optional
   `~/.config/agentwatch/config.json` overriding them and adding agents/workflows. It
   owns the `<number>-<slug>` naming (setting `automatic-rename off` so the daemon
-  preserves the join key), chooses sandbox vs host (`claude`→`claude-sand`), and refuses
+  preserves the join key), chooses sandbox vs host (`claude`→`agent-sand`), and refuses
   grouped sessions. A board action shrinks to
   `command: "agentwatch run implement {number}"`. Which agent implements is a
   per-dispatch choice — Claude Code or Codex today depending on the work; opencode later
@@ -211,7 +211,7 @@ Resolved 2026-07-09 (orchestration layer):
 | 15 | lazyboards: agent status on cards | [lazyboards#255](https://github.com/matteobortolazzo/lazyboards/issues/255) | subscribe via ticket 11's client, badge cards, NeedInput loudest, status-bar summary |
 | 16 | lazyboards: jump to card's session | [lazyboards#256](https://github.com/matteobortolazzo/lazyboards/issues/256) | keybinding to focus the card's tmux window |
 | 17 | agentwatch: self-contained Codex bootstrap parity | TBD | Codex SessionStart hook downloads the version-matched binary with SHA-256 verification + autostarts the daemon (like #27); symlinks the binary onto `$PATH`; redirects the "#33" pointers in both READMEs. From §6 audit |
-| 18 | sandbox: launch Codex in the container | TBD | `claude-sand --agent claude\|codex`: mount host `codex`, stage `~/.codex/auth.json`/`OPENAI_API_KEY`, swap in Codex's full-permission flag; Dockerfile unchanged. Distinct from #40's dispatch launcher. From §6 audit |
+| 18 | sandbox: launch Codex in the container | TBD | `agent-sand --agent claude\|codex`: mount host `codex`, stage `~/.codex/auth.json`/`OPENAI_API_KEY`, swap in Codex's full-permission flag; Dockerfile unchanged. Distinct from #40's dispatch launcher. From §6 audit |
 | 19 | ccflow: documented Codex workflow equivalent | TBD | `AGENTS.md` template carrying TDD/review/worktree/PR conventions as prose + the Codex command template #40 uses for `--agent codex`; NOT a port of the skill/subagent pipeline. Feeds decision 7. From §6 audit |
 
 ## 6. Codex first-class support (audit)

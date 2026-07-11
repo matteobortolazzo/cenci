@@ -128,7 +128,7 @@ a non-numeric first token means the whole description is slugified.
 | Flag | Purpose |
 |------|---------|
 | `--agent <name>` | Agent to launch (`claude`, `codex`, …); default from config, else `claude` |
-| `--sandbox` / `--no-sandbox` | Force the sandbox command (`claude`→`claude-sand`) or a host launch; overrides the config default |
+| `--sandbox` / `--no-sandbox` | Force the sandbox command (`claude`→`agent-sand`) or a host launch; overrides the config default |
 | `--model <model>` | Model override passed to the agent (substituted into `{model}`, else appended as `--model`) |
 | `--session <name>` | Target tmux session (default: the current session) |
 | `--slug <slug>` | Window-name slug (default: the gh issue title, else the bare ticket) |
@@ -168,7 +168,7 @@ substituted at launch:
   "agents": {
     "claude": {
       "command": "claude",
-      "sandboxCommand": "claude-sand",
+      "sandboxCommand": "agent-sand",
       "workflows": {
         "implement": { "args": ["--", "/ccflow:implement {ticket}"] }
       }
