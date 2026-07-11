@@ -211,7 +211,13 @@ This is informational only — it does not block the pipeline.
 
 **If ticketless mode:** Skip this section entirely — ticketless mode applies no board labels.
 
-**If ticket mode:** Before starting the pipeline, add the "Working" label to signal work in progress. The exact swap depends on how this run entered the pipeline:
+**If ticket mode:** Before starting the pipeline, add the "Working" label to signal work in progress. `gh issue edit --add-label` **fails when the label does not exist in the repository**, so first ensure it exists — run this as its own Bash call (the `|| true` swallows only the "already exists" error; `/agentflow:configure` also creates the full lifecycle label set, this is self-healing for projects configured before that):
+
+```bash
+gh label create "Working" --repo <owner>/<repo> --color "FBCA04" --description "Actively being refined, designed, or implemented" 2>/dev/null || true
+```
+
+The exact swap depends on how this run entered the pipeline:
 
 - **Plan-file mode** (`hasPlanFile` true): this is the approved-plan pickup. The ticket carries `Planned` from when the plan was persisted, so swap it for `Working`:
   ```bash

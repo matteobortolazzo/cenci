@@ -60,10 +60,14 @@ If the user says no → stop. If yes → proceed normally.
 
 ## Label "Working"
 
-**Before starting refinement work**, add the "Working" label to signal that the ticket is actively being worked on:
+**Before starting refinement work**, add the "Working" label to signal that the ticket is actively being worked on. `gh issue edit --add-label` fails when the label does not exist in the repository, so ensure it exists first — run each as its own Bash call (`|| true` swallows only the "already exists" error):
+```bash
+gh label create "Working" --repo <owner>/<repo> --color "FBCA04" --description "Actively being refined, designed, or implemented" 2>/dev/null || true
+```
 ```bash
 gh issue edit <number> --repo <owner>/<repo> --add-label "Working"
 ```
+Apply the same ensure-then-add pattern to every label this skill applies later (`Refined`, `Design`, `ui:visual-check`, …): before the first `--add-label <name>` of a label, run its `gh label create <name> … || true` with the color/description from the lifecycle table in `/agentflow:configure`.
 
 ## Your Role
 

@@ -399,6 +399,24 @@ After gathering answers:
    - **Single project or shared monorepo** (`pencil.shared` is `true` or not a monorepo): Create `designs/` at the repo root: `mkdir -p designs/`
    - **Separate monorepo**: For each frontend project that has a `designPath`, create its directory: `mkdir -p <project-path>/designs/`
 
+3c. **Ensure board lifecycle labels exist**: `gh issue edit --add-label` fails when the label is missing from the repository, so create the lifecycle set now. Run `gh label list --repo <owner>/<repo> --limit 100 --json name` once, then for each **missing** label run its own `gh label create` call (never modify or recolor a label that already exists):
+
+   ```bash
+   gh label create "<name>" --repo <owner>/<repo> --color "<color>" --description "<description>"
+   ```
+
+   | Label | Color | Description |
+   |---|---|---|
+   | `Working` | `FBCA04` | Actively being refined, designed, or implemented |
+   | `Refined` | `0E8A16` | Ready for design/implementation |
+   | `Design` | `D93F0B` | Design-only ticket — deliverable is a design spec |
+   | `Designed` | `5319E7` | Design spec approved |
+   | `Planned` | `1D76DB` | Approved plan on disk, ready to pick up |
+   | `In Review` | `A2EEEF` | PR open, under review / CI running |
+   | `Implemented` | `6F42C1` | PR merged — done |
+
+   This is the canonical color/description table — the skills' self-healing `gh label create … || true` fallbacks reference it.
+
 4. **Create or update `.claude/settings.json`**:
 
    Write the minimal shape below — Claude Code's host sandbox is disabled because the container is the boundary. Under `--dangerously-skip-permissions` Claude Code ignores `permissions.allow/deny`, but keep the base allow list + deny rules as defense-in-depth for the case where a user runs plain `claude` (no skip-permissions) inside the container, e.g. via `agent-sand --shell`.
@@ -737,9 +755,12 @@ Report what was created and suggest next steps (e.g., "Try `/agentflow:refine <t
 
 ### Board lifecycle labels
 
-configure does **not** create labels — the skills apply them via `gh issue edit` as a ticket
-moves through the workflow. Document the label set in the completion summary so the user can
-mirror it as columns on their board:
+configure creates any missing lifecycle labels during project setup (step 3c) — `gh issue edit
+--add-label` fails when a label is missing from the repository, which used to silently drop
+labels (e.g. `Planned`) on projects configured before a label was introduced. The skills apply
+the labels via `gh issue edit` as a ticket moves through the workflow, and self-heal with a
+`gh label create … || true` before adding a label that may be missing. Document the label set
+in the completion summary so the user can mirror it as columns on their board:
 
 | Label | Applied by | Meaning |
 |---|---|---|

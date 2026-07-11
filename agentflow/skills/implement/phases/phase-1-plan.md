@@ -156,7 +156,15 @@ Record `planCommitSha` from `git rev-parse HEAD`. Source `isChild`, `isLastChild
 
 ### Mark the ticket `Planned` (ticket mode only)
 
-After the plan file is written, signal on the board that an approved plan is now waiting to be picked up. **Ticket mode only** — skip this entirely in ticketless mode (there is no ticket to label):
+After the plan file is written, signal on the board that an approved plan is now waiting to be picked up. **Ticket mode only** — skip this entirely in ticketless mode (there is no ticket to label).
+
+`gh issue edit --add-label` **fails when the label does not exist in the repository** — `Planned` is newer than the other lifecycle labels, so projects configured before it are missing it. Ensure it exists first, as its own Bash call (`|| true` swallows only the "already exists" error):
+
+```bash
+gh label create "Planned" --repo <owner>/<repo> --color "1D76DB" --description "Approved plan on disk, ready to pick up" 2>/dev/null || true
+```
+
+Then apply the swap and **verify it succeeded** — if this command errors, surface the error to the user instead of ending the session silently, since a missing `Planned` label breaks the approved-plan pickup on the board:
 
 ```bash
 gh issue edit <number> --repo <owner>/<repo> --add-label "Planned" --remove-label "Working"

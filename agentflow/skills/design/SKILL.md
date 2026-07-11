@@ -426,7 +426,10 @@ Include this note at the end of the report:
 
 **If ticketless mode:** Skip this.
 
-**If ticket mode:** Before starting design work (at the beginning of Phase 2), add the "Working" label:
+**If ticket mode:** Before starting design work (at the beginning of Phase 2), add the "Working" label. `gh issue edit --add-label` fails when the label does not exist in the repository, so ensure it exists first — each as its own Bash call (`|| true` swallows only the "already exists" error):
+```bash
+gh label create "Working" --repo <owner>/<repo> --color "FBCA04" --description "Actively being refined, designed, or implemented" 2>/dev/null || true
+```
 ```bash
 gh issue edit <number> --repo <owner>/<repo> --add-label "Working"
 ```
@@ -462,7 +465,10 @@ git add <designPath>/*.pen <designPath>/DESIGN.md && git commit -m "feat(design)
 
 **If ticketless mode:** Skip labeling.
 
-**If ticket mode:** Replace "Working" with "Designed":
+**If ticket mode:** Replace "Working" with "Designed". Ensure the label exists first (same self-heal pattern as Working — `gh issue edit --add-label` fails on a missing label):
+```bash
+gh label create "Designed" --repo <owner>/<repo> --color "5319E7" --description "Design spec approved" 2>/dev/null || true
+```
 ```bash
 gh issue edit <number> --repo <owner>/<repo> --add-label "Designed" --remove-label "Working"
 ```
