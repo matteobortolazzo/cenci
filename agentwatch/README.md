@@ -21,13 +21,13 @@ Claude/Codex hooks  →  agentwatch notify  →  event socket  →  daemon (sess
                                                               window rename/style
                                                                        |
                                                     broadcast socket → agentwatch status
-                                                          (waybar, noctalia, dms, macOS menu bar)
+                                          (waybar, noctalia, dms, GNOME, KDE Plasma, macOS menu bar)
 ```
 
 The core daemon keys state by agent session id, maps hook events to statuses, and owns the paneless TTL sweep. All window work is delegated to an injected frontend:
 
 - **tmux frontend** (`internal/frontend/tmux/`): the one interactive frontend — window rename, style, pane-based stale sweep, renumber migration.
-- **status JSON** (`internal/frontend/status/`): read-only broadcast in the [Waybar custom module protocol](https://github.com/Alexays/Waybar/wiki/Module:-Custom); consumed by `agentwatch status` and the waybar, noctalia, dms, and macOS menu bar ([SwiftBar](https://swiftbar.app), `plugin/macos/`) display widgets.
+- **status JSON** (`internal/frontend/status/`): read-only broadcast in the [Waybar custom module protocol](https://github.com/Alexays/Waybar/wiki/Module:-Custom); consumed by `agentwatch status` and the waybar, noctalia, dms, GNOME Shell (`plugin/gnome/`), KDE Plasma (`plugin/plasma/`), and macOS menu bar ([SwiftBar](https://swiftbar.app), `plugin/macos/`) display widgets.
 
 No polling for normal state changes. Agent hooks push state changes to the daemon instantly via a Unix socket; the daemon sweeps periodically for stale/exited sessions.
 
@@ -492,6 +492,21 @@ plugin that consumes the identical `agentwatch status` JSON — no daemon change
 shows the counts in the menu bar (loud red on `need-input`) and a per-session
 dropdown, and hides when no sessions are live. See
 [`plugin/macos/README.md`](plugin/macos/README.md) for install and settings.
+
+#### GNOME Shell (Ubuntu)
+
+Ubuntu's default desktop gets the same status surface via a GNOME Shell 45+
+extension that polls `agentwatch status` and adds a top-bar indicator — an icon +
+counts colored by the highest-priority status, with a click-through menu listing
+each session. It hides when no sessions are live. See
+[`plugin/gnome/README.md`](plugin/gnome/README.md) for install and settings.
+
+#### KDE Plasma (Kubuntu)
+
+KDE Plasma 6 users get a native panel widget that consumes the identical
+`agentwatch status` JSON — a compact icon + counts with an expandable per-session
+list, hidden from the panel when no sessions are live. See
+[`plugin/plasma/README.md`](plugin/plasma/README.md) for install and settings.
 
 ## Consuming status from your own tool
 
