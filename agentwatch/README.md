@@ -105,12 +105,12 @@ agentwatch run implement 40
 agentwatch run implement 40 --slug my-feature --dry-run
 # session: my-tmux-session
 # window:  40-my-feature
-# command: claude -- '/ccflow:implement 40'
+# command: claude -- '/agentflow:implement 40'
 ```
 
 Positional args are `<workflow> [ticket-id | task description] [additional context]`;
 flags may follow them. Everything after the workflow is forwarded verbatim as the
-skill argument (`/ccflow:<workflow> $ARGUMENTS`), so the same free-text forms the skills
+skill argument (`/agentflow:<workflow> $ARGUMENTS`), so the same free-text forms the skills
 accept work here too — no quoting needed:
 
 ```bash
@@ -170,14 +170,14 @@ substituted at launch:
       "command": "claude",
       "sandboxCommand": "agent-sand",
       "workflows": {
-        "implement": { "args": ["--", "/ccflow:implement {ticket}"] }
+        "implement": { "args": ["--", "/agentflow:implement {ticket}"] }
       }
     },
     "codex": {
       "command": "codex",
       "model": "gpt-5.6-sol",
       "workflows": {
-        "implement": { "args": ["exec", "/ccflow:implement {ticket}"] }
+        "implement": { "args": ["exec", "/agentflow:implement {ticket}"] }
       }
     },
     "opencode": {

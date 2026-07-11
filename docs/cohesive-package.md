@@ -45,7 +45,7 @@ consuming contracts this repo exports (§2.4).
 │  hooks → daemon → tmux · waybar · noctalia · dms       │
 │  "the agent needs YOU" → NeedInput on every surface    │
 ├────────────────────────────────────────────────────────┤
-│  workflow layer    (ccflow)                            │
+│  workflow layer    (agentflow)                         │
 │  human gates: refine · design · plan approval · AUQ    │
 │  autopilot:  /goal-driven phases 2–9 → PR → CI green   │
 │  babysit:    /loop → address-review until merged       │
@@ -67,9 +67,9 @@ versioned and updated like everything else — plugins can ship executables, so 
 launcher, Dockerfile, and a `/sandbox:setup` skill (symlinks the launcher, builds the
 image) travel with `claude plugin install` / `claude plugin update`.
 
-### 2.2 Workflow layer — ccflow becomes container-native
+### 2.2 Workflow layer — agentflow becomes container-native
 
-- **`/ccflow:configure` detects the sandbox** (e.g. `/.dockerenv` or a `AGENT_SAND=1`
+- **`/agentflow:configure` detects the sandbox** (e.g. `/.dockerenv` or a `AGENT_SAND=1`
   env set by the launcher) and generates a container profile: no bubblewrap sandbox
   config, no Bash allowlists, no permission auto-fix phases, HTTPS git remotes
   assumed. Host profile (current behavior) remains for people not using the sandbox —
@@ -80,7 +80,7 @@ image) travel with `claude plugin install` / `claude plugin update`.
 - **`/goal` powers the autopilot**: on plan approval, implement sets a goal such as
   "all plan phases complete, PR open, CI green" so a mid-phase stop resumes instead of
   silently ending (requires Claude Code ≥ 2.1.139).
-- **`/loop` powers babysitting**: a `ccflow:babysit <pr>` skill loops address-review +
+- **`/loop` powers babysitting**: a `agentflow:babysit <pr>` skill loops address-review +
   CI checks every N minutes until the PR merges — human only re-enters when a review
   comment is ambiguous (AskUserQuestion) or the watcher flags NeedInput.
 
@@ -149,7 +149,7 @@ well-behaved consumer over versioned contracts.
 
 ```bash
 claude plugin marketplace add matteobortolazzo/agent-stack
-claude plugin install ccflow agentwatch sandbox
+claude plugin install agentflow agentwatch sandbox
 # later:
 claude plugin update --all
 ```

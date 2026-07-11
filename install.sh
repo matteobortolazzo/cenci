@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # agent-stack installer — one command for the whole package.
 #
-# Installs or updates the three agent-stack plugins (ccflow, agentwatch,
+# Installs or updates the three agent-stack plugins (agentflow, agentwatch,
 # sandbox) as a single system: registers the marketplace, installs the
 # plugins, and runs the post-install setup that used to be manual (sandbox
 # launcher symlink + image build, macOS menu bar wiring).
@@ -14,7 +14,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
 #
 # Flags:
-#   --plugins ccflow,agentwatch,sandbox   preselect plugins (skips the picker)
+#   --plugins agentflow,agentwatch,sandbox   preselect plugins (skips the picker)
 #   --yes                                 accept defaults, never prompt
 #   --build / --no-build                  force / skip the sandbox image build
 #   --help                                this text
@@ -23,7 +23,7 @@ set -u
 
 MARKETPLACE_REPO="matteobortolazzo/agent-stack"
 MARKETPLACE_NAME="agent-stack"
-ALL_PLUGINS="ccflow agentwatch sandbox"
+ALL_PLUGINS="agentflow agentwatch sandbox"
 
 # ---------------------------------------------------------------- output ----
 
@@ -169,7 +169,7 @@ run_doctor() {
 	check "git" required "install git from your package manager" command -v git
 
 	say ""
-	say "  ${BOLD}For ccflow (workflow)${RESET}"
+	say "  ${BOLD}For agentflow (workflow)${RESET}"
 	check "gh (GitHub CLI)" optional \
 		"needed for issues/PRs: https://cli.github.com" command -v gh
 	if have gh; then
@@ -203,12 +203,12 @@ run_doctor() {
 
 	if [ "$OS" = linux ]; then
 		say ""
-		say "  ${BOLD}For ccflow WITHOUT the sandbox (host profile)${RESET}"
+		say "  ${BOLD}For agentflow WITHOUT the sandbox (host profile)${RESET}"
 		check "bubblewrap" optional \
-			"only needed if you run ccflow outside the container: sudo apt install bubblewrap" \
+			"only needed if you run agentflow outside the container: sudo apt install bubblewrap" \
 			command -v bwrap
 		check "socat" optional \
-			"only needed if you run ccflow outside the container: sudo apt install socat" \
+			"only needed if you run agentflow outside the container: sudo apt install socat" \
 			command -v socat
 	fi
 
@@ -239,7 +239,7 @@ choose_plugins() {
 	say ""
 	say "${BOLD}agent-stack is one system in three plugins:${RESET}"
 	say ""
-	say "  ${BOLD}ccflow${RESET}      workflow  — ticket → plan approval → autopilot → PR"
+	say "  ${BOLD}agentflow${RESET}      workflow  — ticket → plan approval → autopilot → PR"
 	say "  ${BOLD}agentwatch${RESET}  attention — live agent status in tmux/waybar/menu bar"
 	say "  ${BOLD}sandbox${RESET}     isolation — Docker/Podman container, full permissions inside"
 	say ""
@@ -411,15 +411,15 @@ step_agentwatch_setup() {
 	say "  in SwiftBar: set the Plugin Folder to ~/SwiftBarPlugins (Preferences → Plugin Folder), then Refresh All"
 }
 
-step_ccflow_notes() {
-	selected ccflow || return 0
-	step "ccflow next steps"
+step_agentflow_notes() {
+	selected agentflow || return 0
+	step "agentflow next steps"
 	if have gh && gh auth status >/dev/null 2>&1; then
 		ok "GitHub CLI is authenticated"
 	else
-		warn "ccflow drives GitHub issues and PRs through the gh CLI — run: gh auth login"
+		warn "agentflow drives GitHub issues and PRs through the gh CLI — run: gh auth login"
 	fi
-	say "  then, in each project you want to use it in, run ${BOLD}/ccflow:configure${RESET} once inside Claude Code"
+	say "  then, in each project you want to use it in, run ${BOLD}/agentflow:configure${RESET} once inside Claude Code"
 }
 
 final_summary() {
@@ -441,8 +441,8 @@ final_summary() {
 	if selected sandbox; then
 		say "    agent-sand                # Claude Code inside the container"
 	fi
-	if selected ccflow; then
-		say "    claude → /ccflow:configure # one-time project setup"
+	if selected agentflow; then
+		say "    claude → /agentflow:configure # one-time project setup"
 	fi
 	if selected agentwatch; then
 		say "    (start any Claude Code session — status appears in the tmux bar)"
@@ -470,7 +470,7 @@ Usage:
   curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
 
 Flags:
-  --plugins ccflow,agentwatch,sandbox   preselect plugins (skips the picker)
+  --plugins agentflow,agentwatch,sandbox   preselect plugins (skips the picker)
   --yes                                 accept defaults, never prompt
   --build / --no-build                  force / skip the sandbox image build
   --help                                this text
@@ -483,7 +483,7 @@ while [ $# -gt 0 ]; do
 	doctor | --doctor) MODE=doctor ;;
 	--plugins)
 		shift
-		[ $# -gt 0 ] || die "--plugins needs a value, e.g. --plugins ccflow,sandbox"
+		[ $# -gt 0 ] || die "--plugins needs a value, e.g. --plugins agentflow,sandbox"
 		SELECTED=$(printf '%s' "$1" | tr ',' ' ')
 		for p in $SELECTED; do
 			case " $ALL_PLUGINS " in
@@ -544,6 +544,6 @@ step_install_plugins
 prune_selected_to_installed
 step_sandbox_setup
 step_agentwatch_setup
-step_ccflow_notes
+step_agentflow_notes
 final_summary
 exit $((INSTALL_FAILED))

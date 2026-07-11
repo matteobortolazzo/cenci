@@ -203,7 +203,7 @@ func runRun(args []string) {
 		DryRun:     *dryRun,
 	}
 	// Everything after the workflow is the skill argument: a ticket id or task
-	// description plus optional context (mirrors `/ccflow:<workflow> $ARGUMENTS`).
+	// description plus optional context (mirrors `/agentflow:<workflow> $ARGUMENTS`).
 	// Join so unquoted multi-word context survives shell splitting.
 	if len(positionals) >= 2 {
 		opts.Ticket = strings.Join(positionals[1:], " ")

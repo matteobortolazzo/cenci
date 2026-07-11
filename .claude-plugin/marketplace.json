@@ -5,8 +5,8 @@
   },
   "plugins": [
     {
-      "name": "ccflow",
-      "source": "./ccflow",
+      "name": "agentflow",
+      "source": "./agentflow",
       "description": "Ticket refinement and automated implementation pipeline for GitHub",
       "version": "2.7.2",
       "author": {

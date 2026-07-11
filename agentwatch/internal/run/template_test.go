@@ -26,7 +26,7 @@ func TestBuiltinClaudeTemplatesResolve(t *testing.T) {
 		if err != nil {
 			t.Fatalf("BuildCommand(claude, %s): %v", wf, err)
 		}
-		want := []string{"claude", "--", "/ccflow:" + wf + " 40"}
+		want := []string{"claude", "--", "/agentflow:" + wf + " 40"}
 		if !equalArgs(argv, want) {
 			t.Errorf("BuildCommand(claude, %s) = %v, want %v", wf, argv, want)
 		}
@@ -50,7 +50,7 @@ func TestModelAppendedWhenNoPlaceholder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"claude", "--model", "opus", "--", "/ccflow:implement 40"}
+	want := []string{"claude", "--model", "opus", "--", "/agentflow:implement 40"}
 	if !equalArgs(argv, want) {
 		t.Errorf("model append = %v, want %v", argv, want)
 	}
@@ -104,7 +104,7 @@ func TestLoadMergesFileOverBuiltins(t *testing.T) {
 	  "agents": {
 	    "codex": {
 	      "command": "codex",
-	      "workflows": { "implement": { "args": ["exec", "/ccflow:implement {ticket}"] } }
+	      "workflows": { "implement": { "args": ["exec", "/agentflow:implement {ticket}"] } }
 	    },
 	    "claude": { "model": "opus" }
 	  }
@@ -126,7 +126,7 @@ func TestLoadMergesFileOverBuiltins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"codex", "exec", "/ccflow:implement 7"}; !equalArgs(argv, want) {
+	if want := []string{"codex", "exec", "/agentflow:implement 7"}; !equalArgs(argv, want) {
 		t.Errorf("codex argv = %v, want %v", argv, want)
 	}
 
