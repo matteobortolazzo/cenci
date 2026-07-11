@@ -62,7 +62,16 @@ macOS host-profile sandbox support is built into Claude Code and requires no ext
 
 ## Installation
 
-### Via marketplace (recommended)
+### Via the claude-tools installer (recommended)
+
+The [one-command installer](../docs/getting-started.md) installs ccflow together with
+the other layers, checks prerequisites, and walks you through the setup:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/claude-tools/main/install.sh | bash
+```
+
+### Via marketplace
 
 ```bash
 # Register the repo as a marketplace (works with private repos too)

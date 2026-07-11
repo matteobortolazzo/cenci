@@ -33,8 +33,15 @@ No polling for normal state changes. Agent hooks push state changes to the daemo
 
 ## Install (Claude Code)
 
-Install the plugin from the marketplace — the binary and daemon auto-bootstrap on
-your first session, so this is all you need:
+The easiest path is the [one-command installer](../docs/getting-started.md), which
+also wires the macOS menu bar widget when SwiftBar is present:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/claude-tools/main/install.sh | bash
+```
+
+Or install the plugin from the marketplace directly — the binary and daemon
+auto-bootstrap on your first session, so this is all you need:
 
 ```bash
 # Register the repo as a marketplace (works with private repos too)
