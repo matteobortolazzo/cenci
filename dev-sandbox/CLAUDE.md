@@ -27,6 +27,8 @@ bash dev-sandbox/tests/smoke.test.sh   # runtime smoke test; self-skips without 
 
 - **Guard clauses must be mirrored across duplicated logic.** When the same validation/parsing pattern appears in both a test file and its corresponding production script (e.g., `smoke.test.sh` and `agent-sand` both resolve a version string with jq + sed fallback), the error-handling guards must be duplicated too. A test file that is more careful than the production code it exercises is a code-review red flag — check for silent failures (e.g., empty Docker tags, null strings propagating downstream).
 
+- **Preserve all pre-existing logic when splitting a script into conditional branches.** When refactoring a script to introduce a new conditional branch (e.g., adding git-based per-repo scoping alongside a legacy non-git fallback), the fallback branch can appear "unchanged" in the diff while actually being accidentally simplified during the rewrite (e.g., dropping a computed value and hardcoding a default). Test both branches independently to catch silent failures.
+
 ## Image architecture: base + fragments
 `Dockerfile.base` builds the stack-agnostic `agent-sandbox-base:<version>` image (Ubuntu,
 system packages, locale, `uv`, GitHub CLI, Docker CLI, non-root `dev` user, entrypoint — no

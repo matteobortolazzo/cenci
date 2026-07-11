@@ -61,7 +61,8 @@ consuming contracts this repo exports (§2.4).
 
 `agent-sand` now launches `claude --dangerously-skip-permissions` instead of an
 `--allowedTools` list. The flag is container-safe by design (rejected as root; we run
-as `dev`/1000). Only `~/Repos` is mounted; the host stays clean.
+as `dev`/1000). Each launch mounts only the current repo (not the whole `~/Repos`) into
+its own container; the host stays clean.
 
 Follow-up (ticket 2): package dev-sandbox as a plugin in the marketplace so it is
 versioned and updated like everything else — plugins can ship executables, so the

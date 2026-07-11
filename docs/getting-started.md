@@ -137,7 +137,7 @@ Treated as Linux. Two things to know:
 - Docker Desktop for Windows with the WSL2 backend works for the sandbox; make sure
   WSL integration is enabled for your distro.
 - Keep your repos on the Linux filesystem (`~/Repos`, not `/mnt/c/...`) — the sandbox
-  mounts `~/Repos`, and cross-OS file access is slow anyway.
+  mounts each repo's root from there, and cross-OS file access is slow anyway.
 
 ## Updating
 

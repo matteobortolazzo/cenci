@@ -12,7 +12,7 @@ else
 fi
 
 # ── Configuration ────────────────────────────────────────────────
-IMAGE="agent-sandbox:latest"
+MONOLITH_IMAGE="agent-sandbox:latest"
 WORKSPACE_HOST="${HOME}/Repos"
 WORKSPACE_CONTAINER="/workspace"
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -41,6 +41,7 @@ else
 fi
 
 INSTANCE_NAME="default"
+NAME_GIVEN=false
 BUILD_ONLY=false
 BUILD_BASE_ONLY=false
 SHELL_ONLY=false
@@ -60,10 +61,12 @@ while [[ $# -gt 0 ]]; do
             ;;
         --name)
             INSTANCE_NAME="$2"
+            NAME_GIVEN=true
             shift 2
             ;;
         --name=*)
             INSTANCE_NAME="${1#*=}"
+            NAME_GIVEN=true
             shift
             ;;
         --build)
@@ -104,8 +107,44 @@ esac
 
 # ── Namespacing (per-agent, so containers/volumes never collide) ──
 CONTAINER_PREFIX="${AGENT}-sand"
-CONTAINER_NAME="${CONTAINER_PREFIX}-${INSTANCE_NAME}"
-VOLUME_NAME="${CONTAINER_PREFIX}-home-${INSTANCE_NAME}"
+
+# ── Repo scoping ─────────────────────────────────────────────────
+# Inside a git repo, containers/volumes/images are namespaced per repo (see
+# lib/repo-scope.sh) so each project gets its own isolated sandbox and,
+# optionally, its own image (<repo-root>/.agent-sand/Dockerfile). Outside a
+# git repo, fall back to the legacy shared-workspace scheme (whole ~/Repos
+# mount, one container per --name) so existing claude-sand-default-style
+# volumes keep working untouched.
+# shellcheck source=lib/repo-scope.sh
+source "${SCRIPT_DIR}/lib/repo-scope.sh"
+
+if REPO_ROOT="$(resolve_repo_root)"; then
+    REPO_SLUG="$(slugify "$(basename "${REPO_ROOT}")")"
+
+    NAME_SUFFIX=""
+    "${NAME_GIVEN}" && NAME_SUFFIX="-${INSTANCE_NAME}"
+
+    CONTAINER_NAME="${CONTAINER_PREFIX}-${REPO_SLUG}${NAME_SUFFIX}"
+    VOLUME_NAME="${CONTAINER_PREFIX}-home-${REPO_SLUG}${NAME_SUFFIX}"
+    HOSTNAME_VALUE="sandbox-${REPO_SLUG}${NAME_SUFFIX}"
+
+    IMAGE="$(select_image "${REPO_ROOT}" "${REPO_SLUG}")"
+    USING_REPO_IMAGE=false
+    has_repo_image "${REPO_ROOT}" && USING_REPO_IMAGE=true
+
+    WORKSPACE_BIND_HOST="${REPO_ROOT}"
+    WORKDIR="$(compute_workdir "${REPO_ROOT}" "${PWD}")"
+else
+    USING_REPO_IMAGE=false
+
+    CONTAINER_NAME="${CONTAINER_PREFIX}-${INSTANCE_NAME}"
+    VOLUME_NAME="${CONTAINER_PREFIX}-home-${INSTANCE_NAME}"
+    HOSTNAME_VALUE="sandbox-${INSTANCE_NAME}"
+
+    IMAGE="${MONOLITH_IMAGE}"
+    WORKSPACE_BIND_HOST="${WORKSPACE_HOST}"
+    WORKDIR="$(compute_legacy_workdir "${WORKSPACE_HOST}" "${PWD}")"
+fi
 
 # ── Build ────────────────────────────────────────────────────────
 build_base_image() {
@@ -114,13 +153,32 @@ build_base_image() {
     echo "Done."
 }
 
-build_image() {
+ensure_base_image() {
     if ! "${RUNTIME}" image inspect "${BASE_IMAGE}" &>/dev/null; then
         build_base_image
     fi
-    echo "Building ${IMAGE} with ${RUNTIME}..."
-    "${RUNTIME}" build --build-arg "BASE_VERSION=${BASE_VERSION}" -t "${IMAGE}" -f "${SCRIPT_DIR}/Dockerfile" "${SCRIPT_DIR}"
+}
+
+build_image() {
+    ensure_base_image
+    echo "Building ${MONOLITH_IMAGE} with ${RUNTIME}..."
+    "${RUNTIME}" build --build-arg "BASE_VERSION=${BASE_VERSION}" -t "${MONOLITH_IMAGE}" -f "${SCRIPT_DIR}/Dockerfile" "${SCRIPT_DIR}"
     echo "Done."
+}
+
+build_repo_image() {
+    ensure_base_image
+    echo "Building ${IMAGE} with ${RUNTIME}..."
+    "${RUNTIME}" build --build-arg "BASE_VERSION=${BASE_VERSION}" -t "${IMAGE}" -f "${REPO_ROOT}/.agent-sand/Dockerfile" "${REPO_ROOT}/.agent-sand"
+    echo "Done."
+}
+
+build_selected_image() {
+    if "${USING_REPO_IMAGE}"; then
+        build_repo_image
+    else
+        build_image
+    fi
 }
 
 if "${BUILD_BASE_ONLY}"; then
@@ -129,12 +187,12 @@ if "${BUILD_BASE_ONLY}"; then
 fi
 
 if "${BUILD_ONLY}"; then
-    build_image
+    build_selected_image
     exit 0
 fi
 
 if ! "${RUNTIME}" image inspect "${IMAGE}" &>/dev/null; then
-    build_image
+    build_selected_image
 fi
 
 # ── Resolve agent binary ────────────────────────────────────────
@@ -186,22 +244,15 @@ fi
 # Remove stopped container if it exists
 "${RUNTIME}" rm "${CONTAINER_NAME}" &>/dev/null || true
 
-# ── Resolve working directory ────────────────────────────────────
-if [[ "${PWD}" == "${WORKSPACE_HOST}"* ]]; then
-    WORKDIR="${WORKSPACE_CONTAINER}${PWD#"${WORKSPACE_HOST}"}"
-else
-    WORKDIR="${WORKSPACE_CONTAINER}"
-fi
-
 # ── Assemble run args ───────────────────────────────────────────
 RUN_ARGS=(
     --name "${CONTAINER_NAME}"
-    --hostname "sandbox-${INSTANCE_NAME}"
+    --hostname "${HOSTNAME_VALUE}"
     -it --init --rm
     --workdir "${WORKDIR}"
 
     # Workspace
-    -v "${WORKSPACE_HOST}:${WORKSPACE_CONTAINER}"
+    -v "${WORKSPACE_BIND_HOST}:${WORKSPACE_CONTAINER}"
 
     # Persistent home
     -v "${VOLUME_NAME}:/home/dev"
