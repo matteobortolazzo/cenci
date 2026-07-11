@@ -71,6 +71,7 @@ This detection is a **non-blocking advisory** — it never gates configuration a
 | 7. Auto-compact | `autoCompactDisabled` | Pre-select Yes/No |
 | 7b. Pin subagents to 200K | `pinSubagents200K` | Pre-select Yes/No |
 | 8. CI/CD pipeline | `cicd` | Pre-select Yes/No based on `cicd.enabled` |
+| 9. Sandbox Dockerfile | `sandbox` | Pre-select Yes/No based on `sandbox.enabled` |
 
 Ask these questions one at a time using the AskUserQuestion tool when possible:
 
@@ -329,6 +330,30 @@ Include the server in `.lsp.json` regardless — it activates once the binary is
    - Python: `python-requires` from `pyproject.toml`, fallback `"3.12"`
    - Rust: `rust-toolchain.toml` or `"stable"`
 
+9. **Sandbox Dockerfile**: "Generate a sandbox Dockerfile for this repo? (Tailors the `agent-sand` image to your stack; committed so your team shares it.)"
+   - Options: "Yes — generate `.agent-sand/Dockerfile`", "No — skip"
+   - Default: Yes
+
+   **Stack-to-fragment mapping**: Use the detected stack from question 1 (or, for monorepos, the union of every `projects[].stack.framework` value) to select which `dev-sandbox/fragments/*.dockerfile` blocks to include:
+
+   | Detected stack | Fragment |
+   |---|---|
+   | `dotnet*` | .NET SDK block (version from the token) |
+   | `angular*` / `react` / `next` / `vue` / `node` | Node block |
+   | `go` | Go block |
+   | `python` | Python + uv block |
+   | `rust` | Rust block |
+
+   **Monorepo**: take the union of all `projects[].stack.framework` values, deduplicated — e.g. a repo with a Go API project and a React web client project selects both the Go and Node fragments.
+
+   A stack token that matches no row above (e.g. `markdown-shell`, `docker-shell`) contributes no fragment. This is not an error — it just means that project doesn't need a runtime block in the generated Dockerfile.
+
+   **.NET version substitution** (the only row with a version-from-token adjustment): `dev-sandbox/fragments/dotnet.dockerfile` ships with `ARG DOTNET_SDK_VERSION=10.0.100` as its own default. When including this fragment, replace that default's version with `<major>.0.100`, where `<major>` is extracted from the stack token using the same extraction as the CI mapping's version-pinning table above (`dotnet10` → `10`) — e.g. a `dotnet8` stack writes `ARG DOTNET_SDK_VERSION=8.0.100`. **Monorepo tie-break**: when multiple projects map to the dotnet fragment with different major versions (e.g. one project on `dotnet8`, another on `dotnet10`), use the **highest** major version found across all matching projects. If no major version can be extracted from the token, leave the fragment's own default (`10.0.100`) unmodified — and add an inline comment immediately after the `ARG DOTNET_SDK_VERSION` line noting the version could not be auto-detected from the stack token and the fragment's default was used instead, e.g. `# .NET version could not be auto-detected from the stack token — using fragment default. See dev-sandbox/README.md to pin manually.` (mirrors the unresolved-`baseVersion` comment pattern in the baseVersion resolution above). The other fragments (node, go, python, rust) are included verbatim with their own `ARG` defaults unmodified — every fragment `ARG` (including `DOTNET_SDK_VERSION` and `BASE_VERSION`) remains overridable at build time via `--build-arg`, so an unmodified default is never a hard lock-in.
+
+   > **Sync obligation**: `dev-sandbox/fragments/*.dockerfile` is the source of truth for these blocks; the mapping table above mirrors their content and existence, not their byte contents (generation reads the fragment files directly — see step 5e). If a fragment is added, removed, or renamed, this table needs a matching manual update. Low risk in practice — both live in the same monorepo and are maintained together — but currently unenforced by tooling.
+
+   > **Trust / security note**: `.agent-sand/Dockerfile` is committed to the repo, so it is reviewed like any other file in the PR that adds or changes it. It only runs `docker build` steps assembled from `dev-sandbox/fragments/*.dockerfile` — no arbitrary runtime hooks execute during configure or during the build it produces.
+
 ### Auth Verification
 
 Before generating config, verify CLI authentication:
@@ -349,7 +374,7 @@ After gathering answers:
 
    **Monorepo**: Update the chosen file using the template at `${CLAUDE_PLUGIN_ROOT}/templates/claude-md-root-monorepo.md` instead — customize with project count and populate the Projects table from the discovered projects. If the file already has content, merge the template sections into it rather than overwriting (preserve user-added content).
 
-1b. **Generate `.lsp.json`** (if any LSP servers were selected in question 9):
+1b. **Generate `.lsp.json`** (if any LSP servers were selected in question 6):
 
    Write `.lsp.json` **in the project root** (not `${CLAUDE_PLUGIN_ROOT}`) with entries for selected servers only, using the command, args, and extension map from the LSP Server Catalog. Claude Code only reads `.lsp.json` from the project root — plugin-scoped LSP config is not supported. If `.lsp.json` already exists in the project root, merge new entries into it (preserve existing entries). Example:
 
@@ -630,6 +655,51 @@ For each MCP selected in question 5:
 
    After writing the file, create the parent directory if needed (`mkdir -p .github/workflows` for GitHub Actions).
 
+5e. **Generate `.agent-sand/Dockerfile`** (from question 9, only if user selected Yes):
+
+   **Resolve `baseVersion`** — try (a), then fall back to (b), then (c):
+
+   (a) **Dogfooding path**: if the repo being configured contains `dev-sandbox/.claude-plugin/plugin.json` (i.e. this is the `agent-stack` repo itself), read its `.version` field directly and use that as `baseVersion`.
+
+   (b) **Installed-plugin path**: otherwise, read `~/.claude/plugins/installed_plugins.json` and look for keys matching `sandbox@<marketplace>` under `.plugins` (any marketplace suffix). If more than one key matches, use the entry with the **highest semver** among the matching entries' `.plugins["sandbox@<marketplace>"][0].version` values as `baseVersion` — never an arbitrary/first-found tie-break. When more than one match exists, note in the final completion summary (see the "Report what was created" instruction near the end of this file) which marketplace/version was resolved, so the choice is visible to the user rather than silent.
+
+   **Validation (applies to both (a) and (b))**: before writing a resolved `baseVersion` anywhere (the Dockerfile's `ARG BASE_VERSION=` line or `.claude/config.json`), validate it against a strict version pattern: `^[0-9]+\.[0-9]+\.[0-9]+$` (matching the real plugin.json version format, e.g. `"0.9.0"`). This guards against a compromised marketplace entry or a tampered plugin.json in a fork injecting arbitrary content (embedded newlines, `#` comments, Dockerfile directives, or even a spoofed `# agentflow:managed-end` sequence) into a file that's later `docker build`'d. If the resolved value does not match the pattern, treat `baseVersion` as unresolved and fall through to (c) — do not write the raw value into the Dockerfile or config.json.
+
+   (c) **Unresolved**: if neither (a) nor (b) yields a version that passes validation, `baseVersion` is unresolved. Store `"baseVersion": null` in `.claude/config.json`'s `sandbox` field. The Dockerfile is still generated (fragments are still selected and written) — only the `ARG BASE_VERSION=` line ships with no default value, followed by an inline comment pointing at `dev-sandbox/README.md` for a manual pin. This is safe because `agent-sand`'s `build_repo_image()` always passes `--build-arg BASE_VERSION=...` explicitly at build time — it resolves `BASE_VERSION` on its own regardless of what (or nothing) is baked into the file.
+
+   **Generated file format** — always emit the ARG/FROM pair below, **never** a literal `FROM agent-sandbox-base:<version>`. `agent-sand`'s `build_repo_image()` always passes `--build-arg BASE_VERSION=...` at build time; a literal `FROM` would silently drift from what's actually built:
+
+   ```dockerfile
+   # agentflow:managed-begin
+   ARG BASE_VERSION=<resolved-version-or-empty>
+   FROM agent-sandbox-base:${BASE_VERSION}
+
+   <selected fragment 1 content, from dev-sandbox/fragments/*.dockerfile>
+
+   <selected fragment 2 content>
+   ...
+   # agentflow:managed-end
+   ```
+
+   - If `baseVersion` resolved (path a or b): write it as the ARG default, e.g. `ARG BASE_VERSION=0.9.0`.
+   - If unresolved (path c): write `ARG BASE_VERSION=` with no default, then a comment line immediately after: `# No sandbox plugin version detected — see dev-sandbox/README.md to pin BASE_VERSION manually, or install the sandbox plugin and re-run /agentflow:configure.`
+
+   **Fragment concatenation order** (when multiple fragments apply, e.g. a monorepo union): **dotnet → node → go → python → rust**, regardless of the order projects were discovered in. Concatenate the selected `dev-sandbox/fragments/*.dockerfile` file contents in that fixed order, applying the **.NET version substitution** from the mapping table above to the dotnet fragment only — every other fragment is included verbatim. Deduplicate — each fragment appears at most once even when multiple monorepo projects map to the same fragment.
+
+   **Merge-safe regeneration**: the whole block above (from `# agentflow:managed-begin` through `# agentflow:managed-end` inclusive) is the managed block.
+   - **File doesn't exist**: create `.agent-sand/` (`mkdir -p .agent-sand`) and write the managed block as the full file content.
+   - **File exists with both markers present**: replace only the text from `# agentflow:managed-begin` through `# agentflow:managed-end` (inclusive) with the freshly generated block. Preserve everything before the begin marker and everything after the end marker exactly as-is — this is where a team can hand-append their own `RUN` steps across re-runs.
+   - **File exists with no markers** (e.g. a hand-authored legacy `.agent-sand/Dockerfile`): do not silently overwrite it. Reuse the exact Overwrite/Skip/Show conflict-check UX already used for CI/CD generation (question 8 / step 5d) — same three options, same behavior:
+     "Found existing `.agent-sand/Dockerfile` without agentflow's managed markers. What would you like to do?"
+     Options: "Overwrite — wrap it in managed markers and replace with the generated block", "Skip — keep the existing file, still record `sandbox` in config.json", "Show existing — display the current file contents"
+     - If Skip: still record `sandbox` in config.json, don't write the file.
+     - If Show existing: read and display the file, then re-ask Overwrite/Skip.
+   - **File exists with malformed markers** (exactly one of `# agentflow:managed-begin` / `# agentflow:managed-end` present, markers out of order, or duplicate marker pairs): do **not** attempt a partial text replace — a malformed marker pair cannot be trusted to safely bound the managed block (and could itself be the result of a spoofed end-marker smuggled in via an unvalidated `baseVersion` — see the validation step above). Route this through the exact same Overwrite/Skip/Show conflict-check UX as the "no markers" case above — same prompt text, same three options, same behavior.
+
+   **Monorepo**: fragments are the deduplicated union described in the Stack-to-fragment mapping table under question 9, concatenated in the dotnet → node → go → python → rust order above — one `.agent-sand/Dockerfile` for the whole repo, not one per project.
+
+   **Committed, not ignored**: `.agent-sand/Dockerfile` is committed to the repo. Do **not** add `.agent-sand/` or `.agent-sand/Dockerfile` to `.gitignore` — the whole point is a team-shared, reviewed Dockerfile that `agent-sand`'s per-repo image selection (see `dev-sandbox/README.md`) builds identically for every teammate.
+
 6. **Write `.claude/config.json`** with their choices using **merge semantics**:
 
    - If `existingConfig` is not null: start from the existing object, overwrite each field with the user's answers. This preserves fields the skill doesn't manage.
@@ -670,6 +740,10 @@ For each MCP selected in question 5:
   "cicd": {
     "enabled": true,
     "platform": "github-actions"
+  },
+  "sandbox": {
+    "enabled": true,
+    "baseVersion": "0.9.0"
   }
 }
 ```
@@ -690,6 +764,14 @@ The `cicd` field is only present when the user selected Yes in question 8. Schem
 - `cicd.platform` — `"github-actions"`
 
 Omit `cicd` entirely when the user says No (same pattern as `pencil`).
+
+The `sandbox` field is only present when the user selected Yes in question 9. Schema:
+- `sandbox.enabled` — `true` if user opted in; omit `sandbox` entirely if declined (same pattern as `cicd`/`pencil` — never write `{"enabled": false}`)
+- `sandbox.baseVersion` — the resolved sandbox plugin version baked into the generated `.agent-sand/Dockerfile`'s `ARG BASE_VERSION` default (see the baseVersion resolution algorithm in step 5e), or `null` when it could not be resolved
+
+Omit `sandbox` entirely when the user says No (same pattern as `cicd`/`pencil`).
+
+> **Not the same as `.claude/settings.json`'s `sandbox.enabled`.** Step 4 above always writes `"sandbox": { "enabled": false }` into `.claude/settings.json` — that key disables **Claude Code's own host sandbox**, because the `agent-sand` container is the security boundary instead. This `.claude/config.json` `sandbox` field is unrelated: it's this ticket's per-repo `.agent-sand/Dockerfile` toggle, consumed by agentflow's configure skill and by `agent-sand`'s per-repo image build — not by Claude Code itself. Same field name (`sandbox.enabled`), two different files, two different consumers, two unrelated meanings. Do not conflate them when reading or writing either file.
 
 The `pencil` field is only present when the user was asked question 5b (frontend framework detected). Schema:
 - `pencil.enabled` — gating flag for all design features (`true` if user opted in, `false` if declined)
@@ -735,6 +817,10 @@ Omit `pencil` entirely if no frontend framework was detected.
   "cicd": {
     "enabled": true,
     "platform": "github-actions"
+  },
+  "sandbox": {
+    "enabled": true,
+    "baseVersion": "0.9.0"
   }
 }
 ```
@@ -751,7 +837,7 @@ When migrating from an older config that has `ticketSystem`, `prSystem`, `ticket
 - When `pencil.shared` is `true`: `pencil.designPath` holds the shared path (e.g., `"designs/"`). Individual projects do **not** have `designPath`.
 - When `pencil.shared` is `false` (separate): `pencil.designPath` is omitted. Each frontend project in the `projects` array gets a `designPath` field (e.g., `"apps/web-client/designs/"`). Non-frontend projects do not get `designPath`.
 
-Report what was created and suggest next steps (e.g., "Try `/agentflow:refine <ticket-id>` on a ticket").
+Report what was created and suggest next steps (e.g., "Try `/agentflow:refine <ticket-id>` on a ticket"). If `sandbox.enabled` is `true`, mention the generated/committed `.agent-sand/Dockerfile` and that `agent-sand --build` (run from inside the repo) builds the repo's own tailored image on top of the shared base. If `sandbox.baseVersion` resolved to `null` (unresolved — see the baseVersion resolution in step 5e), the chat summary must explicitly say so (e.g., "Base version could not be auto-detected — see `dev-sandbox/README.md` to pin `BASE_VERSION` manually") rather than leaving it only as an inline Dockerfile comment, so a user who doesn't open the generated file still learns the base version wasn't pinned.
 
 ### Board lifecycle labels
 

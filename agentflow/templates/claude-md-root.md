@@ -20,6 +20,12 @@
 - ALWAYS read DESIGN.md before implementing any frontend feature
 <!-- END IF -->
 
+<!-- IF sandbox.enabled -->
+## Sandbox Image
+- `.agent-sand/Dockerfile` — committed, per-repo image tailored to this repo's stack; the whole team builds the same image
+- Rebuild after changing the stack or the Dockerfile: `agent-sand --build` (run from inside this repo)
+<!-- END IF -->
+
 ## Reference Docs
 On-demand topic docs live in `docs/` at the repo root. Read the file matching your work area:
 - `docs/git-workflow.md` — branching, commits, PRs, versioning

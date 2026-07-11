@@ -14,5 +14,6 @@ GitHub Issues for tracking. GitHub for code and PRs.
 ## Reference Docs
 On-demand topic docs live at `docs/`:
 - `docs/git-workflow.md` — branching, commits, PRs, versioning
+- `docs/skill-authoring.md` — writing skills that generate/regenerate files, especially with external-sourced values
 
 `.claude/rules/` is reserved for files explicitly `@`-imported by this CLAUDE.md (auto-loaded at session start). It is not used today.
