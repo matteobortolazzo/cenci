@@ -3,7 +3,7 @@
 > Part of [agent-stack](../README.md) — the **isolation layer**. See the root README for
 > the one-command install and how the isolation, workflow, and attention layers fit together.
 
-Isolated Docker/Podman container for running Claude Code with full permissions. Your host OS stays clean — only `~/Repos` is shared with the container.
+Isolated Docker/Podman container for running Claude Code with full permissions. Your host OS stays clean — each launch mounts only the current repo (not your whole `~/Repos`) into its own container.
 
 ## Prerequisites
 
@@ -72,7 +72,7 @@ codex-sand -p "fix the tests"
 # Open a bash shell for manual setup / troubleshooting
 agent-sand --shell
 
-# Run a named instance (separate home volume)
+# Run a named instance (extra suffix, for parallel isolation e.g. worktrees)
 agent-sand --name myproject
 
 # Rebuild the image (after changing Dockerfile or SDK versions)
@@ -89,7 +89,39 @@ agent-sand --docker -p "run the integration tests"
 agent-sand --host-network --shell
 ```
 
-The container starts in the directory matching your host `$PWD` (mapped through `~/Repos` → `/workspace`).
+### Per-repo containers
+
+Run `agent-sand` from inside a git repo (or any subdirectory of one) and it mounts
+**only that repo's root** at `/workspace` — not your whole `~/Repos`. The container
+`WORKDIR` mirrors your host `$PWD` relative to the repo root, so launching from a
+subdirectory starts the shell/agent in the matching `/workspace/<subpath>`.
+
+The container name and home volume are derived from the repo directory name (slugified):
+`<agent>-sand-<repo-slug>` / `<agent>-sand-home-<repo-slug>`. Pass `--name` to append an
+extra suffix (`<agent>-sand-<repo-slug>-<name>`) when you need more than one sandbox for
+the same repo in parallel — e.g. one per git worktree.
+
+If a repo's directory contains `.agent-sand/Dockerfile`, that repo gets its own thin
+image (`agent-sandbox-<repo-slug>:latest`, built `FROM` the shared base image) instead of
+the monolith — see [Per-repo images](#per-repo-images) below. Repos without that file
+still get single-repo mounting, just using the shared `agent-sandbox:latest` image.
+
+**Clean break:** per-repo launches always start from a fresh `<agent>-sand-home-<repo-slug>`
+volume — there is no automatic migration from an existing `<agent>-sand-home-default`
+volume created by an older whole-`~/Repos` launch. Re-authenticate (or delete the old
+volume once you've confirmed you don't need it — see
+[Reset an instance](#reset-an-instance)).
+
+**Caveat:** two different repos that share the same directory basename (e.g.
+`~/Repos/foo/api` and `~/work/foo/api`, both named `api`) slugify to the same name and
+would collide on the same container/volume. Use `--name` to disambiguate if you work
+with same-named repos side by side.
+
+Running `agent-sand` **outside** any git repo falls back to the legacy scheme: the whole
+`~/Repos` directory is mounted at `/workspace`, and the container/volume are named
+`<agent>-sand-<name>` / `<agent>-sand-home-<name>` (default name `default`) — unchanged
+from previous versions, so existing `<agent>-sand-home-default`-style volumes keep
+working untouched.
 
 If a container with the same name is already running, the script attaches to it instead of creating a new one.
 
@@ -101,8 +133,10 @@ permission inside the container — Claude with `--dangerously-skip-permissions`
 `--dangerously-bypass-approvals-and-sandbox`.
 
 Containers and home volumes are **namespaced by agent**, so the two never collide:
-the **Claude agent** uses `claude-sand-<name>` / `claude-sand-home-<name>`; `codex-sand` (or
-`agent-sand --agent codex`) uses `codex-sand-<name>` / `codex-sand-home-<name>`. The two agents
+the **Claude agent** uses the `claude-sand-` prefix; `codex-sand` (or `agent-sand --agent
+codex`) uses `codex-sand-`. The rest of the name is the repo slug (or the legacy `<name>`
+outside a git repo — see [Per-repo containers](#per-repo-containers) above), e.g.
+`claude-sand-my-project` / `claude-sand-home-my-project`. The two agents
 are provisioned differently: **Claude** is bind-mounted from the host (self-contained binary,
 so the container always matches your host version). **Codex** is baked into the image — it ships
 as an npm launcher that resolves a native binary nested in its own `node_modules`, which a
@@ -175,10 +209,16 @@ Everything persists in the home volume — only needs to happen once per instanc
 | uv | latest | `UV_VERSION` |
 | Docker CLI | latest | — |
 
-Override versions at build time:
+Override versions at build time. The monolith `Dockerfile` builds `FROM
+agent-sandbox-base:${BASE_VERSION}`, so build (or pull) the base image first and pass
+the matching `BASE_VERSION` (from `.claude-plugin/plugin.json`) — `agent-sand --build`
+does both steps for you automatically:
 
 ```bash
-docker build --build-arg DOTNET_SDK_VERSION=10.0.200 \
+docker build -f dev-sandbox/Dockerfile.base -t agent-sandbox-base:0.8.0 dev-sandbox/
+
+docker build --build-arg BASE_VERSION=0.8.0 \
+             --build-arg DOTNET_SDK_VERSION=10.0.200 \
              --build-arg GO_VERSION=1.25.0 \
              -t agent-sandbox:latest dev-sandbox/
 ```
@@ -205,6 +245,19 @@ They are **not** built or composed automatically yet — that lands in a follow-
 then, each fragment and its corresponding block in `Dockerfile` are kept byte-identical by
 hand; when you change one, change the other the same way.
 
+### Per-repo images
+
+A repo can opt into its own thin image instead of the shared monolith by adding
+`.agent-sand/Dockerfile` (and any files it needs, e.g. a fragment copy) under
+`.agent-sand/` at the repo root. When present, `agent-sand` builds
+`agent-sandbox-<repo-slug>:latest` `FROM agent-sandbox-base:${BASE_VERSION}` — the
+same base image and `BASE_VERSION` as the monolith — using
+`.agent-sand/` as the build context, and runs that instead of `agent-sandbox:latest`.
+Repos without `.agent-sand/Dockerfile` keep using the shared monolith image, just with
+single-repo mounting (see [Per-repo containers](#per-repo-containers)). Rebuild a
+repo's own image the same way as the monolith: `agent-sand --build` (run from inside
+that repo).
+
 ### Permission model
 
 Claude Code runs with `--dangerously-skip-permissions` inside the container: no permission prompts, no tool allowlists. Isolation comes from the container itself, not from Claude Code's permission system. This is the supported use of the flag (it refuses to run as root; the container user is `dev`, UID 1000). Human-in-the-loop control moves up a layer — to workflow gates (plan approval, `AskUserQuestion`) rather than per-command approval.
@@ -218,7 +271,8 @@ Bypass mode is **fully unattended**. The entrypoint seeds `/home/dev/.claude/set
 ### Isolation
 
 - Container has its **own home directory** (`/home/dev`) backed by a named Docker volume
-- Only `~/Repos` from the host is mounted at `/workspace`
+- Only the current repo's root (not the whole `~/Repos`) is mounted at `/workspace` — see
+  [Per-repo containers](#per-repo-containers)
 - Outbound network only (no inbound ports published)
 
 ### What persists (home volume)
@@ -315,14 +369,18 @@ has no effect on the container.
 ### Reset an instance
 
 Delete the home volume to start fresh (caches, auth, config all cleared). Claude Code
-instances use `claude-sand-home-<name>`; Codex instances use `codex-sand-home-<name>`:
+instances use `claude-sand-home-<repo-slug>`; Codex instances use
+`codex-sand-home-<repo-slug>` (or `-<name>` outside a git repo — see
+[Per-repo containers](#per-repo-containers)):
 
 ```bash
+docker volume rm claude-sand-home-agent-stack
+# or for a --name instance:
+docker volume rm claude-sand-home-agent-stack-myproject
+# outside a git repo (legacy scheme):
 docker volume rm claude-sand-home-default
-# or for a named instance:
-docker volume rm claude-sand-home-myproject
 # Codex instances:
-docker volume rm codex-sand-home-default
+docker volume rm codex-sand-home-agent-stack
 ```
 
 ### List instances
