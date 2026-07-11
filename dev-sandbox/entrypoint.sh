@@ -16,14 +16,19 @@ fi
 # Claude Code pointed these paths at the host filesystem.  Replace any
 # dangling symlink with a real directory / file so plugin installs work.
 #
-# Seed the bypass-mode settings so --dangerously-skip-permissions never
-# prompts ("Yes, I accept") on fresh instances and never silently
-# downgrades to `default` in headless (`claude -p`) runs.  These keys are
-# CONTAINER-ONLY: the container boundary is what makes bypass mode safe
-# (see docs/cohesive-package.md §2.1).  They must never reach the host
-# ~/.claude/settings.json.
+# migrate_settings (lib/migrate-settings.sh) deep-merges three things into
+# settings.json in one idempotent pass: the CONTAINER-ONLY bypass-mode keys
+# (so --dangerously-skip-permissions never prompts and never downgrades to
+# `default` in headless runs — the container boundary is what makes this safe;
+# see docs/cohesive-package.md §2.1, and they must never reach the host
+# ~/.claude/settings.json), the current agentwatch/agentflow plugins from the
+# agent-stack marketplace (so sandbox sessions are visible on the host status
+# bar), and a removal of the stale pre-rename muxwatch/ccflow/claude-tools
+# stack that old home volumes still carry.
 
-BYPASS_SETTINGS='{"skipDangerousModePermissionPrompt":true,"permissions":{"defaultMode":"bypassPermissions"}}'
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/migrate-settings.sh
+source "${SCRIPT_DIR}/lib/migrate-settings.sh"
 
 if [[ -L /home/dev/.claude ]]; then
     rm -f /home/dev/.claude
@@ -34,21 +39,20 @@ if [[ -L /home/dev/.claude/settings.json ]]; then
     rm -f /home/dev/.claude/settings.json
 fi
 if [[ ! -f /home/dev/.claude/settings.json ]]; then
-    # Fresh volume → write the bypass settings.
-    echo "${BYPASS_SETTINGS}" > /home/dev/.claude/settings.json
+    # Fresh volume → seed the merged object (bypass + plugins).
+    echo '{}' | migrate_settings > /home/dev/.claude/settings.json
 elif jq -e . /home/dev/.claude/settings.json >/dev/null 2>&1; then
     # Valid JSON → deep-merge our keys in (ours win on conflict; every
-    # other top-level key, including permissions.*, is preserved).  This
-    # upgrades old `{}` volumes and is idempotent.
-    if jq --argjson bypass "${BYPASS_SETTINGS}" '. * $bypass' \
-        /home/dev/.claude/settings.json > /home/dev/.claude/settings.json.tmp; then
+    # other top-level key, including permissions.*, is preserved) and drop the
+    # stale plugin stack.  This upgrades old volumes and is idempotent.
+    if migrate_settings < /home/dev/.claude/settings.json > /home/dev/.claude/settings.json.tmp; then
         mv /home/dev/.claude/settings.json.tmp /home/dev/.claude/settings.json
     else
         rm -f /home/dev/.claude/settings.json.tmp
     fi
 else
-    # Present but not valid JSON → overwrite with a safe default.
-    echo "${BYPASS_SETTINGS}" > /home/dev/.claude/settings.json
+    # Present but not valid JSON → overwrite with the merged default.
+    echo '{}' | migrate_settings > /home/dev/.claude/settings.json
 fi
 
 # ── Inject host credentials (staged read-only mounts → writable copies) ──

@@ -86,5 +86,6 @@ ENV PATH="/home/dev/.local/bin:/home/dev/go/bin:${PATH}"
 ENV GOPATH="/home/dev/go"
 
 COPY --chown=dev:dev entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY --chown=dev:dev lib/ /usr/local/bin/lib/
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
