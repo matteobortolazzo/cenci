@@ -49,3 +49,43 @@ ONBOARDING_SETTINGS='{"hasCompletedOnboarding":true}'
 seed_onboarding() {
     jq --argjson onboarding "${ONBOARDING_SETTINGS}" '. * $onboarding'
 }
+
+# heal_plugin_installs <plugins-dir>: repair <plugins-dir>/installed_plugins.json
+# so Claude Code reinstalls plugins whose cache is gone. An interrupted
+# auto-install writes the metadata before populating the cache directory it
+# points at; Claude Code then trusts the metadata, skips reinstall, and every
+# skill of that plugin is "Unknown command" until the entry is removed.
+#
+# .plugins maps each plugin key to an ARRAY of install records: drop records
+# whose installPath is missing on disk, then drop keys left with no records.
+# jq cannot stat, so the paths are checked in bash and fed back in via --args.
+# An invalid file is deleted outright — unlike .claude.json it holds no
+# unrecoverable state, Claude Code just regenerates it. Atomic write,
+# idempotent.
+heal_plugin_installs() {
+    local plugins_file="$1/installed_plugins.json"
+    [[ -f "${plugins_file}" ]] || return 0
+
+    if ! jq -e . "${plugins_file}" >/dev/null 2>&1; then
+        rm -f "${plugins_file}"
+        return 0
+    fi
+
+    local path missing=()
+    while IFS= read -r path; do
+        [[ -e "${path}" ]] || missing+=("${path}")
+    done < <(jq -r '(.plugins // {})[][]?.installPath // empty' "${plugins_file}")
+    [[ "${#missing[@]}" -eq 0 ]] && return 0
+
+    if jq '
+        .plugins |= (
+            (. // {})
+            | map_values([ .[] | select(.installPath as $p | ($ARGS.positional | index($p)) | not) ])
+            | with_entries(select(.value | length > 0))
+        )
+    ' "${plugins_file}" --args "${missing[@]}" > "${plugins_file}.tmp"; then
+        mv "${plugins_file}.tmp" "${plugins_file}"
+    else
+        rm -f "${plugins_file}.tmp"
+    fi
+}
