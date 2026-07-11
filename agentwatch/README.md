@@ -168,7 +168,7 @@ substituted at launch:
     },
     "codex": {
       "command": "codex",
-      "model": "gpt-5-codex",
+      "model": "gpt-5.6-sol",
       "workflows": {
         "implement": { "args": ["exec", "/ccflow:implement {ticket}"] }
       }
