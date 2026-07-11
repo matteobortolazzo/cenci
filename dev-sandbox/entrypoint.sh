@@ -55,6 +55,14 @@ else
     echo '{}' | migrate_settings > /home/dev/.claude/settings.json
 fi
 
+# ── Heal broken plugin install metadata ───────────────────────────
+# An interrupted plugin auto-install leaves installed_plugins.json pointing at
+# a cache directory that was never populated.  Claude Code trusts the metadata,
+# skips reinstall, and every skill of that plugin is "Unknown command" — which
+# permanently masks the enabledPlugins provisioning above.  Dropping the broken
+# entries makes Claude Code reinstall from the marketplace on next launch.
+heal_plugin_installs /home/dev/.claude/plugins
+
 # ── Skip Claude Code's first-run onboarding wizard ────────────────
 # Onboarding state (theme picker, terminal "anti-flicker" setup, account step)
 # lives in /home/dev/.claude.json, not settings.json.  Seeding
