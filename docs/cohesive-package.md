@@ -148,7 +148,7 @@ well-behaved consumer over versioned contracts.
 ## 3. One install, one update
 
 ```bash
-claude plugin marketplace add matteobortolazzo/claude-tools
+claude plugin marketplace add matteobortolazzo/agent-stack
 claude plugin install ccflow agentwatch sandbox
 # later:
 claude plugin update --all
@@ -194,20 +194,20 @@ Resolved 2026-07-09 (orchestration layer):
 
 | # | Ticket | Issue | Scope |
 |---|--------|-------|-------|
-| 1 | ✅ dev-sandbox: full permissions in container | [#34](https://github.com/matteobortolazzo/claude-tools/pull/34) | — |
-| 2 | ✅ sandbox plugin packaging | [#25](https://github.com/matteobortolazzo/claude-tools/issues/25) | plugin manifest, `/sandbox:setup` skill, version-bump CI, marketplace entry |
-| 3 | ✅ rename muxwatch → agentwatch | [#26](https://github.com/matteobortolazzo/claude-tools/issues/26) | Go module path, binaries, plugin/marketplace names, CI workflows, goreleaser, docs; keep `muxwatch/v*` tags frozen, start `agentwatch/v*` |
-| 4 | agentwatch: binary bootstrap + daemon autostart | [#27](https://github.com/matteobortolazzo/claude-tools/issues/27) | SessionStart hook downloads release binary + starts daemon; remove manual install steps |
-| 5 | agentwatch: tmux as one frontend | [#28](https://github.com/matteobortolazzo/claude-tools/issues/28) | `internal/frontend/tmux`, drop `$TMUX_PANE` gate in notify |
-| 6 | ccflow: container profile in configure | [#29](https://github.com/matteobortolazzo/claude-tools/issues/29) | sandbox detection, profile generation, docs |
-| 7 | ccflow: goal-driven autopilot | [#30](https://github.com/matteobortolazzo/claude-tools/issues/30) | set/clear goal around phases 2–9 |
-| 8 | ✅ ccflow: babysit skill | [#31](https://github.com/matteobortolazzo/claude-tools/issues/31) | `/loop`-based PR babysitting via address-review |
-| 9 | docs: one-package README | [#32](https://github.com/matteobortolazzo/claude-tools/issues/32) | root README rewrite around the layers + single install path |
-| 10 | codex: first-class support audit | [#33](https://github.com/matteobortolazzo/claude-tools/issues/33) | define proper Codex support per layer → follow-up tickets; includes Codex launcher templates for ticket 12 |
-| 11 | agentwatch: public status client package | [#39](https://github.com/matteobortolazzo/claude-tools/issues/39) | export read-side snapshot types + subscribe client (`pkg/watch`); additive-only JSON contract |
-| 12 | ✅ agentwatch: `run` launcher subcommand | [#40](https://github.com/matteobortolazzo/claude-tools/issues/40) | agent-agnostic dispatch (claude/codex), session naming, sandbox choice, `/goal` wiring; replaces personal scripts |
-| 13 | ccflow: `In Review` board state | [#41](https://github.com/matteobortolazzo/claude-tools/issues/41) | phase 9 sets `In Review` at PR-open; babysit sets `Implemented` on merge |
-| 14 | docs: board-orchestration recipe | [#42](https://github.com/matteobortolazzo/claude-tools/issues/42) | `docs/orchestration.md`: state machine, example board config, join-key convention, multi-agent notes |
+| 1 | ✅ dev-sandbox: full permissions in container | [#34](https://github.com/matteobortolazzo/agent-stack/pull/34) | — |
+| 2 | ✅ sandbox plugin packaging | [#25](https://github.com/matteobortolazzo/agent-stack/issues/25) | plugin manifest, `/sandbox:setup` skill, version-bump CI, marketplace entry |
+| 3 | ✅ rename muxwatch → agentwatch | [#26](https://github.com/matteobortolazzo/agent-stack/issues/26) | Go module path, binaries, plugin/marketplace names, CI workflows, goreleaser, docs; keep `muxwatch/v*` tags frozen, start `agentwatch/v*` |
+| 4 | agentwatch: binary bootstrap + daemon autostart | [#27](https://github.com/matteobortolazzo/agent-stack/issues/27) | SessionStart hook downloads release binary + starts daemon; remove manual install steps |
+| 5 | agentwatch: tmux as one frontend | [#28](https://github.com/matteobortolazzo/agent-stack/issues/28) | `internal/frontend/tmux`, drop `$TMUX_PANE` gate in notify |
+| 6 | ccflow: container profile in configure | [#29](https://github.com/matteobortolazzo/agent-stack/issues/29) | sandbox detection, profile generation, docs |
+| 7 | ccflow: goal-driven autopilot | [#30](https://github.com/matteobortolazzo/agent-stack/issues/30) | set/clear goal around phases 2–9 |
+| 8 | ✅ ccflow: babysit skill | [#31](https://github.com/matteobortolazzo/agent-stack/issues/31) | `/loop`-based PR babysitting via address-review |
+| 9 | docs: one-package README | [#32](https://github.com/matteobortolazzo/agent-stack/issues/32) | root README rewrite around the layers + single install path |
+| 10 | codex: first-class support audit | [#33](https://github.com/matteobortolazzo/agent-stack/issues/33) | define proper Codex support per layer → follow-up tickets; includes Codex launcher templates for ticket 12 |
+| 11 | agentwatch: public status client package | [#39](https://github.com/matteobortolazzo/agent-stack/issues/39) | export read-side snapshot types + subscribe client (`pkg/watch`); additive-only JSON contract |
+| 12 | ✅ agentwatch: `run` launcher subcommand | [#40](https://github.com/matteobortolazzo/agent-stack/issues/40) | agent-agnostic dispatch (claude/codex), session naming, sandbox choice, `/goal` wiring; replaces personal scripts |
+| 13 | ccflow: `In Review` board state | [#41](https://github.com/matteobortolazzo/agent-stack/issues/41) | phase 9 sets `In Review` at PR-open; babysit sets `Implemented` on merge |
+| 14 | docs: board-orchestration recipe | [#42](https://github.com/matteobortolazzo/agent-stack/issues/42) | `docs/orchestration.md`: state machine, example board config, join-key convention, multi-agent notes |
 | 15 | lazyboards: agent status on cards | [lazyboards#255](https://github.com/matteobortolazzo/lazyboards/issues/255) | subscribe via ticket 11's client, badge cards, NeedInput loudest, status-bar summary |
 | 16 | lazyboards: jump to card's session | [lazyboards#256](https://github.com/matteobortolazzo/lazyboards/issues/256) | keybinding to focus the card's tmux window |
 | 17 | agentwatch: self-contained Codex bootstrap parity | TBD | Codex SessionStart hook downloads the version-matched binary with SHA-256 verification + autostarts the daemon (like #27); symlinks the binary onto `$PATH`; redirects the "#33" pointers in both READMEs. From §6 audit |

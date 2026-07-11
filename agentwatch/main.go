@@ -14,14 +14,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/config"
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/daemon"
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/dispatch"
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/frontend/status"
-	tmuxfe "github.com/matteobortolazzo/claude-tools/agentwatch/internal/frontend/tmux"
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/ipc"
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/run"
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/tmux"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/config"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/daemon"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/dispatch"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/frontend/status"
+	tmuxfe "github.com/matteobortolazzo/agent-stack/agentwatch/internal/frontend/tmux"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/ipc"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/run"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/tmux"
 )
 
 func main() {

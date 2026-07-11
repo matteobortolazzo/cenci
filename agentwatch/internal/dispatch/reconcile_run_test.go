@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/claude-tools/agentwatch/pkg/watch"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/pkg/watch"
 )
 
 // fakeMutator records every gh mutation the runner would apply.

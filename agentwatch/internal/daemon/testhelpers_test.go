@@ -3,10 +3,10 @@ package daemon
 import (
 	"time"
 
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/config"
-	tmuxfe "github.com/matteobortolazzo/claude-tools/agentwatch/internal/frontend/tmux"
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/ipc"
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/tmux/tmuxtest"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/config"
+	tmuxfe "github.com/matteobortolazzo/agent-stack/agentwatch/internal/frontend/tmux"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/ipc"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/tmux/tmuxtest"
 )
 
 func testConfig() config.Config {

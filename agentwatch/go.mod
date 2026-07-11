@@ -1,3 +1,3 @@
-module github.com/matteobortolazzo/claude-tools/agentwatch
+module github.com/matteobortolazzo/agent-stack/agentwatch
 
 go 1.25

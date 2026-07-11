@@ -5,9 +5,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/detect"
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/frontend"
-	tmuxc "github.com/matteobortolazzo/claude-tools/agentwatch/internal/tmux"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/detect"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/frontend"
+	tmuxc "github.com/matteobortolazzo/agent-stack/agentwatch/internal/tmux"
 )
 
 const logMaxLen = 50

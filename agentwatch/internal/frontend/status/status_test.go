@@ -3,7 +3,7 @@ package status
 import (
 	"testing"
 
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/ipc"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/ipc"
 )
 
 func testConfig() Config {

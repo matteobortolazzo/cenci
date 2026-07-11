@@ -3,10 +3,10 @@ package daemon
 import (
 	"testing"
 
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/detect"
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/ipc"
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/tmux"
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/tmux/tmuxtest"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/detect"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/ipc"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/tmux"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/tmux/tmuxtest"
 )
 
 func TestDaemon_PostToolUseFailureInterruptSetsStopped(t *testing.T) {

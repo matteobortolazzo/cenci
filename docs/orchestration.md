@@ -68,7 +68,7 @@ When the agentwatch daemon later tracks that window it sees the manual name and
 preserves it instead of overwriting it with the detected task — so `<number>-<slug>`
 flows through to the snapshot's `window_name`, which lazyboards reads over the public
 watcher client (`pkg/watch`,
-[#39](https://github.com/matteobortolazzo/claude-tools/issues/39)) to badge the card.
+[#39](https://github.com/matteobortolazzo/agent-stack/issues/39)) to badge the card.
 See [agentwatch's README](../agentwatch/README.md#the-join-key-survives-the-daemon)
 for the daemon side.
 
@@ -158,7 +158,7 @@ selected card) may not use `{number}`, `{title}`, `{tags}`, or `{session}`.
 ## Dispatching into the sandbox
 
 To run a card's agent inside the dev-sandbox container
-([#29](https://github.com/matteobortolazzo/claude-tools/issues/29)) instead of on the
+([#29](https://github.com/matteobortolazzo/agent-stack/issues/29)) instead of on the
 host, add `--sandbox` to the dispatch (or set `"sandbox": true` in agentwatch's
 `~/.config/agentwatch/config.json`):
 
@@ -193,6 +193,6 @@ ships built-in templates for **claude** (`refine`/`design`/`implement`) only;
 **codex** and **opencode** are added by dropping an entry into
 `~/.config/agentwatch/config.json` (opencode is future config, not code). Codex
 support across the package is tracked in
-[#33](https://github.com/matteobortolazzo/claude-tools/issues/33); see
+[#33](https://github.com/matteobortolazzo/agent-stack/issues/33); see
 [agentwatch's README](../agentwatch/README.md#dispatching-workflows-agentwatch-run)
 for the launcher's flags and config format.

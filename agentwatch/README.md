@@ -1,6 +1,6 @@
 # agentwatch
 
-> Part of [claude-tools](../README.md) — the **attention layer**. See the root README for
+> Part of [agent-stack](../README.md) — the **attention layer**. See the root README for
 > the one-command install and how the isolation, workflow, and attention layers fit together.
 
 An event-driven tmux watcher that monitors Claude Code and OpenAI Codex sessions via hooks and shows live status in the tmux status bar:
@@ -37,7 +37,7 @@ The easiest path is the [one-command installer](../docs/getting-started.md), whi
 also wires the macOS menu bar widget when SwiftBar is present:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/claude-tools/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
 ```
 
 Or install the plugin from the marketplace directly — the binary and daemon
@@ -45,7 +45,7 @@ auto-bootstrap on your first session, so this is all you need:
 
 ```bash
 # Register the repo as a marketplace (works with private repos too)
-claude plugin marketplace add matteobortolazzo/claude-tools
+claude plugin marketplace add matteobortolazzo/agent-stack
 
 # Install the plugin (persists across sessions)
 claude plugin install agentwatch
@@ -73,7 +73,7 @@ If you do not already have a Codex hooks file:
 
 ```bash
 mkdir -p ~/.codex
-cp /path/to/claude-tools/agentwatch/plugin/codex/hooks.json ~/.codex/hooks.json
+cp /path/to/agent-stack/agentwatch/plugin/codex/hooks.json ~/.codex/hooks.json
 ```
 
 If `~/.codex/hooks.json` already exists, merge the `hooks` entries from `plugin/codex/hooks.json` instead of replacing the file.
@@ -191,7 +191,7 @@ substituted at launch:
 ```
 
 Only the built-in Claude templates ship today; Codex command templates are tracked in
-[#33](https://github.com/matteobortolazzo/claude-tools/issues/33). Until one is
+[#33](https://github.com/matteobortolazzo/agent-stack/issues/33). Until one is
 configured, `--agent codex` exits with a helpful "no launch template" error.
 
 ## Auto-dispatch (`agentwatch dispatch`)
@@ -377,14 +377,14 @@ hack on agentwatch, or run against a local plugin directory.
 ### Install the binary manually
 
 ```bash
-go install github.com/matteobortolazzo/claude-tools/agentwatch@latest
+go install github.com/matteobortolazzo/agent-stack/agentwatch@latest
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/matteobortolazzo/claude-tools.git
-cd claude-tools/agentwatch
+git clone https://github.com/matteobortolazzo/agent-stack.git
+cd agent-stack/agentwatch
 make build
 ```
 
@@ -496,13 +496,13 @@ The public `pkg/watch` package lets any Go tool subscribe to that stream — for
 example to badge kanban cards or dashboards with per-window agent status.
 
 ```bash
-go get github.com/matteobortolazzo/claude-tools/agentwatch
+go get github.com/matteobortolazzo/agent-stack/agentwatch
 ```
 
 It versions via the existing `agentwatch/v*` submodule tags.
 
 ```go
-import "github.com/matteobortolazzo/claude-tools/agentwatch/pkg/watch"
+import "github.com/matteobortolazzo/agent-stack/agentwatch/pkg/watch"
 
 c, err := watch.Dial(watch.DefaultSocketPath())
 // ... handle err; defer c.Close()

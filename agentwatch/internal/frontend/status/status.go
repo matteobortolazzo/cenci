@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/ipc"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/ipc"
 )
 
 // ErrNoOutput signals that the waybar module should be hidden (exit 1).

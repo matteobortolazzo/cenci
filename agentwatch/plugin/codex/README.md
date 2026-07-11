@@ -28,7 +28,7 @@ bootstrapped the shared daemon). Everything is non-fatal — failures log one li
 also runs the Claude plugin, both share the same host daemon.
 
 **Manual / Codex-only install** (alternative): install the binary yourself
-(`go install github.com/matteobortolazzo/claude-tools/agentwatch@latest` or
+(`go install github.com/matteobortolazzo/agent-stack/agentwatch@latest` or
 `make build`) and start the daemon once (`agentwatch`). See the main
 [README](../../README.md#advanced--development).
 
@@ -38,7 +38,7 @@ If you do not already have Codex hooks configured:
 
 ```bash
 mkdir -p ~/.codex
-cp /path/to/claude-tools/agentwatch/plugin/codex/hooks.json ~/.codex/hooks.json
+cp /path/to/agent-stack/agentwatch/plugin/codex/hooks.json ~/.codex/hooks.json
 ```
 
 If `~/.codex/hooks.json` already exists, merge the `hooks` entries from this directory's `hooks.json` instead of replacing the file.

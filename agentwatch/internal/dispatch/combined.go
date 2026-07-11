@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/run"
-	"github.com/matteobortolazzo/claude-tools/agentwatch/pkg/watch"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/run"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/pkg/watch"
 )
 
 // RunCombinedLoop runs the dispatch pass and the reconcile pass on one interval

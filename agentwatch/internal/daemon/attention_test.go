@@ -3,8 +3,8 @@ package daemon
 import (
 	"testing"
 
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/ipc"
-	"github.com/matteobortolazzo/claude-tools/agentwatch/internal/tmux/tmuxtest"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/ipc"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/tmux/tmuxtest"
 )
 
 func TestBuildSnapshot_AttentionOverlayAppendsFailed(t *testing.T) {

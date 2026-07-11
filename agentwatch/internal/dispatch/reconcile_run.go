@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/matteobortolazzo/claude-tools/agentwatch/pkg/watch"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/pkg/watch"
 )
 
 // TicketMutator applies the reconciler's gh side effects. The seam keeps
