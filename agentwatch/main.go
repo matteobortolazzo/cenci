@@ -168,8 +168,8 @@ func runNotify(args []string) {
 func runRun(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	agent := fs.String("agent", "", "agent to launch (claude, codex, ...); default from config or claude")
-	sandbox := fs.Bool("sandbox", false, "launch inside the dev-sandbox container")
-	noSandbox := fs.Bool("no-sandbox", false, "force a host launch (overrides the config default)")
+	sandbox := fs.Bool("sandbox", false, "launch inside the dev-sandbox container (the default)")
+	noSandbox := fs.Bool("no-sandbox", false, "force a host launch (overrides the sandbox default)")
 	model := fs.String("model", "", "model override passed to the agent")
 	session := fs.String("session", "", "target tmux session (default: current session)")
 	slug := fs.String("slug", "", "window-name slug (default: gh issue title, else the bare ticket)")

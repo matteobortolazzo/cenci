@@ -63,7 +63,8 @@ func TestRunSpawnsWindowAndPinsName(t *testing.T) {
 	if w.name != "40-demo" {
 		t.Errorf("name = %q, want 40-demo", w.name)
 	}
-	if !strings.Contains(w.cmd, "claude") || !strings.Contains(w.cmd, "/agentflow:implement 40") {
+	// With no flag and no config, the default is now the sandbox launcher (#98).
+	if !strings.Contains(w.cmd, "agent-sand") || !strings.Contains(w.cmd, "/agentflow:implement 40") {
 		t.Errorf("command = %q", w.cmd)
 	}
 
@@ -75,6 +76,46 @@ func TestRunSpawnsWindowAndPinsName(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected automatic-rename off on work:40-demo, got %+v", m.options)
+	}
+}
+
+func TestRunDefaultsToSandbox(t *testing.T) {
+	m := &mockCtrl{session: "work"}
+	opts := noConfigOpts(t)
+	opts.Workflow, opts.Ticket = "implement", "40"
+
+	if err := Run(opts, m); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(m.windows) != 1 {
+		t.Fatalf("expected 1 NewWindow, got %d", len(m.windows))
+	}
+	// No flag and no config default → sandbox launcher (#98).
+	if !strings.Contains(m.windows[0].cmd, "agent-sand") {
+		t.Errorf("command = %q, want sandbox launcher", m.windows[0].cmd)
+	}
+}
+
+func TestRunNoSandboxForcesHost(t *testing.T) {
+	m := &mockCtrl{session: "work"}
+	opts := noConfigOpts(t)
+	opts.Workflow, opts.Ticket = "implement", "40"
+	// Mirrors `--no-sandbox`: flag is set, sandbox is false.
+	opts.SandboxSet = true
+	opts.Sandbox = false
+
+	if err := Run(opts, m); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(m.windows) != 1 {
+		t.Fatalf("expected 1 NewWindow, got %d", len(m.windows))
+	}
+	cmd := m.windows[0].cmd
+	if strings.Contains(cmd, "agent-sand") {
+		t.Errorf("--no-sandbox must not use the sandbox launcher: %q", cmd)
+	}
+	if !strings.Contains(cmd, "claude") {
+		t.Errorf("command = %q, want host claude launcher", cmd)
 	}
 }
 

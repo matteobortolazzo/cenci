@@ -70,10 +70,15 @@ func Run(opts Opts, ctrl Controller) error {
 		agent = "claude"
 	}
 
-	// Resolve sandbox: explicit flag wins, else config default (else host).
+	// Resolve sandbox: explicit flag wins, else config default, else sandbox
+	// (the container is the mandatory runtime — #98). --no-sandbox opts out.
 	sandbox := opts.Sandbox
-	if !opts.SandboxSet && cfg.Sandbox != nil {
-		sandbox = *cfg.Sandbox
+	if !opts.SandboxSet {
+		if cfg.Sandbox != nil {
+			sandbox = *cfg.Sandbox
+		} else {
+			sandbox = true
+		}
 	}
 
 	// 2 + 5. Resolve template and build the launcher command.
