@@ -1,6 +1,7 @@
 ---
 name: refine
-description: Refine a ticket interactively until it's ready for planning
+description: "Claude Code-only: refine a ticket interactively until it is ready for planning."
+compatibility: Requires Claude Code AskUserQuestion and agentflow project configuration.
 argument-hint: <ticket-id> [additional context]
 user-invocable: true
 disable-model-invocation: true

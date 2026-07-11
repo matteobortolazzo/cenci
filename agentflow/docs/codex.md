@@ -1,65 +1,70 @@
 # Codex support
 
-agentflow's implementation workflow is available to OpenAI Codex as a **documented
-prose equivalent**, not a port. This is a deliberate design decision — see
-[`docs/cohesive-package.md` §6.3](../../docs/cohesive-package.md#63-layer-3--agentflow-workflow)
-for the coupling rationale.
+Agentflow gives Codex shared engineering conventions as native plugin skills and the
+ticket-to-PR workflow as an `AGENTS.md` prose recipe. The interactive Claude Code
+pipeline is deliberately not ported.
 
-## What Codex gets
+## Install
+
+The marketplace catalog is shared, but Claude Code and Codex keep separate plugin
+installations:
+
+```bash
+codex plugin marketplace add matteobortolazzo/agent-stack
+codex plugin add agentflow@agent-stack
+```
+
+The agent-stack installer runs these commands automatically when it detects Codex.
+Restart or begin a new Codex session after installation.
+
+Verified with Codex CLI 0.144.1: Codex accepts this repository's existing marketplace,
+uses `agentflow/.codex-plugin/plugin.json`, and discovers the bundled
+`skills/*/SKILL.md` files under the `agentflow:` namespace. A Claude installation
+under `~/.claude/plugins` is not shared with Codex. No `.agents/skills` copy or
+symlink is required.
+
+## Portable skills
+
+Codex can automatically apply the convention skills for attachments, frontend
+classification, PR-comment filtering, shell commands, Angular, .NET, Go, delegation,
+testing, and worktrees. The complete matrix and limitations are in the
+[agentflow README](../README.md#skill-portability).
+
+Skills whose descriptions start with `Claude Code-only` are present so one
+marketplace can serve both clients, but Codex must not invoke them. They depend on
+Claude pipeline mechanics such as `AskUserQuestion`, model/invocation frontmatter,
+hooks, slash commands, or specialized workflow subagents.
+
+## Ticket-to-PR recipe
 
 The recipe in [`templates/agents-md-codex.md`](../templates/agents-md-codex.md) is a
-complete `AGENTS.md` a solo Codex session can follow unaided:
+complete `AGENTS.md` a Codex session can follow:
 
-- **TDD loop** — red (failing tests that assert behavior) → green (simplest
-  passing implementation) → refactor (touched code only).
-- **Self-review** — the three agentflow reviewer conventions (security,
-  code-quality, silent-failure) collapsed into one checklist Codex runs on its
-  own diff.
-- **Worktree discipline** — always work in a git worktree; the main worktree is
-  read-only.
-- **PR flow** — rebase, conventional commit, push, `gh pr create` with a
-  structured body; 1 ticket = 1 PR; never commit to `main`.
+- TDD red, green, and touched-code refactor
+- Security, code-quality, and silent-failure self-review
+- Worktree discipline
+- Rebase, conventional commit, push, and pull-request flow
 
-Codex reads `AGENTS.md` from the repo root, so the conventions travel as that
-file. A single Codex agent performs every role — there are no agentflow skills or
-subagents for it to call.
+Portable skills supply reusable conventions while the recipe owns sequencing and
+acceptance gates. Codex performs the pipeline roles using its available agent
+capabilities; it does not invoke `/agentflow:implement`.
 
-## What stays Claude-only, and why
+## Dispatch
 
-agentflow is architecturally Claude-Code-only at every layer, and only the workflow
-*logic* is portable — as prose. These layers have no Codex equivalent and are
-**not** ported:
-
-- The plugin/skill system and `CLAUDE_PLUGIN_ROOT`.
-- `Task` subagents (planner, implementer, the three reviewers).
-- `AskUserQuestion` interactive gates.
-- The hook lifecycle (`PreToolUse` / `PreCompact` / `SessionStart` / `Stop`).
-- `.claude/settings.json`.
-- `/goal` autopilot, `.plans/` plan files, babysit label automation, and Pencil.
-
-This is a **deliberate prose equivalent, not a half-finished port**. Porting the
-skill/subagent/`AskUserQuestion` pipeline is explicitly out of scope; the coupling
-is documented in
-[`docs/cohesive-package.md` §6.3](../../docs/cohesive-package.md#63-layer-3--agentflow-workflow).
-
-## How it wires
-
-1. Drop [`templates/agents-md-codex.md`](../templates/agents-md-codex.md) at the
-   repo root as `AGENTS.md`.
-2. Merge [`templates/agentwatch-codex-config.json`](../templates/agentwatch-codex-config.json)
-   into `~/.config/agentwatch/config.json`. It adds a `codex` agent with an
-   `implement` workflow in the shape agentwatch's `run` launcher consumes
-   (`agents.codex` → `command` / `model` / `workflows`, with `{ticket}` and
-   `{model}` placeholders). The prompt points Codex at the `AGENTS.md` recipe —
-   **not** at `/agentflow:implement`, which is a Claude-only skill.
-3. Launch:
+1. Put the `AGENTS.md` recipe at the target repository root.
+2. Install agent-stack for Codex so AgentWatch hooks and portable skills are present.
+3. Merge [`templates/agentwatch-codex-config.json`](../templates/agentwatch-codex-config.json)
+   into `~/.config/agentwatch/config.json`.
+4. Launch:
 
    ```bash
    agentwatch run implement <n> --agent codex
    ```
 
-   This resolves to `codex exec 'Implement GitHub ticket #<n> …'` in a
-   `<n>-<slug>` tmux window.
+The Codex workflow template resolves to `codex exec` in a `<ticket>-<slug>` tmux
+window and tells Codex to follow the repository's `AGENTS.md`.
 
-Only the `implement` workflow is provided. `refine` and `design` lean on Pencil
-and `AskUserQuestion`, which are not portable to a single-agent Codex loop.
+Only the `implement` dispatch is provided. Interactive refinement, Pencil design,
+Claude goal/loop automation, and Claude project configuration remain out of scope.
+The architectural rationale is recorded in
+[`docs/cohesive-package.md` section 6.3](../../docs/cohesive-package.md#63-layer-3--agentflow-workflow).

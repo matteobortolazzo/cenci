@@ -139,4 +139,6 @@ describe('OrderTableComponent', () => {
 - Use `HttpClient` which includes XSRF protection by default
 - Sanitize user input displayed via `[innerHTML]` using `DomSanitizer`
 
-Read the project's `CLAUDE.md` and relevant `docs/<topic>.md` files for project-specific Angular conventions (if they exist).
+Read the project's applicable agent guidance (`AGENTS.md` for Codex, `CLAUDE.md` for
+Claude Code) and relevant `docs/<topic>.md` files for project-specific Angular
+conventions when they exist.

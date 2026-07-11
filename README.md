@@ -65,9 +65,14 @@ platform, your first session, troubleshooting, uninstall.
 ```bash
 claude plugin marketplace add matteobortolazzo/agent-stack
 claude plugin install agentflow agentwatch sandbox
+codex plugin marketplace add matteobortolazzo/agent-stack
+codex plugin add agentflow@agent-stack
+codex plugin add agentwatch@agent-stack
+codex plugin add sandbox@agent-stack
 /sandbox:setup   # container layer only — symlink agent-sand + build the image
 # later:
 claude plugin update --all
+codex plugin marketplace upgrade agent-stack
 ```
 
 </details>
@@ -102,11 +107,10 @@ never waits silently. The plugin self-bootstraps its binary and daemon on first 
 
 ## Agent-agnostic (Claude Code + Codex)
 
-One marketplace serves both agents. Codex deliberately consumes Claude-format plugin
-infrastructure: it reads `.claude-plugin/marketplace.json`, accepts
-`.claude-plugin/plugin.json` as a manifest, loads `hooks.json`, and sets
-`CLAUDE_PLUGIN_ROOT`. So "support both agents" reduces to *one* marketplace, not two —
-the same install path above works from Codex.
+One marketplace catalog serves both agents. Claude Code and Codex keep separate local
+plugin installations, so the installer registers and installs the selected plugins
+with both CLIs when Codex is present. Each plugin ships native Claude and Codex
+manifests while sharing the same implementation and skill files.
 
 **Codex `/hooks` trust note.** Codex hash-pins `hooks.json`, so every plugin update that
 changes it changes the hash and requires re-trusting the hooks via `/hooks` in Codex.
@@ -134,11 +138,11 @@ Gemini benefit without per-tool config.
 
 Per-layer Codex status is honest about where each layer stands today:
 
-| Layer | Codex today | Roadmap |
-|-------|-------------|---------|
-| attention (agentwatch) | ✅ watched — self-bootstrapping Codex hooks, `/hooks` trust step | `agentwatch run --agent codex` launch templates ([#33](https://github.com/matteobortolazzo/agent-stack/issues/33)) |
-| workflow (agentflow) | Claude Code only | documented `AGENTS.md` equivalent ([#19](https://github.com/matteobortolazzo/agent-stack/issues/19)) |
-| isolation (sandbox) | Claude-only launcher | `agent-sand --agent codex` ([#18](https://github.com/matteobortolazzo/agent-stack/issues/18)) |
+| Layer | Codex today | Boundary |
+|-------|-------------|----------|
+| attention (agentwatch) | Watched through native, self-bootstrapping Codex hooks | Re-trust changed hooks through `/hooks` |
+| workflow (agentflow) | Portable convention skills plus the `AGENTS.md` implementation recipe | Interactive pipeline commands remain Claude Code-only |
+| isolation (sandbox) | `agent-sand --agent codex` and `codex-sand` | Container remains the security boundary |
 
 ## License
 

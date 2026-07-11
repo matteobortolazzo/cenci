@@ -1,6 +1,7 @@
 ---
 name: configure
-description: Configure the agentflow workflow plugin for this project
+description: "Claude Code-only: configure the agentflow workflow plugin, Claude settings, sandbox, MCP servers, and project guidance."
+compatibility: Requires Claude Code settings, plugin environment variables, and AskUserQuestion.
 argument-hint: [additional context]
 user-invocable: true
 disable-model-invocation: true

@@ -24,6 +24,7 @@ set -u
 MARKETPLACE_REPO="matteobortolazzo/agent-stack"
 MARKETPLACE_NAME="agent-stack"
 ALL_PLUGINS="agentflow agentwatch sandbox"
+CODEX_MARKETPLACE_READY=0
 
 # ---------------------------------------------------------------- output ----
 
@@ -128,6 +129,16 @@ marketplace_registered() {
 	claude plugin marketplace list 2>/dev/null | grep -q "$MARKETPLACE_NAME"
 }
 
+codex_plugin_installed() {
+	codex plugin list 2>/dev/null |
+		grep -Eq "^$1@${MARKETPLACE_NAME}[[:space:]]+installed"
+}
+
+codex_marketplace_registered() {
+	codex plugin marketplace list 2>/dev/null |
+		grep -Eq "^${MARKETPLACE_NAME}[[:space:]]"
+}
+
 # find_plugin_path <relative-path> — resolve a file inside the installed
 # marketplace checkout (stable across plugin updates), falling back to the
 # versioned plugin cache.
@@ -167,6 +178,9 @@ run_doctor() {
 		"install Claude Code first: https://code.claude.com/docs/en/overview" \
 		command -v claude
 	check "git" required "install git from your package manager" command -v git
+	check "codex CLI" optional \
+		"install Codex to add the same plugins there; Claude setup still works without it" \
+		command -v codex
 
 	say ""
 	say "  ${BOLD}For agentflow (workflow)${RESET}"
@@ -265,14 +279,24 @@ choose_plugins() {
 step_marketplace() {
 	step "Registering the agent-stack marketplace"
 	if marketplace_registered; then
-		ok "marketplace '$MARKETPLACE_NAME' already registered"
-		return
-	fi
-	if claude plugin marketplace add "$MARKETPLACE_REPO" >/dev/null 2>&1; then
-		ok "registered $MARKETPLACE_REPO"
+		ok "Claude: marketplace '$MARKETPLACE_NAME' already registered"
+	elif claude plugin marketplace add "$MARKETPLACE_REPO" >/dev/null 2>&1; then
+		ok "Claude: registered $MARKETPLACE_REPO"
 	else
 		die "could not register the marketplace. Run manually to see the error:
   claude plugin marketplace add $MARKETPLACE_REPO"
+	fi
+
+	have codex || return 0
+	if codex_marketplace_registered; then
+		ok "Codex: marketplace '$MARKETPLACE_NAME' already registered"
+		CODEX_MARKETPLACE_READY=1
+	elif codex plugin marketplace add "$MARKETPLACE_REPO" >/dev/null 2>&1; then
+		ok "Codex: registered $MARKETPLACE_REPO"
+		CODEX_MARKETPLACE_READY=1
+	else
+		fail "Codex marketplace registration failed. Run manually: codex plugin marketplace add $MARKETPLACE_REPO"
+		INSTALL_FAILED=1
 	fi
 }
 
@@ -280,13 +304,27 @@ step_install_plugins() {
 	step "Installing plugins"
 	for p in $SELECTED; do
 		if plugin_installed "$p"; then
-			ok "$p already installed (run './install.sh update' to update)"
+			ok "Claude: $p already installed (run './install.sh update' to update)"
 			continue
 		fi
 		if plugin_cmd install "$p"; then
-			ok "$p installed"
+			ok "Claude: $p installed"
 		else
-			fail "$p failed to install. Run manually to see the error: claude plugin install $p@$MARKETPLACE_NAME"
+			fail "Claude: $p failed to install. Run manually: claude plugin install $p@$MARKETPLACE_NAME"
+			INSTALL_FAILED=1
+		fi
+	done
+
+	[ "$CODEX_MARKETPLACE_READY" -eq 1 ] || return 0
+	for p in $SELECTED; do
+		if codex_plugin_installed "$p"; then
+			ok "Codex: $p already installed (run './install.sh update' to update)"
+			continue
+		fi
+		if codex plugin add "$p@$MARKETPLACE_NAME" >/dev/null 2>&1; then
+			ok "Codex: $p installed"
+		else
+			fail "Codex: $p failed to install. Run manually: codex plugin add $p@$MARKETPLACE_NAME"
 			INSTALL_FAILED=1
 		fi
 	done
@@ -301,9 +339,34 @@ step_update_plugins() {
 			continue
 		fi
 		if plugin_cmd update "$p"; then
-			ok "$p updated"
+			ok "Claude: $p updated"
 		else
-			fail "$p failed to update. Run manually to see the error: claude plugin update $p@$MARKETPLACE_NAME"
+			fail "Claude: $p failed to update. Run manually: claude plugin update $p@$MARKETPLACE_NAME"
+			INSTALL_FAILED=1
+		fi
+	done
+
+	have codex || return 0
+	if ! codex_marketplace_registered; then
+		warn "Codex marketplace is not registered — skipping Codex updates (run './install.sh' to install it)"
+		return 0
+	fi
+	if ! codex plugin marketplace upgrade "$MARKETPLACE_NAME" >/dev/null 2>&1; then
+		fail "Codex marketplace update failed. Run manually: codex plugin marketplace upgrade $MARKETPLACE_NAME"
+		INSTALL_FAILED=1
+		return 0
+	fi
+	for p in $SELECTED; do
+		if ! codex_plugin_installed "$p"; then
+			warn "Codex: $p is not installed — skipping"
+			continue
+		fi
+		# `plugin add` is idempotent and refreshes the installed cache from the
+		# newly upgraded marketplace snapshot.
+		if codex plugin add "$p@$MARKETPLACE_NAME" >/dev/null 2>&1; then
+			ok "Codex: $p updated"
+		else
+			fail "Codex: $p failed to update. Run manually: codex plugin add $p@$MARKETPLACE_NAME"
 			INSTALL_FAILED=1
 		fi
 	done
@@ -385,7 +448,7 @@ step_agentwatch_setup() {
 	selected agentwatch || return 0
 	step "Setting up agentwatch"
 
-	ok "nothing to do on $(platform_label) — the binary and daemon self-bootstrap on your first Claude Code session"
+	ok "nothing to do on $(platform_label) — the binary and daemon self-bootstrap on your first agent session"
 	say "  ${DIM}first session may take a moment before status appears; log: \${TMPDIR:-/tmp}/agentwatch-bootstrap.log${RESET}"
 
 	[ "$OS" = macos ] || return 0
@@ -443,6 +506,9 @@ final_summary() {
 	fi
 	if selected agentflow; then
 		say "    claude → /agentflow:configure # one-time project setup"
+		if have codex; then
+			say "    codex                       # portable agentflow conventions are available"
+		fi
 	fi
 	if selected agentwatch; then
 		say "    (start any Claude Code session — status appears in the tmux bar)"

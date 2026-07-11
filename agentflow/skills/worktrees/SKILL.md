@@ -14,7 +14,7 @@ project-root/          # Main worktree — stays on main, read-only for implemen
 
 ## Rules
 - **Never modify code in main worktree** — use it for reading/searching/comparing
-- **One worktree per feature** (enables parallel Claude Code instances)
+- **One worktree per feature** (enables isolated or parallel agent sessions)
 - **Naming**: `.worktrees/<ticket-id>-<short-description>`
 
 ## Commands
@@ -26,7 +26,9 @@ git -C <repo-root> worktree add .worktrees/<id>-<desc> -b feature/<id>-<desc> ma
 git -C <repo-root> worktree list
 ```
 
-To inspect the new worktree (e.g. check for `node_modules`), use separate bare `ls`/`git -C` calls — never `cd <repo>; … 2>/dev/null` in one line. A single Bash call combining a `cd` with a redirection or write hits a built-in guard that no setting can disable (see `shell-rules` → the `cd`+redirection guard).
+To inspect the new worktree, use the client's working-directory option or separate
+`git -C`/inspection calls. Never combine `cd <repo>` with a redirection or write in
+one shell call; see `shell-rules` for client-specific approval behavior.
 
 ## .gitignore
 Ensure `.worktrees/` is in `.gitignore`.

@@ -1,6 +1,7 @@
 ---
 name: review
-description: Review code for security issues, quality, and silent failures — standalone or on PRs
+description: "Claude Code-only: review code with specialized security, quality, and silent-failure subagents."
+compatibility: Requires Claude Code subagents and interactive gates.
 argument-hint: [<pr-number> | <file-paths>]
 user-invocable: true
 disable-model-invocation: true

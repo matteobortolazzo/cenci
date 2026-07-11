@@ -53,8 +53,10 @@ cd agent-stack && ./install.sh
 
 What it does, concretely:
 
-1. Registers this repo as a Claude Code plugin marketplace.
-2. Installs the plugins you pick with `claude plugin install`.
+1. Registers this repo as a Claude Code plugin marketplace and, when detected, as a
+   Codex plugin marketplace.
+2. Installs the selected plugins in Claude Code and Codex. Each client keeps its own
+   local plugin cache; the marketplace catalog and plugin sources are shared.
 3. **sandbox**: symlinks the `agent-sand` / `codex-sand` launchers into
    `~/.local/bin` and offers to build the container image (a few minutes, one time).
 4. **agentwatch**: nothing to do — the binary and daemon self-bootstrap on your first
@@ -80,6 +82,11 @@ project_doc_fallback_filenames = ["CLAUDE.md"]
 ```bash
 claude plugin marketplace add matteobortolazzo/agent-stack
 claude plugin install agentflow agentwatch sandbox
+
+codex plugin marketplace add matteobortolazzo/agent-stack
+codex plugin add agentflow@agent-stack
+codex plugin add agentwatch@agent-stack
+codex plugin add sandbox@agent-stack
 ```
 
 Then, inside Claude Code, `/sandbox:setup` to symlink the launcher and build the
@@ -142,9 +149,9 @@ Treated as Linux. Two things to know:
 # or the same curl one-liner with:  bash -s -- update
 ```
 
-This updates every installed plugin, refreshes the launcher symlinks, and offers to
-rebuild the sandbox image (needed only when the Dockerfile changed — release notes say
-so). agentwatch re-bootstraps its matching binary on the next session automatically.
+This updates every installed plugin in each available client, refreshes the launcher
+symlinks, and offers to rebuild the sandbox image when needed. AgentWatch
+re-bootstraps its matching binary on the next session automatically.
 
 ## Renamed from ccflow
 
@@ -154,6 +161,8 @@ The workflow plugin was formerly `ccflow`; it is now **`agentflow`** (matching
 ```bash
 claude plugin uninstall ccflow
 claude plugin install agentflow
+codex plugin remove ccflow@agent-stack 2>/dev/null || true
+codex plugin add agentflow@agent-stack
 ```
 
 - Skills moved namespace: `/ccflow:*` → `/agentflow:*` (e.g. `/agentflow:refine`,
@@ -173,6 +182,7 @@ claude plugin install agentflow
 | macOS menu bar item never appears | Usually the SwiftBar GUI-PATH gotcha — see [the SwiftBar README](../agentwatch/plugin/macos/README.md#the-gui-path-gotcha) |
 | Sandbox build fails / permission errors on `/workspace` | On Linux your UID must be 1000 (`id -u`); see [dev-sandbox/README.md](../dev-sandbox/README.md#troubleshooting) |
 | `/agentflow:*` commands missing in a session | `claude plugin list` should show agentflow; if not, re-run the installer — and note plugins load at session start, so restart Claude Code after installing |
+| `agentflow:*` skills missing in Codex | `codex plugin list` should show `agentflow@agent-stack` as installed and enabled; re-run the installer, then start a new Codex session |
 | `git push` fails inside the sandbox | SSH remotes don't work through the sandbox network filter — switch to HTTPS: `git remote set-url origin https://github.com/<owner>/<repo>.git` |
 
 ## Uninstall
@@ -180,6 +190,10 @@ claude plugin install agentflow
 ```bash
 claude plugin uninstall agentflow agentwatch sandbox
 claude plugin marketplace remove agent-stack
+codex plugin remove agentflow@agent-stack
+codex plugin remove agentwatch@agent-stack
+codex plugin remove sandbox@agent-stack
+codex plugin marketplace remove agent-stack
 rm -f ~/.local/bin/agent-sand ~/.local/bin/codex-sand
 # sandbox leftovers, if you built the image:
 docker rmi agent-sandbox:latest

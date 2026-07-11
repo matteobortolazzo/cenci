@@ -1,6 +1,7 @@
 ---
 name: setup
-description: Install the agent-sand launcher and build the sandbox container image
+description: "Claude Code-only: install the agent-sand launcher and build the sandbox container image. Codex users receive the launcher through the agent-stack installer."
+compatibility: Requires Claude Code AskUserQuestion and CLAUDE_PLUGIN_ROOT.
 argument-hint: [--build-only | --link-only]
 user-invocable: true
 disable-model-invocation: true

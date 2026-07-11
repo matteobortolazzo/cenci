@@ -47,4 +47,6 @@ dotnet test
 - Validate all model inputs with data annotations or FluentValidation
 - No secrets in `appsettings.json` committed to source control — use User Secrets or environment variables
 
-Read the project's `CLAUDE.md` and relevant `docs/<topic>.md` files for project-specific .NET conventions (if they exist).
+Read the project's applicable agent guidance (`AGENTS.md` for Codex, `CLAUDE.md` for
+Claude Code) and relevant `docs/<topic>.md` files for project-specific .NET
+conventions when they exist.

@@ -1,6 +1,7 @@
 ---
 name: design
-description: Interactive design reasoning and .pen file creation using Pencil
+description: "Claude Code-only: run interactive design reasoning and create .pen files using Pencil."
+compatibility: Requires Claude Code interactive gates and the configured Pencil integration.
 argument-hint: <ticket-id | design description> [additional context]
 user-invocable: true
 disable-model-invocation: true

@@ -1,6 +1,7 @@
 ---
 name: address-review
-description: Address PR review comments — fetch, evaluate, fix, reply, push, re-request review
+description: "Claude Code-only: address PR review comments by fetching, evaluating, fixing, replying, pushing, and re-requesting review."
+compatibility: Requires Claude Code tools, interactive gates, and agentflow pipeline configuration.
 argument-hint: <pr-number> [additional context]
 disable-model-invocation: true
 user-invocable: true

@@ -9,6 +9,7 @@ Isolated Docker/Podman container for running Claude Code with full permissions. 
 
 - Docker or Podman installed on the host
 - Claude Code installed on the host (`claude` in PATH)
+- Codex installed on the host when using `--agent codex` (`codex` in PATH)
 - Host user UID must be 1000 (standard Linux default)
 
 ## Setup
@@ -32,6 +33,11 @@ claude plugin install sandbox
 `/sandbox:setup` accepts `--link-only` (symlink only, skip the build) or `--build-only`
 (rebuild the image, skip the symlink). Update later with `claude plugin update sandbox`,
 then re-run `/sandbox:setup --build-only` if the Dockerfile changed.
+
+The `setup` skill is Claude Code-only because it relies on Claude's interactive and
+plugin-root extensions. Codex users should use the agent-stack installer, which
+installs the same sandbox plugin for Codex and performs the launcher setup outside the
+agent session.
 
 <details>
 <summary>Manual setup (without the plugin)</summary>

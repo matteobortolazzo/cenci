@@ -12,17 +12,21 @@ user-invocable: false
 - Any path containing `@v` version suffixes (e.g., `pkg@v1.2.3/`)
 - `vendor/` directories
 
-Instead, **always use Context7** (`resolve-library-id` + `query-docs`) to look up Go library documentation. This produces accurate, up-to-date API information without polluting context with raw source code.
+Instead, use the client's available documentation lookup, preferring official package
+documentation. Use Context7 when that integration is configured. This produces
+focused API information without polluting context with raw dependency source.
 
 ## Sandbox Environment
 
-Go commands require environment variables for every Bash call (they don't persist between calls):
+When the active sandbox does not permit writes to the default Go caches, set writable
+cache paths on every Go shell call because environment assignments may not persist:
 
 ```bash
 GOPATH=$TMPDIR/gopath GOCACHE=$TMPDIR/gocache GOMODCACHE=$TMPDIR/gomodcache go <command>
 ```
 
-This prefix is required on **every** `go` invocation — `go build`, `go test`, `go mod tidy`, `go get`, etc. There is no way to set these once; accept the repetition.
+Apply this prefix only when the environment requires it, including `go build`,
+`go test`, `go mod tidy`, and `go get`.
 
 ## Integration Tests
 
@@ -93,4 +97,6 @@ When working with BubbleTea (`github.com/charmbracelet/bubbletea`) TUI apps:
 - Use `html/template` (not `text/template`) for HTML output — it auto-escapes
 - Validate and sanitize all user input at handler boundaries
 
-Read the project's `CLAUDE.md` and relevant `docs/<topic>.md` files for project-specific Go conventions (if they exist).
+Read the project's applicable agent guidance (`AGENTS.md` for Codex, `CLAUDE.md` for
+Claude Code) and relevant `docs/<topic>.md` files for project-specific Go conventions
+when they exist.

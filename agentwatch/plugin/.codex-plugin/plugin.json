@@ -1,7 +1,7 @@
 {
   "name": "agentwatch",
   "version": "1.11.4",
-  "description": "Send Codex lifecycle events to the agentwatch tmux status daemon.",
+  "description": "Send Codex lifecycle events to the agentwatch status daemon.",
   "author": {
     "name": "Matteo Bortolazzo",
     "url": "https://github.com/matteobortolazzo"
@@ -15,11 +15,11 @@
     "status",
     "waybar"
   ],
-  "hooks": "./hooks.json",
+  "hooks": "./codex/hooks.json",
   "interface": {
     "displayName": "AgentWatch",
-    "shortDescription": "Track Codex tmux sessions in your status bar.",
-    "longDescription": "AgentWatch forwards Codex lifecycle hooks to a local daemon that updates tmux window indicators and Waybar-compatible session counts.",
+    "shortDescription": "Track Codex sessions in your status surfaces.",
+    "longDescription": "AgentWatch forwards Codex lifecycle hooks to a local daemon that updates tmux window indicators and other status surfaces.",
     "developerName": "Matteo Bortolazzo",
     "category": "Productivity",
     "capabilities": [
@@ -27,6 +27,9 @@
       "Monitoring"
     ],
     "websiteURL": "https://github.com/matteobortolazzo/agent-stack/tree/main/agentwatch",
+    "defaultPrompt": [
+      "Show AgentWatch status and setup guidance."
+    ],
     "brandColor": "#3B82F6"
   }
 }

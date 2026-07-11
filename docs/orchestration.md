@@ -178,6 +178,24 @@ badges exactly as a host dispatch would.
 
 ## Mixed-agent boards
 
+Prepare both client-local plugin stores once. The installer does this automatically
+when both CLIs are present; manual setup is:
+
+```bash
+claude plugin marketplace add matteobortolazzo/agent-stack
+claude plugin install agentflow agentwatch sandbox
+codex plugin marketplace add matteobortolazzo/agent-stack
+codex plugin add agentflow@agent-stack
+codex plugin add agentwatch@agent-stack
+codex plugin add sandbox@agent-stack
+```
+
+Codex then discovers the portable `agentflow:*` convention skills directly from the
+plugin. The full implementation sequence still comes from the repository's
+`AGENTS.md`; copy or merge
+[`agentflow/templates/agents-md-codex.md`](../agentflow/templates/agents-md-codex.md)
+into the target repository.
+
 Which agent runs a card is a **per-dispatch** choice — pass `--agent`:
 
 ```yaml
@@ -193,10 +211,11 @@ shared: each directory's `CLAUDE.md` (canonical) is read by Claude Code natively
 Codex via `project_doc_fallback_filenames = ["CLAUDE.md"]` in `~/.codex/config.toml` (a
 one-time, user-level line — a committed repo-level `.codex/config.toml` is ignored), so a
 dispatched Codex card sees the same project context as a Claude Code card. `agentwatch run`
-ships built-in templates for **claude** (`refine`/`design`/`implement`) only;
-**codex** and **opencode** are added by dropping an entry into
-`~/.config/agentwatch/config.json` (opencode is future config, not code). Codex
-support across the package is tracked in
+ships built-in Claude templates; merge
+[`agentflow/templates/agentwatch-codex-config.json`](../agentflow/templates/agentwatch-codex-config.json)
+into `~/.config/agentwatch/config.json` to add the Codex `implement` template, while
+interactive `refine` and `design` remain Claude Code-only. Codex support across the
+package is tracked in
 [#33](https://github.com/matteobortolazzo/agent-stack/issues/33); see
 [agentwatch's README](../agentwatch/README.md#dispatching-workflows-agentwatch-run)
-for the launcher's flags and config format.
+for config precedence and launcher flags.

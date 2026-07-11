@@ -1,6 +1,6 @@
 ---
 name: pr-comment-filter
-description: Canonical filter for deciding which PR review comments are actionable. Use when fetching PR reviews/comments to decide which ones need action — addressing review feedback, babysitting a PR, or watermarking already-handled comments.
+description: Decide which pull-request review comments are actionable. Use when addressing review feedback, monitoring a PR, or filtering already-handled comments.
 user-invocable: false
 ---
 

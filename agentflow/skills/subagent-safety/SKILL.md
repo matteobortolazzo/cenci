@@ -1,61 +1,58 @@
 ---
 name: subagent-safety
-description: Rules for what operations can and cannot be delegated to subagents
+description: Decide which work is safe to delegate to worker agents. Use before delegating tasks that may require user interaction, approval, authentication, external writes, or shared-state mutation.
 user-invocable: false
 ---
 
-## Subagent Safety
+## Delegation Boundary
 
-Subagents (Task tool) cannot surface permission prompts, authentication errors, or user questions to the main conversation. They block silently, appearing to hang.
+Worker agents may be unable to surface approval prompts, authentication failures, or
+user questions to the active conversation. Delegate bounded work that can complete
+without those interactions.
 
-**Subagent-safe operations** (delegate freely):
-- Code reading, analysis, and review
-- File searching and pattern matching
-- Context7 documentation lookups
-- Local file writes within the worktree
-- Running builds and tests
-- **Read-only `gh` commands** (`gh issue view`, `gh issue list`) — only after the main agent has verified, in the current session, that `Bash(gh *)` is in `permissions.allow` and `gh auth status` succeeds (the implement pre-flight check does both). Without that verification, a `gh` call can trigger a permission prompt or auth error inside the subagent and hang silently
+**Generally safe to delegate:**
 
-**Main-agent-only operations** (never delegate):
-- `AskUserQuestion` — user interaction deadlocks in subagents. This also means reference skills that use `AskUserQuestion` (e.g. `attachments` Steps 2–4) must only be invoked from the main agent
-- `git push`, `git fetch`, `git pull` — require auth tokens
-- Mutating `gh` commands (`gh issue edit`, `gh issue comment`, `gh pr *`, label changes) — require auth tokens and may prompt
-- PR creation, ticket updates, comment replies — require auth tokens
-- Any operation that may trigger a permission prompt
+- Code reading, file searching, analysis, and review
+- Focused documentation lookup
+- Local edits within an explicitly assigned worktree and file scope
+- Builds and tests whose dependencies and permissions are already available
+- Read-only external queries after the conversation-owning agent has verified access
 
-## Container profile (agent-sand)
+**Keep with the conversation-owning agent:**
 
-When agentflow runs under the **container profile** (`.claude/config.json` has `profile: "container"`, set when configure detects the `agent-sand` container), Claude Code runs with `--dangerously-skip-permissions`. This changes two things about the rules above, but leaves the deadlock rules intact:
+- Questions or decisions that require the user
+- Approval or escalation requests
+- Authentication setup and recovery
+- Push, fetch, pull, PR creation, ticket changes, comment replies, and other external
+  mutations unless the client explicitly supports delegated authorization
+- Operations that mutate shared branches, shared worktrees, or global configuration
+- Any task whose likely failure can only be resolved interactively
 
-- **Permission prompts cannot occur** — skip-permissions suppresses them. The `Bash(gh *)` allow-rule check that normally gates read-only `gh` in subagents is therefore **moot**.
-- **`gh auth status` is still required before delegation.** Auth is orthogonal to the permission model: an unauthenticated `gh` call in the context-gatherer subagent still deadlocks silently. The implement pre-flight keeps this check on the container profile.
-- **`AskUserQuestion` still deadlocks in subagents** — the container changes nothing here. Keep it main-agent-only.
-- **Mutating `gh` commands remain main-agent-only** — they require auth tokens regardless of the permission model.
+Before delegating an authenticated read, verify access in the current session. Give
+the worker an exact objective, owned paths, allowed side effects, required output, and
+a stopping condition.
 
-## Subagent delegation and 1M-context sessions
+## Client Notes
 
-Subagents don't inherit a 1M-context session's extra-usage entitlement, so when the
-main session runs a 1M model, `Task` delegation can fail with "Usage credits required
-for 1M context" — even with a `model: sonnet` override (Claude Code bug #51060 / #57249).
-agentflow's fix is to pin every subagent to a 200K model via `CLAUDE_CODE_SUBAGENT_MODEL`.
+### Claude Code
 
-You cannot reliably determine your own session model or context size from inside the
-session — so don't try, and never announce them. The only thing to verify before the
-first delegation is that the pin is set. Run once:
+`AskUserQuestion` is main-agent-only. Claude Code subagents can silently stall on
+permission or authentication prompts, so keep mutating `gh` commands and authenticated
+git operations with the main agent. Under the agent-sand container profile,
+skip-permissions removes permission prompts but does not remove authentication or
+user-interaction failures.
 
-```bash
-echo "${CLAUDE_CODE_SUBAGENT_MODEL:-unset}"
-```
+Claude Code 1M-context sessions can reject `Task` delegation when subagents are not
+pinned to a 200K model. Agentflow configures
+`CLAUDE_CODE_SUBAGENT_MODEL=claude-sonnet-5` as an optional workaround. Do not infer
+or announce the active model/context size. If delegation fails with the documented
+usage-credit error, tell the user to run `/agentflow:configure` and restart, or use a
+standard-context session.
 
-- **Returns a model id** (e.g. `claude-sonnet-5`) → the pin is set; delegation is safe.
-  Proceed silently — do not comment on your model, the pin, or "1M context".
-- **Returns `unset`** → proceed, but if a subagent then fails with "Usage credits required
-  for 1M context", stop and tell the user:
-  > "agentflow delegation is gated: this session is on a 1M-context model and subagents aren't
-  > pinned to 200K (Claude Code bug #51060). Run `/agentflow:configure` (sets
-  > `CLAUDE_CODE_SUBAGENT_MODEL=claude-sonnet-5`) and restart, or run `/model sonnet` for
-  > this session, then re-invoke."
+### Codex
 
-Note: while `CLAUDE_CODE_SUBAGENT_MODEL` is set it overrides every agent's `model:`
-frontmatter, flattening agentflow's model tiering onto the pinned model. The pin exists
-only to work around the 1M gate — on a standard 200K session it should be unset.
+Use Codex worker/subagent tools only for concrete, bounded tasks that can run
+independently. Keep user-input tools and escalation in the root conversation. Do not
+assume a connector authorized in the root agent can be mutated safely by a worker;
+prefer read-only connector work unless the delegated tool contract explicitly
+guarantees authorization and error delivery.

@@ -1,6 +1,7 @@
 ---
 name: sync
-description: Sync main branch, rebase active worktrees, and clean up merged branches
+description: "Claude Code-only: sync the main branch, rebase active worktrees, and clean up merged branches through the agentflow command workflow."
+compatibility: Requires Claude Code skill arguments and model-selection extensions.
 argument-hint: [additional context]
 user-invocable: true
 disable-model-invocation: true
