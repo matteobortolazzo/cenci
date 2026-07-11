@@ -32,9 +32,9 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// TestCodexHooksJSONHasNoUnknownKeys guards against Claude-only keys leaking
-// into the Codex hooks file. Codex parses hooks.json with deny_unknown_fields,
-// so any extra key would break loading for every Codex user.
+// TestCodexHooksJSONHasNoUnknownKeys guards against unsupported keys leaking
+// into the Codex hooks file. In particular, Codex currently does not support
+// asynchronous hooks, and emits a startup warning for each such hook.
 func TestCodexHooksJSONHasNoUnknownKeys(t *testing.T) {
 	// main_test runs with cwd = package dir (repo root), so this resolves.
 	data, err := os.ReadFile(filepath.Join("plugin", "codex", "hooks.json"))
@@ -53,7 +53,7 @@ func TestCodexHooksJSONHasNoUnknownKeys(t *testing.T) {
 	}
 
 	allowedGroupKeys := map[string]bool{"matcher": true, "hooks": true}
-	allowedHookKeys := map[string]bool{"type": true, "command": true, "timeout": true, "async": true}
+	allowedHookKeys := map[string]bool{"type": true, "command": true, "timeout": true}
 
 	for event, groups := range root.Hooks {
 		for i, group := range groups {
@@ -75,7 +75,7 @@ func TestCodexHooksJSONHasNoUnknownKeys(t *testing.T) {
 			for j, hook := range hooks {
 				for key := range hook {
 					if !allowedHookKeys[key] {
-						t.Errorf("%s[%d].hooks[%d]: unexpected hook key %q (allowed: type, command, timeout, async)", event, i, j, key)
+						t.Errorf("%s[%d].hooks[%d]: unexpected hook key %q (allowed: type, command, timeout)", event, i, j, key)
 					}
 				}
 			}

@@ -7,8 +7,7 @@
           {
             "type": "command",
             "command": "nohup \"${PLUGIN_ROOT}/codex/bootstrap.sh\" </dev/null >/dev/null 2>&1 & agentwatch notify -agent codex 2>/dev/null || true",
-            "timeout": 5,
-            "async": true
+            "timeout": 5
           }
         ]
       }
@@ -19,8 +18,7 @@
           {
             "type": "command",
             "command": "agentwatch notify -agent codex 2>/dev/null || true",
-            "timeout": 5,
-            "async": true
+            "timeout": 5
           }
         ]
       }
@@ -31,8 +29,7 @@
           {
             "type": "command",
             "command": "agentwatch notify -agent codex 2>/dev/null || true",
-            "timeout": 5,
-            "async": true
+            "timeout": 5
           }
         ]
       }
@@ -43,8 +40,7 @@
           {
             "type": "command",
             "command": "agentwatch notify -agent codex 2>/dev/null || true",
-            "timeout": 5,
-            "async": true
+            "timeout": 5
           }
         ]
       }
@@ -55,8 +51,7 @@
           {
             "type": "command",
             "command": "agentwatch notify -agent codex 2>/dev/null || true",
-            "timeout": 5,
-            "async": true
+            "timeout": 5
           }
         ]
       }
@@ -67,8 +62,7 @@
           {
             "type": "command",
             "command": "agentwatch notify -agent codex 2>/dev/null || true",
-            "timeout": 5,
-            "async": true
+            "timeout": 5
           }
         ]
       }
