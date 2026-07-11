@@ -290,10 +290,10 @@ If no files were changed (all comments were pushed back, clarified, or acknowled
 git push origin <headRefName>
 ```
 
-If the push **fails** (e.g., sandbox network restriction, SSH remote):
+If the push **fails** (e.g., an SSH remote with no keys in the container):
 1. Display the exact push command to the user
-2. Explain that the sandbox may be blocking the push
-3. Ask the user to run the push command manually outside Claude Code
+2. Explain that it likely needs an HTTPS remote (the container injects only `gh` HTTPS credentials, not SSH keys) or manual authentication
+3. Ask the user to run the push command manually
 4. Wait for user confirmation before proceeding
 
 ## Step 6C: Re-request Review

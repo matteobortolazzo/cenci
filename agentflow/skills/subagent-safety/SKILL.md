@@ -38,7 +38,7 @@ a stopping condition.
 
 `AskUserQuestion` is main-agent-only. Claude Code subagents can silently stall on
 permission or authentication prompts, so keep mutating `gh` commands and authenticated
-git operations with the main agent. Under the agent-sand container profile,
+git operations with the main agent. In the agent-sand container,
 skip-permissions removes permission prompts but does not remove authentication or
 user-interaction failures.
 

@@ -77,18 +77,11 @@ gh auth login
 ```
 The `gh` CLI stores credentials in `~/.config/gh/hosts.yml`. It also respects `GITHUB_TOKEN`/`GH_TOKEN` env vars as a fallback for non-interactive environments.
 
-### Sandbox support (host profile — Linux / WSL2)
+### Runtime — the `agent-sand` container
 
-agentflow runs under one of two **profiles**, auto-detected by `/agentflow:configure`:
+agentflow runs inside the [`dev-sandbox`](../dev-sandbox) `agent-sand` container with `--dangerously-skip-permissions`. The **container is the security boundary** — it provides the filesystem and network isolation for autonomous execution, so Claude Code's own host sandbox stays disabled. `permissions.allow`/`deny` are still written to `.claude/settings.json` as defense-in-depth for the case where you run plain `claude` (no skip-permissions) inside the container, e.g. via `agent-sand --shell`.
 
-- **host** (default) — Claude Code runs on the host and its own sandbox is the boundary. The prerequisites below apply.
-- **container** — Claude Code runs inside the [`dev-sandbox`](../dev-sandbox) `agent-sand` container with `--dangerously-skip-permissions`. The **container is the boundary**, so configure auto-detects it (via the `AGENT_SAND=1` env var, or `/.dockerenv`) and uses the container profile: the host sandbox is skipped, along with Bash allowlists and permission auto-fix. No bubblewrap/socat needed. You can force it with `/agentflow:configure container` (or `/agentflow:configure host` to opt back out).
-
-The **host-profile** sandbox provides OS-level filesystem and network isolation for autonomous execution. It requires:
-- **bubblewrap** (`bwrap`): `sudo apt install bubblewrap` (or `sudo pacman -S bubblewrap`)
-- **socat**: `sudo apt install socat` (or `sudo pacman -S socat`)
-
-macOS host-profile sandbox support is built into Claude Code and requires no extra packages.
+There are no bubblewrap/socat prerequisites — the container supplies the isolation. Launch it with `agent-sand` (see the [`dev-sandbox` README](../dev-sandbox)), then run `/agentflow:configure` inside it.
 
 ## Installation
 
@@ -168,7 +161,7 @@ your-project/
 │   └── git-workflow.md    # On-demand reference: branching, commits, PRs
 ├── .claude/
 │   ├── config.json        # agentflow configuration (includes claudeMdLocation)
-│   └── settings.json      # Sandbox, permissions, and allowed domains
+│   └── settings.json      # permissions (sandbox disabled; container is the boundary)
 └── .worktrees/            # Git worktrees for feature branches (gitignored)
 ```
 
@@ -362,32 +355,24 @@ External integrations use the `gh` CLI rather than MCP servers, keeping permissi
 
 ## Known Limitations
 
-- **SSH git remotes + sandbox**: The sandbox uses `allowedDomains` for network filtering, which works with HTTPS but not SSH. If you have an SSH remote (`git@github.com:...`), `git push` will fail inside the sandbox. **Recommended**: switch to HTTPS remotes (`git remote set-url origin https://github.com/<owner>/<repo>.git`), or push manually when prompted.
+- **SSH git remotes in the container**: The `agent-sand` container injects the `gh` CLI's HTTPS credentials only (`~/.config/gh/hosts.yml`) — your SSH keys are **not** mounted into the container. So pushing to an SSH remote (`git@github.com:...`) has no credentials and fails. **Recommended**: use HTTPS remotes (`git remote set-url origin https://github.com/<owner>/<repo>.git`) so the `gh` credential helper authenticates the push, or push manually when prompted.
 - **New repos with no commits**: `git worktree add` requires at least one commit. The pipeline handles this automatically by creating an initial commit if needed.
 
 ## Troubleshooting
 
-### `git push` fails inside sandbox
-The sandbox blocks SSH connections. Options:
-1. Switch to HTTPS: `git remote set-url origin https://github.com/<owner>/<repo>.git`
+### `git push` fails inside the container
+The container has no SSH keys — only the `gh` CLI's HTTPS credentials are injected. An SSH remote (`git@github.com:...`) has nothing to authenticate with. Options:
+1. Switch to HTTPS so the `gh` credential helper authenticates the push: `git remote set-url origin https://github.com/<owner>/<repo>.git`
 2. Push manually when the pipeline prompts you
-3. Disable sandbox in `.claude/settings.json` (not recommended)
 
 ### `git worktree add` fails with "not a valid reference"
 Your repo has no commits. The pipeline should handle this automatically. If it doesn't, create an initial commit: `git add -A && git commit -m "chore: initial commit" --allow-empty`
-
-### Sandbox permissions errors on Linux
-Ensure bubblewrap and socat are installed:
-```bash
-sudo apt install bubblewrap socat   # Debian/Ubuntu
-sudo pacman -S bubblewrap socat     # Arch
-```
 
 ### GitHub CLI not authenticated
 Run `gh auth login` and follow the prompts. Verify with `gh auth status`.
 
 ### Agent prompts for file edit permissions
-This should not happen with the default settings. Verify `.claude/settings.json` includes `Write(*)` and `Edit(*)` in `permissions.allow`. Running `/agentflow:implement` will auto-detect missing permissions and offer to fix them, or you can re-run `/agentflow:configure` to regenerate settings.
+This should not happen inside the `agent-sand` container, where Claude Code runs with `--dangerously-skip-permissions` and ignores `permissions.allow`/`deny` entirely. If you see prompts, you are likely running plain `claude` (no skip-permissions) — verify `.claude/settings.json` includes `Write(*)` and `Edit(*)` in `permissions.allow`, or re-run `/agentflow:configure` to regenerate settings.
 
 ### Subagent reviews blocked: "Usage credits required for 1M context"
 The pipeline ran inline and skipped the dedicated reviewer agents (security-reviewer, code-reviewer, silent-failure-hunter). This happens when your session runs a **1M-context** model (model ID ends in `[1m]`, e.g. `claude-opus-4-8[1m]`).

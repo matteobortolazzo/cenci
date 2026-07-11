@@ -1,13 +1,6 @@
 {
   "sandbox": {
-    "enabled": true,
-    "autoAllowBashIfSandboxed": true,
-    "allowUnsandboxedCommands": false,
-    "excludedCommands": ["docker", "podman"],
-    "network": {
-      "allowedDomains": [],
-      "allowLocalBinding": true
-    }
+    "enabled": false
   },
   "permissions": {
     "allow": [

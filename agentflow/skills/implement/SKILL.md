@@ -92,49 +92,17 @@ The determined mode (ticket or ticketless) governs conditional behavior througho
 
 ## Pre-flight Check
 
-### Settings Verification
+### Auth Verification
 
-**Before delegating to the context-gatherer (or before proceeding in ticketless mode)**, read `.claude/settings.json` and `.claude/config.json` and verify the required permissions are present. This check is mandatory before any context gathering: the gatherer runs read-only `gh` commands in a subagent, which is only safe once `Bash(gh *)` permission and `gh` authentication are verified here in the main agent.
+**Before delegating to the context-gatherer (or before proceeding in ticketless mode)**, extract `owner/repo` from `git remote get-url origin` (for later commands) and verify `gh` authentication. agentflow runs inside the `agent-sand` container with `--dangerously-skip-permissions`, so Claude Code ignores `permissions.allow/deny` — there is nothing to verify or auto-fix there. What still matters is authentication: the context-gatherer runs read-only `gh` commands in a subagent, and an unauthenticated `gh` deadlocks that subagent silently.
 
-**Container-profile fast-path**: After reading `.claude/config.json`, if `profile == "container"`, **skip steps 1 and 2 below** — under `--dangerously-skip-permissions` Claude Code ignores `permissions.allow/deny`, so permission verification and auto-fix are moot. Run **only step 3** (`gh auth status`): auth failures in the context-gatherer subagent deadlock silently regardless of the permission model, so this check is still required. Host profile or absent `profile` → run steps 1–3 unchanged.
-
-1. Check `permissions.allow` in `.claude/settings.json` contains **at minimum**:
-   - `Write(*)`
-   - `Edit(*)`
-   - `Read(~/.claude/plugins/**)`   (reads the pipeline's own phase files without prompting)
-   - `Read(//tmp/claude*/**)`        (reads context bundles / diffs / scratchpad)
-   - `Write(//tmp/claude*/**)`       (Write-tool temp files, e.g. context bundle)
-2. Read `.claude/config.json` and check feature-specific permissions in `permissions.allow`:
-   - If `mcpServers` exists in config, for each server where value is `true`:
-     verify its tool permissions exist in `permissions.allow`
-     (Context7: `mcp__plugin_agentflow_context7__resolve-library-id` and `mcp__plugin_agentflow_context7__query-docs`;
-      project MCPs: `mcp__<name>__*`)
-   - Legacy support: if `context7Enabled: true` exists (no `mcpServers` field), treat as `mcpServers.context7: true`
-   - Verify `Bash(gh *)` exists
-3. Verify CLI authentication:
-   - Run `gh auth status` and verify it returns authenticated
-
-If any permissions are missing, **offer to auto-fix** by appending the missing entries:
-
-> "Missing permissions in `.claude/settings.json`: [list missing items]. This will cause permission dialogs during the pipeline.
-> I can auto-fix this by appending the missing entries to `.claude/settings.json`. Want me to fix it?"
-
-If the user approves the auto-fix:
-1. Read `.claude/settings.json`
-2. Determine the **full set** of missing permissions to append
-3. Filter out any entries already present in `permissions.allow`
-4. Append only the missing entries to the `permissions.allow` array
-5. Write the updated `.claude/settings.json` back
-6. Confirm: "Fixed! Added [N] missing permissions. Continuing..."
-
-If the user declines the auto-fix:
-> "OK, proceeding without fixing. You may see permission dialogs during the pipeline. Want to continue anyway?"
-
-If the user says no → stop. If yes → proceed.
+- Run `gh auth status`.
+- If it returns authenticated → proceed to context gathering.
+- If **not** authenticated → tell the user to run `gh auth login`, then stop. Do not delegate to the context-gatherer until `gh` is authenticated.
 
 ## Context Gathering (Delegated)
 
-Runs **after** the Pre-flight Check above — the settings verification and `gh auth status` check are the precondition that makes read-only `gh` safe inside a subagent (see the `subagent-safety` skill).
+Runs **after** the Pre-flight Check above — the `gh auth status` check is the precondition that makes read-only `gh` safe inside a subagent (see the `subagent-safety` skill).
 
 > **Blocking delegation — do not background or poll.** Invoke the `context-gatherer` as a single, foreground `Task` call and wait for its result inline. Do **not** run it in the background, do **not** announce that you'll "wait for it to complete," and do **not** call any monitoring/polling tool to check on it — the `Task` call returns the digest directly when the subagent finishes. The next pipeline step reads that returned digest; there is nothing to poll.
 

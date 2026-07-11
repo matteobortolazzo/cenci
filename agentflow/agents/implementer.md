@@ -76,14 +76,6 @@ If build or tests fail:
 3. Re-run build and tests
 4. If stuck after 3 attempts, report the issue clearly
 
-## Sandbox Awareness
-If a command fails with sandbox-related errors (permission denied on paths outside CWD,
-network unreachable for domains not in allowedDomains):
-1. Do NOT retry blindly — the sandbox is blocking the operation intentionally
-2. Report the error clearly, identifying it as a sandbox restriction
-3. Suggest the user add the needed domain to `allowedDomains` or path to sandbox settings if the access is legitimate
-4. If a build tool needs network access to a new domain, note it for the user to approve
-
 ## Working Directory
 When given a worktree path, `cd` into it once at the start of your session. CWD persists between Bash calls — do not prefix subsequent commands with `cd <path> &&`.
 

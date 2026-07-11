@@ -96,7 +96,7 @@ The GitHub ticket → PR pipeline, and the home of every human decision gate: in
 `/agentflow:refine` and `/agentflow:design`, plan approval as the hard stop, and
 `AskUserQuestion` from the main agent. Once you approve the plan, `/goal`-driven phases
 run unattended to an open PR with green CI, and `/agentflow:babysit` loops on review
-comments until the PR merges. It detects the sandbox and drops host-only friction inside it.
+comments until the PR merges. It runs inside the `agent-sand` container, which is the security boundary.
 
 ### Attention — [agentwatch](./agentwatch) (plugin: `agentwatch`)
 
