@@ -1,38 +1,13 @@
-ARG UV_VERSION=latest
-FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
-
-FROM ubuntu:24.04
+ARG BASE_VERSION=0.7.4
+FROM agent-sandbox-base:${BASE_VERSION}
 
 ARG DOTNET_SDK_VERSION=10.0.100
-ARG NODE_MAJOR=24
-ARG GO_VERSION=1.24.1
-ARG CODEX_VERSION=0.144.1
 
-ENV DEBIAN_FRONTEND=noninteractive
-
-# Signal to Claude Code that it runs inside a sandbox container: skips the
-# bypass-mode confirmation dialog and the root check (defense-in-depth
-# alongside the settings.json seeded in entrypoint.sh). Container-scoped, so
-# the host `claude` is unaffected.
-ENV IS_SANDBOX=1
-
-# ── System packages ──────────────────────────────────────────────
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl wget gnupg2 \
-    git git-lfs openssh-client \
-    sudo unzip zip tar xz-utils \
-    build-essential pkg-config libssl-dev \
-    less vim nano jq ripgrep fd-find bat \
-    procps htop lsof \
-    python3 python3-pip python3-venv \
-    locales \
-    && rm -rf /var/lib/apt/lists/*
-
-# ── Locale ───────────────────────────────────────────────────────
-RUN sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
-ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+USER root
 
 # ── .NET SDK ─────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends libicu74 \
+    && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh \
     && chmod +x /tmp/dotnet-install.sh \
     && /tmp/dotnet-install.sh --version "${DOTNET_SDK_VERSION}" --install-dir /usr/share/dotnet \
@@ -42,10 +17,22 @@ ENV DOTNET_ROOT=/usr/share/dotnet
 ENV DOTNET_CLI_TELEMETRY_OPTOUT=1
 ENV DOTNET_NOLOGO=1
 
+USER dev
+
+ARG NODE_MAJOR=24
+
+USER root
+
 # ── Node.js + npm ────────────────────────────────────────────────
 RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
+
+USER dev
+
+ARG CODEX_VERSION=0.144.1
+
+USER root
 
 # ── Codex CLI ────────────────────────────────────────────────────
 # Baked into the image (unlike Claude, which is bind-mounted from the host):
@@ -53,46 +40,15 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
 # single-file bind-mount can't carry. Update by bumping CODEX_VERSION + rebuild.
 RUN npm install -g @openai/codex@${CODEX_VERSION}
 
+USER dev
+
+ARG GO_VERSION=1.24.1
+
+USER root
+
 # ── Go ───────────────────────────────────────────────────────────
 RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" \
     | tar -C /usr/local -xzf -
 ENV PATH="/usr/local/go/bin:${PATH}"
 
-# ── uv (Python package & project manager) ───────────────────────
-COPY --from=uv /uv /uvx /usr/local/bin/
-
-# ── GitHub CLI ───────────────────────────────────────────────────
-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-    | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-    > /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update && apt-get install -y gh \
-    && rm -rf /var/lib/apt/lists/*
-
-# ── Docker CLI (for DooD socket mounting) ────────────────────────
-RUN install -m 0755 -d /etc/apt/keyrings \
-    && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \
-    && chmod a+r /etc/apt/keyrings/docker.asc \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "${VERSION_CODENAME}") stable" \
-    > /etc/apt/sources.list.d/docker.list \
-    && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli \
-    && rm -rf /var/lib/apt/lists/*
-
-# ── Non-root user ────────────────────────────────────────────────
-RUN userdel -r "$(getent passwd 1000 | cut -d: -f1)" 2>/dev/null || true \
-    && groupmod -n dev "$(getent group 1000 | cut -d: -f1)" 2>/dev/null || groupadd -g 1000 dev \
-    && useradd -m -u 1000 -g 1000 -s /bin/bash dev \
-    && echo "dev ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/dev
-
-RUN mkdir -p /workspace && chown dev:dev /workspace
-
 USER dev
-WORKDIR /workspace
-
-ENV PATH="/home/dev/.local/bin:/home/dev/go/bin:${PATH}"
-ENV GOPATH="/home/dev/go"
-
-COPY --chown=dev:dev entrypoint.sh /usr/local/bin/entrypoint.sh
-COPY --chown=dev:dev lib/ /usr/local/bin/lib/
-
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
