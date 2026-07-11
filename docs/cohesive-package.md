@@ -220,14 +220,13 @@ Decision 4 made Codex a first-class target; #33 scoped what that means, layer by
 layer. This section is the audit's output. It is deliberately **docs-only** — its
 deliverable is this writeup plus the three drafted follow-up tickets (17–19 above).
 
-**Distribution is already solved and needs no port.** Verified against `openai/codex`
-`rust-v0.143.0`: Codex deliberately consumes Claude-format plugin infrastructure. It
-reads `.claude-plugin/marketplace.json`, accepts `.claude-plugin/plugin.json` as a
-manifest fallback, loads `hooks/hooks.json`, and sets `CLAUDE_PLUGIN_ROOT`. So "proper
-support" for distribution reduces to **one marketplace, not two**: keep plugin layouts
-Codex-clean (its `hooks.json` parser is `deny_unknown_fields` — no stray keys), and
-document the `/hooks` trust re-approval step. That `/hooks` note folds into the
-one-package README (#32); hook-spec correctness is tracked in #36. No new ticket.
+**Distribution uses one catalog and two client-local installs.** The original audit
+against Codex `rust-v0.143.0` established compatibility with the Claude marketplace
+format. Re-verification for #82 against Codex CLI 0.144.1 established the precise
+boundary: Codex accepts the same marketplace but does not discover plugins installed
+under `~/.claude/plugins`. Each plugin therefore ships a native Codex manifest, and
+the installer registers/installs the shared catalog through both CLIs. No skill copies
+or `.agents/skills` synchronization are required.
 
 ### 6.1 Layer 1 — agentwatch (closest today)
 
@@ -278,27 +277,28 @@ pattern, and swap the Claude-only `--dangerously-skip-permissions` for Codex's
 full-permission flag. This is the *interactive* launcher, distinct from #40's
 `agentwatch run --agent` dispatch launcher.
 
-### 6.3 Layer 3 — ccflow (workflow)
+### 6.3 Layer 3 — agentflow (workflow)
 
-ccflow has zero Codex mentions and is architecturally Claude-Code-only at every layer:
-the plugin/skill system, the `Task` tool for subagents, `AskUserQuestion` gates, the
-hook lifecycle (`PreToolUse`/`PreCompact`/`SessionStart`/`Stop`), `CLAUDE_PLUGIN_ROOT`,
-and `.claude/settings.json`. Only the workflow *logic* — TDD red/green/refactor, the
-review conventions, the worktree + `gh` PR flow — is portable, and only as prose.
+The interactive pipeline remains Claude Code-only: its planning gates, specialized
+subagents, hooks, goal/loop lifecycle, Pencil integration, and `.claude/settings.json`
+are not ported. Codex receives two deliberately smaller surfaces:
 
-**Decision (owner): a documented equivalent, not a port.** Porting the
-skill/subagent/AskUserQuestion pipeline is out of scope. Instead ship an `AGENTS.md`-based
-Codex recipe carrying the conventions, which the #40 dispatch launcher invokes for
-`--agent codex`. This aligns with decision 7 ("Codex templates defined in #33"). →
-**Ticket 19**.
+- portable convention skills for attachments, classification, shell use, stack/test
+  patterns, delegation safety, and worktrees;
+- the `AGENTS.md` ticket-to-PR recipe, which owns sequencing and self-review without
+  invoking `/agentflow:implement`.
+
+This preserves the owner decision to ship a documented pipeline equivalent while
+using the Agent Skills standard for genuinely portable context. Ticket #82 records
+the discovery and frontmatter audit.
 
 ### 6.4 Summary
 
 | Layer | State | Outcome |
 |-------|-------|---------|
-| Distribution | Solved (Codex consumes Claude-format infra) | One marketplace; `/hooks` note → #32 |
+| Distribution | One catalog, separate Claude/Codex installs | Native manifests and installer wiring → #82 |
 | agentwatch — cleanup | Covered by two daemon sweeps | Document; no ticket |
 | agentwatch — hooks | Gaps (`PostToolUseFailure`, `Notification`) | Routed to #36 |
 | agentwatch — bootstrap | Gap (Codex install non-functional standalone) | **Ticket 17** |
 | dev-sandbox | Gap (launcher is `claude`-only) | **Ticket 18** |
-| ccflow | Claude-Code-coupled; only logic is portable | **Ticket 19** (documented equivalent) |
+| agentflow | Portable convention skills; pipeline remains Claude-only | AGENTS.md equivalent + #82 skill audit |

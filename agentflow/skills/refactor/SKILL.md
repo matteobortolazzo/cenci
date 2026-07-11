@@ -1,7 +1,8 @@
 ---
 name: refactor
-description: Analyze codebase for duplication, security issues, and file structure improvements. Proposes refactoring tickets.
-argument-hint: [scope: files/dirs/glob] [additional context]
+description: "Claude Code-only: analyze a codebase with specialized subagents and propose refactoring tickets."
+compatibility: Requires Claude Code subagents, interactive gates, and agentflow project configuration.
+argument-hint: "[scope: files/dirs/glob] [additional context]"
 disable-model-invocation: true
 user-invocable: true
 allowed-tools: Read, Bash, Glob, Grep, Task, AskUserQuestion

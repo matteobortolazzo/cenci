@@ -47,9 +47,10 @@ Codex will ask you to review/trust new hooks. Use `/hooks` in Codex if the hooks
 
 ## Plugin install
 
-This directory also includes a Codex plugin manifest. Plugins and their bundled
-hooks are stable and enabled by default in current Codex releases — no feature
-flag is required.
+The marketplace plugin root includes the Codex manifest at
+`../.codex-plugin/plugin.json`; it points back to this directory's hooks. Plugins and
+their bundled hooks are stable and enabled by default in current Codex releases — no
+feature flag is required.
 
 ## Trust model
 

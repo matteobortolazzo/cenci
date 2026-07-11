@@ -1,10 +1,12 @@
 ---
 name: attachments
-description: Canonical procedure for discovering, downloading, and loading ticket attachments
+description: Discover, select, download, and inspect GitHub ticket attachments. Use when an issue or pull request contains screenshots, mockups, documents, or uploaded files needed as task context.
 user-invocable: false
 ---
 
-**Main-agent only**: This skill uses `AskUserQuestion` (Step 2) and must only be invoked from the main agent — never from subagents, where user interaction deadlocks silently.
+**Conversation-owning agent only**: selection requires user interaction in Step 2.
+Never delegate this procedure to a worker/subagent that cannot surface questions to
+the active conversation.
 
 ## Attachment Handling
 
@@ -33,7 +35,7 @@ Classify each attachment by extension:
 - **document**: md, txt, json, yaml, yml, csv, xml, html, log, pdf
 - **binary**: everything else
 
-Present via `AskUserQuestion` with `multiSelect=true`:
+Use the client's available user-input mechanism and allow multiple selections:
 
 > "Found N attachment(s) on this ticket. Which would you like to download for context?"
 
@@ -45,17 +47,22 @@ If user selects none → skip the rest of this procedure and return to the calli
 
 ### Step 3: Download Selected Attachments
 
-```bash
-mkdir -p /tmp/claude/attachments
-```
+Store downloads under `${TMPDIR:-/tmp}/agentflow/attachments`. Create the directory
+with the client's filesystem tool or a standalone shell command.
 
 ```bash
-curl -sL "<url>" -o "/tmp/claude/attachments/<filename>"
+mkdir -p "${TMPDIR:-/tmp}/agentflow/attachments"
 ```
-If download returns 404 (private repo), retry with auth:
+
+Prefer a connected GitHub attachment-download tool when one is available, especially
+for private `user-attachments` URLs. Otherwise use `curl`:
+
 ```bash
-curl -sL -H "Authorization: token $(gh auth token)" "<url>" -o "/tmp/claude/attachments/<filename>"
+curl -fsSL "<url>" -o "${TMPDIR:-/tmp}/agentflow/attachments/<filename>"
 ```
+
+If a private-repository download fails and no connector can download it, retry with
+the authenticated GitHub CLI token without printing the token.
 
 Post-download: check size with `stat`. If > 10 MB and user wasn't warned → report and skip that file.
 
@@ -63,11 +70,11 @@ On any download failure → warn and continue with remaining files.
 
 ### Step 4: Load Attachment Content
 
-For each downloaded file, use the Read tool:
-- **Images** (png, jpg, jpeg, gif, webp): Read tool renders visually (Claude is multimodal)
-- **SVG**: Read as text
-- **Text files** (md, txt, json, yaml, yml, csv, xml, html, log): Read content
-- **PDF**: Read tool extracts PDF content
+For each downloaded file, use the client's matching file or image inspection tool:
+- **Images** (png, jpg, jpeg, gif, webp): use multimodal image inspection
+- **SVG**: read as text unless visual rendering is specifically needed
+- **Text files** (md, txt, json, yaml, yml, csv, xml, html, log): read as text
+- **PDF**: use the client's PDF reader or extraction support
 - **Binary/other**: Report file path, note content cannot be read as text
 
 **After reading each image**, produce a brief structured summary (5–15 lines) covering applicable aspects:

@@ -62,10 +62,11 @@ jobs:
 
           # Update plugin.json and root marketplace.json
           jq --arg v "$NEW_VERSION" '.version = $v' dev-sandbox/.claude-plugin/plugin.json > tmp.json && mv tmp.json dev-sandbox/.claude-plugin/plugin.json
+          jq --arg v "$NEW_VERSION" '.version = $v' dev-sandbox/.codex-plugin/plugin.json > tmp.json && mv tmp.json dev-sandbox/.codex-plugin/plugin.json
           jq --arg v "$NEW_VERSION" '(.plugins[] | select(.name == "sandbox")).version = $v' .claude-plugin/marketplace.json > tmp.json && mv tmp.json .claude-plugin/marketplace.json
 
           # Commit and push
-          git add dev-sandbox/.claude-plugin/plugin.json .claude-plugin/marketplace.json
+          git add dev-sandbox/.claude-plugin/plugin.json dev-sandbox/.codex-plugin/plugin.json .claude-plugin/marketplace.json
           git commit -m "chore(release): sandbox/v${NEW_VERSION}"
           git push
 

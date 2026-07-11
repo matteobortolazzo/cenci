@@ -56,7 +56,9 @@ Two-tier model — **Playwright Test** for CI, **Playwright CLI** for interactiv
 **Rules**:
 1. **Playwright Test for anything repeatable** — tests live in the repo, run in CI
 2. **Playwright CLI for interactive browser work** — navigation, screenshots, snapshots, form filling, network inspection during development
-3. **Do NOT use Playwright MCP or Chrome MCP** — Playwright CLI is more token-efficient and more capable for agents with shell access
+3. **Prefer the project's established browser tooling** — use Playwright CLI for
+   interactive checks when it is installed; do not introduce another browser driver
+   solely for an ad-hoc check
 4. **Interactive tools are NOT a substitute for tests** — if it matters enough to verify, write a Playwright Test
 
 ## Anti-Patterns — NEVER DO THESE

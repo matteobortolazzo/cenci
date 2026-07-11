@@ -83,7 +83,9 @@ Codex will ask you to review/trust new hooks. Use `/hooks` in Codex if the hooks
 **Trust model:** Codex hash-pins `hooks.json`, so every plugin update that changes
 the file changes its hash and requires re-trusting the hooks via `/hooks` in Codex.
 
-This repository also includes a Codex plugin manifest at `plugin/codex/.codex-plugin/plugin.json`.
+The marketplace plugin includes a native Codex manifest at
+`plugin/.codex-plugin/plugin.json`, which loads the Codex-specific hooks from
+`plugin/codex/hooks.json`.
 Plugins and their bundled hooks are stable and enabled by default in current Codex
 releases — no feature flag is required.
 

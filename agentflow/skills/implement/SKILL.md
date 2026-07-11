@@ -1,6 +1,7 @@
 ---
 name: implement
-description: Full implementation pipeline — plan, test, implement, review, PR
+description: "Claude Code-only: run the full agentflow plan, test, implementation, review, and pull-request pipeline."
+compatibility: Requires Claude Code subagents, interactive gates, hooks, slash commands, and plugin configuration.
 argument-hint: <ticket-id | task description> [additional context]
 user-invocable: true
 disable-model-invocation: true

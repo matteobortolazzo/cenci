@@ -1,6 +1,7 @@
 ---
 name: babysit
-description: Loop-driven PR follow-through — periodically check CI and new review comments on an open PR and drive them to resolution until it merges or closes. Runs only when the user invokes /agentflow:babysit or a babysit loop fires for a specific PR number.
+description: "Claude Code-only: follow an open PR by periodically checking CI and review comments until it merges or closes. Runs only through /agentflow:babysit or its loop."
+compatibility: Requires Claude Code loop scheduling, slash commands, subagents, and interactive gates.
 argument-hint: <pr-number> [interval e.g. 15m]
 user-invocable: true
 model: sonnet

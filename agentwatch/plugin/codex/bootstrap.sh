@@ -20,10 +20,9 @@ log() {
 		"$(date '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || echo '-')" "$1" >>"$LOG" 2>/dev/null || true
 }
 
-# Resolve the plugin root. CLAUDE_PLUGIN_ROOT is set by Codex (and Claude Code);
-# fall back to this script's directory for manual/dev invocation. bootstrap.sh
-# lives at the codex plugin root, so the fallback is $(dirname "$0"), not "/..".
-ROOT="${CLAUDE_PLUGIN_ROOT:-$(dirname "$0")}"
+# Codex sets PLUGIN_ROOT for native plugins. Keep the legacy variable as a
+# compatibility fallback, then resolve one level above codex/ for manual runs.
+ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-$(dirname "$0")/..}}"
 BIN="$ROOT/bin/agentwatch"
 MARKER="$ROOT/bin/.agentwatch-version"
 PLUGIN_JSON="$ROOT/.codex-plugin/plugin.json"

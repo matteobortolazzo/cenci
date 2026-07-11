@@ -1,6 +1,6 @@
 ---
 name: frontend-classification
-description: Canonical rule for classifying a ticket or task as frontend/UI work. Use when deciding whether design-aware refinement, the Designed-label gate, or UI screenshot capture applies to a ticket or task description.
+description: Classify whether a ticket is frontend or UI work. Use when deciding whether design-aware planning, visual verification, UI tests, or screenshot capture applies.
 user-invocable: false
 ---
 
