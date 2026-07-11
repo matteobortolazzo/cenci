@@ -129,7 +129,11 @@ For child tickets that are not last child, use `Related to #<parentId>` for the 
 
 ## Labels
 
-Ticket mode: after PR creation, replace "Working" with "In Review" (the PR is open but not yet merged):
+Ticket mode: after PR creation, replace "Working" with "In Review" (the PR is open but not yet merged). `gh issue edit --add-label` fails when the label does not exist in the repository, so ensure it exists first — each as its own Bash call (`|| true` swallows only the "already exists" error):
+
+```bash
+gh label create "In Review" --repo <owner>/<repo> --color "A2EEEF" --description "PR open, under review / CI running" 2>/dev/null || true
+```
 
 ```bash
 gh issue edit <number> --repo <owner>/<repo> --add-label "In Review" --remove-label "Working"

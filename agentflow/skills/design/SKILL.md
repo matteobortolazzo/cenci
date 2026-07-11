@@ -6,7 +6,7 @@ argument-hint: <ticket-id | design description> [additional context]
 user-invocable: true
 disable-model-invocation: true
 model: opus
-allowed-tools: Read, Write, Bash, Glob, Grep, AskUserQuestion, WebFetch, mcp__pencil__get_editor_state, mcp__pencil__get_guidelines, mcp__pencil__batch_get, mcp__pencil__batch_design, mcp__pencil__get_screenshot, mcp__pencil__export_nodes, mcp__pencil__find_empty_space_on_canvas, mcp__pencil__snapshot_layout, mcp__pencil__open_document, mcp__pencil__get_variables, mcp__pencil__set_variables, mcp__pencil__replace_all_matching_properties, mcp__pencil__search_all_unique_properties
+allowed-tools: Read, Write, Bash(pencil:*), Bash(gh:*), Bash(git:*), Bash(curl:*), Bash(mkdir:*), Glob, Grep, AskUserQuestion, WebFetch, mcp__pencil__get_editor_state, mcp__pencil__get_guidelines, mcp__pencil__batch_get, mcp__pencil__batch_design, mcp__pencil__get_screenshot, mcp__pencil__export_nodes, mcp__pencil__find_empty_space_on_canvas, mcp__pencil__snapshot_layout, mcp__pencil__open_document, mcp__pencil__get_variables, mcp__pencil__set_variables, mcp__pencil__replace_all_matching_properties, mcp__pencil__search_all_unique_properties
 ---
 
 <!-- Architecture note: agentflow orchestrates Pencil via `pencil interactive` CLI (agentflow-driven model).
@@ -426,7 +426,10 @@ Include this note at the end of the report:
 
 **If ticketless mode:** Skip this.
 
-**If ticket mode:** Before starting design work (at the beginning of Phase 2), add the "Working" label:
+**If ticket mode:** Before starting design work (at the beginning of Phase 2), add the "Working" label. `gh issue edit --add-label` fails when the label does not exist in the repository, so ensure it exists first — each as its own Bash call (`|| true` swallows only the "already exists" error):
+```bash
+gh label create "Working" --repo <owner>/<repo> --color "FBCA04" --description "Actively being refined, designed, or implemented" 2>/dev/null || true
+```
 ```bash
 gh issue edit <number> --repo <owner>/<repo> --add-label "Working"
 ```
@@ -462,7 +465,10 @@ git add <designPath>/*.pen <designPath>/DESIGN.md && git commit -m "feat(design)
 
 **If ticketless mode:** Skip labeling.
 
-**If ticket mode:** Replace "Working" with "Designed":
+**If ticket mode:** Replace "Working" with "Designed". Ensure the label exists first (same self-heal pattern as Working — `gh issue edit --add-label` fails on a missing label):
+```bash
+gh label create "Designed" --repo <owner>/<repo> --color "5319E7" --description "Design spec approved" 2>/dev/null || true
+```
 ```bash
 gh issue edit <number> --repo <owner>/<repo> --add-label "Designed" --remove-label "Working"
 ```

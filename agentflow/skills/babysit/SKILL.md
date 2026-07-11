@@ -85,6 +85,13 @@ If `state` is `MERGED` or `CLOSED`:
   `In Review` to `Implemented` — this is the `In Review → Implemented` board transition that
   Phase 9 deferred to merge:
 
+  `gh issue edit --add-label` fails when the label does not exist in the repository, so ensure
+  it exists first (its own Bash call; `|| true` swallows only the "already exists" error):
+
+  ```bash
+  gh label create "Implemented" --repo <owner>/<repo> --color "6F42C1" --description "PR merged — done" 2>/dev/null || true
+  ```
+
   ```bash
   gh issue edit <n> --repo <owner>/<repo> --add-label "Implemented" --remove-label "In Review"
   ```

@@ -82,9 +82,12 @@ Extract the first whitespace-delimited token from `$ARGUMENTS` and determine the
 
 The determined mode (ticket or ticketless) governs conditional behavior throughout the rest of this skill.
 
-**Plan file auto-detection** (ticket mode only): If the first token is a ticket ID (ticket mode) and a file matching `.plans/<id>-*.md` exists, present the user with a choice using `AskUserQuestion`:
-- **"Use existing plan"** — switch to plan file mode, set `hasPlanFile = true`, read the plan file
-- **"Re-plan from scratch"** — ignore the plan file, proceed with normal ticket mode
+**Plan file auto-detection** (ticket mode only): If the first token is a ticket ID (ticket mode), glob for `.plans/<id>-*.md`:
+
+- **Exactly one match, and the user context does not request a re-plan** → pick it up silently: switch to plan file mode, set `hasPlanFile = true`, read the plan file, and tell the user in one line: "Found approved plan `.plans/<filename>` — resuming implementation from it (pass `replan` as context to discard it instead)." Do **not** ask — a plan file only exists because a human approved it in Phase 1, so pickup is the expected path, and scripted launches (`agentwatch run implement <id>`) rely on this being non-interactive. Phase 1's `planCommitSha` staleness check still guards against a plan that predates codebase changes.
+- **The user context requests a re-plan** (it contains a standalone token like `replan` or `re-plan`, or an explicit instruction to discard/redo the existing plan) → ignore the plan file and proceed in normal ticket mode. This is the **re-plan over an existing plan** path referenced in the Label "Working" section.
+- **Multiple matches** → ambiguous; ask with `AskUserQuestion` which plan file to use, offering each match plus **"Re-plan from scratch"** as the final option.
+- **No match** → proceed in normal ticket mode.
 
 **If ticket mode:** Do **not** fetch the ticket in the main agent (single exception: the stale-plan re-fetch in plan-file mode, Phase 1). Extract owner/repo from `git remote get-url origin` (e.g. `git@github.com:owner/repo.git` → `owner/repo`) for later commands; the ticket itself is fetched by the context-gatherer (see Context Gathering below) after the pre-flight check.
 
@@ -176,7 +179,7 @@ If the digest's `labels` already include **"In Review"** or **"Implemented"**, a
 If the user says no → stop. If yes → proceed with the pipeline. This is a warning only — it does not block.
 
 If the digest's `labels` include **"Planned"** but this run is **not** plan-file mode (`hasPlanFile` is false — e.g. the plan file was deleted or lives on another host), an approved plan was recorded for this ticket but no plan-file argument reached this run. Display a soft, non-blocking note via `AskUserQuestion` — mirror the tone above:
-> "This ticket is marked `Planned` (an approved plan was persisted), but you didn't pass a plan file. If the plan file still exists under `.plans/`, re-run as `/agentflow:implement .plans/<file>` to pick it up (the plan-file auto-detection also offers this when a matching file is found); otherwise you can re-plan from scratch. Proceed with a fresh plan anyway?"
+> "This ticket is marked `Planned` (an approved plan was persisted), but you didn't pass a plan file. If the plan file still exists under `.plans/`, re-run as `/agentflow:implement .plans/<file>` to pick it up (the plan-file auto-detection resumes from it automatically when a matching file is found); otherwise you can re-plan from scratch. Proceed with a fresh plan anyway?"
 
 If the user says no → stop. If yes → proceed (a fresh plan re-applies `Planned` at the end). This is a warning only — it does not block.
 
@@ -208,7 +211,13 @@ This is informational only — it does not block the pipeline.
 
 **If ticketless mode:** Skip this section entirely — ticketless mode applies no board labels.
 
-**If ticket mode:** Before starting the pipeline, add the "Working" label to signal work in progress. The exact swap depends on how this run entered the pipeline:
+**If ticket mode:** Before starting the pipeline, add the "Working" label to signal work in progress. `gh issue edit --add-label` **fails when the label does not exist in the repository**, so first ensure it exists — run this as its own Bash call (the `|| true` swallows only the "already exists" error; `/agentflow:configure` also creates the full lifecycle label set, this is self-healing for projects configured before that):
+
+```bash
+gh label create "Working" --repo <owner>/<repo> --color "FBCA04" --description "Actively being refined, designed, or implemented" 2>/dev/null || true
+```
+
+The exact swap depends on how this run entered the pipeline:
 
 - **Plan-file mode** (`hasPlanFile` true): this is the approved-plan pickup. The ticket carries `Planned` from when the plan was persisted, so swap it for `Working`:
   ```bash
@@ -218,7 +227,7 @@ This is informational only — it does not block the pipeline.
   ```bash
   gh issue edit <number> --repo <owner>/<repo> --add-label "Working"
   ```
-  If this session was entered via **"Re-plan from scratch"** over an existing plan (the plan-file auto-detection offered "Use existing plan" / "Re-plan from scratch" and the user chose to re-plan), the ticket still carries `Planned` from the discarded plan — also remove it: `--add-label "Working" --remove-label "Planned"`. In a new-plan session `Working` is short-lived: Phase 1 swaps it for `Planned` again when it persists the fresh approved plan and stops.
+  If this session was entered via a **re-plan over an existing plan** (the user context requested `replan`, or "Re-plan from scratch" was chosen in the multiple-match question), the ticket still carries `Planned` from the discarded plan — also remove it: `--add-label "Working" --remove-label "Planned"`. In a new-plan session `Working` is short-lived: Phase 1 swaps it for `Planned` again when it persists the fresh approved plan and stops.
 
 ## Pipeline
 

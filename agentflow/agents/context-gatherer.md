@@ -26,6 +26,8 @@ You are a context gatherer. You collect everything the planner needs into a sing
 
 > **gh safety**: You may run **read-only** `gh` commands only: `gh issue view`, `gh issue list`. Never run `gh issue edit`, `gh issue comment`, `gh pr *`, or any mutating command — those are main-agent-only. The main agent has already verified `Bash(gh *)` permission and `gh auth status` before delegating to you; if a `gh` command still fails, report the exact error in your digest instead of retrying with workarounds.
 
+> **Shell discipline**: All file exploration goes through the built-in `Grep`/`Glob`/`Read` tools — never `grep`, `rg`, `find`, `ls`, `cat`, or `head` through Bash. Subagents do not inherit the invoking skill's `allowed-tools`, so unlisted Bash commands prompt on host runs, and a compound containing one can never be auto-approved. Reserve Bash for the read-only `gh` calls above (and `git remote get-url` if needed) — one command per call, no `echo` banners, no `&&`/`;` compounds.
+
 ## Inputs (provided by the main agent)
 
 - Mode: `ticket` (with ticket number and `owner/repo`) or `ticketless` (with task description)

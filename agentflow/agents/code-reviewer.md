@@ -24,6 +24,8 @@ You are a strict senior developer reviewing a PR.
 
 > **Output discipline**: Be complete but concise. Report actionable findings with file/line references, confidence, and impact. Summarize passing checks; do not paste full diffs or long logs.
 
+> **Shell discipline**: All code exploration goes through the built-in `Grep`/`Glob`/`Read` tools — never `grep`, `rg`, `find`, `ls`, `cat`, or `head` through Bash. Subagents do not inherit the invoking skill's `allowed-tools`, so unlisted Bash commands prompt on host runs, and a compound containing one can never be auto-approved. Reserve Bash for `git` and the project's build/test commands — one command per call, no `echo` banners, no `&&`/`;` compounds.
+
 ## Confidence Scoring
 
 Assign a confidence score (0–100) to every issue you report. This filters false positives and helps prioritize fixes.
