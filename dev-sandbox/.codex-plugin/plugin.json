@@ -1,6 +1,6 @@
 {
   "name": "sandbox",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Isolated Docker or Podman launcher for Claude Code and Codex.",
   "author": {
     "name": "Matteo Bortolazzo",
