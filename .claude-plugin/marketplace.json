@@ -8,7 +8,7 @@
       "name": "agentflow",
       "source": "./agentflow",
       "description": "Ticket refinement and automated implementation pipeline for GitHub",
-      "version": "2.8.0",
+      "version": "2.9.0",
       "author": {
         "name": "Matteo Bortolazzo"
       },
