@@ -34,3 +34,18 @@ migrate_settings() {
         | del(.extraKnownMarketplaces["claude-tools"])
     '
 }
+
+# Onboarding state lives in /home/dev/.claude.json (NOT settings.json). Marking
+# it complete skips Claude Code's first-run wizard — theme picker, terminal
+# "anti-flicker" setup, and the account/login step — on a fresh home volume.
+# Login itself still works via the host credentials the entrypoint injects.
+ONBOARDING_SETTINGS='{"hasCompletedOnboarding":true}'
+
+# seed_onboarding: read a .claude.json object from stdin, write it back with the
+# onboarding flag set. Deep-merges so oauthAccount, project trust, and history
+# are preserved. Idempotent. The caller must only pipe VALID JSON through this:
+# .claude.json holds unrecoverable state, so a corrupt file is left untouched
+# rather than clobbered.
+seed_onboarding() {
+    jq --argjson onboarding "${ONBOARDING_SETTINGS}" '. * $onboarding'
+}

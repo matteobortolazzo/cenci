@@ -105,6 +105,17 @@ image rebuild.
 
 If `~/.claude/.credentials.json` and `~/.config/gh/hosts.yml` exist on the host, they are automatically injected into the container on each start. **No manual auth needed.**
 
+### Onboarding prompts
+
+Claude Code's first-run wizard — the theme picker, the terminal "anti-flicker"
+setup, and the account/login step — is driven by `/home/dev/.claude.json`, which
+lives in the persistent home volume. The entrypoint seeds
+`hasCompletedOnboarding` on start, so a fresh instance jumps straight to a usable
+session and you won't see those prompts. If an older volume still shows them
+once, completing the wizard is recorded in the volume and won't recur for that
+instance. They only reappear for a **new `--name` instance** (its own fresh
+volume) or after you reset/delete a volume.
+
 ### Codex auth
 
 When launching Codex (`--agent codex` / `codex-sand`), auth is staged from the host:

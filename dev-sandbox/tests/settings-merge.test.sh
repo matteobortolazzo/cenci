@@ -90,6 +90,26 @@ echo "case: our keys win on conflict"
 assert_jq "re-enables agentwatch"   "${OUT_OVERRIDE}" '.enabledPlugins["agentwatch@agent-stack"] == true'
 assert_jq "forces bypass mode"      "${OUT_OVERRIDE}" '.permissions.defaultMode == "bypassPermissions"'
 
+# ── Case 6: onboarding seed into .claude.json ────────────────────
+# Fresh volume: the entrypoint writes ONBOARDING_SETTINGS directly.
+echo "case: onboarding seed (fresh)"
+assert_jq "fresh seed marks onboarding complete" "${ONBOARDING_SETTINGS}" '.hasCompletedOnboarding == true'
+
+# Existing .claude.json: seed_onboarding must preserve account/trust/history.
+EXISTING_CLAUDE_JSON='{"oauthAccount":{"emailAddress":"x@y.z"},"projects":{"/workspace":{"hasTrustDialogAccepted":true}},"hasCompletedOnboarding":false}'
+OUT_ONBOARD="$(echo "${EXISTING_CLAUDE_JSON}" | seed_onboarding)"
+echo "case: onboarding seed (existing .claude.json)"
+assert_jq "flips onboarding to true"   "${OUT_ONBOARD}" '.hasCompletedOnboarding == true'
+assert_jq "preserves oauthAccount"     "${OUT_ONBOARD}" '.oauthAccount.emailAddress == "x@y.z"'
+assert_jq "preserves project trust"    "${OUT_ONBOARD}" '.projects["/workspace"].hasTrustDialogAccepted == true'
+
+echo "case: onboarding seed idempotency"
+if [[ "$(echo "${EXISTING_CLAUDE_JSON}" | seed_onboarding | jq -S .)" == "$(echo "${EXISTING_CLAUDE_JSON}" | seed_onboarding | seed_onboarding | jq -S .)" ]]; then
+    pass
+else
+    fail "running seed_onboarding twice differs from running it once"
+fi
+
 # ── Summary ──────────────────────────────────────────────────────
 echo
 echo "passed: ${PASSES}, failed: ${FAILURES}"
