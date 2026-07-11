@@ -1,6 +1,6 @@
 ---
 name: configure
-description: "Claude Code-only: configure the agentflow workflow plugin, Claude settings, sandbox, MCP servers, and project guidance."
+description: "Claude Code-only: configure the agentflow workflow plugin, Claude settings, MCP servers, and project guidance."
 compatibility: Requires Claude Code settings, plugin environment variables, and AskUserQuestion.
 argument-hint: [additional context]
 user-invocable: true
@@ -16,8 +16,6 @@ Help the user set up this project for the agentflow plugin.
 
 All of `$ARGUMENTS` is optional **user context** (additional instructions or focus areas).
 If empty, proceed normally with defaults.
-
-**Profile override**: If the very first token of `$ARGUMENTS` is `container` or `host` (case-insensitive), it forces the profile (see **Container Detection** below). Strip that token before treating the remainder as user context.
 
 ### Existing Config Detection
 
@@ -48,34 +46,25 @@ If user context was provided, use it to steer the configuration (e.g., skip cert
 
 ### Container Detection
 
-agentflow supports two **profiles**:
+agentflow runs inside `dev-sandbox`'s `agent-sand` container with `--dangerously-skip-permissions`. The **container is the security boundary** — there is no host profile. Claude Code's own host sandbox stays disabled, and `permissions.allow`/`deny` are kept only as defense-in-depth for plain `claude` runs inside the container (e.g. `agent-sand --shell`).
 
-- **host** (default) — Claude Code runs on the host with its own sandbox (bubblewrap, `allowedDomains`, Bash allowlists). This is the historical behavior and is unchanged.
-- **container** — Claude Code runs inside `dev-sandbox`'s `agent-sand` container with `--dangerously-skip-permissions`. Here the **container is the security boundary**, so the host-sandbox machinery is redundant friction: nested bubblewrap can fail, SSH-vs-HTTPS push workarounds are pointless, and permission auto-fix is moot (Claude Code ignores `permissions.allow/deny` under skip-permissions).
+Detect the container (stop at the first match; run each check as its **own** Bash call, per `agentflow:shell-rules` — never compound them):
 
-Determine `detectedProfile` using this precedence (stop at the first match):
+1. **`AGENT_SAND` env var** (works for both Docker and Podman): run `echo "${AGENT_SAND:-}"` as its own Bash call. If it prints `1` → in container.
+2. **Docker fallback**: run `test -f /.dockerenv` as its own Bash call. Exit 0 → in container.
 
-1. **Explicit override**: If the **first token** of `$ARGUMENTS` is `container` or `host` (case-insensitive), that wins. Set `detectedProfile` accordingly and **strip that token** from `$ARGUMENTS` before parsing the rest as user context.
-2. **`AGENT_SAND` env var** (works for both Docker and Podman): run `echo "${AGENT_SAND:-}"` as its own Bash call. If it prints `1` → `container`.
-3. **Docker fallback**: run `test -f /.dockerenv` as its own Bash call. Exit 0 → `container`.
-4. **Default**: `host`.
+This detection is a **non-blocking advisory** — it never gates configuration and never uses `AskUserQuestion`:
 
-Run the detection checks as **separate** Bash calls (per `agentflow:shell-rules` — never compound them).
-
-Auto-detection is **informational, not a gate** — do not use `AskUserQuestion` to confirm it (it's reliable, and gating would nag on every in-container run). Instead:
-
-- When `detectedProfile = "container"` (whether by env/`/.dockerenv` or the `container` override), emit an informational message: "Detected the `agent-sand` container — using the **container profile**. The container is the security boundary, so the host sandbox, Bash allowlists, and permission auto-fix are skipped."
-- On a **profile transition** during re-config (`existingConfig.profile` differs from `detectedProfile`, treating an absent `profile` field as `host`), also note the switch, e.g.: "Switching profile: **host → container** — the existing sandbox block will be replaced with `{ \"enabled\": false }` (your `permissions.allow`/`deny` are preserved)." or the reverse.
+- **In container**: emit an informational message: "Detected the `agent-sand` container — the container is the security boundary. Claude Code's host sandbox stays disabled." Then continue normally.
+- **Not in container**: emit an advisory and continue anyway: "agentflow is designed to run inside the `agent-sand` container (the security boundary). You appear to be running on the host — continuing, but running outside the container is unsupported." Proceed with the same container-shaped output.
 
 **Default values from existing config**: When `existingConfig` is not null, each question below MUST present the existing value as the pre-selected default (list it first, marked "(current)"). The user can accept with one click or change it. New fields not in `existingConfig` (e.g., `lspServers` when upgrading from a pre-LSP config) have no default and are asked normally.
 
 | Question | `existingConfig` field | Default when field exists |
 |---|---|---|
-| — (auto-detected, not asked) | `profile` | Auto-detected each run; on re-config the existing value is shown as "(current)" but auto-detection wins |
 | 1. Tech stack | `stack` | Pre-fill with formatted stack |
 | 2. Project structure | `isMonorepo` | Pre-select based on existing value |
 | 3. Branching strategy | `branchPattern` | Pre-fill with existing pattern |
-| 4. Sandboxing | `sandboxEnabled` | Pre-select Yes/No |
 | 5. MCP Servers | `mcpServers` | Pre-select servers where value is `true` |
 | 5b. Pencil design | `pencil` | Pre-select based on `pencil.enabled`; if field absent, ask normally |
 | 6. LSP Servers | `lspServers` | Pre-select servers where value is `true`; if field absent, ask normally |
@@ -135,14 +124,7 @@ Generate a slug for each project from its directory name (e.g., `packages/api` �
 3. **Branching strategy**: "What's your branch naming convention?"
    - Default suggestion: `feature/<id>-<description>`
 
-4. **Sandboxing**: "Do you want to enable sandboxing? (Recommended — provides OS-level isolation for Bash commands)"
-
-   **Container-profile guard**: If `detectedProfile = "container"`, **skip this question entirely** — set `sandboxEnabled = false` and proceed to question 5. The container is already the security boundary, so a nested host sandbox is redundant friction. This also skips the SSH-vs-HTTPS advisory below (it lives in the "If Yes" branch, which never runs on the container profile). Do **not** prompt.
-
-   - Default: Yes
-   - If Linux/WSL2: note that `bubblewrap` and `socat` must be installed (`sudo apt install bubblewrap socat` or equivalent)
-   - If Yes: recommend using HTTPS git remotes instead of SSH for push support within the sandbox. SSH connections bypass `allowedDomains` network filtering, so `git push` over SSH will fail inside the sandbox. The user can switch with: `git remote set-url origin https://github.com/<owner>/<repo>.git`
-   - If No: set `sandbox.enabled: false` in the generated settings
+(There is no question 4 — sandboxing is not asked. The `agent-sand` container is the security boundary and Claude Code's host sandbox is always disabled; numbering of the remaining questions is kept for stability.)
 
 ### Dependency Detection
 
@@ -419,7 +401,7 @@ After gathering answers:
 
 4. **Create or update `.claude/settings.json`**:
 
-   **Container profile** (`detectedProfile = "container"`): write the minimal shape below — the host sandbox is disabled because the container is the boundary. Under `--dangerously-skip-permissions` Claude Code ignores `permissions.allow/deny`, but keep the base allow list + deny rules as defense-in-depth for the case where a user runs plain `claude` (no skip-permissions) inside the container, e.g. via `agent-sand --shell`.
+   Write the minimal shape below — Claude Code's host sandbox is disabled because the container is the boundary. Under `--dangerously-skip-permissions` Claude Code ignores `permissions.allow/deny`, but keep the base allow list + deny rules as defense-in-depth for the case where a user runs plain `claude` (no skip-permissions) inside the container, e.g. via `agent-sand --shell`.
 
    ```json
    {
@@ -428,21 +410,13 @@ After gathering answers:
    }
    ```
 
-   - **Fresh** (no existing settings.json): copy `${CLAUDE_PLUGIN_ROOT}/templates/settings.json` as the base for `permissions`, then set `sandbox` to `{ "enabled": false }` (drop any `network`, `excludedCommands`, `autoAllowBashIfSandboxed` the template may carry).
-   - **Existing** settings.json (host→container re-config): read it first, then **replace the entire `sandbox` block** with `{ "enabled": false }` (drop `network`, `excludedCommands`, `autoAllowBashIfSandboxed`). **Preserve** `permissions.allow` and `permissions.deny` exactly, including user-added entries.
-   - Still **append** stack-specific `Bash(...)` allow rules and enabled-MCP tool entries (per the "Append to `permissions.allow`" bullets below). Do **NOT** append `sandbox.network.allowedDomains` — there is no network block on the container profile.
-   - Omit `sandbox.network`, `sandbox.excludedCommands`, and `sandbox.autoAllowBashIfSandboxed` entirely — they are meaningless when the sandbox is disabled.
-   - The "base permissions MUST remain" invariant below applies unchanged: never remove or replace existing `permissions.allow` entries; only append.
+   - **Fresh** (no existing settings.json): copy `${CLAUDE_PLUGIN_ROOT}/templates/settings.json` as the base.
+   - **Existing** settings.json: read it first, then **replace the entire `sandbox` block** with `{ "enabled": false }` (drop `network`, `excludedCommands`, `autoAllowBashIfSandboxed`, and any other sandbox sub-keys an older config may carry). **Preserve** `permissions.allow` and `permissions.deny` exactly, including user-added entries.
+   - Omit `sandbox.network`, `sandbox.excludedCommands`, and `sandbox.autoAllowBashIfSandboxed` entirely — they are meaningless when the sandbox is disabled. Never write `sandbox.network.allowedDomains`.
 
-   Then skip the **host** branch that follows and continue at the "Pending-plans detection" note.
-
-   **Host profile** (`detectedProfile = "host"`, i.e. the default / absent `profile`): If the file already exists, read it first and merge new settings into it (preserve user-added entries in `permissions.allow`, `permissions.deny`, and `sandbox.network.allowedDomains`). If the file does not exist, copy `${CLAUDE_PLUGIN_ROOT}/templates/settings.json` as the base. Then **append** to it:
+   Then **append** to it:
 
    > **IMPORTANT**: All base permissions from the template (`Write`, `Edit`, `Read(~/.claude/plugins/**)`, `Read(//tmp/claude*/**)`, `Write(//tmp/claude*/**)`, `Bash(cd:*)`, `Bash(git:*)`, `Bash(gh:*)`, `SlashCommand(/goal:*)`, `SlashCommand(/loop:*)`, etc.) **MUST** remain in `permissions.allow`. Only **append** new entries — never remove or replace existing ones. When updating an **existing** `settings.json`, also ensure these base entries are present — add any that are missing (older configs predate them — e.g. `SlashCommand(/goal:*)` for the implement autopilot and `SlashCommand(/loop:*)` for `/agentflow:babysit`). The `Read(~/.claude/plugins/**)` rule lets the pipeline read its own plugin files (phase docs resolve to `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/skills/…`) without prompting — it is deliberately scoped to `plugins/` so subagents cannot read session transcripts or global config under `~/.claude/`; the `//tmp/claude*/**` rules cover the `shell-rules` heredoc temp-file pattern and the session scratchpad.
-
-   **Append to `sandbox.network.allowedDomains`:**
-   - GitHub domains (`github.com`, `api.github.com`)
-   - Stack-specific domains (e.g., `nuget.org` for .NET, `registry.npmjs.org` for Angular/Node, `proxy.golang.org` and `sum.golang.org` for Go)
 
    **Append to `permissions.allow`:**
    - Stack-specific rules (e.g., `Bash(dotnet:*)` for .NET, `Bash(ng:*)` for Angular, `Bash(go:*)` for Go)
@@ -454,9 +428,6 @@ After gathering answers:
      - **Pencil** (only if `pencil.enabled` is `true`): `mcp__pencil__*` (auto-allow all Pencil editor MCP tools — only relevant when Pencil editor is open)
      - **Angular**: `mcp__angular__:*` (auto-allow all Angular CLI MCP tools)
      - **PrimeNG**: `mcp__primeng__:*` (auto-allow all PrimeNG MCP tools)
-
-   **Other settings:**
-   - If user declined sandboxing: set `sandbox.enabled: false`
 
    **Pending-plans detection** — no per-project setup required. The pending-plans
    SessionStart hook is shipped plugin-side (`${CLAUDE_PLUGIN_ROOT}/hooks/scripts/check-pending-plans.sh`,
@@ -507,34 +478,7 @@ For each MCP selected in question 5:
 5. Update `.gitignore`:
    - Add `.worktrees/` if not present
    - Add `.plans/` if not present (plan files are ephemeral, session-specific)
-   - **Container profile** (`detectedProfile = "container"`): `sandboxEnabled` is `false`, so the "If sandbox is enabled" block below is skipped — do **not** add sandbox artifact entries. (If a prior host-profile run already appended them, leave them in place — they are harmless and removing them would violate the append-only rule.)
-   - **If sandbox is enabled**: Add sandbox artifact entries if not already present. The sandbox exposes git internals, shell configs, and tool configs as visible entries in the working directory. Add these entries under a `# Claude Code sandbox artifacts` comment:
-     ```
-     # Claude Code sandbox artifacts
-     # Git internals
-     HEAD
-     config
-     hooks/
-     objects/
-     refs/
-
-     # Shell configs
-     .bash_profile
-     .bashrc
-     .zshrc
-     .profile
-     .zprofile
-
-     # Tool configs
-     .gitconfig
-     .gitmodules
-     .ripgreprc
-
-     # IDE/tool configs
-     .idea/
-     .vscode/
-     ```
-   - Check each entry individually before adding — skip any that are already in `.gitignore`
+   - Check each entry individually before adding — skip any that are already in `.gitignore`. (If a prior agentflow version appended a `# Claude Code sandbox artifacts` block, leave it in place — the entries are harmless and removing them would violate the append-only rule.)
 5b. **Generate `.claudeignore`**: Create or update `.claudeignore` in the project root. This file tells Claude Code to ignore files that are tracked by git but not useful as context (binary assets, lock files, generated bundles). Claude already respects `.gitignore`, so `.claudeignore` is only for tracked files.
 
    - If `.claudeignore` already exists, merge new entries into it — preserve user-added entries, skip duplicates.
@@ -672,7 +616,6 @@ For each MCP selected in question 5:
 
    - If `existingConfig` is not null: start from the existing object, overwrite each field with the user's answers. This preserves fields the skill doesn't manage.
    - If `existingConfig` is null: create the file fresh.
-   - Always set `profile` to the auto-detected `detectedProfile` (`"host"` or `"container"`) — on re-config this overwrites any stale value, reflecting where configure actually ran. Set `sandboxEnabled` accordingly (`false` on the container profile).
 
 ```json
 {
@@ -682,8 +625,6 @@ For each MCP selected in question 5:
     "frontend": "angular21",
     "testing": ["xunit", "jasmine"]
   },
-  "sandboxEnabled": true,
-  "profile": "host",
   "claudeMdLocation": ".claude/CLAUDE.md | CLAUDE.md",
   "mcpServers": {
     "context7": true,
@@ -722,11 +663,7 @@ The `agentflow` field is optional. If present, preserve existing user values dur
 - `goalAutopilot` — `true` arms a native `/goal` completion condition at Phase 2 start (Claude Code ≥ 2.1.139) so implement phases 2–9 resume through to an open PR after a mid-phase stop; `false` opts out. Default (unset): enabled where supported, a graceful no-op on older runtimes.
 - `planComment` — `true` makes implement Phase 1 also post the approved plan as a ticket comment (ticket mode only) right after marking the ticket `Planned`, for audit / off-host visibility; `.plans/` stays the executable source of truth. Default: `false` (no comment).
 
-The `profile` field records which security model this project runs under and is **auto-detected each run** (never asked as a question). Values:
-- `"host"` (default; also assumed when the field is **absent** — fully backward-compatible) — Claude Code runs on the host with its own sandbox. Configure writes the full sandbox block (or `enabled: false` if the user declined sandboxing in Q4).
-- `"container"` — Claude Code runs inside the `agent-sand` container (`dev-sandbox`) with `--dangerously-skip-permissions`; the container is the security boundary. Configure skips Q4, sets `sandboxEnabled: false`, writes `sandbox: { "enabled": false }` (no `network`/`excludedCommands`/`autoAllowBashIfSandboxed`), and skips sandbox `.gitignore` artifacts.
-
-Detection precedence: an explicit first-token override (`/agentflow:configure container` or `/agentflow:configure host`, case-insensitive, stripped before further parsing) → the `AGENT_SAND=1` env var (set by `agent-sand` for both Docker and Podman) → `/.dockerenv` (Docker fallback) → default `host`. Detection is informational, not gated. Re-config across profiles is safe: the `sandbox` block is owned entirely by configure and is rewritten every run, while `permissions.allow`/`deny` are always preserved.
+Configure always writes `sandbox: { "enabled": false }` in `.claude/settings.json` (no `network`/`excludedCommands`/`autoAllowBashIfSandboxed`) — the `agent-sand` container is the security boundary. The config no longer carries `profile` or `sandboxEnabled` fields; re-config strips them from older configs (see the migration-removal list below).
 
 Optional external usage reducer: RTK (`https://github.com/rtk-ai/rtk`) can compress shell command output before it reaches Claude Code. It is not required for agentflow and should not be installed automatically, but it is worth recommending when users are hitting usage limits from command-heavy sessions. After separate installation, `rtk init -g` enables Claude Code Bash command rewriting where supported. Built-in tools like `Read`, `Grep`, and `Glob` do not pass through RTK hooks.
 
@@ -749,7 +686,6 @@ Omit `pencil` entirely if no frontend framework was detected.
 ```json
 {
   "isMonorepo": true,
-  "profile": "host",
   "projects": [
     {
       "slug": "api",
@@ -791,7 +727,7 @@ Only include servers in `mcpServers` that were presented as options (i.e., detec
 
 Only include servers in `lspServers` that were detected and presented in question 6. Value is `true` if enabled, `false` if declined. Omit `lspServers` entirely if no LSP servers were detected.
 
-When migrating from an older config that has `ticketSystem`, `prSystem`, `ticketPrefix`, `adoOrg`, `adoProject`, or `adoRepo` fields, remove them during the merge.
+When migrating from an older config that has `ticketSystem`, `prSystem`, `ticketPrefix`, `adoOrg`, `adoProject`, `adoRepo`, `profile`, or `sandboxEnabled` fields, remove them during the merge.
 
 **Monorepo `pencil` notes:**
 - When `pencil.shared` is `true`: `pencil.designPath` holds the shared path (e.g., `"designs/"`). Individual projects do **not** have `designPath`.
