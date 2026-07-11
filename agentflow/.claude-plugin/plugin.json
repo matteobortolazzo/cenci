@@ -1,7 +1,7 @@
 {
   "name": "agentflow",
   "description": "Ticket refinement and automated implementation pipeline for GitHub",
-  "version": "3.1.0",
+  "version": "3.1.1",
   "author": {
     "name": "Matteo Bortolazzo"
   },
