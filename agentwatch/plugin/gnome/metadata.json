@@ -1,0 +1,9 @@
+{
+  "uuid": "agentwatch@matteobortolazzo.github.io",
+  "name": "AgentWatch",
+  "description": "Live counts of Claude Code and Codex agent sessions in the GNOME Shell top bar, via the agentwatch daemon. Read-only consumer of `agentwatch status`.",
+  "shell-version": ["45", "46", "47", "48"],
+  "url": "https://github.com/matteobortolazzo/agent-stack/tree/main/agentwatch",
+  "settings-schema": "org.gnome.shell.extensions.agentwatch",
+  "version": 1
+}
