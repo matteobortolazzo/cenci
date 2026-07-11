@@ -52,7 +52,7 @@ The `gh` CLI stores credentials in `~/.config/gh/hosts.yml`. It also respects `G
 ccflow runs under one of two **profiles**, auto-detected by `/ccflow:configure`:
 
 - **host** (default) — Claude Code runs on the host and its own sandbox is the boundary. The prerequisites below apply.
-- **container** — Claude Code runs inside the [`dev-sandbox`](../dev-sandbox) `claude-sand` container with `--dangerously-skip-permissions`. The **container is the boundary**, so configure auto-detects it (via the `CLAUDE_SAND=1` env var, or `/.dockerenv`) and uses the container profile: the host sandbox is skipped, along with Bash allowlists and permission auto-fix. No bubblewrap/socat needed. You can force it with `/ccflow:configure container` (or `/ccflow:configure host` to opt back out).
+- **container** — Claude Code runs inside the [`dev-sandbox`](../dev-sandbox) `agent-sand` container with `--dangerously-skip-permissions`. The **container is the boundary**, so configure auto-detects it (via the `AGENT_SAND=1` env var, or `/.dockerenv`) and uses the container profile: the host sandbox is skipped, along with Bash allowlists and permission auto-fix. No bubblewrap/socat needed. You can force it with `/ccflow:configure container` (or `/ccflow:configure host` to opt back out).
 
 The **host-profile** sandbox provides OS-level filesystem and network isolation for autonomous execution. It requires:
 - **bubblewrap** (`bwrap`): `sudo apt install bubblewrap` (or `sudo pacman -S bubblewrap`)

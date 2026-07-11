@@ -50,12 +50,12 @@ If user context was provided, use it to steer the configuration (e.g., skip cert
 ccflow supports two **profiles**:
 
 - **host** (default) — Claude Code runs on the host with its own sandbox (bubblewrap, `allowedDomains`, Bash allowlists). This is the historical behavior and is unchanged.
-- **container** — Claude Code runs inside `dev-sandbox`'s `claude-sand` container with `--dangerously-skip-permissions`. Here the **container is the security boundary**, so the host-sandbox machinery is redundant friction: nested bubblewrap can fail, SSH-vs-HTTPS push workarounds are pointless, and permission auto-fix is moot (Claude Code ignores `permissions.allow/deny` under skip-permissions).
+- **container** — Claude Code runs inside `dev-sandbox`'s `agent-sand` container with `--dangerously-skip-permissions`. Here the **container is the security boundary**, so the host-sandbox machinery is redundant friction: nested bubblewrap can fail, SSH-vs-HTTPS push workarounds are pointless, and permission auto-fix is moot (Claude Code ignores `permissions.allow/deny` under skip-permissions).
 
 Determine `detectedProfile` using this precedence (stop at the first match):
 
 1. **Explicit override**: If the **first token** of `$ARGUMENTS` is `container` or `host` (case-insensitive), that wins. Set `detectedProfile` accordingly and **strip that token** from `$ARGUMENTS` before parsing the rest as user context.
-2. **`CLAUDE_SAND` env var** (works for both Docker and Podman): run `echo "${CLAUDE_SAND:-}"` as its own Bash call. If it prints `1` → `container`.
+2. **`AGENT_SAND` env var** (works for both Docker and Podman): run `echo "${AGENT_SAND:-}"` as its own Bash call. If it prints `1` → `container`.
 3. **Docker fallback**: run `test -f /.dockerenv` as its own Bash call. Exit 0 → `container`.
 4. **Default**: `host`.
 
@@ -63,7 +63,7 @@ Run the detection checks as **separate** Bash calls (per `ccflow:shell-rules` �
 
 Auto-detection is **informational, not a gate** — do not use `AskUserQuestion` to confirm it (it's reliable, and gating would nag on every in-container run). Instead:
 
-- When `detectedProfile = "container"` (whether by env/`/.dockerenv` or the `container` override), emit an informational message: "Detected the `claude-sand` container — using the **container profile**. The container is the security boundary, so the host sandbox, Bash allowlists, and permission auto-fix are skipped."
+- When `detectedProfile = "container"` (whether by env/`/.dockerenv` or the `container` override), emit an informational message: "Detected the `agent-sand` container — using the **container profile**. The container is the security boundary, so the host sandbox, Bash allowlists, and permission auto-fix are skipped."
 - On a **profile transition** during re-config (`existingConfig.profile` differs from `detectedProfile`, treating an absent `profile` field as `host`), also note the switch, e.g.: "Switching profile: **host → container** — the existing sandbox block will be replaced with `{ \"enabled\": false }` (your `permissions.allow`/`deny` are preserved)." or the reverse.
 
 **Default values from existing config**: When `existingConfig` is not null, each question below MUST present the existing value as the pre-selected default (list it first, marked "(current)"). The user can accept with one click or change it. New fields not in `existingConfig` (e.g., `lspServers` when upgrading from a pre-LSP config) have no default and are asked normally.
@@ -418,7 +418,7 @@ After gathering answers:
 
 4. **Create or update `.claude/settings.json`**:
 
-   **Container profile** (`detectedProfile = "container"`): write the minimal shape below — the host sandbox is disabled because the container is the boundary. Under `--dangerously-skip-permissions` Claude Code ignores `permissions.allow/deny`, but keep the base allow list + deny rules as defense-in-depth for the case where a user runs plain `claude` (no skip-permissions) inside the container, e.g. via `claude-sand --shell`.
+   **Container profile** (`detectedProfile = "container"`): write the minimal shape below — the host sandbox is disabled because the container is the boundary. Under `--dangerously-skip-permissions` Claude Code ignores `permissions.allow/deny`, but keep the base allow list + deny rules as defense-in-depth for the case where a user runs plain `claude` (no skip-permissions) inside the container, e.g. via `agent-sand --shell`.
 
    ```json
    {
@@ -723,9 +723,9 @@ The `ccflow` field is optional. If present, preserve existing user values during
 
 The `profile` field records which security model this project runs under and is **auto-detected each run** (never asked as a question). Values:
 - `"host"` (default; also assumed when the field is **absent** — fully backward-compatible) — Claude Code runs on the host with its own sandbox. Configure writes the full sandbox block (or `enabled: false` if the user declined sandboxing in Q4).
-- `"container"` — Claude Code runs inside the `claude-sand` container (`dev-sandbox`) with `--dangerously-skip-permissions`; the container is the security boundary. Configure skips Q4, sets `sandboxEnabled: false`, writes `sandbox: { "enabled": false }` (no `network`/`excludedCommands`/`autoAllowBashIfSandboxed`), and skips sandbox `.gitignore` artifacts.
+- `"container"` — Claude Code runs inside the `agent-sand` container (`dev-sandbox`) with `--dangerously-skip-permissions`; the container is the security boundary. Configure skips Q4, sets `sandboxEnabled: false`, writes `sandbox: { "enabled": false }` (no `network`/`excludedCommands`/`autoAllowBashIfSandboxed`), and skips sandbox `.gitignore` artifacts.
 
-Detection precedence: an explicit first-token override (`/ccflow:configure container` or `/ccflow:configure host`, case-insensitive, stripped before further parsing) → the `CLAUDE_SAND=1` env var (set by `claude-sand` for both Docker and Podman) → `/.dockerenv` (Docker fallback) → default `host`. Detection is informational, not gated. Re-config across profiles is safe: the `sandbox` block is owned entirely by configure and is rewritten every run, while `permissions.allow`/`deny` are always preserved.
+Detection precedence: an explicit first-token override (`/ccflow:configure container` or `/ccflow:configure host`, case-insensitive, stripped before further parsing) → the `AGENT_SAND=1` env var (set by `agent-sand` for both Docker and Podman) → `/.dockerenv` (Docker fallback) → default `host`. Detection is informational, not gated. Re-config across profiles is safe: the `sandbox` block is owned entirely by configure and is rewritten every run, while `permissions.allow`/`deny` are always preserved.
 
 Optional external usage reducer: RTK (`https://github.com/rtk-ai/rtk`) can compress shell command output before it reaches Claude Code. It is not required for ccflow and should not be installed automatically, but it is worth recommending when users are hitting usage limits from command-heavy sessions. After separate installation, `rtk init -g` enables Claude Code Bash command rewriting where supported. Built-in tools like `Read`, `Grep`, and `Glob` do not pass through RTK hooks.
 

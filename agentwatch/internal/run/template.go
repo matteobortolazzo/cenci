@@ -25,7 +25,7 @@ type WorkflowTemplate struct {
 type AgentConfig struct {
 	// Command is the host executable, e.g. "claude".
 	Command string `json:"command"`
-	// SandboxCommand replaces Command when --sandbox is on, e.g. "claude-sand".
+	// SandboxCommand replaces Command when --sandbox is on, e.g. "agent-sand".
 	SandboxCommand string `json:"sandboxCommand"`
 	// Model, when set, is injected: substituted into any {model} placeholder,
 	// otherwise appended as "--model <model>". A specific model value is never
@@ -48,7 +48,7 @@ type FileConfig struct {
 }
 
 // builtinConfig returns the zero-config defaults: claude refine/design/implement
-// calling the matching ccflow skill, with a claude-sand sandbox command. Fresh
+// calling the matching ccflow skill, with a agent-sand sandbox command. Fresh
 // maps are constructed on each call so callers may mutate the result freely.
 func builtinConfig() FileConfig {
 	claudeWF := func(wf string) WorkflowTemplate {
@@ -59,7 +59,7 @@ func builtinConfig() FileConfig {
 		Agents: map[string]AgentConfig{
 			"claude": {
 				Command:        "claude",
-				SandboxCommand: "claude-sand",
+				SandboxCommand: "agent-sand",
 				Workflows: map[string]WorkflowTemplate{
 					"refine":    claudeWF("refine"),
 					"design":    claudeWF("design"),

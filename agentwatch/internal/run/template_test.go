@@ -39,8 +39,8 @@ func TestSandboxSwapsClaudeToClaudeSand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if argv[0] != "claude-sand" {
-		t.Errorf("sandbox command = %q, want claude-sand", argv[0])
+	if argv[0] != "agent-sand" {
+		t.Errorf("sandbox command = %q, want agent-sand", argv[0])
 	}
 }
 

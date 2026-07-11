@@ -338,12 +338,12 @@ step_sandbox_setup() {
 	step "Setting up the sandbox launcher"
 
 	local launcher
-	if ! launcher=$(find_plugin_path "dev-sandbox/claude-sand"); then
+	if ! launcher=$(find_plugin_path "dev-sandbox/agent-sand"); then
 		warn "could not find the installed sandbox plugin — run /sandbox:setup inside Claude Code instead"
 		return 0
 	fi
 
-	link_launcher claude-sand "$launcher" || true
+	link_launcher agent-sand "$launcher" || true
 	link_launcher codex-sand "$launcher" || true
 
 	case ":$PATH:" in
@@ -355,28 +355,28 @@ step_sandbox_setup() {
 	local runtime
 	if ! runtime=$(container_runtime); then
 		if [ "$OS" = macos ]; then
-			warn "no container runtime found — install Docker Desktop (https://docker.com/products/docker-desktop) or Podman, then run: claude-sand --build"
+			warn "no container runtime found — install Docker Desktop (https://docker.com/products/docker-desktop) or Podman, then run: agent-sand --build"
 		else
-			warn "no container runtime found — install docker or podman, then run: claude-sand --build"
+			warn "no container runtime found — install docker or podman, then run: agent-sand --build"
 		fi
 		return 0
 	fi
 
 	if [ "$BUILD_IMAGE" = no ]; then
-		say "  ${DIM}skipping image build — run 'claude-sand --build' when ready${RESET}"
+		say "  ${DIM}skipping image build — run 'agent-sand --build' when ready${RESET}"
 		return 0
 	fi
 	if [ "$BUILD_IMAGE" = ask ]; then
 		if ! ask_yn "Build the sandbox container image now with $runtime? (takes a few minutes)" y; then
-			say "  ${DIM}skipped — run 'claude-sand --build' when ready${RESET}"
+			say "  ${DIM}skipped — run 'agent-sand --build' when ready${RESET}"
 			return 0
 		fi
 	fi
-	say "  building claude-sandbox:latest with $runtime (this can take a few minutes)…"
-	if "$HOME/.local/bin/claude-sand" --build; then
+	say "  building agent-sandbox:latest with $runtime (this can take a few minutes)…"
+	if "$HOME/.local/bin/agent-sand" --build; then
 		ok "sandbox image built"
 	else
-		fail "image build failed — fix the error above and re-run: claude-sand --build"
+		fail "image build failed — fix the error above and re-run: agent-sand --build"
 		INSTALL_FAILED=1
 	fi
 }
@@ -439,7 +439,7 @@ final_summary() {
 	say ""
 	say "  Try it out:"
 	if selected sandbox; then
-		say "    claude-sand                # Claude Code inside the container"
+		say "    agent-sand                # Claude Code inside the container"
 	fi
 	if selected ccflow; then
 		say "    claude → /ccflow:configure # one-time project setup"
