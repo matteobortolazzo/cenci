@@ -55,6 +55,30 @@ else
     echo '{}' | migrate_settings > /home/dev/.claude/settings.json
 fi
 
+# ── Skip Claude Code's first-run onboarding wizard ────────────────
+# Onboarding state (theme picker, terminal "anti-flicker" setup, account step)
+# lives in /home/dev/.claude.json, not settings.json.  Seeding
+# hasCompletedOnboarding here means a fresh --name instance jumps straight to a
+# usable session; login still works via the injected host credentials.  Unlike
+# settings.json we NEVER overwrite an invalid .claude.json — it holds
+# unrecoverable state (oauthAccount, project trust, history).
+
+if [[ -L /home/dev/.claude.json ]]; then
+    rm -f /home/dev/.claude.json
+fi
+if [[ ! -f /home/dev/.claude.json ]]; then
+    # Fresh volume → seed onboarding-complete.
+    echo "${ONBOARDING_SETTINGS}" > /home/dev/.claude.json
+elif jq -e . /home/dev/.claude.json >/dev/null 2>&1; then
+    # Valid JSON → merge the flag in, preserving account/trust/history.
+    if seed_onboarding < /home/dev/.claude.json > /home/dev/.claude.json.tmp; then
+        mv /home/dev/.claude.json.tmp /home/dev/.claude.json
+    else
+        rm -f /home/dev/.claude.json.tmp
+    fi
+fi
+# Invalid JSON → leave untouched (never clobber unrecoverable state).
+
 # ── Inject host credentials (staged read-only mounts → writable copies) ──
 
 # Claude Code OAuth credentials
