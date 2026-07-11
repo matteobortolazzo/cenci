@@ -89,3 +89,48 @@ heal_plugin_installs() {
         rm -f "${plugins_file}.tmp"
     fi
 }
+
+# provision_plugins <plugins-dir> <marketplace-name> <marketplace-repo> <plugin>...
+#
+# Claude Code 2.1.207's settings-driven auto-install (enabledPlugins +
+# extraKnownMarketplaces in settings.json) is broken: at session startup it
+# writes installed_plugins.json with correct versions and installPaths but
+# never populates plugins/cache/ — deterministic, reproduced on a bare
+# `claude -p "hi"` with no login. heal_plugin_installs alone can't fix this:
+# it drops the resulting broken records, but the next session just rewrites
+# them broken again, looping forever with no cache ever materializing.
+#
+# The official CLI path works and is idempotent: `claude plugin marketplace
+# add <repo>` clones+registers (or no-ops if already on disk), and
+# `claude plugin install <plugin>@<marketplace>` populates the cache and
+# writes correct metadata — even when metadata already claims the plugin is
+# installed. So provision_plugins stops trusting the settings-driven path
+# and calls the CLI directly. Never blocks container start: a missing
+# `claude` binary (codex-sand mounts none) or an offline/failed CLI call
+# just warns to stderr and returns 0.
+provision_plugins() {
+    local plugins_dir="$1" marketplace_name="$2" marketplace_repo="$3"
+    shift 3
+
+    command -v claude >/dev/null 2>&1 || return 0
+
+    if [[ ! -d "${plugins_dir}/marketplaces/${marketplace_name}" ]]; then
+        if ! claude plugin marketplace add "${marketplace_repo}" >/dev/null 2>&1; then
+            echo "warning: failed to add marketplace ${marketplace_repo}; plugins may be unavailable this session" >&2
+        fi
+    fi
+
+    local meta="${plugins_dir}/installed_plugins.json"
+    local plugin key
+    for plugin in "$@"; do
+        key="${plugin}@${marketplace_name}"
+        if [[ -f "${meta}" ]] && jq -e --arg key "${key}" '(.plugins // {})[$key] // [] | length > 0' "${meta}" >/dev/null 2>&1; then
+            continue
+        fi
+        if ! claude plugin install "${key}" >/dev/null 2>&1; then
+            echo "warning: failed to install plugin ${key}; it may be unavailable this session" >&2
+        fi
+    done
+
+    return 0
+}

@@ -25,6 +25,14 @@ fi
 # agent-stack marketplace (so sandbox sessions are visible on the host status
 # bar), and a removal of the stale pre-rename muxwatch/ccflow/claude-tools
 # stack that old home volumes still carry.
+#
+# This enabledPlugins/extraKnownMarketplaces settings alone do NOT actually
+# install anything on Claude Code 2.1.207: its settings-driven auto-install
+# writes installed_plugins.json (correct versions, correct installPaths) but
+# never populates plugins/cache/ — deterministic, reproduced on a bare
+# `claude -p "hi"`. The heal + provision_plugins calls below are what
+# actually materialize the plugins' skills; this migration only makes sure
+# Claude Code *wants* them enabled once the CLI has installed them.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/migrate-settings.sh
@@ -60,8 +68,22 @@ fi
 # a cache directory that was never populated.  Claude Code trusts the metadata,
 # skips reinstall, and every skill of that plugin is "Unknown command" — which
 # permanently masks the enabledPlugins provisioning above.  Dropping the broken
-# entries makes Claude Code reinstall from the marketplace on next launch.
+# entries makes the "is it installed" check below truthful, and stays useful
+# on its own once the upstream 2.1.207 bug is fixed.
 heal_plugin_installs /home/dev/.claude/plugins
+
+# ── Provision plugins explicitly via the official CLI ─────────────
+# Claude Code 2.1.207's settings-driven auto-install never populates
+# plugins/cache/ (see comment above), so `enabledPlugins` alone never
+# materializes the skills — sessions fail with "Unknown command" forever,
+# even right after heal_plugin_installs, because nothing ever reinstalls.
+# `claude plugin marketplace add`/`claude plugin install` are the CLI path
+# that actually works and is idempotent — install even repairs a
+# metadata-present/cache-missing state on its own. Costs one marketplace
+# clone (~10-20s) on first boot only; a healthy volume makes zero `claude`
+# calls. Never blocks container start: failures (offline boot, no `claude`
+# binary — codex-sand mounts none) just warn to stderr.
+provision_plugins /home/dev/.claude/plugins agent-stack matteobortolazzo/agent-stack agentflow agentwatch
 
 # ── Skip Claude Code's first-run onboarding wizard ────────────────
 # Onboarding state (theme picker, terminal "anti-flicker" setup, account step)
