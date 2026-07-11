@@ -6,7 +6,7 @@ argument-hint: <ticket-id> [additional context]
 user-invocable: true
 disable-model-invocation: true
 model: opus
-allowed-tools: Read, Glob, Bash, AskUserQuestion, WebFetch
+allowed-tools: Read, Glob, Bash(gh:*), Bash(git:*), Bash(curl:*), Bash(mkdir:*), AskUserQuestion, WebFetch
 ---
 
 ## Context
