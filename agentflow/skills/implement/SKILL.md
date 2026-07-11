@@ -152,6 +152,19 @@ Store each attachment's file path for passing to subagents (subagents share the 
 
 Check the `labels` line from the context-gatherer digest.
 
+### Design-Ticket Router (first check)
+
+If the labels include **"Design"**, this is a design-only ticket — its deliverable is a design spec (`.pen` + `DESIGN.md`) produced by `/agentflow:design`, not code. Ask via `AskUserQuestion`:
+
+> "This ticket is labeled `Design` — its deliverable is a design spec, not a code change. It should be run through `/agentflow:design <ticket-id>` instead. How do you want to proceed?"
+
+- **"Stop — route to /agentflow:design (Recommended)"** — stop the pipeline immediately. Tell the user to run `/agentflow:design <ticket-id>`. No labels change (the "Working" label has not been applied yet at this point).
+- **"Proceed with implementation anyway"** — the label may be stale or wrong. Continue with the remaining readiness checks below, and tell the user to remove the `Design` label (or re-run `/agentflow:refine`) if the ticket genuinely includes implementation work.
+
+Do not proceed past this check without an explicit answer. (Plan-file mode skips Ticket Readiness entirely, which is fine — a design-only ticket never produces a plan file.)
+
+### Remaining Readiness Checks
+
 If the ticket does **not** have a "Refined" label/tag, display a warning:
 > "This ticket hasn't been refined yet. Consider running `/agentflow:refine <ticket-id>` first for better results. Do you want to proceed anyway?"
 

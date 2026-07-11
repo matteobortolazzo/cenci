@@ -460,6 +460,11 @@ git add <designPath>/*.pen <designPath>/DESIGN.md && git commit -m "feat(design)
 gh issue edit <number> --repo <owner>/<repo> --add-label "Designed" --remove-label "Working"
 ```
 
+**If the ticket carries the "Design" label** (a design-only ticket from `/agentflow:refine` — the design spec *is* the deliverable, no implementation follows), also close it:
+```bash
+gh issue close <number> --repo <owner>/<repo> --comment "Design delivered: \`<designPath>/<pen-file-name>\` + \`<designPath>/DESIGN.md\`, committed on main."
+```
+
 ### Step 6C: Error Recovery
 
 - **Commit fails** → Display the `git add` / `git commit` commands and ask the user to run them manually. Do not retry automatically.
@@ -473,5 +478,6 @@ gh issue edit <number> --repo <owner>/<repo> --add-label "Designed" --remove-lab
 - Suggest next steps beyond telling the user to run `/agentflow:implement` when ready
 
 Final message:
-- **Ticket mode:** "Design committed on `main`. Run `/agentflow:implement <ticket-id>` when ready to implement."
+- **Ticket mode (design-only ticket — has the "Design" label):** "Design committed on `main`. Ticket #<ticket-id> closed — the design spec was the deliverable."
+- **Ticket mode (otherwise):** "Design committed on `main`. Run `/agentflow:implement <ticket-id>` when ready to implement."
 - **Ticketless mode:** "Design committed on `main`."

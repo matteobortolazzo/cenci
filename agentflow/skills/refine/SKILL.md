@@ -80,6 +80,14 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 
 4. **Classify ticket type**: Read the `frontend-classification` reference skill and apply its rule to determine if this ticket involves frontend/UI work. If yes, activate **design-aware refinement** for this session. If purely backend/infrastructure/data, skip design-specific analysis.
 
+   **Design-only classification** (if frontend ticket AND `pencil.enabled` is `true` in `.claude/config.json`): determine whether the ticket's *deliverable* is the design itself — a `.pen` file plus `DESIGN.md` spec, with no production code change (e.g., "Design the settings page", "Create mockups for the onboarding flow"). If the signals point that way, confirm via `AskUserQuestion`:
+
+   > "This reads as a design-only ticket — the deliverable would be a design spec (`.pen` + `DESIGN.md`) produced by `/agentflow:design`, with no code change. Is that right?"
+
+   Options: "Yes — design-only", "No — includes implementation"
+
+   If confirmed, set `isDesignTicket = true`. Design-only tickets are routed to `/agentflow:design`, not `/agentflow:implement`: they skip the browser question (step 8) and the `ui:visual-check` label (step 13), and receive the `Design` label in step 12. Focus the analysis (step 5) on design questions — visual direction, screens, states, design-system fit — and skip implementation-only items (API contracts, database changes, PR size).
+
    **Design Coverage Check** (if frontend ticket AND `pencil.enabled` is `true` in `.claude/config.json`):
 
    a. Read `pencil.designPath` from `.claude/config.json`.
@@ -126,7 +134,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
    - Ask another question, OR
    - Declare the ticket refined
 
-8. **Before producing the summary**, ask one final infrastructure question — but only when it can plausibly apply. Ask it if the ticket was classified frontend/UI in step 4, **or** the ticket/answers mention web scraping, browser automation, or manual browser testing. For pure backend/infrastructure/data tickets with none of those signals, skip the question and set `browserRequired: false`.
+8. **Before producing the summary**, ask one final infrastructure question — but only when it can plausibly apply. **Skip for design-only tickets** (`isDesignTicket` is true) — they never reach the implement pipeline; set `browserRequired: false`. Ask it if the ticket was classified frontend/UI in step 4, **or** the ticket/answers mention web scraping, browser automation, or manual browser testing. For pure backend/infrastructure/data tickets with none of those signals, skip the question and set `browserRequired: false`.
 
    Using `AskUserQuestion`:
    "Does this story need interactive browser access during implementation? (e.g., for visual verification, form testing, or web scraping). If yes, the implementer should ensure `playwright-cli` is installed (`npm i -g @playwright/cli`)."
@@ -179,6 +187,8 @@ ticket is unambiguous, well-scoped, and ready for implementation.
    - Ticket 2, Ticket 3 → can start after Ticket 1 (parallel with each other)
 
    When analyzing the split, determine which child tickets have data/API/schema dependencies on others (sequential) vs. which touch independent areas (parallel). Annotate each ticket accordingly.
+
+   **Design-first splits** (if frontend feature AND `pencil.enabled` is `true` AND no approved design exists): consider making the first child a **design-only ticket** (e.g., "Design <feature> screens") that the implementation children depend on. Mark it as design-only in the split — it gets the `Design` label in Pass 1, is executed via `/agentflow:design`, and produces a committed design spec rather than a PR (the one exception to "1 ticket = 1 PR").
 
 ## Update Ticket
 
@@ -237,6 +247,8 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 
    Omit `Depends on` / `Parallel with` lines that don't apply (e.g. the first child typically has no dependencies).
 
+   Design-only children (see **Design-first splits** above) additionally get `--label "Design"`.
+
    #### Pass 2: Update parent with tracking section
 
    After all children are created, re-read the parent ticket's current body and append a `### Child Tickets` section:
@@ -261,14 +273,17 @@ ticket is unambiguous, well-scoped, and ready for implementation.
    ```
 
 12. **Add the "Refined" label and remove "Working":**
-   - If `browserRequired` is true:
+   - If `isDesignTicket` is true:
+     `gh issue edit <number> --repo <owner>/<repo> --add-label "Refined" --add-label "Design" --remove-label "Working"`
+   - Else if `browserRequired` is true:
      `gh issue edit <number> --repo <owner>/<repo> --add-label "Refined" --add-label "Browser" --remove-label "Working"`
    - Otherwise:
      `gh issue edit <number> --repo <owner>/<repo> --add-label "Refined" --remove-label "Working"`
    - If re-refining and `browserRequired` is false but the issue currently has the `Browser` label, also add `--remove-label "Browser"`
+   - If re-refining and `isDesignTicket` is false but the issue currently has the `Design` label, also add `--remove-label "Design"`
    - If the user declined the ticket update in step 10, use `AskUserQuestion` to ask: "Do you want me to mark this ticket as Refined?" and apply just the label if yes.
 
-13. **Auto-label `ui:visual-check` for visual/layout tickets:**
+13. **Auto-label `ui:visual-check` for visual/layout tickets** (skip if `isDesignTicket` is true):
    If the ticket description, acceptance criteria, or answers during refinement match the **visual-check signals** subset in the `frontend-classification` reference skill, add the `ui:visual-check` label:
    `gh issue edit <number> --repo <owner>/<repo> --add-label "ui:visual-check"`
 
@@ -281,4 +296,4 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 - Offer to run `/implement` or start implementation
 - Suggest next steps beyond what's described above
 
-The user will explicitly invoke `/implement` when they're ready to proceed.
+The user will explicitly invoke `/implement` when they're ready to proceed — or `/agentflow:design` for design-only tickets (labeled `Design`).

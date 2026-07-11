@@ -743,14 +743,17 @@ mirror it as columns on their board:
 
 | Label | Applied by | Meaning |
 |---|---|---|
-| `Working` | refine / implement (at start) | Actively being refined or implemented |
+| `Working` | refine / design / implement (at start) | Actively being refined, designed, or implemented |
 | `Refined` | refine | Ready for design/implementation |
+| `Design` | refine | Design-only ticket — deliverable is a design spec; implement redirects to `/agentflow:design` |
 | `Designed` | design | UI design spec approved |
 | `Planned` | implement Phase 1 (approved plan persisted) | Approved plan on disk, ready to pick up |
 | `In Review` | implement Phase 9 (at PR-open) | PR is open, under review / CI running |
 | `Implemented` | babysit (on PR merge) | PR merged — done |
 
 Lifecycle: `New → Refined → [Designed] → Planned → Working → In Review → Implemented`.
+
+Design-only tickets (labeled `Design` by refine) follow a shorter path: `New → Refined → Designed → closed` — `/agentflow:design` commits the spec on main and closes the ticket; no plan, no PR (the one exception to "1 ticket = 1 PR"). `/agentflow:implement` redirects these tickets to `/agentflow:design`.
 
 **Migration note for existing boards** (state this when re-configuring a project that predates
 `In Review`): add an **`In Review`** column/label. Previously, tickets dropped straight into

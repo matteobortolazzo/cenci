@@ -229,13 +229,14 @@ The skills drive a ticket through a label-based state machine (`gh issue edit`).
 | State | Applied by | Meaning |
 |---|---|---|
 | `Refined` | `/agentflow:refine` | Scoped and ready for design/implementation |
+| `Design` | `/agentflow:refine` | Design-only ticket — the deliverable is a design spec, not code |
 | `Designed` | `/agentflow:design` | UI design spec approved (frontend tickets) |
 | `Planned` | `/agentflow:implement` — Phase 1, at plan approval | Approved plan on disk (`.plans/`), ready to pick up |
 | `Working` | `/agentflow:implement` — at pipeline start | Actively being implemented |
 | `In Review` | `/agentflow:implement` — Phase 9, at PR-open | PR is open, under review / CI running |
 | `Implemented` | `/agentflow:babysit` — on PR merge | PR merged — done |
 
-Full lifecycle: `New → Refined → [Designed] → Planned → Working → In Review → Implemented`. A planning session ends on **`Planned`** — an approved plan sits in `.plans/`, waiting; picking it up with `/agentflow:implement .plans/<file>` swaps `Planned → Working`. Opening the PR (Phase 9) only advances the ticket to **`In Review`**; the transition to **`Implemented`** happens when the PR merges — [babysit](#babysitting-a-pr) performs that swap using the merged PR's `closingIssuesReferences`. (`configure` documents these labels but does not create them; add the matching columns to your board.)
+Full lifecycle: `New → Refined → [Designed] → Planned → Working → In Review → Implemented`. **Design-only tickets** — where the design spec *is* the deliverable — take a shorter path: `/agentflow:refine` classifies them and applies the `Design` label, `/agentflow:implement` redirects them to `/agentflow:design`, and `/agentflow:design` commits the spec on main and closes the ticket (`New → Refined → Designed → closed`; no PR — the one exception to "1 ticket = 1 PR"). A planning session ends on **`Planned`** — an approved plan sits in `.plans/`, waiting; picking it up with `/agentflow:implement .plans/<file>` swaps `Planned → Working`. Opening the PR (Phase 9) only advances the ticket to **`In Review`**; the transition to **`Implemented`** happens when the PR merges — [babysit](#babysitting-a-pr) performs that swap using the merged PR's `closingIssuesReferences`. (`configure` documents these labels but does not create them; add the matching columns to your board.)
 
 ### Autopilot (goal-driven completion)
 
