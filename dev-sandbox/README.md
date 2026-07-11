@@ -232,7 +232,12 @@ If `agentwatch` is installed on the host and the daemon is running, the script a
 - Bind-mounts the events socket so hooks can reach the host daemon
 - Passes `$TMUX_PANE` for tmux window status updates
 
-Install the agentwatch plugin inside the container: `claude plugin install agentwatch`
+No manual install is needed inside the container. On each start the entrypoint
+enables the `agentwatch` and `agentflow` plugins from the `agent-stack`
+marketplace (Claude Code auto-installs them on launch), so sandbox sessions show
+up in the host status bar out of the box. Existing home volumes are migrated off
+the old `muxwatch`/`ccflow` plugins and the renamed `claude-tools` marketplace at
+the same time.
 
 ### Container lifecycle
 
