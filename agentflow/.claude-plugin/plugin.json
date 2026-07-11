@@ -1,0 +1,15 @@
+{
+  "name": "agentflow",
+  "description": "Ticket refinement and automated implementation pipeline for GitHub",
+  "version": "2.7.2",
+  "author": {
+    "name": "Matteo Bortolazzo"
+  },
+  "repository": "https://github.com/matteobortolazzo/agent-stack",
+  "keywords": [
+    "workflow",
+    "github",
+    "tdd",
+    "implementation"
+  ]
+}

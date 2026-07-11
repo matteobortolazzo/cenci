@@ -174,7 +174,7 @@ RUN_ARGS=(
     # Terminal
     -e "TERM=${TERM:-xterm-256color}"
 
-    # Container marker (both docker & podman) — ccflow configure detects this
+    # Container marker (both docker & podman) — agentflow configure detects this
     -e "AGENT_SAND=1"
 )
 

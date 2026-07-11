@@ -63,7 +63,7 @@ func TestRunSpawnsWindowAndPinsName(t *testing.T) {
 	if w.name != "40-demo" {
 		t.Errorf("name = %q, want 40-demo", w.name)
 	}
-	if !strings.Contains(w.cmd, "claude") || !strings.Contains(w.cmd, "/ccflow:implement 40") {
+	if !strings.Contains(w.cmd, "claude") || !strings.Contains(w.cmd, "/agentflow:implement 40") {
 		t.Errorf("command = %q", w.cmd)
 	}
 
@@ -95,7 +95,7 @@ func TestRunPrependsDir(t *testing.T) {
 	if !strings.HasPrefix(cmd, "cd '/repos/my project' && ") {
 		t.Errorf("command missing cd prefix: %q", cmd)
 	}
-	if !strings.Contains(cmd, "/ccflow:implement 40") {
+	if !strings.Contains(cmd, "/agentflow:implement 40") {
 		t.Errorf("command dropped the workflow: %q", cmd)
 	}
 }
@@ -155,7 +155,7 @@ func TestRunDryRunPrintsAndDoesNotSpawn(t *testing.T) {
 		t.Errorf("dry-run must not spawn, got %+v", m.windows)
 	}
 	out := buf.String()
-	for _, want := range []string{"work", "40-demo", "/ccflow:implement 40"} {
+	for _, want := range []string{"work", "40-demo", "/agentflow:implement 40"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("dry-run output missing %q:\n%s", want, out)
 		}
@@ -238,7 +238,7 @@ func TestRunForwardsFullTicketArgument(t *testing.T) {
 	}
 	w := m.windows[0]
 	// The whole argument reaches the skill, not just the first token.
-	if !strings.Contains(w.cmd, "/ccflow:implement 42 focus on the API layer") {
+	if !strings.Contains(w.cmd, "/agentflow:implement 42 focus on the API layer") {
 		t.Errorf("command dropped context: %q", w.cmd)
 	}
 	if w.name != "42-focus-on-the-api-layer" {

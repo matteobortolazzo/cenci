@@ -1,0 +1,59 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/check-sensitive-files.sh",
+            "timeout": 10000
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/guard-main-worktree.sh",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/preserve-context.sh",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Lessons reminder: only capture lessons that would prevent a future agent from repeating a *specific* non-obvious mistake; if the session went smoothly, capture nothing. Lessons are WRITTEN only during Phase 8 of /agentflow:implement, inside the feature worktree, so they land in the PR. In any other context — a non-pipeline session, or after the PR was created — do NOT edit docs/<topic>.md, CLAUDE.md, or any other file, and never leave edits in the main worktree: propose the lesson text to the user and let them decide where it goes. Never write to .claude/rules/lessons-learned.md (deprecated).'",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/check-lessons-file.sh",
+            "timeout": 10000
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/check-pending-plans.sh",
+            "timeout": 5000
+          }
+        ]
+      }
+    ]
+  }
+}

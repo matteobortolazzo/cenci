@@ -170,8 +170,8 @@ func TestRunDryRunPrintsCommandAndWindowName(t *testing.T) {
 	if !strings.Contains(s, "40-agentwatch-run") {
 		t.Errorf("expected window name 40-agentwatch-run, got:\n%s", s)
 	}
-	if !strings.Contains(s, "claude") || !strings.Contains(s, "/ccflow:implement 40") {
-		t.Errorf("expected claude command with the ccflow skill, got:\n%s", s)
+	if !strings.Contains(s, "claude") || !strings.Contains(s, "/agentflow:implement 40") {
+		t.Errorf("expected claude command with the agentflow skill, got:\n%s", s)
 	}
 }
 
@@ -188,7 +188,7 @@ func TestRunForwardsUnquotedCustomText(t *testing.T) {
 		t.Fatalf("custom-text dry-run failed: %v\n%s", err, output)
 	}
 	s := string(output)
-	if !strings.Contains(s, "/ccflow:implement 99999999 focus on the API layer") {
+	if !strings.Contains(s, "/agentflow:implement 99999999 focus on the API layer") {
 		t.Errorf("expected full argument forwarded, got:\n%s", s)
 	}
 	if !strings.Contains(s, "99999999-focus-on-the-api-layer") {

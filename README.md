@@ -13,7 +13,7 @@ one install, one update.
 │  hooks → daemon → tmux · waybar · noctalia · dms       │
 │  "the agent needs YOU" → routed to every surface       │
 ├────────────────────────────────────────────────────────┤
-│  workflow layer    (ccflow)                            │
+│  workflow layer    (agentflow)                         │
 │  human gates: refine · design · plan approval · AUQ    │
 │  autopilot:  /goal-driven phases → PR → CI green       │
 │  babysit:    /loop → address-review until merged       │
@@ -64,7 +64,7 @@ platform, your first session, troubleshooting, uninstall.
 
 ```bash
 claude plugin marketplace add matteobortolazzo/agent-stack
-claude plugin install ccflow agentwatch sandbox
+claude plugin install agentflow agentwatch sandbox
 /sandbox:setup   # container layer only — symlink agent-sand + build the image
 # later:
 claude plugin update --all
@@ -85,12 +85,12 @@ security boundary, which is what lets every layer above it drop per-command appr
 without exposing the host. `/sandbox:setup` symlinks the `agent-sand` launcher and
 builds the image.
 
-### Workflow — [ccflow](./ccflow) (plugin: `ccflow`)
+### Workflow — [agentflow](./agentflow) (plugin: `agentflow`)
 
 The GitHub ticket → PR pipeline, and the home of every human decision gate: interactive
-`/ccflow:refine` and `/ccflow:design`, plan approval as the hard stop, and
+`/agentflow:refine` and `/agentflow:design`, plan approval as the hard stop, and
 `AskUserQuestion` from the main agent. Once you approve the plan, `/goal`-driven phases
-run unattended to an open PR with green CI, and `/ccflow:babysit` loops on review
+run unattended to an open PR with green CI, and `/agentflow:babysit` loops on review
 comments until the PR merges. It detects the sandbox and drops host-only friction inside it.
 
 ### Attention — [agentwatch](./agentwatch) (plugin: `agentwatch`)
@@ -117,7 +117,7 @@ Per-layer Codex status is honest about where each layer stands today:
 | Layer | Codex today | Roadmap |
 |-------|-------------|---------|
 | attention (agentwatch) | ✅ watched — self-bootstrapping Codex hooks, `/hooks` trust step | `agentwatch run --agent codex` launch templates ([#33](https://github.com/matteobortolazzo/agent-stack/issues/33)) |
-| workflow (ccflow) | Claude Code only | documented `AGENTS.md` equivalent ([#19](https://github.com/matteobortolazzo/agent-stack/issues/19)) |
+| workflow (agentflow) | Claude Code only | documented `AGENTS.md` equivalent ([#19](https://github.com/matteobortolazzo/agent-stack/issues/19)) |
 | isolation (sandbox) | Claude-only launcher | `agent-sand --agent codex` ([#18](https://github.com/matteobortolazzo/agent-stack/issues/18)) |
 
 ## License

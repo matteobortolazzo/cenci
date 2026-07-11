@@ -5,7 +5,7 @@
 
 This is the supported recipe for driving the whole package from a
 [lazyboards](https://github.com/matteobortolazzo/lazyboards) kanban board — the
-orchestration layer that sits on top of ccflow (workflow), agentwatch (attention),
+orchestration layer that sits on top of agentflow (workflow), agentwatch (attention),
 and dev-sandbox (isolation). See
 [`cohesive-package.md` §2.4](./cohesive-package.md) for the architecture; this
 document is the wiring.
@@ -13,7 +13,7 @@ document is the wiring.
 Every card is a GitHub issue. A keypress on a card dispatches a coding-agent workflow
 into a detached tmux window; the agent moves the card across the board by relabelling
 the issue; live status flows back onto the card. Nothing here is bespoke to one
-machine — the pieces are `agentwatch run` (the launcher), the ccflow skills (the
+machine — the pieces are `agentwatch run` (the launcher), the agentflow skills (the
 workflows), and a single `~/.config/lazyboards/config.yml`.
 
 ## The state machine: columns are labels
@@ -25,7 +25,7 @@ case-insensitively:
 - an issue with one matching label lands in that column;
 - an issue with several matching labels lands in the **rightmost** matching column.
 
-So the board and the ccflow skills share one vocabulary: the skills relabel the
+So the board and the agentflow skills share one vocabulary: the skills relabel the
 issue, and the card moves on the next refresh. The lifecycle is five states plus one
 transient marker:
 
@@ -33,15 +33,15 @@ transient marker:
 New ──refine──▶ Refined ──design──▶ Designed ──implement──▶ In Review ──merge──▶ Implemented
 ```
 
-| Transition | ccflow skill | Label change |
+| Transition | agentflow skill | Label change |
 |---|---|---|
-| New → Refined | `/ccflow:refine` | `+Working` while running, then `+Refined` `−Working` |
-| Refined → Designed | `/ccflow:design` | `+Working` while running, then `+Designed` `−Working` |
-| Designed → In Review | `/ccflow:implement` (phase 9, on PR open) | `+Working` while running, then `+In Review` `−Working` |
-| In Review → Implemented | `/ccflow:babysit` (on PR merge) | `+Implemented` `−In Review` |
+| New → Refined | `/agentflow:refine` | `+Working` while running, then `+Refined` `−Working` |
+| Refined → Designed | `/agentflow:design` | `+Working` while running, then `+Designed` `−Working` |
+| Designed → In Review | `/agentflow:implement` (phase 9, on PR open) | `+Working` while running, then `+In Review` `−Working` |
+| In Review → Implemented | `/agentflow:babysit` (on PR merge) | `+Implemented` `−In Review` |
 
 `In Review` is applied when the PR **opens**, not when it merges — so a PR still
-looping through review is visibly distinct from a merged one. `/ccflow:babysit` owns
+looping through review is visibly distinct from a merged one. `/agentflow:babysit` owns
 the final swap: it watches the open PR and, on merge, replaces `In Review` with
 `Implemented` on every issue the PR closed (including a parent ticket reached via
 `Fixes #<parent>`). PR-open never applies `Implemented`.
@@ -89,7 +89,7 @@ only read from a project-local `.lazyboards.yml`; the global file ignores them.)
 # ~/.config/lazyboards/config.yml
 session_max_length: 40        # match agentwatch's window-name cap (see join key)
 action_refresh_delay: 5       # seconds after an action before refreshing — lets the
-                              # ccflow skill apply its label before the board re-reads
+                              # agentflow skill apply its label before the board re-reads
 working_label: "Working"      # spinner marker; a card keeps its column while set
 
 columns:

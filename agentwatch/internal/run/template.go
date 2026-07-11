@@ -48,11 +48,11 @@ type FileConfig struct {
 }
 
 // builtinConfig returns the zero-config defaults: claude refine/design/implement
-// calling the matching ccflow skill, with a agent-sand sandbox command. Fresh
+// calling the matching agentflow skill, with a agent-sand sandbox command. Fresh
 // maps are constructed on each call so callers may mutate the result freely.
 func builtinConfig() FileConfig {
 	claudeWF := func(wf string) WorkflowTemplate {
-		return WorkflowTemplate{Args: []string{"--", "/ccflow:" + wf + " {ticket}"}}
+		return WorkflowTemplate{Args: []string{"--", "/agentflow:" + wf + " {ticket}"}}
 	}
 	return FileConfig{
 		DefaultAgent: "claude",

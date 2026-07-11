@@ -28,7 +28,7 @@ type Plan struct {
 	Status        string // "approved" when ready to pick up
 	PlanCommitSha string // HEAD when the plan was written
 	IsChild       bool   // part of a parent/child split
-	IsLastChild   bool   // the last child of its parent (parent-close signal for ccflow/#46)
+	IsLastChild   bool   // the last child of its parent (parent-close signal for agentflow/#46)
 	ParentID      int    // parentId; 0 = none
 	CommitsBehind int    // default-branch commits since PlanCommitSha (collector-filled; 0 = current/unknown-fresh)
 }

@@ -125,7 +125,7 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 			}
 			// A Planned ticket with no local plan file is not always a leak: plan
 			// files are ephemeral and may be mid-write, or the plan legitimately
-			// lives on another host (ccflow treats "Planned, no local plan" as a
+			// lives on another host (agentflow treats "Planned, no local plan" as a
 			// normal state). So this path mirrors the failure path's guards —
 			// never act blind on a nil snapshot, and require the signal to hold
 			// past the grace period before escalating to plan-invalid.
