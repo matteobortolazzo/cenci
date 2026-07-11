@@ -1,7 +1,7 @@
 {
   "name": "sandbox",
   "description": "Isolated Docker/Podman container for running Claude Code with full permissions — the container is the security boundary",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "author": {
     "name": "Matteo Bortolazzo"
   },
