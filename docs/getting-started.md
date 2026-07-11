@@ -65,6 +65,15 @@ What it does, concretely:
 Non-interactive (CI, dotfiles scripts): `bash -s -- --yes --plugins agentflow,agentwatch`.
 Run `./install.sh --help` for all flags.
 
+**Codex users — one-time config.** Project instructions live in `CLAUDE.md` files (one per
+directory). Claude Code reads them natively; Codex needs one line in its *user-level*
+config to discover the same files (a repo-level `.codex/config.toml` is ignored):
+
+```toml
+# ~/.codex/config.toml
+project_doc_fallback_filenames = ["CLAUDE.md"]
+```
+
 <details>
 <summary>Prefer to do it by hand?</summary>
 

@@ -8,7 +8,7 @@
     "testing": "go-test"
   },
   "sandboxEnabled": true,
-  "claudeMdLocation": ".claude/CLAUDE.md",
+  "claudeMdLocation": "CLAUDE.md",
   "mcpServers": {
     "context7": true
   }

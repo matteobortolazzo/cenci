@@ -9,7 +9,7 @@ GitHub Issues for tracking. GitHub for code and PRs.
 - `agentwatch/` — Go binary + Claude Code plugin: coding-agent session monitoring (tmux, waybar, noctalia, DMS)
 - `dev-sandbox/` — Docker/Podman container for isolated Claude Code sessions
 
-Each project has its own `.claude/CLAUDE.md` with project-specific context.
+Each project has its own `CLAUDE.md` with project-specific context.
 
 ## Critical Rules
 - ALWAYS read the relevant project's `.claude/rules/` files before working on any layer.
