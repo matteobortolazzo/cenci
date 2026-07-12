@@ -1,0 +1,77 @@
+name: Bug report
+description: Something in agentflow, agentwatch, or agent-sandbox isn't working as expected
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Affected plugin/layer
+      description: Which layer does this bug affect?
+      options:
+        - agentflow (workflow)
+        - agentwatch (attention)
+        - agent-sandbox (isolation)
+        - Not sure / repo-wide
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Linux
+        - macOS
+        - WSL2
+    validations:
+      required: true
+
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Container runtime (agent-sandbox only)
+      description: Leave the default if this bug isn't about agent-sandbox.
+      options:
+        - Docker
+        - Podman
+        - N/A
+      default: 2
+    validations:
+      required: false
+
+  - type: textarea
+    id: doctor-output
+    attributes:
+      label: install.sh doctor output
+      description: |
+        Run `curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash -s -- doctor`
+        and paste the output.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Repro steps
+      description: Exact steps to reproduce the bug, from a clean state if possible.
+      placeholder: |
+        1. Run `agent-sand --shell`
+        2. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include any error output or logs.
+    validations:
+      required: true
