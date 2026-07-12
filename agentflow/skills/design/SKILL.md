@@ -393,21 +393,6 @@ Options: "Overwrite with new spec", "Merge (add new entries, keep existing)"
 - **Overwrite**: Replace the file entirely.
 - **Merge**: Read the existing file, add new screens/components/tokens that don't already exist, preserve existing entries.
 
-### Step D: Update ticket body (ticket mode only)
-
-**If ticketless mode:** Skip this step.
-
-**If ticket mode:** Append a `### Design Reference` section to the ticket body:
-```bash
-gh issue edit <number> --repo <owner>/<repo> --body "$UPDATED_BODY"
-```
-Where the updated body appends:
-```
-### Design Reference
-- Design file: `<designPath>/<pen-file-name>`
-- Design spec: `<designPath>/DESIGN.md`
-```
-
 ## Phase 5 — Report Summary
 
 ### Report
@@ -461,7 +446,32 @@ git add <designPath>/*.pen <designPath>/DESIGN.md && git commit -m "feat(design)
 - **If ticket mode:** Include ticket ref in the commit body: `#<ticket-id>`
 - **If ticketless mode:** Use the design description slug in the commit message
 
-### Step 6B: Label Ticket
+### Step 6B: Post Design Comment
+
+**If ticketless mode:** Skip this step.
+
+**If ticket mode:** Post the design reference and key decisions as a ticket comment — this keeps the ticket body owned by its author while still surfacing the design context for humans and for the context-gatherer (which bundles ticket comments during planning).
+
+1. Get the commit SHA: `git rev-parse HEAD`
+2. Write the comment body with the client's file tool (per `shell-rules` — do not use a shell heredoc) to a temp file, e.g. `${TMPDIR:-/tmp}/agentflow/design-comment.md`:
+   ```markdown
+   ### Design Reference
+   - Design file: `<designPath>/<pen-file-name>`
+   - Design spec: `<designPath>/DESIGN.md`
+   - Commit: `<commit-sha>`
+
+   ### Design Decisions
+   - Aesthetic tone: <from Phase 5 report>
+   - Color palette: <from Phase 5 report>
+   - Typography: <from Phase 5 report>
+   - Layout approach: <from Phase 5 report>
+   ```
+3. Post it:
+   ```bash
+   gh issue comment <number> --repo <owner>/<repo> --body-file "${TMPDIR:-/tmp}/agentflow/design-comment.md"
+   ```
+
+### Step 6C: Label Ticket
 
 **If ticketless mode:** Skip labeling.
 
@@ -483,11 +493,11 @@ gh issue edit <number> --repo <owner>/<repo> --add-label "Designed" --remove-lab
      ```
    Deduplicate the two lists.
 
-2. **Propagate `Designed` to each dependent.** This is what satisfies implement's Design gate — the gate checks the label on the ticket being implemented:
+2. **Propagate `Designed` to each dependent.** This is what satisfies implement's Design gate — the gate checks the label on the ticket being implemented, not the ticket body:
    ```bash
    gh issue edit <dependent> --repo <owner>/<repo> --add-label "Designed"
    ```
-   Also append the same `### Design Reference` section (from Phase 5.5 Step D) to each dependent's body so the implement pipeline finds the spec from the ticket itself.
+   Also post the same comment from **Step 6B** on each dependent (reuse the temp file written there) via `gh issue comment <dependent> --repo <owner>/<repo> --body-file "${TMPDIR:-/tmp}/agentflow/design-comment.md"`. Implement itself locates `DESIGN.md` via the configured `designPath` (see `implement/SKILL.md`), so this comment is for human/planning context — the context-gatherer bundles ticket comments when implement runs.
 
 3. **Close the design ticket** — its deliverable is done:
    ```bash
@@ -496,9 +506,10 @@ gh issue edit <number> --repo <owner>/<repo> --add-label "Designed" --remove-lab
 
 If no dependents are found, still close the ticket — just note it in the closing comment so a missing `Depends on` link is visible.
 
-### Step 6C: Error Recovery
+### Step 6D: Error Recovery
 
 - **Commit fails** → Display the `git add` / `git commit` commands and ask the user to run them manually. Do not retry automatically.
+- **Design comment post fails** → Report the failure and continue; do not block on it.
 - **Label update fails** → Report the failure and continue; do not block on it.
 
 ## After Commit
