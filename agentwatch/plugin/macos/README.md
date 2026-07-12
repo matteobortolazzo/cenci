@@ -57,7 +57,7 @@ open -a SwiftBar   # first launch, so its app bundle + defaults domain exist
 ### 3. Wire up the plugin
 
 ```sh
-~/.claude/plugins/marketplaces/*/agentwatch/plugin/macos/install.sh
+~/.claude/plugins/marketplaces/agent-stack/agentwatch/plugin/macos/install.sh
 ```
 
 (From a **repo checkout**, run `./plugin/macos/install.sh` inside `agentwatch/` instead.)

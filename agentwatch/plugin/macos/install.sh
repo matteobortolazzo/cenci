@@ -8,7 +8,7 @@
 #   plugin-dir defaults to $SWIFTBAR_PLUGIN_DIR, then SwiftBar's existing
 #   PluginDirectory default (if already set), then ~/SwiftBarPlugins.
 
-set -uo pipefail
+set -euo pipefail
 
 if [ "$(uname -s)" != "Darwin" ]; then
   echo "install.sh is macOS-only (SwiftBar)." >&2
