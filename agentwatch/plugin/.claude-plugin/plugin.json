@@ -1,6 +1,6 @@
 {
   "name": "agentwatch",
-  "version": "2.5.1",
+  "version": "2.5.2",
   "description": "Watch your coding agents (Claude Code, Codex) — live session status across tmux, waybar, noctalia, DMS, and the macOS menu bar",
   "author": {
     "name": "Matteo Bortolazzo"
