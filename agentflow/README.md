@@ -38,6 +38,7 @@ Codex so it does not mistake a pipeline command for a supported workflow.
 | `stack-go` | Yes | Yes | Framework and test conventions; documentation lookup is client-neutral |
 | `subagent-safety` | Yes | Yes | Shared delegation boundary with client-specific notes |
 | `testing` | Yes | Yes | TDD and test-quality conventions |
+| `verify-ui` | Yes | Yes | Playwright/Pencil visual-verification procedure; browser tooling availability is client-neutral |
 | `worktrees` | Yes | Yes | Git worktree conventions |
 | `address-review` | Yes | No | Claude interactive gates and pipeline mutations |
 | `babysit` | Yes | No | Claude loop scheduling and slash commands |
@@ -437,6 +438,7 @@ agentflow/
 │   ├── attachments/SKILL.md
 │   ├── pr-comment-filter/SKILL.md
 │   ├── frontend-classification/SKILL.md
+│   ├── verify-ui/SKILL.md
 │   ├── stack-dotnet/SKILL.md
 │   ├── stack-angular/SKILL.md
 │   └── stack-go/SKILL.md
