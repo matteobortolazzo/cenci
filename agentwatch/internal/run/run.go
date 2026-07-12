@@ -44,6 +44,15 @@ type Opts struct {
 	GHTitle func(number string) string
 	// Out receives dry-run output; nil defaults to os.Stdout.
 	Out io.Writer
+
+	// EnsureDaemon starts the agentwatch daemon if it isn't already running,
+	// and waits briefly for it to come up; nil uses the real implementation
+	// (ensureDaemonRunning in daemon.go). Called right before the window is
+	// spawned (never on dry-run or a refused grouped session): agent-sand
+	// only mounts the event socket into the sandbox if it already exists at
+	// container launch (#139), so a window spawned before the daemon is up
+	// never gets status wired in for its whole lifetime.
+	EnsureDaemon func()
 }
 
 // Run resolves the (agent, workflow) command and spawns a detached tmux window
@@ -139,6 +148,12 @@ func Run(opts Opts, ctrl Controller) error {
 	if grouped {
 		return fmt.Errorf("refusing to spawn into grouped session %q: new windows propagate to all sessions in the group; target an ungrouped session with --session", session)
 	}
+
+	ensure := opts.EnsureDaemon
+	if ensure == nil {
+		ensure = ensureDaemonRunning
+	}
+	ensure()
 
 	if err := ctrl.NewWindow(session, name, shellCommand); err != nil {
 		return fmt.Errorf("creating window %q in session %q: %w", name, session, err)

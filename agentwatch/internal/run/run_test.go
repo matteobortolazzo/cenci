@@ -23,8 +23,8 @@ type mockCtrl struct {
 type winCall struct{ session, name, cmd string }
 type optCall struct{ target, key, value string }
 
-func (m *mockCtrl) CurrentSession() (string, error)          { return m.session, m.sessionErr }
-func (m *mockCtrl) IsGroupedSession(string) (bool, error)    { return m.grouped, m.groupedErr }
+func (m *mockCtrl) CurrentSession() (string, error)       { return m.session, m.sessionErr }
+func (m *mockCtrl) IsGroupedSession(string) (bool, error) { return m.grouped, m.groupedErr }
 func (m *mockCtrl) NewWindow(session, name, cmd string) error {
 	m.windows = append(m.windows, winCall{session, name, cmd})
 	return m.newWindowErr
@@ -151,6 +151,63 @@ func TestRunRefusesGroupedSession(t *testing.T) {
 	}
 	if len(m.windows) != 0 {
 		t.Errorf("must not spawn into a grouped session, got %+v", m.windows)
+	}
+}
+
+// TestRunEnsuresDaemonBeforeSpawning guards #139: a window spawned before the
+// daemon (and thus the event socket agent-sand mounts into the sandbox) is up
+// never gets status wired in for its whole lifetime.
+func TestRunEnsuresDaemonBeforeSpawning(t *testing.T) {
+	m := &mockCtrl{session: "work"}
+	opts := noConfigOpts(t)
+	opts.Workflow, opts.Ticket, opts.Slug = "implement", "40", "demo"
+
+	called := false
+	opts.EnsureDaemon = func() { called = true }
+
+	if err := Run(opts, m); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !called {
+		t.Error("expected EnsureDaemon to be called before spawning the window")
+	}
+	if len(m.windows) != 1 {
+		t.Fatalf("expected 1 NewWindow, got %d", len(m.windows))
+	}
+}
+
+func TestRunDryRunDoesNotEnsureDaemon(t *testing.T) {
+	m := &mockCtrl{session: "work"}
+	var buf bytes.Buffer
+	opts := noConfigOpts(t)
+	opts.Workflow, opts.Ticket, opts.Slug = "implement", "40", "demo"
+	opts.DryRun = true
+	opts.Out = &buf
+
+	called := false
+	opts.EnsureDaemon = func() { called = true }
+
+	if err := Run(opts, m); err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Error("dry-run must not start the daemon")
+	}
+}
+
+func TestRunRefusedGroupedSessionDoesNotEnsureDaemon(t *testing.T) {
+	m := &mockCtrl{session: "work", grouped: true}
+	opts := noConfigOpts(t)
+	opts.Workflow, opts.Ticket, opts.Slug = "implement", "40", "demo"
+
+	called := false
+	opts.EnsureDaemon = func() { called = true }
+
+	if err := Run(opts, m); err == nil {
+		t.Fatal("expected an error for a grouped session")
+	}
+	if called {
+		t.Error("a refused grouped session must not start the daemon")
 	}
 }
 
