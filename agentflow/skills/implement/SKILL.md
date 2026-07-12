@@ -219,17 +219,19 @@ This is informational only — it does not block the pipeline.
 gh label create "Working" --repo <owner>/<repo> --color "FBCA04" --description "Actively being refined, designed, or implemented" 2>/dev/null || true
 ```
 
+`Planned` is a milestone marker, not a current-stage indicator — once a ticket has an approved plan, it keeps that label for the life of the ticket (only `In Review`/`Implemented` reaching the ticket via the Phase 9 flow, or the ticket closing, ever implies otherwise). Only `Working` toggles on and off as the pipeline runs. So the implement skill never issues `--remove-label "Planned"` — this holds even when starting from a plan-file pickup or discarding a plan to re-plan from scratch.
+
 The exact swap depends on how this run entered the pipeline:
 
-- **Plan-file mode** (`hasPlanFile` true): this is the approved-plan pickup. The ticket carries `Planned` from when the plan was persisted, so swap it for `Working`:
+- **Plan-file mode** (`hasPlanFile` true): this is the approved-plan pickup. The ticket already carries `Planned` from when the plan was persisted; just add `Working` alongside it:
   ```bash
-  gh issue edit <number> --repo <owner>/<repo> --add-label "Working" --remove-label "Planned"
+  gh issue edit <number> --repo <owner>/<repo> --add-label "Working"
   ```
 - **New-plan ticket mode** (`hasPlanFile` false): add `Working`:
   ```bash
   gh issue edit <number> --repo <owner>/<repo> --add-label "Working"
   ```
-  If this session was entered via a **re-plan over an existing plan** (the user context requested `replan`, or "Re-plan from scratch" was chosen in the multiple-match question), the ticket still carries `Planned` from the discarded plan — also remove it: `--add-label "Working" --remove-label "Planned"`. In a new-plan session `Working` is short-lived: Phase 1 swaps it for `Planned` again when it persists the fresh approved plan and stops.
+  This also covers a session entered via a **re-plan over an existing plan** (the user context requested `replan`, or "Re-plan from scratch" was chosen in the multiple-match question) — the ticket still carries `Planned` from the discarded plan, and that's fine: it stays. In a new-plan session `Working` is short-lived: Phase 1 swaps it back out when it persists the fresh approved plan and stops.
 
 ## Pipeline
 
