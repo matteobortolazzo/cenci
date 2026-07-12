@@ -67,7 +67,7 @@ JSON
 out="$(run_plugin "$TMP/need-input.json" 0)"
 check "menu bar line loud on need-input" "$out" "sfimage=exclamationmark.triangle.fill sfcolor=red"
 check "need-input row is red/alert"      "$out" "work:2 - deploy | sfimage=exclamationmark.triangle.fill sfcolor=red"
-check "running row is blue/gear"         "$out" "work:1 - build | sfimage=gearshape.fill sfcolor=blue"
+check "running row is blue/brain"         "$out" "work:1 - build | sfimage=brain.head.profile.fill sfcolor=blue"
 
 # --- Case 2a: daemon down / no output -> hidden ---------------------------
 out="$(run_plugin "" 1)"
@@ -85,8 +85,8 @@ cat > "$TMP/mix.json" <<'JSON'
 {"text":"▶ 1  ✓ 1","tooltip":"work:1 - build (running)\nsolo (done)","class":"running","alt":"active"}
 JSON
 out="$(run_plugin "$TMP/mix.json" 0)"
-check "menu bar line tinted by highest class (running)" "$out" "▶ 1  ✓ 1 | sfimage=gearshape.fill sfcolor=blue"
-check "running row is blue/gear"                        "$out" "work:1 - build | sfimage=gearshape.fill sfcolor=blue"
+check "menu bar line tinted by highest class (running)" "$out" "▶ 1  ✓ 1 | sfimage=brain.head.profile.fill sfcolor=blue"
+check "running row is blue/brain"                        "$out" "work:1 - build | sfimage=brain.head.profile.fill sfcolor=blue"
 check "done paneless row is green/check"                "$out" "solo | sfimage=checkmark.circle.fill sfcolor=green"
 
 echo

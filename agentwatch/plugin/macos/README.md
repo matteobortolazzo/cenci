@@ -51,46 +51,66 @@ per the [main README](../../README.md#advanced--development).
 
 ```sh
 brew install swiftbar
+open -a SwiftBar   # first launch, so its app bundle + defaults domain exist
 ```
+
+### 3. Wire up the plugin
+
+```sh
+~/.claude/plugins/marketplaces/*/agentwatch/plugin/macos/install.sh
+```
+
+(From a **repo checkout**, run `./plugin/macos/install.sh` inside `agentwatch/` instead.)
+
+This sets SwiftBar's **Plugin Folder** (a plain `defaults` key — `PluginDirectory`
+under `com.ameba.SwiftBar` — no need to click through SwiftBar's own folder picker)
+to `~/SwiftBarPlugins`, or wherever `PluginDirectory` already points, or
+`$SWIFTBAR_PLUGIN_DIR` / `install.sh <dir>` if you want somewhere else — symlinks
+`agentwatch.5s.sh` in, and restarts SwiftBar so it takes effect immediately.
+
+Re-run it any time (e.g. after an `agentwatch` update) — it's idempotent, and never
+overwrites a Plugin Folder you've already customized.
+
+The `.5s.` in the filename is the refresh interval — rename the segment
+(`.2s.`, `.10s.`) to change the cadence.
+
+<details>
+<summary>Doing it manually instead</summary>
 
 On first launch SwiftBar asks for a **Plugin Folder**. It can be *any* directory —
 SwiftBar's default suggestion lives under `~/Library`, which the macOS open panel
 hides and won't let you navigate to normally. Two easy ways around it:
 
 - Pick (or make) an ordinary visible folder, e.g. `mkdir -p ~/SwiftBarPlugins` and
-  choose that — **recommended**, and what the commands below assume.
+  choose that.
 - Or, in the folder picker, press `⌘⇧G` and paste a path (e.g.
   `~/Library/Application Support/SwiftBar/Plugins`).
 
-You can see/change it later in SwiftBar → **Preferences** → *Plugin Folder*.
+You can see/change it later in SwiftBar → **Preferences** → *Plugin Folder*, or via
+`defaults write com.ameba.SwiftBar PluginDirectory -string "/path"`.
 
-### 3. Symlink the plugin
-
-Symlink the script into whatever Plugin Folder you chose, then **Refresh All** (or
-restart SwiftBar):
-
-```sh
-PLUGIN_DIR="$HOME/SwiftBarPlugins"   # the folder you picked in step 2
-```
-
-From a **marketplace install** — point at the marketplace checkout, which is a
-stable path (unlike the versioned `cache/…/agentwatch/<version>/` copy, it survives
-plugin updates without re-linking); the `*` resolves the marketplace name:
+Then symlink the script into whatever Plugin Folder you chose, and **Refresh All**
+(or restart SwiftBar):
 
 ```sh
+PLUGIN_DIR="$HOME/SwiftBarPlugins"   # the folder you picked above
 ln -sf "$HOME"/.claude/plugins/marketplaces/*/agentwatch/plugin/macos/agentwatch.5s.sh \
   "$PLUGIN_DIR/agentwatch.5s.sh"
 ```
 
-From a **repo checkout** (run inside `agentwatch/`):
+</details>
+
+### Menu bar icon not showing at all?
+
+SwiftBar (Cocoa's `NSStatusItem`) remembers per-item visibility across launches. If
+the icon was ever dragged off the menu bar, it stays hidden on relaunch even with a
+live session. Check for a key like `NSStatusItem Visible<something> = 0`:
 
 ```sh
-chmod +x plugin/macos/agentwatch.5s.sh
-ln -sf "$PWD/plugin/macos/agentwatch.5s.sh" "$PLUGIN_DIR/agentwatch.5s.sh"
+defaults read com.ameba.SwiftBar | grep 'NSStatusItem Visible'
+defaults write com.ameba.SwiftBar "<the key from above>" -bool true
+killall SwiftBar; open -a SwiftBar
 ```
-
-The `.5s.` in the filename is the refresh interval — rename the segment
-(`.2s.`, `.10s.`) to change the cadence.
 
 ## Behavior
 
@@ -101,12 +121,15 @@ The `.5s.` in the filename is the refresh interval — rename the segment
 - The dropdown lists one row per session (`session:index - name`, or `name` for
   paneless sessions), each colored by *its own* status — so a `need-input` row is
   red with an alert symbol even when other sessions are just running.
-- Icon + color map (mirrors `iconForClass`/`colorForClass` in the QML widgets):
+- Icon + color map (colors mirror `colorForClass` in the QML widgets; icons use SF
+  Symbols, so they diverge from the QML widgets' icon sets where SF Symbols has no
+  equivalent glyph — e.g. no literal robot icon, hence `brain.head.profile.fill` for
+  `running` instead of noctalia's `robot` / dms's `smart_toy`):
 
   | class | SF Symbol | color |
   |---|---|---|
   | `need-input` | `exclamationmark.triangle.fill` | red |
-  | `running` | `gearshape.fill` | blue |
+  | `running` | `brain.head.profile.fill` | blue |
   | `done` | `checkmark.circle.fill` | green |
   | `stopped` | `pause.circle.fill` | orange |
   | `idle` | (no icon) | — |
