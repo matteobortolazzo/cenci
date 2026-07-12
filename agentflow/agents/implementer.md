@@ -22,6 +22,7 @@ description: |
   </example>
 tools: Read, Write, Edit, Glob, Grep, Bash, mcp__context7
 model: sonnet
+effort: high
 color: green
 permissionMode: acceptEdits
 ---

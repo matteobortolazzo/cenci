@@ -16,6 +16,7 @@ description: |
   </example>
 tools: Read, Grep, Glob
 model: opus
+effort: high
 color: red
 permissionMode: plan
 ---
