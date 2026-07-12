@@ -1,4 +1,4 @@
-# dev-sandbox
+# Project: agent-sandbox
 
 Docker/Podman container project within the agent-stack monorepo.
 Provides an isolated container (`agent-sand`) for running Claude Code sessions with

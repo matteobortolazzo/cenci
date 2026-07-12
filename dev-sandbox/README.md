@@ -1,4 +1,4 @@
-# Dev Sandbox (agent-sand)
+# agent-sandbox (agent-sand)
 
 > Part of [agent-stack](../README.md) — the **isolation layer**. See the root README for
 > the one-command install and how the isolation, workflow, and attention layers fit together.

@@ -6,7 +6,7 @@
 This is the supported recipe for driving the whole package from a
 [lazyboards](https://github.com/matteobortolazzo/lazyboards) kanban board — the
 orchestration layer that sits on top of agentflow (workflow), agentwatch (attention),
-and dev-sandbox (isolation). See
+and agent-sandbox (isolation). See
 [`cohesive-package.md` §2.4](./cohesive-package.md) for the architecture; this
 document is the wiring.
 
@@ -157,7 +157,7 @@ selected card) may not use `{number}`, `{title}`, `{tags}`, or `{session}`.
 
 ## Dispatching into the sandbox
 
-Sandboxed dispatch is the **default** — the dev-sandbox container
+Sandboxed dispatch is the **default** — the agent-sandbox container
 ([#29](https://github.com/matteobortolazzo/agent-stack/issues/29)) is the mandatory
 runtime and the security boundary. A bare `agentwatch run implement {number}` already
 launches inside the container, so a board action needs no extra flag:
