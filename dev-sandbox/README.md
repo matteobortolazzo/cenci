@@ -14,6 +14,17 @@ Isolated Docker/Podman container for running Claude Code with full permissions. 
   image, so it does **not** need to be installed on the host.
 - Host user UID must be 1000 (standard Linux default)
 
+## Limitations
+
+**Host UID must be 1000.** The container maps mounted files as UID 1000 (the standard
+default for the first user on most Linux distros), so a host UID other than 1000 causes
+permission errors on `/workspace` files — see the "Permission errors on `/workspace`
+files" entry in [Troubleshooting](#troubleshooting) below for the symptom and the check.
+`install.sh doctor` flags a mismatched UID as an optional warning; it isn't a hard
+blocker for macOS or WSL2, where this generally isn't an issue. Support for arbitrary
+host UIDs is tracked in
+[#154](https://github.com/matteobortolazzo/agent-stack/issues/154).
+
 ## Setup
 
 The easiest path is the [one-command installer](../docs/getting-started.md), which
