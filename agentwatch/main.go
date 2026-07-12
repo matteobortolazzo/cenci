@@ -103,11 +103,11 @@ func runDaemon(args []string) {
 	// When dispatch.daemonInterval is configured, run the embedded dispatch +
 	// reconcile loop in one process and feed its failure overlay into the daemon
 	// snapshot. Interval 0 (the default) leaves daemon behavior unchanged.
-	var attention <-chan []ipc.WindowState
+	var attention <-chan ipc.AttentionUpdate
 	if dcfg, err := dispatch.LoadConfig(""); err != nil {
 		log.Printf("dispatch config: %v (embedded loop disabled)", err)
 	} else if dcfg.DaemonInterval > 0 {
-		ch := make(chan []ipc.WindowState, 1)
+		ch := make(chan ipc.AttentionUpdate, 1)
 		attention = ch
 		go dispatch.RunCombinedLoop(ctx, "", &tmux.ExecClient{}, &dispatch.GHMutator{}, dcfg.DaemonInterval, os.Stdout, ch)
 	}

@@ -57,13 +57,27 @@ func (p *UsageProvider) Budget(agent string) Budget {
 }
 
 func (p *UsageProvider) computeBudget(agent string) Budget {
-	reader, hasReader := p.Readers[agent]
-	limit, hasLimit := p.Limits[agent]
-	if !hasReader || !hasLimit {
+	headroom, ok := p.agentHeadroom(agent)
+	if !ok {
 		if floor, ok := p.Floors[agent]; ok {
 			return Budget{Agent: agent, Remaining: floor}
 		}
 		return Budget{Agent: agent, Unlimited: true}
+	}
+
+	floor := p.Floors[agent]
+	return Budget{Agent: agent, Remaining: headroom - floor}
+}
+
+// agentHeadroom computes the pure min(fiveHour, weekly) headroom fraction for
+// agent from its configured reader and limit, with no floor applied. Returns
+// (0, false) when agent has no reader or no limit configured — the "omitted"
+// case both computeBudget's fallback and Headroom's map-building rely on.
+func (p *UsageProvider) agentHeadroom(agent string) (float64, bool) {
+	reader, hasReader := p.Readers[agent]
+	limit, hasLimit := p.Limits[agent]
+	if !hasReader || !hasLimit {
+		return 0, false
 	}
 
 	fiveH := windowHeadroom(reader, p.Now.Add(-5*time.Hour), limit.FiveHourTokens)
@@ -73,9 +87,24 @@ func (p *UsageProvider) computeBudget(agent string) Budget {
 	if weekly < headroom {
 		headroom = weekly
 	}
+	return headroom, true
+}
 
-	floor := p.Floors[agent]
-	return Budget{Agent: agent, Remaining: headroom - floor}
+// Headroom returns the pure remaining-budget fraction (0.0-1.0) for every
+// agent with a reader and limit configured, ignoring the per-agent floor
+// (unlike Budget().Remaining()). Agents without a configured reader/limit are
+// omitted entirely rather than reported as unlimited.
+func (p *UsageProvider) Headroom() map[string]float64 {
+	result := make(map[string]float64)
+	// agentHeadroom only returns ok=true for an agent present in both Readers
+	// and Limits, so iterating Limits alone (rather than the union) already
+	// reaches every eligible agent.
+	for agent := range p.Limits {
+		if h, ok := p.agentHeadroom(agent); ok {
+			result[agent] = h
+		}
+	}
+	return result
 }
 
 // windowHeadroom returns the fraction of the limit still available (0.0–1.0).

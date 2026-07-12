@@ -16,10 +16,11 @@ import (
 // canonical definitions stay in one place. Type aliases are identity-equal, so
 // ipc.StateSnapshot and watch.StateSnapshot are the same type.
 type (
-	StateSnapshot = watch.StateSnapshot
-	WindowState   = watch.WindowState
-	StatusSummary = watch.StatusSummary
-	Client        = watch.Client
+	StateSnapshot   = watch.StateSnapshot
+	WindowState     = watch.WindowState
+	StatusSummary   = watch.StatusSummary
+	AttentionUpdate = watch.AttentionUpdate
+	Client          = watch.Client
 )
 
 // Dial connects to the agentwatch broadcast socket. It is re-exported from

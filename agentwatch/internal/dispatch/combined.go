@@ -20,7 +20,7 @@ import (
 // onto attention as synthetic "failed" windows so the daemon can badge them on
 // the snapshot. It is the ctx-aware sibling of RunLoop and blocks until ctx is
 // cancelled.
-func RunCombinedLoop(ctx context.Context, configPath string, ctrl run.Controller, mut TicketMutator, interval time.Duration, out io.Writer, attention chan<- []watch.WindowState) {
+func RunCombinedLoop(ctx context.Context, configPath string, ctrl run.Controller, mut TicketMutator, interval time.Duration, out io.Writer, attention chan<- watch.AttentionUpdate) {
 	if out == nil {
 		out = os.Stdout
 	}
@@ -46,7 +46,7 @@ func RunCombinedLoop(ctx context.Context, configPath string, ctrl run.Controller
 // reload error the whole tick is skipped — no dispatch, no reconcile, no
 // attention push — and prior is left untouched, so a bad edit between ticks
 // cannot crash the loop or run against a stale/partial config.
-func combinedTick(ctx context.Context, configPath string, ctrl run.Controller, mut TicketMutator, out io.Writer, prior *int, store ObservationStore, attention chan<- []watch.WindowState) {
+func combinedTick(ctx context.Context, configPath string, ctrl run.Controller, mut TicketMutator, out io.Writer, prior *int, store ObservationStore, attention chan<- watch.AttentionUpdate) {
 	cfg, ok := reloadConfig(configPath, out)
 	if !ok {
 		return
@@ -55,11 +55,23 @@ func combinedTick(ctx context.Context, configPath string, ctrl run.Controller, m
 	RunOnce(cfg, ctrl, false, out, prior)
 	result := RunReconcileOnce(cfg, mut, false, out, store)
 	if attention != nil {
+		update := watch.AttentionUpdate{Windows: failedWindows(result.Failed), Headroom: computeHeadroom(cfg)}
 		select {
-		case attention <- failedWindows(result.Failed):
+		case attention <- update:
 		case <-ctx.Done():
 		}
 	}
+}
+
+// computeHeadroom returns the current per-agent-type headroom snapshot, or an
+// empty map when AgentLimits isn't configured (buildBudgetProvider falls back
+// to a FloorProvider, which has no Headroom()).
+func computeHeadroom(cfg Config) map[string]float64 {
+	up, ok := buildBudgetProvider(cfg, time.Now()).(*UsageProvider)
+	if !ok {
+		return map[string]float64{}
+	}
+	return up.Headroom()
 }
 
 // failedWindows maps surfaced-failure tickets to synthetic "failed" window
