@@ -736,6 +736,7 @@ For each MCP selected in question 5:
     "compactImplementation": false,
     "reviewConcurrency": "parallel",
     "diffContextMode": "inline",
+    "liteReviewEnabled": true,
     "goalAutopilot": true,
     "planComment": false
   },
@@ -754,6 +755,7 @@ The `agentflow` field is optional. If present, preserve existing user values dur
 - `compactImplementation` — `true` allows small, low-risk tickets to combine red/green/refactor into one implementer subagent turn while preserving all TDD/reporting gates. Default: `false`.
 - `reviewConcurrency` — `"parallel"` runs security, code, and silent-failure reviews together; `"sequential"` runs the same reviews one after another to smooth usage limits. Default: `"parallel"`.
 - `diffContextMode` — `"inline"` passes small diffs directly to reviewers; `"file"` writes the diff to `/tmp/claude/agentflow-diff.patch` and passes paths so reviewers read targeted hunks. Default: `"inline"`.
+- `liteReviewEnabled` — `true` (default) lets Phase 6 + 7 classify each diff into `full` (all three reviewers), `lite-docs` (no reviewers, docs-only), or `lite-small` (`code-reviewer` only, small config/data-only diffs); `false` forces the full trio on every run regardless of diff size or content. See Phase 6 + 7 for the precedence-ordered classification rules.
 - `goalAutopilot` — `true` arms a native `/goal` completion condition at Phase 2 start (Claude Code ≥ 2.1.139) so implement phases 2–9 resume through to an open PR after a mid-phase stop; `false` opts out. Default (unset): enabled where supported, a graceful no-op on older runtimes.
 - `planComment` — `true` makes implement Phase 1 also post the approved plan as a ticket comment (ticket mode only) right after marking the ticket `Planned`, for audit / off-host visibility; `.plans/` stays the executable source of truth. Default: `false` (no comment).
 

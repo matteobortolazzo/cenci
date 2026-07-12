@@ -306,6 +306,7 @@ For lower limit pressure without removing quality gates, add optional settings t
     "compactImplementation": false,
     "reviewConcurrency": "parallel",
     "diffContextMode": "inline",
+    "liteReviewEnabled": true,
     "goalAutopilot": true
   }
 }
@@ -314,6 +315,7 @@ For lower limit pressure without removing quality gates, add optional settings t
 - `compactImplementation: true` lets small, low-risk tickets combine red/green/refactor into one implementer turn while still requiring red failures, green implementation, refactor, and final build/test reporting.
 - `reviewConcurrency: "sequential"` runs the same security, code, and silent-failure reviewers one after another instead of in parallel.
 - `diffContextMode: "file"` passes reviewers a patch file path and changed-file list for large diffs instead of duplicating the full diff in every prompt.
+- `liteReviewEnabled: true` (default) classifies each diff into `full` (all three reviewers), `lite-docs` (no reviewers, for docs-only diffs), or `lite-small` (`code-reviewer` only, for small config/data-only diffs). Anything touching `.claude/**`, `skills/**`, `agents/**`, `CLAUDE.md`, or a danger pattern (auth/security/secrets/CI workflows) always forces `full`. Set to `false` to force the full trio on every run.
 - `goalAutopilot: false` disables the [goal-driven autopilot](#autopilot-goal-driven-completion) (armed by default on Claude Code ≥ 2.1.139).
 
 ### Optional: RTK command-output compression
