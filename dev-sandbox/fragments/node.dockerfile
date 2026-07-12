@@ -4,7 +4,7 @@ USER root
 
 # ── Node.js + npm ────────────────────────────────────────────────
 RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
-    && apt-get install -y nodejs \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 USER dev

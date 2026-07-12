@@ -14,6 +14,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=../lib/migrate-settings.sh
 source "${SCRIPT_DIR}/../lib/migrate-settings.sh"
 

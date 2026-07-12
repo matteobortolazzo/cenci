@@ -1,6 +1,8 @@
 ARG BASE_VERSION=0.7.4
 FROM agent-sandbox-base:${BASE_VERSION}
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 ARG DOTNET_SDK_VERSION=10.0.100
 
 USER root
@@ -25,7 +27,7 @@ USER root
 
 # ── Node.js + npm ────────────────────────────────────────────────
 RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
-    && apt-get install -y nodejs \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 USER dev
