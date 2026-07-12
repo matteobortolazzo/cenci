@@ -53,37 +53,58 @@ else
     exit 0
 fi
 
-# ── Resolve BASE_VERSION from plugin.json ─────────────────────────
-# No hard `jq` dependency: fall back to the same sed pattern used in
-# agentwatch/plugin/hooks/bootstrap.sh when jq isn't on PATH.
-PLUGIN_JSON="${SANDBOX_DIR}/.claude-plugin/plugin.json"
-if command -v jq &>/dev/null; then
-    BASE_VERSION="$(jq -r '.version' "${PLUGIN_JSON}")"
+# ── Resolve BASE_TAG via content hash ─────────────────────────────
+# Portable content hash of all Dockerfile.base build inputs
+# (Dockerfile.base + entrypoint.sh + everything COPYed from lib/). Rebuilds the
+# base only when those inputs change — not on every plugin.json version bump.
+# Prefers sha256sum (Linux); falls back to shasum -a 256 (macOS). Paths are
+# RELATIVE (subshell cd) so the digest is identical here and in agent-sand
+# regardless of the absolute checkout path.
+if command -v sha256sum &>/dev/null; then
+    HASH_CMD=(sha256sum)
+elif command -v shasum &>/dev/null; then
+    HASH_CMD=(shasum -a 256)
 else
-    BASE_VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${PLUGIN_JSON}" | head -n1)"
-fi
-
-if [[ -z "${BASE_VERSION}" ]]; then
-    fail "could not resolve BASE_VERSION from ${PLUGIN_JSON}"
+    fail "neither sha256sum nor shasum on PATH — cannot resolve base tag."
     summarize_and_exit 1
 fi
-echo "resolved BASE_VERSION=${BASE_VERSION}"
+
+if ! BASE_TAG_FILES="$(cd "${SANDBOX_DIR}" && find Dockerfile.base entrypoint.sh lib -type f)"; then
+    fail "failed to enumerate base image build inputs (Dockerfile.base, entrypoint.sh, lib/)."
+    summarize_and_exit 1
+fi
+if [[ -z "${BASE_TAG_FILES}" ]]; then
+    fail "no base image build inputs found (Dockerfile.base, entrypoint.sh, lib/)."
+    summarize_and_exit 1
+fi
+BASE_TAG="$(
+    cd "${SANDBOX_DIR}" &&
+    LC_ALL=C sort <<<"${BASE_TAG_FILES}" |
+        xargs -r "${HASH_CMD[@]}" |
+        "${HASH_CMD[@]}" |
+        cut -c1-12
+)"
+if [[ -z "${BASE_TAG}" ]]; then
+    fail "failed to compute base image content hash."
+    summarize_and_exit 1
+fi
+echo "resolved BASE_TAG=${BASE_TAG}"
 
 # ── Build the base image ──────────────────────────────────────────
-echo "case: build agent-sandbox-base:${BASE_VERSION} from Dockerfile.base"
-if "${RUNTIME}" build -f "${SANDBOX_DIR}/Dockerfile.base" -t "agent-sandbox-base:${BASE_VERSION}" "${SANDBOX_DIR}"; then
+echo "case: build agent-sandbox-base:${BASE_TAG} from Dockerfile.base"
+if "${RUNTIME}" build -f "${SANDBOX_DIR}/Dockerfile.base" -t "agent-sandbox-base:${BASE_TAG}" "${SANDBOX_DIR}"; then
     pass
 else
-    fail "failed to build agent-sandbox-base:${BASE_VERSION} from Dockerfile.base"
+    fail "failed to build agent-sandbox-base:${BASE_TAG} from Dockerfile.base"
     summarize_and_exit 1
 fi
 
 # ── Build the monolith FROM the base image ────────────────────────
-echo "case: build agent-sandbox:latest (--build-arg BASE_VERSION=${BASE_VERSION})"
-if "${RUNTIME}" build --build-arg "BASE_VERSION=${BASE_VERSION}" -t agent-sandbox:latest -f "${SANDBOX_DIR}/Dockerfile" "${SANDBOX_DIR}"; then
+echo "case: build agent-sandbox:latest (--build-arg BASE_VERSION=${BASE_TAG})"
+if "${RUNTIME}" build --build-arg "BASE_VERSION=${BASE_TAG}" -t agent-sandbox:latest -f "${SANDBOX_DIR}/Dockerfile" "${SANDBOX_DIR}"; then
     pass
 else
-    fail "failed to build agent-sandbox:latest FROM agent-sandbox-base:${BASE_VERSION}"
+    fail "failed to build agent-sandbox:latest FROM agent-sandbox-base:${BASE_TAG}"
     summarize_and_exit 1
 fi
 
