@@ -85,6 +85,35 @@ func TestCodexHooksJSONHasNoUnknownKeys(t *testing.T) {
 	}
 }
 
+func TestCodexHooksUsePluginLocalBinary(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("plugin", "codex", "hooks.json"))
+	if err != nil {
+		t.Fatalf("read codex hooks.json: %v", err)
+	}
+
+	var root struct {
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatalf("parse codex hooks.json: %v", err)
+	}
+
+	const localBinary = `"${PLUGIN_ROOT}/bin/agentwatch" notify`
+	for event, groups := range root.Hooks {
+		for i, group := range groups {
+			for j, hook := range group.Hooks {
+				if !strings.Contains(hook.Command, localBinary) {
+					t.Errorf("%s[%d].hooks[%d] does not use plugin-local binary: %q", event, i, j, hook.Command)
+				}
+			}
+		}
+	}
+}
+
 func TestCodexStopHookEmitsJSON(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("plugin", "codex", "hooks.json"))
 	if err != nil {
@@ -106,8 +135,17 @@ func TestCodexStopHookEmitsJSON(t *testing.T) {
 		t.Fatalf("expected exactly one Codex Stop hook, got %#v", stopGroups)
 	}
 
+	pluginRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(pluginRoot, "bin"), 0o755); err != nil {
+		t.Fatalf("create plugin bin dir: %v", err)
+	}
+	stub := filepath.Join(pluginRoot, "bin", "agentwatch")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\ncat >/dev/null\n"), 0o755); err != nil {
+		t.Fatalf("write hook binary stub: %v", err)
+	}
+
 	cmd := exec.Command("sh", "-c", stopGroups[0].Hooks[0].Command)
-	cmd.Env = append(os.Environ(), "PATH="+filepath.Dir(binaryPath)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmd.Env = append(os.Environ(), "PLUGIN_ROOT="+pluginRoot)
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"Stop","session_id":"test"}`)
 	output, err := cmd.Output()
 	if err != nil {

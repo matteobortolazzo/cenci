@@ -644,7 +644,11 @@ agentwatch respects manually set window names:
 
 ### Daemon restart
 
-If the daemon restarts while agent sessions are active, it re-discovers them on the next hook event — a `ListPanes` call maps the `$TMUX_PANE` to the correct window.
+If the daemon is absent after a login or restart, the next installed Claude or Codex
+hook starts it on demand, waits briefly, and retries that same event. The daemon then
+re-discovers the session — a `ListPanes` call maps the `$TMUX_PANE` to the correct
+window — and status consumers such as DMS see it on their next poll. Custom
+`-event-socket` instances are never started automatically.
 
 ## Troubleshooting
 
@@ -659,7 +663,9 @@ bootstrap can't run, install the binary manually and start the daemon (see
 
 **Names not restoring**: agentwatch restores names on clean exit (Ctrl+C / SIGTERM) and via the stale sweep. If it was killed with SIGKILL, manually rename windows or restart tmux.
 
-**Daemon not running**: `agentwatch notify` fails silently (exit 0) — the agent is never blocked.
+**Daemon not running**: for the default event socket, `agentwatch notify` starts the
+daemon and retries once. Recovery failures remain silent (exit 0), so the agent is
+never blocked. Custom event sockets fail silently without starting another instance.
 
 ### Verbose mode
 

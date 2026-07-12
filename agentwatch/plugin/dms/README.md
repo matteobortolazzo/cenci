@@ -52,5 +52,7 @@ Then open Settings (`dms ipc call settings toggle`) → **Plugins** → enable *
   env -i HOME=$HOME XDG_RUNTIME_DIR=/run/user/$(id -u) PATH=/usr/local/bin:/usr/bin sh -c 'agentwatch waybar'
   ```
   If that says "command not found", link the binary onto the login PATH (re-run `install.sh` and accept the GUI-bar prompt, or `sudo ln -sf "$HOME/.local/bin/agentwatch" /usr/local/bin/agentwatch`) or set `agentwatchPath` to its full path. If it prints `"class": "none"` there are no live sessions — start a Claude Code or Codex tmux pane and try again.
-- **Pill is stuck**: check the agentwatch daemon (`pgrep -a agentwatch`); the daemon is started by tmux (`run-shell -b "agentwatch"` in `~/.config/tmux/tmux.conf`).
+- **Pill is stuck**: check the agentwatch daemon (`pgrep -a agentwatch`). If it is
+  absent after a login or restart, the next installed Claude or Codex lifecycle hook
+  starts it on demand and retries that event; no tmux startup entry is required.
 - **Logs**: `journalctl --user -u dms -f` or wherever your DMS unit writes.
