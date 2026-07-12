@@ -8,6 +8,8 @@ disable-model-invocation: true
 allowed-tools: Read, Bash, Glob, Grep, Task, AskUserQuestion
 ---
 
+> **Interaction rule**: Every question, confirmation, or approval directed at the user — anywhere in this skill, including error recovery — MUST be asked with the `AskUserQuestion` tool. Never ask in plain text. If an instruction says "ask the user" or "confirm", that means `AskUserQuestion`.
+
 ## Context
 
 Read `.claude/config.json`.

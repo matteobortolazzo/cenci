@@ -8,6 +8,8 @@ disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Bash, Glob, Grep, AskUserQuestion
 ---
 
+> **Interaction rule**: Every question, confirmation, or approval directed at the user — anywhere in this skill, including error recovery — MUST be asked with the `AskUserQuestion` tool. Never ask in plain text. If an instruction says "ask the user" or "confirm", that means `AskUserQuestion`.
+
 ## Task
 
 Help the user set up this project for the agentflow plugin.
@@ -73,7 +75,7 @@ This detection is a **non-blocking advisory** — it never gates configuration a
 | 8. CI/CD pipeline | `cicd` | Pre-select Yes/No based on `cicd.enabled` |
 | 9. Sandbox Dockerfile | `sandbox` | Pre-select Yes/No based on `sandbox.enabled` |
 
-Ask these questions one at a time using the AskUserQuestion tool when possible:
+Ask these questions one at a time using the `AskUserQuestion` tool:
 
 1. **Tech stack**: "What's your tech stack?" (capture for stack pack selection)
    - Backend framework + version
@@ -365,8 +367,8 @@ After gathering answers:
 1. **Detect existing CLAUDE.md location**:
    - Check if `CLAUDE.md` exists at the repo root: `test -f CLAUDE.md`
    - Check if `.claude/CLAUDE.md` exists: `test -f .claude/CLAUDE.md`
-   - **If both exist**: Ask the user: "Found CLAUDE.md at both the repo root and `.claude/CLAUDE.md`. Which location do you want to keep?" Options: "Root (CLAUDE.md)", ".claude/ directory (.claude/CLAUDE.md)". Delete the unchosen file after updating the kept one.
-   - **If only root exists**: Ask the user: "Found existing `CLAUDE.md` at the repo root. Do you want to keep it there or move it to `.claude/CLAUDE.md`?" Options: "Keep at root", "Move to .claude/". If moving, delete the root file after creating `.claude/CLAUDE.md`.
+   - **If both exist**: Ask via `AskUserQuestion`: "Found CLAUDE.md at both the repo root and `.claude/CLAUDE.md`. Which location do you want to keep?" Options: "Root (CLAUDE.md)", ".claude/ directory (.claude/CLAUDE.md)". Delete the unchosen file after updating the kept one.
+   - **If only root exists**: Ask via `AskUserQuestion`: "Found existing `CLAUDE.md` at the repo root. Do you want to keep it there or move it to `.claude/CLAUDE.md`?" Options: "Keep at root", "Move to .claude/". If moving, delete the root file after creating `.claude/CLAUDE.md`.
    - **If only `.claude/CLAUDE.md` exists**: Keep it in place.
    - **If neither exists**: Create at `.claude/CLAUDE.md` (default).
 

@@ -10,6 +10,7 @@ GitHub Issues for tracking. GitHub for code and PRs.
 - No PII or stack traces in user-facing error responses.
 - Keep tickets well-scoped. 1 ticket = 1 PR.
 - Use git worktrees for all feature work. Never modify code in main worktree.
+- Interactive (Claude-only) skills must route every user question/confirmation through `AskUserQuestion` and never say a bare "ask the user"; cross-tool-portable skills use abstract wording instead (e.g., "the client's available user-input mechanism").
 
 ## Reference Docs
 On-demand topic docs live at `docs/`:

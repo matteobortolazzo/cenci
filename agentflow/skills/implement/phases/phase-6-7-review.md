@@ -36,7 +36,7 @@ The security reviewer checks OWASP, auth/authz, validation, injection, sensitive
 
 - Critical/High: fix immediately, rerun tests, rerun security review.
 - Medium/Low: note in PR description unless trivial to fix.
-- Unclear fix: ask the user.
+- Unclear fix: ask the user via `AskUserQuestion`.
 
 Security-critical findings take priority over code quality findings.
 
@@ -47,7 +47,7 @@ The code reviewer uses confidence scoring and reports only findings >= 50.
 - Must Fix >= 90: fix all, rerun tests.
 - Should Fix 75-89: fix if straightforward; otherwise note in PR description.
 - Nitpicks 50-74: ignore unless trivial.
-- Human decision: stop and ask the user.
+- Human decision: stop and ask the user via `AskUserQuestion`.
 
 If `REQUEST_CHANGES`, delegate fixes to implementer, rerun tests, and rerun code review. If the same issue persists after 2 fix attempts, escalate to the user.
 
