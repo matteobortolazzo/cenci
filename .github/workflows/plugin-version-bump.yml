@@ -1,0 +1,129 @@
+name: Reusable — Plugin Version Bump
+
+# Reusable version-bump logic shared by the per-plugin caller workflows
+# (agentflow, agentwatch, agent-sandbox). Callers pass their plugin name,
+# the plugin.json paths to stamp, the marketplace entry name, the tag prefix,
+# and — only agentwatch — a workflow to dispatch after tagging.
+
+on:
+  workflow_call:
+    inputs:
+      plugin-name:
+        description: 'Plugin name, used for the commit message and release-commit skip guard'
+        required: true
+        type: string
+      plugin-json-paths:
+        description: 'Space-separated plugin.json paths to stamp; the first is the source of truth'
+        required: true
+        type: string
+      marketplace-name:
+        description: 'Plugin name as it appears in .claude-plugin/marketplace.json'
+        required: true
+        type: string
+      tag-prefix:
+        description: 'Tag prefix, e.g. agentflow -> refs/tags/agentflow/v<version>'
+        required: true
+        type: string
+      dispatch-workflow:
+        description: 'Optional workflow to dispatch after tagging (passed version=<new>)'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+  actions: write   # capped to what each caller grants; only agentwatch needs it (for `gh workflow run`)
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PLUGIN_NAME: ${{ inputs.plugin-name }}
+          PLUGIN_JSON_PATHS: ${{ inputs.plugin-json-paths }}
+          MARKETPLACE_NAME: ${{ inputs.marketplace-name }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          DISPATCH_WORKFLOW: ${{ inputs.dispatch-workflow }}
+        run: |
+          # Skip if last commit is already a release commit
+          LAST_MSG=$(git log -1 --pretty=format:"%s")
+          if echo "$LAST_MSG" | grep -q "^chore(release): ${PLUGIN_NAME}/v"; then
+            echo "Last commit is a release commit, skipping"
+            exit 0
+          fi
+
+          # Read current version from the first plugin.json path (source of truth)
+          # shellcheck disable=SC2086
+          set -- $PLUGIN_JSON_PATHS
+          SOURCE_JSON="$1"
+          VERSION=$(jq -r '.version' "$SOURCE_JSON")
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          PATCH=$(echo "$VERSION" | cut -d. -f3)
+
+          # Determine bump type from the triggering commit
+          COMMITS=$(git log -1 --pretty=format:"%s%n%b")
+          BUMP="patch"
+
+          if echo "$COMMITS" | grep -qiE '^feat!:|^[a-z]+\(.*\)!:|BREAKING CHANGE'; then
+            BUMP="major"
+          elif echo "$COMMITS" | grep -qiE '^feat(\(|:)'; then
+            BUMP="minor"
+          fi
+
+          # Apply bump
+          case $BUMP in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+
+          NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          echo "Bumping $BUMP: $VERSION -> $NEW_VERSION"
+
+          # Stamp every plugin.json path (source of truth + any Codex manifest)
+          for p in $PLUGIN_JSON_PATHS; do
+            jq --arg v "$NEW_VERSION" '.version = $v' "$p" > tmp.json && mv tmp.json "$p"
+          done
+          # Stamp the marketplace entry. Fail loudly if the name matches no entry
+          # (e.g. a typo in a caller's marketplace-name input) — otherwise the jq
+          # filter would silently no-op and ship a stale marketplace version.
+          jq -e --arg n "$MARKETPLACE_NAME" '.plugins[] | select(.name == $n)' \
+            .claude-plugin/marketplace.json > /dev/null \
+            || { echo "no marketplace entry named '$MARKETPLACE_NAME' in .claude-plugin/marketplace.json" >&2; exit 1; }
+          jq --arg v "$NEW_VERSION" --arg n "$MARKETPLACE_NAME" \
+            '(.plugins[] | select(.name == $n)).version = $v' \
+            .claude-plugin/marketplace.json > tmp.json && mv tmp.json .claude-plugin/marketplace.json
+
+          # Commit and push
+          # shellcheck disable=SC2086
+          git add $PLUGIN_JSON_PATHS .claude-plugin/marketplace.json
+          git commit -m "chore(release): ${PLUGIN_NAME}/v${NEW_VERSION}"
+          git push
+
+          # Create tag via GitHub API
+          gh api repos/${{ github.repository }}/git/refs \
+            -f ref="refs/tags/${TAG_PREFIX}/v${NEW_VERSION}" \
+            -f sha="$(git rev-parse HEAD)"
+
+          # Optionally dispatch a downstream workflow (agentwatch release).
+          # A tag pushed with GITHUB_TOKEN does NOT fire an `on: push: tags`
+          # workflow (recursion guard), but dispatching one IS allowed. Run the
+          # workflow definition from main (latest); it checks out the tag to build.
+          if [ -n "$DISPATCH_WORKFLOW" ]; then
+            gh workflow run "$DISPATCH_WORKFLOW" \
+              --ref main \
+              -f version="${NEW_VERSION}"
+          fi

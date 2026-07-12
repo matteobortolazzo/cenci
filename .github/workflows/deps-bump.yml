@@ -1,0 +1,200 @@
+name: dev-sandbox — Deps Bump
+
+# Daily check for new upstream versions of the pinned dev-sandbox dependencies
+# (Codex CLI, Go, uv). Each outdated dependency gets its OWN auto-merged PR, then
+# the agent-sandbox image bump is dispatched once the merge actually lands.
+#
+# .NET SDK (DOTNET_SDK_VERSION) and Node major (NODE_MAJOR) stay on MANUAL pins —
+# see dev-sandbox/CLAUDE.md.
+#
+# NOTE: `gh pr merge --auto` requires the repo setting allow_auto_merge=true (#150).
+# Until that lands, the auto-merge call fails and the poll loop surfaces it.
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Check for dependency updates
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # GitHub's default `run:` shell is `bash --noprofile --norc -eo pipefail`,
+          # so errexit is ON here. This script does its own per-dependency error
+          # handling (accumulate into FAILED, keep checking the other deps), which
+          # requires errexit OFF — so disable it explicitly.
+          set -uo pipefail
+          set +e
+
+          FAILED=0
+
+          # Discard any local edits and re-sync main from origin. Called before each
+          # dependency so it reads/branches from the latest merged state (Codex and Go
+          # both touch dev-sandbox/Dockerfile) and so a prior dep's early failure can't
+          # leave a dirty tree or stray branch checked out.
+          refresh_main() {
+            git checkout -f main >/dev/null 2>&1
+            # Warn (don't fail the whole run) if the fetch blips — a stale
+            # origin/main would otherwise make the reset below silently no-op.
+            git fetch origin main >/dev/null 2>&1 \
+              || echo "refresh_main: 'git fetch origin main' failed; proceeding against possibly-stale local origin/main" >&2
+            git reset --hard origin/main >/dev/null 2>&1
+          }
+
+          # Open one auto-merged PR for a single dependency bump, wait for the merge
+          # to actually land, then dispatch the agent-sandbox image rebuild. The
+          # working tree must already carry the stamped (uncommitted) change on main
+          # when this is called; `git checkout -b` carries it onto the new branch.
+          # Every internal step is checked explicitly (errexit is off) so a failure
+          # returns immediately with a specific message instead of falling through to
+          # the 20-minute poll and surfacing as a generic timeout.
+          open_and_merge() {
+            branch="$1"; msg="$2"; title="$3"; body="$4"
+
+            git checkout -b "$branch" || { echo "could not create branch $branch" >&2; return 1; }
+            git add -A
+            git commit -m "$msg" || { echo "nothing to commit for $branch (stamp was a no-op?)" >&2; return 1; }
+            git push -u origin "$branch" || { echo "could not push $branch" >&2; return 1; }
+
+            PR_URL=$(gh pr create --title "$title" --body "$body" --head "$branch" --base main) \
+              || { echo "could not open a PR for $branch" >&2; return 1; }
+            echo "Opened $PR_URL"
+
+            # Native auto-merge (replaces the old 2-attempt retry loop). Fails fast if
+            # allow_auto_merge is disabled (see #150) instead of waiting out the poll.
+            gh pr merge "$branch" --auto --squash --delete-branch \
+              || { echo "could not enable auto-merge for $branch (is allow_auto_merge enabled? see #150)" >&2; return 1; }
+
+            # Wait for the merge to land BEFORE dispatching — dispatching earlier
+            # could rebuild against a commit that isn't on main yet.
+            # ~20 min budget at a 15s interval (80 * 15s).
+            merged=false
+            for _ in $(seq 1 80); do
+              state=$(gh pr view "$branch" --json state --jq .state 2>/dev/null || echo "")
+              if [ "$state" = "MERGED" ]; then merged=true; break; fi
+              if [ "$state" = "CLOSED" ]; then
+                echo "PR for $branch was closed without merging (left for manual handling)" >&2
+                return 1
+              fi
+              sleep 15
+            done
+
+            if [ "$merged" != "true" ]; then
+              echo "timed out waiting for $branch to merge (left for manual handling)" >&2
+              return 1
+            fi
+
+            # Rebuild/re-tag the agent-sandbox image for the merged bump. The merge
+            # push is by github-actions[bot] so it won't self-trigger the bump
+            # workflow — dispatch it explicitly (its `|| workflow_dispatch` guard).
+            gh workflow run "agent-sandbox — Version Bump" \
+              || { echo "could not dispatch the agent-sandbox bump for $branch" >&2; return 1; }
+          }
+
+          # ── Codex CLI (monolith Dockerfile only, no fragment) ────────────
+          refresh_main
+          LATEST=$(npm view @openai/codex version)
+          if ! echo "$LATEST" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "npm view returned an unexpected value: '$LATEST'" >&2
+            FAILED=1
+          else
+            CURRENT=$(sed -n 's/^ARG CODEX_VERSION=//p' dev-sandbox/Dockerfile)
+            if [ -z "$CURRENT" ]; then
+              echo "could not read ARG CODEX_VERSION from dev-sandbox/Dockerfile" >&2
+              FAILED=1
+            elif [ "$LATEST" = "$CURRENT" ]; then
+              echo "Codex is up to date ($CURRENT)"
+            elif git ls-remote --exit-code --heads origin "codex-bump-v${LATEST}" >/dev/null 2>&1; then
+              echo "Branch codex-bump-v${LATEST} already exists, skipping"
+            else
+              echo "Bumping Codex CLI: $CURRENT -> $LATEST"
+              sed -i 's/^ARG CODEX_VERSION=.*/ARG CODEX_VERSION='"${LATEST}"'/' dev-sandbox/Dockerfile
+              # shellcheck disable=SC2016  # backticks are literal markdown; %s does the substitution
+              BODY=$(printf 'Bumps `CODEX_VERSION` from %s to %s.\n\nCodex is baked into the monolith image only (no fragment, per dev-sandbox/CLAUDE.md). Run `agent-sand --build` to pick up the new version — no `--build-base` needed.' "$CURRENT" "$LATEST")
+              open_and_merge \
+                "codex-bump-v${LATEST}" \
+                "chore(dev-sandbox): bump Codex CLI to ${LATEST}" \
+                "chore(dev-sandbox): bump Codex CLI to ${LATEST}" \
+                "$BODY" || FAILED=1
+            fi
+          fi
+
+          # ── Go (monolith Dockerfile + go fragment, kept byte-identical) ──
+          refresh_main
+          GO_RAW=$(curl -sL https://go.dev/VERSION?m=text | head -n1)
+          LATEST="${GO_RAW#go}"
+          if ! echo "$LATEST" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
+            echo "go.dev/VERSION returned an unexpected value: '$GO_RAW'" >&2
+            FAILED=1
+          else
+            CURRENT=$(sed -n 's/^ARG GO_VERSION=//p' dev-sandbox/Dockerfile)
+            if [ -z "$CURRENT" ]; then
+              echo "could not read ARG GO_VERSION from dev-sandbox/Dockerfile" >&2
+              FAILED=1
+            elif [ "$LATEST" = "$CURRENT" ]; then
+              echo "Go is up to date ($CURRENT)"
+            elif git ls-remote --exit-code --heads origin "go-bump-v${LATEST}" >/dev/null 2>&1; then
+              echo "Branch go-bump-v${LATEST} already exists, skipping"
+            else
+              echo "Bumping Go: $CURRENT -> $LATEST"
+              sed -i 's/^ARG GO_VERSION=.*/ARG GO_VERSION='"${LATEST}"'/' dev-sandbox/Dockerfile
+              sed -i 's/^ARG GO_VERSION=.*/ARG GO_VERSION='"${LATEST}"'/' dev-sandbox/fragments/go.dockerfile
+              # shellcheck disable=SC2016  # backticks are literal markdown; %s does the substitution
+              BODY=$(printf 'Bumps `GO_VERSION` from %s to %s in BOTH `dev-sandbox/Dockerfile` and `dev-sandbox/fragments/go.dockerfile` (kept in sync per the fragment-drift guard).\n\nRun `agent-sand --build` to pick up the new version.' "$CURRENT" "$LATEST")
+              open_and_merge \
+                "go-bump-v${LATEST}" \
+                "chore(dev-sandbox): bump Go to ${LATEST}" \
+                "chore(dev-sandbox): bump Go to ${LATEST}" \
+                "$BODY" || FAILED=1
+            fi
+          fi
+
+          # ── uv (base image Dockerfile.base; first explicit pin) ──────────
+          refresh_main
+          UV_RAW=$(gh api repos/astral-sh/uv/releases/latest --jq .tag_name)
+          LATEST="${UV_RAW#v}"
+          if ! echo "$LATEST" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "astral-sh/uv latest release returned an unexpected value: '$UV_RAW'" >&2
+            FAILED=1
+          else
+            CURRENT=$(sed -n 's/^ARG UV_VERSION=//p' dev-sandbox/Dockerfile.base)
+            if [ -z "$CURRENT" ]; then
+              echo "could not read ARG UV_VERSION from dev-sandbox/Dockerfile.base" >&2
+              FAILED=1
+            elif [ "$LATEST" = "$CURRENT" ]; then
+              echo "uv is up to date ($CURRENT)"
+            elif git ls-remote --exit-code --heads origin "uv-bump-v${LATEST}" >/dev/null 2>&1; then
+              echo "Branch uv-bump-v${LATEST} already exists, skipping"
+            else
+              echo "Bumping uv: $CURRENT -> $LATEST"
+              sed -i 's/^ARG UV_VERSION=.*/ARG UV_VERSION='"${LATEST}"'/' dev-sandbox/Dockerfile.base
+              # shellcheck disable=SC2016  # backticks are literal markdown; %s does the substitution
+              BODY=$(printf 'Bumps `UV_VERSION` from %s to %s in `dev-sandbox/Dockerfile.base` (first explicit pin — was previously `latest`).\n\nRun `agent-sand --build-base` to pick up the new base image.' "$CURRENT" "$LATEST")
+              open_and_merge \
+                "uv-bump-v${LATEST}" \
+                "chore(dev-sandbox): bump uv to ${LATEST}" \
+                "chore(dev-sandbox): bump uv to ${LATEST}" \
+                "$BODY" || FAILED=1
+            fi
+          fi
+
+          exit "$FAILED"

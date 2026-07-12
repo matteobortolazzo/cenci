@@ -44,6 +44,18 @@ editing both `Dockerfile` and `fragments/<stack>.dockerfile` identically). `Code
 one exception: it's monolith-only (no fragment), since it isn't part of the composable
 per-project stack set.
 
+## Dependency version pins
+Image dependency versions are pinned via Dockerfile `ARG`s. Two policies:
+
+- **Auto-bumped** by `.github/workflows/deps-bump.yml` (daily cron), one auto-merged PR per
+  outdated dependency:
+  - `CODEX_VERSION` — `Dockerfile` (monolith only).
+  - `GO_VERSION` — `Dockerfile` **and** `fragments/go.dockerfile` (both stamped, kept in sync).
+  - `UV_VERSION` — `Dockerfile.base`.
+- **Manual pins** — deliberately NOT auto-bumped; update them by hand:
+  - `DOTNET_SDK_VERSION` — `Dockerfile` (+ `fragments/dotnet.dockerfile`, byte-identical).
+  - `NODE_MAJOR` — `Dockerfile` (+ `fragments/node.dockerfile`, byte-identical).
+
 ## Security
 - Never bake secrets or credentials into the image layers.
 - Validate any host paths mounted into the container.

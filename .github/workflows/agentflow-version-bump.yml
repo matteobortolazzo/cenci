@@ -10,67 +10,11 @@ permissions:
 
 jobs:
   bump:
-    runs-on: ubuntu-latest
     if: github.actor != 'github-actions[bot]'
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Configure git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Bump version
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Skip if last commit is already a release commit
-          LAST_MSG=$(git log -1 --pretty=format:"%s")
-          if echo "$LAST_MSG" | grep -q '^chore(release): agentflow/v'; then
-            echo "Last commit is a release commit, skipping"
-            exit 0
-          fi
-
-          # Read current version from plugin.json (source of truth)
-          VERSION=$(jq -r '.version' agentflow/.claude-plugin/plugin.json)
-          MAJOR=$(echo "$VERSION" | cut -d. -f1)
-          MINOR=$(echo "$VERSION" | cut -d. -f2)
-          PATCH=$(echo "$VERSION" | cut -d. -f3)
-
-          # Determine bump type from the triggering commit
-          COMMITS=$(git log -1 --pretty=format:"%s%n%b")
-          BUMP="patch"
-
-          if echo "$COMMITS" | grep -qiE '^feat!:|^[a-z]+\(.*\)!:|BREAKING CHANGE'; then
-            BUMP="major"
-          elif echo "$COMMITS" | grep -qiE '^feat(\(|:)'; then
-            BUMP="minor"
-          fi
-
-          # Apply bump
-          case $BUMP in
-            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
-            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
-            patch) PATCH=$((PATCH + 1)) ;;
-          esac
-
-          NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
-          echo "Bumping $BUMP: $VERSION -> $NEW_VERSION"
-
-          # Update plugin.json and root marketplace.json
-          jq --arg v "$NEW_VERSION" '.version = $v' agentflow/.claude-plugin/plugin.json > tmp.json && mv tmp.json agentflow/.claude-plugin/plugin.json
-          jq --arg v "$NEW_VERSION" '.version = $v' agentflow/.codex-plugin/plugin.json > tmp.json && mv tmp.json agentflow/.codex-plugin/plugin.json
-          jq --arg v "$NEW_VERSION" '(.plugins[] | select(.name == "agentflow")).version = $v' .claude-plugin/marketplace.json > tmp.json && mv tmp.json .claude-plugin/marketplace.json
-
-          # Commit and push
-          git add agentflow/.claude-plugin/plugin.json agentflow/.codex-plugin/plugin.json .claude-plugin/marketplace.json
-          git commit -m "chore(release): agentflow/v${NEW_VERSION}"
-          git push
-
-          # Create tag via GitHub API
-          gh api repos/${{ github.repository }}/git/refs \
-            -f ref="refs/tags/agentflow/v${NEW_VERSION}" \
-            -f sha="$(git rev-parse HEAD)"
+    uses: ./.github/workflows/plugin-version-bump.yml
+    with:
+      plugin-name: agentflow
+      plugin-json-paths: agentflow/.claude-plugin/plugin.json agentflow/.codex-plugin/plugin.json
+      marketplace-name: agentflow
+      tag-prefix: agentflow
+    secrets: inherit
