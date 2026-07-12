@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
     paths: ['dev-sandbox/**']
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -11,7 +12,7 @@ permissions:
 jobs:
   bump:
     runs-on: ubuntu-latest
-    if: github.actor != 'github-actions[bot]'
+    if: github.actor != 'github-actions[bot]' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
         with:
