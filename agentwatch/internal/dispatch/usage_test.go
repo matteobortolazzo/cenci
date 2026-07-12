@@ -389,6 +389,93 @@ func TestUsageProviderMemoizesBudget(t *testing.T) {
 	}
 }
 
+// --- UsageProvider.Headroom tests (#169) ---
+//
+// Headroom() reports the pure remaining-budget fraction per configured agent
+// type (min(fiveHour, weekly) from windowHeadroom), NOT the floor-adjusted
+// value Budget().Remaining() returns. An agent with a reader+limit configured
+// but both window caps at 0 ("unlimited window") is included as 1.0. An agent
+// with no reader/limit configured at all is omitted entirely.
+
+func TestUsageProviderHeadroomMultipleAgents(t *testing.T) {
+	p := &UsageProvider{
+		Readers: map[string]TokenReader{
+			"claude": stubReader{tokens: 1000},
+			"codex":  stubReader{tokens: 5000},
+		},
+		Limits: map[string]AgentLimit{
+			"claude": {FiveHourTokens: 10000, WeeklyTokens: 100000},
+			"codex":  {FiveHourTokens: 10000, WeeklyTokens: 100000},
+		},
+		Now: time.Now(),
+	}
+	h := p.Headroom()
+	if got, want := h["claude"], 0.9; got != want {
+		t.Errorf("claude headroom = %v, want %v", got, want)
+	}
+	if got, want := h["codex"], 0.5; got != want {
+		t.Errorf("codex headroom = %v, want %v", got, want)
+	}
+}
+
+func TestUsageProviderHeadroomReaderErrorDefaultsToZero(t *testing.T) {
+	p := &UsageProvider{
+		Readers: map[string]TokenReader{"claude": stubReader{err: os.ErrNotExist}},
+		Limits:  map[string]AgentLimit{"claude": {FiveHourTokens: 10000, WeeklyTokens: 100000}},
+		Now:     time.Now(),
+	}
+	h := p.Headroom()
+	if got, want := h["claude"], 0.0; got != want {
+		t.Errorf("claude headroom = %v, want %v (safe default on read error)", got, want)
+	}
+}
+
+func TestUsageProviderHeadroomOmitsUnconfiguredAgent(t *testing.T) {
+	p := &UsageProvider{
+		Readers: map[string]TokenReader{"claude": stubReader{tokens: 1000}},
+		Limits:  map[string]AgentLimit{"claude": {FiveHourTokens: 10000, WeeklyTokens: 100000}},
+		Now:     time.Now(),
+	}
+	h := p.Headroom()
+	if _, ok := h["codex"]; ok {
+		t.Errorf("expected codex to be omitted (no reader/limit configured), got %v", h["codex"])
+	}
+	if len(h) != 1 {
+		t.Errorf("expected exactly 1 agent in headroom map, got %d: %v", len(h), h)
+	}
+}
+
+func TestUsageProviderHeadroomUnlimitedWindowIsOne(t *testing.T) {
+	p := &UsageProvider{
+		Readers: map[string]TokenReader{"claude": stubReader{tokens: 999999}},
+		Limits:  map[string]AgentLimit{"claude": {FiveHourTokens: 0, WeeklyTokens: 0}},
+		Now:     time.Now(),
+	}
+	h := p.Headroom()
+	if got, want := h["claude"], 1.0; got != want {
+		t.Errorf("claude headroom = %v, want %v (both windows unlimited)", got, want)
+	}
+}
+
+func TestUsageProviderHeadroomIgnoresFloor(t *testing.T) {
+	p := &UsageProvider{
+		Readers: map[string]TokenReader{"claude": stubReader{tokens: 1000}},
+		Limits:  map[string]AgentLimit{"claude": {FiveHourTokens: 10000, WeeklyTokens: 100000}},
+		Floors:  map[string]float64{"claude": 0.5},
+		Now:     time.Now(),
+	}
+	h := p.Headroom()
+	// Pure headroom is 0.9 (min(0.9, 0.99)); Budget().Remaining() floor-adjusts
+	// this down to 0.4. Headroom() must report the unadjusted value.
+	if got, want := h["claude"], 0.9; got != want {
+		t.Errorf("claude headroom = %v, want %v (floor must not be applied)", got, want)
+	}
+	b := p.Budget("claude")
+	if b.Remaining != 0.4 {
+		t.Errorf("sanity check: Budget().Remaining = %v, want 0.4 (floor-adjusted)", b.Remaining)
+	}
+}
+
 // --- windowHeadroom tests ---
 
 func TestWindowHeadroom(t *testing.T) {

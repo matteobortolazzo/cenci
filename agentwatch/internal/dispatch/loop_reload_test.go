@@ -59,7 +59,7 @@ func corruptConfig(t *testing.T, path string) {
 // drainAttention non-blockingly empties ch, so a prior tick's push (if any)
 // cannot be mistaken for the tick under test, and cannot block a later tick's
 // send against a full buffered channel.
-func drainAttention(ch <-chan []watch.WindowState) {
+func drainAttention(ch <-chan watch.AttentionUpdate) {
 	select {
 	case <-ch:
 	default:
@@ -127,7 +127,7 @@ func TestCombinedTickBadReloadSkipsTick(t *testing.T) {
 	prior := 5
 	mut := &fakeMutator{}
 	store := &memStore{}
-	attention := make(chan []watch.WindowState, 1)
+	attention := make(chan watch.AttentionUpdate, 1)
 	var buf bytes.Buffer
 	ctx := context.Background()
 
@@ -164,7 +164,7 @@ func TestCombinedTickReloadPicksUpEnrollment(t *testing.T) {
 	prior := 0
 	mut := &fakeMutator{}
 	store := &memStore{}
-	attention := make(chan []watch.WindowState, 1)
+	attention := make(chan watch.AttentionUpdate, 1)
 	var buf bytes.Buffer
 	ctx := context.Background()
 

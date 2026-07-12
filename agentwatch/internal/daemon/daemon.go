@@ -27,6 +27,12 @@ type Daemon struct {
 	// (#46). It is appended to every snapshot until the next overlay replaces
 	// it. Empty when the embedded dispatch loop is disabled.
 	attention []ipc.WindowState
+
+	// headroom is the reconciler's per-agent-type token-budget headroom
+	// overlay (#169), carried alongside attention on the same channel. Empty
+	// when the embedded dispatch loop is disabled or no AgentLimits are
+	// configured.
+	headroom map[string]float64
 }
 
 // newDaemon creates a Daemon with the given dependencies.
@@ -44,7 +50,7 @@ func newDaemon(cfg config.Config, fe frontend.Frontend, events <-chan ipc.HookEv
 // It blocks until ctx is cancelled, then cleans up. attention is the optional
 // channel of reconciler failure overlays (#46); pass nil to leave the daemon's
 // behavior unchanged.
-func Run(ctx context.Context, cfg config.Config, fe frontend.Frontend, attention <-chan []ipc.WindowState) error {
+func Run(ctx context.Context, cfg config.Config, fe frontend.Frontend, attention <-chan ipc.AttentionUpdate) error {
 	// Start event receiver.
 	recv, err := ipc.NewEventReceiver(cfg.EventSocketPath)
 	if err != nil {
@@ -83,7 +89,7 @@ func Run(ctx context.Context, cfg config.Config, fe frontend.Frontend, attention
 
 // loop is the main event-driven loop. A nil attention channel never fires in
 // the select, so the extra case is a no-op when the embedded loop is disabled.
-func (d *Daemon) loop(ctx context.Context, attention <-chan []ipc.WindowState) error {
+func (d *Daemon) loop(ctx context.Context, attention <-chan ipc.AttentionUpdate) error {
 	sweep := time.NewTicker(d.cfg.SweepInterval)
 	defer sweep.Stop()
 
@@ -96,8 +102,9 @@ func (d *Daemon) loop(ctx context.Context, attention <-chan []ipc.WindowState) e
 			d.handleEvent(event)
 		case <-sweep.C:
 			d.runSweep()
-		case overlay := <-attention:
-			d.attention = overlay
+		case u := <-attention:
+			d.attention = u.Windows
+			d.headroom = u.Headroom
 			d.broadcast()
 		}
 	}

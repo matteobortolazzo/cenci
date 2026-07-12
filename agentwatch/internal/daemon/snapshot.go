@@ -17,6 +17,7 @@ func (d *Daemon) broadcast() {
 func (d *Daemon) buildSnapshot() ipc.StateSnapshot {
 	snap := ipc.StateSnapshot{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Headroom:  d.headroom,
 	}
 
 	type entry struct {

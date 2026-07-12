@@ -9,6 +9,22 @@ type StateSnapshot struct {
 	Windows []WindowState `json:"windows"`
 	// Summary holds aggregate counts across Windows.
 	Summary StatusSummary `json:"summary"`
+	// Headroom reports per-agent-type token-budget headroom (0.0-1.0) computed
+	// by the embedded dispatch loop. Omitted when the embedded loop is disabled
+	// or no AgentLimits are configured, leaving downstream frontends unchanged.
+	Headroom map[string]float64 `json:"headroom,omitempty"`
+}
+
+// AttentionUpdate is the reconciler's per-tick push onto the daemon's
+// attention channel: the current set of synthetic "failed" windows (#46)
+// alongside the current per-agent-type headroom snapshot (#169).
+type AttentionUpdate struct {
+	// Windows is the current set of synthetic "failed" window entries.
+	Windows []WindowState
+	// Headroom reports per-agent-type token-budget headroom (0.0-1.0). Empty
+	// when the embedded loop's BudgetProvider is not a *UsageProvider or no
+	// AgentLimits are configured.
+	Headroom map[string]float64
 }
 
 // WindowState describes a single tracked window.
