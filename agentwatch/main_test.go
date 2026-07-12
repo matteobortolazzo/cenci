@@ -83,6 +83,40 @@ func TestCodexHooksJSONHasNoUnknownKeys(t *testing.T) {
 	}
 }
 
+func TestCodexStopHookEmitsJSON(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("plugin", "codex", "hooks.json"))
+	if err != nil {
+		t.Fatalf("read codex hooks.json: %v", err)
+	}
+
+	var root struct {
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatalf("parse codex hooks.json: %v", err)
+	}
+	stopGroups := root.Hooks["Stop"]
+	if len(stopGroups) != 1 || len(stopGroups[0].Hooks) != 1 {
+		t.Fatalf("expected exactly one Codex Stop hook, got %#v", stopGroups)
+	}
+
+	cmd := exec.Command("sh", "-c", stopGroups[0].Hooks[0].Command)
+	cmd.Env = append(os.Environ(), "PATH="+filepath.Dir(binaryPath)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"Stop","session_id":"test"}`)
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("run Codex Stop hook: %v", err)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(output, &response); err != nil {
+		t.Fatalf("Codex Stop hook output must be JSON, got %q: %v", output, err)
+	}
+}
+
 func TestUnknownSubcommand_ExitCode2(t *testing.T) {
 	cmd := exec.Command(binaryPath, "garbage")
 	output, err := cmd.CombinedOutput()

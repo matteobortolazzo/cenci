@@ -61,7 +61,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "agentwatch notify -agent codex 2>/dev/null || true",
+            "command": "agentwatch notify -agent codex 2>/dev/null || true; printf '{}\\n'",
             "timeout": 5
           }
         ]
