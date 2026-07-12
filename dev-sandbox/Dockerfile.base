@@ -38,6 +38,14 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     && apt-get update && apt-get install -y gh \
     && rm -rf /var/lib/apt/lists/*
 
+# ── CCometixLine (Claude Code status line) ───────────────────────
+# Static musl build — no runtime deps. The entrypoint seeds a settings.json
+# statusLine pointing here (see lib/migrate-settings.sh).
+ARG CCLINE_VERSION=1.1.2
+RUN curl -fsSL "https://github.com/Haleclipse/CCometixLine/releases/download/v${CCLINE_VERSION}/ccline-linux-x64-static.tar.gz" \
+    | tar -C /usr/local/bin -xzf - ccline \
+    && chmod 755 /usr/local/bin/ccline
+
 # ── Docker CLI (for DooD socket mounting) ────────────────────────
 RUN install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \

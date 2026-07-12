@@ -98,6 +98,18 @@ else
     fail "one or more toolchain checks failed inside agent-sandbox:latest"
 fi
 
+# ── ccline (Claude Code status line) renders from a settings payload ──
+# ccline reads Claude Code's statusline JSON on stdin; a static build that
+# fails here (bad extraction, wrong arch) would leave every sandbox session
+# with a blank status line while the container otherwise works.
+echo "case: ccline renders a status line inside agent-sandbox:latest"
+if "${RUNTIME}" run --rm --entrypoint /bin/bash agent-sandbox:latest -c \
+    'echo "{\"model\":{\"id\":\"claude-test\",\"display_name\":\"Test\"},\"workspace\":{\"current_dir\":\"/workspace\"},\"transcript_path\":\"/dev/null\"}" | /usr/local/bin/ccline' >/dev/null; then
+    pass
+else
+    fail "ccline failed to render inside agent-sandbox:latest"
+fi
+
 # ── Summary ────────────────────────────────────────────────────────
 echo
 echo "passed: ${PASSES}, failed: ${FAILURES}"

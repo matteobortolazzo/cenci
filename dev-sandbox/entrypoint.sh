@@ -37,6 +37,8 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/migrate-settings.sh
 source "${SCRIPT_DIR}/lib/migrate-settings.sh"
+# shellcheck source=lib/codex-config.sh
+source "${SCRIPT_DIR}/lib/codex-config.sh"
 
 if [[ -L /home/dev/.claude ]]; then
     rm -f /home/dev/.claude
@@ -119,6 +121,17 @@ elif jq -e . /home/dev/.claude.json >/dev/null 2>&1; then
     fi
 fi
 # Invalid JSON → leave untouched (never clobber unrecoverable state).
+
+# ── Seed Codex's native status line ───────────────────────────────
+# Codex renders its status line from `[tui] status_line` in config.toml — no
+# external binary needed. seed_codex_config (lib/codex-config.sh) creates the
+# file or appends the block, and leaves any existing [tui]/status_line
+# untouched. Unconditional: harmless in Claude-only containers, and ready if
+# codex is launched later on the same home volume.
+if [[ -L /home/dev/.codex/config.toml ]]; then
+    rm -f /home/dev/.codex/config.toml
+fi
+seed_codex_config /home/dev/.codex/config.toml
 
 # ── Inject host credentials (staged read-only mounts → writable copies) ──
 

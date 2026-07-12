@@ -90,7 +90,19 @@ echo "case: our keys win on conflict"
 assert_jq "re-enables agentwatch"   "${OUT_OVERRIDE}" '.enabledPlugins["agentwatch@agent-stack"] == true'
 assert_jq "forces bypass mode"      "${OUT_OVERRIDE}" '.permissions.defaultMode == "bypassPermissions"'
 
-# ── Case 6: onboarding seed into .claude.json ────────────────────
+# ── Case 6: statusLine seeding ───────────────────────────────────
+# Absent statusLine → seed the ccline binary baked into the image. Unlike the
+# bypass keys there is no safety reason to force it, so a user-customized
+# statusLine in the home volume must be preserved.
+echo "case: statusLine seeded when absent"
+assert_jq "seeds ccline statusLine" "${OUT_EMPTY}" '.statusLine.type == "command" and .statusLine.command == "/usr/local/bin/ccline" and .statusLine.padding == 0'
+
+CUSTOM_STATUSLINE='{"statusLine":{"type":"command","command":"/home/dev/bin/my-line"}}'
+OUT_CUSTOM="$(echo "${CUSTOM_STATUSLINE}" | migrate_settings)"
+echo "case: user statusLine preserved"
+assert_jq "keeps user statusLine command" "${OUT_CUSTOM}" '.statusLine.command == "/home/dev/bin/my-line"'
+
+# ── Case 7: onboarding seed into .claude.json ────────────────────
 # Fresh volume: the entrypoint writes ONBOARDING_SETTINGS directly.
 echo "case: onboarding seed (fresh)"
 assert_jq "fresh seed marks onboarding complete" "${ONBOARDING_SETTINGS}" '.hasCompletedOnboarding == true'

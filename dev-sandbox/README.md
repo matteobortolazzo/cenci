@@ -161,6 +161,19 @@ once, completing the wizard is recorded in the volume and won't recur for that
 instance. They only reappear for a **new `--name` instance** (its own fresh
 volume) or after you reset/delete a volume.
 
+### Status lines
+
+Both agents get a status line out of the box:
+
+- **Claude Code** — [CCometixLine](https://github.com/Haleclipse/CCometixLine) (`ccline`)
+  is baked into the base image at `/usr/local/bin/ccline`, and the entrypoint seeds a
+  `statusLine` entry into the volume's `settings.json` **only if none is set** — customize
+  it inside the container and your version wins.
+- **Codex** — uses its native status line: the entrypoint seeds `[tui] status_line`
+  (model, cwd, context usage, tokens, 5-hour/weekly rate limits) into
+  `/home/dev/.codex/config.toml`. An existing `[tui]` table or `status_line` key is left
+  untouched; tweak it with Codex's `/statusline` command.
+
 ### Codex auth
 
 When launching Codex (`--agent codex` / `codex-sand`), auth is staged from the host:
@@ -205,6 +218,7 @@ Everything persists in the home volume — only needs to happen once per instanc
 | Node.js | 24.x | `NODE_MAJOR` |
 | Go | 1.24.1 | `GO_VERSION` |
 | Codex CLI | 0.144.1 | `CODEX_VERSION` |
+| CCometixLine (ccline) | 1.1.2 | `CCLINE_VERSION` |
 | GitHub CLI | latest | — |
 | git, ripgrep, jq, curl | latest | — |
 | build-essential | latest | — |

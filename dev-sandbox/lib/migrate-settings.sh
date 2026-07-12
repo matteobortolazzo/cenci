@@ -15,7 +15,8 @@
 #     marketplace so coding-agent sessions are visible on the host status bar,
 #   * removes the stale pre-rename muxwatch/ccflow plugins and the old
 #     claude-tools marketplace, which would otherwise 404 on bootstrap and
-#     shadow the renamed plugins.
+#     shadow the renamed plugins,
+#   * seeds the ccline status line when the volume has none of its own.
 
 # Container-only bypass settings. The container boundary is what makes bypass
 # mode safe — these must never reach the host ~/.claude/settings.json.
@@ -25,15 +26,22 @@ BYPASS_SETTINGS='{"skipDangerousModePermissionPrompt":true,"permissions":{"defau
 # agentwatch daemon.
 PLUGIN_SETTINGS='{"extraKnownMarketplaces":{"agent-stack":{"source":{"source":"github","repo":"matteobortolazzo/agent-stack"}}},"enabledPlugins":{"agentwatch@agent-stack":true,"agentflow@agent-stack":true}}'
 
+# Status line rendered by the CCometixLine binary baked into the base image
+# (Dockerfile.base). Seeded only when the volume has no statusLine of its own:
+# unlike the bypass keys there is no safety reason to force it, so a user
+# customization in the home volume wins.
+STATUSLINE_SETTINGS='{"statusLine":{"type":"command","command":"/usr/local/bin/ccline","padding":0}}'
+
 # migrate_settings: read a settings.json object from stdin, write the merged +
 # migrated object to stdout. Reads `{}` when given an empty/whitespace input so
 # fresh and invalid volumes get seeded too. Idempotent: running it on its own
 # output is a no-op.
 migrate_settings() {
-    jq --argjson bypass "${BYPASS_SETTINGS}" --argjson plugins "${PLUGIN_SETTINGS}" '
+    jq --argjson bypass "${BYPASS_SETTINGS}" --argjson plugins "${PLUGIN_SETTINGS}" --argjson statusline "${STATUSLINE_SETTINGS}" '
         (. * $bypass * $plugins)
         | del(.enabledPlugins["muxwatch@claude-tools"], .enabledPlugins["ccflow@claude-tools"])
         | del(.extraKnownMarketplaces["claude-tools"])
+        | if has("statusLine") then . else . + $statusline end
     '
 }
 
