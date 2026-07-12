@@ -23,7 +23,7 @@ if [ "$COUNT" -eq 1 ]; then
 {
   "hookSpecificOutput": {
     "hookEventName": "SessionStart",
-    "additionalContext": "Pending implementation plan found: $FILENAME\nResume implementation by invoking: /agentflow:implement $PLAN_FILE"
+    "additionalContext": "Pending implementation plan found: $FILENAME\nIf the user invokes /agentflow:implement with an explicit ticket number or plan file, honor that argument and do not ask about unrelated pending plans. Otherwise, offer to resume by invoking: /agentflow:implement $PLAN_FILE"
   }
 }
 EOF
@@ -33,7 +33,7 @@ elif [ "$COUNT" -gt 1 ]; then
 {
   "hookSpecificOutput": {
     "hookEventName": "SessionStart",
-    "additionalContext": "Multiple pending plans found: $FILE_LIST\nAsk the user which plan to resume using the AskUserQuestion tool, then invoke: /agentflow:implement .plans/<filename>"
+    "additionalContext": "Multiple pending plans found: $FILE_LIST\nIf the user invokes /agentflow:implement with an explicit ticket number or plan file, honor that argument and ignore every unrelated pending plan; ticket mode may only auto-detect .plans/<ticket-number>-*.md. Do not ask the user to choose among unrelated plans. If no explicit implement target was provided, ask which plan to resume using the AskUserQuestion tool, then invoke: /agentflow:implement .plans/<filename>"
   }
 }
 EOF
