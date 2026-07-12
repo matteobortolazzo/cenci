@@ -39,7 +39,7 @@ jobs:
           echo "version=$VERSION" >>"$GITHUB_OUTPUT"
           echo "tag=agentwatch/v${VERSION}" >>"$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Always build from the tag's commit, regardless of which ref dispatched us.
           ref: refs/tags/agentwatch/v${{ steps.v.outputs.version }}

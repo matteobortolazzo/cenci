@@ -15,7 +15,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: shellcheck
         run: |
           shellcheck install.sh \
@@ -32,7 +32,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Run host-runnable test suites
         run: |
           bash dev-sandbox/tests/settings-merge.test.sh
@@ -43,21 +43,21 @@ jobs:
   fragment-drift:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Assert fragments match the Dockerfile monolith
         run: bash dev-sandbox/tests/fragments-drift.test.sh
 
   build-smoke:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build base + monolith and run the toolchain smoke test
         run: bash dev-sandbox/tests/smoke.test.sh
 
   hadolint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: hadolint/hadolint-action@v3.3.0
         with:
           dockerfile: dev-sandbox/Dockerfile.base
