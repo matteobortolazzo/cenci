@@ -23,6 +23,7 @@ func TestDaemon_MapEventToStatus(t *testing.T) {
 		{"Notification agent_completed", ipc.HookEvent{EventType: "Notification", NotificationType: "agent_completed"}, detect.StatusDone},
 		{"Notification other", ipc.HookEvent{EventType: "Notification", NotificationType: "other"}, detect.StatusUnknown},
 		{"PreToolUse AskUserQuestion", ipc.HookEvent{EventType: "PreToolUse", ToolName: "AskUserQuestion"}, detect.StatusNeedInput},
+		{"PreToolUse request_user_input", ipc.HookEvent{EventType: "PreToolUse", ToolName: "request_user_input"}, detect.StatusNeedInput},
 		{"PreToolUse EnterPlanMode", ipc.HookEvent{EventType: "PreToolUse", ToolName: "EnterPlanMode"}, detect.StatusNeedInput},
 		{"PreToolUse ExitPlanMode", ipc.HookEvent{EventType: "PreToolUse", ToolName: "ExitPlanMode"}, detect.StatusNeedInput},
 		{"PreToolUse generic tool", ipc.HookEvent{EventType: "PreToolUse"}, detect.StatusRunning},

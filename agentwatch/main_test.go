@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/dispatch"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/ipc"
 )
 
 var binaryPath string
@@ -32,6 +33,51 @@ func TestMain(m *testing.M) {
 	}
 
 	os.Exit(m.Run())
+}
+
+func TestNotifyCodexPromptSendsOnlyCompactTaskName(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "events.sock")
+	receiver, err := ipc.NewEventReceiver(socket)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = receiver.Close() }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go receiver.Accept(ctx)
+
+	rawPrompt := "\n  improve\t codex tmux names\x00  \nprivate second line"
+	input := `{"hook_event_name":"UserPromptSubmit","session_id":"codex-sess","prompt":` + string(mustJSON(t, rawPrompt)) + `}`
+	cmd := exec.Command(binaryPath, "notify", "-agent", "codex", "-event-socket", socket)
+	cmd.Stdin = strings.NewReader(input)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("notify: %v: %s", err, output)
+	}
+
+	select {
+	case event := <-receiver.Events():
+		if event.TaskName != "improve codex tmux names" {
+			t.Fatalf("task_name = %q", event.TaskName)
+		}
+		encoded, err := json.Marshal(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(encoded), "private second line") || strings.Contains(string(encoded), "prompt") {
+			t.Fatalf("raw prompt leaked into IPC: %s", encoded)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for notify event")
+	}
+}
+
+func mustJSON(t *testing.T, value string) []byte {
+	t.Helper()
+	b, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 // TestCodexHooksJSONHasNoUnknownKeys guards against unsupported keys leaking

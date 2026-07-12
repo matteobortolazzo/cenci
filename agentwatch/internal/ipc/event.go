@@ -8,6 +8,7 @@ type HookEvent struct {
 	TmuxPane         string `json:"tmux_pane"`                   // $TMUX_PANE (e.g. %5)
 	NotificationType string `json:"notification_type,omitempty"` // Notification events only
 	ToolName         string `json:"tool_name,omitempty"`         // PreToolUse, PermissionRequest, PostToolUse events
+	TaskName         string `json:"task_name,omitempty"`         // compact first-prompt label; raw prompt is never sent
 	IsInterrupt      bool   `json:"is_interrupt,omitempty"`      // PostToolUseFailure: true if user pressed ESC
 	Timestamp        string `json:"timestamp"`
 }

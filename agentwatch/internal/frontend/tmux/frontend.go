@@ -108,6 +108,9 @@ func (f *Frontend) OnEvent(sess *frontend.SessionState, event ipc.HookEvent) fro
 	// Resolve task name from the pane title (sanitize immediately to protect
 	// downstream consumers: IPC broadcast, status output, and rename).
 	taskName := taskNameFromPane(paneInfo)
+	if sess.PromptTaskName {
+		taskName = sess.TaskName
+	}
 	obs.TaskNameHint = taskName
 
 	// Detect mid-session user renames.
@@ -123,11 +126,34 @@ func (f *Frontend) OnEvent(sess *frontend.SessionState, event ipc.HookEvent) fro
 	return obs
 }
 
-// taskNameFromPane derives the display task name from the pane title. The pane
-// title is the only task-name source — neither Claude nor Codex sends one in the
-// hook payload.
+// taskNameFromPane derives the fallback display task name from the pane title.
+// Codex prompt-derived labels override this fallback once available.
 func taskNameFromPane(paneInfo *tmuxc.PaneInfo) string {
+	if fallback, ok := codexActionRequiredTitle(paneInfo.PaneTitle); ok {
+		return fallback
+	}
 	return frontend.CompactTaskName(detect.TaskName(paneInfo.PaneTitle))
+}
+
+// codexActionRequiredTitle recognizes Codex's native question title and
+// returns only its project-name fallback, never the action prefix.
+func codexActionRequiredTitle(title string) (string, bool) {
+	title = strings.TrimSpace(title)
+	if !strings.HasPrefix(title, "[") {
+		return "", false
+	}
+	close := strings.Index(title, "]")
+	if close < 0 || strings.TrimSpace(title[1:close]) != "!" {
+		return "", false
+	}
+	rest := strings.TrimSpace(title[close+1:])
+	const action = "Action Required"
+	if !strings.HasPrefix(rest, action) {
+		return "", false
+	}
+	rest = strings.TrimSpace(strings.TrimPrefix(rest, action))
+	rest = strings.TrimSpace(strings.TrimPrefix(rest, "|"))
+	return frontend.CompactTaskName(rest), true
 }
 
 // OnSessionEnd restores the window owned by the ended session.
@@ -312,6 +338,28 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 			delete(f.panes, ws.PaneID)
 			f.restoreWindow(wt)
 			continue
+		}
+		if ws.Agent == "codex" {
+			if fallback, actionRequired := codexActionRequiredTitle(p.PaneTitle); actionRequired {
+				taskName := ws.TaskName
+				if taskName == "" {
+					taskName = fallback
+				}
+				if ws.Status != detect.StatusNeedInput || ws.TaskName != taskName {
+					f.applyStatus(wt, ws, detect.StatusNeedInput, taskName)
+					if ws.SessionKey != "" {
+						updates = append(updates, frontend.SweepAction{SessionKey: ws.SessionKey, NewStatus: detect.StatusNeedInput, NewTask: taskName})
+					}
+				}
+				continue
+			}
+			if ws.Status == detect.StatusNeedInput && detect.IsBraille(firstRune(p.PaneTitle)) {
+				f.applyStatus(wt, ws, detect.StatusRunning, ws.TaskName)
+				if ws.SessionKey != "" {
+					updates = append(updates, frontend.SweepAction{SessionKey: ws.SessionKey, NewStatus: detect.StatusRunning, NewTask: ws.TaskName})
+				}
+				continue
+			}
 		}
 		if ws.Status != detect.StatusRunning {
 			continue
