@@ -8,6 +8,8 @@ user-invocable: true
 allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Task, AskUserQuestion
 ---
 
+> **Interaction rule**: Every question, confirmation, or approval directed at the user — anywhere in this skill, including error recovery — MUST be asked with the `AskUserQuestion` tool. Never ask in plain text. If an instruction says "ask the user" or "confirm", that means `AskUserQuestion`.
+
 Read the `subagent-safety` reference skill before delegating work to subagents.
 
 ## Context
@@ -197,7 +199,7 @@ For each comment marked **Fix**, in the priority order from Phase 3:
    - Analyze the failure
    - Fix the root cause
    - Re-run tests
-   - If still failing after 3 attempts, stop and ask the user
+   - If still failing after 3 attempts, stop and ask the user via `AskUserQuestion`
 5. Move to the next fix
 
 After all individual fixes are applied, run the full build and test suite:
@@ -293,8 +295,7 @@ git push origin <headRefName>
 If the push **fails** (e.g., an SSH remote with no keys in the container):
 1. Display the exact push command to the user
 2. Explain that it likely needs an HTTPS remote (the container injects only `gh` HTTPS credentials, not SSH keys) or manual authentication
-3. Ask the user to run the push command manually
-4. Wait for user confirmation before proceeding
+3. Use `AskUserQuestion` ("Pushed, continue" / "Abort") to ask the user to run the push command manually and confirm before proceeding
 
 ## Step 6C: Re-request Review
 

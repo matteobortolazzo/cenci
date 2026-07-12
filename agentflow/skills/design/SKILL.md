@@ -9,6 +9,8 @@ model: opus
 allowed-tools: Read, Write, Bash(pencil:*), Bash(gh:*), Bash(git:*), Bash(curl:*), Bash(mkdir:*), Glob, Grep, AskUserQuestion, WebFetch, mcp__pencil__get_editor_state, mcp__pencil__get_guidelines, mcp__pencil__batch_get, mcp__pencil__batch_design, mcp__pencil__get_screenshot, mcp__pencil__export_nodes, mcp__pencil__find_empty_space_on_canvas, mcp__pencil__snapshot_layout, mcp__pencil__open_document, mcp__pencil__get_variables, mcp__pencil__set_variables, mcp__pencil__replace_all_matching_properties, mcp__pencil__search_all_unique_properties
 ---
 
+> **Interaction rule**: Every question, confirmation, or approval directed at the user — anywhere in this skill, including error recovery — MUST be asked with the `AskUserQuestion` tool. Never ask in plain text. If an instruction says "ask the user" or "confirm", that means `AskUserQuestion`.
+
 <!-- Architecture note: agentflow orchestrates Pencil via `pencil interactive` CLI (agentflow-driven model).
      We do NOT use `pencil --agent-config` because:
      1. agentflow needs ticket/worktree/approval workflow integration that agent-config agents lack
@@ -498,7 +500,7 @@ If no dependents are found, still close the ticket — just note it in the closi
 
 ### Step 6C: Error Recovery
 
-- **Commit fails** → Display the `git add` / `git commit` commands and ask the user to run them manually. Do not retry automatically.
+- **Commit fails** → Display the `git add` / `git commit` commands, then use `AskUserQuestion` ("Ran them, continue" / "Skip") to confirm before proceeding. Do not retry automatically.
 - **Label update fails** → Report the failure and continue; do not block on it.
 
 ## After Commit

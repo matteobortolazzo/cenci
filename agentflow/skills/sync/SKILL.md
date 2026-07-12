@@ -6,8 +6,10 @@ argument-hint: [additional context]
 user-invocable: true
 disable-model-invocation: true
 model: haiku
-allowed-tools: Bash, Read
+allowed-tools: Bash, Read, AskUserQuestion
 ---
+
+> **Interaction rule**: Every question, confirmation, or approval directed at the user — anywhere in this skill, including error recovery — MUST be asked with the `AskUserQuestion` tool. Never ask in plain text. If an instruction says "ask the user" or "confirm", that means `AskUserQuestion`.
 
 ## Task
 
@@ -28,7 +30,10 @@ If user context was provided, use it to steer the sync (e.g., skip certain steps
 git status --short
 ```
 
-If the current branch has uncommitted changes, **warn the user** and ask whether to stash, commit, or abort before continuing.
+If the current branch has uncommitted changes, use `AskUserQuestion` to ask how to proceed, with options:
+- **Stash** — `git stash -u` the changes, then continue
+- **Commit** — commit the changes on the current branch, then continue
+- **Abort** — stop the sync entirely, leaving the changes untouched
 
 ### Step 2: Update main
 

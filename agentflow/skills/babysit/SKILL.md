@@ -8,6 +8,8 @@ model: sonnet
 allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Task, AskUserQuestion, SlashCommand, ScheduleWakeup
 ---
 
+> **Interaction rule**: Every question, confirmation, or approval directed at the user — anywhere in this skill, including error recovery — MUST be asked with the `AskUserQuestion` tool. Never ask in plain text. If an instruction says "ask the user" or "confirm", that means `AskUserQuestion`.
+
 Read the `subagent-safety` reference skill before delegating work to subagents.
 Read the `shell-rules` skill before running any `gh` commands (covers the heredoc temp-file pattern, one-command-per-Bash-call, and no cross-dir `cd` compounds).
 

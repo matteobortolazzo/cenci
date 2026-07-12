@@ -60,7 +60,7 @@ Push the branch:
 - Ticket mode: `git push -u origin feature/<ticket-id>-<description>`
 - Ticketless mode: `git push -u origin feature/<auto-slug>`
 
-If push fails due to sandbox/network/auth, clear the goal (`/goal clear`), show the exact command, and wait for user confirmation after they push manually.
+If push fails due to sandbox/network/auth, clear the goal (`/goal clear`), show the exact command, and use `AskUserQuestion` ("Pushed, continue" / "Abort") to wait for the user to push manually before continuing.
 
 ## Screenshots (UI Work)
 

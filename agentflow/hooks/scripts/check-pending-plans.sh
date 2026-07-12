@@ -33,7 +33,7 @@ elif [ "$COUNT" -gt 1 ]; then
 {
   "hookSpecificOutput": {
     "hookEventName": "SessionStart",
-    "additionalContext": "Multiple pending plans found: $FILE_LIST\nAsk the user which plan to resume, then invoke: /agentflow:implement .plans/<filename>"
+    "additionalContext": "Multiple pending plans found: $FILE_LIST\nAsk the user which plan to resume using the AskUserQuestion tool, then invoke: /agentflow:implement .plans/<filename>"
   }
 }
 EOF

@@ -8,7 +8,7 @@ If `hasPlanFile` is true, skip new planning:
 
 1. The plan file was already read and parsed during mode detection. Source ticket details, user context, Q&A, implementation plan, architectural context, design context, and attachment summaries from it.
 2. Compare `planCommitSha` from front matter to `git rev-parse HEAD`. If they differ, warn: "The codebase has changed since this plan was created (`planCommitSha` vs current HEAD). The plan may be stale. Continue anyway?" Use `AskUserQuestion` with "Continue with existing plan" and "Re-plan from scratch". If re-planning, delete the plan file and run normal planning. No board-label removal is needed here: this is a plan-file-mode run, so the `Planned → Working` swap already happened at pipeline start (see the **Label "Working"** section of `SKILL.md`); the re-run's new-plan path re-applies `Planned` at the end when it persists the fresh approved plan.
-3. In ticket mode, re-fetch the ticket and compare state/body with `## Ticket Details`. If changed, warn the user and require confirmation before continuing. (This single read-only `gh issue view` is the sanctioned exception to the "no ticket fetch in the main agent" rule — it runs after the pre-flight check, and the context-gatherer is not used in plan file mode.)
+3. In ticket mode, re-fetch the ticket and compare state/body with `## Ticket Details`. If changed, require confirmation via `AskUserQuestion` ("Continue" / "Abort") before continuing. (This single read-only `gh issue view` is the sanctioned exception to the "no ticket fetch in the main agent" rule — it runs after the pre-flight check, and the context-gatherer is not used in plan file mode.)
 4. Proceed to Phase 2 with context from the plan file.
 
 ## New Plan

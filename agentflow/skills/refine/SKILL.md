@@ -9,6 +9,8 @@ model: opus
 allowed-tools: Read, Glob, Bash(gh:*), Bash(git:*), Bash(curl:*), Bash(mkdir:*), AskUserQuestion, WebFetch
 ---
 
+> **Interaction rule**: Every question, confirmation, or approval directed at the user — anywhere in this skill, including error recovery — MUST be asked with the `AskUserQuestion` tool. Never ask in plain text. If an instruction says "ask the user" or "confirm", that means `AskUserQuestion`.
+
 ## Context
 
 **Config check**: Before anything else, verify `.claude/config.json` exists by reading it. If the file does not exist, **stop immediately** and tell the user:
