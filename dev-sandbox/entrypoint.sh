@@ -28,14 +28,19 @@ if [[ "$(id -u)" -eq 0 ]]; then
     if [[ -n "${HOST_UID:-}" && "${HOST_UID}" != "0" && -n "${HOST_GID:-}" && "${HOST_GID}" != "0" ]] \
        && { [[ "${HOST_UID}" != "${CUR_UID}" ]] || [[ "${HOST_GID}" != "${CUR_GID}" ]]; }; then
         if [[ "${HOST_GID}" != "${CUR_GID}" ]]; then
-            groupmod -g "${HOST_GID}" dev || { echo "remap: groupmod failed" >&2; exit 1; }
+            EXISTING_HOST_GROUP="$(getent group "${HOST_GID}" | cut -d: -f1 || true)"
+            if [[ -n "${EXISTING_HOST_GROUP}" ]]; then
+                usermod -g "${HOST_GID}" dev || { echo "remap: usermod primary group failed" >&2; exit 1; }
+            else
+                groupmod -g "${HOST_GID}" dev || { echo "remap: groupmod failed" >&2; exit 1; }
+            fi
         fi
         if [[ "${HOST_UID}" != "${CUR_UID}" ]]; then
             usermod -u "${HOST_UID}" dev || { echo "remap: usermod failed" >&2; exit 1; }
         fi
         chown -R "${HOST_UID}:${HOST_GID}" /home/dev || { echo "remap: chown /home/dev failed" >&2; exit 1; }
         if [[ "${WORKSPACE_SCOPE:-}" == "repo" ]]; then
-            chown -R "${HOST_UID}:${HOST_GID}" /workspace \
+            find /workspace -mindepth 1 -exec chown -h "${HOST_UID}:${HOST_GID}" {} + \
                 || echo "warning: failed to chown /workspace to ${HOST_UID}:${HOST_GID} — files in this mount may be misowned" >&2
         fi
     elif [[ "${HOST_UID:-}" == "0" || "${HOST_GID:-}" == "0" ]]; then
@@ -51,7 +56,7 @@ if [[ "$(id -u)" -eq 0 ]]; then
 fi
 
 # Fix home directory ownership (volume may be root-owned on first run)
-sudo chown dev:dev /home/dev
+sudo chown dev:"$(id -g dev)" /home/dev
 
 # First-run setup for empty home volume
 if [[ ! -f /home/dev/.bashrc ]]; then

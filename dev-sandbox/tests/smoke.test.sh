@@ -154,6 +154,9 @@ fi
 # only runs (and only fails the suite) under RUNTIME=docker.
 echo "case: entrypoint remaps dev to HOST_UID/HOST_GID for a per-repo mount"
 REMAP_TMP="$(mktemp -d)"
+# The synthetic remap UID (1234) intentionally differs from the test runner's
+# real UID, unlike production where HOST_UID owns the bind-mount root.
+chmod 0777 "${REMAP_TMP}"
 trap 'rm -rf "${REMAP_TMP}"' EXIT
 REMAP_OUT="$(timeout 60 "${RUNTIME}" run --rm --user root \
     -e HOST_UID=1234 -e HOST_GID=1234 -e WORKSPACE_SCOPE=repo \
@@ -172,6 +175,25 @@ elif [[ "${REMAP_STATUS}" -eq 0 ]]; then
     fi
 else
     fail "container run failed while exercising the remap path (exit ${REMAP_STATUS}): ${REMAP_OUT}"
+fi
+
+echo "case: entrypoint reuses an existing image group matching HOST_GID"
+GROUP_COLLISION_OUT="$(timeout 60 "${RUNTIME}" run --rm --user root \
+    -e HOST_UID=1234 -e HOST_GID=20 \
+    agent-sandbox:latest \
+    -c 'id -u; id -g')"
+GROUP_COLLISION_STATUS=$?
+if [[ "${GROUP_COLLISION_STATUS}" -eq 124 ]]; then
+    fail "container run timed out while exercising an existing HOST_GID"
+elif [[ "${GROUP_COLLISION_STATUS}" -eq 0 ]]; then
+    readarray -t GROUP_COLLISION_LINES <<<"${GROUP_COLLISION_OUT}"
+    if [[ "${GROUP_COLLISION_LINES[0]:-}" == "1234" && "${GROUP_COLLISION_LINES[1]:-}" == "20" ]]; then
+        pass
+    else
+        fail "expected dev to reuse existing gid=20, got: ${GROUP_COLLISION_OUT}"
+    fi
+else
+    fail "container run failed for existing HOST_GID (exit ${GROUP_COLLISION_STATUS}): ${GROUP_COLLISION_OUT}"
 fi
 
 echo "case: remap-probe file ownership on the host (best-effort, docker only)"
