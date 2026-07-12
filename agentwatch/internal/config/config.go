@@ -24,7 +24,7 @@ type Config struct {
 func Default() Config {
 	return Config{
 		Verbose:         false,
-		SweepInterval:   30 * time.Second,
+		SweepInterval:   time.Second,
 		SessionTTL:      2 * time.Hour,
 		StyleIdle:       "dim",
 		StyleRunning:    "fg=blue,dim",

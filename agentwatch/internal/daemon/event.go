@@ -44,6 +44,10 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 	if event.Agent != "" {
 		sess.Agent = event.Agent
 	}
+	if event.EventType == "UserPromptSubmit" && event.TaskName != "" && !sess.PromptTaskName {
+		sess.TaskName = event.TaskName
+		sess.PromptTaskName = true
+	}
 
 	if event.EventType == "SessionEnd" {
 		delete(d.sessions, key)
@@ -93,7 +97,7 @@ func (d *Daemon) mapEventToStatus(event ipc.HookEvent) detect.Status {
 	case "PreToolUse":
 		// Tools that pause for user input, same as permission prompts.
 		switch event.ToolName {
-		case "AskUserQuestion", "EnterPlanMode", "ExitPlanMode":
+		case "AskUserQuestion", "request_user_input", "EnterPlanMode", "ExitPlanMode":
 			return detect.StatusNeedInput
 		}
 		// Any non-input tool means the agent is actively working.

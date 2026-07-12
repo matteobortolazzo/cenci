@@ -48,6 +48,28 @@ func TestCompactTaskNameCapsLabel(t *testing.T) {
 	}
 }
 
+func TestPromptTaskName(t *testing.T) {
+	tests := []struct {
+		name   string
+		prompt string
+		want   string
+	}{
+		{"first non-empty line", "\n  \n improve codex tmux names  \nignore this", "improve codex tmux names"},
+		{"collapse whitespace", "  improve\tcodex   names  ", "improve codex names"},
+		{"strip controls", "improve\x00 codex\x07 names", "improve codex names"},
+		{"empty", "\n\t\r\n", ""},
+		{"unicode", "改善 Codex の名前 🚀", "改善 Codex の名前 🚀"},
+		{"truncate by rune", "abcdefghijklmnopqrstuvwxyz0123456789", "abcdefghijklmnopqrstuvwxyz0..."},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := PromptTaskName(tc.prompt); got != tc.want {
+				t.Errorf("PromptTaskName(%q) = %q, want %q", tc.prompt, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSessionStateKey(t *testing.T) {
 	tests := []struct {
 		name string

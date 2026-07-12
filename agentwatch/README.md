@@ -454,7 +454,7 @@ A second `agentwatch daemon` is a safe no-op — it detects the running daemon, 
 | `-v` | `false` | Verbose logging |
 | `-event-socket` | `$XDG_RUNTIME_DIR/agentwatch-events.sock` | Event socket for hook notifications |
 | `-socket` | `$XDG_RUNTIME_DIR/agentwatch.sock` | Broadcast socket for waybar clients |
-| `-sweep` | `30` | Stale session sweep interval in seconds |
+| `-sweep` | `1` | Stale session reconciliation interval in seconds |
 | `-session-ttl` | `2h` | Idle TTL for paneless sessions (Go duration); sessions without a pane are expired after this duration if no `SessionEnd` fires |
 | `-style-running` | `fg=blue,dim` | tmux style for running state (inactive windows) |
 | `-style-done` | `fg=green,dim` | tmux style for done state (inactive windows) |
@@ -601,11 +601,27 @@ never renamed, removed, or repurposed, and unknown fields must be ignored (Go's
 
 Codex does not currently document a `SessionEnd` hook. agentwatch restores tracked Codex windows during the stale sweep once the pane returns to a non-Codex command after a completed/idle turn.
 
+For Codex, the first non-empty line of the first submitted prompt becomes the
+session's task label. Control characters are removed, whitespace is collapsed,
+and the label is capped at 30 characters. The first label stays pinned across
+later prompts and native pane-title changes; manually named windows, including
+dispatched `<ticket>-<slug>` windows, remain unchanged.
+
+Only that compact `task_name` is sent over agentwatch's internal hook-event IPC.
+The raw prompt and its remaining lines are never transmitted or persisted by
+agentwatch.
+
+Codex currently does not emit `PreToolUse` for non-shell/non-MCP tools such as
+`request_user_input`. During reconciliation, agentwatch therefore recognizes
+Codex's native `[ ! ] Action Required | project` pane title as `need-input`,
+keeps the pinned prompt label (or falls back to `project` after a daemon
+restart), and recognizes a later braille-spinner title as `running` again.
+
 ### Stale session sweep
 
 The daemon has two sweep mechanisms:
 
-**Pane-based sweep (tmux-backed sessions)**: Every 30s (configurable with `-sweep`), the tmux frontend checks if tracked pane IDs still exist in tmux. If a pane is gone (e.g. an agent crashed without firing a cleanup hook), the window is restored. For Codex, the sweep also restores the window after a completed session exits back to the user's shell.
+**Pane-based sweep (tmux-backed sessions)**: Every 1s (configurable with `-sweep`), the tmux frontend reconciles native agent titles and checks if tracked pane IDs still exist in tmux. If a pane is gone (e.g. an agent crashed without firing a cleanup hook), the window is restored. For Codex, the sweep also detects native input prompts and restores the window after a completed session exits back to the user's shell.
 
 **Paneless TTL sweep**: Sessions without a tmux pane (plain terminals, dev-sandbox without a pane) are tracked by session id only. They are removed on `SessionEnd`; if no `SessionEnd` fires (e.g. a crash or a Codex session), the daemon expires them after the idle TTL (default `2h`, configurable with `-session-ttl`).
 
@@ -613,7 +629,7 @@ The daemon has two sweep mechanisms:
 
 `agentwatch notify` accepts events even when `$TMUX_PANE` is unset. Sessions running in plain terminals or dev-sandbox without a tmux pane appear in `agentwatch status` output with empty `session` and `window_index` fields; their tooltip line reads `name (status)` rather than `sess:idx - name (status)`.
 
-**Caveat**: for paneless sessions the task name comes only from the hook payload's `task_name` field — there is no pane title to read. Paneless Codex sessions may therefore show no task name.
+**Caveat**: for paneless sessions the task name comes only from the hook payload's `task_name` field — there is no pane title to read. Codex `UserPromptSubmit` hooks provide the compact first-prompt label, but native action-required title detection is only available for tmux-backed sessions.
 
 ### Custom status-format integration
 
@@ -669,7 +685,7 @@ never blocked. Custom event sockets fail silently without starting another insta
 
 ### Verbose mode
 
-When running with `-v`, agentwatch logs task names derived from pane titles to stderr. These titles may reflect file paths, command output, or other workspace context. Task names and window names are truncated to 50 characters in log output to limit exposure.
+When running with `-v`, agentwatch logs compact task names derived from prompt labels or pane titles to stderr. Pane titles may reflect file paths, command output, or other workspace context. Raw prompts are never logged, transmitted, or persisted; task names and window names are truncated to 50 characters in log output to limit exposure.
 
 If verbose logs are persisted (e.g. by a process supervisor), direct output to a user-owned file with restricted permissions:
 

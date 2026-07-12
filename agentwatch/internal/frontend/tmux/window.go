@@ -243,9 +243,10 @@ func (f *Frontend) migratePaneIfRenumbered(newTarget, paneID string) []string {
 
 // applyStatus updates the window's style, symbol variable, and name for the given status.
 func (f *Frontend) applyStatus(windowTarget string, ws *windowState, status detect.Status, taskName string) {
+	taskChanged := ws.TaskName != taskName
 	ws.TaskName = taskName
 
-	if ws.Status == status {
+	if ws.Status == status && !taskChanged {
 		return
 	}
 

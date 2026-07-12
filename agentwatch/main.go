@@ -17,6 +17,7 @@ import (
 	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/config"
 	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/daemon"
 	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/dispatch"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/frontend"
 	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/frontend/status"
 	tmuxfe "github.com/matteobortolazzo/agent-stack/agentwatch/internal/frontend/tmux"
 	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/ipc"
@@ -59,8 +60,8 @@ func runDaemon(args []string) {
 	fs.StringVar(&cfg.SocketPath, "socket", ipc.DefaultSocketPath(), "IPC broadcast socket path (empty to disable)")
 	fs.StringVar(&cfg.EventSocketPath, "event-socket", ipc.DefaultEventSocketPath(), "event socket path for hook notifications")
 
-	var sweepSec int
-	fs.IntVar(&sweepSec, "sweep", 30, "stale session sweep interval in seconds")
+	sweepSec := int(cfg.SweepInterval / time.Second)
+	fs.IntVar(&sweepSec, "sweep", sweepSec, "stale session sweep interval in seconds")
 	fs.DurationVar(&cfg.SessionTTL, "session-ttl", cfg.SessionTTL, "idle expiry for sessions outside tmux (e.g. 2h)")
 
 	fs.StringVar(&cfg.StyleIdle, "style-idle", cfg.StyleIdle, "tmux style for idle state")
@@ -139,6 +140,8 @@ func runNotify(args []string) {
 		} `json:"notification"`
 		// PreToolUse fields
 		ToolName string `json:"tool_name"`
+		// UserPromptSubmit field. It is reduced to a compact label before IPC.
+		Prompt string `json:"prompt"`
 		// PostToolUseFailure fields
 		IsInterrupt bool `json:"is_interrupt"`
 	}
@@ -159,6 +162,9 @@ func runNotify(args []string) {
 		ToolName:         hookInput.ToolName,
 		IsInterrupt:      hookInput.IsInterrupt,
 		Timestamp:        time.Now().UTC().Format(time.RFC3339),
+	}
+	if event.Agent == "codex" && event.EventType == "UserPromptSubmit" {
+		event.TaskName = frontend.PromptTaskName(hookInput.Prompt)
 	}
 
 	// Delivery is silent and non-fatal. For the default socket it starts a

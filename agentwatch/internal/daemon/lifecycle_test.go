@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/detect"
 	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/ipc"
 	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/tmux"
 	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/tmux/tmuxtest"
@@ -153,6 +154,86 @@ func TestDaemon_CodexLifecycleWithoutSessionEndRestoresAfterExit(t *testing.T) {
 	}
 	if d.frontend.WindowInfo("codex-sess") != nil {
 		t.Error("expected window no longer tracked after Codex exit cleanup")
+	}
+}
+
+func TestDaemon_CodexPromptLabelAndNativeQuestionReconciliation(t *testing.T) {
+	mc := &tmuxtest.MockClient{Panes: []tmux.PaneInfo{{
+		SessionName: "main", WindowIndex: "0", WindowName: "zsh", PaneIndex: "0",
+		PaneCurrentCmd: "codex", PaneTitle: "agent-stack", PaneID: "%0",
+	}}}
+	d := newTestDaemon(mc)
+
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
+	if name, _ := lastRename(mc.Renames, "main:0"); name != "agent-stack" {
+		t.Fatalf("folder fallback = %q, want agent-stack", name)
+	}
+
+	// An empty prompt does not pin the folder fallback. The first later
+	// non-empty prompt does, even though the status is already running.
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0", TaskName: "improve codex tmux names"})
+	if name, _ := lastRename(mc.Renames, "main:0"); name != "improve codex tmux names" {
+		t.Fatalf("first prompt label = %q", name)
+	}
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0", TaskName: "replace this label"})
+	if name, _ := lastRename(mc.Renames, "main:0"); name != "improve codex tmux names" {
+		t.Fatalf("later prompt replaced pinned label: %q", name)
+	}
+
+	mc.Panes[0].PaneTitle = "[ ! ] Action Required | agent-stack"
+	d.runSweep()
+	if got := d.sessions["codex-sess"].Status; got != detect.StatusNeedInput {
+		t.Fatalf("action title status = %v, want need-input", got)
+	}
+	if got := d.sessions["codex-sess"].TaskName; got != "improve codex tmux names" {
+		t.Fatalf("action title changed task = %q", got)
+	}
+	if symbol, _ := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); symbol != "!" {
+		t.Fatalf("action title symbol = %q, want !", symbol)
+	}
+
+	mc.Panes[0].PaneTitle = "⠋ Working | agent-stack"
+	d.runSweep()
+	if got := d.sessions["codex-sess"].Status; got != detect.StatusRunning {
+		t.Fatalf("spinner status = %v, want running", got)
+	}
+	if got := d.sessions["codex-sess"].TaskName; got != "improve codex tmux names" {
+		t.Fatalf("spinner changed task = %q", got)
+	}
+}
+
+func TestDaemon_CodexActionTitleFallsBackAfterRestart(t *testing.T) {
+	mc := &tmuxtest.MockClient{Panes: []tmux.PaneInfo{{
+		SessionName: "main", WindowIndex: "0", WindowName: "zsh", PaneIndex: "0",
+		PaneCurrentCmd: "codex", PaneTitle: "[ ! ] Action Required | agent-stack", PaneID: "%0",
+	}}}
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
+	d.runSweep()
+	if got := d.sessions["codex-sess"].TaskName; got != "agent-stack" {
+		t.Fatalf("restart fallback = %q, want agent-stack", got)
+	}
+	if got := d.sessions["codex-sess"].Status; got != detect.StatusNeedInput {
+		t.Fatalf("restart action status = %v, want need-input", got)
+	}
+}
+
+func TestDaemon_CodexKeepsDispatchedWindowName(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{{
+			SessionName: "main", WindowIndex: "0", WindowName: "146-ci-shell-lint", PaneIndex: "0",
+			PaneCurrentCmd: "codex", PaneTitle: "agent-stack", PaneID: "%0",
+		}},
+		WindowOptValues: map[string]string{"main:0:automatic-rename": "off"},
+	}
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0", TaskName: "improve codex tmux names"})
+	mc.Panes[0].PaneTitle = "[ ! ] Action Required | agent-stack"
+	d.runSweep()
+	if name, _ := lastRename(mc.Renames, "main:0"); name != "146-ci-shell-lint" {
+		t.Fatalf("dispatched window renamed to %q", name)
 	}
 }
 

@@ -18,8 +18,10 @@ type SessionState struct {
 	Agent     string // claude, codex, or empty when unknown
 	Status    detect.Status
 	TaskName  string
-	TmuxPane  string    // tmux pane ID (e.g. %5); empty = paneless session
-	LastEvent time.Time // last event time, drives paneless TTL expiry
+	// PromptTaskName is true after the first non-empty prompt label is pinned.
+	PromptTaskName bool
+	TmuxPane       string    // tmux pane ID (e.g. %5); empty = paneless session
+	LastEvent      time.Time // last event time, drives paneless TTL expiry
 }
 
 // Key returns the session key used in the daemon's sessions map: the agent

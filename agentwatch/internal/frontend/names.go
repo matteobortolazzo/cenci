@@ -2,6 +2,7 @@ package frontend
 
 import (
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -43,4 +44,21 @@ func CompactTaskName(name string) string {
 		short = string(runes[:cutoff])
 	}
 	return short + "..."
+}
+
+// PromptTaskName returns a compact label from the first non-empty prompt line.
+// Callers should discard the raw prompt after deriving this value.
+func PromptTaskName(prompt string) string {
+	for _, line := range strings.Split(prompt, "\n") {
+		line = strings.Map(func(r rune) rune {
+			if unicode.IsSpace(r) {
+				return ' '
+			}
+			return r
+		}, line)
+		if label := CompactTaskName(line); label != "" {
+			return label
+		}
+	}
+	return ""
 }
