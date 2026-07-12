@@ -39,6 +39,7 @@ jobs:
           bash dev-sandbox/tests/heal-plugins.test.sh
           bash dev-sandbox/tests/repo-scope.test.sh
           bash dev-sandbox/tests/codex-config.test.sh
+          bash dev-sandbox/tests/launcher-lifecycle.test.sh
 
   fragment-drift:
     runs-on: ubuntu-latest

@@ -148,7 +148,11 @@ Running `agent-sand` **outside** any git repo falls back to the legacy scheme: t
 from previous versions, so existing `<agent>-sand-home-default`-style volumes keep
 working untouched.
 
-If a container with the same name is already running, the script attaches to it instead of creating a new one.
+The repository container runs detached, and every shell or agent is launched as an
+independent `exec` session inside it. Closing any terminal or tmux window therefore
+ends only that shell or agent; it cannot terminate the other windows sharing the
+container. If a container with the same name is already running, the launcher reuses
+it.
 
 ### Choosing an agent
 
@@ -404,9 +408,17 @@ the same time.
 
 ### Container lifecycle
 
-- Containers are created with `--rm` — removed automatically on exit
+- Repository containers run detached so no agent window owns their lifetime
+- Containers remain available for later launches until stopped or the container runtime restarts
+- Containers are created with `--rm` and are removed automatically when stopped
 - The home volume survives container removal
 - Each `--name` instance gets its own container and volume
+
+Stop a repository container explicitly when you no longer need it, for example:
+
+```bash
+docker stop claude-sand-my-repo
+```
 
 ## Maintenance
 
