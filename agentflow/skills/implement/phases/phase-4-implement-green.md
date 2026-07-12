@@ -55,13 +55,16 @@ If build/tests fail, analyze root cause, fix, and rerun. Retry up to 3 times, th
 
 ## Visual Verification
 
-For frontend plans with visual components:
+For frontend plans with visual components, read the `verify-ui` reference skill and
+follow its shared core (screenshot capture, Pencil layout check, fix-before-proceeding,
+never-silently-skip).
 
-- Prefer Playwright Test with `toHaveScreenshot()` when configured.
-- Use Playwright CLI for interactive screenshots/snapshots only as development verification.
-- If no browser tooling is available, note that visual verification was not performed.
-
-If Pencil is available, compare implementation screenshots against design screenshots and inspect `snapshot_layout(..., problemsOnly: true)` for clipping, overflow, and misalignment. Fix significant discrepancies or get explicit user acceptance before Phase 5.
+In addition to that shared core, `implement` also compares implementation screenshots
+against the design screenshots from the plan's `## Design Context` section (Design
+Pre-Read, above) — this comparison is `implement`-only, per the boundary `verify-ui`
+documents, since only a plan file carries design context to compare against. Fix
+significant discrepancies (from either the shared checks or this design comparison) or
+get explicit user acceptance before Phase 5.
 
 ### Persist Screenshots For The PR
 
