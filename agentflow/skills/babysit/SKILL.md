@@ -57,6 +57,7 @@ Read `.claude/config.json`.
 {
   "armed": true,
   "intervalSeconds": 900,
+  "currentDelaySeconds": 900,
   "lastCommentTimestamp": "2026-07-09T12:00:00Z",
   "addressedCommentIds": [123, 456],
   "lastCiHeadSha": "abc123…",
@@ -64,9 +65,19 @@ Read `.claude/config.json`.
 }
 ```
 
+`intervalSeconds` is the immutable base interval parsed from `$ARGUMENTS` (clamped
+`[60, 3600]`). `currentDelaySeconds` is the mutable pacing value — it starts equal to
+`intervalSeconds` and backs off on quiet ticks (step 6), resetting to `intervalSeconds`
+whenever a tick is actionable (step 7).
+
 Read it at the start of every tick (via `Read`; treat "file not found" as **absent** —
 this is the arming run). Write it back through the `shell-rules` temp-file pattern or the
 `Write` tool. `CI_FIX_CAP = 3`.
+
+**Backward compat**: a state file written before this field existed (an in-progress loop
+from an older babysit version) will lack `currentDelaySeconds`. Treat that as
+`currentDelaySeconds = intervalSeconds` for that tick, then persist the field going
+forward.
 
 ## Tick pipeline
 
@@ -113,9 +124,10 @@ If `state` is `MERGED` or `CLOSED`:
 ### 3. Arm-once (self-arm the loop)
 
 - **If the state file is absent** → this is the arming run:
-  1. Write the state file with `armed: true`, `intervalSeconds`, empty
-     `addressedCommentIds`, `ciFixAttempts: 0`, and `lastCommentTimestamp` /
-     `lastCiHeadSha` left null (they are set as steps 4–5 run this same tick).
+  1. Write the state file with `armed: true`, `intervalSeconds`,
+     `currentDelaySeconds: intervalSeconds`, empty `addressedCommentIds`,
+     `ciFixAttempts: 0`, and `lastCommentTimestamp` / `lastCiHeadSha` left null (they are
+     set as steps 4–5 run this same tick).
   2. Arm the self-paced loop by invoking the `/loop` slash command **without an interval**
      (self-paced mode) via the `SlashCommand` tool:
      `/loop /agentflow:babysit <pr> <interval>`
@@ -193,17 +205,28 @@ comments forever.)
 
 ### 6. Quiet tick
 
-If neither CI nor comments were actionable this tick, report a single line, e.g.:
-`PR #<pr> quiet — CI green, no new comments. Next check in ~<interval>.`
+If neither CI nor comments were actionable this tick (no CI fix was delegated or
+escalated in step 4, and `/agentflow:address-review` was not invoked in step 5), back off:
+set `currentDelaySeconds = min(currentDelaySeconds * 2, 3600)`. Report a single line
+naming the new delay, e.g.:
+`PR #<pr> quiet — CI green, no new comments. Next check in ~<currentDelaySeconds/60>m
+(backing off).`
 
 ### 7. Pace the next tick
 
-Persist the updated state file (watermark, `lastCiHeadSha`, `ciFixAttempts`), then schedule
-the next tick:
+If this tick **was** actionable (a CI fix was delegated or escalated in step 4, or
+`/agentflow:address-review` was invoked in step 5), reset the backoff:
+`currentDelaySeconds = intervalSeconds` — a PR that just saw activity is worth checking on
+sooner, not later. A quiet tick leaves `currentDelaySeconds` at the doubled value step 6
+set.
+
+Persist the updated state file (watermark, `lastCiHeadSha`, `ciFixAttempts`,
+`currentDelaySeconds`), then schedule the next tick using the paced delay, not the fixed
+base interval:
 
 ```
 ScheduleWakeup(
-  delaySeconds: intervalSeconds,
+  delaySeconds: currentDelaySeconds,
   prompt: "/agentflow:babysit <pr>",
   reason: "next babysit check for PR <pr>"
 )
@@ -229,3 +252,9 @@ file present and skips re-arming; the loop continues until step 2's terminal che
 - **Self-paced pacing needs native support.** On Bedrock / Vertex / Foundry, self-paced
   `/loop` falls back to a fixed ~10-minute schedule; the `intervalSeconds` pacing above is
   best-effort there.
+- **Outliving the session: use `/schedule`, not a second `/loop`.** `/loop`'s 7-day cap
+  means a PR that needs babysitting longer than that — or across a machine
+  restart/session end — needs a cloud routine instead: set up `/schedule` to periodically
+  re-invoke `/agentflow:babysit <pr>` on a cron interval. Never run both a `/loop` and a
+  `/schedule` routine against the same PR at once — each would independently wake, tick,
+  and re-arm/re-schedule, double-waking the PR and racing on the same state file.
