@@ -108,7 +108,7 @@ func runDaemon(args []string) {
 	} else if dcfg.DaemonInterval > 0 {
 		ch := make(chan []ipc.WindowState, 1)
 		attention = ch
-		go dispatch.RunCombinedLoop(ctx, dcfg, &tmux.ExecClient{}, &dispatch.GHMutator{}, dcfg.DaemonInterval, os.Stdout, ch)
+		go dispatch.RunCombinedLoop(ctx, "", &tmux.ExecClient{}, &dispatch.GHMutator{}, dcfg.DaemonInterval, os.Stdout, ch)
 	}
 
 	if err := daemon.Run(ctx, cfg, fe, attention); err != nil {
@@ -258,7 +258,7 @@ func runDispatch(args []string) {
 	ctrl := &tmux.ExecClient{}
 	// --interval self-loops; otherwise a single pass. --once wins if both given.
 	if *interval > 0 && !*once {
-		dispatch.RunLoop(cfg, ctrl, *interval, os.Stdout)
+		dispatch.RunLoop(*configPath, ctrl, *interval, os.Stdout)
 		return
 	}
 	prior := 0

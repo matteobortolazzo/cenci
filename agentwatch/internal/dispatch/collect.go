@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,17 +16,22 @@ import (
 
 // CollectTickets gathers open issues across the configured repos via the gh CLI,
 // resolving each ticket's Agent from an agent:<name> label and HasOpenPR from
-// open PRs' closing-issue references. Best-effort, mirroring run's gh usage.
+// open PRs' closing-issue references. Best-effort, mirroring run's gh usage. A
+// failure on one repo does not block collection from the rest: every repo is
+// attempted, and any per-repo failures are joined into the returned error so
+// the caller's log names every failing repo, not just the first.
 func CollectTickets(repos []RepoConfig) ([]Ticket, error) {
 	var out []Ticket
+	var errs []error
 	for _, rc := range repos {
 		tickets, err := collectRepoTickets(rc.Repo)
 		if err != nil {
-			return out, err
+			errs = append(errs, err)
+			continue
 		}
 		out = append(out, tickets...)
 	}
-	return out, nil
+	return out, errors.Join(errs...)
 }
 
 func collectRepoTickets(repo string) ([]Ticket, error) {
