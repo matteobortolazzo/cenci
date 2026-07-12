@@ -46,6 +46,36 @@ check_empty() {
   fi
 }
 
+# check_not <name> <haystack> <needle-that-must-be-absent>
+check_not() {
+  local name="$1" haystack="$2" needle="$3"
+  if printf '%s' "$haystack" | grep -qF -- "$needle"; then
+    echo "FAIL - $name (expected substring absent: $needle)"
+    printf '%s\n' "$haystack" | sed 's/^/           /'
+    fail=$((fail + 1))
+  else
+    echo "ok   - $name"
+    pass=$((pass + 1))
+  fi
+}
+
+# check_order <name> <haystack> <first-substring> <second-substring>
+# Asserts <first-substring> appears on an earlier line than <second-substring>.
+check_order() {
+  local name="$1" haystack="$2" first="$3" second="$4"
+  local n1 n2
+  n1="$(printf '%s\n' "$haystack" | grep -nF -- "$first" | head -1 | cut -d: -f1)"
+  n2="$(printf '%s\n' "$haystack" | grep -nF -- "$second" | head -1 | cut -d: -f1)"
+  if [ -n "$n1" ] && [ -n "$n2" ] && [ "$n1" -lt "$n2" ]; then
+    echo "ok   - $name"
+    pass=$((pass + 1))
+  else
+    echo "FAIL - $name (expected '$first' before '$second')"
+    printf '%s\n' "$haystack" | sed 's/^/           /'
+    fail=$((fail + 1))
+  fi
+}
+
 # run_plugin <fixture-file-or-empty> <exit-code>
 # Builds a stub that prints the fixture (if any) and exits with the given code,
 # then runs the plugin with AGENTWATCH_BIN pointed at it.
@@ -88,6 +118,55 @@ out="$(run_plugin "$TMP/mix.json" 0)"
 check "menu bar line tinted by highest class (running)" "$out" "▶ 1  ✓ 1 | sfimage=brain.head.profile.fill sfcolor=blue"
 check "running row is blue/brain"                        "$out" "work:1 - build | sfimage=brain.head.profile.fill sfcolor=blue"
 check "done paneless row is green/check"                "$out" "solo | sfimage=checkmark.circle.fill sfcolor=green"
+
+# --- Case 4: budget headroom present, multiple agents, mixed thresholds ---
+#
+# claude=73% (>25% -> normal/green), codex=15% (10-25% inclusive -> warning/
+# orange), gpt=5% (<10% -> critical/red). Keys are intentionally out of
+# alphabetical order in the fixture to assert the plugin sorts by agent name
+# rather than relying on JS object key iteration order.
+cat > "$TMP/headroom-mixed.json" <<'JSON'
+{"text":"▶ 1  claude 73%  codex 15%  gpt 5%","tooltip":"work:1 - build (running)\nclaude 73%  codex 15%  gpt 5%","class":"running","alt":"active","headroom":{"gpt":0.05,"claude":0.73,"codex":0.15}}
+JSON
+out="$(run_plugin "$TMP/headroom-mixed.json" 0)"
+check "normal-band headroom row (>25%) is green"   "$out" "claude 73% | sfcolor=green"
+check "warning-band headroom row (10-25%) is orange" "$out" "codex 15% | sfcolor=orange"
+check "critical-band headroom row (<10%) is red"    "$out" "gpt 5% | sfcolor=red"
+check_order "headroom rows sorted by agent name (claude before codex)" "$out" "claude 73% | sfcolor=green" "codex 15% | sfcolor=orange"
+check_order "headroom rows sorted by agent name (codex before gpt)"    "$out" "codex 15% | sfcolor=orange" "gpt 5% | sfcolor=red"
+check "session status row still colored by its own status, unaffected by headroom" \
+  "$out" "work:1 - build | sfimage=brain.head.profile.fill sfcolor=blue"
+check_not "headroom summary tooltip line not rendered as a garbled session row" \
+  "$out" "claude 73%  codex 15%  gpt 5% |"
+
+# --- Case 5: budget headroom absent -> no headroom rows, parity with waybar --
+#
+# No "headroom" key in the JSON at all (loop disabled/unconfigured, per #169).
+# The dropdown must render exactly as it does for a status payload with no
+# budget data: no headroom rows, and no bare percentage text anywhere in the
+# output (percentages only ever appear via headroom rendering).
+cat > "$TMP/no-headroom.json" <<'JSON'
+{"text":"▶ 1","tooltip":"work:1 - build (running)","class":"running","alt":"active"}
+JSON
+out="$(run_plugin "$TMP/no-headroom.json" 0)"
+check "session row still renders normally when headroom is absent" "$out" "work:1 - build | sfimage=brain.head.profile.fill sfcolor=blue"
+check_not "no headroom percentage text when field is absent" "$out" "%"
+
+# --- Case 6: non-matching, non-headroom tooltip line -> 'none' fallback ---
+#
+# A tooltip line with no trailing "(status)" suffix that is also NOT the
+# compact headroom summary line (no "headroom" field here) must still render
+# — with the 'none' status fallback (no sfimage/sfcolor params) — rather than
+# being silently dropped. Pins the narrowed skip condition against future
+# regressions of the old "drop any non-matching line" behavior.
+cat > "$TMP/garbled-line.json" <<'JSON'
+{"text":"▶ 1","tooltip":"work:1 - build (running)\ngarbled line with no status suffix","class":"running","alt":"active"}
+JSON
+out="$(run_plugin "$TMP/garbled-line.json" 0)"
+check "non-matching, non-headroom line still renders via 'none' fallback (not silently dropped)" \
+  "$out" "garbled line with no status suffix |"
+check "session row still renders normally alongside the garbled line" \
+  "$out" "work:1 - build | sfimage=brain.head.profile.fill sfcolor=blue"
 
 echo
 echo "passed: $pass  failed: $fail"

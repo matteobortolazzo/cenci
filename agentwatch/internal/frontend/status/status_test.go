@@ -1,6 +1,9 @@
 package status
 
 import (
+	"encoding/json"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/ipc"
@@ -385,5 +388,202 @@ func TestFormat_MixedPanedAndPanelessTooltip(t *testing.T) {
 	}
 	if out.Class != "need-input" {
 		t.Errorf("expected class 'need-input', got %q", out.Class)
+	}
+}
+
+// --- Budget headroom (#170) ------------------------------------------------
+
+func TestFormat_HeadroomMultiAgentText(t *testing.T) {
+	snap := &ipc.StateSnapshot{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Windows: []ipc.WindowState{
+			{Session: "main", WindowIndex: "0", TaskName: "writing tests", Status: "running"},
+		},
+		Summary: ipc.StatusSummary{Total: 1, Running: 1},
+		Headroom: map[string]float64{
+			"claude": 0.73,
+			"codex":  0.15,
+		},
+	}
+	out := Format(snap, testConfig())
+
+	expected := "▶ 1  claude 73%  codex 15%"
+	if out.Text != expected {
+		t.Errorf("expected text %q, got %q", expected, out.Text)
+	}
+}
+
+func TestFormat_HeadroomSortedKeyOrder(t *testing.T) {
+	// Map key order is nondeterministic in Go; headroom rendering must sort
+	// keys alphabetically for stable output regardless of insertion order.
+	snap := &ipc.StateSnapshot{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Windows: []ipc.WindowState{
+			{Session: "main", WindowIndex: "0", TaskName: "writing tests", Status: "running"},
+		},
+		Summary: ipc.StatusSummary{Total: 1, Running: 1},
+		Headroom: map[string]float64{
+			"zulu":  0.50,
+			"alpha": 0.90,
+		},
+	}
+	out := Format(snap, testConfig())
+
+	if !strings.Contains(out.Text, "alpha 90%  zulu 50%") {
+		t.Errorf("expected sorted-key headroom order 'alpha 90%%  zulu 50%%' in text, got %q", out.Text)
+	}
+}
+
+func TestFormat_HeadroomTooltipAppended(t *testing.T) {
+	snap := &ipc.StateSnapshot{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Windows: []ipc.WindowState{
+			{Session: "main", WindowIndex: "0", TaskName: "writing tests", Status: "running"},
+		},
+		Summary: ipc.StatusSummary{Total: 1, Running: 1},
+		Headroom: map[string]float64{
+			"claude": 0.73,
+			"codex":  0.15,
+		},
+	}
+	out := Format(snap, testConfig())
+
+	expected := "main:0 - writing tests (running)\nclaude 73%  codex 15%"
+	if out.Tooltip != expected {
+		t.Errorf("expected tooltip:\n%s\ngot:\n%s", expected, out.Tooltip)
+	}
+}
+
+func TestFormat_HeadroomFieldPassthrough(t *testing.T) {
+	snap := &ipc.StateSnapshot{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Windows: []ipc.WindowState{
+			{Session: "main", WindowIndex: "0", TaskName: "writing tests", Status: "running"},
+		},
+		Summary: ipc.StatusSummary{Total: 1, Running: 1},
+		Headroom: map[string]float64{
+			"claude": 0.73,
+			"codex":  0.15,
+		},
+	}
+	out := Format(snap, testConfig())
+
+	// SwiftBar (and other rich frontends) read the numeric fraction directly
+	// rather than re-parsing formatted text, so the raw values must pass
+	// through unrounded.
+	if !reflect.DeepEqual(out.Headroom, snap.Headroom) {
+		t.Errorf("expected output.Headroom to pass through raw fractions %#v, got %#v", snap.Headroom, out.Headroom)
+	}
+}
+
+// TestFormat_HeadroomAbsentParity asserts that when the snapshot carries no
+// headroom data (nil map, per #169's "loop disabled/unconfigured" case), the
+// waybar output is byte-for-byte identical to a snapshot with an explicit
+// empty headroom map, and to today's (pre-#170) output shape: no empty or
+// placeholder headroom text, and no "headroom" key at all in the marshaled
+// JSON (relying on `omitempty`).
+func TestFormat_HeadroomAbsentParity(t *testing.T) {
+	baseWindows := []ipc.WindowState{
+		{Session: "main", WindowIndex: "0", TaskName: "writing tests", Status: "running"},
+	}
+	baseSummary := ipc.StatusSummary{Total: 1, Running: 1}
+
+	snapNilHeadroom := &ipc.StateSnapshot{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Windows:   baseWindows,
+		Summary:   baseSummary,
+	}
+	snapEmptyHeadroom := &ipc.StateSnapshot{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Windows:   baseWindows,
+		Summary:   baseSummary,
+		Headroom:  map[string]float64{},
+	}
+
+	outNil := Format(snapNilHeadroom, testConfig())
+	outEmpty := Format(snapEmptyHeadroom, testConfig())
+
+	if !reflect.DeepEqual(outNil, outEmpty) {
+		t.Errorf("expected identical output for nil vs empty headroom map, got %+v vs %+v", outNil, outEmpty)
+	}
+
+	if outNil.Text != "▶ 1" {
+		t.Errorf("expected text unchanged from today's no-headroom output '▶ 1', got %q", outNil.Text)
+	}
+	expectedTooltip := "main:0 - writing tests (running)"
+	if outNil.Tooltip != expectedTooltip {
+		t.Errorf("expected tooltip unchanged from today's no-headroom output %q, got %q", expectedTooltip, outNil.Tooltip)
+	}
+
+	data, err := json.Marshal(outNil)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if strings.Contains(string(data), "headroom") {
+		t.Errorf("expected no 'headroom' key in marshaled JSON when headroom is absent, got %s", data)
+	}
+}
+
+func TestFormat_HeadroomEmptyMapVsNoDataOnEmptySnapshot(t *testing.T) {
+	// Even the "no sessions" early-return path must not leak headroom text.
+	snap := &ipc.StateSnapshot{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Headroom:  map[string]float64{"claude": 0.73},
+	}
+	out := Format(snap, testConfig())
+
+	if out.Text != "" {
+		t.Errorf("expected empty text when there are no windows, got %q", out.Text)
+	}
+	if out.Class != "none" {
+		t.Errorf("expected class 'none', got %q", out.Class)
+	}
+}
+
+func TestHeadroomPercent_RoundHalfUp(t *testing.T) {
+	tests := []struct {
+		name    string
+		frac    float64
+		wantPct int
+	}{
+		{"documented rounding example", 0.156, 16},
+		{"exact half rounds up", 0.155, 16},
+		{"exact half rounds up (small)", 0.005, 1},
+		{"zero", 0.0, 0},
+		{"full", 1.0, 100},
+		{"exact quarter, no rounding needed", 0.25, 25},
+		{"round down below half", 0.154, 15},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := headroomPercent(tt.frac)
+			if got != tt.wantPct {
+				t.Errorf("headroomPercent(%v) = %d, want %d", tt.frac, got, tt.wantPct)
+			}
+		})
+	}
+}
+
+func TestHeadroomClass_Boundaries(t *testing.T) {
+	tests := []struct {
+		name string
+		pct  int
+		want string
+	}{
+		{"well above warning threshold is normal", 90, "normal"},
+		{"just above 25 is normal", 26, "normal"},
+		{"exactly 25 is warning (inclusive upper bound)", 25, "warning"},
+		{"mid warning band", 15, "warning"},
+		{"exactly 10 is warning (inclusive lower bound)", 10, "warning"},
+		{"just below 10 is critical", 9, "critical"},
+		{"zero is critical", 0, "critical"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := headroomClass(tt.pct)
+			if got != tt.want {
+				t.Errorf("headroomClass(%d) = %q, want %q", tt.pct, got, tt.want)
+			}
+		})
 	}
 }
