@@ -10,7 +10,7 @@ working setup on Linux, macOS, or WSL2.
 |--------|-------|--------------|
 | `agentflow` | workflow | Turns a GitHub ticket into a merged PR, stopping only for *your* decisions (refine, design, plan approval) |
 | `agentwatch` | attention | Shows live agent status wherever you're looking — tmux bar, waybar, macOS menu bar — and shouts when the agent needs you |
-| `sandbox` | isolation | Runs the agent inside a Docker/Podman container with full permissions, so autopilot is safe |
+| `agent-sandbox` | isolation | Runs the agent inside a Docker/Podman container with full permissions, so autopilot is safe |
 
 They ship and install together, as one unit: agent-sandbox makes autopilot safe,
 agentflow runs the autopilot, agentwatch tells you when it needs you.
@@ -81,15 +81,15 @@ project_doc_fallback_filenames = ["CLAUDE.md"]
 
 ```bash
 claude plugin marketplace add matteobortolazzo/agent-stack
-claude plugin install agentflow agentwatch sandbox
+claude plugin install agentflow agentwatch agent-sandbox
 
 codex plugin marketplace add matteobortolazzo/agent-stack
 codex plugin add agentflow@agent-stack
 codex plugin add agentwatch@agent-stack
-codex plugin add sandbox@agent-stack
+codex plugin add agent-sandbox@agent-stack
 ```
 
-Then, inside Claude Code, `/sandbox:setup` to symlink the launcher and build the
+Then, inside Claude Code, `/agent-sandbox:setup` to symlink the launcher and build the
 image. agentwatch needs nothing. For the macOS menu bar widget, see
 [agentwatch/plugin/macos/README.md](../agentwatch/plugin/macos/README.md).
 
@@ -166,11 +166,11 @@ re-bootstraps its matching binary on the next session automatically.
 ## Uninstall
 
 ```bash
-claude plugin uninstall agentflow agentwatch sandbox
+claude plugin uninstall agentflow agentwatch agent-sandbox
 claude plugin marketplace remove agent-stack
 codex plugin remove agentflow@agent-stack
 codex plugin remove agentwatch@agent-stack
-codex plugin remove sandbox@agent-stack
+codex plugin remove agent-sandbox@agent-stack
 codex plugin marketplace remove agent-stack
 rm -f ~/.local/bin/agent-sand ~/.local/bin/codex-sand
 # sandbox leftovers, if you built the image:

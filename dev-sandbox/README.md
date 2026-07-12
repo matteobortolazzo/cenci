@@ -28,17 +28,17 @@ Or install the plugin from the marketplace, then run the setup skill — it syml
 
 ```bash
 claude plugin marketplace add matteobortolazzo/agent-stack
-claude plugin install sandbox
-/sandbox:setup
+claude plugin install agent-sandbox
+/agent-sandbox:setup
 ```
 
-`/sandbox:setup` accepts `--link-only` (symlink only, skip the build) or `--build-only`
-(rebuild the image, skip the symlink). Update later with `claude plugin update sandbox`,
-then re-run `/sandbox:setup --build-only` if the Dockerfile changed.
+`/agent-sandbox:setup` accepts `--link-only` (symlink only, skip the build) or `--build-only`
+(rebuild the image, skip the symlink). Update later with `claude plugin update agent-sandbox`,
+then re-run `/agent-sandbox:setup --build-only` if the Dockerfile changed.
 
 The `setup` skill is Claude Code-only because it relies on Claude's interactive and
 plugin-root extensions. Codex users should use the agent-stack installer, which
-installs the same sandbox plugin for Codex and performs the launcher setup outside the
+installs the same agent-sandbox plugin for Codex and performs the launcher setup outside the
 agent session.
 
 <details>

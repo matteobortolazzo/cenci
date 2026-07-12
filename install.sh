@@ -2,8 +2,8 @@
 # agent-stack installer — one command for the whole package.
 #
 # Installs or updates the three agent-stack plugins (agentflow, agentwatch,
-# sandbox) as a single system: registers the marketplace, installs the
-# plugins, and runs the post-install setup that used to be manual (sandbox
+# agent-sandbox) as a single system: registers the marketplace, installs the
+# plugins, and runs the post-install setup that used to be manual (agent-sandbox
 # launcher symlink + image build, macOS menu bar wiring).
 #
 # Usage:
@@ -22,7 +22,7 @@ set -u
 
 MARKETPLACE_REPO="matteobortolazzo/agent-stack"
 MARKETPLACE_NAME="agent-stack"
-ALL_PLUGINS="agentflow agentwatch sandbox"
+ALL_PLUGINS="agentflow agentwatch agent-sandbox"
 CODEX_MARKETPLACE_READY=0
 
 # ---------------------------------------------------------------- output ----
@@ -199,7 +199,7 @@ run_doctor() {
 
 	if [ "$OS" = linux ]; then
 		say ""
-		say "  ${BOLD}For sandbox (isolation)${RESET}"
+		say "  ${BOLD}For agent-sandbox (isolation)${RESET}"
 		check "host UID is 1000" optional \
 			"your UID is $(id -u); the container maps files as UID 1000 (see dev-sandbox/README.md)" \
 			test "$(id -u)" = 1000
@@ -354,12 +354,12 @@ link_launcher() {
 }
 
 step_sandbox_setup() {
-	selected sandbox || return 0
-	step "Setting up the sandbox launcher"
+	selected agent-sandbox || return 0
+	step "Setting up the agent-sandbox launcher"
 
 	local launcher
 	if ! launcher=$(find_plugin_path "dev-sandbox/agent-sand"); then
-		warn "could not find the installed sandbox plugin — run /sandbox:setup inside Claude Code instead"
+		warn "could not find the installed agent-sandbox plugin — run /agent-sandbox:setup inside Claude Code instead"
 		return 0
 	fi
 
@@ -533,7 +533,7 @@ final_summary() {
 	fi
 	say ""
 	say "  Try it out:"
-	if selected sandbox; then
+	if selected agent-sandbox; then
 		say "    agent-sand                # Claude Code inside the container"
 	fi
 	if selected agentflow; then

@@ -64,12 +64,12 @@ platform, your first session, troubleshooting, uninstall.
 
 ```bash
 claude plugin marketplace add matteobortolazzo/agent-stack
-claude plugin install agentflow agentwatch sandbox
+claude plugin install agentflow agentwatch agent-sandbox
 codex plugin marketplace add matteobortolazzo/agent-stack
 codex plugin add agentflow@agent-stack
 codex plugin add agentwatch@agent-stack
-codex plugin add sandbox@agent-stack
-/sandbox:setup   # container layer only — symlink agent-sand + build the image
+codex plugin add agent-sandbox@agent-stack
+/agent-sandbox:setup   # container layer only — symlink agent-sand + build the image
 # later:
 claude plugin update --all
 codex plugin marketplace upgrade agent-stack
@@ -82,12 +82,12 @@ mechanism.
 
 ## The three layers
 
-### Isolation — [agent-sandbox](./dev-sandbox) (plugin: `sandbox`)
+### Isolation — [agent-sandbox](./dev-sandbox) (plugin: `agent-sandbox`)
 
 A Docker/Podman container that runs the agent with `--dangerously-skip-permissions` and
 mounts only `~/Repos`. It exists so autopilot is *safe*: the container is the single
 security boundary, which is what lets every layer above it drop per-command approval
-without exposing the host. `/sandbox:setup` symlinks the `agent-sand` launcher and
+without exposing the host. `/agent-sandbox:setup` symlinks the `agent-sand` launcher and
 builds the image.
 
 ### Workflow — [agentflow](./agentflow) (plugin: `agentflow`)
