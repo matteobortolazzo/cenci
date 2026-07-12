@@ -89,17 +89,41 @@ func RunOnce(cfg Config, ctrl run.Controller, dryRun bool, out io.Writer, prior 
 	return decisions
 }
 
-// RunLoop runs RunOnce immediately and then on every interval tick, threading
-// the daily-quota tally in memory (it resets on process restart — acceptable for
-// #45). It blocks until the process exits.
-func RunLoop(cfg Config, ctrl run.Controller, interval time.Duration, out io.Writer) {
+// RunLoop reloads Config from configPath and runs RunOnce immediately and then
+// on every interval tick, threading the daily-quota tally in memory (it resets
+// on process restart — acceptable for #45). It blocks until the process exits.
+func RunLoop(configPath string, ctrl run.Controller, interval time.Duration, out io.Writer) {
 	prior := 0
-	RunOnce(cfg, ctrl, false, out, &prior)
+	dispatchTick(configPath, ctrl, out, &prior)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for range ticker.C {
-		RunOnce(cfg, ctrl, false, out, &prior)
+		dispatchTick(configPath, ctrl, out, &prior)
 	}
+}
+
+// dispatchTick is RunLoop's per-tick body: reload Config from configPath, then
+// run one dispatch pass against the freshly-loaded config. On a reload error the
+// tick is skipped entirely (no dispatch, prior left untouched) so a bad edit
+// between ticks cannot crash the loop or silently dispatch against a stale
+// config.
+func dispatchTick(configPath string, ctrl run.Controller, out io.Writer, prior *int) {
+	cfg, ok := reloadConfig(configPath, out)
+	if !ok {
+		return
+	}
+	RunOnce(cfg, ctrl, false, out, prior)
+}
+
+// reloadConfig loads Config from configPath, logging and reporting failure so
+// dispatchTick and combinedTick can skip their tick uniformly on a bad reload.
+func reloadConfig(configPath string, out io.Writer) (Config, bool) {
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		logf(out, "dispatch: loading config: %v\n", err)
+		return Config{}, false
+	}
+	return cfg, true
 }
 
 // buildBudgetProvider returns a UsageProvider when AgentLimits are configured,
