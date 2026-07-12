@@ -45,6 +45,8 @@ Before any other checks, verify `.claude/config.json` exists by reading it. If t
 - **If no git changes** → ask the user for scope via `AskUserQuestion`:
   > "No scope provided and no recent git changes found. Which files or directories should I analyze?"
 
+**Tip for large or unfamiliar codebases**: Phase 3 fans out 3 parallel analyzer subagents per run. On a first run against an unfamiliar or large codebase, prefer scoping to a single directory or a handful of files before analyzing the whole repo — it keeps that fan-out cheap to validate before committing to a full-repo pass.
+
 ## Phase 2: Scope Analysis
 
 <details>

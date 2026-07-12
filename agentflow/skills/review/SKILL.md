@@ -58,6 +58,8 @@ gh pr view <number> --repo <owner>/<repo> --json title,body,headRefName
 
 Expand any glob patterns with the Glob tool and collect the **list of file paths**. Do **not** read the file contents in the main agent — all three reviewers have `Read` and read the files they need themselves. Pasting contents here would duplicate every file into the main context plus each of the three Task prompts.
 
+**Tip for large or unfamiliar codebases**: Phase 2 fans out 3 parallel reviewer subagents per run. On a first review of an unfamiliar or large codebase, consider scoping to fewer files before a full sweep — it keeps that fan-out cheap to validate.
+
 ## Phase 2: Parallel Review
 
 **Prepare shared context by path, not by paste.** For diff/PR mode: if the diff is small (roughly under 200 lines), it may be passed inline; otherwise write it once to `/tmp/claude/agentflow-review-diff.patch` (plus the changed-file list from `git diff --name-only`) and pass reviewers the path — the same `diffContextMode: "file"` discipline the implement pipeline uses. For file mode: pass the file path list only.
