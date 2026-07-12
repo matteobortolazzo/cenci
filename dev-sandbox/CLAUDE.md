@@ -52,16 +52,23 @@ one exception: it's monolith-only (no fragment), since it isn't part of the comp
 per-project stack set.
 
 ## Dependency version pins
-Image dependency versions are pinned via Dockerfile `ARG`s. Two policies:
+Image dependency versions are pinned via Dockerfile `ARG`s, all checked daily by
+`.github/workflows/deps-bump.yml`. Three tiers, by breaking-change risk:
 
-- **Auto-bumped** by `.github/workflows/deps-bump.yml` (daily cron), one auto-merged PR per
-  outdated dependency:
+- **Auto-bumped, auto-merged** — one auto-merged PR per outdated dependency, then the
+  agent-sandbox rebuild is dispatched once the merge lands:
   - `CODEX_VERSION` — `Dockerfile` (monolith only).
   - `GO_VERSION` — `Dockerfile` **and** `fragments/go.dockerfile` (both stamped, kept in sync).
   - `UV_VERSION` — `Dockerfile.base`.
-- **Manual pins** — deliberately NOT auto-bumped; update them by hand:
-  - `DOTNET_SDK_VERSION` — `Dockerfile` (+ `fragments/dotnet.dockerfile`, byte-identical).
-  - `NODE_MAJOR` — `Dockerfile` (+ `fragments/node.dockerfile`, byte-identical).
+- **Auto-proposed, in-band auto-merges / out-of-band opens a manual-merge PR**:
+  - `DOTNET_SDK_VERSION` — `Dockerfile` (+ `fragments/dotnet.dockerfile`, byte-identical). A
+    patch bump within the currently-pinned major.minor band auto-merges like the tier above.
+    A newer GA feature band or major instead opens a PR left for manual review, manual
+    merge, and a manual `gh workflow run "agent-sandbox — Version Bump"`.
+- **Auto-proposed, always manual-merge**:
+  - `NODE_MAJOR` — `Dockerfile` (+ `fragments/node.dockerfile`, byte-identical). Only
+    proposed once the currently-pinned major's LTS support has ended; the PR is never
+    auto-merged — always reviewed, merged, and rebuild-dispatched by hand.
 
 ## Security
 - Never bake secrets or credentials into the image layers.
