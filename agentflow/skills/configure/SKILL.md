@@ -682,7 +682,7 @@ For each MCP selected in question 5:
    ```
 
    - If `baseVersion` resolved (path a or b): write it as the ARG default, e.g. `ARG BASE_VERSION=0.9.0`.
-   - If unresolved (path c): write `ARG BASE_VERSION=` with no default, then a comment line immediately after: `# No sandbox plugin version detected — see dev-sandbox/README.md to pin BASE_VERSION manually, or install the sandbox plugin and re-run /agentflow:configure.`
+   - If unresolved (path c): write `ARG BASE_VERSION=` with no default, then a comment line immediately after: `# No agent-sandbox plugin version detected — see dev-sandbox/README.md to pin BASE_VERSION manually, or install the agent-sandbox plugin and re-run /agentflow:configure.`
 
    **Fragment concatenation order** (when multiple fragments apply, e.g. a monorepo union): **dotnet → node → go → python → rust**, regardless of the order projects were discovered in. Concatenate the selected `dev-sandbox/fragments/*.dockerfile` file contents in that fixed order, applying the **.NET version substitution** from the mapping table above to the dotnet fragment only — every other fragment is included verbatim. Deduplicate — each fragment appears at most once even when multiple monorepo projects map to the same fragment.
 

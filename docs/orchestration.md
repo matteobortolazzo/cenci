@@ -193,11 +193,11 @@ when both CLIs are present; manual setup is:
 
 ```bash
 claude plugin marketplace add matteobortolazzo/agent-stack
-claude plugin install agentflow agentwatch sandbox
+claude plugin install agentflow agentwatch agent-sandbox
 codex plugin marketplace add matteobortolazzo/agent-stack
 codex plugin add agentflow@agent-stack
 codex plugin add agentwatch@agent-stack
-codex plugin add sandbox@agent-stack
+codex plugin add agent-sandbox@agent-stack
 ```
 
 Codex then discovers the portable `agentflow:*` convention skills directly from the

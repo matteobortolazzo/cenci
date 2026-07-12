@@ -25,7 +25,7 @@
       "repository": "https://github.com/matteobortolazzo/agent-stack"
     },
     {
-      "name": "sandbox",
+      "name": "agent-sandbox",
       "source": "./dev-sandbox",
       "description": "Isolated Docker/Podman container for running Claude Code with full permissions — the container is the security boundary",
       "version": "0.9.1",

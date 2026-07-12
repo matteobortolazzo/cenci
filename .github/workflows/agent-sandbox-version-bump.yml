@@ -1,4 +1,4 @@
-name: sandbox — Version Bump
+name: agent-sandbox — Version Bump
 
 on:
   push:
@@ -29,7 +29,7 @@ jobs:
         run: |
           # Skip if last commit is already a release commit
           LAST_MSG=$(git log -1 --pretty=format:"%s")
-          if echo "$LAST_MSG" | grep -q '^chore(release): sandbox/v'; then
+          if echo "$LAST_MSG" | grep -q '^chore(release): agent-sandbox/v'; then
             echo "Last commit is a release commit, skipping"
             exit 0
           fi
@@ -63,14 +63,14 @@ jobs:
           # Update plugin.json and root marketplace.json
           jq --arg v "$NEW_VERSION" '.version = $v' dev-sandbox/.claude-plugin/plugin.json > tmp.json && mv tmp.json dev-sandbox/.claude-plugin/plugin.json
           jq --arg v "$NEW_VERSION" '.version = $v' dev-sandbox/.codex-plugin/plugin.json > tmp.json && mv tmp.json dev-sandbox/.codex-plugin/plugin.json
-          jq --arg v "$NEW_VERSION" '(.plugins[] | select(.name == "sandbox")).version = $v' .claude-plugin/marketplace.json > tmp.json && mv tmp.json .claude-plugin/marketplace.json
+          jq --arg v "$NEW_VERSION" '(.plugins[] | select(.name == "agent-sandbox")).version = $v' .claude-plugin/marketplace.json > tmp.json && mv tmp.json .claude-plugin/marketplace.json
 
           # Commit and push
           git add dev-sandbox/.claude-plugin/plugin.json dev-sandbox/.codex-plugin/plugin.json .claude-plugin/marketplace.json
-          git commit -m "chore(release): sandbox/v${NEW_VERSION}"
+          git commit -m "chore(release): agent-sandbox/v${NEW_VERSION}"
           git push
 
           # Create tag via GitHub API
           gh api repos/${{ github.repository }}/git/refs \
-            -f ref="refs/tags/sandbox/v${NEW_VERSION}" \
+            -f ref="refs/tags/agent-sandbox/v${NEW_VERSION}" \
             -f sha="$(git rev-parse HEAD)"
