@@ -1,11 +1,19 @@
 name: dev-sandbox — Deps Bump
 
 # Daily check for new upstream versions of the pinned dev-sandbox dependencies
-# (Codex CLI, Go, uv). Each outdated dependency gets its OWN auto-merged PR, then
-# the agent-sandbox image bump is dispatched once the merge actually lands.
+# (Codex CLI, Go, uv, .NET SDK, Node major). Each outdated dependency gets its OWN
+# PR; merge behavior depends on the dependency's breaking-change risk:
 #
-# .NET SDK (DOTNET_SDK_VERSION) and Node major (NODE_MAJOR) stay on MANUAL pins —
-# see dev-sandbox/CLAUDE.md.
+# - Codex CLI, Go, uv: auto-merged (`gh pr merge --auto`), then the agent-sandbox
+#   image bump is dispatched once the merge actually lands.
+# - .NET SDK (DOTNET_SDK_VERSION): an in-band patch bump (same major.minor) is
+#   auto-merged like the above. A feature-band or major bump instead opens a
+#   PR that is left for manual review, manual merge, and a manual rebuild
+#   dispatch.
+# - Node major (NODE_MAJOR): only proposed once the currently-pinned major's LTS
+#   support has ended; always opens a manual-merge PR, never auto-merged.
+#
+# See dev-sandbox/CLAUDE.md's "Dependency version pins" section for the full tiering.
 #
 # NOTE: `gh pr merge --auto` requires the repo setting allow_auto_merge=true (#150).
 # Until that lands, the auto-merge call fails and the poll loop surfaces it.
@@ -60,14 +68,14 @@ jobs:
             git reset --hard origin/main >/dev/null 2>&1
           }
 
-          # Open one auto-merged PR for a single dependency bump, wait for the merge
-          # to actually land, then dispatch the agent-sandbox image rebuild. The
-          # working tree must already carry the stamped (uncommitted) change on main
-          # when this is called; `git checkout -b` carries it onto the new branch.
-          # Every internal step is checked explicitly (errexit is off) so a failure
-          # returns immediately with a specific message instead of falling through to
-          # the 20-minute poll and surfacing as a generic timeout.
-          open_and_merge() {
+          # Create a branch carrying the already-stamped (uncommitted) change on
+          # main, commit, push, and open a PR. The working tree must already carry
+          # the stamp when this is called; `git checkout -b` carries it onto the
+          # new branch. Every internal step is checked explicitly (errexit is off)
+          # so a failure returns immediately with a specific message. Shared by
+          # `open_and_merge` (auto-merge path) and the non-auto-merge dependencies
+          # (.NET out-of-band, Node) that must stop right after PR creation.
+          open_pr() {
             branch="$1"; msg="$2"; title="$3"; body="$4"
 
             git checkout -b "$branch" || { echo "could not create branch $branch" >&2; return 1; }
@@ -78,6 +86,14 @@ jobs:
             PR_URL=$(gh pr create --title "$title" --body "$body" --head "$branch" --base main) \
               || { echo "could not open a PR for $branch" >&2; return 1; }
             echo "Opened $PR_URL"
+          }
+
+          # Open one auto-merged PR for a single dependency bump, wait for the merge
+          # to actually land, then dispatch the agent-sandbox image rebuild.
+          open_and_merge() {
+            branch="$1"
+
+            open_pr "$@" || return 1
 
             # Native auto-merge (replaces the old 2-attempt retry loop). Fails fast if
             # allow_auto_merge is disabled (see #150) instead of waiting out the poll.
@@ -108,6 +124,14 @@ jobs:
             # workflow — dispatch it explicitly (its `|| workflow_dispatch` guard).
             gh workflow run "agent-sandbox — Version Bump" \
               || { echo "could not dispatch the agent-sandbox bump for $branch" >&2; return 1; }
+          }
+
+          # True if version $1 is >= version $2, per `sort -V` ordering. Used by the
+          # .NET/Node sections' band/major "is this newer" and "already up to date"
+          # checks (Codex/Go/uv don't need this — their upstream source is always
+          # exactly the latest, so a plain equality check suffices).
+          ver_ge() {
+            [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]
           }
 
           # ── Codex CLI (monolith Dockerfile only, no fragment) ────────────
@@ -194,6 +218,140 @@ jobs:
                 "chore(dev-sandbox): bump uv to ${LATEST}" \
                 "chore(dev-sandbox): bump uv to ${LATEST}" \
                 "$BODY" || FAILED=1
+            fi
+          fi
+
+          # ── .NET SDK (monolith Dockerfile + dotnet fragment) ─────────────
+          # Two independent sub-checks: (A) a patch bump within the currently-pinned
+          # major.minor band auto-merges like Codex/Go/uv; (B) a newer GA feature
+          # band or major opens a manual-merge PR instead — it is not auto-merged,
+          # not polled, and does not dispatch the rebuild.
+          refresh_main
+          DOTNET_INDEX=$(curl -sL https://builds.dotnet.microsoft.com/dotnet/release-metadata/releases-index.json)
+          if ! echo "$DOTNET_INDEX" | jq -e '."releases-index" | length > 0' >/dev/null 2>&1; then
+            echo "releases-index.json returned unexpected content" >&2
+            FAILED=1
+          else
+            CURRENT=$(sed -n 's/^ARG DOTNET_SDK_VERSION=//p' dev-sandbox/Dockerfile)
+            if [ -z "$CURRENT" ]; then
+              echo "could not read ARG DOTNET_SDK_VERSION from dev-sandbox/Dockerfile" >&2
+              FAILED=1
+            else
+              CUR_BAND=$(echo "$CURRENT" | cut -d. -f1,2)
+
+              # Sub-check A: in-band patch bump (same major.minor band) -> auto-merge.
+              LATEST_SDK=$(echo "$DOTNET_INDEX" | jq -r --arg band "$CUR_BAND" '."releases-index"[] | select(.["channel-version"] == $band) | .["latest-sdk"]')
+              if [ -z "$LATEST_SDK" ] || [ "$LATEST_SDK" = "null" ]; then
+                echo "could not find channel $CUR_BAND in releases-index.json" >&2
+                FAILED=1
+              elif ! echo "$LATEST_SDK" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+                echo "channel $CUR_BAND latest-sdk in releases-index.json has an unexpected format: '$LATEST_SDK'" >&2
+                FAILED=1
+              elif [ "$LATEST_SDK" = "$CURRENT" ]; then
+                echo ".NET SDK is up to date in-band ($CURRENT)"
+              elif ! ver_ge "$LATEST_SDK" "$CURRENT"; then
+                echo ".NET SDK in-band candidate $LATEST_SDK is not newer than $CURRENT, skipping"
+              elif git ls-remote --exit-code --heads origin "dotnet-bump-v${LATEST_SDK}" >/dev/null 2>&1; then
+                echo "Branch dotnet-bump-v${LATEST_SDK} already exists, skipping"
+              else
+                echo "Bumping .NET SDK in-band: $CURRENT -> $LATEST_SDK"
+                sed -i 's/^ARG DOTNET_SDK_VERSION=.*/ARG DOTNET_SDK_VERSION='"${LATEST_SDK}"'/' dev-sandbox/Dockerfile
+                sed -i 's/^ARG DOTNET_SDK_VERSION=.*/ARG DOTNET_SDK_VERSION='"${LATEST_SDK}"'/' dev-sandbox/fragments/dotnet.dockerfile
+                # shellcheck disable=SC2016  # backticks are literal markdown; %s does the substitution
+                BODY=$(printf 'Bumps `DOTNET_SDK_VERSION` from %s to %s in BOTH `dev-sandbox/Dockerfile` and `dev-sandbox/fragments/dotnet.dockerfile` (kept in sync per the fragment-drift guard).\n\nStays within the %s feature band, so this is auto-merged. Run `agent-sand --build` to pick up the new version.' "$CURRENT" "$LATEST_SDK" "$CUR_BAND")
+                open_and_merge \
+                  "dotnet-bump-v${LATEST_SDK}" \
+                  "chore(dev-sandbox): bump .NET SDK to ${LATEST_SDK}" \
+                  "chore(dev-sandbox): bump .NET SDK to ${LATEST_SDK}" \
+                  "$BODY" || FAILED=1
+              fi
+
+              # Sub-check B: newest GA feature band/major (GA channels only, i.e.
+              # support-phase active/maintenance/eol, excluding preview/go-live) ->
+              # manual PR, no auto-merge, no poll, no rebuild dispatch.
+              refresh_main
+              TOP_BAND=$(echo "$DOTNET_INDEX" | jq -r '."releases-index"[] | select(.["support-phase"] == "active" or .["support-phase"] == "maintenance" or .["support-phase"] == "eol") | .["channel-version"]' | sort -V | tail -n1)
+              if [ -z "$TOP_BAND" ]; then
+                echo "could not determine the newest GA .NET channel from releases-index.json" >&2
+                FAILED=1
+              elif ! echo "$TOP_BAND" | grep -qE '^[0-9]+\.[0-9]+$'; then
+                echo "newest GA .NET channel-version in releases-index.json has an unexpected format: '$TOP_BAND'" >&2
+                FAILED=1
+              elif ver_ge "$CUR_BAND" "$TOP_BAND"; then
+                echo ".NET SDK is already on the newest GA band ($CUR_BAND)"
+              else
+                TOP_SDK=$(echo "$DOTNET_INDEX" | jq -r --arg band "$TOP_BAND" '."releases-index"[] | select(.["channel-version"] == $band) | .["latest-sdk"]')
+                if [ -z "$TOP_SDK" ] || [ "$TOP_SDK" = "null" ]; then
+                  echo "could not find latest-sdk for channel $TOP_BAND in releases-index.json" >&2
+                  FAILED=1
+                elif ! echo "$TOP_SDK" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+                  echo "latest-sdk for channel $TOP_BAND in releases-index.json has an unexpected format: '$TOP_SDK'" >&2
+                  FAILED=1
+                elif git ls-remote --exit-code --heads origin "dotnet-bump-v${TOP_SDK}" >/dev/null 2>&1; then
+                  echo "Branch dotnet-bump-v${TOP_SDK} already exists, skipping"
+                else
+                  echo "Opening manual .NET SDK feature-band/major bump PR: $CURRENT ($CUR_BAND) -> $TOP_SDK ($TOP_BAND)"
+                  sed -i 's/^ARG DOTNET_SDK_VERSION=.*/ARG DOTNET_SDK_VERSION='"${TOP_SDK}"'/' dev-sandbox/Dockerfile
+                  sed -i 's/^ARG DOTNET_SDK_VERSION=.*/ARG DOTNET_SDK_VERSION='"${TOP_SDK}"'/' dev-sandbox/fragments/dotnet.dockerfile
+                  # shellcheck disable=SC2016  # backticks are literal markdown; %s does the substitution
+                  BODY=$(printf 'Bumps `DOTNET_SDK_VERSION` from %s to %s (feature-band/major change: %s -> %s) in BOTH `dev-sandbox/Dockerfile` and `dev-sandbox/fragments/dotnet.dockerfile` (kept in sync per the fragment-drift guard).\n\nThis crosses a feature-band or major boundary, so it is **not** auto-merged, polled, or auto-dispatched. Review, merge manually, then run `gh workflow run "agent-sandbox — Version Bump"` to rebuild the image.' "$CURRENT" "$TOP_SDK" "$CUR_BAND" "$TOP_BAND")
+                  open_pr \
+                    "dotnet-bump-v${TOP_SDK}" \
+                    "chore(dev-sandbox): bump .NET SDK to ${TOP_SDK} (feature-band/major)" \
+                    "chore(dev-sandbox): bump .NET SDK to ${TOP_SDK} (feature-band/major)" \
+                    "$BODY" || FAILED=1
+                fi
+              fi
+            fi
+          fi
+
+          # ── Node major (monolith Dockerfile + node fragment) ─────────────
+          # Only proposed once the currently-pinned major's LTS support has ended
+          # (not merely because a newer major has entered Active LTS). Since
+          # NODE_MAJOR only ever moves at major-version boundaries, it never
+          # auto-merges — always opens a manual-merge PR.
+          refresh_main
+          CURRENT=$(sed -n 's/^ARG NODE_MAJOR=//p' dev-sandbox/Dockerfile)
+          if ! echo "$CURRENT" | grep -qE '^[0-9]+$'; then
+            echo "could not read a valid ARG NODE_MAJOR from dev-sandbox/Dockerfile: '$CURRENT'" >&2
+            FAILED=1
+          else
+            NODE_SCHEDULE=$(curl -sL https://raw.githubusercontent.com/nodejs/Release/main/schedule.json)
+            NODE_EOL=$(echo "$NODE_SCHEDULE" | jq -r --arg key "v${CURRENT}" '.[$key].end // empty')
+            if [ -z "$NODE_EOL" ]; then
+              echo "could not read v${CURRENT}.end from nodejs/Release schedule.json" >&2
+              FAILED=1
+            elif ! echo "$NODE_EOL" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'; then
+              echo "v${CURRENT}.end in nodejs/Release schedule.json has an unexpected format: '$NODE_EOL'" >&2
+              FAILED=1
+            # `[[ ]]` (not `[ ]`) is required here: both dates are ISO-8601
+            # (YYYY-MM-DD), which sort correctly with a plain lexicographic `<`,
+            # but POSIX `[ ]` treats a bare `<` as output redirection.
+            elif [[ "$(date -u +%Y-%m-%d)" < "$NODE_EOL" ]]; then
+              echo "Node ${CURRENT} LTS support ends $NODE_EOL (not yet ended), skipping"
+            else
+              echo "Node ${CURRENT} LTS support ended $NODE_EOL, checking for a newer LTS major"
+              NODE_DIST=$(curl -sL https://nodejs.org/dist/index.json)
+              TARGET=$(echo "$NODE_DIST" | jq -r '[.[] | select(.lts != false) | .version | ltrimstr("v") | split(".")[0] | tonumber] | max // empty')
+              if ! echo "$TARGET" | grep -qE '^[0-9]+$'; then
+                echo "could not determine a target Node LTS major from dist/index.json" >&2
+                FAILED=1
+              elif ver_ge "$CURRENT" "$TARGET"; then
+                echo "Node is already on major $CURRENT (no newer LTS major found)"
+              elif git ls-remote --exit-code --heads origin "node-bump-v${TARGET}" >/dev/null 2>&1; then
+                echo "Branch node-bump-v${TARGET} already exists, skipping"
+              else
+                echo "Opening manual Node major bump PR: $CURRENT -> $TARGET"
+                sed -i 's/^ARG NODE_MAJOR=.*/ARG NODE_MAJOR='"${TARGET}"'/' dev-sandbox/Dockerfile
+                sed -i 's/^ARG NODE_MAJOR=.*/ARG NODE_MAJOR='"${TARGET}"'/' dev-sandbox/fragments/node.dockerfile
+                # shellcheck disable=SC2016  # backticks are literal markdown; %s does the substitution
+                BODY=$(printf 'Bumps `NODE_MAJOR` from %s to %s in BOTH `dev-sandbox/Dockerfile` and `dev-sandbox/fragments/node.dockerfile` (kept in sync per the fragment-drift guard).\n\nNode %s'"'"'s LTS support ended %s. This is a major-version bump, so it is **not** auto-merged. Review, merge manually, then run `gh workflow run "agent-sandbox — Version Bump"` to rebuild the image.' "$CURRENT" "$TARGET" "$CURRENT" "$NODE_EOL")
+                open_pr \
+                  "node-bump-v${TARGET}" \
+                  "chore(dev-sandbox): bump Node to major ${TARGET}" \
+                  "chore(dev-sandbox): bump Node to major ${TARGET}" \
+                  "$BODY" || FAILED=1
+              fi
             fi
           fi
 
