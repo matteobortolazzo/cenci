@@ -96,13 +96,15 @@ function run() {
   var text = data.text || ''
   var tooltip = data.tooltip || ''
 
-  // class -> [SF Symbol, color]. A null symbol means no attention treatment
-  // (idle / unknown), mirroring iconForClass/colorForClass in the QML widgets.
-  // need-input is the loudest treatment — that's the attention layer's whole job.
+  // class -> [SF Symbol, color]. Colors mirror colorForClass in the QML widgets;
+  // icons use SF Symbols, which has no literal robot glyph, so `running` uses
+  // brain.head.profile.fill instead of the QML widgets' robot/smart_toy. A null
+  // symbol means no attention treatment (idle / unknown). need-input is the
+  // loudest treatment — that's the attention layer's whole job.
   function styleFor(c) {
     switch (c) {
       case 'need-input': return ['exclamationmark.triangle.fill', 'red']
-      case 'running':    return ['gearshape.fill', 'blue']
+      case 'running':    return ['brain.head.profile.fill', 'blue']
       case 'done':       return ['checkmark.circle.fill', 'green']
       case 'stopped':    return ['pause.circle.fill', 'orange']
       default:           return [null, null] // idle / none — hidden icon
