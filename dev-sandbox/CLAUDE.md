@@ -11,8 +11,9 @@ Provides an isolated container (`agent-sand`) for running Claude Code sessions w
 
 ## Build & Test
 ```bash
-agent-sand --build-base   # agent-sandbox-base:<plugin.json version>, rebuild if Dockerfile.base changes
+agent-sand --build-base   # agent-sandbox-base:<content-hash of Dockerfile.base + entrypoint.sh + lib/> + :latest alias, rebuild if those inputs change
 agent-sand --build        # agent-sandbox:latest, builds the base first if missing
+agent-sand --prune        # remove superseded base tags, dangling images, stopped *-sand-* containers (--volumes to also prompt for stale home volumes)
 shellcheck dev-sandbox/entrypoint.sh dev-sandbox/agent-sand dev-sandbox/tests/*.test.sh
 bash -n dev-sandbox/entrypoint.sh dev-sandbox/agent-sand
 bash dev-sandbox/tests/smoke.test.sh   # runtime smoke test; self-skips without docker/podman
@@ -29,11 +30,17 @@ bash dev-sandbox/tests/smoke.test.sh   # runtime smoke test; self-skips without 
 
 - **Preserve all pre-existing logic when splitting a script into conditional branches.** When refactoring a script to introduce a new conditional branch (e.g., adding git-based per-repo scoping alongside a legacy non-git fallback), the fallback branch can appear "unchanged" in the diff while actually being accidentally simplified during the rewrite (e.g., dropping a computed value and hardcoding a default). Test both branches independently to catch silent failures.
 
+- **Under `pipefail`, a terminal-stage filter or loop that always succeeds masks upstream failures.** Pipelines ending with `grep ... || true` or `while read` (both always exit 0) will hide real failures from earlier stages — e.g., `docker ps` failing silently appears as "nothing found." Always capture command output into a variable and check that command's exit status explicitly before filtering or looping on the captured value.
+
 ## Image architecture: base + fragments
-`Dockerfile.base` builds the stack-agnostic `agent-sandbox-base:<version>` image (Ubuntu,
-system packages, locale, `uv`, GitHub CLI, Docker CLI, non-root `dev` user, entrypoint — no
-language runtimes). `Dockerfile` (the monolith) builds `agent-sandbox:latest` `FROM`
-that base image and layers on the runtime stacks (.NET, Node, Codex, Go).
+`Dockerfile.base` builds the stack-agnostic `agent-sandbox-base:<content-hash>` image
+(plus an `agent-sandbox-base:latest` alias tag), where `<content-hash>` is a 12-char
+digest of `Dockerfile.base` + `entrypoint.sh` + `lib/` (Ubuntu, system packages, locale,
+`uv`, GitHub CLI, Docker CLI, non-root `dev` user, entrypoint — no language runtimes).
+`Dockerfile` (the monolith) builds `agent-sandbox:latest` `FROM` that base image and
+layers on the runtime stacks in order: .NET, Node, Go, then Codex last (Codex bumps
+daily via the deps-bump workflow, so keeping it last avoids invalidating the other
+stacks' layer cache on every bump).
 
 `fragments/*.dockerfile` holds the same per-stack blocks (`dotnet`, `node`, `go`, `python`,
 `rust`) as standalone snippets, for a future composition tool that assembles per-project

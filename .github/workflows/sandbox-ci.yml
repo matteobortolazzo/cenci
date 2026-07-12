@@ -58,11 +58,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: hadolint/hadolint-action@v3.1.0
+      - uses: hadolint/hadolint-action@v3.3.0
         with:
           dockerfile: dev-sandbox/Dockerfile.base
           ignore: DL3008,DL3013
-      - uses: hadolint/hadolint-action@v3.1.0
+      - uses: hadolint/hadolint-action@v3.3.0
         with:
           dockerfile: dev-sandbox/Dockerfile
           ignore: DL3008,DL3013

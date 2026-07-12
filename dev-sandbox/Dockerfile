@@ -1,4 +1,4 @@
-ARG BASE_VERSION=0.7.4
+ARG BASE_VERSION=latest
 FROM agent-sandbox-base:${BASE_VERSION}
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -32,6 +32,17 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
 
 USER dev
 
+ARG GO_VERSION=1.24.1
+
+USER root
+
+# ── Go ───────────────────────────────────────────────────────────
+RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz" \
+    | tar -C /usr/local -xzf -
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+USER dev
+
 ARG CODEX_VERSION=0.144.1
 
 USER root
@@ -41,16 +52,5 @@ USER root
 # Codex ships as an npm launcher that resolves a nested native binary, which a
 # single-file bind-mount can't carry. Update by bumping CODEX_VERSION + rebuild.
 RUN npm install -g @openai/codex@${CODEX_VERSION}
-
-USER dev
-
-ARG GO_VERSION=1.24.1
-
-USER root
-
-# ── Go ───────────────────────────────────────────────────────────
-RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" \
-    | tar -C /usr/local -xzf -
-ENV PATH="/usr/local/go/bin:${PATH}"
 
 USER dev

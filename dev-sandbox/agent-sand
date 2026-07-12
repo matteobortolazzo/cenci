@@ -17,19 +17,42 @@ WORKSPACE_HOST="${HOME}/Repos"
 WORKSPACE_CONTAINER="/workspace"
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
-# ── Resolve BASE_VERSION from plugin.json ────────────────────────
-# No hard `jq` dependency: fall back to a sed pattern when jq isn't on PATH.
-PLUGIN_JSON="${SCRIPT_DIR}/.claude-plugin/plugin.json"
-if command -v jq &>/dev/null; then
-    BASE_VERSION="$(jq -r '.version' "${PLUGIN_JSON}")"
+# ── Resolve BASE_TAG via content hash ─────────────────────────────
+# Portable content hash of all Dockerfile.base build inputs
+# (Dockerfile.base + entrypoint.sh + everything COPYed from lib/). Rebuilds the
+# base only when those inputs change — not on every plugin.json version bump.
+# Prefers sha256sum (Linux); falls back to shasum -a 256 (macOS). Paths are
+# RELATIVE (subshell cd) so the digest is identical here and in smoke.test.sh
+# regardless of the absolute checkout path.
+if command -v sha256sum &>/dev/null; then
+    HASH_CMD=(sha256sum)
+elif command -v shasum &>/dev/null; then
+    HASH_CMD=(shasum -a 256)
 else
-    BASE_VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${PLUGIN_JSON}" | head -n1)"
-fi
-if [[ -z "${BASE_VERSION}" || "${BASE_VERSION}" == "null" ]]; then
-    echo "Error: could not resolve BASE_VERSION from ${PLUGIN_JSON}." >&2
+    echo "Error: neither sha256sum nor shasum on PATH — cannot resolve base tag." >&2
     exit 1
 fi
-BASE_IMAGE="agent-sandbox-base:${BASE_VERSION}"
+
+if ! BASE_TAG_FILES="$(cd "${SCRIPT_DIR}" && find Dockerfile.base entrypoint.sh lib -type f)"; then
+    echo "Error: failed to enumerate base image build inputs (Dockerfile.base, entrypoint.sh, lib/)." >&2
+    exit 1
+fi
+if [[ -z "${BASE_TAG_FILES}" ]]; then
+    echo "Error: no base image build inputs found (Dockerfile.base, entrypoint.sh, lib/)." >&2
+    exit 1
+fi
+BASE_TAG="$(
+    cd "${SCRIPT_DIR}" &&
+    LC_ALL=C sort <<<"${BASE_TAG_FILES}" |
+        xargs -r "${HASH_CMD[@]}" |
+        "${HASH_CMD[@]}" |
+        cut -c1-12
+)"
+if [[ -z "${BASE_TAG}" ]]; then
+    echo "Error: failed to compute base image content hash." >&2
+    exit 1
+fi
+BASE_IMAGE="agent-sandbox-base:${BASE_TAG}"
 
 # ── Parse options ────────────────────────────────────────────────
 # Default agent from the invoked name so a `codex-sand` symlink Just Works.
@@ -48,6 +71,8 @@ SHELL_ONLY=false
 HOST_NETWORK=false
 DOCKER_SOCKET=false
 UPDATE_PLUGINS=false
+PRUNE=false
+PRUNE_VOLUMES=false
 AGENT_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -94,6 +119,14 @@ while [[ $# -gt 0 ]]; do
             UPDATE_PLUGINS=true
             shift
             ;;
+        --prune)
+            PRUNE=true
+            shift
+            ;;
+        --volumes)
+            PRUNE_VOLUMES=true
+            shift
+            ;;
         *)
             AGENT_ARGS+=("$1")
             shift
@@ -109,6 +142,65 @@ case "${AGENT}" in
         exit 1
         ;;
 esac
+
+# ── Prune (--prune) ───────────────────────────────────────────────
+# Cleans up superseded agent-sandbox-base tags, dangling images, and stopped
+# sandbox containers. Runs before repo scoping so it works outside a git repo
+# too. Volumes are left alone unless --volumes is also given, and even then
+# only after an interactive y/Y confirmation — they hold copied credentials
+# and full session history.
+if "${PRUNE}"; then
+    echo "Removing superseded agent-sandbox-base tags..."
+    IMAGE_LIST="$("${RUNTIME}" images --format '{{.Repository}}:{{.Tag}}' agent-sandbox-base)" || {
+        echo "Error: failed to list agent-sandbox-base images." >&2
+        exit 1
+    }
+    if [[ -n "${IMAGE_LIST}" ]]; then
+        while read -r tag; do
+            [[ "${tag}" == "${BASE_IMAGE}" || "${tag}" == "agent-sandbox-base:latest" ]] && continue
+            echo "  removing ${tag}"
+            "${RUNTIME}" rmi "${tag}" || true
+        done <<< "${IMAGE_LIST}"
+    fi
+
+    echo "Removing stopped sandbox containers..."
+    CONTAINER_LIST="$("${RUNTIME}" ps -a --filter status=exited --filter status=created --format '{{.Names}}')" || {
+        echo "Error: failed to list sandbox containers." >&2
+        exit 1
+    }
+    MATCHING_CONTAINERS="$(echo "${CONTAINER_LIST}" | { grep -E -- '^(claude-sand-|codex-sand-)' || true; })"
+    if [[ -n "${MATCHING_CONTAINERS}" ]]; then
+        while read -r name; do
+            echo "  removing ${name}"
+            "${RUNTIME}" rm "${name}" || true
+        done <<< "${MATCHING_CONTAINERS}"
+    fi
+
+    echo "Pruning dangling images..."
+    "${RUNTIME}" image prune -f
+
+    if "${PRUNE_VOLUMES}"; then
+        VOLUME_LIST="$("${RUNTIME}" volume ls --format '{{.Name}}')" || {
+            echo "Error: failed to list sandbox volumes." >&2
+            exit 1
+        }
+        VOLUMES="$(echo "${VOLUME_LIST}" | { grep -E -- '^(claude|codex)-sand-home-' || true; })"
+        if [[ -n "${VOLUMES}" ]]; then
+            echo "The following volumes hold copied credentials and full session history:" >&2
+            echo "${VOLUMES}" >&2
+            read -r -p "Remove these volumes? [y/N] " CONFIRM || CONFIRM=""
+            if [[ "${CONFIRM}" == "y" || "${CONFIRM}" == "Y" ]]; then
+                echo "${VOLUMES}" | xargs -r "${RUNTIME}" volume rm
+            else
+                echo "Skipping volume removal."
+            fi
+        else
+            echo "No sandbox volumes found."
+        fi
+    fi
+
+    exit 0
+fi
 
 # ── Namespacing (per-agent, so containers/volumes never collide) ──
 CONTAINER_PREFIX="${AGENT}-sand"
@@ -155,7 +247,7 @@ fi
 # ── Build ────────────────────────────────────────────────────────
 build_base_image() {
     echo "Building ${BASE_IMAGE} with ${RUNTIME}..."
-    "${RUNTIME}" build -f "${SCRIPT_DIR}/Dockerfile.base" -t "${BASE_IMAGE}" "${SCRIPT_DIR}"
+    "${RUNTIME}" build -f "${SCRIPT_DIR}/Dockerfile.base" -t "${BASE_IMAGE}" -t agent-sandbox-base:latest "${SCRIPT_DIR}"
     echo "Done."
 }
 
@@ -168,14 +260,14 @@ ensure_base_image() {
 build_image() {
     ensure_base_image
     echo "Building ${MONOLITH_IMAGE} with ${RUNTIME}..."
-    "${RUNTIME}" build --build-arg "BASE_VERSION=${BASE_VERSION}" -t "${MONOLITH_IMAGE}" -f "${SCRIPT_DIR}/Dockerfile" "${SCRIPT_DIR}"
+    "${RUNTIME}" build --build-arg "BASE_VERSION=${BASE_TAG}" -t "${MONOLITH_IMAGE}" -f "${SCRIPT_DIR}/Dockerfile" "${SCRIPT_DIR}"
     echo "Done."
 }
 
 build_repo_image() {
     ensure_base_image
     echo "Building ${IMAGE} with ${RUNTIME}..."
-    "${RUNTIME}" build --build-arg "BASE_VERSION=${BASE_VERSION}" -t "${IMAGE}" -f "${REPO_ROOT}/.agent-sand/Dockerfile" "${REPO_ROOT}/.agent-sand"
+    "${RUNTIME}" build --build-arg "BASE_VERSION=${BASE_TAG}" -t "${IMAGE}" -f "${REPO_ROOT}/.agent-sand/Dockerfile" "${REPO_ROOT}/.agent-sand"
     echo "Done."
 }
 
@@ -342,6 +434,7 @@ fi
 
 # Host network mode (fallback for manual OAuth inside container)
 if "${HOST_NETWORK}"; then
+    echo "Warning: --host-network weakens the container's isolation boundary (the container is the security boundary); only use it for manual OAuth callback." >&2
     RUN_ARGS+=(--network host)
 fi
 

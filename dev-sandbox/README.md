@@ -97,10 +97,21 @@ agent-sand --docker --shell
 agent-sand --docker -p "run the integration tests"
 
 # Use host networking for manual OAuth (browser callback)
+# Warning: weakens the container's isolation boundary — the container is the
+# security boundary, so only use this for the manual OAuth callback use case.
 agent-sand --host-network --shell
 
 # Force an agentflow/agentwatch plugin update now (bypasses the 30-min TTL)
 agent-sand --update-plugins
+
+# Clean up superseded base image tags, dangling images, and stopped sandbox
+# containers (keeps the current base tag, agent-sandbox-base:latest, and all
+# per-repo images untouched)
+agent-sand --prune
+
+# Also list and interactively confirm removal of *-sand-home-* volumes (holds
+# copied credentials + full session history — defaults to no deletion)
+agent-sand --prune --volumes
 ```
 
 ### Per-repo containers
@@ -212,7 +223,9 @@ claude                     # Claude Code auth (first launch)
 claude plugin install ...  # Install any plugins you need
 ```
 
-For OAuth flows that require a browser callback, use host network mode:
+For OAuth flows that require a browser callback, use host network mode. Note: this
+weakens the container's isolation boundary (the container is the security boundary),
+so only use it for the manual OAuth callback:
 
 ```bash
 agent-sand --host-network --shell
@@ -239,13 +252,17 @@ Everything persists in the home volume — only needs to happen once per instanc
 
 Override versions at build time. The monolith `Dockerfile` builds `FROM
 agent-sandbox-base:${BASE_VERSION}`, so build (or pull) the base image first and pass
-the matching `BASE_VERSION` (from `.claude-plugin/plugin.json`) — `agent-sand --build`
-does both steps for you automatically:
+the matching `BASE_VERSION` — `agent-sand --build` does both steps for you
+automatically, resolving `BASE_VERSION` to a content hash of `Dockerfile.base` +
+`entrypoint.sh` + `lib/` (see [Two-image model](#two-image-model-base--monolith)
+below). For a manual build, `agent-sand --build-base` always additionally tags
+`agent-sandbox-base:latest`, so a bare `--build-arg BASE_VERSION=latest` works once
+any base has been built:
 
 ```bash
-docker build -f dev-sandbox/Dockerfile.base -t agent-sandbox-base:0.8.0 dev-sandbox/
+agent-sand --build-base   # tags both the content-hash tag and agent-sandbox-base:latest
 
-docker build --build-arg BASE_VERSION=0.8.0 \
+docker build --build-arg BASE_VERSION=latest \
              --build-arg DOTNET_SDK_VERSION=10.0.200 \
              --build-arg GO_VERSION=1.25.0 \
              -t agent-sandbox:latest dev-sandbox/
@@ -257,15 +274,18 @@ docker build --build-arg BASE_VERSION=0.8.0 \
 
 The image is built in two layers:
 
-- **`Dockerfile.base`** → `agent-sandbox-base:<version>` (version comes from
-  `.claude-plugin/plugin.json`). Stack-agnostic: Ubuntu 24.04, system packages, locale,
+- **`Dockerfile.base`** → `agent-sandbox-base:<content-hash>`, plus an `agent-sandbox-base:latest`
+  alias tag. The hash is a 12-char digest of `Dockerfile.base` + `entrypoint.sh` + `lib/`
+  (all its `COPY` inputs), so the base only rebuilds when those actually change — not on
+  every plugin.json version bump. Stack-agnostic: Ubuntu 24.04, system packages, locale,
   `uv`, GitHub CLI, Docker CLI, the non-root `dev` user, and the entrypoint. No language
-  runtimes. Rebuilt only when the base itself changes; `agent-sand --build-base` builds
-  it explicitly, and `agent-sand --build` / `agent-sand` builds it automatically the
-  first time (or whenever `agent-sandbox-base:<version>` is missing locally).
-- **`Dockerfile`** → `agent-sandbox:latest`, `FROM agent-sandbox-base:${BASE_VERSION}`.
-  Layers the runtime stacks on top: .NET SDK, Node.js, Codex CLI, Go. This is the image
-  `agent-sand` actually runs.
+  runtimes. `agent-sand --build-base` builds it explicitly, and `agent-sand --build` /
+  `agent-sand` builds it automatically the first time (or whenever the current content-hash
+  tag is missing locally). Run `agent-sand --prune` to clean up superseded hash tags left
+  behind by earlier `Dockerfile.base` changes.
+- **`Dockerfile`** → `agent-sandbox:latest`, `FROM agent-sandbox-base:${BASE_VERSION}`
+  (default `latest`). Layers the runtime stacks on top: .NET SDK, Node.js, Go, Codex CLI
+  (ordered last since it changes most often). This is the image `agent-sand` actually runs.
 
 `dev-sandbox/fragments/*.dockerfile` holds the same per-stack blocks (`dotnet`, `node`,
 `go`, `python`, `rust`) as standalone snippets for future per-project image composition.
@@ -279,7 +299,7 @@ A repo can opt into its own thin image instead of the shared monolith by adding
 `.agent-sand/Dockerfile` (and any files it needs, e.g. a fragment copy) under
 `.agent-sand/` at the repo root. When present, `agent-sand` builds
 `agent-sandbox-<repo-slug>:latest` `FROM agent-sandbox-base:${BASE_VERSION}` — the
-same base image and `BASE_VERSION` as the monolith — using
+same base image and content-hash `BASE_VERSION` as the monolith — using
 `.agent-sand/` as the build context, and runs that instead of `agent-sandbox:latest`.
 Repos without `.agent-sand/Dockerfile` keep using the shared monolith image, just with
 single-repo mounting (see [Per-repo containers](#per-repo-containers)). Rebuild a
@@ -503,4 +523,4 @@ The script auto-detects `podman` first, then falls back to `docker`.
 **Claude Code says "request not found" during OAuth**
 The OAuth callback can't reach the container. Either:
 1. Ensure `~/.claude/.credentials.json` exists on the host (run `claude` on the host first to authenticate), or
-2. Use `agent-sand --host-network --shell` and run `claude` to complete the OAuth flow with host networking.
+2. Use `agent-sand --host-network --shell` and run `claude` to complete the OAuth flow with host networking. This weakens the container's isolation boundary, so use it only for this manual OAuth callback.
