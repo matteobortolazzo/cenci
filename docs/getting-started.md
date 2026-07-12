@@ -158,7 +158,7 @@ re-bootstraps its matching binary on the next session automatically.
 | `agent-sand: command not found` after install | `~/.local/bin` isn't on your PATH — add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile |
 | No status in tmux after installing agentwatch | The first session bootstraps the binary in the background — give it a moment, then check `${TMPDIR:-/tmp}/agentwatch-bootstrap.log` |
 | macOS menu bar item never appears | Usually the SwiftBar GUI-PATH gotcha — see [the SwiftBar README](../agentwatch/plugin/macos/README.md#the-gui-path-gotcha) |
-| Sandbox build fails / permission errors on `/workspace` | On Linux your UID must be 1000 (`id -u`); see [dev-sandbox/README.md](../dev-sandbox/README.md#troubleshooting) |
+| Permission errors on `/workspace` files | The container auto-remaps to your host UID/GID on every launch; on the legacy whole-`~/Repos` mount, pre-existing mis-owned files need a manual `chown` — see [dev-sandbox/README.md](../dev-sandbox/README.md#troubleshooting) |
 | `/agentflow:*` commands missing in a session | `claude plugin list` should show agentflow; if not, re-run the installer — and note plugins load at session start, so restart Claude Code after installing |
 | `agentflow:*` skills missing in Codex | `codex plugin list` should show `agentflow@agent-stack` as installed and enabled; re-run the installer, then start a new Codex session |
 | `git push` fails inside the sandbox | SSH remotes don't work through the sandbox network filter — switch to HTTPS: `git remote set-url origin https://github.com/<owner>/<repo>.git` |

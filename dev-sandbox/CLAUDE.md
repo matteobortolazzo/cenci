@@ -24,6 +24,12 @@ bash dev-sandbox/tests/smoke.test.sh   # runtime smoke test; self-skips without 
 - `entrypoint.sh` must stay POSIX-portable and pass `shellcheck`.
 - The container is the security boundary — Claude Code's host sandbox stays disabled inside it.
 
+## Entrypoint patterns
+
+- **Never self-remap the UID/GID of a running account via `usermod`/`groupmod`.** A live account's own UID/GID cannot be renumbered while any process (including the calling shell) runs under that UID — the utilities refuse the operation. Container entrypoints that need to remap their own running user (e.g., to match host UID for mounted volumes) must start privileged (root) with zero workload processes yet alive, perform the remap safely, then unconditionally drop privileges to the target user before the rest of the entrypoint runs. Do not try to self-remap from within the account being changed.
+
+- **`docker run --user X` persists for the container's lifetime — it is not scoped to the initial process.** The `--user` flag is stored as the container's `Config.User` and becomes the default for every subsequent `docker exec` call that doesn't pass its own explicit `-u` flag. A pattern that starts a container as root for setup (privilege-drop), but then runs workload via `docker exec`, will silently run all exec calls as root if they omit `-u <target-user>`. The image's original `USER dev` directive from the Dockerfile does not automatically restore as the default for exec — you must audit and add explicit `-u dev` to every exec call site after a privilege-drop entrypoint.
+
 ## Testing
 
 - **Guard clauses must be mirrored across duplicated logic.** When the same validation/parsing pattern appears in both a test file and its corresponding production script (e.g., `smoke.test.sh` and `agent-sand` both resolve a version string with jq + sed fallback), the error-handling guards must be duplicated too. A test file that is more careful than the production code it exercises is a code-review red flag — check for silent failures (e.g., empty Docker tags, null strings propagating downstream).

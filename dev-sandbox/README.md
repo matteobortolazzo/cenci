@@ -12,18 +12,23 @@ Isolated Docker/Podman container for running Claude Code with full permissions. 
 - Codex auth on the host when using `--agent codex` — run `codex login` to create
   `~/.codex/auth.json`, or export `OPENAI_API_KEY`. Codex itself is baked into the
   image, so it does **not** need to be installed on the host.
-- Host user UID must be 1000 (standard Linux default)
 
 ## Limitations
 
-**Host UID must be 1000.** The container maps mounted files as UID 1000 (the standard
-default for the first user on most Linux distros), so a host UID other than 1000 causes
-permission errors on `/workspace` files — see the "Permission errors on `/workspace`
-files" entry in [Troubleshooting](#troubleshooting) below for the symptom and the check.
-`install.sh doctor` flags a mismatched UID as an optional warning; it isn't a hard
-blocker for macOS or WSL2, where this generally isn't an issue. Support for arbitrary
-host UIDs is tracked in
-[#154](https://github.com/matteobortolazzo/agent-stack/issues/154).
+**Legacy `~/Repos` mount and pre-existing files.** The container's `dev` user is baked
+in at UID/GID 1000, but `entrypoint.sh` auto-remaps it to your host `HOST_UID`/`HOST_GID`
+on every launch (`agent-sand` passes them in), so files newly written into the per-repo
+`/workspace` mount always come out owned by your host user — no manual `chown` needed.
+Renumbering a live account requires no process running under it yet, so the container now
+briefly starts as `root` for this remap step before `entrypoint.sh` unconditionally drops
+privileges to (the host-remapped) `dev` for everything else — the exec/attach path
+(`agent-sand --shell`, agent sessions) is unaffected and always resolves to `dev`.
+The one remaining caveat is the legacy whole-`~/Repos` mount (used outside a git repo):
+the remap does **not** retroactively `chown` that tree, since rewriting ownership across
+your entire `~/Repos` from inside the container is too large a blast radius to automate.
+If you have pre-existing files there from before this fix, or you're not UID 1000 and hit
+permission errors under the legacy mount, `chown -R $(id -u):$(id -g) ~/Repos` on the host
+clears it up.
 
 ## Setup
 
@@ -524,7 +529,11 @@ docker load < agent-sandbox.tar.gz
 ## Troubleshooting
 
 **Permission errors on `/workspace` files**
-Your host UID must be 1000. Check with `id -u`.
+`entrypoint.sh` auto-remaps the container's `dev` user to your host UID/GID on every
+launch, so this should no longer happen for the per-repo mount. If you're on the legacy
+whole-`~/Repos` mount (outside a git repo) and see stale mis-owned files from before this
+fix, run `chown -R $(id -u):$(id -g) ~/Repos` on the host — see
+[Limitations](#limitations).
 
 **`claude` binary not found**
 Ensure `claude` is in your host PATH. Check with: `readlink -f "$(which claude)"`
