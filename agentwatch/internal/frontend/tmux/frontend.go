@@ -17,11 +17,12 @@ import (
 
 // Frontend styles tmux windows to mirror agent session state.
 type Frontend struct {
-	cfg         config.Config
-	client      tmuxc.Client
-	windows     map[string]*windowState // key: window target (session:windowIdx)
-	panes       map[string]string       // key: pane ID (%5) → window target
-	sessionKeys map[string]string       // key: core session key → window target
+	cfg          config.Config
+	client       tmuxc.Client
+	windows      map[string]*windowState // key: window target (session:windowIdx)
+	panes        map[string]string       // key: pane ID (%5) → window target
+	sessionKeys  map[string]string       // key: core session key → window target
+	headroomVars map[string]string       // key: agent type → last @agentwatch-headroom-<agent> value set (#171)
 }
 
 var _ frontend.Frontend = (*Frontend)(nil)
@@ -29,11 +30,12 @@ var _ frontend.Frontend = (*Frontend)(nil)
 // New creates a tmux frontend backed by the given client.
 func New(cfg config.Config, client tmuxc.Client) *Frontend {
 	return &Frontend{
-		cfg:         cfg,
-		client:      client,
-		windows:     make(map[string]*windowState),
-		panes:       make(map[string]string),
-		sessionKeys: make(map[string]string),
+		cfg:          cfg,
+		client:       client,
+		windows:      make(map[string]*windowState),
+		panes:        make(map[string]string),
+		sessionKeys:  make(map[string]string),
+		headroomVars: make(map[string]string),
 	}
 }
 
@@ -424,13 +426,18 @@ func firstRune(s string) rune {
 	return 0
 }
 
-// Cleanup restores all tracked windows on daemon shutdown.
+// Cleanup restores all tracked windows on daemon shutdown and clears any
+// tracked @agentwatch-headroom-<agent> global user variables (#171).
 func (f *Frontend) Cleanup(map[string]*frontend.SessionState) {
 	if f.cfg.Verbose && len(f.windows) > 0 {
 		log.Printf("cleaning up %d tracked window(s)", len(f.windows))
 	}
 	for wt := range f.windows {
 		f.restoreWindow(wt)
+	}
+	for agent := range f.headroomVars {
+		f.setOpt(headroomVarName(agent), "", "error clearing @agentwatch-headroom-"+agent)
+		delete(f.headroomVars, agent)
 	}
 }
 

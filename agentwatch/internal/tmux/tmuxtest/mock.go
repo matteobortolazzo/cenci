@@ -13,10 +13,12 @@ type MockClient struct {
 	Renames         []RenameCall
 	WindowOpts      []WindowOptCall
 	WindowOptValues map[string]string // key: "target:key" → value
+	Opts            []OptCall
 	ListErr         error
 	RenameErr       error
 	WindowOptErr    error
 	GetOptErr       error
+	OptErr          error
 }
 
 type RenameCall struct {
@@ -28,6 +30,12 @@ type WindowOptCall struct {
 	Target string
 	Key    string
 	Value  string
+}
+
+// OptCall records a call to SetOption (session-wide/global tmux option).
+type OptCall struct {
+	Key   string
+	Value string
 }
 
 func (m *MockClient) ListPanes() ([]tmux.PaneInfo, error) {
@@ -68,6 +76,23 @@ func (m *MockClient) GetWindowOption(target string, key string) (string, error) 
 		return "on", nil
 	}
 	return "", nil
+}
+
+// SetOption records a session-wide (global) tmux option set, mirroring
+// SetWindowOption's recording pattern.
+func (m *MockClient) SetOption(key string, value string) error {
+	m.Opts = append(m.Opts, OptCall{key, value})
+	return m.OptErr
+}
+
+// FindOpt returns the value of the last SetOption call matching key.
+func FindOpt(opts []OptCall, key string) (string, bool) {
+	for i := len(opts) - 1; i >= 0; i-- {
+		if opts[i].Key == key {
+			return opts[i].Value, true
+		}
+	}
+	return "", false
 }
 
 // FindWindowOpt returns the value of the last SetWindowOption call matching target and key.
