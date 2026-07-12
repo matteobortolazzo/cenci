@@ -135,6 +135,19 @@ killall SwiftBar; open -a SwiftBar
   | `idle` | (no icon) | — |
 
   `need-input` is the loudest treatment — that's the whole point of the surface.
+- When per-agent-type budget headroom is available, the dropdown also gets one row
+  per agent (e.g. `claude 73%`), read from the numeric `headroom` field (not by
+  re-parsing `text`/`tooltip`) and sorted by agent name for a stable order. Each row
+  is colored by its own threshold band, independent of session status colors:
+
+  | headroom | color |
+  |---|---|
+  | `>25%` | green |
+  | `10–25%` (inclusive) | orange |
+  | `<10%` | red |
+
+  When no headroom data is available (budget loop disabled/unconfigured), no
+  headroom rows are rendered — same "nothing shown" fallback as waybar.
 
 ## Settings
 

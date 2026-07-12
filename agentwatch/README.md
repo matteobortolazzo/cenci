@@ -518,6 +518,20 @@ The module sets a `class` based on the highest-priority status: `need-input` > `
 }
 ```
 
+#### Budget headroom
+
+When per-agent-type budget headroom is available (see [Usage budgets](#usage-budgets)),
+the module appends a compact percentage per agent to `text` and `tooltip`, sorted by
+agent name (e.g. `▶ 1  claude 73%  codex 15%`). This is plain text with no Pango
+markup — Waybar has no built-in way to color a substring within `text`, so per-agent
+threshold coloring is left to frontends that read the raw numeric `headroom` field
+directly (see [macOS menu bar](#macos-menu-bar-swiftbar) below). The thresholds
+(`>25%` normal, `10–25%` warning, `<10%` critical) are consistent across frontends
+even though only SwiftBar currently renders them as color. When no headroom data is
+available (budget loop disabled/unconfigured), the `headroom` field and the
+percentage text are both omitted entirely — output is unchanged from before this
+field existed.
+
 #### macOS menu bar (SwiftBar)
 
 macOS users get the same status surface via a [SwiftBar](https://swiftbar.app)

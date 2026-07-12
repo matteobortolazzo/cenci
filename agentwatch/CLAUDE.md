@@ -8,6 +8,7 @@ GitHub Issues for tracking. GitHub for code and PRs.
 - Test-first: integration tests that assert behavior, not implementation details.
 - Keep tickets well-scoped. 1 ticket = 1 PR.
 - Use git worktrees for all feature work. Never modify code in main worktree.
+- When excluding one specific known case from a parsing/filtering loop via a match-miss condition, narrow the skip to match only that case exactly — don't broaden a targeted exclusion into a silent "no match → discard" catch-all. Compute the expected case and skip only on an exact match; keep the original fallback behavior (e.g. a visible `'none'`/default state) for every other non-match, and cover the non-matching case with a regression test. Silent failures hide bugs; visible fallback rendering catches them.
 
 ## Rule Files
 See `.claude/rules/` for conventions:

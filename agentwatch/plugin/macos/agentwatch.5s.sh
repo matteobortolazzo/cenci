@@ -95,6 +95,7 @@ function run() {
 
   var text = data.text || ''
   var tooltip = data.tooltip || ''
+  var headroom = data.headroom || {}
 
   // class -> [SF Symbol, color]. Colors mirror colorForClass in the QML widgets;
   // icons use SF Symbols, which has no literal robot glyph, so `running` uses
@@ -119,20 +120,59 @@ function run() {
     return p
   }
 
+  // Same thresholds as headroomClass in status.go: >25% normal, 10-25%
+  // (inclusive both ends) warning, <10% critical.
+  function colorForHeadroom(pct) {
+    if (pct > 25) return 'green'
+    if (pct >= 10) return 'orange'
+    return 'red'
+  }
+
   var lines = []
 
   // Menu bar line: the counts (text, as-is) tinted by the highest-priority class.
   lines.push((text || 'agents') + ' |' + paramsFor(cls))
   lines.push('---')
 
+  // Agent keys with budget headroom data, sorted for deterministic order
+  // (object key order is otherwise unreliable). Also used below to compute
+  // the exact compact headroom summary line status.go appends to tooltip
+  // (e.g. "claude 73%  codex 15%"), mirroring formatHeadroom in status.go, so
+  // that specific line can be recognized and skipped when parsing session
+  // rows below (it's rendered separately from the numeric `headroom` field
+  // instead). Empty string when there's no headroom data — never matches a
+  // real tooltip line, since tips are pre-filtered to non-empty lines.
+  var hKeys = Object.keys(headroom).sort()
+  var headroomLine = hKeys.map(function (agent) {
+    var pct = Math.floor(headroom[agent] * 100 + 0.5)
+    return agent + ' ' + pct + '%'
+  }).join('  ')
+
   // One dropdown row per session, colored by its OWN status so a need-input row
-  // stays loud even when other sessions are merely running.
+  // stays loud even when other sessions are merely running. Lines ending in
+  // "(status)" are session rows. The known headroom summary line (computed
+  // above) is skipped by exact match. Any OTHER non-matching line (unexpected
+  // status.go output, encoding glitch, future format change, etc.) still
+  // renders with the 'none' status fallback instead of being silently
+  // dropped, so a real regression stays visible rather than vanishing.
   var tips = tooltip.split('\n').filter(function (l) { return l.length > 0 })
   tips.forEach(function (line) {
+    if (headroomLine !== '' && line === headroomLine) return
     var m = line.match(/\(([a-z-]+)\)\s*$/)
     var status = m ? m[1] : 'none'
-    var body = line.replace(/\s*\([a-z-]+\)\s*$/, '')
+    var body = m ? line.replace(/\s*\([a-z-]+\)\s*$/, '') : line
     lines.push(body + ' |' + paramsFor(status))
+  })
+
+  // One dropdown row per agent with budget headroom data. Omitted entirely
+  // when the field is absent/empty — no headroom leaked into the menu.
+  // Invariant: `agent` keys are currently a fixed claude/codex whitelist from
+  // local config, not attacker/session-controllable — if that ever becomes
+  // dynamic/user-derived, re-check this for injection into the sfcolor= param
+  // string or Pango markup.
+  hKeys.forEach(function (agent) {
+    var pct = Math.floor(headroom[agent] * 100 + 0.5)
+    lines.push(agent + ' ' + pct + '% | sfcolor=' + colorForHeadroom(pct))
   })
 
   lines.push('---')

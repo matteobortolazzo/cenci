@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/ipc"
@@ -26,10 +28,11 @@ type Config struct {
 
 // output is the Waybar custom module JSON protocol.
 type output struct {
-	Text    string `json:"text"`
-	Tooltip string `json:"tooltip"`
-	Class   string `json:"class"`
-	Alt     string `json:"alt"`
+	Text     string             `json:"text"`
+	Tooltip  string             `json:"tooltip"`
+	Class    string             `json:"class"`
+	Alt      string             `json:"alt"`
+	Headroom map[string]float64 `json:"headroom,omitempty"`
 }
 
 // Run connects to the IPC socket, reads one snapshot, prints Waybar JSON, and exits.
@@ -111,11 +114,76 @@ func Format(snap *ipc.StateSnapshot, cfg Config) output {
 	// Class: highest-priority status.
 	class := highestClass(snap)
 
-	return output{
+	out := output{
 		Text:    text,
 		Tooltip: tooltip,
 		Class:   class,
 		Alt:     "active",
+	}
+
+	if len(snap.Headroom) > 0 {
+		headroomText := formatHeadroom(snap.Headroom)
+		if out.Text != "" {
+			out.Text += "  " + headroomText
+		} else {
+			out.Text = headroomText
+		}
+		if out.Tooltip != "" {
+			out.Tooltip += "\n" + headroomText
+		} else {
+			out.Tooltip = headroomText
+		}
+		out.Headroom = snap.Headroom
+	}
+
+	return out
+}
+
+// formatHeadroom renders per-agent headroom percentages sorted by agent key
+// for stable, deterministic output (map iteration order is nondeterministic).
+// Invariant: agent keys are currently a fixed claude/codex whitelist from
+// local config, not attacker/session-controllable — if that ever becomes
+// dynamic/user-derived, re-check this (and the JXA mirror in
+// agentwatch.5s.sh) for injection into downstream rendering.
+func formatHeadroom(headroom map[string]float64) string {
+	keys := make([]string, 0, len(headroom))
+	for k := range headroom {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s %d%%", k, headroomPercent(headroom[k])))
+	}
+	return strings.Join(parts, "  ")
+}
+
+// headroomPercent converts a 0.0-1.0 headroom fraction to an integer percent,
+// rounding half up (e.g. 0.156 -> 16).
+func headroomPercent(frac float64) int {
+	return int(math.Floor(frac*100 + 0.5))
+}
+
+// headroomClass returns the threshold class for a headroom percentage:
+// >25% normal, 10-25% (inclusive) warning, <10% critical.
+//
+// Not called from Format(): per the plan's Q&A, waybar renders headroom as
+// plain-text percentages only (no Pango markup, so no in-text coloring is
+// possible there) — see formatHeadroom. Threshold coloring is a SwiftBar-only
+// concern (colorForHeadroom in agentwatch.5s.sh), and JXA cannot call into Go,
+// so that JS mirrors this logic rather than sharing it. This function exists
+// as the canonical, independently-tested definition of the threshold rule
+// (see TestHeadroomClass_Boundaries) that the JXA implementation is kept in
+// sync with.
+func headroomClass(pct int) string {
+	switch {
+	case pct > 25:
+		return "normal"
+	case pct >= 10:
+		return "warning"
+	default:
+		return "critical"
 	}
 }
 
