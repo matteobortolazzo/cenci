@@ -267,7 +267,10 @@ that repeats the tick (~15 minutes by default; pass a second argument to change 
    keeps its own approval gate — you still confirm the plan before any fix is pushed. A
    watermark tracks already-handled comments so the same feedback is never re-addressed.
 
-A quiet tick (green CI, no new comments) just reports one line and schedules the next check.
+A quiet tick (green CI, no new comments) just reports one line and schedules the next check —
+each successive quiet tick doubles the wait (capped at 60 minutes), so a stalled PR is checked
+less and less often, while any actionable tick (a CI fix or an addressed comment) resets the
+pacing back to the base interval.
 
 - **Session-scoped, 7-day expiry.** The `/loop` lives as long as the Claude Code session and
   at most 7 days. If the session ends, re-run `/agentflow:babysit <pr>` to resume.
