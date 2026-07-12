@@ -1,10 +1,12 @@
 #!/bin/bash
-# Shared settings migration for the sandbox home volume.
+# Shared settings migration + plugin provisioning/update helpers for the
+# sandbox home volume.
 #
-# Sourced by entrypoint.sh (in the container) and by the test harness
-# (dev-sandbox/tests/settings-merge.test.sh) on the host, so the jq that
-# provisions/migrates /home/dev/.claude/settings.json lives in exactly one
-# place.
+# Sourced by entrypoint.sh (in the container), by `agent-sand
+# --update-plugins` (via the copy baked at /usr/local/bin/lib/), and by the
+# test harnesses (dev-sandbox/tests/settings-merge.test.sh,
+# dev-sandbox/tests/heal-plugins.test.sh) on the host, so this logic lives in
+# exactly one place.
 #
 # What the migration does, in one idempotent pass:
 #   * seeds the container-only bypass-mode keys (see entrypoint.sh for why
@@ -129,6 +131,62 @@ provision_plugins() {
         fi
         if ! claude plugin install "${key}" >/dev/null 2>&1; then
             echo "warning: failed to install plugin ${key}; it may be unavailable this session" >&2
+        fi
+    done
+
+    return 0
+}
+
+# update_plugins <plugins-dir> <marketplace-name> <ttl-minutes> <plugin>...
+#
+# provision_plugins only installs what's missing — it never version-checks, so
+# an existing home volume would keep stale plugins forever while the
+# marketplace auto-bumps on every push to main. This refreshes the marketplace
+# clone (`claude plugin marketplace update`, the only network step), then calls
+# `claude plugin update` only for plugins whose installed version differs from
+# the refreshed clone's marketplace.json — so a current volume costs exactly
+# one git pull, and nothing else.
+#
+# The whole pass is TTL-gated on a stamp file so rapid stop/start cycles stay
+# quiet: <ttl-minutes> 0 forces it (the manual `agent-sand --update-plugins`
+# path). The stamp is touched even when the refresh fails, so an offline boot
+# doesn't retry on every restart within the window. Same guarantee as
+# provisioning: failures warn to stderr and never block container start.
+update_plugins() {
+    local plugins_dir="$1" marketplace_name="$2" ttl_minutes="$3"
+    shift 3
+
+    command -v claude >/dev/null 2>&1 || return 0
+
+    local stamp="${plugins_dir}/.agent-sand-update-stamp"
+    if [[ "${ttl_minutes}" -gt 0 && -f "${stamp}" ]] \
+        && [[ -n "$(find "${stamp}" -mmin "-${ttl_minutes}" 2>/dev/null)" ]]; then
+        return 0
+    fi
+
+    if ! claude plugin marketplace update "${marketplace_name}" >/dev/null 2>&1; then
+        echo "warning: failed to refresh marketplace ${marketplace_name}; plugins may be stale this session" >&2
+    fi
+    touch "${stamp}"
+
+    local manifest="${plugins_dir}/marketplaces/${marketplace_name}/.claude-plugin/marketplace.json"
+    local meta="${plugins_dir}/installed_plugins.json"
+    jq -e . "${manifest}" >/dev/null 2>&1 || return 0
+    jq -e . "${meta}" >/dev/null 2>&1 || return 0
+
+    local plugin key desired
+    for plugin in "$@"; do
+        key="${plugin}@${marketplace_name}"
+        desired="$(jq -r --arg name "${plugin}" '[.plugins[]? | select(.name == $name) | .version][0] // empty' "${manifest}")"
+        [[ -n "${desired}" ]] || continue
+        # Not installed at all → provision_plugins' job, not ours.
+        jq -e --arg key "${key}" '(.plugins // {})[$key] // [] | length > 0' "${meta}" >/dev/null 2>&1 || continue
+        # Any record already at the marketplace version → up to date.
+        if jq -e --arg key "${key}" --arg v "${desired}" '(.plugins // {})[$key] // [] | any(.version == $v)' "${meta}" >/dev/null 2>&1; then
+            continue
+        fi
+        if ! claude plugin update "${key}" >/dev/null 2>&1; then
+            echo "warning: failed to update plugin ${key}; it may be stale this session" >&2
         fi
     done
 

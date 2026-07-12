@@ -190,6 +190,21 @@ if [[ "${CLAUDE_FAKE_EXIT:-0}" -ne 0 ]]; then
 fi
 if [[ "$1" == "plugin" && "$2" == "marketplace" && "$3" == "add" ]]; then
     mkdir -p "${CLAUDE_FAKE_PLUGINS_DIR}/marketplaces/${CLAUDE_FAKE_MARKETPLACE}"
+elif [[ "$1" == "plugin" && "$2" == "marketplace" && "$3" == "update" ]]; then
+    : # refresh is a no-op: tests seed marketplace.json directly
+elif [[ "$1" == "plugin" && "$2" == "update" ]]; then
+    spec="$3"
+    plugin="${spec%@*}"
+    mkt="${spec#*@}"
+    manifest="${CLAUDE_FAKE_PLUGINS_DIR}/marketplaces/${mkt}/.claude-plugin/marketplace.json"
+    version="$(jq -r --arg name "${plugin}" '[.plugins[]? | select(.name == $name) | .version][0]' "${manifest}")"
+    cache_dir="${CLAUDE_FAKE_PLUGINS_DIR}/cache/${mkt}/${plugin}/${version}"
+    mkdir -p "${cache_dir}"
+    touch "${cache_dir}/plugin.json"
+    meta="${CLAUDE_FAKE_PLUGINS_DIR}/installed_plugins.json"
+    jq --arg key "${spec}" --arg path "${cache_dir}" --arg v "${version}" \
+        '.plugins[$key] = [{"scope":"user","installPath":$path,"version":$v}]' \
+        "${meta}" > "${meta}.tmp" && mv "${meta}.tmp" "${meta}"
 elif [[ "$1" == "plugin" && "$2" == "install" ]]; then
     spec="$3"
     plugin="${spec%@*}"
@@ -336,6 +351,197 @@ if [[ "${FIRST_RUN_CALLS}" -gt 0 && "${SECOND_RUN_CALLS}" -eq 0 ]]; then
     pass
 else
     fail "expected calls on first run and zero on second, got ${FIRST_RUN_CALLS} then ${SECOND_RUN_CALLS}"
+fi
+
+####################################################################
+# update_plugins tests
+#
+# provision_plugins only installs what's missing — it never version-checks,
+# so an existing home volume keeps stale plugins forever while the
+# marketplace auto-bumps on every push to main. update_plugins() refreshes
+# the marketplace clone (`claude plugin marketplace update`), then calls
+# `claude plugin update` only for plugins whose installed version differs
+# from the clone's marketplace.json. A stamp file TTL-gates the whole pass
+# (ttl 0 = forced, the manual `agent-sand --update-plugins` path), and like
+# provisioning it never blocks boot.
+####################################################################
+
+STAMP_NAME=".agent-sand-update-stamp"
+
+# seed_marketplace <version>: write a marketplace.json advertising agentflow
+# and agentwatch at <version> in the fake marketplace clone.
+seed_marketplace() {
+    local dir="${PLUGINS_DIR}/marketplaces/agent-stack/.claude-plugin"
+    mkdir -p "${dir}"
+    jq -n --arg v "$1" \
+        '{name:"agent-stack", plugins:[{name:"agentflow",version:$v},{name:"agentwatch",version:$v}]}' \
+        > "${dir}/marketplace.json"
+}
+
+# seed_installed <plugin> <version>: populated cache dir + metadata record.
+seed_installed() {
+    local path meta="${PLUGINS_DIR}/installed_plugins.json"
+    path="$(seed_cache "agent-stack/$1/$2")"
+    [[ -f "${meta}" ]] || echo '{"version":2,"plugins":{}}' > "${meta}"
+    jq --arg key "$1@agent-stack" --arg path "${path}" --arg v "$2" \
+        '.plugins[$key] = [{"scope":"user","installPath":$path,"version":$v}]' \
+        "${meta}" > "${meta}.tmp" && mv "${meta}.tmp" "${meta}"
+}
+
+echo
+echo "update_plugins tests"
+
+# ── Case 15: stale plugin → exactly one plugin update call ───────
+new_provision_case stale-plugin
+make_fake_claude
+seed_marketplace 4.7.1
+seed_installed agentflow 4.0.0
+seed_installed agentwatch 4.7.1
+echo "case: stale plugin is updated"
+PATH="${FAKE_BIN}:${PATH}" update_plugins "${PLUGINS_DIR}" agent-stack 30 agentflow agentwatch
+if grep -q "^plugin marketplace update agent-stack$" "${CLAUDE_FAKE_LOG}"; then
+    pass
+else
+    fail "expected 'plugin marketplace update agent-stack' in log: $(cat "${CLAUDE_FAKE_LOG}")"
+fi
+UPDATE_CALLS="$(grep -c "^plugin update " "${CLAUDE_FAKE_LOG}" || true)"
+if [[ "${UPDATE_CALLS}" -eq 1 ]] && grep -q "^plugin update agentflow@agent-stack$" "${CLAUDE_FAKE_LOG}"; then
+    pass
+else
+    fail "expected exactly one 'plugin update agentflow@agent-stack', got: $(cat "${CLAUDE_FAKE_LOG}")"
+fi
+assert_file_jq "metadata ends at the marketplace version" \
+    "${PLUGINS_DIR}/installed_plugins.json" '.plugins["agentflow@agent-stack"][0].version == "4.7.1"'
+if [[ -f "${PLUGINS_DIR}/${STAMP_NAME}" ]]; then
+    pass
+else
+    fail "expected update stamp to be created"
+fi
+
+# ── Case 16: everything current → marketplace refresh only ───────
+new_provision_case all-current
+make_fake_claude
+seed_marketplace 4.7.1
+seed_installed agentflow 4.7.1
+seed_installed agentwatch 4.7.1
+echo "case: up-to-date plugins are not updated"
+PATH="${FAKE_BIN}:${PATH}" update_plugins "${PLUGINS_DIR}" agent-stack 30 agentflow agentwatch
+if ! grep -q "^plugin update " "${CLAUDE_FAKE_LOG}"; then
+    pass
+else
+    fail "expected zero 'plugin update' calls, got: $(cat "${CLAUDE_FAKE_LOG}")"
+fi
+
+# ── Case 17: fresh stamp within TTL → zero claude calls ──────────
+new_provision_case fresh-stamp
+make_fake_claude
+seed_marketplace 4.7.1
+seed_installed agentflow 4.0.0
+touch "${PLUGINS_DIR}/${STAMP_NAME}"
+echo "case: fresh stamp within TTL skips everything"
+PATH="${FAKE_BIN}:${PATH}" update_plugins "${PLUGINS_DIR}" agent-stack 30 agentflow agentwatch
+if [[ "$(log_count)" -eq 0 ]]; then
+    pass
+else
+    fail "expected zero claude invocations, got $(log_count): $(cat "${CLAUDE_FAKE_LOG}")"
+fi
+
+# ── Case 18: stale stamp (older than TTL) → update runs ──────────
+new_provision_case stale-stamp
+make_fake_claude
+seed_marketplace 4.7.1
+seed_installed agentflow 4.0.0
+touch -d '31 minutes ago' "${PLUGINS_DIR}/${STAMP_NAME}"
+echo "case: stale stamp runs the update"
+PATH="${FAKE_BIN}:${PATH}" update_plugins "${PLUGINS_DIR}" agent-stack 30 agentflow
+if grep -q "^plugin update agentflow@agent-stack$" "${CLAUDE_FAKE_LOG}"; then
+    pass
+else
+    fail "expected stale stamp to trigger an update: $(cat "${CLAUDE_FAKE_LOG}")"
+fi
+# ...and the stamp was refreshed (newer than the 31-minutes-ago seed).
+if [[ -n "$(find "${PLUGINS_DIR}/${STAMP_NAME}" -mmin -1 2>/dev/null)" ]]; then
+    pass
+else
+    fail "expected the stamp to be refreshed after an update pass"
+fi
+
+# ── Case 19: ttl 0 forces the update despite a fresh stamp ───────
+new_provision_case forced-update
+make_fake_claude
+seed_marketplace 4.7.1
+seed_installed agentflow 4.0.0
+touch "${PLUGINS_DIR}/${STAMP_NAME}"
+echo "case: ttl 0 forces the update"
+PATH="${FAKE_BIN}:${PATH}" update_plugins "${PLUGINS_DIR}" agent-stack 0 agentflow
+if grep -q "^plugin update agentflow@agent-stack$" "${CLAUDE_FAKE_LOG}"; then
+    pass
+else
+    fail "expected ttl 0 to bypass the stamp: $(cat "${CLAUDE_FAKE_LOG}")"
+fi
+
+# ── Case 20: claude exits 1 → returns 0 (never blocks boot) ──────
+new_provision_case update-claude-fails
+make_fake_claude
+seed_marketplace 4.7.1
+seed_installed agentflow 4.0.0
+export CLAUDE_FAKE_EXIT=1
+echo "case: claude failures never block boot"
+if PATH="${FAKE_BIN}:${PATH}" update_plugins "${PLUGINS_DIR}" agent-stack 30 agentflow 2>/dev/null; then
+    pass
+else
+    fail "update_plugins must return 0 even when claude fails"
+fi
+unset CLAUDE_FAKE_EXIT
+
+# ── Case 21: marketplace.json missing → no update calls, exit 0 ──
+new_provision_case no-manifest
+make_fake_claude
+seed_installed agentflow 4.0.0
+echo "case: missing marketplace.json"
+if PATH="${FAKE_BIN}:${PATH}" update_plugins "${PLUGINS_DIR}" agent-stack 30 agentflow; then
+    pass
+else
+    fail "update_plugins must return 0 when marketplace.json is missing"
+fi
+if ! grep -q "^plugin update " "${CLAUDE_FAKE_LOG}"; then
+    pass
+else
+    fail "expected no 'plugin update' calls without a manifest: $(cat "${CLAUDE_FAKE_LOG}")"
+fi
+
+# ── Case 22: plugin not installed → left to provision_plugins ────
+new_provision_case not-installed
+make_fake_claude
+seed_marketplace 4.7.1
+seed_installed agentwatch 4.7.1
+echo "case: uninstalled plugin is not updated"
+PATH="${FAKE_BIN}:${PATH}" update_plugins "${PLUGINS_DIR}" agent-stack 30 agentflow agentwatch
+if ! grep -q "^plugin update " "${CLAUDE_FAKE_LOG}"; then
+    pass
+else
+    fail "expected no 'plugin update' calls for an uninstalled plugin: $(cat "${CLAUDE_FAKE_LOG}")"
+fi
+
+# ── Case 23: no claude on PATH → no-op, exit 0, no stamp ─────────
+# An empty PATH dir (not PATH_NO_CLAUDE, which only strips the fake bin and
+# would fall through to a real host `claude`) — update_plugins must bail on
+# `command -v claude` before touching anything.
+new_provision_case update-no-claude
+EMPTY_BIN="${WORK}/empty-bin"
+mkdir -p "${EMPTY_BIN}"
+seed_marketplace 4.7.1
+seed_installed agentflow 4.0.0
+echo "case: no claude on PATH"
+if PATH="${EMPTY_BIN}" update_plugins "${PLUGINS_DIR}" agent-stack 30 agentflow; then
+    pass
+else
+    fail "update_plugins should return 0 when claude is not on PATH"
+fi
+if [[ ! -f "${PLUGINS_DIR}/${STAMP_NAME}" ]]; then
+    pass
+else
+    fail "expected no stamp without a claude binary"
 fi
 
 # ── Summary ──────────────────────────────────────────────────────

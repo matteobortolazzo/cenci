@@ -87,6 +87,9 @@ agent-sand --docker -p "run the integration tests"
 
 # Use host networking for manual OAuth (browser callback)
 agent-sand --host-network --shell
+
+# Force an agentflow/agentwatch plugin update now (bypasses the 30-min TTL)
+agent-sand --update-plugins
 ```
 
 ### Per-repo containers
@@ -345,9 +348,12 @@ If `agentwatch` is installed on the host and the daemon is running, the script a
 - Passes `$TMUX_PANE` for tmux window status updates
 
 No manual install is needed inside the container. On each start the entrypoint
-enables the `agentwatch` and `agentflow` plugins from the `agent-stack`
-marketplace (Claude Code auto-installs them on launch), so sandbox sessions show
-up in the host status bar out of the box. Existing home volumes are migrated off
+enables and installs the `agentwatch` and `agentflow` plugins from the
+`agent-stack` marketplace, so sandbox sessions show up in the host status bar out
+of the box, and keeps them current: it refreshes the marketplace clone and
+updates any stale plugin, gated by a 30-minute stamp so rapid stop/start cycles
+make zero network calls (`agent-sand --update-plugins` forces it — see
+[Maintenance](#update-sandbox-plugins)). Existing home volumes are migrated off
 the old `muxwatch`/`ccflow` plugins and the renamed `claude-tools` marketplace at
 the same time.
 
@@ -377,6 +383,21 @@ agent-sand --build
 ### Update Claude Code
 
 Just update Claude Code on the host. The binary is bind-mounted, so the container always uses the host version — no rebuild needed.
+
+### Update sandbox plugins
+
+Nothing to do normally: on each container start the entrypoint refreshes the
+`agent-stack` marketplace and updates stale `agentflow`/`agentwatch` plugins in
+the home volume (TTL-gated to 30 minutes). To force an update immediately —
+e.g. right after merging a plugin change — run:
+
+```bash
+agent-sand --update-plugins
+```
+
+It updates the running container in place (agent sessions pick the new version
+up on their next start), or spins up a one-shot container against the home
+volume if none is running.
 
 ### Update Codex
 

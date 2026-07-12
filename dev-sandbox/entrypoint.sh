@@ -81,9 +81,20 @@ heal_plugin_installs /home/dev/.claude/plugins
 # that actually works and is idempotent — install even repairs a
 # metadata-present/cache-missing state on its own. Costs one marketplace
 # clone (~10-20s) on first boot only; a healthy volume makes zero `claude`
-# calls. Never blocks container start: failures (offline boot, no `claude`
-# binary — codex-sand mounts none) just warn to stderr.
+# calls here (the TTL-gated refresh below is the only recurring cost). Never
+# blocks container start: failures (offline boot, no `claude` binary —
+# codex-sand mounts none) just warn to stderr.
 provision_plugins /home/dev/.claude/plugins agent-stack matteobortolazzo/agent-stack agentflow agentwatch
+
+# ── Keep plugins current (TTL-gated) ──────────────────────────────
+# provision_plugins only installs what's missing, so an existing home volume
+# would keep stale plugins forever while the marketplace auto-bumps on every
+# push to main. update_plugins refreshes the marketplace clone (one git pull)
+# and bumps only the plugins whose installed version differs, gated by a
+# 30-minute stamp so rapid stop/start cycles make zero network calls. Forced
+# variant (ttl 0) is `agent-sand --update-plugins`. Same guarantee as above:
+# failures warn to stderr and never block container start.
+update_plugins /home/dev/.claude/plugins agent-stack 30 agentflow agentwatch
 
 # ── Skip Claude Code's first-run onboarding wizard ────────────────
 # Onboarding state (theme picker, terminal "anti-flicker" setup, account step)

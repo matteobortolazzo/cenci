@@ -47,6 +47,7 @@ BUILD_BASE_ONLY=false
 SHELL_ONLY=false
 HOST_NETWORK=false
 DOCKER_SOCKET=false
+UPDATE_PLUGINS=false
 AGENT_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -87,6 +88,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --docker)
             DOCKER_SOCKET=true
+            shift
+            ;;
+        --update-plugins)
+            UPDATE_PLUGINS=true
             shift
             ;;
         *)
@@ -193,6 +198,33 @@ fi
 
 if ! "${RUNTIME}" image inspect "${IMAGE}" &>/dev/null; then
     build_selected_image
+fi
+
+# ── Forced plugin update (--update-plugins) ──────────────────────
+# Runs update_plugins with ttl 0 (bypasses the 30-min stamp the entrypoint
+# uses) inside the running container, or in a one-shot container against the
+# home volume when nothing is running. Needs a host `claude` binary either
+# way — the containers don't bake one.
+if "${UPDATE_PLUGINS}"; then
+    UPDATE_CMD='source /usr/local/bin/lib/migrate-settings.sh && update_plugins /home/dev/.claude/plugins agent-stack 0 agentflow agentwatch'
+    if "${RUNTIME}" ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$"; then
+        echo "Updating plugins in running '${CONTAINER_NAME}'..."
+        "${RUNTIME}" exec "${CONTAINER_NAME}" /bin/bash -c "${UPDATE_CMD}"
+        echo "Done. Agent sessions pick up the update on their next start."
+    else
+        CLAUDE_BIN="$(readlink -f "$(which claude)" 2>/dev/null || true)"
+        if [[ ! -x "${CLAUDE_BIN}" ]]; then
+            echo "Error: --update-plugins needs the claude binary on the host." >&2
+            exit 1
+        fi
+        echo "Updating plugins in volume '${VOLUME_NAME}'..."
+        "${RUNTIME}" run --rm --entrypoint /bin/bash \
+            -v "${VOLUME_NAME}:/home/dev" \
+            -v "${CLAUDE_BIN}:/usr/local/bin/claude:ro" \
+            "${IMAGE}" -c "${UPDATE_CMD}"
+        echo "Done."
+    fi
+    exit 0
 fi
 
 # ── Resolve agent binary ────────────────────────────────────────
