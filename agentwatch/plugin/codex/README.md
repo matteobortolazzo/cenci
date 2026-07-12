@@ -4,8 +4,7 @@ Forwards Codex lifecycle hooks to `agentwatch notify` so the agentwatch daemon c
 
 ## Requirements
 
-- `agentwatch` binary on `$PATH`
-- `agentwatch` daemon running in the same tmux/server environment
+- plugin-local `agentwatch` binary (provisioned automatically on first session)
 - Codex hooks enabled (default in current Codex releases)
 
 ## Binary and daemon (self-bootstrapping)
@@ -17,8 +16,7 @@ Claude Code plugin. On `SessionStart`, `bootstrap.sh` runs detached and:
   against the release `checksums.txt`;
 - installs it to the plugin's `bin/` and symlinks it onto `$PATH` (preferring the
   first existing writable `$PATH` entry, falling back to `~/.local/bin` with a
-  one-line "add it to your PATH" hint in the log) so the hooks' bare `agentwatch`
-  resolves;
+  one-line "add it to your PATH" hint in the log) for interactive use and bar widgets;
 - autostarts the daemon.
 
 It is idempotent: once the version-matched binary and daemon are provisioned, a
@@ -26,6 +24,11 @@ re-run is a no-op (including the common case where the Claude Code plugin alread
 bootstrapped the shared daemon). Everything is non-fatal — failures log one line to
 `${TMPDIR:-/tmp}/agentwatch-bootstrap.log` and never block the session. If a machine
 also runs the Claude plugin, both share the same host daemon.
+
+After a login or restart, the daemon does not need a separate tmux startup entry:
+the first lifecycle hook that finds the default event socket unavailable starts the
+plugin-local daemon, waits briefly, and retries the same event. Explicit custom event
+sockets remain under the caller's control.
 
 **Manual / Codex-only install** (alternative): install the binary yourself
 (`go install github.com/matteobortolazzo/agent-stack/agentwatch@latest` or

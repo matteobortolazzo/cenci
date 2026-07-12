@@ -5,6 +5,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/daemon"
 )
 
 // Controller is the small consumer-side tmux interface the launcher needs.
@@ -47,7 +49,7 @@ type Opts struct {
 
 	// EnsureDaemon starts the agentwatch daemon if it isn't already running,
 	// and waits briefly for it to come up; nil uses the real implementation
-	// (ensureDaemonRunning in daemon.go). Called right before the window is
+	// (daemon.EnsureRunning). Called right before the window is
 	// spawned (never on dry-run or a refused grouped session): agent-sand
 	// only mounts the event socket into the sandbox if it already exists at
 	// container launch (#139), so a window spawned before the daemon is up
@@ -151,7 +153,7 @@ func Run(opts Opts, ctrl Controller) error {
 
 	ensure := opts.EnsureDaemon
 	if ensure == nil {
-		ensure = ensureDaemonRunning
+		ensure = daemon.EnsureRunning
 	}
 	ensure()
 

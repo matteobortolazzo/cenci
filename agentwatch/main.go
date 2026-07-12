@@ -161,8 +161,9 @@ func runNotify(args []string) {
 		Timestamp:        time.Now().UTC().Format(time.RFC3339),
 	}
 
-	// Send event to daemon, ignore errors (daemon might not be running).
-	_ = ipc.SendEvent(*socketPath, event)
+	// Delivery is silent and non-fatal. For the default socket it starts a
+	// missing daemon on demand and retries this exact event once.
+	daemon.DeliverEvent(*socketPath, event)
 }
 
 func runRun(args []string) {
