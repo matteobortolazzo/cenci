@@ -258,6 +258,24 @@ single-repo mounting (see [Per-repo containers](#per-repo-containers)). Rebuild 
 repo's own image the same way as the monolith: `agent-sand --build` (run from inside
 that repo).
 
+`/agentflow:configure` generates and maintains `.agent-sand/Dockerfile` automatically
+from the repo's detected stack (question 9) — you normally don't hand-write this file.
+It writes only the fragments the detected stack needs, wrapped in
+`# agentflow:managed-begin` / `# agentflow:managed-end` markers so re-running configure
+regenerates just that block and preserves anything the team appends around it.
+
+**Sync obligation**: `dev-sandbox/fragments/*.dockerfile` is the source of truth for the
+per-stack blocks configure assembles into `.agent-sand/Dockerfile`; the agentflow
+`configure` skill's stack-to-fragment mapping table mirrors this directory. If a fragment
+is added, removed, or renamed here, that table needs a matching manual update — low risk
+in practice, since both live in this same monorepo and are maintained together, but
+currently unenforced by tooling.
+
+**Trust / security note**: a committed `.agent-sand/Dockerfile` is reviewed code, like
+any other file in the PR that adds or changes it. It only runs `docker build` steps
+assembled from `dev-sandbox/fragments/*.dockerfile` by configure's templates — no
+arbitrary runtime hooks execute during generation or during the build it produces.
+
 ### Permission model
 
 Claude Code runs with `--dangerously-skip-permissions` inside the container: no permission prompts, no tool allowlists. Isolation comes from the container itself, not from Claude Code's permission system. This is the supported use of the flag (it refuses to run as root; the container user is `dev`, UID 1000). Human-in-the-loop control moves up a layer — to workflow gates (plan approval, `AskUserQuestion`) rather than per-command approval.

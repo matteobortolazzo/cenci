@@ -28,6 +28,12 @@ Each frontend project has its own design directory. See per-project CLAUDE.md fo
 - ALWAYS read the project's DESIGN.md before implementing any frontend feature
 <!-- END IF -->
 
+<!-- IF sandbox.enabled -->
+## Sandbox Image
+- `.agent-sand/Dockerfile` — committed, single per-repo image covering the union of every project's stack; the whole team builds the same image
+- Rebuild after changing any project's stack or the Dockerfile: `agent-sand --build` (run from inside this repo)
+<!-- END IF -->
+
 ## Reference Docs
 On-demand topic docs live in `docs/` at the repo root. Read the file matching your work area:
 - `docs/git-workflow.md` — branching, commits, PRs, versioning
