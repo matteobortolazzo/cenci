@@ -12,7 +12,7 @@ working setup on Linux, macOS, or WSL2.
 | `agentwatch` | attention | Shows live agent status wherever you're looking — tmux bar, waybar, macOS menu bar — and shouts when the agent needs you |
 | `sandbox` | isolation | Runs the agent inside a Docker/Podman container with full permissions, so autopilot is safe |
 
-They ship and install together, as one unit: the sandbox makes autopilot safe,
+They ship and install together, as one unit: agent-sandbox makes autopilot safe,
 agentflow runs the autopilot, agentwatch tells you when it needs you.
 
 ## Before you start
@@ -57,7 +57,7 @@ What it does, concretely:
    Codex plugin marketplace.
 2. Installs the selected plugins in Claude Code and Codex. Each client keeps its own
    local plugin cache; the marketplace catalog and plugin sources are shared.
-3. **sandbox**: symlinks the `agent-sand` / `codex-sand` launchers into
+3. **agent-sandbox**: symlinks the `agent-sand` / `codex-sand` launchers into
    `~/.local/bin` and offers to build the container image (a few minutes, one time).
 4. **agentwatch**: nothing to do — the binary and daemon self-bootstrap on your first
    Claude Code session. On macOS, if SwiftBar is installed it offers to wire up the
@@ -185,4 +185,4 @@ rm -f ~/SwiftBarPlugins/agentwatch.5s.sh
 - [Root README](../README.md) — how the three layers fit together, and Codex support
 - [agentflow](../agentflow/README.md) — the full pipeline, board lifecycle, babysitting PRs
 - [agentwatch](../agentwatch/README.md) — dispatch, auto-pickup, widgets, the Go API
-- [dev-sandbox](../dev-sandbox/README.md) — auth injection, Docker-in-Docker, lifecycle
+- [agent-sandbox](../dev-sandbox/README.md) — auth injection, Docker-in-Docker, lifecycle

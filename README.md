@@ -18,7 +18,7 @@ one install, one update.
 │  autopilot:  /goal-driven phases → PR → CI green       │
 │  babysit:    /loop → address-review until merged       │
 ├────────────────────────────────────────────────────────┤
-│  isolation layer   (dev-sandbox)                       │
+│  isolation layer   (agent-sandbox)                     │
 │  Docker/Podman + full permissions                      │
 │  the ONLY security boundary; no prompt friction inside │
 └────────────────────────────────────────────────────────┘
@@ -42,7 +42,7 @@ fits it better; the isolation and attention layers don't care which.
 
 Three plugins, **one installer**. It detects your platform (Linux, macOS, WSL2),
 checks prerequisites, installs all three plugins, and does the post-install setup —
-sandbox launcher + image build, macOS menu bar wiring:
+agent-sandbox launcher + image build, macOS menu bar wiring:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
@@ -82,7 +82,7 @@ mechanism.
 
 ## The three layers
 
-### Isolation — [dev-sandbox](./dev-sandbox) (plugin: `sandbox`)
+### Isolation — [agent-sandbox](./dev-sandbox) (plugin: `sandbox`)
 
 A Docker/Podman container that runs the agent with `--dangerously-skip-permissions` and
 mounts only `~/Repos`. It exists so autopilot is *safe*: the container is the single
@@ -142,7 +142,7 @@ Per-layer Codex status is honest about where each layer stands today:
 |-------|-------------|----------|
 | attention (agentwatch) | Watched through native, self-bootstrapping Codex hooks | Re-trust changed hooks through `/hooks` |
 | workflow (agentflow) | Portable convention skills plus the `AGENTS.md` implementation recipe | Interactive pipeline commands remain Claude Code-only |
-| isolation (sandbox) | `agent-sand --agent codex` and `codex-sand` | Container remains the security boundary |
+| isolation (agent-sandbox) | `agent-sand --agent codex` and `codex-sand` | Container remains the security boundary |
 
 ## License
 
