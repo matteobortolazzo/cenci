@@ -272,6 +272,10 @@ each successive quiet tick doubles the wait (capped at 60 minutes), so a stalled
 less and less often, while any actionable tick (a CI fix or an addressed comment) resets the
 pacing back to the base interval.
 
+Each tick prefers a deterministic helper script (`skills/babysit/scripts/tick.sh`) to gather
+PR state, CI results, and mechanically-filtered candidate comments in one call, falling back
+to the equivalent raw `gh` calls if the script is unavailable or its output can't be parsed.
+
 - **Session-scoped, 7-day expiry.** The `/loop` lives as long as the Claude Code session and
   at most 7 days. If the session ends, re-run `/agentflow:babysit <pr>` to resume.
 - **Self-paced pacing needs native support.** On Bedrock / Vertex / Foundry, self-paced

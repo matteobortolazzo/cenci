@@ -8,6 +8,8 @@ user-invocable: false
 
 This is the single source of truth for "is this PR comment actionable?". `address-review` (Phase 1D) and `babysit` (step 5) both apply exactly this filter — babysit's watermark only works if the two stay identical, so never restate the lists inline in a calling skill; reference this skill instead.
 
+`babysit`'s `scripts/tick.sh` implements only the **mechanical** subset of the Exclude list below — bot logins, resolved threads, outdated comments — nothing semantic. It cannot judge whether a comment is "purely informational" or a genuine change request; that semantic judgment, plus the watermark, stays in the calling model. This skill remains the single source of truth: if the Include/Exclude lists below ever change, edit this file first, then update `tick.sh` to match — never the reverse.
+
 **Include**:
 - Unresolved comments/threads
 - Comments requesting changes (not approvals or neutral comments with no actionable content)

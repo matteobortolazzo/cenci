@@ -79,12 +79,28 @@ from an older babysit version) will lack `currentDelaySeconds`. Treat that as
 `currentDelaySeconds = intervalSeconds` for that tick, then persist the field going
 forward.
 
+**Deterministic tick data**: `scripts/tick.sh` gathers steps 1, 4, and 5's raw data (PR
+state, CI checks, and mechanically-filtered candidate comments) in one deterministic call
+instead of four separate `gh` calls re-derived in-model each tick. Invoke it as a single
+Bash call (the `shell-rules` reviewed-repository-script carve-out):
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/skills/babysit/scripts/tick.sh" <owner> <repo> <pr> <state-file>
+```
+
+Each of steps 1, 4, and 5 below states its own preferred-script / fallback-to-raw-`gh`
+behavior; the fallback text in each step is the literal pre-script behavior, unchanged.
+
 ## Tick pipeline
 
 Execute these steps in order on **every** invocation — the first manual run and each loop
 re-fire alike.
 
 ### 1. Fetch PR state
+
+Prefer `scripts/tick.sh`'s output for this step — its `terminal` (`state`, `mergedAt`,
+`closingIssuesReferences`) and `headRefOid` fields cover it. On a nonzero exit or
+non-JSON stdout from `tick.sh`, fall back to the raw call exactly as below:
 
 ```bash
 gh pr view <pr> --repo <owner>/<repo> --json number,title,state,headRefName,headRefOid,mergedAt,closingIssuesReferences
@@ -144,6 +160,10 @@ keep it going. (Mirror the `/goal` autopilot's "native-command + graceful no-op"
 
 ### 4. CI check (auto-fix red, capped)
 
+Prefer `scripts/tick.sh`'s `checks.failing` / `checks.allPass` / `checks.anyPending`
+fields — the `bucket` categorization below is already done. On a nonzero exit or
+non-JSON stdout from `tick.sh`, fall back to the raw call exactly as below:
+
 ```bash
 gh pr checks <pr> --repo <owner>/<repo> --json bucket,name,state
 ```
@@ -175,7 +195,18 @@ branch of this step.
 
 ### 5. New-comment check (delegate to address-review)
 
-Fetch reviews and comments **in parallel**:
+Prefer `scripts/tick.sh`'s `candidateComments` / `excludedCounts` fields — the mechanical
+exclusions (bot logins, resolved threads, outdated comments) are already applied. Read
+the `pr-comment-filter` reference skill and apply its **semantic** subset only (requesting
+changes vs. informational, inline-suggestion judgment) to `candidateComments`.
+
+**Pagination guard**: if `tick.sh`'s `warnings` array contains a `reviewThreads`
+pagination warning (more resolved-thread data exists than was fetched), its `terminal`
+and `checks` data are still good, but ignore `candidateComments` for this tick and fall
+back to the raw fetch + in-model filter below instead.
+
+On a nonzero exit or non-JSON stdout from `tick.sh` (or the pagination case above), fall
+back to fetching reviews and comments **in parallel**:
 
 ```bash
 gh api repos/<owner>/<repo>/pulls/<pr>/reviews
@@ -184,8 +215,8 @@ gh api repos/<owner>/<repo>/pulls/<pr>/reviews
 gh api repos/<owner>/<repo>/pulls/<pr>/comments
 ```
 
-Read the `pr-comment-filter` reference skill and apply its include/exclude filter — the
-same single source of truth `address-review` Step 1D uses, so the watermark matches
+Read the `pr-comment-filter` reference skill and apply its full include/exclude filter —
+the same single source of truth `address-review` Step 1D uses, so the watermark matches
 exactly what address-review would act on.
 
 Then apply the **watermark** — keep only comments that are **both**:
