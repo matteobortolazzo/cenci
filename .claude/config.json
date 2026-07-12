@@ -42,5 +42,9 @@
     "gopls": true
   },
   "autoCompactDisabled": true,
-  "pinSubagents200K": true
+  "pinSubagents200K": true,
+  "sandbox": {
+    "enabled": true,
+    "baseVersion": "0.9.1"
+  }
 }
