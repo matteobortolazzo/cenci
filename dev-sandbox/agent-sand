@@ -355,14 +355,39 @@ EXEC_ENV_ARGS=(-e "TMUX_PANE=${TMUX_PANE:-}" -e "AGENT_SAND=1")
 [[ -n "${CONTEXT7_API_KEY:-}" ]] && EXEC_ENV_ARGS+=(-e "CONTEXT7_API_KEY=${CONTEXT7_API_KEY}")
 [[ -n "${OPENAI_API_KEY:-}" ]] && EXEC_ENV_ARGS+=(-e "OPENAI_API_KEY=${OPENAI_API_KEY}")
 
-# ── Attach to running container ─────────────────────────────────
-if "${RUNTIME}" ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$"; then
+run_agent() {
     if "${SHELL_ONLY}"; then
         echo "Attaching shell to running '${CONTAINER_NAME}'..."
         "${RUNTIME}" exec -it "${EXEC_ENV_ARGS[@]}" "${CONTAINER_NAME}" /bin/bash
     else
         "${RUNTIME}" exec -it "${EXEC_ENV_ARGS[@]}" "${CONTAINER_NAME}" "${AGENT}" "${AGENT_CMD_ARGS[@]}" "${AGENT_ARGS[@]}"
     fi
+}
+
+wait_until_ready() {
+    local ready=false
+    local attempt
+    for ((attempt = 0; attempt < 600; attempt++)); do
+        if "${RUNTIME}" exec "${CONTAINER_NAME}" test -e /tmp/agent-sand-ready 2>/dev/null; then
+            ready=true
+            break
+        fi
+        sleep 0.1
+    done
+    if ! "${ready}"; then
+        echo "Error: container '${CONTAINER_NAME}' did not become ready within 60 seconds." >&2
+        return 1
+    fi
+}
+
+# ── Attach to running container ─────────────────────────────────
+if "${RUNTIME}" ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$"; then
+    # Containers created by this launcher initialize asynchronously. Older
+    # attached containers have no lifecycle label and are already initialized.
+    if [[ "$("${RUNTIME}" inspect --format '{{ index .Config.Labels "agent-sand.lifecycle" }}' "${CONTAINER_NAME}" 2>/dev/null || true)" == detached ]]; then
+        wait_until_ready
+    fi
+    run_agent
     exit $?
 fi
 
@@ -373,7 +398,8 @@ fi
 RUN_ARGS=(
     --name "${CONTAINER_NAME}"
     --hostname "${HOSTNAME_VALUE}"
-    -it --init --rm
+    --label "agent-sand.lifecycle=detached"
+    -d --init --rm
     --workdir "${WORKDIR}"
 
     # Workspace
@@ -456,9 +482,15 @@ if "${DOCKER_SOCKET}"; then
     fi
 fi
 
-# ── Run ─────────────────────────────────────────────────────────
-if "${SHELL_ONLY}"; then
-    "${RUNTIME}" run "${RUN_ARGS[@]}" "${IMAGE}"
-else
-    "${RUNTIME}" run "${RUN_ARGS[@]}" "${IMAGE}" -c 'exec "$@"' _ "${AGENT}" "${AGENT_CMD_ARGS[@]}" "${AGENT_ARGS[@]}"
-fi
+# ── Start shared container, then exec this agent into it ─────────
+# Keep PID 1 independent from every tmux pane. If the first pane owns an
+# attached `docker run`, closing it forwards SIGHUP to PID 1 and tears down all
+# later `docker exec` sessions in the same repository. A detached idle process
+# makes every agent window an equal, independently disposable exec session.
+"${RUNTIME}" run "${RUN_ARGS[@]}" "${IMAGE}" \
+    -c 'touch /tmp/agent-sand-ready && exec sleep infinity' >/dev/null
+
+# The entrypoint performs credential and plugin setup before running the
+# readiness command. Do not race the first agent against that initialization.
+wait_until_ready
+run_agent
