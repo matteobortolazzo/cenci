@@ -16,6 +16,7 @@ description: |
   </example>
 tools: Read, Grep, Glob
 model: sonnet
+effort: high
 color: magenta
 permissionMode: plan
 ---

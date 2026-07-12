@@ -16,6 +16,7 @@ description: |
   </example>
 tools: Read, Grep, Glob, Bash, mcp__context7
 model: opus
+effort: high
 color: blue
 permissionMode: plan
 ---

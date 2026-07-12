@@ -337,20 +337,26 @@ When a ticket is sized M or L during `/agentflow:refine`, the skill suggests spl
 
 The plugin uses specialized agents with isolated contexts:
 
-| Agent | Role | Model | Permission Mode |
-|-------|------|-------|-----------------|
-| **context-gatherer** | Bundles ticket, design, and project context into a file for the planner | haiku | acceptEdits |
-| **planner** | Analyzes tickets, produces implementation plans | opus | plan (read-only) |
-| **implementer** | TDD: writes tests first, then implementation | sonnet | acceptEdits |
-| **security-reviewer** | OWASP-focused security review | opus | plan (read-only) |
-| **code-reviewer** | PR-style quality review | sonnet | plan (read-only) |
-| **silent-failure-hunter** | Swallowed-error and silent-fallback detection | sonnet | plan (read-only) |
-| **duplication-analyzer** | Copy-paste and extraction analysis for `/agentflow:refactor` | sonnet | plan (read-only) |
-| **structure-analyzer** | File-size and test-organization analysis for `/agentflow:refactor` | haiku | plan (read-only) |
-| **security-analyzer** | OWASP audit for `/agentflow:refactor` | sonnet | plan (read-only) |
-| **lessons-collector** | Routes genuine mistakes to `docs/<topic>.md` or `CLAUDE.md` | haiku | acceptEdits |
+| Agent | Role | Model | Effort | Permission Mode |
+|-------|------|-------|--------|-----------------|
+| **context-gatherer** | Bundles ticket, design, and project context into a file for the planner | haiku | n/a (haiku) | acceptEdits |
+| **planner** | Analyzes tickets, produces implementation plans | opus | high (pinned) | plan (read-only) |
+| **implementer** | TDD: writes tests first, then implementation | sonnet | high (pinned) | acceptEdits |
+| **security-reviewer** | OWASP-focused security review | opus | high (pinned) | plan (read-only) |
+| **code-reviewer** | PR-style quality review | sonnet | high (pinned) | plan (read-only) |
+| **silent-failure-hunter** | Swallowed-error and silent-fallback detection | sonnet | high (pinned) | plan (read-only) |
+| **duplication-analyzer** | Copy-paste and extraction analysis for `/agentflow:refactor` | sonnet | high (pinned) | plan (read-only) |
+| **structure-analyzer** | File-size and test-organization analysis for `/agentflow:refactor` | haiku | n/a (haiku) | plan (read-only) |
+| **security-analyzer** | OWASP audit for `/agentflow:refactor` | sonnet | high (pinned) | plan (read-only) |
+| **lessons-collector** | Routes genuine mistakes to `docs/<topic>.md` or `CLAUDE.md` | haiku | n/a (haiku) | acceptEdits |
 
-**Model tiering**: Opus where judgment is concentrated — `/agentflow:refine` and `/agentflow:design` pin `model: opus` because scope, acceptance criteria, splits, and UX structure drive everything downstream, and the **planner** and **security-reviewer** agents run opus because the approved plan steers the whole unattended pipeline and a missed vulnerability is the costliest review failure. Sonnet for pipeline orchestration and implementation (`/agentflow:implement` pins `model: sonnet`; `/agentflow:babysit` pins `model: sonnet` so long-lived loop ticks stay cheap). Haiku for mechanical work — context-gatherer, structure-analyzer, lessons-collector, and `/agentflow:sync`. These pins are visible in each skill's and agent's frontmatter and override the session model for that skill/agent only. **Caveat**: the `CLAUDE_CODE_SUBAGENT_MODEL` pin (see Troubleshooting) overrides agent frontmatter and flattens this tiering — set it only on 1M-context sessions where the delegation gate applies.
+**Model & effort tiering**: Opus where judgment is concentrated — `/agentflow:refine` and `/agentflow:design` pin `model: opus` because scope, acceptance criteria, splits, and UX structure drive everything downstream, and the **planner** and **security-reviewer** agents run opus because the approved plan steers the whole unattended pipeline and a missed vulnerability is the costliest review failure. Sonnet for pipeline orchestration and implementation (`/agentflow:implement` pins `model: sonnet`; `/agentflow:babysit` pins `model: sonnet` so long-lived loop ticks stay cheap). Haiku for mechanical work — context-gatherer, structure-analyzer, lessons-collector, and `/agentflow:sync`.
+
+Effort is the second lever: model picks how *capable* the agent is (failures that look like "it didn't know enough"), effort picks how *thorough* it is (failures that look like "it didn't try hard enough"). Subagents inherit the **session** effort level by default, so a session running at low effort would silently degrade the unattended pipeline's planning, implementation, and reviews. Every non-haiku agent therefore pins `effort: high` — thoroughness is guaranteed regardless of the session setting. Skills deliberately stay unpinned: they run during interactive phases, where the user's session effort preference should win. Haiku agents can't be tuned — haiku doesn't support effort.
+
+Tiering intentionally stops at Opus. Fable is a specialist tier at the highest per-token cost; for a genuinely hard domain you can escalate an individual agent by setting `model: fable` in its frontmatter.
+
+These pins are visible in each skill's and agent's frontmatter and override the session model for that skill/agent only. **Caveat**: the `CLAUDE_CODE_SUBAGENT_MODEL` pin (see Troubleshooting) overrides agent frontmatter and flattens the model tiering — set it only on 1M-context sessions where the delegation gate applies. Likewise, the `CLAUDE_CODE_EFFORT_LEVEL` env var overrides `effort:` frontmatter and flattens the effort tiering while set.
 
 External integrations use the `gh` CLI rather than MCP servers, keeping permissions simple and avoiding token overhead. Optional MCP servers: Context7 (live documentation lookup) and Pencil (design file creation via `/agentflow:design`).
 

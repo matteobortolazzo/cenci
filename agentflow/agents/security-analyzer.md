@@ -16,6 +16,7 @@ description: |
   </example>
 tools: Read, Grep, Glob, mcp__context7__resolve-library-id, mcp__context7__query-docs
 model: sonnet
+effort: high
 color: red
 permissionMode: plan
 ---
