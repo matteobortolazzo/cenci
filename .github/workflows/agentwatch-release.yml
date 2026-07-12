@@ -72,7 +72,19 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "${assets[@]}" --clobber
           else
-            gh release create "$TAG" "${assets[@]}" \
-              --title "agentwatch v${VERSION}" \
-              --notes "Automated release of agentwatch v${VERSION}."
+            # GitHub-generated notes since the previous agentwatch tag. All tags
+            # are present (checkout uses fetch-depth: 0). The tag being released
+            # sorts first; the previous one is the 2nd line. Falls back to plain
+            # generated notes for the very first tagged release.
+            PREV=$(git tag -l 'agentwatch/v*' --sort=-v:refname | sed -n 2p)
+            if [ -n "$PREV" ]; then
+              gh release create "$TAG" "${assets[@]}" \
+                --title "agentwatch v${VERSION}" \
+                --generate-notes \
+                --notes-start-tag "$PREV"
+            else
+              gh release create "$TAG" "${assets[@]}" \
+                --title "agentwatch v${VERSION}" \
+                --generate-notes
+            fi
           fi
