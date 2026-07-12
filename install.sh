@@ -368,7 +368,7 @@ step_sandbox_setup() {
 
 	case ":$PATH:" in
 	*":$HOME/.local/bin:"*) ;;
-	*) warn "~/.local/bin is not on your PATH — add it to your shell profile:
+	*) warn "$HOME/.local/bin is not on your PATH — add it to your shell profile:
       export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
 	esac
 
@@ -472,7 +472,7 @@ setup_agentwatch_linux_path() {
 
 	case ":$PATH:" in
 	*":$HOME/.local/bin:"*) ;;
-	*) warn "~/.local/bin is not on your PATH — add it to your shell profile:
+	*) warn "$HOME/.local/bin is not on your PATH — add it to your shell profile:
       export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
 	esac
 

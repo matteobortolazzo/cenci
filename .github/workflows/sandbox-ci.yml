@@ -1,0 +1,68 @@
+name: dev-sandbox — CI
+
+on:
+  push:
+    branches: [main]
+    paths: ['dev-sandbox/**', 'install.sh']
+  pull_request:
+    branches: [main]
+    paths: ['dev-sandbox/**', 'install.sh']
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          shellcheck install.sh \
+            dev-sandbox/agent-sand \
+            dev-sandbox/entrypoint.sh \
+            dev-sandbox/lib/*.sh \
+            dev-sandbox/tests/*.test.sh
+      - name: bash -n (syntax check)
+        run: |
+          for f in install.sh dev-sandbox/agent-sand dev-sandbox/entrypoint.sh dev-sandbox/lib/*.sh dev-sandbox/tests/*.test.sh; do
+            bash -n "$f"
+          done
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run host-runnable test suites
+        run: |
+          bash dev-sandbox/tests/settings-merge.test.sh
+          bash dev-sandbox/tests/heal-plugins.test.sh
+          bash dev-sandbox/tests/repo-scope.test.sh
+          bash dev-sandbox/tests/codex-config.test.sh
+
+  fragment-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert fragments match the Dockerfile monolith
+        run: bash dev-sandbox/tests/fragments-drift.test.sh
+
+  build-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build base + monolith and run the toolchain smoke test
+        run: bash dev-sandbox/tests/smoke.test.sh
+
+  hadolint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: dev-sandbox/Dockerfile.base
+          ignore: DL3008,DL3013
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: dev-sandbox/Dockerfile
+          ignore: DL3008,DL3013

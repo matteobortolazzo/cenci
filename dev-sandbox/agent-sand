@@ -120,6 +120,7 @@ CONTAINER_PREFIX="${AGENT}-sand"
 # git repo, fall back to the legacy shared-workspace scheme (whole ~/Repos
 # mount, one container per --name) so existing claude-sand-default-style
 # volumes keep working untouched.
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/repo-scope.sh
 source "${SCRIPT_DIR}/lib/repo-scope.sh"
 

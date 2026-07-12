@@ -11,6 +11,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 # the host `claude` is unaffected.
 ENV IS_SANDBOX=1
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 # ── System packages ──────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl wget gnupg2 \
@@ -35,7 +37,7 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
     > /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update && apt-get install -y gh \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
 # ── CCometixLine (Claude Code status line) ───────────────────────
@@ -47,6 +49,7 @@ RUN curl -fsSL "https://github.com/Haleclipse/CCometixLine/releases/download/v${
     && chmod 755 /usr/local/bin/ccline
 
 # ── Docker CLI (for DooD socket mounting) ────────────────────────
+# hadolint ignore=SC1091
 RUN install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \
     && chmod a+r /etc/apt/keyrings/docker.asc \
