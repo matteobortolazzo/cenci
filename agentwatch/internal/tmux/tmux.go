@@ -34,6 +34,10 @@ type Client interface {
 	RenameWindow(target string, name string) error
 	SetWindowOption(target string, key string, value string) error
 	GetWindowOption(target string, key string) (string, error)
+	// SetOption sets a session-wide (global) tmux option, e.g. for user
+	// variables like @agentwatch-headroom-<agent> that aren't scoped to a
+	// single window.
+	SetOption(key string, value string) error
 }
 
 // ExecClient implements Client by shelling out to the tmux binary.
@@ -65,6 +69,12 @@ func (c *ExecClient) GetWindowOption(target string, key string) (string, error) 
 		return "", err
 	}
 	return strings.TrimSpace(out), nil
+}
+
+// SetOption sets a session-wide (global) tmux option.
+func (c *ExecClient) SetOption(key string, value string) error {
+	_, err := tmuxCmd("set-option", "-g", key, value)
+	return err
 }
 
 // CurrentSession returns the name of the tmux session the caller is inside.

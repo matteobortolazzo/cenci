@@ -664,6 +664,20 @@ Use them in your `status-format` to replace the default indicator and color:
 
 For users with the default tmux status format, agentwatch automatically prepends `#{@agentwatch-symbol}` to `window-status-format` and `window-status-current-format` during tracking, and restores them on cleanup.
 
+### Budget headroom in status-line
+
+For agent-types with budget tracking configured (see [Usage budgets](#usage-budgets)), agentwatch sets a session-wide (not per-window) tmux user variable per agent-type carrying the remaining budget headroom as an integer percent:
+
+- `@agentwatch-headroom-<agent>` — remaining headroom, `0`–`100` (e.g. `@agentwatch-headroom-claude` → `73`)
+
+Unlike `@agentwatch-symbol`/`@agentwatch-style`, this is a global option (`set-option -g`), not scoped to any one window, since headroom is a per-agent-type fact rather than a per-session/window one. Reference it once in your own `status-line`:
+
+```
+set -g status-right "claude: #{@agentwatch-headroom-claude}% | codex: #{@agentwatch-headroom-codex}%"
+```
+
+The variable is cleared (absent) when the daemon has no headroom data for that agent-type (budget tracking disabled or unconfigured).
+
 ### Manual window names
 
 agentwatch respects manually set window names:

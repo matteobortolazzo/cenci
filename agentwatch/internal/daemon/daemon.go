@@ -105,6 +105,7 @@ func (d *Daemon) loop(ctx context.Context, attention <-chan ipc.AttentionUpdate)
 		case u := <-attention:
 			d.attention = u.Windows
 			d.headroom = u.Headroom
+			d.frontend.RenderHeadroom(u.Headroom)
 			d.broadcast()
 		}
 	}

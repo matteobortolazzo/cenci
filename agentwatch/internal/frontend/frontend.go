@@ -53,6 +53,12 @@ type Frontend interface {
 	// WindowInfo returns display fields for the session's window, or nil
 	// when the frontend has none (paneless sessions).
 	WindowInfo(sessionKey string) *WindowInfo
+	// RenderHeadroom pushes per-agent-type token-budget headroom (0.0-1.0,
+	// keyed by agent type as reported by the reconciler) to the frontend's
+	// presentation layer (tmux: session-scoped @agentwatch-headroom-<agent>
+	// user variables). Agents absent from headroom that were previously
+	// present must have their presentation state cleared.
+	RenderHeadroom(headroom map[string]float64)
 }
 
 // Observations carries facts a frontend learned while handling an event.
