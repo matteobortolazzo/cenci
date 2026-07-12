@@ -232,6 +232,7 @@ if REPO_ROOT="$(resolve_repo_root)"; then
 
     WORKSPACE_BIND_HOST="${REPO_ROOT}"
     WORKDIR="$(compute_workdir "${REPO_ROOT}" "${PWD}")"
+    WORKSPACE_SCOPE=repo
 else
     USING_REPO_IMAGE=false
 
@@ -242,6 +243,7 @@ else
     IMAGE="${MONOLITH_IMAGE}"
     WORKSPACE_BIND_HOST="${WORKSPACE_HOST}"
     WORKDIR="$(compute_legacy_workdir "${WORKSPACE_HOST}" "${PWD}")"
+    WORKSPACE_SCOPE=legacy
 fi
 
 # ── Build ────────────────────────────────────────────────────────
@@ -302,7 +304,7 @@ if "${UPDATE_PLUGINS}"; then
     UPDATE_CMD='source /usr/local/bin/lib/migrate-settings.sh && update_plugins /home/dev/.claude/plugins agent-stack 0 agentflow agentwatch'
     if "${RUNTIME}" ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$"; then
         echo "Updating plugins in running '${CONTAINER_NAME}'..."
-        "${RUNTIME}" exec "${CONTAINER_NAME}" /bin/bash -c "${UPDATE_CMD}"
+        "${RUNTIME}" exec -u dev "${CONTAINER_NAME}" /bin/bash -c "${UPDATE_CMD}"
         echo "Done. Agent sessions pick up the update on their next start."
     else
         CLAUDE_BIN="$(readlink -f "$(which claude)" 2>/dev/null || true)"
@@ -351,7 +353,7 @@ else
 fi
 
 # ── Exec env forwarding (for attach path) ───────────────────────
-EXEC_ENV_ARGS=(-e "TMUX_PANE=${TMUX_PANE:-}" -e "AGENT_SAND=1")
+EXEC_ENV_ARGS=(-u dev -e "TMUX_PANE=${TMUX_PANE:-}" -e "AGENT_SAND=1")
 [[ -n "${CONTEXT7_API_KEY:-}" ]] && EXEC_ENV_ARGS+=(-e "CONTEXT7_API_KEY=${CONTEXT7_API_KEY}")
 [[ -n "${OPENAI_API_KEY:-}" ]] && EXEC_ENV_ARGS+=(-e "OPENAI_API_KEY=${OPENAI_API_KEY}")
 
@@ -368,7 +370,7 @@ wait_until_ready() {
     local ready=false
     local attempt
     for ((attempt = 0; attempt < 600; attempt++)); do
-        if "${RUNTIME}" exec "${CONTAINER_NAME}" test -e /tmp/agent-sand-ready 2>/dev/null; then
+        if "${RUNTIME}" exec -u dev "${CONTAINER_NAME}" test -e /tmp/agent-sand-ready 2>/dev/null; then
             ready=true
             break
         fi
@@ -402,6 +404,17 @@ RUN_ARGS=(
     -d --init --rm
     --workdir "${WORKDIR}"
 
+    # Start as root so entrypoint.sh can usermod/groupmod the 'dev' account to
+    # match HOST_UID/HOST_GID before any process runs under it (usermod/groupmod
+    # refuse to renumber an account with a running process — #154). entrypoint.sh
+    # unconditionally drops to 'dev' before running the workload. Docker/Podman
+    # persist --user as the container's Config.User for its whole lifetime, so
+    # `exec` without an explicit -u falls back to that persisted "root", NOT the
+    # image's original `USER dev` Dockerfile directive — every exec call site
+    # (EXEC_ENV_ARGS above, and the --update-plugins exec) must pass `-u dev`
+    # explicitly for exactly this reason.
+    --user root
+
     # Workspace
     -v "${WORKSPACE_BIND_HOST}:${WORKSPACE_CONTAINER}"
 
@@ -413,6 +426,11 @@ RUN_ARGS=(
 
     # Container marker (both docker & podman) — agentflow configure detects this
     -e "AGENT_SAND=1"
+
+    # Host identity — entrypoint remaps 'dev' to this UID/GID on mismatch (#154)
+    -e "HOST_UID=$(id -u)"
+    -e "HOST_GID=$(id -g)"
+    -e "WORKSPACE_SCOPE=${WORKSPACE_SCOPE}"
 )
 
 # Claude binary (read-only); Codex is baked into the image instead

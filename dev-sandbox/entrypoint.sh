@@ -2,8 +2,61 @@
 # Ensure hostname resolves (suppresses sudo warnings)
 sudo sh -c 'grep -q "$(hostname)" /etc/hosts || echo "127.0.0.1 $(hostname)" >> /etc/hosts'
 
+# ── UID/GID remap to match the host user, then drop to dev (#154) ─────
+# Dockerfile.base bakes 'dev' as uid/gid 1000. On hosts where the invoking
+# user isn't 1000, files the container writes into bind-mounted host paths
+# end up owned by a UID that doesn't match the host user. agent-sand passes
+# the host user's id as HOST_UID/HOST_GID and now starts the container as
+# root (--user root) precisely so this block can run before any process
+# exists under the 'dev' account: usermod/groupmod refuse to renumber an
+# account that has a running process, and entrypoint.sh itself used to run
+# as dev, which made every real remap fail. Starting as root sidesteps that.
+#
+# On a HOST_UID/HOST_GID mismatch, remap the account, chown the home volume
+# (and, only for a bounded per-repo mount, /workspace), then unconditionally
+# drop from root to dev via the final exec below — every start now begins as
+# root and must land on dev (the host-remapped account, or the untouched
+# 1000/1000 default) before the rest of the entrypoint runs. The
+# usermod/groupmod/chown calls stay a no-op when HOST_UID/HOST_GID are unset
+# or already match the current dev account — zero behavior change there
+# beyond the one extra root->dev re-exec every start now pays.  Mirrors the
+# exec-sg re-exec pattern used for the docker-socket GID switch further down
+# this file.
+if [[ "$(id -u)" -eq 0 ]]; then
+    CUR_UID="$(id -u dev)"
+    CUR_GID="$(id -g dev)"
+    if [[ -n "${HOST_UID:-}" && "${HOST_UID}" != "0" && -n "${HOST_GID:-}" && "${HOST_GID}" != "0" ]] \
+       && { [[ "${HOST_UID}" != "${CUR_UID}" ]] || [[ "${HOST_GID}" != "${CUR_GID}" ]]; }; then
+        if [[ "${HOST_GID}" != "${CUR_GID}" ]]; then
+            EXISTING_HOST_GROUP="$(getent group "${HOST_GID}" | cut -d: -f1 || true)"
+            if [[ -n "${EXISTING_HOST_GROUP}" ]]; then
+                usermod -g "${HOST_GID}" dev || { echo "remap: usermod primary group failed" >&2; exit 1; }
+            else
+                groupmod -g "${HOST_GID}" dev || { echo "remap: groupmod failed" >&2; exit 1; }
+            fi
+        fi
+        if [[ "${HOST_UID}" != "${CUR_UID}" ]]; then
+            usermod -u "${HOST_UID}" dev || { echo "remap: usermod failed" >&2; exit 1; }
+        fi
+        chown -R "${HOST_UID}:${HOST_GID}" /home/dev || { echo "remap: chown /home/dev failed" >&2; exit 1; }
+        if [[ "${WORKSPACE_SCOPE:-}" == "repo" ]]; then
+            find /workspace -mindepth 1 -exec chown -h "${HOST_UID}:${HOST_GID}" {} + \
+                || echo "warning: failed to chown /workspace to ${HOST_UID}:${HOST_GID} — files in this mount may be misowned" >&2
+        fi
+    elif [[ "${HOST_UID:-}" == "0" || "${HOST_GID:-}" == "0" ]]; then
+        echo "warning: HOST_UID/HOST_GID of 0 requested — ignoring remap to avoid running the workload as root" >&2
+    fi
+
+    # secure_path in /etc/sudoers strips PATH additions (~/.local/bin,
+    # ~/go/bin) even with --preserve-env=PATH; the explicit env "PATH=..."
+    # assignment defeats that. --preserve-env carries everything else
+    # (TERM, XDG_RUNTIME_DIR, AGENT_SAND, OPENAI_API_KEY, ...) across.
+    exec sudo --preserve-env -u dev env "PATH=${PATH}" "HOME=/home/dev" \
+        /usr/local/bin/entrypoint.sh "$@"
+fi
+
 # Fix home directory ownership (volume may be root-owned on first run)
-sudo chown dev:dev /home/dev
+sudo chown dev:"$(id -g dev)" /home/dev
 
 # First-run setup for empty home volume
 if [[ ! -f /home/dev/.bashrc ]]; then

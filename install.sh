@@ -197,14 +197,6 @@ run_doctor() {
 		check "gh authenticated" optional "run: gh auth login" gh auth status
 	fi
 
-	if [ "$OS" = linux ]; then
-		say ""
-		say "  ${BOLD}For agent-sandbox (isolation)${RESET}"
-		check "host UID is 1000" optional \
-			"your UID is $(id -u); the container maps files as UID 1000 (see dev-sandbox/README.md)" \
-			test "$(id -u)" = 1000
-	fi
-
 	say ""
 	say "  ${BOLD}For agentwatch (attention)${RESET}"
 	check "tmux" optional \

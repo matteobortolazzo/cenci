@@ -69,6 +69,16 @@ else
     summarize_and_exit 1
 fi
 
+# ── Portable `stat` (GNU vs BSD) ───────────────────────────────────
+# GNU stat (Linux) takes `-c '%u'`/`-c '%g'`; BSD stat (macOS) takes
+# `-f '%u'`/`-f '%g'` instead. Mirrors the sha256sum/shasum fallback above:
+# probe for the flavor once, up front, rather than at each call site.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    STAT_CMD=(stat -f)
+else
+    STAT_CMD=(stat -c)
+fi
+
 if ! BASE_TAG_FILES="$(cd "${SANDBOX_DIR}" && find Dockerfile.base entrypoint.sh lib -type f)"; then
     fail "failed to enumerate base image build inputs (Dockerfile.base, entrypoint.sh, lib/)."
     summarize_and_exit 1
@@ -129,6 +139,102 @@ if "${RUNTIME}" run --rm --entrypoint /bin/bash agent-sandbox:latest -c \
     pass
 else
     fail "ccline failed to render inside agent-sandbox:latest"
+fi
+
+# ── UID/GID remap via HOST_UID/HOST_GID (#154) ─────────────────────
+# Runs the REAL entrypoint (no --entrypoint override) so the remap block
+# actually executes: a HOST_UID/HOST_GID mismatch must usermod/groupmod
+# `dev` and re-exec, landing the final `bash -c ...` process at the
+# requested UID/GID instead of the image's baked-in 1000/1000 `dev`
+# account. The in-container `id -u`/`id -g` output is the primary,
+# runtime-agnostic assertion. The host-side ownership check on the probe
+# file written into the per-repo `/workspace` mount is best-effort:
+# rootless podman remaps container UID 1234 into a host subuid range, so
+# the host-side `stat` won't literally show 1234 there — that assertion
+# only runs (and only fails the suite) under RUNTIME=docker.
+echo "case: entrypoint remaps dev to HOST_UID/HOST_GID for a per-repo mount"
+REMAP_TMP="$(mktemp -d)"
+# The synthetic remap UID (1234) intentionally differs from the test runner's
+# real UID, unlike production where HOST_UID owns the bind-mount root.
+chmod 0777 "${REMAP_TMP}"
+trap 'rm -rf "${REMAP_TMP}"' EXIT
+REMAP_OUT="$(timeout 60 "${RUNTIME}" run --rm --user root \
+    -e HOST_UID=1234 -e HOST_GID=1234 -e WORKSPACE_SCOPE=repo \
+    -v "${REMAP_TMP}:/workspace" \
+    agent-sandbox:latest \
+    -c 'id -u; id -g; : > /workspace/remap-probe')"
+REMAP_STATUS=$?
+if [[ "${REMAP_STATUS}" -eq 124 ]]; then
+    fail "container run timed out after 60s while exercising the remap path — likely a hang/regression in the root->dev remap"
+elif [[ "${REMAP_STATUS}" -eq 0 ]]; then
+    readarray -t REMAP_LINES <<<"${REMAP_OUT}"
+    if [[ "${REMAP_LINES[0]:-}" == "1234" && "${REMAP_LINES[1]:-}" == "1234" ]]; then
+        pass
+    else
+        fail "expected dev to report uid=1234/gid=1234 inside the container after remap, got: ${REMAP_OUT}"
+    fi
+else
+    fail "container run failed while exercising the remap path (exit ${REMAP_STATUS}): ${REMAP_OUT}"
+fi
+
+echo "case: entrypoint reuses an existing image group matching HOST_GID"
+GROUP_COLLISION_OUT="$(timeout 60 "${RUNTIME}" run --rm --user root \
+    -e HOST_UID=1234 -e HOST_GID=20 \
+    agent-sandbox:latest \
+    -c 'id -u; id -g')"
+GROUP_COLLISION_STATUS=$?
+if [[ "${GROUP_COLLISION_STATUS}" -eq 124 ]]; then
+    fail "container run timed out while exercising an existing HOST_GID"
+elif [[ "${GROUP_COLLISION_STATUS}" -eq 0 ]]; then
+    readarray -t GROUP_COLLISION_LINES <<<"${GROUP_COLLISION_OUT}"
+    if [[ "${GROUP_COLLISION_LINES[0]:-}" == "1234" && "${GROUP_COLLISION_LINES[1]:-}" == "20" ]]; then
+        pass
+    else
+        fail "expected dev to reuse existing gid=20, got: ${GROUP_COLLISION_OUT}"
+    fi
+else
+    fail "container run failed for existing HOST_GID (exit ${GROUP_COLLISION_STATUS}): ${GROUP_COLLISION_OUT}"
+fi
+
+echo "case: remap-probe file ownership on the host (best-effort, docker only)"
+if [[ "${RUNTIME}" == "docker" ]]; then
+    if [[ -f "${REMAP_TMP}/remap-probe" ]]; then
+        PROBE_UID="$("${STAT_CMD[@]}" '%u' "${REMAP_TMP}/remap-probe")"
+        PROBE_GID="$("${STAT_CMD[@]}" '%g' "${REMAP_TMP}/remap-probe")"
+        if [[ "${PROBE_UID}" == "1234" && "${PROBE_GID}" == "1234" ]]; then
+            pass
+        else
+            fail "expected /workspace/remap-probe to be owned by 1234:1234 on the host under docker, got ${PROBE_UID}:${PROBE_GID}"
+        fi
+    else
+        fail "remap-probe file was not created in the per-repo mount"
+    fi
+else
+    echo "  SKIP: host-side ownership check under podman — rootless subuid mapping means the" \
+        "host UID won't literally be 1234; the in-container id check above is authoritative."
+fi
+
+# ── No-op regression: unset HOST_UID/HOST_GID must not remap dev (#154) ──
+# Same real-entrypoint path as above, but without HOST_UID/HOST_GID set, so
+# the usermod/groupmod/chown remap itself must stay a no-op for the existing
+# UID-1000 common case. The container still starts as root and unconditionally
+# drops to dev before running the workload (an unavoidable extra re-exec now
+# that every start begins as root — see entrypoint.sh) — dev keeps reporting
+# uid=1000/gid=1000 either way.
+echo "case: entrypoint leaves dev at uid=1000/gid=1000 when HOST_UID/HOST_GID are unset"
+NOOP_OUT="$(timeout 60 "${RUNTIME}" run --rm --user root agent-sandbox:latest -c 'id -u; id -g')"
+NOOP_STATUS=$?
+if [[ "${NOOP_STATUS}" -eq 124 ]]; then
+    fail "container run timed out after 60s while exercising the no-HOST_UID no-op path — likely a hang/regression in the root->dev remap"
+elif [[ "${NOOP_STATUS}" -eq 0 ]]; then
+    readarray -t NOOP_LINES <<<"${NOOP_OUT}"
+    if [[ "${NOOP_LINES[0]:-}" == "1000" && "${NOOP_LINES[1]:-}" == "1000" ]]; then
+        pass
+    else
+        fail "expected dev to remain uid=1000/gid=1000 when HOST_UID/HOST_GID are unset, got: ${NOOP_OUT}"
+    fi
+else
+    fail "container run failed while exercising the no-HOST_UID no-op path (exit ${NOOP_STATUS}): ${NOOP_OUT}"
 fi
 
 # ── Summary ────────────────────────────────────────────────────────
