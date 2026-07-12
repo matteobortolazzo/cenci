@@ -246,6 +246,29 @@ agentwatch dispatch --reconcile
 Every ticket yields exactly one logged decision — dispatched or skipped, always with
 a reason — so nothing fails silently.
 
+### Enrollment (`agentwatch dispatch enroll|unenroll|status`)
+
+The `dispatch.repos` list (below) is normally managed with these verbs instead of
+hand-editing `config.json` — this is how lazyboards (and humans) register a repo for
+dispatch:
+
+```bash
+agentwatch dispatch enroll   [--dir <path>] [--config <path>]
+agentwatch dispatch unenroll [--dir <path>] [--config <path>] [--repo owner/name]
+agentwatch dispatch status   [--dir <path>] [--config <path>] [--json]
+```
+
+| Verb | Flags | Behavior |
+|------|-------|----------|
+| `enroll` | `--dir` (default cwd), `--config` | Detects `owner/name` and the absolute dir from `--dir`'s git `origin` remote, then adds/updates the `repos` entry. Idempotent: a second run prints `Already enrolled owner/name (dir)` instead of duplicating the entry. |
+| `unenroll` | `--dir`, `--config`, `--repo owner/name` | Removes the `repos` entry. Idempotent: unenrolling a repo that isn't enrolled exits `0` with `Not enrolled: owner/name`. `--repo` unenrolls by name without touching git — use it when the repo's directory has moved or been deleted. `--repo` and an explicitly-passed `--dir` are mutually exclusive (exit `2`) since only one can identify the target. |
+| `status` | `--dir`, `--config`, `--json` | Prints the current enrollment state without mutating anything. `--json` emits a single pinned line: `{"repo":"owner/name","dir":"/abs/path","enrolled":true}`; when not enrolled, `dir` is still the **detected** absolute dir (not empty), even if the config file doesn't exist yet. |
+
+Exit codes are consistent across all three verbs: `0` when the verb ran successfully
+(enrolled/not-enrolled is a result, not a failure), `1` on a detection/IO error
+(`agentwatch dispatch <verb>: <reason>` on stderr), `2` on bad flags (including the
+`--repo`/`--dir` conflict above).
+
 ### Pickup rules and gates
 
 A ticket is dispatched only when **all** of these hold, evaluated in order (the first
@@ -302,7 +325,7 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `repos` | — | Repos to scan; each `dir` holds that repo's `.plans/` and git tree, and a dispatched session `cd`s into it |
+| `repos` | — | Repos to scan; each `dir` holds that repo's `.plans/` and git tree, and a dispatched session `cd`s into it. Normally managed via `agentwatch dispatch enroll`/`unenroll` (see [Enrollment](#enrollment-agentwatch-dispatch-enrollunenrollstatus)) rather than hand-edited, though hand-editing remains supported. |
 | `session` | current | Target tmux session for dispatched windows |
 | `concurrencyCap` | `3` | Max concurrent running sessions (counts in-flight windows plus this pass's dispatches) |
 | `needInputThreshold` | `1` | Pause dispatch when at least this many windows await input |

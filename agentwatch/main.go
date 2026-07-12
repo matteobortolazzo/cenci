@@ -220,6 +220,20 @@ func runRun(args []string) {
 }
 
 func runDispatch(args []string) {
+	if len(args) > 0 {
+		switch args[0] {
+		case "enroll":
+			runDispatchEnroll(args[1:])
+			return
+		case "unenroll":
+			runDispatchUnenroll(args[1:])
+			return
+		case "status":
+			runDispatchStatus(args[1:])
+			return
+		}
+	}
+
 	fs := flag.NewFlagSet("dispatch", flag.ExitOnError)
 	once := fs.Bool("once", false, "run a single dispatch pass then exit (default)")
 	interval := fs.Duration("interval", 0, "run continuously on this interval (e.g. 5m); mutually exclusive with --once")
@@ -249,6 +263,112 @@ func runDispatch(args []string) {
 	}
 	prior := 0
 	dispatch.RunOnce(cfg, ctrl, *dryRun, os.Stdout, &prior)
+}
+
+func runDispatchEnroll(args []string) {
+	fs := flag.NewFlagSet("enroll", flag.ExitOnError)
+	dir := fs.String("dir", ".", "repo directory to enroll (default: current directory)")
+	configPath := fs.String("config", "", "path to config.json (default: $XDG_CONFIG_HOME/agentwatch/config.json)")
+	_ = fs.Parse(args)
+
+	identity, err := dispatch.DetectRepoIdentity(*dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentwatch dispatch enroll: %v\n", err)
+		os.Exit(1)
+	}
+
+	changed, err := dispatch.EnrollRepo(*configPath, identity)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentwatch dispatch enroll: %v\n", err)
+		os.Exit(1)
+	}
+	if changed {
+		fmt.Printf("Enrolled %s (%s)\n", identity.Repo, identity.Dir)
+	} else {
+		fmt.Printf("Already enrolled %s (%s)\n", identity.Repo, identity.Dir)
+	}
+}
+
+func runDispatchUnenroll(args []string) {
+	fs := flag.NewFlagSet("unenroll", flag.ExitOnError)
+	dir := fs.String("dir", ".", "repo directory to unenroll (default: current directory)")
+	configPath := fs.String("config", "", "path to config.json (default: $XDG_CONFIG_HOME/agentwatch/config.json)")
+	repo := fs.String("repo", "", "repo (owner/name) to unenroll, bypassing git detection")
+	_ = fs.Parse(args)
+
+	dirSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "dir" {
+			dirSet = true
+		}
+	})
+
+	if *repo != "" && dirSet {
+		fmt.Fprintln(os.Stderr, "agentwatch dispatch unenroll: --repo and --dir are mutually exclusive")
+		os.Exit(2)
+	}
+
+	var target string
+	if *repo != "" {
+		target = *repo
+	} else {
+		identity, err := dispatch.DetectRepoIdentity(*dir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "agentwatch dispatch unenroll: %v\n", err)
+			os.Exit(1)
+		}
+		target = identity.Repo
+	}
+
+	changed, err := dispatch.UnenrollRepo(*configPath, target)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentwatch dispatch unenroll: %v\n", err)
+		os.Exit(1)
+	}
+	if changed {
+		fmt.Printf("Unenrolled %s\n", target)
+	} else {
+		fmt.Printf("Not enrolled: %s\n", target)
+	}
+}
+
+func runDispatchStatus(args []string) {
+	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	dir := fs.String("dir", ".", "repo directory to query (default: current directory)")
+	configPath := fs.String("config", "", "path to config.json (default: $XDG_CONFIG_HOME/agentwatch/config.json)")
+	jsonOut := fs.Bool("json", false, "print result as JSON")
+	_ = fs.Parse(args)
+
+	identity, err := dispatch.DetectRepoIdentity(*dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentwatch dispatch status: %v\n", err)
+		os.Exit(1)
+	}
+
+	enrollment, err := dispatch.QueryEnrollment(*configPath, identity.Repo)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentwatch dispatch status: %v\n", err)
+		os.Exit(1)
+	}
+	if !enrollment.Enrolled {
+		enrollment.Dir = identity.Dir
+	}
+
+	if *jsonOut {
+		data, err := json.Marshal(enrollment)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "agentwatch dispatch status: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(string(data))
+		return
+	}
+
+	if enrollment.Enrolled {
+		fmt.Printf("Enrolled %s (%s)\n", enrollment.Repo, enrollment.Dir)
+	} else {
+		fmt.Printf("Not enrolled: %s\n", enrollment.Repo)
+	}
 }
 
 func runStatus(args []string) {

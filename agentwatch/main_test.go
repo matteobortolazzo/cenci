@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/dispatch"
 )
 
 var binaryPath string
@@ -271,6 +273,262 @@ func TestRunCodexWithoutTemplateErrors(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(string(output)), "codex") {
 		t.Errorf("expected an error mentioning codex, got:\n%s", output)
+	}
+}
+
+// -- dispatch enroll/unenroll/status sub-verbs (ticket #121) ---------------
+
+// runGit runs `git -C dir <args>`, failing the test on error. Mirrors
+// internal/dispatch/enroll_test.go's helper of the same name.
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// initGitRemote creates a fresh git repo in a temp dir with the given origin
+// remote URL and returns the repo directory (an absolute path since
+// t.TempDir() is absolute). Mirrors internal/dispatch/enroll_test.go's
+// helper of the same name.
+func initGitRemote(t *testing.T, remoteURL string) string {
+	t.Helper()
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "remote", "add", "origin", remoteURL)
+	return dir
+}
+
+func TestDispatchEnroll_WritesConfigAndIsIdempotent(t *testing.T) {
+	dir := initGitRemote(t, "git@github.com:owner/name.git")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+
+	cmd := exec.Command(binaryPath, "dispatch", "enroll", "--dir", dir, "--config", configPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("first enroll: %v\n%s", err, output)
+	}
+	want := "Enrolled owner/name (" + dir + ")"
+	if !strings.Contains(string(output), want) {
+		t.Errorf("first enroll output = %q, want to contain %q", output, want)
+	}
+
+	got, qerr := dispatch.QueryEnrollment(configPath, "owner/name")
+	if qerr != nil {
+		t.Fatalf("QueryEnrollment: %v", qerr)
+	}
+	if !got.Enrolled || got.Dir != dir {
+		t.Errorf("QueryEnrollment after enroll = %+v, want Enrolled=true Dir=%q", got, dir)
+	}
+
+	// Second run is a no-op.
+	cmd = exec.Command(binaryPath, "dispatch", "enroll", "--dir", dir, "--config", configPath)
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("second enroll: %v\n%s", err, output)
+	}
+	want = "Already enrolled owner/name (" + dir + ")"
+	if !strings.Contains(string(output), want) {
+		t.Errorf("second enroll output = %q, want to contain %q", output, want)
+	}
+}
+
+func TestDispatchEnroll_OutsideGitRepo_Exits1(t *testing.T) {
+	dir := t.TempDir() // no .git
+	configPath := filepath.Join(t.TempDir(), "config.json")
+
+	cmd := exec.Command(binaryPath, "dispatch", "enroll", "--dir", dir, "--config", configPath)
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("exit code = %d, want 1\n%s", exitErr.ExitCode(), output)
+	}
+	if !strings.Contains(string(output), "agentwatch dispatch enroll: ") {
+		t.Errorf("stderr = %q, want to contain %q", output, "agentwatch dispatch enroll: ")
+	}
+}
+
+func TestDispatchUnenroll_RemovesRepo_AndNotEnrolledIsNoop(t *testing.T) {
+	dir := initGitRemote(t, "git@github.com:owner/name.git")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+
+	if _, err := dispatch.EnrollRepo(configPath, dispatch.RepoIdentity{Repo: "owner/name", Dir: dir}); err != nil {
+		t.Fatalf("EnrollRepo setup: %v", err)
+	}
+
+	cmd := exec.Command(binaryPath, "dispatch", "unenroll", "--dir", dir, "--config", configPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("unenroll: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "Unenrolled owner/name") {
+		t.Errorf("unenroll output = %q, want to contain %q", output, "Unenrolled owner/name")
+	}
+
+	got, qerr := dispatch.QueryEnrollment(configPath, "owner/name")
+	if qerr != nil {
+		t.Fatalf("QueryEnrollment: %v", qerr)
+	}
+	if got.Enrolled {
+		t.Errorf("QueryEnrollment after unenroll = %+v, want Enrolled=false", got)
+	}
+
+	// Unenrolling again (already not enrolled) is exit 0, "Not enrolled".
+	cmd = exec.Command(binaryPath, "dispatch", "unenroll", "--dir", dir, "--config", configPath)
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("second unenroll: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "Not enrolled: owner/name") {
+		t.Errorf("second unenroll output = %q, want to contain %q", output, "Not enrolled: owner/name")
+	}
+}
+
+func TestDispatchUnenroll_ViaRepoFlag_NoGitRequired(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if _, err := dispatch.EnrollRepo(configPath, dispatch.RepoIdentity{Repo: "owner/name", Dir: "/some/configured/dir"}); err != nil {
+		t.Fatalf("EnrollRepo setup: %v", err)
+	}
+
+	// cwd is a plain, non-git directory: --repo must bypass git detection
+	// entirely.
+	noGitDir := t.TempDir()
+
+	cmd := exec.Command(binaryPath, "dispatch", "unenroll", "--repo", "owner/name", "--config", configPath)
+	cmd.Dir = noGitDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("unenroll --repo: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "Unenrolled owner/name") {
+		t.Errorf("unenroll --repo output = %q, want to contain %q", output, "Unenrolled owner/name")
+	}
+
+	got, qerr := dispatch.QueryEnrollment(configPath, "owner/name")
+	if qerr != nil {
+		t.Fatalf("QueryEnrollment: %v", qerr)
+	}
+	if got.Enrolled {
+		t.Errorf("QueryEnrollment after unenroll --repo = %+v, want Enrolled=false", got)
+	}
+}
+
+func TestDispatchUnenroll_RepoAndExplicitDir_Exits2(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	explicitDir := t.TempDir()
+
+	cmd := exec.Command(binaryPath, "dispatch", "unenroll",
+		"--repo", "owner/name", "--dir", explicitDir, "--config", configPath)
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError for --repo + explicit --dir, got %T: %v\n%s", err, err, output)
+	}
+	if exitErr.ExitCode() != 2 {
+		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
+	}
+}
+
+func TestDispatchStatusJSON_Enrolled(t *testing.T) {
+	dir := initGitRemote(t, "git@github.com:owner/name.git")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if _, err := dispatch.EnrollRepo(configPath, dispatch.RepoIdentity{Repo: "owner/name", Dir: dir}); err != nil {
+		t.Fatalf("EnrollRepo setup: %v", err)
+	}
+
+	cmd := exec.Command(binaryPath, "dispatch", "status", "--dir", dir, "--config", configPath, "--json")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("status --json: %v\n%s", err, output)
+	}
+
+	wantBytes, merr := json.Marshal(dispatch.RepoEnrollment{Repo: "owner/name", Dir: dir, Enrolled: true})
+	if merr != nil {
+		t.Fatalf("json.Marshal want: %v", merr)
+	}
+	got := strings.TrimSpace(string(output))
+	if got != string(wantBytes) {
+		t.Errorf("status --json output = %q, want exactly %q", got, wantBytes)
+	}
+}
+
+func TestDispatchStatusJSON_NotEnrolled_DetectedDir(t *testing.T) {
+	dir := initGitRemote(t, "git@github.com:owner/name.git")
+	// Config file deliberately does not exist (not even its parent dir).
+	configPath := filepath.Join(t.TempDir(), "nested", "does-not-exist", "config.json")
+
+	cmd := exec.Command(binaryPath, "dispatch", "status", "--dir", dir, "--config", configPath, "--json")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("status --json (not enrolled): %v\n%s", err, output)
+	}
+
+	var got dispatch.RepoEnrollment
+	if uerr := json.Unmarshal(output, &got); uerr != nil {
+		t.Fatalf("unmarshal status --json output %q: %v", output, uerr)
+	}
+	if got.Enrolled {
+		t.Errorf("got.Enrolled = true, want false")
+	}
+	if got.Repo != "owner/name" {
+		t.Errorf("got.Repo = %q, want %q", got.Repo, "owner/name")
+	}
+	if got.Dir != dir {
+		t.Errorf("got.Dir = %q, want detected dir %q (non-empty even though config is missing)", got.Dir, dir)
+	}
+
+	if _, statErr := os.Stat(configPath); !os.IsNotExist(statErr) {
+		t.Errorf("status must not create a config file, but %s exists", configPath)
+	}
+}
+
+func TestDispatchStatus_HumanOutput(t *testing.T) {
+	dir := initGitRemote(t, "git@github.com:owner/name.git")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+
+	// Not enrolled yet.
+	cmd := exec.Command(binaryPath, "dispatch", "status", "--dir", dir, "--config", configPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("status (not enrolled): %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "Not enrolled: owner/name") {
+		t.Errorf("status (not enrolled) output = %q, want to contain %q", output, "Not enrolled: owner/name")
+	}
+
+	if _, err := dispatch.EnrollRepo(configPath, dispatch.RepoIdentity{Repo: "owner/name", Dir: dir}); err != nil {
+		t.Fatalf("EnrollRepo setup: %v", err)
+	}
+
+	cmd = exec.Command(binaryPath, "dispatch", "status", "--dir", dir, "--config", configPath)
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("status (enrolled): %v\n%s", err, output)
+	}
+	want := "Enrolled owner/name (" + dir + ")"
+	if !strings.Contains(string(output), want) {
+		t.Errorf("status (enrolled) output = %q, want to contain %q", output, want)
+	}
+}
+
+func TestDispatchFlagRouting_DryRunUnaffectedBySubVerbPeel(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+
+	cmd := exec.Command(binaryPath, "dispatch", "--dry-run", "--config", configPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dispatch --dry-run --config: %v\n%s", err, output)
+	}
+	for _, verbOutput := range []string{"Enrolled", "Unenrolled", "Not enrolled"} {
+		if strings.Contains(string(output), verbOutput) {
+			t.Errorf("dispatch --dry-run output must not contain enroll-verb output %q, got:\n%s", verbOutput, output)
+		}
 	}
 }
 
