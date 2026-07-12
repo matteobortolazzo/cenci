@@ -108,6 +108,9 @@ Ticket mode body includes:
 ## Testing
 <commands and results>
 
+## Review
+<Review line — see below>
+
 ## Screenshots
 _Temporary secret gist, not part of the repo — delete after merge: `gh gist delete <gist-id>`_
 
@@ -116,7 +119,7 @@ _Temporary secret gist, not part of the repo — delete after merge: `gh gist de
 
 ## Checklist
 - [x] Tests pass
-- [x] Security review done
+<Security checklist line — see below>
 - [ ] Documentation updated
 
 ## Notes
@@ -124,6 +127,20 @@ _Temporary secret gist, not part of the repo — delete after merge: `gh gist de
 ```
 
 For child tickets that are not last child, use `Related to #<parentId>` for the parent so it is not auto-closed. For ticketless mode, omit `## Ticket`.
+
+`## Review` reports which Phase 6 + 7 path ran, sourced from `/tmp/claude/agentflow-review-path.txt` (written during Phase 6 + 7's Review Path Classification):
+
+- `full` → "Review: full trio"
+- `lite-docs` → "Review: lite (docs-only — no reviewers)"
+- `lite-small` → "Review: lite (code-reviewer only)"
+
+If the temp file is absent (e.g. after a context compaction or a goal-autopilot resume that skipped re-reading it), default to "Review: full trio" — never over-claim a lite path when the actual path isn't known.
+
+The `## Checklist` security line is derived from the same `/tmp/claude/agentflow-review-path.txt` file, in the same read:
+
+- `full` → `- [x] Security review done`
+- `lite-docs` or `lite-small` → `- [ ] Security review skipped (see Review section — <path>)`, where `<path>` is the literal path value (`lite-docs` or `lite-small`)
+- File absent → default to the `full` behavior (`- [x] Security review done`), consistent with the "default to full trio" fallback above — never claim a security review was skipped when the actual path isn't known.
 
 `## Screenshots` appears only when `isUiTicket` is true: one `### <name>` + image per captured screen/state, or the fallback note from the Screenshots section above. Omit the section entirely for non-UI work. If the user chose "Proceed without design" at the Design Check, add "Implemented without design spec — extra visual review recommended." to `## Notes`.
 
