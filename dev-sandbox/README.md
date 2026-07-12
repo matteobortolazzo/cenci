@@ -405,6 +405,11 @@ Codex is baked into the image, so updating it means bumping `CODEX_VERSION` in t
 `Dockerfile` and rebuilding (`agent-sand --build`). Unlike Claude, updating Codex on the host
 has no effect on the container.
 
+A scheduled workflow (`.github/workflows/codex-version-bump.yml`) checks for new
+Codex releases daily, opens a PR bumping `CODEX_VERSION`, and auto-merges it —
+no manual bumping needed. Run `agent-sand --build` to pick up the new version
+on your next rebuild (monolith image only).
+
 ### Reset an instance
 
 Delete the home volume to start fresh (caches, auth, config all cleared). Claude Code
