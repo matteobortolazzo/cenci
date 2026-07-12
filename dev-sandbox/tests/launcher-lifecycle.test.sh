@@ -37,6 +37,7 @@ case "${1:-} ${2:-}" in
 esac
 EOF
 chmod +x "${BIN_DIR}/docker"
+ln -s docker "${BIN_DIR}/podman"
 
 cat > "${BIN_DIR}/claude" <<'EOF'
 #!/usr/bin/env bash
