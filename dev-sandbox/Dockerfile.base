@@ -49,6 +49,7 @@ RUN curl -fsSL "https://github.com/Haleclipse/CCometixLine/releases/download/v${
     && chmod 755 /usr/local/bin/ccline
 
 # ── Docker CLI (for DooD socket mounting) ────────────────────────
+# hadolint ignore=SC1091
 RUN install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \
     && chmod a+r /etc/apt/keyrings/docker.asc \
