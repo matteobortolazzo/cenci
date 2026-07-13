@@ -77,6 +77,9 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 	if !hasLabel(t.Labels, "Planned") {
 		return skip("not Planned")
 	}
+	if hasLabel(t.Labels, "Working") {
+		return skip("already Working")
+	}
 	if hasLabel(t.Labels, "Blocked") {
 		return skip("blocked")
 	}

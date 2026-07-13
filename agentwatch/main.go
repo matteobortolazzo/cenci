@@ -265,11 +265,11 @@ func runDispatch(args []string) {
 	ctrl := &tmux.ExecClient{}
 	// --interval self-loops; otherwise a single pass. --once wins if both given.
 	if *interval > 0 && !*once {
-		dispatch.RunLoop(*configPath, ctrl, *interval, os.Stdout)
+		dispatch.RunLoop(*configPath, ctrl, &dispatch.GHMutator{}, *interval, os.Stdout)
 		return
 	}
 	prior := 0
-	dispatch.RunOnce(cfg, ctrl, *dryRun, os.Stdout, &prior)
+	dispatch.RunOnce(cfg, ctrl, &dispatch.GHMutator{}, *dryRun, os.Stdout, &prior)
 }
 
 func runDispatchEnroll(args []string) {
