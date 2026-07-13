@@ -339,8 +339,25 @@ AGENTWATCH_BIN="$(readlink -f "$(which agentwatch)" 2>/dev/null || true)"
 AGENTWATCH_EVENTS_SOCKET="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/agentwatch-events.sock"
 AGENTWATCH_AVAILABLE=false
 
+# The host daemon starts lazily (the first `agentwatch notify` from a host
+# session spawns it), so right after boot the events socket may not exist even
+# though agentwatch is installed. Missing it here would create the shared
+# container without any agentwatch wiring — permanently, since the container
+# is long-lived and later launches only exec into it (#195). Start the daemon
+# ourselves (a redundant start is a no-op thanks to its already-running guard)
+# and wait briefly for the socket to appear.
+if [[ -x "${AGENTWATCH_BIN}" && ! -S "${AGENTWATCH_EVENTS_SOCKET}" ]]; then
+    nohup "${AGENTWATCH_BIN}" daemon >/dev/null 2>&1 &
+    for _ in {1..30}; do
+        [[ -S "${AGENTWATCH_EVENTS_SOCKET}" ]] && break
+        sleep 0.1
+    done
+fi
+
 if [[ -x "${AGENTWATCH_BIN}" && -S "${AGENTWATCH_EVENTS_SOCKET}" ]]; then
     AGENTWATCH_AVAILABLE=true
+elif [[ -x "${AGENTWATCH_BIN}" ]]; then
+    echo "Warning: agentwatch is installed but its events socket is unavailable; sessions in this container will not report to the host status bars." >&2
 fi
 
 # ── Build agent command args ─────────────────────────────────────
@@ -382,8 +399,21 @@ wait_until_ready() {
     fi
 }
 
+# A running container's mounts are fixed for its whole lifetime: if it was
+# created while the host events socket was missing, attaching can never bring
+# the agentwatch wiring back. Detect that and say how to fix it instead of
+# letting sessions silently vanish from the host status bars (#195).
+warn_if_unwired() {
+    "${AGENTWATCH_AVAILABLE}" || return 0
+    if ! "${RUNTIME}" inspect --format '{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}}' "${CONTAINER_NAME}" 2>/dev/null \
+        | grep -qx '/run/user/1000/agentwatch-events.sock'; then
+        echo "Warning: container '${CONTAINER_NAME}' was created without agentwatch wiring; its sessions will not report to the host status bars. Run '${RUNTIME} stop ${CONTAINER_NAME}' and relaunch to fix." >&2
+    fi
+}
+
 # ── Attach to running container ─────────────────────────────────
 if "${RUNTIME}" ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$"; then
+    warn_if_unwired
     # Containers created by this launcher initialize asynchronously. Older
     # attached containers have no lifecycle label and are already initialized.
     if [[ "$("${RUNTIME}" inspect --format '{{ index .Config.Labels "agent-sand.lifecycle" }}' "${CONTAINER_NAME}" 2>/dev/null || true)" == detached ]]; then
