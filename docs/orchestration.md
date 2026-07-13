@@ -52,32 +52,33 @@ and hides the label from the card's dot display. Each skill adds `Working` when 
 starts and removes it when it hands off, so a card shows "an agent is on this right
 now" while staying in its current column.
 
-## The join key: `<number>-<slug>`
+## The join key: `<number>-<skill>`
 
-One name ties the three layers together — the board card, the tmux window the agent
-runs in, and the watcher's status snapshot:
+The ticket number ties the three layers together — the board card, the tmux window
+the agent runs in, and the watcher's status snapshot:
 
 ```
 board card  ──dispatch──▶  tmux window  ──daemon──▶  status snapshot
- issue #42                  42-<slug>                  window_name: "42-<slug>"
+ issue #42                  42-implement               window_name: "42-implement"
 ```
 
-`agentwatch run` names the window `<number>-<slug>` (slug from `--slug`, else the
-gh issue title, else any trailing context words) and sets `automatic-rename off`.
-When the agentwatch daemon later tracks that window it sees the manual name and
-preserves it instead of overwriting it with the detected task — so `<number>-<slug>`
-flows through to the snapshot's `window_name`, which lazyboards reads over the public
-watcher client (`pkg/watch`,
+`agentwatch run` names a numbered ticket's window `<number>-<skill>` — the skill is
+the running workflow (`refine` / `design` / `implement`) — and sets
+`automatic-rename off`. These names are short and uniform, so many tabs fit on the
+tmux status line at once. When the agentwatch daemon later tracks that window it sees
+the manual name and preserves it instead of overwriting it with the detected task — so
+`<number>-<skill>` flows through to the snapshot's `window_name`, which lazyboards
+reads over the public watcher client (`pkg/watch`,
 [#39](https://github.com/matteobortolazzo/agent-stack/issues/39)) to badge the card.
 See [agentwatch's README](../agentwatch/README.md#the-join-key-survives-the-daemon)
 for the daemon side.
 
-**Keep the two length caps aligned.** `agentwatch run` caps the window name at 40
-characters; lazyboards caps its `{session}` template variable at `session_max_length`
-(default **32**). Both derive the slug from the same gh issue title, so the only way
-they diverge is truncation. Set `session_max_length: 40` in the board config so the
-`{session}` your cleanup hook passes to `tmux kill-window` matches the window that
-`agentwatch run` actually created.
+**lazyboards matches by ticket-number prefix.** Because the running skill isn't part
+of a card's identity, lazyboards joins a snapshot window to a card when the window
+name equals `<number>` or starts with `<number>-`, rather than reconstructing the full
+name. The prefix boundary (`23-`) keeps card `#23` from matching `230-refine`. This is
+backward-compatible with the older `<number>-<slug>` names, so it never needs to know
+which skill is running.
 
 ## The board config
 
@@ -134,7 +135,7 @@ actions:
 
 **Per-column actions** dispatch a workflow onto the selected card. The action key is
 a single uppercase letter (`R`, `D`, `I`); `agentwatch run <workflow> {number}`
-resolves the gh title, builds the `<number>-<slug>` window, and launches the agent.
+builds the `<number>-<skill>` window and launches the agent.
 `agentwatch` chooses `refine`/`design`/`implement` from its built-in Claude templates
 with zero extra config.
 

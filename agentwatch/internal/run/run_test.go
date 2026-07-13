@@ -34,19 +34,19 @@ func (m *mockCtrl) SetWindowOption(target, key, value string) error {
 	return nil
 }
 
-// noConfigOpts returns Opts pinned to a non-existent config (built-ins only)
-// with a stubbed gh lookup, so tests are deterministic.
+// noConfigOpts returns Opts pinned to a non-existent config (built-ins only),
+// so tests are deterministic.
 func noConfigOpts(t *testing.T) Opts {
 	t.Helper()
 	return Opts{
 		ConfigPath: filepath.Join(t.TempDir(), "none.json"),
-		GHTitle:    func(string) string { return "" },
 	}
 }
 
 func TestRunSpawnsWindowAndPinsName(t *testing.T) {
 	m := &mockCtrl{session: "work"}
 	opts := noConfigOpts(t)
+	// A numeric ticket names the window `<number>-<skill>`; --slug is ignored.
 	opts.Workflow, opts.Ticket, opts.Slug = "implement", "40", "demo"
 
 	if err := Run(opts, m); err != nil {
@@ -60,8 +60,8 @@ func TestRunSpawnsWindowAndPinsName(t *testing.T) {
 	if w.session != "work" {
 		t.Errorf("session = %q, want work", w.session)
 	}
-	if w.name != "40-demo" {
-		t.Errorf("name = %q, want 40-demo", w.name)
+	if w.name != "40-implement" {
+		t.Errorf("name = %q, want 40-implement", w.name)
 	}
 	// With no flag and no config, the default is now the sandbox launcher (#98).
 	if !strings.Contains(w.cmd, "agent-sand") || !strings.Contains(w.cmd, "/agentflow:implement 40") {
@@ -70,12 +70,12 @@ func TestRunSpawnsWindowAndPinsName(t *testing.T) {
 
 	found := false
 	for _, o := range m.options {
-		if o.target == "work:40-demo" && o.key == "automatic-rename" && o.value == "off" {
+		if o.target == "work:40-implement" && o.key == "automatic-rename" && o.value == "off" {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("expected automatic-rename off on work:40-demo, got %+v", m.options)
+		t.Errorf("expected automatic-rename off on work:40-implement, got %+v", m.options)
 	}
 }
 
@@ -253,7 +253,7 @@ func TestRunDryRunPrintsAndDoesNotSpawn(t *testing.T) {
 		t.Errorf("dry-run must not spawn, got %+v", m.windows)
 	}
 	out := buf.String()
-	for _, want := range []string{"work", "40-demo", "/agentflow:implement 40"} {
+	for _, want := range []string{"work", "40-implement", "/agentflow:implement 40"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("dry-run output missing %q:\n%s", want, out)
 		}
@@ -278,47 +278,47 @@ func TestSlugify(t *testing.T) {
 }
 
 func TestWindowName(t *testing.T) {
-	if got := windowName("40", "demo", ""); got != "40-demo" {
-		t.Errorf("numeric+slug = %q, want 40-demo", got)
+	// A numeric ticket names the window `<number>-<skill>`, one of the three
+	// agentflow workflows — short and uniform.
+	if got := windowName("230", "refine", ""); got != "230-refine" {
+		t.Errorf("numeric refine = %q, want 230-refine", got)
 	}
-	if got := windowName("40", "", ""); got != "40" {
-		t.Errorf("numeric bare = %q, want 40", got)
+	if got := windowName("255", "implement", ""); got != "255-implement" {
+		t.Errorf("numeric implement = %q, want 255-implement", got)
 	}
-	if got := windowName("40", "", "Add dark mode toggle"); got != "40-add-dark-mode-toggle" {
-		t.Errorf("numeric+ghTitle = %q, want 40-add-dark-mode-toggle", got)
+	if got := windowName("412", "design", ""); got != "412-design" {
+		t.Errorf("numeric design = %q, want 412-design", got)
 	}
-	if got := windowName("feature-x", "", ""); got != "feature-x" {
-		t.Errorf("non-numeric ticket = %q, want feature-x", got)
-	}
-
-	// Ticket id plus trailing context (the skills' `[additional context]`):
-	// the number stays the prefix, the context becomes the slug.
-	if got := windowName("42 focus on the API layer", "", ""); got != "42-focus-on-the-api-layer" {
-		t.Errorf("id+context = %q, want 42-focus-on-the-api-layer", got)
+	// Trailing context after a numeric id is ignored: the name is skill-only.
+	if got := windowName("42 focus on the API layer", "refine", ""); got != "42-refine" {
+		t.Errorf("id+context = %q, want 42-refine", got)
 	}
 	// A leading '#' on the id is stripped.
-	if got := windowName("#1 focus on API", "", ""); got != "1-focus-on-api" {
-		t.Errorf("hash id+context = %q, want 1-focus-on-api", got)
+	if got := windowName("#1 focus on API", "design", ""); got != "1-design" {
+		t.Errorf("hash id = %q, want 1-design", got)
 	}
-	// Free-text task description (implement's ticketless mode).
-	if got := windowName("add dark mode toggle", "", ""); got != "add-dark-mode-toggle" {
-		t.Errorf("task description = %q, want add-dark-mode-toggle", got)
-	}
-	// gh title still wins over trailing context for the slug.
-	if got := windowName("42 raw context", "", "Nice Title"); got != "42-nice-title" {
-		t.Errorf("gh title should win = %q, want 42-nice-title", got)
-	}
-	// Explicit --slug beats everything.
-	if got := windowName("42 raw context", "chosen", "Nice Title"); got != "42-chosen" {
-		t.Errorf("explicit slug should win = %q, want 42-chosen", got)
+	// --slug is ignored for a numeric ticket — the name is always the skill.
+	if got := windowName("42 raw context", "implement", "chosen"); got != "42-implement" {
+		t.Errorf("slug ignored for numeric = %q, want 42-implement", got)
 	}
 
-	long := windowName("40", strings.Repeat("a", 100), "")
+	// Free-text task description (implement's ticketless mode) keeps its
+	// descriptive slug — it has no ticket number and is never joined on.
+	if got := windowName("feature-x", "implement", ""); got != "feature-x" {
+		t.Errorf("non-numeric ticket = %q, want feature-x", got)
+	}
+	if got := windowName("add dark mode toggle", "implement", ""); got != "add-dark-mode-toggle" {
+		t.Errorf("task description = %q, want add-dark-mode-toggle", got)
+	}
+	// An explicit --slug wins for free-text.
+	if got := windowName("add dark mode toggle", "implement", "chosen"); got != "chosen" {
+		t.Errorf("explicit slug should win = %q, want chosen", got)
+	}
+
+	// The cap still applies to a long free-text slug, keeping any prefix intact.
+	long := windowName("free "+strings.Repeat("a", 100), "implement", "")
 	if len([]rune(long)) > windowNameMaxLen {
 		t.Errorf("windowName not capped: len=%d (%q)", len([]rune(long)), long)
-	}
-	if !strings.HasPrefix(long, "40-") {
-		t.Errorf("cap dropped the numeric prefix: %q", long)
 	}
 }
 
@@ -339,7 +339,8 @@ func TestRunForwardsFullTicketArgument(t *testing.T) {
 	if !strings.Contains(w.cmd, "/agentflow:implement 42 focus on the API layer") {
 		t.Errorf("command dropped context: %q", w.cmd)
 	}
-	if w.name != "42-focus-on-the-api-layer" {
-		t.Errorf("window name = %q, want 42-focus-on-the-api-layer", w.name)
+	// The window name is the skill only — trailing context does not leak in.
+	if w.name != "42-implement" {
+		t.Errorf("window name = %q, want 42-implement", w.name)
 	}
 }

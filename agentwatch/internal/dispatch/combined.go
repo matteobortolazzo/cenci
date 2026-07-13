@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/run"
@@ -88,43 +86,11 @@ func failedWindows(failed []Ticket) []watch.WindowState {
 	return out
 }
 
-// failedWindowMaxLen mirrors run.windowNameMaxLen so a synthetic failed entry
-// carries the same bounded "<number>-<slug>" join key as a real dispatched
-// window, keeping external name matching consistent.
-const failedWindowMaxLen = 40
-
-// failedWindowName builds the "<number>-<slug>" window name external tools join
-// on, falling back to the bare number when the title yields no slug. The result
-// is capped to failedWindowMaxLen with the leading number kept intact (slugify
-// output is ASCII, so a byte cap is a rune cap).
+// failedWindowName builds the `<number>-implement` window name external tools
+// join on. Dispatch always runs the implement workflow (applyDispatch in
+// dispatch.go sets Workflow: "implement"), so a synthetic failed entry carries
+// the same `<number>-<skill>` join shape a real dispatched window gets from
+// run.windowName.
 func failedWindowName(t Ticket) string {
-	slug := slugify(t.Title)
-	if slug == "" {
-		return strconv.Itoa(t.Number)
-	}
-	name := fmt.Sprintf("%d-%s", t.Number, slug)
-	if len(name) > failedWindowMaxLen {
-		name = strings.TrimRight(name[:failedWindowMaxLen], "-")
-	}
-	return name
-}
-
-// slugify lowercases s and collapses runs of non-alphanumeric characters into
-// single hyphens, trimming leading/trailing hyphens.
-func slugify(s string) string {
-	var b strings.Builder
-	prevHyphen := false
-	for _, r := range strings.ToLower(strings.TrimSpace(s)) {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			b.WriteRune(r)
-			prevHyphen = false
-		default:
-			if !prevHyphen && b.Len() > 0 {
-				b.WriteByte('-')
-				prevHyphen = true
-			}
-		}
-	}
-	return strings.TrimRight(b.String(), "-")
+	return fmt.Sprintf("%d-implement", t.Number)
 }
