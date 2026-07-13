@@ -16,6 +16,7 @@
     "implementation"
   ],
   "skills": "./skills/",
+  "hooks": "./codex/hooks.json",
   "interface": {
     "displayName": "AgentFlow",
     "shortDescription": "Shared engineering conventions and workflow guidance.",

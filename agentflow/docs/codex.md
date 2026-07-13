@@ -17,11 +17,18 @@ codex plugin add agentflow@agent-stack
 The agent-stack installer runs these commands automatically when it detects Codex.
 Restart or begin a new Codex session after installation.
 
-Verified with Codex CLI 0.144.1: Codex accepts this repository's existing marketplace,
+Verified with Codex CLI 0.144.3: Codex accepts this repository's existing marketplace,
 uses `agentflow/.codex-plugin/plugin.json`, and discovers the bundled
 `skills/*/SKILL.md` files under the `agentflow:` namespace. A Claude installation
 under `~/.claude/plugins` is not shared with Codex. No `.agents/skills` copy or
 symlink is required.
+
+Agentflow deliberately keeps lifecycle hooks client-specific. The Codex manifest
+points to `codex/hooks.json`, whose empty `hooks` map explicitly declares that the
+Codex surface has no lifecycle handlers. This prevents Codex from falling back to
+`hooks/hooks.json`, which contains Claude Code-only commands and output contracts.
+Claude Code continues to load that original hook file unchanged, while both clients
+continue to discover the shared skills.
 
 ## Portable skills
 
