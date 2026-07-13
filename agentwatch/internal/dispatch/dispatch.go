@@ -90,6 +90,15 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 		Config:   cfg,
 	})
 
+	// Surface the pinned model in the same log stream as the decision table so
+	// it's never silent: a dispatch pass with no Model set falls back to
+	// agents.*.model (or, absent that, whatever ambient default the agent CLI
+	// itself resolves), which is precisely the drift this field exists to make
+	// visible and overridable.
+	if cfg.Model != "" {
+		logf(out, "dispatch: model override %q\n", cfg.Model)
+	}
+
 	for _, d := range decisions {
 		logf(out, "%s\n", formatDecision(d))
 	}
@@ -106,6 +115,7 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 			Workflow: "implement",
 			Ticket:   filepath.Join(".plans", filepath.Base(d.Plan.Path)),
 			Agent:    d.Agent,
+			Model:    cfg.Model,
 			Session:  cfg.Session,
 			Dir:      dirByRepo[d.Ticket.Repo],
 		}, ctrl)
@@ -125,26 +135,33 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 
 // RunLoop reloads Config from configPath and runs RunOnce immediately and then
 // on every interval tick, threading the daily-quota tally in memory (it resets
-// on process restart — acceptable for #45). It blocks until the process exits.
-func RunLoop(configPath string, ctrl run.Controller, mut TicketMutator, interval time.Duration, out io.Writer) {
+// on process restart — acceptable for #45). modelOverride, when non-empty (the
+// --model CLI flag), is re-applied to Config every tick, since each tick
+// reloads Config fresh from disk and would otherwise drop it. It blocks until
+// the process exits.
+func RunLoop(configPath string, ctrl run.Controller, mut TicketMutator, interval time.Duration, out io.Writer, modelOverride string) {
 	prior := 0
-	dispatchTick(configPath, ctrl, mut, out, &prior)
+	dispatchTick(configPath, ctrl, mut, out, &prior, modelOverride)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for range ticker.C {
-		dispatchTick(configPath, ctrl, mut, out, &prior)
+		dispatchTick(configPath, ctrl, mut, out, &prior, modelOverride)
 	}
 }
 
-// dispatchTick is RunLoop's per-tick body: reload Config from configPath, then
-// run one dispatch pass against the freshly-loaded config. On a reload error the
-// tick is skipped entirely (no dispatch, prior left untouched) so a bad edit
+// dispatchTick is RunLoop's per-tick body: reload Config from configPath,
+// re-apply modelOverride (if set) since the reload otherwise wins, then run
+// one dispatch pass against the resulting config. On a reload error the tick
+// is skipped entirely (no dispatch, prior left untouched) so a bad edit
 // between ticks cannot crash the loop or silently dispatch against a stale
 // config.
-func dispatchTick(configPath string, ctrl run.Controller, mut TicketMutator, out io.Writer, prior *int) {
+func dispatchTick(configPath string, ctrl run.Controller, mut TicketMutator, out io.Writer, prior *int, modelOverride string) {
 	cfg, ok := reloadConfig(configPath, out)
 	if !ok {
 		return
+	}
+	if modelOverride != "" {
+		cfg.Model = modelOverride
 	}
 	RunOnce(cfg, ctrl, mut, false, out, prior)
 }
