@@ -11,59 +11,193 @@ import (
 	"github.com/matteobortolazzo/agent-stack/agentwatch/pkg/watch"
 )
 
-// RunCombinedLoop runs the dispatch pass and the reconcile pass on one interval
-// inside the daemon, reloading Config from configPath every tick. Each tick
-// dispatches new pickups (threading the in-memory daily-quota tally),
-// reconciles stranded work, then pushes the current set of surfaced failures
-// onto attention as synthetic "failed" windows so the daemon can badge them on
-// the snapshot. It is the ctx-aware sibling of RunLoop and blocks until ctx is
-// cancelled.
-func RunCombinedLoop(ctx context.Context, configPath string, ctrl run.Controller, mut TicketMutator, interval time.Duration, out io.Writer, attention chan<- watch.AttentionUpdate) {
+// loopCheckInterval bounds configuration latency without changing dispatch
+// cadence. The supervisor polls at least this often and runs passes only at
+// their configured deadlines.
+const loopCheckInterval = 60 * time.Second
+
+type combinedScheduler struct {
+	enabled       bool
+	lastCompleted time.Time
+	next          time.Time
+}
+
+func effectiveInterval(d time.Duration) time.Duration {
+	if d <= 0 {
+		return loopCheckInterval
+	}
+	return d
+}
+
+// plan applies the current configuration and reports whether a pass is due.
+// An enable transition always runs immediately; interval edits move the next
+// deadline relative to the previous completion without inventing a pass.
+func (s *combinedScheduler) plan(now time.Time, cfg Config) (run bool, wait time.Duration) {
+	if !cfg.LoopEnabled {
+		s.enabled = false
+		s.lastCompleted = time.Time{}
+		s.next = time.Time{}
+		return false, loopCheckInterval
+	}
+	if !s.enabled {
+		s.enabled = true
+		s.next = now
+	}
+	if !s.lastCompleted.IsZero() {
+		s.next = s.lastCompleted.Add(effectiveInterval(cfg.DaemonInterval))
+	}
+	if !now.Before(s.next) {
+		return true, 0
+	}
+	return false, minDuration(loopCheckInterval, s.next.Sub(now))
+}
+
+func (s *combinedScheduler) complete(now time.Time, cfg Config) {
+	s.lastCompleted = now
+	s.next = now.Add(effectiveInterval(cfg.DaemonInterval))
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if b < a {
+		return b
+	}
+	return a
+}
+
+// RunCombinedLoop is the daemon-owned supervisor. It reloads configuration
+// every minute (or sooner when a pass is due), while dispatching only at the
+// configured cadence. Individual pass failures are published and logged but
+// do not stop the daemon.
+func RunCombinedLoop(ctx context.Context, configPath string, ctrl run.Controller, mut TicketMutator, out io.Writer, attention chan<- watch.AttentionUpdate) {
 	if out == nil {
 		out = os.Stdout
 	}
 	store := NewStateStore("")
 	prior := 0
+	state := watch.DispatchState{DaemonRunning: true}
+	var windows []watch.WindowState
+	var headroom map[string]float64
+	var scheduler combinedScheduler
 
-	combinedTick(ctx, configPath, ctrl, mut, out, &prior, store, attention)
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
 	for {
-		select {
-		case <-ctx.Done():
+		cfg, ok := reloadConfig(configPath, out)
+		if !ok {
+			if !waitContext(ctx, loopCheckInterval) {
+				return
+			}
+			continue
+		}
+		state.Interval = stateInterval(cfg.DaemonInterval)
+		runPass, wait := scheduler.plan(time.Now(), cfg)
+		if !cfg.LoopEnabled {
+			state.Enabled = false
+			state.PassRunning = false
+			state.LastError = ""
+			windows = nil
+			headroom = nil
+			publish(ctx, attention, &state, nil, nil)
+		} else if runPass {
+			runCombinedPass(ctx, cfg, ctrl, mut, out, &prior, store, attention, &state, &windows, &headroom)
+			scheduler.complete(time.Now(), cfg)
+			wait = minDuration(loopCheckInterval, effectiveInterval(cfg.DaemonInterval))
+		}
+		if !waitContext(ctx, wait) {
 			return
-		case <-ticker.C:
-			combinedTick(ctx, configPath, ctrl, mut, out, &prior, store, attention)
 		}
 	}
 }
 
-// combinedTick is RunCombinedLoop's per-tick body: reload Config from
-// configPath once, then feed the same reloaded cfg to both RunOnce and
-// RunReconcileOnce before pushing the failure overlay onto attention. On a
-// reload error the whole tick is skipped — no dispatch, no reconcile, no
-// attention push — and prior is left untouched, so a bad edit between ticks
-// cannot crash the loop or run against a stale/partial config.
-func combinedTick(ctx context.Context, configPath string, ctrl run.Controller, mut TicketMutator, out io.Writer, prior *int, store ObservationStore, attention chan<- watch.AttentionUpdate) {
+func waitContext(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+func stateInterval(d time.Duration) string {
+	if d <= 0 {
+		return ""
+	}
+	return formatInterval(d)
+}
+
+// combinedTick remains a deterministic single-pass helper for direct tests.
+// Scheduling is deliberately owned by combinedScheduler above.
+func combinedTick(ctx context.Context, configPath string, ctrl run.Controller, mut TicketMutator, out io.Writer, prior *int, store ObservationStore, attention chan<- watch.AttentionUpdate, state *watch.DispatchState, windows *[]watch.WindowState, headroom *map[string]float64) time.Duration {
 	cfg, ok := reloadConfig(configPath, out)
 	if !ok {
+		return loopCheckInterval
+	}
+	state.Interval = stateInterval(cfg.DaemonInterval)
+	if !cfg.LoopEnabled {
+		state.Enabled = false
+		state.PassRunning = false
+		state.LastError = ""
+		*windows = nil
+		*headroom = nil
+		publish(ctx, attention, state, nil, nil)
+		return loopCheckInterval
+	}
+	runCombinedPass(ctx, cfg, ctrl, mut, out, prior, store, attention, state, windows, headroom)
+	return effectiveInterval(cfg.DaemonInterval)
+}
+
+func runCombinedPass(ctx context.Context, cfg Config, ctrl run.Controller, mut TicketMutator, out io.Writer, prior *int, store ObservationStore, attention chan<- watch.AttentionUpdate, state *watch.DispatchState, windows *[]watch.WindowState, headroom *map[string]float64) {
+	state.Enabled = true
+	state.Interval = stateInterval(cfg.DaemonInterval)
+	state.PassRunning = true
+	publish(ctx, attention, state, *windows, *headroom)
+
+	before := *prior
+	decisions, dispatchErr := RunOnce(cfg, ctrl, mut, false, out, prior)
+	result, reconcileErr := RunReconcileOnce(cfg, mut, false, out, store)
+
+	state.PassRunning = false
+	state.LastRunAt = time.Now().UTC().Format(time.RFC3339)
+	state.LastDispatched = *prior - before
+	state.LastSkipped = countSkipped(decisions)
+	state.LastError = passError(dispatchErr, reconcileErr)
+	*windows = failedWindows(result.Failed)
+	*headroom = computeHeadroom(cfg)
+	publish(ctx, attention, state, *windows, *headroom)
+}
+
+func passError(dispatchErr, reconcileErr error) string {
+	if dispatchErr != nil {
+		return "dispatch_pass_failed"
+	}
+	if reconcileErr != nil {
+		return "reconcile_pass_failed"
+	}
+	return ""
+}
+
+func publish(ctx context.Context, attention chan<- watch.AttentionUpdate, state *watch.DispatchState, windows []watch.WindowState, headroom map[string]float64) {
+	if attention == nil {
 		return
 	}
-
-	RunOnce(cfg, ctrl, mut, false, out, prior)
-	result := RunReconcileOnce(cfg, mut, false, out, store)
-	if attention != nil {
-		update := watch.AttentionUpdate{Windows: failedWindows(result.Failed), Headroom: computeHeadroom(cfg)}
-		select {
-		case attention <- update:
-		case <-ctx.Done():
-		}
+	s := *state
+	u := watch.AttentionUpdate{Dispatch: &s, Windows: windows, Headroom: headroom}
+	select {
+	case attention <- u:
+	case <-ctx.Done():
 	}
 }
 
-// computeHeadroom returns the current per-agent-type headroom snapshot, or an
-// empty map when AgentLimits isn't configured (buildBudgetProvider falls back
-// to a FloorProvider, which has no Headroom()).
+func countSkipped(decisions []Decision) int {
+	n := 0
+	for _, d := range decisions {
+		if d.Action == ActionSkip {
+			n++
+		}
+	}
+	return n
+}
+
 func computeHeadroom(cfg Config) map[string]float64 {
 	up, ok := buildBudgetProvider(cfg, time.Now()).(*UsageProvider)
 	if !ok {
@@ -72,25 +206,12 @@ func computeHeadroom(cfg Config) map[string]float64 {
 	return up.Headroom()
 }
 
-// failedWindows maps surfaced-failure tickets to synthetic "failed" window
-// entries. A failed ticket has no real tmux window, so this is the only way it
-// reaches the snapshot and the frontends.
 func failedWindows(failed []Ticket) []watch.WindowState {
 	out := make([]watch.WindowState, 0, len(failed))
 	for _, t := range failed {
-		out = append(out, watch.WindowState{
-			WindowName: failedWindowName(t),
-			Status:     "failed",
-		})
+		out = append(out, watch.WindowState{WindowName: failedWindowName(t), Status: "failed"})
 	}
 	return out
 }
 
-// failedWindowName builds the `<number>-implement` window name external tools
-// join on. Dispatch always runs the implement workflow (applyDispatch in
-// dispatch.go sets Workflow: "implement"), so a synthetic failed entry carries
-// the same `<number>-<skill>` join shape a real dispatched window gets from
-// run.windowName.
-func failedWindowName(t Ticket) string {
-	return fmt.Sprintf("%d-implement", t.Number)
-}
+func failedWindowName(t Ticket) string { return fmt.Sprintf("%d-implement", t.Number) }

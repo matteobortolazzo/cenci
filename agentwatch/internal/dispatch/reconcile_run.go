@@ -163,8 +163,11 @@ type reconcileDeps struct {
 // RunReconcileOnce collects tickets, plans, the daemon snapshot, and durable
 // attempt counts, runs the pure Reconcile engine, logs every recovery, applies
 // the gh mutations (unless dryRun), and persists the grace map. The daemon
-// consumes result.Failed to badge the snapshot.
-func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer, store ObservationStore) ReconcileResult {
+// consumes result.Failed to badge the snapshot. It also returns the first of
+// the collection/plan/attempt errors encountered during the pass, if any —
+// all existing logging is unchanged, this only additionally surfaces the
+// error to the caller instead of swallowing it.
+func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer, store ObservationStore) (ReconcileResult, error) {
 	if out == nil {
 		out = os.Stdout
 	}
@@ -173,12 +176,16 @@ func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer,
 	if err != nil {
 		logf(out, "reconcile: collecting tickets: %v\n", err)
 	}
+	collectErr := err
 
 	var plans []Plan
 	for _, rc := range cfg.Repos {
 		ps, err := ReadPlans(rc.Repo, rc.Dir, nil)
 		if err != nil {
 			logf(out, "reconcile: reading plans in %s: %v\n", rc.Dir, err)
+			if collectErr == nil {
+				collectErr = err
+			}
 			continue
 		}
 		plans = append(plans, ps...)
@@ -199,12 +206,15 @@ func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer,
 		if err != nil {
 			logf(out, "reconcile: #%d counting attempts: %v\n", t.Number, err)
 			attemptsUnknown[planKey(t.Repo, t.Number)] = true
+			if collectErr == nil {
+				collectErr = err
+			}
 			continue
 		}
 		attempts[planKey(t.Repo, t.Number)] = n
 	}
 
-	return applyReconcile(cfg, reconcileDeps{
+	result, applyErr := applyReconcile(cfg, reconcileDeps{
 		Tickets:         tickets,
 		Plans:           plans,
 		Snapshot:        snap,
@@ -212,20 +222,23 @@ func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer,
 		AttemptsUnknown: attemptsUnknown,
 		Now:             time.Now(),
 	}, mut, dryRun, out, store)
+	return result, firstNonNil(collectErr, applyErr)
 }
 
 // applyReconcile runs the pure engine over already-collected deps, logs, applies
 // (unless dryRun), and persists the next grace map. It is the testable core of
 // RunReconcileOnce.
-func applyReconcile(cfg Config, deps reconcileDeps, mut TicketMutator, dryRun bool, out io.Writer, store ObservationStore) ReconcileResult {
+func applyReconcile(cfg Config, deps reconcileDeps, mut TicketMutator, dryRun bool, out io.Writer, store ObservationStore) (ReconcileResult, error) {
 	if out == nil {
 		out = os.Stdout
 	}
 
 	obs, err := store.Load()
+	var firstErr error
 	if err != nil {
 		logf(out, "reconcile: loading state: %v\n", err)
 		obs = map[string]time.Time{}
+		firstErr = err
 	}
 
 	result := Reconcile(ReconcileInputs{
@@ -244,35 +257,41 @@ func applyReconcile(cfg Config, deps reconcileDeps, mut TicketMutator, dryRun bo
 	}
 
 	if dryRun {
-		return result
+		return result, firstErr
 	}
 
 	for _, rec := range result.Recoveries {
-		applyRecovery(mut, rec, out)
+		firstErr = firstNonNil(firstErr, applyRecovery(mut, rec, out))
 	}
 
 	if err := store.Save(result.NextObservations); err != nil {
 		logf(out, "reconcile: saving state: %v\n", err)
+		firstErr = firstNonNil(firstErr, err)
 	}
-	return result
+	return result, firstErr
 }
 
 // applyRecovery applies one recovery's gh side effects. Report-only kinds
 // (orphan-plan) do nothing. If the label swap fails, the comment is skipped so a
 // ticket is never annotated without the state change that explains it.
-func applyRecovery(mut TicketMutator, rec Recovery, out io.Writer) {
+func applyRecovery(mut TicketMutator, rec Recovery, out io.Writer) error {
+	if out == nil {
+		out = os.Stdout
+	}
 	if len(rec.AddLabels) == 0 && len(rec.RemoveLabels) == 0 {
-		return
+		return nil
 	}
 	if err := mut.EditLabels(rec.Ticket.Repo, rec.Ticket.Number, rec.AddLabels, rec.RemoveLabels); err != nil {
 		logf(out, "reconcile: #%d edit labels: %v\n", rec.Ticket.Number, err)
-		return
+		return err
 	}
 	if rec.Comment != "" {
 		if err := mut.Comment(rec.Ticket.Repo, rec.Ticket.Number, rec.Comment); err != nil {
 			logf(out, "reconcile: #%d comment: %v\n", rec.Ticket.Number, err)
+			return err
 		}
 	}
+	return nil
 }
 
 // formatRecovery renders one recovery as a single log line.

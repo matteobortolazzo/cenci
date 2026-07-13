@@ -40,7 +40,9 @@ func TestApplyDispatchClaimsWorkingLabelAfterSpawn(t *testing.T) {
 	prior := 0
 	var buf bytes.Buffer
 
-	applyDispatch(testConfig(), dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior)
+	if _, err := applyDispatch(testConfig(), dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
+		t.Fatalf("applyDispatch returned unexpected error: %v", err)
+	}
 
 	// Exactly one claim: the synchronous Working label must be applied once per
 	// spawned ticket — a duplicate edit would be a real double-mutation bug.
@@ -66,7 +68,9 @@ func TestApplyDispatchDryRunSkipsClaim(t *testing.T) {
 	mut := &fakeMutator{}
 	prior := 0
 
-	applyDispatch(testConfig(), dispatchableDeps(now), fakeController{}, mut, true, nil, &prior)
+	if _, err := applyDispatch(testConfig(), dispatchableDeps(now), fakeController{}, mut, true, nil, &prior); err != nil {
+		t.Fatalf("dry-run returned unexpected error: %v", err)
+	}
 
 	if len(mut.labelEdits) != 0 {
 		t.Errorf("dry-run must not claim, got %+v", mut.labelEdits)
@@ -84,7 +88,10 @@ func TestApplyDispatchNoClaimOnSpawnFailure(t *testing.T) {
 	prior := 0
 	var buf bytes.Buffer
 
-	applyDispatch(testConfig(), dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior)
+	_, err := applyDispatch(testConfig(), dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior)
+	if err == nil || !strings.Contains(err.Error(), "tmux exploded") {
+		t.Fatalf("spawn failure error = %v, want tmux exploded", err)
+	}
 
 	if len(mut.labelEdits) != 0 {
 		t.Errorf("a failed spawn must not claim the ticket, got %+v", mut.labelEdits)
@@ -105,7 +112,10 @@ func TestApplyDispatchClaimFailureLogsAndContinues(t *testing.T) {
 	prior := 0
 	var buf bytes.Buffer
 
-	applyDispatch(testConfig(), dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior)
+	_, err := applyDispatch(testConfig(), dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior)
+	if err == nil || !strings.Contains(err.Error(), "label edit") {
+		t.Fatalf("claim failure error = %v, want label edit error", err)
+	}
 
 	// The spawn already happened, so quota is consumed and the pass carries on;
 	// the failed claim is only logged (reconcile recovers the label drift).
@@ -147,7 +157,9 @@ func TestApplyDispatchPassesModelToRunOpts(t *testing.T) {
 	cfg := testConfig()
 	cfg.Model = "claude-sonnet-5"
 
-	applyDispatch(cfg, dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior)
+	if _, err := applyDispatch(cfg, dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
+		t.Fatalf("applyDispatch returned unexpected error: %v", err)
+	}
 
 	if captured.Model != "claude-sonnet-5" {
 		t.Errorf("captured Opts.Model = %q, want %q", captured.Model, "claude-sonnet-5")
@@ -173,7 +185,9 @@ func TestApplyDispatchOmitsModelWhenUnset(t *testing.T) {
 	prior := 0
 	var buf bytes.Buffer
 
-	applyDispatch(testConfig(), dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior)
+	if _, err := applyDispatch(testConfig(), dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
+		t.Fatalf("applyDispatch returned unexpected error: %v", err)
+	}
 
 	if captured.Model != "" {
 		t.Errorf("captured Opts.Model = %q, want empty", captured.Model)

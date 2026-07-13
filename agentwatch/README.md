@@ -297,6 +297,30 @@ agentwatch dispatch loop status [--config <path>] [--json]
 All three print the same resolved `DispatchState` — human-readable by default, or the
 raw JSON object with `--json` (e.g. `{"enabled":true,"daemon_running":false,"interval":"5m",...}`).
 
+A running `agentwatch daemon` always starts the embedded dispatch supervisor loop at
+startup — `dispatch.loopEnabled` purely controls whether it *performs* passes, not
+whether it runs. The loop reloads its config on a hardcoded 60s check interval (not
+configurable) to pick up `loopEnabled` changes, so `dispatch loop on`/`off` take effect
+within ≤60s of a running daemon, with no daemon restart and no new inbound IPC. While
+disabled, the loop still wakes every 60s — it skips the dispatch/reconcile passes but
+clears any stale failed-window badges and headroom overlays within that same window.
+While enabled, configuration is still polled at least every 60 seconds, but the
+dispatch/reconcile pair runs only at the configured `daemonInterval` deadline (and
+immediately after enabling). Interval edits recalculate that deadline from the prior
+pass completion without creating an extra pass. The loop publishes live state so that
+`agentwatch dispatch status --json`'s `"loop"` object (`enabled`, `pass_running`,
+`last_run_at`, `last_dispatched`, `last_skipped`, `last_error`) now reflects the live
+daemon end-to-end, not just a config fallback. `last_dispatched` counts successful
+spawns (not merely dispatch decisions), and `last_error` is intentionally redacted to
+`dispatch_pass_failed` or `reconcile_pass_failed`; detailed errors stay in daemon logs.
+
+This daemon-embedded path (`dispatch loop on` alongside a running `agentwatch daemon`)
+is the canonical way to run dispatch continuously. `agentwatch dispatch --interval
+<duration>` (see [Auto-dispatch](#auto-dispatch-agentwatch-dispatch)) remains a
+separate, standalone loop for running dispatch directly from the CLI without a daemon.
+It stops and exits nonzero on its first config or pass error; one-shot, dry-run, and
+reconcile invocations likewise exit nonzero when their pass fails.
+
 ### Pickup rules and gates
 
 A ticket is dispatched only when **all** of these hold, evaluated in order (the first
@@ -377,7 +401,7 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 | `planStalenessTolerance` | `5` | Max commits a plan may fall behind before it is skipped as stale (see [Path-aware staleness](#path-aware-staleness) for scoping the count via `stalenessPaths`) |
 | `gracePeriod` | `5m` | How long the failure signal must hold continuously before the reconciler recovers a stranded ticket (Go duration string) |
 | `retryBudget` | `2` | Retries (`Working` → `Planned`) a stranded ticket gets before it is marked `dispatch-failed`; an explicit `0` disables retries |
-| `daemonInterval` | none | When set, the daemon runs the embedded dispatch + reconcile loop on this interval (Go duration string); unset leaves daemon behavior unchanged |
+| `daemonInterval` | none | Dispatch cadence for the daemon's embedded dispatch + reconcile loop (Go duration string). Configuration is independently polled at least every 60 seconds; nonpositive values use a 60s internal fallback but are not reported as a configured interval |
 | `loopEnabled` | unset | Explicitly toggles the embedded fleet dispatch loop; managed via `agentwatch dispatch loop on\|off` (see [Loop toggle](#loop-toggle-agentwatch-dispatch-loop-onoffstatus)). When unset, it back-compat-resolves to `daemonInterval > 0` so an existing `daemonInterval`-only config keeps running unchanged; an explicit `true`/`false` overrides that resolution either way |
 | `defaultAgent` | `claude` | Agent used when a ticket has no `agent:<name>` label |
 | `model` | none | Model override for every dispatched session (overrides `agents.*.model`); the `--model` CLI flag overrides this. Pin this to avoid a dispatched session silently inheriting whatever ambient/account-level default model is active at spawn time |

@@ -11,6 +11,7 @@ import (
 	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/detect"
 	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/frontend"
 	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/ipc"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/pkg/watch"
 )
 
 // Daemon manages the event-driven loop and per-session core state. All tmux
@@ -33,6 +34,11 @@ type Daemon struct {
 	// when the embedded dispatch loop is disabled or no AgentLimits are
 	// configured.
 	headroom map[string]float64
+
+	// dispatch is the embedded fleet dispatch loop's live state (#220),
+	// carried alongside attention on the same channel. Nil until the loop's
+	// first publish.
+	dispatch *watch.DispatchState
 }
 
 // newDaemon creates a Daemon with the given dependencies.
@@ -87,8 +93,10 @@ func Run(ctx context.Context, cfg config.Config, fe frontend.Frontend, attention
 	return d.loop(ctx, attention)
 }
 
-// loop is the main event-driven loop. A nil attention channel never fires in
-// the select, so the extra case is a no-op when the embedded loop is disabled.
+// loop is the main event-driven loop. The attention channel is always live
+// now (main.go always constructs a non-nil channel and always starts
+// RunCombinedLoop, per #220); disabled dispatch state flows through
+// u.Dispatch.Enabled rather than through a nil channel.
 func (d *Daemon) loop(ctx context.Context, attention <-chan ipc.AttentionUpdate) error {
 	sweep := time.NewTicker(d.cfg.SweepInterval)
 	defer sweep.Stop()
@@ -105,6 +113,7 @@ func (d *Daemon) loop(ctx context.Context, attention <-chan ipc.AttentionUpdate)
 		case u := <-attention:
 			d.attention = u.Windows
 			d.headroom = u.Headroom
+			d.dispatch = u.Dispatch
 			d.frontend.RenderHeadroom(u.Headroom)
 			d.broadcast()
 		}
