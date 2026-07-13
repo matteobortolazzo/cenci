@@ -44,14 +44,15 @@ bash dev-sandbox/tests/smoke.test.sh   # runtime smoke test; self-skips without 
 digest of `Dockerfile.base` + `entrypoint.sh` + `lib/` (Ubuntu, system packages, locale,
 `uv`, GitHub CLI, Docker CLI, non-root `dev` user, entrypoint — no language runtimes).
 `Dockerfile` (the monolith) builds `agent-sandbox:latest` `FROM` that base image and
-layers on the runtime stacks in order: .NET, Node, Go, then Codex last (Codex bumps
-daily via the deps-bump workflow, so keeping it last avoids invalidating the other
+layers on the runtime stacks in order: .NET, Node, Playwright, Go, then Codex last (Codex
+bumps daily via the deps-bump workflow, so keeping it last avoids invalidating the other
 stacks' layer cache on every bump).
 
-`fragments/*.dockerfile` holds the same composable blocks (`dotnet`, `node`, `go`, `python`,
-`rust`, `codex`) as standalone snippets used to assemble per-project images. Generated
-images always include Node and Codex so either supported agent can launch; the remaining
-fragments follow the detected project stack. **Invariant:** each fragment and its
+`fragments/*.dockerfile` holds the same composable blocks (`dotnet`, `node`, `playwright`,
+`go`, `python`, `rust`, `codex`) as standalone snippets used to assemble per-project images.
+Generated images always include Node and Codex so either supported agent can launch; the
+remaining fragments (including `playwright`, used for `verify-ui`'s Chromium screenshot
+capture) follow the detected project stack. **Invariant:** each fragment and its
 corresponding block in `Dockerfile` must stay byte-identical — hand-duplicated on every
 change (e.g. bumping `DOTNET_SDK_VERSION` or adding a package to a stack block means
 editing both `Dockerfile` and `fragments/<stack>.dockerfile` identically).
@@ -74,6 +75,10 @@ Image dependency versions are pinned via Dockerfile `ARG`s, all checked daily by
   - `NODE_MAJOR` — `Dockerfile` (+ `fragments/node.dockerfile`, byte-identical). Only
     proposed once the currently-pinned major's LTS support has ended; the PR is never
     auto-merged — always reviewed, merged, and rebuild-dispatched by hand.
+- **Manual only (not yet wired into `deps-bump.yml`)**:
+  - `PLAYWRIGHT_VERSION` — `Dockerfile` (+ `fragments/playwright.dockerfile`,
+    byte-identical). Bump by hand and rebuild; add it to the auto-bumped tier above in a
+    follow-up if it proves stable enough to auto-merge like Codex/Go/uv.
 
 ## Security
 - Never bake secrets or credentials into the image layers.
