@@ -52,7 +52,7 @@ func combinedTick(ctx context.Context, configPath string, ctrl run.Controller, m
 		return
 	}
 
-	RunOnce(cfg, ctrl, false, out, prior)
+	RunOnce(cfg, ctrl, mut, false, out, prior)
 	result := RunReconcileOnce(cfg, mut, false, out, store)
 	if attention != nil {
 		update := watch.AttentionUpdate{Windows: failedWindows(result.Failed), Headroom: computeHeadroom(cfg)}

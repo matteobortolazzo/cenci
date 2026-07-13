@@ -86,6 +86,11 @@ func TestDecideGates(t *testing.T) {
 			want:   []wantDecision{{42, ActionSkip, "not Planned", ""}},
 		},
 		{
+			name:   "already Working",
+			mutate: func(in *Inputs) { in.Tickets[0].Labels = []string{"Planned", "Working"} },
+			want:   []wantDecision{{42, ActionSkip, "already Working", ""}},
+		},
+		{
 			name:   "Blocked",
 			mutate: func(in *Inputs) { in.Tickets[0].Labels = []string{"Planned", "Blocked"} },
 			want:   []wantDecision{{42, ActionSkip, "blocked", ""}},

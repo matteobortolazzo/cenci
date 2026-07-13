@@ -76,13 +76,13 @@ func TestDispatchTickBadReloadSkipsTick(t *testing.T) {
 	var buf bytes.Buffer
 
 	// Baseline tick against a valid config.
-	dispatchTick(path, fakeController{}, &buf, &prior)
+	dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior)
 	buf.Reset()
 
 	// Config goes bad between ticks.
 	corruptConfig(t, path)
 
-	dispatchTick(path, fakeController{}, &buf, &prior)
+	dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior)
 
 	if prior != 3 {
 		t.Errorf("prior quota tally changed on a skipped tick: got %d, want 3", prior)
@@ -99,7 +99,7 @@ func TestDispatchTickReloadPicksUpEnrollment(t *testing.T) {
 	prior := 0
 	var buf bytes.Buffer
 
-	dispatchTick(path, fakeController{}, &buf, &prior)
+	dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior)
 
 	// Repo B is enrolled between ticks (e.g. via `dispatch enroll` or the
 	// board-driven flow from lazyboards#260).
@@ -108,7 +108,7 @@ func TestDispatchTickReloadPicksUpEnrollment(t *testing.T) {
 	}
 
 	buf.Reset()
-	dispatchTick(path, fakeController{}, &buf, &prior)
+	dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior)
 
 	// No gh seam exists for CollectTickets (by design, per the approved plan),
 	// so the reload is observed via the deterministic gh collection-error log
