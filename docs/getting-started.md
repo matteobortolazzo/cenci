@@ -147,8 +147,9 @@ Treated as Linux. Two things to know:
 ```
 
 This updates every installed plugin in each available client, refreshes the launcher
-symlinks, and offers to rebuild the sandbox image when needed. AgentWatch
-re-bootstraps its matching binary on the next session automatically.
+symlinks, and offers to rebuild the sandbox image when needed. When AgentWatch is
+updated, the installer provisions the matching binary and gracefully replaces the
+running daemon so the new version takes effect immediately.
 
 ## Troubleshooting
 
