@@ -3,10 +3,10 @@ name: agentwatch — CI
 on:
   push:
     branches: [main]
-    paths: ['agentwatch/**']
+    paths: ['agentwatch/**', '.github/workflows/agentwatch-ci.yml']
   pull_request:
     branches: [main]
-    paths: ['agentwatch/**']
+    paths: ['agentwatch/**', '.github/workflows/agentwatch-ci.yml']
 
 permissions:
   contents: read
@@ -41,3 +41,14 @@ jobs:
         with:
           version: v2.10.1
           working-directory: agentwatch
+
+  frontend-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agentwatch
+    steps:
+      - uses: actions/checkout@v7
+      - run: bash plugin/gnome/test.sh
+      - run: bash plugin/plasma/test.sh
+      - run: bash plugin/macos/test.sh
