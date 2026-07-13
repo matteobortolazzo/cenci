@@ -11,5 +11,5 @@
   "url": "https://github.com/matteobortolazzo/agent-stack/tree/main/agentwatch",
   "settings-schema": "org.gnome.shell.extensions.agentwatch",
   "version": 1,
-  "version-name": "2.12.0"
+  "version-name": "2.13.0"
 }
