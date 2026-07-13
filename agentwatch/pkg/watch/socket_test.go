@@ -97,17 +97,250 @@ func TestSecureSocketDir_RejectsInsecureXDG(t *testing.T) {
 	}
 }
 
-func TestDefaultSocketPath_UsesSecureDir(t *testing.T) {
+// TestDefaultSocketPath_ResolvesUnderNestedSocketDir replaces the former
+// TestDefaultSocketPath_UsesSecureDir: defaultSocketPath must route through the
+// nested SocketDir() (not secureSocketDir() directly), so agentwatch.sock lands
+// in the same dedicated agentwatch/ subdirectory as the events socket (#217).
+func TestDefaultSocketPath_ResolvesUnderNestedSocketDir(t *testing.T) {
 	xdgDir := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", xdgDir)
 
 	got := DefaultSocketPath()
-	secureDir, err := secureSocketDir()
+
+	// Deliberately built from primitives (not from a live SocketDir() call):
+	// once SocketDir() is nested but defaultSocketPath is NOT yet rerouted to
+	// build on it, comparing against a live SocketDir() call would coincidentally
+	// still pass. This pins the actual nested-path shape from the AC.
+	want := filepath.Join(xdgDir, "agentwatch", "agentwatch.sock")
+	if got != want {
+		t.Errorf("DefaultSocketPath() = %q, want %q (must resolve under the nested SocketDir(), not the flat secureSocketDir())", got, want)
+	}
+}
+
+// TestSocketDir_NestsAgentwatchSubdirUnderXDG covers the AC: when
+// $XDG_RUNTIME_DIR is valid, SocketDir() must return a dedicated agentwatch/
+// subdirectory nested under it (not the shared XDG dir itself, which also
+// holds wayland/pulse/keyring sockets), created with 0700 if missing.
+func TestSocketDir_NestsAgentwatchSubdirUnderXDG(t *testing.T) {
+	xdgDir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", xdgDir)
+
+	got, err := SocketDir()
 	if err != nil {
-		t.Fatalf("secureSocketDir() error: %v", err)
+		t.Fatalf("SocketDir() error: %v", err)
 	}
 
-	if !strings.HasPrefix(got, secureDir) {
-		t.Errorf("DefaultSocketPath() = %q, want prefix %q", got, secureDir)
+	want := filepath.Join(xdgDir, "agentwatch")
+	if got != want {
+		t.Errorf("SocketDir() = %q, want %q (nested agentwatch/ subdir under XDG_RUNTIME_DIR)", got, want)
+	}
+
+	info, err := os.Stat(got)
+	if err != nil {
+		t.Fatalf("stat(%q) error: %v", got, err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("SocketDir() %q is not a directory", got)
+	}
+	if perm := info.Mode().Perm(); perm != 0700 {
+		t.Errorf("SocketDir() dir permissions = %04o, want 0700", perm)
+	}
+}
+
+// TestSocketDir_NestsAgentwatchSubdirUnderTmpFallback covers the AC: the /tmp
+// fallback branch must nest agentwatch/ one level deeper than today's flat
+// /tmp/agentwatch-<uid>/ directory, created with 0700 if missing.
+func TestSocketDir_NestsAgentwatchSubdirUnderTmpFallback(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	tmpRoot := t.TempDir()
+	t.Setenv("TMPDIR", tmpRoot)
+
+	got, err := SocketDir()
+	if err != nil {
+		t.Fatalf("SocketDir() error: %v", err)
+	}
+
+	want := filepath.Join(tmpRoot, fmt.Sprintf("agentwatch-%d", os.Getuid()), "agentwatch")
+	if got != want {
+		t.Errorf("SocketDir() = %q, want %q (nested one level deeper than the /tmp fallback dir)", got, want)
+	}
+
+	info, err := os.Stat(got)
+	if err != nil {
+		t.Fatalf("stat(%q) error: %v", got, err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("SocketDir() %q is not a directory", got)
+	}
+	if perm := info.Mode().Perm(); perm != 0700 {
+		t.Errorf("SocketDir() dir permissions = %04o, want 0700", perm)
+	}
+}
+
+// TestSocketDir_IdempotentAgainstPreCreatedDir covers the container bind-mount
+// case called out in the plan's Risks section: a container may pre-create the
+// nested agentwatch/ mountpoint (with host ownership) before agentwatch itself
+// ever runs. SocketDir() must not error against that, and repeated calls must
+// keep resolving to the same path without error.
+func TestSocketDir_IdempotentAgainstPreCreatedDir(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T) (parentOfNestedDir string)
+	}{
+		{
+			name: "xdg branch",
+			setup: func(t *testing.T) string {
+				xdgDir := t.TempDir()
+				t.Setenv("XDG_RUNTIME_DIR", xdgDir)
+				return xdgDir
+			},
+		},
+		{
+			name: "tmp fallback branch",
+			setup: func(t *testing.T) string {
+				t.Setenv("XDG_RUNTIME_DIR", "")
+				tmpRoot := t.TempDir()
+				t.Setenv("TMPDIR", tmpRoot)
+				return filepath.Join(tmpRoot, fmt.Sprintf("agentwatch-%d", os.Getuid()))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parent := tt.setup(t)
+
+			// Simulate a container bind-mounting the nested dir before
+			// agentwatch ever runs (host pre-creates the mountpoint).
+			preCreated := filepath.Join(parent, "agentwatch")
+			if err := os.MkdirAll(preCreated, 0700); err != nil {
+				t.Fatalf("pre-creating %q: %v", preCreated, err)
+			}
+
+			got, err := SocketDir()
+			if err != nil {
+				t.Fatalf("SocketDir() must not error against a pre-existing dir: %v", err)
+			}
+			if got != preCreated {
+				t.Errorf("SocketDir() = %q, want %q", got, preCreated)
+			}
+
+			// A second call must be idempotent: same path, no error.
+			second, err := SocketDir()
+			if err != nil {
+				t.Fatalf("second SocketDir() call error (must be idempotent): %v", err)
+			}
+			if second != preCreated {
+				t.Errorf("second SocketDir() call = %q, want %q", second, preCreated)
+			}
+		})
+	}
+}
+
+// TestSocketDir_ErrorsWhenNestedPathIsFile covers the review-flagged edge
+// case: if a plain file (not a directory) already occupies the nested
+// agentwatch/ path, SocketDir() must return a clear error itself rather than
+// silently succeeding and letting socket creation fail later with a
+// confusing "not a directory" error.
+func TestSocketDir_ErrorsWhenNestedPathIsFile(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T) (parentOfNestedDir string)
+	}{
+		{
+			name: "xdg branch",
+			setup: func(t *testing.T) string {
+				xdgDir := t.TempDir()
+				t.Setenv("XDG_RUNTIME_DIR", xdgDir)
+				return xdgDir
+			},
+		},
+		{
+			name: "tmp fallback branch",
+			setup: func(t *testing.T) string {
+				t.Setenv("XDG_RUNTIME_DIR", "")
+				tmpRoot := t.TempDir()
+				t.Setenv("TMPDIR", tmpRoot)
+				return filepath.Join(tmpRoot, fmt.Sprintf("agentwatch-%d", os.Getuid()))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parent := tt.setup(t)
+
+			// Pre-create the /tmp-fallback branch's parent dir so writing the
+			// plain file at the nested path succeeds even when the parent
+			// itself doesn't exist yet.
+			if err := os.MkdirAll(parent, 0700); err != nil {
+				t.Fatalf("pre-creating parent %q: %v", parent, err)
+			}
+
+			// Simulate a plain file already occupying the nested agentwatch/
+			// path (instead of a pre-created directory).
+			preCreatedFile := filepath.Join(parent, "agentwatch")
+			if err := os.WriteFile(preCreatedFile, []byte("not a directory"), 0600); err != nil {
+				t.Fatalf("pre-creating file %q: %v", preCreatedFile, err)
+			}
+
+			_, err := SocketDir()
+			if err == nil {
+				t.Fatalf("SocketDir() error = nil, want error when a plain file occupies the nested path")
+			}
+		})
+	}
+}
+
+// TestSocketNames_ShareSocketDirParent guards the risk called out in the
+// plan: if defaultSocketPath isn't rerouted through SocketDir(), the
+// broadcast and events sockets would split across two different
+// directories. Both must resolve inside whichever directory SocketDir()
+// returns, in both the XDG and /tmp-fallback branches.
+func TestSocketNames_ShareSocketDirParent(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T) (wantParent string)
+	}{
+		{
+			name: "xdg branch",
+			setup: func(t *testing.T) string {
+				xdgDir := t.TempDir()
+				t.Setenv("XDG_RUNTIME_DIR", xdgDir)
+				return filepath.Join(xdgDir, "agentwatch")
+			},
+		},
+		{
+			name: "tmp fallback branch",
+			setup: func(t *testing.T) string {
+				t.Setenv("XDG_RUNTIME_DIR", "")
+				tmpRoot := t.TempDir()
+				t.Setenv("TMPDIR", tmpRoot)
+				return filepath.Join(tmpRoot, fmt.Sprintf("agentwatch-%d", os.Getuid()), "agentwatch")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// wantParent is built from primitives (not a live SocketDir()
+			// call): pins the actual nested-path shape from the AC, so this
+			// stays red until both SocketDir() nests AND defaultSocketPath is
+			// rerouted through it (the exact split-sockets risk from the plan).
+			wantParent := tt.setup(t)
+
+			broadcast := DefaultSocketPath()
+			events := defaultSocketPath("agentwatch-events")
+
+			if filepath.Dir(broadcast) != wantParent {
+				t.Errorf("agentwatch.sock parent = %q, want %q", filepath.Dir(broadcast), wantParent)
+			}
+			if filepath.Dir(events) != wantParent {
+				t.Errorf("agentwatch-events.sock parent = %q, want %q", filepath.Dir(events), wantParent)
+			}
+			if filepath.Dir(broadcast) != filepath.Dir(events) {
+				t.Errorf("agentwatch.sock and agentwatch-events.sock must share a parent dir; got %q vs %q", filepath.Dir(broadcast), filepath.Dir(events))
+			}
+		})
 	}
 }
