@@ -23,6 +23,7 @@ import (
 	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/ipc"
 	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/run"
 	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/tmux"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/pkg/watch"
 )
 
 // version is stamped at build time via -ldflags "-X main.version=<ver>".
@@ -265,6 +266,9 @@ func runDispatch(args []string) {
 		case "status":
 			runDispatchStatus(args[1:])
 			return
+		case "loop":
+			runDispatchLoop(args[1:])
+			return
 		default:
 			// A stale/rebuilt binary invoked with a typo'd verb (e.g. "statas")
 			// must never silently fall through to a real dispatch pass: Go's
@@ -408,7 +412,18 @@ func runDispatchStatus(args []string) {
 	}
 
 	if *jsonOut {
-		data, err := json.Marshal(enrollment)
+		out := struct {
+			Repo     string              `json:"repo"`
+			Dir      string              `json:"dir"`
+			Enrolled bool                `json:"enrolled"`
+			Loop     watch.DispatchState `json:"loop"`
+		}{
+			Repo:     enrollment.Repo,
+			Dir:      enrollment.Dir,
+			Enrolled: enrollment.Enrolled,
+			Loop:     dispatch.ResolveDispatchState(*configPath, watch.DefaultSocketPath(), os.Stderr),
+		}
+		data, err := json.Marshal(out)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "agentwatch dispatch status: %v\n", err)
 			os.Exit(1)
@@ -422,6 +437,100 @@ func runDispatchStatus(args []string) {
 	} else {
 		fmt.Printf("Not enrolled: %s\n", enrollment.Repo)
 	}
+}
+
+// runDispatchLoop implements `agentwatch dispatch loop on|off|status`. All
+// three verbs resolve and print the current DispatchState via the same
+// socket-first/config-fallback path (dispatch.ResolveDispatchState); on/off
+// additionally persist the toggle to config.json first. Default output is
+// human-readable; --json prints the raw DispatchState.
+func runDispatchLoop(args []string) {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		fmt.Fprintln(os.Stderr, "agentwatch dispatch loop: expected a subcommand: on, off, or status")
+		os.Exit(2)
+	}
+	verb := args[0]
+
+	fs := flag.NewFlagSet("loop "+verb, flag.ExitOnError)
+	configPath := fs.String("config", "", "path to config.json (default: $XDG_CONFIG_HOME/agentwatch/config.json)")
+	jsonOut := fs.Bool("json", false, "print result as JSON")
+	_ = fs.Parse(args[1:])
+
+	if extra := fs.Args(); len(extra) > 0 {
+		fmt.Fprintf(os.Stderr, "agentwatch dispatch loop: unexpected argument %q\n", extra[0])
+		os.Exit(2)
+	}
+
+	switch verb {
+	case "on":
+		if err := dispatch.SetLoopEnabled(*configPath, true); err != nil {
+			fmt.Fprintf(os.Stderr, "agentwatch dispatch loop: %v\n", err)
+			os.Exit(1)
+		}
+	case "off":
+		if err := dispatch.SetLoopEnabled(*configPath, false); err != nil {
+			fmt.Fprintf(os.Stderr, "agentwatch dispatch loop: %v\n", err)
+			os.Exit(1)
+		}
+	case "status":
+		// no mutation; just resolve and print below.
+	default:
+		fmt.Fprintf(os.Stderr, "agentwatch dispatch loop: unknown subcommand %q\n", verb)
+		os.Exit(2)
+	}
+
+	state := dispatch.ResolveDispatchState(*configPath, watch.DefaultSocketPath(), os.Stderr)
+
+	if *jsonOut {
+		data, err := json.Marshal(state)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "agentwatch dispatch loop: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(string(data))
+		return
+	}
+
+	fmt.Print(renderDispatchState(state))
+}
+
+// renderDispatchState formats a watch.DispatchState as human-readable text
+// for `dispatch loop on|off|status`. DaemonRunning gates whether the
+// live-daemon fields (pass_running, last_run_at, last_dispatched,
+// last_skipped, last_error) are shown, not a version check — no daemon
+// populates them yet (#220), so today this branch never fires.
+func renderDispatchState(state watch.DispatchState) string {
+	var b strings.Builder
+
+	enabledStr := "disabled"
+	if state.Enabled {
+		enabledStr = "enabled"
+	}
+	fmt.Fprintf(&b, "Dispatch loop: %s\n", enabledStr)
+
+	daemonStr := "not running"
+	if state.DaemonRunning {
+		daemonStr = "running"
+	}
+	fmt.Fprintf(&b, "  daemon:   %s\n", daemonStr)
+
+	if state.Interval != "" {
+		fmt.Fprintf(&b, "  interval: %s\n", state.Interval)
+	}
+
+	if state.DaemonRunning {
+		fmt.Fprintf(&b, "  pass_running: %v\n", state.PassRunning)
+		if state.LastRunAt != "" {
+			fmt.Fprintf(&b, "  last_run_at: %s\n", state.LastRunAt)
+		}
+		fmt.Fprintf(&b, "  last_dispatched: %d\n", state.LastDispatched)
+		fmt.Fprintf(&b, "  last_skipped: %d\n", state.LastSkipped)
+		if state.LastError != "" {
+			fmt.Fprintf(&b, "  last_error: %s\n", state.LastError)
+		}
+	}
+
+	return b.String()
 }
 
 func runStatus(args []string) {

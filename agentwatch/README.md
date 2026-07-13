@@ -277,6 +277,26 @@ Exit codes are consistent across all three verbs: `0` when the verb ran successf
 (`agentwatch dispatch <verb>: <reason>` on stderr), `2` on bad flags (including the
 `--repo`/`--dir` conflict above).
 
+### Loop toggle (`agentwatch dispatch loop on|off|status`)
+
+Toggles and reports the embedded fleet dispatch loop (`dispatch.loopEnabled`,
+see [Configuration](#configuration)) without hand-editing `config.json`:
+
+```bash
+agentwatch dispatch loop on     [--config <path>] [--json]
+agentwatch dispatch loop off    [--config <path>] [--json]
+agentwatch dispatch loop status [--config <path>] [--json]
+```
+
+| Verb | Behavior |
+|------|----------|
+| `on` | Sets `dispatch.loopEnabled: true` (defaulting `dispatch.daemonInterval` to `"5m"` if unset), then prints the resolved state. |
+| `off` | Sets `dispatch.loopEnabled: false`, then prints the resolved state. |
+| `status` | Prints the resolved state without mutating anything. |
+
+All three print the same resolved `DispatchState` — human-readable by default, or the
+raw JSON object with `--json` (e.g. `{"enabled":true,"daemon_running":false,"interval":"5m",...}`).
+
 ### Pickup rules and gates
 
 A ticket is dispatched only when **all** of these hold, evaluated in order (the first
@@ -358,6 +378,7 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 | `gracePeriod` | `5m` | How long the failure signal must hold continuously before the reconciler recovers a stranded ticket (Go duration string) |
 | `retryBudget` | `2` | Retries (`Working` → `Planned`) a stranded ticket gets before it is marked `dispatch-failed`; an explicit `0` disables retries |
 | `daemonInterval` | none | When set, the daemon runs the embedded dispatch + reconcile loop on this interval (Go duration string); unset leaves daemon behavior unchanged |
+| `loopEnabled` | unset | Explicitly toggles the embedded fleet dispatch loop; managed via `agentwatch dispatch loop on\|off` (see [Loop toggle](#loop-toggle-agentwatch-dispatch-loop-onoffstatus)). When unset, it back-compat-resolves to `daemonInterval > 0` so an existing `daemonInterval`-only config keeps running unchanged; an explicit `true`/`false` overrides that resolution either way |
 | `defaultAgent` | `claude` | Agent used when a ticket has no `agent:<name>` label |
 | `model` | none | Model override for every dispatched session (overrides `agents.*.model`); the `--model` CLI flag overrides this. Pin this to avoid a dispatched session silently inheriting whatever ambient/account-level default model is active at spawn time |
 | `agentPreference` | none | Fallback agent order tried when the primary agent (label or `defaultAgent`) is out of budget; first agent with budget wins |

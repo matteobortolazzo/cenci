@@ -46,3 +46,82 @@ func TestLoadConfigModelDefaultsEmpty(t *testing.T) {
 		t.Errorf("cfg.Model = %q, want empty when unset", cfg.Model)
 	}
 }
+
+// -- LoopEnabled resolution (#219) -----------------------------------------
+
+// TestLoadConfigLoopEnabled_ExplicitTrue locks in that an explicit
+// "loopEnabled": true wins regardless of any daemonInterval setting.
+func TestLoadConfigLoopEnabled_ExplicitTrue(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"dispatch": {"loopEnabled": true}}`), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.LoopEnabled {
+		t.Errorf("cfg.LoopEnabled = %v, want true", cfg.LoopEnabled)
+	}
+}
+
+// TestLoadConfigLoopEnabled_ExplicitFalseWinsOverInterval locks in that an
+// explicit "loopEnabled": false is honored even when a daemonInterval is
+// configured (an interval alone must not force the loop on when the user has
+// explicitly opted out).
+func TestLoadConfigLoopEnabled_ExplicitFalseWinsOverInterval(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"dispatch": {"loopEnabled": false, "daemonInterval": "5m"}}`), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.LoopEnabled {
+		t.Errorf("cfg.LoopEnabled = %v, want false", cfg.LoopEnabled)
+	}
+}
+
+// TestLoadConfigLoopEnabled_BackCompatFromInterval locks in the back-compat
+// resolution: an absent "loopEnabled" key with a positive daemonInterval
+// implies the loop is enabled, so pre-existing configs that only set
+// daemonInterval keep working unchanged.
+func TestLoadConfigLoopEnabled_BackCompatFromInterval(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"dispatch": {"daemonInterval": "5m"}}`), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.LoopEnabled {
+		t.Errorf("cfg.LoopEnabled = %v, want true (back-compat from daemonInterval)", cfg.LoopEnabled)
+	}
+}
+
+// TestLoadConfigLoopEnabled_DefaultsFalse locks in that with neither
+// "loopEnabled" nor a positive "daemonInterval" set, the loop defaults to
+// disabled.
+func TestLoadConfigLoopEnabled_DefaultsFalse(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"dispatch": {"defaultAgent": "codex"}}`), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.LoopEnabled {
+		t.Errorf("cfg.LoopEnabled = %v, want false when neither loopEnabled nor daemonInterval is set", cfg.LoopEnabled)
+	}
+}

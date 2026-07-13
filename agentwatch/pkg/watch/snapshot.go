@@ -13,6 +13,10 @@ type StateSnapshot struct {
 	// by the embedded dispatch loop. Omitted when the embedded loop is disabled
 	// or no AgentLimits are configured, leaving downstream frontends unchanged.
 	Headroom map[string]float64 `json:"headroom,omitempty"`
+	// Dispatch reports the embedded fleet dispatch loop's live state (#219).
+	// Nil until a daemon populates it (#220), in which case the "dispatch" key
+	// is omitted entirely so pre-#219 NDJSON consumers are unaffected.
+	Dispatch *DispatchState `json:"dispatch,omitempty"`
 }
 
 // AttentionUpdate is the reconciler's per-tick push onto the daemon's
@@ -25,6 +29,9 @@ type AttentionUpdate struct {
 	// when the embedded loop's BudgetProvider is not a *UsageProvider or no
 	// AgentLimits are configured.
 	Headroom map[string]float64
+	// Dispatch reports the embedded fleet dispatch loop's live state (#219).
+	// Nil until a daemon populates it (#220).
+	Dispatch *DispatchState `json:"dispatch,omitempty"`
 }
 
 // WindowState describes a single tracked window.
@@ -51,6 +58,35 @@ type WindowState struct {
 	// ManuallyNamed reports whether the window name was set by the user rather
 	// than derived by agentwatch.
 	ManuallyNamed bool `json:"manually_named"`
+}
+
+// DispatchState describes the daemon-embedded fleet dispatch loop.
+type DispatchState struct {
+	// Enabled reports whether the embedded loop is turned on, resolved from
+	// dispatch.Config's LoopEnabled.
+	Enabled bool `json:"enabled"`
+	// DaemonRunning reports whether a daemon was reached over its socket to
+	// answer this query. False means every field below falls back to the
+	// resolved config and does not reflect a live pass.
+	DaemonRunning bool `json:"daemon_running"`
+	// Interval is the configured loop interval (e.g. "5m"). Empty when no
+	// positive interval is configured. Omitted from JSON when empty.
+	Interval string `json:"interval,omitempty"`
+	// PassRunning reports whether a dispatch pass is in flight right now.
+	// Only meaningful when DaemonRunning is true.
+	PassRunning bool `json:"pass_running"`
+	// LastRunAt is the RFC 3339 time of the most recently completed pass.
+	// Omitted from JSON when empty.
+	LastRunAt string `json:"last_run_at,omitempty"`
+	// LastDispatched is the number of tickets dispatched in the most recent
+	// pass.
+	LastDispatched int `json:"last_dispatched"`
+	// LastSkipped is the number of tickets skipped (not dispatched) in the
+	// most recent pass.
+	LastSkipped int `json:"last_skipped"`
+	// LastError is the most recent pass's error message, if any. Omitted
+	// from JSON when empty.
+	LastError string `json:"last_error,omitempty"`
 }
 
 // StatusSummary counts tracked windows by status.
