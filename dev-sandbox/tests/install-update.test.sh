@@ -62,7 +62,7 @@ EOF
 }
 
 run_layout() {
-    local client="$1" case_root="${WORK}/${1}" home="${WORK}/${1}/home"
+    local client="$1" home="${WORK}/${1}/home"
     local mock_bin="${WORK}/${1}/bin" log="${WORK}/${1}/agentwatch.log"
     local cache_dir manifest_dir new_root new_bin old_bin
     mkdir -p "${home}"
