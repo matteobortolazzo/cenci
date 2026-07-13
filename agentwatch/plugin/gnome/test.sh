@@ -33,6 +33,26 @@ for c in $classes; do
 done
 
 echo
+
+# Headroom rows are colored via dedicated .agentwatch-headroom-<class>
+# selectors (extension.js builds the class name dynamically via a template
+# literal, so it can't be grepped as a quoted string like the status classes
+# above — assert the stylesheet side directly instead). A JS class reference
+# with no matching stylesheet rule would otherwise silently render with no
+# color.
+STYLESHEET="$DIR/stylesheet.css"
+headroom_classes="normal warning critical"
+
+for c in $headroom_classes; do
+    if grep -qE '\.agentwatch-headroom-'"$c"'([^a-z-]|$)' "$STYLESHEET"; then
+        echo "ok   - stylesheet.css defines .agentwatch-headroom-$c"
+    else
+        echo "FAIL - stylesheet.css missing .agentwatch-headroom-$c selector"
+        fail=1
+    fi
+done
+
+echo
 if [ "$fail" -eq 0 ]; then
     echo "PASS"
 else
