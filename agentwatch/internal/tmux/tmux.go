@@ -3,6 +3,7 @@ package tmux
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -77,18 +78,31 @@ func (c *ExecClient) SetOption(key string, value string) error {
 	return err
 }
 
-// CurrentSession returns the name of the tmux session the caller is inside.
-// It errors when not run within a tmux client.
+// CurrentSession returns the name of the tmux session the caller's pane
+// belongs to, resolved via the inherited $TMUX_PANE environment variable.
+// It errors when $TMUX_PANE is unset/blank (no tmux pane context) or when
+// it names a pane that no longer exists.
 //
 // These launcher-facing methods are intentionally kept OFF the daemon-facing
 // Client interface so the frontend seam stays unchanged; the run package
 // defines its own small consumer interface that *ExecClient satisfies.
 func (c *ExecClient) CurrentSession() (string, error) {
-	out, err := tmuxCmd("display-message", "-p", "#{session_name}")
+	pane := strings.TrimSpace(os.Getenv("TMUX_PANE"))
+	if pane == "" {
+		return "", fmt.Errorf("TMUX_PANE is not set; not running inside a tmux pane")
+	}
+	out, err := tmuxCmd("display-message", "-t", pane, "-p", "#{session_name}")
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(out), nil
+	session := strings.TrimSpace(out)
+	if session == "" {
+		// tmux display-message -p exits 0 with empty output when -t names a
+		// pane that no longer exists, rather than erroring like most other
+		// tmux subcommands do with an invalid target.
+		return "", fmt.Errorf("tmux could not resolve a session for pane %q", pane)
+	}
+	return session, nil
 }
 
 // IsGroupedSession reports whether the given session is part of a session
