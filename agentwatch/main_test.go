@@ -280,6 +280,7 @@ func TestRunSubcommandRoutes(t *testing.T) {
 
 func TestRunDryRunPrintsCommandAndWindowName(t *testing.T) {
 	noCfg := filepath.Join(t.TempDir(), "none.json")
+	// --slug is ignored for a numeric ticket: the window is `<number>-<skill>`.
 	cmd := exec.Command(binaryPath, "run", "implement", "40",
 		"--slug", "agentwatch-run", "--session", "demo", "--config", noCfg, "--dry-run")
 	output, err := cmd.CombinedOutput()
@@ -287,8 +288,8 @@ func TestRunDryRunPrintsCommandAndWindowName(t *testing.T) {
 		t.Fatalf("dry-run failed: %v\n%s", err, output)
 	}
 	s := string(output)
-	if !strings.Contains(s, "40-agentwatch-run") {
-		t.Errorf("expected window name 40-agentwatch-run, got:\n%s", s)
+	if !strings.Contains(s, "40-implement") {
+		t.Errorf("expected window name 40-implement, got:\n%s", s)
 	}
 	// No flag and no config default → the sandbox launcher (#98).
 	if !strings.Contains(s, "agent-sand") || !strings.Contains(s, "/agentflow:implement 40") {
@@ -315,9 +316,8 @@ func TestRunDryRunNoSandboxUsesHostCommand(t *testing.T) {
 
 func TestRunForwardsUnquotedCustomText(t *testing.T) {
 	// Unquoted multi-word context (id + additional context) must all reach the
-	// skill argument, not just the first token.
-	// Use a non-existent issue number so the gh title lookup yields nothing and
-	// the trailing context deterministically drives the slug.
+	// skill argument, not just the first token — even though the numeric window
+	// name is skill-only and the context never appears in it.
 	noCfg := filepath.Join(t.TempDir(), "none.json")
 	cmd := exec.Command(binaryPath, "run", "implement", "99999999", "focus", "on", "the", "API", "layer",
 		"--session", "demo", "--config", noCfg, "--dry-run")
@@ -329,8 +329,8 @@ func TestRunForwardsUnquotedCustomText(t *testing.T) {
 	if !strings.Contains(s, "/agentflow:implement 99999999 focus on the API layer") {
 		t.Errorf("expected full argument forwarded, got:\n%s", s)
 	}
-	if !strings.Contains(s, "99999999-focus-on-the-api-layer") {
-		t.Errorf("expected window name 99999999-focus-on-the-api-layer, got:\n%s", s)
+	if !strings.Contains(s, "99999999-implement") {
+		t.Errorf("expected window name 99999999-implement, got:\n%s", s)
 	}
 }
 

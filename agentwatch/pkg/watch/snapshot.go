@@ -33,9 +33,11 @@ type WindowState struct {
 	Session string `json:"session"`
 	// WindowIndex is the window's index within its session, as a string.
 	WindowIndex string `json:"window_index"`
-	// WindowName is the "<number>-<slug>" window name. It is the stable join
-	// key external tools use to associate agentwatch state with their own
-	// records (for example, badging a kanban card that shares the name).
+	// WindowName is the "<number>-<skill>" window name (e.g. "42-implement"),
+	// where skill is the running workflow. The leading ticket number is the
+	// stable join key external tools use to associate agentwatch state with
+	// their own records (for example, badging a kanban card by number prefix).
+	// A free-text run with no ticket number keeps a descriptive slug instead.
 	WindowName string `json:"window_name"`
 	// TaskName is the human-readable task extracted for the window, if any.
 	TaskName string `json:"task_name"`

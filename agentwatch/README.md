@@ -105,7 +105,7 @@ with the Claude plugin) — see the [Codex plugin README](plugin/codex/README.md
 ## Dispatching workflows (`agentwatch run`)
 
 `agentwatch run` launches a coding-agent CLI for a workflow in a detached tmux
-window, owning the `<number>-<slug>` window name that ties board cards, tmux windows,
+window, owning the `<number>-<skill>` window name that ties board cards, tmux windows,
 and watcher snapshots together. It replaces the personal dispatch scripts that used to
 live in `~/.config/lazyboards/scripts/`.
 
@@ -114,9 +114,9 @@ live in `~/.config/lazyboards/scripts/`.
 agentwatch run implement 40
 
 # Inspect the resolution without spawning anything
-agentwatch run implement 40 --slug my-feature --dry-run
+agentwatch run implement 40 --dry-run
 # session: my-tmux-session
-# window:  40-my-feature
+# window:  40-implement
 # command: claude -- '/agentflow:implement 40'
 ```
 
@@ -126,16 +126,19 @@ skill argument (`/agentflow:<workflow> $ARGUMENTS`), so the same free-text forms
 accept work here too — no quoting needed:
 
 ```bash
-# Ticket id plus additional context → window 40-focus-on-the-api-layer
+# Ticket id plus additional context → window 40-implement (context still reaches the skill)
 agentwatch run implement 40 focus on the API layer
 
 # Ticketless task description → window add-dark-mode-toggle
 agentwatch run implement add dark mode toggle
 ```
 
-The window name uses the first token as the `<number>-` prefix when it is a numeric
-ticket id (with the slug from `--slug`, else the gh title, else the trailing context);
-a non-numeric first token means the whole description is slugified.
+When the first token is a numeric ticket id, the window is named `<number>-<skill>`
+(the skill being the workflow: `refine` / `design` / `implement`) — short, uniform, and
+matched by external tools on the number prefix, so the ticket title is deliberately
+omitted. `--slug` and trailing context do not change a numbered window's name. A
+non-numeric first token (a free-text task description) has no ticket number and keeps a
+descriptive slug: `--slug` if given, else the whole description slugified.
 
 | Flag | Purpose |
 |------|---------|
@@ -143,7 +146,7 @@ a non-numeric first token means the whole description is slugified.
 | `--sandbox` / `--no-sandbox` | Sandbox is the default (`claude`→`agent-sand`, the container being the mandatory runtime); `--no-sandbox` is the host opt-out. Both override the config default |
 | `--model <model>` | Model override passed to the agent (substituted into `{model}`, else appended as `--model`) |
 | `--session <name>` | Target tmux session (default: the current session) |
-| `--slug <slug>` | Window-name slug (default: the gh issue title, else the bare ticket) |
+| `--slug <slug>` | Window-name slug for free-text runs; ignored for numeric tickets (named `<number>-<skill>`) |
 | `--config <path>` | Config file (default: `$XDG_CONFIG_HOME/agentwatch/config.json`) |
 | `--dry-run` | Print the resolved session, window name, and command without spawning |
 
@@ -156,7 +159,7 @@ command: "agentwatch run implement {number}"
 ### The join key survives the daemon
 
 `run` creates the window with `automatic-rename off`. When the daemon later tracks it,
-it sees the window is manually named and preserves `<number>-<slug>` instead of
+it sees the window is manually named and preserves `<number>-<skill>` instead of
 overwriting it with the detected task name — so the join key flows through to the
 status snapshot's `window_name`.
 
@@ -640,7 +643,7 @@ For Codex, the first non-empty line of the first submitted prompt becomes the
 session's task label. Control characters are removed, whitespace is collapsed,
 and the label is capped at 30 characters. The first label stays pinned across
 later prompts and native pane-title changes; manually named windows, including
-dispatched `<ticket>-<slug>` windows, remain unchanged.
+dispatched `<number>-<skill>` windows, remain unchanged.
 
 Only that compact `task_name` is sent over agentwatch's internal hook-event IPC.
 The raw prompt and its remaining lines are never transmitted or persisted by

@@ -41,9 +41,6 @@ type Opts struct {
 	// session lands in its repo (finding that repo's .plans/ and git tree).
 	Dir string
 
-	// GHTitle overrides the gh title lookup; nil uses the real gh CLI. Set in
-	// tests to keep window-name resolution deterministic.
-	GHTitle func(number string) string
 	// Out receives dry-run output; nil defaults to os.Stdout.
 	Out io.Writer
 
@@ -58,7 +55,7 @@ type Opts struct {
 }
 
 // Run resolves the (agent, workflow) command and spawns a detached tmux window
-// named <number>-<slug> running it. The window is set automatic-rename off so
+// named <number>-<skill> running it. The window is set automatic-rename off so
 // the daemon later preserves the join key instead of overwriting it with a
 // detected task name. With DryRun it prints the resolution and spawns nothing.
 func Run(opts Opts, ctrl Controller) error {
@@ -121,16 +118,10 @@ func Run(opts Opts, ctrl Controller) error {
 		}
 	}
 
-	// 6. Compute the window join key.
-	titleFn := opts.GHTitle
-	if titleFn == nil {
-		titleFn = ghTitle
-	}
-	gh := ""
-	if id := ticketID(opts.Ticket); opts.Slug == "" && isNumeric(id) {
-		gh = titleFn(id)
-	}
-	name := windowName(opts.Ticket, opts.Slug, gh)
+	// 6. Compute the window name: `<number>-<skill>` for a numeric ticket, else
+	// the free-text slug. opts.Workflow is always the running skill (refine /
+	// design / implement).
+	name := windowName(opts.Ticket, opts.Workflow, opts.Slug)
 	if name == "" {
 		name = slugify(opts.Workflow)
 	}

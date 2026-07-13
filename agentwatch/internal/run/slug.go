@@ -1,7 +1,6 @@
 package run
 
 import (
-	"os/exec"
 	"strings"
 	"unicode/utf8"
 
@@ -32,14 +31,16 @@ func slugify(s string) string {
 	return strings.Join(parts, "-")
 }
 
-// windowName computes the <number>-<slug> join key from the full workflow
-// argument (which mirrors the skills' `<ticket-id | task description>
-// [additional context]`). When the first token is a numeric ticket id, the slug
-// is taken from --slug, else a gh title, else any trailing context; the result
-// is `<number>-<slug>` or the bare number. A non-numeric argument (a free-text
-// task description) is slugified whole. The result is sanitized and capped,
-// keeping the leading number intact.
-func windowName(ticketArg, slug, ghTitle string) string {
+// windowName computes the window name from the full workflow argument (which
+// mirrors the skills' `<ticket-id | task description> [additional context]`)
+// and the running workflow (skill). When the first token is a numeric ticket
+// id, the name is a short, uniform `<number>-<skill>` (e.g. `230-refine`):
+// external tools join on the leading number, so the descriptive ticket title
+// is deliberately omitted to keep tmux tabs short and predictable. A
+// non-numeric argument (a free-text task description) keeps its descriptive
+// slug — an explicit --slug wins, else the whole argument is slugified. The
+// result is sanitized and capped, keeping the leading number intact.
+func windowName(ticketArg, workflow, slug string) string {
 	fields := strings.Fields(ticketArg)
 	id := ""
 	if len(fields) > 0 {
@@ -47,16 +48,9 @@ func windowName(ticketArg, slug, ghTitle string) string {
 	}
 
 	if isNumeric(id) {
-		effSlug := slugify(slug)
-		if effSlug == "" {
-			effSlug = slugify(ghTitle)
-		}
-		if effSlug == "" && len(fields) > 1 {
-			effSlug = slugify(strings.Join(fields[1:], " "))
-		}
 		name := id
-		if effSlug != "" {
-			name = id + "-" + effSlug
+		if s := slugify(workflow); s != "" {
+			name = id + "-" + s
 		}
 		return capName(frontend.SanitizeName(name))
 	}
@@ -67,16 +61,6 @@ func windowName(ticketArg, slug, ghTitle string) string {
 		name = slugify(ticketArg)
 	}
 	return capName(frontend.SanitizeName(name))
-}
-
-// ticketID returns the first whitespace token of a workflow argument with any
-// leading '#' stripped — the ticket number the skills and gh operate on.
-func ticketID(ticketArg string) string {
-	fields := strings.Fields(ticketArg)
-	if len(fields) == 0 {
-		return ""
-	}
-	return strings.TrimPrefix(fields[0], "#")
 }
 
 func isNumeric(s string) bool {
@@ -97,15 +81,4 @@ func capName(s string) string {
 	}
 	r := []rune(s)
 	return strings.TrimRight(string(r[:windowNameMaxLen]), "-")
-}
-
-// ghTitle best-effort fetches an issue title via the gh CLI. Any failure (gh
-// missing, unauthenticated, no such issue) yields "" so the zero-arg board
-// action still produces a usable bare-number window name.
-func ghTitle(number string) string {
-	out, err := exec.Command("gh", "issue", "view", number, "--json", "title", "-q", ".title").Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
 }

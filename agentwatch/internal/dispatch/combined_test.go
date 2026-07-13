@@ -20,12 +20,13 @@ func TestFailedWindowsMapping(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("got %d windows, want 2", len(got))
 	}
-	if got[0].WindowName != "42-fix-the-thing" || got[0].Status != "failed" {
-		t.Errorf("window[0] = %+v, want 42-fix-the-thing/failed", got[0])
+	// Dispatch always runs the implement workflow, so the synthetic failed
+	// entry carries the `<number>-implement` join shape regardless of title.
+	if got[0].WindowName != "42-implement" || got[0].Status != "failed" {
+		t.Errorf("window[0] = %+v, want 42-implement/failed", got[0])
 	}
-	// No title ⇒ bare number.
-	if got[1].WindowName != "7" || got[1].Status != "failed" {
-		t.Errorf("window[1] = %+v, want 7/failed", got[1])
+	if got[1].WindowName != "7-implement" || got[1].Status != "failed" {
+		t.Errorf("window[1] = %+v, want 7-implement/failed", got[1])
 	}
 }
 
@@ -101,22 +102,5 @@ func TestCombinedTickHeadroomEmptyWhenNoAgentLimitsConfigured(t *testing.T) {
 		}
 	default:
 		t.Fatal("expected an attention push on a successful tick")
-	}
-}
-
-func TestSlugify(t *testing.T) {
-	cases := map[string]string{
-		"Fix the thing!":       "fix-the-thing",
-		"  Trim  spaces  ":     "trim-spaces",
-		"already-slugged":      "already-slugged",
-		"Multiple   ---dashes": "multiple-dashes",
-		"":                     "",
-		"!!!":                  "",
-		"CamelCase123":         "camelcase123",
-	}
-	for in, want := range cases {
-		if got := slugify(in); got != want {
-			t.Errorf("slugify(%q) = %q, want %q", in, got, want)
-		}
 	}
 }
