@@ -268,6 +268,7 @@ file present and skips re-arming; the loop continues until step 2's terminal che
 
 ## Human gates (never bypass)
 
+- Followup-ticket capture is inherited via `address-review` in step 5 — babysit has no separate mechanism.
 - `address-review`'s Phase 3F approval gate handles all comment fixes.
 - CI escalation goes through `AskUserQuestion` when the cap is hit or the cause is ambiguous.
 - Never force-push; never resolve disputed threads silently.

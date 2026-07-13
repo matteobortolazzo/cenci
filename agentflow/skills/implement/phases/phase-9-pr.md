@@ -160,6 +160,49 @@ If `isLastChild`, also add "In Review" to the parent. The parent's real completi
 
 The `Working` → `In Review` → `Implemented` progression finishes on merge: babysit swaps `In Review` for `Implemented` on any issue closed by the merged PR (see the babysit skill's terminal check). PR-open never applies `Implemented`.
 
+## Followup Ticket
+
+The `## Notes` section above (deferred Should Fix items, Medium/Low security findings) is the formal source of deferred items. Combine it with any informal out-of-scope observations recalled from this session (tech debt spotted, refactor ideas, missing tests noticed but out of scope — no new tracking file, just what the session actually surfaced).
+
+If there is **nothing** to capture (no `## Notes` items and no informal observations), create no ticket and skip this section entirely.
+
+If ≥1 deferred item exists, ensure the label exists (its own Bash call — note `2>/dev/null || true` suppresses **every** failure, not just "already exists"; a genuine failure (auth, network, permissions) surfaces on the next command as a "label not found" error from `gh issue create` — treat that as the label-create failure it is):
+
+```bash
+gh label create "Followup" --repo <owner>/<repo> --color "C5DEF5" --description "Deferred/out-of-scope item captured from a session — triage before working" 2>/dev/null || true
+```
+
+Write the body to a temp file with the file tool — and the title too: the PR title is free text and must never be interpolated directly into the command line (a title containing `$(…)`, backticks, or quotes would be shell-interpreted). Then create the ticket in one call, reading the title back the same way Posting Replies in `address-review` reads reply text:
+
+```bash
+TITLE=$(cat /tmp/claude/followup-title.txt) && gh issue create --repo <owner>/<repo> --title "$TITLE" --label "Followup" --body-file /tmp/claude/followup-body.md
+```
+
+Body content (checklist of items, each with a one-line context and file/area reference):
+
+```markdown
+## Deferred Items
+- [ ] <one-line context> — `<file/area>`
+
+Related to #<original-ticket>
+
+PR: <PR URL>
+```
+
+Ticket mode: include the `Related to #<original-ticket>` line — `<original-ticket>` is this run's own ticket ID (for a child ticket, the child; the parent is already linked via the commit's `Fixes #<parentId>` on last-child PRs). Ticketless mode: omit it, keep the PR link. The followup ticket does **not** receive the `Refined` label — it enters the backlog unrefined; a human triages it and runs `/agentflow:refine` when it's worth doing.
+
+Assume the issue is world-readable: never transcribe secret values, credentials, or exploitable vulnerability detail into the body. Reference deferred security findings abstractly — one neutral line plus the file/area, not the finding's specifics.
+
+If `gh issue create` fails, or no issue number can be parsed from its output URL, do **not** fabricate `<n>` and do not post any text referencing it — skip the comment below and report the exact error (with the deferred-item list) in the final session summary so the items aren't silently lost.
+
+Ticket mode only: after the followup issue is created successfully, comment on the original ticket (this run's ticket ID) with the followup ticket number `<n>` parsed from the create command's output URL:
+
+```bash
+gh issue comment <original-number> --repo <owner>/<repo> --body "Followups tracked in #<n>"
+```
+
+Ticketless mode: skip this comment (there is no original ticket to comment on).
+
 ## Cleanup
 
 After successful PR creation, first clear the Goal Autopilot condition — the PR now exists, so the goal is met:

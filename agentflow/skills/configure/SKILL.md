@@ -448,6 +448,7 @@ After gathering answers:
    | `Planned` | `1D76DB` | Plan on disk, ready to pick up |
    | `In Review` | `A2EEEF` | PR open, under review / CI running |
    | `Implemented` | `6F42C1` | PR merged — done |
+   | `Followup` | `C5DEF5` | Deferred/out-of-scope item captured from a session — triage before working |
 
    This is the canonical color/description table — the skills' self-healing `gh label create … || true` fallbacks reference it.
 
@@ -870,6 +871,9 @@ in the completion summary so the user can mirror it as columns on their board:
 | `Planned` | implement Phase 1 (plan persisted) | Plan on disk, ready to pick up |
 | `In Review` | implement Phase 9 (at PR-open) | PR is open, under review / CI running |
 | `Implemented` | babysit (on PR merge) | PR merged — done |
+| `Followup` | implement Phase 9 / address-review | Deferred/out-of-scope item captured from a session — triage before working; enters backlog unrefined |
+
+`Followup` is orthogonal to the linear lifecycle above — it is never part of the `New → … → Implemented` chain, applies to a separate followup ticket (not the original), and is never removed.
 
 Lifecycle: `New → Refined → [Designed] → Planned → Working → In Review → Implemented`.
 
