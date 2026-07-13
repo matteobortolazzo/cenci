@@ -1,6 +1,6 @@
 {
   "name": "agentwatch",
-  "version": "2.14.1",
+  "version": "2.15.0",
   "description": "Send Codex lifecycle events to the agentwatch status daemon.",
   "author": {
     "name": "Matteo Bortolazzo",
