@@ -636,3 +636,94 @@ func TestStatusAndWaybarSubcommandsBothRoute(t *testing.T) {
 		}
 	}
 }
+
+func TestVersionSubcommandPrintsVersion(t *testing.T) {
+	cmd := exec.Command(binaryPath, "version")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("version: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "agentwatch dev") {
+		t.Errorf("version output = %q, want to contain %q", output, "agentwatch dev")
+	}
+}
+
+func TestVersionFlagsRouteToVersion(t *testing.T) {
+	for _, flagArg := range []string{"--version", "-version"} {
+		cmd := exec.Command(binaryPath, flagArg)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s: %v\n%s", flagArg, err, output)
+		}
+		if !strings.Contains(string(output), "agentwatch dev") {
+			t.Errorf("%s output = %q, want to contain %q", flagArg, output, "agentwatch dev")
+		}
+		if strings.Contains(string(output), "unknown subcommand") {
+			t.Errorf("%s output = %q, want NOT to contain %q", flagArg, output, "unknown subcommand")
+		}
+	}
+
+	// Bare -v must still route to the daemon (existing behavior), not print
+	// the version banner. Use a timeout because the daemon blocks if it starts.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binaryPath, "-v")
+	output, _ := cmd.CombinedOutput()
+	if strings.Contains(string(output), "agentwatch dev") {
+		t.Errorf("-v output = %q, want NOT to contain %q (must route to daemon, not version)", output, "agentwatch dev")
+	}
+}
+
+func TestVersionStampedViaLdflags(t *testing.T) {
+	stampedPath := filepath.Join(t.TempDir(), "agentwatch-stamped")
+	build := exec.Command("go", "build", "-ldflags", "-X main.version=9.9.9-test", "-o", stampedPath, ".")
+	build.Stderr = os.Stderr
+	if err := build.Run(); err != nil {
+		t.Fatalf("build stamped binary: %v", err)
+	}
+
+	cmd := exec.Command(stampedPath, "version")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("version: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "9.9.9-test") {
+		t.Errorf("version output = %q, want to contain %q (catches a typo'd -X path)", output, "9.9.9-test")
+	}
+}
+
+func TestDispatchUnknownVerb_Exits2NeverDispatches(t *testing.T) {
+	cmd := exec.Command(binaryPath, "dispatch", "statas", "--json", "--dir", "X")
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
+	}
+	if exitErr.ExitCode() != 2 {
+		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
+	}
+	if !strings.Contains(string(output), `agentwatch dispatch: unknown subcommand "statas"`) {
+		t.Errorf("stderr = %q, want to contain %q", output, `agentwatch dispatch: unknown subcommand "statas"`)
+	}
+	if strings.Contains(string(output), "skip:") || strings.Contains(string(output), "dispatch (") {
+		t.Errorf("output must not contain dispatch decision-table lines (a real dispatch pass must never run), got:\n%s", output)
+	}
+}
+
+func TestDispatchTrailingUnexpectedArg_Exits2(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "does-not-exist", "config.json")
+	cmd := exec.Command(binaryPath, "dispatch", "--dry-run", "--config", configPath, "extra")
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
+	}
+	if exitErr.ExitCode() != 2 {
+		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
+	}
+	if !strings.Contains(string(output), `unexpected argument "extra"`) {
+		t.Errorf("stderr = %q, want to contain %q", output, `unexpected argument "extra"`)
+	}
+}

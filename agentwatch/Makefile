@@ -4,7 +4,7 @@ VERSION ?= dev
 
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 
-LDFLAGS := -s -w
+LDFLAGS := -s -w -X main.version=$(VERSION)
 
 PLUGIN_JSON := plugin/.claude-plugin/plugin.json
 PLUGIN_VERSION := $(shell sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' $(PLUGIN_JSON) | head -n1)
@@ -18,7 +18,7 @@ build:
 # version marker so `claude --plugin-dir ./plugin` uses the local build instead
 # of triggering a download of the (possibly unreleased) plugin version.
 plugin-bin:
-	go build -ldflags "$(LDFLAGS)" -o plugin/bin/$(BINARY) .
+	go build -ldflags "-s -w -X main.version=$(PLUGIN_VERSION)" -o plugin/bin/$(BINARY) .
 	printf '%s\n' "$(PLUGIN_VERSION)" > plugin/bin/.agentwatch-version
 
 test:
