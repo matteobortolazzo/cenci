@@ -36,3 +36,5 @@ jobs:
       - uses: actions/checkout@v7
       - name: Check workflow permission declarations
         run: bash .github/scripts/check-workflow-permissions.sh
+      - name: Run permission-check unit tests
+        run: bash .github/scripts/check-workflow-permissions.test.sh
