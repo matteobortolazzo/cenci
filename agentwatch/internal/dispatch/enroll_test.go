@@ -461,6 +461,60 @@ func TestDetectRepoIdentity_Errors(t *testing.T) {
 	})
 }
 
+// -- writeRawConfig symlink-follow hardening -------------------------------
+
+// TestEnrollRepo_DoesNotFollowPreplantedTmpSymlink guards against a
+// symlink-follow attack on writeRawConfig's temp-file write: if an attacker
+// (or another process) can write to the config directory, they could
+// pre-plant a symlink at the historically predictable "config.json.tmp" path
+// pointing at a sentinel file elsewhere. A vulnerable writeRawConfig that does
+// os.WriteFile(path+".tmp", ...) would follow that symlink and clobber the
+// sentinel. writeRawConfig must instead use a randomized temp name (e.g. via
+// os.CreateTemp), so the pre-planted symlink is never touched and the real
+// config write still lands at path.
+func TestEnrollRepo_DoesNotFollowPreplantedTmpSymlink(t *testing.T) {
+	base := t.TempDir()
+	configDir := filepath.Join(base, "cfg")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatalf("mkdir configDir: %v", err)
+	}
+
+	sentinel := filepath.Join(base, "sentinel.txt")
+	const sentinelContent = "do not touch me\n"
+	if err := os.WriteFile(sentinel, []byte(sentinelContent), 0o600); err != nil {
+		t.Fatalf("writing sentinel: %v", err)
+	}
+
+	path := filepath.Join(configDir, "config.json")
+	// Pre-plant a symlink at the old, predictable ".tmp" path, pointing
+	// outside the config directory at the sentinel file.
+	if err := os.Symlink(sentinel, path+".tmp"); err != nil {
+		t.Fatalf("symlinking predictable tmp path to sentinel: %v", err)
+	}
+
+	identity := RepoIdentity{Repo: "owner/name", Dir: "/abs/dir"}
+	changed, err := EnrollRepo(path, identity)
+	if err != nil {
+		t.Fatalf("EnrollRepo: %v", err)
+	}
+	if !changed {
+		t.Fatalf("EnrollRepo: want changed=true")
+	}
+
+	sentinelAfter, err := os.ReadFile(sentinel)
+	if err != nil {
+		t.Fatalf("reading sentinel after EnrollRepo: %v", err)
+	}
+	if string(sentinelAfter) != sentinelContent {
+		t.Fatalf("sentinel content changed: want %q, got %q (writeRawConfig followed the pre-planted symlink)", sentinelContent, sentinelAfter)
+	}
+
+	cfg := mustDecodeConfig(t, path)
+	if !reposContains(cfg.Dispatch.Repos, identity.Repo, identity.Dir) {
+		t.Errorf("dispatch.repos = %+v, want to contain %+v", cfg.Dispatch.Repos, identity)
+	}
+}
+
 // -- Empty-path parity ----------------------------------------------------
 
 func TestEmptyPath_ResolvesDefaultConfigPath(t *testing.T) {
