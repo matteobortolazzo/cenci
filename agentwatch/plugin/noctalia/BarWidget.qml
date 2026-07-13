@@ -26,6 +26,8 @@ Item {
   readonly property string cssClass: pluginApi?.mainInstance?.cssClass || "none"
   readonly property string text: pluginApi?.mainInstance?.text || ""
   readonly property bool isVisible: pluginApi?.mainInstance?.hasOutput || false
+  readonly property var headroom: pluginApi?.mainInstance?.headroom || ({})
+  readonly property var sortedHeadroomKeys: Object.keys(headroom).sort()
 
   visible: isVisible
   opacity: isVisible ? 1.0 : 0.0
@@ -50,6 +52,27 @@ Item {
       case "done":       return Color.mTertiary
       case "stopped":    return Color.mSecondary
       default:           return Color.mOnSurface
+    }
+  }
+
+  // Round-half-up percent from a 0.0-1.0 fraction (e.g. 0.156 -> 16).
+  function percentFor(frac) {
+    return Math.floor(frac * 100 + 0.5)
+  }
+
+  // Same thresholds as headroomClass in status.go:179 and colorForHeadroom
+  // in plugin/macos/agentwatch.5s.sh:125 — keep all three in sync.
+  function classForHeadroom(pct) {
+    if (pct > 25) return "normal"
+    if (pct >= 10) return "warning"
+    return "critical"
+  }
+
+  function colorForHeadroom(pct) {
+    switch (classForHeadroom(pct)) {
+      case "normal":  return Color.mPrimary
+      case "warning": return Color.mTertiary
+      default:        return Color.mError
     }
   }
 
@@ -89,11 +112,42 @@ Item {
           color: root.hovered ? Color.mOnHover : root.colorForClass(root.cssClass)
         }
 
-        NText {
+        RowLayout {
           Layout.alignment: Qt.AlignHCenter | Qt.AlignVCenter
-          text: root.text
-          color: root.hovered ? Color.mOnHover : Color.mOnSurface
-          pointSize: root.barFontSize
+          spacing: Style.marginS
+
+          NText {
+            Layout.alignment: Qt.AlignHCenter | Qt.AlignVCenter
+            text: root.text
+            color: root.hovered ? Color.mOnHover : Color.mOnSurface
+            pointSize: root.barFontSize
+          }
+
+          Repeater {
+            model: root.sortedHeadroomKeys
+
+            delegate: Rectangle {
+              id: badge
+              required property string modelData
+              readonly property int pct: root.percentFor(root.headroom[modelData])
+
+              Layout.alignment: Qt.AlignHCenter | Qt.AlignVCenter
+              radius: height / 2
+              color: "transparent"
+              border.width: 1
+              border.color: root.hovered ? Color.mOnHover : root.colorForHeadroom(pct)
+              implicitWidth: badgeText.implicitWidth + Style.marginS * 2
+              implicitHeight: badgeText.implicitHeight + Style.marginS
+
+              NText {
+                id: badgeText
+                anchors.centerIn: parent
+                text: badge.pct + "%"
+                color: root.hovered ? Color.mOnHover : root.colorForHeadroom(badge.pct)
+                pointSize: root.barFontSize
+              }
+            }
+          }
         }
       }
     }

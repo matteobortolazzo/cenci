@@ -17,6 +17,7 @@ Item {
   property string tooltip: ""
   property string cssClass: "none"
   property bool hasOutput: false
+  property var headroom: ({})
 
   Timer {
     id: pollTimer
@@ -40,6 +41,7 @@ Item {
         const out = text.trim()
         if (!out) {
           root.hasOutput = false
+          root.headroom = {}
           return
         }
         try {
@@ -48,9 +50,11 @@ Item {
           root.tooltip = j.tooltip || ""
           root.cssClass = j["class"] || "none"
           root.hasOutput = root.cssClass !== "none"
+          root.headroom = j.headroom || {}
         } catch (e) {
           Logger.e("AgentWatch", "parse error:", e, out)
           root.hasOutput = false
+          root.headroom = {}
         }
       }
     }
@@ -58,6 +62,7 @@ Item {
     onExited: function (code) {
       if (code !== 0) {
         root.hasOutput = false
+        root.headroom = {}
       }
     }
   }
