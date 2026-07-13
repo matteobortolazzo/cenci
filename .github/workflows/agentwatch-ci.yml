@@ -24,6 +24,8 @@ jobs:
           go-version: '1.25.x'
       - run: go test ./...
       - run: go build ./...
+      - run: ./plugin/hooks/test.sh
+      - run: ./plugin/codex/test.sh
 
   lint:
     runs-on: ubuntu-latest

@@ -9,7 +9,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 PLUGIN_JSON := plugin/.claude-plugin/plugin.json
 PLUGIN_VERSION := $(shell sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' $(PLUGIN_JSON) | head -n1)
 
-.PHONY: build clean test test-macos install-macos lint plugin-bin $(PLATFORMS)
+.PHONY: build clean test test-plugins test-macos install-macos lint plugin-bin $(PLATFORMS)
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) .
@@ -21,8 +21,14 @@ plugin-bin:
 	go build -ldflags "-s -w -X main.version=$(PLUGIN_VERSION)" -o plugin/bin/$(BINARY) .
 	printf '%s\n' "$(PLUGIN_VERSION)" > plugin/bin/.agentwatch-version
 
-test:
+test: test-plugins
 	go test ./...
+
+# Dependency-free gate tests for the Claude Code / Codex bootstrap scripts
+# (self-skip via SKIP when prerequisites like jq are missing).
+test-plugins:
+	./plugin/hooks/test.sh
+	./plugin/codex/test.sh
 
 # Smoke test for the macOS SwiftBar frontend (macOS-only; skips without osascript).
 test-macos:

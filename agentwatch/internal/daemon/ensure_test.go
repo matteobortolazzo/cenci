@@ -35,6 +35,7 @@ func TestAliveTrueWithLiveListener(t *testing.T) {
 
 func TestEnsureRunningSkipsSpawnWhenAlive(t *testing.T) {
 	useTempSocketDir(t)
+	t.Setenv("AGENT_SAND", "")
 	ln, err := net.Listen("unix", ipc.DefaultEventSocketPath())
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -55,6 +56,7 @@ func TestEnsureRunningSkipsSpawnWhenAlive(t *testing.T) {
 
 func TestEnsureRunningWaitsForSpawnedSocket(t *testing.T) {
 	useTempSocketDir(t)
+	t.Setenv("AGENT_SAND", "")
 	restoreTimeout, restoreInterval := readyTimeout, pollInterval
 	readyTimeout = 2 * time.Second
 	pollInterval = 10 * time.Millisecond
@@ -86,8 +88,96 @@ func TestEnsureRunningWaitsForSpawnedSocket(t *testing.T) {
 	}
 }
 
+// TestEnsureRunningSkipsSpawnUnderAgentSand asserts that inside an agent-sand
+// container (AGENT_SAND=1), EnsureRunning never spawns a container-local
+// daemon — such a daemon controls nothing on the host and only masks real
+// wiring failures (#195, #202). It must return promptly without requiring a
+// listener to ever come alive.
+func TestEnsureRunningSkipsSpawnUnderAgentSand(t *testing.T) {
+	useTempSocketDir(t)
+	t.Setenv("AGENT_SAND", "1")
+
+	restoreTimeout, restoreInterval := readyTimeout, pollInterval
+	readyTimeout = 200 * time.Millisecond
+	pollInterval = 10 * time.Millisecond
+	defer func() { readyTimeout, pollInterval = restoreTimeout, restoreInterval }()
+
+	spawned := false
+	restore := spawn
+	spawn = func() { spawned = true }
+	defer func() { spawn = restore }()
+
+	done := make(chan struct{})
+	go func() {
+		EnsureRunning()
+		close(done)
+	}()
+
+	// EnsureRunning must short-circuit immediately under AGENT_SAND=1, well
+	// before it would otherwise give up after readyTimeout.
+	select {
+	case <-done:
+	case <-time.After(readyTimeout / 2):
+		t.Fatal("EnsureRunning did not return promptly under AGENT_SAND=1")
+	}
+
+	if spawned {
+		t.Error("expected daemon not to be spawned when AGENT_SAND=1")
+	}
+	if alive() {
+		t.Error("expected no listener to be alive under AGENT_SAND=1")
+	}
+}
+
+// TestEnsureRunningSpawnsWhenAgentSandUnsetOrZero is a regression guard: the
+// AGENT_SAND gate must not change existing alive/spawn/poll behavior outside
+// an agent-sand container.
+func TestEnsureRunningSpawnsWhenAgentSandUnsetOrZero(t *testing.T) {
+	t.Run("AGENT_SAND unset", func(t *testing.T) {
+		useTempSocketDir(t)
+		t.Setenv("AGENT_SAND", "")
+		restoreTimeout, restoreInterval := readyTimeout, pollInterval
+		readyTimeout = 50 * time.Millisecond
+		pollInterval = 10 * time.Millisecond
+		defer func() { readyTimeout, pollInterval = restoreTimeout, restoreInterval }()
+
+		spawned := false
+		restore := spawn
+		spawn = func() { spawned = true }
+		defer func() { spawn = restore }()
+
+		EnsureRunning()
+
+		if !spawned {
+			t.Error("expected daemon to be spawned when AGENT_SAND is unset")
+		}
+	})
+
+	t.Run("AGENT_SAND=0", func(t *testing.T) {
+		useTempSocketDir(t)
+		restoreTimeout, restoreInterval := readyTimeout, pollInterval
+		readyTimeout = 50 * time.Millisecond
+		pollInterval = 10 * time.Millisecond
+		defer func() { readyTimeout, pollInterval = restoreTimeout, restoreInterval }()
+
+		t.Setenv("AGENT_SAND", "0")
+
+		spawned := false
+		restore := spawn
+		spawn = func() { spawned = true }
+		defer func() { spawn = restore }()
+
+		EnsureRunning()
+
+		if !spawned {
+			t.Error("expected daemon to be spawned when AGENT_SAND=0")
+		}
+	})
+}
+
 func TestEnsureRunningGivesUpAfterTimeout(t *testing.T) {
 	useTempSocketDir(t)
+	t.Setenv("AGENT_SAND", "")
 	restoreTimeout, restoreInterval := readyTimeout, pollInterval
 	readyTimeout = 100 * time.Millisecond
 	pollInterval = 10 * time.Millisecond
