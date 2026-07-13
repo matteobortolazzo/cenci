@@ -12,6 +12,7 @@ import (
 
 	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/dispatch"
 	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/ipc"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/pkg/watch"
 )
 
 var binaryPath string
@@ -519,6 +520,11 @@ func TestDispatchUnenroll_RepoAndExplicitDir_Exits2(t *testing.T) {
 	}
 }
 
+// TestDispatchStatusJSON_Enrolled asserts the pre-#219 enrollment fields
+// individually rather than via an exact-byte comparison against
+// dispatch.RepoEnrollment's marshaled shape: #219 adds an always-present
+// "loop" key (see TestDispatchStatusJSON_IncludesLoopKey), which an
+// RepoEnrollment-shaped exact match can no longer represent.
 func TestDispatchStatusJSON_Enrolled(t *testing.T) {
 	dir := initGitRemote(t, "git@github.com:owner/name.git")
 	configPath := filepath.Join(t.TempDir(), "config.json")
@@ -532,13 +538,13 @@ func TestDispatchStatusJSON_Enrolled(t *testing.T) {
 		t.Fatalf("status --json: %v\n%s", err, output)
 	}
 
-	wantBytes, merr := json.Marshal(dispatch.RepoEnrollment{Repo: "owner/name", Dir: dir, Enrolled: true})
-	if merr != nil {
-		t.Fatalf("json.Marshal want: %v", merr)
+	var got dispatch.RepoEnrollment
+	if uerr := json.Unmarshal(output, &got); uerr != nil {
+		t.Fatalf("unmarshal status --json output %q: %v", output, uerr)
 	}
-	got := strings.TrimSpace(string(output))
-	if got != string(wantBytes) {
-		t.Errorf("status --json output = %q, want exactly %q", got, wantBytes)
+	want := dispatch.RepoEnrollment{Repo: "owner/name", Dir: dir, Enrolled: true}
+	if got != want {
+		t.Errorf("status --json output = %+v, want %+v", got, want)
 	}
 }
 
@@ -598,6 +604,162 @@ func TestDispatchStatus_HumanOutput(t *testing.T) {
 	want := "Enrolled owner/name (" + dir + ")"
 	if !strings.Contains(string(output), want) {
 		t.Errorf("status (enrolled) output = %q, want to contain %q", output, want)
+	}
+}
+
+// -- dispatch loop on|off|status sub-verb (ticket #219) ---------------------
+
+// TestDispatchLoopStatusJSON_NoDaemon locks in that `dispatch loop status
+// --json`, with no daemon reachable, prints a raw watch.DispatchState JSON
+// object with daemon_running:false and enabled resolved from config.json.
+func TestDispatchLoopStatusJSON_NoDaemon(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"dispatch": {"loopEnabled": true, "daemonInterval": "5m"}}`), 0o600); err != nil {
+		t.Fatalf("seeding config: %v", err)
+	}
+
+	cmd := exec.Command(binaryPath, "dispatch", "loop", "status", "--config", configPath, "--json")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dispatch loop status --json: %v\n%s", err, output)
+	}
+
+	var got watch.DispatchState
+	if uerr := json.Unmarshal(output, &got); uerr != nil {
+		t.Fatalf("unmarshal loop status --json output %q: %v", output, uerr)
+	}
+	if got.DaemonRunning {
+		t.Errorf("DaemonRunning = true, want false (no daemon reachable)")
+	}
+	if !got.Enabled {
+		t.Errorf("Enabled = %v, want true (from config.json dispatch.loopEnabled)", got.Enabled)
+	}
+	if got.Interval != "5m" {
+		t.Errorf("Interval = %q, want %q (from config.json dispatch.daemonInterval)", got.Interval, "5m")
+	}
+}
+
+// TestDispatchLoopOnOff_WritesConfigAndRendersSameAsStatus locks in that
+// `dispatch loop on`/`off`:
+//  1. persist the toggle to config.json (verified via dispatch.LoadConfig,
+//     not just by re-invoking the CLI), and
+//  2. print the resulting state using the exact same rendering `dispatch loop
+//     status` would print immediately after — not merely an echo of the
+//     write (e.g. "Enrolled ..."-style text divorced from actual state).
+func TestDispatchLoopOnOff_WritesConfigAndRendersSameAsStatus(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+
+	onCmd := exec.Command(binaryPath, "dispatch", "loop", "on", "--config", configPath)
+	onOutput, err := onCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dispatch loop on: %v\n%s", err, onOutput)
+	}
+
+	cfg, err := dispatch.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig after loop on: %v", err)
+	}
+	if !cfg.LoopEnabled {
+		t.Errorf("cfg.LoopEnabled after `dispatch loop on` = %v, want true", cfg.LoopEnabled)
+	}
+
+	statusAfterOnCmd := exec.Command(binaryPath, "dispatch", "loop", "status", "--config", configPath)
+	statusAfterOn, err := statusAfterOnCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dispatch loop status (after on): %v\n%s", err, statusAfterOn)
+	}
+	if string(onOutput) != string(statusAfterOn) {
+		t.Errorf("`dispatch loop on` output = %q, want identical rendering to a subsequent `dispatch loop status` = %q", onOutput, statusAfterOn)
+	}
+
+	offCmd := exec.Command(binaryPath, "dispatch", "loop", "off", "--config", configPath)
+	offOutput, err := offCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dispatch loop off: %v\n%s", err, offOutput)
+	}
+
+	cfg, err = dispatch.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig after loop off: %v", err)
+	}
+	if cfg.LoopEnabled {
+		t.Errorf("cfg.LoopEnabled after `dispatch loop off` = %v, want false", cfg.LoopEnabled)
+	}
+
+	statusAfterOffCmd := exec.Command(binaryPath, "dispatch", "loop", "status", "--config", configPath)
+	statusAfterOff, err := statusAfterOffCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dispatch loop status (after off): %v\n%s", err, statusAfterOff)
+	}
+	if string(offOutput) != string(statusAfterOff) {
+		t.Errorf("`dispatch loop off` output = %q, want identical rendering to a subsequent `dispatch loop status` = %q", offOutput, statusAfterOff)
+	}
+
+	// on/off must actually toggle a distinct state, not print identical text
+	// regardless of the mutation.
+	if string(statusAfterOn) == string(statusAfterOff) {
+		t.Errorf("status rendering was identical before and after toggling the loop off: %q", statusAfterOn)
+	}
+}
+
+// TestDispatchStatusJSON_IncludesLoopKey locks in that `dispatch status
+// --json` gains a top-level "loop" key (a watch.DispatchState) while every
+// pre-existing key (repo, dir, enrolled) is still present and correct. Every
+// existing key is asserted explicitly so a future edit can't silently drop
+// one.
+func TestDispatchStatusJSON_IncludesLoopKey(t *testing.T) {
+	dir := initGitRemote(t, "git@github.com:owner/name.git")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if _, err := dispatch.EnrollRepo(configPath, dispatch.RepoIdentity{Repo: "owner/name", Dir: dir}); err != nil {
+		t.Fatalf("EnrollRepo setup: %v", err)
+	}
+	if err := dispatch.SetLoopEnabled(configPath, true); err != nil {
+		t.Fatalf("SetLoopEnabled setup: %v", err)
+	}
+
+	cmd := exec.Command(binaryPath, "dispatch", "status", "--dir", dir, "--config", configPath, "--json")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dispatch status --json: %v\n%s", err, output)
+	}
+
+	var got struct {
+		Repo     string              `json:"repo"`
+		Dir      string              `json:"dir"`
+		Enrolled bool                `json:"enrolled"`
+		Loop     watch.DispatchState `json:"loop"`
+	}
+	if uerr := json.Unmarshal(output, &got); uerr != nil {
+		t.Fatalf("unmarshal status --json output %q: %v", output, uerr)
+	}
+
+	if got.Repo != "owner/name" {
+		t.Errorf("repo = %q, want %q", got.Repo, "owner/name")
+	}
+	if got.Dir != dir {
+		t.Errorf("dir = %q, want %q", got.Dir, dir)
+	}
+	if !got.Enrolled {
+		t.Errorf("enrolled = %v, want true", got.Enrolled)
+	}
+	if got.Loop.DaemonRunning {
+		t.Errorf("loop.daemon_running = true, want false (no daemon reachable)")
+	}
+	if !got.Loop.Enabled {
+		t.Errorf("loop.enabled = %v, want true (config was set via SetLoopEnabled)", got.Loop.Enabled)
+	}
+
+	// Belt-and-braces: every key from the pre-#219 shape must round-trip
+	// through a schema-agnostic decode too, so nothing was dropped or
+	// renamed underneath the typed struct above.
+	var raw map[string]json.RawMessage
+	if uerr := json.Unmarshal(output, &raw); uerr != nil {
+		t.Fatalf("unmarshal status --json output %q as raw map: %v", output, uerr)
+	}
+	for _, key := range []string{"repo", "dir", "enrolled", "loop"} {
+		if _, ok := raw[key]; !ok {
+			t.Errorf("status --json output %s missing key %q", output, key)
+		}
 	}
 }
 

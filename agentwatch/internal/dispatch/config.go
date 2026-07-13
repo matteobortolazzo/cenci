@@ -60,6 +60,11 @@ type Config struct {
 	GracePeriod    time.Duration // how long the failure signal must hold before recovery (default 5m)
 	RetryBudget    int           // retries before a ticket is marked dispatch-failed (default 2)
 	DaemonInterval time.Duration // embedded dispatch+reconcile loop interval; 0 disables it
+
+	// LoopEnabled reports whether the embedded fleet dispatch loop (#219) is
+	// on. Resolved from an explicit "loopEnabled" when present, else back-compat
+	// from DaemonInterval > 0.
+	LoopEnabled bool
 }
 
 // DefaultConfig returns the built-in policy used when no config file (or no
@@ -96,6 +101,7 @@ type dispatchFile struct {
 	GracePeriod            string                `json:"gracePeriod"`    // Go duration string, e.g. "5m"
 	RetryBudget            *int                  `json:"retryBudget"`    // pointer so an explicit 0 (no retries) is distinguishable from unset
 	DaemonInterval         string                `json:"daemonInterval"` // Go duration string, e.g. "5m"; empty/0 disables the embedded loop
+	LoopEnabled            *bool                 `json:"loopEnabled"`    // pointer so absence falls back to DaemonInterval > 0 (back-compat)
 }
 
 // LoadConfig returns the default policy with the config.json "dispatch" block
@@ -181,6 +187,11 @@ func mergeConfig(base Config, o dispatchFile) Config {
 	}
 	if d, err := time.ParseDuration(o.DaemonInterval); o.DaemonInterval != "" && err == nil {
 		base.DaemonInterval = d
+	}
+	if o.LoopEnabled != nil {
+		base.LoopEnabled = *o.LoopEnabled
+	} else {
+		base.LoopEnabled = base.DaemonInterval > 0
 	}
 	return base
 }
