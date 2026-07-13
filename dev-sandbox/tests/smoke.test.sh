@@ -148,6 +148,27 @@ else
     fail "one or more toolchain checks failed inside agent-sandbox:latest"
 fi
 
+# Regression guard for the gap this fragment closes: Chromium and its OS-level
+# deps (fonts, libnss3, etc.) must actually launch and render, not just have
+# `playwright --version` report a binary is present. Runs as the image's
+# default non-root `dev` user (no --user override) — the same user verify-ui
+# runs as at runtime, and the configuration Chromium's own sandbox expects.
+echo "case: Playwright launches Chromium and renders a screenshot inside agent-sandbox:latest"
+EXPECTED_PLAYWRIGHT_VERSION="$(sed -n 's/^ARG PLAYWRIGHT_VERSION=//p' "${SANDBOX_DIR}/fragments/playwright.dockerfile")"
+# shellcheck disable=SC2016 # Expansion happens in the container, using the forwarded environment variable.
+if [[ -z "${EXPECTED_PLAYWRIGHT_VERSION}" ]]; then
+    fail "could not read the expected Playwright version from fragments/playwright.dockerfile"
+elif "${RUNTIME}" run --rm --entrypoint /bin/bash \
+    -e "EXPECTED_PLAYWRIGHT_VERSION=${EXPECTED_PLAYWRIGHT_VERSION}" \
+    agent-sandbox:latest -c \
+    'test "$(playwright --version)" = "Version ${EXPECTED_PLAYWRIGHT_VERSION}" \
+        && playwright screenshot --browser=chromium about:blank /tmp/playwright-smoke.png \
+        && test -s /tmp/playwright-smoke.png'; then
+    pass
+else
+    fail "Playwright CLI or Chromium is missing, unusable, or stale in agent-sandbox:latest"
+fi
+
 # ── ccline (Claude Code status line) renders from a settings payload ──
 # ccline reads Claude Code's statusline JSON on stdin; a static build that
 # fails here (bad extraction, wrong arch) would leave every sandbox session
