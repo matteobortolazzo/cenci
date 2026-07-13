@@ -30,7 +30,7 @@ If you have pre-existing files there from before this fix, or you're not UID 100
 permission errors under the legacy mount, `chown -R $(id -u):$(id -g) ~/Repos` on the host
 clears it up.
 
-## Setup
+## Installation
 
 The easiest path is the [one-command installer](../docs/getting-started.md), which
 installs the plugin, symlinks the launchers, and offers to build the image:
@@ -39,7 +39,9 @@ installs the plugin, symlinks the launchers, and offers to build the image:
 curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
 ```
 
-Or install the plugin from the marketplace, then run the setup skill — it symlinks the
+### Advanced / development: standalone setup
+
+Install the plugin from the marketplace, then run the setup skill—it symlinks the
 `agent-sand` launcher onto your PATH and builds the container image:
 
 ```bash

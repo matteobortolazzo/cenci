@@ -86,8 +86,6 @@ There are no bubblewrap/socat prerequisites — the container supplies the isola
 
 ## Installation
 
-### Via the agent-stack installer (recommended)
-
 The [one-command installer](../docs/getting-started.md) installs agentflow together with
 the other layers, checks prerequisites, and walks you through the setup:
 
@@ -95,7 +93,7 @@ the other layers, checks prerequisites, and walks you through the setup:
 curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
 ```
 
-### Via marketplace
+### Advanced / development: standalone installation
 
 ```bash
 # Claude Code

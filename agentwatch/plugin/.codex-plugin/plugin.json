@@ -1,7 +1,7 @@
 {
   "name": "agentwatch",
   "version": "2.16.0",
-  "description": "Send Codex lifecycle events to the agentwatch status daemon.",
+  "description": "agent-stack attention layer: send Codex lifecycle events to the shared AgentWatch daemon.",
   "author": {
     "name": "Matteo Bortolazzo",
     "url": "https://github.com/matteobortolazzo"
@@ -18,8 +18,8 @@
   "hooks": "./codex/hooks.json",
   "interface": {
     "displayName": "AgentWatch",
-    "shortDescription": "Track Codex sessions in your status surfaces.",
-    "longDescription": "AgentWatch forwards Codex lifecycle hooks to a local daemon that updates tmux window indicators and other status surfaces.",
+    "shortDescription": "agent-stack attention for Codex sessions.",
+    "longDescription": "The agent-stack attention layer forwards Codex lifecycle hooks to a local daemon that updates tmux and optional display surfaces.",
     "developerName": "Matteo Bortolazzo",
     "category": "Productivity",
     "capabilities": [

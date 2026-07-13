@@ -31,7 +31,7 @@ The core daemon keys state by agent session id, maps hook events to statuses, an
 
 No polling for normal state changes. Agent hooks push state changes to the daemon instantly via a Unix socket; the daemon sweeps periodically for stale/exited sessions.
 
-## Install (Claude Code)
+## Installation
 
 The easiest path is the [one-command installer](../docs/getting-started.md), which
 also wires the macOS menu bar widget when SwiftBar is present:
@@ -40,8 +40,10 @@ also wires the macOS menu bar widget when SwiftBar is present:
 curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
 ```
 
-Or install the plugin from the marketplace directly — the binary and daemon
-auto-bootstrap on your first session, so this is all you need:
+The installer handles Claude Code, Codex, or both. The binary and daemon
+self-bootstrap from the active client's plugin cache on the first session.
+
+### Advanced / development: standalone client installation
 
 ```bash
 # Register the repo as a marketplace (works with private repos too)
@@ -49,6 +51,9 @@ claude plugin marketplace add matteobortolazzo/agent-stack
 
 # Install the plugin (persists across sessions)
 claude plugin install agentwatch
+
+codex plugin marketplace add matteobortolazzo/agent-stack
+codex plugin add agentwatch@agent-stack
 ```
 
 On the first `SessionStart` after install, the plugin downloads the `agentwatch`
@@ -67,26 +72,9 @@ make them find the binary, `install.sh` offers a one-time `sudo` link into
 `~/.local/bin` link, so it too survives version bumps. Decline it and the bar
 widgets fall back to their `agentwatchPath` / `AGENTWATCH_BIN` overrides.
 
-To update later: `claude plugin update agentwatch` (the next session re-bootstraps
-the matching binary).
-
-## Setup (OpenAI Codex)
-
-Codex reuses the same host daemon and binary provisioned by the Claude Code
-plugin — the Codex hooks call `agentwatch` on `$PATH`. If you only use Codex,
-install the binary manually (see [Advanced / development](#advanced--development))
-and start the daemon once; both agents then share it.
-
-Codex support uses the hook config in `plugin/codex/hooks.json`.
-
-If you do not already have a Codex hooks file:
-
-```bash
-mkdir -p ~/.codex
-cp /path/to/agent-stack/agentwatch/plugin/codex/hooks.json ~/.codex/hooks.json
-```
-
-If `~/.codex/hooks.json` already exists, merge the `hooks` entries from `plugin/codex/hooks.json` instead of replacing the file.
+Use `./install.sh update` for normal updates. Standalone development installs can use
+the corresponding client marketplace update command; the next session re-bootstraps
+the matching binary.
 
 Codex will ask you to review/trust new hooks. Use `/hooks` in Codex if the hooks are listed as pending review.
 
@@ -99,8 +87,9 @@ The marketplace plugin includes a native Codex manifest at
 Plugins and their bundled hooks are stable and enabled by default in current Codex
 releases — no feature flag is required.
 
-The Codex hooks self-bootstrap the binary and daemon on `SessionStart` (parity
-with the Claude plugin) — see the [Codex plugin README](plugin/codex/README.md#binary-and-daemon-self-bootstrapping).
+The Codex hooks self-bootstrap the binary and shared daemon on `SessionStart` even in
+a Codex-only installation—see the
+[Codex plugin README](plugin/codex/README.md#binary-and-daemon-self-bootstrapping).
 
 ## Dispatching workflows (`agentwatch run`)
 

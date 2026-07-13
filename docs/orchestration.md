@@ -6,15 +6,15 @@
 This is the supported recipe for driving the whole package from a
 [lazyboards](https://github.com/matteobortolazzo/lazyboards) kanban board — the
 orchestration layer that sits on top of agentflow (workflow), agentwatch (attention),
-and agent-sandbox (isolation). See
-[`cohesive-package.md` §2.4](./cohesive-package.md) for the architecture; this
-document is the wiring.
+and agent-sandbox (isolation). See the [root overview](../README.md) for the
+architecture; this document is the wiring.
 
 Every card is a GitHub issue. A keypress on a card dispatches a coding-agent workflow
 into a detached tmux window; the agent moves the card across the board by relabelling
 the issue; live status flows back onto the card. Nothing here is bespoke to one
 machine — the pieces are `agentwatch run` (the launcher), the agentflow skills (the
-workflows), and a single `~/.config/lazyboards/config.yml`.
+workflows), and a single `~/.config/lazyboards/config.yml`. lazyboards is an optional
+separate project, not a fourth installed layer.
 
 ## The state machine: columns are labels
 
@@ -26,18 +26,19 @@ case-insensitively:
 - an issue with several matching labels lands in the **rightmost** matching column.
 
 So the board and the agentflow skills share one vocabulary: the skills relabel the
-issue, and the card moves on the next refresh. The lifecycle is five states plus one
-transient marker:
+issue, and the card moves on the next refresh. The lifecycle is:
 
 ```
-New ──refine──▶ Refined ──design──▶ Designed ──implement──▶ In Review ──merge──▶ Implemented
+New → Refined → [Designed] → Planned → Working → In Review → Implemented
 ```
 
 | Transition | agentflow skill | Label change |
 |---|---|---|
 | New → Refined | `/agentflow:refine` | `+Working` while running, then `+Refined` `−Working` |
-| Refined → Designed | `/agentflow:design` | `+Working` while running, then `+Designed` `−Working` |
-| Designed → In Review | `/agentflow:implement` (phase 9, on PR open) | `+Working` while running, then `+In Review` `−Working` |
+| Refined → Designed (optional) | `/agentflow:design` on the dedicated design ticket | Propagates `+Designed` to dependent implementation tickets |
+| Refined/Designed → Planned | `/agentflow:implement` planning | Persists `.plans/<id>-*.md`, then `+Planned` `−Working` |
+| Planned → Working | plan-file implementation or `agentwatch dispatch` pickup | `+Working`; `Planned` remains as a milestone |
+| Working → In Review | `/agentflow:implement` phase 9 | `+In Review` `−Working` when the PR opens |
 | In Review → Implemented | `/agentflow:babysit` (on PR merge) | `+Implemented` `−In Review` |
 
 `In Review` is applied when the PR **opens**, not when it merges — so a PR still
@@ -46,11 +47,13 @@ the final swap: it watches the open PR and, on merge, replaces `In Review` with
 `Implemented` on every issue the PR closed (including a parent ticket reached via
 `Fixes #<parent>`). PR-open never applies `Implemented`.
 
-**`Working` is a marker, not a column.** lazyboards' `working_label` (default
+**`Working` is transient activity, not a persisted handoff.** lazyboards'
+`working_label` (default
 `Working`) renders a spinner on any card carrying that label **without** moving it,
 and hides the label from the card's dot display. Each skill adds `Working` when it
 starts and removes it when it hands off, so a card shows "an agent is on this right
-now" while staying in its current column.
+now" while staying in its current column. `Planned` is the durable handoff and can be
+picked up automatically by AgentWatch dispatch.
 
 ## The join key: `<number>-<skill>`
 
@@ -121,6 +124,8 @@ columns:
         name: Implement
         type: shell
         command: "agentwatch run implement {number}"
+
+  - name: Planned
 
   - name: In Review
   - name: Implemented

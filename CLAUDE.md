@@ -1,13 +1,13 @@
 # agent-stack
 
-Monorepo for Claude Code plugins and development tooling.
+One agent-stack product implemented as a monorepo of client plugins and development tooling.
 GitHub Issues for tracking. GitHub for code and PRs.
 
 ## Projects
 
-- `agentflow/` — Claude Code plugin: markdown skills, agents, shell hooks
-- `agentwatch/` — Go binary + Claude Code plugin: coding-agent session monitoring (tmux, waybar, noctalia, DMS)
-- `dev-sandbox/` — Docker/Podman container for isolated Claude Code sessions
+- `agentflow/` — workflow layer: Claude Code pipeline plus portable Codex conventions
+- `agentwatch/` — attention layer: Go daemon and native Claude Code/Codex hooks
+- `dev-sandbox/` — isolation layer: Docker/Podman launcher for Claude Code and Codex
 
 Each project has its own `CLAUDE.md` with project-specific context.
 
@@ -28,6 +28,10 @@ Each project has its own `CLAUDE.md` with project-specific context.
 
 ### agentflow
 - No build step (markdown/shell plugin)
+
+### agent-sandbox and installer
+- Syntax: `bash -n install.sh dev-sandbox/agent-sand dev-sandbox/entrypoint.sh`
+- Tests: `bash dev-sandbox/tests/installer-clients.test.sh` and the other host-runnable suites in `dev-sandbox/tests/`
 
 ## Versioning
 

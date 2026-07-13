@@ -1,7 +1,7 @@
 {
   "name": "agentflow",
   "version": "4.11.1",
-  "description": "Shared engineering conventions for Codex, plus Claude Code's ticket-to-PR workflow.",
+  "description": "agent-stack workflow layer: engineering conventions for Codex and Claude Code's gated ticket-to-PR pipeline.",
   "author": {
     "name": "Matteo Bortolazzo",
     "url": "https://github.com/matteobortolazzo"
@@ -19,8 +19,8 @@
   "hooks": "./codex/hooks.json",
   "interface": {
     "displayName": "AgentFlow",
-    "shortDescription": "Shared engineering conventions and workflow guidance.",
-    "longDescription": "AgentFlow provides portable engineering convention skills for Codex and the complete interactive ticket-to-PR pipeline for Claude Code.",
+    "shortDescription": "agent-stack workflow conventions and guidance.",
+    "longDescription": "The agent-stack workflow layer provides portable engineering convention skills for Codex and the complete interactive ticket-to-PR pipeline for Claude Code.",
     "developerName": "Matteo Bortolazzo",
     "category": "Developer Tools",
     "capabilities": [

@@ -1,7 +1,7 @@
 {
   "name": "agent-sandbox",
   "version": "0.12.5",
-  "description": "Isolated Docker or Podman launcher for Claude Code and Codex.",
+  "description": "agent-stack isolation layer: Docker or Podman launcher for Claude Code and Codex.",
   "author": {
     "name": "Matteo Bortolazzo",
     "url": "https://github.com/matteobortolazzo"
@@ -19,8 +19,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Agent Sandbox",
-    "shortDescription": "Run coding agents inside an isolated container.",
-    "longDescription": "Agent Sandbox launches Claude Code or Codex with full permissions inside a Docker or Podman security boundary.",
+    "shortDescription": "agent-stack container isolation for coding agents.",
+    "longDescription": "The agent-stack isolation layer launches Claude Code or Codex with full permissions inside a Docker or Podman security boundary.",
     "developerName": "Matteo Bortolazzo",
     "category": "Developer Tools",
     "capabilities": [

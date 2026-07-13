@@ -1,6 +1,6 @@
 {
   "name": "agentflow",
-  "description": "Ticket refinement and automated implementation pipeline for GitHub",
+  "description": "agent-stack workflow layer: portable conventions and Claude Code's gated GitHub ticket-to-PR pipeline",
   "version": "4.11.1",
   "author": {
     "name": "Matteo Bortolazzo"

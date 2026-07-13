@@ -1,7 +1,7 @@
 # Contributing
 
-Thanks for looking at agent-stack. This repo is a monorepo of three independently
-versioned plugins — read the relevant project's `CLAUDE.md` before making changes, and
+Thanks for looking at agent-stack. This repo contains one product implemented as three
+independently versioned internal plugins—read the relevant layer's `CLAUDE.md` before making changes, and
 see the root [`CLAUDE.md`](./CLAUDE.md) and [`README.md`](./README.md) for the overall
 architecture.
 
@@ -85,9 +85,8 @@ Workflows live in [`.github/workflows/`](./.github/workflows/):
 - **`sandbox-ci.yml`** (workflow name `dev-sandbox — CI`) — shellcheck/`bash -n` lint,
   the host-runnable test suites, the fragment-drift guard, a full build + toolchain
   smoke test, and hadolint, on push/PR touching `dev-sandbox/**` or `install.sh`.
-- **`codex-version-bump.yml`** — a daily scheduled job that checks for new Codex CLI
-  releases, opens a PR bumping `CODEX_VERSION` in `dev-sandbox/Dockerfile`, and
-  auto-merges it.
+- **`deps-bump.yml`** — a daily scheduled job that checks pinned sandbox dependencies,
+  opens scoped update PRs, and applies the documented auto/manual merge policy.
 
 ## Marketplace and plugin versioning
 
