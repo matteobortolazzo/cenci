@@ -86,7 +86,7 @@ The determined mode (ticket or ticketless) governs conditional behavior througho
 
 **Plan file auto-detection** (ticket mode only): If the first token is a ticket ID (ticket mode), glob for `.plans/<id>-*.md`:
 
-- **Exactly one match, and the user context does not request a re-plan** → pick it up silently: switch to plan file mode, set `hasPlanFile = true`, read the plan file, and tell the user in one line: "Found approved plan `.plans/<filename>` — resuming implementation from it (pass `replan` as context to discard it instead)." Do **not** ask — a plan file only exists because a human approved it in Phase 1, so pickup is the expected path, and scripted launches (`agentwatch run implement <id>`) rely on this being non-interactive. Phase 1's `planCommitSha` staleness check still guards against a plan that predates codebase changes.
+- **Exactly one match, and the user context does not request a re-plan** → pick it up silently: switch to plan file mode, set `hasPlanFile = true`, read the plan file, and tell the user in one line: "Found saved plan `.plans/<filename>` — resuming implementation from it (pass `replan` as context to discard it instead)." Do **not** ask — a plan file only exists because a Phase 1 planning session persisted it after the user answered its clarifying questions, launching this run is the human authorization to execute it, and scripted launches (`agentwatch run implement <id>`) rely on this being non-interactive. Phase 1's `planCommitSha` staleness check still guards against a plan that predates codebase changes.
 - **The user context requests a re-plan** (it contains a standalone token like `replan` or `re-plan`, or an explicit instruction to discard/redo the existing plan) → ignore the plan file and proceed in normal ticket mode. This is the **re-plan over an existing plan** path referenced in the Label "Working" section.
 - **Multiple matches** → ambiguous; ask with `AskUserQuestion` which plan file to use, offering each match plus **"Re-plan from scratch"** as the final option.
 - **No match** → proceed in normal ticket mode.
@@ -180,8 +180,8 @@ If the digest's `labels` already include **"In Review"** or **"Implemented"**, a
 
 If the user says no → stop. If yes → proceed with the pipeline. This is a warning only — it does not block.
 
-If the digest's `labels` include **"Planned"** but this run is **not** plan-file mode (`hasPlanFile` is false — e.g. the plan file was deleted or lives on another host), an approved plan was recorded for this ticket but no plan-file argument reached this run. Display a soft, non-blocking note via `AskUserQuestion` — mirror the tone above:
-> "This ticket is marked `Planned` (an approved plan was persisted), but you didn't pass a plan file. If the plan file still exists under `.plans/`, re-run as `/agentflow:implement .plans/<file>` to pick it up (the plan-file auto-detection resumes from it automatically when a matching file is found); otherwise you can re-plan from scratch. Proceed with a fresh plan anyway?"
+If the digest's `labels` include **"Planned"** but this run is **not** plan-file mode (`hasPlanFile` is false — e.g. the plan file was deleted or lives on another host), a plan was recorded for this ticket but no plan-file argument reached this run. Display a soft, non-blocking note via `AskUserQuestion` — mirror the tone above:
+> "This ticket is marked `Planned` (a plan was persisted), but you didn't pass a plan file. If the plan file still exists under `.plans/`, re-run as `/agentflow:implement .plans/<file>` to pick it up (the plan-file auto-detection resumes from it automatically when a matching file is found); otherwise you can re-plan from scratch. Proceed with a fresh plan anyway?"
 
 If the user says no → stop. If yes → proceed (a fresh plan re-applies `Planned` at the end). This is a warning only — it does not block.
 
@@ -219,11 +219,11 @@ This is informational only — it does not block the pipeline.
 gh label create "Working" --repo <owner>/<repo> --color "FBCA04" --description "Actively being refined, designed, or implemented" 2>/dev/null || true
 ```
 
-`Planned` is a milestone marker, not a current-stage indicator — once a ticket has an approved plan, it keeps that label for the life of the ticket (only `In Review`/`Implemented` reaching the ticket via the Phase 9 flow, or the ticket closing, ever implies otherwise). Only `Working` toggles on and off as the pipeline runs. So the implement skill never issues `--remove-label "Planned"` — this holds even when starting from a plan-file pickup or discarding a plan to re-plan from scratch.
+`Planned` is a milestone marker, not a current-stage indicator — once a ticket has a persisted plan, it keeps that label for the life of the ticket (only `In Review`/`Implemented` reaching the ticket via the Phase 9 flow, or the ticket closing, ever implies otherwise). Only `Working` toggles on and off as the pipeline runs. So the implement skill never issues `--remove-label "Planned"` — this holds even when starting from a plan-file pickup or discarding a plan to re-plan from scratch.
 
 The exact swap depends on how this run entered the pipeline:
 
-- **Plan-file mode** (`hasPlanFile` true): this is the approved-plan pickup. The ticket already carries `Planned` from when the plan was persisted; just add `Working` alongside it:
+- **Plan-file mode** (`hasPlanFile` true): this is the saved-plan pickup. The ticket already carries `Planned` from when the plan was persisted; just add `Working` alongside it:
   ```bash
   gh issue edit <number> --repo <owner>/<repo> --add-label "Working"
   ```
@@ -231,7 +231,7 @@ The exact swap depends on how this run entered the pipeline:
   ```bash
   gh issue edit <number> --repo <owner>/<repo> --add-label "Working"
   ```
-  This also covers a session entered via a **re-plan over an existing plan** (the user context requested `replan`, or "Re-plan from scratch" was chosen in the multiple-match question) — the ticket still carries `Planned` from the discarded plan, and that's fine: it stays. In a new-plan session `Working` is short-lived: Phase 1 swaps it back out when it persists the fresh approved plan and stops.
+  This also covers a session entered via a **re-plan over an existing plan** (the user context requested `replan`, or "Re-plan from scratch" was chosen in the multiple-match question) — the ticket still carries `Planned` from the discarded plan, and that's fine: it stays. In a new-plan session `Working` is short-lived: Phase 1 swaps it back out when it persists the fresh plan and stops.
 
 ## Pipeline
 
@@ -245,7 +245,7 @@ The only reasons to stop mid-pipeline are explicit error gates defined within in
 
 Phases 2–9 run unattended, but a turn that stops mid-phase (context limit, transient tool error, a subagent that ends the turn) just ends the run — the work is left half-done with no PR. Claude Code's native `/goal` closes that gap: it registers a session-scoped completion condition and, whenever a turn ends without the condition met, immediately starts another turn. Armed at pipeline start, it turns "stopped mid-phase" into "resumes mid-phase."
 
-**Plan approval is the human gate that arms it.** The goal is never set in the session that *creates* a plan — that session ends at Phase 1, and goals are session-scoped (a new session or `/clear` drops them). The human approving a plan is what authorizes the autonomous run; the goal is technically armed when the pre-approved run begins — i.e. **only in plan-file mode (`hasPlanFile = true`), at the start of Phase 2** (see `phases/phase-2-worktree.md`). Ticketless and ticket-mode planning sessions never arm a goal.
+**Launching the plan-file run is the human gate that arms it.** The goal is never set in the session that *creates* a plan — that session ends at Phase 1 after persisting the plan and presenting it for review, and goals are session-scoped (a new session or `/clear` drops them). The human reviewing the saved plan and launching `/agentflow:implement .plans/<filename>` is what authorizes the autonomous run; the goal is armed when that run begins — i.e. **only in plan-file mode (`hasPlanFile = true`), at the start of Phase 2** (see `phases/phase-2-worktree.md`). Ticketless and ticket-mode planning sessions never arm a goal.
 
 **Version + availability gate (do this once, before arming).** `/goal` requires Claude Code ≥ 2.1.139. When entering Phase 2 in plan-file mode:
 
@@ -268,7 +268,7 @@ If the `SlashCommand` tool is not available or the command errors, treat the goa
 - **Any human-input stop**: because `/goal` restarts the turn on every stop, an *un-cleared* goal turns a genuine blocker into an infinite retry loop. So **before any mandatory stop that hands control back to the user** — the error gates in Phases 2–9 (worktree check failure, unclear test requirements, build/test failures after retries, an ambiguous reviewer finding needing a human decision, a rebase conflict, a push auth/network failure) — run `/goal clear` first, then stop and report as the phase instructs. Clearing is a no-op when no goal was armed, so it is always safe to call.
 - **Turn-cap stall**: if the same goal has restarted the turn more than 20 times without the pipeline advancing to a new phase (the safety cap baked into the condition string above), run `/goal clear` and stop, reporting which phase it stalled on and the best available diagnosis — a runaway retry loop is itself a state that needs the human back, exactly like the other error gates.
 
-`/goal` = keep going until the PR exists; plan approval = the human gate that arms it; the error gates and the turn-cap stall = the points where the human must re-enter, so the goal stands down there.
+`/goal` = keep going until the PR exists; launching the plan-file run = the human gate that arms it; the error gates and the turn-cap stall = the points where the human must re-enter, so the goal stands down there.
 
 | Phase | Instructions |
 |-------|--------------|
@@ -292,7 +292,7 @@ Read `.claude/config.json` for optional `agentflow` settings:
 - `agentflow.liteReviewEnabled: false` — opt out of the lite review path (see Phase 6 + 7). Default (unset or `true`): Phase 6 + 7 classifies each diff into one of three paths — `full` (all three reviewers, today's behavior) for source changes, oversized diffs, or anything touching `.claude/**`, `skills/**`, `agents/**`, `CLAUDE.md`, or a danger pattern (auth/security/secrets/CI workflows); `lite-docs` (no reviewers) for docs-only diffs; `lite-small` (`code-reviewer` only, same model, same Code Review Actions) for small config/data-only diffs. Setting this `false` forces the full trio on every run, regardless of diff size or content.
 - `agentflow.diffContextMode: "file"` — before Phase 6 + 7, write the full diff to `/tmp/claude/agentflow-diff.patch` and pass reviewers the path plus changed file list and stat. Reviewers read only the hunks they need. Default is `"inline"` for small diffs.
 - `agentflow.goalAutopilot: false` — opt out of the Goal Autopilot (see the Pipeline section). Default (unset or `true`) arms a `/goal` completion condition at Phase 2 start when Claude Code ≥ 2.1.139, so a mid-phase stop resumes instead of ending the run. This is not a cost control — it trades a small evaluation overhead per turn for the completion guarantee; set it `false` to run phases 2–9 without one.
-- `agentflow.planComment: true` — not a cost control. When `true`, Phase 1 also posts the approved plan as a ticket comment (ticket mode only) for audit / off-host visibility after marking the ticket `Planned`; `.plans/` stays the executable source of truth. Default (unset or `false`): no comment. Canonical schema lives in `/agentflow:configure`.
+- `agentflow.planComment: true` — not a cost control. When `true`, Phase 1 also posts the saved plan as a ticket comment (ticket mode only) for audit / off-host visibility after marking the ticket `Planned`; `.plans/` stays the executable source of truth. Default (unset or `false`): no comment. Canonical schema lives in `/agentflow:configure`.
 
 If a cost-control setting conflicts with quality, ignore the setting and explain why.
 

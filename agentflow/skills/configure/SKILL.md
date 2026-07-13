@@ -440,7 +440,7 @@ After gathering answers:
    | `Refined` | `0E8A16` | Ready for design/implementation |
    | `Design` | `D93F0B` | Design-only ticket — deliverable is a design spec |
    | `Designed` | `5319E7` | Design spec approved |
-   | `Planned` | `1D76DB` | Approved plan on disk, ready to pick up |
+   | `Planned` | `1D76DB` | Plan on disk, ready to pick up |
    | `In Review` | `A2EEEF` | PR open, under review / CI running |
    | `Implemented` | `6F42C1` | PR merged — done |
 
@@ -761,7 +761,7 @@ The `agentflow` field is optional. If present, preserve existing user values dur
 - `diffContextMode` — `"inline"` passes small diffs directly to reviewers; `"file"` writes the diff to `/tmp/claude/agentflow-diff.patch` and passes paths so reviewers read targeted hunks. Default: `"inline"`.
 - `liteReviewEnabled` — `true` (default) lets Phase 6 + 7 classify each diff into `full` (all three reviewers), `lite-docs` (no reviewers, docs-only), or `lite-small` (`code-reviewer` only, small config/data-only diffs); `false` forces the full trio on every run regardless of diff size or content. See Phase 6 + 7 for the precedence-ordered classification rules.
 - `goalAutopilot` — `true` arms a native `/goal` completion condition at Phase 2 start (Claude Code ≥ 2.1.139) so implement phases 2–9 resume through to an open PR after a mid-phase stop; `false` opts out. Default (unset): enabled where supported, a graceful no-op on older runtimes.
-- `planComment` — `true` makes implement Phase 1 also post the approved plan as a ticket comment (ticket mode only) right after marking the ticket `Planned`, for audit / off-host visibility; `.plans/` stays the executable source of truth. Default: `false` (no comment).
+- `planComment` — `true` makes implement Phase 1 also post the saved plan as a ticket comment (ticket mode only) right after marking the ticket `Planned`, for audit / off-host visibility; `.plans/` stays the executable source of truth. Default: `false` (no comment).
 
 Configure always writes `sandbox: { "enabled": false }` in `.claude/settings.json` (no `network`/`excludedCommands`/`autoAllowBashIfSandboxed`) — the `agent-sand` container is the security boundary. The config no longer carries `profile` or `sandboxEnabled` fields; re-config strips them from older configs (see the migration-removal list below).
 
@@ -862,7 +862,7 @@ in the completion summary so the user can mirror it as columns on their board:
 | `Refined` | refine | Ready for design/implementation |
 | `Design` | refine | Design-only ticket — deliverable is a design spec; implement redirects to `/agentflow:design` |
 | `Designed` | design | Design spec approved — propagated from the completed design ticket to the implementation tickets that depend on it |
-| `Planned` | implement Phase 1 (approved plan persisted) | Approved plan on disk, ready to pick up |
+| `Planned` | implement Phase 1 (plan persisted) | Plan on disk, ready to pick up |
 | `In Review` | implement Phase 9 (at PR-open) | PR is open, under review / CI running |
 | `Implemented` | babysit (on PR merge) | PR merged — done |
 
@@ -879,8 +879,8 @@ that carry `Implemented` from before this change but whose PRs are still open ca
 
 **Migration note for existing boards** (state this when re-configuring a project that predates
 `Planned`): add a **`Planned`** column/label between `Designed` and `Working`. Previously, a
-planning session applied `Working` at pipeline start and then stopped once the plan was approved —
+planning session applied `Working` at pipeline start and then stopped once the plan was saved —
 so the board showed `Working` on a ticket nobody was actively working. Now a planning session
-lands the ticket on `Planned` ("an approved plan exists on disk, ready to pick up"); the swap to
+lands the ticket on `Planned` ("a plan exists on disk, ready to pick up"); the swap to
 `Working` happens when the plan-file implementation run begins. New work follows this
 automatically.

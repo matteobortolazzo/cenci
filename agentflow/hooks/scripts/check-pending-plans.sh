@@ -1,5 +1,5 @@
 #!/bin/bash
-# Check for approved plan files and inject as context on session start.
+# Check for pending plan files and inject as context on session start.
 PLANS_DIR=".plans"
 
 if [ ! -d "$PLANS_DIR" ]; then

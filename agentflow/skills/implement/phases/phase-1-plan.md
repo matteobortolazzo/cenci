@@ -7,19 +7,18 @@ Read this file only when Phase 1 starts.
 If `hasPlanFile` is true, skip new planning:
 
 1. The plan file was already read and parsed during mode detection. Source ticket details, user context, Q&A, implementation plan, architectural context, design context, and attachment summaries from it.
-2. Compare `planCommitSha` from front matter to `git rev-parse HEAD`. If they differ, warn: "The codebase has changed since this plan was created (`planCommitSha` vs current HEAD). The plan may be stale. Continue anyway?" Use `AskUserQuestion` with "Continue with existing plan" and "Re-plan from scratch". If re-planning, delete the plan file and run normal planning. No board-label change is needed here: this is a plan-file-mode run, so `Working` was already added at pipeline start (`Planned` stays — see the **Label "Working"** section of `SKILL.md`); the re-run's new-plan path re-applies (harmlessly re-adds) `Planned` at the end when it persists the fresh approved plan.
+2. Compare `planCommitSha` from front matter to `git rev-parse HEAD`. If they differ, warn: "The codebase has changed since this plan was created (`planCommitSha` vs current HEAD). The plan may be stale. Continue anyway?" Use `AskUserQuestion` with "Continue with existing plan" and "Re-plan from scratch". If re-planning, delete the plan file and run normal planning. No board-label change is needed here: this is a plan-file-mode run, so `Working` was already added at pipeline start (`Planned` stays — see the **Label "Working"** section of `SKILL.md`); the re-run's new-plan path re-applies (harmlessly re-adds) `Planned` at the end when it persists the fresh plan.
 3. In ticket mode, re-fetch the ticket and compare state/body with `## Ticket Details`. If changed, require confirmation via `AskUserQuestion` ("Continue" / "Abort") before continuing. (This single read-only `gh issue view` is the sanctioned exception to the "no ticket fetch in the main agent" rule — it runs after the pre-flight check, and the context-gatherer is not used in plan file mode.)
 4. Proceed to Phase 2 with context from the plan file.
 
 ## New Plan
 
-If `hasPlanFile` is false, analyze the codebase, ask clarifying questions, produce a plan, get approval, persist it, and stop.
+If `hasPlanFile` is false, analyze the codebase, ask clarifying questions, produce a plan, persist it, present it, and stop.
 
 Mandatory stops:
 
 1. If the planner has clarifying questions, ask them with `AskUserQuestion` and end the turn.
-2. Present every plan for approval with `AskUserQuestion` and end the turn.
-3. After approval, persist the plan and stop. Implementation resumes by invoking `/agentflow:implement .plans/<filename>` in a fresh session.
+2. Once the planner has no remaining questions, persist the plan and stop, presenting the full plan in the final message. There is **no plan-approval prompt**: answering the clarifying questions is the user's input to planning; reviewing the saved plan and launching the plan-file run is the approval. Implementation resumes by invoking `/agentflow:implement .plans/<filename>` in a fresh session.
 
 Never begin Phase 2 in a session that created a new plan — not in the same turn, and not in a later turn. Phases 2–9 require invocation with a plan-file argument.
 
@@ -67,36 +66,12 @@ Question categories to evaluate: scope boundaries, edge cases, error handling, p
 
 Parse `## Clarifying Questions`.
 
-- If questions exist and are not "None", present all questions using the planner's wording via `AskUserQuestion`; end the turn.
-- If no questions, present the plan for approval.
-- If the user requests changes, ask what needs changing, re-invoke planner with the bundle path, the Q&A pairs, and the change request — do not re-paste ticket or design content — then repeat approval.
+- If questions exist and are not "None", present all questions using the planner's wording via `AskUserQuestion`; end the turn. When the answers arrive, re-invoke the planner with the bundle path and the Q&A pairs — do not re-paste ticket or design content — and route its output through this section again.
+- If no questions (or none remain), persist the plan directly — do **not** ask for approval. The human gate is launching the plan-file run: the user reviews the saved plan in the final message and either launches implementation or re-plans (`replan` as user context discards the saved plan).
 
-## Approval Output
+## Persist the Plan
 
-Present:
-
-```markdown
-## Implementation Plan
-
-<planner's full plan>
-
-### Assumptions
-<assumptions>
-
-### Open Questions
-<unresolved items or "None">
-
-### Risks
-<risks>
-
-If the task appears too large for a single PR, consider running `/refine` to split it first.
-```
-
-Then call `AskUserQuestion` with Approve / Request Changes. Do not call any other tool after this question.
-
-## Persist Approved Plan
-
-After approval, create `.plans/` and assemble:
+Once the planner has no remaining questions, create `.plans/` and assemble:
 
 - Ticket mode: `.plans/<ticket-id>-<slug>.md`
 - Ticketless mode: `.plans/<slug>.md`
@@ -123,7 +98,7 @@ isChild: false
 isLastChild: false
 parentId: null
 createdAt: 2026-03-04T10:30:00Z
-status: approved
+status: planned
 planCommitSha: abc123def
 ---
 
@@ -156,23 +131,23 @@ Record `planCommitSha` from `git rev-parse HEAD`. Source `isChild`, `isLastChild
 
 ### Mark the ticket `Planned` (ticket mode only)
 
-After the plan file is written, signal on the board that an approved plan is now waiting to be picked up. **Ticket mode only** — skip this entirely in ticketless mode (there is no ticket to label).
+After the plan file is written, signal on the board that a plan is now waiting to be picked up. **Ticket mode only** — skip this entirely in ticketless mode (there is no ticket to label).
 
 `gh issue edit --add-label` **fails when the label does not exist in the repository** — `Planned` is newer than the other lifecycle labels, so projects configured before it are missing it. Ensure it exists first, as its own Bash call (`|| true` swallows only the "already exists" error):
 
 ```bash
-gh label create "Planned" --repo <owner>/<repo> --color "1D76DB" --description "Approved plan on disk, ready to pick up" 2>/dev/null || true
+gh label create "Planned" --repo <owner>/<repo> --color "1D76DB" --description "Plan on disk, ready to pick up" 2>/dev/null || true
 ```
 
-Then apply the swap and **verify it succeeded** — if this command errors, surface the error to the user instead of ending the session silently, since a missing `Planned` label breaks the approved-plan pickup on the board:
+Then apply the swap and **verify it succeeded** — if this command errors, surface the error to the user instead of ending the session silently, since a missing `Planned` label breaks the saved-plan pickup on the board:
 
 ```bash
 gh issue edit <number> --repo <owner>/<repo> --add-label "Planned" --remove-label "Working"
 ```
 
-`Planned` means "an approved plan exists (or has existed) on disk (`.plans/<id>-*.md`)." The planning session applied `Working` at pipeline start; this swap replaces it so the board no longer shows the ticket as actively in flight. Unlike `Working`, `Planned` is a milestone marker, not a current-stage indicator — the implement skill never removes it once set, including at the start of the plan-file implementation run (see the **Label "Working"** section of `SKILL.md`), so a stalled implementation run still shows `Planned` on the board.
+`Planned` means "a persisted plan exists (or has existed) on disk (`.plans/<id>-*.md`)." The planning session applied `Working` at pipeline start; this swap replaces it so the board no longer shows the ticket as actively in flight. Unlike `Working`, `Planned` is a milestone marker, not a current-stage indicator — the implement skill never removes it once set, including at the start of the plan-file implementation run (see the **Label "Working"** section of `SKILL.md`), so a stalled implementation run still shows `Planned` on the board.
 
-If `.claude/config.json` has `agentflow.planComment: true`, also post the approved plan as a ticket comment for audit / off-host visibility (ticket mode only), immediately after the label swap. `.plans/` remains the executable source of truth; the comment is a convenience copy:
+If `.claude/config.json` has `agentflow.planComment: true`, also post the saved plan as a ticket comment for audit / off-host visibility (ticket mode only), immediately after the label swap. `.plans/` remains the executable source of truth; the comment is a convenience copy:
 
 ```bash
 gh issue comment <number> --repo <owner>/<repo> --body-file .plans/<filename>
@@ -182,16 +157,35 @@ If `agentflow.planComment` is absent or `false`, skip the comment.
 
 After the plan file is written and (in ticket mode) the label swap and any optional comment are done, the **only remaining actions** are those one-or-two `gh` calls plus the final message below — no other tool calls, and never read `phases/phase-2-worktree.md` or any later phase file in this session. The session that created a plan always ends here; implementation runs in a fresh session.
 
-Stop and tell the user:
+Stop and present the full plan together with the save notice — this final message is the user's review point before launching implementation, so never abbreviate the plan here:
 
 ```text
+## Implementation Plan
+
+<planner's full plan>
+
+### Assumptions
+<assumptions>
+
+### Open Questions
+<unresolved items or "None">
+
+### Risks
+<risks>
+
+---
+
 Plan saved to `.plans/<filename>`.
 
-To implement, start a fresh session and run:
+Review the plan above. To implement, start a fresh session and run:
 
 /agentflow:implement .plans/<filename>
+
+To discard it and re-plan, re-run /agentflow:implement <ticket-id or task> with `replan` as context.
+
+If the task appears too large for a single PR, consider running /refine to split it first.
 
 The SessionStart hook will also remind you of pending plans.
 ```
 
-Approving this plan is the human gate for the autopilot: the plan-file run you launch next arms a `/goal` completion condition (Claude Code ≥ 2.1.139) so phases 2–9 resume through to an open PR instead of stalling on a mid-phase stop. Do **not** set any goal in this planning session — it ends here, and goals are session-scoped. See the **Goal Autopilot** section of `SKILL.md`.
+Launching the plan-file run is the human gate for the autopilot: saving the plan arms nothing — the plan-file run the user launches after reviewing it arms a `/goal` completion condition (Claude Code ≥ 2.1.139) so phases 2–9 resume through to an open PR instead of stalling on a mid-phase stop. Do **not** set any goal in this planning session — it ends here, and goals are session-scoped. See the **Goal Autopilot** section of `SKILL.md`.
