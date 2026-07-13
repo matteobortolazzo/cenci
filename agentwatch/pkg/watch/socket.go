@@ -37,6 +37,10 @@ func secureSocketDir() (string, error) {
 // against a directory that already exists (e.g. a container bind-mount
 // pre-created by the host) — permissions are only forced on fresh creation so
 // this never fights an already-mounted directory's existing ownership/perms.
+// If the nested path is a symlink, it is rejected outright (not followed) to
+// avoid a container/host symlink-swap attack. If a pre-existing directory has
+// group/other-accessible permissions, a non-fatal warning is logged but the
+// directory is still returned (no chmod fight with an already-mounted dir).
 // This is the single home of the runtime-dir fallback logic; other agentwatch
 // packages build their socket paths from it.
 func SocketDir() (string, error) {
@@ -45,17 +49,25 @@ func SocketDir() (string, error) {
 		return "", err
 	}
 	dir := filepath.Join(base, "agentwatch")
-	if info, statErr := os.Stat(dir); os.IsNotExist(statErr) {
+	info, statErr := os.Lstat(dir)
+	switch {
+	case os.IsNotExist(statErr):
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			return "", err
 		}
 		if err := os.Chmod(dir, 0700); err != nil {
 			return "", err
 		}
-	} else if statErr != nil {
+	case statErr != nil:
 		return "", statErr
-	} else if !info.IsDir() {
+	case info.Mode()&os.ModeSymlink != 0:
+		return "", fmt.Errorf("socket dir path %q is a symlink; refusing for security", dir)
+	case !info.IsDir():
 		return "", fmt.Errorf("socket dir path %q exists but is not a directory", dir)
+	default:
+		if info.Mode().Perm()&0077 != 0 {
+			log.Printf("warning: socket dir %q has loose permissions %04o (group/other access); expected 0700", dir, info.Mode().Perm())
+		}
 	}
 	return dir, nil
 }
