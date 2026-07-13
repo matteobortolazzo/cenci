@@ -110,3 +110,33 @@ After creating the ruleset:
    PR merges.
 
 Only consider Part 2 complete once this verification step has passed on a real merge.
+
+## 6. Mandatory post-merge verification of reusable version-bump permissions (#193)
+
+**Not optional.** #193 removed the elevating `permissions:` block from the reusable
+`plugin-version-bump.yml` workflow (it now inherits whatever permissions the caller job
+grants) and reverted `agentflow-version-bump.yml` / `agent-sandbox-version-bump.yml` to
+`contents: write` only, dropping the `actions: write` stopgap. This is only fully proven
+on a real plugin-touching push — a misconfigured caller permission would silently break
+the next release the same way it did before #189/#190/#192.
+
+After this fix merges to `main`:
+
+1. Wait for the next real push that touches a plugin path (`agentflow/**`,
+   `agentwatch/**`, or `dev-sandbox/**`).
+2. Open the Actions tab and find the resulting `*-version-bump.yml` run.
+3. Confirm the run **succeeds end-to-end** with no `startup_failure` — specifically:
+   - `agentflow` / `agent-sandbox`: the run starts and the `git push` step lands the
+     `chore(release): <plugin>/vX.Y.Z` commit on `main`, under a `contents: write`-only
+     token.
+   - `agentwatch`: the run succeeds under `contents: write` + `actions: write`, tags the
+     release, and dispatches `agentwatch-release.yml` via `gh workflow run`.
+4. Confirm the release-commit skip guard still works: on the push that follows the
+   `chore(release): <plugin>/v...` commit, the version-bump workflow's HEAD check exits
+   early (no recursive bump).
+5. If any run fails validation before a job starts (`startup_failure`), a caller is
+   missing a required permission — check it against `.github/scripts/check-workflow-permissions.sh`'s
+   rules and fix the caller's `permissions:` block.
+
+Only consider #193 complete once this verification step has passed on a real merge for
+at least one plugin.

@@ -4,6 +4,13 @@ name: Reusable — Plugin Version Bump
 # (agentflow, agentwatch, agent-sandbox). Callers pass their plugin name,
 # the plugin.json paths to stamp, the marketplace entry name, the tag prefix,
 # and — only agentwatch — a workflow to dispatch after tagging.
+#
+# This workflow declares NO top-level permissions: block. GitHub caps a
+# reusable workflow's effective permissions to whatever the caller job
+# grants, so declaring permissions here would only ever narrow (never
+# widen) what a caller already has — and doing so risks silently capping a
+# caller that legitimately needs more. Each caller workflow declares its own
+# permissions block instead.
 
 on:
   workflow_call:
@@ -29,10 +36,6 @@ on:
         required: false
         type: string
         default: ''
-
-permissions:
-  contents: write
-  actions: write   # capped to what each caller grants; only agentwatch needs it (for `gh workflow run`)
 
 jobs:
   bump:
