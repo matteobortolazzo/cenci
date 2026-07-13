@@ -3,16 +3,35 @@ name: dev-sandbox — CI
 on:
   push:
     branches: [main]
-    paths: ['dev-sandbox/**', 'install.sh']
   pull_request:
     branches: [main]
-    paths: ['dev-sandbox/**', 'install.sh']
 
 permissions:
   contents: read
 
 jobs:
+  changes:
+    name: sandbox-changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      sandbox: ${{ steps.filter.outputs.sandbox }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            sandbox:
+              - 'dev-sandbox/**'
+              - 'install.sh'
+
   lint:
+    name: sandbox-lint
+    needs: changes
+    if: ${{ needs.changes.outputs.sandbox == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -30,6 +49,9 @@ jobs:
           done
 
   test:
+    name: sandbox-test
+    needs: changes
+    if: ${{ needs.changes.outputs.sandbox == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -44,6 +66,9 @@ jobs:
           bash dev-sandbox/tests/install-update.test.sh
 
   fragment-drift:
+    name: sandbox-fragment-drift
+    needs: changes
+    if: ${{ needs.changes.outputs.sandbox == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -51,6 +76,9 @@ jobs:
         run: bash dev-sandbox/tests/fragments-drift.test.sh
 
   build-smoke:
+    name: sandbox-build-smoke
+    needs: changes
+    if: ${{ needs.changes.outputs.sandbox == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -58,6 +86,9 @@ jobs:
         run: bash dev-sandbox/tests/smoke.test.sh
 
   hadolint:
+    name: sandbox-hadolint
+    needs: changes
+    if: ${{ needs.changes.outputs.sandbox == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
