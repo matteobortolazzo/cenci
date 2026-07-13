@@ -3,7 +3,7 @@ FROM agent-sandbox-base:${BASE_VERSION}
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-ARG DOTNET_SDK_VERSION=10.0.100
+ARG DOTNET_SDK_VERSION=10.0.301
 
 USER root
 
