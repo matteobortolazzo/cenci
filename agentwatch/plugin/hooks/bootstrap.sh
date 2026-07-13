@@ -28,9 +28,16 @@ MARKER="$ROOT/bin/.agentwatch-version"
 PLUGIN_JSON="$ROOT/.claude-plugin/plugin.json"
 
 # start_daemon launches the daemon detached. The already-running guard in the
-# binary makes this a no-op when a daemon already owns the socket.
+# binary makes this a no-op when a daemon already owns the socket. Inside an
+# agent-sand container (AGENT_SAND=1), a container-local daemon controls
+# nothing on the host and would only mask real wiring failures (#195, #202),
+# so this is skipped regardless of mount status.
 start_daemon() {
 	[ -x "$BIN" ] || return 0
+	if [ "${AGENT_SAND:-}" = "1" ]; then
+		log "AGENT_SAND=1; not starting a local daemon"
+		return 0
+	fi
 	nohup "$BIN" daemon >/dev/null 2>&1 &
 }
 

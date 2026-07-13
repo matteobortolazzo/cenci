@@ -1,0 +1,7 @@
+# Test Isolation: Environment Variable Gates
+
+Guidance for testing code that branches on ambient process/container state (e.g., environment variables).
+
+## Rules
+
+- **When adding env-var-gated early returns, audit ALL existing tests for env-var isolation.** When you introduce a new early-return or behavioral branch that checks an environment variable (e.g., `AGENT_SAND=1`), do not assume that only new tests for that behavior need to isolate the env var. Existing tests that exercise the *un-gated* code path must be reviewed and explicitly isolated (e.g., with `t.Setenv("VAR_NAME", "")`) if that env var is ambient (always or often set) in this project's normal dev environment. A test can pass despite no longer exercising the code it was written to test, if the ambient environment satisfies the new gate's short-circuit condition — passing assertions are not sufficient evidence that the test reached its target code. Verify test coverage by timing, call counts, or explicit markers (e.g., `t.Logf()` assertions), especially for env vars set by default in the container-based dev sandbox. Ticket #202: `AGENT_SAND=1` gate was added to `EnsureRunning()`, silently breaking two pre-existing tests (`TestEnsureRunningSkipsSpawnWhenAlive`, `TestEnsureRunningGivesUpAfterTimeout`) because they inherited the ambient `AGENT_SAND=1` from the dev container and returned early without exercising the behavior they claimed to test (only caught during code-review pass, not by the implementer).

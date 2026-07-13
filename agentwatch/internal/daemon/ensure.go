@@ -29,8 +29,15 @@ var ensureMu sync.Mutex
 // EnsureRunning starts the daemon when the default event socket has no live
 // listener and waits briefly for it to become reachable. It is deliberately
 // silent and bounded so hooks and launchers remain non-fatal when startup is
-// impossible. Concurrent callers serialize the probe/start sequence.
+// impossible. Concurrent callers serialize the probe/start sequence. Inside an
+// agent-sand container (AGENT_SAND=1) it returns immediately without ever
+// spawning: a container-local daemon controls nothing on the host and would
+// only mask real wiring failures (#195, #202).
 func EnsureRunning() {
+	if os.Getenv("AGENT_SAND") == "1" {
+		return
+	}
+
 	ensureMu.Lock()
 	defer ensureMu.Unlock()
 
