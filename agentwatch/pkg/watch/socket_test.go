@@ -1,12 +1,27 @@
 package watch
 
 import (
+	"bytes"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// captureLog redirects the standard logger's output into a buffer for the
+// duration of the test and restores the original output in t.Cleanup. Not
+// safe to run in parallel with other tests that also mutate log output (this
+// package already forces serial execution via t.Setenv elsewhere).
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	orig := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(orig) })
+	return &buf
+}
 
 func TestSecureSocketDir_UsesXDGWhenSet(t *testing.T) {
 	xdgDir := t.TempDir()
@@ -287,6 +302,195 @@ func TestSocketDir_ErrorsWhenNestedPathIsFile(t *testing.T) {
 			_, err := SocketDir()
 			if err == nil {
 				t.Fatalf("SocketDir() error = nil, want error when a plain file occupies the nested path")
+			}
+		})
+	}
+}
+
+// TestSocketDir_RejectsSymlinkAtNestedPath covers the symlink-hygiene gap
+// (#224): if the nested agentwatch/ path is a symlink, SocketDir() must
+// refuse to follow it and must return a clear error, leaving the symlink
+// itself untouched.
+func TestSocketDir_RejectsSymlinkAtNestedPath(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T) (parentOfNestedDir string)
+	}{
+		{
+			name: "xdg branch",
+			setup: func(t *testing.T) string {
+				xdgDir := t.TempDir()
+				t.Setenv("XDG_RUNTIME_DIR", xdgDir)
+				return xdgDir
+			},
+		},
+		{
+			name: "tmp fallback branch",
+			setup: func(t *testing.T) string {
+				t.Setenv("XDG_RUNTIME_DIR", "")
+				tmpRoot := t.TempDir()
+				t.Setenv("TMPDIR", tmpRoot)
+				return filepath.Join(tmpRoot, fmt.Sprintf("agentwatch-%d", os.Getuid()))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parent := tt.setup(t)
+
+			// Pre-create the /tmp-fallback branch's parent dir so planting the
+			// symlink at the nested path succeeds even when the parent itself
+			// doesn't exist yet.
+			if err := os.MkdirAll(parent, 0700); err != nil {
+				t.Fatalf("pre-creating parent %q: %v", parent, err)
+			}
+
+			targetDir := t.TempDir()
+			nested := filepath.Join(parent, "agentwatch")
+			if err := os.Symlink(targetDir, nested); err != nil {
+				t.Fatalf("planting symlink %q -> %q: %v", nested, targetDir, err)
+			}
+
+			_, err := SocketDir()
+			if err == nil {
+				t.Fatalf("SocketDir() error = nil, want error when nested path is a symlink")
+			}
+			if !strings.Contains(err.Error(), "symlink") {
+				t.Errorf("SocketDir() error = %q, want error mentioning %q", err.Error(), "symlink")
+			}
+
+			// The symlink itself must not have been followed or replaced.
+			linkInfo, lerr := os.Lstat(nested)
+			if lerr != nil {
+				t.Fatalf("Lstat(%q) error: %v", nested, lerr)
+			}
+			if linkInfo.Mode()&os.ModeSymlink == 0 {
+				t.Fatalf("expected %q to still be a symlink, got mode %v", nested, linkInfo.Mode())
+			}
+			gotTarget, rerr := os.Readlink(nested)
+			if rerr != nil {
+				t.Fatalf("Readlink(%q) error: %v", nested, rerr)
+			}
+			if gotTarget != targetDir {
+				t.Errorf("symlink target changed: got %q, want %q", gotTarget, targetDir)
+			}
+		})
+	}
+}
+
+// TestSocketDir_WarnsOnLoosePermissions covers the silent loose-permission
+// gap (#224): when a pre-existing nested agentwatch/ dir is group/world
+// accessible, SocketDir() must still succeed (idempotent, no chmod fight)
+// but must log a non-fatal warning.
+func TestSocketDir_WarnsOnLoosePermissions(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T) (parentOfNestedDir string)
+	}{
+		{
+			name: "xdg branch",
+			setup: func(t *testing.T) string {
+				xdgDir := t.TempDir()
+				t.Setenv("XDG_RUNTIME_DIR", xdgDir)
+				return xdgDir
+			},
+		},
+		{
+			name: "tmp fallback branch",
+			setup: func(t *testing.T) string {
+				t.Setenv("XDG_RUNTIME_DIR", "")
+				tmpRoot := t.TempDir()
+				t.Setenv("TMPDIR", tmpRoot)
+				return filepath.Join(tmpRoot, fmt.Sprintf("agentwatch-%d", os.Getuid()))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parent := tt.setup(t)
+
+			nested := filepath.Join(parent, "agentwatch")
+			if err := os.MkdirAll(nested, 0700); err != nil {
+				t.Fatalf("pre-creating nested dir %q: %v", nested, err)
+			}
+			// Chmod bypasses umask, ensuring the dir is actually group/world
+			// accessible regardless of the process umask.
+			if err := os.Chmod(nested, 0755); err != nil {
+				t.Fatalf("chmod %q: %v", nested, err)
+			}
+
+			logBuf := captureLog(t)
+
+			got, err := SocketDir()
+			if err != nil {
+				t.Fatalf("SocketDir() error: %v", err)
+			}
+			if got != nested {
+				t.Errorf("SocketDir() = %q, want %q", got, nested)
+			}
+
+			if !strings.Contains(strings.ToLower(logBuf.String()), "warning") {
+				t.Errorf("expected a warning to be logged for loose permissions on %q, got log output: %q", nested, logBuf.String())
+			}
+		})
+	}
+}
+
+// TestSocketDir_NoWarnOnStrictPermissions covers the flip side of #224: a
+// pre-existing nested agentwatch/ dir that is already 0700 or stricter must
+// not trigger any warning.
+func TestSocketDir_NoWarnOnStrictPermissions(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T) (parentOfNestedDir string)
+	}{
+		{
+			name: "xdg branch",
+			setup: func(t *testing.T) string {
+				xdgDir := t.TempDir()
+				t.Setenv("XDG_RUNTIME_DIR", xdgDir)
+				return xdgDir
+			},
+		},
+		{
+			name: "tmp fallback branch",
+			setup: func(t *testing.T) string {
+				t.Setenv("XDG_RUNTIME_DIR", "")
+				tmpRoot := t.TempDir()
+				t.Setenv("TMPDIR", tmpRoot)
+				return filepath.Join(tmpRoot, fmt.Sprintf("agentwatch-%d", os.Getuid()))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parent := tt.setup(t)
+
+			nested := filepath.Join(parent, "agentwatch")
+			if err := os.MkdirAll(nested, 0700); err != nil {
+				t.Fatalf("pre-creating nested dir %q: %v", nested, err)
+			}
+			// Chmod explicitly (bypassing umask) so the dir is provably 0700
+			// regardless of the process umask.
+			if err := os.Chmod(nested, 0700); err != nil {
+				t.Fatalf("chmod %q: %v", nested, err)
+			}
+
+			logBuf := captureLog(t)
+
+			got, err := SocketDir()
+			if err != nil {
+				t.Fatalf("SocketDir() error: %v", err)
+			}
+			if got != nested {
+				t.Errorf("SocketDir() = %q, want %q", got, nested)
+			}
+
+			if strings.Contains(strings.ToLower(logBuf.String()), "warning") {
+				t.Errorf("expected no warning for strict permissions on %q, got log output: %q", nested, logBuf.String())
 			}
 		})
 	}
