@@ -125,6 +125,7 @@ parentId: null
 createdAt: 2026-03-04T10:30:00Z
 status: approved
 planCommitSha: abc123def
+stalenessPaths: agentwatch
 ---
 
 ## Ticket Details
@@ -152,7 +153,7 @@ planCommitSha: abc123def
 <summaries or "None">
 ```
 
-Record `planCommitSha` from `git rev-parse HEAD`. Source `isChild`, `isLastChild`, and `parentId` from the context-gatherer digest stored earlier in this session. For ticketless mode, omit ticket fields.
+Record `planCommitSha` from `git rev-parse HEAD`. Source `isChild`, `isLastChild`, and `parentId` from the context-gatherer digest stored earlier in this session. Source `stalenessPaths` from the repo-relative project directory/directories the plan touches (e.g. `agentwatch`, or `agentwatch, agentflow` for a plan spanning both), as identified in the planner output / context digest — this lets `agentwatch dispatch` count only commits relevant to this plan when judging staleness, instead of every commit in the monorepo. Omit or leave empty in single-project repos, where whole-repo staleness counting is fine. For ticketless mode, omit ticket fields.
 
 ### Mark the ticket `Planned` (ticket mode only)
 

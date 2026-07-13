@@ -31,6 +31,11 @@ type Plan struct {
 	IsLastChild   bool   // the last child of its parent (parent-close signal for agentflow/#46)
 	ParentID      int    // parentId; 0 = none
 	CommitsBehind int    // default-branch commits since PlanCommitSha (collector-filled; 0 = current/unknown-fresh)
+
+	// StalenessPaths are repo-relative paths from the stalenessPaths front-matter
+	// key; when non-empty, only commits touching them count toward CommitsBehind.
+	// Empty = whole-repo counting (plan files without the key).
+	StalenessPaths []string
 }
 
 // Action is the outcome the engine chose for a ticket.
@@ -46,7 +51,7 @@ const (
 // loop can log every outcome (silent skips are undebuggable).
 type Decision struct {
 	Ticket Ticket
-	Plan   *Plan  // matched plan; non-nil on dispatch (drives the .plans/<file> arg)
+	Plan   *Plan // matched plan; non-nil on dispatch (drives the .plans/<file> arg)
 	Action Action
 	Reason string // always set
 	Agent  string // resolved agent for the dispatch

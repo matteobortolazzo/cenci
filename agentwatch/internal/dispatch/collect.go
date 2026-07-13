@@ -112,11 +112,12 @@ func agentFromLabels(labels []string) string {
 
 // ReadPlans globs <dir>/.plans/*.md, parses each file's flat YAML front matter,
 // stamps repo (owner/repo) onto each plan, and fills CommitsBehind. commitsBehind
-// resolves default-branch commits since a plan's sha; nil uses git rev-list
-// against dir. Unparseable files are skipped.
-func ReadPlans(repo, dir string, commitsBehind func(sha string) int) ([]Plan, error) {
+// resolves default-branch commits since a plan's sha, restricted to paths when
+// the plan lists stalenessPaths; nil uses git rev-list against dir. Unparseable
+// files are skipped.
+func ReadPlans(repo, dir string, commitsBehind func(sha string, paths []string) int) ([]Plan, error) {
 	if commitsBehind == nil {
-		commitsBehind = func(sha string) int { return gitCommitsBehind(dir, sha) }
+		commitsBehind = func(sha string, paths []string) int { return gitCommitsBehind(dir, sha, paths) }
 	}
 	matches, err := filepath.Glob(filepath.Join(dir, ".plans", "*.md"))
 	if err != nil {
@@ -135,17 +136,18 @@ func ReadPlans(repo, dir string, commitsBehind func(sha string) int) ([]Plan, er
 			continue
 		}
 		p := Plan{
-			Repo:          repo,
-			Path:          path,
-			TicketID:      atoiSafe(fm["ticketId"]),
-			Status:        fm["status"],
-			PlanCommitSha: fm["planCommitSha"],
-			IsChild:       fm["isChild"] == "true",
-			IsLastChild:   fm["isLastChild"] == "true",
-			ParentID:      atoiSafe(fm["parentId"]),
+			Repo:           repo,
+			Path:           path,
+			TicketID:       atoiSafe(fm["ticketId"]),
+			Status:         fm["status"],
+			PlanCommitSha:  fm["planCommitSha"],
+			IsChild:        fm["isChild"] == "true",
+			IsLastChild:    fm["isLastChild"] == "true",
+			ParentID:       atoiSafe(fm["parentId"]),
+			StalenessPaths: splitPaths(fm["stalenessPaths"]),
 		}
 		if p.PlanCommitSha != "" {
-			p.CommitsBehind = commitsBehind(p.PlanCommitSha)
+			p.CommitsBehind = commitsBehind(p.PlanCommitSha, p.StalenessPaths)
 		}
 		plans = append(plans, p)
 	}
@@ -195,8 +197,29 @@ func atoiSafe(s string) int {
 	return n
 }
 
-func gitCommitsBehind(dir, sha string) int {
-	out, err := exec.Command("git", "-C", dir, "rev-list", "--count", sha+"..HEAD").Output()
+// splitPaths parses a comma-separated stalenessPaths value into cleaned
+// repo-relative paths: entries are trimmed and empties dropped, so trailing
+// commas and stray spaces are harmless.
+func splitPaths(s string) []string {
+	var paths []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			paths = append(paths, p)
+		}
+	}
+	return paths
+}
+
+// gitCommitsBehind counts default-branch commits since sha. With paths it
+// counts only commits touching them (`rev-list -- <paths>`), so unrelated
+// monorepo churn cannot mark a scoped plan stale; without paths it keeps the
+// whole-repo count.
+func gitCommitsBehind(dir, sha string, paths []string) int {
+	args := []string{"-C", dir, "rev-list", "--count", sha + "..HEAD"}
+	if len(paths) > 0 {
+		args = append(append(args, "--"), paths...)
+	}
+	out, err := exec.Command("git", args...).Output()
 	if err != nil {
 		return 0
 	}

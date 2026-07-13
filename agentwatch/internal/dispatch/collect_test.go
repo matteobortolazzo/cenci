@@ -2,6 +2,9 @@ package dispatch
 
 import (
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -68,5 +71,142 @@ func TestCollectTicketsJoinsMultipleErrors(t *testing.T) {
 		if !errors.Is(err, unwrapped[i]) {
 			t.Errorf("errors.Is must find the per-repo error for %q in the joined error", rc.Repo)
 		}
+	}
+}
+
+// writePlan writes a plan file into <dir>/.plans/<name> for ReadPlans tests.
+func writePlan(t *testing.T, dir, name, content string) {
+	t.Helper()
+	plansDir := filepath.Join(dir, ".plans")
+	if err := os.MkdirAll(plansDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(plansDir, name), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestReadPlansStalenessPaths locks in the stalenessPaths contract: a plan
+// listing paths has them parsed (comma-split, trimmed, empties dropped) and
+// passed to the commitsBehind seam; a plan without the key passes no paths,
+// preserving whole-repo staleness counting for existing plan files.
+func TestReadPlansStalenessPaths(t *testing.T) {
+	dir := t.TempDir()
+	writePlan(t, dir, "42-scoped.md", `---
+ticketId: 42
+status: approved
+planCommitSha: aaa111
+stalenessPaths: agentwatch, plugin/hooks,
+---
+body
+`)
+	writePlan(t, dir, "43-whole-repo.md", `---
+ticketId: 43
+status: approved
+planCommitSha: bbb222
+---
+body
+`)
+
+	pathsBySha := make(map[string][]string)
+	plans, err := ReadPlans("o/r", dir, func(sha string, paths []string) int {
+		pathsBySha[sha] = paths
+		return 7
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 2 {
+		t.Fatalf("expected 2 plans, got %d: %+v", len(plans), plans)
+	}
+
+	scoped := plans[0]
+	if want := []string{"agentwatch", "plugin/hooks"}; !equalStrings(scoped.StalenessPaths, want) {
+		t.Errorf("scoped plan StalenessPaths = %v, want %v", scoped.StalenessPaths, want)
+	}
+	if scoped.CommitsBehind != 7 {
+		t.Errorf("scoped plan CommitsBehind = %d, want 7 (from the seam)", scoped.CommitsBehind)
+	}
+	if got := pathsBySha["aaa111"]; !equalStrings(got, []string{"agentwatch", "plugin/hooks"}) {
+		t.Errorf("commitsBehind received paths %v for aaa111, want [agentwatch plugin/hooks]", got)
+	}
+
+	whole := plans[1]
+	if len(whole.StalenessPaths) != 0 {
+		t.Errorf("plan without stalenessPaths must have none, got %v", whole.StalenessPaths)
+	}
+	if got, ok := pathsBySha["bbb222"]; !ok || len(got) != 0 {
+		t.Errorf("commitsBehind for bbb222 must be called with no paths, got %v (called=%v)", got, ok)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// gitTest runs a git command in dir with a pinned identity, failing the test on
+// error and returning trimmed stdout.
+func gitTest(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test",
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// commitFile makes one commit touching a single file under dir.
+func commitFile(t *testing.T, dir, rel, msg string) {
+	t.Helper()
+	path := filepath.Join(dir, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(msg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, dir, "add", rel)
+	gitTest(t, dir, "commit", "-m", msg)
+}
+
+// TestGitCommitsBehindPathAware exercises gitCommitsBehind against a real
+// temporary repo: with paths it counts only commits touching those paths;
+// without paths it keeps the whole-repo count.
+func TestGitCommitsBehindPathAware(t *testing.T) {
+	dir := t.TempDir()
+	gitTest(t, dir, "init")
+	commitFile(t, dir, "base.txt", "base")
+	sha := gitTest(t, dir, "rev-parse", "HEAD")
+	commitFile(t, dir, "agentwatch/main.go", "watch change")
+	commitFile(t, dir, "agentflow/skill.md", "flow change one")
+	commitFile(t, dir, "agentflow/other.md", "flow change two")
+
+	if got := gitCommitsBehind(dir, sha, nil); got != 3 {
+		t.Errorf("whole-repo count = %d, want 3", got)
+	}
+	if got := gitCommitsBehind(dir, sha, []string{"agentwatch"}); got != 1 {
+		t.Errorf("agentwatch-scoped count = %d, want 1", got)
+	}
+	if got := gitCommitsBehind(dir, sha, []string{"agentflow"}); got != 2 {
+		t.Errorf("agentflow-scoped count = %d, want 2", got)
+	}
+	if got := gitCommitsBehind(dir, sha, []string{"untouched"}); got != 0 {
+		t.Errorf("untouched-path count = %d, want 0", got)
+	}
+	if got := gitCommitsBehind(dir, sha, []string{"agentwatch", "agentflow"}); got != 3 {
+		t.Errorf("multi-path count = %d, want 3", got)
 	}
 }
