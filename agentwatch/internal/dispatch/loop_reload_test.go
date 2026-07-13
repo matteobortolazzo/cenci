@@ -92,13 +92,15 @@ func TestDispatchTickBadReloadSkipsTick(t *testing.T) {
 	var buf bytes.Buffer
 
 	// Baseline tick against a valid config.
-	dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior, "")
+	_ = dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior, "")
 	buf.Reset()
 
 	// Config goes bad between ticks.
 	corruptConfig(t, path)
 
-	dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior, "")
+	if err := dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior, ""); err == nil {
+		t.Error("expected bad reload to return an error")
+	}
 
 	if prior != 3 {
 		t.Errorf("prior quota tally changed on a skipped tick: got %d, want 3", prior)
@@ -115,7 +117,7 @@ func TestDispatchTickReloadPicksUpEnrollment(t *testing.T) {
 	prior := 0
 	var buf bytes.Buffer
 
-	dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior, "")
+	_ = dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior, "")
 
 	// Repo B is enrolled between ticks (e.g. via `dispatch enroll` or the
 	// board-driven flow from lazyboards#260).
@@ -124,7 +126,7 @@ func TestDispatchTickReloadPicksUpEnrollment(t *testing.T) {
 	}
 
 	buf.Reset()
-	dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior, "")
+	_ = dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior, "")
 
 	// No gh seam exists for CollectTickets (by design, per the approved plan),
 	// so the reload is observed via the deterministic gh collection-error log
@@ -152,7 +154,7 @@ func TestDispatchTickModelOverrideWinsOverPersistedConfig(t *testing.T) {
 	prior := 0
 	var buf bytes.Buffer
 
-	dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior, "claude-sonnet-5")
+	_ = dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior, "claude-sonnet-5")
 
 	if !strings.Contains(buf.String(), "claude-sonnet-5") {
 		t.Errorf("expected the --model override to be logged, got %q", buf.String())
@@ -164,7 +166,7 @@ func TestDispatchTickModelOverrideWinsOverPersistedConfig(t *testing.T) {
 	// Second tick: dispatchTick reloads Config from disk again, which would
 	// re-read "fable" if the override weren't re-applied every time.
 	buf.Reset()
-	dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior, "claude-sonnet-5")
+	_ = dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior, "claude-sonnet-5")
 	if !strings.Contains(buf.String(), "claude-sonnet-5") {
 		t.Errorf("expected the override to survive a config reload on tick 2, got %q", buf.String())
 	}
@@ -411,8 +413,8 @@ func TestCombinedTickLastErrorNotSticky(t *testing.T) {
 	<-attention // start-of-tick
 	errored := <-attention
 
-	if errored.Dispatch == nil || errored.Dispatch.LastError == "" {
-		t.Fatalf("expected a non-empty LastError on a tick whose pass fails, got %+v", errored.Dispatch)
+	if errored.Dispatch == nil || errored.Dispatch.LastError != "dispatch_pass_failed" {
+		t.Fatalf("LastError = %+v, want dispatch_pass_failed", errored.Dispatch)
 	}
 
 	writeFile(t, path, `{"dispatch": {"loopEnabled": true, "daemonInterval": "5m", "repos": []}}`)

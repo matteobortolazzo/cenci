@@ -214,7 +214,7 @@ func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer,
 		attempts[planKey(t.Repo, t.Number)] = n
 	}
 
-	result := applyReconcile(cfg, reconcileDeps{
+	result, applyErr := applyReconcile(cfg, reconcileDeps{
 		Tickets:         tickets,
 		Plans:           plans,
 		Snapshot:        snap,
@@ -222,21 +222,23 @@ func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer,
 		AttemptsUnknown: attemptsUnknown,
 		Now:             time.Now(),
 	}, mut, dryRun, out, store)
-	return result, collectErr
+	return result, firstNonNil(collectErr, applyErr)
 }
 
 // applyReconcile runs the pure engine over already-collected deps, logs, applies
 // (unless dryRun), and persists the next grace map. It is the testable core of
 // RunReconcileOnce.
-func applyReconcile(cfg Config, deps reconcileDeps, mut TicketMutator, dryRun bool, out io.Writer, store ObservationStore) ReconcileResult {
+func applyReconcile(cfg Config, deps reconcileDeps, mut TicketMutator, dryRun bool, out io.Writer, store ObservationStore) (ReconcileResult, error) {
 	if out == nil {
 		out = os.Stdout
 	}
 
 	obs, err := store.Load()
+	var firstErr error
 	if err != nil {
 		logf(out, "reconcile: loading state: %v\n", err)
 		obs = map[string]time.Time{}
+		firstErr = err
 	}
 
 	result := Reconcile(ReconcileInputs{
@@ -255,35 +257,41 @@ func applyReconcile(cfg Config, deps reconcileDeps, mut TicketMutator, dryRun bo
 	}
 
 	if dryRun {
-		return result
+		return result, firstErr
 	}
 
 	for _, rec := range result.Recoveries {
-		applyRecovery(mut, rec, out)
+		firstErr = firstNonNil(firstErr, applyRecovery(mut, rec, out))
 	}
 
 	if err := store.Save(result.NextObservations); err != nil {
 		logf(out, "reconcile: saving state: %v\n", err)
+		firstErr = firstNonNil(firstErr, err)
 	}
-	return result
+	return result, firstErr
 }
 
 // applyRecovery applies one recovery's gh side effects. Report-only kinds
 // (orphan-plan) do nothing. If the label swap fails, the comment is skipped so a
 // ticket is never annotated without the state change that explains it.
-func applyRecovery(mut TicketMutator, rec Recovery, out io.Writer) {
+func applyRecovery(mut TicketMutator, rec Recovery, out io.Writer) error {
+	if out == nil {
+		out = os.Stdout
+	}
 	if len(rec.AddLabels) == 0 && len(rec.RemoveLabels) == 0 {
-		return
+		return nil
 	}
 	if err := mut.EditLabels(rec.Ticket.Repo, rec.Ticket.Number, rec.AddLabels, rec.RemoveLabels); err != nil {
 		logf(out, "reconcile: #%d edit labels: %v\n", rec.Ticket.Number, err)
-		return
+		return err
 	}
 	if rec.Comment != "" {
 		if err := mut.Comment(rec.Ticket.Repo, rec.Ticket.Number, rec.Comment); err != nil {
 			logf(out, "reconcile: #%d comment: %v\n", rec.Ticket.Number, err)
+			return err
 		}
 	}
+	return nil
 }
 
 // formatRecovery renders one recovery as a single log line.

@@ -778,6 +778,26 @@ func TestDispatchFlagRouting_DryRunUnaffectedBySubVerbPeel(t *testing.T) {
 	}
 }
 
+func TestDispatchPassFailuresExitNonzero(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"dispatch":{"repos":[{"repo":"o/r","dir":"/definitely/missing-agentwatch-repo"}]}}`), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+	for _, args := range [][]string{
+		{"dispatch", "--once", "--config", configPath},
+		{"dispatch", "--dry-run", "--config", configPath},
+		{"dispatch", "--reconcile", "--config", configPath},
+		{"dispatch", "--interval", "1s", "--config", configPath},
+	} {
+		cmd := exec.Command(binaryPath, args...)
+		output, err := cmd.CombinedOutput()
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok || exitErr.ExitCode() != 1 {
+			t.Errorf("%v exit = %v, want code 1; output:\n%s", args, err, output)
+		}
+	}
+}
+
 // TestDispatchModelFlag_OverridesPersistedConfig locks in that --model
 // survives the enroll/unenroll/status sub-verb peel in runDispatch, reaches
 // dispatch.LoadConfig's cfg.Model, and wins over a persisted config.json

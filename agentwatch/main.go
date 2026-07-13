@@ -304,18 +304,27 @@ func runDispatch(args []string) {
 	// --reconcile runs the recovery pass once (cron path). It is independent of
 	// the dispatch/loop flags.
 	if *reconcile {
-		dispatch.RunReconcileOnce(cfg, &dispatch.GHMutator{}, *dryRun, os.Stdout, dispatch.NewStateStore(""))
+		if _, err := dispatch.RunReconcileOnce(cfg, &dispatch.GHMutator{}, *dryRun, os.Stdout, dispatch.NewStateStore("")); err != nil {
+			fmt.Fprintf(os.Stderr, "agentwatch dispatch: %v\n", err)
+			os.Exit(1)
+		}
 		return
 	}
 
 	ctrl := &tmux.ExecClient{}
 	// --interval self-loops; otherwise a single pass. --once wins if both given.
 	if *interval > 0 && !*once {
-		dispatch.RunLoop(*configPath, ctrl, &dispatch.GHMutator{}, *interval, os.Stdout, *model)
+		if err := dispatch.RunLoop(*configPath, ctrl, &dispatch.GHMutator{}, *interval, os.Stdout, *model); err != nil {
+			fmt.Fprintf(os.Stderr, "agentwatch dispatch: %v\n", err)
+			os.Exit(1)
+		}
 		return
 	}
 	prior := 0
-	dispatch.RunOnce(cfg, ctrl, &dispatch.GHMutator{}, *dryRun, os.Stdout, &prior)
+	if _, err := dispatch.RunOnce(cfg, ctrl, &dispatch.GHMutator{}, *dryRun, os.Stdout, &prior); err != nil {
+		fmt.Fprintf(os.Stderr, "agentwatch dispatch: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 func runDispatchEnroll(args []string) {

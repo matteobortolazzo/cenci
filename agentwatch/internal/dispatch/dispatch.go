@@ -58,13 +58,13 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 
 	snap, _ := ReadSnapshot(watch.DefaultSocketPath()) // nil on error ⇒ Decide skips safely
 
-	decisions := applyDispatch(cfg, dispatchDeps{
+	decisions, applyErr := applyDispatch(cfg, dispatchDeps{
 		Tickets:  tickets,
 		Plans:    plans,
 		Snapshot: snap,
 		Now:      time.Now(),
 	}, ctrl, mut, dryRun, out, prior)
-	return decisions, collectErr
+	return decisions, firstNonNil(collectErr, applyErr)
 }
 
 // applyDispatch runs the pure engine over already-collected deps, logs, spawns
@@ -73,7 +73,7 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 // spawn→self-label window. A failed claim is logged and the pass continues —
 // the spawn already happened, and the reconciler recovers label drift. It is
 // the testable core of RunOnce.
-func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut TicketMutator, dryRun bool, out io.Writer, prior *int) []Decision {
+func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut TicketMutator, dryRun bool, out io.Writer, prior *int) ([]Decision, error) {
 	if out == nil {
 		out = os.Stdout
 	}
@@ -112,9 +112,10 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 	}
 
 	if dryRun {
-		return decisions
+		return decisions, nil
 	}
 
+	var firstErr error
 	for _, d := range decisions {
 		if d.Action != ActionDispatch || d.Plan == nil {
 			continue
@@ -129,6 +130,7 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 		}, ctrl)
 		if err != nil {
 			logf(out, "dispatch: #%d run failed: %v\n", d.Ticket.Number, err)
+			firstErr = firstNonNil(firstErr, err)
 			continue
 		}
 		if prior != nil {
@@ -136,9 +138,10 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 		}
 		if err := mut.EditLabels(d.Ticket.Repo, d.Ticket.Number, []string{labelWorking}, nil); err != nil {
 			logf(out, "dispatch: #%d claim label failed: %v\n", d.Ticket.Number, err)
+			firstErr = firstNonNil(firstErr, err)
 		}
 	}
-	return decisions
+	return decisions, firstErr
 }
 
 // RunLoop reloads Config from configPath and runs RunOnce immediately and then
@@ -147,14 +150,19 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 // --model CLI flag), is re-applied to Config every tick, since each tick
 // reloads Config fresh from disk and would otherwise drop it. It blocks until
 // the process exits.
-func RunLoop(configPath string, ctrl run.Controller, mut TicketMutator, interval time.Duration, out io.Writer, modelOverride string) {
+func RunLoop(configPath string, ctrl run.Controller, mut TicketMutator, interval time.Duration, out io.Writer, modelOverride string) error {
 	prior := 0
-	dispatchTick(configPath, ctrl, mut, out, &prior, modelOverride)
+	if err := dispatchTick(configPath, ctrl, mut, out, &prior, modelOverride); err != nil {
+		return err
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for range ticker.C {
-		dispatchTick(configPath, ctrl, mut, out, &prior, modelOverride)
+		if err := dispatchTick(configPath, ctrl, mut, out, &prior, modelOverride); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // dispatchTick is RunLoop's per-tick body: reload Config from configPath,
@@ -163,15 +171,25 @@ func RunLoop(configPath string, ctrl run.Controller, mut TicketMutator, interval
 // is skipped entirely (no dispatch, prior left untouched) so a bad edit
 // between ticks cannot crash the loop or silently dispatch against a stale
 // config.
-func dispatchTick(configPath string, ctrl run.Controller, mut TicketMutator, out io.Writer, prior *int, modelOverride string) {
+func dispatchTick(configPath string, ctrl run.Controller, mut TicketMutator, out io.Writer, prior *int, modelOverride string) error {
 	cfg, ok := reloadConfig(configPath, out)
 	if !ok {
-		return
+		return fmt.Errorf("loading dispatch config")
 	}
 	if modelOverride != "" {
 		cfg.Model = modelOverride
 	}
-	RunOnce(cfg, ctrl, mut, false, out, prior)
+	_, err := RunOnce(cfg, ctrl, mut, false, out, prior)
+	return err
+}
+
+func firstNonNil(errs ...error) error {
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // reloadConfig loads Config from configPath, logging and reporting failure so
