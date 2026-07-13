@@ -21,6 +21,7 @@ PlasmoidItem {
     property string tooltipText: ""
     property string cssClass: "none"
     property bool hasOutput: false
+    property var headroom: ({})
 
     readonly property int pollIntervalMs: {
         const v = parseInt(Plasmoid.configuration.pollIntervalMs)
@@ -28,9 +29,36 @@ PlasmoidItem {
     }
     readonly property string agentwatchPath: Plasmoid.configuration.agentwatchPath || "agentwatch"
 
-    readonly property var tooltipLines: tooltipText.length > 0
-        ? tooltipText.split("\n").filter(function (l) { return l.length > 0 })
-        : []
+    // Sorted agent keys with budget headroom data — deterministic order,
+    // mirrors formatHeadroom in status.go / hKeys.sort() in the JXA script.
+    readonly property var headroomKeys: Object.keys(headroom).sort()
+
+    // headroomPercent converts a 0.0-1.0 headroom fraction to an integer
+    // percent, rounding half up. Mirrors headroomPercent in status.go.
+    function headroomPercent(frac) {
+        return Math.floor(frac * 100 + 0.5)
+    }
+
+    // The compact headroom summary line status.go appends to the tooltip
+    // (e.g. "claude 73%  codex 15%"), recomputed here so it can be recognized
+    // and excluded from tooltipLines below. Empty when there's no headroom
+    // data — never matches a real tooltip line, since tips are pre-filtered
+    // to non-empty lines.
+    readonly property string headroomSummaryLine: headroomKeys.map(function (a) {
+        return a + " " + headroomPercent(headroom[a]) + "%"
+    }).join("  ")
+
+    // Lines ending in "(status)" are session rows. The known headroom summary
+    // line (computed above) is skipped by EXACT match only — per the narrow-skip
+    // lesson, any other non-matching line still falls through to the visible
+    // 'none' status fallback rather than being silently dropped.
+    readonly property var tooltipLines: {
+        if (tooltipText.length === 0) return []
+        const summary = headroomSummaryLine
+        return tooltipText.split("\n").filter(function (l) {
+            return l.length > 0 && !(summary.length > 0 && l === summary)
+        })
+    }
     readonly property int sessionCount: tooltipLines.length
 
     // Drop out of the panel entirely when there is nothing live.
@@ -62,6 +90,24 @@ PlasmoidItem {
         }
     }
 
+    // headroomClassFor returns the threshold class for a headroom percentage:
+    // >25% normal, 10-25% (inclusive) warning, <10% critical. Mirrors
+    // headroomClass in status.go.
+    function headroomClassFor(pct) {
+        if (pct > 25) return "normal"
+        if (pct >= 10) return "warning"
+        return "critical"
+    }
+
+    function colorForHeadroomClass(c) {
+        switch (c) {
+        case "normal":   return Kirigami.Theme.positiveTextColor
+        case "warning":  return Kirigami.Theme.neutralTextColor
+        case "critical": return Kirigami.Theme.negativeTextColor
+        default:         return Kirigami.Theme.textColor
+        }
+    }
+
     // Each tooltip line ends with its own "(status)".
     function statusOf(line) {
         const m = line.match(/\(([a-z-]+)\)\s*$/)
@@ -87,6 +133,7 @@ PlasmoidItem {
                 root.statusText = j.text || ""
                 root.tooltipText = j.tooltip || ""
                 root.cssClass = j["class"] || "none"
+                root.headroom = j.headroom || ({})
                 root.hasOutput = root.cssClass !== "none"
             } catch (e) {
                 console.warn("AgentWatch parse error:", e, out)
@@ -189,6 +236,41 @@ PlasmoidItem {
                 text: i18n("No active sessions.")
                 horizontalAlignment: Text.AlignHCenter
                 opacity: 0.7
+            }
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                visible: root.headroomKeys.length > 0
+                spacing: Kirigami.Units.smallSpacing
+
+                Kirigami.Heading {
+                    level: 5
+                    text: i18n("Budget headroom")
+                }
+
+                Repeater {
+                    model: root.headroomKeys
+
+                    delegate: RowLayout {
+                        required property string modelData
+                        // A non-numeric fraction must fail visibly ("n/a"), not
+                        // coerce NaN -> 0 (QML int semantics) and masquerade as
+                        // a genuinely exhausted budget.
+                        readonly property bool validFrac: typeof root.headroom[modelData] === "number"
+                                                          && isFinite(root.headroom[modelData])
+                        readonly property int pct: validFrac ? root.headroomPercent(root.headroom[modelData]) : 0
+
+                        Layout.fillWidth: true
+
+                        PlasmaComponents.Label {
+                            Layout.fillWidth: true
+                            textFormat: Text.PlainText
+                            text: validFrac ? modelData + " " + pct + "%" : modelData + " n/a"
+                            color: validFrac ? root.colorForHeadroomClass(root.headroomClassFor(pct))
+                                             : Kirigami.Theme.textColor
+                        }
+                    }
+                }
             }
         }
     }
