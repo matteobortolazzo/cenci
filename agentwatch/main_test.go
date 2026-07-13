@@ -754,6 +754,37 @@ func TestDispatchUnknownVerb_Exits2NeverDispatches(t *testing.T) {
 	}
 }
 
+// TestSocketDirSubcommandPrintsResolvedDir covers the new `agentwatch
+// socket-dir` CLI command (#217): it must print the resolved SocketDir() path
+// to stdout and exit 0, so shell consumers (dev-sandbox's agent-sand) don't
+// reimplement the XDG-vs-fallback logic themselves.
+func TestSocketDirSubcommandPrintsResolvedDir(t *testing.T) {
+	xdgDir := t.TempDir()
+	cmd := exec.Command(binaryPath, "socket-dir")
+	cmd.Env = append(os.Environ(), "XDG_RUNTIME_DIR="+xdgDir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("socket-dir: %v\n%s", err, output)
+	}
+
+	want := filepath.Join(xdgDir, "agentwatch")
+	got := strings.TrimSpace(string(output))
+	if got != want {
+		t.Errorf("socket-dir output = %q, want %q", got, want)
+	}
+}
+
+// TestSocketDirSubcommandRoutes locks in that "socket-dir" is recognized as a
+// real subcommand (never falls through to the "unknown subcommand" error
+// path), independent of what directory it resolves to.
+func TestSocketDirSubcommandRoutes(t *testing.T) {
+	cmd := exec.Command(binaryPath, "socket-dir")
+	output, _ := cmd.CombinedOutput()
+	if strings.Contains(string(output), "unknown subcommand") {
+		t.Errorf("socket-dir must route to its own handler, got:\n%s", output)
+	}
+}
+
 func TestDispatchTrailingUnexpectedArg_Exits2(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "does-not-exist", "config.json")
 	cmd := exec.Command(binaryPath, "dispatch", "--dry-run", "--config", configPath, "extra")

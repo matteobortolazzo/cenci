@@ -473,8 +473,8 @@ A second `agentwatch daemon` is a safe no-op — it detects the running daemon, 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-v` | `false` | Verbose logging |
-| `-event-socket` | `$XDG_RUNTIME_DIR/agentwatch-events.sock` | Event socket for hook notifications |
-| `-socket` | `$XDG_RUNTIME_DIR/agentwatch.sock` | Broadcast socket for waybar clients |
+| `-event-socket` | `$XDG_RUNTIME_DIR/agentwatch/agentwatch-events.sock` | Event socket for hook notifications |
+| `-socket` | `$XDG_RUNTIME_DIR/agentwatch/agentwatch.sock` | Broadcast socket for waybar clients |
 | `-sweep` | `1` | Stale session reconciliation interval in seconds |
 | `-session-ttl` | `2h` | Idle TTL for paneless sessions (Go duration); sessions without a pane are expired after this duration if no `SessionEnd` fires |
 | `-style-running` | `fg=blue,dim` | tmux style for running state (inactive windows) |
@@ -496,7 +496,7 @@ agentwatch status
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-socket` | `$XDG_RUNTIME_DIR/agentwatch.sock` | Broadcast socket path |
+| `-socket` | `$XDG_RUNTIME_DIR/agentwatch/agentwatch.sock` | Broadcast socket path |
 | `-symbol-running` | `▶` | Symbol for running count |
 | `-symbol-done` | `✓` | Symbol for done count |
 | `-symbol-input` | `!` | Symbol for need-input count |
@@ -714,6 +714,15 @@ hook starts it on demand, waits briefly, and retries that same event. The daemon
 re-discovers the session — a `ListPanes` call maps the `$TMUX_PANE` to the correct
 window — and status consumers such as DMS see it on their next poll. Custom
 `-event-socket` instances are never started automatically.
+
+**Upgrading past the socket-directory nesting change**: sockets moved from
+`$XDG_RUNTIME_DIR/agentwatch*.sock` to `$XDG_RUNTIME_DIR/agentwatch/agentwatch*.sock`
+(nested under a dedicated `agentwatch/` subdirectory — see `agentwatch socket-dir`). An
+already-running pre-upgrade daemon stays bound to its old path and keeps running there,
+harmlessly orphaned. A client on the upgraded binary computes the new nested path,
+can't reach that old daemon, and the existing `EnsureRunning()` self-heal spawns a fresh
+daemon at the new location on the next call — the same self-heal already documented
+above for any other daemon-absent case. No special migration steps are needed.
 
 ## Troubleshooting
 

@@ -29,19 +29,42 @@ func secureSocketDir() (string, error) {
 	return dir, nil
 }
 
-// SocketDir returns the shared, XDG-aware runtime directory that agentwatch
-// sockets live in. It uses $XDG_RUNTIME_DIR when set and secure, otherwise a
-// user-private /tmp/agentwatch-<uid> directory created with 0700 permissions.
+// SocketDir returns the dedicated agentwatch/ subdirectory nested under the
+// shared, XDG-aware runtime directory: <secureSocketDir>/agentwatch/. Nesting
+// keeps this directory mountable in isolation (the shared XDG runtime dir
+// also holds wayland/pulse/keyring sockets that must not leak into a sandbox).
+// It is created with 0700 permissions if missing. Creation is idempotent
+// against a directory that already exists (e.g. a container bind-mount
+// pre-created by the host) — permissions are only forced on fresh creation so
+// this never fights an already-mounted directory's existing ownership/perms.
 // This is the single home of the runtime-dir fallback logic; other agentwatch
 // packages build their socket paths from it.
 func SocketDir() (string, error) {
-	return secureSocketDir()
+	base, err := secureSocketDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(base, "agentwatch")
+	if info, statErr := os.Stat(dir); os.IsNotExist(statErr) {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return "", err
+		}
+		if err := os.Chmod(dir, 0700); err != nil {
+			return "", err
+		}
+	} else if statErr != nil {
+		return "", statErr
+	} else if !info.IsDir() {
+		return "", fmt.Errorf("socket dir path %q exists but is not a directory", dir)
+	}
+	return dir, nil
 }
 
-// defaultSocketPath returns a socket path for the given name, using the secure
-// directory from secureSocketDir with a flat fallback under os.TempDir().
+// defaultSocketPath returns a socket path for the given name, nested under
+// SocketDir(), with a flat fallback under os.TempDir() if the directory
+// cannot be resolved/created.
 func defaultSocketPath(name string) string {
-	dir, err := secureSocketDir()
+	dir, err := SocketDir()
 	if err != nil {
 		log.Printf("warning: could not create secure socket dir: %v; using fallback path", err)
 		return filepath.Join(os.TempDir(), fmt.Sprintf("%s-%d.sock", name, os.Getuid()))

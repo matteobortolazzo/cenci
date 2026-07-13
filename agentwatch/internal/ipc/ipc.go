@@ -3,6 +3,7 @@ package ipc
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -69,6 +70,11 @@ func safeListen(socketPath string) (net.Listener, error) {
 // (<SocketDir>/agentwatch.sock). It is re-exported from pkg/watch.
 func DefaultSocketPath() string { return watch.DefaultSocketPath() }
 
+// DefaultSocketDir returns the resolved agentwatch socket directory
+// (creating it with 0700 if missing). It is re-exported from pkg/watch so
+// main.go's CLI routing doesn't need its own import of pkg/watch.
+func DefaultSocketDir() (string, error) { return watch.SocketDir() }
+
 // DefaultEventSocketPath returns the default event (inbound) socket path the
 // daemon listens on for hook notifications. This write-side socket stays
 // internal; it is rebuilt from the shared watch.SocketDir so the runtime-dir
@@ -76,6 +82,7 @@ func DefaultSocketPath() string { return watch.DefaultSocketPath() }
 func DefaultEventSocketPath() string {
 	dir, err := watch.SocketDir()
 	if err != nil {
+		log.Printf("warning: could not create secure socket dir: %v; using fallback event-socket path", err)
 		return filepath.Join(os.TempDir(), fmt.Sprintf("agentwatch-events-%d.sock", os.Getuid()))
 	}
 	return filepath.Join(dir, "agentwatch-events.sock")

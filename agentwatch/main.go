@@ -47,6 +47,8 @@ func main() {
 		runDispatch(os.Args[2:])
 	case "version", "--version", "-version":
 		runVersion()
+	case "socket-dir":
+		runSocketDir()
 	default:
 		if strings.HasPrefix(os.Args[1], "-") {
 			// Flags like -v go to daemon.
@@ -63,6 +65,18 @@ func main() {
 // safe to use as a capability/version probe.
 func runVersion() {
 	fmt.Printf("agentwatch %s\n", version)
+}
+
+// runSocketDir prints the resolved agentwatch socket directory to stdout and
+// exits 0, so shell consumers (dev-sandbox's agent-sand) don't reimplement
+// the XDG-vs-fallback logic themselves and risk drift. Exits 1 on error.
+func runSocketDir() {
+	dir, err := ipc.DefaultSocketDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentwatch socket-dir: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(dir)
 }
 
 func runDaemon(args []string) {
