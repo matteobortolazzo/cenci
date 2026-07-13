@@ -128,6 +128,58 @@ func (failingMutator) Comment(string, int, string) error {
 	return errors.New("gh comment failed")
 }
 
+// TestApplyDispatchPassesModelToRunOpts locks in that a pinned Config.Model
+// (from config.json's "dispatch.model" or a --model CLI override) reaches
+// every spawned session's run.Opts.Model, so a dispatch pass never depends on
+// whatever ambient/account-level default model happens to be active.
+func TestApplyDispatchPassesModelToRunOpts(t *testing.T) {
+	var captured run.Opts
+	stubRunFn(t, func(opts run.Opts, _ run.Controller) error {
+		captured = opts
+		return nil
+	})
+
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	mut := &fakeMutator{}
+	prior := 0
+	var buf bytes.Buffer
+
+	cfg := testConfig()
+	cfg.Model = "claude-sonnet-5"
+
+	applyDispatch(cfg, dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior)
+
+	if captured.Model != "claude-sonnet-5" {
+		t.Errorf("captured Opts.Model = %q, want %q", captured.Model, "claude-sonnet-5")
+	}
+	if !strings.Contains(buf.String(), "claude-sonnet-5") {
+		t.Errorf("expected the resolved model to be logged for visibility, got %q", buf.String())
+	}
+}
+
+// TestApplyDispatchOmitsModelWhenUnset locks in that an unset Config.Model
+// leaves run.Opts.Model empty, preserving the existing fallback to
+// agents.*.model inside run.BuildCommand — no behavior change for callers
+// that never configure a pinned model.
+func TestApplyDispatchOmitsModelWhenUnset(t *testing.T) {
+	var captured run.Opts
+	stubRunFn(t, func(opts run.Opts, _ run.Controller) error {
+		captured = opts
+		return nil
+	})
+
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	mut := &fakeMutator{}
+	prior := 0
+	var buf bytes.Buffer
+
+	applyDispatch(testConfig(), dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior)
+
+	if captured.Model != "" {
+		t.Errorf("captured Opts.Model = %q, want empty", captured.Model)
+	}
+}
+
 // TestFormatDecisionPrefixesRepo locks in the owner/repo prefix on decision
 // lines so multi-repo fleet output is unambiguous, and keeps the ` skip:` /
 // ` dispatch ` substrings intact — downstream consumers (lazyboards) classify

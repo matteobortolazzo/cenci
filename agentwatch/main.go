@@ -267,6 +267,7 @@ func runDispatch(args []string) {
 	dryRun := fs.Bool("dry-run", false, "print the decision table without dispatching")
 	reconcile := fs.Bool("reconcile", false, "run a single failure-reconciliation pass instead of a dispatch pass (cron path)")
 	configPath := fs.String("config", "", "path to config.json (default: $XDG_CONFIG_HOME/agentwatch/config.json)")
+	model := fs.String("model", "", "model override for every session dispatched this pass (overrides config.json dispatch.model / agents.*.model)")
 	_ = fs.Parse(args)
 
 	// Any positional left after flag parsing is unexpected: the flag parser
@@ -282,6 +283,9 @@ func runDispatch(args []string) {
 		fmt.Fprintf(os.Stderr, "agentwatch dispatch: %v\n", err)
 		os.Exit(1)
 	}
+	if *model != "" {
+		cfg.Model = *model
+	}
 
 	// --reconcile runs the recovery pass once (cron path). It is independent of
 	// the dispatch/loop flags.
@@ -293,7 +297,7 @@ func runDispatch(args []string) {
 	ctrl := &tmux.ExecClient{}
 	// --interval self-loops; otherwise a single pass. --once wins if both given.
 	if *interval > 0 && !*once {
-		dispatch.RunLoop(*configPath, ctrl, &dispatch.GHMutator{}, *interval, os.Stdout)
+		dispatch.RunLoop(*configPath, ctrl, &dispatch.GHMutator{}, *interval, os.Stdout, *model)
 		return
 	}
 	prior := 0

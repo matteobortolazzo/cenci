@@ -616,6 +616,49 @@ func TestDispatchFlagRouting_DryRunUnaffectedBySubVerbPeel(t *testing.T) {
 	}
 }
 
+// TestDispatchModelFlag_OverridesPersistedConfig locks in that --model
+// survives the enroll/unenroll/status sub-verb peel in runDispatch, reaches
+// dispatch.LoadConfig's cfg.Model, and wins over a persisted config.json
+// "dispatch.model" value — the fix for a dispatch pass silently inheriting
+// whatever ambient default model was active at spawn time.
+func TestDispatchModelFlag_OverridesPersistedConfig(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"dispatch": {"model": "fable"}}`), 0o600); err != nil {
+		t.Fatalf("seeding config: %v", err)
+	}
+
+	cmd := exec.Command(binaryPath, "dispatch", "--model", "claude-sonnet-5", "--dry-run", "--config", configPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dispatch --model --dry-run --config: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), `model override "claude-sonnet-5"`) {
+		t.Errorf("expected the --model override to be logged, got:\n%s", output)
+	}
+	if strings.Contains(string(output), "fable") {
+		t.Errorf("expected --model to win over the persisted config model, got:\n%s", output)
+	}
+}
+
+// TestDispatchNoModelFlag_UsesPersistedConfig locks in that omitting --model
+// falls back to config.json's persisted "dispatch.model" (not an empty
+// override wiping it out).
+func TestDispatchNoModelFlag_UsesPersistedConfig(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"dispatch": {"model": "claude-sonnet-5"}}`), 0o600); err != nil {
+		t.Fatalf("seeding config: %v", err)
+	}
+
+	cmd := exec.Command(binaryPath, "dispatch", "--dry-run", "--config", configPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dispatch --dry-run --config: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), `model override "claude-sonnet-5"`) {
+		t.Errorf("expected the persisted config model to be logged when --model is omitted, got:\n%s", output)
+	}
+}
+
 func TestStatusAndWaybarSubcommandsBothRoute(t *testing.T) {
 	// Both "status" and its hidden alias "waybar" must route to the status
 	// frontend. With no daemon on the socket they exit 1 with no output —

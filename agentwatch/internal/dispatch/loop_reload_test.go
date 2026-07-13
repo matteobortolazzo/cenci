@@ -3,6 +3,7 @@ package dispatch
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,13 +77,13 @@ func TestDispatchTickBadReloadSkipsTick(t *testing.T) {
 	var buf bytes.Buffer
 
 	// Baseline tick against a valid config.
-	dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior)
+	dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior, "")
 	buf.Reset()
 
 	// Config goes bad between ticks.
 	corruptConfig(t, path)
 
-	dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior)
+	dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior, "")
 
 	if prior != 3 {
 		t.Errorf("prior quota tally changed on a skipped tick: got %d, want 3", prior)
@@ -99,7 +100,7 @@ func TestDispatchTickReloadPicksUpEnrollment(t *testing.T) {
 	prior := 0
 	var buf bytes.Buffer
 
-	dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior)
+	dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior, "")
 
 	// Repo B is enrolled between ticks (e.g. via `dispatch enroll` or the
 	// board-driven flow from lazyboards#260).
@@ -108,13 +109,49 @@ func TestDispatchTickReloadPicksUpEnrollment(t *testing.T) {
 	}
 
 	buf.Reset()
-	dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior)
+	dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior, "")
 
 	// No gh seam exists for CollectTickets (by design, per the approved plan),
 	// so the reload is observed via the deterministic gh collection-error log
 	// line naming the newly-enrolled repo.
 	if !strings.Contains(buf.String(), "o/B") {
 		t.Errorf("expected the reloaded repo set (including o/B) to reach RunOnce, got log: %q", buf.String())
+	}
+}
+
+// TestDispatchTickModelOverrideWinsOverPersistedConfig locks in that a
+// non-empty modelOverride (threaded from the --model CLI flag through RunLoop)
+// beats whatever "dispatch.model" is persisted in config.json, and that the
+// override is re-applied every tick even though dispatchTick reloads Config
+// fresh from disk each time (so it can't be silently dropped after tick 1, the
+// class of bug that motivated this field).
+func TestDispatchTickModelOverrideWinsOverPersistedConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	repoDir := t.TempDir()
+	cfgJSON := fmt.Sprintf(`{"dispatch": {"model": "fable", "repos": [{"repo": "o/A", "dir": %q}]}}`, repoDir)
+	if err := os.WriteFile(path, []byte(cfgJSON), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	prior := 0
+	var buf bytes.Buffer
+
+	dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior, "claude-sonnet-5")
+
+	if !strings.Contains(buf.String(), "claude-sonnet-5") {
+		t.Errorf("expected the --model override to be logged, got %q", buf.String())
+	}
+	if strings.Contains(buf.String(), "fable") {
+		t.Errorf("expected the --model override to win over the persisted config model, got %q", buf.String())
+	}
+
+	// Second tick: dispatchTick reloads Config from disk again, which would
+	// re-read "fable" if the override weren't re-applied every time.
+	buf.Reset()
+	dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior, "claude-sonnet-5")
+	if !strings.Contains(buf.String(), "claude-sonnet-5") {
+		t.Errorf("expected the override to survive a config reload on tick 2, got %q", buf.String())
 	}
 }
 

@@ -45,12 +45,16 @@ type Config struct {
 	QuietHours             *QuietHours
 	PlanStalenessTolerance int // commits
 	DefaultAgent           string
-	AgentBudgetFloors      map[string]float64
-	AgentLimits            map[string]AgentLimit
-	AgentPreference        []string
-	ClaudeSessionDir       string
-	CodexDBPath            string
-	Session                string // target tmux session for dispatched windows
+	// Model, when set, overrides agents.*.model for every session this
+	// dispatch pass spawns, so dispatched sessions don't silently inherit
+	// whatever ambient/account-level default model is active at spawn time.
+	Model             string
+	AgentBudgetFloors map[string]float64
+	AgentLimits       map[string]AgentLimit
+	AgentPreference   []string
+	ClaudeSessionDir  string
+	CodexDBPath       string
+	Session           string // target tmux session for dispatched windows
 
 	// Reconciler (#46) policy.
 	GracePeriod    time.Duration // how long the failure signal must hold before recovery (default 5m)
@@ -82,6 +86,7 @@ type dispatchFile struct {
 	QuietHours             *QuietHours           `json:"quietHours"`
 	PlanStalenessTolerance *int                  `json:"planStalenessTolerance"`
 	DefaultAgent           string                `json:"defaultAgent"`
+	Model                  string                `json:"model"`
 	AgentBudgetFloors      map[string]float64    `json:"agentBudgetFloors"`
 	AgentLimits            map[string]AgentLimit `json:"agentLimits"`
 	AgentPreference        []string              `json:"agentPreference"`
@@ -146,6 +151,9 @@ func mergeConfig(base Config, o dispatchFile) Config {
 	}
 	if o.DefaultAgent != "" {
 		base.DefaultAgent = o.DefaultAgent
+	}
+	if o.Model != "" {
+		base.Model = o.Model
 	}
 	if o.AgentBudgetFloors != nil {
 		base.AgentBudgetFloors = o.AgentBudgetFloors
