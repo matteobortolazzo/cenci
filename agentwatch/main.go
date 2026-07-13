@@ -128,17 +128,13 @@ func runDaemon(args []string) {
 	// injected so the daemon core stays tmux-free.
 	fe := tmuxfe.New(cfg, &tmux.ExecClient{})
 
-	// When dispatch.daemonInterval is configured, run the embedded dispatch +
-	// reconcile loop in one process and feed its failure overlay into the daemon
-	// snapshot. Interval 0 (the default) leaves daemon behavior unchanged.
-	var attention <-chan ipc.AttentionUpdate
-	if dcfg, err := dispatch.LoadConfig(""); err != nil {
-		log.Printf("dispatch config: %v (embedded loop disabled)", err)
-	} else if dcfg.DaemonInterval > 0 {
-		ch := make(chan ipc.AttentionUpdate, 1)
-		attention = ch
-		go dispatch.RunCombinedLoop(ctx, "", &tmux.ExecClient{}, &dispatch.GHMutator{}, dcfg.DaemonInterval, os.Stdout, ch)
-	}
+	// The embedded dispatch + reconcile loop always runs alongside the daemon
+	// (#220); its own per-tick config reload decides whether dispatch.loopEnabled
+	// is on, so a disabled config simply idles the loop rather than gating
+	// whether it starts at all.
+	ch := make(chan ipc.AttentionUpdate, 1)
+	var attention <-chan ipc.AttentionUpdate = ch
+	go dispatch.RunCombinedLoop(ctx, "", &tmux.ExecClient{}, &dispatch.GHMutator{}, os.Stdout, ch)
 
 	if err := daemon.Run(ctx, cfg, fe, attention); err != nil {
 		fmt.Fprintf(os.Stderr, "agentwatch: %v\n", err)
@@ -497,8 +493,11 @@ func runDispatchLoop(args []string) {
 // renderDispatchState formats a watch.DispatchState as human-readable text
 // for `dispatch loop on|off|status`. DaemonRunning gates whether the
 // live-daemon fields (pass_running, last_run_at, last_dispatched,
-// last_skipped, last_error) are shown, not a version check — no daemon
-// populates them yet (#220), so today this branch never fires.
+// last_skipped, last_error) are shown. Since #220 the daemon always runs the
+// embedded dispatch loop and publishes DaemonRunning=true via its broadcast
+// snapshot, so this branch fires whenever a daemon is reachable; it only
+// stays false when ResolveDispatchState falls back to config (no daemon
+// running).
 func renderDispatchState(state watch.DispatchState) string {
 	var b strings.Builder
 

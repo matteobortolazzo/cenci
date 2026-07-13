@@ -163,8 +163,11 @@ type reconcileDeps struct {
 // RunReconcileOnce collects tickets, plans, the daemon snapshot, and durable
 // attempt counts, runs the pure Reconcile engine, logs every recovery, applies
 // the gh mutations (unless dryRun), and persists the grace map. The daemon
-// consumes result.Failed to badge the snapshot.
-func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer, store ObservationStore) ReconcileResult {
+// consumes result.Failed to badge the snapshot. It also returns the first of
+// the collection/plan/attempt errors encountered during the pass, if any —
+// all existing logging is unchanged, this only additionally surfaces the
+// error to the caller instead of swallowing it.
+func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer, store ObservationStore) (ReconcileResult, error) {
 	if out == nil {
 		out = os.Stdout
 	}
@@ -173,12 +176,16 @@ func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer,
 	if err != nil {
 		logf(out, "reconcile: collecting tickets: %v\n", err)
 	}
+	collectErr := err
 
 	var plans []Plan
 	for _, rc := range cfg.Repos {
 		ps, err := ReadPlans(rc.Repo, rc.Dir, nil)
 		if err != nil {
 			logf(out, "reconcile: reading plans in %s: %v\n", rc.Dir, err)
+			if collectErr == nil {
+				collectErr = err
+			}
 			continue
 		}
 		plans = append(plans, ps...)
@@ -199,12 +206,15 @@ func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer,
 		if err != nil {
 			logf(out, "reconcile: #%d counting attempts: %v\n", t.Number, err)
 			attemptsUnknown[planKey(t.Repo, t.Number)] = true
+			if collectErr == nil {
+				collectErr = err
+			}
 			continue
 		}
 		attempts[planKey(t.Repo, t.Number)] = n
 	}
 
-	return applyReconcile(cfg, reconcileDeps{
+	result := applyReconcile(cfg, reconcileDeps{
 		Tickets:         tickets,
 		Plans:           plans,
 		Snapshot:        snap,
@@ -212,6 +222,7 @@ func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer,
 		AttemptsUnknown: attemptsUnknown,
 		Now:             time.Now(),
 	}, mut, dryRun, out, store)
+	return result, collectErr
 }
 
 // applyReconcile runs the pure engine over already-collected deps, logs, applies

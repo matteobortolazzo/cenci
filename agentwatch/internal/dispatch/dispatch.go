@@ -28,8 +28,11 @@ type dispatchDeps struct {
 // RunOnce gathers inputs (tickets, plans, snapshot, clock), runs the pure
 // engine, logs every decision, then dispatches each ActionDispatch via run.Run
 // (unless dryRun). prior, when non-nil, is the daily-quota tally: it is read in
-// and incremented per successful dispatch. It returns the full decision table.
-func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, out io.Writer, prior *int) []Decision {
+// and incremented per successful dispatch. It returns the full decision table
+// alongside the first collection error encountered (CollectTickets, then
+// per-repo ReadPlans), if any -- all existing logging is unchanged, this only
+// additionally surfaces the error to the caller instead of swallowing it.
+func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, out io.Writer, prior *int) ([]Decision, error) {
 	if out == nil {
 		out = os.Stdout
 	}
@@ -38,12 +41,16 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 	if err != nil {
 		logf(out, "dispatch: collecting tickets: %v\n", err)
 	}
+	collectErr := err
 
 	var plans []Plan
 	for _, rc := range cfg.Repos {
 		ps, err := ReadPlans(rc.Repo, rc.Dir, nil)
 		if err != nil {
 			logf(out, "dispatch: reading plans in %s: %v\n", rc.Dir, err)
+			if collectErr == nil {
+				collectErr = err
+			}
 			continue
 		}
 		plans = append(plans, ps...)
@@ -51,12 +58,13 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 
 	snap, _ := ReadSnapshot(watch.DefaultSocketPath()) // nil on error ⇒ Decide skips safely
 
-	return applyDispatch(cfg, dispatchDeps{
+	decisions := applyDispatch(cfg, dispatchDeps{
 		Tickets:  tickets,
 		Plans:    plans,
 		Snapshot: snap,
 		Now:      time.Now(),
 	}, ctrl, mut, dryRun, out, prior)
+	return decisions, collectErr
 }
 
 // applyDispatch runs the pure engine over already-collected deps, logs, spawns

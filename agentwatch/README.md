@@ -297,6 +297,24 @@ agentwatch dispatch loop status [--config <path>] [--json]
 All three print the same resolved `DispatchState` — human-readable by default, or the
 raw JSON object with `--json` (e.g. `{"enabled":true,"daemon_running":false,"interval":"5m",...}`).
 
+A running `agentwatch daemon` always starts the embedded dispatch supervisor loop at
+startup — `dispatch.loopEnabled` purely controls whether it *performs* passes, not
+whether it runs. The loop reloads its config on a hardcoded 60s check interval (not
+configurable) to pick up `loopEnabled` changes, so `dispatch loop on`/`off` take effect
+within ≤60s of a running daemon, with no daemon restart and no new inbound IPC. While
+disabled, the loop still wakes every 60s — it skips the dispatch/reconcile passes but
+clears any stale failed-window badges and headroom overlays within that same window.
+While enabled, each tick runs a dispatch pass (`RunOnce`) then a reconcile pass
+(`RunReconcileOnce`) on the configured `daemonInterval`, publishing live state so that
+`agentwatch dispatch status --json`'s `"loop"` object (`enabled`, `pass_running`,
+`last_run_at`, `last_dispatched`, `last_skipped`, `last_error`) now reflects the live
+daemon end-to-end, not just a config fallback.
+
+This daemon-embedded path (`dispatch loop on` alongside a running `agentwatch daemon`)
+is the canonical way to run dispatch continuously. `agentwatch dispatch --interval
+<duration>` (see [Auto-dispatch](#auto-dispatch-agentwatch-dispatch)) remains a
+separate, standalone loop for running dispatch directly from the CLI without a daemon.
+
 ### Pickup rules and gates
 
 A ticket is dispatched only when **all** of these hold, evaluated in order (the first

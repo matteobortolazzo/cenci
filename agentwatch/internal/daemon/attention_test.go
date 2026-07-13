@@ -5,6 +5,7 @@ import (
 
 	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/ipc"
 	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/tmux/tmuxtest"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/pkg/watch"
 )
 
 func TestBuildSnapshot_AttentionOverlayAppendsFailed(t *testing.T) {
@@ -89,5 +90,47 @@ func TestBuildSnapshot_HeadroomAbsentWhenUnset(t *testing.T) {
 
 	if len(snap.Headroom) != 0 {
 		t.Errorf("expected no Headroom data when embedded loop disabled, got %v", snap.Headroom)
+	}
+}
+
+// TestBuildSnapshot_DispatchOverlayPresentWhenSet covers #220: when the
+// embedded dispatch loop has populated d.dispatch (via the attention
+// channel's Dispatch field), the snapshot must carry it through verbatim.
+func TestBuildSnapshot_DispatchOverlayPresentWhenSet(t *testing.T) {
+	mc := &tmuxtest.MockClient{}
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1"})
+
+	d.dispatch = &watch.DispatchState{Enabled: true, DaemonRunning: true, LastDispatched: 3}
+
+	snap := d.buildSnapshot()
+
+	if snap.Dispatch == nil {
+		t.Fatal("expected snap.Dispatch to be set, got nil")
+	}
+	if !snap.Dispatch.Enabled {
+		t.Errorf("snap.Dispatch.Enabled = false, want true")
+	}
+	if !snap.Dispatch.DaemonRunning {
+		t.Errorf("snap.Dispatch.DaemonRunning = false, want true")
+	}
+	if snap.Dispatch.LastDispatched != 3 {
+		t.Errorf("snap.Dispatch.LastDispatched = %d, want 3", snap.Dispatch.LastDispatched)
+	}
+}
+
+// TestBuildSnapshot_DispatchAbsentWhenUnset covers #220's "no data yet"
+// contract: before the embedded dispatch loop's first publish, d.dispatch is
+// nil, and the snapshot's Dispatch field must stay nil so the "dispatch" key
+// is omitted from early NDJSON lines (json:"dispatch,omitempty").
+func TestBuildSnapshot_DispatchAbsentWhenUnset(t *testing.T) {
+	mc := &tmuxtest.MockClient{}
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1"})
+
+	snap := d.buildSnapshot()
+
+	if snap.Dispatch != nil {
+		t.Errorf("expected snap.Dispatch to be nil before the first publish, got %+v", snap.Dispatch)
 	}
 }
