@@ -8,11 +8,6 @@ on:
 
 permissions:
   contents: write
-  # plugin-version-bump.yml declares actions: write at workflow level (needed
-  # only by agentwatch's dispatch-workflow step); GitHub caps a reusable
-  # workflow's permissions to what the caller grants, so every caller must
-  # grant it too or the run fails validation before any job starts.
-  actions: write
 
 jobs:
   bump:

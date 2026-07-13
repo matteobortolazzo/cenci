@@ -7,7 +7,11 @@ on:
 
 permissions:
   contents: write
-  actions: write   # required for `gh workflow run` (workflow_dispatch API)
+  # The reusable plugin-version-bump.yml workflow declares no permissions
+  # of its own (reusable workflows inherit whatever the caller grants), so
+  # this caller-side grant is what enables the workflow's `gh workflow run`
+  # dispatch step (this is the only caller that passes dispatch-workflow).
+  actions: write
 
 jobs:
   bump:
