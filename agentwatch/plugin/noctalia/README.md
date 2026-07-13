@@ -34,6 +34,7 @@ Then open Settings (SUPER+R) → Bar, and add the **AgentWatch** widget to a sec
 - Hides when agentwatch reports no sessions (or daemon is down).
 - Icon and color reflect the highest-priority status: `need-input` (red) > `running` (primary) > `done` > `stopped` > `idle`.
 - Hover tooltip lists each window: `session:index - name (status)`.
+- Per-agent budget headroom (when reported) renders as a small percent badge next to the status text, colored by threshold: >25% normal (primary), 10-25% warning (tertiary), <10% critical (error). No badge is shown when headroom data is absent.
 - Right-click → widget settings.
 
 ## Settings
