@@ -1,6 +1,6 @@
 {
   "name": "agentflow",
-  "version": "4.8.0",
+  "version": "4.9.0",
   "description": "Shared engineering conventions for Codex, plus Claude Code's ticket-to-PR workflow.",
   "author": {
     "name": "Matteo Bortolazzo",
