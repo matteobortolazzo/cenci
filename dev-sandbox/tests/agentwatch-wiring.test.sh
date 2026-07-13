@@ -28,7 +28,10 @@ CALLS_FILE="${TEST_ROOT}/runtime-calls"
 AGENTWATCH_CALLS="${TEST_ROOT}/agentwatch-calls"
 STDERR_FILE="${TEST_ROOT}/stderr"
 RUNTIME_DIR="${TEST_ROOT}/runtime"
-EVENTS_SOCKET="${RUNTIME_DIR}/agentwatch-events.sock"
+SOCKET_DIR="${RUNTIME_DIR}/agentwatch"
+EVENTS_SOCKET="${SOCKET_DIR}/agentwatch-events.sock"
+# Container-side mount point; must match agent-sand's AGENTWATCH_SOCKET_MOUNT_DEST.
+SOCKET_MOUNT_DEST="/run/user/1000/agentwatch"
 mkdir -p "${BIN_DIR}" "${RUNTIME_DIR}" "${TEST_ROOT}/home/.claude"
 chmod 700 "${RUNTIME_DIR}"
 touch "${TEST_ROOT}/home/.claude/.credentials.json"
@@ -72,16 +75,29 @@ exit 0
 EOF
 chmod +x "${BIN_DIR}/claude"
 
-# `daemon` creates the events socket unless MOCK_DAEMON_STARTS=false, matching
-# the real daemon binding its socket shortly after being spawned.
+# `socket-dir` mkdir -p's and prints the socket directory, matching the real
+# `agentwatch socket-dir` (#217), unless MOCK_SOCKET_DIR_FAILS=true, in which
+# case it exits non-zero with a diagnostic on stderr (simulating a genuine CLI
+# failure, distinct from agentwatch simply not being installed). `daemon`
+# creates the events socket inside that directory unless MOCK_DAEMON_STARTS=false,
+# matching the real daemon binding its socket shortly after being spawned.
 cat > "${BIN_DIR}/agentwatch" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%q ' "$@" >> "${AGENTWATCH_CALLS}"
 printf '\n' >> "${AGENTWATCH_CALLS}"
+if [[ "${1:-}" == socket-dir ]]; then
+    if [[ "${MOCK_SOCKET_DIR_FAILS:-false}" == true ]]; then
+        echo "mock agentwatch: socket-dir: permission denied" >&2
+        exit 1
+    fi
+    mkdir -p "${XDG_RUNTIME_DIR}/agentwatch"
+    printf '%s\n' "${XDG_RUNTIME_DIR}/agentwatch"
+fi
 if [[ "${1:-}" == daemon && "${MOCK_DAEMON_STARTS:-true}" == true ]]; then
+    mkdir -p "${XDG_RUNTIME_DIR}/agentwatch"
     python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' \
-        "${XDG_RUNTIME_DIR}/agentwatch-events.sock"
+        "${XDG_RUNTIME_DIR}/agentwatch/agentwatch-events.sock"
 fi
 exit 0
 EOF
@@ -104,8 +120,8 @@ if ! grep -Eq '^daemon' "${AGENTWATCH_CALLS}"; then
     exit 1
 fi
 
-if ! grep -Eq "^run .* -v ${EVENTS_SOCKET}:/run/user/1000/agentwatch-events.sock " "${CALLS_FILE}"; then
-    echo "FAIL: container was created without the events-socket mount" >&2
+if ! grep -Eq "^run .* -v ${SOCKET_DIR}:${SOCKET_MOUNT_DEST}:ro " "${CALLS_FILE}"; then
+    echo "FAIL: container was created without the read-only agentwatch socket-directory mount" >&2
     exit 1
 fi
 
@@ -119,7 +135,45 @@ if grep -q 'Warning: agentwatch' "${STDERR_FILE}"; then
     exit 1
 fi
 
-# ── 2. Daemon never binds the socket → loud warning, container still starts ──
+# ── 2. `agentwatch socket-dir` itself fails → loud warning, no hang, no bad mount ──
+rm -f "${EVENTS_SOCKET}"
+printf '' > "${CALLS_FILE}"
+printf '' > "${AGENTWATCH_CALLS}"
+export MOCK_SOCKET_DIR_FAILS=true
+timeout 30 "${SANDBOX_DIR}/agent-sand" -p test 2> "${STDERR_FILE}"
+unset MOCK_SOCKET_DIR_FAILS
+
+if ! grep -q "socket-dir' failed" "${STDERR_FILE}"; then
+    echo "FAIL: launcher did not warn loudly when 'agentwatch socket-dir' failed" >&2
+    exit 1
+fi
+
+if ! grep -q "permission denied" "${STDERR_FILE}"; then
+    echo "FAIL: launcher warning dropped the captured stderr diagnostic from 'agentwatch socket-dir'" >&2
+    exit 1
+fi
+
+if grep -q 'Warning: agentwatch is installed but its events socket is unavailable' "${STDERR_FILE}"; then
+    echo "FAIL: launcher duplicated the generic unavailable-socket warning alongside the specific socket-dir failure warning" >&2
+    exit 1
+fi
+
+if grep -Eq '^run .* -v :' "${CALLS_FILE}"; then
+    echo "FAIL: container was given a malformed/empty-source agentwatch mount after the socket-dir failure" >&2
+    exit 1
+fi
+
+if grep -Eq -- "${SOCKET_MOUNT_DEST}" "${CALLS_FILE}"; then
+    echo "FAIL: container was given agentwatch wiring despite the socket-dir CLI failing" >&2
+    exit 1
+fi
+
+if ! grep -Eq '^run .* -d ' "${CALLS_FILE}"; then
+    echo "FAIL: container was not started after the socket-dir CLI failure" >&2
+    exit 1
+fi
+
+# ── 3. Daemon never binds the socket → loud warning, container still starts ──
 rm -f "${EVENTS_SOCKET}"
 printf '' > "${CALLS_FILE}"
 printf '' > "${AGENTWATCH_CALLS}"
@@ -141,7 +195,7 @@ if ! grep -Eq '^run .* -d ' "${CALLS_FILE}"; then
     exit 1
 fi
 
-# ── 3. Attach to a running container created without the wiring → warn ──
+# ── 4. Attach to a running container created without the wiring → warn ──
 make_socket "${EVENTS_SOCKET}"
 printf '' > "${CALLS_FILE}"
 export MOCK_RUNNING=true
@@ -158,9 +212,9 @@ if ! grep -Eq '^exec -it -u dev .* claude ' "${CALLS_FILE}"; then
     exit 1
 fi
 
-# ── 4. Attach to a properly wired container → no warning ──
+# ── 5. Attach to a properly wired container → no warning ──
 printf '' > "${CALLS_FILE}"
-export MOCK_MOUNTS='/workspace\n/run/user/1000/agentwatch-events.sock\n/home/dev\n'
+export MOCK_MOUNTS="/workspace\n${SOCKET_MOUNT_DEST}\n/home/dev\n"
 "${SANDBOX_DIR}/agent-sand" -p test 2> "${STDERR_FILE}"
 
 if grep -q 'Warning' "${STDERR_FILE}"; then
@@ -168,4 +222,99 @@ if grep -q 'Warning' "${STDERR_FILE}"; then
     exit 1
 fi
 
-echo "passed: daemon ensured before the gate, loud degradation, unwired-container detection"
+# ── 6. Daemon restart (stale inode) → mounting the directory survives it ──
+# Regression for #218: a bind-mounted socket FILE pins the inode that existed
+# at container-creation time. When the host daemon restarts it unlinks the old
+# socket and binds a fresh one (new inode) at the same path, so every already
+# running sandbox keeps pointing at the dead inode. Mounting the directory
+# instead means lookups always resolve through the live path, immune to the
+# daemon rebinding underneath. This is a mocked-docker path-reachability +
+# mount-shape proxy (not a real `mount --bind`, which needs privileges we
+# don't have here).
+listen_once() {
+    # Binds, listens, and accepts a single connection then exits — enough for
+    # a client's connect() to succeed without racing an explicit accept().
+    python3 -c '
+import socket, sys
+path = sys.argv[1]
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.bind(path)
+s.listen(1)
+conn, _ = s.accept()
+conn.close()
+s.close()
+' "$1"
+}
+
+client_connects() {
+    python3 -c '
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect(sys.argv[1])
+s.close()
+' "$1"
+}
+
+wait_for_socket() {
+    for _ in {1..30}; do
+        [[ -S "$1" ]] && return 0
+        sleep 0.1
+    done
+    return 1
+}
+
+RESTART_DIR="${TEST_ROOT}/restart-sim"
+mkdir -p "${RESTART_DIR}"
+RESTART_SOCKET="${RESTART_DIR}/agentwatch-events.sock"
+
+# The "old" daemon binds the socket (first inode).
+listen_once "${RESTART_SOCKET}" &
+OLD_SERVER_PID=$!
+if ! wait_for_socket "${RESTART_SOCKET}"; then
+    echo "FAIL: setup - original daemon socket never appeared" >&2
+    kill "${OLD_SERVER_PID}" 2>/dev/null || true
+    exit 1
+fi
+
+# Simulate the host daemon restarting: unlink the stale socket, rebind a
+# fresh one (new inode) at the identical path.
+kill "${OLD_SERVER_PID}" 2>/dev/null || true
+wait "${OLD_SERVER_PID}" 2>/dev/null || true
+rm -f "${RESTART_SOCKET}"
+
+listen_once "${RESTART_SOCKET}" &
+NEW_SERVER_PID=$!
+if ! wait_for_socket "${RESTART_SOCKET}"; then
+    echo "FAIL: setup - restarted daemon socket never appeared" >&2
+    kill "${NEW_SERVER_PID}" 2>/dev/null || true
+    exit 1
+fi
+
+if ! client_connects "${RESTART_SOCKET}"; then
+    echo "FAIL: a fresh client could not connect through the path after a simulated daemon restart (stale inode)" >&2
+    kill "${NEW_SERVER_PID}" 2>/dev/null || true
+    exit 1
+fi
+kill "${NEW_SERVER_PID}" 2>/dev/null || true
+wait "${NEW_SERVER_PID}" 2>/dev/null || true
+
+# Mount shape: the launcher must mount the socket DIRECTORY, never the socket
+# file itself — a file mount is exactly the stale-inode bug reproduced above.
+rm -f "${EVENTS_SOCKET}"
+printf '' > "${CALLS_FILE}"
+printf '' > "${AGENTWATCH_CALLS}"
+export MOCK_RUNNING=false
+export MOCK_DAEMON_STARTS=true
+"${SANDBOX_DIR}/agent-sand" -p test 2> "${STDERR_FILE}"
+
+if ! grep -Eq "^run .* -v ${SOCKET_DIR}:${SOCKET_MOUNT_DEST}:ro " "${CALLS_FILE}"; then
+    echo "FAIL: launcher did not mount the agentwatch socket directory read-only" >&2
+    exit 1
+fi
+
+if grep -Eq '^run .*agentwatch-events\.sock' "${CALLS_FILE}"; then
+    echo "FAIL: launcher mounted the socket file directly; a bind-mounted file pins the inode and breaks across daemon restarts (#218)" >&2
+    exit 1
+fi
+
+echo "passed: daemon ensured before the gate, loud degradation on daemon and socket-dir CLI failures, unwired-container detection, socket-directory mount survives daemon restart"

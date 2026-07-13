@@ -83,6 +83,7 @@ Image dependency versions are pinned via Dockerfile `ARG`s, all checked daily by
 ## Security
 - Never bake secrets or credentials into the image layers.
 - Validate any host paths mounted into the container.
+- Bind-mount host paths read-only (`:ro`) unless the container genuinely needs write access — containers should be as restrictive as possible. Audit all new and existing mounts in `agent-sand` against this principle.
 
 ## Reference Docs
 Repo-level conventions live at `<repo-root>/docs/` (read on demand). Project-specific notes belong in this file.

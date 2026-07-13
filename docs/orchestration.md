@@ -182,10 +182,10 @@ agentwatch's `~/.config/agentwatch/config.json`):
 
 The default swaps the launch command to `agent-sand`, running the agent under
 `--dangerously-skip-permissions` with the container as the security boundary. Status
-still surfaces on the **host** board: `agent-sand` mounts the host
-`agentwatch-events.sock` into the container and forwards `TMUX_PANE`, so the agent's
-hook events reach the host daemon and the join key flows through unchanged. The card
-badges exactly as a host dispatch would.
+still surfaces on the **host** board: `agent-sand` mounts the host agentwatch socket
+directory (not the raw socket file) into the container at `/run/user/1000/agentwatch`
+and forwards `TMUX_PANE`, so the agent's hook events reach the host daemon and the join
+key flows through unchanged. The card badges exactly as a host dispatch would.
 
 ## Mixed-agent boards
 
