@@ -46,6 +46,14 @@ kquitapp6 plasmashell && kstart plasmashell
   `stopped` (neutral) > `idle` (disabled).
 - Click to expand a list of each session (`session:index - name`) with a
   per-session status icon and badge, colored independently.
+- The expanded view also shows a **Budget headroom** section (hidden when the
+  status JSON carries no `headroom` data) with one `<agent> <pct>%` row per
+  agent. Row color reflects the remaining budget: >25% positive (normal),
+  10–25% neutral (warning), <10% negative (critical) — the same thresholds as
+  `headroomClass` in `status.go` and the macOS menu. The headroom summary line
+  that `agentwatch status` appends to the tooltip is excluded from the session
+  list by exact match, so it neither renders as a bogus session row nor inflates
+  the session count.
 
 ## Settings
 
