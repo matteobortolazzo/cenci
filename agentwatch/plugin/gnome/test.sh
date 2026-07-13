@@ -34,6 +34,28 @@ done
 
 echo
 
+# Hide/show is gated on `alt`, not `class` (status.go can emit `class: "none"`
+# with `alt: "dispatch-only"` when zero sessions but the fleet dispatch loop
+# is enabled — the module must stay visible then). Assert extension.js reads
+# `alt` from the poll JSON and hides on `alt === 'none'`, not on `cls ===
+# 'none'` (a regression to the old class-only gate would re-hide dispatch-only
+# output).
+if grep -qE "alt\s*=\s*j\['alt'\]" "$WIDGET" && grep -qE "alt\s*===\s*'none'" "$WIDGET"; then
+    echo "ok   - extension.js hides on alt === 'none' (not class === 'none')"
+else
+    echo "FAIL - extension.js does not gate hide/show on 'alt'"
+    fail=1
+fi
+
+if grep -qE "cls\s*===\s*'none'" "$WIDGET"; then
+    echo "FAIL - extension.js still hides on cls === 'none' (dispatch-only would be hidden)"
+    fail=1
+else
+    echo "ok   - extension.js does not hide on cls === 'none'"
+fi
+
+echo
+
 # Headroom rows are colored via dedicated .agentwatch-headroom-<class>
 # selectors (extension.js builds the class name dynamically via a template
 # literal, so it can't be grepped as a quoted string like the status classes

@@ -36,6 +36,7 @@ Then open Settings (`dms ipc call settings toggle`) → **Plugins** → enable *
 - Icon + color reflect the highest-priority status:
   `need-input` (error) > `running` (primary) > `done` (tertiary) > `stopped` (secondary) > `idle` (muted).
 - Click the pill to open a popout listing each window: `session:index - name` with the per-session status badge.
+- When the daemon's fleet dispatch loop is enabled, a compact `⟳` glyph and a `dispatch: on (...)` tooltip line appear. The pill no longer hides when there are zero live sessions but the loop is enabled (`alt: "dispatch-only"`) — only a true `alt: "none"` (no sessions and dispatch disabled/absent) hides it.
 - Right-click is unused (open plugin settings via Settings → Plugins → AgentWatch).
 
 ## Settings
@@ -51,7 +52,7 @@ Then open Settings (`dms ipc call settings toggle`) → **Plugins** → enable *
   ```sh
   env -i HOME=$HOME XDG_RUNTIME_DIR=/run/user/$(id -u) PATH=/usr/local/bin:/usr/bin sh -c 'agentwatch waybar'
   ```
-  If that says "command not found", link the binary onto the login PATH (re-run `install.sh` and accept the GUI-bar prompt, or `sudo ln -sf "$HOME/.local/bin/agentwatch" /usr/local/bin/agentwatch`) or set `agentwatchPath` to its full path. If it prints `"class": "none"` there are no live sessions — start a Claude Code or Codex tmux pane and try again.
+  If that says "command not found", link the binary onto the login PATH (re-run `install.sh` and accept the GUI-bar prompt, or `sudo ln -sf "$HOME/.local/bin/agentwatch" /usr/local/bin/agentwatch`) or set `agentwatchPath` to its full path. If it prints `"alt": "none"` there are no live sessions and the fleet dispatch loop is off — start a Claude Code or Codex tmux pane and try again (`"alt": "dispatch-only"` means the pill stays visible even with no sessions, because the dispatch loop is enabled).
 - **Pill is stuck**: check the agentwatch daemon (`pgrep -a agentwatch`). If it is
   absent after a login or restart, the next installed Claude or Codex lifecycle hook
   starts it on demand and retries that event; no tmux startup entry is required.

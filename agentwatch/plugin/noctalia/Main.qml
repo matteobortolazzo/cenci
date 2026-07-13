@@ -16,6 +16,7 @@ Item {
   property string text: ""
   property string tooltip: ""
   property string cssClass: "none"
+  property string cssAlt: "none"
   property bool hasOutput: false
   property var headroom: ({})
 
@@ -49,7 +50,8 @@ Item {
           root.text = j.text || ""
           root.tooltip = j.tooltip || ""
           root.cssClass = j["class"] || "none"
-          root.hasOutput = root.cssClass !== "none"
+          root.cssAlt = j["alt"] || "none"
+          root.hasOutput = root.cssAlt !== "none"
           root.headroom = j.headroom || {}
         } catch (e) {
           Logger.e("AgentWatch", "parse error:", e, out)

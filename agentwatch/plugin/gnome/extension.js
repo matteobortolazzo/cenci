@@ -5,7 +5,9 @@
 // dms, and macOS widgets — it makes no daemon or Go changes. It polls
 // `agentwatch status` on a timer, parses the single JSON line, and maps the
 // `class` field to an icon + color. Empty stdout, a non-zero exit, or
-// class "none" all mean "no live sessions" → hide the indicator.
+// `alt: "none"` all mean "hide the indicator" — `alt` (not `class`) is the
+// module's hide/show contract, since `class` stays "none" for the
+// zero-sessions-but-dispatch-enabled case (see `alt: "dispatch-only"`).
 
 import St from 'gi://St';
 import GLib from 'gi://GLib';
@@ -98,7 +100,8 @@ class AgentWatchIndicator extends PanelMenu.Button {
             return;
         }
         const cls = j['class'] || 'none';
-        if (cls === 'none') {
+        const alt = j['alt'] || 'none';
+        if (alt === 'none') {
             this.setEmpty();
             return;
         }

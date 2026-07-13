@@ -548,6 +548,7 @@ agentwatch status
 | `-symbol-running` | `▶` | Symbol for running count |
 | `-symbol-done` | `✓` | Symbol for done count |
 | `-symbol-input` | `!` | Symbol for need-input count |
+| `-symbol-dispatch` | `⟳` | Symbol for the fleet dispatch loop indicator |
 
 #### Waybar config
 
@@ -600,6 +601,53 @@ even though only SwiftBar currently renders them as color. When no headroom data
 available (budget loop disabled/unconfigured), the `headroom` field and the
 percentage text are both omitted entirely — output is unchanged from before this
 field existed.
+
+#### Fleet dispatch indicator
+
+When the daemon's fleet dispatch loop is enabled, the module surfaces a `dispatch`
+object passed through verbatim from the broadcast snapshot:
+
+```jsonc
+{
+    "enabled": true,
+    "daemon_running": true,
+    "interval": "5m",
+    "pass_running": false,
+    "last_run_at": "2026-07-13T12:04:00Z",
+    "last_dispatched": 2,
+    "last_skipped": 3
+    // "last_error": "..." — present instead of last_run_at/last_dispatched/
+    // last_skipped context on a failed run
+}
+```
+
+`text` gets a compact `⟳` glyph appended (default; override with `-symbol-dispatch`),
+and `tooltip` gets a summary line, e.g. `dispatch: on (5m) — last run 12:04, 2
+dispatched / 3 skipped`, or `dispatch: on (5m) — last run failed: <err>` after a
+failed pass. Both are omitted entirely when the loop is disabled/absent — byte-compatible
+with output from before this field existed. `class` is unaffected (session-status
+priority is unchanged; it stays `"none"` when there are zero live sessions,
+dispatch-enabled or not), but `alt` becomes `"dispatch-only"` instead of `"none"`
+when there are zero live sessions and the loop is enabled — **`alt`, not `class`, is
+what determines whether the module is hidden** (`agentwatch status`'s exit code
+follows `alt == "none"`), so the indicator still appears even with no active
+sessions. Every non-waybar frontend (noctalia/DMS/GNOME/Plasma/macOS) reads this
+same `alt` field to decide visibility.
+
+Since `alt` isn't a stylable CSS class in Waybar (only `class` is — Waybar exposes
+`alt` as the `{alt}` text substitution for `format-alt`, not as a `#custom-agentwatch.<alt>`
+selector), the dispatch-only glyph inherits whatever `.none` is already styled as:
+
+```css
+#custom-agentwatch.none {
+    color: #6c7086;
+}
+```
+
+If you want the dispatch glyph to stand out from the plain "no sessions" case, key
+off `format-alt` / `{alt}` instead of CSS — e.g. `"format-alt": "{alt}"` with
+`"format-alt-click": "click"` toggles between the compact glyph and the literal
+`dispatch-only` alt text on click.
 
 #### macOS menu bar (SwiftBar)
 

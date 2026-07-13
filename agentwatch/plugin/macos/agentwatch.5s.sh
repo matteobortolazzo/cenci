@@ -69,8 +69,9 @@ BIN="$(resolve_bin || true)"
 
 # --- 2. Poll the daemon ---------------------------------------------------
 #
-# Empty stdout / non-zero exit covers both "daemon down" and "no sessions"
-# (class=none, which status.go already renders as exit 1 / no output).
+# Empty stdout / non-zero exit covers both "daemon down" and "no sessions with
+# dispatch off" (alt=none, which status.go already renders as exit 1 / no
+# output).
 JSON="$("$BIN" status 2>/dev/null || true)"
 [ -z "$JSON" ] && exit 0   # nothing live — hide the item
 
@@ -91,7 +92,8 @@ function run() {
   try { data = JSON.parse(json) } catch (e) { return '' }
 
   var cls = data['class'] || 'none'
-  if (cls === 'none') return ''
+  var alt = data['alt'] || 'none'
+  if (alt === 'none') return ''
 
   var text = data.text || ''
   var tooltip = data.tooltip || ''
@@ -148,16 +150,53 @@ function run() {
     return agent + ' ' + pct + '%'
   }).join('  ')
 
+  // Fleet dispatch loop summary. `dispatch` is passed through the status JSON
+  // verbatim from status.go (only enabled/interval/last_run_at/
+  // last_dispatched/last_skipped/last_error are used here — pass_running/
+  // daemon_running are intentionally not surfaced, per the ticket's scope
+  // note). dispatchLine mirrors the exact text formatDispatch/
+  // formatLastRunTime append to the Go tooltip, so it can be recognized and
+  // skipped by exact match in the tooltip-line loop below and rendered
+  // instead as its own dedicated row (no SF Symbol/color, per the accepted
+  // default treatment).
+  var dispatch = data.dispatch || null
+  var dispatchLine = ''
+  if (dispatch && dispatch.enabled) {
+    dispatchLine = dispatch.interval ? 'dispatch: on (' + dispatch.interval + ')' : 'dispatch: on'
+    if (dispatch.last_error) {
+      dispatchLine += ' — last run failed: ' + dispatch.last_error
+    } else if (dispatch.last_run_at) {
+      // Guard against an unparseable/malformed last_run_at: new Date() never
+      // throws, it silently yields an Invalid Date whose getHours()/
+      // getMinutes() are NaN. Fall back to the raw string, mirroring
+      // formatLastRunTime's fallback to the raw RFC3339 string in status.go,
+      // so a bad timestamp stays visible instead of rendering "NaN:NaN".
+      var runDate = new Date(dispatch.last_run_at)
+      var lastRun
+      if (isNaN(runDate.getTime())) {
+        lastRun = dispatch.last_run_at
+      } else {
+        var hh = ('0' + runDate.getHours()).slice(-2)
+        var mm = ('0' + runDate.getMinutes()).slice(-2)
+        lastRun = hh + ':' + mm
+      }
+      dispatchLine += ' — last run ' + lastRun + ', ' +
+        dispatch.last_dispatched + ' dispatched / ' + dispatch.last_skipped + ' skipped'
+    }
+  }
+
   // One dropdown row per session, colored by its OWN status so a need-input row
   // stays loud even when other sessions are merely running. Lines ending in
-  // "(status)" are session rows. The known headroom summary line (computed
-  // above) is skipped by exact match. Any OTHER non-matching line (unexpected
-  // status.go output, encoding glitch, future format change, etc.) still
-  // renders with the 'none' status fallback instead of being silently
-  // dropped, so a real regression stays visible rather than vanishing.
+  // "(status)" are session rows. The known headroom summary line and the known
+  // dispatch summary line (both computed above) are each skipped by exact
+  // match. Any OTHER non-matching line (unexpected status.go output, encoding
+  // glitch, future format change, etc.) still renders with the 'none' status
+  // fallback instead of being silently dropped, so a real regression stays
+  // visible rather than vanishing.
   var tips = tooltip.split('\n').filter(function (l) { return l.length > 0 })
   tips.forEach(function (line) {
     if (headroomLine !== '' && line === headroomLine) return
+    if (dispatchLine !== '' && line === dispatchLine) return
     var m = line.match(/\(([a-z-]+)\)\s*$/)
     var status = m ? m[1] : 'none'
     var body = m ? line.replace(/\s*\([a-z-]+\)\s*$/, '') : line
@@ -174,6 +213,13 @@ function run() {
     var pct = Math.floor(headroom[agent] * 100 + 0.5)
     lines.push(agent + ' ' + pct + '% | sfcolor=' + colorForHeadroom(pct))
   })
+
+  // Dedicated dispatch summary row, rendered from the structured `dispatch`
+  // field rather than the generic tooltip-line loop above. Omitted entirely
+  // when the loop is disabled/absent — no dispatch noise leaked into the menu.
+  if (dispatchLine !== '') {
+    lines.push(dispatchLine)
+  }
 
   lines.push('---')
   lines.push('Refresh | refresh=true')

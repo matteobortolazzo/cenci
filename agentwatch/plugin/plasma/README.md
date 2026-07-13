@@ -38,12 +38,17 @@ kquitapp6 plasmashell && kstart plasmashell
 ## Behavior
 
 - Polls every `pollIntervalMs` (default 2000 ms).
-- Hides from the panel when agentwatch reports no sessions (`class: none`) or the
-  daemon is down (non-zero exit).
+- Hides from the panel when agentwatch reports `alt: "none"` (no sessions and
+  the fleet dispatch loop is disabled/absent) or the daemon is down (non-zero
+  exit).
 - Compact panel view shows a status icon + the count string (`▶ 2  ! 1`). The
   icon color reflects the highest-priority status:
   `failed`/`need-input` (negative) > `running` (highlight) > `done` (positive) >
   `stopped` (neutral) > `idle` (disabled).
+- When the daemon's fleet dispatch loop is enabled, a compact `⟳` glyph appears
+  in the panel text. The widget no longer hides from the panel when there are
+  zero live sessions but the loop is enabled (`alt: "dispatch-only"`) — only
+  `alt: "none"` hides it.
 - Click to expand a list of each session (`session:index - name`) with a
   per-session status icon and badge, colored independently.
 - The expanded view also shows a **Budget headroom** section (hidden when the

@@ -115,8 +115,10 @@ killall SwiftBar; open -a SwiftBar
 ## Behavior
 
 - Polls on SwiftBar's filename interval (`agentwatch status` is a cheap socket read).
-- **Hides completely** when there are no live sessions (`class=none`) or the daemon
-  is down — matching the noctalia/dms widgets.
+- **Hides completely** when `alt=none` (no live sessions and the fleet dispatch loop
+  is disabled/absent) or the daemon is down — matching the noctalia/dms widgets. When
+  there are zero live sessions but the fleet dispatch loop is enabled, `class` stays
+  `none` but `alt` becomes `dispatch-only`, so the item stays visible.
 - Menu bar line shows the counts (`text`), tinted by the highest-priority status.
 - The dropdown lists one row per session (`session:index - name`, or `name` for
   paneless sessions), each colored by *its own* status — so a `need-input` row is
@@ -148,6 +150,13 @@ killall SwiftBar; open -a SwiftBar
 
   When no headroom data is available (budget loop disabled/unconfigured), no
   headroom rows are rendered — same "nothing shown" fallback as waybar.
+- When the daemon's fleet dispatch loop is enabled, the menu bar text gets a
+  compact `⟳` glyph and the dropdown gets a dedicated summary row, e.g.
+  `dispatch: on (5m) — last run 12:04, 2 dispatched / 3 skipped`, or
+  `dispatch: on (5m) — last run failed: <err>` after a failed pass. No SF
+  Symbol/color is applied to this row. It is read from the structured
+  `dispatch` field (not by re-parsing `tooltip`) and is omitted entirely when
+  the loop is disabled/absent.
 
 ## Settings
 
@@ -159,9 +168,10 @@ killall SwiftBar; open -a SwiftBar
 ## Troubleshooting
 
 - **Item never appears**: confirm `agentwatch status` prints JSON in a shell. If it
-  prints nothing / `"class":"none"`, there are no live sessions — start a Claude Code
-  or Codex session and try again. If it works in a shell but not in SwiftBar, it's the
-  GUI-PATH gotcha: set `AGENTWATCH_BIN` to the absolute path (`command -v agentwatch`).
+  prints nothing (`"alt":"none"`), there are no live sessions and the fleet dispatch
+  loop is off — start a Claude Code or Codex session and try again. If it works in a
+  shell but not in SwiftBar, it's the GUI-PATH gotcha: set `AGENTWATCH_BIN` to the
+  absolute path (`command -v agentwatch`).
 - **Daemon not running**: check `pgrep -af agentwatch`. The daemon is started by the
   plugin bootstrap / your tmux config.
 - **Verify the plugin directly**:
