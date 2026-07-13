@@ -120,14 +120,16 @@ else
     echo '{}' | migrate_settings > /home/dev/.claude/settings.json
 fi
 
-# ── Heal broken plugin install metadata ───────────────────────────
+# ── Heal broken Claude plugin install metadata ────────────────────
 # An interrupted plugin auto-install leaves installed_plugins.json pointing at
 # a cache directory that was never populated.  Claude Code trusts the metadata,
 # skips reinstall, and every skill of that plugin is "Unknown command" — which
 # permanently masks the enabledPlugins provisioning above.  Dropping the broken
 # entries makes the "is it installed" check below truthful, and stays useful
 # on its own once the upstream 2.1.207 bug is fixed.
-heal_plugin_installs /home/dev/.claude/plugins
+if [[ "${AGENT_SAND_AGENT:-claude}" == claude ]]; then
+    heal_plugin_installs /home/dev/.claude/plugins
+fi
 
 # ── Provision plugins explicitly via the official CLI ─────────────
 # Claude Code 2.1.207's settings-driven auto-install never populates
@@ -139,9 +141,14 @@ heal_plugin_installs /home/dev/.claude/plugins
 # metadata-present/cache-missing state on its own. Costs one marketplace
 # clone (~10-20s) on first boot only; a healthy volume makes zero `claude`
 # calls here (the TTL-gated refresh below is the only recurring cost). Never
-# blocks container start: failures (offline boot, no `claude` binary —
-# codex-sand mounts none) just warn to stderr.
-provision_plugins /home/dev/.claude/plugins agent-stack matteobortolazzo/agent-stack agentflow agentwatch
+# blocks container start: Claude sandboxes use the mounted Claude CLI, while
+# Codex sandboxes use the baked-in Codex CLI; missing CLIs and offline failures
+# only warn to stderr.
+if [[ "${AGENT_SAND_AGENT:-claude}" == codex ]]; then
+    provision_codex_plugins /home/dev/.codex agent-stack matteobortolazzo/agent-stack agentflow agentwatch
+else
+    provision_plugins /home/dev/.claude/plugins agent-stack matteobortolazzo/agent-stack agentflow agentwatch
+fi
 
 # ── Keep plugins current (TTL-gated) ──────────────────────────────
 # provision_plugins only installs what's missing, so an existing home volume
@@ -151,7 +158,11 @@ provision_plugins /home/dev/.claude/plugins agent-stack matteobortolazzo/agent-s
 # 30-minute stamp so rapid stop/start cycles make zero network calls. Forced
 # variant (ttl 0) is `agent-sand --update-plugins`. Same guarantee as above:
 # failures warn to stderr and never block container start.
-update_plugins /home/dev/.claude/plugins agent-stack 30 agentflow agentwatch
+if [[ "${AGENT_SAND_AGENT:-claude}" == codex ]]; then
+    update_codex_plugins /home/dev/.codex agent-stack 30 agentflow agentwatch
+else
+    update_plugins /home/dev/.claude/plugins agent-stack 30 agentflow agentwatch
+fi
 
 # ── Skip Claude Code's first-run onboarding wizard ────────────────
 # Onboarding state (theme picker, terminal "anti-flicker" setup, account step)
