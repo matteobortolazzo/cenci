@@ -1,5 +1,6 @@
 #!/bin/sh
-# PreToolUse hook: keep the main worktree read-only for Write/Edit.
+# PreToolUse hook: keep the main worktree read-only for Write/Edit — only in
+# repos configured for agentflow (gated on .claude/config.json below).
 # File changes must land inside a feature worktree (.worktrees/) so they ship
 # in PRs. This catches subagents that accidentally use relative paths, and
 # planning sessions that touch source files before a plan is approved —
@@ -9,6 +10,13 @@
 # approved plans (.plans/), agentflow config (.claude/), design artifacts
 # (designs/, *.pen, DESIGN.md), repo meta files configure manages
 # (.gitignore, .mcp.json, CLAUDE.md), and temp paths.
+
+# Only enforce in repos configured for agentflow — .claude/config.json (created
+# by /agentflow:configure) is the canonical signal. In unconfigured repos this
+# guard must be a no-op: the plugin is installed globally, but the worktree
+# workflow only applies where the user opted in.
+ROOT=$(git -C "$(pwd)" rev-parse --show-toplevel 2>/dev/null) || ROOT=$(pwd)
+[ -f "$ROOT/.claude/config.json" ] || exit 0
 
 INPUT=$(cat)
 FILE_PATH=$(echo "$INPUT" | grep -oE '"file_path"\s*:\s*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
