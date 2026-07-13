@@ -24,3 +24,15 @@
 .agentwatch-idle {
     color: #9a9996; /* grey — muted */
 }
+
+.agentwatch-headroom-normal {
+    color: #2ec27e; /* green — plenty of budget left */
+}
+
+.agentwatch-headroom-warning {
+    color: #e66100; /* orange — budget running low */
+}
+
+.agentwatch-headroom-critical {
+    color: #e01b24; /* red — budget nearly exhausted */
+}

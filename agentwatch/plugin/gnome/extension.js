@@ -45,6 +45,23 @@ function statusOf(line) {
     return m ? m[1] : 'none';
 }
 
+// headroomPercent converts a 0.0-1.0 headroom fraction to an integer percent,
+// rounding half up. Mirrors headroomPercent in status.go.
+function headroomPercent(frac) {
+    return Math.floor(frac * 100 + 0.5);
+}
+
+// headroomClass returns the threshold class for a headroom percentage:
+// >25% normal, 10-25% (inclusive) warning, <10% critical. Verbatim port of
+// headroomClass in status.go / colorForHeadroom in agentwatch.5s.sh.
+function headroomClass(pct) {
+    if (pct > 25)
+        return 'normal';
+    if (pct >= 10)
+        return 'warning';
+    return 'critical';
+}
+
 const AgentWatchIndicator = GObject.registerClass(
 class AgentWatchIndicator extends PanelMenu.Button {
     _init() {
@@ -86,7 +103,8 @@ class AgentWatchIndicator extends PanelMenu.Button {
             return;
         }
         const lines = (j.tooltip || '').split('\n').filter(l => l.length > 0);
-        this._render(j.text || '', lines, cls);
+        const headroom = j.headroom || {};
+        this._render(j.text || '', lines, cls, headroom);
     }
 
     // setEmpty hides the indicator (no live sessions / daemon down).
@@ -95,27 +113,56 @@ class AgentWatchIndicator extends PanelMenu.Button {
         this.menu.close();
     }
 
-    _render(text, lines, cls) {
+    _render(text, lines, cls, headroom) {
         this._icon.icon_name = iconForClass(cls);
         this._icon.style_class = styleClassForClass(cls);
         this._label.text = text;
-        this._rebuildMenu(lines);
+        this._rebuildMenu(lines, headroom);
         this.visible = true;
     }
 
-    _rebuildMenu(lines) {
+    _rebuildMenu(lines, headroom) {
         this.menu.removeAll();
         if (lines.length === 0) {
             const item = new PopupMenu.PopupMenuItem('No active sessions', {reactive: false});
             this.menu.addMenuItem(item);
             return;
         }
+
+        // Agent keys with budget headroom data, sorted for deterministic
+        // order. Also used to compute the exact compact headroom summary
+        // line status.go appends to tooltip (e.g. "claude 73%  codex 15%"),
+        // mirroring formatHeadroom in status.go, so that specific line can
+        // be recognized and skipped when parsing session rows below (it's
+        // rendered separately from the numeric `headroom` field instead).
+        // Empty string when there's no headroom data — never matches a real
+        // tooltip line, since tips are pre-filtered to non-empty lines.
+        const hKeys = Object.keys(headroom).sort();
+        const headroomLine = hKeys.map(a => `${a} ${headroomPercent(headroom[a])}%`).join('  ');
+
         for (const line of lines) {
+            // The known headroom summary line (computed above) is skipped
+            // by exact match. Any OTHER non-matching line still renders with
+            // the 'none' status fallback instead of being silently dropped,
+            // so a real regression stays visible rather than vanishing.
+            if (headroomLine !== '' && line === headroomLine)
+                continue;
             const status = statusOf(line);
             const body = line.replace(/\s*\([a-z-]+\)\s*$/, '');
             const item = new PopupMenu.PopupImageMenuItem(
                 body, iconForClass(status), {reactive: false});
             item._icon.add_style_class_name(`agentwatch-${status}`);
+            this.menu.addMenuItem(item);
+        }
+
+        // One dropdown row per agent with budget headroom data. Omitted
+        // entirely when the field is absent/empty — no headroom leaked into
+        // the menu.
+        for (const agent of hKeys) {
+            const pct = headroomPercent(headroom[agent]);
+            const item = new PopupMenu.PopupMenuItem(
+                `${agent} ${pct}%`, {reactive: false});
+            item.label.add_style_class_name(`agentwatch-headroom-${headroomClass(pct)}`);
             this.menu.addMenuItem(item);
         }
     }
