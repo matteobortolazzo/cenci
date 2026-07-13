@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Guards the byte-identity invariant documented in dev-sandbox/CLAUDE.md:
 # every fragments/*.dockerfile block must appear verbatim inside Dockerfile
-# (the monolith). Codex is skipped — it's monolith-only, no fragment.
+# (the monolith), including the Codex runtime required by per-repo images.
 #
 # Runs on the host — no Docker required, plain grep/diff.
 set -uo pipefail

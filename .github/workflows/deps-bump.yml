@@ -134,7 +134,7 @@ jobs:
             [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]
           }
 
-          # ── Codex CLI (monolith Dockerfile only, no fragment) ────────────
+          # ── Codex CLI (monolith Dockerfile + codex fragment) ───────────
           refresh_main
           LATEST=$(npm view @openai/codex version)
           if ! echo "$LATEST" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
@@ -152,8 +152,10 @@ jobs:
             else
               echo "Bumping Codex CLI: $CURRENT -> $LATEST"
               sed -i 's/^ARG CODEX_VERSION=.*/ARG CODEX_VERSION='"${LATEST}"'/' dev-sandbox/Dockerfile
+              sed -i 's/^ARG CODEX_VERSION=.*/ARG CODEX_VERSION='"${LATEST}"'/' dev-sandbox/fragments/codex.dockerfile
+              sed -i 's/^ARG CODEX_VERSION=.*/ARG CODEX_VERSION='"${LATEST}"'/' .agent-sand/Dockerfile
               # shellcheck disable=SC2016  # backticks are literal markdown; %s does the substitution
-              BODY=$(printf 'Bumps `CODEX_VERSION` from %s to %s.\n\nCodex is baked into the monolith image only (no fragment, per dev-sandbox/CLAUDE.md). Run `agent-sand --build` to pick up the new version — no `--build-base` needed.' "$CURRENT" "$LATEST")
+              BODY=$(printf 'Bumps `CODEX_VERSION` from %s to %s in the monolith Dockerfile, the Codex fragment used by generated per-repo images, and the generated sandbox image for this repository. Run `agent-sand --build` to pick up the new version — no `--build-base` needed.' "$CURRENT" "$LATEST")
               open_and_merge \
                 "codex-bump-v${LATEST}" \
                 "chore(dev-sandbox): bump Codex CLI to ${LATEST}" \

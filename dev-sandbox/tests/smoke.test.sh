@@ -119,6 +119,25 @@ else
 fi
 
 # ── Run the built image and assert every toolchain works ──────────
+# A generated per-repo image replaces the monolith whenever the repository
+# contains .agent-sand/Dockerfile, so it must carry the Codex agent runtime.
+echo "case: configured per-repo image includes a working Codex CLI"
+EXPECTED_CODEX_VERSION="$(sed -n 's/^ARG CODEX_VERSION=//p' "${SANDBOX_DIR}/fragments/codex.dockerfile")"
+# shellcheck disable=SC2016 # Expansion happens in the container, using the forwarded environment variable.
+if [[ -z "${EXPECTED_CODEX_VERSION}" ]]; then
+    fail "could not read the expected Codex version from fragments/codex.dockerfile"
+elif "${RUNTIME}" build --build-arg "BASE_VERSION=${BASE_TAG}" \
+    -t agent-sandbox-smoke-repo:latest \
+    -f "${REPO_ROOT}/.agent-sand/Dockerfile" "${REPO_ROOT}/.agent-sand" \
+    && "${RUNTIME}" run --rm --entrypoint /bin/bash \
+        -e "EXPECTED_CODEX_VERSION=${EXPECTED_CODEX_VERSION}" \
+        agent-sandbox-smoke-repo:latest -c \
+        'command -v codex && test "$(codex --version)" = "codex-cli ${EXPECTED_CODEX_VERSION}"'; then
+    pass
+else
+    fail "Codex CLI is missing, unusable, or stale in the configured per-repo image"
+fi
+
 # Regression guard for the libicu74 FailFast bug: if it regresses,
 # `dotnet --version` aborts and this whole chain short-circuits.
 echo "case: dotnet/node/go/uv/python3 all work inside agent-sandbox:latest"
