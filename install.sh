@@ -394,31 +394,107 @@ step_sandbox_setup() {
 	fi
 }
 
-# newest_cache_binary — path to the most recent agentwatch binary in the
-# version-pinned plugin cache, or empty if none is present yet (the plugin
-# bootstrap installs it on the first agent session). Mirrors the cache glob the
-# macOS SwiftBar widget's resolve_bin uses.
-newest_cache_binary() {
-	local newest="" g
-	for g in "$HOME"/.claude/plugins/cache/*/agentwatch/*/bin/agentwatch; do
-		[ -x "$g" ] || continue
-		if [ -z "$newest" ] || [ "$g" -nt "$newest" ]; then
-			newest="$g"
+# newest_agentwatch_root — path to the most recently installed version-pinned
+# Claude plugin cache root. Plugin updates refresh the active manifest, making
+# it a reliable selector even before that version's binary has bootstrapped.
+newest_agentwatch_root() {
+	local newest_manifest="" manifest
+	for manifest in "$HOME"/.claude/plugins/cache/*/agentwatch/*/.claude-plugin/plugin.json; do
+		[ -f "$manifest" ] || continue
+		if [ -z "$newest_manifest" ] || [ "$manifest" -nt "$newest_manifest" ]; then
+			newest_manifest="$manifest"
 		fi
 	done
-	[ -n "$newest" ] && printf '%s\n' "$newest"
+	[ -n "$newest_manifest" ] && dirname "$(dirname "$newest_manifest")"
+}
+
+# cached_agentwatch_binary returns the binary belonging to the active plugin
+# cache when SessionStart has already provisioned it.
+cached_agentwatch_binary() {
+	local root bin
+	root="$(newest_agentwatch_root || true)"
+	[ -n "$root" ] || return 1
+	bin="$root/bin/agentwatch"
+	[ -x "$bin" ] || return 1
+	printf '%s\n' "$bin"
+}
+
+# current_agentwatch_binary provisions and returns the binary belonging to the
+# active plugin cache. Updates cannot rely on a later SessionStart hook: an old
+# daemon may continue owning the sockets indefinitely.
+current_agentwatch_binary() {
+	local root bootstrap
+	if cached_agentwatch_binary; then
+		return 0
+	fi
+	root="$(newest_agentwatch_root || true)"
+	[ -n "$root" ] || return 1
+	bootstrap="$root/hooks/bootstrap.sh"
+	if [ -f "$bootstrap" ]; then
+		CLAUDE_PLUGIN_ROOT="$root" sh "$bootstrap" >/dev/null 2>&1 || true
+	fi
+	cached_agentwatch_binary
+}
+
+# restart_agentwatch_daemon replaces the standard plugin-managed daemon after
+# an explicit update. SIGTERM lets it restore tmux state and remove its sockets
+# before the updated binary starts.
+restart_agentwatch_daemon() {
+	local bin="$1" i pid
+	if ! have pkill || ! have pgrep; then
+		warn "pkill/pgrep unavailable — restart agentwatch manually to finish the update"
+		return 0
+	fi
+
+	pkill -TERM -f '[/]agentwatch daemon$' >/dev/null 2>&1 || true
+	i=0
+	while pgrep -f '[/]agentwatch daemon$' >/dev/null 2>&1 && [ "$i" -lt 30 ]; do
+		sleep 0.1
+		i=$((i + 1))
+	done
+	if pgrep -f '[/]agentwatch daemon$' >/dev/null 2>&1; then
+		fail "the previous agentwatch daemon did not stop; restart it manually"
+		INSTALL_FAILED=1
+		return 0
+	fi
+
+	nohup "$bin" daemon >/dev/null 2>&1 &
+	pid=$!
+	sleep 0.2
+	if kill -0 "$pid" 2>/dev/null; then
+		ok "restarted agentwatch with the updated binary"
+	else
+		fail "the updated agentwatch daemon did not stay running"
+		INSTALL_FAILED=1
+	fi
 }
 
 step_agentwatch_setup() {
 	selected agentwatch || return 0
 	step "Setting up agentwatch"
+	local cache_bin=""
+	if [ "$MODE" = update ]; then
+		cache_bin="$(current_agentwatch_binary || true)"
+	else
+		cache_bin="$(cached_agentwatch_binary || true)"
+	fi
 
 	ok "the binary and daemon self-bootstrap on your first agent session"
 	say "  ${DIM}first session may take a moment before status appears; log: \${TMPDIR:-/tmp}/agentwatch-bootstrap.log${RESET}"
 
 	if [ "$OS" != macos ]; then
-		setup_agentwatch_linux_path
+		setup_agentwatch_linux_path "$cache_bin"
+		if [ "$MODE" = update ] && [ -n "$cache_bin" ]; then
+			restart_agentwatch_daemon "$cache_bin"
+		elif [ "$MODE" = update ]; then
+			warn "updated agentwatch binary is not available yet; the next agent session will bootstrap it"
+		fi
 		return 0
+	fi
+	if [ "$MODE" = update ] && [ -n "$cache_bin" ]; then
+		restart_agentwatch_daemon "$cache_bin"
+	elif [ "$MODE" = update ]; then
+		warn "updated agentwatch binary is not available yet; the next agent session will bootstrap it"
 	fi
 
 	# macOS menu bar (SwiftBar) — optional, and the fiddliest manual step, so
@@ -450,8 +526,7 @@ step_agentwatch_setup() {
 # itself. We keep a stable link on the user's writable PATH and, for GUI bars
 # that don't inherit ~/.local/bin, offer a one-time /usr/local/bin link.
 setup_agentwatch_linux_path() {
-	local user_link="$HOME/.local/bin/agentwatch" cache_bin
-	cache_bin="$(newest_cache_binary || true)"
+	local cache_bin="$1" user_link="$HOME/.local/bin/agentwatch"
 
 	# Ensure the bootstrap-maintained user link exists now. The plugin bootstrap
 	# re-points it on version bumps, so pinning the current cache path is fine;
