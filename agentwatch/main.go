@@ -25,6 +25,10 @@ import (
 	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/tmux"
 )
 
+// version is stamped at build time via -ldflags "-X main.version=<ver>".
+// It defaults to "dev" for local/test builds.
+var version = "dev"
+
 func main() {
 	if len(os.Args) < 2 {
 		runDaemon(os.Args[1:])
@@ -41,6 +45,8 @@ func main() {
 		runRun(os.Args[2:])
 	case "dispatch":
 		runDispatch(os.Args[2:])
+	case "version", "--version", "-version":
+		runVersion()
 	default:
 		if strings.HasPrefix(os.Args[1], "-") {
 			// Flags like -v go to daemon.
@@ -50,6 +56,13 @@ func main() {
 		fmt.Fprintf(os.Stderr, "agentwatch: unknown subcommand %q\n", os.Args[1])
 		os.Exit(2)
 	}
+}
+
+// runVersion prints the binary's stamped version and exits 0. It performs no
+// side effects (no daemon start, no config load, no dispatch pass), so it is
+// safe to use as a capability/version probe.
+func runVersion() {
+	fmt.Printf("agentwatch %s\n", version)
 }
 
 func runDaemon(args []string) {
@@ -227,7 +240,7 @@ func runRun(args []string) {
 }
 
 func runDispatch(args []string) {
-	if len(args) > 0 {
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		switch args[0] {
 		case "enroll":
 			runDispatchEnroll(args[1:])
@@ -238,6 +251,13 @@ func runDispatch(args []string) {
 		case "status":
 			runDispatchStatus(args[1:])
 			return
+		default:
+			// A stale/rebuilt binary invoked with a typo'd verb (e.g. "statas")
+			// must never silently fall through to a real dispatch pass: Go's
+			// flag parser stops at the first positional and would otherwise
+			// discard everything after it, including --json/--dir.
+			fmt.Fprintf(os.Stderr, "agentwatch dispatch: unknown subcommand %q\n", args[0])
+			os.Exit(2)
 		}
 	}
 
@@ -248,6 +268,14 @@ func runDispatch(args []string) {
 	reconcile := fs.Bool("reconcile", false, "run a single failure-reconciliation pass instead of a dispatch pass (cron path)")
 	configPath := fs.String("config", "", "path to config.json (default: $XDG_CONFIG_HOME/agentwatch/config.json)")
 	_ = fs.Parse(args)
+
+	// Any positional left after flag parsing is unexpected: the flag parser
+	// stops at the first non-flag token, so a trailing typo or stray argument
+	// would otherwise be silently swallowed along with any flags after it.
+	if extra := fs.Args(); len(extra) > 0 {
+		fmt.Fprintf(os.Stderr, "agentwatch dispatch: unexpected argument %q\n", extra[0])
+		os.Exit(2)
+	}
 
 	cfg, err := dispatch.LoadConfig(*configPath)
 	if err != nil {
