@@ -32,7 +32,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
 
 USER dev
 
-ARG GO_VERSION=1.24.1
+ARG GO_VERSION=1.26.5
 
 USER root
 
