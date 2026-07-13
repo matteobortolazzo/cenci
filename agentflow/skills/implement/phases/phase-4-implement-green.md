@@ -37,7 +37,7 @@ Pass:
 
 ## Rules
 
-- Follow the approved plan exactly.
+- Follow the plan exactly.
 - Make tests pass with the simplest correct implementation.
 - Consult only relevant `docs/<topic>.md` files.
 - Honor `CLAUDE.md` and `README.md`; update docs if behavior, setup, configuration, or user-visible contracts change.

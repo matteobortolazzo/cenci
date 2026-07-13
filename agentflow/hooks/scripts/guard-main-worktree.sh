@@ -3,11 +3,11 @@
 # repos configured for agentflow (gated on .claude/config.json below).
 # File changes must land inside a feature worktree (.worktrees/) so they ship
 # in PRs. This catches subagents that accidentally use relative paths, and
-# planning sessions that touch source files before a plan is approved —
+# planning sessions that touch source files before a plan is saved —
 # permission rules cannot enforce this under --dangerously-skip-permissions,
 # but hooks still run.
 # Writes that legitimately live in the main worktree are allowlisted below:
-# approved plans (.plans/), agentflow config (.claude/), design artifacts
+# saved plans (.plans/), agentflow config (.claude/), design artifacts
 # (designs/, *.pen, DESIGN.md), repo meta files configure manages
 # (.gitignore, .mcp.json, CLAUDE.md), and temp paths.
 
@@ -29,7 +29,7 @@ fi
 case "$FILE_PATH" in
   # Feature worktrees — the intended write target
   */.worktrees/* | .worktrees/*) exit 0 ;;
-  # Approved-plan persistence (implement Phase 1)
+  # Plan persistence (implement Phase 1)
   */.plans/* | .plans/*) exit 0 ;;
   # Temp paths: body files, context bundles, attachments, scratchpads
   /tmp/* | /private/tmp/* | /var/folders/* | */agentflow/attachments/*) exit 0 ;;

@@ -44,7 +44,7 @@ Codex so it does not mistake a pipeline command for a supported workflow.
 | `babysit` | Yes | No | Claude loop scheduling and slash commands |
 | `configure` | Yes | No | Writes Claude settings and plugin configuration |
 | `design` | Yes | No | Claude interactive gates and Pencil integration |
-| `implement` | Yes | No | Claude subagents, hooks, goals, and approval gates |
+| `implement` | Yes | No | Claude subagents, hooks, goals, and human gates |
 | `refactor` | Yes | No | Claude analysis subagents and ticket workflow |
 | `refine` | Yes | No | Claude interactive refinement gate |
 | `review` | Yes | No | Claude specialized reviewer subagents |
@@ -213,7 +213,7 @@ Lessons are routed by topic (`docs/caching.md`, `docs/migrations.md`, …) rathe
 
 When you run `/agentflow:implement <ticket-id>`, the pipeline executes these phases:
 
-1. **Plan** — Context-gatherer agent bundles the ticket, design, and project context into a file (only a short digest enters the main context); planner agent reads the bundle, analyzes the codebase, and proposes an implementation plan (waits for your approval).
+1. **Plan** — Context-gatherer agent bundles the ticket, design, and project context into a file (only a short digest enters the main context); planner agent reads the bundle, analyzes the codebase, and asks clarifying questions where your answers would change the plan; once none remain, the plan is saved directly — no approval prompt — and presented for you to review before launching implementation.
 2. **Worktree Setup** — Creates an isolated git worktree for the feature branch
 3. **Test First (Red)** — Implementer agent writes failing tests
 4. **Implement (Green)** — Implementer agent makes tests pass; UI tickets also get visual verification, with final screenshots persisted for the PR
@@ -232,20 +232,20 @@ The skills drive a ticket through a label-based state machine (`gh issue edit`).
 | `Refined` | `/agentflow:refine` | Scoped and ready for design/implementation |
 | `Design` | `/agentflow:refine` | Design-only ticket — the deliverable is a design spec, not code |
 | `Designed` | `/agentflow:design` | Design spec approved — propagated from the completed design ticket to the implementation tickets that depend on it |
-| `Planned` | `/agentflow:implement` — Phase 1, at plan approval | Approved plan on disk (`.plans/`), ready to pick up |
+| `Planned` | `/agentflow:implement` — Phase 1, when the plan is persisted | Plan on disk (`.plans/`), ready to pick up |
 | `Working` | `/agentflow:implement` — at pipeline start | Actively being implemented |
 | `In Review` | `/agentflow:implement` — Phase 9, at PR-open | PR is open, under review / CI running |
 | `Implemented` | `/agentflow:babysit` — on PR merge | PR merged — done |
 
-Full lifecycle: `New → Refined → [Designed] → Planned → Working → In Review → Implemented`. **Design always happens on a dedicated design ticket**: when a frontend ticket lacks an approved design, `/agentflow:refine` creates a `Design`-labeled companion ticket (or leads a split with a design child) that the implementation ticket depends on. `/agentflow:implement` redirects `Design` tickets to `/agentflow:design`, which commits the spec on main, propagates `Designed` to the dependent implementation tickets (satisfying implement's design gate), and closes the design ticket (`New → Refined → Designed → closed`; no PR — the one exception to "1 ticket = 1 PR"). On the board, the `Designed` column holds implementation tickets whose design is ready. A planning session ends on **`Planned`** — an approved plan sits in `.plans/`, waiting; picking it up with `/agentflow:implement .plans/<file>` swaps `Planned → Working`. Opening the PR (Phase 9) only advances the ticket to **`In Review`**; the transition to **`Implemented`** happens when the PR merges — [babysit](#babysitting-a-pr) performs that swap using the merged PR's `closingIssuesReferences`. (`configure` documents these labels but does not create them; add the matching columns to your board.)
+Full lifecycle: `New → Refined → [Designed] → Planned → Working → In Review → Implemented`. **Design always happens on a dedicated design ticket**: when a frontend ticket lacks an approved design, `/agentflow:refine` creates a `Design`-labeled companion ticket (or leads a split with a design child) that the implementation ticket depends on. `/agentflow:implement` redirects `Design` tickets to `/agentflow:design`, which commits the spec on main, propagates `Designed` to the dependent implementation tickets (satisfying implement's design gate), and closes the design ticket (`New → Refined → Designed → closed`; no PR — the one exception to "1 ticket = 1 PR"). On the board, the `Designed` column holds implementation tickets whose design is ready. A planning session ends on **`Planned`** — a saved plan sits in `.plans/`, waiting; picking it up with `/agentflow:implement .plans/<file>` swaps `Planned → Working`. Opening the PR (Phase 9) only advances the ticket to **`In Review`**; the transition to **`Implemented`** happens when the PR merges — [babysit](#babysitting-a-pr) performs that swap using the merged PR's `closingIssuesReferences`. (`configure` documents these labels but does not create them; add the matching columns to your board.)
 
 ### Autopilot (goal-driven completion)
 
-Planning stops for your approval (Phase 1); once approved, phases 2–9 run unattended through to an open PR. But a turn that stops mid-phase — a context limit, a transient tool error — would otherwise just end the run with the work half-done.
+Planning ends with a saved plan presented for your review (Phase 1); once you launch the plan-file run, phases 2–9 run unattended through to an open PR. But a turn that stops mid-phase — a context limit, a transient tool error — would otherwise just end the run with the work half-done.
 
 When Claude Code is **≥ 2.1.139**, the pipeline closes that gap with the native [`/goal`](https://code.claude.com/docs/en/goal) command. At the start of Phase 2 (plan-file mode only) it arms a completion condition — "the plan `.plans/<id>.md` is implemented and a PR exists" — so any mid-phase stop restarts instead of ending. The goal is cleared automatically in Phase 9 once the PR is created, and at any error gate that hands control back to you (rebase conflict, repeated build failure, an ambiguous reviewer finding), so a genuine blocker never loops.
 
-- **Plan approval is the human gate that arms it.** No goal is ever set in a planning session — approving the plan authorizes the autonomous run, and the goal is armed only when you launch `/agentflow:implement .plans/<id>.md`.
+- **Launching the plan-file run is the human gate that arms it.** No goal is ever set in a planning session — reviewing the saved plan and launching `/agentflow:implement .plans/<id>.md` authorizes the autonomous run, and that is when the goal is armed.
 - **The condition references the plan file**, matching the SessionStart hook that reminds you of pending `.plans/` — a still-present plan file means "not done."
 - **Graceful on older runtimes.** Below 2.1.139 (or if `/goal` is unavailable) the pipeline behaves exactly as before — it just prints a one-line notice and runs without the completion guarantee.
 - **Stall cap.** The armed condition also carries a fixed 20-turn cap — if the goal restarts the turn more than 20 times without the pipeline advancing to a new phase, it stops retrying, clears itself, and reports the stall instead of looping forever.
@@ -361,7 +361,7 @@ The plugin uses specialized agents with isolated contexts:
 | **security-analyzer** | OWASP audit for `/agentflow:refactor` | sonnet | high (pinned) | plan (read-only) |
 | **lessons-collector** | Routes genuine mistakes to `docs/<topic>.md` or `CLAUDE.md` | haiku | n/a (haiku) | acceptEdits |
 
-**Model & effort tiering**: Opus where judgment is concentrated — `/agentflow:refine` and `/agentflow:design` pin `model: opus` because scope, acceptance criteria, splits, and UX structure drive everything downstream, and the **planner** and **security-reviewer** agents run opus because the approved plan steers the whole unattended pipeline and a missed vulnerability is the costliest review failure. Sonnet for pipeline orchestration and implementation (`/agentflow:implement` pins `model: sonnet`; `/agentflow:babysit` pins `model: sonnet` so long-lived loop ticks stay cheap). Haiku for mechanical work — context-gatherer, structure-analyzer, lessons-collector, and `/agentflow:sync`.
+**Model & effort tiering**: Opus where judgment is concentrated — `/agentflow:refine` and `/agentflow:design` pin `model: opus` because scope, acceptance criteria, splits, and UX structure drive everything downstream, and the **planner** and **security-reviewer** agents run opus because the saved plan steers the whole unattended pipeline and a missed vulnerability is the costliest review failure. Sonnet for pipeline orchestration and implementation (`/agentflow:implement` pins `model: sonnet`; `/agentflow:babysit` pins `model: sonnet` so long-lived loop ticks stay cheap). Haiku for mechanical work — context-gatherer, structure-analyzer, lessons-collector, and `/agentflow:sync`.
 
 Effort is the second lever: model picks how *capable* the agent is (failures that look like "it didn't know enough"), effort picks how *thorough* it is (failures that look like "it didn't try hard enough"). Subagents inherit the **session** effort level by default, so a session running at low effort would silently degrade the unattended pipeline's planning, implementation, and reviews. Every non-haiku agent therefore pins `effort: high` — thoroughness is guaranteed regardless of the session setting. Skills deliberately stay unpinned: they run during interactive phases, where the user's session effort preference should win. Haiku agents can't be tuned — haiku doesn't support effort.
 

@@ -106,7 +106,7 @@ penFile: <path>
 
 The parsed lists at the top of `## Design Context` are mandatory when a DESIGN.md was found — Phase 4 of the implement pipeline reads them directly from the plan file. If no design exists, write `## Design Context` followed by `N/A`.
 
-These headings match the plan file format — the main agent appends this bundle verbatim when persisting the approved plan.
+These headings match the plan file format — the main agent appends this bundle verbatim when persisting the plan.
 
 ## Digest (your final output)
 
