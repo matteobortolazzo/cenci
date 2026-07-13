@@ -48,14 +48,13 @@ layers on the runtime stacks in order: .NET, Node, Go, then Codex last (Codex bu
 daily via the deps-bump workflow, so keeping it last avoids invalidating the other
 stacks' layer cache on every bump).
 
-`fragments/*.dockerfile` holds the same per-stack blocks (`dotnet`, `node`, `go`, `python`,
-`rust`) as standalone snippets, for a future composition tool that assembles per-project
-images. **Invariant:** until that composition tool exists, each fragment and its
+`fragments/*.dockerfile` holds the same composable blocks (`dotnet`, `node`, `go`, `python`,
+`rust`, `codex`) as standalone snippets used to assemble per-project images. Generated
+images always include Node and Codex so either supported agent can launch; the remaining
+fragments follow the detected project stack. **Invariant:** each fragment and its
 corresponding block in `Dockerfile` must stay byte-identical — hand-duplicated on every
 change (e.g. bumping `DOTNET_SDK_VERSION` or adding a package to a stack block means
-editing both `Dockerfile` and `fragments/<stack>.dockerfile` identically). `Codex` is the
-one exception: it's monolith-only (no fragment), since it isn't part of the composable
-per-project stack set.
+editing both `Dockerfile` and `fragments/<stack>.dockerfile` identically).
 
 ## Dependency version pins
 Image dependency versions are pinned via Dockerfile `ARG`s, all checked daily by
@@ -63,7 +62,7 @@ Image dependency versions are pinned via Dockerfile `ARG`s, all checked daily by
 
 - **Auto-bumped, auto-merged** — one auto-merged PR per outdated dependency, then the
   agent-sandbox rebuild is dispatched once the merge lands:
-  - `CODEX_VERSION` — `Dockerfile` (monolith only).
+  - `CODEX_VERSION` — `Dockerfile` **and** `fragments/codex.dockerfile` (both stamped, kept in sync).
   - `GO_VERSION` — `Dockerfile` **and** `fragments/go.dockerfile` (both stamped, kept in sync).
   - `UV_VERSION` — `Dockerfile.base`.
 - **Auto-proposed, in-band auto-merges / out-of-band opens a manual-merge PR**:

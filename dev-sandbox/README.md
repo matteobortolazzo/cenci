@@ -175,7 +175,8 @@ are provisioned differently: **Claude** is bind-mounted from the host (self-cont
 so the container always matches your host version). **Codex** is baked into the image — it ships
 as an npm launcher that resolves a native binary nested in its own `node_modules`, which a
 single-file bind-mount can't carry. Updating Codex therefore means bumping `CODEX_VERSION` in
-the Dockerfile and rebuilding (`agent-sand --build`), whereas updating Claude needs no rebuild.
+the monolith and Codex fragment, regenerating any tailored repo Dockerfile, and rebuilding
+(`agent-sand --build`), whereas updating Claude needs no rebuild.
 
 ## First-Run Setup
 
@@ -296,11 +297,10 @@ The image is built in two layers:
   (default `latest`). Layers the runtime stacks on top: .NET SDK, Node.js, Go, Codex CLI
   (ordered last since it changes most often). This is the image `agent-sand` actually runs.
 
-`dev-sandbox/fragments/*.dockerfile` holds the same per-stack blocks (`dotnet`, `node`,
-`go`, `python`, `rust`) as standalone snippets for future per-project image composition.
-They are **not** built or composed automatically yet — that lands in a follow-up PR. Until
-then, each fragment and its corresponding block in `Dockerfile` are kept byte-identical by
-hand; when you change one, change the other the same way.
+`dev-sandbox/fragments/*.dockerfile` holds the same composable blocks (`dotnet`, `node`,
+`go`, `python`, `rust`, `codex`) used for per-project image composition. Each fragment and
+its corresponding block in `Dockerfile` are kept byte-identical by hand; when you change
+one, change the other the same way.
 
 ### Per-repo images
 
@@ -317,7 +317,9 @@ that repo).
 
 `/agentflow:configure` generates and maintains `.agent-sand/Dockerfile` automatically
 from the repo's detected stack (question 9) — you normally don't hand-write this file.
-It writes only the fragments the detected stack needs, wrapped in
+Every generated image includes the Node and Codex fragments so `agent-sand --agent codex`
+works in tailored images; it adds the remaining fragments required by the detected stack.
+The fragments are wrapped in
 `# agentflow:managed-begin` / `# agentflow:managed-end` markers so re-running configure
 regenerates just that block and preserves anything the team appends around it.
 
@@ -432,7 +434,8 @@ docker stop claude-sand-my-repo
 Edit the `ARG` line for the stack you want to bump:
 
 - `DOTNET_SDK_VERSION`, `NODE_MAJOR`, `CODEX_VERSION`, `GO_VERSION` live in `Dockerfile`
-  (the monolith layers on top of the base).
+  (the monolith layers on top of the base). Stack fragments mirror their corresponding
+  pins, including `fragments/codex.dockerfile` for generated per-repo images.
 - `UV_VERSION` lives in `Dockerfile.base` — bump it and run `agent-sand --build-base`
   first, then rebuild the monolith.
 
@@ -463,14 +466,13 @@ volume if none is running.
 
 ### Update Codex
 
-Codex is baked into the image, so updating it means bumping `CODEX_VERSION` in the
-`Dockerfile` and rebuilding (`agent-sand --build`). Unlike Claude, updating Codex on the host
-has no effect on the container.
+Codex is baked into the image, so updating it means bumping `CODEX_VERSION` in the monolith
+and `fragments/codex.dockerfile`, regenerating tailored repo Dockerfiles, and rebuilding
+(`agent-sand --build`). Unlike Claude, updating Codex on the host has no effect on the container.
 
-A scheduled workflow (`.github/workflows/codex-version-bump.yml`) checks for new
-Codex releases daily, opens a PR bumping `CODEX_VERSION`, and auto-merges it —
-no manual bumping needed. Run `agent-sand --build` to pick up the new version
-on your next rebuild (monolith image only).
+A scheduled workflow checks for new Codex releases daily, opens a PR bumping
+`CODEX_VERSION` in both the monolith and Codex fragment, and auto-merges it — no manual
+bumping needed. Run `agent-sand --build` to pick up the new version in either image type.
 
 ### Reset an instance
 
