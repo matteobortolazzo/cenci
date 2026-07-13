@@ -403,12 +403,16 @@ If `agentwatch` is installed on the host, the script automatically:
   lazily on the first host session, which used to leave containers created
   right after boot without any wiring) and warns if the socket never appears
 - Bind-mounts the `agentwatch` binary (read-only)
-- Bind-mounts the events socket so hooks can reach the host daemon
+- Bind-mounts the events socket directory (read-only) so hooks can reach the
+  host daemon — mounting the directory rather than the socket file means the
+  wiring survives a host daemon restart, since the container follows the host
+  path to the daemon's fresh socket instead of pinning the inode that existed
+  at container creation
 - Passes `$TMUX_PANE` for tmux window status updates
 
 A container's mounts are fixed for its whole lifetime. If the shared container
-was created while the events socket was unavailable, later launches warn that
-its sessions won't report to the host status bars; stop the container
+was created while the events socket directory was unavailable, later launches
+warn that its sessions won't report to the host status bars; stop the container
 (`docker stop <name>`) and relaunch to restore the wiring.
 
 No manual install is needed inside the container. The launcher passes the selected

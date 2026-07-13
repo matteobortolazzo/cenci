@@ -340,8 +340,34 @@ if [[ "${AGENT}" == claude ]]; then
 fi
 
 # ── Resolve agentwatch (optional) ─────────────────────────────────
+# Container-side mount point for the host socket directory (matches the 'dev'
+# user's uid 1000, so its XDG_RUNTIME_DIR lands here regardless of the host
+# uid). Named once and reused everywhere the destination path matters.
+AGENTWATCH_SOCKET_MOUNT_DEST="/run/user/1000/agentwatch"
 AGENTWATCH_BIN="$(readlink -f "$(which agentwatch)" 2>/dev/null || true)"
-AGENTWATCH_EVENTS_SOCKET="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/agentwatch-events.sock"
+AGENTWATCH_SOCKET_DIR=""
+AGENTWATCH_SOCKET_DIR_FAILED=false
+if [[ -x "${AGENTWATCH_BIN}" ]]; then
+    # Bounded (5s) so a hung CLI can't hang the whole launcher, and stderr is
+    # captured separately so a genuine failure isn't silently indistinguishable
+    # from agentwatch simply not being set up yet.
+    AGENTWATCH_SOCKET_DIR_ERR_FILE="$(mktemp)"
+    if AGENTWATCH_SOCKET_DIR="$(timeout 5s "${AGENTWATCH_BIN}" socket-dir 2>"${AGENTWATCH_SOCKET_DIR_ERR_FILE}")"; then
+        :
+    else
+        AGENTWATCH_SOCKET_DIR_STATUS=$?
+        AGENTWATCH_SOCKET_DIR=""
+        AGENTWATCH_SOCKET_DIR_FAILED=true
+        AGENTWATCH_SOCKET_DIR_ERR="$(cat "${AGENTWATCH_SOCKET_DIR_ERR_FILE}")"
+        if [[ "${AGENTWATCH_SOCKET_DIR_STATUS}" -eq 124 ]]; then
+            echo "Warning: 'agentwatch socket-dir' timed out after 5s; skipping agentwatch wiring for this launch." >&2
+        else
+            echo "Warning: 'agentwatch socket-dir' failed (exit ${AGENTWATCH_SOCKET_DIR_STATUS}): ${AGENTWATCH_SOCKET_DIR_ERR}" >&2
+        fi
+    fi
+    rm -f "${AGENTWATCH_SOCKET_DIR_ERR_FILE}"
+fi
+AGENTWATCH_EVENTS_SOCKET="${AGENTWATCH_SOCKET_DIR}/agentwatch-events.sock"
 AGENTWATCH_AVAILABLE=false
 
 # The host daemon starts lazily (the first `agentwatch notify` from a host
@@ -351,7 +377,7 @@ AGENTWATCH_AVAILABLE=false
 # is long-lived and later launches only exec into it (#195). Start the daemon
 # ourselves (a redundant start is a no-op thanks to its already-running guard)
 # and wait briefly for the socket to appear.
-if [[ -x "${AGENTWATCH_BIN}" && ! -S "${AGENTWATCH_EVENTS_SOCKET}" ]]; then
+if [[ -n "${AGENTWATCH_SOCKET_DIR}" && ! -S "${AGENTWATCH_EVENTS_SOCKET}" ]]; then
     nohup "${AGENTWATCH_BIN}" daemon >/dev/null 2>&1 &
     for _ in {1..30}; do
         [[ -S "${AGENTWATCH_EVENTS_SOCKET}" ]] && break
@@ -359,9 +385,9 @@ if [[ -x "${AGENTWATCH_BIN}" && ! -S "${AGENTWATCH_EVENTS_SOCKET}" ]]; then
     done
 fi
 
-if [[ -x "${AGENTWATCH_BIN}" && -S "${AGENTWATCH_EVENTS_SOCKET}" ]]; then
+if [[ -n "${AGENTWATCH_SOCKET_DIR}" && -S "${AGENTWATCH_EVENTS_SOCKET}" ]]; then
     AGENTWATCH_AVAILABLE=true
-elif [[ -x "${AGENTWATCH_BIN}" ]]; then
+elif [[ -x "${AGENTWATCH_BIN}" && "${AGENTWATCH_SOCKET_DIR_FAILED}" == false ]]; then
     echo "Warning: agentwatch is installed but its events socket is unavailable; sessions in this container will not report to the host status bars." >&2
 fi
 
@@ -411,7 +437,7 @@ wait_until_ready() {
 warn_if_unwired() {
     "${AGENTWATCH_AVAILABLE}" || return 0
     if ! "${RUNTIME}" inspect --format '{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}}' "${CONTAINER_NAME}" 2>/dev/null \
-        | grep -qx '/run/user/1000/agentwatch-events.sock'; then
+        | grep -qx "${AGENTWATCH_SOCKET_MOUNT_DEST}"; then
         echo "Warning: container '${CONTAINER_NAME}' was created without agentwatch wiring; its sessions will not report to the host status bars. Run '${RUNTIME} stop ${CONTAINER_NAME}' and relaunch to fix." >&2
     fi
 }
@@ -489,7 +515,7 @@ done
 if "${AGENTWATCH_AVAILABLE}"; then
     RUN_ARGS+=(
         -v "${AGENTWATCH_BIN}:/usr/local/bin/agentwatch:ro"
-        -v "${AGENTWATCH_EVENTS_SOCKET}:/run/user/1000/agentwatch-events.sock"
+        -v "${AGENTWATCH_SOCKET_DIR}:${AGENTWATCH_SOCKET_MOUNT_DEST}:ro"
         -e "XDG_RUNTIME_DIR=/run/user/1000"
         -e "TMUX_PANE=${TMUX_PANE:-}"
     )
