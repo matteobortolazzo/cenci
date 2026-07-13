@@ -242,9 +242,14 @@ agentwatch dispatch --reconcile
 | `--reconcile` | Run one failure-reconciliation pass instead of a dispatch pass (see [Failure reconciliation](#failure-reconciliation)); pair with a cron entry |
 | `--dry-run` | Print the decision (or reconciliation) table and mutate nothing |
 | `--config <path>` | Config file (default: `$XDG_CONFIG_HOME/agentwatch/config.json`) |
+| `--model <model>` | Model override for every session dispatched this pass — overrides `dispatch.model` and `agents.*.model` in `config.json`. With `--interval`, re-applied on every tick (a config reload can't drop it). |
 
 Every ticket yields exactly one logged decision — dispatched or skipped, always with
-a reason — so nothing fails silently.
+a reason — so nothing fails silently. When a model is pinned (via `--model` or
+`dispatch.model`), the resolved value is logged once per pass
+(`dispatch: model override "..."`), so a dispatched session's model is never a
+silent surprise — without a pin, it falls back to `agents.*.model`, or otherwise
+whatever ambient default the agent CLI itself resolves.
 
 ### Enrollment (`agentwatch dispatch enroll|unenroll|status`)
 
@@ -327,6 +332,7 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
     "retryBudget": 2,
     "daemonInterval": "5m",
     "defaultAgent": "claude",
+    "model": "claude-sonnet-5",
     "agentPreference": ["claude", "codex"],
     "agentBudgetFloors": { "claude": 0.1, "codex": 0.1 },
     "agentLimits": {
@@ -350,6 +356,7 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 | `retryBudget` | `2` | Retries (`Working` → `Planned`) a stranded ticket gets before it is marked `dispatch-failed`; an explicit `0` disables retries |
 | `daemonInterval` | none | When set, the daemon runs the embedded dispatch + reconcile loop on this interval (Go duration string); unset leaves daemon behavior unchanged |
 | `defaultAgent` | `claude` | Agent used when a ticket has no `agent:<name>` label |
+| `model` | none | Model override for every dispatched session (overrides `agents.*.model`); the `--model` CLI flag overrides this. Pin this to avoid a dispatched session silently inheriting whatever ambient/account-level default model is active at spawn time |
 | `agentPreference` | none | Fallback agent order tried when the primary agent (label or `defaultAgent`) is out of budget; first agent with budget wins |
 | `agentBudgetFloors` | none | Per-agent budget floor (see [Usage budgets](#usage-budgets)); with `agentLimits` it is a headroom safety margin, without it a static `Remaining` where `0` pins the agent to "budget exhausted" |
 | `agentLimits` | none | Per-agent token caps enabling real usage accounting; each agent takes `fiveHourTokens` and/or `weeklyTokens` (omit or `0` to disable that window) |
