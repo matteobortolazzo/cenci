@@ -261,8 +261,10 @@ func readRawConfig(path string) (map[string]json.RawMessage, error) {
 	return top, nil
 }
 
-// writeRawConfig writes top to path atomically: a *.tmp sibling is written at
-// 0600 then renamed over the final path. Missing parent directories are
+// writeRawConfig writes top to path atomically: a randomized-name temp file
+// is written at 0600 in the same directory then renamed over the final path;
+// the randomized name (via os.CreateTemp) prevents a pre-planted symlink at a
+// predictable path from being followed. Missing parent directories are
 // created at 0700.
 func writeRawConfig(path string, top map[string]json.RawMessage) error {
 	data, err := json.MarshalIndent(top, "", "  ")
@@ -275,11 +277,24 @@ func writeRawConfig(path string, top map[string]json.RawMessage) error {
 		return fmt.Errorf("creating config dir %s: %w", dir, err)
 	}
 
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
+	base := filepath.Base(path)
+	tmp, err := os.CreateTemp(dir, base+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("creating temp config in %s: %w", dir, err)
+	}
+	tmpPath := tmp.Name()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("writing temp config %s: %w", tmpPath, err)
 	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("closing temp config %s: %w", tmpPath, err)
+	}
 	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("renaming temp config %s to %s: %w", tmpPath, path, err)
 	}
 	return nil

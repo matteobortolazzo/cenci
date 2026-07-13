@@ -702,6 +702,62 @@ func TestDispatchLoopOnOff_WritesConfigAndRendersSameAsStatus(t *testing.T) {
 	}
 }
 
+// TestDispatchLoopNoArgs_Exits2NeverMutatesConfig locks in that `agentwatch
+// dispatch loop` with no verb (here, a bare flag that starts with "-") hits
+// the "expected a subcommand" branch before any flag parsing, config read, or
+// socket dial: it must exit 2, print the exact usage error to stderr, leave
+// --config's path untouched (no file created), and never print a rendered
+// dispatch-state line (which would mean ResolveDispatchState ran).
+func TestDispatchLoopNoArgs_Exits2NeverMutatesConfig(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+
+	cmd := exec.Command(binaryPath, "dispatch", "loop", "--config", cfgPath)
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
+	}
+	if exitErr.ExitCode() != 2 {
+		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
+	}
+	if !strings.Contains(string(output), "agentwatch dispatch loop: expected a subcommand: on, off, or status") {
+		t.Errorf("stderr = %q, want to contain %q", output, "agentwatch dispatch loop: expected a subcommand: on, off, or status")
+	}
+	if _, statErr := os.Stat(cfgPath); !os.IsNotExist(statErr) {
+		t.Errorf("cfgPath = %s must not exist after a no-args `dispatch loop` (no config mutation), stat err = %v", cfgPath, statErr)
+	}
+	if strings.Contains(string(output), "Dispatch loop:") {
+		t.Errorf("output must not contain a rendered dispatch-state line (ResolveDispatchState must never run), got:\n%s", output)
+	}
+}
+
+// TestDispatchLoopUnknownVerb_Exits2NeverMutatesConfig locks in that
+// `agentwatch dispatch loop garbage` hits the `default` case of the verb
+// switch before SetLoopEnabled/ResolveDispatchState run: it must exit 2,
+// print the exact unknown-subcommand error to stderr, and leave --config's
+// path untouched (no file created).
+func TestDispatchLoopUnknownVerb_Exits2NeverMutatesConfig(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+
+	cmd := exec.Command(binaryPath, "dispatch", "loop", "garbage", "--config", cfgPath)
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
+	}
+	if exitErr.ExitCode() != 2 {
+		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
+	}
+	if !strings.Contains(string(output), `agentwatch dispatch loop: unknown subcommand "garbage"`) {
+		t.Errorf("stderr = %q, want to contain %q", output, `agentwatch dispatch loop: unknown subcommand "garbage"`)
+	}
+	if _, statErr := os.Stat(cfgPath); !os.IsNotExist(statErr) {
+		t.Errorf("cfgPath = %s must not exist after `dispatch loop garbage` (no config mutation), stat err = %v", cfgPath, statErr)
+	}
+}
+
 // TestDispatchStatusJSON_IncludesLoopKey locks in that `dispatch status
 // --json` gains a top-level "loop" key (a watch.DispatchState) while every
 // pre-existing key (repo, dir, enrolled) is still present and correct. Every
