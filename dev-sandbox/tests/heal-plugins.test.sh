@@ -545,6 +545,115 @@ else
     fail "expected no stamp without a claude binary"
 fi
 
+####################################################################
+# Codex plugin provisioning/update tests
+####################################################################
+
+make_fake_codex() {
+    cat > "${FAKE_BIN}/codex" <<'FAKE'
+#!/bin/bash
+echo "$*" >> "${CODEX_FAKE_LOG}"
+if [[ "${CODEX_FAKE_EXIT:-0}" -ne 0 ]]; then
+    exit "${CODEX_FAKE_EXIT}"
+fi
+case "$1 $2 $3" in
+    "plugin marketplace list")
+        [[ "${CODEX_FAKE_MARKETPLACE_PRESENT:-false}" == true ]] && echo "agent-stack /fake/agent-stack"
+        ;;
+    "plugin marketplace add")
+        export CODEX_FAKE_MARKETPLACE_PRESENT=true
+        ;;
+    "plugin marketplace upgrade") ;;
+    "plugin list "*)
+        [[ "${CODEX_FAKE_AGENTFLOW_PRESENT:-false}" == true ]] && echo "agentflow@agent-stack installed enabled"
+        [[ "${CODEX_FAKE_AGENTWATCH_PRESENT:-false}" == true ]] && echo "agentwatch@agent-stack installed enabled"
+        ;;
+    "plugin add agentflow@agent-stack")
+        export CODEX_FAKE_AGENTFLOW_PRESENT=true
+        ;;
+    "plugin add agentwatch@agent-stack")
+        export CODEX_FAKE_AGENTWATCH_PRESENT=true
+        ;;
+esac
+exit 0
+FAKE
+    chmod +x "${FAKE_BIN}/codex"
+}
+
+new_codex_case() {
+    CODEX_DIR="${WORK}/$1/codex"
+    mkdir -p "${CODEX_DIR}"
+    CODEX_FAKE_LOG="${WORK}/$1/codex.log"
+    : > "${CODEX_FAKE_LOG}"
+    export CODEX_FAKE_LOG
+    export CODEX_FAKE_MARKETPLACE_PRESENT=false
+    export CODEX_FAKE_AGENTFLOW_PRESENT=false
+    export CODEX_FAKE_AGENTWATCH_PRESENT=false
+    unset CODEX_FAKE_EXIT
+}
+
+codex_log_count() {
+    wc -l < "${CODEX_FAKE_LOG}" | tr -d ' '
+}
+
+echo
+echo "Codex plugin tests"
+
+new_codex_case codex-missing-all
+make_fake_codex
+echo "case: Codex provisions a missing marketplace and plugins"
+PATH="${FAKE_BIN}:${PATH}" provision_codex_plugins "${CODEX_DIR}" agent-stack matteobortolazzo/agent-stack agentflow agentwatch
+if grep -q '^plugin marketplace add matteobortolazzo/agent-stack$' "${CODEX_FAKE_LOG}"; then pass; else fail "Codex marketplace was not added"; fi
+if grep -q '^plugin add agentflow@agent-stack$' "${CODEX_FAKE_LOG}"; then pass; else fail "Codex agentflow was not installed"; fi
+if grep -q '^plugin add agentwatch@agent-stack$' "${CODEX_FAKE_LOG}"; then pass; else fail "Codex agentwatch was not installed"; fi
+
+new_codex_case codex-idempotent
+make_fake_codex
+export CODEX_FAKE_MARKETPLACE_PRESENT=true
+export CODEX_FAKE_AGENTFLOW_PRESENT=true
+export CODEX_FAKE_AGENTWATCH_PRESENT=true
+echo "case: Codex provisioning is idempotent"
+PATH="${FAKE_BIN}:${PATH}" provision_codex_plugins "${CODEX_DIR}" agent-stack matteobortolazzo/agent-stack agentflow agentwatch
+if ! grep -Eq '^plugin (marketplace add|add) ' "${CODEX_FAKE_LOG}"; then
+    pass
+else
+    fail "Codex provisioning mutated an already provisioned home: $(cat "${CODEX_FAKE_LOG}")"
+fi
+
+new_codex_case codex-ttl
+make_fake_codex
+export CODEX_FAKE_MARKETPLACE_PRESENT=true
+export CODEX_FAKE_AGENTFLOW_PRESENT=true
+export CODEX_FAKE_AGENTWATCH_PRESENT=true
+touch "${CODEX_DIR}/${STAMP_NAME}"
+echo "case: Codex fresh TTL stamp skips refresh"
+PATH="${FAKE_BIN}:${PATH}" update_codex_plugins "${CODEX_DIR}" agent-stack 30 agentflow agentwatch
+if [[ "$(codex_log_count)" -eq 0 ]]; then pass; else fail "Codex TTL did not skip all CLI calls"; fi
+
+new_codex_case codex-forced
+make_fake_codex
+export CODEX_FAKE_MARKETPLACE_PRESENT=true
+export CODEX_FAKE_AGENTFLOW_PRESENT=true
+export CODEX_FAKE_AGENTWATCH_PRESENT=true
+touch "${CODEX_DIR}/${STAMP_NAME}"
+echo "case: Codex ttl 0 refreshes marketplace and plugin caches"
+PATH="${FAKE_BIN}:${PATH}" update_codex_plugins "${CODEX_DIR}" agent-stack 0 agentflow agentwatch
+if grep -q '^plugin marketplace upgrade agent-stack$' "${CODEX_FAKE_LOG}"; then pass; else fail "Codex marketplace was not forcibly refreshed"; fi
+if grep -q '^plugin add agentflow@agent-stack$' "${CODEX_FAKE_LOG}"; then pass; else fail "Codex agentflow cache was not refreshed"; fi
+if grep -q '^plugin add agentwatch@agent-stack$' "${CODEX_FAKE_LOG}"; then pass; else fail "Codex agentwatch cache was not refreshed"; fi
+
+new_codex_case codex-fails
+make_fake_codex
+export CODEX_FAKE_EXIT=1
+echo "case: Codex CLI failures never block boot"
+if PATH="${FAKE_BIN}:${PATH}" provision_codex_plugins "${CODEX_DIR}" agent-stack matteobortolazzo/agent-stack agentflow agentwatch 2>/dev/null \
+    && PATH="${FAKE_BIN}:${PATH}" update_codex_plugins "${CODEX_DIR}" agent-stack 0 agentflow agentwatch 2>/dev/null; then
+    pass
+else
+    fail "Codex plugin helpers must remain non-fatal"
+fi
+unset CODEX_FAKE_EXIT
+
 # ── Summary ──────────────────────────────────────────────────────
 echo
 echo "passed: ${PASSES}, failed: ${FAILURES}"

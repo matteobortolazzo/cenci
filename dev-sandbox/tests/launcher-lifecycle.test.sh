@@ -69,6 +69,11 @@ if ! grep -Eq '^run .*--label agent-sand\.lifecycle=detached ' "${CALLS_FILE}"; 
     exit 1
 fi
 
+if ! grep -Eq '^run .* -e AGENT_SAND_AGENT=claude ' "${CALLS_FILE}"; then
+    echo "FAIL: selected agent was not forwarded to the new container" >&2
+    exit 1
+fi
+
 if ! grep -Eq '^exec -it -u dev .*claude-sand-.* claude --dangerously-skip-permissions -p test ' "${CALLS_FILE}"; then
     echo "FAIL: first agent was not launched through docker exec" >&2
     exit 1
@@ -92,6 +97,21 @@ READY_LINE="$(grep -n 'exec -u dev claude-sand-.* test -e /tmp/agent-sand-ready'
 AGENT_LINE="$(grep -n 'exec -it -u dev .* claude --dangerously-skip-permissions -p second' "${CALLS_FILE}" | cut -d: -f1)"
 if [[ -z "${READY_LINE}" || -z "${AGENT_LINE}" || "${READY_LINE}" -ge "${AGENT_LINE}" ]]; then
     echo "FAIL: reused container did not wait for readiness before launching the agent" >&2
+    exit 1
+fi
+
+printf '' > "${CALLS_FILE}"
+export MOCK_RUNNING=false
+MOCK_CONTAINER_NAME="codex-sand-$(slugify "$(basename "${REPO_ROOT}")")"
+export MOCK_CONTAINER_NAME
+"${SANDBOX_DIR}/agent-sand" --agent codex --update-plugins
+
+if ! grep -Eq '^run --rm --entrypoint /bin/bash -e AGENT_SAND_AGENT=codex .*provision_codex_plugins' "${CALLS_FILE}"; then
+    echo "FAIL: Codex forced update did not use the baked-in Codex plugin path" >&2
+    exit 1
+fi
+if grep -q '/usr/local/bin/claude' "${CALLS_FILE}"; then
+    echo "FAIL: Codex forced update still requires a host Claude binary" >&2
     exit 1
 fi
 

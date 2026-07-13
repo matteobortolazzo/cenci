@@ -411,15 +411,22 @@ was created while the events socket was unavailable, later launches warn that
 its sessions won't report to the host status bars; stop the container
 (`docker stop <name>`) and relaunch to restore the wiring.
 
-No manual install is needed inside the container. On each start the entrypoint
-enables and installs the `agentwatch` and `agentflow` plugins from the
-`agent-stack` marketplace, so sandbox sessions show up in the host status bar out
-of the box, and keeps them current: it refreshes the marketplace clone and
-updates any stale plugin, gated by a 30-minute stamp so rapid stop/start cycles
-make zero network calls (`agent-sand --update-plugins` forces it — see
-[Maintenance](#update-sandbox-plugins)). Existing home volumes are migrated off
-the old `muxwatch`/`ccflow` plugins and the renamed `claude-tools` marketplace at
-the same time.
+No manual install is needed inside the container. The launcher passes the selected
+agent through the internal `AGENT_SAND_AGENT` contract, and the entrypoint uses that
+agent's native CLI and plugin store: Claude provisions `~/.claude/plugins` through
+the host-mounted `claude` binary, while Codex provisions `~/.codex` through the
+Codex CLI baked into the image. Both paths register the `agent-stack` marketplace,
+install `agentwatch` and `agentflow` when missing, and refresh them on a 30-minute
+TTL. Rapid stop/start cycles therefore make zero network calls; `agent-sand
+--update-plugins` forces provisioning plus refresh through the selected agent's
+CLI. CLI or network failures warn but never block container startup. Existing
+Claude home volumes are migrated off the old `muxwatch`/`ccflow` plugins and the
+renamed `claude-tools` marketplace at the same time.
+
+Codex validates plugin hook files by hash. A new Codex session loads newly installed
+plugins, but if an update changes `hooks.json`, open `/hooks` in Codex and trust the
+pending agentwatch hooks again. This trust decision is intentionally interactive and
+is not bypassed by sandbox provisioning.
 
 ### Container lifecycle
 
@@ -459,18 +466,22 @@ Just update Claude Code on the host. The binary is bind-mounted, so the containe
 
 ### Update sandbox plugins
 
-Nothing to do normally: on each container start the entrypoint refreshes the
-`agent-stack` marketplace and updates stale `agentflow`/`agentwatch` plugins in
-the home volume (TTL-gated to 30 minutes). To force an update immediately —
-e.g. right after merging a plugin change — run:
+Nothing to do normally: on each container start the entrypoint uses the selected
+agent's native CLI to refresh the `agent-stack` marketplace and update
+`agentflow`/`agentwatch` in that agent's home volume (TTL-gated to 30 minutes).
+To force provisioning of anything missing and refresh immediately — e.g. right
+after merging a plugin change — run:
 
 ```bash
-agent-sand --update-plugins
+agent-sand --update-plugins                # Claude home / Claude CLI
+agent-sand --agent codex --update-plugins  # Codex home / baked-in Codex CLI
 ```
 
 It updates the running container in place (agent sessions pick the new version
 up on their next start), or spins up a one-shot container against the home
-volume if none is running.
+volume if none is running. Codex updates do not require Claude Code to be
+installed on the host. After a Codex hook-file update, review pending trust via
+`/hooks` in the next Codex session.
 
 ### Update Codex
 

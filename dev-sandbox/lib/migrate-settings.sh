@@ -200,3 +200,93 @@ update_plugins() {
 
     return 0
 }
+
+# provision_codex_plugins <codex-dir> <marketplace-name> <marketplace-repo> <plugin>...
+#
+# Codex keeps its own marketplace registry and plugin cache under ~/.codex;
+# Claude's installed_plugins.json and cache are not shared with it. Register the
+# marketplace and install only missing plugins through the native Codex CLI.
+# Every failure is deliberately non-fatal so an offline marketplace cannot
+# prevent the sandbox from starting.
+provision_codex_plugins() {
+    local codex_dir="$1" marketplace_name="$2" marketplace_repo="$3"
+    shift 3
+
+    command -v codex >/dev/null 2>&1 || return 0
+    mkdir -p "${codex_dir}" || {
+        echo "warning: failed to create Codex config directory ${codex_dir}; plugins may be unavailable this session" >&2
+        return 0
+    }
+
+    local marketplaces=""
+    if ! marketplaces="$(codex plugin marketplace list 2>/dev/null)"; then
+        echo "warning: failed to list Codex marketplaces; attempting to provision ${marketplace_name}" >&2
+    fi
+    if ! grep -Eq "^${marketplace_name}[[:space:]]" <<< "${marketplaces}"; then
+        if ! codex plugin marketplace add "${marketplace_repo}" >/dev/null 2>&1; then
+            echo "warning: failed to add Codex marketplace ${marketplace_repo}; plugins may be unavailable this session" >&2
+        fi
+    fi
+
+    local installed=""
+    if ! installed="$(codex plugin list 2>/dev/null)"; then
+        echo "warning: failed to list Codex plugins; attempting to provision required plugins" >&2
+    fi
+
+    local plugin key
+    for plugin in "$@"; do
+        key="${plugin}@${marketplace_name}"
+        if grep -Eq "^${key}[[:space:]]+installed" <<< "${installed}"; then
+            continue
+        fi
+        if ! codex plugin add "${key}" >/dev/null 2>&1; then
+            echo "warning: failed to install Codex plugin ${key}; it may be unavailable this session" >&2
+        fi
+    done
+
+    return 0
+}
+
+# update_codex_plugins <codex-dir> <marketplace-name> <ttl-minutes> <plugin>...
+#
+# Refresh the Codex marketplace snapshot, then idempotently re-add each
+# installed required plugin so its versioned cache follows the new snapshot.
+# A shared 30-minute-style stamp prevents network work on rapid restarts; ttl 0
+# forces a refresh. Missing plugins are provisioned by provision_codex_plugins,
+# which callers run first for both normal startup and forced updates.
+update_codex_plugins() {
+    local codex_dir="$1" marketplace_name="$2" ttl_minutes="$3"
+    shift 3
+
+    command -v codex >/dev/null 2>&1 || return 0
+
+    local stamp="${codex_dir}/.agent-sand-update-stamp"
+    if [[ "${ttl_minutes}" -gt 0 && -f "${stamp}" ]] \
+        && [[ -n "$(find "${stamp}" -mmin "-${ttl_minutes}" 2>/dev/null)" ]]; then
+        return 0
+    fi
+
+    if ! codex plugin marketplace upgrade "${marketplace_name}" >/dev/null 2>&1; then
+        echo "warning: failed to refresh Codex marketplace ${marketplace_name}; plugins may be stale this session" >&2
+    fi
+    if ! touch "${stamp}"; then
+        echo "warning: failed to record Codex plugin refresh time; startup will retry next time" >&2
+    fi
+
+    local installed=""
+    if ! installed="$(codex plugin list 2>/dev/null)"; then
+        echo "warning: failed to list Codex plugins after refreshing ${marketplace_name}" >&2
+        return 0
+    fi
+
+    local plugin key
+    for plugin in "$@"; do
+        key="${plugin}@${marketplace_name}"
+        grep -Eq "^${key}[[:space:]]+installed" <<< "${installed}" || continue
+        if ! codex plugin add "${key}" >/dev/null 2>&1; then
+            echo "warning: failed to refresh Codex plugin ${key}; it may be stale this session" >&2
+        fi
+    done
+
+    return 0
+}

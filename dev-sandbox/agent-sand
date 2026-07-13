@@ -296,27 +296,32 @@ if ! "${RUNTIME}" image inspect "${IMAGE}" &>/dev/null; then
 fi
 
 # ── Forced plugin update (--update-plugins) ──────────────────────
-# Runs update_plugins with ttl 0 (bypasses the 30-min stamp the entrypoint
-# uses) inside the running container, or in a one-shot container against the
-# home volume when nothing is running. Needs a host `claude` binary either
-# way — the containers don't bake one.
+# Provisions anything missing, then refreshes with ttl 0 (bypassing the
+# entrypoint's 30-minute stamp) inside the running container, or in a one-shot
+# container against the home volume. Claude uses its host-mounted binary;
+# Codex uses the CLI baked into the image.
 if "${UPDATE_PLUGINS}"; then
-    UPDATE_CMD='source /usr/local/bin/lib/migrate-settings.sh && update_plugins /home/dev/.claude/plugins agent-stack 0 agentflow agentwatch'
+    if [[ "${AGENT}" == codex ]]; then
+        UPDATE_CMD='source /usr/local/bin/lib/migrate-settings.sh && provision_codex_plugins /home/dev/.codex agent-stack matteobortolazzo/agent-stack agentflow agentwatch && update_codex_plugins /home/dev/.codex agent-stack 0 agentflow agentwatch'
+    else
+        UPDATE_CMD='source /usr/local/bin/lib/migrate-settings.sh && heal_plugin_installs /home/dev/.claude/plugins && provision_plugins /home/dev/.claude/plugins agent-stack matteobortolazzo/agent-stack agentflow agentwatch && update_plugins /home/dev/.claude/plugins agent-stack 0 agentflow agentwatch'
+    fi
     if "${RUNTIME}" ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$"; then
         echo "Updating plugins in running '${CONTAINER_NAME}'..."
         "${RUNTIME}" exec -u dev "${CONTAINER_NAME}" /bin/bash -c "${UPDATE_CMD}"
         echo "Done. Agent sessions pick up the update on their next start."
     else
-        CLAUDE_BIN="$(readlink -f "$(which claude)" 2>/dev/null || true)"
-        if [[ ! -x "${CLAUDE_BIN}" ]]; then
-            echo "Error: --update-plugins needs the claude binary on the host." >&2
-            exit 1
-        fi
         echo "Updating plugins in volume '${VOLUME_NAME}'..."
-        "${RUNTIME}" run --rm --entrypoint /bin/bash \
-            -v "${VOLUME_NAME}:/home/dev" \
-            -v "${CLAUDE_BIN}:/usr/local/bin/claude:ro" \
-            "${IMAGE}" -c "${UPDATE_CMD}"
+        UPDATE_RUN_ARGS=(--rm --entrypoint /bin/bash -e "AGENT_SAND_AGENT=${AGENT}" -v "${VOLUME_NAME}:/home/dev")
+        if [[ "${AGENT}" == claude ]]; then
+            CLAUDE_BIN="$(readlink -f "$(which claude)" 2>/dev/null || true)"
+            if [[ ! -x "${CLAUDE_BIN}" ]]; then
+                echo "Error: --update-plugins needs the claude binary on the host for Claude sandboxes." >&2
+                exit 1
+            fi
+            UPDATE_RUN_ARGS+=(-v "${CLAUDE_BIN}:/usr/local/bin/claude:ro")
+        fi
+        "${RUNTIME}" run "${UPDATE_RUN_ARGS[@]}" "${IMAGE}" -c "${UPDATE_CMD}"
         echo "Done."
     fi
     exit 0
@@ -370,7 +375,7 @@ else
 fi
 
 # ── Exec env forwarding (for attach path) ───────────────────────
-EXEC_ENV_ARGS=(-u dev -e "TMUX_PANE=${TMUX_PANE:-}" -e "AGENT_SAND=1")
+EXEC_ENV_ARGS=(-u dev -e "TMUX_PANE=${TMUX_PANE:-}" -e "AGENT_SAND=1" -e "AGENT_SAND_AGENT=${AGENT}")
 [[ -n "${CONTEXT7_API_KEY:-}" ]] && EXEC_ENV_ARGS+=(-e "CONTEXT7_API_KEY=${CONTEXT7_API_KEY}")
 [[ -n "${OPENAI_API_KEY:-}" ]] && EXEC_ENV_ARGS+=(-e "OPENAI_API_KEY=${OPENAI_API_KEY}")
 
@@ -456,6 +461,10 @@ RUN_ARGS=(
 
     # Container marker (both docker & podman) — agentflow configure detects this
     -e "AGENT_SAND=1"
+
+    # Internal contract used by the entrypoint to provision the selected
+    # agent's native plugin store.
+    -e "AGENT_SAND_AGENT=${AGENT}"
 
     # Host identity — entrypoint remaps 'dev' to this UID/GID on mismatch (#154)
     -e "HOST_UID=$(id -u)"
