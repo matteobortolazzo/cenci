@@ -398,10 +398,18 @@ The entrypoint automatically detects the socket's group ownership and adds the `
 
 ### Agentwatch (optional)
 
-If `agentwatch` is installed on the host and the daemon is running, the script automatically:
+If `agentwatch` is installed on the host, the script automatically:
+- Starts the host daemon when its events socket is missing (it normally starts
+  lazily on the first host session, which used to leave containers created
+  right after boot without any wiring) and warns if the socket never appears
 - Bind-mounts the `agentwatch` binary (read-only)
 - Bind-mounts the events socket so hooks can reach the host daemon
 - Passes `$TMUX_PANE` for tmux window status updates
+
+A container's mounts are fixed for its whole lifetime. If the shared container
+was created while the events socket was unavailable, later launches warn that
+its sessions won't report to the host status bars; stop the container
+(`docker stop <name>`) and relaunch to restore the wiring.
 
 No manual install is needed inside the container. On each start the entrypoint
 enables and installs the `agentwatch` and `agentflow` plugins from the
