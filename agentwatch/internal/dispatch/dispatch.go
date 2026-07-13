@@ -202,12 +202,15 @@ func logf(out io.Writer, format string, args ...any) {
 	_, _ = fmt.Fprintf(out, format, args...)
 }
 
-// formatDecision renders one decision as a single log line. Dispatch lines carry
-// the resolved agent and plan file so the table is self-explanatory.
+// formatDecision renders one decision as a single log line, prefixed with
+// owner/repo so multi-repo fleet output is unambiguous. Dispatch lines carry
+// the resolved agent and plan file so the table is self-explanatory. The
+// ` skip:` / ` dispatch ` substrings are load-bearing: downstream consumers
+// (lazyboards) classify lines by matching on them.
 func formatDecision(d Decision) string {
 	if d.Action == ActionDispatch && d.Plan != nil {
-		return fmt.Sprintf("#%d dispatch (%s, %s): %s",
-			d.Ticket.Number, d.Agent, filepath.Base(d.Plan.Path), d.Reason)
+		return fmt.Sprintf("%s#%d dispatch (%s, %s): %s",
+			d.Ticket.Repo, d.Ticket.Number, d.Agent, filepath.Base(d.Plan.Path), d.Reason)
 	}
-	return fmt.Sprintf("#%d skip: %s", d.Ticket.Number, d.Reason)
+	return fmt.Sprintf("%s#%d skip: %s", d.Ticket.Repo, d.Ticket.Number, d.Reason)
 }

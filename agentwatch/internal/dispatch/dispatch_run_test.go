@@ -127,3 +127,29 @@ func (failingMutator) EditLabels(string, int, []string, []string) error {
 func (failingMutator) Comment(string, int, string) error {
 	return errors.New("gh comment failed")
 }
+
+// TestFormatDecisionPrefixesRepo locks in the owner/repo prefix on decision
+// lines so multi-repo fleet output is unambiguous, and keeps the ` skip:` /
+// ` dispatch ` substrings intact — downstream consumers (lazyboards) classify
+// lines by matching on them.
+func TestFormatDecisionPrefixesRepo(t *testing.T) {
+	skip := Decision{
+		Ticket: Ticket{Repo: "o/r", Number: 45},
+		Action: ActionSkip,
+		Reason: "not Planned",
+	}
+	if got, want := formatDecision(skip), "o/r#45 skip: not Planned"; got != want {
+		t.Errorf("skip line = %q, want %q", got, want)
+	}
+
+	dispatch := Decision{
+		Ticket: Ticket{Repo: "o/r", Number: 78},
+		Plan:   &Plan{Path: ".plans/78-add-cache.md"},
+		Action: ActionDispatch,
+		Reason: "dispatch",
+		Agent:  "claude",
+	}
+	if got, want := formatDecision(dispatch), "o/r#78 dispatch (claude, 78-add-cache.md): dispatch"; got != want {
+		t.Errorf("dispatch line = %q, want %q", got, want)
+	}
+}

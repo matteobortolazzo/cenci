@@ -222,8 +222,8 @@ function.
 ```bash
 # Print the decision table without spawning anything
 agentwatch dispatch --dry-run
-# #45 skip: not Planned
-# #78 dispatch (claude, 78-add-cache.md): dispatch
+# owner/name#45 skip: not Planned
+# owner/name#78 dispatch (claude, 78-add-cache.md): dispatch
 
 # Run a single pass
 agentwatch dispatch --once
@@ -277,7 +277,9 @@ failing gate is the logged skip reason):
 1. carries `Planned`, not `Blocked`, and has no open linked PR;
 2. a matching plan for the ticket exists with `status: approved`;
 3. the plan is fresh — default-branch commits since its `planCommitSha` are within
-   `planStalenessTolerance` (else `plan stale, re-plan`);
+   `planStalenessTolerance` (else `plan stale, re-plan`); when the plan's front
+   matter lists `stalenessPaths`, only commits touching those paths are counted
+   (see [Path-aware staleness](#path-aware-staleness) below);
 4. **siblings serialize** — if the plan is a child (`isChild: true`), it waits while
    any sibling (same `parentId`) is active (`Working`, an open PR, or a running
    window) or was already dispatched this pass, so at most one child per parent runs
@@ -291,6 +293,18 @@ failing gate is the logged skip reason):
 10. the resolved agent still has budget (see [Usage budgets](#usage-budgets) — when
     `agentLimits` is set this is computed from real token usage, otherwise from the
     static `agentBudgetFloors`).
+
+#### Path-aware staleness
+
+In a monorepo, unrelated commits elsewhere in the tree shouldn't invalidate a plan
+scoped to one project. A plan's front matter may set an optional flat key
+`stalenessPaths` — comma-separated, repo-relative paths (e.g.
+`stalenessPaths: agentwatch` or `stalenessPaths: agentwatch, agentflow`). When
+present, gate 3 above counts only default-branch commits that touch those paths
+(`git rev-list --count <planCommitSha>..HEAD -- <paths...>`); when absent, it falls
+back to whole-repo commit counting as before. The `agentflow` plan template (see its
+`/implement` plan phase) records this field from the project directories the plan
+touches.
 
 ### Configuration
 
@@ -331,7 +345,7 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 | `needInputThreshold` | `1` | Pause dispatch when at least this many windows await input |
 | `dailyQuota` | `20` | Max dispatches per process run (resets on restart) |
 | `quietHours` | none | Local-clock window to suppress dispatch; `startHour > endHour` wraps midnight, `start == end` disables |
-| `planStalenessTolerance` | `5` | Max commits a plan may fall behind before it is skipped as stale |
+| `planStalenessTolerance` | `5` | Max commits a plan may fall behind before it is skipped as stale (see [Path-aware staleness](#path-aware-staleness) for scoping the count via `stalenessPaths`) |
 | `gracePeriod` | `5m` | How long the failure signal must hold continuously before the reconciler recovers a stranded ticket (Go duration string) |
 | `retryBudget` | `2` | Retries (`Working` → `Planned`) a stranded ticket gets before it is marked `dispatch-failed`; an explicit `0` disables retries |
 | `daemonInterval` | none | When set, the daemon runs the embedded dispatch + reconcile loop on this interval (Go duration string); unset leaves daemon behavior unchanged |
