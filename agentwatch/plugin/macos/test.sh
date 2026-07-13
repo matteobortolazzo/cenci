@@ -46,6 +46,17 @@ check_empty() {
   fi
 }
 
+check_not_empty() {
+  local name="$1" haystack="$2"
+  if [ -n "$haystack" ]; then
+    echo "ok   - $name"
+    pass=$((pass + 1))
+  else
+    echo "FAIL - $name (expected non-empty output)"
+    fail=$((fail + 1))
+  fi
+}
+
 # check_not <name> <haystack> <needle-that-must-be-absent>
 check_not() {
   local name="$1" haystack="$2" needle="$3"
@@ -167,6 +178,70 @@ check "non-matching, non-headroom line still renders via 'none' fallback (not si
   "$out" "garbled line with no status suffix |"
 check "session row still renders normally alongside the garbled line" \
   "$out" "work:1 - build | sfimage=brain.head.profile.fill sfcolor=blue"
+
+# --- Case 7: dispatch enabled, no runs yet, zero sessions ------------------
+#
+# Zero sessions but the fleet dispatch loop is enabled: class stays "none"
+# (session-status semantics unchanged) but alt is "dispatch-only", so the item
+# must NOT hide (this is the one case in this file where "class":"none" must
+# NOT produce empty output — it's the narrow exception to Case 2b above,
+# distinguished by "alt":"dispatch-only" rather than "alt":"none"). Also
+# asserts the dedicated dispatch dropdown row renders (no last-run summary
+# yet, since last_run_at is absent).
+cat > "$TMP/dispatch-only.json" <<'JSON'
+{"text":"⟳","tooltip":"dispatch: on (5m)","class":"none","alt":"dispatch-only","dispatch":{"enabled":true,"daemon_running":true,"interval":"5m","pass_running":false,"last_dispatched":0,"last_skipped":0}}
+JSON
+out="$(run_plugin "$TMP/dispatch-only.json" 0)"
+check_not_empty "not hidden when alt is dispatch-only (class stays none)" "$out"
+check "dispatch-only menu bar line shows the glyph" "$out" "⟳ |"
+check "dispatch-only dropdown row shown, no runs yet" "$out" "dispatch: on (5m)"
+
+# --- Case 8: dispatch enabled, success counts ------------------------------
+#
+# Note: the exact HH:MM in the dedicated dropdown row depends on the local
+# timezone the JXA interpreter runs under (mirrors formatLastRunTime's
+# t.Local() in status.go), so this only asserts the timezone-independent
+# parts of the summary, not a specific clock time.
+cat > "$TMP/dispatch-success.json" <<'JSON'
+{"text":"▶ 1  ⟳","tooltip":"work:1 - build (running)\ndispatch: on (5m) — last run 12:04, 2 dispatched / 3 skipped","class":"running","alt":"active","dispatch":{"enabled":true,"daemon_running":true,"interval":"5m","pass_running":false,"last_run_at":"2026-07-13T12:04:00Z","last_dispatched":2,"last_skipped":3}}
+JSON
+out="$(run_plugin "$TMP/dispatch-success.json" 0)"
+check "dispatch success dropdown row (dedicated, not generic fallback)" "$out" "dispatch: on (5m) — last run"
+check "dispatch success dropdown row shows the counts" "$out" "2 dispatched / 3 skipped"
+check "session row still renders normally alongside the dispatch row" \
+  "$out" "work:1 - build | sfimage=brain.head.profile.fill sfcolor=blue"
+
+# --- Case 9: dispatch enabled, last run failed -----------------------------
+cat > "$TMP/dispatch-error.json" <<'JSON'
+{"text":"▶ 1  ⟳","tooltip":"work:1 - build (running)\ndispatch: on (5m) — last run failed: boom","class":"running","alt":"active","dispatch":{"enabled":true,"daemon_running":true,"interval":"5m","pass_running":false,"last_dispatched":0,"last_skipped":0,"last_error":"boom"}}
+JSON
+out="$(run_plugin "$TMP/dispatch-error.json" 0)"
+check "dispatch error dropdown row shows the failure" "$out" "dispatch: on (5m) — last run failed: boom"
+
+# --- Case 10: dispatch success with malformed last_run_at ------------------
+#
+# A malformed/unparseable last_run_at must not silently degrade to "NaN:NaN"
+# (new Date() never throws). The JXA mirror must fall back to rendering the
+# raw string, mirroring formatLastRunTime's raw-string fallback in status.go.
+cat > "$TMP/dispatch-malformed-timestamp.json" <<'JSON'
+{"text":"▶ 1  ⟳","tooltip":"work:1 - build (running)\ndispatch: on (5m) — last run not-a-timestamp, 2 dispatched / 3 skipped","class":"running","alt":"active","dispatch":{"enabled":true,"daemon_running":true,"interval":"5m","pass_running":false,"last_run_at":"not-a-timestamp","last_dispatched":2,"last_skipped":3}}
+JSON
+out="$(run_plugin "$TMP/dispatch-malformed-timestamp.json" 0)"
+check "malformed last_run_at falls back to the raw string" "$out" "last run not-a-timestamp,"
+check_not "malformed last_run_at never renders NaN:NaN" "$out" "NaN:NaN"
+
+# --- Case 11: dispatch enabled with empty Interval --------------------------
+#
+# Enabled=true with an empty Interval is a reachable config state (LoopEnabled
+# can be explicitly true while DaemonInterval is unset/0). The dedicated
+# dropdown row must omit the parenthetical ("dispatch: on") instead of
+# rendering the cosmetically broken "dispatch: on ()".
+cat > "$TMP/dispatch-empty-interval.json" <<'JSON'
+{"text":"⟳","tooltip":"dispatch: on","class":"none","alt":"dispatch-only","dispatch":{"enabled":true,"daemon_running":true,"interval":"","pass_running":false,"last_dispatched":0,"last_skipped":0}}
+JSON
+out="$(run_plugin "$TMP/dispatch-empty-interval.json" 0)"
+check "empty interval renders without empty parens" "$out" "dispatch: on"
+check_not "empty interval never renders empty parens" "$out" "dispatch: on ()"
 
 echo
 echo "passed: $pass  failed: $fail"

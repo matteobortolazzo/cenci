@@ -8,12 +8,20 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/ipc"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/pkg/watch"
 )
 
 // ErrNoOutput signals that the waybar module should be hidden (exit 1).
 var ErrNoOutput = errors.New("no output")
+
+// DefaultSymbolDispatch is the default glyph shown when the fleet dispatch
+// loop is enabled (U+27F3, per planning Q&A #1). It lives in this package
+// (not internal/config) since SymbolDispatch is status-render-only, mirroring
+// the SymbolFailed wiring precedent.
+const DefaultSymbolDispatch = "⟳"
 
 // Config holds the symbol settings for waybar output.
 type Config struct {
@@ -24,15 +32,17 @@ type Config struct {
 	SymbolNeedInput string
 	SymbolStopped   string
 	SymbolFailed    string
+	SymbolDispatch  string
 }
 
 // output is the Waybar custom module JSON protocol.
 type output struct {
-	Text     string             `json:"text"`
-	Tooltip  string             `json:"tooltip"`
-	Class    string             `json:"class"`
-	Alt      string             `json:"alt"`
-	Headroom map[string]float64 `json:"headroom,omitempty"`
+	Text     string               `json:"text"`
+	Tooltip  string               `json:"tooltip"`
+	Class    string               `json:"class"`
+	Alt      string               `json:"alt"`
+	Headroom map[string]float64   `json:"headroom,omitempty"`
+	Dispatch *watch.DispatchState `json:"dispatch,omitempty"`
 }
 
 // Run connects to the IPC socket, reads one snapshot, prints Waybar JSON, and exits.
@@ -51,8 +61,8 @@ func Run(cfg Config) error {
 	}
 
 	out := Format(snap, cfg)
-	if out.Class == "none" {
-		// No sessions at all — tell caller to hide the module.
+	if out.Alt == "none" {
+		// No sessions at all and no dispatch loop — tell caller to hide the module.
 		return ErrNoOutput
 	}
 	return printJSON(out)
@@ -60,13 +70,22 @@ func Run(cfg Config) error {
 
 // Format converts a state snapshot into Waybar output.
 func Format(snap *ipc.StateSnapshot, cfg Config) output {
+	dispatchGlyph, dispatchLine := formatDispatch(cfg, snap.Dispatch)
+	dispatchEnabled := snap.Dispatch != nil && snap.Dispatch.Enabled
+
 	if len(snap.Windows) == 0 {
-		return output{
+		out := output{
 			Text:    "",
 			Tooltip: "no agent sessions",
 			Class:   "none",
 			Alt:     "none",
 		}
+		appendDispatch(&out, dispatchGlyph, dispatchLine)
+		if dispatchEnabled {
+			out.Alt = "dispatch-only"
+			out.Dispatch = snap.Dispatch
+		}
+		return out
 	}
 
 	// Build text: counts for non-zero statuses. Failed leads — it is the loudest
@@ -136,7 +155,65 @@ func Format(snap *ipc.StateSnapshot, cfg Config) output {
 		out.Headroom = snap.Headroom
 	}
 
+	appendDispatch(&out, dispatchGlyph, dispatchLine)
+	if dispatchEnabled {
+		out.Dispatch = snap.Dispatch
+	}
+
 	return out
+}
+
+// appendDispatch appends the dispatch glyph/tooltip line to an in-progress
+// output, following the same "append with separator, else set" pattern used
+// for headroom text. No-op when glyph/line are empty (loop disabled/absent).
+func appendDispatch(out *output, glyph, line string) {
+	if glyph != "" {
+		if out.Text != "" {
+			out.Text += "  " + glyph
+		} else {
+			out.Text = glyph
+		}
+	}
+	if line != "" {
+		if out.Tooltip != "" {
+			out.Tooltip += "\n" + line
+		} else {
+			out.Tooltip = line
+		}
+	}
+}
+
+// formatDispatch renders the fleet dispatch loop's compact glyph and tooltip
+// summary line. Returns empty strings for both when the loop is nil or
+// disabled, so callers can byte-compatibly skip the indicator entirely.
+func formatDispatch(cfg Config, d *watch.DispatchState) (glyph string, line string) {
+	if d == nil || !d.Enabled {
+		return "", ""
+	}
+
+	summary := "dispatch: on"
+	if d.Interval != "" {
+		summary = fmt.Sprintf("dispatch: on (%s)", d.Interval)
+	}
+	switch {
+	case d.LastError != "":
+		summary += fmt.Sprintf(" — last run failed: %s", d.LastError)
+	case d.LastRunAt != "":
+		summary += fmt.Sprintf(" — last run %s, %d dispatched / %d skipped", formatLastRunTime(d.LastRunAt), d.LastDispatched, d.LastSkipped)
+	}
+
+	return cfg.SymbolDispatch, summary
+}
+
+// formatLastRunTime renders an RFC 3339 timestamp as local HH:MM. Falls back
+// to the raw string on a parse error (defensive; the daemon always emits
+// RFC 3339).
+func formatLastRunTime(rfc3339 string) string {
+	t, err := time.Parse(time.RFC3339, rfc3339)
+	if err != nil {
+		return rfc3339
+	}
+	return t.Local().Format("15:04")
 }
 
 // formatHeadroom renders per-agent headroom percentages sorted by agent key

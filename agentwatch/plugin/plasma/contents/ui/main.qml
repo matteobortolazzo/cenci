@@ -4,7 +4,9 @@
 // frontend over the same Waybar JSON contract consumed by the waybar, noctalia,
 // dms, and macOS widgets — no daemon or Go changes. Polls `agentwatch status`
 // on a timer, parses the single JSON line, and maps the `class` field to an icon
-// + color. Empty stdout, non-zero exit, or class "none" → hide from the panel.
+// + color. Empty stdout, non-zero exit, or `alt: "none"` → hide from the panel
+// (`alt`, not `class`, is the hide/show contract — `class` stays "none" for the
+// zero-sessions-but-dispatch-enabled case, `alt: "dispatch-only"`).
 
 import QtQuick
 import QtQuick.Layouts
@@ -20,6 +22,7 @@ PlasmoidItem {
     property string statusText: ""
     property string tooltipText: ""
     property string cssClass: "none"
+    property string cssAlt: "none"
     property bool hasOutput: false
     property var headroom: ({})
 
@@ -133,8 +136,9 @@ PlasmoidItem {
                 root.statusText = j.text || ""
                 root.tooltipText = j.tooltip || ""
                 root.cssClass = j["class"] || "none"
+                root.cssAlt = j["alt"] || "none"
                 root.headroom = j.headroom || ({})
-                root.hasOutput = root.cssClass !== "none"
+                root.hasOutput = root.cssAlt !== "none"
             } catch (e) {
                 console.warn("AgentWatch parse error:", e, out)
                 root.hasOutput = false

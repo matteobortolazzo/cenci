@@ -66,6 +66,25 @@ check_widget '===\s*summary\b' \
     "main.qml skips the summary line by exact match (=== summary)" \
     "main.qml does not exact-match-skip the summary line"
 
+# Hide/show is gated on `alt`, not `class` (status.go can emit `class: "none"`
+# with `alt: "dispatch-only"` when zero sessions but the fleet dispatch loop is
+# enabled — the panel must stay visible then). main.qml must read `alt` from
+# the poll JSON and derive hasOutput from it, not from cssClass alone.
+check_widget 'cssAlt\s*=\s*j\["alt"\]' \
+    "main.qml reads the alt field from poll JSON" \
+    "main.qml does not read the alt field from poll JSON"
+
+check_widget 'hasOutput\s*=\s*root\.cssAlt\s*!==\s*"none"' \
+    "main.qml derives hasOutput from cssAlt (not cssClass)" \
+    "main.qml does not gate hasOutput on cssAlt"
+
+if grep -qE 'hasOutput\s*=\s*root\.cssClass\s*!==\s*"none"' "$WIDGET"; then
+    echo "FAIL - main.qml still gates hasOutput on cssClass (dispatch-only would be hidden)"
+    fail=1
+else
+    echo "ok   - main.qml does not gate hasOutput on cssClass"
+fi
+
 echo
 if [ "$fail" -eq 0 ]; then
     echo "PASS"

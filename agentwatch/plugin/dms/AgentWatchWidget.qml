@@ -16,6 +16,7 @@ PluginComponent {
     property string statusText: ""
     property string tooltipText: ""
     property string cssClass: "none"
+    property string cssAlt: "none"
     property bool hasOutput: false
 
     readonly property var tooltipLines: tooltipText.length > 0 ? tooltipText.split("\n").filter(function (l) { return l.length > 0 }) : []
@@ -82,7 +83,8 @@ PluginComponent {
                     root.statusText = j.text || ""
                     root.tooltipText = j.tooltip || ""
                     root.cssClass = j["class"] || "none"
-                    root.hasOutput = root.cssClass !== "none"
+                    root.cssAlt = j["alt"] || "none"
+                    root.hasOutput = root.cssAlt !== "none"
                 } catch (e) {
                     console.warn("AgentWatch parse error:", e, out)
                     root.hasOutput = false

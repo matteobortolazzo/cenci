@@ -41,14 +41,18 @@ gnome-extensions enable "$UUID"
 ## Behavior
 
 - Polls every `poll-interval-ms` (default 2000 ms).
-- Hides the indicator when agentwatch reports no sessions (`class: none`) or the
-  daemon is down (non-zero exit).
+- Hides the indicator when agentwatch reports `alt: "none"` (no sessions and the
+  fleet dispatch loop is disabled/absent), or the daemon is down (non-zero exit).
 - Panel shows a status icon + the count string (`▶ 2  ! 1`). The icon color
   reflects the highest-priority status:
   `failed`/`need-input` (red) > `running` (blue) > `done` (green) >
   `stopped` (orange) > `idle` (grey).
 - Click the indicator to open a menu listing each session
   (`session:index - name`), with a per-session status icon colored independently.
+- When the daemon's fleet dispatch loop is enabled, a compact `⟳` glyph appears
+  in the panel text. The indicator no longer hides when there are zero live
+  sessions but the loop is enabled (`alt: "dispatch-only"`) — only `alt: "none"`
+  hides it.
 
 ## Settings
 

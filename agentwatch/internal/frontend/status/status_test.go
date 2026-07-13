@@ -2,11 +2,14 @@ package status
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/ipc"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/pkg/watch"
 )
 
 func testConfig() Config {
@@ -17,6 +20,7 @@ func testConfig() Config {
 		SymbolNeedInput: "!",
 		SymbolStopped:   "⏹",
 		SymbolFailed:    "✗",
+		SymbolDispatch:  "⟳",
 	}
 }
 
@@ -562,6 +566,253 @@ func TestHeadroomPercent_RoundHalfUp(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --- Fleet dispatch loop indicator (#212) ----------------------------------
+
+// TestDefaultSymbolDispatch_Value locks in the default dispatch glyph chosen
+// in planning Q&A #1: exactly U+27F3 (⟳), no Nerd Font codepoint.
+func TestDefaultSymbolDispatch_Value(t *testing.T) {
+	if DefaultSymbolDispatch != "⟳" {
+		t.Errorf("expected DefaultSymbolDispatch to be U+27F3 (⟳), got %q", DefaultSymbolDispatch)
+	}
+}
+
+// TestFormat_DispatchEnabledNoRunsYet covers the "enabled, no runs yet" case:
+// zero sessions, Dispatch.Enabled true, no LastRunAt. The glyph must appear
+// in text, a tooltip line must be present, Alt must switch to
+// "dispatch-only" (not "none", so Run() doesn't hide the module), and the
+// "dispatch" key must be present in the marshaled JSON. Class stays "none"
+// since session-status semantics are unchanged.
+func TestFormat_DispatchEnabledNoRunsYet(t *testing.T) {
+	cfg := testConfig()
+	snap := &ipc.StateSnapshot{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Dispatch: &watch.DispatchState{
+			Enabled:  true,
+			Interval: "5m",
+		},
+	}
+	out := Format(snap, cfg)
+
+	if !strings.Contains(out.Text, cfg.SymbolDispatch) {
+		t.Errorf("expected dispatch glyph %q in text, got %q", cfg.SymbolDispatch, out.Text)
+	}
+	if !strings.Contains(out.Tooltip, "dispatch: on (5m)") {
+		t.Errorf("expected tooltip to contain a dispatch summary line, got %q", out.Tooltip)
+	}
+	if out.Class != "none" {
+		t.Errorf("expected class to remain 'none' (session-status semantics unchanged), got %q", out.Class)
+	}
+	if out.Alt != "dispatch-only" {
+		t.Errorf("expected alt 'dispatch-only' for zero sessions with dispatch enabled, got %q", out.Alt)
+	}
+
+	data, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"dispatch"`) {
+		t.Errorf("expected 'dispatch' key present in marshaled JSON, got %s", data)
+	}
+}
+
+// TestFormat_DispatchSuccessCounts covers a completed pass with dispatched
+// and skipped counts: the tooltip line must reflect both counts and the
+// last-run time (rendered HH:MM local time, per the plan's assumption).
+func TestFormat_DispatchSuccessCounts(t *testing.T) {
+	lastRun := "2024-01-01T12:04:00Z"
+	parsed, err := time.Parse(time.RFC3339, lastRun)
+	if err != nil {
+		t.Fatalf("time.Parse: %v", err)
+	}
+	wantTime := parsed.Local().Format("15:04")
+
+	snap := &ipc.StateSnapshot{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Windows: []ipc.WindowState{
+			{Session: "main", WindowIndex: "0", TaskName: "writing tests", Status: "running"},
+		},
+		Summary: ipc.StatusSummary{Total: 1, Running: 1},
+		Dispatch: &watch.DispatchState{
+			Enabled:        true,
+			Interval:       "5m",
+			LastRunAt:      lastRun,
+			LastDispatched: 2,
+			LastSkipped:    3,
+		},
+	}
+	out := Format(snap, testConfig())
+
+	wantLine := fmt.Sprintf("dispatch: on (5m) — last run %s, 2 dispatched / 3 skipped", wantTime)
+	if !strings.Contains(out.Tooltip, wantLine) {
+		t.Errorf("expected tooltip to contain %q, got %q", wantLine, out.Tooltip)
+	}
+}
+
+// TestFormat_DispatchLastError covers a failed pass: the tooltip line must
+// use the "last run failed: <err>" variant instead of the counts variant.
+func TestFormat_DispatchLastError(t *testing.T) {
+	snap := &ipc.StateSnapshot{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Windows: []ipc.WindowState{
+			{Session: "main", WindowIndex: "0", TaskName: "writing tests", Status: "running"},
+		},
+		Summary: ipc.StatusSummary{Total: 1, Running: 1},
+		Dispatch: &watch.DispatchState{
+			Enabled:   true,
+			Interval:  "5m",
+			LastRunAt: "2024-01-01T12:04:00Z",
+			LastError: "boom",
+		},
+	}
+	out := Format(snap, testConfig())
+
+	wantLine := "dispatch: on (5m) — last run failed: boom"
+	if !strings.Contains(out.Tooltip, wantLine) {
+		t.Errorf("expected tooltip to contain %q, got %q", wantLine, out.Tooltip)
+	}
+}
+
+// TestFormat_DispatchLine covers the dispatch tooltip summary line across a
+// table of Interval values, including the reachable "enabled but Interval
+// unset/empty" config state (per internal/dispatch/config.go, LoopEnabled can
+// be explicitly true while DaemonInterval is unset). The empty-Interval case
+// must omit the parenthetical rather than rendering "dispatch: on ()".
+func TestFormat_DispatchLine(t *testing.T) {
+	tests := []struct {
+		name     string
+		interval string
+		want     string
+	}{
+		{"non-empty interval renders parenthetical", "5m", "dispatch: on (5m)"},
+		{"empty interval omits empty parens", "", "dispatch: on"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			snap := &ipc.StateSnapshot{
+				Timestamp: "2024-01-01T00:00:00Z",
+				Dispatch: &watch.DispatchState{
+					Enabled:  true,
+					Interval: tt.interval,
+				},
+			}
+			out := Format(snap, testConfig())
+
+			if !strings.Contains(out.Tooltip, tt.want) {
+				t.Errorf("expected tooltip to contain %q, got %q", tt.want, out.Tooltip)
+			}
+			if tt.interval == "" && strings.Contains(out.Tooltip, "()") {
+				t.Errorf("expected no empty parens in tooltip, got %q", out.Tooltip)
+			}
+		})
+	}
+}
+
+// TestFormat_DispatchDisabledOrAbsent_NoIndicator asserts byte-compatibility:
+// whether Dispatch is nil (daemon never wired the loop) or present with
+// Enabled false (loop configured off), no tooltip line, no glyph in text,
+// and no "dispatch" key at all in the marshaled JSON — existing consumers
+// predating #212 must see identical output.
+func TestFormat_DispatchDisabledOrAbsent_NoIndicator(t *testing.T) {
+	cfg := testConfig()
+	tests := []struct {
+		name     string
+		dispatch *watch.DispatchState
+	}{
+		{"nil dispatch (daemon never wired the loop)", nil},
+		{"present but disabled", &watch.DispatchState{Enabled: false, DaemonRunning: true, Interval: "5m"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			snap := &ipc.StateSnapshot{
+				Timestamp: "2024-01-01T00:00:00Z",
+				Windows: []ipc.WindowState{
+					{Session: "main", WindowIndex: "0", TaskName: "writing tests", Status: "running"},
+				},
+				Summary:  ipc.StatusSummary{Total: 1, Running: 1},
+				Dispatch: tt.dispatch,
+			}
+			out := Format(snap, cfg)
+
+			if strings.Contains(out.Tooltip, "dispatch:") {
+				t.Errorf("expected no dispatch tooltip line, got %q", out.Tooltip)
+			}
+			if strings.Contains(out.Text, cfg.SymbolDispatch) {
+				t.Errorf("expected no dispatch glyph in text, got %q", out.Text)
+			}
+
+			data, err := json.Marshal(out)
+			if err != nil {
+				t.Fatalf("json.Marshal: %v", err)
+			}
+			if strings.Contains(string(data), `"dispatch"`) {
+				t.Errorf("expected no 'dispatch' key in marshaled JSON (byte-compatible), got %s", data)
+			}
+		})
+	}
+}
+
+// TestFormat_DispatchFieldPassthrough asserts that Dispatch passes through
+// output verbatim (unrounded/untouched), mirroring the existing headroom
+// passthrough test, so richer frontends (SwiftBar, QML) can render the raw
+// fields however they like.
+func TestFormat_DispatchFieldPassthrough(t *testing.T) {
+	dispatch := &watch.DispatchState{
+		Enabled:        true,
+		DaemonRunning:  true,
+		Interval:       "5m",
+		PassRunning:    true,
+		LastRunAt:      "2024-01-01T12:04:00Z",
+		LastDispatched: 2,
+		LastSkipped:    3,
+	}
+	snap := &ipc.StateSnapshot{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Dispatch:  dispatch,
+	}
+	out := Format(snap, testConfig())
+
+	if !reflect.DeepEqual(out.Dispatch, dispatch) {
+		t.Errorf("expected output.Dispatch to pass through verbatim %#v, got %#v", dispatch, out.Dispatch)
+	}
+}
+
+// TestFormat_HideBehavior_DispatchOnlyVsNoLoop is the hide-behavior
+// assertion required by the plan: a dispatch-only snapshot (zero sessions,
+// loop enabled) must NOT be hidden, while the plain zero-sessions-no-loop
+// case must stay hidden. Today Run() hides on `out.Class == "none"`, which
+// would wrongly hide the dispatch-only case too (Class stays "none" by
+// design — session-status semantics are unchanged). This test locks in that
+// Alt is the field that must distinguish the two cases, since Run()'s hide
+// check must move from Class to Alt for #212 to work.
+func TestFormat_HideBehavior_DispatchOnlyVsNoLoop(t *testing.T) {
+	t.Run("dispatch-only zero sessions is not hidden", func(t *testing.T) {
+		snap := &ipc.StateSnapshot{
+			Timestamp: "2024-01-01T00:00:00Z",
+			Dispatch:  &watch.DispatchState{Enabled: true, Interval: "5m"},
+		}
+		out := Format(snap, testConfig())
+
+		if out.Class != "none" {
+			t.Errorf("expected class to remain 'none', got %q", out.Class)
+		}
+		if out.Alt == "none" {
+			t.Errorf("expected alt != 'none' (dispatch-only) so an alt-based hide check does not hide the module, got %q", out.Alt)
+		}
+	})
+
+	t.Run("zero sessions with no dispatch loop stays hidden", func(t *testing.T) {
+		snap := &ipc.StateSnapshot{Timestamp: "2024-01-01T00:00:00Z"}
+		out := Format(snap, testConfig())
+
+		if out.Class != "none" {
+			t.Errorf("expected class 'none', got %q", out.Class)
+		}
+		if out.Alt != "none" {
+			t.Errorf("expected alt 'none' so the module stays hidden, got %q", out.Alt)
+		}
+	})
 }
 
 func TestHeadroomClass_Boundaries(t *testing.T) {
