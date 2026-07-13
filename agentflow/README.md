@@ -446,6 +446,9 @@ agentflow/
 │   └── stack-go/SKILL.md
 ├── hooks/
 │   └── hooks.json
+├── codex/
+│   ├── hooks.json             # Explicitly empty: isolates Claude lifecycle hooks
+│   └── hooks.test.sh          # Codex hook-path and client-separation regression
 ├── docs/
 │   ├── git-workflow.md        # On-demand reference (read by skills as needed)
 │   └── codex.md               # What agentflow offers OpenAI Codex, and how it wires

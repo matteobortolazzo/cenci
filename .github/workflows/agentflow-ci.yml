@@ -1,0 +1,26 @@
+name: agentflow — CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'agentflow/**'
+      - '.github/workflows/agentflow-ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'agentflow/**'
+      - '.github/workflows/agentflow-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate AgentFlow JSON
+        run: find agentflow -name '*.json' -print0 | xargs -0 -n1 jq empty
+      - name: Verify Codex hook isolation
+        run: bash agentflow/codex/hooks.test.sh
