@@ -13,7 +13,7 @@ on:
         required: true
         type: string
       plugin-json-paths:
-        description: 'Space-separated plugin.json paths to stamp; the first is the source of truth'
+        description: 'Space-separated manifest paths to stamp; the first is the source of truth and must version under a top-level .version'
         required: true
         type: string
       marketplace-name:
@@ -93,9 +93,22 @@ jobs:
           NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
           echo "Bumping $BUMP: $VERSION -> $NEW_VERSION"
 
-          # Stamp every plugin.json path (source of truth + any Codex manifest)
+          # Stamp every manifest path (source of truth + Codex manifest + any
+          # status-bar frontend manifests). Frontends keep the version under
+          # different keys: KDE Plasma applets use .KPlugin.Version; GNOME
+          # extensions must keep .version an integer (managed by
+          # extensions.gnome.org), so the semver goes into ."version-name"
+          # (a string field GNOME Shell 45+ displays); everything else uses
+          # a top-level .version.
           for p in $PLUGIN_JSON_PATHS; do
-            jq --arg v "$NEW_VERSION" '.version = $v' "$p" > tmp.json && mv tmp.json "$p"
+            if jq -e 'has("KPlugin")' "$p" > /dev/null; then
+              FILTER='.KPlugin.Version = $v'
+            elif jq -e 'has("shell-version")' "$p" > /dev/null; then
+              FILTER='."version-name" = $v'
+            else
+              FILTER='.version = $v'
+            fi
+            jq --arg v "$NEW_VERSION" "$FILTER" "$p" > tmp.json && mv tmp.json "$p"
           done
           # Stamp the marketplace entry. Fail loudly if the name matches no entry
           # (e.g. a typo in a caller's marketplace-name input) — otherwise the jq

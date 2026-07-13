@@ -15,7 +15,13 @@ jobs:
     uses: ./.github/workflows/plugin-version-bump.yml
     with:
       plugin-name: agentwatch
-      plugin-json-paths: agentwatch/plugin/.claude-plugin/plugin.json agentwatch/plugin/.codex-plugin/plugin.json
+      plugin-json-paths: >-
+        agentwatch/plugin/.claude-plugin/plugin.json
+        agentwatch/plugin/.codex-plugin/plugin.json
+        agentwatch/plugin/noctalia/manifest.json
+        agentwatch/plugin/dms/plugin.json
+        agentwatch/plugin/gnome/metadata.json
+        agentwatch/plugin/plasma/metadata.json
       marketplace-name: agentwatch
       tag-prefix: agentwatch
       dispatch-workflow: agentwatch-release.yml
