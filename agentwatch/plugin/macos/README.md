@@ -30,7 +30,7 @@ First get the daemon + binary, then wire up SwiftBar.
 
 ### 1. agentwatch daemon + binary
 
-If you installed the [Claude Code plugin](../../README.md#install-claude-code), the
+If you installed the [agent-stack attention layer](../../README.md#installation), the
 macOS binary and daemon auto-bootstrap on your first session — nothing else to do:
 
 ```sh

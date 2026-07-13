@@ -7,7 +7,7 @@
     {
       "name": "agentflow",
       "source": "./agentflow",
-      "description": "Ticket refinement and automated implementation pipeline for GitHub",
+      "description": "agent-stack workflow layer: portable engineering conventions and Claude Code's gated GitHub ticket-to-PR pipeline",
       "version": "4.11.1",
       "author": {
         "name": "Matteo Bortolazzo"
@@ -17,7 +17,7 @@
     {
       "name": "agentwatch",
       "source": "./agentwatch/plugin",
-      "description": "Watch your coding agents (Claude Code, Codex) — live session status across tmux, waybar, noctalia, DMS, and the macOS menu bar",
+      "description": "agent-stack attention layer for Claude Code and Codex: live status, dispatch, and optional display integrations",
       "version": "2.16.0",
       "author": {
         "name": "Matteo Bortolazzo"
@@ -27,7 +27,7 @@
     {
       "name": "agent-sandbox",
       "source": "./dev-sandbox",
-      "description": "Isolated Docker/Podman container for running Claude Code with full permissions — the container is the security boundary",
+      "description": "agent-stack isolation layer: Docker/Podman security boundary for full-permission Claude Code and Codex sessions",
       "version": "0.12.5",
       "author": {
         "name": "Matteo Bortolazzo"

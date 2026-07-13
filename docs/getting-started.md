@@ -1,87 +1,149 @@
 # Getting started
 
-agent-stack looks like three plugins, but it's **one system** — you install it once,
-with one command, and update it the same way. This guide takes you from nothing to a
-working setup on Linux, macOS, or WSL2.
+This is the supported happy path from a clean machine to the first agent-stack ticket.
+agent-stack is one product; the installer manages its three internal components for
+every supported client it detects.
 
-## What you're installing
+## 1. Prerequisites
 
-| Plugin | Layer | One-line job |
-|--------|-------|--------------|
-| `agentflow` | workflow | Turns a GitHub ticket into a merged PR, stopping only for *your* decisions (refine, design, plan approval) |
-| `agentwatch` | attention | Shows live agent status wherever you're looking — tmux bar, waybar, macOS menu bar — and shouts when the agent needs you |
-| `agent-sandbox` | isolation | Runs the agent inside a Docker/Podman container with full permissions, so autopilot is safe |
+Install:
 
-They ship and install together, as one unit: agent-sandbox makes autopilot safe,
-agentflow runs the autopilot, agentwatch tells you when it needs you.
+- Linux, macOS, or WSL2
+- git
+- Docker or Podman
+- Claude Code, Codex, or both
 
-## Before you start
+Claude Code is required for the complete interactive ticket-to-PR workflow. A
+Codex-only installation still provides container isolation, monitoring, portable
+engineering conventions, and the [Codex implementation recipe](../agentflow/docs/codex.md).
 
-The hard requirements are **[Claude Code](https://code.claude.com/docs/en/overview)**,
-**git**, and **Docker or Podman** (the sandbox container is the only supported runtime).
-Everything else is per-feature and the installer tells you exactly what's missing and
-why it matters:
+Optional features have separate dependencies:
 
-| You want… | You need… |
-|-----------|-----------|
-| agent-stack (required) | Docker or Podman (macOS: [Docker Desktop](https://docker.com/products/docker-desktop) or Podman) |
-| agentflow (issues & PRs) | [GitHub CLI](https://cli.github.com) (`gh`), authenticated via `gh auth login` |
-| agentwatch in the tmux status bar | tmux |
-| agentwatch in the macOS menu bar | [SwiftBar](https://swiftbar.app) (`brew install swiftbar`) — optional |
+| Feature | Dependency |
+|---|---|
+| GitHub issues and PRs | [GitHub CLI](https://cli.github.com) authenticated with `gh auth login` |
+| tmux status | tmux |
+| macOS menu-bar status | [SwiftBar](https://swiftbar.app) |
+| desktop status | One of the documented AgentWatch display widgets |
 
-Not sure? Run the check first — it changes nothing:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash -s -- doctor
-```
-
-## Install
-
-One command. It detects your platform, checks prerequisites, installs all three
-plugins, and does the post-install setup that used to be manual:
+## 2. Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
 ```
 
-Or from a clone:
+From a clone, run `./install.sh`. Non-interactive automation can add `--yes`; use
+`./install.sh --help` for the complete public interface.
+
+The installer registers the agent-stack marketplace and installs `agentflow`,
+`agentwatch`, and `agent-sandbox` independently for Claude Code, Codex, or both. It
+creates only the launchers relevant to detected clients and can build the sandbox
+image. AgentWatch self-bootstraps its client-cache binary and daemon on first session.
+
+## 3. Verify
+
+`doctor` changes nothing and separates required platform dependencies, detected
+clients, optional feature dependencies, installed components, launchers, and image
+readiness:
 
 ```bash
-git clone https://github.com/matteobortolazzo/agent-stack.git
-cd agent-stack && ./install.sh
+./install.sh doctor
 ```
 
-What it does, concretely:
+Warnings for optional features are safe to defer. Fix any required item marked with
+`✗` before continuing.
 
-1. Registers this repo as a Claude Code plugin marketplace and, when detected, as a
-   Codex plugin marketplace.
-2. Installs the selected plugins in Claude Code and Codex. Each client keeps its own
-   local plugin cache; the marketplace catalog and plugin sources are shared.
-3. **agent-sandbox**: symlinks the `agent-sand` / `codex-sand` launchers into
-   `~/.local/bin` and offers to build the container image (a few minutes, one time).
-4. **agentwatch**: nothing to do — the binary and daemon self-bootstrap on your first
-   Claude Code session. On macOS, if SwiftBar is installed it offers to wire up the
-   menu bar widget for you.
-5. **agentflow**: checks `gh` auth and points you at the one-time `/agentflow:configure`.
+## 4. Launch
 
-Non-interactive (CI, dotfiles scripts): `bash -s -- --yes`.
-Run `./install.sh --help` for all flags.
+Use the launcher installed for your client:
 
-**Codex users — one-time config.** Project instructions live in `CLAUDE.md` files (one per
-directory). Claude Code reads them natively; Codex needs one line in its *user-level*
-config to discover the same files (a repo-level `.codex/config.toml` is ignored):
+```bash
+agent-sand   # Claude Code
+codex-sand   # Codex
+```
+
+When launched from a git repository, only that repository root is mounted at
+`/workspace`. AgentWatch needs no separate binary install: the first supported client
+session provisions it and starts the shared host daemon.
+
+Codex users should also make the repository's canonical `CLAUDE.md` instructions
+discoverable by adding this user-level configuration (repository-level Codex config
+does not control fallback instruction discovery):
 
 ```toml
 # ~/.codex/config.toml
 project_doc_fallback_filenames = ["CLAUDE.md"]
 ```
 
-<details>
-<summary>Prefer to do it by hand?</summary>
+If Codex reports updated plugin hooks as pending, inspect and trust them with `/hooks`.
+
+## 5. Configure a project
+
+In a sandboxed Claude Code session, run once:
+
+```text
+/agentflow:configure
+```
+
+This detects the stack, writes project guidance, configures workflow metadata, and can
+generate a reviewed per-repository sandbox image definition. Codex-only users follow
+the [portable project and implementation guidance](../agentflow/docs/codex.md); the
+interactive configure skill is Claude Code-only.
+
+## 6. Run a ticket
+
+```text
+/agentflow:refine 42
+/agentflow:implement 42
+/agentflow:babysit <pr-number>
+```
+
+The lifecycle is always:
+
+```text
+New → Refined → [Designed] → Planned → Working → In Review → Implemented
+```
+
+For UI work, refinement can branch through a dedicated design ticket. Planning saves
+an approved `.plans/` file and applies `Planned`; implementation or automated dispatch
+picks it up and applies the transient `Working` state. PR creation applies `In Review`,
+and merge completion applies `Implemented`.
+
+## Update
+
+```bash
+./install.sh update
+```
+
+Update refreshes every installed component in every detected client, resolves the
+active AgentWatch cache, refreshes launchers, and replaces a stale running AgentWatch
+daemon with the updated binary.
+
+## Troubleshooting
+
+| Symptom | Resolution |
+|---|---|
+| Neither client is detected | Install Claude Code, Codex, or both, then rerun the installer |
+| Sandbox launcher is not found | Add `~/.local/bin` to `PATH`, then rerun `./install.sh doctor` |
+| AgentWatch status has not appeared | Start a new agent session and inspect `${TMPDIR:-/tmp}/agentwatch-bootstrap.log` |
+| Codex skills are missing | Confirm `codex plugin list`, then restart Codex after installation |
+| Claude commands are missing | Confirm `claude plugin list`, then restart Claude Code after installation |
+| Sandbox image is absent | Run `agent-sand --build` or `codex-sand --build` |
+| GitHub operations fail | Install `gh` and run `gh auth login` |
+
+Platform and display-specific troubleshooting lives in the internal layer references:
+[agent-sandbox](../dev-sandbox/README.md) and [agentwatch](../agentwatch/README.md).
+
+## Advanced and recovery: standalone installation
+
+Use this only when developing a component or recovering a broken installer run. Run
+the commands for each client you actually use:
 
 ```bash
 claude plugin marketplace add matteobortolazzo/agent-stack
-claude plugin install agentflow agentwatch agent-sandbox
+claude plugin install agentflow@agent-stack
+claude plugin install agentwatch@agent-stack
+claude plugin install agent-sandbox@agent-stack
 
 codex plugin marketplace add matteobortolazzo/agent-stack
 codex plugin add agentflow@agent-stack
@@ -89,101 +151,7 @@ codex plugin add agentwatch@agent-stack
 codex plugin add agent-sandbox@agent-stack
 ```
 
-Then, inside Claude Code, `/agent-sandbox:setup` to symlink the launcher and build the
-image. agentwatch needs nothing. For the macOS menu bar widget, see
-[agentwatch/plugin/macos/README.md](../agentwatch/plugin/macos/README.md).
-
-</details>
-
-## Your first session
-
-```bash
-# 1. Launch Claude Code inside the sandbox
-agent-sand
-
-# 2. One-time project setup — detects your stack, writes CLAUDE.md and settings
-/agentflow:configure
-
-# 3. Work a ticket end to end
-/agentflow:refine 42        # sharpen the ticket together (optional)
-/agentflow:implement 42     # plan → your approval → autopilot → open PR
-/agentflow:babysit 43       # keep the PR moving: CI fixes + review comments
-```
-
-agentwatch needs no commands at all — once a session starts, your tmux window shows
-`▶` while the agent works, `✓` when it's done, and `!` (red) when it needs your input.
-
-## Platform notes
-
-### Linux
-
-Everything works natively. Waybar/noctalia/DMS widgets for agentwatch are documented in
-[agentwatch/README.md](../agentwatch/README.md).
-
-### macOS
-
-- **Sandbox** requires a container runtime — Docker Desktop or Podman. Install one
-  before running the image build.
-- **agentwatch** works in tmux out of the box. The menu bar widget is a SwiftBar
-  plugin; the installer wires it up if SwiftBar is present. One gotcha the installer
-  handles for you: SwiftBar's default plugin folder lives under `~/Library`, which
-  Finder hides — the installer uses `~/SwiftBarPlugins` instead. Point SwiftBar at it
-  in *Preferences → Plugin Folder*.
-
-### WSL2
-
-Treated as Linux. Two things to know:
-
-- Docker Desktop for Windows with the WSL2 backend works for the sandbox; make sure
-  WSL integration is enabled for your distro.
-- Keep your repos on the Linux filesystem (`~/Repos`, not `/mnt/c/...`) — the sandbox
-  mounts each repo's root from there, and cross-OS file access is slow anyway.
-
-## Updating
-
-```bash
-./install.sh update
-# or the same curl one-liner with:  bash -s -- update
-```
-
-This updates every installed plugin in each available client, refreshes the launcher
-symlinks, and offers to rebuild the sandbox image when needed. When AgentWatch is
-updated, the installer provisions the matching binary and gracefully replaces the
-running daemon so the new version takes effect immediately.
-
-## Troubleshooting
-
-| Symptom | Fix |
-|---------|-----|
-| `claude: command not found` | Install [Claude Code](https://code.claude.com/docs/en/overview) first — the installer can't do this for you |
-| `agent-sand: command not found` after install | `~/.local/bin` isn't on your PATH — add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile |
-| No status in tmux after installing agentwatch | The first session bootstraps the binary in the background — give it a moment, then check `${TMPDIR:-/tmp}/agentwatch-bootstrap.log` |
-| macOS menu bar item never appears | Usually the SwiftBar GUI-PATH gotcha — see [the SwiftBar README](../agentwatch/plugin/macos/README.md#the-gui-path-gotcha) |
-| Permission errors on `/workspace` files | The container auto-remaps to your host UID/GID on every launch; on the legacy whole-`~/Repos` mount, pre-existing mis-owned files need a manual `chown` — see [dev-sandbox/README.md](../dev-sandbox/README.md#troubleshooting) |
-| `/agentflow:*` commands missing in a session | `claude plugin list` should show agentflow; if not, re-run the installer — and note plugins load at session start, so restart Claude Code after installing |
-| `agentflow:*` skills missing in Codex | `codex plugin list` should show `agentflow@agent-stack` as installed and enabled; re-run the installer, then start a new Codex session |
-| `git push` fails inside the sandbox | SSH remotes don't work through the sandbox network filter — switch to HTTPS: `git remote set-url origin https://github.com/<owner>/<repo>.git` |
-
-## Uninstall
-
-```bash
-claude plugin uninstall agentflow agentwatch agent-sandbox
-claude plugin marketplace remove agent-stack
-codex plugin remove agentflow@agent-stack
-codex plugin remove agentwatch@agent-stack
-codex plugin remove agent-sandbox@agent-stack
-codex plugin marketplace remove agent-stack
-rm -f ~/.local/bin/agent-sand ~/.local/bin/codex-sand
-# sandbox leftovers, if you built the image:
-docker rmi agent-sandbox:latest
-docker volume ls --filter name=sand-home -q | xargs -r docker volume rm
-# macOS menu bar widget, if wired:
-rm -f ~/SwiftBarPlugins/agentwatch.5s.sh
-```
-
-## Where to go next
-
-- [Root README](../README.md) — how the three layers fit together, and Codex support
-- [agentflow](../agentflow/README.md) — the full pipeline, board lifecycle, babysitting PRs
-- [agentwatch](../agentwatch/README.md) — dispatch, auto-pickup, widgets, the Go API
-- [agent-sandbox](../dev-sandbox/README.md) — auth injection, Docker-in-Docker, lifecycle
+Then rerun `./install.sh` to restore launchers, AgentWatch wiring, and image setup.
+Optional desktop/menu-bar widgets are configured from the relevant
+[AgentWatch display documentation](../agentwatch/README.md); they are not another
+agent-stack install.

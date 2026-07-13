@@ -24,6 +24,9 @@ MARKETPLACE_REPO="matteobortolazzo/agent-stack"
 MARKETPLACE_NAME="agent-stack"
 ALL_PLUGINS="agentflow agentwatch agent-sandbox"
 CODEX_MARKETPLACE_READY=0
+CLAUDE_MARKETPLACE_READY=0
+HAS_CLAUDE=0
+HAS_CODEX=0
 
 # ---------------------------------------------------------------- output ----
 
@@ -100,6 +103,15 @@ platform_label() {
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+detect_clients() {
+	have claude && HAS_CLAUDE=1
+	have codex && HAS_CODEX=1
+}
+
+have_supported_client() {
+	[ "$HAS_CLAUDE" -eq 1 ] || [ "$HAS_CODEX" -eq 1 ]
+}
+
 container_runtime() {
 	if have podman; then
 		echo podman
@@ -143,9 +155,29 @@ codex_marketplace_registered() {
 # versioned plugin cache.
 find_plugin_path() {
 	local rel="$1" f
-	for f in "$HOME"/.claude/plugins/marketplaces/*/"$rel"; do
+	for f in \
+		"$HOME"/.claude/plugins/marketplaces/*/"$rel" \
+		"$HOME"/.codex/plugins/marketplaces/*/"$rel"; do
 		[ -e "$f" ] && { printf '%s\n' "$f"; return 0; }
 	done
+	case "$rel" in
+	dev-sandbox/*)
+		rel=${rel#dev-sandbox/}
+		for f in \
+			"$HOME"/.claude/plugins/cache/*/agent-sandbox/*/"$rel" \
+			"$HOME"/.codex/plugins/cache/*/agent-sandbox/*/"$rel"; do
+			[ -e "$f" ] && { printf '%s\n' "$f"; return 0; }
+		done
+		;;
+	agentwatch/plugin/*)
+		rel=${rel#agentwatch/plugin/}
+		for f in \
+			"$HOME"/.claude/plugins/cache/*/agentwatch/*/"$rel" \
+			"$HOME"/.codex/plugins/cache/*/agentwatch/*/"$rel"; do
+			[ -e "$f" ] && { printf '%s\n' "$f"; return 0; }
+		done
+		;;
+	esac
 	return 1
 }
 
@@ -172,10 +204,7 @@ run_doctor() {
 	DOCTOR_FAILED=0
 	step "Checking your system ($(platform_label))"
 
-	say "  ${BOLD}Required${RESET}"
-	check "claude CLI" required \
-		"install Claude Code first: https://code.claude.com/docs/en/overview" \
-		command -v claude
+	say "  ${BOLD}Required platform dependencies${RESET}"
 	check "git" required "install git from your package manager" command -v git
 	if [ "$OS" = macos ]; then
 		check "Docker or Podman" required \
@@ -185,9 +214,15 @@ run_doctor() {
 		check "Docker or Podman" required \
 			"install docker or podman from your package manager" container_runtime
 	fi
-	check "codex CLI" optional \
-		"install Codex to add the same plugins there; Claude setup still works without it" \
-		command -v codex
+
+	say ""
+	say "  ${BOLD}Supported clients (at least one required)${RESET}"
+	if [ "$HAS_CLAUDE" -eq 1 ]; then ok "Claude Code detected"; else warn "Claude Code not detected"; fi
+	if [ "$HAS_CODEX" -eq 1 ]; then ok "Codex detected"; else warn "Codex not detected"; fi
+	if ! have_supported_client; then
+		fail "no supported client — install Claude Code, Codex, or both"
+		DOCTOR_FAILED=1
+	fi
 
 	say ""
 	say "  ${BOLD}For agentflow (workflow)${RESET}"
@@ -209,6 +244,32 @@ run_doctor() {
 	fi
 
 	say ""
+	say "  ${BOLD}Installed stack components${RESET}"
+	if [ "$HAS_CLAUDE" -eq 1 ]; then
+		for p in $ALL_PLUGINS; do
+			if plugin_installed "$p"; then ok "Claude: $p"; else warn "Claude: $p not installed"; fi
+		done
+	fi
+	if [ "$HAS_CODEX" -eq 1 ]; then
+		for p in $ALL_PLUGINS; do
+			if codex_plugin_installed "$p"; then ok "Codex: $p"; else warn "Codex: $p not installed"; fi
+		done
+	fi
+
+	say ""
+	say "  ${BOLD}Launchers and container image${RESET}"
+	if [ "$HAS_CLAUDE" -eq 1 ]; then
+		check "agent-sand launcher" optional "re-run the installer to create it" command -v agent-sand
+	fi
+	if [ "$HAS_CODEX" -eq 1 ]; then
+		check "codex-sand launcher" optional "re-run the installer to create it" command -v codex-sand
+	fi
+	if runtime="$(container_runtime 2>/dev/null)"; then
+		check "agent-sandbox:latest image" optional "build it with the installed sandbox launcher --build" \
+			"$runtime" image inspect agent-sandbox:latest
+	fi
+
+	say ""
 	if [ "$DOCTOR_FAILED" -eq 1 ]; then
 		say "${RED}Missing required tools — fix the ✗ items above, then re-run.${RESET}"
 		return 1
@@ -227,16 +288,20 @@ selected() { case " $SELECTED " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 step_marketplace() {
 	step "Registering the agent-stack marketplace"
-	if marketplace_registered; then
+	if [ "$HAS_CLAUDE" -eq 0 ]; then
+		:
+	elif marketplace_registered; then
 		ok "Claude: marketplace '$MARKETPLACE_NAME' already registered"
+		CLAUDE_MARKETPLACE_READY=1
 	elif claude plugin marketplace add "$MARKETPLACE_REPO" >/dev/null 2>&1; then
 		ok "Claude: registered $MARKETPLACE_REPO"
+		CLAUDE_MARKETPLACE_READY=1
 	else
 		die "could not register the marketplace. Run manually to see the error:
   claude plugin marketplace add $MARKETPLACE_REPO"
 	fi
 
-	have codex || return 0
+	[ "$HAS_CODEX" -eq 1 ] || return 0
 	if codex_marketplace_registered; then
 		ok "Codex: marketplace '$MARKETPLACE_NAME' already registered"
 		CODEX_MARKETPLACE_READY=1
@@ -251,18 +316,20 @@ step_marketplace() {
 
 step_install_plugins() {
 	step "Installing plugins"
-	for p in $SELECTED; do
-		if plugin_installed "$p"; then
-			ok "Claude: $p already installed (run './install.sh update' to update)"
-			continue
-		fi
-		if plugin_cmd install "$p"; then
-			ok "Claude: $p installed"
-		else
-			fail "Claude: $p failed to install. Run manually: claude plugin install $p@$MARKETPLACE_NAME"
-			INSTALL_FAILED=1
-		fi
-	done
+	if [ "$CLAUDE_MARKETPLACE_READY" -eq 1 ]; then
+		for p in $SELECTED; do
+			if plugin_installed "$p"; then
+				ok "Claude: $p already installed (run './install.sh update' to update)"
+				continue
+			fi
+			if plugin_cmd install "$p"; then
+				ok "Claude: $p installed"
+			else
+				fail "Claude: $p failed to install. Run manually: claude plugin install $p@$MARKETPLACE_NAME"
+				INSTALL_FAILED=1
+			fi
+		done
+	fi
 
 	[ "$CODEX_MARKETPLACE_READY" -eq 1 ] || return 0
 	for p in $SELECTED; do
@@ -281,21 +348,23 @@ step_install_plugins() {
 
 step_update_plugins() {
 	step "Updating plugins"
-	claude plugin marketplace update "$MARKETPLACE_NAME" >/dev/null 2>&1 || true
-	for p in $SELECTED; do
-		if ! plugin_installed "$p"; then
-			warn "$p is not installed — skipping (run './install.sh' to install it)"
-			continue
-		fi
-		if plugin_cmd update "$p"; then
-			ok "Claude: $p updated"
-		else
-			fail "Claude: $p failed to update. Run manually: claude plugin update $p@$MARKETPLACE_NAME"
-			INSTALL_FAILED=1
-		fi
-	done
+	if [ "$HAS_CLAUDE" -eq 1 ]; then
+		claude plugin marketplace update "$MARKETPLACE_NAME" >/dev/null 2>&1 || true
+		for p in $SELECTED; do
+			if ! plugin_installed "$p"; then
+				warn "Claude: $p is not installed — skipping (run './install.sh' to install it)"
+				continue
+			fi
+			if plugin_cmd update "$p"; then
+				ok "Claude: $p updated"
+			else
+				fail "Claude: $p failed to update. Run manually: claude plugin update $p@$MARKETPLACE_NAME"
+				INSTALL_FAILED=1
+			fi
+		done
+	fi
 
-	have codex || return 0
+	[ "$HAS_CODEX" -eq 1 ] || return 0
 	if ! codex_marketplace_registered; then
 		warn "Codex marketplace is not registered — skipping Codex updates (run './install.sh' to install it)"
 		return 0
@@ -327,7 +396,10 @@ step_update_plugins() {
 prune_selected_to_installed() {
 	local kept="" p
 	for p in $SELECTED; do
-		plugin_installed "$p" && kept="$kept $p"
+		if { [ "$HAS_CLAUDE" -eq 1 ] && plugin_installed "$p"; } ||
+			{ [ "$HAS_CODEX" -eq 1 ] && codex_plugin_installed "$p"; }; then
+			kept="$kept $p"
+		fi
 	done
 	SELECTED="${kept# }"
 }
@@ -349,14 +421,15 @@ step_sandbox_setup() {
 	selected agent-sandbox || return 0
 	step "Setting up the agent-sandbox launcher"
 
-	local launcher
+	local launcher launcher_name
+	if [ "$HAS_CLAUDE" -eq 1 ]; then launcher_name=agent-sand; else launcher_name=codex-sand; fi
 	if ! launcher=$(find_plugin_path "dev-sandbox/agent-sand"); then
-		warn "could not find the installed agent-sandbox plugin — run /agent-sandbox:setup inside Claude Code instead"
+		warn "could not find the installed agent-sandbox plugin cache — re-run the installer after restarting your client"
 		return 0
 	fi
 
-	link_launcher agent-sand "$launcher" || true
-	link_launcher codex-sand "$launcher" || true
+	if [ "$HAS_CLAUDE" -eq 1 ]; then link_launcher agent-sand "$launcher" || true; fi
+	if [ "$HAS_CODEX" -eq 1 ]; then link_launcher codex-sand "$launcher" || true; fi
 
 	case ":$PATH:" in
 	*":$HOME/.local/bin:"*) ;;
@@ -367,29 +440,29 @@ step_sandbox_setup() {
 	local runtime
 	if ! runtime=$(container_runtime); then
 		if [ "$OS" = macos ]; then
-			fail "no container runtime found — install Docker Desktop (https://docker.com/products/docker-desktop) or Podman, then run: agent-sand --build"
+			fail "no container runtime found — install Docker Desktop (https://docker.com/products/docker-desktop) or Podman, then run: $launcher_name --build"
 		else
-			fail "no container runtime found — install docker or podman, then run: agent-sand --build"
+			fail "no container runtime found — install docker or podman, then run: $launcher_name --build"
 		fi
 		INSTALL_FAILED=1
 		return 0
 	fi
 
 	if [ "$BUILD_IMAGE" = no ]; then
-		say "  ${DIM}skipping image build — run 'agent-sand --build' when ready${RESET}"
+		say "  ${DIM}skipping image build — run '$launcher_name --build' when ready${RESET}"
 		return 0
 	fi
 	if [ "$BUILD_IMAGE" = ask ]; then
 		if ! ask_yn "Build the sandbox container image now with $runtime? (takes a few minutes)" y; then
-			say "  ${DIM}skipped — run 'agent-sand --build' when ready${RESET}"
+			say "  ${DIM}skipped — run '$launcher_name --build' when ready${RESET}"
 			return 0
 		fi
 	fi
 	say "  building agent-sandbox:latest with $runtime (this can take a few minutes)…"
-	if "$HOME/.local/bin/agent-sand" --build; then
+	if "$HOME/.local/bin/$launcher_name" --build; then
 		ok "sandbox image built"
 	else
-		fail "image build failed — fix the error above and re-run: agent-sand --build"
+		fail "image build failed — fix the error above and re-run: $launcher_name --build"
 		INSTALL_FAILED=1
 	fi
 }
@@ -399,7 +472,9 @@ step_sandbox_setup() {
 # it a reliable selector even before that version's binary has bootstrapped.
 newest_agentwatch_root() {
 	local newest_manifest="" manifest
-	for manifest in "$HOME"/.claude/plugins/cache/*/agentwatch/*/.claude-plugin/plugin.json; do
+	for manifest in \
+		"$HOME"/.claude/plugins/cache/*/agentwatch/*/.claude-plugin/plugin.json \
+		"$HOME"/.codex/plugins/cache/*/agentwatch/*/.codex-plugin/plugin.json; do
 		[ -f "$manifest" ] || continue
 		if [ -z "$newest_manifest" ] || [ "$manifest" -nt "$newest_manifest" ]; then
 			newest_manifest="$manifest"
@@ -423,15 +498,25 @@ cached_agentwatch_binary() {
 # active plugin cache. Updates cannot rely on a later SessionStart hook: an old
 # daemon may continue owning the sockets indefinitely.
 current_agentwatch_binary() {
-	local root bootstrap
+	local root bootstrap root_var
 	if cached_agentwatch_binary; then
 		return 0
 	fi
 	root="$(newest_agentwatch_root || true)"
 	[ -n "$root" ] || return 1
-	bootstrap="$root/hooks/bootstrap.sh"
+	if [ -f "$root/.codex-plugin/plugin.json" ]; then
+		bootstrap="$root/codex/bootstrap.sh"
+		root_var=PLUGIN_ROOT
+	else
+		bootstrap="$root/hooks/bootstrap.sh"
+		root_var=CLAUDE_PLUGIN_ROOT
+	fi
 	if [ -f "$bootstrap" ]; then
-		CLAUDE_PLUGIN_ROOT="$root" sh "$bootstrap" >/dev/null 2>&1 || true
+		if [ "$root_var" = PLUGIN_ROOT ]; then
+			PLUGIN_ROOT="$root" sh "$bootstrap" >/dev/null 2>&1 || true
+		else
+			CLAUDE_PLUGIN_ROOT="$root" sh "$bootstrap" >/dev/null 2>&1 || true
+		fi
 	fi
 	cached_agentwatch_binary
 }
@@ -575,6 +660,7 @@ setup_agentwatch_linux_path() {
 
 step_agentflow_notes() {
 	selected agentflow || return 0
+	[ "$HAS_CLAUDE" -eq 1 ] || return 0
 	step "agentflow next steps"
 	if have gh && gh auth status >/dev/null 2>&1; then
 		ok "GitHub CLI is authenticated"
@@ -601,16 +687,21 @@ final_summary() {
 	say ""
 	say "  Try it out:"
 	if selected agent-sandbox; then
-		say "    agent-sand                # Claude Code inside the container"
-	fi
-	if selected agentflow; then
-		say "    claude → /agentflow:configure # one-time project setup"
-		if have codex; then
-			say "    codex                       # portable agentflow conventions are available"
+		if [ "$HAS_CLAUDE" -eq 1 ]; then
+			say "    agent-sand                # Claude Code inside the container"
+		fi
+		if [ "$HAS_CODEX" -eq 1 ]; then
+			say "    codex-sand                # Codex inside the container"
 		fi
 	fi
+	if selected agentflow && [ "$HAS_CLAUDE" -eq 1 ]; then
+		say "    claude → /agentflow:configure # one-time project setup"
+	fi
+	if selected agentflow && [ "$HAS_CODEX" -eq 1 ]; then
+		say "    codex                       # portable agentflow conventions are available"
+	fi
 	if selected agentwatch; then
-		say "    (start any Claude Code session — status appears in the tmux bar)"
+		say "    (start a supported agent session — status appears in configured surfaces)"
 	fi
 	say ""
 	say "  Update everything later:  ${BOLD}./install.sh update${RESET}"
@@ -663,6 +754,7 @@ if [ "$BUILD_IMAGE" = ask ] && { [ "$INTERACTIVE" -eq 0 ] || [ "$ASSUME_YES" -eq
 fi
 
 detect_platform
+detect_clients
 
 say ""
 say "${BOLD}agent-stack installer${RESET} — $(platform_label)"
@@ -672,9 +764,7 @@ if [ "$MODE" = doctor ]; then
 	exit $?
 fi
 
-have claude || die "the 'claude' CLI is required. Install Claude Code first:
-  https://code.claude.com/docs/en/overview
-then re-run this script."
+have_supported_client || die "no supported client found. Install Claude Code, Codex, or both, then re-run this script."
 
 if [ "$MODE" = update ]; then
 	step_update_plugins

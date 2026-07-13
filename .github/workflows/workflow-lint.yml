@@ -27,6 +27,7 @@ jobs:
             workflows:
               - '.github/workflows/**'
               - '.github/scripts/**'
+              - '**/*.md'
 
   check-permissions:
     needs: changes
@@ -38,3 +39,5 @@ jobs:
         run: bash .github/scripts/check-workflow-permissions.sh
       - name: Run permission-check unit tests
         run: bash .github/scripts/check-workflow-permissions.test.sh
+      - name: Check documentation links, anchors, and terminology
+        run: python3 .github/scripts/check-docs.py

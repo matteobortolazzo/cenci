@@ -68,10 +68,10 @@ docker volume rm codex-sand-home-<repo-slug>
 
 See [dev-sandbox/README.md#reset-an-instance](./dev-sandbox/README.md#reset-an-instance)
 for the full naming scheme (per-repo slug, `--name` suffix, legacy `-default` volumes).
-A single `agent-sand --prune --volumes` convenience command that sweeps all sandbox
-volumes at once is planned ([#148](https://github.com/matteobortolazzo/agent-stack/issues/148))
-but not available yet — use `docker volume ls --filter name=sand-home` plus the manual
-`docker volume rm` commands above in the meantime.
+`agent-sand --prune` removes superseded base tags, dangling images, and stopped sandbox
+containers. Add `--volumes` to list sandbox home volumes and interactively confirm
+their removal; volume deletion defaults to no because it destroys copied credentials
+and session history.
 
 ## Reporting a vulnerability
 

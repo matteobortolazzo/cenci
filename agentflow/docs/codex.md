@@ -73,5 +73,5 @@ window and tells Codex to follow the repository's `AGENTS.md`.
 
 Only the `implement` dispatch is provided. Interactive refinement, Pencil design,
 Claude goal/loop automation, and Claude project configuration remain out of scope.
-The architectural rationale is recorded in
-[`docs/cohesive-package.md` section 6.3](../../docs/cohesive-package.md#63-layer-3--agentflow-workflow).
+The supported boundary is summarized in the
+[root client capability matrix](../../README.md#client-capabilities).

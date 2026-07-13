@@ -1,6 +1,6 @@
 {
   "name": "agent-sandbox",
-  "description": "Isolated Docker/Podman container for running Claude Code with full permissions — the container is the security boundary",
+  "description": "agent-stack isolation layer: Docker/Podman security boundary for full-permission Claude Code and Codex sessions",
   "version": "0.12.5",
   "author": {
     "name": "Matteo Bortolazzo"
