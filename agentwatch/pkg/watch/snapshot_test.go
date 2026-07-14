@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v3/pkg/watch"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/pkg/watch"
 )
 
 // -- StateSnapshot.Dispatch (#219) -----------------------------------------
