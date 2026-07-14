@@ -73,6 +73,7 @@ DOCKER_SOCKET=false
 UPDATE_PLUGINS=false
 PRUNE=false
 PRUNE_VOLUMES=false
+RESEED_CREDS=false
 AGENT_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -125,6 +126,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --volumes)
             PRUNE_VOLUMES=true
+            shift
+            ;;
+        --reseed-creds)
+            RESEED_CREDS=true
             shift
             ;;
         *)
@@ -521,10 +526,17 @@ if "${AGENTWATCH_AVAILABLE}"; then
     )
 fi
 
-# Claude credentials (read-only staging — entrypoint copies to /home/dev)
+# Claude credentials (read-only staging — entrypoint seeds into /home/dev only
+# when the volume has none, since rotating refresh tokens fork per copy; #259)
 CLAUDE_CREDS="${HOME}/.claude/.credentials.json"
 if [[ -f "${CLAUDE_CREDS}" ]]; then
     RUN_ARGS+=(-v "${CLAUDE_CREDS}:/tmp/host-claude-creds/.credentials.json:ro")
+fi
+
+# Force a reseed from the host (recovery after the volume's token chain died,
+# e.g. all sessions were revoked)
+if "${RESEED_CREDS}"; then
+    RUN_ARGS+=(-e "AGENT_SAND_RESEED_CREDS=1")
 fi
 
 # Codex credentials (ChatGPT sign-in and/or API key — fail hard if neither present)

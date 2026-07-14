@@ -96,6 +96,9 @@ source "${SCRIPT_DIR}/lib/migrate-settings.sh"
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/codex-config.sh
 source "${SCRIPT_DIR}/lib/codex-config.sh"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/seed-auth.sh
+source "${SCRIPT_DIR}/lib/seed-auth.sh"
 
 if [[ -L /home/dev/.claude ]]; then
     rm -f /home/dev/.claude
@@ -202,15 +205,17 @@ fi
 seed_codex_config /home/dev/.codex/config.toml
 
 # ── Inject host credentials (staged read-only mounts → writable copies) ──
+#
+# Claude and Codex OAuth tokens rotate on refresh, so the volume's copy forks
+# into its own token chain after first use — seed_credential (lib/seed-auth.sh)
+# copies them only when the volume has none yet (or on --reseed-creds), never
+# clobbering a live chain with a stale host copy (#259).
 
 # Claude Code OAuth credentials
-if [[ -f /tmp/host-claude-creds/.credentials.json ]]; then
-    mkdir -p /home/dev/.claude
-    cp /tmp/host-claude-creds/.credentials.json /home/dev/.claude/.credentials.json
-    chmod 600 /home/dev/.claude/.credentials.json
-fi
+seed_credential /tmp/host-claude-creds/.credentials.json /home/dev/.claude/.credentials.json
 
-# GitHub CLI credentials
+# GitHub CLI credentials — non-rotating token, host stays canonical, so an
+# unconditional copy is safe and propagates host re-auths.
 if [[ -f /tmp/host-gh-config/hosts.yml ]]; then
     mkdir -p /home/dev/.config/gh
     cp /tmp/host-gh-config/hosts.yml /home/dev/.config/gh/hosts.yml
@@ -218,11 +223,7 @@ if [[ -f /tmp/host-gh-config/hosts.yml ]]; then
 fi
 
 # Codex OAuth credentials (ChatGPT sign-in)
-if [[ -f /tmp/host-codex-creds/auth.json ]]; then
-    mkdir -p /home/dev/.codex
-    cp /tmp/host-codex-creds/auth.json /home/dev/.codex/auth.json
-    chmod 600 /home/dev/.codex/auth.json
-fi
+seed_credential /tmp/host-codex-creds/auth.json /home/dev/.codex/auth.json
 
 # ── Docker socket group alignment (DooD) ────────────────────────────
 if [[ -S /var/run/docker.sock ]]; then

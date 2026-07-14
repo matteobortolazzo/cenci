@@ -61,6 +61,7 @@ jobs:
           bash dev-sandbox/tests/heal-plugins.test.sh
           bash dev-sandbox/tests/repo-scope.test.sh
           bash dev-sandbox/tests/codex-config.test.sh
+          bash dev-sandbox/tests/seed-auth.test.sh
           bash dev-sandbox/tests/launcher-lifecycle.test.sh
           bash dev-sandbox/tests/agentwatch-wiring.test.sh
           bash dev-sandbox/tests/installer-clients.test.sh
