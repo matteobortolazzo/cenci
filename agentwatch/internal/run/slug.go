@@ -4,7 +4,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v3/internal/frontend"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/frontend"
 )
 
 // windowNameMaxLen caps the join key so it stays readable in tmux, board cards,

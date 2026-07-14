@@ -7,11 +7,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v3/internal/config"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v3/internal/detect"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v3/internal/frontend"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v3/internal/ipc"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v3/pkg/watch"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/config"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/detect"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/frontend"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/ipc"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/pkg/watch"
 )
 
 // Daemon manages the event-driven loop and per-session core state. All tmux

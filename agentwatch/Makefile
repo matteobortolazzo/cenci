@@ -1,5 +1,5 @@
 BINARY := agentwatch
-MODULE := github.com/matteobortolazzo/agent-stack/agentwatch/v3
+MODULE := github.com/matteobortolazzo/agent-stack/agentwatch/v4
 VERSION ?= dev
 
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64

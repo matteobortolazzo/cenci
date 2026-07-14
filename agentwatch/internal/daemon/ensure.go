@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v3/internal/ipc"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/ipc"
 )
 
 var readyTimeout = 3 * time.Second

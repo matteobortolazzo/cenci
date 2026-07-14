@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v3/internal/run"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v3/pkg/watch"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/run"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/pkg/watch"
 )
 
 // runFn is the spawn seam: applyDispatch calls it instead of run.Run directly

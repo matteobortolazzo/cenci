@@ -3,9 +3,9 @@ package daemon
 import (
 	"testing"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v3/internal/ipc"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v3/internal/tmux"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v3/internal/tmux/tmuxtest"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/ipc"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/tmux"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/tmux/tmuxtest"
 )
 
 func TestDaemon_ManuallyNamedWindowKeepsOriginalName(t *testing.T) {

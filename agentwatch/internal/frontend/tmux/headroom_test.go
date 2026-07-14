@@ -4,8 +4,8 @@ import (
 	"math"
 	"testing"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v3/internal/config"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v3/internal/tmux/tmuxtest"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/config"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/tmux/tmuxtest"
 )
 
 // TestRenderHeadroom_SingleAgent covers #171: a single agent-type's headroom
