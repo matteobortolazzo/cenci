@@ -1,6 +1,6 @@
 {
   "name": "agentwatch",
-  "version": "4.0.1",
+  "version": "4.1.0",
   "description": "agent-stack attention layer: send Codex lifecycle events to the shared AgentWatch daemon.",
   "author": {
     "name": "Matteo Bortolazzo",
