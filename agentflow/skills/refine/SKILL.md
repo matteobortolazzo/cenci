@@ -92,7 +92,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 
    Options: "Yes — design-only", "No — includes implementation"
 
-   If confirmed, set `isDesignTicket = true`. Design-only tickets are routed to `/agentflow:design`, not `/agentflow:implement`: they skip the browser question (step 8) and the `ui:visual-check` label (step 13), and receive the `Design` label in step 12. Focus the analysis (step 5) on design questions — visual direction, screens, states, design-system fit — and skip implementation-only items (API contracts, database changes, PR size).
+   If confirmed, set `isDesignTicket = true`. Design-only tickets are routed to `/agentflow:design`, not `/agentflow:implement`: they skip the browser question (step 8) and the `ui:visual-check` label (step 12), and receive the `Design` label in step 11. Focus the analysis (step 5) on design questions — visual direction, screens, states, design-system fit — and skip implementation-only items (API contracts, database changes, PR size).
 
    **Design Coverage Check** (if frontend ticket AND `pencil.enabled` is `true` in `.claude/config.json`):
 
@@ -146,7 +146,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
    - If **yes** → note `browserRequired: true` for the labeling step
    - If **no** → proceed normally
 
-9. **When refined**, produce:
+9. **When refined**, prepare the following summary content. It is not shown yet — steps 10-12 first persist the ticket update, any split or companion design ticket, and the labels; this summary is then presented in the final message together with a notice of what was persisted (see the **Final Message** note at the end of the Update Ticket section):
 
    ## Refined Ticket Summary
 
@@ -198,14 +198,9 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 ## Update Ticket
 
 > **CRITICAL**: This section is mandatory after refinement. Do NOT skip it.
-> All questions in this section MUST use the `AskUserQuestion` tool — never ask as plain text.
+> This section runs unconditionally after refinement — there is no confirmation prompt before writing. The human gate is the Q&A loop (steps 6-8); review happens after the writes, via the final message.
 
-10. **Using `AskUserQuestion`**, ask: "Do you want me to update the ticket in GitHub with this refined information?"
-
-   - If the user says **no** → skip to the label step below (step 12)
-   - If the user says **yes** → proceed to step 11
-
-11. **Update the ticket description in the remote system.**
+10. **Update the ticket description in the remote system.**
 
    > **IMPORTANT**: Writing a temp file is NOT updating the ticket. You MUST execute the update command after writing the file. Never stop between writing the temp file and running the update command.
 
@@ -300,9 +295,9 @@ ticket is unambiguous, well-scoped, and ready for implementation.
    Depends on #<D> (design)
    ```
 
-   When `/agentflow:design <D>` completes, it closes #<D> and propagates the `Designed` label to this ticket, satisfying implement's Design gate. If the user declined the ticket update in step 10, still offer to create the companion design ticket via `AskUserQuestion` (skip the `Depends on` body edit if declined).
+   When `/agentflow:design <D>` completes, it closes #<D> and propagates the `Designed` label to this ticket, satisfying implement's Design gate.
 
-12. **Add the "Refined" label and remove "Working":**
+11. **Add the "Refined" label and remove "Working":**
    - If `isDesignTicket` is true:
      `gh issue edit <number> --repo <owner>/<repo> --add-label "Refined" --add-label "Design" --remove-label "Working"`
    - Else if `browserRequired` is true:
@@ -311,13 +306,22 @@ ticket is unambiguous, well-scoped, and ready for implementation.
      `gh issue edit <number> --repo <owner>/<repo> --add-label "Refined" --remove-label "Working"`
    - If re-refining and `browserRequired` is false but the issue currently has the `Browser` label, also add `--remove-label "Browser"`
    - If re-refining and `isDesignTicket` is false but the issue currently has the `Design` label, also add `--remove-label "Design"`
-   - If the user declined the ticket update in step 10, use `AskUserQuestion` to ask: "Do you want me to mark this ticket as Refined?" and apply just the label if yes.
 
-13. **Auto-label `ui:visual-check` for visual/layout tickets** (skip if `isDesignTicket` is true):
+12. **Auto-label `ui:visual-check` for visual/layout tickets** (skip if `isDesignTicket` is true):
    If the ticket description, acceptance criteria, or answers during refinement match the **visual-check signals** subset in the `frontend-classification` reference skill, add the `ui:visual-check` label:
    `gh issue edit <number> --repo <owner>/<repo> --add-label "ui:visual-check"`
 
    This label signals to the implement skill that interactive browser verification via Playwright CLI should be used.
+
+### Final Message
+
+After steps 10-12 complete, present the Refined Ticket Summary prepared in step 9 in the final message, followed by a short notice of what was persisted:
+
+> Ticket #`<n>` updated. Labels: Refined[, Design][, Browser][, ui:visual-check]. [Created `N` child tickets: #`<c1>`, #`<c2>`, ….] [Created companion design ticket #`<D>`.]
+>
+> Review the summary above.
+
+Do not display the summary earlier in the flow — it is shown once, here, after all writes complete. Do not name or suggest the next command to run (`/implement`, `/agentflow:design`, etc.) here — that's covered by the **After Refinement** section below.
 
 ## After Refinement
 
