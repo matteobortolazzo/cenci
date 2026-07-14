@@ -1,7 +1,7 @@
 {
   "name": "agentflow",
   "description": "agent-stack workflow layer: portable conventions and Claude Code's gated GitHub ticket-to-PR pipeline",
-  "version": "4.14.5",
+  "version": "4.14.6",
   "author": {
     "name": "Matteo Bortolazzo"
   },
