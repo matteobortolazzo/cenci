@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/pkg/watch"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/pkg/watch"
 )
 
 func TestFailedWindowsMapping(t *testing.T) {

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/ipc"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/pkg/watch"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/internal/ipc"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/pkg/watch"
 )
 
 func testConfig() Config {

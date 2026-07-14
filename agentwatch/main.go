@@ -14,16 +14,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/config"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/daemon"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/dispatch"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/frontend"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/frontend/status"
-	tmuxfe "github.com/matteobortolazzo/agent-stack/agentwatch/internal/frontend/tmux"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/ipc"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/run"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/tmux"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/pkg/watch"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/internal/config"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/internal/daemon"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/internal/dispatch"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/internal/frontend"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/internal/frontend/status"
+	tmuxfe "github.com/matteobortolazzo/agent-stack/agentwatch/v2/internal/frontend/tmux"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/internal/ipc"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/internal/run"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/internal/tmux"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/pkg/watch"
 )
 
 // version is stamped at build time via -ldflags "-X main.version=<ver>".

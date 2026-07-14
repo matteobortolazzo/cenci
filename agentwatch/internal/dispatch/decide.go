@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/pkg/watch"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/pkg/watch"
 )
 
 // Inputs is the full, explicit input to Decide. Now is an injected clock value

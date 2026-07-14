@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/ipc"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/internal/ipc"
 )
 
 func TestDeliverEventSucceedsWithoutRecovery(t *testing.T) {

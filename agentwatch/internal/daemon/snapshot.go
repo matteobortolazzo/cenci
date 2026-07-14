@@ -4,8 +4,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/detect"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/ipc"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/internal/detect"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/internal/ipc"
 )
 
 func (d *Daemon) broadcast() {

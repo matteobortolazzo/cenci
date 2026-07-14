@@ -3,7 +3,7 @@
 package tmuxtest
 
 import (
-	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/tmux"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/internal/tmux"
 )
 
 // MockClient implements tmux.Client for testing.

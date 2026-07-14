@@ -6,7 +6,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/pkg/watch"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/pkg/watch"
 )
 
 // SetLoopEnabled idempotently sets dispatch.loopEnabled, preserving every

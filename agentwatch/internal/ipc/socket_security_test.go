@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/pkg/watch"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/pkg/watch"
 )
 
 func TestSafeListen_RejectsSymlink(t *testing.T) {

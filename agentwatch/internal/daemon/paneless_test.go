@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/ipc"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/tmux"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/tmux/tmuxtest"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/internal/ipc"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/internal/tmux"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/internal/tmux/tmuxtest"
 )
 
 func TestDaemon_PanelessEventCreatesSessionWithoutTmux(t *testing.T) {

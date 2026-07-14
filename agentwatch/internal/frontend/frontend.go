@@ -8,8 +8,8 @@ package frontend
 import (
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/detect"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/ipc"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/internal/detect"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/internal/ipc"
 )
 
 // SessionState is the daemon core's view of one agent session.
