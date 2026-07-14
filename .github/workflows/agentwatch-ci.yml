@@ -74,6 +74,7 @@ jobs:
         working-directory: agentwatch
     steps:
       - uses: actions/checkout@v7
+      - run: shellcheck plugin/*/install.sh
       - run: bash plugin/gnome/test.sh
       - run: bash plugin/plasma/test.sh
       - run: bash plugin/macos/test.sh

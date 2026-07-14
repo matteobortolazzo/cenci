@@ -30,7 +30,7 @@ No polling for normal state changes. Agent hooks push state changes to the daemo
 ## Installation
 
 The easiest path is the [one-command installer](../docs/getting-started.md), which
-also wires the macOS menu bar widget when SwiftBar is present:
+also wires the desktop bar widget for whichever bar it detects:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
@@ -38,6 +38,17 @@ curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/i
 
 The installer handles Claude Code, Codex, or both. The binary and daemon
 self-bootstrap from the active client's plugin cache on the first session.
+
+On both install and `agent-stack update`, the installer auto-detects each present
+GUI bar — GNOME Shell, KDE Plasma, DankMaterialShell, and noctalia — and, with a
+per-bar prompt (default yes), installs and **reloads** its widget so widget
+changes are visible immediately. macOS SwiftBar is wired the same way. Because a
+running panel restart is disruptive, each bar is gated behind its own prompt.
+Waybar is the exception: its config is hand-managed, so the installer only prints
+the module snippet to add (see [Waybar config](#waybar-config)) and the
+`pkill -SIGUSR2 waybar` reload hint — it writes nothing. GNOME first installs of a
+brand-new extension dir still need a Shell reload (X11 `Alt+F2`, `r`) or relogin
+(Wayland); update reloads live via the extension's disable→enable toggle.
 
 ### Advanced / development: standalone client installation
 

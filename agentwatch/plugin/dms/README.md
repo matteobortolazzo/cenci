@@ -12,7 +12,24 @@ Live counts of Claude Code and Codex tmux sessions in your DankMaterialShell (DM
   below). If your bar still can't find it, set `agentwatchPath` to the binary's
   full path in plugin settings.
 
-## Install (local dev)
+## Install
+
+The [one-command installer](../../README.md#installation) auto-detects
+DankMaterialShell and wires this widget up for you (on both install and
+`agent-stack update`). To do it directly — from the marketplace checkout or a
+repo checkout:
+
+```sh
+~/.claude/plugins/marketplaces/agent-stack/agentwatch/plugin/dms/install.sh
+# from a repo checkout, inside agentwatch/: ./plugin/dms/install.sh
+```
+
+It symlinks this plugin into `~/.config/DankMaterialShell/plugins/agentwatch` and
+restarts DMS so it picks the plugin up. It's idempotent — re-run after any
+`agentwatch` update. You still enable the widget and add it to a bar section once
+(below).
+
+### Install (manual / local dev)
 
 Symlink this directory into DMS's plugin folder:
 

@@ -19,6 +19,13 @@ bash -n dev-sandbox/entrypoint.sh dev-sandbox/agent-sand
 bash dev-sandbox/tests/smoke.test.sh   # runtime smoke test; self-skips without docker/podman
 ```
 
+Host-runnable installer suites (mock PATH + fake HOME, no container needed):
+```bash
+bash dev-sandbox/tests/install-update.test.sh        # daemon restart on update
+bash dev-sandbox/tests/installer-clients.test.sh     # client detection + launchers
+bash dev-sandbox/tests/agentwatch-widgets.test.sh    # GUI bar-widget detect/install/reload
+```
+
 ## Conventions
 - Keep the image minimal; bake tools into the image rather than bind-mounting from the host.
 - `entrypoint.sh` must stay POSIX-portable and pass `shellcheck`.
