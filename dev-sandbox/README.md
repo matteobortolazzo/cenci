@@ -111,6 +111,10 @@ agent-sand --host-network --shell
 # Force an agentflow/agentwatch plugin update now (bypasses the 30-min TTL)
 agent-sand --update-plugins
 
+# Force re-copying host Claude/Codex credentials into the volume (recovery
+# after this instance's login died — normally they seed once and never update)
+agent-sand --reseed-creds
+
 # Clean up superseded base image tags, dangling images, and stopped sandbox
 # containers (keeps the current base tag, agent-sandbox-base:latest, and all
 # per-repo images untouched)
@@ -182,7 +186,24 @@ the monolith and Codex fragment, regenerating any tailored repo Dockerfile, and 
 
 ## First-Run Setup
 
-If `~/.claude/.credentials.json` and `~/.config/gh/hosts.yml` exist on the host, they are automatically injected into the container on each start. **No manual auth needed.**
+If `~/.claude/.credentials.json` and `~/.config/gh/hosts.yml` exist on the host, they are automatically injected into the container. **No manual auth needed.**
+
+Claude (and Codex) OAuth uses rotating refresh tokens: after the sandbox's first
+token refresh, the volume's credentials become an independent login from the
+host's — like being signed in on two machines. Claude and Codex credentials are
+therefore **seeded only when the volume has none yet** and never overwritten on
+later starts: each instance stays logged in indefinitely, and using the sandbox
+all day can no longer log your host session out (you may see one final host
+re-login right after a volume is first seeded, then both sides are stable). The
+GitHub CLI token doesn't rotate, so `hosts.yml` is still refreshed from the host
+on every start.
+
+If an instance's login does die (e.g. you revoked all sessions on claude.ai),
+force a one-time re-copy from the host:
+
+```bash
+agent-sand --reseed-creds
+```
 
 ### Onboarding prompts
 
@@ -213,7 +234,9 @@ Both agents get a status line out of the box:
 When launching Codex (`--agent codex` / `codex-sand`), auth is staged from the host:
 
 - `~/.codex/auth.json` — the ChatGPT sign-in credentials created by `codex login` on the
-  host. Injected read-only and copied to `/home/dev/.codex/auth.json` (mode 600) on start.
+  host. Injected read-only and seeded to `/home/dev/.codex/auth.json` (mode 600) only when
+  the volume has none yet (rotating refresh tokens — see First-Run Setup; `--reseed-creds`
+  forces a re-copy).
 - `OPENAI_API_KEY` — forwarded into the container when set in your host environment.
 
 At least one of these must be present. If neither is, `agent-sand --agent codex` fails
