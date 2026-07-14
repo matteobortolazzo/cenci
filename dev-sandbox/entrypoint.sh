@@ -69,15 +69,17 @@ fi
 # Claude Code pointed these paths at the host filesystem.  Replace any
 # dangling symlink with a real directory / file so plugin installs work.
 #
-# migrate_settings (lib/migrate-settings.sh) deep-merges three things into
+# migrate_settings (lib/migrate-settings.sh) deep-merges settings into
 # settings.json in one idempotent pass: the CONTAINER-ONLY bypass-mode keys
 # (so --dangerously-skip-permissions never prompts and never downgrades to
 # `default` in headless runs — the container boundary is what makes this safe;
 # see docs/cohesive-package.md §2.1, and they must never reach the host
 # ~/.claude/settings.json), the current agentwatch/agentflow plugins from the
 # agent-stack marketplace (so sandbox sessions are visible on the host status
-# bar), and a removal of the stale pre-rename muxwatch/ccflow/claude-tools
-# stack that old home volumes still carry.
+# bar), a removal of the stale pre-rename muxwatch/ccflow/claude-tools
+# stack that old home volumes still carry, and default UI preferences
+# (fullscreen TUI, clear-context-on-plan-accept) seeded only when the volume
+# has none of its own.
 #
 # This enabledPlugins/extraKnownMarketplaces settings alone do NOT actually
 # install anything on Claude Code 2.1.207: its settings-driven auto-install

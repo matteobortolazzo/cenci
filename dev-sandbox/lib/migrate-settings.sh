@@ -16,7 +16,8 @@
 #   * removes the stale pre-rename muxwatch/ccflow plugins and the old
 #     claude-tools marketplace, which would otherwise 404 on bootstrap and
 #     shadow the renamed plugins,
-#   * seeds the ccline status line when the volume has none of its own.
+#   * seeds the ccline status line and the default UI preferences (fullscreen
+#     TUI, clear-context-on-plan-accept) when the volume has none of its own.
 
 # Container-only bypass settings. The container boundary is what makes bypass
 # mode safe — these must never reach the host ~/.claude/settings.json.
@@ -32,16 +33,23 @@ PLUGIN_SETTINGS='{"extraKnownMarketplaces":{"agent-stack":{"source":{"source":"g
 # customization in the home volume wins.
 STATUSLINE_SETTINGS='{"statusLine":{"type":"command","command":"/usr/local/bin/ccline","padding":0}}'
 
+# Default UI preferences for a fresh sandbox session: the flicker-free
+# fullscreen renderer, and offering to clear context from the plan-approval
+# dialog. Seeded key-by-key only when the volume has none of its own — same
+# non-forcing rationale as STATUSLINE_SETTINGS above.
+UI_PREFERENCE_SETTINGS='{"tui":"fullscreen","showClearContextOnPlanAccept":true}'
+
 # migrate_settings: read a settings.json object from stdin, write the merged +
 # migrated object to stdout. Reads `{}` when given an empty/whitespace input so
 # fresh and invalid volumes get seeded too. Idempotent: running it on its own
 # output is a no-op.
 migrate_settings() {
-    jq --argjson bypass "${BYPASS_SETTINGS}" --argjson plugins "${PLUGIN_SETTINGS}" --argjson statusline "${STATUSLINE_SETTINGS}" '
+    jq --argjson bypass "${BYPASS_SETTINGS}" --argjson plugins "${PLUGIN_SETTINGS}" --argjson statusline "${STATUSLINE_SETTINGS}" --argjson uiprefs "${UI_PREFERENCE_SETTINGS}" '
         (. * $bypass * $plugins)
         | del(.enabledPlugins["muxwatch@claude-tools"], .enabledPlugins["ccflow@claude-tools"])
         | del(.extraKnownMarketplaces["claude-tools"])
         | if has("statusLine") then . else . + $statusline end
+        | reduce ($uiprefs | to_entries[]) as $pref (.; if has($pref.key) then . else . + {($pref.key): $pref.value} end)
     '
 }
 

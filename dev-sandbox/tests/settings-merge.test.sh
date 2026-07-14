@@ -103,7 +103,21 @@ OUT_CUSTOM="$(echo "${CUSTOM_STATUSLINE}" | migrate_settings)"
 echo "case: user statusLine preserved"
 assert_jq "keeps user statusLine command" "${OUT_CUSTOM}" '.statusLine.command == "/home/dev/bin/my-line"'
 
-# ── Case 7: onboarding seed into .claude.json ────────────────────
+# ── Case 7: default UI preference seeding ─────────────────────────
+# Absent tui/showClearContextOnPlanAccept → seed the fullscreen renderer and
+# the plan-approval clear-context option. Same non-forcing rationale as
+# statusLine: a user's own choice in the home volume must be preserved.
+echo "case: UI preferences seeded when absent"
+assert_jq "seeds fullscreen tui"                  "${OUT_EMPTY}" '.tui == "fullscreen"'
+assert_jq "seeds showClearContextOnPlanAccept"    "${OUT_EMPTY}" '.showClearContextOnPlanAccept == true'
+
+CUSTOM_UI_PREFS='{"tui":"default","showClearContextOnPlanAccept":false}'
+OUT_CUSTOM_UI="$(echo "${CUSTOM_UI_PREFS}" | migrate_settings)"
+echo "case: user UI preferences preserved"
+assert_jq "keeps user tui choice"                 "${OUT_CUSTOM_UI}" '.tui == "default"'
+assert_jq "keeps user showClearContextOnPlanAccept" "${OUT_CUSTOM_UI}" '.showClearContextOnPlanAccept == false'
+
+# ── Case 8: onboarding seed into .claude.json ────────────────────
 # Fresh volume: the entrypoint writes ONBOARDING_SETTINGS directly.
 echo "case: onboarding seed (fresh)"
 assert_jq "fresh seed marks onboarding complete" "${ONBOARDING_SETTINGS}" '.hasCompletedOnboarding == true'
