@@ -1,0 +1,14 @@
+# CODEOWNERS — least-privilege CI gate protection
+#
+# Protects the least-privilege workflow-permissions gate hardened in PR #248
+# (deferred follow-up from #241). These entries auto-request review from and
+# document ownership of the gate script and its test, so a single self-merged
+# PR can no longer silently weaken the check that enforces least-privilege
+# workflow `permissions:` grants.
+#
+# NOTE: This is informational/notification-only today. It has no blocking
+# effect until a branch-protection ruleset on `main` enables
+# `require_code_owner_review`. See docs/release-hygiene.md (§4) for why that
+# enforcement is deferred until a second collaborator exists.
+.github/scripts/check-workflow-permissions.sh       @matteobortolazzo
+.github/scripts/check-workflow-permissions.test.sh  @matteobortolazzo
