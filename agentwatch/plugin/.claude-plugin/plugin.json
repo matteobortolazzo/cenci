@@ -1,6 +1,6 @@
 {
   "name": "agentwatch",
-  "version": "4.3.0",
+  "version": "4.4.0",
   "description": "agent-stack attention layer for Claude Code and Codex: live status, dispatch, and optional display integrations",
   "author": {
     "name": "Matteo Bortolazzo"

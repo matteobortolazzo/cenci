@@ -2,7 +2,7 @@
   "id": "agentwatch",
   "name": "AgentWatch",
   "description": "Live counts of Claude Code and Codex tmux sessions (running / need-input / done / stopped / idle).",
-  "version": "4.3.0",
+  "version": "4.4.0",
   "author": "Matteo Bortolazzo",
   "type": "widget",
   "capabilities": [
