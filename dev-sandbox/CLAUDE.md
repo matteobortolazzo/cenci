@@ -24,6 +24,7 @@ Host-runnable installer suites (mock PATH + fake HOME, no container needed):
 bash dev-sandbox/tests/install-update.test.sh        # daemon restart on update
 bash dev-sandbox/tests/installer-clients.test.sh     # client detection + launchers
 bash dev-sandbox/tests/agentwatch-widgets.test.sh    # GUI bar-widget detect/install/reload
+bash dev-sandbox/tests/reap-orphans.test.sh          # --reap-orphans scan/kill/escalation
 ```
 
 ## Conventions
@@ -44,6 +45,8 @@ bash dev-sandbox/tests/agentwatch-widgets.test.sh    # GUI bar-widget detect/ins
 - **Preserve all pre-existing logic when splitting a script into conditional branches.** When refactoring a script to introduce a new conditional branch (e.g., adding git-based per-repo scoping alongside a legacy non-git fallback), the fallback branch can appear "unchanged" in the diff while actually being accidentally simplified during the rewrite (e.g., dropping a computed value and hardcoding a default). Test both branches independently to catch silent failures.
 
 - **Under `pipefail`, a terminal-stage filter or loop that always succeeds masks upstream failures.** Pipelines ending with `grep ... || true` or `while read` (both always exit 0) will hide real failures from earlier stages — e.g., `docker ps` failing silently appears as "nothing found." Always capture command output into a variable and check that command's exit status explicitly before filtering or looping on the captured value.
+
+- **When a function is used as the condition of `if`/`while`, bash suspends `set -e` for its entire body.** This calling-convention gotcha means every command inside such a function whose failure matters must have its exit status explicitly captured and checked — do not rely on `set -e` to catch downstream failures. This differs from `pipefail` masking: it's about errexit suspension via calling convention, not pipeline status computation. Sibling instances of the same error pattern in a function (e.g., multiple `kill` escalations) may not all be caught in a single review pass—systematically sweep the entire function body for the same pattern when fixing one instance.
 
 ## Image architecture: base + fragments
 `Dockerfile.base` builds the stack-agnostic `agent-sandbox-base:<content-hash>` image

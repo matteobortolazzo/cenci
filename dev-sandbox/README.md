@@ -137,6 +137,17 @@ agent-sand --prune
 # Also list and interactively confirm removal of *-sand-home-* volumes (holds
 # copied credentials + full session history — defaults to no deletion)
 agent-sand --prune --volumes
+
+# Retroactively kill container-side agent processes whose owning tmux pane no
+# longer exists on the host (SIGTERM, then SIGKILL after a grace period).
+# Scans every running *-sand-* container across all installed runtimes
+# (docker and podman). If no tmux server is running, every TMUX_PANE-carrying
+# process is treated as orphaned and the output says so explicitly. Processes
+# with a missing/empty TMUX_PANE (manual non-tmux launches) are never
+# signaled. Prints one `reaped\t<container>\t<pid>\t<pane>` line per reaped
+# process plus a final count, and exits non-zero on a genuine runtime error
+# (e.g. exec failure) rather than swallowing it.
+agent-sand --reap-orphans
 ```
 
 ### Per-repo containers

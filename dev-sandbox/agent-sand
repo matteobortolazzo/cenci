@@ -86,6 +86,7 @@ UPDATE_PLUGINS=false
 PRUNE=false
 PRUNE_VOLUMES=false
 RESEED_CREDS=false
+REAP_ORPHANS=false
 AGENT_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -134,6 +135,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --prune)
             PRUNE=true
+            shift
+            ;;
+        --reap-orphans)
+            REAP_ORPHANS=true
             shift
             ;;
         --volumes)
@@ -227,6 +232,162 @@ if "${PRUNE}"; then
     fi
 
     exit 0
+fi
+
+# ── Reap orphans (--reap-orphans) ───────────────────────────────────
+# Kills container-side agent processes whose owning tmux pane no longer
+# exists on the host. Ownership is recorded via the TMUX_PANE env var that
+# EXEC_ENV_ARGS injects into every exec'd session, present in
+# /proc/<pid>/environ of every container-side agent process and descendants.
+# Runs before repo scoping (global sweep, not scoped to the current repo) and
+# scans every installed runtime independently of the single auto-detected
+# RUNTIME used elsewhere in this script, since orphans can exist under either
+# docker or podman regardless of which one is preferred here.
+#
+# Minimal POSIX in-container scan: emits "<pid>\t<pane>" for every process
+# whose environ carries a TMUX_PANE key (pane may be empty), skipping
+# processes lacking the key entirely. All classification (skip-empty-pane,
+# skip-live-pane, reap-dead-pane, TERM->KILL escalation, no-tmux handling)
+# happens host-side below, never inside this canned scan.
+REAP_SCAN_SCRIPT='for e in /proc/[0-9]*/environ; do [ -f "$e" ] || continue; p=${e#/proc/}; p=${p%/environ}; line=$(tr "\0" "\n" < "$e" 2>/dev/null | grep "^TMUX_PANE=") || continue; printf "%s\t%s\n" "$p" "${line#TMUX_PANE=}"; done'
+
+reap_orphans() {
+    # Read once; AGENT_SAND_REAP_GRACE_SECS lets callers tune the SIGTERM ->
+    # SIGKILL grace window (e.g. to 0 for fast test runs).
+    local grace="${AGENT_SAND_REAP_GRACE_SECS:-5}"
+
+    local tmp_dir
+    tmp_dir="$(mktemp -d)" || { echo "Error: failed to create temp directory." >&2; return 1; }
+    trap 'rm -rf "${tmp_dir}"' RETURN
+
+    # ── Host tmux liveness ──────────────────────────────────────────
+    local tmux_out tmux_exit tmux_err
+    if tmux_out="$(tmux list-panes -a -F '#{pane_id}' 2>"${tmp_dir}/tmux.err")"; then
+        tmux_exit=0
+    else
+        tmux_exit=$?
+    fi
+    tmux_err="$(cat "${tmp_dir}/tmux.err" 2>/dev/null || true)"
+
+    local -A LIVE_PANES=()
+    local no_tmux_server=false
+    if [[ "${tmux_exit}" -eq 0 ]]; then
+        while IFS= read -r pane; do
+            [[ -n "${pane}" ]] && LIVE_PANES["${pane}"]=1
+        done <<< "${tmux_out}"
+    elif grep -qi 'no server running' <<< "${tmux_err}"; then
+        no_tmux_server=true
+        echo "Note: No tmux server detected; treating every TMUX_PANE-carrying process as orphaned."
+    else
+        echo "Error: failed to query tmux panes: ${tmux_err}" >&2
+        return 1
+    fi
+
+    # ── Runtimes to scan (independent of the single auto-detected RUNTIME) ──
+    local AVAILABLE_RUNTIMES=()
+    command -v docker &>/dev/null && AVAILABLE_RUNTIMES+=(docker)
+    command -v podman &>/dev/null && AVAILABLE_RUNTIMES+=(podman)
+    if [[ "${#AVAILABLE_RUNTIMES[@]}" -eq 0 ]]; then
+        echo "Error: no container runtime (docker/podman) found on PATH." >&2
+        return 1
+    fi
+
+    local reaped_count=0
+    local rt
+    for rt in "${AVAILABLE_RUNTIMES[@]}"; do
+        local container_list
+        if ! container_list="$("${rt}" ps --format '{{.Names}}')"; then
+            echo "Error: failed to list running containers for ${rt}." >&2
+            return 1
+        fi
+
+        local matching_containers
+        matching_containers="$(echo "${container_list}" | { grep -E -- '^(claude-sand-|codex-sand-)' || true; })"
+        [[ -z "${matching_containers}" ]] && continue
+
+        local container
+        while IFS= read -r container; do
+            [[ -z "${container}" ]] && continue
+
+            # -u root: the container's persisted Config.User (from a prior
+            # `docker run --user X`) may not be root, and this environ scan
+            # needs to read every process's /proc/<pid>/environ, not just
+            # those owned by the default user.
+            local scan_out scan_exit
+            if scan_out="$("${rt}" exec -u root "${container}" sh -c "${REAP_SCAN_SCRIPT}" 2>"${tmp_dir}/scan.err")"; then
+                scan_exit=0
+            else
+                scan_exit=$?
+            fi
+            if [[ "${scan_exit}" -ne 0 ]]; then
+                echo "Error: failed to scan processes in container ${container}: $(cat "${tmp_dir}/scan.err" 2>/dev/null || true)" >&2
+                return 1
+            fi
+            [[ -z "${scan_out}" ]] && continue
+
+            local term_pids=()
+            local pid pane
+            while IFS=$'\t' read -r pid pane; do
+                [[ -z "${pid}" ]] && continue
+                [[ -z "${pane}" ]] && continue
+
+                if ! "${no_tmux_server}" && [[ -n "${LIVE_PANES[${pane}]+_}" ]]; then
+                    continue
+                fi
+
+                # -u root: see comment above the scan call.
+                local term_exit
+                if "${rt}" exec -u root "${container}" kill -TERM "${pid}"; then
+                    term_exit=0
+                else
+                    term_exit=$?
+                fi
+                if [[ "${term_exit}" -ne 0 ]]; then
+                    echo "Error: failed to send SIGTERM to pid ${pid} in container ${container}." >&2
+                    return 1
+                fi
+                printf 'reaped\t%s\t%s\t%s\n' "${container}" "${pid}" "${pane}"
+                reaped_count=$((reaped_count + 1))
+                term_pids+=("${pid}")
+            done <<< "${scan_out}"
+
+            if [[ "${#term_pids[@]}" -gt 0 ]]; then
+                sleep "${grace}"
+                for pid in "${term_pids[@]}"; do
+                    # -u root: see comment above the scan call. Non-zero here
+                    # legitimately means "already gone" (exempt from the
+                    # no-`|| true` rule since it's tested, not swallowed).
+                    if "${rt}" exec -u root "${container}" kill -0 "${pid}"; then
+                        local kill_exit
+                        if "${rt}" exec -u root "${container}" kill -KILL "${pid}"; then
+                            kill_exit=0
+                        else
+                            kill_exit=$?
+                        fi
+                        if [[ "${kill_exit}" -ne 0 ]]; then
+                            echo "Error: failed to send SIGKILL to pid ${pid} in container ${container}." >&2
+                            return 1
+                        fi
+                    fi
+                done
+            fi
+        done <<< "${matching_containers}"
+    done
+
+    if [[ "${reaped_count}" -gt 0 ]]; then
+        echo "Reaped ${reaped_count} orphaned process(es)."
+    else
+        echo "No orphaned processes found."
+    fi
+    return 0
+}
+
+if "${REAP_ORPHANS}"; then
+    if reap_orphans; then
+        exit 0
+    else
+        exit 1
+    fi
 fi
 
 # ── Namespacing (per-agent, so containers/volumes never collide) ──
