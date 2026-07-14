@@ -686,6 +686,61 @@ func TestStateStoreLoadsOldFormatWithoutApplyFailures(t *testing.T) {
 // lessons-learned-mandated classification: "already exists" in gh's output is
 // success, everything else (auth/network failure) must surface as an error —
 // never inferred from a blanket exec error.
+// TestGHMutatorEnsureLabelsCachesConfirmed verifies GHMutator.EnsureLabels
+// caches a (repo, name) once it's confirmed to exist (created, or already
+// existed), so a later pass never re-shells `gh label create` for the same
+// key — but a genuine create failure is never cached and is retried on the
+// next call.
+func TestGHMutatorEnsureLabelsCachesConfirmed(t *testing.T) {
+	var calls []string
+	fail := map[string]bool{}
+	m := &GHMutator{
+		createLabel: func(repo, name, color, description string) error {
+			calls = append(calls, repo+"/"+name)
+			if fail[repo+"/"+name] {
+				return errors.New("gh: authentication required. run `gh auth login`")
+			}
+			return nil
+		},
+	}
+
+	// First call confirms dispatch-failed in o/r: create is invoked.
+	if err := m.EnsureLabels("o/r", []string{labelDispatchFailed}); err != nil {
+		t.Fatalf("EnsureLabels: %v", err)
+	}
+	// Second call for the same (repo, name): cache hit, no additional call.
+	if err := m.EnsureLabels("o/r", []string{labelDispatchFailed}); err != nil {
+		t.Fatalf("EnsureLabels: %v", err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("expected exactly 1 create call for o/r/%s, got %d: %v", labelDispatchFailed, len(calls), calls)
+	}
+
+	// A different, not-yet-confirmed label triggers its own create call.
+	if err := m.EnsureLabels("o/r", []string{labelPlanInvalid}); err != nil {
+		t.Fatalf("EnsureLabels: %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 create calls after a new label, got %d: %v", len(calls), calls)
+	}
+
+	// A genuine failure must surface and must NOT be cached: a subsequent
+	// call for the same key must retry (invoke create again).
+	fail["o2/r2/"+labelReconcileStuck] = true
+	if err := m.EnsureLabels("o2/r2", []string{labelReconcileStuck}); err == nil {
+		t.Fatal("expected EnsureLabels to return the genuine create failure")
+	}
+	if len(calls) != 3 {
+		t.Fatalf("expected 3 create calls after the failing call, got %d: %v", len(calls), calls)
+	}
+	if err := m.EnsureLabels("o2/r2", []string{labelReconcileStuck}); err == nil {
+		t.Fatal("expected the retried EnsureLabels call to still fail (not cached)")
+	}
+	if len(calls) != 4 {
+		t.Fatalf("expected the failed key to be retried (4 total create calls), got %d: %v", len(calls), calls)
+	}
+}
+
 func TestLabelAlreadyExistsClassifiesGHOutput(t *testing.T) {
 	cases := []struct {
 		name   string

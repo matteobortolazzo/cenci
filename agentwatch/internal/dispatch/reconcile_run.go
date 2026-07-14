@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/pkg/watch"
@@ -43,11 +44,21 @@ type ReconcileStore interface {
 }
 
 // GHMutator is the real TicketMutator; it shells out to gh, mirroring collect.go.
-type GHMutator struct{}
+//
+// EnsureLabels caches every (repo, name) it has already confirmed to exist
+// (created, or "already exists") in confirmed, guarded by mu, so a later pass
+// never re-shells `gh label create` for the same key (#274). createLabel is
+// the seam tests inject in place of the real `gh label create` exec call; a
+// nil createLabel falls back to createLabelViaGH.
+type GHMutator struct {
+	mu          sync.Mutex
+	confirmed   map[string]struct{}
+	createLabel func(repo, name, color, description string) error
+}
 
 // EditLabels adds and removes labels on an issue. A no-op call (no labels) does
 // not invoke gh.
-func (GHMutator) EditLabels(repo string, number int, add, remove []string) error {
+func (m *GHMutator) EditLabels(repo string, number int, add, remove []string) error {
 	if len(add) == 0 && len(remove) == 0 {
 		return nil
 	}
@@ -109,17 +120,54 @@ func managedLabelsAmong(names []string) []string {
 // output is treated as success; any other failure (auth, network, ...) is a
 // genuine error and surfaces (lessons-learned.md: never infer resource state
 // from a blanket exec error, never swallow with a catch-all).
-func (GHMutator) EnsureLabels(repo string, names []string) error {
+//
+// Once a (repo, name) is confirmed (created, or already existed), it is
+// cached in m.confirmed (#274) so a later call for the same key skips the
+// create call entirely. The create call itself runs without m.mu held, so
+// concurrent EnsureLabels calls for different labels don't serialize behind
+// a network/exec call; the cache is only touched under the lock. A genuine
+// failure is never cached, so the next call retries it.
+func (m *GHMutator) EnsureLabels(repo string, names []string) error {
 	for _, name := range names {
 		spec, ok := managedLabelSpecs[name]
 		if !ok {
 			continue
 		}
-		out, err := exec.Command("gh", "label", "create", name,
-			"--repo", repo, "--color", spec.color, "--description", spec.desc).CombinedOutput()
-		if err != nil && !labelAlreadyExists(string(out)) {
-			return fmt.Errorf("gh label create %s in %s: %w: %s", name, repo, err, strings.TrimSpace(string(out)))
+		key := repo + "/" + name
+
+		m.mu.Lock()
+		if m.confirmed == nil {
+			m.confirmed = map[string]struct{}{}
 		}
+		_, already := m.confirmed[key]
+		m.mu.Unlock()
+		if already {
+			continue
+		}
+
+		create := m.createLabel
+		if create == nil {
+			create = m.createLabelViaGH
+		}
+		if err := create(repo, name, spec.color, spec.desc); err != nil {
+			return err
+		}
+
+		m.mu.Lock()
+		m.confirmed[key] = struct{}{}
+		m.mu.Unlock()
+	}
+	return nil
+}
+
+// createLabelViaGH is the default createLabel implementation: it shells out
+// to `gh label create`, classifying "already exists" output as success
+// (lessons-learned.md: never infer resource state from a blanket exec error).
+func (m *GHMutator) createLabelViaGH(repo, name, color, description string) error {
+	out, err := exec.Command("gh", "label", "create", name,
+		"--repo", repo, "--color", color, "--description", description).CombinedOutput()
+	if err != nil && !labelAlreadyExists(string(out)) {
+		return fmt.Errorf("gh label create %s in %s: %w: %s", name, repo, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -134,7 +182,7 @@ func labelAlreadyExists(output string) bool {
 
 // Comment posts a comment on an issue. The body is passed as an argv element (no
 // shell), so newlines and markup need no escaping.
-func (GHMutator) Comment(repo string, number int, body string) error {
+func (m *GHMutator) Comment(repo string, number int, body string) error {
 	if out, err := exec.Command("gh", "issue", "comment", strconv.Itoa(number),
 		"--repo", repo, "--body", body).CombinedOutput(); err != nil {
 		return fmt.Errorf("gh issue comment #%d in %s: %w: %s", number, repo, err, strings.TrimSpace(string(out)))
