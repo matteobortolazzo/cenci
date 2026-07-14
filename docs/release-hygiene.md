@@ -90,6 +90,14 @@ finicky; a raw JSON body via `--input -` is a reasonable alternative if the flat
 form above is rejected. Verify the created ruleset's `bypass_actors` in the response
 before moving on.)
 
+> **CODEOWNERS interaction:** [`.github/CODEOWNERS`](../.github/CODEOWNERS) assigns
+> `@matteobortolazzo` as owner of the least-privilege gate script
+> (`check-workflow-permissions.sh`) and its test. That file is
+> **informational-only** until this ruleset adds a `require_code_owner_review`
+> rule — GitHub does not let a PR author approve their own PR, so enabling it
+> today would block the sole collaborator's own merges to those two files.
+> Add `require_code_owner_review` here only once a second collaborator exists.
+
 ## 5. Mandatory post-ruleset verification
 
 **Not optional.** A misconfigured bypass actor silently blocks every future automated
