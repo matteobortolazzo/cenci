@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"sync"
 	"syscall"
+	"testing"
 	"time"
 
 	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/ipc"
@@ -22,6 +23,15 @@ var pollInterval = 50 * time.Millisecond
 // on failure — callers that need to know whether the daemon became reachable
 // should poll Alive afterward.
 func Spawn() {
+	// Refuse to spawn from inside a test binary: os.Executable() would be
+	// the `*.test` binary, and re-invoking it runs the whole test suite —
+	// every unstubbed EnsureRunning call then spawns another copy, fork-
+	// bombing the machine. Unit tests stub the `spawn` var instead;
+	// black-box tests exercise the real installed binary, where
+	// testing.Testing() is false.
+	if testing.Testing() {
+		return
+	}
 	self, err := os.Executable()
 	if err != nil {
 		return

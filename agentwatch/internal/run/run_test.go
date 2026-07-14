@@ -40,6 +40,12 @@ func noConfigOpts(t *testing.T) Opts {
 	t.Helper()
 	return Opts{
 		ConfigPath: filepath.Join(t.TempDir(), "none.json"),
+		// Stub the daemon hook: the real daemon.EnsureRunning spawns
+		// os.Executable(), which inside `go test` is this test binary —
+		// every spawned child re-runs the suite and spawns more children
+		// (a fork bomb, masked in sandboxes where AGENT_SAND=1 short-
+		// circuits EnsureRunning). Tests asserting the hook override this.
+		EnsureDaemon: func() {},
 	}
 }
 
