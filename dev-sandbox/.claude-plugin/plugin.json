@@ -1,7 +1,7 @@
 {
   "name": "agent-sandbox",
   "description": "agent-stack isolation layer: Docker/Podman security boundary for full-permission Claude Code and Codex sessions",
-  "version": "0.14.5",
+  "version": "0.14.6",
   "author": {
     "name": "Matteo Bortolazzo"
   },
