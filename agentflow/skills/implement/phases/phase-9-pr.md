@@ -101,6 +101,8 @@ Create the PR with `gh pr create`. Write body content to `/tmp/claude/agentflow-
 
 If a prior turn already created the PR (a Goal Autopilot resume re-entering after PR creation ran once but the turn ended before `/goal clear`), `gh pr create` fails with "a pull request for branch ... already exists." That is not a failure — run `gh pr view <branch> --json url -q .url` to recover the existing PR URL and continue to Labels/Cleanup as if creation had just succeeded.
 
+If `gh pr create` fails for any other reason (auth, network, validation), clear the goal (`/goal clear`), show the exact failing command and its error output, and use `AskUserQuestion` ("Created, continue" / "Abort") to let the user resolve the issue and confirm before continuing to Labels/Cleanup, or abort the run — mirroring the Push gate above. On "Created, continue," re-run `gh pr view <branch> --json url -q .url` to obtain the PR URL/number before proceeding — the same recovery call as the "already exists" case above — since Labels/Cleanup and the Followup Ticket step below need it.
+
 Ticket mode body includes:
 
 ```markdown

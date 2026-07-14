@@ -455,7 +455,7 @@ git add <designPath>/*.pen <designPath>/DESIGN.md && git commit -m "feat(design)
 **If ticket mode:** Post the design reference and key decisions as a ticket comment — this keeps the ticket body owned by its author while still surfacing the design context for humans and for the context-gatherer (which bundles ticket comments during planning).
 
 1. Get the commit SHA: `git rev-parse HEAD`
-2. Write the comment body with the client's file tool (per `shell-rules` — do not use a shell heredoc) to a temp file, e.g. `${TMPDIR:-/tmp}/agentflow/design-comment.md`:
+2. Write the comment body with the client's file tool (per `shell-rules` — do not use a shell heredoc) to a temp file, e.g. `${TMPDIR:-/tmp}/agentflow/design-comment-<number>.md`:
    ```markdown
    ### Design Reference
    - Design file: `<designPath>/<pen-file-name>`
@@ -470,7 +470,7 @@ git add <designPath>/*.pen <designPath>/DESIGN.md && git commit -m "feat(design)
    ```
 3. Post it:
    ```bash
-   gh issue comment <number> --repo <owner>/<repo> --body-file "${TMPDIR:-/tmp}/agentflow/design-comment.md"
+   gh issue comment <number> --repo <owner>/<repo> --body-file "${TMPDIR:-/tmp}/agentflow/design-comment-<number>.md"
    ```
 
 ### Step 6C: Label Ticket
@@ -499,7 +499,7 @@ gh issue edit <number> --repo <owner>/<repo> --add-label "Designed" --remove-lab
    ```bash
    gh issue edit <dependent> --repo <owner>/<repo> --add-label "Designed"
    ```
-   Also post the same comment from **Step 6B** on each dependent (reuse the temp file written there) via `gh issue comment <dependent> --repo <owner>/<repo> --body-file "${TMPDIR:-/tmp}/agentflow/design-comment.md"`. Implement itself locates `DESIGN.md` via the configured `designPath` (see `implement/SKILL.md`), so this comment is for human/planning context — the context-gatherer bundles ticket comments when implement runs.
+   Also post the same comment from **Step 6B** on each dependent (reuse the temp file written there) via `gh issue comment <dependent> --repo <owner>/<repo> --body-file "${TMPDIR:-/tmp}/agentflow/design-comment-<number>.md"`. Implement itself locates `DESIGN.md` via the configured `designPath` (see `implement/SKILL.md`), so this comment is for human/planning context — the context-gatherer bundles ticket comments when implement runs.
 
 3. **Close the design ticket** — its deliverable is done:
    ```bash

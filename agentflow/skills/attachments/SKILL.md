@@ -47,18 +47,20 @@ If user selects none → skip the rest of this procedure and return to the calli
 
 ### Step 3: Download Selected Attachments
 
-Store downloads under `${TMPDIR:-/tmp}/agentflow/attachments`. Create the directory
-with the client's filesystem tool or a standalone shell command.
+Store downloads under `${TMPDIR:-/tmp}/agentflow/attachments/<scope>` — a per-run
+subdirectory, where `<scope>` is the calling skill's run identifier (ticket id/slug or
+run id), so concurrent runs never pile same-named downloads together. Create the
+directory with the client's filesystem tool or a standalone shell command.
 
 ```bash
-mkdir -p "${TMPDIR:-/tmp}/agentflow/attachments"
+mkdir -p "${TMPDIR:-/tmp}/agentflow/attachments/<scope>"
 ```
 
 Prefer a connected GitHub attachment-download tool when one is available, especially
 for private `user-attachments` URLs. Otherwise use `curl`:
 
 ```bash
-curl -fsSL "<url>" -o "${TMPDIR:-/tmp}/agentflow/attachments/<filename>"
+curl -fsSL "<url>" -o "${TMPDIR:-/tmp}/agentflow/attachments/<scope>/<filename>"
 ```
 
 If a private-repository download fails and no connector can download it, retry with
