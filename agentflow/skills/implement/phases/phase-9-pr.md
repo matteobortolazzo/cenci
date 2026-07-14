@@ -79,8 +79,8 @@ Screenshots are temporary review aids — never commit them to the repo. Host th
 3. **Create the gist** (gists require a text file at creation; images are pushed via git afterwards):
 
    ```bash
-   printf 'Screenshots for %s — temporary, delete after merge.\n' "<branch>" > /tmp/claude/agentflow-screenshots/README.md
-   gh gist create --desc "agentflow screenshots: <owner/repo> <branch>" /tmp/claude/agentflow-screenshots/README.md
+   printf 'Screenshots for %s — temporary, delete after merge.\n' "<branch>" > /tmp/claude/agentflow-screenshots/<ticket-id-or-slug>-README.md
+   gh gist create --desc "agentflow screenshots: <owner/repo> <branch>" /tmp/claude/agentflow-screenshots/<ticket-id-or-slug>-README.md
    ```
 
    The command prints the gist URL; extract `<gist-id>` from it. Do not pass `--public` — the gist must stay secret.
@@ -97,7 +97,7 @@ Screenshots are temporary review aids — never commit them to the repo. Host th
 
 ## PR
 
-Create the PR with `gh pr create`. Write body content to `/tmp/claude/pr-body.md` first and read it back; do not use heredocs or a large inline body string.
+Create the PR with `gh pr create`. Write body content to `/tmp/claude/agentflow-<ticket-id-or-slug>-pr-body.md` first and read it back; do not use heredocs or a large inline body string.
 
 If a prior turn already created the PR (a Goal Autopilot resume re-entering after PR creation ran once but the turn ended before `/goal clear`), `gh pr create` fails with "a pull request for branch ... already exists." That is not a failure — run `gh pr view <branch> --json url -q .url` to recover the existing PR URL and continue to Labels/Cleanup as if creation had just succeeded.
 
@@ -136,7 +136,7 @@ _Temporary secret gist, not part of the repo — delete after merge: `gh gist de
 
 For child tickets that are not last child, use `Related to #<parentId>` for the parent so it is not auto-closed. For ticketless mode, omit `## Ticket`.
 
-`## Review` reports which Phase 6 + 7 path ran, sourced from `/tmp/claude/agentflow-review-path.txt` (written during Phase 6 + 7's Review Path Classification):
+`## Review` reports which Phase 6 + 7 path ran, sourced from `/tmp/claude/agentflow-<ticket-id-or-slug>-review-path.txt` (written during Phase 6 + 7's Review Path Classification):
 
 - `full` → "Review: full trio"
 - `lite-docs` → "Review: lite (docs-only — no reviewers)"
@@ -144,7 +144,7 @@ For child tickets that are not last child, use `Related to #<parentId>` for the 
 
 If the temp file is absent (e.g. after a context compaction or a goal-autopilot resume that skipped re-reading it), default to "Review: full trio" — never over-claim a lite path when the actual path isn't known.
 
-The `## Checklist` security line is derived from the same `/tmp/claude/agentflow-review-path.txt` file, in the same read:
+The `## Checklist` security line is derived from the same `/tmp/claude/agentflow-<ticket-id-or-slug>-review-path.txt` file, in the same read:
 
 - `full` → `- [x] Security review done`
 - `lite-docs` or `lite-small` → `- [ ] Security review skipped (see Review section — <path>)`, where `<path>` is the literal path value (`lite-docs` or `lite-small`)
@@ -180,10 +180,10 @@ If ≥1 deferred item exists, ensure the label exists (its own Bash call — not
 gh label create "Followup" --repo <owner>/<repo> --color "C5DEF5" --description "Deferred/out-of-scope item captured from a session — triage before working" 2>/dev/null || true
 ```
 
-Write the body to a temp file with the file tool — and the title too: the PR title is free text and must never be interpolated directly into the command line (a title containing `$(…)`, backticks, or quotes would be shell-interpreted). Then create the ticket in one call, reading the title back the same way Posting Replies in `address-review` reads reply text:
+Write the body to `/tmp/claude/agentflow-<ticket-id-or-slug>-followup-body.md` with the file tool — and the title too, to `/tmp/claude/agentflow-<ticket-id-or-slug>-followup-title.txt`: the PR title is free text and must never be interpolated directly into the command line (a title containing `$(…)`, backticks, or quotes would be shell-interpreted). Then create the ticket in one call, reading the title back the same way Posting Replies in `address-review` reads reply text:
 
 ```bash
-TITLE=$(cat /tmp/claude/followup-title.txt) && gh issue create --repo <owner>/<repo> --title "$TITLE" --label "Followup" --body-file /tmp/claude/followup-body.md
+TITLE=$(cat /tmp/claude/agentflow-<ticket-id-or-slug>-followup-title.txt) && gh issue create --repo <owner>/<repo> --title "$TITLE" --label "Followup" --body-file /tmp/claude/agentflow-<ticket-id-or-slug>-followup-body.md
 ```
 
 Body content (checklist of items, each with a one-line context and file/area reference):
@@ -222,3 +222,23 @@ After successful PR creation, first clear the Goal Autopilot condition — the P
 Run it via the `SlashCommand` tool; it is a no-op if no goal was armed. Clearing before the plan-file deletion below keeps the two "work is done" signals in sync: the goal's condition references `.plans/<filename>`, which is removed next.
 
 Then delete the consumed plan file. If `.plans/` is empty, remove it. If the pipeline fails before PR creation, preserve the plan file for retry (and, as above, clear the goal at whichever error gate stopped the run).
+
+Finally, delete this run's scoped shared temp files — they were only ever intermediate state for this ticket's pipeline run, and the PR now carries everything they contributed:
+
+```bash
+rm -f \
+  /tmp/claude/agentflow-<ticket-id-or-slug>-diff.patch \
+  /tmp/claude/agentflow-<ticket-id-or-slug>-files.txt \
+  /tmp/claude/agentflow-<ticket-id-or-slug>-stat.txt \
+  /tmp/claude/agentflow-<ticket-id-or-slug>-review-path.txt \
+  /tmp/claude/agentflow-<ticket-id-or-slug>-pr-body.md \
+  /tmp/claude/agentflow-<ticket-id-or-slug>-followup-title.txt \
+  /tmp/claude/agentflow-<ticket-id-or-slug>-followup-body.md \
+  /tmp/claude/agentflow-<ticket-id-or-slug>-explore-1.md \
+  /tmp/claude/agentflow-<ticket-id-or-slug>-explore-2.md \
+  /tmp/claude/agentflow-context-<ticket-id-or-slug>.md
+```
+
+This deliberately excludes two other scoped temp locations: the screenshots dir (`/tmp/claude/agentflow-screenshots/<ticket-id-or-slug>/`) is a documented fallback location kept for gist-upload failures (see Screenshots above), and the gist clone temp dir (`/tmp/claude/agentflow-gist-<gist-id>/`) is already uniquely scoped by gist ID — neither needs this pass to stay collision-safe.
+
+Like the plan-file deletion above, this cleanup only runs on the success path (PR created). If the pipeline fails before PR creation, these files are preserved for retry/debugging, same as the plan file.
