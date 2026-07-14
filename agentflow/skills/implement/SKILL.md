@@ -209,6 +209,33 @@ If the ticket has a `ui:visual-check` or `Browser` label, display a reminder:
 
 This is informational only — it does not block the pipeline.
 
+## Trivial-Ticket Triage
+
+**Ticket mode only.** Skip this section entirely in ticketless mode and in plan file mode — plan file mode already has a persisted plan, and ticketless mode has no ticket body to triage against.
+
+Runs after every Ticket Readiness gate above (Design-Ticket Router, "Refined" check, "Designed" hard gate) — a ticket disqualified by those gates never reaches triage.
+
+This is a cheap heuristic the main agent evaluates directly over the context-gatherer digest already fetched, plus (see below) a single direct read of the already-gathered bundle file — no subagent invocation, no codebase exploration, no additional tool calls beyond that one `Read`.
+
+The digest alone is not sufficient for the last two gates below: it is capped at ~40 lines and is explicitly a 3-6 bullet paraphrase of the ticket, never the verbatim body (see `agents/context-gatherer.md`'s Digest format). Judging "no ambiguity" or "triage can name the specific file(s) directly" against a paraphrase is only as reliable as that paraphrase's fidelity. The bundle file at the digest's `bundlePath:` was already written to disk this session at zero extra cost, so triage may (and for these two gates, should) `Read` its `## Ticket Details` section for the exact verbatim ticket body wording, in addition to the digest. This is still "no subagent invocation, no codebase exploration" — reading a file already gathered this session is neither. If that `Read` fails for any reason, treat it the same as failing to clearly qualify — fall through to the normal planning flow rather than judging trivial off the digest alone.
+
+A ticket qualifies as trivial only when **all** of the following hold:
+
+- Not security-sensitive, not a data migration, not auth/payment-related.
+- Not UI work (`isUiTicket` is false).
+- Fully specified by the ticket body — no ambiguity that would otherwise require a clarifying question.
+- Bounded to an obvious, narrow change — triage can name the specific file(s)/change directly from the ticket body alone.
+
+Conservative default: if the ticket does not clearly qualify on all four points, fall through to today's unchanged planning flow (planner delegation, Q&A, persist-and-stop). Ambiguity always falls through — never guess trivial.
+
+When it qualifies, set a session flag `trivial = true` plus a short `reason` string, and print one line (no `AskUserQuestion`, no confirmation):
+
+```text
+Judged trivial: `<reason>` — skipping planning, implementing directly
+```
+
+Phase 1 reads `trivial` and, when true, takes the **Trivial Fast Path** (see `phases/phase-1-plan.md`) instead of the `## New Plan` planner delegation.
+
 ## Label "Working"
 
 **If ticketless mode:** Skip this section entirely — ticketless mode applies no board labels.
@@ -231,7 +258,7 @@ The exact swap depends on how this run entered the pipeline:
   ```bash
   gh issue edit <number> --repo <owner>/<repo> --add-label "Working"
   ```
-  This also covers a session entered via a **re-plan over an existing plan** (the user context requested `replan`, or "Re-plan from scratch" was chosen in the multiple-match question) — the ticket still carries `Planned` from the discarded plan, and that's fine: it stays. In a new-plan session `Working` is short-lived: Phase 1 swaps it back out when it persists the fresh plan and stops.
+  This also covers a session entered via a **re-plan over an existing plan** (the user context requested `replan`, or "Re-plan from scratch" was chosen in the multiple-match question) — the ticket still carries `Planned` from the discarded plan, and that's fine: it stays. In a new-plan session `Working` is short-lived: Phase 1 swaps it back out when it persists the fresh plan and stops. **Exception — Trivial Fast Path**: when Trivial-Ticket Triage set `trivial = true`, Phase 1 retains `Working` instead of swapping it out — it adds `Planned` alongside the already-present `Working`, because the session continues into Phase 2 rather than stopping.
 
 ## Pipeline
 
@@ -239,15 +266,17 @@ This pipeline has 9 phases. Execute them in order without stopping for confirmat
 
 The only reasons to stop mid-pipeline are explicit error gates defined within individual phases (rebase conflicts, repeated build failures, push auth errors, unclear reviewer findings). If no error gate fires, complete all 9 phases. The pipeline is not complete until a PR URL has been created and returned to the user — never end with a status summary like "ready for PR" or "branch is ready."
 
-**Hard stop after planning**: Phases 2–9 run only when the skill was invoked with a plan-file argument (`hasPlanFile` set during mode detection). A session that creates a new plan **always ends at Phase 1** — after persisting the plan file, do not read `phases/phase-2-worktree.md` or any later phase file. Implementation resumes via `/agentflow:implement .plans/<filename>` in a fresh session.
+**Hard stop after planning**: Phases 2–9 run only when the skill was invoked with a plan-file argument (`hasPlanFile` set during mode detection). A session that creates a new plan **always ends at Phase 1** — after persisting the plan file, do not read `phases/phase-2-worktree.md` or any later phase file. Implementation resumes via `/agentflow:implement .plans/<filename>` in a fresh session. The sole exception is the **Trivial Fast Path**: when Trivial-Ticket Triage judged the ticket trivial, Phase 1 still persists a plan file, but the session does not stop — it continues straight into Phase 2 in the same session (see `phases/phase-1-plan.md`'s `## Trivial Fast Path` and `phases/phase-2-worktree.md`'s `## Gate Check`).
 
 ### Goal Autopilot (plan-file mode)
 
 Phases 2–9 run unattended, but a turn that stops mid-phase (context limit, transient tool error, a subagent that ends the turn) just ends the run — the work is left half-done with no PR. Claude Code's native `/goal` closes that gap: it registers a session-scoped completion condition and, whenever a turn ends without the condition met, immediately starts another turn. Armed at pipeline start, it turns "stopped mid-phase" into "resumes mid-phase."
 
-**Launching the plan-file run is the human gate that arms it.** The goal is never set in the session that *creates* a plan — that session ends at Phase 1 after persisting the plan and presenting it for review, and goals are session-scoped (a new session or `/clear` drops them). The human reviewing the saved plan and launching `/agentflow:implement .plans/<filename>` is what authorizes the autonomous run; the goal is armed when that run begins — i.e. **only in plan-file mode (`hasPlanFile = true`), at the start of Phase 2** (see `phases/phase-2-worktree.md`). Ticketless and ticket-mode planning sessions never arm a goal.
+**Launching the plan-file run is the human gate that arms it.** The goal is never set in an ordinary session that *creates* a plan — that session ends at Phase 1 after persisting the plan and presenting it for review, and goals are session-scoped (a new session or `/clear` drops them). The human reviewing the saved plan and launching `/agentflow:implement .plans/<filename>` is what authorizes the autonomous run; the goal is armed when that run begins — i.e. **only in plan-file mode (`hasPlanFile = true`), at the start of Phase 2** (see `phases/phase-2-worktree.md`). Ticketless and ordinary ticket-mode planning sessions never arm a goal. (The Trivial Fast Path is the one ticket-mode planning session that both creates a plan and arms a goal — see the next paragraph.)
 
-**Version + availability gate (do this once, before arming).** `/goal` requires Claude Code ≥ 2.1.139. When entering Phase 2 in plan-file mode:
+**Trivial Fast Path also arms at Phase 2 start.** Arming keys off `hasPlanFile = true` at the start of Phase 2, and the Trivial Fast Path reaches Phase 2 with `hasPlanFile = true` in the same session (see `phases/phase-1-plan.md`'s `## Trivial Fast Path` and `phases/phase-2-worktree.md`'s `## Gate Check`) — so it arms the goal exactly like a plan-file-argument run does: same version gate, same condition semantics, same clearing rules. Nothing else changes. The conservative triage heuristic in `## Trivial-Ticket Triage` above (with its conservative fall-through) substitutes for the human plan-review gate in this one case.
+
+**Version + availability gate (do this once, before arming).** `/goal` requires Claude Code ≥ 2.1.139. When entering Phase 2 in plan-file mode (or via the Trivial Fast Path reaching Phase 2 with `hasPlanFile = true`):
 
 1. If `.claude/config.json` has `agentflow.goalAutopilot: false`, skip the goal entirely (opt-out) and proceed exactly as today.
 2. Run `claude --version` and parse the leading semver. If it is ≥ `2.1.139`, arm the goal (below). If it is older, if the command is unavailable, or if the version cannot be parsed, **skip silently** and proceed exactly as today — print one line: `Goal autopilot unavailable (Claude Code < 2.1.139) — running without a completion guarantee.` The pipeline's behavior with no goal is unchanged from prior versions.
