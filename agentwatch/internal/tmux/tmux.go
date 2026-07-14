@@ -124,6 +124,19 @@ func (c *ExecClient) NewWindow(session, name, shellCommand string) error {
 	return err
 }
 
+// KillWindow kills the tmux window at target (typically an exact
+// "=SESSION:INDEX" target resolved from the daemon's window registry, so it
+// unambiguously identifies one window regardless of which session the caller
+// happens to be running in). Kept off the Client interface for the same
+// reason as CurrentSession/IsGroupedSession/NewWindow above: this is a
+// launcher/consumer-facing capability, not part of the daemon frontend seam.
+// Consumers that only need to kill a window define their own small interface
+// (see internal/closecmd.windowKiller) rather than growing Client.
+func (c *ExecClient) KillWindow(target string) error {
+	_, err := tmuxCmd("kill-window", "-t", target)
+	return err
+}
+
 func tmuxCmd(args ...string) (string, error) {
 	cmd := exec.Command("tmux", args...)
 	var stdout, stderr bytes.Buffer
