@@ -72,6 +72,38 @@ func TestNotifyCodexPromptSendsOnlyCompactTaskName(t *testing.T) {
 	}
 }
 
+// TestNotifyParsesAgentIDFromStdin covers ticket #277: the real runNotify
+// stdin-parsing path must decode the "agent_id" JSON key into
+// ipc.HookEvent.AgentID, since that's the field the daemon's subagent guard
+// (internal/daemon/event.go) relies on.
+func TestNotifyParsesAgentIDFromStdin(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "events.sock")
+	receiver, err := ipc.NewEventReceiver(socket)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = receiver.Close() }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go receiver.Accept(ctx)
+
+	input := `{"hook_event_name":"Stop","session_id":"s1","agent_id":"sub1"}`
+	cmd := exec.Command(binaryPath, "notify", "-agent", "claude", "-event-socket", socket)
+	cmd.Stdin = strings.NewReader(input)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("notify: %v: %s", err, output)
+	}
+
+	select {
+	case event := <-receiver.Events():
+		if event.AgentID != "sub1" {
+			t.Fatalf("agent_id = %q, want %q", event.AgentID, "sub1")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for notify event")
+	}
+}
+
 func mustJSON(t *testing.T, value string) []byte {
 	t.Helper()
 	b, err := json.Marshal(value)

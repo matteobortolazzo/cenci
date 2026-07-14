@@ -168,6 +168,8 @@ func runNotify(args []string) {
 		Prompt string `json:"prompt"`
 		// PostToolUseFailure fields
 		IsInterrupt bool `json:"is_interrupt"`
+		// AgentID is set when the hook fires inside a subagent (Task tool) call.
+		AgentID string `json:"agent_id"`
 	}
 	if err := json.Unmarshal(data, &hookInput); err != nil {
 		os.Exit(0) // fail silently
@@ -185,6 +187,7 @@ func runNotify(args []string) {
 		NotificationType: hookInput.Notification.Type,
 		ToolName:         hookInput.ToolName,
 		IsInterrupt:      hookInput.IsInterrupt,
+		AgentID:          hookInput.AgentID,
 		Timestamp:        time.Now().UTC().Format(time.RFC3339),
 	}
 	if event.Agent == "codex" && event.EventType == "UserPromptSubmit" {
