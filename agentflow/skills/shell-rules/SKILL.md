@@ -34,14 +34,22 @@ normal interface writes files.
 
 Heredocs can require shell-created temporary files and may fail in restricted
 sandboxes. Write long issue or pull-request content with the client's file tool, then
-pass it through a CLI body-file option:
+pass it through a CLI body-file option. Scope every such filename with a run-unique
+suffix — `<scope>` below is a ticket id, PR number, or run id, whichever is already
+in scope for the calling skill — so concurrent runs never collide on a shared fixed
+name. Any scope key that isn't already format-constrained by its own source (a
+numeric ticket/PR ID is inherently safe) must be validated against
+`^[A-Za-z0-9._-]+$`, additionally rejecting `.`, `..`, or any value containing `..`,
+before use — the same rule `implement`'s slug validation applies, since a scope key
+can end up as a standalone path segment (e.g. a per-run subdirectory) where a
+dot-only value could traverse:
 
 ```bash
-gh issue edit <number> --body-file "${TMPDIR:-/tmp}/agentflow/issue-body.md"
+gh issue edit <number> --body-file "${TMPDIR:-/tmp}/agentflow/issue-body-<scope>.md"
 ```
 
 ```bash
-gh pr create --title "<title>" --body-file "${TMPDIR:-/tmp}/agentflow/pr-body.md"
+gh pr create --title "<title>" --body-file "${TMPDIR:-/tmp}/agentflow/pr-body-<scope>.md"
 ```
 
 Never print or interpolate authentication tokens into command output.

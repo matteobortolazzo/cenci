@@ -73,13 +73,14 @@ Extract the first whitespace-delimited token from `$ARGUMENTS` and determine the
   - Read the plan file. Parse the YAML front matter (between `---` delimiters) to extract metadata: `version`, `mode`, `ticketId`, `ticketTitle`, `slug`, `isChild`, `isLastChild`, `parentId`, `planCommitSha`, `createdAt`, `status`.
   - Set `hasPlanFile = true`.
   - Inherit the original mode (`ticket` or `ticketless`) from the front matter's `mode` field.
-  - If `mode` is `ticket`, set the ticket ID and slug from front matter. If `mode` is `ticketless`, set the slug from front matter.
+  - If `mode` is `ticket`, set the ticket ID and slug from front matter. If `mode` is `ticketless`, set the slug from front matter and **validate it** with the same check and hard-stop as the freshly-generated case below — a hand-edited or pre-validation plan file can carry a slug that was never checked, and it is just as load-bearing on this path.
   - The rest of `$ARGUMENTS` after the file path is ignored.
 
 - **Otherwise** → **ticketless mode**
   - The entire `$ARGUMENTS` string is the **task description**.
   - Generate a **slug** from the description: take the first 4–5 meaningful words, lowercase, hyphenated.
     For example: `add dark mode support for the dashboard` → slug `add-dark-mode-support`.
+  - **Validate the generated slug** against `^[A-Za-z0-9._-]+$`, additionally rejecting `.`, `..`, or any value containing `..` (the regex alone permits a dot-only value, which can traverse a directory when a scoped identifier is used as a standalone path segment, e.g. `attachments/<scope>/`), before it is used in any path — it is load-bearing for every scoped temp file constructed downstream (context bundle, plan filename, explore notes, diff/review temp files, PR body, followup ticket temp files, and Phase 9's cleanup list). On failure, clear the Goal Autopilot condition (`/goal clear` — a safe no-op here, since ticketless mode never arms a goal), report the invalid slug value and that it failed validation, and hard-stop: do not sanitize, re-derive, or continue. `ticketId` (ticket mode) is out of scope for this check — it is already constrained to `^\d+$` above.
   - There is no ticket ID and no separate user context — the task description is the primary input.
 
 The determined mode (ticket or ticketless) governs conditional behavior throughout the rest of this skill.
