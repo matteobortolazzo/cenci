@@ -74,7 +74,7 @@ if ! grep -Eq '^run .* -e AGENT_SAND_AGENT=claude ' "${CALLS_FILE}"; then
     exit 1
 fi
 
-if ! grep -Eq '^exec -it -u dev .*claude-sand-.* claude --dangerously-skip-permissions -p test ' "${CALLS_FILE}"; then
+if ! grep -Eq '^exec -it -u dev .*claude-sand-.* claude --dangerously-skip-permissions --model sonnet -p test ' "${CALLS_FILE}"; then
     echo "FAIL: first agent was not launched through docker exec" >&2
     exit 1
 fi
@@ -94,7 +94,7 @@ if grep -Eq '^run ' "${CALLS_FILE}"; then
 fi
 
 READY_LINE="$(grep -n 'exec -u dev claude-sand-.* test -e /tmp/agent-sand-ready' "${CALLS_FILE}" | cut -d: -f1)"
-AGENT_LINE="$(grep -n 'exec -it -u dev .* claude --dangerously-skip-permissions -p second' "${CALLS_FILE}" | cut -d: -f1)"
+AGENT_LINE="$(grep -n 'exec -it -u dev .* claude --dangerously-skip-permissions --model sonnet -p second' "${CALLS_FILE}" | cut -d: -f1)"
 if [[ -z "${READY_LINE}" || -z "${AGENT_LINE}" || "${READY_LINE}" -ge "${AGENT_LINE}" ]]; then
     echo "FAIL: reused container did not wait for readiness before launching the agent" >&2
     exit 1

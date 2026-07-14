@@ -63,6 +63,24 @@ else
     AGENT=claude
 fi
 
+# ── Model shortcut (first argument only) ──────────────────────────
+# One-token agent+model shorthand: ch/cs/co/cf pick Claude and its
+# haiku/sonnet/opus/fable alias; xl/xt/xs pick Codex and its luna/terra/sol
+# model. Only recognized as the very first argument so it can never shadow a
+# flag or a literal prompt string later in AGENT_ARGS.
+declare -A CLAUDE_MODEL_SHORTCUTS=([ch]=haiku [cs]=sonnet [co]=opus [cf]=fable)
+declare -A CODEX_MODEL_SHORTCUTS=([xl]=luna [xt]=terra [xs]=sol)
+MODEL=""
+if [[ $# -gt 0 && -n "${CLAUDE_MODEL_SHORTCUTS[$1]+_}" ]]; then
+    AGENT=claude
+    MODEL="${CLAUDE_MODEL_SHORTCUTS[$1]}"
+    shift
+elif [[ $# -gt 0 && -n "${CODEX_MODEL_SHORTCUTS[$1]+_}" ]]; then
+    AGENT=codex
+    MODEL="${CODEX_MODEL_SHORTCUTS[$1]}"
+    shift
+fi
+
 INSTANCE_NAME="default"
 NAME_GIVEN=false
 BUILD_ONLY=false
@@ -147,6 +165,16 @@ case "${AGENT}" in
         exit 1
         ;;
 esac
+
+# Model defaults per agent, applied unless a shortcut (ch/cs/co/cf, xl/xt/xs)
+# already set MODEL above.
+if [[ -z "${MODEL}" ]]; then
+    if [[ "${AGENT}" == codex ]]; then
+        MODEL=terra
+    else
+        MODEL=sonnet
+    fi
+fi
 
 # ── Prune (--prune) ───────────────────────────────────────────────
 # Cleans up superseded agent-sandbox-base tags, dangling images, and stopped
@@ -400,9 +428,9 @@ fi
 # The container is the security boundary: the agent runs with full
 # permissions inside it (rejected if root — we run as uid 1000 'dev').
 if [[ "${AGENT}" == codex ]]; then
-    AGENT_CMD_ARGS=(--dangerously-bypass-approvals-and-sandbox)
+    AGENT_CMD_ARGS=(--dangerously-bypass-approvals-and-sandbox --model "${MODEL}")
 else
-    AGENT_CMD_ARGS=(--dangerously-skip-permissions)
+    AGENT_CMD_ARGS=(--dangerously-skip-permissions --model "${MODEL}")
 fi
 
 # ── Exec env forwarding (for attach path) ───────────────────────

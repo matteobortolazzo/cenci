@@ -87,6 +87,18 @@ agent-sand --agent codex
 codex-sand              # equivalent — the codex-sand symlink defaults to --agent codex
 codex-sand -p "fix the tests"
 
+# sb: short alias for agent-sand, with one-token agent+model shortcuts as the
+# first argument (only recognized in that position — everything after is
+# forwarded to the agent CLI as usual). Defaults: claude → sonnet, codex → terra.
+sb ch    # Claude, haiku
+sb cs    # Claude, sonnet
+sb co    # Claude, opus
+sb cf    # Claude, fable
+sb xl    # Codex, luna
+sb xt    # Codex, terra
+sb xs    # Codex, sol
+sb cs -p "fix the tests"
+
 # Open a bash shell for manual setup / troubleshooting
 agent-sand --shell
 

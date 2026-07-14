@@ -430,6 +430,7 @@ step_sandbox_setup() {
 
 	if [ "$HAS_CLAUDE" -eq 1 ]; then link_launcher agent-sand "$launcher" || true; fi
 	if [ "$HAS_CODEX" -eq 1 ]; then link_launcher codex-sand "$launcher" || true; fi
+	link_launcher sb "$launcher" || true
 
 	case ":$PATH:" in
 	*":$HOME/.local/bin:"*) ;;
@@ -692,6 +693,12 @@ final_summary() {
 		fi
 		if [ "$HAS_CODEX" -eq 1 ]; then
 			say "    codex-sand                # Codex inside the container"
+		fi
+		if [ "$HAS_CLAUDE" -eq 1 ]; then
+			say "    sb ch|cs|co|cf             # Claude in the container: haiku/sonnet/opus/fable"
+		fi
+		if [ "$HAS_CODEX" -eq 1 ]; then
+			say "    sb xl|xt|xs                # Codex in the container: luna/terra/sol"
 		fi
 	fi
 	if selected agentflow && [ "$HAS_CLAUDE" -eq 1 ]; then
