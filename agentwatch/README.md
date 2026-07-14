@@ -486,6 +486,52 @@ agentwatch dispatch --reconcile
 > it on the host where plans are persisted. A `Planned` ticket whose plan file lives only
 > on another host is grace-gated but will eventually be marked `plan-invalid`.
 
+## Closing agent windows (`agentwatch close`)
+
+External tools that clean up finished agent windows (for example a kanban board's
+"column cleanup" hook) need to kill the *exact* tmux window an agent is running in —
+not just a same-named window in whatever session the caller happens to be in. A
+bare `tmux kill-window -t =<window-name>` only resolves within the caller's own
+tmux session, so it silently no-ops against windows running elsewhere, or — if you
+run one tool instance per session — ends up reaping only that instance's own
+session's windows instead of the intended target.
+
+`agentwatch close` fixes this by resolving the target from the daemon's live window
+registry instead of guessing a tmux target:
+
+```bash
+# Close every window for ticket 42 (matches "42" or "42-<skill>"), skipping any
+# that are currently running or waiting for input
+agentwatch close 42
+
+# Close a free-text/slug window by its exact name
+agentwatch close add-dark-mode-toggle
+
+# Preview what would happen without killing anything
+agentwatch close 42 --dry-run
+
+# Close even running/need-input windows
+agentwatch close 42 --force
+```
+
+Behavior:
+- Reads a single snapshot from the daemon; if the daemon is unreachable, it exits 1
+  and kills nothing (fail-safe).
+- A numeric target matches every window named exactly that number or prefixed
+  `<number>-` (e.g. `42` matches `42` and `42-refine`, but not `420-anything`).
+  A non-numeric target matches windows by exact name.
+- Windows whose status is `running` or `need-input` are skipped (and reported)
+  unless `--force` is given.
+- No matching windows is not an error — it exits 0, so it's safe to run
+  unconditionally after a window may already be gone.
+
+This is the recommended cleanup command for any tool driving agentwatch-managed
+tmux windows, e.g. a kanban board's column-cleanup hook:
+
+```yaml
+cleanup: 'agentwatch close {number}'
+```
+
 ## Advanced / development
 
 The marketplace install above provisions the binary and daemon automatically. You
