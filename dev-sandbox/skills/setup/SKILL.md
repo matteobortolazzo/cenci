@@ -55,18 +55,19 @@ Skip this step when `--build-only` was passed.
      overwrite it — report it and ask the user (`AskUserQuestion`) whether to replace it.
    - If it is a symlink (even a stale one), `ln -sf` refreshes it; that is fine.
 
-3. Create a sibling `codex-sand` symlink to the **same** launcher (same pattern, same
-   non-symlink-overwrite guard). The launcher detects its invoked name, so `codex-sand`
-   defaults to `--agent codex` with no extra flags:
+3. Create a sibling `sb` symlink to the **same** launcher (same pattern, same
+   non-symlink-overwrite guard). `sb` accepts the same flags as `agent-sand`, plus
+   first-argument agent+model shortcuts (`ch`/`cs`/`co`/`cf` for Claude,
+   `xl`/`xt`/`xs` for Codex):
    ```bash
-   ln -sf "$(realpath "${CLAUDE_PLUGIN_ROOT}")/agent-sand" "$HOME/.local/bin/codex-sand"
+   ln -sf "$(realpath "${CLAUDE_PLUGIN_ROOT}")/agent-sand" "$HOME/.local/bin/sb"
    ```
-   - If a `codex-sand` already exists at the target and is **not** a symlink, do not
+   - If an `sb` already exists at the target and is **not** a symlink, do not
      overwrite it — report it and ask the user (`AskUserQuestion`) whether to replace it.
    - If it is a symlink (even a stale one), `ln -sf` refreshes it; that is fine.
 
-4. Confirm: `ls -l "$HOME/.local/bin/agent-sand" "$HOME/.local/bin/codex-sand"` and
-   `command -v agent-sand codex-sand`.
+4. Confirm: `ls -l "$HOME/.local/bin/agent-sand" "$HOME/.local/bin/sb"` and
+   `command -v agent-sand sb`.
 
 ### Step 2 — Build the image
 
@@ -86,7 +87,8 @@ the SDKs). Report the outcome. On failure, surface the runtime's error output an
 
 Summarize what was done and point the user at usage:
 - `agent-sand` — launch Claude Code in the sandbox (full permissions inside the container)
-- `codex-sand` (or `agent-sand --agent codex`) — launch Codex in the sandbox instead
+- `sb xt` (or `agent-sand --agent codex`) — launch Codex in the sandbox instead
+- `sb ch`/`cs`/`co`/`cf` — launch Claude with the haiku/sonnet/opus/fable model
 - `agent-sand --shell` — open a shell for manual setup / troubleshooting
 - `agent-sand --build` — rebuild the image after changing the Dockerfile
 

@@ -31,7 +31,8 @@ curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/i
 
 The installer detects available clients, registers the marketplace in each one, and
 installs the workflow, attention, and isolation components independently. It also
-creates the appropriate sandbox launcher (`agent-sand`, `codex-sand`, or both).
+creates the appropriate sandbox launcher (`agent-sand` for Claude, `sb` for either
+agent).
 
 ```bash
 # Inspect prerequisites and installation state without changing anything
@@ -49,7 +50,7 @@ is documented only in each layer's advanced/development section.
 
 | Capability | Claude Code | Codex |
 |---|---|---|
-| Container isolation | `agent-sand` | `codex-sand` |
+| Container isolation | `agent-sand` | `sb xt` (or `sb --agent codex`) |
 | Session monitoring and self-bootstrap | Native hooks | Native hooks; re-trust changed hooks with `/hooks` |
 | Portable shell, testing, stack, worktree, and review conventions | Yes | Yes |
 | Interactive ticket refinement, design, implementation, and PR babysitting | Yes | Not yet |

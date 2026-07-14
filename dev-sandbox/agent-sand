@@ -55,13 +55,7 @@ fi
 BASE_IMAGE="agent-sandbox-base:${BASE_TAG}"
 
 # ── Parse options ────────────────────────────────────────────────
-# Default agent from the invoked name so a `codex-sand` symlink Just Works.
-INVOKED_NAME="$(basename "$0")"
-if [[ "${INVOKED_NAME}" == codex-sand ]]; then
-    AGENT=codex
-else
-    AGENT=claude
-fi
+AGENT=claude
 
 # ── Model shortcut (first argument only) ──────────────────────────
 # One-token agent+model shorthand: ch/cs/co/cf pick Claude and its

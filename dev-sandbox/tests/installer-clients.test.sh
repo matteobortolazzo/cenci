@@ -152,13 +152,15 @@ run_case codex codex
 assert_contains "${CASE_CALLS}" "codex plugin add agentflow@agent-stack"
 assert_contains "${CASE_CALLS}" "codex plugin add agentwatch@agent-stack"
 assert_contains "${CASE_CALLS}" "codex plugin add agent-sandbox@agent-stack"
-assert_contains "${CASE_OUTPUT}" "codex-sand"
+assert_contains "${CASE_OUTPUT}" "sb xl|xt|xs"
+assert_not_contains "${CASE_OUTPUT}" "codex-sand"
 assert_not_contains "${CASE_OUTPUT}" "agent-sand                # Claude"
 assert_not_contains "${CASE_OUTPUT}" "/agentflow:configure"
-[[ -L "${CASE_HOME}/.local/bin/codex-sand" ]]
+[[ -L "${CASE_HOME}/.local/bin/sb" ]]
+[[ ! -e "${CASE_HOME}/.local/bin/codex-sand" ]]
 [[ ! -e "${CASE_HOME}/.local/bin/agent-sand" ]]
 
-echo "case: Codex-only image build uses the Codex launcher"
+echo "case: Codex-only image build uses the sb launcher"
 run_case codex-build codex --build
 [[ "${CASE_EXIT}" -eq 0 ]]
 assert_contains "${CASE_OUTPUT}" "sandbox image built"
@@ -170,7 +172,8 @@ run_case dual dual
 assert_contains "${CASE_CALLS}" "claude plugin install agentflow@agent-stack"
 assert_contains "${CASE_CALLS}" "codex plugin add agentflow@agent-stack"
 [[ -L "${CASE_HOME}/.local/bin/agent-sand" ]]
-[[ -L "${CASE_HOME}/.local/bin/codex-sand" ]]
+[[ -L "${CASE_HOME}/.local/bin/sb" ]]
+[[ ! -e "${CASE_HOME}/.local/bin/codex-sand" ]]
 
 echo "case: no supported client fails with a client-specific diagnostic"
 run_case none none
@@ -184,6 +187,8 @@ assert_contains "${DOCTOR_OUTPUT}" "Required platform dependencies"
 assert_contains "${DOCTOR_OUTPUT}" "Supported clients (at least one required)"
 assert_contains "${DOCTOR_OUTPUT}" "Installed stack components"
 assert_contains "${DOCTOR_OUTPUT}" "Launchers and container image"
+assert_contains "${DOCTOR_OUTPUT}" "sb launcher"
+assert_not_contains "${DOCTOR_OUTPUT}" "codex-sand launcher"
 assert_contains "${DOCTOR_OUTPUT}" "Codex: agentflow"
 
 echo "case: doctor fails when no supported client is available"
