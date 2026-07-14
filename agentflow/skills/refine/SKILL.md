@@ -6,7 +6,7 @@ argument-hint: <ticket-id> [additional context]
 user-invocable: true
 disable-model-invocation: true
 model: opus
-allowed-tools: Read, Write, Glob, Bash(gh:*), Bash(git:*), Bash(curl:*), Bash(mkdir:*), AskUserQuestion, WebFetch
+allowed-tools: Read, Write, Glob, Bash(gh:*), Bash(git:*), Bash(curl:*), Bash(mkdir:*), Bash(cat:*), Bash(rm:*), AskUserQuestion, WebFetch
 ---
 
 > **Interaction rule**: Every question, confirmation, or approval directed at the user — anywhere in this skill, including error recovery — MUST be asked with the `AskUserQuestion` tool. Never ask in plain text. If an instruction says "ask the user" or "confirm", that means `AskUserQuestion`.
@@ -205,7 +205,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 > **CRITICAL**: This section is mandatory after refinement. Do NOT skip it.
 > This section runs unconditionally after refinement — there is no confirmation prompt before writing. The human gate is the Q&A loop (steps 6-8); review happens after the writes, via the final message.
 
-> **Write-failure protocol**: Every *edit* in this section (ticket body/title updates, parent tracking updates, label add/remove) MUST be verified by re-fetching the resource with `gh issue view ... --json ...` and confirming the expected change is actually present — a command exiting 0 is not sufficient proof. Ticket *creation* (`gh issue create`) is the one exception: the returned issue URL is itself sufficient proof of success, so no separate re-fetch is required there. If the write or the verification fails:
+> **Write-failure protocol**: Every *edit* in this section (ticket body/title updates, parent tracking updates, label add/remove) MUST be verified by re-fetching the resource with `gh issue view ... --json ...` and confirming the expected change is actually present — a command exiting 0 is not sufficient proof. Ticket *creation* (`gh issue create`) is the one exception: the returned issue URL is itself sufficient proof of success, so no separate re-fetch is required there. This protocol also covers the `TITLE=$(cat <path>)` read-back that precedes a title write — if `cat` fails (missing file) or reads back empty content, treat it exactly like a failed write: do not proceed to `gh` with a blank or stale `--title`. If the write, the read-back, or the verification fails:
 > 1. Report the error to the user.
 > 2. Retry the write once, then verify again.
 > 3. If it still fails, **STOP** — do not proceed to the next step — and emit a partial-state report: what succeeded so far (with concrete issue/label numbers or names), what failed, and what the user needs to do manually to reconcile it. Each write point below states what belongs in that report.
@@ -214,12 +214,17 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 
    > **IMPORTANT**: Writing a temp file is NOT updating the ticket. You MUST execute the update command after writing the file. Never stop between writing the temp file and running the update command.
 
-   Use the `Write` tool to create `/tmp/claude/issue-<number>.md` with the `<updated description>` as its content, then run:
+   Use the `Write` tool to create `/tmp/claude/issue-<number>.md` with the `<updated description>` as its content.
+
+   **Only when step 9 produced an `### Updated Title`**, also use the `Write` tool to create `/tmp/claude/issue-<number>-title.txt` with the raw updated title text as its content — the title is free text and must never be interpolated directly into the command line (a title containing `$(…)`, backticks, or quotes would be shell-interpreted). Then run:
    ```bash
-   gh issue edit <number> --repo <owner>/<repo> --body-file /tmp/claude/issue-<number>.md --title "<updated title>"
+   TITLE=$(cat /tmp/claude/issue-<number>-title.txt) && [ -n "$TITLE" ] && gh issue edit <number> --repo <owner>/<repo> --body-file /tmp/claude/issue-<number>.md --title "$TITLE"
    ```
 
-   Include `--title` **only when step 9 produced an `### Updated Title`**; otherwise omit the flag so the existing title is preserved. (Passing `--title` with the unchanged title would be a harmless no-op, but omitting it keeps intent explicit.)
+   Otherwise (no title change), run:
+   ```bash
+   gh issue edit <number> --repo <owner>/<repo> --body-file /tmp/claude/issue-<number>.md
+   ```
 
    **Verify the update succeeded** — re-fetch the ticket and confirm the body (and, when retitled, the title) changed:
    ```bash
@@ -245,7 +250,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 
    Capture each created issue number from the command output.
 
-   Use the `Write` tool to create `/tmp/claude/issue-child-K.md` with the following content:
+   Use the `Write` tool to create `/tmp/claude/issue-<number>-child-K.md` with the following content:
    ```
    Related to #<original-number>
    Depends on #<sibling-number>
@@ -253,9 +258,9 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 
    <ticket-body>
    ```
-   Then run:
+   Also use the `Write` tool to create `/tmp/claude/issue-<number>-child-K-title.txt` with the raw title text `<ticket-title> (K/N)` as its content — the title is free text and must never be interpolated directly into the command line. Then run:
    ```bash
-   gh issue create --repo <owner>/<repo> --title "<ticket-title> (K/N)" --body-file /tmp/claude/issue-child-K.md --label "Refined"
+   TITLE=$(cat /tmp/claude/issue-<number>-child-K-title.txt) && [ -n "$TITLE" ] && gh issue create --repo <owner>/<repo> --title "$TITLE" --body-file /tmp/claude/issue-<number>-child-K.md --label "Refined"
    ```
    Parse the issue number from the URL in the output (e.g. `https://github.com/owner/repo/issues/10` → `10`) — this is the success confirmation for this child.
 
@@ -301,7 +306,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 
    If `designNeeded` is true, the ticket is **not** being split, and `isDesignTicket` is false, create a dedicated design ticket — design never runs on the implementation ticket itself:
 
-   Use the `Write` tool to create `/tmp/claude/issue-design.md` with the following content:
+   Use the `Write` tool to create `/tmp/claude/issue-<number>-design.md` with the following content:
    ```
    Related to #<number>
    Blocks #<number>
@@ -312,9 +317,9 @@ ticket is unambiguous, well-scoped, and ready for implementation.
    ### Design Direction
    <the Design Direction section from this refinement>
    ```
-   Then run:
+   Also use the `Write` tool to create `/tmp/claude/issue-<number>-design-title.txt` with the raw title text `Design: <feature title>` as its content — the title is free text and must never be interpolated directly into the command line. Then run:
    ```bash
-   gh issue create --repo <owner>/<repo> --title "Design: <feature title>" --label "Refined" --label "Design" --body-file /tmp/claude/issue-design.md
+   TITLE=$(cat /tmp/claude/issue-<number>-design-title.txt) && [ -n "$TITLE" ] && gh issue create --repo <owner>/<repo> --title "$TITLE" --label "Refined" --label "Design" --body-file /tmp/claude/issue-<number>-design.md
    ```
 
    If creation fails, follow the write-failure protocol: report the error, retry once, and if still failing, STOP and report that the design ticket was not created, so the implementation ticket's body cannot be updated with a dependency line.
@@ -369,9 +374,25 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 
    This label signals to the implement skill that interactive browser verification via Playwright CLI should be used.
 
+13. **Clean up this run's scoped temp files.**
+
+   Reaching this step means every write in steps 10-12 succeeded and was verified — the write-failure protocol above STOPs before this step on any failure, which preserves the temp files for manual recovery. So cleanup only runs on the full-success path.
+
+   Delete this run's temp files by explicit path (never a glob — an unmatched glob errors under some shells, and `rm -f` already ignores paths that don't exist, so listing files a given run didn't create — e.g. child/design files when there was no split or companion design ticket — is harmless):
+   ```bash
+   rm -f \
+     /tmp/claude/issue-<number>.md \
+     /tmp/claude/issue-<number>-title.txt \
+     /tmp/claude/issue-<number>-design.md \
+     /tmp/claude/issue-<number>-design-title.txt \
+     /tmp/claude/issue-<number>-child-K.md \
+     /tmp/claude/issue-<number>-child-K-title.txt
+   ```
+   Repeat the last two paths (with the actual `K` value substituted) for each child created in Pass 1 this run.
+
 ### Final Message
 
-After steps 10-12 complete, present the Refined Ticket Summary prepared in step 9 in the final message, followed by a short notice of what was persisted:
+After steps 10-13 complete, present the Refined Ticket Summary prepared in step 9 in the final message, followed by a short notice of what was persisted:
 
 > Ticket #`<n>` updated. Labels: Refined[, Design][, Browser][, ui:visual-check]. [Created `N` child tickets: #`<c1>`, #`<c2>`, ….] [Created companion design ticket #`<D>`.]
 >
