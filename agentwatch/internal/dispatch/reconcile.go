@@ -16,6 +16,12 @@ const (
 	labelPlanned        = "Planned"
 	labelDispatchFailed = "dispatch-failed"
 	labelPlanInvalid    = "plan-invalid"
+	// labelReconcileStuck (#265) is a terminal label the reconciler may apply:
+	// it marks a ticket whose apply-retry budget was exhausted, i.e.
+	// reconciliation itself is stuck (distinct from dispatch-failed, which
+	// means the dispatched work failed). Recognized by the terminal
+	// short-circuit below, so an escalated ticket is never touched again.
+	labelReconcileStuck = "reconcile-stuck"
 )
 
 // attemptMarker is the hidden HTML comment stamped on every retry comment so
@@ -31,6 +37,11 @@ const (
 	RecoveryFailed      RecoveryKind = "failed"       // Working→dispatch-failed, surfaced for a human
 	RecoveryPlanInvalid RecoveryKind = "plan-invalid" // Planned with no parseable plan file
 	RecoveryOrphanPlan  RecoveryKind = "orphan-plan"  // plan file whose ticket is not open (report only)
+	// RecoveryReconcileStuck (#265) is synthesized by the impure runner
+	// (applyReconcile), never by the pure engine: it escalates a recovery whose
+	// gh apply kept failing for cfg.ApplyRetryBudget consecutive passes to the
+	// reconcile-stuck terminal label.
+	RecoveryReconcileStuck RecoveryKind = "reconcile-stuck"
 )
 
 // Recovery is the reconciler's verdict for a single stranded item. AddLabels/
@@ -109,8 +120,11 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 		key := planKey(t.Repo, t.Number)
 
 		// Terminal leak states: surface for a human, never touch again. Cleared
-		// only by a human or a re-plan (which drops the label).
-		if hasLabel(t.Labels, labelDispatchFailed) || hasLabel(t.Labels, labelPlanInvalid) {
+		// only by a human or a re-plan (which drops the label). reconcile-stuck
+		// (#265) is terminal too: once the apply-retry budget escalates a
+		// ticket, reconciliation stops touching it so reconcile_pass_failed
+		// never resurfaces for it again.
+		if hasLabel(t.Labels, labelDispatchFailed) || hasLabel(t.Labels, labelPlanInvalid) || hasLabel(t.Labels, labelReconcileStuck) {
 			res.Failed = append(res.Failed, t)
 			continue
 		}
@@ -319,4 +333,14 @@ func failedComment(attempts int, window, status string) string {
 func planInvalidComment() string {
 	return fmt.Sprintf("⚠️ agentwatch: this ticket is `%s` but has no parseable plan file in `.plans/`. "+
 		"Labeled `%s` — re-run planning to produce an approved plan.", labelPlanned, labelPlanInvalid)
+}
+
+// reconcileStuckComment (#265) is posted when the runner escalates a ticket
+// whose gh apply kept failing for the apply-retry budget. It is distinct from
+// failedComment: dispatch-failed means the dispatched work failed, while
+// reconcile-stuck means reconciliation itself could not apply its verdict.
+func reconcileStuckComment() string {
+	return fmt.Sprintf("🛑 agentwatch: this ticket's reconciliation could not be applied after repeated attempts. "+
+		"Labeled `%s` — reconciliation itself is stuck (distinct from `%s`, which means the dispatched work failed). "+
+		"Clear the label once `gh` connectivity/permissions are restored to retry.", labelReconcileStuck, labelDispatchFailed)
 }

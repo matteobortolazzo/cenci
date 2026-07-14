@@ -19,13 +19,27 @@ import (
 type TicketMutator interface {
 	EditLabels(repo string, number int, add, remove []string) error
 	Comment(repo string, number int, body string) error
+	// EnsureLabels (#265) creates any of the named managed labels that don't
+	// already exist in repo, so a first-time `--add-label` never hard-fails
+	// against a repo that never had the label created.
+	EnsureLabels(repo string, names []string) error
 }
 
-// ObservationStore persists the grace-observation map between passes so grace
-// survives cron invocations and daemon restarts.
-type ObservationStore interface {
-	Load() (map[string]time.Time, error)
-	Save(map[string]time.Time) error
+// ReconcileState is the schema persisted between passes: the grace-observation
+// map (ticketKey → first-seen-failing) plus the apply-retry-failure counters
+// (ticketKey → consecutive failed-apply-mutation count). Splitting the counter
+// out from Observations (#265) lets a failed gh mutation preserve the grace
+// clock while still bounding how many passes will keep retrying the apply.
+type ReconcileState struct {
+	Observations  map[string]time.Time
+	ApplyFailures map[string]int
+}
+
+// ReconcileStore persists ReconcileState between passes so grace and the
+// apply-retry budget survive cron invocations and daemon restarts.
+type ReconcileStore interface {
+	Load() (ReconcileState, error)
+	Save(ReconcileState) error
 }
 
 // GHMutator is the real TicketMutator; it shells out to gh, mirroring collect.go.
@@ -48,6 +62,74 @@ func (GHMutator) EditLabels(repo string, number int, add, remove []string) error
 		return fmt.Errorf("gh issue edit #%d in %s: %w: %s", number, repo, err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// managedLabelSpec is one agentwatch-owned terminal label's color/description,
+// used by EnsureLabels to create the label on first use (#265). No ensure-label
+// pattern existed in Go before this; agentwatch's Go path assumed labels
+// pre-exist, which is why dispatch-failed/plan-invalid never got created.
+type managedLabelSpec struct {
+	color string
+	desc  string
+}
+
+// managedLabelSpecs are the only labels EnsureLabels knows how to create:
+// the reconciler's own terminal labels. Every other label (Working, Planned,
+// Refined, ...) is owned and pre-created by agentflow's skills.
+var managedLabelSpecs = map[string]managedLabelSpec{
+	labelDispatchFailed: {
+		color: "b60205",
+		desc:  "agentwatch: dispatched work failed after exhausting its retry budget",
+	},
+	labelPlanInvalid: {
+		color: "d93f0b",
+		desc:  "agentwatch: ticket is Planned but has no parseable plan file",
+	},
+	labelReconcileStuck: {
+		color: "5319e7",
+		desc:  "agentwatch: reconciliation itself is stuck (apply-retry budget exhausted)",
+	},
+}
+
+// managedLabelsAmong returns the subset of names that are agentwatch-managed
+// (and therefore need EnsureLabels), preserving names' order.
+func managedLabelsAmong(names []string) []string {
+	var out []string
+	for _, n := range names {
+		if _, ok := managedLabelSpecs[n]; ok {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// EnsureLabels creates each named managed label in repo if it doesn't already
+// exist, so the first `--add-label` for a terminal label never hard-fails
+// against a repo that never had it pre-created. "already exists" in gh's
+// output is treated as success; any other failure (auth, network, ...) is a
+// genuine error and surfaces (lessons-learned.md: never infer resource state
+// from a blanket exec error, never swallow with a catch-all).
+func (GHMutator) EnsureLabels(repo string, names []string) error {
+	for _, name := range names {
+		spec, ok := managedLabelSpecs[name]
+		if !ok {
+			continue
+		}
+		out, err := exec.Command("gh", "label", "create", name,
+			"--repo", repo, "--color", spec.color, "--description", spec.desc).CombinedOutput()
+		if err != nil && !labelAlreadyExists(string(out)) {
+			return fmt.Errorf("gh label create %s in %s: %w: %s", name, repo, err, strings.TrimSpace(string(out)))
+		}
+	}
+	return nil
+}
+
+// labelAlreadyExists classifies gh label create's combined output: an
+// "already exists" message is success, everything else (auth/network
+// failure) must surface as a genuine error — never inferred from a blanket
+// exec error (lessons-learned.md).
+func labelAlreadyExists(output string) bool {
+	return strings.Contains(strings.ToLower(output), "already exists")
 }
 
 // Comment posts a comment on an issue. The body is passed as an argv element (no
@@ -88,13 +170,14 @@ func countAttempts(repo string, number int) (int, error) {
 	return n, nil
 }
 
-// stateStore persists the grace-observation map as JSON on disk.
+// stateStore persists ReconcileState as JSON on disk.
 type stateStore struct {
 	path string
 }
 
 type reconcileState struct {
-	Observations map[string]time.Time `json:"observations"`
+	Observations  map[string]time.Time `json:"observations"`
+	ApplyFailures map[string]int       `json:"applyFailures"`
 }
 
 // DefaultStatePath resolves $XDG_STATE_HOME/agentwatch/reconcile.json, falling
@@ -111,38 +194,50 @@ func DefaultStatePath() string {
 	return filepath.Join(dir, "agentwatch", "reconcile.json")
 }
 
-// NewStateStore returns a disk-backed ObservationStore. An empty path resolves
+// NewStateStore returns a disk-backed ReconcileStore. An empty path resolves
 // the XDG default.
-func NewStateStore(path string) ObservationStore {
+func NewStateStore(path string) ReconcileStore {
 	if path == "" {
 		path = DefaultStatePath()
 	}
 	return &stateStore{path: path}
 }
 
-func (s *stateStore) Load() (map[string]time.Time, error) {
+// emptyReconcileState is the zero-value ReconcileState with both maps
+// initialized, so Load never hands a caller a nil map on any error path.
+func emptyReconcileState() ReconcileState {
+	return ReconcileState{Observations: map[string]time.Time{}, ApplyFailures: map[string]int{}}
+}
+
+func (s *stateStore) Load() (ReconcileState, error) {
 	data, err := os.ReadFile(s.path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return map[string]time.Time{}, nil
+			return emptyReconcileState(), nil
 		}
-		return map[string]time.Time{}, err
+		return emptyReconcileState(), err
 	}
 	var st reconcileState
 	if err := json.Unmarshal(data, &st); err != nil {
-		return map[string]time.Time{}, err
+		return emptyReconcileState(), err
 	}
 	if st.Observations == nil {
 		st.Observations = map[string]time.Time{}
 	}
-	return st.Observations, nil
+	// Back-compat: a reconcile.json written before #265 has no "applyFailures"
+	// key at all, so st.ApplyFailures unmarshals to nil. Back-fill to an empty
+	// map, mirroring Observations above, so callers never see a nil map.
+	if st.ApplyFailures == nil {
+		st.ApplyFailures = map[string]int{}
+	}
+	return ReconcileState{Observations: st.Observations, ApplyFailures: st.ApplyFailures}, nil
 }
 
-func (s *stateStore) Save(obs map[string]time.Time) error {
+func (s *stateStore) Save(state ReconcileState) error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(reconcileState{Observations: obs}, "", "  ")
+	data, err := json.MarshalIndent(reconcileState{Observations: state.Observations, ApplyFailures: state.ApplyFailures}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -167,7 +262,7 @@ type reconcileDeps struct {
 // the collection/plan/attempt errors encountered during the pass, if any —
 // all existing logging is unchanged, this only additionally surfaces the
 // error to the caller instead of swallowing it.
-func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer, store ObservationStore) (ReconcileResult, error) {
+func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer, store ReconcileStore) (ReconcileResult, error) {
 	if out == nil {
 		out = os.Stdout
 	}
@@ -228,19 +323,26 @@ func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer,
 // applyReconcile runs the pure engine over already-collected deps, logs, applies
 // (unless dryRun), and persists the next grace map. It is the testable core of
 // RunReconcileOnce.
-func applyReconcile(cfg Config, deps reconcileDeps, mut TicketMutator, dryRun bool, out io.Writer, store ObservationStore) (ReconcileResult, error) {
+func applyReconcile(cfg Config, deps reconcileDeps, mut TicketMutator, dryRun bool, out io.Writer, store ReconcileStore) (ReconcileResult, error) {
 	if out == nil {
 		out = os.Stdout
 	}
 
-	obs, err := store.Load()
+	state, err := store.Load()
 	var firstErr error
 	if err != nil {
 		logf(out, "reconcile: loading state: %v\n", err)
-		obs = map[string]time.Time{}
+		state = ReconcileState{}
 		firstErr = err
 	}
-
+	obs := state.Observations
+	if obs == nil {
+		obs = map[string]time.Time{}
+	}
+	applyFailures := state.ApplyFailures
+	if applyFailures == nil {
+		applyFailures = map[string]int{}
+	}
 	result := Reconcile(ReconcileInputs{
 		Tickets:         deps.Tickets,
 		Plans:           deps.Plans,
@@ -260,11 +362,136 @@ func applyReconcile(cfg Config, deps reconcileDeps, mut TicketMutator, dryRun bo
 		return result, firstErr
 	}
 
-	for _, rec := range result.Recoveries {
-		firstErr = firstNonNil(firstErr, applyRecovery(mut, rec, out))
+	// #265 (code-review finding #1): the pure engine already appends
+	// RecoveryFailed/RecoveryPlanInvalid tickets to result.Failed unconditionally,
+	// before any apply is attempted. If that recovery's apply then exhausts the
+	// budget and escalates successfully below, appending rec.Ticket to
+	// result.Failed a second time would duplicate the entry (combined.go's
+	// failedWindows() would then emit two identical WindowState entries for one
+	// ticket). Track which keys are already present so the escalation append is
+	// idempotent regardless of which recovery kind produced it.
+	failedKeys := make(map[string]bool, len(result.Failed))
+	for _, t := range result.Failed {
+		failedKeys[planKey(t.Repo, t.Number)] = true
 	}
 
-	if err := store.Save(result.NextObservations); err != nil {
+	// recoveredKeys collects every ticket key that produced a mutating
+	// recovery this pass. #265 (code-review finding #2): a ticket that
+	// accumulated applyFailures in a prior pass but produces no recovery at
+	// all this pass is healthy again (mirrors how the pure engine already
+	// drops Observations for a healthy ticket) — its stale counter must be
+	// cleared too, or a later, unrelated stranding episode would inherit it
+	// and escalate prematurely.
+	//
+	// "No recovery this pass" is NOT by itself proof of health, though: the
+	// pure engine also produces no Recovery when it *defers* a verdict — a
+	// nil Snapshot (daemon unreachable, reconcile.go's Snapshot==nil guards)
+	// or an unread durable attempt count (AttemptsUnknown) — and in both
+	// deferral cases it deliberately carries the grace clock forward into
+	// result.NextObservations[key] rather than dropping it. A genuinely
+	// healthy ticket has no observation at all (dropped, not carried). So the
+	// stale-clear loop below must only clear a key that is absent from BOTH
+	// recoveredKeys AND result.NextObservations — clearing on "absent from
+	// recoveredKeys" alone would zero the apply-retry counter mid-outage and
+	// let a ticket whose apply keeps failing take far longer than
+	// cfg.ApplyRetryBudget passes to escalate (or never escalate) while
+	// outages and partial recoveries interleave.
+	recoveredKeys := make(map[string]bool, len(result.Recoveries))
+
+	for _, rec := range result.Recoveries {
+		if len(rec.AddLabels) == 0 && len(rec.RemoveLabels) == 0 {
+			// Report-only (orphan-plan): nothing to apply, nothing to track.
+			continue
+		}
+		key := planKey(rec.Ticket.Repo, rec.Ticket.Number)
+		recoveredKeys[key] = true
+		mutated, err := applyRecovery(mut, rec, out)
+		if mutated {
+			// The label mutation (the state-changing half) landed on GitHub —
+			// the ticket is resolved for this pass regardless of whether the
+			// trailing comment also succeeded (#265 silent-failure-hunter
+			// finding #3). Any prior apply-failure streak is over. A
+			// comment-only failure still surfaces via firstErr/logging but
+			// must not bump the counter or re-inject the grace clock, since
+			// nothing about GitHub's label state actually failed.
+			delete(applyFailures, key)
+			if err != nil {
+				firstErr = firstNonNil(firstErr, err)
+			}
+			continue
+		}
+
+		// Label mutation failed (#265 AC #3/#4): the pure engine assumed this
+		// ticket's observation would clear because the mutation would land —
+		// it didn't, so re-inject the original first-seen time (loaded from
+		// the store, before Reconcile ran) rather than let the grace clock
+		// silently restart next pass. Bump the bounded apply-retry counter
+		// separately from the dispatch-attempt RetryBudget.
+		if ts, ok := obs[key]; ok {
+			result.NextObservations[key] = ts
+		}
+		applyFailures[key]++
+		if applyFailures[key] < cfg.ApplyRetryBudget {
+			firstErr = firstNonNil(firstErr, err)
+			continue
+		}
+
+		// Apply-retry budget exhausted: escalate to reconcile-stuck so this
+		// ticket stops resurfacing reconcile_pass_failed forever (#265 AC
+		// #4/#6), removing the source label the failed recovery intended to
+		// remove (Working or Planned).
+		escRec := Recovery{
+			Ticket:    rec.Ticket,
+			Kind:      RecoveryReconcileStuck,
+			AddLabels: []string{labelReconcileStuck},
+			// Reuses rec.RemoveLabels as-is: every mutating Recovery kind
+			// today (retry/failed/plan-invalid) removes exactly the one
+			// source label (Working/Planned) the escalation must also
+			// remove. Revisit this passthrough if a future recovery kind
+			// removes a different/additional set of labels.
+			RemoveLabels: rec.RemoveLabels,
+			Comment:      reconcileStuckComment(),
+			Detail:       fmt.Sprintf("apply-retry budget (%d) exhausted: %s", cfg.ApplyRetryBudget, rec.Detail),
+		}
+		logf(out, "%s\n", formatRecovery(escRec))
+		escMutated, escErr := applyRecovery(mut, escRec, out)
+		if !escMutated {
+			// gh is still unreachable/failing: keep the counter and the
+			// observation and retry escalation next pass — best-effort, only
+			// blocked while gh is fully down.
+			firstErr = firstNonNil(firstErr, escErr)
+			continue
+		}
+		if escErr != nil {
+			// Escalation's label swap landed but its trailing comment failed
+			// (same partial-success shape as the ordinary case above) — the
+			// ticket is still terminal, so fold into the same success path
+			// rather than leaving a second divergent partial-success branch.
+			firstErr = firstNonNil(firstErr, escErr)
+		}
+		delete(applyFailures, key)
+		delete(result.NextObservations, key)
+		if !failedKeys[key] {
+			result.Failed = append(result.Failed, rec.Ticket)
+			failedKeys[key] = true
+		}
+	}
+
+	for key := range applyFailures {
+		if recoveredKeys[key] {
+			continue
+		}
+		if _, deferred := result.NextObservations[key]; deferred {
+			// Reconcile deferred a verdict for this key (daemon-unreachable or
+			// attempts-unknown) rather than finding it healthy — the grace
+			// clock was carried forward, so the apply-retry counter must
+			// survive too.
+			continue
+		}
+		delete(applyFailures, key)
+	}
+
+	if err := store.Save(ReconcileState{Observations: result.NextObservations, ApplyFailures: applyFailures}); err != nil {
 		logf(out, "reconcile: saving state: %v\n", err)
 		firstErr = firstNonNil(firstErr, err)
 	}
@@ -272,26 +499,47 @@ func applyReconcile(cfg Config, deps reconcileDeps, mut TicketMutator, dryRun bo
 }
 
 // applyRecovery applies one recovery's gh side effects. Report-only kinds
-// (orphan-plan) do nothing. If the label swap fails, the comment is skipped so a
-// ticket is never annotated without the state change that explains it.
-func applyRecovery(mut TicketMutator, rec Recovery, out io.Writer) error {
+// (orphan-plan) do nothing and report mutated=true (nothing to track). If the
+// label swap (EnsureLabels+EditLabels — the state-changing half of the
+// recovery) fails, the comment is skipped so a ticket is never annotated
+// without the state change that explains it, and mutated is false.
+//
+// mutated reports whether that state-changing half landed on GitHub,
+// independent of whether the trailing comment also succeeded. #265
+// (silent-failure-hunter finding #3): a comment-only failure must not be
+// treated the same as a failed label mutation — GitHub's label state already
+// transitioned, so the caller must not bump the apply-retry counter or
+// re-inject the grace observation for it. err is still returned whenever
+// either half fails, so a comment-only failure is never silently dropped —
+// callers must keep surfacing it (log/firstErr), just without touching the
+// apply-retry bookkeeping.
+func applyRecovery(mut TicketMutator, rec Recovery, out io.Writer) (mutated bool, err error) {
 	if out == nil {
 		out = os.Stdout
 	}
 	if len(rec.AddLabels) == 0 && len(rec.RemoveLabels) == 0 {
-		return nil
+		return true, nil
+	}
+	// Ensure any managed terminal labels among AddLabels exist before adding
+	// them (#265 AC #2), so a repo that never had e.g. dispatch-failed
+	// pre-created doesn't hard-fail the label edit below.
+	if managed := managedLabelsAmong(rec.AddLabels); len(managed) > 0 {
+		if err := mut.EnsureLabels(rec.Ticket.Repo, managed); err != nil {
+			logf(out, "reconcile: #%d ensure labels: %v\n", rec.Ticket.Number, err)
+			return false, err
+		}
 	}
 	if err := mut.EditLabels(rec.Ticket.Repo, rec.Ticket.Number, rec.AddLabels, rec.RemoveLabels); err != nil {
 		logf(out, "reconcile: #%d edit labels: %v\n", rec.Ticket.Number, err)
-		return err
+		return false, err
 	}
 	if rec.Comment != "" {
 		if err := mut.Comment(rec.Ticket.Repo, rec.Ticket.Number, rec.Comment); err != nil {
 			logf(out, "reconcile: #%d comment: %v\n", rec.Ticket.Number, err)
-			return err
+			return true, err
 		}
 	}
-	return nil
+	return true, nil
 }
 
 // formatRecovery renders one recovery as a single log line.
@@ -305,6 +553,8 @@ func formatRecovery(rec Recovery) string {
 		return fmt.Sprintf("#%d plan-invalid: %s", rec.Ticket.Number, rec.Detail)
 	case RecoveryOrphanPlan:
 		return fmt.Sprintf("#%d orphan-plan (report only): %s", rec.Ticket.Number, rec.Detail)
+	case RecoveryReconcileStuck:
+		return fmt.Sprintf("#%d reconcile-stuck: %s", rec.Ticket.Number, rec.Detail)
 	default:
 		return fmt.Sprintf("#%d %s: %s", rec.Ticket.Number, rec.Kind, rec.Detail)
 	}

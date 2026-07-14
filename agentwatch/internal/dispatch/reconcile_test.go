@@ -11,8 +11,9 @@ import (
 // the retry→fail transition by varying only Attempts.
 func reconcileConfig() Config {
 	return Config{
-		GracePeriod: 5 * time.Minute,
-		RetryBudget: 2,
+		GracePeriod:      5 * time.Minute,
+		RetryBudget:      2,
+		ApplyRetryBudget: 3,
 	}
 }
 
@@ -194,6 +195,24 @@ func TestReconcileAlreadyFailedSurfacedNotTouched(t *testing.T) {
 	}
 	if !hasFailed(res, "o/r", 42) {
 		t.Error("a dispatch-failed ticket must be surfaced in Failed")
+	}
+}
+
+// TestReconcileReconcileStuckSurfacedNotTouched mirrors
+// TestReconcileAlreadyFailedSurfacedNotTouched above: a ticket already
+// escalated to the reconcile-stuck terminal label must never be re-processed
+// (no recovery) and must stay surfaced in Failed so the daemon keeps badging
+// it, instead of silently dropping off the board.
+func TestReconcileReconcileStuckSurfacedNotTouched(t *testing.T) {
+	in := workingInputs()
+	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{labelReconcileStuck}}}
+	res := Reconcile(in)
+
+	if len(res.Recoveries) != 0 {
+		t.Fatalf("a reconcile-stuck ticket must not be touched, got %+v", res.Recoveries)
+	}
+	if !hasFailed(res, "o/r", 42) {
+		t.Error("a reconcile-stuck ticket must be surfaced in Failed")
 	}
 }
 

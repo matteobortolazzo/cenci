@@ -61,6 +61,12 @@ type Config struct {
 	RetryBudget    int           // retries before a ticket is marked dispatch-failed (default 2)
 	DaemonInterval time.Duration // embedded dispatch+reconcile loop interval; 0 disables it
 
+	// ApplyRetryBudget (#265) bounds consecutive failed apply-mutation passes
+	// (e.g. a gh call failing outright) before a ticket is escalated to the
+	// reconcile-stuck terminal label. Separate from RetryBudget, which bounds
+	// dispatch attempts, not apply-mutation failures.
+	ApplyRetryBudget int
+
 	// LoopEnabled reports whether the embedded fleet dispatch loop (#219) is
 	// on. Resolved from an explicit "loopEnabled" when present, else absent
 	// means disabled.
@@ -78,6 +84,7 @@ func DefaultConfig() Config {
 		DefaultAgent:           "claude",
 		GracePeriod:            5 * time.Minute,
 		RetryBudget:            2,
+		ApplyRetryBudget:       3,
 	}
 }
 
@@ -98,10 +105,11 @@ type dispatchFile struct {
 	ClaudeSessionDir       string                `json:"claudeSessionDir"`
 	CodexDBPath            string                `json:"codexDBPath"`
 	Session                string                `json:"session"`
-	GracePeriod            string                `json:"gracePeriod"`    // Go duration string, e.g. "5m"
-	RetryBudget            *int                  `json:"retryBudget"`    // pointer so an explicit 0 (no retries) is distinguishable from unset
-	DaemonInterval         string                `json:"daemonInterval"` // Go duration string, e.g. "5m"; empty/0 disables the embedded loop
-	LoopEnabled            *bool                 `json:"loopEnabled"`    // pointer so absence resolves to disabled (not inferred from DaemonInterval)
+	GracePeriod            string                `json:"gracePeriod"`      // Go duration string, e.g. "5m"
+	RetryBudget            *int                  `json:"retryBudget"`      // pointer so an explicit 0 (no retries) is distinguishable from unset
+	DaemonInterval         string                `json:"daemonInterval"`   // Go duration string, e.g. "5m"; empty/0 disables the embedded loop
+	LoopEnabled            *bool                 `json:"loopEnabled"`      // pointer so absence resolves to disabled (not inferred from DaemonInterval)
+	ApplyRetryBudget       *int                  `json:"applyRetryBudget"` // pointer so an explicit 0 is distinguishable from unset
 }
 
 // LoadConfig returns the default policy with the config.json "dispatch" block
@@ -190,6 +198,9 @@ func mergeConfig(base Config, o dispatchFile) Config {
 	}
 	if o.LoopEnabled != nil {
 		base.LoopEnabled = *o.LoopEnabled
+	}
+	if o.ApplyRetryBudget != nil {
+		base.ApplyRetryBudget = *o.ApplyRetryBudget
 	}
 	return base
 }
