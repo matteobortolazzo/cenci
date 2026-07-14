@@ -282,6 +282,12 @@ agentwatch dispatch loop status [--config <path>] [--json]
 All three print the same resolved `DispatchState` — human-readable by default, or the
 raw JSON object with `--json` (e.g. `{"enabled":true,"daemon_running":false,"interval":"5m",...}`).
 
+**Breaking change:** the loop no longer auto-enables from a bare `daemonInterval`. It
+now defaults to disabled and only dispatches once `loopEnabled` is explicitly set to
+`true`. Existing installs that relied on `daemonInterval` alone must run `agentwatch
+dispatch loop on` (or set `loopEnabled: true` directly) after upgrading, or dispatch
+will silently stop.
+
 A running `agentwatch daemon` always starts the embedded dispatch supervisor loop at
 startup — `dispatch.loopEnabled` purely controls whether it *performs* passes, not
 whether it runs. The loop reloads its config on a hardcoded 60s check interval (not
@@ -386,8 +392,8 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 | `planStalenessTolerance` | `5` | Max commits a plan may fall behind before it is skipped as stale (see [Path-aware staleness](#path-aware-staleness) for scoping the count via `stalenessPaths`) |
 | `gracePeriod` | `5m` | How long the failure signal must hold continuously before the reconciler recovers a stranded ticket (Go duration string) |
 | `retryBudget` | `2` | Retries (`Working` → `Planned`) a stranded ticket gets before it is marked `dispatch-failed`; an explicit `0` disables retries |
-| `daemonInterval` | none | Dispatch cadence for the daemon's embedded dispatch + reconcile loop (Go duration string). Configuration is independently polled at least every 60 seconds; nonpositive values use a 60s internal fallback but are not reported as a configured interval |
-| `loopEnabled` | unset | Explicitly toggles the embedded fleet dispatch loop; managed via `agentwatch dispatch loop on\|off` (see [Loop toggle](#loop-toggle-agentwatch-dispatch-loop-onoffstatus)). When unset, it back-compat-resolves to `daemonInterval > 0` so an existing `daemonInterval`-only config keeps running unchanged; an explicit `true`/`false` overrides that resolution either way |
+| `daemonInterval` | none | Dispatch cadence once the embedded loop is enabled (Go duration string); setting this alone does **not** start dispatch — see `loopEnabled`. Configuration is independently polled at least every 60 seconds; nonpositive values use a 60s internal fallback but are not reported as a configured interval |
+| `loopEnabled` | `false` | Explicitly toggles the embedded fleet dispatch loop; managed via `agentwatch dispatch loop on\|off` (see [Loop toggle](#loop-toggle-agentwatch-dispatch-loop-onoffstatus)). Defaults to disabled — a bare `daemonInterval` no longer auto-enables the loop; run `dispatch loop on` (or set `loopEnabled: true` directly) to start dispatching |
 | `defaultAgent` | `claude` | Agent used when a ticket has no `agent:<name>` label |
 | `model` | none | Model override for every dispatched session (overrides `agents.*.model`); the `--model` CLI flag overrides this. Pin this to avoid a dispatched session silently inheriting whatever ambient/account-level default model is active at spawn time |
 | `agentPreference` | none | Fallback agent order tried when the primary agent (label or `defaultAgent`) is out of budget; first agent with budget wins |
