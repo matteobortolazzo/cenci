@@ -8,8 +8,8 @@
 #
 # Usage:
 #   ./install.sh                interactive wizard (install)
-#   ./install.sh update         update installed plugins (+ optional rebuild)
-#   ./install.sh doctor         check prerequisites, change nothing
+#   agent-stack update          update installed plugins (+ optional rebuild)
+#   agent-stack doctor          check prerequisites, change nothing
 #
 #   curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
 #
@@ -206,6 +206,7 @@ run_doctor() {
 
 	say "  ${BOLD}Required platform dependencies${RESET}"
 	check "git" required "install git from your package manager" command -v git
+	check "curl" required "install curl from your package manager" command -v curl
 	if [ "$OS" = macos ]; then
 		check "Docker or Podman" required \
 			"install Docker Desktop (https://docker.com/products/docker-desktop) or Podman" \
@@ -258,6 +259,7 @@ run_doctor() {
 
 	say ""
 	say "  ${BOLD}Launchers and container image${RESET}"
+	check "agent-stack utility" optional "re-run the installer to create it" command -v agent-stack
 	if [ "$HAS_CLAUDE" -eq 1 ]; then
 		check "agent-sand launcher" optional "re-run the installer to create it" command -v agent-sand
 	fi
@@ -319,7 +321,7 @@ step_install_plugins() {
 	if [ "$CLAUDE_MARKETPLACE_READY" -eq 1 ]; then
 		for p in $SELECTED; do
 			if plugin_installed "$p"; then
-				ok "Claude: $p already installed (run './install.sh update' to update)"
+				ok "Claude: $p already installed (run 'agent-stack update' to update)"
 				continue
 			fi
 			if plugin_cmd install "$p"; then
@@ -334,7 +336,7 @@ step_install_plugins() {
 	[ "$CODEX_MARKETPLACE_READY" -eq 1 ] || return 0
 	for p in $SELECTED; do
 		if codex_plugin_installed "$p"; then
-			ok "Codex: $p already installed (run './install.sh update' to update)"
+			ok "Codex: $p already installed (run 'agent-stack update' to update)"
 			continue
 		fi
 		if codex plugin add "$p@$MARKETPLACE_NAME" >/dev/null 2>&1; then
@@ -415,6 +417,17 @@ link_launcher() {
 	fi
 	ln -sf "$target" "$dest"
 	ok "linked $name → ~/.local/bin/$name"
+}
+
+step_cli_setup() {
+	step "Setting up the agent-stack command"
+
+	local cli
+	if ! cli=$(find_plugin_path "agent-stack"); then
+		warn "could not find the agent-stack command in the marketplace checkout — re-run the installer after refreshing the marketplace"
+		return 0
+	fi
+	link_launcher agent-stack "$cli" || true
 }
 
 step_sandbox_setup() {
@@ -706,7 +719,8 @@ final_summary() {
 		say "    (start a supported agent session — status appears in configured surfaces)"
 	fi
 	say ""
-	say "  Update everything later:  ${BOLD}./install.sh update${RESET}"
+	say "  Check installation health: ${BOLD}agent-stack doctor${RESET}"
+	say "  Update everything later:  ${BOLD}agent-stack update${RESET}"
 	say "  Docs: https://github.com/$MARKETPLACE_REPO/blob/main/docs/getting-started.md"
 }
 
@@ -721,11 +735,14 @@ usage() {
 agent-stack installer — one command for the whole package.
 
 Usage:
-  ./install.sh                interactive wizard (install)
-  ./install.sh update         update installed plugins (+ optional rebuild)
-  ./install.sh doctor         check prerequisites, change nothing
+  agent-stack                 interactive installer / repair
+  agent-stack update          update installed plugins (+ optional rebuild)
+  agent-stack doctor          check prerequisites, change nothing
 
+Initial install:
   curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
+
+From a source checkout, ./install.sh accepts the same arguments.
 
 Flags:
   --yes                                 accept defaults, never prompt
@@ -771,6 +788,7 @@ have_supported_client || die "no supported client found. Install Claude Code, Co
 if [ "$MODE" = update ]; then
 	step_update_plugins
 	prune_selected_to_installed
+	step_cli_setup
 	step_sandbox_setup
 	step_agentwatch_setup
 	final_summary
@@ -785,6 +803,7 @@ run_doctor || {
 step_marketplace
 step_install_plugins
 prune_selected_to_installed
+step_cli_setup
 step_sandbox_setup
 step_agentwatch_setup
 step_agentflow_notes

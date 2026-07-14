@@ -3,7 +3,10 @@
 > Part of [agent-stack](../README.md) — the **workflow layer**. See the root README for
 > the one-command install and how the isolation, workflow, and attention layers fit together.
 
-Ticket refinement and automated implementation pipeline for GitHub.
+Turn a GitHub ticket into a tested, specialist-reviewed pull request while keeping
+scope and planning decisions human-gated.
+
+![agentflow moves a ticket through human-gated refinement and planning, an autonomous engineering run, and PR follow-through](../docs/assets/agentflow-pipeline.svg)
 
 ## What it does
 
