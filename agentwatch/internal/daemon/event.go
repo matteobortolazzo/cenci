@@ -49,7 +49,9 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 		sess.PromptTaskName = true
 	}
 
-	if event.EventType == "SessionEnd" {
+	// A subagent's own SessionEnd (non-empty AgentID) must not tear down the
+	// main session's window — only the main agent's own SessionEnd does.
+	if event.EventType == "SessionEnd" && event.AgentID == "" {
 		delete(d.sessions, key)
 		d.frontend.OnSessionEnd(sess)
 		d.broadcast()
@@ -80,6 +82,22 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 
 // mapEventToStatus converts a hook event to a detect.Status.
 func (d *Daemon) mapEventToStatus(event ipc.HookEvent) detect.Status {
+	status := d.mapEventToStatusRaw(event)
+	// A subagent (Task tool delegation) fires its own terminal events on the
+	// same session_id as the main agent. Only the main agent's own terminal
+	// events (empty AgentID) may flip the session to done/stopped — a
+	// subagent's Stop/agent_completed must not interrupt the main
+	// delegation's running status.
+	if event.AgentID != "" && (status == detect.StatusDone || status == detect.StatusStopped) {
+		if d.cfg.Verbose {
+			log.Printf("event: suppressing %s for subagent %s on session %s (status=%v)", event.EventType, event.AgentID, sessionKeyForEvent(event), status)
+		}
+		return detect.StatusUnknown
+	}
+	return status
+}
+
+func (d *Daemon) mapEventToStatusRaw(event ipc.HookEvent) detect.Status {
 	switch event.EventType {
 	case "SessionStart":
 		return detect.StatusIdle

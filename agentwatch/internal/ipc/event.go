@@ -10,5 +10,6 @@ type HookEvent struct {
 	ToolName         string `json:"tool_name,omitempty"`         // PreToolUse, PermissionRequest, PostToolUse events
 	TaskName         string `json:"task_name,omitempty"`         // compact first-prompt label; raw prompt is never sent
 	IsInterrupt      bool   `json:"is_interrupt,omitempty"`      // PostToolUseFailure: true if user pressed ESC
+	AgentID          string `json:"agent_id,omitempty"`          // set when the hook fires inside a subagent (Task tool) call; empty for the main agent
 	Timestamp        string `json:"timestamp"`
 }

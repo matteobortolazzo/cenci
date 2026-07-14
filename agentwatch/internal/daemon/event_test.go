@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/detect"
 	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/ipc"
 	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/tmux"
 	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/tmux/tmuxtest"
@@ -451,6 +452,118 @@ func TestDaemon_StylesSetEvenWhenRenameFails(t *testing.T) {
 	}
 	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); !ok || v != "▶" {
 		t.Errorf("expected @agentwatch-symbol=▶ despite rename failure, got %q (found=%v)", v, ok)
+	}
+}
+
+// TestDaemon_SubagentStopDoesNotFlipMainStatus covers ticket #277: when the
+// main agent delegates to a subagent via the Task tool and waits, the
+// subagent's own Stop event (same session_id, non-empty AgentID) must not
+// flip the main session to done. Only a subsequent main-agent Stop (empty
+// AgentID) should do that.
+func TestDaemon_SubagentStopDoesNotFlipMainStatus(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "✳ delegating work", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "PreToolUse", SessionID: "sess1", TmuxPane: "%0", ToolName: "Task"})
+
+	if got := d.sessions["sess1"].Status; got != detect.StatusRunning {
+		t.Fatalf("precondition: expected StatusRunning after PreToolUse(Task), got %v", got)
+	}
+
+	// Subagent's own Stop event: same session, but scoped to the subagent.
+	d.handleEvent(ipc.HookEvent{EventType: "Stop", SessionID: "sess1", TmuxPane: "%0", AgentID: "sub1"})
+
+	if got := d.sessions["sess1"].Status; got != detect.StatusRunning {
+		t.Errorf("expected StatusRunning after subagent Stop (AgentID set), got %v — main session incorrectly flipped to done mid-delegation", got)
+	}
+
+	// Main agent's own Stop event (no AgentID) must still flip to done.
+	d.handleEvent(ipc.HookEvent{EventType: "Stop", SessionID: "sess1", TmuxPane: "%0"})
+
+	if got := d.sessions["sess1"].Status; got != detect.StatusDone {
+		t.Errorf("expected StatusDone after main-agent Stop, got %v", got)
+	}
+}
+
+// TestDaemon_SubagentNotificationAgentCompletedDoesNotFlipMainStatus covers
+// the Notification:agent_completed path for the same guard: a subagent-scoped
+// completion notification must not flip the main session to done.
+func TestDaemon_SubagentNotificationAgentCompletedDoesNotFlipMainStatus(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "✳ delegating work", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "PreToolUse", SessionID: "sess1", TmuxPane: "%0", ToolName: "Task"})
+
+	if got := d.sessions["sess1"].Status; got != detect.StatusRunning {
+		t.Fatalf("precondition: expected StatusRunning after PreToolUse(Task), got %v", got)
+	}
+
+	// Subagent-scoped completion notification: same session, AgentID set.
+	d.handleEvent(ipc.HookEvent{
+		EventType:        "Notification",
+		SessionID:        "sess1",
+		TmuxPane:         "%0",
+		NotificationType: "agent_completed",
+		AgentID:          "sub1",
+	})
+
+	if got := d.sessions["sess1"].Status; got != detect.StatusRunning {
+		t.Errorf("expected StatusRunning after subagent Notification:agent_completed (AgentID set), got %v — main session incorrectly flipped to done mid-delegation", got)
+	}
+}
+
+// TestDaemon_SubagentSessionEndDoesNotEndMainSession covers ticket #277: a
+// subagent's own SessionEnd (same session_id, non-empty AgentID) must not
+// delete the main session or restore its window — only the main agent's own
+// SessionEnd (empty AgentID) does that.
+func TestDaemon_SubagentSessionEndDoesNotEndMainSession(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "✳ delegating work", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "PreToolUse", SessionID: "sess1", TmuxPane: "%0", ToolName: "Task"})
+
+	mc.Renames = nil
+	mc.WindowOpts = nil
+
+	// Subagent's own SessionEnd: same session, but scoped to the subagent.
+	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sess1", TmuxPane: "%0", AgentID: "sub1"})
+
+	if len(mc.Renames) != 0 {
+		t.Errorf("expected no restore rename from subagent SessionEnd, got %d", len(mc.Renames))
+	}
+	if d.sessions["sess1"] == nil {
+		t.Fatal("expected main session state to still exist after subagent SessionEnd")
+	}
+
+	// Main agent's own SessionEnd (no AgentID) must still end the session.
+	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sess1", TmuxPane: "%0"})
+
+	if len(mc.Renames) != 1 {
+		t.Fatalf("expected 1 restore rename after main-agent SessionEnd, got %d", len(mc.Renames))
+	}
+	if d.sessions["sess1"] != nil {
+		t.Error("expected main session state removed after main-agent SessionEnd")
 	}
 }
 
