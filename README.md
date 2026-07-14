@@ -1,114 +1,117 @@
 # agent-stack
 
-agent-stack lets a coding agent work autonomously without making the human disappear
-from the decisions that matter. It combines one security boundary, one gated delivery
-workflow, and one attention router. It is one product installed with one command; its
-three internal plugins retain independent versions as an implementation detail.
+**Let coding agents run longer—without giving up control.**
 
-```text
-attention  agentwatch      hooks → daemon → tmux and desktop status surfaces
-workflow   agentflow       refine → design → plan → implementation → reviewed PR
-isolation  agent-sandbox   Docker/Podman boundary for full-permission agent sessions
-```
+[![Claude Code](https://img.shields.io/badge/Claude_Code-supported-d97757?style=flat-square)](#claude-code-and-codex)
+[![Codex](https://img.shields.io/badge/Codex-supported-10a37f?style=flat-square)](agentflow/docs/codex.md)
+[![Platforms](https://img.shields.io/badge/Linux_%C2%B7_macOS_%C2%B7_WSL2-supported-64748b?style=flat-square)](docs/getting-started.md)
+[![License](https://img.shields.io/badge/license-MIT-8b5cf6?style=flat-square)](LICENSE)
 
-The human refines scope, approves design and plans, and answers genuine questions. The
-agent handles the mechanical work between those gates. The container, not the agent
-client's prompt system, is the security boundary. AgentWatch makes waiting decisions
-visible instead of letting an autonomous session stall silently.
+![agent-stack combines isolation, workflow, and attention into a safe path from issue to reviewed pull request](docs/assets/agent-stack-overview.svg)
 
-An optional [lazyboards](https://github.com/matteobortolazzo/lazyboards) board can
-orchestrate agent-stack through its documented labels and dispatch commands. It is a
-separate project, not an installation requirement.
+Coding agents are useful when they can keep working. They are trustworthy when the
+security boundary, approval points, and waiting states are explicit.
+
+agent-stack provides those missing operating layers as one install:
+
+- **Isolation** limits a full-permission session to a Docker or Podman container.
+- **Workflow** turns an issue into a tested, reviewed pull request with human gates.
+- **Attention** shows when a session is running, finished, idle, or waiting for you.
+
+The human owns intent and consequential decisions. The agent owns the mechanical work
+between them.
+
+## From issue to reviewed PR
+
+![agentflow moves a ticket through human-gated refinement and planning, an autonomous engineering run, and PR follow-through](docs/assets/agentflow-pipeline.svg)
+
+| You stay responsible for | agent-stack handles |
+|---|---|
+| Scope, tradeoffs, and plan review | Worktrees, tests, implementation, and refactoring |
+| Design decisions that change the product | Security review, code review, rebase, and PR creation |
+| Genuine blockers and final judgment | Session status, follow-through, and optional dispatch |
+
+The approved `.plans/` file is the durable handoff. Once you launch that plan, the
+workflow can run unattended through an open PR. AgentWatch keeps its state visible;
+`/agentflow:babysit` can follow CI and review activity through to merge.
 
 ## Install
 
-Requirements: Linux, macOS, or WSL2; git; Docker or Podman; and at least one supported
-client—Claude Code, Codex, or both.
+Requirements: Linux, macOS, or WSL2; git; Docker or Podman; and Claude Code, Codex, or
+both.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
 ```
 
-The installer detects available clients, registers the marketplace in each one, and
-installs the workflow, attention, and isolation components independently. It also
-creates the appropriate sandbox launcher (`agent-sand`, `codex-sand`, or both).
+Then launch your agent inside the project boundary:
 
 ```bash
-# Inspect prerequisites and installation state without changing anything
+agent-sand   # Claude Code
+codex-sand   # Codex
+```
+
+The installer detects available clients, registers the marketplace, installs all
+three layers, and creates the matching launchers. It can also inspect the machine
+without changing anything or update every installed component:
+
+```bash
+# Check prerequisites and installation state
 curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash -s -- doctor
 
-# Update every installed component in every detected client
+# Update the complete stack
 curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash -s -- update
 ```
 
-See [Getting started](docs/getting-started.md) for the first-run path and
-[the roadmap](docs/roadmap.md) for delivery status. Standalone component installation
-is documented only in each layer's advanced/development section.
+Follow the [guided getting-started path](docs/getting-started.md) for first-run
+configuration and your first ticket.
 
-## Client capabilities
+## Three layers, one product
+
+| Layer | What it changes | Learn more |
+|---|---|---|
+| **agent-sandbox** | Runs Claude Code or Codex at full permissions while mounting only the current repository at `/workspace`. The container—not a prompt—is the security boundary. | [Isolation details](dev-sandbox/README.md) |
+| **agentflow** | Adds refinement, optional UI design, persisted planning, test-first implementation, specialist reviews, and PR follow-through. | [Workflow details](agentflow/README.md) |
+| **AgentWatch** | Turns native hooks into shared live state for tmux and optional Linux/macOS status surfaces. It can also dispatch approved plans by policy. | [Attention details](agentwatch/README.md) |
+
+Each layer is independently versioned internally, but normal installation and updates
+treat agent-stack as one product.
+
+## Claude Code and Codex
 
 | Capability | Claude Code | Codex |
-|---|---|---|
-| Container isolation | `agent-sand` | `codex-sand` |
-| Session monitoring and self-bootstrap | Native hooks | Native hooks; re-trust changed hooks with `/hooks` |
+|---|---:|---:|
+| Container isolation | Yes | Yes |
+| Live session monitoring and self-bootstrap | Yes | Yes |
 | Portable shell, testing, stack, worktree, and review conventions | Yes | Yes |
-| Interactive ticket refinement, design, implementation, and PR babysitting | Yes | Not yet |
-| Documented implementation recipe | Built into the interactive workflow | [`agentflow/docs/codex.md`](agentflow/docs/codex.md) |
+| Interactive refinement, design, implementation, and PR babysitting | Yes | Not yet |
+| Documented implementation recipe | Built in | [Available](agentflow/docs/codex.md) |
 
-Claude Code currently provides the full interactive ticket-to-PR experience. Codex
-provides the same isolation and monitoring layers plus portable engineering conventions
-and an implementation recipe; it does not expose Claude-specific interactive commands.
+Claude Code currently provides the full interactive ticket-to-PR workflow. Codex uses
+the same isolation and attention layers plus portable engineering conventions and a
+documented implementation recipe.
 
-## Work lifecycle
+## Fits the tools you already use
+
+AgentWatch can surface the same state in tmux, Waybar, Noctalia, DMS, GNOME, KDE
+Plasma, and the macOS menu bar. An optional
+[lazyboards](https://github.com/matteobortolazzo/lazyboards) board can dispatch the
+documented workflow from issue labels; it is a separate project, not an installation
+requirement.
+
+The lifecycle stays inspectable either way:
 
 ```text
 New → Refined → [Designed] → Planned → Working → In Review → Implemented
 ```
 
-- `Designed` is used when a UI ticket needs the optional design branch. A dedicated
-  design ticket produces and approves the spec, then hands the implementation ticket
-  forward.
-- Planning persists an approved `.plans/` file and applies `Planned`. That file is the
-  handoff between the human-gated planning session and implementation.
-- `Working` is deliberately transient: it begins only when implementation picks up the
-  persisted plan. AgentWatch dispatch can perform that pickup automatically.
-- Opening the PR changes `Working` to `In Review`. Review comments and CI are handled
-  before merge; merge completion applies `Implemented`.
+## Read next
 
-`Followup` is an orthogonal label for separately tracked deferred work. It is not a
-state in the lifecycle above.
-
-## Internal layers
-
-### Isolation: agent-sandbox
-
-[`dev-sandbox/`](dev-sandbox) runs Claude Code or Codex at full permissions inside a
-Docker/Podman boundary. From a git repository it mounts only that repository root at
-`/workspace`; outside a repository it retains a documented legacy `~/Repos` fallback.
-Per-repository images and explicit cleanup commands are available.
-
-### Workflow: agentflow
-
-[`agentflow/`](agentflow) owns human gates and the delivery recipe. On Claude Code it
-offers the full interactive GitHub ticket-to-merged-PR workflow. On Codex its portable
-skills and documented recipe provide the supported subset.
-
-### Attention: agentwatch
-
-[`agentwatch/`](agentwatch) turns Claude Code and Codex hooks into shared live state for
-tmux, Waybar, Noctalia, DMS, GNOME, KDE Plasma, and the macOS menu bar. The plugin
-bootstraps its matching binary and daemon from either client's cache on first session.
-Display widgets are optional integrations, not extra agent-stack installation steps.
-
-## References
-
-- [Getting started](docs/getting-started.md)
-- [Roadmap](docs/roadmap.md)
-- [Security model](SECURITY.md)
-- [Orchestration contract](docs/orchestration.md)
-- [Contributing](CONTRIBUTING.md)
-- Internal layer references: [agentflow](agentflow/README.md),
-  [agentwatch](agentwatch/README.md), [agent-sandbox](dev-sandbox/README.md)
+- [Getting started](docs/getting-started.md) — install, verify, and run the first ticket
+- [Security model](SECURITY.md) — what the container boundary protects and what it does not
+- [Orchestration contract](docs/orchestration.md) — labels, plans, and dispatch behavior
+- [Roadmap](docs/roadmap.md) — current delivery status
+- [Contributing](CONTRIBUTING.md) — development workflow
 
 ## License
 

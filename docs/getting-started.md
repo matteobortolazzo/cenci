@@ -4,6 +4,8 @@ This is the supported happy path from a clean machine to the first agent-stack t
 agent-stack is one product; the installer manages its three internal components for
 every supported client it detects.
 
+![agent-stack combines isolation, workflow, and attention into a safe path from issue to reviewed pull request](assets/agent-stack-overview.svg)
+
 ## 1. Prerequisites
 
 Install:
@@ -100,9 +102,7 @@ interactive configure skill is Claude Code-only.
 
 The lifecycle is always:
 
-```text
-New → Refined → [Designed] → Planned → Working → In Review → Implemented
-```
+![A ticket moves through human-gated refinement and planning, an autonomous engineering run, and PR follow-through](assets/agentflow-pipeline.svg)
 
 For UI work, refinement can branch through a dedicated design ticket. Planning saves
 an approved `.plans/` file and applies `Planned`; implementation or automated dispatch

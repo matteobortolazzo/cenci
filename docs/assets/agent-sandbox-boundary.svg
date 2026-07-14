@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="430" viewBox="0 0 1200 430" role="img" aria-labelledby="title desc">
+  <title id="title">agent-sandbox security boundary</title>
+  <desc id="desc">The current repository crosses from the host into a container workspace where a full-permission coding agent runs with its own persistent home and no inbound ports by default.</desc>
+  <defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#0b1020"/><stop offset="1" stop-color="#111b35"/></linearGradient></defs>
+  <rect width="1200" height="430" rx="24" fill="url(#bg)"/>
+  <g font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <text x="50" y="63" font-size="30" font-weight="750" fill="#f8fafc">Full agent permissions. A deliberately small boundary.</text>
+    <text x="50" y="94" font-size="16" fill="#a8b3cf">The container—not the agent client's prompt system—limits the default blast radius.</text>
+
+    <rect x="50" y="134" width="310" height="204" rx="20" fill="#111a2d" stroke="#2b3b60"/>
+    <text x="76" y="171" font-size="12" font-weight="700" fill="#8292b6" letter-spacing="1.4">YOUR HOST</text>
+    <rect x="76" y="193" width="258" height="55" rx="12" fill="#17243d"/>
+    <path d="M96 212h18l5 5h21v15H96z" fill="none" stroke="#55d6be" stroke-width="2" stroke-linejoin="round"/>
+    <text x="152" y="226" font-size="15" font-weight="650" fill="#e9eefc">current git repository</text>
+    <rect x="76" y="263" width="258" height="48" rx="12" fill="#0d1528" stroke="#243454"/>
+    <text x="96" y="293" font-size="13" fill="#8292b6">other host files + processes stay out</text>
+
+    <path d="M375 223h104" stroke="#55d6be" stroke-width="3"/><path d="M469 214l10 9-10 9" fill="none" stroke="#55d6be" stroke-width="3"/>
+    <text x="384" y="205" font-size="12" font-weight="650" fill="#79e3d1">repo mount</text>
+
+    <rect x="495" y="122" width="655" height="228" rx="24" fill="#10252c" stroke="#2f8f87" stroke-width="2"/>
+    <circle cx="535" cy="160" r="18" fill="#123b3d"/>
+    <path d="M535 148l11 4v8c0 8-5 13-11 17-7-4-11-9-11-17v-8l11-4z" fill="none" stroke="#55d6be" stroke-width="2"/>
+    <text x="566" y="166" font-size="20" font-weight="750" fill="#f8fafc">Docker / Podman container</text>
+
+    <rect x="525" y="196" width="180" height="100" rx="14" fill="#0d1d25" stroke="#28625f"/>
+    <text x="545" y="225" font-size="12" font-weight="700" fill="#79e3d1">/workspace</text>
+    <text x="545" y="252" font-size="15" font-weight="650" fill="#e4fffb">this repository</text>
+    <text x="545" y="276" font-size="12" fill="#8db2b0">host-owned files</text>
+
+    <rect x="723" y="196" width="180" height="100" rx="14" fill="#0d1d25" stroke="#28625f"/>
+    <text x="743" y="225" font-size="12" font-weight="700" fill="#79e3d1">agent home</text>
+    <text x="743" y="252" font-size="15" font-weight="650" fill="#e4fffb">named volume</text>
+    <text x="743" y="276" font-size="12" fill="#8db2b0">persists by design</text>
+
+    <rect x="921" y="196" width="199" height="100" rx="14" fill="#19142f" stroke="#7650c7"/>
+    <text x="941" y="225" font-size="12" font-weight="700" fill="#c4a7ff">coding agent</text>
+    <text x="941" y="252" font-size="15" font-weight="650" fill="#f0e9ff">full permissions</text>
+    <text x="941" y="276" font-size="12" fill="#bba8dd">inside the boundary</text>
+
+    <rect x="50" y="377" width="1100" height="32" rx="10" fill="#221b18" stroke="#5e4632"/>
+    <circle cx="72" cy="393" r="5" fill="#fbbf24"/>
+    <text x="88" y="398" font-size="12" fill="#e8d6af">Default: no inbound ports. Explicit opt-ins widen the boundary: --docker mounts the host socket; --host-network uses host networking.</text>
+  </g>
+</svg>

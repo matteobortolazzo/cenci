@@ -3,7 +3,13 @@
 > Part of [agent-stack](../README.md) — the **attention layer**. See the root README for
 > the one-command install and how the isolation, workflow, and attention layers fit together.
 
-An event-driven tmux watcher that monitors Claude Code and OpenAI Codex sessions via hooks and shows live status in the tmux status bar:
+Stop hunting through terminals to find the session that needs you. AgentWatch turns
+Claude Code and Codex hooks into shared live state for tmux and optional desktop
+surfaces.
+
+![AgentWatch routes Claude Code and Codex hook events to tmux and desktop status surfaces](../docs/assets/agentwatch-surfaces.svg)
+
+The same four states appear everywhere:
 
 - **▶ blue** — running (generating, tool use, thinking)
 - **✓ green** — done (finished, waiting for next prompt)
@@ -13,16 +19,6 @@ An event-driven tmux watcher that monitors Claude Code and OpenAI Codex sessions
 When the agent exits or agentwatch stops, the original window name is restored.
 
 ## Architecture
-
-```
-Claude/Codex hooks  →  agentwatch notify  →  event socket  →  daemon (session-keyed)
-                                                                       |
-                                                              [tmux frontend]
-                                                              window rename/style
-                                                                       |
-                                                    broadcast socket → agentwatch status
-                                          (waybar, noctalia, dms, GNOME, KDE Plasma, macOS menu bar)
-```
 
 The core daemon keys state by agent session id, maps hook events to statuses, and owns the paneless TTL sweep. All window work is delegated to an injected frontend:
 
