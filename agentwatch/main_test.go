@@ -609,10 +609,21 @@ func TestDispatchStatus_HumanOutput(t *testing.T) {
 
 // -- dispatch loop on|off|status sub-verb (ticket #219) ---------------------
 
+// useTempSocketDir isolates a test from any ambient agentwatch daemon by
+// redirecting watch.DefaultSocketPath() to an empty temp dir, so a test
+// asserting daemon_running:false holds even on a machine/CI runner with a
+// live daemon socket bound. See docs/test-isolation.md.
+func useTempSocketDir(t *testing.T) {
+	t.Helper()
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+}
+
 // TestDispatchLoopStatusJSON_NoDaemon locks in that `dispatch loop status
 // --json`, with no daemon reachable, prints a raw watch.DispatchState JSON
 // object with daemon_running:false and enabled resolved from config.json.
 func TestDispatchLoopStatusJSON_NoDaemon(t *testing.T) {
+	useTempSocketDir(t)
+
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(configPath, []byte(`{"dispatch": {"loopEnabled": true, "daemonInterval": "5m"}}`), 0o600); err != nil {
 		t.Fatalf("seeding config: %v", err)
@@ -647,6 +658,8 @@ func TestDispatchLoopStatusJSON_NoDaemon(t *testing.T) {
 //     status` would print immediately after — not merely an echo of the
 //     write (e.g. "Enrolled ..."-style text divorced from actual state).
 func TestDispatchLoopOnOff_WritesConfigAndRendersSameAsStatus(t *testing.T) {
+	useTempSocketDir(t)
+
 	configPath := filepath.Join(t.TempDir(), "config.json")
 
 	onCmd := exec.Command(binaryPath, "dispatch", "loop", "on", "--config", configPath)
@@ -764,6 +777,8 @@ func TestDispatchLoopUnknownVerb_Exits2NeverMutatesConfig(t *testing.T) {
 // existing key is asserted explicitly so a future edit can't silently drop
 // one.
 func TestDispatchStatusJSON_IncludesLoopKey(t *testing.T) {
+	useTempSocketDir(t)
+
 	dir := initGitRemote(t, "git@github.com:owner/name.git")
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	if _, err := dispatch.EnrollRepo(configPath, dispatch.RepoIdentity{Repo: "owner/name", Dir: dir}); err != nil {
