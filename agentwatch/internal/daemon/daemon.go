@@ -11,6 +11,7 @@ import (
 	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/detect"
 	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/frontend"
 	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/ipc"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/reap"
 	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/pkg/watch"
 )
 
@@ -23,6 +24,7 @@ type Daemon struct {
 	ipc      *ipc.Server                       // nil if IPC not enabled
 	events   <-chan ipc.HookEvent
 	now      func() time.Time // injectable clock for TTL tests
+	reaper   reap.Reaper      // triggers agent-sand --reap-orphans on pane-gone sweep/startup (#292)
 
 	// attention is the reconciler's overlay of synthetic "failed" windows
 	// (#46). It is appended to every snapshot until the next overlay replaces
@@ -42,13 +44,14 @@ type Daemon struct {
 }
 
 // newDaemon creates a Daemon with the given dependencies.
-func newDaemon(cfg config.Config, fe frontend.Frontend, events <-chan ipc.HookEvent) *Daemon {
+func newDaemon(cfg config.Config, fe frontend.Frontend, events <-chan ipc.HookEvent, reaper reap.Reaper) *Daemon {
 	return &Daemon{
 		cfg:      cfg,
 		frontend: fe,
 		sessions: make(map[string]*frontend.SessionState),
 		events:   events,
 		now:      time.Now,
+		reaper:   reaper,
 	}
 }
 
@@ -76,7 +79,7 @@ func Run(ctx context.Context, cfg config.Config, fe frontend.Frontend, attention
 		log.Printf("warning: XDG_RUNTIME_DIR is not set; socket paths fall back to /tmp (less secure on multi-user systems)")
 	}
 
-	d := newDaemon(cfg, fe, recv.Events())
+	d := newDaemon(cfg, fe, recv.Events(), reap.NewExecReaper(cfg.Verbose))
 
 	if cfg.SocketPath != "" {
 		srv, err := ipc.NewServer(cfg.SocketPath)
@@ -98,6 +101,8 @@ func Run(ctx context.Context, cfg config.Config, fe frontend.Frontend, attention
 // RunCombinedLoop, per #220); disabled dispatch state flows through
 // u.Dispatch.Enabled rather than through a nil channel.
 func (d *Daemon) loop(ctx context.Context, attention <-chan ipc.AttentionUpdate) error {
+	d.reapOnStartup()
+
 	sweep := time.NewTicker(d.cfg.SweepInterval)
 	defer sweep.Stop()
 
@@ -121,11 +126,17 @@ func (d *Daemon) loop(ctx context.Context, attention <-chan ipc.AttentionUpdate)
 }
 
 // runSweep runs the frontend sweep and the paneless TTL sweep, applying the
-// resulting core-state changes and broadcasting once if anything changed.
+// resulting core-state changes and broadcasting once if anything changed. If
+// any action in this pass flagged PaneGone, the orphan reaper is triggered
+// exactly once for the whole pass (#292 AC1), not once per action.
 func (d *Daemon) runSweep() {
 	actions := d.frontend.Sweep(d.sessions)
 	changed := len(actions) > 0
+	paneGone := false
 	for _, a := range actions {
+		if a.PaneGone {
+			paneGone = true
+		}
 		sess := d.sessions[a.SessionKey]
 		if sess == nil {
 			continue
@@ -139,11 +150,23 @@ func (d *Daemon) runSweep() {
 			sess.TaskName = a.NewTask
 		}
 	}
+	if paneGone && d.reaper != nil {
+		d.reaper.Reap()
+	}
 	if d.ttlSweep() {
 		changed = true
 	}
 	if changed {
 		d.broadcast()
+	}
+}
+
+// reapOnStartup triggers one reap pass at daemon startup, covering panes that
+// closed while the daemon was down or restarting (#292 AC2). Window state is
+// in-memory only, so the live sweep alone has a restart blind spot.
+func (d *Daemon) reapOnStartup() {
+	if d.reaper != nil {
+		d.reaper.Reap()
 	}
 }
 

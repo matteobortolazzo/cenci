@@ -293,6 +293,8 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 	}
 
 	// Phase 2: Clean up truly stale entries (pane gone).
+	paneGone := false
+	paneGoneKeys := make(map[string]bool)
 	var stale []string
 	for wt, ws := range f.windows {
 		if !existing[ws.PaneID] {
@@ -304,8 +306,10 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 		if f.cfg.Verbose {
 			log.Printf("sweep: pane %s gone, cleaning up window %s", ws.PaneID, wt)
 		}
+		paneGone = true
 		if ws.SessionKey != "" {
 			remove[ws.SessionKey] = true
+			paneGoneKeys[ws.SessionKey] = true
 		}
 		delete(f.panes, ws.PaneID)
 		if currentPane, ok := currentPaneForWindow[wt]; ok && currentPane != ws.PaneID {
@@ -398,6 +402,8 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 				log.Printf("sweep: session %s pane %s gone, removing", key, sess.TmuxPane)
 			}
 			remove[key] = true
+			paneGone = true
+			paneGoneKeys[key] = true
 			continue
 		}
 		if owner, ok := paneOwner[sess.TmuxPane]; ok && owner != key {
@@ -409,12 +415,21 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 	}
 
 	actions := updates
+	paneGoneEmitted := false
 	for key := range remove {
-		actions = append(actions, frontend.SweepAction{SessionKey: key, Remove: true})
+		pg := paneGoneKeys[key]
+		paneGoneEmitted = paneGoneEmitted || pg
+		actions = append(actions, frontend.SweepAction{SessionKey: key, Remove: true, PaneGone: pg})
 	}
 	if len(actions) == 0 && displayChanged {
 		// Display-only change (renumbering): emit a marker so the daemon rebroadcasts.
 		actions = append(actions, frontend.SweepAction{})
+	}
+	if paneGone && !paneGoneEmitted {
+		// Ensure the pane-gone signal always reaches the daemon core, even in
+		// the rare case where a stale window carried no SessionKey (so no
+		// remove action above already carried it).
+		actions = append(actions, frontend.SweepAction{PaneGone: true})
 	}
 	return actions
 }
