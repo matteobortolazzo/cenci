@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/internal/ipc"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/pkg/watch"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v3/internal/ipc"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v3/pkg/watch"
 )
 
 // ErrNoOutput signals that the waybar module should be hidden (exit 1).

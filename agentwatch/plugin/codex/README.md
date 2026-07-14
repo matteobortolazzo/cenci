@@ -31,7 +31,7 @@ plugin-local daemon, waits briefly, and retries the same event. Explicit custom 
 sockets remain under the caller's control.
 
 **Manual / Codex-only install** (alternative): install the binary yourself
-(`go install github.com/matteobortolazzo/agent-stack/agentwatch/v2@latest` or
+(`go install github.com/matteobortolazzo/agent-stack/agentwatch/v3@latest` or
 `make build`) and start the daemon once (`agentwatch`). See the main
 [README](../../README.md#advanced--development).
 
