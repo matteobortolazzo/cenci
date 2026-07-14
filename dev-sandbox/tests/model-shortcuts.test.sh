@@ -65,7 +65,7 @@ if ! grep -Eq "^exec -it -u dev .*claude-sand-${REPO_SLUG} claude --dangerously-
     exit 1
 fi
 
-echo "case: 'sb xt' launches Codex with the terra model"
+echo "case: 'sb xt' launches Codex with the gpt-5.6-terra model"
 printf '' > "${CALLS_FILE}"
 "${SANDBOX_DIR}/agent-sand" xt -p test
 
@@ -73,17 +73,17 @@ if ! grep -Eq '^run .* -e AGENT_SAND_AGENT=codex ' "${CALLS_FILE}"; then
     echo "FAIL: 'xt' did not select the codex agent" >&2
     exit 1
 fi
-if ! grep -Eq "^exec -it -u dev .*codex-sand-${REPO_SLUG} codex --dangerously-bypass-approvals-and-sandbox --model terra -p test " "${CALLS_FILE}"; then
-    echo "FAIL: 'xt' did not launch codex with --model terra" >&2
+if ! grep -Eq "^exec -it -u dev .*codex-sand-${REPO_SLUG} codex --dangerously-bypass-approvals-and-sandbox --model gpt-5\\.6-terra -p test " "${CALLS_FILE}"; then
+    echo "FAIL: 'xt' did not launch codex with --model gpt-5.6-terra" >&2
     exit 1
 fi
 
-echo "case: unadorned --agent codex still defaults to the terra model"
+echo "case: unadorned --agent codex still defaults to the gpt-5.6-terra model"
 printf '' > "${CALLS_FILE}"
 "${SANDBOX_DIR}/agent-sand" --agent codex -p test
 
-if ! grep -Eq "^exec -it -u dev .*codex-sand-${REPO_SLUG} codex --dangerously-bypass-approvals-and-sandbox --model terra -p test " "${CALLS_FILE}"; then
-    echo "FAIL: default codex launch did not fall back to --model terra" >&2
+if ! grep -Eq "^exec -it -u dev .*codex-sand-${REPO_SLUG} codex --dangerously-bypass-approvals-and-sandbox --model gpt-5\\.6-terra -p test " "${CALLS_FILE}"; then
+    echo "FAIL: default codex launch did not fall back to --model gpt-5.6-terra" >&2
     exit 1
 fi
 
