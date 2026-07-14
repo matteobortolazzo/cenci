@@ -52,3 +52,4 @@ from external or semi-trusted sources.
   failures, not just one. Instead, state plainly that all errors are suppressed
   and document where silent failures will surface as missing-resource errors in
   downstream commands (e.g., "the label will not be found on the next step").
+- When skill instructions direct the executing agent to make a decision over a specific artifact (e.g., "based on the context-gatherer digest," "reading the bundle's summary"), verify what that artifact actually contains before assuming it has the fidelity your logic requires. A digest or paraphrase (e.g., the ~40-line context-gatherer summary) is not a substitute for verbatim source text. If a decision gate requires fidelity beyond what the artifact provides (e.g., checking for exact phrasing in a ticket body), explicitly direct the agent to read the source artifact or fetch the original data — do not rely on assumptions about what an abbreviated form captures.

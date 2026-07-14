@@ -11,16 +11,35 @@ If `hasPlanFile` is true, skip new planning:
 3. In ticket mode, re-fetch the ticket and compare state/body with `## Ticket Details`. If changed, require confirmation via `AskUserQuestion` ("Continue" / "Abort") before continuing. (This single read-only `gh issue view` is the sanctioned exception to the "no ticket fetch in the main agent" rule — it runs after the pre-flight check, and the context-gatherer is not used in plan file mode.)
 4. Proceed to Phase 2 with context from the plan file.
 
+## Trivial Fast Path
+
+If `hasPlanFile` is false and the main agent's Trivial-Ticket Triage (see `SKILL.md`) set `trivial = true`, take this branch instead of `## New Plan`:
+
+1. The AC-mandated line (`` Judged trivial: `<reason>` — skipping planning, implementing directly ``) was already printed once by `SKILL.md`'s `## Trivial-Ticket Triage` when it set `trivial = true`. Do **not** print it again here.
+2. Skip the planner delegation and the Q&A loop entirely — there are no clarifying questions to ask on this path.
+3. Write the plan file using the **same** "Persist the Plan" machinery below, verbatim: the same front-matter shape, the same ticket-title→slug derivation, a `Write` step for the main-agent-owned sections, then `cat /tmp/claude/agentflow-context-<id>.md >> .plans/<filename>` to append `## Ticket Details`, `## Design Context`, and `## Project Context`. Two content differences: `## Implementation Plan` in this minimal file is a one-liner pointing at `## Ticket Details`, e.g. "Trivial ticket — implementation follows the ticket body directly; see ## Ticket Details." Likewise, `## Architectural Context` is a one-liner in place of the planner's discovered patterns/conventions, e.g. "N/A — no codebase exploration; triage judged the ticket unambiguous from its own body."
+4. Apply the `Planned` label exactly as `## Persist the Plan`'s "Mark the ticket `Planned`" step does, **except** do not remove `Working` — this session is continuing rather than stopping, so the normal flow's
+   ```bash
+   gh issue edit <number> --repo <owner>/<repo> --add-label "Planned" --remove-label "Working"
+   ```
+   becomes just:
+   ```bash
+   gh issue edit <number> --repo <owner>/<repo> --add-label "Planned"
+   ```
+   **Verify this command succeeded before continuing.** This restates — does not merely reference — `## Persist the Plan`'s error-surfacing rule, and it is *more* load-bearing here: the normal flow's plan-review stop is itself a human checkpoint that would catch a silently-failed label swap, but the Trivial Fast Path has no such checkpoint — it continues straight into Phase 2 and can arm an unattended `/goal` autopilot all the way to PR creation. If this command errors, surface the error to the user and **STOP** — do not set `hasPlanFile = true`, do not arm the goal, and do not proceed into Phase 2 on an unconfirmed board state.
+5. If `agentflow.planComment: true`, post the minimal plan as an audit comment exactly as today (see `## Persist the Plan`).
+6. Set `hasPlanFile = true` and continue directly into Phase 2 in the same session. Do **not** stop, do **not** present the plan for review, do **not** end the turn — this is the sole exception to "a session that creates a new plan always ends at Phase 1" (see `SKILL.md`'s Pipeline section).
+
 ## New Plan
 
-If `hasPlanFile` is false, analyze the codebase, ask clarifying questions, produce a plan, persist it, present it, and stop.
+If `hasPlanFile` is false (and the Trivial Fast Path above did not apply), analyze the codebase, ask clarifying questions, produce a plan, persist it, present it, and stop.
 
 Mandatory stops:
 
 1. If the planner has clarifying questions, ask them with `AskUserQuestion` and end the turn.
 2. Once the planner has no remaining questions, persist the plan and stop, presenting the full plan in the final message. There is **no plan-approval prompt**: answering the clarifying questions is the user's input to planning; reviewing the saved plan and launching the plan-file run is the approval. Implementation resumes by invoking `/agentflow:implement .plans/<filename>` in a fresh session.
 
-Never begin Phase 2 in a session that created a new plan — not in the same turn, and not in a later turn. Phases 2–9 require invocation with a plan-file argument.
+Never begin Phase 2 in a session that created a new plan — not in the same turn, and not in a later turn. Phases 2–9 require invocation with a plan-file argument, except the Trivial Fast Path (see `## Trivial Fast Path` above).
 
 ## Optional Deep Exploration
 
@@ -156,7 +175,7 @@ gh issue comment <number> --repo <owner>/<repo> --body-file .plans/<filename>
 
 If `agentflow.planComment` is absent or `false`, skip the comment.
 
-After the plan file is written and (in ticket mode) the label swap and any optional comment are done, the **only remaining actions** are those one-or-two `gh` calls plus the final message below — no other tool calls, and never read `phases/phase-2-worktree.md` or any later phase file in this session. The session that created a plan always ends here; implementation runs in a fresh session.
+After the plan file is written and (in ticket mode) the label swap and any optional comment are done, the **only remaining actions** are those one-or-two `gh` calls plus the final message below — no other tool calls, and never read `phases/phase-2-worktree.md` or any later phase file in this session. The session that created a plan always ends here; implementation runs in a fresh session. (This "always ends here" rule is what `## New Plan` follows; the **Trivial Fast Path** above reuses this section's front-matter/write/label/comment machinery but does not stop — see its step 6.)
 
 Stop and present the full plan together with the save notice — this final message is the user's review point before launching implementation, so never abbreviate the plan here:
 
@@ -189,4 +208,4 @@ If the task risks exceeding the implementing agent's context budget (see `docs/t
 The SessionStart hook will also remind you of pending plans.
 ```
 
-Launching the plan-file run is the human gate for the autopilot: saving the plan arms nothing — the plan-file run the user launches after reviewing it arms a `/goal` completion condition (Claude Code ≥ 2.1.139) so phases 2–9 resume through to an open PR instead of stalling on a mid-phase stop. Do **not** set any goal in this planning session — it ends here, and goals are session-scoped. See the **Goal Autopilot** section of `SKILL.md`.
+Launching the plan-file run is the human gate for the autopilot: saving the plan arms nothing — the plan-file run the user launches after reviewing it arms a `/goal` completion condition (Claude Code ≥ 2.1.139) so phases 2–9 resume through to an open PR instead of stalling on a mid-phase stop. Do **not** set any goal in this (`## New Plan`) session — it ends here, and goals are session-scoped. The Trivial Fast Path is the exception: it does not end here, and arms the goal itself once it reaches Phase 2 (see `SKILL.md`'s Goal Autopilot section).

@@ -4,11 +4,16 @@ Read this file only when Phase 2 starts.
 
 ## Gate Check
 
-Phase 2 only runs when `hasPlanFile` was set to true during mode detection — that is, the skill was **invoked** with a `.plans/<filename>.md` argument. A plan file written by Phase 1 in the current session does NOT satisfy this gate: new-plan sessions end at Phase 1, and implementation resumes in a fresh session.
+Phase 2 runs when either of these holds:
+
+- (a) the skill was **invoked** with a `.plans/<filename>.md` argument (`hasPlanFile` set to true during mode detection), or
+- (b) the Trivial Fast Path in Phase 1 wrote a plan file this session (Trivial-Ticket Triage set `trivial = true`, and Phase 1's `## Trivial Fast Path` set `hasPlanFile = true`).
+
+In both cases a plan file exists on disk and `hasPlanFile` is true — that is the actual invariant this gate protects, not literally "was the skill invoked with a path argument." A plan file written by Phase 1's `## New Plan` branch in the current session does NOT satisfy this gate: ordinary new-plan sessions end at Phase 1, and implementation resumes in a fresh session.
 
 Verify:
 
-1. The invocation used a `.plans/<filename>.md` path (plan file mode from mode detection).
+1. Either the invocation used a `.plans/<filename>.md` path (plan file mode from mode detection), or the Trivial Fast Path ran this session.
 2. The plan file exists and was read.
 
 If either check fails, stop and tell the user to run `/agentflow:implement .plans/<filename>` in a fresh session.

@@ -883,6 +883,8 @@ in the completion summary so the user can mirror it as columns on their board:
 
 `Followup` is orthogonal to the linear lifecycle above — it is never part of the `New → … → Implemented` chain, applies to a separate followup ticket (not the original), and is never removed.
 
+A ticket judged trivial by implement's Trivial-Ticket Triage still transits through `Planned` — same labels, same board columns as any other ticket — just collapsed into one session instead of a stop-and-relaunch between `Planned` and `Working`. No new label state is introduced by the trivial-ticket fast path.
+
 **Reconciler-managed labels**: `dispatch-failed`, `plan-invalid`, and `reconcile-stuck` are not applied by refine, design, or implement — agentwatch's dispatch reconciler applies them automatically when it detects a stuck or failed automation state (dispatched work exhausted its retry budget, a `Planned` ticket has no parseable plan file, or reconciliation itself is stuck with its apply-retry budget exhausted). Like `Followup`, they are orthogonal to the `New → … → Implemented` lifecycle above and are not columns in that chain.
 
 Lifecycle: `New → Refined → [Designed] → Planned → Working → In Review → Implemented`.
