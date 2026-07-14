@@ -412,16 +412,30 @@ reap_orphans() {
                         continue
                     fi
 
-                    # A recorded start (non-empty) that doesn't match the
-                    # probe's current start time means the pid was reused by
+                    # A recorded start and a probe start that are both
+                    # strictly numeric and differ means the pid was reused by
                     # an unrelated process during the grace window -- treat
-                    # as already-gone, skip SIGKILL, not an error.
-                    # __NOSTAT__ (stat unparseable but process exists) and an
-                    # empty recorded start (scan couldn't read stat at scan
-                    # time) both fall back to liveness-only: proceed to
-                    # SIGKILL, best-effort, can't prove reuse either way.
-                    if [[ -n "${recorded_start}" && "${probe_out}" != "__NOSTAT__" && "${probe_out}" != "${recorded_start}" ]]; then
-                        continue
+                    # as already-gone, skip SIGKILL, not an error. Both sides
+                    # must be validated as numeric before trusting a mismatch
+                    # as genuine PID reuse: a forging process can corrupt its
+                    # own /proc/stat field-22 (e.g. via a crafted comm) or
+                    # shift the scan's TSV columns (e.g. an embedded-tab
+                    # TMUX_PANE), producing a non-numeric recorded_start or
+                    # probe_out that isn't __NOSTAT__/__GONE__. Both vectors
+                    # are confined to the forging process's own record, so
+                    # this is unparseable-value handling, not a security
+                    # boundary. __NOSTAT__ (stat unparseable but process
+                    # exists) and an empty recorded start (scan couldn't read
+                    # stat at scan time) fall back to liveness-only silently;
+                    # a non-empty-but-non-numeric value on either side falls
+                    # back the same way but is noted since it's unexpected.
+                    if [[ "${recorded_start}" =~ ^[0-9]+$ && "${probe_out}" =~ ^[0-9]+$ ]]; then
+                        if [[ "${probe_out}" != "${recorded_start}" ]]; then
+                            continue
+                        fi
+                    elif [[ ( -n "${recorded_start}" && ! "${recorded_start}" =~ ^[0-9]+$ ) \
+                         || ( "${probe_out}" != "__NOSTAT__" && ! "${probe_out}" =~ ^[0-9]+$ ) ]]; then
+                        echo "Note: process ${pid} in container ${container} has an unparseable start-time value; proceeding best-effort."
                     fi
 
                     local kill_exit
