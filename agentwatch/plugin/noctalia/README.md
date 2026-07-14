@@ -12,7 +12,22 @@ Live counts of Claude Code and Codex tmux sessions in your noctalia bar. Polls `
   Troubleshooting). If your bar still can't find it, set `agentwatchPath` to the
   binary's full path in plugin settings.
 
-## Install (local dev)
+## Install
+
+The [one-command installer](../../README.md#installation) auto-detects noctalia
+and wires this widget up for you (on both install and `agent-stack update`). To
+do it directly — from the marketplace checkout or a repo checkout:
+
+```sh
+~/.claude/plugins/marketplaces/agent-stack/agentwatch/plugin/noctalia/install.sh
+# from a repo checkout, inside agentwatch/: ./plugin/noctalia/install.sh
+```
+
+It symlinks this plugin into `~/.config/noctalia/plugins/agentwatch` and restarts
+noctalia-shell so it picks the plugin up. It's idempotent — re-run after any
+`agentwatch` update. You still add the widget to a bar section once (below).
+
+### Install (manual / local dev)
 
 Symlink this directory into noctalia's plugin folder:
 

@@ -13,7 +13,23 @@ dms, and macOS widgets. No daemon or Go changes.
 - The `agentwatch` binary reachable by the widget — either on the Plasma session
   `PATH`, or set its absolute path in the widget's settings.
 
-## Install (local dev)
+## Install
+
+The [one-command installer](../../README.md#installation) auto-detects KDE Plasma
+and wires this widget up for you (on both install and `agent-stack update`). To
+do it directly — from the marketplace checkout or a repo checkout:
+
+```sh
+~/.claude/plugins/marketplaces/agent-stack/agentwatch/plugin/plasma/install.sh
+# from a repo checkout, inside agentwatch/: ./plugin/plasma/install.sh
+```
+
+It symlinks this plasmoid into
+`~/.local/share/plasma/plasmoids/com.github.matteobortolazzo.agentwatch` and
+restarts plasmashell so the change takes effect. It's idempotent — re-run after
+any `agentwatch` update. You still add the widget to a panel once (below).
+
+### Install (manual / local dev)
 
 Install the package with `kpackagetool6`:
 

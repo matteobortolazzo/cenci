@@ -13,7 +13,25 @@ dms, and macOS widgets. No daemon or Go changes.
 - The `agentwatch` binary reachable by the extension — either on the GNOME
   session `PATH`, or set its absolute path in the extension's preferences.
 
-## Install (local dev)
+## Install
+
+The [one-command installer](../../README.md#installation) auto-detects GNOME
+Shell and wires this widget up for you (on both install and `agent-stack
+update`). To do it directly — from the marketplace checkout or a repo checkout:
+
+```sh
+~/.claude/plugins/marketplaces/agent-stack/agentwatch/plugin/gnome/install.sh
+# from a repo checkout, inside agentwatch/: ./plugin/gnome/install.sh
+```
+
+It **copies** this widget into `~/.local/share/gnome-shell/extensions/<UUID>` (a
+copy, not a symlink, so the generated `gschemas.compiled` never dirties the git
+checkout), compiles the schema, and live-reloads the extension via the
+disable→enable toggle. It's idempotent — re-run after any `agentwatch` update.
+A brand-new extension dir still needs one Shell reload (X11 <kbd>Alt</kbd>+<kbd>F2</kbd>,
+`r`) or relogin (Wayland) the first time, which the script tells you about.
+
+### Install (manual / local dev)
 
 Symlink this directory into the per-user extensions folder under its UUID, then
 compile the settings schema:

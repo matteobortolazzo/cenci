@@ -66,6 +66,7 @@ jobs:
           bash dev-sandbox/tests/agentwatch-wiring.test.sh
           bash dev-sandbox/tests/installer-clients.test.sh
           bash dev-sandbox/tests/install-update.test.sh
+          bash dev-sandbox/tests/agentwatch-widgets.test.sh
 
   fragment-drift:
     name: sandbox-fragment-drift

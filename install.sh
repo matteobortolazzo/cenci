@@ -4,7 +4,8 @@
 # Installs or updates the three agent-stack plugins (agentflow, agentwatch,
 # agent-sandbox) as a single system: registers the marketplace, installs the
 # plugins, and runs the post-install setup that used to be manual (agent-sandbox
-# launcher symlink + image build, macOS menu bar wiring).
+# launcher symlink + image build, macOS menu bar and Linux desktop bar-widget
+# wiring).
 #
 # Usage:
 #   ./install.sh                interactive wizard (install)
@@ -242,6 +243,15 @@ run_doctor() {
 		check "SwiftBar (menu bar widget)" optional \
 			"optional: brew install swiftbar — for live status in the macOS menu bar" \
 			test -d /Applications/SwiftBar.app
+	else
+		for de in gnome plasma dms noctalia; do
+			if de_detected "$de"; then
+				ok "$(de_label "$de") detected — widget installable"
+			fi
+		done
+		if have waybar; then
+			ok "waybar detected — add the AgentWatch module (see agentwatch/README.md)"
+		fi
 	fi
 
 	say ""
@@ -592,6 +602,7 @@ step_agentwatch_setup() {
 
 	if [ "$OS" != macos ]; then
 		setup_agentwatch_linux_path "$cache_bin"
+		setup_agentwatch_linux_widgets
 		if [ "$MODE" = update ] && [ -n "$cache_bin" ]; then
 			restart_agentwatch_daemon "$cache_bin"
 		elif [ "$MODE" = update ]; then
@@ -606,25 +617,28 @@ step_agentwatch_setup() {
 	fi
 
 	# macOS menu bar (SwiftBar) — optional, and the fiddliest manual step, so
-	# offer to wire it up here. SwiftBar's own resolve_bin already covers
-	# /usr/local/bin and the plugin cache glob, so no PATH linking is needed.
+	# offer to wire it up here. Delegate to the widget's self-contained
+	# install.sh, which sets SwiftBar's Plugin Folder, symlinks the plugin, and
+	# reloads SwiftBar. Re-runs on update so widget changes take effect.
 	local script
-	if ! script=$(find_plugin_path "agentwatch/plugin/macos/agentwatch.5s.sh"); then
+	if ! script=$(find_plugin_path "agentwatch/plugin/macos/install.sh"); then
 		return 0
 	fi
 	if [ ! -d /Applications/SwiftBar.app ]; then
 		say "  ${DIM}optional: menu bar status via SwiftBar — brew install swiftbar, then re-run this script${RESET}"
 		return 0
 	fi
-	if ! ask_yn "SwiftBar detected — link the agentwatch menu bar widget into ~/SwiftBarPlugins?" y; then
+	if ! ask_yn "SwiftBar detected — install the agentwatch menu bar widget and reload it?" y; then
 		say "  ${DIM}skipped — see agentwatch/plugin/macos/README.md to wire it manually${RESET}"
 		return 0
 	fi
-	mkdir -p "$HOME/SwiftBarPlugins"
 	chmod +x "$script" 2>/dev/null || true
-	ln -sf "$script" "$HOME/SwiftBarPlugins/agentwatch.5s.sh"
-	ok "linked menu bar widget → ~/SwiftBarPlugins/agentwatch.5s.sh"
-	say "  in SwiftBar: set the Plugin Folder to ~/SwiftBarPlugins (Preferences → Plugin Folder), then Refresh All"
+	if bash "$script"; then
+		ok "menu bar widget installed and reloaded"
+	else
+		warn "SwiftBar widget setup failed — see agentwatch/plugin/macos/README.md"
+		INSTALL_FAILED=1
+	fi
 }
 
 # setup_agentwatch_linux_path makes bar widgets (DMS, noctalia, waybar) able to
@@ -678,6 +692,65 @@ setup_agentwatch_linux_path() {
 		say "  ${DIM}skipped the GUI-bar PATH link. If a bar widget stays hidden, run:${RESET}"
 		say "      $manual"
 		say "  ${DIM}or point the widget at the binary directly (agentwatchPath for DMS/noctalia, AGENTWATCH_BIN for SwiftBar).${RESET}"
+	fi
+}
+
+# de_detected <de> — true if the desktop bar for <de> is present. Mirrors the
+# self-detection each widget's install.sh does, so we only prompt for bars that
+# are actually installed (keeps CI, where none are present, non-interactive).
+de_detected() {
+	case "$1" in
+	gnome) have gnome-shell || have gnome-extensions ;;
+	plasma) have plasmashell ;;
+	dms) have dms || [ -d "$HOME/.config/DankMaterialShell" ] ;;
+	noctalia) have noctalia-shell || [ -d "$HOME/.config/noctalia" ] ;;
+	*) return 1 ;;
+	esac
+}
+
+de_label() {
+	case "$1" in
+	gnome) printf 'GNOME Shell' ;;
+	plasma) printf 'KDE Plasma' ;;
+	dms) printf 'DankMaterialShell' ;;
+	noctalia) printf 'noctalia-shell' ;;
+	esac
+}
+
+# setup_agentwatch_linux_widgets detects each present GUI bar and delegates to
+# that widget's self-contained install.sh, which (re)installs and reloads it.
+# Runs on both install and update — re-running is what refreshes the widget and
+# reloads the bar, so widget changes become visible after `agent-stack update`.
+# Restarting a running panel is disruptive, so each bar is gated behind its own
+# prompt (default yes).
+setup_agentwatch_linux_widgets() {
+	local de label script
+	for de in gnome plasma dms noctalia; do
+		de_detected "$de" || continue
+		label="$(de_label "$de")"
+		if ! ask_yn "$label detected — install the AgentWatch widget and reload it?" y; then
+			say "  ${DIM}skipped the $label widget — see agentwatch/plugin/$de/README.md to wire it manually${RESET}"
+			continue
+		fi
+		if ! script=$(find_plugin_path "agentwatch/plugin/$de/install.sh"); then
+			warn "could not find agentwatch/plugin/$de/install.sh in the marketplace checkout — re-run after refreshing the marketplace"
+			INSTALL_FAILED=1
+			continue
+		fi
+		chmod +x "$script" 2>/dev/null || true
+		if bash "$script"; then
+			ok "$label widget installed and reloaded"
+		else
+			warn "$label widget setup failed — see agentwatch/plugin/$de/README.md"
+			INSTALL_FAILED=1
+		fi
+	done
+
+	# waybar has no bundled widget — its config is hand-managed. Point at the
+	# docs and the live-reload signal; write nothing.
+	if have waybar; then
+		say "  ${DIM}waybar detected — add the AgentWatch module from agentwatch/README.md (Waybar section),${RESET}"
+		say "  ${DIM}then reload waybar to apply: pkill -SIGUSR2 waybar${RESET}"
 	fi
 }
 
