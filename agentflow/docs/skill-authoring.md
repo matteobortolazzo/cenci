@@ -45,6 +45,16 @@ from external or semi-trusted sources.
   A silent write failure (zero-length file or unwritten temp file) will produce
   an empty string that succeeds with `cat` but creates a malformed external
   command; the guard provides fail-fast detection.
+- When the same ticket/target could plausibly be operated on by concurrent skill
+  runs, scope temp-file paths with a per-run random token (generated once via
+  `mktemp -u`, carried forward as literal text, never re-derived from shell state
+  such as `$$`, which does not persist across separate Bash tool calls) so
+  concurrent runs cannot clobber each other's staged files. This aligns with the
+  CLAUDE.md rule that already mandates scoping shared temp files "by worktree
+  path, run ID, or session UUID." Pair the token with a per-run success-marker
+  file that a mechanical cleanup gate checks (e.g. `cat marker.ok`) before
+  deleting anything — narrative-only cleanup justifications ("reaching this step
+  means everything succeeded") are not an actual check.
 - Every documented external-mutation command flow (gh issue/pr create, edit,
   comment, label create, etc.) must include an explicit documented failure branch.
   Never leave the executing agent to proceed with unparsed identifiers, missing
@@ -62,3 +72,4 @@ from external or semi-trusted sources.
 - When authoring a general/summary statement that will be referenced by name in multiple concrete implementation steps (e.g., "shared write-failure protocol: every write in this section must verify by re-fetch"), verify that the statement's claimed scope actually matches what each concrete step implements. Scope mismatch creates an internal contradiction — e.g., a blanket claim "all writes must X" but some steps only implement "Y as proof of success" — that could lead a future agent to follow the summary literally and patch steps incorrectly. Either narrow the summary's scope to match reality (e.g., "most writes must X; ticket creation verifies by return URL") or broaden implementations to match the claim.
 - When a load-bearing value (e.g., a scoped identifier for temp-file paths or directory segments) is populated through multiple code paths or entry points, apply the same validation check at every path that sets the value, not just the primary/first-written one. For example, if a slug is both freshly-generated in one path and read from a saved plan file in another, validate it at both points — an unvalidated entry point (e.g., a hand-edited plan file) carries the same risk as any other external source.
 - When validating a scoped path-segment identifier with a character-class allowlist (e.g., `^[A-Za-z0-9._-]+$` to reject `/` and shell metacharacters), trace how the value is consumed downstream. The regex alone may still permit directory-traversal patterns like `.` or `..` when the value is used as a standalone path segment (e.g., `attachments/<scope>/`). Explicitly reject dot-only values (`.`, `..`) and patterns containing `..` in addition to the regex check — do not assume the character-class alone is sufficient.
+- When adding a new `cat`-as-boolean-gate pattern to a skill (e.g., a cleanup marker file check, a success/completion gate), inspect the skill document for existing analogous gates. If precedent exists with explicit exit-code-semantics documentation (e.g., "if `cat` fails (non-zero exit, `No such file or directory`), the marker is absent; if it exits 0, the marker is present"), match that documentation style in the new gate — do not leave exit-code interpretation implicit. Consistency within a document prevents future readers from inferring different semantics for structurally identical patterns and avoids creating ambiguity about what a gate actually checks.
