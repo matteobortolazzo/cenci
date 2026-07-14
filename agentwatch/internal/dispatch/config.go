@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/run"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/internal/run"
 )
 
 // QuietHours is a local-clock window in which no dispatch happens. StartHour ==

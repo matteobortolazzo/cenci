@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/pkg/watch"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/pkg/watch"
 )
 
 // The read-side contract (state types and streaming client) lives in the public
