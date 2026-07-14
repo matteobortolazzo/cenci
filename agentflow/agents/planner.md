@@ -123,10 +123,10 @@ Before finalizing the plan, explicitly identify:
     (For backend-only tickets, write "N/A — backend only" and skip the table.)
 
     ### Size Estimate
-    <S/M/L> — <reasoning>
+    <S/M/L> — <reasoning, sized against the context budget in `docs/ticket-sizing.md`>
 
-    ### Split Recommendation (if M/L)
-    If the ticket is too large for a single PR, recommend that the user go back to `/refine` to split it into separate independent tickets. Suggest the split:
+    ### Split Recommendation (only if L — real risk of exceeding the context budget per `docs/ticket-sizing.md`)
+    If there's a real risk of exceeding the implementing agent's context budget, recommend that the user go back to `/refine` to split it into separate independent tickets. Do not recommend a split for S or M estimates just because the ticket touches multiple independent concerns. Suggest the split:
     - Ticket 1: <description>
     - Ticket 2: <description>
     - Ticket 3: <description>

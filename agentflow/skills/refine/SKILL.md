@@ -126,7 +126,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
    - Are there security considerations?
    - Is it estimable? If not, what's blocking estimation?
    - If the ticket references existing apps ("like X", "similar to Y"), are the key UX patterns of those references captured? (e.g., layout model, navigation, interaction patterns)
-   - Is it small enough for a single PR (~500 lines)? If not, should it be split into separate tickets?
+   - Does this ticket risk exceeding the implementing agent's context budget (see `docs/ticket-sizing.md`)? If so, should it be split into separate tickets?
 
 6. **Ask ONE question at a time using `AskUserQuestion`**. Wait for the user's answer before asking the next. Never ask questions as plain text — always use the `AskUserQuestion` tool.
    - Be specific: "What should happen if the user submits an empty form?" not "Are errors handled?"
@@ -179,9 +179,9 @@ ticket is unambiguous, well-scoped, and ready for implementation.
    - **Anti-patterns to avoid**: <generic choices explicitly ruled out>
 
    ### Size Estimate
-   <S/M/L> — <reasoning>
+   <S/M/L> — <reasoning, sized against the context budget in `docs/ticket-sizing.md`>
 
-   ### Suggested Split (if M or L)
+   ### Suggested Split (only if L — real risk of exceeding the context budget per `docs/ticket-sizing.md`)
    - Ticket 1 (1/N): <description>
    - Ticket 2 (2/N): <description> — depends on Ticket 1
    - Ticket 3 (3/N): <description> — parallel with Ticket 2
@@ -191,7 +191,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
    - Ticket 1 → first (no dependencies)
    - Ticket 2, Ticket 3 → can start after Ticket 1 (parallel with each other)
 
-   When analyzing the split, determine which child tickets have data/API/schema dependencies on others (sequential) vs. which touch independent areas (parallel). Annotate each ticket accordingly.
+   When analyzing the split, determine which child tickets have data/API/schema dependencies on others (sequential) vs. which touch independent areas (parallel). Annotate each ticket accordingly. Do not propose a split for S or M tickets just because they touch multiple independent concerns — see `docs/ticket-sizing.md` for the budget-risk-only trigger.
 
    **Design-first splits** (if frontend feature AND `pencil.enabled` is `true` AND `designNeeded` is true): make the first child a **design-only ticket** (e.g., "Design <feature> screens") that every UI implementation child depends on. Mark it as design-only in the split — it gets the `Design` label in Pass 1, its body includes the `### Design Direction` section from this refinement, it is executed via `/agentflow:design`, and it produces a committed design spec rather than a PR (the one exception to "1 ticket = 1 PR"). When `/agentflow:design` completes it, the `Designed` label is propagated to the implementation children that depend on it, satisfying implement's Design gate.
 
