@@ -23,7 +23,7 @@ See `.claude/rules/` for conventions:
 
 ## Project Structure
 
-- `main.go` — CLI entry point, subcommand routing (`daemon start|stop|restart|status`, human `status`, `widget-json` (hidden alias `waybar`), `notify`)
+- `main.go` — CLI entry point, subcommand routing (`daemon start|stop|restart|status`, human `status`, `widget-json` (hidden alias `waybar`), `notify`, `sandbox build|build-base|prune|update-plugins|reseed-creds|reap-orphans|ls|stop`, `open`); also handles the `cn` argv[0] alias (routes to `open`)
 - `plugin/` — Claude Code plugin (hooks that call `agentwatch notify`)
 - `internal/daemon/` — Session-keyed event loop, hook→status mapping, paneless TTL sweep; delegates window work via `frontend.Frontend`
 - `internal/frontend/` — Seam types: `SessionState`, `Frontend` interface, `Observations`, `SweepAction`, `WindowInfo`; shared name sanitizers
@@ -35,6 +35,7 @@ See `.claude/rules/` for conventions:
 - `internal/config/` — Configuration struct and defaults
 - `internal/ipc/` — Event receiver socket, broadcast server/client, NDJSON state, HookEvent types
 - `internal/reap/` — `Reaper` seam + `ExecReaper`: single-flight, non-blocking trigger for `agent-sand --reap-orphans`
+- `internal/sandbox/` — `sandbox`/`open` verb support: agent-sand batch-flag translation table, shortcut tables (mirrored exactly from `dev-sandbox/agent-sand`), `RunAgentSand`/`ExecAgentSand` (PATH-resolved subprocess/exec handoff), and native `docker`/`podman` container listing/stopping for `sandbox ls`/`sandbox stop`
 
 ## Key Conventions
 

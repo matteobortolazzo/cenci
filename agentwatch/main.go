@@ -10,8 +10,10 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/closecmd"
@@ -23,6 +25,7 @@ import (
 	tmuxfe "github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/frontend/tmux"
 	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/ipc"
 	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/run"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/sandbox"
 	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/tmux"
 	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/pkg/watch"
 )
@@ -32,6 +35,15 @@ import (
 var version = "dev"
 
 func main() {
+	// argv[0] alias: a binary invoked (directly or via a symlink/copy) as
+	// "cn" behaves as `agentwatch open <args>` — the one forward-looking
+	// exception ahead of the future "cenci" rename (this PR keeps every
+	// other name under the old agentwatch/agent-sand naming).
+	if filepath.Base(os.Args[0]) == "cn" {
+		runOpen(os.Args[1:])
+		return
+	}
+
 	// BREAKING: bare `agentwatch` (and any unrecognized top-level subcommand
 	// or flag) used to fall through to running the daemon in the foreground.
 	// It now always prints usage and exits 2 — the daemon only starts via the
@@ -57,6 +69,10 @@ func main() {
 		runDispatch(os.Args[2:])
 	case "close":
 		runClose(os.Args[2:])
+	case "sandbox":
+		runSandboxGroup(os.Args[2:])
+	case "open":
+		runOpen(os.Args[2:])
 	case "version", "--version", "-version":
 		runVersion()
 	case "socket-dir":
@@ -86,6 +102,8 @@ Commands:
   run                                dispatch a workflow into a new tmux window
   dispatch                           fleet auto-dispatch (enroll/unenroll/status/loop)
   close                              close a finished/idle agent window
+  sandbox                            manage the dev-sandbox container (build|build-base|prune|update-plugins|reseed-creds|reap-orphans|ls|stop)
+  open [shortcut]                    launch or attach an interactive sandbox session (aliased by the "cn" binary name)
   version                            print the binary version
   socket-dir                         print the resolved socket directory
 
@@ -888,5 +906,262 @@ func printCloseDecisions(w io.Writer, target string, decisions []closecmd.Decisi
 		case closecmd.ActionSkippedBusy:
 			_, _ = fmt.Fprintf(w, "skip %s (%s:%s): status=%s, use --force to close\n", d.Window.WindowName, d.Window.Session, d.Window.WindowIndex, d.Window.Status)
 		}
+	}
+}
+
+// -- sandbox ----------------------------------------------------------
+
+// runSandboxGroup implements `agentwatch sandbox <verb> [flags]`. The batch
+// verbs (build, build-base, update-plugins, reseed-creds, reap-orphans) and
+// prune translate 1:1 (plus prune's optional --volumes) into a single
+// dev-sandbox/agent-sand invocation; ls and stop are implemented natively in
+// Go against docker/podman since agent-sand has no equivalent flag for them.
+func runSandboxGroup(args []string) {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		fmt.Fprintln(os.Stderr, "agentwatch sandbox: expected a subcommand: build, build-base, prune, update-plugins, reseed-creds, reap-orphans, ls, stop")
+		os.Exit(2)
+	}
+	verb := args[0]
+	rest := args[1:]
+
+	switch verb {
+	case "build", "build-base", "update-plugins", "reseed-creds", "reap-orphans":
+		runSandboxBatch(verb, rest)
+	case "prune":
+		runSandboxPrune(rest)
+	case "ls":
+		runSandboxLs(rest)
+	case "stop":
+		runSandboxStop(rest)
+	default:
+		fmt.Fprintf(os.Stderr, "agentwatch sandbox: unknown subcommand %q\n", verb)
+		os.Exit(2)
+	}
+}
+
+// runSandboxBatch implements the batch verbs that take no flags of their own
+// and translate to a single agent-sand long flag (internal/sandbox's
+// BatchFlag table). Unknown flags or any trailing positional are a usage
+// error (exit 2) before agent-sand is ever invoked.
+func runSandboxBatch(verb string, args []string) {
+	fs := flag.NewFlagSet("sandbox "+verb, flag.ExitOnError)
+	_ = fs.Parse(args)
+	if extra := fs.Args(); len(extra) > 0 {
+		fmt.Fprintf(os.Stderr, "agentwatch sandbox %s: unexpected argument %q\n", verb, extra[0])
+		os.Exit(2)
+	}
+
+	agentSandFlag, ok := sandbox.BatchFlag(verb)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "agentwatch sandbox: unknown subcommand %q\n", verb)
+		os.Exit(2)
+	}
+
+	code, err := sandbox.RunAgentSand([]string{agentSandFlag}, os.Stdin, os.Stdout, os.Stderr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentwatch sandbox %s: %v\n", verb, err)
+		os.Exit(1)
+	}
+	os.Exit(code)
+}
+
+// runSandboxPrune implements `agentwatch sandbox prune [--volumes]`, the one
+// batch verb with a flag of its own.
+func runSandboxPrune(args []string) {
+	fs := flag.NewFlagSet("sandbox prune", flag.ExitOnError)
+	volumes := fs.Bool("volumes", false, "also prompt to remove stale sandbox home volumes")
+	_ = fs.Parse(args)
+	if extra := fs.Args(); len(extra) > 0 {
+		fmt.Fprintf(os.Stderr, "agentwatch sandbox prune: unexpected argument %q\n", extra[0])
+		os.Exit(2)
+	}
+
+	argv := []string{"--prune"}
+	if *volumes {
+		argv = append(argv, "--volumes")
+	}
+
+	code, err := sandbox.RunAgentSand(argv, os.Stdin, os.Stdout, os.Stderr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentwatch sandbox prune: %v\n", err)
+		os.Exit(1)
+	}
+	os.Exit(code)
+}
+
+// runSandboxLs implements `agentwatch sandbox ls`: lists every
+// claude-sand-*/codex-sand-* container (running or stopped) as a table.
+func runSandboxLs(args []string) {
+	fs := flag.NewFlagSet("sandbox ls", flag.ExitOnError)
+	_ = fs.Parse(args)
+	if extra := fs.Args(); len(extra) > 0 {
+		fmt.Fprintf(os.Stderr, "agentwatch sandbox ls: unexpected argument %q\n", extra[0])
+		os.Exit(2)
+	}
+
+	runtime, err := sandbox.ContainerRuntime()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentwatch sandbox ls: %v\n", err)
+		os.Exit(1)
+	}
+	containers, err := sandbox.ListContainers(runtime)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentwatch sandbox ls: %v\n", err)
+		os.Exit(1)
+	}
+	if len(containers) == 0 {
+		fmt.Println("no sandbox containers found")
+		return
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	_, _ = fmt.Fprintln(w, "NAME\tSTATUS\tIMAGE")
+	for _, c := range containers {
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\n", c.Name, c.Status, c.Image)
+	}
+	_ = w.Flush()
+}
+
+// runSandboxStop implements `agentwatch sandbox stop [name-or-slug-filter]`:
+// stops every running claude-sand-*/codex-sand-* container, optionally
+// narrowed to names containing the given filter substring.
+func runSandboxStop(args []string) {
+	fs := flag.NewFlagSet("sandbox stop", flag.ExitOnError)
+	_ = fs.Parse(args)
+	extra := fs.Args()
+	if len(extra) > 1 {
+		fmt.Fprintf(os.Stderr, "agentwatch sandbox stop: unexpected argument %q\n", extra[1])
+		os.Exit(2)
+	}
+	var filter string
+	if len(extra) == 1 {
+		filter = extra[0]
+	}
+
+	runtime, err := sandbox.ContainerRuntime()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentwatch sandbox stop: %v\n", err)
+		os.Exit(1)
+	}
+	names, err := sandbox.RunningSandboxContainers(runtime, filter)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentwatch sandbox stop: %v\n", err)
+		os.Exit(1)
+	}
+	if len(names) == 0 {
+		fmt.Println("no matching sandbox containers running")
+		return
+	}
+
+	if err := sandbox.StopContainers(runtime, names, os.Stdout, os.Stderr); err != nil {
+		fmt.Fprintf(os.Stderr, "agentwatch sandbox stop: %v\n", err)
+		os.Exit(1)
+	}
+	for _, name := range names {
+		fmt.Printf("stopped %s\n", name)
+	}
+}
+
+// -- open ---------------------------------------------------------------
+
+// runOpen implements `agentwatch open [shortcut] [flags] [-- passthrough]`
+// (and the "cn" argv[0] alias, which prepends no extra token — args here is
+// already everything after the binary name). It execs agent-sand, replacing
+// this process, so the interactive session owns the TTY.
+//
+// Grammar: an optional one-token shortcut (ch/cs/co/cf, xl/xt/xs — mirroring
+// dev-sandbox/agent-sand's own shortcut tables exactly) may appear first;
+// after that, only the recognized flags below and an optional "--"
+// passthrough sentinel are accepted. Any other leading positional is a usage
+// error, matching the strict-parsing convention used by the other verbs in
+// this file.
+func runOpen(args []string) {
+	var shortcutToken, shortcutAgent, shortcutModel string
+	hasShortcut := false
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		agent, model, ok := sandbox.ResolveShortcut(args[0])
+		if !ok {
+			fmt.Fprintf(os.Stderr, "agentwatch open: unrecognized shortcut %q (expected one of ch, cs, co, cf, xl, xt, xs)\n", args[0])
+			os.Exit(2)
+		}
+		shortcutToken, shortcutAgent, shortcutModel = args[0], agent, model
+		hasShortcut = true
+		args = args[1:]
+	}
+
+	// Split off a "--" passthrough sentinel ourselves (rather than relying on
+	// the flag package's own "--" handling) so anything after it is forwarded
+	// verbatim, while anything else left over after flag parsing is still
+	// treated as an unexpected argument below.
+	var passthrough []string
+	for i, a := range args {
+		if a == "--" {
+			passthrough = args[i+1:]
+			args = args[:i]
+			break
+		}
+	}
+
+	fs := flag.NewFlagSet("open", flag.ExitOnError)
+	agentFlag := fs.String("agent", "", "agent to launch (claude or codex)")
+	modelFlag := fs.String("model", "", "model override")
+	nameFlag := fs.String("name", "", "sandbox instance name")
+	shellFlag := fs.Bool("shell", false, "attach a shell instead of launching the agent")
+	dockerFlag := fs.Bool("docker", false, "mount the host docker/podman socket (opt-in DooD)")
+	hostNetworkFlag := fs.Bool("host-network", false, "use host network mode")
+	_ = fs.Parse(args)
+	if extra := fs.Args(); len(extra) > 0 {
+		fmt.Fprintf(os.Stderr, "agentwatch open: unexpected argument %q\n", extra[0])
+		os.Exit(2)
+	}
+
+	// A shortcut implies a specific agent; a later explicit --agent that
+	// disagrees would silently pair the wrong agent with the shortcut's
+	// model, so reject the conflicting combination instead (mirrors
+	// agent-sand's own shortcut/--agent consistency check).
+	if hasShortcut && *agentFlag != "" && *agentFlag != shortcutAgent {
+		fmt.Fprintf(os.Stderr, "agentwatch open: shortcut %q selects the %s agent, but --agent %s was also given. Drop the shortcut or the --agent flag so they agree.\n", shortcutToken, shortcutAgent, *agentFlag)
+		os.Exit(2)
+	}
+
+	finalAgent := shortcutAgent
+	if *agentFlag != "" {
+		finalAgent = *agentFlag
+	}
+
+	finalModel := shortcutModel
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "model" {
+			finalModel = *modelFlag
+		}
+	})
+
+	var argv []string
+	if finalAgent != "" {
+		argv = append(argv, "--agent", finalAgent)
+	}
+	if finalModel != "" {
+		argv = append(argv, "--model", finalModel)
+	}
+	if *nameFlag != "" {
+		argv = append(argv, "--name", *nameFlag)
+	}
+	if *shellFlag {
+		argv = append(argv, "--shell")
+	}
+	if *dockerFlag {
+		argv = append(argv, "--docker")
+	}
+	if *hostNetworkFlag {
+		argv = append(argv, "--host-network")
+	}
+	if len(passthrough) > 0 {
+		argv = append(argv, "--")
+		argv = append(argv, passthrough...)
+	}
+
+	if err := sandbox.ExecAgentSand(argv); err != nil {
+		fmt.Fprintf(os.Stderr, "agentwatch open: %v\n", err)
+		os.Exit(1)
 	}
 }

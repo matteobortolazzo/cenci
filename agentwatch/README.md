@@ -532,6 +532,46 @@ tmux windows, e.g. a kanban board's column-cleanup hook:
 cleanup: 'agentwatch close {number}'
 ```
 
+## Sandbox management and session launching (`agentwatch sandbox`, `agentwatch open`)
+
+`agentwatch` wraps [dev-sandbox](../dev-sandbox/README.md)'s `agent-sand` bash launcher
+with first-class `sandbox` and `open` verb groups, so day-to-day sandbox commands don't
+need `agent-sand` on PATH to be remembered by name.
+
+```bash
+# One-shot maintenance verbs — each forwards to the matching agent-sand flag
+agentwatch sandbox build           # agent-sand --build
+agentwatch sandbox build-base      # agent-sand --build-base
+agentwatch sandbox prune           # agent-sand --prune
+agentwatch sandbox prune --volumes # agent-sand --prune --volumes
+agentwatch sandbox update-plugins  # agent-sand --update-plugins
+agentwatch sandbox reseed-creds    # agent-sand --reseed-creds
+agentwatch sandbox reap-orphans    # agent-sand --reap-orphans
+
+# List / stop sandbox containers — implemented natively against docker/podman,
+# no agent-sand equivalent
+agentwatch sandbox ls
+agentwatch sandbox stop            # stops every claude-sand-*/codex-sand-* container
+agentwatch sandbox stop agentstack # only containers whose name contains "agentstack"
+
+# Launch or attach an interactive session
+agentwatch open ch                 # claude + haiku
+agentwatch open xs                 # codex + gpt-5.6-sol
+agentwatch open --agent codex --model gpt-5.6-terra --name mybox
+agentwatch open ch -- --resume     # forward flags after -- straight to the agent CLI
+```
+
+`open`'s one-token shortcuts mirror `agent-sand`'s own table exactly, so `ch`/`cs`/`co`/`cf`
+select Claude with the haiku/sonnet/opus/fable model, and `xl`/`xt`/`xs` select Codex with
+the gpt-5.6-luna/terra/sol model. A shortcut and a conflicting explicit `--agent` (e.g.
+`open ch --agent codex`) is a usage error (exit 2) rather than silently picking one.
+Supported flags: `--agent`, `--model`, `--name`, `--shell`, `--docker`, `--host-network`;
+anything after a bare `--` is forwarded to the agent CLI verbatim. `open` execs `agent-sand`
+(replacing the `agentwatch` process) so the interactive session owns the TTY.
+
+**`cn` alias:** a copy or symlink of the `agentwatch` binary named `cn` behaves as
+`agentwatch open <args>` — `cn xs` is exactly `agentwatch open xs`.
+
 ## Advanced / development
 
 The marketplace install above provisions the binary and daemon automatically. You
