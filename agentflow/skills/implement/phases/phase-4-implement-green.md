@@ -34,6 +34,7 @@ Pass:
 - Attachment paths if relevant.
 - Full DESIGN.md only when needed for UI/component mapping.
 - LSP diagnostic reminder if configured.
+- The project's `buildCommand`, `testCommand`, and `lintCommand` (when set).
 
 ## Rules
 
@@ -49,9 +50,10 @@ After implementation:
 
 1. Run the full build.
 2. Run the full test suite.
-3. Report exact commands and results.
+3. Run lint (when `lintCommand` is set). An absent `lintCommand` skips this step cleanly — no error, no false hard-gate failure.
+4. Report exact commands and results.
 
-If build/tests fail, analyze root cause, fix, and rerun. Retry up to 3 times, then clear the Goal Autopilot (`/goal clear` via `SlashCommand`, a no-op if none is armed — see `SKILL.md`) and stop, reporting exact errors, attempts, and best hypothesis. Clearing prevents the goal from restarting the turn straight back into the same failing build.
+If build/tests/lint fail, analyze root cause, fix, and rerun. Retry up to 3 times, then clear the Goal Autopilot (`/goal clear` via `SlashCommand`, a no-op if none is armed — see `SKILL.md`) and stop, reporting exact errors, attempts, and best hypothesis. Clearing prevents the goal from restarting the turn straight back into the same failing build. Lint failures are held to the same hard gate as build/test failures — no silent pass-through.
 
 ## Visual Verification
 

@@ -108,6 +108,7 @@ For each discovered project, detect:
   - Fallback: read `package.json` `name` or directory name
 - **Build command**: auto-detect (`dotnet build` for .NET, `npm run build` for Node, etc.)
 - **Test command**: auto-detect (`dotnet test` for .NET, `npm test` for Node, etc.)
+- **Lint command**: derive from the Stack-to-CI mapping table's Lint column (see the table under question 8 below); omit `lintCommand` entirely when the detected stack has no Lint row (e.g. `markdown-shell`, `docker-shell`)
 
 Present discovered projects for confirmation using AskUserQuestion:
 "Found these projects in the monorepo:
@@ -811,7 +812,8 @@ Omit `pencil` entirely if no frontend framework was detected.
       "description": "REST API backend",
       "stack": { "framework": "dotnet10", "testing": "xunit" },
       "buildCommand": "dotnet build",
-      "testCommand": "dotnet test"
+      "testCommand": "dotnet test",
+      "lintCommand": "dotnet format --verify-no-changes"
     },
     {
       "slug": "web-client",
@@ -821,6 +823,7 @@ Omit `pencil` entirely if no frontend framework was detected.
       "stack": { "framework": "angular21", "testing": "jasmine" },
       "buildCommand": "npm run build",
       "testCommand": "npm test",
+      "lintCommand": "ng lint",
       "designPath": "apps/web-client/designs/"
     }
   ],
@@ -841,6 +844,8 @@ Omit `pencil` entirely if no frontend framework was detected.
   }
 }
 ```
+
+Each project entry's `lintCommand` is optional — it is omitted for stacks with no Lint row in the Stack-to-CI mapping table (e.g. `markdown-shell`, `docker-shell`), the same way `buildCommand`/`testCommand` are already handled for stacks without one.
 
 Existing single-project configs (no `isMonorepo` field) work unchanged.
 

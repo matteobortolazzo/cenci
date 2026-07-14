@@ -22,7 +22,8 @@
       "description": "Go binary + Claude Code plugin: coding-agent session monitoring (tmux, waybar, noctalia, DMS)",
       "stack": { "framework": "go1.25", "testing": "go-testing" },
       "buildCommand": "make build",
-      "testCommand": "make test"
+      "testCommand": "make test",
+      "lintCommand": "make lint"
     },
     {
       "slug": "dev-sandbox",
