@@ -2,11 +2,13 @@
 
 Read this file only when Phase 9 starts.
 
-This phase is pre-approved — commit, push, and create the PR without asking for confirmation. The only exceptions are the error cases defined below (rebase conflicts, test failures after rebase, push auth/network failures).
+This phase is pre-approved — commit, push, and create the PR without asking for confirmation. The only exceptions are the error cases defined below (rebase conflicts, build/test/lint failures after rebase, push auth/network failures).
 
 **Goal Autopilot**: if a goal was armed at Phase 2 (see `SKILL.md` → Goal Autopilot), it must be cleared here. Clear it on success (right after the PR is created, before plan-file cleanup) **and** before any of this phase's error gates hands control back to the user — an un-cleared goal restarts the turn and would loop on an unrecoverable state (a rebase conflict, a failed push). Run `/goal clear` (via the `SlashCommand` tool) at those points; it is a safe no-op if no goal was armed or `/goal` is unavailable.
 
-Prerequisites: all required reviews complete, Must Fix/Critical/High items resolved, build and tests pass.
+**Atomicity rule — always restart at Rebase.** Any (re)entry into this phase — a fresh run or a Goal Autopilot resume mid-phase — MUST restart at the Rebase step below and run the steps in order: Rebase → build → test → lint → Commit → Push → PR. Never resume directly at Commit, Push, or PR creation, even if a prior turn already reached one of those steps. This guarantees push/PR creation is always immediately preceded, in the same turn, by a passing rebase + build + test + lint on the current tree — main may have moved between turns, and a stale rebase/verify from an earlier turn cannot be trusted. This is a stateless, markdown-level rule (no marker file, no new state): rebase and re-verify are cheap and idempotent, so restarting from the top on every entry is always safe. The Commit step below handles the case where a prior turn already committed (nothing left to stage) so the restart cannot double-commit or error out.
+
+Prerequisites: all required reviews complete, Must Fix/Critical/High items resolved, build, tests, and lint pass.
 
 Read `<worktree-path>/docs/git-workflow.md`; if absent, read legacy `<worktree-path>/.claude/rules/git-workflow.md`.
 
@@ -23,7 +25,7 @@ git fetch origin main
 git rebase origin/main
 ```
 
-If rebase succeeds, rerun full build and tests. If tests fail, clear the goal (`/goal clear`), then stop and report the rebase-induced failure.
+If rebase succeeds, rerun full build and tests, then lint (when `lintCommand` is set). An absent `lintCommand` skips the lint step cleanly — no error. If build, tests, or lint fail, clear the goal (`/goal clear`), then stop and report the rebase-induced failure. Lint is an unconditional hard gate here, exactly like build/test: no PR is created if it fails.
 
 If rebase conflicts, abort, clear the goal (`/goal clear`), report conflicting files, and stop:
 
@@ -31,7 +33,7 @@ If rebase conflicts, abort, clear the goal (`/goal clear`), report conflicting f
 git rebase --abort
 ```
 
-Tell the user to resolve manually, rerun build/tests, and resume from commit.
+Tell the user to resolve manually. Per the atomicity rule above, the next entry into this phase still restarts at the Rebase step, not at Commit — the fetch+rebase is a no-op once the user has already resolved and completed it locally, and this guarantees a fresh build/test/lint pass on the rebased tree before Commit runs.
 
 ## Commit
 
@@ -46,6 +48,8 @@ git commit -m "<type>(<scope>): <description>
 <ticket-ref>"
 ```
 
+If a prior turn already committed this work (e.g. a Goal Autopilot resume re-entering after Commit ran once), `git add -A` stages nothing new and `git commit` reports nothing to commit — that is expected, not an error. Skip the commit in that case and proceed to Push; do not create an empty commit or fail the phase over it.
+
 Ticket mode:
 
 - Normal child/non-child: `Fixes #<childId or ticketId>`.
@@ -59,6 +63,8 @@ Push the branch:
 
 - Ticket mode: `git push -u origin feature/<ticket-id>-<description>`
 - Ticketless mode: `git push -u origin feature/<auto-slug>`
+
+If this branch was already pushed in a prior turn (a Goal Autopilot resume) and the atomicity rule's mandatory Rebase restart above rewrote local commit SHAs, the plain push above is rejected as non-fast-forward — this is expected, not a failure. Retry once with `git push --force-with-lease -u origin <branch>`: `--force-with-lease` still refuses if the remote tip isn't what this rebase started from (i.e. someone else pushed to the branch), which surfaces as a genuine conflict to report rather than silently overwriting work.
 
 If push fails due to sandbox/network/auth, clear the goal (`/goal clear`), show the exact command, and use `AskUserQuestion` ("Pushed, continue" / "Abort") to wait for the user to push manually before continuing.
 
@@ -92,6 +98,8 @@ Screenshots are temporary review aids — never commit them to the repo. Host th
 ## PR
 
 Create the PR with `gh pr create`. Write body content to `/tmp/claude/pr-body.md` first and read it back; do not use heredocs or a large inline body string.
+
+If a prior turn already created the PR (a Goal Autopilot resume re-entering after PR creation ran once but the turn ended before `/goal clear`), `gh pr create` fails with "a pull request for branch ... already exists." That is not a failure — run `gh pr view <branch> --json url -q .url` to recover the existing PR URL and continue to Labels/Cleanup as if creation had just succeeded.
 
 Ticket mode body includes:
 

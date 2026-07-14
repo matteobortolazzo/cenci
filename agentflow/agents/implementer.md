@@ -73,10 +73,10 @@ When asked to make tests pass:
 - No TODOs without ticket references
 
 ## Error Recovery
-If build or tests fail:
+If build, tests, or lint fail:
 1. Analyze the error carefully
 2. Fix the root cause (not just the symptom)
-3. Re-run build and tests
+3. Re-run build, tests, and lint
 4. If stuck after 3 attempts, report the issue clearly
 
 ## Working Directory
@@ -89,6 +89,6 @@ When given a worktree path, `cd` into it once at the start of your session. CWD 
 See the `shell-rules` skill's "Worktree & Command Patterns" section for full guidance: one command per Bash call, no `&&`-chaining of unrelated commands, and no conditional shell scripts (`bash -c '…'`, `if/then`, loops, or command substitution) — they never match the allow-list and always force a manual approval prompt.
 
 ## Verification
-Run build and tests after each significant change.
+Run build, tests, and lint (when the project has a `lintCommand`) after each significant change. An absent `lintCommand` skips the lint step cleanly — no error.
 Check for LSP diagnostics on modified files — fix any type errors or unused code warnings.
 Report any failures immediately.
