@@ -74,4 +74,4 @@ window and tells Codex to follow the repository's `AGENTS.md`.
 Only the `implement` dispatch is provided. Interactive refinement, Pencil design,
 Claude goal/loop automation, and Claude project configuration remain out of scope.
 The supported boundary is summarized in the
-[root client capability matrix](../../README.md#client-capabilities).
+[root client capability matrix](../../README.md#claude-code-and-codex).

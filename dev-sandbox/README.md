@@ -3,7 +3,11 @@
 > Part of [agent-stack](../README.md) — the **isolation layer**. See the root README for
 > the one-command install and how the isolation, workflow, and attention layers fit together.
 
-Isolated Docker/Podman container for running Claude Code with full permissions. Your host OS stays clean — each launch mounts only the current repo (not your whole `~/Repos`) into its own container.
+Run Claude Code or Codex at full permissions without giving the agent your whole host.
+Each launch mounts only the current repository into an isolated Docker or Podman
+container.
+
+![agent-sandbox mounts the current repository into a deliberately small container boundary for a full-permission coding agent](../docs/assets/agent-sandbox-boundary.svg)
 
 ## Prerequisites
 

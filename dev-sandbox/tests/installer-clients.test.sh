@@ -10,7 +10,7 @@ make_common_tools() {
     local bin="$1"
     mkdir -p "${bin}"
     local tool
-    for tool in bash cat touch uname grep git mkdir dirname ln readlink sleep pkill pgrep nohup chmod sed head rm; do
+    for tool in bash cat touch uname grep git mkdir dirname ln readlink sleep pkill pgrep nohup chmod sed head rm mktemp; do
         ln -s "$(command -v "${tool}")" "${bin}/${tool}"
     done
     cat > "${bin}/docker" <<'EOF'
@@ -19,6 +19,21 @@ if [ "${1:-}" = image ] && [ "${2:-}" = inspect ]; then exit 1; fi
 exit 0
 EOF
     chmod +x "${bin}/docker"
+    cat > "${bin}/curl" <<'EOF'
+#!/bin/sh
+out=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -o) out=$2; shift 2 ;;
+      *) shift ;;
+    esac
+done
+[ -n "${out}" ] || exit 1
+cat >"${out}" <<'INSTALLER'
+printf 'forwarded installer args: %s\n' "$*"
+INSTALLER
+EOF
+    chmod +x "${bin}/curl"
 }
 
 make_claude() {
@@ -64,13 +79,18 @@ EOF
 }
 
 prepare_checkout() {
-    local home="$1" checkout="${1}/.codex/plugins/marketplaces/agent-stack"
+    local home="$1" client="$2" checkout
+    checkout="${home}/.${client}/plugins/marketplaces/agent-stack"
     mkdir -p "${checkout}/dev-sandbox"
     cat > "${checkout}/dev-sandbox/agent-sand" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
     chmod +x "${checkout}/dev-sandbox/agent-sand"
+    if [[ -f "${ROOT}/agent-stack" ]]; then
+        cp "${ROOT}/agent-stack" "${checkout}/agent-stack"
+        chmod +x "${checkout}/agent-stack"
+    fi
 }
 
 run_case() {
@@ -82,9 +102,9 @@ run_case() {
     : >"${calls}"
     make_common_tools "${bin}"
     case "${clients}" in
-      claude) make_claude "${bin}" ;;
-      codex) make_codex "${bin}"; prepare_checkout "${home}" ;;
-      dual) make_claude "${bin}"; make_codex "${bin}"; prepare_checkout "${home}" ;;
+      claude) make_claude "${bin}"; prepare_checkout "${home}" claude ;;
+      codex) make_codex "${bin}"; prepare_checkout "${home}" codex ;;
+      dual) make_claude "${bin}"; make_codex "${bin}"; prepare_checkout "${home}" claude ;;
     esac
 
     set +e
@@ -99,6 +119,7 @@ run_case() {
     CASE_OUTPUT="${output}"
     CASE_CALLS="${calls}"
     CASE_HOME="${home}"
+    CASE_BIN="${bin}"
 }
 
 run_doctor_case() {
@@ -135,6 +156,14 @@ assert_not_contains() {
     fi
 }
 
+assert_agent_stack_utility() {
+    local output="${CASE_HOME}/agent-stack-output"
+    [[ -L "${CASE_HOME}/.local/bin/agent-stack" ]]
+    HOME="${CASE_HOME}" PATH="${CASE_BIN}" \
+        "${CASE_HOME}/.local/bin/agent-stack" update --yes >"${output}"
+    assert_contains "${output}" "forwarded installer args: update --yes"
+}
+
 echo "installer-clients.test.sh"
 
 echo "case: Claude-only installs every component and prints only Claude launch guidance"
@@ -145,6 +174,7 @@ assert_contains "${CASE_CALLS}" "claude plugin install agentwatch@agent-stack"
 assert_contains "${CASE_CALLS}" "claude plugin install agent-sandbox@agent-stack"
 assert_contains "${CASE_OUTPUT}" "agent-sand"
 assert_not_contains "${CASE_OUTPUT}" "codex-sand"
+assert_agent_stack_utility
 
 echo "case: Codex-only installs every component without invoking or recommending Claude"
 run_case codex codex
@@ -157,6 +187,7 @@ assert_not_contains "${CASE_OUTPUT}" "agent-sand                # Claude"
 assert_not_contains "${CASE_OUTPUT}" "/agentflow:configure"
 [[ -L "${CASE_HOME}/.local/bin/codex-sand" ]]
 [[ ! -e "${CASE_HOME}/.local/bin/agent-sand" ]]
+assert_agent_stack_utility
 
 echo "case: Codex-only image build uses the Codex launcher"
 run_case codex-build codex --build
@@ -171,6 +202,7 @@ assert_contains "${CASE_CALLS}" "claude plugin install agentflow@agent-stack"
 assert_contains "${CASE_CALLS}" "codex plugin add agentflow@agent-stack"
 [[ -L "${CASE_HOME}/.local/bin/agent-sand" ]]
 [[ -L "${CASE_HOME}/.local/bin/codex-sand" ]]
+assert_agent_stack_utility
 
 echo "case: no supported client fails with a client-specific diagnostic"
 run_case none none
@@ -185,6 +217,7 @@ assert_contains "${DOCTOR_OUTPUT}" "Supported clients (at least one required)"
 assert_contains "${DOCTOR_OUTPUT}" "Installed stack components"
 assert_contains "${DOCTOR_OUTPUT}" "Launchers and container image"
 assert_contains "${DOCTOR_OUTPUT}" "Codex: agentflow"
+assert_contains "${DOCTOR_OUTPUT}" "agent-stack utility"
 
 echo "case: doctor fails when no supported client is available"
 run_doctor_case doctor-none none

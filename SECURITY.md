@@ -11,6 +11,8 @@ container, but the container is what stands between it and your host. See
 [`dev-sandbox/CLAUDE.md`](./dev-sandbox/CLAUDE.md) and
 [`dev-sandbox/README.md`](./dev-sandbox/README.md#permission-model) for the full model.
 
+![The current repository is mounted into a container where the coding agent has full permissions, while the host stays outside the default boundary](docs/assets/agent-sandbox-boundary.svg)
+
 ### What the sandbox protects against
 
 - Arbitrary file writes/deletes outside the mounted repo — only the current repo's root
