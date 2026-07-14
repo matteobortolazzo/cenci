@@ -150,6 +150,11 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 
    ## Refined Ticket Summary
 
+   ### Updated Title
+   <refined title — include this section ONLY when the title should change>
+
+   Only propose a new title when the current one is vague or no longer accurately describes the refined scope; otherwise omit this section entirely and keep the existing title. Match the repo's issue-title style — sentence case, no trailing period, concise, declarative or imperative. Do **not** add a `(K/N)` suffix (that is only for split children in Pass 1) or a `Design:` prefix (only for the companion design ticket).
+
    ### Updated Description
    <rewritten description incorporating all clarifications>
 
@@ -207,12 +212,14 @@ ticket is unambiguous, well-scoped, and ready for implementation.
    ```bash
    printf '%s' '<updated description>' > /tmp/claude/issue-<number>.md
    BODY=$(cat /tmp/claude/issue-<number>.md)
-   gh issue edit <number> --repo <owner>/<repo> --body "$BODY"
+   gh issue edit <number> --repo <owner>/<repo> --body "$BODY" --title "<updated title>"
    ```
 
-   **Verify the update succeeded** — re-fetch the ticket and confirm the body was changed:
+   Include `--title` **only when step 9 produced an `### Updated Title`**; otherwise omit the flag so the existing title is preserved. (Passing `--title` with the unchanged title would be a harmless no-op, but omitting it keeps intent explicit.)
+
+   **Verify the update succeeded** — re-fetch the ticket and confirm the body (and, when retitled, the title) changed:
    ```bash
-   gh issue view <number> --repo <owner>/<repo> --json body --jq '.body' | head -c 200
+   gh issue view <number> --repo <owner>/<repo> --json title,body --jq '.title, (.body[:200])'
    ```
 
    If the update failed, report the error to the user and retry once.
