@@ -23,7 +23,7 @@ See `.claude/rules/` for conventions:
 
 ## Project Structure
 
-- `main.go` — CLI entry point, subcommand routing (`daemon`, `status` (alias `waybar`), `notify`)
+- `main.go` — CLI entry point, subcommand routing (`daemon start|stop|restart|status`, human `status`, `widget-json` (hidden alias `waybar`), `notify`)
 - `plugin/` — Claude Code plugin (hooks that call `agentwatch notify`)
 - `internal/daemon/` — Session-keyed event loop, hook→status mapping, paneless TTL sweep; delegates window work via `frontend.Frontend`
 - `internal/frontend/` — Seam types: `SessionState`, `Frontend` interface, `Observations`, `SweepAction`, `WindowInfo`; shared name sanitizers

@@ -63,9 +63,10 @@ func SetLoopEnabled(path string, enabled bool) error {
 // snapshot carries a non-nil Dispatch, that is returned verbatim. Otherwise it
 // falls back to the resolved dispatch.Config, reporting DaemonRunning=false,
 // Enabled from LoopEnabled, and Interval from DaemonInterval (best-effort,
-// empty when DaemonInterval is 0). Live daemon population of
-// StateSnapshot.Dispatch is deferred to #220, so the socket path never fires
-// today. A LoadConfig error (malformed/unreadable config.json) is logged to
+// empty when DaemonInterval is 0). Since #220 the daemon always runs the
+// embedded dispatch loop and populates StateSnapshot.Dispatch from its live
+// state, so the socket-first path above fires whenever a daemon is reachable.
+// A LoadConfig error (malformed/unreadable config.json) is logged to
 // out via the same logf convention as reloadConfig -- unlike the intentional
 // socket-unreachable fallback above, a broken config must not masquerade as a
 // silent "loop disabled" with no signal to the caller.

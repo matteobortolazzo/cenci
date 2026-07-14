@@ -58,8 +58,13 @@ func newDaemon(cfg config.Config, fe frontend.Frontend, events <-chan ipc.HookEv
 // Run starts the event-driven daemon with the given interactive frontend.
 // It blocks until ctx is cancelled, then cleans up. attention is the optional
 // channel of reconciler failure overlays (#46); pass nil to leave the daemon's
-// behavior unchanged.
-func Run(ctx context.Context, cfg config.Config, fe frontend.Frontend, attention <-chan ipc.AttentionUpdate) error {
+// behavior unchanged. onStarted, if non-nil, is invoked once every listener
+// (event socket, and broadcast socket when configured) is successfully bound
+// — i.e. once this call has become the one live daemon — and before the main
+// loop blocks. It is never invoked on the "already running" no-op path below,
+// so a caller that writes a PID file from onStarted never clobbers a
+// different, already-running daemon's PID file.
+func Run(ctx context.Context, cfg config.Config, fe frontend.Frontend, attention <-chan ipc.AttentionUpdate, onStarted func()) error {
 	// Start event receiver.
 	recv, err := ipc.NewEventReceiver(cfg.EventSocketPath)
 	if err != nil {
@@ -92,6 +97,9 @@ func Run(ctx context.Context, cfg config.Config, fe frontend.Frontend, attention
 		if cfg.Verbose {
 			log.Printf("broadcast socket: %s", cfg.SocketPath)
 		}
+	}
+	if onStarted != nil {
+		onStarted()
 	}
 	return d.loop(ctx, attention)
 }

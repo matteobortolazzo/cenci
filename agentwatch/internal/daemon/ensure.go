@@ -14,15 +14,26 @@ import (
 var readyTimeout = 3 * time.Second
 var pollInterval = 50 * time.Millisecond
 
-var spawn = func() {
+// Spawn starts a new detached `agentwatch daemon start` process in the
+// background (Setsid, so it survives the parent's exit). `daemon start` is
+// the canonical form spawned both here (via the spawn var, on-demand startup)
+// and by `agentwatch daemon restart` (internal/main.go), so every
+// daemon-spawning code path launches the process the same way. It is silent
+// on failure — callers that need to know whether the daemon became reachable
+// should poll Alive afterward.
+func Spawn() {
 	self, err := os.Executable()
 	if err != nil {
 		return
 	}
-	cmd := exec.Command(self, "daemon")
+	cmd := exec.Command(self, "daemon", "start")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	_ = cmd.Start()
 }
+
+// spawn is a package var (defaulting to Spawn) so tests can stub it without a
+// real "agentwatch" binary spawning a background process.
+var spawn = Spawn
 
 var ensureMu sync.Mutex
 
@@ -56,7 +67,15 @@ func EnsureRunning() {
 }
 
 func alive() bool {
-	conn, err := net.DialTimeout("unix", ipc.DefaultEventSocketPath(), 200*time.Millisecond)
+	return Alive(ipc.DefaultEventSocketPath())
+}
+
+// Alive reports whether a daemon is listening on the given event socket
+// path. It is exported for `daemon stop`/`daemon status`/`daemon restart`
+// (internal/main.go), which need to probe liveness against a caller-supplied
+// path the same way EnsureRunning's on-demand startup does.
+func Alive(eventSocketPath string) bool {
+	conn, err := net.DialTimeout("unix", eventSocketPath, 200*time.Millisecond)
 	if err != nil {
 		return false
 	}
