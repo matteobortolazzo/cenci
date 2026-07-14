@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/matteobortolazzo/agent-stack/agentwatch/internal/run"
@@ -160,10 +161,21 @@ func runCombinedPass(ctx context.Context, cfg Config, ctrl run.Controller, mut T
 	state.LastRunAt = time.Now().UTC().Format(time.RFC3339)
 	state.LastDispatched = *prior - before
 	state.LastSkipped = countSkipped(decisions)
-	state.LastError = passError(dispatchErr, reconcileErr)
+	state.LastError = sanitizeLastError(passError(dispatchErr, reconcileErr))
 	*windows = failedWindows(result.Failed)
 	*headroom = computeHeadroom(cfg)
 	publish(ctx, attention, state, *windows, *headroom)
+}
+
+// sanitizeLastError normalizes a pass error for safe inclusion in the
+// status JSON's pipe-delimited/menu frontends: it replaces the field
+// delimiter and line breaks with spaces, then collapses whitespace runs.
+func sanitizeLastError(s string) string {
+	if s == "" {
+		return ""
+	}
+	s = strings.NewReplacer("|", " ", "\n", " ", "\r", " ").Replace(s)
+	return strings.Join(strings.Fields(s), " ")
 }
 
 func passError(dispatchErr, reconcileErr error) string {
