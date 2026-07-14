@@ -815,6 +815,145 @@ func TestFormat_HideBehavior_DispatchOnlyVsNoLoop(t *testing.T) {
 	})
 }
 
+// --- Pango-escaped tooltip text (#250) -------------------------------------
+
+// TestEscapePango exercises the escapePango helper directly: it must escape
+// &, <, > for Pango markup safety, leave plain strings untouched, and use
+// single-pass replacer semantics — an already-escaped "&lt;" must become
+// "&amp;lt;" (the introduced "&" is not itself re-escaped), which would fail
+// under naive sequential string.Replace calls.
+func TestEscapePango(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"ampersand", "&", "&amp;"},
+		{"less-than", "<", "&lt;"},
+		{"greater-than", ">", "&gt;"},
+		{"combined specials", "a<b>&c", "a&lt;b&gt;&amp;c"},
+		{"no specials passes through unchanged", "plain text", "plain text"},
+		{"double-escape guard: already-escaped input is not re-escaped", "&lt;", "&amp;lt;"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := escapePango(tt.in)
+			if got != tt.want {
+				t.Errorf("escapePango(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestFormat_TooltipPangoEscaped covers window/task names and session names
+// containing Pango markup-special characters: the tooltip must carry the
+// escaped forms, never a raw "<", ">", or unescaped "&", and the JSON-marshaled
+// payload must be Pango-safe end to end. Includes a paneless case (empty
+// Session) so the non-prefixed tooltip line path is also covered.
+func TestFormat_TooltipPangoEscaped(t *testing.T) {
+	tests := []struct {
+		name     string
+		windows  []ipc.WindowState
+		wantSubs []string // escaped substrings expected in out.Tooltip
+	}{
+		{
+			name: "task name with markup specials, paned session",
+			windows: []ipc.WindowState{
+				{Session: "main<1>&2", WindowIndex: "0", TaskName: "fix <bug> & ship", Status: "running"},
+			},
+			wantSubs: []string{"fix &lt;bug&gt; &amp; ship", "main&lt;1&gt;&amp;2"},
+		},
+		{
+			name: "window name with markup specials (manually named), paned session",
+			windows: []ipc.WindowState{
+				{Session: "main", WindowIndex: "0", WindowName: "a<b>&c", ManuallyNamed: true, Status: "running"},
+			},
+			wantSubs: []string{"a&lt;b&gt;&amp;c"},
+		},
+		{
+			name: "agent fallback with markup specials, paneless session",
+			windows: []ipc.WindowState{
+				{Status: "running", Agent: "a<gent>&x"},
+			},
+			wantSubs: []string{"a&lt;gent&gt;&amp;x"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			snap := &ipc.StateSnapshot{
+				Timestamp: "2024-01-01T00:00:00Z",
+				Windows:   tt.windows,
+				Summary:   ipc.StatusSummary{Total: 1, Running: 1},
+			}
+			out := Format(snap, testConfig())
+
+			for _, want := range tt.wantSubs {
+				if !strings.Contains(out.Tooltip, want) {
+					t.Errorf("expected tooltip to contain escaped %q, got %q", want, out.Tooltip)
+				}
+			}
+			if strings.Contains(out.Tooltip, "<") || strings.Contains(out.Tooltip, ">") {
+				t.Errorf("expected no raw '<' or '>' in tooltip, got %q", out.Tooltip)
+			}
+			if hasUnescapedAmpersand(out.Tooltip) {
+				t.Errorf("expected no unescaped '&' in tooltip, got %q", out.Tooltip)
+			}
+
+			data, err := json.Marshal(out)
+			if err != nil {
+				t.Fatalf("json.Marshal: %v", err)
+			}
+			var decoded output
+			if err := json.Unmarshal(data, &decoded); err != nil {
+				t.Fatalf("json.Unmarshal: %v", err)
+			}
+			if strings.Contains(decoded.Tooltip, "<") || strings.Contains(decoded.Tooltip, ">") {
+				t.Errorf("expected no raw '<' or '>' in marshaled tooltip, got %q", decoded.Tooltip)
+			}
+			if hasUnescapedAmpersand(decoded.Tooltip) {
+				t.Errorf("expected no unescaped '&' in marshaled tooltip, got %q", decoded.Tooltip)
+			}
+		})
+	}
+}
+
+// hasUnescapedAmpersand reports whether s contains a "&" that is not the
+// start of one of the three Pango entities this package emits
+// (&amp; &lt; &gt;).
+func hasUnescapedAmpersand(s string) bool {
+	stripped := strings.NewReplacer("&amp;", "", "&lt;", "", "&gt;", "").Replace(s)
+	return strings.Contains(stripped, "&")
+}
+
+// TestFormat_DispatchLastErrorPangoEscaped covers DispatchState.LastError
+// containing markup specials: the dispatch tooltip summary line built by
+// formatDispatch must carry the escaped form. TestFormat_DispatchLastError
+// (LastError "boom", no specials) is left unmodified and must still pass.
+func TestFormat_DispatchLastErrorPangoEscaped(t *testing.T) {
+	snap := &ipc.StateSnapshot{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Windows: []ipc.WindowState{
+			{Session: "main", WindowIndex: "0", TaskName: "writing tests", Status: "running"},
+		},
+		Summary: ipc.StatusSummary{Total: 1, Running: 1},
+		Dispatch: &watch.DispatchState{
+			Enabled:   true,
+			Interval:  "5m",
+			LastRunAt: "2024-01-01T12:04:00Z",
+			LastError: "boom <x> & y",
+		},
+	}
+	out := Format(snap, testConfig())
+
+	wantLine := "dispatch: on (5m) — last run failed: boom &lt;x&gt; &amp; y"
+	if !strings.Contains(out.Tooltip, wantLine) {
+		t.Errorf("expected tooltip to contain %q, got %q", wantLine, out.Tooltip)
+	}
+	if strings.Contains(out.Tooltip, "<x>") {
+		t.Errorf("expected no raw markup in tooltip, got %q", out.Tooltip)
+	}
+}
+
 func TestHeadroomClass_Boundaries(t *testing.T) {
 	tests := []struct {
 		name string
