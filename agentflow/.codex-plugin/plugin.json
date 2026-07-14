@@ -1,6 +1,6 @@
 {
   "name": "agentflow",
-  "version": "4.11.2",
+  "version": "4.11.3",
   "description": "agent-stack workflow layer: engineering conventions for Codex and Claude Code's gated ticket-to-PR pipeline.",
   "author": {
     "name": "Matteo Bortolazzo",
