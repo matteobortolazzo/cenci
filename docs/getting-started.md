@@ -12,6 +12,7 @@ Install:
 
 - Linux, macOS, or WSL2
 - git
+- curl
 - Docker or Podman
 - Claude Code, Codex, or both
 
@@ -49,7 +50,7 @@ clients, optional feature dependencies, installed components, launchers, and ima
 readiness:
 
 ```bash
-./install.sh doctor
+agent-stack doctor
 ```
 
 Warnings for optional features are safe to defer. Fix any required item marked with
@@ -100,6 +101,13 @@ interactive configure skill is Claude Code-only.
 /agentflow:babysit <pr-number>
 ```
 
+After implementation opens the PR, `babysit` checks CI and review feedback
+immediately, then schedules progressively quieter checks until the PR merges or
+closes. It can fix actionable failures and comments while preserving approval gates;
+on merge it performs the final `In Review → Implemented` transition. Babysit is
+currently Claude Code-only. See [Babysitting a PR](../agentflow/README.md#babysitting-a-pr)
+for pacing, expiry, and safety details.
+
 The lifecycle is always:
 
 ![A ticket moves through human-gated refinement and planning, an autonomous engineering run, and PR follow-through](assets/agentflow-pipeline.svg)
@@ -112,19 +120,19 @@ and merge completion applies `Implemented`.
 ## Update
 
 ```bash
-./install.sh update
+agent-stack update
 ```
 
-Update refreshes every installed component in every detected client, resolves the
-active AgentWatch cache, refreshes launchers, and replaces a stale running AgentWatch
-daemon with the updated binary.
+The command downloads the current official installer, refreshes every installed
+component in every detected client, resolves the active AgentWatch cache, refreshes
+launchers, and replaces a stale running AgentWatch daemon with the updated binary.
 
 ## Troubleshooting
 
 | Symptom | Resolution |
 |---|---|
 | Neither client is detected | Install Claude Code, Codex, or both, then rerun the installer |
-| Sandbox launcher is not found | Add `~/.local/bin` to `PATH`, then rerun `./install.sh doctor` |
+| `agent-stack` or a sandbox launcher is not found | Add `~/.local/bin` to `PATH`, then rerun the install command |
 | AgentWatch status has not appeared | Start a new agent session and inspect `${TMPDIR:-/tmp}/agentwatch-bootstrap.log` |
 | Codex skills are missing | Confirm `codex plugin list`, then restart Codex after installation |
 | Claude commands are missing | Confirm `claude plugin list`, then restart Claude Code after installation |

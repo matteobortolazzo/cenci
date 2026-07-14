@@ -68,7 +68,7 @@ make them find the binary, `install.sh` offers a one-time `sudo` link into
 `~/.local/bin` link, so it too survives version bumps. Decline it and the bar
 widgets fall back to their `agentwatchPath` / `AGENTWATCH_BIN` overrides.
 
-Use `./install.sh update` for normal updates. Standalone development installs can use
+Use `agent-stack update` for normal updates. Standalone development installs can use
 the corresponding client marketplace update command; the next session re-bootstraps
 the matching binary.
 

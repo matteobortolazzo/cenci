@@ -33,12 +33,13 @@ between them.
 
 The approved `.plans/` file is the durable handoff. Once you launch that plan, the
 workflow can run unattended through an open PR. AgentWatch keeps its state visible;
-`/agentflow:babysit` can follow CI and review activity through to merge.
+[`/agentflow:babysit`](agentflow/README.md#babysitting-a-pr) can follow CI and review
+activity through to merge.
 
 ## Install
 
-Requirements: Linux, macOS, or WSL2; git; Docker or Podman; and Claude Code, Codex, or
-both.
+Requirements: Linux, macOS, or WSL2; git; curl; Docker or Podman; and Claude Code,
+Codex, or both.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
@@ -52,16 +53,17 @@ codex-sand   # Codex
 ```
 
 The installer detects available clients, registers the marketplace, installs all
-three layers, and creates the matching launchers. It can also inspect the machine
-without changing anything or update every installed component:
+three layers, and creates the matching launchers. It also installs a small
+`agent-stack` command for routine maintenance:
 
 ```bash
-# Check prerequisites and installation state
-curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash -s -- doctor
-
-# Update the complete stack
-curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash -s -- update
+agent-stack doctor   # inspect prerequisites and installation state
+agent-stack update   # update the complete stack
 ```
+
+The command fetches the current official installer before it runs, so the updater
+itself stays current. Existing installations from before the command was introduced
+can bootstrap it once by rerunning the install command above.
 
 Follow the [guided getting-started path](docs/getting-started.md) for first-run
 configuration and your first ticket.
