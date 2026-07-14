@@ -23,6 +23,15 @@ var ErrNoOutput = errors.New("no output")
 // the SymbolFailed wiring precedent.
 const DefaultSymbolDispatch = "⟳"
 
+// DefaultSymbolDispatchRunning is the default glyph shown when a fleet
+// dispatch pass is actively running (U+2699, per planning Q&A #1). The
+// plain gear was chosen specifically to match the size/weight of the
+// existing ⟳/▶ glyphs, avoiding the heavier-glyph size mismatch observed in
+// DMS. Like DefaultSymbolDispatch, it lives in this package (not
+// internal/config) since it is status-render-only, mirroring the
+// DefaultSymbolDispatch precedent.
+const DefaultSymbolDispatchRunning = "⚙"
+
 // pangoReplacer escapes the three Pango markup-special characters for text
 // interpolated into the Waybar tooltip, which Waybar renders as Pango
 // markup. This is a single non-overlapping left-to-right pass, so the "&"
@@ -39,14 +48,15 @@ func escapePango(s string) string {
 
 // Config holds the symbol settings for waybar output.
 type Config struct {
-	SocketPath      string
-	SymbolIdle      string
-	SymbolRunning   string
-	SymbolDone      string
-	SymbolNeedInput string
-	SymbolStopped   string
-	SymbolFailed    string
-	SymbolDispatch  string
+	SocketPath            string
+	SymbolIdle            string
+	SymbolRunning         string
+	SymbolDone            string
+	SymbolNeedInput       string
+	SymbolStopped         string
+	SymbolFailed          string
+	SymbolDispatch        string
+	SymbolDispatchRunning string
 }
 
 // output is the Waybar custom module JSON protocol.
@@ -217,7 +227,12 @@ func formatDispatch(cfg Config, d *watch.DispatchState) (glyph string, line stri
 		summary += fmt.Sprintf(" — last run %s, %d dispatched / %d skipped", formatLastRunTime(d.LastRunAt), d.LastDispatched, d.LastSkipped)
 	}
 
-	return cfg.SymbolDispatch, summary
+	glyph = cfg.SymbolDispatch
+	if d.PassRunning {
+		glyph = cfg.SymbolDispatchRunning
+	}
+
+	return glyph, summary
 }
 
 // formatLastRunTime renders an RFC 3339 timestamp as local HH:MM. Falls back

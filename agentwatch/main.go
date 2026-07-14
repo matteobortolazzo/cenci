@@ -545,13 +545,14 @@ func runStatus(args []string) {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	defaults := config.Default()
 	wcfg := status.Config{
-		SymbolIdle:      defaults.SymbolIdle,
-		SymbolRunning:   defaults.SymbolRunning,
-		SymbolDone:      defaults.SymbolDone,
-		SymbolNeedInput: defaults.SymbolNeedInput,
-		SymbolStopped:   defaults.SymbolStopped,
-		SymbolFailed:    defaults.SymbolFailed,
-		SymbolDispatch:  status.DefaultSymbolDispatch,
+		SymbolIdle:            defaults.SymbolIdle,
+		SymbolRunning:         defaults.SymbolRunning,
+		SymbolDone:            defaults.SymbolDone,
+		SymbolNeedInput:       defaults.SymbolNeedInput,
+		SymbolStopped:         defaults.SymbolStopped,
+		SymbolFailed:          defaults.SymbolFailed,
+		SymbolDispatch:        status.DefaultSymbolDispatch,
+		SymbolDispatchRunning: status.DefaultSymbolDispatchRunning,
 	}
 	fs.StringVar(&wcfg.SocketPath, "socket", ipc.DefaultSocketPath(), "IPC socket path")
 	fs.StringVar(&wcfg.SymbolIdle, "symbol-idle", wcfg.SymbolIdle, "symbol for idle state")
@@ -561,6 +562,7 @@ func runStatus(args []string) {
 	fs.StringVar(&wcfg.SymbolStopped, "symbol-stopped", wcfg.SymbolStopped, "symbol for stopped (interrupted) state")
 	fs.StringVar(&wcfg.SymbolFailed, "symbol-failed", wcfg.SymbolFailed, "symbol for dispatch-failed state")
 	fs.StringVar(&wcfg.SymbolDispatch, "symbol-dispatch", wcfg.SymbolDispatch, "symbol for the fleet dispatch loop indicator")
+	fs.StringVar(&wcfg.SymbolDispatchRunning, "symbol-dispatch-running", wcfg.SymbolDispatchRunning, "symbol for a fleet dispatch pass actively running")
 	_ = fs.Parse(args)
 
 	if err := status.Run(wcfg); err != nil {

@@ -14,13 +14,14 @@ import (
 
 func testConfig() Config {
 	return Config{
-		SymbolIdle:      "~",
-		SymbolRunning:   "▶",
-		SymbolDone:      "✓",
-		SymbolNeedInput: "!",
-		SymbolStopped:   "⏹",
-		SymbolFailed:    "✗",
-		SymbolDispatch:  "⟳",
+		SymbolIdle:            "~",
+		SymbolRunning:         "▶",
+		SymbolDone:            "✓",
+		SymbolNeedInput:       "!",
+		SymbolStopped:         "⏹",
+		SymbolFailed:          "✗",
+		SymbolDispatch:        "⟳",
+		SymbolDispatchRunning: "⚙",
 	}
 }
 
@@ -575,6 +576,88 @@ func TestHeadroomPercent_RoundHalfUp(t *testing.T) {
 func TestDefaultSymbolDispatch_Value(t *testing.T) {
 	if DefaultSymbolDispatch != "⟳" {
 		t.Errorf("expected DefaultSymbolDispatch to be U+27F3 (⟳), got %q", DefaultSymbolDispatch)
+	}
+}
+
+// TestDefaultSymbolDispatchRunning_Value locks in the default "pass actively
+// running" dispatch glyph chosen in planning Q&A #1: exactly U+2699 (⚙),
+// mirroring TestDefaultSymbolDispatch_Value.
+func TestDefaultSymbolDispatchRunning_Value(t *testing.T) {
+	if DefaultSymbolDispatchRunning != "⚙" {
+		t.Errorf("expected DefaultSymbolDispatchRunning to be U+2699 (⚙), got %q", DefaultSymbolDispatchRunning)
+	}
+}
+
+// TestFormat_DispatchGlyphByState covers all four enabled x pass_running
+// combinations for the "at most one dispatch icon" priority rule (running >
+// idle-enabled > none), per ticket #263 AC #1 and #4. Case 4
+// (enabled=false, pass_running=true) is a defensive regression guard: per
+// planning Q&A #3, `enabled` must gate the whole indicator regardless of
+// `pass_running`. Each case runs with zero sessions and with one active
+// session so the appendDispatch concatenation (glyph placement after any
+// session parts) is exercised in both shapes.
+func TestFormat_DispatchGlyphByState(t *testing.T) {
+	cfg := testConfig()
+
+	tests := []struct {
+		name        string
+		enabled     bool
+		passRunning bool
+		wantGlyph   string // "" means no dispatch glyph at all
+	}{
+		{"enabled and pass running shows running glyph", true, true, cfg.SymbolDispatchRunning},
+		{"enabled and idle shows idle glyph", true, false, cfg.SymbolDispatch},
+		{"disabled and not running shows no glyph", false, false, ""},
+		{"disabled but pass running still shows no glyph (enabled gates everything)", false, true, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, sessionShape := range []string{"zero sessions", "one active session"} {
+				t.Run(sessionShape, func(t *testing.T) {
+					snap := &ipc.StateSnapshot{
+						Timestamp: "2024-01-01T00:00:00Z",
+						Dispatch: &watch.DispatchState{
+							Enabled:     tt.enabled,
+							Interval:    "5m",
+							PassRunning: tt.passRunning,
+						},
+					}
+					if sessionShape == "one active session" {
+						snap.Windows = []ipc.WindowState{
+							{Session: "main", WindowIndex: "0", TaskName: "writing tests", Status: "running"},
+						}
+						snap.Summary = ipc.StatusSummary{Total: 1, Running: 1}
+					}
+
+					out := Format(snap, cfg)
+
+					switch tt.wantGlyph {
+					case cfg.SymbolDispatchRunning:
+						if !strings.Contains(out.Text, cfg.SymbolDispatchRunning) {
+							t.Errorf("expected running glyph %q in text, got %q", cfg.SymbolDispatchRunning, out.Text)
+						}
+						if strings.Contains(out.Text, cfg.SymbolDispatch) {
+							t.Errorf("expected idle glyph %q NOT in text, got %q", cfg.SymbolDispatch, out.Text)
+						}
+					case cfg.SymbolDispatch:
+						if !strings.Contains(out.Text, cfg.SymbolDispatch) {
+							t.Errorf("expected idle glyph %q in text, got %q", cfg.SymbolDispatch, out.Text)
+						}
+						if strings.Contains(out.Text, cfg.SymbolDispatchRunning) {
+							t.Errorf("expected running glyph %q NOT in text, got %q", cfg.SymbolDispatchRunning, out.Text)
+						}
+					default:
+						if strings.Contains(out.Text, cfg.SymbolDispatch) {
+							t.Errorf("expected no idle glyph %q in text, got %q", cfg.SymbolDispatch, out.Text)
+						}
+						if strings.Contains(out.Text, cfg.SymbolDispatchRunning) {
+							t.Errorf("expected no running glyph %q in text, got %q", cfg.SymbolDispatchRunning, out.Text)
+						}
+					}
+				})
+			}
+		})
 	}
 }
 
