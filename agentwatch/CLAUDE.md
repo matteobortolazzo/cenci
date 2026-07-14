@@ -34,6 +34,7 @@ See `.claude/rules/` for conventions:
 - `internal/tmux/tmuxtest/` — Shared tmux mock for tests
 - `internal/config/` — Configuration struct and defaults
 - `internal/ipc/` — Event receiver socket, broadcast server/client, NDJSON state, HookEvent types
+- `internal/reap/` — `Reaper` seam + `ExecReaper`: single-flight, non-blocking trigger for `agent-sand --reap-orphans`
 
 ## Key Conventions
 
@@ -43,4 +44,4 @@ See `.claude/rules/` for conventions:
 - **Testing**: Behavior-driven tests across the frontend seam — the daemon suite wires a real tmux frontend over `tmuxtest.MockClient` and calls `handleEvent()`/`runSweep()` directly for synchronous, deterministic behavior; assertions target renames, window options, `WindowInfo`, and core session state (not internals)
 - **Window state**: `windowState` in `internal/frontend/tmux` tracks per-window original name, original styles, original format strings, current status, pane ID, session ID, manual-name detection
 - **User variables**: tmux frontend sets `@agentwatch-symbol` and `@agentwatch-style` per window for custom `status-format` integration; symbols are NOT embedded in window names. It also sets `@agentwatch-headroom-<agent>` (a global, session-wide option, not per-window) with each agent-type's remaining budget headroom as an integer percent
-- **Stale sweep**: Two mechanisms — the tmux frontend's `Sweep()` cleans up tmux-backed sessions whose pane no longer exists; the daemon's paneless TTL sweep expires sessions without a pane after `-session-ttl` (default `2h`)
+- **Stale sweep**: Two mechanisms — the tmux frontend's `Sweep()` cleans up tmux-backed sessions whose pane no longer exists; the daemon's paneless TTL sweep expires sessions without a pane after `-session-ttl` (default `2h`). A pane-gone sweep pass and daemon startup each trigger one coalesced `agent-sand --reap-orphans` call (via the injectable `internal/reap.Reaper` seam) to kill orphaned container-side agent processes.

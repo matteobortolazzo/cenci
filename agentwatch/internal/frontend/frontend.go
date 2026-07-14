@@ -76,6 +76,10 @@ type SweepAction struct {
 	Remove     bool
 	NewStatus  detect.Status
 	NewTask    string
+	// PaneGone is set when the sweep detected a tmux-backed session whose
+	// pane no longer exists; it asks the daemon core to trigger the orphan
+	// reaper, coalesced once per sweep pass.
+	PaneGone bool
 }
 
 // WindowInfo is the tmux-specific slice of a snapshot entry.

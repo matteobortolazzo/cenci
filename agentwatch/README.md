@@ -772,6 +772,8 @@ The daemon has two sweep mechanisms:
 
 **Paneless TTL sweep**: Sessions without a tmux pane (plain terminals, dev-sandbox without a pane) are tracked by session id only. They are removed on `SessionEnd`; if no `SessionEnd` fires (e.g. a crash or a Codex session), the daemon expires them after the idle TTL (default `2h`, configurable with `-session-ttl`).
 
+**Sandbox orphan reap**: When the pane-based sweep detects one or more tmux-backed sessions whose pane no longer exists, the daemon triggers a single `agent-sand --reap-orphans` pass (coalesced — not one per stale window) to kill any orphaned container-side agent processes for those sessions. The daemon also runs one reap pass at startup, covering panes that closed while it was down or restarting. The reap is fire-and-forget, non-blocking for the event loop, and self-no-ops when `agent-sand` isn't on `PATH` or there's nothing to reap.
+
 ### Paneless sessions
 
 `agentwatch notify` accepts events even when `$TMUX_PANE` is unset. Sessions running in plain terminals or dev-sandbox without a tmux pane appear in `agentwatch status` output with empty `session` and `window_index` fields; their tooltip line reads `name (status)` rather than `sess:idx - name (status)`.
