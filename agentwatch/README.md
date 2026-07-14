@@ -18,12 +18,22 @@ The same four states appear everywhere:
 
 When the agent exits or agentwatch stops, the original window name is restored.
 
+See the desktop integrations for [DankMaterialShell](plugin/dms/README.md),
+[GNOME Shell](plugin/gnome/README.md), [KDE Plasma](plugin/plasma/README.md), and
+the [macOS menu bar](plugin/macos/README.md).
+
+**tmux appearance:** no tmux theme is bundled or required. AgentWatch augments
+tmux's default window list automatically and applies the state colors above. If
+your theme replaces `window-status-format` or `window-status-current-format`, wire
+its two stable user variables into the theme instead; see
+[Custom status-format integration](#custom-status-format-integration).
+
 ## Architecture
 
 The core daemon keys state by agent session id, maps hook events to statuses, and owns the paneless TTL sweep. All window work is delegated to an injected frontend:
 
 - **tmux frontend** (`internal/frontend/tmux/`): the one interactive frontend — window rename, style, pane-based stale sweep, renumber migration.
-- **status JSON** (`internal/frontend/status/`): read-only broadcast in the [Waybar custom module protocol](https://github.com/Alexays/Waybar/wiki/Module:-Custom); consumed by `agentwatch status` and the waybar, noctalia, dms, GNOME Shell (`plugin/gnome/`), KDE Plasma (`plugin/plasma/`), and macOS menu bar ([SwiftBar](https://swiftbar.app), `plugin/macos/`) display widgets.
+- **status JSON** (`internal/frontend/status/`): read-only broadcast in the [Waybar custom module protocol](https://github.com/Alexays/Waybar/wiki/Module:-Custom); consumed by `agentwatch status` and the Waybar, noctalia, [DMS](plugin/dms/README.md), [GNOME Shell](plugin/gnome/README.md), [KDE Plasma](plugin/plasma/README.md), and macOS menu bar ([SwiftBar](https://swiftbar.app), [setup](plugin/macos/README.md)) display widgets.
 
 No polling for normal state changes. Agent hooks push state changes to the daemon instantly via a Unix socket; the daemon sweeps periodically for stale/exited sessions.
 
@@ -797,7 +807,12 @@ Use them in your `status-format` to replace the default indicator and color:
 #{?#{@agentwatch-style},#[#{@agentwatch-style}],#[fg=brightblack]}
 ```
 
-For users with the default tmux status format, agentwatch automatically prepends `#{@agentwatch-symbol}` to `window-status-format` and `window-status-current-format` during tracking, and restores them on cleanup.
+AgentWatch intentionally does not ship a tmux theme: it supplies live state while
+your existing theme remains responsible for layout, spacing, separators, and the
+active-window treatment. For users with the default tmux status format, AgentWatch
+automatically prepends `#{@agentwatch-symbol}` to `window-status-format` and
+`window-status-current-format` during tracking, and restores them on cleanup.
+Themes that fully replace those formats should reference the variables above.
 
 ### Budget headroom in status-line
 
