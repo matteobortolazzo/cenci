@@ -21,12 +21,37 @@
 #     host-side to running containers matching ^(claude-sand-|codex-sand-)$.
 #   - In-container scan: `<runtime> exec -u root <container> sh -c '<POSIX
 #     script scanning /proc/*/environ for a line matching ^TMUX_PANE=>'`,
-#     emitting one `<pid>\t<pane>` line per process that carries the
-#     TMUX_PANE key (pane may be empty), to stdout, exit 0 on success.
+#     emitting one `<pid>\t<pane>\t<start>` line per process that carries the
+#     TMUX_PANE key (pane may be empty; <start> is that process's start time,
+#     read from /proc/<pid>/stat field 22 in the same scan pass), to stdout,
+#     exit 0 on success.
+#   - Pane-format validation (host-side, after the scan): a non-empty <pane>
+#     must match tmux's real pane-id format `^%[0-9]+$` before being treated
+#     as a live-ownership record. A malformed value (e.g. `%foo`, `bad`,
+#     `%1x`) is treated like a missing/empty pane (never signaled) and logged
+#     with a distinct note: "Note: process <pid> in container <container>
+#     has a malformed TMUX_PANE value; skipping."
 #   - Liveness / signaling, always `-u root` (see dev-sandbox/CLAUDE.md's
 #     "docker run --user X persists" entrypoint pattern for why):
 #       `<runtime> exec -u root <container> kill -TERM <pid>`
-#       `<runtime> exec -u root <container> kill -0    <pid>`   (0 = alive)
+#       Pre-SIGKILL probe (replaces the ambiguous `kill -0`): an in-container
+#       `sh -c '<script>' _ <pid>` that reads /proc/<pid>/stat field 22,
+#       passed the pid as an argument (never interpolated), and always exits
+#       0 if it ran at all. It prints the process's *current* start time on
+#       stdout if the pid is still alive, or the sentinel `__GONE__` if it is
+#       not. Host-side classification:
+#         - `<runtime> exec` itself exits non-zero -> container-exec
+#           transport failure (daemon unreachable, container gone, etc.); a
+#           hard error ("Error: ..."), reap_orphans() returns non-zero,
+#           distinct from a genuine "no such process" result.
+#         - stdout is `__GONE__` -> process already gone; no-op, not an
+#           error.
+#         - stdout is a start time that differs from the one recorded at
+#           scan time -> the pid was reused by an unrelated process during
+#           the grace window; skip SIGKILL, treat as already-gone, not an
+#           error.
+#         - stdout matches the recorded start time -> genuinely still the
+#           same process; proceed to SIGKILL.
 #       `<runtime> exec -u root <container> kill -KILL <pid>`
 #   - Host tmux liveness: `tmux list-panes -a -F '#{pane_id}'`, capturing
 #     stdout/stderr/exit separately. Non-zero exit + stderr matching
@@ -35,7 +60,8 @@
 #     hard error (exit non-zero, reap nothing, print an "Error:"-prefixed
 #     message, matching this script's existing error convention).
 #   - Output: one `reaped\t<container>\t<pid>\t<pane>` line per reaped
-#     process, plus a final count line ("Reaped N orphaned process(es)." /
+#     process (SIGTERM already sent, regardless of later grace-window
+#     outcome), plus a final count line ("Reaped N orphaned process(es)." /
 #     "No orphaned processes found.").
 set -uo pipefail
 
@@ -117,9 +143,11 @@ case "${1:-}" in
             *"TMUX_PANE="*)
                 # In-container /proc/*/environ scan. This mock is a dumb,
                 # canned data source keyed by container name (SCAN_DIR) — all
-                # decision logic (skip-empty-pane, skip-live-pane,
-                # reap-dead-pane, TERM->KILL escalation, no-tmux handling)
-                # lives host-side in reap_orphans(), never here.
+                # decision logic (skip-empty-pane, skip-malformed-pane,
+                # skip-live-pane, reap-dead-pane, TERM->KILL escalation,
+                # PID-reuse detection, no-tmux handling) lives host-side in
+                # reap_orphans(), never here. Fixture lines are three
+                # tab-separated columns: <pid>\t<pane>\t<start>.
                 if [[ "${USER_FLAG}" != root ]]; then
                     echo "mock: TMUX_PANE scan on ${CONTAINER} must run as -u root" >&2
                     exit 6
@@ -141,7 +169,8 @@ case "${1:-}" in
                     exit 8
                 fi
                 # Real SIGTERM semantics are simulated via the preset liveness
-                # state file (set_alive/set_dead in the test), not decided here.
+                # state file (set_live_start/set_gone in the test), not
+                # decided here.
                 exit 0
                 ;;
             *"kill -KILL"*)
@@ -154,18 +183,37 @@ case "${1:-}" in
                     exit 9
                 fi
                 PID="$(grep -oE '[0-9]+' <<<"${CMD}" | tail -1)"
-                printf 'dead' > "${LIVENESS_DIR}/${PID}"
+                printf 'gone' > "${LIVENESS_DIR}/${PID}"
                 exit 0
                 ;;
-            *"kill -0"*)
+            *"__GONE__"*)
+                # Pre-SIGKILL probe (replaces kill -0): a canned in-container
+                # /proc/<pid>/stat read. Always exits 0 unless
+                # MOCK_LIVENESS_FAIL simulates a container-exec transport
+                # failure (daemon unreachable / container gone). On success,
+                # prints the pid's current start time, or the sentinel
+                # __GONE__ if the state was set via set_gone. State is keyed
+                # by pid via LIVENESS_DIR, same as the old kill -0 model, but
+                # start-time-aware (see set_live_start/set_gone below).
                 if [[ "${USER_FLAG}" != root ]]; then
                     echo "mock: kill on ${CONTAINER} must run as -u root" >&2
                     exit 6
                 fi
+                if [[ "${MOCK_LIVENESS_FAIL:-}" == "${CONTAINER}" ]]; then
+                    echo "mock ${RUNTIME_NAME} exec: simulated liveness-probe transport failure on ${CONTAINER}" >&2
+                    exit 10
+                fi
                 PID="$(grep -oE '[0-9]+' <<<"${CMD}" | tail -1)"
                 STATE_FILE="${LIVENESS_DIR}/${PID}"
-                if [[ -f "${STATE_FILE}" ]] && [[ "$(cat "${STATE_FILE}")" == dead ]]; then
-                    exit 1
+                if [[ -f "${STATE_FILE}" ]]; then
+                    STATE="$(cat "${STATE_FILE}")"
+                    case "${STATE}" in
+                        gone) printf '__GONE__\n' ;;
+                        live:*) printf '%s\n' "${STATE#live:}" ;;
+                        *) printf '__GONE__\n' ;;
+                    esac
+                else
+                    printf '__GONE__\n'
                 fi
                 exit 0
                 ;;
@@ -241,6 +289,7 @@ reset_state() {
     export MOCK_SCAN_FAIL=""
     export MOCK_TERM_FAIL=""
     export MOCK_KILL_FAIL=""
+    export MOCK_LIVENESS_FAIL=""
     export MOCK_TMUX_MODE="ok"
     export MOCK_LIVE_PANES=""
     export AGENT_SAND_REAP_GRACE_SECS=0
@@ -264,8 +313,15 @@ write_scan() {
     printf '%s\n' "$@" >> "${SCAN_DIR}/${container}"
 }
 
-set_alive() { printf 'alive' > "${LIVENESS_DIR}/$1"; }
-set_dead() { printf 'dead' > "${LIVENESS_DIR}/$1"; }
+# set_live_start <pid> <start>: pid is still alive at the pre-SIGKILL probe;
+# the probe reports <start> as its current /proc/<pid>/stat start time. Pair
+# with a matching <start> in the scan fixture for "genuinely the same
+# process" (escalates to SIGKILL); use a mismatched <start> to simulate a
+# PID-reuse during the grace window (SIGKILL skipped).
+set_live_start() { printf 'live:%s' "$2" > "${LIVENESS_DIR}/$1"; }
+# set_gone <pid>: pid is gone by the time of the pre-SIGKILL probe; the
+# probe reports the __GONE__ sentinel (no-op, not an error).
+set_gone() { printf 'gone' > "${LIVENESS_DIR}/$1"; }
 
 reaped_line() {
     printf 'reaped\t%s\t%s\t%s' "$1" "$2" "$3"
@@ -303,6 +359,15 @@ assert_calls_contains() {
     fi
 }
 
+assert_calls_not_contains() {
+    local needle="$1"
+    if grep -Fq -- "${needle}" "${CALLS_FILE}"; then
+        fail "did not expect calls log to contain: ${needle}"
+    else
+        pass
+    fi
+}
+
 assert_exit_zero() {
     if [[ "${EXIT_CODE}" -eq 0 ]]; then
         pass
@@ -327,12 +392,12 @@ case_1_orphan_termed() {
     reset_state
     local container="claude-sand-orphan1"
     add_podman_container "${container}"
-    write_scan "${container}" $'5001\tpane-dead-1'
-    export MOCK_LIVE_PANES="pane-live-x"
-    set_dead 5001
+    write_scan "${container}" $'5001\t%1\t1000'
+    export MOCK_LIVE_PANES="%99"
+    set_gone 5001
     run_reap
     assert_exit_zero
-    assert_contains "$(reaped_line "${container}" 5001 pane-dead-1)"
+    assert_contains "$(reaped_line "${container}" 5001 "%1")"
     assert_calls_contains "podman exec -u root ${container} kill -TERM 5001"
 }
 
@@ -342,12 +407,12 @@ case_2_term_resistant_escalates_to_kill() {
     reset_state
     local container="claude-sand-orphan2"
     add_podman_container "${container}"
-    write_scan "${container}" $'5002\tpane-dead-2'
-    export MOCK_LIVE_PANES="pane-live-x"
-    set_alive 5002
+    write_scan "${container}" $'5002\t%2\t2000'
+    export MOCK_LIVE_PANES="%99"
+    set_live_start 5002 2000
     run_reap
     assert_exit_zero
-    assert_contains "$(reaped_line "${container}" 5002 pane-dead-2)"
+    assert_contains "$(reaped_line "${container}" 5002 "%2")"
     assert_calls_contains "podman exec -u root ${container} kill -TERM 5002"
     assert_calls_contains "podman exec -u root ${container} kill -KILL 5002"
 }
@@ -358,12 +423,12 @@ case_3_empty_pane_never_signaled() {
     reset_state
     local container="claude-sand-orphan3"
     add_podman_container "${container}"
-    write_scan "${container}" $'5003\t' $'5004\tpane-dead-3'
-    export MOCK_LIVE_PANES="pane-live-x"
-    set_dead 5004
+    write_scan "${container}" $'5003\t\t' $'5004\t%3\t3000'
+    export MOCK_LIVE_PANES="%99"
+    set_gone 5004
     run_reap
     assert_exit_zero
-    assert_contains "$(reaped_line "${container}" 5004 pane-dead-3)"
+    assert_contains "$(reaped_line "${container}" 5004 "%3")"
     local skip_needle
     skip_needle=$'\t5003\t'
     assert_not_contains "${skip_needle}"
@@ -376,12 +441,12 @@ case_4_live_pane_never_signaled() {
     reset_state
     local container="claude-sand-orphan4"
     add_podman_container "${container}"
-    write_scan "${container}" $'5005\tpane-live-y' $'5006\tpane-dead-4'
-    export MOCK_LIVE_PANES="pane-live-y"
-    set_dead 5006
+    write_scan "${container}" $'5005\t%4\t4000' $'5006\t%5\t5000'
+    export MOCK_LIVE_PANES="%4"
+    set_gone 5006
     run_reap
     assert_exit_zero
-    assert_contains "$(reaped_line "${container}" 5006 pane-dead-4)"
+    assert_contains "$(reaped_line "${container}" 5006 "%5")"
     local skip_needle
     skip_needle=$'\t5005\t'
     assert_not_contains "${skip_needle}"
@@ -394,14 +459,14 @@ case_5_no_tmux_server_reaps_everything() {
     reset_state
     local container="claude-sand-notmux"
     add_podman_container "${container}"
-    write_scan "${container}" $'6001\tpane-a' $'6002\tpane-b' $'6003\t'
+    write_scan "${container}" $'6001\t%6\t6000' $'6002\t%7\t6001' $'6003\t\t'
     export MOCK_TMUX_MODE="noserver"
-    set_dead 6001
-    set_dead 6002
+    set_gone 6001
+    set_gone 6002
     run_reap
     assert_exit_zero
-    assert_contains "$(reaped_line "${container}" 6001 pane-a)"
-    assert_contains "$(reaped_line "${container}" 6002 pane-b)"
+    assert_contains "$(reaped_line "${container}" 6001 "%6")"
+    assert_contains "$(reaped_line "${container}" 6002 "%7")"
     local skip_needle
     skip_needle=$'\t6003\t'
     assert_not_contains "${skip_needle}"
@@ -414,9 +479,8 @@ case_6_genuine_tmux_error_hard_fails() {
     reset_state
     local container="claude-sand-tmuxerr"
     add_podman_container "${container}"
-    write_scan "${container}" $'6101\tpane-c'
+    write_scan "${container}" $'6101\t%8\t6100'
     export MOCK_TMUX_MODE="error"
-    set_dead 6101
     run_reap
     assert_exit_nonzero
     assert_contains "Error:"
@@ -433,15 +497,15 @@ case_7_both_runtimes_scanned() {
     local podman_container="codex-sand-orphan-podman"
     add_docker_container "${docker_container}"
     add_podman_container "${podman_container}"
-    write_scan "${docker_container}" $'7001\tpane-d'
-    write_scan "${podman_container}" $'7002\tpane-p'
-    export MOCK_LIVE_PANES="pane-live-z"
-    set_dead 7001
-    set_dead 7002
+    write_scan "${docker_container}" $'7001\t%9\t7000'
+    write_scan "${podman_container}" $'7002\t%10\t7001'
+    export MOCK_LIVE_PANES="%20"
+    set_gone 7001
+    set_gone 7002
     run_reap
     assert_exit_zero
-    assert_contains "$(reaped_line "${docker_container}" 7001 pane-d)"
-    assert_contains "$(reaped_line "${podman_container}" 7002 pane-p)"
+    assert_contains "$(reaped_line "${docker_container}" 7001 "%9")"
+    assert_contains "$(reaped_line "${podman_container}" 7002 "%10")"
     assert_calls_contains "docker exec -u root ${docker_container}"
     assert_calls_contains "podman exec -u root ${podman_container}"
 }
@@ -452,8 +516,8 @@ case_8_nothing_to_reap() {
     reset_state
     local container="claude-sand-clean"
     add_podman_container "${container}"
-    write_scan "${container}" $'8001\tpane-live-clean'
-    export MOCK_LIVE_PANES="pane-live-clean"
+    write_scan "${container}" $'8001\t%11\t8000'
+    export MOCK_LIVE_PANES="%11"
     run_reap
     assert_exit_zero
     assert_contains "No orphaned processes found."
@@ -468,7 +532,7 @@ case_9_genuine_exec_failure_hard_fails() {
     reset_state
     local container="claude-sand-failcase"
     add_podman_container "${container}"
-    write_scan "${container}" $'9001\tpane-e'
+    write_scan "${container}" $'9001\t%12\t9000'
     export MOCK_SCAN_FAIL="${container}"
     run_reap
     assert_exit_nonzero
@@ -483,10 +547,9 @@ case_10_genuine_term_failure_hard_fails() {
     reset_state
     local container="claude-sand-termfail"
     add_podman_container "${container}"
-    write_scan "${container}" $'10001\tpane-f'
-    export MOCK_LIVE_PANES="pane-live-x"
+    write_scan "${container}" $'10001\t%13\t10000'
+    export MOCK_LIVE_PANES="%99"
     export MOCK_TERM_FAIL="${container}"
-    set_dead 10001
     run_reap
     assert_exit_nonzero
     assert_contains "Error:"
@@ -500,13 +563,79 @@ case_11_genuine_kill_failure_hard_fails() {
     reset_state
     local container="claude-sand-killfail"
     add_podman_container "${container}"
-    write_scan "${container}" $'11001\tpane-g'
-    export MOCK_LIVE_PANES="pane-live-x"
+    write_scan "${container}" $'11001\t%14\t11000'
+    export MOCK_LIVE_PANES="%99"
     export MOCK_KILL_FAIL="${container}"
-    set_alive 11001
+    set_live_start 11001 11000
     run_reap
     assert_exit_nonzero
     assert_contains "Error:"
+}
+
+# ---------------------------------------------------------------------------
+case_12_malformed_pane_skipped() {
+    echo "case: malformed TMUX_PANE values (not matching ^%[0-9]+\$) are never signaled, and logged with a distinct note"
+    reset_state
+    local container="claude-sand-malformed"
+    add_podman_container "${container}"
+    write_scan "${container}" \
+        $'12001\t%foo\t1000' \
+        $'12002\tbad\t1000' \
+        $'12003\t%1x\t1000' \
+        $'12004\t%15\t1000'
+    export MOCK_LIVE_PANES="%99"
+    set_gone 12004
+    run_reap
+    assert_exit_zero
+    assert_calls_not_contains "kill -TERM 12001"
+    assert_calls_not_contains "kill -TERM 12002"
+    assert_calls_not_contains "kill -TERM 12003"
+    local skip_needle
+    skip_needle=$'\t12001\t'
+    assert_not_contains "${skip_needle}"
+    assert_contains "Note: process 12001 in container ${container} has a malformed TMUX_PANE value; skipping."
+    assert_contains "Note: process 12002 in container ${container} has a malformed TMUX_PANE value; skipping."
+    assert_contains "Note: process 12003 in container ${container} has a malformed TMUX_PANE value; skipping."
+    assert_contains "$(reaped_line "${container}" 12004 "%15")"
+}
+
+# ---------------------------------------------------------------------------
+case_13_pid_reuse_during_grace_skips_kill() {
+    echo "case: a PID reused by an unrelated process during the grace window is not SIGKILL'd (identity mismatch)"
+    reset_state
+    local container="claude-sand-reused"
+    add_podman_container "${container}"
+    write_scan "${container}" $'13001\t%16\t1000'
+    export MOCK_LIVE_PANES="%99"
+    # Recorded start (scan time) is 1000; the pre-SIGKILL probe reports 9999
+    # -- an unrelated process now owns pid 13001. SIGTERM was already sent
+    # (and is reported reaped) before the mismatch is discovered.
+    set_live_start 13001 9999
+    run_reap
+    assert_exit_zero
+    assert_contains "$(reaped_line "${container}" 13001 "%16")"
+    assert_calls_contains "podman exec -u root ${container} kill -TERM 13001"
+    assert_calls_not_contains "kill -KILL 13001"
+}
+
+# ---------------------------------------------------------------------------
+case_14_liveness_transport_failure_hard_fails() {
+    echo "case: a container-exec transport failure at the pre-SIGKILL probe surfaces as an Error, distinct from a genuine __GONE__ no-op"
+    reset_state
+    local container="claude-sand-transportfail"
+    add_podman_container "${container}"
+    write_scan "${container}" $'14001\t%17\t1000'
+    export MOCK_LIVE_PANES="%99"
+    export MOCK_LIVENESS_FAIL="${container}"
+    run_reap
+    assert_exit_nonzero
+    assert_contains "Error:"
+    # SIGTERM had already succeeded and been reported before the probe's
+    # transport failure -- this is a genuine mid-escalation error, not a
+    # silent "process already gone" (__GONE__) no-op, and the run must not
+    # reach the final success summary line.
+    assert_contains "$(reaped_line "${container}" 14001 "%17")"
+    assert_not_contains "No orphaned processes found."
 }
 
 case_1_orphan_termed
@@ -520,6 +649,9 @@ case_8_nothing_to_reap
 case_9_genuine_exec_failure_hard_fails
 case_10_genuine_term_failure_hard_fails
 case_11_genuine_kill_failure_hard_fails
+case_12_malformed_pane_skipped
+case_13_pid_reuse_during_grace_skips_kill
+case_14_liveness_transport_failure_hard_fails
 
 echo
 echo "passed: ${PASSES}, failed: ${FAILURES}"

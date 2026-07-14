@@ -244,14 +244,35 @@ fi
 # RUNTIME used elsewhere in this script, since orphans can exist under either
 # docker or podman regardless of which one is preferred here.
 #
-# Minimal POSIX in-container scan: emits "<pid>\t<pane>" for every process
-# whose environ carries a TMUX_PANE key (pane may be empty), skipping
-# processes lacking the key entirely. All classification (skip-empty-pane,
-# skip-live-pane, reap-dead-pane, TERM->KILL escalation, no-tmux handling)
-# happens host-side below, never inside this canned scan.
+# Minimal POSIX in-container scan: emits "<pid>\t<pane>\t<start>" for every
+# process whose environ carries a TMUX_PANE key (pane may be empty; <start>
+# is that process's start time, /proc/<pid>/stat field 22, read in the same
+# loop pass -- no extra per-process exec round-trip; empty if the stat line
+# couldn't be read/parsed), skipping processes lacking the TMUX_PANE key
+# entirely. All classification -- skip-empty-pane, skip-malformed-pane
+# (pane-format validation against tmux's real pane-id format ^%[0-9]+$),
+# skip-live-pane, reap-dead-pane, TERM->KILL escalation, PID-reuse
+# detection, no-tmux handling -- happens host-side below, never inside this
+# canned scan.
 # shellcheck disable=SC2016 # single-quoted on purpose: these $vars must expand
 # inside the container's sh -c, not on the host where this string is defined.
-REAP_SCAN_SCRIPT='for e in /proc/[0-9]*/environ; do [ -f "$e" ] || continue; p=${e#/proc/}; p=${p%/environ}; line=$(tr "\0" "\n" < "$e" 2>/dev/null | grep "^TMUX_PANE=") || continue; printf "%s\t%s\n" "$p" "${line#TMUX_PANE=}"; done'
+REAP_SCAN_SCRIPT='for e in /proc/[0-9]*/environ; do [ -f "$e" ] || continue; p=${e#/proc/}; p=${p%/environ}; line=$(tr "\0" "\n" < "$e" 2>/dev/null | grep "^TMUX_PANE=") || continue; st=$(cat "/proc/$p/stat" 2>/dev/null); st=${st##*) }; set -- $st; if [ "$#" -ge 20 ]; then shift 19; start=$1; else start=""; fi; printf "%s\t%s\t%s\n" "$p" "${line#TMUX_PANE=}" "$start"; done'
+
+# Pre-SIGKILL liveness/identity probe (replaces the ambiguous `kill -0`
+# check): invoked as `sh -c "${REAP_LIVENESS_SCRIPT}" _ "${pid}"` -- pid is
+# passed as an argument, never interpolated into the script text. Reads
+# /proc/<pid>/stat field 22 and prints the process's *current* start time on
+# stdout if it is still alive, or the sentinel __GONE__ if it is not (stat
+# unreadable/empty, i.e. no such process). Prints __NOSTAT__ if the process
+# exists but its stat line couldn't be parsed into 20+ fields (edge case:
+# alive but unverifiable). Always exits 0 if it ran at all, so a non-zero
+# exit from the surrounding `<rt> exec` call means the exec transport itself
+# failed (container gone / daemon unreachable), not "process gone" -- see
+# reap_orphans()'s escalation loop for the host-side classification
+# (transport failure / gone / PID-reuse mismatch / unverifiable / match).
+# shellcheck disable=SC2016 # single-quoted on purpose: $1/$# are the probe's
+# own positional parameters, expanded inside the container's sh -c, not here.
+REAP_LIVENESS_SCRIPT='pid="$1"; st=$(cat "/proc/$pid/stat" 2>/dev/null); if [ -z "$st" ]; then printf "__GONE__\n"; exit 0; fi; st=${st##*) }; set -- $st; if [ "$#" -ge 20 ]; then shift 19; printf "%s\n" "$1"; else printf "__NOSTAT__\n"; fi; exit 0'
 
 reap_orphans() {
     # Read once; AGENT_SAND_REAP_GRACE_SECS lets callers tune the SIGTERM ->
@@ -328,10 +349,16 @@ reap_orphans() {
             [[ -z "${scan_out}" ]] && continue
 
             local term_pids=()
-            local pid pane
-            while IFS=$'\t' read -r pid pane; do
+            local term_starts=()
+            local pid pane start
+            while IFS=$'\t' read -r pid pane start; do
                 [[ -z "${pid}" ]] && continue
                 [[ -z "${pane}" ]] && continue
+
+                if [[ ! "${pane}" =~ ^%[0-9]+$ ]]; then
+                    echo "Note: process ${pid} in container ${container} has a malformed TMUX_PANE value; skipping."
+                    continue
+                fi
 
                 if ! "${no_tmux_server}" && [[ -n "${LIVE_PANES[${pane}]+_}" ]]; then
                     continue
@@ -351,25 +378,61 @@ reap_orphans() {
                 printf 'reaped\t%s\t%s\t%s\n' "${container}" "${pid}" "${pane}"
                 reaped_count=$((reaped_count + 1))
                 term_pids+=("${pid}")
+                term_starts+=("${start}")
             done <<< "${scan_out}"
 
             if [[ "${#term_pids[@]}" -gt 0 ]]; then
                 sleep "${grace}"
-                for pid in "${term_pids[@]}"; do
-                    # -u root: see comment above the scan call. Non-zero here
-                    # legitimately means "already gone" (exempt from the
-                    # no-`|| true` rule since it's tested, not swallowed).
-                    if "${rt}" exec -u root "${container}" kill -0 "${pid}"; then
-                        local kill_exit
-                        if "${rt}" exec -u root "${container}" kill -KILL "${pid}"; then
-                            kill_exit=0
-                        else
-                            kill_exit=$?
-                        fi
-                        if [[ "${kill_exit}" -ne 0 ]]; then
-                            echo "Error: failed to send SIGKILL to pid ${pid} in container ${container}." >&2
-                            return 1
-                        fi
+                local i
+                for i in "${!term_pids[@]}"; do
+                    pid="${term_pids[$i]}"
+                    local recorded_start="${term_starts[$i]}"
+
+                    # -u root: see comment above the scan call. Pid is passed
+                    # as an argument to the probe, never interpolated. This
+                    # replaces the ambiguous `kill -0` check: exit status is
+                    # captured explicitly (function-as-condition set -e
+                    # suspension -- see dev-sandbox/CLAUDE.md) so a non-zero
+                    # exit here means the exec transport itself failed, not
+                    # "process gone" -- a hard error, not swallowed.
+                    local probe_out probe_exit
+                    if probe_out="$("${rt}" exec -u root "${container}" sh -c "${REAP_LIVENESS_SCRIPT}" _ "${pid}" 2>"${tmp_dir}/liveness.err")"; then
+                        probe_exit=0
+                    else
+                        probe_exit=$?
+                    fi
+                    if [[ "${probe_exit}" -ne 0 ]]; then
+                        echo "Error: failed to probe liveness of pid ${pid} in container ${container}: $(cat "${tmp_dir}/liveness.err" 2>/dev/null || true)" >&2
+                        return 1
+                    fi
+
+                    # __GONE__: process already gone by probe time -- no-op,
+                    # not an error.
+                    if [[ "${probe_out}" == "__GONE__" ]]; then
+                        continue
+                    fi
+
+                    # A recorded start (non-empty) that doesn't match the
+                    # probe's current start time means the pid was reused by
+                    # an unrelated process during the grace window -- treat
+                    # as already-gone, skip SIGKILL, not an error.
+                    # __NOSTAT__ (stat unparseable but process exists) and an
+                    # empty recorded start (scan couldn't read stat at scan
+                    # time) both fall back to liveness-only: proceed to
+                    # SIGKILL, best-effort, can't prove reuse either way.
+                    if [[ -n "${recorded_start}" && "${probe_out}" != "__NOSTAT__" && "${probe_out}" != "${recorded_start}" ]]; then
+                        continue
+                    fi
+
+                    local kill_exit
+                    if "${rt}" exec -u root "${container}" kill -KILL "${pid}"; then
+                        kill_exit=0
+                    else
+                        kill_exit=$?
+                    fi
+                    if [[ "${kill_exit}" -ne 0 ]]; then
+                        echo "Error: failed to send SIGKILL to pid ${pid} in container ${container}." >&2
+                        return 1
                     fi
                 done
             fi
