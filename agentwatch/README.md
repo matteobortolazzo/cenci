@@ -533,7 +533,8 @@ agentwatch status
 | `-symbol-running` | `▶` | Symbol for running count |
 | `-symbol-done` | `✓` | Symbol for done count |
 | `-symbol-input` | `!` | Symbol for need-input count |
-| `-symbol-dispatch` | `⟳` | Symbol for the fleet dispatch loop indicator |
+| `-symbol-dispatch` | `⟳` | Symbol for the fleet dispatch loop indicator (idle/enabled state) |
+| `-symbol-dispatch-running` | `⚙` | Symbol for a fleet dispatch pass actively running |
 
 #### Waybar config
 
@@ -606,11 +607,24 @@ object passed through verbatim from the broadcast snapshot:
 }
 ```
 
-`text` gets a compact `⟳` glyph appended (default; override with `-symbol-dispatch`),
-and `tooltip` gets a summary line, e.g. `dispatch: on (5m) — last run 12:04, 2
-dispatched / 3 skipped`, or `dispatch: on (5m) — last run failed: <err>` after a
-failed pass. Both are omitted entirely when the loop is disabled/absent — byte-compatible
-with output from before this field existed. `class` is unaffected (session-status
+At most one dispatch glyph is ever appended to `text`, chosen by priority: while a
+pass is actively running (`pass_running: true`) the module shows a distinct
+`⚙` glyph (default; override with `-symbol-dispatch-running`); otherwise, if the
+loop is enabled but idle, it falls back to the `⟳` glyph (default; override with
+`-symbol-dispatch`); if the loop isn't enabled, no dispatch glyph is shown at all.
+`tooltip` gets a summary line regardless of which glyph is chosen, e.g. `dispatch:
+on (5m) — last run 12:04, 2 dispatched / 3 skipped`, or `dispatch: on (5m) — last
+run failed: <err>` after a failed pass — tooltip wording is unaffected by the
+running/idle glyph choice. Both `text` and `tooltip` are omitted entirely when the
+loop is disabled/absent — byte-compatible with output from before this field
+existed.
+
+The `enabled` and `pass_running` fields in the raw `dispatch` JSON object remain
+independently available regardless of the max-one-icon rule above — that rule only
+governs which single glyph the default Waybar `text`/`tooltip` rendering picks. Any
+consumer (GNOME/Plasma/DMS/noctalia widgets) that wants to render both states
+independently (e.g. a spinning icon plus a separate enabled indicator) can do so
+from the raw fields directly. `class` is unaffected (session-status
 priority is unchanged; it stays `"none"` when there are zero live sessions,
 dispatch-enabled or not), but `alt` becomes `"dispatch-only"` instead of `"none"`
 when there are zero live sessions and the loop is enabled — **`alt`, not `class`, is
