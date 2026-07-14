@@ -87,6 +87,22 @@ check_order() {
   fi
 }
 
+# check_count <name> <haystack> <needle> <expected-count>
+# Asserts <needle> appears on exactly <expected-count> lines of output.
+# Catches JS/Go dispatch-row formatting drift that renders a duplicate row.
+check_count() {
+  local name="$1" haystack="$2" needle="$3" want="$4" got
+  got="$(printf '%s\n' "$haystack" | grep -cF -- "$needle")"
+  if [ "$got" -eq "$want" ]; then
+    echo "ok   - $name"
+    pass=$((pass + 1))
+  else
+    echo "FAIL - $name (wanted $want occurrence(s) of: $needle; got $got)"
+    printf '%s\n' "$haystack" | sed 's/^/           /'
+    fail=$((fail + 1))
+  fi
+}
+
 # run_plugin <fixture-file-or-empty> <exit-code>
 # Builds a stub that prints the fixture (if any) and exits with the given code,
 # then runs the plugin with AGENTWATCH_BIN pointed at it.
@@ -206,7 +222,7 @@ cat > "$TMP/dispatch-success.json" <<'JSON'
 {"text":"▶ 1  ⟳","tooltip":"work:1 - build (running)\ndispatch: on (5m) — last run 12:04, 2 dispatched / 3 skipped","class":"running","alt":"active","dispatch":{"enabled":true,"daemon_running":true,"interval":"5m","pass_running":false,"last_run_at":"2026-07-13T12:04:00Z","last_dispatched":2,"last_skipped":3}}
 JSON
 out="$(run_plugin "$TMP/dispatch-success.json" 0)"
-check "dispatch success dropdown row (dedicated, not generic fallback)" "$out" "dispatch: on (5m) — last run"
+check_count "dispatch success summary row rendered exactly once (no JS/Go drift duplicate)" "$out" "dispatch: on (5m) — last run" 1
 check "dispatch success dropdown row shows the counts" "$out" "2 dispatched / 3 skipped"
 check "session row still renders normally alongside the dispatch row" \
   "$out" "work:1 - build | sfimage=brain.head.profile.fill sfcolor=blue"
@@ -216,7 +232,7 @@ cat > "$TMP/dispatch-error.json" <<'JSON'
 {"text":"▶ 1  ⟳","tooltip":"work:1 - build (running)\ndispatch: on (5m) — last run failed: boom","class":"running","alt":"active","dispatch":{"enabled":true,"daemon_running":true,"interval":"5m","pass_running":false,"last_dispatched":0,"last_skipped":0,"last_error":"boom"}}
 JSON
 out="$(run_plugin "$TMP/dispatch-error.json" 0)"
-check "dispatch error dropdown row shows the failure" "$out" "dispatch: on (5m) — last run failed: boom"
+check_count "dispatch error summary row rendered exactly once (no JS/Go drift duplicate)" "$out" "dispatch: on (5m) — last run failed: boom" 1
 
 # --- Case 10: dispatch success with malformed last_run_at ------------------
 #

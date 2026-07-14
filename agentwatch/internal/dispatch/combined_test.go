@@ -163,3 +163,34 @@ func TestCombinedTickHeadroomEmptyWhenNoAgentLimitsConfigured(t *testing.T) {
 		t.Fatal("expected an end-of-tick attention push on a successful tick")
 	}
 }
+
+// TestSanitizeLastError locks in sanitizeLastError's contract: it replaces
+// the status JSON's field delimiter (`|`) and line breaks (`\n`, `\r`) with
+// spaces, then collapses runs of whitespace into one space, trimmed. This
+// guarantees passError's current enum-literal outputs pass through
+// unchanged (the key behavior-preservation assertion) while defending the
+// future case where passError is enriched with real error text.
+func TestSanitizeLastError(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "empty passthrough", input: "", want: ""},
+		{name: "current enum literal unchanged", input: "dispatch_pass_failed", want: "dispatch_pass_failed"},
+		{name: "pipe", input: "boom | bang", want: "boom bang"},
+		{name: "newline", input: "line1\nline2", want: "line1 line2"},
+		{name: "CRLF collapses to one space", input: "a\r\nb", want: "a b"},
+		{name: "mixed delimiters and repeated whitespace", input: "err|\n\r  detail", want: "err detail"},
+		{name: "trim and internal collapse", input: "  leading and trailing  ", want: "leading and trailing"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeLastError(tt.input)
+			if got != tt.want {
+				t.Errorf("sanitizeLastError(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
