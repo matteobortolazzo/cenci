@@ -23,6 +23,20 @@ var ErrNoOutput = errors.New("no output")
 // the SymbolFailed wiring precedent.
 const DefaultSymbolDispatch = "⟳"
 
+// pangoReplacer escapes the three Pango markup-special characters for text
+// interpolated into the Waybar tooltip, which Waybar renders as Pango
+// markup. This is a single non-overlapping left-to-right pass, so the "&"
+// it introduces when escaping "<"/">" is never itself re-escaped. This is
+// distinct from sanitizeLastError in internal/dispatch/combined.go, which
+// defends SwiftBar (a different renderer with a different threat model) —
+// do not merge the two.
+var pangoReplacer = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+
+// escapePango escapes &, <, > for safe interpolation into Pango markup.
+func escapePango(s string) string {
+	return pangoReplacer.Replace(s)
+}
+
 // Config holds the symbol settings for waybar output.
 type Config struct {
 	SocketPath      string
@@ -121,12 +135,13 @@ func Format(snap *ipc.StateSnapshot, cfg Config) output {
 		if name == "" {
 			name = w.Agent
 		}
+		name = escapePango(name)
 		if w.Session == "" {
 			// Paneless session (no tmux window) — no target prefix.
 			lines = append(lines, fmt.Sprintf("%s (%s)", name, w.Status))
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("%s:%s - %s (%s)", w.Session, w.WindowIndex, name, w.Status))
+		lines = append(lines, fmt.Sprintf("%s:%s - %s (%s)", escapePango(w.Session), w.WindowIndex, name, w.Status))
 	}
 	tooltip := strings.Join(lines, "\n")
 
@@ -197,7 +212,7 @@ func formatDispatch(cfg Config, d *watch.DispatchState) (glyph string, line stri
 	}
 	switch {
 	case d.LastError != "":
-		summary += fmt.Sprintf(" — last run failed: %s", d.LastError)
+		summary += fmt.Sprintf(" — last run failed: %s", escapePango(d.LastError))
 	case d.LastRunAt != "":
 		summary += fmt.Sprintf(" — last run %s, %d dispatched / %d skipped", formatLastRunTime(d.LastRunAt), d.LastDispatched, d.LastSkipped)
 	}

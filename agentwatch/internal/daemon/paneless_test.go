@@ -90,6 +90,7 @@ func TestDaemon_EmptyPaneEventDoesNotDowngradeKnownPane(t *testing.T) {
 	sess := d.sessions["sess1"]
 	if sess == nil {
 		t.Fatal("expected session tracked")
+		return
 	}
 	if sess.TmuxPane != "%0" {
 		t.Errorf("expected known pane %%0 kept on empty-pane event, got %q", sess.TmuxPane)

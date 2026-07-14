@@ -322,6 +322,7 @@ func TestDaemon_MaliciousPaneTitleSanitized(t *testing.T) {
 	sess := d.sessions["sess1"]
 	if sess == nil {
 		t.Fatal("expected session to be tracked")
+		return
 	}
 	if sess.TaskName != "evilnamehere" {
 		t.Errorf("expected sess.TaskName='evilnamehere', got %q", sess.TaskName)

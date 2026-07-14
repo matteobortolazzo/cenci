@@ -429,6 +429,7 @@ func TestDaemon_SweepStaleWithRenumbering(t *testing.T) {
 	wi := d.frontend.WindowInfo("s2")
 	if wi == nil {
 		t.Fatal("expected s2's window still tracked after migration")
+		return
 	}
 	if wi.Session != "main" || wi.WindowIndex != "1" {
 		t.Errorf("expected s2's state migrated to main:1, got %s:%s", wi.Session, wi.WindowIndex)
@@ -632,6 +633,7 @@ func TestDaemon_WindowRenumberingMigratesState(t *testing.T) {
 	wi := d.frontend.WindowInfo("s2")
 	if wi == nil {
 		t.Fatal("expected s2's window still tracked after migration")
+		return
 	}
 	if wi.Session != "main" || wi.WindowIndex != "1" {
 		t.Errorf("expected s2's state migrated to main:1, got %s:%s", wi.Session, wi.WindowIndex)

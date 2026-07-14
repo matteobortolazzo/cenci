@@ -107,6 +107,7 @@ func TestBuildSnapshot_DispatchOverlayPresentWhenSet(t *testing.T) {
 
 	if snap.Dispatch == nil {
 		t.Fatal("expected snap.Dispatch to be set, got nil")
+		return
 	}
 	if !snap.Dispatch.Enabled {
 		t.Errorf("snap.Dispatch.Enabled = false, want true")
