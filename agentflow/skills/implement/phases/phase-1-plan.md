@@ -184,7 +184,7 @@ Review the plan above. To implement, start a fresh session and run:
 
 To discard it and re-plan, re-run /agentflow:implement <ticket-id or task> with `replan` as context.
 
-If the task appears too large for a single PR, consider running /refine to split it first.
+If the task risks exceeding the implementing agent's context budget (see `docs/ticket-sizing.md`), consider running /refine to split it first.
 
 The SessionStart hook will also remind you of pending plans.
 ```

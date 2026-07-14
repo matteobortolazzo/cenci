@@ -11,10 +11,12 @@ GitHub Issues for tracking. GitHub for code and PRs.
 - Keep tickets well-scoped. 1 ticket = 1 PR.
 - Use git worktrees for all feature work. Never modify code in main worktree.
 - Interactive (Claude-only) skills must route every user question/confirmation through `AskUserQuestion` and never say a bare "ask the user"; cross-tool-portable skills use abstract wording instead (e.g., "the client's available user-input mechanism").
+- All shared temp files written by phases or agents (e.g., `/tmp/claude/agentflow-diff.patch`) must be uniquely scoped by worktree path, run ID, or session UUID to prevent silent collisions when multiple concurrent `/agentflow:implement` jobs execute in the same monorepo. Fixed paths without scoping cause competing runs to overwrite each other's state, risking reviewers analyzing wrong diffs or broken context.
 
 ## Reference Docs
 On-demand topic docs live at `docs/`:
 - `docs/git-workflow.md` — branching, commits, PRs, versioning
 - `docs/skill-authoring.md` — writing skills that generate/regenerate files, especially with external-sourced values
+- `docs/ticket-sizing.md` — how tickets are sized against the ~200k agent context budget and when to split
 
 `.claude/rules/` is reserved for files explicitly `@`-imported by this CLAUDE.md (auto-loaded at session start). It is not used today.
