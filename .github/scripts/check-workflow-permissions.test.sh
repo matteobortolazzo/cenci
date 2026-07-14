@@ -77,11 +77,47 @@ ${with_block}
 EOF
 }
 
+# write_caller_scalar_permissions <workflows_dir> <filename> <permissions_value>
+# <with_block> — like write_caller, but for fixtures that need a scalar
+# permissions: value (e.g. `write-all`) rather than a nested mapping.
+# write_caller always emits `permissions:\n  <block>`, which can only ever
+# produce a mapping — this variant is needed to cover the scalar-shorthand
+# case that rule 2 (mapping-type assertion) must reject.
+write_caller_scalar_permissions() {
+    local wf_dir="$1" filename="$2" permissions_value="$3" with_block="$4"
+    cat > "${wf_dir}/${filename}" <<EOF
+name: fixture caller
+
+on:
+  push:
+    branches: [main]
+
+permissions: ${permissions_value}
+
+jobs:
+  bump:
+    uses: ./.github/workflows/plugin-version-bump.yml
+    with:
+${with_block}
+    secrets: inherit
+EOF
+}
+
 # run_check <dir> — runs check-workflow-permissions.sh with cwd set to <dir>.
 # Sets CHECK_EXIT and CHECK_STDERR.
 run_check() {
     local dir="$1"
     CHECK_STDERR="$(cd "${dir}" && bash "${CHECK_SH}" 2>&1 >/dev/null)"
+    CHECK_EXIT=$?
+}
+
+# run_check_with_path <dir> <extra_path_dir> — like run_check, but prepends
+# <extra_path_dir> to PATH for this single invocation only. The PATH
+# assignment lives inside the `$(...)` command substitution subshell, so it
+# never leaks into the rest of this test script or later cases.
+run_check_with_path() {
+    local dir="$1" extra_path_dir="$2"
+    CHECK_STDERR="$(cd "${dir}" && PATH="${extra_path_dir}:${PATH}" bash "${CHECK_SH}" 2>&1 >/dev/null)"
     CHECK_EXIT=$?
 }
 
@@ -176,6 +212,66 @@ write_caller "${CASE5}/.github/workflows" "case5-caller.yml" \
 "      plugin-name: fixture"
 run_check "${CASE5}"
 assert_exit "case5 extra permission key (id-token)" 1
+
+# ── Case 6: scalar `permissions: write-all` (not a mapping) must fail ──
+# Rule 2 (new) asserts `.permissions | tag` is `!!map` (or `!!null` when
+# absent). A scalar shorthand like `write-all` has tag `!!str`, so this must
+# fail with a message naming the file and the offending tag/value, and must
+# not also emit rule 3/4-style per-key messages for the same file (rule 2
+# `continue`s past the rest of the per-caller checks once it fails).
+echo "case: scalar permissions (write-all) must fail as a mapping violation"
+CASE6="${TEST_ROOT}/case6-scalar-permissions"
+mkdir -p "${CASE6}/.github/workflows"
+write_reusable "${CASE6}/.github/workflows"
+write_caller_scalar_permissions "${CASE6}/.github/workflows" "case6-caller.yml" "write-all" \
+"      plugin-name: fixture"
+run_check "${CASE6}"
+assert_exit "case6 scalar permissions (write-all)" 1
+assert_stderr_contains "case6 failure message names the file" "case6-caller.yml"
+assert_stderr_contains "case6 failure message identifies rule 2" "rule 2 violated"
+assert_stderr_contains "case6 failure message says must be a mapping" "must be a mapping"
+assert_stderr_contains "case6 failure message names the offending tag" "!!str"
+assert_stderr_contains "case6 failure message names the offending value" "write-all"
+case6_fail_lines="$(grep -c "case6-caller.yml" <<< "${CHECK_STDERR}")"
+if [[ "${case6_fail_lines}" -eq 1 ]]; then
+    pass
+else
+    fail "case6 rule 2 must 'continue' past further per-file checks (expected 1 FAIL line naming case6-caller.yml, got ${case6_fail_lines}; stderr: ${CHECK_STDERR})"
+fi
+
+# ── Case 7: non-mikefarah yq on PATH must fail the flavor guard ──
+# A fake `yq` shim is placed on PATH ahead of everything else for this one
+# invocation only (via run_check_with_path, scoped to the command
+# substitution subshell) so it never leaks into other cases. The shim
+# answers `--version` with a bogus, non-mikefarah string; the script must
+# detect the mismatch and exit 1 before any rule or file processing begins.
+# This does not depend on whether the real yq is installed in this
+# environment, since the shim is first on PATH regardless.
+echo "case: non-mikefarah yq on PATH must fail the flavor guard"
+CASE7="${TEST_ROOT}/case7-yq-flavor"
+mkdir -p "${CASE7}/.github/workflows"
+write_reusable "${CASE7}/.github/workflows"
+write_caller "${CASE7}/.github/workflows" "case7-caller.yml" \
+"  contents: write" \
+"      plugin-name: fixture"
+
+SHIM_DIR="${TEST_ROOT}/case7-fake-yq-bin"
+mkdir -p "${SHIM_DIR}"
+cat > "${SHIM_DIR}/yq" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--version" ]]; then
+    echo "yq version 3.4.1 (https://pypi.org/project/yq/)"
+    exit 0
+fi
+echo "fake yq: unsupported invocation in test shim" >&2
+exit 1
+EOF
+chmod +x "${SHIM_DIR}/yq"
+
+run_check_with_path "${CASE7}" "${SHIM_DIR}"
+assert_exit "case7 non-mikefarah yq on PATH" 1
+assert_stderr_contains "case7 failure message names expected flavor" "mikefarah"
+assert_stderr_contains "case7 failure message names detected version string" "3.4.1"
 
 # ── Summary ──────────────────────────────────────────────────────────
 echo

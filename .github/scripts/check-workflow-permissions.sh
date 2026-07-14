@@ -6,16 +6,19 @@
 #   1. At least one caller workflow must exist (jobs.*.uses ending in
 #      plugin-version-bump.yml) — guards against a yq path typo silently
 #      passing with zero workflows checked.
-#   2. Every caller must declare permissions.contents == write.
-#   3. Every caller's .permissions keys must be a subset of {contents,
+#   2. Every caller's .permissions must be a mapping (`!!map`) or absent
+#      (`!!null`); scalar shorthand like `write-all`/`read-all` or a
+#      sequence fails this rule.
+#   3. Every caller must declare permissions.contents == write.
+#   4. Every caller's .permissions keys must be a subset of {contents,
 #      actions} — least-privilege allowlist. `actions` is only permitted
 #      when the caller passes a non-empty dispatch-workflow input, and when
 #      present must be == write. `contents` must be write (checked by rule
-#      2 above). ANY other key present under .permissions (e.g. packages,
+#      3 above). ANY other key present under .permissions (e.g. packages,
 #      id-token) fails this rule regardless of its value — this replaces an
-#      older, narrower rule 4 that only inspected permissions.actions and
+#      older, narrower check that only inspected permissions.actions and
 #      let every other key slip through silently unchecked.
-#   4. The reusable plugin-version-bump.yml workflow itself must declare NO
+#   5. The reusable plugin-version-bump.yml workflow itself must declare NO
 #      top-level permissions: block (GitHub caps a reusable workflow's
 #      effective permissions to whatever the caller grants, so the reusable
 #      workflow should not carry its own).
@@ -55,6 +58,15 @@ if ! command -v yq >/dev/null 2>&1; then
   exit 1
 fi
 
+yq_version=$(yq --version 2>&1) || {
+  echo "FAIL: yq --version failed to execute" >&2
+  exit 1
+}
+if [[ "$yq_version" != *mikefarah* ]]; then
+  echo "FAIL: yq must be mikefarah/yq (Go-yq); found: $yq_version" >&2
+  exit 1
+fi
+
 if [ ! -f "$REUSABLE_WORKFLOW" ]; then
   fail "reusable workflow not found at $REUSABLE_WORKFLOW"
   exit 1
@@ -88,14 +100,24 @@ fi
 echo "Discovered ${#callers[@]} caller workflow(s) of $REUSABLE_SUFFIX:"
 printf '  - %s\n' "${callers[@]}"
 
-# --- Rules 2-3: per-caller permission checks --------------------------------
+# --- Rules 2-4: per-caller permission checks --------------------------------
 for f in "${callers[@]}"; do
+  perm_tag=$(yq '.permissions | tag' "$f") || {
+    fail "$f: yq failed to read .permissions tag"
+    continue
+  }
+  if [ "$perm_tag" != "!!map" ] && [ "$perm_tag" != "!!null" ]; then
+    perm_value=$(yq '.permissions' "$f")
+    fail "$f: rule 2 violated — .permissions must be a mapping (got tag $perm_tag: '$perm_value')"
+    continue
+  fi
+
   contents_perm=$(yq '.permissions.contents // ""' "$f") || {
     fail "$f: yq failed to read .permissions.contents"
     continue
   }
   if [ "$contents_perm" != "write" ]; then
-    fail "$f: rule 2 violated — permissions.contents must be 'write' (got '${contents_perm:-<absent>}')"
+    fail "$f: rule 3 violated — permissions.contents must be 'write' (got '${contents_perm:-<absent>}')"
   fi
 
   dispatch_workflow=$(yq '.jobs.*.with.dispatch-workflow // ""' "$f") || {
@@ -112,35 +134,35 @@ for f in "${callers[@]}"; do
     [ -n "$key" ] || continue
     case "$key" in
       contents)
-        : # already validated by rule 2 above
+        : # already validated by rule 3 above
         ;;
       actions)
         if [ -z "$dispatch_workflow" ]; then
-          fail "$f: rule 3 violated — permissions.actions is declared but no dispatch-workflow input is passed"
+          fail "$f: rule 4 violated — permissions.actions is declared but no dispatch-workflow input is passed"
         else
           actions_perm=$(yq '.permissions.actions // ""' "$f") || {
             fail "$f: yq failed to read .permissions.actions"
             continue
           }
           if [ "$actions_perm" != "write" ]; then
-            fail "$f: rule 3 violated — passes dispatch-workflow ('$dispatch_workflow') but permissions.actions must be 'write' (got '${actions_perm:-<absent>}')"
+            fail "$f: rule 4 violated — passes dispatch-workflow ('$dispatch_workflow') but permissions.actions must be 'write' (got '${actions_perm:-<absent>}')"
           fi
         fi
         ;;
       *)
-        fail "$f: rule 3 violated — permissions.$key is not permitted (only {contents, actions} are allowed under .permissions)"
+        fail "$f: rule 4 violated — permissions.$key is not permitted (only {contents, actions} are allowed under .permissions)"
         ;;
     esac
   done <<< "$perm_keys"
 done
 
-# --- Rule 4: the reusable workflow must declare no top-level permissions ----
+# --- Rule 5: the reusable workflow must declare no top-level permissions ----
 reusable_perms=$(yq '.permissions // ""' "$REUSABLE_WORKFLOW") || {
   fail "$REUSABLE_WORKFLOW: yq failed to read .permissions"
   reusable_perms=""
 }
 if [ -n "$reusable_perms" ]; then
-  fail "$REUSABLE_WORKFLOW: rule 4 violated — must not declare a top-level permissions: block (reusable workflows inherit the caller's grant)"
+  fail "$REUSABLE_WORKFLOW: rule 5 violated — must not declare a top-level permissions: block (reusable workflows inherit the caller's grant)"
 fi
 
 if [ "$FAILED" -ne 0 ]; then
