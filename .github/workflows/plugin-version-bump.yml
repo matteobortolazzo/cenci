@@ -80,7 +80,7 @@ jobs:
           COMMITS=$(git log -1 --pretty=format:"%s%n%b")
           BUMP="patch"
 
-          if echo "$COMMITS" | grep -qiE '^feat!:|^[a-z]+\(.*\)!:|BREAKING CHANGE'; then
+          if echo "$COMMITS" | grep -qiE '^feat!:|^[a-z]+\(.*\)!:|^BREAKING[ -]CHANGE:'; then
             BUMP="major"
           elif echo "$COMMITS" | grep -qiE '^feat(\(|:)'; then
             BUMP="minor"

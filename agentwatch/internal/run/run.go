@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v3/internal/daemon"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/daemon"
 )
 
 // Controller is the small consumer-side tmux interface the launcher needs.

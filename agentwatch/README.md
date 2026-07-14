@@ -474,7 +474,7 @@ hack on agentwatch, or run against a local plugin directory.
 ### Install the binary manually
 
 ```bash
-go install github.com/matteobortolazzo/agent-stack/agentwatch/v3@latest
+go install github.com/matteobortolazzo/agent-stack/agentwatch/v4@latest
 ```
 
 Or build from source:
@@ -684,13 +684,13 @@ The public `pkg/watch` package lets any Go tool subscribe to that stream — for
 example to badge kanban cards or dashboards with per-window agent status.
 
 ```bash
-go get github.com/matteobortolazzo/agent-stack/agentwatch/v3
+go get github.com/matteobortolazzo/agent-stack/agentwatch/v4
 ```
 
 It versions via the existing `agentwatch/v*` submodule tags.
 
 ```go
-import "github.com/matteobortolazzo/agent-stack/agentwatch/v3/pkg/watch"
+import "github.com/matteobortolazzo/agent-stack/agentwatch/v4/pkg/watch"
 
 c, err := watch.Dial(watch.DefaultSocketPath())
 // ... handle err; defer c.Close()
