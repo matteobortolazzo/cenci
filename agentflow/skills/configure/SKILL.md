@@ -449,8 +449,11 @@ After gathering answers:
    | `In Review` | `A2EEEF` | PR open, under review / CI running |
    | `Implemented` | `6F42C1` | PR merged — done |
    | `Followup` | `C5DEF5` | Deferred/out-of-scope item captured from a session — triage before working |
+   | `dispatch-failed` | `b60205` | agentwatch: dispatched work failed after exhausting its retry budget |
+   | `plan-invalid` | `d93f0b` | agentwatch: ticket is Planned but has no parseable plan file |
+   | `reconcile-stuck` | `5319e7` | agentwatch: reconciliation itself is stuck (apply-retry budget exhausted) |
 
-   This is the canonical color/description table — the skills' self-healing `gh label create … || true` fallbacks reference it.
+   This is the canonical color/description table. The lifecycle rows above are self-healed by the skills' own `gh label create … || true` fallbacks; the reconciler-owned `dispatch-failed` / `plan-invalid` / `reconcile-stuck` rows are self-healed instead by agentwatch's Go `GHMutator.EnsureLabels` (not a skill-level fallback) — see "Reconciler-managed labels" under Board lifecycle labels below.
 
 4. **Create or update `.claude/settings.json`**:
 
@@ -875,6 +878,8 @@ in the completion summary so the user can mirror it as columns on their board:
 
 `Followup` is orthogonal to the linear lifecycle above — it is never part of the `New → … → Implemented` chain, applies to a separate followup ticket (not the original), and is never removed.
 
+**Reconciler-managed labels**: `dispatch-failed`, `plan-invalid`, and `reconcile-stuck` are not applied by refine, design, or implement — agentwatch's dispatch reconciler applies them automatically when it detects a stuck or failed automation state (dispatched work exhausted its retry budget, a `Planned` ticket has no parseable plan file, or reconciliation itself is stuck with its apply-retry budget exhausted). Like `Followup`, they are orthogonal to the `New → … → Implemented` lifecycle above and are not columns in that chain.
+
 Lifecycle: `New → Refined → [Designed] → Planned → Working → In Review → Implemented`.
 
 Design always happens on a dedicated design ticket — refine creates one (companion ticket, or first child of a split) whenever a frontend ticket lacks an approved design. Design tickets (labeled `Design`) follow a shorter path: `New → Refined → Designed → closed` — `/agentflow:design` commits the spec on main, propagates `Designed` to the implementation tickets that depend on it (that propagated label is what satisfies implement's Design gate), and closes the design ticket; no plan, no PR (the one exception to "1 ticket = 1 PR"). `/agentflow:implement` redirects `Design`-labeled tickets to `/agentflow:design`. On a board, the `Designed` column therefore holds implementation tickets whose design is ready, not design tickets.
@@ -893,3 +898,11 @@ so the board showed `Working` on a ticket nobody was actively working. Now a pla
 lands the ticket on `Planned` ("a plan exists on disk, ready to pick up"); the swap to
 `Working` happens when the plan-file implementation run begins. New work follows this
 automatically.
+
+**Migration note for existing boards** (state this when re-configuring a project that predates
+the reconciler-managed labels): re-running `/agentflow:configure` on an existing project creates
+the `dispatch-failed`, `plan-invalid`, and `reconcile-stuck` labels retroactively via step 3c's
+missing-only `gh label create` loop. No other action is needed — the reconciler already
+self-heals these labels itself via `EnsureLabels`, so a board that skips this step is not
+blocked; re-running configure just creates them proactively instead of waiting for the
+reconciler to hit the corresponding error state first.
