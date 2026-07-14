@@ -97,6 +97,8 @@ before moving on.)
 > rule — GitHub does not let a PR author approve their own PR, so enabling it
 > today would block the sole collaborator's own merges to those two files.
 > Add `require_code_owner_review` here only once a second collaborator exists.
+> CODEOWNERS path drift (entries pointing at files that no longer exist) is
+> caught on every push/PR by the `check-codeowners` job in `workflow-lint.yml`.
 
 ## 5. Mandatory post-ruleset verification
 
