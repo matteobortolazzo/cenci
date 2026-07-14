@@ -230,14 +230,14 @@ func (s *stateStore) Load() (ReconcileState, error) {
 	if st.ApplyFailures == nil {
 		st.ApplyFailures = map[string]int{}
 	}
-	return ReconcileState{Observations: st.Observations, ApplyFailures: st.ApplyFailures}, nil
+	return ReconcileState(st), nil
 }
 
 func (s *stateStore) Save(state ReconcileState) error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(reconcileState{Observations: state.Observations, ApplyFailures: state.ApplyFailures}, "", "  ")
+	data, err := json.MarshalIndent(reconcileState(state), "", "  ")
 	if err != nil {
 		return err
 	}

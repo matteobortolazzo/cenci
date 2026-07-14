@@ -633,8 +633,7 @@ func TestApplyReconcileSessionlessReachesDispatchFailedWithoutLooping(t *testing
 	// so this pass is the fresh observation, not yet elapsed.
 	deps = deadWorkingDeps(start.Add(10 * time.Minute))
 	deps.Attempts = map[string]int{"o/r#42": 0}
-	res, err = applyReconcile(cfg, deps, mut, false, nil, store)
-	if err != nil {
+	if _, err := applyReconcile(cfg, deps, mut, false, nil, store); err != nil {
 		t.Fatalf("pass 3: unexpected error: %v", err)
 	}
 	if len(mut.labelEdits) != 1 {
