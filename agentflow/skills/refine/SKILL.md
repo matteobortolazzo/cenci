@@ -6,7 +6,7 @@ argument-hint: <ticket-id> [additional context]
 user-invocable: true
 disable-model-invocation: true
 model: opus
-allowed-tools: Read, Write, Glob, Bash(gh:*), Bash(git:*), Bash(curl:*), Bash(mkdir:*), Bash(cat:*), Bash(rm:*), AskUserQuestion, WebFetch
+allowed-tools: Read, Write, Glob, Bash(gh:*), Bash(git:*), Bash(curl:*), Bash(mkdir:*), Bash(mktemp:*), Bash(cat:*), Bash(rm:*), AskUserQuestion, WebFetch
 ---
 
 > **Interaction rule**: Every question, confirmation, or approval directed at the user — anywhere in this skill, including error recovery — MUST be asked with the `AskUserQuestion` tool. Never ask in plain text. If an instruction says "ask the user" or "confirm", that means `AskUserQuestion`.
@@ -210,20 +210,22 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 > 2. Retry the write once, then verify again.
 > 3. If it still fails, **STOP** — do not proceed to the next step — and emit a partial-state report: what succeeded so far (with concrete issue/label numbers or names), what failed, and what the user needs to do manually to reconcile it. Each write point below states what belongs in that report.
 
+**Per-run temp-file token**: Before step 10, run `mktemp -u /tmp/claude/issue-<number>-XXXXXX` once and capture the trailing random segment as `<token>` (the token is the random suffix only, e.g. `a1b2c3` — not the full mktemp basename). As with `<ticket-id-or-slug>` in the implement phases, carry the literal `<token>` value forward as text into every temp-file path for the rest of this run — do NOT re-derive it per Bash call, and do not use `$$`/shell state (it does not persist across separate Bash tool invocations). `-u` is a dry-run name generator — it only produces a unique-ish suffix, not an atomically-created file — which is why the `Write` tool is what actually creates each temp file below.
+
 10. **Update the ticket description in the remote system.**
 
    > **IMPORTANT**: Writing a temp file is NOT updating the ticket. You MUST execute the update command after writing the file. Never stop between writing the temp file and running the update command.
 
-   Use the `Write` tool to create `/tmp/claude/issue-<number>.md` with the `<updated description>` as its content.
+   Use the `Write` tool to create `/tmp/claude/issue-<number>-<token>.md` with the `<updated description>` as its content.
 
-   **Only when step 9 produced an `### Updated Title`**, also use the `Write` tool to create `/tmp/claude/issue-<number>-title.txt` with the raw updated title text as its content — the title is free text and must never be interpolated directly into the command line (a title containing `$(…)`, backticks, or quotes would be shell-interpreted). Then run:
+   **Only when step 9 produced an `### Updated Title`**, also use the `Write` tool to create `/tmp/claude/issue-<number>-<token>-title.txt` with the raw updated title text as its content — the title is free text and must never be interpolated directly into the command line (a title containing `$(…)`, backticks, or quotes would be shell-interpreted). Then run:
    ```bash
-   TITLE=$(cat /tmp/claude/issue-<number>-title.txt) && [ -n "$TITLE" ] && gh issue edit <number> --repo <owner>/<repo> --body-file /tmp/claude/issue-<number>.md --title "$TITLE"
+   TITLE=$(cat /tmp/claude/issue-<number>-<token>-title.txt) && [ -n "$TITLE" ] && gh issue edit <number> --repo <owner>/<repo> --body-file /tmp/claude/issue-<number>-<token>.md --title "$TITLE"
    ```
 
    Otherwise (no title change), run:
    ```bash
-   gh issue edit <number> --repo <owner>/<repo> --body-file /tmp/claude/issue-<number>.md
+   gh issue edit <number> --repo <owner>/<repo> --body-file /tmp/claude/issue-<number>-<token>.md
    ```
 
    **Verify the update succeeded** — re-fetch the ticket and confirm the body (and, when retitled, the title) changed:
@@ -250,7 +252,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 
    Capture each created issue number from the command output.
 
-   Use the `Write` tool to create `/tmp/claude/issue-<number>-child-K.md` with the following content:
+   Use the `Write` tool to create `/tmp/claude/issue-<number>-<token>-child-K.md` with the following content:
    ```
    Related to #<original-number>
    Depends on #<sibling-number>
@@ -258,9 +260,9 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 
    <ticket-body>
    ```
-   Also use the `Write` tool to create `/tmp/claude/issue-<number>-child-K-title.txt` with the raw title text `<ticket-title> (K/N)` as its content — the title is free text and must never be interpolated directly into the command line. Then run:
+   Also use the `Write` tool to create `/tmp/claude/issue-<number>-<token>-child-K-title.txt` with the raw title text `<ticket-title> (K/N)` as its content — the title is free text and must never be interpolated directly into the command line. Then run:
    ```bash
-   TITLE=$(cat /tmp/claude/issue-<number>-child-K-title.txt) && [ -n "$TITLE" ] && gh issue create --repo <owner>/<repo> --title "$TITLE" --body-file /tmp/claude/issue-<number>-child-K.md --label "Refined"
+   TITLE=$(cat /tmp/claude/issue-<number>-<token>-child-K-title.txt) && [ -n "$TITLE" ] && gh issue create --repo <owner>/<repo> --title "$TITLE" --body-file /tmp/claude/issue-<number>-<token>-child-K.md --label "Refined"
    ```
    Parse the issue number from the URL in the output (e.g. `https://github.com/owner/repo/issues/10` → `10`) — this is the success confirmation for this child.
 
@@ -283,7 +285,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
    **Execution order:** #10 first → then #11 and #12 in parallel
    ```
 
-   Update the parent. Use the `Write` tool to create `/tmp/claude/issue-<original-number>.md` with the following content:
+   Update the parent. Use the `Write` tool to create `/tmp/claude/issue-<original-number>-<token>.md` with the following content (this uses `<original-number>` — parent == original — with the SAME run token from step 10, not a new one):
    ```
    <existing-body>
 
@@ -292,7 +294,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
    ```
    Then run:
    ```bash
-   gh issue edit <original-number> --repo <owner>/<repo> --body-file /tmp/claude/issue-<original-number>.md
+   gh issue edit <original-number> --repo <owner>/<repo> --body-file /tmp/claude/issue-<original-number>-<token>.md
    ```
 
    **Verify** by re-fetching the parent and confirming the `### Child Tickets` section is present in the body:
@@ -306,7 +308,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 
    If `designNeeded` is true, the ticket is **not** being split, and `isDesignTicket` is false, create a dedicated design ticket — design never runs on the implementation ticket itself:
 
-   Use the `Write` tool to create `/tmp/claude/issue-<number>-design.md` with the following content:
+   Use the `Write` tool to create `/tmp/claude/issue-<number>-<token>-design.md` with the following content:
    ```
    Related to #<number>
    Blocks #<number>
@@ -317,14 +319,14 @@ ticket is unambiguous, well-scoped, and ready for implementation.
    ### Design Direction
    <the Design Direction section from this refinement>
    ```
-   Also use the `Write` tool to create `/tmp/claude/issue-<number>-design-title.txt` with the raw title text `Design: <feature title>` as its content — the title is free text and must never be interpolated directly into the command line. Then run:
+   Also use the `Write` tool to create `/tmp/claude/issue-<number>-<token>-design-title.txt` with the raw title text `Design: <feature title>` as its content — the title is free text and must never be interpolated directly into the command line. Then run:
    ```bash
-   TITLE=$(cat /tmp/claude/issue-<number>-design-title.txt) && [ -n "$TITLE" ] && gh issue create --repo <owner>/<repo> --title "$TITLE" --label "Refined" --label "Design" --body-file /tmp/claude/issue-<number>-design.md
+   TITLE=$(cat /tmp/claude/issue-<number>-<token>-design-title.txt) && [ -n "$TITLE" ] && gh issue create --repo <owner>/<repo> --title "$TITLE" --label "Refined" --label "Design" --body-file /tmp/claude/issue-<number>-<token>-design.md
    ```
 
    If creation fails, follow the write-failure protocol: report the error, retry once, and if still failing, STOP and report that the design ticket was not created, so the implementation ticket's body cannot be updated with a dependency line.
 
-   Parse the new issue number `<D>` from the output URL, then append a dependency line to the implementation ticket's body. Use the `Write` tool to create `/tmp/claude/issue-<number>.md` with the implementation ticket's current body plus an appended:
+   Parse the new issue number `<D>` from the output URL, then append a dependency line to the implementation ticket's body. Use the `Write` tool to create `/tmp/claude/issue-<number>-<token>.md` (reusing the bare `issue-<number>-<token>.md` path from step 10, not a `-design` suffixed one) with the implementation ticket's current body plus an appended:
 
    ```
    Depends on #<D> (design)
@@ -332,7 +334,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 
    Then run:
    ```bash
-   gh issue edit <number> --repo <owner>/<repo> --body-file /tmp/claude/issue-<number>.md
+   gh issue edit <number> --repo <owner>/<repo> --body-file /tmp/claude/issue-<number>-<token>.md
    ```
 
    **Verify** by re-fetching the implementation ticket and confirming the `Depends on #<D> (design)` line is present in the body:
@@ -374,21 +376,30 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 
    This label signals to the implement skill that interactive browser verification via Playwright CLI should be used.
 
+   **Mark this run complete.** Once step 12 has taken its action or been correctly skipped (`isDesignTicket` is true), and the write-failure protocol has not STOPped anywhere in steps 10-12, use the `Write` tool to create an empty file at `/tmp/claude/issue-<number>-<token>.ok`. This marker is what step 13 checks before deleting anything. Confirm the write succeeded by re-reading it with `cat /tmp/claude/issue-<number>-<token>.ok` — if that `cat` errors, treat the marker write itself as failed (report it as such, distinct from a steps-10-12 failure) rather than letting step 13 silently read it as "absent" for an unrelated reason.
+
 13. **Clean up this run's scoped temp files.**
 
-   Reaching this step means every write in steps 10-12 succeeded and was verified — the write-failure protocol above STOPs before this step on any failure, which preserves the temp files for manual recovery. So cleanup only runs on the full-success path.
+   Check whether this run completed successfully by attempting to read the marker file:
+   ```bash
+   cat /tmp/claude/issue-<number>-<token>.ok
+   ```
+   If the command errors (non-zero exit, e.g. `No such file or directory`), the marker is absent. If it exits 0 (silently, since the marker is an empty file), the marker is present.
 
-   Delete this run's temp files by explicit path (never a glob — an unmatched glob errors under some shells, and `rm -f` already ignores paths that don't exist, so listing files a given run didn't create — e.g. child/design files when there was no split or companion design ticket — is harmless):
+   **If the marker is present** — every write in steps 10-12 succeeded and was verified, so it's safe to delete this run's temp files by explicit path (never a glob — an unmatched glob errors under some shells, and `rm -f` already ignores paths that don't exist, so listing files a given run didn't create — e.g. child/design files when there was no split or companion design ticket — is harmless):
    ```bash
    rm -f \
-     /tmp/claude/issue-<number>.md \
-     /tmp/claude/issue-<number>-title.txt \
-     /tmp/claude/issue-<number>-design.md \
-     /tmp/claude/issue-<number>-design-title.txt \
-     /tmp/claude/issue-<number>-child-K.md \
-     /tmp/claude/issue-<number>-child-K-title.txt
+     /tmp/claude/issue-<number>-<token>.md \
+     /tmp/claude/issue-<number>-<token>-title.txt \
+     /tmp/claude/issue-<number>-<token>-design.md \
+     /tmp/claude/issue-<number>-<token>-design-title.txt \
+     /tmp/claude/issue-<number>-<token>-child-K.md \
+     /tmp/claude/issue-<number>-<token>-child-K-title.txt \
+     /tmp/claude/issue-<number>-<token>.ok
    ```
-   Repeat the last two paths (with the actual `K` value substituted) for each child created in Pass 1 this run.
+   Repeat the child-K paths (with the actual `K` value substituted) for each child created in Pass 1 this run.
+
+   **If the marker is absent** — an earlier step in 10-12 did not complete successfully (the write-failure protocol already STOPped before reaching this step). Skip cleanup entirely and state explicitly to the user that cleanup was skipped for this reason, preserving the run's `<token>`-scoped temp files for manual recovery.
 
 ### Final Message
 
