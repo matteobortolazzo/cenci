@@ -62,8 +62,8 @@ type Config struct {
 	DaemonInterval time.Duration // embedded dispatch+reconcile loop interval; 0 disables it
 
 	// LoopEnabled reports whether the embedded fleet dispatch loop (#219) is
-	// on. Resolved from an explicit "loopEnabled" when present, else back-compat
-	// from DaemonInterval > 0.
+	// on. Resolved from an explicit "loopEnabled" when present, else absent
+	// means disabled.
 	LoopEnabled bool
 }
 
@@ -101,7 +101,7 @@ type dispatchFile struct {
 	GracePeriod            string                `json:"gracePeriod"`    // Go duration string, e.g. "5m"
 	RetryBudget            *int                  `json:"retryBudget"`    // pointer so an explicit 0 (no retries) is distinguishable from unset
 	DaemonInterval         string                `json:"daemonInterval"` // Go duration string, e.g. "5m"; empty/0 disables the embedded loop
-	LoopEnabled            *bool                 `json:"loopEnabled"`    // pointer so absence falls back to DaemonInterval > 0 (back-compat)
+	LoopEnabled            *bool                 `json:"loopEnabled"`    // pointer so absence resolves to disabled (not inferred from DaemonInterval)
 }
 
 // LoadConfig returns the default policy with the config.json "dispatch" block
@@ -190,8 +190,6 @@ func mergeConfig(base Config, o dispatchFile) Config {
 	}
 	if o.LoopEnabled != nil {
 		base.LoopEnabled = *o.LoopEnabled
-	} else {
-		base.LoopEnabled = base.DaemonInterval > 0
 	}
 	return base
 }

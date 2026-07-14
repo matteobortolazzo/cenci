@@ -87,11 +87,12 @@ func TestLoadConfigLoopEnabled_ExplicitFalseWinsOverInterval(t *testing.T) {
 	}
 }
 
-// TestLoadConfigLoopEnabled_BackCompatFromInterval locks in the back-compat
-// resolution: an absent "loopEnabled" key with a positive daemonInterval
-// implies the loop is enabled, so pre-existing configs that only set
-// daemonInterval keep working unchanged.
-func TestLoadConfigLoopEnabled_BackCompatFromInterval(t *testing.T) {
+// TestLoadConfigLoopEnabled_IntervalOnlyDefaultsOff locks in that an absent
+// "loopEnabled" key with a positive daemonInterval does NOT implicitly enable
+// the loop. The embedded fleet dispatch loop must default to off and only
+// turn on via an explicit "loopEnabled": true; daemonInterval alone is no
+// longer sufficient to opt in.
+func TestLoadConfigLoopEnabled_IntervalOnlyDefaultsOff(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(path, []byte(`{"dispatch": {"daemonInterval": "5m"}}`), 0o600); err != nil {
@@ -102,8 +103,8 @@ func TestLoadConfigLoopEnabled_BackCompatFromInterval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if !cfg.LoopEnabled {
-		t.Errorf("cfg.LoopEnabled = %v, want true (back-compat from daemonInterval)", cfg.LoopEnabled)
+	if cfg.LoopEnabled {
+		t.Errorf("cfg.LoopEnabled = %v, want false (daemonInterval alone must not opt in)", cfg.LoopEnabled)
 	}
 }
 
