@@ -128,7 +128,7 @@ func stateInterval(d time.Duration) string {
 
 // combinedTick remains a deterministic single-pass helper for direct tests.
 // Scheduling is deliberately owned by combinedScheduler above.
-func combinedTick(ctx context.Context, configPath string, ctrl run.Controller, mut TicketMutator, out io.Writer, prior *int, store ObservationStore, attention chan<- watch.AttentionUpdate, state *watch.DispatchState, windows *[]watch.WindowState, headroom *map[string]float64) time.Duration {
+func combinedTick(ctx context.Context, configPath string, ctrl run.Controller, mut TicketMutator, out io.Writer, prior *int, store ReconcileStore, attention chan<- watch.AttentionUpdate, state *watch.DispatchState, windows *[]watch.WindowState, headroom *map[string]float64) time.Duration {
 	cfg, ok := reloadConfig(configPath, out)
 	if !ok {
 		return loopCheckInterval
@@ -147,7 +147,7 @@ func combinedTick(ctx context.Context, configPath string, ctrl run.Controller, m
 	return effectiveInterval(cfg.DaemonInterval)
 }
 
-func runCombinedPass(ctx context.Context, cfg Config, ctrl run.Controller, mut TicketMutator, out io.Writer, prior *int, store ObservationStore, attention chan<- watch.AttentionUpdate, state *watch.DispatchState, windows *[]watch.WindowState, headroom *map[string]float64) {
+func runCombinedPass(ctx context.Context, cfg Config, ctrl run.Controller, mut TicketMutator, out io.Writer, prior *int, store ReconcileStore, attention chan<- watch.AttentionUpdate, state *watch.DispatchState, windows *[]watch.WindowState, headroom *map[string]float64) {
 	state.Enabled = true
 	state.Interval = stateInterval(cfg.DaemonInterval)
 	state.PassRunning = true

@@ -6,6 +6,11 @@
 // intelligence stays inside the dispatched sessions, never in the dispatcher.
 //
 // The package is stdlib-only (no third-party deps).
+//
+// The reconciler (Reconcile/RunReconcileOnce) may terminally label a ticket
+// `reconcile-stuck` (#265) when its apply-retry budget is exhausted, meaning
+// reconciliation itself could not apply its verdict — distinct from
+// `dispatch-failed`, which means the dispatched work failed.
 package dispatch
 
 // Ticket is one open GitHub issue, as collected from a repo. Labels carry the

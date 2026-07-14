@@ -138,6 +138,10 @@ func (failingMutator) Comment(string, int, string) error {
 	return errors.New("gh comment failed")
 }
 
+func (failingMutator) EnsureLabels(string, []string) error {
+	return nil
+}
+
 // TestApplyDispatchPassesModelToRunOpts locks in that a pinned Config.Model
 // (from config.json's "dispatch.model" or a --model CLI override) reaches
 // every spawned session's run.Opts.Model, so a dispatch pass never depends on
