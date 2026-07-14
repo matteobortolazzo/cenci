@@ -27,6 +27,7 @@ func TestDaemon_PostToolUseFailureInterruptSetsStopped(t *testing.T) {
 	sess := d.sessions["sess1"]
 	if sess == nil {
 		t.Fatal("expected session to be tracked")
+		return
 	}
 	if sess.Status != detect.StatusStopped {
 		t.Errorf("expected StatusStopped, got %v", sess.Status)
@@ -58,6 +59,7 @@ func TestDaemon_PostToolUseFailureNoInterruptStaysRunning(t *testing.T) {
 	sess := d.sessions["sess1"]
 	if sess == nil {
 		t.Fatal("expected session to be tracked")
+		return
 	}
 	if sess.Status != detect.StatusRunning {
 		t.Errorf("expected StatusRunning, got %v", sess.Status)

@@ -499,6 +499,7 @@ func TestDaemon_SessionEndForStalePaneIgnored(t *testing.T) {
 	wi := d.frontend.WindowInfo("sess2")
 	if wi == nil {
 		t.Fatal("expected new session's window still tracked")
+		return
 	}
 	if wi.Session != "main" || wi.WindowIndex != "1" {
 		t.Errorf("expected window main:1 for sess2, got %s:%s", wi.Session, wi.WindowIndex)
