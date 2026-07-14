@@ -45,8 +45,8 @@ Never begin Phase 2 in a session that created a new plan — not in the same tur
 
 If `.claude/config.json` has `"deepExploration": true`, launch two Explore-type subagents before planner delegation:
 
-- Explorer 1: feature area, related components/services/patterns. Write full notes to `/tmp/claude/agentflow-explore-1.md`.
-- Explorer 2: cross-cutting concerns, shared utilities, middleware, configuration, integrations. Write full notes to `/tmp/claude/agentflow-explore-2.md`.
+- Explorer 1: feature area, related components/services/patterns. Write full notes to `/tmp/claude/agentflow-<ticket-id-or-slug>-explore-1.md`.
+- Explorer 2: cross-cutting concerns, shared utilities, middleware, configuration, integrations. Write full notes to `/tmp/claude/agentflow-<ticket-id-or-slug>-explore-2.md`.
 
 Each explorer must write its detailed findings to its notes file and return only a summary of 10 lines or fewer. Pass the two file paths (not the notes content) to the planner, which reads them itself. If `deepExploration` is absent or false, skip this.
 
