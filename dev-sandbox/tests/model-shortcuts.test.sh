@@ -96,4 +96,42 @@ if ! grep -Eq "^exec -it -u dev .*claude-sand-${REPO_SLUG} claude --dangerously-
     exit 1
 fi
 
+echo "case: user-supplied --model is forwarded exactly once (no double injection)"
+printf '' > "${CALLS_FILE}"
+"${SANDBOX_DIR}/agent-sand" --model opus -p test
+
+EXEC_LINE="$(grep -E "^exec -it -u dev .*claude-sand-${REPO_SLUG} claude " "${CALLS_FILE}" || true)"
+if [[ -z "${EXEC_LINE}" ]]; then
+    echo "FAIL: no exec call found for user-supplied --model" >&2
+    exit 1
+fi
+MODEL_COUNT="$(grep -o -- '--model' <<< "${EXEC_LINE}" | wc -l)"
+if [[ "${MODEL_COUNT}" -ne 1 ]]; then
+    echo "FAIL: expected exactly one --model in the agent CLI invocation, found ${MODEL_COUNT}: ${EXEC_LINE}" >&2
+    exit 1
+fi
+if ! grep -q -- '--model opus' <<< "${EXEC_LINE}"; then
+    echo "FAIL: user-supplied --model value was not forwarded" >&2
+    exit 1
+fi
+
+echo "case: a shortcut's agent conflicting with an explicit --agent is rejected"
+printf '' > "${CALLS_FILE}"
+set +e
+DESYNC_STDERR="$("${SANDBOX_DIR}/agent-sand" ch --agent codex -p test 2>&1 1>/dev/null)"
+DESYNC_EXIT=$?
+set -e
+if [[ "${DESYNC_EXIT}" -eq 0 ]]; then
+    echo "FAIL: 'ch --agent codex' should have been rejected (conflicting agent/model shortcut)" >&2
+    exit 1
+fi
+if ! grep -qi 'error' <<< "${DESYNC_STDERR}"; then
+    echo "FAIL: expected an error message for conflicting shortcut/--agent, got: ${DESYNC_STDERR}" >&2
+    exit 1
+fi
+if [[ -s "${CALLS_FILE}" ]]; then
+    echo "FAIL: conflicting shortcut/--agent should not have launched any container" >&2
+    exit 1
+fi
+
 echo "passed: agent+model shortcuts (ch/cs/co/cf, xl/xt/xs) and their defaults"

@@ -12,7 +12,10 @@ container.
 ## Prerequisites
 
 - Docker or Podman installed on the host
-- Claude Code installed on the host (`claude` in PATH)
+- Claude Code installed on the host (`claude` in PATH) — only required when launching the
+  **Claude agent** (the default, or `--agent claude`). Claude's binary is bind-mounted from
+  the host into the container; `--agent codex` never touches it (Codex is baked into the
+  image — see [Choosing an agent](#choosing-an-agent)).
 - Codex auth on the host when using `--agent codex` — run `codex login` to create
   `~/.codex/auth.json`, or export `OPENAI_API_KEY`. Codex itself is baked into the
   image, so it does **not** need to be installed on the host.
@@ -92,6 +95,9 @@ agent-sand --agent codex
 # sb: short alias for agent-sand, with one-token agent+model shortcuts as the
 # first argument (only recognized in that position — everything after is
 # forwarded to the agent CLI as usual). Defaults: claude → sonnet, codex → terra.
+# A shortcut also implies its agent; pairing it with a conflicting --agent
+# (e.g. `sb ch --agent codex`) is rejected with an error instead of silently
+# launching the wrong agent with the shortcut's model.
 sb ch    # Claude, haiku
 sb cs    # Claude, sonnet
 sb co    # Claude, opus
@@ -135,19 +141,41 @@ agent-sand --reseed-creds
 agent-sand --prune
 
 # Also list and interactively confirm removal of *-sand-home-* volumes (holds
-# copied credentials + full session history — defaults to no deletion)
+# copied credentials + full session history — defaults to no deletion).
+# --volumes only means something combined with --prune; on its own it errors
+# instead of silently doing nothing.
 agent-sand --prune --volumes
 
 # Retroactively kill container-side agent processes whose owning tmux pane no
-# longer exists on the host (SIGTERM, then SIGKILL after a grace period).
-# Scans every running *-sand-* container across all installed runtimes
-# (docker and podman). If no tmux server is running, every TMUX_PANE-carrying
-# process is treated as orphaned and the output says so explicitly. Processes
-# with a missing/empty TMUX_PANE (manual non-tmux launches) are never
-# signaled. Prints one `reaped\t<container>\t<pid>\t<pane>` line per reaped
-# process plus a final count, and exits non-zero on a genuine runtime error
-# (e.g. exec failure) rather than swallowing it.
+# longer exists on the host (SIGTERM, then SIGKILL after a grace period —
+# 5 seconds by default, override with AGENT_SAND_REAP_GRACE_SECS, e.g. =0 for
+# fast/CI runs). Scans every running *-sand-* container across all installed
+# runtimes (docker and podman). If no tmux server is running, every
+# TMUX_PANE-carrying process is treated as orphaned and the output says so
+# explicitly. Processes with a missing/empty TMUX_PANE (manual non-tmux
+# launches) are never signaled. Prints one `reaped\t<container>\t<pid>\t<pane>`
+# line per reaped process plus a final count, and exits non-zero on a genuine
+# runtime error (e.g. exec failure) rather than swallowing it.
 agent-sand --reap-orphans
+AGENT_SAND_REAP_GRACE_SECS=0 agent-sand --reap-orphans
+```
+
+### Flag parsing
+
+`--agent` and `--name` accept either a separate value (`--agent codex`) or an `=`-joined
+one (`--agent=codex`); `--model` works the same way. Any other `--long-flag` agent-sand
+doesn't recognize is a hard error (so a typo like `--buidl` fails loudly instead of
+silently reaching the agent CLI as a stray positional argument). Short flags (`-p`) and
+plain positional arguments (a prompt string, `ch` in a non-first position, ...) are always
+forwarded to the agent CLI unchanged.
+
+To pass a long flag through to the agent CLI that agent-sand doesn't know about (a
+`claude`/`codex` flag it hasn't been taught, e.g. `--resume`), put it after a bare `--`
+separator — everything after `--` is forwarded verbatim, with no further parsing:
+
+```bash
+agent-sand -- --resume
+sb cs -- --resume
 ```
 
 ### Per-repo containers
