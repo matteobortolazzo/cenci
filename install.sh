@@ -201,6 +201,42 @@ check() {
 	return 1
 }
 
+# agentwatch_binary_for_doctor resolves the installed agentwatch binary the
+# same way a running agent session would: a bare `agentwatch` on PATH first
+# (the bootstrap-maintained ~/.local/bin link, or the Codex-only manual-install
+# case), falling back to the version-pinned plugin cache directly so doctor can
+# still report daemon state before that PATH link exists (e.g. right after a
+# fresh install, before the first agent session bootstraps it). cached_agentwatch_binary
+# is defined further down this file but, like every function here, is available
+# by the time run_doctor actually runs (MODE dispatch happens after the whole
+# script is parsed).
+agentwatch_binary_for_doctor() {
+	if have agentwatch; then
+		command -v agentwatch
+		return 0
+	fi
+	cached_agentwatch_binary
+}
+
+# doctor_daemon_status reports whether the agentwatch daemon is alive via
+# `agentwatch daemon status` (exit 0 = running, exit 1 = not running — see
+# runDaemonStatus in agentwatch/main.go). A missing binary is reported like any
+# other missing component (warn, not a hard doctor failure) since the daemon
+# self-bootstraps on the first agent session; an idle daemon is equally
+# expected and not treated as an error either.
+doctor_daemon_status() {
+	local bin
+	if ! bin="$(agentwatch_binary_for_doctor)"; then
+		warn "agentwatch daemon — binary not found yet (bootstraps on your first agent session)"
+		return 0
+	fi
+	if "$bin" daemon status >/dev/null 2>&1; then
+		ok "agentwatch daemon: running"
+	else
+		warn "agentwatch daemon: not running (starts automatically on your first agent session, or run: agentwatch daemon start)"
+	fi
+}
+
 run_doctor() {
 	DOCTOR_FAILED=0
 	step "Checking your system ($(platform_label))"
@@ -253,6 +289,7 @@ run_doctor() {
 			ok "waybar detected — add the AgentWatch module (see agentwatch/README.md)"
 		fi
 	fi
+	doctor_daemon_status
 
 	say ""
 	say "  ${BOLD}Installed stack components${RESET}"
@@ -555,24 +592,51 @@ current_agentwatch_binary() {
 }
 
 # restart_agentwatch_daemon replaces the standard plugin-managed daemon after
-# an explicit update. SIGTERM lets it restore tmux state and remove its sockets
-# before the updated binary starts.
+# an explicit update. It delegates to the binary's own `daemon restart`
+# lifecycle verb (stop the old daemon, spawn the new one, wait for it to
+# become reachable — see runDaemonRestart in agentwatch/main.go), so this
+# installer path and a user running `agentwatch daemon restart` by hand share
+# one implementation instead of install.sh reimplementing daemon process
+# control. Falls back to the pre-daemon-lifecycle ad-hoc pkill/nohup restart
+# when the binary can't do it itself (missing/not executable, older cached
+# binary without the `daemon` verb group, or the invocation otherwise fails).
 restart_agentwatch_daemon() {
+	local bin="$1"
+	if [ -x "$bin" ] && "$bin" daemon restart >/dev/null 2>&1; then
+		ok "restarted agentwatch with the updated binary"
+		return 0
+	fi
+	warn "'$bin daemon restart' did not succeed — falling back to a manual restart"
+	restart_agentwatch_daemon_fallback "$bin"
+}
+
+# restart_agentwatch_daemon_fallback is the pre-daemon-lifecycle ad-hoc
+# restart: SIGTERM the old daemon, wait for it to exit, then nohup-spawn the
+# given binary directly. The pgrep/pkill pattern matches both the bare
+# `agentwatch daemon` form (hand-started in a pane) and `agentwatch daemon
+# start` (the form Spawn/`daemon restart` itself use), mirroring
+# daemonProcessPattern in agentwatch/internal/daemon/processctl.go.
+restart_agentwatch_daemon_fallback() {
 	local bin="$1" i pid
 	if ! have pkill || ! have pgrep; then
 		warn "pkill/pgrep unavailable — restart agentwatch manually to finish the update"
 		return 0
 	fi
 
-	pkill -TERM -f '[/]agentwatch daemon$' >/dev/null 2>&1 || true
+	pkill -TERM -f '[/]agentwatch daemon( start)?$' >/dev/null 2>&1 || true
 	i=0
-	while pgrep -f '[/]agentwatch daemon$' >/dev/null 2>&1 && [ "$i" -lt 30 ]; do
+	while pgrep -f '[/]agentwatch daemon( start)?$' >/dev/null 2>&1 && [ "$i" -lt 30 ]; do
 		sleep 0.1
 		i=$((i + 1))
 	done
-	if pgrep -f '[/]agentwatch daemon$' >/dev/null 2>&1; then
+	if pgrep -f '[/]agentwatch daemon( start)?$' >/dev/null 2>&1; then
 		fail "the previous agentwatch daemon did not stop; restart it manually"
 		INSTALL_FAILED=1
+		return 0
+	fi
+
+	if [ -z "$bin" ] || [ ! -x "$bin" ]; then
+		warn "no usable agentwatch binary to restart — the next agent session will bootstrap it"
 		return 0
 	fi
 

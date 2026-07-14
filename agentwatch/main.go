@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -73,6 +74,10 @@ func main() {
 		runSandboxGroup(os.Args[2:])
 	case "open":
 		runOpen(os.Args[2:])
+	case "doctor":
+		runDoctor(os.Args[2:])
+	case "update":
+		runUpdate(os.Args[2:])
 	case "version", "--version", "-version":
 		runVersion()
 	case "socket-dir":
@@ -104,6 +109,8 @@ Commands:
   close                              close a finished/idle agent window
   sandbox                            manage the dev-sandbox container (build|build-base|prune|update-plugins|reseed-creds|reap-orphans|ls|stop)
   open [shortcut]                    launch or attach an interactive sandbox session (aliased by the "cn" binary name)
+  doctor                             check prerequisites and installed stack components, change nothing (delegates to the installed agent-stack wrapper)
+  update                             update installed plugins and restart the daemon (delegates to the installed agent-stack wrapper)
   version                            print the binary version
   socket-dir                         print the resolved socket directory
 
@@ -906,6 +913,61 @@ func printCloseDecisions(w io.Writer, target string, decisions []closecmd.Decisi
 		case closecmd.ActionSkippedBusy:
 			_, _ = fmt.Fprintf(w, "skip %s (%s:%s): status=%s, use --force to close\n", d.Window.WindowName, d.Window.Session, d.Window.WindowIndex, d.Window.Status)
 		}
+	}
+}
+
+// -- doctor / update ------------------------------------------------------
+
+// wrapperBinaryName is the curl-and-exec front door installed on user
+// machines (see the repo-root `agent-stack` script), which routes
+// "doctor"/"update" into install.sh's MODE handling. `agentwatch
+// doctor`/`update` shell out to it rather than reimplementing installer logic
+// in Go, so there is exactly one implementation of each mode.
+const wrapperBinaryName = "agent-stack"
+
+// runDoctor implements `agentwatch doctor`: shells out to the installed
+// `agent-stack doctor` wrapper.
+func runDoctor(args []string) {
+	runWrapperMode("doctor", args)
+}
+
+// runUpdate implements `agentwatch update`: shells out to the installed
+// `agent-stack update` wrapper.
+func runUpdate(args []string) {
+	runWrapperMode("update", args)
+}
+
+// runWrapperMode is the shared implementation behind runDoctor/runUpdate: it
+// takes no flags or positionals of its own (mirroring the trailing-positional
+// guard used by the other verbs above), resolves wrapperBinaryName from PATH,
+// and runs it with mode as its sole argument, stdio inherited so prompts and
+// output pass straight through, propagating the child's exit code. A missing
+// wrapper is a clear, non-zero-exit error rather than a silent no-op.
+func runWrapperMode(mode string, args []string) {
+	fs := flag.NewFlagSet(mode, flag.ExitOnError)
+	_ = fs.Parse(args)
+	if extra := fs.Args(); len(extra) > 0 {
+		fmt.Fprintf(os.Stderr, "agentwatch %s: unexpected argument %q\n", mode, extra[0])
+		os.Exit(2)
+	}
+
+	path, err := exec.LookPath(wrapperBinaryName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentwatch %s: %s not found on PATH — re-run the agent-stack installer to create it\n", mode, wrapperBinaryName)
+		os.Exit(1)
+	}
+
+	cmd := exec.Command(path, mode)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			os.Exit(exitErr.ExitCode())
+		}
+		fmt.Fprintf(os.Stderr, "agentwatch %s: %v\n", mode, err)
+		os.Exit(1)
 	}
 }
 
