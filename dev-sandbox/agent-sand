@@ -249,6 +249,8 @@ fi
 # processes lacking the key entirely. All classification (skip-empty-pane,
 # skip-live-pane, reap-dead-pane, TERM->KILL escalation, no-tmux handling)
 # happens host-side below, never inside this canned scan.
+# shellcheck disable=SC2016 # single-quoted on purpose: these $vars must expand
+# inside the container's sh -c, not on the host where this string is defined.
 REAP_SCAN_SCRIPT='for e in /proc/[0-9]*/environ; do [ -f "$e" ] || continue; p=${e#/proc/}; p=${p%/environ}; line=$(tr "\0" "\n" < "$e" 2>/dev/null | grep "^TMUX_PANE=") || continue; printf "%s\t%s\n" "$p" "${line#TMUX_PANE=}"; done'
 
 reap_orphans() {
