@@ -572,6 +572,23 @@ anything after a bare `--` is forwarded to the agent CLI verbatim. `open` execs 
 **`cn` alias:** a copy or symlink of the `agentwatch` binary named `cn` behaves as
 `agentwatch open <args>` — `cn xs` is exactly `agentwatch open xs`.
 
+## Installer integration (`agentwatch doctor`, `agentwatch update`)
+
+```bash
+agentwatch doctor   # check prerequisites and installed stack components, change nothing
+agentwatch update   # update installed plugins and restart the daemon
+```
+
+Both shell out to the `agent-stack` wrapper script installed on `PATH` (see the
+[root README](../README.md)), forwarding the mode — `agentwatch doctor` runs
+`agent-stack doctor`, `agentwatch update` runs `agent-stack update` — with stdio
+inherited and the wrapper's exit code propagated. This gives you a single
+entry point (`agentwatch doctor`/`update`) that reaches the same installer
+logic as running `agent-stack doctor`/`update` directly. Neither verb takes any
+flags or extra arguments (exit 2 if given any). If `agent-stack` isn't on
+`PATH`, both exit 1 with a clear error instead of silently doing nothing —
+re-run the [installer](#installation) to create it.
+
 ## Advanced / development
 
 The marketplace install above provisions the binary and daemon automatically. You

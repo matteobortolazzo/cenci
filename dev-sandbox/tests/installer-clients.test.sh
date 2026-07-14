@@ -138,6 +138,28 @@ run_doctor_case() {
     DOCTOR_OUTPUT="${output}"
 }
 
+# run_doctor_case_with_daemon_status is run_doctor_case plus a fake
+# `agentwatch` on the doctor-run PATH that exits daemon_exit on `daemon
+# status` (0 = running, 1 = not running — mirrors runDaemonStatus in
+# agentwatch/main.go). Pre-creating "${WORK}/${name}/bin/agentwatch" before
+# run_case's `mkdir -p` (idempotent) and make_common_tools (which only
+# symlinks its own fixed tool list) leaves this fake in place for the doctor
+# run that follows.
+run_doctor_case_with_daemon_status() {
+    local name="$1" clients="$2" daemon_exit="$3"
+    local bin="${WORK}/${name}/bin"
+    mkdir -p "${bin}"
+    cat > "${bin}/agentwatch" <<EOF
+#!/bin/sh
+if [ "\${1:-}" = daemon ] && [ "\${2:-}" = status ]; then
+    exit ${daemon_exit}
+fi
+exit 0
+EOF
+    chmod +x "${bin}/agentwatch"
+    run_doctor_case "${name}" "${clients}"
+}
+
 assert_contains() {
     local file="$1" needle="$2"
     if ! grep -Fq -- "${needle}" "${file}"; then
@@ -249,6 +271,18 @@ assert_contains "${DOCTOR_OUTPUT}" "sb launcher"
 assert_not_contains "${DOCTOR_OUTPUT}" "codex-sand launcher"
 assert_contains "${DOCTOR_OUTPUT}" "Codex: agentflow"
 assert_contains "${DOCTOR_OUTPUT}" "agent-stack utility"
+assert_contains "${DOCTOR_OUTPUT}" "agentwatch daemon"
+assert_contains "${DOCTOR_OUTPUT}" "bootstraps on your first agent session"
+
+echo "case: doctor reports the agentwatch daemon as running"
+run_doctor_case_with_daemon_status doctor-daemon-up claude 0
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "agentwatch daemon: running"
+
+echo "case: doctor reports the agentwatch daemon as not running, without failing doctor"
+run_doctor_case_with_daemon_status doctor-daemon-down claude 1
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "agentwatch daemon: not running"
 
 echo "case: doctor fails when no supported client is available"
 run_doctor_case doctor-none none

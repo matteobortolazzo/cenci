@@ -63,7 +63,9 @@ agent-stack update   # update the complete stack
 
 The command fetches the current official installer before it runs, so the updater
 itself stays current. Existing installations from before the command was introduced
-can bootstrap it once by rerunning the install command above.
+can bootstrap it once by rerunning the install command above. Once agentwatch is
+installed, `agentwatch doctor` and `agentwatch update` reach the same two modes
+(see [agentwatch's README](agentwatch/README.md#installer-integration-agentwatch-doctor-agentwatch-update)).
 
 Follow the [guided getting-started path](docs/getting-started.md) for first-run
 configuration and your first ticket.
