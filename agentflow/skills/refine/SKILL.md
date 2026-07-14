@@ -6,7 +6,7 @@ argument-hint: <ticket-id> [additional context]
 user-invocable: true
 disable-model-invocation: true
 model: opus
-allowed-tools: Read, Glob, Bash(gh:*), Bash(git:*), Bash(curl:*), Bash(mkdir:*), AskUserQuestion, WebFetch
+allowed-tools: Read, Write, Glob, Bash(gh:*), Bash(git:*), Bash(curl:*), Bash(mkdir:*), AskUserQuestion, WebFetch
 ---
 
 > **Interaction rule**: Every question, confirmation, or approval directed at the user — anywhere in this skill, including error recovery — MUST be asked with the `AskUserQuestion` tool. Never ask in plain text. If an instruction says "ask the user" or "confirm", that means `AskUserQuestion`.
@@ -205,14 +205,18 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 > **CRITICAL**: This section is mandatory after refinement. Do NOT skip it.
 > This section runs unconditionally after refinement — there is no confirmation prompt before writing. The human gate is the Q&A loop (steps 6-8); review happens after the writes, via the final message.
 
+> **Write-failure protocol**: Every *edit* in this section (ticket body/title updates, parent tracking updates, label add/remove) MUST be verified by re-fetching the resource with `gh issue view ... --json ...` and confirming the expected change is actually present — a command exiting 0 is not sufficient proof. Ticket *creation* (`gh issue create`) is the one exception: the returned issue URL is itself sufficient proof of success, so no separate re-fetch is required there. If the write or the verification fails:
+> 1. Report the error to the user.
+> 2. Retry the write once, then verify again.
+> 3. If it still fails, **STOP** — do not proceed to the next step — and emit a partial-state report: what succeeded so far (with concrete issue/label numbers or names), what failed, and what the user needs to do manually to reconcile it. Each write point below states what belongs in that report.
+
 10. **Update the ticket description in the remote system.**
 
    > **IMPORTANT**: Writing a temp file is NOT updating the ticket. You MUST execute the update command after writing the file. Never stop between writing the temp file and running the update command.
 
+   Use the `Write` tool to create `/tmp/claude/issue-<number>.md` with the `<updated description>` as its content, then run:
    ```bash
-   printf '%s' '<updated description>' > /tmp/claude/issue-<number>.md
-   BODY=$(cat /tmp/claude/issue-<number>.md)
-   gh issue edit <number> --repo <owner>/<repo> --body "$BODY" --title "<updated title>"
+   gh issue edit <number> --repo <owner>/<repo> --body-file /tmp/claude/issue-<number>.md --title "<updated title>"
    ```
 
    Include `--title` **only when step 9 produced an `### Updated Title`**; otherwise omit the flag so the existing title is preserved. (Passing `--title` with the unchanged title would be a harmless no-op, but omitting it keeps intent explicit.)
@@ -222,7 +226,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
    gh issue view <number> --repo <owner>/<repo> --json title,body --jq '.title, (.body[:200])'
    ```
 
-   If the update failed, report the error to the user and retry once.
+   If the update or verification failed, follow the write-failure protocol: report the error, retry once, and if still failing, STOP — do not create children, do not run Pass 2, do not create the companion design ticket, do not proceed to steps 11-12 — and report to the user that ticket #`<number>`'s description/title update did not persist, so they can retry manually.
 
    If splitting, create the child tickets using a **two-pass approach**:
 
@@ -241,16 +245,21 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 
    Capture each created issue number from the command output.
 
-   ```bash
-   printf '%s' 'Related to #<original-number>
+   Use the `Write` tool to create `/tmp/claude/issue-child-K.md` with the following content:
+   ```
+   Related to #<original-number>
    Depends on #<sibling-number>
    Parallel with #<sibling-number>
 
-   <ticket-body>' > /tmp/claude/issue-child-K.md
-   BODY=$(cat /tmp/claude/issue-child-K.md)
-   gh issue create --repo <owner>/<repo> --title "<ticket-title> (K/N)" --body "$BODY" --label "Refined"
+   <ticket-body>
    ```
-   Parse the issue number from the URL in the output (e.g. `https://github.com/owner/repo/issues/10` → `10`).
+   Then run:
+   ```bash
+   gh issue create --repo <owner>/<repo> --title "<ticket-title> (K/N)" --body-file /tmp/claude/issue-child-K.md --label "Refined"
+   ```
+   Parse the issue number from the URL in the output (e.g. `https://github.com/owner/repo/issues/10` → `10`) — this is the success confirmation for this child.
+
+   If creation fails for a child, follow the write-failure protocol: report the error, retry once, and if still failing, STOP — do not create any further children, and do not run Pass 2. Report the partial state to the user: which children (if any) were already created, with their issue numbers.
 
    Omit `Depends on` / `Parallel with` lines that don't apply (e.g. the first child typically has no dependencies).
 
@@ -269,38 +278,64 @@ ticket is unambiguous, well-scoped, and ready for implementation.
    **Execution order:** #10 first → then #11 and #12 in parallel
    ```
 
-   Update the parent:
-   ```bash
-   printf '%s' '<existing-body>
+   Update the parent. Use the `Write` tool to create `/tmp/claude/issue-<original-number>.md` with the following content:
+   ```
+   <existing-body>
 
    ### Child Tickets
-   <checklist>' > /tmp/claude/issue-<original-number>.md
-   BODY=$(cat /tmp/claude/issue-<original-number>.md)
-   gh issue edit <original-number> --repo <owner>/<repo> --body "$BODY"
+   <checklist>
    ```
+   Then run:
+   ```bash
+   gh issue edit <original-number> --repo <owner>/<repo> --body-file /tmp/claude/issue-<original-number>.md
+   ```
+
+   **Verify** by re-fetching the parent and confirming the `### Child Tickets` section is present in the body:
+   ```bash
+   gh issue view <original-number> --repo <owner>/<repo> --json body --jq '.body'
+   ```
+
+   If the update or verification fails, follow the write-failure protocol: report the error, retry once, and if still failing, STOP and report that children #`<c1>`, #`<c2>`, … exist but the parent ticket #`<original-number>` is not yet tracking them, so the user can append the `### Child Tickets` section manually.
 
    #### Companion design ticket (frontend tickets, no split)
 
    If `designNeeded` is true, the ticket is **not** being split, and `isDesignTicket` is false, create a dedicated design ticket — design never runs on the implementation ticket itself:
 
-   ```bash
-   printf '%s' 'Related to #<number>
+   Use the `Write` tool to create `/tmp/claude/issue-design.md` with the following content:
+   ```
+   Related to #<number>
    Blocks #<number>
 
    ### Goal
    Produce the design spec (`.pen` + `DESIGN.md`) for #<number> via `/agentflow:design`.
 
    ### Design Direction
-   <the Design Direction section from this refinement>' > /tmp/claude/issue-design.md
-   BODY=$(cat /tmp/claude/issue-design.md)
-   gh issue create --repo <owner>/<repo> --title "Design: <feature title>" --label "Refined" --label "Design" --body "$BODY"
+   <the Design Direction section from this refinement>
+   ```
+   Then run:
+   ```bash
+   gh issue create --repo <owner>/<repo> --title "Design: <feature title>" --label "Refined" --label "Design" --body-file /tmp/claude/issue-design.md
    ```
 
-   Parse the new issue number `<D>` from the output URL, then append a dependency line to the implementation ticket's body:
+   If creation fails, follow the write-failure protocol: report the error, retry once, and if still failing, STOP and report that the design ticket was not created, so the implementation ticket's body cannot be updated with a dependency line.
+
+   Parse the new issue number `<D>` from the output URL, then append a dependency line to the implementation ticket's body. Use the `Write` tool to create `/tmp/claude/issue-<number>.md` with the implementation ticket's current body plus an appended:
 
    ```
    Depends on #<D> (design)
    ```
+
+   Then run:
+   ```bash
+   gh issue edit <number> --repo <owner>/<repo> --body-file /tmp/claude/issue-<number>.md
+   ```
+
+   **Verify** by re-fetching the implementation ticket and confirming the `Depends on #<D> (design)` line is present in the body:
+   ```bash
+   gh issue view <number> --repo <owner>/<repo> --json body --jq '.body'
+   ```
+
+   If the update or verification fails, follow the write-failure protocol: report the error, retry once, and if still failing, STOP and report that the implementation ticket #`<number>` was not updated with the `Depends on #<D> (design)` line — but design ticket #`<D>` exists, so the user can add the dependency line manually.
 
    When `/agentflow:design <D>` completes, it closes #<D> and propagates the `Designed` label to this ticket, satisfying implement's Design gate.
 
@@ -314,9 +349,23 @@ ticket is unambiguous, well-scoped, and ready for implementation.
    - If re-refining and `browserRequired` is false but the issue currently has the `Browser` label, also add `--remove-label "Browser"`
    - If re-refining and `isDesignTicket` is false but the issue currently has the `Design` label, also add `--remove-label "Design"`
 
+   **Verify** by re-fetching the issue's labels and confirming the expected set is present/absent:
+   ```bash
+   gh issue view <number> --repo <owner>/<repo> --json labels --jq '.labels[].name'
+   ```
+
+   If the edit or verification fails, follow the write-failure protocol: report the error, retry once, and if still failing, STOP and report which labels did and didn't apply on ticket #`<number>`.
+
 12. **Auto-label `ui:visual-check` for visual/layout tickets** (skip if `isDesignTicket` is true):
    If the ticket description, acceptance criteria, or answers during refinement match the **visual-check signals** subset in the `frontend-classification` reference skill, add the `ui:visual-check` label:
    `gh issue edit <number> --repo <owner>/<repo> --add-label "ui:visual-check"`
+
+   **Verify** by re-fetching the issue's labels and confirming `ui:visual-check` is present:
+   ```bash
+   gh issue view <number> --repo <owner>/<repo> --json labels --jq '.labels[].name'
+   ```
+
+   If the edit or verification fails, follow the write-failure protocol: report the error, retry once, and if still failing, STOP and report that `ui:visual-check` did not apply to ticket #`<number>`.
 
    This label signals to the implement skill that interactive browser verification via Playwright CLI should be used.
 
