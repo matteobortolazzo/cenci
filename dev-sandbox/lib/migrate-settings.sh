@@ -124,8 +124,8 @@ heal_plugin_installs() {
 # writes correct metadata — even when metadata already claims the plugin is
 # installed. So provision_plugins stops trusting the settings-driven path
 # and calls the CLI directly. Never blocks container start: a missing
-# `claude` binary (codex-sand mounts none) or an offline/failed CLI call
-# just warns to stderr and returns 0.
+# `claude` binary (Codex-agent containers mount none) or an offline/failed
+# CLI call just warns to stderr and returns 0.
 provision_plugins() {
     local plugins_dir="$1" marketplace_name="$2" marketplace_repo="$3"
     shift 3

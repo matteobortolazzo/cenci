@@ -62,7 +62,7 @@ Use the launcher installed for your client:
 
 ```bash
 agent-sand   # Claude Code
-codex-sand   # Codex
+sb xt        # Codex (or: agent-sand --agent codex)
 ```
 
 When launched from a git repository, only that repository root is mounted at
@@ -136,7 +136,7 @@ launchers, and replaces a stale running AgentWatch daemon with the updated binar
 | AgentWatch status has not appeared | Start a new agent session and inspect `${TMPDIR:-/tmp}/agentwatch-bootstrap.log` |
 | Codex skills are missing | Confirm `codex plugin list`, then restart Codex after installation |
 | Claude commands are missing | Confirm `claude plugin list`, then restart Claude Code after installation |
-| Sandbox image is absent | Run `agent-sand --build` or `codex-sand --build` |
+| Sandbox image is absent | Run `agent-sand --build` or `sb --build` |
 | GitHub operations fail | Install `gh` and run `gh auth login` |
 
 Platform and display-specific troubleshooting lives in the internal layer references:

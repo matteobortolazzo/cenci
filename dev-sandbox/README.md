@@ -88,8 +88,18 @@ agent-sand --model sonnet
 
 # Launch Codex instead of Claude Code
 agent-sand --agent codex
-codex-sand              # equivalent — the codex-sand symlink defaults to --agent codex
-codex-sand -p "fix the tests"
+
+# sb: short alias for agent-sand, with one-token agent+model shortcuts as the
+# first argument (only recognized in that position — everything after is
+# forwarded to the agent CLI as usual). Defaults: claude → sonnet, codex → terra.
+sb ch    # Claude, haiku
+sb cs    # Claude, sonnet
+sb co    # Claude, opus
+sb cf    # Claude, fable
+sb xl    # Codex, luna
+sb xt    # Codex, terra
+sb xs    # Codex, sol
+sb cs -p "fix the tests"
 
 # Open a bash shell for manual setup / troubleshooting
 agent-sand --shell
@@ -171,14 +181,14 @@ it.
 
 ### Choosing an agent
 
-`agent-sand` launches Claude Code by default. Pass `--agent codex` (or use the `codex-sand`
-symlink, which detects its invoked name) to launch Codex instead. Both agents run at full
-permission inside the container — Claude with `--dangerously-skip-permissions`, Codex with
+`agent-sand` launches Claude Code by default. Pass `--agent codex` (or use `sb` with an
+`xl`/`xt`/`xs` shortcut) to launch Codex instead. Both agents run at full permission
+inside the container — Claude with `--dangerously-skip-permissions`, Codex with
 `--dangerously-bypass-approvals-and-sandbox`.
 
 Containers and home volumes are **namespaced by agent**, so the two never collide:
-the **Claude agent** uses the `claude-sand-` prefix; `codex-sand` (or `agent-sand --agent
-codex`) uses `codex-sand-`. The rest of the name is the repo slug (or the legacy `<name>`
+the **Claude agent** uses the `claude-sand-` prefix; the **Codex agent** (`--agent
+codex` / `sb xt`) uses `codex-sand-`. The rest of the name is the repo slug (or the legacy `<name>`
 outside a git repo — see [Per-repo containers](#per-repo-containers) above), e.g.
 `claude-sand-my-project` / `claude-sand-home-my-project`. The two agents
 are provisioned differently: **Claude** is bind-mounted from the host (self-contained binary,
@@ -235,7 +245,7 @@ Both agents get a status line out of the box:
 
 ### Codex auth
 
-When launching Codex (`--agent codex` / `codex-sand`), auth is staged from the host:
+When launching Codex (`--agent codex` / `sb xt`), auth is staged from the host:
 
 - `~/.codex/auth.json` — the ChatGPT sign-in credentials created by `codex login` on the
   host. Injected read-only and seeded to `/home/dev/.codex/auth.json` (mode 600) only when

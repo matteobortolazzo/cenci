@@ -263,8 +263,8 @@ run_doctor() {
 	if [ "$HAS_CLAUDE" -eq 1 ]; then
 		check "agent-sand launcher" optional "re-run the installer to create it" command -v agent-sand
 	fi
-	if [ "$HAS_CODEX" -eq 1 ]; then
-		check "codex-sand launcher" optional "re-run the installer to create it" command -v codex-sand
+	if [ "$HAS_CLAUDE" -eq 1 ] || [ "$HAS_CODEX" -eq 1 ]; then
+		check "sb launcher" optional "re-run the installer to create it" command -v sb
 	fi
 	if runtime="$(container_runtime 2>/dev/null)"; then
 		check "agent-sandbox:latest image" optional "build it with the installed sandbox launcher --build" \
@@ -434,15 +434,14 @@ step_sandbox_setup() {
 	selected agent-sandbox || return 0
 	step "Setting up the agent-sandbox launcher"
 
-	local launcher launcher_name
-	if [ "$HAS_CLAUDE" -eq 1 ]; then launcher_name=agent-sand; else launcher_name=codex-sand; fi
+	local launcher launcher_name="sb"
 	if ! launcher=$(find_plugin_path "dev-sandbox/agent-sand"); then
 		warn "could not find the installed agent-sandbox plugin cache — re-run the installer after restarting your client"
 		return 0
 	fi
 
 	if [ "$HAS_CLAUDE" -eq 1 ]; then link_launcher agent-sand "$launcher" || true; fi
-	if [ "$HAS_CODEX" -eq 1 ]; then link_launcher codex-sand "$launcher" || true; fi
+	link_launcher sb "$launcher" || true
 
 	case ":$PATH:" in
 	*":$HOME/.local/bin:"*) ;;
@@ -703,8 +702,11 @@ final_summary() {
 		if [ "$HAS_CLAUDE" -eq 1 ]; then
 			say "    agent-sand                # Claude Code inside the container"
 		fi
+		if [ "$HAS_CLAUDE" -eq 1 ]; then
+			say "    sb ch|cs|co|cf             # Claude in the container: haiku/sonnet/opus/fable"
+		fi
 		if [ "$HAS_CODEX" -eq 1 ]; then
-			say "    codex-sand                # Codex inside the container"
+			say "    sb xl|xt|xs                # Codex in the container: luna/terra/sol"
 		fi
 	fi
 	if selected agentflow && [ "$HAS_CLAUDE" -eq 1 ]; then
