@@ -1,9 +1,9 @@
-module github.com/matteobortolazzo/agent-stack/agentwatch/v2
+module github.com/matteobortolazzo/agent-stack/agentwatch/v3
 
 go 1.25
 
-// v2.0.0-v2.17.1 were tagged before go.mod declared the required /v2
-// major-version suffix, so they cannot be resolved as module
-// .../agentwatch/v2. Retracted so `go get` skips them and selects a
-// valid release. The git tags and GitHub releases are intentionally kept.
-retract [v2.0.0, v2.17.1]
+// v3.0.0 was tagged before go.mod declared the required /v3
+// major-version suffix, so it cannot be resolved as module
+// .../agentwatch/v3. Retracted so `go get` skips it and selects a
+// valid release. The git tag and GitHub release are intentionally kept.
+retract v3.0.0

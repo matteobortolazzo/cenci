@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/internal/ipc"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v3/internal/ipc"
 )
 
 func useTempSocketDir(t *testing.T) {
