@@ -14,7 +14,7 @@
 # <swiftbar.hideLastUpdated>true</swiftbar.hideLastUpdated>
 # <swiftbar.hideDisablePlugin>false</swiftbar.hideDisablePlugin>
 #
-# The `.5s.` in the filename is SwiftBar's refresh interval. `agentwatch status`
+# The `.5s.` in the filename is SwiftBar's refresh interval. `agentwatch widget-json`
 # is a cheap one-shot socket read, so a short interval is fine. Rename the segment
 # (e.g. `.2s.`, `.10s.`) to change the polling cadence.
 #
@@ -72,7 +72,7 @@ BIN="$(resolve_bin || true)"
 # Empty stdout / non-zero exit covers both "daemon down" and "no sessions with
 # dispatch off" (alt=none, which status.go already renders as exit 1 / no
 # output).
-JSON="$("$BIN" status 2>/dev/null || true)"
+JSON="$("$BIN" widget-json 2>/dev/null || true)"
 [ -z "$JSON" ] && exit 0   # nothing live — hide the item
 
 # --- 3. Format as SwiftBar output via JXA ---------------------------------

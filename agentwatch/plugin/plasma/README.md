@@ -1,7 +1,7 @@
 # AgentWatch — KDE Plasma widget
 
 Live counts of Claude Code and Codex agent sessions in the KDE Plasma panel
-(Kubuntu's default desktop). Polls `agentwatch status` and renders the snapshot —
+(Kubuntu's default desktop). Polls `agentwatch widget-json` and renders the snapshot —
 a read-only frontend over the same Waybar JSON contract as the waybar, noctalia,
 dms, and macOS widgets. No daemon or Go changes.
 
@@ -72,7 +72,7 @@ kquitapp6 plasmashell && kstart plasmashell
   agent. Row color reflects the remaining budget: >25% positive (normal),
   10–25% neutral (warning), <10% negative (critical) — the same thresholds as
   `headroomClass` in `status.go` and the macOS menu. The headroom summary line
-  that `agentwatch status` appends to the tooltip is excluded from the session
+  that `agentwatch widget-json` appends to the tooltip is excluded from the session
   list by exact match, so it neither renders as a bogus session row nor inflates
   the session count.
 
@@ -80,12 +80,12 @@ kquitapp6 plasmashell && kstart plasmashell
 
 | Key | Default | Notes |
 |---|---|---|
-| `pollIntervalMs` | `2000` | How often to run `agentwatch status` (250–60000). |
+| `pollIntervalMs` | `2000` | How often to run `agentwatch widget-json` (250–60000). |
 | `agentwatchPath` | `agentwatch` | Path or command name for the binary. Use an **absolute path** if it is not on the Plasma session PATH. |
 
 ## Troubleshooting
 
-- **Widget never appears / stays hidden**: run `agentwatch status` in a terminal.
+- **Widget never appears / stays hidden**: run `agentwatch widget-json` in a terminal.
   If it prints JSON, set the absolute binary path in the widget settings (the
   Plasma session PATH may not include it). If it prints nothing, no sessions are
   live — start a Claude Code / Codex tmux pane.
@@ -94,5 +94,5 @@ kquitapp6 plasmashell && kstart plasmashell
 
 ## Test
 
-`./test.sh` — a drift check that fails if `agentwatch status` gains a status
+`./test.sh` — a drift check that fails if `agentwatch widget-json` gains a status
 class that `main.qml` doesn't map. It does not launch Plasma.

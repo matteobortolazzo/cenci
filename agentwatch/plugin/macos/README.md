@@ -1,7 +1,7 @@
 # AgentWatch — macOS menu bar (SwiftBar)
 
 Live counts of Claude Code and Codex sessions in your macOS menu bar. Polls
-`agentwatch status` and renders the snapshot as a [SwiftBar](https://swiftbar.app)
+`agentwatch widget-json` and renders the snapshot as a [SwiftBar](https://swiftbar.app)
 plugin — the same Waybar JSON contract the noctalia and dms widgets consume, so
 there are no daemon or Go changes.
 
@@ -41,7 +41,7 @@ claude plugin install agentwatch   # or: claude plugin update agentwatch
 Confirm it works (prints Waybar JSON when a session is live, nothing when idle):
 
 ```sh
-agentwatch status
+agentwatch widget-json
 ```
 
 Codex-only or hacking on the source? Install the binary by hand and start the daemon
@@ -114,7 +114,7 @@ killall SwiftBar; open -a SwiftBar
 
 ## Behavior
 
-- Polls on SwiftBar's filename interval (`agentwatch status` is a cheap socket read).
+- Polls on SwiftBar's filename interval (`agentwatch widget-json` is a cheap socket read).
 - **Hides completely** when `alt=none` (no live sessions and the fleet dispatch loop
   is disabled/absent) or the daemon is down — matching the noctalia/dms widgets. When
   there are zero live sessions but the fleet dispatch loop is enabled, `class` stays
@@ -167,7 +167,7 @@ killall SwiftBar; open -a SwiftBar
 
 ## Troubleshooting
 
-- **Item never appears**: confirm `agentwatch status` prints JSON in a shell. If it
+- **Item never appears**: confirm `agentwatch widget-json` prints JSON in a shell. If it
   prints nothing (`"alt":"none"`), there are no live sessions and the fleet dispatch
   loop is off — start a Claude Code or Codex session and try again. If it works in a
   shell but not in SwiftBar, it's the GUI-PATH gotcha: set `AGENTWATCH_BIN` to the

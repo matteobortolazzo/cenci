@@ -3,7 +3,7 @@
 // Live Claude Code / Codex session counts in the top bar. This is a read-only
 // frontend over the same Waybar JSON contract consumed by the waybar, noctalia,
 // dms, and macOS widgets — it makes no daemon or Go changes. It polls
-// `agentwatch status` on a timer, parses the single JSON line, and maps the
+// `agentwatch widget-json` on a timer, parses the single JSON line, and maps the
 // `class` field to an icon + color. Empty stdout, a non-zero exit, or
 // `alt: "none"` all mean "hide the indicator" — `alt` (not `class`) is the
 // module's hide/show contract, since `class` stays "none" for the
@@ -85,7 +85,7 @@ class AgentWatchIndicator extends PanelMenu.Button {
         this.add_child(this._box);
     }
 
-    // updateFromJSON consumes one line of `agentwatch status` output.
+    // updateFromJSON consumes one line of `agentwatch widget-json` output.
     updateFromJSON(stdout) {
         const out = (stdout || '').trim();
         if (!out) {
@@ -234,7 +234,7 @@ export default class AgentWatchExtension extends Extension {
         let proc;
         try {
             proc = Gio.Subprocess.new(
-                [path, 'status'],
+                [path, 'widget-json'],
                 Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE);
         } catch (_e) {
             // Binary not found / not executable — hide.

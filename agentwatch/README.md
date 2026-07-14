@@ -33,7 +33,7 @@ its two stable user variables into the theme instead; see
 The core daemon keys state by agent session id, maps hook events to statuses, and owns the paneless TTL sweep. All window work is delegated to an injected frontend:
 
 - **tmux frontend** (`internal/frontend/tmux/`): the one interactive frontend — window rename, style, pane-based stale sweep, renumber migration.
-- **status JSON** (`internal/frontend/status/`): read-only broadcast in the [Waybar custom module protocol](https://github.com/Alexays/Waybar/wiki/Module:-Custom); consumed by `agentwatch status` and the Waybar, noctalia, [DMS](plugin/dms/README.md), [GNOME Shell](plugin/gnome/README.md), [KDE Plasma](plugin/plasma/README.md), and macOS menu bar ([SwiftBar](https://swiftbar.app), [setup](plugin/macos/README.md)) display widgets.
+- **status JSON** (`internal/frontend/status/`): read-only broadcast in the [Waybar custom module protocol](https://github.com/Alexays/Waybar/wiki/Module:-Custom); consumed by `agentwatch widget-json` (hidden alias `waybar`) and the Waybar, noctalia, [DMS](plugin/dms/README.md), [GNOME Shell](plugin/gnome/README.md), [KDE Plasma](plugin/plasma/README.md), and macOS menu bar ([SwiftBar](https://swiftbar.app), [setup](plugin/macos/README.md)) display widgets.
 
 No polling for normal state changes. Agent hooks push state changes to the daemon instantly via a Unix socket; the daemon sweeps periodically for stale/exited sessions.
 
@@ -563,24 +563,48 @@ make plugin-bin
 claude --plugin-dir /path/to/agentwatch/plugin
 ```
 
-### Start the daemon manually
+### Daemon lifecycle (`agentwatch daemon start|stop|restart|status`)
 
 When you install the binary by hand, start the daemon once (the marketplace plugin
-does this for you):
+does this for you via `EnsureRunning`, which spawns `agentwatch daemon start` detached
+on demand):
 
 ```bash
-agentwatch        # run in background or a dedicated pane
-agentwatch -v     # verbose logging
+agentwatch daemon start        # foreground; run in background or a dedicated pane
+agentwatch daemon start -v     # verbose logging
+agentwatch daemon              # bare "daemon" acts as "start"
 ```
 
-A second `agentwatch daemon` is a safe no-op — it detects the running daemon, logs
-"daemon already running", and exits without disturbing it.
+**BREAKING**: bare `agentwatch` (no subcommand) and unrecognized top-level
+flags/subcommands used to fall through to running the daemon in the foreground. They
+now print usage and exit 2 instead — the daemon only starts via the explicit `daemon`
+subcommand group. Update any script or shortcut that ran bare `agentwatch` to run
+`agentwatch daemon start` (or `agentwatch daemon`) instead.
+
+`daemon start` writes a PID file at `$XDG_RUNTIME_DIR/agentwatch/agentwatch.pid`
+once it has become the one live daemon (never on the "already running" no-op path
+below), and removes it on clean shutdown (SIGINT/SIGTERM). A second `agentwatch
+daemon start` against a socket that's already bound is a safe no-op — it detects the
+running daemon, logs "daemon already running", and exits without disturbing it or
+touching the PID file.
+
+```bash
+agentwatch daemon stop      # SIGTERM, then SIGKILL if still alive after a few seconds; exits 0 whether or not anything was running
+agentwatch daemon restart   # stop (if running), then spawn a fresh detached daemon and wait for it to come up
+agentwatch daemon status    # running/not-running + PID; exits 1 when not running
+```
+
+`daemon stop` determines liveness via the same event-socket dial `EnsureRunning`
+uses, then reads the PID file, sends `SIGTERM`, and polls (bounded, a few seconds)
+before escalating to `SIGKILL`. If the PID file is missing or stale but the socket
+reports a live daemon, it falls back to a `pgrep -f` process-table scan. The PID
+file is always removed once it's known stale.
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-v` | `false` | Verbose logging |
 | `-event-socket` | `$XDG_RUNTIME_DIR/agentwatch/agentwatch-events.sock` | Event socket for hook notifications |
-| `-socket` | `$XDG_RUNTIME_DIR/agentwatch/agentwatch.sock` | Broadcast socket for waybar clients |
+| `-socket` | `$XDG_RUNTIME_DIR/agentwatch/agentwatch.sock` | Broadcast socket for widget clients |
 | `-sweep` | `1` | Stale session reconciliation interval in seconds |
 | `-session-ttl` | `2h` | Idle TTL for paneless sessions (Go duration); sessions without a pane are expired after this duration if no `SessionEnd` fires |
 | `-style-running` | `fg=blue,dim` | tmux style for running state (inactive windows) |
@@ -592,12 +616,38 @@ A second `agentwatch daemon` is a safe no-op — it detects the running daemon, 
 | `-symbol-input` | `!` | Symbol shown in status bar indicator |
 | `-symbol-idle` | `~` | Symbol shown in status bar indicator |
 
-### Status / Waybar module
+(Flags above apply to `daemon start`; `stop`/`restart`/`status` take no flags — they
+always resolve the default socket/PID paths.)
 
-`agentwatch status` connects to the daemon's broadcast socket, reads the current state, prints a single line of JSON in the [Waybar custom module protocol](https://github.com/Alexays/Waybar/wiki/Module:-Custom), and exits. (`agentwatch waybar` is a backwards-compatible alias.)
+### Human status overview (`agentwatch status`)
+
+`agentwatch status` prints a human-readable overview: whether the daemon is running
+(with its PID), the active sessions from the daemon's broadcast state snapshot (the
+same data `widget-json` reads), and the embedded fleet dispatch loop's state (the
+same renderer `agentwatch dispatch loop status` uses). It degrades gracefully when
+the daemon is down — it still prints a report and always exits 0. This is distinct
+from `agentwatch daemon status` above, which is a narrower running/not-running + PID
+check that exits 1 when not running (for scripting).
+
+```console
+$ agentwatch status
+daemon: running (pid 12345)
+sessions (1):
+  main:0 - implement thing (running)
+Dispatch loop: enabled
+  daemon:   running
+  interval: 5m
+  pass_running: false
+  last_dispatched: 2
+  last_skipped: 0
+```
+
+### Machine-readable status for widgets (`agentwatch widget-json`)
+
+`agentwatch widget-json` connects to the daemon's broadcast socket, reads the current state, prints a single line of JSON in the [Waybar custom module protocol](https://github.com/Alexays/Waybar/wiki/Module:-Custom), and exits. This is the hidden plumbing subcommand every bar widget (Waybar itself, noctalia, DMS, GNOME Shell, KDE Plasma, macOS/SwiftBar) polls — it used to be named `agentwatch status` before `status` became the human-readable overview above. (`agentwatch waybar` remains a backwards-compatible hidden alias for `widget-json`.)
 
 ```bash
-agentwatch status
+agentwatch widget-json
 ```
 
 | Flag | Default | Description |
@@ -613,7 +663,7 @@ agentwatch status
 
 ```jsonc
 "custom/agentwatch": {
-    "exec": "agentwatch status",
+    "exec": "agentwatch widget-json",
     "return-type": "json",
     "interval": 1
 }
@@ -701,7 +751,7 @@ from the raw fields directly. `class` is unaffected (session-status
 priority is unchanged; it stays `"none"` when there are zero live sessions,
 dispatch-enabled or not), but `alt` becomes `"dispatch-only"` instead of `"none"`
 when there are zero live sessions and the loop is enabled — **`alt`, not `class`, is
-what determines whether the module is hidden** (`agentwatch status`'s exit code
+what determines whether the module is hidden** (`agentwatch widget-json`'s exit code
 follows `alt == "none"`), so the indicator still appears even with no active
 sessions. Every non-waybar frontend (noctalia/DMS/GNOME/Plasma/macOS) reads this
 same `alt` field to decide visibility.
@@ -724,7 +774,7 @@ off `format-alt` / `{alt}` instead of CSS — e.g. `"format-alt": "{alt}"` with
 #### macOS menu bar (SwiftBar)
 
 macOS users get the same status surface via a [SwiftBar](https://swiftbar.app)
-plugin that consumes the identical `agentwatch status` JSON — no daemon changes. It
+plugin that consumes the identical `agentwatch widget-json` JSON — no daemon changes. It
 shows the counts in the menu bar (loud red on `need-input`) and a per-session
 dropdown, and hides when no sessions are live. See
 [`plugin/macos/README.md`](plugin/macos/README.md) for install and settings.
@@ -732,7 +782,7 @@ dropdown, and hides when no sessions are live. See
 #### GNOME Shell (Ubuntu)
 
 Ubuntu's default desktop gets the same status surface via a GNOME Shell 45+
-extension that polls `agentwatch status` and adds a top-bar indicator — an icon +
+extension that polls `agentwatch widget-json` and adds a top-bar indicator — an icon +
 counts colored by the highest-priority status, with a click-through menu listing
 each session. It hides when no sessions are live. See
 [`plugin/gnome/README.md`](plugin/gnome/README.md) for install and settings.
@@ -740,7 +790,7 @@ each session. It hides when no sessions are live. See
 #### KDE Plasma (Kubuntu)
 
 KDE Plasma 6 users get a native panel widget that consumes the identical
-`agentwatch status` JSON — a compact icon + counts with an expandable per-session
+`agentwatch widget-json` JSON — a compact icon + counts with an expandable per-session
 list, hidden from the panel when no sessions are live. See
 [`plugin/plasma/README.md`](plugin/plasma/README.md) for install and settings.
 
@@ -832,7 +882,7 @@ The daemon has two sweep mechanisms:
 
 ### Paneless sessions
 
-`agentwatch notify` accepts events even when `$TMUX_PANE` is unset. Sessions running in plain terminals or dev-sandbox without a tmux pane appear in `agentwatch status` output with empty `session` and `window_index` fields; their tooltip line reads `name (status)` rather than `sess:idx - name (status)`.
+`agentwatch notify` accepts events even when `$TMUX_PANE` is unset. Sessions running in plain terminals or dev-sandbox without a tmux pane appear in `agentwatch widget-json` output with empty `session` and `window_index` fields; their tooltip line reads `name (status)` rather than `sess:idx - name (status)`.
 
 **Caveat**: for paneless sessions the task name comes only from the hook payload's `task_name` field — there is no pane title to read. Codex `UserPromptSubmit` hooks provide the compact first-prompt label, but native action-required title detection is only available for tmux-backed sessions.
 
@@ -885,10 +935,13 @@ agentwatch respects manually set window names:
 ### Daemon restart
 
 If the daemon is absent after a login or restart, the next installed Claude or Codex
-hook starts it on demand, waits briefly, and retries that same event. The daemon then
-re-discovers the session — a `ListPanes` call maps the `$TMUX_PANE` to the correct
-window — and status consumers such as DMS see it on their next poll. Custom
-`-event-socket` instances are never started automatically.
+hook starts it on demand (spawning `agentwatch daemon start` detached), waits briefly,
+and retries that same event. The daemon then re-discovers the session — a `ListPanes`
+call maps the `$TMUX_PANE` to the correct window — and status consumers such as DMS
+see it on their next poll. Custom `-event-socket` instances are never started
+automatically. To restart deliberately (e.g. after a config change), use `agentwatch
+daemon restart` instead of waiting for the next hook — see
+[Daemon lifecycle](#daemon-lifecycle-agentwatch-daemon-startstoprestartstatus) above.
 
 **Upgrading past the socket-directory nesting change**: sockets moved from
 `$XDG_RUNTIME_DIR/agentwatch*.sock` to `$XDG_RUNTIME_DIR/agentwatch/agentwatch*.sock`
@@ -901,7 +954,7 @@ above for any other daemon-absent case. No special migration steps are needed.
 
 ## Troubleshooting
 
-**No status updates**: Ensure the hook/plugin is loaded (`claude plugin list`, `claude --plugin-dir ./plugin`, or Codex `/hooks`). Check that `agentwatch notify` can reach the event socket (`agentwatch -v` shows the socket path).
+**No status updates**: Ensure the hook/plugin is loaded (`claude plugin list`, `claude --plugin-dir ./plugin`, or Codex `/hooks`). Check `agentwatch daemon status` (running/not-running + PID) and that `agentwatch notify` can reach the event socket (`agentwatch daemon start -v` shows the socket path).
 
 **Binary/daemon didn't bootstrap**: The SessionStart bootstrap fails silently so it
 never blocks the agent. Check the bootstrap log at

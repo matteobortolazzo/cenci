@@ -2,7 +2,7 @@
 //
 // Live Claude Code / Codex session counts in the Plasma panel. Read-only
 // frontend over the same Waybar JSON contract consumed by the waybar, noctalia,
-// dms, and macOS widgets — no daemon or Go changes. Polls `agentwatch status`
+// dms, and macOS widgets — no daemon or Go changes. Polls `agentwatch widget-json`
 // on a timer, parses the single JSON line, and maps the `class` field to an icon
 // + color. Empty stdout, non-zero exit, or `alt: "none"` → hide from the panel
 // (`alt`, not `class`, is the hide/show contract — `class` stays "none" for the
@@ -146,7 +146,7 @@ PlasmoidItem {
         }
 
         function poll() {
-            connectSource(root.agentwatchPath + " status")
+            connectSource(root.agentwatchPath + " widget-json")
         }
     }
 
