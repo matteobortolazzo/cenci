@@ -101,10 +101,11 @@ session_max_length: 40        # match agentwatch's window-name cap (see join key
 action_refresh_delay: 5       # seconds after an action before refreshing — lets the
                               # agentflow skill apply its label before the board re-reads
 working_label: "Working"      # spinner marker; a card keeps its column while set
+agentwatch: true              # live agent badges + status-bar counts (default)
+cleanup: "tmux kill-window -t ={window} 2>/dev/null || true"
 
 columns:
   - name: New
-    cleanup: "tmux kill-window -t {session} 2>/dev/null || true"
     actions:
       R:
         name: Refine
@@ -112,7 +113,6 @@ columns:
         command: "agentwatch run refine {number}"
 
   - name: Refined
-    cleanup: "tmux kill-window -t {session} 2>/dev/null || true"
     actions:
       D:
         name: Design
@@ -124,7 +124,6 @@ columns:
         command: "agentwatch run implement {number}"
 
   - name: Designed
-    cleanup: "tmux kill-window -t {session} 2>/dev/null || true"
     actions:
       I:
         name: Implement
@@ -134,14 +133,35 @@ columns:
   - name: Planned
 
   - name: In Review
+    actions:
+      W:
+        name: Checkout PR
+        type: shell
+        scope: pr
+        command: 'tmux new-window -d -n pr-{pr_number} "git fetch origin {pr_branch} && git switch {pr_branch}"'
+
   - name: Implemented
 
-# Board-level actions (no selected card)
+# Global actions (default scope is "card" — they act on the selected card)
 actions:
+  G:
+    name: Jump to agent
+    type: shell
+    command: 'tmux switch-client -t "={window}"'
   A:
     name: Annotate
     type: shell
     command: "gh issue comment {number} --body {comment}"
+  S:
+    name: Start dispatch loop
+    type: shell
+    scope: board
+    command: "agentwatch dispatch loop on"
+  X:
+    name: Stop dispatch loop
+    type: shell
+    scope: board
+    command: "agentwatch dispatch loop off"
 ```
 
 **Per-column actions** dispatch a workflow onto the selected card. The action key is
@@ -150,10 +170,30 @@ builds the `<number>-<skill>` window and launches the agent.
 `agentwatch` chooses `refine`/`design`/`implement` from its built-in Claude templates
 with zero extra config.
 
-**`cleanup`** fires when a card leaves the column (detected on refresh). Reaping the
-window with `tmux kill-window -t {session}` closes the agent session that dispatch
-opened — which is why `session_max_length` must match agentwatch's cap, so `{session}`
+**`cleanup`** fires when a card leaves the column (detected on refresh). A single
+top-level `cleanup` covers every column that doesn't define its own. Reap with
+`{window}` — the live agentwatch window name (`<number>-<skill>`), falling back to
+`{session}` when no agent window is live — rather than reconstructing the name with
+`{session}`: dispatch names windows by skill, so only `{window}` is guaranteed to hit
+the window that actually exists. The `=` prefix makes tmux match the name exactly.
+`session_max_length` must still match agentwatch's cap so the `{session}` fallback
 names the right window.
+
+**`W` on In Review** is a `scope: pr` action: it requires the selected card to have a
+linked PR (auto-detected from the issue timeline), runs immediately with one PR, and
+opens lazyboards' PR picker with several. Checking out `{pr_branch}` in a detached
+tmux window puts the agent's PR one keypress from a local review — append the
+project's run command (`ng serve`, `dotnet run`, `go run .`, …) in that project's
+`.lazyboards.yml` to also start it.
+
+**`G` (jump to agent)** switches the tmux client straight to the card's live agent
+window via `{window}` — the reverse direction of the badge: the badge tells you an
+agent needs attention, `G` takes you there.
+
+**`S`/`X` (dispatch loop)** start and stop the daemon-owned background dispatch loop
+(`agentwatch dispatch loop on|off`). lazyboards deliberately never toggles the loop
+itself; these board-scope actions are the supported switch, and the board reflects the
+result live (see the dispatch panel below).
 
 **The annotate action** posts a comment back to the ticket. There is no dedicated
 "comment" action type — `type` is only ever `shell` or `url`. Instead, any action can
@@ -164,8 +204,26 @@ prompt to capture the comment text first, then runs the same command. That gives
 
 Available template variables: `{number}`, `{title}` (slugified), `{tags}`
 (comma-joined labels), `{session}` (`<number>-<slug>`, capped at `session_max_length`),
-`{comment}`, `{repo_owner}`, `{repo_name}`, `{provider}`. Board-scoped actions (no
-selected card) may not use `{number}`, `{title}`, `{tags}`, or `{session}`.
+`{window}` (live agentwatch window name, falling back to `{session}`), `{comment}`,
+`{repo_owner}`, `{repo_name}`, `{provider}` — plus, in `scope: pr` actions only,
+`{pr_branch}`, `{pr_number}`, `{pr_url}`, and `{pr_title}`. Actions default to
+`scope: card`; `scope: board` actions (no selected card) may not use card- or
+PR-specific variables. See the
+[lazyboards README](https://github.com/matteobortolazzo/lazyboards#template-variables)
+for the authoritative reference.
+
+## Fleet dispatch from the board
+
+Pressing `d` in lazyboards opens the dispatch panel for the current repo: it shows
+enrollment state (`Enter` toggles it, backed by `agentwatch dispatch enroll|unenroll`)
+and a read-only line for the daemon-owned dispatch loop. `o` triggers a one-off
+`agentwatch dispatch` pass — fleet-wide, across **all** enrolled repos, picking up any
+`Planned` ticket with an approved `.plans/<id>-*.md` file. The recurring loop is
+switched with the `S`/`X` board actions above; while it's on, the status bar shows a
+`⟳ dispatch` segment fed by the same watcher socket as the agent badges, so it tracks
+the loop (and daemon reachability) live. Concurrency, quiet hours, and budgets live in
+agentwatch's own `dispatch` config block — see the
+[agentwatch README](../agentwatch/README.md#configuration-1).
 
 ## Dispatching into the sandbox
 
