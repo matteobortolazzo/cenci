@@ -638,6 +638,50 @@ case_14_liveness_transport_failure_hard_fails() {
     assert_not_contains "No orphaned processes found."
 }
 
+# ---------------------------------------------------------------------------
+case_15_corrupted_scan_start_falls_back_to_kill() {
+    echo "case: a non-numeric recorded start (scan-time field-22 corruption, e.g. via a crafted comm) does not block SIGKILL; falls back to best-effort with a distinct note"
+    reset_state
+    local container="claude-sand-corruptscan"
+    add_podman_container "${container}"
+    # Recorded start is corrupted (non-numeric) at scan time; the pre-SIGKILL
+    # probe reports a genuine numeric start time. A strictly-numeric identity
+    # comparison can't trust the corrupted recorded value, so it must fall
+    # back to best-effort SIGKILL instead of treating this as a PID-reuse
+    # mismatch.
+    write_scan "${container}" $'15001\t%18\t9x9'
+    export MOCK_LIVE_PANES="%99"
+    set_live_start 15001 15000
+    run_reap
+    assert_exit_zero
+    assert_contains "$(reaped_line "${container}" 15001 "%18")"
+    assert_calls_contains "podman exec -u root ${container} kill -TERM 15001"
+    assert_calls_contains "podman exec -u root ${container} kill -KILL 15001"
+    assert_contains "Note: process 15001 in container ${container} has an unparseable start-time value; proceeding best-effort."
+}
+
+# ---------------------------------------------------------------------------
+case_16_corrupted_probe_output_falls_back_to_kill() {
+    echo "case: a non-numeric pre-SIGKILL probe output (field-22 corruption via a crafted comm on the live process) does not block SIGKILL; falls back to best-effort with a distinct note"
+    reset_state
+    local container="claude-sand-corruptprobe"
+    add_podman_container "${container}"
+    write_scan "${container}" $'16001\t%19\t16000'
+    export MOCK_LIVE_PANES="%99"
+    # Probe output is corrupted (non-numeric, and neither __GONE__ nor
+    # __NOSTAT__) -- a strictly-numeric identity comparison can't trust it,
+    # so it must fall back to best-effort SIGKILL instead of treating this as
+    # a PID-reuse mismatch.
+    set_live_start 16001 "abc123"
+    run_reap
+    assert_exit_zero
+    assert_contains "$(reaped_line "${container}" 16001 "%19")"
+    assert_calls_contains "podman exec -u root ${container} kill -TERM 16001"
+    assert_calls_contains "podman exec -u root ${container} kill -KILL 16001"
+    assert_contains "Note: process 16001 in container ${container} has an unparseable start-time value; proceeding best-effort."
+}
+
+# ---------------------------------------------------------------------------
 case_1_orphan_termed
 case_2_term_resistant_escalates_to_kill
 case_3_empty_pane_never_signaled
@@ -652,6 +696,8 @@ case_11_genuine_kill_failure_hard_fails
 case_12_malformed_pane_skipped
 case_13_pid_reuse_during_grace_skips_kill
 case_14_liveness_transport_failure_hard_fails
+case_15_corrupted_scan_start_falls_back_to_kill
+case_16_corrupted_probe_output_falls_back_to_kill
 
 echo
 echo "passed: ${PASSES}, failed: ${FAILURES}"
