@@ -39,6 +39,12 @@ from external or semi-trusted sources.
   inline interpolation. Direct interpolation allows shell injection: a PR title
   containing `$(…)` or backticks will be executed as code. This applies to all
   interpolation contexts — not only message bodies, but also flags like `--title`.
+- When using the temp-file + read-back pattern, guard against empty reads with
+  `[ -n "$VAR" ]` between the `cat` and the external command (e.g.,
+  `TITLE=$(cat /tmp/claude/title.txt) && [ -n "$TITLE" ] && gh issue create --title "$TITLE" …`).
+  A silent write failure (zero-length file or unwritten temp file) will produce
+  an empty string that succeeds with `cat` but creates a malformed external
+  command; the guard provides fail-fast detection.
 - Every documented external-mutation command flow (gh issue/pr create, edit,
   comment, label create, etc.) must include an explicit documented failure branch.
   Never leave the executing agent to proceed with unparsed identifiers, missing
