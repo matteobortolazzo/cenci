@@ -799,6 +799,26 @@ The `pencil` field is only present when the user was asked question 5b (frontend
 
 Omit `pencil` entirely if no frontend framework was detected.
 
+The `security` field is optional and is **never written by a configure prompt** — there is
+no question for it. It is a manually-editable escape hatch that lets a project extend
+implement's Trivial-Ticket Triage sensitive-path backstop (see `skills/implement/SKILL.md`,
+"Sensitive-path backstop"). Schema:
+- `security.sensitivePaths` — an array of glob-pattern strings. Each pattern is matched
+  whole-path / substring-style (`*` matches any characters including `/`, case-insensitive)
+  against the file path(s) a trivial-candidate ticket names; a match disqualifies the ticket
+  from the trivial fast path and forces full planning.
+
+These entries are **additive to** implement's built-in default pattern list (`*auth*`,
+`*payment*`, `*billing*`, `*migrat*`, `*secret*`, `*credential*`, `*oauth*`, `*token*`, and
+more) — they extend it and never replace it, so the defaults apply even when `security` is
+absent. Add patterns here only to cover project-specific sensitive areas the defaults miss
+(e.g. a domain-specific module name).
+
+Because the config write below uses merge semantics (step 6 — start from `existingConfig` and
+overwrite only the fields the skill manages), a hand-added `security` block is **preserved
+untouched** across re-configuration. Do **not** add `security` to the migration-removal list
+below — it is a supported optional field, not a legacy one.
+
 **Monorepo config** — when `isMonorepo` is true, add `isMonorepo` and `projects` fields:
 
 ```json

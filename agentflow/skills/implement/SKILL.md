@@ -228,6 +228,71 @@ A ticket qualifies as trivial only when **all** of the following hold:
 
 Conservative default: if the ticket does not clearly qualify on all four points, fall through to today's unchanged planning flow (planner delegation, Q&A, persist-and-stop). Ambiguity always falls through — never guess trivial.
 
+### Sensitive-path backstop (deterministic)
+
+The first criterion above ("not security-sensitive, not a data migration, not
+auth/payment-related") is a wording-based judgment over the ticket text. It stays as-is
+and is preserved as the first pass — but a ticket can be security-relevant without saying
+so. So once all four criteria pass, run one additional, deterministic check over the file
+path(s) triage already named from the ticket body under criterion 4. Those paths are
+already in hand; obtaining them requires no new work. If criterion 4 was instead satisfied
+via a change description with no identifiable file path, the backstop has nothing to
+pattern-match against — treat this as inconclusive and fall through to full planning (never
+trivial), consistent with this section's conservative-default philosophy.
+
+**Pattern set — built-in defaults unioned with project config.** Match each named path
+against the union of two sources:
+
+1. The built-in default sensitive-path patterns below. These **always apply**, even for a
+   project that has configured nothing:
+
+   - `*auth*` (authentication, authorization, oauth, authService, …)
+   - `*login*`, `*logout*`, `*session*`
+   - `*password*`, `*passwd*`, `*credential*`, `*secret*`, `*secrets*`
+   - `*token*`, `*jwt*`, `*apikey*`, `*api_key*`, `*.pem`, `*.key`, `*.env*`
+   - `*oauth*`, `*sso*`, `*saml*`, `*openid*`
+   - `*permission*`, `*acl*`, `*rbac*`, `*role*`
+   - `*crypto*`, `*encrypt*`, `*decrypt*`, `*sign*`, `*hash*`
+   - `*payment*`, `*billing*`, `*invoice*`, `*checkout*`, `*stripe*`
+   - `*migrat*` (migration / migrations / migrate), `*schema*`
+
+   This list is intentionally broad. A false positive costs only the fast path — the ticket
+   still gets fully planned, never wrongly judged trivial — so err toward matching.
+
+2. Any glob strings in `security.sensitivePaths` from `.claude/config.json` (already read in
+   the Context section — this adds no tool call). Project entries are **additive**: they
+   extend the built-in defaults and never replace or narrow them. A project that omits
+   `security.sensitivePaths`, or omits the `security` block entirely, still gets the full
+   default list.
+
+**Match semantics — whole-path substring.** A pattern matches when, treating every `*` as
+matching any run of characters **including `/`**, the glob matches the entire
+repository-relative path. In practice `*<term>*` means "the path contains `<term>` anywhere
+— in any directory segment or in the filename, freely across `/` boundaries." Matching is
+case-insensitive. For example, `*auth*` matches `src/auth/login.ts`, `authService.ts`, and
+`lib/oauth.ts` alike.
+
+**Outcome.** If any named path matches any pattern in the combined set, force
+`trivial = false` and fall through to the normal planning flow — the same outcome as failing
+any of the four criteria — regardless of what the wording-based first pass concluded. This
+backstop can only **disqualify** a ticket from the fast path; it never promotes one.
+
+**Zero new tool calls.** The match runs in-model over the path strings already named under
+criterion 4 (and the bundle body already read for the two fidelity gates above). Do **not**
+`Glob`, `Read`, or invoke a subagent to resolve, expand, or verify paths — this stays inside
+the section's "no subagent invocation, no codebase exploration" constraint.
+
+**Conservative fall-through on failure.** If `.claude/config.json` carries no `security`
+block, apply the defaults alone. If `security.sensitivePaths` is present but malformed or
+unreadable (not an array of strings), ignore only the configured entries and still apply the
+built-in defaults — never skip the backstop entirely. When this malformed-config fallback is
+taken, surface it in the chat-level completion summary the user actually reads (not only as
+an inline comment) — e.g. print a one-line notice such as "Ignoring malformed
+`security.sensitivePaths` — applying built-in defaults only" — so a project's custom
+sensitive-path coverage silently breaking doesn't go unnoticed. And consistent with the
+conservative default above, if there is any doubt about whether a named path matches, treat
+it as a match and fall through to full planning rather than judging trivial.
+
 When it qualifies, set a session flag `trivial = true` plus a short `reason` string, and print one line (no `AskUserQuestion`, no confirmation):
 
 ```text
