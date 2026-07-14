@@ -75,6 +75,11 @@ func DefaultSocketPath() string { return watch.DefaultSocketPath() }
 // main.go's CLI routing doesn't need its own import of pkg/watch.
 func DefaultSocketDir() (string, error) { return watch.SocketDir() }
 
+// DefaultPIDPath returns the daemon PID file path (<SocketDir>/agentwatch.pid).
+// It is re-exported from pkg/watch, mirroring DefaultSocketPath/
+// DefaultSocketDir above.
+func DefaultPIDPath() string { return watch.DefaultPIDPath() }
+
 // DefaultEventSocketPath returns the default event (inbound) socket path the
 // daemon listens on for hook notifications. This write-side socket stays
 // internal; it is rebuilt from the shared watch.SocketDir so the runtime-dir

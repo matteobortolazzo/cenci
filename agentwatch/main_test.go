@@ -7,9 +7,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/daemon"
 	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/dispatch"
 	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/ipc"
 	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/pkg/watch"
@@ -274,30 +276,62 @@ func TestUnknownSubcommand_ErrorMessageFormat(t *testing.T) {
 	}
 }
 
-func TestFlagRouting_DashV_NotUnknownSubcommand(t *testing.T) {
-	// -v should route to daemon, not be treated as unknown subcommand.
-	// The daemon will likely fail (no tmux), but should NOT print
-	// "unknown subcommand". Use a timeout because the daemon blocks if it starts.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, binaryPath, "-v")
-	output, _ := cmd.CombinedOutput()
+// TestFlagRouting_DashV_NoLongerRoutesToDaemon locks in the BREAKING change:
+// a bare top-level flag like -v used to fall through to running the daemon
+// in the foreground. It no longer does — it's an unrecognized top-level
+// argument like any other, so it exits 2 immediately (no daemon spawn, no
+// need for a context timeout).
+func TestFlagRouting_DashV_NoLongerRoutesToDaemon(t *testing.T) {
+	cmd := exec.Command(binaryPath, "-v")
+	output, err := cmd.CombinedOutput()
 
-	if strings.Contains(string(output), "unknown subcommand") {
-		t.Errorf("expected -v flag NOT to trigger unknown subcommand error, got:\n%s", output)
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
+	}
+	if exitErr.ExitCode() != 2 {
+		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
+	}
+	if strings.Contains(string(output), "agentwatch starting") {
+		t.Errorf("-v must not route to the daemon anymore, got:\n%s", output)
 	}
 }
 
-func TestNoArgs_NotUnknownSubcommand(t *testing.T) {
-	// No arguments should route to daemon, not unknown subcommand.
-	// Use a timeout because the daemon blocks if it starts.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, binaryPath)
-	output, _ := cmd.CombinedOutput()
+// TestBareInvocation_PrintsUsageAndExits2 locks in the BREAKING change: bare
+// `agentwatch` used to run the daemon in the foreground. It now prints usage
+// and exits 2 instead — the daemon only starts via the explicit `daemon`
+// subcommand group.
+func TestBareInvocation_PrintsUsageAndExits2(t *testing.T) {
+	cmd := exec.Command(binaryPath)
+	output, err := cmd.CombinedOutput()
 
-	if strings.Contains(string(output), "unknown subcommand") {
-		t.Errorf("expected no-args NOT to trigger unknown subcommand error, got:\n%s", output)
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
+	}
+	if exitErr.ExitCode() != 2 {
+		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
+	}
+	if !strings.Contains(string(output), "Usage:") {
+		t.Errorf("expected usage text in output, got:\n%s", output)
+	}
+	if strings.Contains(string(output), "agentwatch starting") {
+		t.Errorf("bare invocation must not route to the daemon anymore, got:\n%s", output)
+	}
+}
+
+// TestHelpFlag_PrintsUsageAndExits0 covers the `help`/`-h`/`--help`
+// convenience added alongside the bare-invocation BREAKING change above.
+func TestHelpFlag_PrintsUsageAndExits0(t *testing.T) {
+	for _, arg := range []string{"help", "-h", "--help"} {
+		cmd := exec.Command(binaryPath, arg)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s: %v\n%s", arg, err, output)
+		}
+		if !strings.Contains(string(output), "Usage:") {
+			t.Errorf("%s: expected usage text, got:\n%s", arg, output)
+		}
 	}
 }
 
@@ -944,16 +978,19 @@ func TestDispatchNoModelFlag_UsesPersistedConfig(t *testing.T) {
 	}
 }
 
-func TestStatusAndWaybarSubcommandsBothRoute(t *testing.T) {
-	// Both "status" and its hidden alias "waybar" must route to the status
-	// frontend. With no daemon on the socket they exit 1 with no output —
-	// never the "unknown subcommand" error.
-	for _, sub := range []string{"status", "waybar"} {
+// TestWidgetJSONAndWaybarSubcommandsBothRoute covers the widget-json split
+// (#daemon-lifecycle PR): "widget-json" (the renamed hidden plumbing
+// subcommand) and its pre-existing hidden alias "waybar" must both route to
+// the same Waybar-JSON status frontend that plain `status` used to. With no
+// daemon on the socket they exit 1 with no output — never the "unknown
+// subcommand" error, and never route to the new human-readable `status`.
+func TestWidgetJSONAndWaybarSubcommandsBothRoute(t *testing.T) {
+	for _, sub := range []string{"widget-json", "waybar"} {
 		cmd := exec.Command(binaryPath, sub, "-socket", filepath.Join(t.TempDir(), "nope.sock"))
 		output, err := cmd.CombinedOutput()
 
 		if strings.Contains(string(output), "unknown subcommand") {
-			t.Errorf("%s: expected routing to status frontend, got:\n%s", sub, output)
+			t.Errorf("%s: expected routing to the widget-json frontend, got:\n%s", sub, output)
 		}
 		exitErr, ok := err.(*exec.ExitError)
 		if !ok {
@@ -962,6 +999,114 @@ func TestStatusAndWaybarSubcommandsBothRoute(t *testing.T) {
 		if exitErr.ExitCode() != 1 {
 			t.Errorf("%s: expected exit code 1 when daemon not running, got %d", sub, exitErr.ExitCode())
 		}
+	}
+}
+
+// TestWidgetJSONAndWaybarOutputByteIdentical drives a real broadcast snapshot
+// through both "widget-json" and its "waybar" alias and asserts byte-for-byte
+// identical output — the split (#daemon-lifecycle PR) must not change a
+// single byte of what widget frontends parse as JSON.
+func TestWidgetJSONAndWaybarOutputByteIdentical(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "aw.sock")
+	srv, err := ipc.NewServer(socket)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go srv.Accept(ctx)
+	time.Sleep(20 * time.Millisecond)
+
+	snap := ipc.StateSnapshot{
+		Windows: []ipc.WindowState{
+			{Session: "sess-a", WindowIndex: "0", WindowName: "77-implement", Status: "running"},
+		},
+		Summary: ipc.StatusSummary{Total: 1, Running: 1},
+	}
+
+	outputs := make(map[string]string, 2)
+	for _, sub := range []string{"widget-json", "waybar"} {
+		srv.Broadcast(snap)
+		time.Sleep(20 * time.Millisecond)
+		cmd := exec.Command(binaryPath, sub, "-socket", socket)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s: %v\n%s", sub, err, out)
+		}
+		outputs[sub] = string(out)
+	}
+
+	if outputs["widget-json"] != outputs["waybar"] {
+		t.Errorf("widget-json and waybar output differ:\nwidget-json: %q\nwaybar:      %q", outputs["widget-json"], outputs["waybar"])
+	}
+	if !strings.Contains(outputs["widget-json"], `"text"`) || !strings.Contains(outputs["widget-json"], "77-implement") {
+		t.Errorf("expected Waybar JSON with the session tooltip, got: %q", outputs["widget-json"])
+	}
+}
+
+// TestStatusSubcommand_HumanReadable_DegradesGracefullyWithNoDaemon covers
+// the new human-readable `agentwatch status` (distinct from `widget-json`):
+// with nothing listening on either socket it must still print a report and
+// exit 0 — never the "unknown subcommand" error, and never a non-zero exit
+// (unlike `daemon status`, which exits 1 when not running).
+func TestStatusSubcommand_HumanReadable_DegradesGracefullyWithNoDaemon(t *testing.T) {
+	dir := t.TempDir()
+	cmd := exec.Command(binaryPath, "status",
+		"-socket", filepath.Join(dir, "nope.sock"),
+		"-event-socket", filepath.Join(dir, "nope-events.sock"))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("status: expected exit 0 even with no daemon, got %v\n%s", err, output)
+	}
+	if strings.Contains(string(output), "unknown subcommand") {
+		t.Errorf("expected routing to the human status overview, got:\n%s", output)
+	}
+	if !strings.Contains(string(output), "daemon: not running") {
+		t.Errorf("expected 'daemon: not running', got:\n%s", output)
+	}
+	if !strings.Contains(string(output), "sessions: unavailable") {
+		t.Errorf("expected sessions to be reported unavailable, got:\n%s", output)
+	}
+}
+
+// TestStatusSubcommand_HumanReadable_ListsLiveSessions drives a real
+// broadcast snapshot (same pattern as TestClose_DryRun_PrintsCloseAndSkipDecisions)
+// through the human `status` overview and asserts the session line renders.
+func TestStatusSubcommand_HumanReadable_ListsLiveSessions(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "aw.sock")
+	srv, err := ipc.NewServer(socket)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go srv.Accept(ctx)
+	time.Sleep(20 * time.Millisecond)
+
+	srv.Broadcast(ipc.StateSnapshot{
+		Windows: []ipc.WindowState{
+			{Session: "sess-a", WindowIndex: "0", WindowName: "77-implement", TaskName: "implement thing", Status: "running"},
+		},
+		Summary: ipc.StatusSummary{Total: 1, Running: 1},
+	})
+	time.Sleep(20 * time.Millisecond)
+
+	cmd := exec.Command(binaryPath, "status",
+		"-socket", socket,
+		"-event-socket", filepath.Join(t.TempDir(), "nope-events.sock"))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("status: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "sess-a:0 - implement thing (running)") {
+		t.Errorf("expected session line, got:\n%s", output)
+	}
+	if !strings.Contains(string(output), "daemon: not running") {
+		t.Errorf("expected daemon not running (only the broadcast socket was live), got:\n%s", output)
 	}
 }
 
@@ -991,14 +1136,13 @@ func TestVersionFlagsRouteToVersion(t *testing.T) {
 		}
 	}
 
-	// Bare -v must still route to the daemon (existing behavior), not print
-	// the version banner. Use a timeout because the daemon blocks if it starts.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, binaryPath, "-v")
+	// Bare -v is now just an unrecognized top-level argument (see
+	// TestFlagRouting_DashV_NoLongerRoutesToDaemon) — it must not print the
+	// version banner either.
+	cmd := exec.Command(binaryPath, "-v")
 	output, _ := cmd.CombinedOutput()
 	if strings.Contains(string(output), "agentwatch dev") {
-		t.Errorf("-v output = %q, want NOT to contain %q (must route to daemon, not version)", output, "agentwatch dev")
+		t.Errorf("-v output = %q, want NOT to contain %q", output, "agentwatch dev")
 	}
 }
 
@@ -1176,5 +1320,231 @@ func TestClose_DryRun_PrintsCloseAndSkipDecisions(t *testing.T) {
 	}
 	if strings.Contains(string(output), "closed 77-implement") {
 		t.Errorf("--dry-run must never print an actual 'closed' line, got:\n%s", output)
+	}
+}
+
+// -- daemon lifecycle subcommands (daemon start|stop|restart|status) --------
+//
+// Every test in this section sets its own isolated XDG_RUNTIME_DIR so the
+// real "agentwatch daemon start" subprocess it spawns never touches a real
+// daemon's sockets/PID file, and so parallel test runs never collide.
+
+// bgDaemon wraps a backgrounded `daemon start` subprocess together with a
+// channel that closes once it has actually been reaped.
+type bgDaemon struct {
+	cmd  *exec.Cmd
+	done chan struct{} // closed once cmd.Wait() has returned
+}
+
+// startDaemonBackground spawns `agentwatch daemon start` in the background
+// (not context-bound: these tests need it to keep running until explicitly
+// stopped, unlike the bounded-context daemon smoke tests elsewhere in this
+// file) and waits for its PID file to appear before returning. The caller's
+// test must have already set XDG_RUNTIME_DIR via t.Setenv.
+//
+// The reaping goroutine below is started immediately (not lazily, on-demand
+// later) so the moment the daemon process actually exits — however it dies,
+// including from an external `agentwatch daemon stop`/SIGKILL — it gets
+// reaped right away. Otherwise this test process (the daemon subprocess's
+// OS-level parent) would leave it as a zombie until something got around to
+// calling Wait(), and os.Process.Signal(0) reports a zombie as still
+// "alive", making an external stop look like it hung.
+func startDaemonBackground(t *testing.T) *bgDaemon {
+	t.Helper()
+	cmd := exec.Command(binaryPath, "daemon", "start")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start 'daemon start': %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(done)
+	}()
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		<-done
+	})
+	waitForFile(t, ipc.DefaultPIDPath(), 3*time.Second)
+	return &bgDaemon{cmd: cmd, done: done}
+}
+
+// waitForFile polls for path to exist, bounded by timeout.
+func waitForFile(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s to appear", path)
+}
+
+// TestDaemonStart_WritesPIDFile_RemovedOnCleanShutdown covers the PID-file
+// half of `daemon start`: the file appears (containing the daemon's real
+// PID) once the daemon is up, and is removed again on a clean SIGTERM
+// shutdown.
+func TestDaemonStart_WritesPIDFile_RemovedOnCleanShutdown(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	bg := startDaemonBackground(t)
+	pidPath := ipc.DefaultPIDPath()
+
+	pid, err := daemon.ReadPIDFile(pidPath)
+	if err != nil {
+		t.Fatalf("ReadPIDFile: %v", err)
+	}
+	if pid != bg.cmd.Process.Pid {
+		t.Errorf("pid file contains %d, want %d", pid, bg.cmd.Process.Pid)
+	}
+
+	if err := bg.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("SIGTERM: %v", err)
+	}
+	select {
+	case <-bg.done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("daemon did not exit after SIGTERM")
+	}
+
+	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+		t.Error("expected pid file to be removed after clean shutdown")
+	}
+}
+
+// TestDaemonStatus_NotRunning covers `daemon status` against an empty
+// runtime dir: it must report not-running and exit non-zero.
+func TestDaemonStatus_NotRunning(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	cmd := exec.Command(binaryPath, "daemon", "status")
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("exit code = %d, want 1\n%s", exitErr.ExitCode(), output)
+	}
+	if !strings.Contains(string(output), "not running") {
+		t.Errorf("expected 'not running', got:\n%s", output)
+	}
+}
+
+// TestDaemonStatus_Running covers `daemon status` against a real,
+// live-spawned daemon: it must report running (with the PID) and exit 0.
+func TestDaemonStatus_Running(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	startDaemonBackground(t)
+
+	cmd := exec.Command(binaryPath, "daemon", "status")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("daemon status: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "running") {
+		t.Errorf("expected 'running', got:\n%s", output)
+	}
+	if strings.Contains(string(output), "not running") {
+		t.Errorf("expected running, not 'not running', got:\n%s", output)
+	}
+}
+
+// TestDaemonStop_RemovesPIDFileAndKillsProcess is the ticket's required
+// black-box regression: `daemon stop` against a real, live-spawned daemon
+// must remove the PID file and the process must actually be gone.
+func TestDaemonStop_RemovesPIDFileAndKillsProcess(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	bg := startDaemonBackground(t)
+	pidPath := ipc.DefaultPIDPath()
+	pid := bg.cmd.Process.Pid
+
+	cmd := exec.Command(binaryPath, "daemon", "stop")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("daemon stop: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "stopped daemon") {
+		t.Errorf("expected 'stopped daemon', got:\n%s", output)
+	}
+
+	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+		t.Error("expected pid file to be removed after 'daemon stop'")
+	}
+	if daemon.ProcessAlive(pid) {
+		t.Errorf("expected daemon process %d to be gone after 'daemon stop'", pid)
+	}
+
+	select {
+	case <-bg.done:
+	case <-time.After(2 * time.Second):
+		t.Error("expected the daemon subprocess to have been reaped promptly")
+	}
+}
+
+// TestDaemonStop_NothingRunningIsNoop covers the idempotent no-op path: with
+// nothing running, `daemon stop` exits 0 and reports "daemon not running".
+func TestDaemonStop_NothingRunningIsNoop(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	cmd := exec.Command(binaryPath, "daemon", "stop")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("daemon stop: expected exit 0, got %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "not running") {
+		t.Errorf("expected 'not running', got:\n%s", output)
+	}
+}
+
+// TestDaemonRestart_StopsOldAndStartsNew covers `daemon restart`: it must
+// tear down an existing daemon and bring up a fresh one reachable at the
+// same socket, reporting the old PID and a "restarted" confirmation.
+func TestDaemonRestart_StopsOldAndStartsNew(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	oldBg := startDaemonBackground(t)
+	oldPID := oldBg.cmd.Process.Pid
+
+	cmd := exec.Command(binaryPath, "daemon", "restart")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("daemon restart: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "daemon restarted") {
+		t.Errorf("expected 'daemon restarted', got:\n%s", output)
+	}
+
+	if daemon.ProcessAlive(oldPID) {
+		t.Errorf("expected old daemon process %d to be gone after restart", oldPID)
+	}
+	if !daemon.Alive(ipc.DefaultEventSocketPath()) {
+		t.Error("expected a new daemon to be reachable after restart")
+	}
+
+	// The freshly spawned daemon is detached (Setsid) and outlives this test
+	// process; stop it directly so it doesn't leak.
+	if _, err := daemon.Stop(ipc.DefaultEventSocketPath(), ipc.DefaultPIDPath()); err != nil {
+		t.Logf("cleanup: daemon.Stop: %v", err)
+	}
+}
+
+// TestDaemonGroup_UnknownSubcommand_Exits2 mirrors the top-level unknown
+// subcommand guard for the `daemon` subcommand group.
+func TestDaemonGroup_UnknownSubcommand_Exits2(t *testing.T) {
+	cmd := exec.Command(binaryPath, "daemon", "frobnicate")
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
+	}
+	if exitErr.ExitCode() != 2 {
+		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
+	}
+	if !strings.Contains(string(output), `unknown subcommand "frobnicate"`) {
+		t.Errorf("expected unknown-subcommand message, got:\n%s", output)
 	}
 }

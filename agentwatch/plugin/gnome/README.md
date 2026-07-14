@@ -1,7 +1,7 @@
 # AgentWatch — GNOME Shell extension
 
 Live counts of Claude Code and Codex agent sessions in the GNOME Shell top bar
-(Ubuntu's default desktop). Polls `agentwatch status` and renders the snapshot —
+(Ubuntu's default desktop). Polls `agentwatch widget-json` and renders the snapshot —
 a read-only frontend over the same Waybar JSON contract as the waybar, noctalia,
 dms, and macOS widgets. No daemon or Go changes.
 
@@ -76,12 +76,12 @@ gnome-extensions enable "$UUID"
 
 | Key | Default | Notes |
 |---|---|---|
-| `poll-interval-ms` | `2000` | How often to run `agentwatch status` (250–60000). |
+| `poll-interval-ms` | `2000` | How often to run `agentwatch widget-json` (250–60000). |
 | `agentwatch-path` | `agentwatch` | Path or command name for the binary. Use an **absolute path** if it is not on the GNOME session PATH. |
 
 ## Troubleshooting
 
-- **Indicator never appears**: run `agentwatch status` in a terminal. If it
+- **Indicator never appears**: run `agentwatch widget-json` in a terminal. If it
   prints JSON, the daemon is fine — set the absolute binary path in preferences,
   since the GNOME session PATH under Wayland is often minimal. If it prints
   nothing, no sessions are live (start a Claude Code / Codex tmux pane).
@@ -92,5 +92,5 @@ gnome-extensions enable "$UUID"
 
 ## Test
 
-`./test.sh` — a drift check that fails if `agentwatch status` gains a status
+`./test.sh` — a drift check that fails if `agentwatch widget-json` gains a status
 class that `extension.js` doesn't map. It does not launch GNOME Shell.

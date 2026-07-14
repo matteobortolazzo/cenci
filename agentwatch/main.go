@@ -32,15 +32,23 @@ import (
 var version = "dev"
 
 func main() {
+	// BREAKING: bare `agentwatch` (and any unrecognized top-level subcommand
+	// or flag) used to fall through to running the daemon in the foreground.
+	// It now always prints usage and exits 2 — the daemon only starts via the
+	// explicit `daemon` subcommand group below. This makes `agentwatch` with
+	// a typo'd or missing subcommand fail loudly instead of silently
+	// launching a long-running foreground process.
 	if len(os.Args) < 2 {
-		runDaemon(os.Args[1:])
-		return
+		printUsage(os.Stderr)
+		os.Exit(2)
 	}
 	switch os.Args[1] {
 	case "daemon":
-		runDaemon(os.Args[2:])
-	case "status", "waybar": // "waybar" is a hidden alias for existing consumers
+		runDaemonGroup(os.Args[2:])
+	case "status":
 		runStatus(os.Args[2:])
+	case "widget-json", "waybar": // "waybar" is a hidden alias kept for existing consumers
+		runWidgetJSON(os.Args[2:])
 	case "notify":
 		runNotify(os.Args[2:])
 	case "run":
@@ -53,15 +61,36 @@ func main() {
 		runVersion()
 	case "socket-dir":
 		runSocketDir()
+	case "help", "-h", "--help":
+		printUsage(os.Stdout)
 	default:
-		if strings.HasPrefix(os.Args[1], "-") {
-			// Flags like -v go to daemon.
-			runDaemon(os.Args[1:])
-			return
-		}
 		fmt.Fprintf(os.Stderr, "agentwatch: unknown subcommand %q\n", os.Args[1])
 		os.Exit(2)
 	}
+}
+
+// printUsage writes the top-level command overview to w. It is what bare
+// `agentwatch`, `agentwatch help`/`-h`/`--help`, and any unrecognized
+// subcommand or flag print.
+func printUsage(w io.Writer) {
+	_, _ = fmt.Fprint(w, `agentwatch — attention layer for Claude Code / Codex tmux sessions
+
+Usage:
+  agentwatch <command> [flags]
+
+Commands:
+  daemon start|stop|restart|status   manage the background daemon (bare "daemon" acts as "start")
+  status                             human-readable session/daemon/dispatch overview
+  widget-json                        machine-readable status for bar widgets (Waybar custom module protocol); "waybar" is a hidden alias
+  notify                             deliver a hook event to the daemon (used by installed hooks)
+  run                                dispatch a workflow into a new tmux window
+  dispatch                           fleet auto-dispatch (enroll/unenroll/status/loop)
+  close                              close a finished/idle agent window
+  version                            print the binary version
+  socket-dir                         print the resolved socket directory
+
+Run 'agentwatch <command> -h' for command-specific flags where supported.
+`)
 }
 
 // runVersion prints the binary's stamped version and exits 0. It performs no
@@ -83,9 +112,51 @@ func runSocketDir() {
 	fmt.Println(dir)
 }
 
-func runDaemon(args []string) {
+// daemonRestartReadyTimeout bounds how long `daemon restart` waits for the
+// freshly spawned daemon to become reachable before reporting failure. It
+// mirrors internal/daemon's EnsureRunning readyTimeout default.
+const daemonRestartReadyTimeout = 3 * time.Second
+
+// daemonRestartPollInterval is the polling cadence within daemonRestartReadyTimeout.
+const daemonRestartPollInterval = 50 * time.Millisecond
+
+// runDaemonGroup implements `agentwatch daemon [start|stop|restart|status]`.
+// A bare `daemon` (no args) or `daemon` followed only by flags acts as
+// `start`, so `agentwatch daemon -v` still works exactly as the old bare
+// `agentwatch -v` did.
+func runDaemonGroup(args []string) {
+	if len(args) == 0 {
+		runDaemonStart(args)
+		return
+	}
+	switch args[0] {
+	case "start":
+		runDaemonStart(args[1:])
+	case "stop":
+		runDaemonStop(args[1:])
+	case "restart":
+		runDaemonRestart(args[1:])
+	case "status":
+		runDaemonStatus(args[1:])
+	default:
+		if strings.HasPrefix(args[0], "-") {
+			runDaemonStart(args)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "agentwatch daemon: unknown subcommand %q\n", args[0])
+		os.Exit(2)
+	}
+}
+
+// runDaemonStart runs the daemon loop in the foreground — identical to the
+// pre-#daemon-lifecycle bare `agentwatch [-flags]` invocation, plus PID-file
+// bookkeeping: a PID file is written at ipc.DefaultPIDPath() once this
+// process has become the one live daemon (never on the "already running"
+// no-op path — see daemon.Run's onStarted contract) and removed on clean
+// shutdown.
+func runDaemonStart(args []string) {
 	cfg := config.Default()
-	fs := flag.NewFlagSet("daemon", flag.ExitOnError)
+	fs := flag.NewFlagSet("daemon start", flag.ExitOnError)
 
 	fs.BoolVar(&cfg.Verbose, "v", false, "verbose logging")
 	fs.StringVar(&cfg.SocketPath, "socket", ipc.DefaultSocketPath(), "IPC broadcast socket path (empty to disable)")
@@ -139,9 +210,105 @@ func runDaemon(args []string) {
 	var attention <-chan ipc.AttentionUpdate = ch
 	go dispatch.RunCombinedLoop(ctx, "", &tmux.ExecClient{}, &dispatch.GHMutator{}, os.Stdout, ch)
 
-	if err := daemon.Run(ctx, cfg, fe, attention); err != nil {
+	pidPath := ipc.DefaultPIDPath()
+	started := false
+	onStarted := func() {
+		started = true
+		if err := daemon.WritePIDFile(pidPath); err != nil && cfg.Verbose {
+			log.Printf("warning: could not write pid file %s: %v", pidPath, err)
+		}
+	}
+	defer func() {
+		if started {
+			daemon.RemovePIDFile(pidPath)
+		}
+	}()
+
+	if err := daemon.Run(ctx, cfg, fe, attention, onStarted); err != nil {
 		fmt.Fprintf(os.Stderr, "agentwatch: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+// runDaemonStop implements `agentwatch daemon stop`. Exits 0 whether or not
+// a daemon was actually stopped (idempotent) — the message on stdout reports
+// which.
+func runDaemonStop(args []string) {
+	fs := flag.NewFlagSet("daemon stop", flag.ExitOnError)
+	_ = fs.Parse(args)
+	if extra := fs.Args(); len(extra) > 0 {
+		fmt.Fprintf(os.Stderr, "agentwatch daemon stop: unexpected argument %q\n", extra[0])
+		os.Exit(2)
+	}
+
+	outcome, err := daemon.Stop(ipc.DefaultEventSocketPath(), ipc.DefaultPIDPath())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentwatch daemon stop: %v\n", err)
+		os.Exit(1)
+	}
+	if outcome.WasRunning {
+		fmt.Printf("stopped daemon (pid %d)\n", outcome.PID)
+		return
+	}
+	fmt.Println("daemon not running")
+}
+
+// runDaemonRestart implements `agentwatch daemon restart`: stop (if running),
+// then spawn a fresh detached daemon the same way EnsureRunning does
+// (daemon.Spawn — `agentwatch daemon start`, Setsid'd), and wait briefly for
+// it to become reachable.
+func runDaemonRestart(args []string) {
+	fs := flag.NewFlagSet("daemon restart", flag.ExitOnError)
+	_ = fs.Parse(args)
+	if extra := fs.Args(); len(extra) > 0 {
+		fmt.Fprintf(os.Stderr, "agentwatch daemon restart: unexpected argument %q\n", extra[0])
+		os.Exit(2)
+	}
+
+	outcome, err := daemon.Stop(ipc.DefaultEventSocketPath(), ipc.DefaultPIDPath())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentwatch daemon restart: %v\n", err)
+		os.Exit(1)
+	}
+	if outcome.WasRunning {
+		fmt.Printf("stopped daemon (pid %d)\n", outcome.PID)
+	}
+
+	daemon.Spawn()
+
+	deadline := time.Now().Add(daemonRestartReadyTimeout)
+	for time.Now().Before(deadline) {
+		if daemon.Alive(ipc.DefaultEventSocketPath()) {
+			fmt.Println("daemon restarted")
+			return
+		}
+		time.Sleep(daemonRestartPollInterval)
+	}
+	fmt.Fprintln(os.Stderr, "agentwatch daemon restart: daemon did not become ready in time")
+	os.Exit(1)
+}
+
+// runDaemonStatus implements `agentwatch daemon status`: a narrow
+// running/not-running + PID report, distinct from the broader `agentwatch
+// status` overview (sessions + dispatch loop). Exits 1 when the daemon is
+// not running so scripts can branch on it; exits 0 when running.
+func runDaemonStatus(args []string) {
+	fs := flag.NewFlagSet("daemon status", flag.ExitOnError)
+	_ = fs.Parse(args)
+	if extra := fs.Args(); len(extra) > 0 {
+		fmt.Fprintf(os.Stderr, "agentwatch daemon status: unexpected argument %q\n", extra[0])
+		os.Exit(2)
+	}
+
+	info := daemon.Status(ipc.DefaultEventSocketPath(), ipc.DefaultPIDPath())
+	if !info.Running {
+		fmt.Println("daemon not running")
+		os.Exit(1)
+	}
+	if info.PID > 0 {
+		fmt.Printf("daemon running (pid %d)\n", info.PID)
+	} else {
+		fmt.Println("daemon running (pid unknown)")
 	}
 }
 
@@ -547,8 +714,14 @@ func renderDispatchState(state watch.DispatchState) string {
 	return b.String()
 }
 
-func runStatus(args []string) {
-	fs := flag.NewFlagSet("status", flag.ExitOnError)
+// runWidgetJSON implements the hidden plumbing subcommand `widget-json`
+// (alias `waybar`): prints a single line of Waybar custom-module JSON and
+// exits. This is the exact behavior the old `agentwatch status` had before
+// `status` became the human-readable overview below — every widget frontend
+// (noctalia, dms, gnome, plasma, macOS/SwiftBar) and any real Waybar config
+// should invoke this subcommand, not `status`.
+func runWidgetJSON(args []string) {
+	fs := flag.NewFlagSet("widget-json", flag.ExitOnError)
 	defaults := config.Default()
 	wcfg := status.Config{
 		SymbolIdle:            defaults.SymbolIdle,
@@ -575,9 +748,75 @@ func runStatus(args []string) {
 		if errors.Is(err, status.ErrNoOutput) {
 			os.Exit(1)
 		}
-		fmt.Fprintf(os.Stderr, "agentwatch status: %v\n", err)
+		fmt.Fprintf(os.Stderr, "agentwatch widget-json: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// runStatus implements the human-readable `agentwatch status` overview:
+// daemon running/pid, active sessions (read from the same broadcast state
+// snapshot widget-json reads), and the embedded fleet dispatch loop's state
+// (reusing renderDispatchState, the same renderer `dispatch loop status`
+// uses). It degrades gracefully when the daemon is down — it still prints a
+// report and always exits 0 (unlike `daemon status`, which exits 1 when not
+// running; see the exit-code note in README.md).
+func runStatus(args []string) {
+	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	socketPath := fs.String("socket", ipc.DefaultSocketPath(), "IPC broadcast socket path")
+	eventSocketPath := fs.String("event-socket", ipc.DefaultEventSocketPath(), "event socket path")
+	_ = fs.Parse(args)
+	if extra := fs.Args(); len(extra) > 0 {
+		fmt.Fprintf(os.Stderr, "agentwatch status: unexpected argument %q\n", extra[0])
+		os.Exit(2)
+	}
+
+	info := daemon.Status(*eventSocketPath, ipc.DefaultPIDPath())
+	fmt.Print(renderHumanStatus(info, *socketPath))
+}
+
+// renderHumanStatus renders the report body for runStatus. Split out for
+// unit testing without a subprocess.
+func renderHumanStatus(info daemon.StatusInfo, socketPath string) string {
+	var b strings.Builder
+
+	if info.Running {
+		if info.PID > 0 {
+			fmt.Fprintf(&b, "daemon: running (pid %d)\n", info.PID)
+		} else {
+			fmt.Fprintf(&b, "daemon: running (pid unknown)\n")
+		}
+	} else {
+		fmt.Fprintf(&b, "daemon: not running\n")
+	}
+
+	snap, err := dispatch.ReadSnapshot(socketPath)
+	switch {
+	case err != nil || snap == nil:
+		fmt.Fprintf(&b, "sessions: unavailable (daemon not reachable)\n")
+	case len(snap.Windows) == 0:
+		fmt.Fprintf(&b, "sessions: none\n")
+	default:
+		fmt.Fprintf(&b, "sessions (%d):\n", len(snap.Windows))
+		for _, w := range snap.Windows {
+			name := w.WindowName
+			if !w.ManuallyNamed && w.TaskName != "" {
+				name = w.TaskName
+			}
+			if name == "" {
+				name = w.Agent
+			}
+			if w.Session == "" {
+				fmt.Fprintf(&b, "  %s (%s)\n", name, w.Status)
+			} else {
+				fmt.Fprintf(&b, "  %s:%s - %s (%s)\n", w.Session, w.WindowIndex, name, w.Status)
+			}
+		}
+	}
+
+	dstate := dispatch.ResolveDispatchState("", socketPath, io.Discard)
+	b.WriteString(renderDispatchState(dstate))
+
+	return b.String()
 }
 
 // runClose implements `agentwatch close <ticket-number|window-name> [--force]

@@ -88,3 +88,19 @@ func defaultSocketPath(name string) string {
 // to with Dial. It resolves to <SocketDir>/agentwatch.sock, falling back to
 // /tmp/agentwatch-<uid>.sock if the secure directory cannot be created.
 func DefaultSocketPath() string { return defaultSocketPath("agentwatch") }
+
+// DefaultPIDPath returns the path of the daemon's PID file, nested under
+// SocketDir() alongside the broadcast/event sockets: <SocketDir>/agentwatch.pid.
+// Falls back to /tmp/agentwatch-<uid>.pid if the secure directory cannot be
+// created, mirroring the other Default*Path fallbacks in this file. The PID
+// file records the process ID of the running `agentwatch daemon start`
+// process so `daemon stop`/`daemon status` can locate it without scanning the
+// process table.
+func DefaultPIDPath() string {
+	dir, err := SocketDir()
+	if err != nil {
+		log.Printf("warning: could not create secure socket dir: %v; using fallback pid path", err)
+		return filepath.Join(os.TempDir(), fmt.Sprintf("agentwatch-%d.pid", os.Getuid()))
+	}
+	return filepath.Join(dir, "agentwatch.pid")
+}

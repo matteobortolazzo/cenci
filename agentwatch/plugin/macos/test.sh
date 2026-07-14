@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Dependency-free smoke test for the SwiftBar plugin. Points AGENTWATCH_BIN at a
-# stub that prints canned `agentwatch status` JSON and asserts the SwiftBar output.
+# stub that prints canned `agentwatch widget-json` JSON and asserts the SwiftBar output.
 # macOS-only: the plugin formats via JXA (/usr/bin/osascript).
 
 set -uo pipefail

@@ -6,7 +6,7 @@
       <default>2000</default>
       <range min="250" max="60000"/>
       <summary>Poll interval (ms)</summary>
-      <description>How often to run "agentwatch status".</description>
+      <description>How often to run "agentwatch widget-json".</description>
     </key>
     <key name="agentwatch-path" type="s">
       <default>'agentwatch'</default>

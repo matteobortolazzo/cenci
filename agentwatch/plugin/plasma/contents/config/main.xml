@@ -6,7 +6,7 @@
   <kcfgfile name=""/>
   <group name="General">
     <entry name="pollIntervalMs" type="Int">
-      <label>How often to run "agentwatch status" (ms)</label>
+      <label>How often to run "agentwatch widget-json" (ms)</label>
       <default>2000</default>
       <min>250</min>
       <max>60000</max>
