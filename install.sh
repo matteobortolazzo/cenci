@@ -303,7 +303,14 @@ step_marketplace() {
 	if [ "$HAS_CLAUDE" -eq 0 ]; then
 		:
 	elif marketplace_registered; then
-		ok "Claude: marketplace '$MARKETPLACE_NAME' already registered"
+		# Registration alone doesn't mean the checkout is current — refresh it so
+		# find_plugin_path (agent-stack launcher, agent-sand, agentwatch macOS
+		# script) sees files added since the last update.
+		if claude plugin marketplace update "$MARKETPLACE_NAME" >/dev/null 2>&1; then
+			ok "Claude: marketplace '$MARKETPLACE_NAME' refreshed"
+		else
+			warn "Claude: could not refresh marketplace '$MARKETPLACE_NAME' — it may be stale. Run manually: claude plugin marketplace update $MARKETPLACE_NAME"
+		fi
 		CLAUDE_MARKETPLACE_READY=1
 	elif claude plugin marketplace add "$MARKETPLACE_REPO" >/dev/null 2>&1; then
 		ok "Claude: registered $MARKETPLACE_REPO"
@@ -315,7 +322,11 @@ step_marketplace() {
 
 	[ "$HAS_CODEX" -eq 1 ] || return 0
 	if codex_marketplace_registered; then
-		ok "Codex: marketplace '$MARKETPLACE_NAME' already registered"
+		if codex plugin marketplace upgrade "$MARKETPLACE_NAME" >/dev/null 2>&1; then
+			ok "Codex: marketplace '$MARKETPLACE_NAME' refreshed"
+		else
+			warn "Codex: could not refresh marketplace '$MARKETPLACE_NAME' — it may be stale. Run manually: codex plugin marketplace upgrade $MARKETPLACE_NAME"
+		fi
 		CODEX_MARKETPLACE_READY=1
 	elif codex plugin marketplace add "$MARKETPLACE_REPO" >/dev/null 2>&1; then
 		ok "Codex: registered $MARKETPLACE_REPO"

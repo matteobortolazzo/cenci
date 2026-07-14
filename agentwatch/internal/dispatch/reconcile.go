@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v2/pkg/watch"
+	"github.com/matteobortolazzo/agent-stack/agentwatch/v3/pkg/watch"
 )
 
 // Board-state labels the reconciler reads and writes.

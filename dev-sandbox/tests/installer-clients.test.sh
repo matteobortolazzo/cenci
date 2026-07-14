@@ -207,6 +207,32 @@ assert_contains "${CASE_CALLS}" "codex plugin add agentflow@agent-stack"
 [[ ! -e "${CASE_HOME}/.local/bin/codex-sand" ]]
 assert_agent_stack_utility
 
+echo "case: already-registered marketplace is refreshed, not just confirmed"
+name=refresh
+case_dir="${WORK}/${name}" home="${WORK}/${name}/home"
+bin="${WORK}/${name}/bin" output="${WORK}/${name}/output" calls="${WORK}/${name}/calls"
+mkdir -p "${home}" "${bin}"
+: >"${calls}"
+make_common_tools "${bin}"
+make_claude "${bin}"
+make_codex "${bin}"
+prepare_checkout "${home}" claude
+touch "${case_dir}/claude-marketplace" "${case_dir}/codex-marketplace"
+set +e
+HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
+    CLAUDE_MARKETPLACE_FILE="${case_dir}/claude-marketplace" \
+    CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
+    CODEX_MARKETPLACE_FILE="${case_dir}/codex-marketplace" \
+    CODEX_INSTALLED_FILE="${case_dir}/codex-installed" \
+    bash "${ROOT}/install.sh" --yes --no-build >"${output}" 2>&1
+refresh_exit=$?
+set -e
+[[ "${refresh_exit}" -eq 0 ]]
+assert_contains "${calls}" "claude plugin marketplace update agent-stack"
+assert_contains "${calls}" "codex plugin marketplace upgrade agent-stack"
+assert_not_contains "${calls}" "claude plugin marketplace add "
+assert_not_contains "${calls}" "codex plugin marketplace add "
+
 echo "case: no supported client fails with a client-specific diagnostic"
 run_case none none
 [[ "${CASE_EXIT}" -ne 0 ]]

@@ -1,6 +1,6 @@
 package daemon
 
-import "github.com/matteobortolazzo/agent-stack/agentwatch/v2/internal/ipc"
+import "github.com/matteobortolazzo/agent-stack/agentwatch/v3/internal/ipc"
 
 // DeliverEvent sends a hook event without surfacing failures to the calling
 // agent. If the default daemon is unavailable, it is started on demand and the

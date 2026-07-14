@@ -1,6 +1,6 @@
 {
   "name": "agent-sandbox",
-  "version": "0.14.0",
+  "version": "0.14.1",
   "description": "agent-stack isolation layer: Docker or Podman launcher for Claude Code and Codex.",
   "author": {
     "name": "Matteo Bortolazzo",
