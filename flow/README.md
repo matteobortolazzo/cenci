@@ -21,6 +21,7 @@ scope and planning decisions human-gated.
 | `/cenci:address-review <pr-number>` | Address PR review comments — fetch, evaluate, fix, reply, push, re-request review |
 | `/cenci:babysit <pr-number>` | Loop-driven PR follow-through — periodically checks CI and new review comments and drives them to resolution until the PR merges or closes |
 | `/cenci:sync` | Pull latest main, rebase active worktrees, prune stale remotes, clean up merged branches |
+| `/cenci:garden [project]` | Curate accumulated lessons — merge duplicate rules, demote rules now covered by automated checks, archive stale ones, and open a PR with the cleanup |
 
 **Codex support**: Codex receives the portable convention skills below plus the full
 implementation workflow as a documented `AGENTS.md` equivalent. The interactive
@@ -49,6 +50,7 @@ Codex so it does not mistake a pipeline command for a supported workflow.
 | `babysit` | Yes | No | Claude loop scheduling and slash commands |
 | `configure` | Yes | No | Writes Claude settings and plugin configuration |
 | `design` | Yes | No | Claude interactive gates and Pencil integration |
+| `garden` | Yes | No | Claude interactive gates, worktree mutations, and GitHub PR creation |
 | `implement` | Yes | No | Claude subagents, hooks, goals, and human gates |
 | `refactor` | Yes | No | Claude analysis subagents and ticket workflow |
 | `refine` | Yes | No | Claude interactive refinement gate |
@@ -174,6 +176,10 @@ your-project/
 - `docs/<topic>.md` — on-demand reference docs read by skills/agents when their topic intersects the work. The lessons-collector also routes new topic-specific lessons here.
 - `CLAUDE.md` — always loaded. Holds critical rules and project-wide invariants.
 - `.claude/rules/` — reserved for files explicitly `@`-imported by `CLAUDE.md` (auto-loaded at session start). Configure does not create files here today.
+
+**Lesson lifecycle**
+
+Rules only enter through the lessons-collector (append, after implementation sessions) and only leave through `/cenci:garden` (curation, human-gated). Because `CLAUDE.md` is loaded into every session, each rule it holds is a permanent context cost — gardening periodically merges duplicates, moves non-invariants into on-demand `docs/<topic>.md` files, demotes rules that a regression test or lint gate now enforces, and archives rules whose subject no longer exists. The collector suggests a gardening run in its summary when a session pushes a rules section past its size threshold.
 
 **Backward compatibility**
 

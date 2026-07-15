@@ -77,6 +77,8 @@ If either check fails — a relative path, or an absolute path with **no** `/.wo
 
 If `<project-root>/docs/` doesn't exist and you need to create a topic file (option 3), create the directory first.
 
+5. **Size check (garden hint).** After writing all entries, count the rule bullets in each section you touched. If a `## Critical Rules` section now exceeds **10** bullets, or a `docs/<topic>.md` rules section exceeds **25** bullets, add a `### Garden suggestion` section to your output summary naming the file and its count. Do NOT edit, merge, or remove anything based on size — curation is `/cenci:garden`'s job and is human-gated; your only action is the suggestion line.
+
 ## Entry Formats
 
 ### docs/<topic>.md entries
@@ -124,6 +126,9 @@ After writing all entries (or finding nothing to write), output a summary:
 
 ### Dropped (no suitable home)
 - "Forgot to update changelog" — too project-specific, not worth a permanent rule
+
+### Garden suggestion
+- `<project-root>/.claude/CLAUDE.md` Critical Rules now holds 12 bullets — consider running `/cenci:garden` to consolidate.
 ```
 
 If a section has no entries, omit it. If you captured nothing at all, output:
