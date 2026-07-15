@@ -123,6 +123,14 @@ func ExecCenciSand(argv []string) error {
 // filter cenci-sand's --prune applies to its container list.
 var sandboxNamePattern = regexp.MustCompile(`^(claude-cenci-|codex-cenci-)`)
 
+// IsSandboxContainerName reports whether name carries one of the sandbox
+// container name prefixes (claude-cenci-/codex-cenci-). Exported so sibling
+// packages (internal/sandbox/launcher) share the one prefix table instead of
+// duplicating the regex.
+func IsSandboxContainerName(name string) bool {
+	return sandboxNamePattern.MatchString(name)
+}
+
 // ContainerRuntime resolves the preferred container runtime the same way
 // cenci-sand does: podman if present on PATH, else docker. Returns an error
 // if neither is found.
