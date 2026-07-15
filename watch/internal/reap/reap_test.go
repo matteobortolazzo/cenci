@@ -104,14 +104,14 @@ func TestExecReaper_GuardResetsAfterCompletion(t *testing.T) {
 	}
 }
 
-// TestExecReaper_MissingBinaryNonFatal asserts that a run failing the way a
-// missing cenci-sand binary would (an *exec.Error wrapping exec.ErrNotFound)
+// TestExecReaper_MissingBinaryNonFatal asserts that a run failing the way an
+// unresolvable self binary would (an *exec.Error wrapping exec.ErrNotFound)
 // is swallowed: no panic, and the guard still resets for future calls.
 func TestExecReaper_MissingBinaryNonFatal(t *testing.T) {
 	calls := make(chan struct{}, 10)
 	r := &ExecReaper{run: func() error {
 		calls <- struct{}{}
-		return &exec.Error{Name: "cenci-sand", Err: exec.ErrNotFound}
+		return &exec.Error{Name: "cenci", Err: exec.ErrNotFound}
 	}}
 
 	r.Reap()
@@ -138,15 +138,16 @@ func TestExecReaper_MissingBinaryNonFatal(t *testing.T) {
 }
 
 // TestExecReaper_RunErrorNotRetriedAutomatically asserts that a run
-// returning a generic error (e.g. cenci-sand exiting non-zero) is logged and
-// dropped — NOT retried in a tight loop by the reaper itself.
+// returning a generic error (e.g. `cenci sandbox reap-orphans` exiting
+// non-zero) is logged and dropped — NOT retried in a tight loop by the
+// reaper itself.
 func TestExecReaper_RunErrorNotRetriedAutomatically(t *testing.T) {
 	var calls int32
 	invoked := make(chan struct{})
 	r := &ExecReaper{run: func() error {
 		atomic.AddInt32(&calls, 1)
 		close(invoked)
-		return errors.New("cenci-sand exited with status 1")
+		return errors.New("cenci sandbox reap-orphans exited with status 1")
 	}}
 
 	r.Reap()

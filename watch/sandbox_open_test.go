@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/matteobortolazzo/cenci/watch/internal/sandbox/launcher"
 )
 
 // -- fakes -------------------------------------------------------------
@@ -88,56 +90,352 @@ func joinArgv(argv []string) string {
 }
 
 // -- sandbox <batch verb> ------------------------------------------------
+//
+// build/build-base/prune/update-plugins run natively against docker/podman
+// via internal/sandbox/launcher, so these tests assert what the fake
+// *runtime* received, not what cenci-sand received. Both docker and podman
+// fakes are always written so the podman-first runtime detection can never
+// escape to a real runtime on machines (or CI runners) that have one.
+// reap-orphans is pinned by the relocated bash contract suite
+// (tests/reap-orphans.test.sh); reseed-creds still forwards to cenci-sand
+// until `cenci open --reseed-creds` lands.
 
-func TestSandboxBuild_ForwardsBuildFlag(t *testing.T) {
+// writeScriptedRuntime writes a fake docker/podman to dir that appends each
+// invocation's argv (space-joined) as a line to callLog and answers scripted
+// responses from env vars:
+//
+//	FAKE_INSPECT_EXIT — `image inspect` exit code (default 0 = image exists)
+//	FAKE_BUILD_EXIT   — `build` exit code (default 0)
+//	FAKE_IMAGES       — `images ...` stdout
+//	FAKE_PS           — `ps ...` stdout
+//	FAKE_VOLUMES      — `volume ls` stdout
+func writeScriptedRuntime(t *testing.T, dir, name, callLog string) {
+	t.Helper()
+	body := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> " + shellQuote(callLog) + "\n" +
+		"case \"$1\" in\n" +
+		"image) if [ \"$2\" = inspect ]; then exit \"${FAKE_INSPECT_EXIT:-0}\"; fi ;;\n" +
+		"build) exit \"${FAKE_BUILD_EXIT:-0}\" ;;\n" +
+		"images) printf '%s' \"${FAKE_IMAGES:-}\" ;;\n" +
+		"ps) printf '%s' \"${FAKE_PS:-}\" ;;\n" +
+		"volume) if [ \"$2\" = ls ]; then printf '%s' \"${FAKE_VOLUMES:-}\"; fi ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	writeExecutable(t, filepath.Join(dir, name), body)
+}
+
+// writeScriptedRuntimes writes the same scripted fake as both docker and
+// podman and returns the shared call log path.
+func writeScriptedRuntimes(t *testing.T, dir string) string {
+	t.Helper()
+	callLog := filepath.Join(dir, "calls.txt")
+	writeScriptedRuntime(t, dir, "docker", callLog)
+	writeScriptedRuntime(t, dir, "podman", callLog)
+	return callLog
+}
+
+// writeAssetFixture creates a minimal sandbox asset dir (Dockerfile.base,
+// entrypoint.sh, lib/) for CENCI_SANDBOX_ASSETS.
+func writeAssetFixture(t *testing.T) string {
+	t.Helper()
 	dir := t.TempDir()
-	capture := filepath.Join(dir, "argv.txt")
-	writeFakeCenciSand(t, dir, capture, 0)
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile.base"), []byte("FROM scratch\n"), 0o644); err != nil {
+		t.Fatalf("write Dockerfile.base: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM cenci-sandbox-base\n"), 0o644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "entrypoint.sh"), []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatalf("write entrypoint.sh: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "lib"), 0o755); err != nil {
+		t.Fatalf("mkdir lib: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "lib", "seed.sh"), []byte("# lib\n"), 0o644); err != nil {
+		t.Fatalf("write lib/seed.sh: %v", err)
+	}
+	return dir
+}
+
+// batchEnv is the black-box environment for native batch-verb runs: fake
+// runtimes first on PATH (with git/sh still resolvable from the system
+// dirs), an isolated HOME, and the asset fixture pinned via
+// CENCI_SANDBOX_ASSETS. os/exec keeps the LAST duplicate env key, so these
+// appends override the inherited values.
+func batchEnv(t *testing.T, fakeDir, assets string) []string {
+	t.Helper()
+	return append(os.Environ(),
+		"PATH="+fakeDir+":/usr/bin:/bin",
+		"HOME="+t.TempDir(),
+		"CENCI_SANDBOX_ASSETS="+assets,
+	)
+}
+
+// callLogLines reads the shared runtime call log (missing file = no calls).
+func callLogLines(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		t.Fatalf("read call log: %v", err)
+	}
+	s := strings.TrimSuffix(string(data), "\n")
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, "\n")
+}
+
+func findLineWithPrefix(lines []string, prefix string) (string, bool) {
+	for _, l := range lines {
+		if strings.HasPrefix(l, prefix) {
+			return l, true
+		}
+	}
+	return "", false
+}
+
+func anyLineContains(lines []string, sub string) bool {
+	for _, l := range lines {
+		if strings.Contains(l, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestSandboxBuildBase_BuildsBaseImageNatively(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	tag, err := launcher.BaseTag(assets)
+	if err != nil {
+		t.Fatalf("BaseTag: %v", err)
+	}
+
+	cmd := exec.Command(binaryPath, "sandbox", "build-base")
+	cmd.Env = batchEnv(t, fakeDir, assets)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandbox build-base: %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	want := "build -f " + assets + "/Dockerfile.base -t cenci-sandbox-base:" + tag + " -t cenci-sandbox-base:latest " + assets
+	if len(lines) != 1 || lines[0] != want {
+		t.Errorf("runtime calls = %v, want exactly [%s]", lines, want)
+	}
+	if !strings.Contains(string(output), "Building cenci-sandbox-base:"+tag) {
+		t.Errorf("expected build progress message, got:\n%s", output)
+	}
+}
+
+func TestSandboxBuild_MonolithBuildsBaseFirstWhenMissing(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	tag, err := launcher.BaseTag(assets)
+	if err != nil {
+		t.Fatalf("BaseTag: %v", err)
+	}
 
 	cmd := exec.Command(binaryPath, "sandbox", "build")
-	cmd.Env = append(os.Environ(), "PATH="+dir)
+	cmd.Env = append(batchEnv(t, fakeDir, assets), "FAKE_INSPECT_EXIT=1")
+	cmd.Dir = t.TempDir() // non-git cwd → monolith image
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("sandbox build: %v\n%s", err, output)
 	}
 
-	got := readCapturedArgv(t, capture)
-	if joinArgv(got) != "--build" {
-		t.Errorf("captured argv = %v, want [--build]", got)
+	lines := callLogLines(t, callLog)
+	if _, ok := findLineWithPrefix(lines, "image inspect cenci-sandbox-base:"+tag); !ok {
+		t.Errorf("expected a base-image inspect, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if !anyLineContains(lines, "-t cenci-sandbox-base:"+tag) {
+		t.Errorf("expected the missing base image to be built first, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	wantMonolith := "build --build-arg BASE_VERSION=" + tag + " -t cenci-sandbox:latest -f " + assets + "/Dockerfile " + assets
+	if _, ok := findLineWithPrefix(lines, wantMonolith); !ok {
+		t.Errorf("expected monolith build call [%s], got calls:\n%s", wantMonolith, strings.Join(lines, "\n"))
 	}
 }
 
-func TestSandboxBuildBase_ForwardsBuildBaseFlag(t *testing.T) {
-	dir := t.TempDir()
-	capture := filepath.Join(dir, "argv.txt")
-	writeFakeCenciSand(t, dir, capture, 0)
-
-	cmd := exec.Command(binaryPath, "sandbox", "build-base")
-	cmd.Env = append(os.Environ(), "PATH="+dir)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("sandbox build-base: %v\n%s", err, output)
+func TestSandboxBuild_RepoImageFromRepoDockerfile(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	tag, err := launcher.BaseTag(assets)
+	if err != nil {
+		t.Fatalf("BaseTag: %v", err)
 	}
 
-	got := readCapturedArgv(t, capture)
-	if joinArgv(got) != "--build-base" {
-		t.Errorf("captured argv = %v, want [--build-base]", got)
+	repo := t.TempDir()
+	if out, err := exec.Command("git", "-C", repo, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	if err := os.MkdirAll(filepath.Join(repo, ".cenci"), 0o755); err != nil {
+		t.Fatalf("mkdir .cenci: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".cenci", "Dockerfile"), []byte("FROM cenci-sandbox-base\n"), 0o644); err != nil {
+		t.Fatalf("write repo Dockerfile: %v", err)
+	}
+	slug := launcher.Slugify(filepath.Base(repo))
+
+	cmd := exec.Command(binaryPath, "sandbox", "build")
+	cmd.Env = append(batchEnv(t, fakeDir, assets), "FAKE_INSPECT_EXIT=1")
+	cmd.Dir = repo
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandbox build (repo): %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	wantRepo := "build --build-arg BASE_VERSION=" + tag + " -t cenci-sandbox-" + slug + ":latest -f " + repo + "/.cenci/Dockerfile " + repo + "/.cenci"
+	if _, ok := findLineWithPrefix(lines, wantRepo); !ok {
+		t.Errorf("expected repo-image build call [%s], got calls:\n%s", wantRepo, strings.Join(lines, "\n"))
 	}
 }
 
-func TestSandboxUpdatePlugins_ForwardsUpdatePluginsFlag(t *testing.T) {
-	dir := t.TempDir()
-	capture := filepath.Join(dir, "argv.txt")
-	writeFakeCenciSand(t, dir, capture, 0)
+func TestSandboxBuild_BuildFailureExits1(t *testing.T) {
+	fakeDir := t.TempDir()
+	writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
 
-	cmd := exec.Command(binaryPath, "sandbox", "update-plugins")
-	cmd.Env = append(os.Environ(), "PATH="+dir)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("sandbox update-plugins: %v\n%s", err, output)
+	cmd := exec.Command(binaryPath, "sandbox", "build")
+	cmd.Env = append(batchEnv(t, fakeDir, assets), "FAKE_INSPECT_EXIT=1", "FAKE_BUILD_EXIT=3")
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("exit code = %d, want 1\n%s", exitErr.ExitCode(), output)
+	}
+	if !strings.Contains(string(output), "cenci sandbox build:") {
+		t.Errorf("expected a 'cenci sandbox build:' error, got:\n%s", output)
+	}
+}
+
+func TestSandboxPrune_RemovesSupersededTagsAndStoppedContainers(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	tag, err := launcher.BaseTag(assets)
+	if err != nil {
+		t.Fatalf("BaseTag: %v", err)
 	}
 
-	got := readCapturedArgv(t, capture)
-	if joinArgv(got) != "--update-plugins" {
-		t.Errorf("captured argv = %v, want [--update-plugins]", got)
+	cmd := exec.Command(binaryPath, "sandbox", "prune")
+	cmd.Env = append(batchEnv(t, fakeDir, assets),
+		"FAKE_IMAGES=cenci-sandbox-base:oldtag\ncenci-sandbox-base:latest\ncenci-sandbox-base:"+tag+"\n",
+		"FAKE_PS=claude-cenci-old\nunrelated-container\n",
+	)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandbox prune: %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	if !anyLineContains(lines, "rmi cenci-sandbox-base:oldtag") {
+		t.Errorf("expected the superseded tag to be removed, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if anyLineContains(lines, "rmi cenci-sandbox-base:latest") || anyLineContains(lines, "rmi cenci-sandbox-base:"+tag) {
+		t.Errorf("expected the current and :latest base tags to be kept, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if _, ok := findLineWithPrefix(lines, "rm claude-cenci-old"); !ok {
+		t.Errorf("expected the stopped sandbox container to be removed, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if anyLineContains(lines, "rm unrelated-container") {
+		t.Errorf("expected non-sandbox containers to be left alone, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if _, ok := findLineWithPrefix(lines, "image prune -f"); !ok {
+		t.Errorf("expected dangling images to be pruned, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if anyLineContains(lines, "volume") {
+		t.Errorf("expected no volume operations without --volumes, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+func TestSandboxPruneVolumes_DefaultDeniesRemoval(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+
+	cmd := exec.Command(binaryPath, "sandbox", "prune", "--volumes")
+	cmd.Env = append(batchEnv(t, fakeDir, assets),
+		"FAKE_VOLUMES=claude-cenci-home-x\ncodex-cenci-home-y\n",
+	)
+	cmd.Dir = t.TempDir()
+	cmd.Stdin = strings.NewReader("n\n")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandbox prune --volumes: %v\n%s", err, output)
+	}
+
+	if !strings.Contains(string(output), "Skipping volume removal.") {
+		t.Errorf("expected the default-deny skip message, got:\n%s", output)
+	}
+	lines := callLogLines(t, callLog)
+	if _, ok := findLineWithPrefix(lines, "volume ls"); !ok {
+		t.Errorf("expected volumes to be listed, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if anyLineContains(lines, "volume rm") {
+		t.Errorf("expected no volume removal on 'n', got calls:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+func TestSandboxUpdatePluginsCodex_RunsOneShotVolumeUpdate(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+
+	cmd := exec.Command(binaryPath, "sandbox", "update-plugins", "--agent", "codex")
+	cmd.Env = batchEnv(t, fakeDir, assets) // image exists, no running container
+	cmd.Dir = t.TempDir()                  // non-git cwd → legacy "default" scope
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandbox update-plugins --agent codex: %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	prefix := "run --rm --entrypoint /bin/bash -e CENCI_SANDBOX_AGENT=codex -v codex-cenci-home-default:/home/dev cenci-sandbox:latest -c "
+	line, ok := findLineWithPrefix(lines, prefix)
+	if !ok {
+		t.Fatalf("expected a one-shot volume update run [%s...], got calls:\n%s", prefix, strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(line, "provision_codex_plugins") {
+		t.Errorf("expected the codex provisioning command, got: %s", line)
+	}
+}
+
+func TestSandboxUpdatePlugins_BadAgent_Exits2NoRuntimeCalls(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+
+	cmd := exec.Command(binaryPath, "sandbox", "update-plugins", "--agent", "bogus")
+	cmd.Env = batchEnv(t, fakeDir, assets)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
+	}
+	if exitErr.ExitCode() != 2 {
+		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
+	}
+	if lines := callLogLines(t, callLog); len(lines) > 0 {
+		t.Errorf("expected no runtime calls on a bad --agent, got:\n%s", strings.Join(lines, "\n"))
 	}
 }
 
@@ -158,82 +456,13 @@ func TestSandboxReseedCreds_ForwardsReseedCredsFlag(t *testing.T) {
 	}
 }
 
-func TestSandboxReapOrphans_ForwardsReapOrphansFlag(t *testing.T) {
-	dir := t.TempDir()
-	capture := filepath.Join(dir, "argv.txt")
-	writeFakeCenciSand(t, dir, capture, 0)
-
-	cmd := exec.Command(binaryPath, "sandbox", "reap-orphans")
-	cmd.Env = append(os.Environ(), "PATH="+dir)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("sandbox reap-orphans: %v\n%s", err, output)
-	}
-
-	got := readCapturedArgv(t, capture)
-	if joinArgv(got) != "--reap-orphans" {
-		t.Errorf("captured argv = %v, want [--reap-orphans]", got)
-	}
-}
-
-func TestSandboxPrune_WithoutVolumes_ForwardsOnlyPruneFlag(t *testing.T) {
-	dir := t.TempDir()
-	capture := filepath.Join(dir, "argv.txt")
-	writeFakeCenciSand(t, dir, capture, 0)
-
-	cmd := exec.Command(binaryPath, "sandbox", "prune")
-	cmd.Env = append(os.Environ(), "PATH="+dir)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("sandbox prune: %v\n%s", err, output)
-	}
-
-	got := readCapturedArgv(t, capture)
-	if joinArgv(got) != "--prune" {
-		t.Errorf("captured argv = %v, want [--prune]", got)
-	}
-}
-
-func TestSandboxPrune_WithVolumes_ForwardsPruneAndVolumesFlags(t *testing.T) {
-	dir := t.TempDir()
-	capture := filepath.Join(dir, "argv.txt")
-	writeFakeCenciSand(t, dir, capture, 0)
-
-	cmd := exec.Command(binaryPath, "sandbox", "prune", "--volumes")
-	cmd.Env = append(os.Environ(), "PATH="+dir)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("sandbox prune --volumes: %v\n%s", err, output)
-	}
-
-	got := readCapturedArgv(t, capture)
-	if joinArgv(got) != "--prune --volumes" {
-		t.Errorf("captured argv = %v, want [--prune --volumes]", got)
-	}
-}
-
-func TestSandboxBatchVerb_PropagatesChildExitCode(t *testing.T) {
-	dir := t.TempDir()
-	capture := filepath.Join(dir, "argv.txt")
-	writeFakeCenciSand(t, dir, capture, 7)
-
-	cmd := exec.Command(binaryPath, "sandbox", "build")
-	cmd.Env = append(os.Environ(), "PATH="+dir)
-	output, err := cmd.CombinedOutput()
-
-	exitErr, ok := err.(*exec.ExitError)
-	if !ok {
-		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
-	}
-	if exitErr.ExitCode() != 7 {
-		t.Errorf("exit code = %d, want 7", exitErr.ExitCode())
-	}
-}
-
-func TestSandboxUnknownFlag_Exits2NoExec(t *testing.T) {
-	dir := t.TempDir()
-	capture := filepath.Join(dir, "argv.txt")
-	writeFakeCenciSand(t, dir, capture, 0)
+func TestSandboxUnknownFlag_Exits2NoRuntimeCalls(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
 
 	cmd := exec.Command(binaryPath, "sandbox", "build", "--bogus")
-	cmd.Env = append(os.Environ(), "PATH="+dir)
+	cmd.Env = batchEnv(t, fakeDir, assets)
 	output, err := cmd.CombinedOutput()
 
 	exitErr, ok := err.(*exec.ExitError)
@@ -243,18 +472,18 @@ func TestSandboxUnknownFlag_Exits2NoExec(t *testing.T) {
 	if exitErr.ExitCode() != 2 {
 		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
 	}
-	if _, err := os.Stat(capture); err == nil {
-		t.Error("expected cenci-sand to never be invoked for an unknown flag")
+	if lines := callLogLines(t, callLog); len(lines) > 0 {
+		t.Errorf("expected the runtime to never be invoked for an unknown flag, got:\n%s", strings.Join(lines, "\n"))
 	}
 }
 
-func TestSandboxUnknownFlag_OnPrune_Exits2NoExec(t *testing.T) {
-	dir := t.TempDir()
-	capture := filepath.Join(dir, "argv.txt")
-	writeFakeCenciSand(t, dir, capture, 0)
+func TestSandboxUnknownFlag_OnPrune_Exits2NoRuntimeCalls(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
 
 	cmd := exec.Command(binaryPath, "sandbox", "prune", "--bogus")
-	cmd.Env = append(os.Environ(), "PATH="+dir)
+	cmd.Env = batchEnv(t, fakeDir, assets)
 	output, err := cmd.CombinedOutput()
 
 	exitErr, ok := err.(*exec.ExitError)
@@ -263,16 +492,19 @@ func TestSandboxUnknownFlag_OnPrune_Exits2NoExec(t *testing.T) {
 	}
 	if exitErr.ExitCode() != 2 {
 		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
+	}
+	if lines := callLogLines(t, callLog); len(lines) > 0 {
+		t.Errorf("expected the runtime to never be invoked for an unknown flag, got:\n%s", strings.Join(lines, "\n"))
 	}
 }
 
-func TestSandboxTrailingPositional_Exits2NoExec(t *testing.T) {
-	dir := t.TempDir()
-	capture := filepath.Join(dir, "argv.txt")
-	writeFakeCenciSand(t, dir, capture, 0)
+func TestSandboxTrailingPositional_Exits2NoRuntimeCalls(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
 
 	cmd := exec.Command(binaryPath, "sandbox", "build", "extra")
-	cmd.Env = append(os.Environ(), "PATH="+dir)
+	cmd.Env = batchEnv(t, fakeDir, assets)
 	output, err := cmd.CombinedOutput()
 
 	exitErr, ok := err.(*exec.ExitError)
@@ -282,8 +514,8 @@ func TestSandboxTrailingPositional_Exits2NoExec(t *testing.T) {
 	if exitErr.ExitCode() != 2 {
 		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
 	}
-	if _, err := os.Stat(capture); err == nil {
-		t.Error("expected cenci-sand to never be invoked for a trailing positional")
+	if lines := callLogLines(t, callLog); len(lines) > 0 {
+		t.Errorf("expected the runtime to never be invoked for a trailing positional, got:\n%s", strings.Join(lines, "\n"))
 	}
 }
 

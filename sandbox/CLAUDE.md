@@ -24,7 +24,6 @@ Host-runnable installer suites (mock PATH + fake HOME, no container needed):
 bash sandbox/tests/install-update.test.sh        # daemon restart on update
 bash sandbox/tests/installer-clients.test.sh     # client detection + launchers
 bash sandbox/tests/cenci-widgets.test.sh         # GUI bar-widget detect/install/reload
-bash sandbox/tests/reap-orphans.test.sh          # --reap-orphans scan/kill/escalation
 ```
 
 ## Conventions
