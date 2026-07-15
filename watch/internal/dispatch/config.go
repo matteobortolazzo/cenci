@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/v4/internal/run"
+	"github.com/matteobortolazzo/cenci/watch/internal/run"
 )
 
 // QuietHours is a local-clock window in which no dispatch happens. StartHour ==

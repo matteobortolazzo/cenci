@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/matteobortolazzo/cenci/watch/v4/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
 )
 
 // tempSocket returns a bind-safe Unix socket path. macOS caps sun_path at 104

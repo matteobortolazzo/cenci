@@ -4,11 +4,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/v4/internal/config"
-	tmuxfe "github.com/matteobortolazzo/cenci/watch/v4/internal/frontend/tmux"
-	"github.com/matteobortolazzo/cenci/watch/v4/internal/ipc"
-	"github.com/matteobortolazzo/cenci/watch/v4/internal/reap"
-	"github.com/matteobortolazzo/cenci/watch/v4/internal/tmux/tmuxtest"
+	"github.com/matteobortolazzo/cenci/watch/internal/config"
+	tmuxfe "github.com/matteobortolazzo/cenci/watch/internal/frontend/tmux"
+	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/internal/reap"
+	"github.com/matteobortolazzo/cenci/watch/internal/tmux/tmuxtest"
 )
 
 // mockReaper is a call-counting reap.Reaper for daemon tests (#292). It never

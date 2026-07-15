@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/matteobortolazzo/cenci/watch/v4/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
 )
 
 // CollectTickets gathers open issues across the configured repos via the gh CLI,

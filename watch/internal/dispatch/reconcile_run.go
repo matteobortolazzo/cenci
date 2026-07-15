@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/v4/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
 )
 
 // TicketMutator applies the reconciler's gh side effects. The seam keeps
