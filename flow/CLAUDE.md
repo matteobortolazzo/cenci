@@ -16,6 +16,7 @@ GitHub Issues for tracking. GitHub for code and PRs.
 - When a new skill section or automated path reuses an existing error-handling or safety rule by reference but changes what happens after that step (e.g., removes a human checkpoint, continues into further autonomous phases, or arms an unattended completion loop), re-evaluate and explicitly restate the error-handling for the new risk profile. Do not assume the rule remains safe as-is in the new context — the original rule may have worked in its original stopping point but be under-specified for the new path.
 
 ## Reference Docs
+CLI grammar, alias, env-var, and naming conventions: `<repo-root>/docs/cli-conventions.md`.
 On-demand topic docs live at `docs/`:
 - `docs/git-workflow.md` — branching, commits, PRs, versioning
 - `docs/skill-authoring.md` — writing skills that generate/regenerate files, especially with external-sourced values

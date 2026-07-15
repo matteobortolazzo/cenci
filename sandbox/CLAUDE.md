@@ -96,4 +96,4 @@ Image dependency versions are pinned via Dockerfile `ARG`s, all checked daily by
 - Bind-mount host paths read-only (`:ro`) unless the container genuinely needs write access — containers should be as restrictive as possible. Audit all new and existing mounts in `cenci-sand` against this principle.
 
 ## Reference Docs
-Repo-level conventions live at `<repo-root>/docs/` (read on demand). Project-specific notes belong in this file.
+Repo-level conventions live at `<repo-root>/docs/` (read on demand); CLI grammar, alias, env-var, and runtime-object naming rules are in `<repo-root>/docs/cli-conventions.md`. Project-specific notes belong in this file.
