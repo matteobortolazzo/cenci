@@ -24,6 +24,7 @@ set -u
 MARKETPLACE_REPO="matteobortolazzo/cenci"
 MARKETPLACE_NAME="cenci"
 ALL_PLUGINS="cenci cenci-watch cenci-sandbox"
+LAZYBOARDS_REPO="matteobortolazzo/lazyboards"
 CODEX_MARKETPLACE_READY=0
 CLAUDE_MARKETPLACE_READY=0
 HAS_CLAUDE=0
@@ -175,6 +176,14 @@ find_plugin_path() {
 		for f in \
 			"$HOME"/.claude/plugins/cache/*/cenci-watch/*/"$rel" \
 			"$HOME"/.codex/plugins/cache/*/cenci-watch/*/"$rel"; do
+			[ -e "$f" ] && { printf '%s\n' "$f"; return 0; }
+		done
+		;;
+	flow/*)
+		rel=${rel#flow/}
+		for f in \
+			"$HOME"/.claude/plugins/cache/*/cenci/*/"$rel" \
+			"$HOME"/.codex/plugins/cache/*/cenci/*/"$rel"; do
 			[ -e "$f" ] && { printf '%s\n' "$f"; return 0; }
 		done
 		;;
@@ -334,6 +343,24 @@ run_doctor() {
 	if runtime="$(container_runtime 2>/dev/null)"; then
 		check "cenci-sandbox:latest image" optional "build it with: cenci sandbox build" \
 			"$runtime" image inspect cenci-sandbox:latest
+	fi
+
+	say ""
+	say "  ${BOLD}Board orchestration (optional)${RESET}"
+	local lb_ver
+	if lazyboards_binary >/dev/null 2>&1; then
+		if lb_ver="$(lazyboards_installed_version)" && [ -n "$lb_ver" ]; then
+			ok "lazyboards installed (v${lb_ver})"
+		else
+			ok "lazyboards installed"
+		fi
+		if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/lazyboards/config.yml" ]; then
+			ok "board config present (~/.config/lazyboards/config.yml)"
+		else
+			warn "no board config — re-run the installer to seed the default, or see docs/orchestration.md"
+		fi
+	else
+		warn "lazyboards not installed — optional; install with: cenci-installer --lazyboards"
 	fi
 
 	say ""
@@ -851,6 +878,168 @@ setup_cenci_linux_widgets() {
 	fi
 }
 
+# ------------------------------------------------------------- lazyboards ----
+
+# lazyboards is the optional board-orchestration layer
+# (https://github.com/matteobortolazzo/lazyboards) — a separate project
+# co-developed with cenci that dispatches the workflow from a kanban board via
+# `cenci run`, labels, and the watch daemon (see docs/orchestration.md).
+# The installer can install and update it, but never by default: install is
+# opt-in (prompt or --lazyboards), update only refreshes an existing install.
+
+lazyboards_binary() {
+	if have lazyboards; then
+		command -v lazyboards
+		return 0
+	fi
+	[ -x "$HOME/.local/bin/lazyboards" ] || return 1
+	printf '%s\n' "$HOME/.local/bin/lazyboards"
+}
+
+# lazyboards_latest_version resolves the newest release by following the
+# GitHub releases/latest redirect (no API token, no jq) and prints the bare
+# semver. The value is validated strictly before use — it flows into a
+# download URL and an archive filename, so a malformed redirect must never be
+# trusted.
+lazyboards_latest_version() {
+	local url ver
+	url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${LAZYBOARDS_REPO}/releases/latest" 2>/dev/null)" || return 1
+	ver="${url##*/}"
+	ver="${ver#v}"
+	printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || return 1
+	printf '%s\n' "$ver"
+}
+
+# lazyboards_installed_version prints the bare semver of the installed binary
+# (`lazyboards --version` prints "lazyboards <version>", where a go-install
+# build may carry a leading v).
+lazyboards_installed_version() {
+	local bin
+	bin="$(lazyboards_binary)" || return 1
+	"$bin" --version 2>/dev/null | sed -n '1s/^lazyboards v\{0,1\}//p'
+}
+
+# install_lazyboards_binary <version> — download the GoReleaser archive for
+# this platform, verify its sha256 against the release's checksums.txt, and
+# install the binary at ~/.local/bin/lazyboards.
+install_lazyboards_binary() {
+	local ver="$1" goos sumtool archive url_base tmp sum
+	case "$OS" in
+	macos) goos=darwin ;;
+	*) goos=linux ;;
+	esac
+	if have sha256sum; then
+		sumtool="sha256sum"
+	elif have shasum; then
+		sumtool="shasum -a 256"
+	else
+		fail "lazyboards: neither sha256sum nor shasum is available to verify the download"
+		return 1
+	fi
+	archive="lazyboards_${ver}_${goos}_${ARCH}.tar.gz"
+	url_base="https://github.com/${LAZYBOARDS_REPO}/releases/download/v${ver}"
+	# Verify temp-dir creation before use — an unchecked failure would let the
+	# paths below collapse to the current directory.
+	tmp="$(mktemp -d)" || tmp=""
+	if [ -z "$tmp" ] || [ ! -d "$tmp" ]; then
+		fail "lazyboards: could not create a temporary download directory"
+		return 1
+	fi
+	if ! curl -fsSL -o "$tmp/$archive" "$url_base/$archive" ||
+		! curl -fsSL -o "$tmp/checksums.txt" "$url_base/checksums.txt"; then
+		fail "lazyboards: download failed ($url_base/$archive)"
+		rm -rf "$tmp"
+		return 1
+	fi
+	sum="$($sumtool "$tmp/$archive" | cut -d' ' -f1)" || sum=""
+	if [ -z "$sum" ] || ! grep -q "^${sum}  ${archive}\$" "$tmp/checksums.txt"; then
+		fail "lazyboards: checksum verification failed for $archive"
+		rm -rf "$tmp"
+		return 1
+	fi
+	if ! tar -xzf "$tmp/$archive" -C "$tmp" lazyboards; then
+		fail "lazyboards: could not extract $archive"
+		rm -rf "$tmp"
+		return 1
+	fi
+	mkdir -p "$HOME/.local/bin"
+	if ! cp "$tmp/lazyboards" "$HOME/.local/bin/lazyboards" || ! chmod +x "$HOME/.local/bin/lazyboards"; then
+		fail "lazyboards: could not install to ~/.local/bin/lazyboards"
+		rm -rf "$tmp"
+		return 1
+	fi
+	rm -rf "$tmp"
+	ok "lazyboards v${ver} installed → ~/.local/bin/lazyboards"
+}
+
+# seed_lazyboards_config copies the packaged default board config (columns
+# wired to the cenci workflow — see docs/orchestration.md) into
+# ~/.config/lazyboards/config.yml, only when no config exists yet. An existing
+# config is never merged into or overwritten: lazyboards has its own config
+# UI, and YAML has no managed-marker regeneration story.
+seed_lazyboards_config() {
+	local cfg_dir cfg template
+	cfg_dir="${XDG_CONFIG_HOME:-$HOME/.config}/lazyboards"
+	cfg="$cfg_dir/config.yml"
+	if [ -e "$cfg" ]; then
+		ok "board config already exists — left untouched ($cfg)"
+		return 0
+	fi
+	if ! template="$(find_plugin_path "flow/templates/lazyboards-config.yml")"; then
+		warn "board config template not found in the marketplace checkout — copy it from docs/orchestration.md"
+		return 0
+	fi
+	if mkdir -p "$cfg_dir" && cp "$template" "$cfg"; then
+		ok "seeded default board config → $cfg (columns wired to cenci run refine/design/implement)"
+	else
+		warn "could not write $cfg — copy flow/templates/lazyboards-config.yml there manually"
+	fi
+}
+
+step_lazyboards_setup() {
+	local installed_ver latest_ver
+	# An explicit skip applies in every mode, including updates of an existing
+	# binary. Flags must override auto-detection rather than merely suppressing
+	# a first-time install.
+	if [ "$LAZYBOARDS" = no ] && [ "$LAZYBOARDS_EXPLICIT" -eq 1 ]; then
+		return 0
+	fi
+	installed_ver="$(lazyboards_installed_version || true)"
+
+	if [ "$MODE" = update ]; then
+		# Updates only refresh an existing install (or honor an explicit --lazyboards).
+		if ! lazyboards_binary >/dev/null 2>&1 && [ "$LAZYBOARDS" != yes ]; then
+			return 0
+		fi
+	elif lazyboards_binary >/dev/null 2>&1; then
+		step "Setting up lazyboards (board orchestration)"
+		ok "lazyboards already installed (run 'cenci update' to update)"
+		seed_lazyboards_config
+		return 0
+	elif [ "$LAZYBOARDS" = no ]; then
+		return 0
+	elif [ "$LAZYBOARDS" = ask ]; then
+		if ! ask_yn "Install lazyboards (kanban board that dispatches the cenci workflow)?" y; then
+			say "  ${DIM}skipped — install later with: cenci-installer --lazyboards${RESET}"
+			return 0
+		fi
+	fi
+
+	step "Setting up lazyboards (board orchestration)"
+	if ! latest_ver="$(lazyboards_latest_version)"; then
+		fail "could not resolve the latest lazyboards release — see https://github.com/${LAZYBOARDS_REPO}/releases"
+		INSTALL_FAILED=1
+		return 0
+	fi
+	if [ -n "$installed_ver" ] && [ "$installed_ver" = "$latest_ver" ]; then
+		ok "lazyboards v${installed_ver} is already up to date"
+	elif ! install_lazyboards_binary "$latest_ver"; then
+		INSTALL_FAILED=1
+		return 0
+	fi
+	seed_lazyboards_config
+}
+
 step_cenci_notes() {
 	selected cenci || return 0
 	[ "$HAS_CLAUDE" -eq 1 ] || return 0
@@ -899,6 +1088,9 @@ final_summary() {
 	if selected cenci-watch; then
 		say "    (start a supported agent session — status appears in configured surfaces)"
 	fi
+	if lazyboards_binary >/dev/null 2>&1; then
+		say "    lazyboards        # kanban board wired to the workflow — see docs/orchestration.md"
+	fi
 	say ""
 	say "  Check installation health: ${BOLD}cenci doctor${RESET}"
 	say "  Update everything later:  ${BOLD}cenci update${RESET}"
@@ -909,6 +1101,8 @@ final_summary() {
 
 MODE=install
 BUILD_IMAGE=ask
+LAZYBOARDS=ask
+LAZYBOARDS_EXPLICIT=0
 INSTALL_FAILED=0
 
 usage() {
@@ -928,6 +1122,7 @@ From a source checkout, ./install.sh accepts the same arguments.
 Flags:
   --yes                                 accept defaults, never prompt
   --build / --no-build                  force / skip the sandbox image build
+  --lazyboards / --no-lazyboards        force / skip the optional lazyboards board install
   --help                                this text
 EOF
 }
@@ -939,6 +1134,8 @@ while [ $# -gt 0 ]; do
 	--yes | -y) ASSUME_YES=1 ;;
 	--build) BUILD_IMAGE=yes ;;
 	--no-build) BUILD_IMAGE=no ;;
+	--lazyboards) LAZYBOARDS=yes; LAZYBOARDS_EXPLICIT=1 ;;
+	--no-lazyboards) LAZYBOARDS=no; LAZYBOARDS_EXPLICIT=1 ;;
 	--help | -h)
 		usage
 		exit 0
@@ -951,6 +1148,12 @@ done
 # Non-interactive runs never start a minutes-long image build unless asked.
 if [ "$BUILD_IMAGE" = ask ] && { [ "$INTERACTIVE" -eq 0 ] || [ "$ASSUME_YES" -eq 1 ]; }; then
 	BUILD_IMAGE=no
+fi
+
+# lazyboards is optional orchestration — non-interactive runs never install it
+# unless explicitly asked with --lazyboards.
+if [ "$LAZYBOARDS" = ask ] && { [ "$INTERACTIVE" -eq 0 ] || [ "$ASSUME_YES" -eq 1 ]; }; then
+	LAZYBOARDS=no
 fi
 
 detect_platform
@@ -972,6 +1175,7 @@ if [ "$MODE" = update ]; then
 	step_cli_setup
 	step_sandbox_setup
 	step_cenci_watch_setup
+	step_lazyboards_setup
 	final_summary
 	exit $((INSTALL_FAILED))
 fi
@@ -987,6 +1191,7 @@ prune_selected_to_installed
 step_cli_setup
 step_sandbox_setup
 step_cenci_watch_setup
+step_lazyboards_setup
 step_cenci_notes
 final_summary
 exit $((INSTALL_FAILED))
