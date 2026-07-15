@@ -8,8 +8,8 @@
 #      top-level concurrency: block with .group == "version-bump-main" and
 #      .cancel-in-progress == false — this serializes all plugin version
 #      bumps onto one queue instead of racing pushes to main.
-#   2. The reusable workflow's checkout step (uses: actions/checkout@v7)
-#      must declare .with.ref == "main" and .with.fetch-depth == 0 — the
+#   2. The reusable workflow's "Checkout main" step must declare
+#      .with.ref == "main" and .with.fetch-depth == 0 — the
 #      checked-out tree (and push base) must be the live tip of main at run
 #      start, not whatever commit triggered the run.
 #   3. The reusable workflow's "Bump version" step must declare
@@ -86,7 +86,7 @@ if [ "$concurrency_cancel" != "false" ]; then
 fi
 
 # --- Rule 2: reusable workflow's checkout step (ref + fetch-depth) ---------
-checkout_ref=$(yq '[.jobs.*.steps[] | select(.uses == "actions/checkout@v7")][0].with.ref // ""' "$REUSABLE_WORKFLOW") || {
+checkout_ref=$(yq '[.jobs.*.steps[] | select(.name == "Checkout main")][0].with.ref // ""' "$REUSABLE_WORKFLOW") || {
   fail "$REUSABLE_WORKFLOW: yq failed to read the checkout step's .with.ref"
   checkout_ref=""
 }
@@ -94,7 +94,7 @@ if [ "$checkout_ref" != "main" ]; then
   fail "$REUSABLE_WORKFLOW: rule 2 violated — checkout step's .with.ref must be 'main' (got '${checkout_ref:-<absent>}')"
 fi
 
-checkout_fetch_depth=$(yq '[.jobs.*.steps[] | select(.uses == "actions/checkout@v7")][0].with."fetch-depth" // ""' "$REUSABLE_WORKFLOW") || {
+checkout_fetch_depth=$(yq '[.jobs.*.steps[] | select(.name == "Checkout main")][0].with."fetch-depth" // ""' "$REUSABLE_WORKFLOW") || {
   fail "$REUSABLE_WORKFLOW: yq failed to read the checkout step's .with.fetch-depth"
   checkout_fetch_depth=""
 }

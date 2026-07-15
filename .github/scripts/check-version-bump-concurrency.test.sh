@@ -27,17 +27,22 @@ TEST_ROOT="$(mktemp -d /var/tmp/check-version-bump-concurrency-test.XXXXXX)"
 trap 'rm -rf "${TEST_ROOT}"' EXIT
 
 # write_reusable <workflows_dir> <concurrency_block> <checkout_with_block>
-# <bump_env_block> — writes a minimal plugin-version-bump.yml stub whose
-# shape mirrors the real reusable workflow for the parts
+# <bump_env_block> [checkout_uses] — writes a minimal plugin-version-bump.yml
+# stub whose shape mirrors the real reusable workflow for the parts
 # check-version-bump-concurrency.sh actually inspects: a top-level
-# concurrency: block, a checkout step (uses: actions/checkout@v7) with a
-# `with:` block, and a "Bump version" step with an `env:` block. Each block
-# is inserted verbatim (pre-indented by the caller) so each case can vary
-# the concurrency settings, checkout inputs, and bump env independently.
-# Passing an empty string for a block simply omits that key entirely (used
-# to exercise "missing" cases, e.g. no concurrency: block at all).
+# concurrency: block, a checkout step (name: Checkout main, uses:
+# actions/checkout@v7 by default) with a `with:` block, and a "Bump version"
+# step with an `env:` block. Each block is inserted verbatim (pre-indented by
+# the caller) so each case can vary the concurrency settings, checkout
+# inputs, and bump env independently. Passing an empty string for a block
+# simply omits that key entirely (used to exercise "missing" cases, e.g. no
+# concurrency: block at all). The optional 5th arg overrides the checkout
+# step's `uses:` pin (defaults to actions/checkout@v7) — used by the #362
+# regression case to prove rule 2 selects the step by name, not by the
+# pinned action version.
 write_reusable() {
     local wf_dir="$1" concurrency_block="$2" checkout_with_block="$3" bump_env_block="$4"
+    local checkout_uses="${5:-actions/checkout@v7}"
     cat > "${wf_dir}/plugin-version-bump.yml" <<EOF
 name: Reusable — Plugin Version Bump
 
@@ -53,7 +58,8 @@ jobs:
   bump:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout main
+        uses: ${checkout_uses}
         with:
 ${checkout_with_block}
 
@@ -312,6 +318,19 @@ run_check "${CASE10}"
 assert_exit "case10 no caller workflows discovered" 1
 assert_stderr_contains "case10 failure message identifies rule 4" "rule 4"
 assert_stderr_contains "case10 failure message names zero callers" "no caller workflows discovered"
+
+# ── Case 11: checkout step's uses: version differs but name matches ────
+# Regression test for #362: rule 2 must select the checkout step by
+# `name: Checkout main`, not by the pinned `uses: actions/checkout@v7`
+# string. A Dependabot bump to actions/checkout@v8 (or any other version)
+# must not make rule 2 stop finding the step.
+echo "case: checkout step's uses: version bumped but name matches must still pass"
+CASE11="${TEST_ROOT}/case11-checkout-uses-version-bumped"
+mkdir -p "${CASE11}/.github/workflows"
+write_reusable "${CASE11}/.github/workflows" "${GOOD_CONCURRENCY}" "${GOOD_CHECKOUT_WITH}" "${GOOD_BUMP_ENV}" "actions/checkout@v8"
+write_caller "${CASE11}/.github/workflows" "case11-caller.yml" ""
+run_check "${CASE11}"
+assert_exit "case11 checkout uses: version bumped, name matches" 0
 
 # ── Summary ──────────────────────────────────────────────────────────
 echo
