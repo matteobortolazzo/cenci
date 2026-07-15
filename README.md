@@ -40,7 +40,8 @@ The approved `.plans/` file is the durable handoff. Once you launch that plan, t
 workflow can run unattended through an open PR. cenci-watch keeps its state visible;
 [`/cenci:babysit`](flow/README.md#babysitting-a-pr) can follow CI and review
 activity through to merge. A `Planned` ticket doesn't require you to launch it by
-hand either — `cenci dispatch` can pick it up by policy (see
+hand either — `cenci dispatch` can pick it up when it is solely assigned to the
+active GitHub CLI user (see
 [Quickstart](#quickstart) and the [CLI reference](#cli-reference) below).
 
 Full permissions, contained: the agent runs with `--dangerously-skip-permissions`
@@ -125,7 +126,7 @@ command group; full flags live in the linked layer README.
 | `cn` / `cenci open` | Launch a sandboxed session | [sandbox/README.md](sandbox/README.md#usage) |
 | `ch`/`cs`/`co`/`cf`, `xl`/`xt`/`xs` | One-token agent+model shortcuts | [sandbox/README.md](sandbox/README.md#usage) |
 | `cenci run <workflow> <ticket\|desc>` | Dispatch a workflow into a named tmux window | [watch/README.md](watch/README.md#dispatching-workflows-cenci-run) |
-| `cenci dispatch` | Autonomous policy-based pickup of approved `Planned` tickets | [watch/README.md](watch/README.md#auto-dispatch-cenci-dispatch) |
+| `cenci dispatch` | Pickup of the current GitHub user's approved `Planned` tickets | [watch/README.md](watch/README.md#auto-dispatch-cenci-dispatch) |
 | `cenci close <target>` | Kill a ticket's tmux window via the daemon registry | [watch/README.md](watch/README.md#closing-agent-windows-cenci-close) |
 | `cenci sandbox build/prune/ls/stop` | Image and container maintenance | [sandbox/README.md](sandbox/README.md#usage) |
 | `cenci status` / `widget-json` | Human/machine status output | [watch/README.md](watch/README.md#human-status-overview-cenci-status) |
@@ -137,7 +138,7 @@ command group; full flags live in the linked layer README.
 |---|---|---|
 | **cenci-sandbox** | Runs Claude Code or Codex at full permissions while mounting only the current repository at `/workspace`. The container—not a prompt—is the security boundary. | [Isolation details](sandbox/README.md) |
 | **cenci** | Adds refinement, optional UI design, persisted planning, test-first implementation, specialist reviews (`/cenci:review`), refactoring proposals (`/cenci:refactor`), and PR follow-through. | [Workflow details](flow/README.md) |
-| **cenci-watch** | Turns native hooks into shared live state for tmux and optional Linux/macOS status surfaces. It can also dispatch approved plans by policy (`cenci dispatch`), picking up any board ticket that reaches `Planned` without a human relaunching it. | [Attention details](watch/README.md) |
+| **cenci-watch** | Turns native hooks into shared live state for tmux and optional Linux/macOS status surfaces. It can also dispatch approved plans by policy (`cenci dispatch`), picking up the active GitHub user's assigned `Planned` tickets without a human relaunching them. | [Attention details](watch/README.md) |
 
 Each layer is independently versioned internally, but normal installation and updates
 treat cenci as one product.

@@ -63,6 +63,14 @@ starts and removes it when it hands off, so a card shows "an agent is on this ri
 now" while staying in its current column. `Planned` is the durable handoff and can be
 picked up automatically by cenci dispatch.
 
+**One GitHub assignee is the exclusive ticket owner.** Ticket-mode `refine`,
+`design`, and `implement` workflows claim an unassigned issue for the active `gh`
+account, but never replace an existing assignee. They stop on foreign or multiple
+assignees. Split children and companion design tickets remain unassigned until their
+own workflow starts. Dispatch applies the same rule: only a `Planned` ticket solely
+assigned to the active `gh` user is eligible, so teammates can run independent
+dispatch loops without selecting each other's work.
+
 ## The join key: `<number>-<skill>`
 
 The ticket number ties the three layers together — the board card, the tmux window

@@ -13,13 +13,14 @@ import (
 // Inputs is the full, explicit input to Decide. Now is an injected clock value
 // and Snapshot is nil when the daemon is unreachable — both keep Decide pure.
 type Inputs struct {
-	Tickets  []Ticket
-	Plans    []Plan
-	Snapshot *watch.StateSnapshot // nil ⇒ daemon unreachable
-	Budgets  BudgetProvider
-	Now      time.Time // injected clock value
-	Prior    int       // dispatches already counted in the current quota window
-	Config   Config
+	Tickets     []Ticket
+	Plans       []Plan
+	Snapshot    *watch.StateSnapshot // nil ⇒ daemon unreachable
+	Budgets     BudgetProvider
+	Now         time.Time // injected clock value
+	Prior       int       // dispatches already counted in the current quota window
+	CurrentUser string    // active gh login; tickets must be solely assigned to it
+	Config      Config
 }
 
 // Decide is pure: identical Inputs yield an identical ordered []Decision with no
@@ -87,7 +88,20 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 		return skip("open PR exists")
 	}
 
-	// Pickup rule 2: an approved plan exists.
+	// Pickup rule 2: exclusive human ownership. Multiple assignees are
+	// intentionally ambiguous even when CurrentUser is among them.
+	switch len(t.Assignees) {
+	case 0:
+		return skip("unassigned")
+	case 1:
+		if !strings.EqualFold(t.Assignees[0], in.CurrentUser) {
+			return skip("assigned to @" + t.Assignees[0])
+		}
+	default:
+		return skip("multiple assignees")
+	}
+
+	// Pickup rule 3: an approved plan exists.
 	plan := planByTicket[planKey(t.Repo, t.Number)]
 	if plan == nil {
 		return skip("no plan file")
@@ -96,12 +110,12 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 		return skip("plan not approved")
 	}
 
-	// Pickup rule 3: plan freshness.
+	// Pickup rule 4: plan freshness.
 	if plan.CommitsBehind > in.Config.PlanStalenessTolerance {
 		return skip("plan stale, re-plan")
 	}
 
-	// Pickup rule 4: serialize siblings — at most one child per parent active.
+	// Pickup rule 5: serialize siblings — at most one child per parent active.
 	if plan.IsChild {
 		if m, blocked := blockingSibling(t, plan, in, dispatchedChildByParent); blocked {
 			return skip(fmt.Sprintf("waiting on sibling #%d", m))

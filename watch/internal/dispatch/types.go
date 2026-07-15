@@ -14,13 +14,14 @@
 package dispatch
 
 // Ticket is one open GitHub issue, as collected from a repo. Labels carry the
-// board state (Planned, Blocked, agent:<name>, ...); Agent is the pre-resolved
-// agent:<name> value, if any.
+// board state (Planned, Blocked, agent:<name>, ...); Assignees carry GitHub
+// logins; Agent is the pre-resolved agent:<name> value, if any.
 type Ticket struct {
 	Repo      string   // owner/repo
 	Number    int      // issue number
 	Title     string   // issue title
 	Labels    []string // includes Planned, Blocked, agent:<name>, ...
+	Assignees []string // GitHub logins; dispatch requires exactly CurrentUser
 	HasOpenPR bool     // an open linked PR exists
 	Agent     string   // resolved from an `agent:<name>` label, else ""
 }

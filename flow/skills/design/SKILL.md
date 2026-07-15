@@ -127,6 +127,10 @@ gh issue view <number> --repo <owner>/<repo> --json number,title,body,labels,sta
 - **"Stop — create a design ticket first (Recommended)"** — stop. Tell the user to re-run `/cenci:refine <ticket-id>` (which creates the companion design ticket) or create one manually with the `Design` label.
 - **"Proceed on this ticket"** — continue; the ticket will be labeled `Designed` but not closed (legacy mixed flow).
 
+Read the `ticket-ownership` reference skill and follow it using the assignees from
+the ticket fetch above. Complete its claim-and-verify contract before attachments,
+design reasoning, or adding `Working`. Never replace an existing assignee.
+
 Read the ticket body and look for a **Design Direction** section (produced by `/cenci:refine` for frontend tickets). Store it for use in Phase 2.
 
 **If ticketless mode:** Skip ticket fetching. The design description from `$ARGUMENTS` is the primary input.

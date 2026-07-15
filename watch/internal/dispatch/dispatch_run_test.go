@@ -25,10 +25,56 @@ func stubRunFn(t *testing.T, fn func(run.Opts, run.Controller) error) {
 // fresh plan and a reachable, idle daemon — every gate passes.
 func dispatchableDeps(now time.Time) dispatchDeps {
 	return dispatchDeps{
-		Tickets:  []Ticket{{Repo: "o/r", Number: 42, Title: "Fix thing", Labels: []string{"Planned"}}},
-		Plans:    []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "approved"}},
-		Snapshot: &watch.StateSnapshot{},
-		Now:      now,
+		Tickets:     []Ticket{{Repo: "o/r", Number: 42, Title: "Fix thing", Labels: []string{"Planned"}, Assignees: []string{"octocat"}}},
+		Plans:       []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "approved"}},
+		Snapshot:    &watch.StateSnapshot{},
+		Now:         now,
+		CurrentUser: "octocat",
+	}
+}
+
+func TestRunOnceFailsClosedWithoutGitHubIdentity(t *testing.T) {
+	installFakeGH(t, `
+case "$1 $2" in
+  "issue list") printf '[{"number":42,"title":"Fix thing","labels":[{"name":"Planned"}],"assignees":[{"login":"octocat"}]}]' ;;
+  "pr list") printf '[]' ;;
+  "api user") printf 'not authenticated\n' >&2; exit 1 ;;
+  *) exit 1 ;;
+esac
+`)
+	stubRunFn(t, func(run.Opts, run.Controller) error {
+		t.Fatal("identity failure must prevent every spawn")
+		return nil
+	})
+
+	var buf bytes.Buffer
+	cfg := testConfig()
+	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: t.TempDir()}}
+	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil)
+	if err == nil || !strings.Contains(err.Error(), "detecting current GitHub user") {
+		t.Fatalf("error = %v, want current-user detection failure", err)
+	}
+	if len(decisions) != 0 {
+		t.Fatalf("decisions = %+v, want none", decisions)
+	}
+	if !strings.Contains(buf.String(), "not authenticated") {
+		t.Errorf("log = %q, want gh diagnostic", buf.String())
+	}
+}
+
+func TestRunOnceEmptyPassDoesNotRequireGitHubIdentity(t *testing.T) {
+	installFakeGH(t, "printf 'identity must not be requested\\n' >&2\nexit 1\n")
+	stubRunFn(t, func(run.Opts, run.Controller) error {
+		t.Fatal("empty pass must not spawn")
+		return nil
+	})
+
+	decisions, err := RunOnce(testConfig(), fakeController{}, &fakeMutator{}, false, nil, nil)
+	if err != nil {
+		t.Fatalf("RunOnce returned unexpected error: %v", err)
+	}
+	if len(decisions) != 0 {
+		t.Fatalf("decisions = %+v, want none", decisions)
 	}
 }
 

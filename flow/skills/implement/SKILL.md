@@ -210,6 +210,16 @@ If the ticket has a `ui:visual-check` or `Browser` label, display a reminder:
 
 This is informational only — it does not block the pipeline.
 
+## Ticket Ownership
+
+**If ticketless mode:** skip this section.
+
+**If ticket mode:** read the `ticket-ownership` reference skill and follow it before
+triage, adding `Working`, or starting the pipeline. In ordinary ticket mode, use the
+fresh `assignees` line from the context-gatherer digest. In plan-file mode, re-fetch
+the ticket's assignees because ownership may have changed since the plan was saved.
+Never replace an existing assignee.
+
 ## Trivial-Ticket Triage
 
 **Ticket mode only.** Skip this section entirely in ticketless mode and in plan file mode — plan file mode already has a persisted plan, and ticketless mode has no ticket body to triage against.
