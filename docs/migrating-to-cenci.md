@@ -160,12 +160,27 @@ in that repo to regenerate it with the new `cenci sandbox build` form.
 
    Or, if you already have `cenci` on `PATH`, `cenci update`.
 
-2. **Reinstall desktop widgets.** The GNOME/KDE Plasma/DMS/noctalia extension ids
+2. **Fix hand-customized tmux status formats.** If you followed cenci-watch's
+   README ["Custom status-format integration"](../watch/README.md#custom-status-format-integration)
+   section before the rename, your own `~/.tmux.conf` (or
+   `~/.config/tmux/tmux.conf`) has a `window-status-format` /
+   `window-status-current-format` override that references the old
+   `@agentwatch-symbol` / `@agentwatch-style` / `@agentwatch-headroom-<agent>`
+   tmux user variables directly. The installer never touches personal dotfiles,
+   so it can't fix these for you — tmux format lookups against a variable that
+   no longer exists just silently fall back to the format's default (no error),
+   so a stale reference looks like nothing happened rather than a visible
+   break. Manually replace each old variable with its new name — see the
+   [tmux user variables](#tmux-user-variables) table above — then
+   `tmux source-file` your config to pick up the change. `cenci doctor` flags
+   stale `@agentwatch-*` references in your tmux config if you're not sure.
+
+3. **Reinstall desktop widgets.** The GNOME/KDE Plasma/DMS/noctalia extension ids
    changed (see the table above), so an old-id widget install won't pick up
    automatically — re-run the installer (it re-prompts for each detected bar) or
    each widget's own `install.sh` under `watch/plugin/<surface>/`.
 
-3. **Clean up orphaned volumes (optional).** Old `*-sand-home-*` container home
+4. **Clean up orphaned volumes (optional).** Old `*-sand-home-*` container home
    volumes are not migrated automatically — list and remove them once you've
    confirmed you don't need the credentials/history inside:
 
@@ -174,7 +189,7 @@ in that repo to regenerate it with the new `cenci sandbox build` form.
    docker volume rm <old-volume-name>
    ```
 
-4. **Clean up old leftovers (optional).** Once you've confirmed the new install
+5. **Clean up old leftovers (optional).** Once you've confirmed the new install
    works:
 
    ```bash
