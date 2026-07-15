@@ -38,17 +38,23 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 		out = os.Stdout
 	}
 
-	currentUser, err := currentGitHubLogin()
-	if err != nil {
-		logf(out, "dispatch: detecting current GitHub user: %v\n", err)
-		return nil, fmt.Errorf("detecting current GitHub user: %w", err)
-	}
-
 	tickets, err := CollectTickets(cfg.Repos)
 	if err != nil {
 		logf(out, "dispatch: collecting tickets: %v\n", err)
 	}
 	collectErr := err
+
+	// Empty passes need no identity. This preserves dry-run/config diagnostics
+	// in unauthenticated environments while every pass with collectible work
+	// still fails closed before making a dispatch decision.
+	currentUser := ""
+	if len(tickets) > 0 {
+		currentUser, err = currentGitHubLogin()
+		if err != nil {
+			logf(out, "dispatch: detecting current GitHub user: %v\n", err)
+			return nil, fmt.Errorf("detecting current GitHub user: %w", err)
+		}
+	}
 
 	var plans []Plan
 	for _, rc := range cfg.Repos {
