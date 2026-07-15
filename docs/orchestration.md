@@ -199,6 +199,17 @@ tmux window puts the agent's PR one keypress from a local review — append the
 project's run command (`ng serve`, `dotnet run`, `go run .`, …) in that project's
 `.lazyboards.yml` to also start it.
 
+**Per-repo run actions are generated for you.** `/cenci:configure` (question 10)
+detects each runnable project's serve command and writes a committed
+`.lazyboards.yml` whose In Review actions open the PR's **registered worktree**
+(`{pr_worktree}`, resolved from `git worktree list` at action time — never the main
+checkout) and start the project. Action keys are single uppercase letters — key
+combinations don't exist in lazyboards yet — so a repo with several runnable
+projects gets one key per project, assigned `W`, then `L`, then `O`, skipping the
+global keys `G`/`A`/`S`/`X` claimed above. Because a local `columns:` list replaces
+the global list (it never merges), the generated file re-lists every column as a
+bare `- name:` entry, which inherits that column's global actions and cleanup.
+
 **`G` (jump to agent)** switches the tmux client straight to the card's live agent
 window via `{window}` — the reverse direction of the badge: the badge tells you an
 agent needs attention, `G` takes you there.

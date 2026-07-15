@@ -74,6 +74,7 @@ This detection is a **non-blocking advisory** — it never gates configuration a
 | 7b. Pin subagents to 200K | `pinSubagents200K` | Pre-select Yes/No |
 | 8. CI/CD pipeline | `cicd` | Pre-select Yes/No based on `cicd.enabled` |
 | 9. Sandbox Dockerfile | `sandbox` | Pre-select Yes/No based on `sandbox.enabled` |
+| 10. Board config (lazyboards) | `lazyboards` | Pre-select Yes/No based on `lazyboards.enabled` |
 
 Ask these questions one at a time using the `AskUserQuestion` tool:
 
@@ -363,6 +364,54 @@ Include the server in `.lsp.json` regardless — it activates once the binary is
    > **Sync obligation**: `sandbox/fragments/*.dockerfile` is the source of truth for these blocks; the mapping table above mirrors their content and existence, not their byte contents (generation reads the fragment files directly — see step 5e). If a fragment is added, removed, or renamed, this table needs a matching manual update. Low risk in practice — both live in the same monorepo and are maintained together — but currently unenforced by tooling.
 
    > **Trust / security note**: `.cenci/Dockerfile` is committed to the repo, so it is reviewed like any other file in the PR that adds or changes it. It only runs `docker build` steps assembled from `sandbox/fragments/*.dockerfile` — no arbitrary runtime hooks execute during configure or during the build it produces.
+
+### Board Config (lazyboards)
+
+**Condition**: Only ask question 10 when at least one of these holds (check in order, stop at the first match; run each command check as its **own** Bash call, per `cenci:shell-rules`):
+
+1. `command -v lazyboards` succeeds (the board is installed)
+2. `.lazyboards.yml` exists at the repo root (a board config is already in use)
+3. `existingConfig.lazyboards` is present (re-configuration of a board-enabled project)
+4. The user context (`$ARGUMENTS`) mentions lazyboards or a kanban board
+
+If none match, skip this section entirely (do not set `lazyboards` in config.json).
+
+10. **Board config**: "Generate a per-repo `.lazyboards.yml` for the lazyboards board?
+    (Adds In Review actions that open a PR's registered worktree in a tmux window and
+    start the project — reviewing a PR becomes one keypress on the card.)"
+   - Options: "Yes — generate `.lazyboards.yml`", "No — skip"
+
+   **If Yes — detect runnable projects and their serve commands.** For the single
+   project (or each monorepo project confirmed in Step 2a), derive a serve command
+   from the first matching rule:
+
+   | Rule (first match wins) | Serve command |
+   |---|---|
+   | `package.json` has a `dev` script | `npm run dev` |
+   | `package.json` has a `start` script | `npm run start` |
+   | Angular project (`@angular/core`) without either script | `ng serve` |
+   | `.csproj` with `Microsoft.NET.Sdk.Web` | `dotnet run` |
+   | Go module containing a `main` package | `go run .` |
+   | Anything else (libraries, tooling, markdown/shell) | *not runnable — no action generated* |
+
+   Only the **runner invocation** above is ever embedded in the generated file
+   (`npm run dev`, `ng serve`, …) — never the script *contents* from `package.json`,
+   which are semi-trusted external values (see `docs/skill-authoring.md`).
+
+   **Key assignment**: lazyboards binds custom actions to single uppercase letters
+   (`A`–`Z`) — key combinations do not exist (yet), so with several runnable projects
+   each needs its own letter. Assign in this order: **`W`** for the first runnable
+   project (frontends first, in Step 2a discovery order), then **`L`**, then **`O`**,
+   then any remaining unused uppercase letter — never `G`, `A`, `S`, or `X`, which the
+   seeded global config claims for jump-to-agent, annotate, and the dispatch-loop
+   toggles. Overriding the global `W` (Checkout PR) inside the In Review column is
+   deliberate: the per-repo run action supersedes the bare checkout.
+
+   Present the proposed mapping with AskUserQuestion before generating, e.g.:
+   "Proposed In Review actions: `W` → web-client (`ng serve`), `L` → admin (`npm run
+   start`). Generate these?" Options: "Yes — use this mapping (Recommended)",
+   "Change keys or drop projects" (then re-ask with the user's adjustments; enforce
+   single-uppercase-letter keys and the reserved-key exclusions above).
 
 ### Auth Verification
 
@@ -736,6 +785,54 @@ For each MCP selected in question 5:
 
    **Committed, not ignored**: `.cenci/Dockerfile` is committed to the repo. Do **not** add `.cenci/` or `.cenci/Dockerfile` to `.gitignore` — the whole point is a team-shared, reviewed Dockerfile that the launcher's per-repo image selection (see `sandbox/README.md`) builds identically for every teammate.
 
+5f. **Generate `.lazyboards.yml`** (from question 10, only if the user selected Yes):
+
+   Write `.lazyboards.yml` at the repo root with the confirmed key mapping. The
+   critical lazyboards behavior to honor: a local `columns:` list **replaces** the
+   global column list entirely (it never merges), so every column from the seeded
+   global config is re-listed — bare `- name:` entries inherit that column's global
+   actions and cleanup; only `In Review` adds local actions.
+
+   ```yaml
+   # Generated by /cenci:configure — per-repo lazyboards board config.
+   # NOTE: a local `columns:` list REPLACES the global column list entirely, so
+   # every column is re-listed here; bare `- name:` entries inherit that
+   # column's actions and cleanup from ~/.config/lazyboards/config.yml.
+   columns:
+     - name: New
+     - name: Refined
+     - name: Designed
+     - name: Planned
+     - name: In Review
+       actions:
+         W:
+           name: Run web-client worktree
+           type: shell
+           scope: pr
+           command: 'tmux new-window -d -n pr-{pr_number} "cd {pr_worktree}/apps/web-client && ng serve"'
+     - name: Implemented
+   ```
+
+   - One action per runnable project, using the confirmed key and serve command.
+     The action name is `Run <slug> worktree`.
+   - **Single project**: the command is `cd {pr_worktree} && <serve-command>` (no
+     subpath). **Monorepo**: `cd {pr_worktree}/<project-path> && <serve-command>`.
+   - `{pr_worktree}` resolves the PR branch's registered Git worktree at action
+     time, so the file stays machine-independent — never embed absolute paths.
+   - The `tmux new-window -d` wrapper keeps long-running serve processes from
+     blocking the action's key slot; keep it even for fast commands.
+   - **File exists**: do not silently overwrite. Reuse the exact Overwrite/Skip/Show
+     conflict-check UX from steps 5d/5e: "Found existing `.lazyboards.yml`. What
+     would you like to do?" Options: "Overwrite — replace with the generated config",
+     "Skip — keep the existing file, still record `lazyboards` in config.json",
+     "Show existing — display the current file contents" (then re-ask
+     Overwrite/Skip). When overwriting, carry the existing top-level `provider:`,
+     `repo:`, and `project:` lines (if present) into the regenerated file unchanged —
+     they are project-identity keys lazyboards only reads from the local file.
+   - **Committed, not ignored**: `.lazyboards.yml` is committed (same reasoning as
+     `.cenci/Dockerfile` — team-shared and reviewed; `{pr_worktree}` keeps it
+     portable). Do **not** add it to `.gitignore`.
+
 6. **Write `.claude/config.json`** with their choices using **merge semantics**:
 
    - If `existingConfig` is not null: start from the existing object, overwrite each field with the user's answers. This preserves fields the skill doesn't manage.
@@ -781,6 +878,11 @@ For each MCP selected in question 5:
   "sandbox": {
     "enabled": true,
     "baseVersion": "0.9.0"
+  },
+  "lazyboards": {
+    "enabled": true,
+    "serveCommand": "ng serve",
+    "boardKey": "W"
   }
 }
 ```
@@ -810,6 +912,13 @@ The `sandbox` field is only present when the user selected Yes in question 9. Sc
 Omit `sandbox` entirely when the user says No (same pattern as `cicd`/`pencil`).
 
 > **Not the same as `.claude/settings.json`'s `sandbox.enabled`.** Step 4 above always writes `"sandbox": { "enabled": false }` into `.claude/settings.json` — that key disables **Claude Code's own host sandbox**, because the cenci-sandbox container is the security boundary instead. This `.claude/config.json` `sandbox` field is unrelated: it's this ticket's per-repo `.cenci/Dockerfile` toggle, consumed by cenci's configure skill and by `cenci sandbox build`'s per-repo image build — not by Claude Code itself. Same field name (`sandbox.enabled`), two different files, two different consumers, two unrelated meanings. Do not conflate them when reading or writing either file.
+
+The `lazyboards` field is only present when question 10 was asked and answered Yes. Schema:
+- `lazyboards.enabled` — `true` if the user opted in; omit `lazyboards` entirely when declined or when question 10 was skipped (same pattern as `cicd`/`pencil`/`sandbox`)
+- **Single project**: `lazyboards.serveCommand` and `lazyboards.boardKey` record the generated In Review action (command and its single-uppercase-letter key)
+- **Monorepo**: `serveCommand` and `boardKey` live on each **runnable** project entry in the `projects` array instead (non-runnable projects get neither), and the top-level `lazyboards` field carries only `enabled`
+
+Omit `lazyboards` entirely when the user says No (same pattern as `cicd`/`pencil`/`sandbox`).
 
 The `pencil` field is only present when the user was asked question 5b (frontend framework detected). Schema:
 - `pencil.enabled` — gating flag for all design features (`true` if user opted in, `false` if declined)
@@ -864,9 +973,14 @@ below — it is a supported optional field, not a legacy one.
       "buildCommand": "npm run build",
       "testCommand": "npm test",
       "lintCommand": "ng lint",
-      "designPath": "apps/web-client/designs/"
+      "designPath": "apps/web-client/designs/",
+      "serveCommand": "ng serve",
+      "boardKey": "W"
     }
   ],
+  "lazyboards": {
+    "enabled": true
+  },
   "pencil": {
     "enabled": true,
     "designPath": "designs/",
@@ -899,7 +1013,7 @@ When migrating from an older config that has `ticketSystem`, `prSystem`, `ticket
 - When `pencil.shared` is `true`: `pencil.designPath` holds the shared path (e.g., `"designs/"`). Individual projects do **not** have `designPath`.
 - When `pencil.shared` is `false` (separate): `pencil.designPath` is omitted. Each frontend project in the `projects` array gets a `designPath` field (e.g., `"apps/web-client/designs/"`). Non-frontend projects do not get `designPath`.
 
-Report what was created and suggest next steps (e.g., "Try `/cenci:refine <ticket-id>` on a ticket"). If `sandbox.enabled` is `true`, mention the generated/committed `.cenci/Dockerfile` and that `cenci sandbox build` (run from inside the repo) builds the repo's own tailored image on top of the shared base. If `sandbox.baseVersion` resolved to `null` (unresolved — see the baseVersion resolution in step 5e), the chat summary must explicitly say so (e.g., "Base version could not be auto-detected — see `sandbox/README.md` to pin `BASE_VERSION` manually") rather than leaving it only as an inline Dockerfile comment, so a user who doesn't open the generated file still learns the base version wasn't pinned.
+Report what was created and suggest next steps (e.g., "Try `/cenci:refine <ticket-id>` on a ticket"). If `sandbox.enabled` is `true`, mention the generated/committed `.cenci/Dockerfile` and that `cenci sandbox build` (run from inside the repo) builds the repo's own tailored image on top of the shared base. If `lazyboards.enabled` is `true`, list the generated `.lazyboards.yml` In Review actions with their keys and serve commands (e.g., "`W` runs web-client's PR worktree with `ng serve`") and point at `docs/orchestration.md` for the board recipe. If `sandbox.baseVersion` resolved to `null` (unresolved — see the baseVersion resolution in step 5e), the chat summary must explicitly say so (e.g., "Base version could not be auto-detected — see `sandbox/README.md` to pin `BASE_VERSION` manually") rather than leaving it only as an inline Dockerfile comment, so a user who doesn't open the generated file still learns the base version wasn't pinned.
 
 ### Board lifecycle labels
 
