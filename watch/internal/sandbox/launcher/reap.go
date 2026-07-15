@@ -14,18 +14,22 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/internal/sandbox"
 )
 
-// reapScanScript is the minimal POSIX in-container scan, copied VERBATIM
-// from sandbox/cenci-sand's REAP_SCAN_SCRIPT (it now runs inside the
-// container via `exec -u dev sh -c`; see the call site's comment for why):
-// emits "<pid>\t<pane>\t<start>" for every process whose environ carries a
+// reapScanScript is the minimal POSIX in-container scan (originally ported
+// verbatim from sandbox/cenci-sand's REAP_SCAN_SCRIPT; it now runs inside the
+// container via `exec -u dev sh -c`; see the call site's comment for why, and
+// #361 for the environ-unreadable diagnostics added below): emits
+// "<pid>\t<pane>\t<start>" for every process whose environ carries a
 // TMUX_PANE key (pane may be empty; <start> is /proc/<pid>/stat field 22,
-// read in the same loop pass; empty if
-// the stat line couldn't be read/parsed), skipping processes lacking the
-// TMUX_PANE key entirely. All classification — skip-empty-pane,
+// read in the same loop pass; empty if the stat line couldn't be
+// read/parsed), skipping processes lacking the TMUX_PANE key entirely. If a
+// process's environ fails to read but the process still exists, the scan
+// instead emits a raw I/O fact — `__UNREADABLE__\t<pid>` — rather than
+// silently skipping it. All classification — skip-empty-pane,
 // skip-malformed-pane, skip-init, skip-live-pane, reap-dead-pane, TERM→KILL escalation,
-// PID-reuse detection, no-tmux handling — happens host-side in ReapOrphans,
-// never inside this canned scan.
-const reapScanScript = `for e in /proc/[0-9]*/environ; do [ -f "$e" ] || continue; p=${e#/proc/}; p=${p%/environ}; line=$(tr "\0" "\n" < "$e" 2>/dev/null | grep "^TMUX_PANE=") || continue; st=$(cat "/proc/$p/stat" 2>/dev/null); st=${st##*) }; set -- $st; if [ "$#" -ge 20 ]; then shift 19; start=$1; else start=""; fi; printf "%s\t%s\t%s\n" "$p" "${line#TMUX_PANE=}" "$start"; done`
+// PID-reuse detection, no-tmux handling, and counting/reporting
+// __UNREADABLE__ markers (including PID-1 exclusion) — happens host-side in
+// ReapOrphans, never inside this canned scan.
+const reapScanScript = `for e in /proc/[0-9]*/environ; do [ -f "$e" ] || continue; p=${e#/proc/}; p=${p%/environ}; env=$(tr "\0" "\n" 2>/dev/null < "$e"); if [ $? -ne 0 ]; then [ -e "$e" ] && printf "__UNREADABLE__\t%s\n" "$p"; continue; fi; line=$(printf "%s\n" "$env" | grep "^TMUX_PANE=") || continue; st=$(cat "/proc/$p/stat" 2>/dev/null); st=${st##*) }; set -- $st; if [ "$#" -ge 20 ]; then shift 19; start=$1; else start=""; fi; printf "%s\t%s\t%s\n" "$p" "${line#TMUX_PANE=}" "$start"; done`
 
 // reapLivenessScript is the pre-SIGKILL liveness/identity probe, copied
 // VERBATIM from sandbox/cenci-sand's REAP_LIVENESS_SCRIPT: invoked as
@@ -137,7 +141,16 @@ func ReapOrphans(stdout, stderr io.Writer) error {
 			}
 
 			var termPids, termStarts []string
+			unreadableCount := 0
 			for _, line := range splitLines(scanOut.String()) {
+				if strings.HasPrefix(line, "__UNREADABLE__\t") {
+					pid := strings.TrimPrefix(line, "__UNREADABLE__\t")
+					if pid != "1" {
+						unreadableCount++
+					}
+					continue
+				}
+
 				parts := strings.SplitN(line, "\t", 3)
 				pid := parts[0]
 				pane, start := "", ""
@@ -200,6 +213,10 @@ func ReapOrphans(stdout, stderr io.Writer) error {
 				reapedCount++
 				termPids = append(termPids, pid)
 				termStarts = append(termStarts, start)
+			}
+
+			if unreadableCount > 0 {
+				_, _ = fmt.Fprintf(stdout, "Note: %d process environ(s) in container %s were unreadable during the -u dev scan; if this persists it may mean the scan user's UID no longer matches the agent process UID, so orphans could go undetected.\n", unreadableCount, container)
 			}
 
 			if len(termPids) == 0 {
