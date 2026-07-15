@@ -1,11 +1,18 @@
-# cenci-sandbox (cenci-sand)
+# cenci-sandbox
 
 > Part of [cenci](../README.md) — the **isolation layer**. See the root README for
 > the one-command install and how the isolation, workflow, and attention layers fit together.
 
-Run Claude Code or Codex at full permissions without giving the agent your whole host.
-Each launch mounts only the current repository into an isolated Docker or Podman
-container.
+Container images and runtime for cenci: run Claude Code or Codex at full permissions
+without giving the agent your whole host. Each launch mounts only the current
+repository into an isolated Docker or Podman container.
+
+The `cenci` binary is the entry point — `cenci open` (alias `cn`) launches or attaches
+sessions, and `cenci sandbox <verb>` handles builds and maintenance. This project ships
+the image and runtime assets it runs (Dockerfiles, fragments, `entrypoint.sh`,
+container-side scripts). The full CLI reference — every verb, flag, and the one-token
+shortcut table — lives in
+[cenci-watch's README](../watch/README.md#sandbox-management-and-session-launching-cenci-sandbox-cenci-open).
 
 ![cenci-sandbox mounts the current repository into a deliberately small container boundary for a full-permission coding agent](../docs/assets/cenci-sandbox-boundary.svg)
 
@@ -24,12 +31,12 @@ container.
 
 **Legacy `~/Repos` mount and pre-existing files.** The container's `dev` user is baked
 in at UID/GID 1000, but `entrypoint.sh` auto-remaps it to your host `HOST_UID`/`HOST_GID`
-on every launch (`cenci-sand` passes them in), so files newly written into the per-repo
+on every launch (the launcher passes them in), so files newly written into the per-repo
 `/workspace` mount always come out owned by your host user — no manual `chown` needed.
 Renumbering a live account requires no process running under it yet, so the container now
 briefly starts as `root` for this remap step before `entrypoint.sh` unconditionally drops
 privileges to (the host-remapped) `dev` for everything else — the exec/attach path
-(`cenci-sand --shell`, agent sessions) is unaffected and always resolves to `dev`.
+(`cenci open --shell`, agent sessions) is unaffected and always resolves to `dev`.
 The one remaining caveat is the legacy whole-`~/Repos` mount (used outside a git repo):
 the remap does **not** retroactively `chown` that tree, since rewriting ownership across
 your entire `~/Repos` from inside the container is too large a blast radius to automate.
@@ -40,7 +47,8 @@ clears it up.
 ## Installation
 
 The easiest path is the [one-command installer](../docs/getting-started.md), which
-installs the plugin, symlinks the launchers, and offers to build the image:
+installs the plugin, puts the `cenci` binary (and its `cn` launch alias) on your PATH,
+and offers to build the image:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
@@ -48,8 +56,8 @@ curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install
 
 ### Advanced / development: standalone setup
 
-Install the plugin from the marketplace, then run the setup skill—it symlinks the
-`cenci-sand` launcher onto your PATH and builds the container image:
+Install the plugin from the marketplace, then run the setup skill—it verifies the
+`cenci` binary resolves on your PATH and builds the container image:
 
 ```bash
 claude plugin marketplace add matteobortolazzo/cenci
@@ -57,133 +65,67 @@ claude plugin install cenci-sandbox
 /cenci-sandbox:setup
 ```
 
-`/cenci-sandbox:setup` accepts `--link-only` (symlink only, skip the build) or `--build-only`
-(rebuild the image, skip the symlink). Update later with `claude plugin update cenci-sandbox`,
+`/cenci-sandbox:setup` accepts `--check-only` (verify only, skip the build) or `--build-only`
+(rebuild the image, skip the verification). Update later with `claude plugin update cenci-sandbox`,
 then re-run `/cenci-sandbox:setup --build-only` if the Dockerfile changed.
 
 The `setup` skill is Claude Code-only because it relies on Claude's interactive and
 plugin-root extensions. Codex users should use the cenci installer, which
-installs the same cenci-sandbox plugin for Codex and performs the launcher setup outside the
+installs the same cenci-sandbox plugin for Codex and sets up the `cenci` binary outside the
 agent session.
 
 <details>
 <summary>Manual setup (without the plugin)</summary>
 
-```bash
-# Symlink the launcher to your PATH
-ln -s "$(pwd)/sandbox/cenci-sand" ~/.local/bin/cenci-sand
+Install the `cenci` binary by hand (see
+[Install the binary manually](../watch/README.md#install-the-binary-manually) in
+cenci-watch's README) and make sure it resolves on your PATH — optionally with a
+`cn` symlink next to it for the short launch alias. Then build the image:
 
-# Build the image
-cenci-sand --build
+```bash
+cenci sandbox build
 ```
+
+Without the installed plugin, point the launcher at a local checkout's assets:
+`CENCI_SANDBOX_ASSETS=/path/to/cenci/sandbox cenci sandbox build`.
 
 </details>
 
 ## Usage
 
 ```bash
-# Launch Claude Code (full permissions — the container is the security boundary)
-cenci-sand
+# Launch or attach a session (full permissions — the container is the security boundary)
+cn                    # Claude Code (`cn <args>` is exactly `cenci open <args>`)
+cn xt                 # Codex, gpt-5.6-terra
+cn ch                 # Claude, haiku (shortcuts: ch/cs/co/cf, xl/xt/xs)
+cenci open --agent codex --model gpt-5.6-sol --name mybox
 
-# Pass additional args to Claude Code
-cenci-sand -p "fix the tests"
-cenci-sand --model sonnet
-
-# Launch Codex instead of Claude Code
-cenci-sand --agent codex
-
-# cn: the short launcher (an alias of the `cenci` binary that routes to
-# `cenci open`), with one-token agent+model shortcuts as the first argument.
-# Defaults: claude → sonnet, codex → terra.
-# A shortcut also implies its agent; pairing it with a conflicting --agent
-# (e.g. `cn ch --agent codex`) is rejected with an error instead of silently
-# launching the wrong agent with the shortcut's model.
-cn ch    # Claude, haiku
-cn cs    # Claude, sonnet
-cn co    # Claude, opus
-cn cf    # Claude, fable
-cn xl    # Codex, luna
-cn xt    # Codex, terra
-cn xs    # Codex, sol
-cn cs -- -p "fix the tests"
+# Pass args through to the agent CLI — everything after a bare -- is forwarded verbatim
+cn -- -p "fix the tests"
+cn cs -- --resume
 
 # Open a bash shell for manual setup / troubleshooting
-cenci-sand --shell
+cenci open --shell
 
-# Run a named instance (extra suffix, for parallel isolation e.g. worktrees)
-cenci-sand --name myproject
-
-# Rebuild the image (after changing Dockerfile or SDK versions)
-cenci-sand --build
-
-# Rebuild only the base image (after changing Dockerfile.base)
-cenci-sand --build-base
-
-# Enable Docker socket mounting (for TestContainers, docker build, etc.)
-cenci-sand --docker --shell
-cenci-sand --docker -p "run the integration tests"
-
-# Use host networking for manual OAuth (browser callback)
-# Warning: weakens the container's isolation boundary — the container is the
-# security boundary, so only use this for the manual OAuth callback use case.
-cenci-sand --host-network --shell
-
-# Force a cenci/cenci-watch plugin update now (bypasses the 30-min TTL)
-cenci-sand --update-plugins
-
-# Force re-copying host Claude/Codex credentials into the volume (recovery
-# after this instance's login died — normally they seed once and never update)
-cenci-sand --reseed-creds
-
-# Clean up superseded base image tags, dangling images, and stopped sandbox
-# containers (keeps the current base tag, cenci-sandbox-base:latest, and all
-# per-repo images untouched)
-cenci-sand --prune
-
-# Also list and interactively confirm removal of *-cenci-home-* volumes (holds
-# copied credentials + full session history — defaults to no deletion).
-# --volumes only means something combined with --prune; on its own it errors
-# instead of silently doing nothing.
-cenci-sand --prune --volumes
-
-# Retroactively kill container-side agent processes whose owning tmux pane no
-# longer exists on the host (SIGTERM, then SIGKILL after a grace period —
-# 5 seconds by default, override with CENCI_SANDBOX_REAP_GRACE_SECS, e.g. =0 for
-# fast/CI runs). Scans every running *-cenci-* container across all installed
-# runtimes (docker and podman). If no tmux server is running, every
-# TMUX_PANE-carrying process is treated as orphaned and the output says so
-# explicitly. Processes with a missing/empty TMUX_PANE (manual non-tmux
-# launches) are never signaled. Prints one `reaped\t<container>\t<pid>\t<pane>`
-# line per reaped process plus a final count, and exits non-zero on a genuine
-# runtime error (e.g. exec failure) rather than swallowing it.
-cenci-sand --reap-orphans
-CENCI_SANDBOX_REAP_GRACE_SECS=0 cenci-sand --reap-orphans
+# Build / maintain the images
+cenci sandbox build   # (re)build the image
+cenci sandbox prune   # clean up superseded base tags, dangling images, stopped sandbox containers
 ```
 
-### Flag parsing
-
-`--agent` and `--name` accept either a separate value (`--agent codex`) or an `=`-joined
-one (`--agent=codex`); `--model` works the same way. Any other `--long-flag` cenci-sand
-doesn't recognize is a hard error (so a typo like `--buidl` fails loudly instead of
-silently reaching the agent CLI as a stray positional argument). Short flags (`-p`) and
-plain positional arguments (a prompt string, `ch` in a non-first position, ...) are always
-forwarded to the agent CLI unchanged.
-
-To pass a long flag through to the agent CLI that cenci-sand doesn't know about (a
-`claude`/`codex` flag it hasn't been taught, e.g. `--resume`), put it after a bare `--`
-separator — everything after `--` is forwarded verbatim, with no further parsing:
-
-```bash
-cenci-sand -- --resume
-cn cs -- --resume
-```
+This is deliberately just a taste: the full launcher reference — every `cenci open`
+flag (`--agent`, `--model`, `--name`, `--shell`, `--docker`, `--host-network`,
+`--reseed-creds`), the `cenci sandbox` verbs (`build`, `build-base`, `prune`,
+`update-plugins`, `reseed-creds`, `reap-orphans`, `ls`, `stop`), the shortcut table,
+and the flag-parsing rules (unknown long flags are usage errors and exit 2; agent
+flags go after `--`) — lives in
+[cenci-watch's README](../watch/README.md#sandbox-management-and-session-launching-cenci-sandbox-cenci-open).
 
 ### Per-repo containers
 
-Run `cenci-sand` from inside a git repo (or any subdirectory of one) and it mounts
-**only that repo's root** at `/workspace` — not your whole `~/Repos`. The container
-`WORKDIR` mirrors your host `$PWD` relative to the repo root, so launching from a
-subdirectory starts the shell/agent in the matching `/workspace/<subpath>`.
+Run the launcher (`cn` / `cenci open`) from inside a git repo (or any subdirectory of
+one) and it mounts **only that repo's root** at `/workspace` — not your whole `~/Repos`.
+The container `WORKDIR` mirrors your host `$PWD` relative to the repo root, so launching
+from a subdirectory starts the shell/agent in the matching `/workspace/<subpath>`.
 
 The container name and home volume are derived from the repo directory name (slugified):
 `<agent>-cenci-<repo-slug>` / `<agent>-cenci-home-<repo-slug>`. Pass `--name` to append an
@@ -206,7 +148,7 @@ volume once you've confirmed you don't need it — see
 would collide on the same container/volume. Use `--name` to disambiguate if you work
 with same-named repos side by side.
 
-Running `cenci-sand` **outside** any git repo falls back to the legacy scheme: the whole
+Running `cenci open` **outside** any git repo falls back to the legacy scheme: the whole
 `~/Repos` directory is mounted at `/workspace`, and the container/volume are named
 `<agent>-cenci-<name>` / `<agent>-cenci-home-<name>` (default name `default`) — unchanged
 from previous versions, so existing `<agent>-cenci-home-default`-style volumes keep
@@ -220,7 +162,7 @@ it.
 
 ### Choosing an agent
 
-`cenci-sand` launches Claude Code by default. Pass `--agent codex` (or use `cn` with an
+`cenci open` launches Claude Code by default. Pass `--agent codex` (or use an
 `xl`/`xt`/`xs` shortcut) to launch Codex instead. Both agents run at full permission
 inside the container — Claude with `--dangerously-skip-permissions`, Codex with
 `--dangerously-bypass-approvals-and-sandbox`.
@@ -235,7 +177,7 @@ so the container always matches your host version). **Codex** is baked into the 
 as an npm launcher that resolves a native binary nested in its own `node_modules`, which a
 single-file bind-mount can't carry. Updating Codex therefore means bumping `CODEX_VERSION` in
 the monolith and Codex fragment, regenerating any tailored repo Dockerfile, and rebuilding
-(`cenci-sand --build`), whereas updating Claude needs no rebuild.
+(`cenci sandbox build`), whereas updating Claude needs no rebuild.
 
 ## First-Run Setup
 
@@ -255,7 +197,9 @@ If an instance's login does die (e.g. you revoked all sessions on claude.ai),
 force a one-time re-copy from the host:
 
 ```bash
-cenci-sand --reseed-creds
+cenci open --reseed-creds
+# or the maintenance-verb alias:
+cenci sandbox reseed-creds
 ```
 
 ### Onboarding prompts
@@ -292,7 +236,7 @@ When launching Codex (`--agent codex` / `cn xt`), auth is staged from the host:
   forces a re-copy).
 - `OPENAI_API_KEY` — forwarded into the container when set in your host environment.
 
-At least one of these must be present. If neither is, `cenci-sand --agent codex` fails
+At least one of these must be present. If neither is, `cenci open --agent codex` fails
 hard with a clear message and does **not** create a container:
 
 ```
@@ -303,7 +247,7 @@ Error: --agent codex requires Codex auth. Run 'codex login' on the host
 If host credentials are not available, open a shell for manual setup:
 
 ```bash
-cenci-sand --shell
+cenci open --shell
 
 # Inside the container:
 gh auth login              # GitHub CLI auth
@@ -316,7 +260,7 @@ weakens the container's isolation boundary (the container is the security bounda
 so only use it for the manual OAuth callback:
 
 ```bash
-cenci-sand --host-network --shell
+cenci open --host-network --shell
 # Inside the container, run: claude
 ```
 
@@ -340,15 +284,15 @@ Everything persists in the home volume — only needs to happen once per instanc
 
 Override versions at build time. The monolith `Dockerfile` builds `FROM
 cenci-sandbox-base:${BASE_VERSION}`, so build (or pull) the base image first and pass
-the matching `BASE_VERSION` — `cenci-sand --build` does both steps for you
+the matching `BASE_VERSION` — `cenci sandbox build` does both steps for you
 automatically, resolving `BASE_VERSION` to a content hash of `Dockerfile.base` +
 `entrypoint.sh` + `lib/` (see [Two-image model](#two-image-model-base--monolith)
-below). For a manual build, `cenci-sand --build-base` always additionally tags
+below). For a manual build, `cenci sandbox build-base` always additionally tags
 `cenci-sandbox-base:latest`, so a bare `--build-arg BASE_VERSION=latest` works once
 any base has been built:
 
 ```bash
-cenci-sand --build-base   # tags both the content-hash tag and cenci-sandbox-base:latest
+cenci sandbox build-base   # tags both the content-hash tag and cenci-sandbox-base:latest
 
 docker build --build-arg BASE_VERSION=latest \
              --build-arg DOTNET_SDK_VERSION=10.0.200 \
@@ -367,13 +311,13 @@ The image is built in two layers:
   (all its `COPY` inputs), so the base only rebuilds when those actually change — not on
   every plugin.json version bump. Stack-agnostic: Ubuntu 24.04, system packages, locale,
   `uv`, GitHub CLI, Docker CLI, the non-root `dev` user, and the entrypoint. No language
-  runtimes. `cenci-sand --build-base` builds it explicitly, and `cenci-sand --build` /
-  `cenci-sand` builds it automatically the first time (or whenever the current content-hash
-  tag is missing locally). Run `cenci-sand --prune` to clean up superseded hash tags left
+  runtimes. `cenci sandbox build-base` builds it explicitly, and `cenci sandbox build` /
+  `cenci open` builds it automatically the first time (or whenever the current content-hash
+  tag is missing locally). Run `cenci sandbox prune` to clean up superseded hash tags left
   behind by earlier `Dockerfile.base` changes.
 - **`Dockerfile`** → `cenci-sandbox:latest`, `FROM cenci-sandbox-base:${BASE_VERSION}`
   (default `latest`). Layers the runtime stacks on top: .NET SDK, Node.js, Go, Codex CLI
-  (ordered last since it changes most often). This is the image `cenci-sand` actually runs.
+  (ordered last since it changes most often). This is the image `cenci open` actually runs.
 
 `sandbox/fragments/*.dockerfile` holds the same composable blocks (`dotnet`, `node`,
 `go`, `python`, `rust`, `codex`) used for per-project image composition. Each fragment and
@@ -384,18 +328,18 @@ one, change the other the same way.
 
 A repo can opt into its own thin image instead of the shared monolith by adding
 `.cenci/Dockerfile` (and any files it needs, e.g. a fragment copy) under
-`.cenci/` at the repo root. When present, `cenci-sand` builds
+`.cenci/` at the repo root. When present, the launcher builds
 `cenci-sandbox-<repo-slug>:latest` `FROM cenci-sandbox-base:${BASE_VERSION}` — the
 same base image and content-hash `BASE_VERSION` as the monolith — using
 `.cenci/` as the build context, and runs that instead of `cenci-sandbox:latest`.
 Repos without `.cenci/Dockerfile` keep using the shared monolith image, just with
 single-repo mounting (see [Per-repo containers](#per-repo-containers)). Rebuild a
-repo's own image the same way as the monolith: `cenci-sand --build` (run from inside
+repo's own image the same way as the monolith: `cenci sandbox build` (run from inside
 that repo).
 
 `/cenci:configure` generates and maintains `.cenci/Dockerfile` automatically
 from the repo's detected stack (question 9) — you normally don't hand-write this file.
-Every generated image includes the Node and Codex fragments so `cenci-sand --agent codex`
+Every generated image includes the Node and Codex fragments so `cenci open --agent codex`
 works in tailored images; it adds the remaining fragments required by the detected stack.
 The fragments are wrapped in
 `# cenci:managed-begin` / `# cenci:managed-end` markers so re-running configure
@@ -421,7 +365,7 @@ Codex (`--agent codex`) runs with the direct analog, `--dangerously-bypass-appro
 
 Bypass mode is **fully unattended**. The entrypoint seeds `/home/dev/.claude/settings.json` with `skipDangerousModePermissionPrompt: true` and `permissions.defaultMode: bypassPermissions` (and the image sets `IS_SANDBOX=1`), so even a brand-new `--name` instance on a fresh home volume reaches the prompt with no "Yes, I accept" bypass dialog, and headless `claude -p` runs report `bypassPermissions` instead of silently downgrading to `default`. The settings are deep-merged into any existing file, so unrelated keys survive.
 
-**Security invariant — container-only.** The `skipDangerousModePermissionPrompt` / `defaultMode: bypassPermissions` pair lives *only* in the container home volume (`/home/dev/.claude/settings.json`). It must **never** be added to the host `~/.claude/settings.json`, and `cenci-sand` never mounts the host `~/.claude` config dir (staging `.credentials.json` read-only is the single exception). The container boundary is the only thing that makes bypass mode safe — if a dialog ever shows where it shouldn't, the fix is always container-side, never host-side.
+**Security invariant — container-only.** The `skipDangerousModePermissionPrompt` / `defaultMode: bypassPermissions` pair lives *only* in the container home volume (`/home/dev/.claude/settings.json`). It must **never** be added to the host `~/.claude/settings.json`, and the launcher never mounts the host `~/.claude` config dir (staging `.credentials.json` read-only is the single exception). The container boundary is the only thing that makes bypass mode safe — if a dialog ever shows where it shouldn't, the fix is always container-side, never host-side.
 
 ### Isolation
 
@@ -462,7 +406,7 @@ MCP servers are picked up from project-scoped `.mcp.json` files inside the works
 Mount the host Docker/Podman socket into the container for Docker-outside-of-Docker (DooD):
 
 ```bash
-cenci-sand --docker
+cenci open --docker
 ```
 
 This enables:
@@ -476,7 +420,7 @@ The entrypoint automatically detects the socket's group ownership and adds the `
 
 ### cenci-watch (optional)
 
-If `cenci` is installed on the host, the script automatically:
+The launcher automatically:
 - Starts the host daemon when its events socket is missing (it normally starts
   lazily on the first host session, which used to leave containers created
   right after boot without any wiring) and warns if the socket never appears
@@ -499,8 +443,8 @@ agent's native CLI and plugin store: Claude provisions `~/.claude/plugins` throu
 the host-mounted `claude` binary, while Codex provisions `~/.codex` through the
 Codex CLI baked into the image. Both paths register the `cenci` marketplace,
 install `cenci-watch` and `cenci` when missing, and refresh them on a 30-minute
-TTL. Rapid stop/start cycles therefore make zero network calls; `cenci-sand
---update-plugins` forces provisioning plus refresh through the selected agent's
+TTL. Rapid stop/start cycles therefore make zero network calls; `cenci sandbox
+update-plugins` forces provisioning plus refresh through the selected agent's
 CLI. CLI or network failures warn but never block container startup. Existing
 Claude home volumes are migrated off the old `muxwatch`/`ccflow` plugins and the
 renamed `claude-tools` marketplace at the same time.
@@ -533,13 +477,13 @@ Edit the `ARG` line for the stack you want to bump:
 - `DOTNET_SDK_VERSION`, `NODE_MAJOR`, `CODEX_VERSION`, `GO_VERSION` live in `Dockerfile`
   (the monolith layers on top of the base). Stack fragments mirror their corresponding
   pins, including `fragments/codex.dockerfile` for generated per-repo images.
-- `UV_VERSION` lives in `Dockerfile.base` — bump it and run `cenci-sand --build-base`
+- `UV_VERSION` lives in `Dockerfile.base` — bump it and run `cenci sandbox build-base`
   first, then rebuild the monolith.
 
 Then rebuild:
 
 ```bash
-cenci-sand --build
+cenci sandbox build
 ```
 
 ### Update Claude Code
@@ -555,8 +499,8 @@ To force provisioning of anything missing and refresh immediately — e.g. right
 after merging a plugin change — run:
 
 ```bash
-cenci-sand --update-plugins                # Claude home / Claude CLI
-cenci-sand --agent codex --update-plugins  # Codex home / baked-in Codex CLI
+cenci sandbox update-plugins                # Claude home / Claude CLI
+cenci sandbox update-plugins --agent codex  # Codex home / baked-in Codex CLI
 ```
 
 It updates the running container in place (agent sessions pick the new version
@@ -569,11 +513,47 @@ installed on the host. After a Codex hook-file update, review pending trust via
 
 Codex is baked into the image, so updating it means bumping `CODEX_VERSION` in the monolith
 and `fragments/codex.dockerfile`, regenerating tailored repo Dockerfiles, and rebuilding
-(`cenci-sand --build`). Unlike Claude, updating Codex on the host has no effect on the container.
+(`cenci sandbox build`). Unlike Claude, updating Codex on the host has no effect on the container.
 
 A scheduled workflow checks for new Codex releases daily, opens a PR bumping
 `CODEX_VERSION` in both the monolith and Codex fragment, and auto-merges it — no manual
-bumping needed. Run `cenci-sand --build` to pick up the new version in either image type.
+bumping needed. Run `cenci sandbox build` to pick up the new version in either image type.
+
+### Clean up superseded images and containers
+
+```bash
+cenci sandbox prune
+```
+
+removes superseded base image tags, dangling images, and stopped sandbox containers —
+it keeps the current base tag, `cenci-sandbox-base:latest`, and all per-repo images
+untouched. To also list `*-cenci-home-*` volumes and interactively confirm their
+removal:
+
+```bash
+cenci sandbox prune --volumes
+```
+
+Volume deletion defaults to **no** because home volumes hold copied credentials and
+your full session history. `--volumes` only means something combined with `prune`; on
+its own it errors instead of silently doing nothing.
+
+### Reap orphaned agent processes
+
+```bash
+cenci sandbox reap-orphans
+CENCI_SANDBOX_REAP_GRACE_SECS=0 cenci sandbox reap-orphans
+```
+
+retroactively kills container-side agent processes whose owning tmux pane no longer
+exists on the host (SIGTERM, then SIGKILL after a grace period — 5 seconds by default,
+override with `CENCI_SANDBOX_REAP_GRACE_SECS`, e.g. `=0` for fast/CI runs). It scans
+every running `*-cenci-*` container across all installed runtimes (docker and podman).
+If no tmux server is running, every `TMUX_PANE`-carrying process is treated as orphaned
+and the output says so explicitly. Processes with a missing/empty `TMUX_PANE` (manual
+non-tmux launches) are never signaled. Prints one `reaped\t<container>\t<pid>\t<pane>`
+line per reaped process plus a final count, and exits non-zero on a genuine runtime
+error (e.g. exec failure) rather than swallowing it.
 
 ### Reset an instance
 
@@ -617,7 +597,7 @@ docker tag cenci-sandbox:latest ghcr.io/YOUR_ORG/cenci-sandbox:latest
 docker push ghcr.io/YOUR_ORG/cenci-sandbox:latest
 ```
 
-Recipients pull the image and only need the `cenci-sand` script.
+Recipients pull the image and only need the `cenci` binary.
 
 ### Via file export
 
@@ -642,9 +622,9 @@ fix, run `chown -R $(id -u):$(id -g) ~/Repos` on the host — see
 Ensure `claude` is in your host PATH. Check with: `readlink -f "$(which claude)"`
 
 **Container runtime**
-The script auto-detects `podman` first, then falls back to `docker`.
+The launcher auto-detects `podman` first, then falls back to `docker`.
 
 **Claude Code says "request not found" during OAuth**
 The OAuth callback can't reach the container. Either:
 1. Ensure `~/.claude/.credentials.json` exists on the host (run `claude` on the host first to authenticate), or
-2. Use `cenci-sand --host-network --shell` and run `claude` to complete the OAuth flow with host networking. This weakens the container's isolation boundary, so use it only for this manual OAuth callback.
+2. Use `cenci open --host-network --shell` and run `claude` to complete the OAuth flow with host networking. This weakens the container's isolation boundary, so use it only for this manual OAuth callback.

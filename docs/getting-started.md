@@ -40,8 +40,9 @@ From a clone, run `./install.sh`. Non-interactive automation can add `--yes`; us
 
 The installer registers the cenci marketplace and installs `cenci`,
 `cenci-watch`, and `cenci-sandbox` independently for Claude Code, Codex, or both. It
-creates only the launchers relevant to detected clients and can build the sandbox
-image. cenci-watch self-bootstraps its client-cache binary and daemon on first session.
+puts the `cenci` binary and its `cn` launch alias on your PATH and can build the
+sandbox image. cenci-watch self-bootstraps its client-cache binary and daemon on
+first session.
 
 ## 3. Verify
 
@@ -132,7 +133,7 @@ launchers, and replaces a stale running cenci daemon with the updated binary.
 | Symptom | Resolution |
 |---|---|
 | Neither client is detected | Install Claude Code, Codex, or both, then rerun the installer |
-| `cenci` or a sandbox launcher is not found | Add `~/.local/bin` to `PATH`, then rerun the install command |
+| `cenci` or `cn` is not found | Add `~/.local/bin` to `PATH`, then rerun the install command |
 | cenci status has not appeared | Start a new agent session and inspect `${TMPDIR:-/tmp}/cenci-bootstrap.log` |
 | Codex skills are missing | Confirm `codex plugin list`, then restart Codex after installation |
 | Claude commands are missing | Confirm `claude plugin list`, then restart Claude Code after installation |

@@ -100,7 +100,7 @@ The determined mode (ticket or ticketless) governs conditional behavior througho
 
 ### Auth Verification
 
-**Before delegating to the context-gatherer (or before proceeding in ticketless mode)**, extract `owner/repo` from `git remote get-url origin` (for later commands) and verify `gh` authentication. cenci runs inside the `cenci-sand` container with `--dangerously-skip-permissions`, so Claude Code ignores `permissions.allow/deny` — there is nothing to verify or auto-fix there. What still matters is authentication: the context-gatherer runs read-only `gh` commands in a subagent, and an unauthenticated `gh` deadlocks that subagent silently.
+**Before delegating to the context-gatherer (or before proceeding in ticketless mode)**, extract `owner/repo` from `git remote get-url origin` (for later commands) and verify `gh` authentication. cenci runs inside the cenci-sandbox container with `--dangerously-skip-permissions`, so Claude Code ignores `permissions.allow/deny` — there is nothing to verify or auto-fix there. What still matters is authentication: the context-gatherer runs read-only `gh` commands in a subagent, and an unauthenticated `gh` deadlocks that subagent silently.
 
 - Run `gh auth status`.
 - If it returns authenticated → proceed to context gathering.

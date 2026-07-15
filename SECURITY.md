@@ -70,7 +70,7 @@ docker volume rm codex-cenci-home-<repo-slug>
 
 See [sandbox/README.md#reset-an-instance](./sandbox/README.md#reset-an-instance)
 for the full naming scheme (per-repo slug, `--name` suffix, legacy `-default` volumes).
-`cenci-sand --prune` removes superseded base tags, dangling images, and stopped sandbox
+`cenci sandbox prune` removes superseded base tags, dangling images, and stopped sandbox
 containers. Add `--volumes` to list sandbox home volumes and interactively confirm
 their removal; volume deletion defaults to no because it destroys copied credentials
 and session history.
