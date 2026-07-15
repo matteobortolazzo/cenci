@@ -92,7 +92,7 @@ Create a dedicated worktree following the `worktrees` skill:
 git -C <repo-root> worktree add .worktrees/garden-<run-token> -b chore/garden-lessons-<run-token> main
 ```
 
-**Hard gate**: every `Edit`/`Write` in this phase MUST target an absolute path containing `/.worktrees/`. If any staged edit would resolve to the main worktree, **stop immediately** and report — do not write, and do not rescue a stranded edit with git commands.
+**Hard gate**: every filesystem mutation in this phase — including `Edit`, `Write`, `mkdir`, and `rm` — MUST target an absolute path containing `/.worktrees/`. Before each mutation, verify its resolved target satisfies that check. If any staged mutation would resolve to the main worktree, **stop immediately** and report — do not write or delete anything, and do not rescue a stranded edit with git commands. In particular, delete legacy lessons files only with `rm <absolute-worktree-path>` after this check; never pass `rm` a relative path.
 
 Apply the approved actions with the `Edit` tool:
 
@@ -109,7 +109,7 @@ Push with `git push -u origin chore/garden-lessons-<run-token>`. If the push fai
 Write the PR body with the `Write` tool to `/tmp/claude/cenci-garden-<run-token>-pr-body.md` (create `/tmp/claude` first if needed), then verify it is non-empty with `cat` before use. The body lists every applied change grouped by action, each with its evidence line, plus a "Not touched" note for groups the user declined. Create the PR:
 
 ```bash
-gh pr create --title "chore: garden lessons" --body-file /tmp/claude/cenci-garden-<run-token>-pr-body.md
+gh pr create --title "chore: garden lessons" --body-file /tmp/claude/cenci-garden-<run-token>-pr-body.md --head chore/garden-lessons-<run-token> --base main
 ```
 
 If `gh pr create` fails with "a pull request for branch ... already exists", recover the URL with `gh pr view <branch> --json url -q .url` and continue. For any other failure, show the exact failing command and error output and ask with `AskUserQuestion` ("Created manually, continue" / "Abort") — never fabricate a PR number or URL. After the PR exists, remove the temp body file.
