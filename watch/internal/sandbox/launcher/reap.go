@@ -21,7 +21,7 @@ import (
 // <start> is /proc/<pid>/stat field 22, read in the same loop pass; empty if
 // the stat line couldn't be read/parsed), skipping processes lacking the
 // TMUX_PANE key entirely. All classification — skip-empty-pane,
-// skip-malformed-pane, skip-live-pane, reap-dead-pane, TERM→KILL escalation,
+// skip-malformed-pane, skip-init, skip-live-pane, reap-dead-pane, TERM→KILL escalation,
 // PID-reuse detection, no-tmux handling — happens host-side in ReapOrphans,
 // never inside this canned scan.
 const reapScanScript = `for e in /proc/[0-9]*/environ; do [ -f "$e" ] || continue; p=${e#/proc/}; p=${p%/environ}; line=$(tr "\0" "\n" < "$e" 2>/dev/null | grep "^TMUX_PANE=") || continue; st=$(cat "/proc/$p/stat" 2>/dev/null); st=${st##*) }; set -- $st; if [ "$#" -ge 20 ]; then shift 19; start=$1; else start=""; fi; printf "%s\t%s\t%s\n" "$p" "${line#TMUX_PANE=}" "$start"; done`
@@ -150,6 +150,17 @@ func ReapOrphans(stdout, stderr io.Writer) error {
 					continue
 				}
 
+				// PID 1 is the container's init: signaling it destroys the
+				// whole shared container and every agent session exec'd into
+				// it. It can carry a (stale) TMUX_PANE on containers created
+				// by pre-#356 launchers, which baked the creating pane's id
+				// into the container-lifetime env at `run` time. Never a
+				// valid reap target, whatever its pane says.
+				if pid == "1" {
+					_, _ = fmt.Fprintf(stdout, "Note: process 1 in container %s is the container init; skipping.\n", container)
+					continue
+				}
+
 				if !noTmuxServer && livePanes[pane] {
 					continue
 				}
@@ -159,6 +170,18 @@ func ReapOrphans(stdout, stderr io.Writer) error {
 				term.Stdout = stdout
 				term.Stderr = stderr
 				if err := term.Run(); err != nil {
+					// A pid can legitimately exit between the scan and the
+					// signal. One guaranteed source on containers created by
+					// pre-#356 launchers: the scan's own in-container sh
+					// inherits the container-lifetime TMUX_PANE (docker/podman
+					// exec merges Config.Env), so once that baked pane goes
+					// stale the scan reports itself as an orphan — and it has
+					// always exited by kill time. Probe before classifying:
+					// __GONE__ means the TERM raced an exit, not a failure.
+					if start, perr := probeStartTime(rt, container, pid); perr == nil && start == "__GONE__" {
+						_, _ = fmt.Fprintf(stdout, "Note: process %s in container %s exited before SIGTERM could be delivered; skipping.\n", pid, container)
+						continue
+					}
 					_, _ = fmt.Fprintf(stderr, "Error: failed to send SIGTERM to pid %s in container %s.\n", pid, container)
 					return fmt.Errorf("%s exec kill -TERM: %w", rt, err)
 				}
@@ -175,19 +198,14 @@ func ReapOrphans(stdout, stderr io.Writer) error {
 			for i, pid := range termPids {
 				recordedStart := termStarts[i]
 
-				// -u root: see comment above the scan call. Pid is passed as
-				// an argument to the probe, never interpolated. A non-zero
-				// exit here means the exec transport itself failed, not
-				// "process gone" — a hard error, not swallowed.
-				var probeOut, probeErr bytes.Buffer
-				probe := exec.Command(rt, "exec", "-u", "root", container, "sh", "-c", reapLivenessScript, "_", pid)
-				probe.Stdout = &probeOut
-				probe.Stderr = &probeErr
-				if err := probe.Run(); err != nil {
-					_, _ = fmt.Fprintf(stderr, "Error: failed to probe liveness of pid %s in container %s: %s\n", pid, container, strings.TrimRight(probeErr.String(), "\n"))
+				// -u root: see comment above the scan call. A non-zero exit
+				// here means the exec transport itself failed, not "process
+				// gone" — a hard error, not swallowed.
+				probeStart, err := probeStartTime(rt, container, pid)
+				if err != nil {
+					_, _ = fmt.Fprintf(stderr, "Error: failed to probe liveness of pid %s in container %s: %v\n", pid, container, err)
 					return fmt.Errorf("%s exec liveness probe: %w", rt, err)
 				}
-				probeStart := strings.TrimRight(probeOut.String(), "\n")
 
 				// __GONE__: process already gone by probe time — no-op, not
 				// an error.
@@ -235,4 +253,20 @@ func ReapOrphans(stdout, stderr io.Writer) error {
 		_, _ = fmt.Fprintln(stdout, "No orphaned processes found.")
 	}
 	return nil
+}
+
+// probeStartTime runs the in-container liveness/identity probe for pid and
+// returns its output: the process's current /proc stat start time, __GONE__
+// (process gone), or __NOSTAT__ (alive but unverifiable). Pid is passed as an
+// argument to the probe, never interpolated. An error means the exec
+// transport itself failed; the probe's stderr is folded into the error text.
+func probeStartTime(rt, container, pid string) (string, error) {
+	var probeOut, probeErr bytes.Buffer
+	probe := exec.Command(rt, "exec", "-u", "root", container, "sh", "-c", reapLivenessScript, "_", pid)
+	probe.Stdout = &probeOut
+	probe.Stderr = &probeErr
+	if err := probe.Run(); err != nil {
+		return "", fmt.Errorf("%w: %s", err, strings.TrimRight(probeErr.String(), "\n"))
+	}
+	return strings.TrimRight(probeOut.String(), "\n"), nil
 }
