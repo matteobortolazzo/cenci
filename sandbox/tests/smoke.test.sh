@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Runtime smoke test for the split agent-sandbox-base + fragments image
+# Runtime smoke test for the split cenci-sandbox-base + fragments image
 # layout (ticket #107).
 #
-# Builds agent-sandbox-base:<ver> from Dockerfile.base, then builds the
-# monolithic agent-sandbox:latest FROM that base image, then runs the
+# Builds cenci-sandbox-base:<ver> from Dockerfile.base, then builds the
+# monolithic cenci-sandbox:latest FROM that base image, then runs the
 # monolith and asserts every baked-in toolchain works. This is the
 # regression guard for the latent bug where ubuntu:24.04 lacks libicu74,
 # which makes `dotnet --version` FailFast (.NET's globalization invariant
@@ -101,37 +101,37 @@ fi
 echo "resolved BASE_TAG=${BASE_TAG}"
 
 # ── Build the base image ──────────────────────────────────────────
-echo "case: build agent-sandbox-base:${BASE_TAG} from Dockerfile.base"
-if "${RUNTIME}" build -f "${SANDBOX_DIR}/Dockerfile.base" -t "agent-sandbox-base:${BASE_TAG}" "${SANDBOX_DIR}"; then
+echo "case: build cenci-sandbox-base:${BASE_TAG} from Dockerfile.base"
+if "${RUNTIME}" build -f "${SANDBOX_DIR}/Dockerfile.base" -t "cenci-sandbox-base:${BASE_TAG}" "${SANDBOX_DIR}"; then
     pass
 else
-    fail "failed to build agent-sandbox-base:${BASE_TAG} from Dockerfile.base"
+    fail "failed to build cenci-sandbox-base:${BASE_TAG} from Dockerfile.base"
     summarize_and_exit 1
 fi
 
 # ── Build the monolith FROM the base image ────────────────────────
-echo "case: build agent-sandbox:latest (--build-arg BASE_VERSION=${BASE_TAG})"
-if "${RUNTIME}" build --build-arg "BASE_VERSION=${BASE_TAG}" -t agent-sandbox:latest -f "${SANDBOX_DIR}/Dockerfile" "${SANDBOX_DIR}"; then
+echo "case: build cenci-sandbox:latest (--build-arg BASE_VERSION=${BASE_TAG})"
+if "${RUNTIME}" build --build-arg "BASE_VERSION=${BASE_TAG}" -t cenci-sandbox:latest -f "${SANDBOX_DIR}/Dockerfile" "${SANDBOX_DIR}"; then
     pass
 else
-    fail "failed to build agent-sandbox:latest FROM agent-sandbox-base:${BASE_TAG}"
+    fail "failed to build cenci-sandbox:latest FROM cenci-sandbox-base:${BASE_TAG}"
     summarize_and_exit 1
 fi
 
 # ── Run the built image and assert every toolchain works ──────────
 # A generated per-repo image replaces the monolith whenever the repository
-# contains .agent-sand/Dockerfile, so it must carry the Codex agent runtime.
+# contains .cenci/Dockerfile, so it must carry the Codex agent runtime.
 echo "case: configured per-repo image includes a working Codex CLI"
 EXPECTED_CODEX_VERSION="$(sed -n 's/^ARG CODEX_VERSION=//p' "${SANDBOX_DIR}/fragments/codex.dockerfile")"
 # shellcheck disable=SC2016 # Expansion happens in the container, using the forwarded environment variable.
 if [[ -z "${EXPECTED_CODEX_VERSION}" ]]; then
     fail "could not read the expected Codex version from fragments/codex.dockerfile"
 elif "${RUNTIME}" build --build-arg "BASE_VERSION=${BASE_TAG}" \
-    -t agent-sandbox-smoke-repo:latest \
-    -f "${REPO_ROOT}/.agent-sand/Dockerfile" "${REPO_ROOT}/.agent-sand" \
+    -t cenci-sandbox-smoke-repo:latest \
+    -f "${REPO_ROOT}/.cenci/Dockerfile" "${REPO_ROOT}/.cenci" \
     && "${RUNTIME}" run --rm --entrypoint /bin/bash \
         -e "EXPECTED_CODEX_VERSION=${EXPECTED_CODEX_VERSION}" \
-        agent-sandbox-smoke-repo:latest -c \
+        cenci-sandbox-smoke-repo:latest -c \
         'command -v codex && test "$(codex --version)" = "codex-cli ${EXPECTED_CODEX_VERSION}"'; then
     pass
 else
@@ -140,12 +140,12 @@ fi
 
 # Regression guard for the libicu74 FailFast bug: if it regresses,
 # `dotnet --version` aborts and this whole chain short-circuits.
-echo "case: dotnet/node/go/uv/python3 all work inside agent-sandbox:latest"
-if "${RUNTIME}" run --rm --entrypoint /bin/bash agent-sandbox:latest -c \
+echo "case: dotnet/node/go/uv/python3 all work inside cenci-sandbox:latest"
+if "${RUNTIME}" run --rm --entrypoint /bin/bash cenci-sandbox:latest -c \
     'dotnet --version && node -v && go version && uv --version && python3 --version'; then
     pass
 else
-    fail "one or more toolchain checks failed inside agent-sandbox:latest"
+    fail "one or more toolchain checks failed inside cenci-sandbox:latest"
 fi
 
 # Regression guard for the gap this fragment closes: Chromium and its OS-level
@@ -153,32 +153,32 @@ fi
 # `playwright --version` report a binary is present. Runs as the image's
 # default non-root `dev` user (no --user override) — the same user verify-ui
 # runs as at runtime, and the configuration Chromium's own sandbox expects.
-echo "case: Playwright launches Chromium and renders a screenshot inside agent-sandbox:latest"
+echo "case: Playwright launches Chromium and renders a screenshot inside cenci-sandbox:latest"
 EXPECTED_PLAYWRIGHT_VERSION="$(sed -n 's/^ARG PLAYWRIGHT_VERSION=//p' "${SANDBOX_DIR}/fragments/playwright.dockerfile")"
 # shellcheck disable=SC2016 # Expansion happens in the container, using the forwarded environment variable.
 if [[ -z "${EXPECTED_PLAYWRIGHT_VERSION}" ]]; then
     fail "could not read the expected Playwright version from fragments/playwright.dockerfile"
 elif "${RUNTIME}" run --rm --entrypoint /bin/bash \
     -e "EXPECTED_PLAYWRIGHT_VERSION=${EXPECTED_PLAYWRIGHT_VERSION}" \
-    agent-sandbox:latest -c \
+    cenci-sandbox:latest -c \
     'test "$(playwright --version)" = "Version ${EXPECTED_PLAYWRIGHT_VERSION}" \
         && playwright screenshot --browser=chromium about:blank /tmp/playwright-smoke.png \
         && test -s /tmp/playwright-smoke.png'; then
     pass
 else
-    fail "Playwright CLI or Chromium is missing, unusable, or stale in agent-sandbox:latest"
+    fail "Playwright CLI or Chromium is missing, unusable, or stale in cenci-sandbox:latest"
 fi
 
 # ── ccline (Claude Code status line) renders from a settings payload ──
 # ccline reads Claude Code's statusline JSON on stdin; a static build that
 # fails here (bad extraction, wrong arch) would leave every sandbox session
 # with a blank status line while the container otherwise works.
-echo "case: ccline renders a status line inside agent-sandbox:latest"
-if "${RUNTIME}" run --rm --entrypoint /bin/bash agent-sandbox:latest -c \
+echo "case: ccline renders a status line inside cenci-sandbox:latest"
+if "${RUNTIME}" run --rm --entrypoint /bin/bash cenci-sandbox:latest -c \
     'echo "{\"model\":{\"id\":\"claude-test\",\"display_name\":\"Test\"},\"workspace\":{\"current_dir\":\"/workspace\"},\"transcript_path\":\"/dev/null\"}" | /usr/local/bin/ccline' >/dev/null; then
     pass
 else
-    fail "ccline failed to render inside agent-sandbox:latest"
+    fail "ccline failed to render inside cenci-sandbox:latest"
 fi
 
 # ── UID/GID remap via HOST_UID/HOST_GID (#154) ─────────────────────
@@ -201,7 +201,7 @@ trap 'rm -rf "${REMAP_TMP}"' EXIT
 REMAP_OUT="$(timeout 60 "${RUNTIME}" run --rm --user root \
     -e HOST_UID=1234 -e HOST_GID=1234 -e WORKSPACE_SCOPE=repo \
     -v "${REMAP_TMP}:/workspace" \
-    agent-sandbox:latest \
+    cenci-sandbox:latest \
     -c 'id -u; id -g; : > /workspace/remap-probe')"
 REMAP_STATUS=$?
 if [[ "${REMAP_STATUS}" -eq 124 ]]; then
@@ -220,7 +220,7 @@ fi
 echo "case: entrypoint reuses an existing image group matching HOST_GID"
 GROUP_COLLISION_OUT="$(timeout 60 "${RUNTIME}" run --rm --user root \
     -e HOST_UID=1234 -e HOST_GID=20 \
-    agent-sandbox:latest \
+    cenci-sandbox:latest \
     -c 'id -u; id -g')"
 GROUP_COLLISION_STATUS=$?
 if [[ "${GROUP_COLLISION_STATUS}" -eq 124 ]]; then
@@ -262,7 +262,7 @@ fi
 # that every start begins as root — see entrypoint.sh) — dev keeps reporting
 # uid=1000/gid=1000 either way.
 echo "case: entrypoint leaves dev at uid=1000/gid=1000 when HOST_UID/HOST_GID are unset"
-NOOP_OUT="$(timeout 60 "${RUNTIME}" run --rm --user root agent-sandbox:latest -c 'id -u; id -g')"
+NOOP_OUT="$(timeout 60 "${RUNTIME}" run --rm --user root cenci-sandbox:latest -c 'id -u; id -g')"
 NOOP_STATUS=$?
 if [[ "${NOOP_STATUS}" -eq 124 ]]; then
     fail "container run timed out after 60s while exercising the no-HOST_UID no-op path — likely a hang/regression in the root->dev remap"

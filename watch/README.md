@@ -1,13 +1,13 @@
-# agentwatch
+# cenci-watch
 
-> Part of [agent-stack](../README.md) — the **attention layer**. See the root README for
+> Part of [cenci](../README.md) — the **attention layer**. See the root README for
 > the one-command install and how the isolation, workflow, and attention layers fit together.
 
-Stop hunting through terminals to find the session that needs you. AgentWatch turns
+Stop hunting through terminals to find the session that needs you. cenci-watch turns
 Claude Code and Codex hooks into shared live state for tmux and optional desktop
 surfaces.
 
-![AgentWatch routes Claude Code and Codex hook events to tmux and desktop status surfaces](../docs/assets/agentwatch-surfaces.svg)
+![cenci-watch routes Claude Code and Codex hook events to tmux and desktop status surfaces](../docs/assets/cenci-surfaces.svg)
 
 The same four states appear everywhere:
 
@@ -16,13 +16,13 @@ The same four states appear everywhere:
 - **! red** — need input (permission dialog)
 - **~ dim** — idle (fresh prompt, no task yet)
 
-When the agent exits or agentwatch stops, the original window name is restored.
+When the agent exits or cenci stops, the original window name is restored.
 
 See the desktop integrations for [DankMaterialShell](plugin/dms/README.md),
 [GNOME Shell](plugin/gnome/README.md), [KDE Plasma](plugin/plasma/README.md), and
 the [macOS menu bar](plugin/macos/README.md).
 
-**tmux appearance:** no tmux theme is bundled or required. AgentWatch augments
+**tmux appearance:** no tmux theme is bundled or required. cenci-watch augments
 tmux's default window list automatically and applies the state colors above. If
 your theme replaces `window-status-format` or `window-status-current-format`, wire
 its two stable user variables into the theme instead; see
@@ -33,7 +33,7 @@ its two stable user variables into the theme instead; see
 The core daemon keys state by agent session id, maps hook events to statuses, and owns the paneless TTL sweep. All window work is delegated to an injected frontend:
 
 - **tmux frontend** (`internal/frontend/tmux/`): the one interactive frontend — window rename, style, pane-based stale sweep, renumber migration.
-- **status JSON** (`internal/frontend/status/`): read-only broadcast in the [Waybar custom module protocol](https://github.com/Alexays/Waybar/wiki/Module:-Custom); consumed by `agentwatch widget-json` (hidden alias `waybar`) and the Waybar, noctalia, [DMS](plugin/dms/README.md), [GNOME Shell](plugin/gnome/README.md), [KDE Plasma](plugin/plasma/README.md), and macOS menu bar ([SwiftBar](https://swiftbar.app), [setup](plugin/macos/README.md)) display widgets.
+- **status JSON** (`internal/frontend/status/`): read-only broadcast in the [Waybar custom module protocol](https://github.com/Alexays/Waybar/wiki/Module:-Custom); consumed by `cenci widget-json` (hidden alias `waybar`) and the Waybar, noctalia, [DMS](plugin/dms/README.md), [GNOME Shell](plugin/gnome/README.md), [KDE Plasma](plugin/plasma/README.md), and macOS menu bar ([SwiftBar](https://swiftbar.app), [setup](plugin/macos/README.md)) display widgets.
 
 No polling for normal state changes. Agent hooks push state changes to the daemon instantly via a Unix socket; the daemon sweeps periodically for stale/exited sessions.
 
@@ -43,13 +43,13 @@ The easiest path is the [one-command installer](../docs/getting-started.md), whi
 also wires the desktop bar widget for whichever bar it detects:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
 ```
 
 The installer handles Claude Code, Codex, or both. The binary and daemon
 self-bootstrap from the active client's plugin cache on the first session.
 
-On both install and `agent-stack update`, the installer auto-detects each present
+On both install and `cenci update`, the installer auto-detects each present
 GUI bar — GNOME Shell, KDE Plasma, DankMaterialShell, and noctalia — and, with a
 per-bar prompt (default yes), installs and **reloads** its widget so widget
 changes are visible immediately. macOS SwiftBar is wired the same way. Because a
@@ -64,16 +64,16 @@ brand-new extension dir still need a Shell reload (X11 `Alt+F2`, `r`) or relogin
 
 ```bash
 # Register the repo as a marketplace (works with private repos too)
-claude plugin marketplace add matteobortolazzo/agent-stack
+claude plugin marketplace add matteobortolazzo/cenci
 
 # Install the plugin (persists across sessions)
-claude plugin install agentwatch
+claude plugin install cenci-watch
 
-codex plugin marketplace add matteobortolazzo/agent-stack
-codex plugin add agentwatch@agent-stack
+codex plugin marketplace add matteobortolazzo/cenci
+codex plugin add cenci-watch@cenci
 ```
 
-On the first `SessionStart` after install, the plugin downloads the `agentwatch`
+On the first `SessionStart` after install, the plugin downloads the `cenci`
 binary matching the plugin version (with checksum verification) into the plugin's
 `bin/` directory, symlinks it onto your writable `$PATH` (`~/.local/bin`), and
 starts the daemon. Bootstrap runs detached and never blocks the agent, so the
@@ -81,15 +81,15 @@ very first session may take a moment before status appears; the daemon then
 persists for all later sessions.
 
 The on-`$PATH` symlink is re-pointed on every session (so it follows version
-bumps) and lets bare `agentwatch` invocations resolve — shell, tmux `run-shell`,
+bumps) and lets bare `cenci` invocations resolve — shell, tmux `run-shell`,
 Codex hooks, and waybar-from-shell. **GUI/compositor bars** (DMS, noctalia) are
 different: they inherit the *login* PATH, which usually lacks `~/.local/bin`. To
 make them find the binary, `install.sh` offers a one-time `sudo` link into
 `/usr/local/bin` (which every GUI login PATH includes) chained through the
 `~/.local/bin` link, so it too survives version bumps. Decline it and the bar
-widgets fall back to their `agentwatchPath` / `AGENTWATCH_BIN` overrides.
+widgets fall back to their `cenciPath` / `CENCI_BIN` overrides.
 
-Use `agent-stack update` for normal updates. Standalone development installs can use
+Use `cenci update` for normal updates. Standalone development installs can use
 the corresponding client marketplace update command; the next session re-bootstraps
 the matching binary.
 
@@ -108,35 +108,35 @@ The Codex hooks self-bootstrap the binary and shared daemon on `SessionStart` ev
 a Codex-only installation—see the
 [Codex plugin README](plugin/codex/README.md#binary-and-daemon-self-bootstrapping).
 
-## Dispatching workflows (`agentwatch run`)
+## Dispatching workflows (`cenci run`)
 
-`agentwatch run` launches a coding-agent CLI for a workflow in a detached tmux
+`cenci run` launches a coding-agent CLI for a workflow in a detached tmux
 window, owning the `<number>-<skill>` window name that ties board cards, tmux windows,
 and watcher snapshots together. It replaces the personal dispatch scripts that used to
 live in `~/.config/lazyboards/scripts/`.
 
 ```bash
 # Refine/design/implement ticket 40 with Claude in the current tmux session
-agentwatch run implement 40
+cenci run implement 40
 
 # Inspect the resolution without spawning anything
-agentwatch run implement 40 --dry-run
+cenci run implement 40 --dry-run
 # session: my-tmux-session
 # window:  40-implement
-# command: claude -- '/agentflow:implement 40'
+# command: claude -- '/cenci:implement 40'
 ```
 
 Positional args are `<workflow> [ticket-id | task description] [additional context]`;
 flags may follow them. Everything after the workflow is forwarded verbatim as the
-skill argument (`/agentflow:<workflow> $ARGUMENTS`), so the same free-text forms the skills
+skill argument (`/cenci:<workflow> $ARGUMENTS`), so the same free-text forms the skills
 accept work here too — no quoting needed:
 
 ```bash
 # Ticket id plus additional context → window 40-implement (context still reaches the skill)
-agentwatch run implement 40 focus on the API layer
+cenci run implement 40 focus on the API layer
 
 # Ticketless task description → window add-dark-mode-toggle
-agentwatch run implement add dark mode toggle
+cenci run implement add dark mode toggle
 ```
 
 When the first token is a numeric ticket id, the window is named `<number>-<skill>`
@@ -149,17 +149,17 @@ descriptive slug: `--slug` if given, else the whole description slugified.
 | Flag | Purpose |
 |------|---------|
 | `--agent <name>` | Agent to launch (`claude`, `codex`, …); default from config, else `claude` |
-| `--sandbox` / `--no-sandbox` | Sandbox is the default (`claude`→`agent-sand`, the container being the mandatory runtime); `--no-sandbox` is the host opt-out. Both override the config default |
+| `--sandbox` / `--no-sandbox` | Sandbox is the default (`claude`→`cenci-sand`, the container being the mandatory runtime); `--no-sandbox` is the host opt-out. Both override the config default |
 | `--model <model>` | Model override passed to the agent (substituted into `{model}`, else appended as `--model`) |
 | `--session <name>` | Target tmux session (default: the current session) |
 | `--slug <slug>` | Window-name slug for free-text runs; ignored for numeric tickets (named `<number>-<skill>`) |
-| `--config <path>` | Config file (default: `$XDG_CONFIG_HOME/agentwatch/config.json`) |
+| `--config <path>` | Config file (default: `$XDG_CONFIG_HOME/cenci/config.json`) |
 | `--dry-run` | Print the resolved session, window name, and command without spawning |
 
 A board column action shrinks to a single line:
 
 ```yaml
-command: "agentwatch run implement {number}"
+command: "cenci run implement {number}"
 ```
 
 ### The join key survives the daemon
@@ -180,7 +180,7 @@ spawn into a grouped session (non-zero exit, no window created). Pass an ungroup
 Built-in Go templates cover Claude `refine`/`design`/`implement` with zero config. An
 optional `config.json` (respecting `$XDG_CONFIG_HOME`, or `--config`) overrides the
 defaults and adds agents or workflows — the tokens `{ticket}` and `{model}` are
-substituted at launch. Launches run inside the dev-sandbox container by default; the
+substituted at launch. Launches run inside the cenci-sandbox container by default; the
 `"sandbox"` field below is optional and, when set to `false`, opts every launch out to
 the host (the same as passing `--no-sandbox`):
 
@@ -191,16 +191,16 @@ the host (the same as passing `--no-sandbox`):
   "agents": {
     "claude": {
       "command": "claude",
-      "sandboxCommand": "agent-sand",
+      "sandboxCommand": "cenci-sand",
       "workflows": {
-        "implement": { "args": ["--", "/agentflow:implement {ticket}"] }
+        "implement": { "args": ["--", "/cenci:implement {ticket}"] }
       }
     },
     "codex": {
       "command": "codex",
       "model": "gpt-5.6-sol",
       "workflows": {
-        "implement": { "args": ["exec", "/agentflow:implement {ticket}"] }
+        "implement": { "args": ["exec", "/cenci:implement {ticket}"] }
       }
     },
     "opencode": {
@@ -217,31 +217,31 @@ Only the built-in Claude templates ship today; Codex and opencode require a
 `config.json` entry. Until one is configured, `--agent codex` exits with a helpful "no
 launch template" error.
 
-## Auto-dispatch (`agentwatch dispatch`)
+## Auto-dispatch (`cenci dispatch`)
 
 Once planning is human-gated and an approved plan shows up on the board as the
 `Planned` state, *picking it up* is pure policy — no LLM in the dispatcher.
-`agentwatch dispatch` walks the configured repos, matches each `Planned` ticket to
+`cenci dispatch` walks the configured repos, matches each `Planned` ticket to
 its approved `.plans/<id>-*.md` file, checks capacity/budget gates, and — for every
 ticket that clears them — runs exactly what a human would press:
-`agentwatch run implement .plans/<file> --agent <chosen>`. The intelligence stays
+`cenci run implement .plans/<file> --agent <chosen>`. The intelligence stays
 inside the dispatched sessions; the dispatcher is config plus a pure decision
 function.
 
 ```bash
 # Print the decision table without spawning anything
-agentwatch dispatch --dry-run
+cenci dispatch --dry-run
 # owner/name#45 skip: not Planned
 # owner/name#78 dispatch (claude, 78-add-cache.md): dispatch
 
 # Run a single pass
-agentwatch dispatch --once
+cenci dispatch --once
 
 # Run continuously, re-evaluating every 5 minutes
-agentwatch dispatch --interval 5m
+cenci dispatch --interval 5m
 
 # Run a single failure-reconciliation pass (recover stranded dispatched work)
-agentwatch dispatch --reconcile
+cenci dispatch --reconcile
 ```
 
 | Flag | Purpose |
@@ -250,7 +250,7 @@ agentwatch dispatch --reconcile
 | `--interval <dur>` | Re-run on this interval (e.g. `5m`); mutually exclusive with `--once` |
 | `--reconcile` | Run one failure-reconciliation pass instead of a dispatch pass (see [Failure reconciliation](#failure-reconciliation)); pair with a cron entry |
 | `--dry-run` | Print the decision (or reconciliation) table and mutate nothing |
-| `--config <path>` | Config file (default: `$XDG_CONFIG_HOME/agentwatch/config.json`) |
+| `--config <path>` | Config file (default: `$XDG_CONFIG_HOME/cenci/config.json`) |
 | `--model <model>` | Model override for every session dispatched this pass — overrides `dispatch.model` and `agents.*.model` in `config.json`. With `--interval`, re-applied on every tick (a config reload can't drop it). |
 
 Every ticket yields exactly one logged decision — dispatched or skipped, always with
@@ -260,16 +260,16 @@ a reason — so nothing fails silently. When a model is pinned (via `--model` or
 silent surprise — without a pin, it falls back to `agents.*.model`, or otherwise
 whatever ambient default the agent CLI itself resolves.
 
-### Enrollment (`agentwatch dispatch enroll|unenroll|status`)
+### Enrollment (`cenci dispatch enroll|unenroll|status`)
 
 The `dispatch.repos` list (below) is normally managed with these verbs instead of
 hand-editing `config.json` — this is how lazyboards (and humans) register a repo for
 dispatch:
 
 ```bash
-agentwatch dispatch enroll   [--dir <path>] [--config <path>]
-agentwatch dispatch unenroll [--dir <path>] [--config <path>] [--repo owner/name]
-agentwatch dispatch status   [--dir <path>] [--config <path>] [--json]
+cenci dispatch enroll   [--dir <path>] [--config <path>]
+cenci dispatch unenroll [--dir <path>] [--config <path>] [--repo owner/name]
+cenci dispatch status   [--dir <path>] [--config <path>] [--json]
 ```
 
 | Verb | Flags | Behavior |
@@ -280,18 +280,18 @@ agentwatch dispatch status   [--dir <path>] [--config <path>] [--json]
 
 Exit codes are consistent across all three verbs: `0` when the verb ran successfully
 (enrolled/not-enrolled is a result, not a failure), `1` on a detection/IO error
-(`agentwatch dispatch <verb>: <reason>` on stderr), `2` on bad flags (including the
+(`cenci dispatch <verb>: <reason>` on stderr), `2` on bad flags (including the
 `--repo`/`--dir` conflict above).
 
-### Loop toggle (`agentwatch dispatch loop on|off|status`)
+### Loop toggle (`cenci dispatch loop on|off|status`)
 
 Toggles and reports the embedded fleet dispatch loop (`dispatch.loopEnabled`,
 see [Configuration](#configuration)) without hand-editing `config.json`:
 
 ```bash
-agentwatch dispatch loop on     [--config <path>] [--json]
-agentwatch dispatch loop off    [--config <path>] [--json]
-agentwatch dispatch loop status [--config <path>] [--json]
+cenci dispatch loop on     [--config <path>] [--json]
+cenci dispatch loop off    [--config <path>] [--json]
+cenci dispatch loop status [--config <path>] [--json]
 ```
 
 | Verb | Behavior |
@@ -305,11 +305,11 @@ raw JSON object with `--json` (e.g. `{"enabled":true,"daemon_running":false,"int
 
 **Breaking change:** the loop no longer auto-enables from a bare `daemonInterval`. It
 now defaults to disabled and only dispatches once `loopEnabled` is explicitly set to
-`true`. Existing installs that relied on `daemonInterval` alone must run `agentwatch
+`true`. Existing installs that relied on `daemonInterval` alone must run `cenci
 dispatch loop on` (or set `loopEnabled: true` directly) after upgrading, or dispatch
 will silently stop.
 
-A running `agentwatch daemon` always starts the embedded dispatch supervisor loop at
+A running `cenci daemon` always starts the embedded dispatch supervisor loop at
 startup — `dispatch.loopEnabled` purely controls whether it *performs* passes, not
 whether it runs. The loop reloads its config on a hardcoded 60s check interval (not
 configurable) to pick up `loopEnabled` changes, so `dispatch loop on`/`off` take effect
@@ -320,15 +320,15 @@ While enabled, configuration is still polled at least every 60 seconds, but the
 dispatch/reconcile pair runs only at the configured `daemonInterval` deadline (and
 immediately after enabling). Interval edits recalculate that deadline from the prior
 pass completion without creating an extra pass. The loop publishes live state so that
-`agentwatch dispatch status --json`'s `"loop"` object (`enabled`, `pass_running`,
+`cenci dispatch status --json`'s `"loop"` object (`enabled`, `pass_running`,
 `last_run_at`, `last_dispatched`, `last_skipped`, `last_error`) now reflects the live
 daemon end-to-end, not just a config fallback. `last_dispatched` counts successful
 spawns (not merely dispatch decisions), and `last_error` is intentionally redacted to
 `dispatch_pass_failed` or `reconcile_pass_failed`; detailed errors stay in daemon logs.
 
-This daemon-embedded path (`dispatch loop on` alongside a running `agentwatch daemon`)
-is the canonical way to run dispatch continuously. `agentwatch dispatch --interval
-<duration>` (see [Auto-dispatch](#auto-dispatch-agentwatch-dispatch)) remains a
+This daemon-embedded path (`dispatch loop on` alongside a running `cenci daemon`)
+is the canonical way to run dispatch continuously. `cenci dispatch --interval
+<duration>` (see [Auto-dispatch](#auto-dispatch-cenci-dispatch)) remains a
 separate, standalone loop for running dispatch directly from the CLI without a daemon.
 It stops and exits nonzero on its first config or pass error; one-shot, dry-run, and
 reconcile invocations likewise exit nonzero when their pass fails.
@@ -363,10 +363,10 @@ failing gate is the logged skip reason):
 In a monorepo, unrelated commits elsewhere in the tree shouldn't invalidate a plan
 scoped to one project. A plan's front matter may set an optional flat key
 `stalenessPaths` — comma-separated, repo-relative paths (e.g.
-`stalenessPaths: agentwatch` or `stalenessPaths: agentwatch, agentflow`). When
+`stalenessPaths: watch` or `stalenessPaths: watch, flow`). When
 present, gate 3 above counts only default-branch commits that touch those paths
 (`git rev-list --count <planCommitSha>..HEAD -- <paths...>`); when absent, it falls
-back to whole-repo commit counting as before. The `agentflow` plan template (see its
+back to whole-repo commit counting as before. The `cenci` plan template (see its
 `/implement` plan phase) records this field from the project directories the plan
 touches.
 
@@ -404,7 +404,7 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `repos` | — | Repos to scan; each `dir` holds that repo's `.plans/` and git tree, and a dispatched session `cd`s into it. Normally managed via `agentwatch dispatch enroll`/`unenroll` (see [Enrollment](#enrollment-agentwatch-dispatch-enrollunenrollstatus)) rather than hand-edited, though hand-editing remains supported. |
+| `repos` | — | Repos to scan; each `dir` holds that repo's `.plans/` and git tree, and a dispatched session `cd`s into it. Normally managed via `cenci dispatch enroll`/`unenroll` (see [Enrollment](#enrollment-cenci-dispatch-enrollunenrollstatus)) rather than hand-edited, though hand-editing remains supported. |
 | `session` | current | Target tmux session for dispatched windows |
 | `concurrencyCap` | `3` | Max concurrent running sessions (counts in-flight windows plus this pass's dispatches) |
 | `needInputThreshold` | `1` | Pause dispatch when at least this many windows await input |
@@ -414,7 +414,7 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 | `gracePeriod` | `5m` | How long the failure signal must hold continuously before the reconciler recovers a stranded ticket (Go duration string) |
 | `retryBudget` | `2` | Retries (`Working` → `Planned`) a stranded ticket gets before it is marked `dispatch-failed`; an explicit `0` disables retries |
 | `daemonInterval` | none | Dispatch cadence once the embedded loop is enabled (Go duration string); setting this alone does **not** start dispatch — see `loopEnabled`. Configuration is independently polled at least every 60 seconds; nonpositive values use a 60s internal fallback but are not reported as a configured interval |
-| `loopEnabled` | `false` | Explicitly toggles the embedded fleet dispatch loop; managed via `agentwatch dispatch loop on\|off` (see [Loop toggle](#loop-toggle-agentwatch-dispatch-loop-onoffstatus)). Defaults to disabled — a bare `daemonInterval` no longer auto-enables the loop; run `dispatch loop on` (or set `loopEnabled: true` directly) to start dispatching |
+| `loopEnabled` | `false` | Explicitly toggles the embedded fleet dispatch loop; managed via `cenci dispatch loop on\|off` (see [Loop toggle](#loop-toggle-cenci-dispatch-loop-onoffstatus)). Defaults to disabled — a bare `daemonInterval` no longer auto-enables the loop; run `dispatch loop on` (or set `loopEnabled: true` directly) to start dispatching |
 | `defaultAgent` | `claude` | Agent used when a ticket has no `agent:<name>` label |
 | `model` | none | Model override for every dispatched session (overrides `agents.*.model`); the `--model` CLI flag overrides this. Pin this to avoid a dispatched session silently inheriting whatever ambient/account-level default model is active at spawn time |
 | `agentPreference` | none | Fallback agent order tried when the primary agent (label or `defaultAgent`) is out of budget; first agent with budget wins |
@@ -431,7 +431,7 @@ An agent is routed per ticket from an `agent:<name>` label, falling back to
 Each candidate agent must clear a budget gate before it can be dispatched. There are two
 modes, chosen per agent by whether `agentLimits` is configured:
 
-- **Real usage accounting** (when `agentLimits[agent]` is set) — agentwatch reads the
+- **Real usage accounting** (when `agentLimits[agent]` is set) — cenci reads the
   agent's own local session data to compute how much of each rolling window remains:
   Claude from output-token counts in its session JSONL (`claudeSessionDir`), Codex from
   per-thread `tokens_used` in its SQLite DB (`codexDBPath`, via the `sqlite3` CLI). The
@@ -476,7 +476,7 @@ Run it two ways:
 
 ```bash
 # Cron path: one recovery pass per invocation
-agentwatch dispatch --reconcile
+cenci dispatch --reconcile
 
 # Daemon-embedded: set dispatch.daemonInterval and the daemon runs the combined
 # dispatch + reconcile loop itself, on that interval
@@ -486,7 +486,7 @@ agentwatch dispatch --reconcile
 > it on the host where plans are persisted. A `Planned` ticket whose plan file lives only
 > on another host is grace-gated but will eventually be marked `plan-invalid`.
 
-## Closing agent windows (`agentwatch close`)
+## Closing agent windows (`cenci close`)
 
 External tools that clean up finished agent windows (for example a kanban board's
 "column cleanup" hook) need to kill the *exact* tmux window an agent is running in —
@@ -496,22 +496,22 @@ tmux session, so it silently no-ops against windows running elsewhere, or — if
 run one tool instance per session — ends up reaping only that instance's own
 session's windows instead of the intended target.
 
-`agentwatch close` fixes this by resolving the target from the daemon's live window
+`cenci close` fixes this by resolving the target from the daemon's live window
 registry instead of guessing a tmux target:
 
 ```bash
 # Close every window for ticket 42 (matches "42" or "42-<skill>"), skipping any
 # that are currently running or waiting for input
-agentwatch close 42
+cenci close 42
 
 # Close a free-text/slug window by its exact name
-agentwatch close add-dark-mode-toggle
+cenci close add-dark-mode-toggle
 
 # Preview what would happen without killing anything
-agentwatch close 42 --dry-run
+cenci close 42 --dry-run
 
 # Close even running/need-input windows
-agentwatch close 42 --force
+cenci close 42 --force
 ```
 
 Behavior:
@@ -525,67 +525,67 @@ Behavior:
 - No matching windows is not an error — it exits 0, so it's safe to run
   unconditionally after a window may already be gone.
 
-This is the recommended cleanup command for any tool driving agentwatch-managed
+This is the recommended cleanup command for any tool driving cenci-managed
 tmux windows, e.g. a kanban board's column-cleanup hook:
 
 ```yaml
-cleanup: 'agentwatch close {number}'
+cleanup: 'cenci close {number}'
 ```
 
-## Sandbox management and session launching (`agentwatch sandbox`, `agentwatch open`)
+## Sandbox management and session launching (`cenci sandbox`, `cenci open`)
 
-`agentwatch` wraps [dev-sandbox](../sandbox/README.md)'s `agent-sand` bash launcher
+`cenci` wraps [cenci-sandbox](../sandbox/README.md)'s `cenci-sand` bash launcher
 with first-class `sandbox` and `open` verb groups, so day-to-day sandbox commands don't
-need `agent-sand` on PATH to be remembered by name.
+need `cenci-sand` on PATH to be remembered by name.
 
 ```bash
-# One-shot maintenance verbs — each forwards to the matching agent-sand flag
-agentwatch sandbox build           # agent-sand --build
-agentwatch sandbox build-base      # agent-sand --build-base
-agentwatch sandbox prune           # agent-sand --prune
-agentwatch sandbox prune --volumes # agent-sand --prune --volumes
-agentwatch sandbox update-plugins  # agent-sand --update-plugins
-agentwatch sandbox reseed-creds    # agent-sand --reseed-creds
-agentwatch sandbox reap-orphans    # agent-sand --reap-orphans
+# One-shot maintenance verbs — each forwards to the matching cenci-sand flag
+cenci sandbox build           # cenci-sand --build
+cenci sandbox build-base      # cenci-sand --build-base
+cenci sandbox prune           # cenci-sand --prune
+cenci sandbox prune --volumes # cenci-sand --prune --volumes
+cenci sandbox update-plugins  # cenci-sand --update-plugins
+cenci sandbox reseed-creds    # cenci-sand --reseed-creds
+cenci sandbox reap-orphans    # cenci-sand --reap-orphans
 
 # List / stop sandbox containers — implemented natively against docker/podman,
-# no agent-sand equivalent
-agentwatch sandbox ls
-agentwatch sandbox stop            # stops every claude-sand-*/codex-sand-* container
-agentwatch sandbox stop agentstack # only containers whose name contains "agentstack"
+# no cenci-sand equivalent
+cenci sandbox ls
+cenci sandbox stop            # stops every claude-cenci-*/codex-cenci-* container
+cenci sandbox stop agentstack # only containers whose name contains "agentstack"
 
 # Launch or attach an interactive session
-agentwatch open ch                 # claude + haiku
-agentwatch open xs                 # codex + gpt-5.6-sol
-agentwatch open --agent codex --model gpt-5.6-terra --name mybox
-agentwatch open ch -- --resume     # forward flags after -- straight to the agent CLI
+cenci open ch                 # claude + haiku
+cenci open xs                 # codex + gpt-5.6-sol
+cenci open --agent codex --model gpt-5.6-terra --name mybox
+cenci open ch -- --resume     # forward flags after -- straight to the agent CLI
 ```
 
-`open`'s one-token shortcuts mirror `agent-sand`'s own table exactly, so `ch`/`cs`/`co`/`cf`
+`open`'s one-token shortcuts mirror `cenci-sand`'s own table exactly, so `ch`/`cs`/`co`/`cf`
 select Claude with the haiku/sonnet/opus/fable model, and `xl`/`xt`/`xs` select Codex with
 the gpt-5.6-luna/terra/sol model. A shortcut and a conflicting explicit `--agent` (e.g.
 `open ch --agent codex`) is a usage error (exit 2) rather than silently picking one.
 Supported flags: `--agent`, `--model`, `--name`, `--shell`, `--docker`, `--host-network`;
-anything after a bare `--` is forwarded to the agent CLI verbatim. `open` execs `agent-sand`
-(replacing the `agentwatch` process) so the interactive session owns the TTY.
+anything after a bare `--` is forwarded to the agent CLI verbatim. `open` execs `cenci-sand`
+(replacing the `cenci` process) so the interactive session owns the TTY.
 
-**`cn` alias:** a copy or symlink of the `agentwatch` binary named `cn` behaves as
-`agentwatch open <args>` — `cn xs` is exactly `agentwatch open xs`.
+**`cn` alias:** a copy or symlink of the `cenci` binary named `cn` behaves as
+`cenci open <args>` — `cn xs` is exactly `cenci open xs`.
 
-## Installer integration (`agentwatch doctor`, `agentwatch update`)
+## Installer integration (`cenci doctor`, `cenci update`)
 
 ```bash
-agentwatch doctor   # check prerequisites and installed stack components, change nothing
-agentwatch update   # update installed plugins and restart the daemon
+cenci doctor   # check prerequisites and installed stack components, change nothing
+cenci update   # update installed plugins and restart the daemon
 ```
 
-Both shell out to the `agent-stack` wrapper script installed on `PATH` (see the
-[root README](../README.md)), forwarding the mode — `agentwatch doctor` runs
-`agent-stack doctor`, `agentwatch update` runs `agent-stack update` — with stdio
+Both shell out to the `cenci-installer` wrapper script installed on `PATH` (see the
+[root README](../README.md)), forwarding the mode — `cenci doctor` runs
+`cenci-installer doctor`, `cenci update` runs `cenci-installer update` — with stdio
 inherited and the wrapper's exit code propagated. This gives you a single
-entry point (`agentwatch doctor`/`update`) that reaches the same installer
-logic as running `agent-stack doctor`/`update` directly. Neither verb takes any
-flags or extra arguments (exit 2 if given any). If `agent-stack` isn't on
+entry point (`cenci doctor`/`update`) that reaches the same installer
+logic as running `cenci-installer doctor`/`update` directly. Neither verb takes any
+flags or extra arguments (exit 2 if given any). If `cenci-installer` isn't on
 `PATH`, both exit 1 with a clear error instead of silently doing nothing —
 re-run the [installer](#installation) to create it.
 
@@ -593,62 +593,62 @@ re-run the [installer](#installation) to create it.
 
 The marketplace install above provisions the binary and daemon automatically. You
 only need this section to install the binary by hand (e.g. Codex-only setups),
-hack on agentwatch, or run against a local plugin directory.
+hack on cenci-watch, or run against a local plugin directory.
 
 ### Install the binary manually
 
 ```bash
-go install github.com/matteobortolazzo/agent-stack/agentwatch/v4@latest
+go install github.com/matteobortolazzo/cenci/watch/v4@latest
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/matteobortolazzo/agent-stack.git
-cd agent-stack/agentwatch
+git clone https://github.com/matteobortolazzo/cenci.git
+cd cenci/watch
 make build
 ```
 
 ### Run against a local plugin directory
 
-`make plugin-bin` builds the current source into `plugin/bin/agentwatch` and stamps
+`make plugin-bin` builds the current source into `plugin/bin/cenci` and stamps
 the version marker, so `claude --plugin-dir ./plugin` uses your local build instead
 of downloading a released artifact:
 
 ```bash
 make plugin-bin
-claude --plugin-dir /path/to/agentwatch/plugin
+claude --plugin-dir /path/to/watch/plugin
 ```
 
-### Daemon lifecycle (`agentwatch daemon start|stop|restart|status`)
+### Daemon lifecycle (`cenci daemon start|stop|restart|status`)
 
 When you install the binary by hand, start the daemon once (the marketplace plugin
-does this for you via `EnsureRunning`, which spawns `agentwatch daemon start` detached
+does this for you via `EnsureRunning`, which spawns `cenci daemon start` detached
 on demand):
 
 ```bash
-agentwatch daemon start        # foreground; run in background or a dedicated pane
-agentwatch daemon start -v     # verbose logging
-agentwatch daemon              # bare "daemon" acts as "start"
+cenci daemon start        # foreground; run in background or a dedicated pane
+cenci daemon start -v     # verbose logging
+cenci daemon              # bare "daemon" acts as "start"
 ```
 
-**BREAKING**: bare `agentwatch` (no subcommand) and unrecognized top-level
+**BREAKING**: bare `cenci` (no subcommand) and unrecognized top-level
 flags/subcommands used to fall through to running the daemon in the foreground. They
 now print usage and exit 2 instead — the daemon only starts via the explicit `daemon`
-subcommand group. Update any script or shortcut that ran bare `agentwatch` to run
-`agentwatch daemon start` (or `agentwatch daemon`) instead.
+subcommand group. Update any script or shortcut that ran bare `cenci` to run
+`cenci daemon start` (or `cenci daemon`) instead.
 
-`daemon start` writes a PID file at `$XDG_RUNTIME_DIR/agentwatch/agentwatch.pid`
+`daemon start` writes a PID file at `$XDG_RUNTIME_DIR/cenci/cenci.pid`
 once it has become the one live daemon (never on the "already running" no-op path
-below), and removes it on clean shutdown (SIGINT/SIGTERM). A second `agentwatch
+below), and removes it on clean shutdown (SIGINT/SIGTERM). A second `cenci
 daemon start` against a socket that's already bound is a safe no-op — it detects the
 running daemon, logs "daemon already running", and exits without disturbing it or
 touching the PID file.
 
 ```bash
-agentwatch daemon stop      # SIGTERM, then SIGKILL if still alive after a few seconds; exits 0 whether or not anything was running
-agentwatch daemon restart   # stop (if running), then spawn a fresh detached daemon and wait for it to come up
-agentwatch daemon status    # running/not-running + PID; exits 1 when not running
+cenci daemon stop      # SIGTERM, then SIGKILL if still alive after a few seconds; exits 0 whether or not anything was running
+cenci daemon restart   # stop (if running), then spawn a fresh detached daemon and wait for it to come up
+cenci daemon status    # running/not-running + PID; exits 1 when not running
 ```
 
 `daemon stop` determines liveness via the same event-socket dial `EnsureRunning`
@@ -660,8 +660,8 @@ file is always removed once it's known stale.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-v` | `false` | Verbose logging |
-| `-event-socket` | `$XDG_RUNTIME_DIR/agentwatch/agentwatch-events.sock` | Event socket for hook notifications |
-| `-socket` | `$XDG_RUNTIME_DIR/agentwatch/agentwatch.sock` | Broadcast socket for widget clients |
+| `-event-socket` | `$XDG_RUNTIME_DIR/cenci/cenci-events.sock` | Event socket for hook notifications |
+| `-socket` | `$XDG_RUNTIME_DIR/cenci/cenci.sock` | Broadcast socket for widget clients |
 | `-sweep` | `1` | Stale session reconciliation interval in seconds |
 | `-session-ttl` | `2h` | Idle TTL for paneless sessions (Go duration); sessions without a pane are expired after this duration if no `SessionEnd` fires |
 | `-style-running` | `fg=blue,dim` | tmux style for running state (inactive windows) |
@@ -676,18 +676,18 @@ file is always removed once it's known stale.
 (Flags above apply to `daemon start`; `stop`/`restart`/`status` take no flags — they
 always resolve the default socket/PID paths.)
 
-### Human status overview (`agentwatch status`)
+### Human status overview (`cenci status`)
 
-`agentwatch status` prints a human-readable overview: whether the daemon is running
+`cenci status` prints a human-readable overview: whether the daemon is running
 (with its PID), the active sessions from the daemon's broadcast state snapshot (the
 same data `widget-json` reads), and the embedded fleet dispatch loop's state (the
-same renderer `agentwatch dispatch loop status` uses). It degrades gracefully when
+same renderer `cenci dispatch loop status` uses). It degrades gracefully when
 the daemon is down — it still prints a report and always exits 0. This is distinct
-from `agentwatch daemon status` above, which is a narrower running/not-running + PID
+from `cenci daemon status` above, which is a narrower running/not-running + PID
 check that exits 1 when not running (for scripting).
 
 ```console
-$ agentwatch status
+$ cenci status
 daemon: running (pid 12345)
 sessions (1):
   main:0 - implement thing (running)
@@ -699,17 +699,17 @@ Dispatch loop: enabled
   last_skipped: 0
 ```
 
-### Machine-readable status for widgets (`agentwatch widget-json`)
+### Machine-readable status for widgets (`cenci widget-json`)
 
-`agentwatch widget-json` connects to the daemon's broadcast socket, reads the current state, prints a single line of JSON in the [Waybar custom module protocol](https://github.com/Alexays/Waybar/wiki/Module:-Custom), and exits. This is the hidden plumbing subcommand every bar widget (Waybar itself, noctalia, DMS, GNOME Shell, KDE Plasma, macOS/SwiftBar) polls — it used to be named `agentwatch status` before `status` became the human-readable overview above. (`agentwatch waybar` remains a backwards-compatible hidden alias for `widget-json`.)
+`cenci widget-json` connects to the daemon's broadcast socket, reads the current state, prints a single line of JSON in the [Waybar custom module protocol](https://github.com/Alexays/Waybar/wiki/Module:-Custom), and exits. This is the hidden plumbing subcommand every bar widget (Waybar itself, noctalia, DMS, GNOME Shell, KDE Plasma, macOS/SwiftBar) polls — it used to be named `cenci status` before `status` became the human-readable overview above. (`cenci waybar` remains a backwards-compatible hidden alias for `widget-json`.)
 
 ```bash
-agentwatch widget-json
+cenci widget-json
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-socket` | `$XDG_RUNTIME_DIR/agentwatch/agentwatch.sock` | Broadcast socket path |
+| `-socket` | `$XDG_RUNTIME_DIR/cenci/cenci.sock` | Broadcast socket path |
 | `-symbol-running` | `▶` | Symbol for running count |
 | `-symbol-done` | `✓` | Symbol for done count |
 | `-symbol-input` | `!` | Symbol for need-input count |
@@ -719,37 +719,37 @@ agentwatch widget-json
 #### Waybar config
 
 ```jsonc
-"custom/agentwatch": {
-    "exec": "agentwatch widget-json",
+"custom/cenci": {
+    "exec": "cenci widget-json",
     "return-type": "json",
     "interval": 1
 }
 ```
 
-Then add `"custom/agentwatch"` to your bar's modules.
+Then add `"custom/cenci"` to your bar's modules.
 
 #### Waybar styling
 
 The module sets a `class` based on the highest-priority status: `need-input` > `running` > `done` > `idle`.
 
 ```css
-#custom-agentwatch {
+#custom-cenci {
     padding: 0 8px;
 }
 
-#custom-agentwatch.need-input {
+#custom-cenci.need-input {
     color: #f38ba8;
 }
 
-#custom-agentwatch.running {
+#custom-cenci.running {
     color: #89b4fa;
 }
 
-#custom-agentwatch.done {
+#custom-cenci.done {
     color: #a6e3a1;
 }
 
-#custom-agentwatch.idle {
+#custom-cenci.idle {
     color: #6c7086;
 }
 ```
@@ -808,17 +808,17 @@ from the raw fields directly. `class` is unaffected (session-status
 priority is unchanged; it stays `"none"` when there are zero live sessions,
 dispatch-enabled or not), but `alt` becomes `"dispatch-only"` instead of `"none"`
 when there are zero live sessions and the loop is enabled — **`alt`, not `class`, is
-what determines whether the module is hidden** (`agentwatch widget-json`'s exit code
+what determines whether the module is hidden** (`cenci widget-json`'s exit code
 follows `alt == "none"`), so the indicator still appears even with no active
 sessions. Every non-waybar frontend (noctalia/DMS/GNOME/Plasma/macOS) reads this
 same `alt` field to decide visibility.
 
 Since `alt` isn't a stylable CSS class in Waybar (only `class` is — Waybar exposes
-`alt` as the `{alt}` text substitution for `format-alt`, not as a `#custom-agentwatch.<alt>`
+`alt` as the `{alt}` text substitution for `format-alt`, not as a `#custom-cenci.<alt>`
 selector), the dispatch-only glyph inherits whatever `.none` is already styled as:
 
 ```css
-#custom-agentwatch.none {
+#custom-cenci.none {
     color: #6c7086;
 }
 ```
@@ -831,7 +831,7 @@ off `format-alt` / `{alt}` instead of CSS — e.g. `"format-alt": "{alt}"` with
 #### macOS menu bar (SwiftBar)
 
 macOS users get the same status surface via a [SwiftBar](https://swiftbar.app)
-plugin that consumes the identical `agentwatch widget-json` JSON — no daemon changes. It
+plugin that consumes the identical `cenci widget-json` JSON — no daemon changes. It
 shows the counts in the menu bar (loud red on `need-input`) and a per-session
 dropdown, and hides when no sessions are live. See
 [`plugin/macos/README.md`](plugin/macos/README.md) for install and settings.
@@ -839,7 +839,7 @@ dropdown, and hides when no sessions are live. See
 #### GNOME Shell (Ubuntu)
 
 Ubuntu's default desktop gets the same status surface via a GNOME Shell 45+
-extension that polls `agentwatch widget-json` and adds a top-bar indicator — an icon +
+extension that polls `cenci widget-json` and adds a top-bar indicator — an icon +
 counts colored by the highest-priority status, with a click-through menu listing
 each session. It hides when no sessions are live. See
 [`plugin/gnome/README.md`](plugin/gnome/README.md) for install and settings.
@@ -847,7 +847,7 @@ each session. It hides when no sessions are live. See
 #### KDE Plasma (Kubuntu)
 
 KDE Plasma 6 users get a native panel widget that consumes the identical
-`agentwatch widget-json` JSON — a compact icon + counts with an expandable per-session
+`cenci widget-json` JSON — a compact icon + counts with an expandable per-session
 list, hidden from the panel when no sessions are live. See
 [`plugin/plasma/README.md`](plugin/plasma/README.md) for install and settings.
 
@@ -858,13 +858,13 @@ The public `pkg/watch` package lets any Go tool subscribe to that stream — for
 example to badge kanban cards or dashboards with per-window agent status.
 
 ```bash
-go get github.com/matteobortolazzo/agent-stack/agentwatch/v4
+go get github.com/matteobortolazzo/cenci/watch/v4
 ```
 
-It versions via the existing `agentwatch/v*` submodule tags.
+It versions via the existing `watch/v*` submodule tags.
 
 ```go
-import "github.com/matteobortolazzo/agent-stack/agentwatch/v4/pkg/watch"
+import "github.com/matteobortolazzo/cenci/watch/v4/pkg/watch"
 
 c, err := watch.Dial(watch.DefaultSocketPath())
 // ... handle err; defer c.Close()
@@ -909,7 +909,7 @@ never renamed, removed, or repurposed, and unknown fields must be ignored (Go's
 | `PostToolUse` | Running | Codex completed a tool call and is still working |
 | `Stop` | Done | Codex finished responding |
 
-Codex does not currently document a `SessionEnd` hook. agentwatch restores tracked Codex windows during the stale sweep once the pane returns to a non-Codex command after a completed/idle turn.
+Codex does not currently document a `SessionEnd` hook. cenci restores tracked Codex windows during the stale sweep once the pane returns to a non-Codex command after a completed/idle turn.
 
 For Codex, the first non-empty line of the first submitted prompt becomes the
 session's task label. Control characters are removed, whitespace is collapsed,
@@ -917,12 +917,12 @@ and the label is capped at 30 characters. The first label stays pinned across
 later prompts and native pane-title changes; manually named windows, including
 dispatched `<number>-<skill>` windows, remain unchanged.
 
-Only that compact `task_name` is sent over agentwatch's internal hook-event IPC.
+Only that compact `task_name` is sent over cenci's internal hook-event IPC.
 The raw prompt and its remaining lines are never transmitted or persisted by
-agentwatch.
+cenci.
 
 Codex currently does not emit `PreToolUse` for non-shell/non-MCP tools such as
-`request_user_input`. During reconciliation, agentwatch therefore recognizes
+`request_user_input`. During reconciliation, cenci therefore recognizes
 Codex's native `[ ! ] Action Required | project` pane title as `need-input`,
 keeps the pinned prompt label (or falls back to `project` after a daemon
 restart), and recognizes a later braille-spinner title as `running` again.
@@ -933,76 +933,76 @@ The daemon has two sweep mechanisms:
 
 **Pane-based sweep (tmux-backed sessions)**: Every 1s (configurable with `-sweep`), the tmux frontend reconciles native agent titles and checks if tracked pane IDs still exist in tmux. If a pane is gone (e.g. an agent crashed without firing a cleanup hook), the window is restored. For Codex, the sweep also detects native input prompts and restores the window after a completed session exits back to the user's shell.
 
-**Paneless TTL sweep**: Sessions without a tmux pane (plain terminals, dev-sandbox without a pane) are tracked by session id only. They are removed on `SessionEnd`; if no `SessionEnd` fires (e.g. a crash or a Codex session), the daemon expires them after the idle TTL (default `2h`, configurable with `-session-ttl`).
+**Paneless TTL sweep**: Sessions without a tmux pane (plain terminals, cenci-sandbox without a pane) are tracked by session id only. They are removed on `SessionEnd`; if no `SessionEnd` fires (e.g. a crash or a Codex session), the daemon expires them after the idle TTL (default `2h`, configurable with `-session-ttl`).
 
-**Sandbox orphan reap**: When the pane-based sweep detects one or more tmux-backed sessions whose pane no longer exists, the daemon triggers a single `agent-sand --reap-orphans` pass (coalesced — not one per stale window) to kill any orphaned container-side agent processes for those sessions. The daemon also runs one reap pass at startup, covering panes that closed while it was down or restarting. The reap is fire-and-forget, non-blocking for the event loop, and self-no-ops when `agent-sand` isn't on `PATH` or there's nothing to reap.
+**Sandbox orphan reap**: When the pane-based sweep detects one or more tmux-backed sessions whose pane no longer exists, the daemon triggers a single `cenci-sand --reap-orphans` pass (coalesced — not one per stale window) to kill any orphaned container-side agent processes for those sessions. The daemon also runs one reap pass at startup, covering panes that closed while it was down or restarting. The reap is fire-and-forget, non-blocking for the event loop, and self-no-ops when `cenci-sand` isn't on `PATH` or there's nothing to reap.
 
 ### Paneless sessions
 
-`agentwatch notify` accepts events even when `$TMUX_PANE` is unset. Sessions running in plain terminals or dev-sandbox without a tmux pane appear in `agentwatch widget-json` output with empty `session` and `window_index` fields; their tooltip line reads `name (status)` rather than `sess:idx - name (status)`.
+`cenci notify` accepts events even when `$TMUX_PANE` is unset. Sessions running in plain terminals or cenci-sandbox without a tmux pane appear in `cenci widget-json` output with empty `session` and `window_index` fields; their tooltip line reads `name (status)` rather than `sess:idx - name (status)`.
 
 **Caveat**: for paneless sessions the task name comes only from the hook payload's `task_name` field — there is no pane title to read. Codex `UserPromptSubmit` hooks provide the compact first-prompt label, but native action-required title detection is only available for tmux-backed sessions.
 
 ### Custom status-format integration
 
-agentwatch exposes two per-window user variables for custom `status-format` configs:
+cenci exposes two per-window user variables for custom `status-format` configs:
 
-- `@agentwatch-symbol` — the status symbol (`~`, `▶`, `✓`, `!`)
-- `@agentwatch-style` — the status style (e.g. `fg=blue,dim`)
+- `@cenci-symbol` — the status symbol (`~`, `▶`, `✓`, `!`)
+- `@cenci-style` — the status style (e.g. `fg=blue,dim`)
 
 Use them in your `status-format` to replace the default indicator and color:
 
 ```
-# Replace ● with agentwatch symbol when active, keep ● otherwise
-#{?#{@agentwatch-symbol},#{@agentwatch-symbol},●}
+# Replace ● with cenci symbol when active, keep ● otherwise
+#{?#{@cenci-symbol},#{@cenci-symbol},●}
 
-# Use agentwatch style when active, fall back to default color
-#{?#{@agentwatch-style},#[#{@agentwatch-style}],#[fg=brightblack]}
+# Use cenci style when active, fall back to default color
+#{?#{@cenci-style},#[#{@cenci-style}],#[fg=brightblack]}
 ```
 
-AgentWatch intentionally does not ship a tmux theme: it supplies live state while
+cenci-watch intentionally does not ship a tmux theme: it supplies live state while
 your existing theme remains responsible for layout, spacing, separators, and the
-active-window treatment. For users with the default tmux status format, AgentWatch
-automatically prepends `#{@agentwatch-symbol}` to `window-status-format` and
+active-window treatment. For users with the default tmux status format, cenci-watch
+automatically prepends `#{@cenci-symbol}` to `window-status-format` and
 `window-status-current-format` during tracking, and restores them on cleanup.
 Themes that fully replace those formats should reference the variables above.
 
 ### Budget headroom in status-line
 
-For agent-types with budget tracking configured (see [Usage budgets](#usage-budgets)), agentwatch sets a session-wide (not per-window) tmux user variable per agent-type carrying the remaining budget headroom as an integer percent:
+For agent-types with budget tracking configured (see [Usage budgets](#usage-budgets)), cenci sets a session-wide (not per-window) tmux user variable per agent-type carrying the remaining budget headroom as an integer percent:
 
-- `@agentwatch-headroom-<agent>` — remaining headroom, `0`–`100` (e.g. `@agentwatch-headroom-claude` → `73`)
+- `@cenci-headroom-<agent>` — remaining headroom, `0`–`100` (e.g. `@cenci-headroom-claude` → `73`)
 
-Unlike `@agentwatch-symbol`/`@agentwatch-style`, this is a global option (`set-option -g`), not scoped to any one window, since headroom is a per-agent-type fact rather than a per-session/window one. Reference it once in your own `status-line`:
+Unlike `@cenci-symbol`/`@cenci-style`, this is a global option (`set-option -g`), not scoped to any one window, since headroom is a per-agent-type fact rather than a per-session/window one. Reference it once in your own `status-line`:
 
 ```
-set -g status-right "claude: #{@agentwatch-headroom-claude}% | codex: #{@agentwatch-headroom-codex}%"
+set -g status-right "claude: #{@cenci-headroom-claude}% | codex: #{@cenci-headroom-codex}%"
 ```
 
 The variable is cleared (absent) when the daemon has no headroom data for that agent-type (budget tracking disabled or unconfigured).
 
 ### Manual window names
 
-agentwatch respects manually set window names:
+cenci respects manually set window names:
 
-- If a window has `automatic-rename` set to `off` (i.e. you renamed it with `Ctrl+b ,`), agentwatch will show status indicators but keep your window name.
-- If you rename a window while an agent is running, agentwatch detects the change and stops overriding your name.
+- If a window has `automatic-rename` set to `off` (i.e. you renamed it with `Ctrl+b ,`), cenci will show status indicators but keep your window name.
+- If you rename a window while an agent is running, cenci detects the change and stops overriding your name.
 - When the agent exits, manually-named windows keep their name (indicators are removed).
 
 ### Daemon restart
 
 If the daemon is absent after a login or restart, the next installed Claude or Codex
-hook starts it on demand (spawning `agentwatch daemon start` detached), waits briefly,
+hook starts it on demand (spawning `cenci daemon start` detached), waits briefly,
 and retries that same event. The daemon then re-discovers the session — a `ListPanes`
 call maps the `$TMUX_PANE` to the correct window — and status consumers such as DMS
 see it on their next poll. Custom `-event-socket` instances are never started
-automatically. To restart deliberately (e.g. after a config change), use `agentwatch
+automatically. To restart deliberately (e.g. after a config change), use `cenci
 daemon restart` instead of waiting for the next hook — see
-[Daemon lifecycle](#daemon-lifecycle-agentwatch-daemon-startstoprestartstatus) above.
+[Daemon lifecycle](#daemon-lifecycle-cenci-daemon-startstoprestartstatus) above.
 
 **Upgrading past the socket-directory nesting change**: sockets moved from
-`$XDG_RUNTIME_DIR/agentwatch*.sock` to `$XDG_RUNTIME_DIR/agentwatch/agentwatch*.sock`
-(nested under a dedicated `agentwatch/` subdirectory — see `agentwatch socket-dir`). An
+`$XDG_RUNTIME_DIR/cenci*.sock` to `$XDG_RUNTIME_DIR/cenci/cenci*.sock`
+(nested under a dedicated `cenci/` subdirectory — see `cenci socket-dir`). An
 already-running pre-upgrade daemon stays bound to its old path and keeps running there,
 harmlessly orphaned. A client on the upgraded binary computes the new nested path,
 can't reach that old daemon, and the existing `EnsureRunning()` self-heal spawns a fresh
@@ -1011,29 +1011,29 @@ above for any other daemon-absent case. No special migration steps are needed.
 
 ## Troubleshooting
 
-**No status updates**: Ensure the hook/plugin is loaded (`claude plugin list`, `claude --plugin-dir ./plugin`, or Codex `/hooks`). Check `agentwatch daemon status` (running/not-running + PID) and that `agentwatch notify` can reach the event socket (`agentwatch daemon start -v` shows the socket path).
+**No status updates**: Ensure the hook/plugin is loaded (`claude plugin list`, `claude --plugin-dir ./plugin`, or Codex `/hooks`). Check `cenci daemon status` (running/not-running + PID) and that `cenci notify` can reach the event socket (`cenci daemon start -v` shows the socket path).
 
 **Binary/daemon didn't bootstrap**: The SessionStart bootstrap fails silently so it
 never blocks the agent. Check the bootstrap log at
-`${TMPDIR:-/tmp}/agentwatch-bootstrap.log` — it records download, checksum, arch,
+`${TMPDIR:-/tmp}/cenci-bootstrap.log` — it records download, checksum, arch,
 and network failures (e.g. no release published yet, or an unsupported OS/arch). If
 bootstrap can't run, install the binary manually and start the daemon (see
 [Advanced / development](#advanced--development)).
 
-**Names not restoring**: agentwatch restores names on clean exit (Ctrl+C / SIGTERM) and via the stale sweep. If it was killed with SIGKILL, manually rename windows or restart tmux.
+**Names not restoring**: cenci restores names on clean exit (Ctrl+C / SIGTERM) and via the stale sweep. If it was killed with SIGKILL, manually rename windows or restart tmux.
 
-**Daemon not running**: for the default event socket, `agentwatch notify` starts the
+**Daemon not running**: for the default event socket, `cenci notify` starts the
 daemon and retries once. Recovery failures remain silent (exit 0), so the agent is
 never blocked. Custom event sockets fail silently without starting another instance.
 
 ### Verbose mode
 
-When running with `-v`, agentwatch logs compact task names derived from prompt labels or pane titles to stderr. Pane titles may reflect file paths, command output, or other workspace context. Raw prompts are never logged, transmitted, or persisted; task names and window names are truncated to 50 characters in log output to limit exposure.
+When running with `-v`, cenci logs compact task names derived from prompt labels or pane titles to stderr. Pane titles may reflect file paths, command output, or other workspace context. Raw prompts are never logged, transmitted, or persisted; task names and window names are truncated to 50 characters in log output to limit exposure.
 
 If verbose logs are persisted (e.g. by a process supervisor), direct output to a user-owned file with restricted permissions:
 
 ```bash
-agentwatch -v 2>~/.local/state/agentwatch.log
+cenci -v 2>~/.local/state/cenci.log
 ```
 
 ## License

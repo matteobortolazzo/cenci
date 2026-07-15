@@ -1,8 +1,8 @@
-// AgentWatch — KDE Plasma 6 plasmoid.
+// Cenci — KDE Plasma 6 plasmoid.
 //
 // Live Claude Code / Codex session counts in the Plasma panel. Read-only
 // frontend over the same Waybar JSON contract consumed by the waybar, noctalia,
-// dms, and macOS widgets — no daemon or Go changes. Polls `agentwatch widget-json`
+// dms, and macOS widgets — no daemon or Go changes. Polls `cenci widget-json`
 // on a timer, parses the single JSON line, and maps the `class` field to an icon
 // + color. Empty stdout, non-zero exit, or `alt: "none"` → hide from the panel
 // (`alt`, not `class`, is the hide/show contract — `class` stays "none" for the
@@ -30,7 +30,7 @@ PlasmoidItem {
         const v = parseInt(Plasmoid.configuration.pollIntervalMs)
         return (!isNaN(v) && v >= 250) ? v : 2000
     }
-    readonly property string agentwatchPath: Plasmoid.configuration.agentwatchPath || "cenci"
+    readonly property string cenciPath: Plasmoid.configuration.cenciPath || "cenci"
 
     // Sorted agent keys with budget headroom data — deterministic order,
     // mirrors formatHeadroom in status.go / hKeys.sort() in the JXA script.
@@ -140,13 +140,13 @@ PlasmoidItem {
                 root.headroom = j.headroom || ({})
                 root.hasOutput = root.cssAlt !== "none"
             } catch (e) {
-                console.warn("AgentWatch parse error:", e, out)
+                console.warn("Cenci parse error:", e, out)
                 root.hasOutput = false
             }
         }
 
         function poll() {
-            connectSource(root.agentwatchPath + " widget-json")
+            connectSource(root.cenciPath + " widget-json")
         }
     }
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Installs the AgentWatch DankMaterialShell (DMS) bar widget without touching the
+# Installs the Cenci DankMaterialShell (DMS) bar widget without touching the
 # GUI: symlinks this plugin into DMS's plugin folder and restarts DMS so the
 # change takes effect immediately.
 #
@@ -17,7 +17,7 @@ if ! command -v dms >/dev/null 2>&1 && [ ! -d "$HOME/.config/DankMaterialShell" 
 fi
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-DEST="$HOME/.config/DankMaterialShell/plugins/agentwatch"
+DEST="$HOME/.config/DankMaterialShell/plugins/cenci"
 
 mkdir -p "$(dirname "$DEST")"
 if [ -e "$DEST" ] && [ ! -L "$DEST" ]; then
@@ -38,4 +38,4 @@ else
 fi
 
 echo "Done. Open Settings (dms ipc call settings toggle) → Plugins → enable"
-echo "AgentWatch → DankBar → add the widget to a section."
+echo "Cenci → DankBar → add the widget to a section."

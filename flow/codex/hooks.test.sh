@@ -2,9 +2,9 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AGENTFLOW_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-CODEX_MANIFEST="${AGENTFLOW_DIR}/.codex-plugin/plugin.json"
-CLAUDE_HOOKS="${AGENTFLOW_DIR}/hooks/hooks.json"
+FLOW_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+CODEX_MANIFEST="${FLOW_DIR}/.codex-plugin/plugin.json"
+CLAUDE_HOOKS="${FLOW_DIR}/hooks/hooks.json"
 
 FAILURES=0
 PASSES=0
@@ -32,7 +32,7 @@ else
     fail "Codex manifest must declare an explicit hooks path"
 fi
 
-CODEX_HOOKS="${AGENTFLOW_DIR}/${HOOKS_PATH#./}"
+CODEX_HOOKS="${FLOW_DIR}/${HOOKS_PATH#./}"
 if [[ -f "${CODEX_HOOKS}" ]]; then
     pass
 else
@@ -52,11 +52,11 @@ else
 fi
 
 SKILLS_PATH="$(jq -r '.skills // empty' "${CODEX_MANIFEST}")"
-SKILL_COUNT="$(find "${AGENTFLOW_DIR}/${SKILLS_PATH#./}" -mindepth 2 -maxdepth 2 -name SKILL.md | wc -l)"
+SKILL_COUNT="$(find "${FLOW_DIR}/${SKILLS_PATH#./}" -mindepth 2 -maxdepth 2 -name SKILL.md | wc -l)"
 if [[ -n "${SKILLS_PATH}" && "${SKILL_COUNT}" -gt 0 ]]; then
     pass
 else
-    fail "Codex manifest must keep AgentFlow skills discoverable"
+    fail "Codex manifest must keep cenci skills discoverable"
 fi
 
 echo "passed: ${PASSES}, failed: ${FAILURES}"

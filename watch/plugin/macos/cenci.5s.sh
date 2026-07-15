@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #
-# AgentWatch — SwiftBar menu bar plugin for macOS.
+# Cenci — SwiftBar menu bar plugin for macOS.
 #
-# <swiftbar.title>AgentWatch</swiftbar.title>
+# <swiftbar.title>Cenci</swiftbar.title>
 # <swiftbar.version>1.0</swiftbar.version>
 # <swiftbar.author>Matteo Bortolazzo</swiftbar.author>
 # <swiftbar.author.github>matteobortolazzo</swiftbar.author.github>
-# <swiftbar.desc>Live Claude Code / Codex session status in the macOS menu bar, via the agentwatch daemon.</swiftbar.desc>
+# <swiftbar.desc>Live Claude Code / Codex session status in the macOS menu bar, via the cenci daemon.</swiftbar.desc>
 # <swiftbar.dependencies>cenci</swiftbar.dependencies>
-# <swiftbar.abouturl>https://github.com/matteobortolazzo/agent-stack/tree/main/agentwatch</swiftbar.abouturl>
+# <swiftbar.abouturl>https://github.com/matteobortolazzo/cenci/tree/main/watch</swiftbar.abouturl>
 # <swiftbar.hideAbout>false</swiftbar.hideAbout>
 # <swiftbar.hideRunInTerminal>true</swiftbar.hideRunInTerminal>
 # <swiftbar.hideLastUpdated>true</swiftbar.hideLastUpdated>

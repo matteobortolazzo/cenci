@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Installs the AgentWatch noctalia-shell bar widget without touching the GUI:
+# Installs the Cenci noctalia-shell bar widget without touching the GUI:
 # symlinks this plugin into noctalia's plugin folder and restarts the shell so
 # the change takes effect immediately.
 #
@@ -17,7 +17,7 @@ if ! command -v noctalia-shell >/dev/null 2>&1 && [ ! -d "$HOME/.config/noctalia
 fi
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-DEST="$HOME/.config/noctalia/plugins/agentwatch"
+DEST="$HOME/.config/noctalia/plugins/cenci"
 
 mkdir -p "$(dirname "$DEST")"
 if [ -e "$DEST" ] && [ ! -L "$DEST" ]; then
@@ -42,4 +42,4 @@ else
   echo "noctalia-shell was not running — start it to load the widget: qs -c noctalia-shell &"
 fi
 
-echo "Done. Open Settings (SUPER+R) → Bar and add the AgentWatch widget to a section."
+echo "Done. Open Settings (SUPER+R) → Bar and add the Cenci widget to a section."

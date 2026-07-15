@@ -78,18 +78,18 @@ func TestResolveShortcut_Unrecognized(t *testing.T) {
 }
 
 func TestParseContainers_FiltersToSandboxPrefixAndParsesFields(t *testing.T) {
-	raw := "claude-sand-agentstack\tUp 2 hours\tagent-sandbox:latest\n" +
-		"codex-sand-agentstack\tExited (0) 5 minutes ago\tagent-sandbox:latest\n" +
+	raw := "claude-cenci-agentstack\tUp 2 hours\tcenci-sandbox:latest\n" +
+		"codex-cenci-agentstack\tExited (0) 5 minutes ago\tcenci-sandbox:latest\n" +
 		"some-other-container\tUp 1 hour\tnginx:latest\n"
 
 	got := parseContainers(raw)
 	if len(got) != 2 {
 		t.Fatalf("expected 2 sandbox containers, got %d: %+v", len(got), got)
 	}
-	if got[0] != (Container{Name: "claude-sand-agentstack", Status: "Up 2 hours", Image: "agent-sandbox:latest"}) {
+	if got[0] != (Container{Name: "claude-cenci-agentstack", Status: "Up 2 hours", Image: "cenci-sandbox:latest"}) {
 		t.Errorf("unexpected first container: %+v", got[0])
 	}
-	if got[1].Name != "codex-sand-agentstack" {
+	if got[1].Name != "codex-cenci-agentstack" {
 		t.Errorf("unexpected second container name: %q", got[1].Name)
 	}
 }
@@ -101,19 +101,19 @@ func TestParseContainers_EmptyInput(t *testing.T) {
 }
 
 func TestParseNames_FiltersToSandboxPrefix(t *testing.T) {
-	raw := "claude-sand-agentstack\ncodex-sand-agentstack\nunrelated-container\n"
+	raw := "claude-cenci-agentstack\ncodex-cenci-agentstack\nunrelated-container\n"
 	got := parseNames(raw, "")
-	want := []string{"claude-sand-agentstack", "codex-sand-agentstack"}
+	want := []string{"claude-cenci-agentstack", "codex-cenci-agentstack"}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Errorf("parseNames(raw, \"\") = %v, want %v", got, want)
 	}
 }
 
 func TestParseNames_SubstringFilter(t *testing.T) {
-	raw := "claude-sand-agentstack\ncodex-sand-otherrepo\n"
+	raw := "claude-cenci-agentstack\ncodex-cenci-otherrepo\n"
 	got := parseNames(raw, "agentstack")
-	if len(got) != 1 || got[0] != "claude-sand-agentstack" {
-		t.Errorf("parseNames(raw, \"agentstack\") = %v, want [claude-sand-agentstack]", got)
+	if len(got) != 1 || got[0] != "claude-cenci-agentstack" {
+		t.Errorf("parseNames(raw, \"agentstack\") = %v, want [claude-cenci-agentstack]", got)
 	}
 }
 

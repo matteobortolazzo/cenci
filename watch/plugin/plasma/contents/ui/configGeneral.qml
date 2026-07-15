@@ -4,7 +4,7 @@ import org.kde.kirigami as Kirigami
 
 Kirigami.FormLayout {
     // cfg_* aliases bind to the matching entries in config/main.xml.
-    property alias cfg_agentwatchPath: pathField.text
+    property alias cfg_cenciPath: pathField.text
     property alias cfg_pollIntervalMs: intervalSpin.value
 
     TextField {

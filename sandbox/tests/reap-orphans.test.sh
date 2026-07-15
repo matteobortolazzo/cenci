@@ -18,7 +18,7 @@
 # Assumed CLI contract this suite defines for the eventual implementation
 # (mirrors the ticket's architectural constraints):
 #   - Container enumeration: `<runtime> ps --format '{{.Names}}'`, filtered
-#     host-side to running containers matching ^(claude-sand-|codex-sand-)$.
+#     host-side to running containers matching ^(claude-cenci-|codex-cenci-)$.
 #   - In-container scan: `<runtime> exec -u root <container> sh -c '<POSIX
 #     script scanning /proc/*/environ for a line matching ^TMUX_PANE=>'`,
 #     emitting one `<pid>\t<pane>\t<start>` line per process that carries the
@@ -72,7 +72,7 @@ SANDBOX_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${SANDBOX_DIR}/lib/repo-scope.sh"
 REPO_ROOT="$(git -C "${SANDBOX_DIR}" rev-parse --show-toplevel)"
 REPO_SLUG="$(slugify "$(basename "${REPO_ROOT}")")"
-MAIN_CONTAINER="claude-sand-${REPO_SLUG}"
+MAIN_CONTAINER="claude-cenci-${REPO_SLUG}"
 
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "${TEST_ROOT}"' EXIT
@@ -218,7 +218,7 @@ case "${1:-}" in
                 exit 0
                 ;;
             *)
-                # Readiness probe (test -e /tmp/agent-sand-ready) or the
+                # Readiness probe (test -e /tmp/cenci-ready) or the
                 # actual agent launch exec — always succeeds.
                 exit 0
                 ;;
@@ -292,7 +292,7 @@ reset_state() {
     export MOCK_LIVENESS_FAIL=""
     export MOCK_TMUX_MODE="ok"
     export MOCK_LIVE_PANES=""
-    export AGENT_SAND_REAP_GRACE_SECS=0
+    export CENCI_SANDBOX_REAP_GRACE_SECS=0
 }
 
 add_podman_container() {
@@ -390,7 +390,7 @@ echo "reap-orphans.test.sh"
 case_1_orphan_termed() {
     echo "case: orphan (dead-pane) pid is SIGTERM'd and reported reaped"
     reset_state
-    local container="claude-sand-orphan1"
+    local container="claude-cenci-orphan1"
     add_podman_container "${container}"
     write_scan "${container}" $'5001\t%1\t1000'
     export MOCK_LIVE_PANES="%99"
@@ -405,7 +405,7 @@ case_1_orphan_termed() {
 case_2_term_resistant_escalates_to_kill() {
     echo "case: a pid that ignores SIGTERM is escalated to SIGKILL after the grace period"
     reset_state
-    local container="claude-sand-orphan2"
+    local container="claude-cenci-orphan2"
     add_podman_container "${container}"
     write_scan "${container}" $'5002\t%2\t2000'
     export MOCK_LIVE_PANES="%99"
@@ -421,7 +421,7 @@ case_2_term_resistant_escalates_to_kill() {
 case_3_empty_pane_never_signaled() {
     echo "case: empty-TMUX_PANE pid is never signaled, even when a paired orphan in the same container is reaped"
     reset_state
-    local container="claude-sand-orphan3"
+    local container="claude-cenci-orphan3"
     add_podman_container "${container}"
     write_scan "${container}" $'5003\t\t' $'5004\t%3\t3000'
     export MOCK_LIVE_PANES="%99"
@@ -439,7 +439,7 @@ case_3_empty_pane_never_signaled() {
 case_4_live_pane_never_signaled() {
     echo "case: live-pane pid is never signaled, even when a paired orphan in the same container is reaped"
     reset_state
-    local container="claude-sand-orphan4"
+    local container="claude-cenci-orphan4"
     add_podman_container "${container}"
     write_scan "${container}" $'5005\t%4\t4000' $'5006\t%5\t5000'
     export MOCK_LIVE_PANES="%4"
@@ -457,7 +457,7 @@ case_4_live_pane_never_signaled() {
 case_5_no_tmux_server_reaps_everything() {
     echo "case: no tmux server running treats every TMUX_PANE-carrying pid as orphaned, with an explicit note"
     reset_state
-    local container="claude-sand-notmux"
+    local container="claude-cenci-notmux"
     add_podman_container "${container}"
     write_scan "${container}" $'6001\t%6\t6000' $'6002\t%7\t6001' $'6003\t\t'
     export MOCK_TMUX_MODE="noserver"
@@ -477,7 +477,7 @@ case_5_no_tmux_server_reaps_everything() {
 case_6_genuine_tmux_error_hard_fails() {
     echo "case: a genuine tmux error (not 'no server running') hard-fails and reaps nothing"
     reset_state
-    local container="claude-sand-tmuxerr"
+    local container="claude-cenci-tmuxerr"
     add_podman_container "${container}"
     write_scan "${container}" $'6101\t%8\t6100'
     export MOCK_TMUX_MODE="error"
@@ -493,8 +493,8 @@ case_6_genuine_tmux_error_hard_fails() {
 case_7_both_runtimes_scanned() {
     echo "case: both docker and podman are scanned when both have matching running containers"
     reset_state
-    local docker_container="claude-sand-orphan-docker"
-    local podman_container="codex-sand-orphan-podman"
+    local docker_container="claude-cenci-orphan-docker"
+    local podman_container="codex-cenci-orphan-podman"
     add_docker_container "${docker_container}"
     add_podman_container "${podman_container}"
     write_scan "${docker_container}" $'7001\t%9\t7000'
@@ -514,7 +514,7 @@ case_7_both_runtimes_scanned() {
 case_8_nothing_to_reap() {
     echo "case: a no-op run (all panes live) exits 0 with a clear nothing-to-reap message"
     reset_state
-    local container="claude-sand-clean"
+    local container="claude-cenci-clean"
     add_podman_container "${container}"
     write_scan "${container}" $'8001\t%11\t8000'
     export MOCK_LIVE_PANES="%11"
@@ -530,7 +530,7 @@ case_8_nothing_to_reap() {
 case_9_genuine_exec_failure_hard_fails() {
     echo "case: a genuine exec (scan) failure surfaces as a non-zero exit with a clear error, nothing reaped"
     reset_state
-    local container="claude-sand-failcase"
+    local container="claude-cenci-failcase"
     add_podman_container "${container}"
     write_scan "${container}" $'9001\t%12\t9000'
     export MOCK_SCAN_FAIL="${container}"
@@ -545,7 +545,7 @@ case_9_genuine_exec_failure_hard_fails() {
 case_10_genuine_term_failure_hard_fails() {
     echo "case: a genuine kill -TERM failure surfaces as a non-zero exit with a clear error, nothing reaped"
     reset_state
-    local container="claude-sand-termfail"
+    local container="claude-cenci-termfail"
     add_podman_container "${container}"
     write_scan "${container}" $'10001\t%13\t10000'
     export MOCK_LIVE_PANES="%99"
@@ -561,7 +561,7 @@ case_10_genuine_term_failure_hard_fails() {
 case_11_genuine_kill_failure_hard_fails() {
     echo "case: a genuine kill -KILL failure surfaces as a non-zero exit with a clear error"
     reset_state
-    local container="claude-sand-killfail"
+    local container="claude-cenci-killfail"
     add_podman_container "${container}"
     write_scan "${container}" $'11001\t%14\t11000'
     export MOCK_LIVE_PANES="%99"
@@ -576,7 +576,7 @@ case_11_genuine_kill_failure_hard_fails() {
 case_12_malformed_pane_skipped() {
     echo "case: malformed TMUX_PANE values (not matching ^%[0-9]+\$) are never signaled, and logged with a distinct note"
     reset_state
-    local container="claude-sand-malformed"
+    local container="claude-cenci-malformed"
     add_podman_container "${container}"
     write_scan "${container}" \
         $'12001\t%foo\t1000' \
@@ -603,7 +603,7 @@ case_12_malformed_pane_skipped() {
 case_13_pid_reuse_during_grace_skips_kill() {
     echo "case: a PID reused by an unrelated process during the grace window is not SIGKILL'd (identity mismatch)"
     reset_state
-    local container="claude-sand-reused"
+    local container="claude-cenci-reused"
     add_podman_container "${container}"
     write_scan "${container}" $'13001\t%16\t1000'
     export MOCK_LIVE_PANES="%99"
@@ -622,7 +622,7 @@ case_13_pid_reuse_during_grace_skips_kill() {
 case_14_liveness_transport_failure_hard_fails() {
     echo "case: a container-exec transport failure at the pre-SIGKILL probe surfaces as an Error, distinct from a genuine __GONE__ no-op"
     reset_state
-    local container="claude-sand-transportfail"
+    local container="claude-cenci-transportfail"
     add_podman_container "${container}"
     write_scan "${container}" $'14001\t%17\t1000'
     export MOCK_LIVE_PANES="%99"
@@ -642,7 +642,7 @@ case_14_liveness_transport_failure_hard_fails() {
 case_15_corrupted_scan_start_falls_back_to_kill() {
     echo "case: a non-numeric recorded start (scan-time field-22 corruption, e.g. via a crafted comm) does not block SIGKILL; falls back to best-effort with a distinct note"
     reset_state
-    local container="claude-sand-corruptscan"
+    local container="claude-cenci-corruptscan"
     add_podman_container "${container}"
     # Recorded start is corrupted (non-numeric) at scan time; the pre-SIGKILL
     # probe reports a genuine numeric start time. A strictly-numeric identity
@@ -664,7 +664,7 @@ case_15_corrupted_scan_start_falls_back_to_kill() {
 case_16_corrupted_probe_output_falls_back_to_kill() {
     echo "case: a non-numeric pre-SIGKILL probe output (field-22 corruption via a crafted comm on the live process) does not block SIGKILL; falls back to best-effort with a distinct note"
     reset_state
-    local container="claude-sand-corruptprobe"
+    local container="claude-cenci-corruptprobe"
     add_podman_container "${container}"
     write_scan "${container}" $'16001\t%19\t16000'
     export MOCK_LIVE_PANES="%99"

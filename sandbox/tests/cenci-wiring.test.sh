@@ -14,7 +14,7 @@ SANDBOX_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # shellcheck source=../lib/repo-scope.sh
 source "${SANDBOX_DIR}/lib/repo-scope.sh"
 REPO_ROOT="$(git -C "${SANDBOX_DIR}" rev-parse --show-toplevel)"
-MOCK_CONTAINER_NAME="claude-sand-$(slugify "$(basename "${REPO_ROOT}")")"
+MOCK_CONTAINER_NAME="claude-cenci-$(slugify "$(basename "${REPO_ROOT}")")"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "${TEST_ROOT}"' EXIT
 

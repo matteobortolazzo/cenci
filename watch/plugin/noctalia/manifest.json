@@ -1,11 +1,11 @@
 {
-  "id": "agentwatch",
-  "name": "AgentWatch",
+  "id": "cenci",
+  "name": "Cenci",
   "version": "4.5.0",
   "minNoctaliaVersion": "4.4.1",
   "author": "Matteo Bortolazzo",
   "license": "MIT",
-  "repository": "https://github.com/matteobortolazzo/agent-stack",
+  "repository": "https://github.com/matteobortolazzo/cenci",
   "description": "Live counts of Claude Code and Codex tmux sessions (running / need-input / done / stopped / idle).",
   "tags": [
     "Bar",
@@ -21,7 +21,7 @@
   "metadata": {
     "defaultSettings": {
       "pollIntervalMs": 2000,
-      "agentwatchPath": "cenci"
+      "cenciPath": "cenci"
     }
   }
 }

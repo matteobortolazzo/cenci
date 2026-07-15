@@ -38,7 +38,7 @@ assert_jq() {
 echo "settings-merge.test.sh"
 
 # ── Case 1: stale pre-rename volume ───────────────────────────────
-# The real contents of the claude-sand-home-default volume that triggered this
+# The real contents of the claude-cenci-home-default volume that triggered this
 # fix: old muxwatch/ccflow plugins from the renamed claude-tools marketplace.
 STALE='{
   "enabledPlugins": { "muxwatch@claude-tools": true, "ccflow@claude-tools": true },

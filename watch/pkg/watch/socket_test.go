@@ -132,11 +132,11 @@ func TestDefaultSocketPath_ResolvesUnderNestedSocketDir(t *testing.T) {
 	}
 }
 
-// TestSocketDir_NestsAgentwatchSubdirUnderXDG covers the AC: when
+// TestSocketDir_NestsCenciSubdirUnderXDG covers the AC: when
 // $XDG_RUNTIME_DIR is valid, SocketDir() must return a dedicated cenci/
 // subdirectory nested under it (not the shared XDG dir itself, which also
 // holds wayland/pulse/keyring sockets), created with 0700 if missing.
-func TestSocketDir_NestsAgentwatchSubdirUnderXDG(t *testing.T) {
+func TestSocketDir_NestsCenciSubdirUnderXDG(t *testing.T) {
 	xdgDir := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", xdgDir)
 
@@ -162,10 +162,10 @@ func TestSocketDir_NestsAgentwatchSubdirUnderXDG(t *testing.T) {
 	}
 }
 
-// TestSocketDir_NestsAgentwatchSubdirUnderTmpFallback covers the AC: the /tmp
+// TestSocketDir_NestsCenciSubdirUnderTmpFallback covers the AC: the /tmp
 // fallback branch must nest cenci/ one level deeper than today's flat
 // /tmp/cenci-<uid>/ directory, created with 0700 if missing.
-func TestSocketDir_NestsAgentwatchSubdirUnderTmpFallback(t *testing.T) {
+func TestSocketDir_NestsCenciSubdirUnderTmpFallback(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", "")
 	tmpRoot := t.TempDir()
 	t.Setenv("TMPDIR", tmpRoot)

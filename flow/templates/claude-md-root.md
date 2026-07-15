@@ -22,7 +22,7 @@
 
 <!-- IF sandbox.enabled -->
 ## Sandbox Image
-- `.agent-sand/Dockerfile` — committed, per-repo image tailored to this repo's stack; the whole team builds the same image
+- `.cenci/Dockerfile` — committed, per-repo image tailored to this repo's stack; the whole team builds the same image
 - Rebuild after changing the stack or the Dockerfile: `cenci-sand --build` (run from inside this repo)
 <!-- END IF -->
 

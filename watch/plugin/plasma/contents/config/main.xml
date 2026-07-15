@@ -11,7 +11,7 @@
       <min>250</min>
       <max>60000</max>
     </entry>
-    <entry name="agentwatchPath" type="String">
+    <entry name="cenciPath" type="String">
       <label>Path or command name for the cenci binary</label>
       <default>cenci</default>
     </entry>

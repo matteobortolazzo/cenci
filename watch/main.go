@@ -1053,7 +1053,7 @@ func runSandboxPrune(args []string) {
 }
 
 // runSandboxLs implements `cenci sandbox ls`: lists every
-// claude-sand-*/codex-sand-* container (running or stopped) as a table.
+// claude-cenci-*/codex-cenci-* container (running or stopped) as a table.
 func runSandboxLs(args []string) {
 	fs := flag.NewFlagSet("sandbox ls", flag.ExitOnError)
 	_ = fs.Parse(args)
@@ -1086,7 +1086,7 @@ func runSandboxLs(args []string) {
 }
 
 // runSandboxStop implements `cenci sandbox stop [name-or-slug-filter]`:
-// stops every running claude-sand-*/codex-sand-* container, optionally
+// stops every running claude-cenci-*/codex-cenci-* container, optionally
 // narrowed to names containing the given filter substring.
 func runSandboxStop(args []string) {
 	fs := flag.NewFlagSet("sandbox stop", flag.ExitOnError)

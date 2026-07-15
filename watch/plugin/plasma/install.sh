@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Installs the AgentWatch KDE Plasma widget without touching the panel GUI:
+# Installs the Cenci KDE Plasma widget without touching the panel GUI:
 # symlinks this plasmoid into the per-user plasmoids folder under its plugin id
 # and restarts plasmashell so the change takes effect immediately.
 #
@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-ID="com.github.matteobortolazzo.agentwatch"
+ID="com.github.matteobortolazzo.cenci"
 
 if ! command -v plasmashell >/dev/null 2>&1; then
   echo "KDE Plasma not detected (no plasmashell) — skipping." >&2
@@ -40,5 +40,5 @@ else
 fi
 echo "Reloaded plasmashell."
 
-echo "Done. Right-click the panel → Add Widgets… → search 'AgentWatch' → add it."
-echo "Right-click the widget → Configure AgentWatch… to set the binary path."
+echo "Done. Right-click the panel → Add Widgets… → search 'Cenci' → add it."
+echo "Right-click the widget → Configure Cenci… to set the binary path."

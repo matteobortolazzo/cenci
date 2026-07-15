@@ -1,19 +1,19 @@
 # Release hygiene — repo-settings runbook (Part 2 of #150)
 
 This is the maintainer runbook for **Part 2** of
-[#150](https://github.com/matteobortolazzo/agent-stack/issues/150) — the repo-settings
+[#150](https://github.com/matteobortolazzo/cenci/issues/150) — the repo-settings
 half that can't be expressed as a file in a PR. Part 1 (this PR) ships the docs/config
 half: `SECURITY.md`, `CONTRIBUTING.md`, issue/PR templates, and `.github/dependabot.yml`.
 Run Part 2 manually, once, after Part 1 merges.
 
 Commands below use `gh api` and assume you're authenticated as the repo owner. Replace
-`{owner}/{repo}` with `matteobortolazzo/agent-stack` where a concrete example is useful;
+`{owner}/{repo}` with `matteobortolazzo/cenci` where a concrete example is useful;
 elsewhere the placeholder form is used since these commands are otherwise generic.
 
 ## 1. Repo topics
 
 ```bash
-gh api -X PUT repos/matteobortolazzo/agent-stack/topics \
+gh api -X PUT repos/matteobortolazzo/cenci/topics \
   -H "Accept: application/vnd.github+json" \
   -f names[]=claude-code \
   -f names[]=codex \
@@ -69,7 +69,7 @@ silently.
 > ```
 
 ```bash
-gh api -X POST repos/matteobortolazzo/agent-stack/rulesets \
+gh api -X POST repos/matteobortolazzo/cenci/rulesets \
   -H "Accept: application/vnd.github+json" \
   -f name="main" \
   -f target="branch" \
@@ -108,13 +108,13 @@ ruleset's PR-required rule applies to them, that push fails.
 
 After creating the ruleset:
 
-1. Merge (or wait for) the next PR that touches a plugin path (`agentflow/**`,
-   `agentwatch/**`, or `dev-sandbox/**`).
+1. Merge (or wait for) the next PR that touches a plugin path (`flow/**`,
+   `watch/**`, or `sandbox/**`).
 2. Open the Actions tab and find the resulting `*-version-bump.yml` run (e.g.
-   `agentflow — Version Bump`).
+   `flow — Version Bump`).
 3. Confirm the run **succeeds end-to-end** — specifically the `git push` step that lands
-   the `chore(release): <plugin>/vX.Y.Z` commit on `main`, and (for agentwatch) the
-   follow-on `agentwatch-release.yml` dispatch.
+   the `chore(release): <plugin>/vX.Y.Z` commit on `main`, and (for watch) the
+   follow-on `watch-release.yml` dispatch.
 4. If the push fails with a branch-protection error, the bypass actor is misconfigured —
    fix the ruleset's `bypass_actors` entry immediately, before any other plugin-touching
    PR merges.
@@ -125,22 +125,22 @@ Only consider Part 2 complete once this verification step has passed on a real m
 
 **Not optional.** #193 removed the elevating `permissions:` block from the reusable
 `plugin-version-bump.yml` workflow (it now inherits whatever permissions the caller job
-grants) and reverted `agentflow-version-bump.yml` / `agent-sandbox-version-bump.yml` to
+grants) and reverted `flow-version-bump.yml` / `sandbox-version-bump.yml` to
 `contents: write` only, dropping the `actions: write` stopgap. This is only fully proven
 on a real plugin-touching push — a misconfigured caller permission would silently break
 the next release the same way it did before #189/#190/#192.
 
 After this fix merges to `main`:
 
-1. Wait for the next real push that touches a plugin path (`agentflow/**`,
-   `agentwatch/**`, or `dev-sandbox/**`).
+1. Wait for the next real push that touches a plugin path (`flow/**`,
+   `watch/**`, or `sandbox/**`).
 2. Open the Actions tab and find the resulting `*-version-bump.yml` run.
 3. Confirm the run **succeeds end-to-end** with no `startup_failure` — specifically:
-   - `agentflow` / `agent-sandbox`: the run starts and the `git push` step lands the
+   - `flow` / `cenci-sandbox`: the run starts and the `git push` step lands the
      `chore(release): <plugin>/vX.Y.Z` commit on `main`, under a `contents: write`-only
      token.
-   - `agentwatch`: the run succeeds under `contents: write` + `actions: write`, tags the
-     release, and dispatches `agentwatch-release.yml` via `gh workflow run`.
+   - `watch`: the run succeeds under `contents: write` + `actions: write`, tags the
+     release, and dispatches `watch-release.yml` via `gh workflow run`.
 4. Confirm the release-commit skip guard still works: on the push that follows the
    `chore(release): <plugin>/v...` commit, the version-bump workflow's HEAD check exits
    early (no recursive bump).

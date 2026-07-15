@@ -15,7 +15,7 @@ isolated Docker/Podman container. Two steps:
 
 1. **Symlink the `cenci-sand` launcher onto PATH** — the launcher ships with the
    plugin at `${CLAUDE_PLUGIN_ROOT}/cenci-sand`.
-2. **Build the container image** (`agent-sandbox:latest`) via `cenci-sand --build`.
+2. **Build the container image** (`cenci-sandbox:latest`) via `cenci-sand --build`.
 
 ### Parse `$ARGUMENTS`
 

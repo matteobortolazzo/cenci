@@ -210,7 +210,6 @@ assert_not_contains "${CASE_OUTPUT}" "/cenci:configure"
 [[ -L "${CASE_HOME}/.local/bin/cenci-sand" ]]
 [[ ! -e "${CASE_HOME}/.local/bin/sb" ]]
 [[ ! -e "${CASE_HOME}/.local/bin/codex-sand" ]]
-[[ ! -e "${CASE_HOME}/.local/bin/agent-sand" ]]
 assert_cenci_installer_utility
 
 echo "case: Codex-only image build uses the cenci-sand launcher"
@@ -226,7 +225,6 @@ assert_contains "${CASE_CALLS}" "claude plugin install cenci@cenci"
 assert_contains "${CASE_CALLS}" "codex plugin add cenci@cenci"
 [[ -L "${CASE_HOME}/.local/bin/cenci-sand" ]]
 [[ ! -e "${CASE_HOME}/.local/bin/sb" ]]
-[[ ! -e "${CASE_HOME}/.local/bin/agent-sand" ]]
 [[ ! -e "${CASE_HOME}/.local/bin/codex-sand" ]]
 assert_cenci_installer_utility
 

@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="430" viewBox="0 0 1200 430" role="img" aria-labelledby="title desc">
-  <title id="title">agent-sandbox security boundary</title>
+  <title id="title">cenci-sandbox security boundary</title>
   <desc id="desc">The current repository crosses from the host into a container workspace where a full-permission coding agent runs with its own persistent home and no inbound ports by default.</desc>
   <defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#0b1020"/><stop offset="1" stop-color="#111b35"/></linearGradient></defs>
   <rect width="1200" height="430" rx="24" fill="url(#bg)"/>

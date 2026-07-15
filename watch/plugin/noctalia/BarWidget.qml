@@ -61,7 +61,7 @@ Item {
   }
 
   // Same thresholds as headroomClass in status.go:179 and colorForHeadroom
-  // in plugin/macos/agentwatch.5s.sh:125 — keep all three in sync.
+  // in plugin/macos/cenci.5s.sh:125 — keep all three in sync.
   function classForHeadroom(pct) {
     if (pct > 25) return "normal"
     if (pct >= 10) return "warning"

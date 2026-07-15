@@ -11,7 +11,7 @@ PluginComponent {
         const v = parseInt(pluginData?.pollIntervalMs)
         return (!isNaN(v) && v >= 250) ? v : 2000
     }
-    readonly property string agentwatchPath: pluginData?.agentwatchPath || "cenci"
+    readonly property string cenciPath: pluginData?.cenciPath || "cenci"
 
     property string statusText: ""
     property string tooltipText: ""
@@ -69,7 +69,7 @@ PluginComponent {
 
     Process {
         id: poll
-        command: ["sh", "-c", root.agentwatchPath + " waybar"]
+        command: ["sh", "-c", root.cenciPath + " waybar"]
 
         stdout: StdioCollector {
             onStreamFinished: {
@@ -86,7 +86,7 @@ PluginComponent {
                     root.cssAlt = j["alt"] || "none"
                     root.hasOutput = root.cssAlt !== "none"
                 } catch (e) {
-                    console.warn("AgentWatch parse error:", e, out)
+                    console.warn("Cenci parse error:", e, out)
                     root.hasOutput = false
                 }
             }
@@ -147,7 +147,7 @@ PluginComponent {
     popoutContent: Component {
         PopoutComponent {
             id: popout
-            headerText: "AgentWatch"
+            headerText: "Cenci"
             detailsText: root.sessionCount === 1
                 ? "1 session"
                 : root.sessionCount + " sessions"

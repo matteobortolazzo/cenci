@@ -153,7 +153,7 @@ jobs:
               echo "Bumping Codex CLI: $CURRENT -> $LATEST"
               sed -i 's/^ARG CODEX_VERSION=.*/ARG CODEX_VERSION='"${LATEST}"'/' sandbox/Dockerfile
               sed -i 's/^ARG CODEX_VERSION=.*/ARG CODEX_VERSION='"${LATEST}"'/' sandbox/fragments/codex.dockerfile
-              sed -i 's/^ARG CODEX_VERSION=.*/ARG CODEX_VERSION='"${LATEST}"'/' .agent-sand/Dockerfile
+              sed -i 's/^ARG CODEX_VERSION=.*/ARG CODEX_VERSION='"${LATEST}"'/' .cenci/Dockerfile
               # shellcheck disable=SC2016  # backticks are literal markdown; %s does the substitution
               BODY=$(printf 'Bumps `CODEX_VERSION` from %s to %s in the monolith Dockerfile, the Codex fragment used by generated per-repo images, and the generated sandbox image for this repository. Run `cenci-sand --build` to pick up the new version — no `--build-base` needed.' "$CURRENT" "$LATEST")
               open_and_merge \

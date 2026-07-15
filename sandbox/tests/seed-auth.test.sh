@@ -65,15 +65,15 @@ seed_credential "${STAGED}" "${DEST}"
 assert_eq "returns success" "0" "$?"
 assert_eq "keeps the volume credential" '{"chain":"volume-live"}' "$(cat "${DEST}")"
 
-# ── Case 3: forced reseed via AGENT_SAND_RESEED_CREDS=1 ────────────
-echo "case: AGENT_SAND_RESEED_CREDS=1 forces overwrite"
+# ── Case 3: forced reseed via CENCI_SANDBOX_RESEED_CREDS=1 ────────────
+echo "case: CENCI_SANDBOX_RESEED_CREDS=1 forces overwrite"
 STAGED="${TMPDIR_TEST}/case3/staged.json"
 DEST="${TMPDIR_TEST}/case3/home/.claude/.credentials.json"
 mkdir -p "$(dirname "${STAGED}")" "$(dirname "${DEST}")"
 echo '{"chain":"host-new"}' > "${STAGED}"
 echo '{"chain":"volume-dead"}' > "${DEST}"
 chmod 644 "${DEST}"
-AGENT_SAND_RESEED_CREDS=1 seed_credential "${STAGED}" "${DEST}"
+CENCI_SANDBOX_RESEED_CREDS=1 seed_credential "${STAGED}" "${DEST}"
 assert_eq "returns success" "0" "$?"
 assert_eq "overwrites with staged credential" '{"chain":"host-new"}' "$(cat "${DEST}")"
 assert_eq "restores mode 600" "600" "$(stat -c '%a' "${DEST}")"

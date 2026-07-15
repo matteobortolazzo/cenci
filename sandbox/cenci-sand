@@ -12,7 +12,7 @@ else
 fi
 
 # ── Configuration ────────────────────────────────────────────────
-MONOLITH_IMAGE="agent-sandbox:latest"
+MONOLITH_IMAGE="cenci-sandbox:latest"
 WORKSPACE_HOST="${HOME}/Repos"
 WORKSPACE_CONTAINER="/workspace"
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -52,7 +52,7 @@ if [[ -z "${BASE_TAG}" ]]; then
     echo "Error: failed to compute base image content hash." >&2
     exit 1
 fi
-BASE_IMAGE="agent-sandbox-base:${BASE_TAG}"
+BASE_IMAGE="cenci-sandbox-base:${BASE_TAG}"
 
 # ── Parse options ────────────────────────────────────────────────
 AGENT=claude
@@ -67,8 +67,8 @@ declare -A CODEX_MODEL_SHORTCUTS=([xl]=gpt-5.6-luna [xt]=gpt-5.6-terra [xs]=gpt-
 MODEL=""
 # SHORTCUT_AGENT records the agent a shortcut implied (empty if no shortcut
 # was used). It lets the parser below reject a later explicit --agent that
-# desyncs the agent/model pair a shortcut selected together (e.g. `sb ch
-# --agent codex` would otherwise silently run the codex agent with a claude
+# desyncs the agent/model pair a shortcut selected together (e.g. `cenci-sand
+# ch --agent codex` would otherwise silently run the codex agent with a claude
 # model) instead of launching the mismatched combination.
 SHORTCUT_TOKEN=""
 SHORTCUT_AGENT=""
@@ -217,7 +217,7 @@ if [[ -n "${SHORTCUT_AGENT}" ]] && "${AGENT_GIVEN}" && [[ "${AGENT}" != "${SHORT
 fi
 
 # --volumes only means something combined with --prune (it controls whether
-# --prune also lists/removes stale *-sand-home-* volumes); on its own it used
+# --prune also lists/removes stale *-cenci-home-* volumes); on its own it used
 # to be a silent no-op.
 if "${PRUNE_VOLUMES}" && ! "${PRUNE}"; then
     echo "Error: --volumes has no effect without --prune. Did you mean 'cenci-sand --prune --volumes'?" >&2
@@ -235,20 +235,20 @@ if [[ -z "${MODEL}" ]]; then
 fi
 
 # ── Prune (--prune) ───────────────────────────────────────────────
-# Cleans up superseded agent-sandbox-base tags, dangling images, and stopped
+# Cleans up superseded cenci-sandbox-base tags, dangling images, and stopped
 # sandbox containers. Runs before repo scoping so it works outside a git repo
 # too. Volumes are left alone unless --volumes is also given, and even then
 # only after an interactive y/Y confirmation — they hold copied credentials
 # and full session history.
 if "${PRUNE}"; then
-    echo "Removing superseded agent-sandbox-base tags..."
-    IMAGE_LIST="$("${RUNTIME}" images --format '{{.Repository}}:{{.Tag}}' agent-sandbox-base)" || {
-        echo "Error: failed to list agent-sandbox-base images." >&2
+    echo "Removing superseded cenci-sandbox-base tags..."
+    IMAGE_LIST="$("${RUNTIME}" images --format '{{.Repository}}:{{.Tag}}' cenci-sandbox-base)" || {
+        echo "Error: failed to list cenci-sandbox-base images." >&2
         exit 1
     }
     if [[ -n "${IMAGE_LIST}" ]]; then
         while read -r tag; do
-            [[ "${tag}" == "${BASE_IMAGE}" || "${tag}" == "agent-sandbox-base:latest" ]] && continue
+            [[ "${tag}" == "${BASE_IMAGE}" || "${tag}" == "cenci-sandbox-base:latest" ]] && continue
             echo "  removing ${tag}"
             "${RUNTIME}" rmi "${tag}" || true
         done <<< "${IMAGE_LIST}"
@@ -259,7 +259,7 @@ if "${PRUNE}"; then
         echo "Error: failed to list sandbox containers." >&2
         exit 1
     }
-    MATCHING_CONTAINERS="$(echo "${CONTAINER_LIST}" | { grep -E -- '^(claude-sand-|codex-sand-)' || true; })"
+    MATCHING_CONTAINERS="$(echo "${CONTAINER_LIST}" | { grep -E -- '^(claude-cenci-|codex-cenci-)' || true; })"
     if [[ -n "${MATCHING_CONTAINERS}" ]]; then
         while read -r name; do
             echo "  removing ${name}"
@@ -275,7 +275,7 @@ if "${PRUNE}"; then
             echo "Error: failed to list sandbox volumes." >&2
             exit 1
         }
-        VOLUMES="$(echo "${VOLUME_LIST}" | { grep -E -- '^(claude|codex)-sand-home-' || true; })"
+        VOLUMES="$(echo "${VOLUME_LIST}" | { grep -E -- '^(claude|codex)-cenci-home-' || true; })"
         if [[ -n "${VOLUMES}" ]]; then
             echo "The following volumes hold copied credentials and full session history:" >&2
             echo "${VOLUMES}" >&2
@@ -334,9 +334,9 @@ REAP_SCAN_SCRIPT='for e in /proc/[0-9]*/environ; do [ -f "$e" ] || continue; p=$
 REAP_LIVENESS_SCRIPT='pid="$1"; st=$(cat "/proc/$pid/stat" 2>/dev/null); if [ -z "$st" ]; then printf "__GONE__\n"; exit 0; fi; st=${st##*) }; set -- $st; if [ "$#" -ge 20 ]; then shift 19; printf "%s\n" "$1"; else printf "__NOSTAT__\n"; fi; exit 0'
 
 reap_orphans() {
-    # Read once; AGENT_SAND_REAP_GRACE_SECS lets callers tune the SIGTERM ->
+    # Read once; CENCI_SANDBOX_REAP_GRACE_SECS lets callers tune the SIGTERM ->
     # SIGKILL grace window (e.g. to 0 for fast test runs).
-    local grace="${AGENT_SAND_REAP_GRACE_SECS:-5}"
+    local grace="${CENCI_SANDBOX_REAP_GRACE_SECS:-5}"
 
     local tmp_dir
     tmp_dir="$(mktemp -d)" || { echo "Error: failed to create temp directory." >&2; return 1; }
@@ -384,7 +384,7 @@ reap_orphans() {
         fi
 
         local matching_containers
-        matching_containers="$(echo "${container_list}" | { grep -E -- '^(claude-sand-|codex-sand-)' || true; })"
+        matching_containers="$(echo "${container_list}" | { grep -E -- '^(claude-cenci-|codex-cenci-)' || true; })"
         [[ -z "${matching_containers}" ]] && continue
 
         local container
@@ -451,7 +451,7 @@ reap_orphans() {
                     # as an argument to the probe, never interpolated. This
                     # replaces the ambiguous `kill -0` check: exit status is
                     # captured explicitly (function-as-condition set -e
-                    # suspension -- see dev-sandbox/CLAUDE.md) so a non-zero
+                    # suspension -- see sandbox/CLAUDE.md) so a non-zero
                     # exit here means the exec transport itself failed, not
                     # "process gone" -- a hard error, not swallowed.
                     local probe_out probe_exit
@@ -529,14 +529,14 @@ if "${REAP_ORPHANS}"; then
 fi
 
 # ── Namespacing (per-agent, so containers/volumes never collide) ──
-CONTAINER_PREFIX="${AGENT}-sand"
+CONTAINER_PREFIX="${AGENT}-cenci"
 
 # ── Repo scoping ─────────────────────────────────────────────────
 # Inside a git repo, containers/volumes/images are namespaced per repo (see
 # lib/repo-scope.sh) so each project gets its own isolated sandbox and,
-# optionally, its own image (<repo-root>/.agent-sand/Dockerfile). Outside a
+# optionally, its own image (<repo-root>/.cenci/Dockerfile). Outside a
 # git repo, fall back to the legacy shared-workspace scheme (whole ~/Repos
-# mount, one container per --name) so existing claude-sand-default-style
+# mount, one container per --name) so existing claude-cenci-default-style
 # volumes keep working untouched.
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/repo-scope.sh
@@ -575,7 +575,7 @@ fi
 # ── Build ────────────────────────────────────────────────────────
 build_base_image() {
     echo "Building ${BASE_IMAGE} with ${RUNTIME}..."
-    "${RUNTIME}" build -f "${SCRIPT_DIR}/Dockerfile.base" -t "${BASE_IMAGE}" -t agent-sandbox-base:latest "${SCRIPT_DIR}"
+    "${RUNTIME}" build -f "${SCRIPT_DIR}/Dockerfile.base" -t "${BASE_IMAGE}" -t cenci-sandbox-base:latest "${SCRIPT_DIR}"
     echo "Done."
 }
 
@@ -595,7 +595,7 @@ build_image() {
 build_repo_image() {
     ensure_base_image
     echo "Building ${IMAGE} with ${RUNTIME}..."
-    "${RUNTIME}" build --build-arg "BASE_VERSION=${BASE_TAG}" -t "${IMAGE}" -f "${REPO_ROOT}/.agent-sand/Dockerfile" "${REPO_ROOT}/.agent-sand"
+    "${RUNTIME}" build --build-arg "BASE_VERSION=${BASE_TAG}" -t "${IMAGE}" -f "${REPO_ROOT}/.cenci/Dockerfile" "${REPO_ROOT}/.cenci"
     echo "Done."
 }
 
@@ -638,7 +638,7 @@ if "${UPDATE_PLUGINS}"; then
         echo "Done. Agent sessions pick up the update on their next start."
     else
         echo "Updating plugins in volume '${VOLUME_NAME}'..."
-        UPDATE_RUN_ARGS=(--rm --entrypoint /bin/bash -e "AGENT_SAND_AGENT=${AGENT}" -v "${VOLUME_NAME}:/home/dev")
+        UPDATE_RUN_ARGS=(--rm --entrypoint /bin/bash -e "CENCI_SANDBOX_AGENT=${AGENT}" -v "${VOLUME_NAME}:/home/dev")
         if [[ "${AGENT}" == claude ]]; then
             CLAUDE_BIN="$(readlink -f "$(which claude)" 2>/dev/null || true)"
             if [[ ! -x "${CLAUDE_BIN}" ]]; then
@@ -727,7 +727,7 @@ else
 fi
 
 # ── Exec env forwarding (for attach path) ───────────────────────
-EXEC_ENV_ARGS=(-u dev -e "TMUX_PANE=${TMUX_PANE:-}" -e "CENCI_SANDBOX=1" -e "AGENT_SAND_AGENT=${AGENT}")
+EXEC_ENV_ARGS=(-u dev -e "TMUX_PANE=${TMUX_PANE:-}" -e "CENCI_SANDBOX=1" -e "CENCI_SANDBOX_AGENT=${AGENT}")
 [[ -n "${CONTEXT7_API_KEY:-}" ]] && EXEC_ENV_ARGS+=(-e "CONTEXT7_API_KEY=${CONTEXT7_API_KEY}")
 [[ -n "${OPENAI_API_KEY:-}" ]] && EXEC_ENV_ARGS+=(-e "OPENAI_API_KEY=${OPENAI_API_KEY}")
 
@@ -744,7 +744,7 @@ wait_until_ready() {
     local ready=false
     local attempt
     for ((attempt = 0; attempt < 600; attempt++)); do
-        if "${RUNTIME}" exec -u dev "${CONTAINER_NAME}" test -e /tmp/agent-sand-ready 2>/dev/null; then
+        if "${RUNTIME}" exec -u dev "${CONTAINER_NAME}" test -e /tmp/cenci-ready 2>/dev/null; then
             ready=true
             break
         fi
@@ -816,7 +816,7 @@ RUN_ARGS=(
 
     # Internal contract used by the entrypoint to provision the selected
     # agent's native plugin store.
-    -e "AGENT_SAND_AGENT=${AGENT}"
+    -e "CENCI_SANDBOX_AGENT=${AGENT}"
 
     # Host identity — entrypoint remaps 'dev' to this UID/GID on mismatch (#154)
     -e "HOST_UID=$(id -u)"
@@ -857,7 +857,7 @@ fi
 # Force a reseed from the host (recovery after the volume's token chain died,
 # e.g. all sessions were revoked)
 if "${RESEED_CREDS}"; then
-    RUN_ARGS+=(-e "AGENT_SAND_RESEED_CREDS=1")
+    RUN_ARGS+=(-e "CENCI_SANDBOX_RESEED_CREDS=1")
 fi
 
 # Codex credentials (ChatGPT sign-in and/or API key — fail hard if neither present)
@@ -904,7 +904,7 @@ fi
 # later `docker exec` sessions in the same repository. A detached idle process
 # makes every agent window an equal, independently disposable exec session.
 "${RUNTIME}" run "${RUN_ARGS[@]}" "${IMAGE}" \
-    -c 'touch /tmp/agent-sand-ready && exec sleep infinity' >/dev/null
+    -c 'touch /tmp/cenci-ready && exec sleep infinity' >/dev/null
 
 # The entrypoint performs credential and plugin setup before running the
 # readiness command. Do not race the first agent against that initialization.

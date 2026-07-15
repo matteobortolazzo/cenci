@@ -7,7 +7,7 @@ SANDBOX_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # shellcheck source=../lib/repo-scope.sh
 source "${SANDBOX_DIR}/lib/repo-scope.sh"
 REPO_ROOT="$(git -C "${SANDBOX_DIR}" rev-parse --show-toplevel)"
-MOCK_CONTAINER_NAME="claude-sand-$(slugify "$(basename "${REPO_ROOT}")")"
+MOCK_CONTAINER_NAME="claude-cenci-$(slugify "$(basename "${REPO_ROOT}")")"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "${TEST_ROOT}"' EXIT
 
@@ -59,7 +59,7 @@ export PATH="${BIN_DIR}:/usr/bin:/bin"
 export MOCK_RUNNING=false
 "${SANDBOX_DIR}/cenci-sand" -p test
 
-if ! grep -Eq '^run .* -d .*claude-sand-' "${CALLS_FILE}"; then
+if ! grep -Eq '^run .* -d .*claude-cenci-' "${CALLS_FILE}"; then
     echo "FAIL: shared container was not started detached" >&2
     exit 1
 fi
@@ -69,12 +69,12 @@ if ! grep -Eq '^run .*--label cenci-sand\.lifecycle=detached ' "${CALLS_FILE}"; 
     exit 1
 fi
 
-if ! grep -Eq '^run .* -e AGENT_SAND_AGENT=claude ' "${CALLS_FILE}"; then
+if ! grep -Eq '^run .* -e CENCI_SANDBOX_AGENT=claude ' "${CALLS_FILE}"; then
     echo "FAIL: selected agent was not forwarded to the new container" >&2
     exit 1
 fi
 
-if ! grep -Eq '^exec -it -u dev .*claude-sand-.* claude --dangerously-skip-permissions --model sonnet -p test ' "${CALLS_FILE}"; then
+if ! grep -Eq '^exec -it -u dev .*claude-cenci-.* claude --dangerously-skip-permissions --model sonnet -p test ' "${CALLS_FILE}"; then
     echo "FAIL: first agent was not launched through docker exec" >&2
     exit 1
 fi
@@ -93,7 +93,7 @@ if grep -Eq '^run ' "${CALLS_FILE}"; then
     exit 1
 fi
 
-READY_LINE="$(grep -n 'exec -u dev claude-sand-.* test -e /tmp/agent-sand-ready' "${CALLS_FILE}" | cut -d: -f1)"
+READY_LINE="$(grep -n 'exec -u dev claude-cenci-.* test -e /tmp/cenci-ready' "${CALLS_FILE}" | cut -d: -f1)"
 AGENT_LINE="$(grep -n 'exec -it -u dev .* claude --dangerously-skip-permissions --model sonnet -p second' "${CALLS_FILE}" | cut -d: -f1)"
 if [[ -z "${READY_LINE}" || -z "${AGENT_LINE}" || "${READY_LINE}" -ge "${AGENT_LINE}" ]]; then
     echo "FAIL: reused container did not wait for readiness before launching the agent" >&2
@@ -102,11 +102,11 @@ fi
 
 printf '' > "${CALLS_FILE}"
 export MOCK_RUNNING=false
-MOCK_CONTAINER_NAME="codex-sand-$(slugify "$(basename "${REPO_ROOT}")")"
+MOCK_CONTAINER_NAME="codex-cenci-$(slugify "$(basename "${REPO_ROOT}")")"
 export MOCK_CONTAINER_NAME
 "${SANDBOX_DIR}/cenci-sand" --agent codex --update-plugins
 
-if ! grep -Eq '^run --rm --entrypoint /bin/bash -e AGENT_SAND_AGENT=codex .*provision_codex_plugins' "${CALLS_FILE}"; then
+if ! grep -Eq '^run --rm --entrypoint /bin/bash -e CENCI_SANDBOX_AGENT=codex .*provision_codex_plugins' "${CALLS_FILE}"; then
     echo "FAIL: Codex forced update did not use the baked-in Codex plugin path" >&2
     exit 1
 fi

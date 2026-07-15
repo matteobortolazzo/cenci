@@ -43,7 +43,7 @@ skip-permissions removes permission prompts but does not remove authentication o
 user-interaction failures.
 
 Claude Code 1M-context sessions can reject `Task` delegation when subagents are not
-pinned to a 200K model. Agentflow configures
+pinned to a 200K model. cenci configures
 `CLAUDE_CODE_SUBAGENT_MODEL=claude-sonnet-5` as an optional workaround. Do not infer
 or announce the active model/context size. If delegation fails with the documented
 usage-credit error, tell the user to run `/cenci:configure` and restart, or use a

@@ -1,10 +1,10 @@
-# AgentWatch for Codex
+# Cenci for Codex
 
-Forwards Codex lifecycle hooks to `agentwatch notify` so the agentwatch daemon can update tmux window indicators and Waybar-compatible counts.
+Forwards Codex lifecycle hooks to `cenci notify` so the cenci daemon can update tmux window indicators and Waybar-compatible counts.
 
 ## Requirements
 
-- plugin-local `agentwatch` binary (provisioned automatically on first session)
+- plugin-local `cenci` binary (provisioned automatically on first session)
 - Codex hooks enabled (default in current Codex releases)
 
 ## Binary and daemon (self-bootstrapping)
@@ -22,7 +22,7 @@ Claude Code plugin. On `SessionStart`, `bootstrap.sh` runs detached and:
 It is idempotent: once the version-matched binary and daemon are provisioned, a
 re-run is a no-op (including the common case where the Claude Code plugin already
 bootstrapped the shared daemon). Everything is non-fatal — failures log one line to
-`${TMPDIR:-/tmp}/agentwatch-bootstrap.log` and never block the session. If a machine
+`${TMPDIR:-/tmp}/cenci-bootstrap.log` and never block the session. If a machine
 also runs the Claude plugin, both share the same host daemon.
 
 After a login or restart, the daemon does not need a separate tmux startup entry:
@@ -31,8 +31,8 @@ plugin-local daemon, waits briefly, and retries the same event. Explicit custom 
 sockets remain under the caller's control.
 
 **Manual / Codex-only install** (alternative): install the binary yourself
-(`go install github.com/matteobortolazzo/agent-stack/agentwatch/v4@latest` or
-`make build`) and start the daemon once (`agentwatch`). See the main
+(`go install github.com/matteobortolazzo/cenci/watch/v4@latest` or
+`make build`) and start the daemon once (`cenci`). See the main
 [README](../../README.md#advanced--development).
 
 ## Manual hook install
@@ -41,7 +41,7 @@ If you do not already have Codex hooks configured:
 
 ```bash
 mkdir -p ~/.codex
-cp /path/to/agent-stack/agentwatch/plugin/codex/hooks.json ~/.codex/hooks.json
+cp /path/to/cenci/watch/plugin/codex/hooks.json ~/.codex/hooks.json
 ```
 
 If `~/.codex/hooks.json` already exists, merge the `hooks` entries from this directory's `hooks.json` instead of replacing the file.

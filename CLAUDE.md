@@ -1,6 +1,6 @@
-# agent-stack
+# cenci
 
-One agent-stack product implemented as a monorepo of client plugins and development tooling.
+One cenci product implemented as a monorepo of client plugins and development tooling.
 GitHub Issues for tracking. GitHub for code and PRs.
 
 ## Projects

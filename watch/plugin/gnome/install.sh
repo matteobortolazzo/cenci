@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Installs the AgentWatch GNOME Shell extension without touching the Extensions
+# Installs the Cenci GNOME Shell extension without touching the Extensions
 # GUI: copies this widget into the per-user extensions folder under its UUID,
 # compiles its settings schema, and live-reloads the extension so the change
 # takes effect immediately.
@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-UUID="agentwatch@matteobortolazzo.github.io"
+UUID="cenci@matteobortolazzo.github.io"
 
 # GNOME Shell must be present. `gnome-extensions` is the CLI we drive the
 # enable/disable toggle with; a running gnome-shell implies it.
@@ -52,7 +52,7 @@ if [ "$FRESH" -eq 1 ]; then
   echo "  Wayland: log out and back in (Shell can't hot-reload on Wayland)"
   echo "then: gnome-extensions enable \"$UUID\""
 else
-  echo "Reloaded the AgentWatch extension."
+  echo "Reloaded the Cenci extension."
 fi
-echo "Done. AgentWatch appears in the top bar once a session is live."
+echo "Done. Cenci appears in the top bar once a session is live."
 echo "Settings: gnome-extensions prefs \"$UUID\""

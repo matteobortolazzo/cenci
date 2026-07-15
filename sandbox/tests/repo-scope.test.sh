@@ -116,16 +116,16 @@ assert_eq "path outside the legacy host root maps to /workspace" \
 echo "case: select_image"
 
 REPO_WITH_DOCKERFILE="$(mk_temp_dir)"
-mkdir -p "${REPO_WITH_DOCKERFILE}/.agent-sand"
-touch "${REPO_WITH_DOCKERFILE}/.agent-sand/Dockerfile"
-assert_eq "uses per-repo image when .agent-sand/Dockerfile exists" \
+mkdir -p "${REPO_WITH_DOCKERFILE}/.cenci"
+touch "${REPO_WITH_DOCKERFILE}/.cenci/Dockerfile"
+assert_eq "uses per-repo image when .cenci/Dockerfile exists" \
     "$(select_image "${REPO_WITH_DOCKERFILE}" "foo")" \
-    "agent-sandbox-foo:latest"
+    "cenci-sandbox-foo:latest"
 
 REPO_WITHOUT_DOCKERFILE="$(mk_temp_dir)"
-assert_eq "falls back to the monolith image when no .agent-sand/Dockerfile" \
+assert_eq "falls back to the monolith image when no .cenci/Dockerfile" \
     "$(select_image "${REPO_WITHOUT_DOCKERFILE}" "foo")" \
-    "agent-sandbox:latest"
+    "cenci-sandbox:latest"
 
 # ── Summary ──────────────────────────────────────────────────────
 echo

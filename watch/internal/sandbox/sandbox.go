@@ -11,8 +11,8 @@
 //   - runtime detection: top of the script (podman if present, else docker)
 //   - shortcut tables: CLAUDE_MODEL_SHORTCUTS / CODEX_MODEL_SHORTCUTS (~line 65)
 //   - recognized long flags: the `case "$1" in ... --*)` block (~line 106)
-//   - container name prefixes: CONTAINER_PREFIX="${AGENT}-sand" and the
-//     `^(claude-sand-|codex-sand-)` filter used by --prune (~line 199, 262, 387)
+//   - container name prefixes: CONTAINER_PREFIX="${AGENT}-cenci" and the
+//     `^(claude-cenci-|codex-cenci-)` filter used by --prune (~line 199, 262, 387)
 package sandbox
 
 import (
@@ -118,10 +118,10 @@ func ExecCenciSand(argv []string) error {
 
 // -- sandbox ls / stop: implemented natively in Go against docker/podman ---
 
-// sandboxNamePattern matches the claude-sand-/codex-sand- container name
+// sandboxNamePattern matches the claude-cenci-/codex-cenci- container name
 // prefixes cenci-sand uses (CONTAINER_PREFIX="${AGENT}-sand"), mirroring the
 // filter cenci-sand's --prune applies to its container list.
-var sandboxNamePattern = regexp.MustCompile(`^(claude-sand-|codex-sand-)`)
+var sandboxNamePattern = regexp.MustCompile(`^(claude-cenci-|codex-cenci-)`)
 
 // ContainerRuntime resolves the preferred container runtime the same way
 // cenci-sand does: podman if present on PATH, else docker. Returns an error
@@ -143,7 +143,7 @@ type Container struct {
 	Image  string
 }
 
-// ListContainers lists every claude-sand-*/codex-sand-* container (running or
+// ListContainers lists every claude-cenci-*/codex-cenci-* container (running or
 // stopped) known to runtime.
 func ListContainers(runtime string) ([]Container, error) {
 	out, err := exec.Command(runtime, "ps", "-a", "--format", "{{.Names}}\t{{.Status}}\t{{.Image}}").Output()
@@ -176,7 +176,7 @@ func parseContainers(raw string) []Container {
 	return containers
 }
 
-// RunningSandboxContainers lists the names of running claude-sand-*/codex-sand-*
+// RunningSandboxContainers lists the names of running claude-cenci-*/codex-cenci-*
 // containers, optionally narrowed to names containing filter (a plain
 // substring match against the full container name, e.g. a repo slug).
 func RunningSandboxContainers(runtime, filter string) ([]string, error) {

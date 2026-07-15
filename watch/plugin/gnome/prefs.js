@@ -1,4 +1,4 @@
-// AgentWatch — GNOME Shell extension preferences (GNOME 45+, libadwaita).
+// Cenci — GNOME Shell extension preferences (GNOME 45+, libadwaita).
 
 import Adw from 'gi://Adw';
 import Gtk from 'gi://Gtk';
@@ -6,13 +6,13 @@ import Gio from 'gi://Gio';
 
 import {ExtensionPreferences} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
-export default class AgentWatchPrefs extends ExtensionPreferences {
+export default class CenciPrefs extends ExtensionPreferences {
     fillPreferencesWindow(window) {
         const settings = this.getSettings();
 
         const page = new Adw.PreferencesPage();
         const group = new Adw.PreferencesGroup({
-            title: 'AgentWatch',
+            title: 'Cenci',
             description: 'How the top-bar indicator polls the cenci daemon.',
         });
         page.add(group);
@@ -20,7 +20,7 @@ export default class AgentWatchPrefs extends ExtensionPreferences {
         // Binary path — use an absolute path if cenci is not on the GNOME
         // session PATH (the shell's PATH under Wayland is often minimal).
         const pathRow = new Adw.EntryRow({title: 'cenci binary path'});
-        settings.bind('agentwatch-path', pathRow, 'text', Gio.SettingsBindFlags.DEFAULT);
+        settings.bind('cenci-path', pathRow, 'text', Gio.SettingsBindFlags.DEFAULT);
         group.add(pathRow);
 
         const intervalRow = new Adw.SpinRow({
