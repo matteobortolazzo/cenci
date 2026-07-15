@@ -488,6 +488,12 @@ Then rebuild:
 cenci sandbox build
 ```
 
+**Per-repo images too:** a `Dockerfile.base` bump changes `BASE_VERSION` (its content
+hash), which every repo's own `.cenci/Dockerfile` image also builds `FROM`. `cenci
+sandbox build` only rebuilds the image for the repo you run it in — rebuild each repo
+that has opted into `.cenci/Dockerfile` separately (see [Per-repo
+images](#per-repo-images)) so it doesn't keep running the stale base.
+
 ### Update Claude Code
 
 Just update Claude Code on the host. The binary is bind-mounted, so the container always uses the host version — no rebuild needed.
