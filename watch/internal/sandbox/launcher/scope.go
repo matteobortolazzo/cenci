@@ -77,7 +77,10 @@ func ComputeWorkdir(repoRoot, cwd string) string {
 // mount): "/workspace/<relative-subpath>" when cwd is under workspaceHost,
 // "/workspace" otherwise.
 func ComputeLegacyWorkdir(workspaceHost, cwd string) string {
-	if strings.HasPrefix(cwd, workspaceHost) {
+	if cwd == workspaceHost {
+		return workspaceContainer
+	}
+	if strings.HasPrefix(cwd, workspaceHost+string(filepath.Separator)) {
 		return workspaceContainer + strings.TrimPrefix(cwd, workspaceHost)
 	}
 	return workspaceContainer
