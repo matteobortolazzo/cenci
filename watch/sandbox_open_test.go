@@ -994,6 +994,9 @@ func TestOpenDocker_MountsRuntimeSocketOrWarns(t *testing.T) {
 		if !strings.Contains(runLine, "-v /var/run/docker.sock:/var/run/docker.sock") {
 			t.Errorf("expected the host docker socket mount, got:\n%s", runLine)
 		}
+		if !strings.Contains(string(output), "root-equivalent") {
+			t.Errorf("expected the docker-socket-mounted warning, got:\n%s", output)
+		}
 	} else {
 		// No discoverable socket (the private XDG_RUNTIME_DIR has no
 		// podman.sock either): a warning, and no socket mount.
@@ -1003,6 +1006,50 @@ func TestOpenDocker_MountsRuntimeSocketOrWarns(t *testing.T) {
 		if strings.Contains(runLine, ":/var/run/docker.sock") {
 			t.Errorf("expected no socket mount, got:\n%s", runLine)
 		}
+	}
+}
+
+// TestOpenDocker_SocketMountedPrintsWarning pins the mounted-socket warning
+// deterministically (independent of whether the test host happens to have a
+// real /var/run/docker.sock): it fabricates a podman.sock under a private
+// XDG_RUNTIME_DIR so the runtime-socket lookup always finds one to mount.
+func TestOpenDocker_SocketMountedPrintsWarning(t *testing.T) {
+	if info, statErr := os.Stat("/var/run/docker.sock"); statErr == nil && info.Mode()&os.ModeSocket != 0 {
+		t.Skip("host has a real docker socket; TestOpenDocker_MountsRuntimeSocketOrWarns already covers the mounted-warning branch")
+	}
+
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, socketDir := openTestEnv(t, fakeDir, assets)
+
+	xdg := filepath.Dir(socketDir)
+	podmanDir := filepath.Join(xdg, "podman")
+	if err := os.Mkdir(podmanDir, 0o700); err != nil {
+		t.Fatalf("mkdir podman dir: %v", err)
+	}
+	podmanSock := filepath.Join(podmanDir, "podman.sock")
+	l, err := net.Listen("unix", podmanSock)
+	if err != nil {
+		t.Fatalf("listen podman socket: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	cmd := exec.Command(binaryPath, "open", "--docker")
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("open --docker: %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	runLine, _ := findLineWithPrefix(lines, "run ")
+	if !strings.Contains(runLine, "-v "+podmanSock+":/var/run/docker.sock") {
+		t.Errorf("expected the podman socket mount, got:\n%s", runLine)
+	}
+	if !strings.Contains(string(output), "root-equivalent") {
+		t.Errorf("expected the docker-socket-mounted warning, got:\n%s", output)
 	}
 }
 

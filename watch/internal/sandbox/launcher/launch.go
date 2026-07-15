@@ -449,6 +449,7 @@ func (e *Engine) assembleOptionalFeatures(opts Options) []string {
 			}
 		}
 		if dockerSock != "" {
+			_, _ = fmt.Fprintln(e.Stderr, "Warning: --docker bind-mounts the host's container runtime socket into the sandbox writable; a writable runtime socket is root-equivalent to the host, so only use it when you trust the sandbox's workload.")
 			args = append(args, "-v", dockerSock+":/var/run/docker.sock")
 		} else {
 			_, _ = fmt.Fprintln(e.Stderr, "Warning: --docker requested but no container runtime socket found.")

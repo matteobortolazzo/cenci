@@ -42,6 +42,12 @@ func TestComputeLegacyWorkdir(t *testing.T) {
 	if got := ComputeLegacyWorkdir("/home/u/Repos", "/somewhere/else"); got != "/workspace" {
 		t.Errorf("outside: got %q, want /workspace", got)
 	}
+	// Sibling directory whose name merely extends workspaceHost as a string
+	// (e.g. "Repos-evil") must NOT be treated as inside the workspace: the
+	// prefix check needs a path-separator boundary, not a bare HasPrefix.
+	if got := ComputeLegacyWorkdir("/home/user/Repos", "/home/user/Repos-evil/x"); got != "/workspace" {
+		t.Errorf("sibling dir with extended name: got %q, want /workspace", got)
+	}
 }
 
 func TestHasRepoImageAndSelectImage(t *testing.T) {
