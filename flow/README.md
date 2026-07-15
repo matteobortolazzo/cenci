@@ -83,9 +83,9 @@ The `gh` CLI stores credentials in `~/.config/gh/hosts.yml`. It also respects `G
 
 ### Runtime — the `agent-sand` container
 
-agentflow runs inside the [`dev-sandbox`](../dev-sandbox) `agent-sand` container with `--dangerously-skip-permissions`. The **container is the security boundary** — it provides the filesystem and network isolation for autonomous execution, so Claude Code's own host sandbox stays disabled. `permissions.allow`/`deny` are still written to `.claude/settings.json` as defense-in-depth for the case where you run plain `claude` (no skip-permissions) inside the container, e.g. via `agent-sand --shell`.
+agentflow runs inside the [`dev-sandbox`](../sandbox) `agent-sand` container with `--dangerously-skip-permissions`. The **container is the security boundary** — it provides the filesystem and network isolation for autonomous execution, so Claude Code's own host sandbox stays disabled. `permissions.allow`/`deny` are still written to `.claude/settings.json` as defense-in-depth for the case where you run plain `claude` (no skip-permissions) inside the container, e.g. via `agent-sand --shell`.
 
-There are no bubblewrap/socat prerequisites — the container supplies the isolation. Launch it with `agent-sand` (see the [`dev-sandbox` README](../dev-sandbox)), then run `/agentflow:configure` inside it.
+There are no bubblewrap/socat prerequisites — the container supplies the isolation. Launch it with `agent-sand` (see the [`dev-sandbox` README](../sandbox)), then run `/agentflow:configure` inside it.
 
 ## Installation
 

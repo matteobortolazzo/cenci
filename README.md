@@ -3,7 +3,7 @@
 **Let coding agents run longer—without giving up control.**
 
 [![Claude Code](https://img.shields.io/badge/Claude_Code-supported-d97757?style=flat-square)](#claude-code-and-codex)
-[![Codex](https://img.shields.io/badge/Codex-supported-10a37f?style=flat-square)](agentflow/docs/codex.md)
+[![Codex](https://img.shields.io/badge/Codex-supported-10a37f?style=flat-square)](flow/docs/codex.md)
 [![Platforms](https://img.shields.io/badge/Linux_%C2%B7_macOS_%C2%B7_WSL2-supported-64748b?style=flat-square)](docs/getting-started.md)
 [![License](https://img.shields.io/badge/license-MIT-8b5cf6?style=flat-square)](LICENSE)
 
@@ -33,7 +33,7 @@ between them.
 
 The approved `.plans/` file is the durable handoff. Once you launch that plan, the
 workflow can run unattended through an open PR. AgentWatch keeps its state visible;
-[`/agentflow:babysit`](agentflow/README.md#babysitting-a-pr) can follow CI and review
+[`/agentflow:babysit`](flow/README.md#babysitting-a-pr) can follow CI and review
 activity through to merge.
 
 ## Install
@@ -65,7 +65,7 @@ The command fetches the current official installer before it runs, so the update
 itself stays current. Existing installations from before the command was introduced
 can bootstrap it once by rerunning the install command above. Once agentwatch is
 installed, `agentwatch doctor` and `agentwatch update` reach the same two modes
-(see [agentwatch's README](agentwatch/README.md#installer-integration-agentwatch-doctor-agentwatch-update)).
+(see [agentwatch's README](watch/README.md#installer-integration-agentwatch-doctor-agentwatch-update)).
 
 Follow the [guided getting-started path](docs/getting-started.md) for first-run
 configuration and your first ticket.
@@ -74,9 +74,9 @@ configuration and your first ticket.
 
 | Layer | What it changes | Learn more |
 |---|---|---|
-| **agent-sandbox** | Runs Claude Code or Codex at full permissions while mounting only the current repository at `/workspace`. The container—not a prompt—is the security boundary. | [Isolation details](dev-sandbox/README.md) |
-| **agentflow** | Adds refinement, optional UI design, persisted planning, test-first implementation, specialist reviews, and PR follow-through. | [Workflow details](agentflow/README.md) |
-| **AgentWatch** | Turns native hooks into shared live state for tmux and optional Linux/macOS status surfaces. It can also dispatch approved plans by policy. | [Attention details](agentwatch/README.md) |
+| **agent-sandbox** | Runs Claude Code or Codex at full permissions while mounting only the current repository at `/workspace`. The container—not a prompt—is the security boundary. | [Isolation details](sandbox/README.md) |
+| **agentflow** | Adds refinement, optional UI design, persisted planning, test-first implementation, specialist reviews, and PR follow-through. | [Workflow details](flow/README.md) |
+| **AgentWatch** | Turns native hooks into shared live state for tmux and optional Linux/macOS status surfaces. It can also dispatch approved plans by policy. | [Attention details](watch/README.md) |
 
 Each layer is independently versioned internally, but normal installation and updates
 treat agent-stack as one product.
@@ -89,7 +89,7 @@ treat agent-stack as one product.
 | Live session monitoring and self-bootstrap | Yes | Yes |
 | Portable shell, testing, stack, worktree, and review conventions | Yes | Yes |
 | Interactive refinement, design, implementation, and PR babysitting | Yes | Not yet |
-| Documented implementation recipe | Built in | [Available](agentflow/docs/codex.md) |
+| Documented implementation recipe | Built in | [Available](flow/docs/codex.md) |
 
 Claude Code currently provides the full interactive ticket-to-PR workflow. Codex uses
 the same isolation and attention layers plus portable engineering conventions and a

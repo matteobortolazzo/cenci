@@ -79,7 +79,7 @@ the manual name and preserves it instead of overwriting it with the detected tas
 `<number>-<skill>` flows through to the snapshot's `window_name`, which lazyboards
 reads over the public watcher client (`pkg/watch`,
 [#39](https://github.com/matteobortolazzo/agent-stack/issues/39)) to badge the card.
-See [agentwatch's README](../agentwatch/README.md#the-join-key-survives-the-daemon)
+See [agentwatch's README](../watch/README.md#the-join-key-survives-the-daemon)
 for the daemon side.
 
 **lazyboards matches by ticket-number prefix.** Because the running skill isn't part
@@ -223,7 +223,7 @@ switched with the `S`/`X` board actions above; while it's on, the status bar sho
 `⟳ dispatch` segment fed by the same watcher socket as the agent badges, so it tracks
 the loop (and daemon reachability) live. Concurrency, quiet hours, and budgets live in
 agentwatch's own `dispatch` config block — see the
-[agentwatch README](../agentwatch/README.md#configuration-1).
+[agentwatch README](../watch/README.md#configuration-1).
 
 ## Dispatching into the sandbox
 
@@ -273,7 +273,7 @@ codex plugin add agent-sandbox@agent-stack
 Codex then discovers the portable `agentflow:*` convention skills directly from the
 plugin. The full implementation sequence still comes from the repository's
 `AGENTS.md`; copy or merge
-[`agentflow/templates/agents-md-codex.md`](../agentflow/templates/agents-md-codex.md)
+[`agentflow/templates/agents-md-codex.md`](../flow/templates/agents-md-codex.md)
 into the target repository.
 
 Which agent runs a card is a **per-dispatch** choice — pass `--agent`:
@@ -292,10 +292,10 @@ Codex via `project_doc_fallback_filenames = ["CLAUDE.md"]` in `~/.codex/config.t
 one-time, user-level line — a committed repo-level `.codex/config.toml` is ignored), so a
 dispatched Codex card sees the same project context as a Claude Code card. `agentwatch run`
 ships built-in Claude templates; merge
-[`agentflow/templates/agentwatch-codex-config.json`](../agentflow/templates/agentwatch-codex-config.json)
+[`flow/templates/cenci-codex-config.json`](../flow/templates/cenci-codex-config.json)
 into `~/.config/agentwatch/config.json` to add the Codex `implement` template, while
 interactive `refine` and `design` remain Claude Code-only. Codex support across the
 package is tracked in
 [#33](https://github.com/matteobortolazzo/agent-stack/issues/33); see
-[agentwatch's README](../agentwatch/README.md#dispatching-workflows-agentwatch-run)
+[agentwatch's README](../watch/README.md#dispatching-workflows-agentwatch-run)
 for config precedence and launcher flags.

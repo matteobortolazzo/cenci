@@ -534,7 +534,7 @@ cleanup: 'agentwatch close {number}'
 
 ## Sandbox management and session launching (`agentwatch sandbox`, `agentwatch open`)
 
-`agentwatch` wraps [dev-sandbox](../dev-sandbox/README.md)'s `agent-sand` bash launcher
+`agentwatch` wraps [dev-sandbox](../sandbox/README.md)'s `agent-sand` bash launcher
 with first-class `sandbox` and `open` verb groups, so day-to-day sandbox commands don't
 need `agent-sand` on PATH to be remembered by name.
 
