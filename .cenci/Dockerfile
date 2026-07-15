@@ -1,5 +1,5 @@
 # cenci:managed-begin
-ARG BASE_VERSION=0.12.2
+ARG BASE_VERSION=1.0.2
 FROM cenci-sandbox-base:${BASE_VERSION}
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
