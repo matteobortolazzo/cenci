@@ -237,6 +237,26 @@ doctor_daemon_status() {
 	fi
 }
 
+# check_stale_tmux_vars greps the user's own tmux config(s) — never touched by
+# this installer — for the pre-rename @agentwatch-* tmux user variables. tmux
+# format lookups against a variable that no longer exists silently fall back
+# to the format's default (no error), so a stale window-status-format override
+# left over from a pre-rename Custom status-format setup just looks like
+# nothing happened rather than a visible break. This is read-only: doctor's
+# contract is to change nothing, so it warns instead of rewriting the dotfile.
+check_stale_tmux_vars() {
+	local conf found=0
+	for conf in "$HOME/.tmux.conf" "${XDG_CONFIG_HOME:-$HOME/.config}/tmux/tmux.conf"; do
+		[ -f "$conf" ] || continue
+		if grep -qE '@agentwatch-(symbol|style|headroom-)' "$conf" 2>/dev/null; then
+			found=1
+		fi
+	done
+	if [ "$found" -eq 1 ]; then
+		warn "tmux config references old @agentwatch-* variables — see docs/migrating-to-cenci.md#tmux-user-variables"
+	fi
+}
+
 run_doctor() {
 	DOCTOR_FAILED=0
 	step "Checking your system ($(platform_label))"
@@ -275,6 +295,7 @@ run_doctor() {
 	check "tmux" optional \
 		"cenci's main frontend is the tmux status bar; other surfaces (waybar, macOS menu bar) still work without it" \
 		command -v tmux
+	check_stale_tmux_vars
 	if [ "$OS" = macos ]; then
 		check "SwiftBar (menu bar widget)" optional \
 			"optional: brew install swiftbar — for live status in the macOS menu bar" \
