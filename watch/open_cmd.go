@@ -63,10 +63,7 @@ func runOpen(args []string) {
 	hostNetworkFlag := fs.Bool("host-network", false, "use host network mode")
 	reseedFlag := fs.Bool("reseed-creds", false, "force a credential reseed from the host on the next container create")
 	_ = fs.Parse(args)
-	if extra := fs.Args(); len(extra) > 0 {
-		fmt.Fprintf(os.Stderr, "cenci open: unexpected argument %q\n", extra[0])
-		os.Exit(2)
-	}
+	rejectExtra("cenci open", fs.Args())
 
 	// A shortcut implies a specific agent; a later explicit --agent that
 	// disagrees would silently pair the wrong agent with the shortcut's

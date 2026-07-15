@@ -49,10 +49,7 @@ func runDispatch(args []string) {
 	// Any positional left after flag parsing is unexpected: the flag parser
 	// stops at the first non-flag token, so a trailing typo or stray argument
 	// would otherwise be silently swallowed along with any flags after it.
-	if extra := fs.Args(); len(extra) > 0 {
-		fmt.Fprintf(os.Stderr, "cenci dispatch: unexpected argument %q\n", extra[0])
-		os.Exit(2)
-	}
+	rejectExtra("cenci dispatch", fs.Args())
 
 	cfg, err := dispatch.LoadConfig(*configPath)
 	if err != nil {
@@ -223,10 +220,7 @@ func runDispatchLoop(args []string) {
 	jsonOut := fs.Bool("json", false, "print result as JSON")
 	_ = fs.Parse(args[1:])
 
-	if extra := fs.Args(); len(extra) > 0 {
-		fmt.Fprintf(os.Stderr, "cenci dispatch loop: unexpected argument %q\n", extra[0])
-		os.Exit(2)
-	}
+	rejectExtra("cenci dispatch loop", fs.Args())
 
 	switch verb {
 	case "on":

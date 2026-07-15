@@ -35,10 +35,7 @@ func runClose(args []string) {
 	// The flag parser stops at the first non-flag token, so anything left in
 	// fs.Args() after the target and recognized flags is unexpected — mirrors
 	// the "dispatch"/"dispatch loop" trailing-positional guards above.
-	if extra := fs.Args(); len(extra) > 0 {
-		fmt.Fprintf(os.Stderr, "cenci close: unexpected argument %q\n", extra[0])
-		os.Exit(2)
-	}
+	rejectExtra("cenci close", fs.Args())
 
 	decisions, err := closecmd.Run(closecmd.Opts{
 		Target:       target,

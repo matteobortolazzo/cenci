@@ -66,10 +66,7 @@ func runStatus(args []string) {
 	socketPath := fs.String("socket", ipc.DefaultSocketPath(), "IPC broadcast socket path")
 	eventSocketPath := fs.String("event-socket", ipc.DefaultEventSocketPath(), "event socket path")
 	_ = fs.Parse(args)
-	if extra := fs.Args(); len(extra) > 0 {
-		fmt.Fprintf(os.Stderr, "cenci status: unexpected argument %q\n", extra[0])
-		os.Exit(2)
-	}
+	rejectExtra("cenci status", fs.Args())
 
 	info := daemon.Status(*eventSocketPath, ipc.DefaultPIDPath())
 	fmt.Print(renderHumanStatus(info, *socketPath))

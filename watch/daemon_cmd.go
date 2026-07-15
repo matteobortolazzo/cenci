@@ -143,10 +143,7 @@ func runDaemonStart(args []string) {
 func runDaemonStop(args []string) {
 	fs := flag.NewFlagSet("daemon stop", flag.ExitOnError)
 	_ = fs.Parse(args)
-	if extra := fs.Args(); len(extra) > 0 {
-		fmt.Fprintf(os.Stderr, "cenci daemon stop: unexpected argument %q\n", extra[0])
-		os.Exit(2)
-	}
+	rejectExtra("cenci daemon stop", fs.Args())
 
 	outcome, err := daemon.Stop(ipc.DefaultEventSocketPath(), ipc.DefaultPIDPath())
 	if err != nil {
@@ -167,10 +164,7 @@ func runDaemonStop(args []string) {
 func runDaemonRestart(args []string) {
 	fs := flag.NewFlagSet("daemon restart", flag.ExitOnError)
 	_ = fs.Parse(args)
-	if extra := fs.Args(); len(extra) > 0 {
-		fmt.Fprintf(os.Stderr, "cenci daemon restart: unexpected argument %q\n", extra[0])
-		os.Exit(2)
-	}
+	rejectExtra("cenci daemon restart", fs.Args())
 
 	outcome, err := daemon.Stop(ipc.DefaultEventSocketPath(), ipc.DefaultPIDPath())
 	if err != nil {
@@ -202,10 +196,7 @@ func runDaemonRestart(args []string) {
 func runDaemonStatus(args []string) {
 	fs := flag.NewFlagSet("daemon status", flag.ExitOnError)
 	_ = fs.Parse(args)
-	if extra := fs.Args(); len(extra) > 0 {
-		fmt.Fprintf(os.Stderr, "cenci daemon status: unexpected argument %q\n", extra[0])
-		os.Exit(2)
-	}
+	rejectExtra("cenci daemon status", fs.Args())
 
 	info := daemon.Status(ipc.DefaultEventSocketPath(), ipc.DefaultPIDPath())
 	if !info.Running {

@@ -54,10 +54,7 @@ func runSandboxGroup(args []string) {
 // (exit 2), because the flag parser stops at the first non-flag token and
 // would otherwise silently swallow everything after it.
 func rejectExtraArgs(verb string, fs *flag.FlagSet) {
-	if extra := fs.Args(); len(extra) > 0 {
-		fmt.Fprintf(os.Stderr, "cenci sandbox %s: unexpected argument %q\n", verb, extra[0])
-		os.Exit(2)
-	}
+	rejectExtra("cenci sandbox "+verb, fs.Args())
 }
 
 // newEngine constructs the launcher engine on process stdio, treating
@@ -241,8 +238,7 @@ func runSandboxStop(args []string) {
 	_ = fs.Parse(args)
 	extra := fs.Args()
 	if len(extra) > 1 {
-		fmt.Fprintf(os.Stderr, "cenci sandbox stop: unexpected argument %q\n", extra[1])
-		os.Exit(2)
+		rejectExtra("cenci sandbox stop", extra[1:])
 	}
 	var filter string
 	if len(extra) == 1 {
