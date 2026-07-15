@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Host-runnable regressions for agent-sand's flag parser:
+# Host-runnable regressions for cenci-sand's flag parser:
 #   - Unknown long `--flags` are rejected with a clear error instead of being
 #     silently forwarded to the agent CLI (a typo used to reach the container
 #     unnoticed).
 #   - A `--` sentinel escapes the parser: everything after it is forwarded to
-#     the agent CLI verbatim, so flags agent-sand doesn't know about (e.g. a
+#     the agent CLI verbatim, so flags cenci-sand doesn't know about (e.g. a
 #     future `claude`/`codex` flag) still have a way through.
 #   - Legitimate passthrough that predates this fix keeps working: short
 #     flags (`-p`) and bare positional args are still forwarded directly.
@@ -54,11 +54,11 @@ exit 0
 EOF
 chmod +x "${BIN_DIR}/claude"
 
-cat > "${BIN_DIR}/agentwatch" <<'EOF'
+cat > "${BIN_DIR}/cenci" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
-chmod +x "${BIN_DIR}/agentwatch"
+chmod +x "${BIN_DIR}/cenci"
 
 export CALLS_FILE
 export HOME="${TEST_ROOT}/home"
@@ -67,7 +67,7 @@ export PATH="${BIN_DIR}:/usr/bin:/bin"
 echo "case: an unknown long flag is rejected instead of silently forwarded"
 printf '' > "${CALLS_FILE}"
 set +e
-UNKNOWN_STDERR="$("${SANDBOX_DIR}/agent-sand" --totally-bogus-flag -p test 2>&1 1>/dev/null)"
+UNKNOWN_STDERR="$("${SANDBOX_DIR}/cenci-sand" --totally-bogus-flag -p test 2>&1 1>/dev/null)"
 UNKNOWN_EXIT=$?
 set -e
 if [[ "${UNKNOWN_EXIT}" -eq 0 ]]; then
@@ -85,7 +85,7 @@ fi
 
 echo "case: '--' passes everything after it through to the agent CLI verbatim"
 printf '' > "${CALLS_FILE}"
-"${SANDBOX_DIR}/agent-sand" -- --resume --some-future-flag
+"${SANDBOX_DIR}/cenci-sand" -- --resume --some-future-flag
 
 if ! grep -Eq -- "^exec -it -u dev .*claude-sand-${REPO_SLUG} claude --dangerously-skip-permissions --model sonnet --resume --some-future-flag " "${CALLS_FILE}"; then
     echo "FAIL: flags after '--' were not forwarded verbatim to the agent CLI" >&2
@@ -94,7 +94,7 @@ fi
 
 echo "case: legitimate passthrough (short flags, bare positional args) still works"
 printf '' > "${CALLS_FILE}"
-"${SANDBOX_DIR}/agent-sand" -p "fix the tests"
+"${SANDBOX_DIR}/cenci-sand" -p "fix the tests"
 
 if ! grep -Eq -- "^exec -it -u dev .*claude-sand-${REPO_SLUG} claude --dangerously-skip-permissions --model sonnet -p fix\\\\ the\\\\ tests " "${CALLS_FILE}"; then
     echo "FAIL: short-flag/positional passthrough regressed" >&2
@@ -104,7 +104,7 @@ fi
 echo "case: --volumes without --prune is a hard error, not a silent no-op"
 printf '' > "${CALLS_FILE}"
 set +e
-VOLUMES_STDERR="$("${SANDBOX_DIR}/agent-sand" --volumes 2>&1 1>/dev/null)"
+VOLUMES_STDERR="$("${SANDBOX_DIR}/cenci-sand" --volumes 2>&1 1>/dev/null)"
 VOLUMES_EXIT=$?
 set -e
 if [[ "${VOLUMES_EXIT}" -eq 0 ]]; then
@@ -122,7 +122,7 @@ fi
 
 echo "case: --volumes combined with --prune still works (regression guard)"
 printf '' > "${CALLS_FILE}"
-"${SANDBOX_DIR}/agent-sand" --prune --volumes <<< "n"
+"${SANDBOX_DIR}/cenci-sand" --prune --volumes <<< "n"
 
 if ! grep -Eq '^volume ls --format' "${CALLS_FILE}"; then
     echo "FAIL: '--prune --volumes' did not query sandbox volumes" >&2

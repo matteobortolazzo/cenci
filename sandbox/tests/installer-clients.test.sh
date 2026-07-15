@@ -42,11 +42,11 @@ make_claude() {
 #!/bin/sh
 printf 'claude %s\n' "$*" >>"${CALLS_FILE}"
 case "$*" in
-  "plugin marketplace list") [ -f "${CLAUDE_MARKETPLACE_FILE}" ] && echo agent-stack; exit 0 ;;
+  "plugin marketplace list") [ -f "${CLAUDE_MARKETPLACE_FILE}" ] && echo cenci; exit 0 ;;
   "plugin marketplace add "*) touch "${CLAUDE_MARKETPLACE_FILE}"; exit 0 ;;
   "plugin list")
-    for p in agentflow agentwatch agent-sandbox; do
-      [ -f "${CLAUDE_INSTALLED_FILE}-${p}" ] && printf '%s@agent-stack\n' "${p}"
+    for p in cenci cenci-watch cenci-sandbox; do
+      [ -f "${CLAUDE_INSTALLED_FILE}-${p}" ] && printf '%s@cenci\n' "${p}"
     done
     exit 0
     ;;
@@ -63,11 +63,11 @@ make_codex() {
 #!/bin/sh
 printf 'codex %s\n' "$*" >>"${CALLS_FILE}"
 case "$*" in
-  "plugin marketplace list") [ -f "${CODEX_MARKETPLACE_FILE}" ] && echo 'agent-stack local'; exit 0 ;;
+  "plugin marketplace list") [ -f "${CODEX_MARKETPLACE_FILE}" ] && echo 'cenci local'; exit 0 ;;
   "plugin marketplace add "*) touch "${CODEX_MARKETPLACE_FILE}"; exit 0 ;;
   "plugin list")
-    for p in agentflow agentwatch agent-sandbox; do
-      [ -f "${CODEX_INSTALLED_FILE}-${p}" ] && printf '%s@agent-stack installed\n' "${p}"
+    for p in cenci cenci-watch cenci-sandbox; do
+      [ -f "${CODEX_INSTALLED_FILE}-${p}" ] && printf '%s@cenci installed\n' "${p}"
     done
     exit 0
     ;;
@@ -80,16 +80,16 @@ EOF
 
 prepare_checkout() {
     local home="$1" client="$2" checkout
-    checkout="${home}/.${client}/plugins/marketplaces/agent-stack"
-    mkdir -p "${checkout}/dev-sandbox"
-    cat > "${checkout}/dev-sandbox/agent-sand" <<'EOF'
+    checkout="${home}/.${client}/plugins/marketplaces/cenci"
+    mkdir -p "${checkout}/sandbox"
+    cat > "${checkout}/sandbox/cenci-sand" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
-    chmod +x "${checkout}/dev-sandbox/agent-sand"
-    if [[ -f "${ROOT}/agent-stack" ]]; then
-        cp "${ROOT}/agent-stack" "${checkout}/agent-stack"
-        chmod +x "${checkout}/agent-stack"
+    chmod +x "${checkout}/sandbox/cenci-sand"
+    if [[ -f "${ROOT}/cenci" ]]; then
+        cp "${ROOT}/cenci" "${checkout}/cenci"
+        chmod +x "${checkout}/cenci"
     fi
 }
 
@@ -139,9 +139,9 @@ run_doctor_case() {
 }
 
 # run_doctor_case_with_daemon_status is run_doctor_case plus a fake
-# `agentwatch` on the doctor-run PATH that exits daemon_exit on `daemon
+# `cenci` on the doctor-run PATH that exits daemon_exit on `daemon
 # status` (0 = running, 1 = not running — mirrors runDaemonStatus in
-# agentwatch/main.go). Pre-creating "${WORK}/${name}/bin/agentwatch" before
+# watch/main.go). Pre-creating "${WORK}/${name}/bin/cenci" before
 # run_case's `mkdir -p` (idempotent) and make_common_tools (which only
 # symlinks its own fixed tool list) leaves this fake in place for the doctor
 # run that follows.
@@ -149,14 +149,14 @@ run_doctor_case_with_daemon_status() {
     local name="$1" clients="$2" daemon_exit="$3"
     local bin="${WORK}/${name}/bin"
     mkdir -p "${bin}"
-    cat > "${bin}/agentwatch" <<EOF
+    cat > "${bin}/cenci" <<EOF
 #!/bin/sh
 if [ "\${1:-}" = daemon ] && [ "\${2:-}" = status ]; then
     exit ${daemon_exit}
 fi
 exit 0
 EOF
-    chmod +x "${bin}/agentwatch"
+    chmod +x "${bin}/cenci"
     run_doctor_case "${name}" "${clients}"
 }
 
@@ -178,11 +178,11 @@ assert_not_contains() {
     fi
 }
 
-assert_agent_stack_utility() {
-    local output="${CASE_HOME}/agent-stack-output"
-    [[ -L "${CASE_HOME}/.local/bin/agent-stack" ]]
+assert_cenci_installer_utility() {
+    local output="${CASE_HOME}/cenci-installer-output"
+    [[ -L "${CASE_HOME}/.local/bin/cenci-installer" ]]
     HOME="${CASE_HOME}" PATH="${CASE_BIN}" \
-        "${CASE_HOME}/.local/bin/agent-stack" update --yes >"${output}"
+        "${CASE_HOME}/.local/bin/cenci-installer" update --yes >"${output}"
     assert_contains "${output}" "forwarded installer args: update --yes"
 }
 
@@ -191,43 +191,44 @@ echo "installer-clients.test.sh"
 echo "case: Claude-only installs every component and prints only Claude launch guidance"
 run_case claude claude
 [[ "${CASE_EXIT}" -eq 0 ]]
-assert_contains "${CASE_CALLS}" "claude plugin install agentflow@agent-stack"
-assert_contains "${CASE_CALLS}" "claude plugin install agentwatch@agent-stack"
-assert_contains "${CASE_CALLS}" "claude plugin install agent-sandbox@agent-stack"
-assert_contains "${CASE_OUTPUT}" "agent-sand"
+assert_contains "${CASE_CALLS}" "claude plugin install cenci@cenci"
+assert_contains "${CASE_CALLS}" "claude plugin install cenci-watch@cenci"
+assert_contains "${CASE_CALLS}" "claude plugin install cenci-sandbox@cenci"
+assert_contains "${CASE_OUTPUT}" "cenci-sand"
 assert_not_contains "${CASE_OUTPUT}" "codex-sand"
-assert_agent_stack_utility
+assert_cenci_installer_utility
 
 echo "case: Codex-only installs every component without invoking or recommending Claude"
 run_case codex codex
 [[ "${CASE_EXIT}" -eq 0 ]]
-assert_contains "${CASE_CALLS}" "codex plugin add agentflow@agent-stack"
-assert_contains "${CASE_CALLS}" "codex plugin add agentwatch@agent-stack"
-assert_contains "${CASE_CALLS}" "codex plugin add agent-sandbox@agent-stack"
-assert_contains "${CASE_OUTPUT}" "sb xl|xt|xs"
+assert_contains "${CASE_CALLS}" "codex plugin add cenci@cenci"
+assert_contains "${CASE_CALLS}" "codex plugin add cenci-watch@cenci"
+assert_contains "${CASE_CALLS}" "codex plugin add cenci-sandbox@cenci"
+assert_contains "${CASE_OUTPUT}" "cenci-sand xl|xt|xs"
 assert_not_contains "${CASE_OUTPUT}" "codex-sand"
-assert_not_contains "${CASE_OUTPUT}" "agent-sand                # Claude"
-assert_not_contains "${CASE_OUTPUT}" "/agentflow:configure"
-[[ -L "${CASE_HOME}/.local/bin/sb" ]]
+assert_not_contains "${CASE_OUTPUT}" "/cenci:configure"
+[[ -L "${CASE_HOME}/.local/bin/cenci-sand" ]]
+[[ ! -e "${CASE_HOME}/.local/bin/sb" ]]
 [[ ! -e "${CASE_HOME}/.local/bin/codex-sand" ]]
 [[ ! -e "${CASE_HOME}/.local/bin/agent-sand" ]]
-assert_agent_stack_utility
+assert_cenci_installer_utility
 
-echo "case: Codex-only image build uses the sb launcher"
+echo "case: Codex-only image build uses the cenci-sand launcher"
 run_case codex-build codex --build
 [[ "${CASE_EXIT}" -eq 0 ]]
 assert_contains "${CASE_OUTPUT}" "sandbox image built"
-assert_not_contains "${CASE_OUTPUT}" "agent-sand: No such file"
+assert_not_contains "${CASE_OUTPUT}" "cenci-sand: No such file"
 
 echo "case: dual-client installs independently and exposes both launchers"
 run_case dual dual
 [[ "${CASE_EXIT}" -eq 0 ]]
-assert_contains "${CASE_CALLS}" "claude plugin install agentflow@agent-stack"
-assert_contains "${CASE_CALLS}" "codex plugin add agentflow@agent-stack"
-[[ -L "${CASE_HOME}/.local/bin/agent-sand" ]]
-[[ -L "${CASE_HOME}/.local/bin/sb" ]]
+assert_contains "${CASE_CALLS}" "claude plugin install cenci@cenci"
+assert_contains "${CASE_CALLS}" "codex plugin add cenci@cenci"
+[[ -L "${CASE_HOME}/.local/bin/cenci-sand" ]]
+[[ ! -e "${CASE_HOME}/.local/bin/sb" ]]
+[[ ! -e "${CASE_HOME}/.local/bin/agent-sand" ]]
 [[ ! -e "${CASE_HOME}/.local/bin/codex-sand" ]]
-assert_agent_stack_utility
+assert_cenci_installer_utility
 
 echo "case: already-registered marketplace is refreshed, not just confirmed"
 name=refresh
@@ -250,8 +251,8 @@ HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
 refresh_exit=$?
 set -e
 [[ "${refresh_exit}" -eq 0 ]]
-assert_contains "${calls}" "claude plugin marketplace update agent-stack"
-assert_contains "${calls}" "codex plugin marketplace upgrade agent-stack"
+assert_contains "${calls}" "claude plugin marketplace update cenci"
+assert_contains "${calls}" "codex plugin marketplace upgrade cenci"
 assert_not_contains "${calls}" "claude plugin marketplace add "
 assert_not_contains "${calls}" "codex plugin marketplace add "
 
@@ -267,22 +268,22 @@ assert_contains "${DOCTOR_OUTPUT}" "Required platform dependencies"
 assert_contains "${DOCTOR_OUTPUT}" "Supported clients (at least one required)"
 assert_contains "${DOCTOR_OUTPUT}" "Installed stack components"
 assert_contains "${DOCTOR_OUTPUT}" "Launchers and container image"
-assert_contains "${DOCTOR_OUTPUT}" "sb launcher"
+assert_contains "${DOCTOR_OUTPUT}" "cenci-sand launcher"
 assert_not_contains "${DOCTOR_OUTPUT}" "codex-sand launcher"
-assert_contains "${DOCTOR_OUTPUT}" "Codex: agentflow"
-assert_contains "${DOCTOR_OUTPUT}" "agent-stack utility"
-assert_contains "${DOCTOR_OUTPUT}" "agentwatch daemon"
+assert_contains "${DOCTOR_OUTPUT}" "Codex: cenci"
+assert_contains "${DOCTOR_OUTPUT}" "cenci-installer utility"
+assert_contains "${DOCTOR_OUTPUT}" "cenci daemon"
 assert_contains "${DOCTOR_OUTPUT}" "bootstraps on your first agent session"
 
-echo "case: doctor reports the agentwatch daemon as running"
+echo "case: doctor reports the cenci daemon as running"
 run_doctor_case_with_daemon_status doctor-daemon-up claude 0
 [[ "${DOCTOR_EXIT}" -eq 0 ]]
-assert_contains "${DOCTOR_OUTPUT}" "agentwatch daemon: running"
+assert_contains "${DOCTOR_OUTPUT}" "cenci daemon: running"
 
-echo "case: doctor reports the agentwatch daemon as not running, without failing doctor"
+echo "case: doctor reports the cenci daemon as not running, without failing doctor"
 run_doctor_case_with_daemon_status doctor-daemon-down claude 1
 [[ "${DOCTOR_EXIT}" -eq 0 ]]
-assert_contains "${DOCTOR_OUTPUT}" "agentwatch daemon: not running"
+assert_contains "${DOCTOR_OUTPUT}" "cenci daemon: not running"
 
 echo "case: doctor fails when no supported client is available"
 run_doctor_case doctor-none none

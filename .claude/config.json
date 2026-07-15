@@ -7,18 +7,18 @@
   },
   "projects": [
     {
-      "slug": "agentflow",
-      "path": "agentflow",
-      "name": "agentflow",
+      "slug": "flow",
+      "path": "flow",
+      "name": "flow",
       "description": "Claude Code plugin: markdown skills, agents, shell hooks",
       "stack": { "framework": "markdown-shell" },
       "buildCommand": "",
       "testCommand": ""
     },
     {
-      "slug": "agentwatch",
-      "path": "agentwatch",
-      "name": "agentwatch",
+      "slug": "watch",
+      "path": "watch",
+      "name": "watch",
       "description": "Go binary + Claude Code plugin: coding-agent session monitoring (tmux, waybar, noctalia, DMS)",
       "stack": { "framework": "go1.25", "testing": "go-testing" },
       "buildCommand": "make build",
@@ -26,9 +26,9 @@
       "lintCommand": "make lint"
     },
     {
-      "slug": "dev-sandbox",
-      "path": "dev-sandbox",
-      "name": "dev-sandbox",
+      "slug": "sandbox",
+      "path": "sandbox",
+      "name": "sandbox",
       "description": "Docker/Podman container for isolated Claude Code sessions",
       "stack": { "framework": "docker-shell", "testing": "shellcheck" },
       "buildCommand": "docker build",

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Host-runnable regressions for `agent-sand --reap-orphans` (#291): scans every
-# running agent-sand container across all installed runtimes (docker AND
+# Host-runnable regressions for `cenci-sand --reap-orphans` (#291): scans every
+# running cenci-sand container across all installed runtimes (docker AND
 # podman), reads TMUX_PANE from /proc/<pid>/environ of every container-side
 # process, and kills (SIGTERM -> grace -> SIGKILL) any process whose recorded
 # pane no longer exists on the host tmux server. Uses the mock-PATH + CALLS_FILE
@@ -10,7 +10,7 @@
 # failing assertion.
 #
 # RED PHASE (#291): `--reap-orphans` and reap_orphans() do not exist yet in
-# agent-sand, so every case below is expected to fail right now — the flag
+# cenci-sand, so every case below is expected to fail right now — the flag
 # falls through to the unrecognized-argument branch and gets forwarded to the
 # agent CLI like any other positional arg, producing a normal (non-reaping)
 # launch instead of a scan-and-kill run.
@@ -328,7 +328,7 @@ reaped_line() {
 }
 
 run_reap() {
-    OUTPUT="$("${SANDBOX_DIR}/agent-sand" --reap-orphans 2>&1)"
+    OUTPUT="$("${SANDBOX_DIR}/cenci-sand" --reap-orphans 2>&1)"
     EXIT_CODE=$?
 }
 

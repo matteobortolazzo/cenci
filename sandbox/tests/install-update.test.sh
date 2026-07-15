@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end regression tests for host installer update behavior: the daemon
-# restart path (restart_agentwatch_daemon in install.sh) must delegate to the
-# just-installed binary's own `agentwatch daemon restart` lifecycle verb
+# restart path (restart_cenci_daemon in install.sh) must delegate to the
+# just-installed binary's own `cenci daemon restart` lifecycle verb
 # rather than install.sh reimplementing pkill/nohup restart logic itself. The
 # old ad-hoc pkill/nohup restart survives only as a fallback for when the
 # binary can't do it itself.
@@ -57,9 +57,9 @@ make_client() {
 #!/bin/sh
 if [ "\${1:-}" = plugin ] && [ "\${2:-}" = list ]; then
     if [ "${client}" = claude ]; then
-        echo 'agentwatch@agent-stack'
+        echo 'cenci-watch@cenci'
     else
-        echo 'agentwatch@agent-stack installed'
+        echo 'cenci-watch@cenci installed'
     fi
 fi
 exit 0
@@ -67,13 +67,13 @@ EOF
     chmod +x "${bin}/${client}"
 }
 
-# make_agentwatch writes a fake agentwatch binary at path that logs every
+# make_cenci writes a fake cenci binary at path that logs every
 # invocation's argv (space-joined) to CALL_LOG. `daemon restart` exits
 # restart_exit (0 = the binary handled its own restart; nonzero = simulate a
 # binary that can't self-restart, so install.sh's fallback should kick in). A
 # bare `daemon` invocation (the fallback's nohup-spawned form) loops until
 # signaled, recording its pid to PIDS_FILE for the harness to reap.
-make_agentwatch() {
+make_cenci() {
     local path="$1" restart_exit="${2:-0}"
     mkdir -p "$(dirname "${path}")"
     cat >"${path}" <<EOF
@@ -93,9 +93,9 @@ EOF
 }
 
 # setup_layout provisions a fake HOME with a client plugin cache containing
-# a single "updated" agentwatch binary (current_agentwatch_binary always finds
-# a binary already in place, so step_agentwatch_setup's update path calls
-# restart_agentwatch_daemon immediately, no bootstrap needed).
+# a single "updated" cenci binary (current_cenci_binary always finds
+# a binary already in place, so step_cenci_setup's update path calls
+# restart_cenci_daemon immediately, no bootstrap needed).
 setup_layout() {
     local name="$1" client="$2" restart_exit="$3"
     local home="${WORK}/${name}/home" mock_bin="${WORK}/${name}/bin"
@@ -109,17 +109,17 @@ setup_layout() {
 
     local cache_dir manifest_dir new_root new_bin
     if [[ "${client}" == claude ]]; then
-        cache_dir="${home}/.claude/plugins/cache/agent-stack/agentwatch"
+        cache_dir="${home}/.claude/plugins/cache/cenci/cenci-watch"
         manifest_dir=.claude-plugin
     else
-        cache_dir="${home}/.codex/plugins/cache/agent-stack/agentwatch"
+        cache_dir="${home}/.codex/plugins/cache/cenci/cenci-watch"
         manifest_dir=.codex-plugin
     fi
     new_root="${cache_dir}/2.0.0"
-    new_bin="${new_root}/bin/agentwatch"
-    make_agentwatch "${new_bin}" "${restart_exit}"
+    new_bin="${new_root}/bin/cenci"
+    make_cenci "${new_bin}" "${restart_exit}"
     mkdir -p "${new_root}/${manifest_dir}"
-    printf '{"name":"agentwatch","version":"2.0.0"}\n' >"${new_root}/${manifest_dir}/plugin.json"
+    printf '{"name":"cenci-watch","version":"2.0.0"}\n' >"${new_root}/${manifest_dir}/plugin.json"
 
     LAYOUT_HOME="${home}"
     LAYOUT_BIN="${mock_bin}"
@@ -153,8 +153,8 @@ if [[ -s "${LAYOUT_PKILL_LOG}" ]]; then
     cat "${LAYOUT_PKILL_LOG}" >&2
     exit 1
 fi
-if [[ ! -L "${LAYOUT_HOME}/.local/bin/agentwatch" ]] ||
-    [[ "$(readlink "${LAYOUT_HOME}/.local/bin/agentwatch")" != "${LAYOUT_NEW_BIN}" ]]; then
+if [[ ! -L "${LAYOUT_HOME}/.local/bin/cenci" ]] ||
+    [[ "$(readlink "${LAYOUT_HOME}/.local/bin/cenci")" != "${LAYOUT_NEW_BIN}" ]]; then
     echo "FAIL: Claude cache launcher does not point to the updated binary" >&2
     exit 1
 fi
@@ -192,10 +192,10 @@ if ! grep -qx "daemon" "${LAYOUT_CALL_LOG}"; then
     cat "${LAYOUT_CALL_LOG}" >&2
     exit 1
 fi
-if ! grep -q "restarted agentwatch with the updated binary" "${WORK}/last-output"; then
+if ! grep -q "restarted cenci with the updated binary" "${WORK}/last-output"; then
     echo "FAIL: expected the fallback restart to report success" >&2
     cat "${WORK}/last-output" >&2
     exit 1
 fi
 
-echo "passed: restart path delegates to 'agentwatch daemon restart', falling back to pkill/nohup only on failure"
+echo "passed: restart path delegates to 'cenci daemon restart', falling back to pkill/nohup only on failure"

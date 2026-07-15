@@ -48,9 +48,9 @@ STALE='{
 OUT_STALE="$(echo "${STALE}" | migrate_settings)"
 
 echo "case: stale pre-rename volume"
-assert_jq "enables agentwatch@agent-stack"        "${OUT_STALE}" '.enabledPlugins["agentwatch@agent-stack"] == true'
-assert_jq "enables agentflow@agent-stack"         "${OUT_STALE}" '.enabledPlugins["agentflow@agent-stack"] == true'
-assert_jq "adds agent-stack marketplace"          "${OUT_STALE}" '.extraKnownMarketplaces["agent-stack"].source.repo == "matteobortolazzo/agent-stack"'
+assert_jq "enables cenci-watch@cenci"        "${OUT_STALE}" '.enabledPlugins["cenci-watch@cenci"] == true'
+assert_jq "enables cenci@cenci"         "${OUT_STALE}" '.enabledPlugins["cenci@cenci"] == true'
+assert_jq "adds cenci marketplace"          "${OUT_STALE}" '.extraKnownMarketplaces["cenci"].source.repo == "matteobortolazzo/cenci"'
 assert_jq "drops muxwatch@claude-tools"           "${OUT_STALE}" '.enabledPlugins | has("muxwatch@claude-tools") | not'
 assert_jq "drops ccflow@claude-tools"             "${OUT_STALE}" '.enabledPlugins | has("ccflow@claude-tools") | not'
 assert_jq "drops claude-tools marketplace"        "${OUT_STALE}" '.extraKnownMarketplaces | has("claude-tools") | not'
@@ -62,16 +62,16 @@ assert_jq "seeds bypass mode"                     "${OUT_STALE}" '.permissions.d
 OUT_EMPTY="$(echo '{}' | migrate_settings)"
 echo "case: empty object"
 assert_jq "seeds bypass mode"          "${OUT_EMPTY}" '.permissions.defaultMode == "bypassPermissions" and .skipDangerousModePermissionPrompt == true'
-assert_jq "enables agentwatch"         "${OUT_EMPTY}" '.enabledPlugins["agentwatch@agent-stack"] == true'
-assert_jq "enables agentflow"          "${OUT_EMPTY}" '.enabledPlugins["agentflow@agent-stack"] == true'
-assert_jq "adds agent-stack marketplace" "${OUT_EMPTY}" '.extraKnownMarketplaces["agent-stack"] != null'
+assert_jq "enables cenci-watch"         "${OUT_EMPTY}" '.enabledPlugins["cenci-watch@cenci"] == true'
+assert_jq "enables cenci"          "${OUT_EMPTY}" '.enabledPlugins["cenci@cenci"] == true'
+assert_jq "adds cenci marketplace" "${OUT_EMPTY}" '.extraKnownMarketplaces["cenci"] != null'
 
 # ── Case 3: fresh volume (entrypoint seeds `{}` into migrate) ─────
 # The fresh-volume branch pipes `{}` through migrate_settings, so it is
 # equivalent to case 2 — assert it explicitly for regression coverage.
 OUT_FRESH="$(echo '{}' | migrate_settings)"
 echo "case: fresh volume"
-assert_jq "has both plugins + bypass" "${OUT_FRESH}" '.enabledPlugins["agentwatch@agent-stack"] == true and .enabledPlugins["agentflow@agent-stack"] == true and .permissions.defaultMode == "bypassPermissions"'
+assert_jq "has both plugins + bypass" "${OUT_FRESH}" '.enabledPlugins["cenci-watch@cenci"] == true and .enabledPlugins["cenci@cenci"] == true and .permissions.defaultMode == "bypassPermissions"'
 
 # ── Case 4: idempotency ──────────────────────────────────────────
 echo "case: idempotency"
@@ -85,10 +85,10 @@ fi
 
 # ── Case 5: user override of a bypass key is replaced, plugins win ─
 # ours-win-on-conflict: a home volume that disabled a plugin gets re-enabled.
-OVERRIDE='{"enabledPlugins":{"agentwatch@agent-stack":false},"permissions":{"defaultMode":"default"}}'
+OVERRIDE='{"enabledPlugins":{"cenci-watch@cenci":false},"permissions":{"defaultMode":"default"}}'
 OUT_OVERRIDE="$(echo "${OVERRIDE}" | migrate_settings)"
 echo "case: our keys win on conflict"
-assert_jq "re-enables agentwatch"   "${OUT_OVERRIDE}" '.enabledPlugins["agentwatch@agent-stack"] == true'
+assert_jq "re-enables cenci-watch"   "${OUT_OVERRIDE}" '.enabledPlugins["cenci-watch@cenci"] == true'
 assert_jq "forces bypass mode"      "${OUT_OVERRIDE}" '.permissions.defaultMode == "bypassPermissions"'
 
 # ── Case 6: statusLine seeding ───────────────────────────────────

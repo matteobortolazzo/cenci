@@ -5,9 +5,9 @@ GitHub Issues for tracking. GitHub for code and PRs.
 
 ## Projects
 
-- `agentflow/` — workflow layer: Claude Code pipeline plus portable Codex conventions
-- `agentwatch/` — attention layer: Go daemon and native Claude Code/Codex hooks
-- `dev-sandbox/` — isolation layer: Docker/Podman launcher for Claude Code and Codex
+- `flow/` — workflow layer: Claude Code pipeline plus portable Codex conventions
+- `watch/` — attention layer: Go daemon and native Claude Code/Codex hooks
+- `sandbox/` — isolation layer: Docker/Podman launcher for Claude Code and Codex
 
 Each project has its own `CLAUDE.md` with project-specific context.
 
@@ -21,21 +21,21 @@ Each project has its own `CLAUDE.md` with project-specific context.
 
 ## Build & Test
 
-### agentwatch
-- Build: `cd agentwatch && make build`
-- Test: `cd agentwatch && make test` or `cd agentwatch && go test ./...`
-- Lint: `cd agentwatch && make lint`
+### watch
+- Build: `cd watch && make build`
+- Test: `cd watch && make test` or `cd watch && go test ./...`
+- Lint: `cd watch && make lint`
 
-### agentflow
+### flow
 - No build step (markdown/shell plugin)
 
-### agent-sandbox and installer
-- Syntax: `bash -n install.sh dev-sandbox/agent-sand dev-sandbox/entrypoint.sh`
-- Tests: `bash dev-sandbox/tests/installer-clients.test.sh` and the other host-runnable suites in `dev-sandbox/tests/`
+### sandbox and installer
+- Syntax: `bash -n install.sh sandbox/cenci-sand sandbox/entrypoint.sh`
+- Tests: `bash sandbox/tests/installer-clients.test.sh` and the other host-runnable suites in `sandbox/tests/`
 
 ## Versioning
 
 Each plugin versions independently:
-- agentflow: auto-bumped on push to main (paths: `agentflow/**`), tags: `agentflow/v*`
-- agentwatch: auto-bumped on push to main (paths: `agentwatch/**`), tags: `agentwatch/v*`
-- agent-sandbox: auto-bumped on push to main (paths: `dev-sandbox/**`), tags: `agent-sandbox/v*`
+- flow: auto-bumped on push to main (paths: `flow/**`), tags: `flow/v*`
+- watch: auto-bumped on push to main (paths: `watch/**`), tags: `watch/v*`
+- sandbox: auto-bumped on push to main (paths: `sandbox/**`), tags: `sandbox/v*`

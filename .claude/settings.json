@@ -21,8 +21,8 @@
       "Bash(wc:*)",
       "SlashCommand(/goal:*)",
       "SlashCommand(/loop:*)",
-      "mcp__plugin_agentflow_context7__resolve-library-id",
-      "mcp__plugin_agentflow_context7__query-docs"
+      "mcp__plugin_cenci_context7__resolve-library-id",
+      "mcp__plugin_cenci_context7__query-docs"
     ],
     "deny": [
       "Bash(git push --force *)",

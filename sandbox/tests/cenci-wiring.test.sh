@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Regression test for #195: agent-sand must not silently create the shared
-# container without agentwatch wiring just because the host daemon hasn't
-# started yet (it starts lazily, on the first `agentwatch notify`). The
+# Regression test for #195: cenci-sand must not silently create the shared
+# container without cenci wiring just because the host daemon hasn't
+# started yet (it starts lazily, on the first `cenci notify`). The
 # launcher now starts the daemon itself when the socket is missing, warns
 # when the wiring cannot be established, and warns on attach when a running
 # container was created without the events-socket mount.
@@ -25,13 +25,13 @@ fi
 
 BIN_DIR="${TEST_ROOT}/bin"
 CALLS_FILE="${TEST_ROOT}/runtime-calls"
-AGENTWATCH_CALLS="${TEST_ROOT}/agentwatch-calls"
+CENCI_CALLS="${TEST_ROOT}/cenci-calls"
 STDERR_FILE="${TEST_ROOT}/stderr"
 RUNTIME_DIR="${TEST_ROOT}/runtime"
-SOCKET_DIR="${RUNTIME_DIR}/agentwatch"
-EVENTS_SOCKET="${SOCKET_DIR}/agentwatch-events.sock"
-# Container-side mount point; must match agent-sand's AGENTWATCH_SOCKET_MOUNT_DEST.
-SOCKET_MOUNT_DEST="/run/user/1000/agentwatch"
+SOCKET_DIR="${RUNTIME_DIR}/cenci"
+EVENTS_SOCKET="${SOCKET_DIR}/cenci-events.sock"
+# Container-side mount point; must match cenci-sand's CENCI_SOCKET_MOUNT_DEST.
+SOCKET_MOUNT_DEST="/run/user/1000/cenci"
 mkdir -p "${BIN_DIR}" "${RUNTIME_DIR}" "${TEST_ROOT}/home/.claude"
 chmod 700 "${RUNTIME_DIR}"
 touch "${TEST_ROOT}/home/.claude/.credentials.json"
@@ -76,35 +76,35 @@ EOF
 chmod +x "${BIN_DIR}/claude"
 
 # `socket-dir` mkdir -p's and prints the socket directory, matching the real
-# `agentwatch socket-dir` (#217), unless MOCK_SOCKET_DIR_FAILS=true, in which
+# `cenci socket-dir` (#217), unless MOCK_SOCKET_DIR_FAILS=true, in which
 # case it exits non-zero with a diagnostic on stderr (simulating a genuine CLI
-# failure, distinct from agentwatch simply not being installed). `daemon`
+# failure, distinct from cenci simply not being installed). `daemon`
 # creates the events socket inside that directory unless MOCK_DAEMON_STARTS=false,
 # matching the real daemon binding its socket shortly after being spawned.
-cat > "${BIN_DIR}/agentwatch" <<'EOF'
+cat > "${BIN_DIR}/cenci" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-printf '%q ' "$@" >> "${AGENTWATCH_CALLS}"
-printf '\n' >> "${AGENTWATCH_CALLS}"
+printf '%q ' "$@" >> "${CENCI_CALLS}"
+printf '\n' >> "${CENCI_CALLS}"
 if [[ "${1:-}" == socket-dir ]]; then
     if [[ "${MOCK_SOCKET_DIR_FAILS:-false}" == true ]]; then
-        echo "mock agentwatch: socket-dir: permission denied" >&2
+        echo "mock cenci: socket-dir: permission denied" >&2
         exit 1
     fi
-    mkdir -p "${XDG_RUNTIME_DIR}/agentwatch"
-    printf '%s\n' "${XDG_RUNTIME_DIR}/agentwatch"
+    mkdir -p "${XDG_RUNTIME_DIR}/cenci"
+    printf '%s\n' "${XDG_RUNTIME_DIR}/cenci"
 fi
 if [[ "${1:-}" == daemon && "${MOCK_DAEMON_STARTS:-true}" == true ]]; then
-    mkdir -p "${XDG_RUNTIME_DIR}/agentwatch"
+    mkdir -p "${XDG_RUNTIME_DIR}/cenci"
     python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' \
-        "${XDG_RUNTIME_DIR}/agentwatch/agentwatch-events.sock"
+        "${XDG_RUNTIME_DIR}/cenci/cenci-events.sock"
 fi
 exit 0
 EOF
-chmod +x "${BIN_DIR}/agentwatch"
+chmod +x "${BIN_DIR}/cenci"
 
 export CALLS_FILE
-export AGENTWATCH_CALLS
+export CENCI_CALLS
 export MOCK_CONTAINER_NAME
 export HOME="${TEST_ROOT}/home"
 export PATH="${BIN_DIR}:/usr/bin:/bin"
@@ -113,15 +113,15 @@ export XDG_RUNTIME_DIR="${RUNTIME_DIR}"
 # ── 1. Socket missing at launch → daemon is started, wiring is mounted ──
 export MOCK_RUNNING=false
 export MOCK_DAEMON_STARTS=true
-"${SANDBOX_DIR}/agent-sand" -p test 2> "${STDERR_FILE}"
+"${SANDBOX_DIR}/cenci-sand" -p test 2> "${STDERR_FILE}"
 
-if ! grep -Eq '^daemon' "${AGENTWATCH_CALLS}"; then
-    echo "FAIL: launcher did not start the agentwatch daemon when the socket was missing" >&2
+if ! grep -Eq '^daemon' "${CENCI_CALLS}"; then
+    echo "FAIL: launcher did not start the cenci daemon when the socket was missing" >&2
     exit 1
 fi
 
 if ! grep -Eq "^run .* -v ${SOCKET_DIR}:${SOCKET_MOUNT_DEST}:ro " "${CALLS_FILE}"; then
-    echo "FAIL: container was created without the read-only agentwatch socket-directory mount" >&2
+    echo "FAIL: container was created without the read-only cenci socket-directory mount" >&2
     exit 1
 fi
 
@@ -130,41 +130,41 @@ if ! grep -Eq '^run .* -e XDG_RUNTIME_DIR=/run/user/1000 ' "${CALLS_FILE}"; then
     exit 1
 fi
 
-if grep -q 'Warning: agentwatch' "${STDERR_FILE}"; then
+if grep -q 'Warning: cenci' "${STDERR_FILE}"; then
     echo "FAIL: launcher warned even though the wiring was established" >&2
     exit 1
 fi
 
-# ── 2. `agentwatch socket-dir` itself fails → loud warning, no hang, no bad mount ──
+# ── 2. `cenci socket-dir` itself fails → loud warning, no hang, no bad mount ──
 rm -f "${EVENTS_SOCKET}"
 printf '' > "${CALLS_FILE}"
-printf '' > "${AGENTWATCH_CALLS}"
+printf '' > "${CENCI_CALLS}"
 export MOCK_SOCKET_DIR_FAILS=true
-timeout 30 "${SANDBOX_DIR}/agent-sand" -p test 2> "${STDERR_FILE}"
+timeout 30 "${SANDBOX_DIR}/cenci-sand" -p test 2> "${STDERR_FILE}"
 unset MOCK_SOCKET_DIR_FAILS
 
 if ! grep -q "socket-dir' failed" "${STDERR_FILE}"; then
-    echo "FAIL: launcher did not warn loudly when 'agentwatch socket-dir' failed" >&2
+    echo "FAIL: launcher did not warn loudly when 'cenci socket-dir' failed" >&2
     exit 1
 fi
 
 if ! grep -q "permission denied" "${STDERR_FILE}"; then
-    echo "FAIL: launcher warning dropped the captured stderr diagnostic from 'agentwatch socket-dir'" >&2
+    echo "FAIL: launcher warning dropped the captured stderr diagnostic from 'cenci socket-dir'" >&2
     exit 1
 fi
 
-if grep -q 'Warning: agentwatch is installed but its events socket is unavailable' "${STDERR_FILE}"; then
+if grep -q 'Warning: cenci is installed but its events socket is unavailable' "${STDERR_FILE}"; then
     echo "FAIL: launcher duplicated the generic unavailable-socket warning alongside the specific socket-dir failure warning" >&2
     exit 1
 fi
 
 if grep -Eq '^run .* -v :' "${CALLS_FILE}"; then
-    echo "FAIL: container was given a malformed/empty-source agentwatch mount after the socket-dir failure" >&2
+    echo "FAIL: container was given a malformed/empty-source cenci mount after the socket-dir failure" >&2
     exit 1
 fi
 
 if grep -Eq -- "${SOCKET_MOUNT_DEST}" "${CALLS_FILE}"; then
-    echo "FAIL: container was given agentwatch wiring despite the socket-dir CLI failing" >&2
+    echo "FAIL: container was given cenci wiring despite the socket-dir CLI failing" >&2
     exit 1
 fi
 
@@ -176,22 +176,22 @@ fi
 # ── 3. Daemon never binds the socket → loud warning, container still starts ──
 rm -f "${EVENTS_SOCKET}"
 printf '' > "${CALLS_FILE}"
-printf '' > "${AGENTWATCH_CALLS}"
+printf '' > "${CENCI_CALLS}"
 export MOCK_DAEMON_STARTS=false
-"${SANDBOX_DIR}/agent-sand" -p test 2> "${STDERR_FILE}"
+"${SANDBOX_DIR}/cenci-sand" -p test 2> "${STDERR_FILE}"
 
-if ! grep -q 'Warning: agentwatch' "${STDERR_FILE}"; then
+if ! grep -q 'Warning: cenci' "${STDERR_FILE}"; then
     echo "FAIL: launcher degraded silently when the events socket never appeared" >&2
     exit 1
 fi
 
-if grep -Eq '^run .*agentwatch-events\.sock' "${CALLS_FILE}"; then
+if grep -Eq '^run .*cenci-events\.sock' "${CALLS_FILE}"; then
     echo "FAIL: container was given a socket mount that does not exist on the host" >&2
     exit 1
 fi
 
 if ! grep -Eq '^run .* -d ' "${CALLS_FILE}"; then
-    echo "FAIL: container was not started after the agentwatch warning" >&2
+    echo "FAIL: container was not started after the cenci warning" >&2
     exit 1
 fi
 
@@ -200,9 +200,9 @@ make_socket "${EVENTS_SOCKET}"
 printf '' > "${CALLS_FILE}"
 export MOCK_RUNNING=true
 export MOCK_MOUNTS='/workspace\n/home/dev\n'
-"${SANDBOX_DIR}/agent-sand" -p test 2> "${STDERR_FILE}"
+"${SANDBOX_DIR}/cenci-sand" -p test 2> "${STDERR_FILE}"
 
-if ! grep -q "without agentwatch wiring" "${STDERR_FILE}"; then
+if ! grep -q "without cenci wiring" "${STDERR_FILE}"; then
     echo "FAIL: attach to an unwired container did not warn" >&2
     exit 1
 fi
@@ -215,7 +215,7 @@ fi
 # ── 5. Attach to a properly wired container → no warning ──
 printf '' > "${CALLS_FILE}"
 export MOCK_MOUNTS="/workspace\n${SOCKET_MOUNT_DEST}\n/home/dev\n"
-"${SANDBOX_DIR}/agent-sand" -p test 2> "${STDERR_FILE}"
+"${SANDBOX_DIR}/cenci-sand" -p test 2> "${STDERR_FILE}"
 
 if grep -q 'Warning' "${STDERR_FILE}"; then
     echo "FAIL: attach to a wired container warned spuriously" >&2
@@ -265,7 +265,7 @@ wait_for_socket() {
 
 RESTART_DIR="${TEST_ROOT}/restart-sim"
 mkdir -p "${RESTART_DIR}"
-RESTART_SOCKET="${RESTART_DIR}/agentwatch-events.sock"
+RESTART_SOCKET="${RESTART_DIR}/cenci-events.sock"
 
 # The "old" daemon binds the socket (first inode).
 listen_once "${RESTART_SOCKET}" &
@@ -302,17 +302,17 @@ wait "${NEW_SERVER_PID}" 2>/dev/null || true
 # file itself — a file mount is exactly the stale-inode bug reproduced above.
 rm -f "${EVENTS_SOCKET}"
 printf '' > "${CALLS_FILE}"
-printf '' > "${AGENTWATCH_CALLS}"
+printf '' > "${CENCI_CALLS}"
 export MOCK_RUNNING=false
 export MOCK_DAEMON_STARTS=true
-"${SANDBOX_DIR}/agent-sand" -p test 2> "${STDERR_FILE}"
+"${SANDBOX_DIR}/cenci-sand" -p test 2> "${STDERR_FILE}"
 
 if ! grep -Eq "^run .* -v ${SOCKET_DIR}:${SOCKET_MOUNT_DEST}:ro " "${CALLS_FILE}"; then
-    echo "FAIL: launcher did not mount the agentwatch socket directory read-only" >&2
+    echo "FAIL: launcher did not mount the cenci socket directory read-only" >&2
     exit 1
 fi
 
-if grep -Eq '^run .*agentwatch-events\.sock' "${CALLS_FILE}"; then
+if grep -Eq '^run .*cenci-events\.sock' "${CALLS_FILE}"; then
     echo "FAIL: launcher mounted the socket file directly; a bind-mounted file pins the inode and breaks across daemon restarts (#218)" >&2
     exit 1
 fi

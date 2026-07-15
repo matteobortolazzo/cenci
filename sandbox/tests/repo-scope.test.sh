@@ -3,7 +3,7 @@
 #
 # Runs on the host — no Docker required. Sources the same slugify(),
 # resolve_repo_root(), compute_workdir(), compute_legacy_workdir() and
-# select_image() that agent-sand uses to namespace containers/volumes/images
+# select_image() that cenci-sand uses to namespace containers/volumes/images
 # per repo.
 set -uo pipefail
 

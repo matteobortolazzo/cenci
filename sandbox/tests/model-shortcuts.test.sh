@@ -42,11 +42,11 @@ exit 0
 EOF
 chmod +x "${BIN_DIR}/claude"
 
-cat > "${BIN_DIR}/agentwatch" <<'EOF'
+cat > "${BIN_DIR}/cenci" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
-chmod +x "${BIN_DIR}/agentwatch"
+chmod +x "${BIN_DIR}/cenci"
 
 export CALLS_FILE
 export HOME="${TEST_ROOT}/home"
@@ -54,7 +54,7 @@ export PATH="${BIN_DIR}:/usr/bin:/bin"
 
 echo "case: 'sb ch' launches Claude with the haiku model"
 printf '' > "${CALLS_FILE}"
-"${SANDBOX_DIR}/agent-sand" ch -p test
+"${SANDBOX_DIR}/cenci-sand" ch -p test
 
 if ! grep -Eq '^run .* -e AGENT_SAND_AGENT=claude ' "${CALLS_FILE}"; then
     echo "FAIL: 'ch' did not select the claude agent" >&2
@@ -67,7 +67,7 @@ fi
 
 echo "case: 'sb xt' launches Codex with the gpt-5.6-terra model"
 printf '' > "${CALLS_FILE}"
-"${SANDBOX_DIR}/agent-sand" xt -p test
+"${SANDBOX_DIR}/cenci-sand" xt -p test
 
 if ! grep -Eq '^run .* -e AGENT_SAND_AGENT=codex ' "${CALLS_FILE}"; then
     echo "FAIL: 'xt' did not select the codex agent" >&2
@@ -80,7 +80,7 @@ fi
 
 echo "case: unadorned --agent codex still defaults to the gpt-5.6-terra model"
 printf '' > "${CALLS_FILE}"
-"${SANDBOX_DIR}/agent-sand" --agent codex -p test
+"${SANDBOX_DIR}/cenci-sand" --agent codex -p test
 
 if ! grep -Eq "^exec -it -u dev .*codex-sand-${REPO_SLUG} codex --dangerously-bypass-approvals-and-sandbox --model gpt-5\\.6-terra -p test " "${CALLS_FILE}"; then
     echo "FAIL: default codex launch did not fall back to --model gpt-5.6-terra" >&2
@@ -89,7 +89,7 @@ fi
 
 echo "case: a shortcut token later in the args is passed through untouched"
 printf '' > "${CALLS_FILE}"
-"${SANDBOX_DIR}/agent-sand" -p ch
+"${SANDBOX_DIR}/cenci-sand" -p ch
 
 if ! grep -Eq "^exec -it -u dev .*claude-sand-${REPO_SLUG} claude --dangerously-skip-permissions --model sonnet -p ch " "${CALLS_FILE}"; then
     echo "FAIL: 'ch' in a non-first position was not forwarded as a literal argument" >&2
@@ -98,7 +98,7 @@ fi
 
 echo "case: user-supplied --model is forwarded exactly once (no double injection)"
 printf '' > "${CALLS_FILE}"
-"${SANDBOX_DIR}/agent-sand" --model opus -p test
+"${SANDBOX_DIR}/cenci-sand" --model opus -p test
 
 EXEC_LINE="$(grep -E "^exec -it -u dev .*claude-sand-${REPO_SLUG} claude " "${CALLS_FILE}" || true)"
 if [[ -z "${EXEC_LINE}" ]]; then
@@ -118,7 +118,7 @@ fi
 echo "case: a shortcut's agent conflicting with an explicit --agent is rejected"
 printf '' > "${CALLS_FILE}"
 set +e
-DESYNC_STDERR="$("${SANDBOX_DIR}/agent-sand" ch --agent codex -p test 2>&1 1>/dev/null)"
+DESYNC_STDERR="$("${SANDBOX_DIR}/cenci-sand" ch --agent codex -p test 2>&1 1>/dev/null)"
 DESYNC_EXIT=$?
 set -e
 if [[ "${DESYNC_EXIT}" -eq 0 ]]; then

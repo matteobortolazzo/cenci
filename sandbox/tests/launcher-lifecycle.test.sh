@@ -45,11 +45,11 @@ exit 0
 EOF
 chmod +x "${BIN_DIR}/claude"
 
-cat > "${BIN_DIR}/agentwatch" <<'EOF'
+cat > "${BIN_DIR}/cenci" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
-chmod +x "${BIN_DIR}/agentwatch"
+chmod +x "${BIN_DIR}/cenci"
 
 export CALLS_FILE
 export MOCK_CONTAINER_NAME
@@ -57,14 +57,14 @@ export HOME="${TEST_ROOT}/home"
 export PATH="${BIN_DIR}:/usr/bin:/bin"
 
 export MOCK_RUNNING=false
-"${SANDBOX_DIR}/agent-sand" -p test
+"${SANDBOX_DIR}/cenci-sand" -p test
 
 if ! grep -Eq '^run .* -d .*claude-sand-' "${CALLS_FILE}"; then
     echo "FAIL: shared container was not started detached" >&2
     exit 1
 fi
 
-if ! grep -Eq '^run .*--label agent-sand\.lifecycle=detached ' "${CALLS_FILE}"; then
+if ! grep -Eq '^run .*--label cenci-sand\.lifecycle=detached ' "${CALLS_FILE}"; then
     echo "FAIL: detached container is missing its lifecycle label" >&2
     exit 1
 fi
@@ -86,7 +86,7 @@ fi
 
 printf '' > "${CALLS_FILE}"
 export MOCK_RUNNING=true
-"${SANDBOX_DIR}/agent-sand" -p second
+"${SANDBOX_DIR}/cenci-sand" -p second
 
 if grep -Eq '^run ' "${CALLS_FILE}"; then
     echo "FAIL: existing detached container was not reused" >&2
@@ -104,7 +104,7 @@ printf '' > "${CALLS_FILE}"
 export MOCK_RUNNING=false
 MOCK_CONTAINER_NAME="codex-sand-$(slugify "$(basename "${REPO_ROOT}")")"
 export MOCK_CONTAINER_NAME
-"${SANDBOX_DIR}/agent-sand" --agent codex --update-plugins
+"${SANDBOX_DIR}/cenci-sand" --agent codex --update-plugins
 
 if ! grep -Eq '^run --rm --entrypoint /bin/bash -e AGENT_SAND_AGENT=codex .*provision_codex_plugins' "${CALLS_FILE}"; then
     echo "FAIL: Codex forced update did not use the baked-in Codex plugin path" >&2

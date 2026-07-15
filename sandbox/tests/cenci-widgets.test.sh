@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end regressions for the installer's GUI bar-widget wiring: detect each
 # present desktop bar, delegate to its self-contained install.sh (install +
-# reload), and prove `agent-stack update` re-runs the reload so widget changes
+# reload), and prove `cenci update` re-runs the reload so widget changes
 # become visible. Uses the mock-PATH + fake-HOME pattern (no real desktop).
 set -euo pipefail
 
@@ -42,15 +42,15 @@ EOF
     chmod +x "${bin}/docker" "${bin}/curl" "${bin}/sudo" "${bin}/pkill"
 }
 
-# make_claude reports agentwatch (only) installed and the marketplace registered,
-# so the installer reaches step_agentwatch_setup with agentwatch selected.
+# make_claude reports cenci-watch (only) installed and the marketplace registered,
+# so the installer reaches step_cenci_watch_setup with cenci-watch selected.
 make_claude() {
     local bin="$1"
     cat >"${bin}/claude" <<'EOF'
 #!/bin/sh
 case "$*" in
-  "plugin marketplace list") echo agent-stack ;;
-  "plugin list") echo 'agentwatch@agent-stack' ;;
+  "plugin marketplace list") echo cenci ;;
+  "plugin list") echo 'cenci-watch@cenci' ;;
 esac
 exit 0
 EOF
@@ -73,10 +73,10 @@ EOF
 # dirs + their install.sh scripts, where find_plugin_path resolves them.
 prepare_checkout() {
     local home="$1" checkout de
-    checkout="${home}/.claude/plugins/marketplaces/agent-stack"
-    mkdir -p "${checkout}/agentwatch/plugin"
+    checkout="${home}/.claude/plugins/marketplaces/cenci"
+    mkdir -p "${checkout}/watch/plugin"
     for de in gnome plasma dms noctalia; do
-        cp -R "${ROOT}/agentwatch/plugin/${de}" "${checkout}/agentwatch/plugin/${de}"
+        cp -R "${ROOT}/watch/plugin/${de}" "${checkout}/watch/plugin/${de}"
     done
 }
 
@@ -96,7 +96,7 @@ assert_log() { grep -q -- "$2" "$1" || fail "expected '$2' in $1"; }
 assert_no_log() { ! grep -q -- "$2" "$1" || fail "did not expect '$2' in $1"; }
 assert_out() { grep -Fq -- "$2" "$1" || { sed -n '1,200p' "$1" >&2; fail "expected '$2' in output"; }; }
 
-echo "agentwatch-widgets.test.sh"
+echo "cenci-widgets.test.sh"
 
 # ---------------------------------------------------------------------------
 echo "case: install detects every bar, installs each widget, and reloads it"
