@@ -17,9 +17,9 @@ import (
 // so they resolve without depending on the overridden PATH containing a
 // shell.
 
-// writeFakeAgentSand writes a fake `cenci-sand` to dir that records the argv
+// writeFakeCenciSand writes a fake `cenci-sand` to dir that records the argv
 // it receives (one arg per line) to captureFile and exits with exitCode.
-func writeFakeAgentSand(t *testing.T, dir, captureFile string, exitCode int) {
+func writeFakeCenciSand(t *testing.T, dir, captureFile string, exitCode int) {
 	t.Helper()
 	body := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + shellQuote(captureFile) + "\nexit " + itoa(exitCode) + "\n"
 	writeExecutable(t, filepath.Join(dir, "cenci-sand"), body)
@@ -92,7 +92,7 @@ func joinArgv(argv []string) string {
 func TestSandboxBuild_ForwardsBuildFlag(t *testing.T) {
 	dir := t.TempDir()
 	capture := filepath.Join(dir, "argv.txt")
-	writeFakeAgentSand(t, dir, capture, 0)
+	writeFakeCenciSand(t, dir, capture, 0)
 
 	cmd := exec.Command(binaryPath, "sandbox", "build")
 	cmd.Env = append(os.Environ(), "PATH="+dir)
@@ -110,7 +110,7 @@ func TestSandboxBuild_ForwardsBuildFlag(t *testing.T) {
 func TestSandboxBuildBase_ForwardsBuildBaseFlag(t *testing.T) {
 	dir := t.TempDir()
 	capture := filepath.Join(dir, "argv.txt")
-	writeFakeAgentSand(t, dir, capture, 0)
+	writeFakeCenciSand(t, dir, capture, 0)
 
 	cmd := exec.Command(binaryPath, "sandbox", "build-base")
 	cmd.Env = append(os.Environ(), "PATH="+dir)
@@ -127,7 +127,7 @@ func TestSandboxBuildBase_ForwardsBuildBaseFlag(t *testing.T) {
 func TestSandboxUpdatePlugins_ForwardsUpdatePluginsFlag(t *testing.T) {
 	dir := t.TempDir()
 	capture := filepath.Join(dir, "argv.txt")
-	writeFakeAgentSand(t, dir, capture, 0)
+	writeFakeCenciSand(t, dir, capture, 0)
 
 	cmd := exec.Command(binaryPath, "sandbox", "update-plugins")
 	cmd.Env = append(os.Environ(), "PATH="+dir)
@@ -144,7 +144,7 @@ func TestSandboxUpdatePlugins_ForwardsUpdatePluginsFlag(t *testing.T) {
 func TestSandboxReseedCreds_ForwardsReseedCredsFlag(t *testing.T) {
 	dir := t.TempDir()
 	capture := filepath.Join(dir, "argv.txt")
-	writeFakeAgentSand(t, dir, capture, 0)
+	writeFakeCenciSand(t, dir, capture, 0)
 
 	cmd := exec.Command(binaryPath, "sandbox", "reseed-creds")
 	cmd.Env = append(os.Environ(), "PATH="+dir)
@@ -161,7 +161,7 @@ func TestSandboxReseedCreds_ForwardsReseedCredsFlag(t *testing.T) {
 func TestSandboxReapOrphans_ForwardsReapOrphansFlag(t *testing.T) {
 	dir := t.TempDir()
 	capture := filepath.Join(dir, "argv.txt")
-	writeFakeAgentSand(t, dir, capture, 0)
+	writeFakeCenciSand(t, dir, capture, 0)
 
 	cmd := exec.Command(binaryPath, "sandbox", "reap-orphans")
 	cmd.Env = append(os.Environ(), "PATH="+dir)
@@ -178,7 +178,7 @@ func TestSandboxReapOrphans_ForwardsReapOrphansFlag(t *testing.T) {
 func TestSandboxPrune_WithoutVolumes_ForwardsOnlyPruneFlag(t *testing.T) {
 	dir := t.TempDir()
 	capture := filepath.Join(dir, "argv.txt")
-	writeFakeAgentSand(t, dir, capture, 0)
+	writeFakeCenciSand(t, dir, capture, 0)
 
 	cmd := exec.Command(binaryPath, "sandbox", "prune")
 	cmd.Env = append(os.Environ(), "PATH="+dir)
@@ -195,7 +195,7 @@ func TestSandboxPrune_WithoutVolumes_ForwardsOnlyPruneFlag(t *testing.T) {
 func TestSandboxPrune_WithVolumes_ForwardsPruneAndVolumesFlags(t *testing.T) {
 	dir := t.TempDir()
 	capture := filepath.Join(dir, "argv.txt")
-	writeFakeAgentSand(t, dir, capture, 0)
+	writeFakeCenciSand(t, dir, capture, 0)
 
 	cmd := exec.Command(binaryPath, "sandbox", "prune", "--volumes")
 	cmd.Env = append(os.Environ(), "PATH="+dir)
@@ -212,7 +212,7 @@ func TestSandboxPrune_WithVolumes_ForwardsPruneAndVolumesFlags(t *testing.T) {
 func TestSandboxBatchVerb_PropagatesChildExitCode(t *testing.T) {
 	dir := t.TempDir()
 	capture := filepath.Join(dir, "argv.txt")
-	writeFakeAgentSand(t, dir, capture, 7)
+	writeFakeCenciSand(t, dir, capture, 7)
 
 	cmd := exec.Command(binaryPath, "sandbox", "build")
 	cmd.Env = append(os.Environ(), "PATH="+dir)
@@ -230,7 +230,7 @@ func TestSandboxBatchVerb_PropagatesChildExitCode(t *testing.T) {
 func TestSandboxUnknownFlag_Exits2NoExec(t *testing.T) {
 	dir := t.TempDir()
 	capture := filepath.Join(dir, "argv.txt")
-	writeFakeAgentSand(t, dir, capture, 0)
+	writeFakeCenciSand(t, dir, capture, 0)
 
 	cmd := exec.Command(binaryPath, "sandbox", "build", "--bogus")
 	cmd.Env = append(os.Environ(), "PATH="+dir)
@@ -251,7 +251,7 @@ func TestSandboxUnknownFlag_Exits2NoExec(t *testing.T) {
 func TestSandboxUnknownFlag_OnPrune_Exits2NoExec(t *testing.T) {
 	dir := t.TempDir()
 	capture := filepath.Join(dir, "argv.txt")
-	writeFakeAgentSand(t, dir, capture, 0)
+	writeFakeCenciSand(t, dir, capture, 0)
 
 	cmd := exec.Command(binaryPath, "sandbox", "prune", "--bogus")
 	cmd.Env = append(os.Environ(), "PATH="+dir)
@@ -269,7 +269,7 @@ func TestSandboxUnknownFlag_OnPrune_Exits2NoExec(t *testing.T) {
 func TestSandboxTrailingPositional_Exits2NoExec(t *testing.T) {
 	dir := t.TempDir()
 	capture := filepath.Join(dir, "argv.txt")
-	writeFakeAgentSand(t, dir, capture, 0)
+	writeFakeCenciSand(t, dir, capture, 0)
 
 	cmd := exec.Command(binaryPath, "sandbox", "build", "extra")
 	cmd.Env = append(os.Environ(), "PATH="+dir)
@@ -408,7 +408,7 @@ func TestSandboxStop_WithFilterArg_OnlyStopsMatchingName(t *testing.T) {
 func TestOpenCh_ResolvesClaudeAndHaikuModel(t *testing.T) {
 	dir := t.TempDir()
 	capture := filepath.Join(dir, "argv.txt")
-	writeFakeAgentSand(t, dir, capture, 0)
+	writeFakeCenciSand(t, dir, capture, 0)
 
 	cmd := exec.Command(binaryPath, "open", "ch")
 	cmd.Env = append(os.Environ(), "PATH="+dir)
@@ -425,7 +425,7 @@ func TestOpenCh_ResolvesClaudeAndHaikuModel(t *testing.T) {
 func TestOpenXs_ResolvesCodexAndSolModel(t *testing.T) {
 	dir := t.TempDir()
 	capture := filepath.Join(dir, "argv.txt")
-	writeFakeAgentSand(t, dir, capture, 0)
+	writeFakeCenciSand(t, dir, capture, 0)
 
 	cmd := exec.Command(binaryPath, "open", "xs")
 	cmd.Env = append(os.Environ(), "PATH="+dir)
@@ -439,7 +439,7 @@ func TestOpenXs_ResolvesCodexAndSolModel(t *testing.T) {
 	}
 }
 
-func TestOpenAllShortcuts_ResolveExactlyAsAgentSandWould(t *testing.T) {
+func TestOpenAllShortcuts_ResolveExactlyAsCenciSandWould(t *testing.T) {
 	cases := []struct {
 		token, agent, model string
 	}{
@@ -455,7 +455,7 @@ func TestOpenAllShortcuts_ResolveExactlyAsAgentSandWould(t *testing.T) {
 		t.Run(tc.token, func(t *testing.T) {
 			dir := t.TempDir()
 			capture := filepath.Join(dir, "argv.txt")
-			writeFakeAgentSand(t, dir, capture, 0)
+			writeFakeCenciSand(t, dir, capture, 0)
 
 			cmd := exec.Command(binaryPath, "open", tc.token)
 			cmd.Env = append(os.Environ(), "PATH="+dir)
@@ -475,7 +475,7 @@ func TestOpenAllShortcuts_ResolveExactlyAsAgentSandWould(t *testing.T) {
 func TestOpenShortcutConflictsWithAgentFlag_Exits2NoExec(t *testing.T) {
 	dir := t.TempDir()
 	capture := filepath.Join(dir, "argv.txt")
-	writeFakeAgentSand(t, dir, capture, 0)
+	writeFakeCenciSand(t, dir, capture, 0)
 
 	cmd := exec.Command(binaryPath, "open", "ch", "--agent", "codex")
 	cmd.Env = append(os.Environ(), "PATH="+dir)
@@ -496,7 +496,7 @@ func TestOpenShortcutConflictsWithAgentFlag_Exits2NoExec(t *testing.T) {
 func TestOpenUnknownFlag_Exits2NoExec(t *testing.T) {
 	dir := t.TempDir()
 	capture := filepath.Join(dir, "argv.txt")
-	writeFakeAgentSand(t, dir, capture, 0)
+	writeFakeCenciSand(t, dir, capture, 0)
 
 	cmd := exec.Command(binaryPath, "open", "--bogus")
 	cmd.Env = append(os.Environ(), "PATH="+dir)
@@ -517,7 +517,7 @@ func TestOpenUnknownFlag_Exits2NoExec(t *testing.T) {
 func TestOpenUnrecognizedLeadingPositional_Exits2NoExec(t *testing.T) {
 	dir := t.TempDir()
 	capture := filepath.Join(dir, "argv.txt")
-	writeFakeAgentSand(t, dir, capture, 0)
+	writeFakeCenciSand(t, dir, capture, 0)
 
 	cmd := exec.Command(binaryPath, "open", "not-a-shortcut")
 	cmd.Env = append(os.Environ(), "PATH="+dir)
@@ -535,7 +535,7 @@ func TestOpenUnrecognizedLeadingPositional_Exits2NoExec(t *testing.T) {
 func TestOpen_ForwardsNameShellDockerHostNetworkFlags(t *testing.T) {
 	dir := t.TempDir()
 	capture := filepath.Join(dir, "argv.txt")
-	writeFakeAgentSand(t, dir, capture, 0)
+	writeFakeCenciSand(t, dir, capture, 0)
 
 	cmd := exec.Command(binaryPath, "open", "--name", "mybox", "--shell", "--docker", "--host-network")
 	cmd.Env = append(os.Environ(), "PATH="+dir)
@@ -553,7 +553,7 @@ func TestOpen_ForwardsNameShellDockerHostNetworkFlags(t *testing.T) {
 func TestOpen_PassthroughAfterDoubleDash(t *testing.T) {
 	dir := t.TempDir()
 	capture := filepath.Join(dir, "argv.txt")
-	writeFakeAgentSand(t, dir, capture, 0)
+	writeFakeCenciSand(t, dir, capture, 0)
 
 	cmd := exec.Command(binaryPath, "open", "ch", "--", "--resume", "--custom-flag")
 	cmd.Env = append(os.Environ(), "PATH="+dir)
@@ -568,7 +568,7 @@ func TestOpen_PassthroughAfterDoubleDash(t *testing.T) {
 	}
 }
 
-func TestOpen_MissingAgentSandBinary_Exits1(t *testing.T) {
+func TestOpen_MissingCenciSandBinary_Exits1(t *testing.T) {
 	dir := t.TempDir() // no cenci-sand fake
 
 	cmd := exec.Command(binaryPath, "open", "ch")
@@ -607,7 +607,7 @@ func TestCnArgv0_RoutesToOpen(t *testing.T) {
 
 	fakeDir := t.TempDir()
 	capture := filepath.Join(fakeDir, "argv.txt")
-	writeFakeAgentSand(t, fakeDir, capture, 0)
+	writeFakeCenciSand(t, fakeDir, capture, 0)
 
 	cmd := exec.Command(cnPath, "xs")
 	cmd.Env = append(os.Environ(), "PATH="+fakeDir)
@@ -629,7 +629,7 @@ func TestCnArgv0_BareInvocationDoesNotErrorLikeAgentwatch(t *testing.T) {
 
 	fakeDir := t.TempDir()
 	capture := filepath.Join(fakeDir, "argv.txt")
-	writeFakeAgentSand(t, fakeDir, capture, 0)
+	writeFakeCenciSand(t, fakeDir, capture, 0)
 
 	cmd := exec.Command(cnPath)
 	cmd.Env = append(os.Environ(), "PATH="+fakeDir)

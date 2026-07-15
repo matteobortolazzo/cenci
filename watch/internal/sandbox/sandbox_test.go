@@ -171,17 +171,17 @@ func TestContainerRuntime_ErrorsWhenNeitherFound(t *testing.T) {
 	}
 }
 
-func TestRunAgentSand_MissingBinaryReturnsError(t *testing.T) {
+func TestRunCenciSand_MissingBinaryReturnsError(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("PATH", dir)
 
-	_, err := RunAgentSand([]string{"--build"}, nil, &bytes.Buffer{}, &bytes.Buffer{})
+	_, err := RunCenciSand([]string{"--build"}, nil, &bytes.Buffer{}, &bytes.Buffer{})
 	if err == nil {
 		t.Error("expected an error when cenci-sand is not on PATH")
 	}
 }
 
-func TestRunAgentSand_ReturnsChildExitCodeAndWiresArgv(t *testing.T) {
+func TestRunCenciSand_ReturnsChildExitCodeAndWiresArgv(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell fake only")
 	}
@@ -191,9 +191,9 @@ func TestRunAgentSand_ReturnsChildExitCodeAndWiresArgv(t *testing.T) {
 exit 3`)
 	t.Setenv("PATH", dir)
 
-	code, err := RunAgentSand([]string{"--build"}, nil, &bytes.Buffer{}, &bytes.Buffer{})
+	code, err := RunCenciSand([]string{"--build"}, nil, &bytes.Buffer{}, &bytes.Buffer{})
 	if err != nil {
-		t.Fatalf("RunAgentSand: %v", err)
+		t.Fatalf("RunCenciSand: %v", err)
 	}
 	if code != 3 {
 		t.Errorf("exit code = %d, want 3", code)

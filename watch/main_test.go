@@ -1185,7 +1185,7 @@ func TestDispatchUnknownVerb_Exits2NeverDispatches(t *testing.T) {
 
 // TestSocketDirSubcommandPrintsResolvedDir covers the new `cenci
 // socket-dir` CLI command (#217): it must print the resolved SocketDir() path
-// to stdout and exit 0, so shell consumers (dev-sandbox's cenci-sand) don't
+// to stdout and exit 0, so shell consumers (sandbox's cenci-sand) don't
 // reimplement the XDG-vs-fallback logic themselves.
 func TestSocketDirSubcommandPrintsResolvedDir(t *testing.T) {
 	xdgDir := t.TempDir()

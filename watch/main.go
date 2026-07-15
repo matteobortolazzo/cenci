@@ -37,9 +37,8 @@ var version = "dev"
 
 func main() {
 	// argv[0] alias: a binary invoked (directly or via a symlink/copy) as
-	// "cn" behaves as `cenci open <args>` — the one forward-looking
-	// exception ahead of the future "cenci" rename (this PR keeps every
-	// other name under the old cenci/cenci-sand naming).
+	// "cn" behaves as `cenci open <args>` — a shorthand entry point kept
+	// alongside the canonical "cenci" binary name.
 	if filepath.Base(os.Args[0]) == "cn" {
 		runOpen(os.Args[1:])
 		return
@@ -107,10 +106,10 @@ Commands:
   run                                dispatch a workflow into a new tmux window
   dispatch                           fleet auto-dispatch (enroll/unenroll/status/loop)
   close                              close a finished/idle agent window
-  sandbox                            manage the dev-sandbox container (build|build-base|prune|update-plugins|reseed-creds|reap-orphans|ls|stop)
+  sandbox                            manage the sandbox container (build|build-base|prune|update-plugins|reseed-creds|reap-orphans|ls|stop)
   open [shortcut]                    launch or attach an interactive sandbox session (aliased by the "cn" binary name)
-  doctor                             check prerequisites and installed stack components, change nothing (delegates to the installed cenci wrapper)
-  update                             update installed plugins and restart the daemon (delegates to the installed cenci wrapper)
+  doctor                             check prerequisites and installed stack components, change nothing (delegates to the installed cenci-installer wrapper)
+  update                             update installed plugins and restart the daemon (delegates to the installed cenci-installer wrapper)
   version                            print the binary version
   socket-dir                         print the resolved socket directory
 
@@ -126,7 +125,7 @@ func runVersion() {
 }
 
 // runSocketDir prints the resolved cenci socket directory to stdout and
-// exits 0, so shell consumers (dev-sandbox's cenci-sand) don't reimplement
+// exits 0, so shell consumers (sandbox's cenci-sand) don't reimplement
 // the XDG-vs-fallback logic themselves and risk drift. Exits 1 on error.
 func runSocketDir() {
 	dir, err := ipc.DefaultSocketDir()
@@ -371,7 +370,7 @@ func runNotify(args []string) {
 	}
 
 	// TMUX_PANE may be empty: sessions outside tmux (plain terminals,
-	// dev-sandbox) are still tracked by the daemon as paneless sessions.
+	// sandbox) are still tracked by the daemon as paneless sessions.
 	tmuxPane := os.Getenv("TMUX_PANE")
 
 	event := ipc.HookEvent{
@@ -397,7 +396,7 @@ func runNotify(args []string) {
 func runRun(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	agent := fs.String("agent", "", "agent to launch (claude, codex, ...); default from config or claude")
-	sandbox := fs.Bool("sandbox", false, "launch inside the dev-sandbox container (the default)")
+	sandbox := fs.Bool("sandbox", false, "launch inside the sandbox container (the default)")
 	noSandbox := fs.Bool("no-sandbox", false, "force a host launch (overrides the sandbox default)")
 	model := fs.String("model", "", "model override passed to the agent")
 	session := fs.String("session", "", "target tmux session (default: current session)")
@@ -978,7 +977,7 @@ func runWrapperMode(mode string, args []string) {
 // runSandboxGroup implements `cenci sandbox <verb> [flags]`. The batch
 // verbs (build, build-base, update-plugins, reseed-creds, reap-orphans) and
 // prune translate 1:1 (plus prune's optional --volumes) into a single
-// dev-sandbox/cenci-sand invocation; ls and stop are implemented natively in
+// sandbox/cenci-sand invocation; ls and stop are implemented natively in
 // Go against docker/podman since cenci-sand has no equivalent flag for them.
 func runSandboxGroup(args []string) {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
@@ -1015,13 +1014,13 @@ func runSandboxBatch(verb string, args []string) {
 		os.Exit(2)
 	}
 
-	agentSandFlag, ok := sandbox.BatchFlag(verb)
+	cenciSandFlag, ok := sandbox.BatchFlag(verb)
 	if !ok {
 		fmt.Fprintf(os.Stderr, "cenci sandbox: unknown subcommand %q\n", verb)
 		os.Exit(2)
 	}
 
-	code, err := sandbox.RunAgentSand([]string{agentSandFlag}, os.Stdin, os.Stdout, os.Stderr)
+	code, err := sandbox.RunCenciSand([]string{cenciSandFlag}, os.Stdin, os.Stdout, os.Stderr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cenci sandbox %s: %v\n", verb, err)
 		os.Exit(1)
@@ -1045,7 +1044,7 @@ func runSandboxPrune(args []string) {
 		argv = append(argv, "--volumes")
 	}
 
-	code, err := sandbox.RunAgentSand(argv, os.Stdin, os.Stdout, os.Stderr)
+	code, err := sandbox.RunCenciSand(argv, os.Stdin, os.Stdout, os.Stderr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cenci sandbox prune: %v\n", err)
 		os.Exit(1)
@@ -1134,7 +1133,7 @@ func runSandboxStop(args []string) {
 // this process, so the interactive session owns the TTY.
 //
 // Grammar: an optional one-token shortcut (ch/cs/co/cf, xl/xt/xs — mirroring
-// dev-sandbox/cenci-sand's own shortcut tables exactly) may appear first;
+// sandbox/cenci-sand's own shortcut tables exactly) may appear first;
 // after that, only the recognized flags below and an optional "--"
 // passthrough sentinel are accepted. Any other leading positional is a usage
 // error, matching the strict-parsing convention used by the other verbs in
@@ -1224,7 +1223,7 @@ func runOpen(args []string) {
 		argv = append(argv, passthrough...)
 	}
 
-	if err := sandbox.ExecAgentSand(argv); err != nil {
+	if err := sandbox.ExecCenciSand(argv); err != nil {
 		fmt.Fprintf(os.Stderr, "cenci open: %v\n", err)
 		os.Exit(1)
 	}

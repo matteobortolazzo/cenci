@@ -1,12 +1,12 @@
 // Package sandbox translates cenci's `sandbox`/`open` verbs into
-// invocations of the dev-sandbox/cenci-sand bash launcher (batch verbs,
+// invocations of the sandbox/cenci-sand bash launcher (batch verbs,
 // interactive open) or direct docker/podman calls (ls/stop, which have no
 // cenci-sand equivalent and are implemented natively here instead).
 //
 // The shortcut tables and the container-runtime/name-prefix conventions below
-// are mirrored byte-for-byte from dev-sandbox/cenci-sand (there is no shared
+// are mirrored byte-for-byte from sandbox/cenci-sand (there is no shared
 // code across the bash/Go boundary) so a desync between the two front doors
-// is a review-time concern, not a runtime one. See dev-sandbox/cenci-sand for
+// is a review-time concern, not a runtime one. See sandbox/cenci-sand for
 // the source of truth each mirrors:
 //   - runtime detection: top of the script (podman if present, else docker)
 //   - shortcut tables: CLAUDE_MODEL_SHORTCUTS / CODEX_MODEL_SHORTCUTS (~line 65)
@@ -49,7 +49,7 @@ func BatchFlag(verb string) (string, bool) {
 	return f, ok
 }
 
-// ClaudeModelShortcuts mirrors dev-sandbox/cenci-sand's CLAUDE_MODEL_SHORTCUTS
+// ClaudeModelShortcuts mirrors sandbox/cenci-sand's CLAUDE_MODEL_SHORTCUTS
 // table exactly: ch/cs/co/cf select Claude with the haiku/sonnet/opus/fable
 // model alias.
 var ClaudeModelShortcuts = map[string]string{
@@ -59,7 +59,7 @@ var ClaudeModelShortcuts = map[string]string{
 	"cf": "fable",
 }
 
-// CodexModelShortcuts mirrors dev-sandbox/cenci-sand's CODEX_MODEL_SHORTCUTS
+// CodexModelShortcuts mirrors sandbox/cenci-sand's CODEX_MODEL_SHORTCUTS
 // table exactly: xl/xt/xs select Codex with the gpt-5.6-luna/terra/sol model.
 var CodexModelShortcuts = map[string]string{
 	"xl": "gpt-5.6-luna",
@@ -79,12 +79,12 @@ func ResolveShortcut(token string) (agent, model string, ok bool) {
 	return "", "", false
 }
 
-// RunAgentSand resolves cenci-sand from PATH and runs it with argv, wiring
+// RunCenciSand resolves cenci-sand from PATH and runs it with argv, wiring
 // stdin/stdout/stderr straight through (batch verbs are non-interactive but
 // may still print progress or a confirmation prompt, e.g. `--prune
 // --volumes`'s y/N). It returns the child's exit code on a normal exit, or a
 // non-nil error when the binary can't be resolved or fails to start.
-func RunAgentSand(argv []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+func RunCenciSand(argv []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 	path, err := exec.LookPath(BinaryName)
 	if err != nil {
 		return 0, fmt.Errorf("%s not found on PATH: %w", BinaryName, err)
@@ -103,11 +103,11 @@ func RunAgentSand(argv []string, stdin io.Reader, stdout, stderr io.Writer) (int
 	return 0, nil
 }
 
-// ExecAgentSand resolves cenci-sand from PATH and execs it (replacing the
+// ExecCenciSand resolves cenci-sand from PATH and execs it (replacing the
 // current process image) with argv, so the interactive session owns the TTY
 // exactly as if the user had invoked cenci-sand directly. It only returns on
 // failure (LookPath or syscall.Exec error) — success never returns.
-func ExecAgentSand(argv []string) error {
+func ExecCenciSand(argv []string) error {
 	path, err := exec.LookPath(BinaryName)
 	if err != nil {
 		return fmt.Errorf("%s not found on PATH: %w", BinaryName, err)
