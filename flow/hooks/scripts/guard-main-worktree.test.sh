@@ -100,6 +100,16 @@ echo "case: configured repo allows .cenci/ writes"
 run_guard "${REPO}" "{\"tool_input\":{\"file_path\":\"${REPO}/.cenci/Dockerfile\"}}"
 assert_exit ".cenci path" 0
 
+# ── Case 8: non-git dir with its own .claude/config.json → no-op ────
+# Pre-fix, ROOT=$(pwd) fallback would let this directory's own config.json
+# satisfy the gate and incorrectly enforce (#371).
+echo "case: non-git directory with .claude/config.json is still a no-op"
+DIR="${TEST_ROOT}/non-git-with-config"
+mkdir -p "${DIR}/.claude"
+touch "${DIR}/.claude/config.json"
+run_guard "${DIR}" "{\"tool_input\":{\"file_path\":\"${DIR}/src/foo.txt\"}}"
+assert_exit "non-git dir with config.json" 0
+
 # ── Summary ──────────────────────────────────────────────────────────
 echo
 echo "passed: ${PASSES}, failed: ${FAILURES}"

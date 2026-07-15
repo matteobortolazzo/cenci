@@ -16,20 +16,27 @@ import (
 
 // reapScanScript is the minimal POSIX in-container scan (originally ported
 // verbatim from sandbox/cenci-sand's REAP_SCAN_SCRIPT; it now runs inside the
-// container via `exec -u dev sh -c`; see the call site's comment for why, and
-// #361 for the environ-unreadable diagnostics added below): emits
-// "<pid>\t<pane>\t<start>" for every process whose environ carries a
-// TMUX_PANE key (pane may be empty; <start> is /proc/<pid>/stat field 22,
-// read in the same loop pass; empty if the stat line couldn't be
-// read/parsed), skipping processes lacking the TMUX_PANE key entirely. If a
-// process's environ fails to read but the process still exists, the scan
-// instead emits a raw I/O fact — `__UNREADABLE__\t<pid>` — rather than
-// silently skipping it. All classification — skip-empty-pane,
-// skip-malformed-pane, skip-init, skip-live-pane, reap-dead-pane, TERM→KILL escalation,
-// PID-reuse detection, no-tmux handling, and counting/reporting
-// __UNREADABLE__ markers (including PID-1 exclusion) — happens host-side in
-// ReapOrphans, never inside this canned scan.
-const reapScanScript = `for e in /proc/[0-9]*/environ; do [ -f "$e" ] || continue; p=${e#/proc/}; p=${p%/environ}; env=$(tr "\0" "\n" 2>/dev/null < "$e"); if [ $? -ne 0 ]; then [ -e "$e" ] && printf "__UNREADABLE__\t%s\n" "$p"; continue; fi; line=$(printf "%s\n" "$env" | grep "^TMUX_PANE=") || continue; st=$(cat "/proc/$p/stat" 2>/dev/null); st=${st##*) }; set -- $st; if [ "$#" -ge 20 ]; then shift 19; start=$1; else start=""; fi; printf "%s\t%s\t%s\n" "$p" "${line#TMUX_PANE=}" "$start"; done`
+// container via `exec -u dev sh -c`; see the call site's comment for why,
+// #361 for the environ-unreadable diagnostics added below, and #373 for the
+// null-delimited match below): emits "<pid>\t<pane>\t<start>" for every
+// process whose environ carries a TMUX_PANE key (pane may be empty; <start>
+// is /proc/<pid>/stat field 22, read in the same loop pass; empty if the
+// stat line couldn't be read/parsed), skipping processes lacking the
+// TMUX_PANE key entirely. The TMUX_PANE line is matched directly against the
+// raw NUL-delimited environ file via `grep --null-data` (the long-form flag,
+// not `-z`, since some grep-compatible tools repurpose `-z` for
+// `--decompress`) instead of translating NUL to newline first — a process
+// fully controls its own environ, so a NUL→newline translation would let an
+// embedded literal newline inside some other variable's value forge what
+// looks like a `TMUX_PANE=` line. If a process's environ fails to read but
+// the process still exists, the scan instead emits a raw I/O fact —
+// `__UNREADABLE__\t<pid>` — rather than silently skipping it. All
+// classification — skip-empty-pane, skip-malformed-pane, skip-init,
+// skip-live-pane, reap-dead-pane, TERM→KILL escalation, PID-reuse detection,
+// no-tmux handling, and counting/reporting __UNREADABLE__ markers (including
+// PID-1 exclusion) — happens host-side in ReapOrphans, never inside this
+// canned scan.
+const reapScanScript = `for e in /proc/[0-9]*/environ; do [ -f "$e" ] || continue; p=${e#/proc/}; p=${p%/environ}; line=$(grep --null-data --text --only-matching --max-count=1 '^TMUX_PANE=.*' "$e" 2>/dev/null); rc=$?; if [ "$rc" -eq 2 ]; then [ -e "$e" ] && printf "__UNREADABLE__\t%s\n" "$p"; continue; fi; [ "$rc" -eq 0 ] || continue; st=$(cat "/proc/$p/stat" 2>/dev/null); st=${st##*) }; set -- $st; if [ "$#" -ge 20 ]; then shift 19; start=$1; else start=""; fi; printf "%s\t%s\t%s\n" "$p" "${line#TMUX_PANE=}" "$start"; done`
 
 // reapLivenessScript is the pre-SIGKILL liveness/identity probe, copied
 // VERBATIM from sandbox/cenci-sand's REAP_LIVENESS_SCRIPT: invoked as
