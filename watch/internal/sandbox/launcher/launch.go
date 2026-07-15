@@ -253,35 +253,65 @@ func isSocket(path string) bool {
 	return err == nil && info.Mode()&os.ModeSocket != 0
 }
 
-// assembleRunArgs builds the `docker/podman run` argument list in exactly
-// cenci-sand's order, preserving the entrypoint contract: --user root at
-// create time (entrypoint.sh remaps 'dev' to HOST_UID/HOST_GID before any
-// process runs under it, then unconditionally drops privileges — #154), the
-// detached lifecycle label, and the HOST_UID/HOST_GID/WORKSPACE_SCOPE env
-// contract. Docker/Podman persist --user as the container's Config.User for
-// its whole lifetime, so every later exec call site passes an explicit
-// `-u dev`.
+// assembleRunArgs builds the `docker/podman run` argument list, preserving
+// the entrypoint contract: --user root at create time (entrypoint.sh remaps
+// 'dev' to HOST_UID/HOST_GID before any process runs under it, then
+// unconditionally drops privileges — #154), the detached lifecycle label,
+// and the HOST_UID/HOST_GID/WORKSPACE_SCOPE env contract. Docker/Podman
+// persist --user as the container's Config.User for its whole lifetime, so
+// every later exec call site passes an explicit `-u dev`.
+//
+// The full arg list is assembled by delegating to focused sub-methods below
+// (base flags, volume mounts, env vars, codex credential validation, and
+// opt-in features), called in sequence and threaded through a single args
+// slice. Grouping by theme means some -v/-e flags end up in a different
+// relative order than cenci-sand's original single-block layout; that's
+// behaviorally identical since docker/podman treat flag order between
+// distinct -v/-e flags as independent — only the trailing image + command
+// (appended by the caller, Launch, after this returns) must stay last.
 func (e *Engine) assembleRunArgs(agent, agentBin, cenciBin, socketDir string, cenciAvailable bool, scope Scope, opts Options, home string) ([]string, error) {
-	term := os.Getenv("TERM")
-	if term == "" {
-		term = "xterm-256color"
-	}
+	args := e.baseRunArgs(scope)
+	args = append(args, e.assembleVolumeMounts(agent, agentBin, cenciBin, socketDir, cenciAvailable, scope, home)...)
+	args = append(args, e.assembleEnv(agent, scope, opts)...)
 
-	args := []string{
+	credArgs, err := e.validateCredentials(agent, home)
+	if err != nil {
+		return nil, err
+	}
+	args = append(args, credArgs...)
+
+	args = append(args, e.assembleOptionalFeatures(opts)...)
+
+	return args, nil
+}
+
+// baseRunArgs builds the container identity/lifecycle flags shared by every
+// launch: name, hostname, the detached lifecycle label, init/rm flags,
+// workdir, and the create-time --user root (see assembleRunArgs's doc
+// comment for why --user root is required at create time).
+func (e *Engine) baseRunArgs(scope Scope) []string {
+	return []string{
 		"--name", scope.ContainerName,
 		"--hostname", scope.Hostname,
 		"--label", "cenci-sand.lifecycle=detached",
 		"-d", "--init", "--rm",
 		"--workdir", scope.Workdir,
 		"--user", "root",
+	}
+}
+
+// assembleVolumeMounts builds every bind/named-volume mount: the workspace
+// and home volumes, the claude binary (read-only; codex is baked into the
+// image instead), git config (read-only, if present), the optional cenci
+// binary + host socket dir wiring (paired with its own XDG_RUNTIME_DIR/
+// TMUX_PANE env under the same cenciAvailable guard as the mount itself),
+// claude credentials staging, and GitHub CLI credentials staging. Codex
+// credentials are handled separately by validateCredentials, since a missing
+// codex auth source is a hard launch error rather than an optional mount.
+func (e *Engine) assembleVolumeMounts(agent, agentBin, cenciBin, socketDir string, cenciAvailable bool, scope Scope, home string) []string {
+	args := []string{
 		"-v", scope.WorkspaceBindHost + ":" + workspaceContainer,
 		"-v", scope.VolumeName + ":/home/dev",
-		"-e", "TERM=" + term,
-		"-e", "CENCI_SANDBOX=1",
-		"-e", "CENCI_SANDBOX_AGENT=" + agent,
-		"-e", fmt.Sprintf("HOST_UID=%d", os.Getuid()),
-		"-e", fmt.Sprintf("HOST_GID=%d", os.Getgid()),
-		"-e", "WORKSPACE_SCOPE=" + scope.WorkspaceScope,
 	}
 
 	// Claude binary (read-only); Codex is baked into the image instead.
@@ -318,30 +348,6 @@ func (e *Engine) assembleRunArgs(agent, agentBin, cenciBin, socketDir string, ce
 		args = append(args, "-v", claudeCreds+":/tmp/host-claude-creds/.credentials.json:ro")
 	}
 
-	// Force a reseed from the host (recovery after the volume's token chain
-	// died, e.g. all sessions were revoked).
-	if opts.ReseedCreds {
-		args = append(args, "-e", "CENCI_SANDBOX_RESEED_CREDS=1")
-	}
-
-	// Codex credentials (ChatGPT sign-in and/or API key — fail hard if
-	// neither present).
-	if agent == "codex" {
-		hasAuth := false
-		codexAuth := filepath.Join(home, ".codex", "auth.json")
-		if isRegularFile(codexAuth) {
-			args = append(args, "-v", codexAuth+":/tmp/host-codex-creds/auth.json:ro")
-			hasAuth = true
-		}
-		if v := os.Getenv("OPENAI_API_KEY"); v != "" {
-			args = append(args, "-e", "OPENAI_API_KEY="+v)
-			hasAuth = true
-		}
-		if !hasAuth {
-			return nil, fmt.Errorf("--agent codex requires Codex auth. Run 'codex login' on the host (creates ~/.codex/auth.json) or export OPENAI_API_KEY.") //nolint:staticcheck // user-facing message ported verbatim from cenci-sand
-		}
-	}
-
 	// GitHub CLI credentials (read-only staging — entrypoint copies to
 	// /home/dev).
 	ghHosts := filepath.Join(home, ".config", "gh", "hosts.yml")
@@ -349,10 +355,32 @@ func (e *Engine) assembleRunArgs(agent, agentBin, cenciBin, socketDir string, ce
 		args = append(args, "-v", ghHosts+":/tmp/host-gh-config/hosts.yml:ro")
 	}
 
-	// Host network mode (fallback for manual OAuth inside container).
-	if opts.HostNetwork {
-		_, _ = fmt.Fprintln(e.Stderr, "Warning: --host-network weakens the container's isolation boundary (the container is the security boundary); only use it for manual OAuth callback.")
-		args = append(args, "--network", "host")
+	return args
+}
+
+// assembleEnv builds the non-credential, non-optional-feature -e flags:
+// TERM (with the xterm-256color fallback), the CENCI_SANDBOX marker/agent
+// name, the HOST_UID/HOST_GID/WORKSPACE_SCOPE entrypoint contract, the
+// opt-in reseed-creds flag, and the COLORTERM/CONTEXT7_API_KEY passthroughs.
+func (e *Engine) assembleEnv(agent string, scope Scope, opts Options) []string {
+	term := os.Getenv("TERM")
+	if term == "" {
+		term = "xterm-256color"
+	}
+
+	args := []string{
+		"-e", "TERM=" + term,
+		"-e", "CENCI_SANDBOX=1",
+		"-e", "CENCI_SANDBOX_AGENT=" + agent,
+		"-e", fmt.Sprintf("HOST_UID=%d", os.Getuid()),
+		"-e", fmt.Sprintf("HOST_GID=%d", os.Getgid()),
+		"-e", "WORKSPACE_SCOPE=" + scope.WorkspaceScope,
+	}
+
+	// Force a reseed from the host (recovery after the volume's token chain
+	// died, e.g. all sessions were revoked).
+	if opts.ReseedCreds {
+		args = append(args, "-e", "CENCI_SANDBOX_RESEED_CREDS=1")
 	}
 
 	if v := os.Getenv("COLORTERM"); v != "" {
@@ -360,6 +388,50 @@ func (e *Engine) assembleRunArgs(agent, agentBin, cenciBin, socketDir string, ce
 	}
 	if v := os.Getenv("CONTEXT7_API_KEY"); v != "" {
 		args = append(args, "-e", "CONTEXT7_API_KEY="+v)
+	}
+
+	return args
+}
+
+// validateCredentials checks agent-specific auth requirements and returns
+// the corresponding mount/env args. Only codex has a hard requirement here
+// (ChatGPT sign-in and/or API key — fail hard if neither is present); claude
+// credentials are optional staging handled in assembleVolumeMounts.
+func (e *Engine) validateCredentials(agent, home string) ([]string, error) {
+	if agent != "codex" {
+		return nil, nil
+	}
+
+	var args []string
+	hasAuth := false
+	codexAuth := filepath.Join(home, ".codex", "auth.json")
+	if isRegularFile(codexAuth) {
+		args = append(args, "-v", codexAuth+":/tmp/host-codex-creds/auth.json:ro")
+		hasAuth = true
+	}
+	if v := os.Getenv("OPENAI_API_KEY"); v != "" {
+		args = append(args, "-e", "OPENAI_API_KEY="+v)
+		hasAuth = true
+	}
+	if !hasAuth {
+		return nil, fmt.Errorf("--agent codex requires Codex auth. Run 'codex login' on the host (creates ~/.codex/auth.json) or export OPENAI_API_KEY.") //nolint:staticcheck // user-facing message ported verbatim from cenci-sand
+	}
+
+	return args, nil
+}
+
+// assembleOptionalFeatures builds the flags for opt-in isolation-weakening
+// features: --network host (with a warning, since the container is the
+// security boundary) and the docker/podman socket mount for DooD (docker
+// first, falling back to a discoverable podman.sock, warning if neither is
+// found).
+func (e *Engine) assembleOptionalFeatures(opts Options) []string {
+	var args []string
+
+	// Host network mode (fallback for manual OAuth inside container).
+	if opts.HostNetwork {
+		_, _ = fmt.Fprintln(e.Stderr, "Warning: --host-network weakens the container's isolation boundary (the container is the security boundary); only use it for manual OAuth callback.")
+		args = append(args, "--network", "host")
 	}
 
 	// Docker socket (opt-in DooD).
@@ -383,7 +455,7 @@ func (e *Engine) assembleRunArgs(agent, agentBin, cenciBin, socketDir string, ce
 		}
 	}
 
-	return args, nil
+	return args
 }
 
 // isRegularFile reports whether path exists and is a regular file.
