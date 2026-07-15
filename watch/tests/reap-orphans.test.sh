@@ -279,10 +279,8 @@ export HOME="${TEST_ROOT}/home"
 export PATH="${BIN_DIR}:/usr/bin:/bin"
 
 # ── Test helpers ─────────────────────────────────────────────────────
-FAILURES=0
-PASSES=0
-fail() { echo "  FAIL: $1" >&2; FAILURES=$((FAILURES + 1)); }
-pass() { PASSES=$((PASSES + 1)); }
+# shellcheck source=../../sandbox/tests/lib/assert.sh
+source "${REPO_ROOT}/sandbox/tests/lib/assert.sh"
 
 reset_state() {
     : > "${CALLS_FILE}"
@@ -704,6 +702,5 @@ case_14_liveness_transport_failure_hard_fails
 case_15_corrupted_scan_start_falls_back_to_kill
 case_16_corrupted_probe_output_falls_back_to_kill
 
-echo
-echo "passed: ${PASSES}, failed: ${FAILURES}"
+print_summary
 [[ "${FAILURES}" -eq 0 ]]

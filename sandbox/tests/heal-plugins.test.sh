@@ -17,19 +17,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=../lib/migrate-settings.sh
 source "${SCRIPT_DIR}/../lib/migrate-settings.sh"
-
-FAILURES=0
-PASSES=0
-
-# fail <message>
-fail() {
-    echo "  FAIL: $1" >&2
-    FAILURES=$((FAILURES + 1))
-}
-
-pass() {
-    PASSES=$((PASSES + 1))
-}
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/assert.sh
+source "${SCRIPT_DIR}/lib/assert.sh"
 
 # assert_file_jq <label> <file> <jq-filter-that-must-be-true>
 assert_file_jq() {
@@ -655,6 +645,5 @@ fi
 unset CODEX_FAKE_EXIT
 
 # ── Summary ──────────────────────────────────────────────────────
-echo
-echo "passed: ${PASSES}, failed: ${FAILURES}"
+print_summary
 [[ "${FAILURES}" -eq 0 ]]

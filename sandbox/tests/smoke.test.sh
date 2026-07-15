@@ -18,25 +18,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 SANDBOX_DIR="${REPO_ROOT}/sandbox"
 
-FAILURES=0
-PASSES=0
-
-# fail <message>
-fail() {
-    echo "  FAIL: $1" >&2
-    FAILURES=$((FAILURES + 1))
-}
-
-pass() {
-    PASSES=$((PASSES + 1))
-}
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/assert.sh
+source "${SCRIPT_DIR}/lib/assert.sh"
 
 # summarize_and_exit <exit-code>: prints the pass/fail summary and exits.
 # Used for the fatal build-failure paths below, where there's nothing left
 # worth testing once a build step has failed.
 summarize_and_exit() {
-    echo
-    echo "passed: ${PASSES}, failed: ${FAILURES}"
+    print_summary
     exit "$1"
 }
 
@@ -278,6 +268,5 @@ else
 fi
 
 # ── Summary ────────────────────────────────────────────────────────
-echo
-echo "passed: ${PASSES}, failed: ${FAILURES}"
+print_summary
 [[ "${FAILURES}" -eq 0 ]]
