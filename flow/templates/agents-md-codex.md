@@ -87,9 +87,15 @@ You are the reviewer too. Run all three checklists over your diff
 - No secrets, PII, or tokens in logs or error responses.
 - No stack traces leaked to users.
 - Cover the OWASP Top 10 items relevant to the diff.
-- **Actions**: Critical/High → fix and rerun tests; Medium/Low → note in the PR
-  description unless trivial to fix. Security findings take priority over
-  code-quality findings.
+- **Actions**: Critical/High → fix and rerun tests. Medium/Low → **fix now** if
+  the fix is straightforward; otherwise **discard** it (neither fix nor track)
+  when it has no realistic trigger path given how this tool is actually used,
+  or in general fixing it wouldn't benefit the product — record each discarded
+  finding as a one-line "Considered and discarded" entry in the PR's `## Notes`
+  section below, which never becomes a followup item; otherwise **track** it —
+  a plausible real trigger or genuine product benefit — by noting it in the
+  PR's `## Notes` section. Security findings take priority over code-quality
+  findings.
 
 **Code-quality review.**
 
@@ -99,8 +105,14 @@ You are the reviewer too. Run all three checklists over your diff
 - Performance is acceptable; names are clear.
 - No dead or commented-out code; no TODOs without ticket references.
 - No unused variables or type errors; documentation is adequate.
-- **Severity tiers**: Must-Fix → fix all. Should-Fix → fix if straightforward,
-  otherwise note in the PR. Nitpick → ignore unless trivial.
+- **Severity tiers**: Must-Fix → fix all. Should-Fix → **fix now** if the fix
+  is straightforward; otherwise **discard** it (neither fix nor track) when it
+  has no realistic trigger path given how this tool is actually used, or in
+  general fixing it wouldn't benefit the product — record each discarded
+  finding as a one-line "Considered and discarded" entry in the PR's
+  `## Notes` section below, which never becomes a followup item; otherwise
+  **track** it — a plausible real trigger or genuine product benefit — by
+  noting it in the PR's `## Notes` section. Nitpick → ignore unless trivial.
 
 **Silent-failure review.** Scan every new or modified `catch` / `except` /
 `rescue` / `.catch(` / error boundary.
@@ -114,8 +126,15 @@ You are the reviewer too. Run all three checklists over your diff
 - **Acceptable** (no action): intentional suppression with an explanatory
   comment; failures in optional/telemetry operations; catch blocks in tests;
   cleanup-then-rethrow.
-- **Actions**: Critical → fix immediately and rerun tests; Warning → fix if
-  straightforward, otherwise note in the PR.
+- **Actions**: Critical → fix immediately and rerun tests. Warning in
+  non-critical paths → **fix now** if the fix is straightforward; otherwise
+  **discard** it (neither fix nor track) when it has no realistic trigger path
+  given how this tool is actually used, or in general fixing it wouldn't
+  benefit the product — record each discarded finding as a one-line
+  "Considered and discarded" entry in the PR's `## Notes` section below, which
+  never becomes a followup item; otherwise **track** it — a plausible real
+  trigger or genuine product benefit — by noting it in the PR's `## Notes`
+  section.
 
 ### 7. PR
 
@@ -169,7 +188,12 @@ You are the reviewer too. Run all three checklists over your diff
    - [ ] Documentation updated
 
    ## Notes
-   <Medium/Low security findings, deferred Should-Fix items, or "None">
+   <Tracked deferred items — Medium/Low security findings, deferred Should-Fix
+   items, deferred non-critical silent-failure warnings — or "None">
+
+   ### Considered and discarded
+   <One line per discarded finding — what was found + why it was discarded —
+   or "None">
    ```
 
 5. **UI work**: never commit screenshots to the repo. Host them in a **secret

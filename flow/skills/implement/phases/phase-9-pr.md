@@ -133,7 +133,10 @@ _Temporary secret gist, not part of the repo — delete after merge: `gh gist de
 - [ ] Documentation updated
 
 ## Notes
-<Medium/Low security findings, deferred Should Fix items, or "None">
+<Tracked deferred items — Medium/Low security findings, deferred Should Fix items, deferred non-critical silent-failure warnings — or "None">
+
+### Considered and discarded
+<One line per discarded finding — what was found + why it was discarded — or "None">
 ```
 
 For child tickets that are not last child, use `Related to #<parentId>` for the parent so it is not auto-closed. For ticketless mode, omit `## Ticket`.
@@ -172,9 +175,9 @@ The `Working` → `In Review` → `Implemented` progression finishes on merge: b
 
 ## Followup Ticket
 
-The `## Notes` section above (deferred Should Fix items, Medium/Low security findings) is the formal source of deferred items. Combine it with any informal out-of-scope observations recalled from this session (tech debt spotted, refactor ideas, missing tests noticed but out of scope — no new tracking file, just what the session actually surfaced).
+The `## Notes` section above — **excluding its `### Considered and discarded` subsection** — is the formal source of tracked/deferred items (deferred Should Fix items, Medium/Low security findings, deferred non-critical silent-failure warnings). Entries under `### Considered and discarded` are recorded for review visibility only and never feed Followup ticket creation. Combine the tracked items with any informal out-of-scope observations recalled from this session (tech debt spotted, refactor ideas, missing tests noticed but out of scope — no new tracking file, just what the session actually surfaced).
 
-If there is **nothing** to capture (no `## Notes` items and no informal observations), create no ticket and skip this section entirely.
+If there is **nothing** to capture (no tracked `## Notes` items — entries under `### Considered and discarded` do not count — and no informal observations), create no ticket and skip this section entirely.
 
 If ≥1 deferred item exists, ensure the label exists (its own Bash call — note `2>/dev/null || true` suppresses **every** failure, not just "already exists"; a genuine failure (auth, network, permissions) surfaces on the next command as a "label not found" error from `gh issue create` — treat that as the label-create failure it is):
 
