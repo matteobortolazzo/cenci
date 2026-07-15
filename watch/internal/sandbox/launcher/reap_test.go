@@ -2,6 +2,7 @@ package launcher
 
 import (
 	"bytes"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -155,6 +156,96 @@ func TestReapOrphans_ContainerInitNeverSignaled(t *testing.T) {
 	}
 	if !containsLine(calls, "exec -u root claude-cenci-shared kill -TERM 5001") {
 		t.Errorf("missing kill -TERM for real orphan; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+// unreadableNoteText builds the exact "Note:" diagnostic ReapOrphans is
+// expected to print (#361) when the -u dev scan's __UNREADABLE__\t<pid>
+// marker count (excluding PID 1) is > 0 for a container.
+func unreadableNoteText(count int, container string) string {
+	return fmt.Sprintf("Note: %d process environ(s) in container %s were unreadable during the -u dev scan; if this persists it may mean the scan user's UID no longer matches the agent process UID, so orphans could go undetected.", count, container)
+}
+
+// A non-PID-1 __UNREADABLE__\t<pid> marker line from the scan (#361) must
+// surface as an always-on diagnostic Note, since an environ read failure on
+// any process other than the container's root-owned init is a possible sign
+// that the scan user's UID has drifted from the agent process UID.
+func TestReapOrphans_UnreadableEnvironNonPid1ProducesNote(t *testing.T) {
+	dir := t.TempDir()
+	callLog := filepath.Join(dir, "calls.txt")
+	writeReapFakes(t, dir, callLog)
+	t.Setenv("PATH", dir)
+	t.Setenv("CENCI_SANDBOX_REAP_GRACE_SECS", "0")
+	t.Setenv("FAKE_PS", "claude-cenci-unreadable\n")
+	t.Setenv("FAKE_SCAN", "__UNREADABLE__\t5002\n")
+	t.Setenv("FAKE_LIVE_PANES", "%99")
+
+	var stdout, stderr bytes.Buffer
+	if err := ReapOrphans(&stdout, &stderr); err != nil {
+		t.Fatalf("ReapOrphans: %v\nstderr: %s", err, stderr.String())
+	}
+
+	want := unreadableNoteText(1, "claude-cenci-unreadable")
+	if !strings.Contains(stdout.String(), want) {
+		t.Errorf("missing unreadable-environ note; want substring:\n%s\ngot stdout:\n%s", want, stdout.String())
+	}
+}
+
+// PID 1 is root-owned by construction (sudo init, see the container user
+// model) and therefore always unreadable by the -u dev scan on a healthy
+// container. Excluding it from the count is what keeps a healthy/idle
+// container silent, so a __UNREADABLE__\t1 marker alone must NOT produce the
+// Note.
+func TestReapOrphans_UnreadableEnvironPid1ProducesNoNote(t *testing.T) {
+	dir := t.TempDir()
+	callLog := filepath.Join(dir, "calls.txt")
+	writeReapFakes(t, dir, callLog)
+	t.Setenv("PATH", dir)
+	t.Setenv("CENCI_SANDBOX_REAP_GRACE_SECS", "0")
+	t.Setenv("FAKE_PS", "claude-cenci-pid1unreadable\n")
+	t.Setenv("FAKE_SCAN", "__UNREADABLE__\t1\n")
+	t.Setenv("FAKE_LIVE_PANES", "%99")
+
+	var stdout, stderr bytes.Buffer
+	if err := ReapOrphans(&stdout, &stderr); err != nil {
+		t.Fatalf("ReapOrphans: %v\nstderr: %s", err, stderr.String())
+	}
+
+	if strings.Contains(stdout.String(), "unreadable during the -u dev scan") {
+		t.Errorf("PID-1-only unreadable marker must not produce a Note; stdout:\n%s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "No orphaned processes found.") {
+		t.Errorf("missing no-op summary; stdout:\n%s", stdout.String())
+	}
+}
+
+// A non-PID-1 __UNREADABLE__ marker and a genuine dead-pane orphan can appear
+// in the same scan output; the marker must not interfere with reaping the
+// real orphan, and the Note must still fire alongside the reap.
+func TestReapOrphans_UnreadableEnvironCoexistsWithReapedOrphan(t *testing.T) {
+	dir := t.TempDir()
+	callLog := filepath.Join(dir, "calls.txt")
+	writeReapFakes(t, dir, callLog)
+	t.Setenv("PATH", dir)
+	t.Setenv("CENCI_SANDBOX_REAP_GRACE_SECS", "0")
+	t.Setenv("FAKE_PS", "claude-cenci-mixed\n")
+	t.Setenv("FAKE_SCAN", "__UNREADABLE__\t5003\n5001\t%1\t1000\n")
+	t.Setenv("FAKE_LIVE_PANES", "%99")
+
+	var stdout, stderr bytes.Buffer
+	if err := ReapOrphans(&stdout, &stderr); err != nil {
+		t.Fatalf("ReapOrphans: %v\nstderr: %s", err, stderr.String())
+	}
+
+	if !strings.Contains(stdout.String(), "reaped\tclaude-cenci-mixed\t5001\t%1") {
+		t.Errorf("missing reaped line for orphan alongside unreadable marker; stdout:\n%s", stdout.String())
+	}
+	want := unreadableNoteText(1, "claude-cenci-mixed")
+	if !strings.Contains(stdout.String(), want) {
+		t.Errorf("missing unreadable-environ note alongside a real reap; want substring:\n%s\ngot stdout:\n%s", want, stdout.String())
+	}
+	if calls := readCallLog(t, callLog); !containsLine(calls, "exec -u root claude-cenci-mixed kill -TERM 5001") {
+		t.Errorf("missing kill -TERM call for coexisting orphan; calls:\n%s", strings.Join(calls, "\n"))
 	}
 }
 

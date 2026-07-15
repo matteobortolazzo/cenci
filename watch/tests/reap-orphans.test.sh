@@ -22,7 +22,15 @@
 #     read from /proc/<pid>/stat field 22 in the same scan pass), to stdout,
 #     exit 0 on success. Scan runs as the fixed `dev` sandbox agent user so
 #     same-uid /proc/<pid>/environ reads succeed without CAP_SYS_PTRACE
-#     (root lacks it under docker's default caps).
+#     (root lacks it under docker's default caps). For a process whose environ
+#     failed to read (and still exists), the scan instead emits a
+#     `__UNREADABLE__\t<pid>` marker line (#361); the host counts these per
+#     container, excludes pid 1 (root-owned init, always unreadable by design
+#     on a healthy container), and prints an always-on
+#     "Note: <n> process environ(s) in container <container> were unreadable
+#     during the -u dev scan; ..." diagnostic when the excluding-pid-1 count is
+#     > 0, so a future scan-user/agent-UID drift is visible instead of
+#     masquerading as "no orphans found".
 #   - Pane-format validation (host-side, after the scan): a non-empty <pane>
 #     must match tmux's real pane-id format `^%[0-9]+$` before being treated
 #     as a live-ownership record. A malformed value (e.g. `%foo`, `bad`,
@@ -826,6 +834,44 @@ case_21_nostat_probe_silently_falls_back_to_kill() {
 }
 
 # ---------------------------------------------------------------------------
+# A __UNREADABLE__\t<pid> marker for a non-init pid is a possible sign of a
+# scan-user/agent-process UID drift (#361): the count-and-Note logic is
+# host-side, so this fixture line is passed through verbatim by the mock scan
+# branch (see the exec-case comment above) exactly like every other scan line.
+case_22_unreadable_environ_note_fires() {
+    echo "case: a non-PID-1 __UNREADABLE__ marker produces an always-on Note, and a paired real orphan is still reaped"
+    reset_state
+    local container="claude-cenci-unreadable"
+    add_podman_container "${container}"
+    write_scan "${container}" $'__UNREADABLE__\t22002' $'22001\t%26\t22000'
+    export MOCK_LIVE_PANES="%99"
+    set_gone 22001
+    run_reap
+    assert_exit_zero
+    assert_contains "$(reaped_line "${container}" 22001 "%26")"
+    assert_contains "Note: 1 process environ(s) in container ${container} were unreadable during the -u dev scan; if this persists it may mean the scan user's UID no longer matches the agent process UID, so orphans could go undetected."
+}
+
+# ---------------------------------------------------------------------------
+# PID 1 (root-owned sudo init, see the container user model) is always
+# unreadable by the -u dev scan on a healthy container, so it is excluded from
+# the unreadable count -- a __UNREADABLE__\t1-only marker must not fire the
+# Note, keeping healthy/idle containers silent.
+case_23_unreadable_pid1_no_note() {
+    echo "case: a PID-1-only __UNREADABLE__ marker does not produce the Note, and a paired real orphan is still reaped"
+    reset_state
+    local container="claude-cenci-unreadablepid1"
+    add_podman_container "${container}"
+    write_scan "${container}" $'__UNREADABLE__\t1' $'23001\t%27\t23000'
+    export MOCK_LIVE_PANES="%99"
+    set_gone 23001
+    run_reap
+    assert_exit_zero
+    assert_contains "$(reaped_line "${container}" 23001 "%27")"
+    assert_not_contains "unreadable during the -u dev scan"
+}
+
+# ---------------------------------------------------------------------------
 case_1_orphan_termed
 case_2_term_resistant_escalates_to_kill
 case_3_empty_pane_never_signaled
@@ -847,6 +893,8 @@ case_18_gone_before_term_is_benign
 case_19_dev_scan_finds_dev_owned_orphan
 case_20_empty_recorded_start_silently_falls_back_to_kill
 case_21_nostat_probe_silently_falls_back_to_kill
+case_22_unreadable_environ_note_fires
+case_23_unreadable_pid1_no_note
 
 print_summary
 [[ "${FAILURES}" -eq 0 ]]
