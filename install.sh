@@ -3,8 +3,8 @@
 #
 # Installs or updates the three cenci plugins (cenci, cenci-watch,
 # cenci-sandbox) as a single system: registers the marketplace, installs the
-# plugins, and runs the post-install setup that used to be manual (cenci-sand
-# launcher symlink + image build, macOS menu bar and Linux desktop bar-widget
+# plugins, and runs the post-install setup that used to be manual (cn launcher
+# link + sandbox image build, macOS menu bar and Linux desktop bar-widget
 # wiring).
 #
 # Usage:
@@ -308,10 +308,10 @@ run_doctor() {
 	say "  ${BOLD}Launchers and container image${RESET}"
 	check "cenci-installer utility" optional "re-run the installer to create it" command -v cenci-installer
 	if [ "$HAS_CLAUDE" -eq 1 ] || [ "$HAS_CODEX" -eq 1 ]; then
-		check "cenci-sand launcher" optional "re-run the installer to create it" command -v cenci-sand
+		check "cn launcher (cenci open)" optional "re-run the installer to create it" command -v cn
 	fi
 	if runtime="$(container_runtime 2>/dev/null)"; then
-		check "cenci-sandbox:latest image" optional "build it with the installed sandbox launcher --build" \
+		check "cenci-sandbox:latest image" optional "build it with: cenci sandbox build" \
 			"$runtime" image inspect cenci-sandbox:latest
 	fi
 
@@ -338,8 +338,8 @@ step_marketplace() {
 		:
 	elif marketplace_registered; then
 		# Registration alone doesn't mean the checkout is current — refresh it so
-		# find_plugin_path (cenci-installer launcher, cenci-sand, cenci macOS
-		# script) sees files added since the last update.
+		# find_plugin_path (cenci-installer launcher, macOS/Linux widget
+		# scripts) sees files added since the last update.
 		if claude plugin marketplace update "$MARKETPLACE_NAME" >/dev/null 2>&1; then
 			ok "Claude: marketplace '$MARKETPLACE_NAME' refreshed"
 		else
@@ -487,15 +487,22 @@ step_cli_setup() {
 
 step_sandbox_setup() {
 	selected cenci-sandbox || return 0
-	step "Setting up the cenci-sand launcher"
+	step "Setting up the sandbox launcher"
 
-	local launcher launcher_name="cenci-sand"
-	if ! launcher=$(find_plugin_path "sandbox/cenci-sand"); then
-		warn "could not find the installed cenci-sandbox plugin cache — re-run the installer after restarting your client"
-		return 0
+	# The launcher is the cenci binary itself (cenci open / cenci sandbox).
+	# `cn` is its one alias: a symlink chained through the bootstrap-maintained
+	# ~/.local/bin/cenci link, so it keeps resolving across version bumps (and
+	# becomes valid on the first agent session even if created dangling here).
+	link_launcher cn "$HOME/.local/bin/cenci" || true
+
+	# The cenci-sand bash launcher is gone. Never create it — but a stale link
+	# from a previous install is repointed at the cenci binary, whose argv[0]
+	# tombstone fails loudly with a migration map instead of leaving old
+	# scripts and docs with a dangling command.
+	if [ -L "$HOME/.local/bin/cenci-sand" ]; then
+		ln -sf "$HOME/.local/bin/cenci" "$HOME/.local/bin/cenci-sand"
+		warn "cenci-sand is deprecated — repointed the stale ~/.local/bin/cenci-sand link at cenci (it now prints a migration map); use 'cn' / 'cenci open' instead"
 	fi
-
-	link_launcher cenci-sand "$launcher" || true
 
 	case ":$PATH:" in
 	*":$HOME/.local/bin:"*) ;;
@@ -506,29 +513,38 @@ step_sandbox_setup() {
 	local runtime
 	if ! runtime=$(container_runtime); then
 		if [ "$OS" = macos ]; then
-			fail "no container runtime found — install Docker Desktop (https://docker.com/products/docker-desktop) or Podman, then run: $launcher_name --build"
+			fail "no container runtime found — install Docker Desktop (https://docker.com/products/docker-desktop) or Podman, then run: cenci sandbox build"
 		else
-			fail "no container runtime found — install docker or podman, then run: $launcher_name --build"
+			fail "no container runtime found — install docker or podman, then run: cenci sandbox build"
 		fi
 		INSTALL_FAILED=1
 		return 0
 	fi
 
 	if [ "$BUILD_IMAGE" = no ]; then
-		say "  ${DIM}skipping image build — run '$launcher_name --build' when ready${RESET}"
+		say "  ${DIM}skipping image build — run 'cenci sandbox build' when ready${RESET}"
 		return 0
 	fi
 	if [ "$BUILD_IMAGE" = ask ]; then
 		if ! ask_yn "Build the sandbox container image now with $runtime? (takes a few minutes)" y; then
-			say "  ${DIM}skipped — run '$launcher_name --build' when ready${RESET}"
+			say "  ${DIM}skipped — run 'cenci sandbox build' when ready${RESET}"
 			return 0
 		fi
 	fi
+
+	# The build runs through the cenci binary (it resolves the image assets
+	# from the installed cenci-sandbox plugin). Provision it from the plugin
+	# cache if the first agent session hasn't bootstrapped it yet.
+	local cenci_bin
+	if ! cenci_bin="$(current_cenci_binary)"; then
+		warn "cenci binary not available yet — build the image later with: cenci sandbox build"
+		return 0
+	fi
 	say "  building cenci-sandbox:latest with $runtime (this can take a few minutes)…"
-	if "$HOME/.local/bin/$launcher_name" --build; then
+	if "$cenci_bin" sandbox build; then
 		ok "sandbox image built"
 	else
-		fail "image build failed — fix the error above and re-run: $launcher_name --build"
+		fail "image build failed — fix the error above and re-run: cenci sandbox build"
 		INSTALL_FAILED=1
 	fi
 }
@@ -844,13 +860,13 @@ final_summary() {
 	say "  Try it out:"
 	if selected cenci-sandbox; then
 		if [ "$HAS_CLAUDE" -eq 1 ] || [ "$HAS_CODEX" -eq 1 ]; then
-			say "    cenci-sand                 # Claude Code inside the container"
+			say "    cn                # Claude Code inside the container (alias for: cenci open)"
 		fi
 		if [ "$HAS_CLAUDE" -eq 1 ]; then
-			say "    cenci-sand ch|cs|co|cf     # Claude in the container: haiku/sonnet/opus/fable"
+			say "    cn ch|cs|co|cf    # Claude in the container: haiku/sonnet/opus/fable"
 		fi
 		if [ "$HAS_CODEX" -eq 1 ]; then
-			say "    cenci-sand xl|xt|xs        # Codex in the container: luna/terra/sol"
+			say "    cn xl|xt|xs       # Codex in the container: luna/terra/sol"
 		fi
 	fi
 	if selected cenci && [ "$HAS_CLAUDE" -eq 1 ]; then

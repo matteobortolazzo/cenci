@@ -363,7 +363,7 @@ fi
 # the marketplace clone (`claude plugin marketplace update`), then calls
 # `claude plugin update` only for plugins whose installed version differs
 # from the clone's marketplace.json. A stamp file TTL-gates the whole pass
-# (ttl 0 = forced, the manual `cenci-sand --update-plugins` path), and like
+# (ttl 0 = forced, the manual `cenci sandbox update-plugins` path), and like
 # provisioning it never blocks boot.
 ####################################################################
 

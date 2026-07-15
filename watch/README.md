@@ -149,7 +149,7 @@ descriptive slug: `--slug` if given, else the whole description slugified.
 | Flag | Purpose |
 |------|---------|
 | `--agent <name>` | Agent to launch (`claude`, `codex`, …); default from config, else `claude` |
-| `--sandbox` / `--no-sandbox` | Sandbox is the default (`claude`→`cenci-sand`, the container being the mandatory runtime); `--no-sandbox` is the host opt-out. Both override the config default |
+| `--sandbox` / `--no-sandbox` | Sandbox is the default (`claude`→`cenci open`, the container being the mandatory runtime); `--no-sandbox` is the host opt-out. Both override the config default |
 | `--model <model>` | Model override passed to the agent (substituted into `{model}`, else appended as `--model`) |
 | `--session <name>` | Target tmux session (default: the current session) |
 | `--slug <slug>` | Window-name slug for free-text runs; ignored for numeric tickets (named `<number>-<skill>`) |
@@ -191,7 +191,7 @@ the host (the same as passing `--no-sandbox`):
   "agents": {
     "claude": {
       "command": "claude",
-      "sandboxCommand": "cenci-sand",
+      "sandboxCommand": "cenci open",
       "workflows": {
         "implement": { "args": ["--", "/cenci:implement {ticket}"] }
       }
@@ -534,43 +534,59 @@ cleanup: 'cenci close {number}'
 
 ## Sandbox management and session launching (`cenci sandbox`, `cenci open`)
 
-`cenci` wraps [cenci-sandbox](../sandbox/README.md)'s `cenci-sand` bash launcher
-with first-class `sandbox` and `open` verb groups, so day-to-day sandbox commands don't
-need `cenci-sand` on PATH to be remembered by name.
+This section is the CLI reference for the sandbox surface (per
+[docs/cli-conventions.md](../docs/cli-conventions.md), the shortcut table below
+is the single documented copy). The launcher is implemented natively in this
+binary (`internal/sandbox/launcher`); the container image and runtime assets it
+launches ship with the [cenci-sandbox](../sandbox/README.md) plugin, resolved
+from the installed plugin automatically (`CENCI_SANDBOX_ASSETS=<dir>` overrides
+the resolution for development).
 
 ```bash
-# One-shot maintenance verbs — each forwards to the matching cenci-sand flag
-cenci sandbox build           # cenci-sand --build
-cenci sandbox build-base      # cenci-sand --build-base
-cenci sandbox prune           # cenci-sand --prune
-cenci sandbox prune --volumes # cenci-sand --prune --volumes
-cenci sandbox update-plugins  # cenci-sand --update-plugins
-cenci sandbox reseed-creds    # cenci-sand --reseed-creds
-cenci sandbox reap-orphans    # cenci-sand --reap-orphans
+# One-shot maintenance verbs
+cenci sandbox build             # build cenci-sandbox:latest (or the repo image if <repo>/.cenci/Dockerfile exists); builds the base first if missing
+cenci sandbox build-base        # build cenci-sandbox-base:<content-hash> + :latest alias
+cenci sandbox prune             # remove superseded base tags, dangling images, stopped *-cenci-* containers
+cenci sandbox prune --volumes   # …and prompt ([y/N], default deny) to remove stale *-cenci-home-* volumes
+cenci sandbox update-plugins [--agent claude|codex] [--name <n>]
+                                # force-refresh the plugins inside the container/volume (ttl 0)
+cenci sandbox reseed-creds      # alias for: cenci open --reseed-creds
+cenci sandbox reap-orphans      # kill container-side agent processes whose tmux pane is gone
 
-# List / stop sandbox containers — implemented natively against docker/podman,
-# no cenci-sand equivalent
+# List / stop sandbox containers
 cenci sandbox ls
-cenci sandbox stop            # stops every claude-cenci-*/codex-cenci-* container
-cenci sandbox stop agentstack # only containers whose name contains "agentstack"
+cenci sandbox stop              # stops every claude-cenci-*/codex-cenci-* container
+cenci sandbox stop agentstack   # only containers whose name contains "agentstack"
 
 # Launch or attach an interactive session
-cenci open ch                 # claude + haiku
-cenci open xs                 # codex + gpt-5.6-sol
+cenci open ch                   # claude + haiku
+cenci open xs                   # codex + gpt-5.6-sol
 cenci open --agent codex --model gpt-5.6-terra --name mybox
-cenci open ch -- --resume     # forward flags after -- straight to the agent CLI
+cenci open ch -- --resume       # forward flags after -- straight to the agent CLI
 ```
 
-`open`'s one-token shortcuts mirror `cenci-sand`'s own table exactly, so `ch`/`cs`/`co`/`cf`
-select Claude with the haiku/sonnet/opus/fable model, and `xl`/`xt`/`xs` select Codex with
-the gpt-5.6-luna/terra/sol model. A shortcut and a conflicting explicit `--agent` (e.g.
-`open ch --agent codex`) is a usage error (exit 2) rather than silently picking one.
-Supported flags: `--agent`, `--model`, `--name`, `--shell`, `--docker`, `--host-network`;
-anything after a bare `--` is forwarded to the agent CLI verbatim. `open` execs `cenci-sand`
-(replacing the `cenci` process) so the interactive session owns the TTY.
+`open`'s one-token shortcuts (recognized only as the first argument):
+
+| Shortcut | Agent | Model |
+|---|---|---|
+| `ch` / `cs` / `co` / `cf` | claude | haiku / sonnet / opus / fable |
+| `xl` / `xt` / `xs` | codex | gpt-5.6-luna / gpt-5.6-terra / gpt-5.6-sol |
+
+Without a shortcut or `--model`, the model defaults per agent (claude→`sonnet`,
+codex→`gpt-5.6-terra`). A shortcut and a conflicting explicit `--agent` (e.g.
+`open ch --agent codex`) is a usage error rather than silently picking one; all
+usage errors (unknown flag, unknown verb, stray positional, conflicts) exit 2.
+Supported flags: `--agent`, `--model`, `--name`, `--shell`, `--docker`,
+`--host-network`, `--reseed-creds`; anything after a bare `--` is forwarded to
+the agent CLI verbatim (this is also how single-dash agent flags like
+`-p "prompt"` are passed: `cenci open -- -p "prompt"`). For the final attach,
+`open` execs the container runtime (replacing the `cenci` process) so the
+interactive session owns the TTY and its exit code propagates.
 
 **`cn` alias:** a copy or symlink of the `cenci` binary named `cn` behaves as
-`cenci open <args>` — `cn xs` is exactly `cenci open xs`.
+`cenci open <args>` — `cn xs` is exactly `cenci open xs`. It is the one alias
+binary; the retired `cenci-sand` name is a tombstone that prints a migration
+map and exits 2.
 
 ## Installer integration (`cenci doctor`, `cenci update`)
 
@@ -935,7 +951,7 @@ The daemon has two sweep mechanisms:
 
 **Paneless TTL sweep**: Sessions without a tmux pane (plain terminals, cenci-sandbox without a pane) are tracked by session id only. They are removed on `SessionEnd`; if no `SessionEnd` fires (e.g. a crash or a Codex session), the daemon expires them after the idle TTL (default `2h`, configurable with `-session-ttl`).
 
-**Sandbox orphan reap**: When the pane-based sweep detects one or more tmux-backed sessions whose pane no longer exists, the daemon triggers a single `cenci-sand --reap-orphans` pass (coalesced — not one per stale window) to kill any orphaned container-side agent processes for those sessions. The daemon also runs one reap pass at startup, covering panes that closed while it was down or restarting. The reap is fire-and-forget, non-blocking for the event loop, and self-no-ops when `cenci-sand` isn't on `PATH` or there's nothing to reap.
+**Sandbox orphan reap**: When the pane-based sweep detects one or more tmux-backed sessions whose pane no longer exists, the daemon triggers a single `cenci sandbox reap-orphans` pass (coalesced — not one per stale window, self-exec'd via the daemon's own binary) to kill any orphaned container-side agent processes for those sessions. The daemon also runs one reap pass at startup, covering panes that closed while it was down or restarting. The reap is fire-and-forget, non-blocking for the event loop, and self-no-ops when there's nothing to reap.
 
 ### Paneless sessions
 

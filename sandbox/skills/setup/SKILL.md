@@ -1,8 +1,8 @@
 ---
 name: setup
-description: "Claude Code-only: install the cenci-sand launcher and build the sandbox container image. Codex users receive the launcher through the cenci installer."
+description: "Claude Code-only: verify the cenci launcher and build the sandbox container image. Codex users receive the launcher through the cenci installer."
 compatibility: Requires Claude Code AskUserQuestion and CLAUDE_PLUGIN_ROOT.
-argument-hint: [--build-only | --link-only]
+argument-hint: [--build-only | --check-only]
 user-invocable: true
 disable-model-invocation: true
 allowed-tools: Bash, Read, AskUserQuestion
@@ -11,16 +11,17 @@ allowed-tools: Bash, Read, AskUserQuestion
 ## Task
 
 Set up the `sandbox` plugin on this host so the user can run Claude Code inside an
-isolated Docker/Podman container. Two steps:
+isolated Docker/Podman container. The launcher is the `cenci` binary itself
+(`cenci open` / its `cn` alias, `cenci sandbox <verb>`) — no plugin symlink is
+installed by this skill. Two steps:
 
-1. **Symlink the `cenci-sand` launcher onto PATH** — the launcher ships with the
-   plugin at `${CLAUDE_PLUGIN_ROOT}/cenci-sand`.
-2. **Build the container image** (`cenci-sandbox:latest`) via `cenci-sand --build`.
+1. **Verify the launcher** — `cenci` resolves on PATH.
+2. **Build the container image** (`cenci-sandbox:latest`) via `cenci sandbox build`.
 
 ### Parse `$ARGUMENTS`
 
-- `--link-only` — do step 1 only (symlink), skip the image build.
-- `--build-only` — do step 2 only (build), skip the symlink.
+- `--check-only` — do step 1 only (verify), skip the image build.
+- `--build-only` — do step 2 only (build), skip the verification.
 - empty — do both.
 
 ### Preconditions
@@ -29,44 +30,40 @@ Run these checks first. If any fails, report it clearly and stop — do not cont
 
 - **Container runtime**: `command -v podman || command -v docker`. If neither is found,
   tell the user to install Docker or Podman and stop.
-- **Launcher present**: verify `${CLAUDE_PLUGIN_ROOT}/cenci-sand` exists and is a file.
 
-### Step 1 — Symlink the launcher
+### Step 1 — Verify the launcher
 
 Skip this step when `--build-only` was passed.
 
-1. Choose a PATH target directory. Prefer `~/.local/bin` (create it with `mkdir -p` if
-   missing). Check it is on `$PATH`:
+1. Check the binary and its alias:
    ```bash
-   case ":$PATH:" in *":$HOME/.local/bin:"*) echo on-path ;; *) echo not-on-path ;; esac
+   command -v cenci
+   command -v cn
    ```
-   If `~/.local/bin` is not on `$PATH`, warn the user they will need to add it (e.g.
-   `export PATH="$HOME/.local/bin:$PATH"` in their shell profile) for `cenci-sand` to
-   be found.
+   - If `cenci` is missing, the plugin's first-session bootstrap has not run yet or
+     `~/.local/bin` is not on `$PATH`. Check with:
+     ```bash
+     case ":$PATH:" in *":$HOME/.local/bin:"*) echo on-path ;; *) echo not-on-path ;; esac
+     ```
+     If it is not on `$PATH`, warn the user to add it (e.g.
+     `export PATH="$HOME/.local/bin:$PATH"` in their shell profile). If it is on
+     `$PATH` but `cenci` still does not resolve, tell the user to re-run the cenci
+     installer (`curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash`)
+     and stop.
+   - A missing `cn` alone is cosmetic — mention re-running the installer to create it,
+     but continue.
 
-2. Create the symlink, resolving the launcher to an absolute path with `realpath` — do
-   **not** use a `$(cd … && pwd)` substitution: combining `cd` with a write command in one
-   compound trips Claude Code's built-in `cd-compound-write` guard and forces a manual
-   prompt every run:
-   ```bash
-   ln -sf "$(realpath "${CLAUDE_PLUGIN_ROOT}")/cenci-sand" "$HOME/.local/bin/cenci-sand"
-   ```
-   - If a `cenci-sand` already exists at the target and is **not** a symlink, do not
-     overwrite it — report it and ask the user (`AskUserQuestion`) whether to replace it.
-   - If it is a symlink (even a stale one), `ln -sf` refreshes it; that is fine.
-
-3. Confirm: `ls -l "$HOME/.local/bin/cenci-sand"` and `command -v cenci-sand`.
+2. Confirm the launcher answers: `cenci version`.
 
 ### Step 2 — Build the image
 
-Skip this step when `--link-only` was passed.
+Skip this step when `--check-only` was passed.
 
-Run the build through the launcher so the same runtime-detection logic is used:
+Run the build through the launcher so the same runtime-detection and asset-resolution
+logic is used:
 ```bash
-cenci-sand --build
+cenci sandbox build
 ```
-If `cenci-sand` is not yet on `$PATH` in this shell (freshly symlinked), invoke it by
-absolute path instead: `"$HOME/.local/bin/cenci-sand" --build`.
 
 The build can take several minutes on first run (it pulls the base image and installs
 the SDKs). Report the outcome. On failure, surface the runtime's error output and stop.
@@ -74,10 +71,10 @@ the SDKs). Report the outcome. On failure, surface the runtime's error output an
 ### Done
 
 Summarize what was done and point the user at usage:
-- `cenci-sand` — launch Claude Code in the sandbox (full permissions inside the container)
-- `cenci-sand xt` (or `cenci-sand --agent codex`) — launch Codex in the sandbox instead
-- `cenci-sand ch`/`cs`/`co`/`cf` — launch Claude with the haiku/sonnet/opus/fable model
-- `cenci-sand --shell` — open a shell for manual setup / troubleshooting
-- `cenci-sand --build` — rebuild the image after changing the Dockerfile
+- `cn` (alias for `cenci open`) — launch Claude Code in the sandbox (full permissions inside the container)
+- `cn xt` (or `cenci open --agent codex`) — launch Codex in the sandbox instead
+- `cn ch`/`cs`/`co`/`cf` — launch Claude with the haiku/sonnet/opus/fable model
+- `cenci open --shell` — open a shell for manual setup / troubleshooting
+- `cenci sandbox build` — rebuild the image after changing the Dockerfile
 
 See `${CLAUDE_PLUGIN_ROOT}/README.md` for auth, MCP, cenci, and Docker-in-Docker details.

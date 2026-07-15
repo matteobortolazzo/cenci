@@ -1,45 +1,11 @@
 package sandbox
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
 )
-
-func TestBatchFlag_KnownVerbs(t *testing.T) {
-	cases := map[string]string{
-		"build":          "--build",
-		"build-base":     "--build-base",
-		"update-plugins": "--update-plugins",
-		"reseed-creds":   "--reseed-creds",
-		"reap-orphans":   "--reap-orphans",
-	}
-	for verb, want := range cases {
-		got, ok := BatchFlag(verb)
-		if !ok {
-			t.Errorf("BatchFlag(%q): expected ok=true", verb)
-		}
-		if got != want {
-			t.Errorf("BatchFlag(%q) = %q, want %q", verb, got, want)
-		}
-	}
-}
-
-func TestBatchFlag_PruneNotInTable(t *testing.T) {
-	// prune takes an optional --volumes flag, so it is handled separately in
-	// main.go rather than through this 1:1 table.
-	if _, ok := BatchFlag("prune"); ok {
-		t.Error("expected prune to be excluded from the batch flag table")
-	}
-}
-
-func TestBatchFlag_UnknownVerb(t *testing.T) {
-	if _, ok := BatchFlag("bogus"); ok {
-		t.Error("expected ok=false for an unknown verb")
-	}
-}
 
 func TestResolveShortcut_ClaudeShortcuts(t *testing.T) {
 	cases := map[string]string{
@@ -141,7 +107,7 @@ func TestContainerRuntime_PrefersPodmanOverDocker(t *testing.T) {
 		t.Fatalf("ContainerRuntime: %v", err)
 	}
 	if got != "podman" {
-		t.Errorf("ContainerRuntime() = %q, want podman (cenci-sand prefers podman when both are present)", got)
+		t.Errorf("ContainerRuntime() = %q, want podman (preferred when both are present)", got)
 	}
 }
 
@@ -168,41 +134,5 @@ func TestContainerRuntime_ErrorsWhenNeitherFound(t *testing.T) {
 
 	if _, err := ContainerRuntime(); err == nil {
 		t.Error("expected an error when neither podman nor docker is on PATH")
-	}
-}
-
-func TestRunCenciSand_MissingBinaryReturnsError(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("PATH", dir)
-
-	_, err := RunCenciSand([]string{"--build"}, nil, &bytes.Buffer{}, &bytes.Buffer{})
-	if err == nil {
-		t.Error("expected an error when cenci-sand is not on PATH")
-	}
-}
-
-func TestRunCenciSand_ReturnsChildExitCodeAndWiresArgv(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX shell fake only")
-	}
-	dir := t.TempDir()
-	capture := filepath.Join(dir, "argv.txt")
-	writeFakeBinary(t, dir, "cenci-sand", `printf '%s\n' "$@" > "`+capture+`"
-exit 3`)
-	t.Setenv("PATH", dir)
-
-	code, err := RunCenciSand([]string{"--build"}, nil, &bytes.Buffer{}, &bytes.Buffer{})
-	if err != nil {
-		t.Fatalf("RunCenciSand: %v", err)
-	}
-	if code != 3 {
-		t.Errorf("exit code = %d, want 3", code)
-	}
-	got, err := os.ReadFile(capture)
-	if err != nil {
-		t.Fatalf("read capture: %v", err)
-	}
-	if string(got) != "--build\n" {
-		t.Errorf("captured argv = %q, want %q", got, "--build\n")
 	}
 }

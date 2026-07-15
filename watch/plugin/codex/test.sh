@@ -2,7 +2,7 @@
 #
 # Dependency-free gate test for the Codex bootstrap script.
 #
-# Inside a cenci-sand container (CENCI_SANDBOX=1), cenci controls nothing
+# Inside a cenci sandbox container (CENCI_SANDBOX=1), cenci controls nothing
 # on the host, so spawning a container-local daemon just masks real wiring
 # failures (#195, #202). This asserts bootstrap.sh's start_daemon() never
 # invokes the `daemon` subcommand when CENCI_SANDBOX=1, and that behavior is

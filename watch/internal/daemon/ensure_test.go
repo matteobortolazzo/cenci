@@ -88,7 +88,7 @@ func TestEnsureRunningWaitsForSpawnedSocket(t *testing.T) {
 	}
 }
 
-// TestEnsureRunningSkipsSpawnUnderCenciSandbox asserts that inside a cenci-sand
+// TestEnsureRunningSkipsSpawnUnderCenciSandbox asserts that inside a cenci sandbox
 // container (CENCI_SANDBOX=1), EnsureRunning never spawns a container-local
 // daemon — such a daemon controls nothing on the host and only masks real
 // wiring failures (#195, #202). It must return promptly without requiring a
@@ -131,7 +131,7 @@ func TestEnsureRunningSkipsSpawnUnderCenciSandbox(t *testing.T) {
 
 // TestEnsureRunningSpawnsWhenCenciSandboxUnsetOrZero is a regression guard: the
 // CENCI_SANDBOX gate must not change existing alive/spawn/poll behavior outside
-// a cenci-sand container.
+// a sandbox container.
 func TestEnsureRunningSpawnsWhenCenciSandboxUnsetOrZero(t *testing.T) {
 	t.Run("CENCI_SANDBOX unset", func(t *testing.T) {
 		useTempSocketDir(t)
