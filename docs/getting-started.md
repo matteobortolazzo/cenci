@@ -1,8 +1,11 @@
 # Getting started
 
-This is the supported happy path from a clean machine to the first cenci ticket.
-cenci is one product; the installer manages its three internal components for
-every supported client it detects.
+This is the detailed companion to the [README quickstart](../README.md#quickstart) —
+use it for prerequisite detail, verification, troubleshooting, and
+recovery/standalone installs. The steps below are the same install → verify →
+launch → configure → run sequence, just with more depth at each step. cenci is
+one product; the installer manages its three internal components for every
+supported client it detects.
 
 ![cenci combines isolation, workflow, and attention into a safe path from issue to reviewed pull request](assets/cenci-overview.svg)
 
@@ -36,13 +39,10 @@ curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install
 ```
 
 From a clone, run `./install.sh`. Non-interactive automation can add `--yes`; use
-`./install.sh --help` for the complete public interface.
-
-The installer registers the cenci marketplace and installs `cenci`,
-`cenci-watch`, and `cenci-sandbox` independently for Claude Code, Codex, or both. It
-puts the `cenci` binary and its `cn` launch alias on your PATH and can build the
-sandbox image. cenci-watch self-bootstraps its client-cache binary and daemon on
-first session.
+`./install.sh --help` for the complete public interface. The installer registers the
+cenci marketplace, installs `cenci`, `cenci-watch`, and `cenci-sandbox` independently
+for every detected client, and puts the `cenci` binary and its `cn` launch alias on
+your PATH.
 
 ## 3. Verify
 
@@ -59,16 +59,14 @@ Warnings for optional features are safe to defer. Fix any required item marked w
 
 ## 4. Launch
 
-Use the launcher installed for your client:
-
 ```bash
 cn           # Claude Code
 cn xt        # Codex (or: cn --agent codex)
 ```
 
-When launched from a git repository, only that repository root is mounted at
-`/workspace`. cenci-watch needs no separate binary install: the first supported client
-session provisions it and starts the shared host daemon.
+Run this from a git repository — only that repository root is mounted at
+`/workspace`. cenci-watch needs no separate binary install: the first supported
+client session provisions it and starts the shared host daemon.
 
 Codex users should also make the repository's canonical `CLAUDE.md` instructions
 discoverable by adding this user-level configuration (repository-level Codex config
@@ -92,7 +90,9 @@ In a sandboxed Claude Code session, run once:
 This detects the stack, writes project guidance, configures workflow metadata, and can
 generate a reviewed per-repository sandbox image definition. Codex-only users follow
 the [portable project and implementation guidance](../flow/docs/codex.md); the
-interactive configure skill is Claude Code-only.
+interactive configure skill is Claude Code-only. See
+[flow/README.md's "What `/cenci:configure` creates"](../flow/README.md#what-cenciconfigure-creates)
+for the generated file layout, including the monorepo progressive-disclosure structure.
 
 ## 6. Run a ticket
 
@@ -115,8 +115,8 @@ The lifecycle is always:
 
 For UI work, refinement can branch through a dedicated design ticket. Planning saves
 an approved `.plans/` file and applies `Planned`; implementation or automated dispatch
-picks it up and applies the transient `Working` state. PR creation applies `In Review`,
-and merge completion applies `Implemented`.
+(`cenci dispatch`) picks it up and applies the transient `Working` state. PR creation
+applies `In Review`, and merge completion applies `Implemented`.
 
 ## Update
 

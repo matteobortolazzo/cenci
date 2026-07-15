@@ -18,6 +18,11 @@ cenci provides those missing operating layers as one install:
 - **Workflow** turns an issue into a tested, reviewed pull request with human gates.
 - **Attention** shows when a session is running, finished, idle, or waiting for you.
 
+Put together: **the board dispatches the work, the workflow owns the decisions, the
+container is the security boundary, the watcher routes your attention.** You don't
+need the board — cenci works from a plain terminal — but the three layers cenci
+installs hold that shape either way.
+
 The human owns intent and consequential decisions. The agent owns the mechanical work
 between them.
 
@@ -34,49 +39,105 @@ between them.
 The approved `.plans/` file is the durable handoff. Once you launch that plan, the
 workflow can run unattended through an open PR. cenci-watch keeps its state visible;
 [`/cenci:babysit`](flow/README.md#babysitting-a-pr) can follow CI and review
-activity through to merge.
+activity through to merge. A `Planned` ticket doesn't require you to launch it by
+hand either — `cenci dispatch` can pick it up by policy (see
+[Quickstart](#quickstart) and the [CLI reference](#cli-reference) below).
 
-## Install
+Full permissions, contained: the agent runs with `--dangerously-skip-permissions`
+(Claude) or `--dangerously-bypass-approvals-and-sandbox` (Codex) so it never stops for
+per-command approval, but only inside the container. Host credentials are bind-mounted
+read-only and copied into a container-only named volume on first start — never baked
+into an image layer — and the container publishes no inbound ports. That still means
+you trust what the agent installs and runs *inside* the container; see the
+[security model](SECURITY.md) for the full threat model and its explicit limits.
+
+## Quickstart
 
 Requirements: Linux, macOS, or WSL2; git; curl; Docker or Podman; and Claude Code,
 Codex, or both.
+
+**1. Install.**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
 ```
 
-Then launch your agent inside the project boundary:
+The installer detects available clients, registers the marketplace, installs all
+three layers, and puts the `cenci` binary — with its `cn` launch alias — on your
+PATH.
+
+**2. Verify.** `doctor` changes nothing; it reports required dependencies, detected
+clients, optional features, and image readiness:
+
+```bash
+cenci doctor
+```
+
+Fix anything marked `✗`; warnings for optional features are safe to defer.
+
+**3. Launch** your agent inside the project boundary, from a git repo:
 
 ```bash
 cn      # Claude Code (cenci open)
-cn xt   # Codex
+cn xt   # Codex (or: cn --agent codex)
 ```
 
-The installer detects available clients, registers the marketplace, installs all
-three layers, and puts the `cenci` binary — with its `cn` launch alias — on your
-PATH. The same command handles routine maintenance:
+Only that repository's root is mounted at `/workspace`. cenci-watch needs no separate
+install: the first client session provisions it and starts the shared host daemon.
 
-```bash
-cenci doctor   # inspect prerequisites and installation state
-cenci update   # update the complete stack
+**4. Configure the project**, once, from inside the sandboxed session:
+
+```text
+/cenci:configure
 ```
 
-The command fetches the current official installer before it runs, so the updater
-itself stays current. Existing installations from before the command was introduced
-can bootstrap it once by rerunning the install command above. Once cenci is
-installed, `cenci doctor` and `cenci update` reach the same two modes
-(see [cenci-watch's README](watch/README.md#installer-integration-cenci-doctor-cenci-update)).
+This detects the stack, writes project guidance (`CLAUDE.md`, `.claude/settings.json`),
+and can generate a reviewed per-repository sandbox image. Codex-only users instead
+follow the [portable project and implementation guidance](flow/docs/codex.md) — the
+interactive configure skill is Claude Code-only.
 
-Follow the [guided getting-started path](docs/getting-started.md) for first-run
-configuration and your first ticket.
+**5. Run a ticket:**
+
+```text
+/cenci:refine 42
+/cenci:implement 42
+/cenci:babysit <pr-number>
+```
+
+`refine` scopes the ticket, `implement` plans it (with a review gate on the saved
+plan) and then runs unattended through worktree setup, test-first implementation,
+refactoring, security/code review, and PR creation. `babysit` then follows CI and
+review comments until the PR merges, performing the final `In Review → Implemented`
+board transition. All three are Claude Code-only today; a Codex-only install still
+gets isolation, monitoring, and a documented implementation recipe.
+
+For the deeper walkthrough — prerequisites detail, troubleshooting, standalone/recovery
+installs, and the `cenci update` maintenance path — see
+[Getting started](docs/getting-started.md).
+
+## CLI reference
+
+Every layer ships its own CLI surface under the single `cenci` binary. One row per
+command group; full flags live in the linked layer README.
+
+| Command | Purpose | Docs |
+|---|---|---|
+| `cn` / `cenci open` | Launch a sandboxed session | [sandbox/README.md](sandbox/README.md#usage) |
+| `ch`/`cs`/`co`/`cf`, `xl`/`xt`/`xs` | One-token agent+model shortcuts | [sandbox/README.md](sandbox/README.md#usage) |
+| `cenci run <workflow> <ticket\|desc>` | Dispatch a workflow into a named tmux window | [watch/README.md](watch/README.md#dispatching-workflows-cenci-run) |
+| `cenci dispatch` | Autonomous policy-based pickup of approved `Planned` tickets | [watch/README.md](watch/README.md#auto-dispatch-cenci-dispatch) |
+| `cenci close <target>` | Kill a ticket's tmux window via the daemon registry | [watch/README.md](watch/README.md#closing-agent-windows-cenci-close) |
+| `cenci sandbox build/prune/ls/stop` | Image and container maintenance | [sandbox/README.md](sandbox/README.md#usage) |
+| `cenci status` / `widget-json` | Human/machine status output | [watch/README.md](watch/README.md#human-status-overview-cenci-status) |
+| `cenci doctor` / `cenci update` | Install/update the whole stack | [watch/README.md](watch/README.md#installer-integration-cenci-doctor-cenci-update) |
 
 ## Three layers, one product
 
 | Layer | What it changes | Learn more |
 |---|---|---|
 | **cenci-sandbox** | Runs Claude Code or Codex at full permissions while mounting only the current repository at `/workspace`. The container—not a prompt—is the security boundary. | [Isolation details](sandbox/README.md) |
-| **cenci** | Adds refinement, optional UI design, persisted planning, test-first implementation, specialist reviews, and PR follow-through. | [Workflow details](flow/README.md) |
-| **cenci-watch** | Turns native hooks into shared live state for tmux and optional Linux/macOS status surfaces. It can also dispatch approved plans by policy. | [Attention details](watch/README.md) |
+| **cenci** | Adds refinement, optional UI design, persisted planning, test-first implementation, specialist reviews (`/cenci:review`), refactoring proposals (`/cenci:refactor`), and PR follow-through. | [Workflow details](flow/README.md) |
+| **cenci-watch** | Turns native hooks into shared live state for tmux and optional Linux/macOS status surfaces. It can also dispatch approved plans by policy (`cenci dispatch`), picking up any board ticket that reaches `Planned` without a human relaunching it. | [Attention details](watch/README.md) |
 
 Each layer is independently versioned internally, but normal installation and updates
 treat cenci as one product.
@@ -95,7 +156,16 @@ Claude Code currently provides the full interactive ticket-to-PR workflow. Codex
 the same isolation and attention layers plus portable engineering conventions and a
 documented implementation recipe.
 
+This isn't just a capability gap — it's a flexibility story. `cenci run` takes a
+per-invocation `--agent`, and `cenci dispatch` routes each ticket by an
+`agent:<name>` label (falling back to configured defaults), so which client runs a
+given ticket is a per-dispatch choice, not an install-time one. One board, one repo,
+and one set of agent-neutral board labels can mix Claude Code and Codex cards side
+by side.
+
 ## Fits the tools you already use
+
+![cenci-watch routes Claude Code and Codex hook events to tmux and desktop status surfaces](docs/assets/cenci-surfaces.svg)
 
 cenci-watch can surface the same state in tmux, Waybar, Noctalia, DMS, GNOME, KDE
 Plasma, and the macOS menu bar. An optional
@@ -111,7 +181,7 @@ New → Refined → [Designed] → Planned → Working → In Review → Impleme
 
 ## Read next
 
-- [Getting started](docs/getting-started.md) — install, verify, and run the first ticket
+- [Getting started](docs/getting-started.md) — deeper walkthrough, troubleshooting, and recovery/standalone installs
 - [Security model](SECURITY.md) — what the container boundary protects and what it does not
 - [Orchestration contract](docs/orchestration.md) — labels, plans, and dispatch behavior
 - [Roadmap](docs/roadmap.md) — current delivery status
