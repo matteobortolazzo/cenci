@@ -28,9 +28,17 @@
       "Bash(git push --force *)",
       "Bash(git reset --hard *)",
       "Read(~/.ssh/**)",
+      "Edit(~/.ssh/**)",
+      "Write(~/.ssh/**)",
       "Read(~/.aws/**)",
+      "Edit(~/.aws/**)",
+      "Write(~/.aws/**)",
       "Read(.env)",
-      "Read(.env.*)"
+      "Edit(.env)",
+      "Write(.env)",
+      "Read(.env.*)",
+      "Edit(.env.*)",
+      "Write(.env.*)"
     ]
   }
 }

@@ -49,14 +49,26 @@ If user selects none → skip the rest of this procedure and return to the calli
 
 ### Step 3: Download Selected Attachments
 
-Store downloads under `${TMPDIR:-/tmp}/cenci/attachments/<scope>` — a per-run
-subdirectory, where `<scope>` is the calling skill's run identifier (ticket id/slug or
-run id), so concurrent runs never pile same-named downloads together. Create the
-directory with the client's filesystem tool or a standalone shell command.
+Store downloads under a freshly created, atomically-unique private directory —
+never a shared, predictable path, which would let a symlink be pre-planted at a
+guessable resolved download filename before the run starts. Create it with the
+client's filesystem tool or a standalone shell command, then use the returned
+path (`${ATTACH_DIR}`) for every download in this run:
 
 ```bash
-mkdir -p "${TMPDIR:-/tmp}/cenci/attachments/<scope>"
+ATTACH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cenci-attachments-XXXXXX")"
 ```
+
+`mktemp -d` both creates the directory and guarantees its name is unique and
+unpredictable, so concurrent runs never collide and nothing can pre-plant a
+symlink at it — no `<scope>` subdirectory is needed for uniqueness.
+
+**Verify before downloading.** Confirm the command succeeded and `${ATTACH_DIR}`
+is a non-empty, existing directory before any download proceeds. If `mktemp -d`
+fails (disk full, unwritable `TMPDIR`, etc.), `${ATTACH_DIR}` would otherwise be
+empty and every downstream `${ATTACH_DIR}/<file>` path would silently collapse to
+an absolute root-relative path — abort the entire attachment step rather than
+continuing with an unverified directory.
 
 Prefer a connected GitHub attachment-download tool when one is available, especially
 for private `user-attachments` URLs. Otherwise use `curl`. Before downloading, resolve
@@ -70,6 +82,10 @@ is issue-author-controlled and presentation-only, not a trusted filesystem input
 2. **Validate the basename.** It must match `^[A-Za-z0-9._-]+$`, must not be exactly
    `.` or `..`, and must not contain `..` anywhere — the same rule used for scope keys
    in the `shell-rules` skill (do not weaken this to a bare character-class check).
+   Then cap its length: if the validated basename exceeds 200 characters, truncate
+   the stem (everything before the last `.`) so `stem+ext ≤ 200`, preserving the
+   extension unchanged — a conservative cap that leaves headroom below common
+   `NAME_MAX` (255) filesystem limits for the `-<k>` collision suffixes applied later.
 3. **Fall back if invalid, absent, or extensionless.** Generate `attachment-<n>`
    (where `<n>` is the attachment's 1-based index within the current run's selected
    set — stable and deterministic, not a global counter) when the basename fails
@@ -85,7 +101,7 @@ is issue-author-controlled and presentation-only, not a trusted filesystem input
    - **Case A — valid URL basename** (step 2 validation passed). The filename,
      including its original extension, is already fully known before any download
      starts — no sniffing applies. Check it for a collision against files already
-     written this run in `${TMPDIR:-/tmp}/cenci/attachments/<scope>`; if it
+     written this run in `${ATTACH_DIR}`; if it
      collides, append `-<k>` before the extension, starting at `k=2` and incrementing
      until unique (e.g. `report.pdf` → `report-2.pdf`). For a multi-dot name, split on
      the *last* `.` only — the extension is everything after the final dot, so
@@ -93,7 +109,7 @@ is issue-author-controlled and presentation-only, not a trusted filesystem input
      name:
 
      ```bash
-     curl -fsSL "<url>" -o "${TMPDIR:-/tmp}/cenci/attachments/<scope>/<resolved-filename>"
+     curl -fsSL "<url>" -o "${ATTACH_DIR}/<resolved-filename>"
      ```
 
    - **Case B — fallback (`attachment-<n>`)**. The extension is unknown until the
@@ -104,7 +120,7 @@ is issue-author-controlled and presentation-only, not a trusted filesystem input
         connector tool's response, if used instead):
 
         ```bash
-        curl -fsSL "<url>" -w '%{content_type}' -o "${TMPDIR:-/tmp}/cenci/attachments/<scope>/attachment-<n>.partial"
+        curl -fsSL "<url>" -w '%{content_type}' -o "${ATTACH_DIR}/attachment-<n>.partial"
         ```
 
         If this download reports failure (non-zero curl exit, or the connector tool's
@@ -125,7 +141,7 @@ is issue-author-controlled and presentation-only, not a trusted filesystem input
         (no bash-only construct):
 
         ```bash
-        mv "${TMPDIR:-/tmp}/cenci/attachments/<scope>/attachment-<n>.partial" "${TMPDIR:-/tmp}/cenci/attachments/<scope>/<resolved-filename>"
+        mv "${ATTACH_DIR}/attachment-<n>.partial" "${ATTACH_DIR}/<resolved-filename>"
         ```
 
         If this `mv` fails (disk full, permissions, etc.), treat it as a download

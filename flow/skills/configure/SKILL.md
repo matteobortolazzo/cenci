@@ -509,12 +509,20 @@ After gathering answers:
    checker never matches scoped-path `Write(<path>)` rules — only scoped-path
    `Edit(<path>)` rules, which also cover Write — so a scoped `Write(<path>)`
    entry is dead weight that produces a startup warning):
-   1. If `permissions.allow` contains a scoped-path `Write(<path>)` entry
-      matching a known base rule (specifically `Write(//tmp/claude*/**)`),
-      **replace** it with the corrected `Edit(<path>)` form rather than
-      appending the missing entry alongside it.
+   1. For **every** scoped-path `Write(<path>)` entry found in
+      `permissions.allow` (not just the known base rule
+      `Write(//tmp/claude*/**)`), **replace** it with the corrected
+      `Edit(<path>)` form rather than appending the missing entry alongside
+      it. Deduplicate as you go: if `permissions.allow` already contains an
+      `Edit(<path>)` entry with that same `<path>`, drop the redundant
+      `Write(<path>)` entry instead of creating a duplicate `Edit(<path>)`.
    2. If `permissions.allow` contains a blanket `Write(*)` entry, normalize
       it to bare `Write`.
+   3. **Verify**: after healing, confirm `permissions.allow` contains no
+      remaining scoped-path `Write(<path>)` entry (a blanket bare `Write` or
+      `Write(*)`→`Write` normalization result is fine — only scoped-path
+      `Write(<path>)` forms are the problem). If any remain, the heal step
+      above was incomplete — fix before continuing.
 
 ### MCP Server Configuration
 

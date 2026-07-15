@@ -79,6 +79,11 @@ make_cenci() {
     cat >"${path}" <<EOF
 #!/bin/sh
 printf '%s\n' "\$*" >>"\${CALL_LOG}"
+# Regression probe (#353): if a host secret survives into this subprocess's
+# environment, surface it in the captured call log so the sentinel-secret
+# case can prove this test harness's env -i scrub keeps host secrets out.
+[ -n "\${OPENAI_API_KEY:-}" ] && printf 'env-leak OPENAI_API_KEY=%s\n' "\${OPENAI_API_KEY}" >>"\${CALL_LOG}"
+[ -n "\${CONTEXT7_API_KEY:-}" ] && printf 'env-leak CONTEXT7_API_KEY=%s\n' "\${CONTEXT7_API_KEY}" >>"\${CALL_LOG}"
 if [ "\${1:-}" = daemon ] && [ "\${2:-}" = restart ]; then
     exit ${restart_exit}
 fi
@@ -130,11 +135,22 @@ setup_layout() {
 
 run_update() {
     set +e
-    HOME="${LAYOUT_HOME}" PATH="${LAYOUT_BIN}" CALL_LOG="${LAYOUT_CALL_LOG}" \
+    env -i HOME="${LAYOUT_HOME}" PATH="${LAYOUT_BIN}" CALL_LOG="${LAYOUT_CALL_LOG}" \
         PIDS_FILE="${PIDS_FILE}" PKILL_LOG="${LAYOUT_PKILL_LOG}" \
         bash "${ROOT}/install.sh" update --yes --no-build >"${WORK}/last-output" 2>&1
     UPDATE_EXIT=$?
     set -e
+}
+
+# assert_not_leaked fails the suite if a sentinel secret value shows up in a
+# captured file (the daemon call log or run_update's output).
+assert_not_leaked() {
+    local needle="$1" file="$2"
+    if grep -Fq -- "${needle}" "${file}"; then
+        echo "FAIL: sentinel value '${needle}' leaked into ${file}" >&2
+        cat "${file}" >&2
+        exit 1
+    fi
 }
 
 echo "install-update.test.sh"
@@ -197,5 +213,17 @@ if ! grep -q "restarted cenci with the updated binary" "${WORK}/last-output"; th
     cat "${WORK}/last-output" >&2
     exit 1
 fi
+
+echo "case: host secrets in the parent env never reach the daemon call log or run_update output (regression, #353)"
+setup_layout sentinel-secrets claude 0
+export OPENAI_API_KEY="sk-test-sentinel-should-not-leak"
+export CONTEXT7_API_KEY="ctx7-test-sentinel-should-not-leak"
+run_update
+unset OPENAI_API_KEY CONTEXT7_API_KEY
+[[ "${UPDATE_EXIT}" -eq 0 ]]
+assert_not_leaked "sk-test-sentinel-should-not-leak" "${LAYOUT_CALL_LOG}"
+assert_not_leaked "sk-test-sentinel-should-not-leak" "${WORK}/last-output"
+assert_not_leaked "ctx7-test-sentinel-should-not-leak" "${LAYOUT_CALL_LOG}"
+assert_not_leaked "ctx7-test-sentinel-should-not-leak" "${WORK}/last-output"
 
 echo "passed: restart path delegates to 'cenci daemon restart', falling back to pkill/nohup only on failure"

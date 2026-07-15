@@ -23,9 +23,18 @@
     "deny": [
       "Bash(git push --force:*)",
       "Bash(git reset --hard:*)",
-      "Read(~/.ssh/)",
-      "Read(~/.aws/)",
-      "Read(.env)"
+      "Read(~/.ssh/**)",
+      "Edit(~/.ssh/**)",
+      "Write(~/.ssh/**)",
+      "Read(~/.aws/**)",
+      "Edit(~/.aws/**)",
+      "Write(~/.aws/**)",
+      "Read(.env)",
+      "Edit(.env)",
+      "Write(.env)",
+      "Read(.env.*)",
+      "Edit(.env.*)",
+      "Write(.env.*)"
     ]
   }
 }
