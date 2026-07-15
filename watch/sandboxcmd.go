@@ -12,11 +12,9 @@ import (
 )
 
 // This file implements the `cenci sandbox <verb>` group and `cenci open`
-// (plus the "cn" argv[0] alias). The batch verbs (build, build-base, prune,
-// update-plugins, reap-orphans) and ls/stop run natively against the
-// internal/sandbox/launcher engine and docker/podman; reseed-creds and the
-// interactive open path still shell out to the sandbox/cenci-sand bash
-// launcher until ticket 3 flips them.
+// (plus the "cn" argv[0] alias). Every verb runs natively against the
+// internal/sandbox/launcher engine and docker/podman — nothing shells out to
+// the sandbox/cenci-sand bash launcher anymore.
 
 // runSandboxGroup implements `cenci sandbox <verb> [flags]`.
 func runSandboxGroup(args []string) {
@@ -167,28 +165,25 @@ func runSandboxReapOrphans(args []string) {
 	}
 }
 
-// runSandboxReseedCreds implements `cenci sandbox reseed-creds`, the one
-// batch verb still forwarded to cenci-sand: it is a launch modifier
-// (CENCI_SANDBOX_RESEED_CREDS on the next container create), so its honest
-// native home is `cenci open --reseed-creds` (ticket 3); until then the
-// bash launcher keeps handling it.
+// runSandboxReseedCreds implements `cenci sandbox reseed-creds`, kept as an
+// alias for `cenci open --reseed-creds` (the flag's honest home — reseeding
+// is a launch modifier: CENCI_SANDBOX_RESEED_CREDS is set on the next
+// container create, so a launch always follows).
 func runSandboxReseedCreds(args []string) {
 	fs := flag.NewFlagSet("sandbox reseed-creds", flag.ExitOnError)
 	_ = fs.Parse(args)
 	rejectExtraArgs("reseed-creds", fs)
 
-	cenciSandFlag, ok := sandbox.BatchFlag("reseed-creds")
-	if !ok {
-		fmt.Fprintln(os.Stderr, "cenci sandbox: unknown subcommand \"reseed-creds\"")
+	err := newEngine("reseed-creds").Launch(launcher.Options{ReseedCreds: true})
+	if err == nil {
+		return // unreachable in practice: a successful Launch never returns
+	}
+	if launcher.IsUsage(err) {
+		fmt.Fprintf(os.Stderr, "cenci sandbox reseed-creds: %v\n", err)
 		os.Exit(2)
 	}
-
-	code, err := sandbox.RunCenciSand([]string{cenciSandFlag}, os.Stdin, os.Stdout, os.Stderr)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "cenci sandbox reseed-creds: %v\n", err)
-		os.Exit(1)
-	}
-	os.Exit(code)
+	fmt.Fprintf(os.Stderr, "cenci sandbox reseed-creds: %v\n", err)
+	os.Exit(1)
 }
 
 // runSandboxPrune implements `cenci sandbox prune [--volumes]`: remove
@@ -281,15 +276,16 @@ func runSandboxStop(args []string) {
 
 // runOpen implements `cenci open [shortcut] [flags] [-- passthrough]`
 // (and the "cn" argv[0] alias, which prepends no extra token — args here is
-// already everything after the binary name). It execs cenci-sand, replacing
-// this process, so the interactive session owns the TTY.
+// already everything after the binary name). It launches natively via the
+// internal/sandbox/launcher engine, whose final attach execs the container
+// runtime in place of this process so the interactive session owns the TTY
+// and its exit code propagates.
 //
-// Grammar: an optional one-token shortcut (ch/cs/co/cf, xl/xt/xs — mirroring
-// sandbox/cenci-sand's own shortcut tables exactly) may appear first;
-// after that, only the recognized flags below and an optional "--"
-// passthrough sentinel are accepted. Any other leading positional is a usage
-// error, matching the strict-parsing convention used by the other verbs in
-// this file.
+// Grammar: an optional one-token shortcut (ch/cs/co/cf, xl/xt/xs — the
+// internal/sandbox shortcut tables) may appear first; after that, only the
+// recognized flags below and an optional "--" passthrough sentinel are
+// accepted. Any other leading positional is a usage error, matching the
+// strict-parsing convention used by the other verbs in this file.
 func runOpen(args []string) {
 	var shortcutToken, shortcutAgent, shortcutModel string
 	hasShortcut := false
@@ -324,6 +320,7 @@ func runOpen(args []string) {
 	shellFlag := fs.Bool("shell", false, "attach a shell instead of launching the agent")
 	dockerFlag := fs.Bool("docker", false, "mount the host docker/podman socket (opt-in DooD)")
 	hostNetworkFlag := fs.Bool("host-network", false, "use host network mode")
+	reseedFlag := fs.Bool("reseed-creds", false, "force a credential reseed from the host on the next container create")
 	_ = fs.Parse(args)
 	if extra := fs.Args(); len(extra) > 0 {
 		fmt.Fprintf(os.Stderr, "cenci open: unexpected argument %q\n", extra[0])
@@ -351,32 +348,30 @@ func runOpen(args []string) {
 		}
 	})
 
-	var argv []string
-	if finalAgent != "" {
-		argv = append(argv, "--agent", finalAgent)
-	}
-	if finalModel != "" {
-		argv = append(argv, "--model", finalModel)
-	}
-	if *nameFlag != "" {
-		argv = append(argv, "--name", *nameFlag)
-	}
-	if *shellFlag {
-		argv = append(argv, "--shell")
-	}
-	if *dockerFlag {
-		argv = append(argv, "--docker")
-	}
-	if *hostNetworkFlag {
-		argv = append(argv, "--host-network")
-	}
-	if len(passthrough) > 0 {
-		argv = append(argv, "--")
-		argv = append(argv, passthrough...)
-	}
-
-	if err := sandbox.ExecCenciSand(argv); err != nil {
+	// Empty agent/model stay empty here — Launch applies the claude default
+	// and the per-agent model default.
+	eng, err := launcher.New(os.Stdin, os.Stdout, os.Stderr)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "cenci open: %v\n", err)
 		os.Exit(1)
 	}
+	err = eng.Launch(launcher.Options{
+		Agent:       finalAgent,
+		Model:       finalModel,
+		Name:        *nameFlag,
+		Shell:       *shellFlag,
+		Docker:      *dockerFlag,
+		HostNetwork: *hostNetworkFlag,
+		ReseedCreds: *reseedFlag,
+		AgentArgs:   passthrough,
+	})
+	if err == nil {
+		return // unreachable in practice: a successful Launch never returns
+	}
+	if launcher.IsUsage(err) {
+		fmt.Fprintf(os.Stderr, "cenci open: %v\n", err)
+		os.Exit(2)
+	}
+	fmt.Fprintf(os.Stderr, "cenci open: %v\n", err)
+	os.Exit(1)
 }

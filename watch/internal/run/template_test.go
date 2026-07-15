@@ -33,14 +33,29 @@ func TestBuiltinClaudeTemplatesResolve(t *testing.T) {
 	}
 }
 
-func TestSandboxSwapsClaudeToClaudeSand(t *testing.T) {
+func TestSandboxSwapsClaudeToCenciOpen(t *testing.T) {
 	cfg := builtinConfig()
 	argv, err := cfg.BuildCommand("claude", "implement", "40", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if argv[0] != "cenci-sand" {
-		t.Errorf("sandbox command = %q, want cenci-sand", argv[0])
+	// The multi-token sandbox command must arrive as separate argv entries,
+	// never as one shell-quoted word.
+	want := []string{"cenci", "open", "--", "/cenci:implement 40"}
+	if !equalArgs(argv, want) {
+		t.Errorf("sandbox argv = %v, want %v", argv, want)
+	}
+}
+
+func TestSandboxCommandWithModelInjectsAfterCommandTokens(t *testing.T) {
+	cfg := builtinConfig()
+	argv, err := cfg.BuildCommand("claude", "implement", "42", "sonnet", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"cenci", "open", "--model", "sonnet", "--", "/cenci:implement 42"}
+	if !equalArgs(argv, want) {
+		t.Errorf("sandbox argv = %v, want %v", argv, want)
 	}
 }
 

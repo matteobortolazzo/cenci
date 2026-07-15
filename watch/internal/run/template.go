@@ -23,9 +23,10 @@ type WorkflowTemplate struct {
 
 // AgentConfig describes how to launch one agent CLI.
 type AgentConfig struct {
-	// Command is the host executable, e.g. "claude".
+	// Command is the host executable, e.g. "claude". Multi-token commands
+	// (e.g. "cenci open") are split on whitespace at build time.
 	Command string `json:"command"`
-	// SandboxCommand replaces Command when --sandbox is on, e.g. "cenci-sand".
+	// SandboxCommand replaces Command when --sandbox is on, e.g. "cenci open".
 	SandboxCommand string `json:"sandboxCommand"`
 	// Model, when set, is injected: substituted into any {model} placeholder,
 	// otherwise appended as "--model <model>". A specific model value is never
@@ -48,8 +49,8 @@ type FileConfig struct {
 }
 
 // builtinConfig returns the zero-config defaults: claude refine/design/implement
-// calling the matching cenci skill, with a cenci-sand sandbox command. Fresh
-// maps are constructed on each call so callers may mutate the result freely.
+// calling the matching cenci skill, with `cenci open` as the sandbox command.
+// Fresh maps are constructed on each call so callers may mutate the result freely.
 func builtinConfig() FileConfig {
 	claudeWF := func(wf string) WorkflowTemplate {
 		return WorkflowTemplate{Args: []string{"--", "/cenci:" + wf + " {ticket}"}}
@@ -59,7 +60,7 @@ func builtinConfig() FileConfig {
 		Agents: map[string]AgentConfig{
 			"claude": {
 				Command:        "claude",
-				SandboxCommand: "cenci-sand",
+				SandboxCommand: "cenci open",
 				Workflows: map[string]WorkflowTemplate{
 					"refine":    claudeWF("refine"),
 					"design":    claudeWF("design"),
@@ -191,7 +192,10 @@ func (fc FileConfig) BuildCommand(agent, workflow, ticket, model string, sandbox
 		rest = append(rest, a)
 	}
 
-	argv := []string{cmd}
+	// The resolved command may be multi-token ("cenci open"): split it into
+	// separate argv entries so the shell join downstream never quotes it into
+	// a single nonexistent program word.
+	argv := strings.Fields(cmd)
 	if model != "" && !usedModelPlaceholder {
 		argv = append(argv, "--model", model)
 	}

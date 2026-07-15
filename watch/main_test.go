@@ -359,8 +359,8 @@ func TestRunDryRunPrintsCommandAndWindowName(t *testing.T) {
 		t.Errorf("expected window name 40-implement, got:\n%s", s)
 	}
 	// No flag and no config default → the sandbox launcher (#98).
-	if !strings.Contains(s, "cenci-sand") || !strings.Contains(s, "/cenci:implement 40") {
-		t.Errorf("expected cenci-sand command with the cenci skill, got:\n%s", s)
+	if !strings.Contains(s, "cenci open") || !strings.Contains(s, "/cenci:implement 40") {
+		t.Errorf("expected a cenci open command with the cenci skill, got:\n%s", s)
 	}
 }
 
@@ -373,7 +373,7 @@ func TestRunDryRunNoSandboxUsesHostCommand(t *testing.T) {
 		t.Fatalf("no-sandbox dry-run failed: %v\n%s", err, output)
 	}
 	s := string(output)
-	if strings.Contains(s, "cenci-sand") {
+	if strings.Contains(s, "cenci open") {
 		t.Errorf("--no-sandbox must not use the sandbox launcher, got:\n%s", s)
 	}
 	if !strings.Contains(s, "claude") || !strings.Contains(s, "/cenci:implement 40") {
@@ -409,8 +409,8 @@ func TestRunDryRunSandboxUsesSandboxCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sandbox dry-run failed: %v\n%s", err, output)
 	}
-	if !strings.Contains(string(output), "cenci-sand") {
-		t.Errorf("expected cenci-sand command, got:\n%s", output)
+	if !strings.Contains(string(output), "cenci open") {
+		t.Errorf("expected a cenci open command, got:\n%s", output)
 	}
 }
 

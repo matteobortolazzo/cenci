@@ -1,6 +1,8 @@
 package main_test
 
 import (
+	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,18 +16,10 @@ import (
 //
 // These black-box tests exercise the real built `cenci` binary as a
 // subprocess (binaryPath, built once in TestMain in main_test.go) with PATH
-// overridden to a temp dir containing fake `cenci-sand`/`docker`/`podman`
-// scripts. Fakes are plain POSIX `/bin/sh` scripts (not `#!/usr/bin/env ...`)
-// so they resolve without depending on the overridden PATH containing a
-// shell.
-
-// writeFakeCenciSand writes a fake `cenci-sand` to dir that records the argv
-// it receives (one arg per line) to captureFile and exits with exitCode.
-func writeFakeCenciSand(t *testing.T, dir, captureFile string, exitCode int) {
-	t.Helper()
-	body := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + shellQuote(captureFile) + "\nexit " + itoa(exitCode) + "\n"
-	writeExecutable(t, filepath.Join(dir, "cenci-sand"), body)
-}
+// overridden to a temp dir containing fake `docker`/`podman` (and, for the
+// open path, `claude`) scripts. Fakes are plain POSIX `/bin/sh` scripts (not
+// `#!/usr/bin/env ...`) so they resolve without depending on the overridden
+// PATH containing a shell.
 
 // writeFakeDocker writes a fake `docker` (or `podman`) to dir that appends
 // each invocation's argv (space-joined) as a line to callLog, and — when
@@ -70,8 +64,9 @@ func itoa(n int) string {
 	return string(digits)
 }
 
-// readCapturedArgv reads a fake-cenci-sand capture file into a []string,
-// one element per line (trailing blank line from the final \n dropped).
+// readCapturedArgv reads a fake binary's capture file into a []string, one
+// element per line (trailing blank line from the final \n dropped). Shared
+// with doctor_update_test.go's fake cenci-installer.
 func readCapturedArgv(t *testing.T, path string) []string {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -93,22 +88,31 @@ func joinArgv(argv []string) string {
 //
 // build/build-base/prune/update-plugins run natively against docker/podman
 // via internal/sandbox/launcher, so these tests assert what the fake
-// *runtime* received, not what cenci-sand received. Both docker and podman
-// fakes are always written so the podman-first runtime detection can never
-// escape to a real runtime on machines (or CI runners) that have one.
-// reap-orphans is pinned by the relocated bash contract suite
-// (tests/reap-orphans.test.sh); reseed-creds still forwards to cenci-sand
-// until `cenci open --reseed-creds` lands.
+// *runtime* received. Both docker and podman fakes are always written so the
+// podman-first runtime detection can never escape to a real runtime on
+// machines (or CI runners) that have one. reap-orphans is pinned by the
+// relocated bash contract suite (tests/reap-orphans.test.sh); reseed-creds
+// is an alias for `cenci open --reseed-creds` and is covered with the open
+// tests below.
 
 // writeScriptedRuntime writes a fake docker/podman to dir that appends each
 // invocation's argv (space-joined) as a line to callLog and answers scripted
 // responses from env vars:
 //
-//	FAKE_INSPECT_EXIT — `image inspect` exit code (default 0 = image exists)
-//	FAKE_BUILD_EXIT   — `build` exit code (default 0)
-//	FAKE_IMAGES       — `images ...` stdout
-//	FAKE_PS           — `ps ...` stdout
-//	FAKE_VOLUMES      — `volume ls` stdout
+//	FAKE_INSPECT_EXIT    — `image inspect` exit code (default 0 = image exists)
+//	FAKE_BUILD_EXIT      — `build` exit code (default 0)
+//	FAKE_IMAGES          — `images ...` stdout
+//	FAKE_PS              — `ps ...` stdout
+//	FAKE_VOLUMES         — `volume ls` stdout
+//	FAKE_INSPECT_LABEL   — container `inspect` stdout for label lookups
+//	FAKE_INSPECT_MOUNTS  — container `inspect` stdout for mount lookups
+//	FAKE_ATTACH_EXIT     — exit code of the final `exec -it ...` attach
+//
+// The open path drives the extra verbs: `rm` (exit 0), `run` (prints a
+// container id), container `inspect` (label vs mounts told apart by the
+// format string), non-interactive `exec` (readiness probe, exit 0), and the
+// final `exec -it` attach — which the binary syscall.Execs, so the fake's
+// exit code IS the binary's exit code.
 func writeScriptedRuntime(t *testing.T, dir, name, callLog string) {
 	t.Helper()
 	body := "#!/bin/sh\n" +
@@ -119,6 +123,15 @@ func writeScriptedRuntime(t *testing.T, dir, name, callLog string) {
 		"images) printf '%s' \"${FAKE_IMAGES:-}\" ;;\n" +
 		"ps) printf '%s' \"${FAKE_PS:-}\" ;;\n" +
 		"volume) if [ \"$2\" = ls ]; then printf '%s' \"${FAKE_VOLUMES:-}\"; fi ;;\n" +
+		"rm) exit 0 ;;\n" +
+		"run) printf '%s\\n' fake-container-id ;;\n" +
+		"inspect)\n" +
+		"  case \"$*\" in\n" +
+		"  *Labels*) printf '%s\\n' \"${FAKE_INSPECT_LABEL:-}\" ;;\n" +
+		"  *Mounts*) printf '%s' \"${FAKE_INSPECT_MOUNTS:-}\" ;;\n" +
+		"  esac\n" +
+		"  ;;\n" +
+		"exec) if [ \"$2\" = \"-it\" ]; then exit \"${FAKE_ATTACH_EXIT:-0}\"; fi; exit 0 ;;\n" +
 		"esac\n" +
 		"exit 0\n"
 	writeExecutable(t, filepath.Join(dir, name), body)
@@ -439,20 +452,26 @@ func TestSandboxUpdatePlugins_BadAgent_Exits2NoRuntimeCalls(t *testing.T) {
 	}
 }
 
-func TestSandboxReseedCreds_ForwardsReseedCredsFlag(t *testing.T) {
-	dir := t.TempDir()
-	capture := filepath.Join(dir, "argv.txt")
-	writeFakeCenciSand(t, dir, capture, 0)
+func TestSandboxReseedCreds_IsOpenReseedAlias(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
 
 	cmd := exec.Command(binaryPath, "sandbox", "reseed-creds")
-	cmd.Env = append(os.Environ(), "PATH="+dir)
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("sandbox reseed-creds: %v\n%s", err, output)
 	}
 
-	got := readCapturedArgv(t, capture)
-	if joinArgv(got) != "--reseed-creds" {
-		t.Errorf("captured argv = %v, want [--reseed-creds]", got)
+	lines := callLogLines(t, callLog)
+	runLine, ok := findLineWithPrefix(lines, "run ")
+	if !ok {
+		t.Fatalf("expected a container run, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(runLine, "-e CENCI_SANDBOX_RESEED_CREDS=1") {
+		t.Errorf("expected the reseed env flag in the run argv, got: %s", runLine)
 	}
 }
 
@@ -636,175 +655,366 @@ func TestSandboxStop_WithFilterArg_OnlyStopsMatchingName(t *testing.T) {
 }
 
 // -- open ------------------------------------------------------------------
+//
+// `cenci open` launches natively: the launcher engine creates/attaches the
+// container itself and finally syscall.Execs the runtime CLI, so these tests
+// assert the docker argv — including the entrypoint contract
+// (launcher-lifecycle), the model shortcuts, the strict flag grammar
+// (flag-parsing), and the #195 cenci wiring (cenci-wiring) that the retired
+// bash suites used to pin against cenci-sand.
 
-func TestOpenCh_ResolvesClaudeAndHaikuModel(t *testing.T) {
-	dir := t.TempDir()
-	capture := filepath.Join(dir, "argv.txt")
-	writeFakeCenciSand(t, dir, capture, 0)
-
-	cmd := exec.Command(binaryPath, "open", "ch")
-	cmd.Env = append(os.Environ(), "PATH="+dir)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("open ch: %v\n%s", err, output)
+// openTestEnv builds the black-box environment for native `cenci open` runs:
+// a fake `claude` binary next to the scripted runtimes on PATH, an isolated
+// HOME, the asset fixture, deterministic TERM/TMUX_PANE, scrubbed optional
+// env passthroughs, and a live events socket under a private 0700
+// XDG_RUNTIME_DIR — pre-created here so the subprocess wires cenci without
+// ever spawning a real daemon.
+func openTestEnv(t *testing.T, fakeDir, assets string) (env []string, home, socketDir string) {
+	t.Helper()
+	writeExecutable(t, filepath.Join(fakeDir, "claude"), "#!/bin/sh\nexit 0\n")
+	home = t.TempDir()
+	xdg := t.TempDir()
+	socketDir = filepath.Join(xdg, "cenci")
+	if err := os.Mkdir(socketDir, 0o700); err != nil {
+		t.Fatalf("mkdir socket dir: %v", err)
 	}
-
-	got := readCapturedArgv(t, capture)
-	if joinArgv(got) != "--agent claude --model haiku" {
-		t.Errorf("captured argv = %v, want [--agent claude --model haiku]", got)
+	l, err := net.Listen("unix", filepath.Join(socketDir, "cenci-events.sock"))
+	if err != nil {
+		t.Fatalf("listen events socket: %v", err)
 	}
+	t.Cleanup(func() { _ = l.Close() })
+	// os/exec keeps the LAST duplicate env key, so these appends override the
+	// inherited values; the empty assignments scrub optional passthroughs
+	// (and a possible ambient CENCI_SANDBOX) for deterministic argv.
+	env = append(os.Environ(),
+		"PATH="+fakeDir+":/usr/bin:/bin",
+		"HOME="+home,
+		"CENCI_SANDBOX_ASSETS="+assets,
+		"XDG_RUNTIME_DIR="+xdg,
+		"TERM=xterm-256color",
+		"TMUX_PANE=%7",
+		"COLORTERM=", "CONTEXT7_API_KEY=", "OPENAI_API_KEY=", "CENCI_SANDBOX=",
+	)
+	return env, home, socketDir
 }
 
-func TestOpenXs_ResolvesCodexAndSolModel(t *testing.T) {
-	dir := t.TempDir()
-	capture := filepath.Join(dir, "argv.txt")
-	writeFakeCenciSand(t, dir, capture, 0)
-
-	cmd := exec.Command(binaryPath, "open", "xs")
-	cmd.Env = append(os.Environ(), "PATH="+dir)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("open xs: %v\n%s", err, output)
+// attachLine returns the final `exec -it ...` attach argv line from the call
+// log (the line the binary syscall.Exec'd the fake runtime with).
+func attachLine(t *testing.T, lines []string) string {
+	t.Helper()
+	line, ok := findLineWithPrefix(lines, "exec -it ")
+	if !ok {
+		t.Fatalf("expected an interactive attach exec, got calls:\n%s", strings.Join(lines, "\n"))
 	}
-
-	got := readCapturedArgv(t, capture)
-	if joinArgv(got) != "--agent codex --model gpt-5.6-sol" {
-		t.Errorf("captured argv = %v, want [--agent codex --model gpt-5.6-sol]", got)
-	}
+	return line
 }
 
-func TestOpenAllShortcuts_ResolveExactlyAsCenciSandWould(t *testing.T) {
+func TestOpenAllShortcuts_AttachTheirAgentAndModel(t *testing.T) {
 	cases := []struct {
-		token, agent, model string
+		token, agent, model, permFlag string
 	}{
-		{"ch", "claude", "haiku"},
-		{"cs", "claude", "sonnet"},
-		{"co", "claude", "opus"},
-		{"cf", "claude", "fable"},
-		{"xl", "codex", "gpt-5.6-luna"},
-		{"xt", "codex", "gpt-5.6-terra"},
-		{"xs", "codex", "gpt-5.6-sol"},
+		{"ch", "claude", "haiku", "--dangerously-skip-permissions"},
+		{"cs", "claude", "sonnet", "--dangerously-skip-permissions"},
+		{"co", "claude", "opus", "--dangerously-skip-permissions"},
+		{"cf", "claude", "fable", "--dangerously-skip-permissions"},
+		{"xl", "codex", "gpt-5.6-luna", "--dangerously-bypass-approvals-and-sandbox"},
+		{"xt", "codex", "gpt-5.6-terra", "--dangerously-bypass-approvals-and-sandbox"},
+		{"xs", "codex", "gpt-5.6-sol", "--dangerously-bypass-approvals-and-sandbox"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.token, func(t *testing.T) {
-			dir := t.TempDir()
-			capture := filepath.Join(dir, "argv.txt")
-			writeFakeCenciSand(t, dir, capture, 0)
+			fakeDir := t.TempDir()
+			callLog := writeScriptedRuntimes(t, fakeDir)
+			assets := writeAssetFixture(t)
+			env, home, _ := openTestEnv(t, fakeDir, assets)
+			if tc.agent == "codex" {
+				// Codex refuses to launch without auth staged from the host.
+				if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(home, ".codex", "auth.json"), []byte("{}"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
 
 			cmd := exec.Command(binaryPath, "open", tc.token)
-			cmd.Env = append(os.Environ(), "PATH="+dir)
+			cmd.Env = env
+			cmd.Dir = t.TempDir() // non-git cwd → legacy "default" scope
 			if output, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("open %s: %v\n%s", tc.token, err, output)
 			}
 
-			want := "--agent " + tc.agent + " --model " + tc.model
-			got := readCapturedArgv(t, capture)
-			if joinArgv(got) != want {
-				t.Errorf("captured argv = %v, want [%s]", got, want)
+			line := attachLine(t, callLogLines(t, callLog))
+			wantTail := tc.agent + "-cenci-default " + tc.agent + " " + tc.permFlag + " --model " + tc.model
+			if !strings.HasSuffix(line, wantTail) {
+				t.Errorf("attach argv = %q, want suffix %q", line, wantTail)
 			}
 		})
 	}
 }
 
-func TestOpenShortcutConflictsWithAgentFlag_Exits2NoExec(t *testing.T) {
-	dir := t.TempDir()
-	capture := filepath.Join(dir, "argv.txt")
-	writeFakeCenciSand(t, dir, capture, 0)
+func TestOpenBare_DefaultsToClaudeSonnet(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
 
-	cmd := exec.Command(binaryPath, "open", "ch", "--agent", "codex")
-	cmd.Env = append(os.Environ(), "PATH="+dir)
-	output, err := cmd.CombinedOutput()
-
-	exitErr, ok := err.(*exec.ExitError)
-	if !ok {
-		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
-	}
-	if exitErr.ExitCode() != 2 {
-		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
-	}
-	if _, err := os.Stat(capture); err == nil {
-		t.Error("expected cenci-sand to never be exec'd on a shortcut/--agent conflict")
-	}
-}
-
-func TestOpenUnknownFlag_Exits2NoExec(t *testing.T) {
-	dir := t.TempDir()
-	capture := filepath.Join(dir, "argv.txt")
-	writeFakeCenciSand(t, dir, capture, 0)
-
-	cmd := exec.Command(binaryPath, "open", "--bogus")
-	cmd.Env = append(os.Environ(), "PATH="+dir)
-	output, err := cmd.CombinedOutput()
-
-	exitErr, ok := err.(*exec.ExitError)
-	if !ok {
-		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
-	}
-	if exitErr.ExitCode() != 2 {
-		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
-	}
-	if _, err := os.Stat(capture); err == nil {
-		t.Error("expected cenci-sand to never be exec'd for an unknown flag")
-	}
-}
-
-func TestOpenUnrecognizedLeadingPositional_Exits2NoExec(t *testing.T) {
-	dir := t.TempDir()
-	capture := filepath.Join(dir, "argv.txt")
-	writeFakeCenciSand(t, dir, capture, 0)
-
-	cmd := exec.Command(binaryPath, "open", "not-a-shortcut")
-	cmd.Env = append(os.Environ(), "PATH="+dir)
-	output, err := cmd.CombinedOutput()
-
-	exitErr, ok := err.(*exec.ExitError)
-	if !ok {
-		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
-	}
-	if exitErr.ExitCode() != 2 {
-		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
-	}
-}
-
-func TestOpen_ForwardsNameShellDockerHostNetworkFlags(t *testing.T) {
-	dir := t.TempDir()
-	capture := filepath.Join(dir, "argv.txt")
-	writeFakeCenciSand(t, dir, capture, 0)
-
-	cmd := exec.Command(binaryPath, "open", "--name", "mybox", "--shell", "--docker", "--host-network")
-	cmd.Env = append(os.Environ(), "PATH="+dir)
+	cmd := exec.Command(binaryPath, "open")
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("open: %v\n%s", err, output)
 	}
 
-	got := readCapturedArgv(t, capture)
-	want := "--name mybox --shell --docker --host-network"
-	if joinArgv(got) != want {
-		t.Errorf("captured argv = %v, want [%s]", got, want)
+	line := attachLine(t, callLogLines(t, callLog))
+	if !strings.HasSuffix(line, "claude --dangerously-skip-permissions --model sonnet") {
+		t.Errorf("attach argv = %q, want the claude/sonnet defaults", line)
 	}
 }
 
-func TestOpen_PassthroughAfterDoubleDash(t *testing.T) {
-	dir := t.TempDir()
-	capture := filepath.Join(dir, "argv.txt")
-	writeFakeCenciSand(t, dir, capture, 0)
+func TestOpenModelFlag_OverridesShortcutModel(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
 
-	cmd := exec.Command(binaryPath, "open", "ch", "--", "--resume", "--custom-flag")
-	cmd.Env = append(os.Environ(), "PATH="+dir)
+	cmd := exec.Command(binaryPath, "open", "ch", "--model", "opus")
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
 	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("open: %v\n%s", err, output)
+		t.Fatalf("open ch --model opus: %v\n%s", err, output)
 	}
 
-	got := readCapturedArgv(t, capture)
-	want := "--agent claude --model haiku -- --resume --custom-flag"
-	if joinArgv(got) != want {
-		t.Errorf("captured argv = %v, want [%s]", got, want)
+	line := attachLine(t, callLogLines(t, callLog))
+	if !strings.HasSuffix(line, "claude --dangerously-skip-permissions --model opus") {
+		t.Errorf("attach argv = %q, want the explicit --model to win", line)
 	}
 }
 
-func TestOpen_MissingCenciSandBinary_Exits1(t *testing.T) {
-	dir := t.TempDir() // no cenci-sand fake
+func TestOpen_FreshCreate_PinsEntrypointContract(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, home, socketDir := openTestEnv(t, fakeDir, assets)
 
 	cmd := exec.Command(binaryPath, "open", "ch")
-	cmd.Env = append(os.Environ(), "PATH="+dir)
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("open ch: %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	runLine, ok := findLineWithPrefix(lines, "run ")
+	if !ok {
+		t.Fatalf("expected a container run, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+
+	// The entrypoint contract, byte-for-byte where it matters: privileged
+	// create + detached lifecycle label + host identity env + the PID-1 idle
+	// tail that owns readiness.
+	for _, want := range []string{
+		"--name claude-cenci-default",
+		"--hostname sandbox-default",
+		"--label cenci-sand.lifecycle=detached",
+		"-d --init --rm",
+		"--user root",
+		"-e TERM=xterm-256color",
+		"-e CENCI_SANDBOX=1",
+		"-e CENCI_SANDBOX_AGENT=claude",
+		fmt.Sprintf("-e HOST_UID=%d", os.Getuid()),
+		fmt.Sprintf("-e HOST_GID=%d", os.Getgid()),
+		"-e WORKSPACE_SCOPE=legacy",
+		"-v " + home + "/Repos:/workspace",
+		"-v claude-cenci-home-default:/home/dev",
+		":/usr/local/bin/claude:ro",
+		"-v " + socketDir + ":/run/user/1000/cenci:ro",
+		":/usr/local/bin/cenci:ro",
+		"-e XDG_RUNTIME_DIR=/run/user/1000",
+		"-e TMUX_PANE=%7",
+	} {
+		if !strings.Contains(runLine, want) {
+			t.Errorf("run argv missing %q:\n%s", want, runLine)
+		}
+	}
+	if !strings.HasSuffix(runLine, "cenci-sandbox:latest -c touch /tmp/cenci-ready && exec sleep infinity") {
+		t.Errorf("run argv must end with the image and PID-1 readiness tail, got:\n%s", runLine)
+	}
+
+	// Readiness was polled as dev before the attach.
+	if !anyLineContains(lines, "exec -u dev claude-cenci-default test -e /tmp/cenci-ready") {
+		t.Errorf("expected a readiness probe, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+
+	// The attach itself runs as dev with the in-container marker set.
+	line := attachLine(t, lines)
+	for _, want := range []string{"-u dev", "-e CENCI_SANDBOX=1", "-e CENCI_SANDBOX_AGENT=claude", "-e TMUX_PANE=%7"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("attach argv missing %q:\n%s", want, line)
+		}
+	}
+}
+
+func TestOpen_NameFlag_ScopesContainerVolumeHostname(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "--name", "mybox")
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("open --name mybox: %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	runLine, ok := findLineWithPrefix(lines, "run ")
+	if !ok {
+		t.Fatalf("expected a container run, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	for _, want := range []string{
+		"--name claude-cenci-mybox",
+		"--hostname sandbox-mybox",
+		"-v claude-cenci-home-mybox:/home/dev",
+	} {
+		if !strings.Contains(runLine, want) {
+			t.Errorf("run argv missing %q:\n%s", want, runLine)
+		}
+	}
+}
+
+func TestOpenShell_AttachesBash(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "--shell")
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("open --shell: %v\n%s", err, output)
+	}
+
+	line := attachLine(t, callLogLines(t, callLog))
+	if !strings.HasSuffix(line, "claude-cenci-default /bin/bash") {
+		t.Errorf("attach argv = %q, want a /bin/bash shell attach", line)
+	}
+	if !strings.Contains(string(output), "Attaching shell to running 'claude-cenci-default'") {
+		t.Errorf("expected the shell-attach message, got:\n%s", output)
+	}
+}
+
+func TestOpenPassthrough_ReachesAgentVerbatim(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "ch", "--", "--resume", "-p", "fix the bug")
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("open ch -- ...: %v\n%s", err, output)
+	}
+
+	line := attachLine(t, callLogLines(t, callLog))
+	if !strings.HasSuffix(line, "claude --dangerously-skip-permissions --model haiku --resume -p fix the bug") {
+		t.Errorf("attach argv = %q, want the passthrough tokens verbatim after the agent flags", line)
+	}
+}
+
+func TestOpenReseedCreds_SetsReseedEnvOnCreate(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "--reseed-creds")
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("open --reseed-creds: %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	runLine, ok := findLineWithPrefix(lines, "run ")
+	if !ok {
+		t.Fatalf("expected a container run, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(runLine, "-e CENCI_SANDBOX_RESEED_CREDS=1") {
+		t.Errorf("expected the reseed env flag in the run argv, got:\n%s", runLine)
+	}
+}
+
+func TestOpenHostNetwork_AddsNetworkHostWithWarning(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "--host-network")
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("open --host-network: %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	runLine, _ := findLineWithPrefix(lines, "run ")
+	if !strings.Contains(runLine, "--network host") {
+		t.Errorf("expected --network host in the run argv, got:\n%s", runLine)
+	}
+	if !strings.Contains(string(output), "weakens the container's isolation boundary") {
+		t.Errorf("expected the host-network warning, got:\n%s", output)
+	}
+}
+
+func TestOpenDocker_MountsRuntimeSocketOrWarns(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "--docker")
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("open --docker: %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	runLine, _ := findLineWithPrefix(lines, "run ")
+	if info, statErr := os.Stat("/var/run/docker.sock"); statErr == nil && info.Mode()&os.ModeSocket != 0 {
+		// Host has a real docker socket: it takes precedence and gets mounted.
+		if !strings.Contains(runLine, "-v /var/run/docker.sock:/var/run/docker.sock") {
+			t.Errorf("expected the host docker socket mount, got:\n%s", runLine)
+		}
+	} else {
+		// No discoverable socket (the private XDG_RUNTIME_DIR has no
+		// podman.sock either): a warning, and no socket mount.
+		if !strings.Contains(string(output), "no container runtime socket found") {
+			t.Errorf("expected the no-socket warning, got:\n%s", output)
+		}
+		if strings.Contains(runLine, ":/var/run/docker.sock") {
+			t.Errorf("expected no socket mount, got:\n%s", runLine)
+		}
+	}
+}
+
+func TestOpenCodexWithoutAuth_Exits1(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets) // no ~/.codex/auth.json, OPENAI_API_KEY scrubbed
+
+	cmd := exec.Command(binaryPath, "open", "xt")
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
 	output, err := cmd.CombinedOutput()
 
 	exitErr, ok := err.(*exec.ExitError)
@@ -813,6 +1023,217 @@ func TestOpen_MissingCenciSandBinary_Exits1(t *testing.T) {
 	}
 	if exitErr.ExitCode() != 1 {
 		t.Errorf("exit code = %d, want 1\n%s", exitErr.ExitCode(), output)
+	}
+	if !strings.Contains(string(output), "requires Codex auth") {
+		t.Errorf("expected the codex auth error, got:\n%s", output)
+	}
+	if lines := callLogLines(t, callLog); anyLineContains(lines, "run ") {
+		t.Errorf("expected no container run without codex auth, got:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+func TestOpen_AttachToRunning_SkipsCreate(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = append(env,
+		"FAKE_PS=claude-cenci-default\n",
+		"FAKE_INSPECT_LABEL=detached",
+		"FAKE_INSPECT_MOUNTS=/workspace\n/home/dev\n/run/user/1000/cenci\n",
+	)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("open ch (running): %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	if _, ok := findLineWithPrefix(lines, "run "); ok {
+		t.Errorf("expected no container create when already running, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if !anyLineContains(lines, "exec -u dev claude-cenci-default test -e /tmp/cenci-ready") {
+		t.Errorf("expected the detached-label readiness gate, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	attachLine(t, lines)
+	if strings.Contains(string(output), "created without cenci wiring") {
+		t.Errorf("wired container must not warn, got:\n%s", output)
+	}
+}
+
+func TestOpen_AttachToUnwiredRunning_Warns(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = append(env,
+		"FAKE_PS=claude-cenci-default\n",
+		"FAKE_INSPECT_LABEL=detached",
+		"FAKE_INSPECT_MOUNTS=/workspace\n/home/dev\n", // no cenci socket mount
+	)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("open ch (unwired): %v\n%s", err, output)
+	}
+
+	if !strings.Contains(string(output), "was created without cenci wiring") {
+		t.Errorf("expected the #195 unwired warning, got:\n%s", output)
+	}
+	attachLine(t, callLogLines(t, callLog))
+}
+
+func TestOpen_NoEventsSocket_LaunchesUnwiredWithWarning(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	// Point XDG at a fresh dir with no live socket. CENCI_SANDBOX=1 keeps
+	// daemon.EnsureRunning inert (the launcher reads it nowhere else), so the
+	// subprocess never spawns a real daemon; the 3s socket poll then expires.
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = append(env,
+		"XDG_RUNTIME_DIR="+t.TempDir(),
+		"CENCI_SANDBOX=1",
+	)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("open ch (no socket): %v\n%s", err, output)
+	}
+
+	if !strings.Contains(string(output), "events socket is unavailable") {
+		t.Errorf("expected the unavailable-socket warning, got:\n%s", output)
+	}
+	lines := callLogLines(t, callLog)
+	runLine, ok := findLineWithPrefix(lines, "run ")
+	if !ok {
+		t.Fatalf("expected the launch to proceed unwired, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if strings.Contains(runLine, ":/usr/local/bin/cenci:ro") || strings.Contains(runLine, ":/run/user/1000/cenci:ro") {
+		t.Errorf("expected no cenci mounts without a live events socket, got:\n%s", runLine)
+	}
+}
+
+func TestOpen_AttachExitCodePropagates(t *testing.T) {
+	fakeDir := t.TempDir()
+	writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = append(env, "FAKE_ATTACH_EXIT=7")
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
+	}
+	if exitErr.ExitCode() != 7 {
+		t.Errorf("exit code = %d, want the attach's own 7 (syscall.Exec propagation)\n%s", exitErr.ExitCode(), output)
+	}
+}
+
+func TestOpenShortcutConflictsWithAgentFlag_Exits2NoRuntimeCalls(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "ch", "--agent", "codex")
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
+	}
+	if exitErr.ExitCode() != 2 {
+		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
+	}
+	if lines := callLogLines(t, callLog); len(lines) > 0 {
+		t.Errorf("expected no runtime calls on a shortcut/--agent conflict, got:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+func TestOpenUnknownFlag_Exits2NoRuntimeCalls(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "--bogus")
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
+	}
+	if exitErr.ExitCode() != 2 {
+		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
+	}
+	if lines := callLogLines(t, callLog); len(lines) > 0 {
+		t.Errorf("expected no runtime calls for an unknown flag, got:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+func TestOpenUnrecognizedLeadingPositional_Exits2NoRuntimeCalls(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "not-a-shortcut")
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
+	}
+	if exitErr.ExitCode() != 2 {
+		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
+	}
+	if lines := callLogLines(t, callLog); len(lines) > 0 {
+		t.Errorf("expected no runtime calls for an unrecognized positional, got:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+func TestOpen_MissingClaudeBinary_Exits1(t *testing.T) {
+	fakeDir := t.TempDir()
+	writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+	// Remove the fake claude openTestEnv installed: the launch must fail
+	// cleanly when the host has no claude binary.
+	if err := os.Remove(filepath.Join(fakeDir, "claude")); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("exit code = %d, want 1\n%s", exitErr.ExitCode(), output)
+	}
+	if !strings.Contains(string(output), "claude binary not found") {
+		t.Errorf("expected the missing-binary error, got:\n%s", output)
 	}
 }
 
@@ -838,18 +1259,26 @@ func TestCnArgv0_RoutesToOpen(t *testing.T) {
 	cnPath := buildCnAlias(t, binDir)
 
 	fakeDir := t.TempDir()
-	capture := filepath.Join(fakeDir, "argv.txt")
-	writeFakeCenciSand(t, fakeDir, capture, 0)
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, home, _ := openTestEnv(t, fakeDir, assets)
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".codex", "auth.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	cmd := exec.Command(cnPath, "xs")
-	cmd.Env = append(os.Environ(), "PATH="+fakeDir)
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("cn xs: %v\n%s", err, output)
 	}
 
-	got := readCapturedArgv(t, capture)
-	if joinArgv(got) != "--agent codex --model gpt-5.6-sol" {
-		t.Errorf("captured argv = %v, want [--agent codex --model gpt-5.6-sol]", got)
+	line := attachLine(t, callLogLines(t, callLog))
+	if !strings.HasSuffix(line, "codex --dangerously-bypass-approvals-and-sandbox --model gpt-5.6-sol") {
+		t.Errorf("attach argv = %q, want the codex/sol shortcut resolution", line)
 	}
 }
 
@@ -860,11 +1289,13 @@ func TestCnArgv0_BareInvocationDoesNotErrorLikeCenci(t *testing.T) {
 	cnPath := buildCnAlias(t, binDir)
 
 	fakeDir := t.TempDir()
-	capture := filepath.Join(fakeDir, "argv.txt")
-	writeFakeCenciSand(t, fakeDir, capture, 0)
+	writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
 
 	cmd := exec.Command(cnPath)
-	cmd.Env = append(os.Environ(), "PATH="+fakeDir)
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("cn (bare): %v\n%s", err, output)
 	}
