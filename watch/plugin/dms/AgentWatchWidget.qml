@@ -11,7 +11,7 @@ PluginComponent {
         const v = parseInt(pluginData?.pollIntervalMs)
         return (!isNaN(v) && v >= 250) ? v : 2000
     }
-    readonly property string agentwatchPath: pluginData?.agentwatchPath || "agentwatch"
+    readonly property string agentwatchPath: pluginData?.agentwatchPath || "cenci"
 
     property string statusText: ""
     property string tooltipText: ""

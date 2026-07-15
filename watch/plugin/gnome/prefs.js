@@ -13,13 +13,13 @@ export default class AgentWatchPrefs extends ExtensionPreferences {
         const page = new Adw.PreferencesPage();
         const group = new Adw.PreferencesGroup({
             title: 'AgentWatch',
-            description: 'How the top-bar indicator polls the agentwatch daemon.',
+            description: 'How the top-bar indicator polls the cenci daemon.',
         });
         page.add(group);
 
-        // Binary path — use an absolute path if agentwatch is not on the GNOME
+        // Binary path — use an absolute path if cenci is not on the GNOME
         // session PATH (the shell's PATH under Wayland is often minimal).
-        const pathRow = new Adw.EntryRow({title: 'agentwatch binary path'});
+        const pathRow = new Adw.EntryRow({title: 'cenci binary path'});
         settings.bind('agentwatch-path', pathRow, 'text', Gio.SettingsBindFlags.DEFAULT);
         group.add(pathRow);
 

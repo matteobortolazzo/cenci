@@ -38,7 +38,7 @@ PluginSettings {
         settingKey: "agentwatchPath"
         label: "agentwatch binary"
         description: "Path or command name for the agentwatch binary. Leave as `agentwatch` if it's on $PATH."
-        defaultValue: "agentwatch"
-        placeholder: "agentwatch"
+        defaultValue: "cenci"
+        placeholder: "cenci"
     }
 }

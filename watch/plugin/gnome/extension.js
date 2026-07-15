@@ -230,7 +230,7 @@ export default class AgentWatchExtension extends Extension {
     }
 
     _poll() {
-        const path = this._settings.get_string('agentwatch-path') || 'agentwatch';
+        const path = this._settings.get_string('agentwatch-path') || 'cenci';
         let proc;
         try {
             proc = Gio.Subprocess.new(

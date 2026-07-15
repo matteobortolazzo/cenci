@@ -1,6 +1,6 @@
 # JavaScript / JXA Frontend Patterns
 
-Conventions and gotchas specific to JavaScript-for-Automation (JXA) and JavaScript frontends in agentwatch plugins.
+Conventions and gotchas specific to JavaScript-for-Automation (JXA) and JavaScript frontends in cenci plugins.
 
 ## Rules
 

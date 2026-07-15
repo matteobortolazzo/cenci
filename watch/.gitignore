@@ -1,5 +1,5 @@
 # Compiled binary (root build target)
-/agentwatch
+/cenci
 
 # Cross-compiled release artifacts
 /dist/

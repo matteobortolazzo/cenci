@@ -7,14 +7,14 @@
 # <swiftbar.author>Matteo Bortolazzo</swiftbar.author>
 # <swiftbar.author.github>matteobortolazzo</swiftbar.author.github>
 # <swiftbar.desc>Live Claude Code / Codex session status in the macOS menu bar, via the agentwatch daemon.</swiftbar.desc>
-# <swiftbar.dependencies>agentwatch</swiftbar.dependencies>
+# <swiftbar.dependencies>cenci</swiftbar.dependencies>
 # <swiftbar.abouturl>https://github.com/matteobortolazzo/agent-stack/tree/main/agentwatch</swiftbar.abouturl>
 # <swiftbar.hideAbout>false</swiftbar.hideAbout>
 # <swiftbar.hideRunInTerminal>true</swiftbar.hideRunInTerminal>
 # <swiftbar.hideLastUpdated>true</swiftbar.hideLastUpdated>
 # <swiftbar.hideDisablePlugin>false</swiftbar.hideDisablePlugin>
 #
-# The `.5s.` in the filename is SwiftBar's refresh interval. `agentwatch widget-json`
+# The `.5s.` in the filename is SwiftBar's refresh interval. `cenci widget-json`
 # is a cheap one-shot socket read, so a short interval is fine. Rename the segment
 # (e.g. `.2s.`, `.10s.`) to change the polling cadence.
 #
@@ -23,28 +23,28 @@
 
 set -uo pipefail
 
-# --- 1. Resolve the agentwatch binary -------------------------------------
+# --- 1. Resolve the cenci binary -------------------------------------
 #
 # SwiftBar is a GUI app and runs plugins with a minimal PATH that excludes
 # /opt/homebrew/bin, /usr/local/bin, and the plugin bin/ dir. Resolve the binary
-# explicitly. Override with the AGENTWATCH_BIN env var / SwiftBar variable.
+# explicitly. Override with the CENCI_BIN env var / SwiftBar variable.
 resolve_bin() {
-  if [ -n "${AGENTWATCH_BIN:-}" ] && [ -x "${AGENTWATCH_BIN}" ]; then
-    printf '%s\n' "${AGENTWATCH_BIN}"
+  if [ -n "${CENCI_BIN:-}" ] && [ -x "${CENCI_BIN}" ]; then
+    printf '%s\n' "${CENCI_BIN}"
     return 0
   fi
 
   local candidates=(
-    /opt/homebrew/bin/agentwatch
-    /usr/local/bin/agentwatch
+    /opt/homebrew/bin/cenci
+    /usr/local/bin/cenci
   )
-  # Plugin bootstrap installs the binary at <plugin-root>/bin/agentwatch. An
-  # installed plugin lives at ~/.claude/plugins/cache/<marketplace>/agentwatch/<version>/,
-  # and the marketplace checkout keeps the repo's plugin/ layout — cover both.
+  # Plugin bootstrap installs the binary at <plugin-root>/bin/cenci. An
+  # installed plugin lives at ~/.claude/plugins/cache/<marketplace>/cenci-watch/<version>/,
+  # and the marketplace checkout keeps the repo's watch/plugin/ layout — cover both.
   local g
   for g in \
-    "$HOME"/.claude/plugins/cache/*/agentwatch/*/bin/agentwatch \
-    "$HOME"/.claude/plugins/marketplaces/*/agentwatch/plugin/bin/agentwatch; do
+    "$HOME"/.claude/plugins/cache/*/cenci-watch/*/bin/cenci \
+    "$HOME"/.claude/plugins/marketplaces/*/watch/plugin/bin/cenci; do
     [ -x "$g" ] && candidates+=("$g")
   done
 
@@ -56,8 +56,8 @@ resolve_bin() {
     fi
   done
 
-  if command -v agentwatch >/dev/null 2>&1; then
-    command -v agentwatch
+  if command -v cenci >/dev/null 2>&1; then
+    command -v cenci
     return 0
   fi
 
@@ -81,10 +81,10 @@ JSON="$("$BIN" widget-json 2>/dev/null || true)"
 # jq/python/brew). The JSON is passed via env var to dodge quoting issues and the
 # multi-arg-shebang pitfall (macOS collapses `#!/usr/bin/osascript -l JavaScript`
 # args), so osascript is invoked from bash via a heredoc rather than a shebang.
-OUTPUT="$(AGENTWATCH_JSON="$JSON" /usr/bin/osascript -l JavaScript <<'JXA'
+OUTPUT="$(CENCI_JSON="$JSON" /usr/bin/osascript -l JavaScript <<'JXA'
 function run() {
   ObjC.import('Foundation')
-  var raw = $.NSProcessInfo.processInfo.environment.objectForKey('AGENTWATCH_JSON')
+  var raw = $.NSProcessInfo.processInfo.environment.objectForKey('CENCI_JSON')
   var json = raw ? ObjC.unwrap(raw) : ''
   if (!json) return ''
 

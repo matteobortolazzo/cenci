@@ -21,7 +21,7 @@
   "metadata": {
     "defaultSettings": {
       "pollIntervalMs": 2000,
-      "agentwatchPath": "agentwatch"
+      "agentwatchPath": "cenci"
     }
   }
 }

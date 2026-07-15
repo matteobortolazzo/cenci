@@ -20,4 +20,4 @@ Claude reads this file automatically. Its rules are authoritative and override a
 2. Hardcoded colors in `status-format` overrode `window-status-style` changes
 3. Users couldn't reference or control the symbol from their format strings
 
-**Rule**: Status symbols MUST be set via the `@agentwatch-symbol` user variable (per window), NOT prepended to window names. Window names should contain only the task name or original name. Use `@agentwatch-style` for the style value. For default-format users, prepend `#{@agentwatch-symbol}` to `window-status-format`/`window-status-current-format` during tracking and restore on cleanup.
+**Rule**: Status symbols MUST be set via the `@cenci-symbol` user variable (per window), NOT prepended to window names. Window names should contain only the task name or original name. Use `@cenci-style` for the style value. For default-format users, prepend `#{@cenci-symbol}` to `window-status-format`/`window-status-current-format` during tracking and restore on cleanup.

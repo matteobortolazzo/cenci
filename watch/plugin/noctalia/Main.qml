@@ -11,7 +11,7 @@ Item {
   readonly property int pollIntervalMs: pluginApi?.pluginSettings.pollIntervalMs
     || pluginApi?.manifest?.metadata?.defaultSettings?.pollIntervalMs || 2000
   readonly property string agentwatchPath: pluginApi?.pluginSettings.agentwatchPath
-    || pluginApi?.manifest?.metadata?.defaultSettings?.agentwatchPath || "agentwatch"
+    || pluginApi?.manifest?.metadata?.defaultSettings?.agentwatchPath || "cenci"
 
   property string text: ""
   property string tooltip: ""

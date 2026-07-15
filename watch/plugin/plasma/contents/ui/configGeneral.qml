@@ -9,8 +9,8 @@ Kirigami.FormLayout {
 
     TextField {
         id: pathField
-        Kirigami.FormData.label: i18n("agentwatch binary path:")
-        // Use an absolute path if agentwatch is not on the Plasma session PATH.
+        Kirigami.FormData.label: i18n("cenci binary path:")
+        // Use an absolute path if cenci is not on the Plasma session PATH.
     }
 
     SpinBox {

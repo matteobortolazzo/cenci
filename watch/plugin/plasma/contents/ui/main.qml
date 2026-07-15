@@ -30,7 +30,7 @@ PlasmoidItem {
         const v = parseInt(Plasmoid.configuration.pollIntervalMs)
         return (!isNaN(v) && v >= 250) ? v : 2000
     }
-    readonly property string agentwatchPath: Plasmoid.configuration.agentwatchPath || "agentwatch"
+    readonly property string agentwatchPath: Plasmoid.configuration.agentwatchPath || "cenci"
 
     // Sorted agent keys with budget headroom data — deterministic order,
     // mirrors formatHeadroom in status.go / hKeys.sort() in the JXA script.

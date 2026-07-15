@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Dependency-free smoke test for the SwiftBar plugin. Points AGENTWATCH_BIN at a
-# stub that prints canned `agentwatch widget-json` JSON and asserts the SwiftBar output.
+# Dependency-free smoke test for the SwiftBar plugin. Points CENCI_BIN at a
+# stub that prints canned `cenci widget-json` JSON and asserts the SwiftBar output.
 # macOS-only: the plugin formats via JXA (/usr/bin/osascript).
 
 set -uo pipefail
@@ -105,7 +105,7 @@ check_count() {
 
 # run_plugin <fixture-file-or-empty> <exit-code>
 # Builds a stub that prints the fixture (if any) and exits with the given code,
-# then runs the plugin with AGENTWATCH_BIN pointed at it.
+# then runs the plugin with CENCI_BIN pointed at it.
 run_plugin() {
   local fixture="$1" code="${2:-0}"
   cat > "$TMP/stub" <<STUB
@@ -114,7 +114,7 @@ run_plugin() {
 exit $code
 STUB
   chmod +x "$TMP/stub"
-  AGENTWATCH_BIN="$TMP/stub" "$PLUGIN"
+  CENCI_BIN="$TMP/stub" "$PLUGIN"
 }
 
 # --- Case 1: need-input present -------------------------------------------

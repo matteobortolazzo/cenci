@@ -9,7 +9,7 @@
       <description>How often to run "agentwatch widget-json".</description>
     </key>
     <key name="agentwatch-path" type="s">
-      <default>'agentwatch'</default>
+      <default>'cenci'</default>
       <summary>agentwatch binary path</summary>
       <description>Path or command name for the agentwatch binary. Use an absolute path if it is not on the GNOME session PATH.</description>
     </key>
