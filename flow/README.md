@@ -16,6 +16,8 @@ scope and planning decisions human-gated.
 | `/cenci:refine <ticket-id>` | Iterative ticket refinement until it's ready for planning |
 | `/cenci:design <ticket-id \| description>` | Interactive design reasoning and `.pen` file creation using Pencil |
 | `/cenci:implement <ticket-id>` | Full pipeline: plan, test, implement, refactor, security review, code review, lessons, PR |
+| `/cenci:refactor [scope]` | Analyze a codebase with specialized subagents and propose refactoring tickets |
+| `/cenci:review <pr-number \| file-paths>` | Review code with specialized security, quality, and silent-failure subagents |
 | `/cenci:address-review <pr-number>` | Address PR review comments — fetch, evaluate, fix, reply, push, re-request review |
 | `/cenci:babysit <pr-number>` | Loop-driven PR follow-through — periodically checks CI and new review comments and drives them to resolution until the PR merges or closes |
 | `/cenci:sync` | Pull latest main, rebase active worktrees, prune stale remotes, clean up merged branches |
@@ -455,6 +457,8 @@ flow/
 │   └── hooks.test.sh          # Codex hook-path and client-separation regression
 ├── docs/
 │   ├── git-workflow.md        # On-demand reference (read by skills as needed)
+│   ├── skill-authoring.md     # Writing skills that generate/regenerate files from external-sourced values
+│   ├── ticket-sizing.md       # How tickets are sized against the ~200k agent context budget, and when to split
 │   └── codex.md               # What cenci offers OpenAI Codex, and how it wires
 ├── templates/
 │   ├── claudeignore
