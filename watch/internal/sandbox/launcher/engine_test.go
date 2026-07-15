@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/matteobortolazzo/cenci/watch/internal/exectest"
 )
 
 // buildEngine wires an Engine to a fake docker whose `image inspect` exit
@@ -19,11 +21,11 @@ func buildEngine(t *testing.T, inspectFails bool) (*Engine, string) {
 		inspectExit = "1"
 	}
 	body := `#!/bin/sh
-printf '%s\n' "$*" >> ` + shellQuote(callLog) + `
+printf '%s\n' "$*" >> ` + exectest.ShellQuote(callLog) + `
 if [ "$1" = image ] && [ "$2" = inspect ]; then exit ` + inspectExit + `; fi
 exit 0
 `
-	writeExecutable(t, filepath.Join(dir, "docker"), body)
+	exectest.WriteExecutable(t, filepath.Join(dir, "docker"), body)
 	t.Setenv("PATH", dir)
 
 	var out bytes.Buffer

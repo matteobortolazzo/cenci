@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/matteobortolazzo/cenci/watch/internal/exectest"
 	"github.com/matteobortolazzo/cenci/watch/internal/sandbox/launcher"
 )
 
@@ -27,22 +28,10 @@ import (
 func writeFakeDocker(t *testing.T, dir, name, callLog, psOutput string) {
 	t.Helper()
 	body := "#!/bin/sh\n" +
-		"printf '%s\\n' \"$*\" >> " + shellQuote(callLog) + "\n" +
-		"if [ \"$1\" = \"ps\" ]; then printf '%s' " + shellQuote(psOutput) + "; fi\n" +
+		"printf '%s\\n' \"$*\" >> " + exectest.ShellQuote(callLog) + "\n" +
+		"if [ \"$1\" = \"ps\" ]; then printf '%s' " + exectest.ShellQuote(psOutput) + "; fi\n" +
 		"exit 0\n"
-	writeExecutable(t, filepath.Join(dir, name), body)
-}
-
-func writeExecutable(t *testing.T, path, body string) {
-	t.Helper()
-	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
-		t.Fatalf("write %s: %v", path, err)
-	}
-}
-
-// shellQuote single-quotes s for embedding in a generated shell script body.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+	exectest.WriteExecutable(t, filepath.Join(dir, name), body)
 }
 
 func itoa(n int) string {
@@ -116,7 +105,7 @@ func joinArgv(argv []string) string {
 func writeScriptedRuntime(t *testing.T, dir, name, callLog string) {
 	t.Helper()
 	body := "#!/bin/sh\n" +
-		"printf '%s\\n' \"$*\" >> " + shellQuote(callLog) + "\n" +
+		"printf '%s\\n' \"$*\" >> " + exectest.ShellQuote(callLog) + "\n" +
 		"case \"$1\" in\n" +
 		"image) if [ \"$2\" = inspect ]; then exit \"${FAKE_INSPECT_EXIT:-0}\"; fi ;;\n" +
 		"build) exit \"${FAKE_BUILD_EXIT:-0}\" ;;\n" +
@@ -134,7 +123,7 @@ func writeScriptedRuntime(t *testing.T, dir, name, callLog string) {
 		"exec) if [ \"$2\" = \"-it\" ]; then exit \"${FAKE_ATTACH_EXIT:-0}\"; fi; exit 0 ;;\n" +
 		"esac\n" +
 		"exit 0\n"
-	writeExecutable(t, filepath.Join(dir, name), body)
+	exectest.WriteExecutable(t, filepath.Join(dir, name), body)
 }
 
 // writeScriptedRuntimes writes the same scripted fake as both docker and
@@ -671,7 +660,7 @@ func TestSandboxStop_WithFilterArg_OnlyStopsMatchingName(t *testing.T) {
 // ever spawning a real daemon.
 func openTestEnv(t *testing.T, fakeDir, assets string) (env []string, home, socketDir string) {
 	t.Helper()
-	writeExecutable(t, filepath.Join(fakeDir, "claude"), "#!/bin/sh\nexit 0\n")
+	exectest.WriteExecutable(t, filepath.Join(fakeDir, "claude"), "#!/bin/sh\nexit 0\n")
 	home = t.TempDir()
 	xdg := t.TempDir()
 	socketDir = filepath.Join(xdg, "cenci")

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/matteobortolazzo/cenci/watch/internal/exectest"
 )
 
 // writeReapFakes writes fake docker + tmux for the two smoke cases below (the
@@ -15,7 +17,7 @@ import (
 func writeReapFakes(t *testing.T, dir, callLog string) {
 	t.Helper()
 	docker := `#!/bin/sh
-printf '%s\n' "$*" >> ` + shellQuote(callLog) + `
+printf '%s\n' "$*" >> ` + exectest.ShellQuote(callLog) + `
 case "$1" in
 ps) printf '%s' "${FAKE_PS:-}" ;;
 exec)
@@ -27,12 +29,12 @@ exec)
 esac
 exit 0
 `
-	writeExecutable(t, filepath.Join(dir, "docker"), docker)
+	exectest.WriteExecutable(t, filepath.Join(dir, "docker"), docker)
 	tmux := `#!/bin/sh
 printf '%s\n' "${FAKE_LIVE_PANES:-}"
 exit 0
 `
-	writeExecutable(t, filepath.Join(dir, "tmux"), tmux)
+	exectest.WriteExecutable(t, filepath.Join(dir, "tmux"), tmux)
 }
 
 func TestReapOrphans_DeadPaneOrphanIsTermed(t *testing.T) {
