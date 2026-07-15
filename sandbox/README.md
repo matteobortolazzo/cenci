@@ -92,20 +92,20 @@ cenci-sand --model sonnet
 # Launch Codex instead of Claude Code
 cenci-sand --agent codex
 
-# sb: short alias for cenci-sand, with one-token agent+model shortcuts as the
-# first argument (only recognized in that position — everything after is
-# forwarded to the agent CLI as usual). Defaults: claude → sonnet, codex → terra.
+# cn: the short launcher (an alias of the `cenci` binary that routes to
+# `cenci open`), with one-token agent+model shortcuts as the first argument.
+# Defaults: claude → sonnet, codex → terra.
 # A shortcut also implies its agent; pairing it with a conflicting --agent
-# (e.g. `sb ch --agent codex`) is rejected with an error instead of silently
+# (e.g. `cn ch --agent codex`) is rejected with an error instead of silently
 # launching the wrong agent with the shortcut's model.
-sb ch    # Claude, haiku
-sb cs    # Claude, sonnet
-sb co    # Claude, opus
-sb cf    # Claude, fable
-sb xl    # Codex, luna
-sb xt    # Codex, terra
-sb xs    # Codex, sol
-sb cs -p "fix the tests"
+cn ch    # Claude, haiku
+cn cs    # Claude, sonnet
+cn co    # Claude, opus
+cn cf    # Claude, fable
+cn xl    # Codex, luna
+cn xt    # Codex, terra
+cn xs    # Codex, sol
+cn cs -- -p "fix the tests"
 
 # Open a bash shell for manual setup / troubleshooting
 cenci-sand --shell
@@ -175,7 +175,7 @@ separator — everything after `--` is forwarded verbatim, with no further parsi
 
 ```bash
 cenci-sand -- --resume
-sb cs -- --resume
+cn cs -- --resume
 ```
 
 ### Per-repo containers
@@ -220,7 +220,7 @@ it.
 
 ### Choosing an agent
 
-`cenci-sand` launches Claude Code by default. Pass `--agent codex` (or use `sb` with an
+`cenci-sand` launches Claude Code by default. Pass `--agent codex` (or use `cn` with an
 `xl`/`xt`/`xs` shortcut) to launch Codex instead. Both agents run at full permission
 inside the container — Claude with `--dangerously-skip-permissions`, Codex with
 `--dangerously-bypass-approvals-and-sandbox`.

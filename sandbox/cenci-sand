@@ -67,8 +67,8 @@ declare -A CODEX_MODEL_SHORTCUTS=([xl]=gpt-5.6-luna [xt]=gpt-5.6-terra [xs]=gpt-
 MODEL=""
 # SHORTCUT_AGENT records the agent a shortcut implied (empty if no shortcut
 # was used). It lets the parser below reject a later explicit --agent that
-# desyncs the agent/model pair a shortcut selected together (e.g. `sb ch
-# --agent codex` would otherwise silently run the codex agent with a claude
+# desyncs the agent/model pair a shortcut selected together (e.g. `cenci-sand
+# ch --agent codex` would otherwise silently run the codex agent with a claude
 # model) instead of launching the mismatched combination.
 SHORTCUT_TOKEN=""
 SHORTCUT_AGENT=""

@@ -52,7 +52,7 @@ export CALLS_FILE
 export HOME="${TEST_ROOT}/home"
 export PATH="${BIN_DIR}:/usr/bin:/bin"
 
-echo "case: 'sb ch' launches Claude with the haiku model"
+echo "case: 'cenci-sand ch' launches Claude with the haiku model"
 printf '' > "${CALLS_FILE}"
 "${SANDBOX_DIR}/cenci-sand" ch -p test
 
@@ -65,7 +65,7 @@ if ! grep -Eq "^exec -it -u dev .*claude-cenci-${REPO_SLUG} claude --dangerously
     exit 1
 fi
 
-echo "case: 'sb xt' launches Codex with the gpt-5.6-terra model"
+echo "case: 'cenci-sand xt' launches Codex with the gpt-5.6-terra model"
 printf '' > "${CALLS_FILE}"
 "${SANDBOX_DIR}/cenci-sand" xt -p test
 

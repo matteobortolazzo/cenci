@@ -61,8 +61,8 @@ Warnings for optional features are safe to defer. Fix any required item marked w
 Use the launcher installed for your client:
 
 ```bash
-cenci-sand   # Claude Code
-sb xt        # Codex (or: cenci-sand --agent codex)
+cn           # Claude Code
+cn xt        # Codex (or: cn --agent codex)
 ```
 
 When launched from a git repository, only that repository root is mounted at
@@ -136,7 +136,7 @@ launchers, and replaces a stale running cenci daemon with the updated binary.
 | cenci status has not appeared | Start a new agent session and inspect `${TMPDIR:-/tmp}/cenci-bootstrap.log` |
 | Codex skills are missing | Confirm `codex plugin list`, then restart Codex after installation |
 | Claude commands are missing | Confirm `claude plugin list`, then restart Claude Code after installation |
-| Sandbox image is absent | Run `cenci-sand --build` or `sb --build` |
+| Sandbox image is absent | Run `cenci sandbox build` |
 | GitHub operations fail | Install `gh` and run `gh auth login` |
 
 Platform and display-specific troubleshooting lives in the internal layer references:
