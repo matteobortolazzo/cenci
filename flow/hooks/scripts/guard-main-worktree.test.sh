@@ -95,6 +95,11 @@ echo "case: missing file_path is a no-op"
 run_guard "${REPO}" "{\"tool_input\":{}}"
 assert_exit "missing file_path" 0
 
+# ── Case 7: configured repo, .cenci/ path → allowlisted ─────────────
+echo "case: configured repo allows .cenci/ writes"
+run_guard "${REPO}" "{\"tool_input\":{\"file_path\":\"${REPO}/.cenci/Dockerfile\"}}"
+assert_exit ".cenci path" 0
+
 # ── Summary ──────────────────────────────────────────────────────────
 echo
 echo "passed: ${PASSES}, failed: ${FAILURES}"

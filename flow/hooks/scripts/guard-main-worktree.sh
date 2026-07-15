@@ -9,7 +9,8 @@
 # Writes that legitimately live in the main worktree are allowlisted below:
 # saved plans (.plans/), cenci config (.claude/), design artifacts
 # (designs/, *.pen, DESIGN.md), repo meta files configure manages
-# (.gitignore, .mcp.json, CLAUDE.md), and temp paths.
+# (.gitignore, .mcp.json, CLAUDE.md), cenci-managed committed artifacts
+# (.cenci/, e.g. the sandbox Dockerfile), and temp paths.
 
 # Only enforce in repos configured for cenci — .claude/config.json (created
 # by /cenci:configure) is the canonical signal. In unconfigured repos this
@@ -39,6 +40,8 @@ case "$FILE_PATH" in
   *.pen | */DESIGN.md | DESIGN.md | */designs/* | designs/*) exit 0 ;;
   # Repo meta files /cenci:configure creates or appends to
   */.gitignore | .gitignore | */.mcp.json | .mcp.json | */CLAUDE.md | CLAUDE.md) exit 0 ;;
+  # cenci-managed artifacts committed in the main worktree (e.g. .cenci/Dockerfile)
+  */.cenci/* | .cenci/*) exit 0 ;;
 esac
 
 # Everything else is a main-worktree write → block with guidance.
