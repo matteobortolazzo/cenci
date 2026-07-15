@@ -8,7 +8,7 @@ This is a different axis from PR size. `docs/git-workflow.md` states there is **
 
 ## Why this is estimated, not measured
 
-Neither `/agentflow:refine` nor the `planner` agent do deep codebase exploration before producing a size estimate — refine works from the ticket text and user answers, and planner's exploration is bounded (see `docs/git-workflow.md` for PR conventions, and the planner's own "Before Planning" exploration limits). Neither can compute an actual token count for an implementation that hasn't happened yet. So sizing is a **qualitative estimate** based on structural signals visible in the refined ticket, not a numeric per-file or per-line token formula.
+Neither `/cenci:refine` nor the `planner` agent do deep codebase exploration before producing a size estimate — refine works from the ticket text and user answers, and planner's exploration is bounded (see `docs/git-workflow.md` for PR conventions, and the planner's own "Before Planning" exploration limits). Neither can compute an actual token count for an implementation that hasn't happened yet. So sizing is a **qualitative estimate** based on structural signals visible in the refined ticket, not a numeric per-file or per-line token formula.
 
 ## Structural signals
 

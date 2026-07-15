@@ -1,6 +1,6 @@
 # Codex support
 
-Agentflow gives Codex shared engineering conventions as native plugin skills and the
+cenci gives Codex shared engineering conventions as native plugin skills and the
 ticket-to-PR workflow as an `AGENTS.md` prose recipe. The interactive Claude Code
 pipeline is deliberately not ported.
 
@@ -10,20 +10,20 @@ The marketplace catalog is shared, but Claude Code and Codex keep separate plugi
 installations:
 
 ```bash
-codex plugin marketplace add matteobortolazzo/agent-stack
-codex plugin add agentflow@agent-stack
+codex plugin marketplace add matteobortolazzo/cenci
+codex plugin add cenci@cenci
 ```
 
-The agent-stack installer runs these commands automatically when it detects Codex.
+The cenci installer runs these commands automatically when it detects Codex.
 Restart or begin a new Codex session after installation.
 
 Verified with Codex CLI 0.144.3: Codex accepts this repository's existing marketplace,
-uses `agentflow/.codex-plugin/plugin.json`, and discovers the bundled
-`skills/*/SKILL.md` files under the `agentflow:` namespace. A Claude installation
+uses `flow/.codex-plugin/plugin.json`, and discovers the bundled
+`skills/*/SKILL.md` files under the `cenci:` namespace. A Claude installation
 under `~/.claude/plugins` is not shared with Codex. No `.agents/skills` copy or
 symlink is required.
 
-Agentflow deliberately keeps lifecycle hooks client-specific. The Codex manifest
+cenci deliberately keeps lifecycle hooks client-specific. The Codex manifest
 points to `codex/hooks.json`, whose empty `hooks` map explicitly declares that the
 Codex surface has no lifecycle handlers. This prevents Codex from falling back to
 `hooks/hooks.json`, which contains Claude Code-only commands and output contracts.
@@ -35,7 +35,7 @@ continue to discover the shared skills.
 Codex can automatically apply the convention skills for attachments, frontend
 classification, PR-comment filtering, shell commands, Angular, .NET, Go, delegation,
 testing, and worktrees. The complete matrix and limitations are in the
-[agentflow README](../README.md#skill-portability).
+[cenci README](../README.md#skill-portability).
 
 Skills whose descriptions start with `Claude Code-only` are present so one
 marketplace can serve both clients, but Codex must not invoke them. They depend on
@@ -54,18 +54,18 @@ complete `AGENTS.md` a Codex session can follow:
 
 Portable skills supply reusable conventions while the recipe owns sequencing and
 acceptance gates. Codex performs the pipeline roles using its available agent
-capabilities; it does not invoke `/agentflow:implement`.
+capabilities; it does not invoke `/cenci:implement`.
 
 ## Dispatch
 
 1. Put the `AGENTS.md` recipe at the target repository root.
-2. Install agent-stack for Codex so AgentWatch hooks and portable skills are present.
-3. Merge [`templates/agentwatch-codex-config.json`](../templates/agentwatch-codex-config.json)
-   into `~/.config/agentwatch/config.json`.
+2. Install cenci for Codex so cenci hooks and portable skills are present.
+3. Merge [`templates/cenci-codex-config.json`](../templates/cenci-codex-config.json)
+   into `~/.config/cenci/config.json`.
 4. Launch:
 
    ```bash
-   agentwatch run implement <n> --agent codex
+   cenci run implement <n> --agent codex
    ```
 
 The Codex workflow template resolves to `codex exec` in a `<ticket>-<slug>` tmux
