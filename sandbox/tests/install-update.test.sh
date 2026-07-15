@@ -22,7 +22,7 @@ trap cleanup EXIT
 make_tools() {
     local bin="$1" tool
     mkdir -p "${bin}"
-    for tool in bash cat touch uname grep git mkdir dirname ln readlink sleep nohup chmod sed head rm; do
+    for tool in bash cat touch uname grep git mkdir dirname ln readlink sleep nohup chmod sed head rm mv; do
         ln -s "$(command -v "${tool}")" "${bin}/${tool}"
     done
     cat >"${bin}/docker" <<'EOF'
@@ -62,6 +62,37 @@ if [ "\${1:-}" = plugin ] && [ "\${2:-}" = list ]; then
         echo 'cenci-watch@cenci installed'
     fi
 fi
+exit 0
+EOF
+    chmod +x "${bin}/${client}"
+}
+
+# make_bump_client installs a claude/codex stub whose update verb simulates a
+# real marketplace pull: it moves a staged new-version cache directory into
+# place, so the installer observes a newer version-pinned cache entry after
+# the update than before it.
+make_bump_client() {
+    local bin="$1" client="$2" staged="$3" dest="$4" manifest_dir="$5"
+    cat >"${bin}/${client}" <<EOF
+#!/bin/sh
+if [ "\${1:-}" = plugin ] && [ "\${2:-}" = list ]; then
+    if [ "${client}" = claude ]; then
+        echo 'cenci-watch@cenci'
+    else
+        echo 'cenci-watch@cenci installed'
+    fi
+fi
+if [ "\${1:-}" = plugin ] && [ "\${2:-}" = marketplace ] && [ "\${3:-}" = list ]; then
+    echo 'cenci installed'
+fi
+case "\${2:-}:\${3:-}" in
+update:cenci-watch* | add:cenci-watch*)
+    if [ -d "${staged}" ]; then
+        mv "${staged}" "${dest}"
+        touch "${dest}/${manifest_dir}/plugin.json"
+    fi
+    ;;
+esac
 exit 0
 EOF
     chmod +x "${bin}/${client}"
@@ -131,6 +162,49 @@ setup_layout() {
     LAYOUT_CALL_LOG="${call_log}"
     LAYOUT_PKILL_LOG="${pkill_log}"
     LAYOUT_NEW_BIN="${new_bin}"
+}
+
+# setup_bump_layout provisions a fake HOME whose plugin cache holds an
+# installed 1.0.0 cenci-watch entry, plus a staged 2.0.0 entry that the
+# bump-client stub moves into the cache when the installer runs the client's
+# update verb — the minimal simulation of a real version-bumping update.
+# Passing `none` as the third argument leaves the cache empty of version
+# entries (a client without a version-pinned cache before the update).
+setup_bump_layout() {
+    local name="$1" client="$2" current="${3:-1.0.0}"
+    local home="${WORK}/${name}/home" mock_bin="${WORK}/${name}/bin"
+    local call_log="${WORK}/${name}/calls" pkill_log="${WORK}/${name}/pkill-calls"
+    mkdir -p "${home}"
+    : >"${call_log}"
+    : >"${pkill_log}"
+    make_tools "${mock_bin}"
+    make_logging_pkill_pgrep "${mock_bin}"
+
+    local cache_dir manifest_dir
+    if [[ "${client}" == claude ]]; then
+        cache_dir="${home}/.claude/plugins/cache/cenci/cenci-watch"
+        manifest_dir=.claude-plugin
+    else
+        cache_dir="${home}/.codex/plugins/cache/cenci/cenci-watch"
+        manifest_dir=.codex-plugin
+    fi
+    mkdir -p "${cache_dir}"
+    if [[ "${current}" != none ]]; then
+        make_cenci "${cache_dir}/${current}/bin/cenci" 0
+        mkdir -p "${cache_dir}/${current}/${manifest_dir}"
+        printf '{"name":"cenci-watch","version":"%s"}\n' "${current}" >"${cache_dir}/${current}/${manifest_dir}/plugin.json"
+    fi
+
+    local staged="${WORK}/${name}/staged-2.0.0"
+    make_cenci "${staged}/bin/cenci" 0
+    mkdir -p "${staged}/${manifest_dir}"
+    printf '{"name":"cenci-watch","version":"2.0.0"}\n' >"${staged}/${manifest_dir}/plugin.json"
+    make_bump_client "${mock_bin}" "${client}" "${staged}" "${cache_dir}/2.0.0" "${manifest_dir}"
+
+    LAYOUT_HOME="${home}"
+    LAYOUT_BIN="${mock_bin}"
+    LAYOUT_CALL_LOG="${call_log}"
+    LAYOUT_PKILL_LOG="${pkill_log}"
 }
 
 run_update() {
@@ -226,4 +300,51 @@ assert_not_leaked "sk-test-sentinel-should-not-leak" "${WORK}/last-output"
 assert_not_leaked "ctx7-test-sentinel-should-not-leak" "${LAYOUT_CALL_LOG}"
 assert_not_leaked "ctx7-test-sentinel-should-not-leak" "${WORK}/last-output"
 
-echo "passed: restart path delegates to 'cenci daemon restart', falling back to pkill/nohup only on failure"
+echo "case: update output shows the Claude version transition (old → new), plain wording without a cache"
+setup_bump_layout bump-claude claude
+run_update
+[[ "${UPDATE_EXIT}" -eq 0 ]]
+if ! grep -q 'Claude: cenci-watch 1.0.0 → 2.0.0' "${WORK}/last-output"; then
+    echo "FAIL: expected 'Claude: cenci-watch 1.0.0 → 2.0.0' in the update output" >&2
+    cat "${WORK}/last-output" >&2
+    exit 1
+fi
+# The cenci (flow) plugin has no version-pinned cache entry in this layout, so
+# its line must keep the plain wording instead of inventing a version.
+if ! grep -q 'Claude: cenci updated$' "${WORK}/last-output"; then
+    echo "FAIL: expected plain 'Claude: cenci updated' fallback for a plugin without a cache entry" >&2
+    cat "${WORK}/last-output" >&2
+    exit 1
+fi
+
+echo "case: update output reports (already up to date) when no new version appears"
+setup_layout current-claude claude 0
+run_update
+[[ "${UPDATE_EXIT}" -eq 0 ]]
+if ! grep -q 'Claude: cenci-watch 2.0.0 (already up to date)' "${WORK}/last-output"; then
+    echo "FAIL: expected 'Claude: cenci-watch 2.0.0 (already up to date)' in the update output" >&2
+    cat "${WORK}/last-output" >&2
+    exit 1
+fi
+
+echo "case: update output reports 'updated to <version>' when no cache entry existed before the update"
+setup_bump_layout fresh-claude claude none
+run_update
+[[ "${UPDATE_EXIT}" -eq 0 ]]
+if ! grep -q 'Claude: cenci-watch updated to 2.0.0' "${WORK}/last-output"; then
+    echo "FAIL: expected 'Claude: cenci-watch updated to 2.0.0' in the update output" >&2
+    cat "${WORK}/last-output" >&2
+    exit 1
+fi
+
+echo "case: update output shows the Codex version transition (old → new)"
+setup_bump_layout bump-codex codex
+run_update
+[[ "${UPDATE_EXIT}" -eq 0 ]]
+if ! grep -q 'Codex: cenci-watch 1.0.0 → 2.0.0' "${WORK}/last-output"; then
+    echo "FAIL: expected 'Codex: cenci-watch 1.0.0 → 2.0.0' in the update output" >&2
+    cat "${WORK}/last-output" >&2
+    exit 1
+fi
+
+echo "passed: restart path delegates to 'cenci daemon restart', falling back to pkill/nohup only on failure; update output reports per-plugin version transitions"
