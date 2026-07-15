@@ -1,8 +1,8 @@
 // Package reap defines the seam the daemon uses to trigger the sandbox
-// orphan reaper (agent-sand --reap-orphans) after detecting a pane-gone
+// orphan reaper (cenci-sand --reap-orphans) after detecting a pane-gone
 // tmux-backed session, and once at daemon startup (#292). All container
 // knowledge (naming, docker/podman detection, exec plumbing, kill semantics)
-// stays in agent-sand; this package only knows how to fire a single-flight,
+// stays in cenci-sand; this package only knows how to fire a single-flight,
 // non-blocking, non-fatal invocation.
 package reap
 
@@ -18,13 +18,13 @@ type Reaper interface {
 	Reap()
 }
 
-// ExecReaper shells out to `agent-sand --reap-orphans` asynchronously, with a
+// ExecReaper shells out to `cenci-sand --reap-orphans` asynchronously, with a
 // single-flight guard so concurrent Reap() calls coalesce into one run.
 type ExecReaper struct {
 	verbose bool
 	running atomic.Bool
-	// run is injectable for tests; defaults to LookPath("agent-sand") then
-	// exec.Command("agent-sand", "--reap-orphans").Run().
+	// run is injectable for tests; defaults to LookPath("cenci-sand") then
+	// exec.Command("cenci-sand", "--reap-orphans").Run().
 	run func() error
 }
 
@@ -35,7 +35,7 @@ func NewExecReaper(verbose bool) *ExecReaper {
 	return &ExecReaper{
 		verbose: verbose,
 		run: func() error {
-			path, err := exec.LookPath("agent-sand")
+			path, err := exec.LookPath("cenci-sand")
 			if err != nil {
 				return err
 			}
@@ -58,12 +58,12 @@ func (r *ExecReaper) Reap() {
 		defer r.running.Store(false)
 		if err := r.run(); err != nil {
 			if r.verbose {
-				log.Printf("reap: agent-sand --reap-orphans failed: %v", err)
+				log.Printf("reap: cenci-sand --reap-orphans failed: %v", err)
 			}
 			return
 		}
 		if r.verbose {
-			log.Printf("reap: agent-sand --reap-orphans completed")
+			log.Printf("reap: cenci-sand --reap-orphans completed")
 		}
 	}()
 }

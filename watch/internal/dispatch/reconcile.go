@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/v4/pkg/watch"
 )
 
 // Board-state labels the reconciler reads and writes.
@@ -27,7 +27,7 @@ const (
 // attemptMarker is the hidden HTML comment stamped on every retry comment so
 // countAttempts can tally durable attempts from the ticket thread across cron
 // invocations and daemon restarts (in-memory state would be amnesiac).
-const attemptMarker = "<!-- agentwatch-dispatch-attempt -->"
+const attemptMarker = "<!-- cenci-dispatch-attempt -->"
 
 // RecoveryKind is the class of leak a Recovery addresses.
 type RecoveryKind string
@@ -139,7 +139,7 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 			}
 			// A Planned ticket with no local plan file is not always a leak: plan
 			// files are ephemeral and may be mid-write, or the plan legitimately
-			// lives on another host (agentflow treats "Planned, no local plan" as a
+			// lives on another host (cenci treats "Planned, no local plan" as a
 			// normal state). So this path mirrors the failure path's guards —
 			// never act blind on a nil snapshot, and require the signal to hold
 			// past the grace period before escalating to plan-invalid.
@@ -321,17 +321,17 @@ func windowDetail(number int, w *watch.WindowState) (name, status string) {
 }
 
 func retryComment(attempt int, window, status string) string {
-	return fmt.Sprintf("%s\n🔄 agentwatch dispatch attempt %d: window `%s` is gone (last status %s). "+
+	return fmt.Sprintf("%s\n🔄 cenci dispatch attempt %d: window `%s` is gone (last status %s). "+
 		"Re-queuing the ticket for pickup.", attemptMarker, attempt, window, status)
 }
 
 func failedComment(attempts int, window, status string) string {
-	return fmt.Sprintf("⛔ agentwatch dispatch failed after %d attempt(s): window `%s` is gone (last status %s). "+
+	return fmt.Sprintf("⛔ cenci dispatch failed after %d attempt(s): window `%s` is gone (last status %s). "+
 		"Labeled `%s` — clear the label or re-plan to retry.", attempts, window, status, labelDispatchFailed)
 }
 
 func planInvalidComment() string {
-	return fmt.Sprintf("⚠️ agentwatch: this ticket is `%s` but has no parseable plan file in `.plans/`. "+
+	return fmt.Sprintf("⚠️ cenci: this ticket is `%s` but has no parseable plan file in `.plans/`. "+
 		"Labeled `%s` — re-run planning to produce an approved plan.", labelPlanned, labelPlanInvalid)
 }
 
@@ -340,7 +340,7 @@ func planInvalidComment() string {
 // failedComment: dispatch-failed means the dispatched work failed, while
 // reconcile-stuck means reconciliation itself could not apply its verdict.
 func reconcileStuckComment() string {
-	return fmt.Sprintf("🛑 agentwatch: this ticket's reconciliation could not be applied after repeated attempts. "+
+	return fmt.Sprintf("🛑 cenci: this ticket's reconciliation could not be applied after repeated attempts. "+
 		"Labeled `%s` — reconciliation itself is stuck (distinct from `%s`, which means the dispatched work failed). "+
 		"Clear the label once `gh` connectivity/permissions are restored to retry.", labelReconcileStuck, labelDispatchFailed)
 }

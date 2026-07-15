@@ -16,7 +16,7 @@ const (
 	eventMaxBytes     = 4096
 )
 
-// EventReceiver listens on a Unix socket for hook events from agentwatch notify.
+// EventReceiver listens on a Unix socket for hook events from cenci notify.
 type EventReceiver struct {
 	listener  net.Listener
 	path      string

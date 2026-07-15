@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/run"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/run"
 )
 
 // RepoIdentity is a resolved (owner/name, absolute dir) pair for a git

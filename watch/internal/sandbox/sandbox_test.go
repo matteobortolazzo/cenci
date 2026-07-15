@@ -141,7 +141,7 @@ func TestContainerRuntime_PrefersPodmanOverDocker(t *testing.T) {
 		t.Fatalf("ContainerRuntime: %v", err)
 	}
 	if got != "podman" {
-		t.Errorf("ContainerRuntime() = %q, want podman (agent-sand prefers podman when both are present)", got)
+		t.Errorf("ContainerRuntime() = %q, want podman (cenci-sand prefers podman when both are present)", got)
 	}
 }
 
@@ -177,7 +177,7 @@ func TestRunAgentSand_MissingBinaryReturnsError(t *testing.T) {
 
 	_, err := RunAgentSand([]string{"--build"}, nil, &bytes.Buffer{}, &bytes.Buffer{})
 	if err == nil {
-		t.Error("expected an error when agent-sand is not on PATH")
+		t.Error("expected an error when cenci-sand is not on PATH")
 	}
 }
 
@@ -187,7 +187,7 @@ func TestRunAgentSand_ReturnsChildExitCodeAndWiresArgv(t *testing.T) {
 	}
 	dir := t.TempDir()
 	capture := filepath.Join(dir, "argv.txt")
-	writeFakeBinary(t, dir, "agent-sand", `printf '%s\n' "$@" > "`+capture+`"
+	writeFakeBinary(t, dir, "cenci-sand", `printf '%s\n' "$@" > "`+capture+`"
 exit 3`)
 	t.Setenv("PATH", dir)
 

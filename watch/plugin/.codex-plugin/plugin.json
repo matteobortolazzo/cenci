@@ -1,13 +1,13 @@
 {
-  "name": "agentwatch",
+  "name": "cenci-watch",
   "version": "4.5.0",
-  "description": "agent-stack attention layer: send Codex lifecycle events to the shared AgentWatch daemon.",
+  "description": "cenci attention layer: send Codex lifecycle events to the shared cenci daemon.",
   "author": {
     "name": "Matteo Bortolazzo",
     "url": "https://github.com/matteobortolazzo"
   },
-  "homepage": "https://github.com/matteobortolazzo/agent-stack/tree/main/agentwatch",
-  "repository": "https://github.com/matteobortolazzo/agent-stack",
+  "homepage": "https://github.com/matteobortolazzo/cenci/tree/main/watch",
+  "repository": "https://github.com/matteobortolazzo/cenci",
   "license": "MIT",
   "keywords": [
     "codex",
@@ -17,18 +17,18 @@
   ],
   "hooks": "./codex/hooks.json",
   "interface": {
-    "displayName": "AgentWatch",
-    "shortDescription": "agent-stack attention for Codex sessions.",
-    "longDescription": "The agent-stack attention layer forwards Codex lifecycle hooks to a local daemon that updates tmux and optional display surfaces.",
+    "displayName": "Cenci Watch",
+    "shortDescription": "cenci attention for Codex sessions.",
+    "longDescription": "The cenci attention layer forwards Codex lifecycle hooks to a local daemon that updates tmux and optional display surfaces.",
     "developerName": "Matteo Bortolazzo",
     "category": "Productivity",
     "capabilities": [
       "Hooks",
       "Monitoring"
     ],
-    "websiteURL": "https://github.com/matteobortolazzo/agent-stack/tree/main/agentwatch",
+    "websiteURL": "https://github.com/matteobortolazzo/cenci/tree/main/watch",
     "defaultPrompt": [
-      "Show AgentWatch status and setup guidance."
+      "Show cenci status and setup guidance."
     ],
     "brandColor": "#3B82F6"
   }

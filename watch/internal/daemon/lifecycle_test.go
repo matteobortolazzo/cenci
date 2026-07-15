@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/detect"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/ipc"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/tmux"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/tmux/tmuxtest"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/detect"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/tmux"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/tmux/tmuxtest"
 )
 
 func TestDaemon_FullLifecycle(t *testing.T) {
@@ -106,35 +106,35 @@ func TestDaemon_CodexLifecycleWithoutSessionEndRestoresAfterExit(t *testing.T) {
 	mc := &tmuxtest.MockClient{
 		Panes: []tmux.PaneInfo{
 			{SessionName: "main", WindowIndex: "0", WindowName: "zsh", PaneIndex: "0",
-				PaneCurrentCmd: "codex", PaneTitle: "agent-stack", PaneID: "%0"},
+				PaneCurrentCmd: "codex", PaneTitle: "cenci", PaneID: "%0"},
 		},
 	}
 
 	d := newTestDaemon(mc)
 
 	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
-	if name, _ := lastRename(mc.Renames, "main:0"); name != "agent-stack" {
-		t.Errorf("after SessionStart: expected native pane title 'agent-stack', got %q", name)
+	if name, _ := lastRename(mc.Renames, "main:0"); name != "cenci" {
+		t.Errorf("after SessionStart: expected native pane title 'cenci', got %q", name)
 	}
 
 	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
-	if name, _ := lastRename(mc.Renames, "main:0"); name != "agent-stack" {
+	if name, _ := lastRename(mc.Renames, "main:0"); name != "cenci" {
 		t.Errorf("after UserPromptSubmit: expected native pane title, got %q", name)
 	}
 	d.handleEvent(ipc.HookEvent{EventType: "PermissionRequest", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
-	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); !ok || v != "!" {
-		t.Errorf("expected @agentwatch-symbol=! after PermissionRequest, got %q (found=%v)", v, ok)
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-symbol"); !ok || v != "!" {
+		t.Errorf("expected @cenci-symbol=! after PermissionRequest, got %q (found=%v)", v, ok)
 	}
-	if name, _ := lastRename(mc.Renames, "main:0"); name != "agent-stack" {
+	if name, _ := lastRename(mc.Renames, "main:0"); name != "cenci" {
 		t.Errorf("after PermissionRequest: expected retained native pane title, got %q", name)
 	}
 
 	d.handleEvent(ipc.HookEvent{EventType: "PostToolUse", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
 	d.handleEvent(ipc.HookEvent{EventType: "Stop", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
-	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); !ok || v != "✓" {
-		t.Errorf("expected @agentwatch-symbol=✓ after Stop, got %q (found=%v)", v, ok)
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-symbol"); !ok || v != "✓" {
+		t.Errorf("expected @cenci-symbol=✓ after Stop, got %q (found=%v)", v, ok)
 	}
-	if name, _ := lastRename(mc.Renames, "main:0"); name != "agent-stack" {
+	if name, _ := lastRename(mc.Renames, "main:0"); name != "cenci" {
 		t.Errorf("after Stop: expected retained native pane title, got %q", name)
 	}
 
@@ -160,13 +160,13 @@ func TestDaemon_CodexLifecycleWithoutSessionEndRestoresAfterExit(t *testing.T) {
 func TestDaemon_CodexPromptLabelAndNativeQuestionReconciliation(t *testing.T) {
 	mc := &tmuxtest.MockClient{Panes: []tmux.PaneInfo{{
 		SessionName: "main", WindowIndex: "0", WindowName: "zsh", PaneIndex: "0",
-		PaneCurrentCmd: "codex", PaneTitle: "agent-stack", PaneID: "%0",
+		PaneCurrentCmd: "codex", PaneTitle: "cenci", PaneID: "%0",
 	}}}
 	d := newTestDaemon(mc)
 
 	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
-	if name, _ := lastRename(mc.Renames, "main:0"); name != "agent-stack" {
-		t.Fatalf("folder fallback = %q, want agent-stack", name)
+	if name, _ := lastRename(mc.Renames, "main:0"); name != "cenci" {
+		t.Fatalf("folder fallback = %q, want cenci", name)
 	}
 
 	// An empty prompt does not pin the folder fallback. The first later
@@ -181,7 +181,7 @@ func TestDaemon_CodexPromptLabelAndNativeQuestionReconciliation(t *testing.T) {
 		t.Fatalf("later prompt replaced pinned label: %q", name)
 	}
 
-	mc.Panes[0].PaneTitle = "[ ! ] Action Required | agent-stack"
+	mc.Panes[0].PaneTitle = "[ ! ] Action Required | cenci"
 	d.runSweep()
 	if got := d.sessions["codex-sess"].Status; got != detect.StatusNeedInput {
 		t.Fatalf("action title status = %v, want need-input", got)
@@ -189,11 +189,11 @@ func TestDaemon_CodexPromptLabelAndNativeQuestionReconciliation(t *testing.T) {
 	if got := d.sessions["codex-sess"].TaskName; got != "improve codex tmux names" {
 		t.Fatalf("action title changed task = %q", got)
 	}
-	if symbol, _ := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); symbol != "!" {
+	if symbol, _ := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-symbol"); symbol != "!" {
 		t.Fatalf("action title symbol = %q, want !", symbol)
 	}
 
-	mc.Panes[0].PaneTitle = "⠋ Working | agent-stack"
+	mc.Panes[0].PaneTitle = "⠋ Working | cenci"
 	d.runSweep()
 	if got := d.sessions["codex-sess"].Status; got != detect.StatusRunning {
 		t.Fatalf("spinner status = %v, want running", got)
@@ -206,13 +206,13 @@ func TestDaemon_CodexPromptLabelAndNativeQuestionReconciliation(t *testing.T) {
 func TestDaemon_CodexActionTitleFallsBackAfterRestart(t *testing.T) {
 	mc := &tmuxtest.MockClient{Panes: []tmux.PaneInfo{{
 		SessionName: "main", WindowIndex: "0", WindowName: "zsh", PaneIndex: "0",
-		PaneCurrentCmd: "codex", PaneTitle: "[ ! ] Action Required | agent-stack", PaneID: "%0",
+		PaneCurrentCmd: "codex", PaneTitle: "[ ! ] Action Required | cenci", PaneID: "%0",
 	}}}
 	d := newTestDaemon(mc)
 	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
 	d.runSweep()
-	if got := d.sessions["codex-sess"].TaskName; got != "agent-stack" {
-		t.Fatalf("restart fallback = %q, want agent-stack", got)
+	if got := d.sessions["codex-sess"].TaskName; got != "cenci" {
+		t.Fatalf("restart fallback = %q, want cenci", got)
 	}
 	if got := d.sessions["codex-sess"].Status; got != detect.StatusNeedInput {
 		t.Fatalf("restart action status = %v, want need-input", got)
@@ -223,14 +223,14 @@ func TestDaemon_CodexKeepsDispatchedWindowName(t *testing.T) {
 	mc := &tmuxtest.MockClient{
 		Panes: []tmux.PaneInfo{{
 			SessionName: "main", WindowIndex: "0", WindowName: "146-ci-shell-lint", PaneIndex: "0",
-			PaneCurrentCmd: "codex", PaneTitle: "agent-stack", PaneID: "%0",
+			PaneCurrentCmd: "codex", PaneTitle: "cenci", PaneID: "%0",
 		}},
 		WindowOptValues: map[string]string{"main:0:automatic-rename": "off"},
 	}
 	d := newTestDaemon(mc)
 	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
 	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0", TaskName: "improve codex tmux names"})
-	mc.Panes[0].PaneTitle = "[ ! ] Action Required | agent-stack"
+	mc.Panes[0].PaneTitle = "[ ! ] Action Required | cenci"
 	d.runSweep()
 	if name, _ := lastRename(mc.Renames, "main:0"); name != "146-ci-shell-lint" {
 		t.Fatalf("dispatched window renamed to %q", name)
@@ -643,8 +643,8 @@ func TestDaemon_WindowRenumberingMigratesState(t *testing.T) {
 	if v, ok := findWindowOpt(mc.WindowOpts, "main:1", "window-status-style"); !ok || v != "fg=green,dim" {
 		t.Errorf("expected window-status-style=fg=green,dim on main:1, got %q (found=%v)", v, ok)
 	}
-	if v, ok := findWindowOpt(mc.WindowOpts, "main:1", "@agentwatch-symbol"); !ok || v != "✓" {
-		t.Errorf("expected @agentwatch-symbol=✓ on main:1, got %q (found=%v)", v, ok)
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:1", "@cenci-symbol"); !ok || v != "✓" {
+		t.Errorf("expected @cenci-symbol=✓ on main:1, got %q (found=%v)", v, ok)
 	}
 
 	// Nothing should target stale main:2.

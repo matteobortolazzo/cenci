@@ -1,6 +1,6 @@
 package ipc
 
-// HookEvent represents an agent hook event delivered via agentwatch notify.
+// HookEvent represents an agent hook event delivered via cenci notify.
 type HookEvent struct {
 	EventType        string `json:"event_type"`                  // hook_event_name from stdin
 	SessionID        string `json:"session_id"`                  // agent session ID

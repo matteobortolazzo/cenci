@@ -3,9 +3,9 @@ package daemon
 import (
 	"log"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/detect"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/frontend"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/detect"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/frontend"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/ipc"
 )
 
 // sessionKeyForEvent returns the key for the daemon's sessions map: the agent

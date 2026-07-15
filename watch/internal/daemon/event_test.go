@@ -4,10 +4,10 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/detect"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/ipc"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/tmux"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/tmux/tmuxtest"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/detect"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/tmux"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/tmux/tmuxtest"
 )
 
 func TestDaemon_SessionStartTracksWindow(t *testing.T) {
@@ -35,11 +35,11 @@ func TestDaemon_SessionStartTracksWindow(t *testing.T) {
 	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "window-status-current-style"); !ok || v != "dim" {
 		t.Errorf("expected window-status-current-style=dim, got %q (found=%v)", v, ok)
 	}
-	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-style"); !ok || v != "dim" {
-		t.Errorf("expected @agentwatch-style=dim, got %q (found=%v)", v, ok)
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-style"); !ok || v != "dim" {
+		t.Errorf("expected @cenci-style=dim, got %q (found=%v)", v, ok)
 	}
-	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); !ok || v != "~" {
-		t.Errorf("expected @agentwatch-symbol=~, got %q (found=%v)", v, ok)
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-symbol"); !ok || v != "~" {
+		t.Errorf("expected @cenci-symbol=~, got %q (found=%v)", v, ok)
 	}
 }
 
@@ -61,8 +61,8 @@ func TestDaemon_UserPromptSubmitSetsRunning(t *testing.T) {
 	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "window-status-style"); !ok || v != "fg=blue,dim" {
 		t.Errorf("expected window-status-style=fg=blue,dim, got %q (found=%v)", v, ok)
 	}
-	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); !ok || v != "▶" {
-		t.Errorf("expected @agentwatch-symbol=▶, got %q (found=%v)", v, ok)
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-symbol"); !ok || v != "▶" {
+		t.Errorf("expected @cenci-symbol=▶, got %q (found=%v)", v, ok)
 	}
 }
 
@@ -90,8 +90,8 @@ func TestDaemon_NotificationPermissionSetsNeedInput(t *testing.T) {
 	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "window-status-style"); !ok || v != "fg=red,dim" {
 		t.Errorf("expected window-status-style=fg=red,dim, got %q (found=%v)", v, ok)
 	}
-	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); !ok || v != "!" {
-		t.Errorf("expected @agentwatch-symbol=!, got %q (found=%v)", v, ok)
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-symbol"); !ok || v != "!" {
+		t.Errorf("expected @cenci-symbol=!, got %q (found=%v)", v, ok)
 	}
 }
 
@@ -116,8 +116,8 @@ func TestDaemon_NotificationAgentNeedsInputSetsNeedInput(t *testing.T) {
 	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "window-status-style"); !ok || v != "fg=red,dim" {
 		t.Errorf("expected window-status-style=fg=red,dim, got %q (found=%v)", v, ok)
 	}
-	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); !ok || v != "!" {
-		t.Errorf("expected @agentwatch-symbol=!, got %q (found=%v)", v, ok)
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-symbol"); !ok || v != "!" {
+		t.Errorf("expected @cenci-symbol=!, got %q (found=%v)", v, ok)
 	}
 }
 
@@ -142,8 +142,8 @@ func TestDaemon_NotificationElicitationDialogSetsNeedInput(t *testing.T) {
 	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "window-status-style"); !ok || v != "fg=red,dim" {
 		t.Errorf("expected window-status-style=fg=red,dim, got %q (found=%v)", v, ok)
 	}
-	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); !ok || v != "!" {
-		t.Errorf("expected @agentwatch-symbol=!, got %q (found=%v)", v, ok)
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-symbol"); !ok || v != "!" {
+		t.Errorf("expected @cenci-symbol=!, got %q (found=%v)", v, ok)
 	}
 }
 
@@ -168,8 +168,8 @@ func TestDaemon_NotificationAgentCompletedSetsDone(t *testing.T) {
 	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "window-status-style"); !ok || v != "fg=green,dim" {
 		t.Errorf("expected window-status-style=fg=green,dim, got %q (found=%v)", v, ok)
 	}
-	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); !ok || v != "✓" {
-		t.Errorf("expected @agentwatch-symbol=✓, got %q (found=%v)", v, ok)
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-symbol"); !ok || v != "✓" {
+		t.Errorf("expected @cenci-symbol=✓, got %q (found=%v)", v, ok)
 	}
 }
 
@@ -189,8 +189,8 @@ func TestDaemon_StopFailureSetsStopped(t *testing.T) {
 	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "window-status-style"); !ok || v != "fg=yellow,dim" {
 		t.Errorf("expected window-status-style=fg=yellow,dim, got %q (found=%v)", v, ok)
 	}
-	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); !ok || v != "⏹" {
-		t.Errorf("expected @agentwatch-symbol=⏹, got %q (found=%v)", v, ok)
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-symbol"); !ok || v != "⏹" {
+		t.Errorf("expected @cenci-symbol=⏹, got %q (found=%v)", v, ok)
 	}
 }
 
@@ -232,8 +232,8 @@ func TestDaemon_StopSetsDone(t *testing.T) {
 	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "window-status-style"); !ok || v != "fg=green,dim" {
 		t.Errorf("expected window-status-style=fg=green,dim, got %q (found=%v)", v, ok)
 	}
-	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); !ok || v != "✓" {
-		t.Errorf("expected @agentwatch-symbol=✓, got %q (found=%v)", v, ok)
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-symbol"); !ok || v != "✓" {
+		t.Errorf("expected @cenci-symbol=✓, got %q (found=%v)", v, ok)
 	}
 }
 
@@ -260,12 +260,12 @@ func TestDaemon_SessionEndRestoresWindow(t *testing.T) {
 		t.Errorf("expected restore to 'bash', got %q", mc.Renames[0].Name)
 	}
 
-	// Should clear @agentwatch-style and @agentwatch-symbol.
-	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-style"); !ok || v != "" {
-		t.Errorf("expected @agentwatch-style cleared, got %q", v)
+	// Should clear @cenci-style and @cenci-symbol.
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-style"); !ok || v != "" {
+		t.Errorf("expected @cenci-style cleared, got %q", v)
 	}
-	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); !ok || v != "" {
-		t.Errorf("expected @agentwatch-symbol cleared, got %q", v)
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-symbol"); !ok || v != "" {
+		t.Errorf("expected @cenci-symbol cleared, got %q", v)
 	}
 
 	found := false
@@ -304,8 +304,8 @@ func TestDaemon_AskUserQuestionSetsNeedInput(t *testing.T) {
 	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "window-status-style"); !ok || v != "fg=red,dim" {
 		t.Errorf("expected window-status-style=fg=red,dim, got %q (found=%v)", v, ok)
 	}
-	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); !ok || v != "!" {
-		t.Errorf("expected @agentwatch-symbol=!, got %q (found=%v)", v, ok)
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-symbol"); !ok || v != "!" {
+		t.Errorf("expected @cenci-symbol=!, got %q (found=%v)", v, ok)
 	}
 
 	// Next tool call should transition back to running.
@@ -314,8 +314,8 @@ func TestDaemon_AskUserQuestionSetsNeedInput(t *testing.T) {
 	if name, ok := lastRename(mc.Renames, "main:0"); !ok || name != "writing tests" {
 		t.Errorf("expected rename to 'writing tests' after next tool, got %q (found=%v)", name, ok)
 	}
-	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); !ok || v != "▶" {
-		t.Errorf("expected @agentwatch-symbol=▶ after next tool, got %q (found=%v)", v, ok)
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-symbol"); !ok || v != "▶" {
+		t.Errorf("expected @cenci-symbol=▶ after next tool, got %q (found=%v)", v, ok)
 	}
 }
 
@@ -418,8 +418,8 @@ func TestDaemon_SymbolVariableAcrossAllStatuses(t *testing.T) {
 			t.Errorf("after %s: expected name 'fixing bug', got %q", tc.event.EventType, name)
 		}
 		// Symbol should be in the user variable.
-		if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); !ok || v != tc.wantSymbol {
-			t.Errorf("after %s: expected @agentwatch-symbol=%q, got %q", tc.event.EventType, tc.wantSymbol, v)
+		if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-symbol"); !ok || v != tc.wantSymbol {
+			t.Errorf("after %s: expected @cenci-symbol=%q, got %q", tc.event.EventType, tc.wantSymbol, v)
 		}
 	}
 }
@@ -447,11 +447,11 @@ func TestDaemon_StylesSetEvenWhenRenameFails(t *testing.T) {
 	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "window-status-current-style"); !ok || v != "fg=blue,dim" {
 		t.Errorf("expected window-status-current-style=fg=blue,dim despite rename failure, got %q (found=%v)", v, ok)
 	}
-	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-style"); !ok || v != "fg=blue,dim" {
-		t.Errorf("expected @agentwatch-style=fg=blue,dim despite rename failure, got %q (found=%v)", v, ok)
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-style"); !ok || v != "fg=blue,dim" {
+		t.Errorf("expected @cenci-style=fg=blue,dim despite rename failure, got %q (found=%v)", v, ok)
 	}
-	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); !ok || v != "▶" {
-		t.Errorf("expected @agentwatch-symbol=▶ despite rename failure, got %q (found=%v)", v, ok)
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-symbol"); !ok || v != "▶" {
+		t.Errorf("expected @cenci-symbol=▶ despite rename failure, got %q (found=%v)", v, ok)
 	}
 }
 

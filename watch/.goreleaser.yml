@@ -1,7 +1,7 @@
 version: 2
 
 builds:
-  - binary: agentwatch
+  - binary: cenci
     env:
       - CGO_ENABLED=0
     goos:
@@ -24,9 +24,9 @@ checksum:
   name_template: 'checksums.txt'
   algorithm: sha256
 
-project_name: agentwatch
+project_name: cenci
 
 release:
   github:
     owner: matteobortolazzo
-    name: agent-stack
+    name: cenci

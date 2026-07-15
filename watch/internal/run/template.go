@@ -1,4 +1,4 @@
-// Package run implements the `agentwatch run` launcher: it spawns a detached
+// Package run implements the `cenci run` launcher: it spawns a detached
 // tmux window running a coding-agent CLI for a chosen (agent, workflow) pair.
 // The (agent, workflow) → command mapping is config-driven with built-in Go
 // defaults, so switching Claude↔Codex (or adding opencode later) is a config
@@ -25,7 +25,7 @@ type WorkflowTemplate struct {
 type AgentConfig struct {
 	// Command is the host executable, e.g. "claude".
 	Command string `json:"command"`
-	// SandboxCommand replaces Command when --sandbox is on, e.g. "agent-sand".
+	// SandboxCommand replaces Command when --sandbox is on, e.g. "cenci-sand".
 	SandboxCommand string `json:"sandboxCommand"`
 	// Model, when set, is injected: substituted into any {model} placeholder,
 	// otherwise appended as "--model <model>". A specific model value is never
@@ -48,18 +48,18 @@ type FileConfig struct {
 }
 
 // builtinConfig returns the zero-config defaults: claude refine/design/implement
-// calling the matching agentflow skill, with a agent-sand sandbox command. Fresh
+// calling the matching cenci skill, with a cenci-sand sandbox command. Fresh
 // maps are constructed on each call so callers may mutate the result freely.
 func builtinConfig() FileConfig {
 	claudeWF := func(wf string) WorkflowTemplate {
-		return WorkflowTemplate{Args: []string{"--", "/agentflow:" + wf + " {ticket}"}}
+		return WorkflowTemplate{Args: []string{"--", "/cenci:" + wf + " {ticket}"}}
 	}
 	return FileConfig{
 		DefaultAgent: "claude",
 		Agents: map[string]AgentConfig{
 			"claude": {
 				Command:        "claude",
-				SandboxCommand: "agent-sand",
+				SandboxCommand: "cenci-sand",
 				Workflows: map[string]WorkflowTemplate{
 					"refine":    claudeWF("refine"),
 					"design":    claudeWF("design"),
@@ -72,8 +72,8 @@ func builtinConfig() FileConfig {
 
 // Load returns the built-in config with an optional JSON file merged over it.
 // A missing file is not an error (the built-ins stand alone). When path is
-// empty the default location is used: $XDG_CONFIG_HOME/agentwatch/config.json,
-// falling back to ~/.config/agentwatch/config.json.
+// empty the default location is used: $XDG_CONFIG_HOME/cenci/config.json,
+// falling back to ~/.config/cenci/config.json.
 func Load(path string) (FileConfig, error) {
 	base := builtinConfig()
 	if path == "" {
@@ -111,7 +111,7 @@ func defaultConfigPath() string {
 		}
 		dir = filepath.Join(home, ".config")
 	}
-	return filepath.Join(dir, "agentwatch", "config.json")
+	return filepath.Join(dir, "cenci", "config.json")
 }
 
 // merge overlays over onto base: scalar fields override when set, agents and

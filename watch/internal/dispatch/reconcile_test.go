@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/v4/pkg/watch"
 )
 
 // reconcileConfig has a 5m grace and a retry budget of 2 so a case can drive

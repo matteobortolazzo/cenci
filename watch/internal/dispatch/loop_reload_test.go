@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/run"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/run"
+	"github.com/matteobortolazzo/cenci/watch/v4/pkg/watch"
 )
 
 // Ticket #122: RunLoop and RunCombinedLoop must reload dispatch.Config from a

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/run"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/run"
+	"github.com/matteobortolazzo/cenci/watch/v4/pkg/watch"
 )
 
 // loopCheckInterval bounds configuration latency without changing dispatch

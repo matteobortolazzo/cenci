@@ -5,9 +5,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/detect"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/frontend"
-	tmuxc "github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/tmux"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/detect"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/frontend"
+	tmuxc "github.com/matteobortolazzo/cenci/watch/v4/internal/tmux"
 )
 
 const logMaxLen = 50
@@ -32,22 +32,22 @@ type windowState struct {
 	Status                detect.Status
 	TaskName              string // current task name from pane title (for WindowInfo)
 	ManuallyNamed         bool   // true = user set name manually, don't touch
-	LastSetName           string // last name agentwatch set, for detecting mid-session renames
+	LastSetName           string // last name cenci set, for detecting mid-session renames
 	PaneID                string // tmux pane ID (e.g. %5) for sweep validation
 	SessionID             string // agent session ID for correlating events
 	SessionKey            string // daemon core session key owning this window
 	Agent                 string // agent name, if known
 }
 
-const symbolPrefix = "#{@agentwatch-symbol} "
+const symbolPrefix = "#{@cenci-symbol} "
 
 // trackWindow sets up tracking for a new window using pre-fetched pane info.
 func (f *Frontend) trackWindow(windowTarget string, paneInfo *tmuxc.PaneInfo, sessionID string) *windowState {
 	currentName := paneInfo.WindowName
 	taskName := frontend.SanitizeName(detect.TaskName(paneInfo.PaneTitle))
 
-	// Strip residual agentwatch prefix from a previous daemon run.
-	currentName = f.stripAgentwatchPrefix(currentName)
+	// Strip residual cenci prefix from a previous daemon run.
+	currentName = f.stripCenciPrefix(currentName)
 	currentName = frontend.SanitizeName(currentName)
 
 	// Check if manually named.
@@ -132,9 +132,9 @@ func agentCommandMatches(agent, cmd string) bool {
 	return inferred == agent
 }
 
-// stripAgentwatchPrefix removes any leading agentwatch symbol + space from a window name.
+// stripCenciPrefix removes any leading cenci symbol + space from a window name.
 // This handles daemon restart where a residual symbol may be embedded in the name.
-func (f *Frontend) stripAgentwatchPrefix(name string) string {
+func (f *Frontend) stripCenciPrefix(name string) string {
 	symbols := []string{f.cfg.SymbolIdle, f.cfg.SymbolRunning, f.cfg.SymbolDone, f.cfg.SymbolStopped, f.cfg.SymbolNeedInput}
 	for _, sym := range symbols {
 		prefix := sym + " "
@@ -183,7 +183,7 @@ func (f *Frontend) restoreWindow(windowTarget string) {
 }
 
 // restoreWindowIndicators restores the original styles, format strings, and
-// clears agentwatch user variables for a tracked window.
+// clears cenci user variables for a tracked window.
 func (f *Frontend) restoreWindowIndicators(target string, ws *windowState) {
 	// Restore original styles.
 	f.setWindowOpt(target, "window-status-style", ws.OriginalStyle, "error restoring window-status-style")
@@ -197,9 +197,9 @@ func (f *Frontend) restoreWindowIndicators(target string, ws *windowState) {
 		f.setWindowOpt(target, "window-status-current-format", ws.OriginalCurrentFormat, "error restoring window-status-current-format")
 	}
 
-	// Clear agentwatch user variables.
-	f.setWindowOpt(target, "@agentwatch-style", "", "error clearing @agentwatch-style")
-	f.setWindowOpt(target, "@agentwatch-symbol", "", "error clearing @agentwatch-symbol")
+	// Clear cenci user variables.
+	f.setWindowOpt(target, "@cenci-style", "", "error clearing @cenci-style")
+	f.setWindowOpt(target, "@cenci-symbol", "", "error clearing @cenci-symbol")
 }
 
 // discardStaleWindow removes stale state for a window target without restoring
@@ -257,10 +257,10 @@ func (f *Frontend) applyStatus(windowTarget string, ws *windowState, status dete
 	f.setWindowOpt(windowTarget, "window-status-style", style, "error setting window-status-style")
 	f.setWindowOpt(windowTarget, "window-status-current-style", style, "error setting window-status-current-style")
 	// User variables for custom status-format integration.
-	f.setWindowOpt(windowTarget, "@agentwatch-style", style, "error setting @agentwatch-style")
-	f.setWindowOpt(windowTarget, "@agentwatch-symbol", symbol, "error setting @agentwatch-symbol")
+	f.setWindowOpt(windowTarget, "@cenci-style", style, "error setting @cenci-style")
+	f.setWindowOpt(windowTarget, "@cenci-symbol", symbol, "error setting @cenci-symbol")
 
-	// Build the display name (no symbol prefix — symbol is in @agentwatch-symbol and format string).
+	// Build the display name (no symbol prefix — symbol is in @cenci-symbol and format string).
 	var displayName string
 	if ws.ManuallyNamed {
 		displayName = ws.OriginalName

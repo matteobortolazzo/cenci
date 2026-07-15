@@ -11,22 +11,22 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/daemon"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/dispatch"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/ipc"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/daemon"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/dispatch"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v4/pkg/watch"
 )
 
 var binaryPath string
 
 func TestMain(m *testing.M) {
-	tmp, err := os.MkdirTemp("", "agentwatch-test-*")
+	tmp, err := os.MkdirTemp("", "cenci-test-*")
 	if err != nil {
 		panic("failed to create temp dir: " + err.Error())
 	}
 	defer func() { _ = os.RemoveAll(tmp) }()
 
-	binaryPath = filepath.Join(tmp, "agentwatch")
+	binaryPath = filepath.Join(tmp, "cenci")
 
 	// Build the binary from the current module root.
 	build := exec.Command("go", "build", "-o", binaryPath, ".")
@@ -183,7 +183,7 @@ func TestCodexHooksUsePluginLocalBinary(t *testing.T) {
 		t.Fatalf("parse codex hooks.json: %v", err)
 	}
 
-	const localBinary = `"${PLUGIN_ROOT}/bin/agentwatch" notify`
+	const localBinary = `"${PLUGIN_ROOT}/bin/cenci" notify`
 	for event, groups := range root.Hooks {
 		for i, group := range groups {
 			for j, hook := range group.Hooks {
@@ -220,7 +220,7 @@ func TestCodexStopHookEmitsJSON(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(pluginRoot, "bin"), 0o755); err != nil {
 		t.Fatalf("create plugin bin dir: %v", err)
 	}
-	stub := filepath.Join(pluginRoot, "bin", "agentwatch")
+	stub := filepath.Join(pluginRoot, "bin", "cenci")
 	if err := os.WriteFile(stub, []byte("#!/bin/sh\ncat >/dev/null\n"), 0o755); err != nil {
 		t.Fatalf("write hook binary stub: %v", err)
 	}
@@ -270,9 +270,9 @@ func TestUnknownSubcommand_ErrorMessageFormat(t *testing.T) {
 		t.Fatal("expected non-zero exit for unknown subcommand, got 0")
 	}
 
-	if !strings.Contains(string(output), `agentwatch: unknown subcommand "frobnicate"`) {
+	if !strings.Contains(string(output), `cenci: unknown subcommand "frobnicate"`) {
 		t.Errorf("expected stderr to contain %q, got:\n%s",
-			`agentwatch: unknown subcommand "frobnicate"`, output)
+			`cenci: unknown subcommand "frobnicate"`, output)
 	}
 }
 
@@ -292,13 +292,13 @@ func TestFlagRouting_DashV_NoLongerRoutesToDaemon(t *testing.T) {
 	if exitErr.ExitCode() != 2 {
 		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
 	}
-	if strings.Contains(string(output), "agentwatch starting") {
+	if strings.Contains(string(output), "cenci starting") {
 		t.Errorf("-v must not route to the daemon anymore, got:\n%s", output)
 	}
 }
 
 // TestBareInvocation_PrintsUsageAndExits2 locks in the BREAKING change: bare
-// `agentwatch` used to run the daemon in the foreground. It now prints usage
+// `cenci` used to run the daemon in the foreground. It now prints usage
 // and exits 2 instead — the daemon only starts via the explicit `daemon`
 // subcommand group.
 func TestBareInvocation_PrintsUsageAndExits2(t *testing.T) {
@@ -315,7 +315,7 @@ func TestBareInvocation_PrintsUsageAndExits2(t *testing.T) {
 	if !strings.Contains(string(output), "Usage:") {
 		t.Errorf("expected usage text in output, got:\n%s", output)
 	}
-	if strings.Contains(string(output), "agentwatch starting") {
+	if strings.Contains(string(output), "cenci starting") {
 		t.Errorf("bare invocation must not route to the daemon anymore, got:\n%s", output)
 	}
 }
@@ -349,7 +349,7 @@ func TestRunDryRunPrintsCommandAndWindowName(t *testing.T) {
 	noCfg := filepath.Join(t.TempDir(), "none.json")
 	// --slug is ignored for a numeric ticket: the window is `<number>-<skill>`.
 	cmd := exec.Command(binaryPath, "run", "implement", "40",
-		"--slug", "agentwatch-run", "--session", "demo", "--config", noCfg, "--dry-run")
+		"--slug", "cenci-run", "--session", "demo", "--config", noCfg, "--dry-run")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("dry-run failed: %v\n%s", err, output)
@@ -359,25 +359,25 @@ func TestRunDryRunPrintsCommandAndWindowName(t *testing.T) {
 		t.Errorf("expected window name 40-implement, got:\n%s", s)
 	}
 	// No flag and no config default → the sandbox launcher (#98).
-	if !strings.Contains(s, "agent-sand") || !strings.Contains(s, "/agentflow:implement 40") {
-		t.Errorf("expected agent-sand command with the agentflow skill, got:\n%s", s)
+	if !strings.Contains(s, "cenci-sand") || !strings.Contains(s, "/cenci:implement 40") {
+		t.Errorf("expected cenci-sand command with the cenci skill, got:\n%s", s)
 	}
 }
 
 func TestRunDryRunNoSandboxUsesHostCommand(t *testing.T) {
 	noCfg := filepath.Join(t.TempDir(), "none.json")
 	cmd := exec.Command(binaryPath, "run", "implement", "40",
-		"--slug", "agentwatch-run", "--session", "demo", "--config", noCfg, "--no-sandbox", "--dry-run")
+		"--slug", "cenci-run", "--session", "demo", "--config", noCfg, "--no-sandbox", "--dry-run")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("no-sandbox dry-run failed: %v\n%s", err, output)
 	}
 	s := string(output)
-	if strings.Contains(s, "agent-sand") {
+	if strings.Contains(s, "cenci-sand") {
 		t.Errorf("--no-sandbox must not use the sandbox launcher, got:\n%s", s)
 	}
-	if !strings.Contains(s, "claude") || !strings.Contains(s, "/agentflow:implement 40") {
-		t.Errorf("expected host claude command with the agentflow skill, got:\n%s", s)
+	if !strings.Contains(s, "claude") || !strings.Contains(s, "/cenci:implement 40") {
+		t.Errorf("expected host claude command with the cenci skill, got:\n%s", s)
 	}
 }
 
@@ -393,7 +393,7 @@ func TestRunForwardsUnquotedCustomText(t *testing.T) {
 		t.Fatalf("custom-text dry-run failed: %v\n%s", err, output)
 	}
 	s := string(output)
-	if !strings.Contains(s, "/agentflow:implement 99999999 focus on the API layer") {
+	if !strings.Contains(s, "/cenci:implement 99999999 focus on the API layer") {
 		t.Errorf("expected full argument forwarded, got:\n%s", s)
 	}
 	if !strings.Contains(s, "99999999-implement") {
@@ -409,8 +409,8 @@ func TestRunDryRunSandboxUsesSandboxCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sandbox dry-run failed: %v\n%s", err, output)
 	}
-	if !strings.Contains(string(output), "agent-sand") {
-		t.Errorf("expected agent-sand command, got:\n%s", output)
+	if !strings.Contains(string(output), "cenci-sand") {
+		t.Errorf("expected cenci-sand command, got:\n%s", output)
 	}
 }
 
@@ -499,8 +499,8 @@ func TestDispatchEnroll_OutsideGitRepo_Exits1(t *testing.T) {
 	if exitErr.ExitCode() != 1 {
 		t.Errorf("exit code = %d, want 1\n%s", exitErr.ExitCode(), output)
 	}
-	if !strings.Contains(string(output), "agentwatch dispatch enroll: ") {
-		t.Errorf("stderr = %q, want to contain %q", output, "agentwatch dispatch enroll: ")
+	if !strings.Contains(string(output), "cenci dispatch enroll: ") {
+		t.Errorf("stderr = %q, want to contain %q", output, "cenci dispatch enroll: ")
 	}
 }
 
@@ -675,7 +675,7 @@ func TestDispatchStatus_HumanOutput(t *testing.T) {
 
 // -- dispatch loop on|off|status sub-verb (ticket #219) ---------------------
 
-// useTempSocketDir isolates a test from any ambient agentwatch daemon by
+// useTempSocketDir isolates a test from any ambient cenci daemon by
 // redirecting watch.DefaultSocketPath() to an empty temp dir, so a test
 // asserting daemon_running:false holds even on a machine/CI runner with a
 // live daemon socket bound. See docs/test-isolation.md.
@@ -781,7 +781,7 @@ func TestDispatchLoopOnOff_WritesConfigAndRendersSameAsStatus(t *testing.T) {
 	}
 }
 
-// TestDispatchLoopNoArgs_Exits2NeverMutatesConfig locks in that `agentwatch
+// TestDispatchLoopNoArgs_Exits2NeverMutatesConfig locks in that `cenci
 // dispatch loop` with no verb (here, a bare flag that starts with "-") hits
 // the "expected a subcommand" branch before any flag parsing, config read, or
 // socket dial: it must exit 2, print the exact usage error to stderr, leave
@@ -800,8 +800,8 @@ func TestDispatchLoopNoArgs_Exits2NeverMutatesConfig(t *testing.T) {
 	if exitErr.ExitCode() != 2 {
 		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
 	}
-	if !strings.Contains(string(output), "agentwatch dispatch loop: expected a subcommand: on, off, or status") {
-		t.Errorf("stderr = %q, want to contain %q", output, "agentwatch dispatch loop: expected a subcommand: on, off, or status")
+	if !strings.Contains(string(output), "cenci dispatch loop: expected a subcommand: on, off, or status") {
+		t.Errorf("stderr = %q, want to contain %q", output, "cenci dispatch loop: expected a subcommand: on, off, or status")
 	}
 	if _, statErr := os.Stat(cfgPath); !os.IsNotExist(statErr) {
 		t.Errorf("cfgPath = %s must not exist after a no-args `dispatch loop` (no config mutation), stat err = %v", cfgPath, statErr)
@@ -812,7 +812,7 @@ func TestDispatchLoopNoArgs_Exits2NeverMutatesConfig(t *testing.T) {
 }
 
 // TestDispatchLoopUnknownVerb_Exits2NeverMutatesConfig locks in that
-// `agentwatch dispatch loop garbage` hits the `default` case of the verb
+// `cenci dispatch loop garbage` hits the `default` case of the verb
 // switch before SetLoopEnabled/ResolveDispatchState run: it must exit 2,
 // print the exact unknown-subcommand error to stderr, and leave --config's
 // path untouched (no file created).
@@ -829,8 +829,8 @@ func TestDispatchLoopUnknownVerb_Exits2NeverMutatesConfig(t *testing.T) {
 	if exitErr.ExitCode() != 2 {
 		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
 	}
-	if !strings.Contains(string(output), `agentwatch dispatch loop: unknown subcommand "garbage"`) {
-		t.Errorf("stderr = %q, want to contain %q", output, `agentwatch dispatch loop: unknown subcommand "garbage"`)
+	if !strings.Contains(string(output), `cenci dispatch loop: unknown subcommand "garbage"`) {
+		t.Errorf("stderr = %q, want to contain %q", output, `cenci dispatch loop: unknown subcommand "garbage"`)
 	}
 	if _, statErr := os.Stat(cfgPath); !os.IsNotExist(statErr) {
 		t.Errorf("cfgPath = %s must not exist after `dispatch loop garbage` (no config mutation), stat err = %v", cfgPath, statErr)
@@ -917,7 +917,7 @@ func TestDispatchFlagRouting_DryRunUnaffectedBySubVerbPeel(t *testing.T) {
 
 func TestDispatchPassFailuresExitNonzero(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(configPath, []byte(`{"dispatch":{"repos":[{"repo":"o/r","dir":"/definitely/missing-agentwatch-repo"}]}}`), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(`{"dispatch":{"repos":[{"repo":"o/r","dir":"/definitely/missing-cenci-repo"}]}}`), 0o600); err != nil {
 		t.Fatalf("writing config: %v", err)
 	}
 	for _, args := range [][]string{
@@ -1047,7 +1047,7 @@ func TestWidgetJSONAndWaybarOutputByteIdentical(t *testing.T) {
 }
 
 // TestStatusSubcommand_HumanReadable_DegradesGracefullyWithNoDaemon covers
-// the new human-readable `agentwatch status` (distinct from `widget-json`):
+// the new human-readable `cenci status` (distinct from `widget-json`):
 // with nothing listening on either socket it must still print a report and
 // exit 0 — never the "unknown subcommand" error, and never a non-zero exit
 // (unlike `daemon status`, which exits 1 when not running).
@@ -1116,8 +1116,8 @@ func TestVersionSubcommandPrintsVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("version: %v\n%s", err, output)
 	}
-	if !strings.Contains(string(output), "agentwatch dev") {
-		t.Errorf("version output = %q, want to contain %q", output, "agentwatch dev")
+	if !strings.Contains(string(output), "cenci dev") {
+		t.Errorf("version output = %q, want to contain %q", output, "cenci dev")
 	}
 }
 
@@ -1128,8 +1128,8 @@ func TestVersionFlagsRouteToVersion(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v\n%s", flagArg, err, output)
 		}
-		if !strings.Contains(string(output), "agentwatch dev") {
-			t.Errorf("%s output = %q, want to contain %q", flagArg, output, "agentwatch dev")
+		if !strings.Contains(string(output), "cenci dev") {
+			t.Errorf("%s output = %q, want to contain %q", flagArg, output, "cenci dev")
 		}
 		if strings.Contains(string(output), "unknown subcommand") {
 			t.Errorf("%s output = %q, want NOT to contain %q", flagArg, output, "unknown subcommand")
@@ -1141,13 +1141,13 @@ func TestVersionFlagsRouteToVersion(t *testing.T) {
 	// version banner either.
 	cmd := exec.Command(binaryPath, "-v")
 	output, _ := cmd.CombinedOutput()
-	if strings.Contains(string(output), "agentwatch dev") {
-		t.Errorf("-v output = %q, want NOT to contain %q", output, "agentwatch dev")
+	if strings.Contains(string(output), "cenci dev") {
+		t.Errorf("-v output = %q, want NOT to contain %q", output, "cenci dev")
 	}
 }
 
 func TestVersionStampedViaLdflags(t *testing.T) {
-	stampedPath := filepath.Join(t.TempDir(), "agentwatch-stamped")
+	stampedPath := filepath.Join(t.TempDir(), "cenci-stamped")
 	build := exec.Command("go", "build", "-ldflags", "-X main.version=9.9.9-test", "-o", stampedPath, ".")
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
@@ -1175,17 +1175,17 @@ func TestDispatchUnknownVerb_Exits2NeverDispatches(t *testing.T) {
 	if exitErr.ExitCode() != 2 {
 		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
 	}
-	if !strings.Contains(string(output), `agentwatch dispatch: unknown subcommand "statas"`) {
-		t.Errorf("stderr = %q, want to contain %q", output, `agentwatch dispatch: unknown subcommand "statas"`)
+	if !strings.Contains(string(output), `cenci dispatch: unknown subcommand "statas"`) {
+		t.Errorf("stderr = %q, want to contain %q", output, `cenci dispatch: unknown subcommand "statas"`)
 	}
 	if strings.Contains(string(output), "skip:") || strings.Contains(string(output), "dispatch (") {
 		t.Errorf("output must not contain dispatch decision-table lines (a real dispatch pass must never run), got:\n%s", output)
 	}
 }
 
-// TestSocketDirSubcommandPrintsResolvedDir covers the new `agentwatch
+// TestSocketDirSubcommandPrintsResolvedDir covers the new `cenci
 // socket-dir` CLI command (#217): it must print the resolved SocketDir() path
-// to stdout and exit 0, so shell consumers (dev-sandbox's agent-sand) don't
+// to stdout and exit 0, so shell consumers (dev-sandbox's cenci-sand) don't
 // reimplement the XDG-vs-fallback logic themselves.
 func TestSocketDirSubcommandPrintsResolvedDir(t *testing.T) {
 	xdgDir := t.TempDir()
@@ -1196,7 +1196,7 @@ func TestSocketDirSubcommandPrintsResolvedDir(t *testing.T) {
 		t.Fatalf("socket-dir: %v\n%s", err, output)
 	}
 
-	want := filepath.Join(xdgDir, "agentwatch")
+	want := filepath.Join(xdgDir, "cenci")
 	got := strings.TrimSpace(string(output))
 	if got != want {
 		t.Errorf("socket-dir output = %q, want %q", got, want)
@@ -1326,7 +1326,7 @@ func TestClose_DryRun_PrintsCloseAndSkipDecisions(t *testing.T) {
 // -- daemon lifecycle subcommands (daemon start|stop|restart|status) --------
 //
 // Every test in this section sets its own isolated XDG_RUNTIME_DIR so the
-// real "agentwatch daemon start" subprocess it spawns never touches a real
+// real "cenci daemon start" subprocess it spawns never touches a real
 // daemon's sockets/PID file, and so parallel test runs never collide.
 
 // bgDaemon wraps a backgrounded `daemon start` subprocess together with a
@@ -1336,7 +1336,7 @@ type bgDaemon struct {
 	done chan struct{} // closed once cmd.Wait() has returned
 }
 
-// startDaemonBackground spawns `agentwatch daemon start` in the background
+// startDaemonBackground spawns `cenci daemon start` in the background
 // (not context-bound: these tests need it to keep running until explicitly
 // stopped, unlike the bounded-context daemon smoke tests elsewhere in this
 // file) and waits for its PID file to appear before returning. The caller's
@@ -1344,7 +1344,7 @@ type bgDaemon struct {
 //
 // The reaping goroutine below is started immediately (not lazily, on-demand
 // later) so the moment the daemon process actually exits — however it dies,
-// including from an external `agentwatch daemon stop`/SIGKILL — it gets
+// including from an external `cenci daemon stop`/SIGKILL — it gets
 // reaped right away. Otherwise this test process (the daemon subprocess's
 // OS-level parent) would leave it as a zombie until something got around to
 // calling Wait(), and os.Process.Signal(0) reports a zombie as still

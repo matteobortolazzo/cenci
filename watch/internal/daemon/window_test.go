@@ -3,9 +3,9 @@ package daemon
 import (
 	"testing"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/ipc"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/tmux"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/tmux/tmuxtest"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/tmux"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/tmux/tmuxtest"
 )
 
 func TestDaemon_ManuallyNamedWindowKeepsOriginalName(t *testing.T) {
@@ -23,7 +23,7 @@ func TestDaemon_ManuallyNamedWindowKeepsOriginalName(t *testing.T) {
 	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
 	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
 
-	// Should keep original name (symbol is in @agentwatch-symbol, not the name).
+	// Should keep original name (symbol is in @cenci-symbol, not the name).
 	if name, ok := lastRename(mc.Renames, "main:0"); !ok || name != "my-window" {
 		t.Errorf("expected rename to 'my-window', got %q (found=%v)", name, ok)
 	}
@@ -32,8 +32,8 @@ func TestDaemon_ManuallyNamedWindowKeepsOriginalName(t *testing.T) {
 	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "window-status-style"); !ok || v != "fg=blue,dim" {
 		t.Errorf("expected window-status-style=fg=blue,dim, got %q (found=%v)", v, ok)
 	}
-	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); !ok || v != "▶" {
-		t.Errorf("expected @agentwatch-symbol=▶, got %q (found=%v)", v, ok)
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-symbol"); !ok || v != "▶" {
+		t.Errorf("expected @cenci-symbol=▶, got %q (found=%v)", v, ok)
 	}
 }
 
@@ -69,12 +69,12 @@ func TestDaemon_ManuallyNamedRestoresOriginalNameOnEnd(t *testing.T) {
 		}
 	}
 
-	// SHOULD clear @agentwatch-style and @agentwatch-symbol.
-	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-style"); !ok || v != "" {
-		t.Errorf("expected @agentwatch-style cleared, got %q", v)
+	// SHOULD clear @cenci-style and @cenci-symbol.
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-style"); !ok || v != "" {
+		t.Errorf("expected @cenci-style cleared, got %q", v)
 	}
-	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); !ok || v != "" {
-		t.Errorf("expected @agentwatch-symbol cleared, got %q", v)
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-symbol"); !ok || v != "" {
+		t.Errorf("expected @cenci-symbol cleared, got %q", v)
 	}
 }
 
@@ -98,7 +98,7 @@ func TestDaemon_MidSessionRenameDetected(t *testing.T) {
 	// Another event triggers — daemon should detect the rename.
 	d.handleEvent(ipc.HookEvent{EventType: "Stop", SessionID: "sess1", TmuxPane: "%0"})
 
-	// After detecting mid-session rename, should use new name (symbol in @agentwatch-symbol).
+	// After detecting mid-session rename, should use new name (symbol in @cenci-symbol).
 	if name, ok := lastRename(mc.Renames, "main:0"); !ok || name != "my-custom-name" {
 		t.Errorf("expected rename to 'my-custom-name', got %q (found=%v)", name, ok)
 	}
@@ -226,11 +226,11 @@ func TestDaemon_FormatStringsSavedAndRestored(t *testing.T) {
 	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
 
 	// Format strings should be prepended with symbol variable.
-	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "window-status-format"); !ok || v != "#{@agentwatch-symbol} #I:#W" {
-		t.Errorf("expected window-status-format='#{@agentwatch-symbol} #I:#W', got %q (found=%v)", v, ok)
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "window-status-format"); !ok || v != "#{@cenci-symbol} #I:#W" {
+		t.Errorf("expected window-status-format='#{@cenci-symbol} #I:#W', got %q (found=%v)", v, ok)
 	}
-	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "window-status-current-format"); !ok || v != "#{@agentwatch-symbol} #I:#W*" {
-		t.Errorf("expected window-status-current-format='#{@agentwatch-symbol} #I:#W*', got %q (found=%v)", v, ok)
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "window-status-current-format"); !ok || v != "#{@cenci-symbol} #I:#W*" {
+		t.Errorf("expected window-status-current-format='#{@cenci-symbol} #I:#W*', got %q (found=%v)", v, ok)
 	}
 
 	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})

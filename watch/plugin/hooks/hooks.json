@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "nohup \"${CLAUDE_PLUGIN_ROOT}/hooks/bootstrap.sh\" </dev/null >/dev/null 2>&1 & \"${CLAUDE_PLUGIN_ROOT}/bin/agentwatch\" notify 2>/dev/null || true",
+            "command": "nohup \"${CLAUDE_PLUGIN_ROOT}/hooks/bootstrap.sh\" </dev/null >/dev/null 2>&1 & \"${CLAUDE_PLUGIN_ROOT}/bin/cenci\" notify 2>/dev/null || true",
             "timeout": 5
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agentwatch\" notify 2>/dev/null || true",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/cenci\" notify 2>/dev/null || true",
             "timeout": 5
           }
         ]
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agentwatch\" notify 2>/dev/null || true",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/cenci\" notify 2>/dev/null || true",
             "timeout": 5
           }
         ]
@@ -39,7 +39,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agentwatch\" notify 2>/dev/null || true",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/cenci\" notify 2>/dev/null || true",
             "timeout": 5
           }
         ]
@@ -50,7 +50,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agentwatch\" notify 2>/dev/null || true",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/cenci\" notify 2>/dev/null || true",
             "timeout": 5
           }
         ]
@@ -61,7 +61,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agentwatch\" notify 2>/dev/null || true",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/cenci\" notify 2>/dev/null || true",
             "timeout": 5
           }
         ]
@@ -72,7 +72,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agentwatch\" notify 2>/dev/null || true",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/cenci\" notify 2>/dev/null || true",
             "timeout": 5
           }
         ]
@@ -83,7 +83,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agentwatch\" notify 2>/dev/null || true",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/cenci\" notify 2>/dev/null || true",
             "timeout": 5
           }
         ]
@@ -94,7 +94,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agentwatch\" notify 2>/dev/null || true",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/cenci\" notify 2>/dev/null || true",
             "timeout": 5
           }
         ]
@@ -105,7 +105,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agentwatch\" notify 2>/dev/null || true",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/cenci\" notify 2>/dev/null || true",
             "timeout": 5
           }
         ]
@@ -116,7 +116,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agentwatch\" notify 2>/dev/null || true",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/cenci\" notify 2>/dev/null || true",
             "timeout": 5
           }
         ]

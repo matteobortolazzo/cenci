@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/closecmd"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/closecmd"
+	"github.com/matteobortolazzo/cenci/watch/v4/pkg/watch"
 )
 
 type fakeKiller struct {

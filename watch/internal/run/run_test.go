@@ -43,7 +43,7 @@ func noConfigOpts(t *testing.T) Opts {
 		// Stub the daemon hook: the real daemon.EnsureRunning spawns
 		// os.Executable(), which inside `go test` is this test binary —
 		// every spawned child re-runs the suite and spawns more children
-		// (a fork bomb, masked in sandboxes where AGENT_SAND=1 short-
+		// (a fork bomb, masked in sandboxes where CENCI_SANDBOX=1 short-
 		// circuits EnsureRunning). Tests asserting the hook override this.
 		EnsureDaemon: func() {},
 	}
@@ -70,7 +70,7 @@ func TestRunSpawnsWindowAndPinsName(t *testing.T) {
 		t.Errorf("name = %q, want 40-implement", w.name)
 	}
 	// With no flag and no config, the default is now the sandbox launcher (#98).
-	if !strings.Contains(w.cmd, "agent-sand") || !strings.Contains(w.cmd, "/agentflow:implement 40") {
+	if !strings.Contains(w.cmd, "cenci-sand") || !strings.Contains(w.cmd, "/cenci:implement 40") {
 		t.Errorf("command = %q", w.cmd)
 	}
 
@@ -97,7 +97,7 @@ func TestRunDefaultsToSandbox(t *testing.T) {
 		t.Fatalf("expected 1 NewWindow, got %d", len(m.windows))
 	}
 	// No flag and no config default → sandbox launcher (#98).
-	if !strings.Contains(m.windows[0].cmd, "agent-sand") {
+	if !strings.Contains(m.windows[0].cmd, "cenci-sand") {
 		t.Errorf("command = %q, want sandbox launcher", m.windows[0].cmd)
 	}
 }
@@ -117,7 +117,7 @@ func TestRunNoSandboxForcesHost(t *testing.T) {
 		t.Fatalf("expected 1 NewWindow, got %d", len(m.windows))
 	}
 	cmd := m.windows[0].cmd
-	if strings.Contains(cmd, "agent-sand") {
+	if strings.Contains(cmd, "cenci-sand") {
 		t.Errorf("--no-sandbox must not use the sandbox launcher: %q", cmd)
 	}
 	if !strings.Contains(cmd, "claude") {
@@ -142,7 +142,7 @@ func TestRunPrependsDir(t *testing.T) {
 	if !strings.HasPrefix(cmd, "cd '/repos/my project' && ") {
 		t.Errorf("command missing cd prefix: %q", cmd)
 	}
-	if !strings.Contains(cmd, "/agentflow:implement 40") {
+	if !strings.Contains(cmd, "/cenci:implement 40") {
 		t.Errorf("command dropped the workflow: %q", cmd)
 	}
 }
@@ -161,7 +161,7 @@ func TestRunRefusesGroupedSession(t *testing.T) {
 }
 
 // TestRunEnsuresDaemonBeforeSpawning guards #139: a window spawned before the
-// daemon (and thus the event socket agent-sand mounts into the sandbox) is up
+// daemon (and thus the event socket cenci-sand mounts into the sandbox) is up
 // never gets status wired in for its whole lifetime.
 func TestRunEnsuresDaemonBeforeSpawning(t *testing.T) {
 	m := &mockCtrl{session: "work"}
@@ -259,7 +259,7 @@ func TestRunDryRunPrintsAndDoesNotSpawn(t *testing.T) {
 		t.Errorf("dry-run must not spawn, got %+v", m.windows)
 	}
 	out := buf.String()
-	for _, want := range []string{"work", "40-implement", "/agentflow:implement 40"} {
+	for _, want := range []string{"work", "40-implement", "/cenci:implement 40"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("dry-run output missing %q:\n%s", want, out)
 		}
@@ -285,7 +285,7 @@ func TestSlugify(t *testing.T) {
 
 func TestWindowName(t *testing.T) {
 	// A numeric ticket names the window `<number>-<skill>`, one of the three
-	// agentflow workflows — short and uniform.
+	// cenci workflows — short and uniform.
 	if got := windowName("230", "refine", ""); got != "230-refine" {
 		t.Errorf("numeric refine = %q, want 230-refine", got)
 	}
@@ -342,7 +342,7 @@ func TestRunForwardsFullTicketArgument(t *testing.T) {
 	}
 	w := m.windows[0]
 	// The whole argument reaches the skill, not just the first token.
-	if !strings.Contains(w.cmd, "/agentflow:implement 42 focus on the API layer") {
+	if !strings.Contains(w.cmd, "/cenci:implement 42 focus on the API layer") {
 		t.Errorf("command dropped context: %q", w.cmd)
 	}
 	// The window name is the skill only — trailing context does not leak in.

@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/daemon"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/daemon"
 )
 
 // Controller is the small consumer-side tmux interface the launcher needs.
@@ -44,10 +44,10 @@ type Opts struct {
 	// Out receives dry-run output; nil defaults to os.Stdout.
 	Out io.Writer
 
-	// EnsureDaemon starts the agentwatch daemon if it isn't already running,
+	// EnsureDaemon starts the cenci daemon if it isn't already running,
 	// and waits briefly for it to come up; nil uses the real implementation
 	// (daemon.EnsureRunning). Called right before the window is
-	// spawned (never on dry-run or a refused grouped session): agent-sand
+	// spawned (never on dry-run or a refused grouped session): cenci-sand
 	// only mounts the event socket into the sandbox if it already exists at
 	// container launch (#139), so a window spawned before the daemon is up
 	// never gets status wired in for its whole lifetime.

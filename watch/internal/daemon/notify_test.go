@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/ipc"
 )
 
 func TestDeliverEventSucceedsWithoutRecovery(t *testing.T) {
@@ -70,7 +70,7 @@ func TestDeliverEventCustomSocketDoesNotStartDaemon(t *testing.T) {
 	sends := 0
 	ensured := false
 
-	deliverEvent("/tmp/custom-agentwatch.sock", event, func(string, ipc.HookEvent) error {
+	deliverEvent("/tmp/custom-cenci.sock", event, func(string, ipc.HookEvent) error {
 		sends++
 		return errors.New("unavailable")
 	}, func() { ensured = true })

@@ -96,7 +96,7 @@ func TestReadPlansStalenessPaths(t *testing.T) {
 ticketId: 42
 status: approved
 planCommitSha: aaa111
-stalenessPaths: agentwatch, plugin/hooks,
+stalenessPaths: watch, plugin/hooks,
 ---
 body
 `)
@@ -121,14 +121,14 @@ body
 	}
 
 	scoped := plans[0]
-	if want := []string{"agentwatch", "plugin/hooks"}; !equalStrings(scoped.StalenessPaths, want) {
+	if want := []string{"watch", "plugin/hooks"}; !equalStrings(scoped.StalenessPaths, want) {
 		t.Errorf("scoped plan StalenessPaths = %v, want %v", scoped.StalenessPaths, want)
 	}
 	if scoped.CommitsBehind != 7 {
 		t.Errorf("scoped plan CommitsBehind = %d, want 7 (from the seam)", scoped.CommitsBehind)
 	}
-	if got := pathsBySha["aaa111"]; !equalStrings(got, []string{"agentwatch", "plugin/hooks"}) {
-		t.Errorf("commitsBehind received paths %v for aaa111, want [agentwatch plugin/hooks]", got)
+	if got := pathsBySha["aaa111"]; !equalStrings(got, []string{"watch", "plugin/hooks"}) {
+		t.Errorf("commitsBehind received paths %v for aaa111, want [watch plugin/hooks]", got)
 	}
 
 	whole := plans[1]
@@ -190,23 +190,23 @@ func TestGitCommitsBehindPathAware(t *testing.T) {
 	gitTest(t, dir, "init")
 	commitFile(t, dir, "base.txt", "base")
 	sha := gitTest(t, dir, "rev-parse", "HEAD")
-	commitFile(t, dir, "agentwatch/main.go", "watch change")
-	commitFile(t, dir, "agentflow/skill.md", "flow change one")
-	commitFile(t, dir, "agentflow/other.md", "flow change two")
+	commitFile(t, dir, "watch/main.go", "watch change")
+	commitFile(t, dir, "flow/skill.md", "flow change one")
+	commitFile(t, dir, "flow/other.md", "flow change two")
 
 	if got := gitCommitsBehind(dir, sha, nil); got != 3 {
 		t.Errorf("whole-repo count = %d, want 3", got)
 	}
-	if got := gitCommitsBehind(dir, sha, []string{"agentwatch"}); got != 1 {
-		t.Errorf("agentwatch-scoped count = %d, want 1", got)
+	if got := gitCommitsBehind(dir, sha, []string{"watch"}); got != 1 {
+		t.Errorf("watch-scoped count = %d, want 1", got)
 	}
-	if got := gitCommitsBehind(dir, sha, []string{"agentflow"}); got != 2 {
-		t.Errorf("agentflow-scoped count = %d, want 2", got)
+	if got := gitCommitsBehind(dir, sha, []string{"flow"}); got != 2 {
+		t.Errorf("flow-scoped count = %d, want 2", got)
 	}
 	if got := gitCommitsBehind(dir, sha, []string{"untouched"}); got != 0 {
 		t.Errorf("untouched-path count = %d, want 0", got)
 	}
-	if got := gitCommitsBehind(dir, sha, []string{"agentwatch", "agentflow"}); got != 3 {
+	if got := gitCommitsBehind(dir, sha, []string{"watch", "flow"}); got != 3 {
 		t.Errorf("multi-path count = %d, want 3", got)
 	}
 }

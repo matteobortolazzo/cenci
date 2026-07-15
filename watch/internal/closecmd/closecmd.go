@@ -1,4 +1,4 @@
-// Package closecmd implements `agentwatch close`: resolving a ticket number
+// Package closecmd implements `cenci close`: resolving a ticket number
 // or window name to the exact tmux windows the daemon's registry knows
 // about, and killing the non-busy ones. The daemon-owned snapshot is the
 // single source of truth for session/window location, so this package never
@@ -13,8 +13,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/detect"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/detect"
+	"github.com/matteobortolazzo/cenci/watch/v4/pkg/watch"
 )
 
 // Action describes what Run decided to do about one matched window.
@@ -48,7 +48,7 @@ type Opts struct {
 	Force bool
 	// DryRun reports decisions without killing any window.
 	DryRun bool
-	// SocketPath is the agentwatch broadcast socket to read a snapshot from.
+	// SocketPath is the cenci broadcast socket to read a snapshot from.
 	SocketPath string
 	// ReadSnapshot performs a one-shot daemon snapshot read. Production:
 	// dispatch.ReadSnapshot. Injected so tests can simulate daemon-down /
@@ -69,7 +69,7 @@ type Opts struct {
 func Run(opts Opts) ([]Decision, error) {
 	snap, err := opts.ReadSnapshot(opts.SocketPath)
 	if err != nil {
-		return nil, fmt.Errorf("reading agentwatch snapshot: %w", err)
+		return nil, fmt.Errorf("reading cenci snapshot: %w", err)
 	}
 
 	matches := matchWindows(opts.Target, snap)

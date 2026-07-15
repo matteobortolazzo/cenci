@@ -7,12 +7,12 @@ import (
 	"os"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/config"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/detect"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/frontend"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/ipc"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/reap"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/config"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/detect"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/frontend"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/reap"
+	"github.com/matteobortolazzo/cenci/watch/v4/pkg/watch"
 )
 
 // Daemon manages the event-driven loop and per-session core state. All tmux
@@ -24,7 +24,7 @@ type Daemon struct {
 	ipc      *ipc.Server                       // nil if IPC not enabled
 	events   <-chan ipc.HookEvent
 	now      func() time.Time // injectable clock for TTL tests
-	reaper   reap.Reaper      // triggers agent-sand --reap-orphans on pane-gone sweep/startup (#292)
+	reaper   reap.Reaper      // triggers cenci-sand --reap-orphans on pane-gone sweep/startup (#292)
 
 	// attention is the reconciler's overlay of synthetic "failed" windows
 	// (#46). It is appended to every snapshot until the next overlay replaces

@@ -1,12 +1,12 @@
-// Package sandbox translates agentwatch's `sandbox`/`open` verbs into
-// invocations of the dev-sandbox/agent-sand bash launcher (batch verbs,
+// Package sandbox translates cenci's `sandbox`/`open` verbs into
+// invocations of the dev-sandbox/cenci-sand bash launcher (batch verbs,
 // interactive open) or direct docker/podman calls (ls/stop, which have no
-// agent-sand equivalent and are implemented natively here instead).
+// cenci-sand equivalent and are implemented natively here instead).
 //
 // The shortcut tables and the container-runtime/name-prefix conventions below
-// are mirrored byte-for-byte from dev-sandbox/agent-sand (there is no shared
+// are mirrored byte-for-byte from dev-sandbox/cenci-sand (there is no shared
 // code across the bash/Go boundary) so a desync between the two front doors
-// is a review-time concern, not a runtime one. See dev-sandbox/agent-sand for
+// is a review-time concern, not a runtime one. See dev-sandbox/cenci-sand for
 // the source of truth each mirrors:
 //   - runtime detection: top of the script (podman if present, else docker)
 //   - shortcut tables: CLAUDE_MODEL_SHORTCUTS / CODEX_MODEL_SHORTCUTS (~line 65)
@@ -27,11 +27,11 @@ import (
 	"syscall"
 )
 
-// BinaryName is the agent-sand executable resolved from PATH.
-const BinaryName = "agent-sand"
+// BinaryName is the cenci-sand executable resolved from PATH.
+const BinaryName = "cenci-sand"
 
 // batchFlags maps each `sandbox <verb>` that translates 1:1 to a single
-// agent-sand long flag. `prune` is deliberately excluded: it takes an
+// cenci-sand long flag. `prune` is deliberately excluded: it takes an
 // optional --volumes flag, so main.go builds its argv by hand instead of
 // going through this table.
 var batchFlags = map[string]string{
@@ -42,14 +42,14 @@ var batchFlags = map[string]string{
 	"reap-orphans":   "--reap-orphans",
 }
 
-// BatchFlag returns the agent-sand long flag verb translates to, and whether
+// BatchFlag returns the cenci-sand long flag verb translates to, and whether
 // verb is a recognized batch verb.
 func BatchFlag(verb string) (string, bool) {
 	f, ok := batchFlags[verb]
 	return f, ok
 }
 
-// ClaudeModelShortcuts mirrors dev-sandbox/agent-sand's CLAUDE_MODEL_SHORTCUTS
+// ClaudeModelShortcuts mirrors dev-sandbox/cenci-sand's CLAUDE_MODEL_SHORTCUTS
 // table exactly: ch/cs/co/cf select Claude with the haiku/sonnet/opus/fable
 // model alias.
 var ClaudeModelShortcuts = map[string]string{
@@ -59,7 +59,7 @@ var ClaudeModelShortcuts = map[string]string{
 	"cf": "fable",
 }
 
-// CodexModelShortcuts mirrors dev-sandbox/agent-sand's CODEX_MODEL_SHORTCUTS
+// CodexModelShortcuts mirrors dev-sandbox/cenci-sand's CODEX_MODEL_SHORTCUTS
 // table exactly: xl/xt/xs select Codex with the gpt-5.6-luna/terra/sol model.
 var CodexModelShortcuts = map[string]string{
 	"xl": "gpt-5.6-luna",
@@ -79,7 +79,7 @@ func ResolveShortcut(token string) (agent, model string, ok bool) {
 	return "", "", false
 }
 
-// RunAgentSand resolves agent-sand from PATH and runs it with argv, wiring
+// RunAgentSand resolves cenci-sand from PATH and runs it with argv, wiring
 // stdin/stdout/stderr straight through (batch verbs are non-interactive but
 // may still print progress or a confirmation prompt, e.g. `--prune
 // --volumes`'s y/N). It returns the child's exit code on a normal exit, or a
@@ -103,9 +103,9 @@ func RunAgentSand(argv []string, stdin io.Reader, stdout, stderr io.Writer) (int
 	return 0, nil
 }
 
-// ExecAgentSand resolves agent-sand from PATH and execs it (replacing the
+// ExecAgentSand resolves cenci-sand from PATH and execs it (replacing the
 // current process image) with argv, so the interactive session owns the TTY
-// exactly as if the user had invoked agent-sand directly. It only returns on
+// exactly as if the user had invoked cenci-sand directly. It only returns on
 // failure (LookPath or syscall.Exec error) — success never returns.
 func ExecAgentSand(argv []string) error {
 	path, err := exec.LookPath(BinaryName)
@@ -119,12 +119,12 @@ func ExecAgentSand(argv []string) error {
 // -- sandbox ls / stop: implemented natively in Go against docker/podman ---
 
 // sandboxNamePattern matches the claude-sand-/codex-sand- container name
-// prefixes agent-sand uses (CONTAINER_PREFIX="${AGENT}-sand"), mirroring the
-// filter agent-sand's --prune applies to its container list.
+// prefixes cenci-sand uses (CONTAINER_PREFIX="${AGENT}-sand"), mirroring the
+// filter cenci-sand's --prune applies to its container list.
 var sandboxNamePattern = regexp.MustCompile(`^(claude-sand-|codex-sand-)`)
 
 // ContainerRuntime resolves the preferred container runtime the same way
-// agent-sand does: podman if present on PATH, else docker. Returns an error
+// cenci-sand does: podman if present on PATH, else docker. Returns an error
 // if neither is found.
 func ContainerRuntime() (string, error) {
 	if _, err := exec.LookPath("podman"); err == nil {

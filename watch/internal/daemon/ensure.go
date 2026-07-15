@@ -9,16 +9,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/ipc"
 )
 
 var readyTimeout = 3 * time.Second
 var pollInterval = 50 * time.Millisecond
 
-// Spawn starts a new detached `agentwatch daemon start` process in the
+// Spawn starts a new detached `cenci daemon start` process in the
 // background (Setsid, so it survives the parent's exit). `daemon start` is
 // the canonical form spawned both here (via the spawn var, on-demand startup)
-// and by `agentwatch daemon restart` (internal/main.go), so every
+// and by `cenci daemon restart` (internal/main.go), so every
 // daemon-spawning code path launches the process the same way. It is silent
 // on failure — callers that need to know whether the daemon became reachable
 // should poll Alive afterward.
@@ -42,7 +42,7 @@ func Spawn() {
 }
 
 // spawn is a package var (defaulting to Spawn) so tests can stub it without a
-// real "agentwatch" binary spawning a background process.
+// real "cenci" binary spawning a background process.
 var spawn = Spawn
 
 var ensureMu sync.Mutex
@@ -50,12 +50,12 @@ var ensureMu sync.Mutex
 // EnsureRunning starts the daemon when the default event socket has no live
 // listener and waits briefly for it to become reachable. It is deliberately
 // silent and bounded so hooks and launchers remain non-fatal when startup is
-// impossible. Concurrent callers serialize the probe/start sequence. Inside an
-// agent-sand container (AGENT_SAND=1) it returns immediately without ever
+// impossible. Concurrent callers serialize the probe/start sequence. Inside a
+// cenci-sand container (CENCI_SANDBOX=1) it returns immediately without ever
 // spawning: a container-local daemon controls nothing on the host and would
 // only mask real wiring failures (#195, #202).
 func EnsureRunning() {
-	if os.Getenv("AGENT_SAND") == "1" {
+	if os.Getenv("CENCI_SANDBOX") == "1" {
 		return
 	}
 

@@ -8,11 +8,11 @@ import (
 	"log"
 	"strings"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/config"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/detect"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/frontend"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/ipc"
-	tmuxc "github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/tmux"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/config"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/detect"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/frontend"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/ipc"
+	tmuxc "github.com/matteobortolazzo/cenci/watch/v4/internal/tmux"
 )
 
 // Frontend styles tmux windows to mirror agent session state.
@@ -22,7 +22,7 @@ type Frontend struct {
 	windows      map[string]*windowState // key: window target (session:windowIdx)
 	panes        map[string]string       // key: pane ID (%5) → window target
 	sessionKeys  map[string]string       // key: core session key → window target
-	headroomVars map[string]string       // key: agent type → last @agentwatch-headroom-<agent> value set (#171)
+	headroomVars map[string]string       // key: agent type → last @cenci-headroom-<agent> value set (#171)
 }
 
 var _ frontend.Frontend = (*Frontend)(nil)
@@ -442,7 +442,7 @@ func firstRune(s string) rune {
 }
 
 // Cleanup restores all tracked windows on daemon shutdown and clears any
-// tracked @agentwatch-headroom-<agent> global user variables (#171).
+// tracked @cenci-headroom-<agent> global user variables (#171).
 func (f *Frontend) Cleanup(map[string]*frontend.SessionState) {
 	if f.cfg.Verbose && len(f.windows) > 0 {
 		log.Printf("cleaning up %d tracked window(s)", len(f.windows))
@@ -451,7 +451,7 @@ func (f *Frontend) Cleanup(map[string]*frontend.SessionState) {
 		f.restoreWindow(wt)
 	}
 	for agent := range f.headroomVars {
-		f.setOpt(headroomVarName(agent), "", "error clearing @agentwatch-headroom-"+agent)
+		f.setOpt(headroomVarName(agent), "", "error clearing @cenci-headroom-"+agent)
 		delete(f.headroomVars, agent)
 	}
 }

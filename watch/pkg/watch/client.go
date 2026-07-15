@@ -10,7 +10,7 @@ import (
 // malformed or oversized stream cannot exhaust memory.
 const snapshotMaxBytes = 65536 // max size of a single StateSnapshot JSON line
 
-// Client is a streaming subscriber to an agentwatch daemon. It reads NDJSON
+// Client is a streaming subscriber to a cenci daemon. It reads NDJSON
 // StateSnapshot lines from a Unix socket connection. A Client is not safe for
 // concurrent use; call ReadSnapshot from a single goroutine.
 type Client struct {
@@ -18,7 +18,7 @@ type Client struct {
 	scanner *bufio.Scanner
 }
 
-// Dial connects to the agentwatch broadcast socket at the given path, typically
+// Dial connects to the cenci broadcast socket at the given path, typically
 // the value returned by DefaultSocketPath. It returns an error if the socket
 // does not exist or the daemon is not accepting connections.
 func Dial(socketPath string) (*Client, error) {

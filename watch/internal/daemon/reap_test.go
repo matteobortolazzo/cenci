@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/frontend"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/ipc"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/tmux"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/tmux/tmuxtest"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/frontend"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/tmux"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/tmux/tmuxtest"
 )
 
 // TestDaemon_SweepPaneGoneTriggersOneReap covers the Phase-2 stale-window
@@ -98,7 +98,7 @@ func TestDaemon_SweepPhase3AgentExitedDoesNotTriggerReap(t *testing.T) {
 	mc := &tmuxtest.MockClient{
 		Panes: []tmux.PaneInfo{
 			{SessionName: "main", WindowIndex: "0", WindowName: "zsh", PaneIndex: "0",
-				PaneCurrentCmd: "codex", PaneTitle: "agent-stack", PaneID: "%0"},
+				PaneCurrentCmd: "codex", PaneTitle: "cenci", PaneID: "%0"},
 		},
 	}
 

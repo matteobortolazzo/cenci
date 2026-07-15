@@ -3,10 +3,10 @@ package daemon
 import (
 	"testing"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/detect"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/ipc"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/tmux"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/tmux/tmuxtest"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/detect"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/tmux"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/tmux/tmuxtest"
 )
 
 func TestDaemon_PostToolUseFailureInterruptSetsStopped(t *testing.T) {
@@ -35,8 +35,8 @@ func TestDaemon_PostToolUseFailureInterruptSetsStopped(t *testing.T) {
 	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "window-status-style"); !ok || v != "fg=yellow,dim" {
 		t.Errorf("expected window-status-style=fg=yellow,dim, got %q (found=%v)", v, ok)
 	}
-	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); !ok || v != "⏹" {
-		t.Errorf("expected @agentwatch-symbol=⏹, got %q (found=%v)", v, ok)
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-symbol"); !ok || v != "⏹" {
+		t.Errorf("expected @cenci-symbol=⏹, got %q (found=%v)", v, ok)
 	}
 }
 
@@ -98,8 +98,8 @@ func TestDaemon_SweepDetectsIdlePaneTitle(t *testing.T) {
 	if sess.Status != detect.StatusStopped {
 		t.Errorf("expected StatusStopped after sweep, got %v", sess.Status)
 	}
-	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); !ok || v != "⏹" {
-		t.Errorf("expected @agentwatch-symbol=⏹, got %q (found=%v)", v, ok)
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-symbol"); !ok || v != "⏹" {
+		t.Errorf("expected @cenci-symbol=⏹, got %q (found=%v)", v, ok)
 	}
 }
 
@@ -182,8 +182,8 @@ func TestDaemon_FullLifecycleWithInterrupt(t *testing.T) {
 	if sess := d.sessions["sess1"]; sess.Status != detect.StatusStopped {
 		t.Errorf("after PostToolUseFailure: expected StatusStopped, got %v", sess.Status)
 	}
-	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@agentwatch-symbol"); !ok || v != "⏹" {
-		t.Errorf("expected @agentwatch-symbol=⏹, got %q (found=%v)", v, ok)
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-symbol"); !ok || v != "⏹" {
+		t.Errorf("expected @cenci-symbol=⏹, got %q (found=%v)", v, ok)
 	}
 
 	// UserPromptSubmit → running again (user submits new prompt)

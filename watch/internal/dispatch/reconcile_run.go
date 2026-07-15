@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/v4/pkg/watch"
 )
 
 // TicketMutator applies the reconciler's gh side effects. The seam keeps
@@ -75,9 +75,9 @@ func (m *GHMutator) EditLabels(repo string, number int, add, remove []string) er
 	return nil
 }
 
-// managedLabelSpec is one agentwatch-owned terminal label's color/description,
+// managedLabelSpec is one cenci-owned terminal label's color/description,
 // used by EnsureLabels to create the label on first use (#265). No ensure-label
-// pattern existed in Go before this; agentwatch's Go path assumed labels
+// pattern existed in Go before this; cenci's Go path assumed labels
 // pre-exist, which is why dispatch-failed/plan-invalid never got created.
 type managedLabelSpec struct {
 	color string
@@ -86,23 +86,23 @@ type managedLabelSpec struct {
 
 // managedLabelSpecs are the only labels EnsureLabels knows how to create:
 // the reconciler's own terminal labels. Every other label (Working, Planned,
-// Refined, ...) is owned and pre-created by agentflow's skills.
+// Refined, ...) is owned and pre-created by cenci's skills.
 var managedLabelSpecs = map[string]managedLabelSpec{
 	labelDispatchFailed: {
 		color: "b60205",
-		desc:  "agentwatch: dispatched work failed after exhausting its retry budget",
+		desc:  "cenci: dispatched work failed after exhausting its retry budget",
 	},
 	labelPlanInvalid: {
 		color: "d93f0b",
-		desc:  "agentwatch: ticket is Planned but has no parseable plan file",
+		desc:  "cenci: ticket is Planned but has no parseable plan file",
 	},
 	labelReconcileStuck: {
 		color: "5319e7",
-		desc:  "agentwatch: reconciliation itself is stuck (apply-retry budget exhausted)",
+		desc:  "cenci: reconciliation itself is stuck (apply-retry budget exhausted)",
 	},
 }
 
-// managedLabelsAmong returns the subset of names that are agentwatch-managed
+// managedLabelsAmong returns the subset of names that are cenci-managed
 // (and therefore need EnsureLabels), preserving names' order.
 func managedLabelsAmong(names []string) []string {
 	var out []string
@@ -228,7 +228,7 @@ type reconcileState struct {
 	ApplyFailures map[string]int       `json:"applyFailures"`
 }
 
-// DefaultStatePath resolves $XDG_STATE_HOME/agentwatch/reconcile.json, falling
+// DefaultStatePath resolves $XDG_STATE_HOME/cenci/reconcile.json, falling
 // back to ~/.local/state when XDG_STATE_HOME is unset.
 func DefaultStatePath() string {
 	dir := os.Getenv("XDG_STATE_HOME")
@@ -239,7 +239,7 @@ func DefaultStatePath() string {
 		}
 		dir = filepath.Join(home, ".local", "state")
 	}
-	return filepath.Join(dir, "agentwatch", "reconcile.json")
+	return filepath.Join(dir, "cenci", "reconcile.json")
 }
 
 // NewStateStore returns a disk-backed ReconcileStore. An empty path resolves

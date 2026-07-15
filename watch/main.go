@@ -17,18 +17,18 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/closecmd"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/config"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/daemon"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/dispatch"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/frontend"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/frontend/status"
-	tmuxfe "github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/frontend/tmux"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/ipc"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/run"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/sandbox"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/tmux"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/closecmd"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/config"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/daemon"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/dispatch"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/frontend"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/frontend/status"
+	tmuxfe "github.com/matteobortolazzo/cenci/watch/v4/internal/frontend/tmux"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/run"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/sandbox"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/tmux"
+	"github.com/matteobortolazzo/cenci/watch/v4/pkg/watch"
 )
 
 // version is stamped at build time via -ldflags "-X main.version=<ver>".
@@ -37,18 +37,18 @@ var version = "dev"
 
 func main() {
 	// argv[0] alias: a binary invoked (directly or via a symlink/copy) as
-	// "cn" behaves as `agentwatch open <args>` — the one forward-looking
+	// "cn" behaves as `cenci open <args>` — the one forward-looking
 	// exception ahead of the future "cenci" rename (this PR keeps every
-	// other name under the old agentwatch/agent-sand naming).
+	// other name under the old cenci/cenci-sand naming).
 	if filepath.Base(os.Args[0]) == "cn" {
 		runOpen(os.Args[1:])
 		return
 	}
 
-	// BREAKING: bare `agentwatch` (and any unrecognized top-level subcommand
+	// BREAKING: bare `cenci` (and any unrecognized top-level subcommand
 	// or flag) used to fall through to running the daemon in the foreground.
 	// It now always prints usage and exits 2 — the daemon only starts via the
-	// explicit `daemon` subcommand group below. This makes `agentwatch` with
+	// explicit `daemon` subcommand group below. This makes `cenci` with
 	// a typo'd or missing subcommand fail loudly instead of silently
 	// launching a long-running foreground process.
 	if len(os.Args) < 2 {
@@ -85,19 +85,19 @@ func main() {
 	case "help", "-h", "--help":
 		printUsage(os.Stdout)
 	default:
-		fmt.Fprintf(os.Stderr, "agentwatch: unknown subcommand %q\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "cenci: unknown subcommand %q\n", os.Args[1])
 		os.Exit(2)
 	}
 }
 
 // printUsage writes the top-level command overview to w. It is what bare
-// `agentwatch`, `agentwatch help`/`-h`/`--help`, and any unrecognized
+// `cenci`, `cenci help`/`-h`/`--help`, and any unrecognized
 // subcommand or flag print.
 func printUsage(w io.Writer) {
-	_, _ = fmt.Fprint(w, `agentwatch — attention layer for Claude Code / Codex tmux sessions
+	_, _ = fmt.Fprint(w, `cenci — attention layer for Claude Code / Codex tmux sessions
 
 Usage:
-  agentwatch <command> [flags]
+  cenci <command> [flags]
 
 Commands:
   daemon start|stop|restart|status   manage the background daemon (bare "daemon" acts as "start")
@@ -109,12 +109,12 @@ Commands:
   close                              close a finished/idle agent window
   sandbox                            manage the dev-sandbox container (build|build-base|prune|update-plugins|reseed-creds|reap-orphans|ls|stop)
   open [shortcut]                    launch or attach an interactive sandbox session (aliased by the "cn" binary name)
-  doctor                             check prerequisites and installed stack components, change nothing (delegates to the installed agent-stack wrapper)
-  update                             update installed plugins and restart the daemon (delegates to the installed agent-stack wrapper)
+  doctor                             check prerequisites and installed stack components, change nothing (delegates to the installed cenci wrapper)
+  update                             update installed plugins and restart the daemon (delegates to the installed cenci wrapper)
   version                            print the binary version
   socket-dir                         print the resolved socket directory
 
-Run 'agentwatch <command> -h' for command-specific flags where supported.
+Run 'cenci <command> -h' for command-specific flags where supported.
 `)
 }
 
@@ -122,16 +122,16 @@ Run 'agentwatch <command> -h' for command-specific flags where supported.
 // side effects (no daemon start, no config load, no dispatch pass), so it is
 // safe to use as a capability/version probe.
 func runVersion() {
-	fmt.Printf("agentwatch %s\n", version)
+	fmt.Printf("cenci %s\n", version)
 }
 
-// runSocketDir prints the resolved agentwatch socket directory to stdout and
-// exits 0, so shell consumers (dev-sandbox's agent-sand) don't reimplement
+// runSocketDir prints the resolved cenci socket directory to stdout and
+// exits 0, so shell consumers (dev-sandbox's cenci-sand) don't reimplement
 // the XDG-vs-fallback logic themselves and risk drift. Exits 1 on error.
 func runSocketDir() {
 	dir, err := ipc.DefaultSocketDir()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "agentwatch socket-dir: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cenci socket-dir: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Println(dir)
@@ -145,10 +145,10 @@ const daemonRestartReadyTimeout = 3 * time.Second
 // daemonRestartPollInterval is the polling cadence within daemonRestartReadyTimeout.
 const daemonRestartPollInterval = 50 * time.Millisecond
 
-// runDaemonGroup implements `agentwatch daemon [start|stop|restart|status]`.
+// runDaemonGroup implements `cenci daemon [start|stop|restart|status]`.
 // A bare `daemon` (no args) or `daemon` followed only by flags acts as
-// `start`, so `agentwatch daemon -v` still works exactly as the old bare
-// `agentwatch -v` did.
+// `start`, so `cenci daemon -v` still works exactly as the old bare
+// `cenci -v` did.
 func runDaemonGroup(args []string) {
 	if len(args) == 0 {
 		runDaemonStart(args)
@@ -168,13 +168,13 @@ func runDaemonGroup(args []string) {
 			runDaemonStart(args)
 			return
 		}
-		fmt.Fprintf(os.Stderr, "agentwatch daemon: unknown subcommand %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "cenci daemon: unknown subcommand %q\n", args[0])
 		os.Exit(2)
 	}
 }
 
 // runDaemonStart runs the daemon loop in the foreground — identical to the
-// pre-#daemon-lifecycle bare `agentwatch [-flags]` invocation, plus PID-file
+// pre-#daemon-lifecycle bare `cenci [-flags]` invocation, plus PID-file
 // bookkeeping: a PID file is written at ipc.DefaultPIDPath() once this
 // process has become the one live daemon (never on the "already running"
 // no-op path — see daemon.Run's onStarted contract) and removed on clean
@@ -206,7 +206,7 @@ func runDaemonStart(args []string) {
 	cfg.SweepInterval = time.Duration(sweepSec) * time.Second
 
 	if cfg.Verbose {
-		log.Printf("agentwatch starting (event-driven, sweep every %s)", cfg.SweepInterval)
+		log.Printf("cenci starting (event-driven, sweep every %s)", cfg.SweepInterval)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -250,25 +250,25 @@ func runDaemonStart(args []string) {
 	}()
 
 	if err := daemon.Run(ctx, cfg, fe, attention, onStarted); err != nil {
-		fmt.Fprintf(os.Stderr, "agentwatch: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cenci: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-// runDaemonStop implements `agentwatch daemon stop`. Exits 0 whether or not
+// runDaemonStop implements `cenci daemon stop`. Exits 0 whether or not
 // a daemon was actually stopped (idempotent) — the message on stdout reports
 // which.
 func runDaemonStop(args []string) {
 	fs := flag.NewFlagSet("daemon stop", flag.ExitOnError)
 	_ = fs.Parse(args)
 	if extra := fs.Args(); len(extra) > 0 {
-		fmt.Fprintf(os.Stderr, "agentwatch daemon stop: unexpected argument %q\n", extra[0])
+		fmt.Fprintf(os.Stderr, "cenci daemon stop: unexpected argument %q\n", extra[0])
 		os.Exit(2)
 	}
 
 	outcome, err := daemon.Stop(ipc.DefaultEventSocketPath(), ipc.DefaultPIDPath())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "agentwatch daemon stop: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cenci daemon stop: %v\n", err)
 		os.Exit(1)
 	}
 	if outcome.WasRunning {
@@ -278,21 +278,21 @@ func runDaemonStop(args []string) {
 	fmt.Println("daemon not running")
 }
 
-// runDaemonRestart implements `agentwatch daemon restart`: stop (if running),
+// runDaemonRestart implements `cenci daemon restart`: stop (if running),
 // then spawn a fresh detached daemon the same way EnsureRunning does
-// (daemon.Spawn — `agentwatch daemon start`, Setsid'd), and wait briefly for
+// (daemon.Spawn — `cenci daemon start`, Setsid'd), and wait briefly for
 // it to become reachable.
 func runDaemonRestart(args []string) {
 	fs := flag.NewFlagSet("daemon restart", flag.ExitOnError)
 	_ = fs.Parse(args)
 	if extra := fs.Args(); len(extra) > 0 {
-		fmt.Fprintf(os.Stderr, "agentwatch daemon restart: unexpected argument %q\n", extra[0])
+		fmt.Fprintf(os.Stderr, "cenci daemon restart: unexpected argument %q\n", extra[0])
 		os.Exit(2)
 	}
 
 	outcome, err := daemon.Stop(ipc.DefaultEventSocketPath(), ipc.DefaultPIDPath())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "agentwatch daemon restart: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cenci daemon restart: %v\n", err)
 		os.Exit(1)
 	}
 	if outcome.WasRunning {
@@ -309,19 +309,19 @@ func runDaemonRestart(args []string) {
 		}
 		time.Sleep(daemonRestartPollInterval)
 	}
-	fmt.Fprintln(os.Stderr, "agentwatch daemon restart: daemon did not become ready in time")
+	fmt.Fprintln(os.Stderr, "cenci daemon restart: daemon did not become ready in time")
 	os.Exit(1)
 }
 
-// runDaemonStatus implements `agentwatch daemon status`: a narrow
-// running/not-running + PID report, distinct from the broader `agentwatch
+// runDaemonStatus implements `cenci daemon status`: a narrow
+// running/not-running + PID report, distinct from the broader `cenci
 // status` overview (sessions + dispatch loop). Exits 1 when the daemon is
 // not running so scripts can branch on it; exits 0 when running.
 func runDaemonStatus(args []string) {
 	fs := flag.NewFlagSet("daemon status", flag.ExitOnError)
 	_ = fs.Parse(args)
 	if extra := fs.Args(); len(extra) > 0 {
-		fmt.Fprintf(os.Stderr, "agentwatch daemon status: unexpected argument %q\n", extra[0])
+		fmt.Fprintf(os.Stderr, "cenci daemon status: unexpected argument %q\n", extra[0])
 		os.Exit(2)
 	}
 
@@ -402,7 +402,7 @@ func runRun(args []string) {
 	model := fs.String("model", "", "model override passed to the agent")
 	session := fs.String("session", "", "target tmux session (default: current session)")
 	slug := fs.String("slug", "", "window-name slug for free-text runs (ignored for numeric tickets, which are named <number>-<skill>)")
-	configPath := fs.String("config", "", "path to config.json (default: $XDG_CONFIG_HOME/agentwatch/config.json)")
+	configPath := fs.String("config", "", "path to config.json (default: $XDG_CONFIG_HOME/cenci/config.json)")
 	dryRun := fs.Bool("dry-run", false, "print the resolved session, window name, and command without spawning")
 
 	// The stdlib flag parser stops at the first positional, but the documented
@@ -418,7 +418,7 @@ func runRun(args []string) {
 	positionals = append(positionals, fs.Args()...)
 
 	if len(positionals) < 1 {
-		fmt.Fprintln(os.Stderr, "agentwatch run: usage: agentwatch run <workflow> [ticket] [flags]")
+		fmt.Fprintln(os.Stderr, "cenci run: usage: cenci run <workflow> [ticket] [flags]")
 		os.Exit(2)
 	}
 
@@ -432,7 +432,7 @@ func runRun(args []string) {
 		DryRun:     *dryRun,
 	}
 	// Everything after the workflow is the skill argument: a ticket id or task
-	// description plus optional context (mirrors `/agentflow:<workflow> $ARGUMENTS`).
+	// description plus optional context (mirrors `/cenci:<workflow> $ARGUMENTS`).
 	// Join so unquoted multi-word context survives shell splitting.
 	if len(positionals) >= 2 {
 		opts.Ticket = strings.Join(positionals[1:], " ")
@@ -443,7 +443,7 @@ func runRun(args []string) {
 	}
 
 	if err := run.Run(opts, &tmux.ExecClient{}); err != nil {
-		fmt.Fprintf(os.Stderr, "agentwatch run: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cenci run: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -468,7 +468,7 @@ func runDispatch(args []string) {
 			// must never silently fall through to a real dispatch pass: Go's
 			// flag parser stops at the first positional and would otherwise
 			// discard everything after it, including --json/--dir.
-			fmt.Fprintf(os.Stderr, "agentwatch dispatch: unknown subcommand %q\n", args[0])
+			fmt.Fprintf(os.Stderr, "cenci dispatch: unknown subcommand %q\n", args[0])
 			os.Exit(2)
 		}
 	}
@@ -478,7 +478,7 @@ func runDispatch(args []string) {
 	interval := fs.Duration("interval", 0, "run continuously on this interval (e.g. 5m); mutually exclusive with --once")
 	dryRun := fs.Bool("dry-run", false, "print the decision table without dispatching")
 	reconcile := fs.Bool("reconcile", false, "run a single failure-reconciliation pass instead of a dispatch pass (cron path)")
-	configPath := fs.String("config", "", "path to config.json (default: $XDG_CONFIG_HOME/agentwatch/config.json)")
+	configPath := fs.String("config", "", "path to config.json (default: $XDG_CONFIG_HOME/cenci/config.json)")
 	model := fs.String("model", "", "model override for every session dispatched this pass (overrides config.json dispatch.model / agents.*.model)")
 	_ = fs.Parse(args)
 
@@ -486,13 +486,13 @@ func runDispatch(args []string) {
 	// stops at the first non-flag token, so a trailing typo or stray argument
 	// would otherwise be silently swallowed along with any flags after it.
 	if extra := fs.Args(); len(extra) > 0 {
-		fmt.Fprintf(os.Stderr, "agentwatch dispatch: unexpected argument %q\n", extra[0])
+		fmt.Fprintf(os.Stderr, "cenci dispatch: unexpected argument %q\n", extra[0])
 		os.Exit(2)
 	}
 
 	cfg, err := dispatch.LoadConfig(*configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "agentwatch dispatch: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cenci dispatch: %v\n", err)
 		os.Exit(1)
 	}
 	if *model != "" {
@@ -503,7 +503,7 @@ func runDispatch(args []string) {
 	// the dispatch/loop flags.
 	if *reconcile {
 		if _, err := dispatch.RunReconcileOnce(cfg, &dispatch.GHMutator{}, *dryRun, os.Stdout, dispatch.NewStateStore("")); err != nil {
-			fmt.Fprintf(os.Stderr, "agentwatch dispatch: %v\n", err)
+			fmt.Fprintf(os.Stderr, "cenci dispatch: %v\n", err)
 			os.Exit(1)
 		}
 		return
@@ -513,14 +513,14 @@ func runDispatch(args []string) {
 	// --interval self-loops; otherwise a single pass. --once wins if both given.
 	if *interval > 0 && !*once {
 		if err := dispatch.RunLoop(*configPath, ctrl, &dispatch.GHMutator{}, *interval, os.Stdout, *model); err != nil {
-			fmt.Fprintf(os.Stderr, "agentwatch dispatch: %v\n", err)
+			fmt.Fprintf(os.Stderr, "cenci dispatch: %v\n", err)
 			os.Exit(1)
 		}
 		return
 	}
 	prior := 0
 	if _, err := dispatch.RunOnce(cfg, ctrl, &dispatch.GHMutator{}, *dryRun, os.Stdout, &prior); err != nil {
-		fmt.Fprintf(os.Stderr, "agentwatch dispatch: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cenci dispatch: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -528,18 +528,18 @@ func runDispatch(args []string) {
 func runDispatchEnroll(args []string) {
 	fs := flag.NewFlagSet("enroll", flag.ExitOnError)
 	dir := fs.String("dir", ".", "repo directory to enroll (default: current directory)")
-	configPath := fs.String("config", "", "path to config.json (default: $XDG_CONFIG_HOME/agentwatch/config.json)")
+	configPath := fs.String("config", "", "path to config.json (default: $XDG_CONFIG_HOME/cenci/config.json)")
 	_ = fs.Parse(args)
 
 	identity, err := dispatch.DetectRepoIdentity(*dir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "agentwatch dispatch enroll: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cenci dispatch enroll: %v\n", err)
 		os.Exit(1)
 	}
 
 	changed, err := dispatch.EnrollRepo(*configPath, identity)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "agentwatch dispatch enroll: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cenci dispatch enroll: %v\n", err)
 		os.Exit(1)
 	}
 	if changed {
@@ -552,7 +552,7 @@ func runDispatchEnroll(args []string) {
 func runDispatchUnenroll(args []string) {
 	fs := flag.NewFlagSet("unenroll", flag.ExitOnError)
 	dir := fs.String("dir", ".", "repo directory to unenroll (default: current directory)")
-	configPath := fs.String("config", "", "path to config.json (default: $XDG_CONFIG_HOME/agentwatch/config.json)")
+	configPath := fs.String("config", "", "path to config.json (default: $XDG_CONFIG_HOME/cenci/config.json)")
 	repo := fs.String("repo", "", "repo (owner/name) to unenroll, bypassing git detection")
 	_ = fs.Parse(args)
 
@@ -564,7 +564,7 @@ func runDispatchUnenroll(args []string) {
 	})
 
 	if *repo != "" && dirSet {
-		fmt.Fprintln(os.Stderr, "agentwatch dispatch unenroll: --repo and --dir are mutually exclusive")
+		fmt.Fprintln(os.Stderr, "cenci dispatch unenroll: --repo and --dir are mutually exclusive")
 		os.Exit(2)
 	}
 
@@ -574,7 +574,7 @@ func runDispatchUnenroll(args []string) {
 	} else {
 		identity, err := dispatch.DetectRepoIdentity(*dir)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "agentwatch dispatch unenroll: %v\n", err)
+			fmt.Fprintf(os.Stderr, "cenci dispatch unenroll: %v\n", err)
 			os.Exit(1)
 		}
 		target = identity.Repo
@@ -582,7 +582,7 @@ func runDispatchUnenroll(args []string) {
 
 	changed, err := dispatch.UnenrollRepo(*configPath, target)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "agentwatch dispatch unenroll: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cenci dispatch unenroll: %v\n", err)
 		os.Exit(1)
 	}
 	if changed {
@@ -595,19 +595,19 @@ func runDispatchUnenroll(args []string) {
 func runDispatchStatus(args []string) {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	dir := fs.String("dir", ".", "repo directory to query (default: current directory)")
-	configPath := fs.String("config", "", "path to config.json (default: $XDG_CONFIG_HOME/agentwatch/config.json)")
+	configPath := fs.String("config", "", "path to config.json (default: $XDG_CONFIG_HOME/cenci/config.json)")
 	jsonOut := fs.Bool("json", false, "print result as JSON")
 	_ = fs.Parse(args)
 
 	identity, err := dispatch.DetectRepoIdentity(*dir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "agentwatch dispatch status: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cenci dispatch status: %v\n", err)
 		os.Exit(1)
 	}
 
 	enrollment, err := dispatch.QueryEnrollment(*configPath, identity.Repo)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "agentwatch dispatch status: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cenci dispatch status: %v\n", err)
 		os.Exit(1)
 	}
 	if !enrollment.Enrolled {
@@ -628,7 +628,7 @@ func runDispatchStatus(args []string) {
 		}
 		data, err := json.Marshal(out)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "agentwatch dispatch status: %v\n", err)
+			fmt.Fprintf(os.Stderr, "cenci dispatch status: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Println(string(data))
@@ -642,43 +642,43 @@ func runDispatchStatus(args []string) {
 	}
 }
 
-// runDispatchLoop implements `agentwatch dispatch loop on|off|status`. All
+// runDispatchLoop implements `cenci dispatch loop on|off|status`. All
 // three verbs resolve and print the current DispatchState via the same
 // socket-first/config-fallback path (dispatch.ResolveDispatchState); on/off
 // additionally persist the toggle to config.json first. Default output is
 // human-readable; --json prints the raw DispatchState.
 func runDispatchLoop(args []string) {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-		fmt.Fprintln(os.Stderr, "agentwatch dispatch loop: expected a subcommand: on, off, or status")
+		fmt.Fprintln(os.Stderr, "cenci dispatch loop: expected a subcommand: on, off, or status")
 		os.Exit(2)
 	}
 	verb := args[0]
 
 	fs := flag.NewFlagSet("loop "+verb, flag.ExitOnError)
-	configPath := fs.String("config", "", "path to config.json (default: $XDG_CONFIG_HOME/agentwatch/config.json)")
+	configPath := fs.String("config", "", "path to config.json (default: $XDG_CONFIG_HOME/cenci/config.json)")
 	jsonOut := fs.Bool("json", false, "print result as JSON")
 	_ = fs.Parse(args[1:])
 
 	if extra := fs.Args(); len(extra) > 0 {
-		fmt.Fprintf(os.Stderr, "agentwatch dispatch loop: unexpected argument %q\n", extra[0])
+		fmt.Fprintf(os.Stderr, "cenci dispatch loop: unexpected argument %q\n", extra[0])
 		os.Exit(2)
 	}
 
 	switch verb {
 	case "on":
 		if err := dispatch.SetLoopEnabled(*configPath, true); err != nil {
-			fmt.Fprintf(os.Stderr, "agentwatch dispatch loop: %v\n", err)
+			fmt.Fprintf(os.Stderr, "cenci dispatch loop: %v\n", err)
 			os.Exit(1)
 		}
 	case "off":
 		if err := dispatch.SetLoopEnabled(*configPath, false); err != nil {
-			fmt.Fprintf(os.Stderr, "agentwatch dispatch loop: %v\n", err)
+			fmt.Fprintf(os.Stderr, "cenci dispatch loop: %v\n", err)
 			os.Exit(1)
 		}
 	case "status":
 		// no mutation; just resolve and print below.
 	default:
-		fmt.Fprintf(os.Stderr, "agentwatch dispatch loop: unknown subcommand %q\n", verb)
+		fmt.Fprintf(os.Stderr, "cenci dispatch loop: unknown subcommand %q\n", verb)
 		os.Exit(2)
 	}
 
@@ -687,7 +687,7 @@ func runDispatchLoop(args []string) {
 	if *jsonOut {
 		data, err := json.Marshal(state)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "agentwatch dispatch loop: %v\n", err)
+			fmt.Fprintf(os.Stderr, "cenci dispatch loop: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Println(string(data))
@@ -741,7 +741,7 @@ func renderDispatchState(state watch.DispatchState) string {
 
 // runWidgetJSON implements the hidden plumbing subcommand `widget-json`
 // (alias `waybar`): prints a single line of Waybar custom-module JSON and
-// exits. This is the exact behavior the old `agentwatch status` had before
+// exits. This is the exact behavior the old `cenci status` had before
 // `status` became the human-readable overview below — every widget frontend
 // (noctalia, dms, gnome, plasma, macOS/SwiftBar) and any real Waybar config
 // should invoke this subcommand, not `status`.
@@ -773,12 +773,12 @@ func runWidgetJSON(args []string) {
 		if errors.Is(err, status.ErrNoOutput) {
 			os.Exit(1)
 		}
-		fmt.Fprintf(os.Stderr, "agentwatch widget-json: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cenci widget-json: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-// runStatus implements the human-readable `agentwatch status` overview:
+// runStatus implements the human-readable `cenci status` overview:
 // daemon running/pid, active sessions (read from the same broadcast state
 // snapshot widget-json reads), and the embedded fleet dispatch loop's state
 // (reusing renderDispatchState, the same renderer `dispatch loop status`
@@ -791,7 +791,7 @@ func runStatus(args []string) {
 	eventSocketPath := fs.String("event-socket", ipc.DefaultEventSocketPath(), "event socket path")
 	_ = fs.Parse(args)
 	if extra := fs.Args(); len(extra) > 0 {
-		fmt.Fprintf(os.Stderr, "agentwatch status: unexpected argument %q\n", extra[0])
+		fmt.Fprintf(os.Stderr, "cenci status: unexpected argument %q\n", extra[0])
 		os.Exit(2)
 	}
 
@@ -844,7 +844,7 @@ func renderHumanStatus(info daemon.StatusInfo, socketPath string) string {
 	return b.String()
 }
 
-// runClose implements `agentwatch close <ticket-number|window-name> [--force]
+// runClose implements `cenci close <ticket-number|window-name> [--force]
 // [--dry-run] [--socket PATH]`. It resolves the target against the daemon's
 // live window registry (never re-derives a tmux target itself) and closes
 // every matched window that isn't running/waiting for input, unless --force
@@ -852,7 +852,7 @@ func renderHumanStatus(info daemon.StatusInfo, socketPath string) string {
 // function only parses flags and renders the result.
 func runClose(args []string) {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-		fmt.Fprintln(os.Stderr, "agentwatch close: usage: agentwatch close <ticket-number|window-name> [--force] [--dry-run] [--socket PATH]")
+		fmt.Fprintln(os.Stderr, "cenci close: usage: cenci close <ticket-number|window-name> [--force] [--dry-run] [--socket PATH]")
 		os.Exit(2)
 	}
 	target := args[0]
@@ -867,7 +867,7 @@ func runClose(args []string) {
 	// fs.Args() after the target and recognized flags is unexpected — mirrors
 	// the "dispatch"/"dispatch loop" trailing-positional guards above.
 	if extra := fs.Args(); len(extra) > 0 {
-		fmt.Fprintf(os.Stderr, "agentwatch close: unexpected argument %q\n", extra[0])
+		fmt.Fprintf(os.Stderr, "cenci close: unexpected argument %q\n", extra[0])
 		os.Exit(2)
 	}
 
@@ -882,19 +882,19 @@ func runClose(args []string) {
 	if err != nil && len(decisions) == 0 {
 		// Daemon unreachable (or every match failed to kill): fail safe, no
 		// partial output.
-		fmt.Fprintf(os.Stderr, "agentwatch close: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cenci close: %v\n", err)
 		os.Exit(1)
 	}
 
 	printCloseDecisions(os.Stdout, target, decisions)
 
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "agentwatch close: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cenci close: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-// printCloseDecisions renders the outcome of `agentwatch close`. No matches
+// printCloseDecisions renders the outcome of `cenci close`. No matches
 // is reported explicitly (rather than silent empty output) so a caller can
 // distinguish "ran and found nothing" from "produced no output"; both cases
 // exit 0 since cleanup running after a window is already gone is expected
@@ -919,20 +919,22 @@ func printCloseDecisions(w io.Writer, target string, decisions []closecmd.Decisi
 // -- doctor / update ------------------------------------------------------
 
 // wrapperBinaryName is the curl-and-exec front door installed on user
-// machines (see the repo-root `agent-stack` script), which routes
-// "doctor"/"update" into install.sh's MODE handling. `agentwatch
+// machines (see the repo-root `cenci` script), which routes
+// "doctor"/"update" into install.sh's MODE handling. `cenci
 // doctor`/`update` shell out to it rather than reimplementing installer logic
-// in Go, so there is exactly one implementation of each mode.
-const wrapperBinaryName = "agent-stack"
+// in Go, so there is exactly one implementation of each mode. It is installed
+// on PATH as "cenci-installer" (not "cenci") to avoid colliding with the
+// "cenci" launcher symlink that points at this very daemon binary.
+const wrapperBinaryName = "cenci-installer"
 
-// runDoctor implements `agentwatch doctor`: shells out to the installed
-// `agent-stack doctor` wrapper.
+// runDoctor implements `cenci doctor`: shells out to the installed
+// `cenci doctor` wrapper.
 func runDoctor(args []string) {
 	runWrapperMode("doctor", args)
 }
 
-// runUpdate implements `agentwatch update`: shells out to the installed
-// `agent-stack update` wrapper.
+// runUpdate implements `cenci update`: shells out to the installed
+// `cenci update` wrapper.
 func runUpdate(args []string) {
 	runWrapperMode("update", args)
 }
@@ -947,13 +949,13 @@ func runWrapperMode(mode string, args []string) {
 	fs := flag.NewFlagSet(mode, flag.ExitOnError)
 	_ = fs.Parse(args)
 	if extra := fs.Args(); len(extra) > 0 {
-		fmt.Fprintf(os.Stderr, "agentwatch %s: unexpected argument %q\n", mode, extra[0])
+		fmt.Fprintf(os.Stderr, "cenci %s: unexpected argument %q\n", mode, extra[0])
 		os.Exit(2)
 	}
 
 	path, err := exec.LookPath(wrapperBinaryName)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "agentwatch %s: %s not found on PATH — re-run the agent-stack installer to create it\n", mode, wrapperBinaryName)
+		fmt.Fprintf(os.Stderr, "cenci %s: %s not found on PATH — re-run the cenci installer to create it\n", mode, wrapperBinaryName)
 		os.Exit(1)
 	}
 
@@ -966,21 +968,21 @@ func runWrapperMode(mode string, args []string) {
 		if errors.As(err, &exitErr) {
 			os.Exit(exitErr.ExitCode())
 		}
-		fmt.Fprintf(os.Stderr, "agentwatch %s: %v\n", mode, err)
+		fmt.Fprintf(os.Stderr, "cenci %s: %v\n", mode, err)
 		os.Exit(1)
 	}
 }
 
 // -- sandbox ----------------------------------------------------------
 
-// runSandboxGroup implements `agentwatch sandbox <verb> [flags]`. The batch
+// runSandboxGroup implements `cenci sandbox <verb> [flags]`. The batch
 // verbs (build, build-base, update-plugins, reseed-creds, reap-orphans) and
 // prune translate 1:1 (plus prune's optional --volumes) into a single
-// dev-sandbox/agent-sand invocation; ls and stop are implemented natively in
-// Go against docker/podman since agent-sand has no equivalent flag for them.
+// dev-sandbox/cenci-sand invocation; ls and stop are implemented natively in
+// Go against docker/podman since cenci-sand has no equivalent flag for them.
 func runSandboxGroup(args []string) {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-		fmt.Fprintln(os.Stderr, "agentwatch sandbox: expected a subcommand: build, build-base, prune, update-plugins, reseed-creds, reap-orphans, ls, stop")
+		fmt.Fprintln(os.Stderr, "cenci sandbox: expected a subcommand: build, build-base, prune, update-plugins, reseed-creds, reap-orphans, ls, stop")
 		os.Exit(2)
 	}
 	verb := args[0]
@@ -996,45 +998,45 @@ func runSandboxGroup(args []string) {
 	case "stop":
 		runSandboxStop(rest)
 	default:
-		fmt.Fprintf(os.Stderr, "agentwatch sandbox: unknown subcommand %q\n", verb)
+		fmt.Fprintf(os.Stderr, "cenci sandbox: unknown subcommand %q\n", verb)
 		os.Exit(2)
 	}
 }
 
 // runSandboxBatch implements the batch verbs that take no flags of their own
-// and translate to a single agent-sand long flag (internal/sandbox's
+// and translate to a single cenci-sand long flag (internal/sandbox's
 // BatchFlag table). Unknown flags or any trailing positional are a usage
-// error (exit 2) before agent-sand is ever invoked.
+// error (exit 2) before cenci-sand is ever invoked.
 func runSandboxBatch(verb string, args []string) {
 	fs := flag.NewFlagSet("sandbox "+verb, flag.ExitOnError)
 	_ = fs.Parse(args)
 	if extra := fs.Args(); len(extra) > 0 {
-		fmt.Fprintf(os.Stderr, "agentwatch sandbox %s: unexpected argument %q\n", verb, extra[0])
+		fmt.Fprintf(os.Stderr, "cenci sandbox %s: unexpected argument %q\n", verb, extra[0])
 		os.Exit(2)
 	}
 
 	agentSandFlag, ok := sandbox.BatchFlag(verb)
 	if !ok {
-		fmt.Fprintf(os.Stderr, "agentwatch sandbox: unknown subcommand %q\n", verb)
+		fmt.Fprintf(os.Stderr, "cenci sandbox: unknown subcommand %q\n", verb)
 		os.Exit(2)
 	}
 
 	code, err := sandbox.RunAgentSand([]string{agentSandFlag}, os.Stdin, os.Stdout, os.Stderr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "agentwatch sandbox %s: %v\n", verb, err)
+		fmt.Fprintf(os.Stderr, "cenci sandbox %s: %v\n", verb, err)
 		os.Exit(1)
 	}
 	os.Exit(code)
 }
 
-// runSandboxPrune implements `agentwatch sandbox prune [--volumes]`, the one
+// runSandboxPrune implements `cenci sandbox prune [--volumes]`, the one
 // batch verb with a flag of its own.
 func runSandboxPrune(args []string) {
 	fs := flag.NewFlagSet("sandbox prune", flag.ExitOnError)
 	volumes := fs.Bool("volumes", false, "also prompt to remove stale sandbox home volumes")
 	_ = fs.Parse(args)
 	if extra := fs.Args(); len(extra) > 0 {
-		fmt.Fprintf(os.Stderr, "agentwatch sandbox prune: unexpected argument %q\n", extra[0])
+		fmt.Fprintf(os.Stderr, "cenci sandbox prune: unexpected argument %q\n", extra[0])
 		os.Exit(2)
 	}
 
@@ -1045,30 +1047,30 @@ func runSandboxPrune(args []string) {
 
 	code, err := sandbox.RunAgentSand(argv, os.Stdin, os.Stdout, os.Stderr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "agentwatch sandbox prune: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cenci sandbox prune: %v\n", err)
 		os.Exit(1)
 	}
 	os.Exit(code)
 }
 
-// runSandboxLs implements `agentwatch sandbox ls`: lists every
+// runSandboxLs implements `cenci sandbox ls`: lists every
 // claude-sand-*/codex-sand-* container (running or stopped) as a table.
 func runSandboxLs(args []string) {
 	fs := flag.NewFlagSet("sandbox ls", flag.ExitOnError)
 	_ = fs.Parse(args)
 	if extra := fs.Args(); len(extra) > 0 {
-		fmt.Fprintf(os.Stderr, "agentwatch sandbox ls: unexpected argument %q\n", extra[0])
+		fmt.Fprintf(os.Stderr, "cenci sandbox ls: unexpected argument %q\n", extra[0])
 		os.Exit(2)
 	}
 
 	runtime, err := sandbox.ContainerRuntime()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "agentwatch sandbox ls: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cenci sandbox ls: %v\n", err)
 		os.Exit(1)
 	}
 	containers, err := sandbox.ListContainers(runtime)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "agentwatch sandbox ls: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cenci sandbox ls: %v\n", err)
 		os.Exit(1)
 	}
 	if len(containers) == 0 {
@@ -1084,7 +1086,7 @@ func runSandboxLs(args []string) {
 	_ = w.Flush()
 }
 
-// runSandboxStop implements `agentwatch sandbox stop [name-or-slug-filter]`:
+// runSandboxStop implements `cenci sandbox stop [name-or-slug-filter]`:
 // stops every running claude-sand-*/codex-sand-* container, optionally
 // narrowed to names containing the given filter substring.
 func runSandboxStop(args []string) {
@@ -1092,7 +1094,7 @@ func runSandboxStop(args []string) {
 	_ = fs.Parse(args)
 	extra := fs.Args()
 	if len(extra) > 1 {
-		fmt.Fprintf(os.Stderr, "agentwatch sandbox stop: unexpected argument %q\n", extra[1])
+		fmt.Fprintf(os.Stderr, "cenci sandbox stop: unexpected argument %q\n", extra[1])
 		os.Exit(2)
 	}
 	var filter string
@@ -1102,12 +1104,12 @@ func runSandboxStop(args []string) {
 
 	runtime, err := sandbox.ContainerRuntime()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "agentwatch sandbox stop: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cenci sandbox stop: %v\n", err)
 		os.Exit(1)
 	}
 	names, err := sandbox.RunningSandboxContainers(runtime, filter)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "agentwatch sandbox stop: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cenci sandbox stop: %v\n", err)
 		os.Exit(1)
 	}
 	if len(names) == 0 {
@@ -1116,7 +1118,7 @@ func runSandboxStop(args []string) {
 	}
 
 	if err := sandbox.StopContainers(runtime, names, os.Stdout, os.Stderr); err != nil {
-		fmt.Fprintf(os.Stderr, "agentwatch sandbox stop: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cenci sandbox stop: %v\n", err)
 		os.Exit(1)
 	}
 	for _, name := range names {
@@ -1126,13 +1128,13 @@ func runSandboxStop(args []string) {
 
 // -- open ---------------------------------------------------------------
 
-// runOpen implements `agentwatch open [shortcut] [flags] [-- passthrough]`
+// runOpen implements `cenci open [shortcut] [flags] [-- passthrough]`
 // (and the "cn" argv[0] alias, which prepends no extra token — args here is
-// already everything after the binary name). It execs agent-sand, replacing
+// already everything after the binary name). It execs cenci-sand, replacing
 // this process, so the interactive session owns the TTY.
 //
 // Grammar: an optional one-token shortcut (ch/cs/co/cf, xl/xt/xs — mirroring
-// dev-sandbox/agent-sand's own shortcut tables exactly) may appear first;
+// dev-sandbox/cenci-sand's own shortcut tables exactly) may appear first;
 // after that, only the recognized flags below and an optional "--"
 // passthrough sentinel are accepted. Any other leading positional is a usage
 // error, matching the strict-parsing convention used by the other verbs in
@@ -1143,7 +1145,7 @@ func runOpen(args []string) {
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		agent, model, ok := sandbox.ResolveShortcut(args[0])
 		if !ok {
-			fmt.Fprintf(os.Stderr, "agentwatch open: unrecognized shortcut %q (expected one of ch, cs, co, cf, xl, xt, xs)\n", args[0])
+			fmt.Fprintf(os.Stderr, "cenci open: unrecognized shortcut %q (expected one of ch, cs, co, cf, xl, xt, xs)\n", args[0])
 			os.Exit(2)
 		}
 		shortcutToken, shortcutAgent, shortcutModel = args[0], agent, model
@@ -1173,16 +1175,16 @@ func runOpen(args []string) {
 	hostNetworkFlag := fs.Bool("host-network", false, "use host network mode")
 	_ = fs.Parse(args)
 	if extra := fs.Args(); len(extra) > 0 {
-		fmt.Fprintf(os.Stderr, "agentwatch open: unexpected argument %q\n", extra[0])
+		fmt.Fprintf(os.Stderr, "cenci open: unexpected argument %q\n", extra[0])
 		os.Exit(2)
 	}
 
 	// A shortcut implies a specific agent; a later explicit --agent that
 	// disagrees would silently pair the wrong agent with the shortcut's
 	// model, so reject the conflicting combination instead (mirrors
-	// agent-sand's own shortcut/--agent consistency check).
+	// cenci-sand's own shortcut/--agent consistency check).
 	if hasShortcut && *agentFlag != "" && *agentFlag != shortcutAgent {
-		fmt.Fprintf(os.Stderr, "agentwatch open: shortcut %q selects the %s agent, but --agent %s was also given. Drop the shortcut or the --agent flag so they agree.\n", shortcutToken, shortcutAgent, *agentFlag)
+		fmt.Fprintf(os.Stderr, "cenci open: shortcut %q selects the %s agent, but --agent %s was also given. Drop the shortcut or the --agent flag so they agree.\n", shortcutToken, shortcutAgent, *agentFlag)
 		os.Exit(2)
 	}
 
@@ -1223,7 +1225,7 @@ func runOpen(args []string) {
 	}
 
 	if err := sandbox.ExecAgentSand(argv); err != nil {
-		fmt.Fprintf(os.Stderr, "agentwatch open: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cenci open: %v\n", err)
 		os.Exit(1)
 	}
 }

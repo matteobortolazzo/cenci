@@ -8,8 +8,8 @@ package frontend
 import (
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/detect"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/detect"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/ipc"
 )
 
 // SessionState is the daemon core's view of one agent session.
@@ -55,7 +55,7 @@ type Frontend interface {
 	WindowInfo(sessionKey string) *WindowInfo
 	// RenderHeadroom pushes per-agent-type token-budget headroom (0.0-1.0,
 	// keyed by agent type as reported by the reconciler) to the frontend's
-	// presentation layer (tmux: session-scoped @agentwatch-headroom-<agent>
+	// presentation layer (tmux: session-scoped @cenci-headroom-<agent>
 	// user variables). Agents absent from headroom that were previously
 	// present must have their presentation state cleared.
 	RenderHeadroom(headroom map[string]float64)

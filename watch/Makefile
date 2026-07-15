@@ -1,5 +1,5 @@
-BINARY := agentwatch
-MODULE := github.com/matteobortolazzo/agent-stack/agentwatch/v4
+BINARY := cenci
+MODULE := github.com/matteobortolazzo/cenci/watch/v4
 VERSION ?= dev
 
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
@@ -19,7 +19,7 @@ build:
 # of triggering a download of the (possibly unreleased) plugin version.
 plugin-bin:
 	go build -ldflags "-s -w -X main.version=$(PLUGIN_VERSION)" -o plugin/bin/$(BINARY) .
-	printf '%s\n' "$(PLUGIN_VERSION)" > plugin/bin/.agentwatch-version
+	printf '%s\n' "$(PLUGIN_VERSION)" > plugin/bin/.cenci-version
 
 test: test-plugins
 	go test ./...

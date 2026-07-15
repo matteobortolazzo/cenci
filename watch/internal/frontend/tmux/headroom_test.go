@@ -4,12 +4,12 @@ import (
 	"math"
 	"testing"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/config"
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/tmux/tmuxtest"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/config"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/tmux/tmuxtest"
 )
 
 // TestRenderHeadroom_SingleAgent covers #171: a single agent-type's headroom
-// is exposed as a session-wide (global) @agentwatch-headroom-<agent> tmux
+// is exposed as a session-wide (global) @cenci-headroom-<agent> tmux
 // user variable, rounded to the nearest integer percent.
 func TestRenderHeadroom_SingleAgent(t *testing.T) {
 	mc := &tmuxtest.MockClient{}
@@ -17,12 +17,12 @@ func TestRenderHeadroom_SingleAgent(t *testing.T) {
 
 	f.RenderHeadroom(map[string]float64{"claude": 0.73})
 
-	got, ok := tmuxtest.FindOpt(mc.Opts, "@agentwatch-headroom-claude")
+	got, ok := tmuxtest.FindOpt(mc.Opts, "@cenci-headroom-claude")
 	if !ok {
-		t.Fatalf("expected @agentwatch-headroom-claude to be set, opts: %+v", mc.Opts)
+		t.Fatalf("expected @cenci-headroom-claude to be set, opts: %+v", mc.Opts)
 	}
 	if got != "73" {
-		t.Errorf("@agentwatch-headroom-claude = %q, want %q", got, "73")
+		t.Errorf("@cenci-headroom-claude = %q, want %q", got, "73")
 	}
 }
 
@@ -34,20 +34,20 @@ func TestRenderHeadroom_MultipleAgents(t *testing.T) {
 
 	f.RenderHeadroom(map[string]float64{"claude": 0.73, "codex": 0.4})
 
-	gotClaude, ok := tmuxtest.FindOpt(mc.Opts, "@agentwatch-headroom-claude")
+	gotClaude, ok := tmuxtest.FindOpt(mc.Opts, "@cenci-headroom-claude")
 	if !ok {
-		t.Fatalf("expected @agentwatch-headroom-claude to be set, opts: %+v", mc.Opts)
+		t.Fatalf("expected @cenci-headroom-claude to be set, opts: %+v", mc.Opts)
 	}
 	if gotClaude != "73" {
-		t.Errorf("@agentwatch-headroom-claude = %q, want %q", gotClaude, "73")
+		t.Errorf("@cenci-headroom-claude = %q, want %q", gotClaude, "73")
 	}
 
-	gotCodex, ok := tmuxtest.FindOpt(mc.Opts, "@agentwatch-headroom-codex")
+	gotCodex, ok := tmuxtest.FindOpt(mc.Opts, "@cenci-headroom-codex")
 	if !ok {
-		t.Fatalf("expected @agentwatch-headroom-codex to be set, opts: %+v", mc.Opts)
+		t.Fatalf("expected @cenci-headroom-codex to be set, opts: %+v", mc.Opts)
 	}
 	if gotCodex != "40" {
-		t.Errorf("@agentwatch-headroom-codex = %q, want %q", gotCodex, "40")
+		t.Errorf("@cenci-headroom-codex = %q, want %q", gotCodex, "40")
 	}
 }
 
@@ -78,12 +78,12 @@ func TestRenderHeadroom_RoundingAndClamping(t *testing.T) {
 
 			f.RenderHeadroom(map[string]float64{"claude": tc.value})
 
-			got, ok := tmuxtest.FindOpt(mc.Opts, "@agentwatch-headroom-claude")
+			got, ok := tmuxtest.FindOpt(mc.Opts, "@cenci-headroom-claude")
 			if !ok {
-				t.Fatalf("expected @agentwatch-headroom-claude to be set, opts: %+v", mc.Opts)
+				t.Fatalf("expected @cenci-headroom-claude to be set, opts: %+v", mc.Opts)
 			}
 			if got != tc.want {
-				t.Errorf("RenderHeadroom(%v): @agentwatch-headroom-claude = %q, want %q", tc.value, got, tc.want)
+				t.Errorf("RenderHeadroom(%v): @cenci-headroom-claude = %q, want %q", tc.value, got, tc.want)
 			}
 		})
 	}
@@ -100,21 +100,21 @@ func TestRenderHeadroom_ClearsOnDisappear(t *testing.T) {
 	f.RenderHeadroom(map[string]float64{"claude": 0.73, "codex": 0.4})
 	f.RenderHeadroom(map[string]float64{"codex": 0.4})
 
-	got, ok := tmuxtest.FindOpt(mc.Opts, "@agentwatch-headroom-claude")
+	got, ok := tmuxtest.FindOpt(mc.Opts, "@cenci-headroom-claude")
 	if !ok {
-		t.Fatalf("expected @agentwatch-headroom-claude to have a recorded (clearing) SetOption call, opts: %+v", mc.Opts)
+		t.Fatalf("expected @cenci-headroom-claude to have a recorded (clearing) SetOption call, opts: %+v", mc.Opts)
 	}
 	if got != "" {
-		t.Errorf("@agentwatch-headroom-claude = %q, want cleared (\"\")", got)
+		t.Errorf("@cenci-headroom-claude = %q, want cleared (\"\")", got)
 	}
 
 	// codex must remain set, untouched by the clear of claude.
-	gotCodex, ok := tmuxtest.FindOpt(mc.Opts, "@agentwatch-headroom-codex")
+	gotCodex, ok := tmuxtest.FindOpt(mc.Opts, "@cenci-headroom-codex")
 	if !ok {
-		t.Fatalf("expected @agentwatch-headroom-codex to be set, opts: %+v", mc.Opts)
+		t.Fatalf("expected @cenci-headroom-codex to be set, opts: %+v", mc.Opts)
 	}
 	if gotCodex != "40" {
-		t.Errorf("@agentwatch-headroom-codex = %q, want %q", gotCodex, "40")
+		t.Errorf("@cenci-headroom-codex = %q, want %q", gotCodex, "40")
 	}
 }
 
@@ -133,8 +133,8 @@ func TestRenderHeadroom_EmptyMapOnFirstCall(t *testing.T) {
 
 // TestCleanup_ClearsAllTrackedHeadroomVars mirrors the existing
 // symbol/style cleanup behavior (restoreWindowIndicators clears
-// @agentwatch-style/@agentwatch-symbol): Cleanup must clear every
-// @agentwatch-headroom-<agent> variable it has ever set.
+// @cenci-style/@cenci-symbol): Cleanup must clear every
+// @cenci-headroom-<agent> variable it has ever set.
 func TestCleanup_ClearsAllTrackedHeadroomVars(t *testing.T) {
 	mc := &tmuxtest.MockClient{}
 	f := New(config.Default(), mc)
@@ -143,12 +143,12 @@ func TestCleanup_ClearsAllTrackedHeadroomVars(t *testing.T) {
 
 	f.Cleanup(nil)
 
-	gotClaude, ok := tmuxtest.FindOpt(mc.Opts, "@agentwatch-headroom-claude")
+	gotClaude, ok := tmuxtest.FindOpt(mc.Opts, "@cenci-headroom-claude")
 	if !ok || gotClaude != "" {
-		t.Errorf("@agentwatch-headroom-claude after Cleanup = (%q, %v), want cleared", gotClaude, ok)
+		t.Errorf("@cenci-headroom-claude after Cleanup = (%q, %v), want cleared", gotClaude, ok)
 	}
-	gotCodex, ok := tmuxtest.FindOpt(mc.Opts, "@agentwatch-headroom-codex")
+	gotCodex, ok := tmuxtest.FindOpt(mc.Opts, "@cenci-headroom-codex")
 	if !ok || gotCodex != "" {
-		t.Errorf("@agentwatch-headroom-codex after Cleanup = (%q, %v), want cleared", gotCodex, ok)
+		t.Errorf("@cenci-headroom-codex after Cleanup = (%q, %v), want cleared", gotCodex, ok)
 	}
 }

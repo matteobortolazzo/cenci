@@ -36,7 +36,7 @@ type Client interface {
 	SetWindowOption(target string, key string, value string) error
 	GetWindowOption(target string, key string) (string, error)
 	// SetOption sets a session-wide (global) tmux option, e.g. for user
-	// variables like @agentwatch-headroom-<agent> that aren't scoped to a
+	// variables like @cenci-headroom-<agent> that aren't scoped to a
 	// single window.
 	SetOption(key string, value string) error
 }

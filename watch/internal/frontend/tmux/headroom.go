@@ -6,7 +6,7 @@ import (
 	"strconv"
 )
 
-// RenderHeadroom sets/clears session-scoped @agentwatch-headroom-<agent>
+// RenderHeadroom sets/clears session-scoped @cenci-headroom-<agent>
 // global tmux user variables from the reconciler's per-agent-type headroom
 // map (#171). Values are rounded to the nearest integer percent and clamped
 // to 0..100. Only changed values trigger a SetOption call. Agents previously
@@ -17,7 +17,7 @@ func (f *Frontend) RenderHeadroom(headroom map[string]float64) {
 		if f.headroomVars[agent] == value {
 			continue
 		}
-		f.setOpt(headroomVarName(agent), value, "error setting @agentwatch-headroom-"+agent)
+		f.setOpt(headroomVarName(agent), value, "error setting @cenci-headroom-"+agent)
 		f.headroomVars[agent] = value
 	}
 
@@ -25,7 +25,7 @@ func (f *Frontend) RenderHeadroom(headroom map[string]float64) {
 		if _, ok := headroom[agent]; ok {
 			continue
 		}
-		f.setOpt(headroomVarName(agent), "", "error clearing @agentwatch-headroom-"+agent)
+		f.setOpt(headroomVarName(agent), "", "error clearing @cenci-headroom-"+agent)
 		delete(f.headroomVars, agent)
 	}
 }
@@ -33,7 +33,7 @@ func (f *Frontend) RenderHeadroom(headroom map[string]float64) {
 // headroomVarName returns the tmux global user variable name for an agent
 // type's headroom.
 func headroomVarName(agent string) string {
-	return "@agentwatch-headroom-" + agent
+	return "@cenci-headroom-" + agent
 }
 
 // clampPercent rounds a 0.0-1.0 fraction to the nearest integer percent,

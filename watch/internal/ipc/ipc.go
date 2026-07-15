@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/v4/pkg/watch"
 )
 
 // The read-side contract (state types and streaming client) lives in the public
@@ -24,7 +24,7 @@ type (
 	Client          = watch.Client
 )
 
-// Dial connects to the agentwatch broadcast socket. It is re-exported from
+// Dial connects to the cenci broadcast socket. It is re-exported from
 // pkg/watch so existing internal callers keep working.
 var Dial = watch.Dial
 
@@ -32,7 +32,7 @@ var Dial = watch.Dial
 // when a live listener is already bound to the target socket path. Callers can
 // treat this as a signal that another daemon owns the socket and back off
 // instead of stealing it.
-var ErrAlreadyRunning = errors.New("agentwatch: daemon already running")
+var ErrAlreadyRunning = errors.New("cenci: daemon already running")
 
 // aliveDialTimeout bounds the probe that checks whether an existing socket has a
 // live listener. It is short because the socket is local and a stale socket has
@@ -67,15 +67,15 @@ func safeListen(socketPath string) (net.Listener, error) {
 }
 
 // DefaultSocketPath returns the default broadcast Unix socket path
-// (<SocketDir>/agentwatch.sock). It is re-exported from pkg/watch.
+// (<SocketDir>/cenci.sock). It is re-exported from pkg/watch.
 func DefaultSocketPath() string { return watch.DefaultSocketPath() }
 
-// DefaultSocketDir returns the resolved agentwatch socket directory
+// DefaultSocketDir returns the resolved cenci socket directory
 // (creating it with 0700 if missing). It is re-exported from pkg/watch so
 // main.go's CLI routing doesn't need its own import of pkg/watch.
 func DefaultSocketDir() (string, error) { return watch.SocketDir() }
 
-// DefaultPIDPath returns the daemon PID file path (<SocketDir>/agentwatch.pid).
+// DefaultPIDPath returns the daemon PID file path (<SocketDir>/cenci.pid).
 // It is re-exported from pkg/watch, mirroring DefaultSocketPath/
 // DefaultSocketDir above.
 func DefaultPIDPath() string { return watch.DefaultPIDPath() }
@@ -88,7 +88,7 @@ func DefaultEventSocketPath() string {
 	dir, err := watch.SocketDir()
 	if err != nil {
 		log.Printf("warning: could not create secure socket dir: %v; using fallback event-socket path", err)
-		return filepath.Join(os.TempDir(), fmt.Sprintf("agentwatch-events-%d.sock", os.Getuid()))
+		return filepath.Join(os.TempDir(), fmt.Sprintf("cenci-events-%d.sock", os.Getuid()))
 	}
-	return filepath.Join(dir, "agentwatch-events.sock")
+	return filepath.Join(dir, "cenci-events.sock")
 }

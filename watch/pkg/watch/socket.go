@@ -9,7 +9,7 @@ import (
 
 // secureSocketDir returns a directory suitable for Unix sockets.
 // Uses $XDG_RUNTIME_DIR if set and valid (exists, is a real directory, not world/group-writable),
-// otherwise creates /tmp/agentwatch-<uid>/ with 0700 permissions.
+// otherwise creates /tmp/cenci-<uid>/ with 0700 permissions.
 func secureSocketDir() (string, error) {
 	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
 		info, err := os.Lstat(dir)
@@ -19,7 +19,7 @@ func secureSocketDir() (string, error) {
 		// XDG_RUNTIME_DIR is not usable (missing, symlink, or wrong perms);
 		// fall through to /tmp fallback.
 	}
-	dir := filepath.Join(os.TempDir(), fmt.Sprintf("agentwatch-%d", os.Getuid()))
+	dir := filepath.Join(os.TempDir(), fmt.Sprintf("cenci-%d", os.Getuid()))
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", err
 	}
@@ -29,8 +29,8 @@ func secureSocketDir() (string, error) {
 	return dir, nil
 }
 
-// SocketDir returns the dedicated agentwatch/ subdirectory nested under the
-// shared, XDG-aware runtime directory: <secureSocketDir>/agentwatch/. Nesting
+// SocketDir returns the dedicated cenci/ subdirectory nested under the
+// shared, XDG-aware runtime directory: <secureSocketDir>/cenci/. Nesting
 // keeps this directory mountable in isolation (the shared XDG runtime dir
 // also holds wayland/pulse/keyring sockets that must not leak into a sandbox).
 // It is created with 0700 permissions if missing. Creation is idempotent
@@ -41,14 +41,14 @@ func secureSocketDir() (string, error) {
 // avoid a container/host symlink-swap attack. If a pre-existing directory has
 // group/other-accessible permissions, a non-fatal warning is logged but the
 // directory is still returned (no chmod fight with an already-mounted dir).
-// This is the single home of the runtime-dir fallback logic; other agentwatch
+// This is the single home of the runtime-dir fallback logic; other cenci
 // packages build their socket paths from it.
 func SocketDir() (string, error) {
 	base, err := secureSocketDir()
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(base, "agentwatch")
+	dir := filepath.Join(base, "cenci")
 	info, statErr := os.Lstat(dir)
 	switch {
 	case os.IsNotExist(statErr):
@@ -85,22 +85,22 @@ func defaultSocketPath(name string) string {
 }
 
 // DefaultSocketPath returns the broadcast socket path that subscribers connect
-// to with Dial. It resolves to <SocketDir>/agentwatch.sock, falling back to
-// /tmp/agentwatch-<uid>.sock if the secure directory cannot be created.
-func DefaultSocketPath() string { return defaultSocketPath("agentwatch") }
+// to with Dial. It resolves to <SocketDir>/cenci.sock, falling back to
+// /tmp/cenci-<uid>.sock if the secure directory cannot be created.
+func DefaultSocketPath() string { return defaultSocketPath("cenci") }
 
 // DefaultPIDPath returns the path of the daemon's PID file, nested under
-// SocketDir() alongside the broadcast/event sockets: <SocketDir>/agentwatch.pid.
-// Falls back to /tmp/agentwatch-<uid>.pid if the secure directory cannot be
+// SocketDir() alongside the broadcast/event sockets: <SocketDir>/cenci.pid.
+// Falls back to /tmp/cenci-<uid>.pid if the secure directory cannot be
 // created, mirroring the other Default*Path fallbacks in this file. The PID
-// file records the process ID of the running `agentwatch daemon start`
+// file records the process ID of the running `cenci daemon start`
 // process so `daemon stop`/`daemon status` can locate it without scanning the
 // process table.
 func DefaultPIDPath() string {
 	dir, err := SocketDir()
 	if err != nil {
 		log.Printf("warning: could not create secure socket dir: %v; using fallback pid path", err)
-		return filepath.Join(os.TempDir(), fmt.Sprintf("agentwatch-%d.pid", os.Getuid()))
+		return filepath.Join(os.TempDir(), fmt.Sprintf("cenci-%d.pid", os.Getuid()))
 	}
-	return filepath.Join(dir, "agentwatch.pid")
+	return filepath.Join(dir, "cenci.pid")
 }

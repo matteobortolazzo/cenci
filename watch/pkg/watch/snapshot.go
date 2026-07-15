@@ -42,7 +42,7 @@ type WindowState struct {
 	WindowIndex string `json:"window_index"`
 	// WindowName is the "<number>-<skill>" window name (e.g. "42-implement"),
 	// where skill is the running workflow. The leading ticket number is the
-	// stable join key external tools use to associate agentwatch state with
+	// stable join key external tools use to associate cenci state with
 	// their own records (for example, badging a kanban card by number prefix).
 	// A free-text run with no ticket number keeps a descriptive slug instead.
 	WindowName string `json:"window_name"`
@@ -56,7 +56,7 @@ type WindowState struct {
 	// Omitted from the JSON when empty.
 	Agent string `json:"agent,omitempty"`
 	// ManuallyNamed reports whether the window name was set by the user rather
-	// than derived by agentwatch.
+	// than derived by cenci.
 	ManuallyNamed bool `json:"manually_named"`
 }
 

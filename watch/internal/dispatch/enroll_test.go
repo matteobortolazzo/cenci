@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/run"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/run"
 )
 
 // -- test helpers --------------------------------------------------------

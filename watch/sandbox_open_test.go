@@ -10,19 +10,19 @@ import (
 
 // -- fakes -------------------------------------------------------------
 //
-// These black-box tests exercise the real built `agentwatch` binary as a
+// These black-box tests exercise the real built `cenci` binary as a
 // subprocess (binaryPath, built once in TestMain in main_test.go) with PATH
-// overridden to a temp dir containing fake `agent-sand`/`docker`/`podman`
+// overridden to a temp dir containing fake `cenci-sand`/`docker`/`podman`
 // scripts. Fakes are plain POSIX `/bin/sh` scripts (not `#!/usr/bin/env ...`)
 // so they resolve without depending on the overridden PATH containing a
 // shell.
 
-// writeFakeAgentSand writes a fake `agent-sand` to dir that records the argv
+// writeFakeAgentSand writes a fake `cenci-sand` to dir that records the argv
 // it receives (one arg per line) to captureFile and exits with exitCode.
 func writeFakeAgentSand(t *testing.T, dir, captureFile string, exitCode int) {
 	t.Helper()
 	body := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + shellQuote(captureFile) + "\nexit " + itoa(exitCode) + "\n"
-	writeExecutable(t, filepath.Join(dir, "agent-sand"), body)
+	writeExecutable(t, filepath.Join(dir, "cenci-sand"), body)
 }
 
 // writeFakeDocker writes a fake `docker` (or `podman`) to dir that appends
@@ -68,7 +68,7 @@ func itoa(n int) string {
 	return string(digits)
 }
 
-// readCapturedArgv reads a fake-agent-sand capture file into a []string,
+// readCapturedArgv reads a fake-cenci-sand capture file into a []string,
 // one element per line (trailing blank line from the final \n dropped).
 func readCapturedArgv(t *testing.T, path string) []string {
 	t.Helper()
@@ -244,7 +244,7 @@ func TestSandboxUnknownFlag_Exits2NoExec(t *testing.T) {
 		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
 	}
 	if _, err := os.Stat(capture); err == nil {
-		t.Error("expected agent-sand to never be invoked for an unknown flag")
+		t.Error("expected cenci-sand to never be invoked for an unknown flag")
 	}
 }
 
@@ -283,7 +283,7 @@ func TestSandboxTrailingPositional_Exits2NoExec(t *testing.T) {
 		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
 	}
 	if _, err := os.Stat(capture); err == nil {
-		t.Error("expected agent-sand to never be invoked for a trailing positional")
+		t.Error("expected cenci-sand to never be invoked for a trailing positional")
 	}
 }
 
@@ -489,7 +489,7 @@ func TestOpenShortcutConflictsWithAgentFlag_Exits2NoExec(t *testing.T) {
 		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
 	}
 	if _, err := os.Stat(capture); err == nil {
-		t.Error("expected agent-sand to never be exec'd on a shortcut/--agent conflict")
+		t.Error("expected cenci-sand to never be exec'd on a shortcut/--agent conflict")
 	}
 }
 
@@ -510,7 +510,7 @@ func TestOpenUnknownFlag_Exits2NoExec(t *testing.T) {
 		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
 	}
 	if _, err := os.Stat(capture); err == nil {
-		t.Error("expected agent-sand to never be exec'd for an unknown flag")
+		t.Error("expected cenci-sand to never be exec'd for an unknown flag")
 	}
 }
 
@@ -569,7 +569,7 @@ func TestOpen_PassthroughAfterDoubleDash(t *testing.T) {
 }
 
 func TestOpen_MissingAgentSandBinary_Exits1(t *testing.T) {
-	dir := t.TempDir() // no agent-sand fake
+	dir := t.TempDir() // no cenci-sand fake
 
 	cmd := exec.Command(binaryPath, "open", "ch")
 	cmd.Env = append(os.Environ(), "PATH="+dir)
@@ -586,7 +586,7 @@ func TestOpen_MissingAgentSandBinary_Exits1(t *testing.T) {
 
 // -- argv[0] == "cn" dispatch ------------------------------------------
 
-// buildCnAlias copies the built agentwatch binary to <dir>/cn so
+// buildCnAlias copies the built cenci binary to <dir>/cn so
 // filepath.Base(os.Args[0]) == "cn" inside the copy.
 func buildCnAlias(t *testing.T, dir string) string {
 	t.Helper()
@@ -622,7 +622,7 @@ func TestCnArgv0_RoutesToOpen(t *testing.T) {
 }
 
 func TestCnArgv0_BareInvocationDoesNotErrorLikeAgentwatch(t *testing.T) {
-	// A bare `agentwatch` (no subcommand) exits 2. `cn` with no args is a
+	// A bare `cenci` (no subcommand) exits 2. `cn` with no args is a
 	// bare `open` with no shortcut/flags -- valid, not an error.
 	binDir := t.TempDir()
 	cnPath := buildCnAlias(t, binDir)

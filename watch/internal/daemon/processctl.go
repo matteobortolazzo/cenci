@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// This file implements the process-control half of `agentwatch daemon
+// This file implements the process-control half of `cenci daemon
 // start|stop|restart|status`: PID file read/write, liveness probing of an
 // already-running daemon process, and the SIGTERM/SIGKILL stop sequence. It
 // is distinct from lifecycle_test.go in this package, which covers the
@@ -27,15 +27,15 @@ var stopPollInterval = 50 * time.Millisecond
 // process when the PID file is missing or stale. The leading "[/]" avoids
 // pgrep matching its own invocation (a literal "[/]" never appears as a raw
 // "/" in pgrep's own argv). The trailing "( start)?$" anchors on the two
-// forms `agentwatch daemon` (bare, e.g. hand-started in a pane) and
-// `agentwatch daemon start` (the canonical form Spawn uses) without matching
+// forms `cenci daemon` (bare, e.g. hand-started in a pane) and
+// `cenci daemon start` (the canonical form Spawn uses) without matching
 // `daemon stop`/`daemon status`/`daemon restart` invocations, including our
 // own.
-const daemonProcessPattern = `[/]agentwatch daemon( start)?$`
+const daemonProcessPattern = `[/]cenci daemon( start)?$`
 
 // pgrepDaemon is the process-table fallback used by Stop when the PID file is
 // missing or stale but the daemon's socket is still alive. It is a package
-// var so tests can stub it without depending on a real "agentwatch daemon"
+// var so tests can stub it without depending on a real "cenci daemon"
 // process existing in the table.
 var pgrepDaemon = func() (int, error) {
 	out, err := exec.Command("pgrep", "-f", daemonProcessPattern).Output()

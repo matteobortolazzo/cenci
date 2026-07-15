@@ -20,7 +20,7 @@ func withShortStopTimeouts(t *testing.T) {
 }
 
 func TestPIDFile_WriteReadRemoveRoundTrip(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "agentwatch.pid")
+	path := filepath.Join(t.TempDir(), "cenci.pid")
 
 	if err := WritePIDFile(path); err != nil {
 		t.Fatalf("WritePIDFile: %v", err)
@@ -45,7 +45,7 @@ func TestRemovePIDFile_MissingFileIsNoop(t *testing.T) {
 }
 
 func TestReadPIDFile_MalformedContentErrors(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "agentwatch.pid")
+	path := filepath.Join(t.TempDir(), "cenci.pid")
 	if err := os.WriteFile(path, []byte("not-a-pid"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestProcessAlive(t *testing.T) {
 
 func TestStatus_NotRunning(t *testing.T) {
 	dir := t.TempDir()
-	info := Status(filepath.Join(dir, "events.sock"), filepath.Join(dir, "agentwatch.pid"))
+	info := Status(filepath.Join(dir, "events.sock"), filepath.Join(dir, "cenci.pid"))
 	if info.Running {
 		t.Error("expected Running=false with no listener")
 	}
@@ -87,7 +87,7 @@ func TestStatus_NotRunning(t *testing.T) {
 func TestStatus_RunningReportsPID(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "events.sock")
-	pidPath := filepath.Join(dir, "agentwatch.pid")
+	pidPath := filepath.Join(dir, "cenci.pid")
 
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {
@@ -128,7 +128,7 @@ func TestStatus_RunningWithMissingPIDFileReportsZeroPID(t *testing.T) {
 
 func TestStop_NothingRunningIsNoopNoError(t *testing.T) {
 	dir := t.TempDir()
-	outcome, err := Stop(filepath.Join(dir, "events.sock"), filepath.Join(dir, "agentwatch.pid"))
+	outcome, err := Stop(filepath.Join(dir, "events.sock"), filepath.Join(dir, "cenci.pid"))
 	if err != nil {
 		t.Fatalf("Stop: unexpected error: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestStop_StaleUnreachablePIDFileIsRemoved(t *testing.T) {
 	// PID file points at a definitely-dead pid, and no socket is alive: Stop
 	// must clean up the stale file and report nothing was running.
 	dir := t.TempDir()
-	pidPath := filepath.Join(dir, "agentwatch.pid")
+	pidPath := filepath.Join(dir, "cenci.pid")
 
 	cmd := exec.Command("true")
 	if err := cmd.Run(); err != nil {
@@ -168,7 +168,7 @@ func TestStop_ValidPIDFileSendsSIGTERMAndRemovesPIDFile(t *testing.T) {
 	withShortStopTimeouts(t)
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "events.sock")
-	pidPath := filepath.Join(dir, "agentwatch.pid")
+	pidPath := filepath.Join(dir, "cenci.pid")
 
 	// A real long-running child process, so terminateAndWait has something
 	// to signal and wait on. "sleep" ignores nothing special about SIGTERM —
@@ -223,7 +223,7 @@ func TestStop_EscalatesToSIGKILLWhenProcessIgnoresSIGTERM(t *testing.T) {
 	withShortStopTimeouts(t)
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "events.sock")
-	pidPath := filepath.Join(dir, "agentwatch.pid")
+	pidPath := filepath.Join(dir, "cenci.pid")
 
 	// A shell that traps and ignores SIGTERM, forcing the SIGKILL escalation
 	// path.
@@ -266,7 +266,7 @@ func TestStop_StaleUnreadablePIDFileButLiveSocketFallsBackToPgrep(t *testing.T) 
 	withShortStopTimeouts(t)
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "events.sock")
-	pidPath := filepath.Join(dir, "agentwatch.pid") // never written: missing
+	pidPath := filepath.Join(dir, "cenci.pid") // never written: missing
 
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {
@@ -304,7 +304,7 @@ func TestStop_StaleUnreadablePIDFileButLiveSocketFallsBackToPgrep(t *testing.T) 
 func TestStop_LiveSocketButPgrepFindsNothingErrors(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "events.sock")
-	pidPath := filepath.Join(dir, "agentwatch.pid") // missing
+	pidPath := filepath.Join(dir, "cenci.pid") // missing
 
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {
@@ -325,7 +325,7 @@ func TestStop_LiveSocketButPgrepFindsNothingErrors(t *testing.T) {
 func TestStop_PgrepErrorPropagates(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "events.sock")
-	pidPath := filepath.Join(dir, "agentwatch.pid")
+	pidPath := filepath.Join(dir, "cenci.pid")
 
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {

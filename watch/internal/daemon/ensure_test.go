@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/agent-stack/agentwatch/v4/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v4/internal/ipc"
 )
 
 func useTempSocketDir(t *testing.T) {
@@ -35,7 +35,7 @@ func TestAliveTrueWithLiveListener(t *testing.T) {
 
 func TestEnsureRunningSkipsSpawnWhenAlive(t *testing.T) {
 	useTempSocketDir(t)
-	t.Setenv("AGENT_SAND", "")
+	t.Setenv("CENCI_SANDBOX", "")
 	ln, err := net.Listen("unix", ipc.DefaultEventSocketPath())
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -56,7 +56,7 @@ func TestEnsureRunningSkipsSpawnWhenAlive(t *testing.T) {
 
 func TestEnsureRunningWaitsForSpawnedSocket(t *testing.T) {
 	useTempSocketDir(t)
-	t.Setenv("AGENT_SAND", "")
+	t.Setenv("CENCI_SANDBOX", "")
 	restoreTimeout, restoreInterval := readyTimeout, pollInterval
 	readyTimeout = 2 * time.Second
 	pollInterval = 10 * time.Millisecond
@@ -88,14 +88,14 @@ func TestEnsureRunningWaitsForSpawnedSocket(t *testing.T) {
 	}
 }
 
-// TestEnsureRunningSkipsSpawnUnderAgentSand asserts that inside an agent-sand
-// container (AGENT_SAND=1), EnsureRunning never spawns a container-local
+// TestEnsureRunningSkipsSpawnUnderCenciSandbox asserts that inside a cenci-sand
+// container (CENCI_SANDBOX=1), EnsureRunning never spawns a container-local
 // daemon — such a daemon controls nothing on the host and only masks real
 // wiring failures (#195, #202). It must return promptly without requiring a
 // listener to ever come alive.
-func TestEnsureRunningSkipsSpawnUnderAgentSand(t *testing.T) {
+func TestEnsureRunningSkipsSpawnUnderCenciSandbox(t *testing.T) {
 	useTempSocketDir(t)
-	t.Setenv("AGENT_SAND", "1")
+	t.Setenv("CENCI_SANDBOX", "1")
 
 	restoreTimeout, restoreInterval := readyTimeout, pollInterval
 	readyTimeout = 200 * time.Millisecond
@@ -113,29 +113,29 @@ func TestEnsureRunningSkipsSpawnUnderAgentSand(t *testing.T) {
 		close(done)
 	}()
 
-	// EnsureRunning must short-circuit immediately under AGENT_SAND=1, well
+	// EnsureRunning must short-circuit immediately under CENCI_SANDBOX=1, well
 	// before it would otherwise give up after readyTimeout.
 	select {
 	case <-done:
 	case <-time.After(readyTimeout / 2):
-		t.Fatal("EnsureRunning did not return promptly under AGENT_SAND=1")
+		t.Fatal("EnsureRunning did not return promptly under CENCI_SANDBOX=1")
 	}
 
 	if spawned {
-		t.Error("expected daemon not to be spawned when AGENT_SAND=1")
+		t.Error("expected daemon not to be spawned when CENCI_SANDBOX=1")
 	}
 	if alive() {
-		t.Error("expected no listener to be alive under AGENT_SAND=1")
+		t.Error("expected no listener to be alive under CENCI_SANDBOX=1")
 	}
 }
 
-// TestEnsureRunningSpawnsWhenAgentSandUnsetOrZero is a regression guard: the
-// AGENT_SAND gate must not change existing alive/spawn/poll behavior outside
-// an agent-sand container.
-func TestEnsureRunningSpawnsWhenAgentSandUnsetOrZero(t *testing.T) {
-	t.Run("AGENT_SAND unset", func(t *testing.T) {
+// TestEnsureRunningSpawnsWhenCenciSandboxUnsetOrZero is a regression guard: the
+// CENCI_SANDBOX gate must not change existing alive/spawn/poll behavior outside
+// a cenci-sand container.
+func TestEnsureRunningSpawnsWhenCenciSandboxUnsetOrZero(t *testing.T) {
+	t.Run("CENCI_SANDBOX unset", func(t *testing.T) {
 		useTempSocketDir(t)
-		t.Setenv("AGENT_SAND", "")
+		t.Setenv("CENCI_SANDBOX", "")
 		restoreTimeout, restoreInterval := readyTimeout, pollInterval
 		readyTimeout = 50 * time.Millisecond
 		pollInterval = 10 * time.Millisecond
@@ -149,18 +149,18 @@ func TestEnsureRunningSpawnsWhenAgentSandUnsetOrZero(t *testing.T) {
 		EnsureRunning()
 
 		if !spawned {
-			t.Error("expected daemon to be spawned when AGENT_SAND is unset")
+			t.Error("expected daemon to be spawned when CENCI_SANDBOX is unset")
 		}
 	})
 
-	t.Run("AGENT_SAND=0", func(t *testing.T) {
+	t.Run("CENCI_SANDBOX=0", func(t *testing.T) {
 		useTempSocketDir(t)
 		restoreTimeout, restoreInterval := readyTimeout, pollInterval
 		readyTimeout = 50 * time.Millisecond
 		pollInterval = 10 * time.Millisecond
 		defer func() { readyTimeout, pollInterval = restoreTimeout, restoreInterval }()
 
-		t.Setenv("AGENT_SAND", "0")
+		t.Setenv("CENCI_SANDBOX", "0")
 
 		spawned := false
 		restore := spawn
@@ -170,14 +170,14 @@ func TestEnsureRunningSpawnsWhenAgentSandUnsetOrZero(t *testing.T) {
 		EnsureRunning()
 
 		if !spawned {
-			t.Error("expected daemon to be spawned when AGENT_SAND=0")
+			t.Error("expected daemon to be spawned when CENCI_SANDBOX=0")
 		}
 	})
 }
 
 func TestEnsureRunningGivesUpAfterTimeout(t *testing.T) {
 	useTempSocketDir(t)
-	t.Setenv("AGENT_SAND", "")
+	t.Setenv("CENCI_SANDBOX", "")
 	restoreTimeout, restoreInterval := readyTimeout, pollInterval
 	readyTimeout = 100 * time.Millisecond
 	pollInterval = 10 * time.Millisecond
