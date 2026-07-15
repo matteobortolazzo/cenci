@@ -1,19 +1,19 @@
-# Decision record: one cohesive agent-stack product
+# Decision record: one cohesive cenci product
 
 Status: completed (2026-07-13)
 
 ## Decision
 
-agent-stack is presented and installed as one product with three internal layers:
+cenci is presented and installed as one product with three internal layers:
 
 - cenci-sandbox: isolation
-- agentflow: workflow and human decision gates
-- agentwatch: attention and dispatch
+- cenci (flow): workflow and human decision gates
+- cenci-watch: attention and dispatch
 
 The external product has one installer, one update command, one lifecycle, and one
 support story. The internal plugins retain separate manifests, versions, release tags,
 and build/test commands. Optional lazyboards orchestration remains a separate project
-that integrates through agent-stack's labels, persisted plans, and dispatch interface.
+that integrates through cenci's labels, persisted plans, and dispatch interface.
 
 Claude Code provides the full interactive workflow. Codex is supported for isolation,
 monitoring, portable conventions, and the documented implementation recipe while its
@@ -29,4 +29,4 @@ because they described superseded architecture.
 
 Current status belongs in the [package roadmap](roadmap.md). Bugs, active maintenance,
 and follow-ups belong in the
-[GitHub issue tracker](https://github.com/matteobortolazzo/agent-stack/issues).
+[GitHub issue tracker](https://github.com/matteobortolazzo/cenci/issues).

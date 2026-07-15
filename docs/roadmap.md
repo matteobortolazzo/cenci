@@ -1,9 +1,9 @@
-# agent-stack roadmap
+# cenci roadmap
 
 This is the package-level source of truth for user-visible capability status. The
 three internal plugins keep independent release versions, while active implementation
 and maintenance follow-ups remain in the
-[GitHub issue tracker](https://github.com/matteobortolazzo/agent-stack/issues).
+[GitHub issue tracker](https://github.com/matteobortolazzo/cenci/issues).
 
 ## Available
 
@@ -20,11 +20,11 @@ and maintenance follow-ups remain in the
 ## In development
 
 - Hardened and more visible sandbox boundary warnings
-  ([#148](https://github.com/matteobortolazzo/agent-stack/issues/148))
-- AgentWatch dispatch/status hardening and operational recovery work
-  ([issues](https://github.com/matteobortolazzo/agent-stack/issues?q=is%3Aissue+is%3Aopen+label%3Aagentwatch))
+  ([#148](https://github.com/matteobortolazzo/cenci/issues/148))
+- Cenci dispatch/status hardening and operational recovery work
+  ([issues](https://github.com/matteobortolazzo/cenci/issues?q=is%3Aissue+is%3Aopen+label%3Awatch))
 - Release and repository security hygiene
-  ([issues](https://github.com/matteobortolazzo/agent-stack/issues?q=is%3Aissue+is%3Aopen+label%3Asecurity))
+  ([issues](https://github.com/matteobortolazzo/cenci/issues?q=is%3Aissue+is%3Aopen+label%3Asecurity))
 
 ## Planned
 

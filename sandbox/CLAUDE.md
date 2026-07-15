@@ -1,6 +1,6 @@
 # Project: sandbox
 
-Docker/Podman container project within the agent-stack monorepo.
+Docker/Podman container project within the cenci monorepo.
 Provides an isolated container (`cenci-sand`) for running Claude Code sessions with
 `--dangerously-skip-permissions` — the container is the security boundary.
 

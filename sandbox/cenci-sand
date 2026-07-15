@@ -451,7 +451,7 @@ reap_orphans() {
                     # as an argument to the probe, never interpolated. This
                     # replaces the ambiguous `kill -0` check: exit status is
                     # captured explicitly (function-as-condition set -e
-                    # suspension -- see dev-sandbox/CLAUDE.md) so a non-zero
+                    # suspension -- see sandbox/CLAUDE.md) so a non-zero
                     # exit here means the exec transport itself failed, not
                     # "process gone" -- a hard error, not swallowed.
                     local probe_out probe_exit

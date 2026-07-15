@@ -1,10 +1,10 @@
 # Getting started
 
-This is the supported happy path from a clean machine to the first agent-stack ticket.
-agent-stack is one product; the installer manages its three internal components for
+This is the supported happy path from a clean machine to the first cenci ticket.
+cenci is one product; the installer manages its three internal components for
 every supported client it detects.
 
-![agent-stack combines isolation, workflow, and attention into a safe path from issue to reviewed pull request](assets/cenci-overview.svg)
+![cenci combines isolation, workflow, and attention into a safe path from issue to reviewed pull request](assets/cenci-overview.svg)
 
 ## 1. Prerequisites
 
@@ -27,21 +27,21 @@ Optional features have separate dependencies:
 | GitHub issues and PRs | [GitHub CLI](https://cli.github.com) authenticated with `gh auth login` |
 | tmux status | tmux |
 | macOS menu-bar status | [SwiftBar](https://swiftbar.app) |
-| desktop status | One of the documented AgentWatch display widgets |
+| desktop status | One of the documented cenci display widgets |
 
 ## 2. Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
 ```
 
 From a clone, run `./install.sh`. Non-interactive automation can add `--yes`; use
 `./install.sh --help` for the complete public interface.
 
-The installer registers the agent-stack marketplace and installs `agentflow`,
-`agentwatch`, and `cenci-sandbox` independently for Claude Code, Codex, or both. It
+The installer registers the cenci marketplace and installs `cenci`,
+`cenci-watch`, and `cenci-sandbox` independently for Claude Code, Codex, or both. It
 creates only the launchers relevant to detected clients and can build the sandbox
-image. AgentWatch self-bootstraps its client-cache binary and daemon on first session.
+image. cenci-watch self-bootstraps its client-cache binary and daemon on first session.
 
 ## 3. Verify
 
@@ -50,7 +50,7 @@ clients, optional feature dependencies, installed components, launchers, and ima
 readiness:
 
 ```bash
-agent-stack doctor
+cenci doctor
 ```
 
 Warnings for optional features are safe to defer. Fix any required item marked with
@@ -66,7 +66,7 @@ sb xt        # Codex (or: cenci-sand --agent codex)
 ```
 
 When launched from a git repository, only that repository root is mounted at
-`/workspace`. AgentWatch needs no separate binary install: the first supported client
+`/workspace`. cenci-watch needs no separate binary install: the first supported client
 session provisions it and starts the shared host daemon.
 
 Codex users should also make the repository's canonical `CLAUDE.md` instructions
@@ -85,7 +85,7 @@ If Codex reports updated plugin hooks as pending, inspect and trust them with `/
 In a sandboxed Claude Code session, run once:
 
 ```text
-/agentflow:configure
+/cenci:configure
 ```
 
 This detects the stack, writes project guidance, configures workflow metadata, and can
@@ -96,9 +96,9 @@ interactive configure skill is Claude Code-only.
 ## 6. Run a ticket
 
 ```text
-/agentflow:refine 42
-/agentflow:implement 42
-/agentflow:babysit <pr-number>
+/cenci:refine 42
+/cenci:implement 42
+/cenci:babysit <pr-number>
 ```
 
 After implementation opens the PR, `babysit` checks CI and review feedback
@@ -120,27 +120,27 @@ and merge completion applies `Implemented`.
 ## Update
 
 ```bash
-agent-stack update
+cenci update
 ```
 
 The command downloads the current official installer, refreshes every installed
-component in every detected client, resolves the active AgentWatch cache, refreshes
-launchers, and replaces a stale running AgentWatch daemon with the updated binary.
+component in every detected client, resolves the active cenci-watch cache, refreshes
+launchers, and replaces a stale running cenci daemon with the updated binary.
 
 ## Troubleshooting
 
 | Symptom | Resolution |
 |---|---|
 | Neither client is detected | Install Claude Code, Codex, or both, then rerun the installer |
-| `agent-stack` or a sandbox launcher is not found | Add `~/.local/bin` to `PATH`, then rerun the install command |
-| AgentWatch status has not appeared | Start a new agent session and inspect `${TMPDIR:-/tmp}/agentwatch-bootstrap.log` |
+| `cenci` or a sandbox launcher is not found | Add `~/.local/bin` to `PATH`, then rerun the install command |
+| cenci status has not appeared | Start a new agent session and inspect `${TMPDIR:-/tmp}/cenci-bootstrap.log` |
 | Codex skills are missing | Confirm `codex plugin list`, then restart Codex after installation |
 | Claude commands are missing | Confirm `claude plugin list`, then restart Claude Code after installation |
 | Sandbox image is absent | Run `cenci-sand --build` or `sb --build` |
 | GitHub operations fail | Install `gh` and run `gh auth login` |
 
 Platform and display-specific troubleshooting lives in the internal layer references:
-[cenci-sandbox](../sandbox/README.md) and [agentwatch](../watch/README.md).
+[cenci-sandbox](../sandbox/README.md) and [cenci-watch](../watch/README.md).
 
 ## Advanced and recovery: standalone installation
 
@@ -148,18 +148,18 @@ Use this only when developing a component or recovering a broken installer run. 
 the commands for each client you actually use:
 
 ```bash
-claude plugin marketplace add matteobortolazzo/agent-stack
-claude plugin install agentflow@agent-stack
-claude plugin install agentwatch@agent-stack
-claude plugin install cenci-sandbox@agent-stack
+claude plugin marketplace add matteobortolazzo/cenci
+claude plugin install cenci@cenci
+claude plugin install cenci-watch@cenci
+claude plugin install cenci-sandbox@cenci
 
-codex plugin marketplace add matteobortolazzo/agent-stack
-codex plugin add agentflow@agent-stack
-codex plugin add agentwatch@agent-stack
-codex plugin add cenci-sandbox@agent-stack
+codex plugin marketplace add matteobortolazzo/cenci
+codex plugin add cenci@cenci
+codex plugin add cenci-watch@cenci
+codex plugin add cenci-sandbox@cenci
 ```
 
-Then rerun `./install.sh` to restore launchers, AgentWatch wiring, and image setup.
+Then rerun `./install.sh` to restore launchers, cenci-watch wiring, and image setup.
 Optional desktop/menu-bar widgets are configured from the relevant
-[AgentWatch display documentation](../watch/README.md); they are not another
-agent-stack install.
+[cenci-watch display documentation](../watch/README.md); they are not another
+cenci install.

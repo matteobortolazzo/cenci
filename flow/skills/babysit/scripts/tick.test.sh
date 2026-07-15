@@ -2,7 +2,7 @@
 # Fixture-driven tests for tick.sh. No network required — the
 # TICK_SH_FIXTURE_* env vars point tick.sh at static JSON files instead of
 # shelling out to `gh`. Follows the self-skipping style of
-# dev-sandbox/tests/*.test.sh (the only shell-test precedent in this repo),
+# sandbox/tests/*.test.sh (the only shell-test precedent in this repo),
 # though nothing here needs to self-skip since fixtures never require a
 # container runtime or network access.
 #
