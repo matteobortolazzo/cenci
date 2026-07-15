@@ -11,6 +11,7 @@ GitHub Issues for tracking. GitHub for code and PRs.
 - When excluding one specific known case from a parsing/filtering loop via a match-miss condition, narrow the skip to match only that case exactly — don't broaden a targeted exclusion into a silent "no match → discard" catch-all. Compute the expected case and skip only on an exact match; keep the original fallback behavior (e.g. a visible `'none'`/default state) for every other non-match, and cover the non-matching case with a regression test. Silent failures hide bugs; visible fallback rendering catches them.
 
 ## Rule Files
+CLI grammar, alias, env-var, and naming conventions: `<repo-root>/docs/cli-conventions.md` (read before touching any user-facing command surface).
 See `.claude/rules/` for conventions:
 - `lessons-learned.md` — real mistakes from this codebase (authoritative, overrides assumptions)
 - Other rule files as created by the team
