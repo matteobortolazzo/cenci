@@ -74,30 +74,30 @@ Skip this section unless `isUiTicket` is true.
 
 Screenshots are temporary review aids — never commit them to the repo. Host them in a **secret GitHub gist**: it lives under the user's account, is unlisted, and is disposable (`gh gist delete <gist-id>` after merge).
 
-1. **Collect**: use the images Phase 4 persisted to `/tmp/claude/agentflow-screenshots/<ticket-id-or-slug>/`. If the directory is missing or empty and `playwright-cli` is available, capture the affected screens now against the dev build. If capture is not possible, skip the upload and use the fallback body in step 5.
+1. **Collect**: use the images Phase 4 persisted to `/tmp/claude/cenci-screenshots/<ticket-id-or-slug>/`. If the directory is missing or empty and `playwright-cli` is available, capture the affected screens now against the dev build. If capture is not possible, skip the upload and use the fallback body in step 5.
 2. **Privacy check**: secret gists are unlisted but readable by anyone with the URL. Screenshots must show only local/dev data — no real user data, tokens, or internal URLs. Crop or re-capture rather than upload.
 3. **Create the gist** (gists require a text file at creation; images are pushed via git afterwards):
 
    ```bash
-   printf 'Screenshots for %s — temporary, delete after merge.\n' "<branch>" > /tmp/claude/agentflow-screenshots/<ticket-id-or-slug>-README.md
-   gh gist create --desc "agentflow screenshots: <owner/repo> <branch>" /tmp/claude/agentflow-screenshots/<ticket-id-or-slug>-README.md
+   printf 'Screenshots for %s — temporary, delete after merge.\n' "<branch>" > /tmp/claude/cenci-screenshots/<ticket-id-or-slug>-README.md
+   gh gist create --desc "cenci screenshots: <owner/repo> <branch>" /tmp/claude/cenci-screenshots/<ticket-id-or-slug>-README.md
    ```
 
    The command prints the gist URL; extract `<gist-id>` from it. Do not pass `--public` — the gist must stay secret.
 4. **Push the images** through the gist's git remote (no `cd` compounds — see the `shell-rules` skill):
 
    ```bash
-   gh gist clone <gist-id> /tmp/claude/agentflow-gist-<gist-id>
-   cp /tmp/claude/agentflow-screenshots/<ticket-id-or-slug>/*.png /tmp/claude/agentflow-gist-<gist-id>/
-   git -C /tmp/claude/agentflow-gist-<gist-id> add -A
-   git -C /tmp/claude/agentflow-gist-<gist-id> commit -m "PR screenshots"
-   git -C /tmp/claude/agentflow-gist-<gist-id> push
+   gh gist clone <gist-id> /tmp/claude/cenci-gist-<gist-id>
+   cp /tmp/claude/cenci-screenshots/<ticket-id-or-slug>/*.png /tmp/claude/cenci-gist-<gist-id>/
+   git -C /tmp/claude/cenci-gist-<gist-id> add -A
+   git -C /tmp/claude/cenci-gist-<gist-id> commit -m "PR screenshots"
+   git -C /tmp/claude/cenci-gist-<gist-id> push
    ```
-5. **Build embed URLs**: `https://gist.githubusercontent.com/<gh-user>/<gist-id>/raw/<filename>.png`, where `<gh-user>` comes from `gh api user -q .login`. These go into the PR body's `## Screenshots` section (template below). If any gist step fails (auth, network), do not block PR creation — write `## Screenshots` with "Not uploaded (<reason>); local copies at `/tmp/claude/agentflow-screenshots/<ticket-id-or-slug>/`" instead.
+5. **Build embed URLs**: `https://gist.githubusercontent.com/<gh-user>/<gist-id>/raw/<filename>.png`, where `<gh-user>` comes from `gh api user -q .login`. These go into the PR body's `## Screenshots` section (template below). If any gist step fails (auth, network), do not block PR creation — write `## Screenshots` with "Not uploaded (<reason>); local copies at `/tmp/claude/cenci-screenshots/<ticket-id-or-slug>/`" instead.
 
 ## PR
 
-Create the PR with `gh pr create`. Write body content to `/tmp/claude/agentflow-<ticket-id-or-slug>-pr-body.md` first and read it back; do not use heredocs or a large inline body string.
+Create the PR with `gh pr create`. Write body content to `/tmp/claude/cenci-<ticket-id-or-slug>-pr-body.md` first and read it back; do not use heredocs or a large inline body string.
 
 If a prior turn already created the PR (a Goal Autopilot resume re-entering after PR creation ran once but the turn ended before `/goal clear`), `gh pr create` fails with "a pull request for branch ... already exists." That is not a failure — run `gh pr view <branch> --json url -q .url` to recover the existing PR URL and continue to Labels/Cleanup as if creation had just succeeded.
 
@@ -138,7 +138,7 @@ _Temporary secret gist, not part of the repo — delete after merge: `gh gist de
 
 For child tickets that are not last child, use `Related to #<parentId>` for the parent so it is not auto-closed. For ticketless mode, omit `## Ticket`.
 
-`## Review` reports which Phase 6 + 7 path ran, sourced from `/tmp/claude/agentflow-<ticket-id-or-slug>-review-path.txt` (written during Phase 6 + 7's Review Path Classification):
+`## Review` reports which Phase 6 + 7 path ran, sourced from `/tmp/claude/cenci-<ticket-id-or-slug>-review-path.txt` (written during Phase 6 + 7's Review Path Classification):
 
 - `full` → "Review: full trio"
 - `lite-docs` → "Review: lite (docs-only — no reviewers)"
@@ -146,7 +146,7 @@ For child tickets that are not last child, use `Related to #<parentId>` for the 
 
 If the temp file is absent (e.g. after a context compaction or a goal-autopilot resume that skipped re-reading it), default to "Review: full trio" — never over-claim a lite path when the actual path isn't known.
 
-The `## Checklist` security line is derived from the same `/tmp/claude/agentflow-<ticket-id-or-slug>-review-path.txt` file, in the same read:
+The `## Checklist` security line is derived from the same `/tmp/claude/cenci-<ticket-id-or-slug>-review-path.txt` file, in the same read:
 
 - `full` → `- [x] Security review done`
 - `lite-docs` or `lite-small` → `- [ ] Security review skipped (see Review section — <path>)`, where `<path>` is the literal path value (`lite-docs` or `lite-small`)
@@ -182,10 +182,10 @@ If ≥1 deferred item exists, ensure the label exists (its own Bash call — not
 gh label create "Followup" --repo <owner>/<repo> --color "C5DEF5" --description "Deferred/out-of-scope item captured from a session — triage before working" 2>/dev/null || true
 ```
 
-Write the body to `/tmp/claude/agentflow-<ticket-id-or-slug>-followup-body.md` with the file tool — and the title too, to `/tmp/claude/agentflow-<ticket-id-or-slug>-followup-title.txt`: the PR title is free text and must never be interpolated directly into the command line (a title containing `$(…)`, backticks, or quotes would be shell-interpreted). Then create the ticket in one call, reading the title back the same way Posting Replies in `address-review` reads reply text:
+Write the body to `/tmp/claude/cenci-<ticket-id-or-slug>-followup-body.md` with the file tool — and the title too, to `/tmp/claude/cenci-<ticket-id-or-slug>-followup-title.txt`: the PR title is free text and must never be interpolated directly into the command line (a title containing `$(…)`, backticks, or quotes would be shell-interpreted). Then create the ticket in one call, reading the title back the same way Posting Replies in `address-review` reads reply text:
 
 ```bash
-TITLE=$(cat /tmp/claude/agentflow-<ticket-id-or-slug>-followup-title.txt) && gh issue create --repo <owner>/<repo> --title "$TITLE" --label "Followup" --body-file /tmp/claude/agentflow-<ticket-id-or-slug>-followup-body.md
+TITLE=$(cat /tmp/claude/cenci-<ticket-id-or-slug>-followup-title.txt) && gh issue create --repo <owner>/<repo> --title "$TITLE" --label "Followup" --body-file /tmp/claude/cenci-<ticket-id-or-slug>-followup-body.md
 ```
 
 Body content (checklist of items, each with a one-line context and file/area reference):
@@ -199,7 +199,7 @@ Related to #<original-ticket>
 PR: <PR URL>
 ```
 
-Ticket mode: include the `Related to #<original-ticket>` line — `<original-ticket>` is this run's own ticket ID (for a child ticket, the child; the parent is already linked via the commit's `Fixes #<parentId>` on last-child PRs). Ticketless mode: omit it, keep the PR link. The followup ticket does **not** receive the `Refined` label — it enters the backlog unrefined; a human triages it and runs `/agentflow:refine` when it's worth doing.
+Ticket mode: include the `Related to #<original-ticket>` line — `<original-ticket>` is this run's own ticket ID (for a child ticket, the child; the parent is already linked via the commit's `Fixes #<parentId>` on last-child PRs). Ticketless mode: omit it, keep the PR link. The followup ticket does **not** receive the `Refined` label — it enters the backlog unrefined; a human triages it and runs `/cenci:refine` when it's worth doing.
 
 Assume the issue is world-readable: never transcribe secret values, credentials, or exploitable vulnerability detail into the body. Reference deferred security findings abstractly — one neutral line plus the file/area, not the finding's specifics.
 
@@ -229,18 +229,18 @@ Finally, delete this run's scoped shared temp files — they were only ever inte
 
 ```bash
 rm -f \
-  /tmp/claude/agentflow-<ticket-id-or-slug>-diff.patch \
-  /tmp/claude/agentflow-<ticket-id-or-slug>-files.txt \
-  /tmp/claude/agentflow-<ticket-id-or-slug>-stat.txt \
-  /tmp/claude/agentflow-<ticket-id-or-slug>-review-path.txt \
-  /tmp/claude/agentflow-<ticket-id-or-slug>-pr-body.md \
-  /tmp/claude/agentflow-<ticket-id-or-slug>-followup-title.txt \
-  /tmp/claude/agentflow-<ticket-id-or-slug>-followup-body.md \
-  /tmp/claude/agentflow-<ticket-id-or-slug>-explore-1.md \
-  /tmp/claude/agentflow-<ticket-id-or-slug>-explore-2.md \
-  /tmp/claude/agentflow-context-<ticket-id-or-slug>.md
+  /tmp/claude/cenci-<ticket-id-or-slug>-diff.patch \
+  /tmp/claude/cenci-<ticket-id-or-slug>-files.txt \
+  /tmp/claude/cenci-<ticket-id-or-slug>-stat.txt \
+  /tmp/claude/cenci-<ticket-id-or-slug>-review-path.txt \
+  /tmp/claude/cenci-<ticket-id-or-slug>-pr-body.md \
+  /tmp/claude/cenci-<ticket-id-or-slug>-followup-title.txt \
+  /tmp/claude/cenci-<ticket-id-or-slug>-followup-body.md \
+  /tmp/claude/cenci-<ticket-id-or-slug>-explore-1.md \
+  /tmp/claude/cenci-<ticket-id-or-slug>-explore-2.md \
+  /tmp/claude/cenci-context-<ticket-id-or-slug>.md
 ```
 
-This deliberately excludes two other scoped temp locations: the screenshots dir (`/tmp/claude/agentflow-screenshots/<ticket-id-or-slug>/`) is a documented fallback location kept for gist-upload failures (see Screenshots above), and the gist clone temp dir (`/tmp/claude/agentflow-gist-<gist-id>/`) is already uniquely scoped by gist ID — neither needs this pass to stay collision-safe.
+This deliberately excludes two other scoped temp locations: the screenshots dir (`/tmp/claude/cenci-screenshots/<ticket-id-or-slug>/`) is a documented fallback location kept for gist-upload failures (see Screenshots above), and the gist clone temp dir (`/tmp/claude/cenci-gist-<gist-id>/`) is already uniquely scoped by gist ID — neither needs this pass to stay collision-safe.
 
 Like the plan-file deletion above, this cleanup only runs on the success path (PR created). If the pipeline fails before PR creation, these files are preserved for retry/debugging, same as the plan file.

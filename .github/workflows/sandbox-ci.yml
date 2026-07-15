@@ -1,4 +1,4 @@
-name: dev-sandbox — CI
+name: sandbox — CI
 
 on:
   push:
@@ -25,7 +25,7 @@ jobs:
         with:
           filters: |
             sandbox:
-              - 'dev-sandbox/**'
+              - 'sandbox/**'
               - 'install.sh'
 
   lint:
@@ -38,13 +38,13 @@ jobs:
       - name: shellcheck
         run: |
           shellcheck install.sh \
-            dev-sandbox/agent-sand \
-            dev-sandbox/entrypoint.sh \
-            dev-sandbox/lib/*.sh \
-            dev-sandbox/tests/*.test.sh
+            sandbox/cenci-sand \
+            sandbox/entrypoint.sh \
+            sandbox/lib/*.sh \
+            sandbox/tests/*.test.sh
       - name: bash -n (syntax check)
         run: |
-          for f in install.sh dev-sandbox/agent-sand dev-sandbox/entrypoint.sh dev-sandbox/lib/*.sh dev-sandbox/tests/*.test.sh; do
+          for f in install.sh sandbox/cenci-sand sandbox/entrypoint.sh sandbox/lib/*.sh sandbox/tests/*.test.sh; do
             bash -n "$f"
           done
 
@@ -57,16 +57,16 @@ jobs:
       - uses: actions/checkout@v7
       - name: Run host-runnable test suites
         run: |
-          bash dev-sandbox/tests/settings-merge.test.sh
-          bash dev-sandbox/tests/heal-plugins.test.sh
-          bash dev-sandbox/tests/repo-scope.test.sh
-          bash dev-sandbox/tests/codex-config.test.sh
-          bash dev-sandbox/tests/seed-auth.test.sh
-          bash dev-sandbox/tests/launcher-lifecycle.test.sh
-          bash dev-sandbox/tests/agentwatch-wiring.test.sh
-          bash dev-sandbox/tests/installer-clients.test.sh
-          bash dev-sandbox/tests/install-update.test.sh
-          bash dev-sandbox/tests/agentwatch-widgets.test.sh
+          bash sandbox/tests/settings-merge.test.sh
+          bash sandbox/tests/heal-plugins.test.sh
+          bash sandbox/tests/repo-scope.test.sh
+          bash sandbox/tests/codex-config.test.sh
+          bash sandbox/tests/seed-auth.test.sh
+          bash sandbox/tests/launcher-lifecycle.test.sh
+          bash sandbox/tests/cenci-wiring.test.sh
+          bash sandbox/tests/installer-clients.test.sh
+          bash sandbox/tests/install-update.test.sh
+          bash sandbox/tests/cenci-widgets.test.sh
 
   fragment-drift:
     name: sandbox-fragment-drift
@@ -76,7 +76,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Assert fragments match the Dockerfile monolith
-        run: bash dev-sandbox/tests/fragments-drift.test.sh
+        run: bash sandbox/tests/fragments-drift.test.sh
 
   build-smoke:
     name: sandbox-build-smoke
@@ -86,7 +86,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Build base + monolith and run the toolchain smoke test
-        run: bash dev-sandbox/tests/smoke.test.sh
+        run: bash sandbox/tests/smoke.test.sh
 
   hadolint:
     name: sandbox-hadolint
@@ -97,9 +97,9 @@ jobs:
       - uses: actions/checkout@v7
       - uses: hadolint/hadolint-action@v3.3.0
         with:
-          dockerfile: dev-sandbox/Dockerfile.base
+          dockerfile: sandbox/Dockerfile.base
           ignore: DL3008,DL3013
       - uses: hadolint/hadolint-action@v3.3.0
         with:
-          dockerfile: dev-sandbox/Dockerfile
+          dockerfile: sandbox/Dockerfile
           ignore: DL3008,DL3013

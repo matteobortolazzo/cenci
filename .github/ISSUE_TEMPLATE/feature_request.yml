@@ -1,5 +1,5 @@
 name: Feature request
-description: Propose a new capability or improvement for agentflow, agentwatch, or agent-sandbox
+description: Propose a new capability or improvement for cenci, cenci-watch, or cenci-sandbox
 labels: ["enhancement"]
 body:
   - type: dropdown
@@ -8,9 +8,9 @@ body:
       label: Affected layer
       description: Which layer would this feature live in?
       options:
-        - agentflow (workflow)
-        - agentwatch (attention)
-        - agent-sandbox (isolation)
+        - cenci (workflow)
+        - cenci-watch (attention)
+        - cenci-sandbox (isolation)
         - Repo-wide / tooling
         - Not sure
     validations:

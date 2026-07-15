@@ -1,6 +1,6 @@
 ---
 name: configure
-description: "Claude Code-only: configure the agentflow workflow plugin, Claude settings, MCP servers, and project guidance."
+description: "Claude Code-only: configure the cenci workflow plugin, Claude settings, MCP servers, and project guidance."
 compatibility: Requires Claude Code settings, plugin environment variables, and AskUserQuestion.
 argument-hint: [additional context]
 user-invocable: true
@@ -12,7 +12,7 @@ allowed-tools: Read, Write, Edit, Bash, Glob, Grep, AskUserQuestion
 
 ## Task
 
-Help the user set up this project for the agentflow plugin.
+Help the user set up this project for the cenci plugin.
 
 ### Parse `$ARGUMENTS`
 
@@ -48,17 +48,17 @@ If user context was provided, use it to steer the configuration (e.g., skip cert
 
 ### Container Detection
 
-agentflow runs inside `dev-sandbox`'s `agent-sand` container with `--dangerously-skip-permissions`. The **container is the security boundary** — there is no host profile. Claude Code's own host sandbox stays disabled, and `permissions.allow`/`deny` are kept only as defense-in-depth for plain `claude` runs inside the container (e.g. `agent-sand --shell`).
+cenci runs inside `sandbox`'s `cenci-sand` container with `--dangerously-skip-permissions`. The **container is the security boundary** — there is no host profile. Claude Code's own host sandbox stays disabled, and `permissions.allow`/`deny` are kept only as defense-in-depth for plain `claude` runs inside the container (e.g. `cenci-sand --shell`).
 
-Detect the container (stop at the first match; run each check as its **own** Bash call, per `agentflow:shell-rules` — never compound them):
+Detect the container (stop at the first match; run each check as its **own** Bash call, per `cenci:shell-rules` — never compound them):
 
-1. **`AGENT_SAND` env var** (works for both Docker and Podman): run `echo "${AGENT_SAND:-}"` as its own Bash call. If it prints `1` → in container.
+1. **`CENCI_SANDBOX` env var** (works for both Docker and Podman): run `echo "${CENCI_SANDBOX:-}"` as its own Bash call. If it prints `1` → in container.
 2. **Docker fallback**: run `test -f /.dockerenv` as its own Bash call. Exit 0 → in container.
 
 This detection is a **non-blocking advisory** — it never gates configuration and never uses `AskUserQuestion`:
 
-- **In container**: emit an informational message: "Detected the `agent-sand` container — the container is the security boundary. Claude Code's host sandbox stays disabled." Then continue normally.
-- **Not in container**: emit an advisory and continue anyway: "agentflow is designed to run inside the `agent-sand` container (the security boundary). You appear to be running on the host — continuing, but running outside the container is unsupported." Proceed with the same container-shaped output.
+- **In container**: emit an informational message: "Detected the `cenci-sand` container — the container is the security boundary. Claude Code's host sandbox stays disabled." Then continue normally.
+- **Not in container**: emit an advisory and continue anyway: "cenci is designed to run inside the `cenci-sand` container (the security boundary). You appear to be running on the host — continuing, but running outside the container is unsupported." Proceed with the same container-shaped output.
 
 **Default values from existing config**: When `existingConfig` is not null, each question below MUST present the existing value as the pre-selected default (list it first, marked "(current)"). The user can accept with one click or change it. New fields not in `existingConfig` (e.g., `lspServers` when upgrading from a pre-LSP config) have no default and are asked normally.
 
@@ -128,7 +128,7 @@ Generate a slug for each project from its directory name (e.g., `packages/api` �
 3. **Branching strategy**: "What's your branch naming convention?"
    - Default suggestion: `feature/<id>-<description>`
 
-(There is no question 4 — sandboxing is not asked. The `agent-sand` container is the security boundary and Claude Code's host sandbox is always disabled; numbering of the remaining questions is kept for stability.)
+(There is no question 4 — sandboxing is not asked. The `cenci-sand` container is the security boundary and Claude Code's host sandbox is always disabled; numbering of the remaining questions is kept for stability.)
 
 ### Dependency Detection
 
@@ -148,7 +148,7 @@ Before asking about MCP servers, scan the project for framework dependencies:
 | `primeng` | primeng | `npx` | `["-y", "@primeng/mcp"]` | — | project |
 
 **Scope:**
-- **plugin**: Already defined in agentflow's `.mcp.json`. Enable by setting `disabled: false`.
+- **plugin**: Already defined in cenci's `.mcp.json`. Enable by setting `disabled: false`.
 - **project**: Add to the project's root `.mcp.json`.
 
 ### LSP Server Catalog
@@ -210,10 +210,10 @@ If no frontend framework is detected, skip this section entirely (do not set `pe
    Run `pencil interactive --help 2>/dev/null` and check the exit code:
    - **Succeeds (exit 0)** → Write `pencil.mode: "cli-app"` to the config. Inform the user:
      "Pencil `interactive` mode detected. Design skills will use `pencil interactive` to communicate with the Pencil editor — this is more token-efficient than the MCP server.
-     For maximum token savings, you can disable the Pencil MCP server in your editor settings (Pencil → Preferences → MCP Server). agentflow uses the CLI directly and does not need the MCP server."
+     For maximum token savings, you can disable the Pencil MCP server in your editor settings (Pencil → Preferences → MCP Server). cenci uses the CLI directly and does not need the MCP server."
    - **Fails or not found** → Write `pencil.mode: "editor"` to the config. Inform the user:
      "Pencil `interactive` mode not available. Design skills will use the Pencil MCP server (requires the MCP connection to be active in your editor).
-     For better token efficiency, install the `pencil` command from within the Pencil app (File → Install `pencil` command into PATH) and re-run `/agentflow:configure` — this switches to `cli-app` mode which avoids loading MCP tool schemas into every conversation."
+     For better token efficiency, install the `pencil` command from within the Pencil app (File → Install `pencil` command into PATH) and re-run `/cenci:configure` — this switches to `cli-app` mode which avoids loading MCP tool schemas into every conversation."
 
 ### Playwright CLI Setup
 
@@ -279,8 +279,8 @@ Include the server in `.lsp.json` regardless — it activates once the binary is
    - If Yes: merge `{"env": {"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "1"}}` into `~/.claude/settings.json` using jq (create the file if it doesn't exist). This sets compaction to trigger at 1% — effectively manual-only.
    - If No: remove the `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` key from the `env` object in `~/.claude/settings.json` (if present)
 
-7b. **Pin subagents to 200K context**: "Do you want to pin agentflow's subagents to a 200K-context
-    model? agentflow delegates reviews to subagents, and on 1M-context sessions that delegation can be
+7b. **Pin subagents to 200K context**: "Do you want to pin cenci's subagents to a 200K-context
+    model? cenci delegates reviews to subagents, and on 1M-context sessions that delegation can be
     gated — every subagent inherits the session's 1M flag but not its extra-usage entitlement, so
     reviews fail with 'Usage credits required for 1M context' (Claude Code bug #51060). Pinning
     subagents to Sonnet 200K keeps reviews working while your main session keeps its 1M context.
@@ -288,7 +288,7 @@ Include the server in `.lsp.json` regardless — it activates once the binary is
    - Default: Yes when the session plausibly runs a 1M model; No otherwise
    - If Yes: merge `{"env": {"CLAUDE_CODE_SUBAGENT_MODEL": "claude-sonnet-5"}}` into `~/.claude/settings.json` using jq (create the file if it doesn't exist). This runs all `Task` subagents on Sonnet 200K regardless of the main session model. (Pin Sonnet, not Opus — Opus is auto-upgraded to 1M on Max/Team/Enterprise plans and would re-trigger the gate.)
    - If No: remove the `CLAUDE_CODE_SUBAGENT_MODEL` key from the `env` object in `~/.claude/settings.json` (if present)
-   - **Tiering caveat (state regardless of answer)**: the pin overrides every agent's `model:` frontmatter — agentflow's model tiering (opus planner/security-reviewer, haiku context-gatherer/structure-analyzer/lessons-collector) is flattened onto the pinned model while it is set. On a standard 200K session the 1M gate never fires, so answer No there to keep the tiering active.
+   - **Tiering caveat (state regardless of answer)**: the pin overrides every agent's `model:` frontmatter — cenci's model tiering (opus planner/security-reviewer, haiku context-gatherer/structure-analyzer/lessons-collector) is flattened onto the pinned model while it is set. On a standard 200K session the 1M gate never fires, so answer No there to keep the tiering active.
    - **Caveat (state regardless of answer)**: this only affects **new** sessions — restart after configuring. If subagent reviews still fail with the 1M gate even after pinning (the pin didn't strip `[1m]`), run `/model sonnet` for the current session, which always yields 200K.
 
 8. **CI/CD pipeline**: "Do you want to generate a CI/CD pipeline?"
@@ -333,13 +333,13 @@ Include the server in `.lsp.json` regardless — it activates once the binary is
    - Python: `python-requires` from `pyproject.toml`, fallback `"3.12"`
    - Rust: `rust-toolchain.toml` or `"stable"`
 
-9. **Sandbox Dockerfile**: "Generate a sandbox Dockerfile for this repo? (Tailors the `agent-sand` image to your stack; committed so your team shares it.)"
+9. **Sandbox Dockerfile**: "Generate a sandbox Dockerfile for this repo? (Tailors the `cenci-sand` image to your stack; committed so your team shares it.)"
    - Options: "Yes — generate `.agent-sand/Dockerfile`", "No — skip"
    - Default: Yes
 
-   **Agent runtime fragments**: Always include both `node.dockerfile` and `codex.dockerfile`, regardless of the detected project stack. `agent-sand --agent codex` executes the Codex CLI baked into the selected image, and the npm-distributed Codex launcher requires Node.js. A generated per-repo image that omits either fragment cannot launch Codex.
+   **Agent runtime fragments**: Always include both `node.dockerfile` and `codex.dockerfile`, regardless of the detected project stack. `cenci-sand --agent codex` executes the Codex CLI baked into the selected image, and the npm-distributed Codex launcher requires Node.js. A generated per-repo image that omits either fragment cannot launch Codex.
 
-   **Stack-to-fragment mapping**: In addition to the mandatory agent runtime fragments, use the detected stack from question 1 (or, for monorepos, the union of every `projects[].stack.framework` value) to select which `dev-sandbox/fragments/*.dockerfile` blocks to include:
+   **Stack-to-fragment mapping**: In addition to the mandatory agent runtime fragments, use the detected stack from question 1 (or, for monorepos, the union of every `projects[].stack.framework` value) to select which `sandbox/fragments/*.dockerfile` blocks to include:
 
    | Detected stack | Fragment |
    |---|---|
@@ -358,11 +358,11 @@ Include the server in `.lsp.json` regardless — it activates once the binary is
 
    A stack token that matches no row above (e.g. `markdown-shell`, `docker-shell`) contributes no additional project fragment. This is not an error — the generated Dockerfile still contains the mandatory Node and Codex runtime fragments.
 
-   **.NET version substitution** (the only row with a version-from-token adjustment): `dev-sandbox/fragments/dotnet.dockerfile` ships with `ARG DOTNET_SDK_VERSION=10.0.100` as its own default. When including this fragment, replace that default's version with `<major>.0.100`, where `<major>` is extracted from the stack token using the same extraction as the CI mapping's version-pinning table above (`dotnet10` → `10`) — e.g. a `dotnet8` stack writes `ARG DOTNET_SDK_VERSION=8.0.100`. **Monorepo tie-break**: when multiple projects map to the dotnet fragment with different major versions (e.g. one project on `dotnet8`, another on `dotnet10`), use the **highest** major version found across all matching projects. If no major version can be extracted from the token, leave the fragment's own default (`10.0.100`) unmodified — and add an inline comment immediately after the `ARG DOTNET_SDK_VERSION` line noting the version could not be auto-detected from the stack token and the fragment's default was used instead, e.g. `# .NET version could not be auto-detected from the stack token — using fragment default. See dev-sandbox/README.md to pin manually.` (mirrors the unresolved-`baseVersion` comment pattern in the baseVersion resolution above). The other fragments (node, playwright, go, python, rust, codex) are included verbatim with their own `ARG` defaults unmodified — every fragment `ARG` (including `DOTNET_SDK_VERSION` and `BASE_VERSION`) remains overridable at build time via `--build-arg`, so an unmodified default is never a hard lock-in.
+   **.NET version substitution** (the only row with a version-from-token adjustment): `sandbox/fragments/dotnet.dockerfile` ships with `ARG DOTNET_SDK_VERSION=10.0.100` as its own default. When including this fragment, replace that default's version with `<major>.0.100`, where `<major>` is extracted from the stack token using the same extraction as the CI mapping's version-pinning table above (`dotnet10` → `10`) — e.g. a `dotnet8` stack writes `ARG DOTNET_SDK_VERSION=8.0.100`. **Monorepo tie-break**: when multiple projects map to the dotnet fragment with different major versions (e.g. one project on `dotnet8`, another on `dotnet10`), use the **highest** major version found across all matching projects. If no major version can be extracted from the token, leave the fragment's own default (`10.0.100`) unmodified — and add an inline comment immediately after the `ARG DOTNET_SDK_VERSION` line noting the version could not be auto-detected from the stack token and the fragment's default was used instead, e.g. `# .NET version could not be auto-detected from the stack token — using fragment default. See sandbox/README.md to pin manually.` (mirrors the unresolved-`baseVersion` comment pattern in the baseVersion resolution above). The other fragments (node, playwright, go, python, rust, codex) are included verbatim with their own `ARG` defaults unmodified — every fragment `ARG` (including `DOTNET_SDK_VERSION` and `BASE_VERSION`) remains overridable at build time via `--build-arg`, so an unmodified default is never a hard lock-in.
 
-   > **Sync obligation**: `dev-sandbox/fragments/*.dockerfile` is the source of truth for these blocks; the mapping table above mirrors their content and existence, not their byte contents (generation reads the fragment files directly — see step 5e). If a fragment is added, removed, or renamed, this table needs a matching manual update. Low risk in practice — both live in the same monorepo and are maintained together — but currently unenforced by tooling.
+   > **Sync obligation**: `sandbox/fragments/*.dockerfile` is the source of truth for these blocks; the mapping table above mirrors their content and existence, not their byte contents (generation reads the fragment files directly — see step 5e). If a fragment is added, removed, or renamed, this table needs a matching manual update. Low risk in practice — both live in the same monorepo and are maintained together — but currently unenforced by tooling.
 
-   > **Trust / security note**: `.agent-sand/Dockerfile` is committed to the repo, so it is reviewed like any other file in the PR that adds or changes it. It only runs `docker build` steps assembled from `dev-sandbox/fragments/*.dockerfile` — no arbitrary runtime hooks execute during configure or during the build it produces.
+   > **Trust / security note**: `.agent-sand/Dockerfile` is committed to the repo, so it is reviewed like any other file in the PR that adds or changes it. It only runs `docker build` steps assembled from `sandbox/fragments/*.dockerfile` — no arbitrary runtime hooks execute during configure or during the build it produces.
 
 ### Auth Verification
 
@@ -450,15 +450,15 @@ After gathering answers:
    | `In Review` | `A2EEEF` | PR open, under review / CI running |
    | `Implemented` | `6F42C1` | PR merged — done |
    | `Followup` | `C5DEF5` | Deferred/out-of-scope item captured from a session — triage before working |
-   | `dispatch-failed` | `b60205` | agentwatch: dispatched work failed after exhausting its retry budget |
-   | `plan-invalid` | `d93f0b` | agentwatch: ticket is Planned but has no parseable plan file |
-   | `reconcile-stuck` | `5319e7` | agentwatch: reconciliation itself is stuck (apply-retry budget exhausted) |
+   | `dispatch-failed` | `b60205` | cenci: dispatched work failed after exhausting its retry budget |
+   | `plan-invalid` | `d93f0b` | cenci: ticket is Planned but has no parseable plan file |
+   | `reconcile-stuck` | `5319e7` | cenci: reconciliation itself is stuck (apply-retry budget exhausted) |
 
-   This is the canonical color/description table. The lifecycle rows above are self-healed by the skills' own `gh label create … || true` fallbacks; the reconciler-owned `dispatch-failed` / `plan-invalid` / `reconcile-stuck` rows are self-healed instead by agentwatch's Go `GHMutator.EnsureLabels` (not a skill-level fallback) — see "Reconciler-managed labels" under Board lifecycle labels below.
+   This is the canonical color/description table. The lifecycle rows above are self-healed by the skills' own `gh label create … || true` fallbacks; the reconciler-owned `dispatch-failed` / `plan-invalid` / `reconcile-stuck` rows are self-healed instead by cenci's Go `GHMutator.EnsureLabels` (not a skill-level fallback) — see "Reconciler-managed labels" under Board lifecycle labels below.
 
 4. **Create or update `.claude/settings.json`**:
 
-   Write the minimal shape below — Claude Code's host sandbox is disabled because the container is the boundary. Under `--dangerously-skip-permissions` Claude Code ignores `permissions.allow/deny`, but keep the base allow list + deny rules as defense-in-depth for the case where a user runs plain `claude` (no skip-permissions) inside the container, e.g. via `agent-sand --shell`.
+   Write the minimal shape below — Claude Code's host sandbox is disabled because the container is the boundary. Under `--dangerously-skip-permissions` Claude Code ignores `permissions.allow/deny`, but keep the base allow list + deny rules as defense-in-depth for the case where a user runs plain `claude` (no skip-permissions) inside the container, e.g. via `cenci-sand --shell`.
 
    ```json
    {
@@ -473,26 +473,26 @@ After gathering answers:
 
    Then **append** to it:
 
-   > **IMPORTANT**: All base permissions from the template (`Write`, `Edit`, `Read(~/.claude/plugins/**)`, `Read(//tmp/claude*/**)`, `Write(//tmp/claude*/**)`, `Bash(cd:*)`, `Bash(git:*)`, `Bash(gh:*)`, `Bash(wc:*)`, `SlashCommand(/goal:*)`, `SlashCommand(/loop:*)`, etc.) **MUST** remain in `permissions.allow`. Only **append** new entries — never remove or replace existing ones. When updating an **existing** `settings.json`, also ensure these base entries are present — add any that are missing (older configs predate them — e.g. `SlashCommand(/goal:*)` for the implement autopilot and `SlashCommand(/loop:*)` for `/agentflow:babysit`). The `Read(~/.claude/plugins/**)` rule lets the pipeline read its own plugin files (phase docs resolve to `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/skills/…`) without prompting — it is deliberately scoped to `plugins/` so subagents cannot read session transcripts or global config under `~/.claude/`; the `//tmp/claude*/**` rules cover the `shell-rules` heredoc temp-file pattern and the session scratchpad.
+   > **IMPORTANT**: All base permissions from the template (`Write`, `Edit`, `Read(~/.claude/plugins/**)`, `Read(//tmp/claude*/**)`, `Write(//tmp/claude*/**)`, `Bash(cd:*)`, `Bash(git:*)`, `Bash(gh:*)`, `Bash(wc:*)`, `SlashCommand(/goal:*)`, `SlashCommand(/loop:*)`, etc.) **MUST** remain in `permissions.allow`. Only **append** new entries — never remove or replace existing ones. When updating an **existing** `settings.json`, also ensure these base entries are present — add any that are missing (older configs predate them — e.g. `SlashCommand(/goal:*)` for the implement autopilot and `SlashCommand(/loop:*)` for `/cenci:babysit`). The `Read(~/.claude/plugins/**)` rule lets the pipeline read its own plugin files (phase docs resolve to `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/skills/…`) without prompting — it is deliberately scoped to `plugins/` so subagents cannot read session transcripts or global config under `~/.claude/`; the `//tmp/claude*/**` rules cover the `shell-rules` heredoc temp-file pattern and the session scratchpad.
 
    **Append to `permissions.allow`:**
    - Stack-specific rules (e.g., `Bash(dotnet:*)` for .NET, `Bash(ng:*)` for Angular, `Bash(go:*)` for Go)
    - For each enabled MCP, add its tool permissions. Look up the server's available tools
      and add entries in the format `mcp__<server-name>__<tool-name>` (for project-scoped)
-     or `mcp__plugin_agentflow_<server-name>__<tool-name>` (for plugin-scoped).
+     or `mcp__plugin_cenci_<server-name>__<tool-name>` (for plugin-scoped).
      Known tools:
-     - **Context7**: `mcp__plugin_agentflow_context7__resolve-library-id`, `mcp__plugin_agentflow_context7__query-docs`
+     - **Context7**: `mcp__plugin_cenci_context7__resolve-library-id`, `mcp__plugin_cenci_context7__query-docs`
      - **Pencil** (only if `pencil.enabled` is `true`): `mcp__pencil__*` (auto-allow all Pencil editor MCP tools — only relevant when Pencil editor is open)
      - **Angular**: `mcp__angular__:*` (auto-allow all Angular CLI MCP tools)
      - **PrimeNG**: `mcp__primeng__:*` (auto-allow all PrimeNG MCP tools)
 
    **Pending-plans detection** — no per-project setup required. The pending-plans
    SessionStart hook is shipped plugin-side (`${CLAUDE_PLUGIN_ROOT}/hooks/scripts/check-pending-plans.sh`,
-   registered in `agentflow/hooks/hooks.json`) and runs automatically wherever agentflow is
+   registered in `flow/hooks/hooks.json`) and runs automatically wherever cenci is
    enabled. Do **not** add a SessionStart entry to `.claude/settings.json` or copy any
    script into `.claude/hooks/`.
 
-   **Legacy cleanup** — heal projects configured by an older agentflow that installed the
+   **Legacy cleanup** — heal projects configured by an older cenci that installed the
    hook per-project (a fragile cwd-relative path that errored in worktrees and
    subdirectories):
    1. If `.claude/settings.json` has a `hooks.SessionStart` hook whose `command` is
@@ -502,14 +502,14 @@ After gathering answers:
    2. Delete the orphaned script if present: `rm -f .claude/hooks/check-pending-plans.sh`.
       Then remove the directory only if it is now empty: `rmdir .claude/hooks 2>/dev/null || true`
       (the `|| true` keeps it non-fatal when the dir is absent or still holds other hooks;
-      run as its own Bash call, never compounded with a `cd` — see `agentflow:shell-rules`).
+      run as its own Bash call, never compounded with a `cd` — see `cenci:shell-rules`).
 
 ### MCP Server Configuration
 
 For each MCP selected in question 5:
 
 **Plugin-scoped (Context7):**
-- In agentflow's `.mcp.json` (`${CLAUDE_PLUGIN_ROOT}/.mcp.json`), set `mcpServers.context7.disabled` to `false`
+- In cenci's `.mcp.json` (`${CLAUDE_PLUGIN_ROOT}/.mcp.json`), set `mcpServers.context7.disabled` to `false`
 - Note to user: "Set CONTEXT7_API_KEY in your shell environment (free key from context7.com/dashboard)"
 
 **Project-scoped (Angular, PrimeNG, etc.):**
@@ -535,7 +535,7 @@ For each MCP selected in question 5:
 5. Update `.gitignore`:
    - Add `.worktrees/` if not present
    - Add `.plans/` if not present (plan files are ephemeral, session-specific)
-   - Check each entry individually before adding — skip any that are already in `.gitignore`. (If a prior agentflow version appended a `# Claude Code sandbox artifacts` block, leave it in place — the entries are harmless and removing them would violate the append-only rule.)
+   - Check each entry individually before adding — skip any that are already in `.gitignore`. (If a prior cenci version appended a `# Claude Code sandbox artifacts` block, leave it in place — the entries are harmless and removing them would violate the append-only rule.)
 5b. **Generate `.claudeignore`**: Create or update `.claudeignore` in the project root. This file tells Claude Code to ignore files that are tracked by git but not useful as context (binary assets, lock files, generated bundles). Claude already respects `.gitignore`, so `.claudeignore` is only for tracked files.
 
    - If `.claudeignore` already exists, merge new entries into it — preserve user-added entries, skip duplicates.
@@ -673,48 +673,48 @@ For each MCP selected in question 5:
 
    **Resolve `baseVersion`** — try (a), then fall back to (b), then (c):
 
-   (a) **Dogfooding path**: if the repo being configured contains `dev-sandbox/.claude-plugin/plugin.json` (i.e. this is the `agent-stack` repo itself), read its `.version` field directly and use that as `baseVersion`.
+   (a) **Dogfooding path**: if the repo being configured contains `sandbox/.claude-plugin/plugin.json` (i.e. this is the `cenci` repo itself), read its `.version` field directly and use that as `baseVersion`.
 
    (b) **Installed-plugin path**: otherwise, read `~/.claude/plugins/installed_plugins.json` and look for keys matching `sandbox@<marketplace>` under `.plugins` (any marketplace suffix). If more than one key matches, use the entry with the **highest semver** among the matching entries' `.plugins["sandbox@<marketplace>"][0].version` values as `baseVersion` — never an arbitrary/first-found tie-break. When more than one match exists, note in the final completion summary (see the "Report what was created" instruction near the end of this file) which marketplace/version was resolved, so the choice is visible to the user rather than silent.
 
-   **Validation (applies to both (a) and (b))**: before writing a resolved `baseVersion` anywhere (the Dockerfile's `ARG BASE_VERSION=` line or `.claude/config.json`), validate it against a strict version pattern: `^[0-9]+\.[0-9]+\.[0-9]+$` (matching the real plugin.json version format, e.g. `"0.9.0"`). This guards against a compromised marketplace entry or a tampered plugin.json in a fork injecting arbitrary content (embedded newlines, `#` comments, Dockerfile directives, or even a spoofed `# agentflow:managed-end` sequence) into a file that's later `docker build`'d. If the resolved value does not match the pattern, treat `baseVersion` as unresolved and fall through to (c) — do not write the raw value into the Dockerfile or config.json.
+   **Validation (applies to both (a) and (b))**: before writing a resolved `baseVersion` anywhere (the Dockerfile's `ARG BASE_VERSION=` line or `.claude/config.json`), validate it against a strict version pattern: `^[0-9]+\.[0-9]+\.[0-9]+$` (matching the real plugin.json version format, e.g. `"0.9.0"`). This guards against a compromised marketplace entry or a tampered plugin.json in a fork injecting arbitrary content (embedded newlines, `#` comments, Dockerfile directives, or even a spoofed `# cenci:managed-end` sequence) into a file that's later `docker build`'d. If the resolved value does not match the pattern, treat `baseVersion` as unresolved and fall through to (c) — do not write the raw value into the Dockerfile or config.json.
 
-   (c) **Unresolved**: if neither (a) nor (b) yields a version that passes validation, `baseVersion` is unresolved. Store `"baseVersion": null` in `.claude/config.json`'s `sandbox` field. The Dockerfile is still generated (fragments are still selected and written) — only the `ARG BASE_VERSION=` line ships with no default value, followed by an inline comment pointing at `dev-sandbox/README.md` for a manual pin. This is safe because `agent-sand`'s `build_repo_image()` always passes `--build-arg BASE_VERSION=...` explicitly at build time — it resolves `BASE_VERSION` on its own regardless of what (or nothing) is baked into the file.
+   (c) **Unresolved**: if neither (a) nor (b) yields a version that passes validation, `baseVersion` is unresolved. Store `"baseVersion": null` in `.claude/config.json`'s `sandbox` field. The Dockerfile is still generated (fragments are still selected and written) — only the `ARG BASE_VERSION=` line ships with no default value, followed by an inline comment pointing at `sandbox/README.md` for a manual pin. This is safe because `cenci-sand`'s `build_repo_image()` always passes `--build-arg BASE_VERSION=...` explicitly at build time — it resolves `BASE_VERSION` on its own regardless of what (or nothing) is baked into the file.
 
-   **Generated file format** — always emit the ARG/FROM pair below, **never** a literal `FROM agent-sandbox-base:<version>`. `agent-sand`'s `build_repo_image()` always passes `--build-arg BASE_VERSION=...` at build time; a literal `FROM` would silently drift from what's actually built:
+   **Generated file format** — always emit the ARG/FROM pair below, **never** a literal `FROM agent-sandbox-base:<version>`. `cenci-sand`'s `build_repo_image()` always passes `--build-arg BASE_VERSION=...` at build time; a literal `FROM` would silently drift from what's actually built:
 
    ```dockerfile
-   # agentflow:managed-begin
+   # cenci:managed-begin
    ARG BASE_VERSION=<resolved-version-or-empty>
    FROM agent-sandbox-base:${BASE_VERSION}
 
    SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-   <selected fragment 1 content, from dev-sandbox/fragments/*.dockerfile>
+   <selected fragment 1 content, from sandbox/fragments/*.dockerfile>
 
    <selected fragment 2 content>
    ...
-   # agentflow:managed-end
+   # cenci:managed-end
    ```
 
    - If `baseVersion` resolved (path a or b): write it as the ARG default, e.g. `ARG BASE_VERSION=0.9.0`.
-   - If unresolved (path c): write `ARG BASE_VERSION=` with no default, then a comment line immediately after: `# No agent-sandbox plugin version detected — see dev-sandbox/README.md to pin BASE_VERSION manually, or install the agent-sandbox plugin and re-run /agentflow:configure.`
+   - If unresolved (path c): write `ARG BASE_VERSION=` with no default, then a comment line immediately after: `# No agent-sandbox plugin version detected — see sandbox/README.md to pin BASE_VERSION manually, or install the agent-sandbox plugin and re-run /cenci:configure.`
 
-   **Fragment concatenation order** (when multiple fragments apply, e.g. a monorepo union): **dotnet → node → playwright → go → python → rust → codex**, regardless of the order projects were discovered in. Node and Codex are mandatory; the remaining fragments are stack-selected. Concatenate the selected `dev-sandbox/fragments/*.dockerfile` file contents in that fixed order, applying the **.NET version substitution** from the mapping table above to the dotnet fragment only — every other fragment is included verbatim. Deduplicate — each fragment appears at most once even when multiple monorepo projects map to the same fragment.
+   **Fragment concatenation order** (when multiple fragments apply, e.g. a monorepo union): **dotnet → node → playwright → go → python → rust → codex**, regardless of the order projects were discovered in. Node and Codex are mandatory; the remaining fragments are stack-selected. Concatenate the selected `sandbox/fragments/*.dockerfile` file contents in that fixed order, applying the **.NET version substitution** from the mapping table above to the dotnet fragment only — every other fragment is included verbatim. Deduplicate — each fragment appears at most once even when multiple monorepo projects map to the same fragment.
 
-   **Merge-safe regeneration**: the whole block above (from `# agentflow:managed-begin` through `# agentflow:managed-end` inclusive) is the managed block.
+   **Merge-safe regeneration**: the whole block above (from `# cenci:managed-begin` through `# cenci:managed-end` inclusive) is the managed block.
    - **File doesn't exist**: create `.agent-sand/` (`mkdir -p .agent-sand`) and write the managed block as the full file content.
-   - **File exists with both markers present**: replace only the text from `# agentflow:managed-begin` through `# agentflow:managed-end` (inclusive) with the freshly generated block. Preserve everything before the begin marker and everything after the end marker exactly as-is — this is where a team can hand-append their own `RUN` steps across re-runs.
+   - **File exists with both markers present**: replace only the text from `# cenci:managed-begin` through `# cenci:managed-end` (inclusive) with the freshly generated block. Preserve everything before the begin marker and everything after the end marker exactly as-is — this is where a team can hand-append their own `RUN` steps across re-runs.
    - **File exists with no markers** (e.g. a hand-authored legacy `.agent-sand/Dockerfile`): do not silently overwrite it. Reuse the exact Overwrite/Skip/Show conflict-check UX already used for CI/CD generation (question 8 / step 5d) — same three options, same behavior:
-     "Found existing `.agent-sand/Dockerfile` without agentflow's managed markers. What would you like to do?"
+     "Found existing `.agent-sand/Dockerfile` without cenci's managed markers. What would you like to do?"
      Options: "Overwrite — wrap it in managed markers and replace with the generated block", "Skip — keep the existing file, still record `sandbox` in config.json", "Show existing — display the current file contents"
      - If Skip: still record `sandbox` in config.json, don't write the file.
      - If Show existing: read and display the file, then re-ask Overwrite/Skip.
-   - **File exists with malformed markers** (exactly one of `# agentflow:managed-begin` / `# agentflow:managed-end` present, markers out of order, or duplicate marker pairs): do **not** attempt a partial text replace — a malformed marker pair cannot be trusted to safely bound the managed block (and could itself be the result of a spoofed end-marker smuggled in via an unvalidated `baseVersion` — see the validation step above). Route this through the exact same Overwrite/Skip/Show conflict-check UX as the "no markers" case above — same prompt text, same three options, same behavior.
+   - **File exists with malformed markers** (exactly one of `# cenci:managed-begin` / `# cenci:managed-end` present, markers out of order, or duplicate marker pairs): do **not** attempt a partial text replace — a malformed marker pair cannot be trusted to safely bound the managed block (and could itself be the result of a spoofed end-marker smuggled in via an unvalidated `baseVersion` — see the validation step above). Route this through the exact same Overwrite/Skip/Show conflict-check UX as the "no markers" case above — same prompt text, same three options, same behavior.
 
    **Monorepo**: fragments are the mandatory Node and Codex runtime fragments plus the deduplicated union described in the Stack-to-fragment mapping table under question 9, concatenated in the dotnet → node → playwright → go → python → rust → codex order above — one `.agent-sand/Dockerfile` for the whole repo, not one per project.
 
-   **Committed, not ignored**: `.agent-sand/Dockerfile` is committed to the repo. Do **not** add `.agent-sand/` or `.agent-sand/Dockerfile` to `.gitignore` — the whole point is a team-shared, reviewed Dockerfile that `agent-sand`'s per-repo image selection (see `dev-sandbox/README.md`) builds identically for every teammate.
+   **Committed, not ignored**: `.agent-sand/Dockerfile` is committed to the repo. Do **not** add `.agent-sand/` or `.agent-sand/Dockerfile` to `.gitignore` — the whole point is a team-shared, reviewed Dockerfile that `cenci-sand`'s per-repo image selection (see `sandbox/README.md`) builds identically for every teammate.
 
 6. **Write `.claude/config.json`** with their choices using **merge semantics**:
 
@@ -746,7 +746,7 @@ For each MCP selected in question 5:
   },
   "autoCompactDisabled": true,
   "pinSubagents200K": true,
-  "agentflow": {
+  "cenci": {
     "compactImplementation": false,
     "reviewConcurrency": "parallel",
     "diffContextMode": "inline",
@@ -765,17 +765,17 @@ For each MCP selected in question 5:
 }
 ```
 
-The `agentflow` field is optional. If present, preserve existing user values during reconfiguration. Schema:
+The `cenci` field is optional. If present, preserve existing user values during reconfiguration. Schema:
 - `compactImplementation` — `true` allows small, low-risk tickets to combine red/green/refactor into one implementer subagent turn while preserving all TDD/reporting gates. Default: `false`.
 - `reviewConcurrency` — `"parallel"` runs security, code, and silent-failure reviews together; `"sequential"` runs the same reviews one after another to smooth usage limits. Default: `"parallel"`.
-- `diffContextMode` — `"inline"` passes small diffs directly to reviewers; `"file"` writes the diff to `/tmp/claude/agentflow-<ticket-id-or-slug>-diff.patch` and passes paths so reviewers read targeted hunks. Default: `"inline"`.
+- `diffContextMode` — `"inline"` passes small diffs directly to reviewers; `"file"` writes the diff to `/tmp/claude/cenci-<ticket-id-or-slug>-diff.patch` and passes paths so reviewers read targeted hunks. Default: `"inline"`.
 - `liteReviewEnabled` — `true` (default) lets Phase 6 + 7 classify each diff into `full` (all three reviewers), `lite-docs` (no reviewers, docs-only), or `lite-small` (`code-reviewer` only, small config/data-only diffs); `false` forces the full trio on every run regardless of diff size or content. See Phase 6 + 7 for the precedence-ordered classification rules.
 - `goalAutopilot` — `true` arms a native `/goal` completion condition at Phase 2 start (Claude Code ≥ 2.1.139) so implement phases 2–9 resume through to an open PR after a mid-phase stop; `false` opts out. Default (unset): enabled where supported, a graceful no-op on older runtimes.
 - `planComment` — `true` makes implement Phase 1 also post the saved plan as a ticket comment (ticket mode only) right after marking the ticket `Planned`, for audit / off-host visibility; `.plans/` stays the executable source of truth. Default: `false` (no comment).
 
-Configure always writes `sandbox: { "enabled": false }` in `.claude/settings.json` (no `network`/`excludedCommands`/`autoAllowBashIfSandboxed`) — the `agent-sand` container is the security boundary. The config no longer carries `profile` or `sandboxEnabled` fields; re-config strips them from older configs (see the migration-removal list below).
+Configure always writes `sandbox: { "enabled": false }` in `.claude/settings.json` (no `network`/`excludedCommands`/`autoAllowBashIfSandboxed`) — the `cenci-sand` container is the security boundary. The config no longer carries `profile` or `sandboxEnabled` fields; re-config strips them from older configs (see the migration-removal list below).
 
-Optional external usage reducer: RTK (`https://github.com/rtk-ai/rtk`) can compress shell command output before it reaches Claude Code. It is not required for agentflow and should not be installed automatically, but it is worth recommending when users are hitting usage limits from command-heavy sessions. After separate installation, `rtk init -g` enables Claude Code Bash command rewriting where supported. Built-in tools like `Read`, `Grep`, and `Glob` do not pass through RTK hooks.
+Optional external usage reducer: RTK (`https://github.com/rtk-ai/rtk`) can compress shell command output before it reaches Claude Code. It is not required for cenci and should not be installed automatically, but it is worth recommending when users are hitting usage limits from command-heavy sessions. After separate installation, `rtk init -g` enables Claude Code Bash command rewriting where supported. Built-in tools like `Read`, `Grep`, and `Glob` do not pass through RTK hooks.
 
 The `cicd` field is only present when the user selected Yes in question 8. Schema:
 - `cicd.enabled` — `true` if user opted in, omit `cicd` entirely if declined
@@ -789,7 +789,7 @@ The `sandbox` field is only present when the user selected Yes in question 9. Sc
 
 Omit `sandbox` entirely when the user says No (same pattern as `cicd`/`pencil`).
 
-> **Not the same as `.claude/settings.json`'s `sandbox.enabled`.** Step 4 above always writes `"sandbox": { "enabled": false }` into `.claude/settings.json` — that key disables **Claude Code's own host sandbox**, because the `agent-sand` container is the security boundary instead. This `.claude/config.json` `sandbox` field is unrelated: it's this ticket's per-repo `.agent-sand/Dockerfile` toggle, consumed by agentflow's configure skill and by `agent-sand`'s per-repo image build — not by Claude Code itself. Same field name (`sandbox.enabled`), two different files, two different consumers, two unrelated meanings. Do not conflate them when reading or writing either file.
+> **Not the same as `.claude/settings.json`'s `sandbox.enabled`.** Step 4 above always writes `"sandbox": { "enabled": false }` into `.claude/settings.json` — that key disables **Claude Code's own host sandbox**, because the `cenci-sand` container is the security boundary instead. This `.claude/config.json` `sandbox` field is unrelated: it's this ticket's per-repo `.agent-sand/Dockerfile` toggle, consumed by cenci's configure skill and by `cenci-sand`'s per-repo image build — not by Claude Code itself. Same field name (`sandbox.enabled`), two different files, two different consumers, two unrelated meanings. Do not conflate them when reading or writing either file.
 
 The `pencil` field is only present when the user was asked question 5b (frontend framework detected). Schema:
 - `pencil.enabled` — gating flag for all design features (`true` if user opted in, `false` if declined)
@@ -879,7 +879,7 @@ When migrating from an older config that has `ticketSystem`, `prSystem`, `ticket
 - When `pencil.shared` is `true`: `pencil.designPath` holds the shared path (e.g., `"designs/"`). Individual projects do **not** have `designPath`.
 - When `pencil.shared` is `false` (separate): `pencil.designPath` is omitted. Each frontend project in the `projects` array gets a `designPath` field (e.g., `"apps/web-client/designs/"`). Non-frontend projects do not get `designPath`.
 
-Report what was created and suggest next steps (e.g., "Try `/agentflow:refine <ticket-id>` on a ticket"). If `sandbox.enabled` is `true`, mention the generated/committed `.agent-sand/Dockerfile` and that `agent-sand --build` (run from inside the repo) builds the repo's own tailored image on top of the shared base. If `sandbox.baseVersion` resolved to `null` (unresolved — see the baseVersion resolution in step 5e), the chat summary must explicitly say so (e.g., "Base version could not be auto-detected — see `dev-sandbox/README.md` to pin `BASE_VERSION` manually") rather than leaving it only as an inline Dockerfile comment, so a user who doesn't open the generated file still learns the base version wasn't pinned.
+Report what was created and suggest next steps (e.g., "Try `/cenci:refine <ticket-id>` on a ticket"). If `sandbox.enabled` is `true`, mention the generated/committed `.agent-sand/Dockerfile` and that `cenci-sand --build` (run from inside the repo) builds the repo's own tailored image on top of the shared base. If `sandbox.baseVersion` resolved to `null` (unresolved — see the baseVersion resolution in step 5e), the chat summary must explicitly say so (e.g., "Base version could not be auto-detected — see `sandbox/README.md` to pin `BASE_VERSION` manually") rather than leaving it only as an inline Dockerfile comment, so a user who doesn't open the generated file still learns the base version wasn't pinned.
 
 ### Board lifecycle labels
 
@@ -894,7 +894,7 @@ in the completion summary so the user can mirror it as columns on their board:
 |---|---|---|
 | `Working` | refine / design / implement (at start) | Actively being refined, designed, or implemented |
 | `Refined` | refine | Ready for design/implementation |
-| `Design` | refine | Design-only ticket — deliverable is a design spec; implement redirects to `/agentflow:design` |
+| `Design` | refine | Design-only ticket — deliverable is a design spec; implement redirects to `/cenci:design` |
 | `Designed` | design | Design spec approved — propagated from the completed design ticket to the implementation tickets that depend on it |
 | `Planned` | implement Phase 1 (plan persisted) | Plan on disk, ready to pick up |
 | `In Review` | implement Phase 9 (at PR-open) | PR is open, under review / CI running |
@@ -905,16 +905,16 @@ in the completion summary so the user can mirror it as columns on their board:
 
 A ticket judged trivial by implement's Trivial-Ticket Triage still transits through `Planned` — same labels, same board columns as any other ticket — just collapsed into one session instead of a stop-and-relaunch between `Planned` and `Working`. No new label state is introduced by the trivial-ticket fast path.
 
-**Reconciler-managed labels**: `dispatch-failed`, `plan-invalid`, and `reconcile-stuck` are not applied by refine, design, or implement — agentwatch's dispatch reconciler applies them automatically when it detects a stuck or failed automation state (dispatched work exhausted its retry budget, a `Planned` ticket has no parseable plan file, or reconciliation itself is stuck with its apply-retry budget exhausted). Like `Followup`, they are orthogonal to the `New → … → Implemented` lifecycle above and are not columns in that chain.
+**Reconciler-managed labels**: `dispatch-failed`, `plan-invalid`, and `reconcile-stuck` are not applied by refine, design, or implement — cenci's dispatch reconciler applies them automatically when it detects a stuck or failed automation state (dispatched work exhausted its retry budget, a `Planned` ticket has no parseable plan file, or reconciliation itself is stuck with its apply-retry budget exhausted). Like `Followup`, they are orthogonal to the `New → … → Implemented` lifecycle above and are not columns in that chain.
 
 Lifecycle: `New → Refined → [Designed] → Planned → Working → In Review → Implemented`.
 
-Design always happens on a dedicated design ticket — refine creates one (companion ticket, or first child of a split) whenever a frontend ticket lacks an approved design. Design tickets (labeled `Design`) follow a shorter path: `New → Refined → Designed → closed` — `/agentflow:design` commits the spec on main, propagates `Designed` to the implementation tickets that depend on it (that propagated label is what satisfies implement's Design gate), and closes the design ticket; no plan, no PR (the one exception to "1 ticket = 1 PR"). `/agentflow:implement` redirects `Design`-labeled tickets to `/agentflow:design`. On a board, the `Designed` column therefore holds implementation tickets whose design is ready, not design tickets.
+Design always happens on a dedicated design ticket — refine creates one (companion ticket, or first child of a split) whenever a frontend ticket lacks an approved design. Design tickets (labeled `Design`) follow a shorter path: `New → Refined → Designed → closed` — `/cenci:design` commits the spec on main, propagates `Designed` to the implementation tickets that depend on it (that propagated label is what satisfies implement's Design gate), and closes the design ticket; no plan, no PR (the one exception to "1 ticket = 1 PR"). `/cenci:implement` redirects `Design`-labeled tickets to `/cenci:design`. On a board, the `Designed` column therefore holds implementation tickets whose design is ready, not design tickets.
 
 **Migration note for existing boards** (state this when re-configuring a project that predates
 `In Review`): add an **`In Review`** column/label. Previously, tickets dropped straight into
 `Implemented` the moment the PR was opened; now PR-open lands them in `In Review`, and
-`/agentflow:babysit` promotes them to `Implemented` when the PR actually merges. Existing tickets
+`/cenci:babysit` promotes them to `Implemented` when the PR actually merges. Existing tickets
 that carry `Implemented` from before this change but whose PRs are still open can be relabeled to
 `In Review` by hand; new work follows the split automatically.
 
@@ -927,7 +927,7 @@ lands the ticket on `Planned` ("a plan exists on disk, ready to pick up"); the s
 automatically.
 
 **Migration note for existing boards** (state this when re-configuring a project that predates
-the reconciler-managed labels): re-running `/agentflow:configure` on an existing project creates
+the reconciler-managed labels): re-running `/cenci:configure` on an existing project creates
 the `dispatch-failed`, `plan-invalid`, and `reconcile-stuck` labels retroactively via step 3c's
 missing-only `gh label create` loop. No other action is needed — the reconciler already
 self-heals these labels itself via `EnsureLabels`, so a board that skips this step is not

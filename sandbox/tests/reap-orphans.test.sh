@@ -31,7 +31,7 @@
 #     `%1x`) is treated like a missing/empty pane (never signaled) and logged
 #     with a distinct note: "Note: process <pid> in container <container>
 #     has a malformed TMUX_PANE value; skipping."
-#   - Liveness / signaling, always `-u root` (see dev-sandbox/CLAUDE.md's
+#   - Liveness / signaling, always `-u root` (see sandbox/CLAUDE.md's
 #     "docker run --user X persists" entrypoint pattern for why):
 #       `<runtime> exec -u root <container> kill -TERM <pid>`
 #       Pre-SIGKILL probe (replaces the ambiguous `kill -0`): an in-container

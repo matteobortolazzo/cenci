@@ -6,7 +6,7 @@ Delegate to the `implementer` agent to write tests first. Tests should fail.
 
 ## Compact Implementation
 
-If `agentflow.compactImplementation` is true and the plan is small, low-risk, and concrete, Phase 3, 4, and 5 may be combined into one implementer delegation. The implementer must still:
+If `cenci.compactImplementation` is true and the plan is small, low-risk, and concrete, Phase 3, 4, and 5 may be combined into one implementer delegation. The implementer must still:
 
 1. Write tests first.
 2. Run them and report failing test names and failure reasons.

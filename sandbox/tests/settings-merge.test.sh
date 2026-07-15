@@ -1,6 +1,6 @@
 #!/bin/bash
 # Tests for the settings.json provision/migrate logic in
-# dev-sandbox/lib/migrate-settings.sh.
+# sandbox/lib/migrate-settings.sh.
 #
 # Runs on the host with the system `jq` — no Docker required. Sources the same
 # migrate_settings() the entrypoint uses, so the jq under test is the shipped

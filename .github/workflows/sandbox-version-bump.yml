@@ -1,9 +1,9 @@
-name: agent-sandbox — Version Bump
+name: sandbox — Version Bump
 
 on:
   push:
     branches: [main]
-    paths: ['dev-sandbox/**']
+    paths: ['sandbox/**']
   workflow_dispatch:
 
 permissions:
@@ -14,8 +14,8 @@ jobs:
     if: github.actor != 'github-actions[bot]' || github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/plugin-version-bump.yml
     with:
-      plugin-name: agent-sandbox
-      plugin-json-paths: dev-sandbox/.claude-plugin/plugin.json dev-sandbox/.codex-plugin/plugin.json
-      marketplace-name: agent-sandbox
-      tag-prefix: agent-sandbox
+      plugin-name: cenci-sandbox
+      plugin-json-paths: sandbox/.claude-plugin/plugin.json sandbox/.codex-plugin/plugin.json
+      marketplace-name: cenci-sandbox
+      tag-prefix: sandbox
     secrets: inherit

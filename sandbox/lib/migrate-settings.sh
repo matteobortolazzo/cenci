@@ -4,8 +4,8 @@
 #
 # Sourced by entrypoint.sh (in the container), by `cenci-sand
 # --update-plugins` (via the copy baked at /usr/local/bin/lib/), and by the
-# test harnesses (dev-sandbox/tests/settings-merge.test.sh,
-# dev-sandbox/tests/heal-plugins.test.sh) on the host, so this logic lives in
+# test harnesses (sandbox/tests/settings-merge.test.sh,
+# sandbox/tests/heal-plugins.test.sh) on the host, so this logic lives in
 # exactly one place.
 #
 # What the migration does, in one idempotent pass:

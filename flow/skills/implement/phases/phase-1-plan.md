@@ -17,7 +17,7 @@ If `hasPlanFile` is false and the main agent's Trivial-Ticket Triage (see `SKILL
 
 1. The AC-mandated line (`` Judged trivial: `<reason>` — skipping planning, implementing directly ``) was already printed once by `SKILL.md`'s `## Trivial-Ticket Triage` when it set `trivial = true`. Do **not** print it again here.
 2. Skip the planner delegation and the Q&A loop entirely — there are no clarifying questions to ask on this path.
-3. Write the plan file using the **same** "Persist the Plan" machinery below, verbatim: the same front-matter shape, the same ticket-title→slug derivation, a `Write` step for the main-agent-owned sections, then `cat /tmp/claude/agentflow-context-<id>.md >> .plans/<filename>` to append `## Ticket Details`, `## Design Context`, and `## Project Context`. Two content differences: `## Implementation Plan` in this minimal file is a one-liner pointing at `## Ticket Details`, e.g. "Trivial ticket — implementation follows the ticket body directly; see ## Ticket Details." Likewise, `## Architectural Context` is a one-liner in place of the planner's discovered patterns/conventions, e.g. "N/A — no codebase exploration; triage judged the ticket unambiguous from its own body."
+3. Write the plan file using the **same** "Persist the Plan" machinery below, verbatim: the same front-matter shape, the same ticket-title→slug derivation, a `Write` step for the main-agent-owned sections, then `cat /tmp/claude/cenci-context-<id>.md >> .plans/<filename>` to append `## Ticket Details`, `## Design Context`, and `## Project Context`. Two content differences: `## Implementation Plan` in this minimal file is a one-liner pointing at `## Ticket Details`, e.g. "Trivial ticket — implementation follows the ticket body directly; see ## Ticket Details." Likewise, `## Architectural Context` is a one-liner in place of the planner's discovered patterns/conventions, e.g. "N/A — no codebase exploration; triage judged the ticket unambiguous from its own body."
 4. Apply the `Planned` label exactly as `## Persist the Plan`'s "Mark the ticket `Planned`" step does, **except** do not remove `Working` — this session is continuing rather than stopping, so the normal flow's
    ```bash
    gh issue edit <number> --repo <owner>/<repo> --add-label "Planned" --remove-label "Working"
@@ -27,7 +27,7 @@ If `hasPlanFile` is false and the main agent's Trivial-Ticket Triage (see `SKILL
    gh issue edit <number> --repo <owner>/<repo> --add-label "Planned"
    ```
    **Verify this command succeeded before continuing.** This restates — does not merely reference — `## Persist the Plan`'s error-surfacing rule, and it is *more* load-bearing here: the normal flow's plan-review stop is itself a human checkpoint that would catch a silently-failed label swap, but the Trivial Fast Path has no such checkpoint — it continues straight into Phase 2 and can arm an unattended `/goal` autopilot all the way to PR creation. If this command errors, surface the error to the user and **STOP** — do not set `hasPlanFile = true`, do not arm the goal, and do not proceed into Phase 2 on an unconfirmed board state.
-5. If `agentflow.planComment: true`, post the minimal plan as an audit comment exactly as today (see `## Persist the Plan`).
+5. If `cenci.planComment: true`, post the minimal plan as an audit comment exactly as today (see `## Persist the Plan`).
 6. Set `hasPlanFile = true` and continue directly into Phase 2 in the same session. Do **not** stop, do **not** present the plan for review, do **not** end the turn — this is the sole exception to "a session that creates a new plan always ends at Phase 1" (see `SKILL.md`'s Pipeline section).
 
 ## New Plan
@@ -37,7 +37,7 @@ If `hasPlanFile` is false (and the Trivial Fast Path above did not apply), analy
 Mandatory stops:
 
 1. If the planner has clarifying questions, ask them with `AskUserQuestion` and end the turn.
-2. Once the planner has no remaining questions, persist the plan and stop, presenting the full plan in the final message. There is **no plan-approval prompt**: answering the clarifying questions is the user's input to planning; reviewing the saved plan and launching the plan-file run is the approval. Implementation resumes by invoking `/agentflow:implement .plans/<filename>` in a fresh session.
+2. Once the planner has no remaining questions, persist the plan and stop, presenting the full plan in the final message. There is **no plan-approval prompt**: answering the clarifying questions is the user's input to planning; reviewing the saved plan and launching the plan-file run is the approval. Implementation resumes by invoking `/cenci:implement .plans/<filename>` in a fresh session.
 
 Never begin Phase 2 in a session that created a new plan — not in the same turn, and not in a later turn. Phases 2–9 require invocation with a plan-file argument, except the Trivial Fast Path (see `## Trivial Fast Path` above).
 
@@ -45,8 +45,8 @@ Never begin Phase 2 in a session that created a new plan — not in the same tur
 
 If `.claude/config.json` has `"deepExploration": true`, launch two Explore-type subagents before planner delegation:
 
-- Explorer 1: feature area, related components/services/patterns. Write full notes to `/tmp/claude/agentflow-<ticket-id-or-slug>-explore-1.md`.
-- Explorer 2: cross-cutting concerns, shared utilities, middleware, configuration, integrations. Write full notes to `/tmp/claude/agentflow-<ticket-id-or-slug>-explore-2.md`.
+- Explorer 1: feature area, related components/services/patterns. Write full notes to `/tmp/claude/cenci-<ticket-id-or-slug>-explore-1.md`.
+- Explorer 2: cross-cutting concerns, shared utilities, middleware, configuration, integrations. Write full notes to `/tmp/claude/cenci-<ticket-id-or-slug>-explore-2.md`.
 
 Each explorer must write its detailed findings to its notes file and return only a summary of 10 lines or fewer. Pass the two file paths (not the notes content) to the planner, which reads them itself. If `deepExploration` is absent or false, skip this.
 
@@ -98,7 +98,7 @@ Once the planner has no remaining questions, create `.plans/` and assemble:
 **Assemble, don't re-emit.** Write the plan file in two steps so bundle content never passes through the main context again:
 
 1. `Write` the plan file with the YAML front matter and only the sections the main agent owns: `## User Context`, `## Q&A from Planning`, `## Implementation Plan`, `## Architectural Context`, `## Attachment Summaries`.
-2. Append the context bundle verbatim via shell: `cat /tmp/claude/agentflow-context-<id|slug>.md >> .plans/<filename>` — this contributes `## Ticket Details`, `## Design Context`, and `## Project Context`.
+2. Append the context bundle verbatim via shell: `cat /tmp/claude/cenci-context-<id|slug>.md >> .plans/<filename>` — this contributes `## Ticket Details`, `## Design Context`, and `## Project Context`.
 
 If no bundle exists (ticketless mode without a gatherer run), write `## Ticket Details` with the task description and `## Design Context` with "N/A" directly in step 1.
 
@@ -119,7 +119,7 @@ parentId: null
 createdAt: 2026-03-04T10:30:00Z
 status: planned
 planCommitSha: abc123def
-stalenessPaths: agentwatch
+stalenessPaths: cenci
 ---
 
 ## Ticket Details
@@ -147,7 +147,7 @@ stalenessPaths: agentwatch
 <summaries or "None">
 ```
 
-Record `planCommitSha` from `git rev-parse HEAD`. Source `isChild`, `isLastChild`, and `parentId` from the context-gatherer digest stored earlier in this session. Source `stalenessPaths` from the repo-relative project directory/directories the plan touches (e.g. `agentwatch`, or `agentwatch, agentflow` for a plan spanning both), as identified in the planner output / context digest — this lets `agentwatch dispatch` count only commits relevant to this plan when judging staleness, instead of every commit in the monorepo. Omit or leave empty in single-project repos, where whole-repo staleness counting is fine. For ticketless mode, omit ticket fields.
+Record `planCommitSha` from `git rev-parse HEAD`. Source `isChild`, `isLastChild`, and `parentId` from the context-gatherer digest stored earlier in this session. Source `stalenessPaths` from the repo-relative project directory/directories the plan touches (e.g. `cenci`, or `cenci, cenci` for a plan spanning both), as identified in the planner output / context digest — this lets `cenci dispatch` count only commits relevant to this plan when judging staleness, instead of every commit in the monorepo. Omit or leave empty in single-project repos, where whole-repo staleness counting is fine. For ticketless mode, omit ticket fields.
 
 ### Mark the ticket `Planned` (ticket mode only)
 
@@ -167,13 +167,13 @@ gh issue edit <number> --repo <owner>/<repo> --add-label "Planned" --remove-labe
 
 `Planned` means "a persisted plan exists (or has existed) on disk (`.plans/<id>-*.md`)." The planning session applied `Working` at pipeline start; this swap replaces it so the board no longer shows the ticket as actively in flight. Unlike `Working`, `Planned` is a milestone marker, not a current-stage indicator — the implement skill never removes it once set, including at the start of the plan-file implementation run (see the **Label "Working"** section of `SKILL.md`), so a stalled implementation run still shows `Planned` on the board.
 
-If `.claude/config.json` has `agentflow.planComment: true`, also post the saved plan as a ticket comment for audit / off-host visibility (ticket mode only), immediately after the label swap. `.plans/` remains the executable source of truth; the comment is a convenience copy:
+If `.claude/config.json` has `cenci.planComment: true`, also post the saved plan as a ticket comment for audit / off-host visibility (ticket mode only), immediately after the label swap. `.plans/` remains the executable source of truth; the comment is a convenience copy:
 
 ```bash
 gh issue comment <number> --repo <owner>/<repo> --body-file .plans/<filename>
 ```
 
-If `agentflow.planComment` is absent or `false`, skip the comment.
+If `cenci.planComment` is absent or `false`, skip the comment.
 
 After the plan file is written and (in ticket mode) the label swap and any optional comment are done, the **only remaining actions** are those one-or-two `gh` calls plus the final message below — no other tool calls, and never read `phases/phase-2-worktree.md` or any later phase file in this session. The session that created a plan always ends here; implementation runs in a fresh session. (This "always ends here" rule is what `## New Plan` follows; the **Trivial Fast Path** above reuses this section's front-matter/write/label/comment machinery but does not stop — see its step 6.)
 
@@ -199,9 +199,9 @@ Plan saved to `.plans/<filename>`.
 
 Review the plan above. To implement, start a fresh session and run:
 
-/agentflow:implement .plans/<filename>
+/cenci:implement .plans/<filename>
 
-To discard it and re-plan, re-run /agentflow:implement <ticket-id or task> with `replan` as context.
+To discard it and re-plan, re-run /cenci:implement <ticket-id or task> with `replan` as context.
 
 If the task risks exceeding the implementing agent's context budget (see `docs/ticket-sizing.md`), consider running /refine to split it first.
 

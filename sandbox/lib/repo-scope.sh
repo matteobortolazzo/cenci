@@ -2,7 +2,7 @@
 # Pure repo-scoping helpers for cenci-sand.
 #
 # Sourced by cenci-sand (on the host) and by the test harness
-# (dev-sandbox/tests/repo-scope.test.sh) so the logic that namespaces
+# (sandbox/tests/repo-scope.test.sh) so the logic that namespaces
 # containers/volumes/images per repo lives in exactly one place.
 #
 # Every function here is pure (no side effects beyond reading the

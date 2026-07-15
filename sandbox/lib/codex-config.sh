@@ -3,7 +3,7 @@
 #
 # Sourced by entrypoint.sh (in the container, via the copy baked at
 # /usr/local/bin/lib/) and by the test harness
-# (dev-sandbox/tests/codex-config.test.sh) on the host, so this logic lives in
+# (sandbox/tests/codex-config.test.sh) on the host, so this logic lives in
 # exactly one place.
 #
 # Codex CLI renders its status line natively from `[tui] status_line` in

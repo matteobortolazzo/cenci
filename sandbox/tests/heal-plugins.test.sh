@@ -1,6 +1,6 @@
 #!/bin/bash
 # Tests for the installed_plugins.json healing logic in
-# dev-sandbox/lib/migrate-settings.sh.
+# sandbox/lib/migrate-settings.sh.
 #
 # An interrupted plugin auto-install leaves installed_plugins.json recording an
 # installPath whose cache directory was never populated. Claude Code trusts the

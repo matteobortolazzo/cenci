@@ -1,6 +1,6 @@
 #!/bin/bash
 # Tests for the Codex config.toml status-line seeding in
-# dev-sandbox/lib/codex-config.sh.
+# sandbox/lib/codex-config.sh.
 #
 # Runs on the host — no Docker required. Sources the same seed_codex_config()
 # the entrypoint uses, exercising it against files in a temp directory.

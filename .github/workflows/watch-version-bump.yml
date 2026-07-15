@@ -1,9 +1,9 @@
-name: agentwatch — Version Bump
+name: watch — Version Bump
 
 on:
   push:
     branches: [main]
-    paths: ['agentwatch/**']
+    paths: ['watch/**']
 
 permissions:
   contents: write
@@ -18,15 +18,15 @@ jobs:
     if: github.actor != 'github-actions[bot]'
     uses: ./.github/workflows/plugin-version-bump.yml
     with:
-      plugin-name: agentwatch
+      plugin-name: cenci-watch
       plugin-json-paths: >-
-        agentwatch/plugin/.claude-plugin/plugin.json
-        agentwatch/plugin/.codex-plugin/plugin.json
-        agentwatch/plugin/noctalia/manifest.json
-        agentwatch/plugin/dms/plugin.json
-        agentwatch/plugin/gnome/metadata.json
-        agentwatch/plugin/plasma/metadata.json
-      marketplace-name: agentwatch
-      tag-prefix: agentwatch
-      dispatch-workflow: agentwatch-release.yml
+        watch/plugin/.claude-plugin/plugin.json
+        watch/plugin/.codex-plugin/plugin.json
+        watch/plugin/noctalia/manifest.json
+        watch/plugin/dms/plugin.json
+        watch/plugin/gnome/metadata.json
+        watch/plugin/plasma/metadata.json
+      marketplace-name: cenci-watch
+      tag-prefix: watch
+      dispatch-workflow: watch-release.yml
     secrets: inherit

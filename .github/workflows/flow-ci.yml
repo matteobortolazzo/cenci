@@ -1,4 +1,4 @@
-name: agentflow — CI
+name: flow — CI
 
 on:
   push:
@@ -11,31 +11,31 @@ permissions:
 
 jobs:
   changes:
-    name: agentflow-changes
+    name: flow-changes
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: read
     outputs:
-      agentflow: ${{ steps.filter.outputs.agentflow }}
+      flow: ${{ steps.filter.outputs.flow }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
-            agentflow:
-              - 'agentflow/**'
-              - '.github/workflows/agentflow-ci.yml'
+            flow:
+              - 'flow/**'
+              - '.github/workflows/flow-ci.yml'
 
   test:
-    name: agentflow-test
+    name: flow-test
     needs: changes
-    if: ${{ needs.changes.outputs.agentflow == 'true' }}
+    if: ${{ needs.changes.outputs.flow == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Validate AgentFlow JSON
-        run: find agentflow -name '*.json' -print0 | xargs -0 -n1 jq empty
+      - name: Validate flow JSON
+        run: find flow -name '*.json' -print0 | xargs -0 -n1 jq empty
       - name: Verify Codex hook isolation
-        run: bash agentflow/codex/hooks.test.sh
+        run: bash flow/codex/hooks.test.sh

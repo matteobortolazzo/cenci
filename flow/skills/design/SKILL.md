@@ -11,10 +11,10 @@ allowed-tools: Read, Write, Bash(pencil:*), Bash(gh:*), Bash(git:*), Bash(curl:*
 
 > **Interaction rule**: Every question, confirmation, or approval directed at the user — anywhere in this skill, including error recovery — MUST be asked with the `AskUserQuestion` tool. Never ask in plain text. If an instruction says "ask the user" or "confirm", that means `AskUserQuestion`.
 
-<!-- Architecture note: agentflow orchestrates Pencil via `pencil interactive` CLI (agentflow-driven model).
+<!-- Architecture note: cenci orchestrates Pencil via `pencil interactive` CLI (cenci-driven model).
      We do NOT use `pencil --agent-config` because:
-     1. agentflow needs ticket/worktree/approval workflow integration that agent-config agents lack
-     2. agent-config agents have no agentflow context (config, CLAUDE.md, docs/)
+     1. cenci needs ticket/worktree/approval workflow integration that agent-config agents lack
+     2. agent-config agents have no cenci context (config, CLAUDE.md, docs/)
      3. For complex designs, we batch via multiple `batch_design` calls within one session
      The Pencil editor is the design engine; Claude Code drives it via CLI subprocess (or MCP as legacy fallback).
      CLI mode (`pencil interactive -a desktop`) avoids loading MCP tool schemas into every conversation,
@@ -23,12 +23,12 @@ allowed-tools: Read, Write, Bash(pencil:*), Bash(gh:*), Bash(git:*), Bash(curl:*
 ## Phase 0 — Context Loading
 
 **Config check**: Before anything else, verify `.claude/config.json` exists by reading it. If the file does not exist, **stop immediately** and tell the user:
-"agentflow is not configured for this project. Run `/agentflow:configure` first to set up."
+"cenci is not configured for this project. Run `/cenci:configure` first to set up."
 
 Read `.claude/config.json`.
 
 **Pencil gating**: Check `pencil.enabled` in `.claude/config.json`. If `pencil` is absent or `pencil.enabled` is not `true`, **stop immediately** and tell the user:
-"Pencil design workflows are not enabled for this project. Run `/agentflow:configure` and enable Pencil when prompted."
+"Pencil design workflows are not enabled for this project. Run `/cenci:configure` and enable Pencil when prompted."
 
 Read `pencil.designPath` from the config to determine where design files belong. If the project is a monorepo with `pencil.shared: false`, determine the per-project `designPath` from the affected project's entry in the `projects` array.
 
@@ -120,14 +120,14 @@ Extract owner/repo from `git remote get-url origin` (e.g. `git@github.com:owner/
 gh issue view <number> --repo <owner>/<repo> --json number,title,body,labels,state,assignees,milestone,comments
 ```
 
-**Dedicated-ticket check:** if the fetched ticket does **not** carry the `Design` label, note that the workflow expects design work on a dedicated design ticket (created by `/agentflow:refine` as a companion or design-first split child). Ask via `AskUserQuestion`:
+**Dedicated-ticket check:** if the fetched ticket does **not** carry the `Design` label, note that the workflow expects design work on a dedicated design ticket (created by `/cenci:refine` as a companion or design-first split child). Ask via `AskUserQuestion`:
 
 > "This ticket isn't labeled `Design` — the workflow expects design on a dedicated design ticket so the implementation ticket stays separate. Design directly on this ticket anyway?"
 
-- **"Stop — create a design ticket first (Recommended)"** — stop. Tell the user to re-run `/agentflow:refine <ticket-id>` (which creates the companion design ticket) or create one manually with the `Design` label.
+- **"Stop — create a design ticket first (Recommended)"** — stop. Tell the user to re-run `/cenci:refine <ticket-id>` (which creates the companion design ticket) or create one manually with the `Design` label.
 - **"Proceed on this ticket"** — continue; the ticket will be labeled `Designed` but not closed (legacy mixed flow).
 
-Read the ticket body and look for a **Design Direction** section (produced by `/agentflow:refine` for frontend tickets). Store it for use in Phase 2.
+Read the ticket body and look for a **Design Direction** section (produced by `/cenci:refine` for frontend tickets). Store it for use in Phase 2.
 
 **If ticketless mode:** Skip ticket fetching. The design description from `$ARGUMENTS` is the primary input.
 
@@ -205,7 +205,7 @@ If using an existing `.pen` file:
 
 **Question 3 — Visual direction:**
 
-If the ticket has a **Design Direction** section from `/agentflow:refine`, propose using it:
+If the ticket has a **Design Direction** section from `/cenci:refine`, propose using it:
 > "The ticket specifies this design direction: [summary]. I'll follow this. Any adjustments?"
 
 If no Design Direction exists, propose a direction from the style guide:
@@ -304,13 +304,13 @@ For each screen/component created:
 1. Capture a visual snapshot:
    - **CLI mode**: Call `export_nodes` to save screenshots to a scratch directory **outside the repo**, then Read the exported PNG. These are local validation artifacts only — never committed.
      ```bash
-     mkdir -p "$TMPDIR/agentflow-design/screenshots"
+     mkdir -p "$TMPDIR/cenci-design/screenshots"
      pencil interactive -a desktop <<'EOF'
-     export_nodes({ nodeIds: ["<node-id>"], outputDir: "$TMPDIR/agentflow-design/screenshots", format: "png" })
+     export_nodes({ nodeIds: ["<node-id>"], outputDir: "$TMPDIR/cenci-design/screenshots", format: "png" })
      snapshot_layout({ parentId: "<node-id>", problemsOnly: true })
      EOF
      ```
-     Then: `Read("$TMPDIR/agentflow-design/screenshots/<node-id>.png")` to view and analyze.
+     Then: `Read("$TMPDIR/cenci-design/screenshots/<node-id>.png")` to view and analyze.
    - **Editor mode**: Call `get_screenshot(nodeId)` to receive the image inline.
 2. **Analyze the screenshot** for:
    - Alignment issues (elements not lined up properly)
@@ -455,7 +455,7 @@ git add <designPath>/*.pen <designPath>/DESIGN.md && git commit -m "feat(design)
 **If ticket mode:** Post the design reference and key decisions as a ticket comment — this keeps the ticket body owned by its author while still surfacing the design context for humans and for the context-gatherer (which bundles ticket comments during planning).
 
 1. Get the commit SHA: `git rev-parse HEAD`
-2. Write the comment body with the client's file tool (per `shell-rules` — do not use a shell heredoc) to a temp file, e.g. `${TMPDIR:-/tmp}/agentflow/design-comment-<number>.md`:
+2. Write the comment body with the client's file tool (per `shell-rules` — do not use a shell heredoc) to a temp file, e.g. `${TMPDIR:-/tmp}/cenci/design-comment-<number>.md`:
    ```markdown
    ### Design Reference
    - Design file: `<designPath>/<pen-file-name>`
@@ -470,7 +470,7 @@ git add <designPath>/*.pen <designPath>/DESIGN.md && git commit -m "feat(design)
    ```
 3. Post it:
    ```bash
-   gh issue comment <number> --repo <owner>/<repo> --body-file "${TMPDIR:-/tmp}/agentflow/design-comment-<number>.md"
+   gh issue comment <number> --repo <owner>/<repo> --body-file "${TMPDIR:-/tmp}/cenci/design-comment-<number>.md"
    ```
 
 ### Step 6C: Label Ticket
@@ -485,7 +485,7 @@ gh label create "Designed" --repo <owner>/<repo> --color "5319E7" --description 
 gh issue edit <number> --repo <owner>/<repo> --add-label "Designed" --remove-label "Working"
 ```
 
-**If the ticket carries the "Design" label** (a design-only ticket from `/agentflow:refine` — the design spec *is* the deliverable, no implementation follows), additionally:
+**If the ticket carries the "Design" label** (a design-only ticket from `/cenci:refine` — the design spec *is* the deliverable, no implementation follows), additionally:
 
 1. **Find the implementation tickets this design blocks.** Union of:
    - Any `Blocks #<n>` lines in the design ticket's body
@@ -499,7 +499,7 @@ gh issue edit <number> --repo <owner>/<repo> --add-label "Designed" --remove-lab
    ```bash
    gh issue edit <dependent> --repo <owner>/<repo> --add-label "Designed"
    ```
-   Also post the same comment from **Step 6B** on each dependent (reuse the temp file written there) via `gh issue comment <dependent> --repo <owner>/<repo> --body-file "${TMPDIR:-/tmp}/agentflow/design-comment-<number>.md"`. Implement itself locates `DESIGN.md` via the configured `designPath` (see `implement/SKILL.md`), so this comment is for human/planning context — the context-gatherer bundles ticket comments when implement runs.
+   Also post the same comment from **Step 6B** on each dependent (reuse the temp file written there) via `gh issue comment <dependent> --repo <owner>/<repo> --body-file "${TMPDIR:-/tmp}/cenci/design-comment-<number>.md"`. Implement itself locates `DESIGN.md` via the configured `designPath` (see `implement/SKILL.md`), so this comment is for human/planning context — the context-gatherer bundles ticket comments when implement runs.
 
 3. **Close the design ticket** — its deliverable is done:
    ```bash
@@ -519,9 +519,9 @@ If no dependents are found, still close the ticket — just note it in the closi
 **STOP.** Do not:
 - Enter plan mode or propose an implementation plan
 - Offer to run `/implement` or start implementation
-- Suggest next steps beyond telling the user to run `/agentflow:implement` when ready
+- Suggest next steps beyond telling the user to run `/cenci:implement` when ready
 
 Final message:
-- **Ticket mode (design-only ticket — has the "Design" label):** "Design committed on `main`. Ticket #<ticket-id> closed; `Designed` propagated to <#list>. Run `/agentflow:implement <dependent-id>` when ready to implement."
-- **Ticket mode (otherwise — legacy mixed flow):** "Design committed on `main`. Run `/agentflow:implement <ticket-id>` when ready to implement."
+- **Ticket mode (design-only ticket — has the "Design" label):** "Design committed on `main`. Ticket #<ticket-id> closed; `Designed` propagated to <#list>. Run `/cenci:implement <dependent-id>` when ready to implement."
+- **Ticket mode (otherwise — legacy mixed flow):** "Design committed on `main`. Run `/cenci:implement <ticket-id>` when ready to implement."
 - **Ticketless mode:** "Design committed on `main`."

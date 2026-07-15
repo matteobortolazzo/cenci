@@ -1,7 +1,7 @@
-# Project: agent-sandbox
+# Project: sandbox
 
 Docker/Podman container project within the agent-stack monorepo.
-Provides an isolated container (`agent-sand`) for running Claude Code sessions with
+Provides an isolated container (`cenci-sand`) for running Claude Code sessions with
 `--dangerously-skip-permissions` — the container is the security boundary.
 
 ## Stack
@@ -11,20 +11,20 @@ Provides an isolated container (`agent-sand`) for running Claude Code sessions w
 
 ## Build & Test
 ```bash
-agent-sand --build-base   # agent-sandbox-base:<content-hash of Dockerfile.base + entrypoint.sh + lib/> + :latest alias, rebuild if those inputs change
-agent-sand --build        # agent-sandbox:latest, builds the base first if missing
-agent-sand --prune        # remove superseded base tags, dangling images, stopped *-sand-* containers (--volumes to also prompt for stale home volumes)
-shellcheck dev-sandbox/entrypoint.sh dev-sandbox/agent-sand dev-sandbox/tests/*.test.sh
-bash -n dev-sandbox/entrypoint.sh dev-sandbox/agent-sand
-bash dev-sandbox/tests/smoke.test.sh   # runtime smoke test; self-skips without docker/podman
+cenci-sand --build-base   # agent-sandbox-base:<content-hash of Dockerfile.base + entrypoint.sh + lib/> + :latest alias, rebuild if those inputs change
+cenci-sand --build        # agent-sandbox:latest, builds the base first if missing
+cenci-sand --prune        # remove superseded base tags, dangling images, stopped *-sand-* containers (--volumes to also prompt for stale home volumes)
+shellcheck sandbox/entrypoint.sh sandbox/cenci-sand sandbox/tests/*.test.sh
+bash -n sandbox/entrypoint.sh sandbox/cenci-sand
+bash sandbox/tests/smoke.test.sh   # runtime smoke test; self-skips without docker/podman
 ```
 
 Host-runnable installer suites (mock PATH + fake HOME, no container needed):
 ```bash
-bash dev-sandbox/tests/install-update.test.sh        # daemon restart on update
-bash dev-sandbox/tests/installer-clients.test.sh     # client detection + launchers
-bash dev-sandbox/tests/agentwatch-widgets.test.sh    # GUI bar-widget detect/install/reload
-bash dev-sandbox/tests/reap-orphans.test.sh          # --reap-orphans scan/kill/escalation
+bash sandbox/tests/install-update.test.sh        # daemon restart on update
+bash sandbox/tests/installer-clients.test.sh     # client detection + launchers
+bash sandbox/tests/cenci-widgets.test.sh         # GUI bar-widget detect/install/reload
+bash sandbox/tests/reap-orphans.test.sh          # --reap-orphans scan/kill/escalation
 ```
 
 ## Conventions
@@ -40,7 +40,7 @@ bash dev-sandbox/tests/reap-orphans.test.sh          # --reap-orphans scan/kill/
 
 ## Testing
 
-- **Guard clauses must be mirrored across duplicated logic.** When the same validation/parsing pattern appears in both a test file and its corresponding production script (e.g., `smoke.test.sh` and `agent-sand` both resolve a version string with jq + sed fallback), the error-handling guards must be duplicated too. A test file that is more careful than the production code it exercises is a code-review red flag — check for silent failures (e.g., empty Docker tags, null strings propagating downstream).
+- **Guard clauses must be mirrored across duplicated logic.** When the same validation/parsing pattern appears in both a test file and its corresponding production script (e.g., `smoke.test.sh` and `cenci-sand` both resolve a version string with jq + sed fallback), the error-handling guards must be duplicated too. A test file that is more careful than the production code it exercises is a code-review red flag — check for silent failures (e.g., empty Docker tags, null strings propagating downstream).
 
 - **Preserve all pre-existing logic when splitting a script into conditional branches.** When refactoring a script to introduce a new conditional branch (e.g., adding git-based per-repo scoping alongside a legacy non-git fallback), the fallback branch can appear "unchanged" in the diff while actually being accidentally simplified during the rewrite (e.g., dropping a computed value and hardcoding a default). Test both branches independently to catch silent failures.
 
@@ -80,7 +80,7 @@ Image dependency versions are pinned via Dockerfile `ARG`s, all checked daily by
   - `DOTNET_SDK_VERSION` — `Dockerfile` (+ `fragments/dotnet.dockerfile`, byte-identical). A
     patch bump within the currently-pinned major.minor band auto-merges like the tier above.
     A newer GA feature band or major instead opens a PR left for manual review, manual
-    merge, and a manual `gh workflow run "agent-sandbox — Version Bump"`.
+    merge, and a manual `gh workflow run "sandbox — Version Bump"`.
 - **Auto-proposed, always manual-merge**:
   - `NODE_MAJOR` — `Dockerfile` (+ `fragments/node.dockerfile`, byte-identical). Only
     proposed once the currently-pinned major's LTS support has ended; the PR is never
@@ -93,7 +93,7 @@ Image dependency versions are pinned via Dockerfile `ARG`s, all checked daily by
 ## Security
 - Never bake secrets or credentials into the image layers.
 - Validate any host paths mounted into the container.
-- Bind-mount host paths read-only (`:ro`) unless the container genuinely needs write access — containers should be as restrictive as possible. Audit all new and existing mounts in `agent-sand` against this principle.
+- Bind-mount host paths read-only (`:ro`) unless the container genuinely needs write access — containers should be as restrictive as possible. Audit all new and existing mounts in `cenci-sand` against this principle.
 
 ## Reference Docs
 Repo-level conventions live at `<repo-root>/docs/` (read on demand). Project-specific notes belong in this file.

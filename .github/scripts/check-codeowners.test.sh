@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tests for check-codeowners.sh (ticket #256). Follows the repo's shell-test
 # precedent (check-workflow-permissions.test.sh /
-# agentflow/hooks/scripts/guard-main-worktree.test.sh): plain bash, no
+# flow/hooks/scripts/guard-main-worktree.test.sh): plain bash, no
 # framework, PASS/FAIL counters, non-zero exit on any failure. Each case
 # builds a fresh throwaway .github/CODEOWNERS + referenced-file fixture tree
 # under one mktemp root and runs the script with cwd set to that tree (the

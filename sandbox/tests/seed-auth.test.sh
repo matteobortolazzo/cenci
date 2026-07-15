@@ -1,5 +1,5 @@
 #!/bin/bash
-# Tests for the seed-once credential logic in dev-sandbox/lib/seed-auth.sh.
+# Tests for the seed-once credential logic in sandbox/lib/seed-auth.sh.
 #
 # Runs on the host — no Docker required. Sources the same seed_credential()
 # the entrypoint uses.

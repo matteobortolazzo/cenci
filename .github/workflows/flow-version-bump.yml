@@ -1,9 +1,9 @@
-name: agentflow — Version Bump
+name: flow — Version Bump
 
 on:
   push:
     branches: [main]
-    paths: ['agentflow/**']
+    paths: ['flow/**']
 
 permissions:
   contents: write
@@ -13,8 +13,8 @@ jobs:
     if: github.actor != 'github-actions[bot]'
     uses: ./.github/workflows/plugin-version-bump.yml
     with:
-      plugin-name: agentflow
-      plugin-json-paths: agentflow/.claude-plugin/plugin.json agentflow/.codex-plugin/plugin.json
-      marketplace-name: agentflow
-      tag-prefix: agentflow
+      plugin-name: cenci
+      plugin-json-paths: flow/.claude-plugin/plugin.json flow/.codex-plugin/plugin.json
+      marketplace-name: cenci
+      tag-prefix: flow
     secrets: inherit

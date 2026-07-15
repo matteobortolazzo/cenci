@@ -1,5 +1,5 @@
 #!/bin/bash
-# Tests for the pure repo-scoping logic in dev-sandbox/lib/repo-scope.sh.
+# Tests for the pure repo-scoping logic in sandbox/lib/repo-scope.sh.
 #
 # Runs on the host — no Docker required. Sources the same slugify(),
 # resolve_repo_root(), compute_workdir(), compute_legacy_workdir() and

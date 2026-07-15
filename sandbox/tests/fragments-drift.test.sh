@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Guards the byte-identity invariant documented in dev-sandbox/CLAUDE.md:
+# Guards the byte-identity invariant documented in sandbox/CLAUDE.md:
 # every fragments/*.dockerfile block must appear verbatim inside Dockerfile
 # (the monolith), including the Codex runtime required by per-repo images.
 #
@@ -40,7 +40,7 @@ for fragment in "${FRAGMENTS[@]}"; do
     if grep -zqF "${content}" "${DOCKERFILE}"; then
         pass
     else
-        fail "${name} is not verbatim inside ${DOCKERFILE} — hand-duplicate the edit (see dev-sandbox/CLAUDE.md)"
+        fail "${name} is not verbatim inside ${DOCKERFILE} — hand-duplicate the edit (see sandbox/CLAUDE.md)"
     fi
 done
 

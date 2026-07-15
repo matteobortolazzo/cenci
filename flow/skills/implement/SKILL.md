@@ -1,6 +1,6 @@
 ---
 name: implement
-description: "Claude Code-only: run the full agentflow plan, test, implementation, review, and pull-request pipeline."
+description: "Claude Code-only: run the full cenci plan, test, implementation, review, and pull-request pipeline."
 compatibility: Requires Claude Code subagents, interactive gates, hooks, slash commands, and plugin configuration.
 argument-hint: <ticket-id | task description> [additional context]
 user-invocable: true
@@ -16,7 +16,7 @@ Read the `subagent-safety` reference skill before delegating work to subagents.
 ## Context
 
 **Config check**: Before anything else, verify `.claude/config.json` exists by reading it. If the file does not exist, **stop immediately** and tell the user:
-"agentflow is not configured for this project. Run `/agentflow:configure` first to set up."
+"cenci is not configured for this project. Run `/cenci:configure` first to set up."
 
 Read `.claude/config.json`.
 Read the `claudeMdLocation` field from `.claude/config.json` to determine where `CLAUDE.md` is located (defaults to `.claude/CLAUDE.md` if not set).
@@ -87,7 +87,7 @@ The determined mode (ticket or ticketless) governs conditional behavior througho
 
 **Plan file auto-detection** (ticket mode only): If the first token is a ticket ID (ticket mode), glob for `.plans/<id>-*.md`:
 
-- **Exactly one match, and the user context does not request a re-plan** → pick it up silently: switch to plan file mode, set `hasPlanFile = true`, read the plan file, and tell the user in one line: "Found saved plan `.plans/<filename>` — resuming implementation from it (pass `replan` as context to discard it instead)." Do **not** ask — a plan file only exists because a Phase 1 planning session persisted it after the user answered its clarifying questions, launching this run is the human authorization to execute it, and scripted launches (`agentwatch run implement <id>`) rely on this being non-interactive. Phase 1's `planCommitSha` staleness check still guards against a plan that predates codebase changes.
+- **Exactly one match, and the user context does not request a re-plan** → pick it up silently: switch to plan file mode, set `hasPlanFile = true`, read the plan file, and tell the user in one line: "Found saved plan `.plans/<filename>` — resuming implementation from it (pass `replan` as context to discard it instead)." Do **not** ask — a plan file only exists because a Phase 1 planning session persisted it after the user answered its clarifying questions, launching this run is the human authorization to execute it, and scripted launches (`cenci run implement <id>`) rely on this being non-interactive. Phase 1's `planCommitSha` staleness check still guards against a plan that predates codebase changes.
 - **The user context requests a re-plan** (it contains a standalone token like `replan` or `re-plan`, or an explicit instruction to discard/redo the existing plan) → ignore the plan file and proceed in normal ticket mode. This is the **re-plan over an existing plan** path referenced in the Label "Working" section.
 - **Multiple matches** → ambiguous; ask with `AskUserQuestion` which plan file to use, offering each match plus **"Re-plan from scratch"** as the final option.
 - **No match** → proceed in normal ticket mode.
@@ -100,7 +100,7 @@ The determined mode (ticket or ticketless) governs conditional behavior througho
 
 ### Auth Verification
 
-**Before delegating to the context-gatherer (or before proceeding in ticketless mode)**, extract `owner/repo` from `git remote get-url origin` (for later commands) and verify `gh` authentication. agentflow runs inside the `agent-sand` container with `--dangerously-skip-permissions`, so Claude Code ignores `permissions.allow/deny` — there is nothing to verify or auto-fix there. What still matters is authentication: the context-gatherer runs read-only `gh` commands in a subagent, and an unauthenticated `gh` deadlocks that subagent silently.
+**Before delegating to the context-gatherer (or before proceeding in ticketless mode)**, extract `owner/repo` from `git remote get-url origin` (for later commands) and verify `gh` authentication. cenci runs inside the `cenci-sand` container with `--dangerously-skip-permissions`, so Claude Code ignores `permissions.allow/deny` — there is nothing to verify or auto-fix there. What still matters is authentication: the context-gatherer runs read-only `gh` commands in a subagent, and an unauthenticated `gh` deadlocks that subagent silently.
 
 - Run `gh auth status`.
 - If it returns authenticated → proceed to context gathering.
@@ -117,7 +117,7 @@ Runs **after** the Pre-flight Check above — the `gh auth status` check is the 
 **If ticket mode:** Delegate to the `context-gatherer` agent. Pass:
 
 - The ticket number and `owner/repo`
-- The bundle output path: `/tmp/claude/agentflow-context-<ticket-id>.md`
+- The bundle output path: `/tmp/claude/cenci-context-<ticket-id>.md`
 - Config facts: `claudeMdLocation`, `isMonorepo` and the `projects` array (if monorepo), and the design path (if `pencil.enabled`)
 
 The gatherer fetches the ticket and comments, performs parent-child detection, discovers attachments, loads design and per-project context, writes the bundle file, and returns a compact digest. From the digest, store:
@@ -129,7 +129,7 @@ The gatherer fetches the ticket and comments, performs parent-child detection, d
 
 If the digest reports errors (ticket not found, auth failure), surface them to the user and stop. Do **not** re-fetch the ticket or re-read DESIGN.md in the main agent — the digest and bundle are the source of truth.
 
-**If ticketless mode:** Delegate to the `context-gatherer` only when there is context to bundle (design enabled or monorepo), with the task description in place of the ticket and bundle path `/tmp/claude/agentflow-context-<slug>.md`. Otherwise skip — the task description is the entire input.
+**If ticketless mode:** Delegate to the `context-gatherer` only when there is context to bundle (design enabled or monorepo), with the task description in place of the ticket and bundle path `/tmp/claude/cenci-context-<slug>.md`. Otherwise skip — the task description is the entire input.
 
 **Parent-child edge cases** (resolved inside the gatherer, recorded here for downstream phases):
 - Parent already closed → `isLastChild = false` (skip auto-close)
@@ -160,19 +160,19 @@ Check the `labels` line from the context-gatherer digest.
 
 ### Design-Ticket Router (first check)
 
-If the labels include **"Design"**, this is a design-only ticket — its deliverable is a design spec (`.pen` + `DESIGN.md`) produced by `/agentflow:design`, not code. Ask via `AskUserQuestion`:
+If the labels include **"Design"**, this is a design-only ticket — its deliverable is a design spec (`.pen` + `DESIGN.md`) produced by `/cenci:design`, not code. Ask via `AskUserQuestion`:
 
-> "This ticket is labeled `Design` — its deliverable is a design spec, not a code change. It should be run through `/agentflow:design <ticket-id>` instead. How do you want to proceed?"
+> "This ticket is labeled `Design` — its deliverable is a design spec, not a code change. It should be run through `/cenci:design <ticket-id>` instead. How do you want to proceed?"
 
-- **"Stop — route to /agentflow:design (Recommended)"** — stop the pipeline immediately. Tell the user to run `/agentflow:design <ticket-id>`. No labels change (the "Working" label has not been applied yet at this point).
-- **"Proceed with implementation anyway"** — the label may be stale or wrong. Continue with the remaining readiness checks below, and tell the user to remove the `Design` label (or re-run `/agentflow:refine`) if the ticket genuinely includes implementation work.
+- **"Stop — route to /cenci:design (Recommended)"** — stop the pipeline immediately. Tell the user to run `/cenci:design <ticket-id>`. No labels change (the "Working" label has not been applied yet at this point).
+- **"Proceed with implementation anyway"** — the label may be stale or wrong. Continue with the remaining readiness checks below, and tell the user to remove the `Design` label (or re-run `/cenci:refine`) if the ticket genuinely includes implementation work.
 
 Do not proceed past this check without an explicit answer. (Plan-file mode skips Ticket Readiness entirely, which is fine — a design-only ticket never produces a plan file.)
 
 ### Remaining Readiness Checks
 
 If the ticket does **not** have a "Refined" label/tag, display a warning:
-> "This ticket hasn't been refined yet. Consider running `/agentflow:refine <ticket-id>` first for better results. Do you want to proceed anyway?"
+> "This ticket hasn't been refined yet. Consider running `/cenci:refine <ticket-id>` first for better results. Do you want to proceed anyway?"
 
 If the user says no → stop. If yes → proceed with the pipeline.
 
@@ -182,7 +182,7 @@ If the digest's `labels` already include **"In Review"** or **"Implemented"**, a
 If the user says no → stop. If yes → proceed with the pipeline. This is a warning only — it does not block.
 
 If the digest's `labels` include **"Planned"** but this run is **not** plan-file mode (`hasPlanFile` is false — e.g. the plan file was deleted or lives on another host), a plan was recorded for this ticket but no plan-file argument reached this run. Display a soft, non-blocking note via `AskUserQuestion` — mirror the tone above:
-> "This ticket is marked `Planned` (a plan was persisted), but you didn't pass a plan file. If the plan file still exists under `.plans/`, re-run as `/agentflow:implement .plans/<file>` to pick it up (the plan-file auto-detection resumes from it automatically when a matching file is found); otherwise you can re-plan from scratch. Proceed with a fresh plan anyway?"
+> "This ticket is marked `Planned` (a plan was persisted), but you didn't pass a plan file. If the plan file still exists under `.plans/`, re-run as `/cenci:implement .plans/<file>` to pick it up (the plan-file auto-detection resumes from it automatically when a matching file is found); otherwise you can re-plan from scratch. Proceed with a fresh plan anyway?"
 
 If the user says no → stop. If yes → proceed (a fresh plan re-applies `Planned` at the end). This is a warning only — it does not block.
 
@@ -198,7 +198,7 @@ Ask via `AskUserQuestion`:
 
 > "This UI ticket has no "Designed" label. [If the digest reports a bundled `DESIGN.md`, add: A `DESIGN.md` was found at `<path>`, but it may belong to an earlier ticket.] How do you want to proceed?"
 
-- **"Stop — design first (Recommended)"** — stop the pipeline. Design lives on a dedicated design ticket, so tell the user: if this ticket already depends on a `Design`-labeled ticket (look for a `Depends on #<n>` line in the ticket body / digest summary), run `/agentflow:design <design-ticket-id>` — completing it closes the design ticket and propagates `Designed` to this one. If no design ticket exists, re-run `/agentflow:refine <ticket-id>` to create the companion design ticket. Re-run `/agentflow:implement` once this ticket carries the "Designed" label.
+- **"Stop — design first (Recommended)"** — stop the pipeline. Design lives on a dedicated design ticket, so tell the user: if this ticket already depends on a `Design`-labeled ticket (look for a `Depends on #<n>` line in the ticket body / digest summary), run `/cenci:design <design-ticket-id>` — completing it closes the design ticket and propagates `Designed` to this one. If no design ticket exists, re-run `/cenci:refine <ticket-id>` to create the companion design ticket. Re-run `/cenci:implement` once this ticket carries the "Designed" label.
 - **"Proceed without design"** — continue the pipeline. Record the choice; Phase 9 notes "implemented without design spec" in the PR body.
 
 Do not proceed past this gate without an explicit answer.
@@ -306,7 +306,7 @@ Phase 1 reads `trivial` and, when true, takes the **Trivial Fast Path** (see `ph
 
 **If ticketless mode:** Skip this section entirely — ticketless mode applies no board labels.
 
-**If ticket mode:** Before starting the pipeline, add the "Working" label to signal work in progress. `gh issue edit --add-label` **fails when the label does not exist in the repository**, so first ensure it exists — run this as its own Bash call (the `|| true` swallows only the "already exists" error; `/agentflow:configure` also creates the full lifecycle label set, this is self-healing for projects configured before that):
+**If ticket mode:** Before starting the pipeline, add the "Working" label to signal work in progress. `gh issue edit --add-label` **fails when the label does not exist in the repository**, so first ensure it exists — run this as its own Bash call (the `|| true` swallows only the "already exists" error; `/cenci:configure` also creates the full lifecycle label set, this is self-healing for projects configured before that):
 
 ```bash
 gh label create "Working" --repo <owner>/<repo> --color "FBCA04" --description "Actively being refined, designed, or implemented" 2>/dev/null || true
@@ -332,28 +332,28 @@ This pipeline has 9 phases. Execute them in order without stopping for confirmat
 
 The only reasons to stop mid-pipeline are explicit error gates defined within individual phases (rebase conflicts, repeated build failures, push auth errors, unclear reviewer findings). If no error gate fires, complete all 9 phases. The pipeline is not complete until a PR URL has been created and returned to the user — never end with a status summary like "ready for PR" or "branch is ready."
 
-**Hard stop after planning**: Phases 2–9 run only when the skill was invoked with a plan-file argument (`hasPlanFile` set during mode detection). A session that creates a new plan **always ends at Phase 1** — after persisting the plan file, do not read `phases/phase-2-worktree.md` or any later phase file. Implementation resumes via `/agentflow:implement .plans/<filename>` in a fresh session. The sole exception is the **Trivial Fast Path**: when Trivial-Ticket Triage judged the ticket trivial, Phase 1 still persists a plan file, but the session does not stop — it continues straight into Phase 2 in the same session (see `phases/phase-1-plan.md`'s `## Trivial Fast Path` and `phases/phase-2-worktree.md`'s `## Gate Check`).
+**Hard stop after planning**: Phases 2–9 run only when the skill was invoked with a plan-file argument (`hasPlanFile` set during mode detection). A session that creates a new plan **always ends at Phase 1** — after persisting the plan file, do not read `phases/phase-2-worktree.md` or any later phase file. Implementation resumes via `/cenci:implement .plans/<filename>` in a fresh session. The sole exception is the **Trivial Fast Path**: when Trivial-Ticket Triage judged the ticket trivial, Phase 1 still persists a plan file, but the session does not stop — it continues straight into Phase 2 in the same session (see `phases/phase-1-plan.md`'s `## Trivial Fast Path` and `phases/phase-2-worktree.md`'s `## Gate Check`).
 
 ### Goal Autopilot (plan-file mode)
 
 Phases 2–9 run unattended, but a turn that stops mid-phase (context limit, transient tool error, a subagent that ends the turn) just ends the run — the work is left half-done with no PR. Claude Code's native `/goal` closes that gap: it registers a session-scoped completion condition and, whenever a turn ends without the condition met, immediately starts another turn. Armed at pipeline start, it turns "stopped mid-phase" into "resumes mid-phase."
 
-**Launching the plan-file run is the human gate that arms it.** The goal is never set in an ordinary session that *creates* a plan — that session ends at Phase 1 after persisting the plan and presenting it for review, and goals are session-scoped (a new session or `/clear` drops them). The human reviewing the saved plan and launching `/agentflow:implement .plans/<filename>` is what authorizes the autonomous run; the goal is armed when that run begins — i.e. **only in plan-file mode (`hasPlanFile = true`), at the start of Phase 2** (see `phases/phase-2-worktree.md`). Ticketless and ordinary ticket-mode planning sessions never arm a goal. (The Trivial Fast Path is the one ticket-mode planning session that both creates a plan and arms a goal — see the next paragraph.)
+**Launching the plan-file run is the human gate that arms it.** The goal is never set in an ordinary session that *creates* a plan — that session ends at Phase 1 after persisting the plan and presenting it for review, and goals are session-scoped (a new session or `/clear` drops them). The human reviewing the saved plan and launching `/cenci:implement .plans/<filename>` is what authorizes the autonomous run; the goal is armed when that run begins — i.e. **only in plan-file mode (`hasPlanFile = true`), at the start of Phase 2** (see `phases/phase-2-worktree.md`). Ticketless and ordinary ticket-mode planning sessions never arm a goal. (The Trivial Fast Path is the one ticket-mode planning session that both creates a plan and arms a goal — see the next paragraph.)
 
 **Trivial Fast Path also arms at Phase 2 start.** Arming keys off `hasPlanFile = true` at the start of Phase 2, and the Trivial Fast Path reaches Phase 2 with `hasPlanFile = true` in the same session (see `phases/phase-1-plan.md`'s `## Trivial Fast Path` and `phases/phase-2-worktree.md`'s `## Gate Check`) — so it arms the goal exactly like a plan-file-argument run does: same version gate, same condition semantics, same clearing rules. Nothing else changes. The conservative triage heuristic in `## Trivial-Ticket Triage` above (with its conservative fall-through) substitutes for the human plan-review gate in this one case.
 
 **Version + availability gate (do this once, before arming).** `/goal` requires Claude Code ≥ 2.1.139. When entering Phase 2 in plan-file mode (or via the Trivial Fast Path reaching Phase 2 with `hasPlanFile = true`):
 
-1. If `.claude/config.json` has `agentflow.goalAutopilot: false`, skip the goal entirely (opt-out) and proceed exactly as today.
+1. If `.claude/config.json` has `cenci.goalAutopilot: false`, skip the goal entirely (opt-out) and proceed exactly as today.
 2. Run `claude --version` and parse the leading semver. If it is ≥ `2.1.139`, arm the goal (below). If it is older, if the command is unavailable, or if the version cannot be parsed, **skip silently** and proceed exactly as today — print one line: `Goal autopilot unavailable (Claude Code < 2.1.139) — running without a completion guarantee.` The pipeline's behavior with no goal is unchanged from prior versions.
 
 **Arming.** Invoke the `/goal` slash command (via the `SlashCommand` tool) with a condition that references the persisted plan file so it stays consistent with the `check-pending-plans` SessionStart hook (which treats a still-present `.plans/<filename>` as "resume this"):
 
 ```
-/goal Implementation of the plan file .plans/<filename> is complete: every remaining agentflow implement phase (2–9) has run and a pull request has been created, with its URL printed in this session. The plan file .plans/<filename> is deleted only in Phase 9 after the PR exists — while it is still on disk, the work is NOT done. Do not treat the goal as met on a build failure, lint failure, rebase conflict, failed push, or any state that was handed back to the user for a decision. Safety cap: if this goal has restarted the turn more than 20 times without the pipeline advancing to a new phase, stop retrying — run /goal clear and report the stall to the user instead of continuing.
+/goal Implementation of the plan file .plans/<filename> is complete: every remaining cenci implement phase (2–9) has run and a pull request has been created, with its URL printed in this session. The plan file .plans/<filename> is deleted only in Phase 9 after the PR exists — while it is still on disk, the work is NOT done. Do not treat the goal as met on a build failure, lint failure, rebase conflict, failed push, or any state that was handed back to the user for a decision. Safety cap: if this goal has restarted the turn more than 20 times without the pipeline advancing to a new phase, stop retrying — run /goal clear and report the stall to the user instead of continuing.
 ```
 
-If the `SlashCommand` tool is not available or the command errors, treat the goal as unavailable (as in the version gate) and proceed without it — never let goal setup block the pipeline. Configs generated by `/agentflow:configure` allow `SlashCommand(/goal:*)`, so arming does not prompt; on an older config that lacks it the invocation may prompt once — allow it (or add `SlashCommand(/goal:*)` to `.claude/settings.json`) to keep later runs unattended.
+If the `SlashCommand` tool is not available or the command errors, treat the goal as unavailable (as in the version gate) and proceed without it — never let goal setup block the pipeline. Configs generated by `/cenci:configure` allow `SlashCommand(/goal:*)`, so arming does not prompt; on an older config that lacks it the invocation may prompt once — allow it (or add `SlashCommand(/goal:*)` to `.claude/settings.json`) to keep later runs unattended.
 
 **Known limitation — no mechanical turn counter.** `/goal` does not expose a counter the pipeline can read or increment; the 20-turn cap above is model-tracked by reasoning over the conversation transcript (how many times this goal has already restarted the turn while stuck on the same phase), and that tracking is best-effort after a context compaction event erases earlier turns from view. This is a deliberate choice, not a gap to fill later — no counter-file or other bookkeeping machinery is being built for this; the cap is a coarse safety valve against runaway retries, not a precise guarantee.
 
@@ -380,14 +380,14 @@ The detailed instructions for each phase live in `phases/`. Read only the file f
 
 ### Cost Controls
 
-Read `.claude/config.json` for optional `agentflow` settings:
+Read `.claude/config.json` for optional `cenci` settings:
 
-- `agentflow.compactImplementation: true` — for small, low-risk plans only, Phase 3, 4, and 5 may be handled by a single implementer delegation. The implementer must still explicitly report red test failures, green implementation, refactoring, and final build/test results. Do not use this mode for security-sensitive, data migration, auth/payment, large UI, or unclear-requirement work.
-- `agentflow.reviewConcurrency: "sequential"` — run the same Phase 6 + 7 reviewers one after another instead of in parallel. Quality gates are unchanged; this only smooths usage limits. Default is `"parallel"`.
-- `agentflow.liteReviewEnabled: false` — opt out of the lite review path (see Phase 6 + 7). Default (unset or `true`): Phase 6 + 7 classifies each diff into one of three paths — `full` (all three reviewers, today's behavior) for source changes, oversized diffs, or anything touching `.claude/**`, `skills/**`, `agents/**`, `CLAUDE.md`, or a danger pattern (auth/security/secrets/CI workflows); `lite-docs` (no reviewers) for docs-only diffs; `lite-small` (`code-reviewer` only, same model, same Code Review Actions) for small config/data-only diffs. Setting this `false` forces the full trio on every run, regardless of diff size or content.
-- `agentflow.diffContextMode: "file"` — before Phase 6 + 7, write the full diff to `/tmp/claude/agentflow-<ticket-id-or-slug>-diff.patch` and pass reviewers the path plus changed file list and stat. Reviewers read only the hunks they need. Default is `"inline"` for small diffs.
-- `agentflow.goalAutopilot: false` — opt out of the Goal Autopilot (see the Pipeline section). Default (unset or `true`) arms a `/goal` completion condition at Phase 2 start when Claude Code ≥ 2.1.139, so a mid-phase stop resumes instead of ending the run. This is not a cost control — it trades a small evaluation overhead per turn for the completion guarantee; set it `false` to run phases 2–9 without one.
-- `agentflow.planComment: true` — not a cost control. When `true`, Phase 1 also posts the saved plan as a ticket comment (ticket mode only) for audit / off-host visibility after marking the ticket `Planned`; `.plans/` stays the executable source of truth. Default (unset or `false`): no comment. Canonical schema lives in `/agentflow:configure`.
+- `cenci.compactImplementation: true` — for small, low-risk plans only, Phase 3, 4, and 5 may be handled by a single implementer delegation. The implementer must still explicitly report red test failures, green implementation, refactoring, and final build/test results. Do not use this mode for security-sensitive, data migration, auth/payment, large UI, or unclear-requirement work.
+- `cenci.reviewConcurrency: "sequential"` — run the same Phase 6 + 7 reviewers one after another instead of in parallel. Quality gates are unchanged; this only smooths usage limits. Default is `"parallel"`.
+- `cenci.liteReviewEnabled: false` — opt out of the lite review path (see Phase 6 + 7). Default (unset or `true`): Phase 6 + 7 classifies each diff into one of three paths — `full` (all three reviewers, today's behavior) for source changes, oversized diffs, or anything touching `.claude/**`, `skills/**`, `agents/**`, `CLAUDE.md`, or a danger pattern (auth/security/secrets/CI workflows); `lite-docs` (no reviewers) for docs-only diffs; `lite-small` (`code-reviewer` only, same model, same Code Review Actions) for small config/data-only diffs. Setting this `false` forces the full trio on every run, regardless of diff size or content.
+- `cenci.diffContextMode: "file"` — before Phase 6 + 7, write the full diff to `/tmp/claude/cenci-<ticket-id-or-slug>-diff.patch` and pass reviewers the path plus changed file list and stat. Reviewers read only the hunks they need. Default is `"inline"` for small diffs.
+- `cenci.goalAutopilot: false` — opt out of the Goal Autopilot (see the Pipeline section). Default (unset or `true`) arms a `/goal` completion condition at Phase 2 start when Claude Code ≥ 2.1.139, so a mid-phase stop resumes instead of ending the run. This is not a cost control — it trades a small evaluation overhead per turn for the completion guarantee; set it `false` to run phases 2–9 without one.
+- `cenci.planComment: true` — not a cost control. When `true`, Phase 1 also posts the saved plan as a ticket comment (ticket mode only) for audit / off-host visibility after marking the ticket `Planned`; `.plans/` stays the executable source of truth. Default (unset or `false`): no comment. Canonical schema lives in `/cenci:configure`.
 
 If a cost-control setting conflicts with quality, ignore the setting and explain why.
 
