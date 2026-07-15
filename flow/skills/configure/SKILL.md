@@ -473,7 +473,7 @@ After gathering answers:
 
    Then **append** to it:
 
-   > **IMPORTANT**: All base permissions from the template (`Write`, `Edit`, `Read(~/.claude/plugins/**)`, `Read(//tmp/claude*/**)`, `Write(//tmp/claude*/**)`, `Bash(cd:*)`, `Bash(git:*)`, `Bash(gh:*)`, `Bash(wc:*)`, `SlashCommand(/goal:*)`, `SlashCommand(/loop:*)`, etc.) **MUST** remain in `permissions.allow`. Only **append** new entries — never remove or replace existing ones. When updating an **existing** `settings.json`, also ensure these base entries are present — add any that are missing (older configs predate them — e.g. `SlashCommand(/goal:*)` for the implement autopilot and `SlashCommand(/loop:*)` for `/cenci:babysit`). The `Read(~/.claude/plugins/**)` rule lets the pipeline read its own plugin files (phase docs resolve to `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/skills/…`) without prompting — it is deliberately scoped to `plugins/` so subagents cannot read session transcripts or global config under `~/.claude/`; the `//tmp/claude*/**` rules cover the `shell-rules` heredoc temp-file pattern and the session scratchpad.
+   > **IMPORTANT**: All base permissions from the template (`Write`, `Edit`, `Read(~/.claude/plugins/**)`, `Read(//tmp/claude*/**)`, `Edit(//tmp/claude*/**)`, `Bash(cd:*)`, `Bash(git:*)`, `Bash(gh:*)`, `Bash(wc:*)`, `SlashCommand(/goal:*)`, `SlashCommand(/loop:*)`, etc.) **MUST** remain in `permissions.allow`. Only **append** new entries — never remove or replace existing ones. When updating an **existing** `settings.json`, also ensure these base entries are present — add any that are missing (older configs predate them — e.g. `SlashCommand(/goal:*)` for the implement autopilot and `SlashCommand(/loop:*)` for `/cenci:babysit`). The `Read(~/.claude/plugins/**)` rule lets the pipeline read its own plugin files (phase docs resolve to `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/skills/…`) without prompting — it is deliberately scoped to `plugins/` so subagents cannot read session transcripts or global config under `~/.claude/`; the `//tmp/claude*/**` rules cover the `shell-rules` heredoc temp-file pattern and the session scratchpad.
 
    **Append to `permissions.allow`:**
    - Stack-specific rules (e.g., `Bash(dotnet:*)` for .NET, `Bash(ng:*)` for Angular, `Bash(go:*)` for Go)
@@ -492,7 +492,7 @@ After gathering answers:
    enabled. Do **not** add a SessionStart entry to `.claude/settings.json` or copy any
    script into `.claude/hooks/`.
 
-   **Legacy cleanup** — heal projects configured by an older cenci that installed the
+   **Legacy cleanup (hook path)** — heal projects configured by an older cenci that installed the
    hook per-project (a fragile cwd-relative path that errored in worktrees and
    subdirectories):
    1. If `.claude/settings.json` has a `hooks.SessionStart` hook whose `command` is
@@ -503,6 +503,18 @@ After gathering answers:
       Then remove the directory only if it is now empty: `rmdir .claude/hooks 2>/dev/null || true`
       (the `|| true` keeps it non-fatal when the dir is absent or still holds other hooks;
       run as its own Bash call, never compounded with a `cd` — see `cenci:shell-rules`).
+
+   **Legacy cleanup (permissions)** — heal projects configured by an older cenci that shipped
+   scoped-path `Write(<path>)` allow entries (Claude Code's file permission
+   checker never matches scoped-path `Write(<path>)` rules — only scoped-path
+   `Edit(<path>)` rules, which also cover Write — so a scoped `Write(<path>)`
+   entry is dead weight that produces a startup warning):
+   1. If `permissions.allow` contains a scoped-path `Write(<path>)` entry
+      matching a known base rule (specifically `Write(//tmp/claude*/**)`),
+      **replace** it with the corrected `Edit(<path>)` form rather than
+      appending the missing entry alongside it.
+   2. If `permissions.allow` contains a blanket `Write(*)` entry, normalize
+      it to bare `Write`.
 
 ### MCP Server Configuration
 

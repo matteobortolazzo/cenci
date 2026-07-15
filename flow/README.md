@@ -396,7 +396,7 @@ Your repo has no commits. The pipeline should handle this automatically. If it d
 Run `gh auth login` and follow the prompts. Verify with `gh auth status`.
 
 ### Agent prompts for file edit permissions
-This should not happen inside the sandbox container, where Claude Code runs with `--dangerously-skip-permissions` and ignores `permissions.allow`/`deny` entirely. If you see prompts, you are likely running plain `claude` (no skip-permissions) — verify `.claude/settings.json` includes `Write(*)` and `Edit(*)` in `permissions.allow`, or re-run `/cenci:configure` to regenerate settings.
+This should not happen inside the sandbox container, where Claude Code runs with `--dangerously-skip-permissions` and ignores `permissions.allow`/`deny` entirely. If you see prompts, you are likely running plain `claude` (no skip-permissions) — verify `.claude/settings.json` includes `Write` and `Edit` in `permissions.allow`, or re-run `/cenci:configure` to regenerate settings.
 
 ### Subagent reviews blocked: "Usage credits required for 1M context"
 The pipeline ran inline and skipped the dedicated reviewer agents (security-reviewer, code-reviewer, silent-failure-hunter). This happens when your session runs a **1M-context** model (model ID ends in `[1m]`, e.g. `claude-opus-4-8[1m]`).
