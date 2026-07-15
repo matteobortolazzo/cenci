@@ -998,6 +998,12 @@ seed_lazyboards_config() {
 
 step_lazyboards_setup() {
 	local installed_ver latest_ver
+	# An explicit skip applies in every mode, including updates of an existing
+	# binary. Flags must override auto-detection rather than merely suppressing
+	# a first-time install.
+	if [ "$LAZYBOARDS" = no ] && [ "$LAZYBOARDS_EXPLICIT" -eq 1 ]; then
+		return 0
+	fi
 	installed_ver="$(lazyboards_installed_version || true)"
 
 	if [ "$MODE" = update ]; then
@@ -1096,6 +1102,7 @@ final_summary() {
 MODE=install
 BUILD_IMAGE=ask
 LAZYBOARDS=ask
+LAZYBOARDS_EXPLICIT=0
 INSTALL_FAILED=0
 
 usage() {
@@ -1127,8 +1134,8 @@ while [ $# -gt 0 ]; do
 	--yes | -y) ASSUME_YES=1 ;;
 	--build) BUILD_IMAGE=yes ;;
 	--no-build) BUILD_IMAGE=no ;;
-	--lazyboards) LAZYBOARDS=yes ;;
-	--no-lazyboards) LAZYBOARDS=no ;;
+	--lazyboards) LAZYBOARDS=yes; LAZYBOARDS_EXPLICIT=1 ;;
+	--no-lazyboards) LAZYBOARDS=no; LAZYBOARDS_EXPLICIT=1 ;;
 	--help | -h)
 		usage
 		exit 0

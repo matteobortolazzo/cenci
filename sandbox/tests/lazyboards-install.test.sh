@@ -243,6 +243,15 @@ run_installer "${name}" update --yes --no-build
 assert_contains "${CASE_OUTPUT}" "already up to date"
 assert_not_contains "${CASE_CURL_LOG}" "releases/download"
 
+echo "case: --no-lazyboards skips an installed lazyboards during update"
+name=update-explicit-skip
+make_installed_lazyboards "${WORK}/${name}/home" 1.0.0
+run_installer "${name}" update --yes --no-build --no-lazyboards
+[[ "${CASE_EXIT}" -eq 0 ]]
+[[ "$("${CASE_HOME}/.local/bin/lazyboards" --version)" == "lazyboards 1.0.0" ]]
+assert_not_contains "${CASE_CURL_LOG}" "releases/latest"
+assert_not_contains "${CASE_CURL_LOG}" "releases/download"
+
 echo "case: update without lazyboards installed skips the step entirely"
 run_installer update-absent update --yes --no-build
 [[ "${CASE_EXIT}" -eq 0 ]]
@@ -273,4 +282,9 @@ if ! diff -u "${ROOT}/flow/templates/lazyboards-config.yml" "${EXTRACTED}"; then
     exit 1
 fi
 
-echo "passed: opt-in install, checksum gate, update refresh, config seeding, doctor, template parity"
+echo "case: generated board actions pass shell-escaped worktree paths via tmux -c"
+assert_contains "${ROOT}/flow/skills/configure/SKILL.md" \
+    "-c {pr_worktree}/'apps/web-client'"
+assert_not_contains "${ROOT}/flow/skills/configure/SKILL.md" '"cd {pr_worktree}'
+
+echo "passed: opt-in install, explicit update skip, checksum gate, config seeding, doctor, template parity, safe board actions"

@@ -809,16 +809,24 @@ For each MCP selected in question 5:
            name: Run web-client worktree
            type: shell
            scope: pr
-           command: 'tmux new-window -d -n pr-{pr_number} "cd {pr_worktree}/apps/web-client && ng serve"'
+           command: "tmux new-window -d -n pr-{pr_number} -c {pr_worktree}/'apps/web-client' \"ng serve\""
      - name: Implemented
    ```
 
    - One action per runnable project, using the confirmed key and serve command.
      The action name is `Run <slug> worktree`.
-   - **Single project**: the command is `cd {pr_worktree} && <serve-command>` (no
-     subpath). **Monorepo**: `cd {pr_worktree}/<project-path> && <serve-command>`.
-   - `{pr_worktree}` resolves the PR branch's registered Git worktree at action
-     time, so the file stays machine-independent — never embed absolute paths.
+   - Use tmux's start-directory option rather than embedding the path in a nested
+     `cd` command. **Single project**: `tmux new-window -d -n pr-{pr_number} -c
+     {pr_worktree} "<serve-command>"`. **Monorepo**: append the project path as a
+     separately POSIX-shell-quoted literal, e.g. `-c
+     {pr_worktree}/'apps/web-client' "<serve-command>"`. Escape any apostrophe in
+     the project path with the standard `'\''` sequence. This is required even for
+     paths that currently contain no spaces or metacharacters.
+   - lazyboards shell-escapes `{pr_worktree}` and `{pr_number}` before expansion.
+     Keep those placeholders outside nested shell quotes so that escaping remains
+     effective. `{pr_worktree}` resolves the PR branch's registered Git worktree at
+     action time, so the file stays machine-independent — never embed absolute
+     paths.
    - The `tmux new-window -d` wrapper keeps long-running serve processes from
      blocking the action's key slot; keep it even for fast commands.
    - **File exists**: do not silently overwrite. Reuse the exact Overwrite/Skip/Show
