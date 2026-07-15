@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/v4/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
 )
 
 var readyTimeout = 3 * time.Second

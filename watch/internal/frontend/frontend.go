@@ -8,8 +8,8 @@ package frontend
 import (
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/v4/internal/detect"
-	"github.com/matteobortolazzo/cenci/watch/v4/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/internal/detect"
+	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
 )
 
 // SessionState is the daemon core's view of one agent session.

@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/matteobortolazzo/cenci/watch/v4/internal/daemon"
+	"github.com/matteobortolazzo/cenci/watch/internal/daemon"
 )
 
 // Controller is the small consumer-side tmux interface the launcher needs.

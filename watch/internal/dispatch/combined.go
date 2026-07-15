@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/v4/internal/run"
-	"github.com/matteobortolazzo/cenci/watch/v4/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/internal/run"
+	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
 )
 
 // loopCheckInterval bounds configuration latency without changing dispatch

@@ -99,7 +99,7 @@ you're installing fresh, you don't need this — just follow
 
 | Old | New |
 |---|---|
-| `github.com/matteobortolazzo/agent-stack/agentwatch/v4` | `github.com/matteobortolazzo/cenci/watch/v4` |
+| `github.com/matteobortolazzo/agent-stack/agentwatch/v4` | `github.com/matteobortolazzo/cenci/watch` (major version reset to 0.x with the rename, so no `/vN` suffix) |
 
 ## Upgrade steps
 

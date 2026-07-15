@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/v4/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
 )
 
 func useTempSocketDir(t *testing.T) {

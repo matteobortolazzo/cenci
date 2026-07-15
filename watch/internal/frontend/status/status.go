@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/v4/internal/ipc"
-	"github.com/matteobortolazzo/cenci/watch/v4/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
 )
 
 // ErrNoOutput signals that the waybar module should be hidden (exit 1).

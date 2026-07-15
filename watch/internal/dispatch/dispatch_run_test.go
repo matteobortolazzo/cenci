@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/v4/internal/run"
-	"github.com/matteobortolazzo/cenci/watch/v4/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/internal/run"
+	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
 )
 
 // stubRunFn swaps runFn for a stub for the duration of the test, so

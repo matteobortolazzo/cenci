@@ -6,7 +6,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/v4/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
 )
 
 // SetLoopEnabled idempotently sets dispatch.loopEnabled, preserving every

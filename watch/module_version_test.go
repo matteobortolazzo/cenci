@@ -15,6 +15,14 @@ func TestModuleVersion(t *testing.T) {
 	moduleMajor := readModuleMajor(t, "go.mod")
 	versionMajor := readPluginVersionMajor(t, "plugin/.claude-plugin/plugin.json")
 
+	if moduleMajor == "" {
+		// No /vN suffix on the module path covers both major 0 and major 1.
+		if versionMajor != "0" && versionMajor != "1" {
+			t.Fatalf("go.mod module path has no /vN suffix (major 0 or 1) but plugin.json version major is %q; add a %q suffix to the go.mod module path", versionMajor, "/v"+versionMajor)
+		}
+		return
+	}
+
 	if "v"+versionMajor != moduleMajor {
 		t.Fatalf("go.mod module major version %q does not match plugin.json version major %q (\"v%s\"); update the go.mod module path to include a %q suffix", moduleMajor, versionMajor, versionMajor, "/v"+versionMajor)
 	}
@@ -41,7 +49,7 @@ func readModuleMajor(t *testing.T, path string) string {
 			return last
 		}
 
-		return "v1" // no /vN suffix means major version 1, per Go's semantic import versioning rules
+		return "" // no /vN suffix means major version 0 or 1, per Go's semantic import versioning rules
 	}
 
 	t.Fatalf("no module line found in %s", path)

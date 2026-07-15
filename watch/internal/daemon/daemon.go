@@ -7,12 +7,12 @@ import (
 	"os"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/v4/internal/config"
-	"github.com/matteobortolazzo/cenci/watch/v4/internal/detect"
-	"github.com/matteobortolazzo/cenci/watch/v4/internal/frontend"
-	"github.com/matteobortolazzo/cenci/watch/v4/internal/ipc"
-	"github.com/matteobortolazzo/cenci/watch/v4/internal/reap"
-	"github.com/matteobortolazzo/cenci/watch/v4/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/internal/config"
+	"github.com/matteobortolazzo/cenci/watch/internal/detect"
+	"github.com/matteobortolazzo/cenci/watch/internal/frontend"
+	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/internal/reap"
+	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
 )
 
 // Daemon manages the event-driven loop and per-session core state. All tmux
