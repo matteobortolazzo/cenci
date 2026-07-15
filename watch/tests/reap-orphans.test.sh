@@ -15,12 +15,14 @@
 # architectural constraints):
 #   - Container enumeration: `<runtime> ps --format '{{.Names}}'`, filtered
 #     host-side to running containers matching ^(claude-cenci-|codex-cenci-)$.
-#   - In-container scan: `<runtime> exec -u root <container> sh -c '<POSIX
+#   - In-container scan: `<runtime> exec -u dev <container> sh -c '<POSIX
 #     script scanning /proc/*/environ for a line matching ^TMUX_PANE=>'`,
 #     emitting one `<pid>\t<pane>\t<start>` line per process that carries the
 #     TMUX_PANE key (pane may be empty; <start> is that process's start time,
 #     read from /proc/<pid>/stat field 22 in the same scan pass), to stdout,
-#     exit 0 on success.
+#     exit 0 on success. Scan runs as the fixed `dev` sandbox agent user so
+#     same-uid /proc/<pid>/environ reads succeed without CAP_SYS_PTRACE
+#     (root lacks it under docker's default caps).
 #   - Pane-format validation (host-side, after the scan): a non-empty <pane>
 #     must match tmux's real pane-id format `^%[0-9]+$` before being treated
 #     as a live-ownership record. A malformed value (e.g. `%foo`, `bad`,
@@ -153,8 +155,8 @@ case "${1:-}" in
                 # PID-reuse detection, no-tmux handling) lives host-side in
                 # reap_orphans(), never here. Fixture lines are three
                 # tab-separated columns: <pid>\t<pane>\t<start>.
-                if [[ "${USER_FLAG}" != root ]]; then
-                    echo "mock: TMUX_PANE scan on ${CONTAINER} must run as -u root" >&2
+                if [[ "${USER_FLAG}" != dev ]]; then
+                    echo "mock: TMUX_PANE scan on ${CONTAINER} must run as -u dev" >&2
                     exit 6
                 fi
                 if [[ "${MOCK_SCAN_FAIL:-}" == "${CONTAINER}" ]]; then
@@ -215,6 +217,7 @@ case "${1:-}" in
                     case "${STATE}" in
                         gone) printf '__GONE__\n' ;;
                         live:*) printf '%s\n' "${STATE#live:}" ;;
+                        nostat) printf '__NOSTAT__\n' ;;
                         *) printf '__GONE__\n' ;;
                     esac
                 else
@@ -325,6 +328,10 @@ set_live_start() { printf 'live:%s' "$2" > "${LIVENESS_DIR}/$1"; }
 # set_gone <pid>: pid is gone by the time of the pre-SIGKILL probe; the
 # probe reports the __GONE__ sentinel (no-op, not an error).
 set_gone() { printf 'gone' > "${LIVENESS_DIR}/$1"; }
+# set_nostat <pid>: pid is still alive at the pre-SIGKILL probe, but its
+# /proc/<pid>/stat field 22 is unverifiable; the probe reports the
+# __NOSTAT__ sentinel (neither __GONE__ nor a parseable start time).
+set_nostat() { printf 'nostat' > "${LIVENESS_DIR}/$1"; }
 
 reaped_line() {
     printf 'reaped\t%s\t%s\t%s' "$1" "$2" "$3"
@@ -366,6 +373,21 @@ assert_calls_not_contains() {
     local needle="$1"
     if grep -Fq -- "${needle}" "${CALLS_FILE}"; then
         fail "did not expect calls log to contain: ${needle}"
+    else
+        pass
+    fi
+}
+
+# assert_calls_not_match <extended-regex>: like assert_calls_not_contains but
+# takes an ERE instead of a fixed string. Needed when a single fixed-string
+# needle would also match an unrelated, legitimate call (e.g. distinguishing
+# the TMUX_PANE scan's "-u root ... sh -c" shape, which must never occur,
+# from the pre-SIGKILL liveness probe's "-u root ... sh -c" shape, which
+# always does).
+assert_calls_not_match() {
+    local pattern="$1"
+    if grep -Eq -- "${pattern}" "${CALLS_FILE}"; then
+        fail "did not expect calls log to match: ${pattern}"
     else
         pass
     fi
@@ -736,6 +758,74 @@ case_18_gone_before_term_is_benign() {
 }
 
 # ---------------------------------------------------------------------------
+# Dev-vs-root contract (#357): the mock's scan-branch guard requires -u dev
+# (see lines ~156-159), mirroring production's scan call. A regression back
+# to -u root on either side makes this case fail loudly (scan transport
+# failure), since the guard's `exit 6` would never let the fixture's
+# dev-owned orphan be reaped.
+case_19_dev_scan_finds_dev_owned_orphan() {
+    echo "case: a dev-owned orphan is found and reaped via a -u dev scan (root scan does not see it)"
+    reset_state
+    local container="claude-cenci-devowned"
+    add_podman_container "${container}"
+    write_scan "${container}" $'19001\t%23\t19000'
+    export MOCK_LIVE_PANES="%99"
+    set_gone 19001
+    run_reap
+    assert_exit_zero
+    assert_contains "$(reaped_line "${container}" 19001 "%23")"
+    assert_calls_contains "podman exec -u dev ${container}"
+    # "environ" is unique to reapScanScript (the TMUX_PANE scan) among the
+    # in-container scripts; the pre-SIGKILL probe also runs "-u root ... sh
+    # -c" but never mentions environ, so this only rules out a root-user
+    # scan, not the (still-root) liveness probe that legitimately follows.
+    assert_calls_not_match "-u root ${container} sh -c .*environ"
+    assert_calls_contains "podman exec -u root ${container} kill -TERM 19001"
+}
+
+# ---------------------------------------------------------------------------
+case_20_empty_recorded_start_silently_falls_back_to_kill() {
+    echo "case: an empty recorded start time (scan-time field-22 read failure) silently falls back to best-effort SIGKILL -- no unparseable-start-time Note"
+    reset_state
+    local container="claude-cenci-emptystart"
+    add_podman_container "${container}"
+    # Recorded start is empty (third column blank) at scan time; the
+    # pre-SIGKILL probe reports a genuine numeric start time. recordedNumeric
+    # is false, probeNumeric is true, and recordedStart == "" -- the silent
+    # (Note-free) fallback branch, not the noted one.
+    write_scan "${container}" $'20001\t%24\t'
+    export MOCK_LIVE_PANES="%99"
+    set_live_start 20001 20000
+    run_reap
+    assert_exit_zero
+    assert_contains "$(reaped_line "${container}" 20001 "%24")"
+    assert_calls_contains "podman exec -u root ${container} kill -TERM 20001"
+    assert_calls_contains "podman exec -u root ${container} kill -KILL 20001"
+    assert_not_contains "unparseable start-time"
+}
+
+# ---------------------------------------------------------------------------
+case_21_nostat_probe_silently_falls_back_to_kill() {
+    echo "case: a __NOSTAT__ pre-SIGKILL probe result silently falls back to best-effort SIGKILL -- no unparseable-start-time Note"
+    reset_state
+    local container="claude-cenci-nostat"
+    add_podman_container "${container}"
+    # Recorded start is a genuine numeric value at scan time; the pre-SIGKILL
+    # probe is alive but unverifiable (__NOSTAT__). recordedNumeric is true,
+    # probeNumeric is false, and probeStart == "__NOSTAT__" -- the silent
+    # (Note-free) fallback branch, not the noted one.
+    write_scan "${container}" $'21001\t%25\t1000'
+    export MOCK_LIVE_PANES="%99"
+    set_nostat 21001
+    run_reap
+    assert_exit_zero
+    assert_contains "$(reaped_line "${container}" 21001 "%25")"
+    assert_calls_contains "podman exec -u root ${container} kill -TERM 21001"
+    assert_calls_contains "podman exec -u root ${container} kill -KILL 21001"
+    assert_not_contains "unparseable start-time"
+}
+
+# ---------------------------------------------------------------------------
 case_1_orphan_termed
 case_2_term_resistant_escalates_to_kill
 case_3_empty_pane_never_signaled
@@ -754,6 +844,9 @@ case_15_corrupted_scan_start_falls_back_to_kill
 case_16_corrupted_probe_output_falls_back_to_kill
 case_17_container_init_never_signaled
 case_18_gone_before_term_is_benign
+case_19_dev_scan_finds_dev_owned_orphan
+case_20_empty_recorded_start_silently_falls_back_to_kill
+case_21_nostat_probe_silently_falls_back_to_kill
 
 print_summary
 [[ "${FAILURES}" -eq 0 ]]
