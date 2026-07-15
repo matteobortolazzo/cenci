@@ -1,13 +1,14 @@
 // Package reap defines the seam the daemon uses to trigger the sandbox
-// orphan reaper (cenci-sand --reap-orphans) after detecting a pane-gone
+// orphan reaper (`cenci sandbox reap-orphans`) after detecting a pane-gone
 // tmux-backed session, and once at daemon startup (#292). All container
 // knowledge (naming, docker/podman detection, exec plumbing, kill semantics)
-// stays in cenci-sand; this package only knows how to fire a single-flight,
-// non-blocking, non-fatal invocation.
+// stays in internal/sandbox/launcher; this package only knows how to fire a
+// single-flight, non-blocking, non-fatal invocation.
 package reap
 
 import (
 	"log"
+	"os"
 	"os/exec"
 	"sync/atomic"
 )
@@ -18,13 +19,16 @@ type Reaper interface {
 	Reap()
 }
 
-// ExecReaper shells out to `cenci-sand --reap-orphans` asynchronously, with a
+// ExecReaper self-execs `cenci sandbox reap-orphans` asynchronously, with a
 // single-flight guard so concurrent Reap() calls coalesce into one run.
 type ExecReaper struct {
 	verbose bool
 	running atomic.Bool
-	// run is injectable for tests; defaults to LookPath("cenci-sand") then
-	// exec.Command("cenci-sand", "--reap-orphans").Run().
+	// run is injectable for tests; defaults to re-invoking this very binary
+	// (os.Executable) as `<self> sandbox reap-orphans`. A subprocess (rather
+	// than calling launcher.ReapOrphans in-process) keeps the daemon isolated
+	// from any crash in the reap pass and preserves the single-flight
+	// semantics across the process boundary.
 	run func() error
 }
 
@@ -35,19 +39,19 @@ func NewExecReaper(verbose bool) *ExecReaper {
 	return &ExecReaper{
 		verbose: verbose,
 		run: func() error {
-			path, err := exec.LookPath("cenci-sand")
+			self, err := os.Executable()
 			if err != nil {
 				return err
 			}
-			return exec.Command(path, "--reap-orphans").Run()
+			return exec.Command(self, "sandbox", "reap-orphans").Run()
 		},
 	}
 }
 
 // Reap triggers a reap pass in the background and returns immediately. A
 // second call while one is already in flight is coalesced (no-op) — the
-// in-flight run already covers the current state. Failures (missing binary,
-// non-zero exit) are logged (verbose-only) and dropped, never retried
+// in-flight run already covers the current state. Failures (unresolvable
+// binary, non-zero exit) are logged (verbose-only) and dropped, never retried
 // automatically; the next pane-gone event or daemon restart retries
 // naturally.
 func (r *ExecReaper) Reap() {
@@ -58,12 +62,12 @@ func (r *ExecReaper) Reap() {
 		defer r.running.Store(false)
 		if err := r.run(); err != nil {
 			if r.verbose {
-				log.Printf("reap: cenci-sand --reap-orphans failed: %v", err)
+				log.Printf("reap: cenci sandbox reap-orphans failed: %v", err)
 			}
 			return
 		}
 		if r.verbose {
-			log.Printf("reap: cenci-sand --reap-orphans completed")
+			log.Printf("reap: cenci sandbox reap-orphans completed")
 		}
 	}()
 }

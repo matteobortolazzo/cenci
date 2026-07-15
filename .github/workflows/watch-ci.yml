@@ -43,8 +43,12 @@ jobs:
           go-version: '1.25.x'
       - run: go test ./...
       - run: go build ./...
+      - run: go build -o cenci .
       - run: ./plugin/hooks/test.sh
       - run: ./plugin/codex/test.sh
+      - run: bash tests/reap-orphans.test.sh
+        env:
+          CENCI_BIN: ${{ github.workspace }}/watch/cenci
 
   lint:
     name: watch-lint

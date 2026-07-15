@@ -1,22 +1,18 @@
 #!/usr/bin/env bash
-# Host-runnable regressions for `cenci-sand --reap-orphans` (#291): scans every
-# running cenci-sand container across all installed runtimes (docker AND
+# Host-runnable regressions for `cenci sandbox reap-orphans` (#291): scans
+# every running sandbox container across all installed runtimes (docker AND
 # podman), reads TMUX_PANE from /proc/<pid>/environ of every container-side
 # process, and kills (SIGTERM -> grace -> SIGKILL) any process whose recorded
-# pane no longer exists on the host tmux server. Uses the mock-PATH + CALLS_FILE
-# pattern from launcher-lifecycle.test.sh / installer-clients.test.sh, plus a
-# FAILURES/PASSES summary in the style of smoke.test.sh so every case below
-# runs (and reports) independently instead of aborting the suite on the first
-# failing assertion.
+# pane no longer exists on the host tmux server. Uses a mock-PATH + CALLS_FILE
+# pattern, plus a FAILURES/PASSES summary so every case below runs (and
+# reports) independently instead of aborting the suite on the first failing
+# assertion.
 #
-# RED PHASE (#291): `--reap-orphans` and reap_orphans() do not exist yet in
-# cenci-sand, so every case below is expected to fail right now — the flag
-# falls through to the unrecognized-argument branch and gets forwarded to the
-# agent CLI like any other positional arg, producing a normal (non-reaping)
-# launch instead of a scan-and-kill run.
+# Requires CENCI_BIN pointing at a built cenci binary (e.g.
+# `cd watch && make build && CENCI_BIN=$PWD/cenci bash tests/reap-orphans.test.sh`).
 #
-# Assumed CLI contract this suite defines for the eventual implementation
-# (mirrors the ticket's architectural constraints):
+# The CLI contract this suite pins (mirrors the original ticket's
+# architectural constraints):
 #   - Container enumeration: `<runtime> ps --format '{{.Names}}'`, filtered
 #     host-side to running containers matching ^(claude-cenci-|codex-cenci-)$.
 #   - In-container scan: `<runtime> exec -u root <container> sh -c '<POSIX
@@ -66,11 +62,20 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SANDBOX_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-# shellcheck source-path=SCRIPTDIR/../lib
-# shellcheck source=../lib/repo-scope.sh
-source "${SANDBOX_DIR}/lib/repo-scope.sh"
-REPO_ROOT="$(git -C "${SANDBOX_DIR}" rev-parse --show-toplevel)"
+
+if [[ -z "${CENCI_BIN:-}" || ! -x "${CENCI_BIN}" ]]; then
+    echo "Error: CENCI_BIN must point at a built cenci binary (cd watch && make build && CENCI_BIN=\$PWD/cenci bash tests/reap-orphans.test.sh)." >&2
+    exit 1
+fi
+
+# slugify <input>: lowercase and replace each character outside [a-z0-9_.-]
+# with a dash — inlined from the launcher's Slugify (one place in code, this
+# local copy exists only to derive a realistic container name for fixtures).
+slugify() {
+    echo "$1" | LC_ALL=C.UTF-8 tr '[:upper:]' '[:lower:]' | LC_ALL=C.UTF-8 sed -E 's/[^a-z0-9_.-]/-/g'
+}
+
+REPO_ROOT="$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel)"
 REPO_SLUG="$(slugify "$(basename "${REPO_ROOT}")")"
 MAIN_CONTAINER="claude-cenci-${REPO_SLUG}"
 
@@ -328,7 +333,7 @@ reaped_line() {
 }
 
 run_reap() {
-    OUTPUT="$("${SANDBOX_DIR}/cenci-sand" --reap-orphans 2>&1)"
+    OUTPUT="$("${CENCI_BIN}" sandbox reap-orphans 2>&1)"
     EXIT_CODE=$?
 }
 
