@@ -70,7 +70,7 @@ func TestRunSpawnsWindowAndPinsName(t *testing.T) {
 		t.Errorf("name = %q, want 40-implement", w.name)
 	}
 	// With no flag and no config, the default is now the sandbox launcher (#98).
-	if !strings.Contains(w.cmd, "cenci-sand") || !strings.Contains(w.cmd, "/cenci:implement 40") {
+	if !strings.Contains(w.cmd, "cenci open") || !strings.Contains(w.cmd, "/cenci:implement 40") {
 		t.Errorf("command = %q", w.cmd)
 	}
 
@@ -97,7 +97,7 @@ func TestRunDefaultsToSandbox(t *testing.T) {
 		t.Fatalf("expected 1 NewWindow, got %d", len(m.windows))
 	}
 	// No flag and no config default → sandbox launcher (#98).
-	if !strings.Contains(m.windows[0].cmd, "cenci-sand") {
+	if !strings.Contains(m.windows[0].cmd, "cenci open") {
 		t.Errorf("command = %q, want sandbox launcher", m.windows[0].cmd)
 	}
 }
@@ -117,7 +117,7 @@ func TestRunNoSandboxForcesHost(t *testing.T) {
 		t.Fatalf("expected 1 NewWindow, got %d", len(m.windows))
 	}
 	cmd := m.windows[0].cmd
-	if strings.Contains(cmd, "cenci-sand") {
+	if strings.Contains(cmd, "cenci open") {
 		t.Errorf("--no-sandbox must not use the sandbox launcher: %q", cmd)
 	}
 	if !strings.Contains(cmd, "claude") {
@@ -161,8 +161,8 @@ func TestRunRefusesGroupedSession(t *testing.T) {
 }
 
 // TestRunEnsuresDaemonBeforeSpawning guards #139: a window spawned before the
-// daemon (and thus the event socket cenci-sand mounts into the sandbox) is up
-// never gets status wired in for its whole lifetime.
+// daemon (and thus the event socket `cenci open` mounts into the sandbox) is
+// up never gets status wired in for its whole lifetime.
 func TestRunEnsuresDaemonBeforeSpawning(t *testing.T) {
 	m := &mockCtrl{session: "work"}
 	opts := noConfigOpts(t)

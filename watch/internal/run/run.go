@@ -47,10 +47,11 @@ type Opts struct {
 	// EnsureDaemon starts the cenci daemon if it isn't already running,
 	// and waits briefly for it to come up; nil uses the real implementation
 	// (daemon.EnsureRunning). Called right before the window is
-	// spawned (never on dry-run or a refused grouped session): cenci-sand
-	// only mounts the event socket into the sandbox if it already exists at
-	// container launch (#139), so a window spawned before the daemon is up
-	// never gets status wired in for its whole lifetime.
+	// spawned (never on dry-run or a refused grouped session): the sandbox
+	// launcher (`cenci open`) only mounts the event socket into the sandbox
+	// if it already exists at container launch (#139), so a window spawned
+	// before the daemon is up never gets status wired in for its whole
+	// lifetime.
 	EnsureDaemon func()
 }
 
