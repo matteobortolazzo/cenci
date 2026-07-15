@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/matteobortolazzo/cenci/watch/internal/exectest"
 )
 
 // writeFakeRuntime writes a fake docker/podman to dir that appends each
@@ -20,7 +22,7 @@ import (
 func writeFakeRuntime(t *testing.T, dir, name, callLog string) {
 	t.Helper()
 	body := `#!/bin/sh
-printf '%s\n' "$*" >> ` + shellQuote(callLog) + `
+printf '%s\n' "$*" >> ` + exectest.ShellQuote(callLog) + `
 case "$1" in
 images) printf '%s' "${FAKE_IMAGES:-}" ;;
 ps) printf '%s' "${FAKE_PS:-}" ;;
@@ -28,19 +30,7 @@ volume) [ "$2" = ls ] && printf '%s' "${FAKE_VOLUMES:-}" ;;
 esac
 exit 0
 `
-	writeExecutable(t, filepath.Join(dir, name), body)
-}
-
-func writeExecutable(t *testing.T, path, body string) {
-	t.Helper()
-	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
-		t.Fatalf("write %s: %v", path, err)
-	}
-}
-
-// shellQuote single-quotes s for embedding in a generated shell script body.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+	exectest.WriteExecutable(t, filepath.Join(dir, name), body)
 }
 
 // readCallLog returns the fake runtime's call log lines.

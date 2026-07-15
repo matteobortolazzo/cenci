@@ -163,10 +163,7 @@ func runUpdate(args []string) {
 func runWrapperMode(mode string, args []string) {
 	fs := flag.NewFlagSet(mode, flag.ExitOnError)
 	_ = fs.Parse(args)
-	if extra := fs.Args(); len(extra) > 0 {
-		fmt.Fprintf(os.Stderr, "cenci %s: unexpected argument %q\n", mode, extra[0])
-		os.Exit(2)
-	}
+	rejectExtra(fmt.Sprintf("cenci %s", mode), fs.Args())
 
 	path, err := exec.LookPath(wrapperBinaryName)
 	if err != nil {

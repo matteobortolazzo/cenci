@@ -6,13 +6,16 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/matteobortolazzo/cenci/watch/internal/exectest"
 )
 
 // -- fakes ---------------------------------------------------------------
 //
 // These black-box tests exercise the real built `cenci` binary (see
-// sandbox_open_test.go for the shared writeExecutable/shellQuote/itoa
-// helpers) with PATH overridden to a temp dir containing a fake `cenci-installer`
+// sandbox_open_test.go for the shared itoa helper and internal/exectest for
+// the shared WriteExecutable/ShellQuote helpers) with PATH overridden to a
+// temp dir containing a fake `cenci-installer`
 // wrapper script that records the argv it receives and exits with a given
 // code, mirroring writeFakeCenciSand's pattern for the "sandbox"/"open"
 // verbs.
@@ -24,11 +27,11 @@ import (
 func writeFakeCenciInstaller(t *testing.T, dir, captureFile string, exitCode int) {
 	t.Helper()
 	body := "#!/bin/sh\n" +
-		"printf '%s\\n' \"$@\" > " + shellQuote(captureFile) + "\n" +
+		"printf '%s\\n' \"$@\" > " + exectest.ShellQuote(captureFile) + "\n" +
 		"printf 'cenci-installer stdout marker\\n'\n" +
 		"printf 'cenci-installer stderr marker\\n' >&2\n" +
 		"exit " + itoa(exitCode) + "\n"
-	writeExecutable(t, filepath.Join(dir, "cenci-installer"), body)
+	exectest.WriteExecutable(t, filepath.Join(dir, "cenci-installer"), body)
 }
 
 // -- doctor ---------------------------------------------------------------

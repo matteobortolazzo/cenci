@@ -40,10 +40,11 @@ jobs:
           shellcheck install.sh \
             sandbox/entrypoint.sh \
             sandbox/lib/*.sh \
-            sandbox/tests/*.test.sh
+            sandbox/tests/*.test.sh \
+            sandbox/tests/lib/*.sh
       - name: bash -n (syntax check)
         run: |
-          for f in install.sh sandbox/entrypoint.sh sandbox/lib/*.sh sandbox/tests/*.test.sh; do
+          for f in install.sh sandbox/entrypoint.sh sandbox/lib/*.sh sandbox/tests/*.test.sh sandbox/tests/lib/*.sh; do
             bash -n "$f"
           done
 
