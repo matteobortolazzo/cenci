@@ -1,6 +1,6 @@
 # cenci-sandbox (cenci-sand)
 
-> Part of [agent-stack](../README.md) — the **isolation layer**. See the root README for
+> Part of [cenci](../README.md) — the **isolation layer**. See the root README for
 > the one-command install and how the isolation, workflow, and attention layers fit together.
 
 Run Claude Code or Codex at full permissions without giving the agent your whole host.
@@ -43,7 +43,7 @@ The easiest path is the [one-command installer](../docs/getting-started.md), whi
 installs the plugin, symlinks the launchers, and offers to build the image:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
 ```
 
 ### Advanced / development: standalone setup
@@ -52,7 +52,7 @@ Install the plugin from the marketplace, then run the setup skill—it symlinks 
 `cenci-sand` launcher onto your PATH and builds the container image:
 
 ```bash
-claude plugin marketplace add matteobortolazzo/agent-stack
+claude plugin marketplace add matteobortolazzo/cenci
 claude plugin install cenci-sandbox
 /cenci-sandbox:setup
 ```
@@ -62,7 +62,7 @@ claude plugin install cenci-sandbox
 then re-run `/cenci-sandbox:setup --build-only` if the Dockerfile changed.
 
 The `setup` skill is Claude Code-only because it relies on Claude's interactive and
-plugin-root extensions. Codex users should use the agent-stack installer, which
+plugin-root extensions. Codex users should use the cenci installer, which
 installs the same cenci-sandbox plugin for Codex and performs the launcher setup outside the
 agent session.
 
@@ -71,7 +71,7 @@ agent session.
 
 ```bash
 # Symlink the launcher to your PATH
-ln -s "$(pwd)/dev-sandbox/cenci-sand" ~/.local/bin/cenci-sand
+ln -s "$(pwd)/sandbox/cenci-sand" ~/.local/bin/cenci-sand
 
 # Build the image
 cenci-sand --build
@@ -128,7 +128,7 @@ cenci-sand --docker -p "run the integration tests"
 # security boundary, so only use this for the manual OAuth callback use case.
 cenci-sand --host-network --shell
 
-# Force an agentflow/agentwatch plugin update now (bypasses the 30-min TTL)
+# Force a cenci/cenci-watch plugin update now (bypasses the 30-min TTL)
 cenci-sand --update-plugins
 
 # Force re-copying host Claude/Codex credentials into the volume (recovery
@@ -353,7 +353,7 @@ cenci-sand --build-base   # tags both the content-hash tag and cenci-sandbox-bas
 docker build --build-arg BASE_VERSION=latest \
              --build-arg DOTNET_SDK_VERSION=10.0.200 \
              --build-arg GO_VERSION=1.25.0 \
-             -t cenci-sandbox:latest dev-sandbox/
+             -t cenci-sandbox:latest sandbox/
 ```
 
 ## Architecture
@@ -375,7 +375,7 @@ The image is built in two layers:
   (default `latest`). Layers the runtime stacks on top: .NET SDK, Node.js, Go, Codex CLI
   (ordered last since it changes most often). This is the image `cenci-sand` actually runs.
 
-`dev-sandbox/fragments/*.dockerfile` holds the same composable blocks (`dotnet`, `node`,
+`sandbox/fragments/*.dockerfile` holds the same composable blocks (`dotnet`, `node`,
 `go`, `python`, `rust`, `codex`) used for per-project image composition. Each fragment and
 its corresponding block in `Dockerfile` are kept byte-identical by hand; when you change
 one, change the other the same way.
@@ -393,16 +393,16 @@ single-repo mounting (see [Per-repo containers](#per-repo-containers)). Rebuild 
 repo's own image the same way as the monolith: `cenci-sand --build` (run from inside
 that repo).
 
-`/agentflow:configure` generates and maintains `.cenci/Dockerfile` automatically
+`/cenci:configure` generates and maintains `.cenci/Dockerfile` automatically
 from the repo's detected stack (question 9) — you normally don't hand-write this file.
 Every generated image includes the Node and Codex fragments so `cenci-sand --agent codex`
 works in tailored images; it adds the remaining fragments required by the detected stack.
 The fragments are wrapped in
-`# agentflow:managed-begin` / `# agentflow:managed-end` markers so re-running configure
+`# cenci:managed-begin` / `# cenci:managed-end` markers so re-running configure
 regenerates just that block and preserves anything the team appends around it.
 
-**Sync obligation**: `dev-sandbox/fragments/*.dockerfile` is the source of truth for the
-per-stack blocks configure assembles into `.cenci/Dockerfile`; the agentflow
+**Sync obligation**: `sandbox/fragments/*.dockerfile` is the source of truth for the
+per-stack blocks configure assembles into `.cenci/Dockerfile`; the cenci
 `configure` skill's stack-to-fragment mapping table mirrors this directory. If a fragment
 is added, removed, or renamed here, that table needs a matching manual update — low risk
 in practice, since both live in this same monorepo and are maintained together, but
@@ -410,7 +410,7 @@ currently unenforced by tooling.
 
 **Trust / security note**: a committed `.cenci/Dockerfile` is reviewed code, like
 any other file in the PR that adds or changes it. It only runs `docker build` steps
-assembled from `dev-sandbox/fragments/*.dockerfile` by configure's templates — no
+assembled from `sandbox/fragments/*.dockerfile` by configure's templates — no
 arbitrary runtime hooks execute during generation or during the build it produces.
 
 ### Permission model
@@ -474,13 +474,13 @@ The entrypoint automatically detects the socket's group ownership and adds the `
 
 **Security note**: The `--docker` flag grants the container access to the host's Docker daemon. Any container started from within the sandbox runs on the host, with full Docker privileges. This is why it is opt-in.
 
-### Agentwatch (optional)
+### cenci-watch (optional)
 
-If `agentwatch` is installed on the host, the script automatically:
+If `cenci` is installed on the host, the script automatically:
 - Starts the host daemon when its events socket is missing (it normally starts
   lazily on the first host session, which used to leave containers created
   right after boot without any wiring) and warns if the socket never appears
-- Bind-mounts the `agentwatch` binary (read-only)
+- Bind-mounts the `cenci` binary (read-only)
 - Bind-mounts the events socket directory (read-only) so hooks can reach the
   host daemon — mounting the directory rather than the socket file means the
   wiring survives a host daemon restart, since the container follows the host
@@ -497,8 +497,8 @@ No manual install is needed inside the container. The launcher passes the select
 agent through the internal `CENCI_SANDBOX_AGENT` contract, and the entrypoint uses that
 agent's native CLI and plugin store: Claude provisions `~/.claude/plugins` through
 the host-mounted `claude` binary, while Codex provisions `~/.codex` through the
-Codex CLI baked into the image. Both paths register the `agent-stack` marketplace,
-install `agentwatch` and `agentflow` when missing, and refresh them on a 30-minute
+Codex CLI baked into the image. Both paths register the `cenci` marketplace,
+install `cenci-watch` and `cenci` when missing, and refresh them on a 30-minute
 TTL. Rapid stop/start cycles therefore make zero network calls; `cenci-sand
 --update-plugins` forces provisioning plus refresh through the selected agent's
 CLI. CLI or network failures warn but never block container startup. Existing
@@ -507,7 +507,7 @@ renamed `claude-tools` marketplace at the same time.
 
 Codex validates plugin hook files by hash. A new Codex session loads newly installed
 plugins, but if an update changes `hooks.json`, open `/hooks` in Codex and trust the
-pending agentwatch hooks again. This trust decision is intentionally interactive and
+pending cenci-watch hooks again. This trust decision is intentionally interactive and
 is not bypassed by sandbox provisioning.
 
 ### Container lifecycle
@@ -549,8 +549,8 @@ Just update Claude Code on the host. The binary is bind-mounted, so the containe
 ### Update sandbox plugins
 
 Nothing to do normally: on each container start the entrypoint uses the selected
-agent's native CLI to refresh the `agent-stack` marketplace and update
-`agentflow`/`agentwatch` in that agent's home volume (TTL-gated to 30 minutes).
+agent's native CLI to refresh the `cenci` marketplace and update
+`cenci`/`cenci-watch` in that agent's home volume (TTL-gated to 30 minutes).
 To force provisioning of anything missing and refresh immediately — e.g. right
 after merging a plugin change — run:
 
@@ -583,26 +583,26 @@ instances use `claude-cenci-home-<repo-slug>`; Codex instances use
 [Per-repo containers](#per-repo-containers)):
 
 ```bash
-docker volume rm claude-cenci-home-agent-stack
+docker volume rm claude-cenci-home-cenci
 # or for a --name instance:
-docker volume rm claude-cenci-home-agent-stack-myproject
+docker volume rm claude-cenci-home-cenci-myproject
 # outside a git repo (legacy scheme):
 docker volume rm claude-cenci-home-default
 # Codex instances:
-docker volume rm codex-cenci-home-agent-stack
+docker volume rm codex-cenci-home-cenci
 ```
 
 ### List instances
 
 ```bash
-docker volume ls --filter name=sand-home
+docker volume ls --filter name=cenci-home
 ```
 
 ### Clean up everything
 
 ```bash
 # Remove all sandbox volumes (both Claude Code and Codex instances)
-docker volume ls --filter name=sand-home -q | xargs docker volume rm
+docker volume ls --filter name=cenci-home -q | xargs docker volume rm
 
 # Remove the image
 docker rmi cenci-sandbox:latest
