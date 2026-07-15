@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Wires SwiftBar up to the agentwatch plugin without touching SwiftBar's GUI:
+# Wires SwiftBar up to the cenci-watch plugin without touching SwiftBar's GUI:
 # sets its Plugin Folder (a plain UserDefaults key) and symlinks the plugin
 # script in, then reloads SwiftBar so the change takes effect immediately.
 #

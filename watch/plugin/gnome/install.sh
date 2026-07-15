@@ -7,7 +7,7 @@
 #
 # We COPY (not symlink) the widget dir so the generated gschemas.compiled never
 # dirties the marketplace git checkout. Re-running refreshes the copy and
-# reloads — that is what makes `agent-stack update` show widget changes.
+# reloads — that is what makes `cenci update` show widget changes.
 #
 # Usage: ./plugin/gnome/install.sh
 

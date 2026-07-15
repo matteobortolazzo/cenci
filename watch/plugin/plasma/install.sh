@@ -4,7 +4,7 @@
 # symlinks this plasmoid into the per-user plasmoids folder under its plugin id
 # and restarts plasmashell so the change takes effect immediately.
 #
-# The symlink-to-checkout keeps the install stable across `agent-stack update`
+# The symlink-to-checkout keeps the install stable across `cenci update`
 # (the checkout is refreshed in place) and needs no re-copy. You still add the
 # widget to a panel once via the Plasma "Add Widgets…" GUI.
 #

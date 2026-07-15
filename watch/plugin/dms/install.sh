@@ -4,7 +4,7 @@
 # GUI: symlinks this plugin into DMS's plugin folder and restarts DMS so the
 # change takes effect immediately.
 #
-# The symlink-to-checkout keeps the install stable across `agent-stack update`.
+# The symlink-to-checkout keeps the install stable across `cenci update`.
 # You still add the widget to a bar section once via DMS Settings → Plugins.
 #
 # Usage: ./plugin/dms/install.sh

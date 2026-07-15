@@ -4,7 +4,7 @@
 # symlinks this plugin into noctalia's plugin folder and restarts the shell so
 # the change takes effect immediately.
 #
-# The symlink-to-checkout keeps the install stable across `agent-stack update`.
+# The symlink-to-checkout keeps the install stable across `cenci update`.
 # You still add the widget to a bar section once via noctalia Settings → Bar.
 #
 # Usage: ./plugin/noctalia/install.sh

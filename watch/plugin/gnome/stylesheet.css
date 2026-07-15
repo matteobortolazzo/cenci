@@ -1,38 +1,38 @@
-/* AgentWatch — GNOME Shell indicator colors.
+/* Cenci — GNOME Shell indicator colors.
  *
  * Colors follow the Adwaita / Yaru palette so the indicator reads correctly on
  * Ubuntu's default light and dark themes. Applied to the panel icon and to each
  * per-session dropdown icon (see styleClassForClass in extension.js). */
 
-.agentwatch-failed,
-.agentwatch-need-input {
+.cenci-failed,
+.cenci-need-input {
     color: #e01b24; /* red — attention */
 }
 
-.agentwatch-running {
+.cenci-running {
     color: #3584e4; /* blue — working */
 }
 
-.agentwatch-done {
+.cenci-done {
     color: #2ec27e; /* green — finished */
 }
 
-.agentwatch-stopped {
+.cenci-stopped {
     color: #e66100; /* orange — paused */
 }
 
-.agentwatch-idle {
+.cenci-idle {
     color: #9a9996; /* grey — muted */
 }
 
-.agentwatch-headroom-normal {
+.cenci-headroom-normal {
     color: #2ec27e; /* green — plenty of budget left */
 }
 
-.agentwatch-headroom-warning {
+.cenci-headroom-warning {
     color: #e66100; /* orange — budget running low */
 }
 
-.agentwatch-headroom-critical {
+.cenci-headroom-critical {
     color: #e01b24; /* red — budget nearly exhausted */
 }

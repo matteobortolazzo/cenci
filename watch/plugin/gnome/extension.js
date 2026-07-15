@@ -3,7 +3,7 @@
 // Live Claude Code / Codex session counts in the top bar. This is a read-only
 // frontend over the same Waybar JSON contract consumed by the waybar, noctalia,
 // dms, and macOS widgets — it makes no daemon or Go changes. It polls
-// `agentwatch widget-json` on a timer, parses the single JSON line, and maps the
+// `cenci widget-json` on a timer, parses the single JSON line, and maps the
 // `class` field to an icon + color. Empty stdout, a non-zero exit, or
 // `alt: "none"` all mean "hide the indicator" — `alt` (not `class`) is the
 // module's hide/show contract, since `class` stays "none" for the
@@ -35,9 +35,9 @@ function iconForClass(c) {
     return ICON_FOR_CLASS[c] || 'face-smile-symbolic';
 }
 
-// Color lives in stylesheet.css as `.agentwatch-<class>`; GNOME auto-loads it.
+// Color lives in stylesheet.css as `.cenci-<class>`; GNOME auto-loads it.
 function styleClassForClass(c) {
-    return `agentwatch-icon agentwatch-${c || 'idle'}`;
+    return `cenci-icon cenci-${c || 'idle'}`;
 }
 
 // Each tooltip line ends with its own "(status)" — extract it so a need-input
@@ -85,7 +85,7 @@ class AgentWatchIndicator extends PanelMenu.Button {
         this.add_child(this._box);
     }
 
-    // updateFromJSON consumes one line of `agentwatch widget-json` output.
+    // updateFromJSON consumes one line of `cenci widget-json` output.
     updateFromJSON(stdout) {
         const out = (stdout || '').trim();
         if (!out) {
@@ -154,7 +154,7 @@ class AgentWatchIndicator extends PanelMenu.Button {
             const body = line.replace(/\s*\([a-z-]+\)\s*$/, '');
             const item = new PopupMenu.PopupImageMenuItem(
                 body, iconForClass(status), {reactive: false});
-            item._icon.add_style_class_name(`agentwatch-${status}`);
+            item._icon.add_style_class_name(`cenci-${status}`);
             this.menu.addMenuItem(item);
         }
 
@@ -165,7 +165,7 @@ class AgentWatchIndicator extends PanelMenu.Button {
             const pct = headroomPercent(headroom[agent]);
             const item = new PopupMenu.PopupMenuItem(
                 `${agent} ${pct}%`, {reactive: false});
-            item.label.add_style_class_name(`agentwatch-headroom-${headroomClass(pct)}`);
+            item.label.add_style_class_name(`cenci-headroom-${headroomClass(pct)}`);
             this.menu.addMenuItem(item);
         }
     }
