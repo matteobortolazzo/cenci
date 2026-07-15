@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.cenci"
+          path="/org/gnome/shell/extensions/cenci/">
+    <key name="poll-interval-ms" type="i">
+      <default>2000</default>
+      <range min="250" max="60000"/>
+      <summary>Poll interval (ms)</summary>
+      <description>How often to run "cenci widget-json".</description>
+    </key>
+    <key name="cenci-path" type="s">
+      <default>'cenci'</default>
+      <summary>cenci binary path</summary>
+      <description>Path or command name for the cenci binary. Use an absolute path if it is not on the GNOME session PATH.</description>
+    </key>
+  </schema>
+</schemalist>

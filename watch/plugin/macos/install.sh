@@ -22,14 +22,14 @@ if [ ! -d /Applications/SwiftBar.app ]; then
 fi
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-SCRIPT="$DIR/agentwatch.5s.sh"
+SCRIPT="$DIR/cenci.5s.sh"
 
 EXISTING_DIR="$(defaults read com.ameba.SwiftBar PluginDirectory 2>/dev/null || true)"
 PLUGIN_DIR="${1:-${SWIFTBAR_PLUGIN_DIR:-${EXISTING_DIR:-$HOME/SwiftBarPlugins}}}"
 
 mkdir -p "$PLUGIN_DIR"
 chmod +x "$SCRIPT"
-ln -sf "$SCRIPT" "$PLUGIN_DIR/agentwatch.5s.sh"
+ln -sf "$SCRIPT" "$PLUGIN_DIR/cenci.5s.sh"
 
 CHANGED_DEFAULT=0
 if [ "$EXISTING_DIR" != "$PLUGIN_DIR" ]; then
@@ -38,7 +38,7 @@ if [ "$EXISTING_DIR" != "$PLUGIN_DIR" ]; then
 fi
 
 echo "Plugin Folder: $PLUGIN_DIR"
-echo "Symlinked:     $PLUGIN_DIR/agentwatch.5s.sh -> $SCRIPT"
+echo "Symlinked:     $PLUGIN_DIR/cenci.5s.sh -> $SCRIPT"
 
 # Reload so the (possibly new) Plugin Folder and symlink take effect now,
 # instead of waiting for the next SwiftBar launch. `open` right after `killall`
@@ -56,4 +56,4 @@ open -a SwiftBar
 if [ "$CHANGED_DEFAULT" -eq 1 ]; then
   echo "Set SwiftBar's Plugin Folder (previously $([ -n "$EXISTING_DIR" ] && echo "$EXISTING_DIR" || echo "unset"))."
 fi
-echo "Done. AgentWatch should appear in the menu bar once a session is live."
+echo "Done. Cenci should appear in the menu bar once a session is live."

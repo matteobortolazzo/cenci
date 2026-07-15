@@ -251,7 +251,7 @@ func formatLastRunTime(rfc3339 string) string {
 // Invariant: agent keys are currently a fixed claude/codex whitelist from
 // local config, not attacker/session-controllable — if that ever becomes
 // dynamic/user-derived, re-check this (and the JXA mirror in
-// agentwatch.5s.sh) for injection into downstream rendering.
+// cenci.5s.sh) for injection into downstream rendering.
 func formatHeadroom(headroom map[string]float64) string {
 	keys := make([]string, 0, len(headroom))
 	for k := range headroom {
@@ -278,7 +278,7 @@ func headroomPercent(frac float64) int {
 // Not called from Format(): per the plan's Q&A, waybar renders headroom as
 // plain-text percentages only (no Pango markup, so no in-text coloring is
 // possible there) — see formatHeadroom. Threshold coloring is a SwiftBar-only
-// concern (colorForHeadroom in agentwatch.5s.sh), and JXA cannot call into Go,
+// concern (colorForHeadroom in cenci.5s.sh), and JXA cannot call into Go,
 // so that JS mirrors this logic rather than sharing it. This function exists
 // as the canonical, independently-tested definition of the threshold rule
 // (see TestHeadroomClass_Boundaries) that the JXA implementation is kept in

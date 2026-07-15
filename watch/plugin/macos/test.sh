@@ -7,7 +7,7 @@
 set -uo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-PLUGIN="$DIR/agentwatch.5s.sh"
+PLUGIN="$DIR/cenci.5s.sh"
 
 if ! command -v osascript >/dev/null 2>&1; then
   echo "SKIP - osascript not found (macOS-only test)"

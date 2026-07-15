@@ -10,8 +10,8 @@ Item {
 
   readonly property int pollIntervalMs: pluginApi?.pluginSettings.pollIntervalMs
     || pluginApi?.manifest?.metadata?.defaultSettings?.pollIntervalMs || 2000
-  readonly property string agentwatchPath: pluginApi?.pluginSettings.agentwatchPath
-    || pluginApi?.manifest?.metadata?.defaultSettings?.agentwatchPath || "cenci"
+  readonly property string cenciPath: pluginApi?.pluginSettings.cenciPath
+    || pluginApi?.manifest?.metadata?.defaultSettings?.cenciPath || "cenci"
 
   property string text: ""
   property string tooltip: ""
@@ -35,7 +35,7 @@ Item {
 
   Process {
     id: poll
-    command: ["sh", "-c", root.agentwatchPath + " waybar"]
+    command: ["sh", "-c", root.cenciPath + " waybar"]
 
     stdout: StdioCollector {
       onStreamFinished: {
@@ -54,7 +54,7 @@ Item {
           root.hasOutput = root.cssAlt !== "none"
           root.headroom = j.headroom || {}
         } catch (e) {
-          Logger.e("AgentWatch", "parse error:", e, out)
+          Logger.e("Cenci", "parse error:", e, out)
           root.hasOutput = false
           root.headroom = {}
         }

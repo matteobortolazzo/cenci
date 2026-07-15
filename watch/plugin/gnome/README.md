@@ -1,33 +1,33 @@
-# AgentWatch — GNOME Shell extension
+# Cenci — GNOME Shell extension
 
 Live counts of Claude Code and Codex agent sessions in the GNOME Shell top bar
-(Ubuntu's default desktop). Polls `agentwatch widget-json` and renders the snapshot —
+(Ubuntu's default desktop). Polls `cenci widget-json` and renders the snapshot —
 a read-only frontend over the same Waybar JSON contract as the waybar, noctalia,
 dms, and macOS widgets. No daemon or Go changes.
 
 ## Requirements
 
 - GNOME Shell **45 or newer** (Ubuntu 23.10+). Older shells are not supported.
-- [agentwatch](https://github.com/matteobortolazzo/agent-stack/tree/main/agentwatch)
+- [cenci](https://github.com/matteobortolazzo/cenci/tree/main/watch)
   daemon running on your tmux server.
-- The `agentwatch` binary reachable by the extension — either on the GNOME
+- The `cenci` binary reachable by the extension — either on the GNOME
   session `PATH`, or set its absolute path in the extension's preferences.
 
 ## Install
 
 The [one-command installer](../../README.md#installation) auto-detects GNOME
-Shell and wires this widget up for you (on both install and `agent-stack
+Shell and wires this widget up for you (on both install and `cenci
 update`). To do it directly — from the marketplace checkout or a repo checkout:
 
 ```sh
-~/.claude/plugins/marketplaces/agent-stack/agentwatch/plugin/gnome/install.sh
-# from a repo checkout, inside agentwatch/: ./plugin/gnome/install.sh
+~/.claude/plugins/marketplaces/cenci/watch/plugin/gnome/install.sh
+# from a repo checkout, inside watch/: ./plugin/gnome/install.sh
 ```
 
 It **copies** this widget into `~/.local/share/gnome-shell/extensions/<UUID>` (a
 copy, not a symlink, so the generated `gschemas.compiled` never dirties the git
 checkout), compiles the schema, and live-reloads the extension via the
-disable→enable toggle. It's idempotent — re-run after any `agentwatch` update.
+disable→enable toggle. It's idempotent — re-run after any `cenci` update.
 A brand-new extension dir still needs one Shell reload (X11 <kbd>Alt</kbd>+<kbd>F2</kbd>,
 `r`) or relogin (Wayland) the first time, which the script tells you about.
 
@@ -37,7 +37,7 @@ Symlink this directory into the per-user extensions folder under its UUID, then
 compile the settings schema:
 
 ```sh
-UUID="agentwatch@matteobortolazzo.github.io"
+UUID="cenci@matteobortolazzo.github.io"
 ln -s "$PWD/plugin/gnome" ~/.local/share/gnome-shell/extensions/"$UUID"
 glib-compile-schemas ~/.local/share/gnome-shell/extensions/"$UUID"/schemas
 ```
@@ -59,7 +59,7 @@ gnome-extensions enable "$UUID"
 ## Behavior
 
 - Polls every `poll-interval-ms` (default 2000 ms).
-- Hides the indicator when agentwatch reports `alt: "none"` (no sessions and the
+- Hides the indicator when cenci reports `alt: "none"` (no sessions and the
   fleet dispatch loop is disabled/absent), or the daemon is down (non-zero exit).
 - Panel shows a status icon + the count string (`▶ 2  ! 1`). The icon color
   reflects the highest-priority status:
@@ -76,12 +76,12 @@ gnome-extensions enable "$UUID"
 
 | Key | Default | Notes |
 |---|---|---|
-| `poll-interval-ms` | `2000` | How often to run `agentwatch widget-json` (250–60000). |
-| `agentwatch-path` | `agentwatch` | Path or command name for the binary. Use an **absolute path** if it is not on the GNOME session PATH. |
+| `poll-interval-ms` | `2000` | How often to run `cenci widget-json` (250–60000). |
+| `cenci-path` | `cenci` | Path or command name for the binary. Use an **absolute path** if it is not on the GNOME session PATH. |
 
 ## Troubleshooting
 
-- **Indicator never appears**: run `agentwatch widget-json` in a terminal. If it
+- **Indicator never appears**: run `cenci widget-json` in a terminal. If it
   prints JSON, the daemon is fine — set the absolute binary path in preferences,
   since the GNOME session PATH under Wayland is often minimal. If it prints
   nothing, no sessions are live (start a Claude Code / Codex tmux pane).
@@ -92,5 +92,5 @@ gnome-extensions enable "$UUID"
 
 ## Test
 
-`./test.sh` — a drift check that fails if `agentwatch widget-json` gains a status
+`./test.sh` — a drift check that fails if `cenci widget-json` gains a status
 class that `extension.js` doesn't map. It does not launch GNOME Shell.

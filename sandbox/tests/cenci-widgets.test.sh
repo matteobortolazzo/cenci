@@ -9,8 +9,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
 
-GNOME_UUID="agentwatch@matteobortolazzo.github.io"
-PLASMA_ID="com.github.matteobortolazzo.agentwatch"
+GNOME_UUID="cenci@matteobortolazzo.github.io"
+PLASMA_ID="com.github.matteobortolazzo.cenci"
 
 # link_tools <bin> — real coreutils the installer + widget scripts need, plus
 # neutralized docker/curl/sudo and a no-op logging pkill (so widget reloads that
@@ -126,11 +126,11 @@ assert_log "${CALLS}" "gnome-extensions enable"
     fail "plasma plasmoid symlink missing"
 assert_log "${CALLS}" "kstart plasmashell"
 # dms: symlinked, service restarted.
-[[ -L "${HOME_DIR}/.config/DankMaterialShell/plugins/agentwatch" ]] ||
+[[ -L "${HOME_DIR}/.config/DankMaterialShell/plugins/cenci" ]] ||
     fail "dms plugin symlink missing"
 assert_log "${CALLS}" "systemctl --user restart dms"
 # noctalia: symlinked, shell respawned.
-[[ -L "${HOME_DIR}/.config/noctalia/plugins/agentwatch" ]] ||
+[[ -L "${HOME_DIR}/.config/noctalia/plugins/cenci" ]] ||
     fail "noctalia plugin symlink missing"
 assert_log "${CALLS}" "qs -c noctalia-shell"
 echo "  ok: all four widgets installed and reloaded"
@@ -163,9 +163,9 @@ sleep 0.2
     fail "plasma widget should have been installed"
 [[ ! -e "${H2}/.local/share/gnome-shell/extensions/${GNOME_UUID}" ]] ||
     fail "gnome widget installed without gnome present"
-[[ ! -e "${H2}/.config/DankMaterialShell/plugins/agentwatch" ]] ||
+[[ ! -e "${H2}/.config/DankMaterialShell/plugins/cenci" ]] ||
     fail "dms widget installed without dms present"
-[[ ! -e "${H2}/.config/noctalia/plugins/agentwatch" ]] ||
+[[ ! -e "${H2}/.config/noctalia/plugins/cenci" ]] ||
     fail "noctalia widget installed without noctalia present"
 assert_no_log "${C2}" "gnome-extensions"
 assert_no_log "${C2}" "systemctl --user restart dms"
@@ -189,9 +189,9 @@ assert_out "${O3}" "pkill -SIGUSR2 waybar"
     fail "waybar path wrote a gnome widget"
 [[ ! -e "${H3}/.local/share/plasma/plasmoids/${PLASMA_ID}" ]] ||
     fail "waybar path wrote a plasma widget"
-[[ ! -e "${H3}/.config/DankMaterialShell/plugins/agentwatch" ]] ||
+[[ ! -e "${H3}/.config/DankMaterialShell/plugins/cenci" ]] ||
     fail "waybar path wrote a dms widget"
-[[ ! -e "${H3}/.config/noctalia/plugins/agentwatch" ]] ||
+[[ ! -e "${H3}/.config/noctalia/plugins/cenci" ]] ||
     fail "waybar path wrote a noctalia widget"
 assert_no_log "${C3}" "waybar reload"
 echo "  ok: waybar guidance printed, nothing installed"

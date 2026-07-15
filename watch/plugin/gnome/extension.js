@@ -1,4 +1,4 @@
-// AgentWatch — GNOME Shell extension (GNOME 45+, ESM).
+// Cenci — GNOME Shell extension (GNOME 45+, ESM).
 //
 // Live Claude Code / Codex session counts in the top bar. This is a read-only
 // frontend over the same Waybar JSON contract consumed by the waybar, noctalia,
@@ -55,7 +55,7 @@ function headroomPercent(frac) {
 
 // headroomClass returns the threshold class for a headroom percentage:
 // >25% normal, 10-25% (inclusive) warning, <10% critical. Verbatim port of
-// headroomClass in status.go / colorForHeadroom in agentwatch.5s.sh.
+// headroomClass in status.go / colorForHeadroom in cenci.5s.sh.
 function headroomClass(pct) {
     if (pct > 25)
         return 'normal';
@@ -64,10 +64,10 @@ function headroomClass(pct) {
     return 'critical';
 }
 
-const AgentWatchIndicator = GObject.registerClass(
-class AgentWatchIndicator extends PanelMenu.Button {
+const CenciIndicator = GObject.registerClass(
+class CenciIndicator extends PanelMenu.Button {
     _init() {
-        super._init(0.0, 'AgentWatch');
+        super._init(0.0, 'Cenci');
 
         this._box = new St.BoxLayout({style_class: 'panel-status-menu-box'});
         this._icon = new St.Icon({
@@ -171,12 +171,12 @@ class AgentWatchIndicator extends PanelMenu.Button {
     }
 });
 
-export default class AgentWatchExtension extends Extension {
+export default class CenciExtension extends Extension {
     enable() {
         this._settings = this.getSettings();
         this._cancellable = new Gio.Cancellable();
 
-        this._indicator = new AgentWatchIndicator();
+        this._indicator = new CenciIndicator();
         this._indicator.visible = false;
         Main.panel.addToStatusArea(this.uuid, this._indicator);
 
@@ -230,7 +230,7 @@ export default class AgentWatchExtension extends Extension {
     }
 
     _poll() {
-        const path = this._settings.get_string('agentwatch-path') || 'cenci';
+        const path = this._settings.get_string('cenci-path') || 'cenci';
         let proc;
         try {
             proc = Gio.Subprocess.new(

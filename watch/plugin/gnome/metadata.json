@@ -1,15 +1,15 @@
 {
-  "uuid": "agentwatch@matteobortolazzo.github.io",
-  "name": "AgentWatch",
-  "description": "Live counts of Claude Code and Codex agent sessions in the GNOME Shell top bar, via the agentwatch daemon. Read-only consumer of `agentwatch widget-json`.",
+  "uuid": "cenci@matteobortolazzo.github.io",
+  "name": "Cenci",
+  "description": "Live counts of Claude Code and Codex agent sessions in the GNOME Shell top bar, via the cenci daemon. Read-only consumer of `cenci widget-json`.",
   "shell-version": [
     "45",
     "46",
     "47",
     "48"
   ],
-  "url": "https://github.com/matteobortolazzo/agent-stack/tree/main/agentwatch",
-  "settings-schema": "org.gnome.shell.extensions.agentwatch",
+  "url": "https://github.com/matteobortolazzo/cenci/tree/main/watch",
+  "settings-schema": "org.gnome.shell.extensions.cenci",
   "version": 1,
   "version-name": "4.5.0"
 }

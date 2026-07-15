@@ -2,14 +2,14 @@
   "KPackageStructure": "Plasma/Applet",
   "X-Plasma-API-Minimum-Version": "6.0",
   "KPlugin": {
-    "Id": "com.github.matteobortolazzo.agentwatch",
-    "Name": "AgentWatch",
-    "Description": "Live counts of Claude Code and Codex agent sessions in the Plasma panel, via the agentwatch daemon.",
+    "Id": "com.github.matteobortolazzo.cenci",
+    "Name": "Cenci",
+    "Description": "Live counts of Claude Code and Codex agent sessions in the Plasma panel, via the cenci daemon.",
     "Icon": "utilities-terminal",
     "Category": "System Information",
     "License": "MIT",
     "Version": "4.5.0",
-    "Website": "https://github.com/matteobortolazzo/agent-stack",
+    "Website": "https://github.com/matteobortolazzo/cenci",
     "Authors": [
       {
         "Name": "Matteo Bortolazzo"

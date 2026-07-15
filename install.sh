@@ -751,7 +751,7 @@ setup_cenci_linux_path() {
 	else
 		say "  ${DIM}skipped the GUI-bar PATH link. If a bar widget stays hidden, run:${RESET}"
 		say "      $manual"
-		say "  ${DIM}or point the widget at the binary directly (agentwatchPath for DMS/noctalia, CENCI_BIN for SwiftBar).${RESET}"
+		say "  ${DIM}or point the widget at the binary directly (cenciPath for DMS/noctalia, CENCI_BIN for SwiftBar).${RESET}"
 	fi
 }
 
