@@ -28,6 +28,11 @@ Host-runnable installer suites (mock PATH + fake HOME, no container needed):
 bash sandbox/tests/install-update.test.sh        # daemon restart on update
 bash sandbox/tests/installer-clients.test.sh     # client detection + launchers
 bash sandbox/tests/cenci-widgets.test.sh         # GUI bar-widget detect/install/reload
+bash sandbox/tests/settings-merge.test.sh        # lib/migrate-settings.sh deep-merge behavior
+bash sandbox/tests/seed-auth.test.sh             # lib/seed-auth.sh credential seeding
+bash sandbox/tests/codex-config.test.sh          # lib/codex-config.sh config generation
+bash sandbox/tests/fragments-drift.test.sh       # Dockerfile vs fragments/*.dockerfile byte-parity
+bash sandbox/tests/heal-plugins.test.sh          # plugin self-heal (Write->Edit allow conversion)
 ```
 
 The launcher-behavior suites live with the launcher code in `watch/`: Go
@@ -54,6 +59,8 @@ black-box tests in `watch/sandbox_open_test.go` plus the reap contract suite
 - **Under `pipefail`, a terminal-stage filter or loop that always succeeds masks upstream failures.** Pipelines ending with `grep ... || true` or `while read` (both always exit 0) will hide real failures from earlier stages — e.g., `docker ps` failing silently appears as "nothing found." Always capture command output into a variable and check that command's exit status explicitly before filtering or looping on the captured value.
 
 - **When a function is used as the condition of `if`/`while`, bash suspends `set -e` for its entire body.** This calling-convention gotcha means every command inside such a function whose failure matters must have its exit status explicitly captured and checked — do not rely on `set -e` to catch downstream failures. This differs from `pipefail` masking: it's about errexit suspension via calling convention, not pipeline status computation. Sibling instances of the same error pattern in a function (e.g., multiple `kill` escalations) may not all be caught in a single review pass—systematically sweep the entire function body for the same pattern when fixing one instance.
+
+- **Host-runnable test harnesses that shell out via a mock PATH must scrub the subprocess environment.** Launch the mocked commands with `env -i HOME=... PATH=... <only the vars the test needs>=...` rather than inheriting the runner's ambient environment — otherwise host secrets (AWS keys, tokens) leak into the subprocess. Pair the scrub with a sentinel-secret regression assertion (set a fake secret only in the test's own env, then assert it never appears in captured calls or output) to prove the scrub actually excludes host secrets, not just that the test passes (#363).
 
 ## Image architecture: base + fragments
 `Dockerfile.base` builds the stack-agnostic `cenci-sandbox-base:<content-hash>` image
