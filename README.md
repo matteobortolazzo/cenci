@@ -189,6 +189,11 @@ New → Refined → [Designed] → Planned → Working → In Review → Impleme
 - [Contributing](CONTRIBUTING.md) — development workflow
 - [Migrating from agent-stack](docs/migrating-to-cenci.md) — old→new names for anyone upgrading from a pre-rename install
 
+## Name
+
+Roberto Cenci is an Italian TV director known for calling out camera numbers live
+during broadcasts, switching between feeds. Coordinating agents felt the same way.
+
 ## License
 
 MIT
