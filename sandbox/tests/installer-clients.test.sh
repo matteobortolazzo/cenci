@@ -41,6 +41,11 @@ make_claude() {
     cat > "${bin}/claude" <<'EOF'
 #!/bin/sh
 printf 'claude %s\n' "$*" >>"${CALLS_FILE}"
+# Regression probe (#353): if a host secret survives into this subprocess's
+# environment, surface it in the captured calls so the sentinel-secret case
+# can prove this test harness's env -i scrub keeps host secrets out.
+[ -n "${OPENAI_API_KEY:-}" ] && printf 'env-leak OPENAI_API_KEY=%s\n' "${OPENAI_API_KEY}" >>"${CALLS_FILE}"
+[ -n "${CONTEXT7_API_KEY:-}" ] && printf 'env-leak CONTEXT7_API_KEY=%s\n' "${CONTEXT7_API_KEY}" >>"${CALLS_FILE}"
 case "$*" in
   "plugin marketplace list") [ -f "${CLAUDE_MARKETPLACE_FILE}" ] && echo cenci; exit 0 ;;
   "plugin marketplace add "*) touch "${CLAUDE_MARKETPLACE_FILE}"; exit 0 ;;
@@ -125,7 +130,7 @@ run_case() {
     esac
 
     set +e
-    HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
+    env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
         CLAUDE_MARKETPLACE_FILE="${case_dir}/claude-marketplace" \
         CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
         CODEX_MARKETPLACE_FILE="${case_dir}/codex-marketplace" \
@@ -144,7 +149,7 @@ run_doctor_case() {
     run_case "${name}" "${clients}"
     local bin="${WORK}/${name}/bin" output="${WORK}/${name}/doctor-output"
     set +e
-    HOME="${CASE_HOME}" PATH="${bin}" CALLS_FILE="${CASE_CALLS}" \
+    env -i HOME="${CASE_HOME}" PATH="${bin}" CALLS_FILE="${CASE_CALLS}" \
         CLAUDE_MARKETPLACE_FILE="${WORK}/${name}/claude-marketplace" \
         CLAUDE_INSTALLED_FILE="${WORK}/${name}/claude-installed" \
         CODEX_MARKETPLACE_FILE="${WORK}/${name}/codex-marketplace" \
@@ -272,7 +277,7 @@ make_codex "${bin}"
 prepare_checkout "${home}" claude
 touch "${case_dir}/claude-marketplace" "${case_dir}/codex-marketplace"
 set +e
-HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
+env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
     CLAUDE_MARKETPLACE_FILE="${case_dir}/claude-marketplace" \
     CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
     CODEX_MARKETPLACE_FILE="${case_dir}/codex-marketplace" \
@@ -319,5 +324,16 @@ echo "case: doctor fails when no supported client is available"
 run_doctor_case doctor-none none
 [[ "${DOCTOR_EXIT}" -ne 0 ]]
 assert_contains "${DOCTOR_OUTPUT}" "no supported client"
+
+echo "case: host secrets in the parent env never reach captured calls or output (regression, #353)"
+export OPENAI_API_KEY="sk-test-sentinel-should-not-leak"
+export CONTEXT7_API_KEY="ctx7-test-sentinel-should-not-leak"
+run_case sentinel-secrets claude
+unset OPENAI_API_KEY CONTEXT7_API_KEY
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_not_contains "${CASE_CALLS}" "sk-test-sentinel-should-not-leak"
+assert_not_contains "${CASE_OUTPUT}" "sk-test-sentinel-should-not-leak"
+assert_not_contains "${CASE_CALLS}" "ctx7-test-sentinel-should-not-leak"
+assert_not_contains "${CASE_OUTPUT}" "ctx7-test-sentinel-should-not-leak"
 
 echo "passed: client detection, installation, launchers, and summaries"

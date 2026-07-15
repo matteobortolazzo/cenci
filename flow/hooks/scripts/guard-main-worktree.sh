@@ -32,7 +32,7 @@ case "$FILE_PATH" in
   # Plan persistence (implement Phase 1)
   */.plans/* | .plans/*) exit 0 ;;
   # Temp paths: body files, context bundles, attachments, scratchpads
-  /tmp/* | /private/tmp/* | /var/folders/* | */cenci/attachments/*) exit 0 ;;
+  /tmp/* | /private/tmp/* | /var/folders/* | */cenci-attachments-*/*) exit 0 ;;
   # cenci-managed config, settings, rules, and lessons
   */.claude/* | .claude/*) exit 0 ;;
   # Design artifacts live in the main worktree by design (/cenci:design)

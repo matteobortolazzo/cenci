@@ -48,6 +48,11 @@ make_claude() {
     local bin="$1"
     cat >"${bin}/claude" <<'EOF'
 #!/bin/sh
+# Regression probe (#353): if a host secret survives into this subprocess's
+# environment, surface it in the captured calls so the sentinel-secret case
+# can prove this test harness's env -i scrub keeps host secrets out.
+[ -n "${OPENAI_API_KEY:-}" ] && printf 'env-leak OPENAI_API_KEY=%s\n' "${OPENAI_API_KEY}" >>"${WIDGET_CALLS}"
+[ -n "${CONTEXT7_API_KEY:-}" ] && printf 'env-leak CONTEXT7_API_KEY=%s\n' "${CONTEXT7_API_KEY}" >>"${WIDGET_CALLS}"
 case "$*" in
   "plugin marketplace list") echo cenci ;;
   "plugin list") echo 'cenci-watch@cenci' ;;
@@ -84,7 +89,7 @@ run_install() {
     local home="$1" bin="$2" calls="$3" out="$4"
     shift 4
     set +e
-    HOME="${home}" PATH="${bin}" WIDGET_CALLS="${calls}" \
+    env -i HOME="${home}" PATH="${bin}" WIDGET_CALLS="${calls}" \
         bash "${ROOT}/install.sh" "$@" >"${out}" 2>&1
     local rc=$?
     set -e
@@ -195,5 +200,24 @@ assert_out "${O3}" "pkill -SIGUSR2 waybar"
     fail "waybar path wrote a noctalia widget"
 assert_no_log "${C3}" "waybar reload"
 echo "  ok: waybar guidance printed, nothing installed"
+
+# ---------------------------------------------------------------------------
+echo "case: host secrets in the parent env never reach captured calls or output (regression, #353)"
+CASE4="${WORK}/sentinel"; H4="${CASE4}/home"; B4="${CASE4}/bin"
+C4="${CASE4}/calls"; O4="${CASE4}/out"
+mkdir -p "${H4}" "${B4}"; : >"${C4}"
+link_tools "${B4}"
+make_claude "${B4}"
+prepare_checkout "${H4}"
+export OPENAI_API_KEY="sk-test-sentinel-should-not-leak"
+export CONTEXT7_API_KEY="ctx7-test-sentinel-should-not-leak"
+run_install "${H4}" "${B4}" "${C4}" "${O4}" --yes --no-build ||
+    fail "install (sentinel) exited non-zero"
+unset OPENAI_API_KEY CONTEXT7_API_KEY
+assert_no_log "${C4}" "sk-test-sentinel-should-not-leak"
+assert_no_log "${C4}" "ctx7-test-sentinel-should-not-leak"
+assert_no_log "${O4}" "sk-test-sentinel-should-not-leak"
+assert_no_log "${O4}" "ctx7-test-sentinel-should-not-leak"
+echo "  ok: sentinel secrets never leaked into captured calls or output"
 
 echo "passed: GUI bar-widget detection, install, reload, and update"

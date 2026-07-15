@@ -20,6 +20,7 @@ Each project has its own `CLAUDE.md` with project-specific context.
 - ALWAYS work in a git worktree — for any change (code, docs, config), not just feature work. Never modify files in the main worktree.
 - Deliver every change as a PR unless told otherwise: commit in the worktree, push the branch, open a PR. Never commit directly to main.
 - Refactor phases must not override decisions the approved plan explicitly reasoned about — if renaming, reorganizing, or restructuring something the plan called out directly, that plan reasoning is binding unless refactoring reveals a fundamental error.
+- Never use unchecked command substitution for security-critical paths (especially temp directories and config files) — explicitly verify command success before use; unchecked failures silently collapse to root-relative paths and undermine hardening.
 
 ## Build & Test
 
