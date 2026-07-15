@@ -59,7 +59,8 @@ jobs:
       # below (the commit that triggered this run) — by the time a queued
       # run executes, main may already be ahead due to an earlier run in
       # this same concurrency group.
-      - uses: actions/checkout@v7
+      - name: Checkout main
+        uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 0
