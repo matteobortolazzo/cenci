@@ -16,7 +16,9 @@
 # by /cenci:configure) is the canonical signal. In unconfigured repos this
 # guard must be a no-op: the plugin is installed globally, but the worktree
 # workflow only applies where the user opted in.
-ROOT=$(git -C "$(pwd)" rev-parse --show-toplevel 2>/dev/null) || ROOT=$(pwd)
+if ! ROOT=$(git -C "$(pwd)" rev-parse --show-toplevel 2>/dev/null); then
+  exit 0
+fi
 [ -f "$ROOT/.claude/config.json" ] || exit 0
 
 INPUT=$(cat)
