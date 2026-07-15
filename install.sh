@@ -151,6 +151,40 @@ codex_marketplace_registered() {
 		grep -Eq "^${MARKETPLACE_NAME}[[:space:]]"
 }
 
+# installed_plugin_version <claude|codex> <plugin> — version of the newest
+# version-pinned cache entry for <plugin> (the cache directory is named after
+# the version). Prints nothing when no cache entry exists, e.g. before the
+# plugin's first install or on older CLIs without a version-pinned cache.
+installed_plugin_version() {
+	local client="$1" plugin="$2" newest="" manifest root
+	for manifest in "$HOME/.$client/plugins/cache"/*/"$plugin"/*/".$client-plugin"/plugin.json; do
+		[ -f "$manifest" ] || continue
+		if [ -z "$newest" ] || [ "$manifest" -nt "$newest" ]; then
+			newest="$manifest"
+		fi
+	done
+	[ -n "$newest" ] || return 0
+	root="${newest%/*/*}"
+	printf '%s\n' "${root##*/}"
+}
+
+# ok_updated <label> <plugin> <old-version> <new-version> — success line for a
+# plugin update, showing the version transition when the version-pinned cache
+# reveals it ("1.2.3 → 1.2.4", or "(already up to date)" when nothing new was
+# pulled). Falls back to the plain wording when no version is known.
+ok_updated() {
+	local label="$1" plugin="$2" old="$3" new="$4"
+	if [ -n "$old" ] && [ -n "$new" ] && [ "$old" != "$new" ]; then
+		ok "$label: $plugin $old → $new"
+	elif [ -n "$new" ] && [ "$old" = "$new" ]; then
+		ok "$label: $plugin $new (already up to date)"
+	elif [ -n "$new" ]; then
+		ok "$label: $plugin updated to $new"
+	else
+		ok "$label: $plugin updated"
+	fi
+}
+
 # find_plugin_path <relative-path> — resolve a file inside the installed
 # marketplace checkout (stable across plugin updates), falling back to the
 # versioned plugin cache.
@@ -425,6 +459,7 @@ step_install_plugins() {
 }
 
 step_update_plugins() {
+	local p old
 	step "Updating plugins"
 	if [ "$HAS_CLAUDE" -eq 1 ]; then
 		claude plugin marketplace update "$MARKETPLACE_NAME" >/dev/null 2>&1 || true
@@ -433,8 +468,9 @@ step_update_plugins() {
 				warn "Claude: $p is not installed — skipping (run './install.sh' to install it)"
 				continue
 			fi
+			old="$(installed_plugin_version claude "$p")"
 			if plugin_cmd update "$p"; then
-				ok "Claude: $p updated"
+				ok_updated "Claude" "$p" "$old" "$(installed_plugin_version claude "$p")"
 			else
 				fail "Claude: $p failed to update. Run manually: claude plugin update $p@$MARKETPLACE_NAME"
 				INSTALL_FAILED=1
@@ -459,8 +495,9 @@ step_update_plugins() {
 		fi
 		# `plugin add` is idempotent and refreshes the installed cache from the
 		# newly upgraded marketplace snapshot.
+		old="$(installed_plugin_version codex "$p")"
 		if codex plugin add "$p@$MARKETPLACE_NAME" >/dev/null 2>&1; then
-			ok "Codex: $p updated"
+			ok_updated "Codex" "$p" "$old" "$(installed_plugin_version codex "$p")"
 		else
 			fail "Codex: $p failed to update. Run manually: codex plugin add $p@$MARKETPLACE_NAME"
 			INSTALL_FAILED=1
