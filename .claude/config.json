@@ -46,6 +46,6 @@
   "pinSubagents200K": true,
   "sandbox": {
     "enabled": true,
-    "baseVersion": "0.9.1"
+    "baseVersion": "1.0.2"
   }
 }
