@@ -2,7 +2,7 @@
   "id": "cenci",
   "name": "Cenci",
   "description": "Live counts of Claude Code and Codex tmux sessions (running / need-input / done / stopped / idle).",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "author": "Matteo Bortolazzo",
   "type": "widget",
   "capabilities": [
