@@ -4,7 +4,7 @@
 
 ## Plugin(s) touched
 
-<!-- agentflow / agentwatch / agent-sandbox / repo-wide (docs, CI, etc.) -->
+<!-- cenci / cenci-watch / cenci-sandbox / repo-wide (docs, CI, etc.) -->
 
 ## Commit title reminder
 

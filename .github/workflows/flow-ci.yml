@@ -1,0 +1,41 @@
+name: flow — CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: flow-changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      flow: ${{ steps.filter.outputs.flow }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            flow:
+              - 'flow/**'
+              - '.github/workflows/flow-ci.yml'
+
+  test:
+    name: flow-test
+    needs: changes
+    if: ${{ needs.changes.outputs.flow == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate flow JSON
+        run: find flow -name '*.json' -print0 | xargs -0 -n1 jq empty
+      - name: Verify Codex hook isolation
+        run: bash flow/codex/hooks.test.sh

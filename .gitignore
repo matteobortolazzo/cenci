@@ -7,8 +7,8 @@
 .env.*
 
 # Go
-agentwatch/agentwatch
-agentwatch/dist/
+watch/cenci
+watch/dist/
 
 # Node
 node_modules/

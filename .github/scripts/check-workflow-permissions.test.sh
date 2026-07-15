@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests for check-workflow-permissions.sh (ticket #226). Follows the repo's
-# shell-test precedent (agentflow/hooks/scripts/guard-main-worktree.test.sh):
+# shell-test precedent (flow/hooks/scripts/guard-main-worktree.test.sh):
 # plain bash, no framework, PASS/FAIL counters, non-zero exit on any failure.
 # Each case builds a fresh throwaway .github/workflows/ fixture tree under
 # one mktemp root and runs the script with cwd set to that tree (the script

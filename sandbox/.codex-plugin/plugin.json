@@ -1,0 +1,35 @@
+{
+  "name": "cenci-sandbox",
+  "version": "0.15.0",
+  "description": "cenci isolation layer: Docker or Podman launcher for Claude Code and Codex.",
+  "author": {
+    "name": "Matteo Bortolazzo",
+    "url": "https://github.com/matteobortolazzo"
+  },
+  "homepage": "https://github.com/matteobortolazzo/cenci/tree/main/sandbox",
+  "repository": "https://github.com/matteobortolazzo/cenci",
+  "license": "MIT",
+  "keywords": [
+    "docker",
+    "podman",
+    "sandbox",
+    "isolation",
+    "container"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Cenci Sandbox",
+    "shortDescription": "cenci container isolation for coding agents.",
+    "longDescription": "The cenci isolation layer launches Claude Code or Codex with full permissions inside a Docker or Podman security boundary.",
+    "developerName": "Matteo Bortolazzo",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive"
+    ],
+    "websiteURL": "https://github.com/matteobortolazzo/cenci/tree/main/sandbox",
+    "defaultPrompt": [
+      "Show the Cenci Sandbox setup and usage guidance."
+    ],
+    "brandColor": "#0F766E"
+  }
+}

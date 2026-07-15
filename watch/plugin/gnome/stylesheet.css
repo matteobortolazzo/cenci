@@ -1,0 +1,38 @@
+/* Cenci — GNOME Shell indicator colors.
+ *
+ * Colors follow the Adwaita / Yaru palette so the indicator reads correctly on
+ * Ubuntu's default light and dark themes. Applied to the panel icon and to each
+ * per-session dropdown icon (see styleClassForClass in extension.js). */
+
+.cenci-failed,
+.cenci-need-input {
+    color: #e01b24; /* red — attention */
+}
+
+.cenci-running {
+    color: #3584e4; /* blue — working */
+}
+
+.cenci-done {
+    color: #2ec27e; /* green — finished */
+}
+
+.cenci-stopped {
+    color: #e66100; /* orange — paused */
+}
+
+.cenci-idle {
+    color: #9a9996; /* grey — muted */
+}
+
+.cenci-headroom-normal {
+    color: #2ec27e; /* green — plenty of budget left */
+}
+
+.cenci-headroom-warning {
+    color: #e66100; /* orange — budget running low */
+}
+
+.cenci-headroom-critical {
+    color: #e01b24; /* red — budget nearly exhausted */
+}

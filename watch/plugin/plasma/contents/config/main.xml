@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kcfg xmlns="http://www.kde.org/standards/kcfg/1.0"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0
+                          http://www.kde.org/standards/kcfg/1.0/kcfg.xsd">
+  <kcfgfile name=""/>
+  <group name="General">
+    <entry name="pollIntervalMs" type="Int">
+      <label>How often to run "cenci widget-json" (ms)</label>
+      <default>2000</default>
+      <min>250</min>
+      <max>60000</max>
+    </entry>
+    <entry name="agentwatchPath" type="String">
+      <label>Path or command name for the cenci binary</label>
+      <default>cenci</default>
+    </entry>
+  </group>
+</kcfg>

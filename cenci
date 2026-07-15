@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Stable front door for installing, updating, and diagnosing cenci.
+# Always fetch the current installer so the updater itself can evolve.
+set -euo pipefail
+
+INSTALLER_URL="https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh"
+
+if ! command -v curl >/dev/null 2>&1; then
+	printf 'Error: curl is required to run cenci.\n' >&2
+	exit 1
+fi
+
+installer="$(mktemp "${TMPDIR:-/tmp}/cenci-install.XXXXXX")"
+
+cleanup() {
+	rm -f "${installer}"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+curl -fsSL "${INSTALLER_URL}" -o "${installer}"
+bash "${installer}" "$@"

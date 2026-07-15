@@ -18,7 +18,7 @@ Install:
 
 Claude Code is required for the complete interactive ticket-to-PR workflow. A
 Codex-only installation still provides container isolation, monitoring, portable
-engineering conventions, and the [Codex implementation recipe](../agentflow/docs/codex.md).
+engineering conventions, and the [Codex implementation recipe](../flow/docs/codex.md).
 
 Optional features have separate dependencies:
 
@@ -90,7 +90,7 @@ In a sandboxed Claude Code session, run once:
 
 This detects the stack, writes project guidance, configures workflow metadata, and can
 generate a reviewed per-repository sandbox image definition. Codex-only users follow
-the [portable project and implementation guidance](../agentflow/docs/codex.md); the
+the [portable project and implementation guidance](../flow/docs/codex.md); the
 interactive configure skill is Claude Code-only.
 
 ## 6. Run a ticket
@@ -105,7 +105,7 @@ After implementation opens the PR, `babysit` checks CI and review feedback
 immediately, then schedules progressively quieter checks until the PR merges or
 closes. It can fix actionable failures and comments while preserving approval gates;
 on merge it performs the final `In Review → Implemented` transition. Babysit is
-currently Claude Code-only. See [Babysitting a PR](../agentflow/README.md#babysitting-a-pr)
+currently Claude Code-only. See [Babysitting a PR](../flow/README.md#babysitting-a-pr)
 for pacing, expiry, and safety details.
 
 The lifecycle is always:
@@ -140,7 +140,7 @@ launchers, and replaces a stale running AgentWatch daemon with the updated binar
 | GitHub operations fail | Install `gh` and run `gh auth login` |
 
 Platform and display-specific troubleshooting lives in the internal layer references:
-[agent-sandbox](../dev-sandbox/README.md) and [agentwatch](../agentwatch/README.md).
+[agent-sandbox](../sandbox/README.md) and [agentwatch](../watch/README.md).
 
 ## Advanced and recovery: standalone installation
 
@@ -161,5 +161,5 @@ codex plugin add agent-sandbox@agent-stack
 
 Then rerun `./install.sh` to restore launchers, AgentWatch wiring, and image setup.
 Optional desktop/menu-bar widgets are configured from the relevant
-[AgentWatch display documentation](../agentwatch/README.md); they are not another
+[AgentWatch display documentation](../watch/README.md); they are not another
 agent-stack install.

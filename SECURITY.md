@@ -2,14 +2,14 @@
 
 ## Threat model
 
-**The container is the security boundary.** [`agent-sandbox`](./dev-sandbox) runs Claude
+**The container is the security boundary.** [`cenci-sandbox`](./sandbox) runs Claude
 Code with `--dangerously-skip-permissions` and Codex with
 `--dangerously-bypass-approvals-and-sandbox` — both agents run fully unattended, with no
 per-command approval prompts. That's only safe because isolation moves from the agent's
 own permission system to the container: the agent can do anything *inside* the
 container, but the container is what stands between it and your host. See
-[`dev-sandbox/CLAUDE.md`](./dev-sandbox/CLAUDE.md) and
-[`dev-sandbox/README.md`](./dev-sandbox/README.md#permission-model) for the full model.
+[`sandbox/CLAUDE.md`](./sandbox/CLAUDE.md) and
+[`sandbox/README.md`](./sandbox/README.md#permission-model) for the full model.
 
 ![The current repository is mounted into a container where the coding agent has full permissions, while the host stays outside the default boundary](docs/assets/agent-sandbox-boundary.svg)
 
@@ -20,7 +20,7 @@ container, but the container is what stands between it and your host. See
   home directory backed by a named volume, not your host `~/`.
 - Host process/credential access — the agent cannot see host processes, host
   environment variables (beyond what's explicitly forwarded), or host files outside the
-  mount points documented in the [dev-sandbox README](./dev-sandbox/README.md#what-persists-home-volume).
+  mount points documented in the [sandbox README](./sandbox/README.md#what-persists-home-volume).
 - Inbound network exposure — the container publishes no inbound ports; network access is
   outbound-only by default.
 
@@ -43,13 +43,13 @@ Both of these are off by default and must be explicitly requested per-launch:
   network isolation from the host for the life of that session. Prefer the default
   (bridged) network and only reach for `--host-network` when a login flow fails without
   it. A louder, more visible warning when this flag is used is tracked in
-  [#148](https://github.com/matteobortolazzo/agent-stack/issues/148) (not yet landed).
+  [#148](https://github.com/matteobortolazzo/cenci/issues/148) (not yet landed).
 - **`--docker`** — mounts the host Docker/Podman socket into the container
   (Docker-outside-of-Docker), for TestContainers, `docker build`, and similar. Any
   container started from inside the sandbox with this flag runs on the **host** daemon,
   with full Docker privileges on the host — this is a meaningfully bigger blast radius
   than the default sandbox and is why it's opt-in. See
-  [dev-sandbox/README.md#docker-optional-opt-in](./dev-sandbox/README.md#docker-optional-opt-in).
+  [sandbox/README.md#docker-optional-opt-in](./sandbox/README.md#docker-optional-opt-in).
 
 ### Credentials
 
@@ -68,9 +68,9 @@ docker volume rm claude-sand-home-<repo-slug>
 docker volume rm codex-sand-home-<repo-slug>
 ```
 
-See [dev-sandbox/README.md#reset-an-instance](./dev-sandbox/README.md#reset-an-instance)
+See [sandbox/README.md#reset-an-instance](./sandbox/README.md#reset-an-instance)
 for the full naming scheme (per-repo slug, `--name` suffix, legacy `-default` volumes).
-`agent-sand --prune` removes superseded base tags, dangling images, and stopped sandbox
+`cenci-sand --prune` removes superseded base tags, dangling images, and stopped sandbox
 containers. Add `--volumes` to list sandbox home volumes and interactively confirm
 their removal; volume deletion defaults to no because it destroys copied credentials
 and session history.
@@ -80,7 +80,7 @@ and session history.
 Email **matteobortolazzo@pm.me** with details — this is the reliable channel today.
 Please include:
 
-- Which layer/plugin is affected (agentflow, agentwatch, agent-sandbox)
+- Which layer/plugin is affected (cenci, cenci-watch, cenci-sandbox)
 - Steps to reproduce, and the impact you believe it has
 - Whether the issue is exploitable from outside the container boundary described above,
   or only from within an already-fully-privileged agent session

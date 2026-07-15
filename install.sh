@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# agent-stack installer — one command for the whole package.
+# cenci installer — one command for the whole package.
 #
-# Installs or updates the three agent-stack plugins (agentflow, agentwatch,
-# agent-sandbox) as a single system: registers the marketplace, installs the
-# plugins, and runs the post-install setup that used to be manual (agent-sandbox
+# Installs or updates the three cenci plugins (cenci, cenci-watch,
+# cenci-sandbox) as a single system: registers the marketplace, installs the
+# plugins, and runs the post-install setup that used to be manual (cenci-sand
 # launcher symlink + image build, macOS menu bar and Linux desktop bar-widget
 # wiring).
 #
 # Usage:
 #   ./install.sh                interactive wizard (install)
-#   agent-stack update          update installed plugins (+ optional rebuild)
-#   agent-stack doctor          check prerequisites, change nothing
+#   cenci-installer update      update installed plugins (+ optional rebuild)
+#   cenci-installer doctor      check prerequisites, change nothing
 #
-#   curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
 #
 # Flags:
 #   --yes                                 accept defaults, never prompt
@@ -21,9 +21,9 @@
 
 set -u
 
-MARKETPLACE_REPO="matteobortolazzo/agent-stack"
-MARKETPLACE_NAME="agent-stack"
-ALL_PLUGINS="agentflow agentwatch agent-sandbox"
+MARKETPLACE_REPO="matteobortolazzo/cenci"
+MARKETPLACE_NAME="cenci"
+ALL_PLUGINS="cenci cenci-watch cenci-sandbox"
 CODEX_MARKETPLACE_READY=0
 CLAUDE_MARKETPLACE_READY=0
 HAS_CLAUDE=0
@@ -80,7 +80,7 @@ detect_platform() {
 	case "$(uname -s)" in
 	Linux) OS=linux ;;
 	Darwin) OS=macos ;;
-	*) die "unsupported OS '$(uname -s)' — agent-stack supports Linux, macOS, and WSL2" ;;
+	*) die "unsupported OS '$(uname -s)' — cenci supports Linux, macOS, and WSL2" ;;
 	esac
 	case "$(uname -m)" in
 	x86_64 | amd64) ARCH=amd64 ;;
@@ -162,19 +162,19 @@ find_plugin_path() {
 		[ -e "$f" ] && { printf '%s\n' "$f"; return 0; }
 	done
 	case "$rel" in
-	dev-sandbox/*)
-		rel=${rel#dev-sandbox/}
+	sandbox/*)
+		rel=${rel#sandbox/}
 		for f in \
-			"$HOME"/.claude/plugins/cache/*/agent-sandbox/*/"$rel" \
-			"$HOME"/.codex/plugins/cache/*/agent-sandbox/*/"$rel"; do
+			"$HOME"/.claude/plugins/cache/*/cenci-sandbox/*/"$rel" \
+			"$HOME"/.codex/plugins/cache/*/cenci-sandbox/*/"$rel"; do
 			[ -e "$f" ] && { printf '%s\n' "$f"; return 0; }
 		done
 		;;
-	agentwatch/plugin/*)
-		rel=${rel#agentwatch/plugin/}
+	watch/plugin/*)
+		rel=${rel#watch/plugin/}
 		for f in \
-			"$HOME"/.claude/plugins/cache/*/agentwatch/*/"$rel" \
-			"$HOME"/.codex/plugins/cache/*/agentwatch/*/"$rel"; do
+			"$HOME"/.claude/plugins/cache/*/cenci-watch/*/"$rel" \
+			"$HOME"/.codex/plugins/cache/*/cenci-watch/*/"$rel"; do
 			[ -e "$f" ] && { printf '%s\n' "$f"; return 0; }
 		done
 		;;
@@ -201,39 +201,39 @@ check() {
 	return 1
 }
 
-# agentwatch_binary_for_doctor resolves the installed agentwatch binary the
-# same way a running agent session would: a bare `agentwatch` on PATH first
+# cenci_binary_for_doctor resolves the installed cenci binary the
+# same way a running agent session would: a bare `cenci` on PATH first
 # (the bootstrap-maintained ~/.local/bin link, or the Codex-only manual-install
 # case), falling back to the version-pinned plugin cache directly so doctor can
 # still report daemon state before that PATH link exists (e.g. right after a
-# fresh install, before the first agent session bootstraps it). cached_agentwatch_binary
+# fresh install, before the first agent session bootstraps it). cached_cenci_binary
 # is defined further down this file but, like every function here, is available
 # by the time run_doctor actually runs (MODE dispatch happens after the whole
 # script is parsed).
-agentwatch_binary_for_doctor() {
-	if have agentwatch; then
-		command -v agentwatch
+cenci_binary_for_doctor() {
+	if have cenci; then
+		command -v cenci
 		return 0
 	fi
-	cached_agentwatch_binary
+	cached_cenci_binary
 }
 
-# doctor_daemon_status reports whether the agentwatch daemon is alive via
-# `agentwatch daemon status` (exit 0 = running, exit 1 = not running — see
-# runDaemonStatus in agentwatch/main.go). A missing binary is reported like any
+# doctor_daemon_status reports whether the cenci daemon is alive via
+# `cenci daemon status` (exit 0 = running, exit 1 = not running — see
+# runDaemonStatus in watch/main.go). A missing binary is reported like any
 # other missing component (warn, not a hard doctor failure) since the daemon
 # self-bootstraps on the first agent session; an idle daemon is equally
 # expected and not treated as an error either.
 doctor_daemon_status() {
 	local bin
-	if ! bin="$(agentwatch_binary_for_doctor)"; then
-		warn "agentwatch daemon — binary not found yet (bootstraps on your first agent session)"
+	if ! bin="$(cenci_binary_for_doctor)"; then
+		warn "cenci daemon — binary not found yet (bootstraps on your first agent session)"
 		return 0
 	fi
 	if "$bin" daemon status >/dev/null 2>&1; then
-		ok "agentwatch daemon: running"
+		ok "cenci daemon: running"
 	else
-		warn "agentwatch daemon: not running (starts automatically on your first agent session, or run: agentwatch daemon start)"
+		warn "cenci daemon: not running (starts automatically on your first agent session, or run: cenci daemon start)"
 	fi
 }
 
@@ -263,7 +263,7 @@ run_doctor() {
 	fi
 
 	say ""
-	say "  ${BOLD}For agentflow (workflow)${RESET}"
+	say "  ${BOLD}For cenci (workflow)${RESET}"
 	check "gh (GitHub CLI)" optional \
 		"needed for issues/PRs: https://cli.github.com" command -v gh
 	if have gh; then
@@ -271,9 +271,9 @@ run_doctor() {
 	fi
 
 	say ""
-	say "  ${BOLD}For agentwatch (attention)${RESET}"
+	say "  ${BOLD}For cenci-watch (attention)${RESET}"
 	check "tmux" optional \
-		"agentwatch's main frontend is the tmux status bar; other surfaces (waybar, macOS menu bar) still work without it" \
+		"cenci's main frontend is the tmux status bar; other surfaces (waybar, macOS menu bar) still work without it" \
 		command -v tmux
 	if [ "$OS" = macos ]; then
 		check "SwiftBar (menu bar widget)" optional \
@@ -286,7 +286,7 @@ run_doctor() {
 			fi
 		done
 		if have waybar; then
-			ok "waybar detected — add the AgentWatch module (see agentwatch/README.md)"
+			ok "waybar detected — add the Cenci Watch module (see watch/README.md)"
 		fi
 	fi
 	doctor_daemon_status
@@ -306,12 +306,9 @@ run_doctor() {
 
 	say ""
 	say "  ${BOLD}Launchers and container image${RESET}"
-	check "agent-stack utility" optional "re-run the installer to create it" command -v agent-stack
-	if [ "$HAS_CLAUDE" -eq 1 ]; then
-		check "agent-sand launcher" optional "re-run the installer to create it" command -v agent-sand
-	fi
+	check "cenci-installer utility" optional "re-run the installer to create it" command -v cenci-installer
 	if [ "$HAS_CLAUDE" -eq 1 ] || [ "$HAS_CODEX" -eq 1 ]; then
-		check "sb launcher" optional "re-run the installer to create it" command -v sb
+		check "cenci-sand launcher" optional "re-run the installer to create it" command -v cenci-sand
 	fi
 	if runtime="$(container_runtime 2>/dev/null)"; then
 		check "agent-sandbox:latest image" optional "build it with the installed sandbox launcher --build" \
@@ -336,12 +333,12 @@ selected() { case " $SELECTED " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 # ------------------------------------------------------------ install steps ----
 
 step_marketplace() {
-	step "Registering the agent-stack marketplace"
+	step "Registering the cenci marketplace"
 	if [ "$HAS_CLAUDE" -eq 0 ]; then
 		:
 	elif marketplace_registered; then
 		# Registration alone doesn't mean the checkout is current — refresh it so
-		# find_plugin_path (agent-stack launcher, agent-sand, agentwatch macOS
+		# find_plugin_path (cenci-installer launcher, cenci-sand, cenci macOS
 		# script) sees files added since the last update.
 		if claude plugin marketplace update "$MARKETPLACE_NAME" >/dev/null 2>&1; then
 			ok "Claude: marketplace '$MARKETPLACE_NAME' refreshed"
@@ -379,7 +376,7 @@ step_install_plugins() {
 	if [ "$CLAUDE_MARKETPLACE_READY" -eq 1 ]; then
 		for p in $SELECTED; do
 			if plugin_installed "$p"; then
-				ok "Claude: $p already installed (run 'agent-stack update' to update)"
+				ok "Claude: $p already installed (run 'cenci update' to update)"
 				continue
 			fi
 			if plugin_cmd install "$p"; then
@@ -394,7 +391,7 @@ step_install_plugins() {
 	[ "$CODEX_MARKETPLACE_READY" -eq 1 ] || return 0
 	for p in $SELECTED; do
 		if codex_plugin_installed "$p"; then
-			ok "Codex: $p already installed (run 'agent-stack update' to update)"
+			ok "Codex: $p already installed (run 'cenci update' to update)"
 			continue
 		fi
 		if codex plugin add "$p@$MARKETPLACE_NAME" >/dev/null 2>&1; then
@@ -478,28 +475,27 @@ link_launcher() {
 }
 
 step_cli_setup() {
-	step "Setting up the agent-stack command"
+	step "Setting up the cenci installer command"
 
 	local cli
-	if ! cli=$(find_plugin_path "agent-stack"); then
-		warn "could not find the agent-stack command in the marketplace checkout — re-run the installer after refreshing the marketplace"
+	if ! cli=$(find_plugin_path "cenci"); then
+		warn "could not find the cenci installer command in the marketplace checkout — re-run the installer after refreshing the marketplace"
 		return 0
 	fi
-	link_launcher agent-stack "$cli" || true
+	link_launcher cenci-installer "$cli" || true
 }
 
 step_sandbox_setup() {
-	selected agent-sandbox || return 0
-	step "Setting up the agent-sandbox launcher"
+	selected cenci-sandbox || return 0
+	step "Setting up the cenci-sand launcher"
 
-	local launcher launcher_name="sb"
-	if ! launcher=$(find_plugin_path "dev-sandbox/agent-sand"); then
-		warn "could not find the installed agent-sandbox plugin cache — re-run the installer after restarting your client"
+	local launcher launcher_name="cenci-sand"
+	if ! launcher=$(find_plugin_path "sandbox/cenci-sand"); then
+		warn "could not find the installed cenci-sandbox plugin cache — re-run the installer after restarting your client"
 		return 0
 	fi
 
-	if [ "$HAS_CLAUDE" -eq 1 ]; then link_launcher agent-sand "$launcher" || true; fi
-	link_launcher sb "$launcher" || true
+	link_launcher cenci-sand "$launcher" || true
 
 	case ":$PATH:" in
 	*":$HOME/.local/bin:"*) ;;
@@ -537,14 +533,14 @@ step_sandbox_setup() {
 	fi
 }
 
-# newest_agentwatch_root — path to the most recently installed version-pinned
+# newest_cenci_root — path to the most recently installed version-pinned
 # Claude plugin cache root. Plugin updates refresh the active manifest, making
 # it a reliable selector even before that version's binary has bootstrapped.
-newest_agentwatch_root() {
+newest_cenci_root() {
 	local newest_manifest="" manifest
 	for manifest in \
-		"$HOME"/.claude/plugins/cache/*/agentwatch/*/.claude-plugin/plugin.json \
-		"$HOME"/.codex/plugins/cache/*/agentwatch/*/.codex-plugin/plugin.json; do
+		"$HOME"/.claude/plugins/cache/*/cenci-watch/*/.claude-plugin/plugin.json \
+		"$HOME"/.codex/plugins/cache/*/cenci-watch/*/.codex-plugin/plugin.json; do
 		[ -f "$manifest" ] || continue
 		if [ -z "$newest_manifest" ] || [ "$manifest" -nt "$newest_manifest" ]; then
 			newest_manifest="$manifest"
@@ -553,26 +549,26 @@ newest_agentwatch_root() {
 	[ -n "$newest_manifest" ] && dirname "$(dirname "$newest_manifest")"
 }
 
-# cached_agentwatch_binary returns the binary belonging to the active plugin
+# cached_cenci_binary returns the binary belonging to the active plugin
 # cache when SessionStart has already provisioned it.
-cached_agentwatch_binary() {
+cached_cenci_binary() {
 	local root bin
-	root="$(newest_agentwatch_root || true)"
+	root="$(newest_cenci_root || true)"
 	[ -n "$root" ] || return 1
-	bin="$root/bin/agentwatch"
+	bin="$root/bin/cenci"
 	[ -x "$bin" ] || return 1
 	printf '%s\n' "$bin"
 }
 
-# current_agentwatch_binary provisions and returns the binary belonging to the
+# current_cenci_binary provisions and returns the binary belonging to the
 # active plugin cache. Updates cannot rely on a later SessionStart hook: an old
 # daemon may continue owning the sockets indefinitely.
-current_agentwatch_binary() {
+current_cenci_binary() {
 	local root bootstrap root_var
-	if cached_agentwatch_binary; then
+	if cached_cenci_binary; then
 		return 0
 	fi
-	root="$(newest_agentwatch_root || true)"
+	root="$(newest_cenci_root || true)"
 	[ -n "$root" ] || return 1
 	if [ -f "$root/.codex-plugin/plugin.json" ]; then
 		bootstrap="$root/codex/bootstrap.sh"
@@ -588,55 +584,55 @@ current_agentwatch_binary() {
 			CLAUDE_PLUGIN_ROOT="$root" sh "$bootstrap" >/dev/null 2>&1 || true
 		fi
 	fi
-	cached_agentwatch_binary
+	cached_cenci_binary
 }
 
-# restart_agentwatch_daemon replaces the standard plugin-managed daemon after
+# restart_cenci_daemon replaces the standard plugin-managed daemon after
 # an explicit update. It delegates to the binary's own `daemon restart`
 # lifecycle verb (stop the old daemon, spawn the new one, wait for it to
-# become reachable — see runDaemonRestart in agentwatch/main.go), so this
-# installer path and a user running `agentwatch daemon restart` by hand share
+# become reachable — see runDaemonRestart in watch/main.go), so this
+# installer path and a user running `cenci daemon restart` by hand share
 # one implementation instead of install.sh reimplementing daemon process
 # control. Falls back to the pre-daemon-lifecycle ad-hoc pkill/nohup restart
 # when the binary can't do it itself (missing/not executable, older cached
 # binary without the `daemon` verb group, or the invocation otherwise fails).
-restart_agentwatch_daemon() {
+restart_cenci_daemon() {
 	local bin="$1"
 	if [ -x "$bin" ] && "$bin" daemon restart >/dev/null 2>&1; then
-		ok "restarted agentwatch with the updated binary"
+		ok "restarted cenci with the updated binary"
 		return 0
 	fi
 	warn "'$bin daemon restart' did not succeed — falling back to a manual restart"
-	restart_agentwatch_daemon_fallback "$bin"
+	restart_cenci_daemon_fallback "$bin"
 }
 
-# restart_agentwatch_daemon_fallback is the pre-daemon-lifecycle ad-hoc
+# restart_cenci_daemon_fallback is the pre-daemon-lifecycle ad-hoc
 # restart: SIGTERM the old daemon, wait for it to exit, then nohup-spawn the
 # given binary directly. The pgrep/pkill pattern matches both the bare
-# `agentwatch daemon` form (hand-started in a pane) and `agentwatch daemon
+# `cenci daemon` form (hand-started in a pane) and `cenci daemon
 # start` (the form Spawn/`daemon restart` itself use), mirroring
-# daemonProcessPattern in agentwatch/internal/daemon/processctl.go.
-restart_agentwatch_daemon_fallback() {
+# daemonProcessPattern in watch/internal/daemon/processctl.go.
+restart_cenci_daemon_fallback() {
 	local bin="$1" i pid
 	if ! have pkill || ! have pgrep; then
-		warn "pkill/pgrep unavailable — restart agentwatch manually to finish the update"
+		warn "pkill/pgrep unavailable — restart cenci manually to finish the update"
 		return 0
 	fi
 
-	pkill -TERM -f '[/]agentwatch daemon( start)?$' >/dev/null 2>&1 || true
+	pkill -TERM -f '[/]cenci daemon( start)?$' >/dev/null 2>&1 || true
 	i=0
-	while pgrep -f '[/]agentwatch daemon( start)?$' >/dev/null 2>&1 && [ "$i" -lt 30 ]; do
+	while pgrep -f '[/]cenci daemon( start)?$' >/dev/null 2>&1 && [ "$i" -lt 30 ]; do
 		sleep 0.1
 		i=$((i + 1))
 	done
-	if pgrep -f '[/]agentwatch daemon( start)?$' >/dev/null 2>&1; then
-		fail "the previous agentwatch daemon did not stop; restart it manually"
+	if pgrep -f '[/]cenci daemon( start)?$' >/dev/null 2>&1; then
+		fail "the previous cenci daemon did not stop; restart it manually"
 		INSTALL_FAILED=1
 		return 0
 	fi
 
 	if [ -z "$bin" ] || [ ! -x "$bin" ]; then
-		warn "no usable agentwatch binary to restart — the next agent session will bootstrap it"
+		warn "no usable cenci binary to restart — the next agent session will bootstrap it"
 		return 0
 	fi
 
@@ -644,40 +640,40 @@ restart_agentwatch_daemon_fallback() {
 	pid=$!
 	sleep 0.2
 	if kill -0 "$pid" 2>/dev/null; then
-		ok "restarted agentwatch with the updated binary"
+		ok "restarted cenci with the updated binary"
 	else
-		fail "the updated agentwatch daemon did not stay running"
+		fail "the updated cenci daemon did not stay running"
 		INSTALL_FAILED=1
 	fi
 }
 
-step_agentwatch_setup() {
-	selected agentwatch || return 0
-	step "Setting up agentwatch"
+step_cenci_watch_setup() {
+	selected cenci-watch || return 0
+	step "Setting up cenci"
 	local cache_bin=""
 	if [ "$MODE" = update ]; then
-		cache_bin="$(current_agentwatch_binary || true)"
+		cache_bin="$(current_cenci_binary || true)"
 	else
-		cache_bin="$(cached_agentwatch_binary || true)"
+		cache_bin="$(cached_cenci_binary || true)"
 	fi
 
 	ok "the binary and daemon self-bootstrap on your first agent session"
-	say "  ${DIM}first session may take a moment before status appears; log: \${TMPDIR:-/tmp}/agentwatch-bootstrap.log${RESET}"
+	say "  ${DIM}first session may take a moment before status appears; log: \${TMPDIR:-/tmp}/cenci-bootstrap.log${RESET}"
 
 	if [ "$OS" != macos ]; then
-		setup_agentwatch_linux_path "$cache_bin"
-		setup_agentwatch_linux_widgets
+		setup_cenci_linux_path "$cache_bin"
+		setup_cenci_linux_widgets
 		if [ "$MODE" = update ] && [ -n "$cache_bin" ]; then
-			restart_agentwatch_daemon "$cache_bin"
+			restart_cenci_daemon "$cache_bin"
 		elif [ "$MODE" = update ]; then
-			warn "updated agentwatch binary is not available yet; the next agent session will bootstrap it"
+			warn "updated cenci binary is not available yet; the next agent session will bootstrap it"
 		fi
 		return 0
 	fi
 	if [ "$MODE" = update ] && [ -n "$cache_bin" ]; then
-		restart_agentwatch_daemon "$cache_bin"
+		restart_cenci_daemon "$cache_bin"
 	elif [ "$MODE" = update ]; then
-		warn "updated agentwatch binary is not available yet; the next agent session will bootstrap it"
+		warn "updated cenci binary is not available yet; the next agent session will bootstrap it"
 	fi
 
 	# macOS menu bar (SwiftBar) — optional, and the fiddliest manual step, so
@@ -685,42 +681,42 @@ step_agentwatch_setup() {
 	# install.sh, which sets SwiftBar's Plugin Folder, symlinks the plugin, and
 	# reloads SwiftBar. Re-runs on update so widget changes take effect.
 	local script
-	if ! script=$(find_plugin_path "agentwatch/plugin/macos/install.sh"); then
+	if ! script=$(find_plugin_path "watch/plugin/macos/install.sh"); then
 		return 0
 	fi
 	if [ ! -d /Applications/SwiftBar.app ]; then
 		say "  ${DIM}optional: menu bar status via SwiftBar — brew install swiftbar, then re-run this script${RESET}"
 		return 0
 	fi
-	if ! ask_yn "SwiftBar detected — install the agentwatch menu bar widget and reload it?" y; then
-		say "  ${DIM}skipped — see agentwatch/plugin/macos/README.md to wire it manually${RESET}"
+	if ! ask_yn "SwiftBar detected — install the cenci menu bar widget and reload it?" y; then
+		say "  ${DIM}skipped — see watch/plugin/macos/README.md to wire it manually${RESET}"
 		return 0
 	fi
 	chmod +x "$script" 2>/dev/null || true
 	if bash "$script"; then
 		ok "menu bar widget installed and reloaded"
 	else
-		warn "SwiftBar widget setup failed — see agentwatch/plugin/macos/README.md"
+		warn "SwiftBar widget setup failed — see watch/plugin/macos/README.md"
 		INSTALL_FAILED=1
 	fi
 }
 
-# setup_agentwatch_linux_path makes bar widgets (DMS, noctalia, waybar) able to
-# resolve a bare `agentwatch`. The binary lives in the version-pinned plugin
-# cache (~/.claude/plugins/cache/.../agentwatch/<version>/bin), which is on no
+# setup_cenci_linux_path makes bar widgets (DMS, noctalia, waybar) able to
+# resolve a bare `cenci`. The binary lives in the version-pinned plugin
+# cache (~/.claude/plugins/cache/.../cenci-watch/<version>/bin), which is on no
 # login PATH — so a widget spawned by the compositor can't find it and hides
 # itself. We keep a stable link on the user's writable PATH and, for GUI bars
 # that don't inherit ~/.local/bin, offer a one-time /usr/local/bin link.
-setup_agentwatch_linux_path() {
-	local cache_bin="$1" user_link="$HOME/.local/bin/agentwatch"
+setup_cenci_linux_path() {
+	local cache_bin="$1" user_link="$HOME/.local/bin/cenci"
 
 	# Ensure the bootstrap-maintained user link exists now. The plugin bootstrap
 	# re-points it on version bumps, so pinning the current cache path is fine;
 	# if the binary isn't cached yet, the first agent session creates the link.
 	if [ -n "$cache_bin" ]; then
-		link_launcher agentwatch "$cache_bin" || true
+		link_launcher cenci "$cache_bin" || true
 	else
-		say "  ${DIM}agentwatch binary not in the plugin cache yet — the first agent session links it onto ~/.local/bin automatically${RESET}"
+		say "  ${DIM}cenci binary not in the plugin cache yet — the first agent session links it onto ~/.local/bin automatically${RESET}"
 	fi
 
 	case ":$PATH:" in
@@ -732,22 +728,22 @@ setup_agentwatch_linux_path() {
 	# GUI/compositor bars inherit the login PATH, which usually lacks
 	# ~/.local/bin but always includes /usr/local/bin. A root link there, chained
 	# through the bootstrap-maintained ~/.local/bin link, lets them resolve
-	# agentwatch and survives version bumps with no re-run.
-	if [ -L /usr/local/bin/agentwatch ] &&
-		[ "$(readlink /usr/local/bin/agentwatch 2>/dev/null)" = "$user_link" ]; then
-		ok "/usr/local/bin/agentwatch already links to ~/.local/bin/agentwatch (GUI bars can resolve it)"
+	# cenci and survives version bumps with no re-run.
+	if [ -L /usr/local/bin/cenci ] &&
+		[ "$(readlink /usr/local/bin/cenci 2>/dev/null)" = "$user_link" ]; then
+		ok "/usr/local/bin/cenci already links to ~/.local/bin/cenci (GUI bars can resolve it)"
 		return 0
 	fi
-	if [ -e /usr/local/bin/agentwatch ] && [ ! -L /usr/local/bin/agentwatch ]; then
-		warn "/usr/local/bin/agentwatch exists and is not a symlink — left untouched; remove it manually or configure the widget's agentwatch path"
+	if [ -e /usr/local/bin/cenci ] && [ ! -L /usr/local/bin/cenci ]; then
+		warn "/usr/local/bin/cenci exists and is not a symlink — left untouched; remove it manually or configure the widget's cenci path"
 		return 0
 	fi
 
-	local manual="sudo ln -sf \"$user_link\" /usr/local/bin/agentwatch"
+	local manual="sudo ln -sf \"$user_link\" /usr/local/bin/cenci"
 	if [ "$INTERACTIVE" -eq 1 ] &&
-		ask_yn "Link agentwatch into /usr/local/bin so GUI bar widgets (DMS, noctalia) can find it? (one-time sudo)" y; then
-		if sudo ln -sf "$user_link" /usr/local/bin/agentwatch; then
-			ok "linked /usr/local/bin/agentwatch → ~/.local/bin/agentwatch"
+		ask_yn "Link cenci into /usr/local/bin so GUI bar widgets (DMS, noctalia) can find it? (one-time sudo)" y; then
+		if sudo ln -sf "$user_link" /usr/local/bin/cenci; then
+			ok "linked /usr/local/bin/cenci → ~/.local/bin/cenci"
 		else
 			warn "could not create the /usr/local/bin link — run it yourself:
       $manual"
@@ -755,7 +751,7 @@ setup_agentwatch_linux_path() {
 	else
 		say "  ${DIM}skipped the GUI-bar PATH link. If a bar widget stays hidden, run:${RESET}"
 		say "      $manual"
-		say "  ${DIM}or point the widget at the binary directly (agentwatchPath for DMS/noctalia, AGENTWATCH_BIN for SwiftBar).${RESET}"
+		say "  ${DIM}or point the widget at the binary directly (agentwatchPath for DMS/noctalia, CENCI_BIN for SwiftBar).${RESET}"
 	fi
 }
 
@@ -781,23 +777,23 @@ de_label() {
 	esac
 }
 
-# setup_agentwatch_linux_widgets detects each present GUI bar and delegates to
+# setup_cenci_linux_widgets detects each present GUI bar and delegates to
 # that widget's self-contained install.sh, which (re)installs and reloads it.
 # Runs on both install and update — re-running is what refreshes the widget and
-# reloads the bar, so widget changes become visible after `agent-stack update`.
+# reloads the bar, so widget changes become visible after `cenci update`.
 # Restarting a running panel is disruptive, so each bar is gated behind its own
 # prompt (default yes).
-setup_agentwatch_linux_widgets() {
+setup_cenci_linux_widgets() {
 	local de label script
 	for de in gnome plasma dms noctalia; do
 		de_detected "$de" || continue
 		label="$(de_label "$de")"
-		if ! ask_yn "$label detected — install the AgentWatch widget and reload it?" y; then
-			say "  ${DIM}skipped the $label widget — see agentwatch/plugin/$de/README.md to wire it manually${RESET}"
+		if ! ask_yn "$label detected — install the Cenci Watch widget and reload it?" y; then
+			say "  ${DIM}skipped the $label widget — see watch/plugin/$de/README.md to wire it manually${RESET}"
 			continue
 		fi
-		if ! script=$(find_plugin_path "agentwatch/plugin/$de/install.sh"); then
-			warn "could not find agentwatch/plugin/$de/install.sh in the marketplace checkout — re-run after refreshing the marketplace"
+		if ! script=$(find_plugin_path "watch/plugin/$de/install.sh"); then
+			warn "could not find watch/plugin/$de/install.sh in the marketplace checkout — re-run after refreshing the marketplace"
 			INSTALL_FAILED=1
 			continue
 		fi
@@ -805,7 +801,7 @@ setup_agentwatch_linux_widgets() {
 		if bash "$script"; then
 			ok "$label widget installed and reloaded"
 		else
-			warn "$label widget setup failed — see agentwatch/plugin/$de/README.md"
+			warn "$label widget setup failed — see watch/plugin/$de/README.md"
 			INSTALL_FAILED=1
 		fi
 	done
@@ -813,21 +809,21 @@ setup_agentwatch_linux_widgets() {
 	# waybar has no bundled widget — its config is hand-managed. Point at the
 	# docs and the live-reload signal; write nothing.
 	if have waybar; then
-		say "  ${DIM}waybar detected — add the AgentWatch module from agentwatch/README.md (Waybar section),${RESET}"
+		say "  ${DIM}waybar detected — add the Cenci Watch module from watch/README.md (Waybar section),${RESET}"
 		say "  ${DIM}then reload waybar to apply: pkill -SIGUSR2 waybar${RESET}"
 	fi
 }
 
-step_agentflow_notes() {
-	selected agentflow || return 0
+step_cenci_notes() {
+	selected cenci || return 0
 	[ "$HAS_CLAUDE" -eq 1 ] || return 0
-	step "agentflow next steps"
+	step "cenci next steps"
 	if have gh && gh auth status >/dev/null 2>&1; then
 		ok "GitHub CLI is authenticated"
 	else
-		warn "agentflow drives GitHub issues and PRs through the gh CLI — run: gh auth login"
+		warn "cenci drives GitHub issues and PRs through the gh CLI — run: gh auth login"
 	fi
-	say "  then, in each project you want to use it in, run ${BOLD}/agentflow:configure${RESET} once inside Claude Code"
+	say "  then, in each project you want to use it in, run ${BOLD}/cenci:configure${RESET} once inside Claude Code"
 }
 
 final_summary() {
@@ -846,29 +842,29 @@ final_summary() {
 	fi
 	say ""
 	say "  Try it out:"
-	if selected agent-sandbox; then
-		if [ "$HAS_CLAUDE" -eq 1 ]; then
-			say "    agent-sand                # Claude Code inside the container"
+	if selected cenci-sandbox; then
+		if [ "$HAS_CLAUDE" -eq 1 ] || [ "$HAS_CODEX" -eq 1 ]; then
+			say "    cenci-sand                 # Claude Code inside the container"
 		fi
 		if [ "$HAS_CLAUDE" -eq 1 ]; then
-			say "    sb ch|cs|co|cf             # Claude in the container: haiku/sonnet/opus/fable"
+			say "    cenci-sand ch|cs|co|cf     # Claude in the container: haiku/sonnet/opus/fable"
 		fi
 		if [ "$HAS_CODEX" -eq 1 ]; then
-			say "    sb xl|xt|xs                # Codex in the container: luna/terra/sol"
+			say "    cenci-sand xl|xt|xs        # Codex in the container: luna/terra/sol"
 		fi
 	fi
-	if selected agentflow && [ "$HAS_CLAUDE" -eq 1 ]; then
-		say "    claude → /agentflow:configure # one-time project setup"
+	if selected cenci && [ "$HAS_CLAUDE" -eq 1 ]; then
+		say "    claude → /cenci:configure # one-time project setup"
 	fi
-	if selected agentflow && [ "$HAS_CODEX" -eq 1 ]; then
-		say "    codex                       # portable agentflow conventions are available"
+	if selected cenci && [ "$HAS_CODEX" -eq 1 ]; then
+		say "    codex                       # portable cenci conventions are available"
 	fi
-	if selected agentwatch; then
+	if selected cenci-watch; then
 		say "    (start a supported agent session — status appears in configured surfaces)"
 	fi
 	say ""
-	say "  Check installation health: ${BOLD}agent-stack doctor${RESET}"
-	say "  Update everything later:  ${BOLD}agent-stack update${RESET}"
+	say "  Check installation health: ${BOLD}cenci doctor${RESET}"
+	say "  Update everything later:  ${BOLD}cenci update${RESET}"
 	say "  Docs: https://github.com/$MARKETPLACE_REPO/blob/main/docs/getting-started.md"
 }
 
@@ -880,15 +876,15 @@ INSTALL_FAILED=0
 
 usage() {
 	cat <<'EOF'
-agent-stack installer — one command for the whole package.
+cenci installer — one command for the whole package.
 
 Usage:
-  agent-stack                 interactive installer / repair
-  agent-stack update          update installed plugins (+ optional rebuild)
-  agent-stack doctor          check prerequisites, change nothing
+  cenci-installer              interactive installer / repair
+  cenci-installer update       update installed plugins (+ optional rebuild)
+  cenci-installer doctor       check prerequisites, change nothing
 
 Initial install:
-  curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
 
 From a source checkout, ./install.sh accepts the same arguments.
 
@@ -924,7 +920,7 @@ detect_platform
 detect_clients
 
 say ""
-say "${BOLD}agent-stack installer${RESET} — $(platform_label)"
+say "${BOLD}cenci installer${RESET} — $(platform_label)"
 
 if [ "$MODE" = doctor ]; then
 	run_doctor
@@ -938,7 +934,7 @@ if [ "$MODE" = update ]; then
 	prune_selected_to_installed
 	step_cli_setup
 	step_sandbox_setup
-	step_agentwatch_setup
+	step_cenci_watch_setup
 	final_summary
 	exit $((INSTALL_FAILED))
 fi
@@ -953,7 +949,7 @@ step_install_plugins
 prune_selected_to_installed
 step_cli_setup
 step_sandbox_setup
-step_agentwatch_setup
-step_agentflow_notes
+step_cenci_watch_setup
+step_cenci_notes
 final_summary
 exit $((INSTALL_FAILED))

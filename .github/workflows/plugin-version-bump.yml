@@ -1,9 +1,9 @@
 name: Reusable — Plugin Version Bump
 
 # Reusable version-bump logic shared by the per-plugin caller workflows
-# (agentflow, agentwatch, agent-sandbox). Callers pass their plugin name,
+# (flow, watch, sandbox). Callers pass their plugin name,
 # the plugin.json paths to stamp, the marketplace entry name, the tag prefix,
-# and — only agentwatch — a workflow to dispatch after tagging.
+# and — only watch — a workflow to dispatch after tagging.
 #
 # This workflow declares NO top-level permissions: block. GitHub caps a
 # reusable workflow's effective permissions to whatever the caller job
@@ -28,7 +28,7 @@ on:
         required: true
         type: string
       tag-prefix:
-        description: 'Tag prefix, e.g. agentflow -> refs/tags/agentflow/v<version>'
+        description: 'Tag prefix, e.g. flow -> refs/tags/flow/v<version>'
         required: true
         type: string
       dispatch-workflow:
@@ -134,7 +134,7 @@ jobs:
             -f ref="refs/tags/${TAG_PREFIX}/v${NEW_VERSION}" \
             -f sha="$(git rev-parse HEAD)"
 
-          # Optionally dispatch a downstream workflow (agentwatch release).
+          # Optionally dispatch a downstream workflow (watch release).
           # A tag pushed with GITHUB_TOKEN does NOT fire an `on: push: tags`
           # workflow (recursion guard), but dispatching one IS allowed. Run the
           # workflow definition from main (latest); it checks out the tag to build.

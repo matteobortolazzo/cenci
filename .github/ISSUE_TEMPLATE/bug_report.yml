@@ -1,5 +1,5 @@
 name: Bug report
-description: Something in agentflow, agentwatch, or agent-sandbox isn't working as expected
+description: Something in cenci, cenci-watch, or cenci-sandbox isn't working as expected
 labels: ["bug"]
 body:
   - type: dropdown
@@ -8,9 +8,9 @@ body:
       label: Affected plugin/layer
       description: Which layer does this bug affect?
       options:
-        - agentflow (workflow)
-        - agentwatch (attention)
-        - agent-sandbox (isolation)
+        - cenci (workflow)
+        - cenci-watch (attention)
+        - cenci-sandbox (isolation)
         - Not sure / repo-wide
     validations:
       required: true
@@ -29,8 +29,8 @@ body:
   - type: dropdown
     id: runtime
     attributes:
-      label: Container runtime (agent-sandbox only)
-      description: Leave the default if this bug isn't about agent-sandbox.
+      label: Container runtime (cenci-sandbox only)
+      description: Leave the default if this bug isn't about cenci-sandbox.
       options:
         - Docker
         - Podman
@@ -44,7 +44,7 @@ body:
     attributes:
       label: install.sh doctor output
       description: |
-        Run `curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/install.sh | bash -s -- doctor`
+        Run `curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash -s -- doctor`
         and paste the output.
       render: shell
     validations:
@@ -56,7 +56,7 @@ body:
       label: Repro steps
       description: Exact steps to reproduce the bug, from a clean state if possible.
       placeholder: |
-        1. Run `agent-sand --shell`
+        1. Run `cenci-sand --shell`
         2. ...
     validations:
       required: true

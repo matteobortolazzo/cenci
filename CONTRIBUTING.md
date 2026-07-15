@@ -1,30 +1,30 @@
 # Contributing
 
-Thanks for looking at agent-stack. This repo contains one product implemented as three
+Thanks for looking at cenci. This repo contains one product implemented as three
 independently versioned internal plugins—read the relevant layer's `CLAUDE.md` before making changes, and
 see the root [`CLAUDE.md`](./CLAUDE.md) and [`README.md`](./README.md) for the overall
 architecture.
 
 ## Dev setup per project
 
-- **agentwatch** (Go): install the Go toolchain per [`agentwatch/CLAUDE.md`](./agentwatch/CLAUDE.md),
-  then from `agentwatch/`:
+- **watch** (Go): install the Go toolchain per [`watch/CLAUDE.md`](./watch/CLAUDE.md),
+  then from `watch/`:
   ```bash
   make build
   make test    # or: go test ./...
   make lint    # requires golangci-lint
   ```
-- **dev-sandbox** (shell): install [`shellcheck`](https://www.shellcheck.net/), then:
+- **sandbox** (shell): install [`shellcheck`](https://www.shellcheck.net/), then:
   ```bash
-  shellcheck install.sh dev-sandbox/agent-sand dev-sandbox/entrypoint.sh \
-    dev-sandbox/lib/*.sh dev-sandbox/tests/*.test.sh
-  bash -n install.sh dev-sandbox/agent-sand dev-sandbox/entrypoint.sh
+  shellcheck install.sh sandbox/cenci-sand sandbox/entrypoint.sh \
+    sandbox/lib/*.sh sandbox/tests/*.test.sh
+  bash -n install.sh sandbox/cenci-sand sandbox/entrypoint.sh
   ```
-  See [`dev-sandbox/CLAUDE.md`](./dev-sandbox/CLAUDE.md) for the full build/test/smoke
+  See [`sandbox/CLAUDE.md`](./sandbox/CLAUDE.md) for the full build/test/smoke
   commands.
-- **agentflow** (markdown/JSON/shell): no build step. Skills and docs are plain
+- **flow** (markdown/JSON/shell): no build step. Skills and docs are plain
   Markdown; hooks are shell scripts and should still pass `shellcheck`/`bash -n`. See
-  [`agentflow/CLAUDE.md`](./agentflow/CLAUDE.md).
+  [`flow/CLAUDE.md`](./flow/CLAUDE.md).
 
 ## Workflow: worktrees, 1 ticket = 1 PR
 
@@ -37,7 +37,7 @@ git worktree add .worktrees/<id>-<desc> -b feature/<id>-<desc>
 
 One ticket maps to one PR targeting `main`. Multiple commits within a PR are fine; use
 them to organize logical steps. Full conventions (branch naming, commit format) live in
-[`agentflow/docs/git-workflow.md`](./agentflow/docs/git-workflow.md).
+[`flow/docs/git-workflow.md`](./flow/docs/git-workflow.md).
 
 ## Conventional commits and release impact
 
@@ -59,9 +59,9 @@ Each plugin versions independently, gated by which paths a merge touches:
 
 | Plugin | Paths | Tag |
 |---|---|---|
-| agentflow | `agentflow/**` | `agentflow/vX.Y.Z` |
-| agentwatch | `agentwatch/**` | `agentwatch/vX.Y.Z` |
-| agent-sandbox | `dev-sandbox/**` | `agent-sandbox/vX.Y.Z` |
+| flow | `flow/**` | `flow/vX.Y.Z` |
+| watch | `watch/**` | `watch/vX.Y.Z` |
+| sandbox | `sandbox/**` | `sandbox/vX.Y.Z` |
 
 A PR that only touches, say, `docs/` or root-level files (like this one) doesn't trigger
 any plugin version bump.
@@ -70,21 +70,21 @@ any plugin version bump.
 
 Workflows live in [`.github/workflows/`](./.github/workflows/):
 
-- **`agentflow-version-bump.yml`**, **`agentwatch-version-bump.yml`**,
-  **`agent-sandbox-version-bump.yml`** — run on push to `main`, path-filtered per
+- **`flow-version-bump.yml`**, **`watch-version-bump.yml`**,
+  **`sandbox-version-bump.yml`** — run on push to `main`, path-filtered per
   plugin. Each reads the commit that triggered it, computes the bump from the mapping
   above, updates that plugin's `plugin.json`(s) and the root `marketplace.json`, commits
   as `chore(release): <plugin>/v<new>`, and tags it. They skip when the actor is
-  `github-actions[bot]` (agent-sandbox's also allows `workflow_dispatch` for manual
+  `github-actions[bot]` (sandbox's also allows `workflow_dispatch` for manual
   re-runs) and when the last commit is already a release commit, to avoid bump loops.
-- **`agentwatch-ci.yml`** — `go test`, `go build`, and `golangci-lint` on push/PR
-  touching `agentwatch/**`.
-- **`agentwatch-release.yml`** — builds and publishes release artifacts with GoReleaser
-  when an `agentwatch/v*` tag is pushed (or via `workflow_dispatch`), triggered by the
+- **`watch-ci.yml`** — `go test`, `go build`, and `golangci-lint` on push/PR
+  touching `watch/**`.
+- **`watch-release.yml`** — builds and publishes release artifacts with GoReleaser
+  when a `watch/v*` tag is pushed (or via `workflow_dispatch`), triggered by the
   version-bump job.
-- **`sandbox-ci.yml`** (workflow name `dev-sandbox — CI`) — shellcheck/`bash -n` lint,
+- **`sandbox-ci.yml`** (workflow name `sandbox — CI`) — shellcheck/`bash -n` lint,
   the host-runnable test suites, the fragment-drift guard, a full build + toolchain
-  smoke test, and hadolint, on push/PR touching `dev-sandbox/**` or `install.sh`.
+  smoke test, and hadolint, on push/PR touching `sandbox/**` or `install.sh`.
 - **`deps-bump.yml`** — a daily scheduled job that checks pinned sandbox dependencies,
   opens scoped update PRs, and applies the documented auto/manual merge policy.
 
@@ -92,9 +92,9 @@ Workflows live in [`.github/workflows/`](./.github/workflows/):
 
 Each plugin's `.claude-plugin/plugin.json` is the **source of truth** for its version:
 
-- `agentflow/.claude-plugin/plugin.json`
-- `agentwatch/plugin/.claude-plugin/plugin.json`
-- `dev-sandbox/.claude-plugin/plugin.json`
+- `flow/.claude-plugin/plugin.json`
+- `watch/plugin/.claude-plugin/plugin.json`
+- `sandbox/.claude-plugin/plugin.json`
 
 A version-bump workflow updates that file, the matching `.codex-plugin/plugin.json` (so
 Claude Code and Codex manifests stay in sync), and the plugin's entry in the root
