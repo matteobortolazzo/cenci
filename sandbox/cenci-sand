@@ -179,7 +179,7 @@ while [[ $# -gt 0 ]]; do
         --)
             # Escape hatch: everything after a bare `--` is forwarded to the
             # agent CLI verbatim, with no further parsing or validation. This
-            # is how flags agent-sand doesn't recognize (a future
+            # is how flags cenci-sand doesn't recognize (a future
             # claude/codex flag, or anything not worth teaching this parser
             # about) still reach the agent CLI, now that unknown long flags
             # below are rejected instead of silently forwarded.
@@ -188,7 +188,7 @@ while [[ $# -gt 0 ]]; do
             shift $#
             ;;
         --*)
-            echo "Error: unknown flag '$1'. Recognized agent-sand flags: --agent, --name, --model, --build, --build-base, --shell, --host-network, --docker, --update-plugins, --prune, --volumes, --reap-orphans, --reseed-creds. To pass a flag through to the agent CLI verbatim (e.g. an agent-specific flag agent-sand doesn't know about), put it after a '--' separator: agent-sand -- ${1}" >&2
+            echo "Error: unknown flag '$1'. Recognized cenci-sand flags: --agent, --name, --model, --build, --build-base, --shell, --host-network, --docker, --update-plugins, --prune, --volumes, --reap-orphans, --reseed-creds. To pass a flag through to the agent CLI verbatim (e.g. an agent-specific flag cenci-sand doesn't know about), put it after a '--' separator: cenci-sand -- ${1}" >&2
             exit 1
             ;;
         *)
@@ -209,7 +209,7 @@ esac
 
 # A model shortcut (ch/cs/co/cf, xl/xt/xs) implies a specific agent. If a
 # later explicit --agent disagrees, launching would silently pair the wrong
-# agent with the shortcut's model (e.g. `sb ch --agent codex` running codex
+# agent with the shortcut's model (e.g. `cenci-sand ch --agent codex` running codex
 # with a claude model) -- reject the conflicting combination instead.
 if [[ -n "${SHORTCUT_AGENT}" ]] && "${AGENT_GIVEN}" && [[ "${AGENT}" != "${SHORTCUT_AGENT}" ]]; then
     echo "Error: shortcut '${SHORTCUT_TOKEN}' selects the ${SHORTCUT_AGENT} agent, but --agent ${AGENT} was also given. Drop the shortcut or the --agent flag so they agree." >&2
@@ -220,7 +220,7 @@ fi
 # --prune also lists/removes stale *-sand-home-* volumes); on its own it used
 # to be a silent no-op.
 if "${PRUNE_VOLUMES}" && ! "${PRUNE}"; then
-    echo "Error: --volumes has no effect without --prune. Did you mean 'agent-sand --prune --volumes'?" >&2
+    echo "Error: --volumes has no effect without --prune. Did you mean 'cenci-sand --prune --volumes'?" >&2
     exit 1
 fi
 
@@ -628,9 +628,9 @@ fi
 # Codex uses the CLI baked into the image.
 if "${UPDATE_PLUGINS}"; then
     if [[ "${AGENT}" == codex ]]; then
-        UPDATE_CMD='source /usr/local/bin/lib/migrate-settings.sh && provision_codex_plugins /home/dev/.codex agent-stack matteobortolazzo/agent-stack agentflow agentwatch && update_codex_plugins /home/dev/.codex agent-stack 0 agentflow agentwatch'
+        UPDATE_CMD='source /usr/local/bin/lib/migrate-settings.sh && provision_codex_plugins /home/dev/.codex cenci matteobortolazzo/cenci cenci cenci-watch && update_codex_plugins /home/dev/.codex cenci 0 cenci cenci-watch'
     else
-        UPDATE_CMD='source /usr/local/bin/lib/migrate-settings.sh && heal_plugin_installs /home/dev/.claude/plugins && provision_plugins /home/dev/.claude/plugins agent-stack matteobortolazzo/agent-stack agentflow agentwatch && update_plugins /home/dev/.claude/plugins agent-stack 0 agentflow agentwatch'
+        UPDATE_CMD='source /usr/local/bin/lib/migrate-settings.sh && heal_plugin_installs /home/dev/.claude/plugins && provision_plugins /home/dev/.claude/plugins cenci matteobortolazzo/cenci cenci cenci-watch && update_plugins /home/dev/.claude/plugins cenci 0 cenci cenci-watch'
     fi
     if "${RUNTIME}" ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$"; then
         echo "Updating plugins in running '${CONTAINER_NAME}'..."
@@ -665,56 +665,56 @@ if [[ "${AGENT}" == claude ]]; then
     fi
 fi
 
-# ── Resolve agentwatch (optional) ─────────────────────────────────
+# ── Resolve cenci (optional) ─────────────────────────────────
 # Container-side mount point for the host socket directory (matches the 'dev'
 # user's uid 1000, so its XDG_RUNTIME_DIR lands here regardless of the host
 # uid). Named once and reused everywhere the destination path matters.
-AGENTWATCH_SOCKET_MOUNT_DEST="/run/user/1000/agentwatch"
-AGENTWATCH_BIN="$(readlink -f "$(which agentwatch)" 2>/dev/null || true)"
-AGENTWATCH_SOCKET_DIR=""
-AGENTWATCH_SOCKET_DIR_FAILED=false
-if [[ -x "${AGENTWATCH_BIN}" ]]; then
+CENCI_SOCKET_MOUNT_DEST="/run/user/1000/cenci"
+CENCI_BIN="$(readlink -f "$(which cenci)" 2>/dev/null || true)"
+CENCI_SOCKET_DIR=""
+CENCI_SOCKET_DIR_FAILED=false
+if [[ -x "${CENCI_BIN}" ]]; then
     # Bounded (5s) so a hung CLI can't hang the whole launcher, and stderr is
     # captured separately so a genuine failure isn't silently indistinguishable
-    # from agentwatch simply not being set up yet.
-    AGENTWATCH_SOCKET_DIR_ERR_FILE="$(mktemp)"
-    if AGENTWATCH_SOCKET_DIR="$(timeout 5s "${AGENTWATCH_BIN}" socket-dir 2>"${AGENTWATCH_SOCKET_DIR_ERR_FILE}")"; then
+    # from cenci simply not being set up yet.
+    CENCI_SOCKET_DIR_ERR_FILE="$(mktemp)"
+    if CENCI_SOCKET_DIR="$(timeout 5s "${CENCI_BIN}" socket-dir 2>"${CENCI_SOCKET_DIR_ERR_FILE}")"; then
         :
     else
-        AGENTWATCH_SOCKET_DIR_STATUS=$?
-        AGENTWATCH_SOCKET_DIR=""
-        AGENTWATCH_SOCKET_DIR_FAILED=true
-        AGENTWATCH_SOCKET_DIR_ERR="$(cat "${AGENTWATCH_SOCKET_DIR_ERR_FILE}")"
-        if [[ "${AGENTWATCH_SOCKET_DIR_STATUS}" -eq 124 ]]; then
-            echo "Warning: 'agentwatch socket-dir' timed out after 5s; skipping agentwatch wiring for this launch." >&2
+        CENCI_SOCKET_DIR_STATUS=$?
+        CENCI_SOCKET_DIR=""
+        CENCI_SOCKET_DIR_FAILED=true
+        CENCI_SOCKET_DIR_ERR="$(cat "${CENCI_SOCKET_DIR_ERR_FILE}")"
+        if [[ "${CENCI_SOCKET_DIR_STATUS}" -eq 124 ]]; then
+            echo "Warning: 'cenci socket-dir' timed out after 5s; skipping cenci wiring for this launch." >&2
         else
-            echo "Warning: 'agentwatch socket-dir' failed (exit ${AGENTWATCH_SOCKET_DIR_STATUS}): ${AGENTWATCH_SOCKET_DIR_ERR}" >&2
+            echo "Warning: 'cenci socket-dir' failed (exit ${CENCI_SOCKET_DIR_STATUS}): ${CENCI_SOCKET_DIR_ERR}" >&2
         fi
     fi
-    rm -f "${AGENTWATCH_SOCKET_DIR_ERR_FILE}"
+    rm -f "${CENCI_SOCKET_DIR_ERR_FILE}"
 fi
-AGENTWATCH_EVENTS_SOCKET="${AGENTWATCH_SOCKET_DIR}/agentwatch-events.sock"
-AGENTWATCH_AVAILABLE=false
+CENCI_EVENTS_SOCKET="${CENCI_SOCKET_DIR}/cenci-events.sock"
+CENCI_AVAILABLE=false
 
-# The host daemon starts lazily (the first `agentwatch notify` from a host
+# The host daemon starts lazily (the first `cenci notify` from a host
 # session spawns it), so right after boot the events socket may not exist even
-# though agentwatch is installed. Missing it here would create the shared
-# container without any agentwatch wiring — permanently, since the container
+# though cenci is installed. Missing it here would create the shared
+# container without any cenci wiring — permanently, since the container
 # is long-lived and later launches only exec into it (#195). Start the daemon
 # ourselves (a redundant start is a no-op thanks to its already-running guard)
 # and wait briefly for the socket to appear.
-if [[ -n "${AGENTWATCH_SOCKET_DIR}" && ! -S "${AGENTWATCH_EVENTS_SOCKET}" ]]; then
-    nohup "${AGENTWATCH_BIN}" daemon >/dev/null 2>&1 &
+if [[ -n "${CENCI_SOCKET_DIR}" && ! -S "${CENCI_EVENTS_SOCKET}" ]]; then
+    nohup "${CENCI_BIN}" daemon >/dev/null 2>&1 &
     for _ in {1..30}; do
-        [[ -S "${AGENTWATCH_EVENTS_SOCKET}" ]] && break
+        [[ -S "${CENCI_EVENTS_SOCKET}" ]] && break
         sleep 0.1
     done
 fi
 
-if [[ -n "${AGENTWATCH_SOCKET_DIR}" && -S "${AGENTWATCH_EVENTS_SOCKET}" ]]; then
-    AGENTWATCH_AVAILABLE=true
-elif [[ -x "${AGENTWATCH_BIN}" && "${AGENTWATCH_SOCKET_DIR_FAILED}" == false ]]; then
-    echo "Warning: agentwatch is installed but its events socket is unavailable; sessions in this container will not report to the host status bars." >&2
+if [[ -n "${CENCI_SOCKET_DIR}" && -S "${CENCI_EVENTS_SOCKET}" ]]; then
+    CENCI_AVAILABLE=true
+elif [[ -x "${CENCI_BIN}" && "${CENCI_SOCKET_DIR_FAILED}" == false ]]; then
+    echo "Warning: cenci is installed but its events socket is unavailable; sessions in this container will not report to the host status bars." >&2
 fi
 
 # ── Build agent command args ─────────────────────────────────────
@@ -727,7 +727,7 @@ else
 fi
 
 # ── Exec env forwarding (for attach path) ───────────────────────
-EXEC_ENV_ARGS=(-u dev -e "TMUX_PANE=${TMUX_PANE:-}" -e "AGENT_SAND=1" -e "AGENT_SAND_AGENT=${AGENT}")
+EXEC_ENV_ARGS=(-u dev -e "TMUX_PANE=${TMUX_PANE:-}" -e "CENCI_SANDBOX=1" -e "AGENT_SAND_AGENT=${AGENT}")
 [[ -n "${CONTEXT7_API_KEY:-}" ]] && EXEC_ENV_ARGS+=(-e "CONTEXT7_API_KEY=${CONTEXT7_API_KEY}")
 [[ -n "${OPENAI_API_KEY:-}" ]] && EXEC_ENV_ARGS+=(-e "OPENAI_API_KEY=${OPENAI_API_KEY}")
 
@@ -758,13 +758,13 @@ wait_until_ready() {
 
 # A running container's mounts are fixed for its whole lifetime: if it was
 # created while the host events socket was missing, attaching can never bring
-# the agentwatch wiring back. Detect that and say how to fix it instead of
+# the cenci wiring back. Detect that and say how to fix it instead of
 # letting sessions silently vanish from the host status bars (#195).
 warn_if_unwired() {
-    "${AGENTWATCH_AVAILABLE}" || return 0
+    "${CENCI_AVAILABLE}" || return 0
     if ! "${RUNTIME}" inspect --format '{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}}' "${CONTAINER_NAME}" 2>/dev/null \
-        | grep -qx "${AGENTWATCH_SOCKET_MOUNT_DEST}"; then
-        echo "Warning: container '${CONTAINER_NAME}' was created without agentwatch wiring; its sessions will not report to the host status bars. Run '${RUNTIME} stop ${CONTAINER_NAME}' and relaunch to fix." >&2
+        | grep -qx "${CENCI_SOCKET_MOUNT_DEST}"; then
+        echo "Warning: container '${CONTAINER_NAME}' was created without cenci wiring; its sessions will not report to the host status bars. Run '${RUNTIME} stop ${CONTAINER_NAME}' and relaunch to fix." >&2
     fi
 }
 
@@ -773,7 +773,7 @@ if "${RUNTIME}" ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAM
     warn_if_unwired
     # Containers created by this launcher initialize asynchronously. Older
     # attached containers have no lifecycle label and are already initialized.
-    if [[ "$("${RUNTIME}" inspect --format '{{ index .Config.Labels "agent-sand.lifecycle" }}' "${CONTAINER_NAME}" 2>/dev/null || true)" == detached ]]; then
+    if [[ "$("${RUNTIME}" inspect --format '{{ index .Config.Labels "cenci-sand.lifecycle" }}' "${CONTAINER_NAME}" 2>/dev/null || true)" == detached ]]; then
         wait_until_ready
     fi
     run_agent
@@ -787,7 +787,7 @@ fi
 RUN_ARGS=(
     --name "${CONTAINER_NAME}"
     --hostname "${HOSTNAME_VALUE}"
-    --label "agent-sand.lifecycle=detached"
+    --label "cenci-sand.lifecycle=detached"
     -d --init --rm
     --workdir "${WORKDIR}"
 
@@ -811,8 +811,8 @@ RUN_ARGS=(
     # Terminal
     -e "TERM=${TERM:-xterm-256color}"
 
-    # Container marker (both docker & podman) — agentflow configure detects this
-    -e "AGENT_SAND=1"
+    # Container marker (both docker & podman) — cenci configure detects this
+    -e "CENCI_SANDBOX=1"
 
     # Internal contract used by the entrypoint to provision the selected
     # agent's native plugin store.
@@ -837,11 +837,11 @@ for gitconfig in "${HOME}/.config/git/config" "${HOME}/.gitconfig"; do
     fi
 done
 
-# Agentwatch (optional)
-if "${AGENTWATCH_AVAILABLE}"; then
+# Cenci (optional)
+if "${CENCI_AVAILABLE}"; then
     RUN_ARGS+=(
-        -v "${AGENTWATCH_BIN}:/usr/local/bin/agentwatch:ro"
-        -v "${AGENTWATCH_SOCKET_DIR}:${AGENTWATCH_SOCKET_MOUNT_DEST}:ro"
+        -v "${CENCI_BIN}:/usr/local/bin/cenci:ro"
+        -v "${CENCI_SOCKET_DIR}:${CENCI_SOCKET_MOUNT_DEST}:ro"
         -e "XDG_RUNTIME_DIR=/run/user/1000"
         -e "TMUX_PANE=${TMUX_PANE:-}"
     )

@@ -2,7 +2,7 @@
 # Shared settings migration + plugin provisioning/update helpers for the
 # sandbox home volume.
 #
-# Sourced by entrypoint.sh (in the container), by `agent-sand
+# Sourced by entrypoint.sh (in the container), by `cenci-sand
 # --update-plugins` (via the copy baked at /usr/local/bin/lib/), and by the
 # test harnesses (dev-sandbox/tests/settings-merge.test.sh,
 # dev-sandbox/tests/heal-plugins.test.sh) on the host, so this logic lives in
@@ -11,7 +11,7 @@
 # What the migration does, in one idempotent pass:
 #   * seeds the container-only bypass-mode keys (see entrypoint.sh for why
 #     these are safe only inside the container),
-#   * enables the current agentwatch/agentflow plugins from the agent-stack
+#   * enables the current cenci-watch/cenci plugins from the cenci
 #     marketplace so coding-agent sessions are visible on the host status bar,
 #   * removes the stale pre-rename muxwatch/ccflow plugins and the old
 #     claude-tools marketplace, which would otherwise 404 on bootstrap and
@@ -24,8 +24,8 @@
 BYPASS_SETTINGS='{"skipDangerousModePermissionPrompt":true,"permissions":{"defaultMode":"bypassPermissions"}}'
 
 # Current marketplace + plugins that make sandbox sessions visible to the host
-# agentwatch daemon.
-PLUGIN_SETTINGS='{"extraKnownMarketplaces":{"agent-stack":{"source":{"source":"github","repo":"matteobortolazzo/agent-stack"}}},"enabledPlugins":{"agentwatch@agent-stack":true,"agentflow@agent-stack":true}}'
+# cenci daemon.
+PLUGIN_SETTINGS='{"extraKnownMarketplaces":{"cenci":{"source":{"source":"github","repo":"matteobortolazzo/cenci"}}},"enabledPlugins":{"cenci-watch@cenci":true,"cenci@cenci":true}}'
 
 # Status line rendered by the CCometixLine binary baked into the base image
 # (Dockerfile.base). Seeded only when the volume has no statusLine of its own:
@@ -164,7 +164,7 @@ provision_plugins() {
 # one git pull, and nothing else.
 #
 # The whole pass is TTL-gated on a stamp file so rapid stop/start cycles stay
-# quiet: <ttl-minutes> 0 forces it (the manual `agent-sand --update-plugins`
+# quiet: <ttl-minutes> 0 forces it (the manual `cenci-sand --update-plugins`
 # path). The stamp is touched even when the refresh fails, so an offline boot
 # doesn't retry on every restart within the window. Same guarantee as
 # provisioning: failures warn to stderr and never block container start.
@@ -174,7 +174,7 @@ update_plugins() {
 
     command -v claude >/dev/null 2>&1 || return 0
 
-    local stamp="${plugins_dir}/.agent-sand-update-stamp"
+    local stamp="${plugins_dir}/.cenci-sand-update-stamp"
     if [[ "${ttl_minutes}" -gt 0 && -f "${stamp}" ]] \
         && [[ -n "$(find "${stamp}" -mmin "-${ttl_minutes}" 2>/dev/null)" ]]; then
         return 0
@@ -268,7 +268,7 @@ update_codex_plugins() {
 
     command -v codex >/dev/null 2>&1 || return 0
 
-    local stamp="${codex_dir}/.agent-sand-update-stamp"
+    local stamp="${codex_dir}/.cenci-sand-update-stamp"
     if [[ "${ttl_minutes}" -gt 0 && -f "${stamp}" ]] \
         && [[ -n "$(find "${stamp}" -mmin "-${ttl_minutes}" 2>/dev/null)" ]]; then
         return 0

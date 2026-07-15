@@ -1,7 +1,7 @@
 #!/bin/bash
-# Pure repo-scoping helpers for agent-sand.
+# Pure repo-scoping helpers for cenci-sand.
 #
-# Sourced by agent-sand (on the host) and by the test harness
+# Sourced by cenci-sand (on the host) and by the test harness
 # (dev-sandbox/tests/repo-scope.test.sh) so the logic that namespaces
 # containers/volumes/images per repo lives in exactly one place.
 #
@@ -65,7 +65,7 @@ has_repo_image() {
     [[ -f "${repo_root}/.agent-sand/Dockerfile" ]]
 }
 
-# select_image <repo-root> <repo-slug>: print the image tag agent-sand should
+# select_image <repo-root> <repo-slug>: print the image tag cenci-sand should
 # use for this repo. A per-repo Dockerfile at <repo-root>/.agent-sand/Dockerfile
 # opts the repo into its own image; otherwise fall back to the shared monolith
 # image.

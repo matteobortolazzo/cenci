@@ -5,7 +5,7 @@ sudo sh -c 'grep -q "$(hostname)" /etc/hosts || echo "127.0.0.1 $(hostname)" >> 
 # ── UID/GID remap to match the host user, then drop to dev (#154) ─────
 # Dockerfile.base bakes 'dev' as uid/gid 1000. On hosts where the invoking
 # user isn't 1000, files the container writes into bind-mounted host paths
-# end up owned by a UID that doesn't match the host user. agent-sand passes
+# end up owned by a UID that doesn't match the host user. cenci-sand passes
 # the host user's id as HOST_UID/HOST_GID and now starts the container as
 # root (--user root) precisely so this block can run before any process
 # exists under the 'dev' account: usermod/groupmod refuse to renumber an
@@ -50,7 +50,7 @@ if [[ "$(id -u)" -eq 0 ]]; then
     # secure_path in /etc/sudoers strips PATH additions (~/.local/bin,
     # ~/go/bin) even with --preserve-env=PATH; the explicit env "PATH=..."
     # assignment defeats that. --preserve-env carries everything else
-    # (TERM, XDG_RUNTIME_DIR, AGENT_SAND, OPENAI_API_KEY, ...) across.
+    # (TERM, XDG_RUNTIME_DIR, CENCI_SANDBOX, OPENAI_API_KEY, ...) across.
     exec sudo --preserve-env -u dev env "PATH=${PATH}" "HOME=/home/dev" \
         /usr/local/bin/entrypoint.sh "$@"
 fi
@@ -74,8 +74,8 @@ fi
 # (so --dangerously-skip-permissions never prompts and never downgrades to
 # `default` in headless runs — the container boundary is what makes this safe;
 # see docs/cohesive-package.md §2.1, and they must never reach the host
-# ~/.claude/settings.json), the current agentwatch/agentflow plugins from the
-# agent-stack marketplace (so sandbox sessions are visible on the host status
+# ~/.claude/settings.json), the current cenci-watch/cenci plugins from the
+# cenci marketplace (so sandbox sessions are visible on the host status
 # bar), a removal of the stale pre-rename muxwatch/ccflow/claude-tools
 # stack that old home volumes still carry, and default UI preferences
 # (fullscreen TUI, clear-context-on-plan-accept) seeded only when the volume
@@ -150,9 +150,9 @@ fi
 # Codex sandboxes use the baked-in Codex CLI; missing CLIs and offline failures
 # only warn to stderr.
 if [[ "${AGENT_SAND_AGENT:-claude}" == codex ]]; then
-    provision_codex_plugins /home/dev/.codex agent-stack matteobortolazzo/agent-stack agentflow agentwatch
+    provision_codex_plugins /home/dev/.codex cenci matteobortolazzo/cenci cenci cenci-watch
 else
-    provision_plugins /home/dev/.claude/plugins agent-stack matteobortolazzo/agent-stack agentflow agentwatch
+    provision_plugins /home/dev/.claude/plugins cenci matteobortolazzo/cenci cenci cenci-watch
 fi
 
 # ── Keep plugins current (TTL-gated) ──────────────────────────────
@@ -161,12 +161,12 @@ fi
 # push to main. update_plugins refreshes the marketplace clone (one git pull)
 # and bumps only the plugins whose installed version differs, gated by a
 # 30-minute stamp so rapid stop/start cycles make zero network calls. Forced
-# variant (ttl 0) is `agent-sand --update-plugins`. Same guarantee as above:
+# variant (ttl 0) is `cenci-sand --update-plugins`. Same guarantee as above:
 # failures warn to stderr and never block container start.
 if [[ "${AGENT_SAND_AGENT:-claude}" == codex ]]; then
-    update_codex_plugins /home/dev/.codex agent-stack 30 agentflow agentwatch
+    update_codex_plugins /home/dev/.codex cenci 30 cenci cenci-watch
 else
-    update_plugins /home/dev/.claude/plugins agent-stack 30 agentflow agentwatch
+    update_plugins /home/dev/.claude/plugins cenci 30 cenci cenci-watch
 fi
 
 # ── Skip Claude Code's first-run onboarding wizard ────────────────
