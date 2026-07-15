@@ -820,11 +820,16 @@ func TestOpen_FreshCreate_PinsEntrypointContract(t *testing.T) {
 		"-v " + socketDir + ":/run/user/1000/cenci:ro",
 		":/usr/local/bin/cenci:ro",
 		"-e XDG_RUNTIME_DIR=/run/user/1000",
-		"-e TMUX_PANE=%7",
 	} {
 		if !strings.Contains(runLine, want) {
 			t.Errorf("run argv missing %q:\n%s", want, runLine)
 		}
+	}
+	// TMUX_PANE must only travel per exec session (asserted on the attach
+	// below): baked into the container-lifetime env it goes stale when the
+	// creating pane closes, and reap-orphans would kill PID 1 (#356).
+	if strings.Contains(runLine, "TMUX_PANE") {
+		t.Errorf("run argv must not carry TMUX_PANE (#356):\n%s", runLine)
 	}
 	if !strings.HasSuffix(runLine, "cenci-sandbox:latest -c touch /tmp/cenci-ready && exec sleep infinity") {
 		t.Errorf("run argv must end with the image and PID-1 readiness tail, got:\n%s", runLine)

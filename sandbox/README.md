@@ -430,7 +430,9 @@ The launcher automatically:
   wiring survives a host daemon restart, since the container follows the host
   path to the daemon's fresh socket instead of pinning the inode that existed
   at container creation
-- Passes `$TMUX_PANE` for tmux window status updates
+- Passes `$TMUX_PANE` per exec session (never at container creation, where it
+  would land in PID 1's environment and go stale once the creating pane
+  closes — #356) for tmux window status updates
 
 A container's mounts are fixed for its whole lifetime. If the shared container
 was created while the events socket directory was unavailable, later launches
@@ -551,7 +553,10 @@ override with `CENCI_SANDBOX_REAP_GRACE_SECS`, e.g. `=0` for fast/CI runs). It s
 every running `*-cenci-*` container across all installed runtimes (docker and podman).
 If no tmux server is running, every `TMUX_PANE`-carrying process is treated as orphaned
 and the output says so explicitly. Processes with a missing/empty `TMUX_PANE` (manual
-non-tmux launches) are never signaled. Prints one `reaped\t<container>\t<pid>\t<pane>`
+non-tmux launches) are never signaled, and neither is PID 1 (the container's init,
+which carries a stale creation-time `TMUX_PANE` on containers created by older
+launchers — killing it would destroy the whole shared container, #356).
+Prints one `reaped\t<container>\t<pid>\t<pane>`
 line per reaped process plus a final count, and exits non-zero on a genuine runtime
 error (e.g. exec failure) rather than swallowing it.
 

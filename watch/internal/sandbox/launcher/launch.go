@@ -303,8 +303,8 @@ func (e *Engine) baseRunArgs(scope Scope) []string {
 // assembleVolumeMounts builds every bind/named-volume mount: the workspace
 // and home volumes, the claude binary (read-only; codex is baked into the
 // image instead), git config (read-only, if present), the optional cenci
-// binary + host socket dir wiring (paired with its own XDG_RUNTIME_DIR/
-// TMUX_PANE env under the same cenciAvailable guard as the mount itself),
+// binary + host socket dir wiring (paired with its own XDG_RUNTIME_DIR env
+// under the same cenciAvailable guard as the mount itself),
 // claude credentials staging, and GitHub CLI credentials staging. Codex
 // credentials are handled separately by validateCredentials, since a missing
 // codex auth source is a hard launch error rather than an optional mount.
@@ -330,13 +330,16 @@ func (e *Engine) assembleVolumeMounts(agent, agentBin, cenciBin, socketDir strin
 		}
 	}
 
-	// Cenci (optional).
+	// Cenci (optional). TMUX_PANE is deliberately NOT set here: a
+	// creation-time value lands in /proc/1/environ of the long-lived shared
+	// container and goes stale once the creating pane closes, which made
+	// reap-orphans kill PID 1 and tear down every attached session (#356).
+	// Pane identity is injected per exec session instead (execEnvArgs).
 	if cenciAvailable {
 		args = append(args,
 			"-v", cenciBin+":/usr/local/bin/cenci:ro",
 			"-v", socketDir+":"+cenciSocketMountDest+":ro",
 			"-e", "XDG_RUNTIME_DIR=/run/user/1000",
-			"-e", "TMUX_PANE="+os.Getenv("TMUX_PANE"),
 		)
 	}
 

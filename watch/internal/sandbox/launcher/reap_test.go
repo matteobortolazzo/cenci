@@ -24,6 +24,7 @@ exec)
   case "$*" in
   *TMUX_PANE=*) printf '%s' "${FAKE_SCAN:-}" ;;
   *__GONE__*) printf '__GONE__\n' ;;
+  *"kill -TERM"*) [ -n "${FAKE_TERM_FAIL:-}" ] && exit 1 ;;
   esac
   ;;
 esac
@@ -83,5 +84,77 @@ func TestReapOrphans_LivePaneNeverSignaled(t *testing.T) {
 	}
 	if calls := readCallLog(t, callLog); containsPrefix(calls, "exec -u root claude-cenci-live kill") {
 		t.Errorf("live-pane process signaled; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+// PID 1 must never be signaled, even when its TMUX_PANE names a dead pane:
+// containers created by pre-#356 launchers baked the creating pane's id into
+// the container-lifetime env, so PID 1 (docker-init) matches the orphan
+// predicate once that pane closes. Killing it destroys the whole shared
+// container and every agent session exec'd inside it. Other orphans in the
+// same container must still be reaped.
+func TestReapOrphans_ContainerInitNeverSignaled(t *testing.T) {
+	dir := t.TempDir()
+	callLog := filepath.Join(dir, "calls.txt")
+	writeReapFakes(t, dir, callLog)
+	t.Setenv("PATH", dir)
+	t.Setenv("CENCI_SANDBOX_REAP_GRACE_SECS", "0")
+	t.Setenv("FAKE_PS", "claude-cenci-shared\n")
+	t.Setenv("FAKE_SCAN", "1\t%1\t50\n5001\t%2\t1000\n")
+	t.Setenv("FAKE_LIVE_PANES", "%99")
+
+	var stdout, stderr bytes.Buffer
+	if err := ReapOrphans(&stdout, &stderr); err != nil {
+		t.Fatalf("ReapOrphans: %v\nstderr: %s", err, stderr.String())
+	}
+
+	if !strings.Contains(stdout.String(), "Note: process 1 in container claude-cenci-shared is the container init; skipping.") {
+		t.Errorf("missing init-skip note; stdout:\n%s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "reaped\tclaude-cenci-shared\t5001\t%2") {
+		t.Errorf("other orphan not reaped; stdout:\n%s", stdout.String())
+	}
+	calls := readCallLog(t, callLog)
+	if containsLine(calls, "exec -u root claude-cenci-shared kill -TERM 1") ||
+		containsLine(calls, "exec -u root claude-cenci-shared kill -KILL 1") {
+		t.Errorf("PID 1 was signaled; calls:\n%s", strings.Join(calls, "\n"))
+	}
+	if !containsLine(calls, "exec -u root claude-cenci-shared kill -TERM 5001") {
+		t.Errorf("missing kill -TERM for real orphan; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+// A pid that exits between the scan and the SIGTERM is a benign race, not a
+// reap failure: the probe reports __GONE__ and the run continues. Guaranteed
+// to happen on containers created by pre-#356 launchers, where the scan's own
+// in-container sh inherits the stale creation-baked TMUX_PANE and reports
+// itself — always exited by kill time.
+func TestReapOrphans_GoneBeforeTermIsSkippedNotFatal(t *testing.T) {
+	dir := t.TempDir()
+	callLog := filepath.Join(dir, "calls.txt")
+	writeReapFakes(t, dir, callLog)
+	t.Setenv("PATH", dir)
+	t.Setenv("CENCI_SANDBOX_REAP_GRACE_SECS", "0")
+	t.Setenv("FAKE_PS", "claude-cenci-race\n")
+	t.Setenv("FAKE_SCAN", "7001\t%3\t900\n")
+	t.Setenv("FAKE_LIVE_PANES", "%99")
+	t.Setenv("FAKE_TERM_FAIL", "1")
+
+	var stdout, stderr bytes.Buffer
+	if err := ReapOrphans(&stdout, &stderr); err != nil {
+		t.Fatalf("ReapOrphans: %v\nstderr: %s", err, stderr.String())
+	}
+
+	if !strings.Contains(stdout.String(), "Note: process 7001 in container claude-cenci-race exited before SIGTERM could be delivered; skipping.") {
+		t.Errorf("missing gone-before-TERM note; stdout:\n%s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "reaped\t") {
+		t.Errorf("nothing should be reported reaped; stdout:\n%s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "No orphaned processes found.") {
+		t.Errorf("missing no-op summary; stdout:\n%s", stdout.String())
+	}
+	if calls := readCallLog(t, callLog); containsPrefix(calls, "exec -u root claude-cenci-race kill -KILL") {
+		t.Errorf("SIGKILL must not follow a gone-before-TERM skip; calls:\n%s", strings.Join(calls, "\n"))
 	}
 }

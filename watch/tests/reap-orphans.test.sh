@@ -553,6 +553,10 @@ case_10_genuine_term_failure_hard_fails() {
     write_scan "${container}" $'10001\t%13\t10000'
     export MOCK_LIVE_PANES="%99"
     export MOCK_TERM_FAIL="${container}"
+    # The process is still alive at the post-failure probe, so this is a
+    # genuine delivery failure — not the benign exited-before-TERM race
+    # (case 18), which the probe classifies via __GONE__.
+    set_live_start 10001 10000
     run_reap
     assert_exit_nonzero
     assert_contains "Error:"
@@ -685,6 +689,53 @@ case_16_corrupted_probe_output_falls_back_to_kill() {
 }
 
 # ---------------------------------------------------------------------------
+case_17_container_init_never_signaled() {
+    echo "case: pid 1 (container init) is never signaled even with a dead pane; a paired orphan in the same container is still reaped"
+    reset_state
+    local container="claude-cenci-init"
+    add_podman_container "${container}"
+    # Containers created by pre-#356 launchers baked the creating pane's id
+    # into the container-lifetime env, so pid 1 carries a stale TMUX_PANE once
+    # that pane closes. Signaling init destroys the whole shared container and
+    # every agent session exec'd into it. The skip precedes pane-liveness
+    # classification entirely, so it also holds in no-tmux-server mode.
+    write_scan "${container}" $'1\t%20\t50' $'27001\t%21\t17000'
+    export MOCK_LIVE_PANES="%99"
+    set_gone 27001
+    run_reap
+    assert_exit_zero
+    assert_contains "Note: process 1 in container ${container} is the container init; skipping."
+    assert_contains "$(reaped_line "${container}" 27001 "%21")"
+    assert_calls_not_contains "podman exec -u root ${container} kill -TERM 1"
+    assert_calls_not_contains "podman exec -u root ${container} kill -KILL 1"
+    assert_contains "Reaped 1 orphaned process(es)."
+}
+
+# ---------------------------------------------------------------------------
+case_18_gone_before_term_is_benign() {
+    echo "case: a pid that exits between the scan and the SIGTERM is skipped with a note, not a hard error"
+    reset_state
+    local container="claude-cenci-goneterm"
+    add_podman_container "${container}"
+    # Guaranteed occurrence on containers created by pre-#356 launchers: the
+    # scan's own in-container sh inherits the stale creation-baked TMUX_PANE
+    # and reports itself, but has always exited by kill time. Must not abort
+    # the run (which would leave later containers unscanned).
+    write_scan "${container}" $'18001\t%22\t18000'
+    export MOCK_LIVE_PANES="%99"
+    export MOCK_TERM_FAIL="${container}"
+    set_gone 18001
+    run_reap
+    assert_exit_zero
+    assert_contains "Note: process 18001 in container ${container} exited before SIGTERM could be delivered; skipping."
+    assert_not_contains "Error:"
+    local reaped_needle
+    reaped_needle=$'reaped\t'
+    assert_not_contains "${reaped_needle}"
+    assert_contains "No orphaned processes found."
+}
+
+# ---------------------------------------------------------------------------
 case_1_orphan_termed
 case_2_term_resistant_escalates_to_kill
 case_3_empty_pane_never_signaled
@@ -701,6 +752,8 @@ case_13_pid_reuse_during_grace_skips_kill
 case_14_liveness_transport_failure_hard_fails
 case_15_corrupted_scan_start_falls_back_to_kill
 case_16_corrupted_probe_output_falls_back_to_kill
+case_17_container_init_never_signaled
+case_18_gone_before_term_is_benign
 
 print_summary
 [[ "${FAILURES}" -eq 0 ]]
