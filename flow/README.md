@@ -81,11 +81,11 @@ gh auth login
 ```
 The `gh` CLI stores credentials in `~/.config/gh/hosts.yml`. It also respects `GITHUB_TOKEN`/`GH_TOKEN` env vars as a fallback for non-interactive environments.
 
-### Runtime — the `cenci-sand` container
+### Runtime — the cenci-sandbox container
 
-cenci runs inside the [`sandbox`](../sandbox) `cenci-sand` container with `--dangerously-skip-permissions`. The **container is the security boundary** — it provides the filesystem and network isolation for autonomous execution, so Claude Code's own host sandbox stays disabled. `permissions.allow`/`deny` are still written to `.claude/settings.json` as defense-in-depth for the case where you run plain `claude` (no skip-permissions) inside the container, e.g. via `cenci-sand --shell`.
+cenci runs inside the [`sandbox`](../sandbox) container with `--dangerously-skip-permissions`. The **container is the security boundary** — it provides the filesystem and network isolation for autonomous execution, so Claude Code's own host sandbox stays disabled. `permissions.allow`/`deny` are still written to `.claude/settings.json` as defense-in-depth for the case where you run plain `claude` (no skip-permissions) inside the container, e.g. via `cenci open --shell`.
 
-There are no bubblewrap/socat prerequisites — the container supplies the isolation. Launch it with `cenci-sand` (see the [`sandbox` README](../sandbox)), then run `/cenci:configure` inside it.
+There are no bubblewrap/socat prerequisites — the container supplies the isolation. Launch it with `cn` / `cenci open` (see the [`sandbox` README](../sandbox)), then run `/cenci:configure` inside it.
 
 ## Installation
 
@@ -377,7 +377,7 @@ External integrations use the `gh` CLI rather than MCP servers, keeping permissi
 
 ## Known Limitations
 
-- **SSH git remotes in the container**: The `cenci-sand` container injects the `gh` CLI's HTTPS credentials only (`~/.config/gh/hosts.yml`) — your SSH keys are **not** mounted into the container. So pushing to an SSH remote (`git@github.com:...`) has no credentials and fails. **Recommended**: use HTTPS remotes (`git remote set-url origin https://github.com/<owner>/<repo>.git`) so the `gh` credential helper authenticates the push, or push manually when prompted.
+- **SSH git remotes in the container**: The sandbox container injects the `gh` CLI's HTTPS credentials only (`~/.config/gh/hosts.yml`) — your SSH keys are **not** mounted into the container. So pushing to an SSH remote (`git@github.com:...`) has no credentials and fails. **Recommended**: use HTTPS remotes (`git remote set-url origin https://github.com/<owner>/<repo>.git`) so the `gh` credential helper authenticates the push, or push manually when prompted.
 - **New repos with no commits**: `git worktree add` requires at least one commit. The pipeline handles this automatically by creating an initial commit if needed.
 
 ## Troubleshooting
@@ -394,7 +394,7 @@ Your repo has no commits. The pipeline should handle this automatically. If it d
 Run `gh auth login` and follow the prompts. Verify with `gh auth status`.
 
 ### Agent prompts for file edit permissions
-This should not happen inside the `cenci-sand` container, where Claude Code runs with `--dangerously-skip-permissions` and ignores `permissions.allow`/`deny` entirely. If you see prompts, you are likely running plain `claude` (no skip-permissions) — verify `.claude/settings.json` includes `Write(*)` and `Edit(*)` in `permissions.allow`, or re-run `/cenci:configure` to regenerate settings.
+This should not happen inside the sandbox container, where Claude Code runs with `--dangerously-skip-permissions` and ignores `permissions.allow`/`deny` entirely. If you see prompts, you are likely running plain `claude` (no skip-permissions) — verify `.claude/settings.json` includes `Write(*)` and `Edit(*)` in `permissions.allow`, or re-run `/cenci:configure` to regenerate settings.
 
 ### Subagent reviews blocked: "Usage credits required for 1M context"
 The pipeline ran inline and skipped the dedicated reviewer agents (security-reviewer, code-reviewer, silent-failure-hunter). This happens when your session runs a **1M-context** model (model ID ends in `[1m]`, e.g. `claude-opus-4-8[1m]`).

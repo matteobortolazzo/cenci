@@ -56,7 +56,7 @@ body:
       label: Repro steps
       description: Exact steps to reproduce the bug, from a clean state if possible.
       placeholder: |
-        1. Run `cenci-sand --shell`
+        1. Run `cenci open --shell`
         2. ...
     validations:
       required: true

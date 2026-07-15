@@ -48,13 +48,13 @@ curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install
 Then launch your agent inside the project boundary:
 
 ```bash
-cenci-sand   # Claude Code
-cn xt        # Codex
+cn      # Claude Code (cenci open)
+cn xt   # Codex
 ```
 
 The installer detects available clients, registers the marketplace, installs all
-three layers, and creates the matching launchers. It also installs a small
-`cenci` command for routine maintenance:
+three layers, and puts the `cenci` binary — with its `cn` launch alias — on your
+PATH. The same command handles routine maintenance:
 
 ```bash
 cenci doctor   # inspect prerequisites and installation state

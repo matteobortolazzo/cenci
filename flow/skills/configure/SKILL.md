@@ -48,7 +48,7 @@ If user context was provided, use it to steer the configuration (e.g., skip cert
 
 ### Container Detection
 
-cenci runs inside `sandbox`'s `cenci-sand` container with `--dangerously-skip-permissions`. The **container is the security boundary** — there is no host profile. Claude Code's own host sandbox stays disabled, and `permissions.allow`/`deny` are kept only as defense-in-depth for plain `claude` runs inside the container (e.g. `cenci-sand --shell`).
+cenci runs inside `sandbox`'s cenci-sandbox container with `--dangerously-skip-permissions`. The **container is the security boundary** — there is no host profile. Claude Code's own host sandbox stays disabled, and `permissions.allow`/`deny` are kept only as defense-in-depth for plain `claude` runs inside the container (e.g. `cenci open --shell`).
 
 Detect the container (stop at the first match; run each check as its **own** Bash call, per `cenci:shell-rules` — never compound them):
 
@@ -57,8 +57,8 @@ Detect the container (stop at the first match; run each check as its **own** Bas
 
 This detection is a **non-blocking advisory** — it never gates configuration and never uses `AskUserQuestion`:
 
-- **In container**: emit an informational message: "Detected the `cenci-sand` container — the container is the security boundary. Claude Code's host sandbox stays disabled." Then continue normally.
-- **Not in container**: emit an advisory and continue anyway: "cenci is designed to run inside the `cenci-sand` container (the security boundary). You appear to be running on the host — continuing, but running outside the container is unsupported." Proceed with the same container-shaped output.
+- **In container**: emit an informational message: "Detected the cenci-sandbox container — the container is the security boundary. Claude Code's host sandbox stays disabled." Then continue normally.
+- **Not in container**: emit an advisory and continue anyway: "cenci is designed to run inside the cenci-sandbox container (the security boundary). You appear to be running on the host — continuing, but running outside the container is unsupported." Proceed with the same container-shaped output.
 
 **Default values from existing config**: When `existingConfig` is not null, each question below MUST present the existing value as the pre-selected default (list it first, marked "(current)"). The user can accept with one click or change it. New fields not in `existingConfig` (e.g., `lspServers` when upgrading from a pre-LSP config) have no default and are asked normally.
 
@@ -128,7 +128,7 @@ Generate a slug for each project from its directory name (e.g., `packages/api` �
 3. **Branching strategy**: "What's your branch naming convention?"
    - Default suggestion: `feature/<id>-<description>`
 
-(There is no question 4 — sandboxing is not asked. The `cenci-sand` container is the security boundary and Claude Code's host sandbox is always disabled; numbering of the remaining questions is kept for stability.)
+(There is no question 4 — sandboxing is not asked. The cenci-sandbox container is the security boundary and Claude Code's host sandbox is always disabled; numbering of the remaining questions is kept for stability.)
 
 ### Dependency Detection
 
@@ -333,11 +333,11 @@ Include the server in `.lsp.json` regardless — it activates once the binary is
    - Python: `python-requires` from `pyproject.toml`, fallback `"3.12"`
    - Rust: `rust-toolchain.toml` or `"stable"`
 
-9. **Sandbox Dockerfile**: "Generate a sandbox Dockerfile for this repo? (Tailors the `cenci-sand` image to your stack; committed so your team shares it.)"
+9. **Sandbox Dockerfile**: "Generate a sandbox Dockerfile for this repo? (Tailors the sandbox image to your stack; committed so your team shares it.)"
    - Options: "Yes — generate `.cenci/Dockerfile`", "No — skip"
    - Default: Yes
 
-   **Agent runtime fragments**: Always include both `node.dockerfile` and `codex.dockerfile`, regardless of the detected project stack. `cenci-sand --agent codex` executes the Codex CLI baked into the selected image, and the npm-distributed Codex launcher requires Node.js. A generated per-repo image that omits either fragment cannot launch Codex.
+   **Agent runtime fragments**: Always include both `node.dockerfile` and `codex.dockerfile`, regardless of the detected project stack. `cenci open --agent codex` executes the Codex CLI baked into the selected image, and the npm-distributed Codex launcher requires Node.js. A generated per-repo image that omits either fragment cannot launch Codex.
 
    **Stack-to-fragment mapping**: In addition to the mandatory agent runtime fragments, use the detected stack from question 1 (or, for monorepos, the union of every `projects[].stack.framework` value) to select which `sandbox/fragments/*.dockerfile` blocks to include:
 
@@ -458,7 +458,7 @@ After gathering answers:
 
 4. **Create or update `.claude/settings.json`**:
 
-   Write the minimal shape below — Claude Code's host sandbox is disabled because the container is the boundary. Under `--dangerously-skip-permissions` Claude Code ignores `permissions.allow/deny`, but keep the base allow list + deny rules as defense-in-depth for the case where a user runs plain `claude` (no skip-permissions) inside the container, e.g. via `cenci-sand --shell`.
+   Write the minimal shape below — Claude Code's host sandbox is disabled because the container is the boundary. Under `--dangerously-skip-permissions` Claude Code ignores `permissions.allow/deny`, but keep the base allow list + deny rules as defense-in-depth for the case where a user runs plain `claude` (no skip-permissions) inside the container, e.g. via `cenci open --shell`.
 
    ```json
    {
@@ -679,9 +679,9 @@ For each MCP selected in question 5:
 
    **Validation (applies to both (a) and (b))**: before writing a resolved `baseVersion` anywhere (the Dockerfile's `ARG BASE_VERSION=` line or `.claude/config.json`), validate it against a strict version pattern: `^[0-9]+\.[0-9]+\.[0-9]+$` (matching the real plugin.json version format, e.g. `"0.9.0"`). This guards against a compromised marketplace entry or a tampered plugin.json in a fork injecting arbitrary content (embedded newlines, `#` comments, Dockerfile directives, or even a spoofed `# cenci:managed-end` sequence) into a file that's later `docker build`'d. If the resolved value does not match the pattern, treat `baseVersion` as unresolved and fall through to (c) — do not write the raw value into the Dockerfile or config.json.
 
-   (c) **Unresolved**: if neither (a) nor (b) yields a version that passes validation, `baseVersion` is unresolved. Store `"baseVersion": null` in `.claude/config.json`'s `sandbox` field. The Dockerfile is still generated (fragments are still selected and written) — only the `ARG BASE_VERSION=` line ships with no default value, followed by an inline comment pointing at `sandbox/README.md` for a manual pin. This is safe because `cenci-sand`'s `build_repo_image()` always passes `--build-arg BASE_VERSION=...` explicitly at build time — it resolves `BASE_VERSION` on its own regardless of what (or nothing) is baked into the file.
+   (c) **Unresolved**: if neither (a) nor (b) yields a version that passes validation, `baseVersion` is unresolved. Store `"baseVersion": null` in `.claude/config.json`'s `sandbox` field. The Dockerfile is still generated (fragments are still selected and written) — only the `ARG BASE_VERSION=` line ships with no default value, followed by an inline comment pointing at `sandbox/README.md` for a manual pin. This is safe because `cenci sandbox build`'s per-repo image build always passes `--build-arg BASE_VERSION=...` explicitly at build time — it resolves `BASE_VERSION` on its own regardless of what (or nothing) is baked into the file.
 
-   **Generated file format** — always emit the ARG/FROM pair below, **never** a literal `FROM cenci-sandbox-base:<version>`. `cenci-sand`'s `build_repo_image()` always passes `--build-arg BASE_VERSION=...` at build time; a literal `FROM` would silently drift from what's actually built:
+   **Generated file format** — always emit the ARG/FROM pair below, **never** a literal `FROM cenci-sandbox-base:<version>`. `cenci sandbox build` always passes `--build-arg BASE_VERSION=...` at build time; a literal `FROM` would silently drift from what's actually built:
 
    ```dockerfile
    # cenci:managed-begin
@@ -714,7 +714,7 @@ For each MCP selected in question 5:
 
    **Monorepo**: fragments are the mandatory Node and Codex runtime fragments plus the deduplicated union described in the Stack-to-fragment mapping table under question 9, concatenated in the dotnet → node → playwright → go → python → rust → codex order above — one `.cenci/Dockerfile` for the whole repo, not one per project.
 
-   **Committed, not ignored**: `.cenci/Dockerfile` is committed to the repo. Do **not** add `.cenci/` or `.cenci/Dockerfile` to `.gitignore` — the whole point is a team-shared, reviewed Dockerfile that `cenci-sand`'s per-repo image selection (see `sandbox/README.md`) builds identically for every teammate.
+   **Committed, not ignored**: `.cenci/Dockerfile` is committed to the repo. Do **not** add `.cenci/` or `.cenci/Dockerfile` to `.gitignore` — the whole point is a team-shared, reviewed Dockerfile that the launcher's per-repo image selection (see `sandbox/README.md`) builds identically for every teammate.
 
 6. **Write `.claude/config.json`** with their choices using **merge semantics**:
 
@@ -773,7 +773,7 @@ The `cenci` field is optional. If present, preserve existing user values during 
 - `goalAutopilot` — `true` arms a native `/goal` completion condition at Phase 2 start (Claude Code ≥ 2.1.139) so implement phases 2–9 resume through to an open PR after a mid-phase stop; `false` opts out. Default (unset): enabled where supported, a graceful no-op on older runtimes.
 - `planComment` — `true` makes implement Phase 1 also post the saved plan as a ticket comment (ticket mode only) right after marking the ticket `Planned`, for audit / off-host visibility; `.plans/` stays the executable source of truth. Default: `false` (no comment).
 
-Configure always writes `sandbox: { "enabled": false }` in `.claude/settings.json` (no `network`/`excludedCommands`/`autoAllowBashIfSandboxed`) — the `cenci-sand` container is the security boundary. The config no longer carries `profile` or `sandboxEnabled` fields; re-config strips them from older configs (see the migration-removal list below).
+Configure always writes `sandbox: { "enabled": false }` in `.claude/settings.json` (no `network`/`excludedCommands`/`autoAllowBashIfSandboxed`) — the cenci-sandbox container is the security boundary. The config no longer carries `profile` or `sandboxEnabled` fields; re-config strips them from older configs (see the migration-removal list below).
 
 Optional external usage reducer: RTK (`https://github.com/rtk-ai/rtk`) can compress shell command output before it reaches Claude Code. It is not required for cenci and should not be installed automatically, but it is worth recommending when users are hitting usage limits from command-heavy sessions. After separate installation, `rtk init -g` enables Claude Code Bash command rewriting where supported. Built-in tools like `Read`, `Grep`, and `Glob` do not pass through RTK hooks.
 
@@ -789,7 +789,7 @@ The `sandbox` field is only present when the user selected Yes in question 9. Sc
 
 Omit `sandbox` entirely when the user says No (same pattern as `cicd`/`pencil`).
 
-> **Not the same as `.claude/settings.json`'s `sandbox.enabled`.** Step 4 above always writes `"sandbox": { "enabled": false }` into `.claude/settings.json` — that key disables **Claude Code's own host sandbox**, because the `cenci-sand` container is the security boundary instead. This `.claude/config.json` `sandbox` field is unrelated: it's this ticket's per-repo `.cenci/Dockerfile` toggle, consumed by cenci's configure skill and by `cenci-sand`'s per-repo image build — not by Claude Code itself. Same field name (`sandbox.enabled`), two different files, two different consumers, two unrelated meanings. Do not conflate them when reading or writing either file.
+> **Not the same as `.claude/settings.json`'s `sandbox.enabled`.** Step 4 above always writes `"sandbox": { "enabled": false }` into `.claude/settings.json` — that key disables **Claude Code's own host sandbox**, because the cenci-sandbox container is the security boundary instead. This `.claude/config.json` `sandbox` field is unrelated: it's this ticket's per-repo `.cenci/Dockerfile` toggle, consumed by cenci's configure skill and by `cenci sandbox build`'s per-repo image build — not by Claude Code itself. Same field name (`sandbox.enabled`), two different files, two different consumers, two unrelated meanings. Do not conflate them when reading or writing either file.
 
 The `pencil` field is only present when the user was asked question 5b (frontend framework detected). Schema:
 - `pencil.enabled` — gating flag for all design features (`true` if user opted in, `false` if declined)
@@ -879,7 +879,7 @@ When migrating from an older config that has `ticketSystem`, `prSystem`, `ticket
 - When `pencil.shared` is `true`: `pencil.designPath` holds the shared path (e.g., `"designs/"`). Individual projects do **not** have `designPath`.
 - When `pencil.shared` is `false` (separate): `pencil.designPath` is omitted. Each frontend project in the `projects` array gets a `designPath` field (e.g., `"apps/web-client/designs/"`). Non-frontend projects do not get `designPath`.
 
-Report what was created and suggest next steps (e.g., "Try `/cenci:refine <ticket-id>` on a ticket"). If `sandbox.enabled` is `true`, mention the generated/committed `.cenci/Dockerfile` and that `cenci-sand --build` (run from inside the repo) builds the repo's own tailored image on top of the shared base. If `sandbox.baseVersion` resolved to `null` (unresolved — see the baseVersion resolution in step 5e), the chat summary must explicitly say so (e.g., "Base version could not be auto-detected — see `sandbox/README.md` to pin `BASE_VERSION` manually") rather than leaving it only as an inline Dockerfile comment, so a user who doesn't open the generated file still learns the base version wasn't pinned.
+Report what was created and suggest next steps (e.g., "Try `/cenci:refine <ticket-id>` on a ticket"). If `sandbox.enabled` is `true`, mention the generated/committed `.cenci/Dockerfile` and that `cenci sandbox build` (run from inside the repo) builds the repo's own tailored image on top of the shared base. If `sandbox.baseVersion` resolved to `null` (unresolved — see the baseVersion resolution in step 5e), the chat summary must explicitly say so (e.g., "Base version could not be auto-detected — see `sandbox/README.md` to pin `BASE_VERSION` manually") rather than leaving it only as an inline Dockerfile comment, so a user who doesn't open the generated file still learns the base version wasn't pinned.
 
 ### Board lifecycle labels
 

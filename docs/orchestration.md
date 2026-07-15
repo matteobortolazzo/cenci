@@ -249,9 +249,10 @@ cenci's `~/.config/cenci/config.json`):
         command: "cenci run implement {number} --no-sandbox"
 ```
 
-The default swaps the launch command to `cenci-sand`, running the agent under
-`--dangerously-skip-permissions` with the container as the security boundary. Status
-still surfaces on the **host** board: `cenci-sand` mounts the host cenci socket
+The default routes the launch through the sandbox launcher (the same engine behind
+`cenci open`), running the agent under `--dangerously-skip-permissions` with the
+container as the security boundary. Status still surfaces on the **host** board: the
+launcher mounts the host cenci socket
 directory (not the raw socket file) into the container at `/run/user/1000/cenci`
 and forwards `TMUX_PANE`, so the agent's hook events reach the host daemon and the join
 key flows through unchanged. The card badges exactly as a host dispatch would.

@@ -31,7 +31,7 @@ Each frontend project has its own design directory. See per-project CLAUDE.md fo
 <!-- IF sandbox.enabled -->
 ## Sandbox Image
 - `.cenci/Dockerfile` — committed, single per-repo image covering the union of every project's stack; the whole team builds the same image
-- Rebuild after changing any project's stack or the Dockerfile: `cenci-sand --build` (run from inside this repo)
+- Rebuild after changing any project's stack or the Dockerfile: `cenci sandbox build` (run from inside this repo)
 <!-- END IF -->
 
 ## Reference Docs
