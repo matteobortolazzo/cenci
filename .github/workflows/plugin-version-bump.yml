@@ -37,12 +37,31 @@ on:
         type: string
         default: ''
 
+# Serializes all plugin version bumps onto a single queue instead of one
+# concurrency group per caller: this workflow reads/writes the same shared
+# state (marketplace.json + a push to main), so two callers running at once
+# (e.g. two plugins' paths changing in the same push) could race pushing
+# and clobber each other's commit. cancel-in-progress stays false — a
+# queued run must still execute, not be dropped, since it may bump a
+# different plugin. No caller may declare this same concurrency group
+# itself (see the caller workflows) — GitHub cancels the caller run when a
+# reusable workflow it invoked enters a concurrency group it also holds.
+concurrency:
+  group: version-bump-main
+  cancel-in-progress: false
+
 jobs:
   bump:
     runs-on: ubuntu-latest
     steps:
+      # `ref: main` pins the checked-out tree (and therefore the push base)
+      # to the live tip of main at run start, separate from ORIGINAL_SHA
+      # below (the commit that triggered this run) — by the time a queued
+      # run executes, main may already be ahead due to an earlier run in
+      # this same concurrency group.
       - uses: actions/checkout@v7
         with:
+          ref: main
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -59,9 +78,16 @@ jobs:
           MARKETPLACE_NAME: ${{ inputs.marketplace-name }}
           TAG_PREFIX: ${{ inputs.tag-prefix }}
           DISPATCH_WORKFLOW: ${{ inputs.dispatch-workflow }}
+          # The commit that triggered this run — NOT necessarily main's tip
+          # by the time this step executes (see the checkout step's ref:
+          # main comment above). Used only for the skip guard and bump-type
+          # classification below, both of which must inspect the triggering
+          # commit itself, not whatever else landed on main while this run
+          # was queued behind the concurrency group.
+          ORIGINAL_SHA: ${{ github.sha }}
         run: |
           # Skip if last commit is already a release commit
-          LAST_MSG=$(git log -1 --pretty=format:"%s")
+          LAST_MSG=$(git log -1 --pretty=format:"%s" "$ORIGINAL_SHA")
           if echo "$LAST_MSG" | grep -q "^chore(release): ${PLUGIN_NAME}/v"; then
             echo "Last commit is a release commit, skipping"
             exit 0
@@ -77,7 +103,7 @@ jobs:
           PATCH=$(echo "$VERSION" | cut -d. -f3)
 
           # Determine bump type from the triggering commit
-          COMMITS=$(git log -1 --pretty=format:"%s%n%b")
+          COMMITS=$(git log -1 --pretty=format:"%s%n%b" "$ORIGINAL_SHA")
           BUMP="patch"
 
           if echo "$COMMITS" | grep -qiE '^feat!:|^[a-z]+\(.*\)!:|^BREAKING[ -]CHANGE:'; then
@@ -127,7 +153,7 @@ jobs:
           # shellcheck disable=SC2086
           git add $PLUGIN_JSON_PATHS .claude-plugin/marketplace.json
           git commit -m "chore(release): ${PLUGIN_NAME}/v${NEW_VERSION}"
-          git push
+          git push origin HEAD:main
 
           # Create tag via GitHub API
           gh api repos/${{ github.repository }}/git/refs \

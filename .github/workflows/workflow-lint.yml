@@ -39,6 +39,10 @@ jobs:
         run: bash .github/scripts/check-workflow-permissions.sh
       - name: Run permission-check unit tests
         run: bash .github/scripts/check-workflow-permissions.test.sh
+      - name: Check version-bump concurrency guards
+        run: bash .github/scripts/check-version-bump-concurrency.sh
+      - name: Run version-bump concurrency unit tests
+        run: bash .github/scripts/check-version-bump-concurrency.test.sh
       - name: Check documentation links, anchors, and terminology
         run: python3 .github/scripts/check-docs.py
 

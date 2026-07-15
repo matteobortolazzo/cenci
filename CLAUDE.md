@@ -15,6 +15,7 @@ Each project has its own `CLAUDE.md` with project-specific context.
 - ALWAYS read the relevant project's `CLAUDE.md` — plus its `.claude/rules/` files where they exist (currently only `watch/`) — before working on any layer.
 - CLI grammar, alias, env-var, and runtime-object naming conventions live in `docs/cli-conventions.md` — read it before adding or changing any user-facing command surface.
 - Test-first: integration tests that assert behavior, not implementation details.
+- When implementing tests described in a plan or ticket, verify that each claimed test assertion is actually exercised by an explicit test case—plan descriptions are intent, not proof of coverage.
 - Keep tickets well-scoped. 1 ticket = 1 PR.
 - ALWAYS work in a git worktree — for any change (code, docs, config), not just feature work. Never modify files in the main worktree.
 - Deliver every change as a PR unless told otherwise: commit in the worktree, push the branch, open a PR. Never commit directly to main.
