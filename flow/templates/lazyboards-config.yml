@@ -1,0 +1,70 @@
+# cenci's default lazyboards board config. Seeded by the cenci installer to
+# ~/.config/lazyboards/config.yml only when no config exists — never merged
+# into or overwritten. Column actions call `cenci run` directly; provider,
+# repo, and project are only read from a project-local .lazyboards.yml, never
+# from this global file.
+session_max_length: 40        # match cenci's window-name cap (see join key)
+action_refresh_delay: 5       # seconds after an action before refreshing — lets the
+                              # cenci skill apply its label before the board re-reads
+working_label: "Working"      # spinner marker; a card keeps its column while set
+cenci: true                   # live agent badges + status-bar counts (default)
+cleanup: "cenci close {number}"
+
+columns:
+  - name: New
+    actions:
+      R:
+        name: Refine
+        type: shell
+        command: "cenci run refine {number}"
+
+  - name: Refined
+    actions:
+      D:
+        name: Design
+        type: shell
+        command: "cenci run design {number}"
+      I:
+        name: Implement
+        type: shell
+        command: "cenci run implement {number}"
+
+  - name: Designed
+    actions:
+      I:
+        name: Implement
+        type: shell
+        command: "cenci run implement {number}"
+
+  - name: Planned
+
+  - name: In Review
+    actions:
+      W:
+        name: Checkout PR
+        type: shell
+        scope: pr
+        command: 'tmux new-window -d -n pr-{pr_number} "git fetch origin {pr_branch} && git switch {pr_branch}"'
+
+  - name: Implemented
+
+# Global actions (default scope is "card" — they act on the selected card)
+actions:
+  G:
+    name: Jump to agent
+    type: shell
+    command: 'tmux switch-client -t "={window}"'
+  A:
+    name: Annotate
+    type: shell
+    command: "gh issue comment {number} --body {comment}"
+  S:
+    name: Start dispatch loop
+    type: shell
+    scope: board
+    command: "cenci dispatch loop on"
+  X:
+    name: Stop dispatch loop
+    type: shell
+    scope: board
+    command: "cenci dispatch loop off"

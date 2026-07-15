@@ -14,7 +14,9 @@ into a detached tmux window; the agent moves the card across the board by relabe
 the issue; live status flows back onto the card. Nothing here is bespoke to one
 machine — the pieces are `cenci run` (the launcher), the cenci workflow skills (the
 workflows), and a single `~/.config/lazyboards/config.yml`. lazyboards is an optional
-separate project, not a fourth installed layer.
+separate project, not a fourth installed layer — the cenci installer offers to
+install it for you and seeds the default board config below (or later:
+`cenci-installer --lazyboards`).
 
 ## The state machine: columns are labels
 
@@ -91,18 +93,26 @@ which skill is running.
 
 ## The board config
 
-A complete `~/.config/lazyboards/config.yml`. Column actions call `cenci run`
-directly — no per-machine dispatch scripts. (`provider`, `repo`, and `project` are
-only read from a project-local `.lazyboards.yml`; the global file ignores them.)
+The complete default `~/.config/lazyboards/config.yml`. It ships with the flow
+plugin as `flow/templates/lazyboards-config.yml`, and the installer seeds it to
+`~/.config/lazyboards/config.yml` when installing lazyboards — only if no config
+exists yet; an existing config is never merged into or overwritten. Column actions
+call `cenci run` directly — no per-machine dispatch scripts. (The block below is
+kept byte-identical to the template file, enforced by
+`sandbox/tests/lazyboards-install.test.sh`.)
 
 ```yaml
-# ~/.config/lazyboards/config.yml
+# cenci's default lazyboards board config. Seeded by the cenci installer to
+# ~/.config/lazyboards/config.yml only when no config exists — never merged
+# into or overwritten. Column actions call `cenci run` directly; provider,
+# repo, and project are only read from a project-local .lazyboards.yml, never
+# from this global file.
 session_max_length: 40        # match cenci's window-name cap (see join key)
 action_refresh_delay: 5       # seconds after an action before refreshing — lets the
                               # cenci skill apply its label before the board re-reads
 working_label: "Working"      # spinner marker; a card keeps its column while set
-watch: true                   # live agent badges + status-bar counts (default)
-cleanup: "tmux kill-window -t ={window} 2>/dev/null || true"
+cenci: true                   # live agent badges + status-bar counts (default)
+cleanup: "cenci close {number}"
 
 columns:
   - name: New
@@ -171,13 +181,16 @@ builds the `<number>-<skill>` window and launches the agent.
 with zero extra config.
 
 **`cleanup`** fires when a card leaves the column (detected on refresh). A single
-top-level `cleanup` covers every column that doesn't define its own. Reap with
-`{window}` — the live cenci window name (`<number>-<skill>`), falling back to
-`{session}` when no agent window is live — rather than reconstructing the name with
-`{session}`: dispatch names windows by skill, so only `{window}` is guaranteed to hit
-the window that actually exists. The `=` prefix makes tmux match the name exactly.
-`session_max_length` must still match cenci's cap so the `{session}` fallback
-names the right window.
+top-level `cleanup` covers every column that doesn't define its own. `cenci close
+{number}` is the supported reaper: it asks the daemon for the window's exact
+`session:index` target (correct across tmux sessions), refuses to kill a window whose
+agent is still running or awaiting input (unless passed `--force`), and exits `0`
+when no window matches — safe on cards that never had an agent. A raw
+`tmux kill-window -t ={window}` still works but resolves bare names only within
+lazyboards' own tmux session; the
+[lazyboards README](https://github.com/matteobortolazzo/lazyboards#column-cleanup)
+documents that sharp edge. `session_max_length` must still match cenci's cap so the
+`{session}` template variable names the right window in actions that create one.
 
 **`W` on In Review** is a `scope: pr` action: it requires the selected card to have a
 linked PR (auto-detected from the issue timeline), runs immediately with one PR, and
