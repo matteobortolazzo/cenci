@@ -56,7 +56,7 @@ echo "case: 'sb ch' launches Claude with the haiku model"
 printf '' > "${CALLS_FILE}"
 "${SANDBOX_DIR}/cenci-sand" ch -p test
 
-if ! grep -Eq '^run .* -e AGENT_SAND_AGENT=claude ' "${CALLS_FILE}"; then
+if ! grep -Eq '^run .* -e CENCI_SANDBOX_AGENT=claude ' "${CALLS_FILE}"; then
     echo "FAIL: 'ch' did not select the claude agent" >&2
     exit 1
 fi
@@ -69,7 +69,7 @@ echo "case: 'sb xt' launches Codex with the gpt-5.6-terra model"
 printf '' > "${CALLS_FILE}"
 "${SANDBOX_DIR}/cenci-sand" xt -p test
 
-if ! grep -Eq '^run .* -e AGENT_SAND_AGENT=codex ' "${CALLS_FILE}"; then
+if ! grep -Eq '^run .* -e CENCI_SANDBOX_AGENT=codex ' "${CALLS_FILE}"; then
     echo "FAIL: 'xt' did not select the codex agent" >&2
     exit 1
 fi

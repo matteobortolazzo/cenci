@@ -334,9 +334,9 @@ REAP_SCAN_SCRIPT='for e in /proc/[0-9]*/environ; do [ -f "$e" ] || continue; p=$
 REAP_LIVENESS_SCRIPT='pid="$1"; st=$(cat "/proc/$pid/stat" 2>/dev/null); if [ -z "$st" ]; then printf "__GONE__\n"; exit 0; fi; st=${st##*) }; set -- $st; if [ "$#" -ge 20 ]; then shift 19; printf "%s\n" "$1"; else printf "__NOSTAT__\n"; fi; exit 0'
 
 reap_orphans() {
-    # Read once; AGENT_SAND_REAP_GRACE_SECS lets callers tune the SIGTERM ->
+    # Read once; CENCI_SANDBOX_REAP_GRACE_SECS lets callers tune the SIGTERM ->
     # SIGKILL grace window (e.g. to 0 for fast test runs).
-    local grace="${AGENT_SAND_REAP_GRACE_SECS:-5}"
+    local grace="${CENCI_SANDBOX_REAP_GRACE_SECS:-5}"
 
     local tmp_dir
     tmp_dir="$(mktemp -d)" || { echo "Error: failed to create temp directory." >&2; return 1; }
@@ -638,7 +638,7 @@ if "${UPDATE_PLUGINS}"; then
         echo "Done. Agent sessions pick up the update on their next start."
     else
         echo "Updating plugins in volume '${VOLUME_NAME}'..."
-        UPDATE_RUN_ARGS=(--rm --entrypoint /bin/bash -e "AGENT_SAND_AGENT=${AGENT}" -v "${VOLUME_NAME}:/home/dev")
+        UPDATE_RUN_ARGS=(--rm --entrypoint /bin/bash -e "CENCI_SANDBOX_AGENT=${AGENT}" -v "${VOLUME_NAME}:/home/dev")
         if [[ "${AGENT}" == claude ]]; then
             CLAUDE_BIN="$(readlink -f "$(which claude)" 2>/dev/null || true)"
             if [[ ! -x "${CLAUDE_BIN}" ]]; then
@@ -727,7 +727,7 @@ else
 fi
 
 # ── Exec env forwarding (for attach path) ───────────────────────
-EXEC_ENV_ARGS=(-u dev -e "TMUX_PANE=${TMUX_PANE:-}" -e "CENCI_SANDBOX=1" -e "AGENT_SAND_AGENT=${AGENT}")
+EXEC_ENV_ARGS=(-u dev -e "TMUX_PANE=${TMUX_PANE:-}" -e "CENCI_SANDBOX=1" -e "CENCI_SANDBOX_AGENT=${AGENT}")
 [[ -n "${CONTEXT7_API_KEY:-}" ]] && EXEC_ENV_ARGS+=(-e "CONTEXT7_API_KEY=${CONTEXT7_API_KEY}")
 [[ -n "${OPENAI_API_KEY:-}" ]] && EXEC_ENV_ARGS+=(-e "OPENAI_API_KEY=${OPENAI_API_KEY}")
 
@@ -816,7 +816,7 @@ RUN_ARGS=(
 
     # Internal contract used by the entrypoint to provision the selected
     # agent's native plugin store.
-    -e "AGENT_SAND_AGENT=${AGENT}"
+    -e "CENCI_SANDBOX_AGENT=${AGENT}"
 
     # Host identity — entrypoint remaps 'dev' to this UID/GID on mismatch (#154)
     -e "HOST_UID=$(id -u)"
@@ -857,7 +857,7 @@ fi
 # Force a reseed from the host (recovery after the volume's token chain died,
 # e.g. all sessions were revoked)
 if "${RESEED_CREDS}"; then
-    RUN_ARGS+=(-e "AGENT_SAND_RESEED_CREDS=1")
+    RUN_ARGS+=(-e "CENCI_SANDBOX_RESEED_CREDS=1")
 fi
 
 # Codex credentials (ChatGPT sign-in and/or API key — fail hard if neither present)

@@ -292,7 +292,7 @@ reset_state() {
     export MOCK_LIVENESS_FAIL=""
     export MOCK_TMUX_MODE="ok"
     export MOCK_LIVE_PANES=""
-    export AGENT_SAND_REAP_GRACE_SECS=0
+    export CENCI_SANDBOX_REAP_GRACE_SECS=0
 }
 
 add_podman_container() {

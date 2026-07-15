@@ -7,7 +7,7 @@
 # copy become independent token chains — re-copying the (now dead) host file
 # over the volume's live chain on a later start logs the sandbox out for no
 # reason. So a credential is seeded only when the volume has none yet;
-# AGENT_SAND_RESEED_CREDS=1 (cenci-sand --reseed-creds) forces a re-copy for
+# CENCI_SANDBOX_RESEED_CREDS=1 (cenci-sand --reseed-creds) forces a re-copy for
 # recovery, e.g. after revoking all sessions.
 #
 # Non-rotating tokens (GitHub CLI hosts.yml) don't need this and keep the
@@ -17,7 +17,7 @@
 seed_credential() {
     local staged="$1" dest="$2"
     [[ -f "${staged}" ]] || return 0
-    if [[ ! -f "${dest}" || "${AGENT_SAND_RESEED_CREDS:-0}" == "1" ]]; then
+    if [[ ! -f "${dest}" || "${CENCI_SANDBOX_RESEED_CREDS:-0}" == "1" ]]; then
         if [[ -L "${dest}" ]]; then
             rm -f "${dest}"
         fi

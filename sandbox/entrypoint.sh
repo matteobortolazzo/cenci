@@ -132,7 +132,7 @@ fi
 # permanently masks the enabledPlugins provisioning above.  Dropping the broken
 # entries makes the "is it installed" check below truthful, and stays useful
 # on its own once the upstream 2.1.207 bug is fixed.
-if [[ "${AGENT_SAND_AGENT:-claude}" == claude ]]; then
+if [[ "${CENCI_SANDBOX_AGENT:-claude}" == claude ]]; then
     heal_plugin_installs /home/dev/.claude/plugins
 fi
 
@@ -149,7 +149,7 @@ fi
 # blocks container start: Claude sandboxes use the mounted Claude CLI, while
 # Codex sandboxes use the baked-in Codex CLI; missing CLIs and offline failures
 # only warn to stderr.
-if [[ "${AGENT_SAND_AGENT:-claude}" == codex ]]; then
+if [[ "${CENCI_SANDBOX_AGENT:-claude}" == codex ]]; then
     provision_codex_plugins /home/dev/.codex cenci matteobortolazzo/cenci cenci cenci-watch
 else
     provision_plugins /home/dev/.claude/plugins cenci matteobortolazzo/cenci cenci cenci-watch
@@ -163,7 +163,7 @@ fi
 # 30-minute stamp so rapid stop/start cycles make zero network calls. Forced
 # variant (ttl 0) is `cenci-sand --update-plugins`. Same guarantee as above:
 # failures warn to stderr and never block container start.
-if [[ "${AGENT_SAND_AGENT:-claude}" == codex ]]; then
+if [[ "${CENCI_SANDBOX_AGENT:-claude}" == codex ]]; then
     update_codex_plugins /home/dev/.codex cenci 30 cenci cenci-watch
 else
     update_plugins /home/dev/.claude/plugins cenci 30 cenci cenci-watch

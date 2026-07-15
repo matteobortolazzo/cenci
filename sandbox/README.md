@@ -148,7 +148,7 @@ agent-sand --prune --volumes
 
 # Retroactively kill container-side agent processes whose owning tmux pane no
 # longer exists on the host (SIGTERM, then SIGKILL after a grace period —
-# 5 seconds by default, override with AGENT_SAND_REAP_GRACE_SECS, e.g. =0 for
+# 5 seconds by default, override with CENCI_SANDBOX_REAP_GRACE_SECS, e.g. =0 for
 # fast/CI runs). Scans every running *-sand-* container across all installed
 # runtimes (docker and podman). If no tmux server is running, every
 # TMUX_PANE-carrying process is treated as orphaned and the output says so
@@ -157,7 +157,7 @@ agent-sand --prune --volumes
 # line per reaped process plus a final count, and exits non-zero on a genuine
 # runtime error (e.g. exec failure) rather than swallowing it.
 agent-sand --reap-orphans
-AGENT_SAND_REAP_GRACE_SECS=0 agent-sand --reap-orphans
+CENCI_SANDBOX_REAP_GRACE_SECS=0 agent-sand --reap-orphans
 ```
 
 ### Flag parsing
@@ -494,7 +494,7 @@ warn that its sessions won't report to the host status bars; stop the container
 (`docker stop <name>`) and relaunch to restore the wiring.
 
 No manual install is needed inside the container. The launcher passes the selected
-agent through the internal `AGENT_SAND_AGENT` contract, and the entrypoint uses that
+agent through the internal `CENCI_SANDBOX_AGENT` contract, and the entrypoint uses that
 agent's native CLI and plugin store: Claude provisions `~/.claude/plugins` through
 the host-mounted `claude` binary, while Codex provisions `~/.codex` through the
 Codex CLI baked into the image. Both paths register the `agent-stack` marketplace,

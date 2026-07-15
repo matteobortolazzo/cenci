@@ -69,7 +69,7 @@ if ! grep -Eq '^run .*--label cenci-sand\.lifecycle=detached ' "${CALLS_FILE}"; 
     exit 1
 fi
 
-if ! grep -Eq '^run .* -e AGENT_SAND_AGENT=claude ' "${CALLS_FILE}"; then
+if ! grep -Eq '^run .* -e CENCI_SANDBOX_AGENT=claude ' "${CALLS_FILE}"; then
     echo "FAIL: selected agent was not forwarded to the new container" >&2
     exit 1
 fi
@@ -106,7 +106,7 @@ MOCK_CONTAINER_NAME="codex-sand-$(slugify "$(basename "${REPO_ROOT}")")"
 export MOCK_CONTAINER_NAME
 "${SANDBOX_DIR}/cenci-sand" --agent codex --update-plugins
 
-if ! grep -Eq '^run --rm --entrypoint /bin/bash -e AGENT_SAND_AGENT=codex .*provision_codex_plugins' "${CALLS_FILE}"; then
+if ! grep -Eq '^run --rm --entrypoint /bin/bash -e CENCI_SANDBOX_AGENT=codex .*provision_codex_plugins' "${CALLS_FILE}"; then
     echo "FAIL: Codex forced update did not use the baked-in Codex plugin path" >&2
     exit 1
 fi
