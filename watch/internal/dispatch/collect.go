@@ -14,12 +14,27 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
 )
 
+// currentGitHubLogin returns the login of the active gh account. Dispatch uses
+// this identity instead of Git commit metadata because author name/email are
+// not reliable GitHub-account identifiers.
+func currentGitHubLogin() (string, error) {
+	data, err := exec.Command("gh", "api", "user", "--jq", ".login").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("gh api user: %w: %s", err, strings.TrimSpace(string(data)))
+	}
+	login := strings.TrimSpace(string(data))
+	if login == "" {
+		return "", fmt.Errorf("gh api user returned an empty login")
+	}
+	return login, nil
+}
+
 // CollectTickets gathers open issues across the configured repos via the gh CLI,
-// resolving each ticket's Agent from an agent:<name> label and HasOpenPR from
-// open PRs' closing-issue references. Best-effort, mirroring run's gh usage. A
-// failure on one repo does not block collection from the rest: every repo is
-// attempted, and any per-repo failures are joined into the returned error so
-// the caller's log names every failing repo, not just the first.
+// resolving each ticket's assignees, Agent from an agent:<name> label, and
+// HasOpenPR from open PRs' closing-issue references. Best-effort, mirroring
+// run's gh usage. A failure on one repo does not block collection from the rest:
+// every repo is attempted, and any per-repo failures are joined into the
+// returned error so the caller's log names every failing repo, not just the first.
 func CollectTickets(repos []RepoConfig) ([]Ticket, error) {
 	var out []Ticket
 	var errs []error
@@ -37,7 +52,7 @@ func CollectTickets(repos []RepoConfig) ([]Ticket, error) {
 func collectRepoTickets(repo string) ([]Ticket, error) {
 	data, err := exec.Command("gh", "issue", "list",
 		"--repo", repo, "--state", "open",
-		"--json", "number,title,labels", "--limit", "200").Output()
+		"--json", "number,title,labels,assignees", "--limit", "200").Output()
 	if err != nil {
 		return nil, fmt.Errorf("gh issue list %s: %w", repo, err)
 	}
@@ -47,6 +62,9 @@ func collectRepoTickets(repo string) ([]Ticket, error) {
 		Labels []struct {
 			Name string `json:"name"`
 		} `json:"labels"`
+		Assignees []struct {
+			Login string `json:"login"`
+		} `json:"assignees"`
 	}
 	if err := json.Unmarshal(data, &issues); err != nil {
 		return nil, fmt.Errorf("parsing issues for %s: %w", repo, err)
@@ -63,11 +81,16 @@ func collectRepoTickets(repo string) ([]Ticket, error) {
 		for i, l := range is.Labels {
 			labels[i] = l.Name
 		}
+		assignees := make([]string, len(is.Assignees))
+		for i, a := range is.Assignees {
+			assignees[i] = a.Login
+		}
 		tickets = append(tickets, Ticket{
 			Repo:      repo,
 			Number:    is.Number,
 			Title:     is.Title,
 			Labels:    labels,
+			Assignees: assignees,
 			HasOpenPR: openPR[is.Number],
 			Agent:     agentFromLabels(labels),
 		})

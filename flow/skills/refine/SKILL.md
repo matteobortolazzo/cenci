@@ -68,6 +68,12 @@ If any of these conditions are true, warn the user and ask for confirmation usin
 
 If the user says no → stop. If yes → proceed normally.
 
+## Ticket Ownership
+
+Read the `ticket-ownership` reference skill and follow it using the assignees from
+the ticket fetch above. Complete its claim-and-verify contract before adding
+`Working` or starting refinement. Never replace an existing assignee.
+
 ## Label "Working"
 
 **Before starting refinement work**, add the "Working" label to signal that the ticket is actively being worked on. `gh issue edit --add-label` fails when the label does not exist in the repository, so ensure it exists first — run each as its own Bash call (`|| true` swallows only the "already exists" error):

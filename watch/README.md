@@ -222,11 +222,17 @@ launch template" error.
 Once planning is human-gated and an approved plan shows up on the board as the
 `Planned` state, *picking it up* is pure policy — no LLM in the dispatcher.
 `cenci dispatch` walks the configured repos, matches each `Planned` ticket to
-its approved `.plans/<id>-*.md` file, checks capacity/budget gates, and — for every
-ticket that clears them — runs exactly what a human would press:
+its approved `.plans/<id>-*.md` file, requires the ticket's sole assignee to match
+the active account returned by `gh api user`, checks capacity/budget gates, and —
+for every ticket that clears them — runs exactly what a human would press:
 `cenci run implement .plans/<file> --agent <chosen>`. The intelligence stays
 inside the dispatched sessions; the dispatcher is config plus a pure decision
 function.
+
+Unassigned tickets, tickets owned by another GitHub user, and tickets with multiple
+assignees are logged as explicit skips. Git commit `user.name` and `user.email` are
+not used for ownership. If the active GitHub login cannot be resolved, the pass fails
+closed and launches nothing.
 
 ```bash
 # Print the decision table without spawning anything

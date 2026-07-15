@@ -9,6 +9,61 @@ import (
 	"testing"
 )
 
+func installFakeGH(t *testing.T, script string) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gh")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+}
+
+func TestCurrentGitHubLogin(t *testing.T) {
+	t.Run("returns trimmed active login", func(t *testing.T) {
+		installFakeGH(t, "printf 'OctoCat\\n'\n")
+		got, err := currentGitHubLogin()
+		if err != nil {
+			t.Fatalf("currentGitHubLogin returned unexpected error: %v", err)
+		}
+		if got != "OctoCat" {
+			t.Errorf("login = %q, want OctoCat", got)
+		}
+	})
+
+	t.Run("fails closed on gh error", func(t *testing.T) {
+		installFakeGH(t, "exit 1\n")
+		if _, err := currentGitHubLogin(); err == nil {
+			t.Fatal("expected an error")
+		}
+	})
+
+	t.Run("rejects empty login", func(t *testing.T) {
+		installFakeGH(t, "exit 0\n")
+		if _, err := currentGitHubLogin(); err == nil || !strings.Contains(err.Error(), "empty login") {
+			t.Fatalf("error = %v, want empty-login error", err)
+		}
+	})
+}
+
+func TestCollectRepoTicketsIncludesAssignees(t *testing.T) {
+	installFakeGH(t, `
+case "$1 $2" in
+  "issue list") printf '[{"number":42,"title":"Fix thing","labels":[{"name":"Planned"}],"assignees":[{"login":"octocat"}]}]' ;;
+  "pr list") printf '[]' ;;
+  *) exit 1 ;;
+esac
+`)
+
+	tickets, err := collectRepoTickets("o/r")
+	if err != nil {
+		t.Fatalf("collectRepoTickets returned unexpected error: %v", err)
+	}
+	if len(tickets) != 1 || !equalStrings(tickets[0].Assignees, []string{"octocat"}) {
+		t.Fatalf("tickets = %+v, want one ticket assigned to octocat", tickets)
+	}
+}
+
 // TestCollectTicketsAttemptsEveryRepoOnFailure locks in CollectTickets' best-
 // effort contract (ticket #122): a failure on one repo must not stop
 // collection from being attempted on the rest, and every per-repo failure

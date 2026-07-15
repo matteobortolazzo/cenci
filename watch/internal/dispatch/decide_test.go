@@ -29,12 +29,13 @@ func snapshot(running, needInput int, windows ...watch.WindowState) *watch.State
 // plan and a reachable, idle daemon.
 func baseInputs() Inputs {
 	return Inputs{
-		Tickets:  []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Planned"}}},
-		Plans:    []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "approved"}},
-		Snapshot: snapshot(0, 0),
-		Budgets:  FloorProvider{},
-		Now:      time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC),
-		Config:   testConfig(),
+		Tickets:     []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}}},
+		Plans:       []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "approved"}},
+		Snapshot:    snapshot(0, 0),
+		Budgets:     FloorProvider{},
+		Now:         time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC),
+		CurrentUser: "octocat",
+		Config:      testConfig(),
 	}
 }
 
@@ -99,6 +100,26 @@ func TestDecideGates(t *testing.T) {
 			name:   "open PR",
 			mutate: func(in *Inputs) { in.Tickets[0].HasOpenPR = true },
 			want:   []wantDecision{{42, ActionSkip, "open PR exists", ""}},
+		},
+		{
+			name:   "unassigned",
+			mutate: func(in *Inputs) { in.Tickets[0].Assignees = nil },
+			want:   []wantDecision{{42, ActionSkip, "unassigned", ""}},
+		},
+		{
+			name:   "assigned to another user",
+			mutate: func(in *Inputs) { in.Tickets[0].Assignees = []string{"hubot"} },
+			want:   []wantDecision{{42, ActionSkip, "assigned to @hubot", ""}},
+		},
+		{
+			name:   "multiple assignees",
+			mutate: func(in *Inputs) { in.Tickets[0].Assignees = []string{"octocat", "hubot"} },
+			want:   []wantDecision{{42, ActionSkip, "multiple assignees", ""}},
+		},
+		{
+			name:   "assignment comparison is case insensitive",
+			mutate: func(in *Inputs) { in.Tickets[0].Assignees = []string{"OctoCat"} },
+			want:   []wantDecision{{42, ActionDispatch, "dispatch", "claude"}},
 		},
 		{
 			name:   "no plan",
@@ -239,9 +260,9 @@ func TestDecideOrderingDeterminism(t *testing.T) {
 	in := baseInputs()
 	// Supplied out of order; output must be sorted by ticket number.
 	in.Tickets = []Ticket{
-		{Repo: "o/r", Number: 99, Labels: []string{"Planned"}},
-		{Repo: "o/r", Number: 7, Labels: []string{"Planned"}},
-		{Repo: "o/r", Number: 42, Labels: []string{"Planned"}},
+		{Repo: "o/r", Number: 99, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
+		{Repo: "o/r", Number: 7, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
+		{Repo: "o/r", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
 	}
 	in.Plans = []Plan{
 		{Repo: "o/r", Path: ".plans/99.md", TicketID: 99, Status: "approved"},
@@ -263,9 +284,9 @@ func TestDecideMultiDispatchRespectsCaps(t *testing.T) {
 	in.Config.ConcurrencyCap = 2
 	in.Snapshot = snapshot(0, 0)
 	in.Tickets = []Ticket{
-		{Repo: "o/r", Number: 1, Labels: []string{"Planned"}},
-		{Repo: "o/r", Number: 2, Labels: []string{"Planned"}},
-		{Repo: "o/r", Number: 3, Labels: []string{"Planned"}},
+		{Repo: "o/r", Number: 1, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
+		{Repo: "o/r", Number: 2, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
+		{Repo: "o/r", Number: 3, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
 	}
 	in.Plans = []Plan{
 		{Repo: "o/r", Path: ".plans/1.md", TicketID: 1, Status: "approved"},
@@ -286,7 +307,7 @@ func TestDecideSiblingSerialization(t *testing.T) {
 		in := baseInputs()
 		in.Tickets = []Ticket{
 			{Repo: "o/r", Number: 41, Labels: []string{"Working"}},
-			{Repo: "o/r", Number: 42, Labels: []string{"Planned"}},
+			{Repo: "o/r", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
 		}
 		in.Plans = []Plan{
 			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "approved", IsChild: true, ParentID: 40},
@@ -303,7 +324,7 @@ func TestDecideSiblingSerialization(t *testing.T) {
 		in := baseInputs()
 		in.Tickets = []Ticket{
 			{Repo: "o/r", Number: 41, Labels: nil},
-			{Repo: "o/r", Number: 42, Labels: []string{"Planned"}},
+			{Repo: "o/r", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
 		}
 		in.Plans = []Plan{
 			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "approved", IsChild: true, ParentID: 40},
@@ -320,8 +341,8 @@ func TestDecideSiblingSerialization(t *testing.T) {
 	t.Run("only one sibling dispatched per pass", func(t *testing.T) {
 		in := baseInputs()
 		in.Tickets = []Ticket{
-			{Repo: "o/r", Number: 41, Labels: []string{"Planned"}},
-			{Repo: "o/r", Number: 42, Labels: []string{"Planned"}},
+			{Repo: "o/r", Number: 41, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
+			{Repo: "o/r", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
 		}
 		in.Plans = []Plan{
 			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "approved", IsChild: true, ParentID: 40},
@@ -337,8 +358,8 @@ func TestDecideSiblingSerialization(t *testing.T) {
 	t.Run("different parents both dispatch", func(t *testing.T) {
 		in := baseInputs()
 		in.Tickets = []Ticket{
-			{Repo: "o/r", Number: 41, Labels: []string{"Planned"}},
-			{Repo: "o/r", Number: 42, Labels: []string{"Planned"}},
+			{Repo: "o/r", Number: 41, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
+			{Repo: "o/r", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
 		}
 		in.Plans = []Plan{
 			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "approved", IsChild: true, ParentID: 30},
@@ -355,7 +376,7 @@ func TestDecideSiblingSerialization(t *testing.T) {
 		in := baseInputs()
 		in.Tickets = []Ticket{
 			{Repo: "o/r", Number: 41, Labels: []string{"Working"}},
-			{Repo: "o/r", Number: 42, Labels: []string{"Planned"}},
+			{Repo: "o/r", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
 		}
 		in.Plans = []Plan{
 			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "approved", IsChild: true, ParentID: 40},
@@ -372,7 +393,7 @@ func TestDecideSiblingSerialization(t *testing.T) {
 	t.Run("closed sibling ticket does not block", func(t *testing.T) {
 		in := baseInputs()
 		in.Tickets = []Ticket{
-			{Repo: "o/r", Number: 42, Labels: []string{"Planned"}},
+			{Repo: "o/r", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
 		}
 		in.Plans = []Plan{
 			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "approved", IsChild: true, ParentID: 40}, // ticket closed/absent
@@ -390,8 +411,8 @@ func TestDecideSiblingSerialization(t *testing.T) {
 func TestDecideMultiRepoNoNumberCollision(t *testing.T) {
 	in := baseInputs()
 	in.Tickets = []Ticket{
-		{Repo: "o/a", Number: 42, Labels: []string{"Planned"}},
-		{Repo: "o/b", Number: 42, Labels: []string{"Planned"}},
+		{Repo: "o/a", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
+		{Repo: "o/b", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
 	}
 	in.Plans = []Plan{
 		{Repo: "o/a", Path: ".plans/42-a.md", TicketID: 42, Status: "approved"},
@@ -416,8 +437,8 @@ func TestDecideMultiRepoNoNumberCollision(t *testing.T) {
 func TestDecideMultiRepoSiblingsIndependent(t *testing.T) {
 	in := baseInputs()
 	in.Tickets = []Ticket{
-		{Repo: "o/a", Number: 41, Labels: []string{"Working"}}, // active sibling in repo a
-		{Repo: "o/b", Number: 42, Labels: []string{"Planned"}}, // child in repo b, parent #40
+		{Repo: "o/a", Number: 41, Labels: []string{"Working"}},                                 // active sibling in repo a
+		{Repo: "o/b", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}}, // child in repo b, parent #40
 	}
 	in.Plans = []Plan{
 		{Repo: "o/a", Path: ".plans/41.md", TicketID: 41, Status: "approved", IsChild: true, ParentID: 40},

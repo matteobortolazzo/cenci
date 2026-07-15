@@ -25,10 +25,31 @@ func stubRunFn(t *testing.T, fn func(run.Opts, run.Controller) error) {
 // fresh plan and a reachable, idle daemon — every gate passes.
 func dispatchableDeps(now time.Time) dispatchDeps {
 	return dispatchDeps{
-		Tickets:  []Ticket{{Repo: "o/r", Number: 42, Title: "Fix thing", Labels: []string{"Planned"}}},
-		Plans:    []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "approved"}},
-		Snapshot: &watch.StateSnapshot{},
-		Now:      now,
+		Tickets:     []Ticket{{Repo: "o/r", Number: 42, Title: "Fix thing", Labels: []string{"Planned"}, Assignees: []string{"octocat"}}},
+		Plans:       []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "approved"}},
+		Snapshot:    &watch.StateSnapshot{},
+		Now:         now,
+		CurrentUser: "octocat",
+	}
+}
+
+func TestRunOnceFailsClosedWithoutGitHubIdentity(t *testing.T) {
+	installFakeGH(t, "printf 'not authenticated\\n' >&2\nexit 1\n")
+	stubRunFn(t, func(run.Opts, run.Controller) error {
+		t.Fatal("identity failure must prevent every spawn")
+		return nil
+	})
+
+	var buf bytes.Buffer
+	decisions, err := RunOnce(testConfig(), fakeController{}, &fakeMutator{}, false, &buf, nil)
+	if err == nil || !strings.Contains(err.Error(), "detecting current GitHub user") {
+		t.Fatalf("error = %v, want current-user detection failure", err)
+	}
+	if len(decisions) != 0 {
+		t.Fatalf("decisions = %+v, want none", decisions)
+	}
+	if !strings.Contains(buf.String(), "not authenticated") {
+		t.Errorf("log = %q, want gh diagnostic", buf.String())
 	}
 }
 

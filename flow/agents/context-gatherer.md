@@ -117,6 +117,7 @@ bundlePath: <path>
 mode: ticket | ticketless
 ticket: #<number> — <title> (<state>)
 labels: <comma-separated label names or "none">
+assignees: <comma-separated GitHub logins or "none">
 parent: isChild=<bool> isLastChild=<bool> parentId=<number|null>
 affectedProjects: <names or "n/a">
 design: <"DESIGN.md bundled, .pen: <path>" — or the exact string "none" with no variation; the main agent string-matches `design: none`>

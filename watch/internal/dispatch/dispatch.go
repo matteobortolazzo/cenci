@@ -19,10 +19,11 @@ var runFn = run.Run
 // dispatchDeps are the collected, impure inputs to a dispatch pass. Separating
 // them from RunOnce lets applyDispatch be exercised without gh or a daemon.
 type dispatchDeps struct {
-	Tickets  []Ticket
-	Plans    []Plan
-	Snapshot *watch.StateSnapshot
-	Now      time.Time
+	Tickets     []Ticket
+	Plans       []Plan
+	Snapshot    *watch.StateSnapshot
+	Now         time.Time
+	CurrentUser string
 }
 
 // RunOnce gathers inputs (tickets, plans, snapshot, clock), runs the pure
@@ -35,6 +36,12 @@ type dispatchDeps struct {
 func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, out io.Writer, prior *int) ([]Decision, error) {
 	if out == nil {
 		out = os.Stdout
+	}
+
+	currentUser, err := currentGitHubLogin()
+	if err != nil {
+		logf(out, "dispatch: detecting current GitHub user: %v\n", err)
+		return nil, fmt.Errorf("detecting current GitHub user: %w", err)
 	}
 
 	tickets, err := CollectTickets(cfg.Repos)
@@ -59,10 +66,11 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 	snap, _ := ReadSnapshot(watch.DefaultSocketPath()) // nil on error ⇒ Decide skips safely
 
 	decisions, applyErr := applyDispatch(cfg, dispatchDeps{
-		Tickets:  tickets,
-		Plans:    plans,
-		Snapshot: snap,
-		Now:      time.Now(),
+		Tickets:     tickets,
+		Plans:       plans,
+		Snapshot:    snap,
+		Now:         time.Now(),
+		CurrentUser: currentUser,
 	}, ctrl, mut, dryRun, out, prior)
 	return decisions, firstNonNil(collectErr, applyErr)
 }
@@ -89,13 +97,14 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 	}
 
 	decisions := Decide(Inputs{
-		Tickets:  deps.Tickets,
-		Plans:    deps.Plans,
-		Snapshot: deps.Snapshot,
-		Budgets:  buildBudgetProvider(cfg, deps.Now),
-		Now:      deps.Now,
-		Prior:    priorVal,
-		Config:   cfg,
+		Tickets:     deps.Tickets,
+		Plans:       deps.Plans,
+		Snapshot:    deps.Snapshot,
+		Budgets:     buildBudgetProvider(cfg, deps.Now),
+		Now:         deps.Now,
+		Prior:       priorVal,
+		CurrentUser: deps.CurrentUser,
+		Config:      cfg,
 	})
 
 	// Surface the pinned model in the same log stream as the decision table so
