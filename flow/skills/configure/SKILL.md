@@ -699,13 +699,13 @@ For each MCP selected in question 5:
 
    **Validation (applies to both (a) and (b))**: before writing a resolved `baseVersion` anywhere (the Dockerfile's `ARG BASE_VERSION=` line or `.claude/config.json`), validate it against a strict version pattern: `^[0-9]+\.[0-9]+\.[0-9]+$` (matching the real plugin.json version format, e.g. `"0.9.0"`). This guards against a compromised marketplace entry or a tampered plugin.json in a fork injecting arbitrary content (embedded newlines, `#` comments, Dockerfile directives, or even a spoofed `# cenci:managed-end` sequence) into a file that's later `docker build`'d. If the resolved value does not match the pattern, treat `baseVersion` as unresolved and fall through to (c) — do not write the raw value into the Dockerfile or config.json.
 
-   (c) **Unresolved**: if neither (a) nor (b) yields a version that passes validation, `baseVersion` is unresolved. Store `"baseVersion": null` in `.claude/config.json`'s `sandbox` field. The Dockerfile is still generated (fragments are still selected and written) — only the `ARG BASE_VERSION=` line ships with no default value, followed by an inline comment pointing at `sandbox/README.md` for a manual pin. This is safe because `cenci sandbox build`'s per-repo image build always passes `--build-arg BASE_VERSION=...` explicitly at build time — it resolves `BASE_VERSION` on its own regardless of what (or nothing) is baked into the file.
+   (c) **Unresolved**: if neither (a) nor (b) yields a version that passes validation, `baseVersion` is unresolved. Store `"baseVersion": null` in `.claude/config.json`'s `sandbox` field. The Dockerfile is still generated (fragments are still selected and written) — the `ARG BASE_VERSION=` line falls back to `latest` (matching `sandbox/Dockerfile`'s own default and the `cenci-sandbox-base:latest` alias tag that `cenci sandbox build-base` always produces), followed by an inline comment pointing at `sandbox/README.md` for a manual pin. An empty default must never be written: Docker's `InvalidDefaultArgInFrom` lint check flags any `ARG` used in a `FROM` whose default resolves to an empty or invalid image reference, and it evaluates the file statically — it fires on every build regardless of the `--build-arg BASE_VERSION=...` override `cenci sandbox build`'s per-repo image build always passes at build time.
 
    **Generated file format** — always emit the ARG/FROM pair below, **never** a literal `FROM cenci-sandbox-base:<version>`. `cenci sandbox build` always passes `--build-arg BASE_VERSION=...` at build time; a literal `FROM` would silently drift from what's actually built:
 
    ```dockerfile
    # cenci:managed-begin
-   ARG BASE_VERSION=<resolved-version-or-empty>
+   ARG BASE_VERSION=<resolved-version-or-latest>
    FROM cenci-sandbox-base:${BASE_VERSION}
 
    SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -718,7 +718,7 @@ For each MCP selected in question 5:
    ```
 
    - If `baseVersion` resolved (path a or b): write it as the ARG default, e.g. `ARG BASE_VERSION=0.9.0`.
-   - If unresolved (path c): write `ARG BASE_VERSION=` with no default, then a comment line immediately after: `# No cenci-sandbox plugin version detected — see sandbox/README.md to pin BASE_VERSION manually, or install the cenci-sandbox plugin and re-run /cenci:configure.`
+   - If unresolved (path c): write `ARG BASE_VERSION=latest`, then a comment line immediately after: `# No cenci-sandbox plugin version detected — using the :latest base image alias. See sandbox/README.md to pin BASE_VERSION manually, or install the cenci-sandbox plugin and re-run /cenci:configure.`
 
    **Fragment concatenation order** (when multiple fragments apply, e.g. a monorepo union): **dotnet → node → playwright → go → python → rust → codex**, regardless of the order projects were discovered in. Node and Codex are mandatory; the remaining fragments are stack-selected. Concatenate the selected `sandbox/fragments/*.dockerfile` file contents in that fixed order, applying the **.NET version substitution** from the mapping table above to the dotnet fragment only — every other fragment is included verbatim. Deduplicate — each fragment appears at most once even when multiple monorepo projects map to the same fragment.
 
