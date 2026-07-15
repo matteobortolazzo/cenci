@@ -168,8 +168,10 @@ setup_layout() {
 # installed 1.0.0 cenci-watch entry, plus a staged 2.0.0 entry that the
 # bump-client stub moves into the cache when the installer runs the client's
 # update verb — the minimal simulation of a real version-bumping update.
+# Passing `none` as the third argument leaves the cache empty of version
+# entries (a client without a version-pinned cache before the update).
 setup_bump_layout() {
-    local name="$1" client="$2"
+    local name="$1" client="$2" current="${3:-1.0.0}"
     local home="${WORK}/${name}/home" mock_bin="${WORK}/${name}/bin"
     local call_log="${WORK}/${name}/calls" pkill_log="${WORK}/${name}/pkill-calls"
     mkdir -p "${home}"
@@ -186,9 +188,12 @@ setup_bump_layout() {
         cache_dir="${home}/.codex/plugins/cache/cenci/cenci-watch"
         manifest_dir=.codex-plugin
     fi
-    make_cenci "${cache_dir}/1.0.0/bin/cenci" 0
-    mkdir -p "${cache_dir}/1.0.0/${manifest_dir}"
-    printf '{"name":"cenci-watch","version":"1.0.0"}\n' >"${cache_dir}/1.0.0/${manifest_dir}/plugin.json"
+    mkdir -p "${cache_dir}"
+    if [[ "${current}" != none ]]; then
+        make_cenci "${cache_dir}/${current}/bin/cenci" 0
+        mkdir -p "${cache_dir}/${current}/${manifest_dir}"
+        printf '{"name":"cenci-watch","version":"%s"}\n' "${current}" >"${cache_dir}/${current}/${manifest_dir}/plugin.json"
+    fi
 
     local staged="${WORK}/${name}/staged-2.0.0"
     make_cenci "${staged}/bin/cenci" 0
@@ -318,6 +323,16 @@ run_update
 [[ "${UPDATE_EXIT}" -eq 0 ]]
 if ! grep -q 'Claude: cenci-watch 2.0.0 (already up to date)' "${WORK}/last-output"; then
     echo "FAIL: expected 'Claude: cenci-watch 2.0.0 (already up to date)' in the update output" >&2
+    cat "${WORK}/last-output" >&2
+    exit 1
+fi
+
+echo "case: update output reports 'updated to <version>' when no cache entry existed before the update"
+setup_bump_layout fresh-claude claude none
+run_update
+[[ "${UPDATE_EXIT}" -eq 0 ]]
+if ! grep -q 'Claude: cenci-watch updated to 2.0.0' "${WORK}/last-output"; then
+    echo "FAIL: expected 'Claude: cenci-watch updated to 2.0.0' in the update output" >&2
     cat "${WORK}/last-output" >&2
     exit 1
 fi
