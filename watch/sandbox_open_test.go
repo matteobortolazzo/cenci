@@ -621,7 +621,7 @@ func TestCnArgv0_RoutesToOpen(t *testing.T) {
 	}
 }
 
-func TestCnArgv0_BareInvocationDoesNotErrorLikeAgentwatch(t *testing.T) {
+func TestCnArgv0_BareInvocationDoesNotErrorLikeCenci(t *testing.T) {
 	// A bare `cenci` (no subcommand) exits 2. `cn` with no args is a
 	// bare `open` with no shortcut/flags -- valid, not an error.
 	binDir := t.TempDir()
