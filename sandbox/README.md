@@ -273,6 +273,7 @@ Everything persists in the home volume — only needs to happen once per instanc
 | .NET SDK | 10.0.100 | `DOTNET_SDK_VERSION` |
 | Node.js | 24.x | `NODE_MAJOR` |
 | Go | 1.24.1 | `GO_VERSION` |
+| Playwright | 1.61.1 | `PLAYWRIGHT_VERSION` |
 | Codex CLI | 0.144.1 | `CODEX_VERSION` |
 | CCometixLine (ccline) | 1.1.2 | `CCLINE_VERSION` |
 | GitHub CLI | latest | — |

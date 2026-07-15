@@ -4,18 +4,16 @@ Go backend (standard library).
 GitHub Issues for tracking. GitHub for code and PRs.
 
 ## Critical Rules
-- ALWAYS read relevant `.claude/rules/` files before working on any layer.
 - Test-first: integration tests that assert behavior, not implementation details.
 - Keep tickets well-scoped. 1 ticket = 1 PR.
 - Use git worktrees for all feature work. Never modify code in main worktree.
-- When excluding one specific known case from a parsing/filtering loop via a match-miss condition, narrow the skip to match only that case exactly — don't broaden a targeted exclusion into a silent "no match → discard" catch-all. Compute the expected case and skip only on an exact match; keep the original fallback behavior (e.g. a visible `'none'`/default state) for every other non-match, and cover the non-matching case with a regression test. Silent failures hide bugs; visible fallback rendering catches them.
-- When changing a literal value (exec flag, environment variable, version) that's referenced in comments, grep the whole file for all references to that literal — don't rely on a change plan's enumerated comment sites. Doc comments on constants, function docstrings, and helper-function comments can all reference the same value and risk going stale (#357).
+- Narrow a match-miss exclusion to the exact case being excluded — never broaden it into a silent "no match → discard" catch-all; keep the original visible fallback for every other case and add a regression test for the non-matching case.
+- When changing a literal value (exec flag, environment variable, version) referenced in comments, grep the whole file for all references to that literal rather than relying on a change plan's enumerated sites — doc comments and docstrings can reference the same value and go stale (#357).
+- `os.IsNotExist`/`errors.Is(err, fs.ErrNotExist)` only classify filesystem-call errors — they never match an `os/exec` error. To handle a missing input file for an external command, `os.Stat` the path yourself first; don't infer it from the command's exit error.
 
 ## Rule Files
 CLI grammar, alias, env-var, and naming conventions: `<repo-root>/docs/cli-conventions.md` (read before touching any user-facing command surface).
-See `.claude/rules/` for conventions:
-- `lessons-learned.md` — real mistakes from this codebase (authoritative, overrides assumptions)
-- Other rule files as created by the team
+`.claude/rules/` is reserved for files explicitly imported by this CLAUDE.md. It is not used today — lessons route to `docs/<topic>.md` or the Critical Rules above (see `flow/agents/lessons-collector.md`).
 
 ## Build & Test
 

@@ -73,7 +73,7 @@ fi
 # settings.json in one idempotent pass: the CONTAINER-ONLY bypass-mode keys
 # (so --dangerously-skip-permissions never prompts and never downgrades to
 # `default` in headless runs — the container boundary is what makes this safe;
-# see docs/cohesive-package.md §2.1, and they must never reach the host
+# see SECURITY.md's threat model, and they must never reach the host
 # ~/.claude/settings.json), the current cenci-watch/cenci plugins from the
 # cenci marketplace (so sandbox sessions are visible on the host status
 # bar), a removal of the stale pre-rename muxwatch/ccflow/claude-tools
