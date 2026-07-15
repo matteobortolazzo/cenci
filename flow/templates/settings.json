@@ -25,16 +25,12 @@
       "Bash(git reset --hard:*)",
       "Read(~/.ssh/**)",
       "Edit(~/.ssh/**)",
-      "Write(~/.ssh/**)",
       "Read(~/.aws/**)",
       "Edit(~/.aws/**)",
-      "Write(~/.aws/**)",
       "Read(.env)",
       "Edit(.env)",
-      "Write(.env)",
       "Read(.env.*)",
-      "Edit(.env.*)",
-      "Write(.env.*)"
+      "Edit(.env.*)"
     ]
   }
 }
