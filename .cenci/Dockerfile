@@ -1,6 +1,6 @@
-# agentflow:managed-begin
+# cenci:managed-begin
 ARG BASE_VERSION=0.12.2
-FROM agent-sandbox-base:${BASE_VERSION}
+FROM cenci-sandbox-base:${BASE_VERSION}
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -37,4 +37,4 @@ USER root
 RUN npm install -g @openai/codex@${CODEX_VERSION}
 
 USER dev
-# agentflow:managed-end
+# cenci:managed-end

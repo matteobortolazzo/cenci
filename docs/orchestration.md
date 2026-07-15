@@ -6,7 +6,7 @@
 This is the supported recipe for driving the whole package from a
 [lazyboards](https://github.com/matteobortolazzo/lazyboards) kanban board — the
 orchestration layer that sits on top of agentflow (workflow), agentwatch (attention),
-and agent-sandbox (isolation). See the [root overview](../README.md) for the
+and cenci-sandbox (isolation). See the [root overview](../README.md) for the
 architecture; this document is the wiring.
 
 Every card is a GitHub issue. A keypress on a card dispatches a coding-agent workflow
@@ -227,7 +227,7 @@ agentwatch's own `dispatch` config block — see the
 
 ## Dispatching into the sandbox
 
-Sandboxed dispatch is the **default** — the agent-sandbox container
+Sandboxed dispatch is the **default** — the cenci-sandbox container
 ([#29](https://github.com/matteobortolazzo/agent-stack/issues/29)) is the mandatory
 runtime and the security boundary. A bare `agentwatch run implement {number}` already
 launches inside the container, so a board action needs no extra flag:
@@ -249,9 +249,9 @@ agentwatch's `~/.config/agentwatch/config.json`):
         command: "agentwatch run implement {number} --no-sandbox"
 ```
 
-The default swaps the launch command to `agent-sand`, running the agent under
+The default swaps the launch command to `cenci-sand`, running the agent under
 `--dangerously-skip-permissions` with the container as the security boundary. Status
-still surfaces on the **host** board: `agent-sand` mounts the host agentwatch socket
+still surfaces on the **host** board: `cenci-sand` mounts the host agentwatch socket
 directory (not the raw socket file) into the container at `/run/user/1000/agentwatch`
 and forwards `TMUX_PANE`, so the agent's hook events reach the host daemon and the join
 key flows through unchanged. The card badges exactly as a host dispatch would.
@@ -263,11 +263,11 @@ when both CLIs are present; manual setup is:
 
 ```bash
 claude plugin marketplace add matteobortolazzo/agent-stack
-claude plugin install agentflow agentwatch agent-sandbox
+claude plugin install agentflow agentwatch cenci-sandbox
 codex plugin marketplace add matteobortolazzo/agent-stack
 codex plugin add agentflow@agent-stack
 codex plugin add agentwatch@agent-stack
-codex plugin add agent-sandbox@agent-stack
+codex plugin add cenci-sandbox@agent-stack
 ```
 
 Codex then discovers the portable `agentflow:*` convention skills directly from the

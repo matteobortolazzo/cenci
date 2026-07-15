@@ -15,7 +15,7 @@ and maintenance follow-ups remain in the
 - tmux plus optional Linux desktop and macOS menu-bar status surfaces
 - Persisted-plan handoff, `Planned` auto-pickup, capacity/budget gates, and failure
   reconciliation
-- Sandbox lifecycle cleanup with `agent-sand --prune` and optional volume removal
+- Sandbox lifecycle cleanup with `cenci-sand --prune` and optional volume removal
 
 ## In development
 

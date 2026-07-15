@@ -11,7 +11,7 @@ container, but the container is what stands between it and your host. See
 [`sandbox/CLAUDE.md`](./sandbox/CLAUDE.md) and
 [`sandbox/README.md`](./sandbox/README.md#permission-model) for the full model.
 
-![The current repository is mounted into a container where the coding agent has full permissions, while the host stays outside the default boundary](docs/assets/agent-sandbox-boundary.svg)
+![The current repository is mounted into a container where the coding agent has full permissions, while the host stays outside the default boundary](docs/assets/cenci-sandbox-boundary.svg)
 
 ### What the sandbox protects against
 
@@ -63,9 +63,9 @@ it.
 To remove a volume and everything copied into it:
 
 ```bash
-docker volume rm claude-sand-home-<repo-slug>
+docker volume rm claude-cenci-home-<repo-slug>
 # or, for Codex sessions:
-docker volume rm codex-sand-home-<repo-slug>
+docker volume rm codex-cenci-home-<repo-slug>
 ```
 
 See [sandbox/README.md#reset-an-instance](./sandbox/README.md#reset-an-instance)

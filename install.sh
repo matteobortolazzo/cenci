@@ -311,8 +311,8 @@ run_doctor() {
 		check "cenci-sand launcher" optional "re-run the installer to create it" command -v cenci-sand
 	fi
 	if runtime="$(container_runtime 2>/dev/null)"; then
-		check "agent-sandbox:latest image" optional "build it with the installed sandbox launcher --build" \
-			"$runtime" image inspect agent-sandbox:latest
+		check "cenci-sandbox:latest image" optional "build it with the installed sandbox launcher --build" \
+			"$runtime" image inspect cenci-sandbox:latest
 	fi
 
 	say ""
@@ -524,7 +524,7 @@ step_sandbox_setup() {
 			return 0
 		fi
 	fi
-	say "  building agent-sandbox:latest with $runtime (this can take a few minutes)…"
+	say "  building cenci-sandbox:latest with $runtime (this can take a few minutes)…"
 	if "$HOME/.local/bin/$launcher_name" --build; then
 		ok "sandbox image built"
 	else

@@ -334,7 +334,7 @@ Include the server in `.lsp.json` regardless — it activates once the binary is
    - Rust: `rust-toolchain.toml` or `"stable"`
 
 9. **Sandbox Dockerfile**: "Generate a sandbox Dockerfile for this repo? (Tailors the `cenci-sand` image to your stack; committed so your team shares it.)"
-   - Options: "Yes — generate `.agent-sand/Dockerfile`", "No — skip"
+   - Options: "Yes — generate `.cenci/Dockerfile`", "No — skip"
    - Default: Yes
 
    **Agent runtime fragments**: Always include both `node.dockerfile` and `codex.dockerfile`, regardless of the detected project stack. `cenci-sand --agent codex` executes the Codex CLI baked into the selected image, and the npm-distributed Codex launcher requires Node.js. A generated per-repo image that omits either fragment cannot launch Codex.
@@ -362,7 +362,7 @@ Include the server in `.lsp.json` regardless — it activates once the binary is
 
    > **Sync obligation**: `sandbox/fragments/*.dockerfile` is the source of truth for these blocks; the mapping table above mirrors their content and existence, not their byte contents (generation reads the fragment files directly — see step 5e). If a fragment is added, removed, or renamed, this table needs a matching manual update. Low risk in practice — both live in the same monorepo and are maintained together — but currently unenforced by tooling.
 
-   > **Trust / security note**: `.agent-sand/Dockerfile` is committed to the repo, so it is reviewed like any other file in the PR that adds or changes it. It only runs `docker build` steps assembled from `sandbox/fragments/*.dockerfile` — no arbitrary runtime hooks execute during configure or during the build it produces.
+   > **Trust / security note**: `.cenci/Dockerfile` is committed to the repo, so it is reviewed like any other file in the PR that adds or changes it. It only runs `docker build` steps assembled from `sandbox/fragments/*.dockerfile` — no arbitrary runtime hooks execute during configure or during the build it produces.
 
 ### Auth Verification
 
@@ -669,7 +669,7 @@ For each MCP selected in question 5:
 
    After writing the file, create the parent directory if needed (`mkdir -p .github/workflows` for GitHub Actions).
 
-5e. **Generate `.agent-sand/Dockerfile`** (from question 9, only if user selected Yes):
+5e. **Generate `.cenci/Dockerfile`** (from question 9, only if user selected Yes):
 
    **Resolve `baseVersion`** — try (a), then fall back to (b), then (c):
 
@@ -681,12 +681,12 @@ For each MCP selected in question 5:
 
    (c) **Unresolved**: if neither (a) nor (b) yields a version that passes validation, `baseVersion` is unresolved. Store `"baseVersion": null` in `.claude/config.json`'s `sandbox` field. The Dockerfile is still generated (fragments are still selected and written) — only the `ARG BASE_VERSION=` line ships with no default value, followed by an inline comment pointing at `sandbox/README.md` for a manual pin. This is safe because `cenci-sand`'s `build_repo_image()` always passes `--build-arg BASE_VERSION=...` explicitly at build time — it resolves `BASE_VERSION` on its own regardless of what (or nothing) is baked into the file.
 
-   **Generated file format** — always emit the ARG/FROM pair below, **never** a literal `FROM agent-sandbox-base:<version>`. `cenci-sand`'s `build_repo_image()` always passes `--build-arg BASE_VERSION=...` at build time; a literal `FROM` would silently drift from what's actually built:
+   **Generated file format** — always emit the ARG/FROM pair below, **never** a literal `FROM cenci-sandbox-base:<version>`. `cenci-sand`'s `build_repo_image()` always passes `--build-arg BASE_VERSION=...` at build time; a literal `FROM` would silently drift from what's actually built:
 
    ```dockerfile
    # cenci:managed-begin
    ARG BASE_VERSION=<resolved-version-or-empty>
-   FROM agent-sandbox-base:${BASE_VERSION}
+   FROM cenci-sandbox-base:${BASE_VERSION}
 
    SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -698,23 +698,23 @@ For each MCP selected in question 5:
    ```
 
    - If `baseVersion` resolved (path a or b): write it as the ARG default, e.g. `ARG BASE_VERSION=0.9.0`.
-   - If unresolved (path c): write `ARG BASE_VERSION=` with no default, then a comment line immediately after: `# No agent-sandbox plugin version detected — see sandbox/README.md to pin BASE_VERSION manually, or install the agent-sandbox plugin and re-run /cenci:configure.`
+   - If unresolved (path c): write `ARG BASE_VERSION=` with no default, then a comment line immediately after: `# No cenci-sandbox plugin version detected — see sandbox/README.md to pin BASE_VERSION manually, or install the cenci-sandbox plugin and re-run /cenci:configure.`
 
    **Fragment concatenation order** (when multiple fragments apply, e.g. a monorepo union): **dotnet → node → playwright → go → python → rust → codex**, regardless of the order projects were discovered in. Node and Codex are mandatory; the remaining fragments are stack-selected. Concatenate the selected `sandbox/fragments/*.dockerfile` file contents in that fixed order, applying the **.NET version substitution** from the mapping table above to the dotnet fragment only — every other fragment is included verbatim. Deduplicate — each fragment appears at most once even when multiple monorepo projects map to the same fragment.
 
    **Merge-safe regeneration**: the whole block above (from `# cenci:managed-begin` through `# cenci:managed-end` inclusive) is the managed block.
-   - **File doesn't exist**: create `.agent-sand/` (`mkdir -p .agent-sand`) and write the managed block as the full file content.
+   - **File doesn't exist**: create `.cenci/` (`mkdir -p .cenci`) and write the managed block as the full file content.
    - **File exists with both markers present**: replace only the text from `# cenci:managed-begin` through `# cenci:managed-end` (inclusive) with the freshly generated block. Preserve everything before the begin marker and everything after the end marker exactly as-is — this is where a team can hand-append their own `RUN` steps across re-runs.
-   - **File exists with no markers** (e.g. a hand-authored legacy `.agent-sand/Dockerfile`): do not silently overwrite it. Reuse the exact Overwrite/Skip/Show conflict-check UX already used for CI/CD generation (question 8 / step 5d) — same three options, same behavior:
-     "Found existing `.agent-sand/Dockerfile` without cenci's managed markers. What would you like to do?"
+   - **File exists with no markers** (e.g. a hand-authored legacy `.cenci/Dockerfile`): do not silently overwrite it. Reuse the exact Overwrite/Skip/Show conflict-check UX already used for CI/CD generation (question 8 / step 5d) — same three options, same behavior:
+     "Found existing `.cenci/Dockerfile` without cenci's managed markers. What would you like to do?"
      Options: "Overwrite — wrap it in managed markers and replace with the generated block", "Skip — keep the existing file, still record `sandbox` in config.json", "Show existing — display the current file contents"
      - If Skip: still record `sandbox` in config.json, don't write the file.
      - If Show existing: read and display the file, then re-ask Overwrite/Skip.
    - **File exists with malformed markers** (exactly one of `# cenci:managed-begin` / `# cenci:managed-end` present, markers out of order, or duplicate marker pairs): do **not** attempt a partial text replace — a malformed marker pair cannot be trusted to safely bound the managed block (and could itself be the result of a spoofed end-marker smuggled in via an unvalidated `baseVersion` — see the validation step above). Route this through the exact same Overwrite/Skip/Show conflict-check UX as the "no markers" case above — same prompt text, same three options, same behavior.
 
-   **Monorepo**: fragments are the mandatory Node and Codex runtime fragments plus the deduplicated union described in the Stack-to-fragment mapping table under question 9, concatenated in the dotnet → node → playwright → go → python → rust → codex order above — one `.agent-sand/Dockerfile` for the whole repo, not one per project.
+   **Monorepo**: fragments are the mandatory Node and Codex runtime fragments plus the deduplicated union described in the Stack-to-fragment mapping table under question 9, concatenated in the dotnet → node → playwright → go → python → rust → codex order above — one `.cenci/Dockerfile` for the whole repo, not one per project.
 
-   **Committed, not ignored**: `.agent-sand/Dockerfile` is committed to the repo. Do **not** add `.agent-sand/` or `.agent-sand/Dockerfile` to `.gitignore` — the whole point is a team-shared, reviewed Dockerfile that `cenci-sand`'s per-repo image selection (see `sandbox/README.md`) builds identically for every teammate.
+   **Committed, not ignored**: `.cenci/Dockerfile` is committed to the repo. Do **not** add `.cenci/` or `.cenci/Dockerfile` to `.gitignore` — the whole point is a team-shared, reviewed Dockerfile that `cenci-sand`'s per-repo image selection (see `sandbox/README.md`) builds identically for every teammate.
 
 6. **Write `.claude/config.json`** with their choices using **merge semantics**:
 
@@ -785,11 +785,11 @@ Omit `cicd` entirely when the user says No (same pattern as `pencil`).
 
 The `sandbox` field is only present when the user selected Yes in question 9. Schema:
 - `sandbox.enabled` — `true` if user opted in; omit `sandbox` entirely if declined (same pattern as `cicd`/`pencil` — never write `{"enabled": false}`)
-- `sandbox.baseVersion` — the resolved sandbox plugin version baked into the generated `.agent-sand/Dockerfile`'s `ARG BASE_VERSION` default (see the baseVersion resolution algorithm in step 5e), or `null` when it could not be resolved
+- `sandbox.baseVersion` — the resolved sandbox plugin version baked into the generated `.cenci/Dockerfile`'s `ARG BASE_VERSION` default (see the baseVersion resolution algorithm in step 5e), or `null` when it could not be resolved
 
 Omit `sandbox` entirely when the user says No (same pattern as `cicd`/`pencil`).
 
-> **Not the same as `.claude/settings.json`'s `sandbox.enabled`.** Step 4 above always writes `"sandbox": { "enabled": false }` into `.claude/settings.json` — that key disables **Claude Code's own host sandbox**, because the `cenci-sand` container is the security boundary instead. This `.claude/config.json` `sandbox` field is unrelated: it's this ticket's per-repo `.agent-sand/Dockerfile` toggle, consumed by cenci's configure skill and by `cenci-sand`'s per-repo image build — not by Claude Code itself. Same field name (`sandbox.enabled`), two different files, two different consumers, two unrelated meanings. Do not conflate them when reading or writing either file.
+> **Not the same as `.claude/settings.json`'s `sandbox.enabled`.** Step 4 above always writes `"sandbox": { "enabled": false }` into `.claude/settings.json` — that key disables **Claude Code's own host sandbox**, because the `cenci-sand` container is the security boundary instead. This `.claude/config.json` `sandbox` field is unrelated: it's this ticket's per-repo `.cenci/Dockerfile` toggle, consumed by cenci's configure skill and by `cenci-sand`'s per-repo image build — not by Claude Code itself. Same field name (`sandbox.enabled`), two different files, two different consumers, two unrelated meanings. Do not conflate them when reading or writing either file.
 
 The `pencil` field is only present when the user was asked question 5b (frontend framework detected). Schema:
 - `pencil.enabled` — gating flag for all design features (`true` if user opted in, `false` if declined)
@@ -879,7 +879,7 @@ When migrating from an older config that has `ticketSystem`, `prSystem`, `ticket
 - When `pencil.shared` is `true`: `pencil.designPath` holds the shared path (e.g., `"designs/"`). Individual projects do **not** have `designPath`.
 - When `pencil.shared` is `false` (separate): `pencil.designPath` is omitted. Each frontend project in the `projects` array gets a `designPath` field (e.g., `"apps/web-client/designs/"`). Non-frontend projects do not get `designPath`.
 
-Report what was created and suggest next steps (e.g., "Try `/cenci:refine <ticket-id>` on a ticket"). If `sandbox.enabled` is `true`, mention the generated/committed `.agent-sand/Dockerfile` and that `cenci-sand --build` (run from inside the repo) builds the repo's own tailored image on top of the shared base. If `sandbox.baseVersion` resolved to `null` (unresolved — see the baseVersion resolution in step 5e), the chat summary must explicitly say so (e.g., "Base version could not be auto-detected — see `sandbox/README.md` to pin `BASE_VERSION` manually") rather than leaving it only as an inline Dockerfile comment, so a user who doesn't open the generated file still learns the base version wasn't pinned.
+Report what was created and suggest next steps (e.g., "Try `/cenci:refine <ticket-id>` on a ticket"). If `sandbox.enabled` is `true`, mention the generated/committed `.cenci/Dockerfile` and that `cenci-sand --build` (run from inside the repo) builds the repo's own tailored image on top of the shared base. If `sandbox.baseVersion` resolved to `null` (unresolved — see the baseVersion resolution in step 5e), the chat summary must explicitly say so (e.g., "Base version could not be auto-detected — see `sandbox/README.md` to pin `BASE_VERSION` manually") rather than leaving it only as an inline Dockerfile comment, so a user who doesn't open the generated file still learns the base version wasn't pinned.
 
 ### Board lifecycle labels
 

@@ -11,9 +11,9 @@ Provides an isolated container (`cenci-sand`) for running Claude Code sessions w
 
 ## Build & Test
 ```bash
-cenci-sand --build-base   # agent-sandbox-base:<content-hash of Dockerfile.base + entrypoint.sh + lib/> + :latest alias, rebuild if those inputs change
-cenci-sand --build        # agent-sandbox:latest, builds the base first if missing
-cenci-sand --prune        # remove superseded base tags, dangling images, stopped *-sand-* containers (--volumes to also prompt for stale home volumes)
+cenci-sand --build-base   # cenci-sandbox-base:<content-hash of Dockerfile.base + entrypoint.sh + lib/> + :latest alias, rebuild if those inputs change
+cenci-sand --build        # cenci-sandbox:latest, builds the base first if missing
+cenci-sand --prune        # remove superseded base tags, dangling images, stopped *-cenci-* containers (--volumes to also prompt for stale home volumes)
 shellcheck sandbox/entrypoint.sh sandbox/cenci-sand sandbox/tests/*.test.sh
 bash -n sandbox/entrypoint.sh sandbox/cenci-sand
 bash sandbox/tests/smoke.test.sh   # runtime smoke test; self-skips without docker/podman
@@ -49,11 +49,11 @@ bash sandbox/tests/reap-orphans.test.sh          # --reap-orphans scan/kill/esca
 - **When a function is used as the condition of `if`/`while`, bash suspends `set -e` for its entire body.** This calling-convention gotcha means every command inside such a function whose failure matters must have its exit status explicitly captured and checked — do not rely on `set -e` to catch downstream failures. This differs from `pipefail` masking: it's about errexit suspension via calling convention, not pipeline status computation. Sibling instances of the same error pattern in a function (e.g., multiple `kill` escalations) may not all be caught in a single review pass—systematically sweep the entire function body for the same pattern when fixing one instance.
 
 ## Image architecture: base + fragments
-`Dockerfile.base` builds the stack-agnostic `agent-sandbox-base:<content-hash>` image
-(plus an `agent-sandbox-base:latest` alias tag), where `<content-hash>` is a 12-char
+`Dockerfile.base` builds the stack-agnostic `cenci-sandbox-base:<content-hash>` image
+(plus an `cenci-sandbox-base:latest` alias tag), where `<content-hash>` is a 12-char
 digest of `Dockerfile.base` + `entrypoint.sh` + `lib/` (Ubuntu, system packages, locale,
 `uv`, GitHub CLI, Docker CLI, non-root `dev` user, entrypoint — no language runtimes).
-`Dockerfile` (the monolith) builds `agent-sandbox:latest` `FROM` that base image and
+`Dockerfile` (the monolith) builds `cenci-sandbox:latest` `FROM` that base image and
 layers on the runtime stacks in order: .NET, Node, Playwright, Go, then Codex last (Codex
 bumps daily via the deps-bump workflow, so keeping it last avoids invalidating the other
 stacks' layer cache on every bump).
@@ -72,7 +72,7 @@ Image dependency versions are pinned via Dockerfile `ARG`s, all checked daily by
 `.github/workflows/deps-bump.yml`. Three tiers, by breaking-change risk:
 
 - **Auto-bumped, auto-merged** — one auto-merged PR per outdated dependency, then the
-  agent-sandbox rebuild is dispatched once the merge lands:
+  cenci-sandbox rebuild is dispatched once the merge lands:
   - `CODEX_VERSION` — `Dockerfile` **and** `fragments/codex.dockerfile` (both stamped, kept in sync).
   - `GO_VERSION` — `Dockerfile` **and** `fragments/go.dockerfile` (both stamped, kept in sync).
   - `UV_VERSION` — `Dockerfile.base`.

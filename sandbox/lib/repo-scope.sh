@@ -59,21 +59,21 @@ compute_legacy_workdir() {
 }
 
 # has_repo_image <repo-root>: true (exit 0) when <repo-root> opts into its own
-# image via a Dockerfile at <repo-root>/.agent-sand/Dockerfile.
+# image via a Dockerfile at <repo-root>/.cenci/Dockerfile.
 has_repo_image() {
     local repo_root="$1"
-    [[ -f "${repo_root}/.agent-sand/Dockerfile" ]]
+    [[ -f "${repo_root}/.cenci/Dockerfile" ]]
 }
 
 # select_image <repo-root> <repo-slug>: print the image tag cenci-sand should
-# use for this repo. A per-repo Dockerfile at <repo-root>/.agent-sand/Dockerfile
+# use for this repo. A per-repo Dockerfile at <repo-root>/.cenci/Dockerfile
 # opts the repo into its own image; otherwise fall back to the shared monolith
 # image.
 select_image() {
     local repo_root="$1" repo_slug="$2"
     if has_repo_image "${repo_root}"; then
-        echo "agent-sandbox-${repo_slug}:latest"
+        echo "cenci-sandbox-${repo_slug}:latest"
     else
-        echo "agent-sandbox:latest"
+        echo "cenci-sandbox:latest"
     fi
 }

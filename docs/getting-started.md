@@ -4,7 +4,7 @@ This is the supported happy path from a clean machine to the first agent-stack t
 agent-stack is one product; the installer manages its three internal components for
 every supported client it detects.
 
-![agent-stack combines isolation, workflow, and attention into a safe path from issue to reviewed pull request](assets/agent-stack-overview.svg)
+![agent-stack combines isolation, workflow, and attention into a safe path from issue to reviewed pull request](assets/cenci-overview.svg)
 
 ## 1. Prerequisites
 
@@ -39,7 +39,7 @@ From a clone, run `./install.sh`. Non-interactive automation can add `--yes`; us
 `./install.sh --help` for the complete public interface.
 
 The installer registers the agent-stack marketplace and installs `agentflow`,
-`agentwatch`, and `agent-sandbox` independently for Claude Code, Codex, or both. It
+`agentwatch`, and `cenci-sandbox` independently for Claude Code, Codex, or both. It
 creates only the launchers relevant to detected clients and can build the sandbox
 image. AgentWatch self-bootstraps its client-cache binary and daemon on first session.
 
@@ -61,8 +61,8 @@ Warnings for optional features are safe to defer. Fix any required item marked w
 Use the launcher installed for your client:
 
 ```bash
-agent-sand   # Claude Code
-sb xt        # Codex (or: agent-sand --agent codex)
+cenci-sand   # Claude Code
+sb xt        # Codex (or: cenci-sand --agent codex)
 ```
 
 When launched from a git repository, only that repository root is mounted at
@@ -110,7 +110,7 @@ for pacing, expiry, and safety details.
 
 The lifecycle is always:
 
-![A ticket moves through human-gated refinement and planning, an autonomous engineering run, and PR follow-through](assets/agentflow-pipeline.svg)
+![A ticket moves through human-gated refinement and planning, an autonomous engineering run, and PR follow-through](assets/cenci-pipeline.svg)
 
 For UI work, refinement can branch through a dedicated design ticket. Planning saves
 an approved `.plans/` file and applies `Planned`; implementation or automated dispatch
@@ -136,11 +136,11 @@ launchers, and replaces a stale running AgentWatch daemon with the updated binar
 | AgentWatch status has not appeared | Start a new agent session and inspect `${TMPDIR:-/tmp}/agentwatch-bootstrap.log` |
 | Codex skills are missing | Confirm `codex plugin list`, then restart Codex after installation |
 | Claude commands are missing | Confirm `claude plugin list`, then restart Claude Code after installation |
-| Sandbox image is absent | Run `agent-sand --build` or `sb --build` |
+| Sandbox image is absent | Run `cenci-sand --build` or `sb --build` |
 | GitHub operations fail | Install `gh` and run `gh auth login` |
 
 Platform and display-specific troubleshooting lives in the internal layer references:
-[agent-sandbox](../sandbox/README.md) and [agentwatch](../watch/README.md).
+[cenci-sandbox](../sandbox/README.md) and [agentwatch](../watch/README.md).
 
 ## Advanced and recovery: standalone installation
 
@@ -151,12 +151,12 @@ the commands for each client you actually use:
 claude plugin marketplace add matteobortolazzo/agent-stack
 claude plugin install agentflow@agent-stack
 claude plugin install agentwatch@agent-stack
-claude plugin install agent-sandbox@agent-stack
+claude plugin install cenci-sandbox@agent-stack
 
 codex plugin marketplace add matteobortolazzo/agent-stack
 codex plugin add agentflow@agent-stack
 codex plugin add agentwatch@agent-stack
-codex plugin add agent-sandbox@agent-stack
+codex plugin add cenci-sandbox@agent-stack
 ```
 
 Then rerun `./install.sh` to restore launchers, AgentWatch wiring, and image setup.

@@ -12,7 +12,7 @@ else
 fi
 
 # ── Configuration ────────────────────────────────────────────────
-MONOLITH_IMAGE="agent-sandbox:latest"
+MONOLITH_IMAGE="cenci-sandbox:latest"
 WORKSPACE_HOST="${HOME}/Repos"
 WORKSPACE_CONTAINER="/workspace"
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -52,7 +52,7 @@ if [[ -z "${BASE_TAG}" ]]; then
     echo "Error: failed to compute base image content hash." >&2
     exit 1
 fi
-BASE_IMAGE="agent-sandbox-base:${BASE_TAG}"
+BASE_IMAGE="cenci-sandbox-base:${BASE_TAG}"
 
 # ── Parse options ────────────────────────────────────────────────
 AGENT=claude
@@ -217,7 +217,7 @@ if [[ -n "${SHORTCUT_AGENT}" ]] && "${AGENT_GIVEN}" && [[ "${AGENT}" != "${SHORT
 fi
 
 # --volumes only means something combined with --prune (it controls whether
-# --prune also lists/removes stale *-sand-home-* volumes); on its own it used
+# --prune also lists/removes stale *-cenci-home-* volumes); on its own it used
 # to be a silent no-op.
 if "${PRUNE_VOLUMES}" && ! "${PRUNE}"; then
     echo "Error: --volumes has no effect without --prune. Did you mean 'cenci-sand --prune --volumes'?" >&2
@@ -235,20 +235,20 @@ if [[ -z "${MODEL}" ]]; then
 fi
 
 # ── Prune (--prune) ───────────────────────────────────────────────
-# Cleans up superseded agent-sandbox-base tags, dangling images, and stopped
+# Cleans up superseded cenci-sandbox-base tags, dangling images, and stopped
 # sandbox containers. Runs before repo scoping so it works outside a git repo
 # too. Volumes are left alone unless --volumes is also given, and even then
 # only after an interactive y/Y confirmation — they hold copied credentials
 # and full session history.
 if "${PRUNE}"; then
-    echo "Removing superseded agent-sandbox-base tags..."
-    IMAGE_LIST="$("${RUNTIME}" images --format '{{.Repository}}:{{.Tag}}' agent-sandbox-base)" || {
-        echo "Error: failed to list agent-sandbox-base images." >&2
+    echo "Removing superseded cenci-sandbox-base tags..."
+    IMAGE_LIST="$("${RUNTIME}" images --format '{{.Repository}}:{{.Tag}}' cenci-sandbox-base)" || {
+        echo "Error: failed to list cenci-sandbox-base images." >&2
         exit 1
     }
     if [[ -n "${IMAGE_LIST}" ]]; then
         while read -r tag; do
-            [[ "${tag}" == "${BASE_IMAGE}" || "${tag}" == "agent-sandbox-base:latest" ]] && continue
+            [[ "${tag}" == "${BASE_IMAGE}" || "${tag}" == "cenci-sandbox-base:latest" ]] && continue
             echo "  removing ${tag}"
             "${RUNTIME}" rmi "${tag}" || true
         done <<< "${IMAGE_LIST}"
@@ -259,7 +259,7 @@ if "${PRUNE}"; then
         echo "Error: failed to list sandbox containers." >&2
         exit 1
     }
-    MATCHING_CONTAINERS="$(echo "${CONTAINER_LIST}" | { grep -E -- '^(claude-sand-|codex-sand-)' || true; })"
+    MATCHING_CONTAINERS="$(echo "${CONTAINER_LIST}" | { grep -E -- '^(claude-cenci-|codex-cenci-)' || true; })"
     if [[ -n "${MATCHING_CONTAINERS}" ]]; then
         while read -r name; do
             echo "  removing ${name}"
@@ -275,7 +275,7 @@ if "${PRUNE}"; then
             echo "Error: failed to list sandbox volumes." >&2
             exit 1
         }
-        VOLUMES="$(echo "${VOLUME_LIST}" | { grep -E -- '^(claude|codex)-sand-home-' || true; })"
+        VOLUMES="$(echo "${VOLUME_LIST}" | { grep -E -- '^(claude|codex)-cenci-home-' || true; })"
         if [[ -n "${VOLUMES}" ]]; then
             echo "The following volumes hold copied credentials and full session history:" >&2
             echo "${VOLUMES}" >&2
@@ -384,7 +384,7 @@ reap_orphans() {
         fi
 
         local matching_containers
-        matching_containers="$(echo "${container_list}" | { grep -E -- '^(claude-sand-|codex-sand-)' || true; })"
+        matching_containers="$(echo "${container_list}" | { grep -E -- '^(claude-cenci-|codex-cenci-)' || true; })"
         [[ -z "${matching_containers}" ]] && continue
 
         local container
@@ -529,14 +529,14 @@ if "${REAP_ORPHANS}"; then
 fi
 
 # ── Namespacing (per-agent, so containers/volumes never collide) ──
-CONTAINER_PREFIX="${AGENT}-sand"
+CONTAINER_PREFIX="${AGENT}-cenci"
 
 # ── Repo scoping ─────────────────────────────────────────────────
 # Inside a git repo, containers/volumes/images are namespaced per repo (see
 # lib/repo-scope.sh) so each project gets its own isolated sandbox and,
-# optionally, its own image (<repo-root>/.agent-sand/Dockerfile). Outside a
+# optionally, its own image (<repo-root>/.cenci/Dockerfile). Outside a
 # git repo, fall back to the legacy shared-workspace scheme (whole ~/Repos
-# mount, one container per --name) so existing claude-sand-default-style
+# mount, one container per --name) so existing claude-cenci-default-style
 # volumes keep working untouched.
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/repo-scope.sh
@@ -575,7 +575,7 @@ fi
 # ── Build ────────────────────────────────────────────────────────
 build_base_image() {
     echo "Building ${BASE_IMAGE} with ${RUNTIME}..."
-    "${RUNTIME}" build -f "${SCRIPT_DIR}/Dockerfile.base" -t "${BASE_IMAGE}" -t agent-sandbox-base:latest "${SCRIPT_DIR}"
+    "${RUNTIME}" build -f "${SCRIPT_DIR}/Dockerfile.base" -t "${BASE_IMAGE}" -t cenci-sandbox-base:latest "${SCRIPT_DIR}"
     echo "Done."
 }
 
@@ -595,7 +595,7 @@ build_image() {
 build_repo_image() {
     ensure_base_image
     echo "Building ${IMAGE} with ${RUNTIME}..."
-    "${RUNTIME}" build --build-arg "BASE_VERSION=${BASE_TAG}" -t "${IMAGE}" -f "${REPO_ROOT}/.agent-sand/Dockerfile" "${REPO_ROOT}/.agent-sand"
+    "${RUNTIME}" build --build-arg "BASE_VERSION=${BASE_TAG}" -t "${IMAGE}" -f "${REPO_ROOT}/.cenci/Dockerfile" "${REPO_ROOT}/.cenci"
     echo "Done."
 }
 
@@ -744,7 +744,7 @@ wait_until_ready() {
     local ready=false
     local attempt
     for ((attempt = 0; attempt < 600; attempt++)); do
-        if "${RUNTIME}" exec -u dev "${CONTAINER_NAME}" test -e /tmp/agent-sand-ready 2>/dev/null; then
+        if "${RUNTIME}" exec -u dev "${CONTAINER_NAME}" test -e /tmp/cenci-ready 2>/dev/null; then
             ready=true
             break
         fi
@@ -904,7 +904,7 @@ fi
 # later `docker exec` sessions in the same repository. A detached idle process
 # makes every agent window an equal, independently disposable exec session.
 "${RUNTIME}" run "${RUN_ARGS[@]}" "${IMAGE}" \
-    -c 'touch /tmp/agent-sand-ready && exec sleep infinity' >/dev/null
+    -c 'touch /tmp/cenci-ready && exec sleep infinity' >/dev/null
 
 # The entrypoint performs credential and plugin setup before running the
 # readiness command. Do not race the first agent against that initialization.

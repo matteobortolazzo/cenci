@@ -6,7 +6,7 @@ Status: completed (2026-07-13)
 
 agent-stack is presented and installed as one product with three internal layers:
 
-- agent-sandbox: isolation
+- cenci-sandbox: isolation
 - agentflow: workflow and human decision gates
 - agentwatch: attention and dispatch
 

@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="430" viewBox="0 0 1200 430" role="img" aria-labelledby="title desc">
-  <title id="title">agentflow delivery pipeline</title>
+  <title id="title">cenci delivery pipeline</title>
   <desc id="desc">A ticket moves through human refinement and planning, an autonomous implementation and review run, and pull request follow-through.</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#0b1020"/><stop offset="1" stop-color="#111b35"/></linearGradient>

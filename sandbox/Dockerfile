@@ -1,5 +1,5 @@
 ARG BASE_VERSION=latest
-FROM agent-sandbox-base:${BASE_VERSION}
+FROM cenci-sandbox-base:${BASE_VERSION}
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 

@@ -125,7 +125,7 @@ Only consider Part 2 complete once this verification step has passed on a real m
 
 **Not optional.** #193 removed the elevating `permissions:` block from the reusable
 `plugin-version-bump.yml` workflow (it now inherits whatever permissions the caller job
-grants) and reverted `agentflow-version-bump.yml` / `agent-sandbox-version-bump.yml` to
+grants) and reverted `agentflow-version-bump.yml` / `cenci-sandbox-version-bump.yml` to
 `contents: write` only, dropping the `actions: write` stopgap. This is only fully proven
 on a real plugin-touching push — a misconfigured caller permission would silently break
 the next release the same way it did before #189/#190/#192.
@@ -136,7 +136,7 @@ After this fix merges to `main`:
    `agentwatch/**`, or `dev-sandbox/**`).
 2. Open the Actions tab and find the resulting `*-version-bump.yml` run.
 3. Confirm the run **succeeds end-to-end** with no `startup_failure` — specifically:
-   - `agentflow` / `agent-sandbox`: the run starts and the `git push` step lands the
+   - `agentflow` / `cenci-sandbox`: the run starts and the `git push` step lands the
      `chore(release): <plugin>/vX.Y.Z` commit on `main`, under a `contents: write`-only
      token.
    - `agentwatch`: the run succeeds under `contents: write` + `actions: write`, tags the

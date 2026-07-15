@@ -315,8 +315,8 @@ func TestSandboxNoSubcommand_Exits2(t *testing.T) {
 
 // -- sandbox ls / stop (native Go against docker/podman) -----------------
 
-const canonPSAllOutput = "claude-sand-agentstack\tUp 2 hours\tagent-sandbox:latest\n" +
-	"codex-sand-agentstack\tExited (0) 5 minutes ago\tagent-sandbox:latest\n" +
+const canonPSAllOutput = "claude-cenci-agentstack\tUp 2 hours\tcenci-sandbox:latest\n" +
+	"codex-cenci-agentstack\tExited (0) 5 minutes ago\tcenci-sandbox:latest\n" +
 	"unrelated-container\tUp 1 hour\tnginx:latest\n"
 
 func TestSandboxLs_ListsMatchingContainersFromFakeDocker(t *testing.T) {
@@ -332,7 +332,7 @@ func TestSandboxLs_ListsMatchingContainersFromFakeDocker(t *testing.T) {
 	}
 
 	out := string(output)
-	if !strings.Contains(out, "claude-sand-agentstack") || !strings.Contains(out, "codex-sand-agentstack") {
+	if !strings.Contains(out, "claude-cenci-agentstack") || !strings.Contains(out, "codex-cenci-agentstack") {
 		t.Errorf("expected both sandbox containers listed, got:\n%s", out)
 	}
 	if strings.Contains(out, "unrelated-container") {
@@ -352,7 +352,7 @@ func TestSandboxStop_StopsMatchingContainers(t *testing.T) {
 	dir := t.TempDir()
 	callLog := filepath.Join(dir, "calls.txt")
 	// Only running containers are relevant to `stop`.
-	psRunning := "claude-sand-agentstack\tUp 2 hours\tagent-sandbox:latest\n" +
+	psRunning := "claude-cenci-agentstack\tUp 2 hours\tcenci-sandbox:latest\n" +
 		"unrelated-container\tUp 1 hour\tnginx:latest\n"
 	writeFakeDocker(t, dir, "docker", callLog, psRunning)
 
@@ -368,8 +368,8 @@ func TestSandboxStop_StopsMatchingContainers(t *testing.T) {
 		t.Fatalf("read call log: %v", err)
 	}
 	callsStr := string(calls)
-	if !strings.Contains(callsStr, "stop claude-sand-agentstack") {
-		t.Errorf("expected a 'stop claude-sand-agentstack' invocation, got call log:\n%s", callsStr)
+	if !strings.Contains(callsStr, "stop claude-cenci-agentstack") {
+		t.Errorf("expected a 'stop claude-cenci-agentstack' invocation, got call log:\n%s", callsStr)
 	}
 	if strings.Contains(callsStr, "stop unrelated-container") {
 		t.Errorf("expected non-sandbox container to never be stopped, got call log:\n%s", callsStr)
@@ -379,8 +379,8 @@ func TestSandboxStop_StopsMatchingContainers(t *testing.T) {
 func TestSandboxStop_WithFilterArg_OnlyStopsMatchingName(t *testing.T) {
 	dir := t.TempDir()
 	callLog := filepath.Join(dir, "calls.txt")
-	psRunning := "claude-sand-agentstack\tUp 2 hours\tagent-sandbox:latest\n" +
-		"codex-sand-otherrepo\tUp 1 hour\tagent-sandbox:latest\n"
+	psRunning := "claude-cenci-agentstack\tUp 2 hours\tcenci-sandbox:latest\n" +
+		"codex-cenci-otherrepo\tUp 1 hour\tcenci-sandbox:latest\n"
 	writeFakeDocker(t, dir, "docker", callLog, psRunning)
 
 	cmd := exec.Command(binaryPath, "sandbox", "stop", "agentstack")
@@ -395,10 +395,10 @@ func TestSandboxStop_WithFilterArg_OnlyStopsMatchingName(t *testing.T) {
 		t.Fatalf("read call log: %v", err)
 	}
 	callsStr := string(calls)
-	if !strings.Contains(callsStr, "stop claude-sand-agentstack") {
+	if !strings.Contains(callsStr, "stop claude-cenci-agentstack") {
 		t.Errorf("expected the matching container to be stopped, got call log:\n%s", callsStr)
 	}
-	if strings.Contains(callsStr, "stop codex-sand-otherrepo") {
+	if strings.Contains(callsStr, "stop codex-cenci-otherrepo") {
 		t.Errorf("expected the non-matching container to be left alone, got call log:\n%s", callsStr)
 	}
 }

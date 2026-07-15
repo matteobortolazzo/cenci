@@ -7,7 +7,7 @@ Stop hunting through terminals to find the session that needs you. AgentWatch tu
 Claude Code and Codex hooks into shared live state for tmux and optional desktop
 surfaces.
 
-![AgentWatch routes Claude Code and Codex hook events to tmux and desktop status surfaces](../docs/assets/agentwatch-surfaces.svg)
+![AgentWatch routes Claude Code and Codex hook events to tmux and desktop status surfaces](../docs/assets/cenci-surfaces.svg)
 
 The same four states appear everywhere:
 
@@ -149,7 +149,7 @@ descriptive slug: `--slug` if given, else the whole description slugified.
 | Flag | Purpose |
 |------|---------|
 | `--agent <name>` | Agent to launch (`claude`, `codex`, …); default from config, else `claude` |
-| `--sandbox` / `--no-sandbox` | Sandbox is the default (`claude`→`agent-sand`, the container being the mandatory runtime); `--no-sandbox` is the host opt-out. Both override the config default |
+| `--sandbox` / `--no-sandbox` | Sandbox is the default (`claude`→`cenci-sand`, the container being the mandatory runtime); `--no-sandbox` is the host opt-out. Both override the config default |
 | `--model <model>` | Model override passed to the agent (substituted into `{model}`, else appended as `--model`) |
 | `--session <name>` | Target tmux session (default: the current session) |
 | `--slug <slug>` | Window-name slug for free-text runs; ignored for numeric tickets (named `<number>-<skill>`) |
@@ -191,7 +191,7 @@ the host (the same as passing `--no-sandbox`):
   "agents": {
     "claude": {
       "command": "claude",
-      "sandboxCommand": "agent-sand",
+      "sandboxCommand": "cenci-sand",
       "workflows": {
         "implement": { "args": ["--", "/agentflow:implement {ticket}"] }
       }
@@ -534,24 +534,24 @@ cleanup: 'agentwatch close {number}'
 
 ## Sandbox management and session launching (`agentwatch sandbox`, `agentwatch open`)
 
-`agentwatch` wraps [dev-sandbox](../sandbox/README.md)'s `agent-sand` bash launcher
+`agentwatch` wraps [dev-sandbox](../sandbox/README.md)'s `cenci-sand` bash launcher
 with first-class `sandbox` and `open` verb groups, so day-to-day sandbox commands don't
-need `agent-sand` on PATH to be remembered by name.
+need `cenci-sand` on PATH to be remembered by name.
 
 ```bash
-# One-shot maintenance verbs — each forwards to the matching agent-sand flag
-agentwatch sandbox build           # agent-sand --build
-agentwatch sandbox build-base      # agent-sand --build-base
-agentwatch sandbox prune           # agent-sand --prune
-agentwatch sandbox prune --volumes # agent-sand --prune --volumes
-agentwatch sandbox update-plugins  # agent-sand --update-plugins
-agentwatch sandbox reseed-creds    # agent-sand --reseed-creds
-agentwatch sandbox reap-orphans    # agent-sand --reap-orphans
+# One-shot maintenance verbs — each forwards to the matching cenci-sand flag
+agentwatch sandbox build           # cenci-sand --build
+agentwatch sandbox build-base      # cenci-sand --build-base
+agentwatch sandbox prune           # cenci-sand --prune
+agentwatch sandbox prune --volumes # cenci-sand --prune --volumes
+agentwatch sandbox update-plugins  # cenci-sand --update-plugins
+agentwatch sandbox reseed-creds    # cenci-sand --reseed-creds
+agentwatch sandbox reap-orphans    # cenci-sand --reap-orphans
 
 # List / stop sandbox containers — implemented natively against docker/podman,
-# no agent-sand equivalent
+# no cenci-sand equivalent
 agentwatch sandbox ls
-agentwatch sandbox stop            # stops every claude-sand-*/codex-sand-* container
+agentwatch sandbox stop            # stops every claude-cenci-*/codex-cenci-* container
 agentwatch sandbox stop agentstack # only containers whose name contains "agentstack"
 
 # Launch or attach an interactive session
@@ -561,12 +561,12 @@ agentwatch open --agent codex --model gpt-5.6-terra --name mybox
 agentwatch open ch -- --resume     # forward flags after -- straight to the agent CLI
 ```
 
-`open`'s one-token shortcuts mirror `agent-sand`'s own table exactly, so `ch`/`cs`/`co`/`cf`
+`open`'s one-token shortcuts mirror `cenci-sand`'s own table exactly, so `ch`/`cs`/`co`/`cf`
 select Claude with the haiku/sonnet/opus/fable model, and `xl`/`xt`/`xs` select Codex with
 the gpt-5.6-luna/terra/sol model. A shortcut and a conflicting explicit `--agent` (e.g.
 `open ch --agent codex`) is a usage error (exit 2) rather than silently picking one.
 Supported flags: `--agent`, `--model`, `--name`, `--shell`, `--docker`, `--host-network`;
-anything after a bare `--` is forwarded to the agent CLI verbatim. `open` execs `agent-sand`
+anything after a bare `--` is forwarded to the agent CLI verbatim. `open` execs `cenci-sand`
 (replacing the `agentwatch` process) so the interactive session owns the TTY.
 
 **`cn` alias:** a copy or symlink of the `agentwatch` binary named `cn` behaves as
@@ -935,7 +935,7 @@ The daemon has two sweep mechanisms:
 
 **Paneless TTL sweep**: Sessions without a tmux pane (plain terminals, dev-sandbox without a pane) are tracked by session id only. They are removed on `SessionEnd`; if no `SessionEnd` fires (e.g. a crash or a Codex session), the daemon expires them after the idle TTL (default `2h`, configurable with `-session-ttl`).
 
-**Sandbox orphan reap**: When the pane-based sweep detects one or more tmux-backed sessions whose pane no longer exists, the daemon triggers a single `agent-sand --reap-orphans` pass (coalesced — not one per stale window) to kill any orphaned container-side agent processes for those sessions. The daemon also runs one reap pass at startup, covering panes that closed while it was down or restarting. The reap is fire-and-forget, non-blocking for the event loop, and self-no-ops when `agent-sand` isn't on `PATH` or there's nothing to reap.
+**Sandbox orphan reap**: When the pane-based sweep detects one or more tmux-backed sessions whose pane no longer exists, the daemon triggers a single `cenci-sand --reap-orphans` pass (coalesced — not one per stale window) to kill any orphaned container-side agent processes for those sessions. The daemon also runs one reap pass at startup, covering panes that closed while it was down or restarting. The reap is fire-and-forget, non-blocking for the event loop, and self-no-ops when `cenci-sand` isn't on `PATH` or there's nothing to reap.
 
 ### Paneless sessions
 

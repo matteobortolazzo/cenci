@@ -7,7 +7,7 @@
 [![Platforms](https://img.shields.io/badge/Linux_%C2%B7_macOS_%C2%B7_WSL2-supported-64748b?style=flat-square)](docs/getting-started.md)
 [![License](https://img.shields.io/badge/license-MIT-8b5cf6?style=flat-square)](LICENSE)
 
-![agent-stack combines isolation, workflow, and attention into a safe path from issue to reviewed pull request](docs/assets/agent-stack-overview.svg)
+![agent-stack combines isolation, workflow, and attention into a safe path from issue to reviewed pull request](docs/assets/cenci-overview.svg)
 
 Coding agents are useful when they can keep working. They are trustworthy when the
 security boundary, approval points, and waiting states are explicit.
@@ -23,7 +23,7 @@ between them.
 
 ## From issue to reviewed PR
 
-![agentflow moves a ticket through human-gated refinement and planning, an autonomous engineering run, and PR follow-through](docs/assets/agentflow-pipeline.svg)
+![agentflow moves a ticket through human-gated refinement and planning, an autonomous engineering run, and PR follow-through](docs/assets/cenci-pipeline.svg)
 
 | You stay responsible for | agent-stack handles |
 |---|---|
@@ -48,7 +48,7 @@ curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/agent-stack/main/i
 Then launch your agent inside the project boundary:
 
 ```bash
-agent-sand   # Claude Code
+cenci-sand   # Claude Code
 sb xt        # Codex
 ```
 
@@ -74,7 +74,7 @@ configuration and your first ticket.
 
 | Layer | What it changes | Learn more |
 |---|---|---|
-| **agent-sandbox** | Runs Claude Code or Codex at full permissions while mounting only the current repository at `/workspace`. The container—not a prompt—is the security boundary. | [Isolation details](sandbox/README.md) |
+| **cenci-sandbox** | Runs Claude Code or Codex at full permissions while mounting only the current repository at `/workspace`. The container—not a prompt—is the security boundary. | [Isolation details](sandbox/README.md) |
 | **agentflow** | Adds refinement, optional UI design, persisted planning, test-first implementation, specialist reviews, and PR follow-through. | [Workflow details](flow/README.md) |
 | **AgentWatch** | Turns native hooks into shared live state for tmux and optional Linux/macOS status surfaces. It can also dispatch approved plans by policy. | [Attention details](watch/README.md) |
 

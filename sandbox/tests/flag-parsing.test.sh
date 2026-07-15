@@ -87,7 +87,7 @@ echo "case: '--' passes everything after it through to the agent CLI verbatim"
 printf '' > "${CALLS_FILE}"
 "${SANDBOX_DIR}/cenci-sand" -- --resume --some-future-flag
 
-if ! grep -Eq -- "^exec -it -u dev .*claude-sand-${REPO_SLUG} claude --dangerously-skip-permissions --model sonnet --resume --some-future-flag " "${CALLS_FILE}"; then
+if ! grep -Eq -- "^exec -it -u dev .*claude-cenci-${REPO_SLUG} claude --dangerously-skip-permissions --model sonnet --resume --some-future-flag " "${CALLS_FILE}"; then
     echo "FAIL: flags after '--' were not forwarded verbatim to the agent CLI" >&2
     exit 1
 fi
@@ -96,7 +96,7 @@ echo "case: legitimate passthrough (short flags, bare positional args) still wor
 printf '' > "${CALLS_FILE}"
 "${SANDBOX_DIR}/cenci-sand" -p "fix the tests"
 
-if ! grep -Eq -- "^exec -it -u dev .*claude-sand-${REPO_SLUG} claude --dangerously-skip-permissions --model sonnet -p fix\\\\ the\\\\ tests " "${CALLS_FILE}"; then
+if ! grep -Eq -- "^exec -it -u dev .*claude-cenci-${REPO_SLUG} claude --dangerously-skip-permissions --model sonnet -p fix\\\\ the\\\\ tests " "${CALLS_FILE}"; then
     echo "FAIL: short-flag/positional passthrough regressed" >&2
     exit 1
 fi
