@@ -28,7 +28,7 @@
       "name": "cenci-sandbox",
       "source": "./sandbox",
       "description": "cenci isolation layer: Docker/Podman security boundary for full-permission Claude Code and Codex sessions",
-      "version": "0.2.0",
+      "version": "1.0.0",
       "author": {
         "name": "Matteo Bortolazzo"
       },
