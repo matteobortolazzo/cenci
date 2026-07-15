@@ -15,10 +15,11 @@ import (
 )
 
 // reapScanScript is the minimal POSIX in-container scan, copied VERBATIM
-// from sandbox/cenci-sand's REAP_SCAN_SCRIPT (it still runs inside the
-// container via `exec -u root sh -c`): emits "<pid>\t<pane>\t<start>" for
-// every process whose environ carries a TMUX_PANE key (pane may be empty;
-// <start> is /proc/<pid>/stat field 22, read in the same loop pass; empty if
+// from sandbox/cenci-sand's REAP_SCAN_SCRIPT (it now runs inside the
+// container via `exec -u dev sh -c`; see the call site's comment for why):
+// emits "<pid>\t<pane>\t<start>" for every process whose environ carries a
+// TMUX_PANE key (pane may be empty; <start> is /proc/<pid>/stat field 22,
+// read in the same loop pass; empty if
 // the stat line couldn't be read/parsed), skipping processes lacking the
 // TMUX_PANE key entirely. All classification — skip-empty-pane,
 // skip-malformed-pane, skip-init, skip-live-pane, reap-dead-pane, TERM→KILL escalation,
@@ -117,12 +118,17 @@ func ReapOrphans(stdout, stderr io.Writer) error {
 				continue
 			}
 
-			// -u root: the container's persisted Config.User (from `run
-			// --user root`) may not be root at exec time, and this environ
-			// scan needs to read every process's /proc/<pid>/environ, not
-			// just those owned by the default user.
+			// -u dev: the scan runs as the fixed sandbox agent user so
+			// same-uid /proc/<pid>/environ reads succeed without
+			// CAP_SYS_PTRACE (root lacks it under docker's default
+			// capability set, so a root-run scan cannot read dev-owned
+			// agent processes — the actual reap target). Root-owned helper
+			// processes are outside the target set. PID 1 is guarded
+			// below as defense-in-depth, though under the dev-user scan
+			// it typically won't be readable at all, so it never
+			// surfaces in practice (#356).
 			var scanOut, scanErr bytes.Buffer
-			scan := exec.Command(rt, "exec", "-u", "root", container, "sh", "-c", reapScanScript)
+			scan := exec.Command(rt, "exec", "-u", "dev", container, "sh", "-c", reapScanScript)
 			scan.Stdout = &scanOut
 			scan.Stderr = &scanErr
 			if err := scan.Run(); err != nil {
@@ -165,7 +171,12 @@ func ReapOrphans(stdout, stderr io.Writer) error {
 					continue
 				}
 
-				// -u root: see comment above the scan call.
+				// -u root: `docker run --user X` persists as the container's
+				// Config.User for the container's lifetime, not just its
+				// initial process, so every exec call site must carry its
+				// own explicit -u rather than relying on the container's
+				// default user (see sandbox project's CLAUDE.md). Signaling
+				// stays root regardless of which user the scan runs as.
 				term := exec.Command(rt, "exec", "-u", "root", container, "kill", "-TERM", pid)
 				term.Stdout = stdout
 				term.Stderr = stderr
@@ -198,9 +209,12 @@ func ReapOrphans(stdout, stderr io.Writer) error {
 			for i, pid := range termPids {
 				recordedStart := termStarts[i]
 
-				// -u root: see comment above the scan call. A non-zero exit
-				// here means the exec transport itself failed, not "process
-				// gone" — a hard error, not swallowed.
+				// -u root: `docker run --user X` persists as the container's
+				// Config.User for the container's lifetime, so this exec
+				// call site carries its own explicit -u (see sandbox
+				// project's CLAUDE.md). A non-zero exit here means the exec
+				// transport itself failed, not "process gone" — a hard
+				// error, not swallowed.
 				probeStart, err := probeStartTime(rt, container, pid)
 				if err != nil {
 					_, _ = fmt.Fprintf(stderr, "Error: failed to probe liveness of pid %s in container %s: %v\n", pid, container, err)
@@ -261,6 +275,10 @@ func ReapOrphans(stdout, stderr io.Writer) error {
 // argument to the probe, never interpolated. An error means the exec
 // transport itself failed; the probe's stderr is folded into the error text.
 func probeStartTime(rt, container, pid string) (string, error) {
+	// -u root: `docker run --user X` persists as the container's Config.User
+	// for the container's lifetime, so this exec call site carries its own
+	// explicit -u (see sandbox project's CLAUDE.md). The probe stays root
+	// regardless of which user the scan runs as.
 	var probeOut, probeErr bytes.Buffer
 	probe := exec.Command(rt, "exec", "-u", "root", container, "sh", "-c", reapLivenessScript, "_", pid)
 	probe.Stdout = &probeOut

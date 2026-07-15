@@ -64,6 +64,40 @@ func TestReapOrphans_DeadPaneOrphanIsTermed(t *testing.T) {
 	}
 }
 
+// The in-container /proc/*/environ scan must run as -u dev (same-uid reads
+// need no CAP_SYS_PTRACE, so dev-owned agent processes become visible),
+// while SIGTERM keeps running as -u root (see reap.go's scan comment and the
+// sandbox CLAUDE.md's "docker run --user X persists" entrypoint pattern for
+// why every exec call site needs its own explicit -u flag). writeReapFakes'
+// mock docker doesn't guard on the -u value, so this only pins the exec
+// call log shape.
+func TestReapOrphans_ScanRunsAsDev(t *testing.T) {
+	dir := t.TempDir()
+	callLog := filepath.Join(dir, "calls.txt")
+	writeReapFakes(t, dir, callLog)
+	t.Setenv("PATH", dir)
+	t.Setenv("CENCI_SANDBOX_REAP_GRACE_SECS", "0")
+	t.Setenv("FAKE_PS", "claude-cenci-devscan\n")
+	t.Setenv("FAKE_SCAN", "22001\t%26\t22000\n")
+	t.Setenv("FAKE_LIVE_PANES", "%99")
+
+	var stdout, stderr bytes.Buffer
+	if err := ReapOrphans(&stdout, &stderr); err != nil {
+		t.Fatalf("ReapOrphans: %v\nstderr: %s", err, stderr.String())
+	}
+
+	if !strings.Contains(stdout.String(), "reaped\tclaude-cenci-devscan\t22001\t%26") {
+		t.Errorf("missing reaped line; stdout:\n%s", stdout.String())
+	}
+	calls := readCallLog(t, callLog)
+	if !containsPrefix(calls, "exec -u dev claude-cenci-devscan sh -c") {
+		t.Errorf("scan did not run as -u dev; calls:\n%s", strings.Join(calls, "\n"))
+	}
+	if !containsLine(calls, "exec -u root claude-cenci-devscan kill -TERM 22001") {
+		t.Errorf("SIGTERM did not stay -u root; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
 func TestReapOrphans_LivePaneNeverSignaled(t *testing.T) {
 	dir := t.TempDir()
 	callLog := filepath.Join(dir, "calls.txt")
