@@ -1,11 +1,11 @@
 {
-  "name": "agent-sandbox",
-  "description": "agent-stack isolation layer: Docker/Podman security boundary for full-permission Claude Code and Codex sessions",
+  "name": "cenci-sandbox",
+  "description": "cenci isolation layer: Docker/Podman security boundary for full-permission Claude Code and Codex sessions",
   "version": "0.14.6",
   "author": {
     "name": "Matteo Bortolazzo"
   },
-  "repository": "https://github.com/matteobortolazzo/agent-stack",
+  "repository": "https://github.com/matteobortolazzo/cenci",
   "keywords": [
     "docker",
     "podman",

@@ -1,13 +1,13 @@
 {
-  "name": "agentflow",
+  "name": "cenci",
   "version": "4.14.7",
-  "description": "agent-stack workflow layer: engineering conventions for Codex and Claude Code's gated ticket-to-PR pipeline.",
+  "description": "cenci workflow layer: engineering conventions for Codex and Claude Code's gated ticket-to-PR pipeline.",
   "author": {
     "name": "Matteo Bortolazzo",
     "url": "https://github.com/matteobortolazzo"
   },
-  "homepage": "https://github.com/matteobortolazzo/agent-stack/tree/main/agentflow",
-  "repository": "https://github.com/matteobortolazzo/agent-stack",
+  "homepage": "https://github.com/matteobortolazzo/cenci/tree/main/flow",
+  "repository": "https://github.com/matteobortolazzo/cenci",
   "license": "MIT",
   "keywords": [
     "workflow",
@@ -18,18 +18,18 @@
   "skills": "./skills/",
   "hooks": "./codex/hooks.json",
   "interface": {
-    "displayName": "AgentFlow",
-    "shortDescription": "agent-stack workflow conventions and guidance.",
-    "longDescription": "The agent-stack workflow layer provides portable engineering convention skills for Codex and the complete interactive ticket-to-PR pipeline for Claude Code.",
+    "displayName": "Cenci",
+    "shortDescription": "cenci workflow conventions and guidance.",
+    "longDescription": "The cenci workflow layer provides portable engineering convention skills for Codex and the complete interactive ticket-to-PR pipeline for Claude Code.",
     "developerName": "Matteo Bortolazzo",
     "category": "Developer Tools",
     "capabilities": [
       "Read",
       "Write"
     ],
-    "websiteURL": "https://github.com/matteobortolazzo/agent-stack/tree/main/agentflow",
+    "websiteURL": "https://github.com/matteobortolazzo/cenci/tree/main/flow",
     "defaultPrompt": [
-      "Apply AgentFlow's engineering conventions to this task."
+      "Apply cenci's engineering conventions to this task."
     ],
     "brandColor": "#2563EB"
   }

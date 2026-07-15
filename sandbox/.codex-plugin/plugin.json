@@ -1,13 +1,13 @@
 {
-  "name": "agent-sandbox",
+  "name": "cenci-sandbox",
   "version": "0.14.6",
-  "description": "agent-stack isolation layer: Docker or Podman launcher for Claude Code and Codex.",
+  "description": "cenci isolation layer: Docker or Podman launcher for Claude Code and Codex.",
   "author": {
     "name": "Matteo Bortolazzo",
     "url": "https://github.com/matteobortolazzo"
   },
-  "homepage": "https://github.com/matteobortolazzo/agent-stack/tree/main/dev-sandbox",
-  "repository": "https://github.com/matteobortolazzo/agent-stack",
+  "homepage": "https://github.com/matteobortolazzo/cenci/tree/main/sandbox",
+  "repository": "https://github.com/matteobortolazzo/cenci",
   "license": "MIT",
   "keywords": [
     "docker",
@@ -18,17 +18,17 @@
   ],
   "skills": "./skills/",
   "interface": {
-    "displayName": "Agent Sandbox",
-    "shortDescription": "agent-stack container isolation for coding agents.",
-    "longDescription": "The agent-stack isolation layer launches Claude Code or Codex with full permissions inside a Docker or Podman security boundary.",
+    "displayName": "Cenci Sandbox",
+    "shortDescription": "cenci container isolation for coding agents.",
+    "longDescription": "The cenci isolation layer launches Claude Code or Codex with full permissions inside a Docker or Podman security boundary.",
     "developerName": "Matteo Bortolazzo",
     "category": "Developer Tools",
     "capabilities": [
       "Interactive"
     ],
-    "websiteURL": "https://github.com/matteobortolazzo/agent-stack/tree/main/dev-sandbox",
+    "websiteURL": "https://github.com/matteobortolazzo/cenci/tree/main/sandbox",
     "defaultPrompt": [
-      "Show the Agent Sandbox setup and usage guidance."
+      "Show the Cenci Sandbox setup and usage guidance."
     ],
     "brandColor": "#0F766E"
   }

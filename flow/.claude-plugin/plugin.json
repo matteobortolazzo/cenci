@@ -1,11 +1,11 @@
 {
-  "name": "agentflow",
-  "description": "agent-stack workflow layer: portable conventions and Claude Code's gated GitHub ticket-to-PR pipeline",
+  "name": "cenci",
+  "description": "cenci workflow layer: portable conventions and Claude Code's gated GitHub ticket-to-PR pipeline",
   "version": "4.14.7",
   "author": {
     "name": "Matteo Bortolazzo"
   },
-  "repository": "https://github.com/matteobortolazzo/agent-stack",
+  "repository": "https://github.com/matteobortolazzo/cenci",
   "keywords": [
     "workflow",
     "github",
