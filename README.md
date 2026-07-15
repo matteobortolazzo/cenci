@@ -191,8 +191,9 @@ New → Refined → [Designed] → Planned → Working → In Review → Impleme
 
 ## Name
 
-Roberto Cenci is an Italian TV director known for calling out camera numbers live
-during broadcasts, switching between feeds. Coordinating agents felt the same way.
+I named this after Roberto Cenci, the Italian TV director who spends live broadcasts
+yelling camera numbers to cut between feeds. Babysitting a pile of agents felt exactly
+like that.
 
 ## License
 
