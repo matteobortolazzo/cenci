@@ -15,6 +15,11 @@ support story. The internal plugins retain separate manifests, versions, release
 and build/test commands. Optional lazyboards orchestration remains a separate project
 that integrates through cenci's labels, persisted plans, and dispatch interface.
 
+Amendment (2026-07-15): the cenci installer can optionally install and update
+lazyboards (opt-in prompt or `--lazyboards`) and seeds its default board config when
+none exists. lazyboards remains a separate, optional project with its own releases —
+this changes distribution convenience, not the layering.
+
 Claude Code provides the full interactive workflow. Codex is supported for isolation,
 monitoring, portable conventions, and the documented implementation recipe while its
 interactive workflow support develops.

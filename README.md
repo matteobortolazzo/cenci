@@ -171,7 +171,8 @@ cenci-watch can surface the same state in tmux, Waybar, Noctalia, DMS, GNOME, KD
 Plasma, and the macOS menu bar. An optional
 [lazyboards](https://github.com/matteobortolazzo/lazyboards) board can dispatch the
 documented workflow from issue labels; it is a separate project, not an installation
-requirement.
+requirement — the installer offers to install it and seed its board config for you
+(see [docs/orchestration.md](docs/orchestration.md)).
 
 The lifecycle stays inspectable either way:
 
