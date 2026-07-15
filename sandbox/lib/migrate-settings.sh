@@ -2,8 +2,8 @@
 # Shared settings migration + plugin provisioning/update helpers for the
 # sandbox home volume.
 #
-# Sourced by entrypoint.sh (in the container), by `cenci-sand
-# --update-plugins` (via the copy baked at /usr/local/bin/lib/), and by the
+# Sourced by entrypoint.sh (in the container), by `cenci sandbox
+# update-plugins` (via the copy baked at /usr/local/bin/lib/), and by the
 # test harnesses (sandbox/tests/settings-merge.test.sh,
 # sandbox/tests/heal-plugins.test.sh) on the host, so this logic lives in
 # exactly one place.
@@ -164,7 +164,7 @@ provision_plugins() {
 # one git pull, and nothing else.
 #
 # The whole pass is TTL-gated on a stamp file so rapid stop/start cycles stay
-# quiet: <ttl-minutes> 0 forces it (the manual `cenci-sand --update-plugins`
+# quiet: <ttl-minutes> 0 forces it (the manual `cenci sandbox update-plugins`
 # path). The stamp is touched even when the refresh fails, so an offline boot
 # doesn't retry on every restart within the window. Same guarantee as
 # provisioning: failures warn to stderr and never block container start.

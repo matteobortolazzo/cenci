@@ -51,7 +51,7 @@ var ensureMu sync.Mutex
 // listener and waits briefly for it to become reachable. It is deliberately
 // silent and bounded so hooks and launchers remain non-fatal when startup is
 // impossible. Concurrent callers serialize the probe/start sequence. Inside a
-// cenci-sand container (CENCI_SANDBOX=1) it returns immediately without ever
+// cenci sandbox container (CENCI_SANDBOX=1) it returns immediately without ever
 // spawning: a container-local daemon controls nothing on the host and would
 // only mask real wiring failures (#195, #202).
 func EnsureRunning() {

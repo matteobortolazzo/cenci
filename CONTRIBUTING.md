@@ -16,9 +16,9 @@ architecture.
   ```
 - **sandbox** (shell): install [`shellcheck`](https://www.shellcheck.net/), then:
   ```bash
-  shellcheck install.sh sandbox/cenci-sand sandbox/entrypoint.sh \
+  shellcheck install.sh sandbox/entrypoint.sh \
     sandbox/lib/*.sh sandbox/tests/*.test.sh
-  bash -n install.sh sandbox/cenci-sand sandbox/entrypoint.sh
+  bash -n install.sh sandbox/entrypoint.sh
   ```
   See [`sandbox/CLAUDE.md`](./sandbox/CLAUDE.md) for the full build/test/smoke
   commands.

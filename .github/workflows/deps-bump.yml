@@ -155,7 +155,7 @@ jobs:
               sed -i 's/^ARG CODEX_VERSION=.*/ARG CODEX_VERSION='"${LATEST}"'/' sandbox/fragments/codex.dockerfile
               sed -i 's/^ARG CODEX_VERSION=.*/ARG CODEX_VERSION='"${LATEST}"'/' .cenci/Dockerfile
               # shellcheck disable=SC2016  # backticks are literal markdown; %s does the substitution
-              BODY=$(printf 'Bumps `CODEX_VERSION` from %s to %s in the monolith Dockerfile, the Codex fragment used by generated per-repo images, and the generated sandbox image for this repository. Run `cenci-sand --build` to pick up the new version — no `--build-base` needed.' "$CURRENT" "$LATEST")
+              BODY=$(printf 'Bumps `CODEX_VERSION` from %s to %s in the monolith Dockerfile, the Codex fragment used by generated per-repo images, and the generated sandbox image for this repository. Run `cenci sandbox build` to pick up the new version — no build-base needed.' "$CURRENT" "$LATEST")
               open_and_merge \
                 "codex-bump-v${LATEST}" \
                 "chore(sandbox): bump Codex CLI to ${LATEST}" \
@@ -185,7 +185,7 @@ jobs:
               sed -i 's/^ARG GO_VERSION=.*/ARG GO_VERSION='"${LATEST}"'/' sandbox/Dockerfile
               sed -i 's/^ARG GO_VERSION=.*/ARG GO_VERSION='"${LATEST}"'/' sandbox/fragments/go.dockerfile
               # shellcheck disable=SC2016  # backticks are literal markdown; %s does the substitution
-              BODY=$(printf 'Bumps `GO_VERSION` from %s to %s in BOTH `sandbox/Dockerfile` and `sandbox/fragments/go.dockerfile` (kept in sync per the fragment-drift guard).\n\nRun `cenci-sand --build` to pick up the new version.' "$CURRENT" "$LATEST")
+              BODY=$(printf 'Bumps `GO_VERSION` from %s to %s in BOTH `sandbox/Dockerfile` and `sandbox/fragments/go.dockerfile` (kept in sync per the fragment-drift guard).\n\nRun `cenci sandbox build` to pick up the new version.' "$CURRENT" "$LATEST")
               open_and_merge \
                 "go-bump-v${LATEST}" \
                 "chore(sandbox): bump Go to ${LATEST}" \
@@ -214,7 +214,7 @@ jobs:
               echo "Bumping uv: $CURRENT -> $LATEST"
               sed -i 's/^ARG UV_VERSION=.*/ARG UV_VERSION='"${LATEST}"'/' sandbox/Dockerfile.base
               # shellcheck disable=SC2016  # backticks are literal markdown; %s does the substitution
-              BODY=$(printf 'Bumps `UV_VERSION` from %s to %s in `sandbox/Dockerfile.base` (first explicit pin — was previously `latest`).\n\nRun `cenci-sand --build-base` to pick up the new base image.' "$CURRENT" "$LATEST")
+              BODY=$(printf 'Bumps `UV_VERSION` from %s to %s in `sandbox/Dockerfile.base` (first explicit pin — was previously `latest`).\n\nRun `cenci sandbox build-base` to pick up the new base image.' "$CURRENT" "$LATEST")
               open_and_merge \
                 "uv-bump-v${LATEST}" \
                 "chore(sandbox): bump uv to ${LATEST}" \
@@ -260,7 +260,7 @@ jobs:
                 sed -i 's/^ARG DOTNET_SDK_VERSION=.*/ARG DOTNET_SDK_VERSION='"${LATEST_SDK}"'/' sandbox/Dockerfile
                 sed -i 's/^ARG DOTNET_SDK_VERSION=.*/ARG DOTNET_SDK_VERSION='"${LATEST_SDK}"'/' sandbox/fragments/dotnet.dockerfile
                 # shellcheck disable=SC2016  # backticks are literal markdown; %s does the substitution
-                BODY=$(printf 'Bumps `DOTNET_SDK_VERSION` from %s to %s in BOTH `sandbox/Dockerfile` and `sandbox/fragments/dotnet.dockerfile` (kept in sync per the fragment-drift guard).\n\nStays within the %s feature band, so this is auto-merged. Run `cenci-sand --build` to pick up the new version.' "$CURRENT" "$LATEST_SDK" "$CUR_BAND")
+                BODY=$(printf 'Bumps `DOTNET_SDK_VERSION` from %s to %s in BOTH `sandbox/Dockerfile` and `sandbox/fragments/dotnet.dockerfile` (kept in sync per the fragment-drift guard).\n\nStays within the %s feature band, so this is auto-merged. Run `cenci sandbox build` to pick up the new version.' "$CURRENT" "$LATEST_SDK" "$CUR_BAND")
                 open_and_merge \
                   "dotnet-bump-v${LATEST_SDK}" \
                   "chore(sandbox): bump .NET SDK to ${LATEST_SDK}" \

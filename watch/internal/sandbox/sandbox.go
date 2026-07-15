@@ -1,56 +1,32 @@
-// Package sandbox translates cenci's `sandbox`/`open` verbs into
-// invocations of the sandbox/cenci-sand bash launcher (batch verbs,
-// interactive open) or direct docker/podman calls (ls/stop, which have no
-// cenci-sand equivalent and are implemented natively here instead).
+// Package sandbox holds the shared primitives behind cenci's
+// `sandbox`/`open` verbs: the container runtime detection, the one-token
+// agent+model shortcut tables, the sandbox container name-prefix convention,
+// and the native docker/podman listing/stopping used by `sandbox ls`/`sandbox
+// stop`. The launch/build/prune/reap engine lives in the launcher subpackage
+// (internal/sandbox/launcher).
 //
-// The shortcut tables and the container-runtime/name-prefix conventions below
-// are mirrored byte-for-byte from sandbox/cenci-sand (there is no shared
-// code across the bash/Go boundary) so a desync between the two front doors
-// is a review-time concern, not a runtime one. See sandbox/cenci-sand for
-// the source of truth each mirrors:
-//   - runtime detection: top of the script (podman if present, else docker)
-//   - shortcut tables: CLAUDE_MODEL_SHORTCUTS / CODEX_MODEL_SHORTCUTS (~line 65)
-//   - recognized long flags: the `case "$1" in ... --*)` block (~line 106)
-//   - container name prefixes: CONTAINER_PREFIX="${AGENT}-cenci" and the
-//     `^(claude-cenci-|codex-cenci-)` filter used by --prune (~line 199, 262, 387)
+// The tables and conventions in this package are the SOURCE OF TRUTH for the
+// whole product (the cenci-sand bash launcher they were once mirrored from is
+// gone). Per docs/cli-conventions.md they are defined exactly once in code
+// (here) and documented exactly once (watch/README.md's CLI reference);
+// everything else links to those two homes:
+//   - runtime detection: ContainerRuntime (podman if present, else docker)
+//   - shortcut tables: ClaudeModelShortcuts / CodexModelShortcuts
+//   - container name prefixes: the `^(claude-cenci-|codex-cenci-)` pattern
+//     behind IsSandboxContainerName
 package sandbox
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"regexp"
 	"strings"
-	"syscall"
 )
 
-// BinaryName is the cenci-sand executable resolved from PATH.
-const BinaryName = "cenci-sand"
-
-// batchFlags maps each `sandbox <verb>` that translates 1:1 to a single
-// cenci-sand long flag. `prune` is deliberately excluded: it takes an
-// optional --volumes flag, so main.go builds its argv by hand instead of
-// going through this table.
-var batchFlags = map[string]string{
-	"build":          "--build",
-	"build-base":     "--build-base",
-	"update-plugins": "--update-plugins",
-	"reseed-creds":   "--reseed-creds",
-	"reap-orphans":   "--reap-orphans",
-}
-
-// BatchFlag returns the cenci-sand long flag verb translates to, and whether
-// verb is a recognized batch verb.
-func BatchFlag(verb string) (string, bool) {
-	f, ok := batchFlags[verb]
-	return f, ok
-}
-
-// ClaudeModelShortcuts mirrors sandbox/cenci-sand's CLAUDE_MODEL_SHORTCUTS
-// table exactly: ch/cs/co/cf select Claude with the haiku/sonnet/opus/fable
+// ClaudeModelShortcuts is the source-of-truth table for the Claude one-token
+// shortcuts: ch/cs/co/cf select Claude with the haiku/sonnet/opus/fable
 // model alias.
 var ClaudeModelShortcuts = map[string]string{
 	"ch": "haiku",
@@ -59,8 +35,8 @@ var ClaudeModelShortcuts = map[string]string{
 	"cf": "fable",
 }
 
-// CodexModelShortcuts mirrors sandbox/cenci-sand's CODEX_MODEL_SHORTCUTS
-// table exactly: xl/xt/xs select Codex with the gpt-5.6-luna/terra/sol model.
+// CodexModelShortcuts is the source-of-truth table for the Codex one-token
+// shortcuts: xl/xt/xs select Codex with the gpt-5.6-luna/terra/sol model.
 var CodexModelShortcuts = map[string]string{
 	"xl": "gpt-5.6-luna",
 	"xt": "gpt-5.6-terra",
@@ -79,48 +55,11 @@ func ResolveShortcut(token string) (agent, model string, ok bool) {
 	return "", "", false
 }
 
-// RunCenciSand resolves cenci-sand from PATH and runs it with argv, wiring
-// stdin/stdout/stderr straight through (batch verbs are non-interactive but
-// may still print progress or a confirmation prompt, e.g. `--prune
-// --volumes`'s y/N). It returns the child's exit code on a normal exit, or a
-// non-nil error when the binary can't be resolved or fails to start.
-func RunCenciSand(argv []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
-	path, err := exec.LookPath(BinaryName)
-	if err != nil {
-		return 0, fmt.Errorf("%s not found on PATH: %w", BinaryName, err)
-	}
-	cmd := exec.Command(path, argv...)
-	cmd.Stdin = stdin
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	if err := cmd.Run(); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return exitErr.ExitCode(), nil
-		}
-		return 0, err
-	}
-	return 0, nil
-}
-
-// ExecCenciSand resolves cenci-sand from PATH and execs it (replacing the
-// current process image) with argv, so the interactive session owns the TTY
-// exactly as if the user had invoked cenci-sand directly. It only returns on
-// failure (LookPath or syscall.Exec error) — success never returns.
-func ExecCenciSand(argv []string) error {
-	path, err := exec.LookPath(BinaryName)
-	if err != nil {
-		return fmt.Errorf("%s not found on PATH: %w", BinaryName, err)
-	}
-	fullArgv := append([]string{path}, argv...)
-	return syscall.Exec(path, fullArgv, os.Environ())
-}
-
 // -- sandbox ls / stop: implemented natively in Go against docker/podman ---
 
 // sandboxNamePattern matches the claude-cenci-/codex-cenci- container name
-// prefixes cenci-sand uses (CONTAINER_PREFIX="${AGENT}-sand"), mirroring the
-// filter cenci-sand's --prune applies to its container list.
+// prefixes every sandbox container carries (launcher.ComputeScope's
+// CONTAINER_PREFIX is "<agent>-cenci"); prune and reap filter on it too.
 var sandboxNamePattern = regexp.MustCompile(`^(claude-cenci-|codex-cenci-)`)
 
 // IsSandboxContainerName reports whether name carries one of the sandbox
@@ -131,9 +70,8 @@ func IsSandboxContainerName(name string) bool {
 	return sandboxNamePattern.MatchString(name)
 }
 
-// ContainerRuntime resolves the preferred container runtime the same way
-// cenci-sand does: podman if present on PATH, else docker. Returns an error
-// if neither is found.
+// ContainerRuntime resolves the preferred container runtime: podman if
+// present on PATH, else docker. Returns an error if neither is found.
 func ContainerRuntime() (string, error) {
 	if _, err := exec.LookPath("podman"); err == nil {
 		return "podman", nil

@@ -1,21 +1,25 @@
 # Project: sandbox
 
 Docker/Podman container project within the cenci monorepo.
-Provides an isolated container (`cenci-sand`) for running Claude Code sessions with
-`--dangerously-skip-permissions` — the container is the security boundary.
+Ships the isolation layer's image and runtime assets (Dockerfiles, fragments,
+`entrypoint.sh`, container-side `lib/` scripts, skills) for running agent
+sessions with `--dangerously-skip-permissions` — the container is the security
+boundary. The launcher itself is the `cenci` Go binary (`cenci open` / `cn`,
+`cenci sandbox <verb>`, in `watch/`); it resolves this project's assets from
+the installed cenci-sandbox plugin.
 
 ## Stack
 - Docker / Podman (Containerfile / Dockerfile)
-- Shell scripts (`entrypoint.sh`, helpers)
+- Shell scripts (`entrypoint.sh`, container-side helpers in `lib/`)
 - Tests: `shellcheck` (static analysis), manual container smoke tests
 
 ## Build & Test
 ```bash
-cenci-sand --build-base   # cenci-sandbox-base:<content-hash of Dockerfile.base + entrypoint.sh + lib/> + :latest alias, rebuild if those inputs change
-cenci-sand --build        # cenci-sandbox:latest, builds the base first if missing
-cenci-sand --prune        # remove superseded base tags, dangling images, stopped *-cenci-* containers (--volumes to also prompt for stale home volumes)
-shellcheck sandbox/entrypoint.sh sandbox/cenci-sand sandbox/tests/*.test.sh
-bash -n sandbox/entrypoint.sh sandbox/cenci-sand
+cenci sandbox build-base            # cenci-sandbox-base:<content-hash of Dockerfile.base + entrypoint.sh + lib/> + :latest alias, rebuild if those inputs change
+cenci sandbox build                 # cenci-sandbox:latest, builds the base first if missing
+cenci sandbox prune [--volumes]     # remove superseded base tags, dangling images, stopped *-cenci-* containers (--volumes also prompts for stale home volumes)
+shellcheck sandbox/entrypoint.sh sandbox/lib/*.sh sandbox/tests/*.test.sh
+bash -n sandbox/entrypoint.sh
 bash sandbox/tests/smoke.test.sh   # runtime smoke test; self-skips without docker/podman
 ```
 
@@ -25,6 +29,10 @@ bash sandbox/tests/install-update.test.sh        # daemon restart on update
 bash sandbox/tests/installer-clients.test.sh     # client detection + launchers
 bash sandbox/tests/cenci-widgets.test.sh         # GUI bar-widget detect/install/reload
 ```
+
+The launcher-behavior suites live with the launcher code in `watch/`: Go
+black-box tests in `watch/sandbox_open_test.go` plus the reap contract suite
+`watch/tests/reap-orphans.test.sh` (run with `CENCI_BIN`).
 
 ## Conventions
 - Keep the image minimal; bake tools into the image rather than bind-mounting from the host.
@@ -92,7 +100,7 @@ Image dependency versions are pinned via Dockerfile `ARG`s, all checked daily by
 ## Security
 - Never bake secrets or credentials into the image layers.
 - Validate any host paths mounted into the container.
-- Bind-mount host paths read-only (`:ro`) unless the container genuinely needs write access — containers should be as restrictive as possible. Audit all new and existing mounts in `cenci-sand` against this principle.
+- Bind-mount host paths read-only (`:ro`) unless the container genuinely needs write access — containers should be as restrictive as possible. Audit all new and existing mounts the launcher assembles (`watch/internal/sandbox/launcher`) against this principle.
 
 ## Reference Docs
 Repo-level conventions live at `<repo-root>/docs/` (read on demand); CLI grammar, alias, env-var, and runtime-object naming rules are in `<repo-root>/docs/cli-conventions.md`. Project-specific notes belong in this file.

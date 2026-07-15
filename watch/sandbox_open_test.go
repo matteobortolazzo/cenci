@@ -1239,24 +1239,25 @@ func TestOpen_MissingClaudeBinary_Exits1(t *testing.T) {
 
 // -- argv[0] == "cn" dispatch ------------------------------------------
 
-// buildCnAlias copies the built cenci binary to <dir>/cn so
-// filepath.Base(os.Args[0]) == "cn" inside the copy.
-func buildCnAlias(t *testing.T, dir string) string {
+// buildArgv0Alias copies the built cenci binary to <dir>/<name> so
+// filepath.Base(os.Args[0]) == name inside the copy ("cn" routes to open,
+// "cenci-sand" hits the tombstone).
+func buildArgv0Alias(t *testing.T, dir, name string) string {
 	t.Helper()
 	data, err := os.ReadFile(binaryPath)
 	if err != nil {
 		t.Fatalf("read binary: %v", err)
 	}
-	cnPath := filepath.Join(dir, "cn")
-	if err := os.WriteFile(cnPath, data, 0o755); err != nil {
-		t.Fatalf("write cn alias: %v", err)
+	aliasPath := filepath.Join(dir, name)
+	if err := os.WriteFile(aliasPath, data, 0o755); err != nil {
+		t.Fatalf("write %s alias: %v", name, err)
 	}
-	return cnPath
+	return aliasPath
 }
 
 func TestCnArgv0_RoutesToOpen(t *testing.T) {
 	binDir := t.TempDir()
-	cnPath := buildCnAlias(t, binDir)
+	cnPath := buildArgv0Alias(t, binDir, "cn")
 
 	fakeDir := t.TempDir()
 	callLog := writeScriptedRuntimes(t, fakeDir)
@@ -1286,7 +1287,7 @@ func TestCnArgv0_BareInvocationDoesNotErrorLikeCenci(t *testing.T) {
 	// A bare `cenci` (no subcommand) exits 2. `cn` with no args is a
 	// bare `open` with no shortcut/flags -- valid, not an error.
 	binDir := t.TempDir()
-	cnPath := buildCnAlias(t, binDir)
+	cnPath := buildArgv0Alias(t, binDir, "cn")
 
 	fakeDir := t.TempDir()
 	writeScriptedRuntimes(t, fakeDir)
@@ -1298,5 +1299,40 @@ func TestCnArgv0_BareInvocationDoesNotErrorLikeCenci(t *testing.T) {
 	cmd.Dir = t.TempDir()
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("cn (bare): %v\n%s", err, output)
+	}
+}
+
+// -- argv[0] == "cenci-sand" tombstone ----------------------------------
+
+func TestCenciSandArgv0_TombstoneExits2WithMigrationMap(t *testing.T) {
+	// install.sh repoints a stale ~/.local/bin/cenci-sand symlink at the
+	// cenci binary; invoking it must fail loudly with the migration map
+	// instead of guessing at the removed bash launcher's grammar.
+	binDir := t.TempDir()
+	sandPath := buildArgv0Alias(t, binDir, "cenci-sand")
+
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(sandPath, "--build")
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
+	}
+	if exitErr.ExitCode() != 2 {
+		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
+	}
+	out := string(output)
+	if !strings.Contains(out, "cenci open") || !strings.Contains(out, "cenci sandbox") {
+		t.Errorf("expected the migration map to mention cenci open and cenci sandbox, got:\n%s", out)
+	}
+	if lines := callLogLines(t, callLog); len(lines) > 0 {
+		t.Errorf("expected no runtime calls from the tombstone, got: %v", lines)
 	}
 }

@@ -29,7 +29,7 @@ PLUGIN_JSON="$ROOT/.codex-plugin/plugin.json"
 
 # start_daemon launches the daemon detached. The already-running guard in the
 # binary makes this a no-op when a daemon already owns the socket. Inside a
-# cenci-sand container (CENCI_SANDBOX=1), a container-local daemon controls
+# cenci sandbox container (CENCI_SANDBOX=1), a container-local daemon controls
 # nothing on the host and would only mask real wiring failures (#195, #202),
 # so this is skipped regardless of mount status.
 start_daemon() {

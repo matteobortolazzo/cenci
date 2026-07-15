@@ -24,7 +24,7 @@ type Daemon struct {
 	ipc      *ipc.Server                       // nil if IPC not enabled
 	events   <-chan ipc.HookEvent
 	now      func() time.Time // injectable clock for TTL tests
-	reaper   reap.Reaper      // triggers cenci-sand --reap-orphans on pane-gone sweep/startup (#292)
+	reaper   reap.Reaper      // triggers cenci sandbox reap-orphans on pane-gone sweep/startup (#292)
 
 	// attention is the reconciler's overlay of synthetic "failed" windows
 	// (#46). It is appended to every snapshot until the next overlay replaces

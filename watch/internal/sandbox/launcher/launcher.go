@@ -1,12 +1,9 @@
-// Package launcher is the native Go port of sandbox/cenci-sand's host-side
-// logic: asset-dir resolution, the BASE_TAG content hash, repo scoping
-// (sandbox/lib/repo-scope.sh), image builds, forced plugin updates, the
-// interactive launch/attach path, prune, and the orphan reaper.
-//
-// Nothing routes here yet — `cenci sandbox <verb>` and `cenci open` still
-// shell out to the cenci-sand bash launcher. Tickets 2–3 flip those verbs to
-// this package and ticket 4 deletes the bash script; until then the two
-// implementations coexist and this one is exercised by its own tests only.
+// Package launcher is the sandbox launch engine behind `cenci sandbox <verb>`
+// and `cenci open`/`cn`: asset-dir resolution, the BASE_TAG content hash,
+// repo scoping, image builds, forced plugin updates, the interactive
+// launch/attach path, prune, and the orphan reaper. It is the native Go port
+// of the retired sandbox/cenci-sand bash launcher (and its
+// sandbox/lib/repo-scope.sh helper), which it fully replaces.
 //
 // The container/entrypoint contract is preserved byte-for-byte from
 // cenci-sand: the `cenci-sand.lifecycle=detached` label, `--user root` at

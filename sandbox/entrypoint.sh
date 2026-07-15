@@ -5,7 +5,7 @@ sudo sh -c 'grep -q "$(hostname)" /etc/hosts || echo "127.0.0.1 $(hostname)" >> 
 # ── UID/GID remap to match the host user, then drop to dev (#154) ─────
 # Dockerfile.base bakes 'dev' as uid/gid 1000. On hosts where the invoking
 # user isn't 1000, files the container writes into bind-mounted host paths
-# end up owned by a UID that doesn't match the host user. cenci-sand passes
+# end up owned by a UID that doesn't match the host user. The cenci launcher passes
 # the host user's id as HOST_UID/HOST_GID and now starts the container as
 # root (--user root) precisely so this block can run before any process
 # exists under the 'dev' account: usermod/groupmod refuse to renumber an
@@ -161,7 +161,7 @@ fi
 # push to main. update_plugins refreshes the marketplace clone (one git pull)
 # and bumps only the plugins whose installed version differs, gated by a
 # 30-minute stamp so rapid stop/start cycles make zero network calls. Forced
-# variant (ttl 0) is `cenci-sand --update-plugins`. Same guarantee as above:
+# variant (ttl 0) is `cenci sandbox update-plugins`. Same guarantee as above:
 # failures warn to stderr and never block container start.
 if [[ "${CENCI_SANDBOX_AGENT:-claude}" == codex ]]; then
     update_codex_plugins /home/dev/.codex cenci 30 cenci cenci-watch

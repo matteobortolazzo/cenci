@@ -81,16 +81,33 @@ EOF
 prepare_checkout() {
     local home="$1" client="$2" checkout
     checkout="${home}/.${client}/plugins/marketplaces/cenci"
-    mkdir -p "${checkout}/sandbox"
-    cat > "${checkout}/sandbox/cenci-sand" <<'EOF'
-#!/bin/sh
-exit 0
-EOF
-    chmod +x "${checkout}/sandbox/cenci-sand"
+    mkdir -p "${checkout}"
     if [[ -f "${ROOT}/cenci" ]]; then
         cp "${ROOT}/cenci" "${checkout}/cenci"
         chmod +x "${checkout}/cenci"
     fi
+}
+
+# prepare_cache_cenci <home> <client> — provision a fake cenci binary in the
+# version-pinned plugin cache (what current_cenci_binary resolves), logging
+# every invocation to CALLS_FILE, so the `cenci sandbox build` step can run.
+prepare_cache_cenci() {
+    local home="$1" client="$2" root manifest_dir
+    if [[ "${client}" == claude ]]; then
+        root="${home}/.claude/plugins/cache/cenci/cenci-watch/1.0.0"
+        manifest_dir=.claude-plugin
+    else
+        root="${home}/.codex/plugins/cache/cenci/cenci-watch/1.0.0"
+        manifest_dir=.codex-plugin
+    fi
+    mkdir -p "${root}/bin" "${root}/${manifest_dir}"
+    printf '{"name":"cenci-watch","version":"1.0.0"}\n' >"${root}/${manifest_dir}/plugin.json"
+    cat > "${root}/bin/cenci" <<'EOF'
+#!/bin/sh
+printf 'cenci %s\n' "$*" >>"${CALLS_FILE}"
+exit 0
+EOF
+    chmod +x "${root}/bin/cenci"
 }
 
 run_case() {
@@ -194,8 +211,10 @@ run_case claude claude
 assert_contains "${CASE_CALLS}" "claude plugin install cenci@cenci"
 assert_contains "${CASE_CALLS}" "claude plugin install cenci-watch@cenci"
 assert_contains "${CASE_CALLS}" "claude plugin install cenci-sandbox@cenci"
-assert_contains "${CASE_OUTPUT}" "cenci-sand"
-assert_not_contains "${CASE_OUTPUT}" "codex-sand"
+assert_contains "${CASE_OUTPUT}" "cn ch|cs|co|cf"
+assert_not_contains "${CASE_OUTPUT}" "cn xl|xt|xs"
+[[ -L "${CASE_HOME}/.local/bin/cn" ]]
+[[ ! -e "${CASE_HOME}/.local/bin/cenci-sand" ]]
 assert_cenci_installer_utility
 
 echo "case: Codex-only installs every component without invoking or recommending Claude"
@@ -204,26 +223,39 @@ run_case codex codex
 assert_contains "${CASE_CALLS}" "codex plugin add cenci@cenci"
 assert_contains "${CASE_CALLS}" "codex plugin add cenci-watch@cenci"
 assert_contains "${CASE_CALLS}" "codex plugin add cenci-sandbox@cenci"
-assert_contains "${CASE_OUTPUT}" "cenci-sand xl|xt|xs"
-assert_not_contains "${CASE_OUTPUT}" "codex-sand"
+assert_contains "${CASE_OUTPUT}" "cn xl|xt|xs"
+assert_not_contains "${CASE_OUTPUT}" "cn ch|cs|co|cf"
 assert_not_contains "${CASE_OUTPUT}" "/cenci:configure"
-[[ -L "${CASE_HOME}/.local/bin/cenci-sand" ]]
+[[ -L "${CASE_HOME}/.local/bin/cn" ]]
+[[ ! -e "${CASE_HOME}/.local/bin/cenci-sand" ]]
 [[ ! -e "${CASE_HOME}/.local/bin/sb" ]]
 [[ ! -e "${CASE_HOME}/.local/bin/codex-sand" ]]
 assert_cenci_installer_utility
 
-echo "case: Codex-only image build uses the cenci-sand launcher"
+echo "case: Codex-only image build runs 'cenci sandbox build' via the cached binary"
+prepare_cache_cenci "${WORK}/codex-build/home" codex
 run_case codex-build codex --build
 [[ "${CASE_EXIT}" -eq 0 ]]
 assert_contains "${CASE_OUTPUT}" "sandbox image built"
-assert_not_contains "${CASE_OUTPUT}" "cenci-sand: No such file"
+assert_contains "${CASE_CALLS}" "cenci sandbox build"
 
-echo "case: dual-client installs independently and exposes both launchers"
+echo "case: a stale cenci-sand symlink is repointed at cenci, never recreated"
+name=stale-sand
+mkdir -p "${WORK}/${name}/home/.local/bin"
+ln -s /nonexistent/old-cenci-sand "${WORK}/${name}/home/.local/bin/cenci-sand"
+run_case "${name}" claude
+[[ "${CASE_EXIT}" -eq 0 ]]
+[[ -L "${CASE_HOME}/.local/bin/cenci-sand" ]]
+[[ "$(readlink "${CASE_HOME}/.local/bin/cenci-sand")" == "${CASE_HOME}/.local/bin/cenci" ]]
+assert_contains "${CASE_OUTPUT}" "cenci-sand is deprecated"
+
+echo "case: dual-client installs independently and exposes the cn launcher"
 run_case dual dual
 [[ "${CASE_EXIT}" -eq 0 ]]
 assert_contains "${CASE_CALLS}" "claude plugin install cenci@cenci"
 assert_contains "${CASE_CALLS}" "codex plugin add cenci@cenci"
-[[ -L "${CASE_HOME}/.local/bin/cenci-sand" ]]
+[[ -L "${CASE_HOME}/.local/bin/cn" ]]
+[[ ! -e "${CASE_HOME}/.local/bin/cenci-sand" ]]
 [[ ! -e "${CASE_HOME}/.local/bin/sb" ]]
 [[ ! -e "${CASE_HOME}/.local/bin/codex-sand" ]]
 assert_cenci_installer_utility
@@ -266,8 +298,8 @@ assert_contains "${DOCTOR_OUTPUT}" "Required platform dependencies"
 assert_contains "${DOCTOR_OUTPUT}" "Supported clients (at least one required)"
 assert_contains "${DOCTOR_OUTPUT}" "Installed stack components"
 assert_contains "${DOCTOR_OUTPUT}" "Launchers and container image"
-assert_contains "${DOCTOR_OUTPUT}" "cenci-sand launcher"
-assert_not_contains "${DOCTOR_OUTPUT}" "codex-sand launcher"
+assert_contains "${DOCTOR_OUTPUT}" "cn launcher (cenci open)"
+assert_not_contains "${DOCTOR_OUTPUT}" "cenci-sand launcher"
 assert_contains "${DOCTOR_OUTPUT}" "Codex: cenci"
 assert_contains "${DOCTOR_OUTPUT}" "cenci-installer utility"
 assert_contains "${DOCTOR_OUTPUT}" "cenci daemon"

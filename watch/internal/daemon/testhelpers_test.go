@@ -14,7 +14,7 @@ import (
 // mockReaper is a call-counting reap.Reaper for daemon tests (#292). It never
 // shells out — Reap() only increments a counter so tests can assert on how
 // many times the daemon triggered a reap pass (and, for startup, that it did
-// at all) without touching cenci-sand/docker.
+// at all) without touching the sandbox launcher/docker.
 type mockReaper struct {
 	calls atomic.Int32
 }

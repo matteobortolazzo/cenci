@@ -25,7 +25,8 @@ See `.claude/rules/` for conventions:
 
 ## Project Structure
 
-- `main.go` — CLI entry point, subcommand routing (`daemon start|stop|restart|status`, human `status`, `widget-json` (hidden alias `waybar`), `notify`, `sandbox build|build-base|prune|update-plugins|reseed-creds|reap-orphans|ls|stop`, `open`); also handles the `cn` argv[0] alias (routes to `open`)
+- `main.go` — CLI entry point, subcommand routing (`daemon start|stop|restart|status`, human `status`, `widget-json` (hidden alias `waybar`), `notify`, `sandbox build|build-base|prune|update-plugins|reseed-creds|reap-orphans|ls|stop`, `open`); also handles the `cn` argv[0] alias (routes to `open`) and the `cenci-sand` argv[0] tombstone (prints a migration map, exits 2)
+- `sandboxcmd.go` — `sandbox`/`open` command handlers (same `package main`): flag parsing, usage errors (exit 2), and dispatch into `internal/sandbox` + `internal/sandbox/launcher`
 - `plugin/` — Claude Code plugin (hooks that call `cenci notify`)
 - `internal/daemon/` — Session-keyed event loop, hook→status mapping, paneless TTL sweep; delegates window work via `frontend.Frontend`
 - `internal/frontend/` — Seam types: `SessionState`, `Frontend` interface, `Observations`, `SweepAction`, `WindowInfo`; shared name sanitizers
@@ -37,7 +38,8 @@ See `.claude/rules/` for conventions:
 - `internal/config/` — Configuration struct and defaults
 - `internal/ipc/` — Event receiver socket, broadcast server/client, NDJSON state, HookEvent types
 - `internal/reap/` — `Reaper` seam + `ExecReaper`: single-flight, non-blocking self-exec of `cenci sandbox reap-orphans`
-- `internal/sandbox/` — `sandbox`/`open` verb support: cenci-sand batch-flag translation table, shortcut tables (mirrored exactly from `sandbox/cenci-sand`), `RunAgentSand`/`ExecAgentSand` (PATH-resolved subprocess/exec handoff), and native `docker`/`podman` container listing/stopping for `sandbox ls`/`sandbox stop`
+- `internal/sandbox/` — shared sandbox primitives and the SOURCE OF TRUTH for CLI tables: runtime detection (podman, then docker), the ch/cs/co/cf + xl/xt/xs shortcut tables, the `claude-cenci-`/`codex-cenci-` name-prefix pattern, and native container listing/stopping for `sandbox ls`/`sandbox stop`
+- `internal/sandbox/launcher/` — the native launch engine (ported from the retired `sandbox/cenci-sand` bash launcher): asset-dir resolution (`CENCI_SANDBOX_ASSETS` override → marketplace → plugin cache), byte-exact BASE_TAG content hash, repo scoping, image builds, plugin updates, interactive launch (in-process cenci wiring, RUN_ARGS, readiness poll, syscall.Exec attach), prune, and the orphan reaper (verbatim in-container scan/liveness scripts)
 
 ## Key Conventions
 

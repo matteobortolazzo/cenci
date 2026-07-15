@@ -38,13 +38,12 @@ jobs:
       - name: shellcheck
         run: |
           shellcheck install.sh \
-            sandbox/cenci-sand \
             sandbox/entrypoint.sh \
             sandbox/lib/*.sh \
             sandbox/tests/*.test.sh
       - name: bash -n (syntax check)
         run: |
-          for f in install.sh sandbox/cenci-sand sandbox/entrypoint.sh sandbox/lib/*.sh sandbox/tests/*.test.sh; do
+          for f in install.sh sandbox/entrypoint.sh sandbox/lib/*.sh sandbox/tests/*.test.sh; do
             bash -n "$f"
           done
 
@@ -59,11 +58,8 @@ jobs:
         run: |
           bash sandbox/tests/settings-merge.test.sh
           bash sandbox/tests/heal-plugins.test.sh
-          bash sandbox/tests/repo-scope.test.sh
           bash sandbox/tests/codex-config.test.sh
           bash sandbox/tests/seed-auth.test.sh
-          bash sandbox/tests/launcher-lifecycle.test.sh
-          bash sandbox/tests/cenci-wiring.test.sh
           bash sandbox/tests/installer-clients.test.sh
           bash sandbox/tests/install-update.test.sh
           bash sandbox/tests/cenci-widgets.test.sh

@@ -42,6 +42,20 @@ func main() {
 		return
 	}
 
+	// Tombstone argv[0] alias: the cenci-sand bash launcher was folded into
+	// this binary, and install.sh repoints a stale ~/.local/bin/cenci-sand
+	// symlink here. Old flags and new verbs don't map 1:1, so instead of
+	// guessing we fail loudly with the migration map — stale references in
+	// user scripts and repo docs get guidance instead of a dangling command.
+	if filepath.Base(os.Args[0]) == "cenci-sand" {
+		fmt.Fprint(os.Stderr, `cenci-sand has been folded into the cenci binary.
+  cenci-sand [shortcut] [flags] [-- args]  ->  cenci open ...   (or: cn ...)
+  cenci-sand --build | --build-base | --prune | --update-plugins | --reap-orphans | --reseed-creds  ->  cenci sandbox <verb>
+Details: docs/migrating-to-cenci.md in the cenci repo.
+`)
+		os.Exit(2)
+	}
+
 	// BREAKING: bare `cenci` (and any unrecognized top-level subcommand
 	// or flag) used to fall through to running the daemon in the foreground.
 	// It now always prints usage and exits 2 — the daemon only starts via the
@@ -123,7 +137,7 @@ func runVersion() {
 }
 
 // runSocketDir prints the resolved cenci socket directory to stdout and
-// exits 0, so shell consumers (sandbox's cenci-sand) don't reimplement
+// exits 0, so shell consumers (widget scripts, tests) don't reimplement
 // the XDG-vs-fallback logic themselves and risk drift. Exits 1 on error.
 func runSocketDir() {
 	dir, err := ipc.DefaultSocketDir()

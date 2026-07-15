@@ -31,7 +31,7 @@ Each project has its own `CLAUDE.md` with project-specific context.
 - No build step (markdown/shell plugin)
 
 ### sandbox and installer
-- Syntax: `bash -n install.sh sandbox/cenci-sand sandbox/entrypoint.sh`
+- Syntax: `bash -n install.sh sandbox/entrypoint.sh`
 - Tests: `bash sandbox/tests/installer-clients.test.sh` and the other host-runnable suites in `sandbox/tests/`
 
 ## Versioning

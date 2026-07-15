@@ -43,7 +43,7 @@ summarize_and_exit() {
 echo "smoke.test.sh"
 
 # ── Auto-detect container runtime (self-skip if none available) ──
-# Mirrors the detection order used by sandbox/cenci-sand.
+# Mirrors the detection order used by the cenci launcher (podman, then docker).
 if command -v podman &>/dev/null; then
     RUNTIME=podman
 elif command -v docker &>/dev/null; then
@@ -58,7 +58,7 @@ fi
 # (Dockerfile.base + entrypoint.sh + everything COPYed from lib/). Rebuilds the
 # base only when those inputs change — not on every plugin.json version bump.
 # Prefers sha256sum (Linux); falls back to shasum -a 256 (macOS). Paths are
-# RELATIVE (subshell cd) so the digest is identical here and in cenci-sand
+# RELATIVE (subshell cd) so the digest is identical here and in the Go launcher
 # regardless of the absolute checkout path.
 if command -v sha256sum &>/dev/null; then
     HASH_CMD=(sha256sum)
