@@ -45,11 +45,11 @@ can end up as a standalone path segment (e.g. a per-run subdirectory) where a
 dot-only value could traverse:
 
 ```bash
-gh issue edit <number> --body-file "${TMPDIR:-/tmp}/agentflow/issue-body-<scope>.md"
+gh issue edit <number> --body-file "${TMPDIR:-/tmp}/cenci/issue-body-<scope>.md"
 ```
 
 ```bash
-gh pr create --title "<title>" --body-file "${TMPDIR:-/tmp}/agentflow/pr-body-<scope>.md"
+gh pr create --title "<title>" --body-file "${TMPDIR:-/tmp}/cenci/pr-body-<scope>.md"
 ```
 
 Never print or interpolate authentication tokens into command output.

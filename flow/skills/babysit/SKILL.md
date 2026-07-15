@@ -1,6 +1,6 @@
 ---
 name: babysit
-description: "Claude Code-only: follow an open PR by periodically checking CI and review comments until it merges or closes. Runs only through /agentflow:babysit or its loop."
+description: "Claude Code-only: follow an open PR by periodically checking CI and review comments until it merges or closes. Runs only through /cenci:babysit or its loop."
 compatibility: Requires Claude Code loop scheduling, slash commands, subagents, and interactive gates.
 argument-hint: <pr-number> [interval e.g. 15m]
 user-invocable: true
@@ -15,9 +15,9 @@ Read the `shell-rules` skill before running any `gh` commands (covers the heredo
 
 ## What this is
 
-`/agentflow:babysit <pr>` keeps an open PR moving while you're away. On each run it does one
+`/cenci:babysit <pr>` keeps an open PR moving while you're away. On each run it does one
 **tick**: fetch PR state, auto-fix red CI, and drive any genuinely new review comments
-through `/agentflow:address-review`. It arms a self-paced Claude Code `/loop` so the tick
+through `/cenci:address-review`. It arms a self-paced Claude Code `/loop` so the tick
 repeats (~15m by default) and stops itself when the PR merges or closes.
 
 On the terminal tick, when the PR **merges**, babysit also performs the board-state
@@ -27,7 +27,7 @@ PR that closes **without** merging leaves the labels untouched.
 
 This skill is **model-invocable on purpose** (note the deliberate absence of
 `disable-model-invocation` in the frontmatter): a scheduled loop fire re-delivers the
-`/agentflow:babysit <pr>` command, which only runs if the skill can be invoked by the model.
+`/cenci:babysit <pr>` command, which only runs if the skill can be invoked by the model.
 Its description is scoped tightly to a specific PR number so it does not auto-trigger on
 unrelated turns.
 
@@ -35,14 +35,14 @@ unrelated turns.
 
 **Config check**: Before anything else, verify `.claude/config.json` exists by reading it.
 If the file does not exist, **stop immediately** and tell the user:
-"agentflow is not configured for this project. Run `/agentflow:configure` first to set up."
+"cenci is not configured for this project. Run `/cenci:configure` first to set up."
 
 Read `.claude/config.json`.
 
 **Parse `$ARGUMENTS`:**
 - **PR number**: the first whitespace-delimited token, with any leading `#` stripped
   (`#42` → `42`, `7` → `7`). If no PR number is present, stop and tell the user to pass
-  one: `/agentflow:babysit <pr-number>`.
+  one: `/cenci:babysit <pr-number>`.
 - **Interval** (optional second token): a duration like `15m`, `10m`, `600s`, or a bare
   number of seconds. Default `15m`. Convert to seconds and **clamp to `[60, 3600]`**
   (`ScheduleWakeup`'s allowed range). Store as `intervalSeconds` (default `900`).
@@ -146,7 +146,7 @@ If `state` is `MERGED` or `CLOSED`:
      set as steps 4–5 run this same tick).
   2. Arm the self-paced loop by invoking the `/loop` slash command **without an interval**
      (self-paced mode) via the `SlashCommand` tool:
-     `/loop /agentflow:babysit <pr> <interval>`
+     `/loop /cenci:babysit <pr> <interval>`
      Self-paced mode is what lets the tick pace itself (step 7) and stop itself (step 2);
      a fixed-interval `/loop` cannot be stopped from inside the body.
 - **If the state file exists** → a loop is already armed. **Skip arming** (this prevents
@@ -154,7 +154,7 @@ If `state` is `MERGED` or `CLOSED`:
 
 **Graceful degradation**: if the `SlashCommand` tool is unavailable, `/loop` errors, or
 `ScheduleWakeup` is unavailable, do **not** let loop setup block the tick. Complete steps
-4–6 for this one tick, then tell the user to run `/loop /agentflow:babysit <pr>` manually to
+4–6 for this one tick, then tell the user to run `/loop /cenci:babysit <pr>` manually to
 keep it going. (Mirror the `/goal` autopilot's "native-command + graceful no-op" shape in
 `implement/SKILL.md`.)
 
@@ -227,7 +227,7 @@ Then apply the **watermark** — keep only comments that are **both**:
 per `address-review` Phase 5 — so without this watermark a re-run would re-address the same
 comments forever.)
 
-- **If new actionable comments remain** → invoke `/agentflow:address-review <pr>` via the
+- **If new actionable comments remain** → invoke `/cenci:address-review <pr>` via the
   `SlashCommand` tool. Its own pipeline runs the evaluate → **approval gate (Phase 3F,
   `AskUserQuestion`)** → fix → reply → push — that Phase 3F gate is the preserved human
   gate; do not bypass it. After it returns, update `lastCommentTimestamp` to the newest
@@ -237,7 +237,7 @@ comments forever.)
 ### 6. Quiet tick
 
 If neither CI nor comments were actionable this tick (no CI fix was delegated or
-escalated in step 4, and `/agentflow:address-review` was not invoked in step 5), back off:
+escalated in step 4, and `/cenci:address-review` was not invoked in step 5), back off:
 set `currentDelaySeconds = min(currentDelaySeconds * 2, 3600)`. Report a single line
 naming the new delay, e.g.:
 `PR #<pr> quiet — CI green, no new comments. Next check in ~<currentDelaySeconds/60>m
@@ -246,7 +246,7 @@ naming the new delay, e.g.:
 ### 7. Pace the next tick
 
 If this tick **was** actionable (a CI fix was delegated or escalated in step 4, or
-`/agentflow:address-review` was invoked in step 5), reset the backoff:
+`/cenci:address-review` was invoked in step 5), reset the backoff:
 `currentDelaySeconds = intervalSeconds` — a PR that just saw activity is worth checking on
 sooner, not later. A quiet tick leaves `currentDelaySeconds` at the doubled value step 6
 set.
@@ -258,7 +258,7 @@ base interval:
 ```
 ScheduleWakeup(
   delaySeconds: currentDelaySeconds,
-  prompt: "/agentflow:babysit <pr>",
+  prompt: "/cenci:babysit <pr>",
   reason: "next babysit check for PR <pr>"
 )
 ```
@@ -280,13 +280,13 @@ file present and skips re-arming; the loop continues until step 2's terminal che
 
 - **`/loop` is session-scoped and expires after 7 days.** Babysitting lives as long as the
   Claude Code session (and at most 7 days). If the session ends, re-run
-  `/agentflow:babysit <pr>` to resume.
+  `/cenci:babysit <pr>` to resume.
 - **Self-paced pacing needs native support.** On Bedrock / Vertex / Foundry, self-paced
   `/loop` falls back to a fixed ~10-minute schedule; the `intervalSeconds` pacing above is
   best-effort there.
 - **Outliving the session: use `/schedule`, not a second `/loop`.** `/loop`'s 7-day cap
   means a PR that needs babysitting longer than that — or across a machine
   restart/session end — needs a cloud routine instead: set up `/schedule` to periodically
-  re-invoke `/agentflow:babysit <pr>` on a cron interval. Never run both a `/loop` and a
+  re-invoke `/cenci:babysit <pr>` on a cron interval. Never run both a `/loop` and a
   `/schedule` routine against the same PR at once — each would independently wake, tick,
   and re-arm/re-schedule, double-waking the PR and racing on the same state file.

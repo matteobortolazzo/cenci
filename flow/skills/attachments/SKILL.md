@@ -49,13 +49,13 @@ If user selects none → skip the rest of this procedure and return to the calli
 
 ### Step 3: Download Selected Attachments
 
-Store downloads under `${TMPDIR:-/tmp}/agentflow/attachments/<scope>` — a per-run
+Store downloads under `${TMPDIR:-/tmp}/cenci/attachments/<scope>` — a per-run
 subdirectory, where `<scope>` is the calling skill's run identifier (ticket id/slug or
 run id), so concurrent runs never pile same-named downloads together. Create the
 directory with the client's filesystem tool or a standalone shell command.
 
 ```bash
-mkdir -p "${TMPDIR:-/tmp}/agentflow/attachments/<scope>"
+mkdir -p "${TMPDIR:-/tmp}/cenci/attachments/<scope>"
 ```
 
 Prefer a connected GitHub attachment-download tool when one is available, especially
@@ -85,7 +85,7 @@ is issue-author-controlled and presentation-only, not a trusted filesystem input
    - **Case A — valid URL basename** (step 2 validation passed). The filename,
      including its original extension, is already fully known before any download
      starts — no sniffing applies. Check it for a collision against files already
-     written this run in `${TMPDIR:-/tmp}/agentflow/attachments/<scope>`; if it
+     written this run in `${TMPDIR:-/tmp}/cenci/attachments/<scope>`; if it
      collides, append `-<k>` before the extension, starting at `k=2` and incrementing
      until unique (e.g. `report.pdf` → `report-2.pdf`). For a multi-dot name, split on
      the *last* `.` only — the extension is everything after the final dot, so
@@ -93,7 +93,7 @@ is issue-author-controlled and presentation-only, not a trusted filesystem input
      name:
 
      ```bash
-     curl -fsSL "<url>" -o "${TMPDIR:-/tmp}/agentflow/attachments/<scope>/<resolved-filename>"
+     curl -fsSL "<url>" -o "${TMPDIR:-/tmp}/cenci/attachments/<scope>/<resolved-filename>"
      ```
 
    - **Case B — fallback (`attachment-<n>`)**. The extension is unknown until the
@@ -104,7 +104,7 @@ is issue-author-controlled and presentation-only, not a trusted filesystem input
         connector tool's response, if used instead):
 
         ```bash
-        curl -fsSL "<url>" -w '%{content_type}' -o "${TMPDIR:-/tmp}/agentflow/attachments/<scope>/attachment-<n>.partial"
+        curl -fsSL "<url>" -w '%{content_type}' -o "${TMPDIR:-/tmp}/cenci/attachments/<scope>/attachment-<n>.partial"
         ```
 
         If this download reports failure (non-zero curl exit, or the connector tool's
@@ -125,7 +125,7 @@ is issue-author-controlled and presentation-only, not a trusted filesystem input
         (no bash-only construct):
 
         ```bash
-        mv "${TMPDIR:-/tmp}/agentflow/attachments/<scope>/attachment-<n>.partial" "${TMPDIR:-/tmp}/agentflow/attachments/<scope>/<resolved-filename>"
+        mv "${TMPDIR:-/tmp}/cenci/attachments/<scope>/attachment-<n>.partial" "${TMPDIR:-/tmp}/cenci/attachments/<scope>/<resolved-filename>"
         ```
 
         If this `mv` fails (disk full, permissions, etc.), treat it as a download

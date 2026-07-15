@@ -1,18 +1,18 @@
 #!/bin/sh
 # PreToolUse hook: keep the main worktree read-only for Write/Edit — only in
-# repos configured for agentflow (gated on .claude/config.json below).
+# repos configured for cenci (gated on .claude/config.json below).
 # File changes must land inside a feature worktree (.worktrees/) so they ship
 # in PRs. This catches subagents that accidentally use relative paths, and
 # planning sessions that touch source files before a plan is saved —
 # permission rules cannot enforce this under --dangerously-skip-permissions,
 # but hooks still run.
 # Writes that legitimately live in the main worktree are allowlisted below:
-# saved plans (.plans/), agentflow config (.claude/), design artifacts
+# saved plans (.plans/), cenci config (.claude/), design artifacts
 # (designs/, *.pen, DESIGN.md), repo meta files configure manages
 # (.gitignore, .mcp.json, CLAUDE.md), and temp paths.
 
-# Only enforce in repos configured for agentflow — .claude/config.json (created
-# by /agentflow:configure) is the canonical signal. In unconfigured repos this
+# Only enforce in repos configured for cenci — .claude/config.json (created
+# by /cenci:configure) is the canonical signal. In unconfigured repos this
 # guard must be a no-op: the plugin is installed globally, but the worktree
 # workflow only applies where the user opted in.
 ROOT=$(git -C "$(pwd)" rev-parse --show-toplevel 2>/dev/null) || ROOT=$(pwd)
@@ -32,12 +32,12 @@ case "$FILE_PATH" in
   # Plan persistence (implement Phase 1)
   */.plans/* | .plans/*) exit 0 ;;
   # Temp paths: body files, context bundles, attachments, scratchpads
-  /tmp/* | /private/tmp/* | /var/folders/* | */agentflow/attachments/*) exit 0 ;;
-  # agentflow-managed config, settings, rules, and lessons
+  /tmp/* | /private/tmp/* | /var/folders/* | */cenci/attachments/*) exit 0 ;;
+  # cenci-managed config, settings, rules, and lessons
   */.claude/* | .claude/*) exit 0 ;;
-  # Design artifacts live in the main worktree by design (/agentflow:design)
+  # Design artifacts live in the main worktree by design (/cenci:design)
   *.pen | */DESIGN.md | DESIGN.md | */designs/* | designs/*) exit 0 ;;
-  # Repo meta files /agentflow:configure creates or appends to
+  # Repo meta files /cenci:configure creates or appends to
   */.gitignore | .gitignore | */.mcp.json | .mcp.json | */CLAUDE.md | CLAUDE.md) exit 0 ;;
 esac
 
@@ -60,7 +60,7 @@ esac
   echo ""
   echo "In a planning session (no feature worktree yet), only .plans/, .claude/, and temp"
   echo "paths are writable — implementation writes happen in the plan-file run, after"
-  echo "approval. Outside /agentflow:implement, propose the change text to the user"
+  echo "approval. Outside /cenci:implement, propose the change text to the user"
   echo "instead of writing it."
 } >&2
 exit 2

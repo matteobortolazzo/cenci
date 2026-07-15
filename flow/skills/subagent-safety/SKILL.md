@@ -38,7 +38,7 @@ a stopping condition.
 
 `AskUserQuestion` is main-agent-only. Claude Code subagents can silently stall on
 permission or authentication prompts, so keep mutating `gh` commands and authenticated
-git operations with the main agent. In the agent-sand container,
+git operations with the main agent. In the cenci-sand container,
 skip-permissions removes permission prompts but does not remove authentication or
 user-interaction failures.
 
@@ -46,7 +46,7 @@ Claude Code 1M-context sessions can reject `Task` delegation when subagents are 
 pinned to a 200K model. Agentflow configures
 `CLAUDE_CODE_SUBAGENT_MODEL=claude-sonnet-5` as an optional workaround. Do not infer
 or announce the active model/context size. If delegation fails with the documented
-usage-credit error, tell the user to run `/agentflow:configure` and restart, or use a
+usage-credit error, tell the user to run `/cenci:configure` and restart, or use a
 standard-context session.
 
 ### Codex

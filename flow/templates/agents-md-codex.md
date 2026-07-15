@@ -1,7 +1,7 @@
-# AGENTS.md — agentflow workflow for Codex
+# AGENTS.md — cenci workflow for Codex
 
-This is the agentflow implementation workflow expressed as prose for Codex. Portable
-`agentflow:*` convention skills may be available and should be applied when relevant,
+This is the cenci implementation workflow expressed as prose for Codex. Portable
+`cenci:*` convention skills may be available and should be applied when relevant,
 but the Claude-only pipeline skills are not invoked. Codex reads this file and owns
 the planner, implementer, and reviewer roles. Follow the steps in order.
 
@@ -180,7 +180,7 @@ You are the reviewer too. Run all three checklists over your diff
 
 ## Explicitly excluded
 
-These are Claude Code pipeline mechanics that agentflow does not port to Codex. Use
+These are Claude Code pipeline mechanics that cenci does not port to Codex. Use
 Codex's native interaction and delegation capabilities where helpful, but do not try
 to invoke the corresponding Claude workflow skills:
 

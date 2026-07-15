@@ -36,7 +36,7 @@ A finding only deserves a permanent home if it would prevent a *future* agent fr
 
 ## Project Root
 
-The caller (Phase 8 of `/agentflow:implement`) MUST supply a `<project-root>` absolute path — the feature worktree path. Every `Read`/`Write`/`Edit` you perform in this process MUST be prefixed with that absolute path. Relative paths resolve against the main-agent's process root (usually the main worktree) and changes will be stranded outside the PR that Phase 9 creates.
+The caller (Phase 8 of `/cenci:implement`) MUST supply a `<project-root>` absolute path — the feature worktree path. Every `Read`/`Write`/`Edit` you perform in this process MUST be prefixed with that absolute path. Relative paths resolve against the main-agent's process root (usually the main worktree) and changes will be stranded outside the PR that Phase 9 creates.
 
 If `<project-root>` was not provided, stop and ask the caller for it — do not fall back to relative paths.
 

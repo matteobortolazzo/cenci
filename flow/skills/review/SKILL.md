@@ -62,7 +62,7 @@ Expand any glob patterns with the Glob tool and collect the **list of file paths
 
 ## Phase 2: Parallel Review
 
-**Prepare shared context by path, not by paste.** For diff/PR mode: if the diff is small (roughly under 200 lines), it may be passed inline; otherwise write it once to `/tmp/claude/agentflow-review-<scope>-diff.patch` (plus the changed-file list from `git diff --name-only`) and pass reviewers the path — the same `diffContextMode: "file"` discipline the implement pipeline uses. `<scope>` is the PR number in PR mode; in diff and file mode, where no PR number is in scope, use a run-unique `<run-id>` (e.g. a timestamp literal captured once when this skill starts, which is inherently safe under the `shell-rules` scope-key format rule) instead, so no fixed-name path survives in any mode. For file mode: pass the file path list only.
+**Prepare shared context by path, not by paste.** For diff/PR mode: if the diff is small (roughly under 200 lines), it may be passed inline; otherwise write it once to `/tmp/claude/cenci-review-<scope>-diff.patch` (plus the changed-file list from `git diff --name-only`) and pass reviewers the path — the same `diffContextMode: "file"` discipline the implement pipeline uses. `<scope>` is the PR number in PR mode; in diff and file mode, where no PR number is in scope, use a run-unique `<run-id>` (e.g. a timestamp literal captured once when this skill starts, which is inherently safe under the `shell-rules` scope-key format rule) instead, so no fixed-name path survives in any mode. For file mode: pass the file path list only.
 
 Launch **all three reviewers as parallel Task tool calls in a SINGLE message**:
 
@@ -164,8 +164,8 @@ If multiple reviewers flag the same location:
 
 If yes (`<pr-number>` below is the same value as `<number>`, this skill's PR identifier):
 ```bash
-printf '%s' '<review report>' > /tmp/claude/agentflow-review-<pr-number>-comment.md
-BODY=$(cat /tmp/claude/agentflow-review-<pr-number>-comment.md)
+printf '%s' '<review report>' > /tmp/claude/cenci-review-<pr-number>-comment.md
+BODY=$(cat /tmp/claude/cenci-review-<pr-number>-comment.md)
 gh pr comment <number> --repo <owner>/<repo> --body "$BODY"
 ```
 

@@ -1,7 +1,7 @@
 ---
 name: refine
 description: "Claude Code-only: refine a ticket interactively until it is ready for planning."
-compatibility: Requires Claude Code AskUserQuestion and agentflow project configuration.
+compatibility: Requires Claude Code AskUserQuestion and cenci project configuration.
 argument-hint: <ticket-id> [additional context]
 user-invocable: true
 disable-model-invocation: true
@@ -14,7 +14,7 @@ allowed-tools: Read, Write, Glob, Bash(gh:*), Bash(git:*), Bash(curl:*), Bash(mk
 ## Context
 
 **Config check**: Before anything else, verify `.claude/config.json` exists by reading it. If the file does not exist, **stop immediately** and tell the user:
-"agentflow is not configured for this project. Run `/agentflow:configure` first to set up."
+"cenci is not configured for this project. Run `/cenci:configure` first to set up."
 
 Read `.claude/config.json`.
 
@@ -69,7 +69,7 @@ gh label create "Working" --repo <owner>/<repo> --color "FBCA04" --description "
 ```bash
 gh issue edit <number> --repo <owner>/<repo> --add-label "Working"
 ```
-Apply the same ensure-then-add pattern to every label this skill applies later (`Refined`, `Design`, `ui:visual-check`, …): before the first `--add-label <name>` of a label, run its `gh label create <name> … || true` with the color/description from the lifecycle table in `/agentflow:configure`.
+Apply the same ensure-then-add pattern to every label this skill applies later (`Refined`, `Design`, `ui:visual-check`, …): before the first `--add-label <name>` of a label, run its `gh label create <name> … || true` with the color/description from the lifecycle table in `/cenci:configure`.
 
 ## Your Role
 
@@ -88,11 +88,11 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 
    **Design-only classification** (if frontend ticket AND `pencil.enabled` is `true` in `.claude/config.json`): determine whether the ticket's *deliverable* is the design itself — a `.pen` file plus `DESIGN.md` spec, with no production code change (e.g., "Design the settings page", "Create mockups for the onboarding flow"). If the signals point that way, confirm via `AskUserQuestion`:
 
-   > "This reads as a design-only ticket — the deliverable would be a design spec (`.pen` + `DESIGN.md`) produced by `/agentflow:design`, with no code change. Is that right?"
+   > "This reads as a design-only ticket — the deliverable would be a design spec (`.pen` + `DESIGN.md`) produced by `/cenci:design`, with no code change. Is that right?"
 
    Options: "Yes — design-only", "No — includes implementation"
 
-   If confirmed, set `isDesignTicket = true`. Design-only tickets are routed to `/agentflow:design`, not `/agentflow:implement`: they skip the browser question (step 8) and the `ui:visual-check` label (step 12), and receive the `Design` label in step 11. Focus the analysis (step 5) on design questions — visual direction, screens, states, design-system fit — and skip implementation-only items (API contracts, database changes, PR size).
+   If confirmed, set `isDesignTicket = true`. Design-only tickets are routed to `/cenci:design`, not `/cenci:implement`: they skip the browser question (step 8) and the `ui:visual-check` label (step 12), and receive the `Design` label in step 11. Focus the analysis (step 5) on design questions — visual direction, screens, states, design-system fit — and skip implementation-only items (API contracts, database changes, PR size).
 
    **Design Coverage Check** (if frontend ticket AND `pencil.enabled` is `true` in `.claude/config.json`):
 
@@ -198,7 +198,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 
    When analyzing the split, determine which child tickets have data/API/schema dependencies on others (sequential) vs. which touch independent areas (parallel). Annotate each ticket accordingly. Do not propose a split for S or M tickets just because they touch multiple independent concerns — see `docs/ticket-sizing.md` for the budget-risk-only trigger.
 
-   **Design-first splits** (if frontend feature AND `pencil.enabled` is `true` AND `designNeeded` is true): make the first child a **design-only ticket** (e.g., "Design <feature> screens") that every UI implementation child depends on. Mark it as design-only in the split — it gets the `Design` label in Pass 1, its body includes the `### Design Direction` section from this refinement, it is executed via `/agentflow:design`, and it produces a committed design spec rather than a PR (the one exception to "1 ticket = 1 PR"). When `/agentflow:design` completes it, the `Designed` label is propagated to the implementation children that depend on it, satisfying implement's Design gate.
+   **Design-first splits** (if frontend feature AND `pencil.enabled` is `true` AND `designNeeded` is true): make the first child a **design-only ticket** (e.g., "Design <feature> screens") that every UI implementation child depends on. Mark it as design-only in the split — it gets the `Design` label in Pass 1, its body includes the `### Design Direction` section from this refinement, it is executed via `/cenci:design`, and it produces a committed design spec rather than a PR (the one exception to "1 ticket = 1 PR"). When `/cenci:design` completes it, the `Designed` label is propagated to the implementation children that depend on it, satisfying implement's Design gate.
 
 ## Update Ticket
 
@@ -270,7 +270,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 
    Omit `Depends on` / `Parallel with` lines that don't apply (e.g. the first child typically has no dependencies).
 
-   Design-only children (see **Design-first splits** above) additionally get `--label "Design"`, and their body includes the `### Design Direction` section from this refinement (that's where `/agentflow:design` reads it from).
+   Design-only children (see **Design-first splits** above) additionally get `--label "Design"`, and their body includes the `### Design Direction` section from this refinement (that's where `/cenci:design` reads it from).
 
    #### Pass 2: Update parent with tracking section
 
@@ -314,7 +314,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
    Blocks #<number>
 
    ### Goal
-   Produce the design spec (`.pen` + `DESIGN.md`) for #<number> via `/agentflow:design`.
+   Produce the design spec (`.pen` + `DESIGN.md`) for #<number> via `/cenci:design`.
 
    ### Design Direction
    <the Design Direction section from this refinement>
@@ -344,7 +344,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 
    If the update or verification fails, follow the write-failure protocol: report the error, retry once, and if still failing, STOP and report that the implementation ticket #`<number>` was not updated with the `Depends on #<D> (design)` line — but design ticket #`<D>` exists, so the user can add the dependency line manually.
 
-   When `/agentflow:design <D>` completes, it closes #<D> and propagates the `Designed` label to this ticket, satisfying implement's Design gate.
+   When `/cenci:design <D>` completes, it closes #<D> and propagates the `Designed` label to this ticket, satisfying implement's Design gate.
 
 11. **Add the "Refined" label and remove "Working":**
    - If `isDesignTicket` is true:
@@ -409,7 +409,7 @@ After steps 10-13 complete, present the Refined Ticket Summary prepared in step 
 >
 > Review the summary above.
 
-Do not display the summary earlier in the flow — it is shown once, here, after all writes complete. Do not name or suggest the next command to run (`/implement`, `/agentflow:design`, etc.) here — that's covered by the **After Refinement** section below.
+Do not display the summary earlier in the flow — it is shown once, here, after all writes complete. Do not name or suggest the next command to run (`/implement`, `/cenci:design`, etc.) here — that's covered by the **After Refinement** section below.
 
 ## After Refinement
 
@@ -418,4 +418,4 @@ Do not display the summary earlier in the flow — it is shown once, here, after
 - Offer to run `/implement` or start implementation
 - Suggest next steps beyond what's described above
 
-The user will explicitly invoke `/implement` when they're ready to proceed — or `/agentflow:design` for design-only tickets (labeled `Design`).
+The user will explicitly invoke `/implement` when they're ready to proceed — or `/cenci:design` for design-only tickets (labeled `Design`).
