@@ -25,8 +25,15 @@ See `.claude/rules/` for conventions:
 
 ## Project Structure
 
-- `main.go` — CLI entry point, subcommand routing (`daemon start|stop|restart|status`, human `status`, `widget-json` (hidden alias `waybar`), `notify`, `sandbox build|build-base|prune|update-plugins|reseed-creds|reap-orphans|ls|stop`, `open`); also handles the `cn` argv[0] alias (routes to `open`) and the `cenci-sand` argv[0] tombstone (prints a migration map, exits 2)
-- `sandboxcmd.go` — `sandbox`/`open` command handlers (same `package main`): flag parsing, usage errors (exit 2), and dispatch into `internal/sandbox` + `internal/sandbox/launcher`
+- `main.go` — CLI entry point: imports, version, `socket-dir`, top-level dispatch to each command group below, doctor/update wrapper-mode delegation; also handles the `cn` argv[0] alias (routes to `open`) and the `cenci-sand` argv[0] tombstone (prints a migration map, exits 2). All command-group implementations live in their own `*_cmd.go` file (same `package main`):
+  - `daemon_cmd.go` — `daemon start|stop|restart|status` + PID-file management
+  - `notify_cmd.go` — `notify` (hook event ingestion)
+  - `run_cmd.go` — `run` (dispatch a workflow into a new tmux window)
+  - `dispatch_cmd.go` — `dispatch` (enroll/unenroll/status/loop) + state rendering
+  - `status_cmd.go` — human `status` + `widget-json` (hidden alias `waybar`) + render helpers
+  - `close_cmd.go` — `close` + decision rendering
+  - `sandbox_cmd.go` — `sandbox build|build-base|prune|update-plugins|reseed-creds|reap-orphans|ls|stop`: flag parsing, usage errors (exit 2), and dispatch into `internal/sandbox` + `internal/sandbox/launcher`
+  - `open_cmd.go` — `open` (interactive sandbox launch, shortcut/model resolution)
 - `plugin/` — Claude Code plugin (hooks that call `cenci notify`)
 - `internal/daemon/` — Session-keyed event loop, hook→status mapping, paneless TTL sweep; delegates window work via `frontend.Frontend`
 - `internal/frontend/` — Seam types: `SessionState`, `Frontend` interface, `Observations`, `SweepAction`, `WindowInfo`; shared name sanitizers
