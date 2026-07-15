@@ -554,24 +554,29 @@ After gathering answers:
       run as its own Bash call, never compounded with a `cd` — see `cenci:shell-rules`).
 
    **Legacy cleanup (permissions)** — heal projects configured by an older cenci that shipped
-   scoped-path `Write(<path>)` allow entries (Claude Code's file permission
-   checker never matches scoped-path `Write(<path>)` rules — only scoped-path
-   `Edit(<path>)` rules, which also cover Write — so a scoped `Write(<path>)`
-   entry is dead weight that produces a startup warning):
+   scoped-path `Write(<path>)` entries in `permissions.allow` and/or
+   `permissions.deny` (Claude Code's file permission checker never matches
+   scoped-path `Write(<path>)` rules — only scoped-path `Edit(<path>)` rules,
+   which also cover Write — so a scoped `Write(<path>)` entry is dead weight
+   that produces a startup warning per entry, in both lists):
    1. For **every** scoped-path `Write(<path>)` entry found in
-      `permissions.allow` (not just the known base rule
-      `Write(//tmp/claude*/**)`), **replace** it with the corrected
-      `Edit(<path>)` form rather than appending the missing entry alongside
-      it. Deduplicate as you go: if `permissions.allow` already contains an
-      `Edit(<path>)` entry with that same `<path>`, drop the redundant
+      `permissions.allow` **or** `permissions.deny` (not just the known
+      template rules like `Write(//tmp/claude*/**)` or `Write(~/.ssh/**)`),
+      **replace** it in place with the corrected `Edit(<path>)` form rather
+      than appending the missing entry alongside it. Deduplicate as you go:
+      if that same list already contains an `Edit(<path>)` entry with that
+      same `<path>` (the template's deny list always did), drop the redundant
       `Write(<path>)` entry instead of creating a duplicate `Edit(<path>)`.
    2. If `permissions.allow` contains a blanket `Write(*)` entry, normalize
-      it to bare `Write`.
-   3. **Verify**: after healing, confirm `permissions.allow` contains no
-      remaining scoped-path `Write(<path>)` entry (a blanket bare `Write` or
-      `Write(*)`→`Write` normalization result is fine — only scoped-path
-      `Write(<path>)` forms are the problem). If any remain, the heal step
-      above was incomplete — fix before continuing.
+      it to bare `Write`. (This normalization applies to `allow` only — a
+      bare `Write` in `deny` would block all file writes and was never
+      shipped by any template.)
+   3. **Verify**: after healing, confirm neither `permissions.allow` nor
+      `permissions.deny` contains a remaining scoped-path `Write(<path>)`
+      entry (a blanket bare `Write` or `Write(*)`→`Write` normalization
+      result in `allow` is fine — only scoped-path `Write(<path>)` forms are
+      the problem). If any remain, the heal step above was incomplete — fix
+      before continuing.
 
 ### MCP Server Configuration
 
