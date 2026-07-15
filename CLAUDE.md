@@ -12,7 +12,7 @@ GitHub Issues for tracking. GitHub for code and PRs.
 Each project has its own `CLAUDE.md` with project-specific context.
 
 ## Critical Rules
-- ALWAYS read the relevant project's `.claude/rules/` files before working on any layer.
+- ALWAYS read the relevant project's `CLAUDE.md` — plus its `.claude/rules/` files where they exist (currently only `watch/`) — before working on any layer.
 - Test-first: integration tests that assert behavior, not implementation details.
 - Keep tickets well-scoped. 1 ticket = 1 PR.
 - ALWAYS work in a git worktree — for any change (code, docs, config), not just feature work. Never modify files in the main worktree.

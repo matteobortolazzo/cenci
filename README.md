@@ -49,7 +49,7 @@ Then launch your agent inside the project boundary:
 
 ```bash
 cenci-sand   # Claude Code
-sb xt        # Codex
+cn xt        # Codex
 ```
 
 The installer detects available clients, registers the marketplace, installs all

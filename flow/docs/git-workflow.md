@@ -35,7 +35,7 @@ Commit types determine the bump — choose your type carefully:
 | `feat!:` / `BREAKING CHANGE` | major (x.0.0) | Removed or renamed skill |
 | `fix`, `refactor`, `test`, `docs`, `chore` | patch (1.0.x) | Bug fix, cleanup, docs |
 
-The workflow updates `.claude-plugin/plugin.json` and `marketplace.json`, commits as `chore(release): v<new>`, and creates a git tag.
+The workflow updates `.claude-plugin/plugin.json` and `marketplace.json`, commits as `chore(release): <plugin-id>/v<new>` (for flow the plugin id is `cenci`, e.g. `chore(release): cenci/v1.2.0`), and creates a git tag `<layer>/v<new>` (e.g. `flow/v1.2.0`).
 
 ## PR Workflow
 No hard PR size limit. 1 ticket = 1 PR targeting `main`.

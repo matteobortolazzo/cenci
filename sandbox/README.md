@@ -227,7 +227,7 @@ inside the container — Claude with `--dangerously-skip-permissions`, Codex wit
 
 Containers and home volumes are **namespaced by agent**, so the two never collide:
 the **Claude agent** uses the `claude-cenci-` prefix; the **Codex agent** (`--agent
-codex` / `sb xt`) uses `codex-cenci-`. The rest of the name is the repo slug (or the legacy `<name>`
+codex` / `cn xt`) uses `codex-cenci-`. The rest of the name is the repo slug (or the legacy `<name>`
 outside a git repo — see [Per-repo containers](#per-repo-containers) above), e.g.
 `claude-cenci-my-project` / `claude-cenci-home-my-project`. The two agents
 are provisioned differently: **Claude** is bind-mounted from the host (self-contained binary,
@@ -284,7 +284,7 @@ Both agents get a status line out of the box:
 
 ### Codex auth
 
-When launching Codex (`--agent codex` / `sb xt`), auth is staged from the host:
+When launching Codex (`--agent codex` / `cn xt`), auth is staged from the host:
 
 - `~/.codex/auth.json` — the ChatGPT sign-in credentials created by `codex login` on the
   host. Injected read-only and seeded to `/home/dev/.codex/auth.json` (mode 600) only when
