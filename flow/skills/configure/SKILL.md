@@ -249,7 +249,7 @@ Reuse the dependency detection results from earlier and add file-type detection 
 
 If no LSP servers are detected, skip question 6 entirely.
 
-6. **LSP Servers**: If any LSP servers were detected above, present using AskUserQuestion with multiSelect=true:
+6. **LSP Servers**: If **two or more** LSP servers were detected above, present using AskUserQuestion with multiSelect=true:
 
    "LSP servers provide real-time diagnostics (type errors, unused variables, dead code) during implementation. Based on your project, which would you like to enable?"
 
@@ -259,6 +259,12 @@ If no LSP servers are detected, skip question 6 entirely.
    - "rust-analyzer — Rust type checking and diagnostics"
    - "csharp-ls — C# type checking and diagnostics"
    - "gopls — Go type checking and diagnostics"
+
+   If exactly **one** LSP server was detected, ask a plain Yes/No instead — a multi-select checkbox with a single option has no sensible "none" choice:
+
+   "Your project uses `<detected-language>`. Do you want to enable `<server-name>` for real-time diagnostics (type errors, unused variables, dead code) during implementation?"
+
+   Options: "Yes — enable `<server-name>`", "No — skip"
 
 #### Binary Verification
 
