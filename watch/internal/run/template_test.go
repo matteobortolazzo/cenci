@@ -109,9 +109,25 @@ func TestCodexNativeWorkflowTemplates(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", workflow, err)
 		}
-		if got := argv[len(argv)-1]; got != "$cenci:"+workflow+" 42" {
-			t.Errorf("%s = %q", workflow, got)
+		got := argv[len(argv)-1]
+		want := "$cenci:" + workflow + " 42"
+		if codexPlanningWorkflow(workflow) {
+			want = "/plan\n" + want
 		}
+		if got != want {
+			t.Errorf("%s = %q, want %q", workflow, got, want)
+		}
+	}
+}
+
+func TestCodexApplyStageLeavesPlanMode(t *testing.T) {
+	cfg := builtinConfig()
+	argv, err := cfg.BuildCommand("codex", "implement", "apply .plans/42.md", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(argv[len(argv)-1], "/plan") {
+		t.Fatalf("apply entered plan mode: %q", argv[len(argv)-1])
 	}
 }
 
