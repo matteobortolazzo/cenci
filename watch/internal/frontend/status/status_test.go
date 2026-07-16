@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -133,7 +134,7 @@ func TestFormat_TooltipOrder(t *testing.T) {
 	}
 	out := Format(snap, testConfig())
 
-	expected := "main:0 - writing tests (running)\nmain:2 - fixing auth (need-input)"
+	expected := "main:0 - writing tests (unknown) (running)\nmain:2 - fixing auth (unknown) (need-input)"
 	if out.Tooltip != expected {
 		t.Errorf("expected tooltip:\n%s\ngot:\n%s", expected, out.Tooltip)
 	}
@@ -187,7 +188,7 @@ func TestFormat_FallbackToWindowName(t *testing.T) {
 	}
 	out := Format(snap, testConfig())
 
-	expected := "main:0 - my-window (running)"
+	expected := "main:0 - my-window (unknown) (running)"
 	if out.Tooltip != expected {
 		t.Errorf("expected tooltip %q, got %q", expected, out.Tooltip)
 	}
@@ -203,7 +204,7 @@ func TestFormat_ManuallyNamedShowsWindowName(t *testing.T) {
 	}
 	out := Format(snap, testConfig())
 
-	expected := "main:0 - my-project (running)"
+	expected := "main:0 - my-project (unknown) (running)"
 	if out.Tooltip != expected {
 		t.Errorf("expected tooltip %q, got %q", expected, out.Tooltip)
 	}
@@ -219,7 +220,7 @@ func TestFormat_AutoNamedShowsTaskName(t *testing.T) {
 	}
 	out := Format(snap, testConfig())
 
-	expected := "main:0 - writing tests (running)"
+	expected := "main:0 - writing tests (unknown) (running)"
 	if out.Tooltip != expected {
 		t.Errorf("expected tooltip %q, got %q", expected, out.Tooltip)
 	}
@@ -350,8 +351,8 @@ func TestFormat_PanelessTooltipLine(t *testing.T) {
 	}
 	out := Format(snap, testConfig())
 
-	// No "sess:idx - " prefix for paneless entries.
-	expected := "sandbox task (running)"
+	// "(no session) - " prefix for paneless entries.
+	expected := "(no session) - sandbox task (unknown) (running)"
 	if out.Tooltip != expected {
 		t.Errorf("expected tooltip %q, got %q", expected, out.Tooltip)
 	}
@@ -370,7 +371,10 @@ func TestFormat_PanelessTooltipFallsBackToAgent(t *testing.T) {
 	}
 	out := Format(snap, testConfig())
 
-	expected := "claude (running)"
+	// No task/window name known yet, so the name slot shows the "(untitled)"
+	// placeholder while the agent renders in its own slot (unified format,
+	// #405) rather than being folded into the name slot as before.
+	expected := "(no session) - (untitled) (claude) (running)"
 	if out.Tooltip != expected {
 		t.Errorf("expected tooltip %q, got %q", expected, out.Tooltip)
 	}
@@ -387,7 +391,7 @@ func TestFormat_MixedPanedAndPanelessTooltip(t *testing.T) {
 	}
 	out := Format(snap, testConfig())
 
-	expected := "main:0 - writing tests (running)\nsandbox task (need-input)"
+	expected := "main:0 - writing tests (unknown) (running)\n(no session) - sandbox task (unknown) (need-input)"
 	if out.Tooltip != expected {
 		t.Errorf("expected tooltip:\n%s\ngot:\n%s", expected, out.Tooltip)
 	}
@@ -453,7 +457,7 @@ func TestFormat_HeadroomTooltipAppended(t *testing.T) {
 	}
 	out := Format(snap, testConfig())
 
-	expected := "main:0 - writing tests (running)\nclaude 73%  codex 15%"
+	expected := "main:0 - writing tests (unknown) (running)\nclaude 73%  codex 15%"
 	if out.Tooltip != expected {
 		t.Errorf("expected tooltip:\n%s\ngot:\n%s", expected, out.Tooltip)
 	}
@@ -515,7 +519,7 @@ func TestFormat_HeadroomAbsentParity(t *testing.T) {
 	if outNil.Text != "▶ 1" {
 		t.Errorf("expected text unchanged from today's no-headroom output '▶ 1', got %q", outNil.Text)
 	}
-	expectedTooltip := "main:0 - writing tests (running)"
+	expectedTooltip := "main:0 - writing tests (unknown) (running)"
 	if outNil.Tooltip != expectedTooltip {
 		t.Errorf("expected tooltip unchanged from today's no-headroom output %q, got %q", expectedTooltip, outNil.Tooltip)
 	}
@@ -1058,5 +1062,130 @@ func TestHeadroomClass_Boundaries(t *testing.T) {
 				t.Errorf("headroomClass(%d) = %q, want %q", tt.pct, got, tt.want)
 			}
 		})
+	}
+}
+
+// --- Unified session line format (#405) ------------------------------------
+
+// TestFormat_PanelessBlankNameAndAgent covers the exact bug that motivated
+// #405: a sessionless (paneless) window before UserPromptSubmit has set a
+// task name AND before the agent type is known (Agent == "") must never
+// collapse to a blank/truncated tooltip line. It must render the unified
+// "(no session) - (untitled) (unknown) (status)" shape.
+func TestFormat_PanelessBlankNameAndAgent(t *testing.T) {
+	snap := &ipc.StateSnapshot{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Windows: []ipc.WindowState{
+			{Status: "running"},
+		},
+		Summary: ipc.StatusSummary{Total: 1, Running: 1},
+	}
+	out := Format(snap, testConfig())
+
+	expected := "(no session) - (untitled) (unknown) (running)"
+	if out.Tooltip != expected {
+		t.Errorf("expected tooltip %q, got %q", expected, out.Tooltip)
+	}
+}
+
+// TestFormat_PanelessKnownAgentNoTaskName covers a sessionless window with a
+// known agent but no task name yet: the name placeholder must still show,
+// alongside the real agent (not folded into the name slot as today).
+func TestFormat_PanelessKnownAgentNoTaskName(t *testing.T) {
+	snap := &ipc.StateSnapshot{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Windows: []ipc.WindowState{
+			{Status: "idle", Agent: "claude"},
+		},
+		Summary: ipc.StatusSummary{Total: 1, Idle: 1},
+	}
+	out := Format(snap, testConfig())
+
+	expected := "(no session) - (untitled) (claude) (idle)"
+	if out.Tooltip != expected {
+		t.Errorf("expected tooltip %q, got %q", expected, out.Tooltip)
+	}
+}
+
+// TestFormat_TmuxAllFieldsKnown covers the normal, fully-known tmux-backed
+// case: session:index prefix, name, agent, and status must all be present
+// in the unified order "session:index - name (agent) (status)".
+func TestFormat_TmuxAllFieldsKnown(t *testing.T) {
+	snap := &ipc.StateSnapshot{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Windows: []ipc.WindowState{
+			{Session: "feature-x", WindowIndex: "1", TaskName: "fix-login", Agent: "claude", Status: "running"},
+		},
+		Summary: ipc.StatusSummary{Total: 1, Running: 1},
+	}
+	out := Format(snap, testConfig())
+
+	expected := "feature-x:1 - fix-login (claude) (running)"
+	if out.Tooltip != expected {
+		t.Errorf("expected tooltip %q, got %q", expected, out.Tooltip)
+	}
+}
+
+// TestFormat_TrailingStatusTokenRegexCompat is a regression guard for the
+// gnome/plasma/macOS plugins (plugin/gnome/extension.js, plugin/plasma/contents/ui/main.qml,
+// plugin/macos/cenci.5s.sh), which each parse a tooltip line by the
+// end-anchored regex /\(([a-z-]+)\)\s*$/ to recover the status. Adding
+// "(agent)" as an earlier parenthesized group must not push status out of
+// the final position, across every status wording the plugins expect
+// (running, idle, done, stopped, need-input, failed).
+func TestFormat_TrailingStatusTokenRegexCompat(t *testing.T) {
+	statusRe := regexp.MustCompile(`\(([a-z-]+)\)\s*$`)
+
+	statuses := []string{"running", "idle", "done", "stopped", "need-input", "failed"}
+	for _, st := range statuses {
+		t.Run(st, func(t *testing.T) {
+			snap := &ipc.StateSnapshot{
+				Timestamp: "2024-01-01T00:00:00Z",
+				Windows: []ipc.WindowState{
+					{Session: "feature-x", WindowIndex: "0", TaskName: "fix-login", Agent: "claude", Status: st},
+				},
+			}
+			out := Format(snap, testConfig())
+
+			expected := fmt.Sprintf("feature-x:0 - fix-login (claude) (%s)", st)
+			if out.Tooltip != expected {
+				t.Errorf("expected tooltip %q, got %q", expected, out.Tooltip)
+			}
+
+			m := statusRe.FindStringSubmatch(out.Tooltip)
+			if m == nil {
+				t.Fatalf("tooltip %q does not end in a parenthesized status token (regex used by gnome/plasma/macos plugins)", out.Tooltip)
+			}
+			if m[1] != st {
+				t.Errorf("expected trailing status token %q, got %q", st, m[1])
+			}
+		})
+	}
+}
+
+// TestFormatSessionLine_PangoEscapedThroughSharedHelper drives a Session and
+// TaskName containing Pango markup-special characters ("<", ">", "&")
+// directly through FormatSessionLine with escapePango — the exact call the
+// waybar tooltip path (Format, above) makes — locking in that the shared
+// #405 helper never lets raw markup from session/task-name fields reach the
+// Pango-rendered tooltip, independent of any future refactor of Format
+// itself.
+func TestFormatSessionLine_PangoEscapedThroughSharedHelper(t *testing.T) {
+	w := ipc.WindowState{
+		Session:     "feature<x>&y",
+		WindowIndex: "2",
+		TaskName:    "<b>&evil</b>",
+		Agent:       "claude",
+		Status:      "running",
+	}
+
+	got := FormatSessionLine(w, escapePango)
+
+	expected := "feature&lt;x&gt;&amp;y:2 - &lt;b&gt;&amp;evil&lt;/b&gt; (claude) (running)"
+	if got != expected {
+		t.Errorf("FormatSessionLine() = %q, want %q", got, expected)
+	}
+	if strings.Contains(got, "<b>") || strings.Contains(got, "</b>") || strings.Contains(got, "feature<x>") {
+		t.Errorf("FormatSessionLine() leaked raw markup into output: %q", got)
 	}
 }

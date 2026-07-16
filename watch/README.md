@@ -714,7 +714,7 @@ check that exits 1 when not running (for scripting).
 $ cenci status
 daemon: running (pid 12345)
 sessions (1):
-  main:0 - implement thing (running)
+  main:0 - implement thing (claude) (running)
 Dispatch loop: enabled
   daemon:   running
   interval: 5m
@@ -975,7 +975,7 @@ The daemon has two sweep mechanisms:
 
 ### Paneless sessions
 
-`cenci notify` accepts events even when `$TMUX_PANE` is unset. Sessions running in plain terminals or cenci-sandbox without a tmux pane appear in `cenci widget-json` output with empty `session` and `window_index` fields; their tooltip line reads `name (status)` rather than `sess:idx - name (status)`.
+`cenci notify` accepts events even when `$TMUX_PANE` is unset. Sessions running in plain terminals or cenci-sandbox without a tmux pane appear in `cenci widget-json` output with empty `session` and `window_index` fields; their tooltip line reads `(no session) - name (agent) (status)` rather than the tmux-backed `session:index - name (agent) (status)`.
 
 **Caveat**: for paneless sessions the task name comes only from the hook payload's `task_name` field — there is no pane title to read. Codex `UserPromptSubmit` hooks provide the compact first-prompt label, but native action-required title detection is only available for tmux-backed sessions.
 

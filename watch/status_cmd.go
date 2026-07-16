@@ -96,18 +96,7 @@ func renderHumanStatus(info daemon.StatusInfo, socketPath string) string {
 	default:
 		fmt.Fprintf(&b, "sessions (%d):\n", len(snap.Windows))
 		for _, w := range snap.Windows {
-			name := w.WindowName
-			if !w.ManuallyNamed && w.TaskName != "" {
-				name = w.TaskName
-			}
-			if name == "" {
-				name = w.Agent
-			}
-			if w.Session == "" {
-				fmt.Fprintf(&b, "  %s (%s)\n", name, w.Status)
-			} else {
-				fmt.Fprintf(&b, "  %s:%s - %s (%s)\n", w.Session, w.WindowIndex, name, w.Status)
-			}
+			fmt.Fprintf(&b, "  %s\n", status.FormatSessionLine(w, status.Identity))
 		}
 	}
 
