@@ -354,7 +354,7 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 				if ws.Status != detect.StatusNeedInput || ws.TaskName != taskName {
 					f.applyStatus(wt, ws, detect.StatusNeedInput, taskName)
 					if ws.SessionKey != "" {
-						updates = append(updates, frontend.SweepAction{SessionKey: ws.SessionKey, NewStatus: detect.StatusNeedInput, NewTask: taskName})
+						updates = append(updates, frontend.SweepAction{SessionKey: ws.SessionKey, NewStatus: detect.StatusNeedInput, NewTask: taskName, AttentionSource: "action-required-title"})
 					}
 				}
 				continue

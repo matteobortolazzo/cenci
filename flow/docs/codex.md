@@ -1,77 +1,43 @@
 # Codex support
 
-cenci gives Codex shared engineering conventions as native plugin skills and the
-ticket-to-PR workflow as an `AGENTS.md` prose recipe. The interactive Claude Code
-pipeline is deliberately not ported.
+cenci installs native plugin skills, hooks, agent adapters, launch templates, and PR
+babysitting for Codex CLI 0.144.1 or newer. The full gated ticket-to-PR workflow remains
+in development until behavioral end-to-end acceptance passes. Shared configuration lives in
+`.cenci/config.json`; shared guidance lives in `AGENTS.md`.
 
 ## Install
-
-The marketplace catalog is shared, but Claude Code and Codex keep separate plugin
-installations:
 
 ```bash
 codex plugin marketplace add matteobortolazzo/cenci
 codex plugin add cenci@cenci
 ```
 
-The cenci installer runs these commands automatically when it detects Codex.
-Restart or begin a new Codex session after installation.
+Review changed plugin hooks with `/hooks`. cenci never changes hook trust automatically.
 
-Verified with Codex CLI 0.144.3: Codex accepts this repository's existing marketplace,
-uses `flow/.codex-plugin/plugin.json`, and discovers the bundled
-`skills/*/SKILL.md` files under the `cenci:` namespace. A Claude installation
-under `~/.claude/plugins` is not shared with Codex. No `.agents/skills` copy or
-symlink is required.
+## Native workflow foundation
 
-cenci deliberately keeps lifecycle hooks client-specific. The Codex manifest
-points to `codex/hooks.json`, whose empty `hooks` map explicitly declares that the
-Codex surface has no lifecycle handlers. This prevents Codex from falling back to
-`hooks/hooks.json`, which contains Claude Code-only commands and output contracts.
-Claude Code continues to load that original hook file unchanged, while both clients
-continue to discover the shared skills.
+Explicitly mention `$cenci:configure`, `$cenci:refine`, `$cenci:implement`,
+`$cenci:review`, `$cenci:address-review`, `$cenci:refactor`, `$cenci:sync`,
+`$cenci:garden`, `$cenci:babysit`, or optional `$cenci:design`.
 
-## Portable skills
+The staged procedures are under active development. Their intended contract is: planning workflows enter `/plan`, gather material choices, and produce an approved plan
+without mutations. A second normal-mode invocation persists plans, updates GitHub, and
+executes. Implementation uses `.cenci/checkpoints/`, generated `.codex/agents/*.toml`,
+and a native goal armed only after plan approval. Missing custom agents fall back to
+built-in workers with the same bounded role prompt.
 
-Codex can automatically apply the convention skills for attachments, frontend
-classification, PR-comment filtering, shell commands, Angular, .NET, Go, delegation,
-testing, and worktrees. The complete matrix and limitations are in the
-[cenci README](../README.md#skill-portability).
+The launcher exposes development entry points:
 
-Skills whose descriptions start with `Claude Code-only` are present so one
-marketplace can serve both clients, but Codex must not invoke them. They depend on
-Claude pipeline mechanics such as `AskUserQuestion`, model/invocation frontmatter,
-hooks, slash commands, or specialized workflow subagents.
+```bash
+cenci run refine 42 --agent codex
+cenci run implement 42 --agent codex
+cenci babysit 123 --agent codex --interval 15m
+```
 
-## Ticket-to-PR recipe
+Pencil design remains optional and requires its CLI/MCP dependencies.
 
-The recipe in [`templates/agents-md-codex.md`](../templates/agents-md-codex.md) is a
-complete `AGENTS.md` a Codex session can follow:
+## Attention behavior
 
-- TDD red, green, and touched-code refactor
-- Security, code-quality, and silent-failure self-review
-- Worktree discipline
-- Rebase, conventional commit, push, and pull-request flow
-
-Portable skills supply reusable conventions while the recipe owns sequencing and
-acceptance gates. Codex performs the pipeline roles using its available agent
-capabilities; it does not invoke `/cenci:implement`.
-
-## Dispatch
-
-1. Put the `AGENTS.md` recipe at the target repository root.
-2. Install cenci for Codex so cenci hooks and portable skills are present.
-3. Merge [`templates/cenci-codex-config.json`](../templates/cenci-codex-config.json)
-   into `~/.config/cenci/config.json`.
-4. Launch:
-
-   ```bash
-   cenci run implement <n> --agent codex
-   ```
-
-The Codex workflow template resolves to `codex exec` in a `<ticket>-<slug>` tmux
-window and tells Codex to follow the repository's `AGENTS.md`.
-
-Only the `implement` dispatch is provided. Interactive refinement, Pencil design,
-Claude goal/loop automation, and Claude project configuration remain out of scope.
-The supported boundary is summarized in the
-[root client capability matrix](../../README.md#claude-code-and-codex).
+Cenci `need-input` renders a red/dim foreground `!`. A red tmux background without `!`
+is usually tmux's native bell alert from a BEL notification. Run `cenci doctor` to inspect
+Codex notification configuration; choose `osc9` yourself if BEL overlays are unwanted.

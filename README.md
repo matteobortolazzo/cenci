@@ -150,13 +150,14 @@ treat cenci as one product.
 | Container isolation | Yes | Yes |
 | Live session monitoring and self-bootstrap | Yes | Yes |
 | Portable shell, testing, stack, worktree, and review conventions | Yes | Yes |
-| Interactive refinement, design, and implementation | Yes | Not yet |
+| Interactive refinement and implementation | Yes | In development |
+| Optional Pencil design | Yes | In development |
 | Persistent PR babysitting | Yes | Yes |
-| Documented implementation recipe | Built in | [Available](flow/docs/codex.md) |
+| Native gated workflow | Yes | [Foundation available](flow/docs/codex.md) |
 
-Claude Code currently provides the full interactive ticket-to-PR workflow. Codex uses
-the same isolation and attention layers plus portable engineering conventions and a
-documented implementation recipe.
+Codex currently has native hooks, launchers, checkpoint helpers, agent adapters, and PR
+babysitting. Its full gated ticket-to-PR path remains in development pending behavioral
+end-to-end acceptance.
 
 This isn't just a capability gap — it's a flexibility story. `cenci run` takes a
 per-invocation `--agent`, and `cenci dispatch` routes each ticket by an

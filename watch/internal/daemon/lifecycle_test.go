@@ -186,6 +186,9 @@ func TestDaemon_CodexPromptLabelAndNativeQuestionReconciliation(t *testing.T) {
 	if got := d.sessions["codex-sess"].Status; got != detect.StatusNeedInput {
 		t.Fatalf("action title status = %v, want need-input", got)
 	}
+	if got := d.sessions["codex-sess"].AttentionSource; got != "action-required-title" {
+		t.Fatalf("attention source = %q, want action-required-title", got)
+	}
 	if got := d.sessions["codex-sess"].TaskName; got != "improve codex tmux names" {
 		t.Fatalf("action title changed task = %q", got)
 	}

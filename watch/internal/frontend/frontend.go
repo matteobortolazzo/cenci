@@ -14,10 +14,11 @@ import (
 
 // SessionState is the daemon core's view of one agent session.
 type SessionState struct {
-	SessionID string
-	Agent     string // claude, codex, or empty when unknown
-	Status    detect.Status
-	TaskName  string
+	SessionID       string
+	Agent           string // claude, codex, or empty when unknown
+	Status          detect.Status
+	AttentionSource string // permission-request, input-tool, action-required-title, native-alert
+	TaskName        string
 	// PromptTaskName is true after the first non-empty prompt label is pinned.
 	PromptTaskName bool
 	TmuxPane       string    // tmux pane ID (e.g. %5); empty = paneless session
@@ -72,10 +73,11 @@ type Observations struct {
 // A zero-valued action (only SessionKey set) records a display-only change
 // (e.g. window renumbering) so the daemon still rebroadcasts.
 type SweepAction struct {
-	SessionKey string
-	Remove     bool
-	NewStatus  detect.Status
-	NewTask    string
+	SessionKey      string
+	Remove          bool
+	NewStatus       detect.Status
+	NewTask         string
+	AttentionSource string
 	// PaneGone is set when the sweep detected a tmux-backed session whose
 	// pane no longer exists; it asks the daemon core to trigger the orphan
 	// reaper, coalesced once per sweep pass.

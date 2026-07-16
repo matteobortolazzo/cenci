@@ -46,16 +46,16 @@ Codex so it does not mistake a pipeline command for a supported workflow.
 | `testing` | Yes | Yes | TDD and test-quality conventions |
 | `verify-ui` | Yes | Yes | Playwright/Pencil visual-verification procedure; browser tooling availability is client-neutral |
 | `worktrees` | Yes | Yes | Git worktree conventions |
-| `address-review` | Yes | No | Claude interactive gates and pipeline mutations |
+| `address-review` | Yes | In development | Native approval/checkpoint foundation |
 | `babysit` | Yes | Yes | Thin wrapper over the client-neutral `cenci babysit` supervisor |
-| `configure` | Yes | No | Writes Claude settings and plugin configuration |
-| `design` | Yes | No | Claude interactive gates and Pencil integration |
-| `garden` | Yes | No | Claude interactive gates, worktree mutations, and GitHub PR creation |
-| `implement` | Yes | No | Claude subagents, hooks, goals, and human gates |
-| `refactor` | Yes | No | Claude analysis subagents and ticket workflow |
-| `refine` | Yes | No | Claude interactive refinement gate |
-| `review` | Yes | No | Claude specialized reviewer subagents |
-| `sync` | Yes | No | Claude command/model invocation extensions |
+| `configure` | Yes | In development | Neutral/adapters foundation present |
+| `design` | Yes | In development | Optional Pencil procedure |
+| `garden` | Yes | In development | Plan/apply foundation |
+| `implement` | Yes | In development | Agents/checkpoints foundation |
+| `refactor` | Yes | In development | Native analysis foundation |
+| `refine` | Yes | In development | Plan/apply foundation |
+| `review` | Yes | In development | Native reviewer foundation |
+| `sync` | Yes | In development | Native procedure foundation |
 
 ## Prerequisites
 

@@ -63,6 +63,15 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 		return
 	}
 	sess.Status = status
+	switch status {
+	case detect.StatusNeedInput:
+		sess.AttentionSource = attentionSource(event)
+		if d.cfg.Verbose {
+			log.Printf("attention: session=%s source=%s event=%s tool=%s", key, sess.AttentionSource, event.EventType, event.ToolName)
+		}
+	case detect.StatusRunning:
+		sess.AttentionSource = ""
+	}
 
 	obs := d.frontend.OnEvent(sess, event)
 	for _, evicted := range obs.EvictedKeys {
@@ -78,6 +87,19 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 	}
 
 	d.broadcast()
+}
+
+func attentionSource(event ipc.HookEvent) string {
+	if event.EventType == "PermissionRequest" {
+		return "permission-request"
+	}
+	if event.EventType == "PreToolUse" {
+		return "input-tool:" + event.ToolName
+	}
+	if event.EventType == "Notification" {
+		return "notification:" + event.NotificationType
+	}
+	return "native-alert"
 }
 
 // mapEventToStatus converts a hook event to a detect.Status.
