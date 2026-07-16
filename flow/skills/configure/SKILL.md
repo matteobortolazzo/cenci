@@ -33,11 +33,24 @@ On migration, preserve every unknown key from `legacyConfig`; new writes go only
 `.cenci/config.json`. If both files exist, recursively merge them into one
 `migrationBase` with canonical values winning, then overlay managed answers. Use
 `flow/scripts/migrate-project-core.sh <root>` to preview the exact config/guidance diff;
-rerun it with `--apply` only after approval. Never rewrite or delete
-`.claude/config.json`; it is a read-only compatibility artifact.
+rerun it with `--apply` only after approval, with `<root>` set to `<worktree-path>` (see
+Create Worktree below — the worktree exists by the time any `--apply` can run). Never
+rewrite or delete `.claude/config.json`; it is a read-only compatibility artifact.
 
 When `existingConfig` is present, tell the user before starting questions:
 "Found existing configuration. Each question will show your current setting as the default — select it to keep it unchanged."
+
+### Create Worktree
+
+`/cenci:configure` writes files into the repo (`.cenci/config.json`, `AGENTS.md`/`CLAUDE.md`, `.mcp.json`, `.lsp.json`, `.gitignore`, `.claudeignore`, `.github/workflows/ci.yml`, `.cenci/Dockerfile`, `.lazyboards.yml`, `.codex/agents/`, `.codex/config.toml`) and updates `.claude/settings.json`. Like every other change in this repo, these ship as a PR — configure never writes directly to the main worktree (see `cenci:worktrees` and `docs/git-workflow.md`).
+
+Create the worktree now, before any file is written (including a migration `--apply` above) and before the detection/question steps below, since none of them depend on it existing yet:
+
+1. Verify at least one commit exists: `git rev-parse HEAD 2>/dev/null`. If the repository has no commits, create an initial commit: `git add -A && git commit -m "chore: initial commit" --allow-empty`.
+2. Derive a slug: `init` when `existingConfig` is null (first-ever configure run), `update` for a plain reconfiguration, or a short kebab-case description of the user's focus when `$ARGUMENTS` names one (e.g. "refresh MCP servers" → `mcp-refresh`).
+3. Create the worktree: `git worktree add .worktrees/configure-<slug> -b chore/configure-<slug> main`. If that branch/directory name is already taken by an unrelated prior run, append `-2`, `-3`, etc. until it's free.
+
+From this point on, `<worktree-path>` is `.worktrees/configure-<slug>`. Every file this skill reads or writes below — `.cenci/config.json`, `AGENTS.md`, `CLAUDE.md`, `.mcp.json`, `.lsp.json`, `.gitignore`, `.claudeignore`, `.claude/settings.json`, `.github/workflows/`, `.cenci/Dockerfile`, `.lazyboards.yml`, `.codex/`, `designs/` — and every "the repo root" / "the project root" reference in the steps below resolves against `<worktree-path>`, never the main checkout. Use absolute paths rooted at `<worktree-path>` for every Write/Edit; verify the CWD before Bash commands rather than relying on a single `cd` persisting across calls. `gh label create` / `gh issue` calls (step 3c) are GitHub API calls, not file writes, and run the same regardless of worktree.
 
 ### Platform Detection
 
@@ -1055,7 +1068,45 @@ When migrating from an older config that has `ticketSystem`, `prSystem`, `ticket
 - When `pencil.shared` is `true`: `pencil.designPath` holds the shared path (e.g., `"designs/"`). Individual projects do **not** have `designPath`.
 - When `pencil.shared` is `false` (separate): `pencil.designPath` is omitted. Each frontend project in the `projects` array gets a `designPath` field (e.g., `"apps/web-client/designs/"`). Non-frontend projects do not get `designPath`.
 
-Report what was created and suggest next steps (e.g., "Try `/cenci:refine <ticket-id>` on a ticket"). If `sandbox.enabled` is `true`, mention the generated/committed `.cenci/Dockerfile` and that `cenci sandbox build` (run from inside the repo) builds the repo's own tailored image on top of the shared base. If `lazyboards.enabled` is `true`, list the generated `.lazyboards.yml` In Review actions with their keys and serve commands (e.g., "`W` runs web-client's PR worktree with `ng serve`") and point at `docs/orchestration.md` for the board recipe. If `sandbox.baseVersion` resolved to `null` (unresolved — see the baseVersion resolution in step 5e), the chat summary must explicitly say so (e.g., "Base version could not be auto-detected — see `sandbox/README.md` to pin `BASE_VERSION` manually") rather than leaving it only as an inline Dockerfile comment, so a user who doesn't open the generated file still learns the base version wasn't pinned.
+7. **Commit, Push, and Open PR**: configure's changes live in `<worktree-path>` — ship them the same way every other change in this repo ships.
+
+   Read `<worktree-path>/docs/git-workflow.md` for the commit/branch/PR conventions used below. Run a standalone `cd <worktree-path>` first so the commands below resolve against the worktree and stay auto-approved (see `cenci:shell-rules` — never compound the `cd` with the git command itself).
+
+   **Commit**:
+   ```bash
+   git add -A
+   git commit -m "chore(configure): <one-line summary of what changed>
+
+   <bullet list of generated/updated files>"
+   ```
+   If nothing is staged (a re-run that changed nothing), skip Commit/Push/PR entirely and report "No configuration changes — nothing to commit" instead of opening an empty PR.
+
+   **Push**:
+   ```bash
+   git push -u origin chore/configure-<slug>
+   ```
+   If push fails due to sandbox/network/auth, show the exact command and use `AskUserQuestion` ("Pushed, continue" / "Abort") to wait for the user to push manually before continuing.
+
+   **PR**: write the body to `/tmp/claude/cenci-configure-<slug>-pr-body.md` first (never a heredoc or large inline string), then:
+   ```bash
+   gh pr create --title "chore(configure): <one-line summary>" --body-file /tmp/claude/cenci-configure-<slug>-pr-body.md
+   ```
+   Body:
+   ```markdown
+   ## Summary
+   Project configuration generated/updated by `/cenci:configure`.
+
+   ## Changes
+   - <one bullet per file/section actually written this run>
+
+   ## Testing
+   N/A — configuration/tooling only, no application code changed.
+   ```
+   If `gh pr create` fails because a PR for this branch already exists (re-entry after a prior turn already created it), recover the URL with `gh pr view chore/configure-<slug> --json url -q .url` and continue. For any other failure (auth, network, validation), show the exact error and use `AskUserQuestion` ("Created, continue" / "Abort") to let the user resolve it before continuing.
+
+   Delete the PR-body temp file after a successful `gh pr create` (or a successful recovery via `gh pr view`).
+
+Report what was created and suggest next steps (e.g., "Try `/cenci:refine <ticket-id>` on a ticket"), including the PR URL from step 7. If `sandbox.enabled` is `true`, mention the generated `.cenci/Dockerfile` and that `cenci sandbox build` (run from inside the repo, after the PR merges) builds the repo's own tailored image on top of the shared base. If `lazyboards.enabled` is `true`, list the generated `.lazyboards.yml` In Review actions with their keys and serve commands (e.g., "`W` runs web-client's PR worktree with `ng serve`") and point at `docs/orchestration.md` for the board recipe. If `sandbox.baseVersion` resolved to `null` (unresolved — see the baseVersion resolution in step 5e), the chat summary must explicitly say so (e.g., "Base version could not be auto-detected — see `sandbox/README.md` to pin `BASE_VERSION` manually") rather than leaving it only as an inline Dockerfile comment, so a user who doesn't open the generated file still learns the base version wasn't pinned.
 
 ### Board lifecycle labels
 

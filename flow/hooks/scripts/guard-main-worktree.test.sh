@@ -95,14 +95,20 @@ echo "case: missing file_path is a no-op"
 run_guard "${REPO}" "{\"tool_input\":{}}"
 assert_exit "missing file_path" 0
 
-# ── Case 7: configured repo, .cenci/ path → allowlisted ─────────────
-echo "case: configured repo allows .cenci/ writes"
+# ── Case 7: configured repo, .cenci/ path → blocked (configure now ships
+# its own writes through a feature worktree + PR, so no main-worktree
+# carve-out is needed for it) ────────────────────────────────────────
+echo "case: configured repo blocks .cenci/ writes outside a worktree"
 run_guard "${REPO}" "{\"tool_input\":{\"file_path\":\"${REPO}/.cenci/Dockerfile\"}}"
-assert_exit ".cenci path" 0
+assert_exit ".cenci path" 2
 
-echo "case: configured repo allows AGENTS.md writes"
+echo "case: configured repo blocks AGENTS.md writes outside a worktree"
 run_guard "${REPO}" "{\"tool_input\":{\"file_path\":\"${REPO}/AGENTS.md\"}}"
-assert_exit "AGENTS.md path" 0
+assert_exit "AGENTS.md path" 2
+
+echo "case: configured repo allows .cenci/ writes inside a feature worktree"
+run_guard "${REPO}" "{\"tool_input\":{\"file_path\":\"${REPO}/.worktrees/configure-init/.cenci/Dockerfile\"}}"
+assert_exit ".cenci path inside worktree" 0
 
 echo "case: legacy-only configured repo remains protected"
 LEGACY_REPO="${TEST_ROOT}/legacy-configured"

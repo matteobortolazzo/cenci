@@ -7,10 +7,13 @@
 # permission rules cannot enforce this under --dangerously-skip-permissions,
 # but hooks still run.
 # Writes that legitimately live in the main worktree are allowlisted below:
-# saved plans (.plans/), cenci config (.cenci/), client adapters, design artifacts
-# (designs/, *.pen, DESIGN.md), repo meta files configure manages
-# (.gitignore, .mcp.json, AGENTS.md, CLAUDE.md), cenci-managed committed artifacts
-# (.cenci/, e.g. the sandbox Dockerfile), and temp paths.
+# saved plans (.plans/), design artifacts (designs/, *.pen, DESIGN.md — the
+# one documented exception, /cenci:design commits directly on main), and temp
+# paths. /cenci:configure writes (.cenci/, .claude/, AGENTS.md, CLAUDE.md,
+# .gitignore, .mcp.json, and everything else it generates) are NOT allowlisted
+# here — configure creates its own feature worktree and ships its changes as
+# a PR like every other skill; see flow/skills/configure/SKILL.md's "Create
+# Worktree" section.
 
 # Only enforce in repos configured for cenci. .cenci/config.json is canonical;
 # .claude/config.json remains a read-only migration signal. In unconfigured repos this
@@ -36,14 +39,8 @@ case "$FILE_PATH" in
   */.plans/* | .plans/*) exit 0 ;;
   # Temp paths: body files, context bundles, attachments, scratchpads
   /tmp/* | /private/tmp/* | /var/folders/* | */cenci-attachments-*/*) exit 0 ;;
-  # cenci-managed config, settings, rules, and lessons
-  */.claude/* | .claude/*) exit 0 ;;
   # Design artifacts live in the main worktree by design (/cenci:design)
   *.pen | */DESIGN.md | DESIGN.md | */designs/* | designs/*) exit 0 ;;
-  # Repo meta files /cenci:configure creates or appends to
-  */.gitignore | .gitignore | */.mcp.json | .mcp.json | */AGENTS.md | AGENTS.md | */CLAUDE.md | CLAUDE.md) exit 0 ;;
-  # cenci-managed artifacts committed in the main worktree (e.g. .cenci/Dockerfile)
-  */.cenci/* | .cenci/*) exit 0 ;;
 esac
 
 # Everything else is a main-worktree write → block with guidance.
@@ -63,9 +60,10 @@ esac
   echo "'git -C <worktree> ...' (never 'cd <worktree> && git ...'). Never move a stranded"
   echo "edit by hand — just re-issue the Write/Edit to the correct path."
   echo ""
-  echo "In a planning session (no feature worktree yet), only .plans/, .cenci/, client adapters, and temp"
-  echo "paths are writable — implementation writes happen in the plan-file run, after"
-  echo "approval. Outside /cenci:implement, propose the change text to the user"
-  echo "instead of writing it."
+  echo "In a planning session (no feature worktree yet), only .plans/ and temp paths are"
+  echo "writable — implementation writes happen in the plan-file run, after approval."
+  echo "Outside /cenci:implement and /cenci:configure, propose the change text to the"
+  echo "user instead of writing it. /cenci:configure creates its own feature worktree"
+  echo "before writing anything — see its 'Create Worktree' step."
 } >&2
 exit 2
