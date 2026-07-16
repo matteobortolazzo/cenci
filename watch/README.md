@@ -949,6 +949,18 @@ Codex's native `[ ! ] Action Required | project` pane title as `need-input`,
 keeps the pinned prompt label (or falls back to `project` after a daemon
 restart), and recognizes a later braille-spinner title as `running` again.
 
+`need-input` is a cenci-owned status: the window receives the configured red/dim
+foreground style and a literal `!` symbol. A red tmux background without `!` is normally
+tmux's native bell style, often triggered by Codex terminal notifications using BEL; it
+is not evidence that a cenci hook classified a question. `cenci doctor` reports the
+effective notification settings it can inspect and recommends `notification_method =
+"osc9"` when BEL overlays are unwanted, but never rewrites them.
+
+With daemon verbose logging enabled, attention transitions identify
+`permission-request`, `input-tool:<name>`, `notification:<type>`, or
+`action-required-title`. A bell with none of those records is an unclassified native
+alert owned by tmux/terminal notification behavior.
+
 ### Stale session sweep
 
 The daemon has two sweep mechanisms:

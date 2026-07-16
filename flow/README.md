@@ -46,16 +46,16 @@ Codex so it does not mistake a pipeline command for a supported workflow.
 | `testing` | Yes | Yes | TDD and test-quality conventions |
 | `verify-ui` | Yes | Yes | Playwright/Pencil visual-verification procedure; browser tooling availability is client-neutral |
 | `worktrees` | Yes | Yes | Git worktree conventions |
-| `address-review` | Yes | No | Claude interactive gates and pipeline mutations |
+| `address-review` | Yes | Yes | Client-native approval and checkpoint stages |
 | `babysit` | Yes | Yes | Thin wrapper over the client-neutral `cenci babysit` supervisor |
-| `configure` | Yes | No | Writes Claude settings and plugin configuration |
-| `design` | Yes | No | Claude interactive gates and Pencil integration |
-| `garden` | Yes | No | Claude interactive gates, worktree mutations, and GitHub PR creation |
-| `implement` | Yes | No | Claude subagents, hooks, goals, and human gates |
-| `refactor` | Yes | No | Claude analysis subagents and ticket workflow |
-| `refine` | Yes | No | Claude interactive refinement gate |
-| `review` | Yes | No | Claude specialized reviewer subagents |
-| `sync` | Yes | No | Claude command/model invocation extensions |
+| `configure` | Yes | Yes | Generates neutral core plus client adapters |
+| `design` | Yes | Yes | Optional; requires Pencil integration |
+| `garden` | Yes | Yes | Plan/apply curation workflow |
+| `implement` | Yes | Yes | Native agents, checkpoints, goals, and human gates |
+| `refactor` | Yes | Yes | Native read-heavy analysis and ticket workflow |
+| `refine` | Yes | Yes | Plan-mode refinement and normal-mode apply |
+| `review` | Yes | Yes | Native specialized reviewer agents |
+| `sync` | Yes | Yes | Client-neutral worktree synchronization |
 
 ## Prerequisites
 

@@ -156,6 +156,10 @@ func (d *Daemon) runSweep() {
 		if a.NewStatus != detect.StatusUnknown {
 			sess.Status = a.NewStatus
 			sess.TaskName = a.NewTask
+			sess.AttentionSource = a.AttentionSource
+			if d.cfg.Verbose && a.AttentionSource != "" {
+				log.Printf("attention: session=%s source=%s", a.SessionKey, a.AttentionSource)
+			}
 		}
 	}
 	if paneGone && d.reaper != nil {

@@ -9,8 +9,8 @@ and maintenance follow-ups remain in the
 
 - One installer and updater for Claude Code, Codex, or a dual-client setup
 - Docker/Podman isolation with per-repository mounts and tailored images
-- Claude Code's gated ticket-to-merged-PR workflow
-- Portable engineering convention skills and a Codex implementation recipe
+- Native Claude Code and Codex gated workflows with Plan-mode handoff and checkpoints
+- Client-neutral persistent PR babysitting
 - Native Claude Code and Codex monitoring hooks with self-bootstrapping binaries
 - tmux plus optional Linux desktop and macOS menu-bar status surfaces
 - Persisted-plan handoff, `Planned` auto-pickup, capacity/budget gates, and failure
@@ -28,7 +28,7 @@ and maintenance follow-ups remain in the
 
 ## Planned
 
-- Broader native Codex support for interactive workflow gates
+- Continued hardening of native Codex workflow gates and optional integrations
 - Additional attention surfaces where they add a maintained, testable integration
 - Further orchestration policies built on the stable label, plan-file, and dispatch
   contracts

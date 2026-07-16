@@ -46,3 +46,19 @@ func TestDaemon_MapEventToStatus(t *testing.T) {
 		})
 	}
 }
+
+func TestAttentionSourceClassification(t *testing.T) {
+	cases := []struct {
+		event ipc.HookEvent
+		want  string
+	}{
+		{ipc.HookEvent{EventType: "PermissionRequest"}, "permission-request"},
+		{ipc.HookEvent{EventType: "PreToolUse", ToolName: "request_user_input"}, "input-tool:request_user_input"},
+		{ipc.HookEvent{EventType: "Notification", NotificationType: "permission_prompt"}, "notification:permission_prompt"},
+	}
+	for _, tc := range cases {
+		if got := attentionSource(tc.event); got != tc.want {
+			t.Errorf("%#v = %q, want %q", tc.event, got, tc.want)
+		}
+	}
+}
