@@ -119,7 +119,9 @@ func Run(o Options) error {
 	}
 	_, _ = fmt.Fprintf(lock, "%d\n", os.Getpid())
 	_ = lock.Close()
-	defer os.Remove(lockPath)
+	defer func() {
+		_ = os.Remove(lockPath)
+	}()
 	s := load(path)
 	if s.Repo != "" && (s.Repo != repo || s.Agent != o.Agent) {
 		return errors.New("existing supervisor state belongs to different repository or agent")
