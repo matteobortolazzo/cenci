@@ -63,6 +63,8 @@ black-box tests in `watch/sandbox_open_test.go` plus the reap contract suite
 
 - **Host-runnable test harnesses that shell out via a mock PATH must scrub the subprocess environment.** Launch the mocked commands with `env -i HOME=... PATH=... <only the vars the test needs>=...` rather than inheriting the runner's ambient environment — otherwise host secrets (AWS keys, tokens) leak into the subprocess. Pair the scrub with a sentinel-secret regression assertion (set a fake secret only in the test's own env, then assert it never appears in captured calls or output) to prove the scrub actually excludes host secrets, not just that the test passes (#363).
 
+- **When asserting on awk-extracted regions of prose/skill-doc text, use longer load-bearing substrings tied to the actual sentence, not single keywords.** An `assert_contains "${EXTRACTED_REGION}" "keyword"` check that passes proves only that the keyword exists *somewhere* in the region — a future edit could reintroduce a conditional bypass while some unrelated sentence nearby still contains the keyword, and the assertion would silently keep passing. Instead, assert on multi-word substrings that span the actual grammatical unit you're guarding (e.g., assert on the entire conditional clause or the sentence containing the invariant-critical phrase). Pair this with: verify that test case names match the region being asserted (if a case claims "5f only runs when X", assert `assert_contains "${EXTRACTED_5F}"`, not against the Q10 region), so test logic matches its description.
+
 ## Image architecture: base + fragments
 `Dockerfile.base` builds the stack-agnostic `cenci-sandbox-base:<content-hash>` image
 (plus an `cenci-sandbox-base:latest` alias tag), where `<content-hash>` is a 12-char

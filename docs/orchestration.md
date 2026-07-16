@@ -215,8 +215,16 @@ checkout) and start the project. Action keys are single uppercase letters — ke
 combinations don't exist in lazyboards yet — so a repo with several runnable
 projects gets one key per project, assigned `W`, then `L`, then `O`, skipping the
 global keys `G`/`A`/`S`/`X` claimed above. Because a local `columns:` list replaces
-the global list (it never merges), the generated file re-lists every column as a
-bare `- name:` entry, which inherits that column's global actions and cleanup.
+the global list entirely (it never merges, and bare `- name:` entries do **not**
+inherit global actions), the generated file re-declares each column's actions
+inline instead of relying on the seeded global config: `New` gets a local `R`
+(Refine) action, `Refined` gets local `I` (Implement) and, when `pencil.enabled`
+is on, a gated `D` (Design) action, and `Planned` gets a local `I` (Implement)
+action so an already-planned ticket can still be manually re-dispatched from the
+board. `Designed` and `Implemented` are dropped from the generated file — they
+exist only in the global default board, not per-repo. When a repo has zero
+runnable projects, `In Review` skips the run action and instead re-declares the
+global `W: Checkout PR` action verbatim, so checkout keeps working either way.
 
 **`G` (jump to agent)** switches the tmux client straight to the card's live agent
 window via `{window}` — the reverse direction of the badge: the badge tells you an

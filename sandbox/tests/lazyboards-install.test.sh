@@ -323,4 +323,78 @@ assert_contains "${ROOT}/flow/skills/configure/SKILL.md" \
     "-c {pr_worktree}/'apps/web-client'"
 assert_not_contains "${ROOT}/flow/skills/configure/SKILL.md" '"cd {pr_worktree}'
 
+# --- Regressions for #406: the 5f per-repo `.lazyboards.yml` template must
+# give New/Refined/Planned explicit LOCAL actions instead of claiming bare
+# `- name:` entries "inherit" global actions (they don't — a local `columns:`
+# list replaces the global list entirely, per lazyboards' documented
+# behavior). Scoped to the 5f template region only, since "Designed" and
+# "Implemented" legitimately appear elsewhere in SKILL.md's label/lifecycle
+# tables.
+SKILL_MD="${ROOT}/flow/skills/configure/SKILL.md"
+EXTRACTED_5F="${WORK}/skill-5f-template.md"
+awk '/^5f\. \*\*Generate `\.lazyboards\.yml`\*\*/{f=1} f && /^6\. \*\*Write `\.cenci\/config\.json`\*\*/{exit} f{print}' \
+    "${SKILL_MD}" >"${EXTRACTED_5F}"
+
+# extract_column <name> — prints the lines of a single generated column's
+# block (from its `- name: <name>` line up to, but excluding, the next
+# `- name:` line), mirroring the fenced-block extraction already used above
+# for docs/orchestration.md's board config parity check.
+extract_column() {
+    local col="$1"
+    awk -v col="${col}" '
+        index($0, "- name: " col) > 0 { f=1; print; next }
+        f && index($0, "- name:") > 0 { exit }
+        f { print }
+    ' "${EXTRACTED_5F}"
+}
+
+echo "case: 5f template gives the New column a local R (Refine) action"
+NEW_COL="${WORK}/skill-5f-col-new.md"
+extract_column "New" >"${NEW_COL}"
+assert_contains "${NEW_COL}" "name: Refine"
+assert_contains "${NEW_COL}" 'command: "cenci run refine {number}"'
+
+echo "case: 5f template gives the Refined column local I (Implement) and gated D (Design) actions"
+REFINED_COL="${WORK}/skill-5f-col-refined.md"
+extract_column "Refined" >"${REFINED_COL}"
+assert_contains "${REFINED_COL}" "name: Implement"
+assert_contains "${REFINED_COL}" 'command: "cenci run implement {number}"'
+assert_contains "${REFINED_COL}" "name: Design"
+assert_contains "${REFINED_COL}" 'command: "cenci run design {number}"'
+assert_contains "${EXTRACTED_5F}" "pencil.enabled"
+
+echo "case: 5f template gives the Planned column a local I (Implement) action"
+PLANNED_COL="${WORK}/skill-5f-col-planned.md"
+extract_column "Planned" >"${PLANNED_COL}"
+assert_contains "${PLANNED_COL}" "name: Implement"
+assert_contains "${PLANNED_COL}" 'command: "cenci run implement {number}"'
+
+echo "case: 5f template keeps the global Checkout PR fallback for In Review when there are zero runnable projects"
+assert_contains "${EXTRACTED_5F}" \
+    'tmux new-window -d -n pr-{pr_number} "git fetch origin {pr_branch} && git switch {pr_branch}"'
+
+echo "case: 5f template never re-emits Designed or Implemented as generated columns"
+assert_not_contains "${EXTRACTED_5F}" "- name: Designed"
+assert_not_contains "${EXTRACTED_5F}" "- name: Implemented"
+
+echo "case: 5f template never duplicates global-only actions (G/A/S/X) into a column's local actions"
+assert_not_contains "${EXTRACTED_5F}" "name: Jump to agent"
+assert_not_contains "${EXTRACTED_5F}" "name: Annotate"
+assert_not_contains "${EXTRACTED_5F}" "name: Start dispatch loop"
+assert_not_contains "${EXTRACTED_5F}" "name: Stop dispatch loop"
+
+echo "case: the .lazyboards.yml file-exists conflict check fires unconditionally regardless of prior lazyboards.enabled state"
+assert_contains "${EXTRACTED_5F}" \
+    "**unconditionally** whenever \`.lazyboards.yml\` already exists at the repo"
+assert_contains "${EXTRACTED_5F}" \
+    "regardless of any prior \`lazyboards.enabled\` state recorded in"
+
+echo "case: 5f only runs on an in-session Yes answer to question 10, not a stale lazyboards.enabled flag"
+Q10_REGION="${WORK}/skill-q10-region.md"
+awk '/^### Board Config \(lazyboards\)$/{f=1} f && /^### Auth Verification$/{exit} f{print}' \
+    "${SKILL_MD}" >"${Q10_REGION}"
+assert_contains "${Q10_REGION}" "in this session"
+assert_contains "${EXTRACTED_5F}" "question 10 was asked and answered Yes"
+assert_contains "${EXTRACTED_5F}" "in this session"
+
 echo "passed: opt-in install, explicit update skip, checksum gate, config seeding, doctor, template parity, safe board actions"
