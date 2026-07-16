@@ -176,9 +176,14 @@ outside a git repo — see [Per-repo containers](#per-repo-containers) above), e
 container-natively at `@latest` into its own persistent `/home/dev/.local` tree on first
 launch (Claude via `@anthropic-ai/claude-code`, Codex via `@openai/codex`). It is independent
 of the host and owned by `dev`, so native self-update prompts can update it successfully.
+Package-tree mutations are serialized per volume; package lifecycle scripts remain enabled
+because Claude Code uses postinstall to place its platform-native executable.
 The first launch needs network access to npm; later launches reuse the executable without a
 recurring network/version check. Existing volumes migrate even when an old image still has a
-root-owned system binary because startup checks the user-local executable specifically.
+root-owned system binary because startup checks the user-local executable specifically. The
+launcher rebuilds an existing mutable image tag when it lacks the writable-agent lifecycle
+label; an already-running legacy container remains usable until stopped, then migrates on its
+next launch.
 
 ## First-Run Setup
 
@@ -513,7 +518,8 @@ cenci sandbox update-agent --agent codex --name qa # named Codex instance
 
 The command updates a running container in place or starts a UID-safe maintenance container
 against the stopped home volume, then prints the installed version. It builds the selected
-image first when the image does not exist. Updating the host CLI or rebuilding the sandbox
+image first when the image is missing or predates the writable-agent lifecycle. Stop a
+legacy running container before its first explicit update. Updating the host CLI or rebuilding the sandbox
 image does not update the volume's CLI.
 
 ### Update sandbox plugins

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -155,7 +156,7 @@ func (e *Engine) Launch(opts Options) error {
 	if running {
 		e.warnIfUnwired(scope.ContainerName, cenciAvailable)
 		if e.lifecycleLabel(scope.ContainerName) == "detached" {
-			if err := e.waitUntilReady(scope.ContainerName); err != nil {
+			if err := e.waitUntilReady(scope); err != nil {
 				return err
 			}
 		}
@@ -184,7 +185,7 @@ func (e *Engine) Launch(opts Options) error {
 	// The entrypoint performs credential and plugin setup before running the
 	// readiness command. Do not race the first agent against that
 	// initialization.
-	if err := e.waitUntilReady(scope.ContainerName); err != nil {
+	if err := e.waitUntilReady(scope); err != nil {
 		return err
 	}
 	return e.runAgent(scope.ContainerName, agent, agentCmdArgs, execEnvArgs, opts)
@@ -489,16 +490,52 @@ func (e *Engine) warnIfUnwired(name string, cenciAvailable bool) {
 	_, _ = fmt.Fprintf(e.Stderr, "Warning: container '%s' was created without cenci wiring; its sessions will not report to the host status bars. Run '%s stop %s' and relaunch to fix.\n", name, e.Runtime, name)
 }
 
+func (e *Engine) containerStartupState(name string) (status, exitCode string, err error) {
+	out, err := exec.Command(e.Runtime, "inspect", "--format", "{{.State.Status}} {{.State.ExitCode}}", name).Output()
+	if err != nil {
+		return "", "", err
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) < 2 {
+		return "", "", fmt.Errorf("unexpected container state %q", strings.TrimSpace(string(out)))
+	}
+	return fields[0], fields[1], nil
+}
+
+func (e *Engine) startupFailureDetail(scope Scope) string {
+	marker := exec.Command(e.Runtime, "run", "--rm", "--user", "root", "--entrypoint", "/bin/cat",
+		"-v", scope.VolumeName+":/home/dev", scope.Image, "/home/dev/.cenci-agent-startup-error")
+	if out, err := marker.Output(); err == nil && strings.TrimSpace(string(out)) != "" {
+		return strings.TrimSpace(string(out))
+	}
+	logs := exec.Command(e.Runtime, "logs", "--tail", "50", scope.ContainerName)
+	if out, err := logs.CombinedOutput(); err == nil && strings.TrimSpace(string(out)) != "" {
+		return strings.TrimSpace(string(out))
+	}
+	return "entrypoint exited before initialization completed"
+}
+
 // waitUntilReady polls for the entrypoint's /tmp/cenci-ready marker so the
-// first agent never races credential/plugin initialization.
-func (e *Engine) waitUntilReady(name string) error {
+// first agent never races credential/plugin initialization. An entrypoint
+// failure is surfaced immediately from its persistent marker or container
+// logs instead of degrading into a generic 60-second timeout.
+func (e *Engine) waitUntilReady(scope Scope) error {
 	for attempt := 0; attempt < readyPollAttempts; attempt++ {
-		if exec.Command(e.Runtime, "exec", "-u", "dev", name, "test", "-e", "/tmp/cenci-ready").Run() == nil {
+		if exec.Command(e.Runtime, "exec", "-u", "dev", scope.ContainerName, "test", "-e", "/tmp/cenci-ready").Run() == nil {
 			return nil
+		}
+		status, exitCode, err := e.containerStartupState(scope.ContainerName)
+		if err != nil && attempt < 3 {
+			time.Sleep(readyPollInterval)
+			continue
+		}
+		if err != nil || status == "exited" || status == "dead" {
+			return fmt.Errorf("container '%s' failed during startup (status %s, exit %s): %s",
+				scope.ContainerName, status, exitCode, e.startupFailureDetail(scope))
 		}
 		time.Sleep(readyPollInterval)
 	}
-	return fmt.Errorf("container '%s' did not become ready within 60 seconds.", name) //nolint:staticcheck // user-facing message ported verbatim from cenci-sand
+	return fmt.Errorf("container '%s' did not become ready within 60 seconds.", scope.ContainerName) //nolint:staticcheck // user-facing message ported verbatim from cenci-sand
 }
 
 // runAgent execs the runtime CLI in place of this process for the final

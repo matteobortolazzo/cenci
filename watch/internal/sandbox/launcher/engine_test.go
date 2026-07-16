@@ -22,7 +22,10 @@ func buildEngine(t *testing.T, inspectFails bool) (*Engine, string) {
 	}
 	body := `#!/bin/sh
 printf '%s\n' "$*" >> ` + exectest.ShellQuote(callLog) + `
-if [ "$1" = image ] && [ "$2" = inspect ]; then exit ` + inspectExit + `; fi
+if [ "$1" = image ] && [ "$2" = inspect ]; then
+  [ ` + inspectExit + ` -eq 0 ] && printf '%s\n' home-v1
+  exit ` + inspectExit + `
+fi
 exit 0
 `
 	exectest.WriteExecutable(t, filepath.Join(dir, "docker"), body)
@@ -64,7 +67,7 @@ func TestBuildMonolith_BuildsBaseFirstWhenMissing(t *testing.T) {
 	if !containsLine(calls, wantBase) {
 		t.Errorf("base build missing; calls:\n%s", strings.Join(calls, "\n"))
 	}
-	wantMonolith := "build --build-arg BASE_VERSION=abc123def456 -t cenci-sandbox:latest -f /assets/Dockerfile /assets"
+	wantMonolith := "build --build-arg BASE_VERSION=abc123def456 --label cenci.agent-cli=home-v1 -t cenci-sandbox:latest -f /assets/Dockerfile /assets"
 	if !containsLine(calls, wantMonolith) {
 		t.Errorf("monolith build argv missing %q; calls:\n%s", wantMonolith, strings.Join(calls, "\n"))
 	}
@@ -83,7 +86,7 @@ func TestBuildRepoImage_UsesRepoDockerfileContext(t *testing.T) {
 	}
 
 	calls := readCallLog(t, callLog)
-	wantRepo := "build --build-arg BASE_VERSION=abc123def456 -t cenci-sandbox-myrepo:latest -f /repo/.cenci/Dockerfile /repo/.cenci"
+	wantRepo := "build --build-arg BASE_VERSION=abc123def456 --label cenci.agent-cli=home-v1 -t cenci-sandbox-myrepo:latest -f /repo/.cenci/Dockerfile /repo/.cenci"
 	if !containsLine(calls, wantRepo) {
 		t.Errorf("repo build argv missing %q; calls:\n%s", wantRepo, strings.Join(calls, "\n"))
 	}

@@ -89,12 +89,17 @@ func joinArgv(argv []string) string {
 // responses from env vars:
 //
 //	FAKE_INSPECT_EXIT    — `image inspect` exit code (default 0 = image exists)
+//	FAKE_IMAGE_AGENT_LIFECYCLE — writable-agent image label (default home-v1)
 //	FAKE_BUILD_EXIT      — `build` exit code (default 0)
 //	FAKE_IMAGES          — `images ...` stdout
 //	FAKE_PS              — `ps ...` stdout
 //	FAKE_VOLUMES         — `volume ls` stdout
 //	FAKE_INSPECT_LABEL   — container `inspect` stdout for label lookups
 //	FAKE_INSPECT_MOUNTS  — container `inspect` stdout for mount lookups
+//	FAKE_INSPECT_STATE   — container startup state (default "running 0")
+//	FAKE_READY_EXIT      — readiness probe exit code (default 0)
+//	FAKE_AGENT_HELPER_EXIT — running-container helper probe exit (default 0)
+//	FAKE_STARTUP_ERROR   — persistent startup error marker text
 //	FAKE_ATTACH_EXIT     — exit code of the final `exec -it ...` attach
 //
 // The open path drives the extra verbs: `rm` (exit 0), `run` (prints a
@@ -107,20 +112,22 @@ func writeScriptedRuntime(t *testing.T, dir, name, callLog string) {
 	body := "#!/bin/sh\n" +
 		"printf '%s\\n' \"$*\" >> " + exectest.ShellQuote(callLog) + "\n" +
 		"case \"$1\" in\n" +
-		"image) if [ \"$2\" = inspect ]; then exit \"${FAKE_INSPECT_EXIT:-0}\"; fi ;;\n" +
+		"image) if [ \"$2\" = inspect ]; then printf '%s\\n' \"${FAKE_IMAGE_AGENT_LIFECYCLE:-home-v1}\"; exit \"${FAKE_INSPECT_EXIT:-0}\"; fi ;;\n" +
 		"build) exit \"${FAKE_BUILD_EXIT:-0}\" ;;\n" +
 		"images) printf '%s' \"${FAKE_IMAGES:-}\" ;;\n" +
 		"ps) printf '%s' \"${FAKE_PS:-}\" ;;\n" +
 		"volume) if [ \"$2\" = ls ]; then printf '%s' \"${FAKE_VOLUMES:-}\"; fi ;;\n" +
 		"rm) exit 0 ;;\n" +
-		"run) printf '%s\\n' fake-container-id ;;\n" +
+		"run) case \"$*\" in *'/bin/cat'*) printf '%s' \"${FAKE_STARTUP_ERROR:-}\"; exit \"${FAKE_STARTUP_ERROR_EXIT:-0}\" ;; esac; printf '%s\\n' fake-container-id ;;\n" +
 		"inspect)\n" +
 		"  case \"$*\" in\n" +
+		"  *State.Status*) printf '%s\\n' \"${FAKE_INSPECT_STATE:-running 0}\"; exit \"${FAKE_CONTAINER_INSPECT_EXIT:-0}\" ;;\n" +
 		"  *Labels*) printf '%s\\n' \"${FAKE_INSPECT_LABEL:-}\" ;;\n" +
 		"  *Mounts*) printf '%s' \"${FAKE_INSPECT_MOUNTS:-}\" ;;\n" +
 		"  esac\n" +
 		"  ;;\n" +
-		"exec) if [ \"$2\" = \"-it\" ]; then exit \"${FAKE_ATTACH_EXIT:-0}\"; fi; exit 0 ;;\n" +
+		"logs) printf '%s' \"${FAKE_LOGS:-}\" ;;\n" +
+		"exec) if [ \"$2\" = \"-it\" ]; then exit \"${FAKE_ATTACH_EXIT:-0}\"; fi; case \"$*\" in *'/tmp/cenci-ready'*) exit \"${FAKE_READY_EXIT:-0}\" ;; *'agent-cli.sh'*) exit \"${FAKE_AGENT_HELPER_EXIT:-0}\" ;; esac; exit 0 ;;\n" +
 		"esac\n" +
 		"exit 0\n"
 	exectest.WriteExecutable(t, filepath.Join(dir, name), body)
@@ -259,7 +266,7 @@ func TestSandboxBuild_MonolithBuildsBaseFirstWhenMissing(t *testing.T) {
 	if !anyLineContains(lines, "-t cenci-sandbox-base:"+tag) {
 		t.Errorf("expected the missing base image to be built first, got calls:\n%s", strings.Join(lines, "\n"))
 	}
-	want := "build --build-arg BASE_VERSION=" + tag + " -t cenci-sandbox:latest -f " + assets + "/Dockerfile " + assets
+	want := "build --build-arg BASE_VERSION=" + tag + " --label cenci.agent-cli=home-v1 -t cenci-sandbox:latest -f " + assets + "/Dockerfile " + assets
 	if !anyLineContains(lines, want) {
 		t.Errorf("expected monolith build call %q, got calls:\n%s", want, strings.Join(lines, "\n"))
 	}
@@ -305,7 +312,7 @@ func TestSandboxBuild_RepoImageFromRepoDockerfile(t *testing.T) {
 	}
 
 	lines := callLogLines(t, callLog)
-	want := "build --build-arg BASE_VERSION=" + tag + " -t cenci-sandbox-" + slug + ":latest -f " + repoRoot + "/.cenci/Dockerfile " + repoRoot + "/.cenci"
+	want := "build --build-arg BASE_VERSION=" + tag + " --label cenci.agent-cli=home-v1 -t cenci-sandbox-" + slug + ":latest -f " + repoRoot + "/.cenci/Dockerfile " + repoRoot + "/.cenci"
 	if !anyLineContains(lines, want) {
 		t.Errorf("expected repo-image build call %q, got calls:\n%s", want, strings.Join(lines, "\n"))
 	}
@@ -329,6 +336,24 @@ func TestSandboxBuild_AgentsFlagIsGone(t *testing.T) {
 	}
 	if lines := callLogLines(t, callLog); len(lines) > 0 {
 		t.Errorf("expected no runtime calls for removed --agents flag, got:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+func TestSandboxUpdateAgent_RebuildsLegacyImageBeforeMigration(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+
+	cmd := exec.Command(binaryPath, "sandbox", "update-agent")
+	cmd.Env = append(batchEnv(t, fakeDir, assets), "FAKE_IMAGE_AGENT_LIFECYCLE=legacy")
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandbox update-agent legacy image migration: %v\n%s", err, output)
+	}
+	lines := callLogLines(t, callLog)
+	if !anyLineContains(lines, "--label cenci.agent-cli=home-v1 -t cenci-sandbox:latest") {
+		t.Errorf("expected legacy image to rebuild with the writable-agent label; calls:\n%s", strings.Join(lines, "\n"))
 	}
 }
 
@@ -463,7 +488,7 @@ func TestSandboxUpdateAgent_RunningContainerExecsAsDev(t *testing.T) {
 	}
 
 	lines := callLogLines(t, callLog)
-	prefix := "exec -u dev claude-cenci-default /bin/bash -c "
+	prefix := "exec -u dev -e HOME=/home/dev -e NPM_CONFIG_PREFIX=/home/dev/.local claude-cenci-default /bin/bash -c "
 	line, ok := findLineWithPrefix(lines, prefix)
 	if !ok {
 		t.Fatalf("expected running-container exec [%s...], got calls:\n%s", prefix, strings.Join(lines, "\n"))
@@ -473,6 +498,29 @@ func TestSandboxUpdateAgent_RunningContainerExecsAsDev(t *testing.T) {
 	}
 	if anyLineContains(lines, "run --rm") {
 		t.Errorf("running container should not use a maintenance container; calls:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+func TestSandboxUpdateAgent_LegacyRunningContainerFailsClearly(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	cmd := exec.Command(binaryPath, "sandbox", "update-agent")
+	cmd.Env = append(batchEnv(t, fakeDir, assets),
+		"FAKE_PS=claude-cenci-default\n",
+		"FAKE_AGENT_HELPER_EXIT=1",
+	)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected legacy running container error, got %T %v\n%s", err, err, output)
+	}
+	if !strings.Contains(string(output), "predates writable agent CLI support") {
+		t.Errorf("expected clear legacy-container diagnostic, got:\n%s", output)
+	}
+	if anyLineContains(callLogLines(t, callLog), "update_agent_cli") {
+		t.Errorf("must not invoke missing helper; calls:\n%s", strings.Join(callLogLines(t, callLog), "\n"))
 	}
 }
 
@@ -534,7 +582,9 @@ func TestSandboxUpdatePluginsCodex_RunsOneShotVolumeUpdate(t *testing.T) {
 	}
 
 	lines := callLogLines(t, callLog)
-	prefix := "run --rm --entrypoint /bin/bash -e CENCI_SANDBOX_AGENT=codex -v codex-cenci-home-default:/home/dev cenci-sandbox:latest -c "
+	prefix := "run --rm --user root -e HOST_UID=" + itoa(os.Getuid()) +
+		" -e HOST_GID=" + itoa(os.Getgid()) +
+		" -e CENCI_SANDBOX_AGENT=codex -v codex-cenci-home-default:/home/dev cenci-sandbox:latest -c "
 	line, ok := findLineWithPrefix(lines, prefix)
 	if !ok {
 		t.Fatalf("expected a one-shot volume update run [%s...], got calls:\n%s", prefix, strings.Join(lines, "\n"))
@@ -974,6 +1024,33 @@ func TestOpen_FreshCreate_PinsEntrypointContract(t *testing.T) {
 		if !strings.Contains(line, want) {
 			t.Errorf("attach argv missing %q:\n%s", want, line)
 		}
+	}
+}
+
+func TestOpen_FirstInstallFailureSurfacesPersistentDiagnostic(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+	env = append(env,
+		"FAKE_READY_EXIT=1",
+		"FAKE_INSPECT_STATE=exited 1",
+		"FAKE_STARTUP_ERROR=entrypoint: selected agent CLI is unavailable; first launch requires network access to npm",
+	)
+
+	cmd := exec.Command(binaryPath, "open")
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected startup failure exit 1, got %T %v\n%s", err, err, output)
+	}
+	if !strings.Contains(string(output), "first launch requires network access to npm") {
+		t.Errorf("expected persistent first-install diagnostic, got:\n%s", output)
+	}
+	if anyLineContains(callLogLines(t, callLog), "exec -it") {
+		t.Errorf("agent attach must not run after startup failure; calls:\n%s", strings.Join(callLogLines(t, callLog), "\n"))
 	}
 }
 

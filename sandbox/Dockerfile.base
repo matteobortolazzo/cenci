@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     sudo unzip zip tar xz-utils \
     build-essential pkg-config libssl-dev \
     less vim nano jq ripgrep fd-find bat \
-    procps htop lsof \
+    procps htop lsof util-linux \
     python3 python3-pip python3-venv \
     locales \
     && rm -rf /var/lib/apt/lists/*

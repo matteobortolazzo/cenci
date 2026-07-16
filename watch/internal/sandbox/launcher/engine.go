@@ -11,6 +11,11 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/internal/sandbox"
 )
 
+const (
+	imageAgentLifecycleLabel = "cenci.agent-cli"
+	imageAgentLifecycleValue = "home-v1"
+)
+
 // Engine bundles what every launcher operation needs: the resolved container
 // runtime, the sandbox asset directory, the content-hash base tag derived
 // from it, and the stdio streams output/prompts flow through.
@@ -68,6 +73,15 @@ func (e *Engine) imageExists(image string) bool {
 	return exec.Command(e.Runtime, "image", "inspect", image).Run() == nil
 }
 
+// imageAgentLifecycleCurrent reports whether an image contains the writable
+// agent helper contract. Mutable :latest tags from older cenci releases may
+// exist locally but cannot migrate a home volume without this capability.
+func (e *Engine) imageAgentLifecycleCurrent(image string) bool {
+	out, err := exec.Command(e.Runtime, "image", "inspect", "--format",
+		`{{ index .Config.Labels "`+imageAgentLifecycleLabel+`" }}`, image).Output()
+	return err == nil && strings.TrimSpace(string(out)) == imageAgentLifecycleValue
+}
+
 // BuildBase builds the content-hash-tagged base image (plus the :latest
 // alias tag) from Dockerfile.base.
 func (e *Engine) BuildBase() error {
@@ -102,6 +116,7 @@ func (e *Engine) BuildMonolith() error {
 	}
 	_, _ = fmt.Fprintf(e.Stdout, "Building %s with %s...\n", MonolithImage, e.Runtime)
 	args := []string{"build", "--build-arg", "BASE_VERSION=" + e.BaseTag,
+		"--label", imageAgentLifecycleLabel + "=" + imageAgentLifecycleValue,
 		"-t", MonolithImage, "-f", filepath.Join(e.AssetDir, "Dockerfile"), e.AssetDir}
 	if err := e.command(args...).Run(); err != nil {
 		return fmt.Errorf("%s build %s: %w", e.Runtime, MonolithImage, err)
@@ -118,6 +133,7 @@ func (e *Engine) BuildRepoImage(repoRoot, image string) error {
 	}
 	_, _ = fmt.Fprintf(e.Stdout, "Building %s with %s...\n", image, e.Runtime)
 	args := []string{"build", "--build-arg", "BASE_VERSION=" + e.BaseTag,
+		"--label", imageAgentLifecycleLabel + "=" + imageAgentLifecycleValue,
 		"-t", image, "-f", filepath.Join(repoRoot, ".cenci", "Dockerfile"), filepath.Join(repoRoot, ".cenci")}
 	if err := e.command(args...).Run(); err != nil {
 		return fmt.Errorf("%s build %s: %w", e.Runtime, image, err)
@@ -137,7 +153,7 @@ func (e *Engine) BuildSelected(scope Scope) error {
 
 // EnsureImage builds the scope's image only when it is missing.
 func (e *Engine) EnsureImage(scope Scope) error {
-	if e.imageExists(scope.Image) {
+	if e.imageAgentLifecycleCurrent(scope.Image) {
 		return nil
 	}
 	return e.BuildSelected(scope)
@@ -158,6 +174,20 @@ func (e *Engine) containerRunning(name string) (bool, error) {
 	return false, nil
 }
 
+func (e *Engine) runningContainerHasAgentHelper(name string) bool {
+	return exec.Command(e.Runtime, "exec", "-u", "dev", name,
+		"test", "-r", "/usr/local/bin/lib/agent-cli.sh").Run() == nil
+}
+
+func (e *Engine) maintenanceRunArgs(agent string, scope Scope, command string) []string {
+	return []string{"run", "--rm", "--user", "root",
+		"-e", fmt.Sprintf("HOST_UID=%d", os.Getuid()),
+		"-e", fmt.Sprintf("HOST_GID=%d", os.Getgid()),
+		"-e", "CENCI_SANDBOX_AGENT=" + agent,
+		"-v", scope.VolumeName + ":/home/dev",
+		scope.Image, "-c", command}
+}
+
 // UpdateAgent forces the selected npm-distributed agent CLI to @latest in its
 // writable home volume, then prints the installed version. Running containers
 // update in place as dev. Stopped volumes use the regular root entrypoint so
@@ -172,8 +202,13 @@ func (e *Engine) UpdateAgent(agent string, scope Scope) error {
 		return err
 	}
 	if running {
+		if !e.runningContainerHasAgentHelper(scope.ContainerName) {
+			return fmt.Errorf("running container '%s' predates writable agent CLI support; stop it and rerun update-agent", scope.ContainerName)
+		}
 		_, _ = fmt.Fprintf(e.Stdout, "Updating %s in running '%s'...\n", agent, scope.ContainerName)
-		cmd := e.command("exec", "-u", "dev", scope.ContainerName, "/bin/bash", "-c", updateCmd)
+		cmd := e.command("exec", "-u", "dev", "-e", "HOME=/home/dev",
+			"-e", "NPM_CONFIG_PREFIX=/home/dev/.local",
+			scope.ContainerName, "/bin/bash", "-c", updateCmd)
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("%s exec %s (update-agent): %w", e.Runtime, scope.ContainerName, err)
 		}
@@ -181,12 +216,7 @@ func (e *Engine) UpdateAgent(agent string, scope Scope) error {
 	}
 
 	_, _ = fmt.Fprintf(e.Stdout, "Updating %s in volume '%s'...\n", agent, scope.VolumeName)
-	args := []string{"run", "--rm", "--user", "root",
-		"-e", fmt.Sprintf("HOST_UID=%d", os.Getuid()),
-		"-e", fmt.Sprintf("HOST_GID=%d", os.Getgid()),
-		"-e", "CENCI_SANDBOX_AGENT=" + agent,
-		"-v", scope.VolumeName + ":/home/dev",
-		scope.Image, "-c", updateCmd}
+	args := e.maintenanceRunArgs(agent, scope, updateCmd)
 	if err := e.command(args...).Run(); err != nil {
 		return fmt.Errorf("%s run (update-agent): %w", e.Runtime, err)
 	}
@@ -197,6 +227,9 @@ func (e *Engine) UpdateAgent(agent string, scope Scope) error {
 // ttl 0 (bypassing the entrypoint's 30-minute stamp) inside the running
 // container, or in a one-shot container against the home volume.
 func (e *Engine) UpdatePlugins(agent string, scope Scope) error {
+	if err := ValidateAgent(agent); err != nil {
+		return err
+	}
 	var updateCmd string
 	if agent == "codex" {
 		updateCmd = `source /usr/local/bin/lib/migrate-settings.sh && provision_codex_plugins /home/dev/.codex cenci matteobortolazzo/cenci cenci cenci-watch && update_codex_plugins /home/dev/.codex cenci 0 cenci cenci-watch`
@@ -219,10 +252,7 @@ func (e *Engine) UpdatePlugins(agent string, scope Scope) error {
 	}
 
 	_, _ = fmt.Fprintf(e.Stdout, "Updating plugins in volume '%s'...\n", scope.VolumeName)
-	args := []string{"run", "--rm", "--entrypoint", "/bin/bash",
-		"-e", "CENCI_SANDBOX_AGENT=" + agent,
-		"-v", scope.VolumeName + ":/home/dev"}
-	args = append(args, scope.Image, "-c", updateCmd)
+	args := e.maintenanceRunArgs(agent, scope, updateCmd)
 	if err := e.command(args...).Run(); err != nil {
 		return fmt.Errorf("%s run (update-plugins): %w", e.Runtime, err)
 	}

@@ -108,8 +108,11 @@ source "${SCRIPT_DIR}/lib/agent-cli.sh"
 # a root-owned /usr/local/bin copy, and existing volumes must migrate to the
 # writable package tree automatically. Once installed this is a filesystem-only
 # no-op; network is required only for first launch or `sandbox update-agent`.
+AGENT_STARTUP_ERROR=/home/dev/.cenci-agent-startup-error
+rm -f "${AGENT_STARTUP_ERROR}"
 if ! ensure_agent_cli "${CENCI_SANDBOX_AGENT:-claude}"; then
-    echo "entrypoint: selected agent CLI is unavailable; sandbox startup cannot continue" >&2
+    STARTUP_MESSAGE="entrypoint: selected agent CLI is unavailable; first launch requires network access to npm"
+    printf '%s\n' "${STARTUP_MESSAGE}" | tee "${AGENT_STARTUP_ERROR}" >&2
     exit 1
 fi
 

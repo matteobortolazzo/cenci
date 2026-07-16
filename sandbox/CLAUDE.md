@@ -79,8 +79,8 @@ maintenance container for a stopped volume. Credentials are still staged from th
 `go`, `python`, `rust`) as standalone snippets used to assemble per-project images.
 Generated images always include Node so either npm-distributed agent can install at runtime;
 the remaining fragments (including `playwright`, used for `verify-ui`'s Chromium
-screenshot capture) follow the detected project stack. Per-repo images always bake both
-agents' shared Node runtime, never the agent packages. **Invariant:** each fragment and its corresponding block in `Dockerfile` must stay
+screenshot capture) follow the detected project stack. Per-repo images include the shared
+Node runtime, never the agent packages. **Invariant:** each fragment and its corresponding block in `Dockerfile` must stay
 byte-identical — hand-duplicated on every change (e.g. bumping `DOTNET_SDK_VERSION` or adding a
 package to a stack block means editing both `Dockerfile` and `fragments/<stack>.dockerfile`
 identically).
