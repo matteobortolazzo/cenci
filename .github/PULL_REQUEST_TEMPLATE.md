@@ -16,7 +16,7 @@ type:
 - `feat!: ...` or a `BREAKING CHANGE:` footer → major bump
 - `fix:`, `refactor:`, `test:`, `docs:`, `chore:` → patch bump
 
-See the versioning table in [`CLAUDE.md`](../CLAUDE.md#versioning) for how bumps map to
+See the versioning table in [`AGENTS.md`](../AGENTS.md#versioning) for how bumps map to
 each plugin's `paths:` filter.
 
 ## Test evidence
