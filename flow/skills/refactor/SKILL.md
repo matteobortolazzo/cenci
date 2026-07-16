@@ -31,7 +31,7 @@ If `isMonorepo` is `true` in the resolved config:
 
 ### Config Existence
 
-Before any other checks, verify `.claude/config.json` exists by reading it. If the file does not exist, **stop immediately** and tell the user:
+Before any other checks, verify neutral-first config resolution succeeded. If not, **stop immediately** and tell the user:
 "cenci is not configured for this project. Run `/cenci:configure` first to set up."
 
 ### Parse Scope from `$ARGUMENTS`
@@ -61,7 +61,7 @@ Before any other checks, verify `.claude/config.json` exists by reading it. If t
    - Line count (use `wc -l` via Bash)
    - Language (infer from extension)
    - Whether it's a test file (matches common patterns: `*.test.*`, `*.spec.*`, `*_test.*`, `*_spec.*`, files in `__tests__/`, `tests/`, `test/` directories)
-3. **Read project stack info** from `.claude/config.json` — framework, testing library, language
+3. **Read project stack info** from the resolved config — framework, testing library, language
 4. **Prepare shared context string** for subagents containing:
    - File list with line counts and languages
    - Stack info (framework, testing, language)

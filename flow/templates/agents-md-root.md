@@ -10,6 +10,7 @@
 - Read the relevant `docs/` file before working in its topic area.
 - Test first; assert behavior rather than implementation details.
 - Never commit secrets, credentials, API keys, or PII.
+- Never expose PII or stack traces in user-facing errors.
 - Keep tickets well scoped: one ticket equals one pull request.
 - Use feature worktrees; never implement directly in the main worktree.
 
@@ -28,5 +29,6 @@
 <!-- IF sandbox.enabled -->
 ## Sandbox Image
 
-- `.cenci/Dockerfile` is the reviewed, repository-specific sandbox image.
+- `.cenci/Dockerfile` is the reviewed, repository-specific sandbox image. Rebuild it
+  with `cenci sandbox build` after stack or Dockerfile changes.
 <!-- END IF -->

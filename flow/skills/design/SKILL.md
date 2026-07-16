@@ -27,16 +27,16 @@ Read `project-core` and resolve neutral configuration before continuing.
 **Config check**: If neither canonical nor legacy configuration exists, **stop immediately** and tell the user:
 "cenci is not configured for this project. Run `/cenci:configure` first to set up."
 
-Read `.claude/config.json`.
+Use the config resolved by `project-core`.
 
-**Pencil gating**: Check `pencil.enabled` in `.claude/config.json`. If `pencil` is absent or `pencil.enabled` is not `true`, **stop immediately** and tell the user:
+**Pencil gating**: Check `pencil.enabled` in the resolved config. If absent or not true, **stop immediately** and tell the user:
 "Pencil design workflows are not enabled for this project. Run `/cenci:configure` and enable Pencil when prompted."
 
 Read `pencil.designPath` from the config to determine where design files belong. If the project is a monorepo with `pencil.shared: false`, determine the per-project `designPath` from the affected project's entry in the `projects` array.
 
 ## Pencil Communication Mode
 
-Read `pencil.mode` from `.claude/config.json` and store as `$PENCIL_MODE`. Default: `"editor"` if absent.
+Read `pencil.mode` from the resolved config and store as `$PENCIL_MODE`. Default: `"editor"` if absent.
 
 **Convention**: All Pencil tool calls in this skill follow `$PENCIL_MODE`:
 
@@ -380,7 +380,7 @@ Parse the output into:
 
 ### Step B: Detect framework from config
 
-Read `stack.frontend` (or per-project stack) from `.claude/config.json` to determine:
+Read `stack.frontend` (or per-project stack) from the resolved config to determine:
 - Column headers for the Components table (Angular, React, Vue, or Generic)
 - Component naming conventions (e.g., `<Name>Component` for Angular, `<Name>` for React)
 

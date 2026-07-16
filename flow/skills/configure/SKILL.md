@@ -28,9 +28,11 @@ Resolve project configuration in this order:
 3. If neither exists, set `existingConfig` to null.
 
 On migration, preserve every unknown key from `legacyConfig`; new writes go only to
-`.cenci/config.json`. If both files exist, the canonical value wins for overlapping keys,
-but merge legacy-only unknown keys into the proposed canonical object. Never rewrite or
-delete `.claude/config.json`; it is a read-only compatibility artifact.
+`.cenci/config.json`. If both files exist, recursively merge them into one
+`migrationBase` with canonical values winning, then overlay managed answers. Use
+`flow/scripts/migrate-project-core.sh <root>` to preview the exact config/guidance diff;
+rerun it with `--apply` only after approval. Never rewrite or delete
+`.claude/config.json`; it is a read-only compatibility artifact.
 
 When `existingConfig` is present, tell the user before starting questions:
 "Found existing configuration. Each question will show your current setting as the default — select it to keep it unchanged."
@@ -442,11 +444,14 @@ After gathering answers:
      `<!-- cenci:claude-only:end -->`.
    - Generate each `<project>/CLAUDE.md` as `@AGENTS.md` with the same optional block.
 
-   Before replacing any substantive existing `AGENTS.md` or `CLAUDE.md`, render and show
+   Discover root `AGENTS.md`, root `CLAUDE.md`, legacy `.claude/CLAUDE.md`, and every
+   configured project's AGENTS/CLAUDE pair. A retained `.claude/CLAUDE.md` adapter imports
+   `@../AGENTS.md`. Before replacing any substantive existing guidance, render and show
    the complete proposed diff with `git diff --no-index`, then require approval through
    `AskUserQuestion`. Preserve existing material by merging it into the shared AGENTS
    content or the explicitly Claude-only block. Never silently delete guidance. Stable
-   markers make reruns idempotent.
+   markers make reruns idempotent. Never delete a second substantive guidance file unless
+   the user explicitly approves its content having been merged into AGENTS.md.
 
 1b. **Generate `.lsp.json`** (if any LSP servers were selected in question 6):
 

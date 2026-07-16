@@ -18,6 +18,19 @@
 
 - <project-specific rules populated during configure>
 
+<!-- IF backend/API project -->
+## Security
+
+- Use parameterized queries or an ORM for database access.
+- Validate input and enforce authorization at every endpoint.
+<!-- END IF -->
+
+<!-- IF frontend project -->
+## Security
+
+- Sanitize untrusted input before rendering.
+<!-- END IF -->
+
 ## Reference Docs
 
 Repository conventions live in `<repo-root>/docs/` and are read on demand.

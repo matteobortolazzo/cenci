@@ -43,7 +43,7 @@ Never begin Phase 2 in a session that created a new plan — not in the same tur
 
 ## Optional Deep Exploration
 
-If `.claude/config.json` has `"deepExploration": true`, launch two Explore-type subagents before planner delegation:
+If the resolved config has `"deepExploration": true`, launch two Explore-type subagents before planner delegation:
 
 - Explorer 1: feature area, related components/services/patterns. Write full notes to `/tmp/claude/cenci-<ticket-id-or-slug>-explore-1.md`.
 - Explorer 2: cross-cutting concerns, shared utilities, middleware, configuration, integrations. Write full notes to `/tmp/claude/cenci-<ticket-id-or-slug>-explore-2.md`.
@@ -167,7 +167,7 @@ gh issue edit <number> --repo <owner>/<repo> --add-label "Planned" --remove-labe
 
 `Planned` means "a persisted plan exists (or has existed) on disk (`.plans/<id>-*.md`)." The planning session applied `Working` at pipeline start; this swap replaces it so the board no longer shows the ticket as actively in flight. Unlike `Working`, `Planned` is a milestone marker, not a current-stage indicator — the implement skill never removes it once set, including at the start of the plan-file implementation run (see the **Label "Working"** section of `SKILL.md`), so a stalled implementation run still shows `Planned` on the board.
 
-If `.claude/config.json` has `cenci.planComment: true`, also post the saved plan as a ticket comment for audit / off-host visibility (ticket mode only), immediately after the label swap. `.plans/` remains the executable source of truth; the comment is a convenience copy:
+If the resolved config has `cenci.planComment: true`, also post the saved plan as a ticket comment for audit / off-host visibility (ticket mode only), immediately after the label swap. `.plans/` remains the executable source of truth; the comment is a convenience copy:
 
 ```bash
 gh issue comment <number> --repo <owner>/<repo> --body-file .plans/<filename>

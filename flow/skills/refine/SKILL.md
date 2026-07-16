@@ -107,9 +107,9 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 
    If confirmed, set `isDesignTicket = true`. Design-only tickets are routed to `/cenci:design`, not `/cenci:implement`: they skip the browser question (step 8) and the `ui:visual-check` label (step 12), and receive the `Design` label in step 11. Focus the analysis (step 5) on design questions — visual direction, screens, states, design-system fit — and skip implementation-only items (API contracts, database changes, PR size).
 
-   **Design Coverage Check** (if frontend ticket AND `pencil.enabled` is `true` in `.claude/config.json`):
+   **Design Coverage Check** (if frontend ticket AND `pencil.enabled` is true in the resolved config):
 
-   a. Read `pencil.designPath` from `.claude/config.json`.
+   a. Read `pencil.designPath` from the resolved config.
    b. Use Glob to check if `.pen` files exist at the configured `designPath` (e.g., `<designPath>/**/*.pen`).
    c. Check if `<designPath>/DESIGN.md` exists. If it does, read it and evaluate coverage:
       - Are screens mapped? (Does the Screens table reference the screens relevant to this ticket?)
