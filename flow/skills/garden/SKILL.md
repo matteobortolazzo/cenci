@@ -23,10 +23,10 @@ it as a normal reviewed PR. It never silently deletes knowledge.
 
 ## Context
 
-**Config check**: Before anything else, verify `.claude/config.json` exists by reading it. If the file does not exist, **stop immediately** and tell the user:
-"cenci is not configured for this project. Run `/cenci:configure` first to set up."
+Read `project-core` and resolve neutral configuration before continuing.
 
-Read `.claude/config.json`. Note `claudeMdLocation` (defaults to `.claude/CLAUDE.md`), `isMonorepo`, and the `projects` array (when present).
+Use the config returned by `project-core`. Note `isMonorepo` and `projects`; curate shared
+critical rules in AGENTS.md.
 
 **Parse `$ARGUMENTS`:**
 - If the first token exactly matches a project `name` from the config's `projects` array, treat it as a **project filter**: garden only that project's rule sources. Everything after it is optional user context.

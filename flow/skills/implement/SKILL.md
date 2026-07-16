@@ -15,25 +15,24 @@ Read the `subagent-safety` reference skill before delegating work to subagents.
 
 ## Context
 
-**Config check**: Before anything else, verify `.claude/config.json` exists by reading it. If the file does not exist, **stop immediately** and tell the user:
-"cenci is not configured for this project. Run `/cenci:configure` first to set up."
+Read `project-core` and resolve neutral configuration before continuing.
 
-Read `.claude/config.json`.
-Read the `claudeMdLocation` field from `.claude/config.json` to determine where `CLAUDE.md` is located (defaults to `.claude/CLAUDE.md` if not set).
+Use the config returned by `project-core`. Shared guidance is `AGENTS.md`; read legacy
+`CLAUDE.md` only as additional compatibility context.
 
 > **Progressive disclosure**: Do NOT eagerly read reference docs in this Context section. The planner subagent reads relevant `docs/<topic>.md` files (and any legacy `.claude/rules/lessons-learned.md` if present) as part of its analysis. `docs/git-workflow.md` is only consulted in Phase 9 (commits/PRs). `.claude/rules/` is reserved for files explicitly `@`-imported by `CLAUDE.md`; do not assume anything lives there.
 
 ### Monorepo Context Loading
 
-If `isMonorepo` is `true` in `.claude/config.json`:
+If `isMonorepo` is `true` in the resolved config:
 
-1. **Do not read per-project CLAUDE.md files in the main agent.** The context-gatherer (see Context Gathering below) determines affected project(s) and bundles their CLAUDE.md content into the context bundle; pass it the `projects` array from config.
+1. **Do not read per-project AGENTS.md files in the main agent.** The context-gatherer determines affected projects and bundles their AGENTS.md content; pass it the `projects` array.
 2. **Use project-specific commands**: When delegating to subagents, use the affected project's `buildCommand`, `testCommand`, and `lintCommand` (when set) from config instead of inferring them globally (the digest names the affected projects).
 3. **Point subagents at context, don't paste it**: When delegating to planner/implementer, pass the bundle path (or plan file path) for project context. Tell the subagent to read relevant `docs/<topic>.md` files (and the legacy `.claude/rules/lessons-learned.md` or `.claude/rules/lessons-learned-<slug>.md` if those legacy files exist). Do not pre-read those in the main agent.
 
 ### Design Context Loading
 
-If `pencil.enabled` is `true` in `.claude/config.json`:
+If `pencil.enabled` is `true` in the resolved config:
 
 1. **Determine design path**: Read `pencil.designPath` from config. If the project is a monorepo with `pencil.shared: false`, pass all per-project `designPath` entries to the context-gatherer — it determines the affected project(s) and resolves which design path applies.
 2. **Do not read or parse DESIGN.md in the main agent.** Pass the design path to the context-gatherer (see Context Gathering below), which loads DESIGN.md, parses screen/component node IDs and design tokens, and writes them into the bundle's `## Design Context` section. The digest reports whether a design was found and the `.pen` path. Phase 4 sources `designScreenIds`, `designComponentMap`, and `designTokens` from the plan file's `## Design Context` section. Do not read the `.pen` file — subagents cannot use Pencil tools, so `.pen` content must be pre-read by the main agent only when needed (Phase 4).
@@ -118,7 +117,7 @@ Runs **after** the Pre-flight Check above — the `gh auth status` check is the 
 
 - The ticket number and `owner/repo`
 - The bundle output path: `/tmp/claude/cenci-context-<ticket-id>.md`
-- Config facts: `claudeMdLocation`, `isMonorepo` and the `projects` array (if monorepo), and the design path (if `pencil.enabled`)
+- Config facts: `isMonorepo`, `projects`, and the design path when enabled
 
 The gatherer fetches the ticket and comments, performs parent-child detection, discovers attachments, loads design and per-project context, writes the bundle file, and returns a compact digest. From the digest, store:
 
@@ -270,7 +269,7 @@ against the union of two sources:
    This list is intentionally broad. A false positive costs only the fast path — the ticket
    still gets fully planned, never wrongly judged trivial — so err toward matching.
 
-2. Any glob strings in `security.sensitivePaths` from `.claude/config.json` (already read in
+2. Any glob strings in `security.sensitivePaths` from the resolved config (already read in
    the Context section — this adds no tool call). Project entries are **additive**: they
    extend the built-in defaults and never replace or narrow them. A project that omits
    `security.sensitivePaths`, or omits the `security` block entirely, still gets the full
@@ -293,7 +292,7 @@ criterion 4 (and the bundle body already read for the two fidelity gates above).
 `Glob`, `Read`, or invoke a subagent to resolve, expand, or verify paths — this stays inside
 the section's "no subagent invocation, no codebase exploration" constraint.
 
-**Conservative fall-through on failure.** If `.claude/config.json` carries no `security`
+**Conservative fall-through on failure.** If the resolved config carries no `security`
 block, apply the defaults alone. If `security.sensitivePaths` is present but malformed or
 unreadable (not an array of strings), ignore only the configured entries and still apply the
 built-in defaults — never skip the backstop entirely. When this malformed-config fallback is
@@ -354,7 +353,7 @@ Phases 2–9 run unattended, but a turn that stops mid-phase (context limit, tra
 
 **Version + availability gate (do this once, before arming).** `/goal` requires Claude Code ≥ 2.1.139. When entering Phase 2 in plan-file mode (or via the Trivial Fast Path reaching Phase 2 with `hasPlanFile = true`):
 
-1. If `.claude/config.json` has `cenci.goalAutopilot: false`, skip the goal entirely (opt-out) and proceed exactly as today.
+1. If the resolved config has `cenci.goalAutopilot: false`, skip the goal entirely.
 2. Run `claude --version` and parse the leading semver. If it is ≥ `2.1.139`, arm the goal (below). If it is older, if the command is unavailable, or if the version cannot be parsed, **skip silently** and proceed exactly as today — print one line: `Goal autopilot unavailable (Claude Code < 2.1.139) — running without a completion guarantee.` The pipeline's behavior with no goal is unchanged from prior versions.
 
 **Arming.** Invoke the `/goal` slash command (via the `SlashCommand` tool) with a condition that references the persisted plan file so it stays consistent with the `check-pending-plans` SessionStart hook (which treats a still-present `.plans/<filename>` as "resume this"):
@@ -390,7 +389,7 @@ The detailed instructions for each phase live in `phases/`. Read only the file f
 
 ### Cost Controls
 
-Read `.claude/config.json` for optional `cenci` settings:
+Read the resolved config for optional `cenci` settings:
 
 - `cenci.compactImplementation: true` — for small, low-risk plans only, Phase 3, 4, and 5 may be handled by a single implementer delegation. The implementer must still explicitly report red test failures, green implementation, refactoring, and final build/test results. Do not use this mode for security-sensitive, data migration, auth/payment, large UI, or unclear-requirement work.
 - `cenci.reviewConcurrency: "sequential"` — run the same Phase 6 + 7 reviewers one after another instead of in parallel. Quality gates are unchanged; this only smooths usage limits. Default is `"parallel"`.

@@ -69,8 +69,8 @@ assert_exit "non-git dir" 0
 echo "case: configured repo blocks source writes"
 REPO="${TEST_ROOT}/configured"
 make_git_repo "${REPO}"
-mkdir -p "${REPO}/.claude"
-touch "${REPO}/.claude/config.json"
+mkdir -p "${REPO}/.cenci"
+touch "${REPO}/.cenci/config.json"
 run_guard "${REPO}" "{\"tool_input\":{\"file_path\":\"${REPO}/src/foo.txt\"}}"
 assert_exit "configured repo" 2
 if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
@@ -99,6 +99,18 @@ assert_exit "missing file_path" 0
 echo "case: configured repo allows .cenci/ writes"
 run_guard "${REPO}" "{\"tool_input\":{\"file_path\":\"${REPO}/.cenci/Dockerfile\"}}"
 assert_exit ".cenci path" 0
+
+echo "case: configured repo allows AGENTS.md writes"
+run_guard "${REPO}" "{\"tool_input\":{\"file_path\":\"${REPO}/AGENTS.md\"}}"
+assert_exit "AGENTS.md path" 0
+
+echo "case: legacy-only configured repo remains protected"
+LEGACY_REPO="${TEST_ROOT}/legacy-configured"
+make_git_repo "${LEGACY_REPO}"
+mkdir -p "${LEGACY_REPO}/.claude"
+touch "${LEGACY_REPO}/.claude/config.json"
+run_guard "${LEGACY_REPO}" "{\"tool_input\":{\"file_path\":\"${LEGACY_REPO}/src/foo.txt\"}}"
+assert_exit "legacy configured repo" 2
 
 # ── Case 8: non-git dir with its own .claude/config.json → no-op ────
 # Pre-fix, ROOT=$(pwd) fallback would let this directory's own config.json

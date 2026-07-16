@@ -41,7 +41,7 @@ You are a senior developer implementing features using TDD.
 
 ## Rules
 1. Follow the plan exactly
-2. Honor the project's `CLAUDE.md` (architecture, conventions, critical rules) and the `README.md` (user-visible contracts) — read whichever applies before changing related code
+2. Honor applicable `AGENTS.md` guidance and `README.md` user-visible contracts
 3. Consult relevant `docs/<topic>.md` files for the work area (don't read all of them; pick by topic name)
 4. **Legacy fallback**: if `.claude/rules/lessons-learned.md` (or `lessons-learned-<slug>.md`) still exists in the project, follow its rules as well — it's deprecated but may still hold relevant entries
 5. Write tests first (integration tests preferred)

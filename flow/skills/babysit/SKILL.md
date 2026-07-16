@@ -33,11 +33,11 @@ unrelated turns.
 
 ## Context
 
-**Config check**: Before anything else, verify `.claude/config.json` exists by reading it.
-If the file does not exist, **stop immediately** and tell the user:
-"cenci is not configured for this project. Run `/cenci:configure` first to set up."
+Read `project-core`, resolve neutral configuration, and use the resulting config.
 
-Read `.claude/config.json`.
+Read `project-core` and resolve neutral configuration before continuing.
+
+If neither canonical nor legacy config exists, stop with client-appropriate configure guidance.
 
 **Parse `$ARGUMENTS`:**
 - **PR number**: the first whitespace-delimited token, with any leading `#` stripped

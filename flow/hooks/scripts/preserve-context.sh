@@ -11,17 +11,21 @@ if test -d docs; then
   ls docs/*.md 2>/dev/null | sed 's|^|  - |'
 fi
 
-if test -f .claude/config.json; then
+if test -f .cenci/config.json; then
   echo ""
   echo "## Active Config"
-  echo "Config exists at .claude/config.json — re-read it for ticket/PR system settings."
+  echo "Config exists at .cenci/config.json — re-read it for ticket/PR system settings."
+elif test -f .claude/config.json; then
+  echo ""
+  echo "## Active Config (legacy)"
+  echo "Legacy config exists at .claude/config.json — read it for compatibility, then migrate with cenci:configure."
 fi
 
 # Backward compat: note any legacy lessons file so the agent knows to consult it.
 if test -f .claude/rules/lessons-learned.md; then
   echo ""
   echo "## Legacy Lessons File"
-  echo "A legacy .claude/rules/lessons-learned.md exists — read it on demand for the work area; new lessons go to docs/ or CLAUDE.md."
+  echo "A legacy .claude/rules/lessons-learned.md exists — read it on demand for the work area; new lessons go to docs/ or AGENTS.md."
 fi
 
 echo ""

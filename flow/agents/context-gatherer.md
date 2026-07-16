@@ -78,7 +78,7 @@ If `<designPath>/DESIGN.md` exists, read it and extract:
 
 ### 5. Project context (monorepo only)
 
-From the ticket description/task and file paths, match against the `projects` array to identify affected project(s). Read each affected project's `CLAUDE.md`.
+From the ticket description/task and file paths, match against the `projects` array to identify affected projects. Read each affected project's `AGENTS.md`.
 
 ### 6. Write the bundle file
 

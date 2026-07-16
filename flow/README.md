@@ -161,20 +161,21 @@ cenci skills (`/refine`, `/implement`, `/design`) are **interactive** — they a
 
 ```
 your-project/
-├── CLAUDE.md              # (or in .claude/ — user's choice during configure)
+├── AGENTS.md              # canonical shared project guidance
+├── CLAUDE.md              # generated @AGENTS.md adapter
 ├── .claudeignore          # Files tracked by git but excluded from Claude's context
 ├── docs/
 │   └── git-workflow.md    # On-demand reference: branching, commits, PRs
-├── .claude/
-│   ├── config.json        # cenci configuration (includes claudeMdLocation)
-│   └── settings.json      # permissions (sandbox disabled; container is the boundary)
+├── .cenci/config.json     # canonical client-neutral configuration
+├── .claude/settings.json  # Claude-specific adapter
 └── .worktrees/            # Git worktrees for feature branches (gitignored)
 ```
 
 **Where reference docs live**
 
 - `docs/<topic>.md` — on-demand reference docs read by skills/agents when their topic intersects the work. The lessons-collector also routes new topic-specific lessons here.
-- `CLAUDE.md` — always loaded. Holds critical rules and project-wide invariants.
+- `AGENTS.md` — canonical shared critical rules and project-wide invariants.
+- `CLAUDE.md` — generated import adapter with an optional Claude-only block.
 - `.claude/rules/` — reserved for files explicitly `@`-imported by `CLAUDE.md` (auto-loaded at session start). Configure does not create files here today.
 
 **Lesson lifecycle**
@@ -201,18 +202,20 @@ For monorepos, `/cenci:configure` detects projects automatically and creates a *
 
 ```
 your-project/
-├── CLAUDE.md                  # Root — projects table + critical rules (eager)
+├── AGENTS.md                  # Root — projects table + shared critical rules
+├── CLAUDE.md                  # generated @AGENTS.md adapter
 ├── .claudeignore              # Files tracked by git but excluded from Claude's context
 ├── docs/
 │   └── git-workflow.md        # On-demand reference (read by skills as needed)
 ├── packages/
 │   ├── api/
-│   │   └── CLAUDE.md          # Per-project — stack, build/test (lazy)
+│   │   ├── AGENTS.md          # Per-project — stack, build/test
+│   │   └── CLAUDE.md          # generated adapter
 │   └── web/
-│       └── CLAUDE.md          # Per-project — stack, build/test (lazy)
-├── .claude/
-│   ├── config.json            # cenci configuration (includes isMonorepo + projects)
-│   └── settings.json          # Sandbox, permissions, and allowed domains
+│       ├── AGENTS.md
+│       └── CLAUDE.md
+├── .cenci/config.json         # canonical config (includes projects)
+├── .claude/settings.json      # Claude-specific adapter
 └── .worktrees/
 ```
 

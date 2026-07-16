@@ -12,7 +12,9 @@ allowed-tools: Read, Bash, Glob, Grep, Task, AskUserQuestion
 
 ## Context
 
-Read `.claude/config.json`.
+Read `project-core` and resolve neutral configuration before continuing.
+
+Use the config returned by `project-core`.
 Read relevant `docs/<topic>.md` files for the area under review. If a legacy `.claude/rules/lessons-learned.md` exists in the project, read it as fallback.
 
 **Shell rules**: Read the `shell-rules` skill before running any `gh` commands.
