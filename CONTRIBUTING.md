@@ -46,7 +46,7 @@ Commit — and PR title, since PRs are squash-merged — using
 The **type of the commit that lands on `main`, in the paths it touches,** drives an
 automated version bump for the affected plugin(s). The mapping (derived from the
 version-bump workflows; see the
-[Versioning section in `CLAUDE.md`](./CLAUDE.md#versioning) for the per-plugin
+[Versioning section in `AGENTS.md`](./AGENTS.md#versioning) for the per-plugin
 path/tag list):
 
 | Commit prefix | Version bump | Example |
