@@ -1,6 +1,6 @@
 ---
 name: design
-description: "Claude Code-only: run interactive design reasoning and create .pen files using Pencil."
+description: "Run interactive design reasoning and create .pen files using Pencil."
 compatibility: Requires Claude Code interactive gates and the configured Pencil integration.
 argument-hint: <ticket-id | design description> [additional context]
 user-invocable: true
@@ -8,6 +8,8 @@ disable-model-invocation: true
 model: opus
 allowed-tools: Read, Write, Bash(pencil:*), Bash(gh:*), Bash(git:*), Bash(curl:*), Bash(mkdir:*), Glob, Grep, AskUserQuestion, WebFetch, mcp__pencil__get_editor_state, mcp__pencil__get_guidelines, mcp__pencil__batch_get, mcp__pencil__batch_design, mcp__pencil__get_screenshot, mcp__pencil__export_nodes, mcp__pencil__find_empty_space_on_canvas, mcp__pencil__snapshot_layout, mcp__pencil__open_document, mcp__pencil__get_variables, mcp__pencil__set_variables, mcp__pencil__replace_all_matching_properties, mcp__pencil__search_all_unique_properties
 ---
+
+> **Client dispatch**: In Codex, read `codex-runtime` and `design/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
 
 > **Interaction rule**: Every question, confirmation, or approval directed at the user — anywhere in this skill, including error recovery — MUST be asked with the `AskUserQuestion` tool. Never ask in plain text. If an instruction says "ask the user" or "confirm", that means `AskUserQuestion`.
 

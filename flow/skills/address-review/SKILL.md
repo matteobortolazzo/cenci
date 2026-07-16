@@ -1,12 +1,14 @@
 ---
 name: address-review
-description: "Claude Code-only: address PR review comments by fetching, evaluating, fixing, replying, pushing, and re-requesting review."
+description: "Address PR review comments by fetching, evaluating, fixing, replying, pushing, and re-requesting review."
 compatibility: Requires Claude Code tools, interactive gates, and cenci pipeline configuration.
 argument-hint: <pr-number> [additional context]
 disable-model-invocation: true
 user-invocable: true
 allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Task, AskUserQuestion
 ---
+
+> **Client dispatch**: In Codex, read `codex-runtime` and `address-review/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
 
 > **Interaction rule**: Every question, confirmation, or approval directed at the user — anywhere in this skill, including error recovery — MUST be asked with the `AskUserQuestion` tool. Never ask in plain text. If an instruction says "ask the user" or "confirm", that means `AskUserQuestion`.
 

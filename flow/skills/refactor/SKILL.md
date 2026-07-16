@@ -1,12 +1,14 @@
 ---
 name: refactor
-description: "Claude Code-only: analyze a codebase with specialized subagents and propose refactoring tickets."
+description: "Analyze a codebase with specialized agents and propose refactoring tickets."
 compatibility: Requires Claude Code subagents, interactive gates, and cenci project configuration.
 argument-hint: "[scope: files/dirs/glob] [additional context]"
 disable-model-invocation: true
 user-invocable: true
 allowed-tools: Read, Bash, Glob, Grep, Task, AskUserQuestion
 ---
+
+> **Client dispatch**: In Codex, read `codex-runtime` and `refactor/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
 
 > **Interaction rule**: Every question, confirmation, or approval directed at the user — anywhere in this skill, including error recovery — MUST be asked with the `AskUserQuestion` tool. Never ask in plain text. If an instruction says "ask the user" or "confirm", that means `AskUserQuestion`.
 

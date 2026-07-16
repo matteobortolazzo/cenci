@@ -92,13 +92,26 @@ func TestModelPlaceholderSubstituted(t *testing.T) {
 
 func TestUnknownAgentAndWorkflowError(t *testing.T) {
 	cfg := builtinConfig()
-	if _, err := cfg.BuildCommand("codex", "implement", "40", "", false); err == nil {
-		t.Error("expected error for unknown agent codex")
-	} else if !strings.Contains(err.Error(), "codex") {
+	if _, err := cfg.BuildCommand("other", "implement", "40", "", false); err == nil {
+		t.Error("expected error for unknown agent other")
+	} else if !strings.Contains(err.Error(), "other") {
 		t.Errorf("error should mention the agent: %v", err)
 	}
 	if _, err := cfg.BuildCommand("claude", "frobnicate", "40", "", false); err == nil {
 		t.Error("expected error for unknown workflow")
+	}
+}
+
+func TestCodexNativeWorkflowTemplates(t *testing.T) {
+	cfg := builtinConfig()
+	for _, workflow := range []string{"configure", "refine", "design", "implement", "review", "address-review", "refactor", "sync", "garden"} {
+		argv, err := cfg.BuildCommand("codex", workflow, "42", "", false)
+		if err != nil {
+			t.Fatalf("%s: %v", workflow, err)
+		}
+		if got := argv[len(argv)-1]; got != "$cenci:"+workflow+" 42" {
+			t.Errorf("%s = %q", workflow, got)
+		}
 	}
 }
 

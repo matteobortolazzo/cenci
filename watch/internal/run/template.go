@@ -55,6 +55,9 @@ func builtinConfig() FileConfig {
 	claudeWF := func(wf string) WorkflowTemplate {
 		return WorkflowTemplate{Args: []string{"--", "/cenci:" + wf + " {ticket}"}}
 	}
+	codexWF := func(wf string) WorkflowTemplate {
+		return WorkflowTemplate{Args: []string{"$cenci:" + wf + " {ticket}"}}
+	}
 	return FileConfig{
 		DefaultAgent: "claude",
 		Agents: map[string]AgentConfig{
@@ -65,6 +68,17 @@ func builtinConfig() FileConfig {
 					"refine":    claudeWF("refine"),
 					"design":    claudeWF("design"),
 					"implement": claudeWF("implement"),
+				},
+			},
+			"codex": {
+				Command:        "codex",
+				SandboxCommand: "cenci open",
+				Workflows: map[string]WorkflowTemplate{
+					"configure": codexWF("configure"), "refine": codexWF("refine"),
+					"design": codexWF("design"), "implement": codexWF("implement"),
+					"review": codexWF("review"), "address-review": codexWF("address-review"),
+					"refactor": codexWF("refactor"), "sync": codexWF("sync"),
+					"garden": codexWF("garden"),
 				},
 			},
 		},

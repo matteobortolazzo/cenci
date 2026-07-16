@@ -1,6 +1,6 @@
 ---
 name: garden
-description: "Claude Code-only: curate accumulated lessons — CLAUDE.md Critical Rules and docs/<topic>.md rule bullets — merging duplicates, demoting rules now covered by automated checks, and archiving stale ones through a reviewed PR."
+description: "Curate AGENTS.md critical rules and topic docs through a reviewed PR."
 compatibility: Requires Claude Code AskUserQuestion and cenci project configuration.
 argument-hint: [project-name] [additional context]
 user-invocable: true
@@ -8,6 +8,8 @@ disable-model-invocation: true
 model: opus
 allowed-tools: Read, Edit, Write, Grep, Glob, Bash(git:*), Bash(gh:*), Bash(cat:*), Bash(mkdir:*), Bash(mktemp:*), Bash(rm:*), AskUserQuestion
 ---
+
+> **Client dispatch**: In Codex, read `codex-runtime` and `garden/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
 
 > **Interaction rule**: Every question, confirmation, or approval directed at the user — anywhere in this skill, including error recovery — MUST be asked with the `AskUserQuestion` tool. Never ask in plain text. If an instruction says "ask the user" or "confirm", that means `AskUserQuestion`.
 
