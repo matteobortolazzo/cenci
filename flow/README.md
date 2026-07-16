@@ -19,7 +19,7 @@ scope and planning decisions human-gated.
 | `/cenci:refactor [scope]` | Analyze a codebase with specialized subagents and propose refactoring tickets |
 | `/cenci:review <pr-number \| file-paths>` | Review code with specialized security, quality, and silent-failure subagents |
 | `/cenci:address-review <pr-number>` | Address PR review comments — fetch, evaluate, fix, reply, push, re-request review |
-| `/cenci:babysit <pr-number>` | Loop-driven PR follow-through — periodically checks CI and new review comments and drives them to resolution until the PR merges or closes |
+| `/cenci:babysit <pr-number>` | Persistent PR follow-through — periodically checks CI and new review comments and drives them to resolution until the PR merges or closes |
 | `/cenci:sync` | Pull latest main, rebase active worktrees, prune stale remotes, clean up merged branches |
 | `/cenci:garden [project]` | Curate accumulated lessons — merge duplicate rules, demote rules now covered by automated checks, archive stale ones, and open a PR with the cleanup |
 
@@ -47,7 +47,7 @@ Codex so it does not mistake a pipeline command for a supported workflow.
 | `verify-ui` | Yes | Yes | Playwright/Pencil visual-verification procedure; browser tooling availability is client-neutral |
 | `worktrees` | Yes | Yes | Git worktree conventions |
 | `address-review` | Yes | No | Claude interactive gates and pipeline mutations |
-| `babysit` | Yes | No | Claude loop scheduling and slash commands |
+| `babysit` | Yes | Yes | Thin wrapper over the client-neutral `cenci babysit` supervisor |
 | `configure` | Yes | No | Writes Claude settings and plugin configuration |
 | `design` | Yes | No | Claude interactive gates and Pencil integration |
 | `garden` | Yes | No | Claude interactive gates, worktree mutations, and GitHub PR creation |
@@ -268,13 +268,13 @@ When Claude Code is **≥ 2.1.139**, the pipeline closes that gap with the nativ
 
 ### Babysitting a PR
 
-Once a PR is open, `/cenci:babysit <pr-number>` keeps it moving while you're away. It does
-one **tick** immediately, then arms a self-paced Claude Code [`/loop`](https://code.claude.com/docs/en/loop)
-that repeats the tick (~15 minutes by default; pass a second argument to change it, e.g.
-`/cenci:babysit 42 10m`). Each tick:
+Once a PR is open, `/cenci:babysit <pr-number>` or `$cenci:babysit <pr-number>` starts a
+client-neutral background supervisor. It polls without keeping an agent session open and
+launches the selected client only for actionable work. The default interval is 15 minutes;
+pass a second argument to change it (for example `42 10m`). Each tick:
 
 1. **Fetches PR state** — if the PR has **merged or closed**, it reports a final summary,
-   stops the loop, and cleans up. On **merge**, it also performs the `In Review → Implemented`
+   stops the supervisor, and cleans up. On **merge**, it also performs the `In Review → Implemented`
    board transition, relabeling every issue the PR closed (from `closingIssuesReferences`).
    A PR closed **without** merging leaves labels untouched.
 2. **Auto-fixes red CI** — diagnoses the failing checks, pushes a fix (never force-pushes),
@@ -289,15 +289,10 @@ each successive quiet tick doubles the wait (capped at 60 minutes), so a stalled
 less and less often, while any actionable tick (a CI fix or an addressed comment) resets the
 pacing back to the base interval.
 
-Each tick prefers a deterministic helper script (`skills/babysit/scripts/tick.sh`) to gather
-PR state, CI results, and mechanically-filtered candidate comments in one call, falling back
-to the equivalent raw `gh` calls if the script is unavailable or its output can't be parsed.
-
-- **Session-scoped, 7-day expiry.** The `/loop` lives as long as the Claude Code session and
-  at most 7 days. If the session ends, re-run `/cenci:babysit <pr>` to resume.
-- **Self-paced pacing needs native support.** On Bedrock / Vertex / Foundry, self-paced
-  `/loop` falls back to a fixed ~10-minute schedule, so the custom interval is best-effort
-  there.
+- **Session-independent.** State is stored under `$XDG_STATE_HOME/cenci/babysit` (or
+  `~/.local/state/cenci/babysit`) and survives the invoking Claude or Codex session.
+- **CLI control.** Use `cenci babysit <pr> --agent <claude|codex> --interval 15m`, add
+  `--once` for one foreground tick, or run `cenci babysit stop <pr>` to stop it.
 - **Human gates preserved.** The `address-review` approval, the CI-escalation question, and
   the never-force-push rule all hold — babysit automates the checking and the safe fixes,
   not the decisions.

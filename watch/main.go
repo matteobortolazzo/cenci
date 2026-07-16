@@ -60,6 +60,8 @@ Details: docs/migrating-to-cenci.md in the cenci repo.
 		runNotify(os.Args[2:])
 	case "run":
 		runRun(os.Args[2:])
+	case "babysit":
+		runBabysit(os.Args[2:])
 	case "dispatch":
 		runDispatch(os.Args[2:])
 	case "close":
@@ -99,6 +101,7 @@ Commands:
   widget-json                        machine-readable status for bar widgets (Waybar custom module protocol); "waybar" is a hidden alias
   notify                             deliver a hook event to the daemon (used by installed hooks)
   run                                dispatch a workflow into a new tmux window
+  babysit                            supervise an open PR until it merges or closes
   dispatch                           fleet auto-dispatch (enroll/unenroll/status/loop)
   close                              close a finished/idle agent window
   sandbox                            manage the sandbox container (build|build-base|prune|update-plugins|reseed-creds|reap-orphans|ls|stop)

@@ -109,8 +109,8 @@ interactive configure skill is Claude Code-only.
 plan) and then runs unattended through worktree setup, test-first implementation,
 refactoring, security/code review, and PR creation. `babysit` then follows CI and
 review comments until the PR merges, performing the final `In Review → Implemented`
-board transition. All three are Claude Code-only today; a Codex-only install still
-gets isolation, monitoring, and a documented implementation recipe.
+board transition. `babysit` is available in both clients through the persistent
+`cenci babysit` supervisor; refinement and implementation remain Claude-only today.
 
 For the deeper walkthrough — prerequisites detail, troubleshooting, standalone/recovery
 installs, and the `cenci update` maintenance path — see
@@ -150,7 +150,8 @@ treat cenci as one product.
 | Container isolation | Yes | Yes |
 | Live session monitoring and self-bootstrap | Yes | Yes |
 | Portable shell, testing, stack, worktree, and review conventions | Yes | Yes |
-| Interactive refinement, design, implementation, and PR babysitting | Yes | Not yet |
+| Interactive refinement, design, and implementation | Yes | Not yet |
+| Persistent PR babysitting | Yes | Yes |
 | Documented implementation recipe | Built in | [Available](flow/docs/codex.md) |
 
 Claude Code currently provides the full interactive ticket-to-PR workflow. Codex uses
