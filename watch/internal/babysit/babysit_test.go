@@ -1,12 +1,28 @@
 package babysit
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestGhJSONAcceptsChecksExitWithValidJSON(t *testing.T) {
+	original := command
+	command = func(string, ...string) ([]byte, error) {
+		return []byte(`[{"bucket":"fail","name":"test"}]`), errors.New("exit status 1")
+	}
+	t.Cleanup(func() { command = original })
+	var checks []check
+	if err := ghJSON(&checks, "pr", "checks", "42"); err != nil {
+		t.Fatal(err)
+	}
+	if len(checks) != 1 || checks[0].Bucket != "fail" {
+		t.Fatalf("checks=%#v", checks)
+	}
+}
 
 func withCommands(t *testing.T, responses []string, calls *[][]string) {
 	t.Helper()
@@ -55,7 +71,7 @@ func TestTickLaunchesAddressReviewForNewFeedback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if delay != 300*time.Second || s.LastCommentAt == "" || !reflect.DeepEqual(s.AddressedIDs, []int64{7}) {
+	if delay != 300*time.Second || s.PendingCommentAt == "" || !reflect.DeepEqual(s.PendingKeys, []string{"comment:7"}) {
 		t.Fatalf("unexpected state: %#v", s)
 	}
 	found := false

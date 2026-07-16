@@ -23,6 +23,7 @@ type Options struct {
 	Once                bool
 }
 type State struct {
+	SchemaVersion       int       `json:"schemaVersion"`
 	PR                  string    `json:"pr"`
 	Repo                string    `json:"repo"`
 	Agent               string    `json:"agent"`
@@ -30,8 +31,12 @@ type State struct {
 	CurrentDelaySeconds int64     `json:"currentDelaySeconds"`
 	LastHeadSHA         string    `json:"lastCiHeadSha,omitempty"`
 	FixAttempts         int       `json:"ciFixAttempts"`
+	RepairPending       bool      `json:"ciRepairPending"`
 	LastCommentAt       string    `json:"lastCommentTimestamp,omitempty"`
-	AddressedIDs        []int64   `json:"addressedCommentIds,omitempty"`
+	AddressedKeys       []string  `json:"addressedCommentKeys,omitempty"`
+	PendingKeys         []string  `json:"pendingCommentKeys,omitempty"`
+	PendingCommentAt    string    `json:"pendingCommentTimestamp,omitempty"`
+	PendingHeadSHA      string    `json:"pendingCommentHeadSha,omitempty"`
 	PID                 int       `json:"pid,omitempty"`
 	Status              string    `json:"status"`
 	UpdatedAt           time.Time `json:"updatedAt"`
@@ -85,7 +90,11 @@ func Run(o Options) error {
 		return err
 	}
 	path := statePath(dir, repo, o.PR)
+	lockPath := path + ".lock"
 	if !o.Once && os.Getenv("CENCI_BABYSIT_SUPERVISOR") == "" {
+		if owner, err := os.ReadFile(lockPath); err == nil {
+			return fmt.Errorf("supervisor already running for PR #%s (%s)", o.PR, strings.TrimSpace(string(owner)))
+		}
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			return err
 		}
@@ -101,11 +110,22 @@ func Run(o Options) error {
 		fmt.Printf("Babysitting PR #%s in the background (pid %d).\n", o.PR, cmd.Process.Pid)
 		return nil
 	}
+	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		if os.IsExist(err) {
+			return fmt.Errorf("supervisor already owns PR #%s; stop it before using --once", o.PR)
+		}
+		return err
+	}
+	_, _ = fmt.Fprintf(lock, "%d\n", os.Getpid())
+	_ = lock.Close()
+	defer os.Remove(lockPath)
 	s := load(path)
 	if s.Repo != "" && (s.Repo != repo || s.Agent != o.Agent) {
 		return errors.New("existing supervisor state belongs to different repository or agent")
 	}
 	s.PR = o.PR
+	s.SchemaVersion = 1
 	s.Repo = repo
 	s.Agent = o.Agent
 	s.IntervalSeconds = int64(o.Interval.Seconds())
@@ -122,10 +142,21 @@ func Run(o Options) error {
 			return save(path, s)
 		}
 		if err != nil {
-			s.Status = "error"
-			s.PID = 0
+			s.Status = "retrying"
+			s.CurrentDelaySeconds *= 2
+			if s.CurrentDelaySeconds < 60 {
+				s.CurrentDelaySeconds = 60
+			}
+			if s.CurrentDelaySeconds > 3600 {
+				s.CurrentDelaySeconds = 3600
+			}
 			_ = save(path, s)
-			return err
+			if o.Once {
+				s.PID = 0
+				return err
+			}
+			time.Sleep(time.Duration(s.CurrentDelaySeconds) * time.Second)
+			continue
 		}
 		if terminal {
 			_ = os.Remove(path)
@@ -163,6 +194,12 @@ func tick(s *State) (bool, time.Duration, error) {
 		return false, 0, err
 	}
 	actionable := false
+	if len(s.PendingKeys) > 0 && pr.HeadRefOID != s.PendingHeadSHA {
+		s.AddressedKeys = append(s.AddressedKeys, s.PendingKeys...)
+		s.PendingKeys = nil
+		s.LastCommentAt = s.PendingCommentAt
+		s.PendingCommentAt, s.PendingHeadSHA = "", ""
+	}
 	var failing []string
 	for _, c := range checks {
 		if c.Bucket == "fail" {
@@ -172,40 +209,43 @@ func tick(s *State) (bool, time.Duration, error) {
 	if len(failing) > 0 && pr.HeadRefOID != s.LastHeadSHA {
 		if s.FixAttempts >= fixCap {
 			s.Status = "needs-input"
-			if err := launch(s, "babysit", s.PR+" CI retry cap reached; decide whether to retry, pause, or stop"); err != nil {
+			if err := launch(s, "babysit-attention", s.PR+" CI retry cap reached; decide whether to retry, pause, or stop"); err != nil {
 				return false, 0, err
 			}
 			return false, 0, errNeedsInput
 		} else {
 			prompt := fmt.Sprintf("PR #%s (%s) has failing CI checks: %s. Diagnose, fix, test, commit, and push without force-pushing.", s.PR, pr.HeadRefName, strings.Join(failing, ", "))
-			if err := launch(s, "implement", prompt); err != nil {
+			if err := launch(s, "ci-repair", prompt); err != nil {
 				return false, 0, err
 			}
 			s.FixAttempts++
+			s.RepairPending = true
 		}
 		s.LastHeadSHA = pr.HeadRefOID
 		actionable = true
 	} else if pr.HeadRefOID != s.LastHeadSHA {
 		s.FixAttempts = 0
+		s.RepairPending = false
 		s.LastHeadSHA = pr.HeadRefOID
 	}
 	var comments []comment
 	if err := ghJSON(&comments, "api", "repos/"+s.Repo+"/pulls/"+s.PR+"/comments"); err != nil {
 		return false, 0, err
 	}
-	seen := map[int64]bool{}
-	for _, id := range s.AddressedIDs {
-		seen[id] = true
+	seen := map[string]bool{}
+	for _, key := range append(append([]string{}, s.AddressedKeys...), s.PendingKeys...) {
+		seen[key] = true
 	}
 	newest := s.LastCommentAt
-	var ids []int64
+	var keys []string
 	for _, c := range comments {
 		ts := c.UpdatedAt
 		if ts == "" {
 			ts = c.CreatedAt
 		}
-		if !seen[c.ID] && ts > s.LastCommentAt && !strings.HasSuffix(c.User.Login, "[bot]") {
-			ids = append(ids, c.ID)
+		key := "comment:" + strconv.FormatInt(c.ID, 10)
+		if !seen[key] && ts > s.LastCommentAt && !strings.HasSuffix(c.User.Login, "[bot]") {
+			keys = append(keys, key)
 			if ts > newest {
 				newest = ts
 			}
@@ -216,19 +256,21 @@ func tick(s *State) (bool, time.Duration, error) {
 		return false, 0, err
 	}
 	for _, r := range reviews {
-		if r.State == "CHANGES_REQUESTED" && !seen[r.ID] && r.SubmittedAt > s.LastCommentAt && !strings.HasSuffix(r.User.Login, "[bot]") {
-			ids = append(ids, r.ID)
+		key := "review:" + strconv.FormatInt(r.ID, 10)
+		if r.State == "CHANGES_REQUESTED" && !seen[key] && r.SubmittedAt > s.LastCommentAt && !strings.HasSuffix(r.User.Login, "[bot]") {
+			keys = append(keys, key)
 			if r.SubmittedAt > newest {
 				newest = r.SubmittedAt
 			}
 		}
 	}
-	if len(ids) > 0 {
+	if len(keys) > 0 {
 		if err := launch(s, "address-review", s.PR); err != nil {
 			return false, 0, err
 		}
-		s.AddressedIDs = append(s.AddressedIDs, ids...)
-		s.LastCommentAt = newest
+		s.PendingKeys = append(s.PendingKeys, keys...)
+		s.PendingCommentAt = newest
+		s.PendingHeadSHA = pr.HeadRefOID
 		actionable = true
 	}
 	if actionable {
@@ -252,11 +294,15 @@ func launch(s *State, workflow, arg string) error {
 }
 func ghJSON(dst any, args ...string) error {
 	out, err := command("gh", args...)
+	decodeErr := json.Unmarshal(out, dst)
+	if decodeErr == nil {
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("gh %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
 	}
-	if err = json.Unmarshal(out, dst); err != nil {
-		return fmt.Errorf("decode gh output: %w", err)
+	if decodeErr != nil {
+		return fmt.Errorf("decode gh output: %w", decodeErr)
 	}
 	return nil
 }
@@ -327,8 +373,15 @@ func Stop(pr, explicit string) error {
 	}
 	s := load(path)
 	if s.PID > 0 {
-		if proc, e := os.FindProcess(s.PID); e == nil {
-			_ = proc.Signal(syscall.SIGTERM)
+		if !processOwned(s.PID, cleanPR) {
+			return fmt.Errorf("refusing to signal pid %d: it is not the recorded cenci babysit process", s.PID)
+		}
+		proc, e := os.FindProcess(s.PID)
+		if e != nil {
+			return e
+		}
+		if e = proc.Signal(syscall.SIGTERM); e != nil {
+			return fmt.Errorf("stop pid %d: %w", s.PID, e)
 		}
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
@@ -336,4 +389,13 @@ func Stop(pr, explicit string) error {
 	}
 	fmt.Printf("Stopped babysitting PR #%s.\n", cleanPR)
 	return nil
+}
+
+func processOwned(pid int, pr string) bool {
+	b, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+	if err != nil {
+		return false
+	}
+	cmdline := strings.ReplaceAll(string(b), "\x00", " ")
+	return strings.Contains(cmdline, "babysit") && strings.Contains(cmdline, pr)
 }
