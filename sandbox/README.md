@@ -20,7 +20,8 @@ shortcut table — lives in
 
 - Docker or Podman installed on the host
 - Neither agent CLI needs to be installed on the host for container execution: first launch
-  installs the selected CLI at `@latest` into its persistent writable home (see
+  bootstraps the selected CLI at its verified official `latest` release into a host-global,
+  read-only-at-workload volume (see
   [Choosing an agent](#choosing-an-agent)). You still need each agent's **auth** on the host
   so credentials can be staged into the container.
 - Claude auth on the host when using `--agent claude` (the default) — the usual `claude`
@@ -172,18 +173,25 @@ Containers and home volumes are **namespaced by agent**, so the two never collid
 the **Claude agent** uses the `claude-cenci-` prefix; the **Codex agent** (`--agent
 codex` / `cn xt`) uses `codex-cenci-`. The rest of the name is the repo slug (or the legacy `<name>`
 outside a git repo — see [Per-repo containers](#per-repo-containers) above), e.g.
-`claude-cenci-my-project` / `claude-cenci-home-my-project`. Each agent CLI is installed
-container-natively at `@latest` into its own persistent `/home/dev/.local` tree on first
-launch (Claude via `@anthropic-ai/claude-code`, Codex via `@openai/codex`). It is independent
-of the host and owned by `dev`, so native self-update prompts can update it successfully.
-Package-tree mutations are serialized per volume; package lifecycle scripts remain enabled
-because Claude Code uses postinstall to place its platform-native executable.
-The first launch needs network access to npm; later launches reuse the executable without a
-recurring network/version check. Existing volumes migrate even when an old image still has a
-root-owned system binary because startup checks the user-local executable specifically. The
-launcher rebuilds an existing mutable image tag when it lacks the writable-agent lifecycle
-label; an already-running legacy container remains usable until stopped, then migrates on its
-next launch.
+`claude-cenci-my-project` / `claude-cenci-home-my-project`. The executable itself is shared
+across every repository and named instance on the host in `cenci-agent-cli-claude` or
+`cenci-agent-cli-codex`, mounted read-only at `/opt/cenci-agent`. Sessions invoke its absolute
+path, so an old or tampered executable in a home volume cannot shadow it.
+
+When the shared volume is absent, the launcher resolves an exact official version and SHA-512
+integrity, then installs it in a short-lived updater with no repository, home, credentials,
+API keys, host network, or container socket. Registry signatures and available npm provenance
+are verified before required postinstall code runs there. Codex provenance must identify
+`openai/codex`; Claude Code currently publishes registry signatures but no npm provenance, so
+its remaining trust boundary is the vendor's legitimate npm release authority. A malicious
+release legitimately published by a vendor cannot be prevented by package integrity alone.
+
+Updates use a volume-scoped `flock`, versioned staging, a `--version` health check, and an
+atomic `current` symlink. The previous release is retained; a failed or interrupted update
+leaves the active release untouched. Launches do no network or version check after bootstrap.
+Native update flows are disabled because workload mounts cannot modify the CLI. Explicit
+updates are global across repositories. Running containers from the older writable-home
+lifecycle must be stopped and relaunched before attachment.
 
 ## First-Run Setup
 
@@ -280,8 +288,8 @@ Everything persists in the home volume — only needs to happen once per instanc
 | Node.js | 24.x | `NODE_MAJOR` |
 | Go | 1.24.1 | `GO_VERSION` |
 | Playwright | 1.61.1 | `PLAYWRIGHT_VERSION` |
-| Codex CLI | latest in writable home | `cenci sandbox update-agent --agent codex` |
-| Claude Code CLI | latest in writable home | `cenci sandbox update-agent` |
+| Codex CLI | verified latest in shared volume | `cenci sandbox update-agent --agent codex [--version X.Y.Z]` |
+| Claude Code CLI | verified latest in shared volume | `cenci sandbox update-agent [--version X.Y.Z]` |
 | CCometixLine (ccline) | 1.1.2 | `CCLINE_VERSION` |
 | GitHub CLI | latest | — |
 | git, ripgrep, jq, curl | latest | — |
@@ -325,7 +333,7 @@ The image is built in two layers:
   behind by earlier `Dockerfile.base` changes.
 - **`Dockerfile`** → `cenci-sandbox:latest`, `FROM cenci-sandbox-base:${BASE_VERSION}`
   (default `latest`). Layers the runtime stacks on top: .NET SDK, Node.js, Playwright, and
-  Go. This is the image `cenci open` actually runs; agent CLIs live in home volumes.
+  Go. This is the image `cenci open` actually runs; agent CLIs live in shared volumes.
 
 `sandbox/fragments/*.dockerfile` holds the same composable blocks (`dotnet`, `node`,
 `playwright`, `go`, `python`, `rust`) used for per-project image composition. Each fragment and
@@ -347,8 +355,8 @@ that repo).
 
 `/cenci:configure` generates and maintains `.cenci/Dockerfile` automatically
 from the repo's detected stack (question 9) — you normally don't hand-write this file.
-Every generated image includes the Node and Codex fragments so `cenci open --agent codex`
-works in tailored images; it adds the remaining fragments required by the detected stack.
+Every generated image includes the Node fragment so the isolated updater can install either
+npm-distributed agent; it adds the remaining fragments required by the detected stack.
 The fragments are wrapped in
 `# cenci:managed-begin` / `# cenci:managed-end` markers so re-running configure
 regenerates just that block and preserves anything the team appends around it.
@@ -446,11 +454,10 @@ was created while the events socket directory was unavailable, later launches
 warn that its sessions won't report to the host status bars; stop the container
 (`docker stop <name>`) and relaunch to restore the wiring.
 
-No manual install is needed inside the container. The launcher passes the selected
-agent through the internal `CENCI_SANDBOX_AGENT` contract. Before provisioning plugins,
-the entrypoint installs that agent at `@latest` into `/home/dev/.local` only when its
-user-local executable is missing. A first-install failure stops startup with a clear
-network diagnostic; an already-installed CLI performs no network check. Claude then
+No manual install is needed inside the container. The launcher bootstraps an absent shared
+CLI volume before creating the long-lived workload and passes the selected agent through the
+internal `CENCI_SANDBOX_AGENT` contract. Updater diagnostics stream directly; failure stops
+before credentials or a workload container are involved. Claude then
 provisions `~/.claude/plugins` and Codex provisions `~/.codex` through the writable CLI.
 Both paths register the `cenci` marketplace,
 install `cenci-watch` and `cenci` when missing, and refresh them on a 30-minute
@@ -507,20 +514,19 @@ images](#per-repo-images)) so it doesn't keep running the stale base.
 
 ### Update an agent CLI
 
-Native Claude Code and Codex update prompts remain enabled and can now succeed because the
-active package tree belongs to `dev`. To force an update explicitly, run:
+Workload mounts are read-only, so native Claude Code and Codex update checks are suppressed.
+Update the host-global agent volume explicitly:
 
 ```bash
-cenci sandbox update-agent                         # Claude, default instance
-cenci sandbox update-agent --agent codex           # Codex
-cenci sandbox update-agent --agent codex --name qa # named Codex instance
+cenci sandbox update-agent                              # Claude, official latest
+cenci sandbox update-agent --agent codex                # Codex, official latest
+cenci sandbox update-agent --agent codex --version 1.2.3 # exact rollback/rollout
 ```
 
-The command updates a running container in place or starts a UID-safe maintenance container
-against the stopped home volume, then prints the installed version. It builds the selected
-image first when the image is missing or predates the writable-agent lifecycle. Stop a
-legacy running container before its first explicit update. Updating the host CLI or rebuilding the sandbox
-image does not update the volume's CLI.
+`--version` accepts only an exact semantic version; ranges and tags are rejected. The command
+uses the same isolated verification and atomic activation path as bootstrap. It is global:
+new and existing sessions in every repository see the activated version through their shared
+read-only mount. Updating the cenci binary or rebuilding an image does not update either CLI.
 
 ### Update sandbox plugins
 
@@ -549,15 +555,16 @@ cenci sandbox prune
 
 removes superseded base image tags, dangling images, and stopped sandbox containers —
 it keeps the current base tag, `cenci-sandbox-base:latest`, and all per-repo images
-untouched. To also list `*-cenci-home-*` volumes and interactively confirm their
-removal:
+untouched. To also list credential-bearing `*-cenci-home-*` volumes and non-credential
+`cenci-agent-cli-*` volumes, clearly separated, and interactively confirm their removal:
 
 ```bash
 cenci sandbox prune --volumes
 ```
 
 Volume deletion defaults to **no** because home volumes hold copied credentials and
-your full session history. `--volumes` only means something combined with `prune`; on
+your full session history. Shared CLI volumes hold no credentials, but deleting one makes the
+next launch bootstrap it again. `--volumes` only means something combined with `prune`; on
 its own it errors instead of silently doing nothing.
 
 ### Reap orphaned agent processes
@@ -644,9 +651,9 @@ fix, run `chown -R $(id -u):$(id -g) ~/Repos` on the host — see
 [Limitations](#limitations).
 
 **`claude` or `codex` not found inside the container**
-The selected CLI is installed into `/home/dev/.local` on first launch. Check the startup
-diagnostic for npm/network errors, restore network access, and relaunch. To repair or refresh
-an existing volume explicitly, run `cenci sandbox update-agent --agent claude|codex`.
+The selected CLI is executed from `/opt/cenci-agent/current`. Check bootstrap diagnostics for
+registry, signature, provenance, or network errors. To repair or refresh the shared global
+volume, run `cenci sandbox update-agent --agent claude|codex`.
 
 **Container runtime**
 The launcher auto-detects `podman` first, then falls back to `docker`.

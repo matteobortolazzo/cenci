@@ -13,7 +13,7 @@ import (
 
 const (
 	imageAgentLifecycleLabel = "cenci.agent-cli"
-	imageAgentLifecycleValue = "home-v1"
+	imageAgentLifecycleValue = "shared-v2"
 )
 
 // Engine bundles what every launcher operation needs: the resolved container
@@ -67,19 +67,35 @@ func (e *Engine) command(args ...string) *exec.Cmd {
 	return cmd
 }
 
-// imageExists reports whether the runtime knows the image, quietly (`image
-// inspect` output discarded, matching cenci-sand's &>/dev/null probes).
-func (e *Engine) imageExists(image string) bool {
-	return exec.Command(e.Runtime, "image", "inspect", image).Run() == nil
+// imageExists reports whether the runtime lists the exact image. A successful
+// empty listing means missing; a listing failure remains an infrastructure
+// error instead of being collapsed into "missing".
+func (e *Engine) imageExists(image string) (bool, error) {
+	out, err := exec.Command(e.Runtime, "images", "--format", "{{.Repository}}:{{.Tag}}", image).Output()
+	if err != nil {
+		return false, fmt.Errorf("%s images: %w", e.Runtime, err)
+	}
+	for _, line := range splitLines(string(out)) {
+		if line == image {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
-// imageAgentLifecycleCurrent reports whether an image contains the writable
-// agent helper contract. Mutable :latest tags from older cenci releases may
-// exist locally but cannot migrate a home volume without this capability.
-func (e *Engine) imageAgentLifecycleCurrent(image string) bool {
+// imageAgentLifecycleCurrent reports whether an image contains the shared-v2
+// agent helper contract. Mutable :latest tags from older releases are rebuilt.
+func (e *Engine) imageAgentLifecycleCurrent(image string) (bool, error) {
+	exists, err := e.imageExists(image)
+	if err != nil || !exists {
+		return false, err
+	}
 	out, err := exec.Command(e.Runtime, "image", "inspect", "--format",
 		`{{ index .Config.Labels "`+imageAgentLifecycleLabel+`" }}`, image).Output()
-	return err == nil && strings.TrimSpace(string(out)) == imageAgentLifecycleValue
+	if err != nil {
+		return false, fmt.Errorf("%s image inspect %s: %w", e.Runtime, image, err)
+	}
+	return strings.TrimSpace(string(out)) == imageAgentLifecycleValue, nil
 }
 
 // BuildBase builds the content-hash-tagged base image (plus the :latest
@@ -101,7 +117,11 @@ func (e *Engine) BuildBase() error {
 // ensureBaseImage builds the base image only when the current content-hash
 // tag is missing.
 func (e *Engine) ensureBaseImage() error {
-	if e.imageExists(e.BaseImage()) {
+	exists, err := e.imageExists(e.BaseImage())
+	if err != nil {
+		return err
+	}
+	if exists {
 		return nil
 	}
 	return e.BuildBase()
@@ -153,7 +173,11 @@ func (e *Engine) BuildSelected(scope Scope) error {
 
 // EnsureImage builds the scope's image only when it is missing.
 func (e *Engine) EnsureImage(scope Scope) error {
-	if e.imageAgentLifecycleCurrent(scope.Image) {
+	current, err := e.imageAgentLifecycleCurrent(scope.Image)
+	if err != nil {
+		return err
+	}
+	if current {
 		return nil
 	}
 	return e.BuildSelected(scope)
@@ -174,51 +198,72 @@ func (e *Engine) containerRunning(name string) (bool, error) {
 	return false, nil
 }
 
-func (e *Engine) runningContainerHasAgentHelper(name string) bool {
-	return exec.Command(e.Runtime, "exec", "-u", "dev", name,
-		"test", "-r", "/usr/local/bin/lib/agent-cli.sh").Run() == nil
+func (e *Engine) volumeExists(name string) (bool, error) {
+	out, err := exec.Command(e.Runtime, "volume", "ls", "--format", "{{.Name}}").Output()
+	if err != nil {
+		return false, fmt.Errorf("%s volume ls: %w", e.Runtime, err)
+	}
+	for _, line := range splitLines(string(out)) {
+		if line == name {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
+func (e *Engine) agentUpdateRunArgs(agent, version, image string) []string {
+	args := []string{"run", "--rm", "--user", "root", "--entrypoint", "/bin/bash",
+		"-v", AgentCLIVolumeName(agent) + ":/opt/cenci-agent",
+		image, "/usr/local/bin/lib/agent-cli.sh", "update", agent}
+	if version != "" {
+		args = append(args, version)
+	}
+	return args
+}
+
+// maintenanceRunArgs is retained for plugin maintenance, which legitimately
+// needs the credential-bearing home volume. Agent CLI updates never use it.
 func (e *Engine) maintenanceRunArgs(agent string, scope Scope, command string) []string {
 	return []string{"run", "--rm", "--user", "root",
 		"-e", fmt.Sprintf("HOST_UID=%d", os.Getuid()),
 		"-e", fmt.Sprintf("HOST_GID=%d", os.Getgid()),
 		"-e", "CENCI_SANDBOX_AGENT=" + agent,
+		"-e", "CENCI_AGENT_CLI=/opt/cenci-agent/current/node_modules/.bin/" + agent,
 		"-v", scope.VolumeName + ":/home/dev",
+		"-v", AgentCLIVolumeName(agent) + ":/opt/cenci-agent:ro",
 		scope.Image, "-c", command}
 }
 
-// UpdateAgent forces the selected npm-distributed agent CLI to @latest in its
-// writable home volume, then prints the installed version. Running containers
-// update in place as dev. Stopped volumes use the regular root entrypoint so
-// its host UID/GID remap runs before the maintenance command drops to dev.
-func (e *Engine) UpdateAgent(agent string, scope Scope) error {
+// UpdateAgent updates the host-global agent volume in a short-lived container
+// that receives no home/workspace/credential/socket mounts or secret env.
+func (e *Engine) UpdateAgent(agent, version, image string) error {
 	if err := ValidateAgent(agent); err != nil {
 		return err
 	}
-	updateCmd := "source /usr/local/bin/lib/agent-cli.sh && update_agent_cli " + agent
-	running, err := e.containerRunning(scope.ContainerName)
+	_, _ = fmt.Fprintf(e.Stdout, "Updating %s in shared volume '%s'...\n", agent, AgentCLIVolumeName(agent))
+	args := e.agentUpdateRunArgs(agent, version, image)
+	if err := e.command(args...).Run(); err != nil {
+		return fmt.Errorf("%s isolated agent updater failed: %w", e.Runtime, err)
+	}
+	return nil
+}
+
+// EnsureAgentVolume bootstraps only a genuinely absent shared volume. Existing
+// volumes are trusted without any launch-time network or version probe.
+func (e *Engine) EnsureAgentVolume(agent, image string) error {
+	name := AgentCLIVolumeName(agent)
+	exists, err := e.volumeExists(name)
 	if err != nil {
 		return err
 	}
-	if running {
-		if !e.runningContainerHasAgentHelper(scope.ContainerName) {
-			return fmt.Errorf("running container '%s' predates writable agent CLI support; stop it and rerun update-agent", scope.ContainerName)
-		}
-		_, _ = fmt.Fprintf(e.Stdout, "Updating %s in running '%s'...\n", agent, scope.ContainerName)
-		cmd := e.command("exec", "-u", "dev", "-e", "HOME=/home/dev",
-			"-e", "NPM_CONFIG_PREFIX=/home/dev/.local",
-			scope.ContainerName, "/bin/bash", "-c", updateCmd)
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("%s exec %s (update-agent): %w", e.Runtime, scope.ContainerName, err)
-		}
+	if exists {
 		return nil
 	}
-
-	_, _ = fmt.Fprintf(e.Stdout, "Updating %s in volume '%s'...\n", agent, scope.VolumeName)
-	args := e.maintenanceRunArgs(agent, scope, updateCmd)
-	if err := e.command(args...).Run(); err != nil {
-		return fmt.Errorf("%s run (update-agent): %w", e.Runtime, err)
+	if err := e.UpdateAgent(agent, "", image); err != nil {
+		// The mount created an empty volume. Remove it so the next launch retries
+		// bootstrap instead of mistaking a failed install for an existing CLI.
+		_ = e.command("volume", "rm", name).Run()
+		return err
 	}
 	return nil
 }

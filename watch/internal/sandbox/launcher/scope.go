@@ -30,6 +30,12 @@ type Scope struct {
 	RepoRoot string
 }
 
+// AgentCLIVolumeName is the host-global, per-agent CLI volume. It is
+// deliberately independent of repositories and named sandbox instances.
+func AgentCLIVolumeName(agent string) string {
+	return "cenci-agent-cli-" + agent
+}
+
 // workspaceContainer is the container-side workspace mount point.
 const workspaceContainer = "/workspace"
 

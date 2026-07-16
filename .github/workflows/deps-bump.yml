@@ -4,9 +4,9 @@ name: sandbox — Deps Bump
 # (Go, uv, .NET SDK, Node major). Each outdated dependency gets its OWN
 # PR; merge behavior depends on the dependency's breaking-change risk:
 #
-# - The agent CLIs (Codex, Claude Code) are NOT image dependencies — first
-#   launch installs @latest into the persistent writable home, and explicit
-#   `cenci sandbox update-agent` refreshes it, so there is no version ARG.
+# - The agent CLIs (Codex, Claude Code) are NOT image dependencies — verified
+#   bootstrap and explicit updates target host-global shared CLI volumes, so
+#   there is no image ARG.
 # - Go, uv: auto-merged (`gh pr merge --auto`), then the sandbox
 #   image bump is dispatched once the merge actually lands.
 # - .NET SDK (DOTNET_SDK_VERSION): an in-band patch bump (same major.minor) is
@@ -138,10 +138,9 @@ jobs:
           }
 
           # ── Codex CLI + Claude Code CLI ────────────────────────────────
-          # Not pinned or bumped here: agent CLIs are installed at @latest into
-          # the selected agent's persistent writable home on first launch, then
-          # updated by native prompts or `cenci sandbox update-agent`. They are
-          # not image layers, so there is no version ARG to track here.
+          # Not pinned or bumped here: agent CLIs bootstrap and update in their
+          # host-global volumes through `cenci sandbox update-agent`. They are not
+          # image layers, so there is no version ARG to track here.
 
           # ── Go (monolith Dockerfile + go fragment, kept byte-identical) ──
           refresh_main

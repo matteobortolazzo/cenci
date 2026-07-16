@@ -55,6 +55,7 @@ echo "case: fresh config.toml"
 assert_grep "creates [tui] table"      "${CONFIG}" '^\[tui\]$'
 assert_grep "sets status_line"         "${CONFIG}" '^status_line = \['
 assert_grep "includes context usage"   "${CONFIG}" 'context-usage'
+assert_grep "disables native update checks" "${CONFIG}" '^check_for_update_on_startup = false$'
 
 # ── Case 2: existing config without [tui] → block appended ───────
 CONFIG="${TMPDIR_TEST}/existing.toml"
@@ -65,6 +66,7 @@ assert_grep "preserves user keys"      "${CONFIG}" '^model = "gpt-5.1-codex"$'
 assert_grep "preserves other tables"   "${CONFIG}" '^\[mcp_servers.context7\]$'
 assert_grep "appends [tui] table"      "${CONFIG}" '^\[tui\]$'
 assert_grep "appends status_line"      "${CONFIG}" '^status_line = \['
+assert_grep "adds update suppression"  "${CONFIG}" '^check_for_update_on_startup = false$'
 
 # ── Case 3: existing [tui] table → left untouched ─────────────────
 # Appending a second [tui] table would be invalid TOML, and a present table
@@ -75,6 +77,7 @@ seed_codex_config "${CONFIG}"
 echo "case: existing [tui] table untouched"
 assert_grep "preserves user tui keys"  "${CONFIG}" '^notifications = true$'
 assert_not_grep "does not add status_line" "${CONFIG}" 'status_line'
+assert_grep "still adds update suppression" "${CONFIG}" '^check_for_update_on_startup = false$'
 if [[ "$(grep -c '^\[tui\]$' "${CONFIG}")" -eq 1 ]]; then
     pass
 else
@@ -88,7 +91,15 @@ seed_codex_config "${CONFIG}"
 echo "case: existing status_line untouched"
 assert_grep "keeps user status_line"   "${CONFIG}" '^status_line = \["model"\]$'
 
-# ── Case 5: idempotency ───────────────────────────────────────────
+# ── Case 5: an existing enabled check is forced off ──────────────
+CONFIG="${TMPDIR_TEST}/updates-enabled.toml"
+printf 'check_for_update_on_startup = true\n' > "${CONFIG}"
+seed_codex_config "${CONFIG}"
+echo "case: enabled native update check is disabled"
+assert_grep "forces update check off" "${CONFIG}" '^check_for_update_on_startup = false$'
+assert_not_grep "removes enabled value" "${CONFIG}" 'check_for_update_on_startup = true'
+
+# ── Case 6: idempotency ───────────────────────────────────────────
 CONFIG="${TMPDIR_TEST}/idempotent/config.toml"
 seed_codex_config "${CONFIG}"
 ONCE="$(cat "${CONFIG}")"

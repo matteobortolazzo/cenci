@@ -99,23 +99,6 @@ source "${SCRIPT_DIR}/lib/codex-config.sh"
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/seed-auth.sh
 source "${SCRIPT_DIR}/lib/seed-auth.sh"
-# shellcheck source-path=SCRIPTDIR
-# shellcheck source=lib/agent-cli.sh
-source "${SCRIPT_DIR}/lib/agent-cli.sh"
-
-# ── Install the selected agent into the persistent writable home ─────
-# Check the exact user-local executable, not PATH: old images may still carry
-# a root-owned /usr/local/bin copy, and existing volumes must migrate to the
-# writable package tree automatically. Once installed this is a filesystem-only
-# no-op; network is required only for first launch or `sandbox update-agent`.
-AGENT_STARTUP_ERROR=/home/dev/.cenci-agent-startup-error
-rm -f "${AGENT_STARTUP_ERROR}"
-if ! ensure_agent_cli "${CENCI_SANDBOX_AGENT:-claude}"; then
-    STARTUP_MESSAGE="entrypoint: selected agent CLI is unavailable; first launch requires network access to npm"
-    printf '%s\n' "${STARTUP_MESSAGE}" | tee "${AGENT_STARTUP_ERROR}" >&2
-    exit 1
-fi
-
 if [[ -L /home/dev/.claude ]]; then
     rm -f /home/dev/.claude
 fi

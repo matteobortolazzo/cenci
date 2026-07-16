@@ -353,7 +353,7 @@ Include the server in `.lsp.json` regardless — it activates once the binary is
    - Options: "Yes — generate `.cenci/Dockerfile`", "No — skip"
    - Default: Yes
 
-   **Mandatory agent runtime**: Always include `node.dockerfile`, regardless of the detected project stack. Claude Code and Codex are npm-distributed launchers installed at first launch into the agent's persistent writable `/home/dev/.local` tree, so generated images need Node.js but must not bake either agent CLI.
+   **Mandatory agent runtime**: Always include `node.dockerfile`, regardless of the detected project stack. Claude Code and Codex are npm-distributed launchers installed by the isolated shared-volume updater, so generated images need Node.js but must not bake either agent CLI.
 
    **Stack-to-fragment mapping**: In addition to the mandatory Node runtime fragment, use the detected stack from question 1 (or, for monorepos, the union of every `projects[].stack.framework` value) to select which `sandbox/fragments/*.dockerfile` blocks to include:
 

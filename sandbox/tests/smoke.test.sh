@@ -150,27 +150,74 @@ else
     fail "monolith or configured per-repo image contains a baked agent CLI, or the repo image lacks Node"
 fi
 
-echo "case: both agents install into writable user-local home volumes"
+echo "case: both agents install into isolated shared CLI volumes"
 SMOKE_VOLUME_PREFIX="cenci-agent-cli-smoke-$$"
 SMOKE_AGENT_VOLUMES=("${SMOKE_VOLUME_PREFIX}-claude" "${SMOKE_VOLUME_PREFIX}-codex")
+REMAP_TMP=""
+cleanup_smoke() {
+    "${RUNTIME}" volume rm "${SMOKE_AGENT_VOLUMES[@]}" >/dev/null 2>&1 || true
+    [[ -z "${REMAP_TMP}" ]] || rm -rf "${REMAP_TMP}"
+}
+trap cleanup_smoke EXIT
 AGENT_INSTALL_OK=1
 for agent in claude codex; do
     volume="${SMOKE_VOLUME_PREFIX}-${agent}"
-    if ! "${RUNTIME}" run --rm --entrypoint /bin/bash \
-        -e "HOME=/home/dev" -e "NPM_CONFIG_PREFIX=/home/dev/.local" \
-        -v "${volume}:/home/dev" cenci-sandbox:latest -c \
-        "source /usr/local/bin/lib/agent-cli.sh \
-            && ensure_agent_cli ${agent} \
-            && test -x /home/dev/.local/bin/${agent} \
-            && test \"\$(stat -c %u /home/dev/.local/bin/${agent})\" = \"\$(id -u)\" \
-            && /home/dev/.local/bin/${agent} --version"; then
+    if ! run_with_timeout "${RUNTIME}" run --rm --user root --entrypoint /bin/bash \
+        -v "${volume}:/opt/cenci-agent" cenci-sandbox:latest \
+        /usr/local/bin/lib/agent-cli.sh update "${agent}" \
+        || ! run_with_timeout "${RUNTIME}" run --rm --entrypoint /bin/bash \
+        -v "${volume}:/opt/cenci-agent:ro" cenci-sandbox:latest -c \
+        "test -x /opt/cenci-agent/current/node_modules/.bin/${agent} \
+            && /opt/cenci-agent/current/node_modules/.bin/${agent} --version"; then
         AGENT_INSTALL_OK=0
     fi
 done
 if [[ "${AGENT_INSTALL_OK}" -eq 1 ]]; then
     pass
 else
-    fail "Claude Code or Codex did not install as dev under /home/dev/.local"
+    fail "Claude Code or Codex did not install and execute from a shared volume"
+fi
+
+echo "case: two images see the same CLI and workload writes fail"
+SHARED_VOLUME="${SMOKE_VOLUME_PREFIX}-codex"
+MONOLITH_VERSION="$(run_with_timeout "${RUNTIME}" run --rm --entrypoint /bin/bash \
+    -v "${SHARED_VOLUME}:/opt/cenci-agent:ro" cenci-sandbox:latest \
+    -c 'cat /opt/cenci-agent/current/VERSION')"
+REPO_VERSION="$(run_with_timeout "${RUNTIME}" run --rm --entrypoint /bin/bash \
+    -v "${SHARED_VOLUME}:/opt/cenci-agent:ro" cenci-sandbox-smoke-repo:latest \
+    -c 'cat /opt/cenci-agent/current/VERSION')"
+if [[ -n "${MONOLITH_VERSION}" && "${MONOLITH_VERSION}" == "${REPO_VERSION}" ]] \
+    && ! run_with_timeout "${RUNTIME}" run --rm --entrypoint /bin/bash \
+        -v "${SHARED_VOLUME}:/opt/cenci-agent:ro" cenci-sandbox:latest \
+        -c 'touch /opt/cenci-agent/current/tamper'; then
+    pass
+else
+    fail "shared CLI differed between images or its workload mount was writable"
+fi
+
+echo "case: update atomically changes current and a failed update retains it"
+BEFORE_TARGET="$(run_with_timeout "${RUNTIME}" run --rm --entrypoint /bin/bash \
+    -v "${SHARED_VOLUME}:/opt/cenci-agent:ro" cenci-sandbox:latest \
+    -c 'readlink /opt/cenci-agent/current')"
+if run_with_timeout "${RUNTIME}" run --rm --user root --entrypoint /bin/bash \
+    -v "${SHARED_VOLUME}:/opt/cenci-agent" cenci-sandbox:latest \
+    /usr/local/bin/lib/agent-cli.sh update codex "${MONOLITH_VERSION}"; then
+    AFTER_TARGET="$(run_with_timeout "${RUNTIME}" run --rm --entrypoint /bin/bash \
+        -v "${SHARED_VOLUME}:/opt/cenci-agent:ro" cenci-sandbox:latest \
+        -c 'readlink /opt/cenci-agent/current')"
+    if [[ "${AFTER_TARGET}" != "${BEFORE_TARGET}" ]] \
+        && ! run_with_timeout "${RUNTIME}" run --rm --user root --entrypoint /bin/bash \
+            -v "${SHARED_VOLUME}:/opt/cenci-agent" cenci-sandbox:latest \
+            /usr/local/bin/lib/agent-cli.sh update codex 999999.0.0 \
+        && [[ "$(run_with_timeout "${RUNTIME}" run --rm --entrypoint /bin/bash \
+            -v "${SHARED_VOLUME}:/opt/cenci-agent:ro" cenci-sandbox:latest \
+            -c 'readlink /opt/cenci-agent/current')" == "${AFTER_TARGET}" ]]; then
+        pass
+    else
+        fail "atomic update or failed-update rollback contract did not hold"
+    fi
+else
+    fail "same-version atomic update failed"
 fi
 
 # Regression guard for the libicu74 FailFast bug: if it regresses,
@@ -241,7 +288,6 @@ chmod +x "${SMOKE_NPM_FAKE}"
 # The synthetic remap UID (1234) intentionally differs from the test runner's
 # real UID, unlike production where HOST_UID owns the bind-mount root.
 chmod 0777 "${REMAP_TMP}"
-trap '"${RUNTIME}" volume rm "${SMOKE_AGENT_VOLUMES[@]}" >/dev/null 2>&1 || true; rm -rf "${REMAP_TMP}"' EXIT
 REMAP_OUT="$(run_with_timeout "${RUNTIME}" run --rm --user root \
     -e HOST_UID=1234 -e HOST_GID=1234 -e WORKSPACE_SCOPE=repo \
     -v "${REMAP_TMP}:/workspace" \

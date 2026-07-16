@@ -91,7 +91,7 @@ func currentScope(verb, agent, instanceName string) launcher.Scope {
 // build the image the current directory selects (the repo's own image when
 // .cenci/Dockerfile opts in, otherwise the shared monolith), building the base
 // first if its content-hash tag is missing. Agent CLIs are runtime-managed in
-// writable home volumes and are not selected as image build inputs. The
+// shared runtime volumes and are not selected as image build inputs. The
 // agent passed to ComputeScope is irrelevant — image selection depends only on
 // the repo, never on the agent-namespaced container/volume names.
 func runSandboxBuild(args []string) {
@@ -107,13 +107,11 @@ func runSandboxBuild(args []string) {
 }
 
 // runSandboxUpdateAgent implements `cenci sandbox update-agent [--agent
-// claude|codex] [--name N]`: force the selected user-local CLI to @latest in a
-// running container or through a UID-safe maintenance container for its home
-// volume, then print the installed version.
+// claude|codex] [--version exact-semver]` for the host-global agent volume.
 func runSandboxUpdateAgent(args []string) {
 	fs := flag.NewFlagSet("sandbox update-agent", flag.ExitOnError)
 	agent := fs.String("agent", "claude", "agent CLI to update (claude or codex)")
-	name := fs.String("name", "", "sandbox instance name")
+	version := fs.String("version", "", "exact semantic version (default: official latest)")
 	_ = fs.Parse(args)
 	rejectExtraArgs("update-agent", fs)
 
@@ -122,13 +120,18 @@ func runSandboxUpdateAgent(args []string) {
 		os.Exit(2)
 	}
 
-	scope := currentScope("update-agent", *agent, *name)
+	if *version != "" && !launcher.IsExactSemver(*version) {
+		fmt.Fprintf(os.Stderr, "cenci sandbox update-agent: version %q is not an exact semantic version\n", *version)
+		os.Exit(2)
+	}
+
+	scope := currentScope("update-agent", *agent, "")
 	eng := newEngine("update-agent")
 	if err := eng.EnsureImage(scope); err != nil {
 		fmt.Fprintf(os.Stderr, "cenci sandbox update-agent: %v\n", err)
 		os.Exit(1)
 	}
-	if err := eng.UpdateAgent(*agent, scope); err != nil {
+	if err := eng.UpdateAgent(*agent, *version, scope.Image); err != nil {
 		fmt.Fprintf(os.Stderr, "cenci sandbox update-agent: %v\n", err)
 		os.Exit(1)
 	}

@@ -9,22 +9,25 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/internal/exectest"
 )
 
-// buildEngine wires an Engine to a fake docker whose `image inspect` exit
-// code is scripted: inspectFails=true makes every inspect fail so ensure
-// paths build.
-func buildEngine(t *testing.T, inspectFails bool) (*Engine, string) {
+// buildEngine wires an Engine to a fake docker whose image listing is either
+// empty or contains the current base and monolith image.
+func buildEngine(t *testing.T, imagesMissing bool) (*Engine, string) {
 	t.Helper()
 	dir := t.TempDir()
 	callLog := filepath.Join(dir, "calls.txt")
-	inspectExit := "0"
-	if inspectFails {
-		inspectExit = "1"
+	images := "cenci-sandbox-base:abc123def456\\ncenci-sandbox:latest\\n"
+	if imagesMissing {
+		images = ""
 	}
 	body := `#!/bin/sh
 printf '%s\n' "$*" >> ` + exectest.ShellQuote(callLog) + `
+if [ "$1" = images ]; then
+  printf '` + images + `'
+  exit 0
+fi
 if [ "$1" = image ] && [ "$2" = inspect ]; then
-  [ ` + inspectExit + ` -eq 0 ] && printf '%s\n' home-v1
-  exit ` + inspectExit + `
+  printf '%s\n' shared-v2
+  exit 0
 fi
 exit 0
 `
@@ -67,7 +70,7 @@ func TestBuildMonolith_BuildsBaseFirstWhenMissing(t *testing.T) {
 	if !containsLine(calls, wantBase) {
 		t.Errorf("base build missing; calls:\n%s", strings.Join(calls, "\n"))
 	}
-	wantMonolith := "build --build-arg BASE_VERSION=abc123def456 --label cenci.agent-cli=home-v1 -t cenci-sandbox:latest -f /assets/Dockerfile /assets"
+	wantMonolith := "build --build-arg BASE_VERSION=abc123def456 --label cenci.agent-cli=shared-v2 -t cenci-sandbox:latest -f /assets/Dockerfile /assets"
 	if !containsLine(calls, wantMonolith) {
 		t.Errorf("monolith build argv missing %q; calls:\n%s", wantMonolith, strings.Join(calls, "\n"))
 	}
@@ -86,7 +89,7 @@ func TestBuildRepoImage_UsesRepoDockerfileContext(t *testing.T) {
 	}
 
 	calls := readCallLog(t, callLog)
-	wantRepo := "build --build-arg BASE_VERSION=abc123def456 --label cenci.agent-cli=home-v1 -t cenci-sandbox-myrepo:latest -f /repo/.cenci/Dockerfile /repo/.cenci"
+	wantRepo := "build --build-arg BASE_VERSION=abc123def456 --label cenci.agent-cli=shared-v2 -t cenci-sandbox-myrepo:latest -f /repo/.cenci/Dockerfile /repo/.cenci"
 	if !containsLine(calls, wantRepo) {
 		t.Errorf("repo build argv missing %q; calls:\n%s", wantRepo, strings.Join(calls, "\n"))
 	}

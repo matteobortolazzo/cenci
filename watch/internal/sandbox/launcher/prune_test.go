@@ -70,7 +70,7 @@ func TestPrune_VolumesDefaultDeny(t *testing.T) {
 	for name, stdin := range map[string]string{"explicit-n": "n\n", "empty-stdin": ""} {
 		t.Run(name, func(t *testing.T) {
 			e, callLog, stdout, stderr := pruneEngine(t, stdin)
-			t.Setenv("FAKE_VOLUMES", "claude-cenci-home-old\ncodex-cenci-home-stale\nunrelated-volume\n")
+			t.Setenv("FAKE_VOLUMES", "claude-cenci-home-old\ncodex-cenci-home-stale\ncenci-agent-cli-claude\nunrelated-volume\n")
 
 			if err := e.Prune(true); err != nil {
 				t.Fatalf("Prune: %v", err)
@@ -86,20 +86,23 @@ func TestPrune_VolumesDefaultDeny(t *testing.T) {
 			if !strings.Contains(stderr.String(), "Remove these volumes? [y/N]") {
 				t.Errorf("missing prompt on stderr; stderr:\n%s", stderr.String())
 			}
+			if !strings.Contains(stderr.String(), "Credential-bearing home volumes") || !strings.Contains(stderr.String(), "Shared agent CLI volumes") {
+				t.Errorf("volume classes not distinguished; stderr:\n%s", stderr.String())
+			}
 		})
 	}
 }
 
 func TestPrune_VolumesConfirmedRemovesAllInOneCall(t *testing.T) {
 	e, callLog, _, _ := pruneEngine(t, "y\n")
-	t.Setenv("FAKE_VOLUMES", "claude-cenci-home-old\ncodex-cenci-home-stale\nunrelated-volume\n")
+	t.Setenv("FAKE_VOLUMES", "claude-cenci-home-old\ncodex-cenci-home-stale\ncenci-agent-cli-codex\nunrelated-volume\n")
 
 	if err := e.Prune(true); err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
 
 	calls := readCallLog(t, callLog)
-	if !containsLine(calls, "volume rm claude-cenci-home-old codex-cenci-home-stale") {
+	if !containsLine(calls, "volume rm claude-cenci-home-old codex-cenci-home-stale cenci-agent-cli-codex") {
 		t.Errorf("expected one volume rm with all matching names; calls:\n%s", strings.Join(calls, "\n"))
 	}
 }

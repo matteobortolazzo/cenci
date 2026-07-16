@@ -88,8 +88,8 @@ func joinArgv(argv []string) string {
 // invocation's argv (space-joined) as a line to callLog and answers scripted
 // responses from env vars:
 //
-//	FAKE_INSPECT_EXIT    — `image inspect` exit code (default 0 = image exists)
-//	FAKE_IMAGE_AGENT_LIFECYCLE — writable-agent image label (default home-v1)
+//	FAKE_INSPECT_EXIT    — image listing exit code (default 0 = image exists)
+//	FAKE_IMAGE_AGENT_LIFECYCLE — shared-agent image label (default shared-v2)
 //	FAKE_BUILD_EXIT      — `build` exit code (default 0)
 //	FAKE_IMAGES          — `images ...` stdout
 //	FAKE_PS              — `ps ...` stdout
@@ -98,7 +98,6 @@ func joinArgv(argv []string) string {
 //	FAKE_INSPECT_MOUNTS  — container `inspect` stdout for mount lookups
 //	FAKE_INSPECT_STATE   — container startup state (default "running 0")
 //	FAKE_READY_EXIT      — readiness probe exit code (default 0)
-//	FAKE_AGENT_HELPER_EXIT — running-container helper probe exit (default 0)
 //	FAKE_STARTUP_ERROR   — persistent startup error marker text
 //	FAKE_ATTACH_EXIT     — exit code of the final `exec -it ...` attach
 //
@@ -112,22 +111,23 @@ func writeScriptedRuntime(t *testing.T, dir, name, callLog string) {
 	body := "#!/bin/sh\n" +
 		"printf '%s\\n' \"$*\" >> " + exectest.ShellQuote(callLog) + "\n" +
 		"case \"$1\" in\n" +
-		"image) if [ \"$2\" = inspect ]; then printf '%s\\n' \"${FAKE_IMAGE_AGENT_LIFECYCLE:-home-v1}\"; exit \"${FAKE_INSPECT_EXIT:-0}\"; fi ;;\n" +
+		"image) if [ \"$2\" = inspect ]; then printf '%s\\n' \"${FAKE_IMAGE_AGENT_LIFECYCLE:-shared-v2}\"; exit \"${FAKE_IMAGE_INSPECT_EXIT:-0}\"; fi ;;\n" +
 		"build) exit \"${FAKE_BUILD_EXIT:-0}\" ;;\n" +
-		"images) printf '%s' \"${FAKE_IMAGES:-}\" ;;\n" +
+		"images) if [ -n \"${FAKE_IMAGES+x}\" ]; then printf '%s' \"${FAKE_IMAGES}\"; else for last do :; done; printf '%s\\n' \"${last}\"; fi; exit \"${FAKE_INSPECT_EXIT:-0}\" ;;\n" +
 		"ps) printf '%s' \"${FAKE_PS:-}\" ;;\n" +
-		"volume) if [ \"$2\" = ls ]; then printf '%s' \"${FAKE_VOLUMES:-}\"; fi ;;\n" +
+		"volume) if [ \"$2\" = ls ]; then printf '%s' \"${FAKE_VOLUMES:-}\"; exit \"${FAKE_VOLUME_LS_EXIT:-0}\"; fi ;;\n" +
 		"rm) exit 0 ;;\n" +
-		"run) case \"$*\" in *'/bin/cat'*) printf '%s' \"${FAKE_STARTUP_ERROR:-}\"; exit \"${FAKE_STARTUP_ERROR_EXIT:-0}\" ;; esac; printf '%s\\n' fake-container-id ;;\n" +
+		"run) case \"$*\" in *'/bin/cat'*) printf '%s' \"${FAKE_STARTUP_ERROR:-}\"; exit \"${FAKE_STARTUP_ERROR_EXIT:-0}\" ;; *'agent-cli.sh update'*) [ -z \"${FAKE_RUN_STDERR:-}\" ] || printf '%s\\n' \"${FAKE_RUN_STDERR}\" >&2; exit \"${FAKE_RUN_EXIT:-0}\" ;; esac; printf '%s\\n' fake-container-id ;;\n" +
 		"inspect)\n" +
 		"  case \"$*\" in\n" +
 		"  *State.Status*) printf '%s\\n' \"${FAKE_INSPECT_STATE:-running 0}\"; exit \"${FAKE_CONTAINER_INSPECT_EXIT:-0}\" ;;\n" +
 		"  *Labels*) printf '%s\\n' \"${FAKE_INSPECT_LABEL:-}\" ;;\n" +
-		"  *Mounts*) printf '%s' \"${FAKE_INSPECT_MOUNTS:-}\" ;;\n" +
+		"  *'.RW'*) printf '%b' \"${FAKE_AGENT_MOUNTS:-cenci-agent-cli-claude|/opt/cenci-agent|false\\n}\"; exit \"${FAKE_CONTAINER_INSPECT_EXIT:-0}\" ;;\n" +
+		"  *Mounts*) printf '%b' \"${FAKE_INSPECT_MOUNTS:-}\"; exit \"${FAKE_CONTAINER_INSPECT_EXIT:-0}\" ;;\n" +
 		"  esac\n" +
 		"  ;;\n" +
 		"logs) printf '%s' \"${FAKE_LOGS:-}\" ;;\n" +
-		"exec) if [ \"$2\" = \"-it\" ]; then exit \"${FAKE_ATTACH_EXIT:-0}\"; fi; case \"$*\" in *'/tmp/cenci-ready'*) exit \"${FAKE_READY_EXIT:-0}\" ;; *'agent-cli.sh'*) exit \"${FAKE_AGENT_HELPER_EXIT:-0}\" ;; esac; exit 0 ;;\n" +
+		"exec) if [ \"$2\" = \"-it\" ]; then exit \"${FAKE_ATTACH_EXIT:-0}\"; fi; case \"$*\" in *'/tmp/cenci-ready'*) exit \"${FAKE_READY_EXIT:-0}\" ;; esac; exit 0 ;;\n" +
 		"esac\n" +
 		"exit 0\n"
 	exectest.WriteExecutable(t, filepath.Join(dir, name), body)
@@ -177,6 +177,7 @@ func batchEnv(t *testing.T, fakeDir, assets string) []string {
 		"PATH="+fakeDir+":/usr/bin:/bin",
 		"HOME="+t.TempDir(),
 		"CENCI_SANDBOX_ASSETS="+assets,
+		"FAKE_VOLUMES=cenci-agent-cli-claude\\ncenci-agent-cli-codex\\n",
 	)
 }
 
@@ -252,7 +253,7 @@ func TestSandboxBuild_MonolithBuildsBaseFirstWhenMissing(t *testing.T) {
 	}
 
 	cmd := exec.Command(binaryPath, "sandbox", "build")
-	cmd.Env = append(batchEnv(t, fakeDir, assets), "FAKE_INSPECT_EXIT=1")
+	cmd.Env = append(batchEnv(t, fakeDir, assets), "FAKE_IMAGES=")
 	cmd.Dir = t.TempDir() // non-git cwd → monolith image
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -260,13 +261,13 @@ func TestSandboxBuild_MonolithBuildsBaseFirstWhenMissing(t *testing.T) {
 	}
 
 	lines := callLogLines(t, callLog)
-	if _, ok := findLineWithPrefix(lines, "image inspect cenci-sandbox-base:"+tag); !ok {
-		t.Errorf("expected a base-image inspect, got calls:\n%s", strings.Join(lines, "\n"))
+	if _, ok := findLineWithPrefix(lines, "images --format {{.Repository}}:{{.Tag}} cenci-sandbox-base:"+tag); !ok {
+		t.Errorf("expected a typed base-image listing, got calls:\n%s", strings.Join(lines, "\n"))
 	}
 	if !anyLineContains(lines, "-t cenci-sandbox-base:"+tag) {
 		t.Errorf("expected the missing base image to be built first, got calls:\n%s", strings.Join(lines, "\n"))
 	}
-	want := "build --build-arg BASE_VERSION=" + tag + " --label cenci.agent-cli=home-v1 -t cenci-sandbox:latest -f " + assets + "/Dockerfile " + assets
+	want := "build --build-arg BASE_VERSION=" + tag + " --label cenci.agent-cli=shared-v2 -t cenci-sandbox:latest -f " + assets + "/Dockerfile " + assets
 	if !anyLineContains(lines, want) {
 		t.Errorf("expected monolith build call %q, got calls:\n%s", want, strings.Join(lines, "\n"))
 	}
@@ -304,7 +305,7 @@ func TestSandboxBuild_RepoImageFromRepoDockerfile(t *testing.T) {
 	}
 
 	cmd := exec.Command(binaryPath, "sandbox", "build")
-	cmd.Env = append(batchEnv(t, fakeDir, assets), "FAKE_INSPECT_EXIT=1")
+	cmd.Env = append(batchEnv(t, fakeDir, assets), "FAKE_IMAGES=")
 	cmd.Dir = repo
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -312,7 +313,7 @@ func TestSandboxBuild_RepoImageFromRepoDockerfile(t *testing.T) {
 	}
 
 	lines := callLogLines(t, callLog)
-	want := "build --build-arg BASE_VERSION=" + tag + " --label cenci.agent-cli=home-v1 -t cenci-sandbox-" + slug + ":latest -f " + repoRoot + "/.cenci/Dockerfile " + repoRoot + "/.cenci"
+	want := "build --build-arg BASE_VERSION=" + tag + " --label cenci.agent-cli=shared-v2 -t cenci-sandbox-" + slug + ":latest -f " + repoRoot + "/.cenci/Dockerfile " + repoRoot + "/.cenci"
 	if !anyLineContains(lines, want) {
 		t.Errorf("expected repo-image build call %q, got calls:\n%s", want, strings.Join(lines, "\n"))
 	}
@@ -352,8 +353,8 @@ func TestSandboxUpdateAgent_RebuildsLegacyImageBeforeMigration(t *testing.T) {
 		t.Fatalf("sandbox update-agent legacy image migration: %v\n%s", err, output)
 	}
 	lines := callLogLines(t, callLog)
-	if !anyLineContains(lines, "--label cenci.agent-cli=home-v1 -t cenci-sandbox:latest") {
-		t.Errorf("expected legacy image to rebuild with the writable-agent label; calls:\n%s", strings.Join(lines, "\n"))
+	if !anyLineContains(lines, "--label cenci.agent-cli=shared-v2 -t cenci-sandbox:latest") {
+		t.Errorf("expected legacy image to rebuild with the shared-agent label; calls:\n%s", strings.Join(lines, "\n"))
 	}
 }
 
@@ -363,7 +364,7 @@ func TestSandboxBuild_BuildFailureExits1(t *testing.T) {
 	assets := writeAssetFixture(t)
 
 	cmd := exec.Command(binaryPath, "sandbox", "build")
-	cmd.Env = append(batchEnv(t, fakeDir, assets), "FAKE_INSPECT_EXIT=1", "FAKE_BUILD_EXIT=3")
+	cmd.Env = append(batchEnv(t, fakeDir, assets), "FAKE_IMAGES=", "FAKE_BUILD_EXIT=3")
 	cmd.Dir = t.TempDir()
 	output, err := cmd.CombinedOutput()
 
@@ -448,39 +449,39 @@ func TestSandboxPruneVolumes_DefaultDeniesRemoval(t *testing.T) {
 	}
 }
 
-func TestSandboxUpdateAgent_StoppedVolumeUsesUIDSafeMaintenanceContainer(t *testing.T) {
+func TestSandboxUpdateAgent_UsesIsolatedGlobalVolumeAndExactVersion(t *testing.T) {
 	fakeDir := t.TempDir()
 	callLog := writeScriptedRuntimes(t, fakeDir)
 	assets := writeAssetFixture(t)
 
-	cmd := exec.Command(binaryPath, "sandbox", "update-agent", "--agent", "codex", "--name", "work")
+	cmd := exec.Command(binaryPath, "sandbox", "update-agent", "--agent", "codex", "--version", "1.2.3")
 	cmd.Env = batchEnv(t, fakeDir, assets)
 	cmd.Dir = t.TempDir()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("sandbox update-agent stopped volume: %v\n%s", err, output)
+		t.Fatalf("sandbox update-agent: %v\n%s", err, output)
 	}
 
 	lines := callLogLines(t, callLog)
-	prefix := "run --rm --user root -e HOST_UID=" + itoa(os.Getuid()) +
-		" -e HOST_GID=" + itoa(os.Getgid()) +
-		" -e CENCI_SANDBOX_AGENT=codex -v codex-cenci-home-work:/home/dev cenci-sandbox:latest -c "
+	prefix := "run --rm --user root --entrypoint /bin/bash -v cenci-agent-cli-codex:/opt/cenci-agent cenci-sandbox:latest /usr/local/bin/lib/agent-cli.sh update codex 1.2.3"
 	line, ok := findLineWithPrefix(lines, prefix)
 	if !ok {
-		t.Fatalf("expected UID-safe maintenance run [%s...], got calls:\n%s", prefix, strings.Join(lines, "\n"))
+		t.Fatalf("expected isolated global update [%s], got calls:\n%s", prefix, strings.Join(lines, "\n"))
 	}
-	if !strings.Contains(line, "source /usr/local/bin/lib/agent-cli.sh") || !strings.Contains(line, "update_agent_cli codex") {
-		t.Errorf("expected maintenance command to force a Codex update, got: %s", line)
+	for _, forbidden := range []string{"/home/dev", "/workspace", "HOST_UID", "HOST_GID", "OPENAI_API_KEY", "docker.sock", "/tmp/host-"} {
+		if strings.Contains(line, forbidden) {
+			t.Errorf("isolated updater argv contains %q: %s", forbidden, line)
+		}
 	}
 }
 
-func TestSandboxUpdateAgent_RunningContainerExecsAsDev(t *testing.T) {
+func TestSandboxUpdateAgent_IsGlobalEvenWhenRepositoryContainersAreRunning(t *testing.T) {
 	fakeDir := t.TempDir()
 	callLog := writeScriptedRuntimes(t, fakeDir)
 	assets := writeAssetFixture(t)
 
 	cmd := exec.Command(binaryPath, "sandbox", "update-agent")
-	cmd.Env = append(batchEnv(t, fakeDir, assets), "FAKE_PS=claude-cenci-default\n")
+	cmd.Env = append(batchEnv(t, fakeDir, assets), "FAKE_PS=claude-cenci-one\nclaude-cenci-two\n")
 	cmd.Dir = t.TempDir()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -488,39 +489,25 @@ func TestSandboxUpdateAgent_RunningContainerExecsAsDev(t *testing.T) {
 	}
 
 	lines := callLogLines(t, callLog)
-	prefix := "exec -u dev -e HOME=/home/dev -e NPM_CONFIG_PREFIX=/home/dev/.local claude-cenci-default /bin/bash -c "
-	line, ok := findLineWithPrefix(lines, prefix)
-	if !ok {
-		t.Fatalf("expected running-container exec [%s...], got calls:\n%s", prefix, strings.Join(lines, "\n"))
-	}
-	if !strings.Contains(line, "update_agent_cli claude") {
-		t.Errorf("expected default Claude update command, got: %s", line)
-	}
-	if anyLineContains(lines, "run --rm") {
-		t.Errorf("running container should not use a maintenance container; calls:\n%s", strings.Join(lines, "\n"))
+	if !anyLineContains(lines, "-v cenci-agent-cli-claude:/opt/cenci-agent") || anyLineContains(lines, "exec -u dev") {
+		t.Errorf("update should use only the global volume, never a running workload; calls:\n%s", strings.Join(lines, "\n"))
 	}
 }
 
-func TestSandboxUpdateAgent_LegacyRunningContainerFailsClearly(t *testing.T) {
+func TestSandboxUpdateAgent_RemovedNameFlagIsUsageError(t *testing.T) {
 	fakeDir := t.TempDir()
 	callLog := writeScriptedRuntimes(t, fakeDir)
 	assets := writeAssetFixture(t)
-	cmd := exec.Command(binaryPath, "sandbox", "update-agent")
-	cmd.Env = append(batchEnv(t, fakeDir, assets),
-		"FAKE_PS=claude-cenci-default\n",
-		"FAKE_AGENT_HELPER_EXIT=1",
-	)
+	cmd := exec.Command(binaryPath, "sandbox", "update-agent", "--name", "old")
+	cmd.Env = batchEnv(t, fakeDir, assets)
 	cmd.Dir = t.TempDir()
 	output, err := cmd.CombinedOutput()
 	exitErr, ok := err.(*exec.ExitError)
-	if !ok || exitErr.ExitCode() != 1 {
-		t.Fatalf("expected legacy running container error, got %T %v\n%s", err, err, output)
+	if !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("expected removed flag usage error, got %T %v\n%s", err, err, output)
 	}
-	if !strings.Contains(string(output), "predates writable agent CLI support") {
-		t.Errorf("expected clear legacy-container diagnostic, got:\n%s", output)
-	}
-	if anyLineContains(callLogLines(t, callLog), "update_agent_cli") {
-		t.Errorf("must not invoke missing helper; calls:\n%s", strings.Join(callLogLines(t, callLog), "\n"))
+	if lines := callLogLines(t, callLog); len(lines) != 0 {
+		t.Errorf("removed --name must make no runtime calls: %v", lines)
 	}
 }
 
@@ -530,7 +517,7 @@ func TestSandboxUpdateAgent_BuildsMissingImageBeforeMaintenance(t *testing.T) {
 	assets := writeAssetFixture(t)
 
 	cmd := exec.Command(binaryPath, "sandbox", "update-agent")
-	cmd.Env = append(batchEnv(t, fakeDir, assets), "FAKE_INSPECT_EXIT=1")
+	cmd.Env = append(batchEnv(t, fakeDir, assets), "FAKE_IMAGES=")
 	cmd.Dir = t.TempDir()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -546,6 +533,9 @@ func TestSandboxUpdateAgent_BuildsMissingImageBeforeMaintenance(t *testing.T) {
 func TestSandboxUpdateAgent_UsageErrorsMakeNoRuntimeCalls(t *testing.T) {
 	tests := [][]string{
 		{"sandbox", "update-agent", "--agent", "gemini"},
+		{"sandbox", "update-agent", "--version", "latest"},
+		{"sandbox", "update-agent", "--version", "^1.2.3"},
+		{"sandbox", "update-agent", "--name", "old"},
 		{"sandbox", "update-agent", "--bogus"},
 		{"sandbox", "update-agent", "extra"},
 	}
@@ -584,7 +574,8 @@ func TestSandboxUpdatePluginsCodex_RunsOneShotVolumeUpdate(t *testing.T) {
 	lines := callLogLines(t, callLog)
 	prefix := "run --rm --user root -e HOST_UID=" + itoa(os.Getuid()) +
 		" -e HOST_GID=" + itoa(os.Getgid()) +
-		" -e CENCI_SANDBOX_AGENT=codex -v codex-cenci-home-default:/home/dev cenci-sandbox:latest -c "
+		" -e CENCI_SANDBOX_AGENT=codex -e CENCI_AGENT_CLI=/opt/cenci-agent/current/node_modules/.bin/codex" +
+		" -v codex-cenci-home-default:/home/dev -v cenci-agent-cli-codex:/opt/cenci-agent:ro cenci-sandbox:latest -c "
 	line, ok := findLineWithPrefix(lines, prefix)
 	if !ok {
 		t.Fatalf("expected a one-shot volume update run [%s...], got calls:\n%s", prefix, strings.Join(lines, "\n"))
@@ -858,6 +849,7 @@ func openTestEnv(t *testing.T, fakeDir, assets string) (env []string, home, sock
 		"TERM=xterm-256color",
 		"TMUX_PANE=%7",
 		"COLORTERM=", "CONTEXT7_API_KEY=", "OPENAI_API_KEY=", "CENCI_SANDBOX=",
+		"FAKE_VOLUMES=cenci-agent-cli-claude\ncenci-agent-cli-codex\n",
 	)
 	return env, home, socketDir
 }
@@ -909,9 +901,15 @@ func TestOpenAllShortcuts_AttachTheirAgentAndModel(t *testing.T) {
 			}
 
 			line := attachLine(t, callLogLines(t, callLog))
-			wantTail := tc.agent + "-cenci-default " + tc.agent + " " + tc.permFlag + " --model " + tc.model
+			wantTail := tc.agent + "-cenci-default /opt/cenci-agent/current/node_modules/.bin/" + tc.agent + " " + tc.permFlag + " --model " + tc.model
 			if !strings.HasSuffix(line, wantTail) {
 				t.Errorf("attach argv = %q, want suffix %q", line, wantTail)
+			}
+			if tc.agent == "claude" && !strings.Contains(line, "-e DISABLE_UPDATES=1") {
+				t.Errorf("Claude agent exec did not suppress native updates: %s", line)
+			}
+			if tc.agent == "codex" && strings.Contains(line, "DISABLE_UPDATES") {
+				t.Errorf("Claude-only update env leaked into Codex: %s", line)
 			}
 		})
 	}
@@ -931,7 +929,7 @@ func TestOpenBare_DefaultsToClaudeSonnet(t *testing.T) {
 	}
 
 	line := attachLine(t, callLogLines(t, callLog))
-	if !strings.HasSuffix(line, "claude --dangerously-skip-permissions --model sonnet") {
+	if !strings.HasSuffix(line, "/opt/cenci-agent/current/node_modules/.bin/claude --dangerously-skip-permissions --model sonnet") {
 		t.Errorf("attach argv = %q, want the claude/sonnet defaults", line)
 	}
 }
@@ -950,7 +948,7 @@ func TestOpenModelFlag_OverridesShortcutModel(t *testing.T) {
 	}
 
 	line := attachLine(t, callLogLines(t, callLog))
-	if !strings.HasSuffix(line, "claude --dangerously-skip-permissions --model opus") {
+	if !strings.HasSuffix(line, "/opt/cenci-agent/current/node_modules/.bin/claude --dangerously-skip-permissions --model opus") {
 		t.Errorf("attach argv = %q, want the explicit --model to win", line)
 	}
 }
@@ -986,11 +984,13 @@ func TestOpen_FreshCreate_PinsEntrypointContract(t *testing.T) {
 		"-e TERM=xterm-256color",
 		"-e CENCI_SANDBOX=1",
 		"-e CENCI_SANDBOX_AGENT=claude",
+		"-e CENCI_AGENT_CLI=/opt/cenci-agent/current/node_modules/.bin/claude",
 		fmt.Sprintf("-e HOST_UID=%d", os.Getuid()),
 		fmt.Sprintf("-e HOST_GID=%d", os.Getgid()),
 		"-e WORKSPACE_SCOPE=legacy",
 		"-v " + home + "/Repos:/workspace",
 		"-v claude-cenci-home-default:/home/dev",
+		"-v cenci-agent-cli-claude:/opt/cenci-agent:ro",
 		"-v " + socketDir + ":/run/user/1000/cenci:ro",
 		":/usr/local/bin/cenci:ro",
 		"-e XDG_RUNTIME_DIR=/run/user/1000",
@@ -999,7 +999,8 @@ func TestOpen_FreshCreate_PinsEntrypointContract(t *testing.T) {
 			t.Errorf("run argv missing %q:\n%s", want, runLine)
 		}
 	}
-	// Claude lives in the persistent home, not a host bind mount.
+	// Claude lives in the shared read-only volume, not the writable home or a
+	// host bind mount.
 	if strings.Contains(runLine, ":/usr/local/bin/claude:ro") {
 		t.Errorf("run argv must not bind-mount the host claude binary:\n%s", runLine)
 	}
@@ -1008,6 +1009,9 @@ func TestOpen_FreshCreate_PinsEntrypointContract(t *testing.T) {
 	// creating pane closes, and reap-orphans would kill PID 1 (#356).
 	if strings.Contains(runLine, "TMUX_PANE") {
 		t.Errorf("run argv must not carry TMUX_PANE (#356):\n%s", runLine)
+	}
+	if strings.Contains(runLine, "DISABLE_UPDATES") {
+		t.Errorf("DISABLE_UPDATES must be scoped to Claude agent execs, not plugin provisioning:\n%s", runLine)
 	}
 	if !strings.HasSuffix(runLine, "cenci-sandbox:latest -c touch /tmp/cenci-ready && exec sleep infinity") {
 		t.Errorf("run argv must end with the image and PID-1 readiness tail, got:\n%s", runLine)
@@ -1020,22 +1024,91 @@ func TestOpen_FreshCreate_PinsEntrypointContract(t *testing.T) {
 
 	// The attach itself runs as dev with the in-container marker set.
 	line := attachLine(t, lines)
-	for _, want := range []string{"-u dev", "-e CENCI_SANDBOX=1", "-e CENCI_SANDBOX_AGENT=claude", "-e TMUX_PANE=%7"} {
+	for _, want := range []string{"-u dev", "-e CENCI_SANDBOX=1", "-e CENCI_SANDBOX_AGENT=claude", "-e TMUX_PANE=%7", "-e DISABLE_UPDATES=1", "/opt/cenci-agent/current/node_modules/.bin/claude"} {
 		if !strings.Contains(line, want) {
 			t.Errorf("attach argv missing %q:\n%s", want, line)
 		}
 	}
 }
 
-func TestOpen_FirstInstallFailureSurfacesPersistentDiagnostic(t *testing.T) {
+func TestOpen_AbsentSharedVolumeBootstrapsBeforeWorkloadWithoutSecrets(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = append(env, "FAKE_VOLUMES=", "CENCI_TEST_SENTINEL_SECRET=parent-only-secret")
+	cmd.Dir = t.TempDir()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("open bootstrap: %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	updater, workload := -1, -1
+	for i, line := range lines {
+		if strings.Contains(line, "agent-cli.sh update claude") {
+			updater = i
+			for _, forbidden := range []string{"/home/dev", "/workspace", "OPENAI_API_KEY", "parent-only-secret", "docker.sock", "/tmp/host-"} {
+				if strings.Contains(line, forbidden) {
+					t.Errorf("bootstrap updater contains %q: %s", forbidden, line)
+				}
+			}
+		}
+		if strings.Contains(line, "--name claude-cenci-default") {
+			workload = i
+		}
+	}
+	if updater < 0 || workload < 0 || updater >= workload {
+		t.Errorf("updater must complete before workload create; calls:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+func TestOpen_ExistingSharedVolumePerformsNoUpdaterOrVersionCheck(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("open existing volume: %v\n%s", err, output)
+	}
+	if anyLineContains(callLogLines(t, callLog), "agent-cli.sh update") {
+		t.Errorf("existing shared volume triggered an updater/version check")
+	}
+}
+
+func TestOpen_VolumeInspectionFailureIsNotMissingVolume(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = append(env, "FAKE_VOLUME_LS_EXIT=17")
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected volume infrastructure error, got %T %v\n%s", err, err, output)
+	}
+	if !strings.Contains(string(output), "volume ls") || anyLineContains(callLogLines(t, callLog), "agent-cli.sh update") {
+		t.Errorf("volume inspection failure was treated as an absent volume:\n%s", output)
+	}
+}
+
+func TestOpen_FirstBootstrapFailureStreamsDiagnosticBeforeWorkloadCreate(t *testing.T) {
 	fakeDir := t.TempDir()
 	callLog := writeScriptedRuntimes(t, fakeDir)
 	assets := writeAssetFixture(t)
 	env, _, _ := openTestEnv(t, fakeDir, assets)
 	env = append(env,
-		"FAKE_READY_EXIT=1",
-		"FAKE_INSPECT_STATE=exited 1",
-		"FAKE_STARTUP_ERROR=entrypoint: selected agent CLI is unavailable; first launch requires network access to npm",
+		"FAKE_VOLUMES=",
+		"FAKE_RUN_STDERR=registry exploded: original diagnostic",
+		"FAKE_RUN_EXIT=23",
 	)
 
 	cmd := exec.Command(binaryPath, "open")
@@ -1046,11 +1119,12 @@ func TestOpen_FirstInstallFailureSurfacesPersistentDiagnostic(t *testing.T) {
 	if !ok || exitErr.ExitCode() != 1 {
 		t.Fatalf("expected startup failure exit 1, got %T %v\n%s", err, err, output)
 	}
-	if !strings.Contains(string(output), "first launch requires network access to npm") {
-		t.Errorf("expected persistent first-install diagnostic, got:\n%s", output)
+	if !strings.Contains(string(output), "registry exploded: original diagnostic") {
+		t.Errorf("expected updater's original diagnostic, got:\n%s", output)
 	}
-	if anyLineContains(callLogLines(t, callLog), "exec -it") {
-		t.Errorf("agent attach must not run after startup failure; calls:\n%s", strings.Join(callLogLines(t, callLog), "\n"))
+	lines := callLogLines(t, callLog)
+	if anyLineContains(lines, "--name claude-cenci-default") || anyLineContains(lines, "exec -it") {
+		t.Errorf("workload must not be created after bootstrap failure; calls:\n%s", strings.Join(lines, "\n"))
 	}
 }
 
@@ -1120,7 +1194,7 @@ func TestOpenPassthrough_ReachesAgentVerbatim(t *testing.T) {
 	}
 
 	line := attachLine(t, callLogLines(t, callLog))
-	if !strings.HasSuffix(line, "claude --dangerously-skip-permissions --model haiku --resume -p fix the bug") {
+	if !strings.HasSuffix(line, "/opt/cenci-agent/current/node_modules/.bin/claude --dangerously-skip-permissions --model haiku --resume -p fix the bug") {
 		t.Errorf("attach argv = %q, want the passthrough tokens verbatim after the agent flags", line)
 	}
 }
@@ -1306,6 +1380,56 @@ func TestOpen_AttachToRunning_SkipsCreate(t *testing.T) {
 	attachLine(t, lines)
 	if strings.Contains(string(output), "created without cenci wiring") {
 		t.Errorf("wired container must not warn, got:\n%s", output)
+	}
+}
+
+func TestOpen_RunningLegacyContainerRequiresStopAndRelaunch(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "ch", "--name", "old")
+	cmd.Env = append(env,
+		"FAKE_PS=claude-cenci-old\n",
+		"FAKE_AGENT_MOUNTS=/workspace|/workspace|true\n",
+	)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected legacy rejection, got %T %v\n%s", err, err, output)
+	}
+	if !strings.Contains(string(output), "cenci sandbox stop claude-cenci-old") || !strings.Contains(string(output), "then relaunch") {
+		t.Errorf("missing precise migration instruction:\n%s", output)
+	}
+	if anyLineContains(callLogLines(t, callLog), "exec -it") {
+		t.Errorf("legacy container must not receive an agent session")
+	}
+}
+
+func TestOpen_RunningContainerInspectFailureIsInfrastructureError(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = append(env,
+		"FAKE_PS=claude-cenci-default\n",
+		"FAKE_CONTAINER_INSPECT_EXIT=17",
+	)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected runtime error, got %T %v\n%s", err, err, output)
+	}
+	if !strings.Contains(string(output), "inspect claude-cenci-default mounts") || strings.Contains(string(output), "predates shared") {
+		t.Errorf("runtime inspection failure was misclassified:\n%s", output)
+	}
+	if anyLineContains(callLogLines(t, callLog), "exec -it") {
+		t.Errorf("attach must not run after inspection failure")
 	}
 }
 
@@ -1496,7 +1620,7 @@ func TestCnArgv0_RoutesToOpen(t *testing.T) {
 	}
 
 	line := attachLine(t, callLogLines(t, callLog))
-	if !strings.HasSuffix(line, "codex --dangerously-bypass-approvals-and-sandbox --model gpt-5.6-sol") {
+	if !strings.HasSuffix(line, "/opt/cenci-agent/current/node_modules/.bin/codex --dangerously-bypass-approvals-and-sandbox --model gpt-5.6-sol") {
 		t.Errorf("attach argv = %q, want the codex/sol shortcut resolution", line)
 	}
 }
