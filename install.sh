@@ -302,7 +302,7 @@ check_stale_tmux_vars() {
 
 doctor_codex_support() {
 	[ "$HAS_CODEX" -eq 1 ] || return 0
-	local raw version config method notifications
+	local raw version config method notifications project_root project_config
 	raw="$(codex --version 2>/dev/null || true)"
 	version="$(printf '%s' "$raw" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
 	if [ -n "$version" ] && printf '%s\n%s\n' "0.144.1" "$version" | sort -V -C 2>/dev/null; then
@@ -311,6 +311,9 @@ doctor_codex_support() {
 		warn "Codex ${version:-unknown} is unsupported — cenci requires 0.144.1 or newer"
 	fi
 	config="${CODEX_HOME:-$HOME/.codex}/config.toml"
+	project_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+	project_config="${project_root:+$project_root/.codex/config.toml}"
+	if [ -n "$project_config" ] && [ -f "$project_config" ]; then config="$project_config"; fi
 	method="$(grep -E '^[[:space:]]*notification_method[[:space:]]*=' "$config" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d ' "')"
 	notifications="$(grep -E '^[[:space:]]*notifications[[:space:]]*=' "$config" 2>/dev/null | tail -1 | cut -d= -f2- | sed 's/^[[:space:]]*//')"
 	[ -n "$notifications" ] && say "    Codex tui.notifications: $notifications"
@@ -318,11 +321,11 @@ doctor_codex_support() {
 	if [ "$method" = "bel" ] || [ -z "$method" ]; then
 		warn "Codex BEL notifications may trigger tmux's native red-background bell; set notification_method = \"osc9\" yourself if unwanted"
 	fi
-	if [ -f .cenci/config.json ]; then ok "Neutral project config: .cenci/config.json"
-	elif [ -f .claude/config.json ]; then warn "Legacy-only project config: run cenci:configure to migrate to .cenci/config.json"
-	elif git rev-parse --show-toplevel >/dev/null 2>&1; then warn "No .cenci/config.json in this project"
+	if [ -n "$project_root" ] && [ -f "$project_root/.cenci/config.json" ]; then ok "Neutral project config: $project_root/.cenci/config.json"
+	elif [ -n "$project_root" ] && [ -f "$project_root/.claude/config.json" ]; then warn "Legacy-only project config: run cenci:configure to migrate to .cenci/config.json"
+	elif [ -n "$project_root" ]; then warn "No .cenci/config.json in this project"
 	fi
-	warn "Codex plugin hook updates require review in /hooks; cenci never marks hooks trusted automatically"
+	warn "Codex hook trust state is not exposed non-interactively; inspect /hooks after plugin updates (cenci never changes trust)"
 }
 
 run_doctor() {

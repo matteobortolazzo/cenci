@@ -55,10 +55,14 @@ else
     fail "Codex hook handlers contain unsupported keys"
 fi
 
-for script in session-context.sh compact-context.sh stop-reminder.sh; do
-    output="$(PLUGIN_ROOT="${FLOW_DIR}" "${FLOW_DIR}/codex/scripts/${script}")"
-    if jq -e . >/dev/null 2>&1 <<<"${output}"; then pass; else fail "${script} must emit JSON"; fi
-done
+CONTRACT_DIR="$(mktemp -d)"
+trap 'rm -rf "${CONTRACT_DIR}"' EXIT
+session="$(cd "${CONTRACT_DIR}" && PLUGIN_ROOT="${FLOW_DIR}" node "${FLOW_DIR}/codex/hook-output.mjs" session)"
+compact="$(PLUGIN_ROOT="${FLOW_DIR}" node "${FLOW_DIR}/codex/hook-output.mjs" compact)"
+stop="$(PLUGIN_ROOT="${FLOW_DIR}" node "${FLOW_DIR}/codex/hook-output.mjs" stop)"
+jq -e '.hookSpecificOutput.hookEventName == "SessionStart" and (.hookSpecificOutput.additionalContext | type == "string")' <<<"${session}" >/dev/null && pass || fail "SessionStart contract"
+jq -e '.hookSpecificOutput.hookEventName == "PreCompact" and (.hookSpecificOutput.additionalContext | type == "string")' <<<"${compact}" >/dev/null && pass || fail "PreCompact contract"
+jq -e '.systemMessage | type == "string"' <<<"${stop}" >/dev/null && pass || fail "Stop contract"
 
 if jq -e '(.hooks.Stop | length) > 0 and (.hooks.PreToolUse | length) > 0 and (.hooks.SessionStart | length) > 0' "${CLAUDE_HOOKS}" >/dev/null; then
     pass

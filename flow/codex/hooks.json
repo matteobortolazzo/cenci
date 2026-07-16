@@ -3,22 +3,22 @@
     "PreToolUse": [{
       "matcher": "Write|Edit",
       "hooks": [
-        {"type":"command","command":"${PLUGIN_ROOT}/hooks/scripts/check-sensitive-files.sh","timeout":10},
-        {"type":"command","command":"${PLUGIN_ROOT}/hooks/scripts/guard-main-worktree.sh","timeout":10}
+        {"type":"command","command":"\"${PLUGIN_ROOT}/hooks/scripts/check-sensitive-files.sh\"","timeout":10},
+        {"type":"command","command":"\"${PLUGIN_ROOT}/hooks/scripts/guard-main-worktree.sh\"","timeout":10}
       ]
     }],
     "SessionStart": [{
       "hooks": [
-        {"type":"command","command":"${PLUGIN_ROOT}/codex/scripts/session-context.sh","timeout":10},
-        {"type":"command","command":"${PLUGIN_ROOT}/hooks/scripts/check-pending-plans.sh","timeout":5}
+        {"type":"command","command":"node \"${PLUGIN_ROOT}/codex/hook-output.mjs\" session","timeout":10},
+        {"type":"command","command":"\"${PLUGIN_ROOT}/hooks/scripts/check-pending-plans.sh\"","timeout":5}
       ]
     }],
     "PreCompact": [{
       "matcher": "manual|auto",
-      "hooks": [{"type":"command","command":"${PLUGIN_ROOT}/codex/scripts/compact-context.sh","timeout":10}]
+      "hooks": [{"type":"command","command":"node \"${PLUGIN_ROOT}/codex/hook-output.mjs\" compact","timeout":10}]
     }],
     "Stop": [{
-      "hooks": [{"type":"command","command":"${PLUGIN_ROOT}/codex/scripts/stop-reminder.sh","timeout":10}]
+      "hooks": [{"type":"command","command":"node \"${PLUGIN_ROOT}/codex/hook-output.mjs\" stop","timeout":10}]
     }]
   }
 }
