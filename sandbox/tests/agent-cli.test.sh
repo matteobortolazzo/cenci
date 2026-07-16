@@ -226,6 +226,34 @@ else
     fail "failed activation did not report failure cleanly: ${OUTPUT}"
 fi
 
+echo "case: same-version re-update from one PID atomically rotates current"
+# In the updater container the script is always the PID-1 shell, so release
+# names must not derive from $$: a same-version re-update would collide with
+# the existing release directory, nest into it, and leave current unchanged.
+# Sourcing the library and updating twice in one shell reproduces that PID
+# reuse on the host.
+new_case samepid 5.5.5
+TARGETS="$(env -i PATH="${BIN}:/usr/bin:/bin" CALL_LOG="${CALL_LOG}" \
+    CENCI_AGENT_CLI_ROOT="${ROOT_DIR}" MOCK_VERSION="5.5.5" \
+    MOCK_INTEGRITY="${MOCK_INTEGRITY}" ATTESTATION_JSON="$(make_attestation 5.5.5)" \
+    bash -c 'source "$1" \
+        && update_agent_cli codex >/dev/null && readlink "${CENCI_AGENT_CLI_ROOT}/current" \
+        && update_agent_cli codex >/dev/null && readlink "${CENCI_AGENT_CLI_ROOT}/current" \
+        && readlink "${CENCI_AGENT_CLI_ROOT}/previous"' _ "${ROOT}/sandbox/lib/agent-cli.sh")" \
+    || fail "same-version re-update from a single PID failed"
+FIRST_TARGET="$(sed -n '1p' <<<"${TARGETS}")"
+SECOND_TARGET="$(sed -n '2p' <<<"${TARGETS}")"
+PREVIOUS_TARGET="$(sed -n '3p' <<<"${TARGETS}")"
+if [[ -n "${FIRST_TARGET}" && -n "${SECOND_TARGET}" \
+    && "${SECOND_TARGET}" != "${FIRST_TARGET}" \
+    && "${PREVIOUS_TARGET}" == "${FIRST_TARGET}" \
+    && -x "${ROOT_DIR}/current/node_modules/.bin/codex" \
+    && -d "${ROOT_DIR}/${PREVIOUS_TARGET}" ]]; then
+    pass
+else
+    fail "same-version re-update did not rotate current atomically (first=${FIRST_TARGET}, second=${SECOND_TARGET}, previous=${PREVIOUS_TARGET})"
+fi
+
 echo
 echo "passed: ${PASSES}, failed: ${FAILURES}"
 [[ "${FAILURES}" -eq 0 ]]

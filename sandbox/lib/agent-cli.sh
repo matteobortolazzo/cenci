@@ -115,15 +115,16 @@ install_agent_cli_unlocked() {
         printf 'agent-cli: failed to create %s/versions.\n' "${root}" >&2
         return 1
     }
-    staging="${root}/.staging-${version}-$$"
-    release="${root}/versions/${version}-$$"
-    rm -rf -- "${staging}"
-    trap 'rm -rf -- "${staging:-}"' EXIT
-    trap 'rm -rf -- "${staging:-}"; exit 130' HUP INT TERM
-    mkdir -p "${staging}" || {
-        printf 'agent-cli: failed to create staging directory %s.\n' "${staging}" >&2
+    # Names must not derive from $$: the script always runs as the updater
+    # container's PID-1 shell, so $$ collides across runs and a same-version
+    # re-update would mv its staging tree INSIDE the existing release
+    # directory, leaving `current` unchanged while reporting success.
+    staging="$(mktemp -d "${root}/.staging-${version}-XXXXXXXX")" || {
+        printf 'agent-cli: failed to create a staging directory under %s.\n' "${root}" >&2
         return 1
     }
+    trap 'rm -rf -- "${staging:-}"' EXIT
+    trap 'rm -rf -- "${staging:-}"; exit 130' HUP INT TERM
     printf '{"name":"cenci-agent-cli-stage","private":true}\n' >"${staging}/package.json" || {
         printf 'agent-cli: failed to write %s/package.json.\n' "${staging}" >&2
         return 1
@@ -162,17 +163,26 @@ install_agent_cli_unlocked() {
         printf 'agent-cli: failed to write %s/VERSION.\n' "${staging}" >&2
         return 1
     }
+    # mktemp guarantees a fresh, empty release directory even for a
+    # same-version re-update; rename(2) via mv -T atomically replaces the
+    # empty placeholder with the staged tree instead of nesting into it.
+    release="$(mktemp -d "${root}/versions/${version}-XXXXXXXX")" || {
+        printf 'agent-cli: failed to create a release directory under %s/versions.\n' "${root}" >&2
+        return 1
+    }
     # The cleanup trap stays armed through this move: if it fails, staging is
     # still on disk under its original name and must be reaped on exit. Only
     # disarm once the release directory is verifiably in place.
-    if ! mv -- "${staging}" "${release}"; then
+    if ! mv -T -- "${staging}" "${release}"; then
         printf 'agent-cli: failed to activate %s release at %s.\n' "${label}" "${release}" >&2
+        rmdir -- "${release}" 2>/dev/null
         return 1
     fi
     trap - EXIT HUP INT TERM
 
     current_target="$(readlink "${root}/current" 2>/dev/null || true)"
     if [[ -n "${current_target}" ]]; then
+        rm -f -- "${root}/.previous-$$"
         if ! ln -s "${current_target}" "${root}/.previous-$$"; then
             printf 'agent-cli: failed to stage previous-version symlink for %s.\n' "${label}" >&2
             return 1
@@ -183,6 +193,7 @@ install_agent_cli_unlocked() {
             return 1
         fi
     fi
+    rm -f -- "${root}/.current-$$"
     if ! ln -s "versions/$(basename "${release}")" "${root}/.current-$$"; then
         printf 'agent-cli: failed to stage current-version symlink for %s.\n' "${label}" >&2
         return 1
