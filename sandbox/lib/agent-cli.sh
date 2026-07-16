@@ -115,6 +115,13 @@ install_agent_cli_unlocked() {
         printf 'agent-cli: failed to create %s/versions.\n' "${root}" >&2
         return 1
     }
+    # Workload containers traverse this tree as a non-root user with the
+    # volume mounted read-only, so world read/execute must not depend on the
+    # updater's umask.
+    chmod 0755 "${root}" "${root}/versions" || {
+        printf 'agent-cli: failed to make %s world-traversable.\n' "${root}" >&2
+        return 1
+    }
     # Names must not derive from $$: the script always runs as the updater
     # container's PID-1 shell, so $$ collides across runs and a same-version
     # re-update would mv its staging tree INSIDE the existing release
@@ -161,6 +168,13 @@ install_agent_cli_unlocked() {
 
     printf '%s\n' "${version}" >"${staging}/VERSION" || {
         printf 'agent-cli: failed to write %s/VERSION.\n' "${staging}" >&2
+        return 1
+    }
+    # mktemp creates the staging directory 0700; grant world read (and execute
+    # where already executable) so non-root workloads can run the release, and
+    # drop group/other write to keep the shared tree read-only for them.
+    chmod -R a+rX,go-w -- "${staging}" || {
+        printf 'agent-cli: failed to normalize permissions on staged %s.\n' "${label}" >&2
         return 1
     }
     # mktemp guarantees a fresh, empty release directory even for a

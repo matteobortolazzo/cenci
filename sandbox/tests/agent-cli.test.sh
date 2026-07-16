@@ -177,6 +177,21 @@ wait "${update_pid}" 2>/dev/null || true
 if [[ "$(readlink "${ROOT_DIR}/current")" == "${OLD_TARGET}" ]]; then pass; else fail "interrupted update changed current"; fi
 unset REBUILD_WAIT_FILE
 
+echo "case: activated release tree is world-traversable for read-only workloads"
+# Workload containers run as a non-root user against the ro-mounted volume, so
+# every path from the root to the binary must grant other-read (and execute on
+# directories and the CLI itself) regardless of the updater's umask.
+new_case world-readable 3.1.0
+run_update codex >/dev/null
+RELEASE_DIR="${ROOT_DIR}/$(readlink "${ROOT_DIR}/current")"
+if [[ "$(find "${ROOT_DIR}" "${ROOT_DIR}/versions" "${RELEASE_DIR}" -maxdepth 0 -perm -005 | wc -l)" -eq 3 ]] \
+    && [[ -n "$(find "${RELEASE_DIR}/VERSION" -maxdepth 0 -perm -004)" ]] \
+    && [[ -n "$(find "${RELEASE_DIR}/node_modules/.bin/codex" -maxdepth 0 -perm -005)" ]]; then
+    pass
+else
+    fail "activated release tree is not world-readable/traversable"
+fi
+
 echo "case: activation retains exactly current and previous releases"
 new_case retention 1.0.0
 run_update codex >/dev/null
@@ -233,6 +248,7 @@ echo "case: same-version re-update from one PID atomically rotates current"
 # Sourcing the library and updating twice in one shell reproduces that PID
 # reuse on the host.
 new_case samepid 5.5.5
+# shellcheck disable=SC2016  # $1 and ${CENCI_AGENT_CLI_ROOT} must expand in the child bash, not here
 TARGETS="$(env -i PATH="${BIN}:/usr/bin:/bin" CALL_LOG="${CALL_LOG}" \
     CENCI_AGENT_CLI_ROOT="${ROOT_DIR}" MOCK_VERSION="5.5.5" \
     MOCK_INTEGRITY="${MOCK_INTEGRITY}" ATTESTATION_JSON="$(make_attestation 5.5.5)" \
