@@ -39,11 +39,30 @@ else
     fail "Codex hooks file does not exist: ${CODEX_HOOKS}"
 fi
 
-if [[ -f "${CODEX_HOOKS}" ]] && jq -e '.hooks | type == "object" and length == 0' "${CODEX_HOOKS}" >/dev/null; then
+if [[ -f "${CODEX_HOOKS}" ]] && jq -e '
+  (([.hooks | keys[]] | sort) == ["PreCompact","PreToolUse","SessionStart","Stop"]) and
+  ([.hooks | to_entries[] | .value[] | .hooks[] | .timeout] | all(. > 0 and . <= 30)) and
+  ([.hooks | to_entries[] | .value[] | .hooks[] | .command] | all(contains("${PLUGIN_ROOT}")))
+' "${CODEX_HOOKS}" >/dev/null; then
     pass
 else
-    fail "Codex hooks configuration must contain an empty hooks map"
+    fail "Codex hooks must cover guards/context/reminders with seconds-based timeouts"
 fi
+
+if jq -e '[.hooks | to_entries[] | .value[] | .hooks[] | keys[]] | all(. == "type" or . == "command" or . == "timeout")' "${CODEX_HOOKS}" >/dev/null; then
+    pass
+else
+    fail "Codex hook handlers contain unsupported keys"
+fi
+
+CONTRACT_DIR="$(mktemp -d)"
+trap 'rm -rf "${CONTRACT_DIR}"' EXIT
+session="$(cd "${CONTRACT_DIR}" && PLUGIN_ROOT="${FLOW_DIR}" node "${FLOW_DIR}/codex/hook-output.mjs" session)"
+compact="$(PLUGIN_ROOT="${FLOW_DIR}" node "${FLOW_DIR}/codex/hook-output.mjs" compact)"
+stop="$(PLUGIN_ROOT="${FLOW_DIR}" node "${FLOW_DIR}/codex/hook-output.mjs" stop)"
+jq -e '.hookSpecificOutput.hookEventName == "SessionStart" and (.hookSpecificOutput.additionalContext | type == "string")' <<<"${session}" >/dev/null && pass || fail "SessionStart contract"
+jq -e '.hookSpecificOutput.hookEventName == "PreCompact" and (.hookSpecificOutput.additionalContext | type == "string")' <<<"${compact}" >/dev/null && pass || fail "PreCompact contract"
+jq -e '.systemMessage | type == "string"' <<<"${stop}" >/dev/null && pass || fail "Stop contract"
 
 if jq -e '(.hooks.Stop | length) > 0 and (.hooks.PreToolUse | length) > 0 and (.hooks.SessionStart | length) > 0' "${CLAUDE_HOOKS}" >/dev/null; then
     pass
