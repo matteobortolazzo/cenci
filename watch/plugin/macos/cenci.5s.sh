@@ -21,7 +21,12 @@
 # This is a read-only frontend over the same Waybar JSON contract consumed by the
 # noctalia and dms widgets — it makes no daemon or Go changes.
 
-set -uo pipefail
+# No arrays, no `set -o pipefail`, no other bashisms below: SwiftBar may run a
+# plugin under whatever /bin/sh resolves to (or without honoring the shebang),
+# and a non-bash Bourne shell aborts on the first `(` of a bash array literal
+# ("syntax error near unexpected token `('") before any output is produced.
+# Keeping this script POSIX-portable avoids that whole failure class.
+set -u
 
 # --- 1. Resolve the cenci binary -------------------------------------
 #
@@ -34,22 +39,19 @@ resolve_bin() {
     return 0
   fi
 
-  local candidates=(
-    /opt/homebrew/bin/cenci
-    /usr/local/bin/cenci
-  )
+  # Fixed install prefixes first, then the two plugin-bootstrap locations.
   # Plugin bootstrap installs the binary at <plugin-root>/bin/cenci. An
   # installed plugin lives at ~/.claude/plugins/cache/<marketplace>/cenci-watch/<version>/,
   # and the marketplace checkout keeps the repo's watch/plugin/ layout — cover both.
-  local g
-  for g in \
+  #
+  # POSIX sh has no arrays, so walk the candidates in one loop. The unquoted
+  # glob segments expand to their matches here; a glob that matches nothing
+  # stays literal and simply fails the -x guard, so it is skipped.
+  for c in \
+    /opt/homebrew/bin/cenci \
+    /usr/local/bin/cenci \
     "$HOME"/.claude/plugins/cache/*/cenci-watch/*/bin/cenci \
     "$HOME"/.claude/plugins/marketplaces/*/watch/plugin/bin/cenci; do
-    [ -x "$g" ] && candidates+=("$g")
-  done
-
-  local c
-  for c in "${candidates[@]}"; do
     if [ -x "$c" ]; then
       printf '%s\n' "$c"
       return 0
