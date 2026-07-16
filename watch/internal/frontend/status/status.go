@@ -46,6 +46,51 @@ func escapePango(s string) string {
 	return pangoReplacer.Replace(s)
 }
 
+// Identity is a no-op escape function for FormatSessionLine callers that
+// render plain text (no markup) and so don't need Pango escaping — e.g.
+// renderHumanStatus in status_cmd.go.
+func Identity(s string) string { return s }
+
+// FormatSessionLine renders the unified per-window session line shared by
+// `cenci status` (human output, via renderHumanStatus in status_cmd.go) and
+// `widget-json`/waybar (tooltip, via Format below), so the two render sites
+// can't drift out of sync (#405):
+//
+//   - Tmux-backed:  "session:index - name (agent) (status)"
+//   - Sessionless:  "(no session) - name (agent) (status)"
+//
+// A missing/blank name renders as the literal placeholder "(untitled)"
+// (never blank); a missing/blank agent renders as "(unknown)" (never
+// blank/silently dropped). status stays the trailing parenthesized token,
+// unchanged in wording — several plugins parse tooltip lines by an
+// end-anchored "(status)" regex, so status must never move out of the final
+// position.
+//
+// escape is applied to every free-text field (session, name, agent) before
+// interpolation. Pass escapePango for markup-rendering consumers (the waybar
+// tooltip) or Identity for plain-text consumers (the human status line).
+func FormatSessionLine(w ipc.WindowState, escape func(string) string) string {
+	name := w.WindowName
+	if !w.ManuallyNamed && w.TaskName != "" {
+		name = w.TaskName
+	}
+	if name == "" {
+		name = "(untitled)"
+	}
+	name = escape(name)
+
+	agent := w.Agent
+	if agent == "" {
+		agent = "unknown"
+	}
+	agent = escape(agent)
+
+	if w.Session == "" {
+		return fmt.Sprintf("(no session) - %s (%s) (%s)", name, agent, w.Status)
+	}
+	return fmt.Sprintf("%s:%s - %s (%s) (%s)", escape(w.Session), w.WindowIndex, name, agent, w.Status)
+}
+
 // Config holds the symbol settings for waybar output.
 type Config struct {
 	SocketPath            string
@@ -138,20 +183,7 @@ func Format(snap *ipc.StateSnapshot, cfg Config) output {
 	// Build tooltip: one line per session.
 	var lines []string
 	for _, w := range snap.Windows {
-		name := w.WindowName
-		if !w.ManuallyNamed && w.TaskName != "" {
-			name = w.TaskName
-		}
-		if name == "" {
-			name = w.Agent
-		}
-		name = escapePango(name)
-		if w.Session == "" {
-			// Paneless session (no tmux window) — no target prefix.
-			lines = append(lines, fmt.Sprintf("%s (%s)", name, w.Status))
-			continue
-		}
-		lines = append(lines, fmt.Sprintf("%s:%s - %s (%s)", escapePango(w.Session), w.WindowIndex, name, w.Status))
+		lines = append(lines, FormatSessionLine(w, escapePango))
 	}
 	tooltip := strings.Join(lines, "\n")
 
