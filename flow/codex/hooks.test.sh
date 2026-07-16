@@ -39,11 +39,26 @@ else
     fail "Codex hooks file does not exist: ${CODEX_HOOKS}"
 fi
 
-if [[ -f "${CODEX_HOOKS}" ]] && jq -e '.hooks | type == "object" and length == 0' "${CODEX_HOOKS}" >/dev/null; then
+if [[ -f "${CODEX_HOOKS}" ]] && jq -e '
+  (([.hooks | keys[]] | sort) == ["PreCompact","PreToolUse","SessionStart","Stop"]) and
+  ([.hooks | to_entries[] | .value[] | .hooks[] | .timeout] | all(. > 0 and . <= 30)) and
+  ([.hooks | to_entries[] | .value[] | .hooks[] | .command] | all(contains("${PLUGIN_ROOT}")))
+' "${CODEX_HOOKS}" >/dev/null; then
     pass
 else
-    fail "Codex hooks configuration must contain an empty hooks map"
+    fail "Codex hooks must cover guards/context/reminders with seconds-based timeouts"
 fi
+
+if jq -e '[.hooks | to_entries[] | .value[] | .hooks[] | keys[]] | all(. == "type" or . == "command" or . == "timeout")' "${CODEX_HOOKS}" >/dev/null; then
+    pass
+else
+    fail "Codex hook handlers contain unsupported keys"
+fi
+
+for script in session-context.sh compact-context.sh stop-reminder.sh; do
+    output="$(PLUGIN_ROOT="${FLOW_DIR}" "${FLOW_DIR}/codex/scripts/${script}")"
+    if jq -e . >/dev/null 2>&1 <<<"${output}"; then pass; else fail "${script} must emit JSON"; fi
+done
 
 if jq -e '(.hooks.Stop | length) > 0 and (.hooks.PreToolUse | length) > 0 and (.hooks.SessionStart | length) > 0' "${CLAUDE_HOOKS}" >/dev/null; then
     pass

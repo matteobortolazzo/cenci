@@ -300,6 +300,31 @@ check_stale_tmux_vars() {
 	fi
 }
 
+doctor_codex_support() {
+	[ "$HAS_CODEX" -eq 1 ] || return 0
+	local raw version config method notifications
+	raw="$(codex --version 2>/dev/null || true)"
+	version="$(printf '%s' "$raw" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+	if [ -n "$version" ] && printf '%s\n%s\n' "0.144.1" "$version" | sort -V -C 2>/dev/null; then
+		ok "Codex ${version} supports cenci hooks"
+	else
+		warn "Codex ${version:-unknown} is unsupported — cenci requires 0.144.1 or newer"
+	fi
+	config="${CODEX_HOME:-$HOME/.codex}/config.toml"
+	method="$(grep -E '^[[:space:]]*notification_method[[:space:]]*=' "$config" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d ' "')"
+	notifications="$(grep -E '^[[:space:]]*notifications[[:space:]]*=' "$config" 2>/dev/null | tail -1 | cut -d= -f2- | sed 's/^[[:space:]]*//')"
+	[ -n "$notifications" ] && say "    Codex tui.notifications: $notifications"
+	if [ -n "$method" ]; then say "    Codex notification_method: $method"; else say "    Codex notification_method: default (terminal-dependent)"; fi
+	if [ "$method" = "bel" ] || [ -z "$method" ]; then
+		warn "Codex BEL notifications may trigger tmux's native red-background bell; set notification_method = \"osc9\" yourself if unwanted"
+	fi
+	if [ -f .cenci/config.json ]; then ok "Neutral project config: .cenci/config.json"
+	elif [ -f .claude/config.json ]; then warn "Legacy-only project config: run cenci:configure to migrate to .cenci/config.json"
+	elif git rev-parse --show-toplevel >/dev/null 2>&1; then warn "No .cenci/config.json in this project"
+	fi
+	warn "Codex plugin hook updates require review in /hooks; cenci never marks hooks trusted automatically"
+}
+
 run_doctor() {
 	DOCTOR_FAILED=0
 	step "Checking your system ($(platform_label))"
@@ -320,6 +345,7 @@ run_doctor() {
 	say "  ${BOLD}Supported clients (at least one required)${RESET}"
 	if [ "$HAS_CLAUDE" -eq 1 ]; then ok "Claude Code detected"; else warn "Claude Code not detected"; fi
 	if [ "$HAS_CODEX" -eq 1 ]; then ok "Codex detected"; else warn "Codex not detected"; fi
+	doctor_codex_support
 	if ! have_supported_client; then
 		fail "no supported client — install Claude Code, Codex, or both"
 		DOCTOR_FAILED=1
