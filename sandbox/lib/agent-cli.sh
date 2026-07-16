@@ -111,14 +111,23 @@ install_agent_cli_unlocked() {
     integrity="$(sed -n '2p' <<<"${resolved}")"
     metadata="$(sed -n '3,$p' <<<"${resolved}")"
 
-    mkdir -p "${root}/versions"
+    mkdir -p "${root}/versions" || {
+        printf 'agent-cli: failed to create %s/versions.\n' "${root}" >&2
+        return 1
+    }
     staging="${root}/.staging-${version}-$$"
     release="${root}/versions/${version}-$$"
     rm -rf -- "${staging}"
     trap 'rm -rf -- "${staging:-}"' EXIT
     trap 'rm -rf -- "${staging:-}"; exit 130' HUP INT TERM
-    mkdir -p "${staging}"
-    printf '{"name":"cenci-agent-cli-stage","private":true}\n' >"${staging}/package.json"
+    mkdir -p "${staging}" || {
+        printf 'agent-cli: failed to create staging directory %s.\n' "${staging}" >&2
+        return 1
+    }
+    printf '{"name":"cenci-agent-cli-stage","private":true}\n' >"${staging}/package.json" || {
+        printf 'agent-cli: failed to write %s/package.json.\n' "${staging}" >&2
+        return 1
+    }
 
     # Fetch and unpack without executing publisher-controlled lifecycle code.
     npm install --prefix "${staging}" --ignore-scripts --save-exact "${package}@${version}" || return $?
@@ -149,19 +158,50 @@ install_agent_cli_unlocked() {
         return 1
     }
 
-    printf '%s\n' "${version}" >"${staging}/VERSION"
-    mv -- "${staging}" "${release}"
+    printf '%s\n' "${version}" >"${staging}/VERSION" || {
+        printf 'agent-cli: failed to write %s/VERSION.\n' "${staging}" >&2
+        return 1
+    }
+    # The cleanup trap stays armed through this move: if it fails, staging is
+    # still on disk under its original name and must be reaped on exit. Only
+    # disarm once the release directory is verifiably in place.
+    if ! mv -- "${staging}" "${release}"; then
+        printf 'agent-cli: failed to activate %s release at %s.\n' "${label}" "${release}" >&2
+        return 1
+    fi
     trap - EXIT HUP INT TERM
 
     current_target="$(readlink "${root}/current" 2>/dev/null || true)"
     if [[ -n "${current_target}" ]]; then
-        ln -s "${current_target}" "${root}/.previous-$$"
-        mv -Tf "${root}/.previous-$$" "${root}/previous"
+        if ! ln -s "${current_target}" "${root}/.previous-$$"; then
+            printf 'agent-cli: failed to stage previous-version symlink for %s.\n' "${label}" >&2
+            return 1
+        fi
+        if ! mv -Tf "${root}/.previous-$$" "${root}/previous"; then
+            printf 'agent-cli: failed to activate previous-version symlink for %s.\n' "${label}" >&2
+            rm -f -- "${root}/.previous-$$"
+            return 1
+        fi
     fi
-    ln -s "versions/$(basename "${release}")" "${root}/.current-$$"
-    mv -Tf "${root}/.current-$$" "${root}/current"
+    if ! ln -s "versions/$(basename "${release}")" "${root}/.current-$$"; then
+        printf 'agent-cli: failed to stage current-version symlink for %s.\n' "${label}" >&2
+        return 1
+    fi
+    if ! mv -Tf "${root}/.current-$$" "${root}/current"; then
+        printf 'agent-cli: failed to activate current-version symlink for %s.\n' "${label}" >&2
+        rm -f -- "${root}/.current-$$"
+        return 1
+    fi
+
+    if [[ ! -x "${root}/current/node_modules/.bin/${agent}" ]]; then
+        printf 'agent-cli: activated %s does not resolve to an executable at %s/current/node_modules/.bin/%s.\n' \
+            "${label}" "${root}" "${agent}" >&2
+        return 1
+    fi
+
     agent_cli_cleanup_versions "${root}"
-    printf 'Activated %s %s.\n' "${label}" "${version}"
+    printf 'Activated %s %s. Running sandboxes keep using the version they started with —\n' "${label}" "${version}"
+    printf 'relaunch them to pick up this update.\n'
 }
 
 update_agent_cli() {

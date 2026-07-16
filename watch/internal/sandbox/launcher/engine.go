@@ -1,6 +1,7 @@
 package launcher
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -183,6 +184,24 @@ func (e *Engine) EnsureImage(scope Scope) error {
 	return e.BuildSelected(scope)
 }
 
+// EnsureMonolithImage builds the shared monolith image only when its current
+// content-hash tag/shared-agent label is missing, regardless of which image
+// the current launch scope selected. The agent-CLI updater and the shared
+// volume's populated-check both run exclusively against MonolithImage — a
+// trusted image checked into this repo — never a per-repo image, so a
+// malicious repo image can never gain root write access to the host-global
+// agent CLI volume every sandbox shares.
+func (e *Engine) EnsureMonolithImage() error {
+	current, err := e.imageAgentLifecycleCurrent(MonolithImage)
+	if err != nil {
+		return err
+	}
+	if current {
+		return nil
+	}
+	return e.BuildMonolith()
+}
+
 // containerRunning reports whether a container with exactly this name is
 // currently running.
 func (e *Engine) containerRunning(name string) (bool, error) {
@@ -211,14 +230,40 @@ func (e *Engine) volumeExists(name string) (bool, error) {
 	return false, nil
 }
 
-func (e *Engine) agentUpdateRunArgs(agent, version, image string) []string {
-	args := []string{"run", "--rm", "--user", "root", "--entrypoint", "/bin/bash",
+// agentUpdateRunArgs builds the updater invocation. It always runs against
+// MonolithImage (the trusted, checked-in shared image), never a per-repo
+// image: repo images are caller-supplied build inputs from
+// <repo-root>/.cenci/Dockerfile, and this container runs as root with the
+// host-global agent CLI volume mounted read-write, so honoring a repo image
+// here would let a malicious repo image gain root write access to the volume
+// every sandbox on the host mounts read-only. --cap-drop=ALL and
+// --security-opt=no-new-privileges harden the root process without blocking
+// network access, which the updater's npm install still needs.
+func (e *Engine) agentUpdateRunArgs(agent, version string) []string {
+	args := []string{"run", "--rm", "--user", "root",
+		"--cap-drop=ALL", "--security-opt=no-new-privileges",
+		"--entrypoint", "/bin/bash",
 		"-v", AgentCLIVolumeName(agent) + ":/opt/cenci-agent",
-		image, "/usr/local/bin/lib/agent-cli.sh", "update", agent}
+		MonolithImage, "/usr/local/bin/lib/agent-cli.sh", "update", agent}
 	if version != "" {
 		args = append(args, version)
 	}
 	return args
+}
+
+// agentVolumeCheckRunArgs builds a cheap, short-lived probe that verifies an
+// already-existing shared agent volume actually contains an installed CLI:
+// network-isolated (npm access is never needed for a read-only check),
+// non-root, read-only volume mount, and hardened the same way as the
+// updater. It always runs against MonolithImage for the same reason
+// agentUpdateRunArgs does.
+func (e *Engine) agentVolumeCheckRunArgs(agent string) []string {
+	path := "/opt/cenci-agent/current/node_modules/.bin/" + agent
+	return []string{"run", "--rm", "--network", "none", "--user", "dev",
+		"--cap-drop=ALL", "--security-opt=no-new-privileges",
+		"--entrypoint", "/bin/sh",
+		"-v", AgentCLIVolumeName(agent) + ":/opt/cenci-agent:ro",
+		MonolithImage, "-c", "test -x " + path}
 }
 
 // maintenanceRunArgs is retained for plugin maintenance, which legitimately
@@ -236,33 +281,79 @@ func (e *Engine) maintenanceRunArgs(agent string, scope Scope, command string) [
 
 // UpdateAgent updates the host-global agent volume in a short-lived container
 // that receives no home/workspace/credential/socket mounts or secret env.
-func (e *Engine) UpdateAgent(agent, version, image string) error {
+// The updater always runs against MonolithImage (see agentUpdateRunArgs), so
+// this ensures that image exists/is current first, independent of whatever
+// image the caller's launch scope selected.
+func (e *Engine) UpdateAgent(agent, version string) error {
 	if err := ValidateAgent(agent); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(e.Stdout, "Updating %s in shared volume '%s'...\n", agent, AgentCLIVolumeName(agent))
-	args := e.agentUpdateRunArgs(agent, version, image)
+	if err := e.EnsureMonolithImage(); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(e.Stdout, "Updating %s in shared volume '%s' (used by every sandbox on this host)...\n", agent, AgentCLIVolumeName(agent))
+	args := e.agentUpdateRunArgs(agent, version)
 	if err := e.command(args...).Run(); err != nil {
 		return fmt.Errorf("%s isolated agent updater failed: %w", e.Runtime, err)
 	}
 	return nil
 }
 
-// EnsureAgentVolume bootstraps only a genuinely absent shared volume. Existing
-// volumes are trusted without any launch-time network or version probe.
-func (e *Engine) EnsureAgentVolume(agent, image string) error {
+// agentVolumePopulated cheaply verifies that an already-existing shared agent
+// volume actually contains an installed CLI. Two real failure modes make
+// volumeExists alone untrustworthy: (a) a concurrent first launch's `docker
+// run -v` auto-creates the named volume long before that launch's own
+// install finishes, so a later launch's volumeExists check can observe a
+// still-empty volume as "existing"; (b) a previously failed bootstrap whose
+// cleanup `volume rm` itself failed (see EnsureAgentVolume) leaves a broken
+// volume that would otherwise be trusted forever. A non-zero exit from the
+// probe itself (agent binary missing/not executable) means "not populated";
+// any other failure (exec transport, runtime error) is reported as an error
+// rather than silently treated as unpopulated.
+func (e *Engine) agentVolumePopulated(agent string) (bool, error) {
+	if err := e.EnsureMonolithImage(); err != nil {
+		return false, err
+	}
+	err := exec.Command(e.Runtime, e.agentVolumeCheckRunArgs(agent)...).Run()
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return false, nil
+	}
+	return false, fmt.Errorf("%s agent volume check failed: %w", e.Runtime, err)
+}
+
+// EnsureAgentVolume bootstraps a genuinely absent shared volume and, for an
+// already-existing one, cheaply verifies it is actually populated before
+// trusting it (see agentVolumePopulated). Only a missing or verified-empty
+// volume triggers UpdateAgent; the updater script's own flock on the
+// volume's lock file makes a concurrent/redundant update safe.
+func (e *Engine) EnsureAgentVolume(agent string) error {
 	name := AgentCLIVolumeName(agent)
 	exists, err := e.volumeExists(name)
 	if err != nil {
 		return err
 	}
 	if exists {
-		return nil
+		populated, err := e.agentVolumePopulated(agent)
+		if err != nil {
+			return err
+		}
+		if populated {
+			return nil
+		}
 	}
-	if err := e.UpdateAgent(agent, "", image); err != nil {
-		// The mount created an empty volume. Remove it so the next launch retries
-		// bootstrap instead of mistaking a failed install for an existing CLI.
-		_ = e.command("volume", "rm", name).Run()
+	if err := e.UpdateAgent(agent, ""); err != nil {
+		// The mount created (or left behind) an empty/broken volume. Remove it
+		// so the next launch retries bootstrap instead of mistaking a failed
+		// install for an existing CLI. A failed removal here leaves the volume
+		// broken on the host for every sandbox that mounts it, so tell the
+		// operator instead of swallowing it.
+		if rmErr := e.command("volume", "rm", name).Run(); rmErr != nil {
+			_, _ = fmt.Fprintf(e.Stderr, "Warning: shared agent volume '%s' is broken and could not be removed automatically (%v); every sandbox on this host mounts it, so remove it manually with '%s volume rm %s' before the next launch.\n", name, rmErr, e.Runtime, name)
+		}
 		return err
 	}
 	return nil

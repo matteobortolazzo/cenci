@@ -128,7 +128,7 @@ func (e *Engine) Launch(opts Options) error {
 	if err := e.EnsureImage(scope); err != nil {
 		return err
 	}
-	if err := e.EnsureAgentVolume(agent, scope.Image); err != nil {
+	if err := e.EnsureAgentVolume(agent); err != nil {
 		return err
 	}
 
@@ -545,6 +545,14 @@ func (e *Engine) containerStartupState(name string) (status, exitCode string, er
 	return fields[0], fields[1], nil
 }
 
+// startupFailureDetail returns diagnostic detail for a container that failed
+// during startup. sandbox/entrypoint.sh writes a human-readable message to
+// /home/dev/.cenci-agent-startup-error and exits non-zero when the agent CLI
+// path is missing or not executable, before the readiness marker is ever
+// touched — so that persistent marker (read here via a short-lived container
+// against the home volume, since the failed container itself may already be
+// gone) is checked first. The container's last 50 log lines are the fallback
+// for any other startup failure that never wrote the marker.
 func (e *Engine) startupFailureDetail(scope Scope) string {
 	marker := exec.Command(e.Runtime, "run", "--rm", "--user", "root", "--entrypoint", "/bin/cat",
 		"-v", scope.VolumeName+":/home/dev", scope.Image, "/home/dev/.cenci-agent-startup-error")

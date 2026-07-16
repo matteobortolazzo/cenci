@@ -108,6 +108,9 @@ func runSandboxBuild(args []string) {
 
 // runSandboxUpdateAgent implements `cenci sandbox update-agent [--agent
 // claude|codex] [--version exact-semver]` for the host-global agent volume.
+// The updater always targets the shared monolith image (never the current
+// directory's own per-repo image, if any — see UpdateAgent), so this verb
+// never needs to resolve or build a per-repo scope.
 func runSandboxUpdateAgent(args []string) {
 	fs := flag.NewFlagSet("sandbox update-agent", flag.ExitOnError)
 	agent := fs.String("agent", "claude", "agent CLI to update (claude or codex)")
@@ -124,14 +127,12 @@ func runSandboxUpdateAgent(args []string) {
 		fmt.Fprintf(os.Stderr, "cenci sandbox update-agent: version %q is not an exact semantic version\n", *version)
 		os.Exit(2)
 	}
-
-	scope := currentScope("update-agent", *agent, "")
-	eng := newEngine("update-agent")
-	if err := eng.EnsureImage(scope); err != nil {
-		fmt.Fprintf(os.Stderr, "cenci sandbox update-agent: %v\n", err)
-		os.Exit(1)
+	if *version != "" {
+		fmt.Println("Note: --version pins/downgrades the shared agent CLI volume, which is used by every sandbox on this host.")
 	}
-	if err := eng.UpdateAgent(*agent, *version, scope.Image); err != nil {
+
+	eng := newEngine("update-agent")
+	if err := eng.UpdateAgent(*agent, *version); err != nil {
 		fmt.Fprintf(os.Stderr, "cenci sandbox update-agent: %v\n", err)
 		os.Exit(1)
 	}

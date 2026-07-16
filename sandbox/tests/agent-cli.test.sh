@@ -213,6 +213,19 @@ new_case secrets
 CENCI_PARENT_SECRET='parent-only-sentinel' run_update codex >/dev/null
 if ! grep -Fq 'parent-only-sentinel' "${CALL_LOG}"; then pass; else fail "parent secret reached updater"; fi
 
+echo "case: failed activation reports failure and leaves no current symlink"
+new_case activation-failure
+# A regular file where "versions/" needs to be a directory makes the
+# activation sequence's first mkdir -p fail, before anything is staged.
+: >"${ROOT_DIR}/versions"
+if OUTPUT="$(run_update codex 2>&1)"; then
+    fail "activation with an unwritable versions path unexpectedly succeeded"
+elif [[ ! -e "${ROOT_DIR}/current" ]] && [[ "${OUTPUT}" == *'failed to create'*'versions'* ]]; then
+    pass
+else
+    fail "failed activation did not report failure cleanly: ${OUTPUT}"
+fi
+
 echo
 echo "passed: ${PASSES}, failed: ${FAILURES}"
 [[ "${FAILURES}" -eq 0 ]]

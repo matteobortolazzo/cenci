@@ -131,7 +131,10 @@ provision_plugins() {
     local agent_cli="${CENCI_AGENT_CLI:-claude}"
     shift 3
 
-    command -v "${agent_cli}" >/dev/null 2>&1 || return 0
+    if ! command -v "${agent_cli}" >/dev/null 2>&1; then
+        echo "warning: agent CLI '${agent_cli}' not found; skipping plugin provisioning this session" >&2
+        return 0
+    fi
 
     if [[ ! -d "${plugins_dir}/marketplaces/${marketplace_name}" ]]; then
         if ! "${agent_cli}" plugin marketplace add "${marketplace_repo}" >/dev/null 2>&1; then
@@ -174,7 +177,10 @@ update_plugins() {
     local agent_cli="${CENCI_AGENT_CLI:-claude}"
     shift 3
 
-    command -v "${agent_cli}" >/dev/null 2>&1 || return 0
+    if ! command -v "${agent_cli}" >/dev/null 2>&1; then
+        echo "warning: agent CLI '${agent_cli}' not found; skipping plugin update this session" >&2
+        return 0
+    fi
 
     local stamp="${plugins_dir}/.cenci-sand-update-stamp"
     if [[ "${ttl_minutes}" -gt 0 && -f "${stamp}" ]] \
@@ -223,7 +229,10 @@ provision_codex_plugins() {
     local agent_cli="${CENCI_AGENT_CLI:-codex}"
     shift 3
 
-    command -v "${agent_cli}" >/dev/null 2>&1 || return 0
+    if ! command -v "${agent_cli}" >/dev/null 2>&1; then
+        echo "warning: agent CLI '${agent_cli}' not found; skipping Codex plugin provisioning this session" >&2
+        return 0
+    fi
     mkdir -p "${codex_dir}" || {
         echo "warning: failed to create Codex config directory ${codex_dir}; plugins may be unavailable this session" >&2
         return 0
@@ -270,7 +279,10 @@ update_codex_plugins() {
     local agent_cli="${CENCI_AGENT_CLI:-codex}"
     shift 3
 
-    command -v "${agent_cli}" >/dev/null 2>&1 || return 0
+    if ! command -v "${agent_cli}" >/dev/null 2>&1; then
+        echo "warning: agent CLI '${agent_cli}' not found; skipping Codex plugin update this session" >&2
+        return 0
+    fi
 
     local stamp="${codex_dir}/.cenci-sand-update-stamp"
     if [[ "${ttl_minutes}" -gt 0 && -f "${stamp}" ]] \

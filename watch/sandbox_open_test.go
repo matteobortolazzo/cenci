@@ -99,6 +99,8 @@ func joinArgv(argv []string) string {
 //	FAKE_INSPECT_STATE   — container startup state (default "running 0")
 //	FAKE_READY_EXIT      — readiness probe exit code (default 0)
 //	FAKE_STARTUP_ERROR   — persistent startup error marker text
+//	FAKE_AGENT_CHECK_EXIT — EnsureAgentVolume's populated-check exit code
+//	                        (default 0 = the shared volume is populated)
 //	FAKE_ATTACH_EXIT     — exit code of the final `exec -it ...` attach
 //
 // The open path drives the extra verbs: `rm` (exit 0), `run` (prints a
@@ -117,7 +119,7 @@ func writeScriptedRuntime(t *testing.T, dir, name, callLog string) {
 		"ps) printf '%s' \"${FAKE_PS:-}\" ;;\n" +
 		"volume) if [ \"$2\" = ls ]; then printf '%s' \"${FAKE_VOLUMES:-}\"; exit \"${FAKE_VOLUME_LS_EXIT:-0}\"; fi ;;\n" +
 		"rm) exit 0 ;;\n" +
-		"run) case \"$*\" in *'/bin/cat'*) printf '%s' \"${FAKE_STARTUP_ERROR:-}\"; exit \"${FAKE_STARTUP_ERROR_EXIT:-0}\" ;; *'agent-cli.sh update'*) [ -z \"${FAKE_RUN_STDERR:-}\" ] || printf '%s\\n' \"${FAKE_RUN_STDERR}\" >&2; exit \"${FAKE_RUN_EXIT:-0}\" ;; esac; printf '%s\\n' fake-container-id ;;\n" +
+		"run) case \"$*\" in *'/bin/cat'*) printf '%s' \"${FAKE_STARTUP_ERROR:-}\"; exit \"${FAKE_STARTUP_ERROR_EXIT:-0}\" ;; *'agent-cli.sh update'*) [ -z \"${FAKE_RUN_STDERR:-}\" ] || printf '%s\\n' \"${FAKE_RUN_STDERR}\" >&2; exit \"${FAKE_RUN_EXIT:-0}\" ;; *'test -x /opt/cenci-agent'*) exit \"${FAKE_AGENT_CHECK_EXIT:-0}\" ;; esac; printf '%s\\n' fake-container-id ;;\n" +
 		"inspect)\n" +
 		"  case \"$*\" in\n" +
 		"  *State.Status*) printf '%s\\n' \"${FAKE_INSPECT_STATE:-running 0}\"; exit \"${FAKE_CONTAINER_INSPECT_EXIT:-0}\" ;;\n" +
@@ -463,7 +465,7 @@ func TestSandboxUpdateAgent_UsesIsolatedGlobalVolumeAndExactVersion(t *testing.T
 	}
 
 	lines := callLogLines(t, callLog)
-	prefix := "run --rm --user root --entrypoint /bin/bash -v cenci-agent-cli-codex:/opt/cenci-agent cenci-sandbox:latest /usr/local/bin/lib/agent-cli.sh update codex 1.2.3"
+	prefix := "run --rm --user root --cap-drop=ALL --security-opt=no-new-privileges --entrypoint /bin/bash -v cenci-agent-cli-codex:/opt/cenci-agent cenci-sandbox:latest /usr/local/bin/lib/agent-cli.sh update codex 1.2.3"
 	line, ok := findLineWithPrefix(lines, prefix)
 	if !ok {
 		t.Fatalf("expected isolated global update [%s], got calls:\n%s", prefix, strings.Join(lines, "\n"))
@@ -472,6 +474,63 @@ func TestSandboxUpdateAgent_UsesIsolatedGlobalVolumeAndExactVersion(t *testing.T
 		if strings.Contains(line, forbidden) {
 			t.Errorf("isolated updater argv contains %q: %s", forbidden, line)
 		}
+	}
+	if !strings.Contains(string(output), "host-global") && !strings.Contains(string(output), "used by every sandbox on this host") {
+		t.Errorf("expected a note that --version pins/downgrades host-globally, got:\n%s", output)
+	}
+}
+
+// TestSandboxUpdateAgent_UsesMonolithImageEvenInsideRepoWithOwnImage pins the
+// finding-1 security fix: the current directory's own repo image
+// (<repo-root>/.cenci/Dockerfile) is a caller-controlled build input, and the
+// updater runs as root with the host-global agent CLI volume mounted
+// read-write. If the updater ever honored that repo image, a malicious repo
+// image could gain root write access to a volume every sandbox on the host
+// mounts read-only. The updater must always target the trusted, checked-in
+// monolith image, never the repo's own image, even when running from inside
+// such a repo.
+func TestSandboxUpdateAgent_UsesMonolithImageEvenInsideRepoWithOwnImage(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+
+	repo := t.TempDir()
+	if out, err := exec.Command("git", "-C", repo, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	if err := os.MkdirAll(filepath.Join(repo, ".cenci"), 0o755); err != nil {
+		t.Fatalf("mkdir .cenci: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".cenci", "Dockerfile"), []byte("FROM cenci-sandbox-base\n"), 0o644); err != nil {
+		t.Fatalf("write repo Dockerfile: %v", err)
+	}
+	slug := launcher.Slugify(filepath.Base(repo))
+	repoImage := "cenci-sandbox-" + slug + ":latest"
+
+	cmd := exec.Command(binaryPath, "sandbox", "update-agent")
+	cmd.Env = batchEnv(t, fakeDir, assets)
+	cmd.Dir = repo // a repo that opts into its own image via .cenci/Dockerfile
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandbox update-agent (repo scope): %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	updateLine, ok := findLineWithPrefix(lines, "run --rm --user root --cap-drop=ALL --security-opt=no-new-privileges --entrypoint /bin/bash")
+	if !ok {
+		t.Fatalf("expected the isolated updater run, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(updateLine, "cenci-sandbox:latest") {
+		t.Errorf("expected the updater to target the monolith image, got: %s", updateLine)
+	}
+	if strings.Contains(updateLine, repoImage) {
+		t.Errorf("updater must never target the repo's own image (%s); got: %s", repoImage, updateLine)
+	}
+	if anyLineContains(lines, "-f "+repo+"/.cenci/Dockerfile") {
+		t.Errorf("update-agent must never build the repo's own image; calls:\n%s", strings.Join(lines, "\n"))
 	}
 }
 
@@ -621,7 +680,7 @@ func TestSandboxReseedCreds_IsOpenReseedAlias(t *testing.T) {
 	}
 
 	lines := callLogLines(t, callLog)
-	runLine, ok := findLineWithPrefix(lines, "run ")
+	runLine, ok := findLineWithPrefix(lines, "run --name ")
 	if !ok {
 		t.Fatalf("expected a container run, got calls:\n%s", strings.Join(lines, "\n"))
 	}
@@ -967,7 +1026,7 @@ func TestOpen_FreshCreate_PinsEntrypointContract(t *testing.T) {
 	}
 
 	lines := callLogLines(t, callLog)
-	runLine, ok := findLineWithPrefix(lines, "run ")
+	runLine, ok := findLineWithPrefix(lines, "run --name ")
 	if !ok {
 		t.Fatalf("expected a container run, got calls:\n%s", strings.Join(lines, "\n"))
 	}
@@ -1076,8 +1135,48 @@ func TestOpen_ExistingSharedVolumePerformsNoUpdaterOrVersionCheck(t *testing.T) 
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("open existing volume: %v\n%s", err, output)
 	}
-	if anyLineContains(callLogLines(t, callLog), "agent-cli.sh update") {
+	lines := callLogLines(t, callLog)
+	if anyLineContains(lines, "agent-cli.sh update") {
 		t.Errorf("existing shared volume triggered an updater/version check")
+	}
+	// The cheap populated-check (finding 3a) still runs against the existing
+	// volume; it just never falls through to the updater when it passes.
+	if !anyLineContains(lines, "test -x /opt/cenci-agent/current/node_modules/.bin/claude") {
+		t.Errorf("expected the populated-check to run against the existing volume, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// TestOpen_ExistingButUnpopulatedVolume_FallsThroughToUpdater pins finding
+// 3a: a volume that docker/podman auto-created via a concurrent first
+// launch's `docker run -v` (or one left behind by a previously failed
+// bootstrap) reports as "existing" but is actually empty/broken. The cheap
+// populated-check must catch that and fall through to the updater instead of
+// mounting a broken CLI into the workload.
+func TestOpen_ExistingButUnpopulatedVolume_FallsThroughToUpdater(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = append(env, "FAKE_AGENT_CHECK_EXIT=1")
+	cmd.Dir = t.TempDir()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("open (unpopulated existing volume): %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	updater, workload := -1, -1
+	for i, line := range lines {
+		if strings.Contains(line, "agent-cli.sh update claude") {
+			updater = i
+		}
+		if strings.HasPrefix(line, "run --name claude-cenci-default") {
+			workload = i
+		}
+	}
+	if updater < 0 || workload < 0 || updater >= workload {
+		t.Errorf("an existing-but-unpopulated volume must fall through to the updater before workload create; calls:\n%s", strings.Join(lines, "\n"))
 	}
 }
 
@@ -1128,6 +1227,63 @@ func TestOpen_FirstBootstrapFailureStreamsDiagnosticBeforeWorkloadCreate(t *test
 	}
 }
 
+// TestOpen_ContainerExitsDuringStartup_ReportsStatusAndExitCode pins finding
+// 4: a container that exits during startup is surfaced immediately with its
+// status/exit code, not degraded into the generic 60-second readiness
+// timeout.
+func TestOpen_ContainerExitsDuringStartup_ReportsStatusAndExitCode(t *testing.T) {
+	fakeDir := t.TempDir()
+	writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = append(env, "FAKE_READY_EXIT=1", "FAKE_INSPECT_STATE=exited 1")
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected a startup failure exit 1, got %T %v\n%s", err, err, output)
+	}
+	if !strings.Contains(string(output), "failed during startup (status exited, exit 1)") {
+		t.Errorf("expected the status/exit code in the error, got:\n%s", output)
+	}
+	if strings.Contains(string(output), "did not become ready within 60 seconds") {
+		t.Errorf("expected the immediate startup-failure error, not the generic timeout, got:\n%s", output)
+	}
+}
+
+// TestOpen_StartupErrorMarkerSurfacedVerbatim pins finding 4: when
+// sandbox/entrypoint.sh writes /home/dev/.cenci-agent-startup-error (agent
+// CLI path missing/not executable) before exiting non-zero, the launch error
+// surfaces that marker's content verbatim instead of falling back to
+// container logs or the generic failure message.
+func TestOpen_StartupErrorMarkerSurfacedVerbatim(t *testing.T) {
+	fakeDir := t.TempDir()
+	writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	const marker = "agent CLI missing at /opt/cenci-agent/current/node_modules/.bin/claude"
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = append(env,
+		"FAKE_READY_EXIT=1",
+		"FAKE_INSPECT_STATE=exited 1",
+		"FAKE_STARTUP_ERROR="+marker,
+	)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected a startup failure exit 1, got %T %v\n%s", err, err, output)
+	}
+	if !strings.Contains(string(output), marker) {
+		t.Errorf("expected the startup-error marker content surfaced verbatim, got:\n%s", output)
+	}
+}
+
 func TestOpen_NameFlag_ScopesContainerVolumeHostname(t *testing.T) {
 	fakeDir := t.TempDir()
 	callLog := writeScriptedRuntimes(t, fakeDir)
@@ -1142,7 +1298,7 @@ func TestOpen_NameFlag_ScopesContainerVolumeHostname(t *testing.T) {
 	}
 
 	lines := callLogLines(t, callLog)
-	runLine, ok := findLineWithPrefix(lines, "run ")
+	runLine, ok := findLineWithPrefix(lines, "run --name ")
 	if !ok {
 		t.Fatalf("expected a container run, got calls:\n%s", strings.Join(lines, "\n"))
 	}
@@ -1213,7 +1369,7 @@ func TestOpenReseedCreds_SetsReseedEnvOnCreate(t *testing.T) {
 	}
 
 	lines := callLogLines(t, callLog)
-	runLine, ok := findLineWithPrefix(lines, "run ")
+	runLine, ok := findLineWithPrefix(lines, "run --name ")
 	if !ok {
 		t.Fatalf("expected a container run, got calls:\n%s", strings.Join(lines, "\n"))
 	}
@@ -1237,7 +1393,7 @@ func TestOpenHostNetwork_AddsNetworkHostWithWarning(t *testing.T) {
 	}
 
 	lines := callLogLines(t, callLog)
-	runLine, _ := findLineWithPrefix(lines, "run ")
+	runLine, _ := findLineWithPrefix(lines, "run --name ")
 	if !strings.Contains(runLine, "--network host") {
 		t.Errorf("expected --network host in the run argv, got:\n%s", runLine)
 	}
@@ -1261,7 +1417,7 @@ func TestOpenDocker_MountsRuntimeSocketOrWarns(t *testing.T) {
 	}
 
 	lines := callLogLines(t, callLog)
-	runLine, _ := findLineWithPrefix(lines, "run ")
+	runLine, _ := findLineWithPrefix(lines, "run --name ")
 	if info, statErr := os.Stat("/var/run/docker.sock"); statErr == nil && info.Mode()&os.ModeSocket != 0 {
 		// Host has a real docker socket: it takes precedence and gets mounted.
 		if !strings.Contains(runLine, "-v /var/run/docker.sock:/var/run/docker.sock") {
@@ -1317,7 +1473,7 @@ func TestOpenDocker_SocketMountedPrintsWarning(t *testing.T) {
 	}
 
 	lines := callLogLines(t, callLog)
-	runLine, _ := findLineWithPrefix(lines, "run ")
+	runLine, _ := findLineWithPrefix(lines, "run --name ")
 	if !strings.Contains(runLine, "-v "+podmanSock+":/var/run/docker.sock") {
 		t.Errorf("expected the podman socket mount, got:\n%s", runLine)
 	}
@@ -1347,8 +1503,12 @@ func TestOpenCodexWithoutAuth_Exits1(t *testing.T) {
 	if !strings.Contains(string(output), "requires Codex auth") {
 		t.Errorf("expected the codex auth error, got:\n%s", output)
 	}
-	if lines := callLogLines(t, callLog); anyLineContains(lines, "run ") {
-		t.Errorf("expected no container run without codex auth, got:\n%s", strings.Join(lines, "\n"))
+	// Credential validation happens late, while assembling the workload's own
+	// create args, so it never races the shared agent volume's read-only
+	// populated-check (EnsureAgentVolume runs unconditionally early in
+	// Launch) -- only the workload container itself must never be created.
+	if lines := callLogLines(t, callLog); anyLineContains(lines, "run --name ") {
+		t.Errorf("expected no workload container run without codex auth, got:\n%s", strings.Join(lines, "\n"))
 	}
 }
 
@@ -1371,7 +1531,7 @@ func TestOpen_AttachToRunning_SkipsCreate(t *testing.T) {
 	}
 
 	lines := callLogLines(t, callLog)
-	if _, ok := findLineWithPrefix(lines, "run "); ok {
+	if _, ok := findLineWithPrefix(lines, "run --name "); ok {
 		t.Errorf("expected no container create when already running, got calls:\n%s", strings.Join(lines, "\n"))
 	}
 	if !anyLineContains(lines, "exec -u dev claude-cenci-default test -e /tmp/cenci-ready") {
@@ -1481,7 +1641,7 @@ func TestOpen_NoEventsSocket_LaunchesUnwiredWithWarning(t *testing.T) {
 		t.Errorf("expected the unavailable-socket warning, got:\n%s", output)
 	}
 	lines := callLogLines(t, callLog)
-	runLine, ok := findLineWithPrefix(lines, "run ")
+	runLine, ok := findLineWithPrefix(lines, "run --name ")
 	if !ok {
 		t.Fatalf("expected the launch to proceed unwired, got calls:\n%s", strings.Join(lines, "\n"))
 	}

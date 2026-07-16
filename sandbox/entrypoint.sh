@@ -223,6 +223,36 @@ fi
 # Codex OAuth credentials (ChatGPT sign-in)
 seed_credential /tmp/host-codex-creds/auth.json /home/dev/.codex/auth.json
 
+# ── Verify the shared agent CLI before signaling ready ─────────────
+# The launcher mounts the shared, updater-populated volume read-only at
+# /opt/cenci-agent and execs this absolute path directly (CENCI_AGENT_CLI, or
+# its default derived from CENCI_SANDBOX_AGENT — see
+# watch/internal/sandbox/launcher/{engine,launch}.go). If that volume is
+# still bootstrapping, or a previous update left it broken, docker only
+# surfaces a raw "exec: no such file" later, from whichever `exec` call hits
+# it first. Fail fast here instead — before "$@" ever runs below and before
+# the launcher's readiness marker (/tmp/cenci-ready) can be touched by it —
+# and leave a precise diagnostic exactly where the Go launcher's
+# startupFailureDetail reads it (watch/internal/sandbox/launcher/launch.go),
+# so a broken volume reports its own cause instead of a generic timeout.
+AGENT_CLI="${CENCI_AGENT_CLI:-/opt/cenci-agent/current/node_modules/.bin/${CENCI_SANDBOX_AGENT:-claude}}"
+if [[ ! -x "${AGENT_CLI}" ]]; then
+    AGENT_CLI_ERROR="agent CLI not found or not executable at ${AGENT_CLI} — the shared /opt/cenci-agent volume may still be bootstrapping, or a previous update failed; rerun 'cenci sandbox update-agent', or wait for the updater to finish and relaunch"
+    printf '%s\n' "${AGENT_CLI_ERROR}" > /home/dev/.cenci-agent-startup-error
+    echo "entrypoint: ${AGENT_CLI_ERROR}" >&2
+    exit 1
+fi
+# A marker from an earlier failed boot must not outlive the failure it
+# describes, or startupFailureDetail would surface it for unrelated crashes.
+rm -f /home/dev/.cenci-agent-startup-error
+
+# Put the shared agent CLI's bin directory ahead of PATH so an interactive
+# --shell session (or any other child process in this container) can invoke
+# the bare `claude`/`codex` command, not just the absolute path the launcher
+# execs. Exported before every remaining exec below (both the docker-socket
+# re-exec and the final exec) so it reaches the whole container session.
+export PATH="/opt/cenci-agent/current/node_modules/.bin:${PATH}"
+
 # ── Docker socket group alignment (DooD) ────────────────────────────
 if [[ -S /var/run/docker.sock ]]; then
     SOCK_GID=$(stat -c '%g' /var/run/docker.sock)

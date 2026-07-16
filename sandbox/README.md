@@ -193,6 +193,19 @@ Native update flows are disabled because workload mounts cannot modify the CLI. 
 updates are global across repositories. Running containers from the older writable-home
 lifecycle must be stopped and relaunched before attachment.
 
+**`update-agent` mutates a host-global volume shared by every sandbox** — not just this
+repo's — including pinning or downgrading via `--version`. Every repository and named
+instance on the host resolves the same `current` symlink.
+
+**Version-retention race:** only the current and previous releases are kept on disk. An
+already-running sandbox holds its agent CLI open from the release directory it started
+with, so two `update-agent` calls in a row (while that session is still running) can prune
+the release out from under it — the version currently executing is neither "current" nor
+"previous" once two newer updates have landed. `update-agent`'s own output notes this:
+already-running sandboxes keep using the version they started with and must be relaunched
+to pick up an update, but a session spanning two or more updates can hit this race. This
+is a known limitation, not a bug to work around by widening retention.
+
 ## First-Run Setup
 
 If `~/.claude/.credentials.json` and `~/.config/gh/hosts.yml` exist on the host, they are automatically injected into the container. **No manual auth needed.**
@@ -372,6 +385,15 @@ currently unenforced by tooling.
 any other file in the PR that adds or changes it. It only runs `docker build` steps
 assembled from `sandbox/fragments/*.dockerfile` by configure's templates — no
 arbitrary runtime hooks execute during generation or during the build it produces.
+
+**Stale managed block:** a repo whose committed `.cenci/Dockerfile` still contains an
+older `cenci:managed-begin`/`cenci:managed-end` block from before agent CLIs moved to
+shared volumes keeps baking a stale, root-owned `codex` (or `claude`) binary into
+`/usr/local/bin` on every image build. `cenci open` launches are unaffected — the
+launcher always execs the shared volume's absolute path — but an interactive shell in
+that repo's container may still see the frozen, image-baked version if it shadows the
+shared one on `PATH`. Rerun `/cenci:configure` to regenerate the managed block and drop
+the stale binary.
 
 ### Permission model
 
@@ -653,7 +675,16 @@ fix, run `chown -R $(id -u):$(id -g) ~/Repos` on the host — see
 **`claude` or `codex` not found inside the container**
 The selected CLI is executed from `/opt/cenci-agent/current`. Check bootstrap diagnostics for
 registry, signature, provenance, or network errors. To repair or refresh the shared global
-volume, run `cenci sandbox update-agent --agent claude|codex`.
+volume, run `cenci sandbox update-agent --agent claude|codex`. If the volume is still
+bootstrapping or a previous update left it broken, the entrypoint now fails the container
+startup itself with a one-line diagnostic (rather than a raw `exec: no such file` error);
+`cenci open` surfaces that diagnostic directly.
+
+**Interactive shell runs an old/frozen `claude` or `codex`**
+If `~/Repos/<repo>/.cenci/Dockerfile` still has an old managed block from before agent CLIs
+moved to shared volumes, its image build bakes a stale, root-owned copy into
+`/usr/local/bin`. See [Per-repo images](#per-repo-images) — rerun `/cenci:configure` to
+regenerate the managed block and remove it.
 
 **Container runtime**
 The launcher auto-detects `podman` first, then falls back to `docker`.

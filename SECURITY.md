@@ -77,6 +77,13 @@ interactively confirm their removal. Volume deletion defaults to no because remo
 home destroys copied credentials and session history; shared CLI volumes contain no
 credentials and are recreated by verified bootstrap on the next launch.
 
+The shared `cenci-agent-cli-*` volumes are host-global, not per-repo or per-instance:
+`cenci sandbox update-agent` (including a pinned or downgraded `--version`) mutates the
+one volume every sandbox on the host mounts read-only, so an update or rollback in one
+repo's context affects every other repository's sessions too. See [sandbox/README.md
+under Update an agent
+CLI](./sandbox/README.md#update-an-agent-cli) for the activation and retention model.
+
 ## Reporting a vulnerability
 
 Email **matteobortolazzo@pm.me** with details — this is the reliable channel today.
