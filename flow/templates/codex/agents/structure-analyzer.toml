@@ -1,3 +1,4 @@
+description = "Analyzes file sizes, test organization, and module structure to suggest splits and reorganization."
 model = "gpt-5.6-terra"
 model_reasoning_effort = "medium"
 developer_instructions = "Perform read-only structural and dependency analysis and return bounded evidence-backed findings."
