@@ -14,18 +14,18 @@ Read the `subagent-safety` reference skill before delegating work to subagents.
 
 ## Phase 1: Context Loading
 
-Read `.claude/config.json`.
-Read the `claudeMdLocation` field from `.claude/config.json` to determine where `CLAUDE.md` is located (defaults to `.claude/CLAUDE.md` if not set).
+Read `project-core`, resolve neutral configuration, and use the resulting config.
+Use root and applicable project `AGENTS.md` as guidance.
 
 > **Progressive disclosure**: Do NOT eagerly read reference docs in this Context section. Read relevant `docs/<topic>.md` files (and any legacy `.claude/rules/lessons-learned.md` if present) when you reach the analysis step that needs them.
 
 ### Monorepo Context Loading
 
-If `isMonorepo` is `true` in `.claude/config.json`:
+If `isMonorepo` is `true` in the resolved config:
 
 1. **Determine affected project(s)**: From the scope and file paths, match against the `projects` array in config to identify which project(s) the analysis affects.
-2. **Read per-project CLAUDE.md**: For each affected project, read `<project-path>/CLAUDE.md` for project-specific stack details and conventions.
-3. **Pass project context to subagents**: When delegating to analyzers, include the per-project CLAUDE.md content. Tell the subagent to read any relevant `docs/<topic>.md` and any legacy `.claude/rules/lessons-learned-<slug>.md` (if it still exists) on demand.
+2. **Read per-project AGENTS.md** for stack details and conventions.
+3. **Pass project context to subagents**, including applicable AGENTS.md content and on-demand docs.
 
 **Shell rules**: Read the `shell-rules` skill before running any `gh` commands (covers heredoc temp-file pattern).
 

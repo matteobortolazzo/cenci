@@ -12,6 +12,14 @@ This page is a reference for anyone upgrading an existing pre-rename install. If
 you're installing fresh, you don't need this — just follow
 [Getting started](getting-started.md).
 
+## Neutral project core migration
+
+Project workflow configuration now lives in `.cenci/config.json`, and shared guidance
+lives in `AGENTS.md`. Existing `.claude/config.json` projects remain readable as a
+legacy fallback. Run `cenci:configure` to preview and approve migration; unknown keys
+and substantive guidance are preserved. Claude Code receives a generated `CLAUDE.md`
+importing `@AGENTS.md`; settings and native agent files remain client-specific adapters.
+
 ## Old → new name reference
 
 ### CLI / binaries

@@ -15,19 +15,18 @@ Read the `subagent-safety` reference skill before delegating work to subagents.
 
 ## Context
 
-**Config check**: Before anything else, verify `.claude/config.json` exists by reading it. If the file does not exist, **stop immediately** and tell the user:
-"cenci is not configured for this project. Run `/cenci:configure` first to set up."
+Read `project-core` and resolve neutral configuration before continuing.
 
-Read `.claude/config.json`.
-Read the `claudeMdLocation` field from `.claude/config.json` to determine where `CLAUDE.md` is located (defaults to `.claude/CLAUDE.md` if not set).
+Use the config returned by `project-core`. Shared guidance is `AGENTS.md`; read legacy
+`CLAUDE.md` only as additional compatibility context.
 
 > **Progressive disclosure**: Do NOT eagerly read reference docs in this Context section. The planner subagent reads relevant `docs/<topic>.md` files (and any legacy `.claude/rules/lessons-learned.md` if present) as part of its analysis. `docs/git-workflow.md` is only consulted in Phase 9 (commits/PRs). `.claude/rules/` is reserved for files explicitly `@`-imported by `CLAUDE.md`; do not assume anything lives there.
 
 ### Monorepo Context Loading
 
-If `isMonorepo` is `true` in `.claude/config.json`:
+If `isMonorepo` is `true` in the resolved config:
 
-1. **Do not read per-project CLAUDE.md files in the main agent.** The context-gatherer (see Context Gathering below) determines affected project(s) and bundles their CLAUDE.md content into the context bundle; pass it the `projects` array from config.
+1. **Do not read per-project AGENTS.md files in the main agent.** The context-gatherer determines affected projects and bundles their AGENTS.md content; pass it the `projects` array.
 2. **Use project-specific commands**: When delegating to subagents, use the affected project's `buildCommand`, `testCommand`, and `lintCommand` (when set) from config instead of inferring them globally (the digest names the affected projects).
 3. **Point subagents at context, don't paste it**: When delegating to planner/implementer, pass the bundle path (or plan file path) for project context. Tell the subagent to read relevant `docs/<topic>.md` files (and the legacy `.claude/rules/lessons-learned.md` or `.claude/rules/lessons-learned-<slug>.md` if those legacy files exist). Do not pre-read those in the main agent.
 

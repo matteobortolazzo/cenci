@@ -49,7 +49,7 @@ When LSP servers are active, diagnostics provide high-signal findings. Apply the
 - **Dead code** detected by LSP → Should Fix (confidence 80)
 
 ## Review Checklist
-- [ ] Follows `CLAUDE.md` and `docs/<topic>.md` conventions
+- [ ] Follows applicable `AGENTS.md` and `docs/<topic>.md` conventions
 - [ ] Tests cover acceptance criteria
 - [ ] No obvious bugs
 - [ ] Edge cases handled

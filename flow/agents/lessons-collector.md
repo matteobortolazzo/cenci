@@ -51,7 +51,7 @@ If either check fails — a relative path, or an absolute path with **no** `/.wo
 
 ## Process
 
-1. Read `<project-root>/.claude/config.json` — note `claudeMdLocation` (defaults to `.claude/CLAUDE.md`).
+1. Read `<project-root>/.cenci/config.json`, falling back read-only to `.claude/config.json`.
 2. Review the full conversation/session context provided to you.
 3. Identify genuine self-corrections — apply the bar strictly:
    - Build/test failure that needed a non-obvious fix (not normal TDD red→green)
@@ -66,12 +66,12 @@ If either check fails — a relative path, or an absolute path with **no** `/.wo
 ### Step 4a: Discover existing homes
 
 - List `<project-root>/docs/*.md` (if the directory exists) — note each topic file and its scope.
-- Read the project's `CLAUDE.md` (path from `claudeMdLocation`) — note the `## Critical Rules` section if present.
+- Read applicable `AGENTS.md` and note its `## Critical Rules` section.
 
 ### Step 4b: Classify each finding
 
 1. **Fits an existing `docs/<topic>.md`** → append a bullet under the most relevant `##` section in that file. *(Preferred — keeps the lesson next to related conventions.)*
-2. **Is a project-wide invariant worth permanent placement** (architecture, integration, convention all future work must follow) → append a bullet under `## Critical Rules` in CLAUDE.md.
+2. **Is a project-wide invariant worth permanent placement** → append it under `## Critical Rules` in AGENTS.md.
 3. **2+ findings cluster on a new topic** with no existing home → create a new `<project-root>/docs/<topic>.md` and append both findings as bullets. Use a clear, lowercase, hyphenated topic name (e.g. `docs/caching.md`, `docs/migrations.md`).
 4. **Otherwise drop the finding** and report it in the output summary so the user can decide. Do NOT write to `lessons-learned.md`. Do NOT create a `docs/<topic>.md` for a single one-off observation.
 

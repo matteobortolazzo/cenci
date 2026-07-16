@@ -1,6 +1,6 @@
 ---
 name: configure
-description: "Claude Code-only: configure the cenci workflow plugin, Claude settings, MCP servers, and project guidance."
+description: "Configure cenci's neutral project core and generate Claude/Codex adapters."
 compatibility: Requires Claude Code settings, plugin environment variables, and AskUserQuestion.
 argument-hint: [additional context]
 user-invocable: true
@@ -21,11 +21,16 @@ If empty, proceed normally with defaults.
 
 ### Existing Config Detection
 
-Before asking questions, check if `.claude/config.json` already exists:
+Resolve project configuration in this order:
 
-- Run `test -f .claude/config.json` to detect an existing configuration.
-- **If it exists**: Read and parse it. Store as `existingConfig`. This is a **re-configuration** run — each question below will show the existing value as the default, letting the user accept it or change it.
-- **If it does not exist**: Set `existingConfig` to `null`. This is a **fresh** run — proceed normally.
+1. `.cenci/config.json` is canonical. If present, read it as `existingConfig`.
+2. Otherwise read `.claude/config.json` as `legacyConfig`. Treat this as a migration run.
+3. If neither exists, set `existingConfig` to null.
+
+On migration, preserve every unknown key from `legacyConfig`; new writes go only to
+`.cenci/config.json`. If both files exist, the canonical value wins for overlapping keys,
+but merge legacy-only unknown keys into the proposed canonical object. Never rewrite or
+delete `.claude/config.json`; it is a read-only compatibility artifact.
 
 When `existingConfig` is present, tell the user before starting questions:
 "Found existing configuration. Each question will show your current setting as the default — select it to keep it unchanged."
@@ -231,9 +236,9 @@ If both conditions are met, present using AskUserQuestion:
    1. Check if `playwright-cli` is already installed: `which playwright-cli 2>/dev/null`
       - **Found** → "✓ `playwright-cli` found at `<path>`"
       - **Not found** → "Run `npm i -g @playwright/cli` to install, then `playwright-cli install --skills` to set up agent skills."
-   2. Set `playwrightCli: true` in `.claude/config.json`
+   2. Set `playwrightCli: true` in `.cenci/config.json`
 
-   **If No**: Set `playwrightCli: false` in `.claude/config.json` (or omit the field)
+   **If No**: Set `playwrightCli: false` in `.cenci/config.json` (or omit the field)
 
 If the conditions are not met, skip this section entirely (do not set `playwrightCli` in config).
 
@@ -427,17 +432,21 @@ Run `gh auth status` and check it returns authenticated. If not, instruct the us
 
 After gathering answers:
 
-1. **Detect existing CLAUDE.md location**:
-   - Check if `CLAUDE.md` exists at the repo root: `test -f CLAUDE.md`
-   - Check if `.claude/CLAUDE.md` exists: `test -f .claude/CLAUDE.md`
-   - **If both exist**: Ask via `AskUserQuestion`: "Found CLAUDE.md at both the repo root and `.claude/CLAUDE.md`. Which location do you want to keep?" Options: "Root (CLAUDE.md)", ".claude/ directory (.claude/CLAUDE.md)". Delete the unchosen file after updating the kept one.
-   - **If only root exists**: Ask via `AskUserQuestion`: "Found existing `CLAUDE.md` at the repo root. Do you want to keep it there or move it to `.claude/CLAUDE.md`?" Options: "Keep at root", "Move to .claude/". If moving, delete the root file after creating `.claude/CLAUDE.md`.
-   - **If only `.claude/CLAUDE.md` exists**: Keep it in place.
-   - **If neither exists**: Create at `.claude/CLAUDE.md` (default).
+1. **Generate canonical guidance and client adapters**:
+   - `AGENTS.md` at the repository root is canonical shared guidance. Use
+     `templates/agents-md-root.md` or `templates/agents-md-root-monorepo.md`.
+   - For each monorepo project, generate `<project>/AGENTS.md` from
+     `templates/agents-md-project.md`.
+   - Generate root `CLAUDE.md` as `@AGENTS.md`, followed only by an optional block
+     delimited with `<!-- cenci:claude-only:start -->` and
+     `<!-- cenci:claude-only:end -->`.
+   - Generate each `<project>/CLAUDE.md` as `@AGENTS.md` with the same optional block.
 
-   **Single-project**: Update the chosen file using the template at `${CLAUDE_PLUGIN_ROOT}/templates/claude-md-root.md` — customize with stack. If the file already has content, merge the template sections into it rather than overwriting (preserve user-added content).
-
-   **Monorepo**: Update the chosen file using the template at `${CLAUDE_PLUGIN_ROOT}/templates/claude-md-root-monorepo.md` instead — customize with project count and populate the Projects table from the discovered projects. If the file already has content, merge the template sections into it rather than overwriting (preserve user-added content).
+   Before replacing any substantive existing `AGENTS.md` or `CLAUDE.md`, render and show
+   the complete proposed diff with `git diff --no-index`, then require approval through
+   `AskUserQuestion`. Preserve existing material by merging it into the shared AGENTS
+   content or the explicitly Claude-only block. Never silently delete guidance. Stable
+   markers make reruns idempotent.
 
 1b. **Generate `.lsp.json`** (if any LSP servers were selected in question 6):
 
@@ -467,15 +476,15 @@ After gathering answers:
 2. Create the `docs/` directory at the repo root (if it doesn't exist) and deploy on-demand reference docs from `${CLAUDE_PLUGIN_ROOT}/templates/docs/`:
    - `docs/git-workflow.md` — branching, commit format, PR workflow
 
-   `.claude/rules/` is reserved for files explicitly `@`-imported by `CLAUDE.md` (auto-loaded at session start). Do NOT deploy reference docs there. Today, configure does not write any files into `.claude/rules/` — leave it absent unless the user opts into auto-loaded rules later.
+   `.claude/rules/` is reserved for files explicitly imported by the generated Claude adapter. Do NOT deploy shared reference docs there.
 
    **Backward compatibility**: Do NOT delete or migrate any existing `.claude/rules/lessons-learned.md`, `.claude/rules/lessons-learned-<slug>.md`, or `.claude/rules/git-workflow.md` files. Skills and agents continue to read them as legacy fallback if present.
 
-   Do NOT deploy `testing.md` or `security.md` — testing rules load on-demand via the `testing` skill, and security rules are distributed across root CLAUDE.md (universal), per-project CLAUDE.md (stack-specific), and stack skills.
+   Do NOT deploy `testing.md` or `security.md` — testing rules load on-demand via the `testing` skill, and security rules are distributed across root/project AGENTS.md and stack skills.
 
 **Monorepo-only additional files:**
 
-3a. For each project, create `<project-path>/CLAUDE.md` using the template at `${CLAUDE_PLUGIN_ROOT}/templates/claude-md-project.md` — customize with:
+3a. For each project, create `<project-path>/AGENTS.md` using `templates/agents-md-project.md`, then create its `CLAUDE.md` import adapter — customize with:
    - `<project-name>`: the project name (from slug or user input)
    - `<stack>`: detected stack
    - `<repo-name>`: the repository name
@@ -852,7 +861,7 @@ For each MCP selected in question 5:
      `.cenci/Dockerfile` — team-shared and reviewed; `{pr_worktree}` keeps it
      portable). Do **not** add it to `.gitignore`.
 
-6. **Write `.claude/config.json`** with their choices using **merge semantics**:
+6. **Write `.cenci/config.json`** with their choices using **merge semantics**:
 
    - If `existingConfig` is not null: start from the existing object, overwrite each field with the user's answers. This preserves fields the skill doesn't manage.
    - If `existingConfig` is null: create the file fresh.
@@ -865,7 +874,7 @@ For each MCP selected in question 5:
     "frontend": "angular21",
     "testing": ["xunit", "jasmine"]
   },
-  "claudeMdLocation": ".claude/CLAUDE.md | CLAUDE.md",
+  "guidanceLocation": "AGENTS.md",
   "mcpServers": {
     "context7": true,
     "angular": false,

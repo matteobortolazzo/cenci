@@ -22,7 +22,9 @@ allowed-tools: Read, Write, Bash(pencil:*), Bash(gh:*), Bash(git:*), Bash(curl:*
 
 ## Phase 0 — Context Loading
 
-**Config check**: Before anything else, verify `.claude/config.json` exists by reading it. If the file does not exist, **stop immediately** and tell the user:
+Read `project-core` and resolve neutral configuration before continuing.
+
+**Config check**: If neither canonical nor legacy configuration exists, **stop immediately** and tell the user:
 "cenci is not configured for this project. Run `/cenci:configure` first to set up."
 
 Read `.claude/config.json`.

@@ -13,10 +13,9 @@ allowed-tools: Read, Write, Glob, Bash(gh:*), Bash(git:*), Bash(curl:*), Bash(mk
 
 ## Context
 
-**Config check**: Before anything else, verify `.claude/config.json` exists by reading it. If the file does not exist, **stop immediately** and tell the user:
-"cenci is not configured for this project. Run `/cenci:configure` first to set up."
+Read `project-core` and resolve neutral configuration before continuing.
 
-Read `.claude/config.json`.
+Use the config returned by `project-core`; if none exists, stop with its client-appropriate setup guidance.
 
 **Parse `$ARGUMENTS`:**
 The first token is the ticket ID. Everything after it is optional **user context** (additional instructions or focus areas).
