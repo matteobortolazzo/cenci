@@ -13,6 +13,7 @@ import (
 // homeVolumePattern matches the per-agent home volume names cenci-sand
 // creates (VOLUME_NAME="${CONTAINER_PREFIX}-home-...").
 var homeVolumePattern = regexp.MustCompile(`^(claude|codex)-cenci-home-`)
+var agentCLIVolumePattern = regexp.MustCompile(`^cenci-agent-cli-(claude|codex)$`)
 
 // Prune cleans up superseded cenci-sandbox-base tags, dangling images, and
 // stopped sandbox containers. Volumes are left alone unless volumes is true,
@@ -65,19 +66,29 @@ func (e *Engine) Prune(volumes bool) error {
 		_, _ = fmt.Fprintln(e.Stderr, "Error: failed to list sandbox volumes.")
 		return fmt.Errorf("%s volume ls: %w", e.Runtime, err)
 	}
-	var stale []string
+	var homes, agents, stale []string
 	for _, name := range splitLines(string(out)) {
 		if homeVolumePattern.MatchString(name) {
-			stale = append(stale, name)
+			homes = append(homes, name)
+		} else if agentCLIVolumePattern.MatchString(name) {
+			agents = append(agents, name)
 		}
 	}
+	stale = append(stale, homes...)
+	stale = append(stale, agents...)
 	if len(stale) == 0 {
 		_, _ = fmt.Fprintln(e.Stdout, "No sandbox volumes found.")
 		return nil
 	}
 
-	_, _ = fmt.Fprintln(e.Stderr, "The following volumes hold copied credentials and full session history:")
-	_, _ = fmt.Fprintln(e.Stderr, strings.Join(stale, "\n"))
+	if len(homes) > 0 {
+		_, _ = fmt.Fprintln(e.Stderr, "Credential-bearing home volumes (credentials, config, and session history):")
+		_, _ = fmt.Fprintln(e.Stderr, strings.Join(homes, "\n"))
+	}
+	if len(agents) > 0 {
+		_, _ = fmt.Fprintln(e.Stderr, "Shared agent CLI volumes (global executables; no credentials):")
+		_, _ = fmt.Fprintln(e.Stderr, strings.Join(agents, "\n"))
+	}
 	_, _ = fmt.Fprint(e.Stderr, "Remove these volumes? [y/N] ")
 	// Only a complete line can confirm: bash's `read ... || CONFIRM=""`
 	// resets the variable on EOF, so a truncated "y" without a newline

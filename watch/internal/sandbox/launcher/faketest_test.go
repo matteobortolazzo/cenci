@@ -67,3 +67,20 @@ func containsPrefix(lines []string, prefix string) bool {
 	}
 	return false
 }
+
+// containsLineWithAll reports whether some line contains every one of subs.
+func containsLineWithAll(lines []string, subs ...string) bool {
+	for _, l := range lines {
+		all := true
+		for _, s := range subs {
+			if !strings.Contains(l, s) {
+				all = false
+				break
+			}
+		}
+		if all {
+			return true
+		}
+	}
+	return false
+}

@@ -26,6 +26,15 @@ func TestSlugify(t *testing.T) {
 	}
 }
 
+func TestAgentCLIVolumeName_IsGlobalPerAgent(t *testing.T) {
+	if got := AgentCLIVolumeName("claude"); got != "cenci-agent-cli-claude" {
+		t.Errorf("Claude volume = %q", got)
+	}
+	if got := AgentCLIVolumeName("codex"); got != "cenci-agent-cli-codex" {
+		t.Errorf("Codex volume = %q", got)
+	}
+}
+
 func TestComputeWorkdir(t *testing.T) {
 	if got := ComputeWorkdir("/home/u/repo", "/home/u/repo"); got != "/workspace" {
 		t.Errorf("repo root: got %q, want /workspace", got)

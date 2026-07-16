@@ -104,7 +104,7 @@ Commands:
   babysit                            supervise an open PR until it merges or closes
   dispatch                           fleet auto-dispatch (enroll/unenroll/status/loop)
   close                              close a finished/idle agent window
-  sandbox                            manage the sandbox container (build|build-base|prune|update-plugins|reseed-creds|reap-orphans|ls|stop)
+  sandbox                            manage the sandbox container (build|build-base|prune|update-agent|update-plugins|reseed-creds|reap-orphans|ls|stop)
   open [shortcut]                    launch or attach an interactive sandbox session (aliased by the "cn" binary name)
   doctor                             check prerequisites and installed stack components, change nothing (delegates to the installed cenci-installer wrapper)
   update                             update installed plugins and restart the daemon (delegates to the installed cenci-installer wrapper)

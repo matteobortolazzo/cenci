@@ -31,6 +31,7 @@ bash sandbox/tests/cenci-widgets.test.sh         # GUI bar-widget detect/install
 bash sandbox/tests/settings-merge.test.sh        # lib/migrate-settings.sh deep-merge behavior
 bash sandbox/tests/seed-auth.test.sh             # lib/seed-auth.sh credential seeding
 bash sandbox/tests/codex-config.test.sh          # lib/codex-config.sh config generation
+bash sandbox/tests/agent-cli.test.sh             # shared, verified, atomic agent update lifecycle
 bash sandbox/tests/fragments-drift.test.sh       # Dockerfile vs fragments/*.dockerfile byte-parity
 bash sandbox/tests/heal-plugins.test.sh          # plugin self-heal (Write->Edit allow conversion)
 ```
@@ -40,7 +41,7 @@ black-box tests in `watch/sandbox_open_test.go` plus the reap contract suite
 `watch/tests/reap-orphans.test.sh` (run with `CENCI_BIN`).
 
 ## Conventions
-- Keep the image minimal; bake tools into the image rather than bind-mounting from the host.
+- Keep the image minimal; agent CLIs belong in host-global volumes mounted read-only in workloads. Only the isolated updater may mount them writable.
 - `entrypoint.sh` must stay POSIX-portable and pass `shellcheck`.
 - The container is the security boundary — Claude Code's host sandbox stays disabled inside it.
 
@@ -68,26 +69,34 @@ black-box tests in `watch/sandbox_open_test.go` plus the reap contract suite
 digest of `Dockerfile.base` + `entrypoint.sh` + `lib/` (Ubuntu, system packages, locale,
 `uv`, GitHub CLI, Docker CLI, non-root `dev` user, entrypoint — no language runtimes).
 `Dockerfile` (the monolith) builds `cenci-sandbox:latest` `FROM` that base image and
-layers on the runtime stacks in order: .NET, Node, Playwright, Go, then Codex last (Codex
-bumps daily via the deps-bump workflow, so keeping it last avoids invalidating the other
-stacks' layer cache on every bump).
+layers on the runtime stacks in order: .NET, Node, Playwright, and Go. Agent CLIs are not
+image layers: the launcher bootstraps absent `cenci-agent-cli-<agent>` volumes through a
+credential-free updater, and workloads mount them read-only at `/opt/cenci-agent`.
+`cenci sandbox update-agent` updates that global volume explicitly and atomically.
+Credentials are still staged only into per-scope home volumes.
 
 `fragments/*.dockerfile` holds the same composable blocks (`dotnet`, `node`, `playwright`,
-`go`, `python`, `rust`, `codex`) as standalone snippets used to assemble per-project images.
-Generated images always include Node and Codex so either supported agent can launch; the
-remaining fragments (including `playwright`, used for `verify-ui`'s Chromium screenshot
-capture) follow the detected project stack. **Invariant:** each fragment and its
-corresponding block in `Dockerfile` must stay byte-identical — hand-duplicated on every
-change (e.g. bumping `DOTNET_SDK_VERSION` or adding a package to a stack block means
-editing both `Dockerfile` and `fragments/<stack>.dockerfile` identically).
+`go`, `python`, `rust`) as standalone snippets used to assemble per-project images.
+Generated images always include Node so the isolated updater can install either npm package;
+the remaining fragments (including `playwright`, used for `verify-ui`'s Chromium
+screenshot capture) follow the detected project stack. Per-repo images include the shared
+Node runtime, never the agent packages. **Invariant:** each fragment and its corresponding block in `Dockerfile` must stay
+byte-identical — hand-duplicated on every change (e.g. bumping `DOTNET_SDK_VERSION` or adding a
+package to a stack block means editing both `Dockerfile` and `fragments/<stack>.dockerfile`
+identically).
 
 ## Dependency version pins
 Image dependency versions are pinned via Dockerfile `ARG`s, all checked daily by
 `.github/workflows/deps-bump.yml`. Three tiers, by breaking-change risk:
 
+- **Runtime-managed (agent CLIs)** — Codex and Claude Code bootstrap at a verified exact
+  `latest` version into global read-only-at-workload volumes and update only through
+  `cenci sandbox update-agent`. There is no image version ARG, so `deps-bump.yml` does not
+  track them. Integrity and signatures do not defend against a legitimately published
+  malicious vendor release; Codex additionally requires provenance for `openai/codex`,
+  while Claude currently has no npm provenance and retains that vendor-release trust.
 - **Auto-bumped, auto-merged** — one auto-merged PR per outdated dependency, then the
   cenci-sandbox rebuild is dispatched once the merge lands:
-  - `CODEX_VERSION` — `Dockerfile` **and** `fragments/codex.dockerfile` (both stamped, kept in sync).
   - `GO_VERSION` — `Dockerfile` **and** `fragments/go.dockerfile` (both stamped, kept in sync).
   - `UV_VERSION` — `Dockerfile.base`.
 - **Auto-proposed, in-band auto-merges / out-of-band opens a manual-merge PR**:
@@ -102,7 +111,7 @@ Image dependency versions are pinned via Dockerfile `ARG`s, all checked daily by
 - **Manual only (not yet wired into `deps-bump.yml`)**:
   - `PLAYWRIGHT_VERSION` — `Dockerfile` (+ `fragments/playwright.dockerfile`,
     byte-identical). Bump by hand and rebuild; add it to the auto-bumped tier above in a
-    follow-up if it proves stable enough to auto-merge like Codex/Go/uv.
+    follow-up if it proves stable enough to auto-merge like Go/uv.
 
 ## Security
 - Never bake secrets or credentials into the image layers.

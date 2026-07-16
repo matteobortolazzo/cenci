@@ -6,7 +6,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -57,6 +59,8 @@ const cenciSocketMountDest = "/run/user/1000/cenci"
 // tests can shrink the 600-poll (60s) budget.
 var readyPollInterval = 100 * time.Millisecond
 
+var exactSemverPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$`)
+
 // readyPollAttempts is the wait_until_ready poll budget (600 × 100ms = 60s).
 const readyPollAttempts = 600
 
@@ -77,6 +81,12 @@ func ValidateAgent(agent string) error {
 		return nil
 	}
 	return usageErrorf("unknown agent %q. Valid agents: claude, codex.", agent)
+}
+
+// IsExactSemver rejects npm tags and ranges while allowing exact stable and
+// prerelease versions for controlled rollout or rollback.
+func IsExactSemver(version string) bool {
+	return exactSemverPattern.MatchString(version)
 }
 
 // DefaultModel returns the per-agent model default applied when neither a
@@ -118,18 +128,13 @@ func (e *Engine) Launch(opts Options) error {
 	if err := e.EnsureImage(scope); err != nil {
 		return err
 	}
-
-	// Claude is a self-contained binary bind-mounted from the host; Codex is
-	// baked into the image (npm launcher + nested native binary can't be
-	// single-file mounted), so only Claude needs a host binary here.
-	var agentBin string
-	if agent == "claude" {
-		agentBin, err = resolveHostBinary("claude")
-		if err != nil {
-			return fmt.Errorf("%s binary not found. Install %s on the host first.", agent, agent) //nolint:staticcheck // user-facing message ported verbatim from cenci-sand
-		}
+	if err := e.EnsureAgentVolume(agent); err != nil {
+		return err
 	}
 
+	// The selected agent is already present in its global shared volume; no
+	// executable is sourced from the host or credential-bearing home volume.
+	// Credentials are still staged from the host.
 	cenciBin, socketDir, cenciAvailable := e.resolveCenciWiring()
 
 	// The container is the security boundary: the agent runs with full
@@ -161,9 +166,22 @@ func (e *Engine) Launch(opts Options) error {
 		return err
 	}
 	if running {
-		e.warnIfUnwired(scope.ContainerName, cenciAvailable)
-		if e.lifecycleLabel(scope.ContainerName) == "detached" {
-			if err := e.waitUntilReady(scope.ContainerName); err != nil {
+		compatible, err := e.containerHasSharedAgentMount(scope.ContainerName, agent)
+		if err != nil {
+			return err
+		}
+		if !compatible {
+			return fmt.Errorf("running container '%s' predates shared read-only agent CLIs; run 'cenci sandbox stop %s', then relaunch", scope.ContainerName, scope.ContainerName)
+		}
+		if err := e.warnIfUnwired(scope.ContainerName, cenciAvailable); err != nil {
+			return err
+		}
+		label, err := e.lifecycleLabel(scope.ContainerName)
+		if err != nil {
+			return err
+		}
+		if label == "detached" {
+			if err := e.waitUntilReady(scope); err != nil {
 				return err
 			}
 		}
@@ -173,7 +191,7 @@ func (e *Engine) Launch(opts Options) error {
 	// Remove a stopped container of the same name if one exists.
 	_ = exec.Command(e.Runtime, "rm", scope.ContainerName).Run()
 
-	runArgs, err := e.assembleRunArgs(agent, agentBin, cenciBin, socketDir, cenciAvailable, scope, opts, home)
+	runArgs, err := e.assembleRunArgs(agent, cenciBin, socketDir, cenciAvailable, scope, opts, home)
 	if err != nil {
 		return err
 	}
@@ -192,7 +210,7 @@ func (e *Engine) Launch(opts Options) error {
 	// The entrypoint performs credential and plugin setup before running the
 	// readiness command. Do not race the first agent against that
 	// initialization.
-	if err := e.waitUntilReady(scope.ContainerName); err != nil {
+	if err := e.waitUntilReady(scope); err != nil {
 		return err
 	}
 	return e.runAgent(scope.ContainerName, agent, agentCmdArgs, execEnvArgs, opts)
@@ -269,9 +287,9 @@ func isSocket(path string) bool {
 // behaviorally identical since docker/podman treat flag order between
 // distinct -v/-e flags as independent — only the trailing image + command
 // (appended by the caller, Launch, after this returns) must stay last.
-func (e *Engine) assembleRunArgs(agent, agentBin, cenciBin, socketDir string, cenciAvailable bool, scope Scope, opts Options, home string) ([]string, error) {
+func (e *Engine) assembleRunArgs(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, opts Options, home string) ([]string, error) {
 	args := e.baseRunArgs(scope)
-	args = append(args, e.assembleVolumeMounts(agent, agentBin, cenciBin, socketDir, cenciAvailable, scope, home)...)
+	args = append(args, e.assembleVolumeMounts(agent, cenciBin, socketDir, cenciAvailable, scope, home)...)
 	args = append(args, e.assembleEnv(agent, scope, opts)...)
 
 	credArgs, err := e.validateCredentials(agent, home)
@@ -301,22 +319,18 @@ func (e *Engine) baseRunArgs(scope Scope) []string {
 }
 
 // assembleVolumeMounts builds every bind/named-volume mount: the workspace
-// and home volumes, the claude binary (read-only; codex is baked into the
-// image instead), git config (read-only, if present), the optional cenci
+// and home volumes, git config (read-only, if present), the optional cenci
 // binary + host socket dir wiring (paired with its own XDG_RUNTIME_DIR env
 // under the same cenciAvailable guard as the mount itself),
-// claude credentials staging, and GitHub CLI credentials staging. Codex
+// claude credentials staging, and GitHub CLI credentials staging. Agent CLIs
+// live in the persistent home, so no agent binary is mounted here. Codex
 // credentials are handled separately by validateCredentials, since a missing
 // codex auth source is a hard launch error rather than an optional mount.
-func (e *Engine) assembleVolumeMounts(agent, agentBin, cenciBin, socketDir string, cenciAvailable bool, scope Scope, home string) []string {
+func (e *Engine) assembleVolumeMounts(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, home string) []string {
 	args := []string{
 		"-v", scope.WorkspaceBindHost + ":" + workspaceContainer,
 		"-v", scope.VolumeName + ":/home/dev",
-	}
-
-	// Claude binary (read-only); Codex is baked into the image instead.
-	if agent == "claude" {
-		args = append(args, "-v", agentBin+":/usr/local/bin/claude:ro")
+		"-v", AgentCLIVolumeName(agent) + ":/opt/cenci-agent:ro",
 	}
 
 	// Git config (read-only, if exists).
@@ -375,6 +389,7 @@ func (e *Engine) assembleEnv(agent string, scope Scope, opts Options) []string {
 		"-e", "TERM=" + term,
 		"-e", "CENCI_SANDBOX=1",
 		"-e", "CENCI_SANDBOX_AGENT=" + agent,
+		"-e", "CENCI_AGENT_CLI=/opt/cenci-agent/current/node_modules/.bin/" + agent,
 		"-e", fmt.Sprintf("HOST_UID=%d", os.Getuid()),
 		"-e", fmt.Sprintf("HOST_GID=%d", os.Getgid()),
 		"-e", "WORKSPACE_SCOPE=" + scope.WorkspaceScope,
@@ -471,13 +486,28 @@ func isRegularFile(path string) bool {
 // lifecycleLabel reads the container's cenci-sand.lifecycle label; containers
 // created by this launcher initialize asynchronously and carry "detached",
 // older attached containers have no label and are already initialized.
-func (e *Engine) lifecycleLabel(name string) string {
+func (e *Engine) lifecycleLabel(name string) (string, error) {
 	out, err := exec.Command(e.Runtime, "inspect", "--format",
 		`{{ index .Config.Labels "cenci-sand.lifecycle" }}`, name).Output()
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("%s inspect %s lifecycle label: %w", e.Runtime, name, err)
 	}
-	return trimTrailingNewline(string(out))
+	return trimTrailingNewline(string(out)), nil
+}
+
+func (e *Engine) containerHasSharedAgentMount(name, agent string) (bool, error) {
+	out, err := exec.Command(e.Runtime, "inspect", "--format",
+		`{{range .Mounts}}{{printf "%s|%s|%t\n" .Name .Destination .RW}}{{end}}`, name).Output()
+	if err != nil {
+		return false, fmt.Errorf("%s inspect %s mounts: %w", e.Runtime, name, err)
+	}
+	want := AgentCLIVolumeName(agent) + "|/opt/cenci-agent|false"
+	for _, line := range splitLines(string(out)) {
+		if line == want {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // warnIfUnwired detects a running container that was created while the host
@@ -485,33 +515,78 @@ func (e *Engine) lifecycleLabel(name string) string {
 // back (mounts are fixed for the container's lifetime), so say how to fix it
 // instead of letting sessions silently vanish from the host status bars
 // (#195).
-func (e *Engine) warnIfUnwired(name string, cenciAvailable bool) {
+func (e *Engine) warnIfUnwired(name string, cenciAvailable bool) error {
 	if !cenciAvailable {
-		return
+		return nil
 	}
 	out, err := exec.Command(e.Runtime, "inspect", "--format",
 		`{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}}`, name).Output()
 	if err != nil {
-		return
+		return fmt.Errorf("%s inspect %s mounts: %w", e.Runtime, name, err)
 	}
 	for _, line := range splitLines(string(out)) {
 		if line == cenciSocketMountDest {
-			return
+			return nil
 		}
 	}
 	_, _ = fmt.Fprintf(e.Stderr, "Warning: container '%s' was created without cenci wiring; its sessions will not report to the host status bars. Run '%s stop %s' and relaunch to fix.\n", name, e.Runtime, name)
+	return nil
+}
+
+func (e *Engine) containerStartupState(name string) (status, exitCode string, err error) {
+	out, err := exec.Command(e.Runtime, "inspect", "--format", "{{.State.Status}} {{.State.ExitCode}}", name).Output()
+	if err != nil {
+		return "", "", err
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) < 2 {
+		return "", "", fmt.Errorf("unexpected container state %q", strings.TrimSpace(string(out)))
+	}
+	return fields[0], fields[1], nil
+}
+
+// startupFailureDetail returns diagnostic detail for a container that failed
+// during startup. sandbox/entrypoint.sh writes a human-readable message to
+// /home/dev/.cenci-agent-startup-error and exits non-zero when the agent CLI
+// path is missing or not executable, before the readiness marker is ever
+// touched — so that persistent marker (read here via a short-lived container
+// against the home volume, since the failed container itself may already be
+// gone) is checked first. The container's last 50 log lines are the fallback
+// for any other startup failure that never wrote the marker.
+func (e *Engine) startupFailureDetail(scope Scope) string {
+	marker := exec.Command(e.Runtime, "run", "--rm", "--user", "root", "--entrypoint", "/bin/cat",
+		"-v", scope.VolumeName+":/home/dev", scope.Image, "/home/dev/.cenci-agent-startup-error")
+	if out, err := marker.Output(); err == nil && strings.TrimSpace(string(out)) != "" {
+		return strings.TrimSpace(string(out))
+	}
+	logs := exec.Command(e.Runtime, "logs", "--tail", "50", scope.ContainerName)
+	if out, err := logs.CombinedOutput(); err == nil && strings.TrimSpace(string(out)) != "" {
+		return strings.TrimSpace(string(out))
+	}
+	return "entrypoint exited before initialization completed"
 }
 
 // waitUntilReady polls for the entrypoint's /tmp/cenci-ready marker so the
-// first agent never races credential/plugin initialization.
-func (e *Engine) waitUntilReady(name string) error {
+// first agent never races credential/plugin initialization. An entrypoint
+// failure is surfaced immediately from its persistent marker or container
+// logs instead of degrading into a generic 60-second timeout.
+func (e *Engine) waitUntilReady(scope Scope) error {
 	for attempt := 0; attempt < readyPollAttempts; attempt++ {
-		if exec.Command(e.Runtime, "exec", "-u", "dev", name, "test", "-e", "/tmp/cenci-ready").Run() == nil {
+		if exec.Command(e.Runtime, "exec", "-u", "dev", scope.ContainerName, "test", "-e", "/tmp/cenci-ready").Run() == nil {
 			return nil
+		}
+		status, exitCode, err := e.containerStartupState(scope.ContainerName)
+		if err != nil && attempt < 3 {
+			time.Sleep(readyPollInterval)
+			continue
+		}
+		if err != nil || status == "exited" || status == "dead" {
+			return fmt.Errorf("container '%s' failed during startup (status %s, exit %s): %s",
+				scope.ContainerName, status, exitCode, e.startupFailureDetail(scope))
 		}
 		time.Sleep(readyPollInterval)
 	}
-	return fmt.Errorf("container '%s' did not become ready within 60 seconds.", name) //nolint:staticcheck // user-facing message ported verbatim from cenci-sand
+	return fmt.Errorf("container '%s' did not become ready within 60 seconds.", scope.ContainerName) //nolint:staticcheck // user-facing message ported verbatim from cenci-sand
 }
 
 // runAgent execs the runtime CLI in place of this process for the final
@@ -526,12 +601,15 @@ func (e *Engine) runAgent(name, agent string, agentCmdArgs, execEnvArgs []string
 
 	argv := []string{runtimePath, "exec", "-it"}
 	argv = append(argv, execEnvArgs...)
+	if !opts.Shell && agent == "claude" {
+		argv = append(argv, "-e", "DISABLE_UPDATES=1")
+	}
 	argv = append(argv, name)
 	if opts.Shell {
 		_, _ = fmt.Fprintf(e.Stdout, "Attaching shell to running '%s'...\n", name)
 		argv = append(argv, "/bin/bash")
 	} else {
-		argv = append(argv, agent)
+		argv = append(argv, "/opt/cenci-agent/current/node_modules/.bin/"+agent)
 		argv = append(argv, agentCmdArgs...)
 		argv = append(argv, opts.AgentArgs...)
 	}

@@ -12,7 +12,7 @@ import (
 )
 
 // This file implements the `cenci sandbox <verb>` group (build, build-base,
-// prune, update-plugins, reseed-creds, reap-orphans, ls, stop). Every verb
+// prune, update-agent, update-plugins, reseed-creds, reap-orphans, ls, stop). Every verb
 // runs natively against the internal/sandbox/launcher engine and
 // docker/podman — nothing shells out to the sandbox/cenci-sand bash launcher
 // anymore. See open_cmd.go for `cenci open` (plus the "cn" argv[0] alias).
@@ -20,7 +20,7 @@ import (
 // runSandboxGroup implements `cenci sandbox <verb> [flags]`.
 func runSandboxGroup(args []string) {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-		fmt.Fprintln(os.Stderr, "cenci sandbox: expected a subcommand: build, build-base, prune, update-plugins, reseed-creds, reap-orphans, ls, stop")
+		fmt.Fprintln(os.Stderr, "cenci sandbox: expected a subcommand: build, build-base, prune, update-agent, update-plugins, reseed-creds, reap-orphans, ls, stop")
 		os.Exit(2)
 	}
 	verb := args[0]
@@ -31,6 +31,8 @@ func runSandboxGroup(args []string) {
 		runSandboxBuild(rest)
 	case "build-base":
 		runSandboxBuildBase(rest)
+	case "update-agent":
+		runSandboxUpdateAgent(rest)
 	case "update-plugins":
 		runSandboxUpdatePlugins(rest)
 	case "reap-orphans":
@@ -85,12 +87,13 @@ func currentScope(verb, agent, instanceName string) launcher.Scope {
 	return launcher.ComputeScope(agent, instanceName, cwd, home)
 }
 
-// runSandboxBuild implements `cenci sandbox build`: build the image the
-// current directory selects (the repo's own image when .cenci/Dockerfile
-// opts in, otherwise the shared monolith), building the base first if its
-// content-hash tag is missing. The agent passed to ComputeScope is
-// irrelevant here — image selection depends only on the repo, never on the
-// agent-namespaced container/volume names.
+// runSandboxBuild implements `cenci sandbox build`:
+// build the image the current directory selects (the repo's own image when
+// .cenci/Dockerfile opts in, otherwise the shared monolith), building the base
+// first if its content-hash tag is missing. Agent CLIs are runtime-managed in
+// shared runtime volumes and are not selected as image build inputs. The
+// agent passed to ComputeScope is irrelevant — image selection depends only on
+// the repo, never on the agent-namespaced container/volume names.
 func runSandboxBuild(args []string) {
 	fs := flag.NewFlagSet("sandbox build", flag.ExitOnError)
 	_ = fs.Parse(args)
@@ -99,6 +102,38 @@ func runSandboxBuild(args []string) {
 	scope := currentScope("build", "claude", "")
 	if err := newEngine("build").BuildSelected(scope); err != nil {
 		fmt.Fprintf(os.Stderr, "cenci sandbox build: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runSandboxUpdateAgent implements `cenci sandbox update-agent [--agent
+// claude|codex] [--version exact-semver]` for the host-global agent volume.
+// The updater always targets the shared monolith image (never the current
+// directory's own per-repo image, if any — see UpdateAgent), so this verb
+// never needs to resolve or build a per-repo scope.
+func runSandboxUpdateAgent(args []string) {
+	fs := flag.NewFlagSet("sandbox update-agent", flag.ExitOnError)
+	agent := fs.String("agent", "claude", "agent CLI to update (claude or codex)")
+	version := fs.String("version", "", "exact semantic version (default: official latest)")
+	_ = fs.Parse(args)
+	rejectExtraArgs("update-agent", fs)
+
+	if err := launcher.ValidateAgent(*agent); err != nil {
+		fmt.Fprintf(os.Stderr, "cenci sandbox update-agent: %v\n", err)
+		os.Exit(2)
+	}
+
+	if *version != "" && !launcher.IsExactSemver(*version) {
+		fmt.Fprintf(os.Stderr, "cenci sandbox update-agent: version %q is not an exact semantic version\n", *version)
+		os.Exit(2)
+	}
+	if *version != "" {
+		fmt.Println("Note: --version pins/downgrades the shared agent CLI volume, which is used by every sandbox on this host.")
+	}
+
+	eng := newEngine("update-agent")
+	if err := eng.UpdateAgent(*agent, *version); err != nil {
+		fmt.Fprintf(os.Stderr, "cenci sandbox update-agent: %v\n", err)
 		os.Exit(1)
 	}
 }

@@ -128,12 +128,16 @@ heal_plugin_installs() {
 # CLI call just warns to stderr and returns 0.
 provision_plugins() {
     local plugins_dir="$1" marketplace_name="$2" marketplace_repo="$3"
+    local agent_cli="${CENCI_AGENT_CLI:-claude}"
     shift 3
 
-    command -v claude >/dev/null 2>&1 || return 0
+    if ! command -v "${agent_cli}" >/dev/null 2>&1; then
+        echo "warning: agent CLI '${agent_cli}' not found; skipping plugin provisioning this session" >&2
+        return 0
+    fi
 
     if [[ ! -d "${plugins_dir}/marketplaces/${marketplace_name}" ]]; then
-        if ! claude plugin marketplace add "${marketplace_repo}" >/dev/null 2>&1; then
+        if ! "${agent_cli}" plugin marketplace add "${marketplace_repo}" >/dev/null 2>&1; then
             echo "warning: failed to add marketplace ${marketplace_repo}; plugins may be unavailable this session" >&2
         fi
     fi
@@ -145,7 +149,7 @@ provision_plugins() {
         if [[ -f "${meta}" ]] && jq -e --arg key "${key}" '(.plugins // {})[$key] // [] | length > 0' "${meta}" >/dev/null 2>&1; then
             continue
         fi
-        if ! claude plugin install "${key}" >/dev/null 2>&1; then
+        if ! "${agent_cli}" plugin install "${key}" >/dev/null 2>&1; then
             echo "warning: failed to install plugin ${key}; it may be unavailable this session" >&2
         fi
     done
@@ -170,9 +174,13 @@ provision_plugins() {
 # provisioning: failures warn to stderr and never block container start.
 update_plugins() {
     local plugins_dir="$1" marketplace_name="$2" ttl_minutes="$3"
+    local agent_cli="${CENCI_AGENT_CLI:-claude}"
     shift 3
 
-    command -v claude >/dev/null 2>&1 || return 0
+    if ! command -v "${agent_cli}" >/dev/null 2>&1; then
+        echo "warning: agent CLI '${agent_cli}' not found; skipping plugin update this session" >&2
+        return 0
+    fi
 
     local stamp="${plugins_dir}/.cenci-sand-update-stamp"
     if [[ "${ttl_minutes}" -gt 0 && -f "${stamp}" ]] \
@@ -180,7 +188,7 @@ update_plugins() {
         return 0
     fi
 
-    if ! claude plugin marketplace update "${marketplace_name}" >/dev/null 2>&1; then
+    if ! "${agent_cli}" plugin marketplace update "${marketplace_name}" >/dev/null 2>&1; then
         echo "warning: failed to refresh marketplace ${marketplace_name}; plugins may be stale this session" >&2
     fi
     touch "${stamp}"
@@ -201,7 +209,7 @@ update_plugins() {
         if jq -e --arg key "${key}" --arg v "${desired}" '(.plugins // {})[$key] // [] | any(.version == $v)' "${meta}" >/dev/null 2>&1; then
             continue
         fi
-        if ! claude plugin update "${key}" >/dev/null 2>&1; then
+        if ! "${agent_cli}" plugin update "${key}" >/dev/null 2>&1; then
             echo "warning: failed to update plugin ${key}; it may be stale this session" >&2
         fi
     done
@@ -218,26 +226,30 @@ update_plugins() {
 # prevent the sandbox from starting.
 provision_codex_plugins() {
     local codex_dir="$1" marketplace_name="$2" marketplace_repo="$3"
+    local agent_cli="${CENCI_AGENT_CLI:-codex}"
     shift 3
 
-    command -v codex >/dev/null 2>&1 || return 0
+    if ! command -v "${agent_cli}" >/dev/null 2>&1; then
+        echo "warning: agent CLI '${agent_cli}' not found; skipping Codex plugin provisioning this session" >&2
+        return 0
+    fi
     mkdir -p "${codex_dir}" || {
         echo "warning: failed to create Codex config directory ${codex_dir}; plugins may be unavailable this session" >&2
         return 0
     }
 
     local marketplaces=""
-    if ! marketplaces="$(codex plugin marketplace list 2>/dev/null)"; then
+    if ! marketplaces="$("${agent_cli}" plugin marketplace list 2>/dev/null)"; then
         echo "warning: failed to list Codex marketplaces; attempting to provision ${marketplace_name}" >&2
     fi
     if ! grep -Eq "^${marketplace_name}[[:space:]]" <<< "${marketplaces}"; then
-        if ! codex plugin marketplace add "${marketplace_repo}" >/dev/null 2>&1; then
+        if ! "${agent_cli}" plugin marketplace add "${marketplace_repo}" >/dev/null 2>&1; then
             echo "warning: failed to add Codex marketplace ${marketplace_repo}; plugins may be unavailable this session" >&2
         fi
     fi
 
     local installed=""
-    if ! installed="$(codex plugin list 2>/dev/null)"; then
+    if ! installed="$("${agent_cli}" plugin list 2>/dev/null)"; then
         echo "warning: failed to list Codex plugins; attempting to provision required plugins" >&2
     fi
 
@@ -247,7 +259,7 @@ provision_codex_plugins() {
         if grep -Eq "^${key}[[:space:]]+installed" <<< "${installed}"; then
             continue
         fi
-        if ! codex plugin add "${key}" >/dev/null 2>&1; then
+        if ! "${agent_cli}" plugin add "${key}" >/dev/null 2>&1; then
             echo "warning: failed to install Codex plugin ${key}; it may be unavailable this session" >&2
         fi
     done
@@ -264,9 +276,13 @@ provision_codex_plugins() {
 # which callers run first for both normal startup and forced updates.
 update_codex_plugins() {
     local codex_dir="$1" marketplace_name="$2" ttl_minutes="$3"
+    local agent_cli="${CENCI_AGENT_CLI:-codex}"
     shift 3
 
-    command -v codex >/dev/null 2>&1 || return 0
+    if ! command -v "${agent_cli}" >/dev/null 2>&1; then
+        echo "warning: agent CLI '${agent_cli}' not found; skipping Codex plugin update this session" >&2
+        return 0
+    fi
 
     local stamp="${codex_dir}/.cenci-sand-update-stamp"
     if [[ "${ttl_minutes}" -gt 0 && -f "${stamp}" ]] \
@@ -274,7 +290,7 @@ update_codex_plugins() {
         return 0
     fi
 
-    if ! codex plugin marketplace upgrade "${marketplace_name}" >/dev/null 2>&1; then
+    if ! "${agent_cli}" plugin marketplace upgrade "${marketplace_name}" >/dev/null 2>&1; then
         echo "warning: failed to refresh Codex marketplace ${marketplace_name}; plugins may be stale this session" >&2
     fi
     if ! touch "${stamp}"; then
@@ -282,7 +298,7 @@ update_codex_plugins() {
     fi
 
     local installed=""
-    if ! installed="$(codex plugin list 2>/dev/null)"; then
+    if ! installed="$("${agent_cli}" plugin list 2>/dev/null)"; then
         echo "warning: failed to list Codex plugins after refreshing ${marketplace_name}" >&2
         return 0
     fi
@@ -291,7 +307,7 @@ update_codex_plugins() {
     for plugin in "$@"; do
         key="${plugin}@${marketplace_name}"
         grep -Eq "^${key}[[:space:]]+installed" <<< "${installed}" || continue
-        if ! codex plugin add "${key}" >/dev/null 2>&1; then
+        if ! "${agent_cli}" plugin add "${key}" >/dev/null 2>&1; then
             echo "warning: failed to refresh Codex plugin ${key}; it may be stale this session" >&2
         fi
     done

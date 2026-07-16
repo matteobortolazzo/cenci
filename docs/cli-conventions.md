@@ -59,6 +59,7 @@ cenci <verb> [subverb] [args] [flags]
 |---|---|
 | Container | `${agent}-cenci-<slug>` (e.g. `claude-cenci-my-repo`) |
 | Home volume | `${agent}-cenci-home-<slug>` |
+| Shared agent CLI volume | `cenci-agent-cli-${agent}` |
 | Monolith image | `cenci-sandbox:latest` |
 | Per-repo image | `cenci-sandbox-<slug>:latest` |
 | Base image | `cenci-sandbox-base:<content-hash>` (+ `:latest` alias) |

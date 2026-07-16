@@ -69,6 +69,27 @@ else
     STAT_CMD=(stat -c)
 fi
 
+# GNU coreutils names the duration guard `timeout`; Homebrew installs it as
+# `gtimeout`. Keep the suite runnable on a stock macOS host even when neither is
+# present—the probes are short-lived container commands, so only the hang guard
+# is skipped in that fallback.
+if command -v timeout &>/dev/null; then
+    TIMEOUT_BIN=timeout
+elif command -v gtimeout &>/dev/null; then
+    TIMEOUT_BIN=gtimeout
+else
+    TIMEOUT_BIN=""
+    echo "  NOTE: timeout/gtimeout unavailable — running container probes without a host-side hang guard."
+fi
+
+run_with_timeout() {
+    if [[ -n "${TIMEOUT_BIN}" ]]; then
+        "${TIMEOUT_BIN}" 60 "$@"
+    else
+        "$@"
+    fi
+}
+
 if ! BASE_TAG_FILES="$(cd "${SANDBOX_DIR}" && find Dockerfile.base entrypoint.sh lib -type f)"; then
     fail "failed to enumerate base image build inputs (Dockerfile.base, entrypoint.sh, lib/)."
     summarize_and_exit 1
@@ -110,22 +131,93 @@ fi
 
 # ── Run the built image and assert every toolchain works ──────────
 # A generated per-repo image replaces the monolith whenever the repository
-# contains .cenci/Dockerfile, so it must carry the Codex agent runtime.
-echo "case: configured per-repo image includes a working Codex CLI"
-EXPECTED_CODEX_VERSION="$(sed -n 's/^ARG CODEX_VERSION=//p' "${SANDBOX_DIR}/fragments/codex.dockerfile")"
-# shellcheck disable=SC2016 # Expansion happens in the container, using the forwarded environment variable.
-if [[ -z "${EXPECTED_CODEX_VERSION}" ]]; then
-    fail "could not read the expected Codex version from fragments/codex.dockerfile"
-elif "${RUNTIME}" build --build-arg "BASE_VERSION=${BASE_TAG}" \
+# contains .cenci/Dockerfile. It must carry Node, but no root-owned agent CLI.
+echo "case: monolith and configured per-repo images contain no baked agent CLIs"
+if "${RUNTIME}" run --rm --entrypoint /bin/bash cenci-sandbox:latest -c \
+        'test ! -e /usr/local/bin/codex && test ! -e /usr/local/bin/claude \
+            && test ! -e /usr/lib/node_modules/@openai/codex \
+            && test ! -e /usr/lib/node_modules/@anthropic-ai/claude-code' \
+    && "${RUNTIME}" build --build-arg "BASE_VERSION=${BASE_TAG}" \
     -t cenci-sandbox-smoke-repo:latest \
     -f "${REPO_ROOT}/.cenci/Dockerfile" "${REPO_ROOT}/.cenci" \
     && "${RUNTIME}" run --rm --entrypoint /bin/bash \
-        -e "EXPECTED_CODEX_VERSION=${EXPECTED_CODEX_VERSION}" \
         cenci-sandbox-smoke-repo:latest -c \
-        'command -v codex && test "$(codex --version)" = "codex-cli ${EXPECTED_CODEX_VERSION}"'; then
+        'node --version && test ! -e /usr/local/bin/codex && test ! -e /usr/local/bin/claude \
+            && test ! -e /usr/lib/node_modules/@openai/codex \
+            && test ! -e /usr/lib/node_modules/@anthropic-ai/claude-code'; then
     pass
 else
-    fail "Codex CLI is missing, unusable, or stale in the configured per-repo image"
+    fail "monolith or configured per-repo image contains a baked agent CLI, or the repo image lacks Node"
+fi
+
+echo "case: both agents install into isolated shared CLI volumes"
+SMOKE_VOLUME_PREFIX="cenci-agent-cli-smoke-$$"
+SMOKE_AGENT_VOLUMES=("${SMOKE_VOLUME_PREFIX}-claude" "${SMOKE_VOLUME_PREFIX}-codex")
+REMAP_TMP=""
+cleanup_smoke() {
+    "${RUNTIME}" volume rm "${SMOKE_AGENT_VOLUMES[@]}" >/dev/null 2>&1 || true
+    [[ -z "${REMAP_TMP}" ]] || rm -rf "${REMAP_TMP}"
+}
+trap cleanup_smoke EXIT
+AGENT_INSTALL_OK=1
+for agent in claude codex; do
+    volume="${SMOKE_VOLUME_PREFIX}-${agent}"
+    if ! run_with_timeout "${RUNTIME}" run --rm --user root --entrypoint /bin/bash \
+        -v "${volume}:/opt/cenci-agent" cenci-sandbox:latest \
+        /usr/local/bin/lib/agent-cli.sh update "${agent}" \
+        || ! run_with_timeout "${RUNTIME}" run --rm --entrypoint /bin/bash \
+        -v "${volume}:/opt/cenci-agent:ro" cenci-sandbox:latest -c \
+        "test -x /opt/cenci-agent/current/node_modules/.bin/${agent} \
+            && /opt/cenci-agent/current/node_modules/.bin/${agent} --version"; then
+        AGENT_INSTALL_OK=0
+    fi
+done
+if [[ "${AGENT_INSTALL_OK}" -eq 1 ]]; then
+    pass
+else
+    fail "Claude Code or Codex did not install and execute from a shared volume"
+fi
+
+echo "case: two images see the same CLI and workload writes fail"
+SHARED_VOLUME="${SMOKE_VOLUME_PREFIX}-codex"
+MONOLITH_VERSION="$(run_with_timeout "${RUNTIME}" run --rm --entrypoint /bin/bash \
+    -v "${SHARED_VOLUME}:/opt/cenci-agent:ro" cenci-sandbox:latest \
+    -c 'cat /opt/cenci-agent/current/VERSION')"
+REPO_VERSION="$(run_with_timeout "${RUNTIME}" run --rm --entrypoint /bin/bash \
+    -v "${SHARED_VOLUME}:/opt/cenci-agent:ro" cenci-sandbox-smoke-repo:latest \
+    -c 'cat /opt/cenci-agent/current/VERSION')"
+if [[ -n "${MONOLITH_VERSION}" && "${MONOLITH_VERSION}" == "${REPO_VERSION}" ]] \
+    && ! run_with_timeout "${RUNTIME}" run --rm --entrypoint /bin/bash \
+        -v "${SHARED_VOLUME}:/opt/cenci-agent:ro" cenci-sandbox:latest \
+        -c 'touch /opt/cenci-agent/current/tamper'; then
+    pass
+else
+    fail "shared CLI differed between images or its workload mount was writable"
+fi
+
+echo "case: update atomically changes current and a failed update retains it"
+BEFORE_TARGET="$(run_with_timeout "${RUNTIME}" run --rm --entrypoint /bin/bash \
+    -v "${SHARED_VOLUME}:/opt/cenci-agent:ro" cenci-sandbox:latest \
+    -c 'readlink /opt/cenci-agent/current')"
+if run_with_timeout "${RUNTIME}" run --rm --user root --entrypoint /bin/bash \
+    -v "${SHARED_VOLUME}:/opt/cenci-agent" cenci-sandbox:latest \
+    /usr/local/bin/lib/agent-cli.sh update codex "${MONOLITH_VERSION}"; then
+    AFTER_TARGET="$(run_with_timeout "${RUNTIME}" run --rm --entrypoint /bin/bash \
+        -v "${SHARED_VOLUME}:/opt/cenci-agent:ro" cenci-sandbox:latest \
+        -c 'readlink /opt/cenci-agent/current')"
+    if [[ "${AFTER_TARGET}" != "${BEFORE_TARGET}" ]] \
+        && ! run_with_timeout "${RUNTIME}" run --rm --user root --entrypoint /bin/bash \
+            -v "${SHARED_VOLUME}:/opt/cenci-agent" cenci-sandbox:latest \
+            /usr/local/bin/lib/agent-cli.sh update codex 999999.0.0 \
+        && [[ "$(run_with_timeout "${RUNTIME}" run --rm --entrypoint /bin/bash \
+            -v "${SHARED_VOLUME}:/opt/cenci-agent:ro" cenci-sandbox:latest \
+            -c 'readlink /opt/cenci-agent/current')" == "${AFTER_TARGET}" ]]; then
+        pass
+    else
+        fail "atomic update or failed-update rollback contract did not hold"
+    fi
+else
+    fail "same-version atomic update failed"
 fi
 
 # Regression guard for the libicu74 FailFast bug: if it regresses,
@@ -184,21 +276,31 @@ fi
 # only runs (and only fails the suite) under RUNTIME=docker.
 echo "case: entrypoint remaps dev to HOST_UID/HOST_GID for a per-repo mount"
 REMAP_TMP="$(mktemp -d)"
+SMOKE_NPM_FAKE="${REMAP_TMP}/npm"
+cat >"${SMOKE_NPM_FAKE}" <<'EOF'
+#!/bin/sh
+case "$*" in *codex*) agent=codex ;; *) agent=claude ;; esac
+mkdir -p "${NPM_CONFIG_PREFIX}/bin"
+printf '#!/bin/sh\nexit 0\n' >"${NPM_CONFIG_PREFIX}/bin/${agent}"
+chmod +x "${NPM_CONFIG_PREFIX}/bin/${agent}"
+EOF
+chmod +x "${SMOKE_NPM_FAKE}"
 # The synthetic remap UID (1234) intentionally differs from the test runner's
 # real UID, unlike production where HOST_UID owns the bind-mount root.
 chmod 0777 "${REMAP_TMP}"
-trap 'rm -rf "${REMAP_TMP}"' EXIT
-REMAP_OUT="$(timeout 60 "${RUNTIME}" run --rm --user root \
+REMAP_OUT="$(run_with_timeout "${RUNTIME}" run --rm --user root \
     -e HOST_UID=1234 -e HOST_GID=1234 -e WORKSPACE_SCOPE=repo \
     -v "${REMAP_TMP}:/workspace" \
+    -v "${SMOKE_NPM_FAKE}:/usr/bin/npm:ro" \
     cenci-sandbox:latest \
     -c 'id -u; id -g; : > /workspace/remap-probe')"
 REMAP_STATUS=$?
 if [[ "${REMAP_STATUS}" -eq 124 ]]; then
     fail "container run timed out after 60s while exercising the remap path — likely a hang/regression in the root->dev remap"
 elif [[ "${REMAP_STATUS}" -eq 0 ]]; then
-    readarray -t REMAP_LINES <<<"${REMAP_OUT}"
-    if [[ "${REMAP_LINES[0]:-}" == "1234" && "${REMAP_LINES[1]:-}" == "1234" ]]; then
+    REMAP_UID="$(printf '%s\n' "${REMAP_OUT}" | tail -n 2 | head -n 1)"
+    REMAP_GID="$(printf '%s\n' "${REMAP_OUT}" | tail -n 1)"
+    if [[ "${REMAP_UID}" == "1234" && "${REMAP_GID}" == "1234" ]]; then
         pass
     else
         fail "expected dev to report uid=1234/gid=1234 inside the container after remap, got: ${REMAP_OUT}"
@@ -208,16 +310,18 @@ else
 fi
 
 echo "case: entrypoint reuses an existing image group matching HOST_GID"
-GROUP_COLLISION_OUT="$(timeout 60 "${RUNTIME}" run --rm --user root \
+GROUP_COLLISION_OUT="$(run_with_timeout "${RUNTIME}" run --rm --user root \
     -e HOST_UID=1234 -e HOST_GID=20 \
+    -v "${SMOKE_NPM_FAKE}:/usr/bin/npm:ro" \
     cenci-sandbox:latest \
     -c 'id -u; id -g')"
 GROUP_COLLISION_STATUS=$?
 if [[ "${GROUP_COLLISION_STATUS}" -eq 124 ]]; then
     fail "container run timed out while exercising an existing HOST_GID"
 elif [[ "${GROUP_COLLISION_STATUS}" -eq 0 ]]; then
-    readarray -t GROUP_COLLISION_LINES <<<"${GROUP_COLLISION_OUT}"
-    if [[ "${GROUP_COLLISION_LINES[0]:-}" == "1234" && "${GROUP_COLLISION_LINES[1]:-}" == "20" ]]; then
+    GROUP_COLLISION_UID="$(printf '%s\n' "${GROUP_COLLISION_OUT}" | tail -n 2 | head -n 1)"
+    GROUP_COLLISION_GID="$(printf '%s\n' "${GROUP_COLLISION_OUT}" | tail -n 1)"
+    if [[ "${GROUP_COLLISION_UID}" == "1234" && "${GROUP_COLLISION_GID}" == "20" ]]; then
         pass
     else
         fail "expected dev to reuse existing gid=20, got: ${GROUP_COLLISION_OUT}"
@@ -227,7 +331,7 @@ else
 fi
 
 echo "case: remap-probe file ownership on the host (best-effort, docker only)"
-if [[ "${RUNTIME}" == "docker" ]]; then
+if [[ "${RUNTIME}" == "docker" && "$(uname -s)" != "Darwin" ]]; then
     if [[ -f "${REMAP_TMP}/remap-probe" ]]; then
         PROBE_UID="$("${STAT_CMD[@]}" '%u' "${REMAP_TMP}/remap-probe")"
         PROBE_GID="$("${STAT_CMD[@]}" '%g' "${REMAP_TMP}/remap-probe")"
@@ -240,8 +344,8 @@ if [[ "${RUNTIME}" == "docker" ]]; then
         fail "remap-probe file was not created in the per-repo mount"
     fi
 else
-    echo "  SKIP: host-side ownership check under podman — rootless subuid mapping means the" \
-        "host UID won't literally be 1234; the in-container id check above is authoritative."
+    echo "  SKIP: host-side ownership check under podman or Docker Desktop — UID mapping means" \
+        "the host UID won't literally be 1234; the in-container id check above is authoritative."
 fi
 
 # ── No-op regression: unset HOST_UID/HOST_GID must not remap dev (#154) ──
@@ -252,13 +356,16 @@ fi
 # that every start begins as root — see entrypoint.sh) — dev keeps reporting
 # uid=1000/gid=1000 either way.
 echo "case: entrypoint leaves dev at uid=1000/gid=1000 when HOST_UID/HOST_GID are unset"
-NOOP_OUT="$(timeout 60 "${RUNTIME}" run --rm --user root cenci-sandbox:latest -c 'id -u; id -g')"
+NOOP_OUT="$(run_with_timeout "${RUNTIME}" run --rm --user root \
+    -v "${SMOKE_NPM_FAKE}:/usr/bin/npm:ro" \
+    cenci-sandbox:latest -c 'id -u; id -g')"
 NOOP_STATUS=$?
 if [[ "${NOOP_STATUS}" -eq 124 ]]; then
     fail "container run timed out after 60s while exercising the no-HOST_UID no-op path — likely a hang/regression in the root->dev remap"
 elif [[ "${NOOP_STATUS}" -eq 0 ]]; then
-    readarray -t NOOP_LINES <<<"${NOOP_OUT}"
-    if [[ "${NOOP_LINES[0]:-}" == "1000" && "${NOOP_LINES[1]:-}" == "1000" ]]; then
+    NOOP_UID="$(printf '%s\n' "${NOOP_OUT}" | tail -n 2 | head -n 1)"
+    NOOP_GID="$(printf '%s\n' "${NOOP_OUT}" | tail -n 1)"
+    if [[ "${NOOP_UID}" == "1000" && "${NOOP_GID}" == "1000" ]]; then
         pass
     else
         fail "expected dev to remain uid=1000/gid=1000 when HOST_UID/HOST_GID are unset, got: ${NOOP_OUT}"

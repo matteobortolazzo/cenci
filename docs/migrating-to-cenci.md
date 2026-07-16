@@ -138,7 +138,9 @@ Usage errors (unknown flag, unknown verb, stray positional) now exit 2.
 - `CENCI_SANDBOX*` environment variables (`CENCI_SANDBOX`, `CENCI_SANDBOX_AGENT`,
   `CENCI_SANDBOX_REAP_GRACE_SECS`, `CENCI_SANDBOX_RESEED_CREDS`, …)
 - Container names (`claude-cenci-*` / `codex-cenci-*`) and home volumes
-  (`*-cenci-home-*`) — existing containers and volumes keep working untouched
+  (`*-cenci-home-*`) remain named the same. Existing home data is preserved, but agent
+  executables there are ignored. Stop and relaunch already-running containers once so they
+  gain the shared read-only `cenci-agent-cli-${agent}` mount.
 - Image names (`cenci-sandbox`, `cenci-sandbox-base:<hash>`, `cenci-sandbox-<slug>`)
 - Per-repo `.cenci/Dockerfile` files — no regeneration required for the file itself
 

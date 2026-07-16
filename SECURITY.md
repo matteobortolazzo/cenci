@@ -71,9 +71,18 @@ docker volume rm codex-cenci-home-<repo-slug>
 See [sandbox/README.md#reset-an-instance](./sandbox/README.md#reset-an-instance)
 for the full naming scheme (per-repo slug, `--name` suffix, legacy `-default` volumes).
 `cenci sandbox prune` removes superseded base tags, dangling images, and stopped sandbox
-containers. Add `--volumes` to list sandbox home volumes and interactively confirm
-their removal; volume deletion defaults to no because it destroys copied credentials
-and session history.
+containers. Add `--volumes` to list credential-bearing home volumes separately from
+the shared `cenci-agent-cli-claude` / `cenci-agent-cli-codex` executable volumes and
+interactively confirm their removal. Volume deletion defaults to no because removing a
+home destroys copied credentials and session history; shared CLI volumes contain no
+credentials and are recreated by verified bootstrap on the next launch.
+
+The shared `cenci-agent-cli-*` volumes are host-global, not per-repo or per-instance:
+`cenci sandbox update-agent` (including a pinned or downgraded `--version`) mutates the
+one volume every sandbox on the host mounts read-only, so an update or rollback in one
+repo's context affects every other repository's sessions too. See [sandbox/README.md
+under Update an agent
+CLI](./sandbox/README.md#update-an-agent-cli) for the activation and retention model.
 
 ## Reporting a vulnerability
 

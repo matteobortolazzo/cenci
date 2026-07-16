@@ -118,6 +118,8 @@ EOF
 run_case() {
     local name="$1" clients="$2"
     local build_flag="${3:---no-build}"
+    local extra=()
+    if [ "$#" -gt 3 ]; then extra=("${@:4}"); fi
     local case_dir="${WORK}/${name}" home="${WORK}/${name}/home"
     local bin="${WORK}/${name}/bin" output="${WORK}/${name}/output" calls="${WORK}/${name}/calls"
     mkdir -p "${home}" "${bin}"
@@ -135,7 +137,7 @@ run_case() {
         CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
         CODEX_MARKETPLACE_FILE="${case_dir}/codex-marketplace" \
         CODEX_INSTALLED_FILE="${case_dir}/codex-installed" \
-        bash "${ROOT}/install.sh" --yes "${build_flag}" >"${output}" 2>&1
+        bash "${ROOT}/install.sh" --yes "${build_flag}" ${extra[@]+"${extra[@]}"} >"${output}" 2>&1
     CASE_EXIT=$?
     set -e
     CASE_OUTPUT="${output}"
@@ -243,6 +245,21 @@ run_case codex-build codex --build
 [[ "${CASE_EXIT}" -eq 0 ]]
 assert_contains "${CASE_OUTPUT}" "sandbox image built"
 assert_contains "${CASE_CALLS}" "cenci sandbox build"
+assert_not_contains "${CASE_CALLS}" "--agents"
+
+echo "case: image builds no longer select or bake agent CLIs"
+prepare_cache_cenci "${WORK}/build-default/home" claude
+run_case build-default dual --build
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_contains "${CASE_CALLS}" "cenci sandbox build"
+assert_not_contains "${CASE_CALLS}" "--agents"
+
+echo "case: the removed installer --agents option is rejected"
+prepare_cache_cenci "${WORK}/agents-removed/home" claude
+run_case agents-removed dual --build --agents claude
+[[ "${CASE_EXIT}" -ne 0 ]]
+assert_contains "${CASE_OUTPUT}" "unknown option '--agents'"
+assert_not_contains "${CASE_CALLS}" "cenci sandbox build"
 
 echo "case: a stale cenci-sand symlink is repointed at cenci, never recreated"
 name=stale-sand

@@ -553,7 +553,9 @@ the resolution for development).
 cenci sandbox build             # build cenci-sandbox:latest (or the repo image if <repo>/.cenci/Dockerfile exists); builds the base first if missing
 cenci sandbox build-base        # build cenci-sandbox-base:<content-hash> + :latest alias
 cenci sandbox prune             # remove superseded base tags, dangling images, stopped *-cenci-* containers
-cenci sandbox prune --volumes   # …and prompt ([y/N], default deny) to remove stale *-cenci-home-* volumes
+cenci sandbox prune --volumes   # …and prompt ([y/N], default deny) for home and shared CLI volumes
+cenci sandbox update-agent [--agent claude|codex] [--version <exact-semver>]
+                                # atomically update the host-global, workload-read-only CLI volume
 cenci sandbox update-plugins [--agent claude|codex] [--name <n>]
                                 # force-refresh the plugins inside the container/volume (ttl 0)
 cenci sandbox reseed-creds      # alias for: cenci open --reseed-creds
