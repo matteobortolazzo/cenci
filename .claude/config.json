@@ -23,7 +23,9 @@
       "stack": { "framework": "go1.25", "testing": "go-testing" },
       "buildCommand": "make build",
       "testCommand": "make test",
-      "lintCommand": "make lint"
+      "lintCommand": "make lint",
+      "serveCommand": "go run .",
+      "boardKey": "W"
     },
     {
       "slug": "sandbox",
@@ -43,9 +45,12 @@
     "gopls": true
   },
   "autoCompactDisabled": true,
-  "pinSubagents200K": true,
+  "pinSubagents200K": false,
   "sandbox": {
     "enabled": true,
-    "baseVersion": "1.0.2"
+    "baseVersion": "1.2.0"
+  },
+  "lazyboards": {
+    "enabled": true
   }
 }
