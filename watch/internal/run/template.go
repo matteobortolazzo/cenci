@@ -76,20 +76,11 @@ func builtinConfig() FileConfig {
 				Command:        "codex",
 				SandboxCommand: "cenci open",
 				Workflows: map[string]WorkflowTemplate{
-					"implement":      codexWF("implement"),
-					"address-review": codexWF("address-review"),
-					"babysit":        codexWF("babysit"),
-				},
-			},
-			"codex": {
-				Command:        "codex",
-				SandboxCommand: "cenci open",
-				Workflows: map[string]WorkflowTemplate{
 					"configure": codexWF("configure"), "refine": codexWF("refine"),
 					"design": codexWF("design"), "implement": codexWF("implement"),
 					"review": codexWF("review"), "address-review": codexWF("address-review"),
 					"refactor": codexWF("refactor"), "sync": codexWF("sync"),
-					"garden": codexWF("garden"),
+					"garden": codexWF("garden"), "babysit": codexWF("babysit"),
 				},
 			},
 		},
