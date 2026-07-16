@@ -1,7 +1,7 @@
 {
   "name": "cenci",
   "version": "0.4.8",
-  "description": "cenci workflow layer: engineering conventions for Codex and Claude Code's gated ticket-to-PR pipeline.",
+  "description": "cenci workflow layer: portable conventions, PR supervision, and Codex and Claude Code's gated ticket-to-PR pipeline.",
   "author": {
     "name": "Matteo Bortolazzo",
     "url": "https://github.com/matteobortolazzo"

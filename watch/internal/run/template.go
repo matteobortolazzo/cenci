@@ -65,9 +65,20 @@ func builtinConfig() FileConfig {
 				Command:        "claude",
 				SandboxCommand: "cenci open",
 				Workflows: map[string]WorkflowTemplate{
-					"refine":    claudeWF("refine"),
-					"design":    claudeWF("design"),
-					"implement": claudeWF("implement"),
+					"refine":         claudeWF("refine"),
+					"design":         claudeWF("design"),
+					"implement":      claudeWF("implement"),
+					"address-review": claudeWF("address-review"),
+					"babysit":        claudeWF("babysit"),
+				},
+			},
+			"codex": {
+				Command:        "codex",
+				SandboxCommand: "cenci open",
+				Workflows: map[string]WorkflowTemplate{
+					"implement":      codexWF("implement"),
+					"address-review": codexWF("address-review"),
+					"babysit":        codexWF("babysit"),
 				},
 			},
 			"codex": {

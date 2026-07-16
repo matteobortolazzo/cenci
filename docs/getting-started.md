@@ -105,9 +105,9 @@ for the generated file layout, including the monorepo progressive-disclosure str
 After implementation opens the PR, `babysit` checks CI and review feedback
 immediately, then schedules progressively quieter checks until the PR merges or
 closes. It can fix actionable failures and comments while preserving approval gates;
-on merge it performs the final `In Review → Implemented` transition. Babysit is
-currently Claude Code-only. See [Babysitting a PR](../flow/README.md#babysitting-a-pr)
-for pacing, expiry, and safety details.
+on merge it performs the final `In Review → Implemented` transition. The persistent
+supervisor supports both Claude Code and Codex. See
+[Babysitting a PR](../flow/README.md#babysitting-a-pr) for pacing and safety details.
 
 The lifecycle is always:
 
