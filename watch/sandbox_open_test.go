@@ -208,6 +208,25 @@ func anyLineContains(lines []string, sub string) bool {
 	return false
 }
 
+// anyLineContainsAll reports whether some line contains every one of subs.
+// Build calls carry a non-deterministic AGENTS_REFRESH timestamp, so an
+// exact-prefix match isn't possible.
+func anyLineContainsAll(lines []string, subs ...string) bool {
+	for _, l := range lines {
+		all := true
+		for _, s := range subs {
+			if !strings.Contains(l, s) {
+				all = false
+				break
+			}
+		}
+		if all {
+			return true
+		}
+	}
+	return false
+}
+
 func TestSandboxBuildBase_BuildsBaseImageNatively(t *testing.T) {
 	fakeDir := t.TempDir()
 	callLog := writeScriptedRuntimes(t, fakeDir)
@@ -259,9 +278,11 @@ func TestSandboxBuild_MonolithBuildsBaseFirstWhenMissing(t *testing.T) {
 	if !anyLineContains(lines, "-t cenci-sandbox-base:"+tag) {
 		t.Errorf("expected the missing base image to be built first, got calls:\n%s", strings.Join(lines, "\n"))
 	}
-	wantMonolith := "build --build-arg BASE_VERSION=" + tag + " -t cenci-sandbox:latest -f " + assets + "/Dockerfile " + assets
-	if _, ok := findLineWithPrefix(lines, wantMonolith); !ok {
-		t.Errorf("expected monolith build call [%s], got calls:\n%s", wantMonolith, strings.Join(lines, "\n"))
+	if !anyLineContainsAll(lines,
+		"build --build-arg BASE_VERSION="+tag,
+		"--build-arg INSTALL_CLAUDE=1", "--build-arg INSTALL_CODEX=1", "--build-arg AGENTS_REFRESH=",
+		"-t cenci-sandbox:latest -f "+assets+"/Dockerfile "+assets) {
+		t.Errorf("expected monolith build call with agent args, got calls:\n%s", strings.Join(lines, "\n"))
 	}
 }
 
@@ -298,9 +319,11 @@ func TestSandboxBuild_RepoImageFromRepoDockerfile(t *testing.T) {
 	}
 
 	lines := callLogLines(t, callLog)
-	wantRepo := "build --build-arg BASE_VERSION=" + tag + " -t cenci-sandbox-" + slug + ":latest -f " + repo + "/.cenci/Dockerfile " + repo + "/.cenci"
-	if _, ok := findLineWithPrefix(lines, wantRepo); !ok {
-		t.Errorf("expected repo-image build call [%s], got calls:\n%s", wantRepo, strings.Join(lines, "\n"))
+	if !anyLineContainsAll(lines,
+		"build --build-arg BASE_VERSION="+tag,
+		"--build-arg INSTALL_CLAUDE=1", "--build-arg INSTALL_CODEX=1", "--build-arg AGENTS_REFRESH=",
+		"-t cenci-sandbox-"+slug+":latest -f "+repo+"/.cenci/Dockerfile "+repo+"/.cenci") {
+		t.Errorf("expected repo-image build call with both-agent args, got calls:\n%s", strings.Join(lines, "\n"))
 	}
 }
 
@@ -653,14 +676,14 @@ func TestSandboxStop_WithFilterArg_OnlyStopsMatchingName(t *testing.T) {
 // bash suites used to pin against cenci-sand.
 
 // openTestEnv builds the black-box environment for native `cenci open` runs:
-// a fake `claude` binary next to the scripted runtimes on PATH, an isolated
-// HOME, the asset fixture, deterministic TERM/TMUX_PANE, scrubbed optional
-// env passthroughs, and a live events socket under a private 0700
-// XDG_RUNTIME_DIR — pre-created here so the subprocess wires cenci without
-// ever spawning a real daemon.
+// the scripted runtimes on PATH, an isolated HOME, the asset fixture,
+// deterministic TERM/TMUX_PANE, scrubbed optional env passthroughs, and a live
+// events socket under a private 0700 XDG_RUNTIME_DIR — pre-created here so the
+// subprocess wires cenci without ever spawning a real daemon. No host `claude`
+// is installed: both agents are baked into the image, so the launcher never
+// resolves an agent binary from the host.
 func openTestEnv(t *testing.T, fakeDir, assets string) (env []string, home, socketDir string) {
 	t.Helper()
-	exectest.WriteExecutable(t, filepath.Join(fakeDir, "claude"), "#!/bin/sh\nexit 0\n")
 	home = t.TempDir()
 	xdg := t.TempDir()
 	socketDir = filepath.Join(xdg, "cenci")
@@ -816,7 +839,6 @@ func TestOpen_FreshCreate_PinsEntrypointContract(t *testing.T) {
 		"-e WORKSPACE_SCOPE=legacy",
 		"-v " + home + "/Repos:/workspace",
 		"-v claude-cenci-home-default:/home/dev",
-		":/usr/local/bin/claude:ro",
 		"-v " + socketDir + ":/run/user/1000/cenci:ro",
 		":/usr/local/bin/cenci:ro",
 		"-e XDG_RUNTIME_DIR=/run/user/1000",
@@ -824,6 +846,10 @@ func TestOpen_FreshCreate_PinsEntrypointContract(t *testing.T) {
 		if !strings.Contains(runLine, want) {
 			t.Errorf("run argv missing %q:\n%s", want, runLine)
 		}
+	}
+	// Claude is baked into the image now, not bind-mounted from the host.
+	if strings.Contains(runLine, ":/usr/local/bin/claude:ro") {
+		t.Errorf("run argv must not bind-mount the claude binary (it's baked into the image):\n%s", runLine)
 	}
 	// TMUX_PANE must only travel per exec session (asserted on the attach
 	// below): baked into the container-lifetime env it goes stale when the
@@ -1247,34 +1273,6 @@ func TestOpenUnrecognizedLeadingPositional_Exits2NoRuntimeCalls(t *testing.T) {
 	}
 	if lines := callLogLines(t, callLog); len(lines) > 0 {
 		t.Errorf("expected no runtime calls for an unrecognized positional, got:\n%s", strings.Join(lines, "\n"))
-	}
-}
-
-func TestOpen_MissingClaudeBinary_Exits1(t *testing.T) {
-	fakeDir := t.TempDir()
-	writeScriptedRuntimes(t, fakeDir)
-	assets := writeAssetFixture(t)
-	env, _, _ := openTestEnv(t, fakeDir, assets)
-	// Remove the fake claude openTestEnv installed: the launch must fail
-	// cleanly when the host has no claude binary.
-	if err := os.Remove(filepath.Join(fakeDir, "claude")); err != nil {
-		t.Fatal(err)
-	}
-
-	cmd := exec.Command(binaryPath, "open", "ch")
-	cmd.Env = env
-	cmd.Dir = t.TempDir()
-	output, err := cmd.CombinedOutput()
-
-	exitErr, ok := err.(*exec.ExitError)
-	if !ok {
-		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
-	}
-	if exitErr.ExitCode() != 1 {
-		t.Errorf("exit code = %d, want 1\n%s", exitErr.ExitCode(), output)
-	}
-	if !strings.Contains(string(output), "claude binary not found") {
-		t.Errorf("expected the missing-binary error, got:\n%s", output)
 	}
 }
 

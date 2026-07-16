@@ -19,13 +19,13 @@ shortcut table — lives in
 ## Prerequisites
 
 - Docker or Podman installed on the host
-- Claude Code installed on the host (`claude` in PATH) — only required when launching the
-  **Claude agent** (the default, or `--agent claude`). Claude's binary is bind-mounted from
-  the host into the container; `--agent codex` never touches it (Codex is baked into the
-  image — see [Choosing an agent](#choosing-an-agent)).
+- Neither agent CLI needs to be installed on the host: both Claude Code and Codex are baked
+  into the sandbox image at `@latest` (see [Choosing an agent](#choosing-an-agent)). You still
+  need each agent's **auth** on the host so credentials can be staged into the container.
+- Claude auth on the host when using `--agent claude` (the default) — the usual `claude`
+  login on the host writes `~/.claude/.credentials.json`, which is staged in read-only.
 - Codex auth on the host when using `--agent codex` — run `codex login` to create
-  `~/.codex/auth.json`, or export `OPENAI_API_KEY`. Codex itself is baked into the
-  image, so it does **not** need to be installed on the host.
+  `~/.codex/auth.json`, or export `OPENAI_API_KEY`.
 
 ## Limitations
 
@@ -171,13 +171,13 @@ Containers and home volumes are **namespaced by agent**, so the two never collid
 the **Claude agent** uses the `claude-cenci-` prefix; the **Codex agent** (`--agent
 codex` / `cn xt`) uses `codex-cenci-`. The rest of the name is the repo slug (or the legacy `<name>`
 outside a git repo — see [Per-repo containers](#per-repo-containers) above), e.g.
-`claude-cenci-my-project` / `claude-cenci-home-my-project`. The two agents
-are provisioned differently: **Claude** is bind-mounted from the host (self-contained binary,
-so the container always matches your host version). **Codex** is baked into the image — it ships
-as an npm launcher that resolves a native binary nested in its own `node_modules`, which a
-single-file bind-mount can't carry. Updating Codex therefore means bumping `CODEX_VERSION` in
-the monolith and Codex fragment, regenerating any tailored repo Dockerfile, and rebuilding
-(`cenci sandbox build`), whereas updating Claude needs no rebuild.
+`claude-cenci-my-project` / `claude-cenci-home-my-project`. **Both agent CLIs are baked into
+the image** at `@latest` (Claude via `@anthropic-ai/claude-code`, Codex via `@openai/codex`),
+so the container carries its own agents independent of the host — updating either means a
+rebuild (`cenci sandbox build`), which re-fetches the newest release (the `AGENTS_REFRESH`
+build-arg busts the agent layers' cache). A personal monolith build can drop the agent it
+doesn't use with `cenci sandbox build --agents claude` (or `--agents codex`); per-repo images
+always carry both.
 
 ## First-Run Setup
 
@@ -274,7 +274,8 @@ Everything persists in the home volume — only needs to happen once per instanc
 | Node.js | 24.x | `NODE_MAJOR` |
 | Go | 1.24.1 | `GO_VERSION` |
 | Playwright | 1.61.1 | `PLAYWRIGHT_VERSION` |
-| Codex CLI | 0.144.1 | `CODEX_VERSION` |
+| Codex CLI | latest | `INSTALL_CODEX` (0/1) |
+| Claude Code CLI | latest | `INSTALL_CLAUDE` (0/1) |
 | CCometixLine (ccline) | 1.1.2 | `CCLINE_VERSION` |
 | GitHub CLI | latest | — |
 | git, ripgrep, jq, curl | latest | — |
@@ -392,7 +393,6 @@ Bypass mode is **fully unattended**. The entrypoint seeds `/home/dev/.claude/set
 
 | Host path | Container path | Purpose |
 |-----------|---------------|---------|
-| `claude` binary (Claude only) | `/usr/local/bin/claude` | Always matches host version (Codex is baked into the image instead) |
 | `~/.config/git/config` or `~/.gitconfig` | `/home/dev/.gitconfig` | Git identity |
 | `~/.claude/.credentials.json` | `/tmp/host-claude-creds/` (staging) | Claude OAuth tokens (copied to home on start) |
 | `~/.codex/auth.json` (Codex only) | `/tmp/host-codex-creds/` (staging) | Codex OAuth tokens (copied to home on start) |
@@ -442,9 +442,9 @@ warn that its sessions won't report to the host status bars; stop the container
 
 No manual install is needed inside the container. The launcher passes the selected
 agent through the internal `CENCI_SANDBOX_AGENT` contract, and the entrypoint uses that
-agent's native CLI and plugin store: Claude provisions `~/.claude/plugins` through
-the host-mounted `claude` binary, while Codex provisions `~/.codex` through the
-Codex CLI baked into the image. Both paths register the `cenci` marketplace,
+agent's native CLI and plugin store: Claude provisions `~/.claude/plugins` and Codex
+provisions `~/.codex`, each through that agent's CLI baked into the image. Both paths
+register the `cenci` marketplace,
 install `cenci-watch` and `cenci` when missing, and refresh them on a 30-minute
 TTL. Rapid stop/start cycles therefore make zero network calls; `cenci sandbox
 update-plugins` forces provisioning plus refresh through the selected agent's
@@ -477,11 +477,14 @@ docker stop claude-cenci-my-repo
 
 Edit the `ARG` line for the stack you want to bump:
 
-- `DOTNET_SDK_VERSION`, `NODE_MAJOR`, `CODEX_VERSION`, `GO_VERSION` live in `Dockerfile`
+- `DOTNET_SDK_VERSION`, `NODE_MAJOR`, `GO_VERSION` live in `Dockerfile`
   (the monolith layers on top of the base). Stack fragments mirror their corresponding
-  pins, including `fragments/codex.dockerfile` for generated per-repo images.
+  pins.
 - `UV_VERSION` lives in `Dockerfile.base` — bump it and run `cenci sandbox build-base`
   first, then rebuild the monolith.
+- The agent CLIs (Codex, Claude Code) have no version pin — they install at `@latest` and
+  re-fetch on every rebuild. Drop one from a personal monolith with
+  `cenci sandbox build --agents claude` / `--agents codex`.
 
 Then rebuild:
 
@@ -497,7 +500,10 @@ images](#per-repo-images)) so it doesn't keep running the stale base.
 
 ### Update Claude Code
 
-Just update Claude Code on the host. The binary is bind-mounted, so the container always uses the host version — no rebuild needed.
+Claude Code is baked into the image at `@latest`, so updating it means a rebuild:
+`cenci sandbox build`. The `AGENTS_REFRESH` cache-bust makes the rebuild re-fetch the newest
+release (only the agent layers rebuild, not the language stacks). Updating Claude Code on the
+host no longer affects the container.
 
 ### Update sandbox plugins
 
@@ -520,13 +526,11 @@ installed on the host. After a Codex hook-file update, review pending trust via
 
 ### Update Codex
 
-Codex is baked into the image, so updating it means bumping `CODEX_VERSION` in the monolith
-and `fragments/codex.dockerfile`, regenerating tailored repo Dockerfiles, and rebuilding
-(`cenci sandbox build`). Unlike Claude, updating Codex on the host has no effect on the container.
-
-A scheduled workflow checks for new Codex releases daily, opens a PR bumping
-`CODEX_VERSION` in both the monolith and Codex fragment, and auto-merges it — no manual
-bumping needed. Run `cenci sandbox build` to pick up the new version in either image type.
+Codex is baked into the image at `@latest`, so updating it is the same as updating Claude:
+just rebuild with `cenci sandbox build`. The `AGENTS_REFRESH` cache-bust re-fetches the newest
+release. Updating Codex on the host has no effect on the container. There is no `CODEX_VERSION`
+pin to bump — the daily "sandbox — Version Bump" rebuild picks up new agent releases on its
+own.
 
 ### Clean up superseded images and containers
 
@@ -630,8 +634,10 @@ whole-`~/Repos` mount (outside a git repo) and see stale mis-owned files from be
 fix, run `chown -R $(id -u):$(id -g) ~/Repos` on the host — see
 [Limitations](#limitations).
 
-**`claude` binary not found**
-Ensure `claude` is in your host PATH. Check with: `readlink -f "$(which claude)"`
+**`claude` or `codex` not found inside the container**
+Both agent CLIs are baked into the image, so a missing one means the image was built without
+it. Rebuild with the agent included: `cenci sandbox build --agents claude,codex` (or just
+`cenci sandbox build`, which bakes both by default).
 
 **Container runtime**
 The launcher auto-detects `podman` first, then falls back to `docker`.

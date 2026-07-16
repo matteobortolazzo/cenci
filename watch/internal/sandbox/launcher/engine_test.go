@@ -55,18 +55,35 @@ func TestBuildBase_ArgvMatchesCenciSand(t *testing.T) {
 func TestBuildMonolith_BuildsBaseFirstWhenMissing(t *testing.T) {
 	e, callLog := buildEngine(t, true)
 
-	if err := e.BuildMonolith(); err != nil {
+	if err := e.BuildMonolith(AllAgents()); err != nil {
 		t.Fatalf("BuildMonolith: %v", err)
 	}
 
 	calls := readCallLog(t, callLog)
 	wantBase := "build -f /assets/Dockerfile.base -t cenci-sandbox-base:abc123def456 -t cenci-sandbox-base:latest /assets"
-	wantMono := "build --build-arg BASE_VERSION=abc123def456 -t cenci-sandbox:latest -f /assets/Dockerfile /assets"
 	if !containsLine(calls, wantBase) {
 		t.Errorf("base build missing; calls:\n%s", strings.Join(calls, "\n"))
 	}
-	if !containsLine(calls, wantMono) {
-		t.Errorf("monolith build missing; calls:\n%s", strings.Join(calls, "\n"))
+	// AGENTS_REFRESH is a wall-clock timestamp, so match the stable pieces by
+	// substring rather than the whole line.
+	if !containsLineWithAll(calls,
+		"build --build-arg BASE_VERSION=abc123def456",
+		"--build-arg INSTALL_CLAUDE=1", "--build-arg INSTALL_CODEX=1", "--build-arg AGENTS_REFRESH=",
+		"-t cenci-sandbox:latest -f /assets/Dockerfile /assets") {
+		t.Errorf("monolith build missing/omitted agent args; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+func TestBuildMonolith_ClaudeOnlyDropsCodexLayer(t *testing.T) {
+	e, callLog := buildEngine(t, false) // base exists
+
+	if err := e.BuildMonolith(BuildAgents{Claude: true}); err != nil {
+		t.Fatalf("BuildMonolith: %v", err)
+	}
+
+	calls := readCallLog(t, callLog)
+	if !containsLineWithAll(calls, "-t cenci-sandbox:latest", "--build-arg INSTALL_CLAUDE=1", "--build-arg INSTALL_CODEX=0") {
+		t.Errorf("claude-only monolith build should set INSTALL_CODEX=0; calls:\n%s", strings.Join(calls, "\n"))
 	}
 }
 
@@ -78,12 +95,48 @@ func TestBuildRepoImage_UsesRepoDockerfileContext(t *testing.T) {
 	}
 
 	calls := readCallLog(t, callLog)
-	want := "build --build-arg BASE_VERSION=abc123def456 -t cenci-sandbox-myrepo:latest -f /repo/.cenci/Dockerfile /repo/.cenci"
-	if !containsLine(calls, want) {
-		t.Errorf("repo build argv missing %q; calls:\n%s", want, strings.Join(calls, "\n"))
+	// A per-repo image always bakes both agents (INSTALL_*=1), regardless of any
+	// per-user selection.
+	if !containsLineWithAll(calls,
+		"build --build-arg BASE_VERSION=abc123def456",
+		"--build-arg INSTALL_CLAUDE=1", "--build-arg INSTALL_CODEX=1", "--build-arg AGENTS_REFRESH=",
+		"-t cenci-sandbox-myrepo:latest -f /repo/.cenci/Dockerfile /repo/.cenci") {
+		t.Errorf("repo build argv missing expected pieces; calls:\n%s", strings.Join(calls, "\n"))
 	}
 	if containsPrefix(calls, "build -f /assets/Dockerfile.base") {
 		t.Errorf("base rebuilt although inspect succeeded; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+func TestParseBuildAgents(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    BuildAgents
+		wantErr bool
+	}{
+		{"", BuildAgents{true, true}, false},
+		{"claude,codex", BuildAgents{true, true}, false},
+		{"claude", BuildAgents{true, false}, false},
+		{"codex", BuildAgents{false, true}, false},
+		{" codex , ", BuildAgents{false, true}, false},
+		{"gemini", BuildAgents{}, true},
+		{",", BuildAgents{}, true},
+	}
+	for _, c := range cases {
+		got, err := ParseBuildAgents(c.in)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("ParseBuildAgents(%q): expected error, got %+v", c.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("ParseBuildAgents(%q): unexpected error %v", c.in, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("ParseBuildAgents(%q) = %+v, want %+v", c.in, got, c.want)
+		}
 	}
 }
 

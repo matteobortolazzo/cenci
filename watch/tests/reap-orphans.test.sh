@@ -278,12 +278,8 @@ esac
 MOCK
 chmod +x "${BIN_DIR}/tmux"
 
-# ── Mock claude (only needed to resolve AGENT_BIN for the bind-mount) ──
-cat > "${BIN_DIR}/claude" <<'MOCK'
-#!/usr/bin/env bash
-exit 0
-MOCK
-chmod +x "${BIN_DIR}/claude"
+# No `claude` mock: the reaper never resolves a host agent binary (both agent
+# CLIs are baked into the image, not bind-mounted from the host).
 
 export CALLS_FILE SCAN_DIR LIVENESS_DIR
 export HOME="${TEST_ROOT}/home"

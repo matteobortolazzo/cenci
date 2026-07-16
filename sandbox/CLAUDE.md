@@ -68,26 +68,39 @@ black-box tests in `watch/sandbox_open_test.go` plus the reap contract suite
 digest of `Dockerfile.base` + `entrypoint.sh` + `lib/` (Ubuntu, system packages, locale,
 `uv`, GitHub CLI, Docker CLI, non-root `dev` user, entrypoint — no language runtimes).
 `Dockerfile` (the monolith) builds `cenci-sandbox:latest` `FROM` that base image and
-layers on the runtime stacks in order: .NET, Node, Playwright, Go, then Codex last (Codex
-bumps daily via the deps-bump workflow, so keeping it last avoids invalidating the other
-stacks' layer cache on every bump).
+layers on the runtime stacks in order: .NET, Node, Playwright, Go, then the two agent CLIs
+(Codex, then Claude Code) last. The agent layers install at `@latest` and are gated by
+`INSTALL_CODEX` / `INSTALL_CLAUDE` build-args (default `1`); a `cenci sandbox build --agents`
+selection can drop one for a leaner personal image. An `AGENTS_REFRESH` build-arg
+(a timestamp the launcher stamps on every build) is referenced inside those RUN layers so a
+rebuild re-fetches the newest agent release instead of serving the cached npm install —
+keeping them last means only the agent layers rebuild, never the stacks above.
+
+Both agent CLIs are **baked into the image** — Claude Code used to be bind-mounted from the
+host binary, but is now installed via `@anthropic-ai/claude-code@latest` alongside Codex, so
+`cenci open` needs no host agent install (credentials are still staged from the host).
 
 `fragments/*.dockerfile` holds the same composable blocks (`dotnet`, `node`, `playwright`,
-`go`, `python`, `rust`, `codex`) as standalone snippets used to assemble per-project images.
-Generated images always include Node and Codex so either supported agent can launch; the
-remaining fragments (including `playwright`, used for `verify-ui`'s Chromium screenshot
-capture) follow the detected project stack. **Invariant:** each fragment and its
-corresponding block in `Dockerfile` must stay byte-identical — hand-duplicated on every
-change (e.g. bumping `DOTNET_SDK_VERSION` or adding a package to a stack block means
-editing both `Dockerfile` and `fragments/<stack>.dockerfile` identically).
+`go`, `python`, `rust`, `codex`, `claude`) as standalone snippets used to assemble per-project
+images. Generated images always include Node, Codex, and Claude so either supported agent can
+launch; the remaining fragments (including `playwright`, used for `verify-ui`'s Chromium
+screenshot capture) follow the detected project stack. Per-repo images always bake both
+agents (a committed team artifact); the per-user `--agents` selection only prunes the personal
+monolith. **Invariant:** each fragment and its corresponding block in `Dockerfile` must stay
+byte-identical — hand-duplicated on every change (e.g. bumping `DOTNET_SDK_VERSION` or adding a
+package to a stack block means editing both `Dockerfile` and `fragments/<stack>.dockerfile`
+identically).
 
 ## Dependency version pins
 Image dependency versions are pinned via Dockerfile `ARG`s, all checked daily by
 `.github/workflows/deps-bump.yml`. Three tiers, by breaking-change risk:
 
+- **Not pinned (agent CLIs)** — Codex and Claude Code are installed at `@latest` when the
+  image builds (the `AGENTS_REFRESH` cache-bust forces a re-fetch). There is no version ARG,
+  so `deps-bump.yml` does not track them; a `cenci sandbox build` or the daily rebuild picks
+  up the newest release.
 - **Auto-bumped, auto-merged** — one auto-merged PR per outdated dependency, then the
   cenci-sandbox rebuild is dispatched once the merge lands:
-  - `CODEX_VERSION` — `Dockerfile` **and** `fragments/codex.dockerfile` (both stamped, kept in sync).
   - `GO_VERSION` — `Dockerfile` **and** `fragments/go.dockerfile` (both stamped, kept in sync).
   - `UV_VERSION` — `Dockerfile.base`.
 - **Auto-proposed, in-band auto-merges / out-of-band opens a manual-merge PR**:
@@ -102,7 +115,7 @@ Image dependency versions are pinned via Dockerfile `ARG`s, all checked daily by
 - **Manual only (not yet wired into `deps-bump.yml`)**:
   - `PLAYWRIGHT_VERSION` — `Dockerfile` (+ `fragments/playwright.dockerfile`,
     byte-identical). Bump by hand and rebuild; add it to the auto-bumped tier above in a
-    follow-up if it proves stable enough to auto-merge like Codex/Go/uv.
+    follow-up if it proves stable enough to auto-merge like Go/uv.
 
 ## Security
 - Never bake secrets or credentials into the image layers.

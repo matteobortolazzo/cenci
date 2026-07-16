@@ -85,19 +85,31 @@ func currentScope(verb, agent, instanceName string) launcher.Scope {
 	return launcher.ComputeScope(agent, instanceName, cwd, home)
 }
 
-// runSandboxBuild implements `cenci sandbox build`: build the image the
-// current directory selects (the repo's own image when .cenci/Dockerfile
-// opts in, otherwise the shared monolith), building the base first if its
-// content-hash tag is missing. The agent passed to ComputeScope is
-// irrelevant here — image selection depends only on the repo, never on the
-// agent-namespaced container/volume names.
+// runSandboxBuild implements `cenci sandbox build [--agents claude,codex]`:
+// build the image the current directory selects (the repo's own image when
+// .cenci/Dockerfile opts in, otherwise the shared monolith), building the base
+// first if its content-hash tag is missing. --agents gates which agent CLIs the
+// monolith bakes in (default: both); a per-repo image is a committed team
+// artifact and always bakes both, so --agents is noted-and-ignored there. The
+// agent passed to ComputeScope is irrelevant — image selection depends only on
+// the repo, never on the agent-namespaced container/volume names.
 func runSandboxBuild(args []string) {
 	fs := flag.NewFlagSet("sandbox build", flag.ExitOnError)
+	agentsFlag := fs.String("agents", "", "comma-separated agents to bake into the monolith image (claude, codex; default both)")
 	_ = fs.Parse(args)
 	rejectExtraArgs("build", fs)
 
+	agents, err := launcher.ParseBuildAgents(*agentsFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cenci sandbox build: %v\n", err)
+		os.Exit(2)
+	}
+
 	scope := currentScope("build", "claude", "")
-	if err := newEngine("build").BuildSelected(scope); err != nil {
+	if scope.UsingRepoImage && *agentsFlag != "" {
+		fmt.Fprintln(os.Stderr, "cenci sandbox build: --agents ignored — this repo's .cenci image always bakes both agents")
+	}
+	if err := newEngine("build").BuildSelected(scope, agents); err != nil {
 		fmt.Fprintf(os.Stderr, "cenci sandbox build: %v\n", err)
 		os.Exit(1)
 	}

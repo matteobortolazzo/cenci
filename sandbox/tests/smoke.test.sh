@@ -110,22 +110,18 @@ fi
 
 # ── Run the built image and assert every toolchain works ──────────
 # A generated per-repo image replaces the monolith whenever the repository
-# contains .cenci/Dockerfile, so it must carry the Codex agent runtime.
-echo "case: configured per-repo image includes a working Codex CLI"
-EXPECTED_CODEX_VERSION="$(sed -n 's/^ARG CODEX_VERSION=//p' "${SANDBOX_DIR}/fragments/codex.dockerfile")"
-# shellcheck disable=SC2016 # Expansion happens in the container, using the forwarded environment variable.
-if [[ -z "${EXPECTED_CODEX_VERSION}" ]]; then
-    fail "could not read the expected Codex version from fragments/codex.dockerfile"
-elif "${RUNTIME}" build --build-arg "BASE_VERSION=${BASE_TAG}" \
+# contains .cenci/Dockerfile, so it must carry BOTH agent runtimes (Codex and
+# Claude Code are baked in at @latest — there is no version pin to assert).
+echo "case: configured per-repo image includes working Codex and Claude CLIs"
+if "${RUNTIME}" build --build-arg "BASE_VERSION=${BASE_TAG}" \
     -t cenci-sandbox-smoke-repo:latest \
     -f "${REPO_ROOT}/.cenci/Dockerfile" "${REPO_ROOT}/.cenci" \
     && "${RUNTIME}" run --rm --entrypoint /bin/bash \
-        -e "EXPECTED_CODEX_VERSION=${EXPECTED_CODEX_VERSION}" \
         cenci-sandbox-smoke-repo:latest -c \
-        'command -v codex && test "$(codex --version)" = "codex-cli ${EXPECTED_CODEX_VERSION}"'; then
+        'command -v codex && codex --version && command -v claude && claude --version'; then
     pass
 else
-    fail "Codex CLI is missing, unusable, or stale in the configured per-repo image"
+    fail "Codex or Claude CLI is missing or unusable in the configured per-repo image"
 fi
 
 # Regression guard for the libicu74 FailFast bug: if it regresses,

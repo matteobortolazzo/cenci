@@ -119,17 +119,10 @@ func (e *Engine) Launch(opts Options) error {
 		return err
 	}
 
-	// Claude is a self-contained binary bind-mounted from the host; Codex is
-	// baked into the image (npm launcher + nested native binary can't be
-	// single-file mounted), so only Claude needs a host binary here.
-	var agentBin string
-	if agent == "claude" {
-		agentBin, err = resolveHostBinary("claude")
-		if err != nil {
-			return fmt.Errorf("%s binary not found. Install %s on the host first.", agent, agent) //nolint:staticcheck // user-facing message ported verbatim from cenci-sand
-		}
-	}
-
+	// Both agents are baked into the image now (Claude via
+	// @anthropic-ai/claude-code, Codex via @openai/codex), so neither needs a
+	// host binary bind-mounted in. Credentials are still staged from the host
+	// (assembleVolumeMounts / validateCredentials).
 	cenciBin, socketDir, cenciAvailable := e.resolveCenciWiring()
 
 	// The container is the security boundary: the agent runs with full
@@ -173,7 +166,7 @@ func (e *Engine) Launch(opts Options) error {
 	// Remove a stopped container of the same name if one exists.
 	_ = exec.Command(e.Runtime, "rm", scope.ContainerName).Run()
 
-	runArgs, err := e.assembleRunArgs(agent, agentBin, cenciBin, socketDir, cenciAvailable, scope, opts, home)
+	runArgs, err := e.assembleRunArgs(agent, cenciBin, socketDir, cenciAvailable, scope, opts, home)
 	if err != nil {
 		return err
 	}
@@ -269,9 +262,9 @@ func isSocket(path string) bool {
 // behaviorally identical since docker/podman treat flag order between
 // distinct -v/-e flags as independent — only the trailing image + command
 // (appended by the caller, Launch, after this returns) must stay last.
-func (e *Engine) assembleRunArgs(agent, agentBin, cenciBin, socketDir string, cenciAvailable bool, scope Scope, opts Options, home string) ([]string, error) {
+func (e *Engine) assembleRunArgs(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, opts Options, home string) ([]string, error) {
 	args := e.baseRunArgs(scope)
-	args = append(args, e.assembleVolumeMounts(agent, agentBin, cenciBin, socketDir, cenciAvailable, scope, home)...)
+	args = append(args, e.assembleVolumeMounts(cenciBin, socketDir, cenciAvailable, scope, home)...)
 	args = append(args, e.assembleEnv(agent, scope, opts)...)
 
 	credArgs, err := e.validateCredentials(agent, home)
@@ -301,22 +294,17 @@ func (e *Engine) baseRunArgs(scope Scope) []string {
 }
 
 // assembleVolumeMounts builds every bind/named-volume mount: the workspace
-// and home volumes, the claude binary (read-only; codex is baked into the
-// image instead), git config (read-only, if present), the optional cenci
+// and home volumes, git config (read-only, if present), the optional cenci
 // binary + host socket dir wiring (paired with its own XDG_RUNTIME_DIR env
 // under the same cenciAvailable guard as the mount itself),
-// claude credentials staging, and GitHub CLI credentials staging. Codex
+// claude credentials staging, and GitHub CLI credentials staging. Both agent
+// CLIs are baked into the image, so no agent binary is mounted here. Codex
 // credentials are handled separately by validateCredentials, since a missing
 // codex auth source is a hard launch error rather than an optional mount.
-func (e *Engine) assembleVolumeMounts(agent, agentBin, cenciBin, socketDir string, cenciAvailable bool, scope Scope, home string) []string {
+func (e *Engine) assembleVolumeMounts(cenciBin, socketDir string, cenciAvailable bool, scope Scope, home string) []string {
 	args := []string{
 		"-v", scope.WorkspaceBindHost + ":" + workspaceContainer,
 		"-v", scope.VolumeName + ":/home/dev",
-	}
-
-	// Claude binary (read-only); Codex is baked into the image instead.
-	if agent == "claude" {
-		args = append(args, "-v", agentBin+":/usr/local/bin/claude:ro")
 	}
 
 	// Git config (read-only, if exists).

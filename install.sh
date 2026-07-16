@@ -484,6 +484,84 @@ SELECTED="$ALL_PLUGINS"
 
 selected() { case " $SELECTED " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
+# ------------------------------------------------------------ agent selection ----
+
+# Which agents (claude/codex) the sandbox image bakes in. Both are baked at the
+# latest version; deselecting one drops its layer for a leaner personal image.
+# --agents overrides; otherwise the default is the detected host clients and the
+# user is prompted interactively (step_select_agents).
+SELECTED_AGENTS=""
+AGENTS_EXPLICIT=0
+
+# default_agents echoes the detected host clients as a space-separated list —
+# the non-interactive default and the pre-filled prompt default.
+default_agents() {
+	local a=""
+	[ "$HAS_CLAUDE" -eq 1 ] && a="$a claude"
+	[ "$HAS_CODEX" -eq 1 ] && a="$a codex"
+	printf '%s' "${a# }"
+}
+
+# normalize_agents <csv-or-space-list> — validate + dedupe into a canonical
+# "claude"/"codex" space-separated list (claude first). Fails (returns 1) on an
+# unknown token or an empty selection, so a bad --agents value is a hard error.
+normalize_agents() {
+	local raw="$1" tok claude=0 codex=0
+	raw="${raw//,/ }"
+	for tok in $raw; do
+		case "$tok" in
+		claude) claude=1 ;;
+		codex) codex=1 ;;
+		*) return 1 ;;
+		esac
+	done
+	local out=""
+	[ "$claude" -eq 1 ] && out="$out claude"
+	[ "$codex" -eq 1 ] && out="$out codex"
+	[ -n "$out" ] || return 1
+	printf '%s' "${out# }"
+}
+
+# step_select_agents resolves SELECTED_AGENTS: --agents wins; a non-interactive
+# or --yes run takes the detected default silently; otherwise it prompts. Only
+# runs when the sandbox plugin is in play and an image build will actually
+# happen — there is nothing to bake otherwise.
+step_select_agents() {
+	selected cenci-sandbox || return 0
+	[ "$BUILD_IMAGE" != no ] || return 0
+	if [ "$AGENTS_EXPLICIT" -eq 1 ]; then
+		return 0
+	fi
+
+	local def defchoice=3
+	def="$(default_agents)"
+	case "$def" in
+	claude) defchoice=1 ;;
+	codex) defchoice=2 ;;
+	esac
+
+	if [ "$INTERACTIVE" -eq 0 ] || [ "$ASSUME_YES" -eq 1 ]; then
+		SELECTED_AGENTS="$def"
+		return 0
+	fi
+
+	local ans
+	while :; do
+		printf '\n%s==>%s %sWhich agents should the sandbox include?%s\n' "$BLUE" "$RESET" "$BOLD" "$RESET" >/dev/tty
+		printf '  %sBoth are baked into the image at the latest version.%s\n' "$DIM" "$RESET" >/dev/tty
+		printf '    1) Claude Code only\n' >/dev/tty
+		printf '    2) Codex only\n' >/dev/tty
+		printf '    3) Both\n' >/dev/tty
+		printf '  Choose [1/2/3] (default: %s) ' "$defchoice" >/dev/tty
+		read -r ans </dev/tty || ans=""
+		case "${ans:-$defchoice}" in
+		1) SELECTED_AGENTS="claude"; return 0 ;;
+		2) SELECTED_AGENTS="codex"; return 0 ;;
+		3) SELECTED_AGENTS="claude codex"; return 0 ;;
+		esac
+	done
+}
+
 # ------------------------------------------------------------ install steps ----
 
 step_marketplace() {
@@ -697,8 +775,16 @@ step_sandbox_setup() {
 		warn "cenci binary not available yet — build the image later with: cenci sandbox build"
 		return 0
 	fi
-	say "  building cenci-sandbox:latest with $runtime (this can take a few minutes)…"
-	if "$cenci_bin" sandbox build; then
+	# Bake in the selected agents (default both). SELECTED_AGENTS is a
+	# space-separated list; the CLI takes a comma-separated --agents value.
+	local -a build_args=(sandbox build)
+	if [ -n "$SELECTED_AGENTS" ]; then
+		build_args+=(--agents "${SELECTED_AGENTS// /,}")
+		say "  building cenci-sandbox:latest with $runtime — agents: ${SELECTED_AGENTS} (this can take a few minutes)…"
+	else
+		say "  building cenci-sandbox:latest with $runtime (this can take a few minutes)…"
+	fi
+	if "$cenci_bin" "${build_args[@]}"; then
 		ok "sandbox image built"
 	else
 		fail "image build failed — fix the error above and re-run: cenci sandbox build"
@@ -1230,6 +1316,9 @@ From a source checkout, ./install.sh accepts the same arguments.
 
 Flags:
   --yes                                 accept defaults, never prompt
+  --agents claude,codex                 which agents to bake into the sandbox
+                                        image (default: detected; interactive
+                                        runs prompt)
   --build / --no-build                  force / skip the sandbox image build
   --lazyboards / --no-lazyboards        force / skip the optional lazyboards board install
   --help                                this text
@@ -1241,6 +1330,16 @@ while [ $# -gt 0 ]; do
 	update | --update) MODE=update ;;
 	doctor | --doctor) MODE=doctor ;;
 	--yes | -y) ASSUME_YES=1 ;;
+	--agents)
+		shift
+		[ $# -gt 0 ] || die "--agents requires a value (claude, codex, or claude,codex)"
+		SELECTED_AGENTS="$(normalize_agents "$1")" || die "invalid --agents value '$1' (use claude, codex, or claude,codex)"
+		AGENTS_EXPLICIT=1
+		;;
+	--agents=*)
+		SELECTED_AGENTS="$(normalize_agents "${1#*=}")" || die "invalid --agents value '${1#*=}' (use claude, codex, or claude,codex)"
+		AGENTS_EXPLICIT=1
+		;;
 	--build) BUILD_IMAGE=yes ;;
 	--no-build) BUILD_IMAGE=no ;;
 	--lazyboards) LAZYBOARDS=yes; LAZYBOARDS_EXPLICIT=1 ;;
@@ -1281,6 +1380,7 @@ have_supported_client || die "no supported client found. Install Claude Code, Co
 if [ "$MODE" = update ]; then
 	step_update_plugins
 	prune_selected_to_installed
+	step_select_agents
 	step_cli_setup
 	step_sandbox_setup
 	step_cenci_watch_setup
@@ -1297,6 +1397,7 @@ run_doctor || {
 step_marketplace
 step_install_plugins
 prune_selected_to_installed
+step_select_agents
 step_cli_setup
 step_sandbox_setup
 step_cenci_watch_setup
