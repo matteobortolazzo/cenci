@@ -92,13 +92,42 @@ func TestModelPlaceholderSubstituted(t *testing.T) {
 
 func TestUnknownAgentAndWorkflowError(t *testing.T) {
 	cfg := builtinConfig()
-	if _, err := cfg.BuildCommand("codex", "implement", "40", "", false); err == nil {
-		t.Error("expected error for unknown agent codex")
-	} else if !strings.Contains(err.Error(), "codex") {
+	if _, err := cfg.BuildCommand("other", "implement", "40", "", false); err == nil {
+		t.Error("expected error for unknown agent other")
+	} else if !strings.Contains(err.Error(), "other") {
 		t.Errorf("error should mention the agent: %v", err)
 	}
 	if _, err := cfg.BuildCommand("claude", "frobnicate", "40", "", false); err == nil {
 		t.Error("expected error for unknown workflow")
+	}
+}
+
+func TestCodexNativeWorkflowTemplates(t *testing.T) {
+	cfg := builtinConfig()
+	for _, workflow := range []string{"configure", "refine", "design", "implement", "review", "address-review", "refactor", "sync", "garden"} {
+		argv, err := cfg.BuildCommand("codex", workflow, "42", "", false)
+		if err != nil {
+			t.Fatalf("%s: %v", workflow, err)
+		}
+		got := argv[len(argv)-1]
+		want := "$cenci:" + workflow + " 42"
+		if codexPlanningWorkflow(workflow) {
+			want = "/plan\n" + want
+		}
+		if got != want {
+			t.Errorf("%s = %q, want %q", workflow, got, want)
+		}
+	}
+}
+
+func TestCodexApplyStageLeavesPlanMode(t *testing.T) {
+	cfg := builtinConfig()
+	argv, err := cfg.BuildCommand("codex", "implement", "apply .plans/42.md", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(argv[len(argv)-1], "/plan") {
+		t.Fatalf("apply entered plan mode: %q", argv[len(argv)-1])
 	}
 }
 

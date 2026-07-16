@@ -86,15 +86,15 @@ func TestRunDryRunSandboxUsesSandboxCommand(t *testing.T) {
 	}
 }
 
-func TestRunCodexWithoutTemplateErrors(t *testing.T) {
+func TestRunCodexUsesBuiltinWorkflowTemplate(t *testing.T) {
 	noCfg := filepath.Join(t.TempDir(), "none.json")
 	cmd := exec.Command(binaryPath, "run", "implement", "40",
 		"--agent", "codex", "--session", "demo", "--config", noCfg, "--dry-run")
 	output, err := cmd.CombinedOutput()
-	if err == nil {
-		t.Fatal("expected non-zero exit when no codex template exists")
+	if err != nil {
+		t.Fatalf("codex dry-run failed: %v\n%s", err, output)
 	}
-	if !strings.Contains(strings.ToLower(string(output)), "codex") {
-		t.Errorf("expected an error mentioning codex, got:\n%s", output)
+	if !strings.Contains(string(output), "cenci open") || !strings.Contains(string(output), "$cenci:implement 40") {
+		t.Errorf("expected built-in Codex skill invocation, got:\n%s", output)
 	}
 }

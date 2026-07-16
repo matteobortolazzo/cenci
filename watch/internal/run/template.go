@@ -55,6 +55,9 @@ func builtinConfig() FileConfig {
 	claudeWF := func(wf string) WorkflowTemplate {
 		return WorkflowTemplate{Args: []string{"--", "/cenci:" + wf + " {ticket}"}}
 	}
+	codexWF := func(wf string) WorkflowTemplate {
+		return WorkflowTemplate{Args: []string{"{codex_stage}$cenci:" + wf + " {ticket}"}}
+	}
 	return FileConfig{
 		DefaultAgent: "claude",
 		Agents: map[string]AgentConfig{
@@ -65,6 +68,17 @@ func builtinConfig() FileConfig {
 					"refine":    claudeWF("refine"),
 					"design":    claudeWF("design"),
 					"implement": claudeWF("implement"),
+				},
+			},
+			"codex": {
+				Command:        "codex",
+				SandboxCommand: "cenci open",
+				Workflows: map[string]WorkflowTemplate{
+					"configure": codexWF("configure"), "refine": codexWF("refine"),
+					"design": codexWF("design"), "implement": codexWF("implement"),
+					"review": codexWF("review"), "address-review": codexWF("address-review"),
+					"refactor": codexWF("refactor"), "sync": codexWF("sync"),
+					"garden": codexWF("garden"),
 				},
 			},
 		},
@@ -182,12 +196,17 @@ func (fc FileConfig) BuildCommand(agent, workflow, ticket, model string, sandbox
 	}
 
 	usedModelPlaceholder := false
+	codexStage := ""
+	if agent == "codex" && codexPlanningWorkflow(workflow) && !codexApplyTarget(ticket) {
+		codexStage = "/plan\n"
+	}
 	rest := make([]string, 0, len(tmpl.Args))
 	for _, a := range tmpl.Args {
 		if strings.Contains(a, "{model}") {
 			usedModelPlaceholder = true
 		}
 		a = strings.ReplaceAll(a, "{ticket}", ticket)
+		a = strings.ReplaceAll(a, "{codex_stage}", codexStage)
 		a = strings.ReplaceAll(a, "{model}", model)
 		rest = append(rest, a)
 	}
@@ -201,6 +220,19 @@ func (fc FileConfig) BuildCommand(agent, workflow, ticket, model string, sandbox
 	}
 	argv = append(argv, rest...)
 	return argv, nil
+}
+
+func codexPlanningWorkflow(workflow string) bool {
+	switch workflow {
+	case "configure", "refine", "implement", "address-review", "refactor", "garden", "design":
+		return true
+	}
+	return false
+}
+
+func codexApplyTarget(ticket string) bool {
+	t := strings.TrimSpace(ticket)
+	return strings.HasPrefix(t, "apply ") || strings.HasPrefix(t, "resume ") || strings.HasPrefix(t, ".plans/")
 }
 
 func sortedKeys(m map[string]AgentConfig) string {

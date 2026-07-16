@@ -8,6 +8,8 @@ disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Bash, Glob, Grep, AskUserQuestion
 ---
 
+> **Client dispatch**: In Codex, read `codex-runtime` and `configure/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
+
 > **Interaction rule**: Every question, confirmation, or approval directed at the user — anywhere in this skill, including error recovery — MUST be asked with the `AskUserQuestion` tool. Never ask in plain text. If an instruction says "ask the user" or "confirm", that means `AskUserQuestion`.
 
 ## Task
@@ -433,6 +435,13 @@ Before generating config, verify CLI authentication:
 Run `gh auth status` and check it returns authenticated. If not, instruct the user to run `gh auth login` first.
 
 After gathering answers:
+
+0. **Generate Codex agent adapters**: copy the reviewed TOML role templates from
+   `templates/codex/agents/` into `.codex/agents/`. Preserve unknown user-authored agent
+   files. Planning, implementation, and critical review use GPT-5.6/high; gathering and
+   read-heavy analysis use GPT-5.6-terra/medium. Also generate `.codex/config.toml` entries
+   that discover these project agents. Native procedures must fall back to built-in workers
+   with the same role prompt when an adapter is unavailable.
 
 1. **Generate canonical guidance and client adapters**:
    - `AGENTS.md` at the repository root is canonical shared guidance. Use
