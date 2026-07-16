@@ -59,7 +59,7 @@ ENV PATH="/usr/local/go/bin:${PATH}"
 
 USER dev
 
-ARG CODEX_VERSION=0.144.1
+ARG CODEX_VERSION=0.144.5
 
 USER root
 
