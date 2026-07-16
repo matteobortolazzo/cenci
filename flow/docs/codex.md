@@ -1,7 +1,8 @@
 # Codex support
 
-cenci installs native plugin skills, hooks, agent adapters, and launch templates for
-Codex CLI 0.144.1 or newer. Shared project configuration lives in
+cenci installs native plugin skills, hooks, agent adapters, launch templates, and PR
+babysitting for Codex CLI 0.144.1 or newer. The full gated ticket-to-PR workflow remains
+in development until behavioral end-to-end acceptance passes. Shared configuration lives in
 `.cenci/config.json`; shared guidance lives in `AGENTS.md`.
 
 ## Install
@@ -13,19 +14,19 @@ codex plugin add cenci@cenci
 
 Review changed plugin hooks with `/hooks`. cenci never changes hook trust automatically.
 
-## Native workflows
+## Native workflow foundation
 
 Explicitly mention `$cenci:configure`, `$cenci:refine`, `$cenci:implement`,
 `$cenci:review`, `$cenci:address-review`, `$cenci:refactor`, `$cenci:sync`,
 `$cenci:garden`, `$cenci:babysit`, or optional `$cenci:design`.
 
-Planning workflows enter `/plan`, gather material choices, and produce an approved plan
+The staged procedures are under active development. Their intended contract is: planning workflows enter `/plan`, gather material choices, and produce an approved plan
 without mutations. A second normal-mode invocation persists plans, updates GitHub, and
 executes. Implementation uses `.cenci/checkpoints/`, generated `.codex/agents/*.toml`,
 and a native goal armed only after plan approval. Missing custom agents fall back to
 built-in workers with the same bounded role prompt.
 
-The launcher provides the same surface:
+The launcher exposes development entry points:
 
 ```bash
 cenci run refine 42 --agent codex

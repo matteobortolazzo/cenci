@@ -9,7 +9,7 @@ and maintenance follow-ups remain in the
 
 - One installer and updater for Claude Code, Codex, or a dual-client setup
 - Docker/Podman isolation with per-repository mounts and tailored images
-- Native Claude Code and Codex gated workflows with Plan-mode handoff and checkpoints
+- Claude Code's gated ticket-to-merged-PR workflow
 - Client-neutral persistent PR babysitting
 - Native Claude Code and Codex monitoring hooks with self-bootstrapping binaries
 - tmux plus optional Linux desktop and macOS menu-bar status surfaces
@@ -18,6 +18,8 @@ and maintenance follow-ups remain in the
 - Sandbox lifecycle cleanup with `cenci sandbox prune` and optional volume removal
 
 ## In development
+
+- Native Codex gated workflows, Plan-mode handoff, and end-to-end acceptance
 
 - Hardened and more visible sandbox boundary warnings
   ([#148](https://github.com/matteobortolazzo/cenci/issues/148))

@@ -150,13 +150,14 @@ treat cenci as one product.
 | Container isolation | Yes | Yes |
 | Live session monitoring and self-bootstrap | Yes | Yes |
 | Portable shell, testing, stack, worktree, and review conventions | Yes | Yes |
-| Interactive refinement and implementation | Yes | Yes |
-| Optional Pencil design | Yes | Yes, when configured |
+| Interactive refinement and implementation | Yes | In development |
+| Optional Pencil design | Yes | In development |
 | Persistent PR babysitting | Yes | Yes |
-| Native gated workflow | Yes | [Yes](flow/docs/codex.md) |
+| Native gated workflow | Yes | [Foundation available](flow/docs/codex.md) |
 
-Both clients provide the gated ticket-to-PR workflow using client-native stages. Codex
-uses Plan-mode handoff, durable checkpoints, native goals, and generated agent adapters.
+Codex currently has native hooks, launchers, checkpoint helpers, agent adapters, and PR
+babysitting. Its full gated ticket-to-PR path remains in development pending behavioral
+end-to-end acceptance.
 
 This isn't just a capability gap — it's a flexibility story. `cenci run` takes a
 per-invocation `--agent`, and `cenci dispatch` routes each ticket by an

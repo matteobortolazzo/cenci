@@ -46,16 +46,16 @@ Codex so it does not mistake a pipeline command for a supported workflow.
 | `testing` | Yes | Yes | TDD and test-quality conventions |
 | `verify-ui` | Yes | Yes | Playwright/Pencil visual-verification procedure; browser tooling availability is client-neutral |
 | `worktrees` | Yes | Yes | Git worktree conventions |
-| `address-review` | Yes | Yes | Client-native approval and checkpoint stages |
+| `address-review` | Yes | In development | Native approval/checkpoint foundation |
 | `babysit` | Yes | Yes | Thin wrapper over the client-neutral `cenci babysit` supervisor |
-| `configure` | Yes | Yes | Generates neutral core plus client adapters |
-| `design` | Yes | Yes | Optional; requires Pencil integration |
-| `garden` | Yes | Yes | Plan/apply curation workflow |
-| `implement` | Yes | Yes | Native agents, checkpoints, goals, and human gates |
-| `refactor` | Yes | Yes | Native read-heavy analysis and ticket workflow |
-| `refine` | Yes | Yes | Plan-mode refinement and normal-mode apply |
-| `review` | Yes | Yes | Native specialized reviewer agents |
-| `sync` | Yes | Yes | Client-neutral worktree synchronization |
+| `configure` | Yes | In development | Neutral/adapters foundation present |
+| `design` | Yes | In development | Optional Pencil procedure |
+| `garden` | Yes | In development | Plan/apply foundation |
+| `implement` | Yes | In development | Agents/checkpoints foundation |
+| `refactor` | Yes | In development | Native analysis foundation |
+| `refine` | Yes | In development | Plan/apply foundation |
+| `review` | Yes | In development | Native reviewer foundation |
+| `sync` | Yes | In development | Native procedure foundation |
 
 ## Prerequisites
 
