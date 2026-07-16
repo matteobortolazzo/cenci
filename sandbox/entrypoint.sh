@@ -235,16 +235,21 @@ seed_credential /tmp/host-codex-creds/auth.json /home/dev/.codex/auth.json
 # and leave a precise diagnostic exactly where the Go launcher's
 # startupFailureDetail reads it (watch/internal/sandbox/launcher/launch.go),
 # so a broken volume reports its own cause instead of a generic timeout.
-AGENT_CLI="${CENCI_AGENT_CLI:-/opt/cenci-agent/current/node_modules/.bin/${CENCI_SANDBOX_AGENT:-claude}}"
-if [[ ! -x "${AGENT_CLI}" ]]; then
-    AGENT_CLI_ERROR="agent CLI not found or not executable at ${AGENT_CLI} — the shared /opt/cenci-agent volume may still be bootstrapping, or a previous update failed; rerun 'cenci sandbox update-agent', or wait for the updater to finish and relaunch"
-    printf '%s\n' "${AGENT_CLI_ERROR}" > /home/dev/.cenci-agent-startup-error
-    echo "entrypoint: ${AGENT_CLI_ERROR}" >&2
-    exit 1
+# Only agent workloads get CENCI_AGENT_CLI (and the volume mount) from the
+# launcher; utility containers (smoke tests, ad-hoc runs) must boot without
+# either, so the check is skipped when neither is present.
+if [[ -n "${CENCI_AGENT_CLI:-}" || -d /opt/cenci-agent ]]; then
+    AGENT_CLI="${CENCI_AGENT_CLI:-/opt/cenci-agent/current/node_modules/.bin/${CENCI_SANDBOX_AGENT:-claude}}"
+    if [[ ! -x "${AGENT_CLI}" ]]; then
+        AGENT_CLI_ERROR="agent CLI not found or not executable at ${AGENT_CLI} — the shared /opt/cenci-agent volume may still be bootstrapping, or a previous update failed; rerun 'cenci sandbox update-agent', or wait for the updater to finish and relaunch"
+        printf '%s\n' "${AGENT_CLI_ERROR}" > /home/dev/.cenci-agent-startup-error
+        echo "entrypoint: ${AGENT_CLI_ERROR}" >&2
+        exit 1
+    fi
+    # A marker from an earlier failed boot must not outlive the failure it
+    # describes, or startupFailureDetail would surface it for unrelated crashes.
+    rm -f /home/dev/.cenci-agent-startup-error
 fi
-# A marker from an earlier failed boot must not outlive the failure it
-# describes, or startupFailureDetail would surface it for unrelated crashes.
-rm -f /home/dev/.cenci-agent-startup-error
 
 # Put the shared agent CLI's bin directory ahead of PATH so an interactive
 # --shell session (or any other child process in this container) can invoke
