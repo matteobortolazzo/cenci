@@ -105,6 +105,28 @@ platform_label() {
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# run_bounded <seconds> <cmd...> — run cmd with stdin detached and a hard
+# timeout. Probes of binaries this installer doesn't own (e.g. `lazyboards
+# --version`) must never block the run: a build that doesn't recognize the
+# flag can start its TUI and wait forever for terminal input — and under
+# `curl | bash` it would inherit the script's own stdin pipe as that input.
+run_bounded() {
+	local secs="$1" pid watchdog rc
+	shift
+	if have timeout; then
+		timeout "$secs" "$@" </dev/null
+		return $?
+	fi
+	"$@" </dev/null &
+	pid=$!
+	{ sleep "$secs" && kill "$pid"; } 2>/dev/null &
+	watchdog=$!
+	wait "$pid" 2>/dev/null
+	rc=$?
+	{ kill "$watchdog" && wait "$watchdog"; } 2>/dev/null
+	return "$rc"
+}
+
 detect_clients() {
 	have claude && HAS_CLAUDE=1
 	have codex && HAS_CODEX=1
@@ -330,6 +352,27 @@ doctor_codex_support() {
 
 run_doctor() {
 	DOCTOR_FAILED=0
+	# Hints must match how doctor was reached: standalone `cenci doctor` can
+	# only point at the installer, but the install-mode preflight runs before
+	# the very steps that create these items — telling a first-time installer
+	# to "re-run the installer" mid-install reads as a failure loop.
+	local launcher_hint="re-run the installer to create it"
+	local image_hint="build it with: cenci sandbox build"
+	local lazyboards_hint="optional; install with: cenci-installer --lazyboards"
+	local seed_hint="re-run the installer to seed the default, or see docs/orchestration.md"
+	if [ "$MODE" = install ]; then
+		launcher_hint="created later in this run"
+		[ "$BUILD_IMAGE" = no ] || image_hint="you'll be offered the build later in this run"
+		case "$LAZYBOARDS" in
+		ask) lazyboards_hint="optional; you'll be asked later in this run" ;;
+		yes) lazyboards_hint="optional; installed later in this run" ;;
+		esac
+		# Mirrors step_lazyboards_setup's guard: only an explicit --no-lazyboards
+		# skips seeding for an already-installed binary.
+		if ! { [ "$LAZYBOARDS" = no ] && [ "$LAZYBOARDS_EXPLICIT" -eq 1 ]; }; then
+			seed_hint="seeded later in this run (see docs/orchestration.md)"
+		fi
+	fi
 	step "Checking your system ($(platform_label))"
 
 	say "  ${BOLD}Required platform dependencies${RESET}"
@@ -399,12 +442,12 @@ run_doctor() {
 
 	say ""
 	say "  ${BOLD}Launchers and container image${RESET}"
-	check "cenci-installer utility" optional "re-run the installer to create it" command -v cenci-installer
+	check "cenci-installer utility" optional "$launcher_hint" command -v cenci-installer
 	if [ "$HAS_CLAUDE" -eq 1 ] || [ "$HAS_CODEX" -eq 1 ]; then
-		check "cn launcher (cenci open)" optional "re-run the installer to create it" command -v cn
+		check "cn launcher (cenci open)" optional "$launcher_hint" command -v cn
 	fi
 	if runtime="$(container_runtime 2>/dev/null)"; then
-		check "cenci-sandbox:latest image" optional "build it with: cenci sandbox build" \
+		check "cenci-sandbox:latest image" optional "$image_hint" \
 			"$runtime" image inspect cenci-sandbox:latest
 	fi
 
@@ -420,10 +463,10 @@ run_doctor() {
 		if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/lazyboards/config.yml" ]; then
 			ok "board config present (~/.config/lazyboards/config.yml)"
 		else
-			warn "no board config — re-run the installer to seed the default, or see docs/orchestration.md"
+			warn "no board config — $seed_hint"
 		fi
 	else
-		warn "lazyboards not installed — optional; install with: cenci-installer --lazyboards"
+		warn "lazyboards not installed — $lazyboards_hint"
 	fi
 
 	say ""
@@ -982,7 +1025,7 @@ lazyboards_latest_version() {
 lazyboards_installed_version() {
 	local bin
 	bin="$(lazyboards_binary)" || return 1
-	"$bin" --version 2>/dev/null | sed -n '1s/^lazyboards v\{0,1\}//p'
+	run_bounded 5 "$bin" --version 2>/dev/null | sed -n '1s/^lazyboards v\{0,1\}//p'
 }
 
 # install_lazyboards_binary <version> — download the GoReleaser archive for

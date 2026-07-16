@@ -112,6 +112,20 @@ EOF
     (cd "${dir}" && sha256sum "${ARCHIVE}" >checksums.txt)
 }
 
+# make_blocking_lazyboards <home> plants an installed lazyboards binary that
+# simulates a build that doesn't recognize --version: instead of answering it
+# behaves like the launched TUI and blocks. The sleep is finite so a probe
+# regression fails the suite's duration assertion instead of hanging CI.
+make_blocking_lazyboards() {
+    local home="$1"
+    mkdir -p "${home}/.local/bin"
+    cat >"${home}/.local/bin/lazyboards" <<'EOF'
+#!/bin/sh
+exec sleep 300
+EOF
+    chmod +x "${home}/.local/bin/lazyboards"
+}
+
 # make_installed_lazyboards <home> <version> plants an already-installed
 # lazyboards binary reporting the given version.
 make_installed_lazyboards() {
@@ -262,6 +276,28 @@ echo "case: doctor reports lazyboards state without failing when absent"
 run_installer doctor-absent doctor
 [[ "${CASE_EXIT}" -eq 0 ]]
 assert_contains "${CASE_OUTPUT}" "lazyboards not installed"
+assert_contains "${CASE_OUTPUT}" "install with: cenci-installer --lazyboards"
+assert_contains "${CASE_OUTPUT}" "re-run the installer to create it"
+
+echo "case: doctor never hangs on a lazyboards binary that ignores --version"
+name=doctor-blocking
+make_blocking_lazyboards "${WORK}/${name}/home"
+probe_start=${SECONDS}
+run_installer "${name}" doctor
+probe_elapsed=$((SECONDS - probe_start))
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_contains "${CASE_OUTPUT}" "lazyboards installed"
+if [[ "${probe_elapsed}" -ge 60 ]]; then
+    echo "FAIL: doctor took ${probe_elapsed}s — the lazyboards version probe is unbounded again" >&2
+    exit 1
+fi
+
+echo "case: install preflight labels missing launchers as created by this run, not a re-run"
+run_installer preflight-hints --yes --no-build
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_contains "${CASE_OUTPUT}" "cenci-installer utility — created later in this run"
+assert_contains "${CASE_OUTPUT}" "cn launcher (cenci open) — created later in this run"
+assert_not_contains "${CASE_OUTPUT}" "re-run the installer to create it"
 
 echo "case: doctor reports an installed lazyboards with its version"
 name=doctor-present
