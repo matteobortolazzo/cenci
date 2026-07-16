@@ -1,4 +1,4 @@
-name: Bug report
+name: Cenci bug report
 description: Something in cenci, cenci-watch, or cenci-sandbox isn't working as expected
 labels: ["bug"]
 body:
@@ -42,10 +42,10 @@ body:
   - type: textarea
     id: doctor-output
     attributes:
-      label: install.sh doctor output
+      label: doctor output
       description: |
-        Run `curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash -s -- doctor`
-        and paste the output.
+        Run `cenci doctor` and paste the output. Not installed yet? Use
+        `curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash -s -- doctor` instead.
       render: shell
     validations:
       required: false
