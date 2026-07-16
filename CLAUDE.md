@@ -42,3 +42,14 @@ Each plugin versions independently:
 - flow: auto-bumped on push to main (paths: `flow/**`), tags: `flow/v*`
 - watch: auto-bumped on push to main (paths: `watch/**`), tags: `watch/v*`
 - sandbox: auto-bumped on push to main (paths: `sandbox/**`), tags: `sandbox/v*`
+
+## Sandbox Image
+
+- `.cenci/Dockerfile` — committed, single per-repo image covering the union of every project's stack; the whole team builds the same image
+- Rebuild after changing any project's stack or the Dockerfile: `cenci sandbox build` (run from inside this repo)
+
+## Reference Docs
+
+On-demand topic docs live in `docs/` at the repo root. Read the file matching your work area:
+- `docs/git-workflow.md` — branching, commits, PRs, versioning
+- `docs/cli-conventions.md` — CLI grammar, alias, env-var, and runtime-object naming
