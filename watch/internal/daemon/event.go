@@ -63,12 +63,13 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 		return
 	}
 	sess.Status = status
-	if status == detect.StatusNeedInput {
+	switch status {
+	case detect.StatusNeedInput:
 		sess.AttentionSource = attentionSource(event)
 		if d.cfg.Verbose {
 			log.Printf("attention: session=%s source=%s event=%s tool=%s", key, sess.AttentionSource, event.EventType, event.ToolName)
 		}
-	} else if status == detect.StatusRunning {
+	case detect.StatusRunning:
 		sess.AttentionSource = ""
 	}
 
