@@ -75,7 +75,7 @@ func joinArgv(argv []string) string {
 
 // -- sandbox <batch verb> ------------------------------------------------
 //
-// build/build-base/prune/update-plugins run natively against docker/podman
+// build/build-base/prune/update-agent/update-plugins run natively against docker/podman
 // via internal/sandbox/launcher, so these tests assert what the fake
 // *runtime* received. Both docker and podman fakes are always written so the
 // podman-first runtime detection can never escape to a real runtime on
@@ -208,25 +208,6 @@ func anyLineContains(lines []string, sub string) bool {
 	return false
 }
 
-// anyLineContainsAll reports whether some line contains every one of subs.
-// Build calls carry a non-deterministic AGENTS_REFRESH timestamp, so an
-// exact-prefix match isn't possible.
-func anyLineContainsAll(lines []string, subs ...string) bool {
-	for _, l := range lines {
-		all := true
-		for _, s := range subs {
-			if !strings.Contains(l, s) {
-				all = false
-				break
-			}
-		}
-		if all {
-			return true
-		}
-	}
-	return false
-}
-
 func TestSandboxBuildBase_BuildsBaseImageNatively(t *testing.T) {
 	fakeDir := t.TempDir()
 	callLog := writeScriptedRuntimes(t, fakeDir)
@@ -278,11 +259,12 @@ func TestSandboxBuild_MonolithBuildsBaseFirstWhenMissing(t *testing.T) {
 	if !anyLineContains(lines, "-t cenci-sandbox-base:"+tag) {
 		t.Errorf("expected the missing base image to be built first, got calls:\n%s", strings.Join(lines, "\n"))
 	}
-	if !anyLineContainsAll(lines,
-		"build --build-arg BASE_VERSION="+tag,
-		"--build-arg INSTALL_CLAUDE=1", "--build-arg INSTALL_CODEX=1", "--build-arg AGENTS_REFRESH=",
-		"-t cenci-sandbox:latest -f "+assets+"/Dockerfile "+assets) {
-		t.Errorf("expected monolith build call with agent args, got calls:\n%s", strings.Join(lines, "\n"))
+	want := "build --build-arg BASE_VERSION=" + tag + " -t cenci-sandbox:latest -f " + assets + "/Dockerfile " + assets
+	if !anyLineContains(lines, want) {
+		t.Errorf("expected monolith build call %q, got calls:\n%s", want, strings.Join(lines, "\n"))
+	}
+	if anyLineContains(lines, "INSTALL_CLAUDE") || anyLineContains(lines, "INSTALL_CODEX") || anyLineContains(lines, "AGENTS_REFRESH") {
+		t.Errorf("build still passed removed agent build arguments; calls:\n%s", strings.Join(lines, "\n"))
 	}
 }
 
@@ -309,6 +291,10 @@ func TestSandboxBuild_RepoImageFromRepoDockerfile(t *testing.T) {
 		t.Fatalf("write repo Dockerfile: %v", err)
 	}
 	slug := launcher.Slugify(filepath.Base(repo))
+	repoRoot, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatalf("resolve repo path: %v", err)
+	}
 
 	cmd := exec.Command(binaryPath, "sandbox", "build")
 	cmd.Env = append(batchEnv(t, fakeDir, assets), "FAKE_INSPECT_EXIT=1")
@@ -319,11 +305,30 @@ func TestSandboxBuild_RepoImageFromRepoDockerfile(t *testing.T) {
 	}
 
 	lines := callLogLines(t, callLog)
-	if !anyLineContainsAll(lines,
-		"build --build-arg BASE_VERSION="+tag,
-		"--build-arg INSTALL_CLAUDE=1", "--build-arg INSTALL_CODEX=1", "--build-arg AGENTS_REFRESH=",
-		"-t cenci-sandbox-"+slug+":latest -f "+repo+"/.cenci/Dockerfile "+repo+"/.cenci") {
-		t.Errorf("expected repo-image build call with both-agent args, got calls:\n%s", strings.Join(lines, "\n"))
+	want := "build --build-arg BASE_VERSION=" + tag + " -t cenci-sandbox-" + slug + ":latest -f " + repoRoot + "/.cenci/Dockerfile " + repoRoot + "/.cenci"
+	if !anyLineContains(lines, want) {
+		t.Errorf("expected repo-image build call %q, got calls:\n%s", want, strings.Join(lines, "\n"))
+	}
+	if anyLineContains(lines, "INSTALL_CLAUDE") || anyLineContains(lines, "INSTALL_CODEX") || anyLineContains(lines, "AGENTS_REFRESH") {
+		t.Errorf("repo build still passed removed agent build arguments; calls:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+func TestSandboxBuild_AgentsFlagIsGone(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+
+	cmd := exec.Command(binaryPath, "sandbox", "build", "--agents", "claude")
+	cmd.Env = batchEnv(t, fakeDir, assets)
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("expected removed --agents flag to exit 2, got %T %v\n%s", err, err, output)
+	}
+	if lines := callLogLines(t, callLog); len(lines) > 0 {
+		t.Errorf("expected no runtime calls for removed --agents flag, got:\n%s", strings.Join(lines, "\n"))
 	}
 }
 
@@ -415,6 +420,103 @@ func TestSandboxPruneVolumes_DefaultDeniesRemoval(t *testing.T) {
 	}
 	if anyLineContains(lines, "volume rm") {
 		t.Errorf("expected no volume removal on 'n', got calls:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+func TestSandboxUpdateAgent_StoppedVolumeUsesUIDSafeMaintenanceContainer(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+
+	cmd := exec.Command(binaryPath, "sandbox", "update-agent", "--agent", "codex", "--name", "work")
+	cmd.Env = batchEnv(t, fakeDir, assets)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandbox update-agent stopped volume: %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	prefix := "run --rm --user root -e HOST_UID=" + itoa(os.Getuid()) +
+		" -e HOST_GID=" + itoa(os.Getgid()) +
+		" -e CENCI_SANDBOX_AGENT=codex -v codex-cenci-home-work:/home/dev cenci-sandbox:latest -c "
+	line, ok := findLineWithPrefix(lines, prefix)
+	if !ok {
+		t.Fatalf("expected UID-safe maintenance run [%s...], got calls:\n%s", prefix, strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(line, "source /usr/local/bin/lib/agent-cli.sh") || !strings.Contains(line, "update_agent_cli codex") {
+		t.Errorf("expected maintenance command to force a Codex update, got: %s", line)
+	}
+}
+
+func TestSandboxUpdateAgent_RunningContainerExecsAsDev(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+
+	cmd := exec.Command(binaryPath, "sandbox", "update-agent")
+	cmd.Env = append(batchEnv(t, fakeDir, assets), "FAKE_PS=claude-cenci-default\n")
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandbox update-agent running container: %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	prefix := "exec -u dev claude-cenci-default /bin/bash -c "
+	line, ok := findLineWithPrefix(lines, prefix)
+	if !ok {
+		t.Fatalf("expected running-container exec [%s...], got calls:\n%s", prefix, strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(line, "update_agent_cli claude") {
+		t.Errorf("expected default Claude update command, got: %s", line)
+	}
+	if anyLineContains(lines, "run --rm") {
+		t.Errorf("running container should not use a maintenance container; calls:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+func TestSandboxUpdateAgent_BuildsMissingImageBeforeMaintenance(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+
+	cmd := exec.Command(binaryPath, "sandbox", "update-agent")
+	cmd.Env = append(batchEnv(t, fakeDir, assets), "FAKE_INSPECT_EXIT=1")
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandbox update-agent image creation: %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	if !anyLineContains(lines, "-t cenci-sandbox:latest") || !anyLineContains(lines, "run --rm --user root") {
+		t.Errorf("expected missing image to build before maintenance run; calls:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+func TestSandboxUpdateAgent_UsageErrorsMakeNoRuntimeCalls(t *testing.T) {
+	tests := [][]string{
+		{"sandbox", "update-agent", "--agent", "gemini"},
+		{"sandbox", "update-agent", "--bogus"},
+		{"sandbox", "update-agent", "extra"},
+	}
+	for _, args := range tests {
+		t.Run(strings.Join(args[2:], "_"), func(t *testing.T) {
+			fakeDir := t.TempDir()
+			callLog := writeScriptedRuntimes(t, fakeDir)
+			assets := writeAssetFixture(t)
+			cmd := exec.Command(binaryPath, args...)
+			cmd.Env = batchEnv(t, fakeDir, assets)
+			output, err := cmd.CombinedOutput()
+			exitErr, ok := err.(*exec.ExitError)
+			if !ok || exitErr.ExitCode() != 2 {
+				t.Fatalf("expected usage error exit 2, got %T %v\n%s", err, err, output)
+			}
+			if lines := callLogLines(t, callLog); len(lines) > 0 {
+				t.Errorf("expected no runtime calls, got:\n%s", strings.Join(lines, "\n"))
+			}
+		})
 	}
 }
 
@@ -680,8 +782,8 @@ func TestSandboxStop_WithFilterArg_OnlyStopsMatchingName(t *testing.T) {
 // deterministic TERM/TMUX_PANE, scrubbed optional env passthroughs, and a live
 // events socket under a private 0700 XDG_RUNTIME_DIR — pre-created here so the
 // subprocess wires cenci without ever spawning a real daemon. No host `claude`
-// is installed: both agents are baked into the image, so the launcher never
-// resolves an agent binary from the host.
+// is installed: agents live in the container's persistent home, so the launcher
+// never resolves an agent binary from the host.
 func openTestEnv(t *testing.T, fakeDir, assets string) (env []string, home, socketDir string) {
 	t.Helper()
 	home = t.TempDir()
@@ -847,9 +949,9 @@ func TestOpen_FreshCreate_PinsEntrypointContract(t *testing.T) {
 			t.Errorf("run argv missing %q:\n%s", want, runLine)
 		}
 	}
-	// Claude is baked into the image now, not bind-mounted from the host.
+	// Claude lives in the persistent home, not a host bind mount.
 	if strings.Contains(runLine, ":/usr/local/bin/claude:ro") {
-		t.Errorf("run argv must not bind-mount the claude binary (it's baked into the image):\n%s", runLine)
+		t.Errorf("run argv must not bind-mount the host claude binary:\n%s", runLine)
 	}
 	// TMUX_PANE must only travel per exec session (asserted on the attach
 	// below): baked into the container-lifetime env it goes stale when the

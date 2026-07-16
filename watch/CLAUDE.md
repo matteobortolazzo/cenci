@@ -31,7 +31,7 @@ CLI grammar, alias, env-var, and naming conventions: `<repo-root>/docs/cli-conve
   - `dispatch_cmd.go` — `dispatch` (enroll/unenroll/status/loop) + state rendering
   - `status_cmd.go` — human `status` + `widget-json` (hidden alias `waybar`) + render helpers
   - `close_cmd.go` — `close` + decision rendering
-  - `sandbox_cmd.go` — `sandbox build|build-base|prune|update-plugins|reseed-creds|reap-orphans|ls|stop`: flag parsing, usage errors (exit 2), and dispatch into `internal/sandbox` + `internal/sandbox/launcher`
+  - `sandbox_cmd.go` — `sandbox build|build-base|prune|update-agent|update-plugins|reseed-creds|reap-orphans|ls|stop`: flag parsing, usage errors (exit 2), and dispatch into `internal/sandbox` + `internal/sandbox/launcher`
   - `open_cmd.go` — `open` (interactive sandbox launch, shortcut/model resolution)
 - `plugin/` — Claude Code plugin (hooks that call `cenci notify`)
 - `internal/daemon/` — Session-keyed event loop, hook→status mapping, paneless TTL sweep; delegates window work via `frontend.Frontend`

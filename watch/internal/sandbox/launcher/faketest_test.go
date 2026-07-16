@@ -69,8 +69,6 @@ func containsPrefix(lines []string, prefix string) bool {
 }
 
 // containsLineWithAll reports whether some line contains every one of subs.
-// Used for build calls that carry a non-deterministic AGENTS_REFRESH timestamp,
-// where an exact-line match isn't possible.
 func containsLineWithAll(lines []string, subs ...string) bool {
 	for _, l := range lines {
 		all := true

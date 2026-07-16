@@ -99,6 +99,19 @@ source "${SCRIPT_DIR}/lib/codex-config.sh"
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/seed-auth.sh
 source "${SCRIPT_DIR}/lib/seed-auth.sh"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/agent-cli.sh
+source "${SCRIPT_DIR}/lib/agent-cli.sh"
+
+# ── Install the selected agent into the persistent writable home ─────
+# Check the exact user-local executable, not PATH: old images may still carry
+# a root-owned /usr/local/bin copy, and existing volumes must migrate to the
+# writable package tree automatically. Once installed this is a filesystem-only
+# no-op; network is required only for first launch or `sandbox update-agent`.
+if ! ensure_agent_cli "${CENCI_SANDBOX_AGENT:-claude}"; then
+    echo "entrypoint: selected agent CLI is unavailable; sandbox startup cannot continue" >&2
+    exit 1
+fi
 
 if [[ -L /home/dev/.claude ]]; then
     rm -f /home/dev/.claude
@@ -146,9 +159,8 @@ fi
 # metadata-present/cache-missing state on its own. Costs one marketplace
 # clone (~10-20s) on first boot only; a healthy volume makes zero `claude`
 # calls here (the TTL-gated refresh below is the only recurring cost). Never
-# blocks container start: Claude sandboxes use the mounted Claude CLI, while
-# Codex sandboxes use the baked-in Codex CLI; missing CLIs and offline failures
-# only warn to stderr.
+# blocks container start after the selected CLI has been installed above;
+# marketplace/plugin network failures still only warn to stderr.
 if [[ "${CENCI_SANDBOX_AGENT:-claude}" == codex ]]; then
     provision_codex_plugins /home/dev/.codex cenci matteobortolazzo/cenci cenci cenci-watch
 else

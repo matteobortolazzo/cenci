@@ -119,10 +119,9 @@ func (e *Engine) Launch(opts Options) error {
 		return err
 	}
 
-	// Both agents are baked into the image now (Claude via
-	// @anthropic-ai/claude-code, Codex via @openai/codex), so neither needs a
-	// host binary bind-mounted in. Credentials are still staged from the host
-	// (assembleVolumeMounts / validateCredentials).
+	// The entrypoint installs the selected agent into the persistent writable
+	// home when its user-local executable is missing, so no host agent binary is
+	// bind-mounted. Credentials are still staged from the host.
 	cenciBin, socketDir, cenciAvailable := e.resolveCenciWiring()
 
 	// The container is the security boundary: the agent runs with full
@@ -297,8 +296,8 @@ func (e *Engine) baseRunArgs(scope Scope) []string {
 // and home volumes, git config (read-only, if present), the optional cenci
 // binary + host socket dir wiring (paired with its own XDG_RUNTIME_DIR env
 // under the same cenciAvailable guard as the mount itself),
-// claude credentials staging, and GitHub CLI credentials staging. Both agent
-// CLIs are baked into the image, so no agent binary is mounted here. Codex
+// claude credentials staging, and GitHub CLI credentials staging. Agent CLIs
+// live in the persistent home, so no agent binary is mounted here. Codex
 // credentials are handled separately by validateCredentials, since a missing
 // codex auth source is a hard launch error rather than an optional mount.
 func (e *Engine) assembleVolumeMounts(cenciBin, socketDir string, cenciAvailable bool, scope Scope, home string) []string {

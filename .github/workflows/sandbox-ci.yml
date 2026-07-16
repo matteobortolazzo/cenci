@@ -59,6 +59,7 @@ jobs:
         run: |
           bash sandbox/tests/settings-merge.test.sh
           bash sandbox/tests/heal-plugins.test.sh
+          bash sandbox/tests/agent-cli.test.sh
           bash sandbox/tests/codex-config.test.sh
           bash sandbox/tests/seed-auth.test.sh
           bash sandbox/tests/installer-clients.test.sh

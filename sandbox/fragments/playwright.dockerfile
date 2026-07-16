@@ -8,8 +8,8 @@ USER root
 # Chromium instead of re-downloading it. --with-deps also installs the OS
 # libraries Chromium needs to launch headless, which requires root.
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-RUN npm install -g playwright@${PLAYWRIGHT_VERSION} \
-    && npx --yes playwright@${PLAYWRIGHT_VERSION} install --with-deps chromium \
+RUN NPM_CONFIG_PREFIX=/usr/local npm install -g playwright@${PLAYWRIGHT_VERSION} \
+    && NPM_CONFIG_PREFIX=/usr/local npx --yes playwright@${PLAYWRIGHT_VERSION} install --with-deps chromium \
     && chmod -R a+rX /ms-playwright
 
 USER dev

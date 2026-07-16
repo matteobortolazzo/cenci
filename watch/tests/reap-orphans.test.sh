@@ -279,7 +279,7 @@ MOCK
 chmod +x "${BIN_DIR}/tmux"
 
 # No `claude` mock: the reaper never resolves a host agent binary (both agent
-# CLIs are baked into the image, not bind-mounted from the host).
+# CLIs live in persistent home volumes, not bind-mounted from the host).
 
 export CALLS_FILE SCAN_DIR LIVENESS_DIR
 export HOME="${TEST_ROOT}/home"

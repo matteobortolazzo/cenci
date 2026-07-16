@@ -34,7 +34,7 @@ Each project has its own `CLAUDE.md` with project-specific context.
 
 ### sandbox and installer
 - Syntax: `bash -n install.sh sandbox/entrypoint.sh`
-- Tests: `bash sandbox/tests/installer-clients.test.sh` and the other host-runnable suites in `sandbox/tests/`
+- Tests: `bash sandbox/tests/installer-clients.test.sh`, `bash sandbox/tests/agent-cli.test.sh`, and the other host-runnable suites in `sandbox/tests/`
 
 ## Versioning
 

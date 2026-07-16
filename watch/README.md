@@ -551,11 +551,11 @@ the resolution for development).
 ```bash
 # One-shot maintenance verbs
 cenci sandbox build             # build cenci-sandbox:latest (or the repo image if <repo>/.cenci/Dockerfile exists); builds the base first if missing
-cenci sandbox build --agents claude,codex
-                                # bake only the listed agents into the monolith (default: both; agents install at @latest; per-repo images always bake both)
 cenci sandbox build-base        # build cenci-sandbox-base:<content-hash> + :latest alias
 cenci sandbox prune             # remove superseded base tags, dangling images, stopped *-cenci-* containers
 cenci sandbox prune --volumes   # …and prompt ([y/N], default deny) to remove stale *-cenci-home-* volumes
+cenci sandbox update-agent [--agent claude|codex] [--name <n>]
+                                # update the writable CLI in its running container or stopped home volume; print its version
 cenci sandbox update-plugins [--agent claude|codex] [--name <n>]
                                 # force-refresh the plugins inside the container/volume (ttl 0)
 cenci sandbox reseed-creds      # alias for: cenci open --reseed-creds

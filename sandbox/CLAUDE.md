@@ -31,6 +31,7 @@ bash sandbox/tests/cenci-widgets.test.sh         # GUI bar-widget detect/install
 bash sandbox/tests/settings-merge.test.sh        # lib/migrate-settings.sh deep-merge behavior
 bash sandbox/tests/seed-auth.test.sh             # lib/seed-auth.sh credential seeding
 bash sandbox/tests/codex-config.test.sh          # lib/codex-config.sh config generation
+bash sandbox/tests/agent-cli.test.sh             # persistent user-local agent install/update lifecycle
 bash sandbox/tests/fragments-drift.test.sh       # Dockerfile vs fragments/*.dockerfile byte-parity
 bash sandbox/tests/heal-plugins.test.sh          # plugin self-heal (Write->Edit allow conversion)
 ```
@@ -40,7 +41,7 @@ black-box tests in `watch/sandbox_open_test.go` plus the reap contract suite
 `watch/tests/reap-orphans.test.sh` (run with `CENCI_BIN`).
 
 ## Conventions
-- Keep the image minimal; bake tools into the image rather than bind-mounting from the host.
+- Keep the image minimal; install agent CLIs into the persistent writable home rather than baking them into images or bind-mounting them from the host.
 - `entrypoint.sh` must stay POSIX-portable and pass `shellcheck`.
 - The container is the security boundary — Claude Code's host sandbox stays disabled inside it.
 
@@ -68,25 +69,18 @@ black-box tests in `watch/sandbox_open_test.go` plus the reap contract suite
 digest of `Dockerfile.base` + `entrypoint.sh` + `lib/` (Ubuntu, system packages, locale,
 `uv`, GitHub CLI, Docker CLI, non-root `dev` user, entrypoint — no language runtimes).
 `Dockerfile` (the monolith) builds `cenci-sandbox:latest` `FROM` that base image and
-layers on the runtime stacks in order: .NET, Node, Playwright, Go, then the two agent CLIs
-(Codex, then Claude Code) last. The agent layers install at `@latest` and are gated by
-`INSTALL_CODEX` / `INSTALL_CLAUDE` build-args (default `1`); a `cenci sandbox build --agents`
-selection can drop one for a leaner personal image. An `AGENTS_REFRESH` build-arg
-(a timestamp the launcher stamps on every build) is referenced inside those RUN layers so a
-rebuild re-fetches the newest agent release instead of serving the cached npm install —
-keeping them last means only the agent layers rebuild, never the stacks above.
-
-Both agent CLIs are **baked into the image** — Claude Code used to be bind-mounted from the
-host binary, but is now installed via `@anthropic-ai/claude-code@latest` alongside Codex, so
-`cenci open` needs no host agent install (credentials are still staged from the host).
+layers on the runtime stacks in order: .NET, Node, Playwright, and Go. Agent CLIs are not
+image layers: the entrypoint installs the selected npm package at `@latest` into the
+persistent `/home/dev/.local` tree only when its user-local executable is missing.
+`cenci sandbox update-agent` forces an update in a running container or via a UID-safe
+maintenance container for a stopped volume. Credentials are still staged from the host.
 
 `fragments/*.dockerfile` holds the same composable blocks (`dotnet`, `node`, `playwright`,
-`go`, `python`, `rust`, `codex`, `claude`) as standalone snippets used to assemble per-project
-images. Generated images always include Node, Codex, and Claude so either supported agent can
-launch; the remaining fragments (including `playwright`, used for `verify-ui`'s Chromium
+`go`, `python`, `rust`) as standalone snippets used to assemble per-project images.
+Generated images always include Node so either npm-distributed agent can install at runtime;
+the remaining fragments (including `playwright`, used for `verify-ui`'s Chromium
 screenshot capture) follow the detected project stack. Per-repo images always bake both
-agents (a committed team artifact); the per-user `--agents` selection only prunes the personal
-monolith. **Invariant:** each fragment and its corresponding block in `Dockerfile` must stay
+agents' shared Node runtime, never the agent packages. **Invariant:** each fragment and its corresponding block in `Dockerfile` must stay
 byte-identical — hand-duplicated on every change (e.g. bumping `DOTNET_SDK_VERSION` or adding a
 package to a stack block means editing both `Dockerfile` and `fragments/<stack>.dockerfile`
 identically).
@@ -95,10 +89,10 @@ identically).
 Image dependency versions are pinned via Dockerfile `ARG`s, all checked daily by
 `.github/workflows/deps-bump.yml`. Three tiers, by breaking-change risk:
 
-- **Not pinned (agent CLIs)** — Codex and Claude Code are installed at `@latest` when the
-  image builds (the `AGENTS_REFRESH` cache-bust forces a re-fetch). There is no version ARG,
-  so `deps-bump.yml` does not track them; a `cenci sandbox build` or the daily rebuild picks
-  up the newest release.
+- **Runtime-managed (agent CLIs)** — Codex and Claude Code install at `@latest` into the
+  persistent writable home on first launch and update through their native prompts or
+  `cenci sandbox update-agent`. There is no image version ARG, so `deps-bump.yml` does not
+  track them.
 - **Auto-bumped, auto-merged** — one auto-merged PR per outdated dependency, then the
   cenci-sandbox rebuild is dispatched once the merge lands:
   - `GO_VERSION` — `Dockerfile` **and** `fragments/go.dockerfile` (both stamped, kept in sync).

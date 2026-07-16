@@ -137,7 +137,7 @@ run_case() {
         CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
         CODEX_MARKETPLACE_FILE="${case_dir}/codex-marketplace" \
         CODEX_INSTALLED_FILE="${case_dir}/codex-installed" \
-        bash "${ROOT}/install.sh" --yes "${build_flag}" "${extra[@]}" >"${output}" 2>&1
+        bash "${ROOT}/install.sh" --yes "${build_flag}" ${extra[@]+"${extra[@]}"} >"${output}" 2>&1
     CASE_EXIT=$?
     set -e
     CASE_OUTPUT="${output}"
@@ -245,27 +245,20 @@ run_case codex-build codex --build
 [[ "${CASE_EXIT}" -eq 0 ]]
 assert_contains "${CASE_OUTPUT}" "sandbox image built"
 assert_contains "${CASE_CALLS}" "cenci sandbox build"
-# A --yes non-interactive run bakes only the detected agent(s): codex-only here.
-assert_contains "${CASE_CALLS}" "cenci sandbox build --agents codex"
+assert_not_contains "${CASE_CALLS}" "--agents"
 
-echo "case: dual-client default bakes both agents into the sandbox image"
-prepare_cache_cenci "${WORK}/agents-default/home" claude
-run_case agents-default dual --build
+echo "case: image builds no longer select or bake agent CLIs"
+prepare_cache_cenci "${WORK}/build-default/home" claude
+run_case build-default dual --build
 [[ "${CASE_EXIT}" -eq 0 ]]
-assert_contains "${CASE_CALLS}" "cenci sandbox build --agents claude,codex"
+assert_contains "${CASE_CALLS}" "cenci sandbox build"
+assert_not_contains "${CASE_CALLS}" "--agents"
 
-echo "case: --agents prunes the sandbox build to the chosen agent"
-prepare_cache_cenci "${WORK}/agents-explicit/home" claude
-run_case agents-explicit dual --build --agents claude
-[[ "${CASE_EXIT}" -eq 0 ]]
-assert_contains "${CASE_CALLS}" "cenci sandbox build --agents claude"
-assert_not_contains "${CASE_CALLS}" "cenci sandbox build --agents claude,codex"
-
-echo "case: an invalid --agents value is rejected without building"
-prepare_cache_cenci "${WORK}/agents-bad/home" claude
-run_case agents-bad dual --build --agents gemini
+echo "case: the removed installer --agents option is rejected"
+prepare_cache_cenci "${WORK}/agents-removed/home" claude
+run_case agents-removed dual --build --agents claude
 [[ "${CASE_EXIT}" -ne 0 ]]
-assert_contains "${CASE_OUTPUT}" "invalid --agents value"
+assert_contains "${CASE_OUTPUT}" "unknown option '--agents'"
 assert_not_contains "${CASE_CALLS}" "cenci sandbox build"
 
 echo "case: a stale cenci-sand symlink is repointed at cenci, never recreated"
