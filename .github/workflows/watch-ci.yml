@@ -28,6 +28,8 @@ jobs:
               - 'watch/**'
               - 'sandbox/tests/lib/**'
               - '.github/workflows/watch-ci.yml'
+              - '!watch/AGENTS.md'
+              - '!watch/CLAUDE.md'
 
   test:
     name: watch-test

@@ -27,6 +27,8 @@ jobs:
             sandbox:
               - 'sandbox/**'
               - 'install.sh'
+              - '!sandbox/AGENTS.md'
+              - '!sandbox/CLAUDE.md'
 
   lint:
     name: sandbox-lint
