@@ -11,7 +11,9 @@
 #   ./install.sh                interactive wizard (install)
 #   cenci-installer update      update installed plugins (+ optional rebuild)
 #   cenci-installer doctor      check prerequisites, change nothing
-#   cenci-installer uninstall   remove plugins, PATH links, daemon, and config
+#   cenci-installer uninstall   remove plugins, PATH links, daemon, config,
+#                                and every cenci sandbox container/image/
+#                                volume on this machine
 #
 #   curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
 #
@@ -1360,10 +1362,101 @@ collect_uninstall_targets() {
 	fi
 	say "  • ~/.local/bin/{cenci,cn,cenci-installer} (only if they're cenci-managed symlinks)"
 	say "  • the cenci daemon (stopped) and its managed state"
+	collect_sandbox_cleanup_targets
 	say "  • ${XDG_CONFIG_HOME:-$HOME/.config}/cenci/config.json"
 	if [ "$LAZYBOARDS" = yes ]; then
 		say "  • lazyboards and ${XDG_CONFIG_HOME:-$HOME/.config}/lazyboards/config.yml (--lazyboards)"
 	fi
+}
+
+# sandbox_cleanup_summary_line prints one "This will remove:" bullet for a
+# single sandbox object kind (containers/images/volumes) — count plus a
+# comma-separated name list, styled like the sibling say "  • …" lines
+# above — or nothing at all when there's nothing of that kind to remove.
+sandbox_cleanup_summary_line() {
+	local kind="$1" names="$2" count name_arr
+	[ -n "$names" ] || return 0
+	read -ra name_arr <<<"$names"
+	count="${#name_arr[@]}"
+	say "  • $count cenci sandbox $kind across every repo on this machine: ${names// /, }"
+}
+
+# collect_sandbox_cleanup_targets is a read-only enumeration (#458) of every
+# cenci-owned container/image/volume across every repo on this machine, via
+# the detected container runtime (podman, then docker — container_runtime,
+# above). Populates SANDBOX_RUNTIME/SANDBOX_CONTAINERS/SANDBOX_IMAGES/
+# SANDBOX_VOLUMES (space-separated names) for uninstall_sandbox_cleanup to
+# reuse verbatim, so what's shown in the confirmation list is exactly what
+# gets removed — enumerate once, never re-enumerate, to avoid
+# shown-vs-removed drift (TOCTOU). Containers use the same
+# claude-cenci-/codex-cenci- prefix as IsSandboxContainerName
+# (watch/internal/sandbox/sandbox.go) but, unlike `cenci sandbox prune`
+# (which only targets exited/created containers), matches running
+# containers too — every cenci-owned container must go. Volumes mirror
+# prune.go's homeVolumePattern/agentCLIVolumePattern verbatim. Images match
+# the cenci-sandbox:latest monolith, every cenci-sandbox-base tag (including
+# its :latest alias), and each per-repo cenci-sandbox-<slug>:latest image,
+# with an optional podman localhost/ prefix. A clean no-op (no output, empty
+# globals) when no container runtime is installed — never errors.
+collect_sandbox_cleanup_targets() {
+	SANDBOX_RUNTIME=""
+	SANDBOX_CONTAINERS=""
+	SANDBOX_IMAGES=""
+	SANDBOX_VOLUMES=""
+
+	local runtime
+	runtime="$(container_runtime 2>/dev/null)" || return 0
+	SANDBOX_RUNTIME="$runtime"
+
+	local out line repo tag bare_repo
+	if ! out="$("$runtime" ps -a --format '{{.Names}}' 2>/dev/null)"; then
+		warn "could not list $runtime containers — skipping sandbox container cleanup"
+		out=""
+	fi
+	while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		case "$line" in
+		claude-cenci-* | codex-cenci-*)
+			SANDBOX_CONTAINERS="${SANDBOX_CONTAINERS:+$SANDBOX_CONTAINERS }$line"
+			;;
+		esac
+	done <<<"$out"
+
+	if ! out="$("$runtime" images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null)"; then
+		warn "could not list $runtime images — skipping sandbox image cleanup"
+		out=""
+	fi
+	while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		repo="${line%%:*}"
+		tag="${line#*:}"
+		bare_repo="${repo#localhost/}"
+		case "$bare_repo" in
+		cenci-sandbox-base)
+			SANDBOX_IMAGES="${SANDBOX_IMAGES:+$SANDBOX_IMAGES }$line"
+			;;
+		cenci-sandbox | cenci-sandbox-*)
+			[ "$tag" = latest ] && SANDBOX_IMAGES="${SANDBOX_IMAGES:+$SANDBOX_IMAGES }$line"
+			;;
+		esac
+	done <<<"$out"
+
+	if ! out="$("$runtime" volume ls --format '{{.Name}}' 2>/dev/null)"; then
+		warn "could not list $runtime volumes — skipping sandbox volume cleanup"
+		out=""
+	fi
+	while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		case "$line" in
+		claude-cenci-home-* | codex-cenci-home-* | cenci-agent-cli-claude | cenci-agent-cli-codex)
+			SANDBOX_VOLUMES="${SANDBOX_VOLUMES:+$SANDBOX_VOLUMES }$line"
+			;;
+		esac
+	done <<<"$out"
+
+	sandbox_cleanup_summary_line "container(s)" "$SANDBOX_CONTAINERS"
+	sandbox_cleanup_summary_line "image(s)" "$SANDBOX_IMAGES"
+	sandbox_cleanup_summary_line "volume(s)" "$SANDBOX_VOLUMES"
 }
 
 # resolve_uninstall_cenci_binary finds the cenci binary to use for
@@ -1696,10 +1789,43 @@ print_manual_path_note() {
 	say "    export PATH=\"\$HOME/.local/bin:\$PATH\""
 }
 
-# uninstall_sandbox_cleanup is an extension point for #458 (machine-wide
-# sandbox cleanup: containers, images, volumes). Intentionally a no-op here.
+# uninstall_sandbox_cleanup (#458) removes every cenci-owned sandbox
+# container/image/volume across every repo on this machine, consuming the
+# SANDBOX_RUNTIME/SANDBOX_CONTAINERS/SANDBOX_IMAGES/SANDBOX_VOLUMES globals
+# collect_sandbox_cleanup_targets already populated during
+# collect_uninstall_targets — never re-enumerates. A no-op when no container
+# runtime was found (SANDBOX_RUNTIME empty). Order matters: containers
+# before images before volumes, since an image `rmi` can fail while a
+# not-yet-removed container still references it. Each removal is
+# best-effort, reported per-object like unlink_launcher/uninstall_fallback_rm
+# above.
 uninstall_sandbox_cleanup() {
-	:
+	[ -n "${SANDBOX_RUNTIME:-}" ] || return 0
+
+	local name
+	for name in ${SANDBOX_CONTAINERS:-}; do
+		if "$SANDBOX_RUNTIME" rm -f "$name" >/dev/null 2>&1; then
+			ok "removed sandbox container $name"
+		else
+			warn "could not remove sandbox container $name — remove it manually: $SANDBOX_RUNTIME rm -f $name"
+		fi
+	done
+
+	for name in ${SANDBOX_IMAGES:-}; do
+		if "$SANDBOX_RUNTIME" rmi "$name" >/dev/null 2>&1; then
+			ok "removed sandbox image $name"
+		else
+			warn "could not remove sandbox image $name — remove it manually: $SANDBOX_RUNTIME rmi $name"
+		fi
+	done
+
+	for name in ${SANDBOX_VOLUMES:-}; do
+		if "$SANDBOX_RUNTIME" volume rm "$name" >/dev/null 2>&1; then
+			ok "removed sandbox volume $name"
+		else
+			warn "could not remove sandbox volume $name — remove it manually: $SANDBOX_RUNTIME volume rm $name"
+		fi
+	done
 }
 
 # uninstall_widget_cleanup is an extension point for #459 (desktop bar widget
@@ -1776,7 +1902,9 @@ Usage:
   cenci-installer              interactive installer / repair
   cenci-installer update       update installed plugins (+ optional rebuild)
   cenci-installer doctor       check prerequisites, change nothing
-  cenci-installer uninstall    remove plugins, PATH links, daemon, and config
+  cenci-installer uninstall    remove plugins, PATH links, daemon, config,
+                                and every cenci sandbox container/image/
+                                volume on this machine
 
 Initial install:
   curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
