@@ -44,7 +44,7 @@ columns:
         name: Checkout PR
         type: shell
         scope: pr
-        command: 'tmux new-window -d -n pr-{pr_number} "git fetch origin {pr_branch} && git switch {pr_branch}"'
+        command: 'tmux new-window -d -n pr-{pr_number} "gh pr checkout {pr_number}"'
 
   - name: Implemented
 
