@@ -101,6 +101,22 @@ run_install() {
     return "${rc}"
 }
 
+# run_widget_script <script> <home> <bin> <calls> <out> <err> — invokes a
+# widget's own install.sh/uninstall.sh directly (bypassing root install.sh),
+# with stdout and stderr captured to separate files so reload-failure tests
+# can assert the actionable message lands on stderr specifically, and the
+# success echo (stdout) is absent — a merged-stream capture (like run_install
+# uses for the root script) can't distinguish the two.
+run_widget_script() {
+    local script="$1" home="$2" bin="$3" calls="$4" out="$5" err="$6"
+    set +e
+    env -i HOME="${home}" PATH="${bin}" WIDGET_CALLS="${calls}" \
+        bash "${script}" >"${out}" 2>"${err}"
+    local rc=$?
+    set -e
+    return "${rc}"
+}
+
 fail() { echo "FAIL: $*" >&2; exit 1; }
 assert_log() { grep -q -- "$2" "$1" || fail "expected '$2' in $1"; }
 assert_no_log() { ! grep -q -- "$2" "$1" || fail "did not expect '$2' in $1"; }
@@ -355,5 +371,71 @@ assert_log "${UC8}" "kstart plasmashell"
 assert_log "${UC8}" "qs -c noctalia-shell"
 assert_log "${UC8}" "gnome-extensions disable"
 echo "  ok: uninstall removed every widget and reloaded each bar again"
+
+# ---------------------------------------------------------------------------
+echo "case: dms install warns instead of failing when systemctl restart fails, and skips the success message (#471)"
+CASE9="${WORK}/dms-systemctl-fail"; H9="${CASE9}/home"; B9="${CASE9}/bin"
+C9="${CASE9}/calls"; O9="${CASE9}/out"; E9="${CASE9}/err"
+mkdir -p "${H9}/.config/DankMaterialShell" "${B9}"; : >"${C9}"
+link_tools "${B9}"
+# systemctl detection ("status dms") succeeds so the clean systemd path is
+# taken, but the actual reload ("restart dms") fails — the branch under test.
+cat >"${B9}/systemctl" <<'EOF'
+#!/bin/sh
+printf 'systemctl %s\n' "$*" >>"${WIDGET_CALLS}"
+case "$*" in
+  *"status dms"*) exit 0 ;;
+  *"restart dms"*) exit 1 ;;
+esac
+exit 0
+EOF
+chmod +x "${B9}/systemctl"
+run_widget_script "${ROOT}/watch/plugin/dms/install.sh" "${H9}" "${B9}" "${C9}" "${O9}" "${E9}" ||
+    fail "dms install.sh should still exit 0 when systemctl restart fails (warn, don't die)"
+assert_out "${E9}" "Could not restart the dms user service — reload it manually: systemctl --user restart dms"
+assert_no_log "${O9}" "Restarted the dms user service."
+echo "  ok: dms systemctl-restart failure warns on stderr, exits 0, and skips the success message"
+
+# ---------------------------------------------------------------------------
+echo "case: dms install warns instead of failing when the pkill fallback fails, and skips the success message (#471)"
+CASE10="${WORK}/dms-pkill-fail"; H10="${CASE10}/home"; B10="${CASE10}/bin"
+C10="${CASE10}/calls"; O10="${CASE10}/out"; E10="${CASE10}/err"
+mkdir -p "${H10}/.config/DankMaterialShell" "${B10}"; : >"${C10}"
+link_tools "${B10}"
+# No systemctl on PATH, so install.sh takes the pkill fallback branch; make
+# that pkill call itself fail (unlike link_tools' always-succeeding stub).
+cat >"${B10}/pkill" <<'EOF'
+#!/bin/sh
+printf 'pkill %s\n' "$*" >>"${WIDGET_CALLS}"
+exit 1
+EOF
+chmod +x "${B10}/pkill"
+run_widget_script "${ROOT}/watch/plugin/dms/install.sh" "${H10}" "${B10}" "${C10}" "${O10}" "${E10}" ||
+    fail "dms install.sh should still exit 0 when the pkill fallback fails (warn, don't die)"
+assert_out "${E10}" "DMS does not appear to be running — start it or check its status manually."
+assert_no_log "${O10}" "Signalled DMS to reload (pkill 'qs -c dms')."
+echo "  ok: dms pkill-fallback failure warns on stderr, exits 0, and skips the success message"
+
+# ---------------------------------------------------------------------------
+echo "case: plasma install warns instead of failing when kstart fails to relaunch plasmashell, and skips the success message (#471)"
+CASE11="${WORK}/plasma-kstart-fail"; H11="${CASE11}/home"; B11="${CASE11}/bin"
+C11="${CASE11}/calls"; O11="${CASE11}/out"; E11="${CASE11}/err"
+mkdir -p "${H11}" "${B11}"; : >"${C11}"
+link_tools "${B11}"
+make_logging_stub "${B11}" plasmashell
+make_logging_stub "${B11}" kquitapp6
+# kquitapp6 stays best-effort (`|| true`, not under test); kstart is the
+# synchronously-checkable branch — make it fail.
+cat >"${B11}/kstart" <<'EOF'
+#!/bin/sh
+printf 'kstart %s\n' "$*" >>"${WIDGET_CALLS}"
+exit 1
+EOF
+chmod +x "${B11}/kstart"
+run_widget_script "${ROOT}/watch/plugin/plasma/install.sh" "${H11}" "${B11}" "${C11}" "${O11}" "${E11}" ||
+    fail "plasma install.sh should still exit 0 when kstart fails (warn, don't die)"
+assert_out "${E11}" "Could not reload plasmashell via kstart — restart it manually: kstart plasmashell"
+assert_no_log "${O11}" "Reloaded plasmashell."
+echo "  ok: plasma kstart failure warns on stderr, exits 0, and skips the success message"
 
 echo "passed: GUI bar-widget detection, install, reload, update, and uninstall"
