@@ -1,3 +1,4 @@
+name = "implementer"
 description = "Senior developer that implements features using TDD, writing tests first and then the simplest implementation to make them pass."
 model = "gpt-5.6"
 model_reasoning_effort = "high"

@@ -12,6 +12,13 @@ PLUGIN_ROOT="$FLOW" sh "$FLOW/codex/install-agents.sh" "$ROOT"
 test "$(find "$ROOT/.codex/agents" -name '*.toml' | wc -l)" -ge 5
 for toml in "$FLOW"/templates/codex/agents/*.toml; do
   grep -Eq '^description = "[^"]+"' "$toml"
+  expected_name="$(basename "$toml" .toml)"
+  grep -Eq "^name = \"$expected_name\"\$" "$toml"
+done
+REPO_ROOT="$(cd "$FLOW/.." && pwd)"
+for toml in "$REPO_ROOT"/.codex/agents/*.toml; do
+  expected_name="$(basename "$toml" .toml)"
+  grep -Eq "^name = \"$expected_name\"\$" "$toml"
 done
 printf 'user-owned\n' > "$ROOT/.codex/agents/planner.toml"
 PLUGIN_ROOT="$FLOW" sh "$FLOW/codex/install-agents.sh" "$ROOT"
