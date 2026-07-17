@@ -11,12 +11,15 @@
 #   ./install.sh                interactive wizard (install)
 #   cenci-installer update      update installed plugins (+ optional rebuild)
 #   cenci-installer doctor      check prerequisites, change nothing
+#   cenci-installer uninstall   remove plugins, PATH links, daemon, and config
 #
 #   curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
 #
 # Flags:
 #   --yes                                 accept defaults, never prompt
 #   --build / --no-build                  force / skip the sandbox image build
+#   --lazyboards / --no-lazyboards        force / skip lazyboards install
+#                                          (uninstall mode: --lazyboards also removes it)
 #   --help                                this text
 
 set -u
@@ -1339,6 +1342,421 @@ final_summary() {
 	say "  Docs: https://github.com/$MARKETPLACE_REPO/blob/main/docs/getting-started.md"
 }
 
+# ---------------------------------------------------------------- uninstall ----
+
+# collect_uninstall_targets prints what run_uninstall is about to remove,
+# with no side effects — it only inspects state so the removal list can be
+# shown before the single confirmation gate.
+collect_uninstall_targets() {
+	say "This will remove:"
+	if [ "$HAS_CLAUDE" -eq 1 ]; then
+		say "  • Claude Code plugins ($ALL_PLUGINS) and the cenci marketplace registration"
+	fi
+	if [ "$HAS_CODEX" -eq 1 ]; then
+		say "  • Codex plugins ($ALL_PLUGINS) and the cenci marketplace registration"
+	fi
+	say "  • ~/.local/bin/{cenci,cn,cenci-installer} (only if they're cenci-managed symlinks)"
+	say "  • the cenci daemon (stopped) and its managed state"
+	say "  • ${XDG_CONFIG_HOME:-$HOME/.config}/cenci/config.json"
+	if [ "$LAZYBOARDS" = yes ]; then
+		say "  • lazyboards and ${XDG_CONFIG_HOME:-$HOME/.config}/lazyboards/config.yml (--lazyboards)"
+	fi
+}
+
+# resolve_uninstall_cenci_binary finds the cenci binary to use for
+# `socket-dir` / `daemon stop`. Unlike cenci_binary_for_doctor (which checks
+# PATH first), uninstall must work even when ~/.local/bin isn't on PATH yet —
+# so it checks the bootstrap-maintained link directly before falling back to
+# the version-pinned plugin cache.
+resolve_uninstall_cenci_binary() {
+	if [ -x "$HOME/.local/bin/cenci" ]; then
+		printf '%s\n' "$HOME/.local/bin/cenci"
+		return 0
+	fi
+	cached_cenci_binary
+}
+
+# uninstall_stop_daemon_fallback mirrors restart_cenci_daemon_fallback's
+# pkill/pgrep pattern for when the primary `daemon stop` path isn't
+# available or didn't succeed. Unlike the ad-hoc restart fallback it never
+# spawns anything — it only needs to confirm the daemon is no longer
+# running — so it returns 0 exactly when a re-check of `pgrep` after the
+# wait loop finds nothing, and 1 (with a warn) otherwise, matching
+# restart_cenci_daemon_fallback's own success/failure convention.
+uninstall_stop_daemon_fallback() {
+	if ! have pkill || ! have pgrep; then
+		warn "pkill/pgrep unavailable — could not confirm the cenci daemon stopped"
+		return 1
+	fi
+	pkill -TERM -f '[/]cenci daemon( start)?$' >/dev/null 2>&1 || true
+	local i=0
+	while pgrep -f '[/]cenci daemon( start)?$' >/dev/null 2>&1 && [ "$i" -lt 30 ]; do
+		sleep 0.1
+		i=$((i + 1))
+	done
+	if pgrep -f '[/]cenci daemon( start)?$' >/dev/null 2>&1; then
+		warn "the cenci daemon did not stop — stop it manually"
+		return 1
+	fi
+	return 0
+}
+
+# uninstall_default_socket_dir computes the daemon's managed-state dir the
+# same way the daemon itself resolves it when no binary is available to ask
+# via `socket-dir` (see SocketDir in watch/pkg/watch/socket.go): the daemon
+# joins a "cenci" segment onto its base runtime dir, so this is
+# $XDG_RUNTIME_DIR/cenci when set, else /tmp/cenci-<uid>/cenci. The uid lookup is checked
+# explicitly per AGENTS.md's rule against unchecked command substitution for
+# security-critical paths — an unchecked `id -u` failing silently would
+# collapse this to /tmp/cenci-/cenci. Prints nothing but the resolved path
+# (or nothing at all) on stdout and reports failure only via exit status —
+# never `warn` here, since every call site captures this function's stdout
+# via `$(...)`, and a `warn` call here would get swallowed into the
+# captured string instead of reaching the terminal.
+uninstall_default_socket_dir() {
+	if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+		printf '%s\n' "$XDG_RUNTIME_DIR/cenci"
+		return 0
+	fi
+	local uid
+	uid="$(id -u 2>/dev/null)" || return 1
+	[ -n "$uid" ] || return 1
+	printf '%s\n' "/tmp/cenci-$uid/cenci"
+	return 0
+}
+
+# uninstall_socket_dir_is_safe rejects a small blocklist of paths a resolved
+# socket_dir must never equal before it's handed to `rm -rf` — every other
+# rm -rf target in this file is built from constants; this is the one path
+# that can come from a subprocess (`cenci socket-dir`), so it gets its own
+# bound.
+uninstall_socket_dir_is_safe() {
+	local dir="$1" cfg_home
+	cfg_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+	case "$dir" in
+	"/" | "$HOME" | "$cfg_home" | "$cfg_home/cenci")
+		return 1
+		;;
+	esac
+	return 0
+}
+
+# uninstall_stop_daemon resolves the binary while it still exists, captures
+# its managed state dir via `socket-dir`, stops the daemon (`daemon stop` is
+# idempotent — see runDaemonStop in watch/daemon_cmd.go), then removes the
+# managed state dir — but only once the daemon is actually confirmed
+# stopped (either `daemon stop` itself succeeded, or the pkill/pgrep
+# fallback confirms no process remains); a daemon that couldn't be
+# confirmed stopped keeps its managed state so a still-live process doesn't
+# get its socket/pid files deleted out from under it.
+uninstall_stop_daemon() {
+	local bin socket_dir="" stopped=0
+	bin="$(resolve_uninstall_cenci_binary || true)"
+	if [ -n "$bin" ] && [ -x "$bin" ]; then
+		socket_dir="$("$bin" socket-dir 2>/dev/null || true)"
+		if [ -z "$socket_dir" ]; then
+			if ! socket_dir="$(uninstall_default_socket_dir)"; then
+				warn "could not determine the current uid — skipping the default managed-state cleanup"
+				socket_dir=""
+			fi
+		fi
+		if "$bin" daemon stop >/dev/null 2>&1; then
+			ok "cenci daemon stopped"
+			stopped=1
+		else
+			warn "'$bin daemon stop' did not succeed — falling back to a manual stop"
+			if uninstall_stop_daemon_fallback; then
+				stopped=1
+			fi
+		fi
+	else
+		if uninstall_stop_daemon_fallback; then
+			stopped=1
+		fi
+		if ! socket_dir="$(uninstall_default_socket_dir)"; then
+			warn "could not determine the current uid — skipping the default managed-state cleanup"
+			socket_dir=""
+		fi
+	fi
+
+	if [ "$stopped" -ne 1 ]; then
+		warn "could not confirm the cenci daemon stopped — leaving its managed state in place"
+		return 0
+	fi
+
+	if [ -n "$socket_dir" ] && [ -d "$socket_dir" ]; then
+		if ! uninstall_socket_dir_is_safe "$socket_dir"; then
+			warn "cenci's managed state dir ($socket_dir) looks unexpected — left untouched"
+			return 0
+		fi
+		rm -rf "$socket_dir"
+		ok "removed cenci's managed state ($socket_dir)"
+	fi
+}
+
+# unlink_launcher <name> — reverse of link_launcher: removes
+# ~/.local/bin/<name> only if it's a symlink, refusing to clobber a real file
+# the user (or something else) put there.
+unlink_launcher() {
+	local name="$1" dest="$HOME/.local/bin/$1"
+	if [ ! -e "$dest" ] && [ ! -L "$dest" ]; then
+		return 0
+	fi
+	if [ ! -L "$dest" ]; then
+		warn "$dest exists and is not a symlink — left untouched"
+		return 0
+	fi
+	if rm -f "$dest"; then
+		ok "removed ~/.local/bin/$name"
+	else
+		warn "could not remove ~/.local/bin/$name — remove it manually: rm ~/.local/bin/$name"
+	fi
+}
+
+# uninstall_links removes the three link_launcher-managed symlinks, plus the
+# optional /usr/local/bin/cenci link — mirroring setup_cenci_linux_path's
+# guard in reverse: only touched when it's a symlink resolving to the user
+# link, sudo only for that case, never forced otherwise.
+uninstall_links() {
+	local name
+	for name in cenci cn cenci-installer; do
+		unlink_launcher "$name"
+	done
+
+	local user_link="$HOME/.local/bin/cenci"
+	if [ -L /usr/local/bin/cenci ] && [ "$(readlink /usr/local/bin/cenci 2>/dev/null)" = "$user_link" ]; then
+		if sudo rm -f /usr/local/bin/cenci 2>/dev/null; then
+			ok "removed /usr/local/bin/cenci"
+		else
+			warn "could not remove /usr/local/bin/cenci — remove it manually: sudo rm /usr/local/bin/cenci"
+		fi
+	elif [ -e /usr/local/bin/cenci ]; then
+		warn "/usr/local/bin/cenci exists and was not created by cenci — left untouched"
+	fi
+}
+
+# uninstall_plugin_cmd mirrors plugin_cmd's qualified-then-bare fallback
+# (install.sh:153) for the removal direction, parameterized by client and
+# verb since codex's removal verb ("remove") differs from claude's
+# ("uninstall").
+uninstall_plugin_cmd() {
+	local client="$1" verb="$2" name="$3"
+	"$client" plugin "$verb" "${name}@${MARKETPLACE_NAME}" >/dev/null 2>&1 ||
+		"$client" plugin "$verb" "$name" >/dev/null 2>&1
+}
+
+# uninstall_plugins removes cenci/cenci-watch/cenci-sandbox for every
+# detected client via the qualified-then-bare fallback. Failures (or an
+# absent client CLI) are tracked in CLAUDE_UNINSTALL_FAILED /
+# CODEX_UNINSTALL_FAILED so uninstall_marketplace's fallback rm -rf can catch
+# anything the CLI left behind.
+uninstall_plugins() {
+	local p
+	if [ "$HAS_CLAUDE" -eq 1 ]; then
+		for p in $ALL_PLUGINS; do
+			if uninstall_plugin_cmd claude uninstall "$p"; then
+				ok "Claude: $p uninstalled"
+			else
+				warn "Claude: $p failed to uninstall via the CLI"
+				CLAUDE_UNINSTALL_FAILED=1
+			fi
+		done
+	else
+		CLAUDE_UNINSTALL_FAILED=1
+	fi
+
+	if [ "$HAS_CODEX" -eq 1 ]; then
+		for p in $ALL_PLUGINS; do
+			if uninstall_plugin_cmd codex remove "$p"; then
+				ok "Codex: $p removed"
+			else
+				warn "Codex: $p failed to remove via the CLI"
+				CODEX_UNINSTALL_FAILED=1
+			fi
+		done
+	else
+		CODEX_UNINSTALL_FAILED=1
+	fi
+}
+
+# uninstall_fallback_rm removes exactly <home>/plugins/marketplaces/cenci and
+# <home>/plugins/cache/cenci for the given client — never a parent dir, never
+# a sibling marketplace/cache — the safety net for when the CLI is absent or
+# its removal verb failed.
+uninstall_fallback_rm() {
+	local client="$1" checkout cache_root
+	checkout="$HOME/.$client/plugins/marketplaces/$MARKETPLACE_NAME"
+	cache_root="$HOME/.$client/plugins/cache/$MARKETPLACE_NAME"
+	if [ -d "$checkout" ]; then
+		if rm -rf "$checkout"; then
+			ok "removed $checkout"
+		else
+			warn "could not remove $checkout — remove it manually: rm -rf $checkout"
+		fi
+	fi
+	if [ -d "$cache_root" ]; then
+		if rm -rf "$cache_root"; then
+			ok "removed $cache_root"
+		else
+			warn "could not remove $cache_root — remove it manually: rm -rf $cache_root"
+		fi
+	fi
+}
+
+# uninstall_marketplace removes the cenci marketplace registration for every
+# detected client, then falls back to uninstall_fallback_rm for any client
+# whose CLI was absent or whose removal (plugin or marketplace) failed —
+# CLI-driven removal is primary, the rm -rf fallback only catches what the
+# CLI left behind.
+uninstall_marketplace() {
+	if [ "$HAS_CLAUDE" -eq 1 ]; then
+		if claude plugin marketplace remove "$MARKETPLACE_NAME" >/dev/null 2>&1; then
+			ok "Claude: marketplace '$MARKETPLACE_NAME' removed"
+		else
+			warn "Claude: could not remove marketplace '$MARKETPLACE_NAME'"
+			CLAUDE_UNINSTALL_FAILED=1
+		fi
+	fi
+	if [ "$HAS_CODEX" -eq 1 ]; then
+		if codex plugin marketplace remove "$MARKETPLACE_NAME" >/dev/null 2>&1; then
+			ok "Codex: marketplace '$MARKETPLACE_NAME' removed"
+		else
+			warn "Codex: could not remove marketplace '$MARKETPLACE_NAME'"
+			CODEX_UNINSTALL_FAILED=1
+		fi
+	fi
+
+	if [ "$CLAUDE_UNINSTALL_FAILED" -eq 1 ]; then
+		uninstall_fallback_rm claude
+	fi
+	if [ "$CODEX_UNINSTALL_FAILED" -eq 1 ]; then
+		uninstall_fallback_rm codex
+	fi
+}
+
+# uninstall_config removes ~/.config/cenci/config.json, then rmdir's the now
+# (likely) empty cenci config dir — harmless no-op if anything else still
+# lives there (e.g. files other children may own).
+uninstall_config() {
+	local cfg_dir cfg
+	cfg_dir="${XDG_CONFIG_HOME:-$HOME/.config}/cenci"
+	cfg="$cfg_dir/config.json"
+	if [ -e "$cfg" ]; then
+		if rm -f "$cfg"; then
+			ok "removed $cfg"
+		else
+			warn "could not remove $cfg — remove it manually: rm $cfg"
+		fi
+	fi
+	rmdir "$cfg_dir" >/dev/null 2>&1 || true
+}
+
+# uninstall_lazyboards is strictly opt-in: --lazyboards (LAZYBOARDS=yes), or
+# an interactive prompt defaulting to no. Declined/absent leaves the managed
+# binary and its config untouched.
+uninstall_lazyboards() {
+	local do_remove=0
+	if [ "$LAZYBOARDS" = yes ]; then
+		do_remove=1
+	elif [ "$LAZYBOARDS" = ask ] && [ "$INTERACTIVE" -eq 1 ]; then
+		if ask_yn "Also remove lazyboards and its config?" n; then
+			do_remove=1
+		fi
+	fi
+	[ "$do_remove" -eq 1 ] || return 0
+
+	local bin cfg
+	if bin="$(lazyboards_managed_binary 2>/dev/null)"; then
+		if rm -f "$bin"; then
+			ok "removed $bin"
+		else
+			warn "could not remove $bin — remove it manually: rm $bin"
+		fi
+	fi
+	cfg="${XDG_CONFIG_HOME:-$HOME/.config}/lazyboards/config.yml"
+	if [ -e "$cfg" ]; then
+		if rm -f "$cfg"; then
+			ok "removed $cfg"
+		else
+			warn "could not remove $cfg — remove it manually: rm $cfg"
+		fi
+	fi
+}
+
+# print_manual_path_note mirrors check_stale_tmux_vars/setup_cenci_linux_path's
+# read-only philosophy: cenci never edits shell rc files, so if a PATH export
+# was added during install, print the line to remove by hand instead.
+print_manual_path_note() {
+	say ""
+	say "  cenci never edits shell rc files. If a PATH export for ~/.local/bin was"
+	say "  added during install (e.g. in ~/.bashrc), remove it manually:"
+	say "    export PATH=\"\$HOME/.local/bin:\$PATH\""
+}
+
+# uninstall_sandbox_cleanup is an extension point for #458 (machine-wide
+# sandbox cleanup: containers, images, volumes). Intentionally a no-op here.
+uninstall_sandbox_cleanup() {
+	:
+}
+
+# uninstall_widget_cleanup is an extension point for #459 (desktop bar widget
+# uninstall: SwiftBar/GNOME/Plasma/DMS/noctalia). Intentionally a no-op here.
+uninstall_widget_cleanup() {
+	:
+}
+
+# have_controlling_tty probes whether /dev/tty is actually openable, not just
+# whether its permission bits look readable/writable. `[ -r/-w /dev/tty ]`
+# (INTERACTIVE, above) can misreport true when the device node exists with
+# permissive bits but no controlling terminal is attached (e.g. a detached
+# CI/agent sandbox) — opening it there fails with ENXIO regardless of those
+# bits. The destructive uninstall confirmation gate needs that stronger
+# signal so it doesn't silently fall through ask_yn's own failed-read path
+# and print the wrong abort message.
+have_controlling_tty() {
+	exec 3<>/dev/tty 2>/dev/null || return 1
+	exec 3<&-
+	return 0
+}
+
+# run_uninstall is the uninstall MODE dispatcher: collect + print targets,
+# gate on a single confirmation (special-cased for ASSUME_YES — routing
+# --yes through ask_yn's destructive default of n would make --yes abort,
+# see ask_yn above), then remove everything in dependency order (stop the
+# daemon before touching the plugin cache its binary lives in).
+run_uninstall() {
+	step "Uninstalling cenci"
+	collect_uninstall_targets
+
+	if [ "$ASSUME_YES" -eq 1 ]; then
+		:
+	elif [ "$INTERACTIVE" -eq 1 ] && have_controlling_tty; then
+		if ! ask_yn "Remove all of the above?" n; then
+			say "Aborted — nothing was removed."
+			return 1
+		fi
+	else
+		die "Refusing to uninstall without confirmation in a non-interactive session — re-run with --yes to skip the confirmation prompt."
+	fi
+
+	CLAUDE_UNINSTALL_FAILED=0
+	CODEX_UNINSTALL_FAILED=0
+
+	uninstall_stop_daemon
+	uninstall_sandbox_cleanup
+	uninstall_widget_cleanup
+	uninstall_plugins
+	uninstall_marketplace
+	uninstall_links
+	uninstall_config
+	uninstall_lazyboards
+	print_manual_path_note
+
+	step "Done"
+	say "  cenci has been uninstalled."
+	return 0
+}
+
 # ------------------------------------------------------------------- main ----
 
 MODE=install
@@ -1355,6 +1773,7 @@ Usage:
   cenci-installer              interactive installer / repair
   cenci-installer update       update installed plugins (+ optional rebuild)
   cenci-installer doctor       check prerequisites, change nothing
+  cenci-installer uninstall    remove plugins, PATH links, daemon, and config
 
 Initial install:
   curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
@@ -1365,6 +1784,7 @@ Flags:
   --yes                                 accept defaults, never prompt
   --build / --no-build                  force / skip the sandbox image build
   --lazyboards / --no-lazyboards        force / skip the optional lazyboards board install
+                                         (uninstall mode: --lazyboards also removes it)
   --help                                this text
 EOF
 }
@@ -1373,6 +1793,7 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 	update | --update) MODE=update ;;
 	doctor | --doctor) MODE=doctor ;;
+	uninstall | --uninstall) MODE=uninstall ;;
 	--yes | -y) ASSUME_YES=1 ;;
 	--build) BUILD_IMAGE=yes ;;
 	--no-build) BUILD_IMAGE=no ;;
@@ -1406,6 +1827,11 @@ say "${BOLD}cenci installer${RESET} — $(platform_label)"
 
 if [ "$MODE" = doctor ]; then
 	run_doctor
+	exit $?
+fi
+
+if [ "$MODE" = uninstall ]; then
+	run_uninstall
 	exit $?
 fi
 
