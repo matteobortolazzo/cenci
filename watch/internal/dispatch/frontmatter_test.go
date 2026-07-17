@@ -12,7 +12,7 @@ slug: add-dark-mode
 isChild: false
 isLastChild: false
 parentId: null
-status: approved
+status: planned
 planCommitSha: abc123def
 ---
 
@@ -26,7 +26,7 @@ do the thing
 	cases := map[string]string{
 		"ticketId":      "42",
 		"ticketTitle":   "Add dark mode support", // quotes stripped
-		"status":        "approved",
+		"status":        "planned",
 		"isChild":       "false",
 		"parentId":      "null",
 		"planCommitSha": "abc123def",
@@ -50,18 +50,18 @@ func TestParseFrontMatterNoFrontMatter(t *testing.T) {
 		t.Error("expected false for an unterminated front-matter block")
 	}
 	// The opening fence must stand on its own line, not run into a key.
-	if _, ok := parseFrontMatter("---status: approved\n---\n"); ok {
+	if _, ok := parseFrontMatter("---status: planned\n---\n"); ok {
 		t.Error("expected false when --- is not a line of its own")
 	}
 }
 
 func TestParseFrontMatterBOM(t *testing.T) {
-	m, ok := parseFrontMatter("\ufeff---\nstatus: approved\n---\n")
+	m, ok := parseFrontMatter("\ufeff---\nstatus: planned\n---\n")
 	if !ok {
 		t.Fatal("expected front matter to parse past a BOM")
 	}
-	if m["status"] != "approved" {
-		t.Errorf("status = %q, want approved", m["status"])
+	if m["status"] != "planned" {
+		t.Errorf("status = %q, want planned", m["status"])
 	}
 }
 

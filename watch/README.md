@@ -232,10 +232,10 @@ launch template" error.
 
 ## Auto-dispatch (`cenci dispatch`)
 
-Once planning is human-gated and an approved plan shows up on the board as the
+Once planning is human-gated and a planned plan shows up on the board as the
 `Planned` state, *picking it up* is pure policy — no LLM in the dispatcher.
 `cenci dispatch` walks the configured repos, matches each `Planned` ticket to
-its approved `.plans/<id>-*.md` file, requires the ticket's sole assignee to match
+its planned `.plans/<id>-*.md` file, requires the ticket's sole assignee to match
 the active account returned by `gh api user`, checks capacity/budget gates, and —
 for every ticket that clears them — runs exactly what a human would press:
 `cenci run implement .plans/<file> --agent <chosen>`. The intelligence stays
@@ -358,7 +358,7 @@ A ticket is dispatched only when **all** of these hold, evaluated in order (the 
 failing gate is the logged skip reason):
 
 1. carries `Planned`, not `Blocked`, and has no open linked PR;
-2. a matching plan for the ticket exists with `status: approved`;
+2. a matching plan for the ticket exists with `status: planned`;
 3. the plan is fresh — default-branch commits since its `planCommitSha` are within
    `planStalenessTolerance` (else `plan stale, re-plan`); when the plan's front
    matter lists `stalenessPaths`, only commits touching those paths are counted
@@ -479,7 +479,7 @@ window (gone, or `stopped`), no open linked PR, and that signal has held continu
 - **at `retryBudget`** → `Working` → `dispatch-failed`, surfaced for a human and never
   touched again.
 
-The inverse leak — a `Planned` ticket whose approved plan file cannot be read — becomes
+The inverse leak — a `Planned` ticket whose planned plan file cannot be read — becomes
 `plan-invalid` (also grace-gated, to tolerate a plan that is mid-write or has not yet
 synced). An orphan `.plans/` file whose ticket is not open is reported in the log only, no
 mutation.

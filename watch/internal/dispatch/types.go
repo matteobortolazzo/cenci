@@ -1,5 +1,5 @@
 // Package dispatch implements `cenci dispatch`: deterministic auto-pickup
-// of approved, human-gated plans. The heart is a pure decision function
+// of planned, human-gated plans. The heart is a pure decision function
 // (Decide) fed by impure adapters (GitHub ticket source, .plans front-matter
 // reader, daemon snapshot, clock, budget provider). Dispatching an action is
 // exactly the human keypress `cenci run implement .plans/<file>` — the
@@ -31,7 +31,7 @@ type Plan struct {
 	Repo          string // owner/repo the plan belongs to (its RepoConfig)
 	Path          string // full path to the plan file
 	TicketID      int    // ticketId front-matter field
-	Status        string // "approved" when ready to pick up
+	Status        string // "planned" when ready to pick up
 	PlanCommitSha string // HEAD when the plan was written
 	IsChild       bool   // part of a parent/child split
 	IsLastChild   bool   // the last child of its parent (parent-close signal for cenci/#46)

@@ -131,8 +131,8 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 
 		// Inverse leak: a Planned ticket with no parseable plan file. ReadPlans
 		// drops unparseable files, so "missing" and "unparseable" both present as
-		// no matched plan. A plan that exists but is not approved is a normal
-		// human-in-loop state — left alone.
+		// no matched plan. A plan that exists but does not yet carry
+		// status: planned is a normal human-in-loop state — left alone.
 		if hasLabel(t.Labels, labelPlanned) {
 			if planByTicket[key] != nil {
 				continue
@@ -332,7 +332,7 @@ func failedComment(attempts int, window, status string) string {
 
 func planInvalidComment() string {
 	return fmt.Sprintf("⚠️ cenci: this ticket is `%s` but has no parseable plan file in `.plans/`. "+
-		"Labeled `%s` — re-run planning to produce an approved plan.", labelPlanned, labelPlanInvalid)
+		"Labeled `%s` — re-run planning to produce a plan.", labelPlanned, labelPlanInvalid)
 }
 
 // reconcileStuckComment (#265) is posted when the runner escalates a ticket

@@ -21,12 +21,12 @@ func stubRunFn(t *testing.T, fn func(run.Opts, run.Controller) error) {
 	t.Cleanup(func() { runFn = restore })
 }
 
-// dispatchableDeps is the happy path: one Planned ticket #42 with an approved,
+// dispatchableDeps is the happy path: one Planned ticket #42 with a planned,
 // fresh plan and a reachable, idle daemon — every gate passes.
 func dispatchableDeps(now time.Time) dispatchDeps {
 	return dispatchDeps{
 		Tickets:     []Ticket{{Repo: "o/r", Number: 42, Title: "Fix thing", Labels: []string{"Planned"}, Assignees: []string{"octocat"}}},
-		Plans:       []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "approved"}},
+		Plans:       []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "planned"}},
 		Snapshot:    &watch.StateSnapshot{},
 		Now:         now,
 		CurrentUser: "octocat",
