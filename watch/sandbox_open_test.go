@@ -932,9 +932,13 @@ func TestOpenAllShortcuts_AttachTheirAgentAndModel(t *testing.T) {
 		{"cs", "claude", "sonnet", "--dangerously-skip-permissions"},
 		{"co", "claude", "opus", "--dangerously-skip-permissions"},
 		{"cf", "claude", "fable", "--dangerously-skip-permissions"},
-		{"xl", "codex", "gpt-5.6-luna", "--dangerously-bypass-approvals-and-sandbox"},
-		{"xt", "codex", "gpt-5.6-terra", "--dangerously-bypass-approvals-and-sandbox"},
-		{"xs", "codex", "gpt-5.6-sol", "--dangerously-bypass-approvals-and-sandbox"},
+		// Codex additionally needs --dangerously-bypass-hook-trust: hook
+		// trust lives in the user config layer and provisioning never seeds
+		// it, so without the flag the cenci-watch hooks are silently skipped
+		// as "pending review" and sandbox sessions never report (#426).
+		{"xl", "codex", "gpt-5.6-luna", "--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"},
+		{"xt", "codex", "gpt-5.6-terra", "--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"},
+		{"xs", "codex", "gpt-5.6-sol", "--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.token, func(t *testing.T) {
@@ -1780,7 +1784,7 @@ func TestCnArgv0_RoutesToOpen(t *testing.T) {
 	}
 
 	line := attachLine(t, callLogLines(t, callLog))
-	if !strings.HasSuffix(line, "/opt/cenci-agent/current/node_modules/.bin/codex --dangerously-bypass-approvals-and-sandbox --model gpt-5.6-sol") {
+	if !strings.HasSuffix(line, "/opt/cenci-agent/current/node_modules/.bin/codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --model gpt-5.6-sol") {
 		t.Errorf("attach argv = %q, want the codex/sol shortcut resolution", line)
 	}
 }

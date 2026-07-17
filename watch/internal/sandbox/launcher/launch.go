@@ -139,9 +139,16 @@ func (e *Engine) Launch(opts Options) error {
 
 	// The container is the security boundary: the agent runs with full
 	// permissions inside it (rejected if root — we run as uid 1000 'dev').
+	// Codex also bypasses hook trust: trust lives in the user config layer
+	// and provisioning never seeds it, so without the flag the cenci-watch
+	// hooks are silently skipped as "pending review" and sandbox sessions
+	// never report to the daemon. There is no supported way to persist
+	// trust non-interactively (openai/codex#21615), and the config
+	// trust-store key format is flagged in-source as temporary — the
+	// per-invocation flag is the only stable route (#426).
 	var agentCmdArgs []string
 	if agent == "codex" {
-		agentCmdArgs = []string{"--dangerously-bypass-approvals-and-sandbox", "--model", model}
+		agentCmdArgs = []string{"--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust", "--model", model}
 	} else {
 		agentCmdArgs = []string{"--dangerously-skip-permissions", "--model", model}
 	}

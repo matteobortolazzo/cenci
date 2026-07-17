@@ -167,7 +167,7 @@ it.
 `cenci open` launches Claude Code by default. Pass `--agent codex` (or use an
 `xl`/`xt`/`xs` shortcut) to launch Codex instead. Both agents run at full permission
 inside the container — Claude with `--dangerously-skip-permissions`, Codex with
-`--dangerously-bypass-approvals-and-sandbox`.
+`--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust`.
 
 Containers and home volumes are **namespaced by agent**, so the two never collide:
 the **Claude agent** uses the `claude-cenci-` prefix; the **Codex agent** (`--agent
@@ -399,7 +399,7 @@ the stale binary.
 
 Claude Code runs with `--dangerously-skip-permissions` inside the container: no permission prompts, no tool allowlists. Isolation comes from the container itself, not from Claude Code's permission system. This is the supported use of the flag (it refuses to run as root; the container user is `dev`, UID 1000). Human-in-the-loop control moves up a layer — to workflow gates (plan approval, `AskUserQuestion`) rather than per-command approval.
 
-Codex (`--agent codex`) runs with the direct analog, `--dangerously-bypass-approvals-and-sandbox`: it skips all confirmation prompts and runs commands without Codex's own sandbox, since the flag is intended for externally-sandboxed environments. It is container-safe by the same reasoning as Claude's flag — the container is the security boundary, and we run as `dev`, UID 1000. Unlike Claude's bypass mode there is no persisted "accept" dialog to seed, so the entrypoint does no Codex settings-seeding.
+Codex (`--agent codex`) runs with the direct analog, `--dangerously-bypass-approvals-and-sandbox`: it skips all confirmation prompts and runs commands without Codex's own sandbox, since the flag is intended for externally-sandboxed environments. It is container-safe by the same reasoning as Claude's flag — the container is the security boundary, and we run as `dev`, UID 1000. Unlike Claude's bypass mode there is no persisted "accept" dialog to seed, so the entrypoint does no Codex settings-seeding. The launcher also passes `--dangerously-bypass-hook-trust`: Codex pins hook trust in the user config layer and offers no non-interactive way to seed it, so without the flag the provisioned cenci-watch hooks would sit "pending review" forever and sandbox sessions would never report to the watch daemon. Container-safe for the same reason — the only hooks in the volume are the ones the sandbox itself provisions.
 
 Bypass mode is **fully unattended**. The entrypoint seeds `/home/dev/.claude/settings.json` with `skipDangerousModePermissionPrompt: true` and `permissions.defaultMode: bypassPermissions` (and the image sets `IS_SANDBOX=1`), so even a brand-new `--name` instance on a fresh home volume reaches the prompt with no "Yes, I accept" bypass dialog, and headless `claude -p` runs report `bypassPermissions` instead of silently downgrading to `default`. The settings are deep-merged into any existing file, so unrelated keys survive.
 
