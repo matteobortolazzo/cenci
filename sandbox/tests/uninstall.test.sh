@@ -339,6 +339,7 @@ if [[ "${bashrc_before}" != "${bashrc_after}" ]]; then
     exit 1
 fi
 assert_contains "${UNINSTALL_OUTPUT}" ".bashrc"
+# shellcheck disable=SC2016 # literal line we expect printed verbatim, not expanded here
 assert_contains "${UNINSTALL_OUTPUT}" 'export PATH="$HOME/.local/bin:$PATH"'
 
 # --- case 8: sentinel-secret regression (#353) --------------------------------
