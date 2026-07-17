@@ -761,7 +761,10 @@ step_sandbox_refresh_plugins() {
 
 	local cenci_bin
 	cenci_bin="$(current_cenci_binary || true)"
-	[ -n "$cenci_bin" ] || return 0
+	if [ -z "$cenci_bin" ]; then
+		warn "cenci binary not available — skipping running-sandbox plugin refresh; run manually with: cenci sandbox update-plugins --all"
+		return 0
+	fi
 
 	step "Refreshing plugins in running sandbox containers"
 	if "$cenci_bin" sandbox update-plugins --all; then

@@ -234,6 +234,44 @@ setup_bump_layout() {
     LAYOUT_PKILL_LOG="${pkill_log}"
 }
 
+# setup_broken_binary_layout provisions a fake HOME with all three plugins
+# reported installed (make_client), but a version-pinned cenci-watch cache
+# manifest with no bootstrap script and no binary — current_cenci_binary can
+# never provision a binary from this cache (mirrors
+# prepare_broken_cenci_cache in installer-clients.test.sh). Regression for
+# step_sandbox_refresh_plugins's silent-failure guard (#461 follow-up): an
+# update run with cenci-sandbox selected must warn instead of silently
+# skipping the running-sandbox plugin refresh when current_cenci_binary
+# fails.
+setup_broken_binary_layout() {
+    local name="$1" client="$2"
+    local home="${WORK}/${name}/home" mock_bin="${WORK}/${name}/bin"
+    local call_log="${WORK}/${name}/calls" pkill_log="${WORK}/${name}/pkill-calls"
+    mkdir -p "${home}"
+    : >"${call_log}"
+    : >"${pkill_log}"
+    make_tools "${mock_bin}"
+    make_logging_pkill_pgrep "${mock_bin}"
+    make_client "${mock_bin}" "${client}"
+    prepare_checkout "${home}" "${client}"
+
+    local cache_dir manifest_dir
+    if [[ "${client}" == claude ]]; then
+        cache_dir="${home}/.claude/plugins/cache/cenci/cenci-watch"
+        manifest_dir=.claude-plugin
+    else
+        cache_dir="${home}/.codex/plugins/cache/cenci/cenci-watch"
+        manifest_dir=.codex-plugin
+    fi
+    mkdir -p "${cache_dir}/1.0.0/${manifest_dir}"
+    printf '{"name":"cenci-watch","version":"1.0.0"}\n' >"${cache_dir}/1.0.0/${manifest_dir}/plugin.json"
+
+    LAYOUT_HOME="${home}"
+    LAYOUT_BIN="${mock_bin}"
+    LAYOUT_CALL_LOG="${call_log}"
+    LAYOUT_PKILL_LOG="${pkill_log}"
+}
+
 run_update() {
     set +e
     env -i HOME="${LAYOUT_HOME}" PATH="${LAYOUT_BIN}" CALL_LOG="${LAYOUT_CALL_LOG}" \
@@ -402,6 +440,20 @@ fi
 if ! grep -q "sandbox update-plugins --all" "${WORK}/last-output"; then
     echo "FAIL: expected the refresh failure to be reported (warned) in the update output" >&2
     cat "${WORK}/last-output" >&2
+    exit 1
+fi
+
+echo "case: when current_cenci_binary can't provision a binary, the sandbox plugin refresh warns instead of failing silently (#461)"
+setup_broken_binary_layout no-binary claude
+run_update
+if ! grep -q "cenci binary not available — skipping running-sandbox plugin refresh; run manually with: cenci sandbox update-plugins --all" "${WORK}/last-output"; then
+    echo "FAIL: expected the sandbox plugin refresh to warn when current_cenci_binary fails" >&2
+    cat "${WORK}/last-output" >&2
+    exit 1
+fi
+if grep -qx "sandbox update-plugins --all" "${LAYOUT_CALL_LOG}"; then
+    echo "FAIL: expected the refresh to never invoke 'sandbox update-plugins --all' without a resolvable binary" >&2
+    cat "${LAYOUT_CALL_LOG}" >&2
     exit 1
 fi
 
