@@ -39,10 +39,10 @@ curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install
 ```
 
 From a clone, run `./install.sh`. Non-interactive automation can add `--yes`; use
-`./install.sh --help` for the complete public interface. The installer registers the
-cenci marketplace, installs `cenci`, `cenci-watch`, and `cenci-sandbox` independently
-for every detected client, and puts the `cenci` binary and its `cn` launch alias on
-your PATH.
+`./install.sh --help` for the complete public interface. Every run reconciles the
+cenci marketplace and the three components (`cenci`, `cenci-watch`, and
+`cenci-sandbox`) for each detected client: it adds missing pieces and refreshes
+existing ones. It then puts the `cenci` binary and its `cn` launch alias on your PATH.
 
 ## 3. Verify
 
@@ -124,9 +124,16 @@ applies `In Review`, and merge completion applies `Implemented`.
 cenci update
 ```
 
-The command downloads the current official installer, refreshes every installed
-component in every detected client, resolves the active cenci-watch cache, refreshes
-launchers, and replaces a stale running cenci daemon with the updated binary.
+The command refreshes the cenci marketplace through the owning client, then reconciles
+all three components in every detected client — missing pieces are added and existing
+ones are refreshed. It resolves the active cenci-watch cache, refreshes launchers, and
+replaces a stale running cenci daemon with the updated binary. Use
+`cenci update --lazyboards` to install or reconcile the optional board binary; an
+already-managed lazyboards installation is also refreshed by a normal update.
+
+The components version independently. In particular, a `watch/v0.5.4` release is the
+`cenci-watch` plugin release, so update output correctly reports it on the
+`cenci-watch` line rather than the `cenci` workflow-plugin line.
 
 ## Troubleshooting
 

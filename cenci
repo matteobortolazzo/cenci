@@ -1,22 +1,93 @@
 #!/usr/bin/env bash
-# Stable front door for installing, updating, and diagnosing cenci.
-# Always fetch the current installer so the updater itself can evolve.
+# Stable front door for installing, updating, and diagnosing cenci. The
+# installed wrapper executes the installer from its exact cenci marketplace
+# checkout; update/repair refreshes that checkout through the owning client
+# first, while doctor remains strictly local and read-only.
 set -euo pipefail
 
-INSTALLER_URL="https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh"
+source_path=${BASH_SOURCE[0]}
+link_depth=0
+while [[ -L "${source_path}" ]]; do
+	link_depth=$((link_depth + 1))
+	if [[ ${link_depth} -gt 16 ]]; then
+		printf 'Error: too many installer symlink levels.\n' >&2
+		exit 1
+	fi
+	if ! source_parent=$(dirname "${source_path}"); then
+		printf 'Error: could not inspect installer directory.\n' >&2
+		exit 1
+	fi
+	if ! source_dir=$(cd -P "${source_parent}" >/dev/null 2>&1 && pwd); then
+		printf 'Error: could not resolve installer directory.\n' >&2
+		exit 1
+	fi
+	if ! link_target=$(readlink "${source_path}"); then
+		printf 'Error: could not resolve installer symlink.\n' >&2
+		exit 1
+	fi
+	if [[ "${link_target}" = /* ]]; then
+		source_path=${link_target}
+	else
+		source_path=${source_dir}/${link_target}
+	fi
+done
+if ! source_parent=$(dirname "${source_path}"); then
+	printf 'Error: could not inspect installer root.\n' >&2
+	exit 1
+fi
+if ! source_dir=$(cd -P "${source_parent}" >/dev/null 2>&1 && pwd); then
+	printf 'Error: could not resolve installer root.\n' >&2
+	exit 1
+fi
+installer=${source_dir}/install.sh
 
-if ! command -v curl >/dev/null 2>&1; then
-	printf 'Error: curl is required to run cenci.\n' >&2
+if [[ ! -f "${installer}" ]]; then
+	printf 'Error: bundled installer not found at %s. Re-run the official install command.\n' "${installer}" >&2
 	exit 1
 fi
 
-installer="$(mktemp "${TMPDIR:-/tmp}/cenci-install.XXXXXX")"
+case "${1:-}" in
+doctor | --help | -h)
+	# doctor is strictly local/read-only, and install.sh handles --help/-h
+	# itself after exec. None of these should pay for (or require) a
+	# checkout refresh, and a read-only invocation from a copied wrapper
+	# should still work.
+	;;
+*)
+	managed_claude_dir=${HOME}/.claude/plugins/marketplaces/cenci
+	resolved_claude_dir=""
+	if [[ -d "${managed_claude_dir}" ]]; then
+		if ! resolved_claude_dir=$(cd -P "${managed_claude_dir}" >/dev/null 2>&1 && pwd); then
+			resolved_claude_dir=""
+		fi
+	fi
 
-cleanup() {
-	rm -f "${installer}"
-}
-trap cleanup EXIT
-trap 'exit 1' HUP INT TERM
+	managed_codex_dir=${HOME}/.codex/plugins/marketplaces/cenci
+	resolved_codex_dir=""
+	if [[ -d "${managed_codex_dir}" ]]; then
+		if ! resolved_codex_dir=$(cd -P "${managed_codex_dir}" >/dev/null 2>&1 && pwd); then
+			resolved_codex_dir=""
+		fi
+	fi
 
-curl -fsSL "${INSTALLER_URL}" -o "${installer}"
-bash "${installer}" "$@"
+	case "${source_dir}" in
+	"${resolved_claude_dir}")
+		claude plugin marketplace update cenci >/dev/null
+		;;
+	"${resolved_codex_dir}")
+		codex plugin marketplace upgrade cenci >/dev/null
+		;;
+	*)
+		# A directly invoked source checkout is already an explicit, local
+		# authority. Keep that development path working, but do not accept an
+		# arbitrary copied wrapper as an updater.
+		if [[ ! -e "${source_dir}/.git" ]]; then
+			printf 'Error: refusing to update from unexpected installer root: %s\n' "${source_dir}" >&2
+			exit 1
+		fi
+		;;
+	esac
+	;;
+esac
+
+exec bash "${installer}" "$@"

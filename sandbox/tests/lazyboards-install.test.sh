@@ -141,10 +141,23 @@ EOF
     chmod +x "${home}/.local/bin/lazyboards"
 }
 
+make_path_lazyboards() {
+    local path="$1" ver="$2"
+    mkdir -p "$(dirname "${path}")"
+    cat >"${path}" <<EOF
+#!/bin/sh
+if [ "\${1:-}" = --version ]; then
+    echo "lazyboards ${ver}"
+fi
+exit 0
+EOF
+    chmod +x "${path}"
+}
+
 # prepare_checkout provisions the marketplace checkout files the installer
 # resolves via find_plugin_path: the cenci CLI and the board config template.
 prepare_checkout() {
-    local home="$1"
+    local home="$1" root
     local checkout="${home}/.claude/plugins/marketplaces/cenci"
     mkdir -p "${checkout}/flow/templates"
     cp "${ROOT}/flow/templates/lazyboards-config.yml" "${checkout}/flow/templates/"
@@ -152,6 +165,14 @@ prepare_checkout() {
         cp "${ROOT}/cenci" "${checkout}/cenci"
         chmod +x "${checkout}/cenci"
     fi
+    root="${home}/.claude/plugins/cache/cenci/cenci-watch/1.0.0"
+    mkdir -p "${root}/bin" "${root}/.claude-plugin"
+    printf '{"name":"cenci-watch","version":"1.0.0"}\n' >"${root}/.claude-plugin/plugin.json"
+    cat >"${root}/bin/cenci" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+    chmod +x "${root}/bin/cenci"
 }
 
 # run_installer <name> <mode-and-flags...> — fresh HOME + mock PATH, then run
@@ -172,7 +193,7 @@ run_installer() {
     prepare_checkout "${home}"
 
     set +e
-    env -i HOME="${home}" PATH="${bin}" \
+    env -i HOME="${home}" PATH="${bin}:${home}/.local/bin" \
         CURL_LOG="${CASE_CURL_LOG}" RELEASE_DIR="${RELEASE_DIR}" FAKE_VER="${FAKE_VER}" \
         bash "${ROOT}/install.sh" "$@" >"${CASE_OUTPUT}" 2>&1
     CASE_EXIT=$?
@@ -232,6 +253,17 @@ run_installer default-skip --yes --no-build
 assert_not_contains "${CASE_CURL_LOG}" "releases/latest"
 assert_not_contains "${CASE_CURL_LOG}" "releases/download"
 
+echo "case: an unmanaged lazyboards found only on PATH is left alone with a reconcile hint, not silently adopted"
+name="path-only-unmanaged"
+make_path_lazyboards "${WORK}/${name}/bin/lazyboards" 1.0.0
+run_installer "${name}" --yes --no-build
+[[ "${CASE_EXIT}" -eq 0 ]]
+[[ ! -e "${CASE_HOME}/.local/bin/lazyboards" ]]
+assert_contains "${CASE_OUTPUT}" "unmanaged lazyboards found at"
+assert_contains "${CASE_OUTPUT}" "reconcile it with: cenci update --lazyboards"
+assert_not_contains "${CASE_CURL_LOG}" "releases/latest"
+assert_not_contains "${CASE_CURL_LOG}" "releases/download"
+
 echo "case: a checksum mismatch fails the step and installs nothing"
 sed 's/^[0-9a-f]\{8\}/deadbeef/' "${RELEASE_DIR}/checksums.txt" >"${RELEASE_DIR}/checksums.txt.tmp"
 mv "${RELEASE_DIR}/checksums.txt.tmp" "${RELEASE_DIR}/checksums.txt"
@@ -248,6 +280,55 @@ run_installer "${name}" update --yes --no-build
 [[ "${CASE_EXIT}" -eq 0 ]]
 [[ "$("${CASE_HOME}/.local/bin/lazyboards" --version)" == "lazyboards ${FAKE_VER}" ]]
 assert_contains "${CASE_OUTPUT}" "lazyboards v${FAKE_VER} installed"
+
+echo "case: rerunning install refreshes an outdated managed lazyboards"
+name=install-refresh
+make_installed_lazyboards "${WORK}/${name}/home" 1.0.0
+run_installer "${name}" --yes --no-build
+[[ "${CASE_EXIT}" -eq 0 ]]
+[[ "$("${CASE_HOME}/.local/bin/lazyboards" --version)" == "lazyboards ${FAKE_VER}" ]]
+
+echo "case: a PATH-shadowing lazyboards is reported instead of false update success"
+name="path-shadow"
+make_installed_lazyboards "${WORK}/${name}/home" 1.0.0
+make_path_lazyboards "${WORK}/${name}/bin/lazyboards" 1.0.0
+run_installer "${name}" update --yes --no-build
+[[ "${CASE_EXIT}" -ne 0 ]]
+[[ "$("${CASE_HOME}/.local/bin/lazyboards" --version)" == "lazyboards ${FAKE_VER}" ]]
+[[ "$("${WORK}/${name}/bin/lazyboards" --version)" == "lazyboards 1.0.0" ]]
+assert_contains "${CASE_OUTPUT}" "shadows the managed lazyboards"
+
+echo "case: an existing lazyboards symlink is never followed or overwritten"
+name=symlink-target
+mkdir -p "${WORK}/${name}/home/.local/bin"
+sentinel="${WORK}/${name}/sentinel"
+printf 'keep-me\n' >"${sentinel}"
+ln -s "${sentinel}" "${WORK}/${name}/home/.local/bin/lazyboards"
+run_installer "${name}" --yes --no-build --lazyboards
+[[ "${CASE_EXIT}" -ne 0 ]]
+[[ "$(cat "${sentinel}")" == keep-me ]]
+[[ -L "${CASE_HOME}/.local/bin/lazyboards" ]]
+
+# Regression (#448): a symlinked ~/.local/bin/lazyboards used to be treated as
+# a managed install (lazyboards_managed_binary didn't check -L), so a plain
+# `update --yes` (no --lazyboards) fell through to install_lazyboards_binary,
+# which then permanently hard-failed on every future update because it
+# refuses to overwrite a symlinked dest. It must instead be recognized as
+# unmanaged and left alone with the same reconcile hint doctor gives.
+echo "case: update leaves a symlinked ~/.local/bin/lazyboards untouched with a reconcile hint, not a permanent hard failure"
+name=symlink-target-update
+target="${WORK}/${name}/target/lazyboards"
+make_path_lazyboards "${target}" 1.0.0
+mkdir -p "${WORK}/${name}/home/.local/bin"
+ln -s "${target}" "${WORK}/${name}/home/.local/bin/lazyboards"
+run_installer "${name}" update --yes --no-build
+[[ "${CASE_EXIT}" -eq 0 ]]
+[[ -L "${CASE_HOME}/.local/bin/lazyboards" ]]
+[[ "$(readlink "${CASE_HOME}/.local/bin/lazyboards")" == "${target}" ]]
+assert_contains "${CASE_OUTPUT}" "unmanaged lazyboards found at"
+assert_contains "${CASE_OUTPUT}" "reconcile it with: cenci update --lazyboards"
+assert_not_contains "${CASE_CURL_LOG}" "releases/latest"
+assert_not_contains "${CASE_CURL_LOG}" "releases/download"
 
 echo "case: update leaves an up-to-date lazyboards alone"
 name=update-current

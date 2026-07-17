@@ -47,9 +47,10 @@ curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install
 cenci doctor
 ```
 
-The installer detects your clients, installs all three layers, and puts `cenci` and
-its `cn` launch alias on your PATH. `doctor` reports what is ready and what needs
-attention without changing anything.
+The installer detects your clients, reconciles all three layers on every run (adding
+missing components and refreshing existing ones), and puts `cenci` and its `cn` launch
+alias on your PATH. `doctor` reports what is ready and what needs attention without
+changing anything.
 
 **2. Launch from a git repository.**
 

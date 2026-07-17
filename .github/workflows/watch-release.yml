@@ -79,12 +79,12 @@ jobs:
             PREV=$(git tag -l 'watch/v*' --sort=-v:refname | sed -n 2p)
             if [ -n "$PREV" ]; then
               gh release create "$TAG" "${assets[@]}" \
-                --title "cenci v${VERSION}" \
+                --title "cenci-watch v${VERSION}" \
                 --generate-notes \
                 --notes-start-tag "$PREV"
             else
               gh release create "$TAG" "${assets[@]}" \
-                --title "cenci v${VERSION}" \
+                --title "cenci-watch v${VERSION}" \
                 --generate-notes
             fi
           fi
