@@ -207,14 +207,21 @@ tmux window puts the agent's PR one keypress from a local review — append the
 project's run command (`ng serve`, `dotnet run`, `go run .`, …) in that project's
 `.lazyboards.yml` to also start it.
 
-**Per-repo run actions are generated for you.** `/cenci:configure` (question 10)
-detects each runnable project's serve command and writes a committed
-`.lazyboards.yml` whose In Review actions open the PR's **registered worktree**
-(`{pr_worktree}`, resolved from `git worktree list` at action time — never the main
-checkout) and start the project. Action keys are single uppercase letters — key
-combinations don't exist in lazyboards yet — so a repo with several runnable
-projects gets one key per project, assigned `W`, then `L`, then `O`, skipping the
-global keys `G`/`A`/`S`/`X` claimed above. Because a local `columns:` list replaces
+**Per-repo run and test actions are generated for you.** `/cenci:configure` detects
+each project's serve **and** test command and writes a committed `.lazyboards.yml`
+whose In Review actions open the PR's **registered worktree** (`{pr_worktree}`,
+resolved from `git worktree list` at action time — never the main checkout) and
+either start the project (**`W`** serve) or run its tests in that worktree (**`T`**
+test — `dotnet test`, `npm test`, `go test ./...`, `ng test --watch=false`, …). A
+one-keypress "run the PR's tests before merging" is the payoff. Action keys are
+single uppercase letters — key combinations don't exist in lazyboards yet — so serve
+keys are assigned `W`, then `L`, then `O`, and test keys `T`, then the next unused
+letters, skipping the global keys `G`/`A`/`S`/`X` claimed above.
+
+Configure evaluates lazyboards on **every** run: with no `.lazyboards.yml` it offers
+to generate one; with an existing file it compares against the recommended action set
+and either suggests the missing actions (e.g. an absent `T` test action) or, when the
+file is already complete, skips silently with a short log line. Because a local `columns:` list replaces
 the global list entirely (it never merges, and bare `- name:` entries do **not**
 inherit global actions), the generated file re-declares each column's actions
 inline instead of relying on the seeded global config: `New` gets a local `R`

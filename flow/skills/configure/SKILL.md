@@ -96,7 +96,7 @@ This detection is a **non-blocking advisory** — it never gates configuration a
 | 7b. Pin subagents to 200K | `pinSubagents200K` | Pre-select Yes/No |
 | 8. CI/CD pipeline | `cicd` | Pre-select Yes/No based on `cicd.enabled` |
 | 9. Sandbox Dockerfile | `sandbox` | Pre-select Yes/No based on `sandbox.enabled` |
-| 10. Board config (lazyboards) | `lazyboards` | Pre-select Yes/No based on `lazyboards.enabled` |
+| 10. Board config (lazyboards) | `lazyboards` | Only asked when no `.lazyboards.yml` exists; if one exists, suggest missing actions or skip (see *Board Config*) |
 
 Ask these questions one at a time using the `AskUserQuestion` tool:
 
@@ -395,16 +395,18 @@ Include the server in `.lsp.json` regardless — it activates once the binary is
 
 ### Board Config (lazyboards)
 
-**Condition**: Only ask question 10 when at least one of these holds (check in order, stop at the first match; run each command check as its **own** Bash call, per `cenci:shell-rules`):
+**This section runs on every configure invocation** — there is no install/opt-in
+gate. Check whether a board config already exists (run the check as its **own**
+Bash call, per `cenci:shell-rules`) and branch:
 
-1. `command -v lazyboards` succeeds (the board is installed)
-2. `.lazyboards.yml` exists at the repo root (a board config is already in use)
-3. `existingConfig.lazyboards` is present (re-configuration of a board-enabled project)
-4. The user context (`$ARGUMENTS`) mentions lazyboards or a kanban board
+- **No `.lazyboards.yml` at the repo root** → ask **question 10** below (offer to
+  generate one). On "No", omit `lazyboards` from config.json (same pattern as
+  `cicd`/`pencil`/`sandbox`).
+- **`.lazyboards.yml` already exists** → **skip question 10** and jump to
+  **Existing config: suggest or skip** below (analyze the file against the
+  recommended action set, suggest what's missing, or skip quietly with a small log).
 
-If none match, skip this section entirely (do not set `lazyboards` in config.json).
-
-10. **Board config**: **every time** this condition is met, present this Yes/No
+10. **Board config** (no existing `.lazyboards.yml`): present this Yes/No
     confirmation via `AskUserQuestion` **in this session** — a pre-existing
     `lazyboards.enabled: true` recorded from a prior run, or `$ARGUMENTS` requesting a
     narrower focus or a skip, never authorizes silently regenerating
@@ -433,20 +435,40 @@ If none match, skip this section entirely (do not set `lazyboards` in config.jso
    (`npm run dev`, `ng serve`, …) — never the script *contents* from `package.json`,
    which are semi-trusted external values (see `docs/skill-authoring.md`).
 
+   **Also derive a test command** for each project (first match wins), so the In
+   Review column can offer a one-keypress "run the PR's tests in its worktree"
+   action alongside serve. Reuse the project's stored `testCommand` from
+   `existingConfig.projects[]` when present before falling back to this table:
+
+   | Rule (first match wins) | Test command |
+   |---|---|
+   | `package.json` has a `test` script | `npm test` |
+   | Angular project (`@angular/core`) | `ng test --watch=false` |
+   | `.csproj` or `.sln` present | `dotnet test` |
+   | Go module | `go test ./...` |
+   | Anything else (no detectable tests) | *not testable — no test action generated* |
+
+   As with serve, only the **runner invocation** is embedded — never the raw `test`
+   script *contents* from `package.json`.
+
    **Key assignment**: lazyboards binds custom actions to single uppercase letters
-   (`A`–`Z`) — key combinations do not exist (yet), so with several runnable projects
-   each needs its own letter. Assign in this order: **`W`** for the first runnable
-   project (frontends first, in Step 2a discovery order), then **`L`**, then **`O`**,
-   then any remaining unused uppercase letter — never `G`, `A`, `S`, or `X`, which the
-   seeded global config claims for jump-to-agent, annotate, and the dispatch-loop
-   toggles. Overriding the global `W` (Checkout PR) inside the In Review column is
-   deliberate: the per-repo run action supersedes the bare checkout.
+   (`A`–`Z`) — key combinations do not exist (yet), so each runnable or testable
+   project action needs its own letter. Assign **serve** keys first: **`W`** for the
+   first runnable project (frontends first, in Step 2a discovery order), then **`L`**,
+   then **`O`**, then any remaining unused uppercase letter. Then assign **test**
+   keys: **`T`** for the first testable project, then the next unused uppercase
+   letters. Never use `G`, `A`, `S`, or `X` (the seeded global config claims them for
+   jump-to-agent, annotate, and the dispatch-loop toggles), and never reuse a letter
+   already assigned to a serve action. Overriding the global `W` (Checkout PR) inside
+   the In Review column is deliberate: the per-repo run action supersedes the bare
+   checkout.
 
    Present the proposed mapping with AskUserQuestion before generating, e.g.:
-   "Proposed In Review actions: `W` → web-client (`ng serve`), `L` → admin (`npm run
-   start`). Generate these?" Options: "Yes — use this mapping (Recommended)",
-   "Change keys or drop projects" (then re-ask with the user's adjustments; enforce
-   single-uppercase-letter keys and the reserved-key exclusions above).
+   "Proposed In Review actions: `W` → web-client serve (`ng serve`), `T` → web-client
+   tests (`ng test --watch=false`), `L` → admin serve (`npm run start`). Generate
+   these?" Options: "Yes — use this mapping (Recommended)", "Change keys or drop
+   projects" (then re-ask with the user's adjustments; enforce single-uppercase-letter
+   keys and the reserved-key exclusions above).
 
 ### Auth Verification
 
@@ -839,8 +861,10 @@ For each MCP selected in question 5:
 
    **Committed, not ignored**: `.cenci/Dockerfile` is committed to the repo. Do **not** add `.cenci/` or `.cenci/Dockerfile` to `.gitignore` — the whole point is a team-shared, reviewed Dockerfile that the launcher's per-repo image selection (see `sandbox/README.md`) builds identically for every teammate.
 
-5f. **Generate `.lazyboards.yml`** (only if question 10 was asked and answered Yes
-   in this session):
+5f. **Generate `.lazyboards.yml`** (when question 10 was asked and answered Yes in
+   this session — the no-existing-file path). When a file already existed, the *Board
+   Config* branch instead runs the **Existing config: suggest or skip** sub-step at
+   the end of this section; the generation format below is what both paths write:
 
    Write `.lazyboards.yml` at the repo root with the confirmed key mapping. The
    critical lazyboards behavior to honor: a local `columns:` list **replaces** the
@@ -886,10 +910,15 @@ For each MCP selected in question 5:
      - name: In Review
        actions:
          W:
-           name: Run web-client worktree
+           name: Serve web-client worktree
            type: shell
            scope: pr
            command: "tmux new-window -d -n pr-{pr_number} -c {pr_worktree}/'apps/web-client' \"ng serve\""
+         T:
+           name: Test web-client worktree
+           type: shell
+           scope: pr
+           command: "tmux new-window -d -n pr-{pr_number} -c {pr_worktree}/'apps/web-client' \"ng test --watch=false\""
    ```
 
    - **`Refined`'s `D` (Design) action is gated on the single top-level
@@ -903,8 +932,11 @@ For each MCP selected in question 5:
    - `G` (and `A`/`S`/`X`) are top-level **global** actions defined outside
      `columns:` in `~/.config/lazyboards/config.yml` — never duplicate them into
      any column's local `actions:` in the generated file.
-   - One `In Review` action per runnable project, using the confirmed key and
-     serve command. The action name is `Run <slug> worktree`.
+   - One `In Review` **serve** action per runnable project, using the confirmed key
+     and serve command; action name `Serve <slug> worktree`. One `In Review` **test**
+     action per testable project, using the confirmed test key (`T`, …) and test
+     command; action name `Test <slug> worktree`. Both use the identical tmux
+     `-c {pr_worktree}` wrapper — only the command and key differ.
    - Use tmux's start-directory option rather than embedding the path in a nested
      `cd` command. **Single project**: `tmux new-window -d -n pr-{pr_number} -c
      {pr_worktree} "<serve-command>"`. **Monorepo**: append the project path as a
@@ -935,17 +967,32 @@ For each MCP selected in question 5:
            scope: pr
            command: 'tmux new-window -d -n pr-{pr_number} "git fetch origin {pr_branch} && git switch {pr_branch}"'
      ```
-   - **File exists**: the Overwrite/Skip/Show conflict check fires
-     **unconditionally** whenever `.lazyboards.yml` already exists at the repo
-     root — regardless of any prior `lazyboards.enabled` state recorded in
-     `.cenci/config.json` — reusing the exact conflict-check UX from steps 5d/5e:
-     "Found existing `.lazyboards.yml`. What would you like to do?" Options:
-     "Overwrite — replace with the generated config", "Skip — keep the existing
-     file, still record `lazyboards` in config.json", "Show existing — display the
-     current file contents" (then re-ask Overwrite/Skip). When overwriting, carry
-     the existing top-level `provider:`, `repo:`, and `project:` lines (if present)
-     into the regenerated file unchanged — they are project-identity keys
-     lazyboards only reads from the local file.
+   - **Existing config: suggest or skip** (the branch taken from *Board Config*
+     above when `.lazyboards.yml` already exists — question 10 is **not** asked and
+     the file is **not** blindly overwritten):
+     1. Read the existing file and derive the **recommended action set** this repo
+        would generate above: Refine/Implement on `New`/`Refined`/`Planned`,
+        pencil-gated Design on `Refined`, and per runnable/testable project a serve
+        (`W`/`L`/`O`/…) and test (`T`/…) In Review action.
+     2. Compute the **delta** = recommended actions absent from the existing file.
+        Match by column + action intent (name/command), **not** by raw key, so a
+        user's custom key binding is respected rather than flagged as "missing".
+     3. **Delta non-empty** → present the concrete additions via `AskUserQuestion`,
+        e.g. "`.lazyboards.yml` is missing a PR-worktree test action: `T` → run tests
+        (`dotnet test`) in the PR worktree. Add it?" Options: "Apply suggested
+        additions (Recommended)", "Overwrite fully — regenerate from scratch", "Keep
+        as-is — no changes", "Show existing — display the current file". **Apply** and
+        **Overwrite** both rewrite the whole file — a local `columns:` list *replaces*
+        the global list (it never merges, so a partial in-place patch is impossible):
+        merge the user's existing custom actions with the missing recommended ones,
+        and carry the existing top-level `provider:`, `repo:`, and `project:` identity
+        lines (if present) through unchanged — they are project-identity keys
+        lazyboards only reads from the local file. **Keep as-is** leaves the file
+        untouched.
+     4. **Delta empty** → do **not** prompt. Emit a small log line
+        (`.lazyboards.yml already covers all recommended actions — no changes.`) and
+        move on. Either way, record `lazyboards.enabled: true` in config.json, since a
+        working board config exists.
    - **Committed, not ignored**: `.lazyboards.yml` is committed (same reasoning as
      `.cenci/Dockerfile` — team-shared and reviewed; `{pr_worktree}` keeps it
      portable). Do **not** add it to `.gitignore`.
@@ -1030,10 +1077,13 @@ Omit `sandbox` entirely when the user says No (same pattern as `cicd`/`pencil`).
 
 > **Not the same as `.claude/settings.json`'s `sandbox.enabled`.** Step 4 above always writes `"sandbox": { "enabled": false }` into `.claude/settings.json` — that key disables **Claude Code's own host sandbox**, because the cenci-sandbox container is the security boundary instead. This `.claude/config.json` `sandbox` field is unrelated: it's this ticket's per-repo `.cenci/Dockerfile` toggle, consumed by cenci's configure skill and by `cenci sandbox build`'s per-repo image build — not by Claude Code itself. Same field name (`sandbox.enabled`), two different files, two different consumers, two unrelated meanings. Do not conflate them when reading or writing either file.
 
-The `lazyboards` field is only present when question 10 was asked and answered Yes. Schema:
-- `lazyboards.enabled` — `true` if the user opted in; omit `lazyboards` entirely when declined or when question 10 was skipped (same pattern as `cicd`/`pencil`/`sandbox`)
-- **Single project**: `lazyboards.serveCommand` and `lazyboards.boardKey` record the generated In Review action (command and its single-uppercase-letter key)
-- **Monorepo**: `serveCommand` and `boardKey` live on each **runnable** project entry in the `projects` array instead (non-runnable projects get neither), and the top-level `lazyboards` field carries only `enabled`
+The `lazyboards` field is present when question 10 was answered Yes **or** a
+`.lazyboards.yml` already existed (the suggest-or-skip branch also records
+`enabled: true`). Schema:
+- `lazyboards.enabled` — `true` if a board config exists (generated or pre-existing); omit `lazyboards` entirely when the user declines question 10 and no file exists (same pattern as `cicd`/`pencil`/`sandbox`)
+- **Single project**: `lazyboards.serveCommand` + `lazyboards.boardKey` record the generated serve action, and `lazyboards.testCommand` + `lazyboards.testKey` record the generated test action (command and its single-uppercase-letter key). Omit the test pair when the project is not testable.
+- **Monorepo**: `serveCommand`/`boardKey` and `testCommand`/`testKey` live on each project entry in the `projects` array instead (a project gets the serve pair only when runnable and the test pair only when testable), and the top-level `lazyboards` field carries only `enabled`
+- These recorded values are advisory: the suggest-or-skip analyzer re-derives serve/test commands from the derivation tables above, so a config missing them still works.
 
 Omit `lazyboards` entirely when the user says No (same pattern as `cicd`/`pencil`/`sandbox`).
 
@@ -1168,7 +1218,7 @@ When migrating from an older config that has `ticketSystem`, `prSystem`, `ticket
 
    Delete the PR-body temp file after a successful `gh pr create` (or a successful recovery via `gh pr view`).
 
-Report what was created and suggest next steps (e.g., "Try `/cenci:refine <ticket-id>` on a ticket"), including the PR URL from step 7. If `sandbox.enabled` is `true`, mention the generated `.cenci/Dockerfile` and that `cenci sandbox build` (run from inside the repo, after the PR merges) builds the repo's own tailored image on top of the shared base. If `lazyboards.enabled` is `true`, list the generated `.lazyboards.yml` In Review actions with their keys and serve commands (e.g., "`W` runs web-client's PR worktree with `ng serve`") and point at `docs/orchestration.md` for the board recipe. If `sandbox.baseVersion` resolved to `null` (unresolved — see the baseVersion resolution in step 5e), the chat summary must explicitly say so (e.g., "Base version could not be auto-detected — see `sandbox/README.md` to pin `BASE_VERSION` manually") rather than leaving it only as an inline Dockerfile comment, so a user who doesn't open the generated file still learns the base version wasn't pinned.
+Report what was created and suggest next steps (e.g., "Try `/cenci:refine <ticket-id>` on a ticket"), including the PR URL from step 7. If `sandbox.enabled` is `true`, mention the generated `.cenci/Dockerfile` and that `cenci sandbox build` (run from inside the repo, after the PR merges) builds the repo's own tailored image on top of the shared base. If `lazyboards.enabled` is `true`, list the generated `.lazyboards.yml` In Review actions with their keys, serve, and test commands (e.g., "`W` serves web-client's PR worktree with `ng serve`, `T` runs its tests with `ng test --watch=false`") and point at `docs/orchestration.md` for the board recipe. When the suggest-or-skip branch ran instead, report what happened (added actions, or "already complete — no changes"). If `sandbox.baseVersion` resolved to `null` (unresolved — see the baseVersion resolution in step 5e), the chat summary must explicitly say so (e.g., "Base version could not be auto-detected — see `sandbox/README.md` to pin `BASE_VERSION` manually") rather than leaving it only as an inline Dockerfile comment, so a user who doesn't open the generated file still learns the base version wasn't pinned.
 
 ### Board lifecycle labels
 
