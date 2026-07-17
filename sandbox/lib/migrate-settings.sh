@@ -269,8 +269,15 @@ provision_codex_plugins() {
 
 # update_codex_plugins <codex-dir> <marketplace-name> <ttl-minutes> <plugin>...
 #
-# Refresh the Codex marketplace snapshot, then idempotently re-add each
-# installed required plugin so its versioned cache follows the new snapshot.
+# Refresh the Codex marketplace snapshot, then re-add each installed required
+# plugin whose installed version no longer matches the refreshed snapshot.
+# `codex plugin add` is never a no-op upstream — it re-clones the plugin
+# source and rewrites the whole cache dir on every call — so the re-add is
+# version-gated: desired from the snapshot manifest under
+# <codex-dir>/.tmp/marketplaces/<name>/ (where codex keeps marketplace
+# clones), installed from `codex plugin list --json`. When either side is
+# unavailable (older codex without --json, missing manifest) fall back to
+# re-adding unconditionally — the repair-safe direction.
 # A shared 30-minute-style stamp prevents network work on rapid restarts; ttl 0
 # forces a refresh. Missing plugins are provisioned by provision_codex_plugins,
 # which callers run first for both normal startup and forced updates.
@@ -303,10 +310,24 @@ update_codex_plugins() {
         return 0
     fi
 
-    local plugin key
+    local manifest="${codex_dir}/.tmp/marketplaces/${marketplace_name}/.claude-plugin/marketplace.json"
+    local versions_json=""
+    if ! versions_json="$("${agent_cli}" plugin list --json 2>/dev/null)" \
+        || ! jq -e . <<< "${versions_json}" >/dev/null 2>&1; then
+        versions_json=""
+    fi
+
+    local plugin key desired current
     for plugin in "$@"; do
         key="${plugin}@${marketplace_name}"
         grep -Eq "^${key}[[:space:]]+installed" <<< "${installed}" || continue
+        if [[ -n "${versions_json}" ]] && jq -e . "${manifest}" >/dev/null 2>&1; then
+            desired="$(jq -r --arg name "${plugin}" '[.plugins[]? | select(.name == $name) | .version][0] // empty' "${manifest}")"
+            current="$(jq -r --arg id "${key}" '[.installed[]? | select(.pluginId == $id) | .version][0] // empty' <<< "${versions_json}")"
+            if [[ -n "${desired}" && -n "${current}" && "${current}" == "${desired}" ]]; then
+                continue
+            fi
+        fi
         if ! "${agent_cli}" plugin add "${key}" >/dev/null 2>&1; then
             echo "warning: failed to refresh Codex plugin ${key}; it may be stale this session" >&2
         fi
