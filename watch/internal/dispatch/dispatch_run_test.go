@@ -244,6 +244,36 @@ func TestApplyDispatchOmitsModelWhenUnset(t *testing.T) {
 	}
 }
 
+// TestApplyDispatchSetsWindowTicketToTicketNumber locks the join-key contract:
+// dispatch passes the plan-file path as run.Opts.Ticket (the implement skill's
+// argument) but must set WindowTicket to the numeric issue number so run.Run
+// names the window `<number>-implement` — the shape Lazyboards and dispatch's
+// own ticketActive/reconcile matching join on. Without WindowTicket the plan
+// path (non-numeric) would slug into a name nothing can match.
+func TestApplyDispatchSetsWindowTicketToTicketNumber(t *testing.T) {
+	var captured run.Opts
+	stubRunFn(t, func(opts run.Opts, _ run.Controller) error {
+		captured = opts
+		return nil
+	})
+
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	mut := &fakeMutator{}
+	prior := 0
+	var buf bytes.Buffer
+
+	if _, err := applyDispatch(testConfig(), dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
+		t.Fatalf("applyDispatch returned unexpected error: %v", err)
+	}
+
+	if captured.WindowTicket != "42" {
+		t.Errorf("captured Opts.WindowTicket = %q, want %q (the numeric issue number)", captured.WindowTicket, "42")
+	}
+	if captured.Ticket != ".plans/42-x.md" {
+		t.Errorf("captured Opts.Ticket = %q, want the plan path %q (the skill argument)", captured.Ticket, ".plans/42-x.md")
+	}
+}
+
 // TestFormatDecisionPrefixesRepo locks in the owner/repo prefix on decision
 // lines so multi-repo fleet output is unambiguous, and keeps the ` skip:` /
 // ` dispatch ` substrings intact — downstream consumers (lazyboards) classify

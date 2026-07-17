@@ -85,6 +85,44 @@ func TestRunSpawnsWindowAndPinsName(t *testing.T) {
 	}
 }
 
+// TestRunWindowTicketNamesWindowIndependentOfTicket guards the dispatch path:
+// dispatch passes a plan-file path as Ticket (the implement skill's positional
+// argument) but must still get the uniform `<number>-implement` join key that
+// Lazyboards and dispatch's own matching join on. WindowTicket carries the
+// numeric identity for naming only, without disturbing the command argument.
+func TestRunWindowTicketNamesWindowIndependentOfTicket(t *testing.T) {
+	m := &mockCtrl{session: "work"}
+	opts := noConfigOpts(t)
+	opts.Workflow, opts.Ticket, opts.WindowTicket = "implement", ".plans/42-x.md", "42"
+
+	if err := Run(opts, m); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(m.windows) != 1 {
+		t.Fatalf("expected 1 NewWindow, got %d", len(m.windows))
+	}
+	w := m.windows[0]
+	// The join key comes from WindowTicket, not the (non-numeric) plan path.
+	if w.name != "42-implement" {
+		t.Errorf("name = %q, want 42-implement", w.name)
+	}
+	// The skill argument still comes from Ticket — the plan path must survive.
+	if !strings.Contains(w.cmd, ".plans/42-x.md") {
+		t.Errorf("command must carry the plan path from Ticket, got %q", w.cmd)
+	}
+
+	found := false
+	for _, o := range m.options {
+		if o.target == "work:42-implement" && o.key == "automatic-rename" && o.value == "off" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected automatic-rename off on work:42-implement, got %+v", m.options)
+	}
+}
+
 func TestRunDefaultsToSandbox(t *testing.T) {
 	m := &mockCtrl{session: "work"}
 	opts := noConfigOpts(t)
