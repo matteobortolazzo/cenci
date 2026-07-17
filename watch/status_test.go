@@ -196,6 +196,55 @@ func TestStatusSubcommand_HumanReadable_PermissionDeniedSocketShowsRealError(t *
 	}
 }
 
+// TestStatusSubcommand_HumanReadable_DispatchSectionShowsResolveErrorOnCorruptSnapshot
+// covers #446: the same corrupt-snapshot scenario as
+// TestStatusSubcommand_HumanReadable_CorruptSnapshotShowsRealError above, but
+// for the embedded dispatch-loop section of `cenci status` (rendered via
+// renderDispatchState, the same renderer `dispatch loop status` uses). A
+// daemon that accepts the connection (Dial succeeds -- the daemon IS
+// reachable) but then sends a malformed/truncated NDJSON line must not leave
+// the dispatch section looking identical to "no daemon at all" -- the real
+// ReadSnapshot error must surface as a "resolve_error:" line.
+func TestStatusSubcommand_HumanReadable_DispatchSectionShowsResolveErrorOnCorruptSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "corrupt.sock")
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	// renderHumanStatus dials the socket twice (once for the session
+	// snapshot, once more inside ResolveDispatchState for the embedded
+	// dispatch-loop state), so the fake daemon must keep accepting
+	// connections until the listener is closed, not just serve one.
+	go func() {
+		for {
+			conn, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = conn.Close() }()
+				// Malformed NDJSON: not valid JSON, and never newline-terminated
+				// before the connection closes -- a corrupt/truncated line.
+				_, _ = conn.Write([]byte("{this is not valid json"))
+			}()
+		}
+	}()
+
+	cmd := exec.Command(binaryPath, "status",
+		"-socket", socket,
+		"-event-socket", filepath.Join(dir, "nope-events.sock"))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("status: expected exit 0 even with a corrupt snapshot, got %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "resolve_error:") {
+		t.Errorf("expected the dispatch section to show a %q line with the real decode error, got:\n%s", "resolve_error:", output)
+	}
+}
+
 // TestStatusSubcommand_HumanReadable_ListsLiveSessions drives a real
 // broadcast snapshot (same pattern as TestClose_DryRun_PrintsCloseAndSkipDecisions)
 // through the human `status` overview and asserts the session line renders.

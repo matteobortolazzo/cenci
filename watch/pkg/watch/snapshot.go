@@ -87,6 +87,14 @@ type DispatchState struct {
 	// LastError is the most recent pass's error message, if any. Omitted
 	// from JSON when empty.
 	LastError string `json:"last_error,omitempty"`
+	// ResolveError is set only when ResolveDispatchState's fallback path was
+	// triggered by a non-daemon-unreachable ReadSnapshot error (for example a
+	// corrupt/truncated snapshot or a permission-denied socket) -- a daemon
+	// that was reached but then failed, distinct from no daemon listening at
+	// all. Empty in every other case, including the live-daemon-broadcast
+	// path (StateSnapshot.Dispatch) which never sets it. Omitted from JSON
+	// when empty.
+	ResolveError string `json:"resolve_error,omitempty"`
 }
 
 // StatusSummary counts tracked windows by status.

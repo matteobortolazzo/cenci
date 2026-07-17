@@ -294,5 +294,9 @@ func renderDispatchState(state watch.DispatchState) string {
 		}
 	}
 
+	if state.ResolveError != "" {
+		fmt.Fprintf(&b, "  resolve_error: %s\n", state.ResolveError)
+	}
+
 	return b.String()
 }

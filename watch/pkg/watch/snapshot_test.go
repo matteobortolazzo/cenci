@@ -59,10 +59,10 @@ func TestStateSnapshot_DispatchKeyPresentWhenPopulated(t *testing.T) {
 // -- DispatchState wire shape (#219) ----------------------------------------
 
 // TestDispatchState_ZeroValueOmitsEmptyFields locks in the exact tagged JSON
-// shape for a zero-value DispatchState: Interval, LastRunAt, and LastError
-// carry omitempty and must be absent, while the remaining fields (including
-// the falsy bools and zero ints, which have no omitempty tag) must still be
-// present.
+// shape for a zero-value DispatchState: Interval, LastRunAt, LastError, and
+// ResolveError (#446) carry omitempty and must be absent, while the
+// remaining fields (including the falsy bools and zero ints, which have no
+// omitempty tag) must still be present.
 func TestDispatchState_ZeroValueOmitsEmptyFields(t *testing.T) {
 	data, err := json.Marshal(watch.DispatchState{})
 	if err != nil {
@@ -76,7 +76,8 @@ func TestDispatchState_ZeroValueOmitsEmptyFields(t *testing.T) {
 
 // TestDispatchState_MarshalsAllTaggedFields locks in the exact tagged JSON
 // shape for a fully populated DispatchState, so #220's daemon-side population
-// can rely on this wire format staying stable.
+// can rely on this wire format staying stable. ResolveError (#446) is
+// populated here too, locking in its "resolve_error" wire key.
 func TestDispatchState_MarshalsAllTaggedFields(t *testing.T) {
 	state := watch.DispatchState{
 		Enabled:        true,
@@ -87,13 +88,14 @@ func TestDispatchState_MarshalsAllTaggedFields(t *testing.T) {
 		LastDispatched: 2,
 		LastSkipped:    1,
 		LastError:      "boom",
+		ResolveError:   "read snapshot: unexpected end of JSON input",
 	}
 
 	data, err := json.Marshal(state)
 	if err != nil {
 		t.Fatalf("json.Marshal: %v", err)
 	}
-	want := `{"enabled":true,"daemon_running":true,"interval":"5m","pass_running":true,"last_run_at":"2026-07-13T00:00:00Z","last_dispatched":2,"last_skipped":1,"last_error":"boom"}`
+	want := `{"enabled":true,"daemon_running":true,"interval":"5m","pass_running":true,"last_run_at":"2026-07-13T00:00:00Z","last_dispatched":2,"last_skipped":1,"last_error":"boom","resolve_error":"read snapshot: unexpected end of JSON input"}`
 	if string(data) != want {
 		t.Errorf("populated DispatchState JSON = %s, want %s", data, want)
 	}
