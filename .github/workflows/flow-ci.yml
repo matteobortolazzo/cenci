@@ -27,6 +27,8 @@ jobs:
             flow:
               - 'flow/**'
               - '.github/workflows/flow-ci.yml'
+              - '!flow/AGENTS.md'
+              - '!flow/CLAUDE.md'
 
   test:
     name: flow-test
