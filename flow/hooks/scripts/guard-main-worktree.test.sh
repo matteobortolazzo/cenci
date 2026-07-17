@@ -128,6 +128,33 @@ touch "${DIR}/.claude/config.json"
 run_guard "${DIR}" "{\"tool_input\":{\"file_path\":\"${DIR}/src/foo.txt\"}}"
 assert_exit "non-git dir with config.json" 0
 
+# ── Case 9: configured repo, native Plan Mode storage under the sandbox
+# container's home (/home/dev/.claude/plans/) → allowlisted (#431). The
+# hook only ever sees an absolute file_path, never a real $HOME, so this
+# exercises the container-home shape of that path.
+echo "case: configured repo allows .claude/plans/ writes under container home"
+run_guard "${REPO}" "{\"tool_input\":{\"file_path\":\"/home/dev/.claude/plans/plan.md\"}}"
+assert_exit "container home .claude/plans path" 0
+
+# ── Case 10: configured repo, native Plan Mode storage under an arbitrary
+# host $HOME (not /home/dev) → allowlisted (#431). Proves the match is
+# portable across $HOME values, not hardcoded to the container's home.
+echo "case: configured repo allows .claude/plans/ writes under an arbitrary host home"
+run_guard "${REPO}" "{\"tool_input\":{\"file_path\":\"${TEST_ROOT}/home-host/.claude/plans/plan.md\"}}"
+assert_exit "arbitrary host home .claude/plans path" 0
+
+# ── Case 11: configured repo, source path adjacent to .claude but not under
+# plans/ → still blocked (#431). Guards against an over-broad glob that
+# would allow any .claude*-prefixed path.
+echo "case: configured repo blocks source paths that merely resemble .claude/plans/"
+run_guard "${REPO}" "{\"tool_input\":{\"file_path\":\"${REPO}/src/.claude-notes.md\"}}"
+assert_exit "adjacent-to-.claude source path" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "adjacent-to-.claude source path: stderr should contain BLOCKED"
+fi
+
 # ── Summary ──────────────────────────────────────────────────────────
 echo
 echo "passed: ${PASSES}, failed: ${FAILURES}"

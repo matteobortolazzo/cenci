@@ -7,13 +7,14 @@
 # permission rules cannot enforce this under --dangerously-skip-permissions,
 # but hooks still run.
 # Writes that legitimately live in the main worktree are allowlisted below:
-# saved plans (.plans/), design artifacts (designs/, *.pen, DESIGN.md — the
-# one documented exception, /cenci:design commits directly on main), and temp
-# paths. /cenci:configure writes (.cenci/, .claude/, AGENTS.md, CLAUDE.md,
-# .gitignore, .mcp.json, and everything else it generates) are NOT allowlisted
-# here — configure creates its own feature worktree and ships its changes as
-# a PR like every other skill; see flow/skills/configure/SKILL.md's "Create
-# Worktree" section.
+# saved plans (.plans/), Claude Code's own native Plan Mode storage
+# (.claude/plans/, e.g. ~/.claude/plans/), design artifacts (designs/, *.pen,
+# DESIGN.md — the one documented exception, /cenci:design commits directly
+# on main), and temp paths. /cenci:configure writes (.cenci/, .claude/,
+# AGENTS.md, CLAUDE.md, .gitignore, .mcp.json, and everything else it
+# generates) are NOT allowlisted here — configure creates its own feature
+# worktree and ships its changes as a PR like every other skill; see
+# flow/skills/configure/SKILL.md's "Create Worktree" section.
 
 # Only enforce in repos configured for cenci. .cenci/config.json is canonical;
 # .claude/config.json remains a read-only migration signal. In unconfigured repos this
@@ -37,6 +38,8 @@ case "$FILE_PATH" in
   */.worktrees/* | .worktrees/*) exit 0 ;;
   # Plan persistence (implement Phase 1)
   */.plans/* | .plans/*) exit 0 ;;
+  # Claude Code native Plan Mode storage
+  */.claude/plans/* | .claude/plans/*) exit 0 ;;
   # Temp paths: body files, context bundles, attachments, scratchpads
   /tmp/* | /private/tmp/* | /var/folders/* | */cenci-attachments-*/*) exit 0 ;;
   # Design artifacts live in the main worktree by design (/cenci:design)
