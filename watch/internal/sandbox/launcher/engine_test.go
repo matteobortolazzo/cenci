@@ -112,6 +112,51 @@ func TestEnsureImage_SkipsBuildWhenPresent(t *testing.T) {
 	}
 }
 
+// pluginHintCount returns how many times the plugin-refresh hint appears in
+// the engine's captured output.
+func pluginHintCount(e *Engine) int {
+	return strings.Count(e.Stdout.(*bytes.Buffer).String(), "cenci sandbox update-plugins")
+}
+
+// The pipeline plugins live in home volumes, not image layers, so every
+// user-invoked build must remind exactly once that existing sandboxes refresh
+// via `cenci sandbox update-plugins` (#423).
+func TestBuildBase_PrintsPluginRefreshHint(t *testing.T) {
+	e, _ := buildEngine(t, true)
+
+	if err := e.BuildBase(); err != nil {
+		t.Fatalf("BuildBase: %v", err)
+	}
+
+	if n := pluginHintCount(e); n != 1 {
+		t.Errorf("plugin refresh hint printed %d times, want 1; output:\n%s", n, e.Stdout.(*bytes.Buffer).String())
+	}
+}
+
+func TestBuildMonolith_PrintsPluginRefreshHintOnce(t *testing.T) {
+	e, _ := buildEngine(t, true) // base missing → built implicitly first
+
+	if err := e.BuildMonolith(); err != nil {
+		t.Fatalf("BuildMonolith: %v", err)
+	}
+
+	if n := pluginHintCount(e); n != 1 {
+		t.Errorf("plugin refresh hint printed %d times, want 1; output:\n%s", n, e.Stdout.(*bytes.Buffer).String())
+	}
+}
+
+func TestBuildRepoImage_PrintsPluginRefreshHintOnce(t *testing.T) {
+	e, _ := buildEngine(t, true) // base missing → built implicitly first
+
+	if err := e.BuildRepoImage("/repo", "cenci-sandbox-myrepo:latest"); err != nil {
+		t.Fatalf("BuildRepoImage: %v", err)
+	}
+
+	if n := pluginHintCount(e); n != 1 {
+		t.Errorf("plugin refresh hint printed %d times, want 1; output:\n%s", n, e.Stdout.(*bytes.Buffer).String())
+	}
+}
+
 // TestUpdateAgent_NeverAcceptsAnImageParameter pins the finding-1 fix at the
 // type level: UpdateAgent no longer takes an image argument at all, so a
 // caller literally cannot thread a scope's (possibly malicious, per-repo)
