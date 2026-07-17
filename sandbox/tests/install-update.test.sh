@@ -128,6 +128,21 @@ EOF
     chmod +x "${path}"
 }
 
+# prepare_checkout provides the stable marketplace files used for the managed
+# cenci-installer launcher. A successful plugin refresh must leave that
+# launcher resolvable as well as refreshing the version-pinned watch cache.
+prepare_checkout() {
+    local home="$1" client="$2" checkout
+    case "${client}" in
+        claude) checkout="${home}/.claude/plugins/marketplaces/cenci" ;;
+        codex) checkout="${home}/.codex/plugins/marketplaces/cenci" ;;
+        *) echo "FAIL: unknown test client ${client}" >&2; exit 1 ;;
+    esac
+    mkdir -p "${checkout}"
+    cp "${ROOT}/cenci" "${ROOT}/install.sh" "${checkout}/"
+    chmod +x "${checkout}/cenci" "${checkout}/install.sh"
+}
+
 # setup_layout provisions a fake HOME with a client plugin cache containing
 # a single "updated" cenci binary (current_cenci_binary always finds
 # a binary already in place, so step_cenci_setup's update path calls
@@ -142,6 +157,7 @@ setup_layout() {
     make_tools "${mock_bin}"
     make_logging_pkill_pgrep "${mock_bin}"
     make_client "${mock_bin}" "${client}"
+    prepare_checkout "${home}" "${client}"
 
     local cache_dir manifest_dir new_root new_bin
     if [[ "${client}" == claude ]]; then
@@ -179,6 +195,7 @@ setup_bump_layout() {
     : >"${pkill_log}"
     make_tools "${mock_bin}"
     make_logging_pkill_pgrep "${mock_bin}"
+    prepare_checkout "${home}" "${client}"
 
     local cache_dir manifest_dir
     if [[ "${client}" == claude ]]; then
@@ -300,7 +317,7 @@ assert_not_leaked "sk-test-sentinel-should-not-leak" "${WORK}/last-output"
 assert_not_leaked "ctx7-test-sentinel-should-not-leak" "${LAYOUT_CALL_LOG}"
 assert_not_leaked "ctx7-test-sentinel-should-not-leak" "${WORK}/last-output"
 
-echo "case: update output shows the Claude version transition (old → new), plain wording without a cache"
+echo "case: update output shows the Claude version transition and repairs missing plugins"
 setup_bump_layout bump-claude claude
 run_update
 [[ "${UPDATE_EXIT}" -eq 0 ]]
@@ -309,10 +326,12 @@ if ! grep -q 'Claude: cenci-watch 1.0.0 → 2.0.0' "${WORK}/last-output"; then
     cat "${WORK}/last-output" >&2
     exit 1
 fi
-# The cenci (flow) plugin has no version-pinned cache entry in this layout, so
-# its line must keep the plain wording instead of inventing a version.
-if ! grep -q 'Claude: cenci updated$' "${WORK}/last-output"; then
-    echo "FAIL: expected plain 'Claude: cenci updated' fallback for a plugin without a cache entry" >&2
+# This layout lists only cenci-watch. Reconciliation must add both missing
+# components instead of treating update as a no-op for partially-installed
+# stacks.
+if ! grep -q 'Claude: cenci installed$' "${WORK}/last-output" || \
+    ! grep -q 'Claude: cenci-sandbox installed$' "${WORK}/last-output"; then
+    echo "FAIL: expected update to repair the missing cenci and cenci-sandbox plugins" >&2
     cat "${WORK}/last-output" >&2
     exit 1
 fi

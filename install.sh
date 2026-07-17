@@ -157,21 +157,31 @@ plugin_cmd() {
 }
 
 plugin_installed() {
-	claude plugin list 2>/dev/null | grep -q "$1"
+	local list
+	list="$(claude plugin list 2>/dev/null)" || return 2
+	printf '%s\n' "$list" |
+		grep -Eq "(^|[[:space:]])$1@${MARKETPLACE_NAME}([[:space:]]|$)"
 }
 
 marketplace_registered() {
-	claude plugin marketplace list 2>/dev/null | grep -q "$MARKETPLACE_NAME"
+	local list
+	list="$(claude plugin marketplace list 2>/dev/null)" || return 2
+	printf '%s\n' "$list" |
+		grep -Eq "(^|[[:space:]])${MARKETPLACE_NAME}([[:space:]]|$)"
 }
 
 codex_plugin_installed() {
-	codex plugin list 2>/dev/null |
-		grep -Eq "^$1@${MARKETPLACE_NAME}[[:space:]]+installed"
+	local list
+	list="$(codex plugin list 2>/dev/null)" || return 2
+	printf '%s\n' "$list" |
+		grep -Eq "^$1@${MARKETPLACE_NAME}[[:space:]]+installed([[:space:]]|$)"
 }
 
 codex_marketplace_registered() {
-	codex plugin marketplace list 2>/dev/null |
-		grep -Eq "^${MARKETPLACE_NAME}[[:space:]]"
+	local list
+	list="$(codex plugin marketplace list 2>/dev/null)" || return 2
+	printf '%s\n' "$list" |
+		grep -Eq "^${MARKETPLACE_NAME}([[:space:]]|$)"
 }
 
 # installed_plugin_version <claude|codex> <plugin> — version of the newest
@@ -214,8 +224,8 @@ ok_updated() {
 find_plugin_path() {
 	local rel="$1" f
 	for f in \
-		"$HOME"/.claude/plugins/marketplaces/*/"$rel" \
-		"$HOME"/.codex/plugins/marketplaces/*/"$rel"; do
+		"$HOME/.claude/plugins/marketplaces/$MARKETPLACE_NAME/$rel" \
+		"$HOME/.codex/plugins/marketplaces/$MARKETPLACE_NAME/$rel"; do
 		[ -e "$f" ] && { printf '%s\n' "$f"; return 0; }
 	done
 	case "$rel" in
@@ -429,20 +439,36 @@ run_doctor() {
 	say "  ${BOLD}Installed stack components${RESET}"
 	if [ "$HAS_CLAUDE" -eq 1 ]; then
 		for p in $ALL_PLUGINS; do
-			if plugin_installed "$p"; then ok "Claude: $p"; else warn "Claude: $p not installed"; fi
+			if plugin_installed "$p"; then
+				ok "Claude: $p"
+			elif [ "$?" -eq 2 ]; then
+				fail "Claude: could not query installed plugins"
+				DOCTOR_FAILED=1
+				break
+			else
+				warn "Claude: $p not installed"
+			fi
 		done
 	fi
 	if [ "$HAS_CODEX" -eq 1 ]; then
 		for p in $ALL_PLUGINS; do
-			if codex_plugin_installed "$p"; then ok "Codex: $p"; else warn "Codex: $p not installed"; fi
+			if codex_plugin_installed "$p"; then
+				ok "Codex: $p"
+			elif [ "$?" -eq 2 ]; then
+				fail "Codex: could not query installed plugins"
+				DOCTOR_FAILED=1
+				break
+			else
+				warn "Codex: $p not installed"
+			fi
 		done
 	fi
 
 	say ""
 	say "  ${BOLD}Launchers and container image${RESET}"
-	check "cenci-installer utility" optional "$launcher_hint" command -v cenci-installer
+	check "cenci-installer utility" optional "$launcher_hint" test -x "$HOME/.local/bin/cenci-installer"
 	if [ "$HAS_CLAUDE" -eq 1 ] || [ "$HAS_CODEX" -eq 1 ]; then
-		check "cn launcher (cenci open)" optional "$launcher_hint" command -v cn
+		check "cn launcher (cenci open)" optional "$launcher_hint" test -x "$HOME/.local/bin/cn"
 	fi
 	if runtime="$(container_runtime 2>/dev/null)"; then
 		check "cenci-sandbox:latest image" optional "$image_hint" \
@@ -452,7 +478,7 @@ run_doctor() {
 	say ""
 	say "  ${BOLD}Board orchestration (optional)${RESET}"
 	local lb_ver
-	if lazyboards_binary >/dev/null 2>&1; then
+	if lazyboards_managed_binary >/dev/null 2>&1; then
 		if lb_ver="$(lazyboards_installed_version)" && [ -n "$lb_ver" ]; then
 			ok "lazyboards installed (v${lb_ver})"
 		else
@@ -463,6 +489,11 @@ run_doctor() {
 		else
 			warn "no board config — $seed_hint"
 		fi
+		if ! verify_lazyboards_resolution; then
+			warn "lazyboards PATH resolution needs attention"
+		fi
+	elif lazyboards_path_binary >/dev/null 2>&1; then
+		warn "unmanaged lazyboards found at $(lazyboards_path_binary) — reconcile it with: cenci update --lazyboards"
 	else
 		warn "lazyboards not installed — $lazyboards_hint"
 	fi
@@ -485,7 +516,8 @@ selected() { case " $SELECTED " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 # ------------------------------------------------------------ install steps ----
 
 step_marketplace() {
-	step "Registering the cenci marketplace"
+	local state
+	step "Reconciling the cenci marketplace"
 	if [ "$HAS_CLAUDE" -eq 0 ]; then
 		:
 	elif marketplace_registered; then
@@ -494,112 +526,104 @@ step_marketplace() {
 		# scripts) sees files added since the last update.
 		if claude plugin marketplace update "$MARKETPLACE_NAME" >/dev/null 2>&1; then
 			ok "Claude: marketplace '$MARKETPLACE_NAME' refreshed"
+			CLAUDE_MARKETPLACE_READY=1
 		else
-			warn "Claude: could not refresh marketplace '$MARKETPLACE_NAME' — it may be stale. Run manually: claude plugin marketplace update $MARKETPLACE_NAME"
+			fail "Claude: could not refresh marketplace '$MARKETPLACE_NAME'. Run manually: claude plugin marketplace update $MARKETPLACE_NAME"
+			INSTALL_FAILED=1
 		fi
-		CLAUDE_MARKETPLACE_READY=1
-	elif claude plugin marketplace add "$MARKETPLACE_REPO" >/dev/null 2>&1; then
-		ok "Claude: registered $MARKETPLACE_REPO"
-		CLAUDE_MARKETPLACE_READY=1
 	else
-		die "could not register the marketplace. Run manually to see the error:
+		state=$?
+		if [ "$state" -eq 2 ]; then
+			fail "Claude: could not query registered marketplaces"
+			INSTALL_FAILED=1
+		elif claude plugin marketplace add "$MARKETPLACE_REPO" >/dev/null 2>&1; then
+			ok "Claude: registered $MARKETPLACE_REPO"
+			CLAUDE_MARKETPLACE_READY=1
+		else
+			fail "Claude: could not register the marketplace. Run manually:
   claude plugin marketplace add $MARKETPLACE_REPO"
+			INSTALL_FAILED=1
+		fi
 	fi
 
 	[ "$HAS_CODEX" -eq 1 ] || return 0
 	if codex_marketplace_registered; then
 		if codex plugin marketplace upgrade "$MARKETPLACE_NAME" >/dev/null 2>&1; then
 			ok "Codex: marketplace '$MARKETPLACE_NAME' refreshed"
+			CODEX_MARKETPLACE_READY=1
 		else
-			warn "Codex: could not refresh marketplace '$MARKETPLACE_NAME' — it may be stale. Run manually: codex plugin marketplace upgrade $MARKETPLACE_NAME"
+			fail "Codex: could not refresh marketplace '$MARKETPLACE_NAME'. Run manually: codex plugin marketplace upgrade $MARKETPLACE_NAME"
+			INSTALL_FAILED=1
 		fi
-		CODEX_MARKETPLACE_READY=1
-	elif codex plugin marketplace add "$MARKETPLACE_REPO" >/dev/null 2>&1; then
-		ok "Codex: registered $MARKETPLACE_REPO"
-		CODEX_MARKETPLACE_READY=1
 	else
-		fail "Codex marketplace registration failed. Run manually: codex plugin marketplace add $MARKETPLACE_REPO"
-		INSTALL_FAILED=1
+		state=$?
+		if [ "$state" -eq 2 ]; then
+			fail "Codex: could not query registered marketplaces"
+			INSTALL_FAILED=1
+		elif codex plugin marketplace add "$MARKETPLACE_REPO" >/dev/null 2>&1; then
+			ok "Codex: registered $MARKETPLACE_REPO"
+			CODEX_MARKETPLACE_READY=1
+		else
+			fail "Codex marketplace registration failed. Run manually: codex plugin marketplace add $MARKETPLACE_REPO"
+			INSTALL_FAILED=1
+		fi
 	fi
 }
 
-step_install_plugins() {
-	step "Installing plugins"
+step_reconcile_plugins() {
+	local p old state
+	step "Reconciling plugins"
 	if [ "$CLAUDE_MARKETPLACE_READY" -eq 1 ]; then
 		for p in $SELECTED; do
 			if plugin_installed "$p"; then
-				ok "Claude: $p already installed (run 'cenci update' to update)"
-				continue
-			fi
-			if plugin_cmd install "$p"; then
-				ok "Claude: $p installed"
+				old="$(installed_plugin_version claude "$p")"
+				if plugin_cmd update "$p"; then
+					ok_updated "Claude" "$p" "$old" "$(installed_plugin_version claude "$p")"
+				else
+					fail "Claude: $p failed to update. Run manually: claude plugin update $p@$MARKETPLACE_NAME"
+					INSTALL_FAILED=1
+				fi
 			else
-				fail "Claude: $p failed to install. Run manually: claude plugin install $p@$MARKETPLACE_NAME"
-				INSTALL_FAILED=1
+				state=$?
+				if [ "$state" -eq 2 ]; then
+					fail "Claude: could not query installed plugins"
+					INSTALL_FAILED=1
+					break
+				elif plugin_cmd install "$p"; then
+					ok "Claude: $p installed"
+				else
+					fail "Claude: $p failed to install. Run manually: claude plugin install $p@$MARKETPLACE_NAME"
+					INSTALL_FAILED=1
+				fi
 			fi
 		done
 	fi
 
-	[ "$CODEX_MARKETPLACE_READY" -eq 1 ] || return 0
-	for p in $SELECTED; do
-		if codex_plugin_installed "$p"; then
-			ok "Codex: $p already installed (run 'cenci update' to update)"
-			continue
-		fi
-		if codex plugin add "$p@$MARKETPLACE_NAME" >/dev/null 2>&1; then
-			ok "Codex: $p installed"
-		else
-			fail "Codex: $p failed to install. Run manually: codex plugin add $p@$MARKETPLACE_NAME"
-			INSTALL_FAILED=1
-		fi
-	done
-}
-
-step_update_plugins() {
-	local p old
-	step "Updating plugins"
-	if [ "$HAS_CLAUDE" -eq 1 ]; then
-		claude plugin marketplace update "$MARKETPLACE_NAME" >/dev/null 2>&1 || true
+	if [ "$CODEX_MARKETPLACE_READY" -eq 1 ]; then
 		for p in $SELECTED; do
-			if ! plugin_installed "$p"; then
-				warn "Claude: $p is not installed — skipping (run './install.sh' to install it)"
-				continue
-			fi
-			old="$(installed_plugin_version claude "$p")"
-			if plugin_cmd update "$p"; then
-				ok_updated "Claude" "$p" "$old" "$(installed_plugin_version claude "$p")"
+			if codex_plugin_installed "$p"; then
+				old="$(installed_plugin_version codex "$p")"
+				if codex plugin add "$p@$MARKETPLACE_NAME" >/dev/null 2>&1; then
+					ok_updated "Codex" "$p" "$old" "$(installed_plugin_version codex "$p")"
+				else
+					fail "Codex: $p failed to update. Run manually: codex plugin add $p@$MARKETPLACE_NAME"
+					INSTALL_FAILED=1
+				fi
 			else
-				fail "Claude: $p failed to update. Run manually: claude plugin update $p@$MARKETPLACE_NAME"
-				INSTALL_FAILED=1
+				state=$?
+				if [ "$state" -eq 2 ]; then
+					fail "Codex: could not query installed plugins"
+					INSTALL_FAILED=1
+					break
+				elif codex plugin add "$p@$MARKETPLACE_NAME" >/dev/null 2>&1; then
+					ok "Codex: $p installed"
+				else
+					fail "Codex: $p failed to install. Run manually: codex plugin add $p@$MARKETPLACE_NAME"
+					INSTALL_FAILED=1
+				fi
 			fi
 		done
 	fi
-
-	[ "$HAS_CODEX" -eq 1 ] || return 0
-	if ! codex_marketplace_registered; then
-		warn "Codex marketplace is not registered — skipping Codex updates (run './install.sh' to install it)"
-		return 0
-	fi
-	if ! codex plugin marketplace upgrade "$MARKETPLACE_NAME" >/dev/null 2>&1; then
-		fail "Codex marketplace update failed. Run manually: codex plugin marketplace upgrade $MARKETPLACE_NAME"
-		INSTALL_FAILED=1
-		return 0
-	fi
-	for p in $SELECTED; do
-		if ! codex_plugin_installed "$p"; then
-			warn "Codex: $p is not installed — skipping"
-			continue
-		fi
-		# `plugin add` is idempotent and refreshes the installed cache from the
-		# newly upgraded marketplace snapshot.
-		old="$(installed_plugin_version codex "$p")"
-		if codex plugin add "$p@$MARKETPLACE_NAME" >/dev/null 2>&1; then
-			ok_updated "Codex" "$p" "$old" "$(installed_plugin_version codex "$p")"
-		else
-			fail "Codex: $p failed to update. Run manually: codex plugin add $p@$MARKETPLACE_NAME"
-			INSTALL_FAILED=1
-		fi
-	done
 }
 
 # Post-install steps must only run for plugins that actually got installed —
@@ -620,12 +644,18 @@ prune_selected_to_installed() {
 # a real file the user put there.
 link_launcher() {
 	local name="$1" target="$2" dest="$HOME/.local/bin/$1"
-	mkdir -p "$HOME/.local/bin"
+	if ! mkdir -p "$HOME/.local/bin"; then
+		fail "could not create $HOME/.local/bin for $name"
+		return 1
+	fi
 	if [ -e "$dest" ] && [ ! -L "$dest" ]; then
 		warn "$dest exists and is not a symlink — left untouched"
 		return 1
 	fi
-	ln -sf "$target" "$dest"
+	if ! ln -sf "$target" "$dest"; then
+		fail "could not link $name at $dest"
+		return 1
+	fi
 	ok "linked $name → ~/.local/bin/$name"
 }
 
@@ -634,10 +664,13 @@ step_cli_setup() {
 
 	local cli
 	if ! cli=$(find_plugin_path "cenci"); then
-		warn "could not find the cenci installer command in the marketplace checkout — re-run the installer after refreshing the marketplace"
+		fail "could not find the cenci installer command in the marketplace checkout — re-run the installer after refreshing the marketplace"
+		INSTALL_FAILED=1
 		return 0
 	fi
-	link_launcher cenci-installer "$cli" || true
+	if ! link_launcher cenci-installer "$cli"; then
+		INSTALL_FAILED=1
+	fi
 }
 
 step_sandbox_setup() {
@@ -648,7 +681,9 @@ step_sandbox_setup() {
 	# `cn` is its one alias: a symlink chained through the bootstrap-maintained
 	# ~/.local/bin/cenci link, so it keeps resolving across version bumps (and
 	# becomes valid on the first agent session even if created dangling here).
-	link_launcher cn "$HOME/.local/bin/cenci" || true
+	if ! link_launcher cn "$HOME/.local/bin/cenci"; then
+		INSTALL_FAILED=1
+	fi
 
 	# The cenci-sand bash launcher is gone. Never create it — but a stale link
 	# from a previous install is repointed at the cenci binary, whose argv[0]
@@ -750,10 +785,12 @@ current_cenci_binary() {
 	fi
 	if [ -f "$bootstrap" ]; then
 		if [ "$root_var" = PLUGIN_ROOT ]; then
-			PLUGIN_ROOT="$root" sh "$bootstrap" >/dev/null 2>&1 || true
+			PLUGIN_ROOT="$root" bash "$bootstrap" || return 1
 		else
-			CLAUDE_PLUGIN_ROOT="$root" sh "$bootstrap" >/dev/null 2>&1 || true
+			CLAUDE_PLUGIN_ROOT="$root" bash "$bootstrap" || return 1
 		fi
+	else
+		return 1
 	fi
 	cached_cenci_binary
 }
@@ -786,8 +823,8 @@ restart_cenci_daemon() {
 restart_cenci_daemon_fallback() {
 	local bin="$1" i pid
 	if ! have pkill || ! have pgrep; then
-		warn "pkill/pgrep unavailable — restart cenci manually to finish the update"
-		return 0
+		fail "pkill/pgrep unavailable — restart cenci manually to finish the update"
+		return 1
 	fi
 
 	pkill -TERM -f '[/]cenci daemon( start)?$' >/dev/null 2>&1 || true
@@ -798,13 +835,12 @@ restart_cenci_daemon_fallback() {
 	done
 	if pgrep -f '[/]cenci daemon( start)?$' >/dev/null 2>&1; then
 		fail "the previous cenci daemon did not stop; restart it manually"
-		INSTALL_FAILED=1
-		return 0
+		return 1
 	fi
 
 	if [ -z "$bin" ] || [ ! -x "$bin" ]; then
 		warn "no usable cenci binary to restart — the next agent session will bootstrap it"
-		return 0
+		return 1
 	fi
 
 	nohup "$bin" daemon >/dev/null 2>&1 &
@@ -814,7 +850,7 @@ restart_cenci_daemon_fallback() {
 		ok "restarted cenci with the updated binary"
 	else
 		fail "the updated cenci daemon did not stay running"
-		INSTALL_FAILED=1
+		return 1
 	fi
 }
 
@@ -822,10 +858,11 @@ step_cenci_watch_setup() {
 	selected cenci-watch || return 0
 	step "Setting up cenci"
 	local cache_bin=""
-	if [ "$MODE" = update ]; then
-		cache_bin="$(current_cenci_binary || true)"
-	else
-		cache_bin="$(cached_cenci_binary || true)"
+	cache_bin="$(current_cenci_binary || true)"
+	if [ -z "$cache_bin" ]; then
+		fail "could not provision the cenci binary from the installed cenci-watch plugin"
+		INSTALL_FAILED=1
+		return 0
 	fi
 
 	ok "the binary and daemon self-bootstrap on your first agent session"
@@ -834,17 +871,13 @@ step_cenci_watch_setup() {
 	if [ "$OS" != macos ]; then
 		setup_cenci_linux_path "$cache_bin"
 		setup_cenci_linux_widgets
-		if [ "$MODE" = update ] && [ -n "$cache_bin" ]; then
-			restart_cenci_daemon "$cache_bin"
-		elif [ "$MODE" = update ]; then
-			warn "updated cenci binary is not available yet; the next agent session will bootstrap it"
-		fi
+			if [ "$MODE" = update ] && ! restart_cenci_daemon "$cache_bin"; then
+				INSTALL_FAILED=1
+			fi
 		return 0
 	fi
-	if [ "$MODE" = update ] && [ -n "$cache_bin" ]; then
-		restart_cenci_daemon "$cache_bin"
-	elif [ "$MODE" = update ]; then
-		warn "updated cenci binary is not available yet; the next agent session will bootstrap it"
+	if [ "$MODE" = update ] && ! restart_cenci_daemon "$cache_bin"; then
+		INSTALL_FAILED=1
 	fi
 
 	# macOS menu bar (SwiftBar) — optional, and the fiddliest manual step, so
@@ -885,9 +918,12 @@ setup_cenci_linux_path() {
 	# re-points it on version bumps, so pinning the current cache path is fine;
 	# if the binary isn't cached yet, the first agent session creates the link.
 	if [ -n "$cache_bin" ]; then
-		link_launcher cenci "$cache_bin" || true
+		if ! link_launcher cenci "$cache_bin"; then
+			INSTALL_FAILED=1
+		fi
 	else
-		say "  ${DIM}cenci binary not in the plugin cache yet — the first agent session links it onto ~/.local/bin automatically${RESET}"
+		fail "cenci binary not available after plugin bootstrap"
+		INSTALL_FAILED=1
 	fi
 
 	case ":$PATH:" in
@@ -994,13 +1030,18 @@ setup_cenci_linux_widgets() {
 # The installer can install and update it, but never by default: install is
 # opt-in (prompt or --lazyboards), update only refreshes an existing install.
 
-lazyboards_binary() {
-	if have lazyboards; then
-		command -v lazyboards
-		return 0
-	fi
+lazyboards_managed_binary() {
 	[ -x "$HOME/.local/bin/lazyboards" ] || return 1
 	printf '%s\n' "$HOME/.local/bin/lazyboards"
+}
+
+lazyboards_path_binary() {
+	have lazyboards || return 1
+	command -v lazyboards
+}
+
+lazyboards_binary() {
+	lazyboards_managed_binary || lazyboards_path_binary
 }
 
 # lazyboards_latest_version resolves the newest release by following the
@@ -1022,7 +1063,7 @@ lazyboards_latest_version() {
 # build may carry a leading v).
 lazyboards_installed_version() {
 	local bin
-	bin="$(lazyboards_binary)" || return 1
+	bin="$(lazyboards_managed_binary)" || return 1
 	run_bounded 5 "$bin" --version 2>/dev/null | sed -n '1s/^lazyboards v\{0,1\}//p'
 }
 
@@ -1030,7 +1071,7 @@ lazyboards_installed_version() {
 # this platform, verify its sha256 against the release's checksums.txt, and
 # install the binary at ~/.local/bin/lazyboards.
 install_lazyboards_binary() {
-	local ver="$1" goos sumtool archive url_base tmp sum
+	local ver="$1" goos sumtool archive url_base tmp sum dest_dir dest staged staged_ver
 	case "$OS" in
 	macos) goos=darwin ;;
 	*) goos=linux ;;
@@ -1069,14 +1110,60 @@ install_lazyboards_binary() {
 		rm -rf "$tmp"
 		return 1
 	fi
-	mkdir -p "$HOME/.local/bin"
-	if ! cp "$tmp/lazyboards" "$HOME/.local/bin/lazyboards" || ! chmod +x "$HOME/.local/bin/lazyboards"; then
-		fail "lazyboards: could not install to ~/.local/bin/lazyboards"
+	dest_dir="$HOME/.local/bin"
+	dest="$dest_dir/lazyboards"
+	if [ -L "$dest" ] || { [ -e "$dest" ] && [ ! -f "$dest" ]; }; then
+		fail "lazyboards: $dest exists with an unsupported file type — left untouched"
+		rm -rf "$tmp"
+		return 1
+	fi
+	if ! mkdir -p "$dest_dir"; then
+		fail "lazyboards: could not create $dest_dir"
+		rm -rf "$tmp"
+		return 1
+	fi
+	staged="$(mktemp "$dest_dir/.lazyboards.XXXXXX")" || staged=""
+	if [ -z "$staged" ] || [ ! -f "$staged" ]; then
+		fail "lazyboards: could not create a staged binary in $dest_dir"
+		rm -rf "$tmp"
+		return 1
+	fi
+	if ! cp "$tmp/lazyboards" "$staged" || ! chmod +x "$staged"; then
+		fail "lazyboards: could not stage the verified binary"
+		rm -f "$staged"
+		rm -rf "$tmp"
+		return 1
+	fi
+	staged_ver="$(run_bounded 5 "$staged" --version 2>/dev/null | sed -n '1s/^lazyboards v\{0,1\}//p')"
+	if [ "$staged_ver" != "$ver" ]; then
+		fail "lazyboards: staged binary reports '${staged_ver:-no version}', expected $ver"
+		rm -f "$staged"
+		rm -rf "$tmp"
+		return 1
+	fi
+	if ! mv -f "$staged" "$dest"; then
+		fail "lazyboards: could not atomically install to $dest"
+		rm -f "$staged"
 		rm -rf "$tmp"
 		return 1
 	fi
 	rm -rf "$tmp"
 	ok "lazyboards v${ver} installed → ~/.local/bin/lazyboards"
+}
+
+verify_lazyboards_resolution() {
+	local managed resolved
+	managed="$(lazyboards_managed_binary)" || return 1
+	resolved="$(lazyboards_path_binary || true)"
+	if [ -z "$resolved" ]; then
+		fail "lazyboards installed at $managed, but ~/.local/bin is not on PATH"
+		return 1
+	fi
+	if [ "$resolved" != "$managed" ]; then
+		fail "$resolved shadows the managed lazyboards at $managed — remove the older copy or put ~/.local/bin first on PATH"
+		return 1
+	fi
+	ok "lazyboards command resolves to the managed binary"
 }
 
 # seed_lazyboards_config copies the packaged default board config (columns
@@ -1104,7 +1191,7 @@ seed_lazyboards_config() {
 }
 
 step_lazyboards_setup() {
-	local installed_ver latest_ver
+	local installed_ver latest_ver path_bin="" present=0
 	# An explicit skip applies in every mode, including updates of an existing
 	# binary. Flags must override auto-detection rather than merely suppressing
 	# a first-time install.
@@ -1112,20 +1199,14 @@ step_lazyboards_setup() {
 		return 0
 	fi
 	installed_ver="$(lazyboards_installed_version || true)"
+	path_bin="$(lazyboards_path_binary || true)"
+	if lazyboards_managed_binary >/dev/null 2>&1 || [ -n "$path_bin" ]; then
+		present=1
+	fi
 
-	if [ "$MODE" = update ]; then
-		# Updates only refresh an existing install (or honor an explicit --lazyboards).
-		if ! lazyboards_binary >/dev/null 2>&1 && [ "$LAZYBOARDS" != yes ]; then
-			return 0
-		fi
-	elif lazyboards_binary >/dev/null 2>&1; then
-		step "Setting up lazyboards (board orchestration)"
-		ok "lazyboards already installed (run 'cenci update' to update)"
-		seed_lazyboards_config
+	if [ "$present" -eq 0 ] && [ "$LAZYBOARDS" = no ]; then
 		return 0
-	elif [ "$LAZYBOARDS" = no ]; then
-		return 0
-	elif [ "$LAZYBOARDS" = ask ]; then
+	elif [ "$present" -eq 0 ] && [ "$LAZYBOARDS" = ask ]; then
 		if ! ask_yn "Install lazyboards (kanban board that dispatches the cenci workflow)?" y; then
 			say "  ${DIM}skipped — install later with: cenci-installer --lazyboards${RESET}"
 			return 0
@@ -1145,6 +1226,9 @@ step_lazyboards_setup() {
 		return 0
 	fi
 	seed_lazyboards_config
+	if ! verify_lazyboards_resolution; then
+		INSTALL_FAILED=1
+	fi
 }
 
 step_cenci_notes() {
@@ -1168,11 +1252,7 @@ final_summary() {
 		say "  ${YELLOW}No plugins ended up installed.${RESET}"
 		return
 	fi
-	if [ "$MODE" = update ]; then
-		say "  Updated: ${BOLD}${SELECTED}${RESET}"
-	else
-		say "  Installed: ${BOLD}${SELECTED}${RESET}"
-	fi
+	say "  Reconciled: ${BOLD}${SELECTED}${RESET}"
 	say ""
 	say "  Try it out:"
 	if selected cenci-sandbox; then
@@ -1277,7 +1357,8 @@ fi
 have_supported_client || die "no supported client found. Install Claude Code, Codex, or both, then re-run this script."
 
 if [ "$MODE" = update ]; then
-	step_update_plugins
+	step_marketplace
+	step_reconcile_plugins
 	prune_selected_to_installed
 	step_cli_setup
 	step_sandbox_setup
@@ -1293,7 +1374,7 @@ run_doctor || {
 	fi
 }
 step_marketplace
-step_install_plugins
+step_reconcile_plugins
 prune_selected_to_installed
 step_cli_setup
 step_sandbox_setup

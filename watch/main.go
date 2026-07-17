@@ -136,45 +136,80 @@ func runSocketDir() {
 
 // -- doctor / update ------------------------------------------------------
 
-// wrapperBinaryName is the curl-and-exec front door installed on user
+// wrapperBinaryName is the marketplace-backed front door installed on user
 // machines (see the repo-root `cenci` script), which routes
 // "doctor"/"update" into install.sh's MODE handling. `cenci
 // doctor`/`update` shell out to it rather than reimplementing installer logic
 // in Go, so there is exactly one implementation of each mode. It is installed
-// on PATH as "cenci-installer" (not "cenci") to avoid colliding with the
+// at ~/.local/bin/cenci-installer (not "cenci") to avoid colliding with the
 // "cenci" launcher symlink that points at this very daemon binary.
 const wrapperBinaryName = "cenci-installer"
 
 // runDoctor implements `cenci doctor`: shells out to the installed
 // `cenci doctor` wrapper.
 func runDoctor(args []string) {
-	runWrapperMode("doctor", args)
+	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+	_ = fs.Parse(args)
+	rejectExtra("cenci doctor", fs.Args())
+	runWrapperMode("doctor", nil)
 }
 
 // runUpdate implements `cenci update`: shells out to the installed
 // `cenci update` wrapper.
 func runUpdate(args []string) {
-	runWrapperMode("update", args)
+	fs := flag.NewFlagSet("update", flag.ExitOnError)
+	yes := fs.Bool("yes", false, "accept defaults without prompting")
+	shortYes := fs.Bool("y", false, "accept defaults without prompting")
+	build := fs.Bool("build", false, "build the sandbox image")
+	noBuild := fs.Bool("no-build", false, "skip the sandbox image build")
+	lazyboards := fs.Bool("lazyboards", false, "install or reconcile lazyboards")
+	noLazyboards := fs.Bool("no-lazyboards", false, "skip lazyboards reconciliation")
+	_ = fs.Parse(args)
+	rejectExtra("cenci update", fs.Args())
+	if *build && *noBuild {
+		fmt.Fprintln(os.Stderr, "cenci update: --build and --no-build conflict")
+		os.Exit(2)
+	}
+	if *lazyboards && *noLazyboards {
+		fmt.Fprintln(os.Stderr, "cenci update: --lazyboards and --no-lazyboards conflict")
+		os.Exit(2)
+	}
+	forward := make([]string, 0, 3)
+	if *yes || *shortYes {
+		forward = append(forward, "--yes")
+	}
+	if *build {
+		forward = append(forward, "--build")
+	} else if *noBuild {
+		forward = append(forward, "--no-build")
+	}
+	if *lazyboards {
+		forward = append(forward, "--lazyboards")
+	} else if *noLazyboards {
+		forward = append(forward, "--no-lazyboards")
+	}
+	runWrapperMode("update", forward)
 }
 
 // runWrapperMode is the shared implementation behind runDoctor/runUpdate: it
-// takes no flags or positionals of its own (mirroring the trailing-positional
-// guard used by the other verbs above), resolves wrapperBinaryName from PATH,
-// and runs it with mode as its sole argument, stdio inherited so prompts and
-// output pass straight through, propagating the child's exit code. A missing
-// wrapper is a clear, non-zero-exit error rather than a silent no-op.
+// resolves the installer from the managed user path rather than accepting a
+// same-named PATH shadow, then runs it with inherited stdio and propagates its
+// exit code.
 func runWrapperMode(mode string, args []string) {
-	fs := flag.NewFlagSet(mode, flag.ExitOnError)
-	_ = fs.Parse(args)
-	rejectExtra(fmt.Sprintf("cenci %s", mode), fs.Args())
-
-	path, err := exec.LookPath(wrapperBinaryName)
+	home, err := os.UserHomeDir()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "cenci %s: %s not found on PATH — re-run the cenci installer to create it\n", mode, wrapperBinaryName)
+		fmt.Fprintf(os.Stderr, "cenci %s: resolve home directory: %v\n", mode, err)
+		os.Exit(1)
+	}
+	path := filepath.Join(home, ".local", "bin", wrapperBinaryName)
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		fmt.Fprintf(os.Stderr, "cenci %s: managed installer %s is missing or not executable — re-run the cenci installer\n", mode, path)
 		os.Exit(1)
 	}
 
-	cmd := exec.Command(path, mode)
+	cmdArgs := append([]string{mode}, args...)
+	cmd := exec.Command(path, cmdArgs...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
