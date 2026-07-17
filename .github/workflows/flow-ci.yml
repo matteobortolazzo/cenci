@@ -29,6 +29,7 @@ jobs:
               - '.github/workflows/flow-ci.yml'
               - '!flow/AGENTS.md'
               - '!flow/CLAUDE.md'
+              - '!flow/README.md'
 
   test:
     name: flow-test

@@ -30,6 +30,7 @@ jobs:
               - '.github/workflows/watch-ci.yml'
               - '!watch/AGENTS.md'
               - '!watch/CLAUDE.md'
+              - '!watch/README.md'
 
   test:
     name: watch-test
