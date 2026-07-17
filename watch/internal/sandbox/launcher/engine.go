@@ -379,6 +379,29 @@ func (e *Engine) EnsureAgentVolume(agent string) error {
 	return nil
 }
 
+// pluginRefreshCommand returns the in-container ttl-0 plugin refresh command
+// (bypassing the entrypoint's 30-minute stamp) for agent, shared by both the
+// running-container and one-shot-volume update paths.
+func pluginRefreshCommand(agent string) string {
+	if agent == "codex" {
+		return `source /usr/local/bin/lib/migrate-settings.sh && provision_codex_plugins /home/dev/.codex cenci matteobortolazzo/cenci cenci cenci-watch && update_codex_plugins /home/dev/.codex cenci 0 cenci cenci-watch`
+	}
+	return `source /usr/local/bin/lib/migrate-settings.sh && heal_plugin_installs /home/dev/.claude/plugins && provision_plugins /home/dev/.claude/plugins cenci matteobortolazzo/cenci cenci cenci-watch && update_plugins /home/dev/.claude/plugins cenci 0 cenci cenci-watch`
+}
+
+// refreshRunningContainerPlugins execs agent's ttl-0 plugin refresh command
+// into the already-running containerName. Shared by UpdatePlugins' running
+// path and RefreshRunningPlugins.
+func (e *Engine) refreshRunningContainerPlugins(agent, containerName string) error {
+	_, _ = fmt.Fprintf(e.Stdout, "Updating plugins in running '%s'...\n", containerName)
+	cmd := e.command("exec", "-u", "dev", containerName, "/bin/bash", "-c", pluginRefreshCommand(agent))
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s exec %s: %w", e.Runtime, containerName, err)
+	}
+	_, _ = fmt.Fprintln(e.Stdout, "Done. Agent sessions pick up the update on their next start.")
+	return nil
+}
+
 // UpdatePlugins provisions anything missing, then refreshes plugins with
 // ttl 0 (bypassing the entrypoint's 30-minute stamp) inside the running
 // container, or in a one-shot container against the home volume.
@@ -386,34 +409,52 @@ func (e *Engine) UpdatePlugins(agent string, scope Scope) error {
 	if err := ValidateAgent(agent); err != nil {
 		return err
 	}
-	var updateCmd string
-	if agent == "codex" {
-		updateCmd = `source /usr/local/bin/lib/migrate-settings.sh && provision_codex_plugins /home/dev/.codex cenci matteobortolazzo/cenci cenci cenci-watch && update_codex_plugins /home/dev/.codex cenci 0 cenci cenci-watch`
-	} else {
-		updateCmd = `source /usr/local/bin/lib/migrate-settings.sh && heal_plugin_installs /home/dev/.claude/plugins && provision_plugins /home/dev/.claude/plugins cenci matteobortolazzo/cenci cenci cenci-watch && update_plugins /home/dev/.claude/plugins cenci 0 cenci cenci-watch`
-	}
 
 	running, err := e.containerRunning(scope.ContainerName)
 	if err != nil {
 		return err
 	}
 	if running {
-		_, _ = fmt.Fprintf(e.Stdout, "Updating plugins in running '%s'...\n", scope.ContainerName)
-		cmd := e.command("exec", "-u", "dev", scope.ContainerName, "/bin/bash", "-c", updateCmd)
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("%s exec %s: %w", e.Runtime, scope.ContainerName, err)
-		}
-		_, _ = fmt.Fprintln(e.Stdout, "Done. Agent sessions pick up the update on their next start.")
-		return nil
+		return e.refreshRunningContainerPlugins(agent, scope.ContainerName)
 	}
 
 	_, _ = fmt.Fprintf(e.Stdout, "Updating plugins in volume '%s'...\n", scope.VolumeName)
-	args := e.maintenanceRunArgs(agent, scope, updateCmd)
+	args := e.maintenanceRunArgs(agent, scope, pluginRefreshCommand(agent))
 	if err := e.command(args...).Run(); err != nil {
 		return fmt.Errorf("%s run (update-plugins): %w", e.Runtime, err)
 	}
 	_, _ = fmt.Fprintln(e.Stdout, "Done.")
 	return nil
+}
+
+// RefreshRunningPlugins refreshes plugins in every currently running sandbox
+// container on the host (not scoped to the caller's repo, matching the
+// scope-independence of the daemon-restart auto-behavior it mirrors),
+// inferring each container's agent from its name. Best-effort: a single
+// container's failure doesn't stop the rest from refreshing — every failure
+// is aggregated into one returned error via errors.Join. Zero running
+// containers is not an error; a note is printed instead.
+func (e *Engine) RefreshRunningPlugins() error {
+	names, err := sandbox.RunningSandboxContainers(e.Runtime, "")
+	if err != nil {
+		return err
+	}
+	if len(names) == 0 {
+		_, _ = fmt.Fprintln(e.Stdout, "No running sandbox containers to refresh.")
+		return nil
+	}
+
+	var errs []error
+	for _, name := range names {
+		agent, ok := sandbox.AgentForContainerName(name)
+		if !ok {
+			continue
+		}
+		if err := e.refreshRunningContainerPlugins(agent, name); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // resolveHostBinary resolves name from PATH and follows symlinks to the real

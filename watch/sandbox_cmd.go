@@ -153,16 +153,45 @@ func runSandboxBuildBase(args []string) {
 }
 
 // runSandboxUpdatePlugins implements `cenci sandbox update-plugins [--agent
-// claude|codex] [--name N]`: refresh the selected agent's plugins inside the
-// running container for the current scope, or in a one-shot container
-// against its home volume. --agent restores the cenci-sand `--agent codex
-// --update-plugins` capability the earlier 1:1 shim dropped.
+// claude|codex] [--name N]` and `cenci sandbox update-plugins --all`.
+// --agent/--name refresh the selected agent's plugins inside the running
+// container for the current scope, or in a one-shot container against its
+// home volume (--agent restores the cenci-sand `--agent codex
+// --update-plugins` capability the earlier 1:1 shim dropped). --all instead
+// refreshes plugins in every running sandbox container on the host
+// (scope-independent) and is a usage error when combined with an explicitly
+// given --name or --agent, since those select a single scope that --all's
+// host-wide sweep would silently ignore.
 func runSandboxUpdatePlugins(args []string) {
 	fs := flag.NewFlagSet("sandbox update-plugins", flag.ExitOnError)
 	agent := fs.String("agent", "claude", "agent whose plugins to update (claude or codex)")
 	name := fs.String("name", "", "sandbox instance name")
+	all := fs.Bool("all", false, "refresh plugins in every running sandbox container on the host")
 	_ = fs.Parse(args)
 	rejectExtraArgs("update-plugins", fs)
+
+	var agentSet, nameSet bool
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "agent":
+			agentSet = true
+		case "name":
+			nameSet = true
+		}
+	})
+
+	if *all {
+		if agentSet || nameSet {
+			fmt.Fprintln(os.Stderr, "cenci sandbox update-plugins: --all refreshes every running container on the host and cannot be combined with --agent or --name")
+			os.Exit(2)
+		}
+		eng := newEngine("update-plugins")
+		if err := eng.RefreshRunningPlugins(); err != nil {
+			fmt.Fprintf(os.Stderr, "cenci sandbox update-plugins: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if err := launcher.ValidateAgent(*agent); err != nil {
 		fmt.Fprintf(os.Stderr, "cenci sandbox update-plugins: %v\n", err)

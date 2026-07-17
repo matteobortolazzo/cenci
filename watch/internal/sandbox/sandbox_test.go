@@ -75,6 +75,27 @@ func TestParseNames_FiltersToSandboxPrefix(t *testing.T) {
 	}
 }
 
+func TestAgentForContainerName(t *testing.T) {
+	cases := []struct {
+		name      string
+		container string
+		wantAgent string
+		wantOK    bool
+	}{
+		{"claude prefix", "claude-cenci-agentstack", "claude", true},
+		{"codex prefix", "codex-cenci-agentstack", "codex", true},
+		{"non-matching name", "some-other-container", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			agent, ok := AgentForContainerName(tc.container)
+			if ok != tc.wantOK || agent != tc.wantAgent {
+				t.Errorf("AgentForContainerName(%q) = (%q, %v), want (%q, %v)", tc.container, agent, ok, tc.wantAgent, tc.wantOK)
+			}
+		})
+	}
+}
+
 func TestParseNames_SubstringFilter(t *testing.T) {
 	raw := "claude-cenci-agentstack\ncodex-cenci-otherrepo\n"
 	got := parseNames(raw, "agentstack")

@@ -70,6 +70,19 @@ func IsSandboxContainerName(name string) bool {
 	return sandboxNamePattern.MatchString(name)
 }
 
+// AgentForContainerName derives the agent (claude/codex) a sandbox container
+// belongs to from its name prefix, reusing sandboxNamePattern (the same
+// source of truth IsSandboxContainerName matches against) rather than
+// re-deriving the prefix table. ok is false when name doesn't carry a
+// sandbox container name prefix.
+func AgentForContainerName(name string) (agent string, ok bool) {
+	m := sandboxNamePattern.FindStringSubmatch(name)
+	if m == nil {
+		return "", false
+	}
+	return strings.TrimSuffix(m[1], "-cenci-"), true
+}
+
 // ContainerRuntime resolves the preferred container runtime: podman if
 // present on PATH, else docker. Returns an error if neither is found.
 func ContainerRuntime() (string, error) {
