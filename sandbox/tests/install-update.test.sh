@@ -57,9 +57,9 @@ make_client() {
 #!/bin/sh
 if [ "\${1:-}" = plugin ] && [ "\${2:-}" = list ]; then
     if [ "${client}" = claude ]; then
-        echo 'cenci-watch@cenci'
+        printf 'cenci@cenci\ncenci-watch@cenci\ncenci-sandbox@cenci\n'
     else
-        echo 'cenci-watch@cenci installed'
+        printf 'cenci@cenci installed\ncenci-watch@cenci installed\ncenci-sandbox@cenci installed\n'
     fi
 fi
 exit 0
@@ -104,8 +104,11 @@ EOF
 # binary that can't self-restart, so install.sh's fallback should kick in). A
 # bare `daemon` invocation (the fallback's nohup-spawned form) loops until
 # signaled, recording its pid to PIDS_FILE for the harness to reap.
+# `sandbox update-plugins --all` (the running-sandbox plugin refresh, #461)
+# exits refresh_exit (default 0), so a test can simulate a refresh failure
+# and assert it only warns rather than failing the update.
 make_cenci() {
-    local path="$1" restart_exit="${2:-0}"
+    local path="$1" restart_exit="${2:-0}" refresh_exit="${3:-0}"
     mkdir -p "$(dirname "${path}")"
     cat >"${path}" <<EOF
 #!/bin/sh
@@ -122,6 +125,9 @@ if [ "\${1:-}" = daemon ] && [ -z "\${2:-}" ]; then
     echo "\$\$" >>"\${PIDS_FILE}"
     trap 'exit 0' TERM INT
     while :; do sleep 1; done
+fi
+if [ "\${1:-}" = sandbox ] && [ "\${2:-}" = update-plugins ] && [ "\${3:-}" = --all ]; then
+    exit ${refresh_exit}
 fi
 exit 0
 EOF
@@ -146,9 +152,13 @@ prepare_checkout() {
 # setup_layout provisions a fake HOME with a client plugin cache containing
 # a single "updated" cenci binary (current_cenci_binary always finds
 # a binary already in place, so step_cenci_setup's update path calls
-# restart_cenci_daemon immediately, no bootstrap needed).
+# restart_cenci_daemon immediately, no bootstrap needed). make_client reports
+# cenci/cenci-watch/cenci-sandbox as all already installed, so
+# step_sandbox_refresh_plugins's `selected cenci-sandbox` gate stays true and
+# it also runs on update; refresh_exit scripts that step's
+# `sandbox update-plugins --all` exit code (default 0).
 setup_layout() {
-    local name="$1" client="$2" restart_exit="$3"
+    local name="$1" client="$2" restart_exit="$3" refresh_exit="${4:-0}"
     local home="${WORK}/${name}/home" mock_bin="${WORK}/${name}/bin"
     local call_log="${WORK}/${name}/calls" pkill_log="${WORK}/${name}/pkill-calls"
     mkdir -p "${home}"
@@ -169,7 +179,7 @@ setup_layout() {
     fi
     new_root="${cache_dir}/2.0.0"
     new_bin="${new_root}/bin/cenci"
-    make_cenci "${new_bin}" "${restart_exit}"
+    make_cenci "${new_bin}" "${restart_exit}" "${refresh_exit}"
     mkdir -p "${new_root}/${manifest_dir}"
     printf '{"name":"cenci-watch","version":"2.0.0"}\n' >"${new_root}/${manifest_dir}/plugin.json"
 
@@ -366,4 +376,33 @@ if ! grep -q 'Codex: cenci-watch 1.0.0 → 2.0.0' "${WORK}/last-output"; then
     exit 1
 fi
 
-echo "passed: restart path delegates to 'cenci daemon restart', falling back to pkill/nohup only on failure; update output reports per-plugin version transitions"
+echo "case: update refreshes plugins in running sandbox containers via 'sandbox update-plugins --all' (#461)"
+setup_layout sandbox-refresh claude 0
+run_update
+[[ "${UPDATE_EXIT}" -eq 0 ]]
+if ! grep -qx "sandbox update-plugins --all" "${LAYOUT_CALL_LOG}"; then
+    echo "FAIL: expected 'sandbox update-plugins --all' invocation in ${LAYOUT_CALL_LOG}" >&2
+    cat "${LAYOUT_CALL_LOG}" >&2
+    exit 1
+fi
+
+echo "case: a sandbox plugin refresh failure warns but does not fail the update (#461)"
+setup_layout sandbox-refresh-fails claude 0 1
+run_update
+if ! grep -qx "sandbox update-plugins --all" "${LAYOUT_CALL_LOG}"; then
+    echo "FAIL: expected 'sandbox update-plugins --all' to still be attempted" >&2
+    cat "${LAYOUT_CALL_LOG}" >&2
+    exit 1
+fi
+if [[ "${UPDATE_EXIT}" -ne 0 ]]; then
+    echo "FAIL: a sandbox plugin refresh failure must not fail the update (UPDATE_EXIT=${UPDATE_EXIT})" >&2
+    cat "${WORK}/last-output" >&2
+    exit 1
+fi
+if ! grep -q "sandbox update-plugins --all" "${WORK}/last-output"; then
+    echo "FAIL: expected the refresh failure to be reported (warned) in the update output" >&2
+    cat "${WORK}/last-output" >&2
+    exit 1
+fi
+
+echo "passed: restart path delegates to 'cenci daemon restart', falling back to pkill/nohup only on failure; update output reports per-plugin version transitions; sandbox plugin refresh runs best-effort on update (#461)"

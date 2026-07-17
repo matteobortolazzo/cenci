@@ -666,6 +666,65 @@ func TestSandboxUpdatePlugins_BadAgent_Exits2NoRuntimeCalls(t *testing.T) {
 	}
 }
 
+func TestSandboxUpdatePluginsAll_RefreshesEveryRunningContainer(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+
+	cmd := exec.Command(binaryPath, "sandbox", "update-plugins", "--all")
+	cmd.Env = append(batchEnv(t, fakeDir, assets), "FAKE_PS=claude-cenci-one\nclaude-cenci-two\ncodex-cenci-three\n")
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandbox update-plugins --all: %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	for _, name := range []string{"claude-cenci-one", "claude-cenci-two", "codex-cenci-three"} {
+		if !anyLineContains(lines, "exec -u dev "+name+" /bin/bash -c") {
+			t.Errorf("expected a plugin refresh exec for %q, got calls:\n%s", name, strings.Join(lines, "\n"))
+		}
+	}
+}
+
+func TestSandboxUpdatePluginsAll_WithExplicitName_UsageError(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+
+	cmd := exec.Command(binaryPath, "sandbox", "update-plugins", "--all", "--name", "x")
+	cmd.Env = batchEnv(t, fakeDir, assets)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("expected --all --name usage error exit 2, got %T %v\n%s", err, err, output)
+	}
+	if lines := callLogLines(t, callLog); len(lines) > 0 {
+		t.Errorf("expected no runtime calls for --all --name usage error, got:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+func TestSandboxUpdatePluginsAll_WithExplicitAgent_UsageError(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+
+	cmd := exec.Command(binaryPath, "sandbox", "update-plugins", "--all", "--agent", "codex")
+	cmd.Env = batchEnv(t, fakeDir, assets)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("expected --all --agent usage error exit 2, got %T %v\n%s", err, err, output)
+	}
+	if lines := callLogLines(t, callLog); len(lines) > 0 {
+		t.Errorf("expected no runtime calls for --all --agent usage error, got:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
 func TestSandboxReseedCreds_IsOpenReseedAlias(t *testing.T) {
 	fakeDir := t.TempDir()
 	callLog := writeScriptedRuntimes(t, fakeDir)

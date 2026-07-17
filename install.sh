@@ -743,6 +743,34 @@ step_sandbox_setup() {
 	fi
 }
 
+# step_sandbox_refresh_plugins refreshes plugins in every currently running
+# sandbox container after an update (#461), so `cenci update` doesn't leave
+# already-running sandboxes on a stale plugin cache until a manual
+# `cenci sandbox update-plugins`. Kept as its own function rather than folded
+# into step_sandbox_setup, because that function early-returns before this
+# point whenever there's no container runtime or BUILD_IMAGE=no — both cases
+# that must still let this refresh attempt to run. Best-effort: a failure
+# only warns (never sets INSTALL_FAILED) — RefreshRunningPlugins is itself
+# best-effort per-container, and an older cached binary might not understand
+# --all yet.
+step_sandbox_refresh_plugins() {
+	selected cenci-sandbox || return 0
+	local runtime
+	runtime="$(container_runtime || true)"
+	[ -n "$runtime" ] || return 0
+
+	local cenci_bin
+	cenci_bin="$(current_cenci_binary || true)"
+	[ -n "$cenci_bin" ] || return 0
+
+	step "Refreshing plugins in running sandbox containers"
+	if "$cenci_bin" sandbox update-plugins --all; then
+		ok "refreshed plugins in running sandbox containers"
+	else
+		warn "'$cenci_bin sandbox update-plugins --all' did not succeed — refresh running sandboxes manually with: cenci sandbox update-plugins --all"
+	fi
+}
+
 # newest_cenci_root — path to the most recently installed version-pinned
 # Claude plugin cache root. Plugin updates refresh the active manifest, making
 # it a reliable selector even before that version's binary has bootstrapped.
@@ -1387,6 +1415,7 @@ if [ "$MODE" = update ]; then
 	step_cli_setup
 	step_sandbox_setup
 	step_cenci_watch_setup
+	step_sandbox_refresh_plugins
 	step_lazyboards_setup
 	final_summary
 	exit $((INSTALL_FAILED))

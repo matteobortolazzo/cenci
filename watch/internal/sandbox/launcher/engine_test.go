@@ -292,3 +292,128 @@ func TestEnsureAgentVolume_UpdateFailureButRmSucceeds_NoWarning(t *testing.T) {
 		t.Errorf("expected no broken-volume warning when removal succeeds, got:\n%s", stderr.String())
 	}
 }
+
+// -- RefreshRunningPlugins ------------------------------------------------
+
+const wantClaudeRefreshCmd = `source /usr/local/bin/lib/migrate-settings.sh && heal_plugin_installs /home/dev/.claude/plugins && provision_plugins /home/dev/.claude/plugins cenci matteobortolazzo/cenci cenci cenci-watch && update_plugins /home/dev/.claude/plugins cenci 0 cenci cenci-watch`
+
+const wantCodexRefreshCmd = `source /usr/local/bin/lib/migrate-settings.sh && provision_codex_plugins /home/dev/.codex cenci matteobortolazzo/cenci cenci cenci-watch && update_codex_plugins /home/dev/.codex cenci 0 cenci cenci-watch`
+
+// refreshRuntimeEngine wires an Engine to a fake docker that answers `ps
+// --format {{.Names}}` with psOutput and fails `exec` calls whose target
+// container name (argv[4], after `exec -u dev`) is in failNames — so
+// RefreshRunningPlugins tests can drive the mixed-container/best-effort
+// paths without a real container runtime.
+func refreshRuntimeEngine(t *testing.T, psOutput string, failNames ...string) (*Engine, string) {
+	t.Helper()
+	dir := t.TempDir()
+	callLogPath := filepath.Join(dir, "calls.txt")
+	body := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %s
+if [ "$1" = ps ]; then
+  printf '%%s' %s
+  exit 0
+fi
+if [ "$1" = exec ]; then
+  target="$4"
+  for f in %s; do
+    if [ "$target" = "$f" ]; then
+      exit 1
+    fi
+  done
+  exit 0
+fi
+exit 0
+`, exectest.ShellQuote(callLogPath), exectest.ShellQuote(psOutput), strings.Join(failNames, " "))
+	exectest.WriteExecutable(t, filepath.Join(dir, "docker"), body)
+	t.Setenv("PATH", dir)
+
+	var out bytes.Buffer
+	return &Engine{
+		Runtime:  "docker",
+		AssetDir: "/assets",
+		BaseTag:  "abc123def456",
+		Stdin:    strings.NewReader(""),
+		Stdout:   &out,
+		Stderr:   &out,
+	}, callLogPath
+}
+
+// TestRefreshRunningPlugins_RefreshesEachRunningContainerByAgent pins the
+// mixed-container happy path: every running claude-cenci-*/codex-cenci-*
+// container gets exec'd with -u dev and its agent-specific ttl-0 refresh
+// command.
+func TestRefreshRunningPlugins_RefreshesEachRunningContainerByAgent(t *testing.T) {
+	e, callLog := refreshRuntimeEngine(t, "claude-cenci-agentstack\ncodex-cenci-otherrepo\n")
+
+	if err := e.RefreshRunningPlugins(); err != nil {
+		t.Fatalf("RefreshRunningPlugins: %v", err)
+	}
+
+	calls := readCallLog(t, callLog)
+	wantClaude := "exec -u dev claude-cenci-agentstack /bin/bash -c " + wantClaudeRefreshCmd
+	if !containsLine(calls, wantClaude) {
+		t.Errorf("expected claude refresh exec %q; calls:\n%s", wantClaude, strings.Join(calls, "\n"))
+	}
+	wantCodex := "exec -u dev codex-cenci-otherrepo /bin/bash -c " + wantCodexRefreshCmd
+	if !containsLine(calls, wantCodex) {
+		t.Errorf("expected codex refresh exec %q; calls:\n%s", wantCodex, strings.Join(calls, "\n"))
+	}
+}
+
+// TestRefreshRunningPlugins_SkipsNonSandboxContainerNames pins that a
+// non-sandbox container running alongside sandbox containers never gets
+// exec'd.
+func TestRefreshRunningPlugins_SkipsNonSandboxContainerNames(t *testing.T) {
+	e, callLog := refreshRuntimeEngine(t, "claude-cenci-agentstack\nsome-other-container\n")
+
+	if err := e.RefreshRunningPlugins(); err != nil {
+		t.Fatalf("RefreshRunningPlugins: %v", err)
+	}
+
+	calls := readCallLog(t, callLog)
+	if containsLineWithAll(calls, "exec", "some-other-container") {
+		t.Errorf("expected non-sandbox container to be skipped; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+// TestRefreshRunningPlugins_NoRunningContainers_PrintsNoteNoExecCalls pins
+// the zero-containers case: a note is printed and no exec calls are made
+// (and RefreshRunningPlugins returns no error — zero running containers is
+// not a failure).
+func TestRefreshRunningPlugins_NoRunningContainers_PrintsNoteNoExecCalls(t *testing.T) {
+	e, callLog := refreshRuntimeEngine(t, "")
+
+	if err := e.RefreshRunningPlugins(); err != nil {
+		t.Fatalf("RefreshRunningPlugins: %v", err)
+	}
+
+	if calls := readCallLog(t, callLog); containsPrefix(calls, "exec") {
+		t.Errorf("expected no exec calls when no containers are running; calls:\n%s", strings.Join(calls, "\n"))
+	}
+	if out := e.Stdout.(*bytes.Buffer).String(); !strings.Contains(out, "No running sandbox containers") {
+		t.Errorf("expected a note about no running containers, got:\n%s", out)
+	}
+}
+
+// TestRefreshRunningPlugins_OneContainerFails_OthersStillRefreshedAndErrorAggregated
+// pins the best-effort contract: a single container's exec failure must not
+// stop the others from being refreshed, and the failure surfaces in the
+// aggregated returned error.
+func TestRefreshRunningPlugins_OneContainerFails_OthersStillRefreshedAndErrorAggregated(t *testing.T) {
+	e, callLog := refreshRuntimeEngine(t, "claude-cenci-agentstack\ncodex-cenci-otherrepo\n", "claude-cenci-agentstack")
+
+	err := e.RefreshRunningPlugins()
+	if err == nil {
+		t.Fatal("expected an aggregated error when one container's refresh fails")
+	}
+	if !strings.Contains(err.Error(), "claude-cenci-agentstack") {
+		t.Errorf("expected the aggregated error to name the failing container, got: %v", err)
+	}
+
+	calls := readCallLog(t, callLog)
+	wantCodex := "exec -u dev codex-cenci-otherrepo /bin/bash -c " + wantCodexRefreshCmd
+	if !containsLine(calls, wantCodex) {
+		t.Errorf("expected the other container to still be refreshed; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}

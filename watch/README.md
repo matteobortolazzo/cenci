@@ -576,6 +576,9 @@ cenci sandbox update-agent [--agent claude|codex] [--version <exact-semver>]
                                 # atomically update the host-global, workload-read-only CLI volume
 cenci sandbox update-plugins [--agent claude|codex] [--name <n>]
                                 # force-refresh the plugins inside the container/volume (ttl 0)
+cenci sandbox update-plugins --all
+                                # force-refresh plugins in every running sandbox container on the host;
+                                # usage error if combined with an explicit --agent or --name
 cenci sandbox reseed-creds      # alias for: cenci open --reseed-creds
 cenci sandbox reap-orphans      # kill container-side agent processes whose tmux pane is gone
 
@@ -630,6 +633,12 @@ logic as running `cenci-installer doctor`/`update` directly. Neither verb takes 
 flags or extra arguments (exit 2 if given any). If `cenci-installer` isn't on
 `PATH`, both exit 1 with a clear error instead of silently doing nothing —
 re-run the [installer](#installation) to create it.
+
+`cenci update` also best-effort refreshes plugins in every currently running
+sandbox container (`cenci sandbox update-plugins --all`, after the image
+build/daemon-restart steps), so an already-running sandbox doesn't stay on a
+stale plugin cache until you manually run `cenci sandbox update-plugins`. A
+per-container refresh failure only warns — it never fails the update.
 
 ## Advanced / development
 
