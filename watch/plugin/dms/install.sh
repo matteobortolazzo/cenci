@@ -29,12 +29,20 @@ echo "Symlinked: $DEST -> $DIR"
 
 # Reload so DMS re-scans its plugins. The systemd user unit is the clean path;
 # fall back to killing the quickshell process (a niri Wants=dms re-spawns it).
+# Capture each reload command's real exit status instead of swallowing it with
+# `|| true`, so a failed reload doesn't get an unconditional success echo.
 if command -v systemctl >/dev/null 2>&1 && systemctl --user status dms >/dev/null 2>&1; then
-  systemctl --user restart dms >/dev/null 2>&1 || true
-  echo "Restarted the dms user service."
+  if systemctl --user restart dms >/dev/null 2>&1; then
+    echo "Restarted the dms user service."
+  else
+    echo "Could not restart the dms user service — reload it manually: systemctl --user restart dms" >&2
+  fi
 else
-  pkill -f 'qs -c dms' >/dev/null 2>&1 || true
-  echo "Signalled DMS to reload (pkill 'qs -c dms')."
+  if pkill -f 'qs -c dms' >/dev/null 2>&1; then
+    echo "Signalled DMS to reload (pkill 'qs -c dms')."
+  else
+    echo "DMS does not appear to be running — start it or check its status manually." >&2
+  fi
 fi
 
 echo "Done. Open Settings (dms ipc call settings toggle) → Plugins → enable"
