@@ -1,6 +1,6 @@
 # cenci
 
-**Let coding agents run longer—without giving up control.**
+**Let coding agents run longer. Keep the important decisions.**
 
 [![Claude Code](https://img.shields.io/badge/Claude_Code-supported-d97757?style=flat-square)](#claude-code-and-codex)
 [![Codex](https://img.shields.io/badge/Codex-supported-10a37f?style=flat-square)](flow/docs/codex.md)
@@ -95,7 +95,7 @@ decisions behind it.
 
 Claude Code runs with `--dangerously-skip-permissions` and Codex with
 `--dangerously-bypass-approvals-and-sandbox`, but only inside the container. By
-default, cenci mounts the current repository—not your whole host—and publishes no
+default, cenci mounts the current repository, not your whole host, and publishes no
 inbound ports. This limits the host blast radius; you still trust what the agent
 installs and runs inside that boundary.
 
@@ -109,7 +109,7 @@ installs and runs inside that boundary.
 cenci works from a plain terminal. If you prefer a board, optional lazyboards can
 dispatch refinement and implementation with one keypress, show live agent state on
 each card, and expose the same session overview. `cenci dispatch` can also pick up an
-approved `Planned` ticket by policy—no board or LLM is required for the pickup step.
+approved `Planned` ticket by policy. No board or LLM is required for the pickup step.
 
 [Follow the board-orchestration recipe →](docs/orchestration.md) ·
 [See the deterministic demo recipe →](demo.tape)
