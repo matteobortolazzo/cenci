@@ -236,6 +236,23 @@ if ! diff -q "${ROOT}/flow/templates/lazyboards-config.yml" \
     exit 1
 fi
 assert_contains "${CASE_OUTPUT}" "seeded default board config"
+# The final "Try it out" hint always names lazyboards; with no tmux on PATH
+# (make_common_tools installs none) it must NOT tell the user to start tmux.
+assert_contains "${CASE_OUTPUT}" "kanban board wired to the workflow"
+assert_not_contains "${CASE_OUTPUT}" "lazyboards dispatches into tmux windows"
+
+echo "case: the try-it-out hint tells the user to start tmux first when tmux is present"
+name=tmux-hint
+mkdir -p "${WORK}/${name}/bin"
+cat >"${WORK}/${name}/bin/tmux" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "${WORK}/${name}/bin/tmux"
+run_installer "${name}" --yes --no-build --lazyboards
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_contains "${CASE_OUTPUT}" "lazyboards dispatches into tmux windows — start it first"
+assert_contains "${CASE_OUTPUT}" "kanban board wired to the workflow"
 
 echo "case: an existing board config is never overwritten"
 name=keep-config
