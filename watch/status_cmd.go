@@ -13,6 +13,7 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/internal/dispatch"
 	"github.com/matteobortolazzo/cenci/watch/internal/frontend/status"
 	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
 )
 
 // runWidgetJSON implements the hidden plumbing subcommand `widget-json`
@@ -89,7 +90,11 @@ func renderHumanStatus(info daemon.StatusInfo, socketPath string) string {
 
 	snap, err := dispatch.ReadSnapshot(socketPath)
 	switch {
-	case err != nil || snap == nil:
+	case errors.Is(err, watch.ErrDaemonUnreachable):
+		fmt.Fprintf(&b, "sessions: unavailable (daemon not reachable)\n")
+	case err != nil:
+		fmt.Fprintf(&b, "sessions: unavailable (error reading snapshot: %v)\n", err)
+	case snap == nil:
 		fmt.Fprintf(&b, "sessions: unavailable (daemon not reachable)\n")
 	case len(snap.Windows) == 0:
 		fmt.Fprintf(&b, "sessions: none\n")
