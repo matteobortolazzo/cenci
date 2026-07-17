@@ -1265,7 +1265,7 @@ step_lazyboards_setup() {
 	if [ "$managed_present" -eq 0 ] && [ -z "$path_bin" ] && [ "$LAZYBOARDS" = no ]; then
 		return 0
 	elif [ "$managed_present" -eq 0 ] && [ -z "$path_bin" ] && [ "$LAZYBOARDS" = ask ]; then
-		if ! ask_yn "Install lazyboards (kanban board that dispatches the cenci workflow)?" y; then
+		if ! ask_yn "Install lazyboards (optional separate project — kanban board that dispatches the cenci workflow)?" y; then
 			say "  ${DIM}skipped — install later with: cenci-installer --lazyboards${RESET}"
 			return 0
 		fi
@@ -1334,6 +1334,9 @@ final_summary() {
 		say "    (start a supported agent session — status appears in configured surfaces)"
 	fi
 	if lazyboards_binary >/dev/null 2>&1; then
+		if have tmux; then
+			say "    tmux              # lazyboards dispatches into tmux windows — start it first"
+		fi
 		say "    lazyboards        # kanban board wired to the workflow — see docs/orchestration.md"
 	fi
 	say ""
