@@ -18,7 +18,8 @@ PLASMA_ID="com.github.matteobortolazzo.cenci"
 link_tools() {
     local bin="$1" tool
     mkdir -p "${bin}"
-    for tool in bash cat touch uname grep git mkdir dirname ln readlink sleep pgrep nohup chmod sed head rm mktemp cp; do
+    for tool in bash cat touch uname grep git mkdir dirname ln readlink sleep pgrep nohup chmod sed head rm mktemp cp \
+        rmdir tail cut tr id basename; do
         ln -s "$(command -v "${tool}")" "${bin}/${tool}"
     done
     cat >"${bin}/docker" <<'EOF'
@@ -232,4 +233,127 @@ assert_no_log "${O4}" "sk-test-sentinel-should-not-leak"
 assert_no_log "${O4}" "ctx7-test-sentinel-should-not-leak"
 echo "  ok: sentinel secrets never leaked into captured calls or output"
 
-echo "passed: GUI bar-widget detection, install, reload, and update"
+# ---------------------------------------------------------------------------
+echo "case: uninstall with no bar detected and no widget installed is a no-op — no reload calls, no errors"
+CASE5="${WORK}/uninstall-noop"; H5="${CASE5}/home"; B5="${CASE5}/bin"
+C5="${CASE5}/calls"; O5="${CASE5}/out"
+mkdir -p "${H5}" "${B5}"; : >"${C5}"
+link_tools "${B5}"
+make_claude "${B5}"
+prepare_checkout "${H5}"
+# Deliberately stub none of the bar-detection/reload tools and create none of
+# the widget config dirs, so every de_detected check is false.
+run_install "${H5}" "${B5}" "${C5}" "${O5}" uninstall --yes ||
+    fail "uninstall (no bars detected) exited non-zero"
+
+assert_no_log "${C5}" "systemctl --user restart dms"
+assert_no_log "${C5}" "kstart plasmashell"
+assert_no_log "${C5}" "qs -c noctalia-shell"
+assert_no_log "${C5}" "gnome-extensions disable"
+[[ ! -e "${H5}/.local/share/gnome-shell/extensions/${GNOME_UUID}" ]] ||
+    fail "gnome extension dir unexpectedly present"
+[[ ! -e "${H5}/.local/share/plasma/plasmoids/${PLASMA_ID}" ]] ||
+    fail "plasma plasmoid unexpectedly present"
+[[ ! -e "${H5}/.config/DankMaterialShell/plugins/cenci" ]] ||
+    fail "dms plugin symlink unexpectedly present"
+[[ ! -e "${H5}/.config/noctalia/plugins/cenci" ]] ||
+    fail "noctalia plugin symlink unexpectedly present"
+echo "  ok: uninstalling never-installed widgets was a clean no-op"
+
+# ---------------------------------------------------------------------------
+echo "case: uninstall leaves a non-symlink DEST untouched (mirrors each install's own guard)"
+CASE6="${WORK}/uninstall-guard"; H6="${CASE6}/home"; B6="${CASE6}/bin"
+C6="${CASE6}/calls"; O6="${CASE6}/out"
+mkdir -p "${H6}" "${B6}"; : >"${C6}"
+link_tools "${B6}"
+make_claude "${B6}"
+prepare_checkout "${H6}"
+make_logging_stub "${B6}" systemctl
+DMS_DEST6="${H6}/.config/DankMaterialShell/plugins/cenci"
+mkdir -p "$(dirname "${DMS_DEST6}")"
+printf 'user-owned file, not managed by cenci\n' >"${DMS_DEST6}"
+# de_detected dms is satisfied by the ~/.config/DankMaterialShell dir existing
+# (no `dms` binary stubbed), matching install.sh's own detection.
+run_install "${H6}" "${B6}" "${C6}" "${O6}" uninstall --yes ||
+    fail "uninstall (non-symlink guard) exited non-zero"
+
+[[ ! -L "${DMS_DEST6}" ]] ||
+    fail "expected the pre-existing DEST to remain a real file, not a symlink"
+[[ -f "${DMS_DEST6}" ]] ||
+    fail "expected the pre-existing DEST file to survive uninstall"
+[[ "$(cat "${DMS_DEST6}")" == "user-owned file, not managed by cenci" ]] ||
+    fail "expected the pre-existing DEST file's contents to survive uninstall untouched"
+echo "  ok: uninstall refused to remove a non-symlink DEST it doesn't own"
+
+# ---------------------------------------------------------------------------
+echo "case: host secrets in the parent env never reach captured calls or output during uninstall (regression, #353)"
+CASE7="${WORK}/uninstall-sentinel"; H7="${CASE7}/home"; B7="${CASE7}/bin"
+C7="${CASE7}/calls"; O7="${CASE7}/out"
+mkdir -p "${H7}" "${B7}"; : >"${C7}"
+link_tools "${B7}"
+make_claude "${B7}"
+prepare_checkout "${H7}"
+for s in dms systemctl; do make_logging_stub "${B7}" "${s}"; done
+export OPENAI_API_KEY="sk-test-sentinel-should-not-leak"
+export CONTEXT7_API_KEY="ctx7-test-sentinel-should-not-leak"
+run_install "${H7}" "${B7}" "${C7}" "${O7}" uninstall --yes ||
+    fail "uninstall (sentinel) exited non-zero"
+unset OPENAI_API_KEY CONTEXT7_API_KEY
+assert_no_log "${C7}" "sk-test-sentinel-should-not-leak"
+assert_no_log "${C7}" "ctx7-test-sentinel-should-not-leak"
+assert_no_log "${O7}" "sk-test-sentinel-should-not-leak"
+assert_no_log "${O7}" "ctx7-test-sentinel-should-not-leak"
+echo "  ok: sentinel secrets never leaked into captured uninstall calls or output"
+
+# ---------------------------------------------------------------------------
+echo "case: install then uninstall removes each Linux widget and reloads its bar again on teardown"
+CASE8="${WORK}/roundtrip"; H8="${CASE8}/home"; B8="${CASE8}/bin"
+C8="${CASE8}/calls"; O8="${CASE8}/out"
+mkdir -p "${H8}" "${B8}"; : >"${C8}"
+link_tools "${B8}"
+make_claude "${B8}"
+prepare_checkout "${H8}"
+for s in gnome-shell gnome-extensions glib-compile-schemas plasmashell kquitapp6 \
+    kstart dms systemctl noctalia-shell qs; do
+    make_logging_stub "${B8}" "${s}"
+done
+# uninstall_stop_daemon/uninstall_plugins need a resolvable cenci binary — give
+# the fake HOME the version-pinned plugin cache an installed system would have,
+# the same way the `update` case above does.
+CACHE_ROOT8="${H8}/.claude/plugins/cache/cenci/cenci-watch/1.0.0"
+mkdir -p "${CACHE_ROOT8}/bin" "${CACHE_ROOT8}/.claude-plugin"
+printf '{"name":"cenci-watch","version":"1.0.0"}\n' >"${CACHE_ROOT8}/.claude-plugin/plugin.json"
+printf '#!/bin/sh\nexit 0\n' >"${CACHE_ROOT8}/bin/cenci"
+chmod +x "${CACHE_ROOT8}/bin/cenci"
+
+run_install "${H8}" "${B8}" "${C8}" "${O8}" --yes --no-build ||
+    fail "install (round trip setup) exited non-zero"
+sleep 0.5
+
+GNOME_DEST8="${H8}/.local/share/gnome-shell/extensions/${GNOME_UUID}"
+PLASMA_DEST8="${H8}/.local/share/plasma/plasmoids/${PLASMA_ID}"
+DMS_DEST8="${H8}/.config/DankMaterialShell/plugins/cenci"
+NOCTALIA_DEST8="${H8}/.config/noctalia/plugins/cenci"
+[[ -e "${GNOME_DEST8}" && ! -L "${GNOME_DEST8}" ]] ||
+    fail "round trip setup: gnome extension was not installed"
+[[ -L "${PLASMA_DEST8}" ]] || fail "round trip setup: plasma plasmoid symlink missing"
+[[ -L "${DMS_DEST8}" ]] || fail "round trip setup: dms plugin symlink missing"
+[[ -L "${NOCTALIA_DEST8}" ]] || fail "round trip setup: noctalia plugin symlink missing"
+
+UC8="${CASE8}/uninstall-calls"; UO8="${CASE8}/uninstall-out"; : >"${UC8}"
+run_install "${H8}" "${B8}" "${UC8}" "${UO8}" uninstall --yes ||
+    fail "uninstall exited non-zero"
+sleep 0.5
+
+[[ ! -e "${GNOME_DEST8}" ]] || fail "gnome extension dir still present after uninstall"
+[[ ! -e "${PLASMA_DEST8}" ]] || fail "plasma plasmoid symlink still present after uninstall"
+[[ ! -e "${DMS_DEST8}" ]] || fail "dms plugin symlink still present after uninstall"
+[[ ! -e "${NOCTALIA_DEST8}" ]] || fail "noctalia plugin symlink still present after uninstall"
+
+assert_log "${UC8}" "systemctl --user restart dms"
+assert_log "${UC8}" "kstart plasmashell"
+assert_log "${UC8}" "qs -c noctalia-shell"
+assert_log "${UC8}" "gnome-extensions disable"
+echo "  ok: uninstall removed every widget and reloaded each bar again"
+
+echo "passed: GUI bar-widget detection, install, reload, update, and uninstall"

@@ -112,6 +112,22 @@ defaults write com.ameba.SwiftBar "<the key from above>" -bool true
 killall SwiftBar; open -a SwiftBar
 ```
 
+## Uninstall
+
+`cenci-installer uninstall` removes this widget as part of removing the whole
+attention layer. To do it directly:
+
+```sh
+~/.claude/plugins/marketplaces/cenci/watch/plugin/macos/uninstall.sh
+```
+
+(From a **repo checkout**, run `./plugin/macos/uninstall.sh` inside `watch/`
+instead.)
+
+It removes the `cenci.5s.sh` symlink from the resolved Plugin Folder (if it's
+still the one this plugin created) and restarts SwiftBar so the change takes
+effect immediately. The `PluginDirectory` default itself is left untouched.
+
 ## Behavior
 
 - Polls on SwiftBar's filename interval (`cenci widget-json` is a cheap socket read).

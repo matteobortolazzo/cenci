@@ -56,6 +56,21 @@ gnome-extensions enable "$UUID"
 (or use the **Extensions** / **Extension Manager** app). Open its settings with
 `gnome-extensions prefs "$UUID"`.
 
+## Uninstall
+
+`cenci-installer uninstall` removes this widget as part of removing the whole
+attention layer. To do it directly — from the marketplace checkout or a repo
+checkout:
+
+```sh
+~/.claude/plugins/marketplaces/cenci/watch/plugin/gnome/uninstall.sh
+# from a repo checkout, inside watch/: ./plugin/gnome/uninstall.sh
+```
+
+It disables and uninstalls the extension via `gnome-extensions`, then removes
+the copied `~/.local/share/gnome-shell/extensions/<UUID>` directory. Disabling
+takes effect immediately — no Shell reload needed.
+
 ## Behavior
 
 - Polls every `poll-interval-ms` (default 2000 ms).
