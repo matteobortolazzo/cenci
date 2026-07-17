@@ -77,6 +77,17 @@ credential-free updater, and workloads mount them read-only at `/opt/cenci-agent
 `cenci sandbox update-agent` updates that global volume explicitly and atomically.
 Credentials are still staged only into per-scope home volumes.
 
+The pipeline plugins (`cenci`/`flow` and `cenci-watch`) are **not** baked into the image
+or copied from the repo either. `entrypoint.sh` provisions them at container boot via the
+official CLI (`claude plugin marketplace add matteobortolazzo/cenci` + `claude plugin
+install`, and the Codex equivalents in `lib/migrate-settings.sh`), materializing them into
+the per-scope home volume and refreshing them on a TTL. So there is **no** sandbox-local
+copy of the agents/skills to maintain — `flow/agents/` and `flow/skills/` are the single
+source of truth, published through `.claude-plugin/marketplace.json` and installed the same
+way a host `install.sh` run would. A consequence worth knowing: a running container carries
+the last *published* plugin version, not your working tree — un-merged edits to
+`flow/skills/` only reach it after the plugin version bumps.
+
 `fragments/*.dockerfile` holds the same composable blocks (`dotnet`, `node`, `playwright`,
 `go`, `python`, `rust`) as standalone snippets used to assemble per-project images.
 Generated images always include Node so the isolated updater can install either npm package;
