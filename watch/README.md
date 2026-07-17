@@ -7,7 +7,12 @@ Stop hunting through terminals to find the session that needs you. cenci-watch t
 Claude Code and Codex hooks into shared live state for tmux and optional desktop
 surfaces.
 
-![cenci-watch routes Claude Code and Codex hook events to tmux and desktop status surfaces](../docs/assets/cenci-surfaces.svg)
+![A lazyboards board in a tmux window; in the tmux window list below, cenci-watch marks one agent window blue and running, one red and needing input, and one green and done](../docs/assets/cenci-tmux.png)
+
+*Live agent state in the tmux window list: `▶ 6-implement` running (blue), `! 12-refine`
+needs input (red), `✓ 9-refine` done (green). cenci-watch supplies the symbols and state
+colors; the board is [lazyboards](https://github.com/matteobortolazzo/lazyboards) and the
+surrounding tmux theme is user-provided.*
 
 The same four states appear everywhere:
 
@@ -29,6 +34,8 @@ its two stable user variables into the theme instead; see
 [Custom status-format integration](#custom-status-format-integration).
 
 ## Architecture
+
+![cenci-watch routes Claude Code and Codex hook events to tmux and desktop status surfaces](../docs/assets/cenci-surfaces.svg)
 
 The core daemon keys state by agent session id, maps hook events to statuses, and owns the paneless TTL sweep. All window work is delegated to an injected frontend:
 
