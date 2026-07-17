@@ -42,7 +42,7 @@ When `existingConfig` is present, tell the user before starting questions:
 
 ### Create Worktree
 
-`/cenci:configure` writes files into the repo (`.cenci/config.json`, `AGENTS.md`/`CLAUDE.md`, `.mcp.json`, `.lsp.json`, `.gitignore`, `.claudeignore`, `.github/workflows/ci.yml`, `.cenci/Dockerfile`, `.lazyboards.yml`, `.codex/agents/`, `.codex/config.toml`) and updates `.claude/settings.json`. Like every other change in this repo, these ship as a PR — configure never writes directly to the main worktree (see `cenci:worktrees` and `docs/git-workflow.md`).
+`/cenci:configure` writes files into the repo (`.cenci/config.json`, `AGENTS.md`/`CLAUDE.md`, `.mcp.json`, `.lsp.json`, `.gitignore`, `.claudeignore`, `.github/workflows/ci.yml`, `.cenci/Dockerfile`, `.lazyboards.yml`, `.codex/agents/`) and updates `.claude/settings.json`. Like every other change in this repo, these ship as a PR — configure never writes directly to the main worktree (see `cenci:worktrees` and `docs/git-workflow.md`).
 
 Create the worktree now, before any file is written (including a migration `--apply` above) and before the detection/question steps below, since none of them depend on it existing yet:
 
@@ -481,9 +481,8 @@ After gathering answers:
 0. **Generate Codex agent adapters**: copy the reviewed TOML role templates from
    `templates/codex/agents/` into `.codex/agents/`. Preserve unknown user-authored agent
    files. Planning, implementation, and critical review use GPT-5.6/high; gathering and
-   read-heavy analysis use GPT-5.6-terra/medium. Also generate `.codex/config.toml` entries
-   that discover these project agents. Native procedures must fall back to built-in workers
-   with the same role prompt when an adapter is unavailable.
+   read-heavy analysis use GPT-5.6-terra/medium. Native procedures must fall back to built-in
+   workers with the same role prompt when an adapter is unavailable.
 
 1. **Generate canonical guidance and client adapters**:
    - `AGENTS.md` at the repository root is canonical shared guidance. Use
