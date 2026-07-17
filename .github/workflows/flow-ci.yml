@@ -44,3 +44,5 @@ jobs:
         run: bash flow/codex/hooks.test.sh
       - name: Verify settings permission lists
         run: bash flow/templates/settings-permissions.test.sh
+      - name: Verify main-worktree guard hook
+        run: bash flow/hooks/scripts/guard-main-worktree.test.sh

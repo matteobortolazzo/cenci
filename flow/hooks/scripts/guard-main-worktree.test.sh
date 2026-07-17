@@ -38,6 +38,34 @@ assert_exit() {
     fi
 }
 
+# run_guard_with_path <cwd> <path_override> <json> — like run_guard, but
+# overrides PATH with a curated bin dir before invoking the hook. Used to
+# simulate a PATH missing specific external tools (fail-closed tests).
+# Sets GUARD_EXIT and GUARD_STDERR.
+run_guard_with_path() {
+    local cwd="$1" path_override="$2" json="$3"
+    GUARD_STDERR="$(cd "${cwd}" && echo "${json}" | PATH="${path_override}" sh "${GUARD_SH}" 2>&1 >/dev/null)"
+    GUARD_EXIT=$?
+}
+
+# make_curated_bin <dir> <tool>... — creates <dir> containing symlinks to the
+# real binaries for each named tool (resolved from the current PATH) and
+# nothing else. Used with run_guard_with_path to simulate a PATH that is
+# missing specific tools.
+make_curated_bin() {
+    local dir="$1"
+    shift
+    mkdir -p "${dir}"
+    local tool real
+    for tool in "$@"; do
+        real="$(command -v "${tool}")" || {
+            echo "make_curated_bin: '${tool}' not found on PATH" >&2
+            exit 1
+        }
+        ln -s "${real}" "${dir}/${tool}"
+    done
+}
+
 echo "guard-main-worktree.test.sh"
 
 # Not under /tmp: the guard allowlists /tmp/* paths, which would make every
@@ -153,6 +181,113 @@ if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
     pass
 else
     fail "adjacent-to-.claude source path: stderr should contain BLOCKED"
+fi
+
+# ── Hardening cases (#440): normalize file_path and use real JSON parsing ──
+# Run against a dedicated repo so these cases don't depend on directory
+# state left behind by earlier cases (e.g. case 5 creates $REPO/src/nested).
+HARDEN_REPO="${TEST_ROOT}/hardening"
+make_git_repo "${HARDEN_REPO}"
+mkdir -p "${HARDEN_REPO}/.cenci"
+touch "${HARDEN_REPO}/.cenci/config.json"
+
+# Case: a "../.." substring makes the raw path contain /.worktrees/ (an
+# allowlisted substring) but it must be normalized (.. collapsed) before the
+# allowlist check — it canonicalizes to $HARDEN_REPO/src/evil.txt, outside
+# any worktree. $HARDEN_REPO/src must not exist so this exercises
+# normalization of a path whose target does not exist yet.
+echo "case: ..-substring path is normalized before the allowlist match and blocked"
+run_guard "${HARDEN_REPO}" "{\"tool_input\":{\"file_path\":\"${HARDEN_REPO}/.worktrees/x/../../src/evil.txt\"}}"
+assert_exit "dot-dot substring bypass" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "dot-dot substring bypass: stderr should contain BLOCKED"
+fi
+
+# Case: a symlink planted under an allowlisted directory (.worktrees/) that
+# resolves outside the worktree must be blocked — the literal path string
+# matching the allowlist substring is not enough; it must be resolved first.
+echo "case: symlink under .worktrees/ resolving outside the worktree is blocked"
+mkdir -p "${TEST_ROOT}/outside"
+mkdir -p "${HARDEN_REPO}/.worktrees"
+ln -s "${TEST_ROOT}/outside" "${HARDEN_REPO}/.worktrees/link"
+run_guard "${HARDEN_REPO}" "{\"tool_input\":{\"file_path\":\"${HARDEN_REPO}/.worktrees/link/evil.txt\"}}"
+assert_exit "symlink escape via .worktrees/" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "symlink escape via .worktrees/: stderr should contain BLOCKED"
+fi
+
+# Case: a symlinked allowlisted directory whose escape target has an existing
+# ancestor several levels below the symlink itself, but the immediate tail
+# (newdir/) does not exist yet. This must still resolve the symlink by
+# walking up to the nearest existing ancestor (existingsub/), not just the
+# immediate parent — regression test for the ancestor-walk fix (#440).
+echo "case: symlink escape with a multi-level missing tail is blocked"
+mkdir -p "${TEST_ROOT}/outside/existingsub"
+run_guard "${HARDEN_REPO}" "{\"tool_input\":{\"file_path\":\"${HARDEN_REPO}/.worktrees/link/existingsub/newdir/newfile.txt\"}}"
+assert_exit "symlink escape with multi-level missing tail" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "symlink escape with multi-level missing tail: stderr should contain BLOCKED"
+fi
+
+# Case: jq missing from PATH must fail closed (block), not silently fall
+# through to an allow. The curated PATH still has git/cat, so the config
+# gate passes through to the jq check rather than short-circuiting at exit 0.
+echo "case: jq missing from PATH fails closed"
+JQ_MISSING_BIN="${TEST_ROOT}/bin-no-jq"
+make_curated_bin "${JQ_MISSING_BIN}" sh git cat realpath
+run_guard_with_path "${HARDEN_REPO}" "${JQ_MISSING_BIN}" "{\"tool_input\":{\"file_path\":\"${HARDEN_REPO}/src/foo.txt\"}}"
+assert_exit "jq missing fails closed" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "jq missing fails closed: stderr should contain BLOCKED"
+fi
+
+# Case: a relative file_path (no leading /) must fail closed rather than be
+# silently normalized relative to some directory and potentially match an
+# allowlisted pattern by coincidence.
+echo "case: relative file_path fails closed"
+run_guard "${HARDEN_REPO}" "{\"tool_input\":{\"file_path\":\"src/foo.txt\"}}"
+assert_exit "relative file_path fails closed" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "relative file_path fails closed: stderr should contain BLOCKED"
+fi
+
+# Case: the true tool_input.file_path is a blocked source path, but an
+# unrelated field (old_string, as in an Edit tool call) contains a lookalike
+# '"file_path": "..."' substring pointing at an allowlisted path. The hook
+# must key off the real tool_input.file_path field via jq, not an incidental
+# substring found anywhere in the raw JSON. Built via jq -n --arg (never
+# hand-escaped strings) to guarantee valid nesting/escaping.
+echo "case: lookalike file_path substring elsewhere in the JSON is ignored"
+LOOKALIKE_JSON=$(jq -n --arg fp "${HARDEN_REPO}/src/evil.txt" --arg os '"file_path": "'"${HARDEN_REPO}"'/.worktrees/safe/x.txt"' '{tool_input:{file_path:$fp,old_string:$os}}')
+run_guard "${HARDEN_REPO}" "${LOOKALIKE_JSON}"
+assert_exit "lookalike file_path substring ignored" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "lookalike file_path substring ignored: stderr should contain BLOCKED"
+fi
+
+# Case: both realpath and readlink missing from PATH must also fail closed
+# (the resolver step, not just the jq step).
+echo "case: path resolver (realpath/readlink) missing from PATH fails closed"
+RESOLVER_MISSING_BIN="${TEST_ROOT}/bin-no-resolver"
+make_curated_bin "${RESOLVER_MISSING_BIN}" sh git cat jq
+run_guard_with_path "${HARDEN_REPO}" "${RESOLVER_MISSING_BIN}" "{\"tool_input\":{\"file_path\":\"${HARDEN_REPO}/src/foo.txt\"}}"
+assert_exit "resolver missing fails closed" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "resolver missing fails closed: stderr should contain BLOCKED"
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────
