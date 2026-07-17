@@ -860,8 +860,8 @@ For each MCP selected in question 5:
 
    **Committed, not ignored**: `.cenci/Dockerfile` is committed to the repo. Do **not** add `.cenci/` or `.cenci/Dockerfile` to `.gitignore` — the whole point is a team-shared, reviewed Dockerfile that the launcher's per-repo image selection (see `sandbox/README.md`) builds identically for every teammate.
 
-5f. **Generate `.lazyboards.yml`** (when question 10 was asked and answered Yes in
-   this session — the no-existing-file path). When a file already existed, the *Board
+5f. **Generate `.lazyboards.yml`** (when question 10 was asked and answered Yes
+   in this session — the no-existing-file path). When a file already existed, the *Board
    Config* branch instead runs the **Existing config: suggest or skip** sub-step at
    the end of this section; the generation format below is what both paths write:
 
@@ -968,7 +968,12 @@ For each MCP selected in question 5:
      ```
    - **Existing config: suggest or skip** (the branch taken from *Board Config*
      above when `.lazyboards.yml` already exists — question 10 is **not** asked and
-     the file is **not** blindly overwritten):
+     the file is **not** blindly overwritten). This file-exists conflict check fires
+     **unconditionally** whenever `.lazyboards.yml` already exists at the repo root,
+     regardless of any prior `lazyboards.enabled` state recorded in
+     `.cenci/config.json` — a stale or missing flag never causes this branch to be
+     skipped, since the check is driven by the file's presence on disk, not the
+     recorded flag:
      1. Read the existing file and derive the **recommended action set** this repo
         would generate above: Refine/Implement on `New`/`Refined`/`Planned`,
         pencil-gated Design on `Refined`, and per runnable/testable project a serve
