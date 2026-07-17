@@ -99,9 +99,27 @@ func (e *Engine) imageAgentLifecycleCurrent(image string) (bool, error) {
 	return strings.TrimSpace(string(out)) == imageAgentLifecycleValue, nil
 }
 
+// printPluginRefreshHint reminds after a user-invoked build that the
+// pipeline plugins live in the per-scope home volumes, not in image layers —
+// rebuilding an image never refreshes them.
+func (e *Engine) printPluginRefreshHint() {
+	_, _ = fmt.Fprintln(e.Stdout, "Note: pipeline plugins (cenci, cenci-watch) are provisioned per home volume, not baked into images — run `cenci sandbox update-plugins` to refresh existing sandboxes.")
+}
+
 // BuildBase builds the content-hash-tagged base image (plus the :latest
 // alias tag) from Dockerfile.base.
 func (e *Engine) BuildBase() error {
+	if err := e.buildBase(); err != nil {
+		return err
+	}
+	e.printPluginRefreshHint()
+	return nil
+}
+
+// buildBase is BuildBase without the plugin-refresh hint, shared with
+// ensureBaseImage so an implicit base build under BuildMonolith or
+// BuildRepoImage prints the hint exactly once, from the outer build.
+func (e *Engine) buildBase() error {
 	_, _ = fmt.Fprintf(e.Stdout, "Building %s with %s...\n", e.BaseImage(), e.Runtime)
 	cmd := e.command("build",
 		"-f", filepath.Join(e.AssetDir, "Dockerfile.base"),
@@ -125,7 +143,7 @@ func (e *Engine) ensureBaseImage() error {
 	if exists {
 		return nil
 	}
-	return e.BuildBase()
+	return e.buildBase()
 }
 
 // BuildMonolith builds the shared cenci-sandbox:latest image FROM the base,
@@ -143,6 +161,7 @@ func (e *Engine) BuildMonolith() error {
 		return fmt.Errorf("%s build %s: %w", e.Runtime, MonolithImage, err)
 	}
 	_, _ = fmt.Fprintln(e.Stdout, "Done.")
+	e.printPluginRefreshHint()
 	return nil
 }
 
@@ -160,6 +179,7 @@ func (e *Engine) BuildRepoImage(repoRoot, image string) error {
 		return fmt.Errorf("%s build %s: %w", e.Runtime, image, err)
 	}
 	_, _ = fmt.Fprintln(e.Stdout, "Done.")
+	e.printPluginRefreshHint()
 	return nil
 }
 
