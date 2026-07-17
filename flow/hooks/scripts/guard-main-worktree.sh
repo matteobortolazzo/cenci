@@ -25,13 +25,105 @@ if ! ROOT=$(git -C "$(pwd)" rev-parse --show-toplevel 2>/dev/null); then
 fi
 [ -f "$ROOT/.cenci/config.json" ] || [ -f "$ROOT/.claude/config.json" ] || exit 0
 
+command -v jq >/dev/null 2>&1 || {
+  echo "BLOCKED: jq is required by guard-main-worktree.sh but was not found on PATH." >&2
+  exit 2
+}
+
 INPUT=$(cat)
-FILE_PATH=$(echo "$INPUT" | grep -oE '"file_path"\s*:\s*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
-if [ -z "$FILE_PATH" ]; then
-  FILE_PATH=$(echo "$INPUT" | grep -oE '"filePath"\s*:\s*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+if ! FILE_PATH=$(printf '%s' "$INPUT" | jq -r '.tool_input.file_path // .tool_input.filePath // empty' 2>/dev/null); then
+  echo "BLOCKED: guard-main-worktree.sh could not parse the tool call's JSON input." >&2
+  exit 2
 fi
 
 [ -z "$FILE_PATH" ] && exit 0
+
+case "$FILE_PATH" in
+  /*) ;;
+  *)
+    echo "BLOCKED: guard-main-worktree.sh received a non-absolute file_path: $FILE_PATH" >&2
+    exit 2
+    ;;
+esac
+
+# Detect a path resolver able to canonicalize an *existing* path. Prefer
+# realpath; fall back to GNU readlink -f (probed via a known-existing path so
+# BSD/other readlink implementations that lack -f are rejected here, not at
+# use time). Neither available → fail closed.
+if command -v realpath >/dev/null 2>&1; then
+  resolve_path() { realpath "$1"; }
+elif readlink -f / >/dev/null 2>&1; then
+  resolve_path() { readlink -f "$1"; }
+else
+  echo "BLOCKED: guard-main-worktree.sh requires realpath or 'readlink -f' to canonicalize paths, neither was found on PATH." >&2
+  exit 2
+fi
+
+# Lexically collapse "." and ".." segments in an absolute path, without
+# touching the filesystem. Used both as the sole normalization for
+# not-yet-existing paths and as a final cleanup pass after a parent-anchored
+# resolve (whose re-appended tail may itself contain traversal segments).
+lexical_collapse() {
+  path="$1"
+  # Split on '/', rebuild collapsing '.' and '..' against the accumulated stack.
+  # Disable globbing for the unquoted split so path segments containing glob
+  # metacharacters (*, ?, [) are never pathname-expanded.
+  old_ifs=$IFS
+  IFS='/'
+  set -f
+  # shellcheck disable=SC2086 # intentional IFS='/' word-splitting to
+  # enumerate path segments; globbing is disabled via `set -f` above.
+  set -- $path
+  set +f
+  IFS=$old_ifs
+  result=""
+  for seg in "$@"; do
+    case "$seg" in
+      "" | ".") ;;
+      "..")
+        result="${result%/*}"
+        ;;
+      *)
+        result="$result/$seg"
+        ;;
+    esac
+  done
+  [ -z "$result" ] && result="/"
+  printf '%s\n' "$result"
+}
+
+# Parent-anchored canonicalization: only ever feed *existing* paths to the
+# resolver, sidestepping realpath/readlink -f divergence on non-existent
+# trailing components (no -m / -f-on-missing-target usage). When FILE_PATH
+# itself does not exist, walk up toward / to find the nearest *existing*
+# ancestor — not just the immediate parent — so a symlink several levels
+# above a not-yet-existing tail (e.g. .worktrees/link/existingsub/newdir/new.txt
+# where only "link" and "existingsub" exist) still gets resolved. "/" always
+# exists, so the walk is guaranteed to terminate.
+if [ -e "$FILE_PATH" ]; then
+  if ! FILE_PATH=$(resolve_path "$FILE_PATH"); then
+    echo "BLOCKED: guard-main-worktree.sh could not resolve $FILE_PATH" >&2
+    exit 2
+  fi
+else
+  ANCESTOR="$FILE_PATH"
+  TAIL=""
+  while [ -n "$ANCESTOR" ] && [ ! -d "$ANCESTOR" ]; do
+    SEG="${ANCESTOR##*/}"
+    if [ -z "$TAIL" ]; then
+      TAIL="$SEG"
+    else
+      TAIL="$SEG/$TAIL"
+    fi
+    ANCESTOR="${ANCESTOR%/*}"
+  done
+  [ -z "$ANCESTOR" ] && ANCESTOR="/"
+  if ! RESOLVED_ANCESTOR=$(resolve_path "$ANCESTOR"); then
+    echo "BLOCKED: guard-main-worktree.sh could not resolve $ANCESTOR" >&2
+    exit 2
+  fi
+  FILE_PATH=$(lexical_collapse "$RESOLVED_ANCESTOR/$TAIL")
+fi
 
 case "$FILE_PATH" in
   # Feature worktrees — the intended write target
