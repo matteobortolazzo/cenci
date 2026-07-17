@@ -301,3 +301,128 @@ func TestUpdate_UsesManagedWrapperInsteadOfPATHShadow(t *testing.T) {
 		t.Errorf("managed wrapper argv = %q, want update", got)
 	}
 }
+
+// -- uninstall -------------------------------------------------------------
+
+func TestUninstall_ExecsWrapperWithUninstallMode(t *testing.T) {
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "argv.txt")
+	writeFakeCenciInstaller(t, dir, capture, 0)
+
+	cmd := exec.Command(binaryPath, "uninstall")
+	cmd.Env = wrapperEnv(dir, dir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("uninstall: %v\n%s", err, output)
+	}
+
+	got := readCapturedArgv(t, capture)
+	if joinArgv(got) != "uninstall" {
+		t.Errorf("captured argv = %v, want [uninstall]", got)
+	}
+	if !strings.Contains(string(output), "cenci-installer stdout marker") {
+		t.Errorf("expected wrapper stdout forwarded, got:\n%s", output)
+	}
+}
+
+func TestUninstall_PropagatesWrapperExitCode(t *testing.T) {
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "argv.txt")
+	writeFakeCenciInstaller(t, dir, capture, 4)
+
+	cmd := exec.Command(binaryPath, "uninstall")
+	cmd.Env = wrapperEnv(dir, dir)
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
+	}
+	if exitErr.ExitCode() != 4 {
+		t.Errorf("exit code = %d, want 4", exitErr.ExitCode())
+	}
+}
+
+func TestUninstall_MissingManagedWrapper_Exits1WithClearError(t *testing.T) {
+	dir := t.TempDir() // no cenci-installer fake
+
+	cmd := exec.Command(binaryPath, "uninstall")
+	cmd.Env = wrapperEnv(dir, dir)
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("exit code = %d, want 1\n%s", exitErr.ExitCode(), output)
+	}
+	if !strings.Contains(string(output), "cenci") {
+		t.Errorf("expected error to mention the missing wrapper, got:\n%s", output)
+	}
+}
+
+func TestUninstall_TrailingArgument_Exits2NoExec(t *testing.T) {
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "argv.txt")
+	writeFakeCenciInstaller(t, dir, capture, 0)
+
+	cmd := exec.Command(binaryPath, "uninstall", "extra")
+	cmd.Env = wrapperEnv(dir, dir)
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
+	}
+	if exitErr.ExitCode() != 2 {
+		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
+	}
+	if _, err := os.Stat(capture); err == nil {
+		t.Error("expected cenci-installer to never be invoked for a trailing positional")
+	}
+}
+
+func TestUninstall_UnknownFlag_Exits2NoExec(t *testing.T) {
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "argv.txt")
+	writeFakeCenciInstaller(t, dir, capture, 0)
+
+	cmd := exec.Command(binaryPath, "uninstall", "--bogus")
+	cmd.Env = wrapperEnv(dir, dir)
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
+	}
+	if exitErr.ExitCode() != 2 {
+		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
+	}
+	if _, err := os.Stat(capture); err == nil {
+		t.Error("expected cenci-installer to never be invoked for an unknown flag")
+	}
+}
+
+func TestUninstall_UsesManagedWrapperInsteadOfPATHShadow(t *testing.T) {
+	home := t.TempDir()
+	capture := filepath.Join(home, "managed-argv.txt")
+	writeFakeCenciInstaller(t, home, capture, 0)
+	shadowDir := t.TempDir()
+	shadowCapture := filepath.Join(home, "shadow-ran")
+	exectest.WriteExecutable(t, filepath.Join(shadowDir, "cenci-installer"),
+		"#!/bin/sh\ntouch "+exectest.ShellQuote(shadowCapture)+"\nexit 0\n")
+
+	cmd := exec.Command(binaryPath, "uninstall")
+	cmd.Env = wrapperEnv(home, shadowDir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("uninstall: %v\n%s", err, output)
+	}
+	if _, err := os.Stat(shadowCapture); !os.IsNotExist(err) {
+		t.Fatalf("PATH-shadow wrapper ran: %v", err)
+	}
+	if got := joinArgv(readCapturedArgv(t, capture)); got != "uninstall" {
+		t.Errorf("managed wrapper argv = %q, want uninstall", got)
+	}
+}

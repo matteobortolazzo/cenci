@@ -74,6 +74,8 @@ Details: docs/migrating-to-cenci.md in the cenci repo.
 		runDoctor(os.Args[2:])
 	case "update":
 		runUpdate(os.Args[2:])
+	case "uninstall":
+		runUninstall(os.Args[2:])
 	case "version", "--version", "-version":
 		runVersion()
 	case "socket-dir":
@@ -108,6 +110,7 @@ Commands:
   open [shortcut]                    launch or attach an interactive sandbox session (aliased by the "cn" binary name)
   doctor                             check prerequisites and installed stack components, change nothing (delegates to the installed cenci-installer wrapper)
   update                             update installed plugins and restart the daemon (delegates to the installed cenci-installer wrapper)
+  uninstall                          remove installed plugins, PATH links, daemon, and config (delegates to the installed cenci-installer wrapper)
   version                            print the binary version
   socket-dir                         print the resolved socket directory
 
@@ -134,15 +137,16 @@ func runSocketDir() {
 	fmt.Println(dir)
 }
 
-// -- doctor / update ------------------------------------------------------
+// -- doctor / update / uninstall ------------------------------------------
 
 // wrapperBinaryName is the marketplace-backed front door installed on user
 // machines (see the repo-root `cenci` script), which routes
-// "doctor"/"update" into install.sh's MODE handling. `cenci
-// doctor`/`update` shell out to it rather than reimplementing installer logic
-// in Go, so there is exactly one implementation of each mode. It is installed
-// at ~/.local/bin/cenci-installer (not "cenci") to avoid colliding with the
-// "cenci" launcher symlink that points at this very daemon binary.
+// "doctor"/"update"/"uninstall" into install.sh's MODE handling. `cenci
+// doctor`/`update`/`uninstall` shell out to it rather than reimplementing
+// installer logic in Go, so there is exactly one implementation of each mode.
+// It is installed at ~/.local/bin/cenci-installer (not "cenci") to avoid
+// colliding with the "cenci" launcher symlink that points at this very
+// daemon binary.
 const wrapperBinaryName = "cenci-installer"
 
 // runDoctor implements `cenci doctor`: shells out to the installed
@@ -191,10 +195,19 @@ func runUpdate(args []string) {
 	runWrapperMode("update", forward)
 }
 
-// runWrapperMode is the shared implementation behind runDoctor/runUpdate: it
-// resolves the installer from the managed user path rather than accepting a
-// same-named PATH shadow, then runs it with inherited stdio and propagates its
-// exit code.
+// runUninstall implements `cenci uninstall`: shells out to the installed
+// `cenci uninstall` wrapper.
+func runUninstall(args []string) {
+	fs := flag.NewFlagSet("uninstall", flag.ExitOnError)
+	_ = fs.Parse(args)
+	rejectExtra("cenci uninstall", fs.Args())
+	runWrapperMode("uninstall", nil)
+}
+
+// runWrapperMode is the shared implementation behind
+// runDoctor/runUpdate/runUninstall: it resolves the installer from the
+// managed user path rather than accepting a same-named PATH shadow, then
+// runs it with inherited stdio and propagates its exit code.
 func runWrapperMode(mode string, args []string) {
 	home, err := os.UserHomeDir()
 	if err != nil {

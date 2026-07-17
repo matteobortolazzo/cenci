@@ -135,6 +135,17 @@ The components version independently. In particular, a `watch/v0.5.4` release is
 `cenci-watch` plugin release, so update output correctly reports it on the
 `cenci-watch` line rather than the `cenci` workflow-plugin line.
 
+## Uninstall
+
+```bash
+cenci uninstall
+```
+
+The command removes installed plugins, `PATH` links, the daemon, and config by
+delegating to the managed `cenci-installer uninstall` wrapper. `cenci uninstall`
+takes no flags or arguments; destructive flags like `--yes` and `--lazyboards`
+require invoking `cenci-installer uninstall` directly.
+
 ## Troubleshooting
 
 | Symptom | Resolution |

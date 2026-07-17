@@ -617,22 +617,28 @@ interactive session owns the TTY and its exit code propagates.
 binary; the retired `cenci-sand` name is a tombstone that prints a migration
 map and exits 2.
 
-## Installer integration (`cenci doctor`, `cenci update`)
+## Installer integration (`cenci doctor`, `cenci update`, `cenci uninstall`)
 
 ```bash
-cenci doctor   # check prerequisites and installed stack components, change nothing
-cenci update   # update installed plugins and restart the daemon
+cenci doctor      # check prerequisites and installed stack components, change nothing
+cenci update      # update installed plugins and restart the daemon
+cenci uninstall   # remove installed plugins, PATH links, daemon, and config
 ```
 
-Both shell out to the `cenci-installer` wrapper script installed on `PATH` (see the
-[root README](../README.md)), forwarding the mode — `cenci doctor` runs
-`cenci-installer doctor`, `cenci update` runs `cenci-installer update` — with stdio
-inherited and the wrapper's exit code propagated. This gives you a single
-entry point (`cenci doctor`/`update`) that reaches the same installer
-logic as running `cenci-installer doctor`/`update` directly. Neither verb takes any
-flags or extra arguments (exit 2 if given any). If `cenci-installer` isn't on
-`PATH`, both exit 1 with a clear error instead of silently doing nothing —
-re-run the [installer](#installation) to create it.
+All three shell out to the `cenci-installer` wrapper script installed on `PATH` (see
+the [root README](../README.md)), forwarding the mode — `cenci doctor` runs
+`cenci-installer doctor`, `cenci update` runs `cenci-installer update`, `cenci
+uninstall` runs `cenci-installer uninstall` — with stdio inherited and the wrapper's
+exit code propagated. This gives you a single entry point (`cenci
+doctor`/`update`/`uninstall`) that reaches the same installer logic as running
+`cenci-installer doctor`/`update`/`uninstall` directly. `cenci doctor` and `cenci
+uninstall` take no flags or extra arguments (exit 2 if given any); `cenci update`
+forwards a fixed set of flags (`--yes`/`-y`, `--build`/`--no-build`,
+`--lazyboards`/`--no-lazyboards`). Destructive flags like `--yes` and `--lazyboards`
+are not forwarded by `cenci uninstall` — invoke `cenci-installer uninstall` directly
+if you need them. If `cenci-installer` isn't on `PATH`, all three exit 1 with a clear
+error instead of silently doing nothing — re-run the [installer](#installation) to
+create it.
 
 `cenci update` also best-effort refreshes plugins in every currently running
 sandbox container (`cenci sandbox update-plugins --all`, after the image
