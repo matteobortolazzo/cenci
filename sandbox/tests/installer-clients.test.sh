@@ -51,6 +51,7 @@ case "$*" in
   "plugin marketplace add "*) touch "${CLAUDE_MARKETPLACE_FILE}"; exit 0 ;;
   "plugin marketplace update "*) [ ! -f "${CLAUDE_REFRESH_FAIL_FILE}" ]; exit $? ;;
   "plugin list")
+    [ ! -f "${CLAUDE_LIST_FAIL_FILE}" ] || exit 1
     for p in cenci cenci-watch cenci-sandbox; do
       [ -f "${CLAUDE_INSTALLED_FILE}-${p}" ] && printf '%s@cenci\n' "${p}"
     done
@@ -129,6 +130,54 @@ EOF
     chmod +x "${bootstrap}"
 }
 
+# prepare_broken_cenci_cache <home> <client> — provisions only the
+# version-pinned plugin cache manifest, with no bootstrap script and no
+# binary. Simulates an offline machine, unpublished release assets, or an
+# otherwise-unpopulated plugin cache: current_cenci_binary can't provision
+# anything from this cache.
+prepare_broken_cenci_cache() {
+    local home="$1" client="$2" root manifest_dir
+    if [[ "${client}" == claude ]]; then
+        root="${home}/.claude/plugins/cache/cenci/cenci-watch/1.0.0"
+        manifest_dir=.claude-plugin
+    else
+        root="${home}/.codex/plugins/cache/cenci/cenci-watch/1.0.0"
+        manifest_dir=.codex-plugin
+    fi
+    mkdir -p "${root}/${manifest_dir}"
+    printf '{"name":"cenci-watch","version":"1.0.0"}\n' >"${root}/${manifest_dir}/plugin.json"
+}
+
+# run_case_broken_cenci_cache <name> <mode-and-flags...> — like run_case, but
+# provisions a plugin cache with no bootstrap script (prepare_broken_cenci_cache)
+# instead of a working one, so current_cenci_binary can't provision the cenci
+# binary at all.
+run_case_broken_cenci_cache() {
+    local name="$1"
+    shift
+    local case_dir="${WORK}/${name}" home="${WORK}/${name}/home"
+    local bin="${WORK}/${name}/bin" output="${WORK}/${name}/output" calls="${WORK}/${name}/calls"
+    mkdir -p "${home}" "${bin}"
+    : >"${calls}"
+    make_common_tools "${bin}"
+    make_claude "${bin}"
+    prepare_checkout "${home}" claude
+    prepare_broken_cenci_cache "${home}" claude
+
+    set +e
+    env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
+        CLAUDE_MARKETPLACE_FILE="${case_dir}/claude-marketplace" \
+        CLAUDE_REFRESH_FAIL_FILE="${case_dir}/claude-refresh-fail" \
+        CLAUDE_LIST_FAIL_FILE="${case_dir}/claude-list-fail" \
+        CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
+        bash "${ROOT}/install.sh" --yes --no-build "$@" >"${output}" 2>&1
+    CASE_EXIT=$?
+    set -e
+    CASE_OUTPUT="${output}"
+    CASE_CALLS="${calls}"
+    CASE_HOME="${home}"
+}
+
 # prepare_cache_cenci <home> <client> — provision a fake cenci binary in the
 # version-pinned plugin cache (what current_cenci_binary resolves), logging
 # every invocation to CALLS_FILE, so the `cenci sandbox build` step can run.
@@ -171,6 +220,7 @@ run_case() {
     env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
         CLAUDE_MARKETPLACE_FILE="${case_dir}/claude-marketplace" \
         CLAUDE_REFRESH_FAIL_FILE="${case_dir}/claude-refresh-fail" \
+        CLAUDE_LIST_FAIL_FILE="${case_dir}/claude-list-fail" \
         CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
         CODEX_MARKETPLACE_FILE="${case_dir}/codex-marketplace" \
         CODEX_INSTALLED_FILE="${case_dir}/codex-installed" \
@@ -386,6 +436,25 @@ run_case "${name}" claude
 assert_contains "${CASE_OUTPUT}" "could not refresh marketplace"
 assert_not_contains "${CASE_OUTPUT}" "Claude: cenci updated"
 
+echo "case: a plugin-list query failure is visible and non-zero, not a false 'not installed'"
+name=list-failure
+mkdir -p "${WORK}/${name}"
+touch "${WORK}/${name}/claude-marketplace" "${WORK}/${name}/claude-list-fail"
+run_case "${name}" claude
+[[ "${CASE_EXIT}" -ne 0 ]]
+assert_contains "${CASE_OUTPUT}" "could not query installed plugins"
+
+echo "case: a fresh install degrades gracefully when the cenci-watch bootstrap can't provision a binary yet"
+run_case_broken_cenci_cache bootstrap-unavailable-install
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_contains "${CASE_OUTPUT}" "could not provision the cenci binary yet"
+assert_not_contains "${CASE_OUTPUT}" "could not provision the cenci binary from the installed cenci-watch plugin"
+
+echo "case: an update still hard-fails when the cenci-watch bootstrap can't provision a binary"
+run_case_broken_cenci_cache bootstrap-unavailable-update update
+[[ "${CASE_EXIT}" -ne 0 ]]
+assert_contains "${CASE_OUTPUT}" "could not provision the cenci binary from the installed cenci-watch plugin"
+
 echo "case: no supported client fails with a client-specific diagnostic"
 run_case none none
 [[ "${CASE_EXIT}" -ne 0 ]]
@@ -454,5 +523,84 @@ assert_not_contains "${CASE_CALLS}" "sk-test-sentinel-should-not-leak"
 assert_not_contains "${CASE_OUTPUT}" "sk-test-sentinel-should-not-leak"
 assert_not_contains "${CASE_CALLS}" "ctx7-test-sentinel-should-not-leak"
 assert_not_contains "${CASE_OUTPUT}" "ctx7-test-sentinel-should-not-leak"
+
+# --- Direct coverage of the repo-root `cenci` wrapper itself (the stable
+# front door installed at ~/.local/bin/cenci-installer): it decides whether
+# to refresh the owning client's marketplace checkout before exec'ing
+# install.sh, and refuses to run as an updater from an unmanaged copy.
+
+echo "case: the cenci wrapper's --help skips the marketplace refresh entirely"
+name=wrapper-help
+home="${WORK}/${name}/home" bin="${WORK}/${name}/bin"
+output="${WORK}/${name}/output" calls="${WORK}/${name}/calls"
+mkdir -p "${home}" "${bin}"
+: >"${calls}"
+make_common_tools "${bin}"
+make_claude "${bin}"
+prepare_checkout "${home}" claude
+
+set +e
+env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
+    "${home}/.claude/plugins/marketplaces/cenci/cenci" --help >"${output}" 2>&1
+wrapper_help_exit=$?
+set -e
+[[ "${wrapper_help_exit}" -eq 0 ]]
+assert_contains "${output}" "Usage:"
+assert_not_contains "${calls}" "claude plugin marketplace update"
+
+echo "case: the cenci wrapper still refreshes the marketplace when ~/.claude is itself a symlink"
+name=wrapper-symlinked-claude-home
+case_dir="${WORK}/${name}" home="${WORK}/${name}/home"
+bin="${WORK}/${name}/bin" output="${WORK}/${name}/output" calls="${WORK}/${name}/calls"
+mkdir -p "${home}" "${bin}"
+: >"${calls}"
+make_common_tools "${bin}"
+make_claude "${bin}"
+
+real_claude_dir="${home}/dot-claude"
+checkout="${real_claude_dir}/plugins/marketplaces/cenci"
+mkdir -p "${checkout}"
+cp "${ROOT}/cenci" "${checkout}/cenci"
+chmod +x "${checkout}/cenci"
+cp "${ROOT}/install.sh" "${checkout}/install.sh"
+ln -s "${real_claude_dir}" "${home}/.claude"
+prepare_bootstrap_cenci "${home}" claude
+
+set +e
+env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
+    CLAUDE_MARKETPLACE_FILE="${case_dir}/claude-marketplace" \
+    CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
+    "${home}/.claude/plugins/marketplaces/cenci/cenci" update --yes >"${output}" 2>&1
+wrapper_update_exit=$?
+set -e
+[[ "${wrapper_update_exit}" -eq 0 ]]
+assert_contains "${calls}" "claude plugin marketplace update cenci"
+
+echo "case: the cenci wrapper refuses to update from an unexpected installer root, but --help still works"
+name=wrapper-unexpected-root
+plain="${WORK}/${name}/plain" bin="${WORK}/${name}/bin"
+mkdir -p "${plain}" "${WORK}/${name}/home" "${bin}"
+make_common_tools "${bin}"
+cp "${ROOT}/cenci" "${plain}/cenci"
+chmod +x "${plain}/cenci"
+cp "${ROOT}/install.sh" "${plain}/install.sh"
+
+update_output="${WORK}/${name}/update-output"
+set +e
+env -i HOME="${WORK}/${name}/home" PATH="${bin}" \
+    "${plain}/cenci" update >"${update_output}" 2>&1
+wrapper_root_update_exit=$?
+set -e
+[[ "${wrapper_root_update_exit}" -ne 0 ]]
+assert_contains "${update_output}" "refusing to update from unexpected installer root"
+
+help_output="${WORK}/${name}/help-output"
+set +e
+env -i HOME="${WORK}/${name}/home" PATH="${bin}" \
+    "${plain}/cenci" --help >"${help_output}" 2>&1
+wrapper_root_help_exit=$?
+set -e
+[[ "${wrapper_root_help_exit}" -eq 0 ]]
+assert_contains "${help_output}" "Usage:"
 
 echo "passed: client detection, installation, launchers, and summaries"

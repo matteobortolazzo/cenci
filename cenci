@@ -46,12 +46,35 @@ if [[ ! -f "${installer}" ]]; then
 	exit 1
 fi
 
-if [[ "${1:-}" != doctor ]]; then
+case "${1:-}" in
+doctor | --help | -h)
+	# doctor is strictly local/read-only, and install.sh handles --help/-h
+	# itself after exec. None of these should pay for (or require) a
+	# checkout refresh, and a read-only invocation from a copied wrapper
+	# should still work.
+	;;
+*)
+	managed_claude_dir=${HOME}/.claude/plugins/marketplaces/cenci
+	resolved_claude_dir=""
+	if [[ -d "${managed_claude_dir}" ]]; then
+		if ! resolved_claude_dir=$(cd -P "${managed_claude_dir}" >/dev/null 2>&1 && pwd); then
+			resolved_claude_dir=""
+		fi
+	fi
+
+	managed_codex_dir=${HOME}/.codex/plugins/marketplaces/cenci
+	resolved_codex_dir=""
+	if [[ -d "${managed_codex_dir}" ]]; then
+		if ! resolved_codex_dir=$(cd -P "${managed_codex_dir}" >/dev/null 2>&1 && pwd); then
+			resolved_codex_dir=""
+		fi
+	fi
+
 	case "${source_dir}" in
-	"${HOME}/.claude/plugins/marketplaces/cenci")
+	"${resolved_claude_dir}")
 		claude plugin marketplace update cenci >/dev/null
 		;;
-	"${HOME}/.codex/plugins/marketplaces/cenci")
+	"${resolved_codex_dir}")
 		codex plugin marketplace upgrade cenci >/dev/null
 		;;
 	*)
@@ -64,6 +87,7 @@ if [[ "${1:-}" != doctor ]]; then
 		fi
 		;;
 	esac
-fi
+	;;
+esac
 
 exec bash "${installer}" "$@"

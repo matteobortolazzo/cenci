@@ -789,9 +789,9 @@ current_cenci_binary() {
 	fi
 	if [ -f "$bootstrap" ]; then
 		if [ "$root_var" = PLUGIN_ROOT ]; then
-			PLUGIN_ROOT="$root" bash "$bootstrap" || return 1
+			PLUGIN_ROOT="$root" bash "$bootstrap" >/dev/null || return 1
 		else
-			CLAUDE_PLUGIN_ROOT="$root" bash "$bootstrap" || return 1
+			CLAUDE_PLUGIN_ROOT="$root" bash "$bootstrap" >/dev/null || return 1
 		fi
 	else
 		return 1
@@ -864,20 +864,25 @@ step_cenci_watch_setup() {
 	local cache_bin=""
 	cache_bin="$(current_cenci_binary || true)"
 	if [ -z "$cache_bin" ]; then
-		fail "could not provision the cenci binary from the installed cenci-watch plugin"
-		INSTALL_FAILED=1
+		if [ "$MODE" = update ]; then
+			fail "could not provision the cenci binary from the installed cenci-watch plugin"
+			INSTALL_FAILED=1
+		else
+			warn "could not provision the cenci binary yet — the first agent session bootstraps it"
+			say "  ${DIM}this can happen offline, or before release assets or the plugin cache are populated; log: \${TMPDIR:-/tmp}/cenci-bootstrap.log${RESET}"
+		fi
 		return 0
 	fi
 
-	ok "the binary and daemon self-bootstrap on your first agent session"
+	ok "the cenci binary is provisioned — the daemon self-manages from here"
 	say "  ${DIM}first session may take a moment before status appears; log: \${TMPDIR:-/tmp}/cenci-bootstrap.log${RESET}"
 
 	if [ "$OS" != macos ]; then
 		setup_cenci_linux_path "$cache_bin"
 		setup_cenci_linux_widgets
-			if [ "$MODE" = update ] && ! restart_cenci_daemon "$cache_bin"; then
-				INSTALL_FAILED=1
-			fi
+		if [ "$MODE" = update ] && ! restart_cenci_daemon "$cache_bin"; then
+			INSTALL_FAILED=1
+		fi
 		return 0
 	fi
 	if [ "$MODE" = update ] && ! restart_cenci_daemon "$cache_bin"; then
@@ -1035,7 +1040,7 @@ setup_cenci_linux_widgets() {
 # opt-in (prompt or --lazyboards), update only refreshes an existing install.
 
 lazyboards_managed_binary() {
-	[ -x "$HOME/.local/bin/lazyboards" ] || return 1
+	[ -x "$HOME/.local/bin/lazyboards" ] && [ ! -L "$HOME/.local/bin/lazyboards" ] || return 1
 	printf '%s\n' "$HOME/.local/bin/lazyboards"
 }
 
@@ -1132,7 +1137,7 @@ install_lazyboards_binary() {
 		rm -rf "$tmp"
 		return 1
 	fi
-	if ! cp "$tmp/lazyboards" "$staged" || ! chmod +x "$staged"; then
+	if ! cp "$tmp/lazyboards" "$staged" || ! chmod 755 "$staged"; then
 		fail "lazyboards: could not stage the verified binary"
 		rm -f "$staged"
 		rm -rf "$tmp"
@@ -1195,7 +1200,7 @@ seed_lazyboards_config() {
 }
 
 step_lazyboards_setup() {
-	local installed_ver latest_ver path_bin="" present=0
+	local installed_ver latest_ver path_bin="" managed_present=0
 	# An explicit skip applies in every mode, including updates of an existing
 	# binary. Flags must override auto-detection rather than merely suppressing
 	# a first-time install.
@@ -1204,13 +1209,24 @@ step_lazyboards_setup() {
 	fi
 	installed_ver="$(lazyboards_installed_version || true)"
 	path_bin="$(lazyboards_path_binary || true)"
-	if lazyboards_managed_binary >/dev/null 2>&1 || [ -n "$path_bin" ]; then
-		present=1
+	if lazyboards_managed_binary >/dev/null 2>&1; then
+		managed_present=1
 	fi
 
-	if [ "$present" -eq 0 ] && [ "$LAZYBOARDS" = no ]; then
+	# An unmanaged lazyboards found only on PATH (never installed by this
+	# installer) must never be silently adopted or shadowed by a fresh managed
+	# install — that's exactly what run_doctor already tells the user to
+	# reconcile by hand. Only an explicit --lazyboards proceeds past this
+	# point; every other mode (ask, or auto no from --yes) just surfaces the
+	# same reconcile hint doctor gives.
+	if [ "$managed_present" -eq 0 ] && [ -n "$path_bin" ] && [ "$LAZYBOARDS" != yes ]; then
+		warn "unmanaged lazyboards found at $path_bin — reconcile it with: cenci update --lazyboards"
 		return 0
-	elif [ "$present" -eq 0 ] && [ "$LAZYBOARDS" = ask ]; then
+	fi
+
+	if [ "$managed_present" -eq 0 ] && [ -z "$path_bin" ] && [ "$LAZYBOARDS" = no ]; then
+		return 0
+	elif [ "$managed_present" -eq 0 ] && [ -z "$path_bin" ] && [ "$LAZYBOARDS" = ask ]; then
 		if ! ask_yn "Install lazyboards (kanban board that dispatches the cenci workflow)?" y; then
 			say "  ${DIM}skipped — install later with: cenci-installer --lazyboards${RESET}"
 			return 0

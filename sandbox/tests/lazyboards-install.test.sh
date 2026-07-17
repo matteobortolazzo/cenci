@@ -253,6 +253,17 @@ run_installer default-skip --yes --no-build
 assert_not_contains "${CASE_CURL_LOG}" "releases/latest"
 assert_not_contains "${CASE_CURL_LOG}" "releases/download"
 
+echo "case: an unmanaged lazyboards found only on PATH is left alone with a reconcile hint, not silently adopted"
+name=path-only-unmanaged
+make_path_lazyboards "${WORK}/${name}/bin/lazyboards" 1.0.0
+run_installer "${name}" --yes --no-build
+[[ "${CASE_EXIT}" -eq 0 ]]
+[[ ! -e "${CASE_HOME}/.local/bin/lazyboards" ]]
+assert_contains "${CASE_OUTPUT}" "unmanaged lazyboards found at"
+assert_contains "${CASE_OUTPUT}" "reconcile it with: cenci update --lazyboards"
+assert_not_contains "${CASE_CURL_LOG}" "releases/latest"
+assert_not_contains "${CASE_CURL_LOG}" "releases/download"
+
 echo "case: a checksum mismatch fails the step and installs nothing"
 sed 's/^[0-9a-f]\{8\}/deadbeef/' "${RELEASE_DIR}/checksums.txt" >"${RELEASE_DIR}/checksums.txt.tmp"
 mv "${RELEASE_DIR}/checksums.txt.tmp" "${RELEASE_DIR}/checksums.txt"
@@ -297,6 +308,27 @@ run_installer "${name}" --yes --no-build --lazyboards
 [[ "${CASE_EXIT}" -ne 0 ]]
 [[ "$(cat "${sentinel}")" == keep-me ]]
 [[ -L "${CASE_HOME}/.local/bin/lazyboards" ]]
+
+# Regression (#448): a symlinked ~/.local/bin/lazyboards used to be treated as
+# a managed install (lazyboards_managed_binary didn't check -L), so a plain
+# `update --yes` (no --lazyboards) fell through to install_lazyboards_binary,
+# which then permanently hard-failed on every future update because it
+# refuses to overwrite a symlinked dest. It must instead be recognized as
+# unmanaged and left alone with the same reconcile hint doctor gives.
+echo "case: update leaves a symlinked ~/.local/bin/lazyboards untouched with a reconcile hint, not a permanent hard failure"
+name=symlink-target-update
+target="${WORK}/${name}/target/lazyboards"
+make_path_lazyboards "${target}" 1.0.0
+mkdir -p "${WORK}/${name}/home/.local/bin"
+ln -s "${target}" "${WORK}/${name}/home/.local/bin/lazyboards"
+run_installer "${name}" update --yes --no-build
+[[ "${CASE_EXIT}" -eq 0 ]]
+[[ -L "${CASE_HOME}/.local/bin/lazyboards" ]]
+[[ "$(readlink "${CASE_HOME}/.local/bin/lazyboards")" == "${target}" ]]
+assert_contains "${CASE_OUTPUT}" "unmanaged lazyboards found at"
+assert_contains "${CASE_OUTPUT}" "reconcile it with: cenci update --lazyboards"
+assert_not_contains "${CASE_CURL_LOG}" "releases/latest"
+assert_not_contains "${CASE_CURL_LOG}" "releases/download"
 
 echo "case: update leaves an up-to-date lazyboards alone"
 name=update-current
