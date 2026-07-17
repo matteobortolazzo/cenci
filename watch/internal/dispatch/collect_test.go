@@ -149,7 +149,7 @@ func TestReadPlansStalenessPaths(t *testing.T) {
 	dir := t.TempDir()
 	writePlan(t, dir, "42-scoped.md", `---
 ticketId: 42
-status: approved
+status: planned
 planCommitSha: aaa111
 stalenessPaths: watch, plugin/hooks,
 ---
@@ -157,7 +157,7 @@ body
 `)
 	writePlan(t, dir, "43-whole-repo.md", `---
 ticketId: 43
-status: approved
+status: planned
 planCommitSha: bbb222
 ---
 body

@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -69,9 +70,15 @@ func SetLoopEnabled(path string, enabled bool) error {
 // A LoadConfig error (malformed/unreadable config.json) is logged to
 // out via the same logf convention as reloadConfig -- unlike the intentional
 // socket-unreachable fallback above, a broken config must not masquerade as a
-// silent "loop disabled" with no signal to the caller.
+// silent "loop disabled" with no signal to the caller. Similarly, when the
+// fallback is triggered by a ReadSnapshot error other than
+// watch.ErrDaemonUnreachable (for example a corrupt/truncated snapshot or a
+// permission-denied socket -- the daemon was reached but then failed), the
+// real error is surfaced via the returned state's ResolveError field (#446);
+// a genuinely unreachable daemon (no listener at all) stays silent.
 func ResolveDispatchState(configPath, socketPath string, out io.Writer) watch.DispatchState {
-	if snap, err := ReadSnapshot(socketPath); err == nil && snap != nil && snap.Dispatch != nil {
+	snap, snapErr := ReadSnapshot(socketPath)
+	if snapErr == nil && snap != nil && snap.Dispatch != nil {
 		return *snap.Dispatch
 	}
 
@@ -85,6 +92,9 @@ func ResolveDispatchState(configPath, socketPath string, out io.Writer) watch.Di
 	}
 	if cfg.DaemonInterval > 0 {
 		state.Interval = formatInterval(cfg.DaemonInterval)
+	}
+	if snapErr != nil && !errors.Is(snapErr, watch.ErrDaemonUnreachable) {
+		state.ResolveError = snapErr.Error()
 	}
 	return state
 }

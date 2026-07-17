@@ -108,7 +108,7 @@ func (s *memStore) Save(state ReconcileState) error {
 func deadWorkingDeps(now time.Time) reconcileDeps {
 	return reconcileDeps{
 		Tickets:  []Ticket{{Repo: "o/r", Number: 42, Title: "Fix thing", Labels: []string{"Working"}}},
-		Plans:    []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "approved"}},
+		Plans:    []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "planned"}},
 		Snapshot: &watch.StateSnapshot{},
 		Attempts: map[string]int{},
 		Now:      now,

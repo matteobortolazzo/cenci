@@ -484,8 +484,12 @@ run_doctor() {
 		else
 			ok "lazyboards installed"
 		fi
-		if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/lazyboards/config.yml" ]; then
+		local lb_config="${XDG_CONFIG_HOME:-$HOME/.config}/lazyboards/config.yml"
+		if [ -f "$lb_config" ]; then
 			ok "board config present (~/.config/lazyboards/config.yml)"
+			if grep -q 'git fetch origin {pr_branch}' "$lb_config" 2>/dev/null; then
+				warn "Checkout PR action uses the vulnerable git fetch/git switch pattern — update to gh pr checkout {pr_number}"
+			fi
 		else
 			warn "no board config — $seed_hint"
 		fi

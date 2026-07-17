@@ -358,6 +358,45 @@ run_installer "${name}" doctor
 assert_contains "${CASE_OUTPUT}" "lazyboards installed (v${FAKE_VER})"
 assert_contains "${CASE_OUTPUT}" "board config present"
 
+echo "case: doctor warns (without failing) when the installed board config still has the vulnerable Checkout PR pattern"
+name=doctor-vulnerable-config
+make_installed_lazyboards "${WORK}/${name}/home" "${FAKE_VER}"
+mkdir -p "${WORK}/${name}/home/.config/lazyboards"
+cat >"${WORK}/${name}/home/.config/lazyboards/config.yml" <<'EOF'
+columns:
+  - name: In Review
+    actions:
+      W:
+        name: Checkout PR
+        type: shell
+        scope: pr
+        command: 'tmux new-window -d -n pr-{pr_number} "git fetch origin {pr_branch} && git switch {pr_branch}"'
+EOF
+run_installer "${name}" doctor
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_contains "${CASE_OUTPUT}" "board config present"
+assert_contains "${CASE_OUTPUT}" "Checkout PR action uses the vulnerable git fetch/git switch pattern"
+assert_contains "${CASE_OUTPUT}" "update to gh pr checkout {pr_number}"
+
+echo "case: doctor stays clean when the installed board config already uses gh pr checkout"
+name=doctor-clean-config
+make_installed_lazyboards "${WORK}/${name}/home" "${FAKE_VER}"
+mkdir -p "${WORK}/${name}/home/.config/lazyboards"
+cat >"${WORK}/${name}/home/.config/lazyboards/config.yml" <<'EOF'
+columns:
+  - name: In Review
+    actions:
+      W:
+        name: Checkout PR
+        type: shell
+        scope: pr
+        command: 'tmux new-window -d -n pr-{pr_number} "gh pr checkout {pr_number}"'
+EOF
+run_installer "${name}" doctor
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_contains "${CASE_OUTPUT}" "board config present"
+assert_not_contains "${CASE_OUTPUT}" "Checkout PR action uses the vulnerable git fetch/git switch pattern"
+
 echo "case: docs/orchestration.md board config block matches flow/templates/lazyboards-config.yml byte-for-byte"
 EXTRACTED="${WORK}/orchestration-config.yml"
 awk '/^## The board config/{s=1} s && /^```yaml$/{f=1; next} f && /^```$/{exit} f{print}' \
@@ -420,7 +459,7 @@ assert_contains "${PLANNED_COL}" 'command: "cenci run implement {number}"'
 
 echo "case: 5f template keeps the global Checkout PR fallback for In Review when there are zero runnable projects"
 assert_contains "${EXTRACTED_5F}" \
-    'tmux new-window -d -n pr-{pr_number} "git fetch origin {pr_branch} && git switch {pr_branch}"'
+    'tmux new-window -d -n pr-{pr_number} "gh pr checkout {pr_number}"'
 
 echo "case: 5f template never re-emits Designed or Implemented as generated columns"
 assert_not_contains "${EXTRACTED_5F}" "- name: Designed"

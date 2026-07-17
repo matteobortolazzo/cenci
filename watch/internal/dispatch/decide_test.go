@@ -25,12 +25,12 @@ func snapshot(running, needInput int, windows ...watch.WindowState) *watch.State
 	}
 }
 
-// baseInputs is the happy path: one Planned ticket #42 with an approved, fresh
+// baseInputs is the happy path: one Planned ticket #42 with a planned, fresh
 // plan and a reachable, idle daemon.
 func baseInputs() Inputs {
 	return Inputs{
 		Tickets:     []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}}},
-		Plans:       []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "approved"}},
+		Plans:       []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "planned"}},
 		Snapshot:    snapshot(0, 0),
 		Budgets:     FloorProvider{},
 		Now:         time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC),
@@ -127,9 +127,9 @@ func TestDecideGates(t *testing.T) {
 			want:   []wantDecision{{42, ActionSkip, "no plan file", ""}},
 		},
 		{
-			name:   "unapproved plan",
+			name:   "plan not ready",
 			mutate: func(in *Inputs) { in.Plans[0].Status = "draft" },
-			want:   []wantDecision{{42, ActionSkip, "plan not approved", ""}},
+			want:   []wantDecision{{42, ActionSkip, "plan not ready", ""}},
 		},
 		{
 			name:   "stale plan",
@@ -265,9 +265,9 @@ func TestDecideOrderingDeterminism(t *testing.T) {
 		{Repo: "o/r", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
 	}
 	in.Plans = []Plan{
-		{Repo: "o/r", Path: ".plans/99.md", TicketID: 99, Status: "approved"},
-		{Repo: "o/r", Path: ".plans/7.md", TicketID: 7, Status: "approved"},
-		{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "approved"},
+		{Repo: "o/r", Path: ".plans/99.md", TicketID: 99, Status: "planned"},
+		{Repo: "o/r", Path: ".plans/7.md", TicketID: 7, Status: "planned"},
+		{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "planned"},
 	}
 	got := Decide(in)
 	nums := []int{got[0].Ticket.Number, got[1].Ticket.Number, got[2].Ticket.Number}
@@ -289,9 +289,9 @@ func TestDecideMultiDispatchRespectsCaps(t *testing.T) {
 		{Repo: "o/r", Number: 3, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
 	}
 	in.Plans = []Plan{
-		{Repo: "o/r", Path: ".plans/1.md", TicketID: 1, Status: "approved"},
-		{Repo: "o/r", Path: ".plans/2.md", TicketID: 2, Status: "approved"},
-		{Repo: "o/r", Path: ".plans/3.md", TicketID: 3, Status: "approved"},
+		{Repo: "o/r", Path: ".plans/1.md", TicketID: 1, Status: "planned"},
+		{Repo: "o/r", Path: ".plans/2.md", TicketID: 2, Status: "planned"},
+		{Repo: "o/r", Path: ".plans/3.md", TicketID: 3, Status: "planned"},
 	}
 	// Two dispatch (filling the cap of 2), the third is capped.
 	assertDecisions(t, Decide(in), []wantDecision{
@@ -310,8 +310,8 @@ func TestDecideSiblingSerialization(t *testing.T) {
 			{Repo: "o/r", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
 		}
 		in.Plans = []Plan{
-			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "approved", IsChild: true, ParentID: 40},
-			{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "approved", IsChild: true, ParentID: 40},
+			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "planned", IsChild: true, ParentID: 40},
+			{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "planned", IsChild: true, ParentID: 40},
 		}
 		assertDecisions(t, Decide(in), []wantDecision{
 			{41, ActionSkip, "not Planned", ""},
@@ -327,8 +327,8 @@ func TestDecideSiblingSerialization(t *testing.T) {
 			{Repo: "o/r", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
 		}
 		in.Plans = []Plan{
-			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "approved", IsChild: true, ParentID: 40},
-			{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "approved", IsChild: true, ParentID: 40},
+			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "planned", IsChild: true, ParentID: 40},
+			{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "planned", IsChild: true, ParentID: 40},
 		}
 		in.Snapshot = snapshot(1, 0, watch.WindowState{WindowName: "41-foo", Status: "running"})
 		assertDecisions(t, Decide(in), []wantDecision{
@@ -345,8 +345,8 @@ func TestDecideSiblingSerialization(t *testing.T) {
 			{Repo: "o/r", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
 		}
 		in.Plans = []Plan{
-			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "approved", IsChild: true, ParentID: 40},
-			{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "approved", IsChild: true, ParentID: 40},
+			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "planned", IsChild: true, ParentID: 40},
+			{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "planned", IsChild: true, ParentID: 40},
 		}
 		assertDecisions(t, Decide(in), []wantDecision{
 			{41, ActionDispatch, "dispatch", ""},
@@ -362,8 +362,8 @@ func TestDecideSiblingSerialization(t *testing.T) {
 			{Repo: "o/r", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
 		}
 		in.Plans = []Plan{
-			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "approved", IsChild: true, ParentID: 30},
-			{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "approved", IsChild: true, ParentID: 40},
+			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "planned", IsChild: true, ParentID: 30},
+			{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "planned", IsChild: true, ParentID: 40},
 		}
 		assertDecisions(t, Decide(in), []wantDecision{
 			{41, ActionDispatch, "dispatch", ""},
@@ -379,8 +379,8 @@ func TestDecideSiblingSerialization(t *testing.T) {
 			{Repo: "o/r", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
 		}
 		in.Plans = []Plan{
-			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "approved", IsChild: true, ParentID: 40},
-			{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "approved"}, // not a child
+			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "planned", IsChild: true, ParentID: 40},
+			{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "planned"}, // not a child
 		}
 		assertDecisions(t, Decide(in), []wantDecision{
 			{41, ActionSkip, "not Planned", ""},
@@ -396,8 +396,8 @@ func TestDecideSiblingSerialization(t *testing.T) {
 			{Repo: "o/r", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
 		}
 		in.Plans = []Plan{
-			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "approved", IsChild: true, ParentID: 40}, // ticket closed/absent
-			{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "approved", IsChild: true, ParentID: 40},
+			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "planned", IsChild: true, ParentID: 40}, // ticket closed/absent
+			{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "planned", IsChild: true, ParentID: 40},
 		}
 		assertDecisions(t, Decide(in), []wantDecision{
 			{42, ActionDispatch, "dispatch", ""},
@@ -415,8 +415,8 @@ func TestDecideMultiRepoNoNumberCollision(t *testing.T) {
 		{Repo: "o/b", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
 	}
 	in.Plans = []Plan{
-		{Repo: "o/a", Path: ".plans/42-a.md", TicketID: 42, Status: "approved"},
-		{Repo: "o/b", Path: ".plans/42-b.md", TicketID: 42, Status: "approved"},
+		{Repo: "o/a", Path: ".plans/42-a.md", TicketID: 42, Status: "planned"},
+		{Repo: "o/b", Path: ".plans/42-b.md", TicketID: 42, Status: "planned"},
 	}
 	got := Decide(in)
 	if len(got) != 2 {
@@ -441,8 +441,8 @@ func TestDecideMultiRepoSiblingsIndependent(t *testing.T) {
 		{Repo: "o/b", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}}, // child in repo b, parent #40
 	}
 	in.Plans = []Plan{
-		{Repo: "o/a", Path: ".plans/41.md", TicketID: 41, Status: "approved", IsChild: true, ParentID: 40},
-		{Repo: "o/b", Path: ".plans/42.md", TicketID: 42, Status: "approved", IsChild: true, ParentID: 40},
+		{Repo: "o/a", Path: ".plans/41.md", TicketID: 41, Status: "planned", IsChild: true, ParentID: 40},
+		{Repo: "o/b", Path: ".plans/42.md", TicketID: 42, Status: "planned", IsChild: true, ParentID: 40},
 	}
 	assertDecisions(t, Decide(in), []wantDecision{
 		{41, ActionSkip, "not Planned", ""},

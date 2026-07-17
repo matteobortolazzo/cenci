@@ -101,13 +101,13 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 		return skip("multiple assignees")
 	}
 
-	// Pickup rule 3: an approved plan exists.
+	// Pickup rule 3: a planned plan exists.
 	plan := planByTicket[planKey(t.Repo, t.Number)]
 	if plan == nil {
 		return skip("no plan file")
 	}
-	if plan.Status != "approved" {
-		return skip("plan not approved")
+	if plan.Status != "planned" {
+		return skip("plan not ready")
 	}
 
 	// Pickup rule 4: plan freshness.

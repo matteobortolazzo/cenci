@@ -23,6 +23,15 @@ func tempSocket(t *testing.T) string {
 	return filepath.Join(dir, "s.sock")
 }
 
+func TestDial_NoListenerReturnsErrDaemonUnreachable(t *testing.T) {
+	path := tempSocket(t) // no listener bound to this path
+
+	_, err := watch.Dial(path)
+	if !errors.Is(err, watch.ErrDaemonUnreachable) {
+		t.Fatalf("Dial = %v, want errors.Is(err, watch.ErrDaemonUnreachable)", err)
+	}
+}
+
 func TestClient_ReadsSnapshotsInOrderThenClose(t *testing.T) {
 	path := tempSocket(t)
 

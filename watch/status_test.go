@@ -3,6 +3,8 @@ package main_test
 import (
 	"context"
 	"encoding/json"
+	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -102,6 +104,144 @@ func TestStatusSubcommand_HumanReadable_DegradesGracefullyWithNoDaemon(t *testin
 	}
 	if !strings.Contains(string(output), "sessions: unavailable") {
 		t.Errorf("expected sessions to be reported unavailable, got:\n%s", output)
+	}
+}
+
+// TestStatusSubcommand_HumanReadable_CorruptSnapshotShowsRealError covers
+// #412: a daemon that accepts the connection (Dial succeeds — the daemon IS
+// reachable) but then sends a malformed/truncated NDJSON line must not be
+// reported as "daemon not reachable". The real decode error must surface via
+// "sessions: unavailable (error reading snapshot: <err>)" so a corrupt
+// snapshot is distinguishable from the daemon simply not running.
+func TestStatusSubcommand_HumanReadable_CorruptSnapshotShowsRealError(t *testing.T) {
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "corrupt.sock")
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	// renderHumanStatus dials the socket twice (once for the session snapshot,
+	// once more inside ResolveDispatchState for the embedded dispatch-loop
+	// state), so the fake daemon must keep accepting connections until the
+	// listener is closed, not just serve one.
+	go func() {
+		for {
+			conn, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = conn.Close() }()
+				// Malformed NDJSON: not valid JSON, and never newline-terminated
+				// before the connection closes — a corrupt/truncated line.
+				_, _ = conn.Write([]byte("{this is not valid json"))
+			}()
+		}
+	}()
+
+	cmd := exec.Command(binaryPath, "status",
+		"-socket", socket,
+		"-event-socket", filepath.Join(dir, "nope-events.sock"))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("status: expected exit 0 even with a corrupt snapshot, got %v\n%s", err, output)
+	}
+	if strings.Contains(string(output), "daemon not reachable") {
+		t.Errorf("a corrupt snapshot after a successful dial must not say 'daemon not reachable', got:\n%s", output)
+	}
+	if !strings.Contains(string(output), "sessions: unavailable (error reading snapshot:") {
+		t.Errorf("expected 'sessions: unavailable (error reading snapshot: ...)' with the real decode error, got:\n%s", output)
+	}
+}
+
+// TestStatusSubcommand_HumanReadable_PermissionDeniedSocketShowsRealError
+// covers #412's permission-denied case: a socket file that exists (so the
+// daemon may well be running) but is unreadable/unwritable by the current
+// user must not be reported identically to "daemon not reachable" — the real
+// permission error must surface via "sessions: unavailable (error reading
+// snapshot: <err>)". Simulated via Unix socket-file permission bits (0000),
+// which reliably yields EACCES on connect for a non-root caller; skipped
+// when running as root since root bypasses Unix file permission checks
+// entirely, making the simulation unreliable in that environment.
+func TestStatusSubcommand_HumanReadable_PermissionDeniedSocketShowsRealError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root bypasses Unix socket permission checks; cannot simulate permission-denied")
+	}
+
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "denied.sock")
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	if err := os.Chmod(socket, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+
+	cmd := exec.Command(binaryPath, "status",
+		"-socket", socket,
+		"-event-socket", filepath.Join(dir, "nope-events.sock"))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("status: expected exit 0 even with a permission-denied socket, got %v\n%s", err, output)
+	}
+	if strings.Contains(string(output), "daemon not reachable") {
+		t.Errorf("a permission-denied socket must not say 'daemon not reachable', got:\n%s", output)
+	}
+	if !strings.Contains(string(output), "sessions: unavailable (error reading snapshot:") {
+		t.Errorf("expected 'sessions: unavailable (error reading snapshot: ...)' with the real permission error, got:\n%s", output)
+	}
+}
+
+// TestStatusSubcommand_HumanReadable_DispatchSectionShowsResolveErrorOnCorruptSnapshot
+// covers #446: the same corrupt-snapshot scenario as
+// TestStatusSubcommand_HumanReadable_CorruptSnapshotShowsRealError above, but
+// for the embedded dispatch-loop section of `cenci status` (rendered via
+// renderDispatchState, the same renderer `dispatch loop status` uses). A
+// daemon that accepts the connection (Dial succeeds -- the daemon IS
+// reachable) but then sends a malformed/truncated NDJSON line must not leave
+// the dispatch section looking identical to "no daemon at all" -- the real
+// ReadSnapshot error must surface as a "resolve_error:" line.
+func TestStatusSubcommand_HumanReadable_DispatchSectionShowsResolveErrorOnCorruptSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "corrupt.sock")
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	// renderHumanStatus dials the socket twice (once for the session
+	// snapshot, once more inside ResolveDispatchState for the embedded
+	// dispatch-loop state), so the fake daemon must keep accepting
+	// connections until the listener is closed, not just serve one.
+	go func() {
+		for {
+			conn, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = conn.Close() }()
+				// Malformed NDJSON: not valid JSON, and never newline-terminated
+				// before the connection closes -- a corrupt/truncated line.
+				_, _ = conn.Write([]byte("{this is not valid json"))
+			}()
+		}
+	}()
+
+	cmd := exec.Command(binaryPath, "status",
+		"-socket", socket,
+		"-event-socket", filepath.Join(dir, "nope-events.sock"))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("status: expected exit 0 even with a corrupt snapshot, got %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "resolve_error:") {
+		t.Errorf("expected the dispatch section to show a %q line with the real decode error, got:\n%s", "resolve_error:", output)
 	}
 }
 

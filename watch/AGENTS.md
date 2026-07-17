@@ -10,6 +10,8 @@ GitHub Issues for tracking. GitHub for code and PRs.
 - Narrow a match-miss exclusion to the exact case being excluded — never broaden it into a silent "no match → discard" catch-all; keep the original visible fallback for every other case and add a regression test for the non-matching case.
 - When changing a literal value (exec flag, environment variable, version) referenced in comments, grep the whole file for all references to that literal rather than relying on a change plan's enumerated sites — doc comments and docstrings can reference the same value and go stale (#357).
 - `os.IsNotExist`/`errors.Is(err, fs.ErrNotExist)` only classify filesystem-call errors — they never match an `os/exec` error. To handle a missing input file for an external command, `os.Stat` the path yourself first; don't infer it from the command's exit error.
+- When introducing a new sentinel error for detection via `errors.Is()`, add a direct unit test at the package boundary asserting the sentinel is returned and detectable — do not rely on indirect coverage via higher-level integration tests, as a refactor could silently break `errors.Is()` while indirect tests still pass (#412).
+- When testing error handling where the same code path can return multiple distinct failure classes, use error-content-specific assertions (e.g., `strings.Contains(err, "specific-marker")`) for each case, not just empty/non-empty checks. A non-empty check alone would pass identically if a regression collapsed multiple classes into the same placeholder string, allowing the tests to silently stop distinguishing between them (#446).
 
 ## Rule Files
 CLI grammar, alias, env-var, and naming conventions: `<repo-root>/docs/cli-conventions.md` (read before touching any user-facing command surface).
