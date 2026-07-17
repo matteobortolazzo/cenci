@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -166,6 +167,13 @@ func TestResolveDispatchState_FallsBackToConfigWhenSocketUnreachable(t *testing.
 	if got.Interval != "5m" {
 		t.Errorf("Interval = %q, want %q (resolved config's DaemonInterval)", got.Interval, "5m")
 	}
+	// #446 regression guard: a genuinely unreachable daemon (no listener at
+	// all, i.e. errors.Is(err, watch.ErrDaemonUnreachable)) must stay silent
+	// -- ResolveError is reserved for a daemon that was reached but then
+	// failed (corrupt snapshot, permission denied, etc).
+	if got.ResolveError != "" {
+		t.Errorf("ResolveError = %q, want empty (socket-unreachable must stay silent, not surface as a resolve error)", got.ResolveError)
+	}
 }
 
 // TestResolveDispatchState_FallbackDisabledLoopAndEmptyInterval locks in that
@@ -212,5 +220,97 @@ func TestResolveDispatchState_LogsMalformedConfigError(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "loading config") {
 		t.Errorf("logged output = %q, want it to mention %q", buf.String(), "loading config")
+	}
+}
+
+// TestResolveDispatchState_SurfacesCorruptSnapshotError covers #446: when a
+// daemon is reachable (Dial succeeds -- the daemon IS reachable) but its
+// first NDJSON line is malformed/truncated, ResolveDispatchState must not
+// silently treat this the same as "daemon simply isn't running" -- the real
+// ReadSnapshot error must surface via ResolveError, distinct from the
+// intentional errors.Is(err, watch.ErrDaemonUnreachable) silence exercised by
+// TestResolveDispatchState_FallsBackToConfigWhenSocketUnreachable above
+// (mirrors the "sessions:" line pattern PR #445 established in
+// watch/status_cmd.go for #412).
+func TestResolveDispatchState_SurfacesCorruptSnapshotError(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeFile(t, configPath, `{"dispatch": {"loopEnabled": true, "daemonInterval": "5m"}}`)
+
+	socketPath := filepath.Join(t.TempDir(), "corrupt.sock")
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	go func() {
+		conn, aerr := ln.Accept()
+		if aerr != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		// Malformed NDJSON: not valid JSON, and never newline-terminated
+		// before the connection closes -- a corrupt/truncated line.
+		_, _ = conn.Write([]byte("{this is not valid json"))
+	}()
+
+	got := ResolveDispatchState(configPath, socketPath, io.Discard)
+
+	if got.ResolveError == "" {
+		t.Error("ResolveError = \"\", want the real decode error surfaced (the daemon was reached, it just sent garbage)")
+	}
+	if !strings.Contains(got.ResolveError, "invalid character") {
+		t.Errorf("ResolveError = %q, want it to contain the real JSON decode error (\"invalid character\"), not a generic placeholder", got.ResolveError)
+	}
+	if got.DaemonRunning {
+		t.Error("DaemonRunning = true, want false (fallback path, even though the daemon was briefly reachable)")
+	}
+	if !got.Enabled {
+		t.Errorf("Enabled = %v, want true (fallback still resolves config's LoopEnabled)", got.Enabled)
+	}
+	if got.Interval != "5m" {
+		t.Errorf("Interval = %q, want %q (fallback still resolves config's DaemonInterval)", got.Interval, "5m")
+	}
+}
+
+// TestResolveDispatchState_SurfacesPermissionDeniedError covers #446's
+// permission-denied case: a socket file that exists (so the daemon may well
+// be running) but is unreadable/unwritable by the current user must not be
+// reported identically to "daemon not reachable" -- the real permission
+// error must surface via ResolveError. Simulated via Unix socket-file
+// permission bits (0000), which reliably yields EACCES on connect for a
+// non-root caller; skipped when running as root since root bypasses Unix
+// file permission checks entirely, making the simulation unreliable in that
+// environment (same simulation watch/status_test.go's
+// TestStatusSubcommand_HumanReadable_PermissionDeniedSocketShowsRealError
+// uses for #412).
+func TestResolveDispatchState_SurfacesPermissionDeniedError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root bypasses Unix socket permission checks; cannot simulate permission-denied")
+	}
+
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeFile(t, configPath, `{"dispatch": {"loopEnabled": true, "daemonInterval": "5m"}}`)
+
+	socketPath := filepath.Join(t.TempDir(), "denied.sock")
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	if err := os.Chmod(socketPath, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+
+	got := ResolveDispatchState(configPath, socketPath, io.Discard)
+
+	if got.ResolveError == "" {
+		t.Error("ResolveError = \"\", want the real permission error surfaced (the socket file exists, the connection was just denied)")
+	}
+	if !strings.Contains(got.ResolveError, "permission denied") {
+		t.Errorf("ResolveError = %q, want it to contain the real permission error (\"permission denied\"), not a generic placeholder", got.ResolveError)
+	}
+	if got.DaemonRunning {
+		t.Error("DaemonRunning = true, want false (fallback path)")
 	}
 }

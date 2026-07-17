@@ -321,6 +321,11 @@ cenci dispatch loop status [--config <path>] [--json]
 
 All three print the same resolved `DispatchState` — human-readable by default, or the
 raw JSON object with `--json` (e.g. `{"enabled":true,"daemon_running":false,"interval":"5m",...}`).
+When the daemon was reached but its snapshot couldn't be read for a reason other than
+plain unreachability (permission-denied socket, corrupt/truncated snapshot), the
+resolved state carries a `resolve_error` field with the real error text (rendered as a
+`resolve_error: <text>` line in human output) — distinct from the loop's own redacted
+`last_error`, and distinct from a daemon that simply isn't running, which stays silent.
 
 **Breaking change:** the loop no longer auto-enables from a bare `daemonInterval`. It
 now defaults to disabled and only dispatches once `loopEnabled` is explicitly set to
