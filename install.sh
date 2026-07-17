@@ -1403,8 +1403,9 @@ uninstall_stop_daemon_fallback() {
 
 # uninstall_default_socket_dir computes the daemon's managed-state dir the
 # same way the daemon itself resolves it when no binary is available to ask
-# via `socket-dir` (see socketDir in watch/internal/daemon): prefer
-# XDG_RUNTIME_DIR, else /tmp/cenci-<uid>/cenci. The uid lookup is checked
+# via `socket-dir` (see SocketDir in watch/pkg/watch/socket.go): the daemon
+# joins a "cenci" segment onto its base runtime dir, so this is
+# $XDG_RUNTIME_DIR/cenci when set, else /tmp/cenci-<uid>/cenci. The uid lookup is checked
 # explicitly per AGENTS.md's rule against unchecked command substitution for
 # security-critical paths — an unchecked `id -u` failing silently would
 # collapse this to /tmp/cenci-/cenci. Prints nothing but the resolved path
@@ -1414,7 +1415,7 @@ uninstall_stop_daemon_fallback() {
 # captured string instead of reaching the terminal.
 uninstall_default_socket_dir() {
 	if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
-		printf '%s\n' "$XDG_RUNTIME_DIR/cenci/cenci"
+		printf '%s\n' "$XDG_RUNTIME_DIR/cenci"
 		return 0
 	fi
 	local uid

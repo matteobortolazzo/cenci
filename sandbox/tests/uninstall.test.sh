@@ -414,4 +414,43 @@ kill -9 "${FAKE_DAEMON_PID}" 2>/dev/null || true
 # Still exercised the rest of the removal path without hanging or crashing.
 [[ ! -e "${home}/.config/cenci/config.json" ]]
 
+# --- case 10: XDG_RUNTIME_DIR default-socket-dir fallback ----------------------
+echo "case: with no resolvable binary but XDG_RUNTIME_DIR set, uninstall removes the daemon's real managed-state dir (\$XDG_RUNTIME_DIR/cenci — not a doubled \$XDG_RUNTIME_DIR/cenci/cenci)"
+name="xdg-default-socket"
+home="${WORK}/${name}/home"
+bin="${WORK}/${name}/bin"
+call_log="${WORK}/${name}/calls"
+xdg="${WORK}/${name}/xdg"
+mkdir -p "${home}" "${bin}" "${xdg}"
+: >"${call_log}"
+
+make_common_tools "${bin}"
+make_claude "${bin}"
+make_codex "${bin}"
+
+mkdir -p "${home}/.config/cenci"
+printf '{}\n' >"${home}/.config/cenci/config.json"
+# No ~/.local/bin/cenci and no plugins/cache/cenci binary, so
+# resolve_uninstall_cenci_binary finds nothing and uninstall_stop_daemon
+# cannot ask `socket-dir` — it must compute the default from XDG_RUNTIME_DIR.
+# The daemon nests a "cenci" segment under its runtime base (SocketDir in
+# watch/pkg/watch/socket.go), so the real managed-state dir is
+# $XDG_RUNTIME_DIR/cenci — a doubled $XDG_RUNTIME_DIR/cenci/cenci would leak it.
+real_socket_dir="${xdg}/cenci"
+mkdir -p "${real_socket_dir}"
+touch "${real_socket_dir}/cenci.pid" "${real_socket_dir}/cenci.sock"
+
+LAYOUT_HOME="${home}"
+LAYOUT_BIN="${bin}"
+LAYOUT_CALL_LOG="${call_log}"
+run_uninstall XDG_RUNTIME_DIR="${xdg}" -- --yes
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+
+if [[ -d "${real_socket_dir}" ]]; then
+    echo "FAIL: expected the daemon's real managed-state dir (${real_socket_dir}) to be removed via the XDG_RUNTIME_DIR default; a doubled cenci/cenci path would leave it behind" >&2
+    cat "${UNINSTALL_OUTPUT}" >&2
+    exit 1
+fi
+[[ ! -e "${home}/.config/cenci/config.json" ]]
+
 echo "passed: uninstall MODE removes plugins/marketplace registration, PATH links, daemon + state, and config behind a single confirmation gate; lazyboards stays opt-in; rc files are never edited; subprocess env stays scrubbed"
