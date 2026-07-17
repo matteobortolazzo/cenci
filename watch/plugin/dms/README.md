@@ -2,6 +2,11 @@
 
 Live counts of Claude Code and Codex tmux sessions in your DankMaterialShell (DMS) bar. Polls `cenci waybar` and renders the snapshot.
 
+![The Cenci DMS widget showing aggregate status counts and a popout with five agent sessions](../../../docs/assets/cenci-dms-widget.png)
+
+*The bar pill summarizes every live agent session; click it to see which work is
+running, done, or waiting for input.*
+
 ## Requirements
 
 - [DankMaterialShell](https://danklinux.com/docs/dankmaterialshell/) (recent build with the plugin system)
