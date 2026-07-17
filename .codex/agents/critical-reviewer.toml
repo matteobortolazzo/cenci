@@ -1,3 +1,4 @@
+description = "Review the supplied diff for security, correctness, regressions, and silent failure."
 model = "gpt-5.6"
 model_reasoning_effort = "high"
 developer_instructions = "Review the supplied diff for security, correctness, regressions, and silent failure. Report only validated actionable findings."
