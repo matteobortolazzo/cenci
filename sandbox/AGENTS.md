@@ -65,6 +65,8 @@ black-box tests in `watch/sandbox_open_test.go` plus the reap contract suite
 
 - **When asserting on awk-extracted regions of prose/skill-doc text, use longer load-bearing substrings tied to the actual sentence, not single keywords.** An `assert_contains "${EXTRACTED_REGION}" "keyword"` check that passes proves only that the keyword exists *somewhere* in the region — a future edit could reintroduce a conditional bypass while some unrelated sentence nearby still contains the keyword, and the assertion would silently keep passing. Instead, assert on multi-word substrings that span the actual grammatical unit you're guarding (e.g., assert on the entire conditional clause or the sentence containing the invariant-critical phrase). Pair this with: verify that test case names match the region being asserted (if a case claims "5f only runs when X", assert `assert_contains "${EXTRACTED_5F}"`, not against the Q10 region), so test logic matches its description.
 
+- **`assert_contains` with `grep -Fq` cannot match text split across markdown line breaks.** The `-F` flag treats the pattern as a literal string and `-q` does single-line matching — if prose being tested is wrapped across multiple lines (common in markdown), a test looking for `"...in\n  this session"` will fail silently. When testing documentation assertions, either refactor to match within a single line, verify the exact text location before writing the assertion, or use a different matching approach that handles line continuations.
+
 ## Image architecture: base + fragments
 `Dockerfile.base` builds the stack-agnostic `cenci-sandbox-base:<content-hash>` image
 (plus an `cenci-sandbox-base:latest` alias tag), where `<content-hash>` is a 12-char

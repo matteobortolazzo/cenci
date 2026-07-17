@@ -156,7 +156,7 @@ columns:
         name: Checkout PR
         type: shell
         scope: pr
-        command: 'tmux new-window -d -n pr-{pr_number} "git fetch origin {pr_branch} && git switch {pr_branch}"'
+        command: 'tmux new-window -d -n pr-{pr_number} "gh pr checkout {pr_number}"'
 
   - name: Implemented
 
@@ -202,8 +202,8 @@ documents that sharp edge. `session_max_length` must still match cenci's cap so 
 
 **`W` on In Review** is a `scope: pr` action: it requires the selected card to have a
 linked PR (auto-detected from the issue timeline), runs immediately with one PR, and
-opens lazyboards' PR picker with several. Checking out `{pr_branch}` in a detached
-tmux window puts the agent's PR one keypress from a local review — append the
+opens lazyboards' PR picker with several. Running `gh pr checkout {pr_number}` in a
+detached tmux window puts the agent's PR one keypress from a local review — append the
 project's run command (`ng serve`, `dotnet run`, `go run .`, …) in that project's
 `.lazyboards.yml` to also start it.
 
@@ -257,7 +257,12 @@ Available template variables: `{number}`, `{title}` (slugified), `{tags}`
 `scope: card`; `scope: board` actions (no selected card) may not use card- or
 PR-specific variables. See the
 [lazyboards README](https://github.com/matteobortolazzo/lazyboards#template-variables)
-for the authoritative reference.
+for the authoritative reference. `{pr_branch}` and `{pr_title}` come from the PR's
+author and are not shell-safe inside a double-quoted command string — lazyboards'
+single-quote escaping only defeats a single-quote-context breakout, so a value nested
+inside an outer double-quoted string can still carry `$(...)`, backticks, or `\"`
+through to the shell. Prefer `{pr_number}` (always a plain integer) for any
+custom `scope: pr` action that shells out.
 
 ## Fleet dispatch from the board
 

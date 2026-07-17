@@ -21,6 +21,7 @@ Each project has its own `AGENTS.md` with project-specific context.
 - Deliver every change as a PR unless told otherwise: commit in the worktree, push the branch, open a PR. Never commit directly to main.
 - Refactor phases must not override decisions the approved plan explicitly reasoned about — if renaming, reorganizing, or restructuring something the plan called out directly, that plan reasoning is binding unless refactoring reveals a fundamental error.
 - Never use unchecked command substitution for security-critical paths (especially temp directories and config files) — explicitly verify command success before use; unchecked failures silently collapse to root-relative paths and undermine hardening.
+- When implementing a pattern or check that already exists elsewhere in the same file or codebase (e.g., a grep check, a validation guard, error-handling convention), audit existing examples first to match established conventions — do not implement solely from a plan description. This includes error-handling specifics like stderr redirection; implementing a similar check without those details is a silent failure that a reviewer is more likely to catch than an implementer.
 
 ## Build & Test
 
