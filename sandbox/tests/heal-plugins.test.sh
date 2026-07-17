@@ -21,6 +21,12 @@ source "${SCRIPT_DIR}/../lib/migrate-settings.sh"
 # shellcheck source=lib/assert.sh
 source "${SCRIPT_DIR}/lib/assert.sh"
 
+# Neutralize any ambient CENCI_AGENT_CLI so every ${CENCI_AGENT_CLI:-claude} /
+# ${CENCI_AGENT_CLI:-codex} fallback in migrate-settings.sh falls through to
+# the bare name, which resolves through this suite's PATH="${FAKE_BIN}:${PATH}"
+# overrides instead of an ambient absolute path.
+unset CENCI_AGENT_CLI
+
 # assert_file_jq <label> <file> <jq-filter-that-must-be-true>
 assert_file_jq() {
     local label="$1" file="$2" filter="$3"
@@ -718,6 +724,37 @@ else
     fail "Codex plugin helpers must remain non-fatal"
 fi
 unset CODEX_FAKE_EXIT
+
+####################################################################
+# CENCI_AGENT_CLI leak regression (#430)
+#
+# provision_plugins/provision_codex_plugins default the CLI to
+# ${CENCI_AGENT_CLI:-claude}/${CENCI_AGENT_CLI:-codex}. When CENCI_AGENT_CLI
+# is set, `command -v` resolves that value directly -- an absolute path
+# bypasses PATH entirely. These two cases point CENCI_AGENT_CLI explicitly
+# at this suite's own fake binaries to prove the suite, not the ambient
+# environment, controls which binary runs.
+####################################################################
+
+new_provision_case explicit-agent-cli-claude
+make_fake_claude
+echo "case: explicit CENCI_AGENT_CLI still resolves to the fake claude"
+CENCI_AGENT_CLI="${FAKE_BIN}/claude" PATH="${FAKE_BIN}:${PATH}" provision_plugins "${PLUGINS_DIR}" cenci matteobortolazzo/cenci cenci
+if grep -q "^plugin install cenci@cenci$" "${CLAUDE_FAKE_LOG}"; then
+    pass
+else
+    fail "expected CENCI_AGENT_CLI=${FAKE_BIN}/claude to invoke the fake claude: $(cat "${CLAUDE_FAKE_LOG}")"
+fi
+
+new_codex_case explicit-agent-cli-codex
+make_fake_codex
+echo "case: explicit CENCI_AGENT_CLI still resolves to the fake codex"
+CENCI_AGENT_CLI="${FAKE_BIN}/codex" PATH="${FAKE_BIN}:${PATH}" provision_codex_plugins "${CODEX_DIR}" cenci matteobortolazzo/cenci cenci
+if grep -q '^plugin add cenci@cenci$' "${CODEX_FAKE_LOG}"; then
+    pass
+else
+    fail "expected CENCI_AGENT_CLI=${FAKE_BIN}/codex to invoke the fake codex: $(cat "${CODEX_FAKE_LOG}")"
+fi
 
 # ── Summary ──────────────────────────────────────────────────────
 print_summary
