@@ -25,7 +25,7 @@ var reconcileNow = time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 func workingInputs() ReconcileInputs {
 	return ReconcileInputs{
 		Tickets:      []Ticket{{Repo: "o/r", Number: 42, Title: "Fix thing", Labels: []string{"Working"}}},
-		Plans:        []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "approved"}},
+		Plans:        []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "planned"}},
 		Snapshot:     &watch.StateSnapshot{},
 		Now:          reconcileNow,
 		Observations: map[string]time.Time{"o/r#42": reconcileNow.Add(-10 * time.Minute)},
@@ -301,14 +301,14 @@ func TestReconcileAttemptsUnknownDefers(t *testing.T) {
 	}
 }
 
-func TestReconcilePlannedUnapprovedPlanLeftAlone(t *testing.T) {
+func TestReconcilePlannedNotReadyPlanLeftAlone(t *testing.T) {
 	in := workingInputs()
 	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Planned"}}}
 	in.Plans = []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "draft"}}
 	res := Reconcile(in)
 
 	if len(res.Recoveries) != 0 {
-		t.Fatalf("an unapproved plan is a normal state, got %+v", res.Recoveries)
+		t.Fatalf("a not-yet-planned plan is a normal state, got %+v", res.Recoveries)
 	}
 }
 
@@ -316,7 +316,7 @@ func TestReconcileOrphanPlanReportOnly(t *testing.T) {
 	in := workingInputs()
 	// A plan whose ticket is not open (not in Tickets).
 	in.Tickets = nil
-	in.Plans = []Plan{{Repo: "o/r", Path: ".plans/99-gone.md", TicketID: 99, Status: "approved"}}
+	in.Plans = []Plan{{Repo: "o/r", Path: ".plans/99-gone.md", TicketID: 99, Status: "planned"}}
 	res := Reconcile(in)
 
 	rec := onlyRecovery(t, res)
