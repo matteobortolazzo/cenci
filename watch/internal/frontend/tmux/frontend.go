@@ -323,8 +323,17 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 	// Phase 3: Detect idle pane titles for windows still marked Running.
 	// When the user presses ESC during pure text generation (no tool running),
 	// there's no hook event. The pane title reverts to an idle marker (✶ ✻ ✳)
-	// while we still think it's Running. Also restore windows whose agent
-	// process exited without a SessionEnd hook (Codex).
+	// while we still think it's Running. Also restore Codex windows whose agent
+	// process exited without a SessionEnd hook.
+	//
+	// The exit restore is Codex-only (#432): Codex documents no SessionEnd hook,
+	// so a pane whose current command no longer reads as codex is our only exit
+	// signal. Claude Code *does* fire SessionEnd (handled in daemon/event.go) and
+	// pane disappearance is covered by Phase 2 above, so a finished Claude
+	// session must not be swept here — its pane_current_command legitimately
+	// differs from "claude" (npm/node shim reports "node"; sandbox lookups fail),
+	// which would otherwise silently untrack a just-done session (regression from
+	// #418 tagging Claude events with -agent claude).
 	paneByID := make(map[string]*tmuxc.PaneInfo, len(panes))
 	for i := range panes {
 		paneByID[panes[i].PaneID] = &panes[i]
@@ -334,7 +343,7 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 		if !ok {
 			continue
 		}
-		if ws.Agent != "" && ws.Status != detect.StatusRunning && ws.Status != detect.StatusNeedInput && !agentCommandMatches(ws.Agent, p.PaneCurrentCmd) {
+		if ws.Agent == "codex" && ws.Status != detect.StatusRunning && ws.Status != detect.StatusNeedInput && !agentCommandMatches(ws.Agent, p.PaneCurrentCmd) {
 			if f.cfg.Verbose {
 				log.Printf("sweep: pane %s no longer running %s (current command %q), restoring window %s", ws.PaneID, ws.Agent, p.PaneCurrentCmd, wt)
 			}
