@@ -17,6 +17,19 @@
 #   - lazyboards removal strictly opt-in via --lazyboards
 #   - shell rc files are never edited, only a manual removal note is printed
 #   - env -i scrub of the mocked subprocess environment (regression #353)
+#
+# Cases 11+ (#458, TDD RED phase against the current uninstall_sandbox_cleanup
+# no-op stub): machine-wide sandbox cleanup — every cenci-owned container
+# (claude-cenci-*/codex-cenci-*, running or stopped — broader than `cenci
+# sandbox prune`, which only targets exited/created), every cenci-owned image
+# (the cenci-sandbox:latest monolith, every cenci-sandbox-<slug>:latest
+# per-repo image, and every cenci-sandbox-base tag incl. its :latest alias,
+# with an optional podman localhost/ prefix), and every cenci-owned volume
+# (claude|codex-cenci-home-* and cenci-agent-cli-{claude,codex}) — removed
+# across every repo on the machine, before plugin-cache/link removal, with
+# the confirmation-gate output showing counts/names, a clean no-op when no
+# container runtime is installed, and the same env -i secret scrub as the
+# rest of this suite.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -112,6 +125,72 @@ fi
 exit 0
 EOF
     chmod +x "${path}"
+}
+
+# make_container_runtime installs a docker/podman stub (named by the
+# "runtime" argument) that logs every invocation to CALL_LOG — space-joined
+# argv, prefixed with the binary name, mirroring make_claude/make_codex's
+# logging convention — and answers the three read-only enumeration calls
+# uninstall's machine-wide sandbox cleanup must make by printing the
+# matching fixture file's contents back:
+#   ps -a --format {{.Names}}                -> containers fixture
+#   images --format {{.Repository}}:{{.Tag}} -> images fixture
+#   volume ls --format {{.Name}}             -> volumes fixture
+# Every other invocation (the rm -f / rmi / volume rm removal calls) is just
+# logged and exits 0, so tests assert on removal calls purely via CALL_LOG.
+# Also probes the same #353 env-leak sentinels as the other mocks in this
+# file, so the sandbox-cleanup path is covered by the same secret-scrub
+# regression as plugin/daemon removal.
+#
+# An optional 6th "fail" argument ("ps", "images", or "volume") makes that
+# one enumeration call print nothing and exit 1 instead — simulating a
+# runtime enumeration failure (permission error, daemon hiccup, etc.) while
+# the other two enumeration calls still behave normally, so tests can pin
+# collect_sandbox_cleanup_targets's per-category warn-and-skip handling
+# (install.sh's `if ! out="$(... 2>/dev/null)"; then warn ...; out=""; fi`
+# guards) without any change to production code.
+make_container_runtime() {
+    local bin="$1" runtime="$2" containers="$3" images="$4" volumes="$5" fail="${6:-}"
+    cat >"${bin}/${runtime}" <<EOF
+#!/bin/sh
+printf '${runtime} %s\n' "\$*" >>"\${CALL_LOG}"
+[ -n "\${OPENAI_API_KEY:-}" ] && printf 'env-leak OPENAI_API_KEY=%s\n' "\${OPENAI_API_KEY}" >>"\${CALL_LOG}"
+[ -n "\${CONTEXT7_API_KEY:-}" ] && printf 'env-leak CONTEXT7_API_KEY=%s\n' "\${CONTEXT7_API_KEY}" >>"\${CALL_LOG}"
+case "\$*" in
+  "ps -a --format {{.Names}}")
+    if [ "${fail}" = "ps" ]; then
+        exit 1
+    fi
+    cat "${containers}" 2>/dev/null
+    ;;
+  "images --format {{.Repository}}:{{.Tag}}")
+    if [ "${fail}" = "images" ]; then
+        exit 1
+    fi
+    cat "${images}" 2>/dev/null
+    ;;
+  "volume ls --format {{.Name}}")
+    if [ "${fail}" = "volume" ]; then
+        exit 1
+    fi
+    cat "${volumes}" 2>/dev/null
+    ;;
+esac
+exit 0
+EOF
+    chmod +x "${bin}/${runtime}"
+}
+
+# write_fixture <path> [line ...] — writes newline-separated fixture entries
+# consumed by make_container_runtime's ps/images/volume-ls stand-ins.
+write_fixture() {
+    local path="$1"
+    shift
+    : >"${path}"
+    local line
+    for line in "$@"; do
+        printf '%s\n' "${line}" >>"${path}"
+    done
 }
 
 # ------------------------------------------------------------- fixtures ----
@@ -217,6 +296,31 @@ assert_not_contains() {
     if grep -Fq -- "${needle}" "${file}"; then
         echo "FAIL: did not expect '${needle}' in ${file}" >&2
         sed -n '1,200p' "${file}" >&2
+        exit 1
+    fi
+}
+
+# assert_before <file> <needle_a> <needle_b> — fails unless the first line
+# matching needle_a appears strictly before the first line matching
+# needle_b, proving call *order* rather than just presence (case 14, #458:
+# the sandbox runtime sweep must run before plugin-cache/link removal).
+assert_before() {
+    local file="$1" a="$2" b="$3" line_a line_b
+    line_a="$(grep -Fn -- "${a}" "${file}" | head -n1 | cut -d: -f1 || true)"
+    line_b="$(grep -Fn -- "${b}" "${file}" | head -n1 | cut -d: -f1 || true)"
+    if [[ -z "${line_a}" ]]; then
+        echo "FAIL: expected '${a}' in ${file}" >&2
+        cat "${file}" >&2
+        exit 1
+    fi
+    if [[ -z "${line_b}" ]]; then
+        echo "FAIL: expected '${b}' in ${file}" >&2
+        cat "${file}" >&2
+        exit 1
+    fi
+    if [[ "${line_a}" -ge "${line_b}" ]]; then
+        echo "FAIL: expected '${a}' (line ${line_a}) before '${b}' (line ${line_b}) in ${file}" >&2
+        cat "${file}" >&2
         exit 1
     fi
 }
@@ -453,4 +557,178 @@ if [[ -d "${real_socket_dir}" ]]; then
 fi
 [[ ! -e "${home}/.config/cenci/config.json" ]]
 
-echo "passed: uninstall MODE removes plugins/marketplace registration, PATH links, daemon + state, and config behind a single confirmation gate; lazyboards stays opt-in; rc files are never edited; subprocess env stays scrubbed"
+# --- case 11: machine-wide sandbox sweep ---------------------------------------
+echo "case: machine-wide sandbox sweep removes every cenci-owned container/image/volume across multiple repos and leaves non-cenci objects untouched"
+prepare_full_layout sandbox-sweep
+containers_fixture="${WORK}/sandbox-sweep/containers"
+images_fixture="${WORK}/sandbox-sweep/images"
+volumes_fixture="${WORK}/sandbox-sweep/volumes"
+write_fixture "${containers_fixture}" \
+    "claude-cenci-repo-a" "codex-cenci-repo-b" "claude-cenci-repo-c" \
+    "unrelated-container" "web-app"
+write_fixture "${images_fixture}" \
+    "cenci-sandbox:latest" "cenci-sandbox-repo-a:latest" \
+    "cenci-sandbox-base:abc123def456" "cenci-sandbox-base:latest" \
+    "nginx:latest" "myapp:1.0"
+write_fixture "${volumes_fixture}" \
+    "claude-cenci-home-repo-a" "codex-cenci-home-repo-b" \
+    "cenci-agent-cli-claude" "cenci-agent-cli-codex" \
+    "random-volume" "pgdata"
+make_container_runtime "${LAYOUT_BIN}" docker "${containers_fixture}" "${images_fixture}" "${volumes_fixture}"
+run_uninstall -- --yes
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+
+for name in claude-cenci-repo-a codex-cenci-repo-b claude-cenci-repo-c; do
+    assert_contains "${LAYOUT_CALL_LOG}" "docker rm -f ${name}"
+done
+for tag in cenci-sandbox:latest cenci-sandbox-repo-a:latest \
+    cenci-sandbox-base:abc123def456 cenci-sandbox-base:latest; do
+    assert_contains "${LAYOUT_CALL_LOG}" "docker rmi ${tag}"
+done
+for vol in claude-cenci-home-repo-a codex-cenci-home-repo-b \
+    cenci-agent-cli-claude cenci-agent-cli-codex; do
+    assert_contains "${LAYOUT_CALL_LOG}" "docker volume rm ${vol}"
+done
+for untouched in "docker rm -f unrelated-container" "docker rm -f web-app" \
+    "docker rmi nginx:latest" "docker rmi myapp:1.0" \
+    "docker volume rm random-volume" "docker volume rm pgdata"; do
+    assert_not_contains "${LAYOUT_CALL_LOG}" "${untouched}"
+done
+
+# --- case 12: running container force-removal -----------------------------------
+echo "case: a running *-cenci-* container is force-removed (broader than 'cenci sandbox prune', which only targets exited/created containers)"
+prepare_full_layout sandbox-running
+containers_fixture="${WORK}/sandbox-running/containers"
+images_fixture="${WORK}/sandbox-running/images"
+volumes_fixture="${WORK}/sandbox-running/volumes"
+write_fixture "${containers_fixture}" "claude-cenci-live-repo"
+write_fixture "${images_fixture}"
+write_fixture "${volumes_fixture}"
+make_container_runtime "${LAYOUT_BIN}" docker "${containers_fixture}" "${images_fixture}" "${volumes_fixture}"
+run_uninstall -- --yes
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+assert_contains "${LAYOUT_CALL_LOG}" "docker ps -a --format {{.Names}}"
+assert_not_contains "${LAYOUT_CALL_LOG}" "--filter status=exited"
+assert_not_contains "${LAYOUT_CALL_LOG}" "--filter status=created"
+assert_contains "${LAYOUT_CALL_LOG}" "docker rm -f claude-cenci-live-repo"
+
+# --- case 13: confirmation list shows counts/names -------------------------------
+echo "case: the collect step's output (before the confirmation gate) shows counts and names of sandbox containers/images/volumes that will be removed"
+prepare_full_layout sandbox-collect
+containers_fixture="${WORK}/sandbox-collect/containers"
+images_fixture="${WORK}/sandbox-collect/images"
+volumes_fixture="${WORK}/sandbox-collect/volumes"
+write_fixture "${containers_fixture}" "claude-cenci-repo-a"
+write_fixture "${images_fixture}" "cenci-sandbox:latest"
+write_fixture "${volumes_fixture}" "claude-cenci-home-repo-a" "cenci-agent-cli-claude"
+make_container_runtime "${LAYOUT_BIN}" docker "${containers_fixture}" "${images_fixture}" "${volumes_fixture}"
+run_uninstall -- --yes
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+assert_contains "${UNINSTALL_OUTPUT}" "1 cenci sandbox container(s) across every repo on this machine: claude-cenci-repo-a"
+assert_contains "${UNINSTALL_OUTPUT}" "1 cenci sandbox image(s) across every repo on this machine: cenci-sandbox:latest"
+assert_contains "${UNINSTALL_OUTPUT}" "2 cenci sandbox volume(s) across every repo on this machine: claude-cenci-home-repo-a, cenci-agent-cli-claude"
+
+# --- case 14: ordering — runtime sweep before plugin-cache/link removal ---------
+echo "case: the sandbox container/image/volume sweep runs before plugin-cache and PATH-link removal"
+prepare_full_layout sandbox-ordering
+containers_fixture="${WORK}/sandbox-ordering/containers"
+images_fixture="${WORK}/sandbox-ordering/images"
+volumes_fixture="${WORK}/sandbox-ordering/volumes"
+write_fixture "${containers_fixture}" "claude-cenci-repo-a"
+write_fixture "${images_fixture}" "cenci-sandbox:latest"
+write_fixture "${volumes_fixture}" "claude-cenci-home-repo-a"
+make_container_runtime "${LAYOUT_BIN}" docker "${containers_fixture}" "${images_fixture}" "${volumes_fixture}"
+run_uninstall -- --yes
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+assert_before "${LAYOUT_CALL_LOG}" "docker rm -f claude-cenci-repo-a" "claude plugin uninstall cenci@cenci"
+assert_before "${LAYOUT_CALL_LOG}" "docker rmi cenci-sandbox:latest" "claude plugin uninstall cenci@cenci"
+assert_before "${LAYOUT_CALL_LOG}" "docker volume rm claude-cenci-home-repo-a" "claude plugin uninstall cenci@cenci"
+
+# --- case 15: no container runtime installed is a clean no-op -------------------
+echo "case: with no docker/podman on PATH, sandbox cleanup is a clean no-op — no error, empty removal list, the rest of uninstall still proceeds"
+prepare_full_layout sandbox-none
+run_uninstall -- --yes
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+assert_not_contains "${UNINSTALL_OUTPUT}" "cenci sandbox container(s)"
+assert_not_contains "${UNINSTALL_OUTPUT}" "cenci sandbox image(s)"
+assert_not_contains "${UNINSTALL_OUTPUT}" "cenci sandbox volume(s)"
+assert_not_contains "${LAYOUT_CALL_LOG}" "docker "
+assert_not_contains "${LAYOUT_CALL_LOG}" "podman "
+if ! grep -qx "daemon stop" "${LAYOUT_CALL_LOG}"; then
+    echo "FAIL: expected the rest of uninstall (daemon stop) to still run when no container runtime is present" >&2
+    cat "${LAYOUT_CALL_LOG}" >&2
+    exit 1
+fi
+
+# --- case 16: podman localhost/-prefixed images ----------------------------------
+echo "case: podman's localhost/-prefixed image tags are matched and removed the same as unprefixed tags"
+prepare_full_layout sandbox-podman
+containers_fixture="${WORK}/sandbox-podman/containers"
+images_fixture="${WORK}/sandbox-podman/images"
+volumes_fixture="${WORK}/sandbox-podman/volumes"
+write_fixture "${containers_fixture}"
+write_fixture "${images_fixture}" \
+    "localhost/cenci-sandbox:latest" \
+    "localhost/cenci-sandbox-base:abc123def456" \
+    "localhost/cenci-sandbox-base:latest" \
+    "localhost/cenci-sandbox-repo-x:latest" \
+    "docker.io/library/nginx:latest"
+write_fixture "${volumes_fixture}"
+make_container_runtime "${LAYOUT_BIN}" podman "${containers_fixture}" "${images_fixture}" "${volumes_fixture}"
+run_uninstall -- --yes
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+for tag in localhost/cenci-sandbox:latest localhost/cenci-sandbox-base:abc123def456 \
+    localhost/cenci-sandbox-base:latest localhost/cenci-sandbox-repo-x:latest; do
+    assert_contains "${LAYOUT_CALL_LOG}" "podman rmi ${tag}"
+done
+assert_not_contains "${LAYOUT_CALL_LOG}" "podman rmi docker.io/library/nginx:latest"
+
+# --- case 17: sentinel-secret regression through the runtime mock (#353) --------
+echo "case: host secrets never leak into the container-runtime call log or captured output during sandbox cleanup"
+prepare_full_layout sandbox-sentinel
+containers_fixture="${WORK}/sandbox-sentinel/containers"
+images_fixture="${WORK}/sandbox-sentinel/images"
+volumes_fixture="${WORK}/sandbox-sentinel/volumes"
+write_fixture "${containers_fixture}" "claude-cenci-repo-a"
+write_fixture "${images_fixture}" "cenci-sandbox:latest"
+write_fixture "${volumes_fixture}" "claude-cenci-home-repo-a"
+make_container_runtime "${LAYOUT_BIN}" docker "${containers_fixture}" "${images_fixture}" "${volumes_fixture}"
+export OPENAI_API_KEY="sk-test-sentinel-should-not-leak"
+export CONTEXT7_API_KEY="ctx7-test-sentinel-should-not-leak"
+run_uninstall -- --yes
+unset OPENAI_API_KEY CONTEXT7_API_KEY
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+assert_contains "${LAYOUT_CALL_LOG}" "docker rm -f claude-cenci-repo-a"
+assert_not_contains "${LAYOUT_CALL_LOG}" "sk-test-sentinel-should-not-leak"
+assert_not_contains "${UNINSTALL_OUTPUT}" "sk-test-sentinel-should-not-leak"
+assert_not_contains "${LAYOUT_CALL_LOG}" "ctx7-test-sentinel-should-not-leak"
+assert_not_contains "${UNINSTALL_OUTPUT}" "ctx7-test-sentinel-should-not-leak"
+
+# --- case 18: container enumeration failure warns and skips only that category --
+echo "case: a failing 'ps -a' container enumeration call warns and skips container cleanup, without aborting image/volume cleanup or the rest of uninstall"
+prepare_full_layout sandbox-ps-failure
+containers_fixture="${WORK}/sandbox-ps-failure/containers"
+images_fixture="${WORK}/sandbox-ps-failure/images"
+volumes_fixture="${WORK}/sandbox-ps-failure/volumes"
+write_fixture "${containers_fixture}" "claude-cenci-repo-a"
+write_fixture "${images_fixture}" "cenci-sandbox:latest"
+write_fixture "${volumes_fixture}" "claude-cenci-home-repo-a"
+make_container_runtime "${LAYOUT_BIN}" docker "${containers_fixture}" "${images_fixture}" "${volumes_fixture}" ps
+run_uninstall -- --yes
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+
+assert_contains "${UNINSTALL_OUTPUT}" "could not list docker containers — skipping sandbox container cleanup"
+assert_not_contains "${LAYOUT_CALL_LOG}" "docker rm -f claude-cenci-repo-a"
+assert_not_contains "${UNINSTALL_OUTPUT}" "cenci sandbox container(s)"
+
+assert_contains "${LAYOUT_CALL_LOG}" "docker rmi cenci-sandbox:latest"
+assert_contains "${LAYOUT_CALL_LOG}" "docker volume rm claude-cenci-home-repo-a"
+
+if ! grep -qx "daemon stop" "${LAYOUT_CALL_LOG}"; then
+    echo "FAIL: expected the rest of uninstall (daemon stop) to still run when container enumeration fails" >&2
+    cat "${LAYOUT_CALL_LOG}" >&2
+    exit 1
+fi
+[[ ! -e "${LAYOUT_HOME}/.config/cenci/config.json" ]]
+
+echo "passed: uninstall MODE removes plugins/marketplace registration, PATH links, daemon + state, and config behind a single confirmation gate; lazyboards stays opt-in; rc files are never edited; subprocess env stays scrubbed; machine-wide sandbox container/image/volume cleanup (#458) runs before plugin-cache removal, shows counts/names in the confirmation list, force-removes running containers, matches podman's localhost/ prefix, is a clean no-op without a container runtime, and warns-and-skips (without aborting) when one enumeration category fails"
