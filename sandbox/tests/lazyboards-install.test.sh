@@ -500,25 +500,26 @@ assert_contains "${REFINED_COL}" "name: Design"
 assert_contains "${REFINED_COL}" 'command: "cenci run design {number}"'
 assert_contains "${EXTRACTED_5F}" "pencil.enabled"
 
-echo "case: 5f template gives the Planned column a local I (Implement) action"
+echo "case: 5f template gives the Planned column local I (Implement), E (Edit plan), and V (View plan) actions"
 PLANNED_COL="${WORK}/skill-5f-col-planned.md"
 extract_column "Planned" >"${PLANNED_COL}"
 assert_contains "${PLANNED_COL}" "name: Implement"
 assert_contains "${PLANNED_COL}" 'command: "cenci run implement {number}"'
+assert_contains "${PLANNED_COL}" "name: Edit plan"
+assert_contains "${PLANNED_COL}" "name: View plan"
+assert_contains "${PLANNED_COL}" '.plans/{number}-*.md'
 
-echo "case: 5f template keeps the global Checkout PR fallback for In Review when there are zero runnable projects"
-assert_contains "${EXTRACTED_5F}" \
+echo "case: 5f template gives In Review no Checkout PR fallback when there are zero runnable projects"
+assert_not_contains "${EXTRACTED_5F}" \
     'tmux new-window -d -n pr-{pr_number} "gh pr checkout {pr_number}"'
 
 echo "case: 5f template never re-emits Designed or Implemented as generated columns"
 assert_not_contains "${EXTRACTED_5F}" "- name: Designed"
 assert_not_contains "${EXTRACTED_5F}" "- name: Implemented"
 
-echo "case: 5f template never duplicates global-only actions (G/A/S/X) into a column's local actions"
-assert_not_contains "${EXTRACTED_5F}" "name: Jump to agent"
-assert_not_contains "${EXTRACTED_5F}" "name: Annotate"
-assert_not_contains "${EXTRACTED_5F}" "name: Start dispatch loop"
-assert_not_contains "${EXTRACTED_5F}" "name: Stop dispatch loop"
+echo "case: 5f template never duplicates the global-only C/X launch actions into a column's local actions"
+assert_not_contains "${EXTRACTED_5F}" "name: Claude"
+assert_not_contains "${EXTRACTED_5F}" "name: Codex"
 
 echo "case: the .lazyboards.yml file-exists conflict check fires unconditionally regardless of prior lazyboards.enabled state"
 assert_contains "${EXTRACTED_5F}" \
