@@ -46,3 +46,5 @@ jobs:
         run: bash flow/templates/settings-permissions.test.sh
       - name: Verify main-worktree guard hook
         run: bash flow/hooks/scripts/guard-main-worktree.test.sh
+      - name: Verify sensitive-files guard hook
+        run: bash flow/hooks/scripts/check-sensitive-files.test.sh
