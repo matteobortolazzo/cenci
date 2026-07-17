@@ -9,6 +9,12 @@
 
 ![cenci combines isolation, workflow, and attention into a safe path from issue to reviewed pull request](docs/assets/cenci-overview.svg)
 
+![A lazyboards board driving cenci: live agent badges on cards, the dispatch panel, one-key refine and implement actions spawning running agents, and the agents overview](docs/assets/cenci-demo.gif)
+
+*One keypress on a card dispatches an agent; its live ▶/!/✓ state flows back onto the
+board, the status bar, and the agents overview. Recorded deterministically — see
+[`demo.tape`](demo.tape).*
+
 Coding agents are useful when they can keep working. They are trustworthy when the
 security boundary, approval points, and waiting states are explicit.
 
