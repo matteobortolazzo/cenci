@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/internal/run"
@@ -136,12 +137,13 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 			continue
 		}
 		err := runFn(run.Opts{
-			Workflow: "implement",
-			Ticket:   filepath.Join(".plans", filepath.Base(d.Plan.Path)),
-			Agent:    d.Agent,
-			Model:    cfg.Model,
-			Session:  cfg.Session,
-			Dir:      dirByRepo[d.Ticket.Repo],
+			Workflow:     "implement",
+			Ticket:       filepath.Join(".plans", filepath.Base(d.Plan.Path)),
+			WindowTicket: strconv.Itoa(d.Ticket.Number),
+			Agent:        d.Agent,
+			Model:        cfg.Model,
+			Session:      cfg.Session,
+			Dir:          dirByRepo[d.Ticket.Repo],
 		}, ctrl)
 		if err != nil {
 			logf(out, "dispatch: #%d run failed: %v\n", d.Ticket.Number, err)

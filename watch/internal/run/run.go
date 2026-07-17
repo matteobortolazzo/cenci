@@ -36,6 +36,13 @@ type Opts struct {
 	Slug       string // --slug
 	ConfigPath string // --config
 	DryRun     bool   // --dry-run
+	// WindowTicket, when non-empty, is the ticket identity used to derive the
+	// tmux window join key (`<number>-<skill>`), overriding Ticket for naming
+	// only. dispatch sets this to the numeric issue number while passing the
+	// plan file path as Ticket (the implement skill's positional argument);
+	// without it the plan path — non-numeric — slugs into a name that neither
+	// Lazyboards nor dispatch's own `<number>-implement` matching can join on.
+	WindowTicket string
 	// Dir, when set, is the working directory the window starts in: a
 	// `cd <dir> &&` prefix is prepended to the built command so a dispatched
 	// session lands in its repo (finding that repo's .plans/ and git tree).
@@ -121,8 +128,15 @@ func Run(opts Opts, ctrl Controller) error {
 
 	// 6. Compute the window name: `<number>-<skill>` for a numeric ticket, else
 	// the free-text slug. opts.Workflow is always the running skill (refine /
-	// design / implement).
-	name := windowName(opts.Ticket, opts.Workflow, opts.Slug)
+	// design / implement). WindowTicket, when set, drives naming only (the
+	// command already came from opts.Ticket via BuildCommand above) so a
+	// dispatched window whose Ticket is a plan-file path still gets the numeric
+	// `<number>-implement` join key.
+	nameArg := opts.Ticket
+	if wt := strings.TrimSpace(opts.WindowTicket); wt != "" {
+		nameArg = wt
+	}
+	name := windowName(nameArg, opts.Workflow, opts.Slug)
 	if name == "" {
 		name = slugify(opts.Workflow)
 	}
