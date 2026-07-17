@@ -17,5 +17,5 @@ For every cenci workflow:
    read as additional compatibility context, but shared guidance mutations target
    `AGENTS.md`.
 
-`.claude/settings.json`, `.codex/config.toml`, `.codex/agents/`, and generated
+`.claude/settings.json`, `.codex/agents/`, and generated
 `CLAUDE.md` imports are client adapters, not sources of shared workflow truth.

@@ -10,7 +10,7 @@ make_common_tools() {
     local bin="$1"
     mkdir -p "${bin}"
     local tool
-    for tool in bash cat touch uname grep git mkdir dirname ln readlink sleep pkill pgrep nohup chmod sed head rm mktemp; do
+    for tool in bash cat touch uname grep git mkdir dirname ln readlink sleep pkill pgrep nohup chmod sed head tail cut tr rm mktemp; do
         ln -s "$(command -v "${tool}")" "${bin}/${tool}"
     done
     cat > "${bin}/docker" <<'EOF'
@@ -326,6 +326,30 @@ assert_contains "${DOCTOR_OUTPUT}" "Codex: cenci"
 assert_contains "${DOCTOR_OUTPUT}" "cenci-installer utility"
 assert_contains "${DOCTOR_OUTPUT}" "cenci daemon"
 assert_contains "${DOCTOR_OUTPUT}" "bootstraps on your first agent session"
+
+echo "case: doctor's Codex notification hint reflects the user-level config.toml, never a differing project-level override Codex itself ignores (#416)"
+name=doctor-codex-config-precedence
+run_case "${name}" codex
+[[ "${CASE_EXIT}" -eq 0 ]]
+project="${WORK}/${name}/project"
+mkdir -p "${project}/.codex" "${CASE_HOME}/.codex"
+git -C "${project}" init -q
+printf 'notification_method = "osc9"\n' >"${CASE_HOME}/.codex/config.toml"
+printf 'notification_method = "bel"\n' >"${project}/.codex/config.toml"
+output="${WORK}/${name}/doctor-precedence-output"
+set +e
+(
+    cd "${project}" &&
+    env -i HOME="${CASE_HOME}" PATH="${CASE_BIN}" CALLS_FILE="${CASE_CALLS}" \
+        CODEX_MARKETPLACE_FILE="${WORK}/${name}/codex-marketplace" \
+        CODEX_INSTALLED_FILE="${WORK}/${name}/codex-installed" \
+        bash "${ROOT}/install.sh" doctor
+) >"${output}" 2>&1
+precedence_exit=$?
+set -e
+[[ "${precedence_exit}" -eq 0 ]]
+assert_contains "${output}" "Codex notification_method: osc9"
+assert_not_contains "${output}" "Codex notification_method: bel"
 
 echo "case: doctor reports the cenci daemon as running"
 run_doctor_case_with_daemon_status doctor-daemon-up claude 0

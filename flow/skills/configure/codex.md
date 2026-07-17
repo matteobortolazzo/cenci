@@ -6,8 +6,7 @@ configuration choices with Plan-mode questions. Produce a migration preview usin
 instruct the user to invoke `cenci run configure apply <checkpoint-id> --agent codex`;
 the approved plan remains in the prior conversation and the checkpoint records its digest. In normal mode,
 write `.cenci/config.json`, AGENTS/CLAUDE adapters, `.claude/settings.json`,
-`.codex/config.toml`, and `.codex/agents/*.toml`; preserve unknown keys and diff-gate
-substantive guidance.
+and `.codex/agents/*.toml`; preserve unknown keys and diff-gate substantive guidance.
 
 Install missing native agents with `PLUGIN_ROOT=<plugin-root> sh
 "${PLUGIN_ROOT}/codex/install-agents.sh" .`. Never overwrite an existing agent file;

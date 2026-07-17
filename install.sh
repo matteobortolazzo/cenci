@@ -324,7 +324,7 @@ check_stale_tmux_vars() {
 
 doctor_codex_support() {
 	[ "$HAS_CODEX" -eq 1 ] || return 0
-	local raw version config method notifications project_root project_config
+	local raw version config method notifications project_root
 	raw="$(codex --version 2>/dev/null || true)"
 	version="$(printf '%s' "$raw" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
 	if [ -n "$version" ] && printf '%s\n%s\n' "0.144.1" "$version" | sort -V -C 2>/dev/null; then
@@ -334,8 +334,6 @@ doctor_codex_support() {
 	fi
 	config="${CODEX_HOME:-$HOME/.codex}/config.toml"
 	project_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-	project_config="${project_root:+$project_root/.codex/config.toml}"
-	if [ -n "$project_config" ] && [ -f "$project_config" ]; then config="$project_config"; fi
 	method="$(grep -E '^[[:space:]]*notification_method[[:space:]]*=' "$config" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d ' "')"
 	notifications="$(grep -E '^[[:space:]]*notifications[[:space:]]*=' "$config" 2>/dev/null | tail -1 | cut -d= -f2- | sed 's/^[[:space:]]*//')"
 	[ -n "$notifications" ] && say "    Codex tui.notifications: $notifications"
