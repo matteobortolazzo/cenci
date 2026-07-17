@@ -83,6 +83,10 @@ prepare_checkout() {
     for de in gnome plasma dms noctalia; do
         cp -R "${ROOT}/watch/plugin/${de}" "${checkout}/watch/plugin/${de}"
     done
+    # step_cli_setup hard-fails when the cenci CLI is missing from the
+    # checkout, so provision it like the real marketplace clone does.
+    cp "${ROOT}/cenci" "${ROOT}/install.sh" "${checkout}/"
+    chmod +x "${checkout}/cenci" "${checkout}/install.sh"
 }
 
 run_install() {
@@ -142,6 +146,14 @@ echo "  ok: all four widgets installed and reloaded"
 
 # ---------------------------------------------------------------------------
 echo "case: update re-runs each reload (widget changes become visible)"
+# `update` (unlike install) hard-fails when no cenci binary can be
+# provisioned, so give the fake HOME the version-pinned plugin cache an
+# installed system would have; its fake binary's `daemon restart` succeeds.
+CACHE_ROOT="${HOME_DIR}/.claude/plugins/cache/cenci/cenci-watch/1.0.0"
+mkdir -p "${CACHE_ROOT}/bin" "${CACHE_ROOT}/.claude-plugin"
+printf '{"name":"cenci-watch","version":"1.0.0"}\n' >"${CACHE_ROOT}/.claude-plugin/plugin.json"
+printf '#!/bin/sh\nexit 0\n' >"${CACHE_ROOT}/bin/cenci"
+chmod +x "${CACHE_ROOT}/bin/cenci"
 UPCALLS="${CASE}/upcalls"; UPOUT="${CASE}/upout"; : >"${UPCALLS}"
 run_install "${HOME_DIR}" "${BIN}" "${UPCALLS}" "${UPOUT}" update --yes ||
     fail "update exited non-zero"

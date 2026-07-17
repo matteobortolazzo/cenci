@@ -254,7 +254,7 @@ assert_not_contains "${CASE_CURL_LOG}" "releases/latest"
 assert_not_contains "${CASE_CURL_LOG}" "releases/download"
 
 echo "case: an unmanaged lazyboards found only on PATH is left alone with a reconcile hint, not silently adopted"
-name=path-only-unmanaged
+name="path-only-unmanaged"
 make_path_lazyboards "${WORK}/${name}/bin/lazyboards" 1.0.0
 run_installer "${name}" --yes --no-build
 [[ "${CASE_EXIT}" -eq 0 ]]
@@ -289,7 +289,7 @@ run_installer "${name}" --yes --no-build
 [[ "$("${CASE_HOME}/.local/bin/lazyboards" --version)" == "lazyboards ${FAKE_VER}" ]]
 
 echo "case: a PATH-shadowing lazyboards is reported instead of false update success"
-name=path-shadow
+name="path-shadow"
 make_installed_lazyboards "${WORK}/${name}/home" 1.0.0
 make_path_lazyboards "${WORK}/${name}/bin/lazyboards" 1.0.0
 run_installer "${name}" update --yes --no-build

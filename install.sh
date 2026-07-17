@@ -867,18 +867,22 @@ step_cenci_watch_setup() {
 		if [ "$MODE" = update ]; then
 			fail "could not provision the cenci binary from the installed cenci-watch plugin"
 			INSTALL_FAILED=1
-		else
-			warn "could not provision the cenci binary yet — the first agent session bootstraps it"
-			say "  ${DIM}this can happen offline, or before release assets or the plugin cache are populated; log: \${TMPDIR:-/tmp}/cenci-bootstrap.log${RESET}"
+			return 0
 		fi
-		return 0
+		# A fresh install stays useful without the binary: widgets come from
+		# the checkout, and the first agent session bootstraps and links the
+		# binary itself.
+		warn "could not provision the cenci binary yet — the first agent session bootstraps it"
+		say "  ${DIM}this can happen offline, or before release assets or the plugin cache are populated; log: \${TMPDIR:-/tmp}/cenci-bootstrap.log${RESET}"
+	else
+		ok "the cenci binary is provisioned — the daemon self-manages from here"
+		say "  ${DIM}first session may take a moment before status appears; log: \${TMPDIR:-/tmp}/cenci-bootstrap.log${RESET}"
 	fi
 
-	ok "the cenci binary is provisioned — the daemon self-manages from here"
-	say "  ${DIM}first session may take a moment before status appears; log: \${TMPDIR:-/tmp}/cenci-bootstrap.log${RESET}"
-
 	if [ "$OS" != macos ]; then
-		setup_cenci_linux_path "$cache_bin"
+		if [ -n "$cache_bin" ]; then
+			setup_cenci_linux_path "$cache_bin"
+		fi
 		setup_cenci_linux_widgets
 		if [ "$MODE" = update ] && ! restart_cenci_daemon "$cache_bin"; then
 			INSTALL_FAILED=1
