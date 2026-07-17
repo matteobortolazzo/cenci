@@ -554,6 +554,24 @@ case "$1 $2 $3" in
         export CODEX_FAKE_MARKETPLACE_PRESENT=true
         ;;
     "plugin marketplace upgrade") ;;
+    "plugin list --json")
+        # Older codex releases have no --json; simulate them with a usage
+        # error so the version gate falls back to the re-add path.
+        if [[ "${CODEX_FAKE_NO_JSON:-false}" == true ]]; then
+            echo "error: unknown flag --json" >&2
+            exit 2
+        fi
+        printf '{"installed":['
+        sep=""
+        if [[ "${CODEX_FAKE_CENCI_PRESENT:-false}" == true ]]; then
+            printf '%s{"pluginId":"cenci@cenci","version":"%s"}' "${sep}" "${CODEX_FAKE_CENCI_VERSION:-1.0.0}"
+            sep=","
+        fi
+        if [[ "${CODEX_FAKE_CENCI_WATCH_PRESENT:-false}" == true ]]; then
+            printf '%s{"pluginId":"cenci-watch@cenci","version":"%s"}' "${sep}" "${CODEX_FAKE_CENCI_WATCH_VERSION:-1.0.0}"
+        fi
+        printf ']}\n'
+        ;;
     "plugin list "*)
         [[ "${CODEX_FAKE_CENCI_PRESENT:-false}" == true ]] && echo "cenci@cenci installed enabled"
         [[ "${CODEX_FAKE_CENCI_WATCH_PRESENT:-false}" == true ]] && echo "cenci-watch@cenci installed enabled"
@@ -579,7 +597,17 @@ new_codex_case() {
     export CODEX_FAKE_MARKETPLACE_PRESENT=false
     export CODEX_FAKE_CENCI_PRESENT=false
     export CODEX_FAKE_CENCI_WATCH_PRESENT=false
-    unset CODEX_FAKE_EXIT
+    unset CODEX_FAKE_EXIT CODEX_FAKE_NO_JSON CODEX_FAKE_CENCI_VERSION CODEX_FAKE_CENCI_WATCH_VERSION
+}
+
+# write_codex_snapshot_manifest <cenci-version> <cenci-watch-version>: seed
+# the marketplace snapshot manifest the version gate reads, mirroring where
+# codex clones marketplaces (<codex-home>/.tmp/marketplaces/<name>).
+write_codex_snapshot_manifest() {
+    mkdir -p "${CODEX_DIR}/.tmp/marketplaces/cenci/.claude-plugin"
+    cat > "${CODEX_DIR}/.tmp/marketplaces/cenci/.claude-plugin/marketplace.json" <<EOF
+{"name":"cenci","plugins":[{"name":"cenci","version":"$1"},{"name":"cenci-watch","version":"$2"}]}
+EOF
 }
 
 codex_log_count() {
@@ -620,17 +648,64 @@ echo "case: Codex fresh TTL stamp skips refresh"
 PATH="${FAKE_BIN}:${PATH}" update_codex_plugins "${CODEX_DIR}" cenci 30 cenci cenci-watch
 if [[ "$(codex_log_count)" -eq 0 ]]; then pass; else fail "Codex TTL did not skip all CLI calls"; fi
 
-new_codex_case codex-forced
+new_codex_case codex-forced-current
 make_fake_codex
 export CODEX_FAKE_MARKETPLACE_PRESENT=true
 export CODEX_FAKE_CENCI_PRESENT=true
 export CODEX_FAKE_CENCI_WATCH_PRESENT=true
+export CODEX_FAKE_CENCI_VERSION=1.0.0 CODEX_FAKE_CENCI_WATCH_VERSION=2.0.0
+write_codex_snapshot_manifest 1.0.0 2.0.0
 touch "${CODEX_DIR}/${STAMP_NAME}"
-echo "case: Codex ttl 0 refreshes marketplace and plugin caches"
+echo "case: Codex ttl 0 refreshes the marketplace but skips re-adding current plugins"
 PATH="${FAKE_BIN}:${PATH}" update_codex_plugins "${CODEX_DIR}" cenci 0 cenci cenci-watch
 if grep -q '^plugin marketplace upgrade cenci$' "${CODEX_FAKE_LOG}"; then pass; else fail "Codex marketplace was not forcibly refreshed"; fi
-if grep -q '^plugin add cenci@cenci$' "${CODEX_FAKE_LOG}"; then pass; else fail "Codex cenci cache was not refreshed"; fi
-if grep -q '^plugin add cenci-watch@cenci$' "${CODEX_FAKE_LOG}"; then pass; else fail "Codex cenci-watch cache was not refreshed"; fi
+if ! grep -q '^plugin add ' "${CODEX_FAKE_LOG}"; then
+    pass
+else
+    fail "Codex re-added plugins although installed versions match the snapshot: $(cat "${CODEX_FAKE_LOG}")"
+fi
+
+new_codex_case codex-forced-stale
+make_fake_codex
+export CODEX_FAKE_MARKETPLACE_PRESENT=true
+export CODEX_FAKE_CENCI_PRESENT=true
+export CODEX_FAKE_CENCI_WATCH_PRESENT=true
+export CODEX_FAKE_CENCI_VERSION=1.0.0 CODEX_FAKE_CENCI_WATCH_VERSION=2.0.0
+write_codex_snapshot_manifest 1.0.0 2.1.0
+touch "${CODEX_DIR}/${STAMP_NAME}"
+echo "case: Codex ttl 0 re-adds only the plugin whose snapshot version moved"
+PATH="${FAKE_BIN}:${PATH}" update_codex_plugins "${CODEX_DIR}" cenci 0 cenci cenci-watch
+if grep -q '^plugin add cenci-watch@cenci$' "${CODEX_FAKE_LOG}"; then pass; else fail "Codex stale cenci-watch was not refreshed"; fi
+if ! grep -q '^plugin add cenci@cenci$' "${CODEX_FAKE_LOG}"; then
+    pass
+else
+    fail "Codex re-added cenci although its version is current: $(cat "${CODEX_FAKE_LOG}")"
+fi
+
+new_codex_case codex-forced-no-json
+make_fake_codex
+export CODEX_FAKE_MARKETPLACE_PRESENT=true
+export CODEX_FAKE_CENCI_PRESENT=true
+export CODEX_FAKE_CENCI_WATCH_PRESENT=true
+export CODEX_FAKE_NO_JSON=true
+write_codex_snapshot_manifest 1.0.0 2.0.0
+touch "${CODEX_DIR}/${STAMP_NAME}"
+echo "case: Codex without plugin list --json falls back to re-adding (repair-safe)"
+PATH="${FAKE_BIN}:${PATH}" update_codex_plugins "${CODEX_DIR}" cenci 0 cenci cenci-watch
+if grep -q '^plugin add cenci@cenci$' "${CODEX_FAKE_LOG}"; then pass; else fail "Codex cenci cache was not refreshed on --json fallback"; fi
+if grep -q '^plugin add cenci-watch@cenci$' "${CODEX_FAKE_LOG}"; then pass; else fail "Codex cenci-watch cache was not refreshed on --json fallback"; fi
+
+new_codex_case codex-forced-no-manifest
+make_fake_codex
+export CODEX_FAKE_MARKETPLACE_PRESENT=true
+export CODEX_FAKE_CENCI_PRESENT=true
+export CODEX_FAKE_CENCI_WATCH_PRESENT=true
+export CODEX_FAKE_CENCI_VERSION=1.0.0 CODEX_FAKE_CENCI_WATCH_VERSION=2.0.0
+touch "${CODEX_DIR}/${STAMP_NAME}"
+echo "case: Codex without a snapshot manifest falls back to re-adding (repair-safe)"
+PATH="${FAKE_BIN}:${PATH}" update_codex_plugins "${CODEX_DIR}" cenci 0 cenci cenci-watch
+if grep -q '^plugin add cenci@cenci$' "${CODEX_FAKE_LOG}"; then pass; else fail "Codex cenci cache was not refreshed on manifest fallback"; fi
+if grep -q '^plugin add cenci-watch@cenci$' "${CODEX_FAKE_LOG}"; then pass; else fail "Codex cenci-watch cache was not refreshed on manifest fallback"; fi
 
 new_codex_case codex-fails
 make_fake_codex
