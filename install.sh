@@ -1068,6 +1068,40 @@ setup_cenci_linux_widgets() {
 	fi
 }
 
+# teardown_cenci_linux_widgets is setup_cenci_linux_widgets' uninstall-side
+# sibling: detects each present GUI bar and delegates to that widget's
+# self-contained uninstall.sh, which removes the widget and reloads the bar.
+# Runs under run_uninstall's single confirmation gate (#457), so — unlike
+# install — there is no per-widget prompt (confirmed Q1). A missing/undetected
+# bar is a silent no-op; only a genuine removal failure warns, so one bar's
+# failure never aborts the rest of the purge.
+teardown_cenci_linux_widgets() {
+	local de label script
+	for de in gnome plasma dms noctalia; do
+		de_detected "$de" || continue
+		label="$(de_label "$de")"
+		if ! script=$(find_plugin_path "watch/plugin/$de/uninstall.sh"); then
+			warn "could not find watch/plugin/$de/uninstall.sh in the marketplace checkout — remove the $label widget manually"
+			continue
+		fi
+		chmod +x "$script" 2>/dev/null || true
+		if bash "$script"; then
+			ok "$label widget removed and bar reloaded"
+		elif [ "$?" -eq 2 ]; then
+			warn "$label widget left untouched — a non-cenci file/dir is present at its plugin path"
+		else
+			warn "$label widget teardown failed — see watch/plugin/$de/README.md"
+		fi
+	done
+
+	# waybar has no bundled widget, so there is nothing to remove — just point
+	# at manual removal and the live-reload signal.
+	if have waybar; then
+		say "  ${DIM}waybar detected — remove the Cenci Watch module from your waybar config manually,${RESET}"
+		say "  ${DIM}then reload waybar to apply: pkill -SIGUSR2 waybar${RESET}"
+	fi
+}
+
 # ------------------------------------------------------------- lazyboards ----
 
 # lazyboards is the optional board-orchestration layer
@@ -1361,6 +1395,7 @@ collect_uninstall_targets() {
 	say "  • ~/.local/bin/{cenci,cn,cenci-installer} (only if they're cenci-managed symlinks)"
 	say "  • the cenci daemon (stopped) and its managed state"
 	say "  • ${XDG_CONFIG_HOME:-$HOME/.config}/cenci/config.json"
+	say "  • desktop bar widgets for any detected bar (GNOME/Plasma/DMS/noctalia/SwiftBar)"
 	if [ "$LAZYBOARDS" = yes ]; then
 		say "  • lazyboards and ${XDG_CONFIG_HOME:-$HOME/.config}/lazyboards/config.yml (--lazyboards)"
 	fi
@@ -1702,10 +1737,34 @@ uninstall_sandbox_cleanup() {
 	:
 }
 
-# uninstall_widget_cleanup is an extension point for #459 (desktop bar widget
-# uninstall: SwiftBar/GNOME/Plasma/DMS/noctalia). Intentionally a no-op here.
+# uninstall_widget_cleanup removes each detected bar's widget as part of the
+# full purge (#459). Mirrors step_cenci_watch_setup's platform branch in
+# reverse: on Darwin, delegate to the SwiftBar uninstall.sh (gated on the app
+# being present, like the install-side block); everywhere else, delegate to
+# teardown_cenci_linux_widgets. Must run before uninstall_marketplace (see
+# run_uninstall) so find_plugin_path can still resolve the widget scripts
+# from the marketplace checkout.
 uninstall_widget_cleanup() {
-	:
+	if [ "$OS" = macos ]; then
+		local script
+		if ! script=$(find_plugin_path "watch/plugin/macos/uninstall.sh"); then
+			warn "could not find watch/plugin/macos/uninstall.sh in the marketplace checkout — remove the SwiftBar menu bar widget manually"
+			return 0
+		fi
+		if [ ! -d /Applications/SwiftBar.app ]; then
+			return 0
+		fi
+		chmod +x "$script" 2>/dev/null || true
+		if bash "$script"; then
+			ok "menu bar widget removed and SwiftBar reloaded"
+		elif [ "$?" -eq 2 ]; then
+			warn "menu bar widget left untouched — a non-cenci file/dir is present at its plugin path"
+		else
+			warn "SwiftBar widget teardown failed — see watch/plugin/macos/README.md"
+		fi
+		return 0
+	fi
+	teardown_cenci_linux_widgets
 }
 
 # have_controlling_tty probes whether /dev/tty is actually openable, not just

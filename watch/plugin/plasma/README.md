@@ -51,6 +51,22 @@ ln -s "$PWD/plugin/plasma" \
 kquitapp6 plasmashell && kstart plasmashell
 ```
 
+## Uninstall
+
+`cenci-installer uninstall` removes this widget as part of removing the whole
+attention layer. To do it directly — from the marketplace checkout or a repo
+checkout:
+
+```sh
+~/.claude/plugins/marketplaces/cenci/watch/plugin/plasma/uninstall.sh
+# from a repo checkout, inside watch/: ./plugin/plasma/uninstall.sh
+```
+
+It removes the
+`~/.local/share/plasma/plasmoids/com.github.matteobortolazzo.cenci` symlink
+(if it's still the one this plugin created) and restarts plasmashell so the
+change takes effect immediately.
+
 ## Behavior
 
 - Polls every `pollIntervalMs` (default 2000 ms).
