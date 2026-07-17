@@ -157,6 +157,56 @@ func TestDaemon_CodexLifecycleWithoutSessionEndRestoresAfterExit(t *testing.T) {
 	}
 }
 
+// Regression for #432: Claude Code fires a SessionEnd hook, so the Codex-only
+// "agent exited without SessionEnd" sweep restore must not touch a finished
+// Claude session while its pane is still alive. #418 started tagging Claude
+// events with -agent claude, which set ws.Agent="claude" and (before the fix)
+// activated that Codex-intended restore whenever pane_current_command wasn't
+// literally "claude" (e.g. an npm/node shim reports "node"), silently wiping the
+// just-finished session and reverting the window — it read as idle.
+func TestDaemon_ClaudeDoneSurvivesSweepWhenPaneCommandDiffers(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "zsh", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "⠋ writing tests", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "claude-sess", Agent: "claude", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "claude-sess", Agent: "claude", TmuxPane: "%0"})
+
+	// Stop → done.
+	mc.Panes[0].PaneTitle = "✳ writing tests"
+	d.handleEvent(ipc.HookEvent{EventType: "Stop", SessionID: "claude-sess", Agent: "claude", TmuxPane: "%0"})
+	if got := d.sessions["claude-sess"].Status; got != detect.StatusDone {
+		t.Fatalf("after Stop: expected done, got %v", got)
+	}
+
+	// The pane is still alive but its current command no longer reads as
+	// "claude" (npm/node shim, or a sandbox lookup failure). A finished Claude
+	// session must survive the sweep — it relies on its SessionEnd hook, not
+	// this Codex-only exit restore.
+	mc.Panes[0].PaneCurrentCmd = "node"
+	mc.Renames = nil
+
+	d.runSweep()
+
+	if _, ok := d.sessions["claude-sess"]; !ok {
+		t.Fatalf("expected Claude session to survive sweep, but it was removed")
+	}
+	if got := d.sessions["claude-sess"].Status; got != detect.StatusDone {
+		t.Errorf("expected status to stay done after sweep, got %v", got)
+	}
+	if d.frontend.WindowInfo("claude-sess") == nil {
+		t.Error("expected window to remain tracked after sweep")
+	}
+	if name, ok := lastRename(mc.Renames, "main:0"); ok && name == "zsh" {
+		t.Errorf("expected no restore to original name 'zsh' after sweep, got rename to %q", name)
+	}
+}
+
 func TestDaemon_CodexPromptLabelAndNativeQuestionReconciliation(t *testing.T) {
 	mc := &tmuxtest.MockClient{Panes: []tmux.PaneInfo{{
 		SessionName: "main", WindowIndex: "0", WindowName: "zsh", PaneIndex: "0",
