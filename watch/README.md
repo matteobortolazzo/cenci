@@ -23,7 +23,13 @@ The same four states appear everywhere:
 
 When the agent exits or cenci stops, the original window name is restored.
 
-See the desktop integrations for [DankMaterialShell](plugin/dms/README.md),
+![The Cenci DMS widget showing aggregate status counts and a popout with five agent sessions](../docs/assets/cenci-dms-widget.png)
+
+*Optional [DankMaterialShell](plugin/dms/README.md) integration: the bar pill
+summarizes every live agent session; click it to find work that is running, done,
+or waiting for input.*
+
+Other desktop integrations are available for
 [GNOME Shell](plugin/gnome/README.md), [KDE Plasma](plugin/plasma/README.md), and
 the [macOS menu bar](plugin/macos/README.md).
 
