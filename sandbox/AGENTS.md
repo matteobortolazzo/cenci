@@ -75,6 +75,8 @@ black-box tests in `watch/sandbox_open_test.go` plus the reap contract suite
 
 - **Destructive operations (like `rm -rf` cleanup) must verify that prerequisite stop/disable operations actually succeeded — do not suppress their errors and proceed optimistically.** A pattern like `"$bin" daemon stop || true` followed by unconditional `ok "stopped"` and then `rm -rf` of the daemon's managed state dir risks deleting live socket/pid files out from under a daemon that didn't actually stop. When a preceding operation's success is a prerequisite for a destructive follow-up, check and propagate its exit status; only suppress the error if the destructive operation is genuinely optional or can safely tolerate the prerequisite's failure.
 
+- **Use bash regex `[[ $var =~ pattern ]]` for whole-string validation, not line-oriented `grep`.** A pattern like `printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'` validates per-line, allowing multi-line strings with a matching first line to pass — bash regex anchors against the entire string instead. When validating a captured value before printing or using it (especially where that value originates outside the script), use bash's `[[ ]]` conditional operator, which validates the full value end-to-end.
+
 ## Image architecture: base + fragments
 `Dockerfile.base` builds the stack-agnostic `cenci-sandbox-base:<content-hash>` image
 (plus an `cenci-sandbox-base:latest` alias tag), where `<content-hash>` is a 12-char
