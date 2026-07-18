@@ -23,6 +23,13 @@ sudo sh -c 'grep -q "$(hostname)" /etc/hosts || echo "127.0.0.1 $(hostname)" >> 
 # exec-sg re-exec pattern used for the docker-socket GID switch further down
 # this file.
 if [[ "$(id -u)" -eq 0 ]]; then
+    # A stale generic startup-failure marker or boot log from a previous
+    # failed boot must not outlive the failure it describes, or
+    # startupFailureDetail (watch/internal/sandbox/launcher/launch.go) would
+    # surface it for an unrelated crash. Cleared here, as root, before any of
+    # the rest of the entrypoint (including a possible re-exec below) runs.
+    rm -f /home/dev/.cenci-startup-failed /home/dev/.cenci-boot.log
+
     CUR_UID="$(id -u dev)"
     CUR_GID="$(id -g dev)"
     if [[ -n "${HOST_UID:-}" && "${HOST_UID}" != "0" && -n "${HOST_GID:-}" && "${HOST_GID}" != "0" ]] \
@@ -57,6 +64,33 @@ fi
 
 # Fix home directory ownership (volume may be root-owned on first run)
 sudo chown dev:"$(id -g dev)" /home/dev
+
+# ── Tee entrypoint output to a boot log; mark any other startup failure ──
+# (#473) The agent-CLI-missing check further below already leaves a precise
+# marker at /home/dev/.cenci-agent-startup-error for its own case, but any
+# other entrypoint failure (plugin provisioning, settings migration,
+# credential seeding, ...) used to vanish once --rm removed the container,
+# leaving startupFailureDetail (watch/internal/sandbox/launcher/launch.go)
+# with nothing but a fully generic message. From here on, every subsequent
+# stdout/stderr line is teed into CENCI_BOOT_LOG
+# (/home/dev/.cenci-boot.log) for startupFailureDetail's second-choice read,
+# and an EXIT trap writes the generic startup-failure marker
+# (/home/dev/.cenci-startup-failed) — its third choice — whenever the
+# entrypoint exits non-zero for any other reason. Both files were already
+# cleared at boot by the root block above, so a stale marker never outlives
+# the failure it describes. Only agent workloads get this (same gate as the
+# agent-CLI check below); utility containers (smoke tests, ad-hoc runs)
+# boot without it.
+if [[ -n "${CENCI_AGENT_CLI:-}" || -d /opt/cenci-agent ]]; then
+    CENCI_BOOT_LOG="/home/dev/.cenci-boot.log"
+    : > "${CENCI_BOOT_LOG}"
+    chmod 600 "${CENCI_BOOT_LOG}"
+    # From here on, every stdout/stderr line is persisted to CENCI_BOOT_LOG and
+    # may later be surfaced verbatim in `cenci open` error output — never echo
+    # credential/token content past this point.
+    exec > >(tee -a "${CENCI_BOOT_LOG}") 2>&1
+    trap '[[ $? -eq 0 ]] || echo "entrypoint exited before completing startup" > /home/dev/.cenci-startup-failed' EXIT
+fi
 
 # First-run setup for empty home volume
 if [[ ! -f /home/dev/.bashrc ]]; then
