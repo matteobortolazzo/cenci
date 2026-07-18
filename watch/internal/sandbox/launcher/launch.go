@@ -552,19 +552,70 @@ func (e *Engine) containerStartupState(name string) (status, exitCode string, er
 	return fields[0], fields[1], nil
 }
 
+// readHomeVolumeFile reads path from scope's home volume via a short-lived
+// container (`run --rm --user root --entrypoint /bin/cat ...`), since the
+// failed workload container may already be gone (auto-removed by --rm). It
+// returns the trimmed content and whether the read succeeded with non-empty
+// content.
+func (e *Engine) readHomeVolumeFile(scope Scope, path string) (string, bool) {
+	cmd := exec.Command(e.Runtime, "run", "--rm", "--user", "root", "--entrypoint", "/bin/cat",
+		"-v", scope.VolumeName+":/home/dev", scope.Image, path)
+	out, err := cmd.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			// cat legitimately exiting non-zero (file absent) is the expected,
+			// silent per-tier case. Anything else means the runtime binary
+			// itself failed to run, which will make all three home-volume
+			// reads and the `docker logs` fallback fail identically — worth
+			// surfacing so the operator isn't misdirected to the generic
+			// fallback message (#473).
+			_, _ = fmt.Fprintf(e.Stderr, "Warning: failed to run %s to read %s from the home volume (%v); startup diagnostics may be incomplete.\n", e.Runtime, path, err)
+		}
+		return "", false
+	}
+	content := strings.TrimSpace(string(out))
+	return content, content != ""
+}
+
+// lastLines returns at most the last n lines of s.
+func lastLines(s string, n int) string {
+	lines := splitLines(s)
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
+}
+
 // startupFailureDetail returns diagnostic detail for a container that failed
-// during startup. sandbox/entrypoint.sh writes a human-readable message to
-// /home/dev/.cenci-agent-startup-error and exits non-zero when the agent CLI
-// path is missing or not executable, before the readiness marker is ever
-// touched — so that persistent marker (read here via a short-lived container
-// against the home volume, since the failed container itself may already be
-// gone) is checked first. The container's last 50 log lines are the fallback
-// for any other startup failure that never wrote the marker.
+// during startup, checked in precedence order:
+//
+//  1. /home/dev/.cenci-agent-startup-error — sandbox/entrypoint.sh writes a
+//     human-readable message here and exits non-zero when the agent CLI path
+//     is missing or not executable, before the readiness marker is ever
+//     touched, so this persistent marker is checked first.
+//  2. /home/dev/.cenci-boot.log — the entrypoint's teed boot log (last 50
+//     lines), covering any other entrypoint failure that occurred after the
+//     boot log tee was installed.
+//  3. /home/dev/.cenci-startup-failed — the generic EXIT-trap marker the
+//     entrypoint writes for any non-zero exit once the tee is installed, for
+//     failures where the boot log itself is empty.
+//  4. The container's last 50 `docker/podman logs` lines, for failures
+//     outside the entrypoint's own diagnostics (e.g. before the tee/trap were
+//     installed).
+//  5. A fully generic fallback string, if none of the above yielded anything.
+//
+// All home-volume reads happen via a short-lived container against the home
+// volume, since the failed container itself may already be gone.
 func (e *Engine) startupFailureDetail(scope Scope) string {
-	marker := exec.Command(e.Runtime, "run", "--rm", "--user", "root", "--entrypoint", "/bin/cat",
-		"-v", scope.VolumeName+":/home/dev", scope.Image, "/home/dev/.cenci-agent-startup-error")
-	if out, err := marker.Output(); err == nil && strings.TrimSpace(string(out)) != "" {
-		return strings.TrimSpace(string(out))
+	if content, ok := e.readHomeVolumeFile(scope, "/home/dev/.cenci-agent-startup-error"); ok {
+		return content
+	}
+	if content, ok := e.readHomeVolumeFile(scope, "/home/dev/.cenci-boot.log"); ok {
+		return lastLines(content, 50)
+	}
+	if content, ok := e.readHomeVolumeFile(scope, "/home/dev/.cenci-startup-failed"); ok {
+		return content
 	}
 	logs := exec.Command(e.Runtime, "logs", "--tail", "50", scope.ContainerName)
 	if out, err := logs.CombinedOutput(); err == nil && strings.TrimSpace(string(out)) != "" {
@@ -588,8 +639,12 @@ func (e *Engine) waitUntilReady(scope Scope) error {
 			continue
 		}
 		if err != nil || status == "exited" || status == "dead" {
+			displayStatus, displayExit := status, exitCode
+			if err != nil {
+				displayStatus, displayExit = "unknown", "unknown"
+			}
 			return fmt.Errorf("container '%s' failed during startup (status %s, exit %s): %s",
-				scope.ContainerName, status, exitCode, e.startupFailureDetail(scope))
+				scope.ContainerName, displayStatus, displayExit, e.startupFailureDetail(scope))
 		}
 		time.Sleep(readyPollInterval)
 	}

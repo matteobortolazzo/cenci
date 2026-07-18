@@ -97,8 +97,18 @@ func joinArgv(argv []string) string {
 //	FAKE_INSPECT_LABEL   — container `inspect` stdout for label lookups
 //	FAKE_INSPECT_MOUNTS  — container `inspect` stdout for mount lookups
 //	FAKE_INSPECT_STATE   — container startup state (default "running 0")
+//	FAKE_CONTAINER_INSPECT_EXIT — container `inspect` exit code, for all three
+//	                        format-string lookups (State.Status, .RW mounts,
+//	                        Mounts) — default 0; set nonzero to simulate
+//	                        inspect erroring (e.g. the container was already
+//	                        removed by `--rm`)
 //	FAKE_READY_EXIT      — readiness probe exit code (default 0)
-//	FAKE_STARTUP_ERROR   — persistent startup error marker text
+//	FAKE_STARTUP_ERROR   — persistent agent-CLI-missing marker text, read
+//	                        from /home/dev/.cenci-agent-startup-error
+//	FAKE_BOOT_LOG        — entrypoint boot-log content, read from
+//	                        /home/dev/.cenci-boot.log
+//	FAKE_STARTUP_MARKER  — generic entrypoint-failure trap marker text, read
+//	                        from /home/dev/.cenci-startup-failed
 //	FAKE_AGENT_CHECK_EXIT — EnsureAgentVolume's populated-check exit code
 //	                        (default 0 = the shared volume is populated)
 //	FAKE_ATTACH_EXIT     — exit code of the final `exec -it ...` attach
@@ -107,7 +117,9 @@ func joinArgv(argv []string) string {
 // container id), container `inspect` (label vs mounts told apart by the
 // format string), non-interactive `exec` (readiness probe, exit 0), and the
 // final `exec -it` attach — which the binary syscall.Execs, so the fake's
-// exit code IS the binary's exit code.
+// exit code IS the binary's exit code. `run --entrypoint /bin/cat ... <path>`
+// (startupFailureDetail's short-lived home-volume reads) is told apart by the
+// requested path, one of the three FAKE_* vars above.
 func writeScriptedRuntime(t *testing.T, dir, name, callLog string) {
 	t.Helper()
 	body := "#!/bin/sh\n" +
@@ -119,7 +131,18 @@ func writeScriptedRuntime(t *testing.T, dir, name, callLog string) {
 		"ps) printf '%s' \"${FAKE_PS:-}\" ;;\n" +
 		"volume) if [ \"$2\" = ls ]; then printf '%s' \"${FAKE_VOLUMES:-}\"; exit \"${FAKE_VOLUME_LS_EXIT:-0}\"; fi ;;\n" +
 		"rm) exit 0 ;;\n" +
-		"run) case \"$*\" in *'/bin/cat'*) printf '%s' \"${FAKE_STARTUP_ERROR:-}\"; exit \"${FAKE_STARTUP_ERROR_EXIT:-0}\" ;; *'agent-cli.sh update'*) [ -z \"${FAKE_RUN_STDERR:-}\" ] || printf '%s\\n' \"${FAKE_RUN_STDERR}\" >&2; exit \"${FAKE_RUN_EXIT:-0}\" ;; *'test -x /opt/cenci-agent'*) exit \"${FAKE_AGENT_CHECK_EXIT:-0}\" ;; esac; printf '%s\\n' fake-container-id ;;\n" +
+		"run) case \"$*\" in\n" +
+		"  *'/bin/cat'*)\n" +
+		"    case \"$*\" in\n" +
+		"    *'.cenci-agent-startup-error'*) printf '%s' \"${FAKE_STARTUP_ERROR:-}\"; exit \"${FAKE_STARTUP_ERROR_EXIT:-0}\" ;;\n" +
+		"    *'.cenci-boot.log'*) printf '%s' \"${FAKE_BOOT_LOG:-}\"; exit \"${FAKE_BOOT_LOG_EXIT:-0}\" ;;\n" +
+		"    *'.cenci-startup-failed'*) printf '%s' \"${FAKE_STARTUP_MARKER:-}\"; exit \"${FAKE_STARTUP_MARKER_EXIT:-0}\" ;;\n" +
+		"    esac\n" +
+		"    ;;\n" +
+		"  *'agent-cli.sh update'*) [ -z \"${FAKE_RUN_STDERR:-}\" ] || printf '%s\\n' \"${FAKE_RUN_STDERR}\" >&2; exit \"${FAKE_RUN_EXIT:-0}\" ;;\n" +
+		"  *'test -x /opt/cenci-agent'*) exit \"${FAKE_AGENT_CHECK_EXIT:-0}\" ;;\n" +
+		"  esac\n" +
+		"  printf '%s\\n' fake-container-id ;;\n" +
 		"inspect)\n" +
 		"  case \"$*\" in\n" +
 		"  *State.Status*) printf '%s\\n' \"${FAKE_INSPECT_STATE:-running 0}\"; exit \"${FAKE_CONTAINER_INSPECT_EXIT:-0}\" ;;\n" +
@@ -1344,6 +1367,123 @@ func TestOpen_StartupErrorMarkerSurfacedVerbatim(t *testing.T) {
 	}
 	if !strings.Contains(string(output), marker) {
 		t.Errorf("expected the startup-error marker content surfaced verbatim, got:\n%s", output)
+	}
+}
+
+// TestOpen_WaitUntilReadyInspectFailure_NoBlankStatusExit pins ticket #473's
+// first symptom: when the container is already gone (auto-removed by --rm)
+// by the time waitUntilReady exhausts its inspect-error retry budget,
+// containerStartupState returns blank status/exit strings alongside its
+// error — the outer message must substitute a clear fallback instead of
+// interpolating those blanks into "(status , exit )".
+func TestOpen_WaitUntilReadyInspectFailure_NoBlankStatusExit(t *testing.T) {
+	fakeDir := t.TempDir()
+	writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = append(env,
+		"FAKE_READY_EXIT=1",
+		"FAKE_CONTAINER_INSPECT_EXIT=1",
+	)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected a startup failure exit 1, got %T %v\n%s", err, err, output)
+	}
+	if strings.Contains(string(output), "(status , exit )") {
+		t.Errorf("expected a fallback in place of blank status/exit, got the literal blank parenthetical:\n%s", output)
+	}
+	if !strings.Contains(string(output), "(status unknown, exit unknown)") {
+		t.Errorf("expected a clear status/exit fallback, got:\n%s", output)
+	}
+}
+
+// TestOpen_GenericEntrypointFailureSurfacesBootLog pins ticket #473's second
+// symptom: an entrypoint failure at a point other than the agent-CLI-missing
+// check (so no /home/dev/.cenci-agent-startup-error marker exists) still
+// surfaces real diagnostic content — sandbox/entrypoint.sh's teed boot log —
+// instead of degrading into startupFailureDetail's fully generic fallback.
+// Parametrized over both agents per the ticket's acceptance criteria.
+func TestOpen_GenericEntrypointFailureSurfacesBootLog(t *testing.T) {
+	cases := []struct {
+		name, token string
+	}{
+		{"claude", "ch"},
+		{"codex", "xt"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeDir := t.TempDir()
+			writeScriptedRuntimes(t, fakeDir)
+			assets := writeAssetFixture(t)
+			env, home, _ := openTestEnv(t, fakeDir, assets)
+			if tc.name == "codex" {
+				if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(home, ".codex", "auth.json"), []byte("{}"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			const bootLog = "boot log: mkdir /workspace/.cenci: permission denied"
+			cmd := exec.Command(binaryPath, "open", tc.token)
+			cmd.Env = append(env,
+				"FAKE_READY_EXIT=1",
+				"FAKE_INSPECT_STATE=exited 1",
+				"FAKE_BOOT_LOG="+bootLog,
+			)
+			cmd.Dir = t.TempDir()
+			output, err := cmd.CombinedOutput()
+
+			exitErr, ok := err.(*exec.ExitError)
+			if !ok || exitErr.ExitCode() != 1 {
+				t.Fatalf("expected a startup failure exit 1, got %T %v\n%s", err, err, output)
+			}
+			if !strings.Contains(string(output), bootLog) {
+				t.Errorf("expected the boot log content surfaced, got:\n%s", output)
+			}
+			if strings.Contains(string(output), "entrypoint exited before initialization completed") {
+				t.Errorf("expected the boot log, not the fully generic fallback, got:\n%s", output)
+			}
+		})
+	}
+}
+
+// TestOpen_GenericEntrypointFailureSurfacesStartupMarker pins the third
+// startupFailureDetail precedence step: when no agent-CLI marker AND no boot
+// log content exists, the generic EXIT-trap marker
+// (/home/dev/.cenci-startup-failed) is still surfaced verbatim rather than
+// falling through to the fully generic fallback string.
+func TestOpen_GenericEntrypointFailureSurfacesStartupMarker(t *testing.T) {
+	fakeDir := t.TempDir()
+	writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	const marker = "generic startup failure: entrypoint trap fired at credential seeding"
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = append(env,
+		"FAKE_READY_EXIT=1",
+		"FAKE_INSPECT_STATE=exited 1",
+		"FAKE_STARTUP_MARKER="+marker,
+	)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected a startup failure exit 1, got %T %v\n%s", err, err, output)
+	}
+	if !strings.Contains(string(output), marker) {
+		t.Errorf("expected the generic trap marker content surfaced verbatim, got:\n%s", output)
+	}
+	if strings.Contains(string(output), "entrypoint exited before initialization completed") {
+		t.Errorf("expected the trap marker, not the fully generic fallback, got:\n%s", output)
 	}
 }
 
