@@ -15,6 +15,7 @@ import (
 const (
 	imageAgentLifecycleLabel = "cenci.agent-cli"
 	imageAgentLifecycleValue = "shared-v2"
+	imageBaseVersionLabel    = "cenci.base-version"
 )
 
 // Engine bundles what every launcher operation needs: the resolved container
@@ -84,19 +85,43 @@ func (e *Engine) imageExists(image string) (bool, error) {
 	return false, nil
 }
 
-// imageAgentLifecycleCurrent reports whether an image contains the shared-v2
-// agent helper contract. Mutable :latest tags from older releases are rebuilt.
-func (e *Engine) imageAgentLifecycleCurrent(image string) (bool, error) {
+// imageCurrent reports whether an image contains the shared-v2 agent helper
+// contract and was built against the engine's current BaseTag. Mutable
+// :latest tags from older releases (stale agent-cli label) or from before the
+// current base-image content hash (stale cenci.base-version label) are
+// treated as not current so the caller rebuilds them. baseDrift distinguishes
+// the two: it is true only when the agent-cli label is current AND the baked
+// base-version label is present but provably no longer matches e.BaseTag, so
+// callers can print a "rebuilding due to base drift" notice specifically for
+// that case (never for a missing image, a stale agent-cli label, or a legacy
+// image built before this label existed at all — an absent base-version
+// label is a plain missing-freshness rebuild, not provable drift).
+func (e *Engine) imageCurrent(image string) (current bool, baseDrift bool, err error) {
 	exists, err := e.imageExists(image)
 	if err != nil || !exists {
-		return false, err
+		return false, false, err
 	}
 	out, err := exec.Command(e.Runtime, "image", "inspect", "--format",
-		`{{ index .Config.Labels "`+imageAgentLifecycleLabel+`" }}`, image).Output()
+		`{{ index .Config.Labels "`+imageAgentLifecycleLabel+`" }}|{{ index .Config.Labels "`+imageBaseVersionLabel+`" }}`, image).Output()
 	if err != nil {
-		return false, fmt.Errorf("%s image inspect %s: %w", e.Runtime, image, err)
+		return false, false, fmt.Errorf("%s image inspect %s: %w", e.Runtime, image, err)
 	}
-	return strings.TrimSpace(string(out)) == imageAgentLifecycleValue, nil
+	parts := strings.SplitN(strings.TrimSpace(string(out)), "|", 2)
+	if len(parts) < 2 {
+		_, _ = fmt.Fprintf(e.Stderr, "Warning: %s image inspect %s returned unparsable output (no agent-cli|base-version separator); treating as not current.\n", e.Runtime, image)
+		return false, false, nil
+	}
+	agentCLI, baseVersion := parts[0], parts[1]
+	if agentCLI != imageAgentLifecycleValue {
+		return false, false, nil
+	}
+	if baseVersion == "" {
+		return false, false, nil
+	}
+	if baseVersion != e.BaseTag {
+		return false, true, nil
+	}
+	return true, false, nil
 }
 
 // printPluginRefreshHint reminds after a user-invoked build that the
@@ -156,6 +181,7 @@ func (e *Engine) BuildMonolith() error {
 	_, _ = fmt.Fprintf(e.Stdout, "Building %s with %s...\n", MonolithImage, e.Runtime)
 	args := []string{"build", "--build-arg", "BASE_VERSION=" + e.BaseTag,
 		"--label", imageAgentLifecycleLabel + "=" + imageAgentLifecycleValue,
+		"--label", imageBaseVersionLabel + "=" + e.BaseTag,
 		"-t", MonolithImage, "-f", filepath.Join(e.AssetDir, "Dockerfile"), e.AssetDir}
 	if err := e.command(args...).Run(); err != nil {
 		return fmt.Errorf("%s build %s: %w", e.Runtime, MonolithImage, err)
@@ -174,6 +200,7 @@ func (e *Engine) BuildRepoImage(repoRoot, image string) error {
 	_, _ = fmt.Fprintf(e.Stdout, "Building %s with %s...\n", image, e.Runtime)
 	args := []string{"build", "--build-arg", "BASE_VERSION=" + e.BaseTag,
 		"--label", imageAgentLifecycleLabel + "=" + imageAgentLifecycleValue,
+		"--label", imageBaseVersionLabel + "=" + e.BaseTag,
 		"-t", image, "-f", filepath.Join(repoRoot, ".cenci", "Dockerfile"), filepath.Join(repoRoot, ".cenci")}
 	if err := e.command(args...).Run(); err != nil {
 		return fmt.Errorf("%s build %s: %w", e.Runtime, image, err)
@@ -192,34 +219,53 @@ func (e *Engine) BuildSelected(scope Scope) error {
 	return e.BuildMonolith()
 }
 
-// EnsureImage builds the scope's image only when it is missing.
+// EnsureImage builds the scope's image only when it is missing, its
+// agent-cli label is stale, or its baked cenci.base-version label no longer
+// matches the engine's current BaseTag (base-image drift). A base-drift
+// rebuild prints a notice first so the user understands why the first launch
+// after a base change is slower.
 func (e *Engine) EnsureImage(scope Scope) error {
-	current, err := e.imageAgentLifecycleCurrent(scope.Image)
+	current, baseDrift, err := e.imageCurrent(scope.Image)
 	if err != nil {
 		return err
 	}
 	if current {
 		return nil
+	}
+	if baseDrift {
+		e.printBaseDriftNotice(scope.Image)
 	}
 	return e.BuildSelected(scope)
 }
 
 // EnsureMonolithImage builds the shared monolith image only when its current
-// content-hash tag/shared-agent label is missing, regardless of which image
-// the current launch scope selected. The agent-CLI updater and the shared
-// volume's populated-check both run exclusively against MonolithImage — a
-// trusted image checked into this repo — never a per-repo image, so a
-// malicious repo image can never gain root write access to the host-global
-// agent CLI volume every sandbox shares.
+// content-hash tag/shared-agent label/base-version label is missing or
+// stale, regardless of which image the current launch scope selected. A
+// base-drift rebuild prints a notice first (see EnsureImage). The agent-CLI
+// updater and the shared volume's populated-check both run exclusively
+// against MonolithImage — a trusted image checked into this repo — never a
+// per-repo image, so a malicious repo image can never gain root write access
+// to the host-global agent CLI volume every sandbox shares.
 func (e *Engine) EnsureMonolithImage() error {
-	current, err := e.imageAgentLifecycleCurrent(MonolithImage)
+	current, baseDrift, err := e.imageCurrent(MonolithImage)
 	if err != nil {
 		return err
 	}
 	if current {
 		return nil
 	}
+	if baseDrift {
+		e.printBaseDriftNotice(MonolithImage)
+	}
 	return e.BuildMonolith()
+}
+
+// printBaseDriftNotice prints a lightweight notice that image's rebuild was
+// triggered specifically by base-version drift (as opposed to a missing
+// image or a stale agent-cli label), so the user understands why the first
+// launch after a base change is slower.
+func (e *Engine) printBaseDriftNotice(image string) {
+	_, _ = fmt.Fprintf(e.Stdout, "Note: %s was built against an older sandbox base (base-version drift); rebuilding — this first launch after a base change is slower.\n", image)
 }
 
 // containerRunning reports whether a container with exactly this name is
