@@ -1739,6 +1739,41 @@ func TestOpenCodexWithoutAuth_Exits1(t *testing.T) {
 	}
 }
 
+// TestOpenCodex_ForwardsProviderKeyPerExecOnly pins Codex's OPENAI_API_KEY
+// forwarding to the per-exec-only model OpenCode already uses (#490/#509):
+// the env var alone must satisfy the codex auth gate (no ~/.codex/auth.json
+// staged) and reach the exec-time attach, but it must never appear in the
+// create-time `run --name` args — else it would sit in the container's PID-1
+// environ for the container's whole lifetime, readable via `docker inspect`/
+// `/proc/1/environ` (#510).
+func TestOpenCodex_ForwardsProviderKeyPerExecOnly(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets) // no ~/.codex/auth.json staged
+
+	cmd := exec.Command(binaryPath, "open", "--agent", "codex")
+	cmd.Env = append(env, "OPENAI_API_KEY=sk-cenci-test-secret")
+	cmd.Dir = t.TempDir()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("open --agent codex: %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	runLine, ok := findLineWithPrefix(lines, "run --name ")
+	if !ok {
+		t.Fatalf("expected a container run, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if strings.Contains(runLine, "OPENAI_API_KEY") {
+		t.Errorf("create-time run args must never bake the provider key into the PID-1 environ; got:\n%s", runLine)
+	}
+
+	line := attachLine(t, lines)
+	if !strings.Contains(line, "-e OPENAI_API_KEY=sk-cenci-test-secret") {
+		t.Errorf("attach argv missing per-exec OPENAI_API_KEY forwarding:\n%s", line)
+	}
+}
+
 // TestOpenOpencode_FreshCreate_PinsBareInvocationAndScopesProviderKeys pins
 // #490's launch contract for OpenCode: a bare `opencode` invocation (no
 // --dangerously-skip-permissions equivalent — permissions are config-driven

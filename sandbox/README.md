@@ -273,7 +273,8 @@ When launching Codex (`--agent codex` / `cn xt`), auth is staged from the host:
   host. Injected read-only and seeded to `/home/dev/.codex/auth.json` (mode 600) only when
   the volume has none yet (rotating refresh tokens — see First-Run Setup; `--reseed-creds`
   forces a re-copy).
-- `OPENAI_API_KEY` — forwarded into the container when set in your host environment.
+- `OPENAI_API_KEY` — forwarded per agent session (`exec`) when set in your host
+  environment; never baked into the container's create-time environment.
 
 At least one of these must be present. If neither is, `cenci open --agent codex` fails
 hard with a clear message and does **not** create a container:
@@ -293,8 +294,8 @@ When launching OpenCode (`--agent opencode`), auth is staged from the host:
   (same seed-once staging as Codex — see First-Run Setup; `--reseed-creds` forces a
   re-copy).
 - `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` — forwarded into the container when set in your
-  host environment (OpenCode reads these natively; unlike Codex's, neither is baked into the
-  container's create-time environment, only passed per-`exec`).
+  host environment (OpenCode reads these natively; like Codex's `OPENAI_API_KEY`, neither is
+  baked into the container's create-time environment, only passed per-`exec`).
 
 At least one of these must be present. If neither is, `cenci open --agent opencode` fails
 hard with a clear message and does **not** create a container:

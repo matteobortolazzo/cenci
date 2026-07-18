@@ -71,7 +71,7 @@ if [[ "$(id -u)" -eq 0 ]]; then
             || echo "warning: boot-log setup failed at ${CENCI_BOOT_LOG} — startup diagnostics may be incomplete or world-readable" >&2
         # Exported (not just a local variable) so it survives the
         # `sudo --preserve-env -u dev` re-exec below (same --preserve-env
-        # call that already carries CENCI_SANDBOX/OPENAI_API_KEY across).
+        # call that already carries CENCI_SANDBOX across).
         # CENCI_BOOT_LOG_INSTALLED — not CENCI_BOOT_LOG itself — is the
         # sentinel the dev-side block further down checks before installing
         # its own fallback tee. CENCI_BOOT_LOG is just a path; nothing stops
@@ -134,7 +134,7 @@ if [[ "$(id -u)" -eq 0 ]]; then
     # secure_path in /etc/sudoers strips PATH additions (~/.local/bin,
     # ~/go/bin) even with --preserve-env=PATH; the explicit env "PATH=..."
     # assignment defeats that. --preserve-env carries everything else
-    # (TERM, XDG_RUNTIME_DIR, CENCI_SANDBOX, OPENAI_API_KEY, ...) across.
+    # (TERM, XDG_RUNTIME_DIR, CENCI_SANDBOX, ...) across.
     exec sudo --preserve-env -u dev env "PATH=${PATH}" "HOME=/home/dev" \
         /usr/local/bin/entrypoint.sh "$@"
 fi
