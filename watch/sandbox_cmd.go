@@ -248,17 +248,20 @@ func runSandboxReseedCreds(args []string) {
 	os.Exit(1)
 }
 
-// runSandboxPrune implements `cenci sandbox prune [--volumes]`: remove
-// superseded base tags, dangling images, and stopped sandbox containers;
-// with --volumes, also prompt (default-deny) before removing stale home
-// volumes.
+// runSandboxPrune implements `cenci sandbox prune [--images] [--volumes]`:
+// remove superseded base tags, dangling images, and stopped sandbox
+// containers; with --images, also prompt (default-deny) before removing
+// per-repo sandbox images (cenci-sandbox-<slug>:latest); with --volumes,
+// also prompt (default-deny) before removing stale home volumes. --images
+// and --volumes are independent and may be combined.
 func runSandboxPrune(args []string) {
 	fs := flag.NewFlagSet("sandbox prune", flag.ExitOnError)
+	images := fs.Bool("images", false, "prompt to remove per-repo sandbox images (cenci-sandbox-<slug>:latest)")
 	volumes := fs.Bool("volumes", false, "also prompt to remove stale sandbox home volumes")
 	_ = fs.Parse(args)
 	rejectExtraArgs("prune", fs)
 
-	if err := newEngine("prune").Prune(*volumes); err != nil {
+	if err := newEngine("prune").Prune(*images, *volumes); err != nil {
 		fmt.Fprintf(os.Stderr, "cenci sandbox prune: %v\n", err)
 		os.Exit(1)
 	}

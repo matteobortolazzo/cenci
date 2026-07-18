@@ -14,17 +14,41 @@ import (
 // read-only listing verbs from env vars, so tests script responses without a
 // real container runtime:
 //
-//	FAKE_IMAGES   → `images ...` stdout
+//	FAKE_IMAGES   → `images ...` stdout, optionally filtered by a trailing
+//	                positional repository argument (e.g. `images --format
+//	                {{.Repository}}:{{.Tag}} cenci-sandbox-base` returns only
+//	                the FAKE_IMAGES lines whose repository is
+//	                "cenci-sandbox-base"); with no positional, every
+//	                FAKE_IMAGES line is returned unfiltered.
 //	FAKE_PS       → `ps ...` stdout (any form)
 //	FAKE_VOLUMES  → `volume ls ...` stdout
 //
 // Plain /bin/sh (not env) so it resolves under a minimal overridden PATH.
 func writeFakeRuntime(t *testing.T, dir, name, callLog string) {
 	t.Helper()
+	// PATH is overridden to only the fake-runtime dir for these tests, so
+	// the images filter below must stay shell-builtin-only (case/for, no
+	// grep/awk) or it silently fails with "command not found" once the
+	// real PATH is gone.
 	body := `#!/bin/sh
 printf '%s\n' "$*" >> ` + exectest.ShellQuote(callLog) + `
 case "$1" in
-images) printf '%s' "${FAKE_IMAGES:-}" ;;
+images)
+  if [ -n "$4" ]; then
+    result=""
+    IFS='
+'
+    for line in ${FAKE_IMAGES:-}; do
+      case "$line" in
+        "$4":*) result="${result}${line}
+" ;;
+      esac
+    done
+    printf '%s' "$result"
+  else
+    printf '%s' "${FAKE_IMAGES:-}"
+  fi
+  ;;
 ps) printf '%s' "${FAKE_PS:-}" ;;
 volume) [ "$2" = ls ] && printf '%s' "${FAKE_VOLUMES:-}" ;;
 esac

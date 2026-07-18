@@ -111,7 +111,8 @@ cenci open --shell
 
 # Build / maintain the images
 cenci sandbox build   # (re)build the image
-cenci sandbox prune   # clean up superseded base tags, dangling images, stopped sandbox containers
+cenci sandbox prune             # clean up superseded base tags, dangling images, stopped sandbox containers
+cenci sandbox prune --images    # …and prompt ([y/N], default deny) to remove per-repo images too
 ```
 
 This is deliberately just a taste: the full launcher reference — every `cenci open`
@@ -364,7 +365,13 @@ same base image and content-hash `BASE_VERSION` as the monolith — using
 Repos without `.cenci/Dockerfile` keep using the shared monolith image, just with
 single-repo mounting (see [Per-repo containers](#per-repo-containers)). Rebuild a
 repo's own image the same way as the monolith: `cenci sandbox build` (run from inside
-that repo).
+that repo). Per-repo images have no automatic expiry, so they accumulate on the host
+as repos come and go — run `cenci sandbox prune --images` to prompt ([y/N], default
+deny) for removal of every `cenci-sandbox-<slug>:latest` image found; each repo's
+image is removed individually (best-effort), so one repo's sandbox holding its image
+open never blocks cleanup of another repo's image. `prune` has no repo/cwd scope of
+its own, so it always lists every candidate on the host rather than trying to detect
+which repos still exist on disk.
 
 `/cenci:configure` generates and maintains `.cenci/Dockerfile` automatically
 from the repo's detected stack (question 9) — you normally don't hand-write this file.
