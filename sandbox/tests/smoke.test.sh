@@ -374,6 +374,45 @@ else
     fail "container run failed while exercising the no-HOST_UID no-op path (exit ${NOOP_STATUS}): ${NOOP_OUT}"
 fi
 
+# ── Root-block failure reaches the boot log (#495) ──────────────────
+# Prior to #495, the boot-log tee + EXIT trap (#484/#473) were only
+# installed after the root block's UID/GID remap had already run, so any
+# failure inside the remap itself (usermod/groupmod/chown) never reached
+# startupFailureDetail's boot-log or startup-failed-marker tiers -- it only
+# ever showed up in `docker logs`, which is routinely gone by the time the
+# launcher's fallback reads it (containers run with --rm). This forces a
+# deterministic remap failure -- HOST_UID=33 collides with the `www-data`
+# system account that ships in every stock ubuntu:24.04 image (predefined by
+# base-passwd, present with or without a web server installed), so
+# `usermod -u 33 dev` refuses (UID already in use) without needing -o -- and
+# asserts the failure is captured by both the root-scoped tee (boot log) and
+# the root-scoped EXIT trap (startup-failed marker), using a named home
+# volume so the log/marker survive the failing --rm container.
+echo "case: root-block remap failure is captured in the boot log and startup-failed marker"
+BOOTLOG_VOLUME="cenci-boot-log-smoke-$$"
+SMOKE_AGENT_VOLUMES+=("${BOOTLOG_VOLUME}")
+BOOTLOG_RUN_OUT="$(run_with_timeout "${RUNTIME}" run --rm --user root \
+    -e CENCI_AGENT_CLI=/bin/true -e HOST_UID=33 -e HOST_GID=1000 \
+    -v "${BOOTLOG_VOLUME}:/home/dev" \
+    cenci-sandbox:latest 2>&1)"
+BOOTLOG_RUN_STATUS=$?
+if [[ "${BOOTLOG_RUN_STATUS}" -eq 124 ]]; then
+    fail "container run timed out while forcing a root-block remap failure"
+elif [[ "${BOOTLOG_RUN_STATUS}" -eq 0 ]]; then
+    fail "expected HOST_UID=33 (colliding with the www-data system account) to make the root-block usermod fail, but the container exited 0: ${BOOTLOG_RUN_OUT}"
+else
+    BOOT_LOG_CONTENT="$(run_with_timeout "${RUNTIME}" run --rm --user root --entrypoint /bin/cat \
+        -v "${BOOTLOG_VOLUME}:/home/dev" cenci-sandbox:latest /home/dev/.cenci-boot.log 2>&1)"
+    STARTUP_FAILED_CHECK="$(run_with_timeout "${RUNTIME}" run --rm --user root --entrypoint /bin/bash \
+        -v "${BOOTLOG_VOLUME}:/home/dev" cenci-sandbox:latest -c \
+        'test -f /home/dev/.cenci-startup-failed && echo EXISTS')"
+    if [[ "${BOOT_LOG_CONTENT}" == *"remap: usermod failed"* && "${STARTUP_FAILED_CHECK}" == "EXISTS" ]]; then
+        pass
+    else
+        fail "expected boot log to contain 'remap: usermod failed' and /home/dev/.cenci-startup-failed to exist; boot log: ${BOOT_LOG_CONTENT}; startup-failed check: ${STARTUP_FAILED_CHECK}"
+    fi
+fi
+
 # ── Summary ────────────────────────────────────────────────────────
 print_summary
 [[ "${FAILURES}" -eq 0 ]]
