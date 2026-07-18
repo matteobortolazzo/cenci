@@ -219,6 +219,16 @@ func (e *Engine) BuildSelected(scope Scope) error {
 	return e.BuildMonolith()
 }
 
+// CheckSelected reports whether the image scope selected (the repo's own
+// image when it opted in via .cenci/Dockerfile, otherwise the monolith) is
+// already current, reusing the same imageCurrent freshness gate BuildSelected
+// and EnsureImage rely on. It never builds — this is a read-only reporting
+// entry point for `cenci sandbox build --check`.
+func (e *Engine) CheckSelected(scope Scope) (current bool, err error) {
+	current, _, err = e.imageCurrent(scope.Image)
+	return current, err
+}
+
 // EnsureImage builds the scope's image only when it is missing, its
 // agent-cli label is stale, or its baked cenci.base-version label no longer
 // matches the engine's current BaseTag (base-image drift). A base-drift

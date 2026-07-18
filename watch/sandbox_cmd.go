@@ -87,19 +87,38 @@ func currentScope(verb, agent, instanceName string) launcher.Scope {
 	return launcher.ComputeScope(agent, instanceName, cwd, home)
 }
 
-// runSandboxBuild implements `cenci sandbox build`:
+// runSandboxBuild implements `cenci sandbox build [--check]`:
 // build the image the current directory selects (the repo's own image when
 // .cenci/Dockerfile opts in, otherwise the shared monolith), building the base
 // first if its content-hash tag is missing. Agent CLIs are runtime-managed in
 // shared runtime volumes and are not selected as image build inputs. The
 // agent passed to ComputeScope is irrelevant — image selection depends only on
 // the repo, never on the agent-namespaced container/volume names.
+// --check reports the selected image's freshness (the same imageCurrent gate
+// BuildSelected relies on) via exit code only — 0 when current, non-zero when
+// a rebuild is needed or the check itself errors — without building anything.
+// install.sh's step_sandbox_setup consults this before its BUILD_IMAGE=ask
+// rebuild prompt so it can skip asking when nothing needs to rebuild.
 func runSandboxBuild(args []string) {
 	fs := flag.NewFlagSet("sandbox build", flag.ExitOnError)
+	check := fs.Bool("check", false, "report whether the selected image is current, without building (0 = current, non-zero = rebuild needed or error)")
 	_ = fs.Parse(args)
 	rejectExtraArgs("build", fs)
 
 	scope := currentScope("build", "claude", "")
+
+	if *check {
+		current, err := newEngine("build").CheckSelected(scope)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cenci sandbox build --check: %v\n", err)
+			os.Exit(1)
+		}
+		if current {
+			os.Exit(0)
+		}
+		os.Exit(1)
+	}
+
 	if err := newEngine("build").BuildSelected(scope); err != nil {
 		fmt.Fprintf(os.Stderr, "cenci sandbox build: %v\n", err)
 		os.Exit(1)

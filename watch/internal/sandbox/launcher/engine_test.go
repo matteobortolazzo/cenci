@@ -465,6 +465,91 @@ func TestEnsureAgentVolume_UpdateFailureButRmSucceeds_NoWarning(t *testing.T) {
 	}
 }
 
+// -- CheckSelected ----------------------------------------------------------
+
+// TestCheckSelected_CurrentImage_ReturnsTrueNoBuild pins the happy path for
+// the ticket-#519 `--check` gate: an already-current image reports
+// current=true and never triggers a build (CheckSelected must only read
+// freshness, never rebuild).
+func TestCheckSelected_CurrentImage_ReturnsTrueNoBuild(t *testing.T) {
+	e, callLog := buildEngine(t, false) // image present, agent-cli + base-version current
+
+	scope := Scope{Image: MonolithImage}
+	current, err := e.CheckSelected(scope)
+	if err != nil {
+		t.Fatalf("CheckSelected: %v", err)
+	}
+	if !current {
+		t.Errorf("CheckSelected(current image) current = false, want true")
+	}
+
+	if calls := readCallLog(t, callLog); containsPrefix(calls, "build") {
+		t.Errorf("CheckSelected must never build; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+// TestCheckSelected_MissingImage_ReturnsFalseNoBuild pins the missing-image
+// case: CheckSelected reports current=false without attempting to build the
+// missing image (unlike EnsureImage/BuildSelected).
+func TestCheckSelected_MissingImage_ReturnsFalseNoBuild(t *testing.T) {
+	e, callLog := buildEngine(t, true) // image missing entirely
+
+	scope := Scope{Image: MonolithImage}
+	current, err := e.CheckSelected(scope)
+	if err != nil {
+		t.Fatalf("CheckSelected: %v", err)
+	}
+	if current {
+		t.Errorf("CheckSelected(missing image) current = true, want false")
+	}
+
+	if calls := readCallLog(t, callLog); containsPrefix(calls, "build") {
+		t.Errorf("CheckSelected must never build; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+// TestCheckSelected_StaleAgentCLILabel_ReturnsFalseNoBuild pins the stale
+// agent-cli label case (image present, base-version current, but the baked
+// agent-cli label no longer matches imageAgentLifecycleValue).
+func TestCheckSelected_StaleAgentCLILabel_ReturnsFalseNoBuild(t *testing.T) {
+	e, callLog := buildEngine(t, false) // image present
+	t.Setenv("FAKE_IMAGE_AGENT_LIFECYCLE", "shared-v1")
+
+	scope := Scope{Image: MonolithImage}
+	current, err := e.CheckSelected(scope)
+	if err != nil {
+		t.Fatalf("CheckSelected: %v", err)
+	}
+	if current {
+		t.Errorf("CheckSelected(stale agent-cli label) current = true, want false")
+	}
+
+	if calls := readCallLog(t, callLog); containsPrefix(calls, "build") {
+		t.Errorf("CheckSelected must never build; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+// TestCheckSelected_BaseVersionDrift_ReturnsFalseNoBuild pins the
+// base-version-drift case (image present, agent-cli label current, but the
+// baked cenci.base-version label no longer matches the engine's BaseTag).
+func TestCheckSelected_BaseVersionDrift_ReturnsFalseNoBuild(t *testing.T) {
+	e, callLog := buildEngine(t, false) // image present
+	t.Setenv("FAKE_IMAGE_BASE_VERSION", "OLDTAG")
+
+	scope := Scope{Image: MonolithImage}
+	current, err := e.CheckSelected(scope)
+	if err != nil {
+		t.Fatalf("CheckSelected: %v", err)
+	}
+	if current {
+		t.Errorf("CheckSelected(base-version drift) current = true, want false")
+	}
+
+	if calls := readCallLog(t, callLog); containsPrefix(calls, "build") {
+		t.Errorf("CheckSelected must never build; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
 // -- RefreshRunningPlugins ------------------------------------------------
 
 const wantClaudeRefreshCmd = `source /usr/local/bin/lib/migrate-settings.sh && heal_plugin_installs /home/dev/.claude/plugins && provision_plugins /home/dev/.claude/plugins cenci matteobortolazzo/cenci cenci cenci-watch && update_plugins /home/dev/.claude/plugins cenci 0 cenci cenci-watch`

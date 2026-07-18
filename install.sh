@@ -860,18 +860,30 @@ step_sandbox_setup() {
 		say "  ${DIM}skipping image build — run 'cenci sandbox build' when ready${RESET}"
 		return 0
 	fi
+
+	# The build runs through the cenci binary (it resolves the image assets
+	# from the installed cenci-sandbox plugin). Provision it from the plugin
+	# cache if the first agent session hasn't bootstrapped it yet. Resolved
+	# here — before the BUILD_IMAGE=ask branch below — so that branch can
+	# consult `sandbox build --check` and skip the prompt entirely when the
+	# image is already current (#519). A resolution failure here is not
+	# fatal: the ask branch below falls back to always asking, and the
+	# post-prompt binary check further down still reports it clearly.
+	local cenci_bin
+	cenci_bin="$(current_cenci_binary || true)"
+
 	if [ "$BUILD_IMAGE" = ask ]; then
+		if [ -n "$cenci_bin" ] && "$cenci_bin" sandbox build --check >/dev/null 2>&1; then
+			say "  ${DIM}sandbox image already up to date — skipping${RESET}"
+			return 0
+		fi
 		if ! ask_yn "Build the sandbox container image now with $runtime? (takes a few minutes)" y; then
 			say "  ${DIM}skipped — run 'cenci sandbox build' when ready${RESET}"
 			return 0
 		fi
 	fi
 
-	# The build runs through the cenci binary (it resolves the image assets
-	# from the installed cenci-sandbox plugin). Provision it from the plugin
-	# cache if the first agent session hasn't bootstrapped it yet.
-	local cenci_bin
-	if ! cenci_bin="$(current_cenci_binary)"; then
+	if [ -z "$cenci_bin" ]; then
 		warn "cenci binary not available yet — build the image later with: cenci sandbox build"
 		return 0
 	fi
