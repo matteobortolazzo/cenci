@@ -33,7 +33,7 @@ func TestPrune_RemovesSupersededBaseTagsKeepsCurrentAndLatest(t *testing.T) {
 	t.Setenv("FAKE_IMAGES",
 		"cenci-sandbox-base:abc123def456\ncenci-sandbox-base:latest\ncenci-sandbox-base:0ldstale0000\n")
 
-	if err := e.Prune(false); err != nil {
+	if err := e.Prune(false, false); err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
 
@@ -53,7 +53,7 @@ func TestPrune_RemovesOnlySandboxContainers(t *testing.T) {
 	e, callLog, _, _ := pruneEngine(t, "")
 	t.Setenv("FAKE_PS", "claude-cenci-old\ncodex-cenci-stale\nunrelated-container\n")
 
-	if err := e.Prune(false); err != nil {
+	if err := e.Prune(false, false); err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
 
@@ -72,7 +72,7 @@ func TestPrune_VolumesDefaultDeny(t *testing.T) {
 			e, callLog, stdout, stderr := pruneEngine(t, stdin)
 			t.Setenv("FAKE_VOLUMES", "claude-cenci-home-old\ncodex-cenci-home-stale\ncenci-agent-cli-claude\nunrelated-volume\n")
 
-			if err := e.Prune(true); err != nil {
+			if err := e.Prune(false, true); err != nil {
 				t.Fatalf("Prune: %v", err)
 			}
 
@@ -97,7 +97,7 @@ func TestPrune_VolumesConfirmedRemovesAllInOneCall(t *testing.T) {
 	e, callLog, _, _ := pruneEngine(t, "y\n")
 	t.Setenv("FAKE_VOLUMES", "claude-cenci-home-old\ncodex-cenci-home-stale\ncenci-agent-cli-codex\nunrelated-volume\n")
 
-	if err := e.Prune(true); err != nil {
+	if err := e.Prune(false, true); err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
 
@@ -111,7 +111,7 @@ func TestPrune_NoMatchingVolumes(t *testing.T) {
 	e, callLog, stdout, _ := pruneEngine(t, "y\n")
 	t.Setenv("FAKE_VOLUMES", "unrelated-volume\n")
 
-	if err := e.Prune(true); err != nil {
+	if err := e.Prune(false, true); err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
 
@@ -120,5 +120,122 @@ func TestPrune_NoMatchingVolumes(t *testing.T) {
 	}
 	if containsPrefix(readCallLog(t, callLog), "volume rm") {
 		t.Error("volume rm issued with no matching volumes")
+	}
+}
+
+// fakeRepoImages is the shared FAKE_IMAGES fixture for the --images tests: a
+// per-repo derived image, the monolith, the current base :latest alias, and
+// the current base hash tag (matching pruneEngine's BaseTag, so the
+// unrelated superseded-base-tag cleanup at the top of Prune leaves it
+// alone) — none of the latter three should ever be treated as an --images
+// candidate.
+const fakeRepoImages = "cenci-sandbox-myrepo:latest\ncenci-sandbox:latest\ncenci-sandbox-base:latest\ncenci-sandbox-base:abc123def456\n"
+
+func TestPrune_ImagesDefaultDeny(t *testing.T) {
+	for name, stdin := range map[string]string{"explicit-n": "n\n", "empty-stdin": ""} {
+		t.Run(name, func(t *testing.T) {
+			e, callLog, stdout, stderr := pruneEngine(t, stdin)
+			t.Setenv("FAKE_IMAGES", fakeRepoImages)
+
+			if err := e.Prune(true, false); err != nil {
+				t.Fatalf("Prune: %v", err)
+			}
+
+			calls := readCallLog(t, callLog)
+			if containsLine(calls, "rmi cenci-sandbox-myrepo:latest") {
+				t.Errorf("image removed without confirmation; calls:\n%s", strings.Join(calls, "\n"))
+			}
+			if !strings.Contains(stdout.String(), "Skipping image removal.") {
+				t.Errorf("missing skip message; stdout:\n%s", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "Remove these images? [y/N]") {
+				t.Errorf("missing prompt on stderr; stderr:\n%s", stderr.String())
+			}
+		})
+	}
+}
+
+func TestPrune_ImagesConfirmedRemoves(t *testing.T) {
+	e, callLog, _, _ := pruneEngine(t, "y\n")
+	t.Setenv("FAKE_IMAGES", fakeRepoImages)
+
+	if err := e.Prune(true, false); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+
+	calls := readCallLog(t, callLog)
+	if !containsLine(calls, "rmi cenci-sandbox-myrepo:latest") {
+		t.Errorf("per-repo image not removed; calls:\n%s", strings.Join(calls, "\n"))
+	}
+	if containsLine(calls, "rmi cenci-sandbox:latest") {
+		t.Errorf("monolith image removed; calls:\n%s", strings.Join(calls, "\n"))
+	}
+	if containsLine(calls, "rmi cenci-sandbox-base:latest") || containsLine(calls, "rmi cenci-sandbox-base:abc123def456") {
+		t.Errorf("base image removed; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+func TestPrune_ImagesExcludeMonolithAndBase(t *testing.T) {
+	// Even with confirmation, the monolith and base tags must never appear
+	// in the candidate listing shown to the user — assert on the listing
+	// itself, not just the resulting rmi calls, so a regression in the
+	// filtering logic (as opposed to the confirm gate) is caught directly.
+	e, _, _, stderr := pruneEngine(t, "n\n")
+	t.Setenv("FAKE_IMAGES", fakeRepoImages)
+
+	if err := e.Prune(true, false); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+
+	listedLines := strings.Split(stderr.String(), "\n")
+	if !containsLine(listedLines, "cenci-sandbox-myrepo:latest") {
+		t.Errorf("expected per-repo image in candidate listing; stderr:\n%s", stderr.String())
+	}
+	if containsLine(listedLines, "cenci-sandbox:latest") {
+		t.Errorf("monolith image listed as a candidate; stderr:\n%s", stderr.String())
+	}
+	if containsLine(listedLines, "cenci-sandbox-base:latest") || containsLine(listedLines, "cenci-sandbox-base:abc123def456") {
+		t.Errorf("base image listed as a candidate; stderr:\n%s", stderr.String())
+	}
+}
+
+func TestPrune_NoMatchingImages(t *testing.T) {
+	e, callLog, stdout, stderr := pruneEngine(t, "y\n")
+	t.Setenv("FAKE_IMAGES", "cenci-sandbox:latest\ncenci-sandbox-base:latest\ncenci-sandbox-base:abc123def456\n")
+
+	if err := e.Prune(true, false); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "No sandbox images found.") {
+		t.Errorf("missing no-images message; stdout:\n%s", stdout.String())
+	}
+	if containsPrefix(readCallLog(t, callLog), "rmi") {
+		t.Error("rmi issued with no matching images")
+	}
+	if strings.Contains(stderr.String(), "Remove these images? [y/N]") {
+		t.Error("prompt shown with no matching images")
+	}
+}
+
+func TestPrune_ImagesAndVolumesTwoPrompts(t *testing.T) {
+	// Regression test for the shared-bufio.Reader fix: two independent
+	// bufio.NewReader(e.Stdin) instances would let the first reader's
+	// internal buffer swallow the byte meant for the second prompt, so
+	// only the first "y\n" would ever take effect.
+	e, callLog, _, _ := pruneEngine(t, "y\ny\n")
+	t.Setenv("FAKE_IMAGES", fakeRepoImages)
+	t.Setenv("FAKE_VOLUMES", "claude-cenci-home-old\ncenci-agent-cli-claude\nunrelated-volume\n")
+
+	if err := e.Prune(true, true); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+
+	calls := readCallLog(t, callLog)
+	if !containsLine(calls, "rmi cenci-sandbox-myrepo:latest") {
+		t.Errorf("per-repo image not removed; calls:\n%s", strings.Join(calls, "\n"))
+	}
+	if !containsLine(calls, "volume rm claude-cenci-home-old cenci-agent-cli-claude") {
+		t.Errorf("volumes not removed; calls:\n%s", strings.Join(calls, "\n"))
 	}
 }

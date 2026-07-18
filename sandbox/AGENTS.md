@@ -17,7 +17,7 @@ the installed cenci-sandbox plugin.
 ```bash
 cenci sandbox build-base            # cenci-sandbox-base:<content-hash of Dockerfile.base + entrypoint.sh + lib/> + :latest alias, rebuild if those inputs change
 cenci sandbox build                 # cenci-sandbox:latest, builds the base first if missing
-cenci sandbox prune [--volumes]     # remove superseded base tags, dangling images, stopped *-cenci-* containers (--volumes also prompts for stale home volumes)
+cenci sandbox prune [--images] [--volumes]     # remove superseded base tags, dangling images, stopped *-cenci-* containers (--images also prompts for per-repo images; --volumes also prompts for stale home volumes; independent flags)
 shellcheck sandbox/entrypoint.sh sandbox/lib/*.sh sandbox/tests/*.test.sh
 bash -n sandbox/entrypoint.sh
 bash sandbox/tests/smoke.test.sh   # runtime smoke test; self-skips without docker/podman
