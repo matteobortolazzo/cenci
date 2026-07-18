@@ -27,35 +27,41 @@ scope and planning decisions human-gated.
 implementation workflow as a documented `AGENTS.md` equivalent. The interactive
 pipeline itself remains Claude Code-only. See [`docs/codex.md`](docs/codex.md).
 
+**OpenCode support**: OpenCode receives the same portable convention skills as real
+symlinks via `opencode/install-skills.sh`, plus project guidance as `AGENTS.md` prose.
+OpenCode has no plugin marketplace or hook system today, so there is no executable
+OpenCode primary agent or `/cenci:*` command yet, and the interactive pipeline itself
+remains Claude Code-only. See [`docs/opencode.md`](docs/opencode.md).
+
 ## Skill portability
 
-The same `skills/` directory is installed in both clients. Portable skills avoid
+The same `skills/` directory is installed across clients. Portable skills avoid
 depending on one client's tools; Claude-only descriptions are deliberately visible in
-Codex so it does not mistake a pipeline command for a supported workflow.
+Codex and OpenCode so neither mistakes a pipeline command for a supported workflow.
 
-| Skill | Claude Code | Codex | Notes |
-|-------|-------------|-------|-------|
-| `attachments` | Yes | Yes | Uses the active client's user-input and file/image tools |
-| `frontend-classification` | Yes | Yes | Pure classification rule |
-| `pr-comment-filter` | Yes | Yes | Pure review-filtering rule |
-| `shell-rules` | Yes | Yes | Shared rules with client-specific approval notes |
-| `stack-angular` | Yes | Yes | Framework and test conventions |
-| `stack-dotnet` | Yes | Yes | Framework and test conventions |
-| `stack-go` | Yes | Yes | Framework and test conventions; documentation lookup is client-neutral |
-| `subagent-safety` | Yes | Yes | Shared delegation boundary with client-specific notes |
-| `testing` | Yes | Yes | TDD and test-quality conventions |
-| `verify-ui` | Yes | Yes | Playwright/Pencil visual-verification procedure; browser tooling availability is client-neutral |
-| `worktrees` | Yes | Yes | Git worktree conventions |
-| `address-review` | Yes | In development | Native approval/checkpoint foundation |
-| `babysit` | Yes | Yes | Thin wrapper over the client-neutral `cenci babysit` supervisor |
-| `configure` | Yes | In development | Neutral/adapters foundation present |
-| `design` | Yes | In development | Optional Pencil procedure |
-| `garden` | Yes | In development | Plan/apply foundation |
-| `implement` | Yes | In development | Agents/checkpoints foundation |
-| `refactor` | Yes | In development | Native analysis foundation |
-| `refine` | Yes | In development | Plan/apply foundation |
-| `review` | Yes | In development | Native reviewer foundation |
-| `sync` | Yes | In development | Native procedure foundation |
+| Skill | Claude Code | Codex | OpenCode | Notes |
+|-------|-------------|-------|----------|-------|
+| `attachments` | Yes | Yes | Yes | Uses the active client's user-input and file/image tools |
+| `frontend-classification` | Yes | Yes | Yes | Pure classification rule |
+| `pr-comment-filter` | Yes | Yes | Yes | Pure review-filtering rule |
+| `shell-rules` | Yes | Yes | Yes | Shared rules with client-specific approval notes |
+| `stack-angular` | Yes | Yes | Yes | Framework and test conventions |
+| `stack-dotnet` | Yes | Yes | Yes | Framework and test conventions |
+| `stack-go` | Yes | Yes | Yes | Framework and test conventions; documentation lookup is client-neutral |
+| `subagent-safety` | Yes | Yes | Yes | Shared delegation boundary with client-specific notes |
+| `testing` | Yes | Yes | Yes | TDD and test-quality conventions |
+| `verify-ui` | Yes | Yes | Yes | Playwright/Pencil visual-verification procedure; browser tooling availability is client-neutral |
+| `worktrees` | Yes | Yes | Yes | Git worktree conventions |
+| `address-review` | Yes | In development | No | Native approval/checkpoint foundation |
+| `babysit` | Yes | Yes | Yes | Thin wrapper over the client-neutral `cenci babysit` supervisor |
+| `configure` | Yes | In development | No | Neutral/adapters foundation present |
+| `design` | Yes | In development | No | Optional Pencil procedure |
+| `garden` | Yes | In development | No | Plan/apply foundation |
+| `implement` | Yes | In development | No | Agents/checkpoints foundation |
+| `refactor` | Yes | In development | No | Native analysis foundation |
+| `refine` | Yes | In development | No | Plan/apply foundation |
+| `review` | Yes | In development | No | Native reviewer foundation |
+| `sync` | Yes | In development | No | Native procedure foundation |
 
 ## Prerequisites
 
@@ -459,11 +465,16 @@ flow/
 ├── codex/
 │   ├── hooks.json             # Explicitly empty: isolates Claude lifecycle hooks
 │   └── hooks.test.sh          # Codex hook-path and client-separation regression
+├── opencode/
+│   ├── install-skills.sh      # Symlinks portable skills into OpenCode's global skills dir
+│   ├── install-skills.test.sh # Install/remove/idempotency regression
+│   └── portability.test.sh    # README/PORTABLE_SKILLS drift guard
 ├── docs/
 │   ├── git-workflow.md        # On-demand reference (read by skills as needed)
 │   ├── skill-authoring.md     # Writing skills that generate/regenerate files from external-sourced values
 │   ├── ticket-sizing.md       # How tickets are sized against the ~200k agent context budget, and when to split
-│   └── codex.md               # What cenci offers OpenAI Codex, and how it wires
+│   ├── codex.md               # What cenci offers OpenAI Codex, and how it wires
+│   └── opencode.md            # What cenci offers OpenCode, and how it wires
 ├── templates/
 │   ├── claudeignore
 │   ├── claude-md-root.md
