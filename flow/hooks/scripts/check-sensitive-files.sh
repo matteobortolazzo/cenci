@@ -119,6 +119,15 @@ else
   ANCESTOR="$FILE_PATH"
   TAIL=""
   while [ -n "$ANCESTOR" ] && [ ! -d "$ANCESTOR" ]; do
+    # A component present as a symlink node (lstat via [ -L ], which does not
+    # dereference) but unresolvable to an existing target ([ -e ] follows the
+    # link and is false for a dangling target or an ELOOP cycle) must fail
+    # closed rather than be walked past as a not-yet-existing segment.
+    # A genuinely absent component ([ -L ] false) still walks up unchanged.
+    if [ -L "$ANCESTOR" ] && [ ! -e "$ANCESTOR" ]; then
+      echo "BLOCKED: check-sensitive-files.sh refusing to resolve $FILE_PATH: component $ANCESTOR is a symlink that does not resolve (dangling target or symlink loop)." >&2
+      exit 2
+    fi
     SEG="${ANCESTOR##*/}"
     if [ -z "$TAIL" ]; then
       TAIL="$SEG"
