@@ -1249,13 +1249,37 @@ verify_lazyboards_resolution() {
 	ok "lazyboards command resolves to the managed binary"
 }
 
+# disable_cleanup_line comments out the board config's `cleanup:` action in
+# place, so the seeded file keeps the setting visible (and trivially
+# re-enabled) instead of silently dropping it. It fails loud rather than
+# silently leaving auto-close on: it verifies the substitution actually fired,
+# guarding against a future template whose cleanup line no longer matches.
+disable_cleanup_line() {
+	local cfg="$1" tmp
+	tmp="$(mktemp)" || return 1
+	if ! sed 's|^cleanup:.*|# &  # auto-close disabled at install; uncomment to enable|' "$cfg" >"$tmp"; then
+		rm -f "$tmp"
+		return 1
+	fi
+	if ! grep -q '^# cleanup:' "$tmp"; then
+		rm -f "$tmp"
+		return 1
+	fi
+	mv "$tmp" "$cfg"
+}
+
 # seed_lazyboards_config copies the packaged default board config (columns
 # wired to the cenci workflow — see docs/orchestration.md) into
 # ~/.config/lazyboards/config.yml, only when no config exists yet. An existing
 # config is never merged into or overwritten: lazyboards has its own config
 # UI, and YAML has no managed-marker regeneration story.
+#
+# On a fresh seed it resolves the optional auto-close action: an interactive
+# run asks (default on); --no-cleanup / --cleanup force it; and a
+# non-interactive or --yes run keeps the template default (on) so the seeded
+# file matches flow/templates/lazyboards-config.yml byte-for-byte.
 seed_lazyboards_config() {
-	local cfg_dir cfg template
+	local cfg_dir cfg template cleanup="$CLEANUP"
 	cfg_dir="${XDG_CONFIG_HOME:-$HOME/.config}/lazyboards"
 	cfg="$cfg_dir/config.yml"
 	if [ -e "$cfg" ]; then
@@ -1266,11 +1290,27 @@ seed_lazyboards_config() {
 		warn "board config template not found in the marketplace checkout — copy it from docs/orchestration.md"
 		return 0
 	fi
-	if mkdir -p "$cfg_dir" && cp "$template" "$cfg"; then
-		ok "seeded default board config → $cfg (columns wired to cenci run refine/design/implement)"
-	else
-		warn "could not write $cfg — copy flow/templates/lazyboards-config.yml there manually"
+	if [ "$cleanup" = ask ]; then
+		# ask_yn returns the default (yes) untouched under --yes / no tty.
+		if ask_yn "Auto-close a card's tmux window when its ticket closes (lazyboards runs 'cenci close')?" y; then
+			cleanup=yes
+		else
+			cleanup=no
+		fi
 	fi
+	if ! { mkdir -p "$cfg_dir" && cp "$template" "$cfg"; }; then
+		warn "could not write $cfg — copy flow/templates/lazyboards-config.yml there manually"
+		return 0
+	fi
+	if [ "$cleanup" = no ]; then
+		if disable_cleanup_line "$cfg"; then
+			ok "seeded default board config → $cfg (auto-close disabled — uncomment cleanup: to enable)"
+		else
+			warn "seeded board config but could not disable the cleanup action — edit $cfg by hand"
+		fi
+		return 0
+	fi
+	ok "seeded default board config → $cfg (columns wired to cenci run refine/design/implement)"
 }
 
 step_lazyboards_setup() {
@@ -1951,6 +1991,7 @@ MODE=install
 BUILD_IMAGE=ask
 LAZYBOARDS=ask
 LAZYBOARDS_EXPLICIT=0
+CLEANUP=ask
 INSTALL_FAILED=0
 
 usage() {
@@ -1975,6 +2016,9 @@ Flags:
   --build / --no-build                  force / skip the sandbox image build
   --lazyboards / --no-lazyboards        force / skip the optional lazyboards board install
                                          (uninstall mode: --lazyboards also removes it)
+  --cleanup / --no-cleanup              seed the lazyboards board config with / without the
+                                         auto-close action (`cleanup: "cenci close {number}"`)
+                                         that closes a card's tmux window when its ticket does
   --help                                this text
 EOF
 }
@@ -1989,6 +2033,8 @@ while [ $# -gt 0 ]; do
 	--no-build) BUILD_IMAGE=no ;;
 	--lazyboards) LAZYBOARDS=yes; LAZYBOARDS_EXPLICIT=1 ;;
 	--no-lazyboards) LAZYBOARDS=no; LAZYBOARDS_EXPLICIT=1 ;;
+	--cleanup) CLEANUP=yes ;;
+	--no-cleanup) CLEANUP=no ;;
 	--help | -h)
 		usage
 		exit 0
