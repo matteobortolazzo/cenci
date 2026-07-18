@@ -13,7 +13,8 @@
       "description": "Claude Code plugin: markdown skills, agents, shell hooks",
       "stack": { "framework": "markdown-shell" },
       "buildCommand": "",
-      "testCommand": ""
+      "testCommand": "",
+      "gateCommand": "find . -name '*.json' -print0 | xargs -0 -r -n1 jq empty && find . -name '*.test.sh' -print0 | sort -z | xargs -0 -r -n1 bash"
     },
     {
       "slug": "watch",
@@ -24,6 +25,7 @@
       "buildCommand": "make build",
       "testCommand": "make test",
       "lintCommand": "make lint",
+      "gateCommand": "make test",
       "serveCommand": "go run .",
       "boardKey": "W"
     },
@@ -34,7 +36,8 @@
       "description": "Docker/Podman container for isolated Claude Code sessions",
       "stack": { "framework": "docker-shell", "testing": "shellcheck" },
       "buildCommand": "docker build",
-      "testCommand": ""
+      "testCommand": "",
+      "gateCommand": "n=0; for t in tests/*.test.sh; do [ \"$t\" = tests/smoke.test.sh ] && continue; bash \"$t\" || exit 1; n=$((n+1)); done; [ \"$n\" -gt 0 ] || exit 1"
     }
   ],
   "guidanceLocation": "AGENTS.md",

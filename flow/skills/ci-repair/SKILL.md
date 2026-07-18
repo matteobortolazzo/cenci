@@ -7,7 +7,8 @@ user-invocable: false
 
 Read `project-core`, `testing`, `shell-rules`, and `subagent-safety`. Diagnose the named
 failing jobs, work only in the PR branch worktree, reproduce the root cause locally, make
-the smallest test-backed fix, commit, and push normally. Never force-push, change lifecycle
-labels, open another PR, or mark an infrastructure/flaky/external failure as repaired. If
-the cause is ambiguous, checkpoint evidence and return control to the babysit supervisor
-for human input.
+the smallest test-backed fix, verify the fix is green via the project's local gate
+(`docs/health-gates.md`) before pushing, rather than relying on a CI round-trip, commit,
+and push normally. Never force-push, change lifecycle labels, open another PR, or mark an
+infrastructure/flaky/external failure as repaired. If the cause is ambiguous, checkpoint
+evidence and return control to the babysit supervisor for human input.
