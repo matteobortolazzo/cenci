@@ -592,6 +592,8 @@ the resolution for development).
 ```bash
 # One-shot maintenance verbs
 cenci sandbox build             # build cenci-sandbox:latest (or the repo image if <repo>/.cenci/Dockerfile exists); builds the base first if missing
+cenci sandbox build --check     # report freshness only, build nothing (0 = current, non-zero = rebuild needed or error);
+                                 # used by the installer to skip its rebuild prompt when nothing needs to rebuild
 cenci sandbox build-base        # build cenci-sandbox-base:<content-hash> + :latest alias
 cenci sandbox prune             # remove superseded base tags, dangling images, stopped *-cenci-* containers
 cenci sandbox prune --images    # …and prompt ([y/N], default deny) for per-repo images (cenci-sandbox-<slug>:latest)

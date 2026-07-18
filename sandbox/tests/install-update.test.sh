@@ -86,9 +86,13 @@ EOF
 # signaled, recording its pid to PIDS_FILE for the harness to reap.
 # `sandbox update-plugins --all` (the running-sandbox plugin refresh, #461)
 # exits refresh_exit (default 0), so a test can simulate a refresh failure
-# and assert it only warns rather than failing the update.
+# and assert it only warns rather than failing the update. `sandbox build
+# --check` (#519 — the freshness gate step_sandbox_setup consults before
+# showing the rebuild prompt) exits check_exit: default 1 (not current /
+# needs rebuild) so callers that never care about the check keep exercising
+# today's always-ask behavior unless they opt into a current-image (0) fixture.
 make_cenci() {
-    local path="$1" restart_exit="${2:-0}" refresh_exit="${3:-0}"
+    local path="$1" restart_exit="${2:-0}" refresh_exit="${3:-0}" check_exit="${4:-1}"
     mkdir -p "$(dirname "${path}")"
     cat >"${path}" <<EOF
 #!/bin/sh
@@ -108,6 +112,9 @@ if [ "\${1:-}" = daemon ] && [ -z "\${2:-}" ]; then
 fi
 if [ "\${1:-}" = sandbox ] && [ "\${2:-}" = update-plugins ] && [ "\${3:-}" = --all ]; then
     exit ${refresh_exit}
+fi
+if [ "\${1:-}" = sandbox ] && [ "\${2:-}" = build ] && [ "\${3:-}" = --check ]; then
+    exit ${check_exit}
 fi
 exit 0
 EOF
@@ -136,9 +143,11 @@ prepare_checkout() {
 # cenci/cenci-watch/cenci-sandbox as all already installed, so
 # step_sandbox_refresh_plugins's `selected cenci-sandbox` gate stays true and
 # it also runs on update; refresh_exit scripts that step's
-# `sandbox update-plugins --all` exit code (default 0).
+# `sandbox update-plugins --all` exit code (default 0); check_exit scripts
+# that binary's `sandbox build --check` exit code (default 1 — see
+# make_cenci) for the #519 rebuild-prompt-skip PTY cases below.
 setup_layout() {
-    local name="$1" client="$2" restart_exit="$3" refresh_exit="${4:-0}"
+    local name="$1" client="$2" restart_exit="$3" refresh_exit="${4:-0}" check_exit="${5:-1}"
     local home="${WORK}/${name}/home" mock_bin="${WORK}/${name}/bin"
     local call_log="${WORK}/${name}/calls" pkill_log="${WORK}/${name}/pkill-calls"
     mkdir -p "${home}"
@@ -159,7 +168,7 @@ setup_layout() {
     fi
     new_root="${cache_dir}/2.0.0"
     new_bin="${new_root}/bin/cenci"
-    make_cenci "${new_bin}" "${restart_exit}" "${refresh_exit}"
+    make_cenci "${new_bin}" "${restart_exit}" "${refresh_exit}" "${check_exit}"
     mkdir -p "${new_root}/${manifest_dir}"
     printf '{"name":"cenci-watch","version":"2.0.0"}\n' >"${new_root}/${manifest_dir}/plugin.json"
 
@@ -168,6 +177,49 @@ setup_layout() {
     LAYOUT_CALL_LOG="${call_log}"
     LAYOUT_PKILL_LOG="${pkill_log}"
     LAYOUT_NEW_BIN="${new_bin}"
+}
+
+# add_curl_to_layout symlinks the host's curl into a layout's mock PATH.
+# Only the install-mode PTY cases below need it: install mode runs
+# run_doctor before step_sandbox_setup, and doctor's "curl" check is
+# required (fails the whole doctor run without it, forcing the unrelated
+# "Continue anyway?" prompt) — see the #519 plan's install-mode doctor risk.
+# Every other case in this file runs update mode, which never calls
+# run_doctor, so make_tools deliberately leaves curl out by default rather
+# than widening every existing fixture.
+add_curl_to_layout() {
+    ln -s "$(command -v curl)" "${LAYOUT_BIN}/curl"
+}
+
+# run_installer_pty <install|update> <feed> drives install.sh through a real
+# controlling terminal via `script -qec` (per the #519 plan's confirmed Q&A:
+# BUILD_IMAGE=ask's confirmation is inherently TTY-only — --yes/no-tty force
+# BUILD_IMAGE=no before ever reaching it, so a sourced/non-PTY test can never
+# exercise the real interactive path). <feed> is piped into the pty's stdin
+# (interpreted with printf '%b', so "y\n" answers the build prompt with
+# "yes"; "" sends immediate EOF, which makes every ask_yn — including the
+# build prompt itself, when it fires — silently take its default answer
+# instead of blocking). --no-lazyboards is always appended so the unrelated
+# lazyboards/cleanup prompts can never fire, leaving the sandbox build
+# prompt (and, in install mode, the unconditional Linux GUI-bar PATH-link
+# prompt in setup_cenci_linux_path, answered by its own EOF default) as the
+# only interactive gates. Sets PTY_EXIT; output lands in
+# "${WORK}/last-output" (mirrors run_update's capture convention).
+run_installer_pty() {
+    local mode="$1" feed="$2" mode_arg=""
+    [ "${mode}" = update ] && mode_arg=update
+    local wrapper="${WORK}/pty-wrapper-$$-${RANDOM}.sh"
+    cat >"${wrapper}" <<EOF
+#!/bin/sh
+exec env -i HOME="${LAYOUT_HOME}" PATH="${LAYOUT_BIN}" CALL_LOG="${LAYOUT_CALL_LOG}" \
+    PIDS_FILE="${PIDS_FILE}" PKILL_LOG="${LAYOUT_PKILL_LOG}" \
+    bash "${ROOT}/install.sh" ${mode_arg} --no-lazyboards
+EOF
+    chmod +x "${wrapper}"
+    set +e
+    printf '%b' "${feed}" | timeout 20 script -qec "${wrapper}" /dev/null >"${WORK}/last-output" 2>&1
+    PTY_EXIT=$?
+    set -e
 }
 
 # setup_broken_binary_layout provisions a fake HOME with all three plugins
@@ -820,4 +872,75 @@ if ! grep -q 'Codex: cenci-watch updated$' "${WORK}/last-output"; then
     exit 1
 fi
 
-echo "passed: restart path delegates to 'cenci daemon restart', falling back to pkill/nohup only on failure; update output reports per-plugin version transitions from authoritative client state (#492); sandbox plugin refresh runs best-effort on update (#461)"
+# ---------------------------------------------------------------------------
+# #519 — step_sandbox_setup must consult `sandbox build --check` before
+# showing the BUILD_IMAGE=ask rebuild prompt, skipping it entirely when the
+# resolved image is already current, for both install and update modes. The
+# ask branch is inherently TTY-only (--yes/no-tty force BUILD_IMAGE=no first),
+# so these cases drive the real interactive path via a PTY (script -qec) per
+# the plan's confirmed Q&A, rather than a sourceable helper.
+# ---------------------------------------------------------------------------
+
+echo "case: update — a current sandbox image skips the rebuild prompt entirely, no 'sandbox build' call (#519)"
+setup_layout check-current-update claude 0 0 0
+run_installer_pty update ""
+[[ "${PTY_EXIT}" -eq 0 ]]
+if grep -qx "sandbox build" "${LAYOUT_CALL_LOG}"; then
+    echo "FAIL: expected no 'sandbox build' call when the image is already current (update mode)" >&2
+    cat "${LAYOUT_CALL_LOG}" >&2
+    exit 1
+fi
+if grep -q "Build the sandbox container image now" "${WORK}/last-output"; then
+    echo "FAIL: expected the rebuild confirmation prompt to be skipped entirely when the image is current (update mode)" >&2
+    cat "${WORK}/last-output" >&2
+    exit 1
+fi
+
+echo "case: install — a current sandbox image skips the rebuild prompt entirely, no 'sandbox build' call (#519)"
+setup_layout check-current-install claude 0 0 0
+add_curl_to_layout
+run_installer_pty install ""
+[[ "${PTY_EXIT}" -eq 0 ]]
+if grep -qx "sandbox build" "${LAYOUT_CALL_LOG}"; then
+    echo "FAIL: expected no 'sandbox build' call when the image is already current (install mode)" >&2
+    cat "${LAYOUT_CALL_LOG}" >&2
+    exit 1
+fi
+if grep -q "Build the sandbox container image now" "${WORK}/last-output"; then
+    echo "FAIL: expected the rebuild confirmation prompt to be skipped entirely when the image is current (install mode)" >&2
+    cat "${WORK}/last-output" >&2
+    exit 1
+fi
+
+echo "case: update — a stale/missing sandbox image still shows the rebuild prompt, and builds once confirmed (#519)"
+setup_layout check-stale-update claude 0 0 1
+run_installer_pty update "y\n"
+[[ "${PTY_EXIT}" -eq 0 ]]
+if ! grep -q "Build the sandbox container image now" "${WORK}/last-output"; then
+    echo "FAIL: expected the rebuild confirmation prompt to show when the image needs a rebuild (update mode)" >&2
+    cat "${WORK}/last-output" >&2
+    exit 1
+fi
+if ! grep -qx "sandbox build" "${LAYOUT_CALL_LOG}"; then
+    echo "FAIL: expected a 'sandbox build' call once the rebuild prompt is confirmed (update mode)" >&2
+    cat "${LAYOUT_CALL_LOG}" >&2
+    exit 1
+fi
+
+echo "case: install — a stale/missing sandbox image still shows the rebuild prompt, and builds once confirmed (#519)"
+setup_layout check-stale-install claude 0 0 1
+add_curl_to_layout
+run_installer_pty install "y\n"
+[[ "${PTY_EXIT}" -eq 0 ]]
+if ! grep -q "Build the sandbox container image now" "${WORK}/last-output"; then
+    echo "FAIL: expected the rebuild confirmation prompt to show when the image needs a rebuild (install mode)" >&2
+    cat "${WORK}/last-output" >&2
+    exit 1
+fi
+if ! grep -qx "sandbox build" "${LAYOUT_CALL_LOG}"; then
+    echo "FAIL: expected a 'sandbox build' call once the rebuild prompt is confirmed (install mode)" >&2
+    cat "${LAYOUT_CALL_LOG}" >&2
+    exit 1
+fi
+
+echo "passed: restart path delegates to 'cenci daemon restart', falling back to pkill/nohup only on failure; update output reports per-plugin version transitions from authoritative client state (#492); sandbox plugin refresh runs best-effort on update (#461); rebuild prompt is skipped when the sandbox image is already current, for both install and update (#519)"
