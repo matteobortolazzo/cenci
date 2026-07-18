@@ -5,7 +5,10 @@
 # cenci-sandbox) as a single system: registers the marketplace, installs the
 # plugins, and runs the post-install setup that used to be manual (cn launcher
 # link + sandbox image build, macOS menu bar and Linux desktop bar-widget
-# wiring).
+# wiring). Supports Claude Code and Codex as marketplace-installable clients;
+# when OpenCode is also detected on the host, offers to wire it up too
+# (portable skills + watch plugin registration) — OpenCode-only hosts are not
+# supported on their own, since it has no marketplace CLI of its own.
 #
 # Usage:
 #   ./install.sh                interactive wizard (install)
@@ -34,6 +37,8 @@ CODEX_MARKETPLACE_READY=0
 CLAUDE_MARKETPLACE_READY=0
 HAS_CLAUDE=0
 HAS_CODEX=0
+HAS_OPENCODE=0
+OPENCODE_MIN_VERSION="1.18.3"
 
 # ---------------------------------------------------------------- output ----
 
@@ -135,8 +140,14 @@ run_bounded() {
 detect_clients() {
 	have claude && HAS_CLAUDE=1
 	have codex && HAS_CODEX=1
+	have opencode && HAS_OPENCODE=1
 }
 
+# have_supported_client gates on Claude/Codex only — OpenCode has no
+# marketplace CLI of its own, so an OpenCode-only host can't bootstrap the
+# marketplace checkout step_opencode_setup depends on. It's an opt-in add-on
+# once one of the two marketplace-capable clients is present, never a
+# standalone install target.
 have_supported_client() {
 	[ "$HAS_CLAUDE" -eq 1 ] || [ "$HAS_CODEX" -eq 1 ]
 }
@@ -397,6 +408,80 @@ doctor_codex_support() {
 	warn "Codex hook trust state is not exposed non-interactively; inspect /hooks after plugin updates (cenci never changes trust)"
 }
 
+# opencode_config_dir — OpenCode's config directory, matching the exact
+# expression flow/opencode/install-skills.sh uses for its own TARGET_DIR, so
+# doctor's file-based checks below stay in sync with what that script (and
+# sandbox/lib/opencode-config.sh's seed_opencode_config) actually writes to.
+opencode_config_dir() {
+	printf '%s' "${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+}
+
+# opencode_skills_linked — true when at least one entry exists under
+# OpenCode's skills dir. Unlike Claude/Codex's plugin_installed (which queries
+# the client's own CLI), OpenCode has no marketplace CLI to ask, so this is a
+# direct filesystem check mirroring what flow/opencode/install-skills.sh
+# itself symlinks into. Uses bash's own globbing rather than `ls`/`find` so
+# it has no extra tool dependency.
+opencode_skills_linked() {
+	local dir entry
+	dir="$(opencode_config_dir)/skills"
+	[ -d "$dir" ] || return 1
+	for entry in "$dir"/*; do
+		if [ -e "$entry" ] || [ -L "$entry" ]; then
+			return 0
+		fi
+	done
+	return 1
+}
+
+# OPENCODE_PLUGIN_SPEC_PATTERN — an extended-regex fragment matching the
+# cenci-watch OpenCode plugin's file:// spec regardless of which
+# find_plugin_path branch resolved it when step_opencode_setup registered it:
+# the marketplace-checkout branch's path ends in watch/plugin/opencode, while
+# the plugin-cache fallback branch strips the watch/plugin/ prefix before
+# searching, producing .../cenci-watch/<version>/opencode instead — with no
+# watch/plugin/opencode substring in it at all. A single hardcoded literal
+# would miss that second shape, so both are matched here. Shared by
+# opencode_plugin_registered and uninstall_opencode_cleanup's jq filter so
+# both registration shapes are recognized consistently.
+OPENCODE_PLUGIN_SPEC_PATTERN='watch/plugin/opencode|cenci-watch/[^/"]+/opencode'
+
+# opencode_plugin_registered — true when the cenci-watch OpenCode plugin's
+# file:// spec (registered by seed_opencode_config) is present in
+# opencode.json's .plugin array.
+opencode_plugin_registered() {
+	local config
+	config="$(opencode_config_dir)/opencode.json"
+	[ -f "$config" ] && grep -qE "$OPENCODE_PLUGIN_SPEC_PATTERN" "$config" 2>/dev/null
+}
+
+# doctor_opencode_support reports whether the detected OpenCode is new enough
+# to support cenci integration (>= $OPENCODE_MIN_VERSION, mirroring
+# doctor_codex_support's semver-grep + sort -V -C comparison), and whether a
+# provider is authenticated — checked via env vars or the presence of
+# OpenCode's own auth.json, never a live API call. Cenci-integration health
+# (skills linked / plugin registered) is reported separately under "Installed
+# stack components" below, alongside the other per-client install state; the
+# daemon-reachability piece of that same "is the integration healthy"
+# question is already covered once, for every client, by doctor_daemon_status
+# — not duplicated here.
+doctor_opencode_support() {
+	[ "$HAS_OPENCODE" -eq 1 ] || return 0
+	local raw version
+	raw="$(opencode --version 2>/dev/null || true)"
+	version="$(printf '%s' "$raw" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+	if [ -n "$version" ] && printf '%s\n%s\n' "$OPENCODE_MIN_VERSION" "$version" | sort -V -C 2>/dev/null; then
+		ok "OpenCode ${version} supports cenci integration"
+	else
+		warn "OpenCode ${version:-unknown} is unsupported — cenci requires ${OPENCODE_MIN_VERSION} or newer"
+	fi
+	if [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${OPENAI_API_KEY:-}" ] || [ -f "${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json" ]; then
+		ok "OpenCode provider authenticated"
+	else
+		warn "OpenCode provider not authenticated"
+	fi
+}
+
 run_doctor() {
 	DOCTOR_FAILED=0
 	# Hints must match how doctor was reached: standalone `cenci doctor` can
@@ -439,6 +524,17 @@ run_doctor() {
 	if [ "$HAS_CLAUDE" -eq 1 ]; then ok "Claude Code detected"; else warn "Claude Code not detected"; fi
 	if [ "$HAS_CODEX" -eq 1 ]; then ok "Codex detected"; else warn "Codex not detected"; fi
 	doctor_codex_support
+	# Unlike Claude/Codex (marketplace-capable clients, always reported), a
+	# missing OpenCode is only worth a line in standalone `cenci doctor` runs —
+	# it's a bonus, opt-in integration, and printing "not detected" during
+	# every plain install/update preflight would add noise for the many hosts
+	# that never have it. Its *presence* is always worth surfacing though.
+	if [ "$HAS_OPENCODE" -eq 1 ]; then
+		ok "OpenCode detected"
+	elif [ "$MODE" = doctor ]; then
+		warn "OpenCode not detected"
+	fi
+	doctor_opencode_support
 	if ! have_supported_client; then
 		fail "no supported client — install Claude Code, Codex, or both"
 		DOCTOR_FAILED=1
@@ -501,6 +597,12 @@ run_doctor() {
 				warn "Codex: $p not installed"
 			fi
 		done
+	fi
+	if [ "$HAS_OPENCODE" -eq 1 ]; then
+		# No plugin-CLI query — OpenCode has none — so this is the direct
+		# filesystem check the doctor_opencode_support comment above refers to.
+		if opencode_skills_linked; then ok "OpenCode skills linked"; else warn "OpenCode skills not linked"; fi
+		if opencode_plugin_registered; then ok "OpenCode plugin registered"; else warn "OpenCode plugin not registered"; fi
 	fi
 
 	say ""
@@ -984,6 +1086,57 @@ step_cenci_watch_setup() {
 		ok "menu bar widget installed and reloaded"
 	else
 		warn "SwiftBar widget setup failed — see watch/plugin/macos/README.md"
+		INSTALL_FAILED=1
+	fi
+}
+
+# step_opencode_setup is OpenCode's opt-in counterpart to the SwiftBar block
+# above: an already-detected optional integration, offered here rather than
+# gating install on it (OpenCode-only hosts stay unsupported — see
+# have_supported_client). Guards on HAS_OPENCODE plus every asset it needs
+# being resolvable from the marketplace checkout, mirroring the SwiftBar
+# script's own silent-skip-if-unresolvable shape. Also gates on `selected
+# cenci-watch` like every other opt-in step below (step_cenci_watch_setup,
+# etc.): the plugin it registers belongs to cenci-watch, so a user who
+# deselected it (SELECTED pruned by prune_selected_to_installed) must not
+# have it silently registered anyway. Idempotent and safe to re-run:
+# flow/opencode/install-skills.sh only links what's missing, and
+# seed_opencode_config only seeds what's absent and dedups the plugin entry —
+# never reimplemented here, just called.
+step_opencode_setup() {
+	[ "$HAS_OPENCODE" -eq 1 ] || return 0
+	selected cenci-watch || return 0
+	local skills_script watch_dir config_lib plugin_root opencode_json
+
+	skills_script=$(find_plugin_path "flow/opencode/install-skills.sh") || return 0
+	watch_dir=$(find_plugin_path "watch/plugin/opencode") || return 0
+	config_lib=$(find_plugin_path "sandbox/lib/opencode-config.sh") || return 0
+
+	step "Setting up OpenCode integration"
+	if ! ask_yn "OpenCode detected — link cenci's skills and register its plugin?" y; then
+		say "  ${DIM}skipped — re-run the installer to set it up${RESET}"
+		return 0
+	fi
+
+	plugin_root="$(dirname "$(dirname "$skills_script")")"
+	chmod +x "$skills_script" 2>/dev/null || true
+	if ! PLUGIN_ROOT="$plugin_root" bash "$skills_script" install; then
+		warn "OpenCode skill linking failed — see flow/opencode/install-skills.sh"
+		INSTALL_FAILED=1
+	fi
+
+	# shellcheck source=/dev/null
+	source "$config_lib"
+	opencode_json="$(opencode_config_dir)/opencode.json"
+	seed_opencode_config "$opencode_json" "file://$watch_dir" || true
+	# seed_opencode_config can return 0 without actually registering anything
+	# (e.g. an existing opencode.json that isn't valid JSON is left
+	# untouched) — verify the entry actually landed rather than trusting its
+	# exit code alone, so a silent no-op doesn't get reported as success.
+	if opencode_plugin_registered; then
+		ok "OpenCode plugin registered ($opencode_json)"
+	else
+		warn "OpenCode plugin registration may not have applied — check $opencode_json manually"
 		INSTALL_FAILED=1
 	fi
 }
@@ -1967,6 +2120,51 @@ uninstall_widget_cleanup() {
 	teardown_cenci_linux_widgets
 }
 
+# uninstall_opencode_cleanup removes only what step_opencode_setup itself
+# added: the portable skill symlinks (via install-skills.sh remove, which
+# only unlinks its own PORTABLE_SKILLS symlinks pointing at the plugin's own
+# source — a user's own skills or a foreign symlink at the same name are left
+# untouched) and the cenci-watch plugin entry from opencode.json's .plugin
+# array — every other key (permission, autoupdate, other plugins) is left
+# exactly as the user has it. Not gated on HAS_OPENCODE: leftover
+# registration/symlinks should still be cleaned up even if the opencode
+# binary itself is gone by the time uninstall runs. Must run before
+# uninstall_marketplace (like uninstall_widget_cleanup above) so
+# find_plugin_path can still resolve install-skills.sh from the checkout.
+uninstall_opencode_cleanup() {
+	local script plugin_root opencode_json
+
+	if script=$(find_plugin_path "flow/opencode/install-skills.sh"); then
+		plugin_root="$(dirname "$(dirname "$script")")"
+		chmod +x "$script" 2>/dev/null || true
+		if PLUGIN_ROOT="$plugin_root" bash "$script" remove >/dev/null 2>&1; then
+			ok "removed cenci's OpenCode skill symlinks"
+		else
+			warn "could not remove OpenCode skill symlinks — run manually: PLUGIN_ROOT=$plugin_root bash $script remove"
+		fi
+	else
+		warn "could not find flow/opencode/install-skills.sh in the marketplace checkout — remove OpenCode skill symlinks manually"
+	fi
+
+	opencode_json="$(opencode_config_dir)/opencode.json"
+	if [ -f "$opencode_json" ] && have jq; then
+		if jq --arg pat "$OPENCODE_PLUGIN_SPEC_PATTERN" \
+			'if has("plugin") then .plugin |= map(select(test($pat) | not)) else . end' \
+			"$opencode_json" >"$opencode_json.cenci-tmp" 2>/dev/null; then
+			if mv "$opencode_json.cenci-tmp" "$opencode_json"; then
+				ok "removed cenci's OpenCode plugin registration"
+			else
+				warn "failed to update $opencode_json — see $opencode_json.cenci-tmp"
+			fi
+		else
+			rm -f "$opencode_json.cenci-tmp"
+			warn "could not update $opencode_json — remove the cenci plugin entry manually"
+		fi
+	elif [ -f "$opencode_json" ]; then
+		warn "jq not found — remove the cenci plugin entry from $opencode_json manually"
+	fi
+}
+
 # have_controlling_tty probes whether /dev/tty is actually openable, not just
 # whether its permission bits look readable/writable. `[ -r/-w /dev/tty ]`
 # (INTERACTIVE, above) can misreport true when the device node exists with
@@ -2007,6 +2205,7 @@ run_uninstall() {
 	uninstall_stop_daemon
 	uninstall_sandbox_cleanup
 	uninstall_widget_cleanup
+	uninstall_opencode_cleanup
 	uninstall_plugins
 	uninstall_marketplace
 	uninstall_links
@@ -2114,6 +2313,7 @@ if [ "$MODE" = update ]; then
 	step_cli_setup
 	step_sandbox_setup
 	step_cenci_watch_setup
+	step_opencode_setup
 	step_sandbox_refresh_plugins
 	step_lazyboards_setup
 	final_summary
@@ -2131,6 +2331,7 @@ prune_selected_to_installed
 step_cli_setup
 step_sandbox_setup
 step_cenci_watch_setup
+step_opencode_setup
 step_lazyboards_setup
 step_cenci_notes
 final_summary

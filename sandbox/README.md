@@ -305,6 +305,11 @@ Error: --agent opencode requires OpenCode auth. Run 'opencode auth login' on the
 (creates ~/.local/share/opencode/auth.json) or export ANTHROPIC_API_KEY/OPENAI_API_KEY.
 ```
 
+The launcher itself makes no assumption about the host OpenCode version — see
+[cenci-watch's OpenCode adapter section](../watch/README.md#dispatching-workflows-cenci-run)
+for the pinned minimum version (`cenci-installer doctor` enforces it) and its known
+limitations.
+
 If host credentials are not available, open a shell for manual setup:
 
 ```bash

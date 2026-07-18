@@ -44,6 +44,7 @@ black-box tests in `watch/sandbox_open_test.go` plus the reap contract suite
 - Keep the image minimal; agent CLIs belong in host-global volumes mounted read-only in workloads. Only the isolated updater may mount them writable.
 - `entrypoint.sh` must stay POSIX-portable and pass `shellcheck`.
 - The container is the security boundary — Claude Code's host sandbox stays disabled inside it.
+- When implementing a check or filter that depends on the return value of a shared helper function with multiple conditional branches (e.g., `find_plugin_path`), audit all branches to ensure your implementation accounts for every possible return shape—not just the primary or most obvious one. A hardcoded substring match that works for one branch may silently fail for another, causing undetected false negatives at runtime (#491 review fix).
 
 ## Entrypoint patterns
 

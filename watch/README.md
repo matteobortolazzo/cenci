@@ -230,12 +230,18 @@ Only the built-in Claude templates ship today; Codex and opencode require a
 `config.json` entry. Until one is configured, `--agent codex` exits with a helpful "no
 launch template" error.
 
-**OpenCode:** this adapter is tested against the latest stable OpenCode release
-as of this writing; no specific minimum version is enforced yet. Model/provider
-resolution follows the same override chain as the `--model` flag above: an
-explicit `--model` flag on the command line overrides the agent's `model` in
-`config.json`, which in turn overrides whatever provider/model OpenCode itself
-would default to when neither is set.
+**OpenCode:** this adapter requires OpenCode 1.18.3 or newer — `cenci-installer
+doctor` enforces this same minimum when it detects OpenCode on the host (see
+[Installer integration](#installer-integration-cenci-doctor-cenci-update-cenci-uninstall)
+below). Model/provider resolution follows the same override chain as the
+`--model` flag above: an explicit `--model` flag on the command line overrides
+the agent's `model` in `config.json`, which in turn overrides whatever
+provider/model OpenCode itself would default to when neither is set.
+
+Known limitations: no `TokenReader` is wired for OpenCode yet, so it has no
+usage-budget headroom tracking (see [Budget headroom](#budget-headroom)
+below); and it has no one-token `open` shortcut yet (see the shortcut table
+below) — launch it with `--agent opencode`.
 
 ## Auto-dispatch (`cenci dispatch`)
 

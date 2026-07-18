@@ -10,7 +10,7 @@ make_common_tools() {
     local bin="$1"
     mkdir -p "${bin}"
     local tool
-    for tool in bash cat touch uname grep git mkdir dirname ln readlink sleep pkill pgrep nohup chmod sed head tail cut tr rm mktemp; do
+    for tool in bash cat touch uname grep git mkdir dirname ln readlink sleep pkill pgrep nohup chmod sed head tail cut tr rm mktemp jq mv sort; do
         ln -s "$(command -v "${tool}")" "${bin}/${tool}"
     done
     cat > "${bin}/docker" <<'EOF'
@@ -57,7 +57,16 @@ case "$*" in
     done
     exit 0
     ;;
-  "plugin install "*) p=${3%%@*}; touch "${CLAUDE_INSTALLED_FILE}-${p}"; exit 0 ;;
+  "plugin install "*)
+    p=${3%%@*}
+    # CLAUDE_SKIP_INSTALL_PLUGIN (optional) simulates a specific plugin never
+    # actually landing despite the install command reporting success — e.g. a
+    # marketplace that doesn't (yet) carry it — so plugin_installed keeps
+    # reporting it absent and prune_selected_to_installed prunes it from
+    # SELECTED, the same as a real never-installed plugin.
+    [ "${p}" = "${CLAUDE_SKIP_INSTALL_PLUGIN:-}" ] || touch "${CLAUDE_INSTALLED_FILE}-${p}"
+    exit 0
+    ;;
   "plugin update "*) exit 0 ;;
 esac
 exit 0
@@ -86,6 +95,27 @@ EOF
     chmod +x "${bin}/codex"
 }
 
+# make_opencode <bin> [version] — mocks the `opencode` executable that
+# HAS_OPENCODE / doctor_opencode_support (#491, not yet implemented) resolve
+# via `have opencode` + `opencode --version`. Unlike make_claude/make_codex,
+# OpenCode plugin/skill registration never goes through the `opencode` binary
+# itself (no marketplace CLI) — it's done by install-skills.sh symlinking and
+# seed_opencode_config merging opencode.json directly — so this mock only
+# needs to report a version and log invocations, following the same
+# CALLS_FILE-logging convention as the other client mocks.
+make_opencode() {
+    local bin="$1" version="${2:-1.18.3}"
+    cat > "${bin}/opencode" <<EOF
+#!/bin/sh
+printf 'opencode %s\n' "\$*" >>"\${CALLS_FILE}"
+case "\$*" in
+  --version) printf '%s\n' "${version}" ;;
+esac
+exit 0
+EOF
+    chmod +x "${bin}/opencode"
+}
+
 prepare_checkout() {
     local home="$1" client="$2" checkout
     checkout="${home}/.${client}/plugins/marketplaces/cenci"
@@ -95,6 +125,51 @@ prepare_checkout() {
         chmod +x "${checkout}/cenci"
     fi
     cp "${ROOT}/install.sh" "${checkout}/install.sh"
+}
+
+# prepare_opencode_checkout_assets <home> <client> — stages the real,
+# already-shipped OpenCode assets (flow/opencode/install-skills.sh,
+# flow/skills/*, watch/plugin/opencode, sandbox/lib/opencode-config.sh) into
+# the marketplace checkout at the exact relative paths find_plugin_path
+# resolves first (marketplace-checkout-first, no cache-fallback stripping
+# needed), so a real step_opencode_setup (#491, not yet implemented) has
+# something genuine to symlink/merge — mirroring how prepare_checkout stages
+# the real cenci wrapper + install.sh rather than a fake stand-in.
+prepare_opencode_checkout_assets() {
+    local home="$1" client="$2" checkout
+    checkout="${home}/.${client}/plugins/marketplaces/cenci"
+    mkdir -p "${checkout}/flow/opencode" "${checkout}/watch/plugin" "${checkout}/sandbox/lib"
+    cp "${ROOT}/flow/opencode/install-skills.sh" "${checkout}/flow/opencode/install-skills.sh"
+    chmod +x "${checkout}/flow/opencode/install-skills.sh"
+    cp -r "${ROOT}/flow/skills" "${checkout}/flow/skills"
+    cp -r "${ROOT}/watch/plugin/opencode" "${checkout}/watch/plugin/opencode"
+    cp "${ROOT}/sandbox/lib/opencode-config.sh" "${checkout}/sandbox/lib/opencode-config.sh"
+}
+
+# prepare_opencode_cache_fallback_assets <home> <client> — like
+# prepare_opencode_checkout_assets, but intentionally omits watch/plugin/opencode
+# from the marketplace checkout, staging it only in the version-pinned plugin
+# cache (mirroring prepare_bootstrap_cenci's cache root) so find_plugin_path
+# falls through to its cache-fallback branch for that one asset: that branch
+# strips the watch/plugin/ prefix before searching, producing a resolved path
+# like .../cenci-watch/1.0.0/opencode with no watch/plugin/opencode substring
+# in it at all — the exact shape that exposed the #491 review substring-
+# matching bug in opencode_plugin_registered / uninstall_opencode_cleanup.
+prepare_opencode_cache_fallback_assets() {
+    local home="$1" client="$2" checkout cache_root
+    checkout="${home}/.${client}/plugins/marketplaces/cenci"
+    mkdir -p "${checkout}/flow/opencode" "${checkout}/sandbox/lib"
+    cp "${ROOT}/flow/opencode/install-skills.sh" "${checkout}/flow/opencode/install-skills.sh"
+    chmod +x "${checkout}/flow/opencode/install-skills.sh"
+    cp -r "${ROOT}/flow/skills" "${checkout}/flow/skills"
+    cp "${ROOT}/sandbox/lib/opencode-config.sh" "${checkout}/sandbox/lib/opencode-config.sh"
+    if [[ "${client}" == claude ]]; then
+        cache_root="${home}/.claude/plugins/cache/cenci/cenci-watch/1.0.0"
+    else
+        cache_root="${home}/.codex/plugins/cache/cenci/cenci-watch/1.0.0"
+    fi
+    mkdir -p "${cache_root}"
+    cp -r "${ROOT}/watch/plugin/opencode" "${cache_root}/opencode"
 }
 
 # prepare_bootstrap_cenci provisions the installed plugin cache without a
@@ -269,6 +344,88 @@ exit 0
 EOF
     chmod +x "${bin}/cenci"
     run_doctor_case "${name}" "${clients}"
+}
+
+# run_case_opencode <name> <clients> <opencode-version|absent> [build_flag]
+# [extra args...] — like run_case, but additionally provisions a mocked
+# `opencode` executable (unless <opencode-version> is the literal string
+# "absent") plus the real OpenCode assets step_opencode_setup will resolve
+# via find_plugin_path (prepare_opencode_checkout_assets). step_opencode_setup
+# (#491, not yet implemented) is assumed to gate its own ask_yn opt-in with a
+# "y" default — mirroring the existing SwiftBar-widget precedent
+# (step_cenci_watch_setup's `ask_yn "SwiftBar detected..." y`) for an
+# already-detected optional integration — so plain --yes (no interactive tty
+# stub) is expected to proceed with it once implemented.
+run_case_opencode() {
+    local name="$1" clients="$2" opencode_version="$3"
+    shift 3
+    local build_flag="${1:---no-build}"
+    local extra=()
+    if [ "$#" -gt 1 ]; then extra=("${@:2}"); fi
+    local case_dir="${WORK}/${name}" home="${WORK}/${name}/home"
+    local bin="${WORK}/${name}/bin" output="${WORK}/${name}/output" calls="${WORK}/${name}/calls"
+    mkdir -p "${home}" "${bin}"
+    : >"${calls}"
+    make_common_tools "${bin}"
+    case "${clients}" in
+    claude)
+        make_claude "${bin}"
+        prepare_checkout "${home}" claude
+        prepare_bootstrap_cenci "${home}" claude
+        prepare_opencode_checkout_assets "${home}" claude
+        ;;
+    codex)
+        make_codex "${bin}"
+        prepare_checkout "${home}" codex
+        prepare_bootstrap_cenci "${home}" codex
+        prepare_opencode_checkout_assets "${home}" codex
+        ;;
+    dual)
+        make_claude "${bin}"
+        make_codex "${bin}"
+        prepare_checkout "${home}" claude
+        prepare_bootstrap_cenci "${home}" claude
+        prepare_opencode_checkout_assets "${home}" claude
+        ;;
+    esac
+    if [ "${opencode_version}" != absent ]; then
+        make_opencode "${bin}" "${opencode_version}"
+    fi
+
+    set +e
+    env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
+        CLAUDE_MARKETPLACE_FILE="${case_dir}/claude-marketplace" \
+        CLAUDE_REFRESH_FAIL_FILE="${case_dir}/claude-refresh-fail" \
+        CLAUDE_LIST_FAIL_FILE="${case_dir}/claude-list-fail" \
+        CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
+        CODEX_MARKETPLACE_FILE="${case_dir}/codex-marketplace" \
+        CODEX_INSTALLED_FILE="${case_dir}/codex-installed" \
+        bash "${ROOT}/install.sh" --yes "${build_flag}" ${extra[@]+"${extra[@]}"} >"${output}" 2>&1
+    CASE_EXIT=$?
+    set -e
+    CASE_OUTPUT="${output}"
+    CASE_CALLS="${calls}"
+    CASE_HOME="${home}"
+    CASE_BIN="${bin}"
+}
+
+# run_opencode_doctor_case <name> <clients> <opencode-version|absent> — like
+# run_doctor_case, but runs run_case_opencode first so the mocked `opencode`
+# executable and checkout assets are in place for doctor to detect.
+run_opencode_doctor_case() {
+    local name="$1" clients="$2" opencode_version="$3"
+    run_case_opencode "${name}" "${clients}" "${opencode_version}"
+    local bin="${WORK}/${name}/bin" output="${WORK}/${name}/doctor-output"
+    set +e
+    env -i HOME="${CASE_HOME}" PATH="${bin}" CALLS_FILE="${CASE_CALLS}" \
+        CLAUDE_MARKETPLACE_FILE="${WORK}/${name}/claude-marketplace" \
+        CLAUDE_INSTALLED_FILE="${WORK}/${name}/claude-installed" \
+        CODEX_MARKETPLACE_FILE="${WORK}/${name}/codex-marketplace" \
+        CODEX_INSTALLED_FILE="${WORK}/${name}/codex-installed" \
+        bash "${ROOT}/install.sh" doctor >"${output}" 2>&1
+    DOCTOR_EXIT=$?
+    set -e
+    DOCTOR_OUTPUT="${output}"
 }
 
 assert_contains() {
@@ -602,5 +759,242 @@ wrapper_root_help_exit=$?
 set -e
 [[ "${wrapper_root_help_exit}" -eq 0 ]]
 assert_contains "${help_output}" "Usage:"
+
+# --- OpenCode wiring (#491): install.sh has no HAS_OPENCODE detection,
+# doctor_opencode_support, or step_opencode_setup yet, so every case below
+# currently fails (RED). It's expected to pass end-to-end once #491 lands.
+#
+# Assumed doctor-output contract these cases pin down for the implementation
+# to satisfy (mirrors doctor_codex_support's existing wording style):
+#   "OpenCode detected" / "OpenCode not detected"            — Supported clients
+#   "OpenCode <ver> supports cenci integration"               — diagnostic 1 (installed+version)
+#   "OpenCode <ver> is unsupported — cenci requires 1.18.3 or newer"
+#   "OpenCode provider authenticated" / "... not authenticated" — diagnostic 2
+#   "OpenCode skills linked" / "OpenCode skills not linked"     — diagnostic 3 (part a)
+#   "OpenCode plugin registered" / "OpenCode plugin not registered" — diagnostic 3 (part b)
+
+echo "case: OpenCode absent does not alter Claude/Codex install output (regression guard, #491)"
+run_case_opencode opencode-absent-install claude absent
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_contains "${CASE_CALLS}" "claude plugin install cenci@cenci"
+assert_not_contains "${CASE_OUTPUT}" "OpenCode"
+
+echo "case: OpenCode absent still separates Claude/Codex detection from an explicit 'not detected' doctor line"
+run_opencode_doctor_case opencode-absent-doctor claude absent
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "Claude Code detected"
+assert_contains "${DOCTOR_OUTPUT}" "OpenCode not detected"
+
+echo "case: OpenCode detected reports itself and its version in doctor output"
+run_opencode_doctor_case opencode-version-ok claude 1.18.3
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "OpenCode detected"
+assert_contains "${DOCTOR_OUTPUT}" "OpenCode 1.18.3 supports cenci integration"
+
+echo "case: an OpenCode version below 1.18.3 is flagged unsupported, not a hard doctor failure"
+run_opencode_doctor_case opencode-version-old claude 1.17.0
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "OpenCode 1.17.0 is unsupported — cenci requires 1.18.3 or newer"
+
+echo "case: OpenCode provider authentication is flagged absent when neither env vars nor auth.json are present"
+run_opencode_doctor_case opencode-provider-absent claude 1.18.3
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "OpenCode provider not authenticated"
+
+echo "case: OpenCode provider authentication is reported via an API key env var — no live API call"
+name=opencode-provider-env
+run_case_opencode "${name}" claude 1.18.3
+[[ "${CASE_EXIT}" -eq 0 ]]
+output="${WORK}/${name}/doctor-env-output"
+set +e
+env -i HOME="${CASE_HOME}" PATH="${CASE_BIN}" CALLS_FILE="${CASE_CALLS}" \
+    ANTHROPIC_API_KEY="sk-ant-test-not-a-real-key" \
+    CLAUDE_MARKETPLACE_FILE="${WORK}/${name}/claude-marketplace" \
+    CLAUDE_INSTALLED_FILE="${WORK}/${name}/claude-installed" \
+    bash "${ROOT}/install.sh" doctor >"${output}" 2>&1
+provider_env_exit=$?
+set -e
+[[ "${provider_env_exit}" -eq 0 ]]
+assert_contains "${output}" "OpenCode provider authenticated"
+
+echo "case: OpenCode provider authentication is also reported via ~/.local/share/opencode/auth.json"
+name=opencode-provider-authjson
+run_case_opencode "${name}" claude 1.18.3
+[[ "${CASE_EXIT}" -eq 0 ]]
+mkdir -p "${CASE_HOME}/.local/share/opencode"
+printf '{}\n' >"${CASE_HOME}/.local/share/opencode/auth.json"
+output="${WORK}/${name}/doctor-authjson-output"
+set +e
+env -i HOME="${CASE_HOME}" PATH="${CASE_BIN}" CALLS_FILE="${CASE_CALLS}" \
+    CLAUDE_MARKETPLACE_FILE="${WORK}/${name}/claude-marketplace" \
+    CLAUDE_INSTALLED_FILE="${WORK}/${name}/claude-installed" \
+    bash "${ROOT}/install.sh" doctor >"${output}" 2>&1
+provider_authjson_exit=$?
+set -e
+[[ "${provider_authjson_exit}" -eq 0 ]]
+assert_contains "${output}" "OpenCode provider authenticated"
+
+echo "case: OpenCode's cenci-integration diagnostics report independently — skills linked but the plugin not yet registered"
+# Provisioned with opencode "absent" during the install run itself so
+# step_opencode_setup never auto-links/auto-registers (which would otherwise
+# fully complete both diagnostics before this case gets a chance to build a
+# partial state — see the idempotent case below, which pins that a plain
+# install run really does fully link+register when opencode is present).
+# The opencode mock is added only for the follow-up doctor invocation, so
+# doctor still detects and reports its version.
+name=opencode-skills-only
+run_case_opencode "${name}" claude absent
+[[ "${CASE_EXIT}" -eq 0 ]]
+make_opencode "${CASE_BIN}" 1.18.3
+mkdir -p "${CASE_HOME}/.config/opencode/skills"
+ln -s "${CASE_HOME}/.claude/plugins/marketplaces/cenci/flow/skills/testing" "${CASE_HOME}/.config/opencode/skills/testing"
+output="${WORK}/${name}/doctor-output"
+set +e
+env -i HOME="${CASE_HOME}" PATH="${CASE_BIN}" CALLS_FILE="${CASE_CALLS}" \
+    CLAUDE_MARKETPLACE_FILE="${WORK}/${name}/claude-marketplace" \
+    CLAUDE_INSTALLED_FILE="${WORK}/${name}/claude-installed" \
+    bash "${ROOT}/install.sh" doctor >"${output}" 2>&1
+skills_only_exit=$?
+set -e
+[[ "${skills_only_exit}" -eq 0 ]]
+assert_contains "${output}" "OpenCode 1.18.3 supports cenci integration"
+assert_contains "${output}" "OpenCode skills linked"
+assert_contains "${output}" "OpenCode plugin not registered"
+
+echo "case: OpenCode's cenci-integration diagnostics report independently — plugin registered but skills not yet linked"
+# Same "absent" provisioning rationale as the skills-only case above: keeps
+# step_opencode_setup from auto-completing both diagnostics before this case
+# builds its own partial (plugin-only) state.
+name=opencode-plugin-only
+run_case_opencode "${name}" claude absent
+[[ "${CASE_EXIT}" -eq 0 ]]
+make_opencode "${CASE_BIN}" 1.18.3
+mkdir -p "${CASE_HOME}/.config/opencode"
+printf '{"plugin": ["file://%s/watch/plugin/opencode"]}\n' "${CASE_HOME}/.claude/plugins/marketplaces/cenci" >"${CASE_HOME}/.config/opencode/opencode.json"
+output="${WORK}/${name}/doctor-output"
+set +e
+env -i HOME="${CASE_HOME}" PATH="${CASE_BIN}" CALLS_FILE="${CASE_CALLS}" \
+    CLAUDE_MARKETPLACE_FILE="${WORK}/${name}/claude-marketplace" \
+    CLAUDE_INSTALLED_FILE="${WORK}/${name}/claude-installed" \
+    bash "${ROOT}/install.sh" doctor >"${output}" 2>&1
+plugin_only_exit=$?
+set -e
+[[ "${plugin_only_exit}" -eq 0 ]]
+assert_contains "${output}" "OpenCode plugin registered"
+assert_contains "${output}" "OpenCode skills not linked"
+
+echo "case: re-running install links OpenCode's portable skills idempotently and never duplicates the plugin entry"
+name=opencode-idempotent
+run_case_opencode "${name}" claude 1.18.3
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_contains "${CASE_OUTPUT}" "linked: 12, skipped: 0"
+[[ -L "${CASE_HOME}/.config/opencode/skills/testing" ]]
+[[ "$(grep -c 'watch/plugin/opencode' "${CASE_HOME}/.config/opencode/opencode.json")" -eq 1 ]]
+
+second_output="${WORK}/${name}/second-run-output"
+set +e
+env -i HOME="${CASE_HOME}" PATH="${CASE_BIN}" CALLS_FILE="${CASE_CALLS}" \
+    CLAUDE_MARKETPLACE_FILE="${WORK}/${name}/claude-marketplace" \
+    CLAUDE_INSTALLED_FILE="${WORK}/${name}/claude-installed" \
+    bash "${ROOT}/install.sh" --yes --no-build >"${second_output}" 2>&1
+second_run_exit=$?
+set -e
+[[ "${second_run_exit}" -eq 0 ]]
+assert_contains "${second_output}" "linked: 0, skipped: 12"
+[[ "$(grep -c 'watch/plugin/opencode' "${CASE_HOME}/.config/opencode/opencode.json")" -eq 1 ]]
+
+echo "case: uninstall removes only cenci's OpenCode skill symlinks and plugin entry, preserving the user's own config and skills"
+name=opencode-uninstall
+run_case_opencode "${name}" claude 1.18.3
+[[ "${CASE_EXIT}" -eq 0 ]]
+echo "user content" >"${CASE_HOME}/.config/opencode/skills/my-own-skill"
+jq '. + {"theme": "dark"}' "${CASE_HOME}/.config/opencode/opencode.json" >"${CASE_HOME}/.config/opencode/opencode.json.tmp"
+mv "${CASE_HOME}/.config/opencode/opencode.json.tmp" "${CASE_HOME}/.config/opencode/opencode.json"
+
+uninstall_output="${WORK}/${name}/uninstall-output"
+set +e
+env -i HOME="${CASE_HOME}" PATH="${CASE_BIN}" CALLS_FILE="${CASE_CALLS}" \
+    CLAUDE_MARKETPLACE_FILE="${WORK}/${name}/claude-marketplace" \
+    CLAUDE_INSTALLED_FILE="${WORK}/${name}/claude-installed" \
+    bash "${ROOT}/install.sh" uninstall --yes >"${uninstall_output}" 2>&1
+opencode_uninstall_exit=$?
+set -e
+[[ "${opencode_uninstall_exit}" -eq 0 ]]
+[[ ! -e "${CASE_HOME}/.config/opencode/skills/testing" ]]
+[[ -f "${CASE_HOME}/.config/opencode/skills/my-own-skill" ]]
+assert_contains "${CASE_HOME}/.config/opencode/opencode.json" "theme"
+assert_not_contains "${CASE_HOME}/.config/opencode/opencode.json" "watch/plugin/opencode"
+
+echo "case: OpenCode plugin registration is recognized (install, doctor, and uninstall) even when find_plugin_path resolves watch/plugin/opencode via the plugin-cache fallback branch, not the marketplace checkout (#491 review fix — substring-matching bug)"
+name=opencode-cache-fallback
+case_dir="${WORK}/${name}" home="${WORK}/${name}/home"
+bin="${WORK}/${name}/bin" output="${WORK}/${name}/output" calls="${WORK}/${name}/calls"
+mkdir -p "${home}" "${bin}"
+: >"${calls}"
+make_common_tools "${bin}"
+make_claude "${bin}"
+make_opencode "${bin}" 1.18.3
+prepare_checkout "${home}" claude
+prepare_bootstrap_cenci "${home}" claude
+prepare_opencode_cache_fallback_assets "${home}" claude
+
+set +e
+env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
+    CLAUDE_MARKETPLACE_FILE="${case_dir}/claude-marketplace" \
+    CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
+    bash "${ROOT}/install.sh" --yes --no-build >"${output}" 2>&1
+cache_fallback_install_exit=$?
+set -e
+[[ "${cache_fallback_install_exit}" -eq 0 ]]
+assert_contains "${output}" "OpenCode plugin registered"
+assert_contains "${home}/.config/opencode/opencode.json" "cenci-watch/1.0.0/opencode"
+
+doctor_output="${WORK}/${name}/doctor-output"
+set +e
+env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
+    CLAUDE_MARKETPLACE_FILE="${case_dir}/claude-marketplace" \
+    CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
+    bash "${ROOT}/install.sh" doctor >"${doctor_output}" 2>&1
+cache_fallback_doctor_exit=$?
+set -e
+[[ "${cache_fallback_doctor_exit}" -eq 0 ]]
+assert_contains "${doctor_output}" "OpenCode plugin registered"
+
+uninstall_output="${WORK}/${name}/uninstall-output"
+set +e
+env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
+    CLAUDE_MARKETPLACE_FILE="${case_dir}/claude-marketplace" \
+    CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
+    bash "${ROOT}/install.sh" uninstall --yes >"${uninstall_output}" 2>&1
+cache_fallback_uninstall_exit=$?
+set -e
+[[ "${cache_fallback_uninstall_exit}" -eq 0 ]]
+assert_not_contains "${home}/.config/opencode/opencode.json" "cenci-watch/1.0.0/opencode"
+
+echo "case: a cenci-watch that never actually installs is pruned from SELECTED, so step_opencode_setup skips OpenCode plugin registration entirely instead of registering a deselected plugin's asset (#491 review fix — missing selected gate)"
+name=opencode-cenci-watch-deselected
+case_dir="${WORK}/${name}" home="${WORK}/${name}/home"
+bin="${WORK}/${name}/bin" output="${WORK}/${name}/output" calls="${WORK}/${name}/calls"
+mkdir -p "${home}" "${bin}"
+: >"${calls}"
+make_common_tools "${bin}"
+make_claude "${bin}"
+make_opencode "${bin}" 1.18.3
+prepare_checkout "${home}" claude
+prepare_bootstrap_cenci "${home}" claude
+prepare_opencode_checkout_assets "${home}" claude
+
+set +e
+env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
+    CLAUDE_MARKETPLACE_FILE="${case_dir}/claude-marketplace" \
+    CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
+    CLAUDE_SKIP_INSTALL_PLUGIN="cenci-watch" \
+    bash "${ROOT}/install.sh" --yes --no-build >"${output}" 2>&1
+deselected_exit=$?
+set -e
+[[ "${deselected_exit}" -eq 0 ]]
+assert_not_contains "${output}" "Setting up OpenCode integration"
+assert_not_contains "${output}" "OpenCode plugin registered"
+[[ ! -e "${home}/.config/opencode/opencode.json" ]]
 
 echo "passed: client detection, installation, launchers, and summaries"
