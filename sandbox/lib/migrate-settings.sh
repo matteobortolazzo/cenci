@@ -335,3 +335,88 @@ update_codex_plugins() {
 
     return 0
 }
+
+# provision_opencode_plugins <src-dir> <repo-url>
+#
+# OpenCode has no marketplace CLI like `claude plugin marketplace add` /
+# `codex plugin marketplace add`, so the analogous mechanism is a plain `git
+# clone` of the cenci monorepo into <src-dir> (the sandbox home volume's
+# "cenci-src" directory), giving PLUGIN_ROOT=<src-dir>/flow for
+# flow/opencode/install-skills.sh — the merged #489 primitive that symlinks
+# the portable skills into ~/.config/opencode/skills/. Clone-once: an
+# existing <src-dir> is left alone here (update_opencode_plugins below is the
+# refresh path). Every failure is deliberately non-fatal so a missing git or
+# an offline clone cannot prevent the sandbox from starting.
+provision_opencode_plugins() {
+    local src_dir="$1" repo_url="$2"
+
+    if ! command -v git >/dev/null 2>&1; then
+        echo "warning: git not found; skipping OpenCode plugin/skill provisioning this session" >&2
+        return 0
+    fi
+
+    if [[ ! -d "${src_dir}" ]]; then
+        if ! git clone "https://github.com/${repo_url}.git" "${src_dir}" >/dev/null 2>&1; then
+            echo "warning: failed to clone ${repo_url}; OpenCode plugin/skills may be unavailable this session" >&2
+            return 0
+        fi
+    fi
+
+    local install_skills="${src_dir}/flow/opencode/install-skills.sh"
+    if [[ ! -x "${install_skills}" ]]; then
+        echo "warning: install-skills.sh not found; skipping OpenCode skill staging this session" >&2
+        return 0
+    fi
+    if ! PLUGIN_ROOT="${src_dir}/flow" "${install_skills}" install >/dev/null 2>&1; then
+        echo "warning: failed to install OpenCode skills; they may be unavailable this session" >&2
+    fi
+
+    return 0
+}
+
+# update_opencode_plugins <src-dir> <repo-url> <ttl-minutes>
+#
+# Refreshes the cenci-src clone (`git -C <src-dir> pull`) so a long-lived
+# home volume doesn't keep a stale flow/skills/ snapshot forever, then
+# re-runs install-skills.sh to link any newly-portable skill. TTL-gated on a
+# stamp file, same convention as update_plugins/update_codex_plugins: <ttl-
+# minutes> 0 forces it (the manual `cenci sandbox update-plugins` path). The
+# stamp is touched even when the pull fails, so an offline boot doesn't retry
+# on every restart within the window. Every failure warns to stderr and never
+# blocks container start.
+update_opencode_plugins() {
+    local src_dir="$1" repo_url="$2" ttl_minutes="$3"
+
+    if ! command -v git >/dev/null 2>&1; then
+        echo "warning: git not found; skipping OpenCode plugin/skill update this session" >&2
+        return 0
+    fi
+
+    local stamp="${src_dir}/.cenci-sand-update-stamp"
+    if [[ "${ttl_minutes}" -gt 0 && -f "${stamp}" ]] \
+        && [[ -n "$(find "${stamp}" -mmin "-${ttl_minutes}" 2>/dev/null)" ]]; then
+        return 0
+    fi
+
+    if [[ ! -d "${src_dir}" ]]; then
+        if ! git clone "https://github.com/${repo_url}.git" "${src_dir}" >/dev/null 2>&1; then
+            echo "warning: failed to clone ${repo_url}; OpenCode plugin/skills may be stale this session" >&2
+        fi
+    elif ! git -C "${src_dir}" pull >/dev/null 2>&1; then
+        echo "warning: failed to refresh cenci-src clone at ${src_dir}; OpenCode plugin/skills may be stale this session" >&2
+    fi
+    if ! touch "${stamp}"; then
+        echo "warning: failed to record OpenCode plugin refresh time; startup will retry next time" >&2
+    fi
+
+    local install_skills="${src_dir}/flow/opencode/install-skills.sh"
+    if [[ -x "${install_skills}" ]]; then
+        if ! PLUGIN_ROOT="${src_dir}/flow" "${install_skills}" install >/dev/null 2>&1; then
+            echo "warning: failed to refresh OpenCode skills; they may be stale this session" >&2
+        fi
+    else
+        echo "warning: install-skills.sh not found; skipping OpenCode skill refresh this session" >&2
+    fi
+
+    return 0
+}

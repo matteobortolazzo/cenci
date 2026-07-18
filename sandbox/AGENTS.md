@@ -77,6 +77,8 @@ black-box tests in `watch/sandbox_open_test.go` plus the reap contract suite
 
 - **Use bash regex `[[ $var =~ pattern ]]` for whole-string validation, not line-oriented `grep`.** A pattern like `printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'` validates per-line, allowing multi-line strings with a matching first line to pass — bash regex anchors against the entire string instead. When validating a captured value before printing or using it (especially where that value originates outside the script), use bash's `[[ ]]` conditional operator, which validates the full value end-to-end.
 
+- **Test mocks must enforce the real command's interface contract, not just accept inputs and pass.** A mock that silently accepts any input masks production bugs — e.g., a fake `git` that accepts bare GitHub shorthand `owner/repo` when real `git clone` requires a full URL, or a fake command on PATH when production code should invoke a resolved full path and never rely on PATH lookups. When writing recording-fake test harnesses (especially those with scrubbed `env -i` environments), validate that the mocks' accepted inputs/invocation patterns match what production code can actually provide: if a command interface requires a full URL, assert the mock was called with that format; if a script should never be resolved via PATH, place a "decoy" on PATH and assert it was never invoked (#490).
+
 ## Image architecture: base + fragments
 `Dockerfile.base` builds the stack-agnostic `cenci-sandbox-base:<content-hash>` image
 (plus an `cenci-sandbox-base:latest` alias tag), where `<content-hash>` is a 12-char

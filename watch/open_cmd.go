@@ -55,7 +55,7 @@ func runOpen(args []string) {
 	}
 
 	fs := flag.NewFlagSet("open", flag.ExitOnError)
-	agentFlag := fs.String("agent", "", "agent to launch (claude or codex)")
+	agentFlag := fs.String("agent", "", "agent to launch (claude, codex, or opencode)")
 	modelFlag := fs.String("model", "", "model override")
 	nameFlag := fs.String("name", "", "sandbox instance name")
 	shellFlag := fs.Bool("shell", false, "attach a shell instead of launching the agent")

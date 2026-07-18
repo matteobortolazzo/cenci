@@ -429,8 +429,11 @@ func (e *Engine) EnsureAgentVolume(agent string) error {
 // (bypassing the entrypoint's 30-minute stamp) for agent, shared by both the
 // running-container and one-shot-volume update paths.
 func pluginRefreshCommand(agent string) string {
-	if agent == "codex" {
+	switch agent {
+	case "codex":
 		return `source /usr/local/bin/lib/migrate-settings.sh && provision_codex_plugins /home/dev/.codex cenci matteobortolazzo/cenci cenci cenci-watch && update_codex_plugins /home/dev/.codex cenci 0 cenci cenci-watch`
+	case "opencode":
+		return `source /usr/local/bin/lib/migrate-settings.sh && provision_opencode_plugins /home/dev/.cenci-src matteobortolazzo/cenci && update_opencode_plugins /home/dev/.cenci-src matteobortolazzo/cenci 0`
 	}
 	return `source /usr/local/bin/lib/migrate-settings.sh && heal_plugin_installs /home/dev/.claude/plugins && provision_plugins /home/dev/.claude/plugins cenci matteobortolazzo/cenci cenci cenci-watch && update_plugins /home/dev/.claude/plugins cenci 0 cenci cenci-watch`
 }

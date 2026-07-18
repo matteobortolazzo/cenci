@@ -113,7 +113,7 @@ func runSandboxBuild(args []string) {
 // never needs to resolve or build a per-repo scope.
 func runSandboxUpdateAgent(args []string) {
 	fs := flag.NewFlagSet("sandbox update-agent", flag.ExitOnError)
-	agent := fs.String("agent", "claude", "agent CLI to update (claude or codex)")
+	agent := fs.String("agent", "claude", "agent CLI to update (claude, codex, or opencode)")
 	version := fs.String("version", "", "exact semantic version (default: official latest)")
 	_ = fs.Parse(args)
 	rejectExtraArgs("update-agent", fs)
@@ -164,7 +164,7 @@ func runSandboxBuildBase(args []string) {
 // host-wide sweep would silently ignore.
 func runSandboxUpdatePlugins(args []string) {
 	fs := flag.NewFlagSet("sandbox update-plugins", flag.ExitOnError)
-	agent := fs.String("agent", "claude", "agent whose plugins to update (claude or codex)")
+	agent := fs.String("agent", "claude", "agent whose plugins to update (claude, codex, or opencode)")
 	name := fs.String("name", "", "sandbox instance name")
 	all := fs.Bool("all", false, "refresh plugins in every running sandbox container on the host")
 	_ = fs.Parse(args)
