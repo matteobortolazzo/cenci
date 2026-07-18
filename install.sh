@@ -189,27 +189,61 @@ codex_marketplace_registered() {
 		grep -Eq "^${MARKETPLACE_NAME}([[:space:]]|$)"
 }
 
-# installed_plugin_version <claude|codex> <plugin> — version of the newest
-# version-pinned cache entry for <plugin> (the cache directory is named after
-# the version). Prints nothing when no cache entry exists, e.g. before the
-# plugin's first install or on older CLIs without a version-pinned cache.
+# claude_plugin_version <plugin> — version of the exact <plugin>@cenci record
+# in Claude's authoritative active-install state
+# (~/.claude/plugins/installed_plugins.json), preferring the "user"-scope
+# record when multiple coexist, else the first record. Prints nothing (and
+# never fails) when the file, jq, or a valid semver version is unavailable —
+# a missing/corrupt authoritative record falls back to ok_updated's non-fatal
+# wording rather than breaking the update.
+claude_plugin_version() {
+	local plugin="$1" meta version
+	meta="$HOME/.claude/plugins/installed_plugins.json"
+	[ -f "$meta" ] || return 0
+	have jq || return 0
+	version="$(jq -r --arg key "${plugin}@${MARKETPLACE_NAME}" \
+		'(.plugins[$key] // []) as $r | ([$r[] | select(.scope=="user") | .version][0] // $r[0].version // empty)' \
+		"$meta" 2>/dev/null)" || return 0
+	[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 0
+	printf '%s\n' "$version"
+}
+
+# codex_plugin_version <plugin> — version of the exact <plugin>@cenci entry
+# from Codex's authoritative active-install state (`codex plugin list
+# --json`'s `.installed[]`, matched by `.pluginId`), mirroring
+# update_codex_plugins' parsing in sandbox/lib/migrate-settings.sh. Prints
+# nothing (and never fails) when jq is unavailable, the command fails, its
+# output isn't valid JSON, or no valid semver version is found.
+codex_plugin_version() {
+	local plugin="$1" versions_json version
+	have jq || return 0
+	versions_json="$(codex plugin list --json 2>/dev/null)" || return 0
+	jq -e . <<<"$versions_json" >/dev/null 2>&1 || return 0
+	version="$(jq -r --arg id "${plugin}@${MARKETPLACE_NAME}" \
+		'[.installed[]? | select(.pluginId == $id) | .version][0] // empty' \
+		<<<"$versions_json" 2>/dev/null)" || return 0
+	[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 0
+	printf '%s\n' "$version"
+}
+
+# installed_plugin_version <claude|codex> <plugin> — active installed version
+# of <plugin>, resolved from the client's own authoritative install state
+# (never plugin-cache manifest mtimes, which are not authoritative — see the
+# resolvers above). Prints nothing when that state is absent, unreadable, or
+# yields no valid semver.
 installed_plugin_version() {
-	local client="$1" plugin="$2" newest="" manifest root
-	for manifest in "$HOME/.$client/plugins/cache"/*/"$plugin"/*/".$client-plugin"/plugin.json; do
-		[ -f "$manifest" ] || continue
-		if [ -z "$newest" ] || [ "$manifest" -nt "$newest" ]; then
-			newest="$manifest"
-		fi
-	done
-	[ -n "$newest" ] || return 0
-	root="${newest%/*/*}"
-	printf '%s\n' "${root##*/}"
+	local client="$1" plugin="$2"
+	case "$client" in
+	claude) claude_plugin_version "$plugin" ;;
+	codex) codex_plugin_version "$plugin" ;;
+	esac
 }
 
 # ok_updated <label> <plugin> <old-version> <new-version> — success line for a
-# plugin update, showing the version transition when the version-pinned cache
-# reveals it ("1.2.3 → 1.2.4", or "(already up to date)" when nothing new was
-# pulled). Falls back to the plain wording when no version is known.
+# plugin update, showing the version transition when the client's
+# authoritative install state (installed_plugin_version) reveals it ("1.2.3 →
+# 1.2.4", or "(already up to date)" when nothing new was pulled). Falls back
+# to the plain wording when no version is known.
 ok_updated() {
 	local label="$1" plugin="$2" old="$3" new="$4"
 	if [ -n "$old" ] && [ -n "$new" ] && [ "$old" != "$new" ]; then
