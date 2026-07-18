@@ -438,4 +438,49 @@ assert_out "${E11}" "Could not reload plasmashell via kstart — restart it manu
 assert_no_log "${O11}" "Reloaded plasmashell."
 echo "  ok: plasma kstart failure warns on stderr, exits 0, and skips the success message"
 
+# ---------------------------------------------------------------------------
+echo "case: gnome install warns instead of failing when gnome-extensions enable fails, and skips the success message (#475)"
+CASE12="${WORK}/gnome-enable-fail"; H12="${CASE12}/home"; B12="${CASE12}/bin"
+C12="${CASE12}/calls"; O12="${CASE12}/out"; E12="${CASE12}/err"
+mkdir -p "${H12}" "${B12}"; : >"${C12}"
+link_tools "${B12}"
+# gnome-extensions detection ("list") reports the UUID already installed
+# (non-fresh) and "disable" succeeds, but the actual reload ("enable") fails
+# — the branch under test.
+cat >"${B12}/gnome-extensions" <<'EOF'
+#!/bin/sh
+printf 'gnome-extensions %s\n' "$*" >>"${WIDGET_CALLS}"
+case "$1" in
+  list) echo "cenci@matteobortolazzo.github.io" ;;
+  disable) exit 0 ;;
+  enable) exit 1 ;;
+esac
+exit 0
+EOF
+chmod +x "${B12}/gnome-extensions"
+run_widget_script "${ROOT}/watch/plugin/gnome/install.sh" "${H12}" "${B12}" "${C12}" "${O12}" "${E12}" ||
+    fail "gnome install.sh should still exit 0 when gnome-extensions enable fails (warn, don't die)"
+assert_out "${E12}" "Could not reload the Cenci extension — reload it manually: gnome-extensions enable \"${GNOME_UUID}\""
+assert_no_log "${O12}" "Reloaded the Cenci extension."
+echo "  ok: gnome enable failure warns on stderr, exits 0, and skips the success message"
+
+# ---------------------------------------------------------------------------
+echo "case: gnome install warns instead of unconditionally claiming reload success when gnome-extensions is missing from PATH (#475)"
+CASE13="${WORK}/gnome-extensions-missing"; H13="${CASE13}/home"; B13="${CASE13}/bin"
+C13="${CASE13}/calls"; O13="${CASE13}/out"; E13="${CASE13}/err"
+mkdir -p "${H13}" "${B13}"; : >"${C13}"
+link_tools "${B13}"
+# gnome-shell is on PATH (satisfies the top-level gate) but gnome-extensions
+# is deliberately not stubbed, so the disable/enable block never runs — the
+# gap under test (FRESH stays 0, so the script must not fall through to the
+# unconditional "Reloaded" message).
+make_logging_stub "${B13}" gnome-shell
+run_widget_script "${ROOT}/watch/plugin/gnome/install.sh" "${H13}" "${B13}" "${C13}" "${O13}" "${E13}" ||
+    fail "gnome install.sh should still exit 0 when gnome-extensions is missing from PATH"
+assert_out "${E13}" "Could not reload the Cenci extension — gnome-extensions not found on PATH; reload GNOME Shell manually to pick up changes."
+assert_no_log "${O13}" "Reloaded the Cenci extension."
+assert_no_log "${C13}" "gnome-extensions disable"
+assert_no_log "${C13}" "gnome-extensions enable"
+echo "  ok: gnome install warns when gnome-extensions is missing, exits 0, and skips the success message"
+
 echo "passed: GUI bar-widget detection, install, reload, update, and uninstall"

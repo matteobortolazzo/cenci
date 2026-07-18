@@ -39,11 +39,23 @@ echo "Installed: $DEST"
 
 # The disable→enable toggle live-reloads an already-loaded extension on both
 # X11 and Wayland — this is what makes `update` show changes without a relogin.
+# `enable` is the actual reload action — capture its real exit status instead
+# of swallowing it with `|| true`, so a failed reload doesn't get an
+# unconditional success echo. `disable` stays best-effort (unverified): it's
+# just clearing state ahead of the `enable` that follows. RELOADED uses a
+# third state (-1) to distinguish "gnome-extensions absent from PATH" from
+# "enable ran and failed" so each gets its own actionable message.
 FRESH=0
 if command -v gnome-extensions >/dev/null 2>&1; then
   gnome-extensions list 2>/dev/null | grep -qx "$UUID" || FRESH=1
   gnome-extensions disable "$UUID" 2>/dev/null || true
-  gnome-extensions enable "$UUID" 2>/dev/null || true
+  if gnome-extensions enable "$UUID" 2>/dev/null; then
+    RELOADED=1
+  else
+    RELOADED=0
+  fi
+else
+  RELOADED=-1
 fi
 
 if [ "$FRESH" -eq 1 ]; then
@@ -51,8 +63,12 @@ if [ "$FRESH" -eq 1 ]; then
   echo "  X11:     press Alt+F2, type 'r', Enter"
   echo "  Wayland: log out and back in (Shell can't hot-reload on Wayland)"
   echo "then: gnome-extensions enable \"$UUID\""
-else
+elif [ "$RELOADED" -eq 1 ]; then
   echo "Reloaded the Cenci extension."
+elif [ "$RELOADED" -eq 0 ]; then
+  echo "Could not reload the Cenci extension — reload it manually: gnome-extensions enable \"$UUID\"" >&2
+else
+  echo "Could not reload the Cenci extension — gnome-extensions not found on PATH; reload GNOME Shell manually to pick up changes." >&2
 fi
 echo "Done. Cenci appears in the top bar once a session is live."
 echo "Settings: gnome-extensions prefs \"$UUID\""
