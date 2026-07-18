@@ -85,7 +85,10 @@ layers on the runtime stacks in order: .NET, Node, Playwright, and Go. Agent CLI
 image layers: the launcher bootstraps absent `cenci-agent-cli-<agent>` volumes through a
 credential-free updater, and workloads mount them read-only at `/opt/cenci-agent`.
 `cenci sandbox update-agent` updates that global volume explicitly and atomically.
-Credentials are still staged only into per-scope home volumes.
+Credentials are still staged only into per-scope home volumes. Derived images (the
+monolith and per-repo builds) are stamped with a `cenci.base-version` label at build
+time, so `cenci open` / `cenci sandbox build` detect base drift and auto-rebuild with a
+one-line stdout notice instead of silently running a stale base.
 
 The pipeline plugins (`cenci`/`flow` and `cenci-watch`) are **not** baked into the image
 or copied from the repo either. `entrypoint.sh` provisions them at container boot via the

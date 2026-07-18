@@ -11,7 +11,18 @@ import (
 )
 
 // buildEngine wires an Engine to a fake docker whose image listing is either
-// empty or contains the current base and monolith image.
+// empty or contains the current base and monolith image. The `image inspect`
+// branch emits the combined agent-cli/base-version label format
+// (`<agent-cli>|<base-version>`); tests can override either half via
+// FAKE_IMAGE_AGENT_LIFECYCLE / FAKE_IMAGE_BASE_VERSION (t.Setenv) to drive the
+// staleness gate without a real container runtime. The defaults
+// (shared-v2/abc123def456) match the Engine's own BaseTag below, so an
+// unmodified call reports "current". FAKE_IMAGE_BASE_VERSION is read with the
+// `${VAR+x}` set-check (not `${VAR:-default}`) so a test can t.Setenv it to
+// the empty string to simulate a legacy image whose base-version label was
+// never baked at all, distinct from simply not setting it. FAKE_IMAGE_INSPECT_RAW,
+// when set, replaces the whole `image inspect` line verbatim (no `|`
+// separator enforced), to simulate unparsable inspect output.
 func buildEngine(t *testing.T, imagesMissing bool) (*Engine, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -27,7 +38,16 @@ if [ "$1" = images ]; then
   exit 0
 fi
 if [ "$1" = image ] && [ "$2" = inspect ]; then
-  printf '%s\n' shared-v2
+  if [ -n "${FAKE_IMAGE_INSPECT_RAW+x}" ]; then
+    printf '%s\n' "$FAKE_IMAGE_INSPECT_RAW"
+    exit 0
+  fi
+  if [ -n "${FAKE_IMAGE_BASE_VERSION+x}" ]; then
+    base="$FAKE_IMAGE_BASE_VERSION"
+  else
+    base="abc123def456"
+  fi
+  printf '%s|%s\n' "${FAKE_IMAGE_AGENT_LIFECYCLE:-shared-v2}" "$base"
   exit 0
 fi
 exit 0
@@ -71,7 +91,7 @@ func TestBuildMonolith_BuildsBaseFirstWhenMissing(t *testing.T) {
 	if !containsLine(calls, wantBase) {
 		t.Errorf("base build missing; calls:\n%s", strings.Join(calls, "\n"))
 	}
-	wantMonolith := "build --build-arg BASE_VERSION=abc123def456 --label cenci.agent-cli=shared-v2 -t cenci-sandbox:latest -f /assets/Dockerfile /assets"
+	wantMonolith := "build --build-arg BASE_VERSION=abc123def456 --label cenci.agent-cli=shared-v2 --label cenci.base-version=abc123def456 -t cenci-sandbox:latest -f /assets/Dockerfile /assets"
 	if !containsLine(calls, wantMonolith) {
 		t.Errorf("monolith build argv missing %q; calls:\n%s", wantMonolith, strings.Join(calls, "\n"))
 	}
@@ -90,7 +110,7 @@ func TestBuildRepoImage_UsesRepoDockerfileContext(t *testing.T) {
 	}
 
 	calls := readCallLog(t, callLog)
-	wantRepo := "build --build-arg BASE_VERSION=abc123def456 --label cenci.agent-cli=shared-v2 -t cenci-sandbox-myrepo:latest -f /repo/.cenci/Dockerfile /repo/.cenci"
+	wantRepo := "build --build-arg BASE_VERSION=abc123def456 --label cenci.agent-cli=shared-v2 --label cenci.base-version=abc123def456 -t cenci-sandbox-myrepo:latest -f /repo/.cenci/Dockerfile /repo/.cenci"
 	if !containsLine(calls, wantRepo) {
 		t.Errorf("repo build argv missing %q; calls:\n%s", wantRepo, strings.Join(calls, "\n"))
 	}
@@ -109,6 +129,156 @@ func TestEnsureImage_SkipsBuildWhenPresent(t *testing.T) {
 
 	if calls := readCallLog(t, callLog); containsPrefix(calls, "build") {
 		t.Errorf("EnsureImage built although the image exists; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+// baseDriftNoticeSubstring is the load-bearing fragment of the base-drift
+// rebuild notice (per watch rule #446, tests assert this exact phrase rather
+// than a bare non-empty-output check, so the drift and missing-image build
+// paths stay distinguishable).
+const baseDriftNoticeSubstring = "built against an older sandbox base"
+
+// TestEnsureImage_RebuildsWhenBaseVersionStale pins the ticket-#493 fix: an
+// image whose agent-cli label is current but whose baked cenci.base-version
+// label no longer matches the engine's BaseTag must be treated as stale and
+// rebuilt, even though the plain agent-cli check alone would call it current.
+func TestEnsureImage_RebuildsWhenBaseVersionStale(t *testing.T) {
+	e, callLog := buildEngine(t, false) // image present
+	t.Setenv("FAKE_IMAGE_BASE_VERSION", "OLDTAG")
+
+	scope := Scope{Image: MonolithImage}
+	if err := e.EnsureImage(scope); err != nil {
+		t.Fatalf("EnsureImage: %v", err)
+	}
+
+	if calls := readCallLog(t, callLog); !containsPrefix(calls, "build") {
+		t.Errorf("expected a rebuild when the baked base-version label is stale; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+// TestEnsureImage_SkipsWhenBaseVersionCurrent is the companion positive case:
+// an image whose baked base-version label matches the engine's current
+// BaseTag must not be rebuilt (no regression to the missing-image-only fast
+// path).
+func TestEnsureImage_SkipsWhenBaseVersionCurrent(t *testing.T) {
+	e, callLog := buildEngine(t, false) // image present
+	t.Setenv("FAKE_IMAGE_BASE_VERSION", "abc123def456")
+
+	scope := Scope{Image: MonolithImage}
+	if err := e.EnsureImage(scope); err != nil {
+		t.Fatalf("EnsureImage: %v", err)
+	}
+
+	if calls := readCallLog(t, callLog); containsPrefix(calls, "build") {
+		t.Errorf("expected no rebuild when the baked base-version label matches; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+// TestEnsureMonolithImage_RebuildsWhenBaseVersionStale is the
+// EnsureMonolithImage analogue of TestEnsureImage_RebuildsWhenBaseVersionStale
+// — the ticket's "both monolith and per-repo images honor the check"
+// acceptance criterion.
+func TestEnsureMonolithImage_RebuildsWhenBaseVersionStale(t *testing.T) {
+	e, callLog := buildEngine(t, false) // image present
+	t.Setenv("FAKE_IMAGE_BASE_VERSION", "OLDTAG")
+
+	if err := e.EnsureMonolithImage(); err != nil {
+		t.Fatalf("EnsureMonolithImage: %v", err)
+	}
+
+	if calls := readCallLog(t, callLog); !containsPrefix(calls, "build") {
+		t.Errorf("expected the monolith to rebuild when its baked base-version label is stale; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+// TestEnsureImage_BaseDriftRebuild_PrintsNotice pins the ticket's optional
+// follow-up (included in scope per the plan's Q&A): a rebuild triggered
+// specifically by base-version drift must print a one-line stdout notice so
+// the user understands why the first launch after a base change is slower.
+func TestEnsureImage_BaseDriftRebuild_PrintsNotice(t *testing.T) {
+	e, _ := buildEngine(t, false) // image present, agent-cli current
+	t.Setenv("FAKE_IMAGE_BASE_VERSION", "OLDTAG")
+
+	scope := Scope{Image: MonolithImage}
+	if err := e.EnsureImage(scope); err != nil {
+		t.Fatalf("EnsureImage: %v", err)
+	}
+
+	out := e.Stdout.(*bytes.Buffer).String()
+	if !strings.Contains(out, baseDriftNoticeSubstring) {
+		t.Errorf("expected a base-drift rebuild notice containing %q, got:\n%s", baseDriftNoticeSubstring, out)
+	}
+}
+
+// TestEnsureImage_MissingImageBuild_NoDriftNotice is the companion negative
+// case: a plain missing-image build (the pre-existing fast path, no baked
+// label to compare against at all) must never print the base-drift notice —
+// only a provable version mismatch counts as "drift".
+func TestEnsureImage_MissingImageBuild_NoDriftNotice(t *testing.T) {
+	e, callLog := buildEngine(t, true) // image missing entirely
+
+	scope := Scope{Image: MonolithImage}
+	if err := e.EnsureImage(scope); err != nil {
+		t.Fatalf("EnsureImage: %v", err)
+	}
+
+	if calls := readCallLog(t, callLog); !containsPrefix(calls, "build") {
+		t.Errorf("expected a build for the missing image; calls:\n%s", strings.Join(calls, "\n"))
+	}
+	out := e.Stdout.(*bytes.Buffer).String()
+	if strings.Contains(out, baseDriftNoticeSubstring) {
+		t.Errorf("expected no base-drift notice for a missing-image build, got:\n%s", out)
+	}
+}
+
+// TestEnsureImage_MissingBaseVersionLabel_RebuildsWithoutDriftNotice covers a
+// legacy image built before the cenci.base-version label existed at all:
+// present, agent-cli-current image whose base-version label is absent (empty)
+// rather than merely stale. The plan's Assumptions/Risks sections are
+// explicit that an absent label can never prove drift — only a present but
+// mismatched label can — so this must rebuild (current=false) without
+// printing the base-drift notice, distinct from
+// TestEnsureImage_MissingImageBuild_NoDriftNotice's "image missing entirely"
+// case, which never reaches the inspect branch at all.
+func TestEnsureImage_MissingBaseVersionLabel_RebuildsWithoutDriftNotice(t *testing.T) {
+	e, callLog := buildEngine(t, false) // image present, agent-cli current
+	t.Setenv("FAKE_IMAGE_BASE_VERSION", "")
+
+	scope := Scope{Image: MonolithImage}
+	if err := e.EnsureImage(scope); err != nil {
+		t.Fatalf("EnsureImage: %v", err)
+	}
+
+	if calls := readCallLog(t, callLog); !containsPrefix(calls, "build") {
+		t.Errorf("expected a rebuild when the base-version label is absent; calls:\n%s", strings.Join(calls, "\n"))
+	}
+	out := e.Stdout.(*bytes.Buffer).String()
+	if strings.Contains(out, baseDriftNoticeSubstring) {
+		t.Errorf("expected no base-drift notice when the base-version label is merely absent (not provably stale), got:\n%s", out)
+	}
+}
+
+// TestImageCurrent_UnparsableInspectOutput_WarnsOnStderr pins the
+// silent-failure fix: when `image inspect` returns output without the
+// expected `<agent-cli>|<base-version>` separator (a template/runtime
+// incompatibility), imageCurrent must not silently fall back to "not
+// current, no error" — it must warn on Stderr so a persistent tooling bug
+// doesn't look identical to a normal rebuild-needed case forever.
+func TestImageCurrent_UnparsableInspectOutput_WarnsOnStderr(t *testing.T) {
+	e, _ := buildEngine(t, false) // image present
+	t.Setenv("FAKE_IMAGE_INSPECT_RAW", "shared-v2")
+
+	current, baseDrift, err := e.imageCurrent(MonolithImage)
+	if err != nil {
+		t.Fatalf("imageCurrent: %v", err)
+	}
+	if current || baseDrift {
+		t.Errorf("imageCurrent(unparsable output) = (%v, %v), want (false, false)", current, baseDrift)
+	}
+
+	out := e.Stderr.(*bytes.Buffer).String()
+	if !strings.Contains(out, "unparsable") {
+		t.Errorf("expected a Stderr warning about unparsable image inspect output, got:\n%s", out)
 	}
 }
 
@@ -176,11 +346,13 @@ func TestUpdateAgent_NeverAcceptsAnImageParameter(t *testing.T) {
 }
 
 // volumeCheckEngine wires an Engine to a fake docker that always reports the
-// current monolith image as present/current (so image builds never
-// interfere) and the given agent's shared volume as already existing, with
-// controllable exit codes for the populated-check run, the updater run, and
-// `volume rm` — so tests can drive EnsureAgentVolume's fallback and warning
-// paths (finding 3) without a real container runtime.
+// current monolith image as present/current — the `image inspect` branch
+// emits the combined agent-cli/base-version label format
+// (shared-v2|abc123def456, matching the Engine's own BaseTag below) so image
+// builds never interfere — and the given agent's shared volume as already
+// existing, with controllable exit codes for the populated-check run, the
+// updater run, and `volume rm` — so tests can drive EnsureAgentVolume's
+// fallback and warning paths (finding 3) without a real container runtime.
 func volumeCheckEngine(t *testing.T, checkExit, updateExit, rmExit int) (e *Engine, callLog string, stderr *bytes.Buffer) {
 	t.Helper()
 	dir := t.TempDir()
@@ -192,7 +364,7 @@ if [ "$1" = images ]; then
   exit 0
 fi
 if [ "$1" = image ] && [ "$2" = inspect ]; then
-  printf '%%s\n' shared-v2
+  printf '%%s\n' 'shared-v2|abc123def456'
   exit 0
 fi
 if [ "$1" = volume ] && [ "$2" = ls ]; then

@@ -361,11 +361,14 @@ A repo can opt into its own thin image instead of the shared monolith by adding
 `.cenci/` at the repo root. When present, the launcher builds
 `cenci-sandbox-<repo-slug>:latest` `FROM cenci-sandbox-base:${BASE_VERSION}` — the
 same base image and content-hash `BASE_VERSION` as the monolith — using
-`.cenci/` as the build context, and runs that instead of `cenci-sandbox:latest`.
-Repos without `.cenci/Dockerfile` keep using the shared monolith image, just with
-single-repo mounting (see [Per-repo containers](#per-repo-containers)). Rebuild a
-repo's own image the same way as the monolith: `cenci sandbox build` (run from inside
-that repo). Per-repo images have no automatic expiry, so they accumulate on the host
+`.cenci/` as the build context, and runs that instead of `cenci-sandbox:latest`. The
+built image records the base it was built against in a `cenci.base-version` label, so
+if the base later drifts, `cenci open` / `cenci sandbox build` detect the mismatch and
+self-heal by rebuilding automatically. Repos without `.cenci/Dockerfile` keep using
+the shared monolith image, just with single-repo mounting (see [Per-repo
+containers](#per-repo-containers)). Rebuild a repo's own image the same way as the
+monolith: `cenci sandbox build` (run from inside that repo). Per-repo images have no
+automatic expiry, so they accumulate on the host
 as repos come and go — run `cenci sandbox prune --images` to prompt ([y/N], default
 deny) for removal of every `cenci-sandbox-<slug>:latest` image found; each repo's
 image is removed individually (best-effort), so one repo's sandbox holding its image
@@ -537,9 +540,12 @@ cenci sandbox build
 
 **Per-repo images too:** a `Dockerfile.base` bump changes `BASE_VERSION` (its content
 hash), which every repo's own `.cenci/Dockerfile` image also builds `FROM`. `cenci
-sandbox build` only rebuilds the image for the repo you run it in — rebuild each repo
-that has opted into `.cenci/Dockerfile` separately (see [Per-repo
-images](#per-repo-images)) so it doesn't keep running the stale base.
+sandbox build` only rebuilds the image for the repo you run it in, so you still need to
+run it from inside each repo that has opted into `.cenci/Dockerfile` (see [Per-repo
+images](#per-repo-images)) to trigger that repo's rebuild. You no longer have to
+remember to do this proactively, though: the built-in `cenci.base-version` label lets
+`cenci open` / `cenci sandbox build` detect that a repo's image was built against an
+older base, print a notice, and rebuild it automatically on the next run.
 
 ### Update an agent CLI
 

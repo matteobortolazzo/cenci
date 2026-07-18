@@ -90,6 +90,11 @@ func joinArgv(argv []string) string {
 //
 //	FAKE_INSPECT_EXIT    — image listing exit code (default 0 = image exists)
 //	FAKE_IMAGE_AGENT_LIFECYCLE — shared-agent image label (default shared-v2)
+//	FAKE_IMAGE_BASE_VERSION — baked cenci.base-version image label (default
+//	                        set per-test by batchEnv/openTestEnv to the
+//	                        fixture's current BaseTag, so pre-existing
+//	                        "image current -> skip build" tests keep passing
+//	                        without every caller having to know the tag)
 //	FAKE_BUILD_EXIT      — `build` exit code (default 0)
 //	FAKE_IMAGES          — `images ...` stdout
 //	FAKE_PS              — `ps ...` stdout
@@ -125,7 +130,7 @@ func writeScriptedRuntime(t *testing.T, dir, name, callLog string) {
 	body := "#!/bin/sh\n" +
 		"printf '%s\\n' \"$*\" >> " + exectest.ShellQuote(callLog) + "\n" +
 		"case \"$1\" in\n" +
-		"image) if [ \"$2\" = inspect ]; then printf '%s\\n' \"${FAKE_IMAGE_AGENT_LIFECYCLE:-shared-v2}\"; exit \"${FAKE_IMAGE_INSPECT_EXIT:-0}\"; fi ;;\n" +
+		"image) if [ \"$2\" = inspect ]; then printf '%s|%s\\n' \"${FAKE_IMAGE_AGENT_LIFECYCLE:-shared-v2}\" \"${FAKE_IMAGE_BASE_VERSION:-}\"; exit \"${FAKE_IMAGE_INSPECT_EXIT:-0}\"; fi ;;\n" +
 		"build) exit \"${FAKE_BUILD_EXIT:-0}\" ;;\n" +
 		"images) if [ -n \"${FAKE_IMAGES+x}\" ]; then printf '%s' \"${FAKE_IMAGES}\"; else for last do :; done; printf '%s\\n' \"${last}\"; fi; exit \"${FAKE_INSPECT_EXIT:-0}\" ;;\n" +
 		"ps) printf '%s' \"${FAKE_PS:-}\" ;;\n" +
@@ -195,14 +200,23 @@ func writeAssetFixture(t *testing.T) string {
 // runtimes first on PATH (with git/sh still resolvable from the system
 // dirs), an isolated HOME, and the asset fixture pinned via
 // CENCI_SANDBOX_ASSETS. os/exec keeps the LAST duplicate env key, so these
-// appends override the inherited values.
+// appends override the inherited values. FAKE_IMAGE_BASE_VERSION defaults to
+// the fixture's own current BaseTag so pre-existing "image current -> skip
+// build" tests keep passing now that the fake's `image inspect` branch
+// carries a base-version field too; tests that want to exercise base-drift
+// staleness override it with their own append.
 func batchEnv(t *testing.T, fakeDir, assets string) []string {
 	t.Helper()
+	tag, err := launcher.BaseTag(assets)
+	if err != nil {
+		t.Fatalf("BaseTag: %v", err)
+	}
 	return append(os.Environ(),
 		"PATH="+fakeDir+":/usr/bin:/bin",
 		"HOME="+t.TempDir(),
 		"CENCI_SANDBOX_ASSETS="+assets,
 		"FAKE_VOLUMES=cenci-agent-cli-claude\\ncenci-agent-cli-codex\\n",
+		"FAKE_IMAGE_BASE_VERSION="+tag,
 	)
 }
 
@@ -292,7 +306,7 @@ func TestSandboxBuild_MonolithBuildsBaseFirstWhenMissing(t *testing.T) {
 	if !anyLineContains(lines, "-t cenci-sandbox-base:"+tag) {
 		t.Errorf("expected the missing base image to be built first, got calls:\n%s", strings.Join(lines, "\n"))
 	}
-	want := "build --build-arg BASE_VERSION=" + tag + " --label cenci.agent-cli=shared-v2 -t cenci-sandbox:latest -f " + assets + "/Dockerfile " + assets
+	want := "build --build-arg BASE_VERSION=" + tag + " --label cenci.agent-cli=shared-v2 --label cenci.base-version=" + tag + " -t cenci-sandbox:latest -f " + assets + "/Dockerfile " + assets
 	if !anyLineContains(lines, want) {
 		t.Errorf("expected monolith build call %q, got calls:\n%s", want, strings.Join(lines, "\n"))
 	}
@@ -338,7 +352,7 @@ func TestSandboxBuild_RepoImageFromRepoDockerfile(t *testing.T) {
 	}
 
 	lines := callLogLines(t, callLog)
-	want := "build --build-arg BASE_VERSION=" + tag + " --label cenci.agent-cli=shared-v2 -t cenci-sandbox-" + slug + ":latest -f " + repoRoot + "/.cenci/Dockerfile " + repoRoot + "/.cenci"
+	want := "build --build-arg BASE_VERSION=" + tag + " --label cenci.agent-cli=shared-v2 --label cenci.base-version=" + tag + " -t cenci-sandbox-" + slug + ":latest -f " + repoRoot + "/.cenci/Dockerfile " + repoRoot + "/.cenci"
 	if !anyLineContains(lines, want) {
 		t.Errorf("expected repo-image build call %q, got calls:\n%s", want, strings.Join(lines, "\n"))
 	}
@@ -378,8 +392,8 @@ func TestSandboxUpdateAgent_RebuildsLegacyImageBeforeMigration(t *testing.T) {
 		t.Fatalf("sandbox update-agent legacy image migration: %v\n%s", err, output)
 	}
 	lines := callLogLines(t, callLog)
-	if !anyLineContains(lines, "--label cenci.agent-cli=shared-v2 -t cenci-sandbox:latest") {
-		t.Errorf("expected legacy image to rebuild with the shared-agent label; calls:\n%s", strings.Join(lines, "\n"))
+	if !anyLineContains(lines, "--label cenci.agent-cli=shared-v2 --label cenci.base-version=") {
+		t.Errorf("expected legacy image to rebuild with both the shared-agent and base-version labels; calls:\n%s", strings.Join(lines, "\n"))
 	}
 }
 
@@ -979,9 +993,18 @@ func openTestEnv(t *testing.T, fakeDir, assets string) (env []string, home, sock
 		t.Fatalf("listen events socket: %v", err)
 	}
 	t.Cleanup(func() { _ = l.Close() })
+	tag, err := launcher.BaseTag(assets)
+	if err != nil {
+		t.Fatalf("BaseTag: %v", err)
+	}
 	// os/exec keeps the LAST duplicate env key, so these appends override the
 	// inherited values; the empty assignments scrub optional passthroughs
 	// (and a possible ambient CENCI_SANDBOX) for deterministic argv.
+	// FAKE_IMAGE_BASE_VERSION defaults to the fixture's own current BaseTag so
+	// pre-existing "image current -> skip build" tests keep passing; tests
+	// that want to exercise base-drift staleness override it with their own
+	// append (see batchEnv, whose FAKE_IMAGE_BASE_VERSION convention this
+	// mirrors).
 	env = append(os.Environ(),
 		"PATH="+fakeDir+":/usr/bin:/bin",
 		"HOME="+home,
@@ -991,6 +1014,7 @@ func openTestEnv(t *testing.T, fakeDir, assets string) (env []string, home, sock
 		"TMUX_PANE=%7",
 		"COLORTERM=", "CONTEXT7_API_KEY=", "OPENAI_API_KEY=", "CENCI_SANDBOX=",
 		"FAKE_VOLUMES=cenci-agent-cli-claude\ncenci-agent-cli-codex\n",
+		"FAKE_IMAGE_BASE_VERSION="+tag,
 	)
 	return env, home, socketDir
 }
