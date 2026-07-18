@@ -449,7 +449,9 @@ func (e *Engine) assembleEnv(agent string, scope Scope, opts Options) []string {
 // the corresponding mount/env args. Codex and OpenCode both have a hard
 // requirement here (ChatGPT/subscription sign-in and/or API key — fail hard
 // if neither is present); claude credentials are optional staging handled in
-// assembleVolumeMounts.
+// assembleVolumeMounts. A present OPENAI_API_KEY for codex is forwarded
+// per-exec only (execEnvArgs above) and never baked into create-time env, so
+// it only counts toward the auth check here.
 func (e *Engine) validateCredentials(agent, home string) ([]string, error) {
 	switch agent {
 	case "codex":
@@ -460,8 +462,7 @@ func (e *Engine) validateCredentials(agent, home string) ([]string, error) {
 			args = append(args, "-v", codexAuth+":/tmp/host-codex-creds/auth.json:ro")
 			hasAuth = true
 		}
-		if v := os.Getenv("OPENAI_API_KEY"); v != "" {
-			args = append(args, "-e", "OPENAI_API_KEY="+v)
+		if os.Getenv("OPENAI_API_KEY") != "" {
 			hasAuth = true
 		}
 		if !hasAuth {
