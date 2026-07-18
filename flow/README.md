@@ -270,7 +270,7 @@ When Claude Code is **≥ 2.1.139**, the pipeline closes that gap with the nativ
 - **The condition references the plan file**, matching the SessionStart hook that reminds you of pending `.plans/` — a still-present plan file means "not done."
 - **Graceful on older runtimes.** Below 2.1.139 (or if `/goal` is unavailable) the pipeline behaves exactly as before — it just prints a one-line notice and runs without the completion guarantee.
 - **Stall cap.** The armed condition also carries a fixed 20-turn cap — if the goal restarts the turn more than 20 times without the pipeline advancing to a new phase, it stops retrying, clears itself, and reports the stall instead of looping forever.
-- **Opt out** with `"cenci": { "goalAutopilot": false }` in `.claude/config.json`.
+- **Opt out** with `"cenci": { "goalAutopilot": false }` in `.cenci/config.json`.
 
 ### Babysitting a PR
 
@@ -314,7 +314,7 @@ UI implementations are the most error-prone, so the pipeline adds two guards for
 
 ### Usage controls
 
-For lower limit pressure without removing quality gates, add optional settings to `.claude/config.json`:
+For lower limit pressure without removing quality gates, add optional settings to `.cenci/config.json`:
 
 ```json
 {

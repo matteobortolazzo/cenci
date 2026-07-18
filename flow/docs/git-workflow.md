@@ -10,7 +10,7 @@ git worktree add .worktrees/<id>-<desc> -b feature/<id>-<desc>
 ```
 
 ## Branch Naming
-Use the pattern from `.claude/config.json`:
+Use the pattern from `.cenci/config.json`:
 - GitHub: `feature/<id>-<short-description>`
 
 ## Commit Format
