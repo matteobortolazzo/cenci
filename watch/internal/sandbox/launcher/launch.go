@@ -77,10 +77,10 @@ var execAttach = func(path string, argv, env []string) error {
 // error. Exported so callers can validate before building an Engine.
 func ValidateAgent(agent string) error {
 	switch agent {
-	case "claude", "codex":
+	case "claude", "codex", "opencode":
 		return nil
 	}
-	return usageErrorf("unknown agent %q. Valid agents: claude, codex.", agent)
+	return usageErrorf("unknown agent %q. Valid agents: claude, codex, opencode.", agent)
 }
 
 // IsExactSemver rejects npm tags and ranges while allowing exact stable and
@@ -90,10 +90,16 @@ func IsExactSemver(version string) bool {
 }
 
 // DefaultModel returns the per-agent model default applied when neither a
-// shortcut nor an explicit --model chose one.
+// shortcut nor an explicit --model chose one. OpenCode has no cenci-side
+// default: its permissions are config-driven with no --model equivalent to
+// force, so a bare `opencode` launch never forwards --model unless the
+// caller explicitly passed one.
 func DefaultModel(agent string) string {
-	if agent == "codex" {
+	switch agent {
+	case "codex":
 		return "gpt-5.6-terra"
+	case "opencode":
+		return ""
 	}
 	return "sonnet"
 }
@@ -147,12 +153,26 @@ func (e *Engine) Launch(opts Options) error {
 	// trust-store key format is flagged in-source as temporary — the
 	// per-invocation flag is the only stable route (#426).
 	var agentCmdArgs []string
-	if agent == "codex" {
+	switch agent {
+	case "codex":
 		agentCmdArgs = []string{"--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust", "--model", model}
-	} else {
+	case "opencode":
+		// No --dangerously-skip-permissions equivalent exists for OpenCode:
+		// permissions are config-driven via the seeded opencode.json
+		// permission block. --model is only forwarded when the caller
+		// explicitly passed one (DefaultModel("opencode") is "").
+		if model != "" {
+			agentCmdArgs = []string{"--model", model}
+		}
+	default:
 		agentCmdArgs = []string{"--dangerously-skip-permissions", "--model", model}
 	}
 
+	// Provider API keys are forwarded per-exec only (never baked into the
+	// container-lifetime create-time env/PID-1 environ), and scoped to the
+	// agent that can use them: OpenCode reads ANTHROPIC_API_KEY/
+	// OPENAI_API_KEY natively, Codex only OPENAI_API_KEY, and Claude neither
+	// (#490).
 	execEnvArgs := []string{"-u", "dev",
 		"-e", "TMUX_PANE=" + os.Getenv("TMUX_PANE"),
 		"-e", "CENCI_SANDBOX=1",
@@ -160,8 +180,15 @@ func (e *Engine) Launch(opts Options) error {
 	if v := os.Getenv("CONTEXT7_API_KEY"); v != "" {
 		execEnvArgs = append(execEnvArgs, "-e", "CONTEXT7_API_KEY="+v)
 	}
-	if v := os.Getenv("OPENAI_API_KEY"); v != "" {
-		execEnvArgs = append(execEnvArgs, "-e", "OPENAI_API_KEY="+v)
+	if agent == "opencode" {
+		if v := os.Getenv("ANTHROPIC_API_KEY"); v != "" {
+			execEnvArgs = append(execEnvArgs, "-e", "ANTHROPIC_API_KEY="+v)
+		}
+	}
+	if agent == "codex" || agent == "opencode" {
+		if v := os.Getenv("OPENAI_API_KEY"); v != "" {
+			execEnvArgs = append(execEnvArgs, "-e", "OPENAI_API_KEY="+v)
+		}
 	}
 
 	// Attach to an already-running container: its mounts are fixed for its
@@ -419,30 +446,49 @@ func (e *Engine) assembleEnv(agent string, scope Scope, opts Options) []string {
 }
 
 // validateCredentials checks agent-specific auth requirements and returns
-// the corresponding mount/env args. Only codex has a hard requirement here
-// (ChatGPT sign-in and/or API key — fail hard if neither is present); claude
-// credentials are optional staging handled in assembleVolumeMounts.
+// the corresponding mount/env args. Codex and OpenCode both have a hard
+// requirement here (ChatGPT/subscription sign-in and/or API key — fail hard
+// if neither is present); claude credentials are optional staging handled in
+// assembleVolumeMounts.
 func (e *Engine) validateCredentials(agent, home string) ([]string, error) {
-	if agent != "codex" {
+	switch agent {
+	case "codex":
+		var args []string
+		hasAuth := false
+		codexAuth := filepath.Join(home, ".codex", "auth.json")
+		if isRegularFile(codexAuth) {
+			args = append(args, "-v", codexAuth+":/tmp/host-codex-creds/auth.json:ro")
+			hasAuth = true
+		}
+		if v := os.Getenv("OPENAI_API_KEY"); v != "" {
+			args = append(args, "-e", "OPENAI_API_KEY="+v)
+			hasAuth = true
+		}
+		if !hasAuth {
+			return nil, fmt.Errorf("--agent codex requires Codex auth. Run 'codex login' on the host (creates ~/.codex/auth.json) or export OPENAI_API_KEY.") //nolint:staticcheck // user-facing message ported verbatim from cenci-sand
+		}
+		return args, nil
+	case "opencode":
+		// Unlike codex, a present provider API key is forwarded per-exec
+		// only (execEnvArgs above) and must never be baked into the
+		// create-time env, so it only counts toward hasAuth here.
+		var args []string
+		hasAuth := false
+		opencodeAuth := filepath.Join(home, ".local", "share", "opencode", "auth.json")
+		if isRegularFile(opencodeAuth) {
+			args = append(args, "-v", opencodeAuth+":/tmp/host-opencode-creds/auth.json:ro")
+			hasAuth = true
+		}
+		if os.Getenv("ANTHROPIC_API_KEY") != "" || os.Getenv("OPENAI_API_KEY") != "" {
+			hasAuth = true
+		}
+		if !hasAuth {
+			return nil, fmt.Errorf("--agent opencode requires OpenCode auth. Run 'opencode auth login' on the host (creates ~/.local/share/opencode/auth.json) or export ANTHROPIC_API_KEY/OPENAI_API_KEY.") //nolint:staticcheck // mirrors the codex auth error's punctuation
+		}
+		return args, nil
+	default:
 		return nil, nil
 	}
-
-	var args []string
-	hasAuth := false
-	codexAuth := filepath.Join(home, ".codex", "auth.json")
-	if isRegularFile(codexAuth) {
-		args = append(args, "-v", codexAuth+":/tmp/host-codex-creds/auth.json:ro")
-		hasAuth = true
-	}
-	if v := os.Getenv("OPENAI_API_KEY"); v != "" {
-		args = append(args, "-e", "OPENAI_API_KEY="+v)
-		hasAuth = true
-	}
-	if !hasAuth {
-		return nil, fmt.Errorf("--agent codex requires Codex auth. Run 'codex login' on the host (creates ~/.codex/auth.json) or export OPENAI_API_KEY.") //nolint:staticcheck // user-facing message ported verbatim from cenci-sand
-	}
-
-	return args, nil
 }
 
 // assembleOptionalFeatures builds the flags for opt-in isolation-weakening

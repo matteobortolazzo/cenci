@@ -233,6 +233,9 @@ source "${SCRIPT_DIR}/lib/migrate-settings.sh"
 # shellcheck source=lib/codex-config.sh
 source "${SCRIPT_DIR}/lib/codex-config.sh"
 # shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/opencode-config.sh
+source "${SCRIPT_DIR}/lib/opencode-config.sh"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/seed-auth.sh
 source "${SCRIPT_DIR}/lib/seed-auth.sh"
 if [[ -L /home/dev/.claude ]]; then
@@ -283,11 +286,17 @@ fi
 # calls here (the TTL-gated refresh below is the only recurring cost). Never
 # blocks container start after the selected CLI has been installed above;
 # marketplace/plugin network failures still only warn to stderr.
-if [[ "${CENCI_SANDBOX_AGENT:-claude}" == codex ]]; then
+case "${CENCI_SANDBOX_AGENT:-claude}" in
+codex)
     provision_codex_plugins /home/dev/.codex cenci matteobortolazzo/cenci cenci cenci-watch
-else
+    ;;
+opencode)
+    provision_opencode_plugins /home/dev/.cenci-src matteobortolazzo/cenci
+    ;;
+*)
     provision_plugins /home/dev/.claude/plugins cenci matteobortolazzo/cenci cenci cenci-watch
-fi
+    ;;
+esac
 
 # ── Keep plugins current (TTL-gated) ──────────────────────────────
 # provision_plugins only installs what's missing, so an existing home volume
@@ -297,11 +306,17 @@ fi
 # 30-minute stamp so rapid stop/start cycles make zero network calls. Forced
 # variant (ttl 0) is `cenci sandbox update-plugins`. Same guarantee as above:
 # failures warn to stderr and never block container start.
-if [[ "${CENCI_SANDBOX_AGENT:-claude}" == codex ]]; then
+case "${CENCI_SANDBOX_AGENT:-claude}" in
+codex)
     update_codex_plugins /home/dev/.codex cenci 30 cenci cenci-watch
-else
+    ;;
+opencode)
+    update_opencode_plugins /home/dev/.cenci-src matteobortolazzo/cenci 30
+    ;;
+*)
     update_plugins /home/dev/.claude/plugins cenci 30 cenci cenci-watch
-fi
+    ;;
+esac
 
 # ── Skip Claude Code's first-run onboarding wizard ────────────────
 # Onboarding state (theme picker, terminal "anti-flicker" setup, account step)
@@ -338,6 +353,17 @@ if [[ -L /home/dev/.codex/config.toml ]]; then
 fi
 seed_codex_config /home/dev/.codex/config.toml
 
+# ── Seed OpenCode's config (permissions + plugin registration) ────
+# seed_opencode_config (lib/opencode-config.sh) creates or merges
+# ~/.config/opencode/opencode.json idempotently: an allow-all permission
+# block and disabled native update checks (container-boundary-safe
+# defaults, seeded only when absent), plus the cenci-watch OpenCode plugin
+# registered by its file:// path into the cenci-src clone
+# (provision_opencode_plugins above). Unconditional: harmless in
+# Claude/Codex-only containers, and ready if OpenCode is launched later on
+# the same home volume.
+seed_opencode_config /home/dev/.config/opencode/opencode.json "file:///home/dev/.cenci-src/watch/plugin/opencode"
+
 # ── Inject host credentials (staged read-only mounts → writable copies) ──
 #
 # Claude and Codex OAuth tokens rotate on refresh, so the volume's copy forks
@@ -358,6 +384,11 @@ fi
 
 # Codex OAuth credentials (ChatGPT sign-in)
 seed_credential /tmp/host-codex-creds/auth.json /home/dev/.codex/auth.json
+
+# OpenCode auth (ANTHROPIC_API_KEY/OPENAI_API_KEY are read natively from the
+# environment — see execEnvArgs in watch/internal/sandbox/launcher/launch.go
+# — so only the subscription/OAuth auth.json needs staging here)
+seed_credential /tmp/host-opencode-creds/auth.json /home/dev/.local/share/opencode/auth.json
 
 # ── Verify the shared agent CLI before signaling ready ─────────────
 # The launcher mounts the shared, updater-populated volume read-only at

@@ -591,9 +591,9 @@ cenci sandbox prune             # remove superseded base tags, dangling images, 
 cenci sandbox prune --images    # …and prompt ([y/N], default deny) for per-repo images (cenci-sandbox-<slug>:latest)
 cenci sandbox prune --volumes   # …and prompt ([y/N], default deny) for home and shared CLI volumes
                                 # --images and --volumes are independent; combine them for both prompts
-cenci sandbox update-agent [--agent claude|codex] [--version <exact-semver>]
+cenci sandbox update-agent [--agent claude|codex|opencode] [--version <exact-semver>]
                                 # atomically update the host-global, workload-read-only CLI volume
-cenci sandbox update-plugins [--agent claude|codex] [--name <n>]
+cenci sandbox update-plugins [--agent claude|codex|opencode] [--name <n>]
                                 # force-refresh the plugins inside the container/volume (ttl 0)
 cenci sandbox update-plugins --all
                                 # force-refresh plugins in every running sandbox container on the host;
@@ -603,13 +603,14 @@ cenci sandbox reap-orphans      # kill container-side agent processes whose tmux
 
 # List / stop sandbox containers
 cenci sandbox ls
-cenci sandbox stop              # stops every claude-cenci-*/codex-cenci-* container
+cenci sandbox stop              # stops every claude-cenci-*/codex-cenci-*/opencode-cenci-* container
 cenci sandbox stop agentstack   # only containers whose name contains "agentstack"
 
 # Launch or attach an interactive session
 cenci open ch                   # claude + haiku
 cenci open xs                   # codex + gpt-5.6-sol
 cenci open --agent codex --model gpt-5.6-terra --name mybox
+cenci open --agent opencode --name mybox
 cenci open ch -- --resume       # forward flags after -- straight to the agent CLI
 ```
 
@@ -620,10 +621,13 @@ cenci open ch -- --resume       # forward flags after -- straight to the agent C
 | `ch` / `cs` / `co` / `cf` | claude | haiku / sonnet / opus / fable |
 | `xl` / `xt` / `xs` | codex | gpt-5.6-luna / gpt-5.6-terra / gpt-5.6-sol |
 
+OpenCode has no one-token shortcut yet — launch it with `--agent opencode`.
+
 Without a shortcut or `--model`, the model defaults per agent (claude→`sonnet`,
-codex→`gpt-5.6-terra`). A shortcut and a conflicting explicit `--agent` (e.g.
-`open ch --agent codex`) is a usage error rather than silently picking one; all
-usage errors (unknown flag, unknown verb, stray positional, conflicts) exit 2.
+codex→`gpt-5.6-terra`, opencode→ no default, config-driven). A shortcut and a
+conflicting explicit `--agent` (e.g. `open ch --agent codex`) is a usage error
+rather than silently picking one; all usage errors (unknown flag, unknown
+verb, stray positional, conflicts) exit 2.
 Supported flags: `--agent`, `--model`, `--name`, `--shell`, `--docker`,
 `--host-network`, `--reseed-creds`; anything after a bare `--` is forwarded to
 the agent CLI verbatim (this is also how single-dash agent flags like

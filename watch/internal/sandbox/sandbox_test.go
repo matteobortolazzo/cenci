@@ -67,10 +67,10 @@ func TestParseContainers_EmptyInput(t *testing.T) {
 }
 
 func TestParseNames_FiltersToSandboxPrefix(t *testing.T) {
-	raw := "claude-cenci-agentstack\ncodex-cenci-agentstack\nunrelated-container\n"
+	raw := "claude-cenci-agentstack\ncodex-cenci-agentstack\nopencode-cenci-agentstack\nunrelated-container\n"
 	got := parseNames(raw, "")
-	want := []string{"claude-cenci-agentstack", "codex-cenci-agentstack"}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+	want := []string{"claude-cenci-agentstack", "codex-cenci-agentstack", "opencode-cenci-agentstack"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
 		t.Errorf("parseNames(raw, \"\") = %v, want %v", got, want)
 	}
 }
@@ -84,6 +84,7 @@ func TestAgentForContainerName(t *testing.T) {
 	}{
 		{"claude prefix", "claude-cenci-agentstack", "claude", true},
 		{"codex prefix", "codex-cenci-agentstack", "codex", true},
+		{"opencode prefix", "opencode-cenci-agentstack", "opencode", true},
 		{"non-matching name", "some-other-container", "", false},
 	}
 	for _, tc := range cases {

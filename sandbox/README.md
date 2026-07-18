@@ -28,6 +28,9 @@ shortcut table — lives in
   login on the host writes `~/.claude/.credentials.json`, which is staged in read-only.
 - Codex auth on the host when using `--agent codex` — run `codex login` to create
   `~/.codex/auth.json`, or export `OPENAI_API_KEY`.
+- OpenCode auth on the host when using `--agent opencode` — run `opencode auth login` to
+  create `~/.local/share/opencode/auth.json` (staged read-only, mode 600, mirrors Codex), or
+  export `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`.
 
 ## Limitations
 
@@ -101,6 +104,7 @@ cn                    # Claude Code (`cn <args>` is exactly `cenci open <args>`)
 cn xt                 # Codex, gpt-5.6-terra
 cn ch                 # Claude, haiku (shortcuts: ch/cs/co/cf, xl/xt/xs)
 cenci open --agent codex --model gpt-5.6-sol --name mybox
+cenci open --agent opencode --name mybox     # OpenCode (no cenci-side shortcuts yet)
 
 # Pass args through to the agent CLI — everything after a bare -- is forwarded verbatim
 cn -- -p "fix the tests"
@@ -166,26 +170,32 @@ it.
 ### Choosing an agent
 
 `cenci open` launches Claude Code by default. Pass `--agent codex` (or use an
-`xl`/`xt`/`xs` shortcut) to launch Codex instead. Both agents run at full permission
+`xl`/`xt`/`xs` shortcut) to launch Codex instead, or `--agent opencode` to launch OpenCode
+(no cenci-side shortcuts for OpenCode yet). All three agents run at full permission
 inside the container — Claude with `--dangerously-skip-permissions`, Codex with
-`--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust`.
+`--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust`. OpenCode has no
+equivalent CLI flag; its permissions are config-driven via a seeded `opencode.json` instead —
+see [Permission model](#permission-model).
 
-Containers and home volumes are **namespaced by agent**, so the two never collide:
+Containers and home volumes are **namespaced by agent**, so the three never collide:
 the **Claude agent** uses the `claude-cenci-` prefix; the **Codex agent** (`--agent
-codex` / `cn xt`) uses `codex-cenci-`. The rest of the name is the repo slug (or the legacy `<name>`
+codex` / `cn xt`) uses `codex-cenci-`; the **OpenCode agent** (`--agent opencode`) uses
+`opencode-cenci-`. The rest of the name is the repo slug (or the legacy `<name>`
 outside a git repo — see [Per-repo containers](#per-repo-containers) above), e.g.
 `claude-cenci-my-project` / `claude-cenci-home-my-project`. The executable itself is shared
-across every repository and named instance on the host in `cenci-agent-cli-claude` or
-`cenci-agent-cli-codex`, mounted read-only at `/opt/cenci-agent`. Sessions invoke its absolute
-path, so an old or tampered executable in a home volume cannot shadow it.
+across every repository and named instance on the host in `cenci-agent-cli-claude`,
+`cenci-agent-cli-codex`, or `cenci-agent-cli-opencode`, mounted read-only at
+`/opt/cenci-agent`. Sessions invoke its absolute path, so an old or tampered executable in a
+home volume cannot shadow it.
 
 When the shared volume is absent, the launcher resolves an exact official version and SHA-512
 integrity, then installs it in a short-lived updater with no repository, home, credentials,
 API keys, host network, or container socket. Registry signatures and available npm provenance
 are verified before required postinstall code runs there. Codex provenance must identify
-`openai/codex`; Claude Code currently publishes registry signatures but no npm provenance, so
-its remaining trust boundary is the vendor's legitimate npm release authority. A malicious
-release legitimately published by a vendor cannot be prevented by package integrity alone.
+`openai/codex`; Claude Code and OpenCode currently publish registry signatures but no npm
+provenance, so their remaining trust boundary is the vendor's legitimate npm release
+authority. A malicious release legitimately published by a vendor cannot be prevented by
+package integrity alone.
 
 Updates use a volume-scoped `flock`, versioned staging, a `--version` health check, and an
 atomic `current` symlink. The previous release is retained; a failed or interrupted update
@@ -219,7 +229,8 @@ later starts: each instance stays logged in indefinitely, and using the sandbox
 all day can no longer log your host session out (you may see one final host
 re-login right after a volume is first seeded, then both sides are stable). The
 GitHub CLI token doesn't rotate, so `hosts.yml` is still refreshed from the host
-on every start.
+on every start. OpenCode's `auth.json` (when present) goes through the same
+seed-once staging path — see [OpenCode auth](#opencode-auth) below.
 
 If an instance's login does die (e.g. you revoked all sessions on claude.ai),
 force a one-time re-copy from the host:
@@ -272,6 +283,27 @@ Error: --agent codex requires Codex auth. Run 'codex login' on the host
 (creates ~/.codex/auth.json) or export OPENAI_API_KEY.
 ```
 
+### OpenCode auth
+
+When launching OpenCode (`--agent opencode`), auth is staged from the host:
+
+- `~/.local/share/opencode/auth.json` — the subscription/OAuth sign-in credentials created
+  by `opencode auth login` on the host. Injected read-only and seeded to
+  `/home/dev/.local/share/opencode/auth.json` (mode 600) only when the volume has none yet
+  (same seed-once staging as Codex — see First-Run Setup; `--reseed-creds` forces a
+  re-copy).
+- `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` — forwarded into the container when set in your
+  host environment (OpenCode reads these natively; unlike Codex's, neither is baked into the
+  container's create-time environment, only passed per-`exec`).
+
+At least one of these must be present. If neither is, `cenci open --agent opencode` fails
+hard with a clear message and does **not** create a container:
+
+```
+Error: --agent opencode requires OpenCode auth. Run 'opencode auth login' on the host
+(creates ~/.local/share/opencode/auth.json) or export ANTHROPIC_API_KEY/OPENAI_API_KEY.
+```
+
 If host credentials are not available, open a shell for manual setup:
 
 ```bash
@@ -304,6 +336,7 @@ Everything persists in the home volume — only needs to happen once per instanc
 | Playwright | 1.61.1 | `PLAYWRIGHT_VERSION` |
 | Codex CLI | verified latest in shared volume | `cenci sandbox update-agent --agent codex [--version X.Y.Z]` |
 | Claude Code CLI | verified latest in shared volume | `cenci sandbox update-agent [--version X.Y.Z]` |
+| OpenCode CLI | verified latest in shared volume | `cenci sandbox update-agent --agent opencode [--version X.Y.Z]` |
 | CCometixLine (ccline) | 1.1.2 | `CCLINE_VERSION` |
 | GitHub CLI | latest | — |
 | git, ripgrep, jq, curl | latest | — |
@@ -415,6 +448,10 @@ Bypass mode is **fully unattended**. The entrypoint seeds `/home/dev/.claude/set
 
 **Security invariant — container-only.** The `skipDangerousModePermissionPrompt` / `defaultMode: bypassPermissions` pair lives *only* in the container home volume (`/home/dev/.claude/settings.json`). It must **never** be added to the host `~/.claude/settings.json`, and the launcher never mounts the host `~/.claude` config dir (staging `.credentials.json` read-only is the single exception). The container boundary is the only thing that makes bypass mode safe — if a dialog ever shows where it shouldn't, the fix is always container-side, never host-side.
 
+OpenCode (`--agent opencode`) has no per-flag "skip permissions" equivalent to bypass with — the CLI has no `--dangerously-*` flag of its own. Instead the entrypoint seeds `/home/dev/.config/opencode/opencode.json` with a `permission: {"*": "allow"}` block, plus `autoupdate: false` (workload mounts are read-only, so native update checks would only fail). Both are seeded **only when the corresponding key is absent** — a user who already set a `permission` block (possibly stricter than the container-boundary default) or explicitly opted back into `autoupdate` keeps their own choice; any other existing key in the file is left untouched.
+
+**Security invariant — container-only.** Exactly like Claude's bypass settings above, the seeded `permission: {"*": "allow"}` block lives *only* in the container home volume (`/home/dev/.config/opencode/opencode.json`). It must **never** be added to a host `~/.config/opencode/opencode.json`, and the launcher never mounts a host OpenCode config dir. The container boundary is what makes the allow-all permission block safe.
+
 ### Isolation
 
 - Container has its **own home directory** (`/home/dev`) backed by a named Docker volume
@@ -428,6 +465,8 @@ Bypass mode is **fully unattended**. The entrypoint seeds `/home/dev/.claude/set
 |------|----------|
 | `/home/dev/.claude/` | Claude Code config, plugins, session data |
 | `/home/dev/.codex/` | Codex config, auth, session data |
+| `/home/dev/.local/share/opencode/` | OpenCode auth |
+| `/home/dev/.config/opencode/` | OpenCode config (`opencode.json`), plugins |
 | `/home/dev/.npm/` | npm package cache |
 | `/home/dev/.nuget/` | NuGet package cache |
 | `/home/dev/.dotnet/` | .NET user-level config |
@@ -442,6 +481,7 @@ Bypass mode is **fully unattended**. The entrypoint seeds `/home/dev/.claude/set
 | `~/.config/git/config` or `~/.gitconfig` | `/home/dev/.gitconfig` | Git identity |
 | `~/.claude/.credentials.json` | `/tmp/host-claude-creds/` (staging) | Claude OAuth tokens (copied to home on start) |
 | `~/.codex/auth.json` (Codex only) | `/tmp/host-codex-creds/` (staging) | Codex OAuth tokens (copied to home on start) |
+| `~/.local/share/opencode/auth.json` (OpenCode only) | `/tmp/host-opencode-creds/` (staging) | OpenCode OAuth tokens (copied to home on start) |
 | `~/.config/gh/hosts.yml` | `/tmp/host-gh-config/` (staging) | GitHub CLI tokens (copied to home on start) |
 
 ### MCP servers
@@ -504,6 +544,15 @@ plugins, but if an update changes `hooks.json`, open `/hooks` in Codex and trust
 pending cenci-watch hooks again. This trust decision is intentionally interactive and
 is not bypassed by sandbox provisioning.
 
+OpenCode has no marketplace CLI like `claude plugin marketplace add` / `codex plugin
+marketplace add`, so provisioning uses the analogous mechanism instead: a plain `git clone`
+of `matteobortolazzo/cenci` into `/home/dev/.cenci-src`, giving
+`PLUGIN_ROOT=/home/dev/.cenci-src/flow` for `flow/opencode/install-skills.sh` (the primitive
+that symlinks the portable skills into `~/.config/opencode/skills/`). The clone happens once;
+`cenci sandbox update-plugins --agent opencode` (or the 30-minute TTL) instead `git pull`s the
+existing clone and re-runs `install-skills.sh` to link anything newly portable. Every step
+warns and never blocks container start if `git` is missing or the clone/pull fails offline.
+
 ### Container lifecycle
 
 - Repository containers run detached so no agent window owns their lifetime
@@ -549,13 +598,14 @@ older base, print a notice, and rebuild it automatically on the next run.
 
 ### Update an agent CLI
 
-Workload mounts are read-only, so native Claude Code and Codex update checks are suppressed.
-Update the host-global agent volume explicitly:
+Workload mounts are read-only, so native Claude Code, Codex, and OpenCode update checks are
+suppressed. Update the host-global agent volume explicitly:
 
 ```bash
-cenci sandbox update-agent                              # Claude, official latest
-cenci sandbox update-agent --agent codex                # Codex, official latest
-cenci sandbox update-agent --agent codex --version 1.2.3 # exact rollback/rollout
+cenci sandbox update-agent                                  # Claude, official latest
+cenci sandbox update-agent --agent codex                    # Codex, official latest
+cenci sandbox update-agent --agent codex --version 1.2.3    # exact rollback/rollout
+cenci sandbox update-agent --agent opencode                 # OpenCode, official latest
 ```
 
 `--version` accepts only an exact semantic version; ranges and tags are rejected. The command
@@ -572,13 +622,14 @@ To force provisioning of anything missing and refresh immediately — e.g. right
 after merging a plugin change — run:
 
 ```bash
-cenci sandbox update-plugins                # Claude home / Claude CLI
-cenci sandbox update-plugins --agent codex  # Codex home / writable Codex CLI
+cenci sandbox update-plugins                  # Claude home / Claude CLI
+cenci sandbox update-plugins --agent codex    # Codex home / writable Codex CLI
+cenci sandbox update-plugins --agent opencode # OpenCode home / cenci-src git clone
 ```
 
 It updates the running container in place (agent sessions pick the new version
 up on their next start), or spins up a one-shot container against the home
-volume if none is running. Codex updates do not require Claude Code to be
+volume if none is running. Codex and OpenCode updates do not require Claude Code to be
 installed on the host. After a Codex hook-file update, review pending trust via
 `/hooks` in the next Codex session.
 
@@ -626,7 +677,8 @@ error (e.g. exec failure) rather than swallowing it.
 
 Delete the home volume to start fresh (caches, auth, config all cleared). Claude Code
 instances use `claude-cenci-home-<repo-slug>`; Codex instances use
-`codex-cenci-home-<repo-slug>` (or `-<name>` outside a git repo — see
+`codex-cenci-home-<repo-slug>`; OpenCode instances use `opencode-cenci-home-<repo-slug>`
+(or `-<name>` outside a git repo — see
 [Per-repo containers](#per-repo-containers)):
 
 ```bash
@@ -637,6 +689,8 @@ docker volume rm claude-cenci-home-cenci-myproject
 docker volume rm claude-cenci-home-default
 # Codex instances:
 docker volume rm codex-cenci-home-cenci
+# OpenCode instances:
+docker volume rm opencode-cenci-home-cenci
 ```
 
 ### List instances
@@ -648,7 +702,7 @@ docker volume ls --filter name=cenci-home
 ### Clean up everything
 
 ```bash
-# Remove all sandbox volumes (both Claude Code and Codex instances)
+# Remove all sandbox volumes (Claude Code, Codex, and OpenCode instances)
 docker volume ls --filter name=cenci-home -q | xargs docker volume rm
 
 # Remove the image
@@ -685,10 +739,10 @@ whole-`~/Repos` mount (outside a git repo) and see stale mis-owned files from be
 fix, run `chown -R $(id -u):$(id -g) ~/Repos` on the host — see
 [Limitations](#limitations).
 
-**`claude` or `codex` not found inside the container**
+**`claude`, `codex`, or `opencode` not found inside the container**
 The selected CLI is executed from `/opt/cenci-agent/current`. Check bootstrap diagnostics for
 registry, signature, provenance, or network errors. To repair or refresh the shared global
-volume, run `cenci sandbox update-agent --agent claude|codex`. If the volume is still
+volume, run `cenci sandbox update-agent --agent claude|codex|opencode`. If the volume is still
 bootstrapping or a previous update left it broken, the entrypoint now fails the container
 startup itself with a one-line diagnostic (rather than a raw `exec: no such file` error);
 `cenci open` surfaces that diagnostic directly.

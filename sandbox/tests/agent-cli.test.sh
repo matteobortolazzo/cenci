@@ -40,9 +40,9 @@ install)
         sleep 0.2
         rmdir "${NPM_CONCURRENCY_MARKER}" 2>/dev/null || true
     fi
-    mkdir -p "${prefix}/node_modules/@openai/codex" "${prefix}/node_modules/@anthropic-ai/claude-code" "${prefix}/node_modules/.bin"
-    printf '{"packages":{"node_modules/@openai/codex":{"integrity":"%s"},"node_modules/@anthropic-ai/claude-code":{"integrity":"%s"}}}\n' \
-        "${LOCK_INTEGRITY:-${MOCK_INTEGRITY}}" "${LOCK_INTEGRITY:-${MOCK_INTEGRITY}}" >"${prefix}/package-lock.json"
+    mkdir -p "${prefix}/node_modules/@openai/codex" "${prefix}/node_modules/@anthropic-ai/claude-code" "${prefix}/node_modules/opencode-ai" "${prefix}/node_modules/.bin"
+    printf '{"packages":{"node_modules/@openai/codex":{"integrity":"%s"},"node_modules/@anthropic-ai/claude-code":{"integrity":"%s"},"node_modules/opencode-ai":{"integrity":"%s"}}}\n' \
+        "${LOCK_INTEGRITY:-${MOCK_INTEGRITY}}" "${LOCK_INTEGRITY:-${MOCK_INTEGRITY}}" "${LOCK_INTEGRITY:-${MOCK_INTEGRITY}}" >"${prefix}/package-lock.json"
     ;;
 audit)
     [[ "${NPM_AUDIT_FAIL:-0}" -eq 0 ]] || { echo 'signature verification failed' >&2; exit 42; }
@@ -60,6 +60,7 @@ rebuild)
     fi
     agent=claude
     [[ "$*" == *'@openai/codex'* ]] && agent=codex
+    [[ "$*" == *'opencode-ai'* ]] && agent=opencode
     if [[ "${HEALTH_FAIL:-0}" -eq 1 ]]; then status=19; else status=0; fi
     printf '#!/bin/sh\necho "%s"\nexit %s\n' "${MOCK_VERSION}" "${status}" >"${prefix}/node_modules/.bin/${agent}"
     chmod +x "${prefix}/node_modules/.bin/${agent}"
@@ -119,6 +120,17 @@ new_case validation
 if [[ "$(bash -c 'source "$1"; agent_cli_package claude' _ "${ROOT}/sandbox/lib/agent-cli.sh")" == '@anthropic-ai/claude-code' ]] \
     && [[ "$(bash -c 'source "$1"; agent_cli_package codex' _ "${ROOT}/sandbox/lib/agent-cli.sh")" == '@openai/codex' ]] \
     && ! run_update codex latest >/dev/null 2>&1; then pass; else fail "package or exact-version allowlist failed"; fi
+
+echo "case: OpenCode package/label resolve for the shared updater (#490)"
+if [[ "$(bash -c 'source "$1"; agent_cli_package opencode' _ "${ROOT}/sandbox/lib/agent-cli.sh")" == 'opencode-ai' ]] \
+    && [[ "$(bash -c 'source "$1"; agent_cli_label opencode' _ "${ROOT}/sandbox/lib/agent-cli.sh")" == 'OpenCode' ]]; then pass; else fail "opencode package or label resolution failed"; fi
+
+echo "case: OpenCode takes the vendor-trust (non-provenance) branch, not Codex's hard gate"
+new_case opencode-no-provenance
+NO_PROVENANCE=1
+if OPENCODE_OUTPUT="$(run_update opencode 2>&1)" \
+    && [[ "${OPENCODE_OUTPUT}" == *'vendor release trust remains'* ]]; then pass; else fail "OpenCode did not take Claude's vendor-trust branch: ${OPENCODE_OUTPUT:-<update failed>}"; fi
+unset NO_PROVENANCE
 
 echo "case: latest resolves to exact version and SHA-512 before activation"
 new_case latest 9.8.7

@@ -1739,6 +1739,111 @@ func TestOpenCodexWithoutAuth_Exits1(t *testing.T) {
 	}
 }
 
+// TestOpenOpencode_FreshCreate_PinsBareInvocationAndScopesProviderKeys pins
+// #490's launch contract for OpenCode: a bare `opencode` invocation (no
+// --dangerously-skip-permissions equivalent — permissions are config-driven
+// via the seeded opencode.json), and ANTHROPIC_API_KEY/OPENAI_API_KEY
+// forwarded only at exec time (per-session), never baked into the
+// container-lifetime create-time env/PID-1 environ.
+func TestOpenOpencode_FreshCreate_PinsBareInvocationAndScopesProviderKeys(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "--agent", "opencode")
+	cmd.Env = append(env, "ANTHROPIC_API_KEY=sk-test-anthropic", "OPENAI_API_KEY=sk-test-openai")
+	cmd.Dir = t.TempDir()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("open --agent opencode: %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	runLine, ok := findLineWithPrefix(lines, "run --name ")
+	if !ok {
+		t.Fatalf("expected a container run, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	for _, forbidden := range []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY"} {
+		if strings.Contains(runLine, forbidden) {
+			t.Errorf("create-time run args must never bake provider keys into the PID-1 environ; got %q in:\n%s", forbidden, runLine)
+		}
+	}
+
+	line := attachLine(t, lines)
+	if !strings.HasSuffix(line, "/opt/cenci-agent/current/node_modules/.bin/opencode") {
+		t.Errorf("attach argv = %q, want a bare opencode invocation with no permission-skip flag and no forced --model", line)
+	}
+	for _, want := range []string{"ANTHROPIC_API_KEY=sk-test-anthropic", "OPENAI_API_KEY=sk-test-openai"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("attach argv missing %q (opencode-only per-exec provider key forwarding):\n%s", want, line)
+		}
+	}
+}
+
+// TestOpenClaude_NeverForwardsProviderKeys pins the opencode-only scoping of
+// ANTHROPIC_API_KEY/OPENAI_API_KEY (#490): a Claude launch must never receive
+// either provider key, at create time or exec time, even when both are set
+// on the host.
+func TestOpenClaude_NeverForwardsProviderKeys(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = append(env, "OPENAI_API_KEY=sk-test-openai", "ANTHROPIC_API_KEY=sk-test-anthropic")
+	cmd.Dir = t.TempDir()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("open ch: %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	runLine, ok := findLineWithPrefix(lines, "run --name ")
+	if !ok {
+		t.Fatalf("expected a container run, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	line := attachLine(t, lines)
+	for _, forbidden := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY"} {
+		if strings.Contains(runLine, forbidden) {
+			t.Errorf("claude create-time run args must never carry a provider key (opencode-only forwarding); got %q in:\n%s", forbidden, runLine)
+		}
+		if strings.Contains(line, forbidden) {
+			t.Errorf("claude attach exec args must never carry a provider key (opencode-only forwarding); got %q in:\n%s", forbidden, line)
+		}
+	}
+}
+
+// TestOpenOpencodeWithoutAuth_Exits1 mirrors TestOpenCodexWithoutAuth_Exits1:
+// OpenCode has a hard credential requirement (ANTHROPIC_API_KEY,
+// OPENAI_API_KEY, or a staged ~/.local/share/opencode/auth.json), so a launch
+// with none of those present must fail before ever creating the workload
+// container.
+func TestOpenOpencodeWithoutAuth_Exits1(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets) // no opencode auth.json, provider keys scrubbed
+
+	cmd := exec.Command(binaryPath, "open", "--agent", "opencode")
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("exit code = %d, want 1\n%s", exitErr.ExitCode(), output)
+	}
+	if !strings.Contains(string(output), "OpenCode") || !strings.Contains(string(output), "auth") {
+		t.Errorf("expected an OpenCode auth error, got:\n%s", output)
+	}
+	if lines := callLogLines(t, callLog); anyLineContains(lines, "run --name ") {
+		t.Errorf("expected no workload container run without opencode auth, got:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
 func TestOpen_AttachToRunning_SkipsCreate(t *testing.T) {
 	fakeDir := t.TempDir()
 	callLog := writeScriptedRuntimes(t, fakeDir)

@@ -12,8 +12,9 @@
 // everything else links to those two homes:
 //   - runtime detection: ContainerRuntime (podman if present, else docker)
 //   - shortcut tables: ClaudeModelShortcuts / CodexModelShortcuts
-//   - container name prefixes: the `^(claude-cenci-|codex-cenci-)` pattern
-//     behind IsSandboxContainerName
+//   - container name prefixes: the
+//     `^(claude-cenci-|codex-cenci-|opencode-cenci-)` pattern behind
+//     IsSandboxContainerName
 package sandbox
 
 import (
@@ -57,20 +58,21 @@ func ResolveShortcut(token string) (agent, model string, ok bool) {
 
 // -- sandbox ls / stop: implemented natively in Go against docker/podman ---
 
-// sandboxNamePattern matches the claude-cenci-/codex-cenci- container name
-// prefixes every sandbox container carries (launcher.ComputeScope's
-// CONTAINER_PREFIX is "<agent>-cenci"); prune and reap filter on it too.
-var sandboxNamePattern = regexp.MustCompile(`^(claude-cenci-|codex-cenci-)`)
+// sandboxNamePattern matches the claude-cenci-/codex-cenci-/opencode-cenci-
+// container name prefixes every sandbox container carries
+// (launcher.ComputeScope's CONTAINER_PREFIX is "<agent>-cenci"); prune and
+// reap filter on it too.
+var sandboxNamePattern = regexp.MustCompile(`^(claude-cenci-|codex-cenci-|opencode-cenci-)`)
 
 // IsSandboxContainerName reports whether name carries one of the sandbox
-// container name prefixes (claude-cenci-/codex-cenci-). Exported so sibling
-// packages (internal/sandbox/launcher) share the one prefix table instead of
-// duplicating the regex.
+// container name prefixes (claude-cenci-/codex-cenci-/opencode-cenci-).
+// Exported so sibling packages (internal/sandbox/launcher) share the one
+// prefix table instead of duplicating the regex.
 func IsSandboxContainerName(name string) bool {
 	return sandboxNamePattern.MatchString(name)
 }
 
-// AgentForContainerName derives the agent (claude/codex) a sandbox container
+// AgentForContainerName derives the agent (claude/codex/opencode) a sandbox container
 // belongs to from its name prefix, reusing sandboxNamePattern (the same
 // source of truth IsSandboxContainerName matches against) rather than
 // re-deriving the prefix table. ok is false when name doesn't carry a
@@ -102,8 +104,8 @@ type Container struct {
 	Image  string
 }
 
-// ListContainers lists every claude-cenci-*/codex-cenci-* container (running or
-// stopped) known to runtime.
+// ListContainers lists every claude-cenci-*/codex-cenci-*/opencode-cenci-*
+// container (running or stopped) known to runtime.
 func ListContainers(runtime string) ([]Container, error) {
 	out, err := exec.Command(runtime, "ps", "-a", "--format", "{{.Names}}\t{{.Status}}\t{{.Image}}").Output()
 	if err != nil {
@@ -135,9 +137,10 @@ func parseContainers(raw string) []Container {
 	return containers
 }
 
-// RunningSandboxContainers lists the names of running claude-cenci-*/codex-cenci-*
-// containers, optionally narrowed to names containing filter (a plain
-// substring match against the full container name, e.g. a repo slug).
+// RunningSandboxContainers lists the names of running
+// claude-cenci-*/codex-cenci-*/opencode-cenci-* containers, optionally
+// narrowed to names containing filter (a plain substring match against the
+// full container name, e.g. a repo slug).
 func RunningSandboxContainers(runtime, filter string) ([]string, error) {
 	out, err := exec.Command(runtime, "ps", "--format", "{{.Names}}").Output()
 	if err != nil {

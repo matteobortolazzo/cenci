@@ -110,6 +110,42 @@ seed_credential "${STAGED}" "${DEST}"
 assert_eq "returns success" "0" "$?"
 assert_eq "copies over the dangling symlink" '{"chain":"host"}' "$(cat "${DEST}" 2>/dev/null)"
 
+# ── Case 6: OpenCode auth.json seed-once (#490) ────────────────────
+# Mirrors case 1/case 3 exactly, at OpenCode's own auth/credentials path
+# (~/.local/share/opencode/auth.json) — seed_credential is path-agnostic, so
+# the same seed-once + CENCI_SANDBOX_RESEED_CREDS contract applies verbatim.
+echo "case: seeds OpenCode auth.json when destination is missing"
+STAGED="${TMPDIR_TEST}/case6/staged.json"
+DEST="${TMPDIR_TEST}/case6/home/.local/share/opencode/auth.json"
+mkdir -p "$(dirname "${STAGED}")"
+echo '{"chain":"host"}' > "${STAGED}"
+seed_credential "${STAGED}" "${DEST}"
+assert_eq "returns success" "0" "$?"
+assert_eq "copies staged OpenCode credential" '{"chain":"host"}' "$(cat "${DEST}" 2>/dev/null)"
+assert_eq "sets mode 600" "600" "$(stat -c '%a' "${DEST}" 2>/dev/null)"
+
+echo "case: never overwrites an existing OpenCode auth.json"
+STAGED="${TMPDIR_TEST}/case6b/staged.json"
+DEST="${TMPDIR_TEST}/case6b/home/.local/share/opencode/auth.json"
+mkdir -p "$(dirname "${STAGED}")" "$(dirname "${DEST}")"
+echo '{"chain":"host-stale"}' > "${STAGED}"
+echo '{"chain":"volume-live"}' > "${DEST}"
+seed_credential "${STAGED}" "${DEST}"
+assert_eq "returns success" "0" "$?"
+assert_eq "keeps the volume OpenCode credential" '{"chain":"volume-live"}' "$(cat "${DEST}")"
+
+echo "case: CENCI_SANDBOX_RESEED_CREDS=1 forces OpenCode auth.json overwrite"
+STAGED="${TMPDIR_TEST}/case6c/staged.json"
+DEST="${TMPDIR_TEST}/case6c/home/.local/share/opencode/auth.json"
+mkdir -p "$(dirname "${STAGED}")" "$(dirname "${DEST}")"
+echo '{"chain":"host-new"}' > "${STAGED}"
+echo '{"chain":"volume-dead"}' > "${DEST}"
+chmod 644 "${DEST}"
+CENCI_SANDBOX_RESEED_CREDS=1 seed_credential "${STAGED}" "${DEST}"
+assert_eq "returns success" "0" "$?"
+assert_eq "overwrites with staged OpenCode credential" '{"chain":"host-new"}' "$(cat "${DEST}")"
+assert_eq "restores mode 600" "600" "$(stat -c '%a' "${DEST}")"
+
 echo
 echo "Passed: ${PASSES}, Failed: ${FAILURES}"
 [[ "${FAILURES}" -eq 0 ]]

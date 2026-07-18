@@ -8,8 +8,9 @@ agent_cli_package() {
     case "${1:-}" in
     claude) printf '%s\n' '@anthropic-ai/claude-code' ;;
     codex) printf '%s\n' '@openai/codex' ;;
+    opencode) printf '%s\n' 'opencode-ai' ;;
     *)
-        printf 'agent-cli: unknown agent %q. Valid agents: claude, codex.\n' "${1:-}" >&2
+        printf 'agent-cli: unknown agent %q. Valid agents: claude, codex, opencode.\n' "${1:-}" >&2
         return 2
         ;;
     esac
@@ -19,6 +20,7 @@ agent_cli_label() {
     case "${1:-}" in
     claude) printf '%s\n' 'Claude Code' ;;
     codex) printf '%s\n' 'Codex' ;;
+    opencode) printf '%s\n' 'OpenCode' ;;
     *) agent_cli_package "${1:-}" >/dev/null ;;
     esac
 }
@@ -250,6 +252,6 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     shift || true
     case "${command_name}" in
     update) update_agent_cli "$@" ;;
-    *) echo "usage: agent-cli.sh update <claude|codex> [exact-version]" >&2; exit 2 ;;
+    *) echo "usage: agent-cli.sh update <claude|codex|opencode> [exact-version]" >&2; exit 2 ;;
     esac
 fi
