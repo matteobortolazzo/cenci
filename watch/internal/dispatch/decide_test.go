@@ -256,6 +256,20 @@ func TestDecideAgentFallback(t *testing.T) {
 	})
 }
 
+// TestDecideAgentFallbackToOpenCodeWhenPreferredExhausted is a #488
+// regression/confirmation test: agentPreference and Decide's budget-fallback
+// walk are already fully agent-neutral (opencode is just another string),
+// so this is expected to pass without any dispatch package changes — it
+// pins that "opencode" specifically (not just an arbitrary agent name)
+// survives as the exhausted-fallback target and stays Unlimited absent a
+// floor/reader for it.
+func TestDecideAgentFallbackToOpenCodeWhenPreferredExhausted(t *testing.T) {
+	in := baseInputs()
+	in.Budgets = FloorProvider{Floors: map[string]float64{"claude": 0, "codex": 0}}
+	in.Config.AgentPreference = []string{"claude", "codex", "opencode"}
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "opencode"}})
+}
+
 func TestDecideOrderingDeterminism(t *testing.T) {
 	in := baseInputs()
 	// Supplied out of order; output must be sorted by ticket number.

@@ -15,7 +15,7 @@ import (
 // SessionState is the daemon core's view of one agent session.
 type SessionState struct {
 	SessionID       string
-	Agent           string // claude, codex, or empty when unknown
+	Agent           string // claude, codex, opencode, or empty when unknown
 	Status          detect.Status
 	AttentionSource string // permission-request, input-tool, action-required-title, native-alert
 	TaskName        string

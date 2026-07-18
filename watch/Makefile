@@ -29,6 +29,7 @@ test: test-plugins
 test-plugins:
 	./plugin/hooks/test.sh
 	./plugin/codex/test.sh
+	./plugin/opencode/test.sh
 
 # Smoke test for the macOS SwiftBar frontend (macOS-only; skips without osascript).
 test-macos:

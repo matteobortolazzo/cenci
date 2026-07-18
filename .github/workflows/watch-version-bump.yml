@@ -26,6 +26,7 @@ jobs:
         watch/plugin/dms/plugin.json
         watch/plugin/gnome/metadata.json
         watch/plugin/plasma/metadata.json
+        watch/plugin/opencode/package.json
       marketplace-name: cenci-watch
       tag-prefix: watch
       dispatch-workflow: watch-release.yml

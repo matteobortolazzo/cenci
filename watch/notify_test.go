@@ -49,6 +49,47 @@ func TestNotifyCodexPromptSendsOnlyCompactTaskName(t *testing.T) {
 	}
 }
 
+// TestNotifyOpenCodePromptSendsOnlyCompactTaskName extends the existing Codex
+// coverage (#488): notify_cmd.go's task-name-from-prompt gate is currently
+// codex-only (`event.Agent == "codex" && event.EventType ==
+// "UserPromptSubmit"`), so `-agent opencode` on a UserPromptSubmit event must
+// also derive and send a compact TaskName, without leaking the raw prompt.
+func TestNotifyOpenCodePromptSendsOnlyCompactTaskName(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "events.sock")
+	receiver, err := ipc.NewEventReceiver(socket)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = receiver.Close() }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go receiver.Accept(ctx)
+
+	rawPrompt := "\n  improve\t opencode tmux names\x00  \nprivate second line"
+	input := `{"hook_event_name":"UserPromptSubmit","session_id":"oc-sess","prompt":` + string(mustJSON(t, rawPrompt)) + `}`
+	cmd := exec.Command(binaryPath, "notify", "-agent", "opencode", "-event-socket", socket)
+	cmd.Stdin = strings.NewReader(input)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("notify: %v: %s", err, output)
+	}
+
+	select {
+	case event := <-receiver.Events():
+		if event.TaskName != "improve opencode tmux names" {
+			t.Fatalf("task_name = %q", event.TaskName)
+		}
+		encoded, err := json.Marshal(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(encoded), "private second line") || strings.Contains(string(encoded), "prompt") {
+			t.Fatalf("raw prompt leaked into IPC: %s", encoded)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for notify event")
+	}
+}
+
 // TestNotifyParsesAgentIDFromStdin covers ticket #277: the real runNotify
 // stdin-parsing path must decode the "agent_id" JSON key into
 // ipc.HookEvent.AgentID, since that's the field the daemon's subagent guard
