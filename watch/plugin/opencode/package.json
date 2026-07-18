@@ -1,0 +1,23 @@
+{
+  "name": "cenci-watch-opencode",
+  "version": "0.7.3",
+  "description": "cenci attention layer: send OpenCode lifecycle events to the shared cenci daemon.",
+  "author": {
+    "name": "Matteo Bortolazzo",
+    "url": "https://github.com/matteobortolazzo"
+  },
+  "homepage": "https://github.com/matteobortolazzo/cenci/tree/main/watch",
+  "repository": "https://github.com/matteobortolazzo/cenci",
+  "license": "MIT",
+  "keywords": [
+    "opencode",
+    "tmux",
+    "status",
+    "waybar"
+  ],
+  "main": "./plugin.ts",
+  "type": "module",
+  "devDependencies": {
+    "@opencode-ai/plugin": "^0.16.0"
+  }
+}

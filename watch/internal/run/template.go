@@ -58,6 +58,16 @@ func builtinConfig() FileConfig {
 	codexWF := func(wf string) WorkflowTemplate {
 		return WorkflowTemplate{Args: []string{"{codex_stage}$cenci:" + wf + " {ticket}"}}
 	}
+	// OpenCode shares Claude's "/cenci:<workflow>" skill-invocation format
+	// (unlike Codex's "$cenci:" convention). Per ticket #488 Q&A, dispatch is
+	// TUI + --auto in a tmux window (never "opencode run ..."), so the prompt
+	// travels via the top-level --prompt flag rather than a "--" argument. No
+	// SandboxCommand is configured yet: sandbox-launcher wiring for opencode is
+	// deferred to #490, so BuildCommand falls back to the bare host command
+	// even when sandbox=true.
+	openCodeWF := func(wf string) WorkflowTemplate {
+		return WorkflowTemplate{Args: []string{"--auto", "--prompt", "/cenci:" + wf + " {ticket}"}}
+	}
 	return FileConfig{
 		DefaultAgent: "claude",
 		Agents: map[string]AgentConfig{
@@ -83,6 +93,18 @@ func builtinConfig() FileConfig {
 					"review": codexWF("review"), "address-review": codexWF("address-review"),
 					"refactor": codexWF("refactor"), "sync": codexWF("sync"),
 					"garden": codexWF("garden"), "babysit": codexWF("babysit"), "babysit-attention": codexWF("babysit-attention"), "ci-repair": codexWF("ci-repair"),
+				},
+			},
+			"opencode": {
+				Command: "opencode",
+				Workflows: map[string]WorkflowTemplate{
+					"refine":            openCodeWF("refine"),
+					"design":            openCodeWF("design"),
+					"implement":         openCodeWF("implement"),
+					"address-review":    openCodeWF("address-review"),
+					"babysit":           openCodeWF("babysit"),
+					"babysit-attention": openCodeWF("babysit-attention"),
+					"ci-repair":         openCodeWF("ci-repair"),
 				},
 			},
 		},

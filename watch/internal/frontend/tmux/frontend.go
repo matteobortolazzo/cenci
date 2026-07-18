@@ -326,14 +326,20 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 	// while we still think it's Running. Also restore Codex windows whose agent
 	// process exited without a SessionEnd hook.
 	//
-	// The exit restore is Codex-only (#432): Codex documents no SessionEnd hook,
-	// so a pane whose current command no longer reads as codex is our only exit
-	// signal. Claude Code *does* fire SessionEnd (handled in daemon/event.go) and
-	// pane disappearance is covered by Phase 2 above, so a finished Claude
-	// session must not be swept here — its pane_current_command legitimately
-	// differs from "claude" (npm/node shim reports "node"; sandbox lookups fail),
-	// which would otherwise silently untrack a just-done session (regression from
-	// #418 tagging Claude events with -agent claude).
+	// The exit restore is Codex/OpenCode-only (#432, #488): neither documents a
+	// SessionEnd hook, so a pane whose current command no longer reads as that
+	// agent is our only exit signal. Claude Code *does* fire SessionEnd (handled
+	// in daemon/event.go) and pane disappearance is covered by Phase 2 above, so
+	// a finished Claude session must not be swept here — its pane_current_command
+	// legitimately differs from "claude" (npm/node shim reports "node"; sandbox
+	// lookups fail), which would otherwise silently untrack a just-done session
+	// (regression from #418 tagging Claude events with -agent claude).
+	//
+	// OpenCode's own JS/Bun runtime can transiently report "node"/"bun" instead
+	// of "opencode" while still alive; inferAgent aliases those back to
+	// "opencode" (unlike Codex, which has no such alias list), so
+	// agentCommandMatches naturally treats them as "still running" here and only
+	// an unambiguous shell revert triggers the restore below.
 	paneByID := make(map[string]*tmuxc.PaneInfo, len(panes))
 	for i := range panes {
 		paneByID[panes[i].PaneID] = &panes[i]
@@ -343,7 +349,7 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 		if !ok {
 			continue
 		}
-		if ws.Agent == "codex" && ws.Status != detect.StatusRunning && ws.Status != detect.StatusNeedInput && !agentCommandMatches(ws.Agent, p.PaneCurrentCmd) {
+		if (ws.Agent == "codex" || ws.Agent == "opencode") && ws.Status != detect.StatusRunning && ws.Status != detect.StatusNeedInput && !agentCommandMatches(ws.Agent, p.PaneCurrentCmd) {
 			if f.cfg.Verbose {
 				log.Printf("sweep: pane %s no longer running %s (current command %q), restoring window %s", ws.PaneID, ws.Agent, p.PaneCurrentCmd, wt)
 			}

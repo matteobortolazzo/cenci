@@ -185,6 +185,79 @@ func TestRunPrependsDir(t *testing.T) {
 	}
 }
 
+// TestRunOpenCodeHostCommandNoSandboxCommandConfigured is the Run()-level
+// analog of TestOpenCodeSandboxWiringOutOfScope: dispatching through the
+// public Run() entry point with --agent opencode (and no --no-sandbox) must
+// still spawn the bare "opencode" host command, since no sandboxCommand is
+// configured for opencode yet (#490 owns that wiring).
+func TestRunOpenCodeHostCommandNoSandboxCommandConfigured(t *testing.T) {
+	m := &mockCtrl{session: "work"}
+	opts := noConfigOpts(t)
+	opts.Agent, opts.Workflow, opts.Ticket = "opencode", "implement", "40"
+
+	if err := Run(opts, m); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(m.windows) != 1 {
+		t.Fatalf("expected 1 NewWindow, got %d", len(m.windows))
+	}
+	cmd := m.windows[0].cmd
+	if strings.Contains(cmd, "cenci open") {
+		t.Errorf("opencode has no sandboxCommand configured yet (#490): %q", cmd)
+	}
+	if !strings.Contains(cmd, "opencode") || !strings.Contains(cmd, "--auto") || !strings.Contains(cmd, "/cenci:implement 40") {
+		t.Errorf("command = %q, want opencode launcher with --auto and the implement prompt", cmd)
+	}
+}
+
+// TestRunOpenCodeDryRunPrintsResolvedCommand mirrors
+// TestRunDryRunPrintsAndDoesNotSpawn for the opencode agent: dry-run must be
+// deterministic and never touch tmux state.
+func TestRunOpenCodeDryRunPrintsResolvedCommand(t *testing.T) {
+	m := &mockCtrl{session: "work"}
+	var buf bytes.Buffer
+	opts := noConfigOpts(t)
+	opts.Agent, opts.Workflow, opts.Ticket = "opencode", "implement", "40"
+	opts.DryRun = true
+	opts.Out = &buf
+
+	if err := Run(opts, m); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.windows) != 0 {
+		t.Errorf("dry-run must not spawn, got %+v", m.windows)
+	}
+	out := buf.String()
+	for _, want := range []string{"work", "40-implement", "/cenci:implement 40", "--auto"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("dry-run output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestRunOpenCodeQuotesPromptWithSpecialCharacters guards shell-safety: a
+// ticket carrying spaces/quotes must reach the spawned command as a single,
+// safely-quoted shell word (shellQuote already handles this generically; this
+// pins the behavior for opencode's --prompt argument specifically).
+func TestRunOpenCodeQuotesPromptWithSpecialCharacters(t *testing.T) {
+	m := &mockCtrl{session: "work"}
+	opts := noConfigOpts(t)
+	opts.Agent, opts.Workflow = "opencode", "implement"
+	opts.Ticket = `42 fix the "quoting" bug`
+
+	if err := Run(opts, m); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(m.windows) != 1 {
+		t.Fatalf("expected 1 NewWindow, got %d", len(m.windows))
+	}
+	cmd := m.windows[0].cmd
+	wantQuoted := `'/cenci:implement 42 fix the "quoting" bug'`
+	if !strings.Contains(cmd, wantQuoted) {
+		t.Errorf("command = %q, want prompt single-quoted as %q", cmd, wantQuoted)
+	}
+}
+
 func TestRunRefusesGroupedSession(t *testing.T) {
 	m := &mockCtrl{session: "work", grouped: true}
 	opts := noConfigOpts(t)

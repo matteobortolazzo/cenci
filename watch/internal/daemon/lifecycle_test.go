@@ -290,6 +290,243 @@ func TestDaemon_CodexKeepsDispatchedWindowName(t *testing.T) {
 	}
 }
 
+// --- OpenCode sweep/lifecycle tests (#488) ---
+//
+// OpenCode's mapped hook event stream (session/prompt/permission/tool/stop)
+// drives status through the same agent-neutral daemon/event.go logic already
+// exercised above for Claude/Codex — no daemon code changes are required for
+// that path (see watch/internal/daemon/event.go: mapEventToStatusRaw and the
+// AgentID subagent-suppression guard are agent-neutral already). What is new
+// for #488 is the OpenCode analog of the Codex exit-restore/liveness sweep in
+// frontend.go, which does not exist yet.
+
+// TestDaemon_OpenCodeFullLifecycle exercises the mapped OpenCode event stream
+// end to end (session/prompt/permission/tool/stop) through the existing
+// agent-neutral daemon core — this proves the daemon needs no changes to
+// drive OpenCode's running/need-input/done states, matching the architecture
+// note in the #488 plan.
+func TestDaemon_OpenCodeFullLifecycle(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "zsh", PaneIndex: "0",
+				PaneCurrentCmd: "opencode", PaneTitle: "⠋ writing tests", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "oc-sess", Agent: "opencode", TmuxPane: "%0"})
+	if got := d.sessions["oc-sess"].Status; got != detect.StatusIdle {
+		t.Fatalf("after SessionStart: expected idle, got %v", got)
+	}
+	if got := d.sessions["oc-sess"].Agent; got != "opencode" {
+		t.Fatalf("expected sess.Agent=opencode, got %q", got)
+	}
+
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "oc-sess", Agent: "opencode", TmuxPane: "%0"})
+	if got := d.sessions["oc-sess"].Status; got != detect.StatusRunning {
+		t.Fatalf("after UserPromptSubmit: expected running, got %v", got)
+	}
+
+	d.handleEvent(ipc.HookEvent{EventType: "PermissionRequest", SessionID: "oc-sess", Agent: "opencode", TmuxPane: "%0"})
+	if got := d.sessions["oc-sess"].Status; got != detect.StatusNeedInput {
+		t.Fatalf("after PermissionRequest: expected need-input, got %v", got)
+	}
+
+	d.handleEvent(ipc.HookEvent{EventType: "PostToolUse", SessionID: "oc-sess", Agent: "opencode", TmuxPane: "%0"})
+	if got := d.sessions["oc-sess"].Status; got != detect.StatusRunning {
+		t.Fatalf("after PostToolUse: expected running, got %v", got)
+	}
+
+	mc.Panes[0].PaneTitle = "✳ writing tests"
+	d.handleEvent(ipc.HookEvent{EventType: "Stop", SessionID: "oc-sess", Agent: "opencode", TmuxPane: "%0"})
+	if got := d.sessions["oc-sess"].Status; got != detect.StatusDone {
+		t.Fatalf("after Stop: expected done, got %v", got)
+	}
+
+	mc.Renames = nil
+	mc.WindowOpts = nil
+	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "oc-sess", TmuxPane: "%0"})
+	if len(mc.Renames) != 1 || mc.Renames[0].Name != "zsh" {
+		t.Errorf("after SessionEnd: expected restore to 'zsh', got %v", mc.Renames)
+	}
+	if len(d.sessions) != 0 {
+		t.Errorf("expected sessions map empty after SessionEnd, got %d", len(d.sessions))
+	}
+}
+
+// TestDaemon_OpenCodeSubagentStopDoesNotFlipMainStatus is the OpenCode analog
+// of TestDaemon_SubagentStopDoesNotFlipMainStatus (#277): a subagent-scoped
+// Stop (same session_id, non-empty AgentID) must not complete the main
+// OpenCode session.
+func TestDaemon_OpenCodeSubagentStopDoesNotFlipMainStatus(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "zsh", PaneIndex: "0",
+				PaneCurrentCmd: "opencode", PaneTitle: "✳ delegating work", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "oc-sess", Agent: "opencode", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "oc-sess", Agent: "opencode", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "PreToolUse", SessionID: "oc-sess", Agent: "opencode", TmuxPane: "%0", ToolName: "Task"})
+
+	if got := d.sessions["oc-sess"].Status; got != detect.StatusRunning {
+		t.Fatalf("precondition: expected StatusRunning after PreToolUse(Task), got %v", got)
+	}
+
+	// Subagent's own Stop event: same session, scoped to the subagent.
+	d.handleEvent(ipc.HookEvent{EventType: "Stop", SessionID: "oc-sess", Agent: "opencode", TmuxPane: "%0", AgentID: "sub1"})
+	if got := d.sessions["oc-sess"].Status; got != detect.StatusRunning {
+		t.Errorf("expected StatusRunning after subagent Stop (AgentID set), got %v — main OpenCode session incorrectly flipped to done mid-delegation", got)
+	}
+
+	// Main agent's own Stop event (no AgentID) must still flip to done.
+	d.handleEvent(ipc.HookEvent{EventType: "Stop", SessionID: "oc-sess", Agent: "opencode", TmuxPane: "%0"})
+	if got := d.sessions["oc-sess"].Status; got != detect.StatusDone {
+		t.Errorf("expected StatusDone after main-agent Stop, got %v", got)
+	}
+}
+
+// TestDaemon_OpenCodeLifecycleWithoutSessionEndRestoresAfterExit is the
+// OpenCode analog of TestDaemon_CodexLifecycleWithoutSessionEndRestoresAfterExit
+// (#488): frontend.go's Codex-only exit-restore/liveness sweep does not yet
+// have an OpenCode branch, so a finished OpenCode session whose pane reverts
+// to the user's shell (an unambiguous exit signal — never mapped to
+// "opencode" by inferAgent) is never restored today. This is the primary red
+// test driving the frontend.go sweep addition.
+func TestDaemon_OpenCodeLifecycleWithoutSessionEndRestoresAfterExit(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "zsh", PaneIndex: "0",
+				PaneCurrentCmd: "opencode", PaneTitle: "cenci", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "oc-sess", Agent: "opencode", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "oc-sess", Agent: "opencode", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "Stop", SessionID: "oc-sess", Agent: "opencode", TmuxPane: "%0"})
+	if got := d.sessions["oc-sess"].Status; got != detect.StatusDone {
+		t.Fatalf("precondition: expected done after Stop, got %v", got)
+	}
+
+	// OpenCode process exits back to the user's shell — an unambiguous signal
+	// (unlike "node"/"bun", never aliased to "opencode" by inferAgent).
+	mc.Panes[0].PaneCurrentCmd = "zsh"
+	mc.Renames = nil
+	mc.WindowOpts = nil
+
+	d.runSweep()
+
+	if len(mc.Renames) != 1 || mc.Renames[0].Name != "zsh" {
+		t.Fatalf("expected restore to 'zsh' after OpenCode exit, got %v", mc.Renames)
+	}
+	if len(d.sessions) != 0 {
+		t.Errorf("expected sessions map empty after OpenCode exit cleanup, got %d entries", len(d.sessions))
+	}
+	if d.frontend.WindowInfo("oc-sess") != nil {
+		t.Error("expected window no longer tracked after OpenCode exit cleanup")
+	}
+}
+
+// TestDaemon_OpenCodeSweepDoesNotUntrackOnAmbiguousRuntimeShimCommand is the
+// OpenCode analog of TestDaemon_ClaudeDoneSurvivesSweepWhenPaneCommandDiffers:
+// OpenCode's CLI runs atop a JS/Bun runtime, so a tmux pane may transiently
+// report "node" or "bun" instead of "opencode" even while the session is
+// still alive. The sweep must never treat that ambiguous signal as an exit —
+// this pins the "never untrack on ambiguous/unrecognized command" guard from
+// the #488 plan (mirroring the existing Claude npm/node-shim guard). Today
+// this already holds trivially (no OpenCode sweep branch exists yet); once
+// frontend.go's OpenCode analog is added, this guards it from regressing to
+// Codex's broader "any mismatch restores" behavior.
+func TestDaemon_OpenCodeSweepDoesNotUntrackOnAmbiguousRuntimeShimCommand(t *testing.T) {
+	for _, shimCmd := range []string{"node", "bun"} {
+		t.Run(shimCmd, func(t *testing.T) {
+			mc := &tmuxtest.MockClient{
+				Panes: []tmux.PaneInfo{
+					{SessionName: "main", WindowIndex: "0", WindowName: "zsh", PaneIndex: "0",
+						PaneCurrentCmd: "opencode", PaneTitle: "cenci", PaneID: "%0"},
+				},
+			}
+			d := newTestDaemon(mc)
+			d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "oc-sess", Agent: "opencode", TmuxPane: "%0"})
+			d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "oc-sess", Agent: "opencode", TmuxPane: "%0"})
+			d.handleEvent(ipc.HookEvent{EventType: "Stop", SessionID: "oc-sess", Agent: "opencode", TmuxPane: "%0"})
+
+			mc.Panes[0].PaneCurrentCmd = shimCmd
+			mc.Renames = nil
+
+			d.runSweep()
+
+			if _, ok := d.sessions["oc-sess"]; !ok {
+				t.Fatalf("expected OpenCode session to survive sweep on ambiguous command %q, but it was removed", shimCmd)
+			}
+			if d.frontend.WindowInfo("oc-sess") == nil {
+				t.Errorf("expected window to remain tracked after sweep on ambiguous command %q", shimCmd)
+			}
+			if name, ok := lastRename(mc.Renames, "main:0"); ok && name == "zsh" {
+				t.Errorf("expected no restore to original name 'zsh' after sweep on ambiguous command %q, got rename to %q", shimCmd, name)
+			}
+		})
+	}
+}
+
+// TestDaemon_MixedAgentSweepPreservesPerAgentSemantics is the regression
+// guard the #488 plan calls for: Claude, Codex, and OpenCode sessions swept
+// together in the same pass must each keep their own existing semantics —
+// adding the OpenCode sweep branch must not perturb Claude's SessionEnd-only
+// cleanup or Codex's broader "any mismatch restores" exit signal.
+func TestDaemon_MixedAgentSweepPreservesPerAgentSemantics(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "zsh", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "⠋ writing tests", PaneID: "%0"},
+			{SessionName: "main", WindowIndex: "1", WindowName: "zsh", PaneIndex: "0",
+				PaneCurrentCmd: "codex", PaneTitle: "cenci", PaneID: "%1"},
+			{SessionName: "main", WindowIndex: "2", WindowName: "zsh", PaneIndex: "0",
+				PaneCurrentCmd: "opencode", PaneTitle: "cenci", PaneID: "%2"},
+		},
+	}
+	d := newTestDaemon(mc)
+
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "claude-sess", Agent: "claude", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "claude-sess", Agent: "claude", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "Stop", SessionID: "claude-sess", Agent: "claude", TmuxPane: "%0"})
+
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%1"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%1"})
+	d.handleEvent(ipc.HookEvent{EventType: "Stop", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%1"})
+
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "oc-sess", Agent: "opencode", TmuxPane: "%2"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "oc-sess", Agent: "opencode", TmuxPane: "%2"})
+	d.handleEvent(ipc.HookEvent{EventType: "Stop", SessionID: "oc-sess", Agent: "opencode", TmuxPane: "%2"})
+
+	// Claude's pane reads "node" (npm shim, ambiguous — must survive: Claude
+	// relies on SessionEnd, not this sweep, per #432).
+	mc.Panes[0].PaneCurrentCmd = "node"
+	// Codex's pane reverts to its shell — Codex's existing "any mismatch"
+	// exit signal must still restore it.
+	mc.Panes[1].PaneCurrentCmd = "zsh"
+	// OpenCode's pane reverts to its shell — unambiguous exit signal, must
+	// restore (this is the new #488 behavior).
+	mc.Panes[2].PaneCurrentCmd = "zsh"
+
+	d.runSweep()
+
+	if _, ok := d.sessions["claude-sess"]; !ok {
+		t.Error("expected Claude session to survive sweep (node shim is ambiguous, not an exit signal)")
+	}
+	if _, ok := d.sessions["codex-sess"]; ok {
+		t.Error("expected Codex session to be swept away on shell revert (unchanged existing behavior)")
+	}
+	if _, ok := d.sessions["oc-sess"]; ok {
+		t.Error("expected OpenCode session to be swept away on shell revert (new #488 behavior)")
+	}
+}
+
 func TestDaemon_DaemonRestartRediscoversSession(t *testing.T) {
 	mc := &tmuxtest.MockClient{
 		Panes: []tmux.PaneInfo{

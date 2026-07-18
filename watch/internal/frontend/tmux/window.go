@@ -119,6 +119,8 @@ func inferAgent(cmd string) string {
 		return "claude"
 	case "codex", "codex-cli":
 		return "codex"
+	case "opencode", "bun", "node":
+		return "opencode"
 	default:
 		return ""
 	}

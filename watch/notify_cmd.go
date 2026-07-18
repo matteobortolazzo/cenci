@@ -16,7 +16,7 @@ import (
 func runNotify(args []string) {
 	fs := flag.NewFlagSet("notify", flag.ExitOnError)
 	socketPath := fs.String("event-socket", ipc.DefaultEventSocketPath(), "event socket path")
-	agent := fs.String("agent", "", "agent name (claude or codex)")
+	agent := fs.String("agent", "", "agent name (claude, codex, or opencode)")
 	_ = fs.Parse(args)
 
 	// Read hook JSON from stdin.
@@ -61,7 +61,7 @@ func runNotify(args []string) {
 		AgentID:          hookInput.AgentID,
 		Timestamp:        time.Now().UTC().Format(time.RFC3339),
 	}
-	if event.Agent == "codex" && event.EventType == "UserPromptSubmit" {
+	if (event.Agent == "codex" || event.Agent == "opencode") && event.EventType == "UserPromptSubmit" {
 		event.TaskName = frontend.PromptTaskName(hookInput.Prompt)
 	}
 

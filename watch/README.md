@@ -230,6 +230,13 @@ Only the built-in Claude templates ship today; Codex and opencode require a
 `config.json` entry. Until one is configured, `--agent codex` exits with a helpful "no
 launch template" error.
 
+**OpenCode:** this adapter is tested against the latest stable OpenCode release
+as of this writing; no specific minimum version is enforced yet. Model/provider
+resolution follows the same override chain as the `--model` flag above: an
+explicit `--model` flag on the command line overrides the agent's `model` in
+`config.json`, which in turn overrides whatever provider/model OpenCode itself
+would default to when neither is set.
+
 ## Auto-dispatch (`cenci dispatch`)
 
 Once planning is human-gated and a planned plan shows up on the board as the
@@ -467,6 +474,16 @@ modes, chosen per agent by whether `agentLimits` is configured:
   directly as the remaining budget, so `0` pins the agent to "budget exhausted" and any
   positive value lets it dispatch. An agent with neither a limit nor a floor is
   unlimited.
+
+**OpenCode:** no `TokenReader` is wired for OpenCode yet — `buildBudgetProvider`
+only builds one for `claude` and `codex`. So once any agent's `agentLimits` is
+configured, OpenCode falls into the no-reader path: it uses its
+`agentBudgetFloors.opencode` value if set, otherwise it is always `Unlimited`.
+Real usage-based accounting for OpenCode is future work. The same gap means
+OpenCode is always omitted from the per-agent headroom map, so `cenci
+widget-json`'s headroom percentage (see [Budget headroom](#budget-headroom))
+never includes it — OpenCode shows no headroom until a provider-specific
+reader is added in a future ticket.
 
 ### Failure reconciliation
 

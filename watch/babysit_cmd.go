@@ -35,13 +35,13 @@ func runBabysit(args []string) {
 	once := fs.Bool("once", false, "run one tick in the foreground")
 	stateDir := fs.String("state-dir", "", "state directory (default: $XDG_STATE_HOME/cenci/babysit)")
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-		fmt.Fprintln(os.Stderr, "cenci babysit: usage: cenci babysit <pr> --agent <claude|codex> [--interval 15m] [--once]")
+		fmt.Fprintln(os.Stderr, "cenci babysit: usage: cenci babysit <pr> --agent <claude|codex|opencode> [--interval 15m] [--once]")
 		os.Exit(2)
 	}
 	pr := strings.TrimPrefix(args[0], "#")
 	_ = fs.Parse(args[1:])
 	if len(fs.Args()) != 0 || (*agent != "claude" && *agent != "codex") {
-		fmt.Fprintln(os.Stderr, "cenci babysit: usage: cenci babysit <pr> --agent <claude|codex> [--interval 15m] [--once]")
+		fmt.Fprintln(os.Stderr, "cenci babysit: usage: cenci babysit <pr> --agent <claude|codex|opencode> [--interval 15m] [--once]")
 		os.Exit(2)
 	}
 	opts := babysit.Options{PR: pr, Agent: *agent, Interval: *interval, Once: *once, StateDir: *stateDir}

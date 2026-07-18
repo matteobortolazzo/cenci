@@ -78,6 +78,38 @@ func TestRunOnceEmptyPassDoesNotRequireGitHubIdentity(t *testing.T) {
 	}
 }
 
+// TestBuildBudgetProviderOpenCodeFallsBackToUnlimited is a #488
+// regression/confirmation test: buildBudgetProvider's per-agent TokenReader
+// switch has no "opencode" case (and none is added by this ticket — real
+// per-agent usage accounting for OpenCode is future work), so an operator who
+// configures agentLimits for "opencode" gets a Budget with no reader wired
+// in. UsageProvider.Budget already degrades that to Unlimited (absent a
+// floor), so this is expected to pass without any dispatch.go changes — it
+// pins "missing budget accounting degrades honestly rather than blocking
+// dispatch" (#488 acceptance criteria) specifically for opencode.
+func TestBuildBudgetProviderOpenCodeFallsBackToUnlimited(t *testing.T) {
+	cfg := testConfig()
+	cfg.AgentLimits = map[string]AgentLimit{
+		"opencode": {FiveHourTokens: 10000, WeeklyTokens: 100000},
+	}
+
+	provider := buildBudgetProvider(cfg, time.Now())
+	b := provider.Budget("opencode")
+	if !b.Unlimited {
+		t.Errorf("expected opencode budget Unlimited (no TokenReader wired for it), got %+v", b)
+	}
+
+	// Headroom() must omit opencode entirely (no reader configured), matching
+	// UsageProvider's documented "omitted, not reported as unlimited" contract.
+	up, ok := provider.(*UsageProvider)
+	if !ok {
+		t.Fatalf("buildBudgetProvider with non-empty AgentLimits must return *UsageProvider, got %T", provider)
+	}
+	if _, ok := up.Headroom()["opencode"]; ok {
+		t.Error("expected opencode omitted from Headroom() (no reader configured)")
+	}
+}
+
 func TestApplyDispatchClaimsWorkingLabelAfterSpawn(t *testing.T) {
 	stubRunFn(t, func(run.Opts, run.Controller) error { return nil })
 
