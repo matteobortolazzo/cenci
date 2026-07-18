@@ -290,6 +290,48 @@ else
     fail "resolver missing fails closed: stderr should contain BLOCKED"
 fi
 
+# Case: a symlink loop leaf directly under the .worktrees/ allowlist must
+# still be blocked -- an unresolvable ELOOP node is a fail-closed signal
+# that must win over the allowlist substring match, not be walked past.
+echo "case: symlink loop leaf under .worktrees/ allowlist is blocked"
+mkdir -p "${HARDEN_REPO}/.worktrees/loop"
+ln -s b "${HARDEN_REPO}/.worktrees/loop/a"
+ln -s a "${HARDEN_REPO}/.worktrees/loop/b"
+run_guard "${HARDEN_REPO}" "{\"tool_input\":{\"file_path\":\"${HARDEN_REPO}/.worktrees/loop/a\"}}"
+assert_exit "symlink loop leaf under .worktrees/" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "symlink loop leaf under .worktrees/: stderr should contain BLOCKED"
+fi
+
+# Case: a symlink loop as an intermediate ancestor (not the leaf) under the
+# .worktrees/ allowlist, with a not-yet-existing tail below it, must also be
+# blocked -- proves the fix isn't leaf-only.
+echo "case: symlink loop as an intermediate ancestor under .worktrees/ allowlist is blocked"
+mkdir -p "${HARDEN_REPO}/.worktrees/loop2"
+ln -s b "${HARDEN_REPO}/.worktrees/loop2/a"
+ln -s a "${HARDEN_REPO}/.worktrees/loop2/b"
+run_guard "${HARDEN_REPO}" "{\"tool_input\":{\"file_path\":\"${HARDEN_REPO}/.worktrees/loop2/a/newsub/new.txt\"}}"
+assert_exit "symlink loop intermediate under .worktrees/" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "symlink loop intermediate under .worktrees/: stderr should contain BLOCKED"
+fi
+
+# Case: a dangling symlink leaf under the .worktrees/ allowlist (real
+# symlink node, unresolvable target) must be blocked.
+echo "case: dangling symlink leaf under .worktrees/ allowlist is blocked"
+ln -s "${TEST_ROOT}/nonexistent-target-worktree" "${HARDEN_REPO}/.worktrees/dangling-link"
+run_guard "${HARDEN_REPO}" "{\"tool_input\":{\"file_path\":\"${HARDEN_REPO}/.worktrees/dangling-link\"}}"
+assert_exit "dangling symlink leaf under .worktrees/" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "dangling symlink leaf under .worktrees/: stderr should contain BLOCKED"
+fi
+
 # ── Summary ──────────────────────────────────────────────────────────
 echo
 echo "passed: ${PASSES}, failed: ${FAILURES}"

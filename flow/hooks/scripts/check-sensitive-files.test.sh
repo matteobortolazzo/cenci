@@ -211,35 +211,54 @@ run_check "{\"tool_input\":{\"file_path\":\"\",\"filePath\":\"${TEST_ROOT}/fallb
 assert_exit "empty file_path falls back to filePath" 2
 assert_blocked_stderr "empty file_path falls back to filePath"
 
-# ── Genuine symlink loop: resolve_path is never reached (investigated) ──
-# Investigated via `sh -x` trace: a two-node ELOOP cycle (a -> b, b -> a)
-# makes BOTH `[ -e path ]` and `[ -d path ]` report false for any path that
-# requires traversing the cycle -- the exact same signal this script already
-# uses to decide "does not exist yet, walk up to the nearest real ancestor."
-# So the parent-anchored ancestor walk backs off past the loop node(s) and
-# calls resolve_path only on the nearest REAL, non-looping ancestor (which
-# always exists -- the walk is guaranteed to terminate at "/"); the
-# unresolved loop segment is carried forward only as a literal TAIL string
-# (lexical_collapse never touches the filesystem). resolve_path is therefore
-# never actually invoked on the unresolvable component for a pure ELOOP
-# input -- confirmed empirically, not just by reading the code. Neither the
-# "-e-true-but-resolve-fails" branch nor the "ancestor-walk resolve failure"
-# branch is reachable this way: both would require resolve_path to run on a
-# string that -e/-d already evaluated, and ELOOP makes all three (-e, -d,
-# resolve_path) fail identically on that string, so it never gets there.
-# Net effect: a bare symlink loop with a benign literal name degrades to
-# raw-name-only matching and is ALLOWED (exit 0), not blocked. This is inert
-# in practice -- an actual Write/Edit through a genuine symlink loop
-# independently fails at the OS level (ELOOP) regardless of this hook's
-# verdict, so no exploitable gap results. This test locks in that documented,
-# verified behavior rather than a fabricated fail-closed assertion the
-# current parent-anchored design cannot actually produce for this input.
-echo "case: a genuine symlink loop (benign literal name) is allowed -- resolve_path is never reached"
+# ── Genuine symlink loop: unresolvable ancestor node must fail closed ──
+# A two-node ELOOP cycle (a -> b, b -> a) makes BOTH `[ -e path ]` and
+# `[ -d path ]` report false for any path that requires traversing the
+# cycle -- the exact same signal this script uses to decide "does not exist
+# yet, walk up to the nearest real ancestor." Without hardening, the
+# parent-anchored ancestor walk backs off past the loop node(s) entirely and
+# calls resolve_path only on the nearest REAL, non-looping ancestor,
+# carrying the unresolved loop segment forward as a literal TAIL string --
+# degrading to raw-name-only matching and silently ALLOWING the write. A
+# hardened ancestor walk must recognize that a path component which is a
+# real symlink node (`[ -L ]` true) but whose target cannot be resolved
+# (`[ -e ]` false -- ELOOP or a dangling target) is itself a fail-closed
+# signal, and BLOCK rather than walk past it. This is defense-in-depth (an
+# actual Write/Edit through a genuine symlink loop independently fails at
+# the OS level regardless of this hook's verdict), but the hook is meant to
+# fail closed rather than silently degrade to a weaker check.
+echo "case: a genuine symlink loop (benign literal name) is blocked (fail-closed ancestor walk)"
 mkdir -p "${TEST_ROOT}/loop"
 ln -s b "${TEST_ROOT}/loop/a"
 ln -s a "${TEST_ROOT}/loop/b"
 run_check "{\"tool_input\":{\"file_path\":\"${TEST_ROOT}/loop/a\"}}"
-assert_exit "symlink loop (benign literal name)" 0
+assert_exit "symlink loop (benign literal name)" 2
+assert_blocked_stderr "symlink loop (benign literal name)"
+
+# ── Genuine symlink loop as an intermediate ancestor (not the leaf) ──
+# The unresolvable loop node (loop-mid/a) is not the final path component --
+# there is a not-yet-existing tail (newsub/new.txt) below it. Proves the fix
+# isn't leaf-only: the ancestor walk must detect the unresolvable loop node
+# even when it is an intermediate ancestor of a longer not-yet-existing
+# path, not just the terminal component.
+echo "case: an unresolvable symlink loop as an intermediate ancestor (not the leaf) is blocked"
+mkdir -p "${TEST_ROOT}/loop-mid"
+ln -s b "${TEST_ROOT}/loop-mid/a"
+ln -s a "${TEST_ROOT}/loop-mid/b"
+run_check "{\"tool_input\":{\"file_path\":\"${TEST_ROOT}/loop-mid/a/newsub/new.txt\"}}"
+assert_exit "symlink loop as intermediate ancestor" 2
+assert_blocked_stderr "symlink loop as intermediate ancestor"
+
+# ── Dangling symlink as the final path component ──
+# dangling-link is a real symlink node (`[ -L ]` true) whose target does not
+# exist (`[ -e ]` false). Uses a benign literal name so a raw-string
+# sensitive-name match would not fire on its own -- only the fail-closed
+# ancestor-walk guard should cause the block here.
+echo "case: a dangling symlink as the final path component is blocked"
+ln -s "${TEST_ROOT}/nonexistent-target" "${TEST_ROOT}/dangling-link"
+run_check "{\"tool_input\":{\"file_path\":\"${TEST_ROOT}/dangling-link\"}}"
+assert_exit "dangling symlink final component" 2
+assert_blocked_stderr "dangling symlink final component"
 
 # ── Lookalike file_path substring elsewhere in the JSON must be ignored ──
 # The true tool_input.file_path is genuine; a sibling field (old_string, as
