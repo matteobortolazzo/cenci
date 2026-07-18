@@ -2,8 +2,9 @@
 
 **Let coding agents run longer. Keep the important decisions.**
 
-[![Claude Code](https://img.shields.io/badge/Claude_Code-supported-d97757?style=flat-square)](#claude-code-and-codex)
+[![Claude Code](https://img.shields.io/badge/Claude_Code-supported-d97757?style=flat-square)](#claude-code-codex-and-opencode)
 [![Codex](https://img.shields.io/badge/Codex-supported-10a37f?style=flat-square)](flow/docs/codex.md)
+[![OpenCode](https://img.shields.io/badge/OpenCode-supported-fab040?style=flat-square)](flow/docs/opencode.md)
 [![Platforms](https://img.shields.io/badge/Linux_%C2%B7_macOS_%C2%B7_WSL2-supported-64748b?style=flat-square)](docs/getting-started.md)
 [![License](https://img.shields.io/badge/license-MIT-8b5cf6?style=flat-square)](LICENSE)
 
@@ -38,7 +39,9 @@ theme is user-provided.
 ## Quickstart
 
 Requirements: Linux, macOS, or WSL2; git; curl; Docker or Podman; and Claude Code,
-Codex, or both.
+Codex, or both. [OpenCode](flow/docs/opencode.md) is supported as an additional,
+opt-in agent — it layers on top of an existing Claude Code or Codex install rather
+than standing alone.
 
 **1. Install and verify.**
 
@@ -115,19 +118,21 @@ approved `Planned` ticket by policy. No board or LLM is required for the pickup 
 [Follow the board-orchestration recipe →](docs/orchestration.md) ·
 [See the deterministic demo recipe →](demo.tape)
 
-## Claude Code and Codex
+## Claude Code, Codex, and OpenCode
 
 | Client | Ready today |
 |---|---|
 | **Claude Code** | Full gated workflow, sandbox isolation, live monitoring, optional design, and PR babysitting |
 | **Codex** | Sandbox isolation, live monitoring, portable conventions, and PR babysitting; native gated workflow in development |
+| **OpenCode** | Sandbox isolation, live monitoring, and portable engineering conventions via `--agent opencode`; opt-in during install and requires an existing Claude Code or Codex install; no native gated workflow, usage-budget tracking, or PR babysitting yet |
 
-Both clients can share one install, one repository, and one board. `cenci run` chooses
-an agent per invocation, while `cenci dispatch` can route tickets by `agent:<name>`
-label.
+All three clients can share one install, one repository, and one board. `cenci run`
+chooses an agent per invocation, while `cenci dispatch` can route tickets by
+`agent:<name>` label.
 
 [See current delivery status →](docs/roadmap.md) ·
-[Read the Codex implementation guide →](flow/docs/codex.md)
+[Read the Codex implementation guide →](flow/docs/codex.md) ·
+[Read the OpenCode implementation guide →](flow/docs/opencode.md)
 
 ## Learn more
 
@@ -141,6 +146,7 @@ label.
 | Check what is available or in development | [Roadmap](docs/roadmap.md) |
 | Contribute | [Contributing guide](CONTRIBUTING.md) |
 | Upgrade from agent-stack | [Migration guide](docs/migrating-to-cenci.md) |
+| Manually verify an OpenCode end-to-end run | [OpenCode smoke matrix](docs/opencode-smoke-matrix.md) |
 
 ## License
 

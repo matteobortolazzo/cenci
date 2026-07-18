@@ -23,6 +23,10 @@ Claude Code is required for the complete interactive ticket-to-PR workflow. A
 Codex-only installation still provides container isolation, monitoring, portable
 engineering conventions, and the [Codex implementation recipe](../flow/docs/codex.md).
 
+[OpenCode](https://opencode.ai) is an additional, opt-in agent layered on top of an
+existing Claude Code or Codex install — it is not a standalone option. See
+[OpenCode support](#opencode-support-additional-opt-in-agent) below.
+
 Optional features have separate dependencies:
 
 | Feature | Dependency |
@@ -117,6 +121,36 @@ For UI work, refinement can branch through a dedicated design ticket. Planning s
 an approved `.plans/` file and applies `Planned`; implementation or automated dispatch
 (`cenci dispatch`) picks it up and applies the transient `Working` state. PR creation
 applies `In Review`, and merge completion applies `Implemented`.
+
+## OpenCode support (additional, opt-in agent)
+
+The installer also detects [OpenCode](https://opencode.ai) and, when found, offers an
+opt-in integration on top of your existing Claude Code or Codex install — OpenCode is
+never a standalone option; `install.sh` still requires Claude Code, Codex, or both.
+
+When OpenCode is detected during install or update, you're asked:
+
+```text
+OpenCode detected — link cenci's skills and register its plugin?
+```
+
+Accepting symlinks cenci's portable convention skills into OpenCode's skills directory
+(see [flow's OpenCode support](../flow/docs/opencode.md)) and registers the cenci-watch
+OpenCode plugin (`watch/plugin/opencode`) in `opencode.json`, so OpenCode sessions report
+live status the same way Claude Code and Codex sessions do. `cenci uninstall` reverses
+both when it runs.
+
+`cenci doctor` reports, separately: whether the detected OpenCode is new enough to
+support this integration (the pinned minimum version and known limitations live in
+[cenci-watch's OpenCode adapter section](../watch/README.md#dispatching-workflows-cenci-run)),
+whether skills are linked and the plugin is registered, and whether a provider is
+authenticated. Provider auth is checked via either `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`
+in your environment or the presence of `opencode auth login`'s
+`~/.local/share/opencode/auth.json` — never a live API call.
+
+Once set up, launch OpenCode with `--agent opencode` (see
+[Choosing an agent](../sandbox/README.md#choosing-an-agent)); there is no one-token
+shortcut for it yet.
 
 ## Update
 
