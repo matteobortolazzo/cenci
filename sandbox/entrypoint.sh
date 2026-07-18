@@ -11,6 +11,13 @@ sudo sh -c 'grep -q "$(hostname)" /etc/hosts || echo "127.0.0.1 $(hostname)" >> 
 # exists under the 'dev' account: usermod/groupmod refuse to renumber an
 # account that has a running process, and entrypoint.sh itself used to run
 # as dev, which made every real remap fail. Starting as root sidesteps that.
+# entrypoint.sh is this image's literal ENTRYPOINT (no init wrapper baked in
+# — see Dockerfile.base), so a container started without `--init` (production
+# always passes it; ad-hoc/manual runs may not) makes this process PID 1 in
+# the container's PID namespace: its exit SIGKILLs every other process in
+# that namespace immediately, including a still-draining `tee` from the
+# boot-log redirect below. See flush_boot_log further down for how the remap
+# failure branches defend against that race.
 #
 # On a HOST_UID/HOST_GID mismatch, remap the account, chown the home volume
 # (and, only for a bounded per-repo mount, /workspace), then unconditionally
@@ -51,18 +58,54 @@ if [[ "$(id -u)" -eq 0 ]]; then
     # ad-hoc runs) boot without it.
     if [[ -n "${CENCI_AGENT_CLI:-}" || -d /opt/cenci-agent ]]; then
         CENCI_BOOT_LOG="/home/dev/.cenci-boot.log"
-        : > "${CENCI_BOOT_LOG}"
-        chmod 600 "${CENCI_BOOT_LOG}"
+        # Checked (unlike the original #495 landing): a silent failure here
+        # (disk pressure, unusual volume permissions) would otherwise leave
+        # the tee below writing into a file that was never truncated/created
+        # or never got the intended 600 mode, defeating the whole point of
+        # #495 — making startup failures diagnosable — with nothing to show
+        # for it. Warn now, on stderr, BEFORE `exec >` below redirects
+        # stderr through the tee: this line must reach `docker logs`
+        # directly, since if the file itself is the problem, the boot log
+        # can't be trusted to carry it.
+        : > "${CENCI_BOOT_LOG}" && chmod 600 "${CENCI_BOOT_LOG}" \
+            || echo "warning: boot-log setup failed at ${CENCI_BOOT_LOG} — startup diagnostics may be incomplete or world-readable" >&2
         # Exported (not just a local variable) so it survives the
         # `sudo --preserve-env -u dev` re-exec below (same --preserve-env
         # call that already carries CENCI_SANDBOX/OPENAI_API_KEY across).
-        # This both fixes the path for downstream use AND acts as the
-        # sentinel the dev-side block checks to avoid installing a second,
-        # duplicate tee.
+        # CENCI_BOOT_LOG_INSTALLED — not CENCI_BOOT_LOG itself — is the
+        # sentinel the dev-side block further down checks before installing
+        # its own fallback tee. CENCI_BOOT_LOG is just a path; nothing stops
+        # it being set externally (e.g. `docker run -e CENCI_BOOT_LOG=...`,
+        # though the Go launcher never does this today) for an unrelated
+        # reason, which would make the dev-side block wrongly skip
+        # installing a real tee while its EXIT trap stays armed.
         export CENCI_BOOT_LOG
+        export CENCI_BOOT_LOG_INSTALLED=1
         exec > >(tee -a "${CENCI_BOOT_LOG}") 2>&1
+        # Captured immediately after the process substitution above — bash
+        # sets $! to the backgrounded tee's PID here. flush_boot_log
+        # (defined below, used by the remap failure branches) waits on this
+        # before exiting, to avoid losing the failure line to the PID-1/
+        # SIGKILL race described above.
+        CENCI_TEE_PID=$!
         trap '[[ $? -eq 0 ]] || echo "entrypoint exited before completing startup (root setup)" > /home/dev/.cenci-startup-failed' EXIT
     fi
+
+    # Waits for the background `tee` above (when one was installed — i.e.
+    # CENCI_TEE_PID is set) to finish draining before letting an `exit`
+    # below proceed. See the PID-1/SIGKILL comment near the top of this
+    # block: when this script is the container's PID 1 (no `--init`), its
+    # exit reaps every other process in the namespace immediately, including
+    # a tee that hasn't yet read the failure line out of its pipe. Closing
+    # our own stdout/stderr first makes tee see EOF on its input and
+    # flush + exit on its own; `wait` then blocks until it has. This is
+    # deliberate, not redundant — do not remove it.
+    flush_boot_log() {
+        if [[ -n "${CENCI_TEE_PID:-}" ]]; then
+            exec 1>&- 2>&-
+            wait "${CENCI_TEE_PID}" 2>/dev/null || true
+        fi
+    }
 
     CUR_UID="$(id -u dev)"
     CUR_GID="$(id -g dev)"
@@ -71,15 +114,15 @@ if [[ "$(id -u)" -eq 0 ]]; then
         if [[ "${HOST_GID}" != "${CUR_GID}" ]]; then
             EXISTING_HOST_GROUP="$(getent group "${HOST_GID}" | cut -d: -f1 || true)"
             if [[ -n "${EXISTING_HOST_GROUP}" ]]; then
-                usermod -g "${HOST_GID}" dev || { echo "remap: usermod primary group failed — the home volume may predate this cenci-sandbox version; try 'cenci sandbox prune --volumes'" >&2; exit 1; }
+                usermod -g "${HOST_GID}" dev || { echo "remap: usermod primary group failed — HOST_UID/HOST_GID may collide with a system account already baked into this image; check what account/group already owns that ID inside the container" >&2; flush_boot_log; exit 1; }
             else
-                groupmod -g "${HOST_GID}" dev || { echo "remap: groupmod failed — the home volume may predate this cenci-sandbox version; try 'cenci sandbox prune --volumes'" >&2; exit 1; }
+                groupmod -g "${HOST_GID}" dev || { echo "remap: groupmod failed — HOST_UID/HOST_GID may collide with a system account already baked into this image; check what account/group already owns that ID inside the container" >&2; flush_boot_log; exit 1; }
             fi
         fi
         if [[ "${HOST_UID}" != "${CUR_UID}" ]]; then
-            usermod -u "${HOST_UID}" dev || { echo "remap: usermod failed — the home volume may predate this cenci-sandbox version; try 'cenci sandbox prune --volumes'" >&2; exit 1; }
+            usermod -u "${HOST_UID}" dev || { echo "remap: usermod failed — HOST_UID/HOST_GID may collide with a system account already baked into this image; check what account/group already owns that ID inside the container" >&2; flush_boot_log; exit 1; }
         fi
-        chown -R "${HOST_UID}:${HOST_GID}" /home/dev || { echo "remap: chown /home/dev failed — the home volume may predate this cenci-sandbox version; try 'cenci sandbox prune --volumes'" >&2; exit 1; }
+        chown -R "${HOST_UID}:${HOST_GID}" /home/dev || { echo "remap: chown /home/dev failed — the home volume may predate this cenci-sandbox version; try 'cenci sandbox prune --volumes'" >&2; flush_boot_log; exit 1; }
         if [[ "${WORKSPACE_SCOPE:-}" == "repo" ]]; then
             find /workspace -mindepth 1 -exec chown -h "${HOST_UID}:${HOST_GID}" {} + \
                 || echo "warning: failed to chown /workspace to ${HOST_UID}:${HOST_GID} — files in this mount may be misowned — the home volume may predate this cenci-sandbox version; try 'cenci sandbox prune --volumes'" >&2
@@ -107,19 +150,22 @@ sudo chown dev:"$(id -g dev)" /home/dev
 # container, leaving startupFailureDetail
 # (watch/internal/sandbox/launcher/launch.go) with nothing but a fully
 # generic message. A container that started as root already had this tee
-# installed by the root block above (CENCI_BOOT_LOG survives the
-# `sudo --preserve-env -u dev` re-exec into this script, since exec
-# replaces the process image but inherited file descriptors persist) — so
-# the tee below only installs as a FALLBACK, gated on CENCI_BOOT_LOG being
-# unset, for the direct-as-dev entry point (e.g. a manual `docker run`
-# without `--user root`, which skips the root block entirely — the image's
-# default USER is dev). Installing it unconditionally here would pipe a
-# second live tee through the first and double-write every line — do not
-# "fix" that by dropping this guard. EXIT traps, unlike file descriptors, do
-# NOT survive exec (trap state is shell-internal, discarded on process image
-# replacement), so the trap below is always re-armed here regardless of
-# which branch installed the tee. From here on, every subsequent
-# stdout/stderr line is teed into CENCI_BOOT_LOG
+# installed by the root block above (CENCI_BOOT_LOG and
+# CENCI_BOOT_LOG_INSTALLED both survive the `sudo --preserve-env -u dev`
+# re-exec into this script, since exec replaces the process image but
+# inherited file descriptors AND exported env vars persist) — so the tee
+# below only installs as a FALLBACK, gated on CENCI_BOOT_LOG_INSTALLED being
+# unset (not on CENCI_BOOT_LOG itself, which is just a path and could in
+# principle be set externally for an unrelated reason — see the root block's
+# comment on CENCI_BOOT_LOG_INSTALLED), for the direct-as-dev entry point
+# (e.g. a manual `docker run` without `--user root`, which skips the root
+# block entirely — the image's default USER is dev). Installing it
+# unconditionally here would pipe a second live tee through the first and
+# double-write every line — do not "fix" that by dropping this guard. EXIT
+# traps, unlike file descriptors, do NOT survive exec (trap state is
+# shell-internal, discarded on process image replacement), so the trap below
+# is always re-armed here regardless of which branch installed the tee. From
+# here on, every subsequent stdout/stderr line is teed into CENCI_BOOT_LOG
 # (/home/dev/.cenci-boot.log) for startupFailureDetail's second-choice read,
 # and this EXIT trap writes the generic startup-failure marker
 # (/home/dev/.cenci-startup-failed) — its third choice — whenever the
@@ -129,10 +175,17 @@ sudo chown dev:"$(id -g dev)" /home/dev
 # agent-CLI check below); utility containers (smoke tests, ad-hoc runs)
 # boot without it.
 if [[ -n "${CENCI_AGENT_CLI:-}" || -d /opt/cenci-agent ]]; then
-    if [[ -z "${CENCI_BOOT_LOG:-}" ]]; then
+    if [[ -z "${CENCI_BOOT_LOG_INSTALLED:-}" ]]; then
         CENCI_BOOT_LOG="/home/dev/.cenci-boot.log"
-        : > "${CENCI_BOOT_LOG}"
-        chmod 600 "${CENCI_BOOT_LOG}"
+        # Checked, same as the root block above: an unreported failure here
+        # would leave the tee below writing into a file that was never
+        # truncated/created or never got the intended 600 mode, defeating
+        # the whole point of #495. Warn now, on stderr, BEFORE `exec >`
+        # below redirects stderr through the tee, so it reaches `docker
+        # logs` directly.
+        : > "${CENCI_BOOT_LOG}" && chmod 600 "${CENCI_BOOT_LOG}" \
+            || echo "warning: boot-log setup failed at ${CENCI_BOOT_LOG} — startup diagnostics may be incomplete or world-readable" >&2
+        CENCI_BOOT_LOG_INSTALLED=1
         # From here on, every stdout/stderr line is persisted to CENCI_BOOT_LOG and
         # may later be surfaced verbatim in `cenci open` error output — never echo
         # credential/token content past this point.

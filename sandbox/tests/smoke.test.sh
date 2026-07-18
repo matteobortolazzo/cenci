@@ -388,10 +388,15 @@ fi
 # asserts the failure is captured by both the root-scoped tee (boot log) and
 # the root-scoped EXIT trap (startup-failed marker), using a named home
 # volume so the log/marker survive the failing --rm container.
+# --init mirrors the production launcher (watch/internal/sandbox/launcher/
+# launch.go), which always passes it to `docker run`. Without it,
+# entrypoint.sh is PID 1 in this container's PID namespace, and its `exit 1`
+# below would SIGKILL the still-draining `tee` before it can flush the
+# failure line — see flush_boot_log in entrypoint.sh for the full race.
 echo "case: root-block remap failure is captured in the boot log and startup-failed marker"
 BOOTLOG_VOLUME="cenci-boot-log-smoke-$$"
 SMOKE_AGENT_VOLUMES+=("${BOOTLOG_VOLUME}")
-BOOTLOG_RUN_OUT="$(run_with_timeout "${RUNTIME}" run --rm --user root \
+BOOTLOG_RUN_OUT="$(run_with_timeout "${RUNTIME}" run --rm --init --user root \
     -e CENCI_AGENT_CLI=/bin/true -e HOST_UID=33 -e HOST_GID=1000 \
     -v "${BOOTLOG_VOLUME}:/home/dev" \
     cenci-sandbox:latest 2>&1)"
@@ -403,13 +408,18 @@ elif [[ "${BOOTLOG_RUN_STATUS}" -eq 0 ]]; then
 else
     BOOT_LOG_CONTENT="$(run_with_timeout "${RUNTIME}" run --rm --user root --entrypoint /bin/cat \
         -v "${BOOTLOG_VOLUME}:/home/dev" cenci-sandbox:latest /home/dev/.cenci-boot.log 2>&1)"
-    STARTUP_FAILED_CHECK="$(run_with_timeout "${RUNTIME}" run --rm --user root --entrypoint /bin/bash \
-        -v "${BOOTLOG_VOLUME}:/home/dev" cenci-sandbox:latest -c \
-        'test -f /home/dev/.cenci-startup-failed && echo EXISTS')"
-    if [[ "${BOOT_LOG_CONTENT}" == *"remap: usermod failed"* && "${STARTUP_FAILED_CHECK}" == "EXISTS" ]]; then
+    # Asserted on content, not just existence: the marker file is shared by
+    # both the root-scoped trap ("... (root setup)") and the dev-side trap
+    # (no suffix) further down entrypoint.sh, so only the full root-setup
+    # sentence proves the ROOT-block trap fired, as opposed to some other
+    # path leaving the generic dev-side marker behind.
+    STARTUP_FAILED_CHECK="$(run_with_timeout "${RUNTIME}" run --rm --user root --entrypoint /bin/cat \
+        -v "${BOOTLOG_VOLUME}:/home/dev" cenci-sandbox:latest /home/dev/.cenci-startup-failed 2>&1)"
+    if [[ "${BOOT_LOG_CONTENT}" == *"remap: usermod failed"* \
+        && "${STARTUP_FAILED_CHECK}" == *"entrypoint exited before completing startup (root setup)"* ]]; then
         pass
     else
-        fail "expected boot log to contain 'remap: usermod failed' and /home/dev/.cenci-startup-failed to exist; boot log: ${BOOT_LOG_CONTENT}; startup-failed check: ${STARTUP_FAILED_CHECK}"
+        fail "expected boot log to contain 'remap: usermod failed' and /home/dev/.cenci-startup-failed to contain the root-setup trap message; boot log: ${BOOT_LOG_CONTENT}; startup-failed marker: ${STARTUP_FAILED_CHECK}"
     fi
 fi
 
