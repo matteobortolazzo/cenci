@@ -14,6 +14,7 @@ Each project has its own `AGENTS.md` with project-specific context.
 ## Critical Rules
 - ALWAYS read the relevant project's `AGENTS.md` — plus its `.claude/rules/` files where they exist — before working on any layer.
 - CLI grammar, alias, env-var, and runtime-object naming conventions live in `docs/cli-conventions.md` — read it before adding or changing any user-facing command surface.
+- Local per-project health checks (`gateCommand` in `.cenci/config.json`) are documented in `docs/health-gates.md` — read it before adding or changing a project's gate, or before touching `babysit`/`ci-repair`'s pre-push verification.
 - Test-first: integration tests that assert behavior, not implementation details.
 - When implementing tests described in a plan or ticket, verify that each claimed test assertion is actually exercised by an explicit test case—plan descriptions are intent, not proof of coverage.
 - Keep tickets well-scoped. 1 ticket = 1 PR.
@@ -56,3 +57,4 @@ Each plugin versions independently:
 On-demand topic docs live in `docs/` at the repo root. Read the file matching your work area:
 - `docs/git-workflow.md` — branching, commits, PRs, versioning
 - `docs/cli-conventions.md` — CLI grammar, alias, env-var, and runtime-object naming
+- `docs/health-gates.md` — per-project local health gates (`gateCommand`), consumed by the implement pipeline's baseline check and by `babysit`/`ci-repair`

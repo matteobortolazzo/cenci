@@ -44,7 +44,9 @@ arm Claude `/loop`, create a Codex goal, or maintain `/tmp/claude` state.
 ## Safety guarantees
 
 The supervisor never force-pushes. It launches the selected client through `cenci run`
-for CI repair or review handling, preserving those workflows' approval gates. After
-three failed repair launches it pauses and opens a visible babysit window for human
-direction. A merged PR moves its closing issues from `In Review` to `Implemented`; a PR
-closed without merging leaves labels unchanged.
+for CI repair or review handling, preserving those workflows' approval gates. Launched
+repair agents confirm a fix against the project's local gate (`docs/health-gates.md`,
+exit-0-is-healthy) before pushing, so a broken fix is caught locally instead of via a
+CI round-trip. After three failed repair launches it pauses and opens a visible babysit
+window for human direction. A merged PR moves its closing issues from `In Review` to
+`Implemented`; a PR closed without merging leaves labels unchanged.
