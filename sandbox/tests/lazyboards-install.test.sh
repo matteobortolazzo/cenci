@@ -240,6 +240,31 @@ assert_contains "${CASE_OUTPUT}" "seeded default board config"
 # (make_common_tools installs none) it must NOT tell the user to start tmux.
 assert_contains "${CASE_OUTPUT}" "kanban board wired to the workflow"
 assert_not_contains "${CASE_OUTPUT}" "lazyboards dispatches into tmux windows"
+# The default seed leaves the auto-close action active (byte-parity above
+# already covers this; asserted explicitly so the --no-cleanup case below has
+# a clear counterpart).
+grep -q '^cleanup: "cenci close {number}"' "${CASE_HOME}/.config/lazyboards/config.yml"
+
+echo "case: --no-cleanup seeds the board config with the auto-close action commented out"
+run_installer no-cleanup --yes --no-build --lazyboards --no-cleanup
+[[ "${CASE_EXIT}" -eq 0 ]]
+NO_CLEANUP_CFG="${CASE_HOME}/.config/lazyboards/config.yml"
+[[ -f "${NO_CLEANUP_CFG}" ]]
+# No active (uncommented) cleanup action survives...
+if grep -q '^cleanup:' "${NO_CLEANUP_CFG}"; then
+    echo "FAIL: --no-cleanup left an active cleanup: action in ${NO_CLEANUP_CFG}" >&2
+    sed -n '1,40p' "${NO_CLEANUP_CFG}" >&2
+    exit 1
+fi
+# ...but it is preserved as a comment so the user can re-enable it by hand.
+assert_contains "${NO_CLEANUP_CFG}" '# cleanup: "cenci close {number}"'
+assert_contains "${CASE_OUTPUT}" "auto-close disabled"
+
+echo "case: --cleanup keeps the auto-close action active in the seeded board config"
+run_installer with-cleanup --yes --no-build --lazyboards --cleanup
+[[ "${CASE_EXIT}" -eq 0 ]]
+grep -q '^cleanup: "cenci close {number}"' "${CASE_HOME}/.config/lazyboards/config.yml"
+assert_contains "${CASE_OUTPUT}" "seeded default board config"
 
 echo "case: the try-it-out hint tells the user to start tmux first when tmux is present"
 name=tmux-hint
