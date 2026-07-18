@@ -84,14 +84,16 @@ This detection is a **non-blocking advisory** — it never gates configuration a
 
 **Default values from existing config**: When `existingConfig` is not null, each question below MUST present the existing value as the pre-selected default (list it first, marked "(current)"). The user can accept with one click or change it. New fields not in `existingConfig` (e.g., `lspServers` when upgrading from a pre-LSP config) have no default and are asked normally.
 
+**`AskUserQuestion` cannot pre-check `multiSelect` options** — its options only carry `label`/`description`/`preview`, no "selected by default" field. So for the two multi-select questions (5. MCP Servers, 6. LSP Servers), "pre-select" cannot mean a pre-ticked checkbox — re-asking the full multi-select on every reconfigure would force re-clicking every already-enabled server one at a time. Instead, gate behind a single Keep/Change confirmation first (see *Keep-or-change gate* under each question below): when `existingConfig` already has a value for that field, ask one Yes/No question summarizing the current selections; only "No — let me change them" drops into the full multi-select. This is a single click to keep everything unchanged, instead of one click per server.
+
 | Question | `existingConfig` field | Default when field exists |
 |---|---|---|
 | 1. Tech stack | `stack` | Pre-fill with formatted stack |
 | 2. Project structure | `isMonorepo` | Pre-select based on existing value |
 | 3. Branching strategy | `branchPattern` | Pre-fill with existing pattern |
-| 5. MCP Servers | `mcpServers` | Pre-select servers where value is `true` |
+| 5. MCP Servers | `mcpServers` | Keep-or-change gate (see below); only "change" enters the multi-select, pre-sorted with enabled servers first |
 | 5b. Pencil design | `pencil` | Pre-select based on `pencil.enabled`; if field absent, ask normally |
-| 6. LSP Servers | `lspServers` | Pre-select servers where value is `true`; if field absent, ask normally |
+| 6. LSP Servers | `lspServers` | Keep-or-change gate (see below); only "change" enters the multi-select, pre-sorted with enabled servers first |
 | 7. Auto-compact | `autoCompactDisabled` | Pre-select Yes/No |
 | 7b. Pin subagents to 200K | `pinSubagents200K` | Pre-select Yes/No |
 | 8. CI/CD pipeline | `cicd` | Pre-select Yes/No based on `cicd.enabled` |
@@ -188,7 +190,17 @@ Before asking about MCP servers, scan the project for framework dependencies:
    - Always include **Context7** (general-purpose docs lookup)
    - Add each MCP whose trigger package was found in the dependency scan
 
-   Present using AskUserQuestion with multiSelect=true:
+   **Keep-or-change gate**: if `existingConfig.mcpServers` is present, do not jump straight into the multi-select — `AskUserQuestion` can't pre-check boxes, so re-asking it fresh would force re-clicking every already-enabled server. Instead present the current state and ask a plain Yes/No:
+
+   "Current MCP servers: `<name>` ✓ enabled, `<name>` ✗ disabled, … . Keep these settings?"
+   Options: "Yes — keep current settings (Recommended)", "No — let me change them"
+
+   - **Yes**: carry `existingConfig.mcpServers` forward unchanged, skip the multi-select below entirely.
+   - **No**: continue to the multi-select below.
+
+   If `existingConfig.mcpServers` is absent (first-ever configure run, or a newly-detected MCP not previously offered), skip the gate and ask the multi-select directly.
+
+   Present using AskUserQuestion with multiSelect=true (sort currently-enabled servers first when `existingConfig.mcpServers` exists, so they're easiest to re-tick):
 
    "Based on your project dependencies, these MCP servers can enhance AI assistance.
     Which would you like to enable?"
@@ -271,7 +283,19 @@ Reuse the dependency detection results from earlier and add file-type detection 
 
 If no LSP servers are detected, skip question 6 entirely.
 
-6. **LSP Servers**: If **two or more** LSP servers were detected above, present using AskUserQuestion with multiSelect=true:
+6. **LSP Servers**: If **two or more** LSP servers were detected above:
+
+   **Keep-or-change gate**: if `existingConfig.lspServers` is present, do not jump straight into the multi-select — `AskUserQuestion` can't pre-check boxes, so re-asking it fresh would force re-clicking every already-enabled server. Instead present the current state and ask a plain Yes/No:
+
+   "Current LSP servers: `<name>` ✓ enabled, `<name>` ✗ disabled, … . Keep these settings?"
+   Options: "Yes — keep current settings (Recommended)", "No — let me change them"
+
+   - **Yes**: carry `existingConfig.lspServers` forward unchanged, skip the multi-select below entirely.
+   - **No**: continue to the multi-select below.
+
+   If `existingConfig.lspServers` is absent (first-ever configure run, or a newly-detected LSP server not previously offered), skip the gate and ask the multi-select directly.
+
+   Present using AskUserQuestion with multiSelect=true (sort currently-enabled servers first when `existingConfig.lspServers` exists, so they're easiest to re-tick):
 
    "LSP servers provide real-time diagnostics (type errors, unused variables, dead code) during implementation. Based on your project, which would you like to enable?"
 
