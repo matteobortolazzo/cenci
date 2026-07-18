@@ -1165,7 +1165,8 @@ below — it is a supported optional field, not a legacy one.
       "stack": { "framework": "dotnet10", "testing": "xunit" },
       "buildCommand": "dotnet build",
       "testCommand": "dotnet test",
-      "lintCommand": "dotnet format --verify-no-changes"
+      "lintCommand": "dotnet format --verify-no-changes",
+      "gateCommand": "dotnet build && dotnet test"
     },
     {
       "slug": "web-client",
@@ -1176,6 +1177,7 @@ below — it is a supported optional field, not a legacy one.
       "buildCommand": "npm run build",
       "testCommand": "npm test",
       "lintCommand": "ng lint",
+      "gateCommand": "npm run build && npm test -- --watch=false",
       "designPath": "apps/web-client/designs/",
       "serveCommand": "ng serve",
       "boardKey": "W"
@@ -1203,6 +1205,8 @@ below — it is a supported optional field, not a legacy one.
 ```
 
 Each project entry's `lintCommand` is optional — it is omitted for stacks with no Lint row in the Stack-to-CI mapping table (e.g. `markdown-shell`, `docker-shell`), the same way `buildCommand`/`testCommand` are already handled for stacks without one.
+
+Each project entry's `gateCommand` is optional — unlike `lintCommand`, its presence isn't tied to the Stack-to-CI mapping table; it may simply be omitted for any project. Like the other `<verb>Command` fields, its value is executed as a shell command, so it must come only from trusted project configuration, never from untrusted input.
 
 Existing single-project configs (no `isMonorepo` field) work unchanged.
 
