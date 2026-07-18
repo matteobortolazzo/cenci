@@ -48,3 +48,49 @@ Create the worktree:
 - Ticketless mode: `git worktree add .worktrees/<auto-slug> -b feature/<auto-slug>`
 
 All subsequent phases run inside the worktree. Use absolute paths rooted at `<worktree-path>` when delegating file edits.
+
+## Baseline Gate Check
+
+Before handing off to Phase 3, confirm the worktree's own baseline is green — a repository that's already broken shouldn't have new work piled on top of it.
+
+### 1. Applicability
+
+Run this check only when the resolved config defines a top-level `gateCommand` (single-repo) or at least one `projects[]` entry (monorepo). If neither is present, skip this section silently and proceed to Phase 3 — there is nothing to gate on.
+
+### 2. Resolve targets
+
+- **Single-repo**: one target, invoked with no slug.
+- **Monorepo**: map the plan's affected components to the set of matching `projects[].slug` values:
+  - Primary signal: the plan file's `## Project Context` section — for each project whose `AGENTS.md` was bundled there, read its leading `# Project: <name>` header and match `<name>` against `projects[].name` to get that entry's `slug`.
+  - Fallback: the `### Technical Notes` "Affected services"/"Affected components" lines inside `## Ticket Details`, matched against each `projects[]` entry's `slug`, `name`, or `path`.
+  - Deduplicate the resolved slugs. If nothing resolves (no match found either way, or only some affected components matched), this is a no-op for the unmatched portion, not an error — proceed to Phase 3 unchanged. This mapping is inherently fuzzy (free text matched against config), so when it under-matches, print a one-line notice such as "Baseline gate: could not map this ticket's affected components to a configured project — skipping the baseline check" so silent under-coverage stays visible in the chat-level summary rather than going unnoticed.
+
+### 3. Invoke
+
+For each resolved target, run it as its own single Bash call — one subshell that both `cd`s to the absolute worktree path and runs the script, never relying on an inherited `cd` from a prior call:
+
+```bash
+( cd "<abs-worktree-path>" && sh "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/run-gate.sh" "<slug>" )
+```
+
+Omit the trailing `"<slug>"` argument entirely for the single-repo case; pass the resolved, quoted `projects[].slug` value for each monorepo target.
+
+### 4. Interpret
+
+Parse stdout for the `GATE_STATUS=` line:
+
+- `GATE_STATUS=green` or `GATE_STATUS=unset` → this target passes.
+- `GATE_STATUS=red` → this target fails as **"gate failed"** — capture the project slug (or "top-level" for single-repo) and the command's output.
+- Non-zero exit with **no** `GATE_STATUS=` line at all → this target fails as **"gate could not run"** — capture the project slug and stderr/output. This is a script error (missing `jq`, malformed config, missing project directory, no-match/ambiguous slug), distinct from a red gate, and must be reported with visibly different wording than the "gate failed" case above.
+
+### 5. Proceed
+
+If every invoked target passes (green or unset), hand off to Phase 3 unchanged — no other observable change to the pipeline.
+
+### 6. Stop on failure
+
+If any target fails (either "gate failed" or "gate could not run"):
+
+1. Run `/goal clear` via the `SlashCommand` tool first — a no-op if nothing is armed (see `SKILL.md`'s Goal Autopilot "Clearing" subsection).
+2. Hard-stop and report which project's gate failed (or could not run), using the distinct wording from step 4, plus its captured output. Do not call `AskUserQuestion` — there is no choice to offer here, only a report.
+3. State explicitly that the worktree and branch are left in place, and that the user should fix the baseline and re-run `/cenci:implement .plans/<filename>` to retry.
