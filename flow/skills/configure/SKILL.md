@@ -439,8 +439,9 @@ Bash call, per `cenci:shell-rules`) and branch:
     and, when `pencil.enabled` is on, a Design keybinding — onto the New/Refined/
     Planned columns, Edit-plan and View-plan keybindings on Planned that open the
     ticket's saved plan in `$EDITOR` / a pager, plus In Review actions that open a
-    PR's registered worktree in a tmux window and start the project — reviewing a PR
-    becomes one keypress on the card.)"
+    PR's registered worktree in a tmux window (`W`) and, per project, serve or test it
+    with a mnemonic key sequence — reviewing a PR becomes a couple of keypresses on
+    the card.)"
    - Options: "Yes — generate `.lazyboards.yml`", "No — skip"
 
    **If Yes — detect runnable projects and their serve commands.** For the single
@@ -476,23 +477,37 @@ Bash call, per `cenci:shell-rules`) and branch:
    As with serve, only the **runner invocation** is embedded — never the raw `test`
    script *contents* from `package.json`.
 
-   **Key assignment**: lazyboards binds custom actions to single uppercase letters
-   (`A`–`Z`) — key combinations do not exist (yet), so each runnable or testable
-   project action needs its own letter. Assign **serve** keys first: **`W`** for the
-   first runnable project (frontends first, in Step 2a discovery order), then **`L`**,
-   then **`O`**, then any remaining unused uppercase letter. Then assign **test**
-   keys: **`T`** for the first testable project, then the next unused uppercase
-   letters. Never use `C` or `X` (the seeded global config claims them for the
-   Claude/Codex board-level launch actions), never use `E` or `V` (the Planned
-   column's Edit-plan and View-plan actions claim them), and never reuse a letter
-   already assigned to a serve action.
+   **Key assignment**: lazyboards now supports multi-key sequences (e.g. `Sb`, `Sf`),
+   not just single letters, so per-project serve/test actions no longer need to
+   compete for a scarce pool of single uppercase letters.
+
+   **`W` is reserved board-wide for Open worktree** — a single action, always emitted
+   on `In Review`, that opens the PR's registered worktree in a tmux window with a
+   plain shell and runs no command (see the generated example below). `W` is never
+   assigned to serve, test, or any other action.
+
+   Assign **serve** keys as `S` followed by a project-specific mnemonic letter:
+   pick whichever second letter best identifies the project for its type — e.g. `Sb`
+   for a backend/API project, `Sf` for a frontend project, or the first letter of the
+   project slug when neither fits (e.g. `Sw` for `web-client`, `Sa` for `admin`). For
+   a single-project repo, plain `S` is enough — there's nothing to disambiguate. On a
+   mnemonic collision between two projects, fall back to the next letter of that
+   project's slug.
+
+   Assign **test** keys the same way: plain `T` for a single testable project, or `T`
+   + mnemonic (`Tb`, `Tf`, …) for multiple, following the same mnemonic rule as serve.
+
+   Never use `C` or `X` (the seeded global config claims them for the Claude/Codex
+   board-level launch actions), never use `E` or `V` (the Planned column's Edit-plan
+   and View-plan actions claim them), never reuse a key or key sequence already
+   assigned to a serve action, and never repurpose `W` for anything but Open worktree.
 
    Present the proposed mapping with AskUserQuestion before generating, e.g.:
-   "Proposed In Review actions: `W` → web-client serve (`ng serve`), `T` → web-client
-   tests (`ng test --watch=false`), `L` → admin serve (`npm run start`). Generate
-   these?" Options: "Yes — use this mapping (Recommended)", "Change keys or drop
-   projects" (then re-ask with the user's adjustments; enforce single-uppercase-letter
-   keys and the reserved-key exclusions above).
+   "Proposed In Review actions: `W` → open PR worktree, `Sb` → api serve
+   (`dotnet run`), `Sf` → web-client serve (`ng serve`), `Tf` → web-client tests
+   (`ng test --watch=false`). Generate these?" Options: "Yes — use this mapping
+   (Recommended)", "Change keys or drop projects" (then re-ask with the user's
+   adjustments; enforce the reserved-key exclusions above).
 
 ### Auth Verification
 
@@ -941,6 +956,11 @@ For each MCP selected in question 5:
      - name: In Review
        actions:
          W:
+           name: Open worktree
+           type: shell
+           scope: pr
+           command: "tmux new-window -d -n pr-{pr_number} -c {pr_worktree}"
+         S:
            name: Serve web-client worktree
            type: shell
            scope: pr
@@ -952,6 +972,11 @@ For each MCP selected in question 5:
            command: "tmux new-window -d -n pr-{pr_number} -c {pr_worktree}/'apps/web-client' \"ng test --watch=false\""
    ```
 
+   - **`W` (Open worktree) is always emitted on `In Review`, for every repo, whether
+     or not any project is runnable or testable.** It opens the PR's registered
+     worktree in a tmux window with a plain shell and runs no command — it never
+     carries a project path or a serve/test command, even in a monorepo. `W` is
+     never reused for serve, test, or any other action.
    - **`Refined`'s `D` (Design) action is gated on the single top-level
      `pencil.enabled` field** (from `.cenci/config.json` — never a per-project
      field): emit `D` only when `pencil.enabled` is `true`; when it is `false` or
@@ -970,10 +995,13 @@ For each MCP selected in question 5:
      launch actions) defined outside `columns:` in `~/.config/lazyboards/config.yml` —
      never duplicate them into any column's local `actions:` in the generated file.
    - One `In Review` **serve** action per runnable project, using the confirmed key
-     and serve command; action name `Serve <slug> worktree`. One `In Review` **test**
-     action per testable project, using the confirmed test key (`T`, …) and test
-     command; action name `Test <slug> worktree`. Both use the identical tmux
-     `-c {pr_worktree}` wrapper — only the command and key differ.
+     (`S` alone for a single runnable project, or `S` + mnemonic — `Sb`, `Sf`, … —
+     for multiple, per the Key assignment rules above) and serve command; action name
+     `Serve <slug> worktree`. One `In Review` **test** action per testable project,
+     using the confirmed test key (`T` alone, or `T` + mnemonic for multiple) and test
+     command; action name `Test <slug> worktree`. All three of `W`, serve, and test
+     use the identical tmux `-c {pr_worktree}` wrapper — only the command, working
+     directory, and key differ.
    - Use tmux's start-directory option rather than embedding the path in a nested
      `cd` command. **Single project**: `tmux new-window -d -n pr-{pr_number} -c
      {pr_worktree} "<serve-command>"`. **Monorepo**: append the project path as a
@@ -991,11 +1019,17 @@ For each MCP selected in question 5:
      escaping.
    - The `tmux new-window -d` wrapper keeps long-running serve processes from
      blocking the action's key slot; keep it even for fast commands.
-   - **Zero runnable projects**: if no project in the repo has a detected serve
-     command, `In Review` is still emitted (so PR cards have a column) but carries no
-     actions — there is no Checkout PR fallback:
+   - **Zero runnable projects**: `W` (Open worktree) is emitted regardless — it
+     doesn't depend on any project being runnable or testable. If no project in the
+     repo has a detected serve or test command, `In Review` still carries just `W`:
      ```yaml
      - name: In Review
+       actions:
+         W:
+           name: Open worktree
+           type: shell
+           scope: pr
+           command: "tmux new-window -d -n pr-{pr_number} -c {pr_worktree}"
      ```
    - **Existing config: suggest or skip** (the branch taken from *Board Config*
      above when `.lazyboards.yml` already exists — question 10 is **not** asked and
@@ -1008,8 +1042,9 @@ For each MCP selected in question 5:
      1. Read the existing file and derive the **recommended action set** this repo
         would generate above: Refine/Implement on `New`/`Refined`/`Planned`,
         pencil-gated Design on `Refined`, Edit-plan (`E`) and View-plan (`V`) actions
-        on `Planned`, and per runnable/testable project a serve (`W`/`L`/`O`/…) and
-        test (`T`/…) In Review action.
+        on `Planned`, an unconditional `W` (Open worktree) on `In Review`, and per
+        runnable/testable project a serve (`S`/`Sb`/`Sf`/…) and test (`T`/`Tb`/`Tf`/…)
+        In Review action.
      2. Compute the **delta** = recommended actions absent from the existing file.
         Match by column + action intent (name/command), **not** by raw key, so a
         user's custom key binding is respected rather than flagged as "missing".
@@ -1082,7 +1117,7 @@ For each MCP selected in question 5:
   "lazyboards": {
     "enabled": true,
     "serveCommand": "ng serve",
-    "boardKey": "W"
+    "boardKey": "S"
   }
 }
 ```
@@ -1117,7 +1152,7 @@ The `lazyboards` field is present when question 10 was answered Yes **or** a
 `.lazyboards.yml` already existed (the suggest-or-skip branch also records
 `enabled: true`). Schema:
 - `lazyboards.enabled` — `true` if a board config exists (generated or pre-existing); omit `lazyboards` entirely when the user declines question 10 and no file exists (same pattern as `cicd`/`pencil`/`sandbox`)
-- **Single project**: `lazyboards.serveCommand` + `lazyboards.boardKey` record the generated serve action, and `lazyboards.testCommand` + `lazyboards.testKey` record the generated test action (command and its single-uppercase-letter key). Omit the test pair when the project is not testable.
+- **Single project**: `lazyboards.serveCommand` + `lazyboards.boardKey` record the generated serve action, and `lazyboards.testCommand` + `lazyboards.testKey` record the generated test action (command and its key — a single letter, or a multi-key mnemonic sequence like `Sb`/`Tf` in a monorepo). Omit the test pair when the project is not testable. `W` (Open worktree) is never recorded here — it carries no command and isn't project-specific.
 - **Monorepo**: `serveCommand`/`boardKey` and `testCommand`/`testKey` live on each project entry in the `projects` array instead (a project gets the serve pair only when runnable and the test pair only when testable), and the top-level `lazyboards` field carries only `enabled`
 - These recorded values are advisory: the suggest-or-skip analyzer re-derives serve/test commands from the derivation tables above, so a config missing them still works.
 
@@ -1166,7 +1201,10 @@ below — it is a supported optional field, not a legacy one.
       "buildCommand": "dotnet build",
       "testCommand": "dotnet test",
       "lintCommand": "dotnet format --verify-no-changes",
-      "gateCommand": "dotnet build && dotnet test"
+      "gateCommand": "dotnet build && dotnet test",
+      "serveCommand": "dotnet run",
+      "boardKey": "Sb",
+      "testKey": "Tb"
     },
     {
       "slug": "web-client",
@@ -1180,7 +1218,8 @@ below — it is a supported optional field, not a legacy one.
       "gateCommand": "npm run build && npm test -- --watch=false",
       "designPath": "apps/web-client/designs/",
       "serveCommand": "ng serve",
-      "boardKey": "W"
+      "boardKey": "Sf",
+      "testKey": "Tf"
     }
   ],
   "lazyboards": {

@@ -161,22 +161,27 @@ open lazyboards' PR picker with several. The global file defines no In Review ac
 the column's actions are generated per-repo (next section); a repo with no runnable
 project simply gets an In Review column with no actions.
 
-**Per-repo run and test actions are generated for you.** `/cenci:configure` detects
-each project's serve **and** test command and writes a committed `.lazyboards.yml`
-whose In Review actions open the PR's **registered worktree** (`{pr_worktree}`,
-resolved from `git worktree list` at action time — never the main checkout) and
-either start the project (**`W`** serve) or run its tests in that worktree (**`T`**
-test — `dotnet test`, `npm test`, `go test ./...`, `ng test --watch=false`, …). A
-one-keypress "run the PR's tests before merging" is the payoff. Action keys are
-single uppercase letters — key combinations don't exist in lazyboards yet — so serve
-keys are assigned `W`, then `L`, then `O`, and test keys `T`, then the next unused
-letters, skipping the global keys `C`/`X` claimed above. `Planned` also carries
-local `E` (Edit plan) and `V` (View plan) actions that open the ticket's saved
+**Per-repo worktree, run, and test actions are generated for you.** `/cenci:configure`
+detects each project's serve **and** test command and writes a committed
+`.lazyboards.yml` whose In Review actions open the PR's **registered worktree**
+(`{pr_worktree}`, resolved from `git worktree list` at action time — never the main
+checkout). **`W`** opens that worktree in a tmux window with a plain shell — no
+command, no project path — and is always emitted regardless of whether any project
+is runnable or testable. Per project, a separate action starts it (**serve**) or
+runs its tests (**test** — `dotnet test`, `npm test`, `go test ./...`,
+`ng test --watch=false`, …) in the same worktree. A one-keypress "run the PR's tests
+before merging" is the payoff. lazyboards now supports multi-key sequences, so serve
+and test keys no longer compete with `W` or with each other for scarce single
+letters: a single-project repo gets plain `S` (serve) and `T` (test); a monorepo gets
+`S`/`T` plus a project mnemonic — `Sb`/`Tb` for a backend project, `Sf`/`Tf` for a
+frontend project, or the project slug's first letter when neither fits — skipping the
+global keys `C`/`X` claimed above and never reusing `W`. `Planned` also carries local
+`E` (Edit plan) and `V` (View plan) actions that open the ticket's saved
 `.plans/<number>-*.md` file in `$EDITOR` and a pager respectively.
 
 Configure evaluates lazyboards on **every** run: with no `.lazyboards.yml` it offers
 to generate one; with an existing file it compares against the recommended action set
-and either suggests the missing actions (e.g. an absent `T` test action) or, when the
+and either suggests the missing actions (e.g. an absent test action) or, when the
 file is already complete, skips silently with a short log line. Because a local `columns:` list replaces
 the global list entirely (it never merges, and bare `- name:` entries do **not**
 inherit global actions), the generated file declares every column and its actions
@@ -187,8 +192,8 @@ action so an already-planned ticket can still be manually re-dispatched from the
 board, plus `E` (Edit plan) and `V` (View plan) actions on its saved plan file. `Designed`
 and `Implemented` are labels in the ticket lifecycle but not board columns — only
 `New`, `Refined`, `Planned`, and `In Review` are generated. When a repo has zero
-runnable projects, `In Review` is emitted with no actions (there is no Checkout PR
-fallback).
+runnable projects, `In Review` still carries `W` (Open worktree) — there is no
+Checkout PR fallback beyond it.
 
 **`C` (Claude) and `X` (Codex)** are the two board-level actions in the global
 config. Each opens a fresh agent in a detached tmux window via the sandbox launcher
