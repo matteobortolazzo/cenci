@@ -29,6 +29,16 @@
 # config files — not watch/ or sandbox/ (see the ticket #530 plan).
 set -uo pipefail
 
+# Force deterministic sort/glob ordering regardless of the invoking
+# environment's locale. Bash's pathname expansion (e.g. `skills/*/`) and
+# `sort` both collate per LC_COLLATE, so the same directory listing can come
+# out in a different order on an author's machine (e.g. en_US.UTF-8, which
+# sorts "babysit" before "babysit-attention") than on a CI runner (typically
+# C/C.UTF-8, which sorts the opposite way). Since generated section content
+# must byte-for-byte match between --write and validation runs, every
+# ordering-sensitive operation in this script needs one fixed collation.
+export LC_ALL=C
+
 # --- Checker-owned context-budget thresholds --------------------------------
 # Single source of truth for #531 ("/cenci:maintain rules"): reference these
 # constants rather than copying the numbers.

@@ -77,8 +77,8 @@ companion) for every skill, including the internal ones not listed above.
 |---|---|---|---|---|---|
 | `address-review` | Address PR review comments by fetching, evaluating, fixing, replying, pushing, and re-requesting review. | No | Yes | Yes | Yes |
 | `attachments` | Discover, select, download, and inspect GitHub ticket attachments. Use when an issue or pull request contains screenshots, mockups, documents, or uploaded files needed as task context. | Yes | No | Yes | Yes |
-| `babysit` | Follow an open PR with the client-neutral cenci supervisor until it merges or closes. | Yes | Yes | Yes | Yes |
 | `babysit-attention` | Resolve a paused PR supervisor decision with explicit human input. | No | No | Yes | No |
+| `babysit` | Follow an open PR with the client-neutral cenci supervisor until it merges or closes. | Yes | Yes | Yes | Yes |
 | `ci-repair` | Diagnose and repair failing CI for an existing pull request without reopening the implementation pipeline. | No | No | Yes | No |
 | `codex-runtime` | Shared native Codex stage, checkpoint, goal, and agent-adapter contract. | No | No | Yes | No |
 | `configure` | Configure cenci's neutral project core and generate Claude/Codex adapters. | No | Yes | Yes | Yes |
@@ -127,8 +127,8 @@ companion) for every skill, including the internal ones not listed above.
 |---|---|---|---|---|
 | `address-review` | — | babysit,codex-runtime implement,pr-comment-filter project-core,shell-rules subagent-safety,verify-ui | — | — |
 | `attachments` | — | shell-rules | — | context-gatherer |
-| `babysit` | — | project-core,shell-rules | tick.sh | — |
 | `babysit-attention` | — | — | — | — |
+| `babysit` | — | project-core,shell-rules | tick.sh | — |
 | `ci-repair` | — | project-core,shell-rules subagent-safety,testing | — | — |
 | `codex-runtime` | — | — | — | — |
 | `configure` | — | codex-runtime,shell-rules testing,verify-ui | — | code-reviewer |
