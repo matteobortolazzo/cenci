@@ -10,8 +10,11 @@ ACTION=${1:?usage: install-skills.sh install|remove}
 # codex-runtime, project-core, ci-repair, ticket-ownership,
 # babysit-attention) are intentionally excluded — they assume Claude Code's
 # interactive approval flow. This list is the single source of truth; the
-# README "Skill portability" table's OpenCode column must match it exactly
-# (see portability.test.sh).
+# README's generated skill inventory (`<!-- cenci-maintain:skills:start -->`)
+# OpenCode column must match it exactly — drift is caught by
+# flow/skills/maintain/scripts/check.sh's capability-table and adapter-drift
+# checks (run via flow/tests/maintain.test.sh), which replaced the retired
+# flow/opencode/portability.test.sh.
 PORTABLE_SKILLS="attachments babysit frontend-classification pr-comment-filter shell-rules stack-angular stack-dotnet stack-go subagent-safety testing verify-ui worktrees"
 
 # Guard against an empty (not just unset) HOME, which would otherwise

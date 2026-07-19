@@ -11,7 +11,7 @@ is currently healthy, without running a full CI pipeline.
 
 A gate is a local pre-flight — it catches a repository that's already red
 *before* new work gets piled on top of it, and before that red state ever
-reaches CI. Two consumers rely on it:
+reaches CI. Three consumers rely on it:
 
 - The implement pipeline's Baseline Gate Check, run at the Phase 2 → Phase 3
   boundary (`flow/skills/implement/phases/phase-2-worktree.md`): before
@@ -21,6 +21,11 @@ reaches CI. Two consumers rely on it:
   `flow/skills/ci-repair/SKILL.md`): a repair agent verifies a fix against the
   project's local gate before pushing, instead of relying solely on a CI
   round-trip to find out whether the fix actually worked.
+- The maintain checker's `gate-command` check
+  (`flow/skills/maintain/scripts/check.sh`): reports `fail` when a configured
+  gate is red or missing, and `skip` (never a false `pass`) when the gate
+  can't be resolved or run in the current environment (e.g. `run-gate.sh` is
+  unreachable, or the gate command itself isn't found).
 
 ## Exit-0-is-healthy contract
 
