@@ -38,6 +38,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - name: Validate flow JSON
         run: find flow -name '*.json' -print0 | xargs -0 -n1 jq empty
       - name: Verify Codex hook isolation
@@ -48,3 +50,26 @@ jobs:
         run: bash flow/hooks/scripts/guard-main-worktree.test.sh
       - name: Verify sensitive-files guard hook
         run: bash flow/hooks/scripts/check-sensitive-files.test.sh
+      - name: Verify maintain checker test suite
+        run: bash flow/tests/maintain.test.sh
+      - name: Run maintain checker (changed files)
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          mapfile -t CHANGED < <(git diff --name-only "${BASE_SHA}"...HEAD)
+          bash flow/skills/maintain/scripts/check.sh --changed "${CHANGED[@]}"
+      - name: Run maintain checker (full)
+        if: ${{ github.event_name != 'pull_request' }}
+        # Report-only on push-to-main: full mode can fail on pre-existing,
+        # unrelated drift (e.g. context-budget breaches) that predates the
+        # commit(s) just pushed -- see docs/health-gates.md. The PR path
+        # above (--changed) stays fully blocking; a periodic *blocking*
+        # full-repo audit is #534's job, not this push-to-main step.
+        # gateCommand/test-file execution here is intentional -- see
+        # check_gate_command's comment in check.sh, and this workflow's
+        # `pull_request` (never `pull_request_target`) trigger plus
+        # repo-wide `permissions: contents: read` above.
+        continue-on-error: true
+        run: bash flow/skills/maintain/scripts/check.sh
