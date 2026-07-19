@@ -57,6 +57,14 @@ type Opts struct {
 	// Killer kills a resolved tmux window target. Production:
 	// (*tmux.ExecClient).KillWindow.
 	Killer windowKiller
+	// Register, if non-nil, registers a busy-skipped window with the daemon
+	// as pending-close so the daemon retries the close itself at the
+	// session's SessionEnd (#522). Production: a closure wrapping
+	// ipc.SendPendingClose against ipc.DefaultEventSocketPath(). Called only
+	// for busy-skip decisions and never under --dry-run/--force. Best-effort:
+	// a Register error never fails Run or changes rendered decisions, since
+	// the snapshot read already succeeded.
+	Register func(watch.WindowState) error
 }
 
 // Run reads a one-shot snapshot from the daemon, matches Target against the
@@ -85,6 +93,15 @@ func Run(opts Opts) ([]Decision, error) {
 		busy := w.Status == detect.StatusRunning.String() || w.Status == detect.StatusNeedInput.String()
 		if busy && !opts.Force {
 			decisions = append(decisions, Decision{Window: w, Action: ActionSkippedBusy})
+			// Registration is best-effort and only meaningful outside
+			// --dry-run (a dry run never records daemon-side state) and
+			// never reached under --force (handled above by the busy
+			// guard). A failed registration must not fail Run — the
+			// snapshot read already succeeded and rendered decisions must
+			// stand regardless (#522).
+			if !opts.DryRun && opts.Register != nil {
+				_ = opts.Register(w)
+			}
 			continue
 		}
 		if opts.DryRun {

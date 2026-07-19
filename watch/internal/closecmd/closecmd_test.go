@@ -27,6 +27,19 @@ func fakeReadSnapshot(snap *watch.StateSnapshot, err error) func(string) (*watch
 	}
 }
 
+// fakeRegister is a call-recording pending-close registrar for tests (#522).
+// It mirrors fakeKiller above: no real IPC call, just records every window
+// Run asked to register as pending-close.
+type fakeRegister struct {
+	registered []watch.WindowState
+	err        error
+}
+
+func (f *fakeRegister) Register(w watch.WindowState) error {
+	f.registered = append(f.registered, w)
+	return f.err
+}
+
 func TestRun_NumberMatchesExactAndPrefixNotLongerNumber(t *testing.T) {
 	snap := &watch.StateSnapshot{Windows: []watch.WindowState{
 		{Session: "s1", WindowIndex: "0", WindowName: "42", Status: "done"},
@@ -168,6 +181,110 @@ func TestRun_SnapshotReadErrorReturnsErrorKillerNeverCalled(t *testing.T) {
 	}
 	if len(killer.killed) != 0 {
 		t.Errorf("killer.killed = %v, want zero tmux calls on daemon read failure", killer.killed)
+	}
+}
+
+// -- pending-close registration (#522) ---------------------------------------
+
+// TestRun_BusySkipCallsRegisterForEachSkippedWindow covers #522 AC1: a
+// matched window skipped as busy (no --force) must be registered with the
+// daemon as pending-close, one call per skipped window.
+func TestRun_BusySkipCallsRegisterForEachSkippedWindow(t *testing.T) {
+	snap := &watch.StateSnapshot{Windows: []watch.WindowState{
+		{Session: "s1", WindowIndex: "0", WindowName: "42-a", Status: "running"},
+		{Session: "s1", WindowIndex: "1", WindowName: "42-b", Status: "need-input"},
+	}}
+	killer := &fakeKiller{}
+	fr := &fakeRegister{}
+	decisions, err := closecmd.Run(closecmd.Opts{
+		Target:       "42",
+		ReadSnapshot: fakeReadSnapshot(snap, nil),
+		Killer:       killer,
+		Register:     fr.Register,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(fr.registered) != 2 {
+		t.Fatalf("registered = %+v, want 2 (one per busy-skipped window)", fr.registered)
+	}
+	if len(killer.killed) != 0 {
+		t.Errorf("killed = %v, want none for busy-skipped windows", killer.killed)
+	}
+	for _, d := range decisions {
+		if d.Action != closecmd.ActionSkippedBusy {
+			t.Errorf("window %s action = %s, want skipped-busy", d.Window.WindowName, d.Action)
+		}
+	}
+}
+
+// TestRun_DryRunNeverCallsRegisterEvenForBusyWindows covers #522 AC
+// ("--dry-run never registers a pending-close intent"): a mix of a
+// non-busy and a busy match under --dry-run still renders the normal
+// would-close/skipped-busy decisions, but must call Register zero times.
+func TestRun_DryRunNeverCallsRegisterEvenForBusyWindows(t *testing.T) {
+	snap := &watch.StateSnapshot{Windows: []watch.WindowState{
+		{Session: "s1", WindowIndex: "0", WindowName: "42-a", Status: "done"},
+		{Session: "s1", WindowIndex: "1", WindowName: "42-b", Status: "running"},
+	}}
+	fr := &fakeRegister{}
+	decisions, err := closecmd.Run(closecmd.Opts{
+		Target:       "42",
+		DryRun:       true,
+		ReadSnapshot: fakeReadSnapshot(snap, nil),
+		Killer:       &fakeKiller{},
+		Register:     fr.Register,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(fr.registered) != 0 {
+		t.Errorf("registered = %+v, want zero Register calls under --dry-run", fr.registered)
+	}
+	var gotWouldClose, gotSkippedBusy bool
+	for _, d := range decisions {
+		switch d.Action {
+		case closecmd.ActionWouldClose:
+			gotWouldClose = true
+		case closecmd.ActionSkippedBusy:
+			gotSkippedBusy = true
+		}
+	}
+	if !gotWouldClose || !gotSkippedBusy {
+		t.Fatalf("decisions = %+v, want both would-close (42-a) and skipped-busy (42-b) present", decisions)
+	}
+}
+
+// TestRun_ForceClosesImmediatelyNeverRegisters covers #522 AC ("--force
+// closes are unaffected ... with no pending-close bookkeeping"): --force
+// kills busy windows immediately and never registers them.
+func TestRun_ForceClosesImmediatelyNeverRegisters(t *testing.T) {
+	snap := &watch.StateSnapshot{Windows: []watch.WindowState{
+		{Session: "s1", WindowIndex: "0", WindowName: "42-a", Status: "running"},
+		{Session: "s1", WindowIndex: "1", WindowName: "42-b", Status: "need-input"},
+	}}
+	killer := &fakeKiller{}
+	fr := &fakeRegister{}
+	decisions, err := closecmd.Run(closecmd.Opts{
+		Target:       "42",
+		Force:        true,
+		ReadSnapshot: fakeReadSnapshot(snap, nil),
+		Killer:       killer,
+		Register:     fr.Register,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(killer.killed) != 2 {
+		t.Errorf("killed = %v, want both windows killed immediately with --force", killer.killed)
+	}
+	if len(fr.registered) != 0 {
+		t.Errorf("registered = %+v, want zero Register calls when --force closes immediately", fr.registered)
+	}
+	for _, d := range decisions {
+		if d.Action != closecmd.ActionClosed {
+			t.Errorf("window %s action = %s, want closed", d.Window.WindowName, d.Action)
+		}
 	}
 }
 
