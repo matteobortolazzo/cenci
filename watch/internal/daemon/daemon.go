@@ -12,19 +12,38 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/internal/frontend"
 	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
 	"github.com/matteobortolazzo/cenci/watch/internal/reap"
+	"github.com/matteobortolazzo/cenci/watch/internal/tmux"
 	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
 )
+
+// windowKiller is the minimal seam the daemon needs to kill a tmux window on
+// a pending-close match at SessionEnd. Production is (*tmux.ExecClient); kept
+// as a small daemon-owned interface rather than growing frontend.Frontend or
+// tmux.Client, mirroring internal/closecmd.windowKiller and the rationale
+// documented on tmux.ExecClient.KillWindow (#522).
+type windowKiller interface {
+	KillWindow(target string) error
+}
 
 // Daemon manages the event-driven loop and per-session core state. All tmux
 // interaction lives behind the injected frontend.
 type Daemon struct {
-	cfg      config.Config
-	frontend frontend.Frontend
-	sessions map[string]*frontend.SessionState // key: session ID (fallback "pane:<id>")
-	ipc      *ipc.Server                       // nil if IPC not enabled
-	events   <-chan ipc.HookEvent
-	now      func() time.Time // injectable clock for TTL tests
-	reaper   reap.Reaper      // triggers cenci sandbox reap-orphans on pane-gone sweep/startup (#292)
+	cfg           config.Config
+	frontend      frontend.Frontend
+	sessions      map[string]*frontend.SessionState // key: session ID (fallback "pane:<id>")
+	ipc           *ipc.Server                       // nil if IPC not enabled
+	events        <-chan ipc.HookEvent
+	pendingCloses <-chan ipc.PendingClose // nil unless wired by Run (#522); loop skips this select case when nil
+	now           func() time.Time        // injectable clock for TTL tests
+	reaper        reap.Reaper             // triggers cenci sandbox reap-orphans on pane-gone sweep/startup (#292)
+	killer        windowKiller            // kills a pending-close window's target at SessionEnd (#522)
+
+	// pending is the in-memory pending-close registry (#522), keyed by
+	// "session:index" (the same identity closecmd kills by). Dropped on
+	// daemon restart, per plan assumption; pruned when the owning session is
+	// removed (runSweep/ttlSweep) to bound growth from windows closed by
+	// other means.
+	pending map[string]ipc.PendingClose
 
 	// attention is the reconciler's overlay of synthetic "failed" windows
 	// (#46). It is appended to every snapshot until the next overlay replaces
@@ -52,6 +71,8 @@ func newDaemon(cfg config.Config, fe frontend.Frontend, events <-chan ipc.HookEv
 		events:   events,
 		now:      time.Now,
 		reaper:   reaper,
+		killer:   &tmux.ExecClient{},
+		pending:  make(map[string]ipc.PendingClose),
 	}
 }
 
@@ -85,6 +106,7 @@ func Run(ctx context.Context, cfg config.Config, fe frontend.Frontend, attention
 	}
 
 	d := newDaemon(cfg, fe, recv.Events(), reap.NewExecReaper(cfg.Verbose))
+	d.pendingCloses = recv.PendingCloses()
 
 	if cfg.SocketPath != "" {
 		srv, err := ipc.NewServer(cfg.SocketPath)
@@ -121,6 +143,8 @@ func (d *Daemon) loop(ctx context.Context, attention <-chan ipc.AttentionUpdate)
 			return nil
 		case event := <-d.events:
 			d.handleEvent(event)
+		case pc := <-d.pendingCloses:
+			d.registerPendingClose(pc)
 		case <-sweep.C:
 			d.runSweep()
 		case u := <-attention:
@@ -138,6 +162,16 @@ func (d *Daemon) loop(ctx context.Context, attention <-chan ipc.AttentionUpdate)
 // any action in this pass flagged PaneGone, the orphan reaper is triggered
 // exactly once for the whole pass (#292 AC1), not once per action.
 func (d *Daemon) runSweep() {
+	// Resolve WindowInfo for every in-scope session *before* calling Sweep:
+	// Sweep's own stale-window cleanup already tears down (forgets) a
+	// pane-gone window's tracking state internally, so resolving afterward
+	// would always see nil and silently no-op the pending-close prune below
+	// (#522).
+	preSweep := make(map[string]*frontend.WindowInfo, len(d.sessions))
+	for key := range d.sessions {
+		preSweep[key] = d.frontend.WindowInfo(key)
+	}
+
 	actions := d.frontend.Sweep(d.sessions)
 	changed := len(actions) > 0
 	paneGone := false
@@ -150,6 +184,7 @@ func (d *Daemon) runSweep() {
 			continue
 		}
 		if a.Remove {
+			d.prunePendingCloseForWindow(preSweep[a.SessionKey])
 			delete(d.sessions, a.SessionKey)
 			continue
 		}
@@ -199,6 +234,7 @@ func (d *Daemon) ttlSweep() bool {
 			if d.cfg.Verbose {
 				log.Printf("sweep: paneless session %s idle past TTL, removing", key)
 			}
+			d.prunePendingCloseForWindow(d.frontend.WindowInfo(key))
 			delete(d.sessions, key)
 			changed = true
 		}

@@ -269,6 +269,94 @@ func TestEventReceiver_ConnectionLimitAllowsAfterRelease(t *testing.T) {
 	}
 }
 
+// -- pending-close routing (#522) --------------------------------------------
+
+// TestSendPendingClose_RoundTripsToPendingCloses asserts SendPendingClose's
+// message round-trips to the new PendingCloses() channel, and does NOT land
+// on the existing Events() channel (the two message kinds route separately).
+func TestSendPendingClose_RoundTripsToPendingCloses(t *testing.T) {
+	path := tempSocket(t)
+	recv, err := NewEventReceiver(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = recv.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go recv.Accept(ctx)
+
+	// Allow listener to start.
+	time.Sleep(10 * time.Millisecond)
+
+	pc := PendingClose{Session: "main", WindowIndex: "0", WindowName: "42-implement"}
+	if err := SendPendingClose(path, pc); err != nil {
+		t.Fatalf("SendPendingClose: %v", err)
+	}
+
+	select {
+	case got := <-recv.PendingCloses():
+		if got != pc {
+			t.Errorf("PendingCloses() = %+v, want %+v", got, pc)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for pending-close")
+	}
+
+	select {
+	case evt := <-recv.Events():
+		t.Fatalf("expected no hook event from a pending-close message, but got: %+v", evt)
+	case <-time.After(200 * time.Millisecond):
+		// Good -- pending-close messages never land on Events().
+	}
+}
+
+// TestEventReceiver_HookEventWithoutKindRoutesToEvents asserts backward
+// compatibility: a plain hook-event line (no "kind" discriminator field, as
+// every pre-#522 cenci notify caller sends) still routes to Events() and
+// never to the new PendingCloses() channel.
+func TestEventReceiver_HookEventWithoutKindRoutesToEvents(t *testing.T) {
+	path := tempSocket(t)
+	recv, err := NewEventReceiver(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = recv.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go recv.Accept(ctx)
+
+	// Allow listener to start.
+	time.Sleep(10 * time.Millisecond)
+
+	event := HookEvent{
+		EventType: "Stop",
+		SessionID: "sess-no-kind",
+		TmuxPane:  "%0",
+		Timestamp: "2024-01-01T00:00:00Z",
+	}
+	if err := SendEvent(path, event); err != nil {
+		t.Fatalf("SendEvent: %v", err)
+	}
+
+	select {
+	case got := <-recv.Events():
+		if got.EventType != "Stop" || got.SessionID != "sess-no-kind" {
+			t.Errorf("Events() = %+v, want EventType=Stop SessionID=sess-no-kind", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for hook event")
+	}
+
+	select {
+	case pc := <-recv.PendingCloses():
+		t.Fatalf("expected no pending-close from a plain hook-event message, but got: %+v", pc)
+	case <-time.After(200 * time.Millisecond):
+		// Good -- hook events never land on PendingCloses().
+	}
+}
+
 func TestEventReceiver_ContextCancelStopsAccept(t *testing.T) {
 	path := tempSocket(t)
 	recv, err := NewEventReceiver(path)

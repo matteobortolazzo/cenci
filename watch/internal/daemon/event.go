@@ -52,8 +52,13 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 	// A subagent's own SessionEnd (non-empty AgentID) must not tear down the
 	// main session's window — only the main agent's own SessionEnd does.
 	if event.EventType == "SessionEnd" && event.AgentID == "" {
+		// Resolve the window's "session:index" target before teardown:
+		// OnSessionEnd releases the frontend's tracking state for this
+		// session key, so WindowInfo would return nil afterward (#522).
+		wi := d.frontend.WindowInfo(key)
 		delete(d.sessions, key)
 		d.frontend.OnSessionEnd(sess)
+		d.killPendingClose(wi)
 		d.broadcast()
 		return
 	}

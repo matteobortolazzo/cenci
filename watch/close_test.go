@@ -101,4 +101,44 @@ func TestClose_DryRun_PrintsCloseAndSkipDecisions(t *testing.T) {
 	if strings.Contains(string(output), "closed 77-implement") {
 		t.Errorf("--dry-run must never print an actual 'closed' line, got:\n%s", output)
 	}
+	// #522: the skip line must communicate that the close will be retried
+	// automatically at session end, not just "use --force to close now".
+	if !strings.Contains(string(output), "will retry automatically") {
+		t.Errorf("skip line should communicate automatic retry at session end, got:\n%s", output)
+	}
+}
+
+// TestClose_NoMatches_EmptyStdoutExit0 locks in the quieted no-op output
+// (#522): a target that matches zero windows must produce no stdout and
+// exit 0 -- replacing the old `no matching windows for %q` line, which
+// lazyboards surfaced as a spurious "warning" for a legitimate no-op (there
+// is nothing actionable to report).
+func TestClose_NoMatches_EmptyStdoutExit0(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "empty.sock")
+	srv, err := ipc.NewServer(socket)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go srv.Accept(ctx)
+	time.Sleep(20 * time.Millisecond)
+
+	srv.Broadcast(ipc.StateSnapshot{
+		Windows: []ipc.WindowState{
+			{Session: "sess-a", WindowIndex: "0", WindowName: "99-other", Status: "done"},
+		},
+	})
+	time.Sleep(20 * time.Millisecond)
+
+	cmd := exec.Command(binaryPath, "close", "42", "--socket", socket)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("close with zero matches: unexpected error/exit code: %v\n%s", err, output)
+	}
+	if len(output) != 0 {
+		t.Errorf("expected empty stdout for zero matches, got:\n%s", output)
+	}
 }

@@ -18,10 +18,11 @@ const (
 
 // EventReceiver listens on a Unix socket for hook events from cenci notify.
 type EventReceiver struct {
-	listener  net.Listener
-	path      string
-	events    chan HookEvent
-	activeSem chan struct{}
+	listener     net.Listener
+	path         string
+	events       chan HookEvent
+	pendingClose chan PendingClose
+	activeSem    chan struct{}
 }
 
 // NewEventReceiver creates a receiver listening on the given Unix socket path.
@@ -31,16 +32,23 @@ func NewEventReceiver(socketPath string) (*EventReceiver, error) {
 		return nil, err
 	}
 	return &EventReceiver{
-		listener:  ln,
-		path:      socketPath,
-		events:    make(chan HookEvent, eventChanCap),
-		activeSem: make(chan struct{}, maxEventConns),
+		listener:     ln,
+		path:         socketPath,
+		events:       make(chan HookEvent, eventChanCap),
+		pendingClose: make(chan PendingClose, eventChanCap),
+		activeSem:    make(chan struct{}, maxEventConns),
 	}, nil
 }
 
 // Events returns the channel that delivers parsed hook events.
 func (r *EventReceiver) Events() <-chan HookEvent {
 	return r.events
+}
+
+// PendingCloses returns the channel that delivers pending-close
+// registrations sent by SendPendingClose (#522).
+func (r *EventReceiver) PendingCloses() <-chan PendingClose {
+	return r.pendingClose
 }
 
 // Accept accepts connections until ctx is cancelled. Each connection sends one
@@ -83,6 +91,30 @@ func (r *EventReceiver) handleConn(conn net.Conn) {
 		return
 	}
 
+	var envelope struct {
+		Kind string `json:"kind"`
+	}
+	if err := json.Unmarshal(scanner.Bytes(), &envelope); err != nil {
+		log.Printf("event: invalid JSON: %v", err)
+		return
+	}
+
+	if envelope.Kind == pendingCloseKind {
+		var pc PendingClose
+		if err := json.Unmarshal(scanner.Bytes(), &pc); err != nil {
+			log.Printf("event: invalid pending-close JSON: %v", err)
+			return
+		}
+		select {
+		case r.pendingClose <- pc:
+		default:
+			log.Printf("event: pending-close channel full, dropping %s:%s", pc.Session, pc.WindowIndex)
+		}
+		return
+	}
+
+	// Every other kind (including empty/absent, the pre-#522 wire format)
+	// routes to the existing hook-event path unchanged.
 	var event HookEvent
 	if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
 		log.Printf("event: invalid JSON: %v", err)

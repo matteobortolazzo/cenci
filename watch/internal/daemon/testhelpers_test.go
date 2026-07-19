@@ -25,6 +25,20 @@ func (m *mockReaper) Reap() {
 	m.calls.Add(1)
 }
 
+// fakeKiller is a call-recording windowKiller for daemon tests (#522). It
+// mirrors internal/closecmd/closecmd_test.go's fakeKiller pattern in the
+// sibling package: no real tmux call, just records every target the daemon
+// asked to kill so tests can assert on pending-close-triggered kills at
+// SessionEnd without touching a real tmux binary.
+type fakeKiller struct {
+	killed []string
+}
+
+func (f *fakeKiller) KillWindow(target string) error {
+	f.killed = append(f.killed, target)
+	return nil
+}
+
 func testConfig() config.Config {
 	cfg := config.Default()
 	cfg.SweepInterval = 10 * time.Millisecond
@@ -45,9 +59,13 @@ func lastRename(renames []tmuxtest.RenameCall, target string) (string, bool) {
 // tmux client — an integration setup across the frontend seam. Tests call
 // handleEvent/runSweep directly for synchronous, deterministic behavior. A
 // mockReaper is always injected (#292) so existing tests are unaffected and
-// reap-specific tests can type-assert d.reaper.(*mockReaper).
+// reap-specific tests can type-assert d.reaper.(*mockReaper). A fakeKiller is
+// likewise always injected (#522) so pending-close tests can type-assert
+// d.killer.(*fakeKiller) without touching a real tmux binary.
 func newTestDaemon(mc *tmuxtest.MockClient) *Daemon {
 	ch := make(chan ipc.HookEvent, 16)
 	cfg := testConfig()
-	return newDaemon(cfg, tmuxfe.New(cfg, mc), ch, &mockReaper{})
+	d := newDaemon(cfg, tmuxfe.New(cfg, mc), ch, &mockReaper{})
+	d.killer = &fakeKiller{}
+	return d
 }

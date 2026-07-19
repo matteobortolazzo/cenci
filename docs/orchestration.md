@@ -141,9 +141,14 @@ with zero extra config.
 **`cleanup`** fires when a card leaves the column (detected on refresh). A single
 top-level `cleanup` covers every column that doesn't define its own. `cenci close
 {number}` is the supported reaper: it asks the daemon for the window's exact
-`session:index` target (correct across tmux sessions), refuses to kill a window whose
-agent is still running or awaiting input (unless passed `--force`), and exits `0`
-when no window matches — safe on cards that never had an agent. A raw
+`session:index` target (correct across tmux sessions) and refuses to kill a window
+whose agent is still running or awaiting input (unless passed `--force`). A
+busy-skipped window is self-healing: `cenci close` registers it with the daemon as
+pending-close, and the daemon closes it itself the moment it observes that session's
+end — no second `cenci close` invocation (from lazyboards or anything else) is
+required. When no window matches at all, `cenci close` produces no output and exits
+`0` — safe on cards that never had an agent, and quiet enough that lazyboards never
+surfaces a legitimate no-op as a spurious warning. A raw
 `tmux kill-window -t ={window}` still works but resolves bare names only within
 lazyboards' own tmux session; the
 [lazyboards README](https://github.com/matteobortolazzo/lazyboards#column-cleanup)

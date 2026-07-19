@@ -568,9 +568,11 @@ Behavior:
   `<number>-` (e.g. `42` matches `42` and `42-refine`, but not `420-anything`).
   A non-numeric target matches windows by exact name.
 - Windows whose status is `running` or `need-input` are skipped (and reported)
-  unless `--force` is given.
-- No matching windows is not an error — it exits 0, so it's safe to run
-  unconditionally after a window may already be gone.
+  unless `--force` is given. The daemon remembers the skip and closes the window
+  itself once it observes that session end, so a caller never needs to retry —
+  no second `cenci close` invocation is required.
+- No matching windows is not an error — it exits 0 with no output, so it's safe
+  to run unconditionally after a window may already be gone.
 
 This is the recommended cleanup command for any tool driving cenci-managed
 tmux windows, e.g. a kanban board's column-cleanup hook:
