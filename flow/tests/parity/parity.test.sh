@@ -305,6 +305,52 @@ if _markers_strictly_increasing "${codex_bad_order_copy}" "${_CODEX_STOP_MARKER}
   fail "Codex ordering self-test: a deliberately-reordered synthetic copy must be REJECTED by _markers_strictly_increasing, but it passed"
 fi
 
+# --- _contains_ws_insensitive self-test (#556) ------------------------------
+# check_codex_adapter's P8 push-policy check requires the exact contiguous
+# sentence "Never force-push or bypass security/design/approval gates.", but
+# flow/skills/implement/codex.md wraps that sentence across a Markdown line
+# break -- an ordinary substring match can never span the wrap. This proves
+# the whitespace-insensitive helper the fix will route P8 through: spaces,
+# tabs, and newlines between words must be fungible, but the full required
+# word sequence must still be mandatory (a dropped word must still fail).
+_PUSH_POLICY_SENTENCE="Never force-push or bypass security/design/approval gates."
+
+# 1. A deliberately Markdown-wrapped, but complete, copy of the sentence
+#    (mirrors the real wrap in codex.md, between "bypass" and "security")
+#    must still be found -- this is the regression case for the reported bug.
+codex_wrapped_copy="Never force-push or bypass
+security/design/approval gates."
+if ! _contains_ws_insensitive "${codex_wrapped_copy}" "${_PUSH_POLICY_SENTENCE}"; then
+  fail "_contains_ws_insensitive self-test: a Markdown-wrapped but complete copy of the push-policy sentence must be found (regression for #556), but it was not"
+fi
+
+# 2. A weakened copy (a required word, "force-push", dropped) must still
+#    fail -- proves whitespace-insensitivity never widens into
+#    word-insensitivity; the full required word sequence stays mandatory.
+codex_weakened_copy="Never or bypass
+security/design/approval gates."
+if _contains_ws_insensitive "${codex_weakened_copy}" "${_PUSH_POLICY_SENTENCE}"; then
+  fail "_contains_ws_insensitive self-test: a weakened copy of the push-policy sentence (missing 'force-push') must NOT be found, but it was"
+fi
+
+# 3. Extra whitespace and multiple newlines between words must still match --
+#    proves whitespace runs of any length/kind collapse equivalently, not
+#    just a single line-wrap newline.
+codex_extra_ws_copy="Never   force-push  or
+
+bypass
+   security/design/approval    gates."
+if ! _contains_ws_insensitive "${codex_extra_ws_copy}" "${_PUSH_POLICY_SENTENCE}"; then
+  fail "_contains_ws_insensitive self-test: extra whitespace/multi-newline variant of the push-policy sentence must still be found, but it was not"
+fi
+
+# 4. An empty phrase must NOT match -- an empty needle would otherwise
+#    vacuously match any (or even empty) content via the substring glob,
+#    silently masking a caller bug (unset/empty required phrase) as a pass.
+if _contains_ws_insensitive "${codex_wrapped_copy}" ""; then
+  fail "_contains_ws_insensitive self-test: an empty phrase must NOT vacuously match, but it did"
+fi
+
 # KNOWN GAP: Codex's codex.md never invokes run-gate.sh. #517's "Codex implement
 # gate parity" child slice owns fixing this -- this harness must keep failing
 # it loudly as an explicit xfail until that slice flips these two markers.

@@ -106,6 +106,27 @@ _check_push_policy_text() {
   [[ "${bad}" -eq 0 && "${saw_force_with_lease}" -eq 1 ]]
 }
 
+# ---------------------------------------------------------------------------
+# Internal helper: _contains_ws_insensitive <content> <phrase>
+# Collapses whitespace runs (space/tab/newline) to a single space in both
+# arguments before a literal substring test, so a Markdown line wrap between
+# words (e.g. a real doc wrapping mid-sentence) never breaks a match that
+# would otherwise hold -- while the full required word sequence stays
+# mandatory (a dropped word still fails the match).
+_contains_ws_insensitive() {
+  local content normalized_content phrase normalized_phrase
+  content="$1"
+  phrase="$2"
+  # An empty phrase would otherwise vacuously match any content (including
+  # empty content) via the `*""* ` glob below -- reject it explicitly so a
+  # caller passing an unset/empty required phrase fails loudly instead of
+  # the check silently reporting a pass.
+  [[ -n "${phrase}" ]] || return 1
+  normalized_content="$(printf '%s' "${content}" | tr -s '[:space:]' ' ')" || return 1
+  normalized_phrase="$(printf '%s' "${phrase}" | tr -s '[:space:]' ' ')" || return 1
+  [[ "${normalized_content}" == *"${normalized_phrase}"* ]]
+}
+
 # _prop <property-id> <ok (0|1)> <reason-if-failed> -- prints the
 # "<property-id>:pass" / "<property-id>:fail:<reason>" line contract.
 # Returns the same 0/1 it was given, for the caller's overall accumulator.
@@ -520,7 +541,7 @@ check_codex_adapter() {
   # P8 push-policy: codex.md's literal force-push/gate-bypass refusal sentence.
   if [[ "${codex_ok}" -ne 0 ]]; then
     _prop "push-policy" 1 "skills/implement/codex.md not found/unreadable"
-  elif [[ "${codex_doc}" == *"Never force-push or bypass security/design/approval gates."* ]]; then
+  elif _contains_ws_insensitive "${codex_doc}" "Never force-push or bypass security/design/approval gates."; then
     _prop "push-policy" 0
   else
     _prop "push-policy" 1 "codex.md does not state the force-push/gate-bypass refusal"
