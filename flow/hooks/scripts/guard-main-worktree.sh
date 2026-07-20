@@ -31,10 +31,22 @@ command -v jq >/dev/null 2>&1 || {
 }
 
 INPUT=$(cat)
-if ! FILE_PATH=$(printf '%s' "$INPUT" | jq -r '.tool_input.file_path // .tool_input.filePath // empty' 2>/dev/null); then
-  echo "BLOCKED: guard-main-worktree.sh could not parse the tool call's JSON input." >&2
+JQ_ERR=$(mktemp 2>/dev/null) || JQ_ERR=/dev/null
+# Explicit emptiness check, not a bare `//` chain: jq's `//` only falls back on
+# null/false and would treat a present-but-empty file_path ("") as truthy,
+# short-circuiting past filePath to the empty-path allow below.
+if ! FILE_PATH=$(printf '%s' "$INPUT" | jq -r '
+    if (.tool_input.file_path // "") != "" then
+      .tool_input.file_path
+    else
+      (.tool_input.filePath // empty)
+    end
+  ' 2>"$JQ_ERR"); then
+  echo "BLOCKED: guard-main-worktree.sh could not parse the tool call's JSON input: $(cat "$JQ_ERR" 2>/dev/null)" >&2
+  rm -f "$JQ_ERR"
   exit 2
 fi
+rm -f "$JQ_ERR"
 
 [ -z "$FILE_PATH" ] && exit 0
 
