@@ -108,6 +108,26 @@ Before finalizing the plan, explicitly identify:
     1. <step>
     2. <step>
 
+    ### Parallel Lanes (optional — omit by default)
+    Declare lanes ONLY when every condition holds; when in doubt, omit this section
+    and the pipeline implements sequentially (the safe default):
+
+    - The plan contains 2+ genuinely independent work streams, each a coherent slice.
+    - The lanes' file sets (Files to Modify + Files to Create) are fully disjoint —
+      every planned file belongs to exactly one lane. If any file is needed by two
+      lanes, do not declare lanes at all.
+    - Each lane is independently testable with a lane-scoped test command or pattern.
+    - The work is not security/auth/payment-related and not a data migration.
+    - The work is not UI/frontend (design pre-read and visual verification require
+      the sequential path).
+
+    Format (repeat per lane):
+
+    Lane 1: <short name>
+    - Files: <exact subset of Files to Modify/Create owned by this lane>
+    - Tests: <lane-scoped test command or pattern>
+    - Scope: <what this lane implements, including its acceptance criteria>
+
     ### Test Strategy
     For each component/file, classify and specify test types:
 
