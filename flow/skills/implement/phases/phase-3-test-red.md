@@ -16,6 +16,31 @@ If `cenci.compactImplementation` is true and the plan is small, low-risk, and co
 
 Do not use compact mode for auth, payment, security-sensitive code, data migrations, broad refactors, large UI work, flaky test infrastructure, or unclear requirements.
 
+## Parallel Lanes
+
+If the plan file's `## Implementation Plan` contains a `### Parallel Lanes` section, Phases 3 and 4 may fan out one implementer per lane. Quality gates are unchanged: per-lane red-before-green discipline, a single authoritative full-suite verification barrier (Phase 4's `## Lane Verification Barrier`), and the full Phase 5–9 flow (one refactor pass, all reviewers, one PR).
+
+**Eligibility re-check (main agent, before any fan-out).** The planner's declaration is a proposal, not authorization. Verify all of the following against the plan file; if any check fails, ignore the lanes section entirely and run the standard sequential Phase 3 → Phase 4 flow — never partially:
+
+- Every file across all lanes' `Files:` lists appears in exactly one lane. Any overlap → sequential.
+- `isUiTicket` is false. UI work always takes the sequential path (design pre-read and visual verification live in the standard Phase 4).
+- No lane file matches the sensitive-path pattern set from `SKILL.md`'s `## Sensitive-path backstop` (built-in defaults unioned with `security.sensitivePaths`). Any match → sequential.
+- Each lane declares `Files:`, `Tests:`, and `Scope:`. A malformed lane → sequential.
+
+**Fan-out.** One implementer delegation per lane, each receiving the standard Delegation Context below plus its lane's `Files:`, `Tests:`, and `Scope:`. Each lane implementer must, in order:
+
+1. Write the lane's tests first. Tests should fail.
+2. Run only the lane-scoped tests (`Tests:` command/pattern) and report failing test names and failure reasons — the observed red comes before any implementation.
+3. Implement the lane to make its failing tests pass, then re-run the lane-scoped tests to green.
+4. Touch only files in the lane's `Files:` list. If correctness genuinely requires a file outside the lane, stop the lane and report — do not edit it.
+5. Never run the full build or full test suite — concurrent full runs race in the shared worktree (build caches, ports, lockfiles). The full suite runs exactly once, in Phase 4's `## Lane Verification Barrier`.
+
+If the resolved config has `cenci.implementerConcurrency: "sequential"`, run the same lane delegations one after another instead of concurrently; otherwise (default `"parallel"`) launch them together. The lane structure, rules, and gates are identical in both modes.
+
+**Error gate (restated for the parallel risk profile — see `docs/pipeline-safety.md`).** A lane implementer applies the same analyze-fix-rerun loop as Phase 4, up to 3 attempts within its lane. If any lane still fails after that (red tests that cannot be written, green that cannot be reached, or a needed out-of-lane file), let already-running lanes finish, then clear the Goal Autopilot (`/goal clear` via `SlashCommand`, a no-op if none is armed — see `SKILL.md`) and stop, reporting per-lane status: which lanes completed red→green, which failed, exact errors and attempts. Completed lanes' work stays in the worktree — do not revert it; the user decides whether to continue sequentially or abort. Do not proceed to the Lane Verification Barrier with a failed lane.
+
+When lanes run, skip the single-implementer delegation below and Phase 4's standard delegation — Phase 4 runs only its `## Lane Verification Barrier`.
+
 ## Delegation Context
 
 Pass:
