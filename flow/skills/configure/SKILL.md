@@ -1261,12 +1261,12 @@ When migrating from an older config that has `ticketSystem`, `prSystem`, `ticket
 
 7. **Commit, Push, and Open PR**: configure's changes live in `<worktree-path>` — ship them the same way every other change in this repo ships.
 
-   Read `<worktree-path>/docs/git-workflow.md` for the commit/branch/PR conventions used below. Run a standalone `cd <worktree-path>` first so the commands below resolve against the worktree and stay auto-approved (see `cenci:shell-rules` — never compound the `cd` with the git command itself).
+   Read `<worktree-path>/docs/git-workflow.md` for the commit/branch/PR conventions used below. Target the worktree explicitly with `git -C <worktree-path>` on every command below so they resolve against the worktree and stay auto-approved (see `cenci:shell-rules` — never compound `cd` with the git command itself).
 
    **Commit**:
    ```bash
-   git add -A
-   git commit -m "chore(configure): <one-line summary of what changed>
+   git -C <worktree-path> add -A
+   git -C <worktree-path> commit -m "chore(configure): <one-line summary of what changed>
 
    <bullet list of generated/updated files>"
    ```
@@ -1274,7 +1274,7 @@ When migrating from an older config that has `ticketSystem`, `prSystem`, `ticket
 
    **Push**:
    ```bash
-   git push -u origin chore/configure-<slug>
+   git -C <worktree-path> push -u origin chore/configure-<slug>
    ```
    If push fails due to sandbox/network/auth, show the exact command and use `AskUserQuestion` ("Pushed, continue" / "Abort") to wait for the user to push manually before continuing.
 

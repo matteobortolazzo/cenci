@@ -14,15 +14,15 @@ Read `<worktree-path>/docs/git-workflow.md`; if absent, read legacy `<worktree-p
 
 Source `ticketId`, `slug`, `isChild`, `isLastChild`, and `parentId` from plan front matter when `hasPlanFile` is true.
 
-The worktree must be the CWD first — run a standalone `cd <worktree-path>` before the rebase/commit/push commands below so they resolve against the worktree and stay auto-approved.
+Target the worktree explicitly with `git -C <worktree-path>` on every rebase/commit/push command below so they resolve against the worktree and stay auto-approved — never compound a standalone `cd <worktree-path>` with the git command itself.
 
 ## Rebase
 
 Fetch and rebase:
 
 ```bash
-git fetch origin main
-git rebase origin/main
+git -C <worktree-path> fetch origin main
+git -C <worktree-path> rebase origin/main
 ```
 
 If rebase succeeds, rerun full build and tests, then lint (when `lintCommand` is set). An absent `lintCommand` skips the lint step cleanly — no error. If build, tests, or lint fail, clear the goal (`/goal clear`), then stop and report the rebase-induced failure. Lint is an unconditional hard gate here, exactly like build/test: no PR is created if it fails.
@@ -30,7 +30,7 @@ If rebase succeeds, rerun full build and tests, then lint (when `lintCommand` is
 If rebase conflicts, abort, clear the goal (`/goal clear`), report conflicting files, and stop:
 
 ```bash
-git rebase --abort
+git -C <worktree-path> rebase --abort
 ```
 
 Tell the user to resolve manually. Per the atomicity rule above, the next entry into this phase still restarts at the Rebase step, not at Commit — the fetch+rebase is a no-op once the user has already resolved and completed it locally, and this guarantees a fresh build/test/lint pass on the rebased tree before Commit runs.
@@ -40,15 +40,15 @@ Tell the user to resolve manually. Per the atomicity rule above, the next entry 
 Stage and commit:
 
 ```bash
-git add -A
-git commit -m "<type>(<scope>): <description>
+git -C <worktree-path> add -A
+git -C <worktree-path> commit -m "<type>(<scope>): <description>
 
 <body if needed>
 
 <ticket-ref>"
 ```
 
-If a prior turn already committed this work (e.g. a Goal Autopilot resume re-entering after Commit ran once), `git add -A` stages nothing new and `git commit` reports nothing to commit — that is expected, not an error. Skip the commit in that case and proceed to Push; do not create an empty commit or fail the phase over it.
+If a prior turn already committed this work (e.g. a Goal Autopilot resume re-entering after Commit ran once), `git -C <worktree-path> add -A` stages nothing new and `git -C <worktree-path> commit` reports nothing to commit — that is expected, not an error. Skip the commit in that case and proceed to Push; do not create an empty commit or fail the phase over it.
 
 Ticket mode:
 
@@ -61,10 +61,10 @@ Ticketless mode: no ticket reference.
 
 Push the branch:
 
-- Ticket mode: `git push -u origin feature/<ticket-id>-<description>`
-- Ticketless mode: `git push -u origin feature/<auto-slug>`
+- Ticket mode: `git -C <worktree-path> push -u origin feature/<ticket-id>-<description>`
+- Ticketless mode: `git -C <worktree-path> push -u origin feature/<auto-slug>`
 
-If this branch was already pushed in a prior turn (a Goal Autopilot resume) and the atomicity rule's mandatory Rebase restart above rewrote local commit SHAs, the plain push above is rejected as non-fast-forward — this is expected, not a failure. Retry once with `git push --force-with-lease -u origin <branch>`: `--force-with-lease` still refuses if the remote tip isn't what this rebase started from (i.e. someone else pushed to the branch), which surfaces as a genuine conflict to report rather than silently overwriting work.
+If this branch was already pushed in a prior turn (a Goal Autopilot resume) and the atomicity rule's mandatory Rebase restart above rewrote local commit SHAs, the plain push above is rejected as non-fast-forward — this is expected, not a failure. Retry once with `git -C <worktree-path> push --force-with-lease -u origin <branch>`: `--force-with-lease` still refuses if the remote tip isn't what this rebase started from (i.e. someone else pushed to the branch), which surfaces as a genuine conflict to report rather than silently overwriting work.
 
 If push fails due to sandbox/network/auth, clear the goal (`/goal clear`), show the exact command, and use `AskUserQuestion` ("Pushed, continue" / "Abort") to wait for the user to push manually before continuing.
 
