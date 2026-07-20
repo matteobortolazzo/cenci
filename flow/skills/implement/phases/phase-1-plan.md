@@ -2,6 +2,10 @@
 
 Read this file only when Phase 1 starts.
 
+## Pipeline: Plan Stage
+
+Ticket mode only, regardless of which branch below runs: at planning start, invoke `cenci pipeline plan <id>` to record `waiting_for_plan_approval` and obtain this stage's `next_actions`/`warnings`/`errors`. Render this as the one-line status update in place of the phase-transition prose each branch below used to narrate on its own. If it returns non-empty `errors[]` (e.g. `plan` invoked before `prepare`), surface them and stop before continuing into any branch below. `plan` here does not itself gate Phase 2 — approval is recorded separately when the human launches the plan-file run (see `phase-2-worktree.md`'s Gate Check). Ticketless mode: skip this invocation — the pipeline commands operate on ticket IDs.
+
 ## Existing Plan
 
 If `hasPlanFile` is true, skip new planning:
@@ -9,7 +13,7 @@ If `hasPlanFile` is true, skip new planning:
 1. The plan file was already read and parsed during mode detection. Source ticket details, user context, Q&A, implementation plan, architectural context, design context, and attachment summaries from it.
 2. Compare `planCommitSha` from front matter to `git rev-parse HEAD`. If they differ, inspect the intervening commits and their diffs against the plan's scope and assumptions. A SHA mismatch alone is not a reason to ask the user. If the changes are clearly unrelated or do not invalidate or materially complicate the plan, briefly note that the plan is behind but still applicable and continue automatically. Ask only when there is a concrete conflict or reasonable doubt about whether the existing plan remains valid. In that case, explain the specific potentially relevant changes and use `AskUserQuestion` with "Continue with existing plan" and "Re-plan from scratch". If re-planning, delete the plan file and run normal planning. No board-label change is needed here: this is a plan-file-mode run, so `Working` was already added at pipeline start (`Planned` stays — see the **Label "Working"** section of `SKILL.md`); the re-run's new-plan path re-applies (harmlessly re-adds) `Planned` at the end when it persists the fresh plan.
 3. In ticket mode, re-fetch the ticket and compare state/body with `## Ticket Details`. If changed, require confirmation via `AskUserQuestion` ("Continue" / "Abort") before continuing. (This single read-only `gh issue view` is the sanctioned exception to the "no ticket fetch in the main agent" rule — it runs after the pre-flight check, and the context-gatherer is not used in plan file mode.)
-4. Proceed to Phase 2 with context from the plan file.
+4. Render the `next_actions` from the `cenci pipeline plan <id>` call above (see `## Pipeline: Plan Stage`) as this step's status update; they point to Phase 2.
 
 ## Trivial Fast Path
 
@@ -28,7 +32,7 @@ If `hasPlanFile` is false and the main agent's Trivial-Ticket Triage (see `SKILL
    ```
    **Verify this command succeeded before continuing.** This restates — does not merely reference — `## Persist the Plan`'s error-surfacing rule, and it is *more* load-bearing here: the normal flow's plan-review stop is itself a human checkpoint that would catch a silently-failed label swap, but the Trivial Fast Path has no such checkpoint — it continues straight into Phase 2 and can arm an unattended `/goal` autopilot all the way to PR creation. If this command errors, surface the error to the user and **STOP** — do not set `hasPlanFile = true`, do not arm the goal, and do not proceed into Phase 2 on an unconfirmed board state.
 5. If `cenci.planComment: true`, post the minimal plan as an audit comment exactly as today (see `## Persist the Plan`).
-6. Set `hasPlanFile = true` and continue directly into Phase 2 in the same session. Do **not** stop, do **not** present the plan for review, do **not** end the turn — this is the sole exception to "a session that creates a new plan always ends at Phase 1" (see `SKILL.md`'s Pipeline section).
+6. Set `hasPlanFile = true` and continue into Phase 2 in the same session, per the `next_actions` rendered from the `cenci pipeline plan <id>` call above (see `## Pipeline: Plan Stage`). Do **not** stop, do **not** present the plan for review, do **not** end the turn — this is the sole exception to "a session that creates a new plan always ends at Phase 1" (see `SKILL.md`'s Pipeline section).
 
 ## New Plan
 
@@ -37,7 +41,7 @@ If `hasPlanFile` is false (and the Trivial Fast Path above did not apply), analy
 Mandatory stops:
 
 1. If the planner has clarifying questions, ask them with `AskUserQuestion` and end the turn.
-2. Once the planner has no remaining questions, persist the plan and stop, presenting the full plan in the final message. There is **no plan-approval prompt**: answering the clarifying questions is the user's input to planning; reviewing the saved plan and launching the plan-file run is the approval. Implementation resumes by invoking `/cenci:implement .plans/<filename>` in a fresh session.
+2. Once the planner has no remaining questions, persist the plan and stop, presenting the full plan together with the `next_actions` rendered from the `cenci pipeline plan <id>` call above (see `## Pipeline: Plan Stage`) in the final message. There is **no plan-approval prompt**: answering the clarifying questions is the user's input to planning; reviewing the saved plan and launching the plan-file run is the approval — which is what advances the pipeline state past `waiting_for_plan_approval` (see `phase-2-worktree.md`'s Gate Check). Implementation resumes by invoking `/cenci:implement .plans/<filename>` in a fresh session.
 
 Never begin Phase 2 in a session that created a new plan — not in the same turn, and not in a later turn. Phases 2–9 require invocation with a plan-file argument, except the Trivial Fast Path (see `## Trivial Fast Path` above).
 
