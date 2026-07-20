@@ -135,7 +135,7 @@ companion) for every skill, including the internal ones not listed above.
 | `design` | — | attachments,codex-runtime project-core,shell-rules ticket-ownership | — | — |
 | `frontend-classification` | — | implement,refine | — | — |
 | `garden` | — | codex-runtime,project-core shell-rules,worktrees | — | — |
-| `implement` | phase-1-plan.md,phase-2-worktree.md phase-3-test-red.md,phase-4-implement-green.md phase-5-refactor.md,phase-6-7-review.md phase-8-docs.md,phase-9-pr.md | attachments,codex-runtime frontend-classification,project-core shell-rules,subagent-safety ticket-ownership | — | code-reviewer,context-gatherer |
+| `implement` | phase-1-plan.md,phase-2-worktree.md phase-3-test-red.md,phase-4-implement-green.md phase-5-refactor.md,phase-6-7-review.md phase-8-docs.md,phase-9-pr.md | attachments,codex-runtime frontend-classification,project-core shell-rules,subagent-safety ticket-ownership | run-artifact-dir.sh | code-reviewer,context-gatherer |
 | `pr-comment-filter` | — | address-review,babysit | — | — |
 | `project-core` | — | — | — | — |
 | `refactor` | — | codex-runtime,project-core shell-rules,subagent-safety | — | — |

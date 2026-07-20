@@ -52,6 +52,8 @@ jobs:
         run: bash flow/hooks/scripts/check-sensitive-files.test.sh
       - name: Verify maintain checker test suite
         run: bash flow/tests/maintain.test.sh
+      - name: Verify implement review-artifact scoping
+        run: bash flow/tests/implement-review-artifacts.test.sh
       - name: Run maintain checker (changed files)
         if: ${{ github.event_name == 'pull_request' }}
         env:
