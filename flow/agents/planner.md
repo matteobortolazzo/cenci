@@ -108,6 +108,26 @@ Before finalizing the plan, explicitly identify:
     1. <step>
     2. <step>
 
+    ### Parallel Lanes (optional — omit by default)
+    Declare lanes ONLY when every condition holds; when in doubt, omit this section
+    and the pipeline implements sequentially (the safe default):
+
+    - The plan contains 2+ genuinely independent work streams, each a coherent slice.
+    - The lanes' file sets (Files to Modify + Files to Create) are fully disjoint —
+      every planned file belongs to exactly one lane. If any file is needed by two
+      lanes, do not declare lanes at all.
+    - Each lane is independently testable with a lane-scoped test command or pattern.
+    - The work is not security/auth/payment-related and not a data migration.
+    - The work is not UI/frontend (design pre-read and visual verification require
+      the sequential path).
+
+    Format (repeat per lane):
+
+    Lane 1: <short name>
+    - Files: <exact subset of Files to Modify/Create owned by this lane>
+    - Tests: <lane-scoped test command or pattern>
+    - Scope: <what this lane implements, including its acceptance criteria>
+
     ### Test Strategy
     For each component/file, classify and specify test types:
 
@@ -115,7 +135,12 @@ Before finalizing the plan, explicitly identify:
     |---|---|---|
     | `login.component.ts` | Critical Journey | E2E + Integration |
     | `user-avatar.component.ts` | Presentational | Skip (parent covers) |
-    | `dashboard.component.ts` | Smart + Data Display | Integration + Unit |
+    | `dashboard.component.ts` | Smart + Data Display | Integration + Unit (validators: edge-case input matrix) |
+
+    Any `Unit` entry must carry a one-line justification in the table: what the unit
+    test catches that an integration test cannot reasonably catch. If no such
+    justification exists, plan integration coverage instead — coverage means
+    acceptance criteria exercised through the real stack, not unit-test count.
 
     E2E scope: <list user journeys needing E2E>
     Visual verification: <list components needing visual checks>

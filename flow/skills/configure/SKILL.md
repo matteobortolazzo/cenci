@@ -1101,6 +1101,7 @@ For each MCP selected in question 5:
   "cenci": {
     "compactImplementation": false,
     "reviewConcurrency": "parallel",
+    "implementerConcurrency": "parallel",
     "diffContextMode": "inline",
     "liteReviewEnabled": true,
     "goalAutopilot": true,
@@ -1125,6 +1126,7 @@ For each MCP selected in question 5:
 The `cenci` field is optional. If present, preserve existing user values during reconfiguration. Schema:
 - `compactImplementation` — `true` allows small, low-risk tickets to combine red/green/refactor into one implementer subagent turn while preserving all TDD/reporting gates. Default: `false`.
 - `reviewConcurrency` — `"parallel"` runs security, code, and silent-failure reviews together; `"sequential"` runs the same reviews one after another to smooth usage limits. Default: `"parallel"`.
+- `implementerConcurrency` — `"parallel"` (default) runs planner-declared `### Parallel Lanes` implementers concurrently during implement Phase 3; `"sequential"` runs the same lanes one after another to smooth usage limits. Quality gates identical either way; the setting never creates lanes on its own — plans without a lanes section always run the standard sequential flow.
 - `diffContextMode` — `"inline"` passes small diffs directly to reviewers; `"file"` writes the diff to this implement run's artifact directory (`$RUN_DIR/diff.patch` — see implement Phase 6 + 7) and passes paths so reviewers read targeted hunks. Default: `"inline"`.
 - `liteReviewEnabled` — `true` (default) lets Phase 6 + 7 classify each diff into `full` (all three reviewers), `lite-docs` (no reviewers, docs-only), or `lite-small` (`code-reviewer` only, small config/data-only diffs); `false` forces the full trio on every run regardless of diff size or content. See Phase 6 + 7 for the precedence-ordered classification rules.
 - `goalAutopilot` — `true` attempts to arm a native `/goal` completion condition at Phase 2 start so implement phases 2–9 resume through to an open PR after a mid-phase stop, falling back to running without one if `/goal` is unavailable; `false` opts out. Default (unset): enabled, a graceful no-op when `/goal` is unsupported.
