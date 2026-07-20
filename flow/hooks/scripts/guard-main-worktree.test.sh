@@ -332,6 +332,23 @@ else
     fail "dangling symlink leaf under .worktrees/: stderr should contain BLOCKED"
 fi
 
+# Case: a present-but-empty file_path must fall back to filePath (jq `//`
+# bug). jq's `//` alternative operator only falls back on null/false, NOT on
+# an empty string. A payload with BOTH keys present, file_path set to "" and
+# filePath set to a genuine main-worktree source path, previously extracted
+# "" (the `//` never tried filePath because "" is not null) and hit the
+# empty-path early `exit 0` -- silently ALLOWING the write. The extraction
+# must check emptiness explicitly so a present-but-empty file_path correctly
+# falls through to filePath.
+echo "case: empty file_path falls back to filePath (jq // does not treat \"\" as fallback trigger)"
+run_guard "${HARDEN_REPO}" "{\"tool_input\":{\"file_path\":\"\",\"filePath\":\"${HARDEN_REPO}/src/foo.txt\"}}"
+assert_exit "empty file_path falls back to filePath" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "empty file_path falls back to filePath: stderr should contain BLOCKED"
+fi
+
 # ── Summary ──────────────────────────────────────────────────────────
 echo
 echo "passed: ${PASSES}, failed: ${FAILURES}"
