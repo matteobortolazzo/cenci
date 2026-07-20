@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"log"
+	"strings"
 
 	"github.com/matteobortolazzo/cenci/watch/internal/detect"
 	"github.com/matteobortolazzo/cenci/watch/internal/frontend"
@@ -67,6 +68,12 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 	if status == detect.StatusUnknown {
 		return
 	}
+	if status == detect.StatusRunning && sess.Status == detect.StatusNeedInput && suppressNeedInputClear(event, sess) {
+		if d.cfg.Verbose {
+			log.Printf("attention: suppressing %s (tool=%s agent=%s) clearing need-input on session %s", event.EventType, event.ToolName, event.AgentID, key)
+		}
+		return
+	}
 	sess.Status = status
 	switch status {
 	case detect.StatusNeedInput:
@@ -92,6 +99,36 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 	}
 
 	d.broadcast()
+}
+
+// suppressNeedInputClear reports whether a Running-mapping event must be
+// ignored while a session is waiting on user input (NeedInput), rather than
+// clearing it back to running (#544). Two cases:
+//
+//   - The event belongs to a subagent (Task tool delegation, AgentID set).
+//     A backgrounded subagent fires its own PreToolUse/PostToolUse on the
+//     same session_id as the main agent; those must never affect the main
+//     session's attention state, matching the existing Done/Stopped guard
+//     in mapEventToStatus (#277).
+//   - The event is a PostToolUse for a tool call that started before the
+//     input-blocking tool and is only now completing (its tool name doesn't
+//     match the tool recorded in AttentionSource). Each `cenci notify`
+//     invocation is an independent process racing to the daemon's socket,
+//     so a prior tool's completion can be delivered after the
+//     PreToolUse(AskUserQuestion) that set NeedInput.
+//
+// A PreToolUse from the main agent itself is never suppressed — it always
+// means the agent has resumed and is doing new work (see
+// TestDaemon_AskUserQuestionSetsNeedInput).
+func suppressNeedInputClear(event ipc.HookEvent, sess *frontend.SessionState) bool {
+	if event.AgentID != "" {
+		return true
+	}
+	if event.EventType != "PostToolUse" {
+		return false
+	}
+	expectedTool, ok := strings.CutPrefix(sess.AttentionSource, "input-tool:")
+	return ok && expectedTool != "" && expectedTool != event.ToolName
 }
 
 func attentionSource(event ipc.HookEvent) string {
