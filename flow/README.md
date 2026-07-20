@@ -161,6 +161,7 @@ companion) for every skill, including the internal ones not listed above.
 - `docs/opencode.md`
 
 **Core workflow docs**
+- `docs/adapter-contract.md`
 - `docs/git-workflow.md`
 - `docs/pipeline-safety.md`
 - `docs/shell-scripting-gotchas.md`
