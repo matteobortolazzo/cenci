@@ -26,7 +26,12 @@
 # any "warn". "skip" never blocks.
 #
 # Checker scope: the flow project (slug "flow") plus repo-root instruction/
-# config files — not watch/ or sandbox/ (see the ticket #530 plan).
+# config files — not watch/ or sandbox/ (see the ticket #530 plan). Check
+# BODIES remain flow-scoped under this charter; ticket #532 only extends
+# --changed relevance (is_relevant()) so a change under any configured
+# sibling project (e.g. watch/, sandbox/) maps to the three cross-project
+# checks (command-flags, config-examples, roadmap-status) instead of being a
+# silent no-op. No existing check body gained project-generalization logic.
 set -uo pipefail
 
 # Force deterministic sort/glob ordering regardless of the invoking
@@ -201,6 +206,47 @@ resolve_flow_dir() {
   fi
 }
 
+# Populate PROJECT_PATHS (repo-root-relative dir prefixes for every configured
+# project) from .cenci/config.json's projects[].path. Single-repo configs yield
+# ("") meaning the repo root. Used only by is_relevant()'s --changed mapping so a
+# change under any project subtree maps to the cross-project checks instead of a
+# silent no-op; it never widens what a check body scans (that stays flow-scoped
+# per the #530 charter).
+resolve_project_dirs() {
+  local cfg="$ROOT/.cenci/config.json" p jq_out jq_rc
+  PROJECT_PATHS=()
+  if [[ -f "$cfg" && "$(config_is_monorepo "$cfg")" == "true" ]]; then
+    jq_out="$(jq -r '.projects[]?.path // empty' "$cfg" 2>/dev/null)"
+    jq_rc=$?
+    if [[ "$jq_rc" -eq 0 ]]; then
+      while IFS= read -r p; do
+        [[ -n "$p" && "$p" != "null" ]] && PROJECT_PATHS+=("$p")
+      done <<< "$jq_out"
+    fi
+    # jq_rc != 0 here means a genuinely malformed config.json (distinct from
+    # a legitimate single-repo/no-.projects[] config, which jq parses cleanly
+    # and just yields no output) -- deliberately not conflated with that case
+    # above; PROJECT_PATHS still falls through to the single-repo default
+    # below either way. This is safe because PROJECT_PATHS only ever feeds
+    # is_relevant()'s --changed relevance mapping (never a check body's scan
+    # scope), and the parse failure itself is already surfaced loudly and
+    # separately by check_invalid_json's own dedicated result.
+  fi
+  [[ "${#PROJECT_PATHS[@]}" -eq 0 ]] && PROJECT_PATHS=("")
+}
+
+# file_under_project <repo-root-relative-path> — true if the path falls under
+# any configured project's directory (or the config is single-repo, in which
+# case everything is "in-project"). Consumed only by is_relevant().
+file_under_project() {
+  local f="$1" p
+  for p in "${PROJECT_PATHS[@]}"; do
+    [[ -z "$p" ]] && return 0                 # single-repo: everything is in-project
+    case "$f" in "$p"/*) return 0 ;; esac
+  done
+  return 1
+}
+
 # ============================================================================
 # Result buffer (NDJSON) + text/JSON rendering
 # ============================================================================
@@ -274,6 +320,13 @@ is_relevant() {
         case "$f" in .claude/rules/*|AGENTS.md|CLAUDE.md|flow/AGENTS.md|flow/CLAUDE.md) return 0 ;; esac ;;
       legacy-lessons)
         case "$f" in .claude/rules/lessons-learned*) return 0 ;; esac ;;
+      command-flags)
+        case "$f" in docs/*.md|flow/docs/*.md|flow/skills/*|flow/README.md|README.md|watch/*_cmd.go|docs/cli-conventions.md) return 0 ;; esac ;;
+      config-examples)
+        case "$f" in docs/*.md|flow/docs/*.md|flow/README.md|README.md|.cenci/config.json) return 0 ;; esac ;;
+      roadmap-status)
+        case "$f" in docs/roadmap.md|flow/skills/*|flow/agents/*|watch/*_cmd.go) return 0 ;; esac
+        file_under_project "$f" && return 0 ;;
     esac
   done
   return 1
@@ -979,6 +1032,243 @@ check_context_budget() {
 }
 
 # ============================================================================
+# command-flags / config-examples / roadmap-status (ticket #532)
+# ============================================================================
+
+# check_command_flags (id command-flags) — Q2 cross-reference. Only inspects
+# backtick spans that begin with "cenci " (precise; avoids flagging git/gh/
+# arbitrary flags). Each span's verb chain and any --flags must each resolve
+# in at least one definition surface (watch/main.go, watch/*_cmd.go,
+# docs/cli-conventions.md, skill SKILL.md/phases/codex.md files); otherwise
+# the span is flagged. watch/main.go is included alongside watch/*_cmd.go
+# because some top-level verbs (e.g. `doctor`, `update`, `uninstall`) dispatch
+# directly from main.go and never get their own *_cmd.go file.
+#
+# Tokenizing a doc's `cenci ...` span: many real spans embed placeholder
+# syntax (`<ticket>`, `{number}`, `[--flag]`, `a|b`) that can never appear
+# verbatim in a definition surface, and shortened/bracketed doc phrasing of a
+# real flag (e.g. a doc's `[--volumes]` vs. the real source's
+# `[--images] [--volumes]`) is not expected to match a defining source
+# byte-for-byte either. So the verb chain is only ever built from the run of
+# leading tokens that are neither flag-shaped (`--x`) nor placeholder-shaped
+# (containing `<`, `{`, `[`, or `|`) nor a bare `--` (an argv separator, not a
+# named flag) — the first such token stops the verb chain from growing any
+# further, and only that leading run needs to resolve verbatim. Well-formed
+# `--flag` tokens are still validated individually (found anywhere in the
+# span, even past where the verb chain stopped); anything else (bare
+# placeholder tokens, or plain words trailing after a flag/placeholder, e.g.
+# an example's argument value) is not itself checked.
+check_command_flags() {
+  local corpus_file target f span rest verb_str flag any_fail=0
+  corpus_file="$(mktemp)" || { echo "check.sh: mktemp failed" >&2; exit 2; }
+
+  for f in "$ROOT/watch/main.go" "$ROOT"/watch/*_cmd.go "$ROOT/docs/cli-conventions.md" \
+           "$FLOW_DIR"/skills/*/SKILL.md "$FLOW_DIR"/skills/*/phases/*.md "$FLOW_DIR"/skills/*/codex.md; do
+    [[ -f "$f" ]] && cat "$f" >> "$corpus_file"
+  done
+
+  for target in "$ROOT"/docs/*.md "$FLOW_DIR"/docs/*.md "$FLOW_DIR/README.md" "$ROOT/README.md" \
+                "$FLOW_DIR"/skills/*/SKILL.md "$FLOW_DIR"/skills/*/phases/*.md; do
+    [[ -f "$target" ]] || continue
+    while IFS= read -r span; do
+      [[ -n "$span" ]] || continue
+      rest="${span#cenci }"
+      local -a toks=() verb_toks=() flag_toks=()
+      IFS=' ' read -r -a toks <<< "$rest"
+      local t stopped=0
+      for t in "${toks[@]}"; do
+        case "$t" in
+          *[\<\{\[\|]*)
+            # placeholder/bracket/pipe/angle-bracket token: never itself
+            # checked, and stops the verb chain from growing further.
+            stopped=1
+            continue
+            ;;
+        esac
+        case "$t" in
+          --)
+            # bare argv separator, not a named flag: stops the verb chain,
+            # nothing to validate.
+            stopped=1
+            continue
+            ;;
+          --?*)
+            flag_toks+=("$t")
+            stopped=1
+            continue
+            ;;
+        esac
+        [[ "$stopped" -eq 0 ]] && verb_toks+=("$t")
+      done
+      verb_str="${verb_toks[*]:-}"
+      local unresolved=0
+      if [[ -n "$verb_str" ]] && ! grep -qF -- "$verb_str" "$corpus_file"; then
+        unresolved=1
+      fi
+      for flag in "${flag_toks[@]:-}"; do
+        [[ -n "$flag" ]] || continue
+        grep -qF -- "$flag" "$corpus_file" || unresolved=1
+      done
+      if [[ "$unresolved" -eq 1 ]]; then
+        add_result command-flags "$(relpath "$target")" fail \
+          "\`cenci ${rest}\` in $(relpath "$target") references a CLI command/flag defined in no known surface (watch/main.go, watch/*_cmd.go, docs/cli-conventions.md, skills)" \
+          "update or remove the stale command/flag reference in $(relpath "$target"), or add the command to its definition surface"
+        any_fail=1
+      fi
+    done < <(grep -oE '`cenci [^`]*`' "$target" 2>/dev/null | tr -d '`')
+  done
+
+  rm -f "$corpus_file"
+  [[ "$any_fail" -eq 0 ]] && add_result command-flags "(repo)" pass "no stale cenci command/flag references found" ""
+}
+
+# check_config_examples (id config-examples) — Q3. Fenced ```json blocks that
+# look config-shaped (contain at least one signal key from the live
+# .cenci/config.json schema) must parse as JSON and use only field names
+# present in that live schema.
+CONFIG_SIGNAL_KEYS=(projects isMonorepo gateCommand guidanceLocation branchPattern buildCommand testCommand lintCommand serveCommand mcpServers lspServers)
+
+_is_config_shaped_block() {
+  local block="$1" k
+  for k in "${CONFIG_SIGNAL_KEYS[@]}"; do
+    grep -qF "\"$k\"" <<< "$block" && return 0
+  done
+  return 1
+}
+
+# extract_json_blocks <file> — prints each fenced ```json ... ``` block's
+# body, terminated by a sentinel line, so a caller can iterate multiple
+# blocks per file safely. NUL-delimiting (the usual idiom elsewhere in this
+# script) is deliberately avoided here: awk's printf "\0" is not portable
+# (mawk silently drops it instead of emitting a null byte), so a text
+# sentinel line is used instead -- safe because JSON content can never
+# legitimately contain this exact line on its own.
+_JSON_BLOCK_SENTINEL="@@CENCI-MAINTAIN-JSON-BLOCK-END@@"
+
+extract_json_blocks() {
+  local file="$1"
+  awk -v sentinel="$_JSON_BLOCK_SENTINEL" '
+    /^```json[ \t]*$/ { inblock=1; buf=""; next }
+    inblock && /^```[ \t]*$/ { inblock=0; print buf sentinel; next }
+    inblock { buf = buf $0 "\n" }
+    # An opened ```json fence that is never closed before EOF must still be
+    # routed through validation instead of its buffered content silently
+    # vanishing (no fail/warn ever emitted for it).
+    END { if (inblock) print buf sentinel }
+  ' "$file"
+}
+
+check_config_examples() {
+  local cfg="$ROOT/.cenci/config.json" schema_keys any_fail=0 target rel line block k keys schema_rc
+  schema_keys="$(jq -r '[.. | objects | keys[]] | unique[]' "$cfg" 2>/dev/null)"
+  schema_rc=$?
+  if [[ "$schema_rc" -ne 0 ]]; then
+    # Missing or malformed .cenci/config.json: the live schema itself is
+    # unavailable, so no config-shaped example's fields can be meaningfully
+    # compared against it. Surface that explicitly and skip every per-key
+    # comparison below -- otherwise every config-shaped block found
+    # afterward would get ALL its keys reported as "not present in schema",
+    # a misleading fail cascade whose true cause (schema unavailable) is
+    # never surfaced. check_invalid_json already reports a malformed
+    # config.json in its own right; this is a distinct, config-examples-
+    # scoped signal that its own comparisons could not run.
+    add_result config-examples "(repo)" skip \
+      "live .cenci/config.json schema is unavailable (missing or does not parse), so config examples cannot be validated against it" \
+      ""
+    return
+  fi
+
+  for target in "$ROOT"/docs/*.md "$FLOW_DIR"/docs/*.md "$FLOW_DIR/README.md" "$ROOT/README.md"; do
+    [[ -f "$target" ]] || continue
+    rel="$(relpath "$target")"
+    block=""
+    while IFS= read -r line; do
+      if [[ "$line" == "$_JSON_BLOCK_SENTINEL" ]]; then
+        if _is_config_shaped_block "$block"; then
+          if ! jq empty <<< "$block" >/dev/null 2>&1; then
+            add_result config-examples "$rel" fail \
+              "config example in $rel does not parse as JSON" \
+              "fix the malformed JSON in the config example block in $rel"
+            any_fail=1
+          else
+            keys="$(jq -r '[.. | objects | keys[]] | unique[]' <<< "$block" 2>/dev/null)"
+            while IFS= read -r k; do
+              [[ -n "$k" ]] || continue
+              if ! grep -qxF -- "$k" <<< "$schema_keys"; then
+                add_result config-examples "$rel" fail \
+                  "config example in $rel uses field \`$k\` not present in the live .cenci/config.json schema" \
+                  "update the config example to match the current .cenci/config.json schema (field renamed/removed), or fix the JSON"
+                any_fail=1
+              fi
+            done <<< "$keys"
+          fi
+        fi
+        block=""
+        continue
+      fi
+      block+="$line"$'\n'
+    done < <(extract_json_blocks "$target")
+  done
+
+  [[ "$any_fail" -eq 0 ]] && add_result config-examples "(repo)" pass "all config examples match the live .cenci/config.json schema" ""
+}
+
+# check_roadmap_status (id roadmap-status) — name-reference staleness only.
+# Restricted to unambiguous backticked token classes (file-path-shaped,
+# skill-invocation-shaped) so label words like `Planned`/`Working` are never
+# flagged. `cenci <verb>` command spans are intentionally not revalidated here
+# (command-flags already scans docs/*.md, including roadmap.md, for those).
+_roadmap_token_is_path_shaped() {
+  local t="$1"
+  [[ "$t" == */* ]] || return 1
+  # Reject any '..' path-traversal segment before ever reaching the -f test
+  # against "$ROOT/$inner" below -- matches the repo's established
+  # traversal-guard convention (see guard-main-worktree.sh). A token like
+  # this is simply treated as not path-shaped (no result emitted either way).
+  case "$t" in
+    *..*) return 1 ;;
+  esac
+  case "$t" in
+    *.md|*.sh|*.go|*.json) return 0 ;;
+  esac
+  file_under_project "$t"
+}
+
+check_roadmap_status() {
+  local file="$ROOT/docs/roadmap.md"
+  if [[ ! -f "$file" ]]; then
+    add_result roadmap-status "(repo)" skip "docs/roadmap.md not found" ""
+    return
+  fi
+
+  local any_fail=0 span inner name
+  while IFS= read -r span; do
+    [[ -n "$span" ]] || continue
+    inner="$(tr -d '`' <<< "$span")"
+    if [[ "$inner" =~ ^/?cenci:([A-Za-z0-9_-]+)$ ]]; then
+      name="${BASH_REMATCH[1]}"
+      if [[ ! -d "$FLOW_DIR/skills/$name" ]]; then
+        add_result roadmap-status "$inner" fail \
+          "stale reference \`$inner\` in docs/roadmap.md names a skill that no longer exists" \
+          "update the stale reference \`$inner\` in docs/roadmap.md -- the named skill/file no longer exists (renamed or deleted); fix or restore the target"
+        any_fail=1
+      fi
+      continue
+    fi
+    if _roadmap_token_is_path_shaped "$inner"; then
+      if [[ ! -f "$ROOT/$inner" ]]; then
+        add_result roadmap-status "$inner" fail \
+          "stale reference \`$inner\` in docs/roadmap.md names a file that no longer exists" \
+          "update the stale reference \`$inner\` in docs/roadmap.md -- the named skill/file no longer exists (renamed or deleted); fix or restore the target"
+        any_fail=1
+      fi
+    fi
+  done < <(grep -oE '`[^`]+`' "$file" 2>/dev/null)
+
+  [[ "$any_fail" -eq 0 ]] && add_result roadmap-status "(repo)" pass "no stale name references found in docs/roadmap.md" ""
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 main() {
@@ -988,6 +1278,7 @@ main() {
   command -v jq >/dev/null 2>&1 || { echo "check.sh: jq is required but was not found on PATH." >&2; exit 2; }
 
   resolve_flow_dir
+  resolve_project_dirs
 
   RESULTS_FILE="$(mktemp)" || { echo "check.sh: mktemp failed" >&2; exit 2; }
   trap 'rm -f "$RESULTS_FILE"' EXIT
@@ -1016,6 +1307,9 @@ main() {
   is_relevant legacy-lessons && check_legacy_lessons
   check_github_labels
   check_context_budget
+  is_relevant command-flags   && check_command_flags
+  is_relevant config-examples && check_config_examples
+  is_relevant roadmap-status  && check_roadmap_status
 
   local mode
   if [[ "$MODE_STRICT" -eq 1 ]]; then

@@ -130,6 +130,7 @@ _Temporary secret gist, not part of the repo — delete after merge: `gh gist de
 ## Checklist
 - [x] Tests pass
 <Security checklist line — see below>
+<Maintenance check checklist line — see below>
 - [ ] Documentation updated
 
 ## Notes
@@ -154,6 +155,17 @@ The `## Checklist` security line is derived from the same `$RUN_DIR/review-path.
 - `full` → `- [x] Security review done`
 - `lite-docs` or `lite-small` → `- [ ] Security review skipped (see Review section — <path>)`, where `<path>` is the literal path value (`lite-docs` or `lite-small`)
 - `$RUN_DIR` unknown or file absent → `- [ ] Security review status unknown (RUN_DIR lost — verify manually before merge)`, consistent with the "Review: unknown" fallback above — never claim a security review was done, or was skipped, when the actual path isn't known; an unverifiable state must read as unverifiable, not as either known outcome.
+
+The `## Checklist` Maintenance check line is derived from `$RUN_DIR/maintain-status.txt` (written by Phase 8's Maintenance Check sub-step), read next to `review-path.txt` above:
+
+- summary line has no trailing `— <tag>` at all (the all-clean case: zero non-pass results, nothing to repair/report/halt) → `- [x] Maintenance check passed`
+- summary line shows `— repaired` and no `fail` → `- [x] Maintenance check passed (auto-repaired same-PR drift — see Notes)`
+- summary line shows `— reported` → `- [ ] Maintenance check: findings reported (see Notes)`
+- file's first line is `maintenance: skipped …` → `- [x] Maintenance check: not applicable`
+- file's first line is `maintenance: error …` (the checker itself crashed with no `summary:` line — see Phase 8's checker-crash guard) → `- [ ] Maintenance check: error (checker execution failed — verify manually before merge)` — never render this as a pass; the checker never produced a real pass/fail summary to report on.
+- `$RUN_DIR` unknown or the file is absent → `- [ ] Maintenance check status unknown (RUN_DIR lost — verify manually before merge)`, mirroring the Review/Security "RUN_DIR lost" honesty rule above.
+
+Any reported or deferred maintenance findings (from a `— reported` status) each append one line to `## Notes`. The Cleanup step's `rm -rf "$RUN_DIR"` already removes `maintain-status.txt` with the rest of the run's artifacts — no new cleanup line is needed.
 
 `## Screenshots` appears only when `isUiTicket` is true: one `### <name>` + image per captured screen/state, or the fallback note from the Screenshots section above. Omit the section entirely for non-UI work. If the user chose "Proceed without design" at the Design Check, add "Implemented without design spec — extra visual review recommended." to `## Notes`.
 

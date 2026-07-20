@@ -81,6 +81,16 @@ assert_no_result() {
   is_eq0 "${n}" || fail "${label}: expected 0 results for '${check}' (narrowed-out category), got '${n:-N/A}'"
 }
 
+# assert_check_ran <check-id> <label> — opposite of assert_no_result: asserts
+# the given check produced at least one result (any status), proving a
+# --changed mapping actually invoked it instead of leaving it a silent no-op.
+assert_check_ran() {
+  local check="$1" label="$2"
+  local n
+  n="$(printf '%s' "${REPORT_JSON}" | jq --arg c "$1" '[.results[]? | select(.check==$c)] | length' 2>/dev/null)"
+  is_ge1 "${n}" || fail "${label}: expected '${check}' to have produced at least one result (not a no-op), got '${n:-N/A}'"
+}
+
 assert_all_fixes_present() {
   local label="$1"
   local n
@@ -801,6 +811,311 @@ assert_eq "$(cat "${ROOT}/flow/README.md")" "${before_content}" "case24c must no
 run_check "${ROOT}" --write
 assert_exit_nonzero "case24c --write on reversed marker pair must also fail closed"
 assert_eq "$(cat "${ROOT}/flow/README.md")" "${before_content}" "case24c --write must not silently delete content after the reversed start marker"
+rm -rf "${ROOT}"
+
+# =====================================================================
+# Case 25: command-flags — stale `cenci <verb>` references (ticket #532,
+# Q2 cross-reference: watch/*_cmd.go, docs/cli-conventions.md, skills)
+# =====================================================================
+
+# 25a. A `cenci <renamed-verb>` span in a repo-root doc that resolves in none
+# of the definition surfaces must fail, with a fix pointer.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/docs"
+cat > "${ROOT}/docs/example.md" <<'EOF'
+# Example doc
+
+Run `cenci ghost-verb --ghost-flag` to do a thing that was renamed away.
+EOF
+run_check "${ROOT}"
+assert_has_result "command-flags" "fail" "case25a stale cenci command/flag reference"
+assert_all_fixes_present "case25a command-flags fail must carry a fix"
+rm -rf "${ROOT}"
+
+# 25b. A valid `cenci <verb>` present in a watch/*_cmd.go fixture must not be
+# flagged for the doc span that references it.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/watch"
+cat > "${ROOT}/watch/real_cmd.go" <<'EOF'
+package main
+
+// real-verb is registered as `cenci real-verb`.
+func realVerbCmd() {}
+EOF
+mkdir -p "${ROOT}/docs"
+cat > "${ROOT}/docs/example.md" <<'EOF'
+# Example doc
+
+Run `cenci real-verb` to do a real, still-supported thing.
+EOF
+run_check "${ROOT}"
+n_cf_fail="$(count_results "command-flags" "fail")"
+is_eq0 "${n_cf_fail}" || fail "case25b: valid cenci command present in watch/*_cmd.go must not fail command-flags (got ${n_cf_fail})"
+rm -rf "${ROOT}"
+
+# =====================================================================
+# Case 26: config-examples — config-shaped fenced ```json blocks (ticket #532,
+# Q3 cross-reference: the live .cenci/config.json key set)
+# =====================================================================
+
+# 26a. A config-shaped block with a renamed/invalid field absent from the
+# fixture's live .cenci/config.json schema must fail, with a fix pointer.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/docs"
+cat > "${ROOT}/docs/getting-started.md" <<'EOF'
+# Getting started
+
+Example `.cenci/config.json`:
+
+```json
+{
+  "isMonorepo": true,
+  "guidanceLocation": "AGENTS.md",
+  "gateCommandRenamed": "npm test"
+}
+```
+EOF
+run_check "${ROOT}"
+assert_has_result "config-examples" "fail" "case26a config example uses a field not present in the live config schema"
+assert_all_fixes_present "case26a config-examples fail must carry a fix"
+rm -rf "${ROOT}"
+
+# 26b. A malformed (unparseable) config-shaped block must fail with a
+# parse-error message, not be silently skipped.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/docs"
+cat > "${ROOT}/docs/health-gates.md" <<'EOF'
+# Health gates
+
+Example (malformed) `.cenci/config.json` snippet:
+
+```json
+{
+  "isMonorepo": true,
+  "gateCommand": "npm test",
+```
+EOF
+run_check "${ROOT}"
+assert_has_result "config-examples" "fail" "case26b malformed config example fails to parse as JSON"
+assert_all_fixes_present "case26b config-examples parse-error fail must carry a fix"
+rm -rf "${ROOT}"
+
+# 26c. A config-shaped block whose fields all match the live schema must not
+# be flagged.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/docs"
+cat > "${ROOT}/docs/getting-started.md" <<'EOF'
+# Getting started
+
+Example `.cenci/config.json`:
+
+```json
+{
+  "isMonorepo": true,
+  "guidanceLocation": "AGENTS.md",
+  "projects": [
+    { "slug": "flow", "path": "flow", "gateCommand": "true" }
+  ]
+}
+```
+EOF
+run_check "${ROOT}"
+n_ce_fail="$(count_results "config-examples" "fail")"
+is_eq0 "${n_ce_fail}" || fail "case26c: valid config example matching the live schema must not fail config-examples (got ${n_ce_fail})"
+rm -rf "${ROOT}"
+
+# 26d. A non-config-shaped json block (e.g. a plugin manifest) must be
+# ignored entirely -- no fail or warn triggered by it.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/docs"
+cat > "${ROOT}/docs/plugin-example.md" <<'EOF'
+# Plugin manifest example
+
+```json
+{
+  "name": "cenci-sandbox",
+  "version": "1.0.0",
+  "author": "cenci"
+}
+```
+EOF
+run_check "${ROOT}"
+n_ce_fail="$(count_results "config-examples" "fail")"
+is_eq0 "${n_ce_fail}" || fail "case26d: plugin-manifest-shaped json block must not be flagged by config-examples (got ${n_ce_fail} fail)"
+n_ce_warn="$(count_results "config-examples" "warn")"
+is_eq0 "${n_ce_warn}" || fail "case26d: plugin-manifest-shaped json block must not warn either (got ${n_ce_warn})"
+rm -rf "${ROOT}"
+
+# =====================================================================
+# Case 27: roadmap-status — docs/roadmap.md name-reference staleness only
+# (ticket #532; label words like `Planned`/`Working` must never false-positive)
+# =====================================================================
+
+# 27a. docs/roadmap.md naming a deleted docs/gone.md and a missing
+# /cenci:ghost skill must produce two fails.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/docs"
+cat > "${ROOT}/docs/roadmap.md" <<'EOF'
+# Roadmap
+
+- See `docs/gone.md` for background (file was deleted).
+- The `/cenci:ghost` skill will land in a future milestone.
+EOF
+run_check "${ROOT}"
+n_rm_fail="$(count_results "roadmap-status" "fail")"
+[[ "${n_rm_fail:-0}" =~ ^[0-9]+$ ]] && [[ "${n_rm_fail}" -ge 2 ]] || fail "case27a: expected >=2 roadmap-status fails (deleted doc + missing skill), got ${n_rm_fail:-N/A}"
+assert_all_fixes_present "case27a roadmap-status fails must carry a fix"
+rm -rf "${ROOT}"
+
+# 27b. Label words like `Planned`/`Working` appearing in roadmap.md must not
+# be misread as broken file/skill references.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/docs"
+cat > "${ROOT}/docs/roadmap.md" <<'EOF'
+# Roadmap
+
+- Ticket #532 status: `Planned`.
+- Ticket #533 status: `Working`.
+- Ticket #534 status: `Refined`.
+EOF
+run_check "${ROOT}"
+n_rm_fail="$(count_results "roadmap-status" "fail")"
+is_eq0 "${n_rm_fail}" || fail "case27b: label words like Planned/Working must not be flagged as broken references (got ${n_rm_fail} fail)"
+rm -rf "${ROOT}"
+
+# =====================================================================
+# Case 28: watch/sandbox --changed relevance mapping (ticket #532, Q4:
+# relevance-mapping-only -- watch/** and sandbox/** stop being silent no-ops
+# for the cross-project checks, but existing flow-scoped check bodies are
+# unaffected)
+# =====================================================================
+
+# 28a. `--changed watch/foo_cmd.go` must trigger command-flags and
+# roadmap-status (not a silent no-op).
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+run_check "${ROOT}" --changed watch/foo_cmd.go
+assert_check_ran "command-flags" "case28a watch/foo_cmd.go must trigger command-flags (not a silent no-op)"
+assert_check_ran "roadmap-status" "case28a watch/foo_cmd.go must trigger roadmap-status (not a silent no-op)"
+rm -rf "${ROOT}"
+
+# 28b. `--changed sandbox/lib/x.sh` must trigger roadmap-status via the new
+# file_under_project mechanism (not a silent no-op). file_under_project maps
+# a changed path to a *configured* project's directory, so this fixture's
+# .cenci/config.json must register "sandbox" as a project (setup_base's base
+# config only registers "flow") for the mapping to have anything to match --
+# without this, the assertion below could never legitimately pass regardless
+# of the checker's implementation.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+cat > "${ROOT}/.cenci/config.json" <<'EOF'
+{
+  "isMonorepo": true,
+  "guidanceLocation": "AGENTS.md",
+  "projects": [
+    { "slug": "flow", "path": "flow", "gateCommand": "true" },
+    { "slug": "sandbox", "path": "sandbox", "gateCommand": "true" }
+  ]
+}
+EOF
+run_check "${ROOT}" --changed sandbox/lib/x.sh
+assert_check_ran "roadmap-status" "case28b sandbox/lib/x.sh must trigger roadmap-status via file_under_project (not a silent no-op)"
+rm -rf "${ROOT}"
+
+# 28c. Existing flow-only check bodies (e.g. invalid-json) stay flow-scoped:
+# a broken watch/*.json file must not be picked up by invalid-json's body,
+# even though it is relevant under --changed (per Q4, only is_relevant's
+# --changed mapping and the three new checks gain project awareness).
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/watch"
+printf '{ "broken": true, oops' > "${ROOT}/watch/broken.json"
+run_check "${ROOT}" --changed watch/broken.json
+n_ij_fail="$(count_results "invalid-json" "fail")"
+is_eq0 "${n_ij_fail}" || fail "case28c: invalid-json check body must stay flow-scoped and not fail on watch/broken.json (got ${n_ij_fail})"
+rm -rf "${ROOT}"
+
+# =====================================================================
+# Case 29: command-flags tokenizer/corpus fix cycle (ticket #532 review
+# round 2, item A) -- placeholder/bracket-shaped doc phrasing must not be
+# required to match a definition surface verbatim, and a command dispatched
+# only from a main.go-style file (no *_cmd.go) must still resolve.
+# =====================================================================
+
+# 29a. A doc's shortened bracket-flag phrasing (`[--volumes]`) must resolve
+# against a definition surface whose real text has additional bracketed
+# flags (`[--images] [--volumes]`) -- the bracketed token must stop the verb
+# chain instead of forcing the whole span to match verbatim.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/watch"
+cat > "${ROOT}/watch/sandbox_cmd.go" <<'EOF'
+package main
+
+// runSandboxPrune implements `cenci sandbox prune [--images] [--volumes]`.
+func sandboxPruneCmd() {}
+EOF
+mkdir -p "${ROOT}/docs"
+cat > "${ROOT}/docs/example.md" <<'EOF'
+# Example doc
+
+Run `cenci sandbox prune [--volumes]` to clean up.
+EOF
+run_check "${ROOT}"
+n_cf_fail="$(count_results "command-flags" "fail")"
+is_eq0 "${n_cf_fail}" || fail "case29a: doc's bracketed-flag phrasing must resolve against a corpus fixture with additional bracketed flags (got ${n_cf_fail})"
+rm -rf "${ROOT}"
+
+# 29b. A command dispatched only from a main.go-style fixture (not a
+# *_cmd.go file) must still resolve -- watch/main.go is part of the corpus.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/watch"
+cat > "${ROOT}/watch/main.go" <<'EOF'
+package main
+
+// runDoctor implements `cenci doctor`: shells out to the installed
+// `cenci doctor` wrapper.
+func doctorCmd() {}
+EOF
+mkdir -p "${ROOT}/docs"
+cat > "${ROOT}/docs/example2.md" <<'EOF'
+# Example doc
+
+Run `cenci doctor` to check your setup.
+EOF
+run_check "${ROOT}"
+n_cf_fail="$(count_results "command-flags" "fail")"
+is_eq0 "${n_cf_fail}" || fail "case29b: a command defined only in a main.go-style fixture must resolve (got ${n_cf_fail})"
+rm -rf "${ROOT}"
+
+# =====================================================================
+# Case 30: extract_json_blocks must not silently drop an unterminated
+# ```json fence (ticket #532 review round 2, item B) -- a fenced block that
+# is opened but never closed before EOF must still produce a result.
+# =====================================================================
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/docs"
+cat > "${ROOT}/docs/unterminated.md" <<'EOF'
+# Unterminated example
+
+```json
+{
+  "isMonorepo": true,
+  "gateCommand": "npm test"
+EOF
+run_check "${ROOT}"
+assert_has_result "config-examples" "fail" "case30 unterminated \`\`\`json fence must still produce a config-examples result, not be silently ignored"
+assert_all_fixes_present "case30 config-examples fail must carry a fix"
 rm -rf "${ROOT}"
 
 echo "maintain.test.sh: failures=${failures}"
