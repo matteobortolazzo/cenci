@@ -114,6 +114,7 @@ companion) for every skill, including the internal ones not listed above.
 | `implementer` | Senior developer that implements features using TDD — writes tests first, then implementation. Use for writing code, tests, and making builds pass. | implement |
 | `lessons-collector` | Reviews implementation sessions and routes genuine mistakes into topic-specific docs (or CLAUDE.md) for future prevention. Use after implementation only when something actually went wrong. | implement |
 | `planner` | Senior architect that analyzes tickets and produces implementation plans. Use when planning feature work, analyzing ticket requirements, or breaking down complex tasks. | implement |
+| `refiner` | Senior tech lead that analyzes tickets during backlog refinement — finds ambiguity, drafts clarifying questions, and produces the refined ticket proposal (scope, acceptance criteria, sizing, splits). Use from the refine skill's Q&A relay loop. | refine |
 | `security-analyzer` | Analyzes codebase for security vulnerabilities using OWASP guidelines and official library documentation via Context7. Use for security audits of application code. | — |
 | `security-reviewer` | Security-focused code reviewer that checks for OWASP vulnerabilities, auth issues, and sensitive data exposure. Use after implementation to review security. | implement |
 | `silent-failure-hunter` | Detects silent failure patterns — empty catch blocks, swallowed errors, missing error propagation, and silent fallbacks. Use alongside security and code reviewers during the review phase. | implement |
@@ -139,7 +140,7 @@ companion) for every skill, including the internal ones not listed above.
 | `pr-comment-filter` | — | address-review,babysit | — | — |
 | `project-core` | — | — | — | — |
 | `refactor` | — | codex-runtime,project-core shell-rules,subagent-safety | — | — |
-| `refine` | — | attachments,codex-runtime frontend-classification,project-core shell-rules,ticket-ownership | — | — |
+| `refine` | — | attachments,codex-runtime frontend-classification,project-core shell-rules,subagent-safety ticket-ownership | — | refiner |
 | `review` | — | codex-runtime,project-core shell-rules,subagent-safety | — | — |
 | `shell-rules` | — | implement | — | — |
 | `stack-angular` | — | testing | — | — |
@@ -475,6 +476,7 @@ The plugin uses specialized agents with isolated contexts:
 | Agent | Role | Model | Effort | Permission Mode |
 |-------|------|-------|--------|-----------------|
 | **context-gatherer** | Bundles ticket, design, and project context into a file for the planner | haiku | n/a (haiku) | acceptEdits |
+| **refiner** | Refinement analysis for `/cenci:refine`: ambiguity, questions, refined ticket proposal | opus | high (pinned) | plan (read-only) |
 | **planner** | Analyzes tickets, produces implementation plans | opus | high (pinned) | plan (read-only) |
 | **implementer** | TDD: writes tests first, then implementation | sonnet | high (pinned) | acceptEdits |
 | **security-reviewer** | OWASP-focused security review | opus | high (pinned) | plan (read-only) |
@@ -485,7 +487,7 @@ The plugin uses specialized agents with isolated contexts:
 | **security-analyzer** | OWASP audit for `/cenci:refactor` | sonnet | high (pinned) | plan (read-only) |
 | **lessons-collector** | Routes genuine mistakes to `docs/<topic>.md` or `CLAUDE.md` | haiku | n/a (haiku) | acceptEdits |
 
-**Model & effort tiering**: Opus where judgment is concentrated — `/cenci:refine` and `/cenci:design` pin `model: opus` because scope, acceptance criteria, splits, and UX structure drive everything downstream, and the **planner** and **security-reviewer** agents run opus because the saved plan steers the whole unattended pipeline and a missed vulnerability is the costliest review failure. Sonnet for pipeline orchestration and implementation (`/cenci:implement` pins `model: sonnet`; `/cenci:babysit` pins `model: sonnet` so long-lived loop ticks stay cheap). Haiku for mechanical work — context-gatherer, structure-analyzer, lessons-collector, and `/cenci:sync`.
+**Model & effort tiering**: Opus where judgment is concentrated — `/cenci:design` pins `model: opus` because UX structure drives everything downstream, and the **refiner**, **planner**, and **security-reviewer** agents run opus because refinement scope, acceptance criteria, and splits steer every later phase, the saved plan steers the whole unattended pipeline, and a missed vulnerability is the costliest review failure. Refinement's opus lives in the **refiner agent** rather than the refine skill's frontmatter because a skill-level `model:` pin only lasts the invoking turn — in a multi-turn Q&A loop every follow-up turn silently reverts to the session model, while an agent-level pin holds for the agent's entire run. Sonnet for pipeline orchestration and implementation (`/cenci:refine` and `/cenci:implement` pin `model: sonnet` for orchestration, relaying, and writes; `/cenci:babysit` pins `model: sonnet` so long-lived loop ticks stay cheap). Haiku for mechanical work — context-gatherer, structure-analyzer, lessons-collector, and `/cenci:sync`.
 
 Effort is the second lever: model picks how *capable* the agent is (failures that look like "it didn't know enough"), effort picks how *thorough* it is (failures that look like "it didn't try hard enough"). Subagents inherit the **session** effort level by default, so a session running at low effort would silently degrade the unattended pipeline's planning, implementation, and reviews. Every non-haiku agent therefore pins `effort: high` — thoroughness is guaranteed regardless of the session setting. Skills deliberately stay unpinned: they run during interactive phases, where the user's session effort preference should win. Haiku agents can't be tuned — haiku doesn't support effort.
 
@@ -536,6 +538,7 @@ flow/
 ├── .lsp.json              # LSP server configuration (generated by configure)
 ├── agents/
 │   ├── context-gatherer.md
+│   ├── refiner.md
 │   ├── planner.md
 │   ├── implementer.md
 │   ├── security-reviewer.md
