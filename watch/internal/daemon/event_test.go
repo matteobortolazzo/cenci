@@ -567,6 +567,89 @@ func TestDaemon_SubagentSessionEndDoesNotEndMainSession(t *testing.T) {
 	}
 }
 
+// TestDaemon_StalePostToolUseDoesNotClearNeedInput covers ticket #544: a
+// prior tool call's PostToolUse can be delivered after a subsequent
+// PreToolUse(AskUserQuestion) has already set NeedInput — each `cenci
+// notify` invocation is an independent process racing to the daemon's
+// socket. That stale, mismatched PostToolUse must not clobber the pending
+// question; only the matching PostToolUse (or a genuinely new PreToolUse,
+// covered by TestDaemon_AskUserQuestionSetsNeedInput) clears it.
+func TestDaemon_StalePostToolUseDoesNotClearNeedInput(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "⠋ writing tests", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+	// A prior tool call (Bash) starts, still in flight when AskUserQuestion
+	// fires — its own PostToolUse hasn't been delivered yet.
+	d.handleEvent(ipc.HookEvent{EventType: "PreToolUse", SessionID: "sess1", TmuxPane: "%0", ToolName: "Bash"})
+	d.handleEvent(ipc.HookEvent{EventType: "PreToolUse", SessionID: "sess1", TmuxPane: "%0", ToolName: "AskUserQuestion"})
+
+	if got := d.sessions["sess1"].Status; got != detect.StatusNeedInput {
+		t.Fatalf("precondition: expected StatusNeedInput after PreToolUse(AskUserQuestion), got %v", got)
+	}
+
+	// Bash's PostToolUse arrives late — must not clear the pending question.
+	d.handleEvent(ipc.HookEvent{EventType: "PostToolUse", SessionID: "sess1", TmuxPane: "%0", ToolName: "Bash"})
+
+	if got := d.sessions["sess1"].Status; got != detect.StatusNeedInput {
+		t.Errorf("expected StatusNeedInput to survive a stale PostToolUse(Bash), got %v", got)
+	}
+
+	// The matching PostToolUse for the actual pending question clears it.
+	d.handleEvent(ipc.HookEvent{EventType: "PostToolUse", SessionID: "sess1", TmuxPane: "%0", ToolName: "AskUserQuestion"})
+
+	if got := d.sessions["sess1"].Status; got != detect.StatusRunning {
+		t.Errorf("expected StatusRunning after PostToolUse(AskUserQuestion), got %v", got)
+	}
+}
+
+// TestDaemon_SubagentEventDoesNotClearMainNeedInput covers ticket #544: a
+// backgrounded subagent (Task tool delegation) fires its own PreToolUse and
+// PostToolUse on the same session_id as the main agent. The existing
+// suppression in mapEventToStatus only protects Done/Stopped from a
+// subagent's terminal events (#277) — it must also stop a subagent's
+// Running-mapping events from clobbering a main session that is waiting on
+// user input.
+func TestDaemon_SubagentEventDoesNotClearMainNeedInput(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "⠋ writing tests", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "PreToolUse", SessionID: "sess1", TmuxPane: "%0", ToolName: "AskUserQuestion"})
+
+	if got := d.sessions["sess1"].Status; got != detect.StatusNeedInput {
+		t.Fatalf("precondition: expected StatusNeedInput after PreToolUse(AskUserQuestion), got %v", got)
+	}
+
+	// A backgrounded subagent is still working and fires its own
+	// PreToolUse/PostToolUse on the same session_id.
+	d.handleEvent(ipc.HookEvent{EventType: "PreToolUse", SessionID: "sess1", TmuxPane: "%0", ToolName: "Read", AgentID: "sub1"})
+	d.handleEvent(ipc.HookEvent{EventType: "PostToolUse", SessionID: "sess1", TmuxPane: "%0", ToolName: "Read", AgentID: "sub1"})
+
+	if got := d.sessions["sess1"].Status; got != detect.StatusNeedInput {
+		t.Errorf("expected StatusNeedInput to survive subagent PreToolUse/PostToolUse, got %v", got)
+	}
+
+	// The main agent's own tool activity still clears it normally.
+	d.handleEvent(ipc.HookEvent{EventType: "PreToolUse", SessionID: "sess1", TmuxPane: "%0", ToolName: "Read"})
+
+	if got := d.sessions["sess1"].Status; got != detect.StatusRunning {
+		t.Errorf("expected StatusRunning after main-agent PreToolUse, got %v", got)
+	}
+}
+
 func TestDaemon_SessionEndForStalePaneIgnored(t *testing.T) {
 	// A late SessionEnd for a dead pane (old window) must not restore the new
 	// window that now occupies the same window target.
