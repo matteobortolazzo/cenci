@@ -86,6 +86,19 @@ already-triaged, well-scoped bug fix or small feature, similar in size to what t
          OpenCode asked a permission question) — confirming the
          `watch/plugin/opencode` hooks fired.
 
+7. **Event mapping spot-checks (`watch/plugin/opencode/plugin.ts`).**
+
+   Confirm each OpenCode event maps to the expected daemon `hook_event_name`
+   (inspect the session transcript / `cenci status` transitions):
+
+   - [ ] **`session.status`** — `busy` → `PostToolUse` (window shows running);
+         `idle` → `Stop` (window shows done).
+   - [ ] **`session.error`** → `StopFailure`, but only for an already-tracked
+         session; an untracked `session.error` must NOT flip an unrelated window.
+   - [ ] **`message.updated`** (role=`user`) → `UserPromptSubmit`, reported once;
+         re-submitting the same message id does NOT double-report (dedup).
+   - [ ] **`permission.asked`** → `PermissionRequest` (window shows needs-input).
+
 **Pass** means every checkbox above is checked for that provider, with no cenci-side
 crash, hang, or silently-swallowed error. A step that fails for a reason specific to
 the ticket content (e.g. a genuinely broken test in the target repo) is not a cenci
