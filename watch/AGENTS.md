@@ -19,6 +19,7 @@ GitHub Issues for tracking. GitHub for code and PRs.
 
 ## Rule Files
 CLI grammar, alias, env-var, and naming conventions: `<repo-root>/docs/cli-conventions.md` (read before touching any user-facing command surface).
+Structured error-identifier (`CENCI-*`) naming convention and registered-code index: `<repo-root>/docs/error-codes.md` (read before adding or wiring a new error code; the registry lives in `internal/errcode`).
 `.claude/rules/` is reserved for files explicitly imported by this AGENTS.md. It is not used today — lessons route to `docs/<topic>.md` or the Critical Rules above (see `flow/agents/lessons-collector.md`).
 
 ## Build & Test
