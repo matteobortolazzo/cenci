@@ -5,8 +5,8 @@ compatibility: Requires Claude Code AskUserQuestion and cenci project configurat
 argument-hint: <ticket-id> [additional context]
 user-invocable: true
 disable-model-invocation: true
-model: opus
-allowed-tools: Read, Write, Glob, Bash(gh:*), Bash(git:*), Bash(curl:*), Bash(mkdir:*), Bash(mktemp:*), Bash(cat:*), Bash(rm:*), AskUserQuestion, WebFetch
+model: sonnet
+allowed-tools: Read, Write, Glob, Task, Bash(gh:*), Bash(git:*), Bash(curl:*), Bash(mkdir:*), Bash(mktemp:*), Bash(cat:*), Bash(rm:*), AskUserQuestion, WebFetch
 ---
 
 > **Client dispatch**: In Codex, read `codex-runtime` and `refine/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
@@ -88,132 +88,55 @@ Apply the same ensure-then-add pattern to every label this skill applies later (
 
 ## Your Role
 
-You are a senior tech lead doing backlog refinement. Your goal is to ensure this
-ticket is unambiguous, well-scoped, and ready for implementation.
+You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hunting, question drafting, sizing, and the refined ticket proposal — is delegated to the **refiner** agent (spawned via the `Task` tool), whose `model: opus` frontmatter pin holds for its entire run; a skill-level pin only lasts the invoking turn, so it would silently degrade every follow-up turn of the Q&A loop to the session model. You run the interaction and the writes: relay the refiner's questions to the user, feed answers back, and perform every GitHub mutation yourself. Never perform the refiner's analysis inline, and never delegate a GitHub write or an `AskUserQuestion` to a subagent (see the `subagent-safety` skill).
 
 ## Process
 
-1. **Fetch and summarize** the ticket (title, description, acceptance criteria, linked items)
+1. **Summarize** the fetched ticket for the user in 2-3 lines (title, current scope, state). Do not analyze it — that is the refiner's job.
 
-2. **Read relevant `docs/<topic>.md`** files for the feature area. If a legacy `.claude/rules/lessons-learned.md` exists, read it as fallback.
+2. **Classify ticket type**: Read the `frontend-classification` reference skill and apply its rule to determine if this ticket involves frontend/UI work. Record the result as `isFrontend` for the bundle and the labeling steps.
 
-3. **If user context was provided**, treat it as additional steering input. Focus your analysis and questions on the areas the user highlighted. Mention the user's context when it's relevant to your questions or analysis.
-
-4. **Classify ticket type**: Read the `frontend-classification` reference skill and apply its rule to determine if this ticket involves frontend/UI work. If yes, activate **design-aware refinement** for this session. If purely backend/infrastructure/data, skip design-specific analysis.
-
-   **Design-only classification** (if frontend ticket AND `pencil.enabled` is `true` in `.cenci/config.json`): determine whether the ticket's *deliverable* is the design itself — a `.pen` file plus `DESIGN.md` spec, with no production code change (e.g., "Design the settings page", "Create mockups for the onboarding flow"). If the signals point that way, confirm via `AskUserQuestion`:
+   **Design-only classification** (if `isFrontend` AND `pencil.enabled` is `true` in `.cenci/config.json`): determine whether the ticket's *deliverable* is the design itself — a `.pen` file plus `DESIGN.md` spec, with no production code change (e.g., "Design the settings page", "Create mockups for the onboarding flow"). If the signals point that way, confirm via `AskUserQuestion`:
 
    > "This reads as a design-only ticket — the deliverable would be a design spec (`.pen` + `DESIGN.md`) produced by `/cenci:design`, with no code change. Is that right?"
 
    Options: "Yes — design-only", "No — includes implementation"
 
-   If confirmed, set `isDesignTicket = true`. Design-only tickets are routed to `/cenci:design`, not `/cenci:implement`: they skip the browser question (step 8) and the `ui:visual-check` label (step 12), and receive the `Design` label in step 11. Focus the analysis (step 5) on design questions — visual direction, screens, states, design-system fit — and skip implementation-only items (API contracts, database changes, PR size).
+   If confirmed, set `isDesignTicket = true`. Design-only tickets are routed to `/cenci:design`, not `/cenci:implement`: they skip the browser question (step 8) and the `ui:visual-check` label (step 12), and receive the `Design` label in step 11. The refiner focuses its analysis accordingly via the bundle's `isDesignTicket` flag — design questions (visual direction, screens, states, design-system fit) instead of implementation-only items.
 
-   **Design Coverage Check** (if frontend ticket AND `pencil.enabled` is true in the resolved config):
+   The **Design Coverage Check** (`.pen`/`DESIGN.md` evaluation and the `designNeeded` determination) is performed by the refiner agent, not here — its result arrives in the proposal's `### Design Coverage` section (step 7). **Design always happens on a dedicated design ticket, never on the implementation ticket itself** — when `designNeeded` is true, the design ticket is created later, either as the first child of a split (see **Design-first splits** in step 9) or as a companion ticket (see **Companion design ticket** in the Update Ticket section).
 
-   a. Read `pencil.designPath` from the resolved config.
-   b. Use Glob to check if `.pen` files exist at the configured `designPath` (e.g., `<designPath>/**/*.pen`).
-   c. Check if `<designPath>/DESIGN.md` exists. If it does, read it and evaluate coverage:
-      - Are screens mapped? (Does the Screens table reference the screens relevant to this ticket?)
-      - Are behavior annotations present? (Do mapped screens have interaction/state descriptions?)
-      - Are component-to-code mappings documented? (Does the Components table link design components to framework components?)
-   d. Report any gaps as informational findings — these are **not blocking**:
-      - "Design coverage: N screens mapped, M components mapped, behavior annotations present/missing for [screen names]."
-   e. If coverage is insufficient (no `.pen` files found, no DESIGN.md, or significant gaps in mappings), set `designNeeded = true`. **Design always happens on a dedicated design ticket, never on the implementation ticket itself** — the design ticket is created later, either as the first child of a split (see **Design-first splits**) or as a companion ticket (see **Companion design ticket** in the Update Ticket section).
+3. **Create the per-run temp-file token.** Run `mktemp -u /tmp/claude/issue-<number>-XXXXXX` once and capture the trailing random segment as `<token>` (the token is the random suffix only, e.g. `a1b2c3` — not the full mktemp basename). As with `<ticket-id-or-slug>` in the implement phases, carry the literal `<token>` value forward as text into every temp-file path for the rest of this run — do NOT re-derive it per Bash call, and do not use `$$`/shell state (it does not persist across separate Bash tool invocations). `-u` is a dry-run name generator — it only produces a unique-ish suffix, not an atomically-created file — which is why the `Write` tool is what actually creates each temp file in this run. The `<token>` is a **collision-avoidance mechanism only** — it reduces the chance of two concurrent runs picking the same temp-file basename — and is explicitly **not** an atomic reservation (a second run could theoretically generate the same suffix before either run's `Write` call lands) and **not** a security boundary (it provides no protection against a malicious or adversarial process targeting the same path).
 
-5. **Analyze** what's missing or ambiguous. Consider:
-   - Are acceptance criteria specific and testable?
-   - Are edge cases covered?
-   - Is the scope clear? Could it hide complexity?
-   - Are API contracts defined (request/response shapes)?
-   - Are there dependencies on other tickets?
-   - Is the UI behavior specified (states, loading, errors)?
-   - **If frontend ticket** — also evaluate design quality:
-     - Is a visual direction or aesthetic tone specified, or will it default to generic?
-     - Are typography, color palette, and spatial layout defined with intention?
-     - Are motion/animation behaviors described, or will the result be static?
-     - Does the ticket risk producing cookie-cutter design (generic fonts, predictable layout, cliched color schemes)?
-   - **If frontend ticket AND `pencil.enabled` is `true`** — also evaluate design spec coverage:
-     - Are the screens referenced in this ticket present in DESIGN.md?
-     - Are behavior annotations present for the affected screens?
-     - Are component-to-code mappings documented for all UI components in scope?
-     - Are design tokens (spacing, color, typography) referenced for the affected components?
-   - Are there security considerations?
-   - Is it estimable? If not, what's blocking estimation?
-   - If the ticket references existing apps ("like X", "similar to Y"), are the key UX patterns of those references captured? (e.g., layout model, navigation, interaction patterns)
-   - Does this ticket risk exceeding the implementing agent's context budget (see `docs/ticket-sizing.md`)? If so, should it be split into separate tickets?
+4. **Write the context bundle.** Use the `Write` tool to create `/tmp/claude/issue-<number>-<token>-bundle.md` containing, in order:
+   - The **verbatim** ticket title, body, labels, state, and comments from the fetch above — full text, never a digest or paraphrase (the refiner's decisions require source fidelity; see `docs/skill-authoring.md`).
+   - Each attachment's summary alongside its downloaded file path (from the Attachments step).
+   - The user context parsed from `$ARGUMENTS`, verbatim (or `None`).
+   - The resolved flags: `isFrontend`, `isDesignTicket`, `pencil.enabled`, `pencil.designPath` (from the resolved config).
 
-6. **Ask ONE question at a time using `AskUserQuestion`**. Wait for the user's answer before asking the next. Never ask questions as plain text — always use the `AskUserQuestion` tool.
-   - Be specific: "What should happen if the user submits an empty form?" not "Are errors handled?"
-   - Reference existing code/patterns when relevant: "I see we use toast notifications elsewhere — should errors here also use toasts?"
-   - **For frontend tickets — propose design directions instead of asking open-ended questions.** Don't ask "What typography should we use?" — instead propose: "For a [context], I'd suggest [specific font pairing] to avoid the generic Inter/Roboto look. Does this work, or do you have a different direction?" Apply this propose-first pattern to color palette, layout composition, and motion design.
-   - Challenge vague design language: "clean and modern" or "professional look" almost always produces generic results. Push for what makes this interface *memorable*.
-   - Limit design-specific questions to 2-3 per session. Focus on highest-impact decisions: aesthetic tone, one typography/color choice, and one layout/motion choice.
+   If the `Write` fails, retry once; if it still fails, STOP and report the error — the refiner must never run without the bundle.
 
-7. **After each answer**, update your understanding and decide:
-   - Ask another question, OR
-   - Declare the ticket refined
+5. **Delegate to the refiner agent** (`Task` tool, agent `refiner`). The first invocation's prompt contains only: the bundle path, a note that this is round 1, and the instruction to read the bundle file in full before analyzing. Later rounds additionally carry the Q&A history (step 6) — do not re-paste ticket or bundle content into any prompt; the bundle path is the context.
 
-8. **Before producing the summary**, ask one final infrastructure question — but only when it can plausibly apply. **Skip for design-only tickets** (`isDesignTicket` is true) — they never reach the implement pipeline; set `browserRequired: false`. Ask it if the ticket was classified frontend/UI in step 4, **or** the ticket/answers mention web scraping, browser automation, or manual browser testing. For pure backend/infrastructure/data tickets with none of those signals, skip the question and set `browserRequired: false`.
+6. **Q&A relay loop.** Parse the refiner's `## Questions` section:
+   - If it is `None.` → the same output contains the `## Refined Ticket Proposal`; continue to step 7.
+   - Otherwise, present the questions to the user **in the refiner's order**. Ask exactly ONE question per `AskUserQuestion` call, and wait for the answer before the next call. Never combine multiple refiner questions into a single `AskUserQuestion` call, never merge them into one composite question, and never ask them as plain text. When the refiner supplied answer options for a question, map them onto the `AskUserQuestion` options using the refiner's wording (the user can always answer freeform via "Other"); otherwise offer sensible options.
+   - When every question in the round is answered, re-invoke the refiner with the bundle path and the **complete** accumulated Q&A history — all rounds, as `Q:`/`A:` pairs using the refiner's original question wording; do not re-paste ticket or bundle content. Route the new output through this step again. The refiner asks at most 4 questions per round and rounds continue until it returns `None.`.
+
+7. **Proposal received.** When the refiner returns `None.`, its output contains the `## Refined Ticket Proposal` — the summary content adopted in step 9 and persisted in steps 10-12. Read `designNeeded` from its `### Design Coverage` section (treat it as false when the section or field is absent).
+
+8. **Before adopting the proposal**, ask one final infrastructure question — but only when it can plausibly apply. **Skip for design-only tickets** (`isDesignTicket` is true) — they never reach the implement pipeline; set `browserRequired: false`. Ask it if the ticket was classified frontend/UI in step 2, **or** the ticket/answers mention web scraping, browser automation, or manual browser testing. For pure backend/infrastructure/data tickets with none of those signals, skip the question and set `browserRequired: false`.
 
    Using `AskUserQuestion`:
    "Does this story need interactive browser access during implementation? (e.g., for visual verification, form testing, or web scraping). If yes, the implementer should ensure `playwright-cli` is installed (`npm i -g @playwright/cli`)."
    - If **yes** → note `browserRequired: true` for the labeling step
    - If **no** → proceed normally
 
-9. **When refined**, prepare the following summary content. It is not shown yet — steps 10-12 first persist the ticket update, any split or companion design ticket, and the labels; this summary is then presented in the final message together with a notice of what was persisted (see the **Final Message** note at the end of the Update Ticket section):
+9. **When refined**, adopt the refiner's `## Refined Ticket Proposal` **verbatim** as the summary content — its sections (`### Updated Title` (optional), `### Updated Description`, `### Acceptance Criteria`, `### Technical Notes`, `### Design Coverage`, `### Design Direction`, `### Size Estimate`, `### Suggested Split` with `#### Execution Order`) map 1:1 onto the persistence steps below; the section formats themselves are specified in `agents/refiner.md`. Do not rewrite, summarize, or reorder the proposal's content. It is not shown yet — steps 10-12 first persist the ticket update, any split or companion design ticket, and the labels; the summary is then presented in the final message together with a notice of what was persisted (see the **Final Message** note at the end of the Update Ticket section).
 
-   ## Refined Ticket Summary
+   A `### Suggested Split` in the proposal means each child becomes its own numbered ticket and PR, with the parent tracking all children and their dependencies (Pass 1/Pass 2 below).
 
-   ### Updated Title
-   <refined title — include this section ONLY when the title should change>
-
-   Only propose a new title when the current one is vague or no longer accurately describes the refined scope; otherwise omit this section entirely and keep the existing title. Match the repo's issue-title style — sentence case, no trailing period, concise, declarative or imperative. Do **not** add a `(K/N)` suffix (that is only for split children in Pass 1) or a `Design:` prefix (only for the companion design ticket).
-
-   ### Updated Description
-   <rewritten description incorporating all clarifications>
-
-   ### Acceptance Criteria
-   - [ ] <specific, testable criterion>
-   ...
-
-   ### Technical Notes
-   - Affected services: <list>
-   - Affected components: <list>
-   - API changes: <list endpoints, methods, DTOs>
-   - Database changes: <migrations needed>
-   - Dependencies: <other tickets that must complete first>
-
-   ### Design Coverage (if frontend ticket AND pencil.enabled)
-   - **Screens mapped**: <list of screen names from DESIGN.md that relate to this ticket>
-   - **Missing annotations**: <any screens lacking behavior annotations>
-   - **Unmapped components**: <UI components without code mappings in DESIGN.md>
-   - **Design tokens**: <coverage status — defined/missing for affected components>
-
-   ### Design Direction (if frontend ticket)
-   - **Aesthetic tone**: <chosen direction, e.g., "editorial with high-contrast typography">
-   - **Typography**: <font pairing with rationale>
-   - **Color palette**: <dominant + accent, hex values>
-   - **Key motion**: <entrance animations, hover states, transitions>
-   - **Layout approach**: <spatial strategy, any grid-breaking elements>
-   - **Anti-patterns to avoid**: <generic choices explicitly ruled out>
-
-   ### Size Estimate
-   <S/M/L> — <reasoning, sized against the context budget in `docs/ticket-sizing.md`>
-
-   ### Suggested Split (only if L — real risk of exceeding the context budget per `docs/ticket-sizing.md`)
-   - Ticket 1 (1/N): <description>
-   - Ticket 2 (2/N): <description> — depends on Ticket 1
-   - Ticket 3 (3/N): <description> — parallel with Ticket 2
-   (Each becomes its own numbered ticket and PR. The parent ticket tracks all children and their dependencies.)
-
-   #### Execution Order
-   - Ticket 1 → first (no dependencies)
-   - Ticket 2, Ticket 3 → can start after Ticket 1 (parallel with each other)
-
-   When analyzing the split, determine which child tickets have data/API/schema dependencies on others (sequential) vs. which touch independent areas (parallel). Annotate each ticket accordingly. Do not propose a split for S or M tickets just because they touch multiple independent concerns — see `docs/ticket-sizing.md` for the budget-risk-only trigger.
-
-   **Design-first splits** (if frontend feature AND `pencil.enabled` is `true` AND `designNeeded` is true): make the first child a **design-only ticket** (e.g., "Design <feature> screens") that every UI implementation child depends on. Mark it as design-only in the split — it gets the `Design` label in Pass 1, its body includes the `### Design Direction` section from this refinement, it is executed via `/cenci:design`, and it produces a committed design spec rather than a PR (the one exception to "1 ticket = 1 PR"). When `/cenci:design` completes it, the `Designed` label is propagated to the implementation children that depend on it, satisfying implement's Design gate.
+   **Design-first splits** (if frontend feature AND `pencil.enabled` is `true` AND `designNeeded` is true): the proposal's split makes the first child a **design-only ticket** (e.g., "Design <feature> screens") that every UI implementation child depends on. It gets the `Design` label in Pass 1, its body includes the `### Design Direction` section from the proposal (that's where `/cenci:design` reads it from), it is executed via `/cenci:design`, and it produces a committed design spec rather than a PR (the one exception to "1 ticket = 1 PR"). When `/cenci:design` completes it, the `Designed` label is propagated to the implementation children that depend on it, satisfying implement's Design gate.
 
 ## Update Ticket
 
@@ -225,7 +148,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 > 2. Retry the write once, then verify again.
 > 3. If it still fails, **STOP** — do not proceed to the next step — and emit a partial-state report: what succeeded so far (with concrete issue/label numbers or names), what failed, and what the user needs to do manually to reconcile it. Each write point below states what belongs in that report.
 
-**Per-run temp-file token**: Before step 10, run `mktemp -u /tmp/claude/issue-<number>-XXXXXX` once and capture the trailing random segment as `<token>` (the token is the random suffix only, e.g. `a1b2c3` — not the full mktemp basename). As with `<ticket-id-or-slug>` in the implement phases, carry the literal `<token>` value forward as text into every temp-file path for the rest of this run — do NOT re-derive it per Bash call, and do not use `$$`/shell state (it does not persist across separate Bash tool invocations). `-u` is a dry-run name generator — it only produces a unique-ish suffix, not an atomically-created file — which is why the `Write` tool is what actually creates each temp file below. The `<token>` is a **collision-avoidance mechanism only** — it reduces the chance of two concurrent runs picking the same temp-file basename — and is explicitly **not** an atomic reservation (a second run could theoretically generate the same suffix before either run's `Write` call lands) and **not** a security boundary (it provides no protection against a malicious or adversarial process targeting the same path).
+**Per-run temp-file token**: The `<token>` used in every temp-file path of this section is the one created in Process step 3 — carry that same literal value forward; never mint a second token mid-run (two tokens in one run would orphan the earlier files from step 13's cleanup list).
 
 10. **Update the ticket description in the remote system.**
 
@@ -233,7 +156,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 
    Use the `Write` tool to create `/tmp/claude/issue-<number>-<token>.md` with the `<updated description>` as its content.
 
-   **Only when step 9 produced an `### Updated Title`**, also use the `Write` tool to create `/tmp/claude/issue-<number>-<token>-title.txt` with the raw updated title text as its content — the title is free text and must never be interpolated directly into the command line (a title containing `$(…)`, backticks, or quotes would be shell-interpreted). Then run:
+   **Only when the proposal adopted in step 9 includes an `### Updated Title`**, also use the `Write` tool to create `/tmp/claude/issue-<number>-<token>-title.txt` with the raw updated title text as its content — the title is free text and must never be interpolated directly into the command line (a title containing `$(…)`, backticks, or quotes would be shell-interpreted). Then run:
    ```bash
    TITLE=$(cat /tmp/claude/issue-<number>-<token>-title.txt) && [ -n "$TITLE" ] && gh issue edit <number> --repo <owner>/<repo> --body-file /tmp/claude/issue-<number>-<token>.md --title "$TITLE"
    ```
@@ -405,6 +328,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
    ```bash
    rm -f \
      /tmp/claude/issue-<number>-<token>.md \
+     /tmp/claude/issue-<number>-<token>-bundle.md \
      /tmp/claude/issue-<number>-<token>-title.txt \
      /tmp/claude/issue-<number>-<token>-design.md \
      /tmp/claude/issue-<number>-<token>-design-title.txt \
@@ -418,7 +342,7 @@ ticket is unambiguous, well-scoped, and ready for implementation.
 
 ### Final Message
 
-After steps 10-13 complete, present the Refined Ticket Summary prepared in step 9 in the final message, followed by a short notice of what was persisted:
+After steps 10-13 complete, present the refiner's Refined Ticket Proposal adopted in step 9 in the final message, followed by a short notice of what was persisted:
 
 > Ticket #`<n>` updated. Labels: Refined[, Design][, Browser][, ui:visual-check]. [Created `N` child tickets: #`<c1>`, #`<c2>`, ….] [Created companion design ticket #`<D>`.]
 >
