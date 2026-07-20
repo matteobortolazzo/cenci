@@ -115,7 +115,12 @@ Before finalizing the plan, explicitly identify:
     |---|---|---|
     | `login.component.ts` | Critical Journey | E2E + Integration |
     | `user-avatar.component.ts` | Presentational | Skip (parent covers) |
-    | `dashboard.component.ts` | Smart + Data Display | Integration + Unit |
+    | `dashboard.component.ts` | Smart + Data Display | Integration + Unit (validators: edge-case input matrix) |
+
+    Any `Unit` entry must carry a one-line justification in the table: what the unit
+    test catches that an integration test cannot reasonably catch. If no such
+    justification exists, plan integration coverage instead — coverage means
+    acceptance criteria exercised through the real stack, not unit-test count.
 
     E2E scope: <list user journeys needing E2E>
     Visual verification: <list components needing visual checks>

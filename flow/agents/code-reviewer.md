@@ -51,6 +51,8 @@ When LSP servers are active, diagnostics provide high-signal findings. Apply the
 ## Review Checklist
 - [ ] Follows applicable `AGENTS.md` and `docs/<topic>.md` conventions
 - [ ] Tests cover acceptance criteria
+- [ ] Acceptance criteria are exercised through the real stack (integration/E2E) — unit tests alone do not satisfy coverage
+- [ ] No low-value unit tests (see Test Value below)
 - [ ] No obvious bugs
 - [ ] Edge cases handled
 - [ ] Error handling complete
@@ -61,6 +63,14 @@ When LSP servers are active, diagnostics provide high-signal findings. Apply the
 - [ ] No TODOs without tickets
 - [ ] No commented code
 - [ ] Documentation adequate
+
+## Test Value
+
+Test coverage is measured in behavior covered through the real stack, not in test count. When reviewing tests:
+
+- **Flag low-value unit tests as removal candidates** (Should Fix, confidence 75+): mock-heavy tests that re-verify wiring (every collaborator mocked, assertions on mock calls), tests that mirror the implementation, and tests that would stay green while the real flow is broken. Removing such a test is an improvement, not a coverage loss.
+- **Flag missing integration coverage as the real gap** (Must Fix when an acceptance criterion has no integration/E2E test exercising it): a unit test on an internal helper does not cover the acceptance criterion it feeds into.
+- A unit test is justified only by what it catches that an integration test cannot reasonably catch (complex isolated logic: state machines, calculations, validators, parsing with an edge-case input matrix). Absent that justification, prefer the integration test.
 
 ## Output Constraints
 
