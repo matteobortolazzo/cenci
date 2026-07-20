@@ -10,12 +10,12 @@ Any point below that stops for the user — an unclear security fix, a code-revi
 
 Source `ticketId`/`slug` from the plan front matter (`hasPlanFile` is always true here) before writing or reading any temp file below.
 
-Gather context once. The worktree must be the CWD first — run a standalone `cd <worktree-path>` before these commands so the `git diff` calls resolve against the worktree and stay auto-approved:
+Gather context once. Target the worktree explicitly with `git -C <worktree-path>` on each `git diff` call so it resolves against the worktree and stays auto-approved; redirect to an absolute temp-file path (never compound `cd <worktree-path>` with the redirect):
 
 ```bash
-git diff > /tmp/claude/cenci-<ticket-id-or-slug>-diff.patch
-git diff --name-only > /tmp/claude/cenci-<ticket-id-or-slug>-files.txt
-git diff --stat > /tmp/claude/cenci-<ticket-id-or-slug>-stat.txt
+git -C <worktree-path> diff > /tmp/claude/cenci-<ticket-id-or-slug>-diff.patch
+git -C <worktree-path> diff --name-only > /tmp/claude/cenci-<ticket-id-or-slug>-files.txt
+git -C <worktree-path> diff --stat > /tmp/claude/cenci-<ticket-id-or-slug>-stat.txt
 ```
 
 For small diffs and `cenci.diffContextMode` not set to `"file"`, inline the diff. For large diffs or file mode, pass reviewers the patch path, changed file list, stat, ticket requirements, and implementation plan. Tell reviewers to read only relevant hunks/files.

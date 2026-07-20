@@ -80,7 +80,7 @@ If build, tests, or lint fail:
 4. If stuck after 3 attempts, report the issue clearly
 
 ## Working Directory
-When given a worktree path, `cd` into it once at the start of your session. CWD persists between Bash calls — do not prefix subsequent commands with `cd <path> &&`.
+When given a worktree path, target it explicitly on every command — Bash CWD does not reliably persist across calls. Use `git -C <worktree-path> ...` for git commands, absolute paths for file operations, and the client's working-directory option where available.
 
 **Never prefix git with `cd`.** `cd <dir> && git …` can *never* be auto-approved — it trips Claude Code's built-in "changes directory before running git, which can execute untrusted hooks" safety check, independent of the `Bash(git:*)` allow-rule, and forces a manual prompt every time. If a git command must target a directory other than the current one, use git's own flag: `git -C <path> status` — **never** `cd <path> && git status`.
 

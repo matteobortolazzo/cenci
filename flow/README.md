@@ -163,6 +163,7 @@ companion) for every skill, including the internal ones not listed above.
 **Core workflow docs**
 - `docs/git-workflow.md`
 - `docs/pipeline-safety.md`
+- `docs/shell-scripting-gotchas.md`
 - `docs/skill-authoring.md`
 - `docs/ticket-sizing.md`
 

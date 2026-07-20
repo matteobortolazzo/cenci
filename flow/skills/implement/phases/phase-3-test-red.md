@@ -20,7 +20,7 @@ Do not use compact mode for auth, payment, security-sensitive code, data migrati
 
 Pass:
 
-- Worktree path. Tell the agent: enter it with a standalone `cd <worktree-path>` as the first Bash call (CWD persists for later calls) — do **not** prefix every command with `cd <path> &&`. See the `shell-rules` skill for command patterns.
+- Worktree path. Tell the agent: target the worktree explicitly on every command — via `git -C <worktree-path>` for git commands, absolute paths for file operations, or the client's working-directory option — do **not** prefix every command with `cd <path> &&`. See the `shell-rules` skill for command patterns.
 - Plan file sections: `## Ticket Details`, `## Implementation Plan`, and `## Architectural Context`.
 - Files to modify/create and planner notes.
 - Acceptance criteria, edge cases, and error scenarios.
