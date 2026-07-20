@@ -23,8 +23,7 @@ If either check fails, stop and tell the user to run `/cenci:implement .plans/<f
 The Gate Check passing means this session is committed to running phases 2–9. Arm the completion goal now, following the **Goal Autopilot (plan-file mode)** section of `SKILL.md`:
 
 1. If the resolved config sets `cenci.goalAutopilot: false`, skip — proceed to Create Worktree.
-2. Otherwise run `claude --version` and version-gate on ≥ 2.1.139. If older, unparseable, or the command is unavailable, print the one-line unavailable notice and proceed without a goal.
-3. If available, invoke `/goal` (via the `SlashCommand` tool) with the plan-file-referencing condition from `SKILL.md`, substituting the actual `.plans/<filename>` for this run — that condition string already includes the 20-turn stall safety cap, so no separate arming step is needed for it here. If `SlashCommand` is unavailable or errors, proceed without a goal.
+2. Otherwise attempt to arm `/goal` directly via the `SlashCommand` tool, treating a missing tool, unknown command, or error as Goal Autopilot being unavailable. Use the plan-file-referencing condition from `SKILL.md`, substituting the actual `.plans/<filename>` for this run — that condition string already includes the 20-turn stall safety cap, so no separate arming step is needed for it here. On the unavailable outcome, print the one-line unavailable notice from `SKILL.md` and proceed without a goal.
 
 This runs once, here — do not re-arm in later phases. Phase 9 clears the goal after the PR is created; any error gate that stops for user input clears it first (see `SKILL.md`).
 

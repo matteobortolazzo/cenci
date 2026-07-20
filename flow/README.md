@@ -372,11 +372,11 @@ Full lifecycle: `New → Refined → [Designed] → Planned → Working → In R
 
 Planning ends with a saved plan presented for your review (Phase 1); once you launch the plan-file run, phases 2–9 run unattended through to an open PR — except the Trivial Fast Path, which arms the goal and continues into Phase 2 without a separate plan-file relaunch. But a turn that stops mid-phase — a context limit, a transient tool error — would otherwise just end the run with the work half-done.
 
-When Claude Code is **≥ 2.1.139**, the pipeline closes that gap with the native [`/goal`](https://code.claude.com/docs/en/goal) command. At the start of Phase 2 (plan-file mode only, except the Trivial Fast Path — see below) it arms a completion condition — "the plan `.plans/<id>.md` is implemented and a PR exists" — so any mid-phase stop restarts instead of ending. The goal is cleared automatically in Phase 9 once the PR is created, and at any error gate that hands control back to you (rebase conflict, repeated build failure, an ambiguous reviewer finding), so a genuine blocker never loops.
+The pipeline closes that gap with the native [`/goal`](https://code.claude.com/docs/en/goal) command. At the start of Phase 2 (plan-file mode only, except the Trivial Fast Path — see below) it attempts to arm a completion condition — "the plan `.plans/<id>.md` is implemented and a PR exists" — so any mid-phase stop restarts instead of ending. The goal is cleared automatically in Phase 9 once the PR is created, and at any error gate that hands control back to you (rebase conflict, repeated build failure, an ambiguous reviewer finding), so a genuine blocker never loops.
 
 - **Launching the plan-file run is the human gate that arms it.** No goal is ever set in an ordinary planning session — reviewing the saved plan and launching `/cenci:implement .plans/<id>.md` authorizes the autonomous run, and that is when the goal is armed — except the Trivial Fast Path, which arms the goal and continues into Phase 2 without a separate plan-file relaunch.
 - **The condition references the plan file**, matching the SessionStart hook that reminds you of pending `.plans/` — a still-present plan file means "not done."
-- **Graceful on older runtimes.** Below 2.1.139 (or if `/goal` is unavailable) the pipeline behaves exactly as before — it just prints a one-line notice and runs without the completion guarantee.
+- **Graceful when unavailable.** If arming `/goal` fails (missing tool, unknown command, or error — for example older Claude Code clients below 2.1.139, which lack `/goal` support) the pipeline behaves exactly as before — it just prints a one-line notice and runs without the completion guarantee.
 - **Stall cap.** The armed condition also carries a fixed 20-turn cap — if the goal restarts the turn more than 20 times without the pipeline advancing to a new phase, it stops retrying, clears itself, and reports the stall instead of looping forever.
 - **Opt out** with `"cenci": { "goalAutopilot": false }` in `.cenci/config.json`.
 
@@ -440,7 +440,7 @@ For lower limit pressure without removing quality gates, add optional settings t
 - `reviewConcurrency: "sequential"` runs the same security, code, and silent-failure reviewers one after another instead of in parallel.
 - `diffContextMode: "file"` passes reviewers a patch file path and changed-file list for large diffs instead of duplicating the full diff in every prompt.
 - `liteReviewEnabled: true` (default) classifies each diff into `full` (all three reviewers), `lite-docs` (no reviewers, for docs-only diffs), or `lite-small` (`code-reviewer` only, for small config/data-only diffs). Anything touching `.claude/**`, `skills/**`, `agents/**`, `CLAUDE.md`, or a danger pattern (auth/security/secrets/CI workflows) always forces `full`. Set to `false` to force the full trio on every run.
-- `goalAutopilot: false` disables the [goal-driven autopilot](#autopilot-goal-driven-completion) (armed by default on Claude Code ≥ 2.1.139).
+- `goalAutopilot: false` disables the [goal-driven autopilot](#autopilot-goal-driven-completion) (armed by default, falling back gracefully when `/goal` is unavailable).
 
 ### Optional: RTK command-output compression
 
