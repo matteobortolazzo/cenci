@@ -108,7 +108,7 @@ Commands:
   babysit                            supervise an open PR until it merges or closes
   dispatch                           fleet auto-dispatch (enroll/unenroll/status/loop)
   close                              close a finished/idle agent window
-  pipeline                           drive the implement pipeline's stage state machine (prepare|plan|execute|review|finalize)
+  pipeline                           drive the implement pipeline's stage state machine (prepare|plan|execute|review|finalize) plus mechanics verbs (label|worktree|worktree-cleanup|artifact|plan-check)
   sandbox                            manage the sandbox container (build|build-base|prune|update-agent|update-plugins|reseed-creds|reap-orphans|ls|stop)
   open [shortcut]                    launch or attach an interactive sandbox session (aliased by the "cn" binary name)
   doctor                             check prerequisites and installed stack components, change nothing (delegates to the installed cenci-installer wrapper)

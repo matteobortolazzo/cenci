@@ -8,9 +8,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 
+	"github.com/matteobortolazzo/cenci/watch/internal/planfile"
 	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
 )
 
@@ -140,7 +140,13 @@ func agentFromLabels(labels []string) string {
 // files are skipped.
 func ReadPlans(repo, dir string, commitsBehind func(sha string, paths []string) int) ([]Plan, error) {
 	if commitsBehind == nil {
-		commitsBehind = func(sha string, paths []string) int { return gitCommitsBehind(dir, sha, paths) }
+		// Display-only usage (not decision-gating): degrade gracefully to 0
+		// on a git failure rather than propagating it, preserving this
+		// package's existing tested behavior (#560 item 1).
+		commitsBehind = func(sha string, paths []string) int {
+			n, _ := planfile.CommitsBehind(dir, sha, paths)
+			return n
+		}
 	}
 	matches, err := filepath.Glob(filepath.Join(dir, ".plans", "*.md"))
 	if err != nil {
@@ -154,20 +160,20 @@ func ReadPlans(repo, dir string, commitsBehind func(sha string, paths []string) 
 		if err != nil {
 			continue
 		}
-		fm, ok := parseFrontMatter(string(data))
+		fm, ok := planfile.ParseFrontMatter(string(data))
 		if !ok {
 			continue
 		}
 		p := Plan{
 			Repo:           repo,
 			Path:           path,
-			TicketID:       atoiSafe(fm["ticketId"]),
+			TicketID:       planfile.AtoiSafe(fm["ticketId"]),
 			Status:         fm["status"],
 			PlanCommitSha:  fm["planCommitSha"],
 			IsChild:        fm["isChild"] == "true",
 			IsLastChild:    fm["isLastChild"] == "true",
-			ParentID:       atoiSafe(fm["parentId"]),
-			StalenessPaths: splitPaths(fm["stalenessPaths"]),
+			ParentID:       planfile.AtoiSafe(fm["parentId"]),
+			StalenessPaths: planfile.SplitPaths(fm["stalenessPaths"]),
 		}
 		if p.PlanCommitSha != "" {
 			p.CommitsBehind = commitsBehind(p.PlanCommitSha, p.StalenessPaths)
@@ -175,78 +181,6 @@ func ReadPlans(repo, dir string, commitsBehind func(sha string, paths []string) 
 		plans = append(plans, p)
 	}
 	return plans, nil
-}
-
-// parseFrontMatter reads the leading `---`-delimited block as flat key: value
-// scalars (no yaml dependency). It returns false when no front matter is found.
-func parseFrontMatter(content string) (map[string]string, bool) {
-	content = strings.TrimPrefix(content, "\ufeff") // drop a leading UTF-8 BOM
-	// The opening fence must be a line of its own ("---\n" or "---\r\n"), not a
-	// key line that merely starts with dashes.
-	if !strings.HasPrefix(content, "---\n") && !strings.HasPrefix(content, "---\r\n") {
-		return nil, false
-	}
-	rest := strings.TrimPrefix(content[len("---"):], "\r")
-	rest = strings.TrimPrefix(rest, "\n")
-	end := strings.Index(rest, "\n---")
-	if end < 0 {
-		return nil, false
-	}
-
-	m := make(map[string]string)
-	for _, line := range strings.Split(rest[:end], "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		idx := strings.Index(line, ":")
-		if idx < 0 {
-			continue
-		}
-		key := strings.TrimSpace(line[:idx])
-		val := strings.TrimSpace(line[idx+1:])
-		val = strings.Trim(val, `"'`)
-		m[key] = val
-	}
-	return m, true
-}
-
-// atoiSafe parses an int, returning 0 for empty, "null", or malformed values.
-func atoiSafe(s string) int {
-	n, err := strconv.Atoi(strings.TrimSpace(s))
-	if err != nil {
-		return 0
-	}
-	return n
-}
-
-// splitPaths parses a comma-separated stalenessPaths value into cleaned
-// repo-relative paths: entries are trimmed and empties dropped, so trailing
-// commas and stray spaces are harmless.
-func splitPaths(s string) []string {
-	var paths []string
-	for _, p := range strings.Split(s, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			paths = append(paths, p)
-		}
-	}
-	return paths
-}
-
-// gitCommitsBehind counts default-branch commits since sha. With paths it
-// counts only commits touching them (`rev-list -- <paths>`), so unrelated
-// monorepo churn cannot mark a scoped plan stale; without paths it keeps the
-// whole-repo count.
-func gitCommitsBehind(dir, sha string, paths []string) int {
-	args := []string{"-C", dir, "rev-list", "--count", sha + "..HEAD"}
-	if len(paths) > 0 {
-		args = append(append(args, "--"), paths...)
-	}
-	out, err := exec.Command("git", args...).Output()
-	if err != nil {
-		return 0
-	}
-	return atoiSafe(strings.TrimSpace(string(out)))
 }
 
 // ReadSnapshot dials the daemon broadcast socket, reads one snapshot, and

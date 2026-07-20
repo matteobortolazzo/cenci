@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/matteobortolazzo/cenci/watch/internal/planfile"
 )
 
 func installFakeGH(t *testing.T, script string) {
@@ -237,9 +239,13 @@ func commitFile(t *testing.T, dir, rel, msg string) {
 	gitTest(t, dir, "commit", "-m", msg)
 }
 
-// TestGitCommitsBehindPathAware exercises gitCommitsBehind against a real
-// temporary repo: with paths it counts only commits touching those paths;
-// without paths it keeps the whole-repo count.
+// TestGitCommitsBehindPathAware exercises planfile.CommitsBehind (via
+// ReadPlans' default commitsBehind wiring) against a real temporary repo:
+// with paths it counts only commits touching those paths; without paths it
+// keeps the whole-repo count. The path-scoping behavior itself is unit
+// tested at its new home (internal/planfile/frontmatter_test.go); this test
+// stays here as dispatch's own regression guard that ReadPlans' default
+// wiring still calls through to it correctly.
 func TestGitCommitsBehindPathAware(t *testing.T) {
 	dir := t.TempDir()
 	gitTest(t, dir, "init")
@@ -249,19 +255,19 @@ func TestGitCommitsBehindPathAware(t *testing.T) {
 	commitFile(t, dir, "flow/skill.md", "flow change one")
 	commitFile(t, dir, "flow/other.md", "flow change two")
 
-	if got := gitCommitsBehind(dir, sha, nil); got != 3 {
-		t.Errorf("whole-repo count = %d, want 3", got)
+	if got, err := planfile.CommitsBehind(dir, sha, nil); err != nil || got != 3 {
+		t.Errorf("whole-repo count = %d, err = %v, want 3, nil", got, err)
 	}
-	if got := gitCommitsBehind(dir, sha, []string{"watch"}); got != 1 {
-		t.Errorf("watch-scoped count = %d, want 1", got)
+	if got, err := planfile.CommitsBehind(dir, sha, []string{"watch"}); err != nil || got != 1 {
+		t.Errorf("watch-scoped count = %d, err = %v, want 1, nil", got, err)
 	}
-	if got := gitCommitsBehind(dir, sha, []string{"flow"}); got != 2 {
-		t.Errorf("flow-scoped count = %d, want 2", got)
+	if got, err := planfile.CommitsBehind(dir, sha, []string{"flow"}); err != nil || got != 2 {
+		t.Errorf("flow-scoped count = %d, err = %v, want 2, nil", got, err)
 	}
-	if got := gitCommitsBehind(dir, sha, []string{"untouched"}); got != 0 {
-		t.Errorf("untouched-path count = %d, want 0", got)
+	if got, err := planfile.CommitsBehind(dir, sha, []string{"untouched"}); err != nil || got != 0 {
+		t.Errorf("untouched-path count = %d, err = %v, want 0, nil", got, err)
 	}
-	if got := gitCommitsBehind(dir, sha, []string{"watch", "flow"}); got != 3 {
-		t.Errorf("multi-path count = %d, want 3", got)
+	if got, err := planfile.CommitsBehind(dir, sha, []string{"watch", "flow"}); err != nil || got != 3 {
+		t.Errorf("multi-path count = %d, err = %v, want 3, nil", got, err)
 	}
 }

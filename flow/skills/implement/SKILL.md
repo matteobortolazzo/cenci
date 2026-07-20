@@ -71,10 +71,8 @@ Extract the first whitespace-delimited token from `$ARGUMENTS` and determine the
   - Examples: `#1 focus on API` → ID `1`, context `focus on API`; `7` → ID `7`, no context.
 
 - **If the first token ends in `.md` and resolves to a file in `.plans/`** → **plan file mode**
-  - Read the plan file. Parse the YAML front matter (between `---` delimiters) to extract metadata: `version`, `mode`, `ticketId`, `ticketTitle`, `slug`, `isChild`, `isLastChild`, `parentId`, `planCommitSha`, `createdAt`, `status`.
-  - Set `hasPlanFile = true`.
-  - Inherit the original mode (`ticket` or `ticketless`) from the front matter's `mode` field.
-  - If `mode` is `ticket`, set the ticket ID and slug from front matter. If `mode` is `ticketless`, set the slug from front matter and **validate it** with the same check and hard-stop as the freshly-generated case below — a hand-edited or pre-validation plan file can carry a slug that was never checked, and it is just as load-bearing on this path.
+  - If the filename has a numeric prefix (`.plans/<id>-<slug>.md`, ticket mode), extract that ticket ID and defer entirely to the **Plan Verification** step below — it validates and resumes from the file; do not read or parse it yourself here.
+  - If the filename has no numeric prefix (`.plans/<slug>.md`, a ticketless-mode plan — **Plan Verification** below operates on ticket IDs and does not apply), `Read` the plan file directly, parse its YAML front matter (between `---` delimiters) for `mode` and `slug`, set `hasPlanFile = true`, and **validate** the slug with the same check and hard-stop as the freshly-generated case below — a hand-edited or pre-validation plan file can carry a slug that was never checked, and it is just as load-bearing on this path.
   - The rest of `$ARGUMENTS` after the file path is ignored.
 
 - **Otherwise** → **ticketless mode**
@@ -86,14 +84,9 @@ Extract the first whitespace-delimited token from `$ARGUMENTS` and determine the
 
 The determined mode (ticket or ticketless) governs conditional behavior throughout the rest of this skill.
 
-**Plan file auto-detection** (ticket mode only): If the first token is a ticket ID (ticket mode), glob for `.plans/<id>-*.md`:
+A numeric ticket ID is now known whenever this is ticket mode — either from the bare ticket-ID first token, or extracted from a `.plans/<id>-*.md` filename argument above. **Plan Verification** (see `## Pre-flight Check` below) validates and resumes any saved plan for it via `cenci pipeline plan-check <id>` — that call itself invokes `gh`, so it runs after Auth Verification confirms `gh` is authenticated, not here.
 
-- **Exactly one match, and the user context does not request a re-plan** → pick it up silently: switch to plan file mode, set `hasPlanFile = true`, read the plan file, and tell the user in one line: "Found saved plan `.plans/<filename>` — resuming implementation from it (pass `replan` as context to discard it instead)." Do **not** ask — a plan file only exists because a Phase 1 planning session persisted it after the user answered its clarifying questions, launching this run is the human authorization to execute it, and scripted launches (`cenci run implement <id>`) rely on this being non-interactive. Phase 1's `planCommitSha` staleness check still guards against a plan that predates codebase changes.
-- **The user context requests a re-plan** (it contains a standalone token like `replan` or `re-plan`, or an explicit instruction to discard/redo the existing plan) → ignore the plan file and proceed in normal ticket mode. This is the **re-plan over an existing plan** path referenced in the Label "Working" section.
-- **Multiple matches** → ambiguous; ask with `AskUserQuestion` which plan file to use, offering each match plus **"Re-plan from scratch"** as the final option.
-- **No match** → proceed in normal ticket mode.
-
-**If ticket mode:** Do **not** fetch the ticket in the main agent (single exception: the stale-plan re-fetch in plan-file mode, Phase 1). Extract owner/repo from `git remote get-url origin` (e.g. `git@github.com:owner/repo.git` → `owner/repo`) for later commands; the ticket itself is fetched by the context-gatherer (see Context Gathering below) after the pre-flight check.
+**If ticket mode:** Do **not** fetch the ticket in the main agent (the only exception is `cenci pipeline plan-check`, covered by Auth Verification below and run immediately after it). Extract owner/repo from `git remote get-url origin` (e.g. `git@github.com:owner/repo.git` → `owner/repo`) for later commands; the ticket itself is fetched by the context-gatherer (see Context Gathering below) after the pre-flight check.
 
 **If ticketless mode:** No ticket to fetch. The task description from `$ARGUMENTS` is the primary input.
 
@@ -107,13 +100,26 @@ The determined mode (ticket or ticketless) governs conditional behavior througho
 - If it returns authenticated → proceed to context gathering.
 - If **not** authenticated → tell the user to run `gh auth login`, then stop. Do not delegate to the context-gatherer until `gh` is authenticated.
 
+### Plan Verification
+
+**Ticket mode only**, immediately after Auth Verification passes (this call invokes `gh`, so it must not run before authentication is confirmed): invoke `cenci pipeline plan-check <id>`, passing `--replan-requested` when the user context contains a standalone token like `replan`/`re-plan` or an explicit instruction to discard/redo the existing plan (this is the **re-plan over an existing plan** path referenced in the Label "Working" section). The CLI owns discovery (globbing `.plans/<id>-*.md`), validation (front matter, required sections, slug), and the freshness/resume decision — do not glob `.plans/` or hand-parse front matter yourself; consume the returned `plan` metadata (`mode`, `slug`, `ticketId`, `isChild`, `isLastChild`, `parentId`) instead. Store the returned `decision` as `planCheckDecision` (Phase 1 reads it) and render its verdict:
+
+- **`resume`** → switch to plan file mode: set `hasPlanFile = true`, `Read` the plan file at the returned `artifacts[0]` path for its full content (the CLI validates and echoes metadata only, not file content) — source ticket details, user context, Q&A, implementation plan, architectural context, design context, and attachment summaries from it — and tell the user in one line: "Found saved plan `.plans/<filename>` — resuming implementation from it (pass `replan` as context to discard it instead)." Do **not** ask — a plan file only exists because a Phase 1 planning session persisted it after the user answered its clarifying questions, launching this run is the human authorization to execute it, and scripted launches (`cenci run implement <id>`) rely on this being non-interactive.
+- **`stale`** → same as `resume` above (set `hasPlanFile = true`, read the plan file) but do **not** print the resuming notice — Phase 1's `## Existing Plan` renders the stored `planCheckDecision` and asks the human before continuing (see `phases/phase-1-plan.md`).
+- **`replan`** → ignore the plan file (leave `hasPlanFile` unset) and proceed in normal ticket mode.
+- **`none`** → proceed in normal ticket mode. This is the everyday outcome for a first `/cenci:implement <ticket-id>` run on a ticket with no saved plan yet — not an error. Do not surface its `errors[]` entry to the user as a failure.
+- **`multiple`** → ambiguous; ask with `AskUserQuestion` which plan file to use, offering each path from the returned `artifacts[]` plus **"Re-plan from scratch"** as the final option. Picking "Re-plan from scratch" proceeds in normal ticket mode. Picking a specific path: `cenci pipeline plan-check` has no way to target one candidate among several for validation, so `Read` that file directly and parse its YAML front matter for `mode`/`slug`/`ticketId`/`isChild`/`isLastChild`/`parentId` — the one narrow exception to "the CLI owns discovery/validation" above, mirroring the ticketless-mode fallback earlier in this section, and justified the same way: a structurally CLI-unresolvable disambiguation, not the common case. Set `hasPlanFile = true` and `planCheckDecision = "stale"` — the CLI never computed a freshness verdict for the disambiguated file (it short-circuits to `multiple` before freshness runs), so freshness is *unverified*, not known-fresh; reusing the `stale` branch means Phase 1's existing human-confirmation gate (`## Existing Plan` in `phases/phase-1-plan.md`) runs for this file too, the same safety net every other branch gets. Otherwise proceed like `resume` above.
+- **Unrecognized/empty `decision`** (the CLI exited non-zero with `decision` empty and a populated `errors[]` — the plan file exists but is malformed, or its freshness could not be determined at all, e.g. a git or `gh` failure) → do **not** silently fall through to any other branch above. Surface the `errors[]` message to the user and ask via `AskUserQuestion`: "The saved plan couldn't be validated: `<errors[0]>` — re-plan from scratch?" ("Continue with existing plan" is not offered here — unlike `stale`, the plan itself is unreadable/unverifiable, not merely possibly outdated.) If the user agrees, proceed in normal ticket mode (leave `hasPlanFile` unset); otherwise stop.
+
+**If ticketless mode:** Skip Plan Verification entirely — the pipeline commands operate on ticket IDs.
+
 ## Context Gathering (Delegated)
 
 Runs **after** the Pre-flight Check above — the `gh auth status` check is the precondition that makes read-only `gh` safe inside a subagent (see the `subagent-safety` skill).
 
 > **Blocking delegation — do not background or poll.** Invoke the `context-gatherer` as a single, foreground `Task` call and wait for its result inline. Do **not** run it in the background, do **not** announce that you'll "wait for it to complete," and do **not** call any monitoring/polling tool to check on it — the `Task` call returns the digest directly when the subagent finishes. The next pipeline step reads that returned digest; there is nothing to poll.
 
-**If plan file mode** (`hasPlanFile = true`): skip this delegation entirely — the plan file already contains the bundled context, and `isChild`/`isLastChild`/`parentId` come from its front matter. The stale-plan re-fetch in Phase 1 (a single read-only `gh issue view`) is the explicit exception to the no-fetch rule and runs in the main agent after pre-flight.
+**If plan file mode** (`hasPlanFile = true`): skip this delegation entirely — the plan file already contains the bundled context, and `isChild`/`isLastChild`/`parentId` come from the `plan` metadata `cenci pipeline plan-check` returned during Pre-flight Check's **Plan Verification** above. Ticket-drift freshness is checked by that same CLI call, not by a main-agent `gh` re-fetch.
 
 **If ticket mode:** Delegate to the `context-gatherer` agent. Pass:
 
@@ -185,7 +191,7 @@ If the digest's `labels` already include **"In Review"** or **"Implemented"**, a
 If the user says no → stop. If yes → proceed with the pipeline. This is a warning only — it does not block.
 
 If the digest's `labels` include **"Planned"** but this run is **not** plan-file mode (`hasPlanFile` is false — e.g. the plan file was deleted or lives on another host), a plan was recorded for this ticket but no plan-file argument reached this run. Display a soft, non-blocking note via `AskUserQuestion` — mirror the tone above:
-> "This ticket is marked `Planned` (a plan was persisted), but you didn't pass a plan file. If the plan file still exists under `.plans/`, re-run as `/cenci:implement .plans/<file>` to pick it up (the plan-file auto-detection resumes from it automatically when a matching file is found); otherwise you can re-plan from scratch. Proceed with a fresh plan anyway?"
+> "This ticket is marked `Planned` (a plan was persisted), but you didn't pass a plan file. If the plan file still exists under `.plans/`, re-run as `/cenci:implement <ticket-id>` or `/cenci:implement .plans/<file>` to pick it up (`cenci pipeline plan-check` resumes from it automatically when a matching file is found); otherwise you can re-plan from scratch. Proceed with a fresh plan anyway?"
 
 If the user says no → stop. If yes → proceed (a fresh plan re-applies `Planned` at the end). This is a warning only — it does not block.
 
