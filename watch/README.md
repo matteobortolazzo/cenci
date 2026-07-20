@@ -581,6 +581,52 @@ tmux windows, e.g. a kanban board's column-cleanup hook:
 cleanup: 'cenci close {number}'
 ```
 
+## Pipeline stage commands (`cenci pipeline`)
+
+`cenci pipeline <stage> <id>` drives the implement pipeline's state machine —
+the deterministic "what stage is ticket `<id>` in, what's next" logic that
+used to live in the flow skill's prose now lives here instead, exercised by
+Go tests rather than prompt interpretation:
+
+```bash
+cenci pipeline prepare 42            # new -> prepared (confirms the ticket exists via `gh issue view`)
+cenci pipeline plan 42               # prepared -> waiting_for_plan_approval
+cenci pipeline plan 42 --approve     # waiting_for_plan_approval -> plan_approved (run after human approval)
+cenci pipeline execute 42            # plan_approved -> executed (blocked before a plan is approved)
+cenci pipeline review 42             # executed -> reviewed
+cenci pipeline finalize 42           # reviewed -> finalized
+```
+
+Every stage prints a structured JSON contract to stdout:
+
+```json
+{ "state": "waiting_for_plan_approval", "next_actions": [], "artifacts": [], "warnings": [], "errors": [] }
+```
+
+`next_actions`, `artifacts`, `warnings`, and `errors` are always present
+(empty arrays, never `null`, when there's nothing to report). `artifacts`
+currently holds only the pipeline state file's path; richer artifact
+tracking is a follow-up.
+
+Behavior:
+- State persists per-repo, git-tracked, at `.cenci/pipeline/<id>.json`
+  (resolved from the git repo root of the current working directory).
+  Concurrent invocations for the same ticket serialize through a file lock,
+  retried with deterministic backoff on contention.
+- `prepare` is idempotent — re-running it once a ticket is already `prepared`
+  re-emits the current state instead of erroring.
+- `execute` is blocked until the plan has been explicitly approved
+  (`plan --approve`); running it any earlier is a domain error, not a
+  transition.
+- A transition that's invalid for the ticket's current stage (e.g. `execute`
+  before `plan --approve`, or a ticket `gh issue view` can't find) is a
+  **domain error**: the full JSON contract still prints on stdout with
+  `errors` populated, and the process exits `1`.
+- Malformed CLI usage (unknown/missing stage, missing or non-numeric `<id>`,
+  an unrecognized flag, `--approve` on any stage but `plan`, or a trailing
+  unexpected argument) prints a one-line hint to stderr and exits `2` —
+  no JSON is printed for these.
+
 ## Sandbox management and session launching (`cenci sandbox`, `cenci open`)
 
 This section is the CLI reference for the sandbox surface (per

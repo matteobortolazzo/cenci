@@ -2,6 +2,8 @@
 
 Read this file only when Phase 6 + 7 starts.
 
+Ticket mode: at entry, invoke `cenci pipeline review <id>` to advance to `reviewed` and obtain this stage's `next_actions`/`warnings`/`errors`. Render them as this phase's status update — the lite-docs branch below renders this same call's `next_actions` instead of narrating its own transition (see Execution). This call runs inside the feature worktree, a different tree than where `prepare`/`plan`/`execute` ran (main checkout), so a non-empty `errors[]` here is expected in the common cross-worktree case (the `.cenci/pipeline/<id>.json` state file isn't shared across the worktree boundary — a known #559 dependency, not this ticket's to fix) rather than an authoritative error gate: render each error as an informational/best-effort warning (e.g. "pipeline state tracking unavailable across the worktree boundary — continuing with this phase's existing procedure; see #559") and fall through to run the rest of this phase's existing prose-driven procedure exactly as it did before this ticket's cutover — do not clear the Goal Autopilot or stop for this call's `errors[]`. Ticketless mode: skip this call — the pipeline commands operate on ticket IDs.
+
 These quality gates are mandatory. `cenci.reviewConcurrency` controls only whether reviewers run in parallel or sequentially.
 
 Any point below that stops for the user — an unclear security fix, a code-review human decision, an issue that persists after 2 fix attempts — is an error gate: clear the Goal Autopilot first (`/goal clear` via `SlashCommand`, a no-op if none is armed — see `SKILL.md`), then stop and ask. Otherwise the goal restarts the turn instead of waiting for the decision.
@@ -50,7 +52,7 @@ Write the chosen path string — `full`, `lite-docs`, or `lite-small` — to `$R
 
 Branch on the classification result written above:
 
-- **`lite-docs`**: launch no reviewers. Docs-only changes skip Phase 6 + 7 review entirely; proceed to the next phase.
+- **`lite-docs`**: launch no reviewers. Docs-only changes skip Phase 6 + 7 review entirely; render the `next_actions` from the `cenci pipeline review <id>` call above (see the entry note) as this run's status update instead of narrating what comes next.
 - **`lite-small`**: launch `code-reviewer` only, with the same diff/path, changed files, ticket requirements, and implementation plan it would receive on the full path. The existing Code Review Actions below apply unchanged — this is a narrower reviewer set, not a cheaper model tier. `cenci.reviewConcurrency` has no effect with a single reviewer.
 - **`full`**: launch all three reviewers:
 

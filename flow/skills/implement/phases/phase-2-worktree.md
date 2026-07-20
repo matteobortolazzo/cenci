@@ -18,6 +18,8 @@ Verify:
 
 If either check fails, stop and tell the user to run `/cenci:implement .plans/<filename>` in a fresh session.
 
+3. Ticket mode: record approval and enter execute. The Gate Check passing above — the human having launched this plan-file run — is what this step records as approval. Invoke `cenci pipeline plan <id> --approve` to advance to `plan_approved`, then invoke `cenci pipeline execute <id>` to advance to `executed`. Render the returned `next_actions`/`warnings`/`errors`; if either call returns non-empty `errors[]`, treat it the same as a Gate Check failure above — stop and tell the user to run `/cenci:implement .plans/<filename>` in a fresh session. Ticketless mode: skip both calls — the pipeline commands operate on ticket IDs. The `next_actions` obtained from `execute` here are what Phases 3–5 and the Baseline Gate Check's Proceed step below render as the "what's next" status, in place of per-phase transition prose.
+
 ## Arm Goal Autopilot
 
 The Gate Check passing means this session is committed to running phases 2–9. Arm the completion goal now, following the **Goal Autopilot (plan-file mode)** section of `SKILL.md`:
@@ -84,7 +86,7 @@ Parse stdout for the `GATE_STATUS=` line:
 
 ### 5. Proceed
 
-If every invoked target passes (green or unset), hand off to Phase 3 unchanged — no other observable change to the pipeline.
+If every invoked target passes (green or unset), continue to Phase 3 — render the `execute` stage's `next_actions` obtained at the Gate Check above (see `## Gate Check`, step 3) as the status update; no other observable change to the pipeline.
 
 ### 6. Stop on failure
 
