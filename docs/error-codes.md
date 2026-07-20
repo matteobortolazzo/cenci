@@ -59,4 +59,4 @@ exit ...) [CENCI-SANDBOX-START-001]: <verbatim detail>`).
 
 The `did not become ready within 60 seconds` readiness-timeout path does not
 yet attach a code — that classification is deferred to a follow-up ticket
-(#572, the `cenci diagnose` work) rather than this foundation ticket.
+(#572, the diagnose command work) rather than this foundation ticket.
