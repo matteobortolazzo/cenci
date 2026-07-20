@@ -22,17 +22,23 @@ If `hasPlanFile` is false and the main agent's Trivial-Ticket Triage (see `SKILL
 1. The AC-mandated line (`` Judged trivial: `<reason>` — skipping planning, implementing directly ``) was already printed once by `SKILL.md`'s `## Trivial-Ticket Triage` when it set `trivial = true`. Do **not** print it again here.
 2. Skip the planner delegation and the Q&A loop entirely — there are no clarifying questions to ask on this path.
 3. Write the plan file using the **same** "Persist the Plan" machinery below, verbatim: the same front-matter shape, the same ticket-title→slug derivation, a `Write` step for the main-agent-owned sections, then `cat /tmp/claude/cenci-context-<id>.md >> .plans/<filename>` to append `## Ticket Details`, `## Design Context`, and `## Project Context`. Two content differences: `## Implementation Plan` in this minimal file is a one-liner pointing at `## Ticket Details`, e.g. "Trivial ticket — implementation follows the ticket body directly; see ## Ticket Details." Likewise, `## Architectural Context` is a one-liner in place of the planner's discovered patterns/conventions, e.g. "N/A — no codebase exploration; triage judged the ticket unambiguous from its own body."
-4. Apply the `Planned` label exactly as `## Persist the Plan`'s "Mark the ticket `Planned`" step does, **except** do not remove `Working` — this session is continuing rather than stopping, so the normal flow's
+4. Apply the `Planned` label exactly as `## Persist the Plan`'s "Mark the ticket `Planned`" step does, **except** retain `Working` instead of swapping it out — this session is continuing rather than stopping, so the normal flow's
    ```bash
-   gh issue edit <number> --repo <owner>/<repo> --add-label "Planned" --remove-label "Working"
+   cenci pipeline label <id> --transition planned
    ```
-   becomes just:
+   becomes:
    ```bash
-   gh issue edit <number> --repo <owner>/<repo> --add-label "Planned"
+   cenci pipeline label <id> --transition planned --trivial
    ```
-   **Verify this command succeeded before continuing.** This restates — does not merely reference — `## Persist the Plan`'s error-surfacing rule, and it is *more* load-bearing here: the normal flow's plan-review stop is itself a human checkpoint that would catch a silently-failed label swap, but the Trivial Fast Path has no such checkpoint — it continues straight into Phase 2 and can arm an unattended `/goal` autopilot all the way to PR creation. If this command errors, surface the error to the user and **STOP** — do not set `hasPlanFile = true`, do not arm the goal, and do not proceed into Phase 2 on an unconfirmed board state.
-5. If `cenci.planComment: true`, post the minimal plan as an audit comment exactly as today (see `## Persist the Plan`).
-6. Set `hasPlanFile = true` and continue into Phase 2 in the same session, per the `next_actions` rendered from the `cenci pipeline plan <id>` call above (see `## Pipeline: Plan Stage`). Do **not** stop, do **not** present the plan for review, do **not** end the turn — this is the sole exception to "a session that creates a new plan always ends at Phase 1" (see `SKILL.md`'s Pipeline section).
+   The `--trivial` flag tells the CLI to keep `Working` (add `Planned` alongside it) instead of swapping `Working` out.
+
+   **Verify this call succeeded before continuing** — render its `state`/`next_actions`/`warnings`/`errors`. This restates — does not merely reference — `## Persist the Plan`'s error-surfacing rule, and it is *more* load-bearing here: the normal flow's plan-review stop is itself a human checkpoint that would catch a silently-failed label swap, but the Trivial Fast Path has no such checkpoint — it continues straight into Phase 2 and can arm an unattended `/goal` autopilot all the way to PR creation. If this call returns non-empty `errors[]`, surface them to the user and **STOP** — do not set `hasPlanFile = true`, do not arm the goal, and do not proceed into Phase 2 on an unconfirmed board state.
+5. Record the saved plan path as a tracked artifact:
+   ```bash
+   cenci pipeline artifact <id> --plan .plans/<filename>
+   ```
+6. If `cenci.planComment: true`, post the minimal plan as an audit comment exactly as today (see `## Persist the Plan`).
+7. Set `hasPlanFile = true` and continue into Phase 2 in the same session, per the `next_actions` rendered from the `cenci pipeline plan <id>` call above (see `## Pipeline: Plan Stage`). Do **not** stop, do **not** present the plan for review, do **not** end the turn — this is the sole exception to "a session that creates a new plan always ends at Phase 1" (see `SKILL.md`'s Pipeline section).
 
 ## New Plan
 
@@ -155,21 +161,23 @@ Record `planCommitSha` from `git rev-parse HEAD`. Source `isChild`, `isLastChild
 
 ### Mark the ticket `Planned` (ticket mode only)
 
-After the plan file is written, signal on the board that a plan is now waiting to be picked up. **Ticket mode only** — skip this entirely in ticketless mode (there is no ticket to label).
+After the plan file is written, signal on the board that a plan is now waiting to be picked up, and record the plan path as a tracked artifact. **Ticket mode only** — skip this entirely in ticketless mode (there is no ticket to label; the artifact call below is also skipped since it's keyed by ticket ID).
 
-`gh issue edit --add-label` **fails when the label does not exist in the repository** — `Planned` is newer than the other lifecycle labels, so projects configured before it are missing it. Ensure it exists first, as its own Bash call (`|| true` swallows only the "already exists" error):
-
-```bash
-gh label create "Planned" --repo <owner>/<repo> --color "1D76DB" --description "Plan on disk, ready to pick up" 2>/dev/null || true
-```
-
-Then apply the swap and **verify it succeeded** — if this command errors, surface the error to the user instead of ending the session silently, since a missing `Planned` label breaks the saved-plan pickup on the board:
+Apply the swap and **verify it succeeded** — if this call returns non-empty `errors[]`, surface it to the user instead of ending the session silently, since a missing `Planned` label breaks the saved-plan pickup on the board:
 
 ```bash
-gh issue edit <number> --repo <owner>/<repo> --add-label "Planned" --remove-label "Working"
+cenci pipeline label <id> --transition planned
 ```
 
-`Planned` means "a persisted plan exists (or has existed) on disk (`.plans/<id>-*.md`)." The planning session applied `Working` at pipeline start; this swap replaces it so the board no longer shows the ticket as actively in flight. Unlike `Working`, `Planned` is a milestone marker, not a current-stage indicator — the implement skill never removes it once set, including at the start of the plan-file implementation run (see the **Label "Working"** section of `SKILL.md`), so a stalled implementation run still shows `Planned` on the board.
+Render the returned `state`/`next_actions`/`warnings`/`errors`. The CLI self-heals `Planned`'s existence in the repository (it is newer than the other lifecycle labels, so projects configured before it may be missing it) and treats "already exists" as success — no separate self-heal call is needed.
+
+`Planned` means "a persisted plan exists (or has existed) on disk (`.plans/<id>-*.md`)." The planning session applied `Working` at pipeline start; this call replaces it so the board no longer shows the ticket as actively in flight. Unlike `Working`, `Planned` is a milestone marker, not a current-stage indicator — the implement skill never removes it once set, including at the start of the plan-file implementation run (see the **Label "Working"** section of `SKILL.md`), so a stalled implementation run still shows `Planned` on the board.
+
+Record the saved plan path as a tracked artifact:
+
+```bash
+cenci pipeline artifact <id> --plan .plans/<filename>
+```
 
 If the resolved config has `cenci.planComment: true`, also post the saved plan as a ticket comment for audit / off-host visibility (ticket mode only), immediately after the label swap. `.plans/` remains the executable source of truth; the comment is a convenience copy:
 
@@ -179,7 +187,7 @@ gh issue comment <number> --repo <owner>/<repo> --body-file .plans/<filename>
 
 If `cenci.planComment` is absent or `false`, skip the comment.
 
-After the plan file is written and (in ticket mode) the label swap and any optional comment are done, the **only remaining actions** are those one-or-two `gh` calls plus the final message below — no other tool calls, and never read `phases/phase-2-worktree.md` or any later phase file in this session. The session that created a plan always ends here; implementation runs in a fresh session. (This "always ends here" rule is what `## New Plan` follows; the **Trivial Fast Path** above reuses this section's front-matter/write/label/comment machinery but does not stop — see its step 6.)
+After the plan file is written and (in ticket mode) the label transition, artifact recording, and any optional comment are done, the **only remaining actions** are those `cenci pipeline`/`gh` calls plus the final message below — no other tool calls, and never read `phases/phase-2-worktree.md` or any later phase file in this session. The session that created a plan always ends here; implementation runs in a fresh session. (This "always ends here" rule is what `## New Plan` follows; the **Trivial Fast Path** above reuses this section's front-matter/write/label/artifact/comment machinery but does not stop — see its step 7.)
 
 Stop and present the full plan together with the save notice — this final message is the user's review point before launching implementation, so never abbreviate the plan here:
 

@@ -82,6 +82,14 @@ func transition(from Stage, command string, approve bool) (Stage, error) {
 	}
 }
 
+// NextActionsFor is the exported form of nextActionsFor (ticket #559): the
+// mechanics verbs' CLI rendering (pipeline_cmd.go, package main) renders the
+// same {state, next_actions, artifacts, warnings, errors} contract the five
+// stage commands do, and needs this guidance table without duplicating it.
+func NextActionsFor(stage Stage) []string {
+	return nextActionsFor(stage)
+}
+
 // nextActionsFor returns the stage-appropriate guidance for the structured
 // output contract's next_actions field. Always non-nil (possibly empty for
 // the terminal finalized stage, where there is nothing left to do).

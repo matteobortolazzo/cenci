@@ -30,18 +30,36 @@ var pipelineStages = map[string]bool{
 
 var pipelineIDPattern = regexp.MustCompile(`^\d+$`)
 
-// runPipeline implements `cenci pipeline <stage> <id> [--approve]
-// [--state-dir DIR] [--repo PATH]`: it parses and validates the CLI surface
-// (usage errors exit 2 with a one-line stderr hint, per
-// docs/cli-conventions.md), dispatches into internal/pipeline's engine, and
-// renders the returned {state, next_actions, artifacts, warnings, errors}
-// contract as JSON on stdout. Domain errors (invalid transition, ticket not
-// found, etc.) still print the full contract and exit 1 — only malformed CLI
-// input exits 2 without ever reaching the engine.
+// runPipeline implements `cenci pipeline <stage|verb> <id> [flags]`: the
+// first token is either one of the five stage transitions (unchanged from
+// ticket #558) or one of ticket #559's mechanics verbs (label/worktree/
+// worktree-cleanup/artifact), each with its own usage hint and flag set. It
+// parses and validates the CLI surface (usage errors exit 2 with a one-line
+// stderr hint, per docs/cli-conventions.md), dispatches into
+// internal/pipeline's engine, and renders the returned {state, next_actions,
+// artifacts, warnings, errors} contract as JSON on stdout. Domain errors
+// (invalid transition, ticket not found, etc.) still print the full
+// contract and exit 1 — only malformed CLI input exits 2 without ever
+// reaching the engine.
 func runPipeline(args []string) {
 	if len(args) == 0 {
 		pipelineUsageExit()
 	}
+	switch args[0] {
+	case "label":
+		runPipelineLabel(args[1:])
+		return
+	case "worktree":
+		runPipelineWorktree(args[1:])
+		return
+	case "worktree-cleanup":
+		runPipelineWorktreeCleanup(args[1:])
+		return
+	case "artifact":
+		runPipelineArtifact(args[1:])
+		return
+	}
+
 	stage := args[0]
 	if !pipelineStages[stage] {
 		pipelineUsageExit()

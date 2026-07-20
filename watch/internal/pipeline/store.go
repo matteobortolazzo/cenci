@@ -1,11 +1,14 @@
 package pipeline
 
 // Pipeline run state persistence (ticket #558): repo-root resolution
-// (mirrors internal/sandbox/launcher/scope.go's ResolveRepoRoot), the
-// canonical <repo>/.cenci/pipeline/<id>.json path (with <id> validated
-// against ^\d+$ before it ever reaches a path), and atomic load/save
-// (mirrors internal/babysit's State/load/save: .tmp + os.Rename,
-// MarshalIndent, MkdirAll).
+// (ticket #559: anchored on the MAIN checkout root via `git rev-parse
+// --path-format=absolute --git-common-dir` + filepath.Dir, which diverges
+// from internal/sandbox/launcher/scope.go's ResolveRepoRoot — see
+// resolveRepoRoot's own doc comment below for why), the canonical
+// <repo>/.cenci/pipeline/<id>.json path (with <id> validated against ^\d+$
+// before it ever reaches a path), and atomic load/save (mirrors
+// internal/babysit's State/load/save: .tmp + os.Rename, MarshalIndent,
+// MkdirAll).
 
 import (
 	"encoding/json"
@@ -20,14 +23,32 @@ import (
 
 // CurrentSchemaVersion tags the on-disk state format (mirrors babysit's
 // SchemaVersion), giving a future format change something to gate on.
-const CurrentSchemaVersion = 1
+//
+// Bumped to 2 (ticket #559) now that the v2 fields below (PlanPath, Branch,
+// WorktreePath, PRURL, PRNumber, Labels, Session) are wired up by the
+// mechanics verbs (artifact/worktree/label).
+const CurrentSchemaVersion = 2
 
 // State is the persisted pipeline run record for one ticket.
+//
+// The fields below PlanPath are v2 additions (ticket #559: deterministic
+// pipeline mechanics — artifact tracking, worktree lifecycle, label
+// lifecycle). All are omitempty so a v1 state file (schemaVersion=1, none
+// of these fields present) still round-trips through loadState with them
+// defaulting to their zero values.
 type State struct {
 	SchemaVersion int       `json:"schemaVersion"`
 	ID            string    `json:"id"`
 	Stage         Stage     `json:"stage"`
 	UpdatedAt     time.Time `json:"updatedAt"`
+
+	PlanPath     string            `json:"planPath,omitempty"`
+	Branch       string            `json:"branch,omitempty"`
+	WorktreePath string            `json:"worktreePath,omitempty"`
+	PRURL        string            `json:"prUrl,omitempty"`
+	PRNumber     int               `json:"prNumber,omitempty"`
+	Labels       []string          `json:"labels,omitempty"`
+	Session      map[string]string `json:"session,omitempty"`
 }
 
 // idPattern is the validation gate every <id> must pass before it is used to
@@ -45,15 +66,32 @@ func statePath(repoRoot, id string) (string, error) {
 	return filepath.Join(repoRoot, ".cenci", "pipeline", id+".json"), nil
 }
 
-// resolveRepoRoot returns the absolute root of the git repo containing cwd,
-// or an error when cwd isn't inside a git repo (mirrors
-// internal/sandbox/launcher/scope.go's ResolveRepoRoot).
+// resolveRepoRoot returns the absolute root of the MAIN checkout of the git
+// repo containing cwd, or an error when cwd isn't inside a git repo.
+//
+// This resolves via `git rev-parse --path-format=absolute --git-common-dir`
+// + filepath.Dir, NOT `--show-toplevel` (ticket #559): the common-dir path
+// (<main-repo>/.git) is shared by the main checkout and every linked
+// worktree it owns, so filepath.Dir of it always yields the main checkout's
+// root — even when cwd is inside a linked worktree (e.g. review/finalize
+// running inside .worktrees/<id>-<slug>). `--show-toplevel` would instead
+// resolve to that linked worktree's own root, breaking cross-worktree state
+// continuity, which is exactly the gap this ticket closes. See
+// TestResolveRepoRoot_FromLinkedWorktree_ReturnsMainCheckoutRoot in
+// store_test.go.
+//
+// This behavior now DIVERGES from internal/sandbox/launcher/scope.go's
+// ResolveRepoRoot, which intentionally stays on `--show-toplevel` for
+// launcher/sandbox scoping (worktree-local by design) — that is not a bug,
+// it is a different, correct answer to a different question. Do not
+// "fix" scope.go to match this function or vice versa.
 func resolveRepoRoot(cwd string) (string, error) {
-	out, err := exec.Command("git", "-C", cwd, "rev-parse", "--show-toplevel").Output()
+	out, err := exec.Command("git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir").Output()
 	if err != nil {
 		return "", fmt.Errorf("resolve repo root from %s: %w", cwd, err)
 	}
-	return strings.TrimSpace(string(out)), nil
+	commonDir := strings.TrimSpace(string(out))
+	return filepath.Dir(commonDir), nil
 }
 
 // saveState writes s to path atomically: marshal, write to a sibling .tmp

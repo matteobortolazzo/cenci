@@ -202,3 +202,182 @@ func initGitRepo(t *testing.T, dir string) {
 		t.Fatalf("git init %s: %v\n%s", dir, err, out)
 	}
 }
+
+// -- ticket #559: schema v2 + main-checkout-anchored repo-root resolution --
+
+// TestCurrentSchemaVersion_IsV2 locks in the v2 bump named in ticket #559's
+// store.go changes (new omitempty fields: PlanPath, Branch, WorktreePath,
+// PRURL, PRNumber, Labels, Session). RED until CurrentSchemaVersion is
+// bumped from 1 to 2.
+func TestCurrentSchemaVersion_IsV2(t *testing.T) {
+	if CurrentSchemaVersion != 2 {
+		t.Errorf("CurrentSchemaVersion = %d, want 2 (ticket #559's schema bump for the new artifact-tracking fields)", CurrentSchemaVersion)
+	}
+}
+
+// TestState_V2FieldsRoundTripThroughSaveAndLoad locks in that the new v2
+// fields (PlanPath, Branch, WorktreePath, PRURL, PRNumber, Labels, Session)
+// persist and reload exactly, alongside the existing v1 fields.
+func TestState_V2FieldsRoundTripThroughSaveAndLoad(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "42.json")
+
+	want := State{
+		SchemaVersion: CurrentSchemaVersion,
+		ID:            "42",
+		Stage:         StagePlanApproved,
+		UpdatedAt:     time.Now().UTC().Round(time.Second),
+		PlanPath:      ".plans/42-add-thing.md",
+		Branch:        "feature/42-add-thing",
+		WorktreePath:  "/repo/.worktrees/42-add-thing",
+		PRURL:         "https://github.com/o/r/pull/7",
+		PRNumber:      7,
+		Labels:        []string{"Working", "Planned"},
+		Session:       map[string]string{"runId": "abc123", "reviewPath": "full"},
+	}
+	if err := saveState(path, want); err != nil {
+		t.Fatalf("saveState: %v", err)
+	}
+
+	got, err := loadState(path)
+	if err != nil {
+		t.Fatalf("loadState: %v", err)
+	}
+	if got.PlanPath != want.PlanPath {
+		t.Errorf("PlanPath = %q, want %q", got.PlanPath, want.PlanPath)
+	}
+	if got.Branch != want.Branch {
+		t.Errorf("Branch = %q, want %q", got.Branch, want.Branch)
+	}
+	if got.WorktreePath != want.WorktreePath {
+		t.Errorf("WorktreePath = %q, want %q", got.WorktreePath, want.WorktreePath)
+	}
+	if got.PRURL != want.PRURL {
+		t.Errorf("PRURL = %q, want %q", got.PRURL, want.PRURL)
+	}
+	if got.PRNumber != want.PRNumber {
+		t.Errorf("PRNumber = %d, want %d", got.PRNumber, want.PRNumber)
+	}
+	if len(got.Labels) != len(want.Labels) {
+		t.Fatalf("Labels = %v, want %v", got.Labels, want.Labels)
+	}
+	for i := range want.Labels {
+		if got.Labels[i] != want.Labels[i] {
+			t.Errorf("Labels[%d] = %q, want %q", i, got.Labels[i], want.Labels[i])
+		}
+	}
+	if len(got.Session) != len(want.Session) {
+		t.Fatalf("Session = %v, want %v", got.Session, want.Session)
+	}
+	for k, v := range want.Session {
+		if got.Session[k] != v {
+			t.Errorf("Session[%q] = %q, want %q", k, got.Session[k], v)
+		}
+	}
+}
+
+// TestLoadState_V1StateFile_LoadsWithNewFieldsZeroValued covers backward
+// compatibility: a state file written before ticket #559 (schemaVersion=1,
+// none of the v2 fields present in the JSON at all) must still load without
+// error, with every new field defaulting to its zero value.
+func TestLoadState_V1StateFile_LoadsWithNewFieldsZeroValued(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "42.json")
+
+	v1JSON := `{
+		"schemaVersion": 1,
+		"id": "42",
+		"stage": "executed",
+		"updatedAt": "2024-01-01T00:00:00Z"
+	}`
+	if err := os.WriteFile(path, []byte(v1JSON), 0o644); err != nil {
+		t.Fatalf("write v1 fixture: %v", err)
+	}
+
+	got, err := loadState(path)
+	if err != nil {
+		t.Fatalf("loadState on a v1 file: unexpected error: %v", err)
+	}
+	if got.SchemaVersion != 1 {
+		t.Errorf("SchemaVersion = %d, want 1 (unchanged from the v1 fixture)", got.SchemaVersion)
+	}
+	if got.Stage != StageExecuted {
+		t.Errorf("Stage = %q, want %q", got.Stage, StageExecuted)
+	}
+	if got.PlanPath != "" {
+		t.Errorf("PlanPath = %q, want zero value %q for a v1 file", got.PlanPath, "")
+	}
+	if got.Branch != "" {
+		t.Errorf("Branch = %q, want zero value %q for a v1 file", got.Branch, "")
+	}
+	if got.WorktreePath != "" {
+		t.Errorf("WorktreePath = %q, want zero value %q for a v1 file", got.WorktreePath, "")
+	}
+	if got.PRURL != "" {
+		t.Errorf("PRURL = %q, want zero value %q for a v1 file", got.PRURL, "")
+	}
+	if got.PRNumber != 0 {
+		t.Errorf("PRNumber = %d, want zero value 0 for a v1 file", got.PRNumber)
+	}
+	if got.Labels != nil {
+		t.Errorf("Labels = %v, want nil (zero value) for a v1 file", got.Labels)
+	}
+	if got.Session != nil {
+		t.Errorf("Session = %v, want nil (zero value) for a v1 file", got.Session)
+	}
+}
+
+// TestResolveRepoRoot_FromLinkedWorktree_ReturnsMainCheckoutRoot is ticket
+// #559's crux fix, tested at the store.go boundary: resolveRepoRoot from
+// inside a REAL linked worktree (created via `git worktree add`) must
+// return the SAME absolute path as resolveRepoRoot from the main checkout
+// root -- never the worktree's own root. RED against the current `git
+// rev-parse --show-toplevel`-based implementation, which resolves to the
+// worktree's own root instead.
+//
+// Expected values were verified empirically (not assumed) via `git
+// rev-parse --path-format=absolute --git-common-dir` run from both a main
+// checkout and one of its linked worktrees: both return
+// "<main-repo>/.git", so filepath.Dir of that value is the main checkout's
+// root in both cases.
+func TestResolveRepoRoot_FromLinkedWorktree_ReturnsMainCheckoutRoot(t *testing.T) {
+	mainRepo := t.TempDir()
+	initGitRepo(t, mainRepo)
+	if out, err := exec.Command("git", "-C", mainRepo, "commit", "--allow-empty", "-q", "-m", "init").CombinedOutput(); err != nil {
+		t.Fatalf("git commit --allow-empty: %v\n%s", err, out)
+	}
+
+	wantReal, err := filepath.EvalSymlinks(mainRepo)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(mainRepo): %v", err)
+	}
+
+	fromMain, err := resolveRepoRoot(mainRepo)
+	if err != nil {
+		t.Fatalf("resolveRepoRoot(mainRepo): %v", err)
+	}
+	fromMainReal, err := filepath.EvalSymlinks(fromMain)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(fromMain): %v", err)
+	}
+	if fromMainReal != wantReal {
+		t.Errorf("resolveRepoRoot(mainRepo) = %q, want %q", fromMain, mainRepo)
+	}
+
+	worktreeDir := filepath.Join(t.TempDir(), "linked-worktree")
+	if out, err := exec.Command("git", "-C", mainRepo, "worktree", "add", "-q", worktreeDir, "-b", "feature/559-test").CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, out)
+	}
+
+	fromWorktree, err := resolveRepoRoot(worktreeDir)
+	if err != nil {
+		t.Fatalf("resolveRepoRoot(worktreeDir): %v", err)
+	}
+	fromWorktreeReal, err := filepath.EvalSymlinks(fromWorktree)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(fromWorktree): %v", err)
+	}
+	if fromWorktreeReal != wantReal {
+		t.Errorf("resolveRepoRoot(worktreeDir) = %q, want the MAIN checkout root %q, not the worktree's own root %q", fromWorktree, mainRepo, worktreeDir)
+	}
+}
