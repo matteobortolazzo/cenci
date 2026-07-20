@@ -14,7 +14,7 @@ Source `ticketId`/`slug` from the plan front matter (`hasPlanFile` is always tru
 
 Create `RUN_DIR` **once**, on first entry into this phase. Every fix-and-rerun cycle below (including the re-eval loop) reuses the same `RUN_DIR` and only overwrites the files inside it — never call the helper again within the same phase run, or the second call orphans the first `RUN_DIR` and any reviewer already holding the old paths silently goes stale. (If Phase 6 + 7 is entered fresh in a new session — e.g. after a Goal Autopilot resume that lost `RUN_DIR` to context compaction — a new `RUN_DIR` is created and the prior run's directory becomes an acceptable ephemeral `/tmp` leak; see Phase 9's Cleanup for the matching fail-closed note.)
 
-Gather context once. Target the worktree explicitly with `git -C <worktree-path>` on each `git diff` call so it resolves against the worktree and stays auto-approved regardless of whether Bash tool CWD persisted from an earlier call (never compound `cd <worktree-path>` with the redirect):
+Gather context once. Target the worktree explicitly with `git -C <worktree-path>` on each `git diff` call so it resolves against the worktree and stays auto-approved; redirect to an absolute temp-file path (never compound `cd <worktree-path>` with the redirect):
 
 ```bash
 git -C <worktree-path> diff > "$RUN_DIR/diff.patch"
