@@ -760,6 +760,30 @@ interactive session owns the TTY and its exit code propagates.
 binary; the retired `cenci-sand` name is a tombstone that prints a migration
 map and exits 2.
 
+## Diagnosing a sandbox session (`cenci diagnose`)
+
+```bash
+cenci diagnose mysession                    # read-only report on the claude-cenci-mysession session
+cenci diagnose mysession --agent codex      # same, for codex-cenci-mysession
+```
+
+`cenci diagnose <session> [--agent claude|codex|opencode]` prints a read-only
+report on a sandbox session: container status/exit, the timestamped startup
+marker (surfaced verbatim, same precedence as `open`'s launch-failure
+diagnostics), recent container logs, mounted volumes, daemon/event-socket
+reachability, and the image base + plugin manifest versions ("unknown" when a
+best-effort read fails). Every failure is annotated with a registered
+[error code](../docs/error-codes.md) and a fatal/degraded/warning severity.
+
+Unlike `open`, `diagnose` never launches, attaches, or wires the daemon — it
+only reads. It is also a report, not a pass/fail gate: a successful render
+exits 0 even when it finds fatal or degraded issues; only usage errors
+(missing session, unknown flag, invalid `--agent`) and cwd/home/runtime
+resolution failures exit non-zero (2 for usage errors, 1 otherwise).
+
+Note: recent logs and mount paths in the report may contain sensitive data
+(secrets, credentials, host paths) — review before sharing this output.
+
 ## Installer integration (`cenci doctor`, `cenci update`, `cenci uninstall`)
 
 ```bash

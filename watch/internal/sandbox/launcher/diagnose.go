@@ -1,0 +1,330 @@
+package launcher
+
+import (
+	"errors"
+	"fmt"
+	"net"
+	"os/exec"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/matteobortolazzo/cenci/watch/internal/errcode"
+	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
+)
+
+// Severity classifies how urgently a diagnose finding needs attention.
+// String values are deliberately lowercase — they're printed verbatim in the
+// human-readable report.
+type Severity string
+
+const (
+	// SeverityFatal marks a finding that means the session cannot work at
+	// all: the container exited/dead/not-found, or an agent-CLI/entrypoint
+	// startup failure (START-001/START-002).
+	SeverityFatal Severity = "fatal"
+	// SeverityDegraded marks a finding that means the session still works but
+	// with reduced functionality: a readiness-poll timeout, or the daemon/
+	// event-socket being unreachable (sessions won't report to host status
+	// bars).
+	SeverityDegraded Severity = "degraded"
+	// SeverityWarning marks a purely informational finding: an image or
+	// plugin-manifest version that couldn't be determined.
+	SeverityWarning Severity = "warning"
+)
+
+// finding is one reportable diagnose observation: a human-readable message,
+// optionally annotated with a registered errcode.Code (empty for findings —
+// like an unknown version read — that have no registered code to attach) and
+// its severity tier.
+type finding struct {
+	Message  string
+	Code     errcode.Code
+	Severity Severity
+}
+
+// severityForCode maps a registered errcode.Code to its severity tier per
+// the ticket's taxonomy. An unregistered or empty code (attached to no
+// specific failure class — e.g. a version-read finding) defaults to the
+// lowest tier, warning, rather than panicking or silently escalating.
+func severityForCode(code errcode.Code) Severity {
+	switch code {
+	case errcode.SandboxStartAgentCLIMissing, errcode.SandboxStartGenericEntrypoint, errcode.SandboxSessionNotFound:
+		return SeverityFatal
+	case errcode.SandboxStartReadinessTimeout, errcode.DaemonConnUnreachable, errcode.DaemonSocketMissing:
+		return SeverityDegraded
+	default:
+		return SeverityWarning
+	}
+}
+
+// renderFinding renders f as a report block: a "[severity] message" header,
+// followed by the code (if any) and its registered recovery hints — reused
+// verbatim from errcode.Lookup(f.Code).Hints so the diagnose output and the
+// errcode registry never drift apart. A finding with no Code (Code == "")
+// prints only the severity and message; it never fabricates a code or hints
+// that were never attached.
+func renderFinding(f finding) string {
+	var b strings.Builder
+	if f.Code != "" {
+		fmt.Fprintf(&b, "[%s] %s: %s\n", f.Severity, f.Code, f.Message)
+		if entry, ok := errcode.Lookup(f.Code); ok {
+			for _, hint := range entry.Hints {
+				fmt.Fprintf(&b, "  - %s\n", hint)
+			}
+		}
+	} else {
+		fmt.Fprintf(&b, "[%s] %s\n", f.Severity, f.Message)
+	}
+	return b.String()
+}
+
+// versionOrUnknown is the shared "unknown" fallback every best-effort version
+// read (image base-version, plugin-manifest version) funnels through: a
+// failed read (ok == false) or a successful-but-empty read (ok == true,
+// content == "") both surface as "unknown" rather than a blank string.
+// Whitespace in a real, non-empty content value is preserved verbatim — the
+// caller is responsible for trimming, not this fallback.
+func versionOrUnknown(content string, ok bool) string {
+	if !ok || content == "" {
+		return "unknown"
+	}
+	return content
+}
+
+// scopeAgent recovers the agent slug ("claude"/"codex"/"opencode") from the
+// scope's ContainerName prefix ("<agent>-cenci-..."). Scope carries no
+// direct Agent field to read; ComputeScope builds both ContainerName and
+// VolumeName from the same agent value, so parsing the prefix back out stays
+// consistent with how the scope was constructed rather than requiring a
+// second, easily out-of-sync argument.
+func scopeAgent(scope Scope) string {
+	if idx := strings.Index(scope.ContainerName, "-cenci-"); idx > 0 {
+		return scope.ContainerName[:idx]
+	}
+	return "claude"
+}
+
+// marketplaceManifestPath returns the in-container path to the given agent's
+// provisioned cenci marketplace manifest, mirroring the client-specific
+// checkout locations sandbox/lib/migrate-settings.sh provisions into. Only
+// claude and codex are provisioned via a marketplace.json manifest;
+// opencode has no marketplace.json at all — it's provisioned via a git
+// clone into a cenci-src directory (see
+// sandbox/lib/migrate-settings.sh's provision_opencode_plugins) — so it
+// returns "" rather than falling back to the claude path, which would
+// silently read the wrong (and possibly absent) file.
+func marketplaceManifestPath(agent string) string {
+	switch agent {
+	case "codex":
+		return "/home/dev/.codex/plugins/marketplaces/cenci/.claude-plugin/marketplace.json"
+	case "claude":
+		return "/home/dev/.claude/plugins/marketplaces/cenci/.claude-plugin/marketplace.json"
+	default:
+		return ""
+	}
+}
+
+// pluginManifestVersion best-effort reads agent's provisioned marketplace
+// manifest from scope's home volume via the same short-lived-container
+// pattern as startupFailureDetail's home-volume reads (the workload container
+// may already be gone). An agent with no manifest path (opencode) reports a
+// clean read failure — same as any other unreadable path — rather than
+// attempting a read with an empty path argument.
+func (e *Engine) pluginManifestVersion(scope Scope, agent string) (string, bool) {
+	path := marketplaceManifestPath(agent)
+	if path == "" {
+		return "", false
+	}
+	return e.readHomeVolumeFile(scope, path)
+}
+
+// imageBaseVersion best-effort reads image's baked cenci.base-version label.
+// It reuses imageCurrent's combined agent-cli|base-version format string so a
+// single `image inspect` invocation serves both call sites identically.
+func (e *Engine) imageBaseVersion(image string) (string, bool) {
+	out, err := exec.Command(e.Runtime, "image", "inspect", "--format",
+		`{{ index .Config.Labels "`+imageAgentLifecycleLabel+`" }}|{{ index .Config.Labels "`+imageBaseVersionLabel+`" }}`, image).Output()
+	if err != nil {
+		return "", false
+	}
+	parts := strings.SplitN(strings.TrimSpace(string(out)), "|", 2)
+	if len(parts) < 2 {
+		return "", false
+	}
+	v := parts[1]
+	return v, v != ""
+}
+
+// containerLogsTail best-effort reads the container's last n log lines.
+func (e *Engine) containerLogsTail(name string, n int) (string, bool) {
+	out, err := exec.Command(e.Runtime, "logs", "--tail", strconv.Itoa(n), name).CombinedOutput()
+	if err != nil {
+		return "", false
+	}
+	trimmed := strings.TrimSpace(string(out))
+	return trimmed, trimmed != ""
+}
+
+// inspectMounts best-effort reads the container's mount list as
+// "<host source> -> <container destination>" lines.
+func (e *Engine) inspectMounts(name string) (string, bool) {
+	out, err := exec.Command(e.Runtime, "inspect", "--format",
+		`{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}`, name).Output()
+	if err != nil {
+		return "", false
+	}
+	trimmed := strings.TrimSpace(string(out))
+	return trimmed, trimmed != ""
+}
+
+// daemonDialTimeout bounds diagnose's read-only reachability probe.
+const daemonDialTimeout = 200 * time.Millisecond
+
+// daemonStatusFinding is diagnose's read-only daemon-reachability probe. It
+// deliberately never calls daemon.EnsureRunning() (diagnose must not start a
+// daemon as a side effect), and distinguishes two distinct failure classes:
+// the event socket not existing at all (DaemonSocketMissing) versus existing
+// but not answering a dial (DaemonConnUnreachable). Returns nil when the
+// daemon is reachable — no finding to report.
+func (e *Engine) daemonStatusFinding() *finding {
+	socketPath := ipc.DefaultEventSocketPath()
+	if !isSocket(socketPath) {
+		return &finding{
+			Message:  "the cenci daemon's event socket does not exist at " + socketPath,
+			Code:     errcode.DaemonSocketMissing,
+			Severity: severityForCode(errcode.DaemonSocketMissing),
+		}
+	}
+	conn, err := net.DialTimeout("unix", socketPath, daemonDialTimeout)
+	if err != nil {
+		return &finding{
+			Message:  "the cenci daemon is not answering at its event socket " + socketPath,
+			Code:     errcode.DaemonConnUnreachable,
+			Severity: severityForCode(errcode.DaemonConnUnreachable),
+		}
+	}
+	_ = conn.Close()
+	return nil
+}
+
+// Diagnose writes a read-only, human-readable report for scope's sandbox
+// session to e.Stdout: container status/exit, the timestamped startup
+// marker (surfaced verbatim via startupFailureDetail), recent logs, mounted
+// volumes, daemon/event-socket reachability, and plugin + image versions.
+// Every failure is annotated with a registered errcode.Code and its
+// fatal/degraded/warning severity via renderFinding. Diagnose is a report,
+// not a gate: it always returns nil on a successful render, even when it
+// finds fatal issues — the caller (diagnose_cmd.go) exits 0 in that case,
+// reserving a non-nil error for when diagnose itself cannot run (never
+// expected in normal operation, since every collection step here is
+// best-effort).
+func (e *Engine) Diagnose(scope Scope) error {
+	agent := scopeAgent(scope)
+	var findings []finding
+
+	_, _ = fmt.Fprintf(e.Stdout, "cenci diagnose: %s (agent=%s)\n", scope.ContainerName, agent)
+	_, _ = fmt.Fprintln(e.Stdout, "Note: recent logs and mount paths below may contain sensitive data (secrets, credentials, host paths) — review before sharing this output.")
+	_, _ = fmt.Fprintf(e.Stdout, "Container: %s\n", scope.ContainerName)
+
+	status, exitCode, stateErr := e.containerStartupState(scope.ContainerName)
+	var stateExitErr *exec.ExitError
+	switch {
+	case stateErr != nil && errors.As(stateErr, &stateExitErr):
+		// The runtime ran fine and reported a non-zero exit for `inspect
+		// <name>` — the container genuinely does not exist (never launched,
+		// launched under a different scope, or already auto-removed by
+		// --rm). Still read the home-volume markers via
+		// startupFailureDetail: that short-lived-container read doesn't
+		// depend on the (missing) workload container.
+		_, _ = fmt.Fprintln(e.Stdout, "Status: not found")
+		content, _ := e.startupFailureDetail(scope)
+		detail := strings.TrimSpace(string(stateExitErr.Stderr))
+		if detail == "" {
+			detail = stateErr.Error()
+		}
+		findings = append(findings, finding{
+			Message:  fmt.Sprintf("container %q was not found: %s (%s)", scope.ContainerName, content, detail),
+			Code:     errcode.SandboxSessionNotFound,
+			Severity: severityForCode(errcode.SandboxSessionNotFound),
+		})
+	case stateErr != nil:
+		// Some other error type (the runtime binary itself failed to run,
+		// e.g. missing or a dial/timeout failure) — this is a
+		// runtime/daemon-reachability problem, not evidence the container is
+		// missing, so it must not be reported as SandboxSessionNotFound with
+		// its "relaunch the session" recovery hints.
+		_, _ = fmt.Fprintln(e.Stdout, "Status: unknown (runtime unreachable)")
+		content, _ := e.startupFailureDetail(scope)
+		findings = append(findings, finding{
+			Message:  fmt.Sprintf("could not query the container runtime for %q: %s (%s)", scope.ContainerName, stateErr, content),
+			Code:     errcode.DaemonConnUnreachable,
+			Severity: severityForCode(errcode.DaemonConnUnreachable),
+		})
+	case status == "exited" || status == "dead":
+		_, _ = fmt.Fprintf(e.Stdout, "Status: %s (exit %s)\n", status, exitCode)
+		content, code := e.startupFailureDetail(scope)
+		findings = append(findings, finding{
+			Message:  content,
+			Code:     code,
+			Severity: severityForCode(code),
+		})
+	default:
+		_, _ = fmt.Fprintf(e.Stdout, "Status: %s\n", status)
+	}
+
+	logs, logsOK := e.containerLogsTail(scope.ContainerName, 20)
+	_, _ = fmt.Fprintf(e.Stdout, "Recent logs (tail):\n%s\n", versionOrUnknown(logs, logsOK))
+	if !logsOK {
+		findings = append(findings, finding{
+			Message:  "recent container logs could not be read",
+			Severity: SeverityWarning,
+		})
+	}
+
+	mounts, mountsOK := e.inspectMounts(scope.ContainerName)
+	_, _ = fmt.Fprintf(e.Stdout, "Mounts:\n%s\n", versionOrUnknown(mounts, mountsOK))
+	if !mountsOK {
+		findings = append(findings, finding{
+			Message:  "container mounts could not be read",
+			Severity: SeverityWarning,
+		})
+	}
+
+	if f := e.daemonStatusFinding(); f != nil {
+		findings = append(findings, *f)
+	} else {
+		_, _ = fmt.Fprintln(e.Stdout, "Daemon: reachable")
+	}
+
+	baseVersion, baseOK := e.imageBaseVersion(scope.Image)
+	baseDisplay := versionOrUnknown(baseVersion, baseOK)
+	_, _ = fmt.Fprintf(e.Stdout, "Image base version: %s\n", baseDisplay)
+	if baseDisplay == "unknown" {
+		findings = append(findings, finding{
+			Message:  "image base version could not be determined",
+			Severity: SeverityWarning,
+		})
+	}
+
+	pluginVersion, pluginOK := e.pluginManifestVersion(scope, agent)
+	pluginDisplay := versionOrUnknown(pluginVersion, pluginOK)
+	_, _ = fmt.Fprintf(e.Stdout, "Plugin manifest version: %s\n", pluginDisplay)
+	if pluginDisplay == "unknown" {
+		findings = append(findings, finding{
+			Message:  "plugin manifest version could not be determined",
+			Severity: SeverityWarning,
+		})
+	}
+
+	if len(findings) == 0 {
+		_, _ = fmt.Fprintln(e.Stdout, "No issues found.")
+		return nil
+	}
+
+	_, _ = fmt.Fprintln(e.Stdout, "\nFindings:")
+	for _, f := range findings {
+		_, _ = fmt.Fprint(e.Stdout, renderFinding(f))
+	}
+	return nil
+}

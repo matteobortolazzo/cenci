@@ -117,14 +117,25 @@ func joinArgv(argv []string) string {
 //	FAKE_AGENT_CHECK_EXIT — EnsureAgentVolume's populated-check exit code
 //	                        (default 0 = the shared volume is populated)
 //	FAKE_ATTACH_EXIT     — exit code of the final `exec -it ...` attach
+//	FAKE_PLUGIN_MANIFEST — `cenci diagnose`'s best-effort plugin-manifest
+//	                        read, from either agent's marketplace.json
+//	                        (/home/dev/.claude/plugins/marketplaces/cenci/
+//	                        .claude-plugin/marketplace.json or the Codex
+//	                        equivalent under /home/dev/.codex/...) via the
+//	                        same short-lived `run --entrypoint /bin/cat`
+//	                        home-volume read pattern as the three
+//	                        startupFailureDetail vars above; unset/empty
+//	                        simulates a read failure (diagnose falls back to
+//	                        "unknown")
 //
 // The open path drives the extra verbs: `rm` (exit 0), `run` (prints a
 // container id), container `inspect` (label vs mounts told apart by the
 // format string), non-interactive `exec` (readiness probe, exit 0), and the
 // final `exec -it` attach — which the binary syscall.Execs, so the fake's
 // exit code IS the binary's exit code. `run --entrypoint /bin/cat ... <path>`
-// (startupFailureDetail's short-lived home-volume reads) is told apart by the
-// requested path, one of the three FAKE_* vars above.
+// (startupFailureDetail's short-lived home-volume reads, and diagnose's
+// plugin-manifest read) is told apart by the requested path, one of the four
+// FAKE_* vars above.
 func writeScriptedRuntime(t *testing.T, dir, name, callLog string) {
 	t.Helper()
 	body := "#!/bin/sh\n" +
@@ -142,6 +153,7 @@ func writeScriptedRuntime(t *testing.T, dir, name, callLog string) {
 		"    *'.cenci-agent-startup-error'*) printf '%s' \"${FAKE_STARTUP_ERROR:-}\"; exit \"${FAKE_STARTUP_ERROR_EXIT:-0}\" ;;\n" +
 		"    *'.cenci-boot.log'*) printf '%s' \"${FAKE_BOOT_LOG:-}\"; exit \"${FAKE_BOOT_LOG_EXIT:-0}\" ;;\n" +
 		"    *'.cenci-startup-failed'*) printf '%s' \"${FAKE_STARTUP_MARKER:-}\"; exit \"${FAKE_STARTUP_MARKER_EXIT:-0}\" ;;\n" +
+		"    *'marketplace.json'*) printf '%s' \"${FAKE_PLUGIN_MANIFEST:-}\"; exit \"${FAKE_PLUGIN_MANIFEST_EXIT:-0}\" ;;\n" +
 		"    esac\n" +
 		"    ;;\n" +
 		"  *'agent-cli.sh update'*) [ -z \"${FAKE_RUN_STDERR:-}\" ] || printf '%s\\n' \"${FAKE_RUN_STDERR}\" >&2; exit \"${FAKE_RUN_EXIT:-0}\" ;;\n" +

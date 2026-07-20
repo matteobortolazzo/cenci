@@ -48,6 +48,10 @@ func TestAllConstants_ResolveToCompleteEntries(t *testing.T) {
 	constants := []Code{
 		SandboxStartAgentCLIMissing,
 		SandboxStartGenericEntrypoint,
+		SandboxStartReadinessTimeout,
+		SandboxSessionNotFound,
+		DaemonConnUnreachable,
+		DaemonSocketMissing,
 	}
 	for _, code := range constants {
 		entry, ok := Lookup(code)
@@ -74,6 +78,10 @@ func TestRegisteredCodes_MatchFormat(t *testing.T) {
 	constants := []Code{
 		SandboxStartAgentCLIMissing,
 		SandboxStartGenericEntrypoint,
+		SandboxStartReadinessTimeout,
+		SandboxSessionNotFound,
+		DaemonConnUnreachable,
+		DaemonSocketMissing,
 	}
 	for _, code := range constants {
 		if !codeFormat.MatchString(string(code)) {
@@ -114,5 +122,66 @@ func TestTicketCodes_ExistAndAreDistinct(t *testing.T) {
 	}
 	if _, ok := Lookup(SandboxStartGenericEntrypoint); !ok {
 		t.Errorf("SandboxStartGenericEntrypoint not registered")
+	}
+}
+
+// TestDiagnoseCodes_ExistAndAreDistinct pins the four codes ticket #572 (the
+// `cenci diagnose` work) introduces: DaemonConnUnreachable
+// (CENCI-DAEMON-CONN-001, daemon unreachable), DaemonSocketMissing
+// (CENCI-DAEMON-SOCKET-001, event socket missing), SandboxSessionNotFound
+// (CENCI-SANDBOX-SESSION-001, session/container not found), and the
+// registry-only SandboxStartReadinessTimeout (CENCI-SANDBOX-START-003,
+// readiness timeout — not yet wired into waitUntilReady, only referenced by
+// diagnose). Every code must resolve to a real, non-empty Entry (proving the
+// registry carries actual diagnostic content, not placeholder data), satisfy
+// the CENCI-<AREA>-<SUBAREA>-<NNN> format, and stay pairwise distinct from
+// every other registered code — including the two pre-existing #571 codes —
+// so no two failure classes silently collapse onto the same identifier.
+func TestDiagnoseCodes_ExistAndAreDistinct(t *testing.T) {
+	wantValues := map[Code]string{
+		DaemonConnUnreachable:        "CENCI-DAEMON-CONN-001",
+		DaemonSocketMissing:          "CENCI-DAEMON-SOCKET-001",
+		SandboxSessionNotFound:       "CENCI-SANDBOX-SESSION-001",
+		SandboxStartReadinessTimeout: "CENCI-SANDBOX-START-003",
+	}
+	for code, want := range wantValues {
+		if string(code) != want {
+			t.Errorf("code = %q, want %q", code, want)
+		}
+	}
+
+	all := []Code{
+		SandboxStartAgentCLIMissing,
+		SandboxStartGenericEntrypoint,
+		SandboxStartReadinessTimeout,
+		SandboxSessionNotFound,
+		DaemonConnUnreachable,
+		DaemonSocketMissing,
+	}
+	seen := make(map[Code]bool, len(all))
+	for _, code := range all {
+		if seen[code] {
+			t.Fatalf("code %q is not distinct from another registered code", code)
+		}
+		seen[code] = true
+
+		if !codeFormat.MatchString(string(code)) {
+			t.Errorf("code %q does not match format %s", code, codeFormat.String())
+		}
+
+		entry, ok := Lookup(code)
+		if !ok {
+			t.Errorf("Lookup(%s) = _, false; want true", code)
+			continue
+		}
+		if entry.Message == "" {
+			t.Errorf("Lookup(%s).Message is empty", code)
+		}
+		if len(entry.Causes) == 0 {
+			t.Errorf("Lookup(%s).Causes is empty", code)
+		}
+		if len(entry.Hints) == 0 {
+			t.Errorf("Lookup(%s).Hints is empty — diagnose renders recovery commands straight from Hints", code)
+		}
 	}
 }

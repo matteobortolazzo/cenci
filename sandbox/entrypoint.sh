@@ -88,7 +88,7 @@ if [[ "$(id -u)" -eq 0 ]]; then
         # before exiting, to avoid losing the failure line to the PID-1/
         # SIGKILL race described above.
         CENCI_TEE_PID=$!
-        trap '[[ $? -eq 0 ]] || echo "entrypoint exited before completing startup (root setup)" > /home/dev/.cenci-startup-failed' EXIT
+        trap '[[ $? -eq 0 ]] || echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) entrypoint exited before completing startup (root setup)" > /home/dev/.cenci-startup-failed' EXIT
     fi
 
     # Waits for the background `tee` above (when one was installed — i.e.
@@ -191,7 +191,7 @@ if [[ -n "${CENCI_AGENT_CLI:-}" || -d /opt/cenci-agent ]]; then
         # credential/token content past this point.
         exec > >(tee -a "${CENCI_BOOT_LOG}") 2>&1
     fi
-    trap '[[ $? -eq 0 ]] || echo "entrypoint exited before completing startup" > /home/dev/.cenci-startup-failed' EXIT
+    trap '[[ $? -eq 0 ]] || echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) entrypoint exited before completing startup" > /home/dev/.cenci-startup-failed' EXIT
 fi
 
 # First-run setup for empty home volume
@@ -409,7 +409,7 @@ if [[ -n "${CENCI_AGENT_CLI:-}" || -d /opt/cenci-agent ]]; then
     AGENT_CLI="${CENCI_AGENT_CLI:-/opt/cenci-agent/current/node_modules/.bin/${CENCI_SANDBOX_AGENT:-claude}}"
     if [[ ! -x "${AGENT_CLI}" ]]; then
         AGENT_CLI_ERROR="agent CLI not found or not executable at ${AGENT_CLI} — the shared /opt/cenci-agent volume may still be bootstrapping, or a previous update failed; rerun 'cenci sandbox update-agent', or wait for the updater to finish and relaunch"
-        printf '%s\n' "${AGENT_CLI_ERROR}" > /home/dev/.cenci-agent-startup-error
+        printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${AGENT_CLI_ERROR}" > /home/dev/.cenci-agent-startup-error
         echo "entrypoint: ${AGENT_CLI_ERROR}" >&2
         exit 1
     fi
