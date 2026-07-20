@@ -141,19 +141,19 @@ _Temporary secret gist, not part of the repo — delete after merge: `gh gist de
 
 For child tickets that are not last child, use `Related to #<parentId>` for the parent so it is not auto-closed. For ticketless mode, omit `## Ticket`.
 
-`## Review` reports which Phase 6 + 7 path ran, sourced from `/tmp/claude/cenci-<ticket-id-or-slug>-review-path.txt` (written during Phase 6 + 7's Review Path Classification):
+`## Review` reports which Phase 6 + 7 path ran, sourced from `$RUN_DIR/review-path.txt` (written during Phase 6 + 7's Review Path Classification):
 
 - `full` → "Review: full trio"
 - `lite-docs` → "Review: lite (docs-only — no reviewers)"
 - `lite-small` → "Review: lite (code-reviewer only)"
 
-If the temp file is absent (e.g. after a context compaction or a goal-autopilot resume that skipped re-reading it), default to "Review: full trio" — never over-claim a lite path when the actual path isn't known.
+If `$RUN_DIR` is unknown (e.g. lost to a context compaction or a goal-autopilot resume in a fresh session that never re-ran Phase 6 + 7's Shared Context step) or the file at that path is absent, do not default to any of the three known paths — write "Review: unknown (RUN_DIR lost — could not determine which review path ran)". An unrecoverable path must never be silently reported as `full`, `lite-docs`, or `lite-small`: claiming `full` would be a false assurance (the actual run could have been `lite-docs`, with no reviewers at all), so the PR body must surface the gap honestly instead of guessing.
 
-The `## Checklist` security line is derived from the same `/tmp/claude/cenci-<ticket-id-or-slug>-review-path.txt` file, in the same read:
+The `## Checklist` security line is derived from the same `$RUN_DIR/review-path.txt` file, in the same read:
 
 - `full` → `- [x] Security review done`
 - `lite-docs` or `lite-small` → `- [ ] Security review skipped (see Review section — <path>)`, where `<path>` is the literal path value (`lite-docs` or `lite-small`)
-- File absent → default to the `full` behavior (`- [x] Security review done`), consistent with the "default to full trio" fallback above — never claim a security review was skipped when the actual path isn't known.
+- `$RUN_DIR` unknown or file absent → `- [ ] Security review status unknown (RUN_DIR lost — verify manually before merge)`, consistent with the "Review: unknown" fallback above — never claim a security review was done, or was skipped, when the actual path isn't known; an unverifiable state must read as unverifiable, not as either known outcome.
 
 `## Screenshots` appears only when `isUiTicket` is true: one `### <name>` + image per captured screen/state, or the fallback note from the Screenshots section above. Omit the section entirely for non-UI work. If the user chose "Proceed without design" at the Design Check, add "Implemented without design spec — extra visual review recommended." to `## Notes`.
 
@@ -228,14 +228,18 @@ Run it via the `SlashCommand` tool; it is a no-op if no goal was armed. Clearing
 
 Then delete the consumed plan file. If `.plans/` is empty, remove it. If the pipeline fails before PR creation, preserve the plan file for retry (and, as above, clear the goal at whichever error gate stopped the run).
 
-Finally, delete this run's scoped shared temp files — they were only ever intermediate state for this ticket's pipeline run, and the PR now carries everything they contributed:
+Finally, delete this run's scoped shared temp files — they were only ever intermediate state for this ticket's pipeline run, and the PR now carries everything they contributed. Phase 6 + 7's four review artifacts (diff patch, changed-file list, stat, review-path) live together in `$RUN_DIR`, so remove the whole directory in one step, guarded on `RUN_DIR` actually being known:
+
+```bash
+[[ -n "${RUN_DIR:-}" && -d "$RUN_DIR" ]] && rm -rf "$RUN_DIR"
+```
+
+If `$RUN_DIR` is unknown (lost to compaction — see the `## Review`/`## Checklist` fallback above), skip this step; the directory becomes a small, acceptable ephemeral `/tmp` leak rather than a risk of deleting the wrong path.
+
+The remaining per-ticket temp files stay ticket-slug-scoped and out of this ticket's scope:
 
 ```bash
 rm -f \
-  /tmp/claude/cenci-<ticket-id-or-slug>-diff.patch \
-  /tmp/claude/cenci-<ticket-id-or-slug>-files.txt \
-  /tmp/claude/cenci-<ticket-id-or-slug>-stat.txt \
-  /tmp/claude/cenci-<ticket-id-or-slug>-review-path.txt \
   /tmp/claude/cenci-<ticket-id-or-slug>-pr-body.md \
   /tmp/claude/cenci-<ticket-id-or-slug>-followup-title.txt \
   /tmp/claude/cenci-<ticket-id-or-slug>-followup-body.md \
