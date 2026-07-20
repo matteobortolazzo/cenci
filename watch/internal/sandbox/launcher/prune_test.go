@@ -51,14 +51,14 @@ func TestPrune_RemovesSupersededBaseTagsKeepsCurrentAndLatest(t *testing.T) {
 
 func TestPrune_RemovesOnlySandboxContainers(t *testing.T) {
 	e, callLog, _, _ := pruneEngine(t, "")
-	t.Setenv("FAKE_PS", "claude-cenci-old\ncodex-cenci-stale\nunrelated-container\n")
+	t.Setenv("FAKE_PS", "claude-cenci-old\ncodex-cenci-stale\nopencode-cenci-old\nunrelated-container\n")
 
 	if err := e.Prune(false, false); err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
 
 	calls := readCallLog(t, callLog)
-	if !containsLine(calls, "rm claude-cenci-old") || !containsLine(calls, "rm codex-cenci-stale") {
+	if !containsLine(calls, "rm claude-cenci-old") || !containsLine(calls, "rm codex-cenci-stale") || !containsLine(calls, "rm opencode-cenci-old") {
 		t.Errorf("stopped sandbox containers not removed; calls:\n%s", strings.Join(calls, "\n"))
 	}
 	if containsLine(calls, "rm unrelated-container") {
@@ -70,7 +70,7 @@ func TestPrune_VolumesDefaultDeny(t *testing.T) {
 	for name, stdin := range map[string]string{"explicit-n": "n\n", "empty-stdin": ""} {
 		t.Run(name, func(t *testing.T) {
 			e, callLog, stdout, stderr := pruneEngine(t, stdin)
-			t.Setenv("FAKE_VOLUMES", "claude-cenci-home-old\ncodex-cenci-home-stale\ncenci-agent-cli-claude\nunrelated-volume\n")
+			t.Setenv("FAKE_VOLUMES", "claude-cenci-home-old\ncodex-cenci-home-stale\nopencode-cenci-home-old\ncenci-agent-cli-claude\ncenci-agent-cli-opencode\nunrelated-volume\n")
 
 			if err := e.Prune(false, true); err != nil {
 				t.Fatalf("Prune: %v", err)
@@ -95,15 +95,39 @@ func TestPrune_VolumesDefaultDeny(t *testing.T) {
 
 func TestPrune_VolumesConfirmedRemovesAllInOneCall(t *testing.T) {
 	e, callLog, _, _ := pruneEngine(t, "y\n")
-	t.Setenv("FAKE_VOLUMES", "claude-cenci-home-old\ncodex-cenci-home-stale\ncenci-agent-cli-codex\nunrelated-volume\n")
+	t.Setenv("FAKE_VOLUMES", "claude-cenci-home-old\ncodex-cenci-home-stale\nopencode-cenci-home-old\ncenci-agent-cli-codex\ncenci-agent-cli-opencode\nunrelated-volume\n")
 
 	if err := e.Prune(false, true); err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
 
 	calls := readCallLog(t, callLog)
-	if !containsLine(calls, "volume rm claude-cenci-home-old codex-cenci-home-stale cenci-agent-cli-codex") {
-		t.Errorf("expected one volume rm with all matching names; calls:\n%s", strings.Join(calls, "\n"))
+	if !containsLine(calls, "volume rm claude-cenci-home-old codex-cenci-home-stale opencode-cenci-home-old cenci-agent-cli-codex cenci-agent-cli-opencode") {
+		t.Errorf("expected one volume rm with all matching names including opencode; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+// TestPrune_VolumesRejectsForeignLookAlikes pins the narrow match-miss
+// boundary for the volume matchers: names that merely resemble an
+// opencode-owned volume (wrong middle segment, extra trailing segment, or no
+// "-home-"/"-agent-cli-" marker at all) must never appear in the batch
+// volume rm call.
+func TestPrune_VolumesRejectsForeignLookAlikes(t *testing.T) {
+	e, callLog, _, _ := pruneEngine(t, "y\n")
+	t.Setenv("FAKE_VOLUMES", "opencode-cenci-home-old\nopencode-notcenci-home-x\ncenci-agent-cli-opencode-foo\nopencode-elsewhere\n")
+
+	if err := e.Prune(false, true); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+
+	calls := readCallLog(t, callLog)
+	if !containsLine(calls, "volume rm opencode-cenci-home-old") {
+		t.Errorf("expected the genuine opencode home volume to be removed; calls:\n%s", strings.Join(calls, "\n"))
+	}
+	for _, foreign := range []string{"opencode-notcenci-home-x", "cenci-agent-cli-opencode-foo", "opencode-elsewhere"} {
+		if containsLineWithAll(calls, foreign) {
+			t.Errorf("foreign look-alike volume %q removed; calls:\n%s", foreign, strings.Join(calls, "\n"))
+		}
 	}
 }
 
@@ -225,7 +249,7 @@ func TestPrune_ImagesAndVolumesTwoPrompts(t *testing.T) {
 	// only the first "y\n" would ever take effect.
 	e, callLog, _, _ := pruneEngine(t, "y\ny\n")
 	t.Setenv("FAKE_IMAGES", fakeRepoImages)
-	t.Setenv("FAKE_VOLUMES", "claude-cenci-home-old\ncenci-agent-cli-claude\nunrelated-volume\n")
+	t.Setenv("FAKE_VOLUMES", "claude-cenci-home-old\nopencode-cenci-home-old\ncenci-agent-cli-claude\ncenci-agent-cli-opencode\nunrelated-volume\n")
 
 	if err := e.Prune(true, true); err != nil {
 		t.Fatalf("Prune: %v", err)
@@ -235,7 +259,7 @@ func TestPrune_ImagesAndVolumesTwoPrompts(t *testing.T) {
 	if !containsLine(calls, "rmi cenci-sandbox-myrepo:latest") {
 		t.Errorf("per-repo image not removed; calls:\n%s", strings.Join(calls, "\n"))
 	}
-	if !containsLine(calls, "volume rm claude-cenci-home-old cenci-agent-cli-claude") {
-		t.Errorf("volumes not removed; calls:\n%s", strings.Join(calls, "\n"))
+	if !containsLine(calls, "volume rm claude-cenci-home-old opencode-cenci-home-old cenci-agent-cli-claude cenci-agent-cli-opencode") {
+		t.Errorf("volumes including opencode not removed; calls:\n%s", strings.Join(calls, "\n"))
 	}
 }

@@ -1663,15 +1663,21 @@ sandbox_cleanup_summary_line() {
 # reuse verbatim, so what's shown in the confirmation list is exactly what
 # gets removed — enumerate once, never re-enumerate, to avoid
 # shown-vs-removed drift (TOCTOU). Containers use the same
-# claude-cenci-/codex-cenci- prefix as IsSandboxContainerName
-# (watch/internal/sandbox/sandbox.go) but, unlike `cenci sandbox prune`
-# (which only targets exited/created containers), matches running
-# containers too — every cenci-owned container must go. Volumes mirror
-# prune.go's homeVolumePattern/agentCLIVolumePattern verbatim. Images match
-# the cenci-sandbox:latest monolith, every cenci-sandbox-base tag (including
-# its :latest alias), and each per-repo cenci-sandbox-<slug>:latest image,
-# with an optional podman localhost/ prefix. A clean no-op (no output, empty
-# globals) when no container runtime is installed — never errors.
+# claude-cenci-/codex-cenci-/opencode-cenci- prefix as
+# IsSandboxContainerName (watch/internal/sandbox/sandbox.go) but, unlike
+# `cenci sandbox prune` (which only targets exited/created containers),
+# matches running containers too — every cenci-owned container must go.
+# Volumes mirror prune.go's IsHomeVolumeName/IsAgentCLIVolumeName verbatim.
+# Images match the cenci-sandbox:latest monolith, every cenci-sandbox-base
+# tag (including its :latest alias), and each per-repo
+# cenci-sandbox-<slug>:latest image, with an optional podman localhost/
+# prefix. A clean no-op (no output, empty globals) when no container runtime
+# is installed — never errors.
+#
+# This bash logic is standalone (curl | bash, no repo checkout — it cannot
+# import the Go registry) and must be kept in parity by hand with
+# watch/internal/sandbox/sandbox.go's SupportedAgents, the Go source of
+# truth for which agents cenci's sandbox owns resources for (#528).
 collect_sandbox_cleanup_targets() {
 	SANDBOX_RUNTIME=""
 	SANDBOX_CONTAINERS=""
@@ -1690,7 +1696,7 @@ collect_sandbox_cleanup_targets() {
 	while IFS= read -r line; do
 		[ -n "$line" ] || continue
 		case "$line" in
-		claude-cenci-* | codex-cenci-*)
+		claude-cenci-* | codex-cenci-* | opencode-cenci-*)
 			SANDBOX_CONTAINERS="${SANDBOX_CONTAINERS:+$SANDBOX_CONTAINERS }$line"
 			;;
 		esac
@@ -1722,7 +1728,8 @@ collect_sandbox_cleanup_targets() {
 	while IFS= read -r line; do
 		[ -n "$line" ] || continue
 		case "$line" in
-		claude-cenci-home-* | codex-cenci-home-* | cenci-agent-cli-claude | cenci-agent-cli-codex)
+		claude-cenci-home-* | codex-cenci-home-* | opencode-cenci-home-* | \
+			cenci-agent-cli-claude | cenci-agent-cli-codex | cenci-agent-cli-opencode)
 			SANDBOX_VOLUMES="${SANDBOX_VOLUMES:+$SANDBOX_VOLUMES }$line"
 			;;
 		esac
