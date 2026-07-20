@@ -6,16 +6,27 @@ user-invocable: false
 
 ## Philosophy
 Write tests first. Tests encode requirements, not implementation details.
+Coverage means behavior covered end-to-end, not test count — a green suite full of
+isolated unit tests can coexist with a completely broken product.
 
 ## Integration Tests (Preferred)
 Test real flows end-to-end. Prefer integration tests that exercise the actual
 application stack over isolated unit tests.
 
-## Unit Tests (For Complex Logic Only)
+## Unit Tests (Justify Every One)
+Default to zero unit tests. Write one only when it catches something an
+integration test cannot reasonably catch — and be able to state, in one line,
+what that something is. Logic that typically clears this bar:
+
 - State machines
 - Calculations
 - Validation rules
 - Parsing logic
+
+Belonging to this list is not the justification by itself — the justification is
+the concrete failure the unit test catches that the integration suite would miss
+(e.g. an edge-case input matrix too expensive to drive through the full stack).
+A unit test that cannot be justified this way is a removal candidate, not coverage.
 
 ## UI Component Testing (Frontend Stacks)
 
@@ -65,6 +76,8 @@ Two-tier model — **Playwright Test** for CI, **Playwright CLI** for interactiv
 - Hardcode magic values just to make tests pass
 - Assert implementation details (call counts, internal method names)
 - Copy expected values from implementation — tests should encode requirements, not mirror code
+- Mock-heavy unit tests that re-verify wiring — mocking every collaborator and asserting the mocks were called proves the test agrees with the implementation, not that the product works
+- Unit tests that would stay green while the product is broken — if the real flow can fail without this test failing, the test is false confidence, not coverage
 
 ## Good Assertions
 Assert behavior and business rules:

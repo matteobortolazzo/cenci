@@ -60,6 +60,7 @@ When asked to write tests:
   - Visual/Layout → note for post-implementation visual verification
   - Data Display → integration tests for data binding/transformation
 - For backend code: integration tests for real flows, unit tests for complex domain logic
+- Default to zero unit tests: write one only when it catches something an integration test cannot reasonably catch, and state that justification when reporting the tests. Never write mock-heavy unit tests that re-verify wiring.
 - No magic values — tests encode requirements
 - Tests should fail before implementation exists
 

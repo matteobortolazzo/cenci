@@ -42,6 +42,8 @@ Backend:
 - Prefer integration tests for real flows.
 - Unit tests only for complex domain logic, calculations, state machines, validation, or parsing.
 
+Unit-test bar (both frontend and backend): default to zero unit tests. Every unit test written must be justified by what it catches that an integration test cannot reasonably catch; an unjustifiable unit test is skipped, not written. Coverage means acceptance criteria exercised through the real stack, not unit-test count.
+
 ## Quality Rules
 
 Tests must assert behavior and business rules: status codes, response shapes, state changes, visible UI states, error behavior. Do not assert call counts, implementation details, hardcoded magic values, or copied implementation outputs.
