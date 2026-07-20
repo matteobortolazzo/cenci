@@ -16,7 +16,7 @@
 #      fail for its specific, isolated reason while every other property
 #      still passes; bad-wrong-order additionally guards the ordering check.
 #   C. Static checks against the REAL committed Claude Code and Codex
-#      adapter docs, with the two known Codex gaps wired through `xfail`.
+#      adapter docs -- both adapters must pass all 8 properties.
 #
 # Follows the established flow test idiom (flow/tests/maintain.test.sh,
 # flow/hooks/scripts/run-gate.test.sh, flow/tests/subagent-cwd-contract.test.sh):
@@ -245,12 +245,10 @@ assert_exit_zero "${xfail_self_code}" "xfail() self-test: a failing check (code 
 
 # ===========================================================================
 # Section C: static checks against the REAL Claude Code and Codex adapters
-# (not only hand-crafted synthetic fixtures). The Codex baseline-gate check
-# (and the gate-interpretation facet of gate-result-integrity, which depends
-# on the same missing run-gate.sh call) is a KNOWN, currently-failing check
-# -- codex.md does not call run-gate.sh yet. It is wired through `xfail`,
-# referencing #517's "Codex implement gate parity" child slice: not fixed
-# here, not silently skipped, not silently passed.
+# (not only hand-crafted synthetic fixtures). Both adapters must pass all 8
+# properties -- #555 wired run-gate.sh/GATE_STATUS into codex.md, closing the
+# baseline-gate/gate-result-integrity gap tracked by #517's "Codex implement
+# gate parity" child slice.
 # ===========================================================================
 
 claude_out="$(check_claude_adapter "${FLOW_DIR}")"; claude_code=$?
@@ -261,12 +259,12 @@ for prop in baseline-gate worktree-isolation red-before-green gate-result-integr
 done
 
 # check_codex_adapter's own exit code IS captured (mirroring claude_code
-# above) and asserted non-zero -- while the two known gaps below persist,
-# the overall checker result must fail, never vacuously pass.
+# above) and asserted zero -- codex.md now invokes run-gate.sh and interprets
+# GATE_STATUS, so all 8 properties must pass, matching the Claude loop above.
 codex_out="$(check_codex_adapter "${FLOW_DIR}")"; codex_code=$?
-assert_exit_nonzero "${codex_code}" "real Codex adapter: overall checker result (expected non-zero -- baseline-gate/gate-result-integrity known gaps below)"
-for prop in worktree-isolation red-before-green planning-immutability \
-            sensitive-file-refusal verification-locality push-policy; do
+assert_exit_zero "${codex_code}" "real Codex adapter: overall checker result"
+for prop in baseline-gate worktree-isolation red-before-green gate-result-integrity \
+            planning-immutability sensitive-file-refusal verification-locality push-policy; do
   assert_prop_status "${codex_out}" "${prop}" "pass" "real Codex adapter: ${prop}"
 done
 
@@ -350,45 +348,6 @@ fi
 if _contains_ws_insensitive "${codex_wrapped_copy}" ""; then
   fail "_contains_ws_insensitive self-test: an empty phrase must NOT vacuously match, but it did"
 fi
-
-# KNOWN GAP: Codex's codex.md never invokes run-gate.sh. #517's "Codex implement
-# gate parity" child slice owns fixing this -- this harness must keep failing
-# it loudly as an explicit xfail until that slice flips these two markers.
-#
-# assert_codex_known_gap_prop asserts the property's line specifically
-# STARTS WITH "<prop>:fail:" (not merely "is not :pass") before ever handing
-# it to xfail. That distinction matters: "is not :pass" is also true for an
-# empty/absent line (check_codex_adapter crashed, or the property id typo'd
-# in a refactor) -- this would silently forgive a harness bug as though it
-# were the known, expected content gap. A malformed line is instead reported
-# as an immediate `fail` here (never silently absorbed into xfail's XFAIL
-# branch), and only a genuine "<prop>:fail:" line is deliberately treated as
-# the known gap and forwarded to xfail — which itself flips to XPASS
-# (a hard failure) the moment codex.md starts invoking run-gate.sh and the
-# line flips to "<prop>:pass".
-assert_codex_known_gap_prop() {
-  local prop="$1" label="$2" note="$3" line check_code
-  line="$(get_prop_line "${codex_out}" "${prop}")"
-  case "${line}" in
-    "${prop}:fail:"*) check_code=1 ;;
-    "${prop}:pass"*) check_code=0 ;;
-    *)
-      fail "${label}: property '${prop}' line must start with '${prop}:fail:' or '${prop}:pass', got [${line:-<absent>}] (check_codex_adapter may have crashed, or the property id changed)"
-      return
-      ;;
-  esac
-  xfail "${label}" "${check_code}" "${note}"
-  local xfail_result_code=$?
-  [[ "${xfail_result_code}" -eq 0 ]] || failures=$((failures+1))
-}
-
-assert_codex_known_gap_prop "baseline-gate" \
-  "real Codex adapter: baseline-gate (run-gate.sh not yet invoked by codex.md)" \
-  "#517 Codex implement gate parity child slice"
-
-assert_codex_known_gap_prop "gate-result-integrity" \
-  "real Codex adapter: gate-result-integrity (no run-gate.sh output to interpret)" \
-  "#517 Codex implement gate parity child slice"
 
 echo "parity.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]

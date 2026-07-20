@@ -439,9 +439,8 @@ _CODEX_CREATE_MARKER="create the worktree"
 # Same per-property pass/fail reporting, against the real committed
 # skills/implement/codex.md, skills/codex-runtime/SKILL.md, and codex/hooks.json
 # wiring. P1 (baseline-gate) and the gate-interpretation facet of P4 are
-# KNOWN, currently-failing checks here -- codex.md does not call run-gate.sh
-# yet. The caller (parity.test.sh) wraps those two lines through `xfail`,
-# never asserts them as plain passes.
+# asserted as plain passes here -- #555 wired codex.md to invoke run-gate.sh
+# and interpret GATE_STATUS, closing the gap this checker used to flag.
 check_codex_adapter() {
   local flow_dir="$1" overall=0
   local codex_doc codex_ok runtime_doc runtime_ok hooks_json hooks_ok
@@ -450,7 +449,7 @@ check_codex_adapter() {
   runtime_doc="$(read_doc "skills/codex-runtime/SKILL.md" "${flow_dir}")"; runtime_ok=$?
   hooks_json="$(read_doc "codex/hooks.json" "${flow_dir}")"; hooks_ok=$?
 
-  # P1 baseline-gate: KNOWN GAP -- codex.md never invokes run-gate.sh.
+  # P1 baseline-gate: codex.md invokes run-gate.sh (#555 closed the prior gap).
   if [[ "${codex_ok}" -ne 0 && "${runtime_ok}" -ne 0 ]]; then
     _prop "baseline-gate" 1 "skills/implement/codex.md and skills/codex-runtime/SKILL.md not found/unreadable"
   elif [[ "${codex_doc}" == *"run-gate.sh"* ]] || [[ "${runtime_doc}" == *"run-gate.sh"* ]]; then
@@ -494,7 +493,8 @@ check_codex_adapter() {
   fi
   overall=$((overall + $?))
 
-  # P4 gate-result-integrity: KNOWN GAP -- no run-gate.sh output to interpret.
+  # P4 gate-result-integrity: codex.md interprets run-gate.sh's GATE_STATUS
+  # output (#555 closed the prior gap).
   if [[ "${codex_ok}" -ne 0 && "${runtime_ok}" -ne 0 ]]; then
     _prop "gate-result-integrity" 1 "skills/implement/codex.md and skills/codex-runtime/SKILL.md not found/unreadable"
   elif [[ "${codex_doc}" == *"GATE_STATUS"* ]] || [[ "${runtime_doc}" == *"GATE_STATUS"* ]]; then
