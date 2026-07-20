@@ -56,3 +56,4 @@ On-demand topic docs live in `docs/` at the repo root. Read the file matching yo
 - `docs/cli-conventions.md` — CLI grammar, alias, env-var, and runtime-object naming
 - `docs/health-gates.md` — per-project local health gates (`gateCommand`), consumed by the implement pipeline's baseline check and by `babysit`/`ci-repair`
 - `docs/plan-fidelity.md` — cross-checking an implementation against a plan or ticket's full stated intent, not just its Files to Modify wording
+- `docs/error-codes.md` — the `CENCI-<AREA>-<SUBAREA>-<NNN>` structured error-identifier naming convention and registered-code index

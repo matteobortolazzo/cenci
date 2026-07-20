@@ -1392,6 +1392,12 @@ func TestOpen_StartupErrorMarkerSurfacedVerbatim(t *testing.T) {
 	if !strings.Contains(string(output), marker) {
 		t.Errorf("expected the startup-error marker content surfaced verbatim, got:\n%s", output)
 	}
+	if !strings.Contains(string(output), "CENCI-SANDBOX-START-001") {
+		t.Errorf("expected the agent-CLI-missing error code CENCI-SANDBOX-START-001, got:\n%s", output)
+	}
+	if strings.Contains(string(output), "CENCI-SANDBOX-START-002") {
+		t.Errorf("expected only the agent-CLI-missing code, not the generic-entrypoint code, got:\n%s", output)
+	}
 }
 
 // TestOpen_WaitUntilReadyInspectFailure_NoBlankStatusExit pins ticket #473's
@@ -1474,6 +1480,12 @@ func TestOpen_GenericEntrypointFailureSurfacesBootLog(t *testing.T) {
 			if strings.Contains(string(output), "entrypoint exited before initialization completed") {
 				t.Errorf("expected the boot log, not the fully generic fallback, got:\n%s", output)
 			}
+			if !strings.Contains(string(output), "CENCI-SANDBOX-START-002") {
+				t.Errorf("expected the generic-entrypoint error code CENCI-SANDBOX-START-002, got:\n%s", output)
+			}
+			if strings.Contains(string(output), "CENCI-SANDBOX-START-001") {
+				t.Errorf("expected only the generic-entrypoint code, not the agent-CLI-missing code, got:\n%s", output)
+			}
 		})
 	}
 }
@@ -1508,6 +1520,12 @@ func TestOpen_GenericEntrypointFailureSurfacesStartupMarker(t *testing.T) {
 	}
 	if strings.Contains(string(output), "entrypoint exited before initialization completed") {
 		t.Errorf("expected the trap marker, not the fully generic fallback, got:\n%s", output)
+	}
+	if !strings.Contains(string(output), "CENCI-SANDBOX-START-002") {
+		t.Errorf("expected the generic-entrypoint error code CENCI-SANDBOX-START-002, got:\n%s", output)
+	}
+	if strings.Contains(string(output), "CENCI-SANDBOX-START-001") {
+		t.Errorf("expected only the generic-entrypoint code, not the agent-CLI-missing code, got:\n%s", output)
 	}
 }
 

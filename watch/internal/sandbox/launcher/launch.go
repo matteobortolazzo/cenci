@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/internal/daemon"
+	"github.com/matteobortolazzo/cenci/watch/internal/errcode"
 	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
 )
 
@@ -654,21 +655,27 @@ func lastLines(s string, n int) string {
 //
 // All home-volume reads happen via a short-lived container against the home
 // volume, since the failed container itself may already be gone.
-func (e *Engine) startupFailureDetail(scope Scope) string {
+//
+// The returned errcode.Code classifies which case fired:
+// errcode.SandboxStartAgentCLIMissing for case 1 (the agent-CLI-missing
+// marker); errcode.SandboxStartGenericEntrypoint for every other case
+// (2 through 5), since they all represent the same "generic entrypoint
+// failure" class the ticket distinguishes from the agent-CLI-missing case.
+func (e *Engine) startupFailureDetail(scope Scope) (string, errcode.Code) {
 	if content, ok := e.readHomeVolumeFile(scope, "/home/dev/.cenci-agent-startup-error"); ok {
-		return content
+		return content, errcode.SandboxStartAgentCLIMissing
 	}
 	if content, ok := e.readHomeVolumeFile(scope, "/home/dev/.cenci-boot.log"); ok {
-		return lastLines(content, 50)
+		return lastLines(content, 50), errcode.SandboxStartGenericEntrypoint
 	}
 	if content, ok := e.readHomeVolumeFile(scope, "/home/dev/.cenci-startup-failed"); ok {
-		return content
+		return content, errcode.SandboxStartGenericEntrypoint
 	}
 	logs := exec.Command(e.Runtime, "logs", "--tail", "50", scope.ContainerName)
 	if out, err := logs.CombinedOutput(); err == nil && strings.TrimSpace(string(out)) != "" {
-		return strings.TrimSpace(string(out))
+		return strings.TrimSpace(string(out)), errcode.SandboxStartGenericEntrypoint
 	}
-	return "entrypoint exited before initialization completed"
+	return "entrypoint exited before initialization completed", errcode.SandboxStartGenericEntrypoint
 }
 
 // waitUntilReady polls for the entrypoint's /tmp/cenci-ready marker so the
@@ -690,8 +697,9 @@ func (e *Engine) waitUntilReady(scope Scope) error {
 			if err != nil {
 				displayStatus, displayExit = "unknown", "unknown"
 			}
-			return fmt.Errorf("container '%s' failed during startup (status %s, exit %s): %s",
-				scope.ContainerName, displayStatus, displayExit, e.startupFailureDetail(scope))
+			detail, code := e.startupFailureDetail(scope)
+			return fmt.Errorf("container '%s' failed during startup (status %s, exit %s) [%s]: %s",
+				scope.ContainerName, displayStatus, displayExit, code, detail)
 		}
 		time.Sleep(readyPollInterval)
 	}
