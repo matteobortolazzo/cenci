@@ -270,6 +270,12 @@ func TestPipelineCrossWorktreeContinuity_MainCheckoutAndLinkedWorktreeShareState
 
 	mainRepo := t.TempDir()
 	initGitRepoForCLITest(t, mainRepo)
+	if out, err := exec.Command("git", "-C", mainRepo, "config", "user.email", "test@example.com").CombinedOutput(); err != nil {
+		t.Fatalf("git config user.email: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", mainRepo, "config", "user.name", "Test").CombinedOutput(); err != nil {
+		t.Fatalf("git config user.name: %v\n%s", err, out)
+	}
 	if out, err := exec.Command("git", "-C", mainRepo, "commit", "--allow-empty", "-q", "-m", "init").CombinedOutput(); err != nil {
 		t.Fatalf("git commit --allow-empty: %v\n%s", err, out)
 	}

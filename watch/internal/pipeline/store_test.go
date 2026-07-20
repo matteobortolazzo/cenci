@@ -343,6 +343,12 @@ func TestLoadState_V1StateFile_LoadsWithNewFieldsZeroValued(t *testing.T) {
 func TestResolveRepoRoot_FromLinkedWorktree_ReturnsMainCheckoutRoot(t *testing.T) {
 	mainRepo := t.TempDir()
 	initGitRepo(t, mainRepo)
+	if out, err := exec.Command("git", "-C", mainRepo, "config", "user.email", "test@example.com").CombinedOutput(); err != nil {
+		t.Fatalf("git config user.email: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", mainRepo, "config", "user.name", "Test").CombinedOutput(); err != nil {
+		t.Fatalf("git config user.name: %v\n%s", err, out)
+	}
 	if out, err := exec.Command("git", "-C", mainRepo, "commit", "--allow-empty", "-q", "-m", "init").CombinedOutput(); err != nil {
 		t.Fatalf("git commit --allow-empty: %v\n%s", err, out)
 	}
