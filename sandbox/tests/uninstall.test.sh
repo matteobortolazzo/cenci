@@ -20,14 +20,15 @@
 #
 # Cases 11+ (#458, TDD RED phase against the current uninstall_sandbox_cleanup
 # no-op stub): machine-wide sandbox cleanup — every cenci-owned container
-# (claude-cenci-*/codex-cenci-*, running or stopped — broader than `cenci
-# sandbox prune`, which only targets exited/created), every cenci-owned image
-# (the cenci-sandbox:latest monolith, every cenci-sandbox-<slug>:latest
-# per-repo image, and every cenci-sandbox-base tag incl. its :latest alias,
-# with an optional podman localhost/ prefix), and every cenci-owned volume
-# (claude|codex-cenci-home-* and cenci-agent-cli-{claude,codex}) — removed
-# across every repo on the machine, before plugin-cache/link removal, with
-# the confirmation-gate output showing counts/names, a clean no-op when no
+# (claude-cenci-*/codex-cenci-*/opencode-cenci-*, running or stopped —
+# broader than `cenci sandbox prune`, which only targets exited/created),
+# every cenci-owned image (the cenci-sandbox:latest monolith, every
+# cenci-sandbox-<slug>:latest per-repo image, and every cenci-sandbox-base
+# tag incl. its :latest alias, with an optional podman localhost/ prefix),
+# and every cenci-owned volume (claude|codex|opencode-cenci-home-* and
+# cenci-agent-cli-{claude,codex,opencode} — #528) — removed across every
+# repo on the machine, before plugin-cache/link removal, with the
+# confirmation-gate output showing counts/names, a clean no-op when no
 # container runtime is installed, and the same env -i secret scrub as the
 # rest of this suite.
 set -euo pipefail
@@ -558,40 +559,42 @@ fi
 [[ ! -e "${home}/.config/cenci/config.json" ]]
 
 # --- case 11: machine-wide sandbox sweep ---------------------------------------
-echo "case: machine-wide sandbox sweep removes every cenci-owned container/image/volume across multiple repos and leaves non-cenci objects untouched"
+echo "case: machine-wide sandbox sweep removes every cenci-owned container/image/volume across multiple repos (including OpenCode) and leaves non-cenci objects (and OpenCode-look-alikes) untouched"
 prepare_full_layout sandbox-sweep
 containers_fixture="${WORK}/sandbox-sweep/containers"
 images_fixture="${WORK}/sandbox-sweep/images"
 volumes_fixture="${WORK}/sandbox-sweep/volumes"
 write_fixture "${containers_fixture}" \
     "claude-cenci-repo-a" "codex-cenci-repo-b" "claude-cenci-repo-c" \
+    "opencode-cenci-repo-d" \
     "unrelated-container" "web-app"
 write_fixture "${images_fixture}" \
     "cenci-sandbox:latest" "cenci-sandbox-repo-a:latest" \
     "cenci-sandbox-base:abc123def456" "cenci-sandbox-base:latest" \
     "nginx:latest" "myapp:1.0"
 write_fixture "${volumes_fixture}" \
-    "claude-cenci-home-repo-a" "codex-cenci-home-repo-b" \
-    "cenci-agent-cli-claude" "cenci-agent-cli-codex" \
-    "random-volume" "pgdata"
+    "claude-cenci-home-repo-a" "codex-cenci-home-repo-b" "opencode-cenci-home-repo-d" \
+    "cenci-agent-cli-claude" "cenci-agent-cli-codex" "cenci-agent-cli-opencode" \
+    "random-volume" "pgdata" "opencode-elsewhere" "random-opencode-volume"
 make_container_runtime "${LAYOUT_BIN}" docker "${containers_fixture}" "${images_fixture}" "${volumes_fixture}"
 run_uninstall -- --yes
 [[ "${UNINSTALL_EXIT}" -eq 0 ]]
 
-for name in claude-cenci-repo-a codex-cenci-repo-b claude-cenci-repo-c; do
+for name in claude-cenci-repo-a codex-cenci-repo-b claude-cenci-repo-c opencode-cenci-repo-d; do
     assert_contains "${LAYOUT_CALL_LOG}" "docker rm -f ${name}"
 done
 for tag in cenci-sandbox:latest cenci-sandbox-repo-a:latest \
     cenci-sandbox-base:abc123def456 cenci-sandbox-base:latest; do
     assert_contains "${LAYOUT_CALL_LOG}" "docker rmi ${tag}"
 done
-for vol in claude-cenci-home-repo-a codex-cenci-home-repo-b \
-    cenci-agent-cli-claude cenci-agent-cli-codex; do
+for vol in claude-cenci-home-repo-a codex-cenci-home-repo-b opencode-cenci-home-repo-d \
+    cenci-agent-cli-claude cenci-agent-cli-codex cenci-agent-cli-opencode; do
     assert_contains "${LAYOUT_CALL_LOG}" "docker volume rm ${vol}"
 done
 for untouched in "docker rm -f unrelated-container" "docker rm -f web-app" \
     "docker rmi nginx:latest" "docker rmi myapp:1.0" \
-    "docker volume rm random-volume" "docker volume rm pgdata"; do
+    "docker volume rm random-volume" "docker volume rm pgdata" \
+    "docker volume rm opencode-elsewhere" "docker volume rm random-opencode-volume"; do
     assert_not_contains "${LAYOUT_CALL_LOG}" "${untouched}"
 done
 
@@ -613,20 +616,20 @@ assert_not_contains "${LAYOUT_CALL_LOG}" "--filter status=created"
 assert_contains "${LAYOUT_CALL_LOG}" "docker rm -f claude-cenci-live-repo"
 
 # --- case 13: confirmation list shows counts/names -------------------------------
-echo "case: the collect step's output (before the confirmation gate) shows counts and names of sandbox containers/images/volumes that will be removed"
+echo "case: the collect step's output (before the confirmation gate) shows counts and names of sandbox containers/images/volumes that will be removed, including OpenCode-owned ones"
 prepare_full_layout sandbox-collect
 containers_fixture="${WORK}/sandbox-collect/containers"
 images_fixture="${WORK}/sandbox-collect/images"
 volumes_fixture="${WORK}/sandbox-collect/volumes"
-write_fixture "${containers_fixture}" "claude-cenci-repo-a"
+write_fixture "${containers_fixture}" "claude-cenci-repo-a" "opencode-cenci-repo-a"
 write_fixture "${images_fixture}" "cenci-sandbox:latest"
-write_fixture "${volumes_fixture}" "claude-cenci-home-repo-a" "cenci-agent-cli-claude"
+write_fixture "${volumes_fixture}" "claude-cenci-home-repo-a" "cenci-agent-cli-claude" "opencode-cenci-home-repo-a" "cenci-agent-cli-opencode"
 make_container_runtime "${LAYOUT_BIN}" docker "${containers_fixture}" "${images_fixture}" "${volumes_fixture}"
 run_uninstall -- --yes
 [[ "${UNINSTALL_EXIT}" -eq 0 ]]
-assert_contains "${UNINSTALL_OUTPUT}" "1 cenci sandbox container(s) across every repo on this machine: claude-cenci-repo-a"
+assert_contains "${UNINSTALL_OUTPUT}" "2 cenci sandbox container(s) across every repo on this machine: claude-cenci-repo-a, opencode-cenci-repo-a"
 assert_contains "${UNINSTALL_OUTPUT}" "1 cenci sandbox image(s) across every repo on this machine: cenci-sandbox:latest"
-assert_contains "${UNINSTALL_OUTPUT}" "2 cenci sandbox volume(s) across every repo on this machine: claude-cenci-home-repo-a, cenci-agent-cli-claude"
+assert_contains "${UNINSTALL_OUTPUT}" "4 cenci sandbox volume(s) across every repo on this machine: claude-cenci-home-repo-a, cenci-agent-cli-claude, opencode-cenci-home-repo-a, cenci-agent-cli-opencode"
 
 # --- case 14: ordering — runtime sweep before plugin-cache/link removal ---------
 echo "case: the sandbox container/image/volume sweep runs before plugin-cache and PATH-link removal"

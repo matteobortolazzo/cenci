@@ -10,11 +10,6 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/internal/sandbox"
 )
 
-// homeVolumePattern matches the per-agent home volume names cenci-sand
-// creates (VOLUME_NAME="${CONTAINER_PREFIX}-home-...").
-var homeVolumePattern = regexp.MustCompile(`^(claude|codex)-cenci-home-`)
-var agentCLIVolumePattern = regexp.MustCompile(`^cenci-agent-cli-(claude|codex)$`)
-
 // repoImagePattern matches per-repo derived images (cenci-sandbox-<slug>:latest,
 // built from <repo-root>/.cenci/Dockerfile — see HasRepoImage/SelectImage/
 // Slugify in scope.go). It requires a non-empty slug segment after
@@ -146,8 +141,10 @@ func (e *Engine) pruneRepoImages(reader *bufio.Reader) error {
 	return nil
 }
 
-// pruneVolumes lists home and agent-CLI volumes and, after an interactive
-// y/Y confirmation, removes every stale one in a single batch call.
+// pruneVolumes lists home and agent-CLI volumes for every supported agent
+// (claude/codex/opencode, per sandbox.SupportedAgents) and, after an
+// interactive y/Y confirmation, removes every stale one in a single batch
+// call.
 func (e *Engine) pruneVolumes(reader *bufio.Reader) error {
 	out, err := exec.Command(e.Runtime, "volume", "ls", "--format", "{{.Name}}").Output()
 	if err != nil {
@@ -156,9 +153,9 @@ func (e *Engine) pruneVolumes(reader *bufio.Reader) error {
 	}
 	var homes, agents, stale []string
 	for _, name := range splitLines(string(out)) {
-		if homeVolumePattern.MatchString(name) {
+		if sandbox.IsHomeVolumeName(name) {
 			homes = append(homes, name)
-		} else if agentCLIVolumePattern.MatchString(name) {
+		} else if sandbox.IsAgentCLIVolumeName(name) {
 			agents = append(agents, name)
 		}
 	}

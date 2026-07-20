@@ -12,9 +12,9 @@
 // everything else links to those two homes:
 //   - runtime detection: ContainerRuntime (podman if present, else docker)
 //   - shortcut tables: ClaudeModelShortcuts / CodexModelShortcuts
-//   - container name prefixes: the
-//     `^(claude-cenci-|codex-cenci-|opencode-cenci-)` pattern behind
-//     IsSandboxContainerName
+//   - supported agents: SupportedAgents is the single enumeration that
+//     sandboxNamePattern (container name prefixes), IsHomeVolumeName, and
+//     IsAgentCLIVolumeName all derive from
 package sandbox
 
 import (
@@ -58,11 +58,71 @@ func ResolveShortcut(token string) (agent, model string, ok bool) {
 
 // -- sandbox ls / stop: implemented natively in Go against docker/podman ---
 
+// SupportedAgents is the single source-of-truth enumeration of every agent
+// cenci's sandbox owns resources for. sandboxNamePattern (container name
+// prefixes), IsHomeVolumeName, and IsAgentCLIVolumeName are all derived from
+// this slice, so adding a 4th agent here is the only Go-side change needed
+// to bring prune and `sandbox ls`/`sandbox stop` in sync (#528).
+var SupportedAgents = []string{"claude", "codex", "opencode"}
+
+// init guards SupportedAgents against ever being left empty by a future
+// edit. sandboxNamePatternSource/homeVolumePatternSource/
+// agentCLIVolumePatternSource all derive their regexes from this slice, and
+// an empty slice degenerates each pattern silently: sandboxNamePatternSource
+// would collapse to `^()`, matching the start of every string (massive
+// over-match in a deletion path used by `sandbox prune` and install.sh's
+// full-uninstall), while the home/agent-CLI patterns would collapse to
+// matching nothing (prune silently stops working). Fail loudly at process
+// start instead.
+func init() {
+	if len(SupportedAgents) == 0 {
+		panic("sandbox: SupportedAgents must not be empty")
+	}
+}
+
 // sandboxNamePattern matches the claude-cenci-/codex-cenci-/opencode-cenci-
 // container name prefixes every sandbox container carries
 // (launcher.ComputeScope's CONTAINER_PREFIX is "<agent>-cenci"); prune and
-// reap filter on it too.
-var sandboxNamePattern = regexp.MustCompile(`^(claude-cenci-|codex-cenci-|opencode-cenci-)`)
+// reap filter on it too. Built from SupportedAgents, preserving the
+// `^(...)` capturing group AgentForContainerName relies on.
+var sandboxNamePattern = regexp.MustCompile(sandboxNamePatternSource())
+
+func sandboxNamePatternSource() string {
+	alternatives := make([]string, len(SupportedAgents))
+	for i, agent := range SupportedAgents {
+		alternatives[i] = regexp.QuoteMeta(agent) + "-cenci-"
+	}
+	return `^(` + strings.Join(alternatives, "|") + `)`
+}
+
+// homeVolumePattern matches the per-agent home volume names cenci-sand
+// creates (VOLUME_NAME="${CONTAINER_PREFIX}-home-..."), built from
+// SupportedAgents.
+var homeVolumePattern = regexp.MustCompile(homeVolumePatternSource())
+
+func homeVolumePatternSource() string {
+	return `^(` + strings.Join(quoteMetaAll(SupportedAgents), "|") + `)-cenci-home-`
+}
+
+// agentCLIVolumePattern matches the shared per-agent CLI volume names
+// (cenci-agent-cli-<agent>), built from SupportedAgents. $-anchored so
+// cenci-agent-cli-<agent>-<extra> is excluded.
+var agentCLIVolumePattern = regexp.MustCompile(agentCLIVolumePatternSource())
+
+func agentCLIVolumePatternSource() string {
+	return `^cenci-agent-cli-(` + strings.Join(quoteMetaAll(SupportedAgents), "|") + `)$`
+}
+
+// quoteMetaAll escapes every agent name with regexp.QuoteMeta before it is
+// spliced into a pattern string, so a future agent name containing a regex
+// metacharacter can't silently broaden a match.
+func quoteMetaAll(agents []string) []string {
+	quoted := make([]string, len(agents))
+	for i, agent := range agents {
+		quoted[i] = regexp.QuoteMeta(agent)
+	}
+	return quoted
+}
 
 // IsSandboxContainerName reports whether name carries one of the sandbox
 // container name prefixes (claude-cenci-/codex-cenci-/opencode-cenci-).
@@ -70,6 +130,22 @@ var sandboxNamePattern = regexp.MustCompile(`^(claude-cenci-|codex-cenci-|openco
 // prefix table instead of duplicating the regex.
 func IsSandboxContainerName(name string) bool {
 	return sandboxNamePattern.MatchString(name)
+}
+
+// IsHomeVolumeName reports whether name is a supported agent's per-agent
+// home volume (holds copied credentials, config, and session history).
+// Exported so internal/sandbox/launcher's prune engine shares the one
+// matcher instead of duplicating it, closing the drift #528 fixes.
+func IsHomeVolumeName(name string) bool {
+	return homeVolumePattern.MatchString(name)
+}
+
+// IsAgentCLIVolumeName reports whether name is a supported agent's shared
+// agent-CLI volume (global executables; no credentials). Exported so
+// internal/sandbox/launcher's prune engine shares the one matcher instead of
+// duplicating it, closing the drift #528 fixes.
+func IsAgentCLIVolumeName(name string) bool {
+	return agentCLIVolumePattern.MatchString(name)
 }
 
 // AgentForContainerName derives the agent (claude/codex/opencode) a sandbox container
