@@ -45,8 +45,8 @@ git add -A && git commit -m "chore: initial commit" --allow-empty
 
 Create the worktree:
 
-- Ticket mode: `git worktree add .worktrees/<ticket-id>-<description> -b feature/<ticket-id>-<description>`
-- Ticketless mode: `git worktree add .worktrees/<auto-slug> -b feature/<auto-slug>`
+- Ticket mode: `cenci pipeline worktree <id> --slug <description>` — creates `.worktrees/<id>-<description>` on branch `feature/<id>-<description>` (the same naming convention as before, now applied deterministically by the CLI) and records the branch and worktree path as artifacts. Render the returned `state`/`next_actions`/`warnings`/`errors`; if it returns non-empty `errors[]`, treat it as an error gate — clear the Goal Autopilot (`/goal clear` via `SlashCommand`, a no-op if none is armed) and stop, reporting the errors.
+- Ticketless mode: `git worktree add .worktrees/<auto-slug> -b feature/<auto-slug>` — unchanged; the pipeline CLI operates on ticket IDs, and ticketless mode has none.
 
 All subsequent phases run inside the worktree. Use absolute paths rooted at `<worktree-path>` when delegating file edits.
 

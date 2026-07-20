@@ -609,10 +609,13 @@ currently holds only the pipeline state file's path; richer artifact
 tracking is a follow-up.
 
 Behavior:
-- State persists per-repo, git-tracked, at `.cenci/pipeline/<id>.json`
-  (resolved from the git repo root of the current working directory).
-  Concurrent invocations for the same ticket serialize through a file lock,
-  retried with deterministic backoff on contention.
+- State persists per-repo at `.cenci/pipeline/<id>.json`, resolved from the
+  **main checkout's** git root — not the current working directory's own
+  `git rev-parse --show-toplevel` — so the same file is reachable whether the
+  command runs from the main checkout (`prepare`/`plan`/`execute`) or from a
+  linked worktree created for the ticket (`review`/`finalize`). Concurrent
+  invocations for the same ticket serialize through a file lock, retried
+  with deterministic backoff on contention.
 - `prepare` is idempotent — re-running it once a ticket is already `prepared`
   re-emits the current state instead of erroring.
 - `execute` is blocked until the plan has been explicitly approved
@@ -626,6 +629,42 @@ Behavior:
   an unrecognized flag, `--approve` on any stage but `plan`, or a trailing
   unexpected argument) prints a one-line hint to stderr and exits `2` —
   no JSON is printed for these.
+
+### Mechanics verbs (`label`, `worktree`, `worktree-cleanup`, `artifact`)
+
+Alongside the five stage transitions, `cenci pipeline` also exposes the
+deterministic side-effect mechanics that used to live in flow's skill prose:
+label lifecycle, worktree create/cleanup, and artifact tracking. Each verb
+renders the same JSON contract as the stage commands.
+
+```bash
+cenci pipeline label 42 --transition working                     # verifies/claims exclusive gh assignee ownership, applies "Working"
+cenci pipeline label 42 --transition planned [--trivial]          # applies "Planned", removes "Working" unless --trivial
+cenci pipeline label 42 --transition in-review [--parent 10]      # applies "In Review", removes "Working"; --parent cascades to the parent ticket
+cenci pipeline worktree 42 --slug add-thing                       # git worktree add .worktrees/42-add-thing -b feature/42-add-thing
+cenci pipeline worktree-cleanup 42 --slug add-thing               # removes both the worktree dir and the branch (creation-failure rollback only)
+cenci pipeline artifact 42 --plan .plans/42-add-thing.md --branch feature/42-add-thing --session runId=abc123
+cenci pipeline artifact 42 --get                                  # read-only fetch of the current artifacts
+```
+
+Behavior:
+- `label`'s three transitions each require the ticket's persisted pipeline
+  stage to match (`working` requires `prepared`, `planned` requires
+  `waiting_for_plan_approval`, `in-review` requires `finalized`); a mismatch
+  is a domain error. `working` additionally mirrors the `ticket-ownership`
+  skill: verify exclusive gh-assignee ownership, auto-claiming only when the
+  ticket is unassigned, never replacing an existing assignee.
+- `worktree` rolls back any partial worktree/branch state on failure;
+  `worktree-cleanup` removes both the worktree and its branch and is used
+  only on that rollback path (not on a "baseline gate failed" retry path,
+  which deliberately keeps the worktree/branch around).
+- `artifact` records/reads `PlanPath`, `Branch`, `WorktreePath`, `PRURL`,
+  `PRNumber`, and `--session KEY=VALUE` metadata (repeatable; merges into the
+  persisted map without clobbering keys from earlier calls) on the pipeline
+  state file.
+- `--repo-slug OWNER/REPO` (label only) and `--slug SLUG` (worktree/
+  worktree-cleanup, required) are additional flags on top of the stage
+  commands' `--state-dir`/`--repo` test hooks.
 
 ## Sandbox management and session launching (`cenci sandbox`, `cenci open`)
 

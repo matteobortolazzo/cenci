@@ -68,6 +68,12 @@ If this branch was already pushed in a prior turn (a Goal Autopilot resume) and 
 
 If push fails due to sandbox/network/auth, clear the goal (`/goal clear`), show the exact command, and use `AskUserQuestion` ("Pushed, continue" / "Abort") to wait for the user to push manually before continuing.
 
+After a successful push (ticket mode only — ticketless mode has no ticket ID to key the artifact on), record the branch as a tracked artifact:
+
+```bash
+cenci pipeline artifact <id> --branch <branch-name>
+```
+
 ## Screenshots (UI Work)
 
 Skip this section unless `isUiTicket` is true.
@@ -99,9 +105,15 @@ Screenshots are temporary review aids — never commit them to the repo. Host th
 
 Create the PR with `gh pr create`. Write body content to `/tmp/claude/cenci-<ticket-id-or-slug>-pr-body.md` first and read it back; do not use heredocs or a large inline body string.
 
-If a prior turn already created the PR (a Goal Autopilot resume re-entering after PR creation ran once but the turn ended before `/goal clear`), `gh pr create` fails with "a pull request for branch ... already exists." That is not a failure — run `gh pr view <branch> --json url -q .url` to recover the existing PR URL and continue to Labels/Cleanup as if creation had just succeeded.
+If a prior turn already created the PR (a Goal Autopilot resume re-entering after PR creation ran once but the turn ended before `/goal clear`), `gh pr create` fails with "a pull request for branch ... already exists." That is not a failure — run `gh pr view <branch> --json url,number -q '.url + " " + (.number | tostring)'` to recover the existing PR URL and number, and continue to Labels/Cleanup as if creation had just succeeded.
 
-If `gh pr create` fails for any other reason (auth, network, validation), clear the goal (`/goal clear`), show the exact failing command and its error output, and use `AskUserQuestion` ("Created, continue" / "Abort") to let the user resolve the issue and confirm before continuing to Labels/Cleanup, or abort the run — mirroring the Push gate above. On "Created, continue," re-run `gh pr view <branch> --json url -q .url` to obtain the PR URL/number before proceeding — the same recovery call as the "already exists" case above — since Labels/Cleanup and the Followup Ticket step below need it.
+If `gh pr create` fails for any other reason (auth, network, validation), clear the goal (`/goal clear`), show the exact failing command and its error output, and use `AskUserQuestion` ("Created, continue" / "Abort") to let the user resolve the issue and confirm before continuing to Labels/Cleanup, or abort the run — mirroring the Push gate above. On "Created, continue," re-run `gh pr view <branch> --json url,number -q '.url + " " + (.number | tostring)'` to obtain the PR URL/number before proceeding — the same recovery call as the "already exists" case above — since Labels/Cleanup and the Followup Ticket step below need it.
+
+However the PR URL/number was obtained above (fresh `gh pr create`, or either recovery path), record it as a tracked artifact (ticket mode only):
+
+```bash
+cenci pipeline artifact <id> --pr <pr-url> --pr-number <pr-number>
+```
 
 Ticket mode body includes:
 
@@ -171,17 +183,21 @@ Any reported or deferred maintenance findings (from a `— reported` status) eac
 
 ## Labels
 
-Ticket mode: after PR creation, replace "Working" with "In Review" (the PR is open but not yet merged). `gh issue edit --add-label` fails when the label does not exist in the repository, so ensure it exists first — each as its own Bash call (`|| true` swallows only the "already exists" error):
+Ticket mode: after PR creation, replace "Working" with "In Review" (the PR is open but not yet merged):
 
 ```bash
-gh label create "In Review" --repo <owner>/<repo> --color "A2EEEF" --description "PR open, under review / CI running" 2>/dev/null || true
+cenci pipeline label <id> --transition in-review
 ```
+
+Render the returned `state`/`next_actions`/`warnings`/`errors`. The CLI self-heals `In Review`'s existence in the repository and treats "already exists" as success, so no separate self-heal call is needed.
+
+If `isLastChild`, pass `--parent <parentId>` on the same call so the CLI also cascades "In Review" to the parent ticket:
 
 ```bash
-gh issue edit <number> --repo <owner>/<repo> --add-label "In Review" --remove-label "Working"
+cenci pipeline label <id> --transition in-review --parent <parentId>
 ```
 
-If `isLastChild`, also add "In Review" to the parent. The parent's real completion — the transition to "Implemented" — arrives when this last child's PR merges: the last-child commit carries `Fixes #<parentId>` (see Commit above), so the parent appears in the PR's `closingIssuesReferences` and babysit relabels it on merge.
+The parent's real completion — the transition to "Implemented" — arrives when this last child's PR merges: the last-child commit carries `Fixes #<parentId>` (see Commit above), so the parent appears in the PR's `closingIssuesReferences` and babysit relabels it on merge.
 
 The `Working` → `In Review` → `Implemented` progression finishes on merge: babysit swaps `In Review` for `Implemented` on any issue closed by the merged PR (see the babysit skill's terminal check). PR-open never applies `Implemented`.
 

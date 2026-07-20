@@ -65,6 +65,18 @@ assert_contains() {
   [[ "${content}" == *"${pattern}"* ]] || fail "${label}: expected cenci pipeline invocation not found: [${pattern}]"
 }
 
+# assert_not_contains <content> <forbidden-substring> <label>
+# Asserts the SPECIFIC raw gh-CLI prose this file's edit site must remove is
+# absent -- per docs/shell-scripting-gotchas.md rule 3, the forbidden
+# substring must be the exact removed text (e.g. `gh label create "Working"`),
+# never a generic marker like bare `gh issue edit`, since that invocation
+# legitimately appears elsewhere in the codebase for unrelated purposes
+# (comments, followups) and must not be a false-positive match.
+assert_not_contains() {
+  local content="$1" pattern="$2" label="$3"
+  [[ "${content}" != *"${pattern}"* ]] || fail "${label}: forbidden pre-cutover text still present: [${pattern}]"
+}
+
 # extract_pipeline_section <skill-md-content>
 # Returns only the `## Pipeline` section body (that header through EOF, since
 # it is SKILL.md's last level-2 section) so the assertion below cannot be
@@ -138,6 +150,81 @@ CONTENT_8="$(read_doc "${FILE_8}")" || CONTENT_8=""
 CONTENT_9="$(read_doc "${FILE_9}")" || CONTENT_9=""
 if [[ "${CONTENT_8}" != *"cenci pipeline finalize"* && "${CONTENT_9}" != *"cenci pipeline finalize"* ]]; then
   fail "${FILE_8} or ${FILE_9}: expected cenci pipeline invocation not found: [cenci pipeline finalize]"
+fi
+
+# =====================================================================
+# Ticket #559 -- deterministic pipeline mechanics: label lifecycle,
+# worktree creation, artifact tracking. Cuts the implement skill's
+# hand-rolled `gh label create` / `gh issue edit --add-label` / raw
+# `git worktree add` prose over to the `cenci pipeline label`, `cenci
+# pipeline worktree`, and `cenci pipeline artifact` CLI subcommands. See
+# .plans/559-*.md's Flow Cutover subsection for the per-file diff list.
+#
+# Marker choice mirrors the #558 blocks above: `assert_contains` pins the
+# exact new CLI invocation text; `assert_not_contains` pins the exact raw
+# gh-CLI prose that must be gone, never a generic marker (e.g. bare `gh
+# issue edit` legitimately appears elsewhere for unrelated purposes such as
+# comments/followups, and must not be a false-positive match).
+# =====================================================================
+
+# ---------------------------------------------------------------------
+# skills/implement/SKILL.md -- ## Ticket Ownership / ## Label "Working":
+# the pipeline start Working-label application must call `cenci pipeline
+# label <id> --transition working` instead of hand-rolling `gh label
+# create "Working" ...` + `gh issue edit --add-label "Working"`. Pin the
+# literal `gh label create "Working"` string as gone (CLI now owns
+# Working-label creation), and pin `cenci pipeline label` as present.
+# ---------------------------------------------------------------------
+FILE="skills/implement/SKILL.md"
+if CONTENT="$(read_doc "${FILE}")"; then
+  assert_contains "${CONTENT}" "cenci pipeline label" "${FILE} (Label \"Working\" section)"
+  assert_not_contains "${CONTENT}" 'gh label create "Working"' "${FILE} (Label \"Working\" section)"
+fi
+
+# ---------------------------------------------------------------------
+# skills/implement/phases/phase-1-plan.md -- ## Persist the Plan's "Mark
+# the ticket Planned" step (and the Trivial Fast Path step that mirrors
+# it) must call `cenci pipeline label <id> --transition planned` instead
+# of hand-rolling `gh label create "Planned" ...` + `gh issue edit
+# --add-label "Planned" [--remove-label "Working"]`. The saved plan path
+# must also be recorded via `cenci pipeline artifact <id> --plan`.
+# ---------------------------------------------------------------------
+FILE="skills/implement/phases/phase-1-plan.md"
+if CONTENT="$(read_doc "${FILE}")"; then
+  assert_contains "${CONTENT}" "cenci pipeline label" "${FILE} (Mark the ticket Planned)"
+  assert_contains "${CONTENT}" "--transition planned" "${FILE} (Mark the ticket Planned)"
+  assert_not_contains "${CONTENT}" 'gh label create "Planned"' "${FILE} (Mark the ticket Planned)"
+  assert_contains "${CONTENT}" "cenci pipeline artifact" "${FILE} (record plan path)"
+fi
+
+# ---------------------------------------------------------------------
+# skills/implement/phases/phase-2-worktree.md -- ## Create Worktree must
+# invoke `cenci pipeline worktree` instead of the raw `git worktree add
+# .worktrees/<ticket-id>-<description> -b feature/<ticket-id>-<description>`
+# ticket-mode invocation. Pin only that exact ticket-mode string as gone
+# (not bare `git worktree add`, which could still appear elsewhere in doc
+# prose, e.g. a `cenci:worktrees` reference or comment).
+# ---------------------------------------------------------------------
+FILE="skills/implement/phases/phase-2-worktree.md"
+if CONTENT="$(read_doc "${FILE}")"; then
+  assert_contains "${CONTENT}" "cenci pipeline worktree" "${FILE} (Create Worktree)"
+  assert_not_contains "${CONTENT}" "git worktree add .worktrees/<ticket-id>-<description>" "${FILE} (Create Worktree)"
+fi
+
+# ---------------------------------------------------------------------
+# skills/implement/phases/phase-9-pr.md -- ## Push / ## PR / ## Labels:
+# after PR creation, the Working -> In Review swap must call `cenci
+# pipeline label <id> --transition in-review` instead of hand-rolling `gh
+# label create "In Review" ...` + `gh issue edit --add-label "In Review"
+# --remove-label "Working"`. Branch/PR/PR-number must also be recorded via
+# `cenci pipeline artifact <id> --branch/--pr/--pr-number`.
+# ---------------------------------------------------------------------
+FILE="skills/implement/phases/phase-9-pr.md"
+if CONTENT="$(read_doc "${FILE}")"; then
+  assert_contains "${CONTENT}" "cenci pipeline label" "${FILE} (Labels)"
+  assert_contains "${CONTENT}" "--transition in-review" "${FILE} (Labels)"
+  assert_not_contains "${CONTENT}" 'gh label create "In Review"' "${FILE} (Labels)"
+  assert_contains "${CONTENT}" "cenci pipeline artifact" "${FILE} (record branch/PR)"
 fi
 
 echo "pipeline-cutover-contract.test.sh: failures=${failures}"

@@ -217,11 +217,9 @@ This is informational only — it does not block the pipeline.
 
 **If ticketless mode:** skip this section.
 
-**If ticket mode:** read the `ticket-ownership` reference skill and follow it before
-triage, adding `Working`, or starting the pipeline. In ordinary ticket mode, use the
-fresh `assignees` line from the context-gatherer digest. In plan-file mode, re-fetch
-the ticket's assignees because ownership may have changed since the plan was saved.
-Never replace an existing assignee.
+**If ticket mode:** before triage, invoke `cenci pipeline label <id> --transition working` — the CLI now owns both the ownership verify/auto-claim logic (mirroring the `ticket-ownership` reference skill's own logic: verify exclusive ownership, auto-claim an unassigned ticket, never replace an existing assignee) **and** applying the `Working` label in one call (see the **Label "Working"** section below, which this same call also satisfies). Render the returned `state`/`next_actions`/`warnings`/`errors` as this step's status update; if it returns non-empty `errors[]` (foreign/multiple assignee, wrong pipeline stage), surface them and stop before proceeding to triage or the pipeline.
+
+The `ticket-ownership` reference skill itself stays in place — it is still read directly by `/refine` and `/design`, which don't run through the pipeline CLI. This call site no longer reads it directly; the CLI reimplements the same logic instead.
 
 ## Trivial-Ticket Triage
 
@@ -319,31 +317,20 @@ Phase 1 reads `trivial` and, when true, takes the **Trivial Fast Path** (see `ph
 
 **If ticketless mode:** Skip this section entirely — ticketless mode applies no board labels.
 
-**If ticket mode:** Before starting the pipeline, add the "Working" label to signal work in progress. `gh issue edit --add-label` **fails when the label does not exist in the repository**, so first ensure it exists — run this as its own Bash call (the `|| true` swallows only the "already exists" error; `/cenci:configure` also creates the full lifecycle label set, this is self-healing for projects configured before that):
+**If ticket mode:** Before starting the pipeline, the `cenci pipeline label <id> --transition working` call from the **Ticket Ownership** step above is what applies the "Working" label to signal work in progress — there is no separate label-application step here; this section explains *why* that label is applied, not a second mechanism for applying it. The CLI self-heals the label's existence (creating it in the repository on first use, same as it always did) and treats "already exists" as success, so no separate self-heal call is needed here either.
 
-```bash
-gh label create "Working" --repo <owner>/<repo> --color "FBCA04" --description "Actively being refined, designed, or implemented" 2>/dev/null || true
-```
+`Planned` is a milestone marker, not a current-stage indicator — once a ticket has a persisted plan, it keeps that label for the life of the ticket (only `In Review`/`Implemented` reaching the ticket via the Phase 9 flow, or the ticket closing, ever implies otherwise). Only `Working` toggles on and off as the pipeline runs. So the implement skill never removes `Planned` — this holds even when starting from a plan-file pickup or discarding a plan to re-plan from scratch.
 
-`Planned` is a milestone marker, not a current-stage indicator — once a ticket has a persisted plan, it keeps that label for the life of the ticket (only `In Review`/`Implemented` reaching the ticket via the Phase 9 flow, or the ticket closing, ever implies otherwise). Only `Working` toggles on and off as the pipeline runs. So the implement skill never issues `--remove-label "Planned"` — this holds even when starting from a plan-file pickup or discarding a plan to re-plan from scratch.
+The reasoning behind the single `--transition working` call is the same regardless of how this run entered the pipeline:
 
-The exact swap depends on how this run entered the pipeline:
-
-- **Plan-file mode** (`hasPlanFile` true): this is the saved-plan pickup. The ticket already carries `Planned` from when the plan was persisted; just add `Working` alongside it:
-  ```bash
-  gh issue edit <number> --repo <owner>/<repo> --add-label "Working"
-  ```
-- **New-plan ticket mode** (`hasPlanFile` false): add `Working`:
-  ```bash
-  gh issue edit <number> --repo <owner>/<repo> --add-label "Working"
-  ```
-  This also covers a session entered via a **re-plan over an existing plan** (the user context requested `replan`, or "Re-plan from scratch" was chosen in the multiple-match question) — the ticket still carries `Planned` from the discarded plan, and that's fine: it stays. In a new-plan session `Working` is short-lived: Phase 1 swaps it back out when it persists the fresh plan and stops. **Exception — Trivial Fast Path**: when Trivial-Ticket Triage set `trivial = true`, Phase 1 retains `Working` instead of swapping it out — it adds `Planned` alongside the already-present `Working`, because the session continues into Phase 2 rather than stopping.
+- **Plan-file mode** (`hasPlanFile` true): this is the saved-plan pickup. The ticket already carries `Planned` from when the plan was persisted; the call above just adds `Working` alongside it.
+- **New-plan ticket mode** (`hasPlanFile` false): the call above adds `Working`. This also covers a session entered via a **re-plan over an existing plan** (the user context requested `replan`, or "Re-plan from scratch" was chosen in the multiple-match question) — the ticket still carries `Planned` from the discarded plan, and that's fine: it stays. In a new-plan session `Working` is short-lived: Phase 1 swaps it back out (`cenci pipeline label <id> --transition planned`) when it persists the fresh plan and stops. **Exception — Trivial Fast Path**: when Trivial-Ticket Triage set `trivial = true`, Phase 1 retains `Working` instead of swapping it out (`cenci pipeline label <id> --transition planned --trivial`) — it adds `Planned` alongside the already-present `Working`, because the session continues into Phase 2 rather than stopping.
 
 ## Pipeline
 
 This pipeline has 9 phases, grouped into 5 coarse stages tracked by `cenci pipeline <stage> <id>`: **prepare** (pre-flight/context, before Phase 1), **plan** (Phase 1), **execute** (Phases 2–5), **review** (Phases 6–7), **finalize** (Phases 8–9). Execute the phases in order without stopping for confirmation — the user pre-approved all phases, including commit, push, and PR creation, by invoking this skill. At each coarse-stage boundary, invoke `cenci pipeline <stage> <id>` and render the returned `state`/`next_actions`/`warnings`/`errors` as the one-line status update between major phases, instead of prose-deriving "what's next" — then immediately continue per those `next_actions`; do not wait for acknowledgment. **Read each phase file only when you reach that phase** — do not read all files upfront.
 
-The only reasons to stop mid-pipeline are explicit error gates defined within individual phases (rebase conflicts, repeated build failures, push auth errors, unclear reviewer findings) or a `cenci pipeline <stage> <id>` call returning a non-empty `errors[]` — except `review` and `finalize`: those two calls run inside the feature worktree, a different tree than `prepare`/`plan`/`execute`'s main-checkout runs, so their `errors[]` is rendered as an informational warning and the phase falls through to its existing procedure instead of stopping (see `phase-6-7-review.md`/`phase-8-docs.md`). If no error gate fires, complete all 9 phases. The pipeline is not complete until a PR URL has been created and returned to the user — never end with a status summary like "ready for PR" or "branch is ready."
+The only reasons to stop mid-pipeline are explicit error gates defined within individual phases (rebase conflicts, repeated build failures, push auth errors, unclear reviewer findings) or a `cenci pipeline <stage> <id>` call returning a non-empty `errors[]` — this applies uniformly to every stage, including `review` and `finalize`: pipeline state is now anchored to the main-checkout root and shared across the main-checkout → feature-worktree boundary, so a non-empty `errors[]` from either call is an authoritative hard-stop like any other stage — clear the Goal Autopilot (`/goal clear` via `SlashCommand`, a no-op if none is armed) before stopping and reporting (see `phase-6-7-review.md`/`phase-8-docs.md` for the exact stop procedure at each of those two stages). If no error gate fires, complete all 9 phases. The pipeline is not complete until a PR URL has been created and returned to the user — never end with a status summary like "ready for PR" or "branch is ready."
 
 **Hard stop after planning**: Phases 2–9 run only when the skill was invoked with a plan-file argument (`hasPlanFile` set during mode detection). A session that creates a new plan **always ends at Phase 1** — after persisting the plan file, do not read `phases/phase-2-worktree.md` or any later phase file. Implementation resumes via `/cenci:implement .plans/<filename>` in a fresh session. The sole exception is the **Trivial Fast Path**: when Trivial-Ticket Triage judged the ticket trivial, Phase 1 still persists a plan file, but the session does not stop — it continues straight into Phase 2 in the same session (see `phases/phase-1-plan.md`'s `## Trivial Fast Path` and `phases/phase-2-worktree.md`'s `## Gate Check`).
 
