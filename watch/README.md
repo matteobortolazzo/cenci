@@ -784,6 +784,36 @@ resolution failures exit non-zero (2 for usage errors, 1 otherwise).
 Note: recent logs and mount paths in the report may contain sensitive data
 (secrets, credentials, host paths) — review before sharing this output.
 
+## Support bundle (`cenci support-bundle`)
+
+```bash
+cenci support-bundle                        # write ./cenci-support-bundle-<UTCstamp>.tar.gz
+cenci support-bundle -o /tmp/bundle.tar.gz  # write to a specific path
+cenci support-bundle --yes                  # skip the confirmation prompt
+```
+
+`cenci support-bundle [--output|-o PATH] [--yes|-y]` collects a single
+sanitized diagnostic archive covering the whole host + sandbox fleet, for
+attaching to a bug report: cenci and container-runtime versions, host
+environment variable NAMES only (never values), daemon reachability,
+config.json (or a "(not found ...)" placeholder), and, for every known
+sandbox container, a read-only `cenci diagnose`-style report plus its tailed
+boot log (`<runtime> logs --tail 500`).
+
+Before writing anything, it prints a manifest to stdout — every entry's name
+and byte size, the container count, and a review-before-sharing caveat — then
+asks for confirmation (`Write bundle to <path>? [y/N]`, prompted on stderr;
+default-deny unless `--yes`). Collection is entirely in-memory: nothing
+touches disk until the archive itself, which refuses to clobber an existing
+file at the target path and defaults to
+`./cenci-support-bundle-<UTCstamp>.tar.gz` in the current directory.
+
+Only the environment variable NAMES collected in `environment.txt` are a hard
+sanitization guarantee. Everything else — `logs/boot-*.log`, `config.json`,
+and each container's `diagnose-*.txt` — is collected verbatim and may contain
+secrets (API keys, tokens echoed at container boot, credentials stored in
+config) or host paths. Review the archive before sharing it.
+
 ## Installer integration (`cenci doctor`, `cenci update`, `cenci uninstall`)
 
 ```bash

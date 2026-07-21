@@ -121,9 +121,10 @@ func ComputeScope(agent, instanceName, cwd, home string) Scope {
 		if instanceName != "" {
 			suffix = "-" + instanceName
 		}
+		containerName := prefix + "-" + slug + suffix
 		return Scope{
-			ContainerName:     prefix + "-" + slug + suffix,
-			VolumeName:        prefix + "-home-" + slug + suffix,
+			ContainerName:     containerName,
+			VolumeName:        volumeNameForContainer(containerName),
 			Hostname:          "sandbox-" + slug + suffix,
 			Image:             SelectImage(repoRoot, slug),
 			UsingRepoImage:    HasRepoImage(repoRoot),
@@ -138,14 +139,49 @@ func ComputeScope(agent, instanceName, cwd, home string) Scope {
 	if name == "" {
 		name = "default"
 	}
+	containerName := prefix + "-" + name
 	workspaceHost := filepath.Join(home, "Repos")
 	return Scope{
-		ContainerName:     prefix + "-" + name,
-		VolumeName:        prefix + "-home-" + name,
+		ContainerName:     containerName,
+		VolumeName:        volumeNameForContainer(containerName),
 		Hostname:          "sandbox-" + name,
 		Image:             MonolithImage,
 		WorkspaceBindHost: workspaceHost,
 		Workdir:           ComputeLegacyWorkdir(workspaceHost, cwd),
 		WorkspaceScope:    "legacy",
+	}
+}
+
+// cenciMarker is the "-cenci-" separator every sandbox container/volume name
+// pair is namespaced around ("${agent}-cenci-<slug>" / "${agent}-cenci-home-
+// <slug>"; see docs/cli-conventions.md's runtime object naming table).
+const cenciMarker = "-cenci-"
+
+// volumeNameForContainer derives a container's home-volume name from its
+// container name by inserting "home-" right after the shared cenciMarker
+// both ComputeScope and ScopeForContainer build container/volume name pairs
+// around (e.g. "claude-cenci-myrepo" -> "claude-cenci-home-myrepo"). Returns
+// "" when containerName carries no cenciMarker to split on — there is no
+// reliable insertion point to guess at.
+func volumeNameForContainer(containerName string) string {
+	idx := strings.Index(containerName, cenciMarker)
+	if idx < 0 {
+		return ""
+	}
+	return containerName[:idx] + cenciMarker + "home-" + containerName[idx+len(cenciMarker):]
+}
+
+// ScopeForContainer derives a Scope directly from an already-known container
+// name and image (as reported by sandbox.ListContainers), without resolving
+// any cwd/repo. It is the support-bundle collection path (ticket #573):
+// unlike ComputeScope, which derives scope from the current cwd/repo,
+// ScopeForContainer reports on containers it never launched, so
+// Workspace/RepoRoot-related fields stay zero rather than fabricating a
+// value that doesn't apply.
+func ScopeForContainer(containerName, image string) Scope {
+	return Scope{
+		ContainerName: containerName,
+		VolumeName:    volumeNameForContainer(containerName),
+		Image:         image,
 	}
 }
