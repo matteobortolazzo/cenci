@@ -50,6 +50,9 @@ curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install
 cenci doctor
 ```
 
+Resolves to the latest release tag by default; set `CENCI_REF=main` (or pass
+`--ref main`) for bleeding-edge main instead.
+
 The installer detects your clients, reconciles all three layers on every run (adding
 missing components and refreshing existing ones), and puts `cenci` and its `cn` launch
 alias on your PATH. `doctor` reports what is ready and what needs attention without

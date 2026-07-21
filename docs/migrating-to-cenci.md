@@ -168,6 +168,9 @@ in that repo to regenerate it with the new `cenci sandbox build` form.
    curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
    ```
 
+   Resolves to the latest release tag by default; set `CENCI_REF=main` (or
+   pass `--ref main`) for bleeding-edge main instead.
+
    Or, if you already have `cenci` on `PATH`, `cenci update`.
 
 2. **Fix hand-customized tmux status formats.** If you followed cenci-watch's

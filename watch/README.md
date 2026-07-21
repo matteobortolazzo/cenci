@@ -59,6 +59,9 @@ also wires the desktop bar widget for whichever bar it detects:
 curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
 ```
 
+Resolves to the latest release tag by default; set `CENCI_REF=main` (or pass
+`--ref main`) for bleeding-edge main instead.
+
 The installer handles Claude Code, Codex, or both. The binary and daemon
 self-bootstrap from the active client's plugin cache on the first session.
 

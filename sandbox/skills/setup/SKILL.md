@@ -48,7 +48,9 @@ Skip this step when `--build-only` was passed.
      If it is not on `$PATH`, warn the user to add it (e.g.
      `export PATH="$HOME/.local/bin:$PATH"` in their shell profile). If it is on
      `$PATH` but `cenci` still does not resolve, tell the user to re-run the cenci
-     installer (`curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash`)
+     installer (`curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash`
+     — resolves to the latest release tag by default; `CENCI_REF=main` for
+     bleeding-edge main)
      and stop.
    - A missing `cn` alone is cosmetic — mention re-running the installer to create it,
      but continue.
