@@ -84,6 +84,13 @@ repo's context affects every other repository's sessions too. See [sandbox/READM
 under Update an agent
 CLI](./sandbox/README.md#update-an-agent-cli) for the activation and retention model.
 
+## Release artifact integrity
+
+`cenci-watch` release checksums are signed keylessly via Sigstore/cosign (GitHub
+Actions OIDC, published to the public Rekor transparency log) — see
+[Verifying release artifacts](./watch/README.md#verifying-release-artifacts) for the
+`cosign verify-blob` command and the follow-through `sha256sum -c` check.
+
 ## Reporting a vulnerability
 
 Email **matteobortolazzo@pm.me** with details — this is the reliable channel today.
