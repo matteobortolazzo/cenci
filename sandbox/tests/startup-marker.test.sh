@@ -31,11 +31,13 @@ ENTRYPOINT="${SANDBOX_DIR}/entrypoint.sh"
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
 
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/assert.sh
 source "${SCRIPT_DIR}/lib/assert.sh"
 
 echo "startup-marker.test.sh"
 
+# shellcheck disable=SC2016 # literal token we grep for in entrypoint.sh, not expanded here
 DATE_TOKEN='$(date -u +%Y-%m-%dT%H:%M:%SZ)'
 TIMESTAMP_REGEX='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z '
 
