@@ -402,7 +402,12 @@ func classifyEnvNames(args []string) []EnvVarName {
 
 // forwardedEnvVarNames are the provider API keys assembleExecEnv may forward
 // per-exec — the only names ForwardedEnv ever reports (see
-// ForwardedEnvVar's doc comment).
+// ForwardedEnvVar's doc comment). This is the single source of truth for
+// secret-env classification: both `cenci audit`'s reporting and
+// `cenci open --dry-run`'s redaction (renderArgv/redactSecretEnv in
+// dryrun.go) depend on it. Any new secret "-e" env forward added in
+// assembleExecEnv/assembleEnv MUST also be added here, or it will render
+// unredacted in dry-run output.
 var forwardedEnvVarNames = map[string]bool{
 	"CONTEXT7_API_KEY":  true,
 	"ANTHROPIC_API_KEY": true,
