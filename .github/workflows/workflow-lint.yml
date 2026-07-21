@@ -19,8 +19,8 @@ jobs:
     outputs:
       workflows: ${{ steps.filter.outputs.workflows }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dorny/paths-filter@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
         id: filter
         with:
           filters: |
@@ -34,7 +34,7 @@ jobs:
     if: ${{ needs.changes.outputs.workflows == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check workflow permission declarations
         run: bash .github/scripts/check-workflow-permissions.sh
       - name: Run permission-check unit tests
@@ -49,7 +49,7 @@ jobs:
   check-codeowners:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check CODEOWNERS path drift
         run: bash .github/scripts/check-codeowners.sh
       - name: Run CODEOWNERS drift-check unit tests
