@@ -59,7 +59,8 @@ func runOpen(args []string) {
 	modelFlag := fs.String("model", "", "model override")
 	nameFlag := fs.String("name", "", "sandbox instance name")
 	shellFlag := fs.Bool("shell", false, "attach a shell instead of launching the agent")
-	dockerFlag := fs.Bool("docker", false, "mount the host docker/podman socket (opt-in DooD)")
+	dindFlag := fs.Bool("dind", false, "run the sandbox under the sysbox-runc runtime with its own isolated Docker storage (nested docker-in-docker)")
+	noDindFlag := fs.Bool("no-dind", false, "force dind off, overriding the repo's .cenci/config.json sandbox.dind setting")
 	hostNetworkFlag := fs.Bool("host-network", false, "use host network mode")
 	reseedFlag := fs.Bool("reseed-creds", false, "force a credential reseed from the host on the next container create")
 	_ = fs.Parse(args)
@@ -88,7 +89,7 @@ func runOpen(args []string) {
 
 	// Empty agent/model stay empty here — Launch applies the claude default
 	// and the per-agent model default.
-	eng, err := launcher.New(os.Stdin, os.Stdout, os.Stderr)
+	eng, err := launcher.NewForLaunch(os.Stdin, os.Stdout, os.Stderr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cenci open: %v\n", err)
 		os.Exit(1)
@@ -98,7 +99,8 @@ func runOpen(args []string) {
 		Model:       finalModel,
 		Name:        *nameFlag,
 		Shell:       *shellFlag,
-		Docker:      *dockerFlag,
+		Dind:        *dindFlag,
+		NoDind:      *noDindFlag,
 		HostNetwork: *hostNetworkFlag,
 		ReseedCreds: *reseedFlag,
 		AgentArgs:   passthrough,

@@ -37,6 +37,29 @@ func New(stdin io.Reader, stdout, stderr io.Writer) (*Engine, error) {
 	if err != nil {
 		return nil, err
 	}
+	e, err := newEngineBase(stdin, stdout, stderr)
+	if err != nil {
+		return nil, err
+	}
+	e.Runtime = runtime
+	return e, nil
+}
+
+// NewForLaunch resolves the sandbox asset directory and base tag, like New,
+// but leaves Runtime unset (""). The interactive `cenci open` path only
+// knows whether dind mode is on after ResolveDind runs (it decides between
+// docker-first and podman-first runtime resolution), which needs the launch
+// scope Launch itself computes — so runtime resolution happens inside Launch
+// instead of eagerly here (#585).
+func NewForLaunch(stdin io.Reader, stdout, stderr io.Writer) (*Engine, error) {
+	return newEngineBase(stdin, stdout, stderr)
+}
+
+// newEngineBase resolves the sandbox asset directory and the base tag,
+// returning an Engine with everything except Runtime populated. Shared by
+// New (which resolves Runtime eagerly) and NewForLaunch (which leaves it for
+// the caller to resolve later).
+func newEngineBase(stdin io.Reader, stdout, stderr io.Writer) (*Engine, error) {
 	assetDir, err := ResolveAssetDir()
 	if err != nil {
 		return nil, err
@@ -46,7 +69,6 @@ func New(stdin io.Reader, stdout, stderr io.Writer) (*Engine, error) {
 		return nil, err
 	}
 	return &Engine{
-		Runtime:  runtime,
 		AssetDir: assetDir,
 		BaseTag:  tag,
 		Stdin:    stdin,

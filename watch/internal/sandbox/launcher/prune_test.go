@@ -131,6 +131,32 @@ func TestPrune_VolumesRejectsForeignLookAlikes(t *testing.T) {
 	}
 }
 
+// TestPrune_VolumesClassifiesDindVolumesAsNonCredential pins the new dind
+// storage volume bucket (#585): *-cenci-dind-* volumes carry no credentials
+// (they hold a nested Docker's image/container storage, not the home
+// volume's session history), so prune classifies them alongside the
+// non-credential agent-CLI volumes rather than the credential-bearing home
+// volumes, and removes them in the same single batch call.
+func TestPrune_VolumesClassifiesDindVolumesAsNonCredential(t *testing.T) {
+	e, callLog, _, stderr := pruneEngine(t, "y\n")
+	t.Setenv("FAKE_VOLUMES", "claude-cenci-home-old\nclaude-cenci-dind-myrepo\ncodex-cenci-dind-otherrepo\nunrelated-volume\n")
+
+	if err := e.Prune(false, true); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+
+	calls := readCallLog(t, callLog)
+	if !containsLineWithAll(calls, "volume rm", "claude-cenci-home-old", "claude-cenci-dind-myrepo", "codex-cenci-dind-otherrepo") {
+		t.Errorf("expected dind volumes removed alongside other stale volumes in one batch call; calls:\n%s", strings.Join(calls, "\n"))
+	}
+	if !strings.Contains(stderr.String(), "claude-cenci-dind-myrepo") || !strings.Contains(stderr.String(), "codex-cenci-dind-otherrepo") {
+		t.Errorf("expected dind volumes to be listed in the confirmation prompt; stderr:\n%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "Credential-bearing home volumes") {
+		t.Errorf("expected the credential-bearing heading to still be printed for the home volume; stderr:\n%s", stderr.String())
+	}
+}
+
 func TestPrune_NoMatchingVolumes(t *testing.T) {
 	e, callLog, stdout, _ := pruneEngine(t, "y\n")
 	t.Setenv("FAKE_VOLUMES", "unrelated-volume\n")

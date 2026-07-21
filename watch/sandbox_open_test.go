@@ -102,6 +102,11 @@ func joinArgv(argv []string) string {
 //	                        simulate a container-listing failure (e.g.
 //	                        support-bundle's ListContainers call)
 //	FAKE_VOLUMES         — `volume ls` stdout
+//	FAKE_INFO_RUNTIMES   — `info --format {{json .Runtimes}}` stdout (default
+//	                        "{}"); the dind preflight's sysbox-registration
+//	                        probe reads this, e.g.
+//	                        `{"sysbox-runc":{},"runc":{}}` to simulate a
+//	                        registered sysbox runtime.
 //	FAKE_INSPECT_LABEL   — container `inspect` stdout for label lookups
 //	FAKE_INSPECT_MOUNTS  — container `inspect` stdout for mount lookups
 //	FAKE_INSPECT_STATE   — container startup state (default "running 0")
@@ -149,6 +154,12 @@ func writeScriptedRuntime(t *testing.T, dir, name, callLog string) {
 		"images) if [ -n \"${FAKE_IMAGES+x}\" ]; then printf '%s' \"${FAKE_IMAGES}\"; else for last do :; done; printf '%s\\n' \"${last}\"; fi; exit \"${FAKE_INSPECT_EXIT:-0}\" ;;\n" +
 		"ps) printf '%s' \"${FAKE_PS:-}\"; exit \"${FAKE_PS_EXIT:-0}\" ;;\n" +
 		"volume) if [ \"$2\" = ls ]; then printf '%s' \"${FAKE_VOLUMES:-}\"; exit \"${FAKE_VOLUME_LS_EXIT:-0}\"; fi ;;\n" +
+		// The default value's "\}" backslash-escapes the inner brace so the
+		// shell's ${VAR:-word} parser can't mistake it for the expansion's
+		// own closing brace; the fallback still evaluates to the literal
+		// two-character JSON "{}" (empty runtimes map = sysbox-runc
+		// unregistered) — not a stray typo.
+		"info) printf '%s' \"${FAKE_INFO_RUNTIMES:-{\\}}\" ;;\n" +
 		"rm) exit 0 ;;\n" +
 		"run) case \"$*\" in\n" +
 		"  *'/bin/cat'*)\n" +
@@ -184,6 +195,27 @@ func writeScriptedRuntimes(t *testing.T, dir string) string {
 	t.Helper()
 	callLog := filepath.Join(dir, "calls.txt")
 	writeScriptedRuntime(t, dir, "docker", callLog)
+	writeScriptedRuntime(t, dir, "podman", callLog)
+	return callLog
+}
+
+// writeDockerOnlyRuntime writes only a fake docker (no podman) to dir. Dind
+// mode requires Docker as the outer runtime, and podman-first detection
+// would otherwise win were both fakes present, so dind happy-path tests use
+// this instead of writeScriptedRuntimes.
+func writeDockerOnlyRuntime(t *testing.T, dir string) string {
+	t.Helper()
+	callLog := filepath.Join(dir, "calls.txt")
+	writeScriptedRuntime(t, dir, "docker", callLog)
+	return callLog
+}
+
+// writePodmanOnlyRuntime writes only a fake podman (no docker) to dir, for
+// dind preflight tests that need a podman-only host (Docker absent from
+// PATH).
+func writePodmanOnlyRuntime(t *testing.T, dir string) string {
+	t.Helper()
+	callLog := filepath.Join(dir, "calls.txt")
 	writeScriptedRuntime(t, dir, "podman", callLog)
 	return callLog
 }
@@ -797,6 +829,52 @@ func TestSandboxReseedCreds_IsOpenReseedAlias(t *testing.T) {
 	}
 	if !strings.Contains(runLine, "-e CENCI_SANDBOX_RESEED_CREDS=1") {
 		t.Errorf("expected the reseed env flag in the run argv, got: %s", runLine)
+	}
+}
+
+// TestSandboxReseedCreds_DindConfigRepo_BothRuntimesPresent_UsesDocker
+// reproduces #585: `cenci sandbox reseed-creds` reaches Launch (via the
+// open --reseed-creds alias path) just like `cenci open` does, so it must
+// build its engine with NewForLaunch (leaving Runtime unresolved) rather than
+// the eager, podman-first newEngine() every other batch verb uses. With both
+// a docker and a podman fake registered (podman-first would normally win)
+// and the repo's .cenci/config.json turning dind on, the eager podman-first
+// resolution would lock the runtime to podman before Launch ever computes
+// dind, and dindPreflight would then hard-fail with "requires Docker ...
+// got \"podman\"" even though Docker is present. The fixed path must
+// instead re-resolve docker-preferred once dind is known, succeeding and
+// selecting the sysbox-runc runtime.
+func TestSandboxReseedCreds_DindConfigRepo_BothRuntimesPresent_UsesDocker(t *testing.T) {
+	repoRoot, slug := dindRepoEnv(t, true)
+
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+	env = append(env, `FAKE_INFO_RUNTIMES={"sysbox-runc":{},"runc":{}}`)
+
+	cmd := exec.Command(binaryPath, "sandbox", "reseed-creds")
+	cmd.Env = env
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandbox reseed-creds (dind repo, both runtimes present): %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	createLine, ok := findLineWithPrefix(lines, "run --name ")
+	if !ok {
+		t.Fatalf("expected a container run, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(createLine, "--runtime=sysbox-runc") {
+		t.Errorf("expected dind mode to resolve docker-preferred (--runtime=sysbox-runc), got: %s", createLine)
+	}
+	wantVolume := "claude-cenci-dind-" + slug + ":/var/lib/docker"
+	if !strings.Contains(createLine, wantVolume) {
+		t.Errorf("expected the dind storage volume mount %q, got: %s", wantVolume, createLine)
+	}
+	if !strings.Contains(createLine, "-e CENCI_SANDBOX_RESEED_CREDS=1") {
+		t.Errorf("expected the reseed env flag in the run argv, got: %s", createLine)
 	}
 }
 
@@ -1662,7 +1740,236 @@ func TestOpenHostNetwork_AddsNetworkHostWithWarning(t *testing.T) {
 	}
 }
 
-func TestOpenDocker_MountsRuntimeSocketOrWarns(t *testing.T) {
+// -- open --dind (sysbox nested-Docker mode, #585) -------------------------
+//
+// dind replaces the removed --docker DooD path: instead of bind-mounting the
+// host's runtime socket (root-equivalent access to the host), dind runs the
+// workload container itself under the sysbox-runc OCI runtime with its own
+// isolated per-repo Docker storage volume, so a nested `docker` inside the
+// sandbox never touches the host runtime at all.
+
+// dindRepoEnv builds a git-initialized repo (dind is only ever on in repo
+// scope) with an optional `.cenci/config.json` `sandbox.dind` value, and
+// returns the repo's resolved root and slug.
+func dindRepoEnv(t *testing.T, dindConfig bool) (repoRoot, slug string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo := t.TempDir()
+	if out, err := exec.Command("git", "-C", repo, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	if dindConfig {
+		if err := os.MkdirAll(filepath.Join(repo, ".cenci"), 0o755); err != nil {
+			t.Fatalf("mkdir .cenci: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, ".cenci", "config.json"), []byte(`{"sandbox":{"dind":true}}`), 0o644); err != nil {
+			t.Fatalf("write .cenci/config.json: %v", err)
+		}
+	}
+	repoRoot, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatalf("resolve repo path: %v", err)
+	}
+	return repoRoot, launcher.Slugify(filepath.Base(repoRoot))
+}
+
+func TestOpenDind_ViaRepoConfig_AddsSysboxRuntimeVolumeAndEnv(t *testing.T) {
+	repoRoot, slug := dindRepoEnv(t, true)
+
+	fakeDir := t.TempDir()
+	// docker-only: dind's preflight requires Docker as the outer runtime, and
+	// podman-first detection would otherwise win were both fakes present.
+	callLog := writeDockerOnlyRuntime(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+	env = append(env, `FAKE_INFO_RUNTIMES={"sysbox-runc":{},"runc":{}}`)
+
+	cmd := exec.Command(binaryPath, "open")
+	cmd.Env = env
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("open (dind via repo config): %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	createLine, ok := findLineWithPrefix(lines, "run --name ")
+	if !ok {
+		t.Fatalf("expected a container run, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(createLine, "--runtime=sysbox-runc") {
+		t.Errorf("expected --runtime=sysbox-runc in the run argv, got: %s", createLine)
+	}
+	wantVolume := "claude-cenci-dind-" + slug + ":/var/lib/docker"
+	if !strings.Contains(createLine, wantVolume) {
+		t.Errorf("expected the dind storage volume mount %q, got: %s", wantVolume, createLine)
+	}
+	if !strings.Contains(createLine, "-e CENCI_SANDBOX_DIND=1") {
+		t.Errorf("expected -e CENCI_SANDBOX_DIND=1 in the run argv, got: %s", createLine)
+	}
+}
+
+func TestOpenNoDind_OverridesDindConfigRepo(t *testing.T) {
+	repoRoot, _ := dindRepoEnv(t, true)
+
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "--no-dind")
+	cmd.Env = env
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("open --no-dind: %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	createLine, ok := findLineWithPrefix(lines, "run --name ")
+	if !ok {
+		t.Fatalf("expected a container run, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	for _, marker := range []string{"--runtime=sysbox-runc", "-cenci-dind-", "CENCI_SANDBOX_DIND"} {
+		if strings.Contains(createLine, marker) {
+			t.Errorf("expected --no-dind to suppress dind despite the repo config, but found %q in: %s", marker, createLine)
+		}
+	}
+}
+
+// symlinkGitOnlyDir symlinks the real git binary into dir (already holding a
+// scripted single-runtime fake) and returns dir, so a caller can set PATH to
+// dir alone: git resolves, but no host PATH directory can leak a real
+// docker/podman into the runtime lookup a test deliberately made single.
+func symlinkGitOnlyDir(t *testing.T, dir string) string {
+	t.Helper()
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not available")
+	}
+	if err := os.Symlink(gitPath, filepath.Join(dir, "git")); err != nil {
+		t.Fatalf("symlink git into %s: %v", dir, err)
+	}
+	return dir
+}
+
+func TestOpenDind_PodmanOnlyHost_Exits1RequiresDocker(t *testing.T) {
+	repoRoot, _ := dindRepoEnv(t, false)
+
+	fakeDir := t.TempDir()
+	callLog := writePodmanOnlyRuntime(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+	// openTestEnv's PATH appends /usr/bin:/bin so git resolves, but on a host
+	// that also has a real docker installed there, that would leak a real
+	// docker back onto PATH and defeat this test's "docker absent from PATH"
+	// premise. Symlink git into fakeDir and use it alone, so no host
+	// directory can supply a real docker/podman.
+	env = append(env, "PATH="+symlinkGitOnlyDir(t, fakeDir))
+
+	cmd := exec.Command(binaryPath, "open", "--dind")
+	cmd.Env = env
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected the podman-outer-runtime dind preflight failure to exit 1, got %T %v\n%s", err, err, output)
+	}
+	if !strings.Contains(string(output), "requires Docker") {
+		t.Errorf("expected an error naming the Docker-as-outer-runtime requirement, got:\n%s", output)
+	}
+	if lines := callLogLines(t, callLog); anyLineContains(lines, "run --name ") {
+		t.Errorf("expected no container to be created when dind preflight fails, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+func TestOpenDind_SysboxNotRegistered_Exits1WithInstallPointer(t *testing.T) {
+	repoRoot, _ := dindRepoEnv(t, false)
+
+	fakeDir := t.TempDir()
+	callLog := writeDockerOnlyRuntime(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+	env = append(env, `FAKE_INFO_RUNTIMES={"runc":{}}`) // no sysbox-runc registered
+
+	cmd := exec.Command(binaryPath, "open", "--dind")
+	cmd.Env = env
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected the sysbox-not-registered preflight failure to exit 1, got %T %v\n%s", err, err, output)
+	}
+	lower := strings.ToLower(string(output))
+	for _, want := range []string{"sysbox", "arch", "ubuntu", "nestybox"} {
+		if !strings.Contains(lower, want) {
+			t.Errorf("expected the sysbox install-pointer message to mention %q, got:\n%s", want, output)
+		}
+	}
+	if lines := callLogLines(t, callLog); anyLineContains(lines, "run --name ") {
+		t.Errorf("expected no container to be created when dind preflight fails, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+func TestOpenDindAndNoDind_Together_Exits2(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "--dind", "--no-dind")
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("expected --dind --no-dind together to exit 2, got %T %v\n%s", err, err, output)
+	}
+	// Distinguishes the intended usage-conflict error from --dind simply not
+	// existing yet as a recognized flag (which also exits 2, coincidentally).
+	if strings.Contains(string(output), "flag provided but not defined") {
+		t.Errorf("expected --dind and --no-dind to be recognized flags rejected for conflicting together, not unrecognized flags; got:\n%s", output)
+	}
+	if lines := callLogLines(t, callLog); len(lines) > 0 {
+		t.Errorf("expected no runtime calls for the --dind/--no-dind usage error, got:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+func TestOpenDind_LegacyScope_Exits2(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "--dind")
+	cmd.Env = env
+	cmd.Dir = t.TempDir() // non-git cwd -> legacy "default" scope
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("expected --dind in legacy scope to be a usage error (exit 2), got %T %v\n%s", err, err, output)
+	}
+	// Distinguishes the intended scope-conflict usage error from --dind
+	// simply not existing yet as a recognized flag (which also exits 2,
+	// coincidentally).
+	if strings.Contains(string(output), "flag provided but not defined") {
+		t.Errorf("expected --dind to be a recognized flag rejected for legacy scope, not an unrecognized flag; got:\n%s", output)
+	}
+	if lines := callLogLines(t, callLog); len(lines) > 0 {
+		t.Errorf("expected no runtime calls for the dind/legacy-scope usage error, got:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// TestOpenDockerFlag_IsRemoved_Exits2NoRunCall regression-tests the removal
+// of the --docker DooD flag (replaced by --dind): it must now be rejected as
+// an unrecognized flag, and critically must never reach container creation.
+func TestOpenDockerFlag_IsRemoved_Exits2NoRunCall(t *testing.T) {
 	fakeDir := t.TempDir()
 	callLog := writeScriptedRuntimes(t, fakeDir)
 	assets := writeAssetFixture(t)
@@ -1672,73 +1979,13 @@ func TestOpenDocker_MountsRuntimeSocketOrWarns(t *testing.T) {
 	cmd.Env = env
 	cmd.Dir = t.TempDir()
 	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("open --docker: %v\n%s", err, output)
-	}
 
-	lines := callLogLines(t, callLog)
-	runLine, _ := findLineWithPrefix(lines, "run --name ")
-	if info, statErr := os.Stat("/var/run/docker.sock"); statErr == nil && info.Mode()&os.ModeSocket != 0 {
-		// Host has a real docker socket: it takes precedence and gets mounted.
-		if !strings.Contains(runLine, "-v /var/run/docker.sock:/var/run/docker.sock") {
-			t.Errorf("expected the host docker socket mount, got:\n%s", runLine)
-		}
-		if !strings.Contains(string(output), "root-equivalent") {
-			t.Errorf("expected the docker-socket-mounted warning, got:\n%s", output)
-		}
-	} else {
-		// No discoverable socket (the private XDG_RUNTIME_DIR has no
-		// podman.sock either): a warning, and no socket mount.
-		if !strings.Contains(string(output), "no container runtime socket found") {
-			t.Errorf("expected the no-socket warning, got:\n%s", output)
-		}
-		if strings.Contains(runLine, ":/var/run/docker.sock") {
-			t.Errorf("expected no socket mount, got:\n%s", runLine)
-		}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("expected the removed --docker flag to exit 2, got %T %v\n%s", err, err, output)
 	}
-}
-
-// TestOpenDocker_SocketMountedPrintsWarning pins the mounted-socket warning
-// deterministically (independent of whether the test host happens to have a
-// real /var/run/docker.sock): it fabricates a podman.sock under a private
-// XDG_RUNTIME_DIR so the runtime-socket lookup always finds one to mount.
-func TestOpenDocker_SocketMountedPrintsWarning(t *testing.T) {
-	if info, statErr := os.Stat("/var/run/docker.sock"); statErr == nil && info.Mode()&os.ModeSocket != 0 {
-		t.Skip("host has a real docker socket; TestOpenDocker_MountsRuntimeSocketOrWarns already covers the mounted-warning branch")
-	}
-
-	fakeDir := t.TempDir()
-	callLog := writeScriptedRuntimes(t, fakeDir)
-	assets := writeAssetFixture(t)
-	env, _, socketDir := openTestEnv(t, fakeDir, assets)
-
-	xdg := filepath.Dir(socketDir)
-	podmanDir := filepath.Join(xdg, "podman")
-	if err := os.Mkdir(podmanDir, 0o700); err != nil {
-		t.Fatalf("mkdir podman dir: %v", err)
-	}
-	podmanSock := filepath.Join(podmanDir, "podman.sock")
-	l, err := net.Listen("unix", podmanSock)
-	if err != nil {
-		t.Fatalf("listen podman socket: %v", err)
-	}
-	t.Cleanup(func() { _ = l.Close() })
-
-	cmd := exec.Command(binaryPath, "open", "--docker")
-	cmd.Env = env
-	cmd.Dir = t.TempDir()
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("open --docker: %v\n%s", err, output)
-	}
-
-	lines := callLogLines(t, callLog)
-	runLine, _ := findLineWithPrefix(lines, "run --name ")
-	if !strings.Contains(runLine, "-v "+podmanSock+":/var/run/docker.sock") {
-		t.Errorf("expected the podman socket mount, got:\n%s", runLine)
-	}
-	if !strings.Contains(string(output), "root-equivalent") {
-		t.Errorf("expected the docker-socket-mounted warning, got:\n%s", output)
+	if lines := callLogLines(t, callLog); anyLineContains(lines, "run --name ") {
+		t.Errorf("expected no 'run' subcommand for the removed --docker flag, got calls:\n%s", strings.Join(lines, "\n"))
 	}
 }
 

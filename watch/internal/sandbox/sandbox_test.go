@@ -257,3 +257,87 @@ func TestContainerRuntime_ErrorsWhenNeitherFound(t *testing.T) {
 		t.Error("expected an error when neither podman nor docker is on PATH")
 	}
 }
+
+// TestContainerRuntimePreferDocker_PrefersDockerOverPodman pins the dind
+// mode's runtime resolution (#585): unlike the default ContainerRuntime
+// (podman-first), dind must run under Docker as the outer runtime, so
+// ContainerRuntimePreferDocker resolves docker first when both are present.
+func TestContainerRuntimePreferDocker_PrefersDockerOverPodman(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fakes only")
+	}
+	dir := t.TempDir()
+	writeFakeBinary(t, dir, "podman", "exit 0")
+	writeFakeBinary(t, dir, "docker", "exit 0")
+	t.Setenv("PATH", dir)
+
+	got, err := ContainerRuntimePreferDocker()
+	if err != nil {
+		t.Fatalf("ContainerRuntimePreferDocker: %v", err)
+	}
+	if got != "docker" {
+		t.Errorf("ContainerRuntimePreferDocker() = %q, want docker (preferred when both are present)", got)
+	}
+}
+
+func TestContainerRuntimePreferDocker_FallsBackToPodmanWhenDockerMissing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fakes only")
+	}
+	dir := t.TempDir()
+	writeFakeBinary(t, dir, "podman", "exit 0")
+	t.Setenv("PATH", dir)
+
+	got, err := ContainerRuntimePreferDocker()
+	if err != nil {
+		t.Fatalf("ContainerRuntimePreferDocker: %v", err)
+	}
+	if got != "podman" {
+		t.Errorf("ContainerRuntimePreferDocker() = %q, want podman", got)
+	}
+}
+
+func TestContainerRuntimePreferDocker_ErrorsWhenNeitherFound(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PATH", dir)
+
+	if _, err := ContainerRuntimePreferDocker(); err == nil {
+		t.Error("expected an error when neither docker nor podman is on PATH")
+	}
+}
+
+// TestIsDindVolumeName_RecognizesPerAgentDindVolumes mirrors
+// TestSupportedAgents_OwnedResourcesRecognized for the new dind storage
+// volume (#585): "<agent>-cenci-dind-<slug>", optionally suffixed
+// "-<name>" the same way Scope.VolumeName's --name suffix handling works.
+func TestIsDindVolumeName_RecognizesPerAgentDindVolumes(t *testing.T) {
+	for _, agent := range SupportedAgents {
+		t.Run(agent, func(t *testing.T) {
+			plain := agent + "-cenci-dind-myrepo"
+			if !IsDindVolumeName(plain) {
+				t.Errorf("IsDindVolumeName(%q) = false, want true", plain)
+			}
+			named := agent + "-cenci-dind-myrepo-instance"
+			if !IsDindVolumeName(named) {
+				t.Errorf("IsDindVolumeName(%q) = false, want true (--name suffix)", named)
+			}
+		})
+	}
+}
+
+// TestIsDindVolumeName_RejectsForeignLookAlikes mirrors the home/agent-CLI
+// volume matchers' negative case for the dind storage volume matcher.
+func TestIsDindVolumeName_RejectsForeignLookAlikes(t *testing.T) {
+	cases := []string{
+		"opencode-notcenci-dind-x", // wrong middle segment, not "-cenci-dind-"
+		"opencode-elsewhere",       // no "-dind-" segment at all
+		"unrelated-dind-volume",
+	}
+	for _, name := range cases {
+		t.Run(name, func(t *testing.T) {
+			if IsDindVolumeName(name) {
+				t.Errorf("IsDindVolumeName(%q) = true, want false (foreign look-alike)", name)
+			}
+		})
+	}
+}

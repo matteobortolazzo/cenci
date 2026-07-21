@@ -28,6 +28,10 @@ type Scope struct {
 	WorkspaceScope string
 	// RepoRoot is the git toplevel in repo mode, empty in legacy mode.
 	RepoRoot string
+	// DindVolumeName is the per-repo dind storage volume name
+	// (<agent>-cenci-dind-<slug>), populated in repo mode only; empty in
+	// legacy mode, since dind is only ever available in repo scope (#585).
+	DindVolumeName string
 }
 
 // AgentCLIVolumeName is the host-global, per-agent CLI volume. It is
@@ -132,6 +136,7 @@ func ComputeScope(agent, instanceName, cwd, home string) Scope {
 			Workdir:           ComputeWorkdir(repoRoot, cwd),
 			WorkspaceScope:    "repo",
 			RepoRoot:          repoRoot,
+			DindVolumeName:    dindVolumeNameForContainer(containerName),
 		}
 	}
 
@@ -169,6 +174,19 @@ func volumeNameForContainer(containerName string) string {
 		return ""
 	}
 	return containerName[:idx] + cenciMarker + "home-" + containerName[idx+len(cenciMarker):]
+}
+
+// dindVolumeNameForContainer mirrors volumeNameForContainer for the dind
+// storage volume: it inserts "dind-" right after the shared cenciMarker
+// instead of "home-" (e.g. "claude-cenci-myrepo" ->
+// "claude-cenci-dind-myrepo"). Returns "" when containerName carries no
+// cenciMarker to split on.
+func dindVolumeNameForContainer(containerName string) string {
+	idx := strings.Index(containerName, cenciMarker)
+	if idx < 0 {
+		return ""
+	}
+	return containerName[:idx] + cenciMarker + "dind-" + containerName[idx+len(cenciMarker):]
 }
 
 // ScopeForContainer derives a Scope directly from an already-known container

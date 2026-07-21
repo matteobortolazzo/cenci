@@ -19,6 +19,8 @@ package sandbox
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os/exec"
@@ -113,6 +115,18 @@ func agentCLIVolumePatternSource() string {
 	return `^cenci-agent-cli-(` + strings.Join(quoteMetaAll(SupportedAgents), "|") + `)$`
 }
 
+// dindVolumePattern matches the per-agent, per-repo dind storage volume
+// names (<agent>-cenci-dind-<slug>, optionally suffixed "-<name>" the same
+// way Scope.VolumeName's --name suffix works), built from SupportedAgents.
+// These volumes hold a nested Docker's own image/container storage, not
+// credentials, so prune classifies them alongside the agent-CLI volumes
+// rather than the credential-bearing home volumes (#585).
+var dindVolumePattern = regexp.MustCompile(dindVolumePatternSource())
+
+func dindVolumePatternSource() string {
+	return `^(` + strings.Join(quoteMetaAll(SupportedAgents), "|") + `)-cenci-dind-`
+}
+
 // quoteMetaAll escapes every agent name with regexp.QuoteMeta before it is
 // spliced into a pattern string, so a future agent name containing a regex
 // metacharacter can't silently broaden a match.
@@ -148,6 +162,14 @@ func IsAgentCLIVolumeName(name string) bool {
 	return agentCLIVolumePattern.MatchString(name)
 }
 
+// IsDindVolumeName reports whether name is a supported agent's per-repo dind
+// storage volume (nested Docker's own image/container storage; no
+// credentials). Exported so internal/sandbox/launcher's prune engine shares
+// the one matcher instead of duplicating it (#585).
+func IsDindVolumeName(name string) bool {
+	return dindVolumePattern.MatchString(name)
+}
+
 // AgentForContainerName derives the agent (claude/codex/opencode) a sandbox container
 // belongs to from its name prefix, reusing sandboxNamePattern (the same
 // source of truth IsSandboxContainerName matches against) rather than
@@ -164,13 +186,44 @@ func AgentForContainerName(name string) (agent string, ok bool) {
 // ContainerRuntime resolves the preferred container runtime: podman if
 // present on PATH, else docker. Returns an error if neither is found.
 func ContainerRuntime() (string, error) {
-	if _, err := exec.LookPath("podman"); err == nil {
-		return "podman", nil
+	return resolveRuntime("podman", "docker")
+}
+
+// ContainerRuntimePreferDocker resolves the preferred container runtime for
+// dind mode: docker if present on PATH, else podman. Returns an error if
+// neither is found. Unlike ContainerRuntime, dind requires Docker as the
+// outer runtime (the sysbox-runc OCI runtime is only registered with Docker),
+// so this prefers docker over podman (#585).
+func ContainerRuntimePreferDocker() (string, error) {
+	return resolveRuntime("docker", "podman")
+}
+
+// resolveRuntime returns the first of order found on PATH, or an error
+// naming every candidate it tried if none is found.
+func resolveRuntime(order ...string) (string, error) {
+	for _, name := range order {
+		if _, err := exec.LookPath(name); err == nil {
+			return name, nil
+		}
 	}
-	if _, err := exec.LookPath("docker"); err == nil {
-		return "docker", nil
+	return "", fmt.Errorf("none of %s found on PATH", strings.Join(order, ", "))
+}
+
+// SysboxRegistered reports whether the sysbox-runc OCI runtime is registered
+// with runtime (via `<runtime> info --format '{{json .Runtimes}}'`), the
+// dind preflight's check that the host has sysbox installed and wired up
+// before a dind launch is attempted (#585).
+func SysboxRegistered(runtime string) (bool, error) {
+	out, err := exec.Command(runtime, "info", "--format", "{{json .Runtimes}}").Output()
+	if err != nil {
+		return false, fmt.Errorf("%s info: %w", runtime, err)
 	}
-	return "", fmt.Errorf("neither podman nor docker found on PATH")
+	var runtimes map[string]json.RawMessage
+	if err := json.Unmarshal(bytes.TrimSpace(out), &runtimes); err != nil {
+		return false, fmt.Errorf("%s info: unparsable runtimes output: %w", runtime, err)
+	}
+	_, ok := runtimes["sysbox-runc"]
+	return ok, nil
 }
 
 // Container is one row of `sandbox ls` output.

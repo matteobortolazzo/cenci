@@ -76,7 +76,7 @@ func TestAssembleRunArgs_NoCreationTimeTmuxPane(t *testing.T) {
 		WorkspaceScope:    "repo",
 	}
 
-	args, err := e.assembleRunArgs("claude", "/usr/local/bin/cenci", "/run/user/1000/cenci", true, scope, Options{Agent: "claude"}, home)
+	args, err := e.assembleRunArgs("claude", "/usr/local/bin/cenci", "/run/user/1000/cenci", true, scope, Options{Agent: "claude"}, home, false)
 	if err != nil {
 		t.Fatalf("assembleRunArgs: %v", err)
 	}
