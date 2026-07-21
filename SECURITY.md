@@ -31,7 +31,9 @@ container, but the container is what stands between it and your host. See
   agent still executes with full container privileges. The container boundary limits
   *blast radius to the container*, not what happens within it.
 - **Supply-chain risk in what you mount or install** — the sandbox doesn't vet
-  dependencies, MCP servers, or plugins you add.
+  dependencies, MCP servers, or plugins you add. `watch` release tarballs themselves
+  carry a SLSA build provenance attestation you can verify — see
+  [watch/README.md#verifying-release-provenance](./watch/README.md#verifying-release-provenance).
 - **The two opt-in flags below**, which deliberately widen the boundary.
 
 ### Opt-in weakenings
