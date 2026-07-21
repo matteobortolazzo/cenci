@@ -630,12 +630,13 @@ Behavior:
   unexpected argument) prints a one-line hint to stderr and exits `2` —
   no JSON is printed for these.
 
-### Mechanics verbs (`label`, `worktree`, `worktree-cleanup`, `artifact`)
+### Mechanics verbs (`label`, `worktree`, `worktree-cleanup`, `artifact`, `plan-check`)
 
 Alongside the five stage transitions, `cenci pipeline` also exposes the
 deterministic side-effect mechanics that used to live in flow's skill prose:
-label lifecycle, worktree create/cleanup, and artifact tracking. Each verb
-renders the same JSON contract as the stage commands.
+label lifecycle, worktree create/cleanup, artifact tracking, and read-only
+plan-file discovery/validation/freshness. Each verb renders the same JSON
+contract as the stage commands.
 
 ```bash
 cenci pipeline label 42 --transition working                     # verifies/claims exclusive gh assignee ownership, applies "Working"
@@ -645,6 +646,8 @@ cenci pipeline worktree 42 --slug add-thing                       # git worktree
 cenci pipeline worktree-cleanup 42 --slug add-thing               # removes both the worktree dir and the branch (creation-failure rollback only)
 cenci pipeline artifact 42 --plan .plans/42-add-thing.md --branch feature/42-add-thing --session runId=abc123
 cenci pipeline artifact 42 --get                                  # read-only fetch of the current artifacts
+cenci pipeline plan-check 42 [--replan-requested] [--repo-slug OWNER/REPO]
+                                                                   # discovers/validates .plans/42-*.md and classifies it
 ```
 
 Behavior:
@@ -662,9 +665,31 @@ Behavior:
   `PRNumber`, and `--session KEY=VALUE` metadata (repeatable; merges into the
   persisted map without clobbering keys from earlier calls) on the pipeline
   state file.
-- `--repo-slug OWNER/REPO` (label only) and `--slug SLUG` (worktree/
-  worktree-cleanup, required) are additional flags on top of the stage
-  commands' `--state-dir`/`--repo` test hooks.
+- `plan-check` globs `.plans/<id>-*.md`, validates the single match's front
+  matter/required sections/slug, and (unless `--replan-requested`
+  short-circuits first) computes a deterministic freshness verdict from git
+  commits-behind (scoped to the plan's `stalenessPaths`) and the ticket's
+  `gh issue view` state/`updatedAt`. It never gates on or mutates the
+  persisted pipeline stage — read-only, like `artifact --get`. Its JSON
+  output adds two fields beyond the shared contract: `decision` (one of
+  `resume` | `stale` | `replan` | `none` | `multiple`) and `plan` (the
+  validated front-matter metadata, present on every decision except `none`
+  and `multiple`).
+  - **Exit-code framing deliberately deviates from the other mechanics
+    verbs' blanket "errors[] non-empty → exit 1"**: `none` (no plan file
+    yet — the everyday first-run outcome) and `multiple` (ambiguous — ask
+    the human which file) both carry a populated `errors[]` for
+    observability but exit `0`, since both are normal continuation
+    branches, not failures. Only an empty/unrecognized `decision` — the
+    plan file exists but is malformed, or its freshness genuinely could
+    not be determined (an invalid/unreachable `planCommitSha`, a git
+    failure, or a `gh issue view` failure) — is a hard-stop domain error
+    and exits `1`. Usage errors (missing/non-numeric `<id>`, unrecognized
+    flag, trailing positional) still exit `2` with a one-line stderr hint,
+    same as every other verb.
+- `--repo-slug OWNER/REPO` (`label` and `plan-check`) and `--slug SLUG`
+  (worktree/worktree-cleanup, required) are additional flags on top of the
+  stage commands' `--state-dir`/`--repo` test hooks.
 
 ## Sandbox management and session launching (`cenci sandbox`, `cenci open`)
 

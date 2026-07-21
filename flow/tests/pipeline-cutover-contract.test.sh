@@ -227,5 +227,82 @@ if CONTENT="$(read_doc "${FILE}")"; then
   assert_contains "${CONTENT}" "cenci pipeline artifact" "${FILE} (record branch/PR)"
 fi
 
+# =====================================================================
+# Ticket #560 -- plan-file handling moves into `cenci pipeline plan-check`:
+# discovery (globbing `.plans/<id>-*.md`), front-matter/section/slug
+# validation, and the resume/stale/replan/none/multiple freshness decision
+# all move out of skill prose and into the CLI. Cuts SKILL.md's old
+# "Plan file auto-detection" mode-detection block and phase-1-plan.md's old
+# `planCommitSha` vs. `git rev-parse HEAD` staleness-judgment prose over to
+# rendering `cenci pipeline plan-check`'s returned `decision`.
+#
+# Marker choice mirrors the #558/#559 blocks above: assert_contains pins the
+# literal new CLI invocation text (scoped to the specific section it must
+# appear in, per this file's SKILL.md ## Pipeline precedent, so a match
+# elsewhere in the file cannot vacuously satisfy it); assert_not_contains
+# pins the exact old prose this ticket's diff removed (verified via `git
+# diff --staged` against this ticket's actual before/after while writing
+# this test), never a generic marker.
+# =====================================================================
+
+# extract_plan_verification_section <skill-md-content>
+# Returns SKILL.md's "### Plan Verification" subsection body only (through
+# the next "## "-level heading, "## Context Gathering (Delegated)"), so the
+# assertion below cannot be satisfied by unrelated `cenci pipeline` mentions
+# elsewhere in the file.
+extract_plan_verification_section() {
+  awk '
+    /^### Plan Verification$/ { on=1 }
+    on && /^## / { exit }
+    on { print }
+  ' <<<"$1"
+}
+
+# extract_existing_plan_section <phase-1-plan-md-content>
+# Returns phase-1-plan.md's "## Existing Plan" section body only (through
+# the next "## "-level heading, "## Trivial Fast Path").
+extract_existing_plan_section() {
+  awk '
+    /^## Existing Plan$/ { on=1 }
+    on && /^## / && !/^## Existing Plan$/ { exit }
+    on { print }
+  ' <<<"$1"
+}
+
+# ---------------------------------------------------------------------
+# skills/implement/SKILL.md -- ### Plan Verification must invoke `cenci
+# pipeline plan-check`; the old "Plan file auto-detection" mode-detection
+# block (glob `.plans/<id>-*.md` directly in skill prose) must be gone.
+# ---------------------------------------------------------------------
+FILE="skills/implement/SKILL.md"
+if CONTENT="$(read_doc "${FILE}")"; then
+  PLAN_VERIFICATION_SECTION="$(extract_plan_verification_section "${CONTENT}")"
+  if [[ -z "${PLAN_VERIFICATION_SECTION}" ]]; then
+    fail "${FILE}: could not locate '### Plan Verification' section"
+  else
+    assert_contains "${PLAN_VERIFICATION_SECTION}" "cenci pipeline plan-check" "${FILE} (### Plan Verification section)"
+  fi
+  assert_not_contains "${CONTENT}" 'glob for `.plans/<id>-*.md`' "${FILE} (mode-detection section)"
+fi
+
+# ---------------------------------------------------------------------
+# skills/implement/phases/phase-1-plan.md -- ## Existing Plan must render
+# the `cenci pipeline plan-check` verdict; the old front-matter
+# `planCommitSha` vs. `git rev-parse HEAD` staleness-judgment prose, and the
+# old "sanctioned exception" gh re-fetch carve-out it required, must both be
+# gone -- that judgment call and that re-fetch now live in the CLI.
+# ---------------------------------------------------------------------
+FILE="skills/implement/phases/phase-1-plan.md"
+if CONTENT="$(read_doc "${FILE}")"; then
+  EXISTING_PLAN_SECTION="$(extract_existing_plan_section "${CONTENT}")"
+  if [[ -z "${EXISTING_PLAN_SECTION}" ]]; then
+    fail "${FILE}: could not locate '## Existing Plan' section"
+  else
+    assert_contains "${EXISTING_PLAN_SECTION}" "cenci pipeline plan-check" "${FILE} (## Existing Plan section)"
+  fi
+  assert_not_contains "${CONTENT}" 'planCommitSha` from front matter to `git rev-parse HEAD`' "${FILE} (## Existing Plan section)"
+  assert_not_contains "${CONTENT}" "sanctioned exception to the" "${FILE} (## Existing Plan section)"
+fi
+
 echo "pipeline-cutover-contract.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]

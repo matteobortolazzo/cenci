@@ -31,12 +31,18 @@ type Opts struct {
 // Output is the structured {state, next_actions, artifacts, warnings,
 // errors} contract every stage command emits on stdout. All four arrays are
 // always non-nil (empty when there is nothing to report).
+//
+// Decision and Plan (ticket #560) are omitempty additions carried only by
+// `cenci pipeline plan-check`'s output -- every existing stage/mechanics
+// command leaves them absent, preserving the frozen #558 contract.
 type Output struct {
-	State       string   `json:"state"`
-	NextActions []string `json:"next_actions"`
-	Artifacts   []string `json:"artifacts"`
-	Warnings    []string `json:"warnings"`
-	Errors      []string `json:"errors"`
+	State       string    `json:"state"`
+	NextActions []string  `json:"next_actions"`
+	Artifacts   []string  `json:"artifacts"`
+	Warnings    []string  `json:"warnings"`
+	Errors      []string  `json:"errors"`
+	Decision    string    `json:"decision,omitempty"`
+	Plan        *PlanMeta `json:"plan,omitempty"`
 }
 
 // Run executes one pipeline stage command: it acquires the per-ticket state
