@@ -45,7 +45,7 @@ cenci <verb> [subverb] [args] [flags]
 - Host-side variables the cenci binary reads or sets are prefixed `CENCI_`.
 - Sandbox-launcher variables are prefixed `CENCI_SANDBOX_`
   (e.g. `CENCI_SANDBOX_AGENT`, `CENCI_SANDBOX_REAP_GRACE_SECS`,
-  `CENCI_SANDBOX_RESEED_CREDS`, `CENCI_SANDBOX_ASSETS`).
+  `CENCI_SANDBOX_RESEED_CREDS`, `CENCI_SANDBOX_ASSETS`, `CENCI_SANDBOX_DIND`).
 - The in-container gate is the bare `CENCI_SANDBOX=1` — set on every sandbox
   container; hooks and the daemon use it to detect "I am inside the sandbox"
   and skip host-only behavior.
@@ -59,6 +59,7 @@ cenci <verb> [subverb] [args] [flags]
 |---|---|
 | Container | `${agent}-cenci-<slug>` (e.g. `claude-cenci-my-repo`) |
 | Home volume | `${agent}-cenci-home-<slug>` |
+| Dind storage volume | `${agent}-cenci-dind-<slug>` |
 | Shared agent CLI volume | `cenci-agent-cli-${agent}` |
 | Monolith image | `cenci-sandbox:latest` |
 | Per-repo image | `cenci-sandbox-<slug>:latest` |

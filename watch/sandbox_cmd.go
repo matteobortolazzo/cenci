@@ -249,13 +249,24 @@ func runSandboxReapOrphans(args []string) {
 // runSandboxReseedCreds implements `cenci sandbox reseed-creds`, kept as an
 // alias for `cenci open --reseed-creds` (the flag's honest home — reseeding
 // is a launch modifier: CENCI_SANDBOX_RESEED_CREDS is set on the next
-// container create, so a launch always follows).
+// container create, so a launch always follows). Because this verb reaches
+// Launch (unlike every other newEngine() call site), it must build its engine
+// via NewForLaunch — exactly like open_cmd.go — so Launch's e.Runtime == ""
+// guard can re-resolve the runtime docker-preferred when dind mode is on
+// (#585); the eager, podman-first newEngine() would lock the runtime before
+// Launch ever computes dind, breaking dind-enabled repos on hosts with both
+// docker and podman installed.
 func runSandboxReseedCreds(args []string) {
 	fs := flag.NewFlagSet("sandbox reseed-creds", flag.ExitOnError)
 	_ = fs.Parse(args)
 	rejectExtraArgs("reseed-creds", fs)
 
-	err := newEngine("reseed-creds").Launch(launcher.Options{ReseedCreds: true})
+	eng, err := launcher.NewForLaunch(os.Stdin, os.Stdout, os.Stderr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cenci sandbox reseed-creds: %v\n", err)
+		os.Exit(1)
+	}
+	err = eng.Launch(launcher.Options{ReseedCreds: true})
 	if err == nil {
 		return // unreachable in practice: a successful Launch never returns
 	}

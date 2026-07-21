@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -15,6 +14,7 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/internal/daemon"
 	"github.com/matteobortolazzo/cenci/watch/internal/errcode"
 	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/internal/sandbox"
 )
 
 // Options are the launch parameters `cenci open` collects: which agent and
@@ -25,7 +25,8 @@ type Options struct {
 	Model       string
 	Name        string
 	Shell       bool
-	Docker      bool
+	Dind        bool
+	NoDind      bool
 	HostNetwork bool
 	ReseedCreds bool
 	AgentArgs   []string
@@ -132,6 +133,26 @@ func (e *Engine) Launch(opts Options) error {
 	}
 	scope := ComputeScope(agent, opts.Name, cwd, home)
 
+	dindOn, err := ResolveDind(opts, scope)
+	if err != nil {
+		return err
+	}
+	if e.Runtime == "" {
+		if dindOn {
+			e.Runtime, err = sandbox.ContainerRuntimePreferDocker()
+		} else {
+			e.Runtime, err = sandbox.ContainerRuntime()
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if dindOn {
+		if err := e.dindPreflight(); err != nil {
+			return err
+		}
+	}
+
 	if err := e.EnsureImage(scope); err != nil {
 		return err
 	}
@@ -226,7 +247,7 @@ func (e *Engine) Launch(opts Options) error {
 	// Remove a stopped container of the same name if one exists.
 	_ = exec.Command(e.Runtime, "rm", scope.ContainerName).Run()
 
-	runArgs, err := e.assembleRunArgs(agent, cenciBin, socketDir, cenciAvailable, scope, opts, home)
+	runArgs, err := e.assembleRunArgs(agent, cenciBin, socketDir, cenciAvailable, scope, opts, home, dindOn)
 	if err != nil {
 		return err
 	}
@@ -322,10 +343,10 @@ func isSocket(path string) bool {
 // behaviorally identical since docker/podman treat flag order between
 // distinct -v/-e flags as independent — only the trailing image + command
 // (appended by the caller, Launch, after this returns) must stay last.
-func (e *Engine) assembleRunArgs(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, opts Options, home string) ([]string, error) {
+func (e *Engine) assembleRunArgs(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, opts Options, home string, dindOn bool) ([]string, error) {
 	args := e.baseRunArgs(scope)
-	args = append(args, e.assembleVolumeMounts(agent, cenciBin, socketDir, cenciAvailable, scope, home)...)
-	args = append(args, e.assembleEnv(agent, scope, opts)...)
+	args = append(args, e.assembleVolumeMounts(agent, cenciBin, socketDir, cenciAvailable, scope, home, dindOn)...)
+	args = append(args, e.assembleEnv(agent, scope, opts, dindOn)...)
 
 	credArgs, err := e.validateCredentials(agent, home)
 	if err != nil {
@@ -334,6 +355,14 @@ func (e *Engine) assembleRunArgs(agent, cenciBin, socketDir string, cenciAvailab
 	args = append(args, credArgs...)
 
 	args = append(args, e.assembleOptionalFeatures(opts)...)
+
+	// The sysbox-runc OCI runtime replaces the default runc for this
+	// container only, in dind mode. Appended last (still before the trailing
+	// image + command Launch appends after this returns) so it never shifts
+	// --name off the front of the argv the run-line assertions key off of.
+	if dindOn {
+		args = append(args, "--runtime=sysbox-runc")
+	}
 
 	return args, nil
 }
@@ -361,11 +390,17 @@ func (e *Engine) baseRunArgs(scope Scope) []string {
 // live in the persistent home, so no agent binary is mounted here. Codex
 // credentials are handled separately by validateCredentials, since a missing
 // codex auth source is a hard launch error rather than an optional mount.
-func (e *Engine) assembleVolumeMounts(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, home string) []string {
+func (e *Engine) assembleVolumeMounts(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, home string, dindOn bool) []string {
 	args := []string{
 		"-v", scope.WorkspaceBindHost + ":" + workspaceContainer,
 		"-v", scope.VolumeName + ":/home/dev",
 		"-v", AgentCLIVolumeName(agent) + ":/opt/cenci-agent:ro",
+	}
+
+	// Dind's own isolated Docker storage (nested `docker` inside the sandbox
+	// never touches the host runtime).
+	if dindOn {
+		args = append(args, "-v", scope.DindVolumeName+":/var/lib/docker")
 	}
 
 	// Git config (read-only, if exists).
@@ -414,7 +449,7 @@ func (e *Engine) assembleVolumeMounts(agent, cenciBin, socketDir string, cenciAv
 // TERM (with the xterm-256color fallback), the CENCI_SANDBOX marker/agent
 // name, the HOST_UID/HOST_GID/WORKSPACE_SCOPE entrypoint contract, the
 // opt-in reseed-creds flag, and the COLORTERM/CONTEXT7_API_KEY passthroughs.
-func (e *Engine) assembleEnv(agent string, scope Scope, opts Options) []string {
+func (e *Engine) assembleEnv(agent string, scope Scope, opts Options, dindOn bool) []string {
 	term := os.Getenv("TERM")
 	if term == "" {
 		term = "xterm-256color"
@@ -434,6 +469,10 @@ func (e *Engine) assembleEnv(agent string, scope Scope, opts Options) []string {
 	// died, e.g. all sessions were revoked).
 	if opts.ReseedCreds {
 		args = append(args, "-e", "CENCI_SANDBOX_RESEED_CREDS=1")
+	}
+
+	if dindOn {
+		args = append(args, "-e", "CENCI_SANDBOX_DIND=1")
 	}
 
 	if v := os.Getenv("COLORTERM"); v != "" {
@@ -495,9 +534,7 @@ func (e *Engine) validateCredentials(agent, home string) ([]string, error) {
 
 // assembleOptionalFeatures builds the flags for opt-in isolation-weakening
 // features: --network host (with a warning, since the container is the
-// security boundary) and the docker/podman socket mount for DooD (docker
-// first, falling back to a discoverable podman.sock, warning if neither is
-// found).
+// security boundary).
 func (e *Engine) assembleOptionalFeatures(opts Options) []string {
 	var args []string
 
@@ -505,28 +542,6 @@ func (e *Engine) assembleOptionalFeatures(opts Options) []string {
 	if opts.HostNetwork {
 		_, _ = fmt.Fprintln(e.Stderr, "Warning: --host-network weakens the container's isolation boundary (the container is the security boundary); only use it for manual OAuth callback.")
 		args = append(args, "--network", "host")
-	}
-
-	// Docker socket (opt-in DooD).
-	if opts.Docker {
-		dockerSock := ""
-		if isSocket("/var/run/docker.sock") {
-			dockerSock = "/var/run/docker.sock"
-		} else {
-			runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
-			if runtimeDir == "" {
-				runtimeDir = "/run/user/" + strconv.Itoa(os.Getuid())
-			}
-			if candidate := filepath.Join(runtimeDir, "podman", "podman.sock"); isSocket(candidate) {
-				dockerSock = candidate
-			}
-		}
-		if dockerSock != "" {
-			_, _ = fmt.Fprintln(e.Stderr, "Warning: --docker bind-mounts the host's container runtime socket into the sandbox; a writable runtime socket is root-equivalent to the host, so only use it when you trust the sandbox's workload.")
-			args = append(args, "-v", dockerSock+":/var/run/docker.sock")
-		} else {
-			_, _ = fmt.Fprintln(e.Stderr, "Warning: --docker requested but no container runtime socket found.")
-		}
 	}
 
 	return args

@@ -151,16 +151,19 @@ func (e *Engine) pruneVolumes(reader *bufio.Reader) error {
 		_, _ = fmt.Fprintln(e.Stderr, "Error: failed to list sandbox volumes.")
 		return fmt.Errorf("%s volume ls: %w", e.Runtime, err)
 	}
-	var homes, agents, stale []string
+	var homes, agents, dinds, stale []string
 	for _, name := range splitLines(string(out)) {
 		if sandbox.IsHomeVolumeName(name) {
 			homes = append(homes, name)
 		} else if sandbox.IsAgentCLIVolumeName(name) {
 			agents = append(agents, name)
+		} else if sandbox.IsDindVolumeName(name) {
+			dinds = append(dinds, name)
 		}
 	}
 	stale = append(stale, homes...)
 	stale = append(stale, agents...)
+	stale = append(stale, dinds...)
 	if len(stale) == 0 {
 		_, _ = fmt.Fprintln(e.Stdout, "No sandbox volumes found.")
 		return nil
@@ -173,6 +176,10 @@ func (e *Engine) pruneVolumes(reader *bufio.Reader) error {
 	if len(agents) > 0 {
 		_, _ = fmt.Fprintln(e.Stderr, "Shared agent CLI volumes (global executables; no credentials):")
 		_, _ = fmt.Fprintln(e.Stderr, strings.Join(agents, "\n"))
+	}
+	if len(dinds) > 0 {
+		_, _ = fmt.Fprintln(e.Stderr, "Dind storage volumes (nested Docker image/container storage; no credentials):")
+		_, _ = fmt.Fprintln(e.Stderr, strings.Join(dinds, "\n"))
 	}
 	_, _ = fmt.Fprint(e.Stderr, "Remove these volumes? [y/N] ")
 	// Only a complete line can confirm: bash's `read ... || CONFIRM=""`
