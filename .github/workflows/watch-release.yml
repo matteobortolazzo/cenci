@@ -16,14 +16,13 @@ on:
     tags:
       - 'watch/v*'
 
-permissions:
-  contents: write
-  id-token: write
-  attestations: write
-
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Resolve version and tag
         id: v
@@ -63,6 +62,19 @@ jobs:
         env:
           GORELEASER_CURRENT_TAG: v${{ steps.v.outputs.version }}
 
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign checksums with cosign (keyless)
+        run: |
+          set -euo pipefail
+          if [ ! -f watch/dist/checksums.txt ]; then
+            echo "watch/dist/checksums.txt not found" >&2
+            exit 1
+          fi
+          cosign sign-blob --yes watch/dist/checksums.txt \
+            --output-signature watch/dist/checksums.txt.sig \
+            --output-certificate watch/dist/checksums.txt.pem
+
       - name: Attest build provenance for release tarballs
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
@@ -75,7 +87,12 @@ jobs:
           VERSION: ${{ steps.v.outputs.version }}
         run: |
           set -euo pipefail
-          assets=(watch/dist/cenci_*.tar.gz watch/dist/checksums.txt)
+          assets=(
+            watch/dist/cenci_*.tar.gz
+            watch/dist/checksums.txt
+            watch/dist/checksums.txt.sig
+            watch/dist/checksums.txt.pem
+          )
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "${assets[@]}" --clobber
           else
