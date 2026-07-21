@@ -844,15 +844,17 @@ classifies the result — it never requires a running container, a built
 image, or a container runtime, and never starts the daemon. Unlike
 `diagnose` (above), which inspects an already-running session's actual
 mounts, `audit` answers "what would a launch apply right now," which is also
-what `cenci security explain` (a companion command) builds on.
+what [`cenci security explain`](#explain-the-security-posture-cenci-security-explain)
+builds on.
 
 Nested Docker (`--dind`, or a repo's `sandbox.dind` config) gets its own
 "Nested Docker (sysbox-isolated)" section, separate from boundary
-weakenings — sysbox-isolated dind is a safer replacement for the removed
-`--docker` host-socket mount, not an equivalent risk. Only `--host-network`
-is reported as a **boundary weakening**, and the text report visually marks
-it (`⚠`) instead of burying it in a flat list; the default-safe baseline
-(no weakenings active) is reported explicitly, not just omitted.
+weakenings — it runs under its own sysbox-isolated OCI runtime, never
+touching the host's own container runtime, so it is not an equivalent risk.
+Only `--host-network` is reported as a **boundary weakening**, and the text
+report visually marks it (`⚠`) instead of burying it in a flat list; the
+default-safe baseline (no weakenings active) is reported explicitly, not
+just omitted.
 
 `cenci audit --json` emits the same data with stable field names
 (`agent`, `scope`, `image`, `workspace`, `network`, `dind`, `mounts`,
@@ -864,6 +866,53 @@ and presence/status booleans.
 Like `diagnose`, `audit` is read-only and exits 0 on a successful render;
 only usage errors (e.g. `--dind` with `--no-dind`, or `--dind` outside a
 repo-scoped session) exit 2.
+
+## Explain the security posture (`cenci security explain`)
+
+```bash
+cenci security explain                      # plain-language report for the current repo/session context
+cenci security explain --agent codex        # explain as codex instead of claude
+cenci security explain --dind               # explain as if launched with nested Docker (sysbox-runc) enabled
+cenci security explain --host-network       # explain as if launched with host network mode
+```
+
+`cenci security explain [--agent claude|codex|opencode] [--name NAME]
+[--dind] [--no-dind] [--host-network] [--reseed-creds]` renders the same
+posture `cenci audit` derives as a plain-language "why this is/isn't safe"
+narrative instead of a tabular report: it reuses `audit`'s posture-detection
+logic verbatim, adding no new detection, only prose. The narrative opens
+with the threat-model framing from [SECURITY.md](../SECURITY.md) — the
+container, not the agent's own permissions, is the isolation boundary,
+since the agent runs unattended with no per-command approval — then walks
+through one paragraph per posture element (workspace/home mounts, other
+mounts such as the cenci socket/binary/gitconfig and named volumes, network
+mode, credential sources, and forwarded env var names), a dedicated
+"Nested Docker (sysbox-isolated)" section explaining why dind is not a
+boundary weakening, and a closing boundary-weakenings block that visually
+marks any opt-in weakening (`⚠`) or states the default-safe baseline
+explicitly when none apply.
+
+```
+cenci security explain: agent=claude scope=my-repo
+
+Threat model:
+The container is the security boundary, not the agent's own permissions.
+The agent runs unattended, with no per-command approval prompts, so isolation
+relies entirely on the container standing between the agent and the host — see
+SECURITY.md for the full threat model this narrative paraphrases.
+
+Workspace and home:
+Only the current repo (/home/me/my-repo) is bind-mounted into the container at
+/workspace — not your whole host filesystem. ...
+
+...
+
+Boundary weakenings: none (default-safe baseline)
+```
+
+Like `audit`, `explain` is read-only — it never launches, attaches, or wires
+the daemon — and it never prints a credential or secret *value*, only names,
+paths, and presence/status, the same as `audit`'s text and JSON reports.
 
 ## Support bundle (`cenci support-bundle`)
 
