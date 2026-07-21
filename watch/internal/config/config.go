@@ -4,6 +4,7 @@ import "time"
 
 type Config struct {
 	Verbose         bool
+	LogJSON         bool   // emit structured JSON log lines instead of plain text (--json / CENCI_LOG_JSON)
 	SocketPath      string // broadcast socket for waybar clients
 	EventSocketPath string // event socket for hook notifications
 	SweepInterval   time.Duration
@@ -24,6 +25,7 @@ type Config struct {
 func Default() Config {
 	return Config{
 		Verbose:         false,
+		LogJSON:         false,
 		SweepInterval:   time.Second,
 		SessionTTL:      2 * time.Hour,
 		StyleIdle:       "dim",
