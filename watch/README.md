@@ -793,6 +793,53 @@ resolution failures exit non-zero (2 for usage errors, 1 otherwise).
 Note: recent logs and mount paths in the report may contain sensitive data
 (secrets, credentials, host paths) — review before sharing this output.
 
+## Effective security posture (`cenci audit`)
+
+```bash
+cenci audit                                 # text report for the current repo/session context
+cenci audit --agent codex                   # audit as codex instead of claude
+cenci audit --dind                          # audit as if launched with nested Docker (sysbox-runc) enabled
+cenci audit --host-network                  # audit as if launched with host network mode
+cenci audit --json                          # same report as stable JSON, for scripting/CI
+```
+
+`cenci audit [--agent claude|codex|opencode] [--name NAME] [--dind] [--no-dind]
+[--host-network] [--reseed-creds] [--json]` reports the effective security
+posture the sandbox launcher **would apply** for the current repo/agent/flags:
+mounted host paths and whether each is read-only or read-write, forwarded
+environment variable NAMES only (never values), network mode, credential
+sources staged into the session (`~/.claude/.credentials.json`,
+`~/.codex/auth.json`, `~/.config/gh/hosts.yml`, and opencode's auth file) and
+whether each is present, named persistent volumes, and whether a
+repository-specific image or the shared monolith image is in play.
+
+Posture is *derived*, not inspected: `audit` reuses the same construction
+logic `open`/`Launch` uses to assemble mounts, env, and network flags, and
+classifies the result — it never requires a running container, a built
+image, or a container runtime, and never starts the daemon. Unlike
+`diagnose` (above), which inspects an already-running session's actual
+mounts, `audit` answers "what would a launch apply right now," which is also
+what `cenci security explain` (a companion command) builds on.
+
+Nested Docker (`--dind`, or a repo's `sandbox.dind` config) gets its own
+"Nested Docker (sysbox-isolated)" section, separate from boundary
+weakenings — sysbox-isolated dind is a safer replacement for the removed
+`--docker` host-socket mount, not an equivalent risk. Only `--host-network`
+is reported as a **boundary weakening**, and the text report visually marks
+it (`⚠`) instead of burying it in a flat list; the default-safe baseline
+(no weakenings active) is reported explicitly, not just omitted.
+
+`cenci audit --json` emits the same data with stable field names
+(`agent`, `scope`, `image`, `workspace`, `network`, `dind`, `mounts`,
+`volumes`, `env`, `forwardedEnv`, `credentialSources`, `boundaryWeakenings`,
+`reseedCreds`) suitable for scripting or CI checks. As with the text report,
+no field ever carries a secret or credential *value* — only names, paths,
+and presence/status booleans.
+
+Like `diagnose`, `audit` is read-only and exits 0 on a successful render;
+only usage errors (e.g. `--dind` with `--no-dind`, or `--dind` outside a
+repo-scoped session) exit 2.
+
 ## Support bundle (`cenci support-bundle`)
 
 ```bash

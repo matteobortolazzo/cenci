@@ -74,6 +74,8 @@ Details: docs/migrating-to-cenci.md in the cenci repo.
 		runOpen(os.Args[2:])
 	case "diagnose":
 		runDiagnose(os.Args[2:])
+	case "audit":
+		runAudit(os.Args[2:])
 	case "support-bundle":
 		runSupportBundle(os.Args[2:])
 	case "doctor":
@@ -116,6 +118,7 @@ Commands:
   sandbox                            manage the sandbox container (build|build-base|prune|update-agent|update-plugins|reseed-creds|reap-orphans|ls|stop)
   open [shortcut]                    launch or attach an interactive sandbox session (aliased by the "cn" binary name)
   diagnose <session>                 read-only report on a sandbox session's container/daemon/version health
+  audit [flags]                      read-only report on the effective sandbox security posture the launcher would apply (mounts, env names, network, dind, credential sources, boundary weakenings)
   support-bundle [--output PATH]     collect a sanitized diagnostic archive (versions, env var names, daemon/container health, logs)
   doctor                             check prerequisites and installed stack components, change nothing (delegates to the installed cenci-installer wrapper)
   update                             update installed plugins and restart the daemon (delegates to the installed cenci-installer wrapper)

@@ -195,23 +195,7 @@ func (e *Engine) Launch(opts Options) error {
 	// agent that can use them: OpenCode reads ANTHROPIC_API_KEY/
 	// OPENAI_API_KEY natively, Codex only OPENAI_API_KEY, and Claude neither
 	// (#490).
-	execEnvArgs := []string{"-u", "dev",
-		"-e", "TMUX_PANE=" + os.Getenv("TMUX_PANE"),
-		"-e", "CENCI_SANDBOX=1",
-		"-e", "CENCI_SANDBOX_AGENT=" + agent}
-	if v := os.Getenv("CONTEXT7_API_KEY"); v != "" {
-		execEnvArgs = append(execEnvArgs, "-e", "CONTEXT7_API_KEY="+v)
-	}
-	if agent == "opencode" {
-		if v := os.Getenv("ANTHROPIC_API_KEY"); v != "" {
-			execEnvArgs = append(execEnvArgs, "-e", "ANTHROPIC_API_KEY="+v)
-		}
-	}
-	if agent == "codex" || agent == "opencode" {
-		if v := os.Getenv("OPENAI_API_KEY"); v != "" {
-			execEnvArgs = append(execEnvArgs, "-e", "OPENAI_API_KEY="+v)
-		}
-	}
+	execEnvArgs := assembleExecEnv(agent)
 
 	// Attach to an already-running container: its mounts are fixed for its
 	// whole lifetime, so only warn about missing cenci wiring (#195) and wait
@@ -270,6 +254,37 @@ func (e *Engine) Launch(opts Options) error {
 		return err
 	}
 	return e.runAgent(scope.ContainerName, agent, agentCmdArgs, execEnvArgs, opts)
+}
+
+// assembleExecEnv builds the per-exec (not create-time) "-e"/"-u" argument
+// list every agent exec session receives: the attach user, pane identity,
+// the CENCI_SANDBOX marker/agent name, and provider API key passthroughs
+// forwarded per-exec only (never baked into the container-lifetime
+// create-time env/PID-1 environ), scoped to the agent that can use them:
+// OpenCode reads ANTHROPIC_API_KEY/OPENAI_API_KEY natively, Codex only
+// OPENAI_API_KEY, and Claude neither (#490). Pure aside from reading host
+// env vars — it depends only on agent, so both Launch and Audit's posture
+// classification (audit.go) can call it and stay byte-identical to each
+// other rather than re-deriving this list independently.
+func assembleExecEnv(agent string) []string {
+	execEnvArgs := []string{"-u", "dev",
+		"-e", "TMUX_PANE=" + os.Getenv("TMUX_PANE"),
+		"-e", "CENCI_SANDBOX=1",
+		"-e", "CENCI_SANDBOX_AGENT=" + agent}
+	if v := os.Getenv("CONTEXT7_API_KEY"); v != "" {
+		execEnvArgs = append(execEnvArgs, "-e", "CONTEXT7_API_KEY="+v)
+	}
+	if agent == "opencode" {
+		if v := os.Getenv("ANTHROPIC_API_KEY"); v != "" {
+			execEnvArgs = append(execEnvArgs, "-e", "ANTHROPIC_API_KEY="+v)
+		}
+	}
+	if agent == "codex" || agent == "opencode" {
+		if v := os.Getenv("OPENAI_API_KEY"); v != "" {
+			execEnvArgs = append(execEnvArgs, "-e", "OPENAI_API_KEY="+v)
+		}
+	}
+	return execEnvArgs
 }
 
 // resolveCenciWiring resolves the cenci binary to bind-mount and the host
