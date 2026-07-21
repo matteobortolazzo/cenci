@@ -55,6 +55,16 @@ func NewForLaunch(stdin io.Reader, stdout, stderr io.Writer) (*Engine, error) {
 	return newEngineBase(stdin, stdout, stderr)
 }
 
+// NewForAudit returns a minimal Engine suitable for Audit: only stdio, with
+// Stderr always set to io.Discard so assembleOptionalFeatures' --host-network
+// warning is never printed while Audit is only classifying its emitted
+// tokens into a report. Unlike New/NewForLaunch, it performs no asset-dir/
+// base-tag/container-runtime resolution — Audit is entirely read-only and
+// never shells out to the container runtime or needs the sandbox asset dir.
+func NewForAudit(stdin io.Reader, stdout io.Writer) *Engine {
+	return &Engine{Stdin: stdin, Stdout: stdout, Stderr: io.Discard}
+}
+
 // newEngineBase resolves the sandbox asset directory and the base tag,
 // returning an Engine with everything except Runtime populated. Shared by
 // New (which resolves Runtime eagerly) and NewForLaunch (which leaves it for
