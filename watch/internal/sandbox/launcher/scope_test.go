@@ -175,3 +175,41 @@ func TestComputeScope_RepoMode(t *testing.T) {
 		t.Errorf("repo image scope = %q/%v, want cenci-sandbox-my-repo:latest/true", withImage.Image, withImage.UsingRepoImage)
 	}
 }
+
+// TestScopeForContainer covers the support-bundle path (ticket #573): unlike
+// ComputeScope, which derives scope from the current cwd/repo,
+// ScopeForContainer derives it directly from an already-known container name
+// (as listed by `cenci sandbox ls` / ListContainers) — support-bundle never
+// resolves a repo or workspace for the containers it reports on, so
+// Workspace/RepoRoot stay zero.
+func TestScopeForContainer(t *testing.T) {
+	scope := ScopeForContainer("claude-cenci-myrepo", "cenci-sandbox:latest")
+	if scope.ContainerName != "claude-cenci-myrepo" {
+		t.Errorf("ContainerName = %q, want claude-cenci-myrepo", scope.ContainerName)
+	}
+	if scope.VolumeName != "claude-cenci-home-myrepo" {
+		t.Errorf("VolumeName = %q, want claude-cenci-home-myrepo", scope.VolumeName)
+	}
+	if scope.Image != "cenci-sandbox:latest" {
+		t.Errorf("Image = %q, want cenci-sandbox:latest", scope.Image)
+	}
+
+	multiDash := ScopeForContainer("codex-cenci-x-inst", "cenci-sandbox-x:latest")
+	if multiDash.VolumeName != "codex-cenci-home-x-inst" {
+		t.Errorf("VolumeName = %q, want codex-cenci-home-x-inst", multiDash.VolumeName)
+	}
+
+	// A container name without a "-cenci-" separator can't be re-derived into
+	// a home-volume name (there's no reliable split point), so VolumeName
+	// stays empty rather than guessing.
+	noMarker := ScopeForContainer("some-other-container", "cenci-sandbox:latest")
+	if noMarker.VolumeName != "" {
+		t.Errorf("VolumeName for a non-cenci container name = %q, want empty", noMarker.VolumeName)
+	}
+
+	// Workspace/repo fields are irrelevant for a support-bundle collection
+	// pass over an already-known container and must stay zero.
+	if scope.WorkspaceBindHost != "" || scope.RepoRoot != "" || scope.Workdir != "" || scope.WorkspaceScope != "" {
+		t.Errorf("expected zero workspace/repo fields, got %+v", scope)
+	}
+}

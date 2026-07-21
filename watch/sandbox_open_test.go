@@ -98,6 +98,9 @@ func joinArgv(argv []string) string {
 //	FAKE_BUILD_EXIT      — `build` exit code (default 0)
 //	FAKE_IMAGES          — `images ...` stdout
 //	FAKE_PS              — `ps ...` stdout
+//	FAKE_PS_EXIT         — `ps ...` exit code (default 0); set nonzero to
+//	                        simulate a container-listing failure (e.g.
+//	                        support-bundle's ListContainers call)
 //	FAKE_VOLUMES         — `volume ls` stdout
 //	FAKE_INSPECT_LABEL   — container `inspect` stdout for label lookups
 //	FAKE_INSPECT_MOUNTS  — container `inspect` stdout for mount lookups
@@ -144,7 +147,7 @@ func writeScriptedRuntime(t *testing.T, dir, name, callLog string) {
 		"image) if [ \"$2\" = inspect ]; then printf '%s|%s\\n' \"${FAKE_IMAGE_AGENT_LIFECYCLE:-shared-v2}\" \"${FAKE_IMAGE_BASE_VERSION:-}\"; exit \"${FAKE_IMAGE_INSPECT_EXIT:-0}\"; fi ;;\n" +
 		"build) exit \"${FAKE_BUILD_EXIT:-0}\" ;;\n" +
 		"images) if [ -n \"${FAKE_IMAGES+x}\" ]; then printf '%s' \"${FAKE_IMAGES}\"; else for last do :; done; printf '%s\\n' \"${last}\"; fi; exit \"${FAKE_INSPECT_EXIT:-0}\" ;;\n" +
-		"ps) printf '%s' \"${FAKE_PS:-}\" ;;\n" +
+		"ps) printf '%s' \"${FAKE_PS:-}\"; exit \"${FAKE_PS_EXIT:-0}\" ;;\n" +
 		"volume) if [ \"$2\" = ls ]; then printf '%s' \"${FAKE_VOLUMES:-}\"; exit \"${FAKE_VOLUME_LS_EXIT:-0}\"; fi ;;\n" +
 		"rm) exit 0 ;;\n" +
 		"run) case \"$*\" in\n" +
