@@ -18,6 +18,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -60,6 +62,11 @@ jobs:
           workdir: watch
         env:
           GORELEASER_CURRENT_TAG: v${{ steps.v.outputs.version }}
+
+      - name: Attest build provenance for release tarballs
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: 'watch/dist/cenci_*.tar.gz'
 
       - name: Publish release to the watch/v* tag
         env:

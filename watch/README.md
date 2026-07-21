@@ -944,6 +944,39 @@ cd cenci/watch
 make build
 ```
 
+### Verifying release provenance
+
+Every `watch/vX.Y.Z` release publishes a [SLSA build provenance
+attestation](https://slsa.dev/spec/v1.0/provenance) covering all release
+tarballs, generated in CI by `actions/attest-build-provenance` from
+`.github/workflows/watch-release.yml`. This lets you confirm a downloaded
+tarball was actually built by this repo's CI from the tagged commit, not
+tampered with or substituted post-build. It complements — and is independent
+of — the installer's existing `checksums.txt` verification, which only proves
+the file matches what CI uploaded, not who built it.
+
+Verify a downloaded tarball with the [GitHub CLI](https://cli.github.com):
+
+```bash
+gh attestation verify cenci_<ver>_<os>_<arch>.tar.gz --owner matteobortolazzo
+```
+
+For example, for the `1.6.0` Linux amd64 tarball:
+
+```bash
+gh attestation verify cenci_1.6.0_linux_amd64.tar.gz --owner matteobortolazzo
+```
+
+For a tighter guarantee that binds verification to this exact repo (rather
+than any repo owned by `matteobortolazzo`), pass `--repo` instead:
+
+```bash
+gh attestation verify cenci_1.6.0_linux_amd64.tar.gz --repo matteobortolazzo/cenci
+```
+
+A successful verification reports the workflow run and commit that produced
+the artifact.
+
 ### Run against a local plugin directory
 
 `make plugin-bin` builds the current source into `plugin/bin/cenci` and stamps

@@ -150,3 +150,26 @@ After this fix merges to `main`:
 
 Only consider #193 complete once this verification step has passed on a real merge for
 at least one plugin.
+
+## 7. Mandatory post-merge verification: build provenance (#593)
+
+**Not optional.** #593 added an `actions/attest-build-provenance` step to
+`watch-release.yml` (gated by the new `id-token: write` / `attestations: write`
+permissions), publishing a SLSA build provenance attestation covering all release
+tarballs. This can only be proven end-to-end on a real release — the workflow needs
+a genuine OIDC token minted on a tag/dispatch run, which isn't available inside a PR.
+
+After the next `watch` release lands:
+
+1. Download one of the release tarballs, e.g.
+   `gh release download watch/v<ver> -p 'cenci_<ver>_linux_amd64.tar.gz'`.
+2. Run `gh attestation verify cenci_<ver>_linux_amd64.tar.gz --owner matteobortolazzo`
+   (or `--repo matteobortolazzo/cenci` for a tighter, repo-scoped check).
+3. Confirm the command reports a verified provenance attestation tying the tarball to
+   the `watch-release.yml` run and commit that built it.
+4. If verification fails, check that the `Attest build provenance for release
+   tarballs` step actually ran and succeeded in that release's workflow run, and that
+   the workflow's `permissions:` block still grants `id-token: write` and
+   `attestations: write`.
+
+Only consider #593 complete once this verification step has passed on a real release.
