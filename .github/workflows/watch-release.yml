@@ -22,6 +22,7 @@ jobs:
     permissions:
       contents: write
       id-token: write
+      attestations: write
     steps:
       - name: Resolve version and tag
         id: v
@@ -73,6 +74,11 @@ jobs:
           cosign sign-blob --yes watch/dist/checksums.txt \
             --output-signature watch/dist/checksums.txt.sig \
             --output-certificate watch/dist/checksums.txt.pem
+
+      - name: Attest build provenance for release tarballs
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: 'watch/dist/cenci_*.tar.gz'
 
       - name: Publish release to the watch/v* tag
         env:
