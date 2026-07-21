@@ -215,6 +215,9 @@ the other layers, checks prerequisites, and walks you through the setup:
 curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
 ```
 
+Resolves to the latest release tag by default; set `CENCI_REF=main` (or pass
+`--ref main`) for bleeding-edge main instead.
+
 ### Advanced / development: standalone installation
 
 ```bash

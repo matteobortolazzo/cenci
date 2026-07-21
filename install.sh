@@ -20,11 +20,19 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
 #
+#   The command above resolves to the latest release tag by default (not
+#   live main) — piped runs with CENCI_REF unset re-exec themselves from the
+#   newest `<layer>/vX.Y.Z` release tag's install.sh. Set CENCI_REF=main (or
+#   pass --ref main) to opt into bleeding-edge main instead.
+#
 # Flags:
 #   --yes                                 accept defaults, never prompt
 #   --build / --no-build                  force / skip the sandbox image build
 #   --lazyboards / --no-lazyboards        force / skip lazyboards install
 #                                          (uninstall mode: --lazyboards also removes it)
+#   --ref <ref>                           install from this ref instead of the
+#                                          resolved latest release tag (e.g.
+#                                          --ref main); same as CENCI_REF=<ref>
 #   --help                                this text
 
 set -u
@@ -1340,6 +1348,25 @@ lazyboards_latest_version() {
 	printf '%s\n' "$ver"
 }
 
+# cenci_latest_ref resolves the newest release tag across all three cenci
+# plugins by following the same GitHub releases/latest redirect (no API
+# token, no jq) as lazyboards_latest_version above. Cenci tags are
+# two-segment and per-plugin (`<layer>/vX.Y.Z`, e.g. `watch/v0.19.0`) rather
+# than lazyboards' single-segment semver, so the tail is stripped up to
+# `/releases/tag/` instead of lazyboards' `${url##*/}`. The result is
+# strictly whole-string validated before use with bash `[[ =~ ]]` (not
+# line-oriented grep) — it flows straight into a raw.githubusercontent.com
+# download URL, so a malformed or injected redirect must never be trusted.
+# This is the supply-chain trust boundary the immutable-tag default exists
+# to enforce.
+cenci_latest_ref() {
+	local url tag
+	url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${MARKETPLACE_REPO}/releases/latest" 2>/dev/null)" || return 1
+	tag="${url#*/releases/tag/}"
+	[[ "$tag" =~ ^(flow|watch|sandbox)/v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+	printf '%s\n' "$tag"
+}
+
 # lazyboards_installed_version prints the bare semver of the installed binary
 # (`lazyboards --version` prints "lazyboards <version>", where a go-install
 # build may carry a leading v).
@@ -2245,6 +2272,11 @@ LAZYBOARDS=ask
 LAZYBOARDS_EXPLICIT=0
 CLEANUP=ask
 INSTALL_FAILED=0
+CENCI_REF="${CENCI_REF:-}"
+# Captured before the arg-parse loop below consumes "$@" via shift, so the
+# piped-release-pin re-exec can forward the caller's original arguments
+# (including --ref) to the resolved tag's install.sh.
+CENCI_ORIG_ARGS=("$@")
 
 usage() {
 	cat <<'EOF'
@@ -2261,6 +2293,10 @@ Usage:
 Initial install:
   curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
 
+  Resolves to the latest release tag by default (not live main) — a piped
+  run with CENCI_REF unset re-execs itself from the newest release tag's
+  install.sh. Set CENCI_REF=main (or pass --ref main) for bleeding-edge main.
+
 From a source checkout, ./install.sh accepts the same arguments.
 
 Flags:
@@ -2271,6 +2307,8 @@ Flags:
   --cleanup / --no-cleanup              seed the lazyboards board config with / without the
                                          auto-close action (`cleanup: "cenci close {number}"`)
                                          that closes a card's tmux window when its ticket does
+  --ref <ref>                           install from this ref instead of the resolved latest
+                                         release tag (e.g. --ref main); same as CENCI_REF=<ref>
   --help                                this text
 EOF
 }
@@ -2287,6 +2325,12 @@ while [ $# -gt 0 ]; do
 	--no-lazyboards) LAZYBOARDS=no; LAZYBOARDS_EXPLICIT=1 ;;
 	--cleanup) CLEANUP=yes ;;
 	--no-cleanup) CLEANUP=no ;;
+	--ref)
+		[ $# -ge 2 ] || die "--ref requires a value (see --help)"
+		CENCI_REF="$2"
+		shift
+		;;
+	--ref=*) CENCI_REF="${1#--ref=}" ;;
 	--help | -h)
 		usage
 		exit 0
@@ -2295,6 +2339,59 @@ while [ $# -gt 0 ]; do
 	esac
 	shift
 done
+
+# ------------------------------------------------ immutable release pin ----
+
+# Piped invocations (`curl -fsSL ... | bash`) have no on-disk script path:
+# bash reports $0 (and BASH_SOURCE[0], when set) as the bare word "bash" —
+# no path component, and not resolved against a real file — in that mode. A
+# from-file run — a source checkout's ./install.sh, the cenci-installer
+# wrapper, or `cenci-installer update` — always resolves to a real, readable
+# file with a path component, so this guard is a no-op there (verified
+# empirically; see the plan's Risks). Only the piped path, and only when
+# CENCI_REF is still unset (env, --ref, or a prior re-exec's own
+# CENCI_REF="$pin_tag" all skip this), resolves the latest release tag and
+# re-execs from it — the
+# AC1 default: a fresh piped install runs reviewed released code, never live
+# main, unless the caller explicitly opts out.
+pin_self="${BASH_SOURCE[0]:-$0}"
+# A real `curl | bash` invocation reports $0 as the bare word "bash" — no
+# path separator at all, since bash never resolves it against $PATH into a
+# path for $0/BASH_SOURCE. A from-file run (source checkout's ./install.sh,
+# the cenci-installer wrapper, `cenci-installer update`, or this script's own
+# re-exec below) always has a path component. So the absence of a `/` in
+# pin_self is itself sufficient evidence of a piped run, and — unlike -f/-r
+# alone — can't be fooled by a coincidentally-named regular file called
+# "bash" sitting in the caller's CWD (which would otherwise make -f/-r look
+# like a from-file invocation). Blank out pin_self in that case so the -f/-r
+# checks below correctly fall through to "piped". The `[ ! -t 0 ]` (stdin is
+# not a terminal) check is a secondary guard: it stops an interactive
+# from-file run with a bare-word BASH_SOURCE (unusual, but not impossible)
+# from being misdetected as piped.
+case "$pin_self" in
+	*/*) : ;;
+	*) pin_self="" ;;
+esac
+if [ -z "$CENCI_REF" ] && [ ! -t 0 ] && { [ -z "$pin_self" ] || [ ! -f "$pin_self" ] || [ ! -r "$pin_self" ]; }; then
+	pin_tag="$(cenci_latest_ref)" || die "could not resolve the latest cenci release tag to install from (offline, or no release has been published yet) — retry, or set CENCI_REF=main (or pass --ref main) to install from main instead"
+	# Re-exec from a temp *file*, never a re-pipe: the child then sees a
+	# real, readable BASH_SOURCE[0] and skips this block outright. Setting
+	# CENCI_REF="$pin_tag" for the child below is a second, independent
+	# guard against an infinite re-exec loop.
+	pin_tmp="$(mktemp)" || pin_tmp=""
+	if [ -z "$pin_tmp" ] || [ ! -f "$pin_tmp" ]; then
+		die "could not create a temporary file to stage the pinned install.sh"
+	fi
+	if ! curl -fsSL -o "$pin_tmp" "https://raw.githubusercontent.com/${MARKETPLACE_REPO}/${pin_tag}/install.sh"; then
+		rm -f "$pin_tmp"
+		die "could not download install.sh from release tag '${pin_tag}' — retry, or set CENCI_REF=main (or pass --ref main) to install from main instead"
+	fi
+	if [ ! -s "$pin_tmp" ]; then
+		rm -f "$pin_tmp"
+		die "downloaded install.sh from release tag '${pin_tag}' was empty — retry, or set CENCI_REF=main (or pass --ref main) to install from main instead"
+	fi
+	CENCI_REF="$pin_tag" exec bash "$pin_tmp" ${CENCI_ORIG_ARGS[@]+"${CENCI_ORIG_ARGS[@]}"}
+fi
 
 # Non-interactive runs never start a minutes-long image build unless asked.
 if [ "$BUILD_IMAGE" = ask ] && { [ "$INTERACTIVE" -eq 0 ] || [ "$ASSUME_YES" -eq 1 ]; }; then

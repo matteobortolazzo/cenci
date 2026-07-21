@@ -42,6 +42,9 @@ Optional features have separate dependencies:
 curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
 ```
 
+Resolves to the latest release tag by default; set `CENCI_REF=main` (or pass
+`--ref main`) for bleeding-edge main instead.
+
 From a clone, run `./install.sh`. Non-interactive automation can add `--yes`; use
 `./install.sh --help` for the complete public interface. Every run reconciles the
 cenci marketplace and the three components (`cenci`, `cenci-watch`, and

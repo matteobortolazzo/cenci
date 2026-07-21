@@ -10,7 +10,7 @@ make_common_tools() {
     local bin="$1"
     mkdir -p "${bin}"
     local tool
-    for tool in bash cat touch uname grep git mkdir dirname ln readlink sleep pkill pgrep nohup chmod sed head tail cut tr rm mktemp jq mv sort; do
+    for tool in bash cat touch uname grep git mkdir dirname ln readlink sleep pkill pgrep nohup chmod sed head tail cut tr rm mktemp jq mv sort cp; do
         ln -s "$(command -v "${tool}")" "${bin}/${tool}"
     done
     cat > "${bin}/docker" <<'EOF'
@@ -19,15 +19,55 @@ if [ "${1:-}" = image ] && [ "${2:-}" = inspect ]; then exit 1; fi
 exit 0
 EOF
     chmod +x "${bin}/docker"
+    # curl mock: every invocation is logged to CURL_LOG (defaulted to
+    # /dev/null so existing from-file cases that never set it stay silent),
+    # then branches on the requested URL:
+    #   */releases/latest — the redirect probe cenci_latest_ref() (#590) will
+    #     follow via `-fsSLI -o /dev/null -w '%{url_effective}'`; answers with
+    #     a fake .../releases/tag/<CENCI_FAKE_RELEASE_TAG> redirect when that
+    #     env var is set, or prints nothing (simulating an unresolvable
+    #     release — offline / no releases yet) when unset. Mirrors the
+    #     existing lazyboards_latest_version mock pattern in
+    #     lazyboards-install.test.sh, but the tail after CENCI_FAKE_RELEASE_TAG
+    #     is caller-controlled so malformed/injected values can be exercised
+    #     directly (#590's two-segment tag trust boundary).
+    #   */install.sh — the tag's install.sh download; copies the real
+    #     checkout's install.sh (via $ROOT, threaded through explicitly since
+    #     piped cases run under a scrubbed env — see run_piped_case) so a
+    #     re-exec genuinely continues the installer from a file, not a stub.
+    #     CENCI_FAKE_EMPTY_INSTALL (optional), when set, instead leaves the
+    #     destination a 0-byte file — simulating a truncated/dropped download
+    #     that curl -fsSL still exits 0 for — to exercise install.sh's own
+    #     empty-download guard (#590).
+    #   anything else — legacy generic stub retained for the cenci-installer
+    #     wrapper's self-update fetch path.
     cat > "${bin}/curl" <<'EOF'
 #!/bin/sh
-out=
+printf 'curl %s\n' "$*" >>"${CURL_LOG:-/dev/null}"
+out= url=
 while [ "$#" -gt 0 ]; do
     case "$1" in
       -o) out=$2; shift 2 ;;
-      *) shift ;;
+      -w) shift 2 ;;
+      -*) shift ;;
+      *) url=$1; shift ;;
     esac
 done
+case "${url}" in
+*/releases/latest)
+    [ -n "${CENCI_FAKE_RELEASE_TAG:-}" ] && printf 'https://github.com/matteobortolazzo/cenci/releases/tag/%s' "${CENCI_FAKE_RELEASE_TAG}"
+    exit 0
+    ;;
+*/install.sh)
+    [ -n "${out}" ] || exit 1
+    if [ -n "${CENCI_FAKE_EMPTY_INSTALL:-}" ]; then
+        : >"${out}"
+    else
+        cp "${ROOT}/install.sh" "${out}"
+    fi
+    exit 0
+    ;;
+esac
 [ -n "${out}" ] || exit 1
 cat >"${out}" <<'INSTALLER'
 printf 'forwarded installer args: %s\n' "$*"
@@ -304,6 +344,74 @@ run_case() {
     set -e
     CASE_OUTPUT="${output}"
     CASE_CALLS="${calls}"
+    CASE_HOME="${home}"
+    CASE_BIN="${bin}"
+}
+
+# run_piped_case <name> <clients> <env_extra> [install.sh args...] — simulates
+# the documented `curl -fsSL .../main/install.sh | bash` one-liner: install.sh
+# is read from stdin (no on-disk script path for $0/BASH_SOURCE to resolve),
+# the exact shape the new piped-only release-tag resolution + re-exec guard
+# (#590) must detect. `bash -s -- <args>` is the standard way to forward
+# arguments into a piped script's "$@" (see the plan's Architectural Context /
+# Assumptions). <env_extra> is a single word-split string of NAME=value pairs
+# (e.g. "CENCI_FAKE_RELEASE_TAG=watch/v9.9.9 CENCI_REF=main") layered onto the
+# env -i scrub — pass "" for none. Sets CASE_CURL_LOG (every curl-mock
+# invocation, argv only — never the resolved redirect body) alongside the
+# usual run_case CASE_* outputs, so callers can assert whether/how the
+# /releases/latest probe and the tag's install.sh download happened.
+#
+# Every case's CWD-for-the-invocation is case_dir, and case_dir always
+# contains a readable regular file literally named "bash" (a decoy) planted
+# before the run. In a real piped invocation $0 is the bare word "bash" (no
+# path separator), so a naive from-file check (`[ -f "$pin_self" ]` alone)
+# would resolve that -f/-r against CWD and be fooled into thinking this is a
+# from-file run whenever the caller's CWD happens to contain a file named
+# "bash" — silently skipping the release-tag pin. Planting the decoy in
+# every piped case's CWD (not just one dedicated case) proves the guard's
+# bare-word/no-path-separator detection (install.sh) isn't fooled by it,
+# across every piped scenario this suite exercises.
+run_piped_case() {
+    local name="$1" clients="$2" env_extra="$3"
+    shift 3
+    local install_args=("$@")
+    local case_dir="${WORK}/${name}" home="${WORK}/${name}/home"
+    local bin="${WORK}/${name}/bin" output="${WORK}/${name}/output" calls="${WORK}/${name}/calls"
+    local curl_log="${WORK}/${name}/curl-log"
+    mkdir -p "${home}" "${bin}"
+    : >"${calls}"
+    : >"${curl_log}"
+    # Decoy: a readable regular file literally named "bash" in the CWD the
+    # piped invocation below runs from (see doc comment above).
+    printf 'not a real shell\n' >"${case_dir}/bash"
+    make_common_tools "${bin}"
+    case "${clients}" in
+      claude) make_claude "${bin}"; prepare_checkout "${home}" claude; prepare_bootstrap_cenci "${home}" claude ;;
+      codex) make_codex "${bin}"; prepare_checkout "${home}" codex; prepare_bootstrap_cenci "${home}" codex ;;
+    esac
+
+    set +e
+    # shellcheck disable=SC2086 # env_extra is intentionally word-split into
+    # zero or more separate NAME=value tokens for env -i (see doc comment).
+    # Run from case_dir (which holds the "bash" decoy file) so $0's bare-word
+    # "bash" would resolve -f/-r false-positive against it if the guard
+    # regressed to CWD-relative detection alone.
+    (
+        cd "${case_dir}" && \
+        env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
+            ROOT="${ROOT}" CURL_LOG="${curl_log}" \
+            CLAUDE_MARKETPLACE_FILE="${case_dir}/claude-marketplace" \
+            CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
+            CODEX_MARKETPLACE_FILE="${case_dir}/codex-marketplace" \
+            CODEX_INSTALLED_FILE="${case_dir}/codex-installed" \
+            ${env_extra} \
+            bash -s -- --yes --no-build ${install_args[@]+"${install_args[@]}"} <"${ROOT}/install.sh" >"${output}" 2>&1
+    )
+    CASE_EXIT=$?
+    set -e
+    CASE_OUTPUT="${output}"
+    CASE_CALLS="${calls}"
+    CASE_CURL_LOG="${curl_log}"
     CASE_HOME="${home}"
     CASE_BIN="${bin}"
 }
@@ -996,5 +1104,69 @@ set -e
 assert_not_contains "${output}" "Setting up OpenCode integration"
 assert_not_contains "${output}" "OpenCode plugin registered"
 [[ ! -e "${home}/.config/opencode/opencode.json" ]]
+
+# --- Supply chain: install.sh defaults to an immutable release tag instead
+# of main (#590), via cenci_latest_ref() and a piped-only re-exec guard.
+
+echo "case: a default piped run resolves the latest release tag and re-execs install.sh from it, even with a coincidentally-named readable file called 'bash' sitting in the caller's CWD (run_piped_case always plants one — see its doc comment) — proves the guard's bare-word/no-path-separator detection isn't fooled into a false 'from-file' read (#590 review fix)"
+run_piped_case piped-default claude "CENCI_FAKE_RELEASE_TAG=watch/v9.9.9"
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_contains "${CASE_CURL_LOG}" "releases/latest"
+assert_contains "${CASE_CURL_LOG}" "watch/v9.9.9"
+assert_contains "${CASE_CURL_LOG}" "install.sh"
+assert_contains "${CASE_CALLS}" "claude plugin install cenci@cenci"
+
+echo "case: CENCI_REF=main skips release-tag resolution entirely on a piped run (#590)"
+run_piped_case piped-cenci-ref-main claude "CENCI_FAKE_RELEASE_TAG=watch/v9.9.9 CENCI_REF=main"
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_not_contains "${CASE_CURL_LOG}" "releases/latest"
+assert_contains "${CASE_CALLS}" "claude plugin install cenci@cenci"
+
+echo "case: --ref main skips release-tag resolution entirely on a piped run (#590)"
+run_piped_case piped-ref-flag-main claude "CENCI_FAKE_RELEASE_TAG=watch/v9.9.9" --ref main
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_not_contains "${CASE_CURL_LOG}" "releases/latest"
+assert_contains "${CASE_CALLS}" "claude plugin install cenci@cenci"
+
+echo "case: an unresolvable release tag (offline / no releases yet) hard-fails with a clear error naming the CENCI_REF=main override, never a silent fall-through (#590, AC5)"
+run_piped_case piped-resolve-failure claude ""
+[[ "${CASE_EXIT}" -ne 0 ]]
+assert_contains "${CASE_OUTPUT}" "CENCI_REF=main"
+
+echo "case: a malformed/injected release-tag redirect (failing the ^(flow|watch|sandbox)/v[0-9]+.[0-9]+.[0-9]+\$ regex) is rejected and never flows into a download URL (#590, trust boundary)"
+run_piped_case piped-malformed-tag claude "CENCI_FAKE_RELEASE_TAG=../../etc/passwd"
+[[ "${CASE_EXIT}" -ne 0 ]]
+assert_contains "${CASE_OUTPUT}" "CENCI_REF=main"
+assert_not_contains "${CASE_CURL_LOG}" "../../etc/passwd"
+
+echo "case: a resolved release tag whose install.sh download is empty (curl -fsSL exits 0 on a truncated/dropped body) hard-fails with a clear error naming the CENCI_REF=main override, never a silent no-op (#590, AC5)"
+run_piped_case piped-empty-download claude "CENCI_FAKE_RELEASE_TAG=watch/v9.9.9 CENCI_FAKE_EMPTY_INSTALL=1"
+[[ "${CASE_EXIT}" -ne 0 ]]
+assert_contains "${CASE_OUTPUT}" "CENCI_REF=main"
+
+echo "case: a normal from-file install.sh run never probes /releases/latest (regression — proves the piped-only guard can't break existing from-file suites, #590)"
+name=onfile-no-probe
+case_dir="${WORK}/${name}" home="${WORK}/${name}/home"
+bin="${WORK}/${name}/bin" output="${WORK}/${name}/output" calls="${WORK}/${name}/calls"
+curl_log="${WORK}/${name}/curl-log"
+mkdir -p "${home}" "${bin}"
+: >"${calls}"
+: >"${curl_log}"
+make_common_tools "${bin}"
+make_claude "${bin}"
+prepare_checkout "${home}" claude
+prepare_bootstrap_cenci "${home}" claude
+
+set +e
+env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" ROOT="${ROOT}" CURL_LOG="${curl_log}" \
+    CENCI_FAKE_RELEASE_TAG="watch/v9.9.9" \
+    CLAUDE_MARKETPLACE_FILE="${case_dir}/claude-marketplace" \
+    CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
+    bash "${ROOT}/install.sh" --yes --no-build >"${output}" 2>&1
+onfile_no_probe_exit=$?
+set -e
+[[ "${onfile_no_probe_exit}" -eq 0 ]]
+assert_not_contains "${curl_log}" "releases/latest"
+assert_contains "${calls}" "claude plugin install cenci@cenci"
 
 echo "passed: client detection, installation, launchers, and summaries"

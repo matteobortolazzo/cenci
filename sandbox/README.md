@@ -59,6 +59,9 @@ and offers to build the image:
 curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
 ```
 
+Resolves to the latest release tag by default; set `CENCI_REF=main` (or pass
+`--ref main`) for bleeding-edge main instead.
+
 ### Advanced / development: standalone setup
 
 Install the plugin from the marketplace, then run the setup skill—it verifies the
