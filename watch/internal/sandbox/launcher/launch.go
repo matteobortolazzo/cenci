@@ -165,30 +165,7 @@ func (e *Engine) Launch(opts Options) error {
 	// Credentials are still staged from the host.
 	cenciBin, socketDir, cenciAvailable := e.resolveCenciWiring()
 
-	// The container is the security boundary: the agent runs with full
-	// permissions inside it (rejected if root — we run as uid 1000 'dev').
-	// Codex also bypasses hook trust: trust lives in the user config layer
-	// and provisioning never seeds it, so without the flag the cenci-watch
-	// hooks are silently skipped as "pending review" and sandbox sessions
-	// never report to the daemon. There is no supported way to persist
-	// trust non-interactively (openai/codex#21615), and the config
-	// trust-store key format is flagged in-source as temporary — the
-	// per-invocation flag is the only stable route (#426).
-	var agentCmdArgs []string
-	switch agent {
-	case "codex":
-		agentCmdArgs = []string{"--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust", "--model", model}
-	case "opencode":
-		// No --dangerously-skip-permissions equivalent exists for OpenCode:
-		// permissions are config-driven via the seeded opencode.json
-		// permission block. --model is only forwarded when the caller
-		// explicitly passed one (DefaultModel("opencode") is "").
-		if model != "" {
-			agentCmdArgs = []string{"--model", model}
-		}
-	default:
-		agentCmdArgs = []string{"--dangerously-skip-permissions", "--model", model}
-	}
+	agentCmdArgs := buildAgentCmdArgs(agent, model)
 
 	// Provider API keys are forwarded per-exec only (never baked into the
 	// container-lifetime create-time env/PID-1 environ), and scoped to the
@@ -231,16 +208,14 @@ func (e *Engine) Launch(opts Options) error {
 	// Remove a stopped container of the same name if one exists.
 	_ = exec.Command(e.Runtime, "rm", scope.ContainerName).Run()
 
-	runArgs, err := e.assembleRunArgs(agent, cenciBin, socketDir, cenciAvailable, scope, opts, home, dindOn)
-	if err != nil {
-		return err
-	}
-
 	// Start the shared container detached, then exec this agent into it: PID 1
 	// stays independent from every tmux pane, so closing the first pane can't
 	// SIGHUP the container and tear down later exec sessions.
-	runArgs = append(runArgs, scope.Image, "-c", "touch /tmp/cenci-ready && exec sleep infinity")
-	create := exec.Command(e.Runtime, append([]string{"run"}, runArgs...)...)
+	runArgv, err := e.buildRunArgv(agent, cenciBin, socketDir, cenciAvailable, scope, opts, home, dindOn)
+	if err != nil {
+		return err
+	}
+	create := exec.Command(e.Runtime, runArgv...)
 	create.Stdout = nil // cenci-sand discards the container id (>/dev/null)
 	create.Stderr = e.Stderr
 	if err := create.Run(); err != nil {
@@ -254,6 +229,36 @@ func (e *Engine) Launch(opts Options) error {
 		return err
 	}
 	return e.runAgent(scope.ContainerName, agent, agentCmdArgs, execEnvArgs, opts)
+}
+
+// buildAgentCmdArgs builds the per-agent CLI flags Launch/DryRun append after
+// the resolved agent binary. The container is the security boundary: the
+// agent runs with full permissions inside it (rejected if root — we run as
+// uid 1000 'dev'). Codex also bypasses hook trust: trust lives in the user
+// config layer and provisioning never seeds it, so without the flag the
+// cenci-watch hooks are silently skipped as "pending review" and sandbox
+// sessions never report to the daemon. There is no supported way to persist
+// trust non-interactively (openai/codex#21615), and the config trust-store
+// key format is flagged in-source as temporary — the per-invocation flag is
+// the only stable route (#426). Pure aside from its inputs — no printing, no
+// side effects — so both Launch and DryRun can call it and stay
+// byte-identical to each other.
+func buildAgentCmdArgs(agent, model string) []string {
+	switch agent {
+	case "codex":
+		return []string{"--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust", "--model", model}
+	case "opencode":
+		// No --dangerously-skip-permissions equivalent exists for OpenCode:
+		// permissions are config-driven via the seeded opencode.json
+		// permission block. --model is only forwarded when the caller
+		// explicitly passed one (DefaultModel("opencode") is "").
+		if model != "" {
+			return []string{"--model", model}
+		}
+		return nil
+	default:
+		return []string{"--dangerously-skip-permissions", "--model", model}
+	}
 }
 
 // assembleExecEnv builds the per-exec (not create-time) "-e"/"-u" argument
@@ -357,7 +362,7 @@ func isSocket(path string) bool {
 // relative order than cenci-sand's original single-block layout; that's
 // behaviorally identical since docker/podman treat flag order between
 // distinct -v/-e flags as independent — only the trailing image + command
-// (appended by the caller, Launch, after this returns) must stay last.
+// (appended by the caller, buildRunArgv, after this returns) must stay last.
 func (e *Engine) assembleRunArgs(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, opts Options, home string, dindOn bool) ([]string, error) {
 	args := e.baseRunArgs(scope)
 	args = append(args, e.assembleVolumeMounts(agent, cenciBin, socketDir, cenciAvailable, scope, home, dindOn)...)
@@ -373,13 +378,29 @@ func (e *Engine) assembleRunArgs(agent, cenciBin, socketDir string, cenciAvailab
 
 	// The sysbox-runc OCI runtime replaces the default runc for this
 	// container only, in dind mode. Appended last (still before the trailing
-	// image + command Launch appends after this returns) so it never shifts
-	// --name off the front of the argv the run-line assertions key off of.
+	// image + command buildRunArgv appends after this returns) so it never
+	// shifts --name off the front of the argv the run-line assertions key
+	// off of.
 	if dindOn {
 		args = append(args, "--runtime=sysbox-runc")
 	}
 
 	return args, nil
+}
+
+// buildRunArgv wraps assembleRunArgs with the trailing image + detached PID-1
+// command, returning the full argv after the runtime binary (leading "run"
+// token included) — exactly what Launch execs to create the detached
+// container. Shared by Launch and DryRun so the create argv can never drift
+// between a real launch and its dry-run preview. The validateCredentials hard
+// error (inside assembleRunArgs) propagates through unchanged.
+func (e *Engine) buildRunArgv(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, opts Options, home string, dindOn bool) ([]string, error) {
+	runArgs, err := e.assembleRunArgs(agent, cenciBin, socketDir, cenciAvailable, scope, opts, home, dindOn)
+	if err != nil {
+		return nil, err
+	}
+	runArgs = append(runArgs, scope.Image, "-c", "touch /tmp/cenci-ready && exec sleep infinity")
+	return append([]string{"run"}, runArgs...), nil
 }
 
 // baseRunArgs builds the container identity/lifecycle flags shared by every
@@ -746,21 +767,35 @@ func (e *Engine) runAgent(name, agent string, agentCmdArgs, execEnvArgs []string
 		return fmt.Errorf("%s not found on PATH: %w", e.Runtime, err)
 	}
 
-	argv := []string{runtimePath, "exec", "-it"}
+	if opts.Shell {
+		_, _ = fmt.Fprintf(e.Stdout, "Attaching shell to running '%s'...\n", name)
+	}
+	argv := append([]string{runtimePath}, buildAgentExecArgv(name, agent, agentCmdArgs, execEnvArgs, opts)...)
+	return execAttach(runtimePath, argv, os.Environ())
+}
+
+// buildAgentExecArgv builds the interactive agent-attach argv (after the
+// runtime binary): the per-exec env, the DISABLE_UPDATES=1 native-update
+// suppression (claude, non-shell only), the container name, and either
+// /bin/bash (--shell) or the resolved agent binary with its per-agent flags
+// and the trailing "--" forwarded args. Pure argv assembly — no printing, no
+// side effects — so both runAgent and DryRun can call it and stay
+// byte-identical to each other.
+func buildAgentExecArgv(name, agent string, agentCmdArgs, execEnvArgs []string, opts Options) []string {
+	argv := []string{"exec", "-it"}
 	argv = append(argv, execEnvArgs...)
 	if !opts.Shell && agent == "claude" {
 		argv = append(argv, "-e", "DISABLE_UPDATES=1")
 	}
 	argv = append(argv, name)
 	if opts.Shell {
-		_, _ = fmt.Fprintf(e.Stdout, "Attaching shell to running '%s'...\n", name)
 		argv = append(argv, "/bin/bash")
 	} else {
 		argv = append(argv, "/opt/cenci-agent/current/node_modules/.bin/"+agent)
 		argv = append(argv, agentCmdArgs...)
 		argv = append(argv, opts.AgentArgs...)
 	}
-	return execAttach(runtimePath, argv, os.Environ())
+	return argv
 }
 
 // trimTrailingNewline drops a single trailing newline (command output).

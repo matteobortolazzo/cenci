@@ -735,6 +735,8 @@ cenci open xs                   # codex + gpt-5.6-sol
 cenci open --agent codex --model gpt-5.6-terra --name mybox
 cenci open --agent opencode --name mybox
 cenci open ch -- --resume       # forward flags after -- straight to the agent CLI
+cenci open ch --dry-run -- --resume
+                                 # print the exact launch commands (and posture) without creating anything
 ```
 
 `open`'s one-token shortcuts (recognized only as the first argument):
@@ -751,12 +753,32 @@ codex→`gpt-5.6-terra`, opencode→ no default, config-driven). A shortcut and 
 conflicting explicit `--agent` (e.g. `open ch --agent codex`) is a usage error
 rather than silently picking one; all usage errors (unknown flag, unknown
 verb, stray positional, conflicts) exit 2.
-Supported flags: `--agent`, `--model`, `--name`, `--shell`, `--docker`,
-`--host-network`, `--reseed-creds`; anything after a bare `--` is forwarded to
-the agent CLI verbatim (this is also how single-dash agent flags like
-`-p "prompt"` are passed: `cenci open -- -p "prompt"`). For the final attach,
-`open` execs the container runtime (replacing the `cenci` process) so the
-interactive session owns the TTY and its exit code propagates.
+Supported flags: `--agent`, `--model`, `--name`, `--shell`, `--dind`,
+`--no-dind`, `--host-network`, `--reseed-creds`, `--dry-run`; anything after a
+bare `--` is forwarded to the agent CLI verbatim (this is also how
+single-dash agent flags like `-p "prompt"` are passed:
+`cenci open -- -p "prompt"`). For the final attach, `open` execs the
+container runtime (replacing the `cenci` process) so the interactive session
+owns the TTY and its exit code propagates.
+
+`--dry-run` prints the exact, literal docker/podman argv `open` would run —
+both the detached container-create command and the interactive agent-attach
+command, each clearly labeled — followed by the full `cenci audit` posture
+breakdown (see below), without creating any container, volume, or network.
+The argv comes from the exact same construction helpers the real launch path
+calls, so it can never drift from what a real `open` would actually run, and
+`--dry-run` faithfully mirrors a real launch's own failure modes (unknown
+agent, `--dind`/`--no-dind` conflicts, missing container runtime, failed dind
+preflight, missing codex/opencode auth) instead of always printing a
+best-effort argv. Any forwarded secret env var (`OPENAI_API_KEY`,
+`ANTHROPIC_API_KEY`, `CONTEXT7_API_KEY`) renders as `-e NAME=<redacted>` —
+masked but structurally visible — never the actual value; as with `audit`
+(below), mounted host *paths* are shown in full, so review the output before
+sharing it. Trailing `--` forwarded args (e.g. `cenci open -- --api-key
+sk-...`) are echoed verbatim in the attach argv and are **not** redacted, so a
+secret passed as a forwarded flag appears in clear — review those too before
+sharing. Works with agent+model shortcuts, `--dind`, `--host-network`, and a
+trailing `--` forwarded-args section.
 
 **`cn` alias:** a copy or symlink of the `cenci` binary named `cn` behaves as
 `cenci open <args>` — `cn xs` is exactly `cenci open xs`. It is the one alias

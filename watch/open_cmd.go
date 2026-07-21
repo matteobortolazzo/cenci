@@ -63,6 +63,7 @@ func runOpen(args []string) {
 	noDindFlag := fs.Bool("no-dind", false, "force dind off, overriding the repo's .cenci/config.json sandbox.dind setting")
 	hostNetworkFlag := fs.Bool("host-network", false, "use host network mode")
 	reseedFlag := fs.Bool("reseed-creds", false, "force a credential reseed from the host on the next container create")
+	dryRunFlag := fs.Bool("dry-run", false, "print the exact docker/podman launch commands and posture without creating anything")
 	_ = fs.Parse(args)
 	rejectExtra("cenci open", fs.Args())
 
@@ -94,7 +95,7 @@ func runOpen(args []string) {
 		fmt.Fprintf(os.Stderr, "cenci open: %v\n", err)
 		os.Exit(1)
 	}
-	err = eng.Launch(launcher.Options{
+	opts := launcher.Options{
 		Agent:       finalAgent,
 		Model:       finalModel,
 		Name:        *nameFlag,
@@ -104,7 +105,26 @@ func runOpen(args []string) {
 		HostNetwork: *hostNetworkFlag,
 		ReseedCreds: *reseedFlag,
 		AgentArgs:   passthrough,
-	})
+	}
+
+	if *dryRunFlag {
+		plan, err := eng.DryRun(opts)
+		if err != nil {
+			if launcher.IsUsage(err) {
+				fmt.Fprintf(os.Stderr, "cenci open: %v\n", err)
+				os.Exit(2)
+			}
+			fmt.Fprintf(os.Stderr, "cenci open: %v\n", err)
+			os.Exit(1)
+		}
+		if err := plan.WriteText(os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "cenci open: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	err = eng.Launch(opts)
 	if err == nil {
 		return // unreachable in practice: a successful Launch never returns
 	}
