@@ -208,6 +208,98 @@ func (e *Engine) daemonStatusFinding() *finding {
 	return nil
 }
 
+// containerExistenceFinding re-runs containerStartupState — the same probe
+// Diagnose's not-found branch uses — and reports SandboxSessionNotFound only
+// when the runtime conclusively answers "no such container" (an
+// *exec.ExitError). Any other runtime-invocation failure (missing runtime
+// binary, dial/timeout) is inconclusive for container existence
+// specifically: a runtime problem, not evidence the container is missing or
+// present. ok is false in that inconclusive case; f carries a message
+// describing why, so Verify can still report the check as skipped instead of
+// misreporting it as a pass/fail or attaching the wrong code — mirroring the
+// classification-reuse pattern this package already applies in Diagnose's
+// own switch (#572), and matching Diagnose's own "runtime unreachable"
+// reporting for this exact inconclusive case rather than silently omitting
+// it (#574).
+func (e *Engine) containerExistenceFinding(scope Scope) (f *finding, ok bool) {
+	_, _, err := e.containerStartupState(scope.ContainerName)
+	var exitErr *exec.ExitError
+	switch {
+	case err != nil && errors.As(err, &exitErr):
+		return &finding{
+			Message:  fmt.Sprintf("container %q was not found", scope.ContainerName),
+			Code:     errcode.SandboxSessionNotFound,
+			Severity: severityForCode(errcode.SandboxSessionNotFound),
+		}, true
+	case err != nil:
+		return &finding{Message: fmt.Sprintf("runtime unreachable (%s)", err)}, false
+	default:
+		return nil, true
+	}
+}
+
+// verifyCheck is one re-runnable diagnostic probe --verify re-runs, reusing
+// Diagnose's own probe helpers (daemonStatusFinding, containerStartupState)
+// rather than a new framework. A nil *finding with ok true is a pass; ok
+// false means the probe was inconclusive (e.g. the runtime binary itself
+// could not run) — Verify still prints an explicit "[skip]" line for it
+// (using f.Message, when set, to say why) rather than silently omitting the
+// check.
+type verifyCheck struct {
+	Label string
+	Run   func(e *Engine, scope Scope) (f *finding, ok bool)
+}
+
+// verifyChecks covers the recovery commands `cenci diagnose` already
+// surfaces (#572): daemon reachability (DaemonSocketMissing/
+// DaemonConnUnreachable) and container existence (SandboxSessionNotFound).
+// The version/logs/mounts warnings carry no registered code and are out of
+// verify scope (see the plan's Architectural Context).
+var verifyChecks = []verifyCheck{
+	{
+		Label: "daemon reachability",
+		Run: func(e *Engine, _ Scope) (*finding, bool) {
+			return e.daemonStatusFinding(), true
+		},
+	},
+	{
+		Label: "container existence",
+		Run:   (*Engine).containerExistenceFinding,
+	},
+}
+
+// Verify re-runs the read-only diagnostic probes behind the recovery
+// commands Diagnose surfaces and prints a "[pass]"/"[fail]"/"[skip]" line
+// per check, so an operator can confirm a suggested recovery command
+// actually worked. A check that came back inconclusive (ok == false, e.g.
+// the runtime binary itself could not be invoked) still prints a "[skip]"
+// line rather than being silently omitted — Verify must not have a weaker
+// failure-visibility contract than Diagnose's own parallel switch, which
+// reports this exact case as a finding (#572, #574). Like Diagnose, Verify
+// is entirely read-only: it never launches, attaches, or executes a
+// recovery command itself, only re-runs the same dial/inspect probes
+// Diagnose already calls.
+func (e *Engine) Verify(scope Scope) error {
+	_, _ = fmt.Fprintf(e.Stdout, "cenci diagnose --verify: %s\n", scope.ContainerName)
+	for _, check := range verifyChecks {
+		f, ok := check.Run(e, scope)
+		if !ok {
+			reason := "inconclusive"
+			if f != nil && f.Message != "" {
+				reason = f.Message
+			}
+			_, _ = fmt.Fprintf(e.Stdout, "[skip] %s: %s\n", check.Label, reason)
+			continue
+		}
+		if f == nil {
+			_, _ = fmt.Fprintf(e.Stdout, "[pass] %s\n", check.Label)
+			continue
+		}
+		_, _ = fmt.Fprintf(e.Stdout, "[fail] %s: %s: %s\n", check.Label, f.Code, f.Message)
+	}
+	return nil
+}
+
 // Diagnose writes a read-only, human-readable report for scope's sandbox
 // session to e.Stdout: container status/exit, the timestamped startup
 // marker (surfaced verbatim via startupFailureDetail), recent logs, mounted

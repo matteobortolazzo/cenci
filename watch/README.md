@@ -765,6 +765,7 @@ map and exits 2.
 ```bash
 cenci diagnose mysession                    # read-only report on the claude-cenci-mysession session
 cenci diagnose mysession --agent codex      # same, for codex-cenci-mysession
+cenci diagnose mysession --verify           # re-run the diagnostic probes and report pass/fail instead of the full report
 ```
 
 `cenci diagnose <session> [--agent claude|codex|opencode]` prints a read-only
@@ -773,7 +774,15 @@ marker (surfaced verbatim, same precedence as `open`'s launch-failure
 diagnostics), recent container logs, mounted volumes, daemon/event-socket
 reachability, and the image base + plugin manifest versions ("unknown" when a
 best-effort read fails). Every failure is annotated with a registered
-[error code](../docs/error-codes.md) and a fatal/degraded/warning severity.
+[error code](../docs/error-codes.md) — see the [failure atlas](../docs/failure-atlas.md)
+for its recovery procedure — and a fatal/degraded/warning severity.
+
+`--verify` re-runs the same read-only probes behind the recovery commands
+diagnose surfaces (daemon reachability, container existence) and prints a
+`[pass]`/`[fail]` line per check instead of the full report, so after running
+a suggested recovery command you can confirm it actually worked. Like the
+full report, `--verify` never launches, attaches, or executes a recovery
+command itself — only the existing read-only dial/inspect probes.
 
 Unlike `open`, `diagnose` never launches, attaches, or wires the daemon — it
 only reads. It is also a report, not a pass/fail gate: a successful render
@@ -851,9 +860,10 @@ does this for you via `EnsureRunning`, which spawns `cenci daemon start` detache
 on demand):
 
 ```bash
-cenci daemon start        # foreground; run in background or a dedicated pane
-cenci daemon start -v     # verbose logging
-cenci daemon              # bare "daemon" acts as "start"
+cenci daemon start            # foreground; run in background or a dedicated pane
+cenci daemon start -v         # verbose logging
+cenci daemon start -v --json  # verbose logging, structured JSON lines instead of plain text
+cenci daemon                  # bare "daemon" acts as "start"
 ```
 
 **BREAKING**: bare `cenci` (no subcommand) and unrecognized top-level
@@ -884,6 +894,7 @@ file is always removed once it's known stale.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-v` | `false` | Verbose logging |
+| `-json` | `false` (or `CENCI_LOG_JSON`, see below) | Emit `-v` start/signal lines as structured JSON (`{timestamp, severity, code, message}`) instead of plain text |
 | `-event-socket` | `$XDG_RUNTIME_DIR/cenci/cenci-events.sock` | Event socket for hook notifications |
 | `-socket` | `$XDG_RUNTIME_DIR/cenci/cenci.sock` | Broadcast socket for widget clients |
 | `-sweep` | `1` | Stale session reconciliation interval in seconds |
@@ -899,6 +910,14 @@ file is always removed once it's known stale.
 
 (Flags above apply to `daemon start`; `stop`/`restart`/`status` take no flags — they
 always resolve the default socket/PID paths.)
+
+`CENCI_LOG_JSON=1` sets `-json`'s default without passing the flag; an
+explicit `-json`/`-json=false` on the command line always overrides the
+environment variable. Only `daemon_cmd.go`'s own
+`-v` start/signal lines (the startup announcement, the shutdown-signal line,
+and the PID-file warning) go through the JSON seam — the daemon's own
+internal event/sweep/attention `-v` logging is unaffected and stays plain
+text.
 
 ### Human status overview (`cenci status`)
 
@@ -1246,6 +1265,13 @@ daemon at the new location on the next call — the same self-heal already docum
 above for any other daemon-absent case. No special migration steps are needed.
 
 ## Troubleshooting
+
+For meaning, common causes, diagnostic commands, a recovery procedure, and
+known platform-specific issues per registered error code (the
+`CENCI-<AREA>-<SUBAREA>-<NNN>` identifiers `cenci diagnose` attaches to its
+findings), see the [failure atlas](../docs/failure-atlas.md). After running a
+suggested recovery command, `cenci diagnose <session> --verify` re-runs the
+same read-only probe and reports `[pass]`/`[fail]` to confirm it worked.
 
 **No status updates**: Ensure the hook/plugin is loaded (`claude plugin list`, `claude --plugin-dir ./plugin`, or Codex `/hooks`). Check `cenci daemon status` (running/not-running + PID) and that `cenci notify` can reach the event socket (`cenci daemon start -v` shows the socket path).
 

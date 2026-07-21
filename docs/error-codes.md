@@ -4,6 +4,12 @@ Cenci uses a stable, structured error-identifier scheme so failures can be
 referenced, documented, and matched programmatically instead of relying on
 ad hoc free-text messages.
 
+For meaning, common causes, diagnostic commands, a recovery procedure, and
+known platform-specific issues per code, see the
+[failure atlas](failure-atlas.md). This page owns the naming convention and
+a short one-line meaning per code; the atlas is the single home for the
+fuller recovery content, so the two never carry duplicated, driftable text.
+
 ## Naming convention
 
 ```

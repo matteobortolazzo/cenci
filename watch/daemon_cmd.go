@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"strings"
@@ -16,6 +15,7 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/internal/dispatch"
 	tmuxfe "github.com/matteobortolazzo/cenci/watch/internal/frontend/tmux"
 	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/internal/logging"
 	"github.com/matteobortolazzo/cenci/watch/internal/tmux"
 )
 
@@ -66,6 +66,7 @@ func runDaemonStart(args []string) {
 	fs := flag.NewFlagSet("daemon start", flag.ExitOnError)
 
 	fs.BoolVar(&cfg.Verbose, "v", false, "verbose logging")
+	fs.BoolVar(&cfg.LogJSON, "json", os.Getenv("CENCI_LOG_JSON") == "1", "emit structured JSON log lines instead of plain text (default from CENCI_LOG_JSON)")
 	fs.StringVar(&cfg.SocketPath, "socket", ipc.DefaultSocketPath(), "IPC broadcast socket path (empty to disable)")
 	fs.StringVar(&cfg.EventSocketPath, "event-socket", ipc.DefaultEventSocketPath(), "event socket path for hook notifications")
 
@@ -87,8 +88,10 @@ func runDaemonStart(args []string) {
 
 	cfg.SweepInterval = time.Duration(sweepSec) * time.Second
 
+	logger := logging.New(os.Stderr, cfg.LogJSON)
+
 	if cfg.Verbose {
-		log.Printf("cenci starting (event-driven, sweep every %s)", cfg.SweepInterval)
+		logger.Log(logging.SeverityInfo, "", fmt.Sprintf("cenci starting (event-driven, sweep every %s)", cfg.SweepInterval))
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -100,7 +103,7 @@ func runDaemonStart(args []string) {
 	go func() {
 		sig := <-sigCh
 		if cfg.Verbose {
-			log.Printf("received %s, shutting down", sig)
+			logger.Log(logging.SeverityInfo, "", fmt.Sprintf("received %s, shutting down", sig))
 		}
 		cancel()
 	}()
@@ -122,7 +125,7 @@ func runDaemonStart(args []string) {
 	onStarted := func() {
 		started = true
 		if err := daemon.WritePIDFile(pidPath); err != nil && cfg.Verbose {
-			log.Printf("warning: could not write pid file %s: %v", pidPath, err)
+			logger.Log(logging.SeverityWarn, "", fmt.Sprintf("warning: could not write pid file %s: %v", pidPath, err))
 		}
 	}
 	defer func() {
