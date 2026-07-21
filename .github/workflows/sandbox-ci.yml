@@ -19,8 +19,8 @@ jobs:
     outputs:
       sandbox: ${{ steps.filter.outputs.sandbox }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dorny/paths-filter@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
         id: filter
         with:
           filters: |
@@ -37,7 +37,7 @@ jobs:
     if: ${{ needs.changes.outputs.sandbox == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: shellcheck
         run: |
           shellcheck install.sh \
@@ -57,7 +57,7 @@ jobs:
     if: ${{ needs.changes.outputs.sandbox == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run host-runnable test suites
         run: |
           bash sandbox/tests/settings-merge.test.sh
@@ -75,7 +75,7 @@ jobs:
     if: ${{ needs.changes.outputs.sandbox == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Assert fragments match the Dockerfile monolith
         run: bash sandbox/tests/fragments-drift.test.sh
 
@@ -85,7 +85,7 @@ jobs:
     if: ${{ needs.changes.outputs.sandbox == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build base + monolith and run the toolchain smoke test
         run: bash sandbox/tests/smoke.test.sh
 
@@ -95,12 +95,12 @@ jobs:
     if: ${{ needs.changes.outputs.sandbox == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: hadolint/hadolint-action@v3.3.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5 # v3.3.0
         with:
           dockerfile: sandbox/Dockerfile.base
           ignore: DL3008,DL3013
-      - uses: hadolint/hadolint-action@v3.3.0
+      - uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5 # v3.3.0
         with:
           dockerfile: sandbox/Dockerfile
           ignore: DL3008,DL3013
