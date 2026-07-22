@@ -1,6 +1,6 @@
 ---
 name: maintain
-description: "Audit and repair structure, documentation, and client-portability drift through a deterministic check plus specialized agents, gated by human approval."
+description: "Audit and repair structure, documentation, client-portability, and rule/lesson-hygiene drift through a deterministic check plus specialized agents, gated by human approval."
 compatibility: Requires Claude Code AskUserQuestion, Task, and cenci project configuration.
 argument-hint: [mode] [scope] [additional context]
 user-invocable: true
@@ -15,13 +15,13 @@ allowed-tools: Read, Edit, Write, Grep, Glob, Task, Bash(git:*), Bash(gh:*), Bas
 
 ## Why this skill exists
 
-There is no unified maintenance command. Structural, documentation, and client-portability
-consistency each drift independently as the repo grows. This skill pairs a deterministic,
-LLM-free checker (`scripts/check.sh`) with three lightweight judgment-layer agents, reports every
+There is no unified maintenance command. Structural, documentation, client-portability, and rule
+hygiene consistency each drift independently as the repo grows. This skill pairs a deterministic,
+LLM-free checker (`scripts/check.sh`) with four lightweight judgment-layer agents, reports every
 finding with evidence and a proposed repair, and only ever mutates the repo after explicit human
-approval, in a dedicated worktree, as one reviewed PR. `rules` mode (curating `## Critical Rules`
-and topic-doc rule bullets, replacing `/cenci:garden`) is out of scope for this ticket and arrives
-in a follow-on split.
+approval, in a dedicated worktree, as one reviewed PR. `rules` mode curates `## Critical Rules`
+and topic-doc rule bullets — the same curation `/cenci:garden` performs today, folded into this
+unified flow.
 
 ## Context
 
@@ -31,9 +31,8 @@ Read the `shell-rules`, `worktrees`, and `subagent-safety` reference skills befo
 `git`/`gh` commands, creating the Apply-phase worktree, or delegating to the analyzer agents.
 
 **Parse `$ARGUMENTS`** into mode, scope, and additional context:
-- **Mode** — the first token. `structure`, `docs`, or `clients` selects that single mode. `all`
-  (or an omitted/blank first token) is the default and runs all three modes together. `rules` is
-  not yet a valid mode — that lands in a later ticket in this split.
+- **Mode** — the first token. `structure`, `docs`, `clients`, or `rules` selects that single mode.
+  `all` (or an omitted/blank first token) is the default and runs all four modes together.
 - **Scope** — the next token, if it exactly matches a project `slug` from `.cenci/config.json`'s
   `projects` array (`flow`, `watch`, `sandbox`), narrows analysis to that project. Everything else
   is optional **additional context** (focus areas or constraints).
@@ -71,14 +70,15 @@ pass/warn/fail/skip results, each non-pass result carrying a concrete fix. Read 
 
 ## Phase 3 — Parallel audit
 
-One mode launches exactly one analyzer agent (`Task` tool); mode `all` launches all three
+One mode launches exactly one analyzer agent (`Task` tool); mode `all` launches all four
 together, in a single message with parallel `Task` calls:
 
 - Mode `structure` → launch only `structure-maintainer` (see `modes/structure.md`).
 - Mode `docs` → launch only `docs-maintainer` (see `modes/docs.md`).
 - Mode `clients` → launch only `portability-maintainer` (see `modes/clients.md`).
-- Mode `all` (default) → launch `structure-maintainer`, `docs-maintainer`, and
-  `portability-maintainer` together.
+- Mode `rules` → launch only `rules-maintainer` (see `modes/rules.md`).
+- Mode `all` (default) → launch `structure-maintainer`, `docs-maintainer`,
+  `portability-maintainer`, and `rules-maintainer` together.
 
 Each analyzer only reads the repository — see `subagent-safety` before delegating — and returns
 findings in the shared schema described below. No analyzer edits anything.
@@ -91,7 +91,7 @@ as a silent "no findings".
 ## Phase 4 — Report
 
 Categories in scope for this ticket: Structure, Documentation drift, Generated index drift, Client
-mismatch, Test gap (`rules`/"Rule hygiene" arrives with `rules` mode, a later ticket).
+mismatch, Test gap, Rule hygiene.
 
 Each finding carries: ID, category, severity, location, evidence, proposed change, repair
 confidence, and required tests — the schema each analyzer agent documents in its own file.
@@ -113,16 +113,17 @@ Ask once via `AskUserQuestion`: "Which maintenance actions should I apply?" with
 what actually ran this invocation:
 
 - **all deterministic repairs** — apply every checker-suggested fix from Phase 2, plus every
-  High/Medium-confidence finding from the agents that ran this invocation
-- **critical+high findings** — apply only Critical/High severity findings from the agents that ran
+  High/Medium-confidence finding from the agents that ran this invocation, including any Rule
+  hygiene findings
+- **critical+high findings** — apply only Critical/High severity findings from the agents that
+  ran, including any Rule hygiene findings
 - **docs+indexes only** — (offered only when `docs`-owned categories ran, i.e. `docs` or `all`
   mode) apply Documentation drift and Generated index drift findings only
+- **rules only** — (offered only when `rules`-owned categories ran, i.e. `rules` or `all` mode)
+  apply Rule hygiene findings only
 - **let me select findings** — present the numbered finding list and let the user pick
   individually
 - **report only** — apply nothing
-
-No option scoped only to rule-hygiene findings is offered — `rules` mode does not exist yet, so
-nothing ran this invocation that such an option could apply to.
 
 Choosing **report only** ends the run right after the report above.
 

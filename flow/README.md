@@ -87,7 +87,7 @@ companion) for every skill, including the internal ones not listed above.
 | `frontend-classification` | Classify whether a ticket is frontend or UI work. Use when deciding whether design-aware planning, visual verification, UI tests, or screenshot capture applies. | Yes | No | Yes | Yes |
 | `garden` | Curate AGENTS.md critical rules and topic docs through a reviewed PR. | No | Yes | Yes | Yes |
 | `implement` | Run the full cenci plan, test, implementation, review, and pull-request pipeline. | No | Yes | Yes | Yes |
-| `maintain` | Audit and repair structure, documentation, and client-portability drift through a deterministic check plus specialized agents, gated by human approval. | No | Yes | Yes | Yes |
+| `maintain` | Audit and repair structure, documentation, client-portability, and rule/lesson-hygiene drift through a deterministic check plus specialized agents, gated by human approval. | No | Yes | Yes | Yes |
 | `pr-comment-filter` | Decide which pull-request review comments are actionable. Use when addressing review feedback, monitoring a PR, or filtering already-handled comments. | Yes | No | Yes | Yes |
 | `project-core` | Resolve cenci's neutral project configuration and shared guidance consistently. | No | No | Yes | No |
 | `refactor` | Analyze a codebase with specialized agents and propose refactoring tickets. | No | Yes | Yes | Yes |
@@ -119,6 +119,7 @@ companion) for every skill, including the internal ones not listed above.
 | `planner` | Senior architect that analyzes tickets and produces implementation plans. Use when planning feature work, analyzing ticket requirements, or breaking down complex tasks. | implement |
 | `portability-maintainer` | Audits client-portability consistency (Claude Code, Codex, OpenCode) for maintenance drift, producing Client mismatch findings with proposed repairs. Use from the /cenci:maintain skill's clients and all modes. | maintain |
 | `refiner` | Senior tech lead that analyzes tickets during backlog refinement — finds ambiguity, drafts clarifying questions, and produces the refined ticket proposal (scope, acceptance criteria, sizing, splits). Use from the refine skill's Q&A relay loop. | refine |
+| `rules-maintainer` | Audits the repo's rule sources (CLAUDE.md/AGENTS.md Critical Rules, topic-doc rule bullets, and legacy lessons-learned files) for curation drift, producing findings with proposed repairs. Use from the /cenci:maintain skill's rules and all modes. | maintain |
 | `security-analyzer` | Analyzes codebase for security vulnerabilities using OWASP guidelines and official library documentation via Context7. Use for security audits of application code. | — |
 | `security-reviewer` | Security-focused code reviewer that checks for OWASP vulnerabilities, auth issues, and sensitive data exposure. Use after implementation to review security. | implement |
 | `silent-failure-hunter` | Detects silent failure patterns — empty catch blocks, swallowed errors, missing error propagation, and silent fallbacks. Use alongside security and code reviewers during the review phase. | implement |
@@ -142,7 +143,7 @@ companion) for every skill, including the internal ones not listed above.
 | `frontend-classification` | — | implement,refine | — | — |
 | `garden` | — | codex-runtime,project-core shell-rules,worktrees | — | — |
 | `implement` | phase-1-plan.md,phase-2-worktree.md phase-3-test-red.md,phase-4-implement-green.md phase-5-refactor.md,phase-6-7-review.md phase-8-docs.md,phase-9-pr.md | attachments,codex-runtime frontend-classification,project-core review,shell-rules subagent-safety,ticket-ownership | run-artifact-dir.sh | code-reviewer,context-gatherer |
-| `maintain` | — | codex-runtime,project-core shell-rules,subagent-safety worktrees | check.sh | docs-maintainer,portability-maintainer structure-maintainer |
+| `maintain` | — | codex-runtime,project-core shell-rules,subagent-safety worktrees | check.sh | docs-maintainer,portability-maintainer rules-maintainer,structure-maintainer |
 | `pr-comment-filter` | — | address-review,babysit | — | — |
 | `project-core` | — | — | — | — |
 | `refactor` | — | codex-runtime,project-core shell-rules,subagent-safety | — | — |
