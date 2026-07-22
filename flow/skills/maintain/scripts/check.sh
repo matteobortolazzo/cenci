@@ -1126,7 +1126,7 @@ check_command_flags() {
 # look config-shaped (contain at least one signal key from the live
 # .cenci/config.json schema) must parse as JSON and use only field names
 # present in that live schema.
-CONFIG_SIGNAL_KEYS=(projects isMonorepo gateCommand guidanceLocation branchPattern buildCommand testCommand lintCommand serveCommand mcpServers lspServers)
+CONFIG_SIGNAL_KEYS=(projects isMonorepo gateCommand babysitInterval guidanceLocation branchPattern buildCommand testCommand lintCommand serveCommand mcpServers lspServers)
 
 _is_config_shaped_block() {
   local block="$1" k

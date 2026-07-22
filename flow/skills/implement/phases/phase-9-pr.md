@@ -279,3 +279,33 @@ rm -f \
 This deliberately excludes two other scoped temp locations: the screenshots dir (`/tmp/claude/cenci-screenshots/<ticket-id-or-slug>/`) is a documented fallback location kept for gist-upload failures (see Screenshots above), and the gist clone temp dir (`/tmp/claude/cenci-gist-<gist-id>/`) is already uniquely scoped by gist ID — neither needs this pass to stay collision-safe.
 
 Like the plan-file deletion above, this cleanup only runs on the success path (PR created). If the pipeline fails before PR creation, these files are preserved for retry/debugging, same as the plan file.
+
+## Babysit
+
+This is the **final** Phase-9 action — do it only after `## Cleanup` above has settled the session's own completion (`/goal clear` ran, the plan file was deleted). Ordering matters: this step arms an *unattended* `cenci babysit` supervisor that keeps running after this session exits, so per `flow/AGENTS.md` the goal-clear-before-handoff rule is restated here for that new "arms an unattended loop" risk profile — the goal must already be cleared (Cleanup) before the supervisor is launched, so a still-armed goal can never re-loop the turn *after* an external watcher is live.
+
+The PR is open but unverified — CI has not run, review feedback has not arrived, and the ticket is still `In Review`, not `Implemented`. Hand the PR off to the persistent supervisor, which carries it the rest of the way (CI watch, review handling, and the final `In Review` → `Implemented` relabel on merge) exactly as the standalone `babysit` skill does when invoked by hand. `cenci babysit` detaches its own background supervisor and returns immediately, so this launch is non-blocking — the session ends here; babysit runs on.
+
+**Skip entirely in ticketless mode** — there is no PR number tracked as an artifact in ticketless mode; the babysit hand-off is a ticket-mode step, like the Labels and artifact calls above. (A ticketless run still opened a real PR; the user can `cenci babysit <pr> <interval>` it manually via the `babysit` skill.)
+
+1. **Resolve the interval.** The watch cadence is the optional `babysitInterval` field in `.cenci/config.json`, resolved with the shared resolver — top-level for a single-repo, or the affected project's value in a monorepo. Pass the single affected project slug when one was resolved at Phase 2's Baseline Gate Check (the same `projects[].slug` used for the baseline gate); otherwise resolve top-level with no slug argument:
+
+   ```bash
+   ( cd "<abs-worktree-path>" && sh "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/resolve-babysit-interval.sh" "<slug>" )
+   ```
+
+   Omit the trailing `"<slug>"` for the single-repo / top-level case. Non-empty stdout → use it as `<interval>` below; empty stdout (field unset, or no config file) → omit `--interval` entirely and let `cenci babysit` use its built-in `15m` default. A non-zero exit with a stderr diagnostic (missing `jq`, malformed config, no-match/ambiguous slug) is **not** fatal here: report it and fall back to the default by omitting `--interval` — a bad interval lookup must never block arming the watcher.
+
+2. **Launch the supervisor** for the PR number already captured for the `cenci pipeline artifact <id> --pr-number` call above:
+
+   ```bash
+   cenci babysit <pr-number> --agent claude --interval <interval>
+   ```
+
+   Drop `--interval <interval>` when step 1 resolved nothing.
+
+3. **Non-fatal & idempotent.** If the launch prints `supervisor already running for PR #<pr-number>`, that is **expected success**, not an error — a Goal-Autopilot re-entry (or a manual re-run) already armed the watcher, and `cenci babysit` refuses to start a second supervisor for the same PR. Treat it exactly like the "PR already exists" / "label already exists" cases earlier in this phase: proceed to the report below. Any *other* launch failure (auth, network, missing binary) is reported to the user but does **not** fail the phase or re-loop the goal — the PR already exists and is the pipeline's real deliverable; a failed watcher launch just means the user should arm it manually.
+
+Finally, report the terminal state as the PR being open and watched, not as done/merged:
+
+> PR #<pr-number> open and being watched by babysit → <pr-url> (stop with `cenci babysit stop <pr-number>`)

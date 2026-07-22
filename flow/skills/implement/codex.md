@@ -22,5 +22,15 @@ capture lessons, run the maintenance check (`flow/skills/maintain/scripts/check.
 when the change touches docs, skills, agents, config, or client adapters — auto-repair only
 drift caused by this same change and route any ambiguous or policy-affecting finding through
 the client's available user-input mechanism — commit, push, and open the PR. Clear the goal
-before any question/error and after PR creation. Never force-push or bypass
+before any question/error and after PR creation. Then, as the final step once the goal is
+cleared, hand the open PR to the persistent supervisor so it carries the PR to merge and does
+the final `In Review` → `Implemented` relabel: resolve the watch interval from
+`.cenci/config.json`'s optional `babysitInterval` via
+`${PLUGIN_ROOT}/hooks/scripts/resolve-babysit-interval.sh` (top-level, or the affected
+project's slug), then launch `cenci babysit <pr> --agent codex --interval <interval>` — omit
+`--interval` when the resolver prints nothing, letting the CLI use its built-in `15m` default.
+This launch is non-blocking (the supervisor detaches and survives session exit) and
+best-effort: treat `supervisor already running for PR #<pr>` as expected success (a re-entry
+already armed it), and report any other launch failure without failing the run — the open PR
+is the real deliverable. Never force-push or bypass
 security/design/approval gates.
