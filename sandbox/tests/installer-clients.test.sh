@@ -293,6 +293,71 @@ run_case_broken_cenci_cache() {
     CASE_HOME="${home}"
 }
 
+# prepare_stale_newest_cenci_cache <home> <client> — provisions TWO version-
+# pinned plugin cache roots: an older one (1.0.0) with a working bootstrapped
+# binary, and a newer one (2.0.0) with only a manifest — no bootstrap, no binary.
+# Simulates the manifest-ahead-of-release race: the plugin manifest bumped to a
+# version whose release isn't published yet, so current_cenci_binary (which
+# resolves the newest root) can't provision it, while the previous version's
+# binary is still installed and usable. The newer manifest is stamped with a
+# strictly newer mtime so newest_cenci_root resolves 2.0.0.
+prepare_stale_newest_cenci_cache() {
+    local home="$1" client="$2" old_root new_root manifest_dir
+    if [[ "${client}" == claude ]]; then
+        old_root="${home}/.claude/plugins/cache/cenci/cenci-watch/1.0.0"
+        new_root="${home}/.claude/plugins/cache/cenci/cenci-watch/2.0.0"
+        manifest_dir=.claude-plugin
+    else
+        old_root="${home}/.codex/plugins/cache/cenci/cenci-watch/1.0.0"
+        new_root="${home}/.codex/plugins/cache/cenci/cenci-watch/2.0.0"
+        manifest_dir=.codex-plugin
+    fi
+    # Older version: working binary that logs its invocations.
+    mkdir -p "${old_root}/bin" "${old_root}/${manifest_dir}"
+    printf '{"name":"cenci-watch","version":"1.0.0"}\n' >"${old_root}/${manifest_dir}/plugin.json"
+    cat > "${old_root}/bin/cenci" <<'EOF'
+#!/bin/sh
+printf 'cenci %s\n' "$*" >>"${CALLS_FILE}"
+exit 0
+EOF
+    chmod +x "${old_root}/bin/cenci"
+    # Newer version: manifest only — release assets not published yet.
+    mkdir -p "${new_root}/${manifest_dir}"
+    printf '{"name":"cenci-watch","version":"2.0.0"}\n' >"${new_root}/${manifest_dir}/plugin.json"
+    # Portable (GNU + BSD touch) mtime stamps so the newer root sorts newest.
+    touch -t 202001010000 "${old_root}/${manifest_dir}/plugin.json"
+    touch -t 202001020000 "${new_root}/${manifest_dir}/plugin.json"
+}
+
+# run_case_stale_newest_cenci_cache <name> <mode-and-flags...> — like
+# run_case_broken_cenci_cache, but the newest plugin version has no binary while
+# a previous version's binary is present (prepare_stale_newest_cenci_cache).
+run_case_stale_newest_cenci_cache() {
+    local name="$1"
+    shift
+    local case_dir="${WORK}/${name}" home="${WORK}/${name}/home"
+    local bin="${WORK}/${name}/bin" output="${WORK}/${name}/output" calls="${WORK}/${name}/calls"
+    mkdir -p "${home}" "${bin}"
+    : >"${calls}"
+    make_common_tools "${bin}"
+    make_claude "${bin}"
+    prepare_checkout "${home}" claude
+    prepare_stale_newest_cenci_cache "${home}" claude
+
+    set +e
+    env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
+        CLAUDE_MARKETPLACE_FILE="${case_dir}/claude-marketplace" \
+        CLAUDE_REFRESH_FAIL_FILE="${case_dir}/claude-refresh-fail" \
+        CLAUDE_LIST_FAIL_FILE="${case_dir}/claude-list-fail" \
+        CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
+        bash "${ROOT}/install.sh" --yes --no-build "$@" >"${output}" 2>&1
+    CASE_EXIT=$?
+    set -e
+    CASE_OUTPUT="${output}"
+    CASE_CALLS="${calls}"
+    CASE_HOME="${home}"
+}
+
 # prepare_cache_cenci <home> <client> — provision a fake cenci binary in the
 # version-pinned plugin cache (what current_cenci_binary resolves), logging
 # every invocation to CALLS_FILE, so the `cenci sandbox build` step can run.
@@ -715,10 +780,18 @@ run_case_broken_cenci_cache bootstrap-unavailable-install
 assert_contains "${CASE_OUTPUT}" "could not provision the cenci binary yet"
 assert_not_contains "${CASE_OUTPUT}" "could not provision the cenci binary from the installed cenci-watch plugin"
 
-echo "case: an update still hard-fails when the cenci-watch bootstrap can't provision a binary"
+echo "case: an update still hard-fails when NO cenci binary can be provisioned anywhere"
 run_case_broken_cenci_cache bootstrap-unavailable-update update
 [[ "${CASE_EXIT}" -ne 0 ]]
 assert_contains "${CASE_OUTPUT}" "could not provision the cenci binary from the installed cenci-watch plugin"
+
+echo "case: an update tolerates an unpublished newest release by keeping the previously provisioned binary"
+run_case_stale_newest_cenci_cache bootstrap-stale-newest-update update
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_contains "${CASE_OUTPUT}" "the newest cenci-watch release isn't available yet"
+assert_not_contains "${CASE_OUTPUT}" "could not provision the cenci binary from the installed cenci-watch plugin"
+# Fell back to the previously provisioned (1.0.0) binary and restarted the daemon with it.
+assert_contains "${CASE_CALLS}" "cenci daemon restart"
 
 echo "case: no supported client fails with a client-specific diagnostic"
 run_case none none
