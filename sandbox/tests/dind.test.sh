@@ -127,6 +127,7 @@ EOF
 # 1` (the groupadd/usermod failure guard) propagates to the caller.
 run_start_dind() {
     local bin="$1" home="$2" call_log="$3" stderr_capture="${4:-/dev/null}"
+    # shellcheck disable=SC2016  # $1 must expand in the child bash, not here
     env -i PATH="${bin}:/usr/bin:/bin" CENCI_DIND_HOME_ROOT="${home}" CALL_LOG="${call_log}" \
         bash -c 'source "$1"; start_dind; wait' _ "${DIND_LIB}" 2>"${stderr_capture}"
 }

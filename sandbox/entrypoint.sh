@@ -138,7 +138,7 @@ if [[ "$(id -u)" -eq 0 ]]; then
     # re-exec is needed here, unlike the removed DooD socket block).
     if [[ "${CENCI_SANDBOX_DIND:-}" == "1" ]]; then
         DIND_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
-        # shellcheck source-path=SCRIPTDIR/lib
+        # shellcheck source-path=SCRIPTDIR
         # shellcheck source=lib/dind.sh
         source "${DIND_LIB_DIR}/dind.sh"
         start_dind
