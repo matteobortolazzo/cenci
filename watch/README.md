@@ -1453,14 +1453,15 @@ above for any other daemon-absent case. No special migration steps are needed.
 Every `watch/dist/checksums.txt` published with a `cenci-watch` release is signed
 keylessly by the `watch-release.yml` GitHub Actions workflow via
 [cosign](https://docs.sigstore.dev/cosign/overview/) and [Sigstore](https://www.sigstore.dev/):
-the signature (`checksums.txt.sig`) and signing certificate (`checksums.txt.pem`) are
-uploaded as release assets alongside the tarballs, and the signing event is recorded
+a self-contained Sigstore bundle (`checksums.txt.bundle`, carrying both the signature
+and the signing certificate) is uploaded as a release asset alongside the tarballs,
+and the signing event is recorded
 in the public [Rekor](https://docs.sigstore.dev/logging/overview/) transparency log.
 This lets you confirm a downloaded checksums file — and therefore every tarball it
 covers — really was produced by this repository's release workflow, not tampered
 with in transit or on a mirror.
 
-Download `checksums.txt`, `checksums.txt.sig`, and `checksums.txt.pem` from the
+Download `checksums.txt` and `checksums.txt.bundle` from the
 release, then verify the signature. This workflow runs on both a `watch/v*` tag push
 and a `workflow_dispatch` from `watch-version-bump.yml`, and the Fulcio-issued
 certificate's SAN identity differs between those two trigger paths — so verification
@@ -1470,8 +1471,7 @@ matches the workflow file by identity regexp rather than a single fixed identity
 cosign verify-blob \
   --certificate-identity-regexp '^https://github\.com/matteobortolazzo/cenci/\.github/workflows/watch-release\.yml@' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --signature checksums.txt.sig \
-  --certificate checksums.txt.pem \
+  --bundle checksums.txt.bundle \
   checksums.txt
 ```
 

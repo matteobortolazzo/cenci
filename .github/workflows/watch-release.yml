@@ -63,6 +63,13 @@ jobs:
           GORELEASER_CURRENT_TAG: v${{ steps.v.outputs.version }}
 
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          # Pin the cosign *binary*: cosign-installer otherwise tracks "latest".
+          # cosign v3 flipped `sign-blob` to the Sigstore bundle format by
+          # default (deprecating --output-signature/--output-certificate), which
+          # silently broke watch/v0.26.0's release. Pinning keeps signing
+          # deterministic across upstream default changes.
+          cosign-release: 'v3.1.2'
 
       - name: Sign checksums with cosign (keyless)
         run: |
@@ -71,9 +78,13 @@ jobs:
             echo "watch/dist/checksums.txt not found" >&2
             exit 1
           fi
-          cosign sign-blob --yes watch/dist/checksums.txt \
-            --output-signature watch/dist/checksums.txt.sig \
-            --output-certificate watch/dist/checksums.txt.pem
+          # Emit a single self-contained Sigstore bundle (signature + signing
+          # certificate). This is cosign v3's default output format; the older
+          # --output-signature/--output-certificate flags are deprecated and
+          # ignored under it, so we write the bundle explicitly via --bundle.
+          cosign sign-blob --yes \
+            --bundle watch/dist/checksums.txt.bundle \
+            watch/dist/checksums.txt
 
       - name: Attest build provenance for release tarballs
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
@@ -90,8 +101,7 @@ jobs:
           assets=(
             watch/dist/cenci_*.tar.gz
             watch/dist/checksums.txt
-            watch/dist/checksums.txt.sig
-            watch/dist/checksums.txt.pem
+            watch/dist/checksums.txt.bundle
           )
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "${assets[@]}" --clobber
