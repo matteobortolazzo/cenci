@@ -58,6 +58,7 @@ Codex and OpenCode so neither mistakes a pipeline command for a supported workfl
 | `design` | Yes | In development | No | Optional Pencil procedure |
 | `garden` | Yes | In development | No | Plan/apply foundation |
 | `implement` | Yes | In development | No | Agents/checkpoints foundation |
+| `maintain` | Yes | In development | No | Deterministic-check + agent-audit foundation |
 | `refactor` | Yes | In development | No | Native analysis foundation |
 | `refine` | Yes | In development | No | Plan/apply foundation |
 | `review` | Yes | In development | No | Native reviewer foundation |
@@ -86,6 +87,7 @@ companion) for every skill, including the internal ones not listed above.
 | `frontend-classification` | Classify whether a ticket is frontend or UI work. Use when deciding whether design-aware planning, visual verification, UI tests, or screenshot capture applies. | Yes | No | Yes | Yes |
 | `garden` | Curate AGENTS.md critical rules and topic docs through a reviewed PR. | No | Yes | Yes | Yes |
 | `implement` | Run the full cenci plan, test, implementation, review, and pull-request pipeline. | No | Yes | Yes | Yes |
+| `maintain` | Audit and repair structure, documentation, and client-portability drift through a deterministic check plus specialized agents, gated by human approval. | No | Yes | Yes | Yes |
 | `pr-comment-filter` | Decide which pull-request review comments are actionable. Use when addressing review feedback, monitoring a PR, or filtering already-handled comments. | Yes | No | Yes | Yes |
 | `project-core` | Resolve cenci's neutral project configuration and shared guidance consistently. | No | No | Yes | No |
 | `refactor` | Analyze a codebase with specialized agents and propose refactoring tickets. | No | Yes | Yes | Yes |
@@ -110,15 +112,18 @@ companion) for every skill, including the internal ones not listed above.
 |---|---|---|
 | `code-reviewer` | Strict senior developer that reviews PRs for quality, conventions, bugs, and test coverage. Use after implementation for final review before PR. | configure,implement |
 | `context-gatherer` | Gathers ticket, design, and project context into a compact bundle file before planning. Use at the start of the implement pipeline so large context (ticket body, comments, DESIGN.md, per-project CLAUDE.md) stays out of the main conversation. | attachments,implement |
+| `docs-maintainer` | Audits the flow project's documentation and generated-index consistency for maintenance drift, producing findings with proposed repairs. Use from the /cenci:maintain skill's docs and all modes. | maintain |
 | `duplication-analyzer` | Analyzes codebase for duplicated code patterns, copy-paste code, and extraction opportunities. Use when checking for repeated logic across files. | — |
 | `implementer` | Senior developer that implements features using TDD — writes tests first, then implementation. Use for writing code, tests, and making builds pass. | implement |
 | `lessons-collector` | Reviews implementation sessions and routes genuine mistakes into topic-specific docs (or CLAUDE.md) for future prevention. Use after implementation only when something actually went wrong. | implement |
 | `planner` | Senior architect that analyzes tickets and produces implementation plans. Use when planning feature work, analyzing ticket requirements, or breaking down complex tasks. | implement |
+| `portability-maintainer` | Audits client-portability consistency (Claude Code, Codex, OpenCode) for maintenance drift, producing Client mismatch findings with proposed repairs. Use from the /cenci:maintain skill's clients and all modes. | maintain |
 | `refiner` | Senior tech lead that analyzes tickets during backlog refinement — finds ambiguity, drafts clarifying questions, and produces the refined ticket proposal (scope, acceptance criteria, sizing, splits). Use from the refine skill's Q&A relay loop. | refine |
 | `security-analyzer` | Analyzes codebase for security vulnerabilities using OWASP guidelines and official library documentation via Context7. Use for security audits of application code. | — |
 | `security-reviewer` | Security-focused code reviewer that checks for OWASP vulnerabilities, auth issues, and sensitive data exposure. Use after implementation to review security. | implement |
 | `silent-failure-hunter` | Detects silent failure patterns — empty catch blocks, swallowed errors, missing error propagation, and silent fallbacks. Use alongside security and code reviewers during the review phase. | implement |
 | `structure-analyzer` | Analyzes file sizes, test organization, and module structure to suggest splits and reorganization. Use when checking for oversized files and structural improvements. | — |
+| `structure-maintainer` | Audits the flow project's structural conventions and test-suite coverage for maintenance drift, producing findings with proposed repairs. Use from the /cenci:maintain skill's structure and all modes. | maintain |
 <!-- cenci-maintain:agents:end -->
 
 <!-- cenci-maintain:workflow-deps:start -->
@@ -137,6 +142,7 @@ companion) for every skill, including the internal ones not listed above.
 | `frontend-classification` | — | implement,refine | — | — |
 | `garden` | — | codex-runtime,project-core shell-rules,worktrees | — | — |
 | `implement` | phase-1-plan.md,phase-2-worktree.md phase-3-test-red.md,phase-4-implement-green.md phase-5-refactor.md,phase-6-7-review.md phase-8-docs.md,phase-9-pr.md | attachments,codex-runtime frontend-classification,project-core review,shell-rules subagent-safety,ticket-ownership | run-artifact-dir.sh | code-reviewer,context-gatherer |
+| `maintain` | — | codex-runtime,project-core shell-rules,subagent-safety worktrees | check.sh | docs-maintainer,portability-maintainer structure-maintainer |
 | `pr-comment-filter` | — | address-review,babysit | — | — |
 | `project-core` | — | — | — | — |
 | `refactor` | — | codex-runtime,project-core shell-rules,subagent-safety | — | — |
@@ -582,8 +588,15 @@ flow/
 ├── opencode/
 │   ├── install-skills.sh      # Symlinks portable skills into OpenCode's global skills dir
 │   └── install-skills.test.sh # Install/remove/idempotency regression
-├── skills/maintain/scripts/
-│   └── check.sh               # Deterministic repo-consistency checker (18 categories, JSON+text report)
+├── skills/maintain/
+│   ├── SKILL.md                # /cenci:maintain skill: structure, docs, clients modes
+│   ├── codex.md                # Thin Codex adapter stub
+│   ├── modes/
+│   │   ├── structure.md
+│   │   ├── docs.md
+│   │   └── clients.md
+│   └── scripts/
+│       └── check.sh            # Deterministic repo-consistency checker (18 categories, JSON+text report)
 ├── tests/
 │   └── maintain.test.sh       # check.sh fixture-driven regression suite
 ├── docs/

@@ -1118,5 +1118,102 @@ assert_has_result "config-examples" "fail" "case30 unterminated \`\`\`json fence
 assert_all_fixes_present "case30 config-examples fail must carry a fix"
 rm -rf "${ROOT}"
 
+# =====================================================================
+# Skill markdown contract cases (ticket #545) -- grep-based anchor-phrase
+# assertions against flow/skills/maintain/{SKILL.md,codex.md,modes/*.md},
+# none of which exist yet at RED-phase time (the skill/mode/agent files are
+# Phase 4's job). Mirrors the anchor-phrase idiom in
+# flow/tests/parity/parity.test.sh: assert the exact edit-site text, never a
+# bare generic marker that could vacuously match unrelated prose -- see
+# docs/shell-scripting-gotchas.md's grep-based contract-test-marker
+# guidance. Every phrase below is written as a single unwrapped source line
+# in the skill/mode markdown authored in Phase 4, specifically to avoid the
+# Markdown line-wrap pitfall also documented there (a phrase split across
+# two source lines would make a naive grep -F false-negative even though the
+# semantic content is correct).
+# =====================================================================
+
+MAINTAIN_SKILL_DIR="${FLOW_DIR}/skills/maintain"
+MAINTAIN_SKILL_MD="${MAINTAIN_SKILL_DIR}/SKILL.md"
+MAINTAIN_CODEX_MD="${MAINTAIN_SKILL_DIR}/codex.md"
+MAINTAIN_MODE_STRUCTURE="${MAINTAIN_SKILL_DIR}/modes/structure.md"
+MAINTAIN_MODE_DOCS="${MAINTAIN_SKILL_DIR}/modes/docs.md"
+MAINTAIN_MODE_CLIENTS="${MAINTAIN_SKILL_DIR}/modes/clients.md"
+
+# assert_file_has_phrase <file> <phrase> <label> -- fails if the file is
+# missing OR the exact (grep -F, literal) phrase is not present.
+assert_file_has_phrase() {
+  local file="$1" phrase="$2" label="$3"
+  [[ -n "${phrase}" ]] || { fail "${label}: test bug -- empty required phrase"; return; }
+  [[ -f "${file}" ]] || { fail "${label}: file not found: ${file}"; return; }
+  grep -qF -- "${phrase}" "${file}" || fail "${label}: expected ${file} to contain: ${phrase}"
+}
+
+# assert_file_lacks_phrase <file> <phrase> <label> -- fails if the file is
+# missing (a "must not contain" claim about a nonexistent file is meaningless
+# and must never vacuously pass) OR the exact phrase IS present.
+assert_file_lacks_phrase() {
+  local file="$1" phrase="$2" label="$3"
+  [[ -n "${phrase}" ]] || { fail "${label}: test bug -- empty required phrase"; return; }
+  [[ -f "${file}" ]] || { fail "${label}: file not found: ${file}"; return; }
+  grep -qF -- "${phrase}" "${file}" && fail "${label}: expected ${file} to NOT contain: ${phrase}"
+  return 0
+}
+
+# --- Mode parsing: each modes/*.md names its one analyzer -----------------
+assert_file_has_phrase "${MAINTAIN_MODE_STRUCTURE}" "structure-maintainer" "MC1 structure.md names structure-maintainer"
+assert_file_has_phrase "${MAINTAIN_MODE_DOCS}" "docs-maintainer" "MC2 docs.md names docs-maintainer"
+assert_file_has_phrase "${MAINTAIN_MODE_CLIENTS}" "portability-maintainer" "MC3 clients.md names portability-maintainer"
+
+# --- One-mode-one-analyzer gating: negative cross-mode assertions, plus
+# mode "all" launching all three (SKILL.md must name all three agents by
+# their backticked name so check.sh's generated workflow-deps/agents tables
+# resolve the references -- see plan Files to Create) ----------------------
+assert_file_lacks_phrase "${MAINTAIN_MODE_STRUCTURE}" "docs-maintainer" "MC4 structure.md must not name docs-maintainer"
+assert_file_lacks_phrase "${MAINTAIN_MODE_STRUCTURE}" "portability-maintainer" "MC5 structure.md must not name portability-maintainer"
+assert_file_lacks_phrase "${MAINTAIN_MODE_DOCS}" "structure-maintainer" "MC6 docs.md must not name structure-maintainer"
+assert_file_lacks_phrase "${MAINTAIN_MODE_DOCS}" "portability-maintainer" "MC7 docs.md must not name portability-maintainer"
+assert_file_lacks_phrase "${MAINTAIN_MODE_CLIENTS}" "structure-maintainer" "MC8 clients.md must not name structure-maintainer"
+assert_file_lacks_phrase "${MAINTAIN_MODE_CLIENTS}" "docs-maintainer" "MC9 clients.md must not name docs-maintainer"
+assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "structure-maintainer" "MC10 SKILL.md (mode 'all') names structure-maintainer"
+assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "docs-maintainer" "MC11 SKILL.md (mode 'all') names docs-maintainer"
+assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "portability-maintainer" "MC12 SKILL.md (mode 'all') names portability-maintainer"
+
+# --- Approval options per mode: mode-scoped options incl. "report only";
+# no rules-only option anywhere (rules mode is out of scope for this ticket
+# -- plan Q1/Scope: "rules mode does not exist yet") -----------------------
+MAINTAIN_OPT_ALL_REPAIRS="all deterministic repairs"
+MAINTAIN_OPT_CRIT_HIGH="critical+high findings"
+MAINTAIN_OPT_SELECT="let me select findings"
+MAINTAIN_OPT_REPORT_ONLY="report only"
+MAINTAIN_OPT_RULES_ONLY="rules-only"
+
+assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "${MAINTAIN_OPT_ALL_REPAIRS}" "MC13 approval options include: all deterministic repairs"
+assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "${MAINTAIN_OPT_CRIT_HIGH}" "MC14 approval options include: critical+high findings"
+assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "${MAINTAIN_OPT_SELECT}" "MC15 approval options include: let me select findings"
+assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "${MAINTAIN_OPT_REPORT_ONLY}" "MC16 approval options include: report only"
+
+assert_file_lacks_phrase "${MAINTAIN_SKILL_MD}" "${MAINTAIN_OPT_RULES_ONLY}" "MC17 SKILL.md must not offer a rules-only approval option"
+assert_file_lacks_phrase "${MAINTAIN_MODE_STRUCTURE}" "${MAINTAIN_OPT_RULES_ONLY}" "MC18 structure.md must not offer a rules-only approval option"
+assert_file_lacks_phrase "${MAINTAIN_MODE_DOCS}" "${MAINTAIN_OPT_RULES_ONLY}" "MC19 docs.md must not offer a rules-only approval option"
+assert_file_lacks_phrase "${MAINTAIN_MODE_CLIENTS}" "${MAINTAIN_OPT_RULES_ONLY}" "MC20 clients.md must not offer a rules-only approval option"
+assert_file_lacks_phrase "${MAINTAIN_CODEX_MD}" "${MAINTAIN_OPT_RULES_ONLY}" "MC21 codex.md must not offer a rules-only approval option"
+
+# --- Report-only no-mutation: SKILL.md documents report-only as terminal
+# (no worktree/file/ticket/label/commit/push/PR) and restates that
+# pre-approval phases are read-only ----------------------------------------
+MAINTAIN_REPORT_ONLY_TERMINAL="Choosing it must end after reporting: no worktree, file mutation, ticket/label mutation, commit, push, or pull request."
+MAINTAIN_PRE_APPROVAL_READONLY="Pre-approval phases must remain read-only"
+
+assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "${MAINTAIN_REPORT_ONLY_TERMINAL}" "MC22 SKILL.md documents report-only as terminal (no worktree/file/ticket/label/commit/push/PR)"
+assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "${MAINTAIN_PRE_APPROVAL_READONLY}" "MC23 SKILL.md restates that pre-approval phases are read-only"
+
+# --- Scope no-op: watch/sandbox is an explicit "not yet covered" no-op ----
+MAINTAIN_SCOPE_NOOP_PHRASE="not yet covered"
+MAINTAIN_SCOPE_PROJECTS_PHRASE='`watch`/`sandbox`'
+
+assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "${MAINTAIN_SCOPE_NOOP_PHRASE}" "MC24 SKILL.md documents the out-of-scope-project no-op wording (not yet covered)"
+assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "${MAINTAIN_SCOPE_PROJECTS_PHRASE}" "MC25 SKILL.md names watch/sandbox as the out-of-scope no-op projects"
+
 echo "maintain.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]
