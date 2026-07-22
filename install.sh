@@ -951,6 +951,32 @@ newest_cenci_root() {
 	[ -n "$newest_manifest" ] && dirname "$(dirname "$newest_manifest")"
 }
 
+# newest_provisioned_cenci_binary — path to the executable cenci binary from the
+# most recently installed version-pinned cache root that has ALREADY bootstrapped
+# one. Unlike current_cenci_binary it never triggers a download; it only reports
+# binaries already present on disk. Used as an update-mode fallback when the
+# newest plugin version's release isn't published yet (the manifest bump reaches
+# the plugin cache before the release assets exist, so its bootstrap download
+# 404s) — a routine manifest-ahead-of-release race must not turn `cenci update`
+# into a hard failure while a previous version's binary, and the daemon running
+# on it, remain perfectly usable. Mirrors newest_cenci_root's glob.
+newest_provisioned_cenci_binary() {
+	local newest_manifest="" newest_bin="" manifest root bin
+	for manifest in \
+		"$HOME"/.claude/plugins/cache/*/cenci-watch/*/.claude-plugin/plugin.json \
+		"$HOME"/.codex/plugins/cache/*/cenci-watch/*/.codex-plugin/plugin.json; do
+		[ -f "$manifest" ] || continue
+		root="$(dirname "$(dirname "$manifest")")"
+		bin="$root/bin/cenci"
+		[ -x "$bin" ] || continue
+		if [ -z "$newest_manifest" ] || [ "$manifest" -nt "$newest_manifest" ]; then
+			newest_manifest="$manifest"
+			newest_bin="$bin"
+		fi
+	done
+	[ -n "$newest_bin" ] && printf '%s\n' "$newest_bin"
+}
+
 # cached_cenci_binary returns the binary belonging to the active plugin
 # cache when SessionStart has already provisioned it.
 cached_cenci_binary() {
@@ -1057,15 +1083,28 @@ step_cenci_watch_setup() {
 	cache_bin="$(current_cenci_binary || true)"
 	if [ -z "$cache_bin" ]; then
 		if [ "$MODE" = update ]; then
-			fail "could not provision the cenci binary from the installed cenci-watch plugin"
-			INSTALL_FAILED=1
-			return 0
+			# The newest plugin version's binary couldn't be provisioned — most
+			# often because its release isn't published yet (the manifest bump
+			# reaches the plugin cache before the release assets exist, so the
+			# bootstrap download 404s). Fall back to the newest previously
+			# provisioned binary if one exists: the daemon keeps running on it
+			# and the update completes as a deferred no-op for the binary rather
+			# than a hard failure.
+			cache_bin="$(newest_provisioned_cenci_binary || true)"
+			if [ -z "$cache_bin" ]; then
+				fail "could not provision the cenci binary from the installed cenci-watch plugin"
+				INSTALL_FAILED=1
+				return 0
+			fi
+			warn "the newest cenci-watch release isn't available yet — keeping the currently provisioned binary; it updates once the release publishes"
+			say "  ${DIM}log: \${TMPDIR:-/tmp}/cenci-bootstrap.log${RESET}"
+		else
+			# A fresh install stays useful without the binary: widgets come from
+			# the checkout, and the first agent session bootstraps and links the
+			# binary itself.
+			warn "could not provision the cenci binary yet — the first agent session bootstraps it"
+			say "  ${DIM}this can happen offline, or before release assets or the plugin cache are populated; log: \${TMPDIR:-/tmp}/cenci-bootstrap.log${RESET}"
 		fi
-		# A fresh install stays useful without the binary: widgets come from
-		# the checkout, and the first agent session bootstraps and links the
-		# binary itself.
-		warn "could not provision the cenci binary yet — the first agent session bootstraps it"
-		say "  ${DIM}this can happen offline, or before release assets or the plugin cache are populated; log: \${TMPDIR:-/tmp}/cenci-bootstrap.log${RESET}"
 	else
 		ok "the cenci binary is provisioned — the daemon self-manages from here"
 		say "  ${DIM}first session may take a moment before status appears; log: \${TMPDIR:-/tmp}/cenci-bootstrap.log${RESET}"
