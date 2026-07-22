@@ -123,7 +123,7 @@ cenci sandbox prune --images    # …and prompt ([y/N], default deny) to remove 
 ```
 
 This is deliberately just a taste: the full launcher reference — every `cenci open`
-flag (`--agent`, `--model`, `--name`, `--shell`, `--docker`, `--host-network`,
+flag (`--agent`, `--model`, `--name`, `--shell`, `--dind`, `--no-dind`, `--host-network`,
 `--reseed-creds`), the `cenci sandbox` verbs (`build`, `build-base`, `prune`,
 `update-agent`, `update-plugins`, `reseed-creds`, `reap-orphans`, `ls`, `stop`), the shortcut table,
 and the flag-parsing rules (unknown long flags are usage errors and exit 2; agent
@@ -497,22 +497,49 @@ OpenCode (`--agent opencode`) has no per-flag "skip permissions" equivalent to b
 
 MCP servers are picked up from project-scoped `.mcp.json` files inside the workspace (e.g. `./.mcp.json` under the project you're working on). The launcher forwards `CONTEXT7_API_KEY` from the host when set, so `.mcp.json` entries referencing `${CONTEXT7_API_KEY}` resolve correctly inside the container.
 
-### Docker (optional, opt-in)
+### Nested Docker (sysbox)
 
-Mount the host Docker/Podman socket into the container for Docker-outside-of-Docker (DooD):
+Repos that need Docker inside the sandbox — Testcontainers, `docker build`/`docker run`
+in tests, or any Docker SDK client — can enable **dind mode**: an inner `dockerd` runs
+*inside* the sandbox container, isolated by the [sysbox](https://github.com/nestybox/sysbox)
+OCI runtime (`sysbox-runc`). This replaces the retired `--docker` flag's
+Docker-outside-of-Docker (DooD) socket mount, which gave the sandbox direct access to the
+host's Docker daemon.
 
-```bash
-cenci open --docker
-```
+**How it works**: the launcher starts the outer sandbox container with
+`--runtime=sysbox-runc` and `-e CENCI_SANDBOX_DIND=1`. Sysbox gives that container its own
+kernel-level container/VM nesting capability, so `entrypoint.sh` starts a private `dockerd`
+inside it, backed by a dedicated volume — never the host's Docker daemon or socket. This
+isolation relies on sysbox's user-namespace separation between the inner and outer
+daemons, and the inner `dockerd` is itself an additional daemon and attack surface versus a
+sandbox with no Docker at all — enable dind only for repos that genuinely need
+in-container Docker; `--no-dind` remains the escape hatch (below) when they don't.
 
-This enables:
-- **TestContainers**: Integration tests that spin up containers (databases, message brokers, etc.)
-- **Docker CLI**: Build images, run containers, use docker compose
-- **Any Docker SDK usage**: Libraries that talk to the Docker daemon
+**Host install** (one-time, per machine): dind mode requires **Docker** as the outer
+runtime (not Podman — sysbox-runc is a Docker-only OCI runtime) with `sysbox-runc`
+registered. `cenci doctor` reports whether it's registered.
+- **Arch Linux**: AUR package `sysbox-ce`, e.g. `yay -S sysbox-ce`
+- **Ubuntu**: download the nestybox `sysbox-ce` `.deb` from
+  [github.com/nestybox/sysbox/releases](https://github.com/nestybox/sysbox/releases) and
+  install it with `sudo apt install ./sysbox-ce_*.deb`
+- Docs: [github.com/nestybox/sysbox](https://github.com/nestybox/sysbox)
 
-The entrypoint automatically detects the socket's group ownership and adds the `dev` user to the matching group.
+**Enabling it**: set `"sandbox": { "dind": true }` in `.cenci/config.json` (written by
+`/cenci:configure`'s dind question) to enable it by default for a repo, or override per
+launch with `cenci open --dind` (force on) / `cenci open --no-dind` (force off — always
+works as an escape hatch, even if the repo config has `dind: true`). Combining `--dind` and
+`--no-dind` is a usage error.
 
-**Security note**: The `--docker` flag grants the container access to the host's Docker daemon. Any container started from within the sandbox runs on the host, with full Docker privileges. This is why it is opt-in.
+**Volume lifecycle**: each repo gets its own persistent Docker storage volume, named
+`<agent>-cenci-dind-<slug>[-<name>]` and mounted at `/var/lib/docker` inside the container —
+so image layers and containers built inside the sandbox survive across sessions for that
+repo. `cenci sandbox prune --volumes` includes dind volumes in its stale-volume cleanup
+alongside home and agent-CLI volumes.
+
+**Limitations**:
+- **Docker-outer-only**: dind requires the host's resolved container runtime to be Docker; it is not supported when the outer runtime is Podman.
+- **Repo-scope-only**: dind is only available when launching from inside a git repo (repo scope) — not in legacy/default scope.
+- **Self-skips in CI**: installing sysbox on a CI runner is out of scope for cenci; CI environments simply don't have it registered, so dind-dependent tests should not assume it's available there.
 
 ### cenci-watch (optional)
 

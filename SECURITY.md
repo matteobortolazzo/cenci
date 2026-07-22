@@ -34,11 +34,11 @@ container, but the container is what stands between it and your host. See
   dependencies, MCP servers, or plugins you add. `watch` release tarballs themselves
   carry a SLSA build provenance attestation you can verify — see
   [watch/README.md#verifying-release-provenance](./watch/README.md#verifying-release-provenance).
-- **The two opt-in flags below**, which deliberately widen the boundary.
+- **The opt-in flag below**, which deliberately widens the boundary.
 
 ### Opt-in weakenings
 
-Both of these are off by default and must be explicitly requested per-launch:
+Off by default and must be explicitly requested per-launch:
 
 - **`--host-network`** — switches the container to host networking, needed for OAuth
   flows that require a browser callback to `localhost`. This removes the container's
@@ -46,12 +46,20 @@ Both of these are off by default and must be explicitly requested per-launch:
   (bridged) network and only reach for `--host-network` when a login flow fails without
   it. A louder, more visible warning when this flag is used is tracked in
   [#148](https://github.com/matteobortolazzo/cenci/issues/148) (not yet landed).
-- **`--docker`** — mounts the host Docker/Podman socket into the container
-  (Docker-outside-of-Docker), for TestContainers, `docker build`, and similar. Any
-  container started from inside the sandbox with this flag runs on the **host** daemon,
-  with full Docker privileges on the host — this is a meaningfully bigger blast radius
-  than the default sandbox and is why it's opt-in. See
-  [sandbox/README.md#docker-optional-opt-in](./sandbox/README.md#docker-optional-opt-in).
+
+### Nested Docker (`--dind`) preserves the boundary
+
+`--dind` (or a repo's `sandbox.dind` config) — nested Docker for TestContainers,
+`docker build`, and similar — is opt-in but, unlike the retired `--docker`
+Docker-outside-of-Docker flag it replaces, does **not** weaken the container boundary. The
+inner `dockerd` runs *inside* the sandbox container, isolated by the sysbox-runc OCI
+runtime, backed by its own dedicated storage volume — it never talks to the host's Docker
+daemon or socket. A container started with `docker` inside a dind sandbox stays inside that
+sandbox; it does not run on the host. This guarantee relies on sysbox's user-namespace
+isolation, and running an inner `dockerd` does add an additional daemon and in-container
+attack surface compared to a sandbox with no Docker at all — which is why dind stays
+opt-in; only enable it for repos that genuinely need in-container Docker. See
+[sandbox/README.md#nested-docker-sysbox](./sandbox/README.md#nested-docker-sysbox).
 
 ### Credentials
 

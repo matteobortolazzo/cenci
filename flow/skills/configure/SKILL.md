@@ -98,6 +98,7 @@ This detection is a **non-blocking advisory** — it never gates configuration a
 | 7b. Pin subagents to 200K | `pinSubagents200K` | Pre-select Yes/No |
 | 8. CI/CD pipeline | `cicd` | Pre-select Yes/No based on `cicd.enabled` |
 | 9. Sandbox Dockerfile | `sandbox` | Pre-select Yes/No based on `sandbox.enabled` |
+| 9b. Nested Docker (dind) | `sandbox` | Pre-select Yes/No based on `existingConfig.sandbox.dind` (else Yes when a Testcontainers/Docker-SDK trigger was detected, No otherwise) |
 | 10. Board config (lazyboards) | `lazyboards` | Only asked when no `.lazyboards.yml` exists; if one exists, suggest missing actions or skip (see *Board Config*) |
 
 Ask these questions one at a time using the `AskUserQuestion` tool:
@@ -162,6 +163,11 @@ Before asking about MCP servers, scan the project for framework dependencies:
 1. If `package.json` exists in the repo root, read `dependencies` and `devDependencies`
 2. If `.csproj` files exist, read `PackageReference` entries
 3. Store the detected package names for matching against the MCP catalog below
+4. **Testcontainers/Docker-SDK detection** (for question 9b below — nested Docker/dind): scan for these triggers and store the result as `dindDetected` (`true` if any match, `false` otherwise):
+   - npm: `testcontainers`, `@testcontainers/*`, or `dockerode` in `dependencies`/`devDependencies`
+   - NuGet: `Testcontainers*` or `Docker.DotNet` in `.csproj` `PackageReference` entries
+   - Python: `testcontainers` in the dependency list (`requirements.txt`, `pyproject.toml`) — dep list only, no source scan
+   - Go: `github.com/testcontainers/testcontainers-go` in `go.mod`
 
 ### MCP Server Catalog
 
@@ -416,6 +422,12 @@ Include the server in `.lsp.json` regardless — it activates once the binary is
    > **Sync obligation**: `sandbox/fragments/*.dockerfile` is the source of truth for these blocks; the mapping table above mirrors their content and existence, not their byte contents (generation reads the fragment files directly — see step 5e). If a fragment is added, removed, or renamed, this table needs a matching manual update. Low risk in practice — both live in the same monorepo and are maintained together — but currently unenforced by tooling.
 
    > **Trust / security note**: `.cenci/Dockerfile` is committed to the repo, so it is reviewed like any other file in the PR that adds or changes it. It only runs `docker build` steps assembled from `sandbox/fragments/*.dockerfile` — no arbitrary runtime hooks execute during configure or during the build it produces.
+
+9b. **Nested Docker (dind)**: "Does this repo need Docker inside the sandbox — Testcontainers, `docker build`/`docker run` in tests, or a Docker SDK client?"
+   - Options: "Yes — enable nested Docker (`sandbox.dind`)", "No — skip"
+   - Default: Yes when `dindDetected` is `true` (a Testcontainers/Docker-SDK trigger was found above), otherwise No
+   - This question is independent of question 9 (Sandbox Dockerfile) — ask it regardless of how Q9 was answered, and record its answer separately (see the `sandbox.dind` schema note below).
+   - If Yes: inform the user that nested Docker requires the host to have Docker (not Podman) with the `sysbox-runc` container runtime registered — `cenci doctor` reports this — and point at `sandbox/README.md#nested-docker-sysbox` for host install instructions per distro.
 
 ### Board Config (lazyboards)
 
@@ -1113,7 +1125,8 @@ For each MCP selected in question 5:
   },
   "sandbox": {
     "enabled": true,
-    "baseVersion": "0.9.0"
+    "baseVersion": "0.9.0",
+    "dind": true
   },
   "lazyboards": {
     "enabled": true,
@@ -1142,11 +1155,18 @@ The `cicd` field is only present when the user selected Yes in question 8. Schem
 
 Omit `cicd` entirely when the user says No (same pattern as `pencil`).
 
-The `sandbox` field is only present when the user selected Yes in question 9. Schema:
-- `sandbox.enabled` — `true` if user opted in; omit `sandbox` entirely if declined (same pattern as `cicd`/`pencil` — never write `{"enabled": false}`)
-- `sandbox.baseVersion` — the resolved sandbox plugin version baked into the generated `.cenci/Dockerfile`'s `ARG BASE_VERSION` default (see the baseVersion resolution algorithm in step 5e), or `null` when it could not be resolved
+The `sandbox` field carries two **independently toggled** sub-answers — question 9 (Sandbox Dockerfile) and question 9b (Nested Docker/dind) — that do not gate each other. Schema:
+- `sandbox.enabled` — `true` if the user opted in to question 9; omit the key entirely if declined (same pattern as `cicd`/`pencil` — never write `enabled: false`)
+- `sandbox.baseVersion` — the resolved sandbox plugin version baked into the generated `.cenci/Dockerfile`'s `ARG BASE_VERSION` default (see the baseVersion resolution algorithm in step 5e), or `null` when it could not be resolved; only present alongside `sandbox.enabled: true`
+- `sandbox.dind` — `true` if the user opted in to question 9b; omit the key entirely if declined (never write `dind: false`)
 
-Omit `sandbox` entirely when the user says No (same pattern as `cicd`/`pencil`).
+Because the two answers are independent, `sandbox` is written whenever **either** is Yes:
+- Q9=Yes, 9b=No → `"sandbox": { "enabled": true, "baseVersion": "<resolved>" }` (no `dind` key)
+- Q9=No, 9b=Yes → `"sandbox": { "dind": true }` (no `enabled`/`baseVersion` keys)
+- Q9=Yes, 9b=Yes → `"sandbox": { "enabled": true, "baseVersion": "<resolved>", "dind": true }`
+- Q9=No, 9b=No → omit `sandbox` entirely (same pattern as `cicd`/`pencil`)
+
+On re-configuration, **merge** into any existing `sandbox` object rather than replacing it wholesale — this preserves the sibling key when only one of the two answers changes (e.g. a dind-only re-config that answers 9b=No must drop only `dind` and retain an already-enabled `sandbox.enabled`/`baseVersion`, and vice versa).
 
 > **Not the same as `.claude/settings.json`'s `sandbox.enabled`.** Step 4 above always writes `"sandbox": { "enabled": false }` into `.claude/settings.json` — that key disables **Claude Code's own host sandbox**, because the cenci-sandbox container is the security boundary instead. This `.cenci/config.json` `sandbox` field is unrelated: it's this ticket's per-repo `.cenci/Dockerfile` toggle, consumed by cenci's configure skill and by `cenci sandbox build`'s per-repo image build — not by Claude Code itself. Same field name (`sandbox.enabled`), two different files, two different consumers, two unrelated meanings. Do not conflate them when reading or writing either file.
 

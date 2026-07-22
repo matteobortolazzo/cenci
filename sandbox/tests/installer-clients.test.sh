@@ -13,9 +13,29 @@ make_common_tools() {
     for tool in bash cat touch uname grep git mkdir dirname ln readlink sleep pkill pgrep nohup chmod sed head tail cut tr rm mktemp jq mv sort cp; do
         ln -s "$(command -v "${tool}")" "${bin}/${tool}"
     done
+    # docker mock: `image inspect` fails (no cenci-sandbox:latest yet, the
+    # existing convention). `info --format '{{json .Runtimes}}'` answers with
+    # DOCKER_INFO_RUNTIMES when set (tests use this to script sysbox-runc
+    # presence/absence for doctor_sysbox — #587, mirroring #585's
+    # SysboxRegistered detection), else defaults to a runtimes map with no
+    # sysbox-runc entry, so every existing case that never sets the env var
+    # exercises the "absent" branch. DOCKER_INFO_FAIL (optional), when set,
+    # instead makes `docker info --format ...` itself fail (exit 1, no
+    # stdout) — simulating a genuine `docker info` failure (daemon down,
+    # permission denied, misconfigured context) distinct from a Docker that's
+    # up but genuinely has no sysbox-runc runtime registered.
     cat > "${bin}/docker" <<'EOF'
 #!/bin/sh
 if [ "${1:-}" = image ] && [ "${2:-}" = inspect ]; then exit 1; fi
+if [ "${1:-}" = info ] && [ "${2:-}" = --format ]; then
+    if [ -n "${DOCKER_INFO_FAIL:-}" ]; then exit 1; fi
+    runtimes=${DOCKER_INFO_RUNTIMES:-}
+    if [ -z "$runtimes" ]; then
+        runtimes='{"runc":{"path":"runc"}}'
+    fi
+    printf '%s\n' "$runtimes"
+    exit 0
+fi
 exit 0
 EOF
     chmod +x "${bin}/docker"
@@ -481,8 +501,13 @@ run_piped_case() {
     CASE_BIN="${bin}"
 }
 
+# run_doctor_case <name> <clients> [extra NAME=value env assignments for the
+# doctor run...] — extra args are forwarded to `env -i` ahead of the doctor
+# invocation, so callers can script additional env vars the mocked tools on
+# PATH read (e.g. DOCKER_INFO_RUNTIMES for the docker mock).
 run_doctor_case() {
     local name="$1" clients="$2"
+    shift 2
     run_case "${name}" "${clients}"
     local bin="${WORK}/${name}/bin" output="${WORK}/${name}/doctor-output"
     set +e
@@ -491,6 +516,7 @@ run_doctor_case() {
         CLAUDE_INSTALLED_FILE="${WORK}/${name}/claude-installed" \
         CODEX_MARKETPLACE_FILE="${WORK}/${name}/codex-marketplace" \
         CODEX_INSTALLED_FILE="${WORK}/${name}/codex-installed" \
+        "$@" \
         bash "${ROOT}/install.sh" doctor >"${output}" 2>&1
     DOCTOR_EXIT=$?
     set -e
@@ -516,6 +542,46 @@ fi
 exit 0
 EOF
     chmod +x "${bin}/cenci"
+    run_doctor_case "${name}" "${clients}"
+}
+
+# run_doctor_case_with_docker_runtimes <name> <clients> <runtimes_json> — like
+# run_doctor_case, but sets DOCKER_INFO_RUNTIMES for the doctor invocation so
+# the docker mock's `docker info --format '{{json .Runtimes}}'` branch answers
+# with <runtimes_json>, exercising doctor_sysbox's presence/absence branches
+# (#587, mirroring #585's SysboxRegistered detection: presence of the
+# "sysbox-runc" key in the Runtimes map).
+run_doctor_case_with_docker_runtimes() {
+    local name="$1" clients="$2" runtimes_json="$3"
+    run_doctor_case "${name}" "${clients}" "DOCKER_INFO_RUNTIMES=${runtimes_json}"
+}
+
+# run_doctor_case_with_docker_info_failure <name> <clients> — like
+# run_doctor_case, but sets DOCKER_INFO_FAIL for the doctor invocation so the
+# docker mock's `docker info --format '{{json .Runtimes}}'` branch itself
+# fails (exit 1, no stdout), exercising doctor_sysbox's distinct "could not
+# query docker info" path (#587 review fix) rather than the generic
+# "not registered" message a genuinely-absent sysbox-runc runtime produces.
+run_doctor_case_with_docker_info_failure() {
+    local name="$1" clients="$2"
+    run_doctor_case "${name}" "${clients}" "DOCKER_INFO_FAIL=1"
+}
+
+# run_doctor_case_with_podman <name> <clients> — like run_doctor_case, but
+# stubs a `podman` executable onto the case's PATH before the run so
+# container_runtime() resolves "podman" (have podman is checked before
+# docker), exercising doctor_sysbox's runtime-gated self-skip: #585's sysbox
+# preflight/detection is Docker-only, so the doctor check must not run at all
+# under Podman.
+run_doctor_case_with_podman() {
+    local name="$1" clients="$2"
+    local bin="${WORK}/${name}/bin"
+    mkdir -p "${bin}"
+    cat > "${bin}/podman" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+    chmod +x "${bin}/podman"
     run_doctor_case "${name}" "${clients}"
 }
 
@@ -845,6 +911,28 @@ echo "case: doctor reports the cenci daemon as not running, without failing doct
 run_doctor_case_with_daemon_status doctor-daemon-down claude 1
 [[ "${DOCTOR_EXIT}" -eq 0 ]]
 assert_contains "${DOCTOR_OUTPUT}" "cenci daemon: not running"
+
+echo "case: doctor reports sysbox-runc registered when present under Docker (#587, mirrors #585's SysboxRegistered presence check)"
+run_doctor_case_with_docker_runtimes doctor-sysbox-present claude '{"runc":{"path":"runc"},"sysbox-runc":{"path":"/usr/bin/sysbox-runc"}}'
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "sysbox-runc registered"
+
+echo "case: doctor self-skips sysbox with a neutral line (no failure marker) when Docker has no sysbox-runc runtime, and never fails doctor"
+run_doctor_case_with_docker_runtimes doctor-sysbox-absent claude '{"runc":{"path":"runc"}}'
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "sysbox-runc not registered"
+assert_not_contains "${DOCTOR_OUTPUT}" "✗ sysbox-runc"
+
+echo "case: doctor reports a distinct 'could not query docker info' line (not 'not registered') when docker info itself fails, and never fails doctor (#587 review fix)"
+run_doctor_case_with_docker_info_failure doctor-sysbox-docker-info-fail claude
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "could not query docker info — sysbox-runc status unknown"
+assert_not_contains "${DOCTOR_OUTPUT}" "sysbox-runc not registered"
+
+echo "case: doctor skips the sysbox check entirely when the resolved container runtime is Podman, not Docker (#585's sysbox preflight is Docker-only)"
+run_doctor_case_with_podman doctor-sysbox-podman claude
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_not_contains "${DOCTOR_OUTPUT}" "sysbox"
 
 echo "case: doctor fails when no supported client is available"
 run_doctor_case doctor-none none

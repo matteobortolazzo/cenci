@@ -98,6 +98,6 @@ Each topic has exactly one home; everything else links to it.
 |---|---|
 | CLI reference (verbs, flags, shortcut table) | `watch/README.md` |
 | Image architecture (base/fragments, per-repo images) | `sandbox/README.md` |
-| Security boundary (why `--docker`/`--host-network` are opt-in) | `SECURITY.md` |
+| Security boundary (why `--dind`/`--host-network` are opt-in) | `SECURITY.md` |
 | Old → new name mappings | `docs/migrating-to-cenci.md` |
 | Failure atlas / recovery procedures per error code | `docs/failure-atlas.md` |
