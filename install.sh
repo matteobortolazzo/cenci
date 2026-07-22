@@ -416,6 +416,30 @@ doctor_codex_support() {
 	warn "Codex hook trust state is not exposed non-interactively; inspect /hooks after plugin updates (cenci never changes trust)"
 }
 
+# doctor_sysbox reports whether Docker has the sysbox-runc container runtime
+# registered for nested Docker (dind) sandbox sessions. This is an
+# informational, presence-only mirror of Go's sandbox.SysboxRegistered
+# (watch/internal/sandbox/sandbox.go), which probes the exact same
+# `docker info --format '{{json .Runtimes}}'` output for the same
+# "sysbox-runc" key — keep both detections in sync if either changes.
+# Docker-gated only (sysbox dind requires Docker, not Podman — #585's
+# preflight is Docker-only) and never sets DOCTOR_FAILED: sysbox is an
+# opt-in capability, expected to be absent on hosts/CI that don't need it
+# (#587).
+doctor_sysbox() {
+	local runtime="$1" runtimes
+	[ "$runtime" = docker ] || return 0
+	if ! runtimes="$(docker info --format '{{json .Runtimes}}' 2>/dev/null)"; then
+		say "    could not query docker info — sysbox-runc status unknown"
+		return 0
+	fi
+	if printf '%s' "$runtimes" | grep -q '"sysbox-runc"'; then
+		ok "sysbox-runc registered — nested Docker (dind) available"
+	else
+		say "    sysbox-runc not registered — nested Docker (dind) unavailable (see sandbox/README.md#nested-docker-sysbox)"
+	fi
+}
+
 # opencode_config_dir — OpenCode's config directory, matching the exact
 # expression flow/opencode/install-skills.sh uses for its own TARGET_DIR, so
 # doctor's file-based checks below stay in sync with what that script (and
@@ -622,6 +646,7 @@ run_doctor() {
 	if runtime="$(container_runtime 2>/dev/null)"; then
 		check "cenci-sandbox:latest image" optional "$image_hint" \
 			"$runtime" image inspect cenci-sandbox:latest
+		doctor_sysbox "$runtime"
 	fi
 
 	say ""
