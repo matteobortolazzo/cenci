@@ -6,7 +6,7 @@ ACTION=${1:?usage: install-skills.sh install|remove}
 
 # Portable convention skills that are safe to expose to any client (no
 # Claude-only tool/UX dependency). Pipeline/interactive skills (implement,
-# configure, refine, design, garden, address-review, review, sync,
+# configure, refine, design, maintain, address-review, review, sync,
 # codex-runtime, project-core, ci-repair, ticket-ownership,
 # babysit-attention) are intentionally excluded — they assume Claude Code's
 # interactive approval flow. This list is the single source of truth; the

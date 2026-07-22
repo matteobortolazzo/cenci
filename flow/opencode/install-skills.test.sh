@@ -17,10 +17,10 @@ fi
 
 # Portable convention skills the helper is expected to link into OpenCode's
 # native global skills directory. Pipeline/interactive skills (implement,
-# configure, refine, review, refactor, sync, garden, design, address-review)
+# configure, refine, review, refactor, sync, maintain, design, address-review)
 # must never appear here.
 PORTABLE_SKILLS="attachments babysit frontend-classification pr-comment-filter shell-rules stack-angular stack-dotnet stack-go subagent-safety testing verify-ui worktrees"
-PIPELINE_SKILLS="implement configure refine review refactor sync garden design address-review"
+PIPELINE_SKILLS="implement configure refine review refactor sync maintain design address-review"
 
 HOME_A="$(mktemp -d)"
 HOME_B="$(mktemp -d)"

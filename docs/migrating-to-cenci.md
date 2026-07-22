@@ -109,6 +109,12 @@ importing `@AGENTS.md`; settings and native agent files remain client-specific a
 |---|---|
 | `github.com/matteobortolazzo/agent-stack/agentwatch/v4` | `github.com/matteobortolazzo/cenci/watch` (major version reset to 0.x with the rename, so no `/vN` suffix) |
 
+### Skills / slash-commands
+
+| Old | New |
+|---|---|
+| `/cenci:garden [project]` | `/cenci:maintain rules` — garden retired; rule curation folded into the maintain skill's `rules` mode |
+
 ## cenci-sand → cenci
 
 The `cenci-sand` bash launcher has been folded into the `cenci` Go binary: sessions

@@ -21,7 +21,7 @@ scope and planning decisions human-gated.
 | `/cenci:address-review <pr-number>` | Address PR review comments — fetch, evaluate, fix, reply, push, re-request review |
 | `/cenci:babysit <pr-number>` | Persistent PR follow-through — periodically checks CI and new review comments and drives them to resolution until the PR merges or closes |
 | `/cenci:sync` | Pull latest main, rebase active worktrees, prune stale remotes, clean up merged branches |
-| `/cenci:garden [project]` | Curate accumulated lessons — merge duplicate rules, demote rules now covered by automated checks, archive stale ones, and open a PR with the cleanup |
+| `/cenci:maintain rules` | Curate accumulated lessons — merge duplicate rules, demote rules now covered by automated checks, archive stale ones, and open a PR with the cleanup |
 
 **Codex support**: Codex receives the portable convention skills below plus the full
 implementation workflow as a documented `AGENTS.md` equivalent. The interactive
@@ -56,7 +56,6 @@ Codex and OpenCode so neither mistakes a pipeline command for a supported workfl
 | `babysit` | Yes | Yes | Yes | Thin wrapper over the client-neutral `cenci babysit` supervisor |
 | `configure` | Yes | In development | No | Neutral/adapters foundation present |
 | `design` | Yes | In development | No | Optional Pencil procedure |
-| `garden` | Yes | In development | No | Plan/apply foundation |
 | `implement` | Yes | In development | No | Agents/checkpoints foundation |
 | `maintain` | Yes | In development | No | Deterministic-check + agent-audit foundation |
 | `refactor` | Yes | In development | No | Native analysis foundation |
@@ -85,7 +84,6 @@ companion) for every skill, including the internal ones not listed above.
 | `configure` | Configure cenci's neutral project core and generate Claude/Codex adapters. | No | Yes | Yes | Yes |
 | `design` | Run interactive design reasoning and create .pen files using Pencil. | No | Yes | Yes | Yes |
 | `frontend-classification` | Classify whether a ticket is frontend or UI work. Use when deciding whether design-aware planning, visual verification, UI tests, or screenshot capture applies. | Yes | No | Yes | Yes |
-| `garden` | Curate AGENTS.md critical rules and topic docs through a reviewed PR. | No | Yes | Yes | Yes |
 | `implement` | Run the full cenci plan, test, implementation, review, and pull-request pipeline. | No | Yes | Yes | Yes |
 | `maintain` | Audit and repair structure, documentation, client-portability, and rule/lesson-hygiene drift through a deterministic check plus specialized agents, gated by human approval. | No | Yes | Yes | Yes |
 | `pr-comment-filter` | Decide which pull-request review comments are actionable. Use when addressing review feedback, monitoring a PR, or filtering already-handled comments. | Yes | No | Yes | Yes |
@@ -141,7 +139,6 @@ companion) for every skill, including the internal ones not listed above.
 | `configure` | — | babysit,codex-runtime shell-rules,testing verify-ui | — | code-reviewer |
 | `design` | — | attachments,codex-runtime project-core,shell-rules ticket-ownership | — | — |
 | `frontend-classification` | — | implement,refine | — | — |
-| `garden` | — | codex-runtime,project-core shell-rules,worktrees | — | — |
 | `implement` | phase-1-plan.md,phase-2-worktree.md phase-3-test-red.md,phase-4-implement-green.md phase-5-refactor.md,phase-6-7-review.md phase-8-docs.md,phase-9-pr.md | attachments,codex-runtime frontend-classification,project-core review,shell-rules subagent-safety,ticket-ownership | run-artifact-dir.sh | code-reviewer,context-gatherer |
 | `maintain` | — | codex-runtime,project-core shell-rules,subagent-safety worktrees | check.sh | docs-maintainer,portability-maintainer rules-maintainer,structure-maintainer |
 | `pr-comment-filter` | — | address-review,babysit | — | — |
@@ -305,7 +302,7 @@ your-project/
 
 **Lesson lifecycle**
 
-Rules only enter through the lessons-collector (append, after implementation sessions) and only leave through `/cenci:garden` (curation, human-gated). Because `CLAUDE.md` is loaded into every session, each rule it holds is a permanent context cost — gardening periodically merges duplicates, moves non-invariants into on-demand `docs/<topic>.md` files, demotes rules that a regression test or lint gate now enforces, and archives rules whose subject no longer exists. The collector suggests a gardening run in its summary when a session pushes a rules section past its size threshold.
+Rules only enter through the lessons-collector (append, after implementation sessions) and only leave through `/cenci:maintain rules` (curation, human-gated). Because `CLAUDE.md` is loaded into every session, each rule it holds is a permanent context cost — maintenance periodically merges duplicates, moves non-invariants into on-demand `docs/<topic>.md` files, demotes rules that a regression test or lint gate now enforces, and archives rules whose subject no longer exists. The collector suggests a maintenance run in its summary when a session pushes a rules section past its size threshold.
 
 **Backward compatibility**
 

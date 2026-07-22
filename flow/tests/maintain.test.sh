@@ -1283,5 +1283,38 @@ assert_file_lacks_phrase "${MAINTAIN_MODE_RULES}" "~25" "MC42 rules.md must not 
 assert_file_has_phrase "${MAINTAIN_MODE_RULES}" "lessons-learned*.md" "MC43 rules.md names legacy lessons-learned*.md files"
 assert_file_has_phrase "${MAINTAIN_MODE_RULES}" "same PR" "MC44 rules.md states legacy survivors are relocated and the legacy file deleted in the same PR"
 
+# --- Garden retirement (#547): flow/skills/garden/ must be gone, and no
+# retired-command literal (the old skill's slash-invocation prefixed with
+# either the Claude or Codex client sigil) may remain live anywhere in the
+# repo. The needle is built from concatenated parts so this assertion's own
+# source line never self-matches its own grep. -------------------------------
+if [[ -d "${FLOW_DIR}/skills/garden" ]]; then
+  fail "MC45 flow/skills/garden/ must be deleted (garden is retired)"
+fi
+
+REPO_ROOT="$(cd "${FLOW_DIR}/.." && pwd)"
+if [[ -z "${REPO_ROOT}" || ! -d "${REPO_ROOT}" ]]; then
+  fail "MC46 setup: REPO_ROOT resolution failed (cd \"${FLOW_DIR}/..\" did not resolve to a real directory)"
+else
+  GARDEN_NEEDLE_PART1="cenci:"
+  GARDEN_NEEDLE_PART2="garden"
+  GARDEN_NEEDLE="${GARDEN_NEEDLE_PART1}${GARDEN_NEEDLE_PART2}"
+  GARDEN_GREP_STDERR="$(mktemp)"
+  GARDEN_HITS="$(grep -rlF \
+    --exclude-dir=.git \
+    --exclude-dir=.worktrees \
+    --exclude-dir=worktrees \
+    --exclude="migrating-to-cenci.md" \
+    -- "${GARDEN_NEEDLE}" "${REPO_ROOT}" \
+    2>"${GARDEN_GREP_STDERR}")"
+  GARDEN_GREP_CODE=$?
+  if [[ "${GARDEN_GREP_CODE}" -gt 1 ]]; then
+    fail "MC46 setup: grep search over ${REPO_ROOT} failed (exit ${GARDEN_GREP_CODE}): $(cat "${GARDEN_GREP_STDERR}")"
+  elif [[ -n "${GARDEN_HITS}" ]]; then
+    fail "MC46 no live retired-garden-command reference may remain outside docs/migrating-to-cenci.md; found in: ${GARDEN_HITS}"
+  fi
+  rm -f "${GARDEN_GREP_STDERR}"
+fi
+
 echo "maintain.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]

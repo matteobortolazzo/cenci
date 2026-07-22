@@ -12,7 +12,7 @@ Phase 2's `scripts/check.sh` run (`context-budget`) is the source of truth for t
 
 ## Phase 3 contribution: Inventory + Audit
 
-This mode's contribution to the shared Parallel audit phase is `/cenci:garden`'s own Phase 1 (Inventory) and Phase 2 (Audit), run by `rules-maintainer` instead of as a standalone skill's phases:
+This mode's contribution to the shared Parallel audit phase is the retired garden skill's own Phase 1 (Inventory) and Phase 2 (Audit), run by `rules-maintainer` instead of as a standalone skill's phases:
 
 - **Inventory** — enumerate `## Critical Rules` bullets in `CLAUDE.md`/`AGENTS.md`, rule bullets
   in `docs/*.md`, and any legacy `lessons-learned*.md` files.

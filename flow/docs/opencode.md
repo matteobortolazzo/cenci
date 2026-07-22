@@ -78,7 +78,7 @@ These are portable because each one avoids depending on a Claude Code-only tool 
 approval mechanism.
 
 Pipeline and interactive skills — `implement`, `configure`, `refine`, `design`,
-`garden`, `address-review`, `review`, `refactor`, `sync`, `codex-runtime`,
+`maintain`, `address-review`, `review`, `refactor`, `sync`, `codex-runtime`,
 `project-core`, `ci-repair`, `ticket-ownership`, `babysit-attention` — are **not**
 linked. They assume
 Claude Code's interactive approval flow (`AskUserQuestion`, checkpoints, native

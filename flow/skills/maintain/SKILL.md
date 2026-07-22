@@ -20,8 +20,8 @@ hygiene consistency each drift independently as the repo grows. This skill pairs
 LLM-free checker (`scripts/check.sh`) with four lightweight judgment-layer agents, reports every
 finding with evidence and a proposed repair, and only ever mutates the repo after explicit human
 approval, in a dedicated worktree, as one reviewed PR. `rules` mode curates `## Critical Rules`
-and topic-doc rule bullets — the same curation `/cenci:garden` performs today, folded into this
-unified flow.
+and topic-doc rule bullets — the same curation the retired garden skill used to perform, folded
+into this unified flow.
 
 ## Context
 
