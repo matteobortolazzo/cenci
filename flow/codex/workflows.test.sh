@@ -3,7 +3,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 failures=0
 fail(){ echo "FAIL: $1" >&2; failures=$((failures+1)); }
-for workflow in configure refine implement review address-review refactor sync garden design; do
+for workflow in configure refine implement review address-review refactor sync maintain design; do
   skill="${ROOT}/skills/${workflow}/SKILL.md"
   procedure="${ROOT}/skills/${workflow}/codex.md"
   grep -q 'Client dispatch.*Codex' "$skill" || fail "$workflow dispatcher"

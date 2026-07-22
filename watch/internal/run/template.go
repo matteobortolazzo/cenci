@@ -92,7 +92,7 @@ func builtinConfig() FileConfig {
 					"design": codexWF("design"), "implement": codexWF("implement"),
 					"review": codexWF("review"), "address-review": codexWF("address-review"),
 					"refactor": codexWF("refactor"), "sync": codexWF("sync"),
-					"garden": codexWF("garden"), "babysit": codexWF("babysit"), "babysit-attention": codexWF("babysit-attention"), "ci-repair": codexWF("ci-repair"),
+					"maintain": codexWF("maintain"), "babysit": codexWF("babysit"), "babysit-attention": codexWF("babysit-attention"), "ci-repair": codexWF("ci-repair"),
 				},
 			},
 			"opencode": {
@@ -250,7 +250,7 @@ func (fc FileConfig) BuildCommand(agent, workflow, ticket, model string, sandbox
 
 func codexPlanningWorkflow(workflow string) bool {
 	switch workflow {
-	case "configure", "refine", "implement", "address-review", "refactor", "garden", "design":
+	case "configure", "refine", "implement", "address-review", "refactor", "maintain", "design":
 		return true
 	}
 	return false

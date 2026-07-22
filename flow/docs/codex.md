@@ -18,7 +18,7 @@ Review changed plugin hooks with `/hooks`. cenci never changes hook trust automa
 
 Explicitly mention `$cenci:configure`, `$cenci:refine`, `$cenci:implement`,
 `$cenci:review`, `$cenci:address-review`, `$cenci:refactor`, `$cenci:sync`,
-`$cenci:garden`, `$cenci:babysit`, or optional `$cenci:design`.
+`$cenci:maintain`, `$cenci:babysit`, or optional `$cenci:design`.
 
 The staged procedures are under active development. Their intended contract is: planning workflows enter `/plan`, gather material choices, and produce an approved plan
 without mutations. A second normal-mode invocation persists plans, updates GitHub, and

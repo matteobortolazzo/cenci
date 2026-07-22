@@ -104,7 +104,7 @@ func TestUnknownAgentAndWorkflowError(t *testing.T) {
 
 func TestCodexNativeWorkflowTemplates(t *testing.T) {
 	cfg := builtinConfig()
-	for _, workflow := range []string{"configure", "refine", "design", "implement", "review", "address-review", "refactor", "sync", "garden"} {
+	for _, workflow := range []string{"configure", "refine", "design", "implement", "review", "address-review", "refactor", "sync", "maintain"} {
 		argv, err := cfg.BuildCommand("codex", workflow, "42", "", false)
 		if err != nil {
 			t.Fatalf("%s: %v", workflow, err)
