@@ -82,7 +82,7 @@ From the ticket description/task and file paths, match against the `projects` ar
 
 ### 6. Write the bundle file
 
-Write the bundle to the provided path with these sections (omit sections that don't apply, but always include `## Ticket Details`):
+Write the bundle to the provided path with these sections. `## Ticket Details` and `## Design Context` are **always written, never omitted** — `## Design Context` still gets a heading with the literal body `N/A` when no design applies (see the note after the template). `## Project Context` is the only section that may be omitted outright (monorepo-only; skip when nothing applies):
 
 ```markdown
 ## Ticket Details
@@ -104,7 +104,7 @@ penFile: <path>
 <per-project CLAUDE.md content for affected projects (monorepo only) — or omit>
 ```
 
-The parsed lists at the top of `## Design Context` are mandatory when a DESIGN.md was found — Phase 4 of the implement pipeline reads them directly from the plan file. If no design exists, write `## Design Context` followed by `N/A`.
+The parsed lists at the top of `## Design Context` are mandatory when a DESIGN.md was found — Phase 4 of the implement pipeline reads them directly from the plan file. **If no design exists, still write the `## Design Context` heading, with the literal body `N/A` — never drop the section.** The plan-file validator (`watch/internal/pipeline/planfile.go`) hard-requires this heading to be present in every plan; omitting it makes the persisted plan file fail validation on every later `/cenci:implement` run.
 
 These headings match the plan file format — the main agent appends this bundle verbatim when persisting the plan.
 
