@@ -1139,6 +1139,8 @@ MAINTAIN_CODEX_MD="${MAINTAIN_SKILL_DIR}/codex.md"
 MAINTAIN_MODE_STRUCTURE="${MAINTAIN_SKILL_DIR}/modes/structure.md"
 MAINTAIN_MODE_DOCS="${MAINTAIN_SKILL_DIR}/modes/docs.md"
 MAINTAIN_MODE_CLIENTS="${MAINTAIN_SKILL_DIR}/modes/clients.md"
+MAINTAIN_MODE_RULES="${MAINTAIN_SKILL_DIR}/modes/rules.md"
+MAINTAIN_AGENT_RULES="${FLOW_DIR}/agents/rules-maintainer.md"
 
 # assert_file_has_phrase <file> <phrase> <label> -- fails if the file is
 # missing OR the exact (grep -F, literal) phrase is not present.
@@ -1179,25 +1181,32 @@ assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "structure-maintainer" "MC10 SKILL
 assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "docs-maintainer" "MC11 SKILL.md (mode 'all') names docs-maintainer"
 assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "portability-maintainer" "MC12 SKILL.md (mode 'all') names portability-maintainer"
 
-# --- Approval options per mode: mode-scoped options incl. "report only";
-# no rules-only option anywhere (rules mode is out of scope for this ticket
-# -- plan Q1/Scope: "rules mode does not exist yet") -----------------------
+# --- Approval options per mode: mode-scoped options incl. "report only".
+# Ticket #546 flips MC17 to assert presence of the rules-only option in
+# SKILL.md (the only file that ever documents approval options -- Phase 5 is
+# shared/central, not per-mode). MC18-MC20 stay lacks-assertions: mode files
+# never document approval options themselves regardless of whether rules
+# mode exists (see modes/structure.md's own "Approval" section: it points at
+# SKILL.md's Phase 5, it doesn't restate options). MC21 also stays a
+# lacks-assertion: codex.md gets a one-line rule-curation mention (tested
+# separately below) but must never introduce the rules-only approval literal
+# itself -- see plan Risks "Codex under-specification" / Files to Modify. ---
 MAINTAIN_OPT_ALL_REPAIRS="all deterministic repairs"
 MAINTAIN_OPT_CRIT_HIGH="critical+high findings"
 MAINTAIN_OPT_SELECT="let me select findings"
 MAINTAIN_OPT_REPORT_ONLY="report only"
-MAINTAIN_OPT_RULES_ONLY="rules-only"
+MAINTAIN_OPT_RULES_ONLY="rules only"
 
 assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "${MAINTAIN_OPT_ALL_REPAIRS}" "MC13 approval options include: all deterministic repairs"
 assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "${MAINTAIN_OPT_CRIT_HIGH}" "MC14 approval options include: critical+high findings"
 assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "${MAINTAIN_OPT_SELECT}" "MC15 approval options include: let me select findings"
 assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "${MAINTAIN_OPT_REPORT_ONLY}" "MC16 approval options include: report only"
 
-assert_file_lacks_phrase "${MAINTAIN_SKILL_MD}" "${MAINTAIN_OPT_RULES_ONLY}" "MC17 SKILL.md must not offer a rules-only approval option"
-assert_file_lacks_phrase "${MAINTAIN_MODE_STRUCTURE}" "${MAINTAIN_OPT_RULES_ONLY}" "MC18 structure.md must not offer a rules-only approval option"
-assert_file_lacks_phrase "${MAINTAIN_MODE_DOCS}" "${MAINTAIN_OPT_RULES_ONLY}" "MC19 docs.md must not offer a rules-only approval option"
-assert_file_lacks_phrase "${MAINTAIN_MODE_CLIENTS}" "${MAINTAIN_OPT_RULES_ONLY}" "MC20 clients.md must not offer a rules-only approval option"
-assert_file_lacks_phrase "${MAINTAIN_CODEX_MD}" "${MAINTAIN_OPT_RULES_ONLY}" "MC21 codex.md must not offer a rules-only approval option"
+assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "${MAINTAIN_OPT_RULES_ONLY}" "MC17 SKILL.md now offers a rules only approval option"
+assert_file_lacks_phrase "${MAINTAIN_MODE_STRUCTURE}" "${MAINTAIN_OPT_RULES_ONLY}" "MC18 structure.md must not offer a rules only approval option"
+assert_file_lacks_phrase "${MAINTAIN_MODE_DOCS}" "${MAINTAIN_OPT_RULES_ONLY}" "MC19 docs.md must not offer a rules only approval option"
+assert_file_lacks_phrase "${MAINTAIN_MODE_CLIENTS}" "${MAINTAIN_OPT_RULES_ONLY}" "MC20 clients.md must not offer a rules only approval option"
+assert_file_lacks_phrase "${MAINTAIN_CODEX_MD}" "${MAINTAIN_OPT_RULES_ONLY}" "MC21 codex.md must not offer a rules only approval option"
 
 # --- Report-only no-mutation: SKILL.md documents report-only as terminal
 # (no worktree/file/ticket/label/commit/push/PR) and restates that
@@ -1214,6 +1223,65 @@ MAINTAIN_SCOPE_PROJECTS_PHRASE='`watch`/`sandbox`'
 
 assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "${MAINTAIN_SCOPE_NOOP_PHRASE}" "MC24 SKILL.md documents the out-of-scope-project no-op wording (not yet covered)"
 assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "${MAINTAIN_SCOPE_PROJECTS_PHRASE}" "MC25 SKILL.md names watch/sandbox as the out-of-scope no-op projects"
+
+# =====================================================================
+# Ticket #546 -- port Garden's rule curation into /cenci:maintain rules mode.
+# Grep-based anchor-phrase assertions against modes/rules.md,
+# agents/rules-maintainer.md, SKILL.md's rules wiring, and codex.md's
+# rule-curation mention -- none of these production files/edits exist yet at
+# RED-phase time (Phase 4's job). Mirrors the #545 anchor-phrase idiom above:
+# assert the exact edit-site text, single unwrapped source line, never a bare
+# generic marker that could vacuously match unrelated prose.
+# =====================================================================
+
+# --- Mode parsing: rules.md names rules-maintainer as its sole analyzer,
+# mirroring MC1-3 -----------------------------------------------------------
+assert_file_has_phrase "${MAINTAIN_MODE_RULES}" "rules-maintainer" "MC26 rules.md names rules-maintainer"
+
+# --- One-mode-one-analyzer gating: rules.md must not name the other three
+# analyzers, mirroring the MC4-9 cross-mode negative-test pattern -----------
+assert_file_lacks_phrase "${MAINTAIN_MODE_RULES}" "structure-maintainer" "MC27 rules.md must not name structure-maintainer"
+assert_file_lacks_phrase "${MAINTAIN_MODE_RULES}" "docs-maintainer" "MC28 rules.md must not name docs-maintainer"
+assert_file_lacks_phrase "${MAINTAIN_MODE_RULES}" "portability-maintainer" "MC29 rules.md must not name portability-maintainer"
+
+# --- SKILL.md wiring: mode "all" also launches rules-maintainer, backtick-
+# named so check.sh's generated agents/workflow-deps tables resolve the
+# reference (mirrors MC10-12) -----------------------------------------------
+assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "rules-maintainer" "MC30 SKILL.md (mode 'all') names rules-maintainer"
+
+# --- SKILL.md Phase 3 dispatch: mode rules launches only rules-maintainer,
+# same phrasing pattern as the other three modes' dispatch lines ("launch
+# only \`structure-maintainer\`" etc.) --------------------------------------
+assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "launch only \`rules-maintainer\`" "MC31 SKILL.md Phase 3 dispatches mode rules to launch only rules-maintainer"
+
+# --- SKILL.md grammar: rules is now a valid first-token mode alongside
+# structure/docs/clients, and the "not yet a valid mode" sentence is gone --
+MAINTAIN_MODE_LIST_PHRASE='`structure`, `docs`, `clients`, or `rules`'
+assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "${MAINTAIN_MODE_LIST_PHRASE}" "MC32 SKILL.md grammar lists rules as a valid mode token"
+assert_file_lacks_phrase "${MAINTAIN_SKILL_MD}" "is not yet a valid mode" "MC33 SKILL.md no longer says rules is not yet a valid mode"
+
+# --- codex.md parity mention: a rule/lesson-curation mention is added to the
+# audited-drift sentence, per Q&A round 1 -- literal quoted from the plan's
+# Files to Modify example so Phase 4 has an unambiguous target -------------
+MAINTAIN_CODEX_RULE_MENTION='`## Critical Rules` / topic-doc rule curation'
+assert_file_has_phrase "${MAINTAIN_CODEX_MD}" "${MAINTAIN_CODEX_RULE_MENTION}" "MC34 codex.md mentions rule/lesson curation for Claude/Codex parity"
+
+# --- agents/rules-maintainer.md: shared finding schema + Garden's evidence
+# discipline preserved verbatim ---------------------------------------------
+assert_file_has_phrase "${MAINTAIN_AGENT_RULES}" "Rule hygiene" "MC35 rules-maintainer.md documents Category: Rule hygiene"
+assert_file_has_phrase "${MAINTAIN_AGENT_RULES}" "Demote and Archive require fresh \`Grep\`/\`Read\` evidence" "MC36 rules-maintainer.md preserves fresh Grep/Read evidence discipline for Demote/Archive"
+assert_file_has_phrase "${MAINTAIN_AGENT_RULES}" "Quote each bullet being merged" "MC37 rules-maintainer.md preserves quoted-bullets evidence discipline for Merge"
+assert_file_has_phrase "${MAINTAIN_AGENT_RULES}" "Default is Keep" "MC38 rules-maintainer.md preserves default-Keep classification"
+assert_file_has_phrase "${MAINTAIN_AGENT_RULES}" "you never edit files" "MC39 rules-maintainer.md states it is read-only and never edits files"
+
+# --- modes/rules.md: references check.sh as the threshold source of truth,
+# never restates the numeric marks, and states the legacy lessons-learned*.md
+# migration behavior (survivors relocated + legacy file deleted, same PR) --
+assert_file_has_phrase "${MAINTAIN_MODE_RULES}" "scripts/check.sh" "MC40 rules.md references scripts/check.sh as the source of truth for context-budget thresholds"
+assert_file_lacks_phrase "${MAINTAIN_MODE_RULES}" "~10" "MC41 rules.md must not restate the Critical-Rules numeric threshold"
+assert_file_lacks_phrase "${MAINTAIN_MODE_RULES}" "~25" "MC42 rules.md must not restate the topic-doc numeric threshold"
+assert_file_has_phrase "${MAINTAIN_MODE_RULES}" "lessons-learned*.md" "MC43 rules.md names legacy lessons-learned*.md files"
+assert_file_has_phrase "${MAINTAIN_MODE_RULES}" "same PR" "MC44 rules.md states legacy survivors are relocated and the legacy file deleted in the same PR"
 
 echo "maintain.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]
