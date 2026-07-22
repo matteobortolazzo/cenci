@@ -1,0 +1,78 @@
+#!/bin/bash
+# start_dind — fire-and-forget inner Docker engine startup for dind mode
+# (#586, gated by entrypoint.sh on CENCI_SANDBOX_DIND=1).
+#
+# Creates the docker group and adds dev to it BEFORE launching dockerd, so
+# the priv-drop re-exec into `sudo -u dev` (entrypoint.sh) picks up the
+# updated /etc/group membership — no `sg` re-exec needed, unlike the removed
+# DooD socket-group block.
+#
+# dockerd itself is launched fire-and-forget: agents don't touch docker until
+# well after startup, and the docker CLI/Testcontainers clients already
+# retry/wait on connect, so blocking container startup on daemon readiness
+# would only add latency for no benefit. The background subshell — not the
+# caller — owns the `wait` on dockerd's exit, so it keeps working after
+# entrypoint.sh's later `exec sudo` reparents the rest of the process tree
+# (a sibling `wait $PID` after that exec could never observe the reparented
+# PID; the subshell that started dockerd has no such problem). `--init` is
+# already passed by the launcher, so the process tree is reaped either way.
+#
+# If dockerd exits non-zero, the subshell writes a timestamped
+# .cenci-dockerd-startup-error marker under /home/dev (mirrors the existing
+# .cenci-agent-startup-error convention, #572: UTC ISO-8601 prefix via
+# `date -u +%Y-%m-%dT%H:%M:%SZ`, one line, real diagnostic content — here the
+# tail of dockerd's own captured stderr) so a genuinely broken daemon (e.g.
+# corrupted /var/lib/docker) surfaces its real cause on first `docker` touch
+# instead of a generic connection error. A clean exit (or one still running
+# when reaped) must never leave a marker behind.
+#
+# start_dind() runs in entrypoint.sh's ROOT phase, before the `exec sudo -u
+# dev` re-exec that sets HOME=/home/dev — root's own $HOME is /root, NOT
+# /home/dev. So the marker/log path is hardcoded to /home/dev, exactly like
+# every other root-phase marker write in entrypoint.sh (e.g. the
+# .cenci-startup-failed/.cenci-boot.log/.cenci-agent-startup-error paths),
+# instead of reading $HOME — using $HOME here would silently land the marker
+# in the ephemeral container root filesystem instead of the persisted
+# /home/dev home volume, defeating the whole point of surviving `--rm` for
+# #587 to later read. CENCI_DIND_HOME_ROOT is a narrow, test-only override
+# (same convention as agent_cli_root()'s CENCI_AGENT_CLI_ROOT in
+# lib/agent-cli.sh) so dind.test.sh can redirect it into a scratch dir
+# without touching a real /home/dev — production never sets it.
+#
+# A dockerd exit code that matches a common termination signal (SIGHUP=129,
+# SIGINT=130, SIGQUIT=131, SIGKILL=137, SIGTERM=143) means `docker stop`/a
+# normal container shutdown killed it — not a crash — so no marker is written
+# for those; every other non-zero rc is treated as a genuine failure.
+
+start_dind() {
+    # flush_boot_log (entrypoint.sh) must run before exit here — without
+    # --init as PID 1, a bare `exit` can SIGKILL the still-draining `tee`
+    # before it writes this failure line to .cenci-boot.log, silently losing
+    # the diagnostic. It's in scope: dind.sh is sourced into entrypoint.sh's
+    # own root-phase shell, after flush_boot_log is defined there.
+    groupadd -f docker \
+        || { echo "dind: groupadd -f docker failed — dev will not gain docker-group membership; docker CLI calls will fail with a permission error" >&2; flush_boot_log; exit 1; }
+    usermod -aG docker dev \
+        || { echo "dind: usermod -aG docker dev failed — dev will not gain docker-group membership; docker CLI calls will fail with a permission error" >&2; flush_boot_log; exit 1; }
+
+    local home="${CENCI_DIND_HOME_ROOT:-/home/dev}"
+    local log="${home}/.cenci-dockerd.log"
+    local marker="${home}/.cenci-dockerd-startup-error"
+
+    (
+        dockerd >"${log}" 2>&1
+        rc=$?
+        case ${rc} in
+        # rc=137 (SIGKILL) can't be distinguished between an intentional
+        # `docker stop` escalation and a genuine OOM-kill — accepted
+        # tradeoff, not a bug.
+        0 | 129 | 130 | 131 | 137 | 143) ;; # clean exit or normal termination signal — no marker
+        *)
+            tail_diag="$(tail -c 2000 "${log}" 2>/dev/null | tr '\n' ' ')"
+            printf '%s dockerd exited with status %s: %s\n' \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${rc}" "${tail_diag}" > "${marker}" \
+                || echo "dind: failed to write dockerd startup-error marker at ${marker}" >&2
+            ;;
+        esac
+    ) &
+}

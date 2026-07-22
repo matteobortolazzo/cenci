@@ -34,6 +34,7 @@ bash sandbox/tests/codex-config.test.sh          # lib/codex-config.sh config ge
 bash sandbox/tests/agent-cli.test.sh             # shared, verified, atomic agent update lifecycle
 bash sandbox/tests/fragments-drift.test.sh       # Dockerfile vs fragments/*.dockerfile byte-parity
 bash sandbox/tests/heal-plugins.test.sh          # plugin self-heal (Write->Edit allow conversion)
+bash sandbox/tests/dind.test.sh                  # lib/dind.sh start_dind() background dockerd + marker
 ```
 
 The launcher-behavior suites live with the launcher code in `watch/`: Go
@@ -53,6 +54,8 @@ black-box tests in `watch/sandbox_open_test.go` plus the reap contract suite
 - **`docker run --user X` persists for the container's lifetime — it is not scoped to the initial process.** The `--user` flag is stored as the container's `Config.User` and becomes the default for every subsequent `docker exec` call that doesn't pass its own explicit `-u` flag. A pattern that starts a container as root for setup (privilege-drop), but then runs workload via `docker exec`, will silently run all exec calls as root if they omit `-u <target-user>`. The image's original `USER dev` directive from the Dockerfile does not automatically restore as the default for exec — you must audit and add explicit `-u dev` to every exec call site after a privilege-drop entrypoint.
 
 - **TTY detection via permission-bit check alone is unreliable in sandboxed environments.** A permission check like `[ -r /dev/tty ] && [ -w /dev/tty ]` returns true even when `/dev/tty` exists with permissive bits but has no actual controlling terminal attached (common in Docker/CI containers) — an actual `open(2)` of the file will then fail with ENXIO. When a conditional behavior truly depends on interactive TTY availability (e.g., destructive-action confirmation gates), verify with an actual open attempt: `exec 3<>/dev/tty 2>/dev/null`, not just a permission-bit check.
+
+- **When adding new code to the root phase of `entrypoint.sh` or its sourced libs (like `lib/dind.sh`), systematically cross-check against ALL established conventions already present in the file.** Don't assume a pattern is obvious just because related examples exist nearby. Key root-phase conventions to verify: hardcoded `/home/dev/` paths (never `$HOME`, since root's `$HOME` is `/root`, not `/home/dev`), explicit exit-status checks on privileged calls like `groupadd`/`usermod` (fatal errors must fail loud), and `flush_boot_log; exit 1` before fatal exits (not bare `exit 1`, to avoid losing diagnostics to a SIGKILL race when not running under `--init`). Code reviewers often miss violations of secondary patterns if each reviewer assumes others verified those details; implementers should verify the full set before review.
 
 ## Testing
 
