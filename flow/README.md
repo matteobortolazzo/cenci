@@ -137,7 +137,7 @@ companion) for every skill, including the internal ones not listed above.
 | `babysit` | — | project-core,shell-rules | tick.sh | — |
 | `ci-repair` | — | project-core,shell-rules subagent-safety,testing | — | — |
 | `codex-runtime` | — | — | — | — |
-| `configure` | — | codex-runtime,shell-rules testing,verify-ui | — | code-reviewer |
+| `configure` | — | babysit,codex-runtime shell-rules,testing verify-ui | — | code-reviewer |
 | `design` | — | attachments,codex-runtime project-core,shell-rules ticket-ownership | — | — |
 | `frontend-classification` | — | implement,refine | — | — |
 | `garden` | — | codex-runtime,project-core shell-rules,worktrees | — | — |
