@@ -154,9 +154,11 @@ echo "case: both agents install into isolated shared CLI volumes"
 SMOKE_VOLUME_PREFIX="cenci-agent-cli-smoke-$$"
 SMOKE_AGENT_VOLUMES=("${SMOKE_VOLUME_PREFIX}-claude" "${SMOKE_VOLUME_PREFIX}-codex")
 REMAP_TMP=""
+DIND_CONTAINER_NAME=""
 cleanup_smoke() {
     "${RUNTIME}" volume rm "${SMOKE_AGENT_VOLUMES[@]}" >/dev/null 2>&1 || true
     [[ -z "${REMAP_TMP}" ]] || rm -rf "${REMAP_TMP}"
+    [[ -z "${DIND_CONTAINER_NAME}" ]] || "${RUNTIME}" rm -f "${DIND_CONTAINER_NAME}" >/dev/null 2>&1 || true
 }
 trap cleanup_smoke EXIT
 AGENT_INSTALL_OK=1
@@ -421,6 +423,60 @@ else
     else
         fail "expected boot log to contain 'remap: usermod failed' and /home/dev/.cenci-startup-failed to contain the root-setup trap message; boot log: ${BOOT_LOG_CONTENT}; startup-failed marker: ${STARTUP_FAILED_CHECK}"
     fi
+fi
+
+# ── dind: entrypoint boots an inner dockerd under sysbox-runc (#586) ────
+# sysbox-runc is the OCI runtime dindPreflight requires
+# (watch/internal/sandbox/launcher/dind.go); it's only ever registered with
+# Docker, never Podman, and GitHub-hosted CI runners don't ship it either.
+# Self-skips cleanly (mirroring the top-of-file runtime self-skip) rather
+# than failing a suite over host software this ticket doesn't install —
+# CI sysbox installation is an explicit follow-up (#582/#586).
+#
+# The container is launched with --user root and CENCI_SANDBOX_DIND=1 so
+# entrypoint.sh's gated root-phase block backgrounds dockerd before dropping
+# to dev; passing "-c" "sleep infinity" as CMD keeps the container's
+# foreground process (and therefore tini/--init, and the dockerd it
+# reparented) alive long enough to probe. `docker exec -u dev` is required
+# for the inner probes: per this project's Entrypoint patterns note,
+# `docker run --user root` persists as the container's default exec user for
+# every later `docker exec` that doesn't pass its own `-u`, so an unqualified
+# exec would run as root instead of exercising the docker-group membership
+# the entrypoint just granted dev.
+echo "case: dind container boots dockerd with sysbox-runc and runs a nested container"
+if [[ "${RUNTIME}" != "docker" ]]; then
+    echo "  SKIP: dind requires Docker as the outer runtime (sysbox-runc is never registered with Podman); running under ${RUNTIME}."
+elif ! DIND_RUNTIMES_JSON="$(docker info --format '{{json .Runtimes}}' 2>/dev/null)" || [[ "${DIND_RUNTIMES_JSON}" != *'"sysbox-runc"'* ]]; then
+    echo "  SKIP: sysbox-runc is not registered with Docker on this host (see watch/internal/sandbox/launcher/dind.go for install pointers)."
+else
+    DIND_VOLUME="cenci-dind-smoke-$$"
+    SMOKE_AGENT_VOLUMES+=("${DIND_VOLUME}")
+    DIND_CONTAINER_NAME="cenci-dind-smoke-container-$$"
+    docker rm -f "${DIND_CONTAINER_NAME}" >/dev/null 2>&1 || true
+    if ! docker run -d --name "${DIND_CONTAINER_NAME}" --runtime=sysbox-runc --init --user root \
+        -e CENCI_SANDBOX_DIND=1 -v "${DIND_VOLUME}:/var/lib/docker" \
+        cenci-sandbox:latest -c "sleep infinity" >/dev/null; then
+        fail "failed to launch the dind container with --runtime=sysbox-runc"
+    else
+        DIND_SOCKET_READY=0
+        for _ in $(seq 1 30); do
+            if docker exec -u dev "${DIND_CONTAINER_NAME}" test -S /var/run/docker.sock 2>/dev/null; then
+                DIND_SOCKET_READY=1
+                break
+            fi
+            sleep 1
+        done
+        if [[ "${DIND_SOCKET_READY}" -eq 0 ]]; then
+            fail "inner dockerd socket did not appear inside the dind container within the retry budget"
+        elif docker exec -u dev "${DIND_CONTAINER_NAME}" docker info >/dev/null 2>&1 \
+            && docker exec -u dev "${DIND_CONTAINER_NAME}" docker run --rm hello-world >/dev/null 2>&1; then
+            pass
+        else
+            fail "inner 'docker info' or 'docker run --rm hello-world' failed inside the dind container"
+        fi
+    fi
+    docker rm -f "${DIND_CONTAINER_NAME}" >/dev/null 2>&1 || true
+    DIND_CONTAINER_NAME=""
 fi
 
 # ── Summary ────────────────────────────────────────────────────────

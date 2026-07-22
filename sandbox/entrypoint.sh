@@ -26,16 +26,14 @@ sudo sh -c 'grep -q "$(hostname)" /etc/hosts || echo "127.0.0.1 $(hostname)" >> 
 # 1000/1000 default) before the rest of the entrypoint runs. The
 # usermod/groupmod/chown calls stay a no-op when HOST_UID/HOST_GID are unset
 # or already match the current dev account — zero behavior change there
-# beyond the one extra root->dev re-exec every start now pays.  Mirrors the
-# exec-sg re-exec pattern used for the docker-socket GID switch further down
-# this file.
+# beyond the one extra root->dev re-exec every start now pays.
 if [[ "$(id -u)" -eq 0 ]]; then
     # A stale generic startup-failure marker or boot log from a previous
     # failed boot must not outlive the failure it describes, or
     # startupFailureDetail (watch/internal/sandbox/launcher/launch.go) would
     # surface it for an unrelated crash. Cleared here, as root, before any of
     # the rest of the entrypoint (including a possible re-exec below) runs.
-    rm -f /home/dev/.cenci-startup-failed /home/dev/.cenci-boot.log
+    rm -f /home/dev/.cenci-startup-failed /home/dev/.cenci-boot.log /home/dev/.cenci-dockerd-startup-error
 
     # ── Tee entrypoint output to a boot log as early as possible (#495) ──
     # A failure inside THIS root block (the UID/GID remap below, or its
@@ -129,6 +127,21 @@ if [[ "$(id -u)" -eq 0 ]]; then
         fi
     elif [[ "${HOST_UID:-}" == "0" || "${HOST_GID:-}" == "0" ]]; then
         echo "warning: HOST_UID/HOST_GID of 0 requested — ignoring remap to avoid running the workload as root" >&2
+    fi
+
+    # ── dind: start the inner Docker engine (#586) ────────────────────
+    # Gated on CENCI_SANDBOX_DIND=1 (set by the launcher's dind mode, #585).
+    # Must run here — while still root and before the priv-drop exec below —
+    # because starting dockerd needs root, and adding dev to the docker group
+    # must land in /etc/group before the `sudo -u dev` re-exec picks up
+    # membership (a fresh re-exec re-reads group membership, so no `sg`
+    # re-exec is needed here, unlike the removed DooD socket block).
+    if [[ "${CENCI_SANDBOX_DIND:-}" == "1" ]]; then
+        DIND_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
+        # shellcheck source-path=SCRIPTDIR
+        # shellcheck source=lib/dind.sh
+        source "${DIND_LIB_DIR}/dind.sh"
+        start_dind
     fi
 
     # secure_path in /etc/sudoers strips PATH additions (~/.local/bin,
@@ -421,26 +434,8 @@ fi
 # Put the shared agent CLI's bin directory ahead of PATH so an interactive
 # --shell session (or any other child process in this container) can invoke
 # the bare `claude`/`codex` command, not just the absolute path the launcher
-# execs. Exported before every remaining exec below (both the docker-socket
-# re-exec and the final exec) so it reaches the whole container session.
+# execs. Exported before the final exec below so it reaches the whole
+# container session.
 export PATH="/opt/cenci-agent/current/node_modules/.bin:${PATH}"
-
-# ── Docker socket group alignment (DooD) ────────────────────────────
-if [[ -S /var/run/docker.sock ]]; then
-    SOCK_GID=$(stat -c '%g' /var/run/docker.sock)
-    EXISTING_GROUP=$(getent group "${SOCK_GID}" | cut -d: -f1 || true)
-    if [[ -z "${EXISTING_GROUP}" ]]; then
-        sudo groupadd -g "${SOCK_GID}" docker
-        EXISTING_GROUP="docker"
-    fi
-    if ! id -nG dev | grep -qw "${EXISTING_GROUP}"; then
-        sudo usermod -aG "${EXISTING_GROUP}" dev
-        if [[ $# -gt 0 ]]; then
-            exec sg "${EXISTING_GROUP}" -c "/bin/bash $(printf '%q ' "$@")"
-        else
-            exec sg "${EXISTING_GROUP}" -c /bin/bash
-        fi
-    fi
-fi
 
 exec /bin/bash "$@"
