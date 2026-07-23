@@ -357,6 +357,84 @@ func TestAudit_ClaudeAndGhCredentials_PresentAndAbsent(t *testing.T) {
 	}
 }
 
+// TestAudit_PencilCredentialSource_PresentAndAbsent covers the Pencil CLI
+// session's optional staged credential (headless design reads inside the
+// sandbox): the pencil credentialSources entry must always be reported with
+// its resolved host path, flipping Present only once
+// ~/.pencil/session-cli.json actually exists.
+func TestAudit_PencilCredentialSource_PresentAndAbsent(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+	eng := auditEngine()
+
+	posture, err := eng.Audit(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Audit (no pencil session): %v", err)
+	}
+	src := findCredentialSource(posture.CredentialSources, CredentialTypePencil)
+	if src == nil {
+		t.Fatalf("expected a pencil credentialSources entry, got %+v", posture.CredentialSources)
+	}
+	if src.Present {
+		t.Errorf("pencil credential source Present = true without a staged file, want false")
+	}
+	wantPath := filepath.Join(home, ".pencil", "session-cli.json")
+	if src.HostPath != wantPath {
+		t.Errorf("pencil credential source HostPath = %q, want %q", src.HostPath, wantPath)
+	}
+
+	writeFile(t, wantPath, `{"token":"sentinel"}`)
+	posture, err = eng.Audit(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Audit (with pencil session): %v", err)
+	}
+	src = findCredentialSource(posture.CredentialSources, CredentialTypePencil)
+	if src == nil || !src.Present {
+		t.Fatalf("expected a present pencil credentialSources entry, got %+v", posture.CredentialSources)
+	}
+}
+
+// TestAudit_ForwardedEnv_IncludesPenCliKeyNameOnly covers the PEN_CLI_KEY
+// per-exec passthrough (Pencil CLI auth for headless design reads): once set
+// on the host it must be reported in ForwardedEnv by name, marked Secret,
+// and its value must never appear in the marshaled posture.
+func TestAudit_ForwardedEnv_IncludesPenCliKeyNameOnly(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+	const penSecret = "sentinel-secret-value-pen789"
+	t.Setenv("PEN_CLI_KEY", penSecret)
+
+	posture, err := auditEngine().Audit(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+
+	found := false
+	for _, ev := range posture.ForwardedEnv {
+		if ev.Name == "PEN_CLI_KEY" {
+			found = true
+			if !ev.Secret {
+				t.Errorf("PEN_CLI_KEY forwarded env Secret = false, want true")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected PEN_CLI_KEY in ForwardedEnv names, got %+v", posture.ForwardedEnv)
+	}
+
+	data, err := json.Marshal(posture)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(data), penSecret) {
+		t.Errorf("JSON output leaks the PEN_CLI_KEY sentinel value:\n%s", data)
+	}
+}
+
 // -- env names only -------------------------------------------------------
 
 // TestAudit_EnvReportedAsNamesOnly covers the create-time env list: names
@@ -499,10 +577,13 @@ func TestAudit_SecretLeakRegression_NeverEmitsSecretValues(t *testing.T) {
 
 	const contextSecret = "sentinel-secret-value-xyz123"
 	const openaiSecret = "sentinel-secret-value-openai456"
+	const penSecret = "sentinel-secret-value-pen789"
 	t.Setenv("CONTEXT7_API_KEY", contextSecret)
 	t.Setenv("OPENAI_API_KEY", openaiSecret)
+	t.Setenv("PEN_CLI_KEY", penSecret)
 	writeFile(t, filepath.Join(home, ".codex", "auth.json"), `{"token":"`+contextSecret+`"}`)
 	writeFile(t, filepath.Join(home, ".claude", ".credentials.json"), `{"token":"`+openaiSecret+`"}`)
+	writeFile(t, filepath.Join(home, ".pencil", "session-cli.json"), `{"token":"`+penSecret+`"}`)
 
 	posture, err := auditEngine().Audit(Options{Agent: "codex"})
 	if err != nil {
@@ -519,6 +600,9 @@ func TestAudit_SecretLeakRegression_NeverEmitsSecretValues(t *testing.T) {
 	if strings.Contains(textBuf.String(), openaiSecret) {
 		t.Errorf("text output leaks the OPENAI_API_KEY sentinel value:\n%s", textBuf.String())
 	}
+	if strings.Contains(textBuf.String(), penSecret) {
+		t.Errorf("text output leaks the PEN_CLI_KEY sentinel value:\n%s", textBuf.String())
+	}
 
 	jsonBytes, err := json.MarshalIndent(posture, "", "  ")
 	if err != nil {
@@ -529,6 +613,9 @@ func TestAudit_SecretLeakRegression_NeverEmitsSecretValues(t *testing.T) {
 	}
 	if strings.Contains(string(jsonBytes), openaiSecret) {
 		t.Errorf("JSON output leaks the OPENAI_API_KEY sentinel value:\n%s", jsonBytes)
+	}
+	if strings.Contains(string(jsonBytes), penSecret) {
+		t.Errorf("JSON output leaks the PEN_CLI_KEY sentinel value:\n%s", jsonBytes)
 	}
 }
 
@@ -547,9 +634,11 @@ func TestAudit_JSON_EmptySlicesSerializeAsEmptyArrayNotNull(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	// Explicitly clear every provider API key assembleExecEnv would forward
-	// for "claude" (CONTEXT7_API_KEY) so forwardedEnv is deterministically
-	// empty regardless of the host process's own environment.
+	// for "claude" (CONTEXT7_API_KEY, PEN_CLI_KEY) so forwardedEnv is
+	// deterministically empty regardless of the host process's own
+	// environment.
 	t.Setenv("CONTEXT7_API_KEY", "")
+	t.Setenv("PEN_CLI_KEY", "")
 	t.Chdir(repo)
 
 	posture, err := auditEngine().Audit(Options{Agent: "claude"})

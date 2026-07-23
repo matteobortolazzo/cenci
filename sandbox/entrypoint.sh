@@ -403,6 +403,14 @@ seed_credential /tmp/host-codex-creds/auth.json /home/dev/.codex/auth.json
 # — so only the subscription/OAuth auth.json needs staging here)
 seed_credential /tmp/host-opencode-creds/auth.json /home/dev/.local/share/opencode/auth.json
 
+# Pencil CLI session — auth for headless design reads (`pen interactive`,
+# used by the implement/verify-ui pipelines when no desktop editor is
+# reachable). Session tokens are treated as rotating like the agent OAuth
+# chains above, so the same seed-once contract applies. A host PEN_CLI_KEY
+# forwarded per-exec (execEnvArgs in watch/internal/sandbox/launcher/
+# launch.go) takes precedence over this seeded session inside the CLI.
+seed_credential /tmp/host-pencil-creds/session-cli.json /home/dev/.pencil/session-cli.json
+
 # ── Verify the shared agent CLI before signaling ready ─────────────
 # The launcher mounts the shared, updater-populated volume read-only at
 # /opt/cenci-agent and execs this absolute path directly (CENCI_AGENT_CLI, or

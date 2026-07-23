@@ -10,7 +10,7 @@ If `pencil.enabled` and `pencilAvailable` are true, the main agent pre-reads rel
 
 Identify affected screen node IDs from the plan file's `## Design Context` section — the `designScreenIds` and `designComponentMap` lists at the top of that section (written there by the context-gatherer). Narrow to the screens the plan actually touches.
 
-CLI-app mode: batch reads in one invocation:
+CLI-app mode (`pencilHeadless` false): batch reads in one invocation against the running desktop app:
 
 ```bash
 pencil interactive -a desktop <<'EOF'
@@ -18,6 +18,18 @@ batch_get({ nodeIds: ["<screen-node-id>"], readDepth: 3 })
 get_variables()
 export_nodes({ nodeIds: ["<screen-node-id>"], outputDir: "$TMPDIR/design-screenshots", format: "png" })
 EOF
+```
+
+Headless mode (`pencilHeadless` true — typical inside the cenci sandbox): the same batch reads, run by the CLI's own headless editor engine directly against the design `.pen` file from the plan's `## Design Context` (no desktop app, no GUI; rendering is local). Open the file with `-i`; point `-o` at a run-scoped scratch path, and treat the session as **read-only — never call `save()`**, so the repo's design file is never modified by an implement run:
+
+```bash
+pencil interactive -i <designPath>/<design-file>.pen \
+  -o "${TMPDIR:-/tmp}/cenci-<ticket-id-or-slug>-design-scratch.pen" <<'EOF'
+batch_get({ nodeIds: ["<screen-node-id>"], readDepth: 3 })
+get_variables()
+export_nodes({ nodeIds: ["<screen-node-id>"], outputDir: "$TMPDIR/design-screenshots", format: "png" })
+EOF
+rm -f "${TMPDIR:-/tmp}/cenci-<ticket-id-or-slug>-design-scratch.pen"
 ```
 
 Editor mode: call `batch_get`, `get_variables`, and `get_screenshot` via MCP.

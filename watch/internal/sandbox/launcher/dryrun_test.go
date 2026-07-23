@@ -81,6 +81,38 @@ func TestDryRun_CreateArgv_ContainsRunNameWorkspaceRwAgentCliRoAndCredsRo(t *tes
 	}
 }
 
+// TestDryRun_CreateArgv_StagesPencilSessionOnlyWhenPresent pins the optional
+// Pencil CLI session staging mount (headless design reads inside the
+// sandbox): a host ~/.pencil/session-cli.json is staged read-only at
+// /tmp/host-pencil-creds/session-cli.json, and no pencil staging mount
+// appears at all when the host has no session file.
+func TestDryRun_CreateArgv_StagesPencilSessionOnlyWhenPresent(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	plan, err := dryRunEngine().DryRun(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("DryRun (no pencil session): %v", err)
+	}
+	joined := strings.Join(plan.CreateArgv, " ")
+	if strings.Contains(joined, "host-pencil-creds") {
+		t.Errorf("CreateArgv stages a pencil credential mount without a host session file:\n%s", joined)
+	}
+
+	writeFile(t, filepath.Join(home, ".pencil", "session-cli.json"), `{"token":"unused-in-this-test"}`)
+	plan, err = dryRunEngine().DryRun(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("DryRun (with pencil session): %v", err)
+	}
+	joined = strings.Join(plan.CreateArgv, " ")
+	wantPencil := home + "/.pencil/session-cli.json:/tmp/host-pencil-creds/session-cli.json:ro"
+	if !strings.Contains(joined, wantPencil) {
+		t.Errorf("CreateArgv missing the read-only pencil session mount %q, got:\n%s", wantPencil, joined)
+	}
+}
+
 // -- attach argv content ---------------------------------------------------
 
 // TestDryRun_AttachArgv_ContainsExecAgentFlagsAndForwardedArgs pins the
