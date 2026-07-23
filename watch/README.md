@@ -761,16 +761,27 @@ single-dash agent flags like `-p "prompt"` are passed:
 container runtime (replacing the `cenci` process) so the interactive session
 owns the TTY and its exit code propagates.
 
-`--dry-run` prints the exact, literal docker/podman argv `open` would run —
-both the detached container-create command and the interactive agent-attach
-command, each clearly labeled — followed by the full `cenci audit` posture
-breakdown (see below), without creating any container, volume, or network.
-The argv comes from the exact same construction helpers the real launch path
-calls, so it can never drift from what a real `open` would actually run, and
-`--dry-run` faithfully mirrors a real launch's own failure modes (unknown
-agent, `--dind`/`--no-dind` conflicts, missing container runtime, failed dind
+`--dry-run` renders the branch a real launch would actually take, followed by
+the full `cenci audit` posture breakdown (see below), without creating any
+container, volume, network, or daemon, and without attaching. It performs
+read-only container-disposition probes (`ps`/`inspect`) to decide which
+branch a real launch would take, then prints one of: an attach-only report
+(no create argv) when a compatible container is already scoped and running;
+the same hard error a real launch would return when the running container
+predates the shared read-only agent CLIs; or the detached container-create
+command plus the interactive agent-attach command, each clearly labeled, when
+no compatible container is running. The branch decision and both argvs come
+from the exact same construction helpers the real launch path calls, so they
+can never drift from what a real `open` would actually run, and `--dry-run`
+faithfully mirrors a real launch's own failure modes (unknown agent,
+`--dind`/`--no-dind` conflicts, missing container runtime, failed dind
 preflight, missing codex/opencode auth) instead of always printing a
-best-effort argv. Any forwarded secret env var (`OPENAI_API_KEY`,
+best-effort argv. When creating a new container, whether the launch would
+include cenci's wiring mounts can depend on a side effect a real launch
+performs (starting the events daemon on demand) that the read-only preview
+never performs itself; when that outcome can't be determined read-only, the
+create argv omits the wiring mounts and the report says so explicitly instead
+of claiming to be exact. Any forwarded secret env var (`OPENAI_API_KEY`,
 `ANTHROPIC_API_KEY`, `CONTEXT7_API_KEY`) renders as `-e NAME=<redacted>` —
 masked but structurally visible — never the actual value; as with `audit`
 (below), mounted host *paths* are shown in full, so review the output before

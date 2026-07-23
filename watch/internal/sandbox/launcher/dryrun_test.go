@@ -2,10 +2,13 @@ package launcher
 
 import (
 	"bytes"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
 )
 
 // -- cenci open --dry-run (ticket #589) ----------------------------------
@@ -55,6 +58,7 @@ func TestDryRun_CreateArgv_ContainsRunNameWorkspaceRwAgentCliRoAndCredsRo(t *tes
 	t.Setenv("HOME", home)
 	t.Chdir(repo)
 	writeFile(t, filepath.Join(home, ".claude", ".credentials.json"), `{"token":"unused-in-this-test"}`)
+	setFakeDockerNotRunning(t)
 
 	plan, err := dryRunEngine().DryRun(Options{Agent: "claude"})
 	if err != nil {
@@ -91,6 +95,7 @@ func TestDryRun_CreateArgv_StagesPencilSessionOnlyWhenPresent(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Chdir(repo)
+	setFakeDockerNotRunning(t)
 
 	plan, err := dryRunEngine().DryRun(Options{Agent: "claude"})
 	if err != nil {
@@ -125,6 +130,7 @@ func TestDryRun_AttachArgv_ContainsExecAgentFlagsAndForwardedArgs(t *testing.T) 
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Chdir(repo)
+	setFakeDockerNotRunning(t)
 
 	plan, err := dryRunEngine().DryRun(Options{Agent: "claude", AgentArgs: []string{"--resume"}})
 	if err != nil {
@@ -160,6 +166,7 @@ func TestDryRun_SecretLeakRegression_NeverEmitsForwardedSecretValues(t *testing.
 	const openaiSecret = "sentinel-secret-value-openai456"
 	t.Setenv("CONTEXT7_API_KEY", contextSecret)
 	t.Setenv("OPENAI_API_KEY", openaiSecret) // also satisfies codex's credential check below
+	setFakeDockerNotRunning(t)
 
 	plan, err := dryRunEngine().DryRun(Options{Agent: "codex"})
 	if err != nil {
@@ -195,6 +202,7 @@ func TestDryRun_Posture_FullBodyPresentInWriteText(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Chdir(repo)
+	setFakeDockerNotRunning(t)
 
 	plan, err := dryRunEngine().DryRun(Options{Agent: "claude"})
 	if err != nil {
@@ -226,6 +234,13 @@ func TestDryRun_CodexNoAuth_ReturnsNonUsageErrorMentioningCodexAuth(t *testing.T
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Chdir(cwd)
+	// Clear any provider credential inherited from the host/CI environment
+	// (AC6): validateCredentials treats a present OPENAI_API_KEY as
+	// sufficient codex auth on its own, so an inherited value would silently
+	// make this negative test pass for the wrong reason (or fail to hit the
+	// hard error at all) depending on the machine running it.
+	t.Setenv("OPENAI_API_KEY", "")
+	setFakeDockerNotRunning(t)
 
 	_, err := dryRunEngine().DryRun(Options{Agent: "codex"})
 	if err == nil {
@@ -303,13 +318,19 @@ func TestDryRun_DindWithPodmanRuntime_ReturnsNonUsageErrorRequiresDocker(t *test
 
 // -- no side effects ---------------------------------------------------------
 
-// TestDryRun_NoSideEffects_NoRuntimeInvocationsAndExecAttachNeverCalled is a
-// dedicated regression test for the ticket's core AC: DryRun must never
-// shell out to the container runtime (a scripted-runtime recorder preset as
-// Runtime records zero invocations -- covering run/create/volume/exec, since
-// the fake logs every invocation regardless of verb) and must never invoke
-// the execAttach seam (the final interactive handoff runAgent uses).
-func TestDryRun_NoSideEffects_NoRuntimeInvocationsAndExecAttachNeverCalled(t *testing.T) {
+// TestDryRun_NoSideEffects_NoMutatingRuntimeCallsAndExecAttachNeverCalled is
+// a dedicated regression test for the ticket's core AC4: DryRun must never
+// shell out to a *mutating* container-runtime verb (run/rm/exec/create/
+// volume create/network) and must never invoke the execAttach seam (the
+// final interactive handoff runAgent uses). Since #620 makes DryRun perform
+// its own read-only container-disposition probing (ps + inspect, via the
+// shared planArgvs helper), a bare "zero invocations" assertion would no
+// longer hold -- read-only ps/inspect calls are allowed and expected; only
+// mutating verbs are forbidden. Each forbidden verb is enumerated explicitly
+// (AGENTS #446/plan Risks) so a future accidental run/rm creeping into the
+// dry-run path can't hide behind a loosened "some invocations are fine"
+// assertion.
+func TestDryRun_NoSideEffects_NoMutatingRuntimeCallsAndExecAttachNeverCalled(t *testing.T) {
 	repo := newAuditTestRepo(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -340,8 +361,212 @@ func TestDryRun_NoSideEffects_NoRuntimeInvocationsAndExecAttachNeverCalled(t *te
 	if execAttachCalled {
 		t.Error("DryRun invoked the execAttach seam; it must never attach/exec into a container")
 	}
-	if lines := readCallLog(t, callLog); len(lines) != 0 {
-		t.Errorf("DryRun invoked the container runtime %d time(s), want zero side effects; calls:\n%s", len(lines), strings.Join(lines, "\n"))
+
+	lines := readCallLog(t, callLog)
+	for _, mutatingPrefix := range []string{"run ", "rm ", "exec ", "create ", "volume create", "network"} {
+		if containsPrefix(lines, mutatingPrefix) {
+			t.Errorf("DryRun issued a mutating runtime call with prefix %q; want zero mutation (read-only ps/inspect only). calls:\n%s", mutatingPrefix, strings.Join(lines, "\n"))
+		}
+	}
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if verb := fields[0]; verb != "ps" && verb != "inspect" {
+			t.Errorf("DryRun issued an unexpected runtime call %q; want only read-only ps/inspect probes, calls:\n%s", line, strings.Join(lines, "\n"))
+		}
+	}
+}
+
+// -- launch-branch fidelity (ticket #620) -----------------------------------
+
+// TestDryRun_ExistingCompatibleContainer_RendersAttachOnlyWithNoCreateArgv
+// covers AC1/AC2: when a scoped container is already running and compatible
+// (has the shared read-only agent-CLI mount), a real launch would attach
+// only -- DryRun must render the same attach-only branch, reporting the
+// disposition (Mode == "attach", ContainerName set) and emitting no create
+// argv at all, rather than the always-create preview #589 shipped with.
+func TestDryRun_ExistingCompatibleContainer_RendersAttachOnlyWithNoCreateArgv(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	scope := ComputeScope("claude", "", repo, home)
+
+	fakeDir := t.TempDir()
+	callLog := filepath.Join(fakeDir, "calls.txt")
+	writeFakeRuntime(t, fakeDir, "docker", callLog)
+	t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
+	t.Setenv("FAKE_INSPECT_MOUNTS", AgentCLIVolumeName("claude")+"|/opt/cenci-agent|false\n")
+
+	eng := &Engine{Runtime: "docker", Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	plan, err := eng.DryRun(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+
+	if plan.Mode != "attach" {
+		t.Errorf("Mode = %q, want \"attach\" for an already-running compatible container", plan.Mode)
+	}
+	if plan.CreateArgv != nil {
+		t.Errorf("CreateArgv = %v, want nil (no create argv) for the attach-only branch", plan.CreateArgv)
+	}
+	if plan.ContainerName != scope.ContainerName {
+		t.Errorf("ContainerName = %q, want %q", plan.ContainerName, scope.ContainerName)
+	}
+
+	var out bytes.Buffer
+	if err := plan.WriteText(&out); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+	text := out.String()
+	if strings.Contains(text, "run --name") {
+		t.Errorf("WriteText rendered a container-create argv for an already-running compatible container, got:\n%s", text)
+	}
+}
+
+// TestDryRun_IncompatibleRunningContainer_MirrorsLaunchHardError covers Q2's
+// resolution: a running container that predates the shared read-only
+// agent-CLI mount makes a real Launch hard-error rather than attach; DryRun
+// must fail the exact same way (content-specific assertion per AGENTS #446,
+// not just a non-nil check), rather than silently printing a plan for a
+// launch that would actually fail.
+func TestDryRun_IncompatibleRunningContainer_MirrorsLaunchHardError(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	scope := ComputeScope("claude", "", repo, home)
+
+	fakeDir := t.TempDir()
+	callLog := filepath.Join(fakeDir, "calls.txt")
+	writeFakeRuntime(t, fakeDir, "docker", callLog)
+	t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
+	// FAKE_INSPECT_MOUNTS deliberately left unset: the running container
+	// reports no shared read-only agent-CLI mount at all, i.e. it predates
+	// the migration -- incompatible.
+
+	eng := &Engine{Runtime: "docker", Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	_, err := eng.DryRun(Options{Agent: "claude"})
+	if err == nil {
+		t.Fatal("DryRun against an incompatible running container = nil error, want the same hard error a real Launch would return")
+	}
+	if !strings.Contains(err.Error(), "predates shared read-only agent CLIs") {
+		t.Errorf("DryRun error = %q, want it to mention \"predates shared read-only agent CLIs\"", err.Error())
+	}
+}
+
+// TestDryRun_MissingInitialDaemonSocket_OmitsWiringMountsAndFlagsIndeterminate
+// covers Q1's resolution (Option A): when no container is running (create
+// branch) and the events socket is merely missing -- not unresolvable, the
+// distinguishing signal cenciWiringReadOnly already exposes via a non-empty
+// socketDir -- a real launch's daemon.EnsureRunning() might bring cenci
+// wiring up or might not, so the outcome is genuinely indeterminate
+// read-only. DryRun must render the create argv WITHOUT the cenci wiring
+// mounts (consistent with the read-only probe's determinate-false posture)
+// and set CenciWiringUnknown so the preview never claims to be exact.
+func TestDryRun_MissingInitialDaemonSocket_OmitsWiringMountsAndFlagsIndeterminate(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	xdgDir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", xdgDir)
+
+	fakeDir := t.TempDir()
+	callLog := filepath.Join(fakeDir, "calls.txt")
+	writeFakeRuntime(t, fakeDir, "docker", callLog)
+	t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
+	// FAKE_PS left empty: no running container, so the create branch is the
+	// one where wiring indeterminacy applies (per the plan's Assumption: the
+	// CenciWiringUnknown caveat is scoped to the create branch only).
+
+	eng := &Engine{Runtime: "docker", Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	plan, err := eng.DryRun(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+
+	if plan.Mode != "create" {
+		t.Fatalf("Mode = %q, want \"create\" (no container running)", plan.Mode)
+	}
+	if !plan.CenciWiringUnknown {
+		t.Error("CenciWiringUnknown = false, want true: the events socket is missing (not unresolvable), so a real launch's daemon-start outcome can't be determined read-only")
+	}
+
+	joined := strings.Join(plan.CreateArgv, " ")
+	if strings.Contains(joined, ":/usr/local/bin/cenci:ro") {
+		t.Errorf("CreateArgv includes the cenci-binary wiring mount despite indeterminate wiring; got:\n%s", joined)
+	}
+	if strings.Contains(joined, "XDG_RUNTIME_DIR=") {
+		t.Errorf("CreateArgv includes the cenci wiring XDG_RUNTIME_DIR env despite indeterminate wiring; got:\n%s", joined)
+	}
+
+	var out bytes.Buffer
+	if err := plan.WriteText(&out); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+	text := out.String()
+	if !strings.Contains(text, "daemon") {
+		t.Errorf("WriteText missing an indeterminacy caveat mentioning the not-yet-running daemon, got:\n%s", text)
+	}
+	if !strings.Contains(text, "could not be determined") {
+		t.Errorf("WriteText missing an explicit \"could not be determined\" indeterminacy caveat, got:\n%s", text)
+	}
+}
+
+// TestDryRun_DeterminateWiring_LiveSocketIncludesMountsAndClearsUnknownFlag
+// is the determinate counterpart to the missing-socket test above: binding a
+// real unix socket at the default events-socket path makes cenciWiringReadOnly
+// report available=true, so the create argv DOES include the cenci wiring
+// mounts and CenciWiringUnknown is false. Without this test, CenciWiringUnknown
+// could be hardcoded true and every other test would still pass (plan Risks) --
+// this proves the flag is a genuine, meaningful signal (AGENTS #446-style
+// boundary coverage).
+func TestDryRun_DeterminateWiring_LiveSocketIncludesMountsAndClearsUnknownFlag(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	xdgDir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", xdgDir)
+
+	eventsSocket := ipc.DefaultEventSocketPath()
+	ln, err := net.Listen("unix", eventsSocket)
+	if err != nil {
+		t.Fatalf("bind events socket at %s: %v", eventsSocket, err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	fakeDir := t.TempDir()
+	callLog := filepath.Join(fakeDir, "calls.txt")
+	writeFakeRuntime(t, fakeDir, "docker", callLog)
+	t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
+	// FAKE_PS left empty: no running container -> create branch, matching
+	// the missing-socket counterpart above.
+
+	eng := &Engine{Runtime: "docker", Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	plan, err := eng.DryRun(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+
+	if plan.CenciWiringUnknown {
+		t.Error("CenciWiringUnknown = true, want false: a live events socket makes the wiring outcome determinate")
+	}
+	joined := strings.Join(plan.CreateArgv, " ")
+	if !strings.Contains(joined, ":/usr/local/bin/cenci:ro") {
+		t.Errorf("CreateArgv missing the cenci-binary wiring mount despite a live events socket; got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "XDG_RUNTIME_DIR=/run/user/1000") {
+		t.Errorf("CreateArgv missing the cenci wiring XDG_RUNTIME_DIR env despite a live events socket; got:\n%s", joined)
 	}
 }
 
@@ -360,6 +585,7 @@ func TestDryRun_HostNetwork_AddsNetworkHostAndWarnsOnce(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Chdir(repo)
+	setFakeDockerNotRunning(t)
 
 	stderr := &bytes.Buffer{}
 	eng := &Engine{Runtime: "docker", Stdout: &bytes.Buffer{}, Stderr: stderr}
@@ -419,8 +645,11 @@ func TestDryRun_Dind_SuccessfulPreviewShowsSysboxRuntimeWithNoSideEffects(t *tes
 		t.Errorf("CreateArgv missing \"--runtime=sysbox-runc\", got:\n%s", joined)
 	}
 
+	// Two invocations: the sysbox-runc registration probe (dindPreflight) and
+	// the read-only containerRunning disposition probe planArgvs now always
+	// performs (#620) -- both reads, zero container/volume side effects.
 	lines := readCallLog(t, callLog)
-	if len(lines) != 1 || !strings.HasPrefix(lines[0], "info") {
-		t.Errorf("expected exactly one runtime invocation (the sysbox-runc registration probe), want zero container/volume side effects; got calls:\n%s", strings.Join(lines, "\n"))
+	if len(lines) != 2 || !strings.HasPrefix(lines[0], "info") || !strings.HasPrefix(lines[1], "ps ") {
+		t.Errorf("expected exactly the sysbox-runc registration probe followed by the read-only containerRunning probe, want zero container/volume side effects; got calls:\n%s", strings.Join(lines, "\n"))
 	}
 }

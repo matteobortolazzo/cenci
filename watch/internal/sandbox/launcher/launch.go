@@ -106,17 +106,32 @@ func DefaultModel(agent string) string {
 	return "sonnet"
 }
 
-// Launch runs the interactive path: scope the launch, make sure the image
-// exists, wire cenci, then attach to a running container or create a
-// detached one and attach into it. On success it does not return — the final
-// attach execs the container runtime in place of this process.
-func (e *Engine) Launch(opts Options) error {
+// launchCtx is the shared preamble both Launch and DryRun resolve before
+// they can branch/build: agent/model defaults, cwd/home, the computed scope,
+// and the dind decision. Extracted (ticket #620) so scope/dind/runtime
+// resolution/preflight can never drift between a real launch and its dry-run
+// preview.
+type launchCtx struct {
+	Agent  string
+	Model  string
+	Home   string
+	Scope  Scope
+	DindOn bool
+}
+
+// resolveLaunchContext resolves the shared preamble: agent/model
+// defaults+validation, cwd/home, ComputeScope, ResolveDind (a UsageError on
+// conflicting/misplaced --dind flags), container-runtime resolution
+// (mutates e.Runtime only when unset — docker-first under dind, else
+// podman-first), and dindPreflight when dind is on. Both Launch and DryRun
+// call this so their failure modes for these steps can never diverge.
+func (e *Engine) resolveLaunchContext(opts Options) (launchCtx, error) {
 	agent := opts.Agent
 	if agent == "" {
 		agent = "claude"
 	}
 	if err := ValidateAgent(agent); err != nil {
-		return err
+		return launchCtx{}, err
 	}
 	model := opts.Model
 	if model == "" {
@@ -125,17 +140,17 @@ func (e *Engine) Launch(opts Options) error {
 
 	cwd, err := os.Getwd()
 	if err != nil {
-		return fmt.Errorf("cannot determine working directory: %w", err)
+		return launchCtx{}, fmt.Errorf("cannot determine working directory: %w", err)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return fmt.Errorf("cannot determine home directory: %w", err)
+		return launchCtx{}, fmt.Errorf("cannot determine home directory: %w", err)
 	}
 	scope := ComputeScope(agent, opts.Name, cwd, home)
 
 	dindOn, err := ResolveDind(opts, scope)
 	if err != nil {
-		return err
+		return launchCtx{}, err
 	}
 	if e.Runtime == "" {
 		if dindOn {
@@ -144,19 +159,83 @@ func (e *Engine) Launch(opts Options) error {
 			e.Runtime, err = sandbox.ContainerRuntime()
 		}
 		if err != nil {
-			return err
+			return launchCtx{}, err
 		}
 	}
 	if dindOn {
 		if err := e.dindPreflight(); err != nil {
-			return err
+			return launchCtx{}, err
 		}
 	}
 
-	if err := e.EnsureImage(scope); err != nil {
+	return launchCtx{Agent: agent, Model: model, Home: home, Scope: scope, DindOn: dindOn}, nil
+}
+
+// planArgvs performs the read-only container-disposition probing
+// (containerRunning + containerHasSharedAgentMount) and returns the create
+// and attach argvs plus whether a real launch would attach to an existing
+// container instead of creating one. Both Launch and DryRun call this so the
+// running/compatible/incompatible branch decision and both argvs can never
+// drift between a real launch and its preview:
+//
+//   - running + compatible (has the shared read-only agent-CLI mount):
+//     attaching=true, createArgv=nil — a real launch only attaches, never
+//     creates.
+//   - running + incompatible (predates the shared read-only agent-CLI
+//     mount): the same hard error Launch has always returned.
+//   - not running: createArgv is built via buildRunArgv (credential
+//     validation included — its hard error propagates unchanged),
+//     attaching=false.
+//
+// attachArgv is always built (buildAgentExecArgv is pure and cannot fail)
+// since both branches need it: Launch's runAgent rebuilds it from the same
+// inputs, and DryRun always previews it.
+//
+// A containerRunning/containerHasSharedAgentMount probe failure (e.g. the
+// container runtime daemon is unreachable) is returned unchanged, exactly as
+// Launch has always propagated it — DryRun must fail the same way a real
+// launch would rather than silently assuming "not running".
+func (e *Engine) planArgvs(ctx launchCtx, opts Options, cenciBin, socketDir string, cenciAvailable bool) (createArgv, attachArgv []string, attaching bool, err error) {
+	agentCmdArgs := buildAgentCmdArgs(ctx.Agent, ctx.Model)
+	execEnvArgs := assembleExecEnv(ctx.Agent)
+	attachArgv = buildAgentExecArgv(ctx.Scope.ContainerName, ctx.Agent, agentCmdArgs, execEnvArgs, opts)
+
+	running, err := e.containerRunning(ctx.Scope.ContainerName)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if running {
+		compatible, err := e.containerHasSharedAgentMount(ctx.Scope.ContainerName, ctx.Agent)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		if !compatible {
+			return nil, nil, false, fmt.Errorf("running container '%s' predates shared read-only agent CLIs; run 'cenci sandbox stop %s', then relaunch", ctx.Scope.ContainerName, ctx.Scope.ContainerName)
+		}
+		return nil, attachArgv, true, nil
+	}
+
+	createArgv, err = e.buildRunArgv(ctx.Agent, cenciBin, socketDir, cenciAvailable, ctx.Scope, opts, ctx.Home, ctx.DindOn)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	return createArgv, attachArgv, false, nil
+}
+
+// Launch runs the interactive path: scope the launch, make sure the image
+// exists, wire cenci, then attach to a running container or create a
+// detached one and attach into it. On success it does not return — the final
+// attach execs the container runtime in place of this process.
+func (e *Engine) Launch(opts Options) error {
+	ctx, err := e.resolveLaunchContext(opts)
+	if err != nil {
 		return err
 	}
-	if err := e.EnsureAgentVolume(agent); err != nil {
+
+	if err := e.EnsureImage(ctx.Scope); err != nil {
+		return err
+	}
+	if err := e.EnsureAgentVolume(ctx.Agent); err != nil {
 		return err
 	}
 
@@ -165,57 +244,57 @@ func (e *Engine) Launch(opts Options) error {
 	// Credentials are still staged from the host.
 	cenciBin, socketDir, cenciAvailable := e.resolveCenciWiring()
 
-	agentCmdArgs := buildAgentCmdArgs(agent, model)
+	agentCmdArgs := buildAgentCmdArgs(ctx.Agent, ctx.Model)
 
 	// Provider API keys are forwarded per-exec only (never baked into the
 	// container-lifetime create-time env/PID-1 environ), and scoped to the
 	// agent that can use them: OpenCode reads ANTHROPIC_API_KEY/
 	// OPENAI_API_KEY natively, Codex only OPENAI_API_KEY, and Claude neither
 	// (#490).
-	execEnvArgs := assembleExecEnv(agent)
+	execEnvArgs := assembleExecEnv(ctx.Agent)
 
-	// Attach to an already-running container: its mounts are fixed for its
-	// whole lifetime, so only warn about missing cenci wiring (#195) and wait
-	// for the async entrypoint when the lifecycle label says we created it
-	// detached.
-	running, err := e.containerRunning(scope.ContainerName)
+	// The disposition decision (attach vs create), the incompatible hard
+	// error, and both argvs come from the shared planArgvs helper so they can
+	// never drift from DryRun's preview of the same decision.
+	createArgv, _, attaching, err := e.planArgvs(ctx, opts, cenciBin, socketDir, cenciAvailable)
 	if err != nil {
 		return err
 	}
-	if running {
-		compatible, err := e.containerHasSharedAgentMount(scope.ContainerName, agent)
-		if err != nil {
+
+	if attaching {
+		// Attach to an already-running container: its mounts are fixed for
+		// its whole lifetime, so only warn about missing cenci wiring (#195)
+		// and wait for the async entrypoint when the lifecycle label says we
+		// created it detached.
+		if err := e.warnIfUnwired(ctx.Scope.ContainerName, cenciAvailable); err != nil {
 			return err
 		}
-		if !compatible {
-			return fmt.Errorf("running container '%s' predates shared read-only agent CLIs; run 'cenci sandbox stop %s', then relaunch", scope.ContainerName, scope.ContainerName)
-		}
-		if err := e.warnIfUnwired(scope.ContainerName, cenciAvailable); err != nil {
-			return err
-		}
-		label, err := e.lifecycleLabel(scope.ContainerName)
+		label, err := e.lifecycleLabel(ctx.Scope.ContainerName)
 		if err != nil {
 			return err
 		}
 		if label == "detached" {
-			if err := e.waitUntilReady(scope); err != nil {
+			if err := e.waitUntilReady(ctx.Scope); err != nil {
 				return err
 			}
 		}
-		return e.runAgent(scope.ContainerName, agent, agentCmdArgs, execEnvArgs, opts)
+		return e.runAgent(ctx.Scope.ContainerName, ctx.Agent, agentCmdArgs, execEnvArgs, opts)
 	}
 
-	// Remove a stopped container of the same name if one exists.
-	_ = exec.Command(e.Runtime, "rm", scope.ContainerName).Run()
+	// Remove a stopped container of the same name if one exists. Deliberately
+	// sequenced AFTER planArgvs (which includes buildRunArgv's credential
+	// validation) succeeds, not unconditionally before it as pre-#620 code
+	// did: planArgvs must stay pure/read-only-safe so DryRun can reuse it,
+	// which pushed rm out of it and after its call. A side effect: a launch
+	// that now fails credential validation against a stopped, same-named
+	// container leaves that container in place instead of deleting it — a
+	// deliberate, no-worse-than-before behavior change, not an oversight.
+	_ = exec.Command(e.Runtime, "rm", ctx.Scope.ContainerName).Run()
 
 	// Start the shared container detached, then exec this agent into it: PID 1
 	// stays independent from every tmux pane, so closing the first pane can't
 	// SIGHUP the container and tear down later exec sessions.
-	runArgv, err := e.buildRunArgv(agent, cenciBin, socketDir, cenciAvailable, scope, opts, home, dindOn)
-	if err != nil {
-		return err
-	}
-	create := exec.Command(e.Runtime, runArgv...)
+	create := exec.Command(e.Runtime, createArgv...)
 	create.Stdout = nil // cenci-sand discards the container id (>/dev/null)
 	create.Stderr = e.Stderr
 	if err := create.Run(); err != nil {
@@ -225,10 +304,10 @@ func (e *Engine) Launch(opts Options) error {
 	// The entrypoint performs credential and plugin setup before running the
 	// readiness command. Do not race the first agent against that
 	// initialization.
-	if err := e.waitUntilReady(scope); err != nil {
+	if err := e.waitUntilReady(ctx.Scope); err != nil {
 		return err
 	}
-	return e.runAgent(scope.ContainerName, agent, agentCmdArgs, execEnvArgs, opts)
+	return e.runAgent(ctx.Scope.ContainerName, ctx.Agent, agentCmdArgs, execEnvArgs, opts)
 }
 
 // buildAgentCmdArgs builds the per-agent CLI flags Launch/DryRun append after
