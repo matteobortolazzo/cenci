@@ -67,6 +67,45 @@ func TestSecurityExplain_TextOutput_ReportsFramingAndWeakenings(t *testing.T) {
 	}
 }
 
+// TestSecurityExplain_CodexCredsPresentButNotApplicable_NotNarratedAsStaged
+// is the #598 command-level acceptance-criteria assertion: a claude
+// `security explain` with Codex auth present on the host must NOT narrate
+// codex credentials as bind-mounted/copied/staged — the mount plan never
+// stages codex creds for a non-codex agent.
+func TestSecurityExplain_CodexCredsPresentButNotApplicable_NotNarratedAsStaged(t *testing.T) {
+	repo := securityRepoDir(t)
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".codex", "auth.json"), []byte(`{"token":"sentinel"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cmd := exec.Command(binaryPath, "security", "explain", "--agent", "claude")
+	cmd.Env = securityEnv(home, t.TempDir())
+	cmd.Dir = repo
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cenci security explain: %v\n%s", err, output)
+	}
+	out := string(output)
+
+	credIdx := strings.Index(out, "Credential sources:")
+	forwardedIdx := strings.Index(out, "Forwarded exec env")
+	if credIdx == -1 || forwardedIdx == -1 || forwardedIdx <= credIdx {
+		t.Fatalf("expected a \"Credential sources:\" section before \"Forwarded exec env\", got:\n%s", out)
+	}
+	credSection := out[credIdx:forwardedIdx]
+
+	if !strings.Contains(credSection, "codex") {
+		t.Errorf("expected codex credentials named in the narrative, got:\n%s", credSection)
+	}
+	if strings.Contains(credSection, "bind-mounted") || strings.Contains(credSection, "copied") {
+		t.Errorf("expected a claude security explain with codex creds present to NOT narrate codex as staged/mounted, got:\n%s", credSection)
+	}
+}
+
 func TestSecurityExplain_UsageErrors_Exit2(t *testing.T) {
 	tests := []struct {
 		name string

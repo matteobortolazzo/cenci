@@ -62,15 +62,7 @@ func (p Posture) WriteExplanation(w io.Writer) error {
 		_, _ = fmt.Fprintln(bw, "No credential sources apply to this agent.")
 	}
 	for _, c := range p.CredentialSources {
-		if c.Present {
-			_, _ = fmt.Fprintf(bw, "%s credentials (%s) are present on the host. They are bind-mounted\n", c.Type, c.HostPath)
-			_, _ = fmt.Fprintln(bw, "read-only into a staging path and copied into the container's own named")
-			_, _ = fmt.Fprintln(bw, "volume on first start — never baked into an image layer — so the host's")
-			_, _ = fmt.Fprintln(bw, "original credential file is never written to by the container.")
-		} else {
-			_, _ = fmt.Fprintf(bw, "%s credentials (%s) are absent on the host — nothing is staged or\n", c.Type, c.HostPath)
-			_, _ = fmt.Fprintln(bw, "mounted for this credential type.")
-		}
+		writeCredentialSourceExplanation(bw, c, p.Agent)
 	}
 	_, _ = fmt.Fprintln(bw)
 
@@ -114,6 +106,46 @@ func (p Posture) WriteExplanation(w io.Writer) error {
 	}
 
 	return bw.Flush()
+}
+
+// writeCredentialSourceExplanation narrates a single CredentialSource's
+// safety assumption for WriteExplanation's "Credential sources" section. It
+// branches on c.Staged for any "bind-mounted/copied" claim — never on
+// c.Present alone, per the #598 acceptance criterion that a present-but-
+// not-staged credential (e.g. Codex auth present on the host during a
+// Claude audit, which the mount plan never stages for a non-Codex agent)
+// must not be narrated as mounted. c.Probe additionally distinguishes an
+// unreadable/error probe state from plain absence, so a stat/read failure
+// is never narrated as a reassuring "absent". Probe is a plain string, not a
+// compiler-enforced enum, so an unrecognized value falls to its own distinct
+// "inconclusive" wording below — never the plain-absent case.
+func writeCredentialSourceExplanation(bw *bufio.Writer, c CredentialSource, agent string) {
+	switch {
+	case c.Staged:
+		_, _ = fmt.Fprintf(bw, "%s credentials (%s) are present on the host and staged for this launch.\n", c.Type, c.HostPath)
+		_, _ = fmt.Fprintln(bw, "They are bind-mounted read-only into a staging path and copied into the")
+		_, _ = fmt.Fprintln(bw, "container's own named volume on first start — never baked into an image")
+		_, _ = fmt.Fprintln(bw, "layer — so the host's original credential file is never written to by the")
+		_, _ = fmt.Fprintln(bw, "container.")
+	case c.Probe == CredentialProbeError:
+		_, _ = fmt.Fprintf(bw, "%s credentials (%s) could not be read on the host — an unreadable/error\n", c.Type, c.HostPath)
+		_, _ = fmt.Fprintln(bw, "probe result, distinct from a plain absence — so nothing is staged or")
+		_, _ = fmt.Fprintln(bw, "mounted into a read-only staging path or named volume for this credential")
+		_, _ = fmt.Fprintln(bw, "type.")
+	case c.Present:
+		_, _ = fmt.Fprintf(bw, "%s credentials (%s) are present on the host but are not staged for this\n", c.Type, c.HostPath)
+		_, _ = fmt.Fprintf(bw, "launch (agent=%s) — nothing is mounted into a read-only staging path or\n", agent)
+		_, _ = fmt.Fprintln(bw, "the container's named volume for this credential type.")
+	case c.Probe == CredentialProbeMissing:
+		_, _ = fmt.Fprintf(bw, "%s credentials (%s) are absent on the host — nothing is staged or\n", c.Type, c.HostPath)
+		_, _ = fmt.Fprintln(bw, "mounted into a read-only staging path or named volume for this credential")
+		_, _ = fmt.Fprintln(bw, "type.")
+	default:
+		_, _ = fmt.Fprintf(bw, "%s credential probe (%s) returned an unrecognized state (%q) — treat this\n", c.Type, c.HostPath, c.Probe)
+		_, _ = fmt.Fprintln(bw, "as inconclusive, not absent: nothing is staged or mounted into a read-only")
+		_, _ = fmt.Fprintln(bw, "staging path or named volume for this credential type, but presence on the")
+		_, _ = fmt.Fprintln(bw, "host could not be determined.")
+	}
 }
 
 // writeOtherMountsExplanation narrates every MountPosture.Kind in mounts that

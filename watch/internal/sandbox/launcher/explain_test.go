@@ -49,8 +49,8 @@ func baselinePosture() Posture {
 			{Source: "/tmp/host-claude-creds", Destination: "/tmp/host-claude-creds/.credentials.json", ReadOnly: true, Kind: MountKindClaudeCreds},
 		},
 		CredentialSources: []CredentialSource{
-			{Type: CredentialTypeClaude, HostPath: "/home/user/.claude/.credentials.json", Present: true},
-			{Type: CredentialTypeCodex, HostPath: "/home/user/.codex/auth.json", Present: false},
+			{Type: CredentialTypeClaude, HostPath: "/home/user/.claude/.credentials.json", Present: true, Probe: CredentialProbePresent},
+			{Type: CredentialTypeCodex, HostPath: "/home/user/.codex/auth.json", Present: false, Probe: CredentialProbeMissing},
 		},
 		BoundaryWeakenings: []BoundaryWeakening{},
 	}
@@ -121,16 +121,17 @@ func TestWriteExplanation_CredentialPresence_ReflectsEachState(t *testing.T) {
 	tests := []struct {
 		name    string
 		present bool
+		probe   string
 		wantSub string
 	}{
-		{name: "present", present: true, wantSub: "read-only"},
-		{name: "absent", present: false, wantSub: "absent"},
+		{name: "present", present: true, probe: CredentialProbePresent, wantSub: "read-only"},
+		{name: "absent", present: false, probe: CredentialProbeMissing, wantSub: "absent"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			p := baselinePosture()
 			p.CredentialSources = []CredentialSource{
-				{Type: CredentialTypeClaude, HostPath: "/home/user/.claude/.credentials.json", Present: tc.present},
+				{Type: CredentialTypeClaude, HostPath: "/home/user/.claude/.credentials.json", Present: tc.present, Probe: tc.probe},
 			}
 
 			var buf bytes.Buffer
@@ -217,7 +218,7 @@ func TestWriteExplanation_NeverMentionsDocker(t *testing.T) {
 
 	credAbsent := baselinePosture()
 	credAbsent.CredentialSources = []CredentialSource{
-		{Type: CredentialTypeCodex, HostPath: "/home/user/.codex/auth.json", Present: false},
+		{Type: CredentialTypeCodex, HostPath: "/home/user/.codex/auth.json", Present: false, Probe: CredentialProbeMissing},
 	}
 
 	fixtures := map[string]Posture{
@@ -348,6 +349,127 @@ func TestWriteExplanation_Mounts_UnknownKindSurfaced(t *testing.T) {
 	}
 	if !strings.Contains(out, "/container/future/dest") {
 		t.Errorf("expected the unclassified mount's destination to be named, got:\n%s", out)
+	}
+}
+
+// -- 8. staged/applicable/probe narrative (ticket #598) ----------------------
+
+// credentialSection extracts the "Credential sources:" narrative block out
+// of a full WriteExplanation output, up to (not including) the next
+// "Forwarded exec env" section header — narrowing assertions to the
+// credential-sources narrative specifically, so a match against a phrase
+// used elsewhere in the narrative (e.g. "bind-mounted" in the mounts
+// sections) can't produce a false pass/fail.
+func credentialSection(t *testing.T, out string) string {
+	t.Helper()
+	credIdx := strings.Index(out, "Credential sources:")
+	forwardedIdx := strings.Index(out, "Forwarded exec env")
+	if credIdx == -1 || forwardedIdx == -1 || forwardedIdx <= credIdx {
+		t.Fatalf("expected a \"Credential sources:\" section before \"Forwarded exec env\", got:\n%s", out)
+	}
+	return out[credIdx:forwardedIdx]
+}
+
+// TestWriteExplanation_CredentialPresentButNotStaged_NoStagedClaim covers
+// the #598 acceptance criterion directly: a credential that is present on
+// the host but not staged (e.g. codex creds during a claude audit —
+// Applicable:false, Staged:false) must NOT be narrated as bind-mounted,
+// copied, or staged — WriteExplanation must branch on Staged, never infer
+// staging from Present alone.
+func TestWriteExplanation_CredentialPresentButNotStaged_NoStagedClaim(t *testing.T) {
+	p := baselinePosture()
+	p.CredentialSources = []CredentialSource{
+		{
+			Type:       CredentialTypeCodex,
+			HostPath:   "/home/user/.codex/auth.json",
+			Present:    true,
+			Probe:      CredentialProbePresent,
+			Applicable: false,
+			Staged:     false,
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := p.WriteExplanation(&buf); err != nil {
+		t.Fatalf("WriteExplanation: %v", err)
+	}
+	out := buf.String()
+	credSection := credentialSection(t, out)
+
+	if !strings.Contains(credSection, "codex") {
+		t.Errorf("expected codex credentials named in the narrative, got:\n%s", credSection)
+	}
+	if strings.Contains(credSection, "bind-mounted") || strings.Contains(credSection, "copied") {
+		t.Errorf("expected the narrative to NOT claim a present-but-not-staged codex credential is bind-mounted/copied, got:\n%s", credSection)
+	}
+}
+
+// TestWriteExplanation_CredentialProbeError_DistinguishesFromAbsent covers
+// the unreadable/error probe state: the narrative must distinguish it from
+// plain absence (e.g. must not say the credential is simply "absent") —
+// content-specific, per AGENTS.md #446.
+func TestWriteExplanation_CredentialProbeError_DistinguishesFromAbsent(t *testing.T) {
+	p := baselinePosture()
+	p.CredentialSources = []CredentialSource{
+		{
+			Type:       CredentialTypeCodex,
+			HostPath:   "/home/user/.codex/auth.json",
+			Present:    false,
+			Probe:      CredentialProbeError,
+			Applicable: true,
+			Staged:     false,
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := p.WriteExplanation(&buf); err != nil {
+		t.Fatalf("WriteExplanation: %v", err)
+	}
+	out := buf.String()
+	credSection := credentialSection(t, out)
+
+	if !strings.Contains(credSection, "unreadable") && !strings.Contains(credSection, "error") {
+		t.Errorf("expected the probe-error state to be narrated distinctly (unreadable/error), got:\n%s", credSection)
+	}
+	if strings.Contains(credSection, "absent") {
+		t.Errorf("expected the probe-error state to NOT be narrated as plain absence, got:\n%s", credSection)
+	}
+}
+
+// TestWriteExplanation_CredentialProbeUnrecognized_NotNarratedAsAbsent covers
+// a silent-failure regression: Probe is a plain string, not a
+// compiler-enforced enum, so a CredentialSource carrying an
+// unrecognized/zero-value Probe must be narrated as inconclusive — never as
+// the plain, most-reassuring "absent" wording used for a genuinely missing
+// credential (content-specific per AGENTS.md #446).
+func TestWriteExplanation_CredentialProbeUnrecognized_NotNarratedAsAbsent(t *testing.T) {
+	p := baselinePosture()
+	p.CredentialSources = []CredentialSource{
+		{
+			Type:       CredentialTypeCodex,
+			HostPath:   "/home/user/.codex/auth.json",
+			Present:    false,
+			Probe:      "some-future-probe-state",
+			Applicable: true,
+			Staged:     false,
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := p.WriteExplanation(&buf); err != nil {
+		t.Fatalf("WriteExplanation: %v", err)
+	}
+	out := buf.String()
+	credSection := credentialSection(t, out)
+
+	if !strings.Contains(credSection, "inconclusive") {
+		t.Errorf("expected the unrecognized-probe state to be narrated as inconclusive, got:\n%s", credSection)
+	}
+	if strings.Contains(credSection, "are absent on the host") {
+		t.Errorf("expected the unrecognized-probe state to NOT use the plain-missing 'absent on the host' wording, got:\n%s", credSection)
+	}
+	if !strings.Contains(credSection, "some-future-probe-state") {
+		t.Errorf("expected the unrecognized-probe text to include the actual Probe value, got:\n%s", credSection)
 	}
 }
 

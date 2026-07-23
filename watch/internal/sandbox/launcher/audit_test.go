@@ -3,6 +3,7 @@ package launcher
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -435,6 +436,237 @@ func TestAudit_ForwardedEnv_IncludesPenCliKeyNameOnly(t *testing.T) {
 	}
 }
 
+// -- cross-agent applicability / staging (ticket #598) ---------------------
+
+// TestAudit_CrossAgentCredential_CodexPresentButNotApplicable_NotStaged is
+// the primary Acceptance-Criteria fixture from #598: a claude audit with
+// Codex auth present on the host must report codex as Present:true but
+// Applicable:false and Staged:false (the mount plan only ever stages codex
+// creds for agent=="codex" — validateCredentials/launch.go), while claude's
+// own credential (and gh, staged for every agent by assembleVolumeMounts)
+// must report Staged:true.
+func TestAudit_CrossAgentCredential_CodexPresentButNotApplicable_NotStaged(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	writeFile(t, filepath.Join(home, ".codex", "auth.json"), `{"token":"sentinel"}`)
+	writeFile(t, filepath.Join(home, ".claude", ".credentials.json"), `{"token":"sentinel"}`)
+	writeFile(t, filepath.Join(home, ".config", "gh", "hosts.yml"), "github.com:\n  oauth_token: sentinel\n")
+
+	posture, err := auditEngine().Audit(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+
+	codex := findCredentialSource(posture.CredentialSources, CredentialTypeCodex)
+	if codex == nil {
+		t.Fatalf("expected a codex credentialSources entry, got %+v", posture.CredentialSources)
+	}
+	if !codex.Present {
+		t.Errorf("codex credential Present = false, want true (~/.codex/auth.json exists)")
+	}
+	if codex.Applicable {
+		t.Errorf("codex credential Applicable = true for a claude audit, want false (codex creds only apply to agent=codex)")
+	}
+	if codex.Staged {
+		t.Errorf("codex credential Staged = true for a claude audit, want false (mount plan never stages codex creds for a non-codex agent)")
+	}
+
+	for _, typ := range []string{CredentialTypeClaude, CredentialTypeGh} {
+		src := findCredentialSource(posture.CredentialSources, typ)
+		if src == nil {
+			t.Fatalf("expected a %s credentialSources entry, got %+v", typ, posture.CredentialSources)
+		}
+		if !src.Present {
+			t.Errorf("%s credential Present = false, want true", typ)
+		}
+		if !src.Applicable {
+			t.Errorf("%s credential Applicable = false, want true (claude/gh apply to every agent)", typ)
+		}
+		if !src.Staged {
+			t.Errorf("%s credential Staged = false, want true (present + applicable => staged)", typ)
+		}
+	}
+}
+
+// TestAudit_StagedImpliesApplicableAndPresent_AcrossAgents is a dedicated
+// invariant test (per the plan's Architectural Context): staged must never
+// be true unless applicable && present both hold, for every credential type
+// and every agent — Staged is read from the already-computed mounts set
+// (never independently re-derived), so this invariant guards against future
+// drift between the two.
+func TestAudit_StagedImpliesApplicableAndPresent_AcrossAgents(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	writeFile(t, filepath.Join(home, ".claude", ".credentials.json"), `{"token":"sentinel"}`)
+	writeFile(t, filepath.Join(home, ".codex", "auth.json"), `{"token":"sentinel"}`)
+	writeFile(t, filepath.Join(home, ".local", "share", "opencode", "auth.json"), `{"token":"sentinel"}`)
+	writeFile(t, filepath.Join(home, ".config", "gh", "hosts.yml"), "github.com:\n  oauth_token: sentinel\n")
+	writeFile(t, filepath.Join(home, ".pencil", "session-cli.json"), `{"token":"sentinel"}`)
+
+	for _, agent := range []string{"claude", "codex", "opencode"} {
+		posture, err := auditEngine().Audit(Options{Agent: agent})
+		if err != nil {
+			t.Fatalf("Audit(%s): %v", agent, err)
+		}
+		for _, src := range posture.CredentialSources {
+			if src.Staged && (!src.Applicable || !src.Present) {
+				t.Errorf("agent %s: credential %s Staged=true but Applicable=%t Present=%t; invariant staged => applicable && present violated",
+					agent, src.Type, src.Applicable, src.Present)
+			}
+		}
+	}
+}
+
+// -- credential probe: missing vs unreadable/error (ticket #598) -----------
+
+// TestAudit_CredentialProbe_MissingVsDirectoryInPlace_DistinctFieldsAndText
+// covers the three-state probe: a plain-absent credential must report
+// Probe:CredentialProbeMissing, while a directory sitting at the same path
+// (root-safe, deterministic per Q&A item 2 — no chmod/permission-denied
+// primary fixture, since tests may run as root) must report
+// Probe:CredentialProbeError, distinctly. Both cases keep Present:false
+// (isRegularFile stays false for a directory), and WriteText's rendered text
+// must differ between the two states — a content-specific assertion, not
+// just a non-empty check (AGENTS.md #446).
+func TestAudit_CredentialProbe_MissingVsDirectoryInPlace_DistinctFieldsAndText(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+	eng := auditEngine()
+
+	// Missing: no ~/.codex/auth.json at all.
+	missingPosture, err := eng.Audit(Options{Agent: "codex"})
+	if err != nil {
+		t.Fatalf("Audit (missing): %v", err)
+	}
+	missingSrc := findCredentialSource(missingPosture.CredentialSources, CredentialTypeCodex)
+	if missingSrc == nil {
+		t.Fatalf("expected a codex credentialSources entry, got %+v", missingPosture.CredentialSources)
+	}
+	if missingSrc.Probe != CredentialProbeMissing {
+		t.Errorf("missing codex credential Probe = %q, want %q", missingSrc.Probe, CredentialProbeMissing)
+	}
+	if missingSrc.Present {
+		t.Errorf("missing codex credential Present = true, want false")
+	}
+	var missingText bytes.Buffer
+	if err := missingPosture.WriteText(&missingText); err != nil {
+		t.Fatalf("WriteText (missing): %v", err)
+	}
+
+	// Error: a directory sits at the codex auth.json path.
+	codexAuthPath := filepath.Join(home, ".codex", "auth.json")
+	if err := os.MkdirAll(codexAuthPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	errorPosture, err := eng.Audit(Options{Agent: "codex"})
+	if err != nil {
+		t.Fatalf("Audit (directory-in-place): %v", err)
+	}
+	errorSrc := findCredentialSource(errorPosture.CredentialSources, CredentialTypeCodex)
+	if errorSrc == nil {
+		t.Fatalf("expected a codex credentialSources entry, got %+v", errorPosture.CredentialSources)
+	}
+	if errorSrc.Probe != CredentialProbeError {
+		t.Errorf("directory-in-place codex credential Probe = %q, want %q", errorSrc.Probe, CredentialProbeError)
+	}
+	if errorSrc.Present {
+		t.Errorf("directory-in-place codex credential Present = true, want false (not a regular file)")
+	}
+	var errorText bytes.Buffer
+	if err := errorPosture.WriteText(&errorText); err != nil {
+		t.Fatalf("WriteText (directory-in-place): %v", err)
+	}
+
+	if missingSrc.Probe == errorSrc.Probe {
+		t.Errorf("missing and directory-in-place probes must report distinct Probe values, both got %q", missingSrc.Probe)
+	}
+	if missingText.String() == errorText.String() {
+		t.Errorf("missing and directory-in-place probe states must render distinct text, got identical output:\n%s", missingText.String())
+	}
+	if !strings.Contains(errorText.String(), "unreadable") && !strings.Contains(errorText.String(), "error") {
+		t.Errorf("directory-in-place probe text does not distinguish an error/unreadable state, got:\n%s", errorText.String())
+	}
+	if strings.Contains(missingText.String(), "unreadable") || strings.Contains(missingText.String(), "error") {
+		t.Errorf("missing probe text must not claim an unreadable/error state, got:\n%s", missingText.String())
+	}
+}
+
+// TestCredentialStatusText_UnrecognizedProbe_NotRenderedAsAbsent covers a
+// silent-failure regression: Probe is a plain string, not a compiler-enforced
+// enum, so a CredentialSource carrying an unrecognized/zero-value Probe (a
+// future probe state added without updating credentialStatusText, or a test
+// literal that forgot to set Probe) must render as a visibly distinct
+// "unknown probe state" — never silently collapsed into the most reassuring
+// "absent" text.
+func TestCredentialStatusText_UnrecognizedProbe_NotRenderedAsAbsent(t *testing.T) {
+	c := CredentialSource{
+		Type:     CredentialTypeCodex,
+		HostPath: "/home/user/.codex/auth.json",
+		Present:  false,
+		Probe:    "some-future-probe-state",
+	}
+	got := credentialStatusText(c, "codex")
+	if got == "absent" {
+		t.Errorf("unrecognized Probe rendered as plain %q, want a distinct unknown-state text", got)
+	}
+	if !strings.Contains(got, "unknown") {
+		t.Errorf("expected the unrecognized Probe text to call out an unknown state, got %q", got)
+	}
+	if !strings.Contains(got, "some-future-probe-state") {
+		t.Errorf("expected the unrecognized Probe text to include the actual Probe value, got %q", got)
+	}
+}
+
+// -- env-secret classification (ticket #598) -------------------------------
+
+// TestAudit_EnvSecretClassification_ContextKeySecretTermNot covers giving
+// create-time env names the same explicit secret classification semantics
+// as forwarded exec env (isSecretEnvName wrapping forwardedEnvVarNames):
+// CONTEXT7_API_KEY must be marked Secret:true, while an ordinary,
+// non-secret create-time name (TERM) must be marked Secret:false.
+func TestAudit_EnvSecretClassification_ContextKeySecretTermNot(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+	t.Setenv("CONTEXT7_API_KEY", "sentinel-secret-value-envsecret1")
+
+	posture, err := auditEngine().Audit(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+
+	var contextEnv, termEnv *EnvVarName
+	for i := range posture.Env {
+		switch posture.Env[i].Name {
+		case "CONTEXT7_API_KEY":
+			contextEnv = &posture.Env[i]
+		case "TERM":
+			termEnv = &posture.Env[i]
+		}
+	}
+	if contextEnv == nil {
+		t.Fatalf("expected CONTEXT7_API_KEY in Env, got %+v", posture.Env)
+	}
+	if !contextEnv.Secret {
+		t.Errorf("CONTEXT7_API_KEY Env entry Secret = false, want true")
+	}
+	if termEnv == nil {
+		t.Fatalf("expected TERM in Env, got %+v", posture.Env)
+	}
+	if termEnv.Secret {
+		t.Errorf("TERM Env entry Secret = true, want false (not a create-time secret name)")
+	}
+}
+
 // -- env names only -------------------------------------------------------
 
 // TestAudit_EnvReportedAsNamesOnly covers the create-time env list: names
@@ -617,6 +849,42 @@ func TestAudit_SecretLeakRegression_NeverEmitsSecretValues(t *testing.T) {
 	if strings.Contains(string(jsonBytes), penSecret) {
 		t.Errorf("JSON output leaks the PEN_CLI_KEY sentinel value:\n%s", jsonBytes)
 	}
+
+	// Extend the regression to the new cross-agent (present-but-not-staged)
+	// and probe-error (directory-in-place) fixtures introduced by #598: none
+	// of the sentinel secret values above may leak in either state.
+	writeFile(t, filepath.Join(home, ".local", "share", "opencode", "auth.json"), `{"token":"`+contextSecret+`"}`)
+	if err := os.RemoveAll(filepath.Join(home, ".config", "gh", "hosts.yml")); err != nil {
+		t.Fatalf("RemoveAll: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".config", "gh", "hosts.yml"), 0o755); err != nil {
+		t.Fatalf("MkdirAll (directory-in-place gh hosts.yml): %v", err)
+	}
+
+	crossPosture, err := auditEngine().Audit(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Audit (cross-agent claude, with error-probe gh path): %v", err)
+	}
+
+	var crossTextBuf bytes.Buffer
+	if err := crossPosture.WriteText(&crossTextBuf); err != nil {
+		t.Fatalf("WriteText (cross-agent): %v", err)
+	}
+	for _, secret := range []string{contextSecret, openaiSecret, penSecret} {
+		if strings.Contains(crossTextBuf.String(), secret) {
+			t.Errorf("cross-agent text output leaks a sentinel secret value:\n%s", crossTextBuf.String())
+		}
+	}
+
+	crossJSONBytes, err := json.MarshalIndent(crossPosture, "", "  ")
+	if err != nil {
+		t.Fatalf("MarshalIndent (cross-agent): %v", err)
+	}
+	for _, secret := range []string{contextSecret, openaiSecret, penSecret} {
+		if strings.Contains(string(crossJSONBytes), secret) {
+			t.Errorf("cross-agent JSON output leaks a sentinel secret value:\n%s", crossJSONBytes)
+		}
+	}
 }
 
 // TestAudit_JSON_EmptySlicesSerializeAsEmptyArrayNotNull is a dedicated,
@@ -701,7 +969,7 @@ func TestAudit_JSON_HasStableFieldNamesAndNeverSerializesEnvValue(t *testing.T) 
 		`"mounts"`, `"destination"`, `"kind"`,
 		`"volumes"`, `"name"`,
 		`"env"`, `"forwardedEnv"`, `"secret"`,
-		`"credentialSources"`, `"present"`,
+		`"credentialSources"`, `"present"`, `"probe"`, `"applicable"`, `"staged"`,
 		`"boundaryWeakenings"`, `"option"`, `"active"`, `"effect"`,
 		`"reseedCreds"`,
 	} {

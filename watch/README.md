@@ -872,7 +872,24 @@ just omitted.
 `volumes`, `env`, `forwardedEnv`, `credentialSources`, `boundaryWeakenings`,
 `reseedCreds`) suitable for scripting or CI checks. As with the text report,
 no field ever carries a secret or credential *value* — only names, paths,
-and presence/status booleans.
+and presence/status booleans. Each `credentialSources` entry carries `type`,
+`hostPath`, `present` (host file is a readable regular file), `probe`
+(`"present"` | `"missing"` | `"error"` — distinguishes a missing file from
+an unreadable/stat-error one), `applicable` (whether this credential type
+applies to the selected `--agent`), and `staged` (whether it is actually
+staged into this session by the real mount plan). Each `env` entry carries
+`name` and `secret` (whether the name is classified secret-bearing, e.g.
+`CONTEXT7_API_KEY`), matching how `forwardedEnv` is already classified.
+
+**Migration notes (additive, backward compatible):** `present` keeps its
+original meaning and does not by itself tell you whether a credential is
+mounted — a credential can be `present:true` but `staged:false` (e.g. Codex
+auth is present on host but the selected agent is Claude). Scripts and tools
+that need "is this credential actually mounted" must check `staged`, not
+`present`. `probe` distinguishes a genuinely missing file (`"missing"`) from
+an unreadable/stat-error one (`"error"`); both previously collapsed into
+`present:false`. Create-time `env` entries now mark secret-bearing names
+with `secret:true`, the same classification forwarded exec env already had.
 
 Like `diagnose`, `audit` is read-only and exits 0 on a successful render;
 only usage errors (e.g. `--dind` with `--no-dind`, or `--dind` outside a

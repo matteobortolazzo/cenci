@@ -96,6 +96,167 @@ func TestAudit_JSONOutput_ParsesWithExpectedFields(t *testing.T) {
 	}
 }
 
+// TestAudit_JSONOutput_HasProbeApplicableStagedFields covers the new #598
+// credentialSources fields at the command level: every credentialSources
+// entry must carry "probe"/"applicable"/"staged" keys alongside the
+// existing "present".
+func TestAudit_JSONOutput_HasProbeApplicableStagedFields(t *testing.T) {
+	repo := auditRepoDir(t)
+	home := t.TempDir()
+
+	cmd := exec.Command(binaryPath, "audit", "--agent", "claude", "--json")
+	cmd.Env = auditEnv(home, t.TempDir())
+	cmd.Dir = repo
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cenci audit --json: %v\n%s", err, output)
+	}
+	out := string(output)
+
+	for _, key := range []string{`"probe"`, `"applicable"`, `"staged"`} {
+		if !strings.Contains(out, key) {
+			t.Errorf("cenci audit --json output missing expected credentialSources field %s; got:\n%s", key, out)
+		}
+	}
+
+	var parsed struct {
+		CredentialSources []struct {
+			Type       string `json:"type"`
+			Present    bool   `json:"present"`
+			Probe      string `json:"probe"`
+			Applicable bool   `json:"applicable"`
+			Staged     bool   `json:"staged"`
+		} `json:"credentialSources"`
+	}
+	if err := json.Unmarshal(output, &parsed); err != nil {
+		t.Fatalf("cenci audit --json produced invalid JSON: %v\noutput:\n%s", err, output)
+	}
+	if len(parsed.CredentialSources) == 0 {
+		t.Fatalf("expected at least one credentialSources entry, got none; output:\n%s", output)
+	}
+	for _, src := range parsed.CredentialSources {
+		if src.Probe == "" {
+			t.Errorf("credentialSources[%s].probe is empty, want a non-empty probe state", src.Type)
+		}
+	}
+}
+
+// TestAudit_JSONOutput_EnvSecretFlagsContextKeyTrue covers create-time env
+// names getting the same explicit secret classification as forwarded exec
+// env (#598): CONTEXT7_API_KEY must be reported with "secret":true, and its
+// VALUE must never appear anywhere in the JSON output.
+func TestAudit_JSONOutput_EnvSecretFlagsContextKeyTrue(t *testing.T) {
+	repo := auditRepoDir(t)
+	home := t.TempDir()
+	const contextSecret = "sentinel-secret-value-cmdjson1"
+	t.Setenv("CONTEXT7_API_KEY", contextSecret)
+
+	cmd := exec.Command(binaryPath, "audit", "--agent", "claude", "--json")
+	cmd.Env = auditEnv(home, t.TempDir())
+	cmd.Dir = repo
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cenci audit --json: %v\n%s", err, output)
+	}
+
+	var parsed struct {
+		Env []struct {
+			Name   string `json:"name"`
+			Secret bool   `json:"secret"`
+		} `json:"env"`
+	}
+	if err := json.Unmarshal(output, &parsed); err != nil {
+		t.Fatalf("cenci audit --json produced invalid JSON: %v\noutput:\n%s", err, output)
+	}
+
+	var contextEnv *struct {
+		Name   string `json:"name"`
+		Secret bool   `json:"secret"`
+	}
+	for i := range parsed.Env {
+		if parsed.Env[i].Name == "CONTEXT7_API_KEY" {
+			contextEnv = &parsed.Env[i]
+		}
+	}
+	if contextEnv == nil {
+		t.Fatalf("expected CONTEXT7_API_KEY in env, got %+v", parsed.Env)
+	}
+	if !contextEnv.Secret {
+		t.Errorf("env CONTEXT7_API_KEY secret = false, want true")
+	}
+	if strings.Contains(string(output), contextSecret) {
+		t.Errorf("cenci audit --json leaked the CONTEXT7_API_KEY sentinel value:\n%s", output)
+	}
+}
+
+// TestAudit_JSONOutput_CrossAgentCredential_PresentNotApplicableNotStaged is
+// the command-level cross-agent scenario from the #598 plan: a claude audit
+// with codex auth present on the host must report codex as present:true but
+// applicable:false and staged:false.
+func TestAudit_JSONOutput_CrossAgentCredential_PresentNotApplicableNotStaged(t *testing.T) {
+	repo := auditRepoDir(t)
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".codex", "auth.json"), []byte(`{"token":"sentinel"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cmd := exec.Command(binaryPath, "audit", "--agent", "claude", "--json")
+	cmd.Env = auditEnv(home, t.TempDir())
+	cmd.Dir = repo
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cenci audit --json: %v\n%s", err, output)
+	}
+
+	var parsed struct {
+		CredentialSources []struct {
+			Type       string `json:"type"`
+			Present    bool   `json:"present"`
+			Probe      string `json:"probe"`
+			Applicable bool   `json:"applicable"`
+			Staged     bool   `json:"staged"`
+		} `json:"credentialSources"`
+	}
+	if err := json.Unmarshal(output, &parsed); err != nil {
+		t.Fatalf("cenci audit --json produced invalid JSON: %v\noutput:\n%s", err, output)
+	}
+
+	var codex *struct {
+		Type       string `json:"type"`
+		Present    bool   `json:"present"`
+		Probe      string `json:"probe"`
+		Applicable bool   `json:"applicable"`
+		Staged     bool   `json:"staged"`
+	}
+	for i := range parsed.CredentialSources {
+		if parsed.CredentialSources[i].Type == "codex" {
+			codex = &parsed.CredentialSources[i]
+		}
+	}
+	if codex == nil {
+		t.Fatalf("expected a codex credentialSources entry, got %+v", parsed.CredentialSources)
+	}
+	// Probe must be non-empty (e.g. "present") -- this is what forces the
+	// present/applicable/staged assertions below to actually exercise the new
+	// schema instead of vacuously passing on the current schema's zero-value
+	// defaults for fields that don't exist yet.
+	if codex.Probe == "" {
+		t.Errorf("codex credentialSources.probe is empty, want a non-empty probe state (e.g. %q)", "present")
+	}
+	if !codex.Present {
+		t.Errorf("codex credentialSources.present = false, want true (auth.json exists on host)")
+	}
+	if codex.Applicable {
+		t.Errorf("codex credentialSources.applicable = true for a claude audit, want false")
+	}
+	if codex.Staged {
+		t.Errorf("codex credentialSources.staged = true for a claude audit, want false (not applicable)")
+	}
+}
+
 func TestAudit_UsageErrors_Exit2(t *testing.T) {
 	tests := []struct {
 		name string
