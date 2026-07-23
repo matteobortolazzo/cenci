@@ -44,13 +44,21 @@ gh issue view <number> --repo <owner>/<repo> --json number,title,body,labels,sta
 
 ### 2. Parent-child detection (ticket mode only)
 
-1. Parse the ticket body for `Related to #<number>`. If found, this is a child ticket — extract the parent ID.
+1. Determine the parent ID. Primary source is the native sub-issue link:
+   ```bash
+   gh issue view <number> --repo <owner>/<repo> --json parent --jq '.parent.number // empty'
+   ```
+   If that returns a number, this is a child ticket. **Fallback** (older tickets linked only by convention): parse the ticket body for `Related to #<number>` and extract the parent ID. If neither yields a parent, this is not a child — set `isChild = false` and skip the rest of this section.
 2. Fetch the parent with the same `gh issue view` command. If the parent is already closed, set `isChild = true`, `isLastChild = false`, and skip the sibling checks.
-3. Find siblings in the parent's `### Child Tickets` section (lines matching `- [ ] #<number>` or `- [x] #<number>`). Fallback if the section is missing:
+3. Find siblings from the parent's native sub-issue list:
+   ```bash
+   gh issue view <parentId> --repo <owner>/<repo> --json subIssues --jq '.subIssues.nodes[].number'
+   ```
+   **Fallback** if the parent has no sub-issue nodes (older convention-only tickets):
    ```bash
    gh issue list --repo <owner>/<repo> --search "\"Related to #<parentId>\"" --state all --json number
    ```
-4. Determine `isLastChild`: check open siblings (excluding the current ticket):
+4. Determine `isLastChild`: check open siblings (excluding the current ticket). Derive open state from the sub-issue nodes (`.subIssues.nodes[]` carry a `state`), or reuse the `Related to` search restricted to open issues:
    ```bash
    gh issue list --repo <owner>/<repo> --search "\"Related to #<parentId>\"" --state open --json number
    ```
