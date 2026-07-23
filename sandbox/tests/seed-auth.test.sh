@@ -146,6 +146,43 @@ assert_eq "returns success" "0" "$?"
 assert_eq "overwrites with staged OpenCode credential" '{"chain":"host-new"}' "$(cat "${DEST}")"
 assert_eq "restores mode 600" "600" "$(stat -c '%a' "${DEST}")"
 
+# ── Case 7: Pencil CLI session seed-once ───────────────────────────
+# Mirrors case 1/case 2 at Pencil's session path (~/.pencil/session-cli.json)
+# — headless design reads (`pen interactive`) authenticate with this seeded
+# session when no PEN_CLI_KEY is forwarded. Session tokens are treated as
+# rotating like the agent OAuth chains, so the seed-once contract applies.
+echo "case: seeds Pencil session-cli.json when destination is missing"
+STAGED="${TMPDIR_TEST}/case7/staged.json"
+DEST="${TMPDIR_TEST}/case7/home/.pencil/session-cli.json"
+mkdir -p "$(dirname "${STAGED}")"
+echo '{"chain":"host"}' > "${STAGED}"
+seed_credential "${STAGED}" "${DEST}"
+assert_eq "returns success" "0" "$?"
+assert_eq "copies staged Pencil session" '{"chain":"host"}' "$(cat "${DEST}" 2>/dev/null)"
+assert_eq "sets mode 600" "600" "$(stat -c '%a' "${DEST}" 2>/dev/null)"
+
+echo "case: never overwrites an existing Pencil session-cli.json"
+STAGED="${TMPDIR_TEST}/case7b/staged.json"
+DEST="${TMPDIR_TEST}/case7b/home/.pencil/session-cli.json"
+mkdir -p "$(dirname "${STAGED}")" "$(dirname "${DEST}")"
+echo '{"chain":"host-stale"}' > "${STAGED}"
+echo '{"chain":"volume-live"}' > "${DEST}"
+seed_credential "${STAGED}" "${DEST}"
+assert_eq "returns success" "0" "$?"
+assert_eq "keeps the volume Pencil session" '{"chain":"volume-live"}' "$(cat "${DEST}")"
+
+# ── Case 8: entrypoint wires the Pencil staging → home-volume path ─
+# The generic function contract above is meaningless if entrypoint.sh never
+# calls it for Pencil's paths. Assert the exact wiring line (full staged and
+# destination paths on one line, matched as a fixed string).
+echo "case: entrypoint.sh seeds the staged Pencil session into the home volume"
+if grep -qF "seed_credential /tmp/host-pencil-creds/session-cli.json /home/dev/.pencil/session-cli.json" \
+    "${SCRIPT_DIR}/../entrypoint.sh"; then
+    pass
+else
+    fail "entrypoint.sh does not seed /tmp/host-pencil-creds/session-cli.json to /home/dev/.pencil/session-cli.json"
+fi
+
 echo
 echo "Passed: ${PASSES}, Failed: ${FAILURES}"
 [[ "${FAILURES}" -eq 0 ]]

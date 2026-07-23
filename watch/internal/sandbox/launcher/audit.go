@@ -64,6 +64,7 @@ const (
 	MountKindCodexCreds     = "codex-creds"
 	MountKindOpencodeCreds  = "opencode-creds"
 	MountKindGhCreds        = "gh-creds"
+	MountKindPencilCreds    = "pencil-creds"
 
 	// MountKindUnknown is an explicit sentinel for a mount destination that
 	// doesn't match any case in mountKindForDestination's switch — a visible
@@ -79,6 +80,7 @@ const (
 	CredentialTypeCodex    = "codex"
 	CredentialTypeOpencode = "opencode"
 	CredentialTypeGh       = "gh"
+	CredentialTypePencil   = "pencil"
 )
 
 // ImagePosture is Posture.Image: the resolved image reference and whether it
@@ -361,6 +363,8 @@ func mountKindForDestination(destination string) string {
 		return MountKindOpencodeCreds
 	case "/tmp/host-gh-config/hosts.yml":
 		return MountKindGhCreds
+	case "/tmp/host-pencil-creds/session-cli.json":
+		return MountKindPencilCreds
 	default:
 		return MountKindUnknown
 	}
@@ -412,6 +416,7 @@ var forwardedEnvVarNames = map[string]bool{
 	"CONTEXT7_API_KEY":  true,
 	"ANTHROPIC_API_KEY": true,
 	"OPENAI_API_KEY":    true,
+	"PEN_CLI_KEY":       true,
 }
 
 // forwardedEnvVars reports the per-exec provider API keys assembleExecEnv
@@ -443,6 +448,7 @@ var credentialSourceSpecs = []struct {
 		return filepath.Join(home, ".local", "share", "opencode", "auth.json")
 	}},
 	{CredentialTypeGh, func(home string) string { return filepath.Join(home, ".config", "gh", "hosts.yml") }},
+	{CredentialTypePencil, func(home string) string { return filepath.Join(home, ".pencil", "session-cli.json") }},
 }
 
 // credentialSources reports every credential type's resolved host path and

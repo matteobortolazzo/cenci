@@ -313,6 +313,28 @@ The launcher itself makes no assumption about the host OpenCode version — see
 for the pinned minimum version (`cenci-installer doctor` enforces it) and its known
 limitations.
 
+### Pencil auth (headless design reads)
+
+Repos with Pencil design workflows enabled (`pencil.enabled` in `.cenci/config.json`)
+run their `implement`/`verify-ui` design reads inside the sandbox through
+`@pen.dev/cli`'s **headless** mode (`pencil interactive -i <design>.pen`) — the CLI
+runs the full editor engine with local rendering, so no desktop app, GUI, or MCP
+connection is needed. The CLI itself is baked into the per-repo image by
+`fragments/pencil.dockerfile` (selected by `/cenci:configure`); auth is optional
+staging, never a hard launch requirement:
+
+- `~/.pencil/session-cli.json` — the session created by `pencil login` on the host.
+  Injected read-only and seeded to `/home/dev/.pencil/session-cli.json` (mode 600) only
+  when the volume has none yet (same seed-once staging as the agent credentials;
+  `--reseed-creds` forces a re-copy).
+- `PEN_CLI_KEY` — an org-scoped CLI key (created under Developer Keys in the Pencil web
+  app). Forwarded per agent session (`exec`) when set in your host environment; never
+  baked into the image or the container's create-time environment. Takes precedence
+  over a seeded session inside the CLI.
+
+With neither present, the pipeline degrades gracefully: the Pencil availability probe
+fails and implement proceeds with `DESIGN.md` text context only.
+
 If host credentials are not available, open a shell for manual setup:
 
 ```bash
@@ -492,6 +514,7 @@ OpenCode (`--agent opencode`) has no per-flag "skip permissions" equivalent to b
 | `~/.codex/auth.json` (Codex only) | `/tmp/host-codex-creds/` (staging) | Codex OAuth tokens (copied to home on start) |
 | `~/.local/share/opencode/auth.json` (OpenCode only) | `/tmp/host-opencode-creds/` (staging) | OpenCode OAuth tokens (copied to home on start) |
 | `~/.config/gh/hosts.yml` | `/tmp/host-gh-config/` (staging) | GitHub CLI tokens (copied to home on start) |
+| `~/.pencil/session-cli.json` | `/tmp/host-pencil-creds/` (staging) | Pencil CLI session for headless design reads (copied to home on start) |
 
 ### MCP servers
 

@@ -112,10 +112,14 @@ the last *published* plugin version, not your working tree — un-merged edits t
 `flow/skills/` only reach it after the plugin version bumps.
 
 `fragments/*.dockerfile` holds the same composable blocks (`dotnet`, `node`, `playwright`,
-`go`, `python`, `rust`) as standalone snippets used to assemble per-project images.
+`go`, `python`, `rust`, `pencil`) as standalone snippets used to assemble per-project images.
 Generated images always include Node so the isolated updater can install either npm package;
 the remaining fragments (including `playwright`, used for `verify-ui`'s Chromium
-screenshot capture) follow the detected project stack. Per-repo images include the shared
+screenshot capture) follow the detected project stack — except `pencil`, which is
+config-selected (`pencil.enabled: true`), baking `@pen.dev/cli` in so `implement`/`verify-ui`
+run design reads via the CLI's headless editor engine (no desktop app reachable from a
+container). Headless auth is a seeded `~/.pencil/session-cli.json` (staged by the launcher,
+seeded once by `entrypoint.sh`) or a per-exec `PEN_CLI_KEY` — never baked into the image. Per-repo images include the shared
 Node runtime, never the agent packages. **Invariant:** each fragment and its corresponding block in `Dockerfile` must stay
 byte-identical — hand-duplicated on every change (e.g. bumping `DOTNET_SDK_VERSION` or adding a
 package to a stack block means editing both `Dockerfile` and `fragments/<stack>.dockerfile`
@@ -148,6 +152,9 @@ Image dependency versions are pinned via Dockerfile `ARG`s, all checked daily by
   - `PLAYWRIGHT_VERSION` — `Dockerfile` (+ `fragments/playwright.dockerfile`,
     byte-identical). Bump by hand and rebuild; add it to the auto-bumped tier above in a
     follow-up if it proves stable enough to auto-merge like Go/uv.
+  - `PEN_CLI_VERSION` — `fragments/pencil.dockerfile` only (config-selected fragment, no
+    monolith block — like `python`/`rust`, this repo's own stack doesn't use it). Bump by
+    hand; affected repos pick it up on their next `cenci sandbox build`.
 
 ## Security
 - Never bake secrets or credentials into the image layers.

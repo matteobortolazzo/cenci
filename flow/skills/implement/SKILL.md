@@ -46,15 +46,26 @@ If `pencil.enabled` is `true` in the resolved config:
    get_editor_state({ include_schema: false })
    EOF
    ```
-   If it succeeds → set `pencilAvailable = true`. If it fails → set `pencilAvailable = false`.
+   If it succeeds → set `pencilAvailable = true`. If it fails → run the **headless fallback probe** below.
 
    **Editor mode** (`pencil.mode` is `"editor"`):
    ```
    Call `get_editor_state()` via MCP — if it succeeds, set `pencilAvailable = true`.
-   If it fails or times out, set `pencilAvailable = false`.
+   If it fails or times out, run the headless fallback probe below.
    ```
 
-   If the probe fails, inform the user: "Pencil unavailable — proceeding with DESIGN.md text content only. Open Pencil and retry if live design reads are needed."
+   **Headless fallback probe** (both modes): when the primary probe fails and the `pencil` binary is on `PATH` (`command -v pencil`), the CLI can still run the full editor engine with no GUI or desktop app — the normal situation inside the cenci sandbox, where the host's desktop editor and its MCP server are unreachable. Probe it:
+
+   ```bash
+   pencil interactive -o "${TMPDIR:-/tmp}/cenci-pencil-probe-$$.pen" <<'EOF'
+   get_editor_state({ include_schema: false })
+   EOF
+   rm -f "${TMPDIR:-/tmp}/cenci-pencil-probe-$$.pen"
+   ```
+
+   If it succeeds → set `pencilAvailable = true` and `pencilHeadless = true` — Phase 4 design reads then run `pencil interactive` against the design `.pen` file directly instead of a desktop connection. If it fails too (binary missing, or no auth — headless mode needs a seeded `~/.pencil/session-cli.json` or a `PEN_CLI_KEY` env var) → set `pencilAvailable = false`.
+
+   If every probe fails, inform the user: "Pencil unavailable — proceeding with DESIGN.md text content only. Open Pencil (or provide headless CLI auth via `pencil login` / `PEN_CLI_KEY`) and retry if live design reads are needed."
    This probe runs once during context loading. Do not auto-launch Pencil.
 
 If `pencil.enabled` is not `true` or `pencil` is absent, skip this section.

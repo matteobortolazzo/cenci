@@ -279,6 +279,9 @@ func assembleExecEnv(agent string) []string {
 	if v := os.Getenv("CONTEXT7_API_KEY"); v != "" {
 		execEnvArgs = append(execEnvArgs, "-e", "CONTEXT7_API_KEY="+v)
 	}
+	if v := os.Getenv("PEN_CLI_KEY"); v != "" {
+		execEnvArgs = append(execEnvArgs, "-e", "PEN_CLI_KEY="+v)
+	}
 	if agent == "opencode" {
 		if v := os.Getenv("ANTHROPIC_API_KEY"); v != "" {
 			execEnvArgs = append(execEnvArgs, "-e", "ANTHROPIC_API_KEY="+v)
@@ -422,7 +425,8 @@ func (e *Engine) baseRunArgs(scope Scope) []string {
 // and home volumes, git config (read-only, if present), the optional cenci
 // binary + host socket dir wiring (paired with its own XDG_RUNTIME_DIR env
 // under the same cenciAvailable guard as the mount itself),
-// claude credentials staging, and GitHub CLI credentials staging. Agent CLIs
+// claude credentials staging, GitHub CLI credentials staging, and Pencil CLI
+// session staging (headless design reads). Agent CLIs
 // live in the persistent home, so no agent binary is mounted here. Codex
 // credentials are handled separately by validateCredentials, since a missing
 // codex auth source is a hard launch error rather than an optional mount.
@@ -476,6 +480,16 @@ func (e *Engine) assembleVolumeMounts(agent, cenciBin, socketDir string, cenciAv
 	ghHosts := filepath.Join(home, ".config", "gh", "hosts.yml")
 	if isRegularFile(ghHosts) {
 		args = append(args, "-v", ghHosts+":/tmp/host-gh-config/hosts.yml:ro")
+	}
+
+	// Pencil CLI session (read-only staging — entrypoint seeds into /home/dev
+	// only when the volume has none, mirroring the rotating-credential
+	// caution of #259). Enables headless design reads (`pen interactive`)
+	// inside the sandbox; a host PEN_CLI_KEY forwarded per-exec takes
+	// precedence over the seeded session inside the CLI.
+	pencilSession := filepath.Join(home, ".pencil", "session-cli.json")
+	if isRegularFile(pencilSession) {
+		args = append(args, "-v", pencilSession+":/tmp/host-pencil-creds/session-cli.json:ro")
 	}
 
 	return args

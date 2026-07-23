@@ -24,6 +24,14 @@ skill instead.
 If Pencil is enabled and design context (screen node IDs) is available, inspect
 `snapshot_layout(..., problemsOnly: true)` for clipping, overflow, and misalignment.
 
+The call runs over whichever Pencil transport the caller's availability probe
+resolved: the desktop editor (MCP or `pencil interactive -a desktop`), or — when
+`pencilHeadless` is true, e.g. inside the cenci sandbox where no desktop editor is
+reachable — `pencil interactive` headless mode against the design `.pen` file
+directly (`-i <design>.pen -o <run-scoped scratch path>`, read-only: never call
+`save()`). Headless rendering is local (CanvasKit), so screenshots and layout
+snapshots need no GUI.
+
 ### Fix-before-proceeding
 
 Significant visual discrepancies found by either check above must be fixed, or get
