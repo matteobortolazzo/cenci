@@ -526,6 +526,75 @@ func TestDaemon_SubagentNotificationAgentCompletedDoesNotFlipMainStatus(t *testi
 	}
 }
 
+// TestDaemon_SubagentRunningEventDoesNotClearDone covers ticket #656: each
+// hook fires an independent `cenci notify` process racing to the daemon's
+// socket, so a subagent's PreToolUse/PostToolUse can be delivered after the
+// main agent's Stop already set done. Those late subagent events must not
+// flip the session back to running — the subagent's own Stop is suppressed
+// (#277), so nothing would ever restore done.
+func TestDaemon_SubagentRunningEventDoesNotClearDone(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "✳ delegating work", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "PreToolUse", SessionID: "sess1", TmuxPane: "%0", ToolName: "Task"})
+	d.handleEvent(ipc.HookEvent{EventType: "Stop", SessionID: "sess1", TmuxPane: "%0"})
+
+	if got := d.sessions["sess1"].Status; got != detect.StatusDone {
+		t.Fatalf("precondition: expected StatusDone after main-agent Stop, got %v", got)
+	}
+
+	// Late subagent events delivered after the main agent's Stop.
+	d.handleEvent(ipc.HookEvent{EventType: "PostToolUse", SessionID: "sess1", TmuxPane: "%0", ToolName: "Read", AgentID: "sub1"})
+	if got := d.sessions["sess1"].Status; got != detect.StatusDone {
+		t.Errorf("expected StatusDone after late subagent PostToolUse, got %v — subagent event cleared the main session's done status", got)
+	}
+	d.handleEvent(ipc.HookEvent{EventType: "PreToolUse", SessionID: "sess1", TmuxPane: "%0", ToolName: "Grep", AgentID: "sub1"})
+	if got := d.sessions["sess1"].Status; got != detect.StatusDone {
+		t.Errorf("expected StatusDone after late subagent PreToolUse, got %v — subagent event cleared the main session's done status", got)
+	}
+
+	// A main-agent event (empty AgentID) must still flip back to running:
+	// it means the agent genuinely resumed (new prompt or re-invocation).
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+	if got := d.sessions["sess1"].Status; got != detect.StatusRunning {
+		t.Errorf("expected StatusRunning after main-agent UserPromptSubmit, got %v", got)
+	}
+}
+
+// TestDaemon_SubagentRunningEventDoesNotClearStopped covers the stopped
+// (interrupt/StopFailure) terminal state for the same #656 guard: a late
+// subagent running event must not clear it either.
+func TestDaemon_SubagentRunningEventDoesNotClearStopped(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "✳ delegating work", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "PreToolUse", SessionID: "sess1", TmuxPane: "%0", ToolName: "Task"})
+	d.handleEvent(ipc.HookEvent{EventType: "StopFailure", SessionID: "sess1", TmuxPane: "%0"})
+
+	if got := d.sessions["sess1"].Status; got != detect.StatusStopped {
+		t.Fatalf("precondition: expected StatusStopped after main-agent StopFailure, got %v", got)
+	}
+
+	d.handleEvent(ipc.HookEvent{EventType: "PostToolUse", SessionID: "sess1", TmuxPane: "%0", ToolName: "Read", AgentID: "sub1"})
+	if got := d.sessions["sess1"].Status; got != detect.StatusStopped {
+		t.Errorf("expected StatusStopped after late subagent PostToolUse, got %v — subagent event cleared the main session's stopped status", got)
+	}
+}
+
 // TestDaemon_SubagentSessionEndDoesNotEndMainSession covers ticket #277: a
 // subagent's own SessionEnd (same session_id, non-empty AgentID) must not
 // delete the main session or restore its window — only the main agent's own
