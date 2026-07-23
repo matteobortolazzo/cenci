@@ -50,6 +50,10 @@ jobs:
         run: bash flow/hooks/scripts/guard-main-worktree.test.sh
       - name: Verify sensitive-files guard hook
         run: bash flow/hooks/scripts/check-sensitive-files.test.sh
+      - name: Verify config-staleness hook
+        run: bash flow/hooks/scripts/check-config-staleness.test.sh
+      - name: Verify configure detect script
+        run: bash flow/skills/configure/scripts/detect-project.test.sh
       - name: Verify maintain checker test suite
         run: bash flow/tests/maintain.test.sh
       - name: Verify implement review-artifact scoping

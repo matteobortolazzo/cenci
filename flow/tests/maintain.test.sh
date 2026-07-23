@@ -39,6 +39,11 @@ FLOW_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CHECK="${FLOW_DIR}/skills/maintain/scripts/check.sh"
 failures=0
 
+# The live flow plugin version — check.sh's config-version check compares
+# fixture configs against the *bundled* plugin manifest, so the base fixture
+# stamps this value dynamically to stay version-proof across releases.
+FLOW_PLUGIN_VERSION="$(jq -r .version "${FLOW_DIR}/.claude-plugin/plugin.json")"
+
 fail() { echo "FAIL: $1" >&2; failures=$((failures+1)); }
 assert_eq() { [[ "$1" == "$2" ]] || fail "$3: expected [$2], got [$1]"; }
 assert_contains() { [[ "$1" == *"$2"* ]] || fail "$3: expected output to contain: $2 (actual: $1)"; }
@@ -148,8 +153,9 @@ EOF
 @AGENTS.md
 EOF
 
-  cat > "${root}/.cenci/config.json" <<'EOF'
+  cat > "${root}/.cenci/config.json" <<EOF
 {
+  "configVersion": "${FLOW_PLUGIN_VERSION}",
   "isMonorepo": true,
   "guidanceLocation": "AGENTS.md",
   "projects": [
@@ -1116,6 +1122,69 @@ EOF
 run_check "${ROOT}"
 assert_has_result "config-examples" "fail" "case30 unterminated \`\`\`json fence must still produce a config-examples result, not be silently ignored"
 assert_all_fixes_present "case30 config-examples fail must carry a fix"
+rm -rf "${ROOT}"
+
+# =====================================================================
+# Case 31: config-version — .cenci/config.json's configVersion stamp vs the
+# bundled flow plugin version (advisory: warn, never fail). The staleness
+# decision itself is owned by hooks/scripts/check-config-staleness.sh (see
+# its own test file); these cases pin check.sh's wiring of that resolver.
+# =====================================================================
+
+# 31a: configVersion behind the plugin's major.minor -> warn with both versions
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+jq '.configVersion = "0.0.1"' "${ROOT}/.cenci/config.json" > "${ROOT}/.cenci/config.json.tmp" \
+  && mv "${ROOT}/.cenci/config.json.tmp" "${ROOT}/.cenci/config.json"
+run_check "${ROOT}" --write   # bootstrap generated sections, as in case 1
+run_check "${ROOT}"
+assert_exit_zero "case31a stale configVersion is advisory (warn must not block default mode)"
+assert_has_result "config-version" "warn" "case31a stale configVersion warns"
+assert_contains "${REPORT_TEXT}" "0.0.1" "case31a warn names the stamped version"
+assert_contains "${REPORT_TEXT}" "/cenci:configure" "case31a fix points at configure"
+assert_all_fixes_present "case31a config-version warn must carry a fix"
+rm -rf "${ROOT}"
+
+# 31b: config without configVersion (pre-stamping configure) -> warn
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+jq 'del(.configVersion)' "${ROOT}/.cenci/config.json" > "${ROOT}/.cenci/config.json.tmp" \
+  && mv "${ROOT}/.cenci/config.json.tmp" "${ROOT}/.cenci/config.json"
+run_check "${ROOT}"
+assert_has_result "config-version" "warn" "case31b unstamped config warns"
+assert_all_fixes_present "case31b config-version warn must carry a fix"
+rm -rf "${ROOT}"
+
+# 31c: configVersion ahead of the plugin (downgrade) -> pass, never a nag
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+jq '.configVersion = "999.999.999"' "${ROOT}/.cenci/config.json" > "${ROOT}/.cenci/config.json.tmp" \
+  && mv "${ROOT}/.cenci/config.json.tmp" "${ROOT}/.cenci/config.json"
+run_check "${ROOT}"
+assert_has_result "config-version" "pass" "case31c ahead-of-plugin config passes"
+n_cv_warn="$(count_results "config-version" "warn")"
+is_eq0 "${n_cv_warn}" || fail "case31c: ahead-of-plugin config must not warn (got ${n_cv_warn})"
+rm -rf "${ROOT}"
+
+# 31d: patch-only drift stays current -> pass (re-run nags are reserved for
+# minor/major feature bumps)
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+FLOW_PLUGIN_MM="$(printf '%s' "${FLOW_PLUGIN_VERSION}" | cut -d. -f1,2)"
+jq --arg v "${FLOW_PLUGIN_MM}.999" '.configVersion = $v' "${ROOT}/.cenci/config.json" > "${ROOT}/.cenci/config.json.tmp" \
+  && mv "${ROOT}/.cenci/config.json.tmp" "${ROOT}/.cenci/config.json"
+run_check "${ROOT}"
+assert_has_result "config-version" "pass" "case31d patch-only drift passes"
+rm -rf "${ROOT}"
+
+# 31e: --changed narrowing — unrelated file skips the check entirely; a
+# changed .cenci/config.json runs it
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+run_check "${ROOT}" --changed flow/skills/sample/SKILL.md
+assert_no_result "config-version" "case31e config-version not relevant to an unrelated changed file"
+run_check "${ROOT}" --changed .cenci/config.json
+assert_check_ran "config-version" "case31e config-version runs when .cenci/config.json changed"
 rm -rf "${ROOT}"
 
 # =====================================================================

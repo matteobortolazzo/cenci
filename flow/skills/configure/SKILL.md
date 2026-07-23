@@ -40,6 +40,8 @@ rewrite or delete `.claude/config.json`; it is a read-only compatibility artifac
 When `existingConfig` is present, tell the user before starting questions:
 "Found existing configuration. Each question will show your current setting as the default — select it to keep it unchanged."
 
+Reconfiguration runs are how a project picks up configure features added since its config was written. The plugin's SessionStart hook (`hooks/scripts/check-config-staleness.sh`) compares `existingConfig.configVersion` against the installed flow plugin version and nudges the user to re-run this skill when the config is stale or unstamped; completing this run refreshes the stamp (step 6) and clears the nudge.
+
 ### Create Worktree
 
 `/cenci:configure` writes files into the repo (`.cenci/config.json`, `AGENTS.md`/`CLAUDE.md`, `.mcp.json`, `.lsp.json`, `.gitignore`, `.claudeignore`, `.github/workflows/ci.yml`, `.cenci/Dockerfile`, `.lazyboards.yml`, `.codex/agents/`) and updates `.claude/settings.json`. Like every other change in this repo, these ship as a PR — configure never writes directly to the main worktree (see `cenci:worktrees` and `docs/git-workflow.md`).
@@ -52,11 +54,33 @@ Create the worktree now, before any file is written (including a migration `--ap
 
 From this point on, `<worktree-path>` is `.worktrees/configure-<slug>`. Every file this skill reads or writes below — `.cenci/config.json`, `AGENTS.md`, `CLAUDE.md`, `.mcp.json`, `.lsp.json`, `.gitignore`, `.claudeignore`, `.claude/settings.json`, `.github/workflows/`, `.cenci/Dockerfile`, `.lazyboards.yml`, `.codex/`, `designs/` — and every "the repo root" / "the project root" reference in the steps below resolves against `<worktree-path>`, never the main checkout. Use absolute paths rooted at `<worktree-path>` for every Write/Edit; verify the CWD before Bash commands rather than relying on a single `cd` persisting across calls. `gh label create` / `gh issue` calls (step 3c) are GitHub API calls, not file writes, and run the same regardless of worktree.
 
+### Scripted Detection
+
+The deterministic detections this skill needs (platform, container, package manager, MCP/LSP/dind/Playwright catalog triggers, plugin version) are scripted, not re-derived ad hoc. Run the bundled detector once, as its **own** Bash call (per `cenci:shell-rules`), from the repository root of the main checkout — it only reads, nothing is written:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/detect-project.sh"
+```
+
+(the detector is `scripts/detect-project.sh` inside this skill; its tests live next to it). Parse its stdout as a JSON object and keep it as `detection` for the rest of this run:
+
+- `detection.pluginVersion` — installed flow plugin version; stamped into config as `configVersion` (step 6)
+- `detection.platform` — `{name, owner, repo}` parsed from the git remote, or `null`
+- `detection.inContainer` — cenci-sandbox container detection result
+- `detection.packageManager` — `pnpm` / `yarn` / `npm` from lockfiles, or `null`
+- `detection.mcpServers` — MCP catalog triggers found in the dependency scan (e.g. `angular`, `primeng`)
+- `detection.lspServers` — LSP catalog triggers found (e.g. `typescript`, `gopls`)
+- `detection.dindDetected` — Testcontainers/Docker-SDK trigger found (question 9b default)
+- `detection.playwrightTest` — `@playwright/test` in root `devDependencies`
+- `detection.warnings` — non-fatal detection notes; relay them to the user as informational messages
+
+If the script exits non-zero or its output is not valid JSON, fall back to the **manual fallback** procedure kept in each consuming section below — a detection either comes from `detection` or from its manual fallback, never silently skipped. The script only detects: every question, catalog decision, and user choice stays in this skill.
+
 ### Platform Detection
 
-Before asking questions, attempt to auto-detect the platform from the git remote:
+Use `detection.platform`: when non-null it carries the platform name plus extracted owner/repo; when `null`, fall back to manual questions.
 
-Run `git remote get-url origin 2>/dev/null` and parse the result:
+**Manual fallback** (only if Scripted Detection failed): run `git remote get-url origin 2>/dev/null` and parse the result:
 
 | Remote URL pattern | Platform | Extracted values |
 |---|---|---|
@@ -72,7 +96,9 @@ If user context was provided, use it to steer the configuration (e.g., skip cert
 
 cenci runs inside `sandbox`'s cenci-sandbox container with `--dangerously-skip-permissions`. The **container is the security boundary** — there is no host profile. Claude Code's own host sandbox stays disabled, and `permissions.allow`/`deny` are kept only as defense-in-depth for plain `claude` runs inside the container (e.g. `cenci open --shell`).
 
-Detect the container (stop at the first match; run each check as its **own** Bash call, per `cenci:shell-rules` — never compound them):
+Use `detection.inContainer` (the detector checks `CENCI_SANDBOX`, then `/.dockerenv`).
+
+**Manual fallback** (only if Scripted Detection failed) — detect the container (stop at the first match; run each check as its **own** Bash call, per `cenci:shell-rules` — never compound them):
 
 1. **`CENCI_SANDBOX` env var** (works for both Docker and Podman): run `echo "${CENCI_SANDBOX:-}"` as its own Bash call. If it prints `1` → in container.
 2. **Docker fallback**: run `test -f /.dockerenv` as its own Bash call. Exit 0 → in container.
@@ -158,7 +184,9 @@ Generate a slug for each project from its directory name (e.g., `packages/api` �
 
 ### Dependency Detection
 
-Before asking about MCP servers, scan the project for framework dependencies:
+The dependency scan is scripted: `detection.mcpServers` carries the MCP catalog triggers found, and `detection.dindDetected` is the `dindDetected` value question 9b uses below.
+
+**Manual fallback** (only if Scripted Detection failed) — scan the project for framework dependencies:
 
 1. If `package.json` exists in the repo root, read `dependencies` and `devDependencies`
 2. If `.csproj` files exist, read `PackageReference` entries
@@ -269,7 +297,7 @@ If no frontend framework is detected, skip this section entirely (do not set `pe
 
 ### Playwright CLI Setup
 
-**Condition**: Only ask this when a frontend framework is detected in the stack from question 1 AND `@playwright/test` is found in `devDependencies`.
+**Condition**: Only ask this when a frontend framework is detected in the stack from question 1 AND `detection.playwrightTest` is `true` (manual fallback: `@playwright/test` found in root `devDependencies`).
 
 If both conditions are met, present using AskUserQuestion:
 
@@ -290,7 +318,9 @@ If the conditions are not met, skip this section entirely (do not set `playwrigh
 
 ### LSP Detection
 
-Reuse the dependency detection results from earlier and add file-type detection to match against the LSP Server Catalog:
+`detection.lspServers` carries the detected LSP catalog triggers directly.
+
+**Manual fallback** (only if Scripted Detection failed) — reuse the dependency detection results from earlier and add file-type detection to match against the LSP Server Catalog:
 
 - `typescript`, `@angular/core`, `react`, `next`, or `vue` in `package.json` dependencies → **typescript**
 - `*.py` files present, or `pyproject.toml`, or `requirements.txt` → **pyright**
@@ -389,7 +419,7 @@ Include the server in `.lsp.json` regardless — it activates once the binary is
    | `react` / `next` | `npx eslint .` | `npm run build` | `npm test -- --coverage --watchAll=false` |
    | `vue` | `npx eslint .` | `npm run build` | `npm run test:unit -- --coverage` |
 
-   **Package manager detection** (for Node-based stacks):
+   **Package manager detection** (for Node-based stacks): use `detection.packageManager`. Manual fallback:
    - `pnpm-lock.yaml` → pnpm
    - `yarn.lock` → yarn
    - `package-lock.json` → npm
@@ -1104,8 +1134,11 @@ For each MCP selected in question 5:
    - If `existingConfig` is not null: start from the existing object, overwrite each field with the user's answers. This preserves fields the skill doesn't manage.
    - If `existingConfig` is null: create the file fresh.
 
+   **Always stamp `configVersion`** on every write (fresh or re-config): set it to `detection.pluginVersion`. If Scripted Detection was unavailable, read `.version` from `${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json` with jq, verifying the command succeeded before using its output. If neither resolves, preserve any existing `configVersion` unchanged and tell the user the stamp could not be refreshed — never invent a version.
+
 ```json
 {
+  "configVersion": "0.22.0",
   "branchPattern": "feature/<id>-<description>",
   "stack": {
     "backend": "dotnet10",
@@ -1154,6 +1187,12 @@ For each MCP selected in question 5:
   }
 }
 ```
+
+`configVersion` records the flow plugin version that last wrote this config (managed by this skill — always overwritten with the current plugin version in step 6, never a question). Consumers:
+- the plugin's SessionStart hook (`hooks/scripts/check-config-staleness.sh`) — nudges the user at session start when the stamp's major.minor is behind the installed plugin (or missing entirely), so they learn a `/cenci:configure` re-run would pick up new configure features without watching the changelog;
+- maintain's `config-version` check (`/cenci:maintain`, via the same staleness resolver) — reports the same staleness as an advisory `warn`.
+
+Patch-only drift is deliberately silent: configure features that warrant a re-run land in minor (`feat`) or major bumps per the plugin-version-bump workflow. Do **not** add `configVersion` to the migration-removal list below — it is a managed field, not a legacy one.
 
 The `cenci` field is optional. If present, preserve existing user values during reconfiguration. Schema:
 - `compactImplementation` — `true` allows small, low-risk tickets to combine red/green/refactor into one implementer subagent turn while preserving all TDD/reporting gates. Default: `false`.
@@ -1231,6 +1270,7 @@ below — it is a supported optional field, not a legacy one.
 
 ```json
 {
+  "configVersion": "0.22.0",
   "isMonorepo": true,
   "projects": [
     {

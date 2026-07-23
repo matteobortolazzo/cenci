@@ -58,6 +58,7 @@ TOPIC_DOC_RULES_MAX=25
 # happens to exist under the target repo's resolved flow directory.
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || { echo "check.sh: failed to resolve script directory." >&2; exit 2; }
 RUN_GATE_SH="${SELF_DIR}/../../../hooks/scripts/run-gate.sh"
+STALENESS_SH="${SELF_DIR}/../../../hooks/scripts/check-config-staleness.sh"
 
 MARKER_IDS=(skills agents workflow-deps docs-nav)
 
@@ -308,6 +309,8 @@ is_relevant() {
         case "$f" in docs/*.md|flow/docs/*.md|AGENTS.md|flow/AGENTS.md) return 0 ;; esac ;;
       invalid-json)
         case "$f" in *.json) return 0 ;; esac ;;
+      config-version)
+        case "$f" in .cenci/config.json) return 0 ;; esac ;;
       shell-syntax)
         case "$f" in *.sh) return 0 ;; esac ;;
       stale-generated|capability-table|adapter-drift)
@@ -748,6 +751,56 @@ check_invalid_json() {
     fi
   done < <(json_targets)
   [[ "$any_fail" -eq 0 ]] && add_result invalid-json "(repo)" pass "all configured JSON files parse cleanly" ""
+}
+
+# check_config_version — is .cenci/config.json's configVersion stamp current
+# for the bundled flow plugin? The staleness decision is delegated to
+# hooks/scripts/check-config-staleness.sh --plain (the same script the
+# SessionStart hook runs), so this check and the session-start advisory can
+# never disagree. Staleness is advisory: stale/unstamped is a warn, never a
+# fail; every unreadable input degrades to skip.
+check_config_version() {
+  local cfg="$ROOT/.cenci/config.json"
+  if [[ ! -f "$cfg" ]]; then
+    add_result config-version "(repo)" skip "no .cenci/config.json — repo is not configured" ""
+    return
+  fi
+  if [[ ! -f "$STALENESS_SH" ]]; then
+    add_result config-version "(repo)" skip "bundled check-config-staleness.sh not found next to this checker" ""
+    return
+  fi
+  local plugin_dir out
+  plugin_dir="$(cd "${SELF_DIR}/../../.." && pwd)" || {
+    add_result config-version "(repo)" skip "could not resolve the bundled plugin directory" ""
+    return
+  }
+  out="$(cd "$ROOT" && CLAUDE_PLUGIN_ROOT="$plugin_dir" bash "$STALENESS_SH" --plain 2>/dev/null)" || {
+    add_result config-version "(repo)" skip "config-staleness resolver failed" ""
+    return
+  }
+  local state cfg_v plug_v
+  read -r state cfg_v plug_v <<< "$out"
+  case "$state" in
+    current)
+      add_result config-version "(repo)" pass "configVersion ${cfg_v} is current for the installed flow plugin v${plug_v}" ""
+      ;;
+    stale)
+      add_result config-version "(repo)" warn \
+        ".cenci/config.json was written by /cenci:configure v${cfg_v}; the installed flow plugin is v${plug_v}" \
+        "re-run /cenci:configure to pick up configure features added since (existing answers become defaults) and refresh configVersion"
+      ;;
+    unstamped)
+      add_result config-version "(repo)" warn \
+        ".cenci/config.json has no configVersion stamp (written by a pre-stamping /cenci:configure)" \
+        "re-run /cenci:configure to stamp configVersion (existing answers become defaults)"
+      ;;
+    absent)
+      add_result config-version "(repo)" skip "no .cenci/config.json — repo is not configured" ""
+      ;;
+    *)
+      add_result config-version "(repo)" skip "could not determine config staleness (resolver said: ${out:-nothing})" ""
+      ;;
+  esac
 }
 
 check_shell_syntax() {
@@ -1297,6 +1350,7 @@ main() {
   is_relevant instruction-docs && check_instruction_docs
   is_relevant topic-docs && check_topic_docs
   is_relevant invalid-json && check_invalid_json
+  is_relevant config-version && check_config_version
   is_relevant shell-syntax && check_shell_syntax
   is_relevant capability-table && check_capability_table
   is_relevant adapter-drift && check_adapter_drift
