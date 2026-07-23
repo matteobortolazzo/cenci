@@ -474,7 +474,7 @@ After restarting Claude Code, Bash commands are rewritten through RTK automatica
 
 ## Ticket Splitting
 
-When a ticket is sized M or L during `/cenci:refine`, the skill suggests splitting it into numbered child tickets (e.g., "(1/3)", "(2/3)", "(3/3)") with explicit dependency ordering — which children can be implemented in parallel and which are sequential. Each child references the parent in its body and the parent tracks all children in a "Child Tickets" checklist with dependencies. When `/cenci:implement` creates a PR for the last open child, it auto-closes the parent alongside the child.
+When a ticket is sized M or L during `/cenci:refine`, the skill suggests splitting it into numbered child tickets (e.g., "(1/3)", "(2/3)", "(3/3)") with explicit dependency ordering — which children can be implemented in parallel and which are sequential. Each child references the parent in its body and is linked to the parent as a native GitHub sub-issue, so the parent renders the child enumeration and progress directly in the GitHub UI; dependency ordering lives in the child bodies (and, when non-trivial, a short prose "Execution Order" note on the parent). When `/cenci:implement` creates a PR for the last open child, it auto-closes the parent alongside the child.
 
 ## Architecture
 

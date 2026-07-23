@@ -153,7 +153,7 @@ After the digest is stored, invoke `cenci pipeline prepare <id>` to record `prep
 
 **Parent-child edge cases** (resolved inside the gatherer, recorded here for downstream phases):
 - Parent already closed → `isLastChild = false` (skip auto-close)
-- No `### Child Tickets` section on parent → gatherer uses the search fallback
+- Parent/child links resolve from the native sub-issue graph (`--json parent` for the parentId, `--json subIssues` for siblings); when a ticket predates native linking and has no sub-issue nodes, the gatherer falls back to the `Related to #<parentId>` search
 - Some siblings manually closed → they don't count as open, don't block last-child detection
 
 ## Attachments

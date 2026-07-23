@@ -134,7 +134,7 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
 
 9. **When refined**, adopt the refiner's `## Refined Ticket Proposal` **verbatim** as the summary content — its sections (`### Updated Title` (optional), `### Updated Description`, `### Acceptance Criteria`, `### Technical Notes`, `### Design Coverage`, `### Design Direction`, `### Size Estimate`, `### Suggested Split` with `#### Execution Order`) map 1:1 onto the persistence steps below; the section formats themselves are specified in `agents/refiner.md`. Do not rewrite, summarize, or reorder the proposal's content. It is not shown yet — steps 10-12 first persist the ticket update, any split or companion design ticket, and the labels; the summary is then presented in the final message together with a notice of what was persisted (see the **Final Message** note at the end of the Update Ticket section).
 
-   A `### Suggested Split` in the proposal means each child becomes its own numbered ticket and PR, with the parent tracking all children and their dependencies (Pass 1/Pass 2 below).
+   A `### Suggested Split` in the proposal means each child becomes its own numbered ticket and PR, linked to the parent as a native GitHub sub-issue, with dependency ordering captured in the child bodies (Pass 1/Pass 2 below).
 
    **Design-first splits** (if frontend feature AND `pencil.enabled` is `true` AND `designNeeded` is true): the proposal's split makes the first child a **design-only ticket** (e.g., "Design <feature> screens") that every UI implementation child depends on. It gets the `Design` label in Pass 1, its body includes the `### Design Direction` section from the proposal (that's where `/cenci:design` reads it from), it is executed via `/cenci:design`, and it produces a committed design spec rather than a PR (the one exception to "1 ticket = 1 PR"). When `/cenci:design` completes it, the `Designed` label is propagated to the implementation children that depend on it, satisfying implement's Design gate.
 
@@ -204,43 +204,50 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
    ```
    Parse the issue number from the URL in the output (e.g. `https://github.com/owner/repo/issues/10` → `10`) — this is the success confirmation for this child.
 
+   **Link the child as a native sub-issue of the parent.** Immediately after parsing a child's number (children are created in dependency order, so link each one right after it is created — parent == `<original-number>`):
+   ```bash
+   gh issue edit <child-number> --repo <owner>/<repo> --parent <original-number>
+   ```
+   **Verify from the parent side** — re-fetch the parent's sub-issue list and confirm this child's number is present (idempotent: treat an "already linked" result, i.e. the child already appearing in the list, as success):
+   ```bash
+   gh issue view <original-number> --repo <owner>/<repo> --json subIssues --jq '.subIssues.nodes[].number'
+   ```
+   If the link or its verification fails, follow the write-failure protocol: report the error, retry the `--parent` edit once, then verify again; if still failing, STOP — do not create any further children, and do not run Pass 2. Report the partial state: which children exist and which are linked as sub-issues.
+
    If creation fails for a child, follow the write-failure protocol: report the error, retry once, and if still failing, STOP — do not create any further children, and do not run Pass 2. Report the partial state to the user: which children (if any) were already created, with their issue numbers.
 
    Omit `Depends on` / `Parallel with` lines that don't apply (e.g. the first child typically has no dependencies).
 
-   Design-only children (see **Design-first splits** above) additionally get `--label "Design"`, and their body includes the `### Design Direction` section from this refinement (that's where `/cenci:design` reads it from).
+   Design-only children (see **Design-first splits** above) additionally get `--label "Design"`, and their body includes the `### Design Direction` section from this refinement (that's where `/cenci:design` reads it from). A design-only first child is a real child of the parent → link it as a sub-issue exactly like the others.
 
-   #### Pass 2: Update parent with tracking section
+   #### Pass 2: Final sub-issue verification and (if ordered) an Execution Order note
 
-   After all children are created, re-read the parent ticket's current body and append a `### Child Tickets` section:
+   The native sub-issue list now renders the child enumeration and progress in the GitHub UI, so **do NOT append a child-ticket markdown checklist** to the parent body — there is no per-child checkbox list to write back.
 
-   ```markdown
-   ### Child Tickets
-   - [ ] #10 (1/3): Add API validation
-   - [ ] #11 (2/3): Add frontend form — depends on #10
-   - [ ] #12 (3/3): Add integration tests — parallel with #11
-
-   **Execution order:** #10 first → then #11 and #12 in parallel
+   **(a) Final verification.** After all children are created and linked in Pass 1, re-fetch the parent's sub-issue list one last time and confirm **every** child number appears in `subIssues.nodes`:
+   ```bash
+   gh issue view <original-number> --repo <owner>/<repo> --json subIssues,subIssuesSummary --jq '.subIssues.nodes[].number, .subIssuesSummary'
    ```
+   If any child is missing from the list, follow the write-failure protocol: report which child is not linked, retry that child's `gh issue edit <child> --parent <original-number>` once, then verify again; if still failing, STOP and report that children #`<c1>`, #`<c2>`, … exist but child #`<cN>` is not linked as a sub-issue of parent #`<original-number>`, so the user can link it manually with `gh issue edit <cN> --parent <original-number>`.
 
-   Update the parent. Use the `Write` tool to create `/tmp/claude/issue-<original-number>-<token>.md` with the following content (this uses `<original-number>` — parent == original — with the SAME run token from step 10, not a new one):
+   **(b) Execution Order (only when the split has real ordering).** If any child `Depends on` another (i.e. the children are not all independent), append a concise **prose** `### Execution Order` section to the parent body — never a `- [ ]` checklist. Use the `Write` tool to create `/tmp/claude/issue-<original-number>-<token>.md` with the following content (this uses `<original-number>` — parent == original — with the SAME run token from step 10, not a new one):
    ```
    <existing-body>
 
-   ### Child Tickets
-   <checklist>
+   ### Execution Order
+   #10 first → then #11 and #12 in parallel
    ```
    Then run:
    ```bash
    gh issue edit <original-number> --repo <owner>/<repo> --body-file /tmp/claude/issue-<original-number>-<token>.md
    ```
-
-   **Verify** by re-fetching the parent and confirming the `### Child Tickets` section is present in the body:
+   **Verify** by re-fetching the parent and confirming the `### Execution Order` section is present in the body:
    ```bash
    gh issue view <original-number> --repo <owner>/<repo> --json body --jq '.body'
    ```
+   If the split has no ordering (all children independent), skip (b) entirely — the sub-issue list alone conveys the enumeration.
 
-   If the update or verification fails, follow the write-failure protocol: report the error, retry once, and if still failing, STOP and report that children #`<c1>`, #`<c2>`, … exist but the parent ticket #`<original-number>` is not yet tracking them, so the user can append the `### Child Tickets` section manually.
+   If the Execution Order update or its verification fails, follow the write-failure protocol: report the error, retry once, and if still failing, STOP and report that children #`<c1>`, #`<c2>`, … are linked as sub-issues of parent #`<original-number>` but the `### Execution Order` note did not persist, so the user can append it manually.
 
    #### Companion design ticket (frontend tickets, no split)
 
