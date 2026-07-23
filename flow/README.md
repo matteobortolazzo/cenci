@@ -136,7 +136,7 @@ companion) for every skill, including the internal ones not listed above.
 | `babysit` | — | project-core,shell-rules | tick.sh | — |
 | `ci-repair` | — | project-core,shell-rules subagent-safety,testing | — | — |
 | `codex-runtime` | — | — | — | — |
-| `configure` | — | babysit,codex-runtime implement,shell-rules testing,verify-ui | — | code-reviewer |
+| `configure` | — | babysit,codex-runtime implement,shell-rules testing,verify-ui | detect-project.sh | code-reviewer |
 | `design` | — | attachments,codex-runtime project-core,shell-rules ticket-ownership | — | — |
 | `frontend-classification` | — | implement,refine | — | — |
 | `implement` | phase-1-plan.md,phase-2-worktree.md phase-3-test-red.md,phase-4-implement-green.md phase-5-refactor.md,phase-6-7-review.md phase-8-docs.md,phase-9-pr.md | attachments,codex-runtime frontend-classification,project-core review,shell-rules subagent-safety,ticket-ownership | run-artifact-dir.sh | code-reviewer,context-gatherer |
@@ -594,7 +594,7 @@ flow/
 │   │   ├── docs.md
 │   │   └── clients.md
 │   └── scripts/
-│       └── check.sh            # Deterministic repo-consistency checker (18 categories, JSON+text report)
+│       └── check.sh            # Deterministic repo-consistency checker (19 categories, JSON+text report)
 ├── tests/
 │   └── maintain.test.sh       # check.sh fixture-driven regression suite
 ├── docs/
