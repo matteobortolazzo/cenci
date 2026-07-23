@@ -58,6 +58,8 @@ jobs:
         run: bash flow/tests/maintain.test.sh
       - name: Verify implement review-artifact scoping
         run: bash flow/tests/implement-review-artifacts.test.sh
+      - name: Verify followup ticket milestone/label inheritance
+        run: bash flow/tests/followup-ticket-inheritance.test.sh
       - name: Run maintain checker (changed files)
         if: ${{ github.event_name == 'pull_request' }}
         env:

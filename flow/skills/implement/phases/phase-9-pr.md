@@ -213,11 +213,32 @@ If ≥1 deferred item exists, ensure the label exists (its own Bash call — not
 gh label create "Followup" --repo <owner>/<repo> --color "C5DEF5" --description "Deferred/out-of-scope item captured from a session — triage before working" 2>/dev/null || true
 ```
 
-Write the body to `/tmp/claude/cenci-<ticket-id-or-slug>-followup-body.md` with the file tool — and the title too, to `/tmp/claude/cenci-<ticket-id-or-slug>-followup-title.txt`: the PR title is free text and must never be interpolated directly into the command line (a title containing `$(…)`, backticks, or quotes would be shell-interpreted). Then create the ticket in one call, reading the title back the same way Posting Replies in `address-review` reads reply text:
+Ticket mode only: before creating the follow-up issue, fetch the original ticket's milestone and labels so the follow-up can inherit them. Run this as its own Bash call so a fetch failure surfaces distinctly, before the create call below:
 
 ```bash
-TITLE=$(cat /tmp/claude/cenci-<ticket-id-or-slug>-followup-title.txt) && gh issue create --repo <owner>/<repo> --title "$TITLE" --label "Followup" --body-file /tmp/claude/cenci-<ticket-id-or-slug>-followup-body.md
+gh issue view <original-ticket> --repo <owner>/<repo> --json milestone,labels > /tmp/claude/cenci-<ticket-id-or-slug>-followup-meta.json || rm -f /tmp/claude/cenci-<ticket-id-or-slug>-followup-meta.json
 ```
+
+Ticketless mode skips this fetch entirely — same as it already omits `Related to #<original-ticket>` below.
+
+Write the body to `/tmp/claude/cenci-<ticket-id-or-slug>-followup-body.md` with the file tool — and the title too, to `/tmp/claude/cenci-<ticket-id-or-slug>-followup-title.txt`: the PR title is free text and must never be interpolated directly into the command line (a title containing `$(…)`, backticks, or quotes would be shell-interpreted). Then create the ticket in one call, reading the title (and, when the fetch above succeeded, the inherited milestone/labels) back the same way Posting Replies in `address-review` reads reply text. Labels and the milestone are externally-sourced free text, so they are passed as array args (`--label "$l"` per label, `--milestone "$MILESTONE"`), never inline-interpolated into the command string. Carry over every original label except the 7 lifecycle/transient markers — `"Refined","Working","Planned","In Review","Implemented","Design","Designed"` — and `Followup` itself (which is always applied on top regardless of what's carried over); the milestone is applied only when the original ticket actually has one, via an explicit jq emptiness check rather than a bare `//` fallback (see `docs/shell-scripting-gotchas.md`):
+
+```bash
+TITLE=$(cat /tmp/claude/cenci-<ticket-id-or-slug>-followup-title.txt) || { echo "followup title read failed" >&2; exit 1; }
+LABEL_ARGS=(--label "Followup")
+MILESTONE_ARGS=()
+if [[ -f /tmp/claude/cenci-<ticket-id-or-slug>-followup-meta.json ]]; then
+  MILESTONE=$(jq -r 'if (.milestone.title // "") != "" then .milestone.title else empty end' /tmp/claude/cenci-<ticket-id-or-slug>-followup-meta.json)
+  mapfile -t CARRIED < <(jq -r '.labels[].name | select(. as $n | (["Refined","Working","Planned","In Review","Implemented","Design","Designed","Followup"] | index($n)) | not)' /tmp/claude/cenci-<ticket-id-or-slug>-followup-meta.json)
+  for l in "${CARRIED[@]}"; do LABEL_ARGS+=(--label "$l"); done
+  [[ -n "$MILESTONE" ]] && MILESTONE_ARGS=(--milestone "$MILESTONE")
+fi
+gh issue create --repo <owner>/<repo> --title "$TITLE" \
+  "${LABEL_ARGS[@]}" "${MILESTONE_ARGS[@]}" \
+  --body-file /tmp/claude/cenci-<ticket-id-or-slug>-followup-body.md
+```
+
+Ticketless mode, and ticket mode when the fetch above failed (no meta file present), fall through this same command unchanged: `LABEL_ARGS`/`MILESTONE_ARGS` stay at their defaults and the issue is created with `--label "Followup"` only. This is a graceful degrade, not a halt — inheritance is a visibility enhancement, not a correctness gate. When the fetch failed, note in the final session summary that milestone/label inheritance was skipped (fetch failed) so the gap is visible.
 
 Body content (checklist of items, each with a one-line context and file/area reference):
 
@@ -271,6 +292,7 @@ rm -f \
   /tmp/claude/cenci-<ticket-id-or-slug>-pr-body.md \
   /tmp/claude/cenci-<ticket-id-or-slug>-followup-title.txt \
   /tmp/claude/cenci-<ticket-id-or-slug>-followup-body.md \
+  /tmp/claude/cenci-<ticket-id-or-slug>-followup-meta.json \
   /tmp/claude/cenci-<ticket-id-or-slug>-explore-1.md \
   /tmp/claude/cenci-<ticket-id-or-slug>-explore-2.md \
   /tmp/claude/cenci-context-<ticket-id-or-slug>.md

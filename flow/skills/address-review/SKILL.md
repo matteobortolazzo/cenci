@@ -284,10 +284,29 @@ gh issue edit <n> --repo <owner>/<repo> --body-file /tmp/claude/cenci-<pr-number
 ```bash
 gh label create "Followup" --repo <owner>/<repo> --color "C5DEF5" --description "Deferred/out-of-scope item captured from a session — triage before working" 2>/dev/null || true
 ```
-Write the body to a temp file with the file tool — and the title too: the PR title is free text and must never be interpolated directly into the command line (a title containing `$(…)`, backticks, or quotes would be shell-interpreted). Then create the ticket in one call, reading the title back the same way "Posting Replies" reads reply text:
+Ticket mode only: before creating the follow-up issue, fetch the original ticket's milestone and labels so the follow-up can inherit them — same original-ticket source as the search predicate above (the first entry of `closingIssuesReferences`, the child ticket). Run this as its own Bash call so a fetch failure surfaces distinctly, before the create call below:
 ```bash
-TITLE=$(cat /tmp/claude/cenci-<pr-number>-followup-title.txt) && gh issue create --repo <owner>/<repo> --title "$TITLE" --label "Followup" --body-file /tmp/claude/cenci-<pr-number>-followup-body.md
+gh issue view <original-ticket> --repo <owner>/<repo> --json milestone,labels > /tmp/claude/cenci-<pr-number>-followup-meta.json || rm -f /tmp/claude/cenci-<pr-number>-followup-meta.json
 ```
+Ticketless mode, or ticket mode when `closingIssuesReferences` is empty, skips this fetch entirely — same as `Related to #<original-ticket>` is already omitted below.
+
+Write the body to a temp file with the file tool — and the title too: the PR title is free text and must never be interpolated directly into the command line (a title containing `$(…)`, backticks, or quotes would be shell-interpreted). Then create the ticket in one call, reading the title (and, when the fetch above succeeded, the inherited milestone/labels) back the same way "Posting Replies" reads reply text. Labels and the milestone are externally-sourced free text, so they are passed as array args (`--label "$l"` per label, `--milestone "$MILESTONE"`), never inline-interpolated into the command string. Carry over every original label except the 7 lifecycle/transient markers — `"Refined","Working","Planned","In Review","Implemented","Design","Designed"` — and `Followup` itself (which is always applied on top regardless of what's carried over); the milestone is applied only when the original ticket actually has one, via an explicit jq emptiness check rather than a bare `//` fallback (see `docs/shell-scripting-gotchas.md`):
+```bash
+TITLE=$(cat /tmp/claude/cenci-<pr-number>-followup-title.txt) || { echo "followup title read failed" >&2; exit 1; }
+LABEL_ARGS=(--label "Followup")
+MILESTONE_ARGS=()
+if [[ -f /tmp/claude/cenci-<pr-number>-followup-meta.json ]]; then
+  MILESTONE=$(jq -r 'if (.milestone.title // "") != "" then .milestone.title else empty end' /tmp/claude/cenci-<pr-number>-followup-meta.json)
+  mapfile -t CARRIED < <(jq -r '.labels[].name | select(. as $n | (["Refined","Working","Planned","In Review","Implemented","Design","Designed","Followup"] | index($n)) | not)' /tmp/claude/cenci-<pr-number>-followup-meta.json)
+  for l in "${CARRIED[@]}"; do LABEL_ARGS+=(--label "$l"); done
+  [[ -n "$MILESTONE" ]] && MILESTONE_ARGS=(--milestone "$MILESTONE")
+fi
+gh issue create --repo <owner>/<repo> --title "$TITLE" \
+  "${LABEL_ARGS[@]}" "${MILESTONE_ARGS[@]}" \
+  --body-file /tmp/claude/cenci-<pr-number>-followup-body.md
+```
+Ticketless mode, and ticket mode when the fetch above failed (no meta file present), fall through this same command unchanged: `LABEL_ARGS`/`MILESTONE_ARGS` stay at their defaults and the issue is created with `--label "Followup"` only. This is a graceful degrade, not a halt — inheritance is a visibility enhancement, not a correctness gate. When the fetch failed, note in the final session summary that milestone/label inheritance was skipped (fetch failed) so the gap is visible.
+
 Body content mirrors Phase 9's format: a checklist of Acknowledged items (one-line context + file/area reference), `Related to #<original-ticket>` (from `closingIssuesReferences`; omit in ticketless mode or when empty), and the PR link. Assume the issue is world-readable: never transcribe secret values, credentials, or exploitable vulnerability detail — reference security-related items abstractly. Do **not** add the `Refined` label — it enters the backlog unrefined. Parse the new ticket number `<n>` from the create command's output URL.
 
 Capture `<n>` (found or created) for the Acknowledge reply template below. If the create fails, or `<n>` cannot be parsed from the output, do **not** post an unresolved or invented `#<n>` — stop this sub-step and surface the error via `AskUserQuestion` before posting any reply that references the followup ticket.
