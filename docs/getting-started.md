@@ -59,8 +59,11 @@ The legacy one-liner still works and re-execs itself through this same verified 
 curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
 ```
 
-Set `CENCI_REF=main` (or pass `--ref main`) to explicitly opt into bleeding-edge,
-unverified main instead (unsafe; development use only).
+Resolves to the latest release tag by default. That resolved ref pins the client
+marketplace manifests and all three plugins' content — not just which install.sh
+runs — for every install, update, and repair run. Set `CENCI_REF=main` (or pass
+`--ref main`) to explicitly opt into bleeding-edge, unverified main instead (unsafe;
+development use only) — it is the only path that intentionally tracks main.
 
 From a clone, run `./install.sh`. Non-interactive automation can add `--yes`; use
 `./install.sh --help` for the complete public interface. Every run reconciles the

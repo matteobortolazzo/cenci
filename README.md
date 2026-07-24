@@ -68,8 +68,11 @@ through this same verified path:
 curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
 ```
 
-Set `CENCI_REF=main` (or pass `--ref main`) to explicitly opt into bleeding-edge,
-unverified main instead (unsafe; development use only).
+Resolves to the latest release tag by default. That resolved ref pins the client
+marketplace manifests and all three plugins' content — not just which install.sh
+runs — for every install, update, and repair run. Set `CENCI_REF=main` (or pass
+`--ref main`) to explicitly opt into bleeding-edge, unverified main instead (unsafe;
+development use only) — it is the only path that intentionally tracks main.
 
 The installer detects your clients, reconciles all three layers on every run (adding
 missing components and refreshing existing ones), and puts `cenci` and its `cn` launch

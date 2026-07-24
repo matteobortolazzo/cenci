@@ -41,6 +41,37 @@ make_tools() {
 exit 0
 EOF
     chmod +x "${bin}/docker"
+    # curl mock: install.sh's resolved-ref resolution (#625) now runs on
+    # every dispatch path, including plain `update`, so every layout in this
+    # file needs a curl on PATH — this suite is about the daemon-restart and
+    # authoritative-state (#492) flows, not ref pinning, so the fake always
+    # answers both probes as available (default "watch/v1.0.0" release tag,
+    # always-published marketplace.json) rather than modeling #625's own
+    # scenarios, which installer-clients.test.sh already covers directly.
+    cat >"${bin}/curl" <<'EOF'
+#!/bin/sh
+out= url=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -o) out=$2; shift 2 ;;
+      -w) shift 2 ;;
+      -*) shift ;;
+      *) url=$1; shift ;;
+    esac
+done
+case "${url}" in
+*/releases/latest)
+    printf 'https://github.com/matteobortolazzo/cenci/releases/tag/watch/v1.0.0'
+    exit 0
+    ;;
+*/.claude-plugin/marketplace.json)
+    exit 0
+    ;;
+esac
+[ -n "${out}" ] && : >"${out}"
+exit 0
+EOF
+    chmod +x "${bin}/curl"
 }
 
 # make_logging_pkill_pgrep installs pkill/pgrep stubs (instead of the real
@@ -177,18 +208,6 @@ setup_layout() {
     LAYOUT_CALL_LOG="${call_log}"
     LAYOUT_PKILL_LOG="${pkill_log}"
     LAYOUT_NEW_BIN="${new_bin}"
-}
-
-# add_curl_to_layout symlinks the host's curl into a layout's mock PATH.
-# Only the install-mode PTY cases below need it: install mode runs
-# run_doctor before step_sandbox_setup, and doctor's "curl" check is
-# required (fails the whole doctor run without it, forcing the unrelated
-# "Continue anyway?" prompt) — see the #519 plan's install-mode doctor risk.
-# Every other case in this file runs update mode, which never calls
-# run_doctor, so make_tools deliberately leaves curl out by default rather
-# than widening every existing fixture.
-add_curl_to_layout() {
-    ln -s "$(command -v curl)" "${LAYOUT_BIN}/curl"
 }
 
 # run_installer_pty <install|update> <feed> drives install.sh through a real
@@ -414,6 +433,17 @@ if [ "\${1:-}" = plugin ] && [ "\${2:-}" = list ]; then
 fi
 if [ "\${1:-}" = plugin ] && [ "\${2:-}" = marketplace ] && [ "\${3:-}" = list ]; then
     printf 'cenci installed\n'
+fi
+# Minimal #625/#490 interface-contract guard: this suite is about the
+# daemon-restart and authoritative-state (#492) flows, not ref pinning, but a
+# regression back to a ref-less \`marketplace add\` must not pass silently
+# just because this fake never checked. See installer-clients.test.sh's
+# make_claude for the full reference pattern.
+if [ "\${1:-}" = plugin ] && [ "\${2:-}" = marketplace ] && [ "\${3:-}" = add ]; then
+    case "\${4:-}" in
+      *@*) : ;;
+      *) printf 'error: plugin marketplace add requires owner/repo@ref (#490)\n' >&2; exit 1 ;;
+    esac
 fi
 case "\${2:-}:\${3:-}" in
 ${update_cases}
@@ -898,7 +928,6 @@ fi
 
 echo "case: install — a current sandbox image skips the rebuild prompt entirely, no 'sandbox build' call (#519)"
 setup_layout check-current-install claude 0 0 0
-add_curl_to_layout
 run_installer_pty install ""
 [[ "${PTY_EXIT}" -eq 0 ]]
 if grep -qx "sandbox build" "${LAYOUT_CALL_LOG}"; then
@@ -929,7 +958,6 @@ fi
 
 echo "case: install — a stale/missing sandbox image still shows the rebuild prompt, and builds once confirmed (#519)"
 setup_layout check-stale-install claude 0 0 1
-add_curl_to_layout
 run_installer_pty install "y\n"
 [[ "${PTY_EXIT}" -eq 0 ]]
 if ! grep -q "Build the sandbox container image now" "${WORK}/last-output"; then

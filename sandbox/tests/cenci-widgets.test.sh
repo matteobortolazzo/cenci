@@ -27,8 +27,31 @@ link_tools() {
 if [ "${1:-}" = image ] && [ "${2:-}" = inspect ]; then exit 1; fi
 exit 0
 EOF
+    # curl mock: install.sh's resolved-ref resolution (#625) runs on every
+    # dispatch path now, so it needs a curl that answers both ref-resolution
+    # probes as available (this suite is about widget wiring, not ref
+    # pinning — installer-clients.test.sh covers #625's own scenarios).
     cat >"${bin}/curl" <<'EOF'
 #!/bin/sh
+out= url=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -o) out=$2; shift 2 ;;
+      -w) shift 2 ;;
+      -*) shift ;;
+      *) url=$1; shift ;;
+    esac
+done
+case "${url}" in
+*/releases/latest)
+    printf 'https://github.com/matteobortolazzo/cenci/releases/tag/watch/v1.0.0'
+    exit 0
+    ;;
+*/.claude-plugin/marketplace.json)
+    exit 0
+    ;;
+esac
+[ -n "${out}" ] && : >"${out}"
 exit 0
 EOF
     cat >"${bin}/sudo" <<'EOF'
@@ -57,6 +80,16 @@ make_claude() {
 case "$*" in
   "plugin marketplace list") echo cenci ;;
   "plugin list") echo 'cenci-watch@cenci' ;;
+  # Minimal #625/#490 interface-contract guard: this suite isn't testing ref
+  # pinning, but a regression back to a ref-less `marketplace add` must not
+  # pass silently just because this fake never checked. See
+  # installer-clients.test.sh's make_claude for the full reference pattern.
+  "plugin marketplace add "*)
+    case "$4" in
+      *@*) : ;;
+      *) printf 'error: plugin marketplace add requires owner/repo@ref (#490)\n' >&2; exit 1 ;;
+    esac
+    ;;
 esac
 exit 0
 EOF

@@ -52,13 +52,23 @@ EOF
     # then branches on the requested URL:
     #   */releases/latest — the redirect probe cenci_latest_ref() (#590) will
     #     follow via `-fsSLI -o /dev/null -w '%{url_effective}'`; answers with
-    #     a fake .../releases/tag/<CENCI_FAKE_RELEASE_TAG> redirect when that
-    #     env var is set, or prints nothing (simulating an unresolvable
-    #     release — offline / no releases yet) when unset. Mirrors the
-    #     existing lazyboards_latest_version mock pattern in
-    #     lazyboards-install.test.sh, but the tail after CENCI_FAKE_RELEASE_TAG
-    #     is caller-controlled so malformed/injected values can be exercised
-    #     directly (#590's two-segment tag trust boundary).
+    #     a fake .../releases/tag/<CENCI_FAKE_RELEASE_TAG> redirect (default
+    #     "watch/v1.0.0" when that env var is unset, so every from-file/
+    #     update case that never sets it still resolves a ref — #625's
+    #     default-pins-everywhere requirement), or prints nothing (simulating
+    #     an unresolvable release — offline / no releases yet) when
+    #     CENCI_FAKE_NO_RELEASE is set, which takes priority over the
+    #     default. Mirrors the existing lazyboards_latest_version mock
+    #     pattern in lazyboards-install.test.sh, but the tail after
+    #     CENCI_FAKE_RELEASE_TAG is caller-controlled so malformed/injected
+    #     values can be exercised directly (#590's two-segment tag trust
+    #     boundary).
+    #   */.claude-plugin/marketplace.json — the per-ref availability probe
+    #     ref_available() (#625) is expected to make before trusting a
+    #     resolved/explicit ref; succeeds by default (ref is "available"), or
+    #     fails (curl -f style nonzero exit, no output) when
+    #     CENCI_FAKE_REF_UNAVAILABLE is set — simulating a ref with no
+    #     published marketplace manifest (typo'd tag, deleted branch, etc.).
     #   */install.sh — the tag's install.sh download; copies the real
     #     checkout's install.sh (via $ROOT, threaded through explicitly since
     #     piped cases run under a scrubbed env — see run_piped_case) so a
@@ -99,7 +109,16 @@ while [ "$#" -gt 0 ]; do
 done
 case "${url}" in
 */releases/latest)
-    [ -n "${CENCI_FAKE_RELEASE_TAG:-}" ] && printf 'https://github.com/matteobortolazzo/cenci/releases/tag/%s' "${CENCI_FAKE_RELEASE_TAG}"
+    if [ -n "${CENCI_FAKE_NO_RELEASE:-}" ]; then
+        exit 0
+    fi
+    printf 'https://github.com/matteobortolazzo/cenci/releases/tag/%s' "${CENCI_FAKE_RELEASE_TAG:-watch/v1.0.0}"
+    exit 0
+    ;;
+*/.claude-plugin/marketplace.json)
+    if [ -n "${CENCI_FAKE_REF_UNAVAILABLE:-}" ]; then
+        exit 22
+    fi
     exit 0
     ;;
 */install.sh)
@@ -203,6 +222,19 @@ EOF
     chmod +x "${bin}/cosign"
 }
 
+# make_claude <bin> — fake `claude` executable. Marketplace registration
+# (#625) enforces the real CLI's interface contract (#490): `plugin
+# marketplace add` is only accepted in the `owner/repo@ref` form and is
+# rejected (nonzero, no state change) when the ref is missing, so a
+# production regression back to a ref-less `marketplace add
+# matteobortolazzo/cenci` call is caught instead of silently masked.
+# CLAUDE_MARKETPLACE_FILE doubles as the recorded active ref: `add` writes
+# the ref into it, `remove` deletes it (modeling the Q4 remove+re-add
+# contract — `marketplace_registered` only checks the file's existence, so
+# content changes are invisible to that check). `plugin install`/`update`
+# stamp the resulting CLAUDE_INSTALLED_FILE-<plugin> marker with the
+# currently-registered ref's content, so a test can prove which ref actually
+# supplied the installed plugin content, not just which ref was requested.
 make_claude() {
     local bin="$1"
     cat > "${bin}/claude" <<'EOF'
@@ -215,8 +247,29 @@ printf 'claude %s\n' "$*" >>"${CALLS_FILE}"
 [ -n "${CONTEXT7_API_KEY:-}" ] && printf 'env-leak CONTEXT7_API_KEY=%s\n' "${CONTEXT7_API_KEY}" >>"${CALLS_FILE}"
 case "$*" in
   "plugin marketplace list") [ -f "${CLAUDE_MARKETPLACE_FILE}" ] && echo cenci; exit 0 ;;
-  "plugin marketplace add "*) touch "${CLAUDE_MARKETPLACE_FILE}"; exit 0 ;;
-  "plugin marketplace update "*) [ ! -f "${CLAUDE_REFRESH_FAIL_FILE}" ]; exit $? ;;
+  "plugin marketplace add "*)
+    case "$4" in
+      *@*)
+        printf '%s' "${4#*@}" >"${CLAUDE_MARKETPLACE_FILE}"
+        exit 0
+        ;;
+      *)
+        printf 'error: plugin marketplace add requires owner/repo@ref (#490)\n' >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  "plugin marketplace remove "*)
+    # CLAUDE_REFRESH_FAIL_FILE (optional), when present, fails the remove
+    # step of the Q4 remove+re-add contract — modeling a client that can't
+    # tear down its existing registration, which must abort before any
+    # re-add is attempted (destructive-prerequisite convention, #625).
+    if [ -f "${CLAUDE_REFRESH_FAIL_FILE}" ]; then
+      exit 1
+    fi
+    rm -f "${CLAUDE_MARKETPLACE_FILE}"
+    exit 0
+    ;;
   "plugin list")
     [ ! -f "${CLAUDE_LIST_FAIL_FILE}" ] || exit 1
     for p in cenci cenci-watch cenci-sandbox; do
@@ -231,16 +284,30 @@ case "$*" in
     # marketplace that doesn't (yet) carry it — so plugin_installed keeps
     # reporting it absent and prune_selected_to_installed prunes it from
     # SELECTED, the same as a real never-installed plugin.
-    [ "${p}" = "${CLAUDE_SKIP_INSTALL_PLUGIN:-}" ] || touch "${CLAUDE_INSTALLED_FILE}-${p}"
+    if [ "${p}" != "${CLAUDE_SKIP_INSTALL_PLUGIN:-}" ]; then
+      [ -f "${CLAUDE_MARKETPLACE_FILE}" ] && cp "${CLAUDE_MARKETPLACE_FILE}" "${CLAUDE_INSTALLED_FILE}-${p}" || touch "${CLAUDE_INSTALLED_FILE}-${p}"
+    fi
     exit 0
     ;;
-  "plugin update "*) exit 0 ;;
+  "plugin update "*)
+    p=${3%%@*}
+    [ -f "${CLAUDE_MARKETPLACE_FILE}" ] && cp "${CLAUDE_MARKETPLACE_FILE}" "${CLAUDE_INSTALLED_FILE}-${p}" || touch "${CLAUDE_INSTALLED_FILE}-${p}"
+    exit 0
+    ;;
 esac
 exit 0
 EOF
     chmod +x "${bin}/claude"
 }
 
+# make_codex <bin> — fake `codex` executable. Mirrors make_claude's ref
+# recording/enforcement (#625, #490) for Codex's distinct `--ref <value>`
+# flag form: `plugin marketplace add <repo> --ref <ref>` is only accepted
+# with a non-empty --ref value, rejected otherwise. CODEX_MARKETPLACE_FILE
+# doubles as the recorded active ref (add writes it, remove deletes it —
+# same Q4 remove+re-add modeling as Claude). `plugin add` (used for both
+# fresh installs and updates — see step_reconcile_plugins) stamps
+# CODEX_INSTALLED_FILE-<plugin> with the currently-registered ref's content.
 make_codex() {
     local bin="$1"
     cat > "${bin}/codex" <<'EOF'
@@ -248,14 +315,27 @@ make_codex() {
 printf 'codex %s\n' "$*" >>"${CALLS_FILE}"
 case "$*" in
   "plugin marketplace list") [ -f "${CODEX_MARKETPLACE_FILE}" ] && echo 'cenci local'; exit 0 ;;
-  "plugin marketplace add "*) touch "${CODEX_MARKETPLACE_FILE}"; exit 0 ;;
+  "plugin marketplace add "*)
+    if [ "${5:-}" = "--ref" ] && [ -n "${6:-}" ]; then
+      printf '%s' "$6" >"${CODEX_MARKETPLACE_FILE}"
+      exit 0
+    else
+      printf 'error: plugin marketplace add requires --ref <value> (#490)\n' >&2
+      exit 1
+    fi
+    ;;
+  "plugin marketplace remove "*) rm -f "${CODEX_MARKETPLACE_FILE}"; exit 0 ;;
   "plugin list")
     for p in cenci cenci-watch cenci-sandbox; do
       [ -f "${CODEX_INSTALLED_FILE}-${p}" ] && printf '%s@cenci installed\n' "${p}"
     done
     exit 0
     ;;
-  "plugin add "*) p=${3%%@*}; touch "${CODEX_INSTALLED_FILE}-${p}"; exit 0 ;;
+  "plugin add "*)
+    p=${3%%@*}
+    [ -f "${CODEX_MARKETPLACE_FILE}" ] && cp "${CODEX_MARKETPLACE_FILE}" "${CODEX_INSTALLED_FILE}-${p}" || touch "${CODEX_INSTALLED_FILE}-${p}"
+    exit 0
+    ;;
 esac
 exit 0
 EOF
@@ -888,6 +968,32 @@ assert_not_contains() {
     fi
 }
 
+# assert_before <file> <first> <second> — asserts <first>'s earliest matching
+# line number is strictly less than <second>'s in <file>, proving call
+# ordering (e.g. the Q4 remove+re-add contract: `marketplace remove` must be
+# recorded before the ref-carrying `marketplace add`, #625).
+assert_before() {
+    local file="$1" first="$2" second="$3" line1 line2
+    # `|| true` on each assignment: under `set -e` + `pipefail`, grep finding
+    # no match makes the whole pipeline (and thus this plain assignment)
+    # exit nonzero, which would abort the script here — before the explicit
+    # "expected both ... in file" diagnostic below ever runs. Suppress that
+    # so a genuinely missing needle is reported with a clear message instead
+    # of a silent, unexplained script exit.
+    line1="$(grep -Fn -- "${first}" "${file}" | head -n1 | cut -d: -f1)" || true
+    line2="$(grep -Fn -- "${second}" "${file}" | head -n1 | cut -d: -f1)" || true
+    if [ -z "${line1}" ] || [ -z "${line2}" ]; then
+        echo "FAIL: expected both '${first}' and '${second}' in ${file}" >&2
+        sed -n '1,240p' "${file}" >&2
+        exit 1
+    fi
+    if [ "${line1}" -ge "${line2}" ]; then
+        echo "FAIL: expected '${first}' before '${second}' in ${file} (got lines ${line1} and ${line2})" >&2
+        sed -n '1,240p' "${file}" >&2
+        exit 1
+    fi
+}
+
 assert_cenci_installer_utility() {
     local output="${CASE_HOME}/cenci-installer-output"
     [[ -L "${CASE_HOME}/.local/bin/cenci-installer" ]]
@@ -974,8 +1080,14 @@ assert_contains "${CASE_CALLS}" "codex plugin add cenci@cenci"
 [[ ! -e "${CASE_HOME}/.local/bin/codex-sand" ]]
 assert_cenci_installer_utility
 
-echo "case: already-registered marketplace is refreshed, not just confirmed"
-name=refresh
+# --- Supply chain: an already-registered marketplace is removed and
+# re-added at the resolved ref rather than merely refreshed in place (#625,
+# Q4) — the deterministic remove+re-add contract, since neither client's
+# in-place `add`/`update`/`upgrade` semantics for repointing an existing
+# registration to a different ref are verified.
+
+echo "case: an already-registered marketplace at a different ref is removed then re-added at the resolved ref, for both clients (#625, Q4)"
+name=already-registered-different-ref
 case_dir="${WORK}/${name}" home="${WORK}/${name}/home"
 bin="${WORK}/${name}/bin" output="${WORK}/${name}/output" calls="${WORK}/${name}/calls"
 mkdir -p "${home}" "${bin}"
@@ -985,21 +1097,22 @@ make_claude "${bin}"
 make_codex "${bin}"
 prepare_checkout "${home}" claude
 prepare_bootstrap_cenci "${home}" claude
-touch "${case_dir}/claude-marketplace" "${case_dir}/codex-marketplace"
+printf 'main' >"${case_dir}/claude-marketplace"
+printf 'main' >"${case_dir}/codex-marketplace"
 set +e
 env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
     CLAUDE_MARKETPLACE_FILE="${case_dir}/claude-marketplace" \
     CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
     CODEX_MARKETPLACE_FILE="${case_dir}/codex-marketplace" \
     CODEX_INSTALLED_FILE="${case_dir}/codex-installed" \
-    bash "${ROOT}/install.sh" --yes --no-build >"${output}" 2>&1
-refresh_exit=$?
+    bash "${ROOT}/install.sh" --yes --no-build --ref watch/v9.9.9 >"${output}" 2>&1
+already_registered_exit=$?
 set -e
-[[ "${refresh_exit}" -eq 0 ]]
-assert_contains "${calls}" "claude plugin marketplace update cenci"
-assert_contains "${calls}" "codex plugin marketplace upgrade cenci"
-assert_not_contains "${calls}" "claude plugin marketplace add "
-assert_not_contains "${calls}" "codex plugin marketplace add "
+[[ "${already_registered_exit}" -eq 0 ]]
+assert_before "${calls}" "claude plugin marketplace remove cenci" "claude plugin marketplace add matteobortolazzo/cenci@watch/v9.9.9"
+assert_before "${calls}" "codex plugin marketplace remove cenci" "codex plugin marketplace add matteobortolazzo/cenci --ref watch/v9.9.9"
+assert_contains "${case_dir}/claude-marketplace" "watch/v9.9.9"
+assert_contains "${case_dir}/codex-marketplace" "watch/v9.9.9"
 
 echo "case: install repairs a missing core plugin without substring false positives"
 name=repair-missing-core
@@ -1026,14 +1139,15 @@ assert_contains "${CASE_CALLS}" "claude plugin update cenci@cenci"
 assert_contains "${CASE_CALLS}" "claude plugin update cenci-watch@cenci"
 assert_contains "${CASE_CALLS}" "claude plugin update cenci-sandbox@cenci"
 
-echo "case: marketplace refresh failure is visible and non-zero"
+echo "case: marketplace re-registration is aborted when removing the existing registration fails — the destructive-prerequisite guard fires, no re-add is attempted (#625)"
 name=refresh-failure
 mkdir -p "${WORK}/${name}"
 touch "${WORK}/${name}/claude-marketplace" "${WORK}/${name}/claude-refresh-fail"
 run_case "${name}" claude
 [[ "${CASE_EXIT}" -ne 0 ]]
-assert_contains "${CASE_OUTPUT}" "could not refresh marketplace"
+assert_contains "${CASE_OUTPUT}" "could not remove the existing marketplace registration"
 assert_not_contains "${CASE_OUTPUT}" "Claude: cenci updated"
+assert_not_contains "${CASE_CALLS}" "claude plugin marketplace add"
 
 echo "case: a plugin-list query failure is visible and non-zero, not a false 'not installed'"
 name=list-failure
@@ -1215,7 +1329,7 @@ set -e
 assert_contains "${output}" "Usage:"
 assert_not_contains "${calls}" "claude plugin marketplace update"
 
-echo "case: the cenci wrapper still refreshes the marketplace when ~/.claude is itself a symlink"
+echo "case: the cenci wrapper still resolves ~/.claude when it is itself a symlink, and lets install.sh's own marketplace step register cenci at the resolved ref (no wrapper-side refresh needed since #625)"
 name=wrapper-symlinked-claude-home
 case_dir="${WORK}/${name}" home="${WORK}/${name}/home"
 bin="${WORK}/${name}/bin" output="${WORK}/${name}/output" calls="${WORK}/${name}/calls"
@@ -1241,7 +1355,8 @@ env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
 wrapper_update_exit=$?
 set -e
 [[ "${wrapper_update_exit}" -eq 0 ]]
-assert_contains "${calls}" "claude plugin marketplace update cenci"
+assert_contains "${calls}" "claude plugin marketplace add matteobortolazzo/cenci@watch/v1.0.0"
+assert_not_contains "${calls}" "claude plugin marketplace update cenci"
 
 echo "case: the cenci wrapper refuses to update from an unexpected installer root, but --help still works"
 name=wrapper-unexpected-root
@@ -1531,7 +1646,7 @@ assert_not_contains "${CASE_CURL_LOG}" "releases/latest"
 assert_contains "${CASE_CALLS}" "claude plugin install cenci@cenci"
 
 echo "case: an unresolvable release tag (offline / no releases yet) hard-fails with a clear error naming the CENCI_REF=main override, never a silent fall-through (#590, AC5)"
-run_piped_case piped-resolve-failure claude ""
+run_piped_case piped-resolve-failure claude "CENCI_FAKE_NO_RELEASE=1"
 [[ "${CASE_EXIT}" -ne 0 ]]
 assert_contains "${CASE_OUTPUT}" "CENCI_REF=main"
 
@@ -1596,8 +1711,8 @@ assert_contains "${CASE_OUTPUT}" "installer verification failed"
 assert_contains "${CASE_OUTPUT}" "CENCI_REF=main"
 assert_not_contains "${CASE_CALLS}" "claude plugin install cenci@cenci"
 
-echo "case: a normal from-file install.sh run never probes /releases/latest (regression — proves the piped-only guard can't break existing from-file suites, #590)"
-name=onfile-no-probe
+echo "case: a normal from-file install.sh run never re-execs itself via the piped-only pin block (regression — proves the piped-only guard can't break existing from-file suites, #590), but — per #625's Q1 — DOES resolve and pin the marketplace + plugin content to the default release ref since CENCI_REF is unset, not live main"
+name=onfile-no-reexec-but-pins-default-ref
 case_dir="${WORK}/${name}" home="${WORK}/${name}/home"
 bin="${WORK}/${name}/bin" output="${WORK}/${name}/output" calls="${WORK}/${name}/calls"
 curl_log="${WORK}/${name}/curl-log"
@@ -1618,8 +1733,170 @@ env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" ROOT="${ROOT}" CURL_LO
 onfile_no_probe_exit=$?
 set -e
 [[ "${onfile_no_probe_exit}" -eq 0 ]]
-assert_not_contains "${curl_log}" "releases/latest"
+# The piped-only re-exec pin block never fires from a file: no fresh
+# install.sh download is staged and re-exec'd (#590 regression).
+assert_not_contains "${curl_log}" "/install.sh"
 assert_contains "${calls}" "claude plugin install cenci@cenci"
+# #625, Q1 + test case 2: a from-file run with CENCI_REF unset still
+# resolves the latest release tag (a *different*, new call path than the
+# #590 piped pin block above) and pins the marketplace + installed plugin
+# content to it — never main.
+assert_contains "${curl_log}" "releases/latest"
+assert_contains "${calls}" "claude plugin marketplace add matteobortolazzo/cenci@watch/v9.9.9"
+assert_contains "${case_dir}/claude-installed-cenci" "watch/v9.9.9"
+assert_not_contains "${case_dir}/claude-installed-cenci" "@main"
+
+echo "case: cenci-installer update (from-file, CENCI_REF unset) also resolves and pins the marketplace + plugin content to the default release ref, never main — covers the update-mode dispatch path distinctly from plain install (#625, Q1)"
+name=update-mode-pins-default-ref
+case_dir="${WORK}/${name}" home="${WORK}/${name}/home"
+bin="${WORK}/${name}/bin" output="${WORK}/${name}/output" calls="${WORK}/${name}/calls"
+mkdir -p "${home}" "${bin}"
+: >"${calls}"
+make_common_tools "${bin}"
+make_codex "${bin}"
+prepare_checkout "${home}" codex
+prepare_bootstrap_cenci "${home}" codex
+set +e
+env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
+    CENCI_FAKE_RELEASE_TAG="watch/v9.9.9" \
+    CODEX_MARKETPLACE_FILE="${case_dir}/codex-marketplace" \
+    CODEX_INSTALLED_FILE="${case_dir}/codex-installed" \
+    bash "${ROOT}/install.sh" --yes --no-build update >"${output}" 2>&1
+update_mode_exit=$?
+set -e
+[[ "${update_mode_exit}" -eq 0 ]]
+assert_contains "${calls}" "codex plugin marketplace add matteobortolazzo/cenci --ref watch/v9.9.9"
+assert_contains "${case_dir}/codex-installed-cenci" "watch/v9.9.9"
+
+# --- Supply chain: CENCI_REF/--ref pins marketplace manifests and installed
+# plugin content — not just the installer re-exec — for every entry path
+# (#625). See docs/getting-started.md and README.md for the user-facing
+# summary of this contract.
+
+echo "case: a default piped run (CENCI_FAKE_RELEASE_TAG set, CENCI_REF unset) pins the marketplace registration and installed plugin content to the resolved release ref, not main, for Claude (#625, test case 1)"
+run_piped_case piped-default-ref-pin-claude claude "CENCI_FAKE_RELEASE_TAG=watch/v9.9.9"
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_contains "${CASE_CALLS}" "claude plugin marketplace add matteobortolazzo/cenci@watch/v9.9.9"
+assert_contains "${CASE_CALLS}" "claude plugin install cenci@cenci"
+assert_contains "${WORK}/piped-default-ref-pin-claude/claude-installed-cenci" "watch/v9.9.9"
+assert_not_contains "${WORK}/piped-default-ref-pin-claude/claude-installed-cenci" "@main"
+
+echo "case: a default piped run (CENCI_FAKE_RELEASE_TAG set, CENCI_REF unset) pins the marketplace registration and installed plugin content to the resolved release ref, not main, for Codex (#625, test case 1)"
+run_piped_case piped-default-codex codex "CENCI_FAKE_RELEASE_TAG=watch/v9.9.9"
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_contains "${CASE_CALLS}" "codex plugin marketplace add matteobortolazzo/cenci --ref watch/v9.9.9"
+assert_contains "${CASE_CALLS}" "codex plugin add cenci@cenci"
+assert_contains "${WORK}/piped-default-codex/codex-installed-cenci" "watch/v9.9.9"
+assert_not_contains "${WORK}/piped-default-codex/codex-installed-cenci" "main"
+
+echo "case: an explicit --ref <tag-or-commit> (from-file) pins the marketplace + installed plugin content to exactly that ref for Claude, no resolution involved (#625, test case 3)"
+run_case explicit-ref-claude claude --no-build --ref watch/v2.3.4
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_contains "${CASE_CALLS}" "claude plugin marketplace add matteobortolazzo/cenci@watch/v2.3.4"
+assert_contains "${WORK}/explicit-ref-claude/claude-installed-cenci" "watch/v2.3.4"
+
+echo "case: an explicit --ref <tag-or-commit> (from-file) pins the marketplace + installed plugin content to exactly that ref for Codex, no resolution involved (#625, test case 3)"
+run_case explicit-ref-codex codex --no-build --ref watch/v2.3.4
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_contains "${CASE_CALLS}" "codex plugin marketplace add matteobortolazzo/cenci --ref watch/v2.3.4"
+assert_contains "${WORK}/explicit-ref-codex/codex-installed-cenci" "watch/v2.3.4"
+
+echo "case: --ref main is the only path that actually registers the marketplace and installs plugin content at main for Claude (#625, test case 4, AC3)"
+run_case explicit-main claude --no-build --ref main
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_contains "${CASE_CALLS}" "claude plugin marketplace add matteobortolazzo/cenci@main"
+assert_contains "${WORK}/explicit-main/claude-installed-cenci" "main"
+
+echo "case: CENCI_REF=main is the only path that actually registers the marketplace and installs plugin content at main for Codex (#625, test case 4, AC3)"
+name=explicit-main-env
+case_dir="${WORK}/${name}" home="${WORK}/${name}/home"
+bin="${WORK}/${name}/bin" output="${WORK}/${name}/output" calls="${WORK}/${name}/calls"
+mkdir -p "${home}" "${bin}"
+: >"${calls}"
+make_common_tools "${bin}"
+make_codex "${bin}"
+prepare_checkout "${home}" codex
+prepare_bootstrap_cenci "${home}" codex
+set +e
+env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" CENCI_REF=main \
+    CODEX_MARKETPLACE_FILE="${case_dir}/codex-marketplace" \
+    CODEX_INSTALLED_FILE="${case_dir}/codex-installed" \
+    bash "${ROOT}/install.sh" --yes --no-build >"${output}" 2>&1
+explicit_main_env_exit=$?
+set -e
+[[ "${explicit_main_env_exit}" -eq 0 ]]
+assert_contains "${calls}" "codex plugin marketplace add matteobortolazzo/cenci --ref main"
+assert_contains "${case_dir}/codex-installed-cenci" "main"
+
+echo "case: a malformed --ref value (space/shell metacharacter) is rejected before any marketplace mutation, never silently accepted (#625, test case 6)"
+name=malformed-ref
+run_case "${name}" claude --no-build --ref 'bad ref!'
+[[ "${CASE_EXIT}" -ne 0 ]]
+assert_contains "${CASE_OUTPUT}" "invalid ref"
+assert_not_contains "${CASE_CALLS}" "marketplace add"
+assert_not_contains "${CASE_CALLS}" "marketplace remove"
+
+echo "case: a --ref value containing a '..' path segment is rejected before any marketplace mutation — closes the gap where the ref_available manifest probe could resolve a different ref's content than what gets registered with the client CLI (#625 review fix)"
+name=dotdot-ref
+run_case "${name}" claude --no-build --ref '../cenci/main'
+[[ "${CASE_EXIT}" -ne 0 ]]
+assert_contains "${CASE_OUTPUT}" "invalid ref"
+assert_not_contains "${CASE_CALLS}" "marketplace add"
+assert_not_contains "${CASE_CALLS}" "marketplace remove"
+
+echo "case: a --ref value with a leading '-' is rejected before any marketplace mutation — closes the gap where Codex's --ref <value> invocation risks the value being misparsed as another flag (#625 review fix)"
+name=leading-dash-ref
+run_case "${name}" claude --no-build --ref '-x'
+[[ "${CASE_EXIT}" -ne 0 ]]
+assert_contains "${CASE_OUTPUT}" "invalid ref"
+assert_not_contains "${CASE_CALLS}" "marketplace add"
+assert_not_contains "${CASE_CALLS}" "marketplace remove"
+
+echo "case: a syntactically valid but unavailable ref (marketplace.json probe 404s) is rejected before any marketplace mutation, never falls through to main (#625, test case 7)"
+name=unavailable-ref
+case_dir="${WORK}/${name}" home="${WORK}/${name}/home"
+bin="${WORK}/${name}/bin" output="${WORK}/${name}/output" calls="${WORK}/${name}/calls"
+mkdir -p "${home}" "${bin}"
+: >"${calls}"
+make_common_tools "${bin}"
+make_claude "${bin}"
+prepare_checkout "${home}" claude
+prepare_bootstrap_cenci "${home}" claude
+set +e
+env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" CENCI_FAKE_REF_UNAVAILABLE=1 \
+    CLAUDE_MARKETPLACE_FILE="${case_dir}/claude-marketplace" \
+    CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
+    bash "${ROOT}/install.sh" --yes --no-build --ref does-not-exist >"${output}" 2>&1
+unavailable_ref_exit=$?
+set -e
+[[ "${unavailable_ref_exit}" -ne 0 ]]
+assert_contains "${output}" "not available"
+assert_contains "${output}" "CENCI_REF=main"
+assert_not_contains "${calls}" "marketplace add"
+assert_not_contains "${calls}" "@main"
+assert_not_contains "${calls}" "--ref main"
+
+echo "case: an unresolvable release (offline, no release published yet) hard-fails on a from-file cenci-installer update run with the CENCI_REF=main hint, before any marketplace mutation (#625, test case 8, Q2)"
+name=unresolvable-release-from-file
+case_dir="${WORK}/${name}" home="${WORK}/${name}/home"
+bin="${WORK}/${name}/bin" output="${WORK}/${name}/output" calls="${WORK}/${name}/calls"
+mkdir -p "${home}" "${bin}"
+: >"${calls}"
+make_common_tools "${bin}"
+make_claude "${bin}"
+prepare_checkout "${home}" claude
+prepare_bootstrap_cenci "${home}" claude
+set +e
+env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" CENCI_FAKE_NO_RELEASE=1 \
+    CLAUDE_MARKETPLACE_FILE="${case_dir}/claude-marketplace" \
+    CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
+    bash "${ROOT}/install.sh" --yes --no-build update >"${output}" 2>&1
+unresolvable_release_exit=$?
+set -e
+[[ "${unresolvable_release_exit}" -ne 0 ]]
+assert_contains "${output}" "CENCI_REF=main"
+assert_not_contains "${calls}" "marketplace add"
+assert_not_contains "${calls}" "marketplace remove"
 
 # --- doc regression assertions (#630) ----------------------------------------
 # Direct content checks against the checked-out repo's own doc files (no

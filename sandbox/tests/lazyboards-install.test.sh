@@ -50,6 +50,17 @@ make_claude() {
 case "$*" in
   "plugin marketplace list") echo cenci; exit 0 ;;
   "plugin list") printf 'cenci@cenci\ncenci-watch@cenci\ncenci-sandbox@cenci\n'; exit 0 ;;
+  # Minimal #625/#490 interface-contract guard: this suite is about
+  # lazyboards install/verify, not ref pinning, but a regression back to a
+  # ref-less `marketplace add` must not pass silently just because this fake
+  # never checked. See installer-clients.test.sh's make_claude for the full
+  # reference pattern.
+  "plugin marketplace add "*)
+    case "$4" in
+      *@*) exit 0 ;;
+      *) printf 'error: plugin marketplace add requires owner/repo@ref (#490)\n' >&2; exit 1 ;;
+    esac
+    ;;
 esac
 exit 0
 EOF
@@ -75,8 +86,20 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 case "${url}" in
-*/releases/latest)
+*/matteobortolazzo/lazyboards/releases/latest)
     printf 'https://github.com/matteobortolazzo/lazyboards/releases/tag/v%s' "${FAKE_VER}"
+    exit 0
+    ;;
+*/matteobortolazzo/cenci/releases/latest)
+    # Answers install.sh's own resolved-ref resolution (#625), distinct from
+    # the lazyboards release probe above (both hit "*/releases/latest") — a
+    # fixed default tag, since this suite is about lazyboards install/verify,
+    # not #625's own ref-pinning scenarios (installer-clients.test.sh covers
+    # those directly).
+    printf 'https://github.com/matteobortolazzo/cenci/releases/tag/watch/v1.0.0'
+    exit 0
+    ;;
+*/.claude-plugin/marketplace.json)
     exit 0
     ;;
 */releases/download/*)
@@ -292,7 +315,11 @@ echo "case: --yes without --lazyboards never touches the lazyboards release"
 run_installer default-skip --yes --no-build
 [[ "${CASE_EXIT}" -eq 0 ]]
 [[ ! -e "${CASE_HOME}/.local/bin/lazyboards" ]]
-assert_not_contains "${CASE_CURL_LOG}" "releases/latest"
+# Scoped to the lazyboards repo specifically: install.sh's own #625
+# ref-resolution now always probes matteobortolazzo/cenci's releases/latest
+# (and .claude-plugin/marketplace.json) on every run, unrelated to whether
+# lazyboards is selected — only the lazyboards-repo probe must be absent here.
+assert_not_contains "${CASE_CURL_LOG}" "matteobortolazzo/lazyboards/releases/latest"
 assert_not_contains "${CASE_CURL_LOG}" "releases/download"
 
 echo "case: an unmanaged lazyboards found only on PATH is left alone with a reconcile hint, not silently adopted"
@@ -303,7 +330,11 @@ run_installer "${name}" --yes --no-build
 [[ ! -e "${CASE_HOME}/.local/bin/lazyboards" ]]
 assert_contains "${CASE_OUTPUT}" "unmanaged lazyboards found at"
 assert_contains "${CASE_OUTPUT}" "reconcile it with: cenci update --lazyboards"
-assert_not_contains "${CASE_CURL_LOG}" "releases/latest"
+# Scoped to the lazyboards repo specifically: install.sh's own #625
+# ref-resolution now always probes matteobortolazzo/cenci's releases/latest
+# (and .claude-plugin/marketplace.json) on every run, unrelated to whether
+# lazyboards is selected — only the lazyboards-repo probe must be absent here.
+assert_not_contains "${CASE_CURL_LOG}" "matteobortolazzo/lazyboards/releases/latest"
 assert_not_contains "${CASE_CURL_LOG}" "releases/download"
 
 echo "case: a checksum mismatch fails the step and installs nothing"
@@ -369,7 +400,11 @@ run_installer "${name}" update --yes --no-build
 [[ "$(readlink "${CASE_HOME}/.local/bin/lazyboards")" == "${target}" ]]
 assert_contains "${CASE_OUTPUT}" "unmanaged lazyboards found at"
 assert_contains "${CASE_OUTPUT}" "reconcile it with: cenci update --lazyboards"
-assert_not_contains "${CASE_CURL_LOG}" "releases/latest"
+# Scoped to the lazyboards repo specifically: install.sh's own #625
+# ref-resolution now always probes matteobortolazzo/cenci's releases/latest
+# (and .claude-plugin/marketplace.json) on every run, unrelated to whether
+# lazyboards is selected — only the lazyboards-repo probe must be absent here.
+assert_not_contains "${CASE_CURL_LOG}" "matteobortolazzo/lazyboards/releases/latest"
 assert_not_contains "${CASE_CURL_LOG}" "releases/download"
 
 echo "case: update leaves an up-to-date lazyboards alone"
@@ -386,14 +421,22 @@ make_installed_lazyboards "${WORK}/${name}/home" 1.0.0
 run_installer "${name}" update --yes --no-build --no-lazyboards
 [[ "${CASE_EXIT}" -eq 0 ]]
 [[ "$("${CASE_HOME}/.local/bin/lazyboards" --version)" == "lazyboards 1.0.0" ]]
-assert_not_contains "${CASE_CURL_LOG}" "releases/latest"
+# Scoped to the lazyboards repo specifically: install.sh's own #625
+# ref-resolution now always probes matteobortolazzo/cenci's releases/latest
+# (and .claude-plugin/marketplace.json) on every run, unrelated to whether
+# lazyboards is selected — only the lazyboards-repo probe must be absent here.
+assert_not_contains "${CASE_CURL_LOG}" "matteobortolazzo/lazyboards/releases/latest"
 assert_not_contains "${CASE_CURL_LOG}" "releases/download"
 
 echo "case: update without lazyboards installed skips the step entirely"
 run_installer update-absent update --yes --no-build
 [[ "${CASE_EXIT}" -eq 0 ]]
 [[ ! -e "${CASE_HOME}/.local/bin/lazyboards" ]]
-assert_not_contains "${CASE_CURL_LOG}" "releases/latest"
+# Scoped to the lazyboards repo specifically: install.sh's own #625
+# ref-resolution now always probes matteobortolazzo/cenci's releases/latest
+# (and .claude-plugin/marketplace.json) on every run, unrelated to whether
+# lazyboards is selected — only the lazyboards-repo probe must be absent here.
+assert_not_contains "${CASE_CURL_LOG}" "matteobortolazzo/lazyboards/releases/latest"
 
 echo "case: doctor reports lazyboards state without failing when absent"
 run_installer doctor-absent doctor
