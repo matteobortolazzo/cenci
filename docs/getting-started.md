@@ -101,7 +101,27 @@ interactive configure skill is Claude Code-only. See
 [flow/README.md's "What `/cenci:configure` creates"](../flow/README.md#what-cenciconfigure-creates)
 for the generated file layout, including the monorepo progressive-disclosure structure.
 
-## 6. Run a ticket
+## 6. Keep the project healthy
+
+cenci's maintenance checks are a core workflow feature, not a lazyboards add-on — they
+work the same whether or not you ever set up a board.
+
+Every `/cenci:implement` run already automatically checks documentation and generated
+indexes affected by the files it changes, and repairs or reports what it finds — no
+setup required.
+
+For a full, on-demand audit of the whole project — workflow structure, docs, client
+adapters (Claude Code, Codex, OpenCode), and accumulated rules — run:
+
+```text
+/cenci:maintain
+```
+
+It reports findings with proposed repairs and opens a PR with the cleanup once you
+approve. See [flow/README.md's maintenance section](../flow/README.md#maintaining-the-project)
+for each mode (`structure`, `docs`, `clients`, `rules`).
+
+## 7. Run a ticket
 
 ```text
 /cenci:refine 42

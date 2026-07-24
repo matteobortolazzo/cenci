@@ -21,7 +21,7 @@ scope and planning decisions human-gated.
 | `/cenci:address-review <pr-number>` | Address PR review comments — fetch, evaluate, fix, reply, push, re-request review |
 | `/cenci:babysit <pr-number>` | Persistent PR follow-through — periodically checks CI and new review comments and drives them to resolution until the PR merges or closes |
 | `/cenci:sync` | Pull latest main, rebase active worktrees, prune stale remotes, clean up merged branches |
-| `/cenci:maintain rules` | Curate accumulated lessons — merge duplicate rules, demote rules now covered by automated checks, archive stale ones, and open a PR with the cleanup |
+| `/cenci:maintain [structure\|docs\|clients\|rules]` | Audit and repair the project's workflow structure, documentation and generated indexes, client-adapter consistency (Claude Code, Codex, OpenCode), and accumulated rules — `rules` replaces the retired garden skill. Runs all four modes by default, or a single named mode; reports findings with proposed repairs for approval, then applies them in one PR. Independent of lazyboards |
 
 **Codex support**: Codex receives the portable convention skills below plus the full
 implementation workflow as a documented `AGENTS.md` equivalent. The interactive
@@ -420,6 +420,38 @@ pacing back to the base interval.
   not the decisions.
 
 On merge, babysit performs the `In Review → Implemented` board transition (see the terminal-tick behavior above and the [Board lifecycle](#board-lifecycle) table) — relabeling each issue closed by the merged PR.
+
+### Maintaining the project
+
+Maintenance is a core cenci workflow feature, independent of lazyboards — it works the
+same whether or not a board is set up.
+
+**On demand, full audit.** `/cenci:maintain [structure|docs|clients|rules] [scope]`
+pairs the deterministic checker (`flow/skills/maintain/scripts/check.sh`) with four
+analyzer agents:
+
+- `structure` — workflow structural conventions and test-suite coverage
+- `docs` — documentation and generated-index drift
+- `clients` — Claude Code/Codex/OpenCode client-adapter consistency
+- `rules` — curates `AGENTS.md`/`CLAUDE.md` Critical Rules and topic-doc rule bullets;
+  this mode replaces the retired garden skill's curation duties
+
+An omitted mode (or `all`) runs every mode together. Each run reports every finding
+with evidence and a proposed repair, then asks once which actions to apply (all
+deterministic repairs, critical+high only, docs+indexes only, rules only, pick
+individually, or report only) — nothing is written until you approve. Approved repairs
+are applied in a dedicated worktree, re-verified against the checker and the project's
+health gate, and shipped as a single reviewed PR (Phase 6 Apply) — the same
+worktree/single-PR guarantee every other pipeline skill follows.
+
+**Automatic, during-implement.** `/cenci:implement`'s Phase 8 already runs the
+deterministic maintenance checker automatically against doc-affecting changed files on
+every run — repairing safe findings and reporting the rest, no setup required. This is
+existing pipeline behavior, independent of the `maintenance` config block below.
+`.cenci/config.json`'s optional `maintenance` block (see
+[`flow/skills/configure/SKILL.md`](skills/configure/SKILL.md)) documents reserved
+fields for future opt-out/reminder control — those fields are advisory this release and
+don't yet gate the check above.
 
 ### UI tickets
 
