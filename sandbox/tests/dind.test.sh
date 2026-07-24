@@ -425,6 +425,7 @@ exit 0
 EOF
 chmod +x "${BIN8}/dockerd"
 
+# shellcheck disable=SC2016  # $1 must expand in the child bash, not here
 env -i PATH="${BIN8}:/usr/bin:/bin" CENCI_DIND_HOME_ROOT="${HOME8}" CALL_LOG="${CALL_LOG8}" \
     bash -c 'source "$1"; start_dind' _ "${DIND_LIB}" &
 STILL_RUNNING_PID=$!
