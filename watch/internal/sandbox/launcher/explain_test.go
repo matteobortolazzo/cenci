@@ -498,3 +498,287 @@ func TestWriteExplanation_NeverLeaksEnvVarValues(t *testing.T) {
 		t.Errorf("expected no \"ANTHROPIC_API_KEY=value\" leak, got:\n%s", out)
 	}
 }
+
+// -- ticket #627: observed-vs-planned basis, network rewording, inspect
+// warning, and next-exec labeling ---------------------------------------
+//
+// NOTE (red phase): Posture.Basis/PostureBasisRunning/PostureBasisPlanned/
+// Posture.InspectWarning do not exist yet (land in audit.go, a later
+// phase); every test below fails to COMPILE until then. The narrative
+// content assertions (bridge/host-network full sentences, next-exec
+// qualifier, warning suppression) also fail against the CURRENT
+// WriteExplanation body even once the fields exist, until explain.go's
+// network paragraph and basis/warning rendering land — the intended
+// red-phase state either way.
+
+// -- 9. basis: observed vs planned -------------------------------------------
+
+// TestWriteExplanation_Basis_StatesObservedVsPlanned covers AC #5: the
+// narrative must explicitly say whether it is explaining observed running
+// state or a plan, using content-specific wording for each basis (not a
+// shared, ambiguous phrase).
+func TestWriteExplanation_Basis_StatesObservedVsPlanned(t *testing.T) {
+	tests := []struct {
+		name    string
+		basis   string
+		wantSub string
+	}{
+		{name: "running", basis: PostureBasisRunning, wantSub: "observed"},
+		{name: "planned", basis: PostureBasisPlanned, wantSub: "plan"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := baselinePosture()
+			p.Basis = tc.basis
+
+			var buf bytes.Buffer
+			if err := p.WriteExplanation(&buf); err != nil {
+				t.Fatalf("WriteExplanation: %v", err)
+			}
+			out := buf.String()
+
+			if !strings.Contains(strings.ToLower(out), tc.wantSub) {
+				t.Errorf("basis %q: expected the narrative to mention %q, got:\n%s", tc.basis, tc.wantSub, out)
+			}
+		})
+	}
+}
+
+// TestWriteExplanation_Basis_RunningAndPlanned_UseDistinctFraming is a
+// dedicated content-specific regression (AGENTS.md #446): the running and
+// planned intros must render visibly different text, not the same generic
+// sentence with the basis word swapped out silently losing meaning.
+func TestWriteExplanation_Basis_RunningAndPlanned_UseDistinctFraming(t *testing.T) {
+	running := baselinePosture()
+	running.Basis = PostureBasisRunning
+	var runningBuf bytes.Buffer
+	if err := running.WriteExplanation(&runningBuf); err != nil {
+		t.Fatalf("WriteExplanation (running): %v", err)
+	}
+
+	planned := baselinePosture()
+	planned.Basis = PostureBasisPlanned
+	var plannedBuf bytes.Buffer
+	if err := planned.WriteExplanation(&plannedBuf); err != nil {
+		t.Fatalf("WriteExplanation (planned): %v", err)
+	}
+
+	if runningBuf.String() == plannedBuf.String() {
+		t.Errorf("running-basis and planned-basis narratives must render distinct intros, got identical output:\n%s", runningBuf.String())
+	}
+}
+
+// -- 10. bridge network: separate namespace, no published ports, outbound
+// reachability (AC #6/#7/#10) ------------------------------------------------
+
+// TestWriteExplanation_BridgeNetwork_SeparateNamespaceNoPublishedInboundPorts
+// covers AC #6/#7 as a complete-sentence assertion (not an isolated
+// keyword): bridge mode uses a separate network namespace and publishes no
+// inbound ports by default.
+func TestWriteExplanation_BridgeNetwork_SeparateNamespaceNoPublishedInboundPorts(t *testing.T) {
+	p := baselinePosture()
+	p.Basis = PostureBasisPlanned
+
+	var buf bytes.Buffer
+	if err := p.WriteExplanation(&buf); err != nil {
+		t.Fatalf("WriteExplanation: %v", err)
+	}
+	out := buf.String()
+
+	if !strings.Contains(out, "separate network namespace") {
+		t.Errorf("expected the bridge narrative to state a separate network namespace as a complete claim, got:\n%s", out)
+	}
+	if !strings.Contains(out, "no published inbound ports") && !strings.Contains(out, "publishes no inbound ports") {
+		t.Errorf("expected the bridge narrative to state no published inbound ports, got:\n%s", out)
+	}
+}
+
+// TestWriteExplanation_BridgeNetwork_OutboundMayReachHostLanInternet covers
+// AC #7's flip side: outbound connections may still reach routable host,
+// LAN, or internet services depending on runtime/firewall configuration —
+// this is the corrected wording replacing the old "outbound-only and
+// isolated from the host" overclaim.
+func TestWriteExplanation_BridgeNetwork_OutboundMayReachHostLanInternet(t *testing.T) {
+	p := baselinePosture()
+	p.Basis = PostureBasisPlanned
+
+	var buf bytes.Buffer
+	if err := p.WriteExplanation(&buf); err != nil {
+		t.Fatalf("WriteExplanation: %v", err)
+	}
+	out := buf.String()
+
+	if !strings.Contains(out, "outbound") {
+		t.Errorf("expected the bridge narrative to discuss outbound connections, got:\n%s", out)
+	}
+	if !strings.Contains(out, "host") || !strings.Contains(out, "LAN") || (!strings.Contains(out, "internet") && !strings.Contains(out, "Internet")) {
+		t.Errorf("expected the bridge narrative to name host, LAN, and internet reachability explicitly, got:\n%s", out)
+	}
+	if !strings.Contains(out, "firewall") {
+		t.Errorf("expected the bridge narrative to qualify outbound reachability on runtime/firewall configuration, got:\n%s", out)
+	}
+}
+
+// TestWriteExplanation_BridgeNetwork_NeverClaimsCompleteIsolationOrOutboundOnly
+// is a dedicated regression test (per the ticket's Goal/AC #6): the removed
+// overclaim "outbound-only and isolated from the host" must never resurface
+// in the bridge narrative.
+func TestWriteExplanation_BridgeNetwork_NeverClaimsCompleteIsolationOrOutboundOnly(t *testing.T) {
+	p := baselinePosture()
+	p.Basis = PostureBasisPlanned
+
+	var buf bytes.Buffer
+	if err := p.WriteExplanation(&buf); err != nil {
+		t.Fatalf("WriteExplanation: %v", err)
+	}
+	out := buf.String()
+
+	if strings.Contains(out, "outbound-only and isolated from the host") {
+		t.Errorf("bridge narrative must never claim complete host isolation / universal outbound-only enforcement, got:\n%s", out)
+	}
+}
+
+// -- 11. host-network: blast radius, shared namespace, localhost exposure
+// (AC #8) ---------------------------------------------------------------
+
+// TestWriteExplanation_HostNetwork_SharedNamespaceAndLocalhostExposure
+// covers what --host-network additionally changes, as complete sentences:
+// a shared host network namespace, host-localhost exposure, and loss of
+// namespace separation — continuing to identify the increased blast radius
+// clearly (AC #8).
+func TestWriteExplanation_HostNetwork_SharedNamespaceAndLocalhostExposure(t *testing.T) {
+	p := baselinePosture()
+	p.Basis = PostureBasisPlanned
+	p.Network = NetworkPosture{Mode: NetworkModeHost, Weakened: true}
+	p.BoundaryWeakenings = []BoundaryWeakening{{
+		Option: "--host-network",
+		Active: true,
+		Effect: "the container joins the host network namespace instead of an isolated bridge network",
+	}}
+
+	var buf bytes.Buffer
+	if err := p.WriteExplanation(&buf); err != nil {
+		t.Fatalf("WriteExplanation: %v", err)
+	}
+	out := buf.String()
+
+	if !strings.Contains(out, "shared host network namespace") && !strings.Contains(out, "shared") {
+		t.Errorf("expected the host-network narrative to state the shared host namespace, got:\n%s", out)
+	}
+	if !strings.Contains(out, "localhost") {
+		t.Errorf("expected the host-network narrative to state host-localhost exposure, got:\n%s", out)
+	}
+	if !strings.Contains(out, "namespace separation") {
+		t.Errorf("expected the host-network narrative to state the loss of namespace separation, got:\n%s", out)
+	}
+	if !strings.Contains(out, "blast radius") {
+		t.Errorf("expected the host-network narrative to keep the blast-radius warning, got:\n%s", out)
+	}
+}
+
+// -- 12. inspect warning: never a reassuring default -------------------------
+
+// TestWriteExplanation_InspectWarning_SuppressesBaselineAndSurfacesWarning
+// covers Q2/AC #9: when InspectWarning is set, the narrative must surface
+// it prominently and must never print the default-safe baseline line, even
+// when BoundaryWeakenings is empty.
+func TestWriteExplanation_InspectWarning_SuppressesBaselineAndSurfacesWarning(t *testing.T) {
+	p := baselinePosture()
+	p.Basis = PostureBasisPlanned
+	p.InspectWarning = "the running container's actual posture could not be verified: malformed inspect output"
+
+	var buf bytes.Buffer
+	if err := p.WriteExplanation(&buf); err != nil {
+		t.Fatalf("WriteExplanation: %v", err)
+	}
+	out := buf.String()
+
+	if !strings.Contains(out, p.InspectWarning) {
+		t.Errorf("expected the narrative to surface the InspectWarning text verbatim, got:\n%s", out)
+	}
+	if strings.Contains(out, "Boundary weakenings: none (default-safe baseline)") {
+		t.Errorf("narrative must never print the default-safe baseline line when InspectWarning is set, got:\n%s", out)
+	}
+}
+
+// -- 13. next-exec labeling (Q4) ----------------------------------------------
+
+// TestWriteExplanation_NextExecQualifier_ForwardedEnvWhenRunning covers Q4:
+// forwardedEnv has no inspect source, so a running-basis narrative must
+// label it "next-exec — not observed" rather than presenting it as an
+// observed fact of the running container.
+func TestWriteExplanation_NextExecQualifier_ForwardedEnvWhenRunning(t *testing.T) {
+	p := baselinePosture()
+	p.Basis = PostureBasisRunning
+	p.ForwardedEnv = []ForwardedEnvVar{{Name: "ANTHROPIC_API_KEY", Secret: true}}
+
+	var buf bytes.Buffer
+	if err := p.WriteExplanation(&buf); err != nil {
+		t.Fatalf("WriteExplanation: %v", err)
+	}
+	out := buf.String()
+
+	if !strings.Contains(out, "next-exec") {
+		t.Errorf("expected a \"next-exec\" qualifier on the forwarded-env section for a running-basis report, got:\n%s", out)
+	}
+	if !strings.Contains(out, "not observed") {
+		t.Errorf("expected the next-exec qualifier to explicitly say these values are \"not observed\" from the running container, got:\n%s", out)
+	}
+}
+
+// TestWriteExplanation_NextExecQualifier_AbsentWhenPlanned covers the
+// converse of Q4: a planned-basis narrative must NOT render the "next-exec"
+// qualifier at all — every field is already a hypothetical next-launch
+// value in that mode, so singling out forwardedEnv would be misleading.
+func TestWriteExplanation_NextExecQualifier_AbsentWhenPlanned(t *testing.T) {
+	p := baselinePosture()
+	p.Basis = PostureBasisPlanned
+	p.ForwardedEnv = []ForwardedEnvVar{{Name: "ANTHROPIC_API_KEY", Secret: true}}
+
+	var buf bytes.Buffer
+	if err := p.WriteExplanation(&buf); err != nil {
+		t.Fatalf("WriteExplanation: %v", err)
+	}
+	out := buf.String()
+
+	if strings.Contains(out, "next-exec") {
+		t.Errorf("expected no \"next-exec\" qualifier for a planned-basis report, got:\n%s", out)
+	}
+}
+
+// -- 14. dind source unknown must not render as "disabled" (#598/#627) -------
+
+// TestWriteExplanation_DindSourceUnknown_NotRenderedAsDisabled covers the
+// review finding for #627: a running container whose cenci-sand.dind label
+// is unrecognized reports DindPosture{Enabled:false, Source:DindSourceUnknown}
+// — WriteExplanation must render this as indeterminate, never as the
+// confident "Nested Docker is disabled" sentence it prints for a genuinely
+// off dind (DindSourceOff/DindSourceObserved). This case has no
+// InspectWarning (the inspect call itself succeeded; only the label's
+// meaning is ambiguous), so the "default-safe baseline" suppression must key
+// off Dind.Source too, not just InspectWarning.
+func TestWriteExplanation_DindSourceUnknown_NotRenderedAsDisabled(t *testing.T) {
+	p := baselinePosture()
+	p.Basis = PostureBasisRunning
+	p.Dind = DindPosture{
+		Enabled: false,
+		Source:  DindSourceUnknown,
+		Note:    "the running container's cenci-sand.dind label is an unrecognized value; its nested-Docker posture could not be conclusively determined and must not be read as disabled.",
+	}
+
+	var buf bytes.Buffer
+	if err := p.WriteExplanation(&buf); err != nil {
+		t.Fatalf("WriteExplanation: %v", err)
+	}
+	out := buf.String()
+
+	if strings.Contains(out, "Nested Docker is disabled for this launch") {
+		t.Errorf("narrative must not render an unrecognized dind label as a confident \"disabled\", got:\n%s", out)
+	}
+	if !strings.Contains(out, "could not be determined") {
+		t.Errorf("expected a non-reassuring \"could not be determined\" narrative for an unrecognized dind label, got:\n%s", out)
+	}
+	if strings.Contains(out, "Boundary weakenings: none (default-safe baseline)") {
+		t.Errorf("narrative must never print the default-safe baseline line when dind's state is indeterminate, got:\n%s", out)
+	}
+}

@@ -98,8 +98,19 @@ func (e *Engine) DryRun(opts Options) (DryRunPlan, error) {
 	// argv build above already printed it once (to e.Stderr, the real
 	// engine); the Audit call below reuses the same assembleOptionalFeatures
 	// method, so it runs against a Stderr-discarding clone instead.
+	//
+	// The clone's Runtime is deliberately cleared (not copied from e) so
+	// Audit's observed-mode dispatch (ticket #627, gated on e.Runtime != "")
+	// never fires here: planArgvs above already performed the one
+	// authoritative containerRunning/inspect disposition probe DryRun needs
+	// (attaching reflects it), so calling observed Audit here would issue a
+	// second, redundant containerRunning probe purely for the Posture
+	// breakdown. DryRun's Posture stays the planned preview it always was —
+	// consistent with "what the launcher WOULD apply", not a second
+	// independent observation of the same running container.
 	clone := *e
 	clone.Stderr = io.Discard
+	clone.Runtime = ""
 	posture, err := clone.Audit(opts)
 	if err != nil {
 		return DryRunPlan{}, err

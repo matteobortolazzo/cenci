@@ -26,7 +26,30 @@ import (
 func (p Posture) WriteExplanation(w io.Writer) error {
 	bw := bufio.NewWriter(w)
 
-	_, _ = fmt.Fprintf(bw, "cenci security explain: agent=%s scope=%s\n\n", p.Agent, p.Scope)
+	_, _ = fmt.Fprintf(bw, "cenci security explain: agent=%s scope=%s basis=%s\n\n", p.Agent, p.Scope, p.Basis)
+
+	// Basis framing (ticket #627, AC #5): state up front whether this
+	// narrative describes the scoped container's actual observed running
+	// state or a hypothetical next-launch plan — using content-specific,
+	// visibly distinct wording for each so the two cases can never collapse
+	// into an ambiguous, generically-worded intro.
+	if p.Basis == PostureBasisRunning {
+		_, _ = fmt.Fprintln(bw, "This report describes the observed running state of the scoped container:")
+		_, _ = fmt.Fprintln(bw, "it was inspected directly rather than derived from a hypothetical plan, so")
+		_, _ = fmt.Fprintln(bw, "the fields below (aside from the next-exec values explicitly labeled as")
+		_, _ = fmt.Fprintln(bw, "such) reflect the container's actual current configuration.")
+	} else {
+		_, _ = fmt.Fprintln(bw, "This report describes a plan for the next launch: no running scoped")
+		_, _ = fmt.Fprintln(bw, "container was found (or its state could not be verified), so nothing below")
+		_, _ = fmt.Fprintln(bw, "reflects observed state — it is what the launcher WOULD apply.")
+	}
+	_, _ = fmt.Fprintln(bw)
+
+	if p.InspectWarning != "" {
+		_, _ = fmt.Fprintln(bw, "⚠ Inspect warning:")
+		_, _ = fmt.Fprintln(bw, p.InspectWarning)
+		_, _ = fmt.Fprintln(bw)
+	}
 
 	_, _ = fmt.Fprintln(bw, "Threat model:")
 	_, _ = fmt.Fprintln(bw, "The container is the security boundary, not the agent's own permissions.")
@@ -44,12 +67,31 @@ func (p Posture) WriteExplanation(w io.Writer) error {
 
 	_, _ = fmt.Fprintln(bw, "Network:")
 	if p.Network.Weakened {
-		_, _ = fmt.Fprintf(bw, "Network mode is %q — --host-network is active, so the container joins the\n", p.Network.Mode)
-		_, _ = fmt.Fprintln(bw, "host network namespace instead of an isolated bridge network, removing the")
-		_, _ = fmt.Fprintln(bw, "container's network isolation from the host for the life of this session.")
+		// AC #8: --host-network's additional effect — a shared host network
+		// namespace, host-localhost exposure, and loss of namespace
+		// separation — stated as complete sentences, plus the blast-radius
+		// warning (also repeated in the Boundary weakenings block below).
+		_, _ = fmt.Fprintf(bw, "Network mode is %q — --host-network is active: the container joins a\n", p.Network.Mode)
+		_, _ = fmt.Fprintln(bw, "shared host network namespace instead of its own isolated bridge namespace,")
+		_, _ = fmt.Fprintln(bw, "losing network namespace separation from the host for the life of this")
+		_, _ = fmt.Fprintln(bw, "session — this removes the container's network isolation from the host. Any")
+		_, _ = fmt.Fprintln(bw, "port the container binds to localhost is reachable exactly as if that")
+		_, _ = fmt.Fprintln(bw, "process were running directly on your host — see the boundary weakening's")
+		_, _ = fmt.Fprintln(bw, "blast radius warning below.")
 	} else {
-		_, _ = fmt.Fprintf(bw, "Network mode is %q — the default-safe bridge network. The container publishes\n", p.Network.Mode)
-		_, _ = fmt.Fprintln(bw, "no inbound ports; network access is outbound-only and isolated from the host.")
+		// AC #6/#7: bridge mode uses a separate network namespace and
+		// publishes no inbound ports by default — but that does NOT mean
+		// outbound-only/complete host isolation: outbound connections may
+		// still reach routable host, LAN, or internet services depending on
+		// the runtime and firewall configuration (replaces the old
+		// "outbound-only and isolated from the host" overclaim).
+		_, _ = fmt.Fprintf(bw, "Network mode is %q — the container runs in its own separate network namespace\n", p.Network.Mode)
+		_, _ = fmt.Fprintln(bw, "and publishes no inbound ports by default, so nothing on your")
+		_, _ = fmt.Fprintln(bw, "host or network can initiate a connection into the container. This does not")
+		_, _ = fmt.Fprintln(bw, "mean the container is outbound-only or completely isolated from the host:")
+		_, _ = fmt.Fprintln(bw, "outbound connections initiated from inside the container may still reach")
+		_, _ = fmt.Fprintln(bw, "routable host, LAN, or internet services, depending on your container")
+		_, _ = fmt.Fprintln(bw, "runtime and firewall configuration.")
 	}
 	_, _ = fmt.Fprintln(bw)
 
@@ -67,6 +109,15 @@ func (p Posture) WriteExplanation(w io.Writer) error {
 	_, _ = fmt.Fprintln(bw)
 
 	_, _ = fmt.Fprintln(bw, "Forwarded exec env (names only — values are never shown):")
+	if p.Basis == PostureBasisRunning {
+		// Q4: forwardedEnv has no inspect source (it's a per-exec-only value),
+		// so a running-basis narrative must label it "next-exec" rather than
+		// presenting it as an observed fact of the running container. Omitted
+		// entirely for a planned-basis report, where every field is already a
+		// hypothetical next-launch value.
+		_, _ = fmt.Fprintln(bw, "(next-exec — not observed from the running container; these are the values")
+		_, _ = fmt.Fprintln(bw, "the NEXT exec into this container would forward)")
+	}
 	if len(p.ForwardedEnv) == 0 {
 		_, _ = fmt.Fprintln(bw, "No provider API keys are forwarded for this agent.")
 	}
@@ -80,19 +131,41 @@ func (p Posture) WriteExplanation(w io.Writer) error {
 	_, _ = fmt.Fprintln(bw)
 
 	_, _ = fmt.Fprintln(bw, "Nested Docker (sysbox-isolated):")
-	if p.Dind.Enabled {
+	switch {
+	case p.Dind.Enabled:
 		_, _ = fmt.Fprintln(bw, "Nested Docker is enabled for this launch. This is NOT a boundary weakening:")
 		_, _ = fmt.Fprintf(bw, "it runs under the %s OCI runtime, isolated from the host Docker daemon and\n", p.Dind.Runtime)
 		_, _ = fmt.Fprintln(bw, "never touching the host's own container runtime — its own dedicated isolation")
 		_, _ = fmt.Fprintf(bw, "boundary, backed by the %s storage volume.\n", p.Dind.StorageVolume)
-	} else {
+	case p.Dind.Source == DindSourceUnknown:
+		// #598/#627: an unrecognized cenci-sand.dind label is indeterminate,
+		// not "disabled" — the confident-disabled sentence below must never
+		// be printed for this case (see DindSourceUnknown's doc comment).
+		_, _ = fmt.Fprintln(bw, "Nested Docker's state could not be determined for this launch — the running")
+		_, _ = fmt.Fprintln(bw, "container's cenci-sand.dind label is an unrecognized value, so whether a")
+		_, _ = fmt.Fprintln(bw, "sysbox-isolated Docker daemon runs inside the container is indeterminate. Do")
+		_, _ = fmt.Fprintln(bw, "not read this as disabled.")
+	default:
 		_, _ = fmt.Fprintln(bw, "Nested Docker is disabled for this launch — no sysbox-isolated Docker daemon")
 		_, _ = fmt.Fprintln(bw, "runs inside the container.")
 	}
 	_, _ = fmt.Fprintln(bw)
 
 	if len(p.BoundaryWeakenings) == 0 {
-		_, _ = fmt.Fprintln(bw, "Boundary weakenings: none (default-safe baseline)")
+		switch {
+		case p.InspectWarning != "":
+			_, _ = fmt.Fprintln(bw, "Boundary weakenings: unknown — the running container's actual posture")
+			_, _ = fmt.Fprintln(bw, "could not be verified; see the inspect warning above.")
+		case p.Dind.Source == DindSourceUnknown:
+			// The dind state alone is indeterminate here (no separate
+			// InspectWarning — the inspect call itself succeeded), so this
+			// must not co-occur with the reassuring "default-safe baseline"
+			// claim either.
+			_, _ = fmt.Fprintln(bw, "Boundary weakenings: unknown — the running container's nested-Docker state")
+			_, _ = fmt.Fprintln(bw, "could not be determined; see the Nested Docker section above.")
+		default:
+			_, _ = fmt.Fprintln(bw, "Boundary weakenings: none (default-safe baseline)")
+		}
 	} else {
 		_, _ = fmt.Fprintln(bw, "⚠ Boundary weakenings (opt-in, reduces isolation):")
 		for _, bwk := range p.BoundaryWeakenings {

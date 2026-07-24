@@ -23,6 +23,16 @@ import (
 // assembleOptionalFeatures) — Audit must never re-derive that construction
 // independently, or the report and the real launch argv could silently
 // drift apart. Audit never launches, attaches, or starts the daemon.
+//
+// Ticket #627 additive schema migration: when a runtime is resolved
+// (e.Runtime != "", see NewForAuditWithRuntime in engine.go) and the scoped
+// container is actually running, Audit derives Posture from the container's
+// real inspected state (basis:"running", audit_observed.go) instead of the
+// hypothetical construction above (basis:"planned", buildPlannedPosture).
+// Both bases share the exact same Posture shape; existing JSON consumers
+// that don't check the new top-level `basis`/`inspectWarning` fields keep
+// working unchanged. A runtime-less Engine (NewForAudit) always stays
+// basis:"planned", identical to Audit's pre-#627 behavior.
 
 // -- Posture and its nested types ---------------------------------------
 //
@@ -44,11 +54,30 @@ const (
 
 // DindSource enumerates Posture.Dind.Source: which input decided whether
 // dind is on, mirroring ResolveDind's own precedence (flag > repo config,
-// with --no-dind always winning as "off").
+// with --no-dind always winning as "off"). DindSourceObserved/
+// DindSourceUnknown are ticket #627's observed-mode additions:
+// DindSourceObserved attributes an observed on/off state to the running
+// container's own inspect data (label or legacy signals) rather than a
+// planned flag/config input; DindSourceUnknown is the explicit,
+// non-reassuring attribution for an unrecognized cenci-sand.dind label
+// value — it must never collapse into a confident "disabled" (#598).
 const (
-	DindSourceFlag   = "flag"
-	DindSourceConfig = "config"
-	DindSourceOff    = "off"
+	DindSourceFlag     = "flag"
+	DindSourceConfig   = "config"
+	DindSourceOff      = "off"
+	DindSourceObserved = "observed"
+	DindSourceUnknown  = "unknown"
+)
+
+// Basis enumerates Posture.Basis (ticket #627): whether the report reflects
+// a scoped container's actual, inspected running state (PostureBasisRunning)
+// or a hypothetical next-launch derivation (PostureBasisPlanned) — the only
+// two values; an inspect/read/ps failure on a running container still
+// reports PostureBasisPlanned, paired with a non-empty InspectWarning, never
+// a third value.
+const (
+	PostureBasisRunning = "running"
+	PostureBasisPlanned = "planned"
 )
 
 // Mount kind classifications for Posture.Mounts[].Kind. Every mount Audit
@@ -234,6 +263,10 @@ type BoundaryWeakening struct {
 // only names, sources, and mount/staging status (see EnvVarName/
 // ForwardedEnvVar/CredentialSource's doc comments).
 type Posture struct {
+	// Basis is the running/planned discriminator (ticket #627): see the
+	// PostureBasis* consts. Always exactly "running" or "planned" — never
+	// omitted, never a third value.
+	Basis    string `json:"basis"`
 	Agent    string `json:"agent"`
 	Scope    string `json:"scope"`
 	RepoRoot string `json:"repoRoot,omitempty"`
@@ -251,6 +284,16 @@ type Posture struct {
 	BoundaryWeakenings []BoundaryWeakening `json:"boundaryWeakenings"`
 
 	ReseedCreds bool `json:"reseedCreds"`
+
+	// InspectWarning is non-empty exactly when a running scoped container's
+	// actual posture could NOT be verified (a ps/daemon failure or a
+	// malformed/unreadable inspect response) — Basis is still "planned" in
+	// that case (never "running"), and this warning is the signal that
+	// suppresses WriteText/WriteExplanation's reassuring "default-safe
+	// baseline" line (Q2, ticket #627). Empty (and omitted from JSON) for
+	// both a genuinely absent/stopped container and a successful observed
+	// inspect — neither is an inspect failure.
+	InspectWarning string `json:"inspectWarning,omitempty"`
 }
 
 // -- Audit -----------------------------------------------------------------
@@ -335,12 +378,59 @@ func (e *Engine) Audit(opts Options) (Posture, error) {
 	allEnvArgs = append(allEnvArgs, mountArgs...)
 	allEnvArgs = append(allEnvArgs, envArgs...)
 
+	planned := buildPlannedPosture(agent, scope, home, opts, dindOn, mounts, allEnvArgs, featureArgs, stagedKinds)
+
+	// Observed-mode dispatch (ticket #627): only attempted when a runtime is
+	// resolved (e.Runtime != "") — a runtime-less Engine (NewForAudit) always
+	// stays planned, keeping every pre-existing pure-planned unit test
+	// hermetic (Architectural Context: "NewForAudit stays runtime-less").
+	if e.Runtime == "" {
+		return planned, nil
+	}
+
+	running, err := e.containerRunning(scope.ContainerName)
+	if err != nil {
+		// A ps/daemon failure is inconclusive for container disposition — not
+		// evidence the container is absent — so it must never collapse to the
+		// clean planned baseline (mirrors diagnose.go's
+		// containerExistenceFinding classification, #572). Still returned as
+		// a report (nil error, exit 0), never a hard failure.
+		planned.InspectWarning = fmt.Sprintf("container disposition could not be determined (%s ps failed: %v); showing the planned posture only, not the running container's actual state", e.Runtime, err)
+		return planned, nil
+	}
+	if !running {
+		// A never-launched and a stopped/stale container are indistinguishable
+		// at this probe (`ps` only lists running containers) and both
+		// legitimately report the unweakened planned posture with no warning
+		// — this is not an inspect failure (AC #3).
+		return planned, nil
+	}
+
+	observed, err := e.deriveObservedPosture(scope, agent, home, opts, planned)
+	if err != nil {
+		// A malformed/unreadable inspect response on a genuinely running
+		// container must never be silently read as the permissive planned
+		// baseline (Q2, AC #9/#11) — degrade to a warning, never a hard
+		// failure or basis:"running".
+		planned.InspectWarning = fmt.Sprintf("the running container's actual posture could not be verified (%v); showing the planned posture only, not the running container's actual state", err)
+		return planned, nil
+	}
+	return observed, nil
+}
+
+// buildPlannedPosture builds the hypothetical next-launch Posture
+// (basis:"planned") from the already-computed mount/env/feature/dind inputs
+// — the single construction site both Audit's runtime-less path and its
+// observed-mode fallback (ps/inspect failure) share, so neither can silently
+// re-derive a different planned posture (audit.go:14-23).
+func buildPlannedPosture(agent string, scope Scope, home string, opts Options, dindOn bool, mounts []MountPosture, allEnvArgs []string, featureArgs []string, stagedKinds map[string]bool) Posture {
 	imageType := ImageTypeMonolith
 	if scope.UsingRepoImage {
 		imageType = ImageTypeRepo
 	}
 
 	return Posture{
+		Basis:    PostureBasisPlanned,
 		Agent:    agent,
 		Scope:    scope.WorkspaceScope,
 		RepoRoot: scope.RepoRoot,
@@ -362,7 +452,7 @@ func (e *Engine) Audit(opts Options) (Posture, error) {
 		BoundaryWeakenings: boundaryWeakenings(featureArgs),
 
 		ReseedCreds: opts.ReseedCreds,
-	}, nil
+	}
 }
 
 // classifyMounts parses every "-v <source>:<destination>[:ro]" pair out of
@@ -696,17 +786,26 @@ func credentialStatusText(c CredentialSource, agent string) string {
 func (p Posture) WriteText(w io.Writer) error {
 	bw := bufio.NewWriter(w)
 
-	_, _ = fmt.Fprintf(bw, "cenci audit: agent=%s scope=%s", p.Agent, p.Scope)
+	_, _ = fmt.Fprintf(bw, "cenci audit: agent=%s scope=%s basis=%s", p.Agent, p.Scope, p.Basis)
 	if p.RepoRoot != "" {
 		_, _ = fmt.Fprintf(bw, " repoRoot=%s", p.RepoRoot)
 	}
 	_, _ = fmt.Fprintln(bw)
 	_, _ = fmt.Fprintln(bw)
 
+	if p.InspectWarning != "" {
+		_, _ = fmt.Fprintln(bw, "⚠ Inspect warning: the running container's actual posture could not be fully verified.")
+		_, _ = fmt.Fprintf(bw, "  %s\n\n", p.InspectWarning)
+	}
+
 	_, _ = fmt.Fprintf(bw, "Image: %s (%s)\n", p.Image.Reference, p.Image.Type)
 	_, _ = fmt.Fprintf(bw, "Workspace: %s -> %s\n", p.Workspace.HostPath, p.Workspace.ContainerPath)
 	_, _ = fmt.Fprintf(bw, "Network: %s (weakened=%t)\n", p.Network.Mode, p.Network.Weakened)
-	_, _ = fmt.Fprintf(bw, "Reseed creds: %t\n", p.ReseedCreds)
+	_, _ = fmt.Fprintf(bw, "Reseed creds: %t", p.ReseedCreds)
+	if p.Basis == PostureBasisRunning {
+		_, _ = fmt.Fprint(bw, " (next-exec — not observed from the running container)")
+	}
+	_, _ = fmt.Fprintln(bw)
 
 	_, _ = fmt.Fprintln(bw, "\nMounts:")
 	if len(p.Mounts) == 0 {
@@ -741,6 +840,9 @@ func (p Posture) WriteText(w io.Writer) error {
 	}
 
 	_, _ = fmt.Fprintln(bw, "\nForwarded exec env (per-exec, names only — values are never shown):")
+	if p.Basis == PostureBasisRunning {
+		_, _ = fmt.Fprintln(bw, "  (next-exec — not observed from the running container)")
+	}
 	if len(p.ForwardedEnv) == 0 {
 		_, _ = fmt.Fprintln(bw, "  (none)")
 	}
@@ -763,13 +865,24 @@ func (p Posture) WriteText(w io.Writer) error {
 	if p.Dind.Enabled {
 		_, _ = fmt.Fprintf(bw, "  runtime: %s\n", p.Dind.Runtime)
 		_, _ = fmt.Fprintf(bw, "  storage volume: %s\n", p.Dind.StorageVolume)
-		if p.Dind.Note != "" {
-			_, _ = fmt.Fprintf(bw, "  note: %s\n", p.Dind.Note)
-		}
+	}
+	if p.Dind.Note != "" {
+		_, _ = fmt.Fprintf(bw, "  note: %s\n", p.Dind.Note)
 	}
 
 	if len(p.BoundaryWeakenings) == 0 {
-		_, _ = fmt.Fprintln(bw, "\nBoundary weakenings: none (default-safe baseline)")
+		switch {
+		case p.InspectWarning != "":
+			_, _ = fmt.Fprintln(bw, "\nBoundary weakenings: unknown — the running container's actual posture could not be verified; see the inspect warning above.")
+		case p.Dind.Source == DindSourceUnknown:
+			// The dind state alone is indeterminate here (the inspect call
+			// itself succeeded, so InspectWarning is empty) — it must not
+			// co-occur with the reassuring "default-safe baseline" claim
+			// either (#598/#627).
+			_, _ = fmt.Fprintln(bw, "\nBoundary weakenings: unknown — the running container's nested-Docker state could not be determined; see the Nested Docker section above.")
+		default:
+			_, _ = fmt.Fprintln(bw, "\nBoundary weakenings: none (default-safe baseline)")
+		}
 	} else {
 		_, _ = fmt.Fprintln(bw, "\n⚠ Boundary weakenings (opt-in, reduces isolation):")
 		for _, bwk := range p.BoundaryWeakenings {

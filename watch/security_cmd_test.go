@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/matteobortolazzo/cenci/watch/internal/sandbox/launcher"
 )
 
 // -- cenci security explain (ticket #594) -----------------------------------
@@ -36,23 +38,21 @@ func securityRepoDir(t *testing.T) string {
 	return repo
 }
 
-// securityEnv builds a minimal black-box environment for `cenci security
-// explain` runs: an isolated HOME and a fresh XDG_RUNTIME_DIR with no live
-// daemon socket — explain reuses Audit's read-only posture derivation and
-// must never start one either.
-func securityEnv(home, xdg string) []string {
-	return append(os.Environ(),
-		"HOME="+home,
-		"XDG_RUNTIME_DIR="+xdg,
-	)
-}
-
+// Every test below uses auditSecurityEnv (audit_security_faketest_test.go)
+// for its subprocess environment: an isolated HOME and a fresh
+// XDG_RUNTIME_DIR with no live daemon socket — explain reuses Audit's
+// read-only posture derivation and must never start one either — plus PATH
+// pinned to a fake docker/podman (writeAuditFakeRuntimes) whose FAKE_PS
+// defaults to empty (no running container). Ticket #627's
+// NewForAuditWithRuntime resolves a real runtime via
+// internal/sandbox.ContainerRuntime(), so every pre-existing hermetic test in
+// this file must pin PATH the same way (watch AGENTS.md #620).
 func TestSecurityExplain_TextOutput_ReportsFramingAndWeakenings(t *testing.T) {
 	repo := securityRepoDir(t)
 	home := t.TempDir()
 
 	cmd := exec.Command(binaryPath, "security", "explain", "--agent", "claude")
-	cmd.Env = securityEnv(home, t.TempDir())
+	cmd.Env = auditSecurityEnv(t, home, t.TempDir())
 	cmd.Dir = repo
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -83,7 +83,7 @@ func TestSecurityExplain_CodexCredsPresentButNotApplicable_NotNarratedAsStaged(t
 	}
 
 	cmd := exec.Command(binaryPath, "security", "explain", "--agent", "claude")
-	cmd.Env = securityEnv(home, t.TempDir())
+	cmd.Env = auditSecurityEnv(t, home, t.TempDir())
 	cmd.Dir = repo
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -134,7 +134,7 @@ func TestSecurityExplain_UsageErrors_Exit2(t *testing.T) {
 			dir := tc.dir(t)
 
 			cmd := exec.Command(binaryPath, tc.args...)
-			cmd.Env = securityEnv(home, t.TempDir())
+			cmd.Env = auditSecurityEnv(t, home, t.TempDir())
 			cmd.Dir = dir
 			output, err := cmd.CombinedOutput()
 			exitErr, ok := err.(*exec.ExitError)
@@ -198,7 +198,7 @@ func TestSecurityExplain_NeverStartsADaemon(t *testing.T) {
 	xdg := t.TempDir()
 
 	cmd := exec.Command(binaryPath, "security", "explain")
-	cmd.Env = securityEnv(home, xdg)
+	cmd.Env = auditSecurityEnv(t, home, xdg)
 	cmd.Dir = repo
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -212,5 +212,154 @@ func TestSecurityExplain_NeverStartsADaemon(t *testing.T) {
 	pidPath := filepath.Join(xdg, "cenci", "cenci.pid")
 	if _, statErr := os.Stat(pidPath); statErr == nil {
 		t.Errorf("cenci security explain must never start the daemon; found a PID file at %s", pidPath)
+	}
+}
+
+// -- ticket #627: observed vs planned narrative (command level) -------------
+//
+// NOTE (red phase): security_cmd.go does not yet swap to
+// launcher.NewForAuditWithRuntime, and internal/sandbox/launcher does not
+// yet render basis/inspectWarning/the corrected network wording — every
+// test below currently observes the CURRENT command's output instead. That
+// is the intended red-phase state.
+
+// TestSecurityExplain_TextOutput_StatesPlannedByDefault_NoLiveRuntime
+// covers AC #5's planned side at the command level: with the fake runtime
+// reporting nothing running, `cenci security explain` must state it is
+// narrating a plan, not observed state.
+func TestSecurityExplain_TextOutput_StatesPlannedByDefault_NoLiveRuntime(t *testing.T) {
+	repo := securityRepoDir(t)
+	home := t.TempDir()
+
+	cmd := exec.Command(binaryPath, "security", "explain", "--agent", "claude")
+	cmd.Env = auditSecurityEnv(t, home, t.TempDir())
+	cmd.Dir = repo
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cenci security explain: %v\n%s", err, output)
+	}
+	out := strings.ToLower(string(output))
+	// A multi-word phrase (not a bare "plan"/"observed" substring) so this
+	// assertion can never accidentally match text unrelated to basis framing
+	// — including, notably, the test's own t.TempDir()-derived HOME path
+	// embedded in the narrative's credential-source lines, which contains
+	// this test's function name (and therefore the substring "planned").
+	if !strings.Contains(out, "describing a plan") && !strings.Contains(out, "describes a plan") {
+		t.Errorf("expected the narrative to state it is describing a plan (no running scoped container), got:\n%s", output)
+	}
+}
+
+// TestSecurityExplain_TextOutput_RunningContainer_StatesObserved covers
+// AC #5's observed side: with a running scoped container, `cenci security
+// explain` must state it is narrating observed state.
+func TestSecurityExplain_TextOutput_RunningContainer_StatesObserved(t *testing.T) {
+	repo := securityRepoDir(t)
+	home := t.TempDir()
+	scope := launcher.ComputeScope("claude", "", repo, home)
+
+	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
+
+	cmd, _ := auditFakeRuntimeCmd(t, repo, home, "security", "explain", "--agent", "claude")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cenci security explain: %v\n%s", err, output)
+	}
+	out := strings.ToLower(string(output))
+	// Multi-word phrase for the same reason as the planned-side test above:
+	// this test's own name/HOME tempdir path contains the substring
+	// "Observed", which a bare strings.Contains(out, "observed") would
+	// accidentally match regardless of the narrative's actual content.
+	if !strings.Contains(out, "observed running") {
+		t.Errorf("expected the narrative to state it is describing observed running state, got:\n%s", output)
+	}
+}
+
+// TestSecurityExplain_BridgeNetwork_FullSentenceNarrative covers AC #6/#7 at
+// the command level: separate network namespace, no published inbound
+// ports, and outbound reachability to host/LAN/internet as complete
+// sentences (not isolated keywords).
+func TestSecurityExplain_BridgeNetwork_FullSentenceNarrative(t *testing.T) {
+	repo := securityRepoDir(t)
+	home := t.TempDir()
+
+	cmd := exec.Command(binaryPath, "security", "explain", "--agent", "claude")
+	cmd.Env = auditSecurityEnv(t, home, t.TempDir())
+	cmd.Dir = repo
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cenci security explain: %v\n%s", err, output)
+	}
+	out := string(output)
+
+	if !strings.Contains(out, "separate network namespace") {
+		t.Errorf("expected the bridge narrative to state a separate network namespace, got:\n%s", out)
+	}
+	if !strings.Contains(out, "no published inbound ports") && !strings.Contains(out, "publishes no inbound ports") {
+		t.Errorf("expected the bridge narrative to state no published inbound ports, got:\n%s", out)
+	}
+	if !strings.Contains(out, "LAN") {
+		t.Errorf("expected the bridge narrative to name LAN reachability explicitly, got:\n%s", out)
+	}
+	if strings.Contains(out, "outbound-only and isolated from the host") {
+		t.Errorf("bridge narrative must never claim complete host isolation / universal outbound-only enforcement, got:\n%s", out)
+	}
+}
+
+// TestSecurityExplain_HostNetwork_BlastRadiusFullSentence covers AC #8 at
+// the command level: --host-network output must continue to identify the
+// increased blast radius clearly, including the shared-namespace and
+// host-localhost-exposure wording.
+func TestSecurityExplain_HostNetwork_BlastRadiusFullSentence(t *testing.T) {
+	repo := securityRepoDir(t)
+	home := t.TempDir()
+
+	cmd := exec.Command(binaryPath, "security", "explain", "--agent", "claude", "--host-network")
+	cmd.Env = auditSecurityEnv(t, home, t.TempDir())
+	cmd.Dir = repo
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cenci security explain --host-network: %v\n%s", err, output)
+	}
+	out := string(output)
+
+	if !strings.Contains(out, "blast radius") {
+		t.Errorf("expected the host-network narrative to keep the blast-radius warning, got:\n%s", out)
+	}
+	if !strings.Contains(out, "localhost") {
+		t.Errorf("expected the host-network narrative to state host-localhost exposure, got:\n%s", out)
+	}
+	if !strings.Contains(out, "namespace separation") {
+		t.Errorf("expected the host-network narrative to state the loss of namespace separation, got:\n%s", out)
+	}
+}
+
+// TestSecurityExplain_MalformedInspect_WarningAndPlanNoBaseline_Exit0 covers
+// Q2/AC #9 at the command level: `cenci security explain` must never
+// collapse an inspect failure into the reassuring default-safe baseline,
+// and must still exit 0.
+func TestSecurityExplain_MalformedInspect_WarningAndPlanNoBaseline_Exit0(t *testing.T) {
+	repo := securityRepoDir(t)
+	home := t.TempDir()
+	scope := launcher.ComputeScope("claude", "", repo, home)
+
+	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
+	t.Setenv("FAKE_OBSERVED_POSTURE", "not-the-expected-shape\n")
+
+	cmd, _ := auditFakeRuntimeCmd(t, repo, home, "security", "explain", "--agent", "claude")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cenci security explain (malformed inspect) must exit 0, got %v\n%s", err, output)
+	}
+	out := string(output)
+	if strings.Contains(out, "Boundary weakenings: none (default-safe baseline)") {
+		t.Errorf("output claims the default-safe baseline despite an inspect failure, got:\n%s", out)
+	}
+	// A multi-word phrase (not a bare "warning" substring): this test's own
+	// HOME tempdir path (embedded in the narrative's credential-source
+	// lines) contains the test function's name, which itself contains
+	// "Warning" — a bare substring check would accidentally match that path
+	// text regardless of whether the command actually rendered a warning.
+	if !strings.Contains(strings.ToLower(out), "could not be") {
+		t.Errorf("expected a visible warning explaining the running container's posture could not be verified, got:\n%s", out)
 	}
 }

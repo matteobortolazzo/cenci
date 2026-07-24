@@ -65,6 +65,22 @@ func NewForAudit(stdin io.Reader, stdout io.Writer) *Engine {
 	return &Engine{Stdin: stdin, Stdout: stdout, Stderr: io.Discard}
 }
 
+// NewForAuditWithRuntime returns an Engine suitable for Audit's observed-mode
+// dispatch (ticket #627): like NewForAudit, no asset-dir/base-tag resolution
+// and Stderr always io.Discard, but it best-effort resolves the container
+// runtime via sandbox.ContainerRuntime() so Audit can probe a scoped
+// container's actual running state. A resolution failure (no runtime
+// installed) degrades to a runtime-less Engine rather than returning an
+// error — Audit must still produce a planned-only report when no container
+// runtime is available at all, exactly as it always has.
+func NewForAuditWithRuntime(stdin io.Reader, stdout io.Writer) *Engine {
+	e := NewForAudit(stdin, stdout)
+	if runtime, err := sandbox.ContainerRuntime(); err == nil {
+		e.Runtime = runtime
+	}
+	return e
+}
+
 // newEngineBase resolves the sandbox asset directory and the base tag,
 // returning an Engine with everything except Runtime populated. Shared by
 // New (which resolves Runtime eagerly) and NewForLaunch (which leaves it for
