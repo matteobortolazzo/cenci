@@ -45,6 +45,45 @@ jobs:
         run: bash .github/scripts/check-version-bump-concurrency.test.sh
       - name: Check documentation links, anchors, and terminology
         run: python3 .github/scripts/check-docs.py
+      - name: Run maintenance-issue unit tests
+        run: bash .github/scripts/maintenance-issue.test.sh
+      - name: Check cenci-maintenance.yml structure
+        run: |
+          set -uo pipefail
+          WF=.github/workflows/cenci-maintenance.yml
+          FAILED=0
+          cron="$(yq -r '.on.schedule[0].cron // ""' "$WF")"
+          if [ "$cron" != "0 6 * * 1" ]; then
+            echo "cenci-maintenance.yml: expected schedule cron '0 6 * * 1', got '$cron'" >&2
+            FAILED=1
+          fi
+          if ! yq -e '.on | has("workflow_dispatch")' "$WF" >/dev/null 2>&1; then
+            echo "cenci-maintenance.yml: expected on.workflow_dispatch to be present" >&2
+            FAILED=1
+          fi
+          contents_perm="$(yq -r '.permissions.contents // ""' "$WF")"
+          if [ "$contents_perm" != "write" ]; then
+            echo "cenci-maintenance.yml: expected permissions.contents == write, got '$contents_perm'" >&2
+            FAILED=1
+          fi
+          issues_perm="$(yq -r '.permissions.issues // ""' "$WF")"
+          if [ "$issues_perm" != "write" ]; then
+            echo "cenci-maintenance.yml: expected permissions.issues == write, got '$issues_perm'" >&2
+            FAILED=1
+          fi
+          if ! grep -q 'check.sh --strict' "$WF"; then
+            echo "cenci-maintenance.yml: expected a step invoking check.sh --strict" >&2
+            FAILED=1
+          fi
+          if ! grep -q 'maintenance-issue.sh' "$WF"; then
+            echo "cenci-maintenance.yml: expected a step invoking maintenance-issue.sh" >&2
+            FAILED=1
+          fi
+          if ! yq -r '.jobs.audit.steps[] | select(.name == "Run maintenance audit") | .run' "$WF" | bash -n; then
+            echo "cenci-maintenance.yml: the 'Run maintenance audit' step's run: block failed a bash -n syntax check" >&2
+            FAILED=1
+          fi
+          exit "$FAILED"
 
   check-codeowners:
     runs-on: ubuntu-latest

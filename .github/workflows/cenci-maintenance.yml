@@ -1,0 +1,99 @@
+name: cenci — Maintenance Audit
+
+# Weekly, schedule-only maintenance audit (ticket #534): runs the
+# deterministic flow/skills/maintain/scripts/check.sh --strict checker (no
+# LLM involved) and opens/updates/closes a single deduplicated
+# `maintenance`-labeled issue based on the result. Never edits repository
+# source/content files — detection only; a maintainer runs /cenci:maintain
+# separately to review and repair.
+#
+# - On failure: dispatches to .github/scripts/maintenance-issue.sh report,
+#   which creates or edits (dedup) the open maintenance issue with the
+#   FAIL/WARN summary from .cenci/maintain-report.json.
+# - On a clean run: dispatches to maintenance-issue.sh resolve (closes any
+#   open issue), then commits a small .cenci/last-audit.json marker
+#   ({generatedAt, sha}) to main if it changed — read locally/offline by
+#   flow/hooks/scripts/maintenance-reminder.sh's SessionStart advisory.
+#
+# Mirrors deps-bump.yml's style: pinned checkout with fetch-depth 0,
+# github-actions[bot] git identity, `set -uo pipefail; set +e` in the run
+# block (GitHub Actions' default `bash -eo pipefail` would otherwise abort
+# on the expected-nonzero check.sh exit), GH_TOKEN for `gh`.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Run maintenance audit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          set +e
+
+          bash flow/skills/maintain/scripts/check.sh --strict
+          CHECK_EXIT=$?
+
+          if [ "$CHECK_EXIT" -ne 0 ]; then
+            echo "check.sh --strict failed (exit $CHECK_EXIT); reporting the maintenance issue"
+            bash .github/scripts/maintenance-issue.sh report
+            # Intentional: this job always exits 0 here regardless of
+            # check.sh --strict's result. The GitHub issue opened above is
+            # the notification channel for a failing audit, not CI going
+            # red -- do not "fix" this into a non-zero exit.
+            exit 0
+          fi
+
+          echo "check.sh --strict is clean; resolving the maintenance issue"
+          bash .github/scripts/maintenance-issue.sh resolve
+          RESOLVE_EXIT=$?
+          if [ "$RESOLVE_EXIT" -ne 0 ]; then
+            echo "maintenance-issue.sh resolve failed (exit $RESOLVE_EXIT); refusing to record the audit marker" >&2
+            exit 1
+          fi
+
+          mkdir -p .cenci
+          if ! GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || [ -z "$GENERATED_AT" ]; then
+            echo "date -u failed or returned empty; refusing to write the maintenance marker" >&2
+            exit 1
+          fi
+          if ! SHA="$(git rev-parse HEAD)" || [ -z "$SHA" ]; then
+            echo "git rev-parse HEAD failed or returned empty; refusing to write the maintenance marker" >&2
+            exit 1
+          fi
+          if ! jq -n --arg g "$GENERATED_AT" --arg s "$SHA" '{generatedAt: $g, sha: $s}' > .cenci/last-audit.json; then
+            echo "jq failed to generate the maintenance marker; refusing to record it" >&2
+            exit 1
+          fi
+
+          git add .cenci/last-audit.json
+          if git diff --cached --quiet; then
+            echo "maintenance marker unchanged, nothing to commit"
+          else
+            if ! git commit -m "chore(maintenance): record clean audit marker"; then
+              echo "failed to commit the maintenance marker" >&2
+              exit 1
+            fi
+            if ! git push origin HEAD:main; then
+              echo "failed to push the maintenance marker to main (issue may already be closed; marker did not land)" >&2
+              exit 1
+            fi
+          fi
