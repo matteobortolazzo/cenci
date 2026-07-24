@@ -37,6 +37,21 @@ import (
 //	                     different inspect format (the plain ".Destination"
 //	                     shape warnIfUnwired uses) since this package's DryRun
 //	                     only ever needs the ".RW" shared-agent-mount check.
+//	FAKE_REUSE_POSTURE → `inspect --format ...` stdout for the combined
+//	                     reuse-posture probe (ticket #628's
+//	                     inspectReusePosture: the `cenci-sand.dind` label,
+//	                     HostConfig.Runtime, and mount source/destination
+//	                     pairs), told apart by the `cenci-sand.dind`
+//	                     format-string token. Line 1 is
+//	                     "<label>|<runtime>|<dindenv 0-or-1>"; remaining
+//	                     lines are "<source>::<destination>" per mount.
+//	                     Defaults to an empty label, non-sysbox runtime, no
+//	                     dind env, and a workspace-only mount (derives
+//	                     dindOff, no host socket) so existing reuse tests
+//	                     that don't care about posture keep passing; must
+//	                     stay byte-parallel with sandbox_open_test.go's
+//	                     writeScriptedRuntime FAKE_REUSE_POSTURE var (#493
+//	                     keep-in-sync note).
 //
 // Plain /bin/sh (not env) so it resolves under a minimal overridden PATH.
 func writeFakeRuntime(t *testing.T, dir, name, callLog string) {
@@ -69,6 +84,7 @@ volume) [ "$2" = ls ] && printf '%s' "${FAKE_VOLUMES:-}" ;;
 info) printf '%s' "${FAKE_INFO_RUNTIMES:-{\}}" ;;
 inspect)
   case "$*" in
+  *'cenci-sand.dind'*) printf '%b' "${FAKE_REUSE_POSTURE:-|runc|0\nworkspace-vol::/workspace\n}" ;;
   *'.RW'*) printf '%b' "${FAKE_INSPECT_MOUNTS:-}" ;;
   esac
   ;;

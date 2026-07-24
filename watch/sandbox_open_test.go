@@ -109,6 +109,22 @@ func joinArgv(argv []string) string {
 //	                        registered sysbox runtime.
 //	FAKE_INSPECT_LABEL   — container `inspect` stdout for label lookups
 //	FAKE_INSPECT_MOUNTS  — container `inspect` stdout for mount lookups
+//	FAKE_REUSE_POSTURE   — container `inspect` stdout for the combined
+//	                        reuse-posture probe (ticket #628's
+//	                        inspectReusePosture: the `cenci-sand.dind` label,
+//	                        HostConfig.Runtime, and mount source/destination
+//	                        pairs), told apart by the `cenci-sand.dind`
+//	                        format-string token. Line 1 is
+//	                        "<label>|<runtime>|<dindenv 0-or-1>"; remaining
+//	                        lines are "<source>::<destination>" per mount.
+//	                        Defaults to an empty label, non-sysbox runtime, no
+//	                        dind env, and a workspace-only mount (derives
+//	                        dindOff, no host socket) so existing reuse tests
+//	                        that don't care about posture keep passing;
+//	                        watch AGENTS.md #493 keep-in-sync note applies —
+//	                        this must stay byte-parallel with
+//	                        internal/sandbox/launcher/faketest_test.go's
+//	                        writeFakeRuntime.
 //	FAKE_INSPECT_STATE   — container startup state (default "running 0")
 //	FAKE_CONTAINER_INSPECT_EXIT — container `inspect` exit code, for all three
 //	                        format-string lookups (State.Status, .RW mounts,
@@ -176,6 +192,11 @@ func writeScriptedRuntime(t *testing.T, dir, name, callLog string) {
 		"  printf '%s\\n' fake-container-id ;;\n" +
 		"inspect)\n" +
 		"  case \"$*\" in\n" +
+		// Checked first: the format string below deliberately contains the
+		// literal substrings "Labels" and "Mounts" (it reads
+		// .Config.Labels and ranges over .Mounts), so it must be matched
+		// before the generic *Labels*/*Mounts* arms or those would shadow it.
+		"  *'cenci-sand.dind'*) printf '%b' \"${FAKE_REUSE_POSTURE:-|runc|0\\nworkspace-vol::/workspace\\n}\"; exit \"${FAKE_CONTAINER_INSPECT_EXIT:-0}\" ;;\n" +
 		"  *State.Status*) printf '%s\\n' \"${FAKE_INSPECT_STATE:-running 0}\"; exit \"${FAKE_CONTAINER_INSPECT_EXIT:-0}\" ;;\n" +
 		"  *Labels*) printf '%s\\n' \"${FAKE_INSPECT_LABEL:-}\" ;;\n" +
 		"  *'.RW'*) printf '%b' \"${FAKE_AGENT_MOUNTS:-cenci-agent-cli-claude|/opt/cenci-agent|false\\n}\"; exit \"${FAKE_CONTAINER_INSPECT_EXIT:-0}\" ;;\n" +
@@ -2311,6 +2332,312 @@ func TestOpen_RunningContainerInspectFailureIsInfrastructureError(t *testing.T) 
 	}
 	if anyLineContains(callLogLines(t, callLog), "exec -it") {
 		t.Errorf("attach must not run after inspection failure")
+	}
+}
+
+// -- ticket #628: reject legacy socket mounts and DinD-mode mismatches ----
+//
+// Before attaching to a running same-name container, planArgvs must also
+// inspect its mounts/runtime/DinD env/storage mount (inspectReusePosture)
+// and reject: a host Docker/Podman socket exposure (independent of DinD
+// posture), a requested/derived DinD mismatch, and an ambiguous
+// (unrecognized) cenci-sand.dind label -- all with the same
+// "cenci sandbox stop <name>", then relaunch instruction as the sibling
+// "predates shared read-only agent CLIs" rejection, and all provably never
+// reaching the interactive agent exec (anyLineContains(lines, "exec -it")
+// is false), per watch AGENTS.md #446 (content-specific error assertions
+// distinguishing each rejection class).
+
+func TestOpen_RunningContainerWithHostSocketMount_RejectsEvenWithCompatibleAgentMount(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = append(env,
+		"FAKE_PS=claude-cenci-default\n",
+		// FAKE_AGENT_MOUNTS left at its default (compatible shared agent-CLI
+		// mount present) -- the socket rejection must fire even when the
+		// agent-CLI mount is otherwise fine.
+		"FAKE_REUSE_POSTURE=off|runc|0\n/var/run/docker.sock::/var/run/docker.sock\n",
+	)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected the host-socket rejection to exit 1, got %T %v\n%s", err, err, output)
+	}
+	if !strings.Contains(string(output), "host Docker/Podman socket") {
+		t.Errorf("expected the rejection to name the host Docker/Podman socket, got:\n%s", output)
+	}
+	if !strings.Contains(string(output), "cenci sandbox stop claude-cenci-default") || !strings.Contains(string(output), "then relaunch") {
+		t.Errorf("missing precise migration instruction:\n%s", output)
+	}
+	if anyLineContains(callLogLines(t, callLog), "exec -it") {
+		t.Errorf("a container exposing a host socket must not receive an agent session")
+	}
+}
+
+func TestOpenDind_OntoDerivedNonDindContainer_Rejects(t *testing.T) {
+	repoRoot, _ := dindRepoEnv(t, false)
+	containerName := "claude-cenci-" + launcher.Slugify(filepath.Base(repoRoot))
+
+	fakeDir := t.TempDir()
+	// docker-only: dind's preflight requires Docker as the outer runtime.
+	callLog := writeDockerOnlyRuntime(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+	env = append(env,
+		`FAKE_INFO_RUNTIMES={"sysbox-runc":{},"runc":{}}`,
+		"FAKE_PS="+containerName+"\n",
+		"FAKE_REUSE_POSTURE=off|runc|0\nworkspace-vol::/workspace\n",
+	)
+
+	cmd := exec.Command(binaryPath, "open", "--dind")
+	cmd.Env = env
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected the --dind/non-dind-container mismatch to exit 1, got %T %v\n%s", err, err, output)
+	}
+	if !strings.Contains(string(output), "without --dind") {
+		t.Errorf("expected the rejection to mention the container was created without --dind, got:\n%s", output)
+	}
+	if !strings.Contains(string(output), "cenci sandbox stop "+containerName) || !strings.Contains(string(output), "then relaunch") {
+		t.Errorf("missing precise migration instruction:\n%s", output)
+	}
+	if anyLineContains(callLogLines(t, callLog), "exec -it") {
+		t.Errorf("a DinD-mode-mismatched container must not receive an agent session")
+	}
+}
+
+func TestOpen_DefaultOntoDerivedDindContainer_Rejects(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = append(env,
+		"FAKE_PS=claude-cenci-default\n",
+		"FAKE_REUSE_POSTURE=on|sysbox-runc|1\nworkspace-vol::/workspace\ndind-vol::/var/lib/docker\n",
+	)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected the default(--no-dind)/dind-container mismatch to exit 1, got %T %v\n%s", err, err, output)
+	}
+	if !strings.Contains(string(output), "with --dind") {
+		t.Errorf("expected the rejection to mention the container was created with --dind, got:\n%s", output)
+	}
+	if !strings.Contains(string(output), "cenci sandbox stop claude-cenci-default") || !strings.Contains(string(output), "then relaunch") {
+		t.Errorf("missing precise migration instruction:\n%s", output)
+	}
+	if anyLineContains(callLogLines(t, callLog), "exec -it") {
+		t.Errorf("a DinD-mode-mismatched container must not receive an agent session")
+	}
+}
+
+func TestOpen_AmbiguousDindLabel_Rejects(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = append(env,
+		"FAKE_PS=claude-cenci-default\n",
+		"FAKE_REUSE_POSTURE=maybe|runc|0\nworkspace-vol::/workspace\n",
+	)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected the ambiguous-label rejection to exit 1, got %T %v\n%s", err, err, output)
+	}
+	if !strings.Contains(string(output), "ambiguous") {
+		t.Errorf("expected the rejection to call the posture ambiguous (watch AGENTS.md #598: never collapse an unrecognized enum value into the safest-looking case), got:\n%s", output)
+	}
+	if !strings.Contains(string(output), "cenci sandbox stop claude-cenci-default") || !strings.Contains(string(output), "then relaunch") {
+		t.Errorf("missing precise migration instruction:\n%s", output)
+	}
+	if anyLineContains(callLogLines(t, callLog), "exec -it") {
+		t.Errorf("a container with ambiguous DinD posture must not receive an agent session")
+	}
+}
+
+// TestOpen_MalformedReusePostureHeader_Rejects covers the Critical
+// silent-failure finding on ticket #628's parseReusePosture: a scripted
+// docker fake answering the reuse-posture inspect with a header line that
+// exits 0 but doesn't match the expected "<label>|<runtime>|<dindenv>"
+// shape (fewer than 3 "|"-delimited fields) must reject the reuse attempt
+// -- fail closed -- rather than silently defaulting to the zero-value
+// reusePosture{}, which derives to the fully permissive "no host socket,
+// dindOff" outcome (indistinguishable from a legitimately compatible
+// legacy container).
+func TestOpen_MalformedReusePostureHeader_Rejects(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = append(env,
+		"FAKE_PS=claude-cenci-default\n",
+		"FAKE_REUSE_POSTURE=garbage-no-pipes\n",
+	)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected the malformed reuse-posture header to exit 1, got %T %v\n%s", err, err, output)
+	}
+	if !strings.Contains(string(output), "reuse posture") {
+		t.Errorf("expected the rejection to mention the reuse posture parse failure, got:\n%s", output)
+	}
+	if anyLineContains(callLogLines(t, callLog), "exec -it") {
+		t.Errorf("a container with malformed reuse-posture inspect output must not receive an agent session")
+	}
+}
+
+// TestOpen_MalformedReusePostureMountLine_Rejects covers the second gap
+// this finding calls out: a mount line that fails to split on "::" must be
+// treated as a parse failure (fail closed), not silently dropped -- the
+// dropped line could be exactly the host-socket bind or DinD storage mount
+// the security checks depend on.
+func TestOpen_MalformedReusePostureMountLine_Rejects(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = append(env,
+		"FAKE_PS=claude-cenci-default\n",
+		"FAKE_REUSE_POSTURE=off|runc|0\nno-delimiter-here\n",
+	)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected the malformed reuse-posture mount line to exit 1, got %T %v\n%s", err, err, output)
+	}
+	if !strings.Contains(string(output), "reuse posture") {
+		t.Errorf("expected the rejection to mention the reuse posture parse failure, got:\n%s", output)
+	}
+	if anyLineContains(callLogLines(t, callLog), "exec -it") {
+		t.Errorf("a container with an unparseable mount line must not receive an agent session")
+	}
+}
+
+func TestOpen_CompatibleNormalContainer_ReusesSuccessfully(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = append(env,
+		"FAKE_PS=claude-cenci-default\n",
+		"FAKE_REUSE_POSTURE=off|runc|0\nworkspace-vol::/workspace\n",
+	)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("open ch (compatible normal reuse): %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	if _, ok := findLineWithPrefix(lines, "run --name "); ok {
+		t.Errorf("expected no container create when reusing a compatible normal container, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	attachLine(t, lines)
+}
+
+func TestOpenDind_CompatibleDindContainer_ReusesSuccessfully(t *testing.T) {
+	repoRoot, _ := dindRepoEnv(t, false)
+	containerName := "claude-cenci-" + launcher.Slugify(filepath.Base(repoRoot))
+
+	fakeDir := t.TempDir()
+	// docker-only: dind's preflight requires Docker as the outer runtime.
+	callLog := writeDockerOnlyRuntime(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+	env = append(env,
+		`FAKE_INFO_RUNTIMES={"sysbox-runc":{},"runc":{}}`,
+		"FAKE_PS="+containerName+"\n",
+		"FAKE_REUSE_POSTURE=on|sysbox-runc|1\nworkspace-vol::/workspace\ndind-vol::/var/lib/docker\n",
+	)
+
+	cmd := exec.Command(binaryPath, "open", "--dind")
+	cmd.Env = env
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("open --dind (compatible dind reuse): %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	if _, ok := findLineWithPrefix(lines, "run --name "); ok {
+		t.Errorf("expected no container create when reusing a compatible DinD container, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	attachLine(t, lines)
+}
+
+// -- ticket #628: new containers stamp an authoritative DinD-mode label ----
+
+func TestOpen_FreshCreate_StampsDindLabelOff(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("open ch: %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	runLine, ok := findLineWithPrefix(lines, "run --name ")
+	if !ok {
+		t.Fatalf("expected a container run, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(runLine, "--label cenci-sand.dind=off") {
+		t.Errorf("expected the new container to be stamped --label cenci-sand.dind=off, got:\n%s", runLine)
+	}
+}
+
+func TestOpenDind_FreshCreate_StampsDindLabelOn(t *testing.T) {
+	repoRoot, _ := dindRepoEnv(t, true)
+
+	fakeDir := t.TempDir()
+	// docker-only: dind's preflight requires Docker as the outer runtime.
+	callLog := writeDockerOnlyRuntime(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+	env = append(env, `FAKE_INFO_RUNTIMES={"sysbox-runc":{},"runc":{}}`)
+
+	cmd := exec.Command(binaryPath, "open")
+	cmd.Env = env
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("open (dind via repo config): %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	runLine, ok := findLineWithPrefix(lines, "run --name ")
+	if !ok {
+		t.Fatalf("expected a container run, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(runLine, "--label cenci-sand.dind=on") {
+		t.Errorf("expected the new dind container to be stamped --label cenci-sand.dind=on, got:\n%s", runLine)
 	}
 }
 

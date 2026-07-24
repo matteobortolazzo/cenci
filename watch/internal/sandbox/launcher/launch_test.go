@@ -87,3 +87,195 @@ func TestAssembleRunArgs_NoCreationTimeTmuxPane(t *testing.T) {
 		}
 	}
 }
+
+// -- ticket #628: reuse-posture derivation/socket-matcher unit tests --------
+//
+// NOTE (red phase): deriveDindPosture, mountExposesHostSocket, reusePosture,
+// reuseMount, reuseDindPosture, and the dindOn/dindOff/dindUnknown constants
+// do not exist yet -- they land in launch.go in the next, non-red phase
+// (ticket #628's Implementation Order step 2). Every reference to them below
+// is therefore a compile error until that lands; that is the intended
+// red-phase state (mirroring dryrun_test.go's historical #589 red-phase
+// note), not a bug to fix by stubbing the implementation in this file.
+//
+// The tri-state type is named reuseDindPosture (not dindPosture) because
+// audit.go already defines a function named dindPosture -- a distinct name
+// avoids colliding with that existing identifier while keeping the plan's
+// dindOn/dindOff/dindUnknown value names exactly as specified.
+
+// TestDeriveDindPosture pins the tri-state derivation rules: an explicit
+// cenci-sand.dind label is authoritative over every other signal (even a
+// conflicting one), a legacy unlabeled container derives its posture from any
+// one of the three independent create-time DinD signals, and an unrecognized
+// label value is ambiguous -- never collapsed into the safest-looking case
+// (watch AGENTS.md #598).
+func TestDeriveDindPosture(t *testing.T) {
+	cases := []struct {
+		name string
+		p    reusePosture
+		want reuseDindPosture
+	}{
+		{
+			name: "label on is authoritative even with no other dind signals",
+			p:    reusePosture{DindLabel: "on"},
+			want: dindOn,
+		},
+		{
+			name: "label off is authoritative even with a conflicting sysbox-runc runtime signal",
+			p:    reusePosture{DindLabel: "off", Runtime: "sysbox-runc"},
+			want: dindOff,
+		},
+		{
+			name: "legacy unlabeled container derives on from the sysbox-runc runtime signal alone",
+			p:    reusePosture{Runtime: "sysbox-runc"},
+			want: dindOn,
+		},
+		{
+			name: "legacy unlabeled container derives on from the CENCI_SANDBOX_DIND env signal alone",
+			p:    reusePosture{DindEnv: true},
+			want: dindOn,
+		},
+		{
+			name: "legacy unlabeled container derives on from a /var/lib/docker storage mount alone",
+			p:    reusePosture{Mounts: []reuseMount{{Source: "claude-cenci-dind-repo", Destination: "/var/lib/docker"}}},
+			want: dindOn,
+		},
+		{
+			name: "legacy unlabeled container with none of the three signals derives off",
+			p:    reusePosture{Runtime: "runc", Mounts: []reuseMount{{Source: "workspace-vol", Destination: "/workspace"}}},
+			want: dindOff,
+		},
+		{
+			name: "unrecognized label value is ambiguous, not the safest-looking case (#598)",
+			p:    reusePosture{DindLabel: "maybe"},
+			want: dindUnknown,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := deriveDindPosture(tc.p); got != tc.want {
+				t.Errorf("deriveDindPosture(%+v) = %v, want %v", tc.p, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMountExposesHostSocket pins the host-socket matcher: it flags a mount
+// whose source OR destination basename is docker.sock/podman.sock, and it
+// must not over-match the cenci socket-dir mount (a directory, not a
+// *.sock file) or ordinary workspace/home mounts (plan Risks: over-broad
+// socket match).
+func TestMountExposesHostSocket(t *testing.T) {
+	cases := []struct {
+		name   string
+		mounts []reuseMount
+		want   bool
+	}{
+		{
+			name:   "docker.sock source basename is flagged",
+			mounts: []reuseMount{{Source: "/var/run/docker.sock", Destination: "/var/run/docker.sock"}},
+			want:   true,
+		},
+		{
+			name:   "podman.sock destination basename is flagged",
+			mounts: []reuseMount{{Source: "/run/user/1000/podman/podman.sock", Destination: "/run/podman/podman.sock"}},
+			want:   true,
+		},
+		{
+			name:   "the cenci socket directory mount is not flagged",
+			mounts: []reuseMount{{Source: "/run/user/1000/cenci", Destination: cenciSocketMountDest}},
+			want:   false,
+		},
+		{
+			name:   "the workspace bind mount is not flagged",
+			mounts: []reuseMount{{Source: "/home/user/repo", Destination: "/workspace"}},
+			want:   false,
+		},
+		{
+			name:   "the home volume mount is not flagged",
+			mounts: []reuseMount{{Source: "claude-cenci-home-default", Destination: "/home/dev"}},
+			want:   false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := mountExposesHostSocket(tc.mounts); got != tc.want {
+				t.Errorf("mountExposesHostSocket(%+v) = %v, want %v", tc.mounts, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseReusePosture_FailsClosedOnMalformedOrEmptyOutput is a direct unit
+// test of parseReusePosture's boundary shapes -- justified despite this
+// project's integration-first default because the exact "genuinely empty
+// string" case this Critical finding calls out cannot be produced through
+// the fake-runtime shell scripts' `${FAKE_REUSE_POSTURE:-default}`
+// substitution (an empty env var value falls back to the default under
+// that substitution form, same as unset), so an integration test cannot
+// reach it. It pins the finding's core requirement: a truncated/garbled
+// `inspect` response that still exits 0 must never silently collapse to
+// the zero-value reusePosture{} (which derives to the fully permissive
+// "no host socket, dindOff" outcome) -- it must return an error instead,
+// exactly like containerStartupState's existing "unexpected container
+// state" shape check (watch AGENTS.md #572, #598).
+func TestParseReusePosture_FailsClosedOnMalformedOrEmptyOutput(t *testing.T) {
+	cases := []struct {
+		name       string
+		out        string
+		wantErrSub string
+	}{
+		{
+			name:       "genuinely empty output (exit 0, zero bytes) is rejected, not defaulted to the zero-value posture",
+			out:        "",
+			wantErrSub: "empty",
+		},
+		{
+			name:       "a header line missing the expected pipe-delimited fields is rejected",
+			out:        "garbage-no-pipes\n",
+			wantErrSub: "malformed reuse posture header",
+		},
+		{
+			name:       "a header line with only one pipe (missing the dind-env field) is rejected",
+			out:        "off|runc\n",
+			wantErrSub: "malformed reuse posture header",
+		},
+		{
+			name:       "a mount line that fails to split on \"::\" is rejected rather than silently dropped",
+			out:        "off|runc|0\nno-delimiter-here\n",
+			wantErrSub: "malformed reuse posture mount line",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseReusePosture(tc.out)
+			if err == nil {
+				t.Fatalf("parseReusePosture(%q) = nil error, want a fail-closed rejection", tc.out)
+			}
+			if !strings.Contains(err.Error(), tc.wantErrSub) {
+				t.Errorf("parseReusePosture(%q) error = %q, want it to contain %q", tc.out, err.Error(), tc.wantErrSub)
+			}
+		})
+	}
+}
+
+// TestParseReusePosture_ValidShapeStillParses is the happy-path companion to
+// the fail-closed test above: a well-formed inspect response must still
+// parse into the expected reusePosture fields, so the new validation doesn't
+// reject legitimate output.
+func TestParseReusePosture_ValidShapeStillParses(t *testing.T) {
+	p, err := parseReusePosture("on|sysbox-runc|1\nworkspace-vol::/workspace\ndind-vol::/var/lib/docker\n")
+	if err != nil {
+		t.Fatalf("parseReusePosture: %v", err)
+	}
+	if p.DindLabel != "on" || p.Runtime != "sysbox-runc" || !p.DindEnv {
+		t.Errorf("parseReusePosture header fields = %+v, want DindLabel=on Runtime=sysbox-runc DindEnv=true", p)
+	}
+	want := []reuseMount{
+		{Source: "workspace-vol", Destination: "/workspace"},
+		{Source: "dind-vol", Destination: "/var/lib/docker"},
+	}
+	if len(p.Mounts) != len(want) || p.Mounts[0] != want[0] || p.Mounts[1] != want[1] {
+		t.Errorf("parseReusePosture mounts = %+v, want %+v", p.Mounts, want)
+	}
+}
