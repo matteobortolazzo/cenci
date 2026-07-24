@@ -280,6 +280,66 @@ func TestParseReusePosture_ValidShapeStillParses(t *testing.T) {
 	}
 }
 
+// TestParseReusePosture_TrailingBlankLineFromRealDockerInspect_IsTolerated
+// pins ticket #684's fix: real `docker inspect --format` appends its own
+// trailing newline on top of the template's own per-mount "\n", so the
+// captured stdout always ends with one blank line after the last mount (or
+// right after the header when there are no mounts at all). Before this fix,
+// parseReusePosture treated that blank line as a malformed mount line and
+// rejected every reuse of a real, already-running container. A non-trailing
+// malformed line must still fail closed exactly as before.
+func TestParseReusePosture_TrailingBlankLineFromRealDockerInspect_IsTolerated(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		want reusePosture
+	}{
+		{
+			name: "trailing blank line after mounts is trimmed, not rejected",
+			out:  "off|runc|0\nworkspace-vol::/workspace\n\n",
+			want: reusePosture{
+				DindLabel: "off",
+				Runtime:   "runc",
+				Mounts:    []reuseMount{{Source: "workspace-vol", Destination: "/workspace"}},
+			},
+		},
+		{
+			name: "trailing blank line right after the header (no mounts) is trimmed, not rejected",
+			out:  "off|runc|0\n\n",
+			want: reusePosture{DindLabel: "off", Runtime: "runc"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := parseReusePosture(tc.out)
+			if err != nil {
+				t.Fatalf("parseReusePosture(%q): %v", tc.out, err)
+			}
+			if p.DindLabel != tc.want.DindLabel || p.Runtime != tc.want.Runtime || p.DindEnv != tc.want.DindEnv {
+				t.Errorf("parseReusePosture(%q) header fields = %+v, want %+v", tc.out, p, tc.want)
+			}
+			if len(p.Mounts) != len(tc.want.Mounts) {
+				t.Errorf("parseReusePosture(%q) Mounts = %+v, want %+v", tc.out, p.Mounts, tc.want.Mounts)
+			}
+			for i := range tc.want.Mounts {
+				if i < len(p.Mounts) && p.Mounts[i] != tc.want.Mounts[i] {
+					t.Errorf("parseReusePosture(%q) Mounts[%d] = %+v, want %+v", tc.out, i, p.Mounts[i], tc.want.Mounts[i])
+				}
+			}
+		})
+	}
+
+	// A non-trailing malformed line must still fail closed even though the
+	// output also carries the real trailing blank line.
+	_, err := parseReusePosture("off|runc|0\nno-delimiter-here\n\n")
+	if err == nil {
+		t.Fatal("parseReusePosture with a non-trailing malformed mount line = nil error, want a fail-closed rejection even with the trailing blank line present")
+	}
+	if !strings.Contains(err.Error(), "malformed reuse posture mount line") {
+		t.Errorf("parseReusePosture error = %q, want it to mention the malformed mount line", err.Error())
+	}
+}
+
 // dindShutdownSentinelPath is the shutdown-sentinel file the dind-only
 // keepalive TERM/INT trap must write (#630's Assumptions: hardcoded under
 // /home/dev, mirroring the marker's own hardcoded root-phase path — never

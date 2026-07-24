@@ -136,13 +136,20 @@ func joinArgv(argv []string) string {
 //	                        pairs), told apart by the `cenci-sand.dind`
 //	                        format-string token. Line 1 is
 //	                        "<label>|<runtime>|<dindenv 0-or-1>"; remaining
-//	                        lines are "<source>::<destination>" per mount.
-//	                        Defaults to an empty label, non-sysbox runtime, no
-//	                        dind env, and a workspace-only mount (derives
-//	                        dindOff, no host socket) so existing reuse tests
-//	                        that don't care about posture keep passing;
-//	                        watch AGENTS.md #493 keep-in-sync note applies —
-//	                        this must stay byte-parallel with
+//	                        lines are "<source>::<destination>" per mount,
+//	                        followed by one trailing blank line — real
+//	                        `docker inspect --format` appends its own
+//	                        trailing newline on top of the template's last
+//	                        mount's own "\n", and parseReusePosture trims
+//	                        exactly that trailing blank line rather than
+//	                        rejecting it (ticket #684); omitting it here would
+//	                        let these fakes drift from the real runtime shape
+//	                        again. Defaults to an empty label, non-sysbox
+//	                        runtime, no dind env, and a workspace-only mount
+//	                        (derives dindOff, no host socket) so existing
+//	                        reuse tests that don't care about posture keep
+//	                        passing; watch AGENTS.md #493 keep-in-sync note
+//	                        applies — this must stay byte-parallel with
 //	                        internal/sandbox/launcher/faketest_test.go's
 //	                        writeFakeRuntime.
 //	FAKE_INSPECT_STATE   — container startup state (default "running 0")
@@ -322,7 +329,7 @@ run) case "$*" in
   printf '%s\n' fake-container-id ;;
 inspect)
   case "$*" in
-  *'cenci-sand.dind'*) fvb REUSE_POSTURE "|runc|0\nworkspace-vol::/workspace\n"; exit "$(fe CONTAINER_INSPECT)" ;;
+  *'cenci-sand.dind'*) fvb REUSE_POSTURE "|runc|0\nworkspace-vol::/workspace\n\n"; exit "$(fe CONTAINER_INSPECT)" ;;
   *State.Status*) printf '%s\n' "$(fv INSPECT_STATE "running 0")"; exit "$(fe CONTAINER_INSPECT)" ;;
   *Labels*) printf '%s\n' "$(fv INSPECT_LABEL "")" ;;
   *'.RW'*) fvb AGENT_MOUNTS "cenci-agent-cli-claude|/opt/cenci-agent|false\n"; exit "$(fe CONTAINER_INSPECT)" ;;
@@ -2270,7 +2277,7 @@ func TestOpenDind_DockerdMarkerPresent_AttachToRunning_WarnsBeforeAttach(t *test
 		"FAKE_PS=claude-cenci-"+slug+"\n",
 		"FAKE_INSPECT_LABEL=detached",
 		"FAKE_INSPECT_MOUNTS=/workspace\n/home/dev\n/run/user/1000/cenci\n",
-		"FAKE_REUSE_POSTURE=on|sysbox-runc|1\nworkspace-vol::/workspace\ndind-vol::/var/lib/docker\n",
+		"FAKE_REUSE_POSTURE=on|sysbox-runc|1\nworkspace-vol::/workspace\ndind-vol::/var/lib/docker\n\n",
 	)
 
 	cmd := exec.Command(binaryPath, "open")
@@ -2715,7 +2722,7 @@ func TestOpen_RunningContainerWithHostSocketMount_RejectsEvenWithCompatibleAgent
 		// FAKE_AGENT_MOUNTS left at its default (compatible shared agent-CLI
 		// mount present) -- the socket rejection must fire even when the
 		// agent-CLI mount is otherwise fine.
-		"FAKE_REUSE_POSTURE=off|runc|0\n/var/run/docker.sock::/var/run/docker.sock\n",
+		"FAKE_REUSE_POSTURE=off|runc|0\n/var/run/docker.sock::/var/run/docker.sock\n\n",
 	)
 	cmd.Dir = t.TempDir()
 	output, err := cmd.CombinedOutput()
@@ -2746,7 +2753,7 @@ func TestOpenDind_OntoDerivedNonDindContainer_Rejects(t *testing.T) {
 	env = append(env,
 		`FAKE_INFO_RUNTIMES={"sysbox-runc":{},"runc":{}}`,
 		"FAKE_PS="+containerName+"\n",
-		"FAKE_REUSE_POSTURE=off|runc|0\nworkspace-vol::/workspace\n",
+		"FAKE_REUSE_POSTURE=off|runc|0\nworkspace-vol::/workspace\n\n",
 	)
 
 	cmd := exec.Command(binaryPath, "open", "--dind")
@@ -2777,7 +2784,7 @@ func TestOpen_DefaultOntoDerivedDindContainer_Rejects(t *testing.T) {
 	cmd := exec.Command(binaryPath, "open", "ch")
 	cmd.Env = append(env,
 		"FAKE_PS=claude-cenci-default\n",
-		"FAKE_REUSE_POSTURE=on|sysbox-runc|1\nworkspace-vol::/workspace\ndind-vol::/var/lib/docker\n",
+		"FAKE_REUSE_POSTURE=on|sysbox-runc|1\nworkspace-vol::/workspace\ndind-vol::/var/lib/docker\n\n",
 	)
 	cmd.Dir = t.TempDir()
 	output, err := cmd.CombinedOutput()
@@ -2805,7 +2812,7 @@ func TestOpen_AmbiguousDindLabel_Rejects(t *testing.T) {
 	cmd := exec.Command(binaryPath, "open", "ch")
 	cmd.Env = append(env,
 		"FAKE_PS=claude-cenci-default\n",
-		"FAKE_REUSE_POSTURE=maybe|runc|0\nworkspace-vol::/workspace\n",
+		"FAKE_REUSE_POSTURE=maybe|runc|0\nworkspace-vol::/workspace\n\n",
 	)
 	cmd.Dir = t.TempDir()
 	output, err := cmd.CombinedOutput()
@@ -2842,7 +2849,7 @@ func TestOpen_MalformedReusePostureHeader_Rejects(t *testing.T) {
 	cmd := exec.Command(binaryPath, "open", "ch")
 	cmd.Env = append(env,
 		"FAKE_PS=claude-cenci-default\n",
-		"FAKE_REUSE_POSTURE=garbage-no-pipes\n",
+		"FAKE_REUSE_POSTURE=garbage-no-pipes\n\n",
 	)
 	cmd.Dir = t.TempDir()
 	output, err := cmd.CombinedOutput()
@@ -2862,7 +2869,10 @@ func TestOpen_MalformedReusePostureHeader_Rejects(t *testing.T) {
 // this finding calls out: a mount line that fails to split on "::" must be
 // treated as a parse failure (fail closed), not silently dropped -- the
 // dropped line could be exactly the host-socket bind or DinD storage mount
-// the security checks depend on.
+// the security checks depend on. The malformed line is deliberately followed
+// by the trailing blank line real `docker inspect` always appends (ticket
+// #684), pinning that the trailing-blank-line tolerance only trims a
+// genuinely-trailing empty line and never masks a malformed non-trailing one.
 func TestOpen_MalformedReusePostureMountLine_Rejects(t *testing.T) {
 	fakeDir := t.TempDir()
 	callLog := writeScriptedRuntimes(t, fakeDir)
@@ -2872,7 +2882,7 @@ func TestOpen_MalformedReusePostureMountLine_Rejects(t *testing.T) {
 	cmd := exec.Command(binaryPath, "open", "ch")
 	cmd.Env = append(env,
 		"FAKE_PS=claude-cenci-default\n",
-		"FAKE_REUSE_POSTURE=off|runc|0\nno-delimiter-here\n",
+		"FAKE_REUSE_POSTURE=off|runc|0\nno-delimiter-here\n\n",
 	)
 	cmd.Dir = t.TempDir()
 	output, err := cmd.CombinedOutput()
@@ -2897,7 +2907,7 @@ func TestOpen_CompatibleNormalContainer_ReusesSuccessfully(t *testing.T) {
 	cmd := exec.Command(binaryPath, "open", "ch")
 	cmd.Env = append(env,
 		"FAKE_PS=claude-cenci-default\n",
-		"FAKE_REUSE_POSTURE=off|runc|0\nworkspace-vol::/workspace\n",
+		"FAKE_REUSE_POSTURE=off|runc|0\nworkspace-vol::/workspace\n\n",
 	)
 	cmd.Dir = t.TempDir()
 	output, err := cmd.CombinedOutput()
@@ -2924,7 +2934,7 @@ func TestOpenDind_CompatibleDindContainer_ReusesSuccessfully(t *testing.T) {
 	env = append(env,
 		`FAKE_INFO_RUNTIMES={"sysbox-runc":{},"runc":{}}`,
 		"FAKE_PS="+containerName+"\n",
-		"FAKE_REUSE_POSTURE=on|sysbox-runc|1\nworkspace-vol::/workspace\ndind-vol::/var/lib/docker\n",
+		"FAKE_REUSE_POSTURE=on|sysbox-runc|1\nworkspace-vol::/workspace\ndind-vol::/var/lib/docker\n\n",
 	)
 
 	cmd := exec.Command(binaryPath, "open", "--dind")

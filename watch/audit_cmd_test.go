@@ -421,7 +421,7 @@ func TestAudit_JSONOutput_RunningHostNetworkContainer_BasisRunningAndWeakened(t 
 	scope := launcher.ComputeScope("claude", "", repo, home)
 
 	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
-	t.Setenv("FAKE_OBSERVED_POSTURE", "cenci-sandbox:latest|host|runc||\n")
+	t.Setenv("FAKE_OBSERVED_POSTURE", "cenci-sandbox:latest|host|runc||\n\n")
 
 	cmd, _ := auditFakeRuntimeCmd(t, repo, home, "audit", "--agent", "claude", "--json")
 	output, err := cmd.CombinedOutput()

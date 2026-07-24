@@ -638,7 +638,7 @@ func TestDryRun_RunningContainerWithHostSocketMount_RejectsEvenWithCompatibleAge
 	t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
 	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
 	t.Setenv("FAKE_INSPECT_MOUNTS", AgentCLIVolumeName("claude")+"|/opt/cenci-agent|false\n")
-	t.Setenv("FAKE_REUSE_POSTURE", "off|runc|0\n/var/run/docker.sock::/var/run/docker.sock\n")
+	t.Setenv("FAKE_REUSE_POSTURE", "off|runc|0\n/var/run/docker.sock::/var/run/docker.sock\n\n")
 
 	eng := &Engine{Runtime: "docker", Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
 	_, err := eng.DryRun(Options{Agent: "claude"})
@@ -672,7 +672,7 @@ func TestDryRun_CompatibleDindContainer_RendersAttachOnlyWithNoCreateArgv(t *tes
 	t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
 	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
 	t.Setenv("FAKE_INSPECT_MOUNTS", AgentCLIVolumeName("claude")+"|/opt/cenci-agent|false\n")
-	t.Setenv("FAKE_REUSE_POSTURE", "on|sysbox-runc|1\nworkspace-vol::/workspace\ndind-vol::/var/lib/docker\n")
+	t.Setenv("FAKE_REUSE_POSTURE", "on|sysbox-runc|1\nworkspace-vol::/workspace\ndind-vol::/var/lib/docker\n\n")
 	t.Setenv("FAKE_INFO_RUNTIMES", `{"sysbox-runc":{},"runc":{}}`)
 
 	eng := &Engine{Runtime: "docker", Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
