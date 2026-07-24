@@ -2,8 +2,10 @@ package launcher
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,6 +85,21 @@ const (
 	CredentialTypePencil   = "pencil"
 )
 
+// Credential probe states for Posture.CredentialSources[].Probe (ticket
+// #598): distinguishes a plain-absent host credential file
+// (CredentialProbeMissing) from a stat/read failure that is NOT a simple
+// absence — a directory sitting at the expected path, a permission-denied
+// stat, or any other unreadable state (CredentialProbeError) — so a probe
+// failure is never silently collapsed into a reassuring "absent" result.
+// CredentialProbePresent means the path is a readable regular file (the
+// same condition isRegularFile in launch.go checks for the real mount
+// plan).
+const (
+	CredentialProbePresent = "present"
+	CredentialProbeMissing = "missing"
+	CredentialProbeError   = "error"
+)
+
 // ImagePosture is Posture.Image: the resolved image reference and whether it
 // is the shared monolith or a repo-opted-in image (scope.UsingRepoImage).
 type ImagePosture struct {
@@ -150,9 +167,14 @@ type VolumePosture struct {
 // NAME the container would receive. It deliberately carries no Value field —
 // not "a Value field that happens to stay empty," an actual absence at the
 // type level, so a future accidental assignment can't silently reintroduce a
-// secret-leak regression through this type.
+// secret-leak regression through this type. Secret is a classification FLAG
+// only — never a value — reusing the same forwardedEnvVarNames source of
+// truth ForwardedEnv's Secret already uses (isSecretEnvName), so a
+// create-time name like CONTEXT7_API_KEY is marked secret consistently with
+// its forwarded-exec-env counterpart.
 type EnvVarName struct {
-	Name string `json:"name"`
+	Name   string `json:"name"`
+	Secret bool   `json:"secret"`
 }
 
 // ForwardedEnvVar is one entry of Posture.ForwardedEnv: a per-exec
@@ -168,15 +190,30 @@ type ForwardedEnvVar struct {
 }
 
 // CredentialSource is one entry of Posture.CredentialSources: a host
-// credential file (or absence of one) the launcher would stage into the
-// container for Type. HostPath is always the resolved host-side path
-// regardless of Present, so an operator can see exactly where cenci expects
-// to find it even when it's missing. Present is false, never an error, when
-// the file is absent — Audit's non-fatal credential handling.
+// credential file (or absence of one) for Type. HostPath is always the
+// resolved host-side path regardless of Present, so an operator can see
+// exactly where cenci expects to find it even when it's missing. Present is
+// true only when Probe is CredentialProbePresent (a readable regular file);
+// it is false, never an error, for both a missing file and a probe failure
+// — Audit's non-fatal credential handling. Probe additionally distinguishes
+// those two false-Present cases (CredentialProbeMissing vs
+// CredentialProbeError), so an unreadable/non-regular-file state is never
+// silently collapsed into a reassuring "absent". Applicable reports whether
+// Type's credential ever applies to the audited agent at all (mirroring the
+// per-agent mount-plan rules in launch.go: claude/gh/pencil apply to every
+// agent, codex only to "codex", opencode only to "opencode"). Staged
+// reports whether the credential is ACTUALLY staged for this specific
+// launch — read directly from the already-computed mount set Audit builds
+// (assembleVolumeMounts/validateCredentials), never independently
+// re-derived, so audit and the real launch argv cannot silently drift
+// apart. The invariant `Staged implies Applicable && Present` always holds.
 type CredentialSource struct {
-	Type     string `json:"type"`
-	HostPath string `json:"hostPath"`
-	Present  bool   `json:"present"`
+	Type       string `json:"type"`
+	HostPath   string `json:"hostPath"`
+	Present    bool   `json:"present"`
+	Probe      string `json:"probe"`
+	Applicable bool   `json:"applicable"`
+	Staged     bool   `json:"staged"`
 }
 
 // BoundaryWeakening is one entry of Posture.BoundaryWeakenings: an opt-in
@@ -277,6 +314,18 @@ func (e *Engine) Audit(opts Options) (Posture, error) {
 	allMountArgs = append(allMountArgs, credArgs...)
 	mounts := classifyMounts(allMountArgs)
 
+	// stagedKinds is the authoritative "is it actually staged" signal for
+	// credentialSources below: every credential MountKind that made it into
+	// the already-computed mounts slice above (derived from
+	// assembleVolumeMounts + validateCredentials) is staged for this launch.
+	// Reading from this computed set — rather than independently
+	// re-evaluating the mount plan's staging rules — keeps Audit from
+	// drifting away from what Launch would actually do (audit.go:14-23).
+	stagedKinds := make(map[string]bool, len(mounts))
+	for _, m := range mounts {
+		stagedKinds[m.Kind] = true
+	}
+
 	allEnvArgs := make([]string, 0, len(mountArgs)+len(envArgs))
 	allEnvArgs = append(allEnvArgs, mountArgs...)
 	allEnvArgs = append(allEnvArgs, envArgs...)
@@ -304,7 +353,7 @@ func (e *Engine) Audit(opts Options) (Posture, error) {
 		Volumes:            namedVolumes(mounts),
 		Env:                classifyEnvNames(allEnvArgs),
 		ForwardedEnv:       forwardedEnvVars(agent),
-		CredentialSources:  credentialSources(home),
+		CredentialSources:  credentialSources(home, agent, stagedKinds),
 		BoundaryWeakenings: boundaryWeakenings(featureArgs),
 
 		ReseedCreds: opts.ReseedCreds,
@@ -388,7 +437,10 @@ func namedVolumes(mounts []MountPosture) []VolumePosture {
 
 // classifyEnvNames parses every "-e NAME=value" pair out of args (as emitted
 // by assembleVolumeMounts/assembleEnv) into an EnvVarName carrying only the
-// NAME — never the value.
+// NAME — never the value — with Secret set via isSecretEnvName so a
+// create-time name (e.g. CONTEXT7_API_KEY, emitted here for the create-time
+// env args) gets the same explicit secret classification as its forwarded
+// exec-env counterpart (ticket #598).
 func classifyEnvNames(args []string) []EnvVarName {
 	envs := make([]EnvVarName, 0, len(args)/2)
 	for i := 0; i < len(args); i++ {
@@ -399,7 +451,7 @@ func classifyEnvNames(args []string) []EnvVarName {
 		if idx := strings.IndexByte(name, '='); idx >= 0 {
 			name = name[:idx]
 		}
-		envs = append(envs, EnvVarName{Name: name})
+		envs = append(envs, EnvVarName{Name: name, Secret: isSecretEnvName(name)})
 	}
 	return envs
 }
@@ -407,7 +459,8 @@ func classifyEnvNames(args []string) []EnvVarName {
 // forwardedEnvVarNames are the provider API keys assembleExecEnv may forward
 // per-exec — the only names ForwardedEnv ever reports (see
 // ForwardedEnvVar's doc comment). This is the single source of truth for
-// secret-env classification: both `cenci audit`'s reporting and
+// secret-env classification: both `cenci audit`'s reporting (via
+// isSecretEnvName, for both create-time and forwarded env) and
 // `cenci open --dry-run`'s redaction (renderArgv/redactSecretEnv in
 // dryrun.go) depend on it. Any new secret "-e" env forward added in
 // assembleExecEnv/assembleEnv MUST also be added here, or it will render
@@ -419,6 +472,15 @@ var forwardedEnvVarNames = map[string]bool{
 	"PEN_CLI_KEY":       true,
 }
 
+// isSecretEnvName reports whether name is one of the provider-API-key names
+// that must never have its value shown — wrapping forwardedEnvVarNames
+// (the single source of truth) rather than forking a second classification
+// list, so create-time env (classifyEnvNames) and forwarded exec env
+// (forwardedEnvVars) always agree.
+func isSecretEnvName(name string) bool {
+	return forwardedEnvVarNames[name]
+}
+
 // forwardedEnvVars reports the per-exec provider API keys assembleExecEnv
 // would actually forward for agent — names only, Secret:true, and only when
 // the corresponding host env var is actually set (matching assembleExecEnv's
@@ -427,7 +489,7 @@ func forwardedEnvVars(agent string) []ForwardedEnvVar {
 	envNames := classifyEnvNames(assembleExecEnv(agent))
 	forwarded := make([]ForwardedEnvVar, 0, len(envNames))
 	for _, name := range envNames {
-		if forwardedEnvVarNames[name.Name] {
+		if isSecretEnvName(name.Name) {
 			forwarded = append(forwarded, ForwardedEnvVar{Name: name.Name, Secret: true})
 		}
 	}
@@ -437,31 +499,95 @@ func forwardedEnvVars(agent string) []ForwardedEnvVar {
 // credentialSourceSpecs are the fixed host credential paths Audit always
 // probes, regardless of which agent is being audited — an operator can see
 // exactly where cenci expects each credential type even when it's missing
-// or belongs to a different agent than the one currently selected.
+// or belongs to a different agent than the one currently selected. kind is
+// the MountKind* this credential type stages as (mountKindForDestination's
+// classification of its container-side destination), used to look up
+// whether it made it into the already-computed mounts set (Staged).
 var credentialSourceSpecs = []struct {
 	typ      string
+	kind     string
 	pathFrom func(home string) string
 }{
-	{CredentialTypeClaude, func(home string) string { return filepath.Join(home, ".claude", ".credentials.json") }},
-	{CredentialTypeCodex, func(home string) string { return filepath.Join(home, ".codex", "auth.json") }},
-	{CredentialTypeOpencode, func(home string) string {
+	{CredentialTypeClaude, MountKindClaudeCreds, func(home string) string {
+		return filepath.Join(home, ".claude", ".credentials.json")
+	}},
+	{CredentialTypeCodex, MountKindCodexCreds, func(home string) string {
+		return filepath.Join(home, ".codex", "auth.json")
+	}},
+	{CredentialTypeOpencode, MountKindOpencodeCreds, func(home string) string {
 		return filepath.Join(home, ".local", "share", "opencode", "auth.json")
 	}},
-	{CredentialTypeGh, func(home string) string { return filepath.Join(home, ".config", "gh", "hosts.yml") }},
-	{CredentialTypePencil, func(home string) string { return filepath.Join(home, ".pencil", "session-cli.json") }},
+	{CredentialTypeGh, MountKindGhCreds, func(home string) string {
+		return filepath.Join(home, ".config", "gh", "hosts.yml")
+	}},
+	{CredentialTypePencil, MountKindPencilCreds, func(home string) string {
+		return filepath.Join(home, ".pencil", "session-cli.json")
+	}},
 }
 
-// credentialSources reports every credential type's resolved host path and
-// whether it is actually staged (a regular file) there — never a secret
-// value, and never an error for an absent file (Audit's non-fatal credential
-// handling).
-func credentialSources(home string) []CredentialSource {
+// credentialAppliesToAgent reports whether typ's credential is ever staged
+// for agent at all, mirroring the mount plan's per-agent rules: claude/gh/
+// pencil creds are staged for every agent by assembleVolumeMounts; codex
+// creds only for agent=="codex" and opencode creds only for
+// agent=="opencode" (both gated in validateCredentials).
+func credentialAppliesToAgent(typ, agent string) bool {
+	switch typ {
+	case CredentialTypeCodex:
+		return agent == "codex"
+	case CredentialTypeOpencode:
+		return agent == "opencode"
+	default:
+		return true
+	}
+}
+
+// credentialSources reports every credential type's resolved host path,
+// three-state probe result, selected-agent applicability, and actual
+// staging status for this launch — never a secret value. stagedKinds is the
+// set of credential MountKinds Audit already found in its computed mounts
+// slice (see Audit's stagedKinds comment); Staged is read from it directly,
+// never independently re-derived, so it can never drift from what Launch
+// would actually stage.
+func credentialSources(home, agent string, stagedKinds map[string]bool) []CredentialSource {
 	sources := make([]CredentialSource, 0, len(credentialSourceSpecs))
 	for _, spec := range credentialSourceSpecs {
 		path := spec.pathFrom(home)
-		sources = append(sources, CredentialSource{Type: spec.typ, HostPath: path, Present: isRegularFile(path)})
+		probe := probeCredentialFile(path)
+		sources = append(sources, CredentialSource{
+			Type:       spec.typ,
+			HostPath:   path,
+			Present:    probe == CredentialProbePresent,
+			Probe:      probe,
+			Applicable: credentialAppliesToAgent(spec.typ, agent),
+			Staged:     stagedKinds[spec.kind],
+		})
 	}
 	return sources
+}
+
+// probeCredentialFile classifies path's filesystem state into one of the
+// three CredentialProbe* states: CredentialProbeMissing when the path does
+// not exist (errors.Is(err, fs.ErrNotExist) — the AGENTS.md-documented way
+// to classify a filesystem-call error), CredentialProbeError for any other
+// stat failure or a path that exists but is not a regular file (e.g. a
+// directory sitting where a credential file is expected), and
+// CredentialProbePresent for a readable regular file — the same condition
+// isRegularFile (launch.go) checks for the real mount plan. This is an
+// audit-local helper: launch.go's isRegularFile stays unchanged, since the
+// mount plan itself must keep collapsing "not a regular file" into a single
+// false rather than distinguishing why.
+func probeCredentialFile(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return CredentialProbeMissing
+		}
+		return CredentialProbeError
+	}
+	if !info.Mode().IsRegular() {
+		return CredentialProbeError
+	}
+	return CredentialProbePresent
 }
 
 // networkPosture classifies assembleOptionalFeatures' emitted args: a
@@ -522,6 +648,37 @@ func dindPosture(dindOn bool, opts Options, scope Scope) DindPosture {
 	}
 }
 
+// credentialStatusText renders c's three-state probe result plus its
+// staged/applicable annotation for WriteText's "Credential sources" section:
+// "present, staged" when it is actually mounted for this launch; "present,
+// not staged (not applicable to <agent>)" when the host file exists but the
+// mount plan never stages this credential type for agent; "absent" for a
+// plain-missing file; and "unreadable/error" for a probe failure distinct
+// from absence (a directory in place, a stat error, or any other
+// non-regular-file state). Probe is a plain string, not a compiler-enforced
+// enum, so an unrecognized value (e.g. a future probe state added without
+// updating this switch, or a test literal with a typo'd Probe) renders as a
+// visibly distinct "unknown probe state" — never silently collapsed into the
+// most reassuring "absent" text.
+func credentialStatusText(c CredentialSource, agent string) string {
+	switch c.Probe {
+	case CredentialProbeMissing:
+		return "absent"
+	case CredentialProbeError:
+		return "unreadable/error"
+	case CredentialProbePresent:
+		if c.Staged {
+			return "present, staged"
+		}
+		if !c.Applicable {
+			return fmt.Sprintf("present, not staged (not applicable to %s)", agent)
+		}
+		return "present, not staged"
+	default:
+		return fmt.Sprintf("unknown probe state %q", c.Probe)
+	}
+}
+
 // -- WriteText ---------------------------------------------------------
 
 // WriteText renders p as the `cenci audit` human-readable report: every
@@ -571,7 +728,11 @@ func (p Posture) WriteText(w io.Writer) error {
 		_, _ = fmt.Fprintln(bw, "  (none)")
 	}
 	for _, e := range p.Env {
-		_, _ = fmt.Fprintf(bw, "  %s\n", e.Name)
+		secretMark := ""
+		if e.Secret {
+			secretMark = " (secret)"
+		}
+		_, _ = fmt.Fprintf(bw, "  %s%s\n", e.Name, secretMark)
 	}
 
 	_, _ = fmt.Fprintln(bw, "\nForwarded exec env (per-exec, names only — values are never shown):")
@@ -588,11 +749,7 @@ func (p Posture) WriteText(w io.Writer) error {
 
 	_, _ = fmt.Fprintln(bw, "\nCredential sources:")
 	for _, c := range p.CredentialSources {
-		status := "absent"
-		if c.Present {
-			status = "present"
-		}
-		_, _ = fmt.Fprintf(bw, "  %s: %s (%s)\n", c.Type, c.HostPath, status)
+		_, _ = fmt.Fprintf(bw, "  %s: %s (%s)\n", c.Type, c.HostPath, credentialStatusText(c, p.Agent))
 	}
 
 	_, _ = fmt.Fprintln(bw, "\nNested Docker (sysbox-isolated):")
