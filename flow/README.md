@@ -444,12 +444,14 @@ are applied in a dedicated worktree, re-verified against the checker and the pro
 health gate, and shipped as a single reviewed PR (Phase 6 Apply) — the same
 worktree/single-PR guarantee every other pipeline skill follows.
 
-**Reserved for automatic, during-implement checks.** `.cenci/config.json`'s optional
-`maintenance` block (see
-[`flow/skills/configure/SKILL.md`](skills/configure/SKILL.md)) already documents the
-schema for changed-file maintenance checks during `/cenci:implement`, but that wiring
-is not active this release — run `/cenci:maintain` on demand for full coverage until
-it ships.
+**Automatic, during-implement.** `/cenci:implement`'s Phase 8 already runs the
+deterministic maintenance checker automatically against doc-affecting changed files on
+every run — repairing safe findings and reporting the rest, no setup required. This is
+existing pipeline behavior, independent of the `maintenance` config block below.
+`.cenci/config.json`'s optional `maintenance` block (see
+[`flow/skills/configure/SKILL.md`](skills/configure/SKILL.md)) documents reserved
+fields for future opt-out/reminder control — those fields are advisory this release and
+don't yet gate the check above.
 
 ### UI tickets
 

@@ -95,7 +95,8 @@ cenci handles the worktree, tests, implementation, refactoring, specialist revie
 rebase, and pull request. `/cenci:babysit` can then follow CI and review activity
 through to merge while preserving the same human gates. The approved `.plans/` file
 is a durable handoff, so the run can be resumed or dispatched without recreating the
-decisions behind it.
+decisions behind it. Normal `/cenci:implement` runs already automatically check
+documentation and generated indexes affected by their own changes.
 
 `/cenci:maintain` — audit and repair workflow, docs, client adapters, and accumulated
 rules — is a separate, on-demand full-repo audit; it runs standalone and needs no

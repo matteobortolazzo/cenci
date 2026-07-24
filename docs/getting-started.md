@@ -106,6 +106,10 @@ for the generated file layout, including the monorepo progressive-disclosure str
 cenci's maintenance checks are a core workflow feature, not a lazyboards add-on — they
 work the same whether or not you ever set up a board.
 
+Every `/cenci:implement` run already automatically checks documentation and generated
+indexes affected by the files it changes, and repairs or reports what it finds — no
+setup required.
+
 For a full, on-demand audit of the whole project — workflow structure, docs, client
 adapters (Claude Code, Codex, OpenCode), and accumulated rules — run:
 
