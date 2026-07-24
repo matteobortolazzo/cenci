@@ -1474,6 +1474,28 @@ n_ce_fail="$(count_results "config-examples" "fail")"
 [[ "${n_ce_fail:-0}" =~ ^[0-9]+$ ]] && [[ "${n_ce_fail}" -ge 2 ]] || fail "case39b wrong config nesting and type must each fail (got ${n_ce_fail:-N/A})"
 rm -rf "${ROOT}"
 
+# Case 39c: schema paths carrying two [] array markers (e.g.
+# projects[].stack.testing[]) must match literally — an unquoted bash pattern
+# match misparses them as bracket expressions and falsely rejects a
+# schema-valid array example.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/docs"
+cat > "${ROOT}/docs/array-testing-config.md" <<'EOF'
+```json
+{
+  "isMonorepo": true,
+  "projects": [
+    { "slug": "api", "path": "api", "stack": { "testing": ["xunit", "jasmine"] } }
+  ]
+}
+```
+EOF
+run_check "${ROOT}"
+n_ce_fail="$(count_results "config-examples" "fail")"
+is_eq0 "${n_ce_fail}" || fail "case39c projects[].stack.testing array example is schema-valid and must not fail config-examples (got ${n_ce_fail})"
+rm -rf "${ROOT}"
+
 # Case 40: the hand-curated client matrix row set is exactly the union of
 # portable and user-invocable skills.
 ROOT="$(mktemp -d)"

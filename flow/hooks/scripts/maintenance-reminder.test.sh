@@ -175,7 +175,9 @@ for mode in disabled offline malformed-workflow malformed-runs malformed-jobs au
 done
 
 # Slow local and remote commands remain within the host hook's five-second
-# deadline and still produce a useful local status-unknown result.
+# deadline; an advisory run that cannot finish inside its bounded timeout
+# contributes no local conclusion and stays silent instead of nagging every
+# session with an unknown-status reminder.
 repo="${TEST_ROOT}/slow-local"
 make_repo "$repo"
 sha="$(git -C "$repo" rev-parse HEAD)"
@@ -190,8 +192,7 @@ make_gh_stub "${repo}/bin" offline "$sha" "$NOW"
 SECONDS=0
 run_hook "$repo" "${repo}/bin" "${repo}/check.log"
 elapsed="$SECONDS"
-assert_advisory slow-local
-assert_contains "$OUT" "maintenance status is unknown" "slow-local reason"
+assert_silent slow-local
 [[ "$elapsed" -lt 5 ]] || fail "slow-local exceeded host hook budget (${elapsed}s)"
 
 repo="${TEST_ROOT}/slow-remote"
@@ -205,8 +206,9 @@ elapsed="$SECONDS"
 assert_silent slow-remote
 [[ "$elapsed" -lt 5 ]] || fail "slow-remote exceeded host hook budget (${elapsed}s)"
 
-# Checker timeout, infrastructure exit, and malformed output produce a bounded
-# status-unknown reminder without exposing raw diagnostics.
+# Checker timeout, infrastructure exit, and malformed output contribute no
+# local conclusion: the hook stays silent (never a permanent unknown-status
+# nag) and never exposes raw diagnostics.
 for mode in checker-timeout checker-exit-two checker-malformed; do
   repo="${TEST_ROOT}/${mode}"
   make_repo "$repo"
@@ -230,10 +232,22 @@ EOF
   esac
   make_gh_stub "${repo}/bin" active-success "$sha" "$NOW"
   run_hook "$repo" "${repo}/bin" "${repo}/check.log"
-  assert_advisory "$mode"
-  assert_contains "$OUT" "maintenance status is unknown" "$mode reason"
+  assert_silent "$mode"
   [[ "$OUT" != *"not json"* ]] || fail "$mode: raw checker output leaked"
 done
+
+# Consumer repos: the flow plugin ships this hook everywhere, but the checker
+# only exists in the cenci monorepo's own tree. Without
+# flow/skills/maintain/scripts/check.sh in the target repo the local advisory
+# is skipped entirely (mirroring Phase 8's applicability guard) instead of
+# reporting cenci-specific drift against an unrelated repository.
+repo="${TEST_ROOT}/consumer"
+make_repo "$repo"
+sha="$(git -C "$repo" rev-parse HEAD)"
+make_gh_stub "${repo}/bin" active-success "$sha" "$NOW"
+run_hook "$repo" "${repo}/bin" "${repo}/check.log"
+assert_silent consumer
+[[ ! -e "${repo}/check.log" ]] || fail "consumer: checker must not run without a target-tree check.sh"
 
 repo="${TEST_ROOT}/enabled-default"
 make_repo "$repo"

@@ -33,13 +33,19 @@ THRESHOLD_DAYS="${REMIND_AFTER_DAYS%%.*}"
 
 REASONS=()
 
-# Run the bundled static checker from an explicit absolute repository CWD.
+# Run the target repository's own static checker from an explicit absolute
+# repository CWD. The checker only exists in the cenci monorepo itself — in a
+# consumer repo the flow plugin is installed but the tree has no
+# flow/skills/maintain/scripts/check.sh, so this signal is skipped entirely,
+# mirroring Phase 8's applicability guard (the checker's repo-scoped checks
+# would otherwise report cenci-specific drift against an unrelated tree).
 # Advisory mode emits JSON on stdout and skips executable/network checks, so
 # it is safe for a bounded SessionStart hook and does not write a report file.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || finish_silent
-CHECKER="${SCRIPT_DIR}/../../skills/maintain/scripts/check.sh"
-LOCAL_CHECK_VALID=0
-if [[ "$CHECKER" = /* && -f "$CHECKER" ]] && command -v timeout >/dev/null 2>&1; then
+# A timeout, infrastructure exit, or malformed result contributes no local
+# conclusion — like every remote degradation path below, it stays silent
+# rather than turning an unfinished check into an every-session reminder.
+CHECKER="${ROOT}/flow/skills/maintain/scripts/check.sh"
+if [[ -f "$CHECKER" ]] && command -v timeout >/dev/null 2>&1; then
   set +e
   CHECK_JSON="$(cd "$ROOT" && timeout 2 bash "$CHECKER" --advisory 2>/dev/null)"
   CHECK_EXIT=$?
@@ -50,16 +56,12 @@ if [[ "$CHECKER" = /* && -f "$CHECKER" ]] && command -v timeout >/dev/null 2>&1;
     (.summary.warn | type) == "number" and
     .summary.mode == "advisory"
   ' <<<"$CHECK_JSON" >/dev/null 2>&1; then
-    LOCAL_CHECK_VALID=1
     LOCAL_FAIL="$(jq -r '.summary.fail | floor' <<<"$CHECK_JSON")"
     LOCAL_WARN="$(jq -r '.summary.warn | floor' <<<"$CHECK_JSON")"
     if [[ "$LOCAL_FAIL" -gt 0 || "$LOCAL_WARN" -gt 0 ]]; then
       REASONS+=("The bounded local maintenance advisory found ${LOCAL_FAIL} failing and ${LOCAL_WARN} warning check result(s). Run /cenci:maintain to inspect them.")
     fi
   fi
-fi
-if [[ "$LOCAL_CHECK_VALID" -ne 1 ]]; then
-  REASONS+=("The bounded local maintenance advisory could not produce a valid result, so current maintenance status is unknown. Run /cenci:maintain to inspect it.")
 fi
 
 is_sensitive_path() {

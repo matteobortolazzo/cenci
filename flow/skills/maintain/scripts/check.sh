@@ -287,13 +287,14 @@ project_path_is_safe() {
 # silent no-op; it never widens what a check body scans (that stays flow-scoped
 # per the #530 charter).
 resolve_project_dirs() {
-  local cfg="$ROOT/.cenci/config.json" p slug jq_out jq_rc=0 any_fail=0
+  local cfg="$ROOT/.cenci/config.json" p slug jq_out jq_rc=0 any_fail=0 checked=0
   PROJECT_PATHS=()
   PROJECT_PATHS_OK=1
   if [[ -f "$cfg" && "$(config_is_monorepo "$cfg")" == "true" ]]; then
     jq_out="$(jq -r '.projects[]? | [(.slug // "(unknown)"), (.path // "")] | @tsv' "$cfg" 2>/dev/null)"
     jq_rc=$?
     if [[ "$jq_rc" -eq 0 ]]; then
+      checked=1
       while IFS=$'\t' read -r slug p; do
         [[ -n "$slug" || -n "$p" ]] || continue
         if ! project_path_is_safe "$p"; then
@@ -317,9 +318,13 @@ resolve_project_dirs() {
     # separately by check_invalid_json's own dedicated result.
   fi
   [[ "${#PROJECT_PATHS[@]}" -eq 0 ]] && PROJECT_PATHS=("")
-  if [[ "$jq_rc" -eq 0 && "$any_fail" -eq 0 ]]; then
+  # Only a monorepo config whose project list was actually read earns a
+  # result: a single-repo or absent config has no configured paths to
+  # validate, so claiming "all paths stay within the repository" there
+  # would be a pass for a check that never ran.
+  if [[ "$checked" -eq 1 && "$any_fail" -eq 0 ]]; then
     add_result config-paths "(repo)" pass "all configured project paths stay within the repository" ""
-  elif [[ "${jq_rc:-0}" -ne 0 ]]; then
+  elif [[ "$jq_rc" -ne 0 ]]; then
     add_result config-paths "(repo)" skip "configured project paths could not be read from invalid JSON" ""
   fi
 }
@@ -1457,10 +1462,18 @@ config_schema_types() {
   for entry in "${CONFIG_SCHEMA[@]}"; do
     pattern="${entry%%|*}"
     types="${entry#*|}"
-    if [[ "$path" == $pattern ]]; then
-      printf '%s' "$types"
-      return 0
+    # `*` (user-defined map keys, e.g. mcpServers.*) is the only pattern
+    # metacharacter honored here. Every other path must compare literally:
+    # an unquoted bash pattern match would misparse the [] array markers as
+    # bracket expressions (a pattern with two [] pairs, like
+    # projects[].stack.testing[], can never match its own literal path).
+    if [[ "$pattern" == *'*'* ]]; then
+      [[ "$path" == $pattern ]] || continue
+    else
+      [[ "$path" == "$pattern" ]] || continue
     fi
+    printf '%s' "$types"
+    return 0
   done
   return 1
 }
