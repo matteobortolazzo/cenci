@@ -219,8 +219,8 @@ run)
   ;;
 inspect)
   case "$*" in
-  *'.HostConfig.NetworkMode'*) fvb OBSERVED_POSTURE "cenci-sandbox:latest|bridge|runc||\n"; exit "$(fe OBSERVED_POSTURE)" ;;
-  *'cenci-sand.dind'*) fvb REUSE_POSTURE "|runc|0\nworkspace-vol::/workspace\n" ;;
+  *'.HostConfig.NetworkMode'*) fvb OBSERVED_POSTURE "cenci-sandbox:latest|bridge|runc||\n\n"; exit "$(fe OBSERVED_POSTURE)" ;;
+  *'cenci-sand.dind'*) fvb REUSE_POSTURE "|runc|0\nworkspace-vol::/workspace\n\n" ;;
   *State.Status*) fv INSPECT_STATE "running 0"; printf '\n' ;;
   *'.RW'*) fvb INSPECT_MOUNTS "" ;;
   esac

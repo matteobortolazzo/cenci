@@ -1009,7 +1009,7 @@ func TestAudit_ObservedMode_RunningHostNetwork_BasisRunningWeakenedWithoutFlag(t
 	eng, _ := auditEngineWithFakeRuntime(t)
 	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
 	t.Setenv("FAKE_OBSERVED_POSTURE", "cenci-sandbox:latest|host|runc||0\n"+
-		"/host/repo::/workspace::true\n")
+		"/host/repo::/workspace::true\n\n")
 
 	posture, err := eng.Audit(Options{Agent: "claude"})
 	if err != nil {
@@ -1054,7 +1054,7 @@ func TestAudit_ObservedMode_MountsImageDindRuntimeVolumesFromInspect(t *testing.
 		repo+"::/workspace::true\n"+
 		"claude-cenci-home-repo::/home/dev::true\n"+
 		"claude-cenci-dind-repo::/var/lib/docker::true\n"+
-		"/run/user/1000/cenci-sockets::"+cenciSocketMountDest+"::true\n")
+		"/run/user/1000/cenci-sockets::"+cenciSocketMountDest+"::true\n\n")
 
 	posture, err := eng.Audit(Options{Agent: "claude"})
 	if err != nil {
@@ -1114,7 +1114,7 @@ func TestAudit_ObservedMode_HostSocketMount_BoundaryWeakening(t *testing.T) {
 	eng, _ := auditEngineWithFakeRuntime(t)
 	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
 	t.Setenv("FAKE_OBSERVED_POSTURE", "cenci-sandbox:latest|bridge|runc||0\n"+
-		"/var/run/docker.sock::/var/run/docker.sock::true\n")
+		"/var/run/docker.sock::/var/run/docker.sock::true\n\n")
 
 	posture, err := eng.Audit(Options{Agent: "claude"})
 	if err != nil {
@@ -1410,7 +1410,7 @@ func TestAudit_ObservedMode_DindLabelUnknown_NotRenderedAsDisabledOrBaseline(t *
 	eng, _ := auditEngineWithFakeRuntime(t)
 	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
 	t.Setenv("FAKE_OBSERVED_POSTURE", "cenci-sandbox:latest|bridge|runc|some-unrecognized-value|0\n"+
-		"/host/repo::/workspace::true\n")
+		"/host/repo::/workspace::true\n\n")
 
 	posture, err := eng.Audit(Options{Agent: "claude"})
 	if err != nil {

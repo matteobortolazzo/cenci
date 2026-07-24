@@ -94,6 +94,12 @@ func (e *Engine) inspectObservedPosture(name string) (observedInspect, error) {
 // field that isn't exactly "true" or "false" are all rejected the same way
 // — a dropped or misread line could be exactly the host-socket bind or
 // host-network mode the boundary-weakening checks depend on.
+//
+// Real `docker inspect --format` appends its own trailing newline on top of
+// the template's own per-mount {{"\n"}} action, so the captured stdout
+// always ends with one blank line after the last mount (or right after the
+// header when there are no mounts) — same artifact as parseReusePosture's,
+// trimmed the same way (ticket #684) rather than rejected.
 func parseObservedInspect(out string) (observedInspect, error) {
 	lines := splitLines(out)
 	if len(lines) == 0 {
@@ -110,7 +116,11 @@ func parseObservedInspect(out string) (observedInspect, error) {
 		DindLabel:   fields[3],
 		DindEnv:     fields[4] == "1",
 	}
-	for _, line := range lines[1:] {
+	mountLines := lines[1:]
+	for len(mountLines) > 0 && mountLines[len(mountLines)-1] == "" {
+		mountLines = mountLines[:len(mountLines)-1]
+	}
+	for _, line := range mountLines {
 		parts := strings.SplitN(line, "::", 3)
 		if len(parts) != 3 {
 			return observedInspect{}, fmt.Errorf("malformed observed inspect mount line %q: expected \"source::destination::rw\": %w", line, ErrMalformedObservedInspect)

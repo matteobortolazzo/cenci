@@ -55,7 +55,7 @@ case "$1" in
 ps) printf '%s' "${FAKE_PS:-}"; exit "${FAKE_PS_EXIT:-0}" ;;
 inspect)
   case "$*" in
-  *'.HostConfig.NetworkMode'*) printf '%b' "${FAKE_OBSERVED_POSTURE:-cenci-sandbox:latest|bridge|runc||\n}"; exit "${FAKE_OBSERVED_POSTURE_EXIT:-0}" ;;
+  *'.HostConfig.NetworkMode'*) printf '%b' "${FAKE_OBSERVED_POSTURE:-cenci-sandbox:latest|bridge|runc||\n\n}"; exit "${FAKE_OBSERVED_POSTURE_EXIT:-0}" ;;
   esac
   ;;
 esac

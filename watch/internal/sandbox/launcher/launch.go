@@ -851,6 +851,15 @@ func (e *Engine) inspectReusePosture(name string) (reusePosture, error) {
 // "::" is rejected the same way rather than silently dropped, since the
 // dropped line could be exactly the host-socket bind or DinD storage mount
 // the security checks depend on (ticket #628).
+//
+// Real `docker inspect --format` appends its own trailing newline on top of
+// the template's own per-mount "\n", so the captured stdout always ends with
+// one blank line after the last mount (or right after the header when there
+// are no mounts). That blank line is an artifact of the inspect output's
+// fixed structure, not attacker/container-supplied mount data, so trailing
+// empty mount lines are trimmed before parsing rather than rejected — any
+// non-trailing empty or malformed line still fails closed as before
+// (ticket #684).
 func parseReusePosture(out string) (reusePosture, error) {
 	lines := splitLines(out)
 	if len(lines) == 0 {
@@ -865,7 +874,11 @@ func parseReusePosture(out string) (reusePosture, error) {
 		Runtime:   fields[1],
 		DindEnv:   fields[2] == "1",
 	}
-	for _, line := range lines[1:] {
+	mountLines := lines[1:]
+	for len(mountLines) > 0 && mountLines[len(mountLines)-1] == "" {
+		mountLines = mountLines[:len(mountLines)-1]
+	}
+	for _, line := range mountLines {
 		source, dest, ok := strings.Cut(line, "::")
 		if !ok {
 			return reusePosture{}, fmt.Errorf("malformed reuse posture mount line %q: expected \"source::destination\"", line)

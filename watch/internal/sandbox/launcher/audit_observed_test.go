@@ -187,3 +187,44 @@ func TestParseObservedInspect_MalformedMountRWField_FailsClosedWithSentinel(t *t
 		t.Errorf("parseObservedInspect unrecognized-RW error = %v, want errors.Is(err, ErrMalformedObservedInspect) to hold", err)
 	}
 }
+
+// TestParseObservedInspect_TrailingBlankLineFromRealDockerInspect_IsTolerated
+// pins ticket #684's fix, mirroring parseReusePosture's own regression test:
+// real `docker inspect --format` appends its own trailing newline on top of
+// the template's own per-mount {{"\n"}} action, so the captured stdout
+// always ends with one blank line after the last mount (or right after the
+// header when there are no mounts). Before this fix, that blank line was
+// rejected as a malformed mount line, breaking `cenci audit`/`security
+// explain` against any real, already-running container. A non-trailing
+// malformed line must still fail closed exactly as before.
+func TestParseObservedInspect_TrailingBlankLineFromRealDockerInspect_IsTolerated(t *testing.T) {
+	out := "cenci-sandbox:latest|bridge|runc||0\n" +
+		"/host/repo::/workspace::true\n\n"
+
+	got, err := parseObservedInspect(out)
+	if err != nil {
+		t.Fatalf("parseObservedInspect(%q): %v", out, err)
+	}
+	if len(got.Mounts) != 1 || got.Mounts[0].Source != "/host/repo" || got.Mounts[0].Destination != "/workspace" {
+		t.Errorf("parseObservedInspect(%q) Mounts = %+v, want a single /host/repo::/workspace mount", out, got.Mounts)
+	}
+
+	noMounts := "cenci-sandbox:latest|bridge|runc||0\n\n"
+	got, err = parseObservedInspect(noMounts)
+	if err != nil {
+		t.Fatalf("parseObservedInspect(%q): %v", noMounts, err)
+	}
+	if len(got.Mounts) != 0 {
+		t.Errorf("parseObservedInspect(%q) Mounts = %+v, want empty", noMounts, got.Mounts)
+	}
+
+	stillMalformed := "cenci-sandbox:latest|bridge|runc||0\n" +
+		"/host/repo->/workspace (not double-colon delimited)\n\n"
+	_, err = parseObservedInspect(stillMalformed)
+	if err == nil {
+		t.Fatal("parseObservedInspect with a non-trailing malformed mount line = nil error, want a fail-closed rejection even with the trailing blank line present")
+	}
+	if !errors.Is(err, ErrMalformedObservedInspect) {
+		t.Errorf("parseObservedInspect(%q) error = %v, want errors.Is(err, ErrMalformedObservedInspect) to hold", stillMalformed, err)
+	}
+}
