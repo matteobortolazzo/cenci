@@ -21,7 +21,7 @@ scope and planning decisions human-gated.
 | `/cenci:address-review <pr-number>` | Address PR review comments — fetch, evaluate, fix, reply, push, re-request review |
 | `/cenci:babysit <pr-number>` | Persistent PR follow-through — periodically checks CI and new review comments and drives them to resolution until the PR merges or closes |
 | `/cenci:sync` | Pull latest main, rebase active worktrees, prune stale remotes, clean up merged branches |
-| `/cenci:maintain [structure\|docs\|clients\|rules]` | Audit and repair the project's workflow structure, documentation and generated indexes, client-adapter consistency (Claude Code, Codex, OpenCode), and accumulated rules — `rules` replaces the retired garden skill. Runs all four modes by default, or a single named mode; reports findings with proposed repairs for approval, then applies them in one PR. Independent of lazyboards. Normal `/cenci:implement` runs also apply automatic changed-file maintenance checks as part of their own worktree/PR |
+| `/cenci:maintain [structure\|docs\|clients\|rules]` | Audit and repair the project's workflow structure, documentation and generated indexes, client-adapter consistency (Claude Code, Codex, OpenCode), and accumulated rules — `rules` replaces the retired garden skill. Runs all four modes by default, or a single named mode; reports findings with proposed repairs for approval, then applies them in one PR. Independent of lazyboards |
 
 **Codex support**: Codex receives the portable convention skills below plus the full
 implementation workflow as a documented `AGENTS.md` equivalent. The interactive
@@ -426,11 +426,6 @@ On merge, babysit performs the `In Review → Implemented` board transition (see
 Maintenance is a core cenci workflow feature, independent of lazyboards — it works the
 same whether or not a board is set up.
 
-**Automatic, during implement.** Normal `/cenci:implement` runs automatically check the
-documentation and generated indexes affected by their own changed files, and repair
-drift as part of the same PR. This is on by default (see `.cenci/config.json`'s
-optional `maintenance` escape hatch in [`flow/skills/configure/SKILL.md`](skills/configure/SKILL.md)).
-
 **On demand, full audit.** `/cenci:maintain [structure|docs|clients|rules] [scope]`
 pairs the deterministic checker (`flow/skills/maintain/scripts/check.sh`) with four
 analyzer agents:
@@ -448,6 +443,13 @@ individually, or report only) — nothing is written until you approve. Approved
 are applied in a dedicated worktree, re-verified against the checker and the project's
 health gate, and shipped as a single reviewed PR (Phase 6 Apply) — the same
 worktree/single-PR guarantee every other pipeline skill follows.
+
+**Reserved for automatic, during-implement checks.** `.cenci/config.json`'s optional
+`maintenance` block (see
+[`flow/skills/configure/SKILL.md`](skills/configure/SKILL.md)) already documents the
+schema for changed-file maintenance checks during `/cenci:implement`, but that wiring
+is not active this release — run `/cenci:maintain` on demand for full coverage until
+it ships.
 
 ### UI tickets
 

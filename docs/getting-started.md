@@ -106,10 +106,6 @@ for the generated file layout, including the monorepo progressive-disclosure str
 cenci's maintenance checks are a core workflow feature, not a lazyboards add-on — they
 work the same whether or not you ever set up a board.
 
-Every `/cenci:implement` run automatically checks the documentation and generated
-indexes affected by the files it changed, and repairs drift as part of the same PR.
-This runs by default and needs no setup.
-
 For a full, on-demand audit of the whole project — workflow structure, docs, client
 adapters (Claude Code, Codex, OpenCode), and accumulated rules — run:
 
@@ -118,7 +114,7 @@ adapters (Claude Code, Codex, OpenCode), and accumulated rules — run:
 ```
 
 It reports findings with proposed repairs and opens a PR with the cleanup once you
-approve. See [flow/README.md's maintenance section](../flow/README.md#what-it-does)
+approve. See [flow/README.md's maintenance section](../flow/README.md#maintaining-the-project)
 for each mode (`structure`, `docs`, `clients`, `rules`).
 
 ## 7. Run a ticket
