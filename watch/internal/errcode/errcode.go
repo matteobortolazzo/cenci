@@ -81,6 +81,17 @@ const (
 	SandboxSessionNotFound Code = "CENCI-SANDBOX-SESSION-001"
 )
 
+// Sandbox DinD codes (CENCI-SANDBOX-DIND-*), attached by
+// watch/internal/sandbox/launcher/launch.go's warnDockerdStartupFailure and
+// diagnose.go's "Nested Docker:" section.
+const (
+	// SandboxDindStartupFailure is attached when the persistent
+	// .cenci-dockerd-startup-error marker is present: the nested dockerd
+	// failed to start (or crashed/OOMed later) without an intentional
+	// shutdown sentinel superseding it.
+	SandboxDindStartupFailure Code = "CENCI-SANDBOX-DIND-001"
+)
+
 // Daemon reachability codes (CENCI-DAEMON-*), attached by `cenci diagnose`'s
 // read-only daemon probe.
 const (
@@ -141,6 +152,17 @@ var registry = map[Code]Entry{
 			"cenci open <shortcut> to relaunch the session",
 		},
 	},
+	SandboxDindStartupFailure: {
+		Message: "The nested Docker daemon (DinD) failed to start or crashed.",
+		Causes: []string{
+			"The inner dockerd process failed to start (e.g. Sysbox not registered, resource limits).",
+			"The inner dockerd crashed or was OOM-killed after starting.",
+		},
+		Hints: []string{
+			"cenci diagnose <session>",
+			"docker/podman logs <container> --tail 50",
+		},
+	},
 	DaemonConnUnreachable: {
 		Message: "The cenci daemon did not answer on its event socket.",
 		Causes: []string{
@@ -174,6 +196,7 @@ var allCodes = []Code{
 	SandboxStartGenericEntrypoint,
 	SandboxStartReadinessTimeout,
 	SandboxSessionNotFound,
+	SandboxDindStartupFailure,
 	DaemonConnUnreachable,
 	DaemonSocketMissing,
 }

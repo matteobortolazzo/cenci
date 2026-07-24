@@ -38,8 +38,11 @@
     <text x="941" y="252" font-size="15" font-weight="650" fill="#f0e9ff">full permissions</text>
     <text x="941" y="276" font-size="12" fill="#bba8dd">inside the boundary</text>
 
+    <rect x="525" y="308" width="595" height="34" rx="10" fill="none" stroke="#55d6be" stroke-width="1.5" stroke-dasharray="4 3"/>
+    <text x="545" y="330" font-size="12" fill="#79e3d1">optional: --dind runs an isolated nested Docker daemon inside the container, via the Sysbox runtime</text>
+
     <rect x="50" y="377" width="1100" height="32" rx="10" fill="#221b18" stroke="#5e4632"/>
     <circle cx="72" cy="393" r="5" fill="#fbbf24"/>
-    <text x="88" y="398" font-size="12" fill="#e8d6af">Default: no inbound ports. Explicit opt-ins widen the boundary: --docker mounts the host socket; --host-network uses host networking.</text>
+    <text x="88" y="398" font-size="12" fill="#e8d6af">Default: no inbound ports. Explicit opt-ins widen the boundary: --dind runs a Sysbox-isolated nested Docker daemon; --host-network uses host networking.</text>
   </g>
 </svg>

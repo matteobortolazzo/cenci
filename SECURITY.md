@@ -53,13 +53,30 @@ Off by default and must be explicitly requested per-launch:
 `docker build`, and similar — is opt-in but, unlike the retired `--docker`
 Docker-outside-of-Docker flag it replaces, does **not** weaken the container boundary. The
 inner `dockerd` runs *inside* the sandbox container, isolated by the sysbox-runc OCI
-runtime, backed by its own dedicated storage volume — it never talks to the host's Docker
-daemon or socket. A container started with `docker` inside a dind sandbox stays inside that
-sandbox; it does not run on the host. This guarantee relies on sysbox's user-namespace
-isolation, and running an inner `dockerd` does add an additional daemon and in-container
-attack surface compared to a sandbox with no Docker at all — which is why dind stays
-opt-in; only enable it for repos that genuinely need in-container Docker. See
+runtime, backed by its own dedicated `*-cenci-dind-*` storage volume — it never talks to
+the host's Docker daemon or socket. A container started with `docker` inside a dind
+sandbox stays inside that sandbox; it does not run on the host. This guarantee relies on
+sysbox's user-namespace isolation, not on a separately virtualized kernel: the inner
+daemon still shares the same host kernel as the rest of the sandbox, so dind adds an
+inner daemon and a shared-kernel attack surface compared to a sandbox with no Docker at
+all — which is why dind stays opt-in; only enable it for repos that genuinely need
+in-container Docker. See
 [sandbox/README.md#nested-docker-sysbox](./sandbox/README.md#nested-docker-sysbox).
+
+The dedicated `*-cenci-dind-*` storage volume backing a dind session holds the inner
+Docker's own image/container layers, build caches, and any data those in-container images
+or containers write — potentially sensitive application/build state, the same way the
+credential-bearing home volume is. Remove it the same way credentials are removed above
+once you no longer need it:
+
+```bash
+docker volume rm claude-cenci-dind-<repo-slug>
+# or, for Codex sessions:
+docker volume rm codex-cenci-dind-<repo-slug>
+```
+
+`cenci sandbox prune --volumes` and full `install.sh uninstall` both inventory and offer
+to remove these volumes alongside the credential-bearing home volumes.
 
 ### Credentials
 

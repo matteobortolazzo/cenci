@@ -185,3 +185,62 @@ func TestDiagnoseCodes_ExistAndAreDistinct(t *testing.T) {
 		}
 	}
 }
+
+// TestDindStartupFailureCode_ExistsAndIsRegistered pins ticket #630's new
+// error identifier: a persistent dockerd startup-failure marker (surfaced
+// non-fatally before first attach by launch.go's warnDockerdStartupFailure,
+// and always by diagnose.go's "Nested Docker:" section) must attach
+// CENCI-SANDBOX-DIND-001. The code must satisfy the CENCI-<AREA>-<SUBAREA>-
+// <NNN> format, resolve to a real (non-empty Message/Causes/Hints) Entry via
+// Lookup, and stay pairwise distinct from every other registered code so this
+// new dind failure class never silently collapses onto an existing
+// identifier.
+func TestDindStartupFailureCode_ExistsAndIsRegistered(t *testing.T) {
+	if SandboxDindStartupFailure != "CENCI-SANDBOX-DIND-001" {
+		t.Errorf("SandboxDindStartupFailure = %q, want CENCI-SANDBOX-DIND-001", SandboxDindStartupFailure)
+	}
+	if !codeFormat.MatchString(string(SandboxDindStartupFailure)) {
+		t.Errorf("SandboxDindStartupFailure %q does not match format %s", SandboxDindStartupFailure, codeFormat.String())
+	}
+
+	entry, ok := Lookup(SandboxDindStartupFailure)
+	if !ok {
+		t.Fatalf("Lookup(%s) = _, false; want true", SandboxDindStartupFailure)
+	}
+	if entry.Message == "" {
+		t.Errorf("Lookup(%s).Message is empty", SandboxDindStartupFailure)
+	}
+	if len(entry.Causes) == 0 {
+		t.Errorf("Lookup(%s).Causes is empty", SandboxDindStartupFailure)
+	}
+	if len(entry.Hints) == 0 {
+		t.Errorf("Lookup(%s).Hints is empty", SandboxDindStartupFailure)
+	}
+
+	others := []Code{
+		SandboxStartAgentCLIMissing,
+		SandboxStartGenericEntrypoint,
+		SandboxStartReadinessTimeout,
+		SandboxSessionNotFound,
+		DaemonConnUnreachable,
+		DaemonSocketMissing,
+	}
+	for _, other := range others {
+		if SandboxDindStartupFailure == other {
+			t.Fatalf("SandboxDindStartupFailure must be distinct from %q, both = %q", other, other)
+		}
+	}
+}
+
+// TestDindStartupFailureCode_IsInAllCodes asserts the new constant is wired
+// into allCodes (the same list init() cross-checks against registry), so
+// AllCodes()-driven exhaustiveness guards elsewhere (e.g. launcher's
+// TestSeverityForCode_AllRegisteredCodesAreExplicitlyMapped) actually see it.
+func TestDindStartupFailureCode_IsInAllCodes(t *testing.T) {
+	for _, c := range AllCodes() {
+		if c == SandboxDindStartupFailure {
+			return
+		}
+	}
+	t.Errorf("AllCodes() does not include SandboxDindStartupFailure (%s); it must be added to allCodes in errcode.go", SandboxDindStartupFailure)
+}

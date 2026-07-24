@@ -142,6 +142,43 @@ cenci diagnose <session>
 **Platform notes**: None specific to this code — container naming and `--rm`
 auto-removal behave identically across Docker and Podman.
 
+## CENCI-SANDBOX-DIND-001
+
+**Meaning**: The nested Docker daemon (DinD) failed to start, or crashed/OOMed
+after starting, without an intentional-shutdown sentinel superseding the
+marker. `sandbox/lib/dind.sh` persists this to
+`/home/dev/.cenci-dockerd-startup-error`. The launcher's
+`warnDockerdStartupFailure` surfaces it as a non-fatal warning right before
+the first agent attach (the session still attaches — only nested Docker is
+unavailable), and `cenci diagnose <session>`'s "Nested Docker:" section
+always reports it for dind sessions.
+
+**Common causes**:
+- The inner `dockerd` process failed to start (e.g. Sysbox is not registered
+  with the container runtime, or resource limits prevent it from starting).
+- The inner `dockerd` crashed or was OOM-killed sometime after starting.
+
+**Diagnostic commands**:
+```bash
+cenci diagnose <session>
+docker/podman logs <container> --tail 50
+```
+
+**Recovery procedure**:
+1. Run `cenci diagnose <session>` to read the captured diagnostic.
+2. Confirm Sysbox is registered with the runtime (`cenci doctor`) if nested
+   Docker never started at all.
+3. Stop and relaunch the session with `--dind` (`cenci sandbox stop
+   <session>`, then `cenci open <shortcut> --dind`) once the underlying cause
+   is addressed.
+4. Re-run `cenci diagnose <session> --verify` — it re-reads the same marker
+   and reports `[pass]` once a clean relaunch supersedes the prior failure.
+
+**Platform notes**: DinD requires the Sysbox container runtime to be
+registered with Docker; on Podman-preferred dual-runtime hosts, `cenci
+doctor` still probes Docker's Sysbox registration independently since dind
+sessions specifically require it.
+
 ## CENCI-DAEMON-CONN-001
 
 **Meaning**: The cenci daemon's event socket exists but nothing answers a

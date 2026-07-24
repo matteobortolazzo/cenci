@@ -68,6 +68,7 @@ This prevents readers and future implementers from assuming the code is actively
 | `CENCI-SANDBOX-START-002` | Sandbox / Start | The sandbox entrypoint failed during container startup (boot log, generic entrypoint-trap marker, container runtime logs, or fully generic fallback). |
 | `CENCI-SANDBOX-START-003` | Sandbox / Start | The sandbox container did not signal readiness within the readiness-poll budget. Registry-only: registered (message, causes, hints) but not yet wired into any detection path — neither `waitUntilReady` nor `cenci diagnose` attaches it today (see below). Reserved for future use. |
 | `CENCI-SANDBOX-SESSION-001` | Sandbox / Session | No container exists for the requested sandbox session (never launched, launched under a different scope, or already auto-removed by `--rm`). Attached by `cenci diagnose`. |
+| `CENCI-SANDBOX-DIND-001` | Sandbox / Dind | The nested Docker daemon (DinD) failed to start, or crashed/OOMed after starting, without an intentional-shutdown sentinel superseding the marker. Attached by the launcher's before-attach warning and by `cenci diagnose`. |
 | `CENCI-DAEMON-CONN-001` | Daemon / Conn | The cenci daemon's event socket exists but did not answer a read-only dial. Attached by `cenci diagnose`. |
 | `CENCI-DAEMON-SOCKET-001` | Daemon / Socket | The cenci daemon's event socket does not exist at all. Attached by `cenci diagnose`. |
 
@@ -93,3 +94,12 @@ it. `waitUntilReady`'s own `did not become ready within 60 seconds` message
 still does not attach `CENCI-SANDBOX-START-003` itself — wiring a
 readiness-timeout detection path (in `launch.go`, `diagnose.go`, or both) to
 attach it is left to a follow-up.
+
+`CENCI-SANDBOX-DIND-001` (#630) is attached in two places: `launch.go`'s
+`warnDockerdStartupFailure` prints a prominent, non-fatal warning with it
+right before the first agent attach when the persistent
+`.cenci-dockerd-startup-error` marker is present, and `diagnose.go`'s always-
+on "Nested Docker:" section attaches a `SeverityDegraded` finding with it
+whenever that marker is present for a dind session. Severity is `Degraded`
+(not fatal) because the agent session still works — only nested Docker
+inside the container is unavailable.

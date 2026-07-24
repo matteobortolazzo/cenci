@@ -2,6 +2,8 @@ package launcher
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -25,6 +27,7 @@ func TestSeverityForCode_MapsRegisteredCodesToTheirTier(t *testing.T) {
 		{"readiness timeout", errcode.SandboxStartReadinessTimeout, SeverityDegraded},
 		{"daemon unreachable", errcode.DaemonConnUnreachable, SeverityDegraded},
 		{"event socket missing", errcode.DaemonSocketMissing, SeverityDegraded},
+		{"dind startup failure", errcode.SandboxDindStartupFailure, SeverityDegraded},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -294,5 +297,117 @@ func TestPluginManifestVersion_OpencodeReportsCleanFailureWithoutReadingClaudePa
 	version, ok := e.pluginManifestVersion(scope, "opencode")
 	if ok || version != "" {
 		t.Errorf("pluginManifestVersion(opencode) = %q, %v; want \"\", false", version, ok)
+	}
+}
+
+// -- Nested Docker (#630): always-on 3-state "Nested Docker:" section -------
+//
+// Per the ticket's Q3, Diagnose must always print a "Nested Docker:" line
+// (never partial silence, per the package's #572 failure-visibility
+// convention): "not a dind session" when scope.DindVolumeName was never
+// created (a `volume inspect` miss), "no failure recorded" when the session
+// is dind but the dockerd-startup-error marker is absent, or the marker's
+// diagnostic content plus a Degraded CENCI-SANDBOX-DIND-001 finding when the
+// marker is present. These three tests use writeFakeRuntime (a real,
+// scriptable fake docker on PATH), not the "runtime does not exist" pattern
+// the tests above use, since exercising all three states needs a working
+// `volume inspect` + home-volume marker read.
+
+// dindDiagnoseScope returns a Scope with a realistic DindVolumeName set, so
+// Diagnose's `volume inspect scope.DindVolumeName` probe has something to
+// inspect (the fake only cares about the exit code FAKE_VOLUME_INSPECT_EXIT
+// scripts, not the name itself).
+func dindDiagnoseScope() Scope {
+	return Scope{
+		ContainerName:  "claude-cenci-test",
+		VolumeName:     "claude-cenci-home-test",
+		DindVolumeName: "claude-cenci-dind-test",
+		Image:          "cenci-sandbox:test",
+	}
+}
+
+func TestDiagnose_NestedDocker_NotADindSession(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := filepath.Join(fakeDir, "calls.txt")
+	writeFakeRuntime(t, fakeDir, "docker", callLog)
+	t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
+
+	var stdout, stderr bytes.Buffer
+	e := &Engine{Runtime: "docker", Stdout: &stdout, Stderr: &stderr}
+	// FAKE_VOLUME_INSPECT_EXIT=1: scope.DindVolumeName was never created —
+	// this session was never launched with --dind.
+	t.Setenv("FAKE_VOLUME_INSPECT_EXIT", "1")
+
+	if err := e.Diagnose(dindDiagnoseScope()); err != nil {
+		t.Fatalf("Diagnose: %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Nested Docker:") {
+		t.Errorf("expected an always-on \"Nested Docker:\" line (Q3), got:\n%s", out)
+	}
+	if !strings.Contains(out, "not a dind session") {
+		t.Errorf("expected the not-a-dind-session state, got:\n%s", out)
+	}
+	if strings.Contains(out, string(errcode.SandboxDindStartupFailure)) {
+		t.Errorf("did not expect %s when the session isn't dind at all, got:\n%s", errcode.SandboxDindStartupFailure, out)
+	}
+}
+
+func TestDiagnose_NestedDocker_NoFailureRecorded(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := filepath.Join(fakeDir, "calls.txt")
+	writeFakeRuntime(t, fakeDir, "docker", callLog)
+	t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
+
+	var stdout, stderr bytes.Buffer
+	e := &Engine{Runtime: "docker", Stdout: &stdout, Stderr: &stderr}
+	// FAKE_VOLUME_INSPECT_EXIT unset (default 0): the dind volume exists, so
+	// this is a genuine dind session. FAKE_DOCKERD_MARKER unset: no
+	// persistent dockerd-startup-error marker was ever written.
+
+	if err := e.Diagnose(dindDiagnoseScope()); err != nil {
+		t.Fatalf("Diagnose: %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Nested Docker:") {
+		t.Errorf("expected an always-on \"Nested Docker:\" line (Q3), got:\n%s", out)
+	}
+	if !strings.Contains(out, "no failure recorded") {
+		t.Errorf("expected the no-failure-recorded state for a healthy dind session, got:\n%s", out)
+	}
+	if strings.Contains(out, string(errcode.SandboxDindStartupFailure)) {
+		t.Errorf("did not expect %s when no dockerd marker was ever written, got:\n%s", errcode.SandboxDindStartupFailure, out)
+	}
+}
+
+func TestDiagnose_NestedDocker_MarkerPresent_AttachesDegradedFinding(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := filepath.Join(fakeDir, "calls.txt")
+	writeFakeRuntime(t, fakeDir, "docker", callLog)
+	t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
+
+	var stdout, stderr bytes.Buffer
+	e := &Engine{Runtime: "docker", Stdout: &stdout, Stderr: &stderr}
+	const marker = "2026-07-24T09:00:00Z dockerd exited with status 1: failed to start daemon: mkdir /var/lib/docker/overlay2: read-only file system"
+	t.Setenv("FAKE_DOCKERD_MARKER", marker)
+
+	if err := e.Diagnose(dindDiagnoseScope()); err != nil {
+		t.Fatalf("Diagnose: %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Nested Docker:") {
+		t.Errorf("expected an always-on \"Nested Docker:\" line (Q3), got:\n%s", out)
+	}
+	if !strings.Contains(out, marker) {
+		t.Errorf("expected the dockerd-startup-error marker's diagnostic surfaced verbatim, got:\n%s", out)
+	}
+	if !strings.Contains(out, string(errcode.SandboxDindStartupFailure)) {
+		t.Errorf("expected %s attached for the recorded dockerd startup failure, got:\n%s", errcode.SandboxDindStartupFailure, out)
+	}
+	if !strings.Contains(out, string(SeverityDegraded)) {
+		t.Errorf("expected degraded severity for the dind startup-failure finding, got:\n%s", out)
 	}
 }
