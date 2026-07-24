@@ -23,6 +23,9 @@ One install adds the three operating layers that make longer agent runs practica
 - **Workflow:** turn an issue into a tested, specialist-reviewed pull request with
   human gates for the decisions that matter.
 - **Attention:** see which sessions are running, done, idle, or waiting for you.
+- **Maintenance:** keep the repo's own workflow, docs, and client adapters healthy —
+  `/cenci:maintain` audits and repairs structure, docs, client adapters, and
+  accumulated rules, and works whether or not lazyboards is set up.
 
 ## See every session without watching every terminal
 
@@ -92,7 +95,13 @@ cenci handles the worktree, tests, implementation, refactoring, specialist revie
 rebase, and pull request. `/cenci:babysit` can then follow CI and review activity
 through to merge while preserving the same human gates. The approved `.plans/` file
 is a durable handoff, so the run can be resumed or dispatched without recreating the
-decisions behind it.
+decisions behind it. Normal `/cenci:implement` runs also automatically check the
+documentation and generated indexes affected by their own changes, so drift is caught
+as part of the same PR rather than accumulating silently.
+
+`/cenci:maintain` — audit and repair workflow, docs, client adapters, and accumulated
+rules — is a separate, on-demand full-repo audit; it runs standalone and needs no
+lazyboards setup.
 
 [Explore the workflow and every skill →](flow/README.md)
 

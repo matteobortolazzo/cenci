@@ -56,5 +56,11 @@
   },
   "lazyboards": {
     "enabled": true
+  },
+  "maintenance": {
+    "enabled": true,
+    "checkDuringImplement": true,
+    "remindAfterDays": 30,
+    "generatedDocs": true
   }
 }

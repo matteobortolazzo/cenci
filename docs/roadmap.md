@@ -16,6 +16,9 @@ and maintenance follow-ups remain in the
 - Persisted-plan handoff, `Planned` auto-pickup, capacity/budget gates, and failure
   reconciliation
 - Sandbox lifecycle cleanup with `cenci sandbox prune` and optional volume removal
+- `/cenci:maintain` — on-demand audit-and-repair of workflow structure, docs, client
+  adapters, and accumulated rules, independent of lazyboards; rules curation (formerly
+  the standalone garden skill, now retired) lives in its `rules` mode
 
 ## In development
 
