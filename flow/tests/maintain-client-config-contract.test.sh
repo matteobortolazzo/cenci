@@ -70,6 +70,9 @@ assert_contains "${codex}" 'Mode `docs` launches only `docs-maintainer`.' "Codex
 assert_contains "${codex}" 'Mode `clients` launches only `portability-maintainer`.' "Codex clients worker dispatch"
 assert_contains "${codex}" 'Mode `rules` launches only `rules-maintainer`.' "Codex rules worker dispatch"
 assert_contains "${codex}" 'Mode `all` launches all four workers in parallel.' "Codex all-mode worker dispatch"
+assert_contains "${codex}" 'Mode `backlog` launches only `backlog-maintainer`;' "Codex backlog worker dispatch"
+assert_contains "${codex}" 'it is excluded from `all` and must be requested explicitly.' "Codex backlog excluded from all"
+assert_contains "${codex}" 'Mode `backlog` uses a different apply path:' "Codex backlog GitHub-issue apply-path redirect"
 assert_contains "${codex}" 'If scope is `watch` or `sandbox`, report `not yet covered` and stop before Phase 2.' "Codex scope no-op"
 assert_contains "${codex}" 'Treat an errored, timed-out, or malformed worker result as an incomplete run' "Codex worker failure remains incomplete"
 
@@ -96,6 +99,12 @@ assert_contains "${maintain_skill}" 'verified absolute `<repo-root>` working dir
 assert_contains "${maintain_skill}" 'verified absolute `<worktree-path>` working directory' "Claude apply checker absolute CWD"
 assert_before "${maintain_skill}" 'check.sh --advisory' '## Phase 5 — Approval' "Claude advisory check precedes approval"
 assert_before "${maintain_skill}" '## Phase 5 — Approval' 'Run the executable/default checker' "Claude executable check follows approval"
+
+# backlog mode parity: both clients name backlog's sole analyzer, exclude it
+# from `all`, and route it to the GitHub-issue apply path (no worktree/PR).
+assert_contains "${maintain_skill}" 'launch only `backlog-maintainer`' "Claude backlog mode dispatch"
+assert_contains "${maintain_skill}" 'is excluded from `all` and must be' "Claude backlog excluded from all"
+assert_contains "${maintain_skill}" '`backlog` mode uses a different apply path.' "Claude backlog GitHub-issue apply-path redirect"
 
 # Phase 8 always checks correctness; configuration only controls repair/UX.
 assert_contains "${phase8}" 'Core correctness checks always run in Phase 8.' "Phase 8 core checks are unconditional"

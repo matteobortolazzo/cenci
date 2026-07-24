@@ -17,11 +17,13 @@ allowed-tools: Read, Edit, Write, Grep, Glob, Task, Bash(git:*), Bash(gh:*), Bas
 
 There is no unified maintenance command. Structural, documentation, client-portability, and rule
 hygiene consistency each drift independently as the repo grows. This skill pairs a deterministic,
-LLM-free checker (`scripts/check.sh`) with four lightweight judgment-layer agents, reports every
+LLM-free checker (`scripts/check.sh`) with four lightweight repo-audit judgment agents (plus a
+fifth, opt-in `backlog` agent that consolidates the `Followup` ticket queue), reports every
 finding with evidence and a proposed repair, and only ever mutates the repo after explicit human
 approval, in a dedicated worktree, as one reviewed PR. `rules` mode curates `## Critical Rules`
 and topic-doc rule bullets — the same curation the retired garden skill used to perform, folded
-into this unified flow.
+into this unified flow; `backlog` mode groups and supersede-closes open `Followup` tickets, its
+one apply path that mutates GitHub issues rather than repo files.
 
 ## Context
 
@@ -31,8 +33,10 @@ Read the `shell-rules`, `worktrees`, and `subagent-safety` reference skills befo
 `git`/`gh` commands, creating the Apply-phase worktree, or delegating to the analyzer agents.
 
 **Parse `$ARGUMENTS`** into mode, scope, and additional context:
-- **Mode** — the first token. `structure`, `docs`, `clients`, or `rules` selects that single mode.
-  `all` (or an omitted/blank first token) is the default and runs all four modes together.
+- **Mode** — the first token. `structure`, `docs`, `clients`, `rules`, or `backlog` selects that single mode.
+  `all` (or an omitted/blank first token) is the default and runs the four repo-audit modes together;
+  `backlog`, which mutates GitHub issues rather than repo files, is excluded from `all` and must be
+  requested explicitly.
 - **Scope** — the next token, if it exactly matches a project `slug` from `.cenci/config.json`'s
   `projects` array (`flow`, `watch`, `sandbox`), narrows analysis to that project. Everything else
   is optional **additional context** (focus areas or constraints).
@@ -83,6 +87,8 @@ together, in a single message with parallel `Task` calls:
 - Mode `docs` → launch only `docs-maintainer` (see `modes/docs.md`).
 - Mode `clients` → launch only `portability-maintainer` (see `modes/clients.md`).
 - Mode `rules` → launch only `rules-maintainer` (see `modes/rules.md`).
+- Mode `backlog` → launch only `backlog-maintainer` (see `modes/backlog.md`); never part of `all`,
+  since its apply path mutates GitHub issues rather than repo files.
 - Mode `all` (default) → launch `structure-maintainer`, `docs-maintainer`,
   `portability-maintainer`, and `rules-maintainer` together.
 
@@ -97,7 +103,7 @@ as a silent "no findings".
 ## Phase 4 — Report
 
 Categories in scope for this ticket: Structure, Documentation drift, Generated index drift, Client
-mismatch, Test gap, Rule hygiene.
+mismatch, Test gap, Rule hygiene, Followup backlog.
 
 Each finding carries: ID, category, severity, location, evidence, proposed change, repair
 confidence, and required tests — the schema each analyzer agent documents in its own file.
@@ -136,6 +142,12 @@ Choosing **report only** ends the run right after the report above.
 Choosing it must end after reporting: no worktree, file mutation, ticket/label mutation, commit, push, or pull request.
 
 ## Phase 6 — Apply (worktree only)
+
+**`backlog` mode uses a different apply path.** It consolidates GitHub issues (merge duplicates, batch
+small items, promote), mutating no repository files — so it creates no worktree, branch, commit, or
+PR, and does not run the `scripts/check.sh`/health-gate re-verify below. For `backlog`, follow the
+GitHub-issue apply path in `modes/backlog.md` instead of the worktree procedure here; the rest of
+this section applies to the four repo-audit modes.
 
 **Run token**: Generate a per-run token once, before creating the worktree, per AGENTS.md's rule
 against unchecked command substitution for security-critical paths:

@@ -24,5 +24,6 @@ On-demand topic docs live at `docs/`:
 - `docs/pipeline-safety.md` — restart/recovery and risk-profile re-evaluation rules for multi-phase pipelines
 - `docs/shell-scripting-gotchas.md` — narrow shell/jq/grep pitfalls (CWD persistence, jq fallback semantics, contract-test markers)
 - `docs/adapter-contract.md` — the 8-property behavioral-parity contract client adapters (Claude Code, Codex) must satisfy, and its enforcement points
+- `docs/followup-triage.md` — the `Followup` capture-queue invariant and the `/cenci:maintain backlog` consolidation (merge/batch/supersede) mechanics
 
 `.claude/rules/` is reserved for files explicitly `@`-imported by this AGENTS.md (auto-loaded at session start). It is not used today.
