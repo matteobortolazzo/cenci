@@ -866,13 +866,38 @@ sources staged into the session (`~/.claude/.credentials.json`,
 whether each is present, named persistent volumes, and whether a
 repository-specific image or the shared monolith image is in play.
 
-Posture is *derived*, not inspected: `audit` reuses the same construction
-logic `open`/`Launch` uses to assemble mounts, env, and network flags, and
-classifies the result — it never requires a running container, a built
-image, or a container runtime, and never starts the daemon. Unlike
-`diagnose` (above), which inspects an already-running session's actual
-mounts, `audit` answers "what would a launch apply right now," which is also
-what [`cenci security explain`](#explain-the-security-posture-cenci-security-explain)
+Posture is **running when possible, planned otherwise** — a stable `basis`
+discriminator (`"running"` or `"planned"`) tells you which. When the
+current repo/agent's scoped container is actually running, `audit` inspects
+it read-only (`ps`/`inspect` only — never a mutating call) and reports its
+*real, current* mounts (ro/rw), image, network mode, nested-Docker state,
+and any detectable boundary weakening (e.g. a container that was actually
+launched with `--host-network`, or one with a host Docker/Podman socket
+mounted into it) — even if the current `cenci audit` invocation didn't pass
+that flag. When no scoped container is running (never launched, stopped, or
+stale), `audit` falls back to the same hypothetical next-launch derivation
+it has always used: it reuses the same construction logic `open`/`Launch`
+uses to assemble mounts, env, and network flags, and classifies the result
+— no running container, built image, or container runtime is required, and
+the daemon is never started. `forwardedEnv` and `reseedCreds` have no
+inspect source (they only apply to the *next* exec into a container), so a
+running-basis text report labels them `(next-exec — not observed from the
+running container)` rather than presenting them as observed facts.
+
+If a container IS running but its actual posture could **not** be verified
+(a `ps`/daemon failure, or an unreadable/malformed `inspect` response),
+`audit` still renders a full report — `basis:"planned"` plus a prominent,
+non-empty `inspectWarning` — rather than either failing hard or silently
+printing the reassuring default-safe baseline line. Exit stays 0 in this
+case: `audit` degrades to a visible warning, never a hard failure, and never
+a false "nothing to see here."
+
+This is also the difference from `diagnose` (above): `diagnose` reports an
+already-running session's raw inspected state (logs, exit code, mount paths)
+as a diagnostic tool, while `audit` reports the *security posture* — running
+when a container exists, otherwise the same "what would a launch apply
+right now" planned answer it has always given — which is also what
+[`cenci security explain`](#explain-the-security-posture-cenci-security-explain)
 builds on.
 
 Nested Docker (`--dind`, or a repo's `sandbox.dind` config) gets its own
@@ -885,26 +910,39 @@ default-safe baseline (no weakenings active) is reported explicitly, not
 just omitted.
 
 `cenci audit --json` emits the same data with stable field names
-(`agent`, `scope`, `image`, `workspace`, `network`, `dind`, `mounts`,
-`volumes`, `env`, `forwardedEnv`, `credentialSources`, `boundaryWeakenings`,
-`reseedCreds`) suitable for scripting or CI checks. As with the text report,
-no field ever carries a secret or credential *value* — only names, paths,
-and presence/status booleans. Each `credentialSources` entry carries `type`,
-`hostPath`, `present` (host file is a readable regular file), `probe`
-(`"present"` | `"missing"` | `"error"` — distinguishes a missing file from
-an unreadable/stat-error one), `applicable` (whether this credential type
-applies to the selected `--agent`), and `staged` (whether it is actually
-staged into this session by the real mount plan). Each `env` entry carries
-`name` and `secret` (whether the name is classified secret-bearing, e.g.
-`CONTEXT7_API_KEY`), matching how `forwardedEnv` is already classified.
+(`basis`, `agent`, `scope`, `image`, `workspace`, `network`, `dind`,
+`mounts`, `volumes`, `env`, `forwardedEnv`, `credentialSources`,
+`boundaryWeakenings`, `reseedCreds`, `inspectWarning`) suitable for
+scripting or CI checks. As with the text report, no field ever carries a
+secret or credential *value* — only names, paths, and presence/status
+booleans. `basis` is always present (`"running"` or `"planned"`, never a
+third value). `inspectWarning` is present with a non-empty string only
+when a running container's actual posture could not be verified (see
+above); it is omitted entirely otherwise, so `jq 'select(.inspectWarning)'`
+is a reliable "flag me if inspection failed" check. Each `credentialSources`
+entry carries `type`, `hostPath`, `present` (host file is a readable regular
+file), `probe` (`"present"` | `"missing"` | `"error"` — distinguishes a
+missing file from an unreadable/stat-error one), `applicable` (whether this
+credential type applies to the selected `--agent`), and `staged` (whether it
+is actually staged into this session by the real mount plan). Each `env`
+entry carries `name` and `secret` (whether the name is classified
+secret-bearing, e.g. `CONTEXT7_API_KEY`), matching how `forwardedEnv` is
+already classified.
 
-**Migration notes (additive, backward compatible):** `present` keeps its
-original meaning and does not by itself tell you whether a credential is
-mounted — a credential can be `present:true` but `staged:false` (e.g. Codex
-auth is present on host but the selected agent is Claude). Scripts and tools
-that need "is this credential actually mounted" must check `staged`, not
-`present`. `probe` distinguishes a genuinely missing file (`"missing"`) from
-an unreadable/stat-error one (`"error"`); both previously collapsed into
+**Migration notes (additive, backward compatible):** `basis` and
+`inspectWarning` are new top-level fields (ticket #627) — existing
+consumers that don't check them keep working unchanged, since a
+runtime-less environment (no container runtime installed) always reports
+`basis:"planned"` with `inspectWarning` omitted, matching `audit`'s
+behavior before this change. Scripts that want to distinguish an inspected
+running container's real posture from a hypothetical plan should start
+checking `basis`. `present` keeps its original meaning and does not by
+itself tell you whether a credential is mounted — a credential can be
+`present:true` but `staged:false` (e.g. Codex auth is present on host but
+the selected agent is Claude). Scripts and tools that need "is this
+credential actually mounted" must check `staged`, not `present`. `probe`
+distinguishes a genuinely missing file (`"missing"`) from an
+unreadable/stat-error one (`"error"`); both previously collapsed into
 `present:false`. Create-time `env` entries now mark secret-bearing names
 with `secret:true`, the same classification forwarded exec env already had.
 
@@ -925,20 +963,43 @@ cenci security explain --host-network       # explain as if launched with host n
 [--dind] [--no-dind] [--host-network] [--reseed-creds]` renders the same
 posture `cenci audit` derives as a plain-language "why this is/isn't safe"
 narrative instead of a tabular report: it reuses `audit`'s posture-detection
-logic verbatim, adding no new detection, only prose. The narrative opens
-with the threat-model framing from [SECURITY.md](../SECURITY.md) — the
-container, not the agent's own permissions, is the isolation boundary,
-since the agent runs unattended with no per-command approval — then walks
-through one paragraph per posture element (workspace/home mounts, other
-mounts such as the cenci socket/binary/gitconfig and named volumes, network
-mode, credential sources, and forwarded env var names), a dedicated
-"Nested Docker (sysbox-isolated)" section explaining why dind is not a
-boundary weakening, and a closing boundary-weakenings block that visually
-marks any opt-in weakening (`⚠`) or states the default-safe baseline
-explicitly when none apply.
+logic verbatim, adding no new detection, only prose. It explicitly states
+whether it is narrating the scoped container's **observed running state**
+(inspected directly) or a **plan** for the next launch (no running scoped
+container was found, or its state could not be verified) — the same
+`basis`/`inspectWarning` distinction `cenci audit` reports as JSON fields,
+narrated instead of tabulated. The narrative opens with the threat-model
+framing from [SECURITY.md](../SECURITY.md) — the container, not the agent's
+own permissions, is the isolation boundary, since the agent runs unattended
+with no per-command approval — then walks through one paragraph per posture
+element (workspace/home mounts, other mounts such as the cenci
+socket/binary/gitconfig and named volumes, network mode, credential
+sources, and forwarded env var names — labeled `(next-exec — not observed
+from the running container)` when the basis is running, since forwarded env
+only applies to the *next* exec), a dedicated "Nested Docker
+(sysbox-isolated)" section explaining why dind is not a boundary weakening,
+and a closing boundary-weakenings block that visually marks any opt-in
+weakening (`⚠`) or states the default-safe baseline explicitly when none
+apply (suppressed in favor of a prominent inspect-failure warning when the
+running container's actual posture could not be verified).
+
+The network paragraph states the same guarantee [SECURITY.md](../SECURITY.md)
+does: the default bridge network uses a separate network namespace and
+publishes no inbound ports, but outbound connections initiated from inside
+the container may still reach routable host, LAN, or internet services,
+depending on your container runtime and firewall configuration — this is
+*not* a claim of complete host isolation or universal outbound-only
+enforcement. `--host-network` additionally states what changes: a *shared*
+host network namespace, loss of network namespace separation, and
+host-`localhost` exposure, with the blast-radius warning kept front and
+center.
 
 ```
-cenci security explain: agent=claude scope=my-repo
+cenci security explain: agent=claude scope=my-repo basis=planned
+
+This report describes a plan for the next launch: no running scoped
+container was found (or its state could not be verified), so nothing below
+reflects observed state — it is what the launcher WOULD apply.
 
 Threat model:
 The container is the security boundary, not the agent's own permissions.

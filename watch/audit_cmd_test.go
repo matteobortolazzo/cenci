@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/matteobortolazzo/cenci/watch/internal/sandbox/launcher"
 )
 
 // -- cenci audit (ticket #588) ---------------------------------------------
@@ -35,23 +37,23 @@ func auditRepoDir(t *testing.T) string {
 	return repo
 }
 
-// auditEnv builds a minimal black-box environment for `cenci audit` runs:
-// an isolated HOME and a fresh XDG_RUNTIME_DIR with no live daemon socket —
-// audit must never start one (it probes read-only, unlike Launch's
-// resolveCenciWiring).
-func auditEnv(home, xdg string) []string {
-	return append(os.Environ(),
-		"HOME="+home,
-		"XDG_RUNTIME_DIR="+xdg,
-	)
-}
-
+// Every test below uses auditSecurityEnv (audit_security_faketest_test.go)
+// for its subprocess environment: an isolated HOME and a fresh
+// XDG_RUNTIME_DIR with no live daemon socket — audit must never start one
+// (it probes read-only, unlike Launch's resolveCenciWiring) — plus PATH
+// pinned to a fake docker/podman (writeAuditFakeRuntimes) whose FAKE_PS
+// defaults to empty (no running container). Ticket #627's
+// NewForAuditWithRuntime resolves a real runtime via
+// internal/sandbox.ContainerRuntime(), so every pre-existing hermetic test in
+// this file must pin PATH the same way — otherwise a host with a real
+// docker/podman installed (daemon up or down) could perturb these
+// exact-output assertions (watch AGENTS.md #620).
 func TestAudit_TextOutput_ReportsAgentAndSections(t *testing.T) {
 	repo := auditRepoDir(t)
 	home := t.TempDir()
 
 	cmd := exec.Command(binaryPath, "audit", "--agent", "claude")
-	cmd.Env = auditEnv(home, t.TempDir())
+	cmd.Env = auditSecurityEnv(t, home, t.TempDir())
 	cmd.Dir = repo
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -74,7 +76,7 @@ func TestAudit_JSONOutput_ParsesWithExpectedFields(t *testing.T) {
 	home := t.TempDir()
 
 	cmd := exec.Command(binaryPath, "audit", "--agent", "claude", "--json")
-	cmd.Env = auditEnv(home, t.TempDir())
+	cmd.Env = auditSecurityEnv(t, home, t.TempDir())
 	cmd.Dir = repo
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -105,7 +107,7 @@ func TestAudit_JSONOutput_HasProbeApplicableStagedFields(t *testing.T) {
 	home := t.TempDir()
 
 	cmd := exec.Command(binaryPath, "audit", "--agent", "claude", "--json")
-	cmd.Env = auditEnv(home, t.TempDir())
+	cmd.Env = auditSecurityEnv(t, home, t.TempDir())
 	cmd.Dir = repo
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -152,7 +154,7 @@ func TestAudit_JSONOutput_EnvSecretFlagsContextKeyTrue(t *testing.T) {
 	t.Setenv("CONTEXT7_API_KEY", contextSecret)
 
 	cmd := exec.Command(binaryPath, "audit", "--agent", "claude", "--json")
-	cmd.Env = auditEnv(home, t.TempDir())
+	cmd.Env = auditSecurityEnv(t, home, t.TempDir())
 	cmd.Dir = repo
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -204,7 +206,7 @@ func TestAudit_JSONOutput_CrossAgentCredential_PresentNotApplicableNotStaged(t *
 	}
 
 	cmd := exec.Command(binaryPath, "audit", "--agent", "claude", "--json")
-	cmd.Env = auditEnv(home, t.TempDir())
+	cmd.Env = auditSecurityEnv(t, home, t.TempDir())
 	cmd.Dir = repo
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -285,7 +287,7 @@ func TestAudit_UsageErrors_Exit2(t *testing.T) {
 			dir := tc.dir(t)
 
 			cmd := exec.Command(binaryPath, tc.args...)
-			cmd.Env = auditEnv(home, t.TempDir())
+			cmd.Env = auditSecurityEnv(t, home, t.TempDir())
 			cmd.Dir = dir
 			output, err := cmd.CombinedOutput()
 			exitErr, ok := err.(*exec.ExitError)
@@ -314,7 +316,7 @@ func TestAudit_MalformedDindConfig_Exits1(t *testing.T) {
 	home := t.TempDir()
 
 	cmd := exec.Command(binaryPath, "audit", "--agent", "claude")
-	cmd.Env = auditEnv(home, t.TempDir())
+	cmd.Env = auditSecurityEnv(t, home, t.TempDir())
 	cmd.Dir = repoRoot
 	output, err := cmd.CombinedOutput()
 
@@ -334,7 +336,7 @@ func TestAuditNoDind_SucceedsDespiteMalformedConfig(t *testing.T) {
 	home := t.TempDir()
 
 	cmd := exec.Command(binaryPath, "audit", "--agent", "claude", "--no-dind")
-	cmd.Env = auditEnv(home, t.TempDir())
+	cmd.Env = auditSecurityEnv(t, home, t.TempDir())
 	cmd.Dir = repoRoot
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -354,7 +356,7 @@ func TestAudit_NeverStartsADaemon(t *testing.T) {
 	xdg := t.TempDir()
 
 	cmd := exec.Command(binaryPath, "audit")
-	cmd.Env = auditEnv(home, xdg)
+	cmd.Env = auditSecurityEnv(t, home, xdg)
 	cmd.Dir = repo
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -368,5 +370,194 @@ func TestAudit_NeverStartsADaemon(t *testing.T) {
 	pidPath := filepath.Join(xdg, "cenci", "cenci.pid")
 	if _, statErr := os.Stat(pidPath); statErr == nil {
 		t.Errorf("cenci audit must never start the daemon; found a PID file at %s", pidPath)
+	}
+}
+
+// -- ticket #627: observed vs planned posture (command level) ---------------
+//
+// NOTE (red phase): main.go/audit_cmd.go do not yet swap to
+// launcher.NewForAuditWithRuntime, and internal/sandbox/launcher does not
+// yet expose Basis/InspectWarning/observed derivation — every test below
+// currently observes the CURRENT command's always-planned, no-basis JSON/
+// text output instead of the behavior asserted here. That is the intended
+// red-phase state.
+
+// TestAudit_JSONOutput_BasisPlannedByDefault_NoLiveRuntime covers the
+// default hermetic case: with the fake runtime reporting nothing running,
+// `cenci audit` must report basis:"planned" and no inspectWarning.
+func TestAudit_JSONOutput_BasisPlannedByDefault_NoLiveRuntime(t *testing.T) {
+	repo := auditRepoDir(t)
+	home := t.TempDir()
+
+	cmd := exec.Command(binaryPath, "audit", "--agent", "claude", "--json")
+	cmd.Env = auditSecurityEnv(t, home, t.TempDir())
+	cmd.Dir = repo
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cenci audit --json: %v\n%s", err, output)
+	}
+	out := string(output)
+	// `cenci audit --json` renders via json.MarshalIndent (unmodified by this
+	// ticket), which always inserts a space after the colon — a compact
+	// `"basis":"planned"` substring (no space) would never match this
+	// command's actual indented output; every other JSON assertion in this
+	// file either checks a bare key name or unmarshals into a struct rather
+	// than a compact key:value substring, so this is a corrected test-authoring
+	// bug, not a production-code/formatting change.
+	if !strings.Contains(out, `"basis": "planned"`) {
+		t.Errorf("expected \"basis\": \"planned\" with no running scoped container, got:\n%s", out)
+	}
+	if strings.Contains(out, `"inspectWarning"`) {
+		t.Errorf("expected no \"inspectWarning\" field when inspection never failed, got:\n%s", out)
+	}
+}
+
+// TestAudit_JSONOutput_RunningHostNetworkContainer_BasisRunningAndWeakened
+// covers AC #1 at the command level: a running host-network container must
+// be reported as weakened without the caller repeating --host-network.
+func TestAudit_JSONOutput_RunningHostNetworkContainer_BasisRunningAndWeakened(t *testing.T) {
+	repo := auditRepoDir(t)
+	home := t.TempDir()
+	scope := launcher.ComputeScope("claude", "", repo, home)
+
+	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
+	t.Setenv("FAKE_OBSERVED_POSTURE", "cenci-sandbox:latest|host|runc||\n")
+
+	cmd, _ := auditFakeRuntimeCmd(t, repo, home, "audit", "--agent", "claude", "--json")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cenci audit --json: %v\n%s", err, output)
+	}
+
+	var parsed struct {
+		Basis   string `json:"basis"`
+		Network struct {
+			Mode     string `json:"mode"`
+			Weakened bool   `json:"weakened"`
+		} `json:"network"`
+		BoundaryWeakenings []struct {
+			Option string `json:"option"`
+		} `json:"boundaryWeakenings"`
+	}
+	if err := json.Unmarshal(output, &parsed); err != nil {
+		t.Fatalf("cenci audit --json produced invalid JSON: %v\noutput:\n%s", err, output)
+	}
+	if parsed.Basis != "running" {
+		t.Errorf("basis = %q, want %q", parsed.Basis, "running")
+	}
+	if parsed.Network.Mode != "host" || !parsed.Network.Weakened {
+		t.Errorf("network = %+v, want host/weakened", parsed.Network)
+	}
+	found := false
+	for _, w := range parsed.BoundaryWeakenings {
+		if w.Option == "--host-network" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a --host-network boundary weakening reported automatically (no --host-network flag was passed), got %+v", parsed.BoundaryWeakenings)
+	}
+}
+
+// TestAudit_JSONOutput_MalformedInspect_InspectWarningPlannedExit0 covers
+// Q2/AC #9/#11 at the command level: a running container whose combined
+// inspect probe returns unparsable output must still exit 0 and render
+// basis:"planned" with a non-empty inspectWarning — never a hard failure,
+// never a silent collapse to the default-safe baseline.
+func TestAudit_JSONOutput_MalformedInspect_InspectWarningPlannedExit0(t *testing.T) {
+	repo := auditRepoDir(t)
+	home := t.TempDir()
+	scope := launcher.ComputeScope("claude", "", repo, home)
+
+	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
+	t.Setenv("FAKE_OBSERVED_POSTURE", "not-the-expected-shape\n")
+
+	cmd, _ := auditFakeRuntimeCmd(t, repo, home, "audit", "--agent", "claude", "--json")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cenci audit --json (malformed inspect) must exit 0, got %v\n%s", err, output)
+	}
+
+	var parsed struct {
+		Basis          string `json:"basis"`
+		InspectWarning string `json:"inspectWarning"`
+	}
+	if err := json.Unmarshal(output, &parsed); err != nil {
+		t.Fatalf("cenci audit --json produced invalid JSON: %v\noutput:\n%s", err, output)
+	}
+	if parsed.Basis != "planned" {
+		t.Errorf("basis = %q, want %q on inspect failure (never collapse to running)", parsed.Basis, "planned")
+	}
+	if parsed.InspectWarning == "" {
+		t.Errorf("inspectWarning is empty, want a non-empty warning on malformed inspect output")
+	}
+	if strings.Contains(string(output), "default-safe baseline") {
+		t.Errorf("output claims the default-safe baseline despite an inspect failure, got:\n%s", output)
+	}
+}
+
+// TestAudit_TextOutput_PsUnreachable_InspectWarningPlannedExit0 covers
+// AC #9's ps/daemon-unreachable case at the command level: exit 0, a
+// visible warning, no default-safe baseline claim.
+func TestAudit_TextOutput_PsUnreachable_InspectWarningPlannedExit0(t *testing.T) {
+	repo := auditRepoDir(t)
+	home := t.TempDir()
+
+	t.Setenv("FAKE_PS_EXIT", "1")
+
+	cmd, _ := auditFakeRuntimeCmd(t, repo, home, "audit", "--agent", "claude")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cenci audit (ps/daemon unreachable) must exit 0, got %v\n%s", err, output)
+	}
+	out := string(output)
+	if strings.Contains(out, "default-safe baseline") {
+		t.Errorf("output claims the default-safe baseline despite a ps/daemon failure, got:\n%s", out)
+	}
+	// A multi-word phrase (not a bare "warning" substring): this test's own
+	// HOME tempdir path (embedded in the narrative's credential-source
+	// lines) contains the test function's name, which itself contains
+	// "InspectWarning" — a bare substring check would accidentally match
+	// that path text regardless of whether the command actually rendered a
+	// warning.
+	if !strings.Contains(strings.ToLower(out), "could not be") {
+		t.Errorf("expected a visible warning explaining the running container's posture could not be verified, got:\n%s", out)
+	}
+}
+
+// TestAudit_NoMutation_CallLogOnlyPsAndInspect is the command-level
+// counterpart of internal/sandbox/launcher/audit_test.go's
+// TestAudit_ObservedMode_NoMutation_CallLogOnlyPsAndInspect: with a running
+// scoped container, `cenci audit` must issue only read-only ps/inspect
+// calls, never a mutating verb.
+func TestAudit_NoMutation_CallLogOnlyPsAndInspect(t *testing.T) {
+	repo := auditRepoDir(t)
+	home := t.TempDir()
+	scope := launcher.ComputeScope("claude", "", repo, home)
+
+	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
+
+	cmd, callLog := auditFakeRuntimeCmd(t, repo, home, "audit", "--agent", "claude")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cenci audit: %v\n%s", err, output)
+	}
+
+	data, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatalf("read call log: %v", err)
+	}
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" {
+		t.Fatal("expected at least a ps call in the call log, got none")
+	}
+	for _, line := range strings.Split(trimmed, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if verb := fields[0]; verb != "ps" && verb != "inspect" {
+			t.Errorf("audit issued a non-read-only runtime call %q; want only ps/inspect, full log:\n%s", line, data)
+		}
 	}
 }

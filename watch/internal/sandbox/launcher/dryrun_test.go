@@ -428,6 +428,46 @@ func TestDryRun_ExistingCompatibleContainer_RendersAttachOnlyWithNoCreateArgv(t 
 	}
 }
 
+// TestDryRun_Posture_StaysPlannedBasisEvenWhenContainerRunning is a
+// regression test (per watch/AGENTS.md #620: "do not assume existing tests
+// will detect the behavior change") for the `clone.Runtime = ""` fix in
+// DryRun: the Posture breakdown DryRun composes must always stay
+// basis:"planned" -- a preview of what a real launch WOULD apply -- even
+// when a real scoped container happens to be running under that name (the
+// same precondition TestDryRun_ExistingCompatibleContainer_... exercises for
+// the attach-branch argv). Without clearing clone.Runtime, Audit's
+// ticket #627 observed-mode dispatch would fire on the clone and flip this
+// Posture to basis:"running", contradicting DryRun's own "preview, not
+// observation" contract (dryrun.go's DryRun doc comment).
+func TestDryRun_Posture_StaysPlannedBasisEvenWhenContainerRunning(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	scope := ComputeScope("claude", "", repo, home)
+
+	fakeDir := t.TempDir()
+	callLog := filepath.Join(fakeDir, "calls.txt")
+	writeFakeRuntime(t, fakeDir, "docker", callLog)
+	t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
+	t.Setenv("FAKE_INSPECT_MOUNTS", AgentCLIVolumeName("claude")+"|/opt/cenci-agent|false\n")
+
+	eng := &Engine{Runtime: "docker", Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	plan, err := eng.DryRun(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+
+	if plan.Mode != "attach" {
+		t.Fatalf("Mode = %q, want \"attach\" (precondition: a real container is running under this scoped name)", plan.Mode)
+	}
+	if plan.Posture.Basis != PostureBasisPlanned {
+		t.Errorf("Posture.Basis = %q, want %q -- DryRun's preview must never flip to basis:%q even when a real container happens to be running under the scoped name", plan.Posture.Basis, PostureBasisPlanned, PostureBasisRunning)
+	}
+}
+
 // TestDryRun_IncompatibleRunningContainer_MirrorsLaunchHardError covers Q2's
 // resolution: a running container that predates the shared read-only
 // agent-CLI mount makes a real Launch hard-error rather than attach; DryRun
