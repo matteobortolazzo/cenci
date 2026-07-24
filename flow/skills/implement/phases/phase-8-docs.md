@@ -37,9 +37,28 @@ Update only for user-visible features, commands, API endpoints, configuration, s
 
 ## Maintenance Check
 
+Core correctness checks always run in Phase 8. The applicability and changed-file
+guards below still produce explicit skips when the checker is not relevant, but no
+maintenance configuration value disables an applicable correctness run.
+`maintenance.enabled` does not gate this sub-step; it controls only optional scheduled
+maintenance and reminder UX.
+
+Resolve the optional `maintenance` object from the canonical project config with these
+defaults: `checkDuringImplement=true` and `generatedDocs=true`. Test each boolean for
+explicit equality with `false` — do not use a jq `//` fallback, because jq treats a real
+`false` as a fallback candidate.
+
+- When `maintenance.checkDuringImplement` is explicitly `false`, still run and report
+  the checker exactly as below, but all non-pass results are report-only. Do not enter
+  either the auto-repair or must-stop-and-ask branch, do not mutate a finding's target,
+  and record the results for Phase 9 with the `reported` outcome.
+- When `maintenance.generatedDocs` is explicitly `false`, generated-section maintenance
+  is disabled: honor the checker's generated-section skip, do not run `check.sh --write`,
+  and continue handling every non-generated correctness result normally.
+
 **Applicability guard**: run this sub-step only if `<worktree-path>/flow/skills/maintain/scripts/check.sh` exists. This scopes the step to the cenci monorepo itself (dogfooding) — in a consumer repo the flow plugin is installed, not present in the target tree, so the file is absent and the step is a clean skip.
 
-**Trigger guard**: obtain the changed-file list from `$RUN_DIR/files.txt` (written in Phase 6 + 7's Shared Context step). If `$RUN_DIR` is unknown (lost to compaction, or a Goal Autopilot resume in a fresh session), recompute it with `git -C <worktree-path> diff --name-only origin/main`. Run the checker only if at least one changed path matches:
+**Trigger guard**: obtain the changed-file list from `$RUN_DIR/files.txt` (written in Phase 6 + 7's Shared Context step), checking that the file read itself succeeds. If `$RUN_DIR` is unknown (lost to compaction, or a Goal Autopilot resume in a fresh session), recompute it with `git -C <worktree-path> diff --name-only origin/main`, capturing output in a temporary file and checking the `git diff` exit status before reading it. Never use process substitution for changed-file discovery: an acquisition failure must not collapse into an empty list. If either the expected `files.txt` read or the fallback `git diff` fails, write `maintenance: error (changed-file discovery failed)` to `$RUN_DIR/maintain-status.txt` when `$RUN_DIR` is known, otherwise report that status directly for Phase 9, then stop this sub-step. Run the checker only if at least one successfully discovered changed path matches:
 
 ```
 flow/skills/**
@@ -63,13 +82,17 @@ sandbox/lib/codex-config.sh
 
 If no changed path matches, write `maintenance: skipped (no doc-affecting changes)` to `$RUN_DIR/maintain-status.txt` (skip the write if `$RUN_DIR` is unknown) and stop this sub-step.
 
-**Run**: invoke `bash flow/skills/maintain/scripts/check.sh --changed <changed files>` with `<worktree-path>` as CWD (no `cd &&` compound — per the `shell-rules` skill, verify CWD then run). Capture the text output (stdout+stderr) and exit code.
+**Run**: set the shell tool working directory to the verified absolute `<worktree-path>` on every checker invocation in this sub-step, including the initial
+changed-file check, `--write`, and every verification re-run. Never rely on a prior
+`cd`, a relative worktree path, or a compound `cd &&` command. Invoke
+`bash flow/skills/maintain/scripts/check.sh --changed <changed files>` and capture the
+text output (stdout+stderr) and exit code.
 
 **Checker-crash guard**: `check.sh` exits 2 (not 0/1) on its own infra errors (missing `jq`, `mktemp` failure, etc.) and in that path never reaches its `summary: pass=... warn=... fail=...` line. Before running the repair-policy decision flow below, check the captured output for that `summary:` line — regardless of exit code, but especially on exit 2. If it is absent, do **not** proceed into the decision flow (there are no parsed results to interpret) and do not fabricate `pass=0 warn=0 fail=0`. Instead write `maintenance: error (checker execution failed) — <captured output/stderr>` as the status file's first line (see Status file below) and stop this sub-step; Phase 9 renders this as an honest "status unknown/errored" rather than a false pass.
 
 **Repair-policy decision flow** — for each non-pass result the checker reports:
 
-- **Allowed (auto-repair, same PR only)**: a new-skill table row, a broken path caused by this PR's own rename, a stale generated index (`check.sh --write`), a missing structural-test entry, a documented flag changed by this PR. Apply the fix inside `<worktree-path>`, then re-run the checker to confirm the finding cleared. If the re-run does **not** clear the finding, do not keep retrying or silently treat it as fixed — downgrade it to report-only: carry it forward to Phase 9's `## Notes` like any other reported finding, and reflect that in the status file's `<repaired|reported|halted>` tag (it no longer counts toward "repaired"). An "Allowed" finding must never silently roll into a "repaired"/"pass" status-file line when it didn't actually clear.
+- **Allowed (auto-repair, same PR only)**: a new-skill table row, a broken path caused by this PR's own rename, a stale generated index (`check.sh --write`, only when `maintenance.generatedDocs` is not explicitly `false`), a missing structural-test entry, a documented flag changed by this PR. Apply the fix inside `<worktree-path>`, then re-run the checker to confirm the finding cleared. If the re-run does **not** clear the finding, do not keep retrying or silently treat it as fixed — downgrade it to report-only: carry it forward to Phase 9's `## Notes` like any other reported finding, and reflect that in the status file's `<repaired|reported|halted>` tag (it no longer counts toward "repaired"). An "Allowed" finding must never silently roll into a "repaired"/"pass" status-file line when it didn't actually clear.
 - **Must stop and ask (do not auto-repair)**: two docs express conflicting intended behavior, client-support status is ambiguous, a rule's meaning would change, a security/workflow policy would be weakened, or the required change expands product scope. Before asking, run `/goal clear` (via `SlashCommand`, a no-op if unarmed) — mirroring this phase's worktree-absoluteness guard and Phase 9's error gates, so an armed Goal Autopilot can't loop the halt — then route the question through `AskUserQuestion`. Phase 8 is not pre-approved, so halting here is safe (this is why the maintenance check lives in Phase 8, not Phase 9).
 - **Report-only default**: any finding that is neither clearly Allowed nor clearly a must-stop case is **not** silently repaired — record it in the status file and carry it forward to Phase 9's `## Notes`; do not halt.
 

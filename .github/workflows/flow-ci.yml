@@ -18,6 +18,7 @@ jobs:
       pull-requests: read
     outputs:
       flow: ${{ steps.filter.outputs.flow }}
+      maintenance: ${{ steps.filter.outputs.maintenance }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
@@ -30,6 +31,71 @@ jobs:
               - '!flow/AGENTS.md'
               - '!flow/CLAUDE.md'
               - '!flow/README.md'
+            maintenance:
+              - 'flow/skills/**'
+              - 'flow/agents/**'
+              - 'flow/hooks/**'
+              - 'flow/docs/**'
+              - 'flow/codex/**'
+              - 'flow/opencode/**'
+              - 'docs/**'
+              - 'README.md'
+              - 'flow/README.md'
+              - 'flow/AGENTS.md'
+              - 'flow/CLAUDE.md'
+              - 'AGENTS.md'
+              - 'CLAUDE.md'
+              - '.cenci/config.json'
+              - 'install.sh'
+              - 'sandbox/**'
+              - 'watch/**'
+              - '.claude-plugin/**'
+              - '*/.claude-plugin/**'
+              - '.github/scripts/maintenance-*'
+              - '.github/workflows/cenci-maintenance.yml'
+              - '.github/workflows/workflow-lint.yml'
+              - '.github/workflows/flow-ci.yml'
+
+  maintenance:
+    name: flow-maintenance
+    needs: changes
+    if: ${{ needs.changes.outputs.maintenance == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Run maintain checker (changed files)
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          CHECKOUT_ROOT="${GITHUB_WORKSPACE}"
+          if [[ "$CHECKOUT_ROOT" != /* ]]; then
+            echo "GITHUB_WORKSPACE must be an absolute path" >&2
+            exit 2
+          fi
+          CHANGED_FILE="$(mktemp)"
+          trap 'rm -f "$CHANGED_FILE"' EXIT
+          git -C "$CHECKOUT_ROOT" diff --name-only "${BASE_SHA}"...HEAD > "$CHANGED_FILE"
+          mapfile -t CHANGED < "$CHANGED_FILE"
+          cd "$CHECKOUT_ROOT"
+          bash flow/skills/maintain/scripts/check.sh --changed "${CHANGED[@]}"
+      - name: Run maintain checker (full report-only)
+        if: ${{ github.event_name != 'pull_request' }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          CHECKOUT_ROOT="${GITHUB_WORKSPACE}"
+          if [[ "$CHECKOUT_ROOT" != /* ]]; then
+            echo "GITHUB_WORKSPACE must be an absolute path" >&2
+            exit 2
+          fi
+          cd "$CHECKOUT_ROOT"
+          bash flow/skills/maintain/scripts/check.sh
 
   test:
     name: flow-test
@@ -62,24 +128,3 @@ jobs:
         run: bash flow/tests/implement-review-artifacts.test.sh
       - name: Verify followup ticket milestone/label inheritance
         run: bash flow/tests/followup-ticket-inheritance.test.sh
-      - name: Run maintain checker (changed files)
-        if: ${{ github.event_name == 'pull_request' }}
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          set -euo pipefail
-          mapfile -t CHANGED < <(git diff --name-only "${BASE_SHA}"...HEAD)
-          bash flow/skills/maintain/scripts/check.sh --changed "${CHANGED[@]}"
-      - name: Run maintain checker (full)
-        if: ${{ github.event_name != 'pull_request' }}
-        # Report-only on push-to-main: full mode can fail on pre-existing,
-        # unrelated drift (e.g. context-budget breaches) that predates the
-        # commit(s) just pushed -- see docs/health-gates.md. The PR path
-        # above (--changed) stays fully blocking; a periodic *blocking*
-        # full-repo audit is #534's job, not this push-to-main step.
-        # gateCommand/test-file execution here is intentional -- see
-        # check_gate_command's comment in check.sh, and this workflow's
-        # `pull_request` (never `pull_request_target`) trigger plus
-        # repo-wide `permissions: contents: read` above.
-        continue-on-error: true
-        run: bash flow/skills/maintain/scripts/check.sh

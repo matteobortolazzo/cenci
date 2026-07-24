@@ -64,6 +64,41 @@ run_check() {
   fi
 }
 
+# run_advisory <root> [args...] — advisory mode emits its report as the only
+# stdout payload and must never create the default repository report.
+run_advisory() {
+  local root="$1"; shift
+  local json_path="${root}/.cenci/maintain-report.json"
+  local stderr_path
+  stderr_path="$(mktemp)"
+  rm -f "${json_path}"
+  REPORT_STDOUT="$(cd "${root}" && bash "${CHECK}" --advisory "$@" 2>"${stderr_path}")"
+  REPORT_CODE=$?
+  REPORT_STDERR="$(cat "${stderr_path}")"
+  rm -f "${stderr_path}"
+  REPORT_JSON="${REPORT_STDOUT}"
+  REPORT_TEXT="${REPORT_STDOUT}${REPORT_STDERR}"
+}
+
+# run_explicit_report <root> <path> [args...] — selects a non-default report.
+run_explicit_report() {
+  local root="$1" report_path="$2"; shift 2
+  local stderr_path
+  stderr_path="$(mktemp)"
+  rm -f "${root}/.cenci/maintain-report.json"
+  [[ -d "${report_path}" ]] || rm -f "${report_path}"
+  REPORT_STDOUT="$(cd "${root}" && bash "${CHECK}" --report-file "${report_path}" "$@" 2>"${stderr_path}")"
+  REPORT_CODE=$?
+  REPORT_STDERR="$(cat "${stderr_path}")"
+  rm -f "${stderr_path}"
+  REPORT_TEXT="${REPORT_STDOUT}${REPORT_STDERR}"
+  if [[ -f "${report_path}" ]]; then
+    REPORT_JSON="$(cat "${report_path}")"
+  else
+    REPORT_JSON="null"
+  fi
+}
+
 # count_results <check-id> <status> — number of results matching both.
 count_results() {
   printf '%s' "${REPORT_JSON}" | jq --arg c "$1" --arg s "$2" \
@@ -113,6 +148,7 @@ assert_clean_report() {
 
 assert_exit_zero() { [[ "${REPORT_CODE}" -eq 0 ]] || fail "$1: expected exit 0, got ${REPORT_CODE}"; }
 assert_exit_nonzero() { [[ "${REPORT_CODE}" -ne 0 ]] || fail "$1: expected non-zero exit, got 0"; }
+assert_exit_two() { [[ "${REPORT_CODE}" -eq 2 ]] || fail "$1: expected exit 2, got ${REPORT_CODE}"; }
 
 # strip_marker_bodies — reads a file on stdin, prints it back with all lines
 # strictly between a "cenci-maintain:<id>:start" and its matching ":end"
@@ -255,6 +291,23 @@ EOF
 
 bootstrap_markers() {
   run_check "$1" --write
+}
+
+add_fixture_client_matrix() {
+  local root="$1"
+  awk '
+    /^<!-- cenci-maintain:skills:start -->/ && !done {
+      print "## Skill portability"
+      print ""
+      print "| Skill | Claude Code | Codex | OpenCode | Notes |"
+      print "|-------|-------------|-------|----------|-------|"
+      print "| `demo` | Yes | Yes | Yes | Fixture skill |"
+      print ""
+      done=1
+    }
+    { print }
+  ' "${root}/flow/README.md" > "${root}/flow/README.md.tmp"
+  mv "${root}/flow/README.md.tmp" "${root}/flow/README.md"
 }
 
 # =====================================================================
@@ -847,8 +900,12 @@ mkdir -p "${ROOT}/watch"
 cat > "${ROOT}/watch/real_cmd.go" <<'EOF'
 package main
 
-// real-verb is registered as `cenci real-verb`.
-func realVerbCmd() {}
+import "flag"
+
+func realVerbCmd() {
+	fs := flag.NewFlagSet("real-verb", flag.ExitOnError)
+	_ = fs.Bool("real-flag", false, "real flag")
+}
 EOF
 mkdir -p "${ROOT}/docs"
 cat > "${ROOT}/docs/example.md" <<'EOF'
@@ -859,6 +916,26 @@ EOF
 run_check "${ROOT}"
 n_cf_fail="$(count_results "command-flags" "fail")"
 is_eq0 "${n_cf_fail}" || fail "case25b: valid cenci command present in watch/*_cmd.go must not fail command-flags (got ${n_cf_fail})"
+rm -rf "${ROOT}"
+
+# 25c. Comments and unrelated string literals in Go sources are not command
+# or flag registrations and therefore cannot validate stale documentation.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/watch" "${ROOT}/docs"
+cat > "${ROOT}/watch/ghost_cmd.go" <<'EOF'
+package main
+
+// fs := flag.NewFlagSet("ghost-verb", flag.ExitOnError)
+const note = `fs.Bool("ghost-flag", false, "not registration")`
+EOF
+cat > "${ROOT}/docs/example.md" <<'EOF'
+# Example doc
+
+Run `cenci ghost-verb --ghost-flag`.
+EOF
+run_check "${ROOT}"
+assert_has_result "command-flags" "fail" "case25c comments and unrelated strings cannot register CLI tokens"
 rm -rf "${ROOT}"
 
 # =====================================================================
@@ -956,6 +1033,46 @@ n_ce_fail="$(count_results "config-examples" "fail")"
 is_eq0 "${n_ce_fail}" || fail "case26d: plugin-manifest-shaped json block must not be flagged by config-examples (got ${n_ce_fail} fail)"
 n_ce_warn="$(count_results "config-examples" "warn")"
 is_eq0 "${n_ce_warn}" || fail "case26d: plugin-manifest-shaped json block must not warn either (got ${n_ce_warn})"
+rm -rf "${ROOT}"
+
+# 26e. Optional-only top-level blocks are detected from the canonical schema.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/docs"
+cat > "${ROOT}/docs/security.md" <<'EOF'
+# Security config
+
+```json
+{
+  "security": {
+    "sensitivePaths": "wrong"
+  }
+}
+```
+EOF
+run_check "${ROOT}"
+assert_has_result "config-examples" "fail" "case26e optional-only security block has wrong nested type"
+rm -rf "${ROOT}"
+
+# 26f. playwrightCli is a configure-owned optional boolean.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/docs"
+cat > "${ROOT}/docs/playwright.md" <<'EOF'
+# Playwright config
+
+```json
+{
+  "playwrightCli": true
+}
+```
+EOF
+run_check "${ROOT}"
+n_ce_fail="$(count_results "config-examples" "fail")"
+is_eq0 "${n_ce_fail}" || fail "case26f: valid playwrightCli boolean must not fail config-examples (got ${n_ce_fail})"
+sed -i 's/"playwrightCli": true/"playwrightCli": "true"/' "${ROOT}/docs/playwright.md"
+run_check "${ROOT}"
+assert_has_result "config-examples" "fail" "case26f wrong playwrightCli type fails"
 rm -rf "${ROOT}"
 
 # =====================================================================
@@ -1066,8 +1183,12 @@ mkdir -p "${ROOT}/watch"
 cat > "${ROOT}/watch/sandbox_cmd.go" <<'EOF'
 package main
 
-// runSandboxPrune implements `cenci sandbox prune [--images] [--volumes]`.
-func sandboxPruneCmd() {}
+import "flag"
+
+func sandboxPruneCmd() {
+	fs := flag.NewFlagSet("sandbox prune", flag.ExitOnError)
+	_ = fs
+}
 EOF
 mkdir -p "${ROOT}/docs"
 cat > "${ROOT}/docs/example.md" <<'EOF'
@@ -1088,9 +1209,11 @@ mkdir -p "${ROOT}/watch"
 cat > "${ROOT}/watch/main.go" <<'EOF'
 package main
 
-// runDoctor implements `cenci doctor`: shells out to the installed
-// `cenci doctor` wrapper.
-func doctorCmd() {}
+func main() {
+	switch "doctor" {
+	case "doctor":
+	}
+}
 EOF
 mkdir -p "${ROOT}/docs"
 cat > "${ROOT}/docs/example2.md" <<'EOF'
@@ -1188,6 +1311,296 @@ assert_check_ran "config-version" "case31e config-version runs when .cenci/confi
 rm -rf "${ROOT}"
 
 # =====================================================================
+# Ticket #666 checker hardening
+# =====================================================================
+
+# Case 32: every generated marker pair is required, including the case where
+# both halves of one pair are absent.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+bootstrap_markers "${ROOT}"
+grep -v 'cenci-maintain:docs-nav:' "${ROOT}/flow/README.md" > "${ROOT}/flow/README.md.tmp"
+mv "${ROOT}/flow/README.md.tmp" "${ROOT}/flow/README.md"
+run_check "${ROOT}"
+assert_has_result "stale-generated" "fail" "case32 an entirely missing marker pair fails"
+assert_contains "${REPORT_TEXT}" "docs-nav" "case32 names the missing marker pair"
+rm -rf "${ROOT}"
+
+# Case 33: a clean generated-section comparison emits an explicit pass.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+bootstrap_markers "${ROOT}"
+run_check "${ROOT}"
+assert_has_result "stale-generated" "pass" "case33 clean generated sections emit a pass"
+rm -rf "${ROOT}"
+
+# Case 34: zero structural test scripts is a failure, never a vacuous pass.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+rm -f "${ROOT}/flow/tests/sample.test.sh"
+run_check "${ROOT}"
+assert_has_result "structural-tests" "fail" "case34 zero structural tests fails"
+rm -rf "${ROOT}"
+
+# Case 35: scripts/ references resolve relative to their owning skill. A
+# same-named script under another skill must not mask the missing owner file.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+rm -f "${ROOT}/flow/skills/demo/scripts/helper.sh"
+mkdir -p "${ROOT}/flow/skills/other/scripts"
+cat > "${ROOT}/flow/skills/other/SKILL.md" <<'EOF'
+---
+name: other
+description: "Other fixture skill."
+---
+
+Uses `scripts/helper.sh`.
+EOF
+cat > "${ROOT}/flow/skills/other/scripts/helper.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+run_check "${ROOT}"
+assert_has_result "broken-refs" "fail" "case35 duplicate basename in another skill cannot satisfy owner-relative reference"
+assert_contains "${REPORT_TEXT}" "flow/skills/demo" "case35 identifies the owning skill"
+rm -rf "${ROOT}"
+
+# Case 36: phase, mode, and Codex companion files participate in dependency
+# indexes, not only the owning SKILL.md.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/flow/skills/demo/phases" "${ROOT}/flow/skills/demo/modes"
+cat > "${ROOT}/flow/skills/demo/phases/phase-one.md" <<'EOF'
+Use the `phase-agent`.
+EOF
+cat > "${ROOT}/flow/skills/demo/modes/sample.md" <<'EOF'
+Use the `mode-agent`.
+EOF
+cat > "${ROOT}/flow/skills/demo/codex.md" <<'EOF'
+Use the `codex-agent`.
+EOF
+for agent in phase-agent mode-agent codex-agent; do
+  cat > "${ROOT}/flow/agents/${agent}.md" <<EOF
+---
+name: ${agent}
+description: "${agent} fixture."
+---
+EOF
+done
+run_check "${ROOT}" --write
+README_CONTENT="$(cat "${ROOT}/flow/README.md")"
+assert_contains "${README_CONTENT}" '| `phase-agent` | phase-agent fixture. | demo |' "case36 phase dependency is indexed"
+assert_contains "${README_CONTENT}" '| `mode-agent` | mode-agent fixture. | demo |' "case36 mode dependency is indexed"
+assert_contains "${README_CONTENT}" '| `codex-agent` | codex-agent fixture. | demo |' "case36 Codex dependency is indexed"
+assert_contains "${README_CONTENT}" '| Skill | Procedure files | Reference skills | Scripts | Agents |' "case36 dependency index names its procedure-files column"
+assert_contains "${README_CONTENT}" 'codex.md, modes/sample.md, phases/phase-one.md' "case36 dependency index lists Codex, mode, and phase files"
+rm -rf "${ROOT}"
+
+# Case 37: CLI documentation never validates itself. Repeating a stale
+# command and flag in convention/skill prose cannot make them canonical.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/docs"
+cat > "${ROOT}/docs/cli-conventions.md" <<'EOF'
+Run `cenci ghost-verb --ghost-flag`.
+EOF
+cat >> "${ROOT}/flow/skills/demo/SKILL.md" <<'EOF'
+
+Also run `cenci ghost-verb --ghost-flag`.
+EOF
+run_check "${ROOT}"
+assert_has_result "command-flags" "fail" "case37 stale command repeated only in docs still fails"
+rm -rf "${ROOT}"
+
+# Case 38: commands and flags registered in Go CLI source remain valid.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/watch" "${ROOT}/docs"
+cat > "${ROOT}/watch/real_cmd.go" <<'EOF'
+package main
+
+import "flag"
+
+func realCmd(args []string) {
+	fs := flag.NewFlagSet("real-verb", flag.ContinueOnError)
+	_ = fs.Bool("real-flag", false, "fixture flag")
+}
+EOF
+cat > "${ROOT}/docs/example.md" <<'EOF'
+Run `cenci real-verb --real-flag`.
+EOF
+run_check "${ROOT}"
+n_cf_fail="$(count_results "command-flags" "fail")"
+is_eq0 "${n_cf_fail}" || fail "case38 Go-registered command and flag must pass (got ${n_cf_fail})"
+rm -rf "${ROOT}"
+
+# Case 39: canonical config metadata covers optional nested fields even when
+# the live fixture omits them, and rejects wrong nesting/types.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/docs"
+cat > "${ROOT}/docs/optional-config.md" <<'EOF'
+```json
+{
+  "maintenance": {
+    "enabled": true,
+    "checkDuringImplement": false,
+    "remindAfterDays": 14,
+    "generatedDocs": true
+  }
+}
+```
+EOF
+run_check "${ROOT}"
+n_ce_fail="$(count_results "config-examples" "fail")"
+is_eq0 "${n_ce_fail}" || fail "case39a absent optional maintenance schema fields must pass (got ${n_ce_fail})"
+rm -rf "${ROOT}"
+
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/docs"
+cat > "${ROOT}/docs/wrong-config.md" <<'EOF'
+```json
+{
+  "generatedDocs": true,
+  "maintenance": {
+    "enabled": "yes"
+  }
+}
+```
+EOF
+run_check "${ROOT}"
+n_ce_fail="$(count_results "config-examples" "fail")"
+[[ "${n_ce_fail:-0}" =~ ^[0-9]+$ ]] && [[ "${n_ce_fail}" -ge 2 ]] || fail "case39b wrong config nesting and type must each fail (got ${n_ce_fail:-N/A})"
+rm -rf "${ROOT}"
+
+# Case 40: the hand-curated client matrix row set is exactly the union of
+# portable and user-invocable skills.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+add_fixture_client_matrix "${ROOT}"
+sed -i '/`demo`/d' "${ROOT}/flow/README.md"
+run_check "${ROOT}"
+assert_has_result "capability-table" "fail" "case40a missing expected client row fails"
+rm -rf "${ROOT}"
+
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+add_fixture_client_matrix "${ROOT}"
+sed -i 's/`demo`/`renamed-demo`/' "${ROOT}/flow/README.md"
+run_check "${ROOT}"
+n_cap_fail="$(count_results "capability-table" "fail")"
+[[ "${n_cap_fail:-0}" =~ ^[0-9]+$ ]] && [[ "${n_cap_fail}" -ge 2 ]] || fail "case40b renamed row reports missing and unexpected entries (got ${n_cap_fail:-N/A})"
+rm -rf "${ROOT}"
+
+# Case 41: configured project paths cannot escape the repository.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+jq '(.projects[] | select(.slug=="flow") | .path) = "../outside"' \
+  "${ROOT}/.cenci/config.json" > "${ROOT}/.cenci/config.json.tmp"
+mv "${ROOT}/.cenci/config.json.tmp" "${ROOT}/.cenci/config.json"
+run_check "${ROOT}"
+assert_exit_nonzero "case41 escaping project path is rejected"
+assert_contains "${REPORT_TEXT}" "escapes repository root" "case41 path diagnostic is explicit"
+rm -rf "${ROOT}"
+
+# Case 41b: symlink escapes, including a missing tail below a symlink
+# ancestor, fail closed and never execute the configured gate.
+for project_path in linked linked/missing; do
+  ROOT="$(mktemp -d)"
+  OUTSIDE="$(mktemp -d)"
+  setup_base "${ROOT}"
+  ln -s "${OUTSIDE}" "${ROOT}/linked"
+  jq --arg path "$project_path" '
+    (.projects[] | select(.slug=="flow") | .path) = $path |
+    (.projects[] | select(.slug=="flow") | .gateCommand) = "touch gate-ran"
+  ' "${ROOT}/.cenci/config.json" > "${ROOT}/.cenci/config.json.tmp"
+  mv "${ROOT}/.cenci/config.json.tmp" "${ROOT}/.cenci/config.json"
+  run_check "${ROOT}"
+  assert_exit_nonzero "case41b symlink escaping project path is rejected"
+  assert_has_result "gate-command" "skip" "case41b unsafe path skips executable gate"
+  [[ ! -e "${OUTSIDE}/gate-ran" ]] || fail "case41b unsafe project path executed a gate outside the repository"
+  rm -rf "${ROOT}" "${OUTSIDE}"
+done
+
+# Case 41c: path safety remains portable when a host realpath rejects GNU -m.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+bootstrap_markers "${ROOT}"
+mkdir -p "${ROOT}/bin"
+cat > "${ROOT}/bin/realpath" <<'EOF'
+#!/usr/bin/env bash
+echo "fixture realpath must not be called" >&2
+exit 2
+EOF
+chmod +x "${ROOT}/bin/realpath"
+PATH="${ROOT}/bin:${PATH}" run_check "${ROOT}"
+assert_exit_zero "case41c checker does not depend on GNU realpath -m"
+[[ "${REPORT_TEXT}" != *"fixture realpath"* ]] || fail "case41c checker invoked realpath"
+rm -rf "${ROOT}"
+
+# Case 42: advisory mode is repository-read-only, emits pure JSON on stdout,
+# and explicitly skips executable/network checks.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+bootstrap_markers "${ROOT}"
+rm -f "${ROOT}/.cenci/maintain-report.json"
+cat > "${ROOT}/flow/tests/sample.test.sh" <<'EOF'
+#!/usr/bin/env bash
+touch advisory-structural-ran
+exit 0
+EOF
+jq '(.projects[] | select(.slug=="flow") | .gateCommand) = "touch advisory-gate-ran"' \
+  "${ROOT}/.cenci/config.json" > "${ROOT}/.cenci/config.json.tmp"
+mv "${ROOT}/.cenci/config.json.tmp" "${ROOT}/.cenci/config.json"
+BEFORE_HASHES="$(find "${ROOT}" -type f ! -path '*/.git/*' -print0 | sort -z | xargs -0 sha256sum)"
+run_advisory "${ROOT}"
+assert_exit_zero "case42 advisory clean run exits zero"
+jq -e '.summary.mode == "advisory"' <<< "${REPORT_STDOUT}" >/dev/null 2>&1 || fail "case42 advisory stdout is one valid JSON report"
+assert_has_result "structural-tests" "skip" "case42 structural tests explicitly skip"
+assert_has_result "gate-command" "skip" "case42 gate command explicitly skips"
+assert_has_result "github-labels" "skip" "case42 GitHub check explicitly skips"
+[[ ! -e "${ROOT}/advisory-gate-ran" && ! -e "${ROOT}/advisory-structural-ran" ]] || fail "case42 advisory executed a skipped check"
+[[ ! -e "${ROOT}/.cenci/maintain-report.json" ]] || fail "case42 advisory wrote the default report"
+AFTER_HASHES="$(find "${ROOT}" -type f ! -path '*/.git/*' -print0 | sort -z | xargs -0 sha256sum)"
+assert_eq "${AFTER_HASHES}" "${BEFORE_HASHES}" "case42 advisory must not mutate repository files"
+rm -rf "${ROOT}"
+
+# Case 43: --report-file selects an explicit report, and report-write
+# failures exit 2 without printing a summary.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+bootstrap_markers "${ROOT}"
+run_explicit_report "${ROOT}" "${ROOT}/.cenci/custom-report.json" --strict
+assert_exit_zero "case43a strict explicit report succeeds"
+jq -e '.summary.mode == "strict"' <<< "${REPORT_JSON}" >/dev/null 2>&1 || fail "case43a strict explicit report is valid JSON"
+[[ ! -e "${ROOT}/.cenci/maintain-report.json" ]] || fail "case43a explicit report also wrote the default"
+
+printf 'not a directory\n' > "${ROOT}/blocked-parent"
+run_explicit_report "${ROOT}" "${ROOT}/blocked-parent/report.json"
+assert_exit_two "case43b report write failure exits 2"
+[[ "${REPORT_TEXT}" != *"summary:"* ]] || fail "case43b report write failure printed a summary"
+[[ ! -e "${ROOT}/.cenci/maintain-report.json" ]] || fail "case43b failure wrote the default report"
+
+mkdir -p "${ROOT}/report-is-directory"
+run_explicit_report "${ROOT}" "${ROOT}/report-is-directory"
+assert_exit_two "case43c directory report destination exits 2"
+[[ "${REPORT_TEXT}" != *"summary:"* ]] || fail "case43c directory report destination printed a summary"
+rm -rf "${ROOT}"
+
+# Case 44: generatedDocs=false skips only generated-section maintenance.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+jq '.maintenance = {"generatedDocs": false}' \
+  "${ROOT}/.cenci/config.json" > "${ROOT}/.cenci/config.json.tmp"
+mv "${ROOT}/.cenci/config.json.tmp" "${ROOT}/.cenci/config.json"
+run_check "${ROOT}"
+assert_has_result "stale-generated" "skip" "case44 generatedDocs=false explicitly skips generated sections"
+assert_has_result "front-matter" "pass" "case44 core checks still run"
+assert_has_result "structural-tests" "pass" "case44 executable checks still run outside advisory"
+rm -rf "${ROOT}"
+
+# =====================================================================
 # Skill markdown contract cases (ticket #545) -- grep-based anchor-phrase
 # assertions against flow/skills/maintain/{SKILL.md,codex.md,modes/*.md},
 # none of which exist yet at RED-phase time (the skill/mode/agent files are
@@ -1258,8 +1671,7 @@ assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "portability-maintainer" "MC12 SKI
 # mode exists (see modes/structure.md's own "Approval" section: it points at
 # SKILL.md's Phase 5, it doesn't restate options). MC21 also stays a
 # lacks-assertion: codex.md gets a one-line rule-curation mention (tested
-# separately below) but must never introduce the rules-only approval literal
-# itself -- see plan Risks "Codex under-specification" / Files to Modify. ---
+# separately below) and now carries the full rules-only approval contract. ---
 MAINTAIN_OPT_ALL_REPAIRS="all deterministic repairs"
 MAINTAIN_OPT_CRIT_HIGH="critical+high findings"
 MAINTAIN_OPT_SELECT="let me select findings"
@@ -1275,7 +1687,7 @@ assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "${MAINTAIN_OPT_RULES_ONLY}" "MC17
 assert_file_lacks_phrase "${MAINTAIN_MODE_STRUCTURE}" "${MAINTAIN_OPT_RULES_ONLY}" "MC18 structure.md must not offer a rules only approval option"
 assert_file_lacks_phrase "${MAINTAIN_MODE_DOCS}" "${MAINTAIN_OPT_RULES_ONLY}" "MC19 docs.md must not offer a rules only approval option"
 assert_file_lacks_phrase "${MAINTAIN_MODE_CLIENTS}" "${MAINTAIN_OPT_RULES_ONLY}" "MC20 clients.md must not offer a rules only approval option"
-assert_file_lacks_phrase "${MAINTAIN_CODEX_MD}" "${MAINTAIN_OPT_RULES_ONLY}" "MC21 codex.md must not offer a rules only approval option"
+assert_file_has_phrase "${MAINTAIN_CODEX_MD}" "${MAINTAIN_OPT_RULES_ONLY}" "MC21 codex.md offers the full rules only approval option"
 
 # --- Report-only no-mutation: SKILL.md documents report-only as terminal
 # (no worktree/file/ticket/label/commit/push/PR) and restates that

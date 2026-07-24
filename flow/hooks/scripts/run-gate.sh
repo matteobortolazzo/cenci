@@ -22,7 +22,6 @@ command -v jq >/dev/null 2>&1 || {
   echo "run-gate.sh: jq is required but was not found on PATH." >&2
   exit 2
 }
-
 ROOT="$(pwd -P)" || { echo "run-gate.sh: failed to resolve current working directory." >&2; exit 2; }
 CONFIG="${ROOT}/.cenci/config.json"
 
@@ -102,9 +101,15 @@ if [ -z "${GATE_COMMAND}" ]; then
   exit 0
 fi
 
+case "/${PROJECT_PATH}/" in
+  */../*|*/./*)
+    echo "run-gate.sh: refusing project path containing a dot segment: ${PROJECT_PATH}" >&2
+    exit 1
+    ;;
+esac
 case "${PROJECT_PATH}" in
-  *..*)
-    echo "run-gate.sh: refusing project path containing '..': ${PROJECT_PATH}" >&2
+  /*)
+    echo "run-gate.sh: refusing absolute project path: ${PROJECT_PATH}" >&2
     exit 1
     ;;
 esac
@@ -114,6 +119,47 @@ if [ -n "${SLUG}" ]; then
 else
   ABS_DIR="${ROOT}"
 fi
+
+# Resolve the nearest existing directory ancestor with `pwd -P`, then append
+# the validated missing tail. This is portable across GNU and BSD/macOS hosts
+# and still exposes a symlink ancestor that escapes the repository.
+canonicalize_dir_allow_missing() {
+  candidate="$1"
+  tail=""
+  while [ ! -d "$candidate" ]; do
+    if [ -L "$candidate" ]; then
+      return 1
+    fi
+    segment="${candidate##*/}"
+    [ -n "$segment" ] || return 1
+    if [ -z "$tail" ]; then
+      tail="$segment"
+    else
+      tail="$segment/$tail"
+    fi
+    candidate="${candidate%/*}"
+    [ -n "$candidate" ] || candidate="/"
+  done
+  resolved_ancestor=$(cd "$candidate" 2>/dev/null && pwd -P) || return 1
+  if [ -n "$tail" ]; then
+    printf '%s/%s\n' "$resolved_ancestor" "$tail"
+  else
+    printf '%s\n' "$resolved_ancestor"
+  fi
+}
+
+if ! RESOLVED_DIR=$(canonicalize_dir_allow_missing "${ABS_DIR}"); then
+  echo "run-gate.sh: failed to resolve project directory: ${ABS_DIR}" >&2
+  exit 1
+fi
+case "${RESOLVED_DIR}" in
+  "${ROOT}"|"${ROOT}"/*) ;;
+  *)
+    echo "run-gate.sh: refusing project path outside repository root: ${PROJECT_PATH}" >&2
+    exit 1
+    ;;
+esac
+ABS_DIR="${RESOLVED_DIR}"
 
 if [ ! -d "${ABS_DIR}" ]; then
   echo "run-gate.sh: project directory not found: ${ABS_DIR}" >&2

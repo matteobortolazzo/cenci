@@ -108,7 +108,10 @@ work the same whether or not you ever set up a board.
 
 Every `/cenci:implement` run already automatically checks documentation and generated
 indexes affected by the files it changes, and repairs or reports what it finds — no
-setup required.
+setup required. Optional `.cenci/config.json` controls change the policy without
+disabling correctness: `checkDuringImplement: false` keeps the check report-only,
+`generatedDocs: false` skips marker-bounded generated-section maintenance, and
+`maintenance.enabled` controls only scheduled/reminder UX.
 
 For a full, on-demand audit of the whole project — workflow structure, docs, client
 adapters (Claude Code, Codex, OpenCode), and accumulated rules — run:
