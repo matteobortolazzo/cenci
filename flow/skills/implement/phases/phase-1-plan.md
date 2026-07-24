@@ -148,7 +148,7 @@ stalenessPaths: watch/internal/pipeline/planfile.go, flow/skills/implement/phase
 <planner output>
 
 ## Architectural Context
-<patterns, conventions, code structures discovered>
+<the planner output's ## Architectural Context section — patterns, conventions, integration points discovered>
 
 ## Design Context
 <DESIGN.md content or .pen path, or "N/A">
