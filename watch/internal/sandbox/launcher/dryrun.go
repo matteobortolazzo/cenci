@@ -4,33 +4,41 @@ import (
 	"bufio"
 	"fmt"
 	"io"
-	"os"
 	"strings"
-
-	"github.com/matteobortolazzo/cenci/watch/internal/sandbox"
 )
 
-// This file implements `cenci open --dry-run` (ticket #589): a faithful,
-// read-only preview of the exact create/attach argv Engine.Launch would run
-// for a given Options, plus the full `cenci audit` Posture breakdown.
+// This file implements `cenci open --dry-run` (ticket #589, corrected by
+// #620): a faithful, read-only preview of the exact launch branch
+// Engine.Launch would take for a given Options — attach-only, create-then-
+// attach, or the incompatible-container hard error — plus the full
+// `cenci audit` Posture breakdown.
 //
 // DryRun mirrors Launch's own failure modes (agent validation, ComputeScope,
-// ResolveDind, container-runtime resolution, dind preflight, credential
-// validation) rather than printing a best-effort argv, and its create/attach
-// argv is built via the exact same buildRunArgv/buildAgentExecArgv helpers
+// ResolveDind, container-runtime resolution, dind preflight, container
+// disposition, credential validation) rather than printing a best-effort
+// argv, and its branch decision and argvs are built via the exact same
+// resolveLaunchContext/planArgvs/buildRunArgv/buildAgentExecArgv helpers
 // Launch/runAgent call — never a parallel/duplicate command-building path.
-// Like Audit, DryRun never launches, attaches, creates a container/volume, or
-// starts the daemon (cenciWiringReadOnly, not resolveCenciWiring).
+// Like Audit, DryRun never launches, creates a container/volume, or starts
+// the daemon (cenciWiringReadOnly, not resolveCenciWiring); its
+// containerRunning/containerHasSharedAgentMount disposition probes (via
+// planArgvs) are reads (`ps`/`inspect`), never mutations.
 
 // DryRunPlan is the faithful, read-only representation of what a real launch
-// would run for a given Options: the exact create/attach argv (each after the
-// runtime binary — Runtime carries the binary name itself) plus the full
-// audit Posture breakdown.
+// would run for a given Options: the branch a real launch would take
+// (Mode: "create" or "attach"), the scoped container name, the create/attach
+// argv (each after the runtime binary — Runtime carries the binary name
+// itself; CreateArgv is nil in the attach branch), whether the create
+// branch's cenci-wiring outcome could not be determined read-only
+// (CenciWiringUnknown), and the full audit Posture breakdown.
 type DryRunPlan struct {
-	Runtime    string
-	CreateArgv []string
-	AttachArgv []string
-	Posture    Posture
+	Runtime            string
+	Mode               string
+	ContainerName      string
+	CreateArgv         []string
+	AttachArgv         []string
+	CenciWiringUnknown bool
+	Posture            Posture
 }
 
 // DryRun performs the same non-side-effecting steps Launch performs, in the
@@ -38,12 +46,24 @@ type DryRunPlan struct {
 // launch.go's UsageError/IsUsage): agent validation, ComputeScope,
 // ResolveDind (usage error), container-runtime resolution (docker-first
 // under dind, else podman-first — mirrors Launch), dindPreflight when dind is
-// on, and credential validation (via buildRunArgv -> assembleRunArgs ->
+// on, the read-only container-disposition probe (containerRunning +
+// containerHasSharedAgentMount, via the shared planArgvs), the same
+// incompatible-running-container hard error Launch returns, and credential
+// validation on the create branch (via buildRunArgv -> assembleRunArgs ->
 // validateCredentials, a hard non-usage error). It skips every
 // side-effecting step Launch performs (EnsureImage, EnsureAgentVolume,
-// containerRunning/rm/run, waitUntilReady, runAgent/execAttach) and uses the
-// read-only cenciWiringReadOnly (never resolveCenciWiring, which starts the
-// daemon), exactly as Audit does.
+// rm/run, waitUntilReady, runAgent/execAttach) and uses the read-only
+// cenciWiringReadOnly (never resolveCenciWiring, which starts the daemon),
+// exactly as Audit does.
+//
+// When the create branch's cenci-wiring outcome is genuinely indeterminate
+// read-only (the events socket is merely missing, not unresolvable — a real
+// launch's daemon.EnsureRunning() might bring it up or might not),
+// CenciWiringUnknown is set and the create argv omits the wiring mounts
+// (consistent with the read-only probe's determinate-false posture; #620
+// Q1). The attach branch never sets it: an already-running container's
+// mounts are fixed for its lifetime and are not re-derived read-only (no
+// read-only equivalent of warnIfUnwired here — see the plan's Assumption).
 //
 // The Posture breakdown is composed by calling Audit on a shallow engine
 // copy with Stderr discarded: DryRun's own create-argv build already prints
@@ -51,58 +71,28 @@ type DryRunPlan struct {
 // calling Audit on a Stderr-discarding clone avoids printing it a second
 // time.
 func (e *Engine) DryRun(opts Options) (DryRunPlan, error) {
-	agent := opts.Agent
-	if agent == "" {
-		agent = "claude"
-	}
-	if err := ValidateAgent(agent); err != nil {
-		return DryRunPlan{}, err
-	}
-	model := opts.Model
-	if model == "" {
-		model = DefaultModel(agent)
-	}
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		return DryRunPlan{}, fmt.Errorf("cannot determine working directory: %w", err)
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return DryRunPlan{}, fmt.Errorf("cannot determine home directory: %w", err)
-	}
-	scope := ComputeScope(agent, opts.Name, cwd, home)
-
-	dindOn, err := ResolveDind(opts, scope)
+	ctx, err := e.resolveLaunchContext(opts)
 	if err != nil {
 		return DryRunPlan{}, err
-	}
-	if e.Runtime == "" {
-		if dindOn {
-			e.Runtime, err = sandbox.ContainerRuntimePreferDocker()
-		} else {
-			e.Runtime, err = sandbox.ContainerRuntime()
-		}
-		if err != nil {
-			return DryRunPlan{}, err
-		}
-	}
-	if dindOn {
-		if err := e.dindPreflight(); err != nil {
-			return DryRunPlan{}, err
-		}
 	}
 
 	cenciBin, socketDir, cenciAvailable := cenciWiringReadOnly()
 
-	createArgv, err := e.buildRunArgv(agent, cenciBin, socketDir, cenciAvailable, scope, opts, home, dindOn)
+	createArgv, attachArgv, attaching, err := e.planArgvs(ctx, opts, cenciBin, socketDir, cenciAvailable)
 	if err != nil {
 		return DryRunPlan{}, err
 	}
 
-	agentCmdArgs := buildAgentCmdArgs(agent, model)
-	execEnvArgs := assembleExecEnv(agent)
-	attachArgv := buildAgentExecArgv(scope.ContainerName, agent, agentCmdArgs, execEnvArgs, opts)
+	mode := "create"
+	if attaching {
+		mode = "attach"
+	}
+
+	// CenciWiringUnknown only applies to the create branch: socketDir != ""
+	// with cenciAvailable == false is cenciWiringReadOnly's signal that the
+	// events socket is merely missing (not unresolvable), so a real launch's
+	// daemon.EnsureRunning() outcome can't be determined read-only.
+	cenciWiringUnknown := !attaching && cenciBin != "" && socketDir != "" && !cenciAvailable
 
 	// Avoid printing the --host-network isolation warning twice: the create
 	// argv build above already printed it once (to e.Stderr, the real
@@ -116,29 +106,42 @@ func (e *Engine) DryRun(opts Options) (DryRunPlan, error) {
 	}
 
 	return DryRunPlan{
-		Runtime:    e.Runtime,
-		CreateArgv: createArgv,
-		AttachArgv: attachArgv,
-		Posture:    posture,
+		Runtime:            e.Runtime,
+		Mode:               mode,
+		ContainerName:      ctx.Scope.ContainerName,
+		CreateArgv:         createArgv,
+		AttachArgv:         attachArgv,
+		CenciWiringUnknown: cenciWiringUnknown,
+		Posture:            posture,
 	}, nil
 }
 
 // WriteText renders p as `cenci open --dry-run`'s human-readable report: an
 // honest capabilities line (the launcher applies no --cap-add/--cap-drop
 // today, so there is no capabilities argv content or Posture field to
-// invent), both labeled argvs (redacted via renderArgv), and the full
-// cenci audit Posture body verbatim (Posture.WriteText) — never a trimmed
-// summary, so the breakdown can never drift from `cenci audit`.
+// invent), the branch a real launch would take (attach-only vs create-then-
+// attach, each redacted via renderArgv), an explicit indeterminacy caveat on
+// the create branch when CenciWiringUnknown, and the full cenci audit
+// Posture body verbatim (Posture.WriteText) — never a trimmed summary, so
+// the breakdown can never drift from `cenci audit`.
 func (p DryRunPlan) WriteText(w io.Writer) error {
 	bw := bufio.NewWriter(w)
 
-	_, _ = fmt.Fprintln(bw, "cenci open --dry-run: the exact launch commands, printed without executing them")
+	_, _ = fmt.Fprintln(bw, "cenci open --dry-run: the launch branch a real launch would take, printed without executing it")
 	_, _ = fmt.Fprintln(bw)
 	_, _ = fmt.Fprintln(bw, "Capabilities: runtime defaults (launcher applies no --cap-add/--cap-drop)")
 	_, _ = fmt.Fprintln(bw)
 
-	_, _ = fmt.Fprintln(bw, "Container create (detached):")
-	_, _ = fmt.Fprintf(bw, "  %s %s\n\n", p.Runtime, renderArgv(p.CreateArgv))
+	if p.Mode == "attach" {
+		_, _ = fmt.Fprintf(bw, "Container '%s' is already running and compatible — attaching, no create.\n\n", p.ContainerName)
+	} else {
+		_, _ = fmt.Fprintln(bw, "Container create (detached):")
+		_, _ = fmt.Fprintf(bw, "  %s %s\n\n", p.Runtime, renderArgv(p.CreateArgv))
+		if p.CenciWiringUnknown {
+			_, _ = fmt.Fprintln(bw, "Note: the cenci events daemon is not yet running, so whether this launch would include cenci wiring mounts could not be determined read-only; a real launch may start the daemon and include them.")
+			_, _ = fmt.Fprintln(bw)
+		}
+	}
 
 	_, _ = fmt.Fprintln(bw, "Agent attach (exec):")
 	_, _ = fmt.Fprintf(bw, "  %s %s\n\n", p.Runtime, renderArgv(p.AttachArgv))

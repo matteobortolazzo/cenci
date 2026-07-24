@@ -27,6 +27,16 @@ import (
 //	                     registration probe, sandbox.SysboxRegistered);
 //	                     defaults to "{}" (no runtimes registered), mirroring
 //	                     sandbox_open_test.go's writeScriptedRuntime.
+//	FAKE_INSPECT_MOUNTS → `inspect --format ...` stdout for the ".RW" mounts
+//	                     format containerHasSharedAgentMount uses (ticket
+//	                     #620's read-only running-container disposition
+//	                     probe); defaults to "" (no mounts -> incompatible).
+//	                     Named to mirror sandbox_open_test.go's
+//	                     writeScriptedRuntime FAKE_INSPECT_MOUNTS var (#493
+//	                     keep-in-sync note), though that fake's var answers a
+//	                     different inspect format (the plain ".Destination"
+//	                     shape warnIfUnwired uses) since this package's DryRun
+//	                     only ever needs the ".RW" shared-agent-mount check.
 //
 // Plain /bin/sh (not env) so it resolves under a minimal overridden PATH.
 func writeFakeRuntime(t *testing.T, dir, name, callLog string) {
@@ -57,10 +67,29 @@ images)
 ps) printf '%s' "${FAKE_PS:-}" ;;
 volume) [ "$2" = ls ] && printf '%s' "${FAKE_VOLUMES:-}" ;;
 info) printf '%s' "${FAKE_INFO_RUNTIMES:-{\}}" ;;
+inspect)
+  case "$*" in
+  *'.RW'*) printf '%b' "${FAKE_INSPECT_MOUNTS:-}" ;;
+  esac
+  ;;
 esac
 exit 0
 `
 	exectest.WriteExecutable(t, filepath.Join(dir, name), body)
+}
+
+// setFakeDockerNotRunning puts a fake "docker" (FAKE_PS left unset, so
+// containerRunning reports nothing running) first on PATH, so tests that
+// don't care about container disposition can call DryRun (which now always
+// performs the read-only containerRunning probe via planArgvs, ticket #620)
+// without depending on a real container runtime being reachable on the host
+// running the test suite.
+func setFakeDockerNotRunning(t *testing.T) {
+	t.Helper()
+	fakeDir := t.TempDir()
+	callLog := filepath.Join(fakeDir, "calls.txt")
+	writeFakeRuntime(t, fakeDir, "docker", callLog)
+	t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
 }
 
 // readCallLog returns the fake runtime's call log lines.

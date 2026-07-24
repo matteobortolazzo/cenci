@@ -2019,6 +2019,80 @@ func TestOpenCodexWithoutAuth_Exits1(t *testing.T) {
 	}
 }
 
+// TestOpenCodexWithoutAuth_DoesNotRemoveStoppedContainer is a #620 follow-up
+// regression test (code review, "Should Fix"): Launch's create branch used to
+// run `rm <container-name>` unconditionally before building the create argv,
+// so a stopped/absent same-named container was always deleted even when the
+// launch itself then failed (e.g. codex credential validation). The #620
+// refactor moved `rm` to run after planArgvs (which includes buildRunArgv's
+// credential validation) succeeds, so a failed launch must now leave any
+// stopped, same-named container untouched — nothing removes it before the
+// hard error is returned. FAKE_PS is left empty (its default), which is the
+// "not running" case containerRunning reads regardless of whether the
+// container is stopped or absent.
+func TestOpenCodexWithoutAuth_DoesNotRemoveStoppedContainer(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets) // no ~/.codex/auth.json, OPENAI_API_KEY scrubbed
+
+	cmd := exec.Command(binaryPath, "open", "xt")
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected codex auth failure to exit 1, got %T %v\n%s", err, err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	if anyLineContains(lines, "rm codex-cenci-default") {
+		t.Errorf("expected the stopped/absent same-named container to survive a failed credential validation (rm must run after planArgvs succeeds, not before), got calls:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// TestOpenCodex_RemovesStoppedContainerOnSuccessfulCreate is the success-path
+// sibling of TestOpenCodexWithoutAuth_DoesNotRemoveStoppedContainer: once
+// credential validation (and the rest of planArgvs) succeeds, Launch must
+// still remove a stopped/absent same-named container before creating the new
+// one, exactly as it always has.
+func TestOpenCodex_RemovesStoppedContainerOnSuccessfulCreate(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "xt")
+	cmd.Env = append(env, "OPENAI_API_KEY=sk-cenci-test-secret") // satisfies the codex auth gate
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("open xt: %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	rmIdx := -1
+	runIdx := -1
+	for i, l := range lines {
+		if l == "rm codex-cenci-default" {
+			rmIdx = i
+		}
+		if strings.HasPrefix(l, "run --name codex-cenci-default") {
+			runIdx = i
+		}
+	}
+	if rmIdx == -1 {
+		t.Fatalf("expected 'rm codex-cenci-default' before creating the container, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if runIdx == -1 {
+		t.Fatalf("expected a 'run --name codex-cenci-default' create call, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if rmIdx > runIdx {
+		t.Errorf("expected rm (index %d) to run before create (index %d), got calls:\n%s", rmIdx, runIdx, strings.Join(lines, "\n"))
+	}
+}
+
 // TestOpenCodex_ForwardsProviderKeyPerExecOnly pins Codex's OPENAI_API_KEY
 // forwarding to the per-exec-only model OpenCode already uses (#490/#509):
 // the env var alone must satisfy the codex auth gate (no ~/.codex/auth.json

@@ -6,22 +6,53 @@ import (
 	"testing"
 )
 
-// -- cenci open --dry-run (ticket #589) ----------------------------------
+// -- cenci open --dry-run (ticket #589, corrected by #620) ----------------
 //
-// `cenci open --dry-run` (and the `cn --dry-run` argv[0] alias) prints the
-// exact, redacted docker/podman argv `cenci open` would run -- both the
-// detached container-create command and the interactive agent-attach
-// command -- followed by the full `cenci audit` Posture breakdown, without
-// creating any container, volume, or network. These black-box tests drive
-// the real built `cenci` binary as a subprocess against the scripted-runtime
-// harness already shared by sandbox_open_test.go (writeScriptedRuntimes,
+// `cenci open --dry-run` (and the `cn --dry-run` argv[0] alias) renders the
+// branch a real launch would take -- attach-only, create-then-attach, or the
+// incompatible-container hard error -- followed by the full `cenci audit`
+// Posture breakdown, without creating any container, volume, network, or
+// daemon, and without attaching. These black-box tests drive the real built
+// `cenci` binary as a subprocess against the scripted-runtime harness
+// already shared by sandbox_open_test.go (writeScriptedRuntimes,
 // openTestEnv, callLogLines, buildArgv0Alias, etc. -- watch/AGENTS.md #493)
 // rather than reinventing it.
 //
-// NOTE (red phase): main.go/open_cmd.go do not yet recognize --dry-run --
-// every test below currently observes the stdlib flag package's "flag
-// provided but not defined: -dry-run" usage error instead of real dry-run
-// behavior, which is the intended red-phase failure.
+// Since #620, DryRun performs its own read-only container-disposition
+// probing (a `ps` call via the shared planArgvs helper, mirroring a real
+// launch's containerRunning check) even in these fixtures' no-container-
+// running scenarios, so a bare "zero calls" assertion no longer holds --
+// assertOnlyReadOnlyContainerProbeCalls enumerates the still-forbidden
+// mutating verbs explicitly (AGENTS #446) rather than loosening to "any
+// calls are fine".
+
+// assertOnlyReadOnlyContainerProbeCalls asserts the container-runtime call
+// log contains, at most, read-only listing/inspection verbs (the
+// containerRunning/containerHasSharedAgentMount disposition probes planArgvs
+// now always performs, ticket #620) -- never a mutating verb (run, rm, exec,
+// create, volume create, network). Each forbidden verb is enumerated
+// explicitly (AGENTS #446/plan Risks) rather than a loosened "some calls are
+// fine" check, so a future accidental mutating call in the dry-run path
+// can't hide behind it.
+func assertOnlyReadOnlyContainerProbeCalls(t *testing.T, lines []string) {
+	t.Helper()
+	for _, mutatingPrefix := range []string{"run ", "rm ", "exec ", "create ", "volume create", "network"} {
+		for _, line := range lines {
+			if strings.HasPrefix(line, mutatingPrefix) {
+				t.Errorf("expected only read-only ps/inspect container-runtime calls, got mutating call with prefix %q; calls:\n%s", mutatingPrefix, strings.Join(lines, "\n"))
+			}
+		}
+	}
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if verb := fields[0]; verb != "ps" && verb != "inspect" {
+			t.Errorf("expected only read-only ps/inspect container-runtime calls, got unexpected call %q; calls:\n%s", line, strings.Join(lines, "\n"))
+		}
+	}
+}
 
 func TestOpenDryRun_PrintsBothLabeledArgvsAndPostureWithoutMutating(t *testing.T) {
 	fakeDir := t.TempDir()
@@ -48,9 +79,7 @@ func TestOpenDryRun_PrintsBothLabeledArgvsAndPostureWithoutMutating(t *testing.T
 		t.Errorf("expected the full cenci audit Posture breakdown, got:\n%s", out)
 	}
 
-	if lines := callLogLines(t, callLog); len(lines) != 0 {
-		t.Errorf("expected --dry-run to make zero container-runtime calls, got:\n%s", strings.Join(lines, "\n"))
-	}
+	assertOnlyReadOnlyContainerProbeCalls(t, callLogLines(t, callLog))
 }
 
 func TestCnDryRun_PrintsBothLabeledArgvsAndPostureWithoutMutating(t *testing.T) {
@@ -74,9 +103,7 @@ func TestCnDryRun_PrintsBothLabeledArgvsAndPostureWithoutMutating(t *testing.T) 
 	if !strings.Contains(out, "run --name ") || !strings.Contains(out, "exec -it ") {
 		t.Errorf("expected both labeled argvs from the cn alias, got:\n%s", out)
 	}
-	if lines := callLogLines(t, callLog); len(lines) != 0 {
-		t.Errorf("expected cn --dry-run to make zero container-runtime calls, got:\n%s", strings.Join(lines, "\n"))
-	}
+	assertOnlyReadOnlyContainerProbeCalls(t, callLogLines(t, callLog))
 }
 
 func TestOpenDryRun_ClaudeHaikuShortcutAndTrailingForwardedArgs(t *testing.T) {
@@ -98,9 +125,7 @@ func TestOpenDryRun_ClaudeHaikuShortcutAndTrailingForwardedArgs(t *testing.T) {
 	if !strings.Contains(out, wantTail) {
 		t.Errorf("expected the attach argv to show the claude+haiku shortcut resolution and trailing --resume, got:\n%s", out)
 	}
-	if lines := callLogLines(t, callLog); len(lines) != 0 {
-		t.Errorf("expected --dry-run to make zero container-runtime calls, got:\n%s", strings.Join(lines, "\n"))
-	}
+	assertOnlyReadOnlyContainerProbeCalls(t, callLogLines(t, callLog))
 }
 
 func TestOpenDryRun_DindAndNoDind_Exits2(t *testing.T) {
@@ -144,7 +169,5 @@ func TestOpenDryRun_CodexNoAuth_Exits1(t *testing.T) {
 	if !strings.Contains(string(output), "requires Codex auth") {
 		t.Errorf("expected the codex auth error, got:\n%s", output)
 	}
-	if lines := callLogLines(t, callLog); len(lines) != 0 {
-		t.Errorf("expected no runtime calls for the codex-no-auth --dry-run failure, got:\n%s", strings.Join(lines, "\n"))
-	}
+	assertOnlyReadOnlyContainerProbeCalls(t, callLogLines(t, callLog))
 }
