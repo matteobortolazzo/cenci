@@ -164,4 +164,17 @@ Before finalizing the plan, explicitly identify:
     ### Open Questions
     - <anything unresolved — needs human input before implementation>
 
+    ## Architectural Context
+
+    The patterns, conventions, and integration points discovered during codebase
+    exploration that the implementation must follow. The main agent persists this
+    section verbatim into the plan file's `## Architectural Context` (a required
+    section — `cenci pipeline plan-check` rejects a plan without it), so the
+    implementing session inherits the exploration instead of redoing it:
+
+    - **Existing patterns to follow**: <pattern> — <where it lives, e.g. `path/to/file.ext`>
+    - **Conventions that bind this work**: <naming, structure, error-handling, or testing conventions>
+    - **Integration points**: <interfaces, seams, or contracts this change plugs into>
+    - **Constraints**: <architectural decisions or critical rules that shaped the plan>
+
 Use ultrathink for complex analysis.
