@@ -155,7 +155,7 @@ func CheckPlan(o PlanCheckOpts) (State, PlanCheck, error) {
 		return state, PlanCheck{Decision: "replan", Paths: matches, Plan: meta}, nil
 	}
 
-	stale, err := planIsStale(o, fm, repoRoot)
+	stale, err := planIsStale(o, fm, repoRoot, state.TicketUpdatedAt)
 	if err != nil {
 		return state, PlanCheck{Paths: matches, Plan: meta}, err
 	}
@@ -232,7 +232,16 @@ func isValidPlanSlug(slug string) bool {
 // planIsStale computes the deterministic freshness verdict (Q&A #3/#39):
 // stale when ANY of commits-behind (git, scoped to the plan's
 // stalenessPaths) > 0, ticket state != OPEN, or ticket updatedAt > the
-// plan's createdAt. No judgment-pass fallback.
+// plan's createdAt AND > the recorded post-label-edit baseline (#669). No
+// judgment-pass fallback.
+//
+// baseline is the persisted State.TicketUpdatedAt: the ticket's updatedAt
+// as observed immediately after the pipeline's own most recent label edit.
+// Persisting a plan is always followed by the `planned` label swap, whose
+// `gh issue edit` bumps updatedAt past the plan's createdAt — comparing
+// against createdAt alone marked every freshly persisted plan stale with
+// zero repo churn. An empty baseline (pre-#669 state file, or a state file
+// that could not be loaded) falls back to the createdAt-only comparison.
 //
 // A commits-behind failure (invalid/unreachable planCommitSha, transient git
 // error, corrupted worktree) is propagated as a genuine error rather than
@@ -240,7 +249,7 @@ func isValidPlanSlug(slug string) bool {
 // must never be silently treated as "0 commits behind, resume". This mirrors
 // the ticket-freshness failure handling below it (gh error, JSON decode,
 // time.Parse), each with a content-distinct message (rule #446).
-func planIsStale(o PlanCheckOpts, fm map[string]string, repoRoot string) (bool, error) {
+func planIsStale(o PlanCheckOpts, fm map[string]string, repoRoot, baseline string) (bool, error) {
 	sha := fm["planCommitSha"]
 	if sha != "" && !planCommitShaPattern.MatchString(sha) {
 		return false, fmt.Errorf("plan file for ticket %s: invalid planCommitSha %q: must match %s: %w",
@@ -283,5 +292,16 @@ func planIsStale(o PlanCheckOpts, fm map[string]string, repoRoot string) (bool, 
 	if cerr != nil {
 		return false, fmt.Errorf("parse plan createdAt %q for %s: %w", fm["createdAt"], o.ID, cerr)
 	}
-	return updatedAt.After(createdAt), nil
+
+	threshold := createdAt
+	if baseline != "" {
+		b, berr := time.Parse(time.RFC3339, baseline)
+		if berr != nil {
+			return false, fmt.Errorf("parse recorded ticketUpdatedAt baseline %q for %s: %w", baseline, o.ID, berr)
+		}
+		if b.After(threshold) {
+			threshold = b
+		}
+	}
+	return updatedAt.After(threshold), nil
 }

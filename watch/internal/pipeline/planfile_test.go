@@ -579,6 +579,97 @@ func TestCheckPlan_StaleTicket_UpdatedAtAfterCreatedAt_ReturnsStale(t *testing.T
 	}
 }
 
+// -- freshness baseline: the pipeline's own label edits are not drift (#669) -
+
+// seedStateWithBaseline writes a pipeline state file carrying a recorded
+// post-label-edit ticketUpdatedAt baseline, as ApplyLabelTransition persists
+// it.
+func seedStateWithBaseline(t *testing.T, stateDir, id string, stage Stage, ticketUpdatedAt string) {
+	t.Helper()
+	path := filepath.Join(stateDir, id+".json")
+	s := State{SchemaVersion: CurrentSchemaVersion, ID: id, Stage: stage, TicketUpdatedAt: ticketUpdatedAt}
+	if err := saveState(path, s); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+}
+
+func TestCheckPlan_PipelineOwnLabelEdit_CoveredByBaseline_ReturnsResume(t *testing.T) {
+	// Regression (#669): persisting a plan stamps createdAt, then the
+	// pipeline's own `planned` label swap bumps the ticket's updatedAt past
+	// it — previously making every freshly persisted plan report stale with
+	// zero repo churn. With the post-edit updatedAt recorded as the state's
+	// baseline, that self-inflicted bump must classify as resume.
+	repoRoot := t.TempDir()
+	initGitRepoWithCommit(t, repoRoot)
+	sha := gitHeadSha(t, repoRoot)
+	createdAt := "2026-07-20T20:00:00Z"
+	writePlanFile(t, repoRoot, "42", "add-thing", defaultPlanFields("42", "add-thing", sha, createdAt), validPlanBody)
+
+	stateDir := t.TempDir()
+	seedStateWithBaseline(t, stateDir, "42", StageWaitingForPlanApproval, "2026-07-20T20:01:00Z")
+
+	// The ticket's updatedAt equals the recorded baseline: the last edit
+	// was the pipeline's own label swap, not a user edit.
+	gh := newFakeGhTicket(t, "OPEN", "2026-07-20T20:01:00Z")
+	gh.install()
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, StateDir: stateDir, RepoSlug: "o/r"})
+	if err != nil {
+		t.Fatalf("CheckPlan: %v", err)
+	}
+	if check.Decision != "resume" {
+		t.Errorf("Decision = %q, want resume (updatedAt matches the recorded post-label-edit baseline)", check.Decision)
+	}
+}
+
+func TestCheckPlan_TicketEditedAfterBaseline_ReturnsStale(t *testing.T) {
+	// A genuine ticket edit after the recorded baseline is still drift.
+	repoRoot := t.TempDir()
+	initGitRepoWithCommit(t, repoRoot)
+	sha := gitHeadSha(t, repoRoot)
+	createdAt := "2026-07-20T20:00:00Z"
+	writePlanFile(t, repoRoot, "42", "add-thing", defaultPlanFields("42", "add-thing", sha, createdAt), validPlanBody)
+
+	stateDir := t.TempDir()
+	seedStateWithBaseline(t, stateDir, "42", StageWaitingForPlanApproval, "2026-07-20T20:01:00Z")
+
+	gh := newFakeGhTicket(t, "OPEN", "2026-07-20T22:00:00Z") // after the baseline
+	gh.install()
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, StateDir: stateDir, RepoSlug: "o/r"})
+	if err != nil {
+		t.Fatalf("CheckPlan: %v", err)
+	}
+	if check.Decision != "stale" {
+		t.Errorf("Decision = %q, want stale (ticket updatedAt is after the recorded baseline)", check.Decision)
+	}
+}
+
+func TestCheckPlan_MalformedBaselineInState_ReturnsErrorNotResume(t *testing.T) {
+	// An unverifiable freshness signal must never silently default to
+	// "resume" (#560 item 1), matching the surrounding parse-failure
+	// handling with a content-distinct message (rule #446).
+	repoRoot := t.TempDir()
+	initGitRepoWithCommit(t, repoRoot)
+	sha := gitHeadSha(t, repoRoot)
+	createdAt := "2026-07-20T20:00:00Z"
+	writePlanFile(t, repoRoot, "42", "add-thing", defaultPlanFields("42", "add-thing", sha, createdAt), validPlanBody)
+
+	stateDir := t.TempDir()
+	seedStateWithBaseline(t, stateDir, "42", StageWaitingForPlanApproval, "not-a-timestamp")
+
+	gh := newFakeGhTicket(t, "OPEN", "2026-07-20T21:00:00Z")
+	gh.install()
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, StateDir: stateDir, RepoSlug: "o/r"})
+	if err == nil {
+		t.Fatalf("CheckPlan with a malformed baseline: want an error, got decision %q", check.Decision)
+	}
+	if !strings.Contains(err.Error(), "ticketUpdatedAt") {
+		t.Errorf("error = %q, want it to name the malformed ticketUpdatedAt baseline", err.Error())
+	}
+}
+
 // -- replan: short-circuits regardless of freshness --------------------------
 
 func TestCheckPlan_ReplanRequested_ReturnsReplanRegardlessOfFreshness(t *testing.T) {

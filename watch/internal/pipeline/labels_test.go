@@ -75,11 +75,21 @@ type fakeGh struct {
 	// "ok" (exit 0), "already-exists" (gh's real "already exists" error
 	// text, exit 1), or "genuine-failure" (an unrelated failure, exit 1).
 	labelCreateBehavior string
+
+	// ticketUpdatedAt is the response to the post-edit `gh issue view <id>
+	// --json updatedAt` freshness-baseline fetch (#669).
+	ticketUpdatedAt string
 }
 
 func newFakeGh(t *testing.T, login string, assignees []string) *fakeGh {
 	t.Helper()
-	return &fakeGh{t: t, login: login, assignees: append([]string{}, assignees...), labelCreateBehavior: "ok"}
+	return &fakeGh{
+		t:                   t,
+		login:               login,
+		assignees:           append([]string{}, assignees...),
+		labelCreateBehavior: "ok",
+		ticketUpdatedAt:     "2026-07-20T20:05:00Z",
+	}
 }
 
 func (f *fakeGh) install() {
@@ -97,6 +107,8 @@ func (f *fakeGh) respond(call ghCall) ([]byte, error) {
 	switch {
 	case call.name == "gh" && call.is("api", "user"):
 		return []byte(f.login + "\n"), nil
+	case call.name == "gh" && call.is("issue", "view") && call.hasFlag("--json", "updatedAt"):
+		return []byte(`{"updatedAt":"` + f.ticketUpdatedAt + `"}`), nil
 	case call.name == "gh" && call.is("issue", "view"):
 		return []byte(f.assigneesJSON()), nil
 	case call.name == "gh" && call.is("issue", "edit") && call.hasFlag("--add-assignee", ""):
@@ -292,6 +304,97 @@ func TestApplyLabelTransition_InReview_WithParent_CascadesToParent(t *testing.T)
 	}
 	if !foundParent {
 		t.Error("expected a `gh issue edit 10 --add-label \"In Review\"` cascade call to the parent ticket")
+	}
+}
+
+// -- freshness baseline: post-edit ticketUpdatedAt recording (#669) --------
+
+func TestApplyLabelTransition_Planned_RecordsTicketUpdatedAtBaseline(t *testing.T) {
+	// The pipeline's own `gh issue edit` label swap bumps the ticket's
+	// updatedAt past the plan's createdAt; without a recorded baseline,
+	// plan-check would mark every freshly persisted plan stale (#669).
+	// After the swap, the transition must fetch the post-edit updatedAt
+	// and persist it as State.TicketUpdatedAt.
+	stateDir := t.TempDir()
+	mustSeedState(t, stateDir, "42", StageWaitingForPlanApproval)
+	gh := newFakeGh(t, "octocat", nil)
+	gh.ticketUpdatedAt = "2026-07-20T20:07:00Z"
+	gh.install()
+
+	s, err := ApplyLabelTransition(LabelOpts{ID: "42", StateDir: stateDir, RepoSlug: "o/r", Transition: "planned"})
+	if err != nil {
+		t.Fatalf("ApplyLabelTransition(planned): %v", err)
+	}
+	if s.TicketUpdatedAt != "2026-07-20T20:07:00Z" {
+		t.Errorf("returned State.TicketUpdatedAt = %q, want the post-edit updatedAt %q", s.TicketUpdatedAt, "2026-07-20T20:07:00Z")
+	}
+
+	persisted, err := loadState(filepath.Join(stateDir, "42.json"))
+	if err != nil {
+		t.Fatalf("load persisted state: %v", err)
+	}
+	if persisted.TicketUpdatedAt != "2026-07-20T20:07:00Z" {
+		t.Errorf("persisted TicketUpdatedAt = %q, want %q", persisted.TicketUpdatedAt, "2026-07-20T20:07:00Z")
+	}
+
+	// Ordering (#620): the baseline fetch must run AFTER the label edit —
+	// a pre-edit fetch would record a stale updatedAt that the edit itself
+	// immediately invalidates, reintroducing the bug.
+	editIdx, fetchIdx := -1, -1
+	for i, c := range gh.calls {
+		if c.is("issue", "edit") && c.hasFlag("--add-label", "Planned") {
+			editIdx = i
+		}
+		if c.is("issue", "view") && c.hasFlag("--json", "updatedAt") {
+			fetchIdx = i
+		}
+	}
+	if editIdx == -1 || fetchIdx == -1 {
+		t.Fatalf("expected both a label edit and an updatedAt fetch, got calls %v", gh.calls)
+	}
+	if fetchIdx < editIdx {
+		t.Errorf("updatedAt fetch (call %d) ran before the label edit (call %d); baseline must be post-edit", fetchIdx, editIdx)
+	}
+}
+
+func TestApplyLabelTransition_Working_RecordsTicketUpdatedAtBaseline(t *testing.T) {
+	// The working transition (including a saved-plan pickup's re-apply)
+	// also edits the ticket; recording its post-edit updatedAt keeps a
+	// later re-run of plan-check from seeing that edit as user drift.
+	stateDir := t.TempDir()
+	mustSeedState(t, stateDir, "42", StagePrepared)
+	gh := newFakeGh(t, "octocat", []string{"octocat"})
+	gh.ticketUpdatedAt = "2026-07-20T20:09:00Z"
+	gh.install()
+
+	if _, err := ApplyLabelTransition(LabelOpts{ID: "42", StateDir: stateDir, RepoSlug: "o/r", Transition: "working"}); err != nil {
+		t.Fatalf("ApplyLabelTransition(working): %v", err)
+	}
+	persisted, err := loadState(filepath.Join(stateDir, "42.json"))
+	if err != nil {
+		t.Fatalf("load persisted state: %v", err)
+	}
+	if persisted.TicketUpdatedAt != "2026-07-20T20:09:00Z" {
+		t.Errorf("persisted TicketUpdatedAt = %q, want %q", persisted.TicketUpdatedAt, "2026-07-20T20:09:00Z")
+	}
+}
+
+func TestApplyLabelTransition_BaselineFetchFailure_PropagatesError(t *testing.T) {
+	// An unverifiable freshness baseline must never be silently dropped
+	// (#560 item 1): a missing baseline would make the next plan-check
+	// misclassify the pipeline's own edit as user drift.
+	stateDir := t.TempDir()
+	mustSeedState(t, stateDir, "42", StageWaitingForPlanApproval)
+	gh := newFakeGh(t, "octocat", nil)
+	gh.ticketUpdatedAt = "not-a-timestamp"
+	gh.install()
+
+	_, err := ApplyLabelTransition(LabelOpts{ID: "42", StateDir: stateDir, RepoSlug: "o/r", Transition: "planned"})
+	if err == nil {
+		t.Fatal("ApplyLabelTransition(planned) with an unparsable post-edit updatedAt: want an error, got nil")
+	}
+	if !strings.Contains(err.Error(), "updatedAt") {
+		t.Errorf("error = %q, want it to name the updatedAt baseline fetch", err.Error())
 	}
 }
 
