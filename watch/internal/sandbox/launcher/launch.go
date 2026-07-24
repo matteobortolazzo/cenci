@@ -179,8 +179,13 @@ func (e *Engine) resolveLaunchContext(opts Options) (launchCtx, error) {
 // drift between a real launch and its preview:
 //
 //   - running + compatible (has the shared read-only agent-CLI mount):
-//     attaching=true, createArgv=nil — a real launch only attaches, never
-//     creates.
+//     the container's reuse posture (host-socket exposure, DinD-mode
+//     derived from its create-time signals) is inspected before
+//     attaching; a host Docker/Podman socket mount, an ambiguous
+//     `cenci-sand.dind` label, or a DinD-mode mismatch against the
+//     requested launch all reject with a plain error (ticket #628).
+//     Otherwise attaching=true, createArgv=nil — a real launch only
+//     attaches, never creates.
 //   - running + incompatible (predates the shared read-only agent-CLI
 //     mount): the same hard error Launch has always returned.
 //   - not running: createArgv is built via buildRunArgv (credential
@@ -212,6 +217,24 @@ func (e *Engine) planArgvs(ctx launchCtx, opts Options, cenciBin, socketDir stri
 		if !compatible {
 			return nil, nil, false, fmt.Errorf("running container '%s' predates shared read-only agent CLIs; run 'cenci sandbox stop %s', then relaunch", ctx.Scope.ContainerName, ctx.Scope.ContainerName)
 		}
+
+		posture, err := e.inspectReusePosture(ctx.Scope.ContainerName)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		if mountExposesHostSocket(posture.Mounts) {
+			return nil, nil, false, fmt.Errorf("running container '%s' exposes a host Docker/Podman socket; run 'cenci sandbox stop %s', then relaunch", ctx.Scope.ContainerName, ctx.Scope.ContainerName)
+		}
+		derived := deriveDindPosture(posture)
+		switch {
+		case derived == dindUnknown:
+			return nil, nil, false, fmt.Errorf("running container '%s' has an ambiguous DinD posture (unrecognized cenci-sand.dind label); run 'cenci sandbox stop %s', then relaunch", ctx.Scope.ContainerName, ctx.Scope.ContainerName)
+		case derived == dindOn && !ctx.DindOn:
+			return nil, nil, false, fmt.Errorf("running container '%s' was created with --dind; run 'cenci sandbox stop %s', then relaunch", ctx.Scope.ContainerName, ctx.Scope.ContainerName)
+		case derived == dindOff && ctx.DindOn:
+			return nil, nil, false, fmt.Errorf("running container '%s' was created without --dind; run 'cenci sandbox stop %s', then relaunch", ctx.Scope.ContainerName, ctx.Scope.ContainerName)
+		}
+
 		return nil, attachArgv, true, nil
 	}
 
@@ -446,7 +469,7 @@ func isSocket(path string) bool {
 // distinct -v/-e flags as independent — only the trailing image + command
 // (appended by the caller, buildRunArgv, after this returns) must stay last.
 func (e *Engine) assembleRunArgs(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, opts Options, home string, dindOn bool) ([]string, error) {
-	args := e.baseRunArgs(scope)
+	args := e.baseRunArgs(scope, dindOn)
 	args = append(args, e.assembleVolumeMounts(agent, cenciBin, socketDir, cenciAvailable, scope, home, dindOn)...)
 	args = append(args, e.assembleEnv(agent, scope, opts, dindOn)...)
 
@@ -486,14 +509,22 @@ func (e *Engine) buildRunArgv(agent, cenciBin, socketDir string, cenciAvailable 
 }
 
 // baseRunArgs builds the container identity/lifecycle flags shared by every
-// launch: name, hostname, the detached lifecycle label, init/rm flags,
-// workdir, and the create-time --user root (see assembleRunArgs's doc
-// comment for why --user root is required at create time).
-func (e *Engine) baseRunArgs(scope Scope) []string {
+// launch: name, hostname, the detached lifecycle label, the authoritative
+// cenci-sand.dind=<on|off> posture label (ticket #628 — stamped on every
+// newly created container so a future reuse decision never has to infer
+// posture for containers created after this change), init/rm flags, workdir,
+// and the create-time --user root (see assembleRunArgs's doc comment for why
+// --user root is required at create time).
+func (e *Engine) baseRunArgs(scope Scope, dindOn bool) []string {
+	dindLabel := "off"
+	if dindOn {
+		dindLabel = "on"
+	}
 	return []string{
 		"--name", scope.ContainerName,
 		"--hostname", scope.Hostname,
 		"--label", "cenci-sand.lifecycle=detached",
+		"--label", "cenci-sand.dind=" + dindLabel,
 		"-d", "--init", "--rm",
 		"--workdir", scope.Workdir,
 		"--user", "root",
@@ -707,6 +738,149 @@ func (e *Engine) containerHasSharedAgentMount(name, agent string) (bool, error) 
 		}
 	}
 	return false, nil
+}
+
+// reuseMount is a single mount's source/destination pair, as read back by
+// inspectReusePosture — used both for the host-socket matcher
+// (mountExposesHostSocket) and the legacy /var/lib/docker storage-mount DinD
+// signal (deriveDindPosture).
+type reuseMount struct {
+	Source      string
+	Destination string
+}
+
+// reusePosture is the read-only container-reuse probe result inspectReusePosture
+// returns: the cenci-sand.dind label (authoritative for containers created
+// after ticket #628), the configured OCI runtime, whether
+// CENCI_SANDBOX_DIND=1 is present in the container's create-time env, and
+// every mount's source/destination pair.
+type reusePosture struct {
+	DindLabel string
+	Runtime   string
+	DindEnv   bool
+	Mounts    []reuseMount
+}
+
+// reuseDindPosture is the tri-state derived DinD posture for an existing
+// container (ticket #628). Named reuseDindPosture rather than dindPosture to
+// avoid colliding with the existing dindPosture function in audit.go.
+type reuseDindPosture int
+
+const (
+	dindOff reuseDindPosture = iota
+	dindOn
+	dindUnknown
+)
+
+// inspectReusePosture reads back everything planArgvs needs to decide
+// whether a running same-name container is safe to reuse: the cenci-sand.dind
+// label, HostConfig.Runtime, whether CENCI_SANDBOX_DIND=1 is set, and every
+// mount's source/destination. One combined inspect call keeps the fake-runtime
+// surface (and the #493 keep-in-sync burden) minimal.
+func (e *Engine) inspectReusePosture(name string) (reusePosture, error) {
+	out, err := exec.Command(e.Runtime, "inspect", "--format",
+		`{{index .Config.Labels "cenci-sand.dind"}}|{{.HostConfig.Runtime}}|{{range .Config.Env}}{{if eq . "CENCI_SANDBOX_DIND=1"}}1{{end}}{{end}}
+{{range .Mounts}}{{.Source}}::{{.Destination}}
+{{end}}`, name).Output()
+	if err != nil {
+		return reusePosture{}, fmt.Errorf("%s inspect %s reuse posture: %w", e.Runtime, name, err)
+	}
+	p, err := parseReusePosture(string(out))
+	if err != nil {
+		return reusePosture{}, fmt.Errorf("%s inspect %s reuse posture: %w", e.Runtime, name, err)
+	}
+	return p, nil
+}
+
+// parseReusePosture parses inspectReusePosture's stdout: line 1 is
+// "<label>|<runtime>|<dindenv 0-or-1>"; remaining lines are
+// "<source>::<destination>" per mount.
+//
+// It fails closed (watch AGENTS.md #598) rather than silently defaulting to
+// the zero-value reusePosture{} on unrecognized shape: an empty/truncated/
+// garbled inspect response would produce that same zero value, which
+// deriveDindPosture and mountExposesHostSocket both read as the fully
+// permissive outcome (no host socket, dindOff) — indistinguishable from a
+// legitimately compatible legacy container. A line that fails to split on
+// "::" is rejected the same way rather than silently dropped, since the
+// dropped line could be exactly the host-socket bind or DinD storage mount
+// the security checks depend on (ticket #628).
+func parseReusePosture(out string) (reusePosture, error) {
+	lines := splitLines(out)
+	if len(lines) == 0 {
+		return reusePosture{}, fmt.Errorf("empty reuse posture output")
+	}
+	fields := strings.SplitN(lines[0], "|", 3)
+	if len(fields) != 3 {
+		return reusePosture{}, fmt.Errorf("malformed reuse posture header %q: expected 3 %q-delimited fields, got %d", lines[0], "|", len(fields))
+	}
+	p := reusePosture{
+		DindLabel: fields[0],
+		Runtime:   fields[1],
+		DindEnv:   fields[2] == "1",
+	}
+	for _, line := range lines[1:] {
+		source, dest, ok := strings.Cut(line, "::")
+		if !ok {
+			return reusePosture{}, fmt.Errorf("malformed reuse posture mount line %q: expected \"source::destination\"", line)
+		}
+		p.Mounts = append(p.Mounts, reuseMount{Source: source, Destination: dest})
+	}
+	return p, nil
+}
+
+// deriveDindPosture derives the tri-state DinD posture for an existing
+// container (ticket #628's Derivation rules):
+//
+//   - Label "on"/"off" is authoritative for containers created after this
+//     change, even if it conflicts with the legacy signals below.
+//   - Empty label (legacy container, created before this change): derive
+//     from HostConfig.Runtime == "sysbox-runc" OR CENCI_SANDBOX_DIND=1 OR a
+//     /var/lib/docker mount — any single signal means dindOn, else dindOff.
+//   - Any other label value is ambiguous metadata and must be rejected
+//     conservatively (watch AGENTS.md #598: never collapse an unrecognized
+//     enum value into the safest-looking case) rather than treated as either
+//     dindOn or dindOff.
+func deriveDindPosture(p reusePosture) reuseDindPosture {
+	switch p.DindLabel {
+	case "on":
+		return dindOn
+	case "off":
+		return dindOff
+	case "":
+		if p.Runtime == "sysbox-runc" || p.DindEnv {
+			return dindOn
+		}
+		for _, m := range p.Mounts {
+			if m.Destination == "/var/lib/docker" {
+				return dindOn
+			}
+		}
+		return dindOff
+	default:
+		return dindUnknown
+	}
+}
+
+// mountExposesHostSocket reports whether any mount's source or destination
+// basename is docker.sock/podman.sock — the retired --docker DooD leftover
+// this ticket rejects, even when the shared agent-CLI mount is otherwise
+// compatible. It must not match the cenci socket-dir mount (a directory) or
+// ordinary workspace/home mounts (plan Risks: over-broad socket match).
+func mountExposesHostSocket(mounts []reuseMount) bool {
+	for _, m := range mounts {
+		if isHostSocketBasename(m.Source) || isHostSocketBasename(m.Destination) {
+			return true
+		}
+	}
+	return false
+}
+
+// isHostSocketBasename reports whether path's basename is a host Docker/Podman
+// socket filename.
+func isHostSocketBasename(path string) bool {
+	base := filepath.Base(path)
+	return base == "docker.sock" || base == "podman.sock"
 }
 
 // warnIfUnwired detects a running container that was created while the host

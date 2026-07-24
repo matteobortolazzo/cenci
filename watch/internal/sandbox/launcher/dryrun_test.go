@@ -570,6 +570,119 @@ func TestDryRun_DeterminateWiring_LiveSocketIncludesMountsAndClearsUnknownFlag(t
 	}
 }
 
+// -- ticket #628: reuse-posture reject/reuse mirrors -------------------------
+//
+// planArgvs is shared by Launch and DryRun (ticket #620), so the new
+// reuse-posture checks (host-socket exposure, DinD-mode mismatch, ambiguous
+// posture) must reject/attach identically in both. At least one reject case
+// and one reuse case are mirrored here (dryrun_test.go:437-459's pattern);
+// the full case matrix (all four rejections plus both compatible-reuse
+// paths) lives in sandbox_open_test.go's black-box `cenci open` tests.
+
+// TestDryRun_RunningContainerWithHostSocketMount_RejectsEvenWithCompatibleAgentMount
+// mirrors TestOpen_RunningContainerWithHostSocketMount_RejectsEvenWithCompatibleAgentMount
+// (sandbox_open_test.go): a running container exposing a host Docker/Podman
+// socket must never be previewed as attach-only, even though its shared
+// agent-CLI mount is otherwise compatible.
+func TestDryRun_RunningContainerWithHostSocketMount_RejectsEvenWithCompatibleAgentMount(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	scope := ComputeScope("claude", "", repo, home)
+
+	fakeDir := t.TempDir()
+	callLog := filepath.Join(fakeDir, "calls.txt")
+	writeFakeRuntime(t, fakeDir, "docker", callLog)
+	t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
+	t.Setenv("FAKE_INSPECT_MOUNTS", AgentCLIVolumeName("claude")+"|/opt/cenci-agent|false\n")
+	t.Setenv("FAKE_REUSE_POSTURE", "off|runc|0\n/var/run/docker.sock::/var/run/docker.sock\n")
+
+	eng := &Engine{Runtime: "docker", Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	_, err := eng.DryRun(Options{Agent: "claude"})
+	if err == nil {
+		t.Fatal("DryRun against a running container exposing a host socket = nil error, want the same rejection a real Launch would return")
+	}
+	if !strings.Contains(err.Error(), "host Docker/Podman socket") {
+		t.Errorf("DryRun error = %q, want it to mention the host Docker/Podman socket rejection", err.Error())
+	}
+	if !strings.Contains(err.Error(), "cenci sandbox stop "+scope.ContainerName) || !strings.Contains(err.Error(), "then relaunch") {
+		t.Errorf("DryRun error = %q, want the stop+relaunch recovery instruction", err.Error())
+	}
+}
+
+// TestDryRun_CompatibleDindContainer_RendersAttachOnlyWithNoCreateArgv mirrors
+// TestOpenDind_CompatibleDindContainer_ReusesSuccessfully (sandbox_open_test.go):
+// a running container whose derived DinD posture matches the requested
+// --dind must still preview as attach-only, exactly like a real Launch would
+// reuse it.
+func TestDryRun_CompatibleDindContainer_RendersAttachOnlyWithNoCreateArgv(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	scope := ComputeScope("claude", "", repo, home)
+
+	fakeDir := t.TempDir()
+	callLog := filepath.Join(fakeDir, "calls.txt")
+	writeFakeRuntime(t, fakeDir, "docker", callLog)
+	t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
+	t.Setenv("FAKE_INSPECT_MOUNTS", AgentCLIVolumeName("claude")+"|/opt/cenci-agent|false\n")
+	t.Setenv("FAKE_REUSE_POSTURE", "on|sysbox-runc|1\nworkspace-vol::/workspace\ndind-vol::/var/lib/docker\n")
+	t.Setenv("FAKE_INFO_RUNTIMES", `{"sysbox-runc":{},"runc":{}}`)
+
+	eng := &Engine{Runtime: "docker", Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	plan, err := eng.DryRun(Options{Agent: "claude", Dind: true})
+	if err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+
+	if plan.Mode != "attach" {
+		t.Errorf("Mode = %q, want \"attach\" for a compatible existing DinD container", plan.Mode)
+	}
+	if plan.CreateArgv != nil {
+		t.Errorf("CreateArgv = %v, want nil (no create argv) for the attach-only branch", plan.CreateArgv)
+	}
+}
+
+// TestDryRun_MalformedReusePostureOutput_Rejects mirrors
+// TestOpen_MalformedReusePostureHeader_Rejects (sandbox_open_test.go): a
+// scripted docker fake answering the reuse-posture inspect with a header
+// that exits 0 but doesn't match the expected "<label>|<runtime>|<dindenv>"
+// shape must reject the reuse attempt rather than silently falling through
+// to the fully permissive zero-value posture (Critical finding, ticket
+// #628: parseReusePosture must fail closed on malformed inspect output,
+// exactly like the existing dindUnknown and exec-error rejection paths).
+func TestDryRun_MalformedReusePostureOutput_Rejects(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	scope := ComputeScope("claude", "", repo, home)
+
+	fakeDir := t.TempDir()
+	callLog := filepath.Join(fakeDir, "calls.txt")
+	writeFakeRuntime(t, fakeDir, "docker", callLog)
+	t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
+	t.Setenv("FAKE_INSPECT_MOUNTS", AgentCLIVolumeName("claude")+"|/opt/cenci-agent|false\n")
+	t.Setenv("FAKE_REUSE_POSTURE", "garbage-no-pipes\n")
+
+	eng := &Engine{Runtime: "docker", Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	_, err := eng.DryRun(Options{Agent: "claude"})
+	if err == nil {
+		t.Fatal("DryRun against a container with malformed reuse-posture inspect output = nil error, want a fail-closed rejection")
+	}
+	if !strings.Contains(err.Error(), "reuse posture") {
+		t.Errorf("DryRun error = %q, want it to mention the reuse posture parse failure", err.Error())
+	}
+}
+
 // -- host-network isolation-warning dedup (code review fix, ticket #589) ---
 
 // TestDryRun_HostNetwork_AddsNetworkHostAndWarnsOnce covers --host-network
