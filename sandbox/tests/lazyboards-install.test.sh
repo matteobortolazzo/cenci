@@ -38,6 +38,22 @@ if [ "${1:-}" = image ] && [ "${2:-}" = inspect ]; then exit 1; fi
 exit 0
 EOF
     chmod +x "${bin}/docker"
+    # cosign mock: doctor's cosign check is now `required` rather than
+    # `optional` (#700 — cosign is a hard prerequisite for cenci update's own
+    # release-verification bootstrap, not only the piped install path), so
+    # every install/update/doctor invocation in this suite needs cosign on
+    # PATH or doctor would hard-fail and (for install/update modes) hit the
+    # "Continue anyway?" prompt this suite doesn't answer. This suite is
+    # about the lazyboards step, not #626's own cosign verification
+    # scenarios (installer-clients.test.sh covers those directly), so a bare
+    # pass-through is enough — cosign is never actually exercised here since
+    # every install.sh invocation runs from $ROOT directly (managed_checkout_dir
+    # never matches), never triggering the update-mode bootstrap.
+    cat >"${bin}/cosign" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+    chmod +x "${bin}/cosign"
 }
 
 # make_claude installs a claude stub that reports every cenci plugin as

@@ -72,6 +72,24 @@ esac
 exit 0
 EOF
     chmod +x "${bin}/curl"
+    # cosign mock: doctor's cosign check is now `required` rather than
+    # `optional` (#700 — cosign is a hard prerequisite for cenci update's own
+    # release-verification bootstrap, not only the piped install path), so
+    # every layout in this file needs cosign on PATH too, or the install-mode
+    # PTY cases below (run_installer_pty's preflight `run_doctor` call) would
+    # hard-fail and hit the interactive "Continue anyway?" prompt instead of
+    # exercising the #519 rebuild-prompt behavior this suite actually tests.
+    # This suite's install.sh invocations always run from $ROOT directly
+    # (never re-exec'd from the copied checkout under LAYOUT_HOME), so
+    # managed_checkout_dir never matches and the update-mode bootstrap itself
+    # never fires here — cosign only needs to be present, not exercised with
+    # a full verify-blob contract check like installer-clients.test.sh's
+    # make_cosign.
+    cat >"${bin}/cosign" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+    chmod +x "${bin}/cosign"
 }
 
 # make_logging_pkill_pgrep installs pkill/pgrep stubs (instead of the real

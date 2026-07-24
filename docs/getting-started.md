@@ -215,6 +215,32 @@ The components version independently. In particular, a `watch/v0.5.4` release is
 `cenci-watch` plugin release, so update output correctly reports it on the
 `cenci-watch` line rather than the `cenci` workflow-plugin line.
 
+`cenci update` now requires `cosign` to be installed — it downloads and verifies a
+fresh installer before applying it, the same fail-closed check that piped installs have
+always used. If cosign is missing, `cenci update` stops with an actionable message
+instead of silently falling back to the currently-installed (possibly stale) installer;
+`cenci doctor` reports this as a hard failure rather than a warning.
+
+### Troubleshooting: `cenci update` reports success but the version never changes
+
+Installs pinned before this fix (below `watch/v0.28.1` / `sandbox/v1.14.4` /
+`flow/v0.26.0`) ran `cenci update` from their own on-disk, stale installer, which could
+never move its own marketplace pin — every step reported success while nothing actually
+changed. `cenci doctor` on an affected install now warns that the pin is stale and
+prints the recovery commands; if you're not sure, or `cenci doctor` isn't available yet,
+recover manually:
+
+```bash
+claude plugin marketplace remove cenci
+claude plugin marketplace add matteobortolazzo/cenci@watch/v0.28.3
+cenci update
+cenci --version   # expect >= 0.28.2
+```
+
+Substitute the Codex equivalent (`codex plugin marketplace remove/add`) if you use
+Codex instead of Claude Code. Once reinstalled at a current release, `cenci update`
+self-heals for all future releases and this manual step is no longer needed.
+
 ## Uninstall
 
 ```bash
