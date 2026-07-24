@@ -74,6 +74,19 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 		}
 		return
 	}
+	// A subagent's running event must not clear a terminal status set by the
+	// main agent (#656). Each `cenci notify` is an independent process racing
+	// to the daemon's socket, so a subagent PreToolUse/PostToolUse can be
+	// delivered after the main agent's Stop already set done — and because the
+	// subagent's own Stop is suppressed above, nothing would restore done.
+	// Only a main-agent event (empty AgentID) may resume a finished session.
+	if status == detect.StatusRunning && event.AgentID != "" &&
+		(sess.Status == detect.StatusDone || sess.Status == detect.StatusStopped) {
+		if d.cfg.Verbose {
+			log.Printf("event: suppressing %s (tool=%s agent=%s) clearing %v on session %s", event.EventType, event.ToolName, event.AgentID, sess.Status, key)
+		}
+		return
+	}
 	sess.Status = status
 	switch status {
 	case detect.StatusNeedInput:
