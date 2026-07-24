@@ -214,6 +214,18 @@ func (d *Daemon) mapEventToStatusRaw(event ipc.HookEvent) detect.Status {
 		// Tool failed but the agent may retry — still running.
 		return detect.StatusRunning
 	case "Stop":
+		// The main agent's turn can end while work it backgrounded (a
+		// subagent/fork, a workflow, a background shell command, a monitor) is
+		// still in flight. Claude Code reports that work on the Stop event, and
+		// the session is paused waiting to be woken by it — not done (#698).
+		// Restricted to main-agent events so a subagent-scoped Stop stays the
+		// no-op the guard in mapEventToStatus makes it (#277).
+		if event.BackgroundWork && event.AgentID == "" {
+			if d.cfg.Verbose {
+				log.Printf("event: Stop on session %s reports in-flight background work, holding running instead of done", sessionKeyForEvent(event))
+			}
+			return detect.StatusRunning
+		}
 		return detect.StatusDone
 	case "StopFailure":
 		// Turn died on an API error (rate_limit, overloaded, billing). Reuse

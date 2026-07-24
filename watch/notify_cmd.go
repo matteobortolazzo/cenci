@@ -13,6 +13,20 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
 )
 
+// terminalBackgroundTaskStatus lists the background-task states that have
+// finished and can no longer wake the session. Claude Code's task status enum
+// is pending|running|completed|failed|killed|paused, and a Stop event's
+// background_tasks array is already documented to carry only in-flight work
+// ("running/pending + backgrounded"). So this excludes exactly the finished
+// states and treats every other value — including one added by a future Claude
+// Code release — as still in flight: a session wrongly held at running recovers
+// on the next event, while one wrongly marked done stays wrong (#698).
+var terminalBackgroundTaskStatus = map[string]bool{
+	"completed": true,
+	"failed":    true,
+	"killed":    true,
+}
+
 func runNotify(args []string) {
 	fs := flag.NewFlagSet("notify", flag.ExitOnError)
 	socketPath := fs.String("event-socket", ipc.DefaultEventSocketPath(), "event socket path")
@@ -41,6 +55,11 @@ func runNotify(args []string) {
 		IsInterrupt bool `json:"is_interrupt"`
 		// AgentID is set when the hook fires inside a subagent (Task tool) call.
 		AgentID string `json:"agent_id"`
+		// Stop field. Only each task's status is read: descriptions and shell
+		// command lines stay local, like the raw prompt above.
+		BackgroundTasks []struct {
+			Status string `json:"status"`
+		} `json:"background_tasks"`
 	}
 	if err := json.Unmarshal(data, &hookInput); err != nil {
 		os.Exit(0) // fail silently
@@ -60,6 +79,12 @@ func runNotify(args []string) {
 		IsInterrupt:      hookInput.IsInterrupt,
 		AgentID:          hookInput.AgentID,
 		Timestamp:        time.Now().UTC().Format(time.RFC3339),
+	}
+	for _, task := range hookInput.BackgroundTasks {
+		if !terminalBackgroundTaskStatus[task.Status] {
+			event.BackgroundWork = true
+			break
+		}
 	}
 	if (event.Agent == "codex" || event.Agent == "opencode") && event.EventType == "UserPromptSubmit" {
 		event.TaskName = frontend.PromptTaskName(hookInput.Prompt)

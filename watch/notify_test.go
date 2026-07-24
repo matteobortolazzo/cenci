@@ -253,3 +253,131 @@ func TestCodexStopHookEmitsJSON(t *testing.T) {
 		t.Fatalf("Codex Stop hook output must be JSON, got %q: %v", output, err)
 	}
 }
+
+// TestNotifyStopForwardsInFlightBackgroundWork covers ticket #698: Claude
+// Code's Stop hook carries a background_tasks array describing in-flight
+// background work ("running/pending + backgrounded"). notify must parse it and
+// flag the event so the daemon can tell "session is done" from "session is
+// paused waiting for background work to wake it".
+//
+// The task descriptions and shell command lines must never reach IPC, matching
+// the raw-prompt privacy posture of the UserPromptSubmit path.
+func TestNotifyStopForwardsInFlightBackgroundWork(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "events.sock")
+	receiver, err := ipc.NewEventReceiver(socket)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = receiver.Close() }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go receiver.Accept(ctx)
+
+	input := `{"hook_event_name":"Stop","session_id":"sess1","stop_hook_active":false,` +
+		`"background_tasks":[{"id":"t1","type":"subagent","status":"running",` +
+		`"description":"secret task description","agent_type":"code-reviewer"},` +
+		`{"id":"t2","type":"shell","status":"completed","description":"done already",` +
+		`"command":"secret --command-line"}]}`
+	cmd := exec.Command(binaryPath, "notify", "-agent", "claude", "-event-socket", socket)
+	cmd.Stdin = strings.NewReader(input)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("notify: %v: %s", err, output)
+	}
+
+	select {
+	case event := <-receiver.Events():
+		if !event.BackgroundWork {
+			t.Fatalf("background_work = false, want true — a running subagent task is in flight")
+		}
+		encoded, err := json.Marshal(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(encoded), "secret task description") ||
+			strings.Contains(string(encoded), "secret --command-line") {
+			t.Fatalf("background task description/command leaked into IPC: %s", encoded)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for notify event")
+	}
+}
+
+// TestNotifyStopWithOnlyTerminalBackgroundTasksReportsNoWork asserts the
+// narrow exclusion: only explicitly terminal task states (completed, failed,
+// killed) are discounted. A Stop whose tasks have all finished is an ordinary
+// finished turn.
+func TestNotifyStopWithOnlyTerminalBackgroundTasksReportsNoWork(t *testing.T) {
+	for name, tasks := range map[string]string{
+		"absent":    ``,
+		"empty":     `,"background_tasks":[]`,
+		"completed": `,"background_tasks":[{"id":"t1","type":"subagent","status":"completed","description":"d"}]`,
+		"failed":    `,"background_tasks":[{"id":"t1","type":"shell","status":"failed","description":"d"}]`,
+		"killed":    `,"background_tasks":[{"id":"t1","type":"workflow","status":"killed","description":"d"}]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			socket := filepath.Join(t.TempDir(), "events.sock")
+			receiver, err := ipc.NewEventReceiver(socket)
+			if err != nil {
+				t.Fatalf("listen: %v", err)
+			}
+			defer func() { _ = receiver.Close() }()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go receiver.Accept(ctx)
+
+			input := `{"hook_event_name":"Stop","session_id":"sess1","stop_hook_active":false` + tasks + `}`
+			cmd := exec.Command(binaryPath, "notify", "-agent", "claude", "-event-socket", socket)
+			cmd.Stdin = strings.NewReader(input)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("notify: %v: %s", err, output)
+			}
+
+			select {
+			case event := <-receiver.Events():
+				if event.BackgroundWork {
+					t.Fatalf("background_work = true, want false for %s background_tasks", name)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out waiting for notify event")
+			}
+		})
+	}
+}
+
+// TestNotifyStopWithPausedOrPendingBackgroundTaskReportsWork pins the other
+// side of that exclusion: pending and paused work still wakes the session
+// later, and an unrecognized status must count as in flight rather than
+// silently collapsing to "done" — background_tasks is documented to contain
+// only in-flight work.
+func TestNotifyStopWithPausedOrPendingBackgroundTaskReportsWork(t *testing.T) {
+	for _, status := range []string{"pending", "paused", "some_future_status"} {
+		t.Run(status, func(t *testing.T) {
+			socket := filepath.Join(t.TempDir(), "events.sock")
+			receiver, err := ipc.NewEventReceiver(socket)
+			if err != nil {
+				t.Fatalf("listen: %v", err)
+			}
+			defer func() { _ = receiver.Close() }()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go receiver.Accept(ctx)
+
+			input := `{"hook_event_name":"Stop","session_id":"sess1","stop_hook_active":false,` +
+				`"background_tasks":[{"id":"t1","type":"subagent","status":"` + status + `","description":"d"}]}`
+			cmd := exec.Command(binaryPath, "notify", "-agent", "claude", "-event-socket", socket)
+			cmd.Stdin = strings.NewReader(input)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("notify: %v: %s", err, output)
+			}
+
+			select {
+			case event := <-receiver.Events():
+				if !event.BackgroundWork {
+					t.Fatalf("background_work = false, want true for status %q", status)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out waiting for notify event")
+			}
+		})
+	}
+}
