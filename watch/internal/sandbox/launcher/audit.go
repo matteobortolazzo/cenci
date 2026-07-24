@@ -273,6 +273,11 @@ type Posture struct {
 // --dind combined with --no-dind, or --dind requested outside repo scope)
 // is still returned as an error — that is a caller input-validation
 // failure, not a credential/environment condition Audit degrades through.
+// A plain (non-usage) error from ResolveDind — an unreadable, malformed, or
+// wrong-typed .cenci/config.json surfaced by RepoDindConfig — is likewise
+// returned unmodified as a hard error (exit 1), not degraded to a warning
+// finding: corrupt stored config must never silently render an audit report
+// under an assumed dind-off posture (#632).
 func (e *Engine) Audit(opts Options) (Posture, error) {
 	agent := opts.Agent
 	if agent == "" {

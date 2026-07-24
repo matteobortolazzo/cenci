@@ -1213,7 +1213,18 @@ The `cicd` field is only present when the user selected Yes in question 8. Schem
 
 Omit `cicd` entirely when the user says No (same pattern as `pencil`).
 
-The `sandbox` field carries two **independently toggled** sub-answers — question 9 (Sandbox Dockerfile) and question 9b (Nested Docker/dind) — that do not gate each other. Schema:
+The `sandbox` field carries two **independently toggled** sub-answers — question 9 (Sandbox Dockerfile) and question 9b (Nested Docker/dind) — that do not gate each other. Its merge into `existingConfig` (or a fresh config) is delegated to a shared, deterministic script rather than hand-merged, so Claude Code and Codex configure runs produce byte-equivalent `sandbox` JSON for equivalent answers — "prose presence alone is not evidence that generated JSON is correct" (#632):
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/merge-sandbox-config.sh" <path to existingConfig, or "-" for stdin> \
+  --dockerfile <true|false, from question 9> \
+  --base-version <resolved baseVersion, or the literal "null" if unresolved or Q9=No> \
+  --dind <true|false, from question 9b>
+```
+
+Run it as its own Bash call (per `cenci:shell-rules`). If `existingConfig` is null (first-ever configure run), pass `-` as the config argument and pipe `{}` in as stdin. The script prints the **full merged config** (not just the `sandbox` object) to stdout — treat that stdout as the new full config content going into step 6's write (after also stamping `configVersion` per above).
+
+`scripts/merge-sandbox-config.sh` (tested by its own `scripts/merge-sandbox-config.test.sh`) is the source of truth for the merge; the schema and four outcomes below document its contract, not a procedure to hand-execute. On any non-zero exit from the script, do not use its (possibly empty) stdout as the new config content — read stderr for the cause. The script fails closed (exit 2) for several distinct reasons: `jq` missing, an unreadable existing config, invalid existing JSON, a missing/invalid `--dockerfile`/`--dind`/`--base-version` value, or an unknown argument. If `jq` is genuinely unavailable, fall back to this manual procedure; for any other validation failure, fix the inputs (e.g. re-check the existing config's readability/JSON validity, the resolved flag values) and retry the script rather than falling back:
 - `sandbox.enabled` — `true` if the user opted in to question 9; omit the key entirely if declined (same pattern as `cicd`/`pencil` — never write `enabled: false`)
 - `sandbox.baseVersion` — the resolved sandbox plugin version baked into the generated `.cenci/Dockerfile`'s `ARG BASE_VERSION` default (see the baseVersion resolution algorithm in step 5e), or `null` when it could not be resolved; only present alongside `sandbox.enabled: true`
 - `sandbox.dind` — `true` if the user opted in to question 9b; omit the key entirely if declined (never write `dind: false`)
@@ -1224,7 +1235,7 @@ Because the two answers are independent, `sandbox` is written whenever **either*
 - Q9=Yes, 9b=Yes → `"sandbox": { "enabled": true, "baseVersion": "<resolved>", "dind": true }`
 - Q9=No, 9b=No → omit `sandbox` entirely (same pattern as `cicd`/`pencil`)
 
-On re-configuration, **merge** into any existing `sandbox` object rather than replacing it wholesale — this preserves the sibling key when only one of the two answers changes (e.g. a dind-only re-config that answers 9b=No must drop only `dind` and retain an already-enabled `sandbox.enabled`/`baseVersion`, and vice versa).
+On re-configuration, merge into any existing `sandbox` object rather than replacing it wholesale — this preserves the sibling key when only one of the two answers changes (e.g. a dind-only re-config that answers 9b=No must drop only `dind` and retain an already-enabled `sandbox.enabled`/`baseVersion`, and vice versa).
 
 > **Not the same as `.claude/settings.json`'s `sandbox.enabled`.** Step 4 above always writes `"sandbox": { "enabled": false }` into `.claude/settings.json` — that key disables **Claude Code's own host sandbox**, because the cenci-sandbox container is the security boundary instead. This `.cenci/config.json` `sandbox` field is unrelated: it's this ticket's per-repo `.cenci/Dockerfile` toggle, consumed by cenci's configure skill and by `cenci sandbox build`'s per-repo image build — not by Claude Code itself. Same field name (`sandbox.enabled`), two different files, two different consumers, two unrelated meanings. Do not conflate them when reading or writing either file.
 

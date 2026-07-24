@@ -151,6 +151,55 @@ func TestOpenDryRun_DindAndNoDind_Exits2(t *testing.T) {
 	}
 }
 
+// TestOpenDryRun_MalformedDindConfig_Exits1 mirrors the real-launch #632
+// hard-fail (TestOpen_MalformedDindConfig_Exits1 in sandbox_open_test.go)
+// for --dry-run: a corrupt .cenci/config.json must hard-fail dry-run too,
+// not render a plan with dind silently resolved off.
+func TestOpenDryRun_MalformedDindConfig_Exits1(t *testing.T) {
+	repoRoot := malformedDindRepoEnv(t)
+
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "--dry-run")
+	cmd.Env = env
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected --dry-run with malformed .cenci/config.json to exit 1, got %T %v\n%s", err, err, output)
+	}
+	if !strings.Contains(string(output), "config.json") {
+		t.Errorf("expected a path-bearing error naming config.json, got:\n%s", output)
+	}
+	if lines := callLogLines(t, callLog); len(lines) != 0 {
+		t.Errorf("expected no runtime calls once config parsing hard-fails, got:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// TestOpenDryRunNoDind_SucceedsDespiteMalformedConfig pins --no-dind as a
+// config-free escape hatch for --dry-run too (#632).
+func TestOpenDryRunNoDind_SucceedsDespiteMalformedConfig(t *testing.T) {
+	repoRoot := malformedDindRepoEnv(t)
+
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "--dry-run", "--no-dind")
+	cmd.Env = env
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("open --dry-run --no-dind with corrupt config: %v\n%s", err, output)
+	}
+	assertOnlyReadOnlyContainerProbeCalls(t, callLogLines(t, callLog))
+}
+
 func TestOpenDryRun_CodexNoAuth_Exits1(t *testing.T) {
 	fakeDir := t.TempDir()
 	callLog := writeScriptedRuntimes(t, fakeDir)

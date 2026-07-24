@@ -1860,6 +1860,86 @@ func TestOpenNoDind_OverridesDindConfigRepo(t *testing.T) {
 	}
 }
 
+// malformedDindRepoEnv builds a git-initialized repo with an unparsable
+// `.cenci/config.json` (#632): RepoDindConfig must hard-fail on this input
+// rather than silently resolving dind off, since a corrupt config must not
+// silently change launch posture.
+func malformedDindRepoEnv(t *testing.T) (repoRoot string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo := t.TempDir()
+	if out, err := exec.Command("git", "-C", repo, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	if err := os.MkdirAll(filepath.Join(repo, ".cenci"), 0o755); err != nil {
+		t.Fatalf("mkdir .cenci: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".cenci", "config.json"), []byte(`{not valid json`), 0o644); err != nil {
+		t.Fatalf("write .cenci/config.json: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatalf("resolve repo path: %v", err)
+	}
+	return resolved
+}
+
+// TestOpen_MalformedDindConfig_Exits1 pins the #632 hard-fail: a corrupt
+// .cenci/config.json must never silently launch with dind off — it must
+// hard-fail the launch (exit 1) with a path-bearing, non-usage error.
+func TestOpen_MalformedDindConfig_Exits1(t *testing.T) {
+	repoRoot := malformedDindRepoEnv(t)
+
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open")
+	cmd.Env = env
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected malformed .cenci/config.json to exit 1 (hard fail, not a usage error), got %T %v\n%s", err, err, output)
+	}
+	if !strings.Contains(string(output), "config.json") {
+		t.Errorf("expected a path-bearing error naming config.json, got:\n%s", output)
+	}
+	if lines := callLogLines(t, callLog); len(lines) != 0 {
+		t.Errorf("expected no runtime calls once config parsing hard-fails, got:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// TestOpenNoDind_SucceedsDespiteMalformedConfig pins --no-dind as a
+// config-free escape hatch (#632): it must keep working even when the
+// repo's .cenci/config.json is corrupt, because ResolveDind returns before
+// RepoDindConfig is ever reached.
+func TestOpenNoDind_SucceedsDespiteMalformedConfig(t *testing.T) {
+	repoRoot := malformedDindRepoEnv(t)
+
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "--no-dind")
+	cmd.Env = env
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("open --no-dind with corrupt config: %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	if _, ok := findLineWithPrefix(lines, "run --name "); !ok {
+		t.Fatalf("expected --no-dind to still launch a container despite the corrupt config, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
 // symlinkGitOnlyDir symlinks the real git binary into dir (already holding a
 // scripted single-runtime fake) and returns dir, so a caller can set PATH to
 // dir alone: git resolves, but no host PATH directory can leak a real
