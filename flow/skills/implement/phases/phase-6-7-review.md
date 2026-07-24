@@ -67,7 +67,7 @@ Branch on the classification result written above:
 The security reviewer checks OWASP, auth/authz, validation, injection, sensitive data, logging, and error exposure.
 
 - Critical/High: fix immediately, rerun tests, rerun security review.
-- Medium/Low: **Fix now** if the fix is straightforward. Otherwise **discard** it (neither fix nor track) when it has no realistic trigger path given how this tool is actually used, or in general fixing it wouldn't benefit the product — record each discarded finding as a one-line "Considered and discarded" entry in the PR's `## Notes` (see `phase-9-pr.md`), which never becomes a Followup ticket. **Track** it otherwise — a plausible real trigger or genuine product benefit — by noting it in the PR's `## Notes` for the Followup Ticket step.
+- Medium/Low: **Fix now** if the fix is straightforward. Otherwise, discard by default — test-coverage gaps, doc polish, "consider X" suggestions, and refactor/tech-debt observations are never tracked, only recorded as a one-line "Considered and discarded" entry in the PR's `## Notes` (see `phase-9-pr.md`), which never becomes a Followup ticket. **Track** it only when it is an actual defect with a concrete, realistic trigger path a user can hit in real use by noting it in the PR's `## Notes` for the Followup Ticket step.
 - Unclear fix: ask the user via `AskUserQuestion`.
 
 Security-critical findings take priority over code quality findings.
@@ -77,7 +77,7 @@ Security-critical findings take priority over code quality findings.
 The code reviewer uses confidence scoring and reports only findings >= 50.
 
 - Must Fix >= 90: fix all, rerun tests.
-- Should Fix 75-89: **Fix now** if the fix is straightforward. Otherwise **discard** it (neither fix nor track) when it has no realistic trigger path given how this tool is actually used, or in general fixing it wouldn't benefit the product — record each discarded finding as a one-line "Considered and discarded" entry in the PR's `## Notes` (see `phase-9-pr.md`), which never becomes a Followup ticket. **Track** it otherwise — a plausible real trigger or genuine product benefit — by noting it in the PR's `## Notes` for the Followup Ticket step.
+- Should Fix 75-89: **Fix now** if the fix is straightforward. Otherwise, discard by default — test-coverage gaps, doc polish, "consider X" suggestions, and refactor/tech-debt observations are never tracked, only recorded as a one-line "Considered and discarded" entry in the PR's `## Notes` (see `phase-9-pr.md`), which never becomes a Followup ticket. **Track** it only when it is an actual defect with a concrete, realistic trigger path a user can hit in real use by noting it in the PR's `## Notes` for the Followup Ticket step.
 - Nitpicks 50-74: ignore unless trivial.
 - Human decision: stop and ask the user via `AskUserQuestion`.
 
@@ -90,5 +90,5 @@ After any fix-and-rerun cycle that changes the diff, re-run the Shared Context g
 The silent-failure hunter checks for swallowed errors, empty catch blocks, silent fallbacks, and missing error propagation.
 
 - Critical in auth/payment/data-loss paths: fix immediately.
-- Warning in non-critical paths: **Fix now** if the fix is straightforward. Otherwise **discard** it (neither fix nor track) when it has no realistic trigger path given how this tool is actually used, or in general fixing it wouldn't benefit the product — record each discarded finding as a one-line "Considered and discarded" entry in the PR's `## Notes` (see `phase-9-pr.md`), which never becomes a Followup ticket. **Track** it otherwise — a plausible real trigger or genuine product benefit — by noting it in the PR's `## Notes` for the Followup Ticket step.
+- Warning in non-critical paths: **Fix now** if the fix is straightforward. Otherwise, discard by default — test-coverage gaps, doc polish, "consider X" suggestions, and refactor/tech-debt observations are never tracked, only recorded as a one-line "Considered and discarded" entry in the PR's `## Notes` (see `phase-9-pr.md`), which never becomes a Followup ticket. **Track** it only when it is an actual defect with a concrete, realistic trigger path a user can hit in real use by noting it in the PR's `## Notes` for the Followup Ticket step.
 - Info with intentional suppression and comments: no action.
