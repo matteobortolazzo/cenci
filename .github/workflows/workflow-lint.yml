@@ -49,6 +49,10 @@ jobs:
         run: bash .github/scripts/maintenance-issue.test.sh
       - name: Run maintenance workflow contract tests
         run: bash .github/scripts/maintenance-workflows.test.sh
+      - name: Run release-version resolver unit tests
+        run: bash .github/scripts/resolve-release-version.test.sh
+      - name: Run watch-release workflow contract tests
+        run: bash .github/scripts/watch-release-workflow.test.sh
       - name: Lint GitHub Actions workflows
         uses: docker://rhysd/actionlint:1.7.7
         with:

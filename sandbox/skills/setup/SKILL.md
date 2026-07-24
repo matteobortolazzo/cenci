@@ -48,9 +48,11 @@ Skip this step when `--build-only` was passed.
      If it is not on `$PATH`, warn the user to add it (e.g.
      `export PATH="$HOME/.local/bin:$PATH"` in their shell profile). If it is on
      `$PATH` but `cenci` still does not resolve, tell the user to re-run the cenci
-     installer (`curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash`
-     — resolves to the latest release tag by default; `CENCI_REF=main` for
-     bleeding-edge main)
+     installer per the download-verify-run sequence in `docs/getting-started.md`
+     (requires cosign; fails closed with no fallback to an unverified ref). The legacy
+     `curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash`
+     one-liner still works and re-execs itself through that same verified path — set
+     `CENCI_REF=main` to explicitly opt into unsafe, unverified main instead
      and stop.
    - A missing `cn` alone is cosmetic — mention re-running the installer to create it,
      but continue.

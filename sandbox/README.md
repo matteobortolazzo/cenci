@@ -56,11 +56,26 @@ installs the plugin, puts the `cenci` binary (and its `cn` launch alias) on your
 and offers to build the image:
 
 ```bash
+curl -fsSL -o install.sh https://github.com/matteobortolazzo/cenci/releases/latest/download/install.sh
+curl -fsSL -o install.sh.bundle https://github.com/matteobortolazzo/cenci/releases/latest/download/install.sh.bundle
+cosign verify-blob --bundle install.sh.bundle \
+  --certificate-identity-regexp '^https://github\.com/matteobortolazzo/cenci/\.github/workflows/watch-release\.yml@refs/tags/watch/v' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  install.sh
+bash install.sh
+```
+
+Requires [cosign](https://docs.sigstore.dev/system_config/installation/) — the installer
+verifies its own bytes against the release before running, and fails closed with no
+fallback to an unverified ref. The legacy one-liner still works and re-execs itself
+through this same verified path:
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
 ```
 
-Resolves to the latest release tag by default; set `CENCI_REF=main` (or pass
-`--ref main`) for bleeding-edge main instead.
+Set `CENCI_REF=main` (or pass `--ref main`) to explicitly opt into bleeding-edge,
+unverified main instead (unsafe; development use only).
 
 ### Advanced / development: standalone setup
 

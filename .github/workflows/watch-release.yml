@@ -26,19 +26,15 @@ jobs:
     steps:
       - name: Resolve version and tag
         id: v
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="${{ github.event.inputs.version }}"
-          else
-            VERSION="${GITHUB_REF_NAME#watch/v}"
-          fi
-          VERSION="${VERSION#v}"   # tolerate a stray leading v
-          if [ -z "$VERSION" ]; then
-            echo "could not resolve version" >&2
-            exit 1
-          fi
-          echo "version=$VERSION" >>"$GITHUB_OUTPUT"
-          echo "tag=watch/v${VERSION}" >>"$GITHUB_OUTPUT"
+        env:
+          # Passed through env vars, never interpolated into the run: body —
+          # workflow_dispatch's version input is untrusted, manually-typed
+          # text; interpolating it directly into shell source would let a
+          # crafted value inject shell commands (#626).
+          EVENT_NAME: ${{ github.event_name }}
+          VERSION_INPUT: ${{ github.event.inputs.version }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: bash .github/scripts/resolve-release-version.sh
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -86,6 +82,20 @@ jobs:
             --bundle watch/dist/checksums.txt.bundle \
             watch/dist/checksums.txt
 
+      - name: Sign install.sh with cosign (keyless)
+        run: |
+          set -euo pipefail
+          # install.sh comes from the tagged checkout above, so the bytes
+          # signed here are the exact bytes the installer will download and
+          # verify (#626) — never a mutable-branch copy.
+          if [ ! -f install.sh ]; then
+            echo "install.sh not found" >&2
+            exit 1
+          fi
+          cosign sign-blob --yes \
+            --bundle install.sh.bundle \
+            install.sh
+
       - name: Attest build provenance for release tarballs
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
@@ -102,6 +112,8 @@ jobs:
             watch/dist/cenci_*.tar.gz
             watch/dist/checksums.txt
             watch/dist/checksums.txt.bundle
+            install.sh
+            install.sh.bundle
           )
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "${assets[@]}" --clobber
