@@ -1,136 +1,176 @@
 #!/usr/bin/env bash
-# maintenance-reminder.sh — SessionStart advisory (ticket #534). Dormant
-# unless cwd's .cenci/config.json sets a positive
-# `.maintenance.remindAfterDays` (from the separate config-schema ticket —
-# this hook only reads the key defensively, never writes it). Absent file,
-# absent/non-positive/malformed key, or missing jq all mean "dormant":
-# silent, exit 0, no output at all — the same graceful-absence idiom as
-# resolve-babysit-interval.sh. When active, follows check-config-staleness.sh's
-# shared hookSpecificOutput idiom: emit JSON when there's something to say,
-# stay silent otherwise, always exit 0, never block.
+# Non-blocking SessionStart maintenance advisory.
 #
-# When active, reads (from cwd):
-#   - .cenci/last-audit.json ({generatedAt: ISO8601, sha: <commit>}),
-#     written by the scheduled cenci-maintenance.yml workflow on its last
-#     clean run;
-#   - .cenci/maintain-report.json, the local (possibly gitignored) last
-#     /cenci:maintain run's machine report, if present.
-#
-# Warns (emits hookSpecificOutput + exits 0) when ANY of:
-#   (a) the marker's generatedAt is older than remindAfterDays;
-#   (b) a maintenance-sensitive file changed since the marker's sha
-#       (git diff --name-only <sha>...HEAD intersected with an allowlist;
-#       degrades to silent/skipped if git/sha are unavailable);
-#   (c) the local .cenci/maintain-report.json has summary.fail > 0;
-#   (d) the marker file does not exist at all — a gentler advisory than
-#       (a): there has simply never been a recorded clean audit.
-# Silent otherwise. No Lazyboards coupling; every path exits 0.
+# Optional reminder UX is disabled only by maintenance.enabled=false and
+# otherwise requires a positive remindAfterDays. Core correctness checks
+# remain independent of this hook. Remote audit state is read from GitHub
+# Actions metadata; no tracked marker file is created or consumed.
 set -uo pipefail
 
-finish_silent() {
-  exit 0
-}
-
+finish_silent() { exit 0; }
 command -v jq >/dev/null 2>&1 || finish_silent
 
-CONFIG_FILE=".cenci/config.json"
+ROOT="$(pwd -P)" || finish_silent
+CONFIG_FILE="${ROOT}/.cenci/config.json"
 [[ -f "$CONFIG_FILE" ]] || finish_silent
 
-jq -e 'type == "object"' "$CONFIG_FILE" >/dev/null 2>&1 || finish_silent
-
-# A positive maintenance.remindAfterDays activates the hook; anything else
-# (absent, non-number, non-positive, or a malformed .maintenance shape)
-# resolves to empty here and is handled by the emptiness check below.
 REMIND_AFTER_DAYS="$(jq -r '
-  if (.maintenance.remindAfterDays? | type) == "number" and (.maintenance.remindAfterDays > 0)
+  if type == "object"
+    and (.maintenance? | type) == "object"
+    and (if (.maintenance | has("enabled")) and (.maintenance.enabled | type) == "boolean"
+         then .maintenance.enabled != false
+         else true
+         end)
+    and (.maintenance.remindAfterDays | type) == "number"
+    and .maintenance.remindAfterDays > 0
   then (.maintenance.remindAfterDays | tostring)
-  else "" end
+  else ""
+  end
 ' "$CONFIG_FILE" 2>/dev/null)" || finish_silent
 [[ -n "$REMIND_AFTER_DAYS" ]] || finish_silent
-
-# Integer-days threshold for the age comparison below (truncates a
-# fractional remindAfterDays, e.g. "3.5" -> "3" — good enough for a
-# day-granularity staleness nudge).
 THRESHOLD_DAYS="${REMIND_AFTER_DAYS%%.*}"
-[[ -n "$THRESHOLD_DAYS" ]] || THRESHOLD_DAYS=0
-
-MARKER_FILE=".cenci/last-audit.json"
-LOCAL_REPORT_FILE=".cenci/maintain-report.json"
-
-# Maintenance-sensitive file allowlist, approximating check.sh's repo-scope
-# inputs (plan Assumptions).
-is_sensitive_path() {
-  case "$1" in
-    flow/skills/*|flow/agents/*|flow/docs/*|flow/hooks/*|flow/README.md| \
-    AGENTS.md|CLAUDE.md|flow/AGENTS.md|flow/CLAUDE.md|docs/*|.cenci/config.json)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
+[[ "$THRESHOLD_DAYS" =~ ^[0-9]+$ ]] || finish_silent
 
 REASONS=()
 
-if [[ ! -f "$MARKER_FILE" ]]; then
-  # (d) no marker recorded yet — gentler than a staleness warning.
-  REASONS+=("No maintenance audit marker (.cenci/last-audit.json) was found — the scheduled cenci-maintenance.yml workflow has not recorded a clean run yet. Consider running /cenci:maintain to establish a baseline.")
-else
-  MARKER_JSON="$(cat "$MARKER_FILE" 2>/dev/null)"
-  if jq -e 'type == "object"' <<<"${MARKER_JSON:-}" >/dev/null 2>&1; then
-    GENERATED_AT="$(jq -r 'if (.generatedAt | type) == "string" then .generatedAt else "" end' <<<"$MARKER_JSON" 2>/dev/null)"
-    MARKER_SHA="$(jq -r 'if (.sha | type) == "string" then .sha else "" end' <<<"$MARKER_JSON" 2>/dev/null)"
-
-    # (a) staleness — the marker is older than the configured threshold.
-    if [[ -n "$GENERATED_AT" ]]; then
-      GENERATED_EPOCH="$(date -u -d "$GENERATED_AT" +%s 2>/dev/null || true)"
-      if [[ -n "$GENERATED_EPOCH" ]]; then
-        NOW_EPOCH="$(date -u +%s)"
-        AGE_DAYS=$(( (NOW_EPOCH - GENERATED_EPOCH) / 86400 ))
-        if [[ "$AGE_DAYS" -gt "$THRESHOLD_DAYS" ]]; then
-          REASONS+=("The last recorded clean maintenance audit was generated on ${GENERATED_AT}, more than the configured ${REMIND_AFTER_DAYS}-day threshold ago. Consider running /cenci:maintain.")
-        fi
-      fi
-    fi
-
-    # (b) a maintenance-sensitive file changed since the marker's sha.
-    # Degrades to skipped (not silent overall — other conditions still
-    # apply) if git or the recorded sha are unavailable.
-    if [[ -n "$MARKER_SHA" ]] \
-      && command -v git >/dev/null 2>&1 \
-      && git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
-      && git cat-file -e "${MARKER_SHA}^{commit}" 2>/dev/null; then
-      CHANGED_FILES="$(git diff --name-only "${MARKER_SHA}...HEAD" 2>/dev/null || true)"
-      if [[ -n "$CHANGED_FILES" ]]; then
-        SENSITIVE_HIT=""
-        while IFS= read -r f; do
-          [[ -n "$f" ]] || continue
-          if is_sensitive_path "$f"; then
-            SENSITIVE_HIT="$f"
-            break
-          fi
-        done <<<"$CHANGED_FILES"
-        if [[ -n "$SENSITIVE_HIT" ]]; then
-          REASONS+=("A maintenance-sensitive file (${SENSITIVE_HIT}) changed since the last recorded clean audit (${MARKER_SHA:0:12}). Consider running /cenci:maintain.")
-        fi
-      fi
+# Run the target repository's own static checker from an explicit absolute
+# repository CWD. The checker only exists in the cenci monorepo itself — in a
+# consumer repo the flow plugin is installed but the tree has no
+# flow/skills/maintain/scripts/check.sh, so this signal is skipped entirely,
+# mirroring Phase 8's applicability guard (the checker's repo-scoped checks
+# would otherwise report cenci-specific drift against an unrelated tree).
+# Advisory mode emits JSON on stdout and skips executable/network checks, so
+# it is safe for a bounded SessionStart hook and does not write a report file.
+# A timeout, infrastructure exit, or malformed result contributes no local
+# conclusion — like every remote degradation path below, it stays silent
+# rather than turning an unfinished check into an every-session reminder.
+CHECKER="${ROOT}/flow/skills/maintain/scripts/check.sh"
+if [[ -f "$CHECKER" ]] && command -v timeout >/dev/null 2>&1; then
+  set +e
+  CHECK_JSON="$(cd "$ROOT" && timeout 2 bash "$CHECKER" --advisory 2>/dev/null)"
+  CHECK_EXIT=$?
+  if [[ "$CHECK_EXIT" -eq 0 || "$CHECK_EXIT" -eq 1 ]] && jq -e '
+    type == "object" and
+    (.summary | type) == "object" and
+    (.summary.fail | type) == "number" and
+    (.summary.warn | type) == "number" and
+    .summary.mode == "advisory"
+  ' <<<"$CHECK_JSON" >/dev/null 2>&1; then
+    LOCAL_FAIL="$(jq -r '.summary.fail | floor' <<<"$CHECK_JSON")"
+    LOCAL_WARN="$(jq -r '.summary.warn | floor' <<<"$CHECK_JSON")"
+    if [[ "$LOCAL_FAIL" -gt 0 || "$LOCAL_WARN" -gt 0 ]]; then
+      REASONS+=("The bounded local maintenance advisory found ${LOCAL_FAIL} failing and ${LOCAL_WARN} warning check result(s). Run /cenci:maintain to inspect them.")
     fi
   fi
 fi
 
-# (c) local report shows outstanding failures.
-if [[ -f "$LOCAL_REPORT_FILE" ]]; then
-  FAIL_COUNT="$(jq -r 'if (.summary.fail | type) == "number" then (.summary.fail | floor) else 0 end' "$LOCAL_REPORT_FILE" 2>/dev/null)"
-  [[ "$FAIL_COUNT" =~ ^[0-9]+$ ]] || FAIL_COUNT=0
-  if [[ "$FAIL_COUNT" -gt 0 ]]; then
-    REASONS+=("The local .cenci/maintain-report.json shows ${FAIL_COUNT} failing check(s) from the last /cenci:maintain run. Consider reviewing and repairing them.")
+is_sensitive_path() {
+  case "$1" in
+    flow/skills/*|flow/agents/*|flow/hooks/*|flow/docs/*|flow/codex/*|flow/opencode/*| \
+    docs/*|sandbox/*|watch/*|.claude-plugin/*|*/.claude-plugin/*| \
+    README.md|flow/README.md|flow/AGENTS.md|flow/CLAUDE.md|AGENTS.md|CLAUDE.md| \
+    .cenci/config.json|install.sh)
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+resolve_repo_slug() {
+  if [[ -n "${GITHUB_REPOSITORY:-}" ]]; then
+    printf '%s' "$GITHUB_REPOSITORY"
+    return
+  fi
+  command -v git >/dev/null 2>&1 || return 1
+  local remote
+  remote="$(git -C "$ROOT" remote get-url origin 2>/dev/null)" || return 1
+  case "$remote" in
+    https://github.com/*) remote="${remote#https://github.com/}" ;;
+    git@github.com:*) remote="${remote#git@github.com:}" ;;
+    *) return 1 ;;
+  esac
+  remote="${remote%.git}"
+  [[ "$remote" == */* && "$remote" != */*/* ]] || return 1
+  printf '%s' "$remote"
+}
+
+# GitHub metadata is optional. Offline, unauthenticated, disabled, and
+# malformed responses contribute no remote conclusion; local advisory results
+# above remain useful and this hook always exits zero.
+if command -v gh >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1 && REPO_SLUG="$(resolve_repo_slug)"; then
+  if WORKFLOW_JSON="$(timeout 0.5 gh api "repos/${REPO_SLUG}/actions/workflows/cenci-maintenance.yml" 2>/dev/null)" \
+    && jq -e 'type == "object" and .state == "active"' <<<"$WORKFLOW_JSON" >/dev/null 2>&1 \
+    && RUNS_JSON="$(timeout 0.5 gh api "repos/${REPO_SLUG}/actions/workflows/cenci-maintenance.yml/runs?status=completed&per_page=20" 2>/dev/null)" \
+    && jq -e 'type == "object" and (.workflow_runs | type) == "array"' <<<"$RUNS_JSON" >/dev/null 2>&1; then
+
+    RUN_JSON=""
+    AUDIT_OUTCOME=""
+    while IFS= read -r CANDIDATE; do
+      RUN_ID="$(jq -r '.id' <<<"$CANDIDATE" 2>/dev/null)"
+      [[ "$RUN_ID" =~ ^[0-9]+$ ]] || continue
+      if ! JOBS_JSON="$(timeout 0.5 gh api "repos/${REPO_SLUG}/actions/runs/${RUN_ID}/jobs" 2>/dev/null)" \
+        || ! jq -e 'type == "object" and (.jobs | type) == "array"' <<<"$JOBS_JSON" >/dev/null 2>&1; then
+        continue
+      fi
+      CANDIDATE_OUTCOME="$(jq -r '
+        [.jobs[]?.steps[]?
+          | select(.name == "Run maintenance audit")
+          | .conclusion
+          | select(type == "string" and . != "skipped")]
+        | first // empty
+      ' <<<"$JOBS_JSON" 2>/dev/null)"
+      [[ -n "$CANDIDATE_OUTCOME" ]] || continue
+      RUN_JSON="$CANDIDATE"
+      AUDIT_OUTCOME="$CANDIDATE_OUTCOME"
+      break
+    done < <(jq -c '
+      [.workflow_runs[]
+        | select((.id | type) == "number")
+        | select((.conclusion | type) == "string")
+        | select(.conclusion != "skipped")
+        | select((.updated_at | type) == "string" and (.updated_at | length) > 0)
+        | select((.head_sha | type) == "string" and (.head_sha | length) > 0)][0:2][]
+    ' <<<"$RUNS_JSON" 2>/dev/null)
+
+    if [[ -n "$RUN_JSON" ]]; then
+      AUDIT_AT="$(jq -r '.updated_at' <<<"$RUN_JSON")"
+      AUDIT_SHA="$(jq -r '.head_sha' <<<"$RUN_JSON")"
+
+      if [[ "$AUDIT_OUTCOME" != "success" ]]; then
+        REASONS+=("The latest usable scheduled maintenance audit concluded '${AUDIT_OUTCOME}'. Run /cenci:maintain to inspect current drift.")
+      fi
+
+      AUDIT_EPOCH="$(date -u -d "$AUDIT_AT" +%s 2>/dev/null || true)"
+      NOW_EPOCH="$(date -u +%s 2>/dev/null || true)"
+      if [[ -n "$AUDIT_EPOCH" && -n "$NOW_EPOCH" ]]; then
+        AGE_DAYS=$(( (NOW_EPOCH - AUDIT_EPOCH) / 86400 ))
+        if [[ "$AGE_DAYS" -gt "$THRESHOLD_DAYS" ]]; then
+          REASONS+=("The latest usable scheduled maintenance audit completed on ${AUDIT_AT}, more than the configured ${REMIND_AFTER_DAYS}-day threshold ago.")
+        fi
+      fi
+
+      if command -v git >/dev/null 2>&1 \
+        && git -C "$ROOT" cat-file -e "${AUDIT_SHA}^{commit}" 2>/dev/null; then
+        if CHANGED_FILES="$(git -C "$ROOT" diff --name-only "${AUDIT_SHA}...HEAD" 2>/dev/null)"; then
+          if [[ -n "$CHANGED_FILES" ]]; then
+            while IFS= read -r changed; do
+              [[ -n "$changed" ]] || continue
+              if is_sensitive_path "$changed"; then
+                REASONS+=("A maintenance-sensitive file (${changed}) changed since the latest usable scheduled audit (${AUDIT_SHA:0:12}).")
+                break
+              fi
+            done <<<"$CHANGED_FILES"
+          fi
+        else
+          REASONS+=("The latest scheduled maintenance audit could not be compared with the current checkout, so change status is unknown. Run /cenci:maintain to inspect it.")
+        fi
+      fi
+    fi
   fi
 fi
 
 [[ "${#REASONS[@]}" -gt 0 ]] || finish_silent
-
 CTX="$(printf '%s\n' "${REASONS[@]}")"
 jq -n --arg ctx "$CTX" \
-  '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $ctx}}'
+  '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:$ctx}}'
 exit 0

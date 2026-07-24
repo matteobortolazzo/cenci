@@ -6,7 +6,7 @@ argument-hint: [mode] [scope] [additional context]
 user-invocable: true
 disable-model-invocation: true
 model: opus
-allowed-tools: Read, Edit, Write, Grep, Glob, Task, Bash(git:*), Bash(gh:*), Bash(bash flow/skills/maintain/scripts/check.sh:*), Bash(mktemp:*), Bash(mkdir:*), Bash(rm:*), Bash(cat:*), AskUserQuestion
+allowed-tools: Read, Edit, Write, Grep, Glob, Task, Bash(git:*), Bash(gh:*), Bash(bash flow/skills/maintain/scripts/check.sh:*), Bash(sh flow/hooks/scripts/run-gate.sh:*), Bash(mktemp:*), Bash(mkdir:*), Bash(rm:*), Bash(cat:*), AskUserQuestion
 ---
 
 > **Client dispatch**: In Codex, read `codex-runtime` and `maintain/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
@@ -58,15 +58,21 @@ applies, and stop before Phase 2.
 
 ## Phase 2 — Deterministic check
 
-Run the existing deterministic checker via `scripts/check.sh`:
+Resolve `<repo-root>` to its absolute path and verify it names the intended checkout.
+Run the repository-read-only static checker with the Bash tool's CWD set to that
+verified absolute `<repo-root>` working directory:
 
 ```bash
-bash flow/skills/maintain/scripts/check.sh
+bash flow/skills/maintain/scripts/check.sh --advisory
 ```
 
-`scripts/check.sh` (already implemented — see `flow/tests/maintain.test.sh`) enumerates
-pass/warn/fail/skip results, each non-pass result carrying a concrete fix. Read its JSON report at
-`.cenci/maintain-report.json` for the Report phase; this phase makes no writes.
+`scripts/check.sh --advisory` (see `flow/tests/maintain.test.sh`) emits its structured
+JSON report on stdout and enumerates pass/warn/fail/skip results, each non-pass result
+carrying a concrete fix. Parse that stdout directly; do not use `--report-file` or shell
+redirection in this phase. Advisory mode explicitly skips executable/network checks so
+the pre-approval read-only guarantee remains true. If it exits 2 or does not emit valid
+report JSON, report the deterministic layer as incomplete and stop rather than fabricating
+a result.
 
 ## Phase 3 — Parallel audit
 
@@ -157,11 +163,17 @@ resolved target satisfies that check. If any staged mutation would resolve to th
 edit with git commands.
 
 Apply only the approved actions with the `Edit`/`Write` tools, touching only the locations named in
-the approved findings. Regenerate selected indexes (`scripts/check.sh --write` when a Generated
-index drift finding was approved).
+the approved findings. Every checker invocation in this phase uses the Bash tool with its
+CWD set to the verified absolute `<worktree-path>` working directory. Regenerate selected
+indexes (`scripts/check.sh --write` when a Generated index drift finding was approved and
+`maintenance.generatedDocs` is not explicitly `false`).
 
-**Verify the repair before shipping it**: re-run `scripts/check.sh` to confirm the repair holds,
-then run flow's health gate per `docs/health-gates.md`. If either the `scripts/check.sh` re-run or
+**Verify the repair before shipping it**: Run the executable/default checker only now,
+after approval and worktree creation, by invoking `scripts/check.sh` from that verified
+absolute worktree CWD. Re-run it after any repair to confirm the repair holds, then run
+flow's health gate per `docs/health-gates.md` by invoking
+`sh flow/hooks/scripts/run-gate.sh flow` from the same verified absolute worktree CWD. If
+either the `scripts/check.sh` re-run or
 the health gate still reports fail (or warn) after the repair, **stop here** — same as the Hard
 gate above — do not commit, push, or open a PR. Report the failure to the user via
 `AskUserQuestion` instead: never open a PR carrying an unverified repair.

@@ -18,10 +18,14 @@ the distinct diagnostic plus its captured output, and tell the user to fix the b
 and re-run `cenci run implement apply`.
 Arm
 the native goal, implement test-first, run the configured reviews, fix accepted findings,
-capture lessons, run the maintenance check (`flow/skills/maintain/scripts/check.sh --changed`)
-when the change touches docs, skills, agents, config, or client adapters — auto-repair only
-drift caused by this same change and route any ambiguous or policy-affecting finding through
-the client's available user-input mechanism — commit, push, and open the PR. Clear the goal
+capture lessons, and run the maintenance check
+(`flow/skills/maintain/scripts/check.sh --changed`) when the change touches docs, skills,
+agents, config, or client adapters, with the shell tool working directory set to the verified absolute worktree path on the initial check, every `--write`, and every re-run.
+Core checking remains active regardless of `maintenance.enabled`;
+`maintenance.checkDuringImplement=false` makes all findings report-only, and
+`maintenance.generatedDocs=false` disables generated-section maintenance. Otherwise,
+auto-repair only drift caused by this same change and route any ambiguous or policy-affecting
+finding through the client's available user-input mechanism — commit, push, and open the PR. Clear the goal
 before any question/error and after PR creation. Then, as the final step once the goal is
 cleared, hand the open PR to the persistent supervisor so it carries the PR to merge and does
 the final `In Review` → `Implemented` relabel: resolve the watch interval from

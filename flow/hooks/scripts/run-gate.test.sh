@@ -174,5 +174,68 @@ code=$?
 assert_not_contains "${out}" "GATE_STATUS="
 rm -rf "${ROOT}"
 
+# --- Case 11: Symlinked project path cannot escape the repository ---------
+ROOT="$(mktemp -d)"
+OUTSIDE="$(mktemp -d)"
+mkdir -p "${ROOT}/.cenci"
+ln -s "${OUTSIDE}" "${ROOT}/escaped"
+cat > "${ROOT}/.cenci/config.json" <<EOF
+{
+  "isMonorepo": true,
+  "projects": [
+    { "slug": "api", "path": "escaped", "gateCommand": "touch gate-ran" }
+  ]
+}
+EOF
+out="$(cd "${ROOT}" && sh "${RUN_GATE}" api 2>/dev/null)"
+code=$?
+[[ "${code}" -ne 0 ]] || { echo "FAIL: expected non-zero exit for escaping symlink" >&2; failures=$((failures+1)); }
+assert_not_contains "${out}" "GATE_STATUS="
+[[ ! -e "${OUTSIDE}/gate-ran" ]] || { echo "FAIL: escaping symlink gate executed outside repository" >&2; failures=$((failures+1)); }
+rm -rf "${ROOT}" "${OUTSIDE}"
+
+# --- Case 12: Symlink ancestor plus missing tail also fails closed --------
+ROOT="$(mktemp -d)"
+OUTSIDE="$(mktemp -d)"
+mkdir -p "${ROOT}/.cenci"
+ln -s "${OUTSIDE}" "${ROOT}/escaped"
+cat > "${ROOT}/.cenci/config.json" <<EOF
+{
+  "isMonorepo": true,
+  "projects": [
+    { "slug": "api", "path": "escaped/missing", "gateCommand": "touch gate-ran" }
+  ]
+}
+EOF
+out="$(cd "${ROOT}" && sh "${RUN_GATE}" api 2>/dev/null)"
+code=$?
+[[ "${code}" -ne 0 ]] || { echo "FAIL: expected non-zero exit for escaping symlink ancestor" >&2; failures=$((failures+1)); }
+assert_not_contains "${out}" "GATE_STATUS="
+[[ ! -e "${OUTSIDE}/gate-ran" ]] || { echo "FAIL: symlink-ancestor gate executed outside repository" >&2; failures=$((failures+1)); }
+rm -rf "${ROOT}" "${OUTSIDE}"
+
+# --- Case 13: Canonicalization does not require GNU realpath -m ------------
+ROOT="$(mktemp -d)"
+mkdir -p "${ROOT}/.cenci" "${ROOT}/project" "${ROOT}/bin"
+cat > "${ROOT}/.cenci/config.json" <<EOF
+{
+  "isMonorepo": true,
+  "projects": [
+    { "slug": "api", "path": "project", "gateCommand": "true" }
+  ]
+}
+EOF
+cat > "${ROOT}/bin/realpath" <<'EOF'
+#!/bin/sh
+echo "fixture realpath must not be called" >&2
+exit 2
+EOF
+chmod +x "${ROOT}/bin/realpath"
+out="$(cd "${ROOT}" && PATH="${ROOT}/bin:${PATH}" sh "${RUN_GATE}" api)"
+code=$?
+assert_contains "${out}" "GATE_STATUS=green"
+assert_eq "${code}" "0"
+rm -rf "${ROOT}"
+
 echo "run-gate.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]

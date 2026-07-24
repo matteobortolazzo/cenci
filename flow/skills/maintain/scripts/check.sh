@@ -10,6 +10,11 @@
 #                                 repo-root-relative changed files; unrelated
 #                                 context-budget breaches downgrade to "warn"
 #   check.sh --strict            full check; any "warn" also fails CI
+#   check.sh --advisory          repository-read-only static checks; JSON is
+#                                 emitted on stdout and executable/network
+#                                 checks are explicitly skipped
+#   check.sh --report-file PATH  atomically write JSON to PATH instead of the
+#                                 default .cenci/maintain-report.json
 #   check.sh --write              regenerate marker-bounded generated sections
 #                                 from canonical sources; never touches content
 #                                 outside a marker pair; fails closed (no
@@ -22,8 +27,9 @@
 # plus a JSON report written to "<repo-root>/.cenci/maintain-report.json":
 #   { "summary": {pass,warn,fail,skip,mode}, "results": [{check,target,status,message,fix}] }
 #
-# Exit codes: 0 unless a "fail" result exists. --strict additionally fails on
-# any "warn". "skip" never blocks.
+# Exit codes: 0 unless a "fail" result exists, 1 for findings, and 2 for usage
+# or checker/report infrastructure errors. --strict additionally fails on any
+# "warn". "skip" never blocks.
 #
 # Checker scope: the flow project (slug "flow") plus repo-root instruction/
 # config files — not watch/ or sandbox/ (see the ticket #530 plan). Check
@@ -65,6 +71,8 @@ MARKER_IDS=(skills agents workflow-deps docs-nav)
 MODE_STRICT=0
 MODE_CHANGED=0
 MODE_WRITE=0
+MODE_ADVISORY=0
+REPORT_FILE=""
 CHANGED_FILES=()
 
 COUNT_PASS=0
@@ -73,6 +81,7 @@ COUNT_FAIL=0
 COUNT_SKIP=0
 RESULTS_FILE=""
 MARKERS_OK=1
+PROJECT_PATHS_OK=1
 declare -A MARKER_PRESENT
 
 # ============================================================================
@@ -97,12 +106,32 @@ parse_args() {
         MODE_WRITE=1
         shift
         ;;
+      --advisory)
+        MODE_ADVISORY=1
+        shift
+        ;;
+      --report-file)
+        if [[ $# -lt 2 || -z "$2" || "$2" == --* ]]; then
+          echo "check.sh: --report-file requires a path" >&2
+          exit 2
+        fi
+        REPORT_FILE="$2"
+        shift 2
+        ;;
       *)
         echo "check.sh: unknown argument: $1" >&2
         exit 2
         ;;
     esac
   done
+  if [[ "$MODE_ADVISORY" -eq 1 && "$MODE_WRITE" -eq 1 ]]; then
+    echo "check.sh: --advisory cannot be combined with --write" >&2
+    exit 2
+  fi
+  if [[ "$MODE_ADVISORY" -eq 1 && -n "$REPORT_FILE" ]]; then
+    echo "check.sh: --advisory emits JSON on stdout and cannot be combined with --report-file" >&2
+    exit 2
+  fi
 }
 
 # ============================================================================
@@ -163,7 +192,7 @@ agent_purpose() {
 
 list_join() {
   # shellcheck disable=SC2039
-  printf '%s' "$1" | paste -sd ', ' - 2>/dev/null
+  printf '%s' "$1" | paste -sd ',' - 2>/dev/null | sed 's/,/, /g'
 }
 
 portable_skills_list() {
@@ -181,6 +210,12 @@ is_portable_skill() {
 # that needs to branch on .cenci/config.json's top-level isMonorepo flag.
 config_is_monorepo() {
   jq -r 'if (.isMonorepo // false) == true then "true" else "false" end' "$1" 2>/dev/null
+}
+
+generated_docs_enabled() {
+  local cfg="$ROOT/.cenci/config.json"
+  [[ -f "$cfg" ]] || return 0
+  ! jq -e '.maintenance.generatedDocs? == false' "$cfg" >/dev/null 2>&1
 }
 
 # flow_project_field <cfg> <field> <default> — reads <field> off the
@@ -201,10 +236,48 @@ resolve_flow_dir() {
   local path
   if [[ "$(config_is_monorepo "$cfg")" == "true" ]]; then
     path="$(flow_project_field "$cfg" path flow)"
-    [[ -n "$path" && "$path" != "null" ]] && FLOW_DIR="$ROOT/$path"
+    if [[ -n "$path" && "$path" != "null" ]] && project_path_is_safe "$path"; then
+      FLOW_DIR="$ROOT/$path"
+    fi
   else
     FLOW_DIR="$ROOT"
   fi
+}
+
+canonicalize_dir_allow_missing() {
+  local candidate="$1" tail="" segment resolved_ancestor
+  while [[ ! -d "$candidate" ]]; do
+    [[ ! -L "$candidate" ]] || return 1
+    segment="${candidate##*/}"
+    [[ -n "$segment" ]] || return 1
+    if [[ -z "$tail" ]]; then
+      tail="$segment"
+    else
+      tail="$segment/$tail"
+    fi
+    candidate="${candidate%/*}"
+    [[ -n "$candidate" ]] || candidate="/"
+  done
+  resolved_ancestor="$(cd "$candidate" 2>/dev/null && pwd -P)" || return 1
+  if [[ -n "$tail" ]]; then
+    printf '%s/%s\n' "$resolved_ancestor" "$tail"
+  else
+    printf '%s\n' "$resolved_ancestor"
+  fi
+}
+
+project_path_is_safe() {
+  local path="$1" resolved
+  [[ -n "$path" && "$path" != /* ]] || return 1
+  case "/$path/" in
+    */../*|*/./*) return 1 ;;
+  esac
+  resolved="$(canonicalize_dir_allow_missing "$ROOT/$path")" || return 1
+  case "$resolved" in
+    "$ROOT"|"$ROOT"/*) ;;
+    *) return 1 ;;
+  esac
+  return 0
 }
 
 # Populate PROJECT_PATHS (repo-root-relative dir prefixes for every configured
@@ -214,14 +287,25 @@ resolve_flow_dir() {
 # silent no-op; it never widens what a check body scans (that stays flow-scoped
 # per the #530 charter).
 resolve_project_dirs() {
-  local cfg="$ROOT/.cenci/config.json" p jq_out jq_rc
+  local cfg="$ROOT/.cenci/config.json" p slug jq_out jq_rc=0 any_fail=0 checked=0
   PROJECT_PATHS=()
+  PROJECT_PATHS_OK=1
   if [[ -f "$cfg" && "$(config_is_monorepo "$cfg")" == "true" ]]; then
-    jq_out="$(jq -r '.projects[]?.path // empty' "$cfg" 2>/dev/null)"
+    jq_out="$(jq -r '.projects[]? | [(.slug // "(unknown)"), (.path // "")] | @tsv' "$cfg" 2>/dev/null)"
     jq_rc=$?
     if [[ "$jq_rc" -eq 0 ]]; then
-      while IFS= read -r p; do
-        [[ -n "$p" && "$p" != "null" ]] && PROJECT_PATHS+=("$p")
+      checked=1
+      while IFS=$'\t' read -r slug p; do
+        [[ -n "$slug" || -n "$p" ]] || continue
+        if ! project_path_is_safe "$p"; then
+          add_result config-paths "$slug" fail \
+            "configured project path '${p:-<empty>}' escapes repository root or is not a safe repo-relative path" \
+            "set projects[].path for '$slug' to a non-empty repository-relative path without '.' or '..' segments"
+          any_fail=1
+          PROJECT_PATHS_OK=0
+          continue
+        fi
+        PROJECT_PATHS+=("$p")
       done <<< "$jq_out"
     fi
     # jq_rc != 0 here means a genuinely malformed config.json (distinct from
@@ -234,6 +318,15 @@ resolve_project_dirs() {
     # separately by check_invalid_json's own dedicated result.
   fi
   [[ "${#PROJECT_PATHS[@]}" -eq 0 ]] && PROJECT_PATHS=("")
+  # Only a monorepo config whose project list was actually read earns a
+  # result: a single-repo or absent config has no configured paths to
+  # validate, so claiming "all paths stay within the repository" there
+  # would be a pass for a check that never ran.
+  if [[ "$checked" -eq 1 && "$any_fail" -eq 0 ]]; then
+    add_result config-paths "(repo)" pass "all configured project paths stay within the repository" ""
+  elif [[ "$jq_rc" -ne 0 ]]; then
+    add_result config-paths "(repo)" skip "configured project paths could not be read from invalid JSON" ""
+  fi
 }
 
 # file_under_project <repo-root-relative-path> — true if the path falls under
@@ -262,7 +355,7 @@ add_result() {
     fail) COUNT_FAIL=$((COUNT_FAIL+1)) ;;
     skip) COUNT_SKIP=$((COUNT_SKIP+1)) ;;
   esac
-  if [[ "$status" != "pass" ]]; then
+  if [[ "$status" != "pass" && "$MODE_ADVISORY" -eq 0 ]]; then
     local upper
     upper="$(printf '%s' "$status" | tr '[:lower:]' '[:upper:]')"
     printf '%s %s %s: %s -> fix: %s\n' "$upper" "$check" "$target" "$message" "$fix"
@@ -275,6 +368,33 @@ build_report() {
     --argjson fail "$COUNT_FAIL" --argjson skip "$COUNT_SKIP" \
     '{summary:{pass:$pass,warn:$warn,fail:$fail,skip:$skip,mode:$mode}, results: .}' \
     "$RESULTS_FILE"
+}
+
+write_report_atomically() {
+  local destination="$1" mode="$2" parent tmp
+  if [[ -d "$destination" ]]; then
+    echo "check.sh: report path is a directory, expected a file: $destination" >&2
+    return 1
+  fi
+  parent="$(dirname "$destination")"
+  if [[ ! -d "$parent" ]] && ! mkdir -p "$parent" 2>/dev/null; then
+    echo "check.sh: failed to create report directory: $parent" >&2
+    return 1
+  fi
+  tmp="$(mktemp "${parent}/.maintain-report.XXXXXX")" || {
+    echo "check.sh: failed to create temporary report next to: $destination" >&2
+    return 1
+  }
+  if ! build_report "$mode" > "$tmp"; then
+    rm -f "$tmp"
+    echo "check.sh: failed to render report: $destination" >&2
+    return 1
+  fi
+  if ! mv -f -- "$tmp" "$destination" 2>/dev/null; then
+    rm -f "$tmp"
+    echo "check.sh: failed to write report atomically: $destination" >&2
+    return 1
+  fi
 }
 
 # ============================================================================
@@ -372,6 +492,10 @@ validate_markers() {
     sc="${sc:-0}"; ec="${ec:-0}"
     if [[ "$sc" -eq 0 && "$ec" -eq 0 ]]; then
       MARKER_PRESENT[$id]=0
+      add_result stale-generated "$(relpath "$file")" fail \
+        "required cenci-maintain:${id} marker pair is missing from $(relpath "$file")" \
+        "add exactly one start and end marker for '${id}', then run check.sh --write"
+      MARKERS_OK=0
       continue
     fi
     MARKER_PRESENT[$id]=1
@@ -424,7 +548,8 @@ generate_skills_section() {
 
 referencing_skills() {
   local agent="$1"
-  grep -lE "\`${agent}\`" "$FLOW_DIR"/skills/*/SKILL.md "$FLOW_DIR"/skills/*/phases/*.md 2>/dev/null \
+  grep -lE "\`${agent}\`" "$FLOW_DIR"/skills/*/SKILL.md "$FLOW_DIR"/skills/*/codex.md \
+    "$FLOW_DIR"/skills/*/phases/*.md "$FLOW_DIR"/skills/*/modes/*.md 2>/dev/null \
     | sed -E "s#.*/skills/([^/]+)/.*#\\1#" | sort -u | paste -sd ', ' -
 }
 
@@ -444,18 +569,20 @@ generate_agents_section() {
 }
 
 other_skill_refs() {
-  local sm="$1" self="$2" all_names tok
+  local skilldir="$1" self="$2" all_names tok
   all_names="$(for d in "$FLOW_DIR"/skills/*/; do basename "$d"; done | sort -u)"
-  grep -oE '`[a-zA-Z0-9_-]+`' "$sm" 2>/dev/null | tr -d '`' | sort -u | while read -r tok; do
+  grep -hoE '`[a-zA-Z0-9_-]+`' "$skilldir/SKILL.md" "$skilldir/codex.md" \
+    "$skilldir"/phases/*.md "$skilldir"/modes/*.md 2>/dev/null | tr -d '`' | sort -u | while read -r tok; do
     [[ -z "$tok" || "$tok" == "$self" ]] && continue
     grep -qxF -- "$tok" <<< "$all_names" && printf '%s\n' "$tok"
   done
 }
 
 agent_refs() {
-  local sm="$1" all_agents tok
+  local skilldir="$1" all_agents tok
   all_agents="$(for f in "$FLOW_DIR"/agents/*.md; do [[ -f "$f" ]] && fm_field "$f" name; done | sort -u)"
-  grep -oE '`[a-zA-Z0-9_-]+`' "$sm" 2>/dev/null | tr -d '`' | sort -u | while read -r tok; do
+  grep -hoE '`[a-zA-Z0-9_-]+`' "$skilldir/SKILL.md" "$skilldir/codex.md" \
+    "$skilldir"/phases/*.md "$skilldir"/modes/*.md 2>/dev/null | tr -d '`' | sort -u | while read -r tok; do
     [[ -z "$tok" ]] && continue
     grep -qxF -- "$tok" <<< "$all_agents" && printf '%s\n' "$tok"
   done
@@ -464,18 +591,24 @@ agent_refs() {
 generate_workflow_deps_section() {
   printf '%s\n' "<!-- Auto-generated by flow/skills/maintain/scripts/check.sh --write. Do not hand-edit. -->"
   printf '%s\n' ""
-  printf '%s\n' "| Skill | Phases | Reference skills | Scripts | Agents |"
+  printf '%s\n' "| Skill | Procedure files | Reference skills | Scripts | Agents |"
   printf '%s\n' "|---|---|---|---|---|"
-  local d skillname sm phases scripts refskills agents_col
+  local d skillname sm procedures scripts refskills agents_col
   for d in "$FLOW_DIR"/skills/*/; do
     skillname="$(basename "$d")"
     sm="${d}SKILL.md"
     [[ -f "$sm" ]] || continue
-    phases="$(list_join "$(find "${d}phases" -maxdepth 1 -name '*.md' 2>/dev/null | sort | xargs -n1 basename 2>/dev/null)")"
+    procedures="$(list_join "$(
+      {
+        [[ -f "${d}codex.md" ]] && printf '%s\n' "codex.md"
+        find "${d}modes" -maxdepth 1 -name '*.md' -printf 'modes/%f\n' 2>/dev/null
+        find "${d}phases" -maxdepth 1 -name '*.md' -printf 'phases/%f\n' 2>/dev/null
+      } | sort
+    )")"
     scripts="$(list_join "$(find "${d}scripts" -maxdepth 1 -name '*.sh' ! -name '*.test.sh' 2>/dev/null | sort | xargs -n1 basename 2>/dev/null)")"
-    refskills="$(list_join "$(other_skill_refs "$sm" "$skillname")")"
-    agents_col="$(list_join "$(agent_refs "$sm")")"
-    printf '| `%s` | %s | %s | %s | %s |\n' "$skillname" "${phases:-—}" "${refskills:-—}" "${scripts:-—}" "${agents_col:-—}"
+    refskills="$(list_join "$(other_skill_refs "$d" "$skillname")")"
+    agents_col="$(list_join "$(agent_refs "$d")")"
+    printf '| `%s` | %s | %s | %s | %s |\n' "$skillname" "${procedures:-—}" "${refskills:-—}" "${scripts:-—}" "${agents_col:-—}"
   done
 }
 
@@ -518,7 +651,7 @@ process_markers() {
   [[ "$MARKERS_OK" -eq 1 ]] || return 1
   [[ "$write" -eq 1 || "$do_compare" -eq 1 ]] || return 0
 
-  local id expected actual tmp
+  local id expected actual tmp any_drift=0
   tmp="$(mktemp)" || { echo "check.sh: mktemp failed" >&2; exit 2; }
   cp "$file" "$tmp"
   for id in "${MARKER_IDS[@]}"; do
@@ -526,6 +659,7 @@ process_markers() {
     expected="$(generate_section "$id")"
     actual="$(extract_marker_body "$file" "$id")"
     if [[ "$expected" != "$actual" ]]; then
+      any_drift=1
       if [[ "$write" -eq 1 ]]; then
         replace_marker_body "$tmp" "$id" "$expected"
       else
@@ -539,6 +673,11 @@ process_markers() {
     mv "$tmp" "$file"
   else
     rm -f "$tmp"
+  fi
+  if [[ "$any_drift" -eq 0 ]]; then
+    add_result stale-generated "$(relpath "$file")" pass "all required generated sections match their canonical sources" ""
+  elif [[ "$write" -eq 1 ]]; then
+    add_result stale-generated "$(relpath "$file")" pass "generated sections were refreshed from canonical sources" ""
   fi
   return 0
 }
@@ -599,32 +738,59 @@ check_duplicate_names() {
 }
 
 check_broken_refs() {
-  local all_scripts f refs r any_fail=0
-  all_scripts="$(find "$FLOW_DIR" -path '*/scripts/*.sh' -printf '%f\n' 2>/dev/null | sort -u)"
-  for f in "$FLOW_DIR"/skills/*/SKILL.md; do
-    [[ -f "$f" ]] || continue
-    refs="$(grep -oE '`scripts/[A-Za-z0-9_.-]+\.sh`' "$f" 2>/dev/null | tr -d '`' | sed 's#^scripts/##' | sort -u)"
-    [[ -z "$refs" ]] && continue
-    while IFS= read -r r; do
-      [[ -n "$r" ]] || continue
-      if ! grep -qxF -- "$r" <<< "$all_scripts"; then
-        add_result broken-refs "$(relpath "$f")" fail \
-          "referenced script 'scripts/$r' does not exist anywhere under flow/" \
-          "create scripts/$r or fix the reference in $(relpath "$f")"
-        any_fail=1
-      fi
-    done <<< "$refs"
+  local d f refs r candidate candidate_owner matches any_fail=0
+  for d in "$FLOW_DIR"/skills/*/; do
+    [[ -f "${d}SKILL.md" ]] || continue
+    for f in "${d}SKILL.md" "${d}codex.md" "${d}"phases/*.md "${d}"modes/*.md; do
+      [[ -f "$f" ]] || continue
+      refs="$(grep -oE '`scripts/[A-Za-z0-9_.-]+\.sh`' "$f" 2>/dev/null | tr -d '`' | sort -u)"
+      [[ -z "$refs" ]] && continue
+      while IFS= read -r r; do
+        [[ -n "$r" ]] || continue
+        if [[ ! -f "$d/$r" ]]; then
+          matches=0
+          candidate_owner=""
+          for candidate in "$FLOW_DIR"/skills/*/"$r"; do
+            [[ -f "$candidate" ]] || continue
+            matches=$((matches+1))
+            candidate_owner="$(basename "$(dirname "$(dirname "$candidate")")")"
+          done
+          # Cross-skill references must explicitly name the owning skill.
+          # This keeps `babysit`'s `scripts/tick.sh` valid while preventing an
+          # unrelated duplicate basename from satisfying a local reference.
+          if [[ "$matches" -eq 1 ]] && grep -qE "\`${candidate_owner}\`" "$f" 2>/dev/null; then
+            continue
+          fi
+          add_result broken-refs "$(relpath "$f")" fail \
+            "referenced script '$r' does not exist relative to its owning skill $(relpath "$d")" \
+            "create $r under $(relpath "$d") or fix the reference in $(relpath "$f")"
+          any_fail=1
+        fi
+      done <<< "$refs"
+    done
   done
   [[ "$any_fail" -eq 0 ]] && add_result broken-refs "(repo)" pass "no broken scripts/ references found" ""
 }
 
 check_orphan_files() {
-  local any_orphan=0 f name skilldir
+  local any_orphan=0 f name skilldir owner source referenced
   while IFS= read -r -d '' f; do
     name="$(basename "$f")"
-    if ! grep -rlqE "\`scripts/${name}\`" "$FLOW_DIR"/skills/*/SKILL.md 2>/dev/null; then
+    skilldir="$(dirname "$(dirname "$f")")"
+    owner="$(basename "$skilldir")"
+    referenced=0
+    for source in "$FLOW_DIR"/skills/*/SKILL.md "$FLOW_DIR"/skills/*/codex.md \
+      "$FLOW_DIR"/skills/*/phases/*.md "$FLOW_DIR"/skills/*/modes/*.md; do
+      [[ -f "$source" ]] || continue
+      grep -qE "\`scripts/${name}\`" "$source" 2>/dev/null || continue
+      if [[ "$source" == "$skilldir/"* ]] || grep -qE "\`${owner}\`" "$source" 2>/dev/null; then
+        referenced=1
+        break
+      fi
+    done
+    if [[ "$referenced" -eq 0 ]]; then
       add_result orphan-files "$(relpath "$f")" fail "script $(relpath "$f") is not referenced by any skill" \
-        "reference it from the owning skill's SKILL.md (e.g. \`scripts/${name}\`) or delete it if unused"
+        "reference it from its owning skill (e.g. \`scripts/${name}\`) or delete it if unused"
       any_orphan=1
     fi
   done < <(find "$FLOW_DIR"/skills -path '*/scripts/*.sh' ! -name '*.test.sh' \
@@ -850,6 +1016,40 @@ check_capability_table() {
   hc_lines="$(awk '/^## Skill portability/{f=1;next} /^## /{f=0} /<!-- cenci-maintain:[a-zA-Z0-9_-]+:start -->/{f=0} f' "$readme" 2>/dev/null)"
   if [[ -n "$hc_lines" ]]; then
     checked=1
+    local expected_rows actual_rows row count
+    expected_rows="$(
+      for name in $portable; do printf '%s\n' "$name"; done
+      for f in "$FLOW_DIR"/skills/*/SKILL.md; do
+        [[ -f "$f" ]] || continue
+        [[ "$(fm_field "$f" user-invocable)" == "true" ]] && basename "$(dirname "$f")"
+      done
+    )"
+    expected_rows="$(printf '%s\n' "$expected_rows" | sed '/^$/d' | sort -u)"
+    actual_rows="$(printf '%s\n' "$hc_lines" | awk -F'`' '/^[|][[:space:]]*`[A-Za-z0-9_-]+`/{print $2}' | sort)"
+    while IFS= read -r row; do
+      [[ -n "$row" ]] || continue
+      count="$(grep -xcF -- "$row" <<< "$actual_rows")"
+      if [[ "$count" -eq 0 ]]; then
+        add_result capability-table "$row" fail \
+          "README hand-curated Skill portability table is missing expected skill row '$row'" \
+          "add the '$row' row to flow/README.md's Skill portability table"
+        any_fail=1
+      elif [[ "$count" -gt 1 ]]; then
+        add_result capability-table "$row" fail \
+          "README hand-curated Skill portability table contains duplicate rows for '$row'" \
+          "keep exactly one '$row' row in flow/README.md's Skill portability table"
+        any_fail=1
+      fi
+    done <<< "$expected_rows"
+    while IFS= read -r row; do
+      [[ -n "$row" ]] || continue
+      if ! grep -qxF -- "$row" <<< "$expected_rows"; then
+        add_result capability-table "$row" fail \
+          "README hand-curated Skill portability table contains unexpected or renamed skill row '$row'" \
+          "remove '$row' or rename it to the current portable/user-invocable skill name"
+        any_fail=1
+      fi
+    done < <(printf '%s\n' "$actual_rows" | sort -u)
     while IFS='|' read -r _junk col_skill col_claude col_codex col_opencode col_notes _junk; do
       [[ "$col_skill" == *'`'* ]] || continue
       name="$(printf '%s' "$col_skill" | tr -d ' `')"
@@ -887,9 +1087,10 @@ check_adapter_drift() {
 }
 
 check_structural_tests() {
-  local any_fail=0 f out rc
+  local any_fail=0 count=0 f out rc
   for f in "$FLOW_DIR"/tests/*.test.sh; do
     [[ -f "$f" ]] || continue
+    count=$((count+1))
     out="$(bash "$f" 2>&1)"; rc=$?
     if [[ "$rc" -ne 0 ]]; then
       add_result structural-tests "$(relpath "$f")" fail "$(basename "$f") failed (exit ${rc})" \
@@ -897,7 +1098,12 @@ check_structural_tests() {
       any_fail=1
     fi
   done
-  [[ "$any_fail" -eq 0 ]] && add_result structural-tests "(repo)" pass "all flow/tests/*.test.sh pass" ""
+  if [[ "$count" -eq 0 ]]; then
+    add_result structural-tests "(repo)" fail "zero structural tests ran under flow/tests/" \
+      "add at least one flow/tests/*.test.sh integration test"
+  elif [[ "$any_fail" -eq 0 ]]; then
+    add_result structural-tests "(repo)" pass "all ${count} flow/tests/*.test.sh scripts pass" ""
+  fi
 }
 
 check_worktree_ignored() {
@@ -1050,7 +1256,7 @@ check_github_labels() {
 }
 
 check_context_budget() {
-  local target rel count status
+  local target rel count status any_fail=0
 
   for target in "$ROOT/AGENTS.md" "$FLOW_DIR/AGENTS.md"; do
     [[ -f "$target" ]] || continue
@@ -1062,6 +1268,7 @@ check_context_budget() {
       add_result context-budget "$rel" "$status" \
         "Critical Rules section has ${count} bullets (max ${CRITICAL_RULES_MAX})" \
         "run /cenci:maintain rules on ${rel} to curate the Critical Rules section back under the ${CRITICAL_RULES_MAX}-bullet threshold"
+      any_fail=1
     fi
   done
 
@@ -1079,9 +1286,11 @@ check_context_budget() {
         add_result context-budget "$rel" "$status" \
           "Rules section has ${count} bullets (max ${TOPIC_DOC_RULES_MAX})" \
           "run /cenci:maintain rules on ${rel} to curate the Rules section back under the ${TOPIC_DOC_RULES_MAX}-bullet threshold"
+        any_fail=1
       fi
     done
   done
+  [[ "$any_fail" -eq 0 ]] && add_result context-budget "(repo)" pass "all rule sections are within checker-owned context budgets" ""
 }
 
 # ============================================================================
@@ -1091,9 +1300,9 @@ check_context_budget() {
 # check_command_flags (id command-flags) — Q2 cross-reference. Only inspects
 # backtick spans that begin with "cenci " (precise; avoids flagging git/gh/
 # arbitrary flags). Each span's verb chain and any --flags must each resolve
-# in at least one definition surface (watch/main.go, watch/*_cmd.go,
-# docs/cli-conventions.md, skill SKILL.md/phases/codex.md files); otherwise
-# the span is flagged. watch/main.go is included alongside watch/*_cmd.go
+# in executable Go CLI registration sites (watch/main.go and watch/*_cmd.go);
+# documentation being validated is never an authority. Otherwise the span is
+# flagged. watch/main.go is included alongside watch/*_cmd.go
 # because some top-level verbs (e.g. `doctor`, `update`, `uninstall`) dispatch
 # directly from main.go and never get their own *_cmd.go file.
 #
@@ -1112,16 +1321,28 @@ check_context_budget() {
 # placeholder tokens, or plain words trailing after a flag/placeholder, e.g.
 # an example's argument value) is not itself checked.
 check_command_flags() {
-  local corpus_file target f span rest verb_str flag any_fail=0
-  corpus_file="$(mktemp)" || { echo "check.sh: mktemp failed" >&2; exit 2; }
+  local command_file flag_file target f span rest verb_str flag any_fail=0
+  command_file="$(mktemp)" || { echo "check.sh: mktemp failed" >&2; exit 2; }
+  flag_file="$(mktemp)" || { rm -f "$command_file"; echo "check.sh: mktemp failed" >&2; exit 2; }
 
-  for f in "$ROOT/watch/main.go" "$ROOT"/watch/*_cmd.go "$ROOT/docs/cli-conventions.md" \
-           "$FLOW_DIR"/skills/*/SKILL.md "$FLOW_DIR"/skills/*/phases/*.md "$FLOW_DIR"/skills/*/codex.md; do
-    [[ -f "$f" ]] && cat "$f" >> "$corpus_file"
+  # Only syntactic registration sites in executable Go CLI sources establish
+  # command/flag truth. Exact-token registries prevent comments, prose, and
+  # unrelated string literals from validating a stale documented spelling.
+  for f in "$ROOT/watch/main.go" "$ROOT"/watch/*_cmd.go; do
+    [[ -f "$f" ]] || continue
+    sed -nE 's/^[[:space:]]*case[[:space:]]+"([A-Za-z0-9_-]+)".*/\1/p' "$f" >> "$command_file"
+    sed -nE 's/^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:=[[:space:]]*flag\.NewFlagSet\("([A-Za-z0-9_-]+)( [A-Za-z0-9_-]+)?".*/\1\2/p' "$f" \
+      | tr ' ' '\n' >> "$command_file"
+    sed -nE 's/^[[:space:]]*"([A-Za-z0-9_-]+)"[[:space:]]*:[[:space:]]*true,.*/\1/p' "$f" >> "$command_file"
+    sed -nE 's/^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(:=|=)[[:space:]]*[A-Za-z_][A-Za-z0-9_]*\.(Bool|Duration|Int|String)\("([A-Za-z0-9_-]+)".*/\3/p' "$f" >> "$flag_file"
+    sed -nE 's/^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*\.(BoolVar|DurationVar|IntVar|StringVar|Var)\([^,]+,[[:space:]]*"([A-Za-z0-9_-]+)".*/\2/p' "$f" >> "$flag_file"
   done
+  sort -u -o "$command_file" "$command_file"
+  sort -u -o "$flag_file" "$flag_file"
 
   for target in "$ROOT"/docs/*.md "$FLOW_DIR"/docs/*.md "$FLOW_DIR/README.md" "$ROOT/README.md" \
-                "$FLOW_DIR"/skills/*/SKILL.md "$FLOW_DIR"/skills/*/phases/*.md; do
+                "$FLOW_DIR"/skills/*/SKILL.md "$FLOW_DIR"/skills/*/codex.md \
+                "$FLOW_DIR"/skills/*/phases/*.md "$FLOW_DIR"/skills/*/modes/*.md; do
     [[ -f "$target" ]] || continue
     while IFS= read -r span; do
       [[ -n "$span" ]] || continue
@@ -1155,23 +1376,31 @@ check_command_flags() {
       done
       verb_str="${verb_toks[*]:-}"
       local unresolved=0
-      if [[ -n "$verb_str" ]] && ! grep -qF -- "$verb_str" "$corpus_file"; then
-        unresolved=1
+      if [[ -n "$verb_str" ]]; then
+        local first_verb="${verb_toks[0]:-}"
+        if ! grep -qxF -- "$first_verb" "$command_file"; then
+          unresolved=1
+        elif [[ "$first_verb" != "run" && "$first_verb" != "pipeline" ]]; then
+          local verb_token
+          for verb_token in "${verb_toks[@]}"; do
+            grep -qxF -- "$verb_token" "$command_file" || unresolved=1
+          done
+        fi
       fi
       for flag in "${flag_toks[@]:-}"; do
         [[ -n "$flag" ]] || continue
-        grep -qF -- "$flag" "$corpus_file" || unresolved=1
+        grep -qxF -- "${flag#--}" "$flag_file" || unresolved=1
       done
       if [[ "$unresolved" -eq 1 ]]; then
         add_result command-flags "$(relpath "$target")" fail \
-          "\`cenci ${rest}\` in $(relpath "$target") references a CLI command/flag defined in no known surface (watch/main.go, watch/*_cmd.go, docs/cli-conventions.md, skills)" \
-          "update or remove the stale command/flag reference in $(relpath "$target"), or add the command to its definition surface"
+          "\`cenci ${rest}\` in $(relpath "$target") references a CLI command/flag not registered by watch/main.go or watch/*_cmd.go" \
+          "update or remove the stale command/flag reference in $(relpath "$target"), or register it in the Go CLI source"
         any_fail=1
       fi
     done < <(grep -oE '`cenci [^`]*`' "$target" 2>/dev/null | tr -d '`')
   done
 
-  rm -f "$corpus_file"
+  rm -f "$command_file" "$flag_file"
   [[ "$any_fail" -eq 0 ]] && add_result command-flags "(repo)" pass "no stale cenci command/flag references found" ""
 }
 
@@ -1179,12 +1408,86 @@ check_command_flags() {
 # look config-shaped (contain at least one signal key from the live
 # .cenci/config.json schema) must parse as JSON and use only field names
 # present in that live schema.
-CONFIG_SIGNAL_KEYS=(projects isMonorepo gateCommand babysitInterval guidanceLocation branchPattern buildCommand testCommand lintCommand serveCommand mcpServers lspServers)
+# Canonical .cenci/config.json path/type metadata. Paths use [] for array
+# elements and * for user-defined map keys. Optional fields remain valid even
+# when the repository's live config does not happen to contain them.
+CONFIG_SCHEMA=(
+  'configVersion|string' 'branchPattern|string' 'isMonorepo|boolean'
+  'guidanceLocation|string' 'babysitInterval|string'
+  'buildCommand|string' 'testCommand|string' 'lintCommand|string'
+  'gateCommand|string' 'serveCommand|string'
+  'stack|object' 'stack.backend|string' 'stack.frontend|string'
+  'stack.testing|string,array' 'stack.testing[]|string'
+  'projects|array' 'projects[]|object' 'projects[].slug|string'
+  'projects[].path|string' 'projects[].name|string' 'projects[].description|string'
+  'projects[].stack|object' 'projects[].stack.framework|string'
+  'projects[].stack.testing|string,array' 'projects[].stack.testing[]|string'
+  'projects[].buildCommand|string' 'projects[].testCommand|string'
+  'projects[].lintCommand|string' 'projects[].gateCommand|string'
+  'projects[].serveCommand|string' 'projects[].babysitInterval|string'
+  'projects[].designPath|string' 'projects[].boardKey|string' 'projects[].testKey|string'
+  'mcpServers|object' 'mcpServers.*|boolean'
+  'lspServers|object' 'lspServers.*|boolean'
+  'playwrightCli|boolean'
+  'autoCompactDisabled|boolean' 'pinSubagents200K|boolean'
+  'cenci|object' 'cenci.compactImplementation|boolean'
+  'cenci.reviewConcurrency|string' 'cenci.implementerConcurrency|string'
+  'cenci.diffContextMode|string' 'cenci.liteReviewEnabled|boolean'
+  'cenci.goalAutopilot|boolean' 'cenci.planComment|boolean'
+  'cicd|object' 'cicd.enabled|boolean' 'cicd.platform|string'
+  'sandbox|object' 'sandbox.enabled|boolean' 'sandbox.baseVersion|string,null'
+  'sandbox.dind|boolean'
+  'lazyboards|object' 'lazyboards.enabled|boolean'
+  'lazyboards.serveCommand|string' 'lazyboards.boardKey|string'
+  'lazyboards.testCommand|string' 'lazyboards.testKey|string'
+  'pencil|object' 'pencil.enabled|boolean' 'pencil.designPath|string'
+  'pencil.mode|string' 'pencil.shared|boolean'
+  'security|object' 'security.sensitivePaths|array' 'security.sensitivePaths[]|string'
+  'maintenance|object' 'maintenance.enabled|boolean'
+  'maintenance.checkDuringImplement|boolean' 'maintenance.remindAfterDays|number'
+  'maintenance.generatedDocs|boolean'
+)
+
+CONFIG_SIGNAL_KEYS=()
+for _config_entry in "${CONFIG_SCHEMA[@]}"; do
+  _config_path="${_config_entry%%|*}"
+  if [[ "$_config_path" != *.* && "$_config_path" != *"[]"* && "$_config_path" != *"*"* ]]; then
+    CONFIG_SIGNAL_KEYS+=("$_config_path")
+  fi
+done
+unset _config_entry _config_path
+
+config_schema_types() {
+  local path="$1" entry pattern types
+  for entry in "${CONFIG_SCHEMA[@]}"; do
+    pattern="${entry%%|*}"
+    types="${entry#*|}"
+    # `*` (user-defined map keys, e.g. mcpServers.*) is the only pattern
+    # metacharacter honored here. Every other path must compare literally:
+    # an unquoted bash pattern match would misparse the [] array markers as
+    # bracket expressions (a pattern with two [] pairs, like
+    # projects[].stack.testing[], can never match its own literal path).
+    if [[ "$pattern" == *'*'* ]]; then
+      [[ "$path" == $pattern ]] || continue
+    else
+      [[ "$path" == "$pattern" ]] || continue
+    fi
+    printf '%s' "$types"
+    return 0
+  done
+  return 1
+}
 
 _is_config_shaped_block() {
-  local block="$1" k
+  local block="$1" k top_keys
+  if top_keys="$(jq -r 'if type == "object" then keys[] else empty end' <<< "$block" 2>/dev/null)"; then
+    for k in "${CONFIG_SIGNAL_KEYS[@]}"; do
+      grep -qxF -- "$k" <<< "$top_keys" && return 0
+    done
+    return 1
+  fi
   for k in "${CONFIG_SIGNAL_KEYS[@]}"; do
-    grep -qF "\"$k\"" <<< "$block" && return 0
+    grep -qE "\"${k}\"[[:space:]]*:" <<< "$block" && return 0
   done
   return 1
 }
@@ -1212,24 +1515,7 @@ extract_json_blocks() {
 }
 
 check_config_examples() {
-  local cfg="$ROOT/.cenci/config.json" schema_keys any_fail=0 target rel line block k keys schema_rc
-  schema_keys="$(jq -r '[.. | objects | keys[]] | unique[]' "$cfg" 2>/dev/null)"
-  schema_rc=$?
-  if [[ "$schema_rc" -ne 0 ]]; then
-    # Missing or malformed .cenci/config.json: the live schema itself is
-    # unavailable, so no config-shaped example's fields can be meaningfully
-    # compared against it. Surface that explicitly and skip every per-key
-    # comparison below -- otherwise every config-shaped block found
-    # afterward would get ALL its keys reported as "not present in schema",
-    # a misleading fail cascade whose true cause (schema unavailable) is
-    # never surfaced. check_invalid_json already reports a malformed
-    # config.json in its own right; this is a distinct, config-examples-
-    # scoped signal that its own comparisons could not run.
-    add_result config-examples "(repo)" skip \
-      "live .cenci/config.json schema is unavailable (missing or does not parse), so config examples cannot be validated against it" \
-      ""
-    return
-  fi
+  local any_fail=0 target rel line block path node_type allowed
 
   for target in "$ROOT"/docs/*.md "$FLOW_DIR"/docs/*.md "$FLOW_DIR/README.md" "$ROOT/README.md"; do
     [[ -f "$target" ]] || continue
@@ -1244,16 +1530,26 @@ check_config_examples() {
               "fix the malformed JSON in the config example block in $rel"
             any_fail=1
           else
-            keys="$(jq -r '[.. | objects | keys[]] | unique[]' <<< "$block" 2>/dev/null)"
-            while IFS= read -r k; do
-              [[ -n "$k" ]] || continue
-              if ! grep -qxF -- "$k" <<< "$schema_keys"; then
+            while IFS=$'\t' read -r path node_type; do
+              [[ -n "$path" ]] || continue
+              allowed="$(config_schema_types "$path" 2>/dev/null)" || allowed=""
+              if [[ -z "$allowed" ]]; then
                 add_result config-examples "$rel" fail \
-                  "config example in $rel uses field \`$k\` not present in the live .cenci/config.json schema" \
-                  "update the config example to match the current .cenci/config.json schema (field renamed/removed), or fix the JSON"
+                  "config example in $rel uses field path \`$path\` outside the canonical .cenci/config.json schema" \
+                  "move, rename, or remove \`$path\` so the example matches the canonical config nesting"
+                any_fail=1
+              elif ! grep -qwF -- "$node_type" <<< "${allowed//,/ }"; then
+                add_result config-examples "$rel" fail \
+                  "config example in $rel gives \`$path\` type $node_type; canonical type is $allowed" \
+                  "change \`$path\` in the example to the canonical $allowed type"
                 any_fail=1
               fi
-            done <<< "$keys"
+            done < <(jq -r '
+              paths as $p
+              | [($p | map(if type == "number" then "[]" else tostring end) | join(".") | gsub("\\.\\[\\]"; "[]")),
+                 (getpath($p) | type)]
+              | @tsv
+            ' <<< "$block")
           fi
         fi
         block=""
@@ -1263,7 +1559,7 @@ check_config_examples() {
     done < <(extract_json_blocks "$target")
   done
 
-  [[ "$any_fail" -eq 0 ]] && add_result config-examples "(repo)" pass "all config examples match the live .cenci/config.json schema" ""
+  [[ "$any_fail" -eq 0 ]] && add_result config-examples "(repo)" pass "all config examples match canonical path/type metadata" ""
 }
 
 # check_roadmap_status (id roadmap-status) — name-reference staleness only.
@@ -1330,17 +1626,24 @@ main() {
   ROOT="$(pwd -P)" || { echo "check.sh: failed to resolve current working directory." >&2; exit 2; }
   command -v jq >/dev/null 2>&1 || { echo "check.sh: jq is required but was not found on PATH." >&2; exit 2; }
 
-  resolve_flow_dir
-  resolve_project_dirs
-
   RESULTS_FILE="$(mktemp)" || { echo "check.sh: mktemp failed" >&2; exit 2; }
   trap 'rm -f "$RESULTS_FILE"' EXIT
 
+  resolve_project_dirs
+  resolve_flow_dir
+
   local readme="$FLOW_DIR/README.md"
-  if [[ -f "$readme" ]]; then
+  if is_relevant stale-generated && ! generated_docs_enabled; then
+    add_result stale-generated "$(relpath "$readme")" skip \
+      "maintenance.generatedDocs=false disables generated-section maintenance" ""
+  elif [[ -f "$readme" ]]; then
     local do_compare=0
     is_relevant stale-generated && do_compare=1
     process_markers "$readme" "$MODE_WRITE" "$do_compare"
+  elif is_relevant stale-generated; then
+    add_result stale-generated "$(relpath "$readme")" fail \
+      "flow README containing the required generated marker pairs is missing" \
+      "restore $(relpath "$readme") with all required cenci-maintain marker pairs"
   fi
 
   is_relevant front-matter && check_front_matter
@@ -1354,19 +1657,35 @@ main() {
   is_relevant shell-syntax && check_shell_syntax
   is_relevant capability-table && check_capability_table
   is_relevant adapter-drift && check_adapter_drift
-  is_relevant structural-tests && check_structural_tests
+  if [[ "$MODE_ADVISORY" -eq 1 ]]; then
+    add_result structural-tests "(repo)" skip "advisory mode skips executable structural tests" ""
+  else
+    is_relevant structural-tests && check_structural_tests
+  fi
   is_relevant worktree-ignored && check_worktree_ignored
-  check_gate_command
+  if [[ "$MODE_ADVISORY" -eq 1 ]]; then
+    add_result gate-command "(repo)" skip "advisory mode skips executable gate commands" ""
+  elif [[ "$PROJECT_PATHS_OK" -ne 1 ]]; then
+    add_result gate-command "(repo)" skip "unsafe configured project paths prevent gate execution" ""
+  else
+    check_gate_command
+  fi
   is_relevant claude-rules-imports && check_claude_rules_imports
   is_relevant legacy-lessons && check_legacy_lessons
-  check_github_labels
+  if [[ "$MODE_ADVISORY" -eq 1 ]]; then
+    add_result github-labels "(repo)" skip "advisory mode skips network-backed GitHub label checks" ""
+  else
+    check_github_labels
+  fi
   check_context_budget
   is_relevant command-flags   && check_command_flags
   is_relevant config-examples && check_config_examples
   is_relevant roadmap-status  && check_roadmap_status
 
   local mode
-  if [[ "$MODE_STRICT" -eq 1 ]]; then
+  if [[ "$MODE_ADVISORY" -eq 1 ]]; then
+    mode="advisory"
+  elif [[ "$MODE_STRICT" -eq 1 ]]; then
     mode="strict"
   elif [[ "$MODE_CHANGED" -eq 1 ]]; then
     mode="changed"
@@ -1374,10 +1693,13 @@ main() {
     mode="full"
   fi
 
-  mkdir -p "$ROOT/.cenci"
-  build_report "$mode" > "$ROOT/.cenci/maintain-report.json"
-
-  echo "summary: pass=${COUNT_PASS} warn=${COUNT_WARN} fail=${COUNT_FAIL} skip=${COUNT_SKIP} mode=${mode}"
+  if [[ "$MODE_ADVISORY" -eq 1 ]]; then
+    build_report "$mode" || { echo "check.sh: failed to render advisory report" >&2; exit 2; }
+  else
+    local destination="${REPORT_FILE:-$ROOT/.cenci/maintain-report.json}"
+    write_report_atomically "$destination" "$mode" || exit 2
+    echo "summary: pass=${COUNT_PASS} warn=${COUNT_WARN} fail=${COUNT_FAIL} skip=${COUNT_SKIP} mode=${mode}"
+  fi
 
   if [[ "$COUNT_FAIL" -gt 0 ]]; then
     exit 1

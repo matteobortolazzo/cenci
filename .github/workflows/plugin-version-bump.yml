@@ -132,10 +132,13 @@ jobs:
           # a top-level .version.
           for p in $PLUGIN_JSON_PATHS; do
             if jq -e 'has("KPlugin")' "$p" > /dev/null; then
+              # shellcheck disable=SC2016 # $v is a jq --arg placeholder, not a shell variable
               FILTER='.KPlugin.Version = $v'
             elif jq -e 'has("shell-version")' "$p" > /dev/null; then
+              # shellcheck disable=SC2016 # $v is a jq --arg placeholder, not a shell variable
               FILTER='."version-name" = $v'
             else
+              # shellcheck disable=SC2016 # $v is a jq --arg placeholder, not a shell variable
               FILTER='.version = $v'
             fi
             jq --arg v "$NEW_VERSION" "$FILTER" "$p" > tmp.json && mv tmp.json "$p"

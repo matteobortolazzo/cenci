@@ -1348,20 +1348,22 @@ is a supported optional field, not a legacy one.
 
 Maintenance is a core cenci workflow feature and is independent of
 [lazyboards](https://github.com/matteobortolazzo/lazyboards): automatic changed-file
-maintenance checks run during normal `/cenci:implement` runs and are enabled by
-default, with no `.lazyboards.yml` or `lazyboards` config required. A full, on-demand
-audit is always available via `/cenci:maintain`. Scheduled GitHub Actions maintenance
-runs are optional and are tracked as a follow-up ticket, not implemented here.
+maintenance checks run during normal `/cenci:implement` runs, with no `.lazyboards.yml`
+or `lazyboards` config required. A full, on-demand audit is always available via
+`/cenci:maintain`.
 
 Schema — every field below defaults as shown, so omitting `maintenance` entirely is
 equivalent to writing all four defaults explicitly:
-- `maintenance.enabled` — master switch for maintenance checks (default `true`)
-- `maintenance.checkDuringImplement` — whether `/cenci:implement` runs automatic
-  changed-file maintenance checks (default `true`)
+- `maintenance.enabled` — gates optional scheduled-maintenance and reminder UX only
+  (default `true`); it never disables core correctness checks
+- `maintenance.checkDuringImplement` — whether Phase 8 may repair findings
+  automatically (default `true`); when `false`, Phase 8 still runs its changed-file
+  correctness check but carries every non-pass result forward as report-only
 - `maintenance.remindAfterDays` — days between reminders to run a full
   `/cenci:maintain` audit (default `30`)
-- `maintenance.generatedDocs` — whether optional generated documentation sections are
-  kept up to date (default `true`)
+- `maintenance.generatedDocs` — whether marker-bounded generated documentation sections are checked and regenerated
+  (default `true`); when `false`, generated-section maintenance is skipped without
+  suppressing other checks
 
 ```json
 {
@@ -1374,10 +1376,11 @@ equivalent to writing all four defaults explicitly:
 }
 ```
 
-Automatic changed-file correctness checks run regardless of whether this block is
-present, or what values it holds — the defaults above are active with zero config. The
-`maintenance` block only controls reminders and optional generated sections; it is
-advisory/reserved this release and is not yet wired into Phase 8 implement behavior.
+Core correctness checks always run when the maintenance checker is applicable, regardless
+of whether this block is present or `maintenance.enabled` is false. The block controls
+optional scheduled/reminder UX, whether Phase 8 may repair versus report findings, and
+whether generated documentation sections participate. Omitting it keeps all optional UX
+and repair/generated-section behavior enabled by default.
 
 Only include servers in `mcpServers` that were presented as options (i.e., detected or always-available). Value is `true` if enabled, `false` if declined.
 
