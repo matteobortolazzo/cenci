@@ -304,6 +304,44 @@ func TestAudit_UsageErrors_Exit2(t *testing.T) {
 	}
 }
 
+// TestAudit_MalformedDindConfig_Exits1 mirrors the real-launch and dry-run
+// #632 hard-fail (sandbox_open_test.go's TestOpen_MalformedDindConfig_Exits1
+// and open_dryrun_test.go's TestOpenDryRun_MalformedDindConfig_Exits1) for
+// `cenci audit`: per Q2, audit hard-fails on malformed stored config exactly
+// like launch/dry-run, rather than degrading it to a warning finding.
+func TestAudit_MalformedDindConfig_Exits1(t *testing.T) {
+	repoRoot := malformedDindRepoEnv(t)
+	home := t.TempDir()
+
+	cmd := exec.Command(binaryPath, "audit", "--agent", "claude")
+	cmd.Env = auditEnv(home, t.TempDir())
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected malformed .cenci/config.json to exit 1 (hard fail, not a usage error), got %T %v\n%s", err, err, output)
+	}
+	if !strings.Contains(string(output), "config.json") {
+		t.Errorf("expected a path-bearing error naming config.json, got:\n%s", output)
+	}
+}
+
+// TestAuditNoDind_SucceedsDespiteMalformedConfig pins --no-dind as a
+// config-free escape hatch for `cenci audit` too (#632).
+func TestAuditNoDind_SucceedsDespiteMalformedConfig(t *testing.T) {
+	repoRoot := malformedDindRepoEnv(t)
+	home := t.TempDir()
+
+	cmd := exec.Command(binaryPath, "audit", "--agent", "claude", "--no-dind")
+	cmd.Env = auditEnv(home, t.TempDir())
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cenci audit --no-dind with corrupt config: %v\n%s", err, output)
+	}
+}
+
 // TestAudit_NeverStartsADaemon pins audit's read-only contract: no live
 // event socket or PID file exists under XDG_RUNTIME_DIR after the run —
 // audit must probe wiring read-only and never call daemon.EnsureRunning(),

@@ -136,7 +136,7 @@ companion) for every skill, including the internal ones not listed above.
 | `babysit` | — | project-core, shell-rules | tick.sh | — |
 | `ci-repair` | — | project-core, shell-rules, subagent-safety, testing | — | — |
 | `codex-runtime` | — | — | — | — |
-| `configure` | codex.md | babysit, codex-runtime, implement, project-core, shell-rules, testing, verify-ui | detect-project.sh | code-reviewer |
+| `configure` | codex.md | babysit, codex-runtime, implement, project-core, shell-rules, testing, verify-ui | detect-project.sh, merge-sandbox-config.sh | code-reviewer |
 | `design` | codex.md | attachments, codex-runtime, project-core, shell-rules, ticket-ownership | — | — |
 | `frontend-classification` | — | implement, refine | — | — |
 | `implement` | codex.md, phases/phase-1-plan.md, phases/phase-2-worktree.md, phases/phase-3-test-red.md, phases/phase-4-implement-green.md, phases/phase-5-refactor.md, phases/phase-6-7-review.md, phases/phase-8-docs.md, phases/phase-9-pr.md | address-review, attachments, babysit, codex-runtime, frontend-classification, project-core, review, shell-rules, subagent-safety, testing, ticket-ownership, verify-ui | run-artifact-dir.sh | code-reviewer, context-gatherer, implementer, lessons-collector, planner, security-reviewer, silent-failure-hunter |
