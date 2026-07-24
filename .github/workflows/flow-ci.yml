@@ -52,6 +52,8 @@ jobs:
         run: bash flow/hooks/scripts/check-sensitive-files.test.sh
       - name: Verify config-staleness hook
         run: bash flow/hooks/scripts/check-config-staleness.test.sh
+      - name: Verify maintenance-reminder hook
+        run: bash flow/hooks/scripts/maintenance-reminder.test.sh
       - name: Verify configure detect script
         run: bash flow/skills/configure/scripts/detect-project.test.sh
       - name: Verify maintain checker test suite
