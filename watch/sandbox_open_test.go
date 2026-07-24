@@ -151,6 +151,18 @@ func joinArgv(argv []string) string {
 //	                        startupFailureDetail vars above; unset/empty
 //	                        simulates a read failure (diagnose falls back to
 //	                        "unknown")
+//	FAKE_DOCKERD_MARKER  — #630's persistent dockerd-startup-failure marker
+//	                        text, read from /home/dev/.cenci-dockerd-startup-
+//	                        error via the same short-lived `run --entrypoint
+//	                        /bin/cat` home-volume read pattern; consumed by
+//	                        both the launcher's before-attach warning
+//	                        (warnDockerdStartupFailure) and `cenci diagnose`'s
+//	                        "Nested Docker:" section. Unset/empty simulates no
+//	                        recorded failure.
+//	FAKE_VOLUME_INSPECT_EXIT — `volume inspect <name>` exit code (default 0 =
+//	                        the volume exists); `cenci diagnose`'s dind-session
+//	                        probe (#630) treats non-zero as "not a dind
+//	                        session" (scope.DindVolumeName was never created).
 //
 // The open path drives the extra verbs: `rm` (exit 0), `run` (prints a
 // container id), container `inspect` (label vs mounts told apart by the
@@ -169,7 +181,10 @@ func writeScriptedRuntime(t *testing.T, dir, name, callLog string) {
 		"build) exit \"${FAKE_BUILD_EXIT:-0}\" ;;\n" +
 		"images) if [ -n \"${FAKE_IMAGES+x}\" ]; then printf '%s' \"${FAKE_IMAGES}\"; else for last do :; done; printf '%s\\n' \"${last}\"; fi; exit \"${FAKE_INSPECT_EXIT:-0}\" ;;\n" +
 		"ps) printf '%s' \"${FAKE_PS:-}\"; exit \"${FAKE_PS_EXIT:-0}\" ;;\n" +
-		"volume) if [ \"$2\" = ls ]; then printf '%s' \"${FAKE_VOLUMES:-}\"; exit \"${FAKE_VOLUME_LS_EXIT:-0}\"; fi ;;\n" +
+		"volume) case \"$2\" in\n" +
+		"  ls) printf '%s' \"${FAKE_VOLUMES:-}\"; exit \"${FAKE_VOLUME_LS_EXIT:-0}\" ;;\n" +
+		"  inspect) exit \"${FAKE_VOLUME_INSPECT_EXIT:-0}\" ;;\n" +
+		"  esac ;;\n" +
 		// The default value's "\}" backslash-escapes the inner brace so the
 		// shell's ${VAR:-word} parser can't mistake it for the expansion's
 		// own closing brace; the fallback still evaluates to the literal
@@ -183,6 +198,7 @@ func writeScriptedRuntime(t *testing.T, dir, name, callLog string) {
 		"    *'.cenci-agent-startup-error'*) printf '%s' \"${FAKE_STARTUP_ERROR:-}\"; exit \"${FAKE_STARTUP_ERROR_EXIT:-0}\" ;;\n" +
 		"    *'.cenci-boot.log'*) printf '%s' \"${FAKE_BOOT_LOG:-}\"; exit \"${FAKE_BOOT_LOG_EXIT:-0}\" ;;\n" +
 		"    *'.cenci-startup-failed'*) printf '%s' \"${FAKE_STARTUP_MARKER:-}\"; exit \"${FAKE_STARTUP_MARKER_EXIT:-0}\" ;;\n" +
+		"    *'.cenci-dockerd-startup-error'*) printf '%s' \"${FAKE_DOCKERD_MARKER:-}\"; exit \"${FAKE_DOCKERD_MARKER_EXIT:-0}\" ;;\n" +
 		"    *'marketplace.json'*) printf '%s' \"${FAKE_PLUGIN_MANIFEST:-}\"; exit \"${FAKE_PLUGIN_MANIFEST_EXIT:-0}\" ;;\n" +
 		"    esac\n" +
 		"    ;;\n" +
@@ -2014,6 +2030,139 @@ func TestOpenDind_SysboxNotRegistered_Exits1WithInstallPointer(t *testing.T) {
 	if lines := callLogLines(t, callLog); anyLineContains(lines, "run --name ") {
 		t.Errorf("expected no container to be created when dind preflight fails, got calls:\n%s", strings.Join(lines, "\n"))
 	}
+}
+
+// TestOpenDind_DockerdMarkerPresent_FreshCreate_WarnsBeforeAttachButStillAttaches
+// pins ticket #630's Q1 (warn, still attach): a persistent dockerd
+// startup-failure marker detected right before the first agent attach on a
+// freshly-created container must print a prominent, non-fatal Warning naming
+// CENCI-SANDBOX-DIND-001 and the captured diagnostic, but must NOT block the
+// attach — the agent session still launches (matches #586's non-blocking
+// dockerd-start mandate; the container and every other capability but nested
+// Docker still work).
+func TestOpenDind_DockerdMarkerPresent_FreshCreate_WarnsBeforeAttachButStillAttaches(t *testing.T) {
+	repoRoot, _ := dindRepoEnv(t, true)
+
+	fakeDir := t.TempDir()
+	callLog := writeDockerOnlyRuntime(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+	const marker = "2026-07-24T09:00:00Z dockerd exited with status 1: failed to start daemon: mkdir /var/lib/docker/overlay2: read-only file system"
+	env = append(env,
+		`FAKE_INFO_RUNTIMES={"sysbox-runc":{},"runc":{}}`,
+		"FAKE_DOCKERD_MARKER="+marker,
+	)
+
+	cmd := exec.Command(binaryPath, "open")
+	cmd.Env = env
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("open (dind, dockerd marker present): %v\n%s", err, output)
+	}
+
+	out := string(output)
+	if !strings.Contains(out, "Warning:") {
+		t.Errorf("expected a prominent Warning: for the dockerd startup-failure marker, got:\n%s", out)
+	}
+	if !strings.Contains(out, marker) {
+		t.Errorf("expected the marker's captured diagnostic surfaced verbatim, got:\n%s", out)
+	}
+	if !strings.Contains(out, "CENCI-SANDBOX-DIND-001") {
+		t.Errorf("expected the CENCI-SANDBOX-DIND-001 error code attached, got:\n%s", out)
+	}
+
+	// Non-fatal: the agent session still attached despite the warning.
+	attachLine(t, callLogLines(t, callLog))
+}
+
+// TestOpenDind_NoDockerdMarker_NoWarning is the sibling of the test above:
+// when no dockerd-startup-error marker was ever written, dind mode must
+// launch silently on this front (no false-positive warning).
+func TestOpenDind_NoDockerdMarker_NoWarning(t *testing.T) {
+	repoRoot, _ := dindRepoEnv(t, true)
+
+	fakeDir := t.TempDir()
+	callLog := writeDockerOnlyRuntime(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+	env = append(env, `FAKE_INFO_RUNTIMES={"sysbox-runc":{},"runc":{}}`)
+	// FAKE_DOCKERD_MARKER deliberately left unset.
+
+	cmd := exec.Command(binaryPath, "open")
+	cmd.Env = env
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("open (dind, no dockerd marker): %v\n%s", err, output)
+	}
+
+	if strings.Contains(string(output), "CENCI-SANDBOX-DIND-001") {
+		t.Errorf("did not expect the dind startup-failure warning when no marker was ever written, got:\n%s", output)
+	}
+	attachLine(t, callLogLines(t, callLog))
+}
+
+// TestOpen_NonDind_NeverProbesDockerdMarker asserts the dockerd-marker
+// before-attach check is strictly gated on ctx.DindOn: a non-dind launch
+// must never even attempt the short-lived-container home-volume read for
+// .cenci-dockerd-startup-error (that path doesn't exist for a non-dind
+// session's home volume in the first place).
+func TestOpen_NonDind_NeverProbesDockerdMarker(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("open ch (non-dind): %v\n%s", err, output)
+	}
+
+	if anyLineContains(callLogLines(t, callLog), ".cenci-dockerd-startup-error") {
+		t.Errorf("non-dind launch must never probe the dockerd-startup-error marker, got calls:\n%s", strings.Join(callLogLines(t, callLog), "\n"))
+	}
+}
+
+// TestOpenDind_DockerdMarkerPresent_AttachToRunning_WarnsBeforeAttach covers
+// the launcher's second warnDockerdStartupFailure call site (before the
+// "attach to an already-running container" runAgent, not just fresh
+// create): the marker must still surface non-fatally before this attach too.
+func TestOpenDind_DockerdMarkerPresent_AttachToRunning_WarnsBeforeAttach(t *testing.T) {
+	repoRoot, slug := dindRepoEnv(t, true)
+
+	fakeDir := t.TempDir()
+	callLog := writeDockerOnlyRuntime(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+	const marker = "2026-07-24T09:05:00Z dockerd exited with status 137: killed"
+	env = append(env,
+		`FAKE_INFO_RUNTIMES={"sysbox-runc":{},"runc":{}}`,
+		"FAKE_DOCKERD_MARKER="+marker,
+		"FAKE_PS=claude-cenci-"+slug+"\n",
+		"FAKE_INSPECT_LABEL=detached",
+		"FAKE_INSPECT_MOUNTS=/workspace\n/home/dev\n/run/user/1000/cenci\n",
+		"FAKE_REUSE_POSTURE=on|sysbox-runc|1\nworkspace-vol::/workspace\ndind-vol::/var/lib/docker\n",
+	)
+
+	cmd := exec.Command(binaryPath, "open")
+	cmd.Env = env
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("open (dind, attach to running, dockerd marker present): %v\n%s", err, output)
+	}
+
+	out := string(output)
+	if !strings.Contains(out, "CENCI-SANDBOX-DIND-001") {
+		t.Errorf("expected the CENCI-SANDBOX-DIND-001 warning before attaching to the already-running container, got:\n%s", out)
+	}
+	if !strings.Contains(out, marker) {
+		t.Errorf("expected the marker's captured diagnostic surfaced verbatim, got:\n%s", out)
+	}
+	attachLine(t, callLogLines(t, callLog))
 }
 
 func TestOpenDindAndNoDind_Together_Exits2(t *testing.T) {

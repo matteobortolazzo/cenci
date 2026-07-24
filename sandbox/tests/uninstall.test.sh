@@ -734,4 +734,75 @@ if ! grep -qx "daemon stop" "${LAYOUT_CALL_LOG}"; then
 fi
 [[ ! -e "${LAYOUT_HOME}/.config/cenci/config.json" ]]
 
-echo "passed: uninstall MODE removes plugins/marketplace registration, PATH links, daemon + state, and config behind a single confirmation gate; lazyboards stays opt-in; rc files are never edited; subprocess env stays scrubbed; machine-wide sandbox container/image/volume cleanup (#458) runs before plugin-cache removal, shows counts/names in the confirmation list, force-removes running containers, matches podman's localhost/ prefix, is a clean no-op without a container runtime, and warns-and-skips (without aborting) when one enumeration category fails"
+# --- case 19: per-agent *-cenci-dind-* volumes are inventoried and removed,
+#     with dind look-alikes excluded (#630) --------------------------------
+echo "case: per-agent *-cenci-dind-* volumes are inventoried and removed alongside home/agent-CLI volumes, with dind look-alikes excluded"
+prepare_full_layout sandbox-dind-volumes
+containers_fixture="${WORK}/sandbox-dind-volumes/containers"
+images_fixture="${WORK}/sandbox-dind-volumes/images"
+volumes_fixture="${WORK}/sandbox-dind-volumes/volumes"
+write_fixture "${containers_fixture}"
+write_fixture "${images_fixture}"
+write_fixture "${volumes_fixture}" \
+    "claude-cenci-dind-repo-a" "codex-cenci-dind-repo-b" "opencode-cenci-dind-repo-c" \
+    "claude-cenci-dindrepo-lookalike" "notclaude-cenci-dind-repo-x" "random-dind-volume"
+make_container_runtime "${LAYOUT_BIN}" docker "${containers_fixture}" "${images_fixture}" "${volumes_fixture}"
+run_uninstall -- --yes
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+
+for vol in claude-cenci-dind-repo-a codex-cenci-dind-repo-b opencode-cenci-dind-repo-c; do
+    assert_contains "${LAYOUT_CALL_LOG}" "docker volume rm ${vol}"
+    assert_contains "${UNINSTALL_OUTPUT}" "${vol}"
+done
+for lookalike in claude-cenci-dindrepo-lookalike notclaude-cenci-dind-repo-x random-dind-volume; do
+    assert_not_contains "${LAYOUT_CALL_LOG}" "docker volume rm ${lookalike}"
+    assert_not_contains "${UNINSTALL_OUTPUT}" "${lookalike}"
+done
+
+# --- case 20: both docker and podman installed — each runtime's own
+#     cenci-owned containers/images/volumes (including dind volumes) are
+#     inventoried and removed independently, tagged by runtime (#630) ------
+echo "case: with both docker and podman installed, sandbox cleanup inventories and removes each runtime's own cenci-owned containers/images/volumes (including *-cenci-dind-* volumes) independently, without cross-runtime contamination, and shows every removed name in the confirmation output"
+prepare_full_layout sandbox-multi-runtime
+docker_containers="${WORK}/sandbox-multi-runtime/docker-containers"
+docker_images="${WORK}/sandbox-multi-runtime/docker-images"
+docker_volumes="${WORK}/sandbox-multi-runtime/docker-volumes"
+podman_containers="${WORK}/sandbox-multi-runtime/podman-containers"
+podman_images="${WORK}/sandbox-multi-runtime/podman-images"
+podman_volumes="${WORK}/sandbox-multi-runtime/podman-volumes"
+write_fixture "${docker_containers}" "claude-cenci-docker-repo"
+write_fixture "${docker_images}" "cenci-sandbox:latest"
+write_fixture "${docker_volumes}" "claude-cenci-home-docker-repo" "claude-cenci-dind-docker-repo"
+write_fixture "${podman_containers}" "codex-cenci-podman-repo"
+write_fixture "${podman_images}" "localhost/cenci-sandbox:latest"
+write_fixture "${podman_volumes}" "codex-cenci-home-podman-repo" "codex-cenci-dind-podman-repo"
+make_container_runtime "${LAYOUT_BIN}" docker "${docker_containers}" "${docker_images}" "${docker_volumes}"
+make_container_runtime "${LAYOUT_BIN}" podman "${podman_containers}" "${podman_images}" "${podman_volumes}"
+run_uninstall -- --yes
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+
+assert_contains "${LAYOUT_CALL_LOG}" "docker rm -f claude-cenci-docker-repo"
+assert_contains "${LAYOUT_CALL_LOG}" "docker rmi cenci-sandbox:latest"
+assert_contains "${LAYOUT_CALL_LOG}" "docker volume rm claude-cenci-home-docker-repo"
+assert_contains "${LAYOUT_CALL_LOG}" "docker volume rm claude-cenci-dind-docker-repo"
+
+assert_contains "${LAYOUT_CALL_LOG}" "podman rm -f codex-cenci-podman-repo"
+assert_contains "${LAYOUT_CALL_LOG}" "podman rmi localhost/cenci-sandbox:latest"
+assert_contains "${LAYOUT_CALL_LOG}" "podman volume rm codex-cenci-home-podman-repo"
+assert_contains "${LAYOUT_CALL_LOG}" "podman volume rm codex-cenci-dind-podman-repo"
+
+# Runtime tagging must not cross-contaminate: docker's targets are never
+# removed via podman, and vice versa.
+assert_not_contains "${LAYOUT_CALL_LOG}" "podman rm -f claude-cenci-docker-repo"
+assert_not_contains "${LAYOUT_CALL_LOG}" "docker rm -f codex-cenci-podman-repo"
+assert_not_contains "${LAYOUT_CALL_LOG}" "podman volume rm claude-cenci-dind-docker-repo"
+assert_not_contains "${LAYOUT_CALL_LOG}" "docker volume rm codex-cenci-dind-podman-repo"
+
+# shown==removed parity across both runtimes: every removed name is also
+# shown in the confirmation-list output.
+for name in claude-cenci-docker-repo cenci-sandbox:latest claude-cenci-home-docker-repo claude-cenci-dind-docker-repo \
+    codex-cenci-podman-repo codex-cenci-home-podman-repo codex-cenci-dind-podman-repo; do
+    assert_contains "${UNINSTALL_OUTPUT}" "${name}"
+done
+
+echo "passed: uninstall MODE removes plugins/marketplace registration, PATH links, daemon + state, and config behind a single confirmation gate; lazyboards stays opt-in; rc files are never edited; subprocess env stays scrubbed; machine-wide sandbox container/image/volume cleanup (#458) runs before plugin-cache removal, shows counts/names in the confirmation list, force-removes running containers, matches podman's localhost/ prefix, is a clean no-op without a container runtime, warns-and-skips (without aborting) when one enumeration category fails, inventories/removes per-agent *-cenci-dind-* volumes with look-alike exclusion, and inventories/removes both Docker's and Podman's cenci-owned resources independently when both runtimes are installed (#630)"

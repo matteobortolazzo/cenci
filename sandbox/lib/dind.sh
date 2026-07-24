@@ -17,19 +17,33 @@
 # PID; the subshell that started dockerd has no such problem). `--init` is
 # already passed by the launcher, so the process tree is reaped either way.
 #
-# If dockerd exits non-zero, the subshell writes a timestamped
-# .cenci-dockerd-startup-error marker under /home/dev (mirrors the existing
-# .cenci-agent-startup-error convention, #572: UTC ISO-8601 prefix via
-# `date -u +%Y-%m-%dT%H:%M:%SZ`, one line, real diagnostic content — here the
-# tail of dockerd's own captured stderr) so a genuinely broken daemon (e.g.
-# corrupted /var/lib/docker) surfaces its real cause on first `docker` touch
-# instead of a generic connection error. A clean exit (or one still running
-# when reaped) must never leave a marker behind.
+# Shutdown is classified with an explicit sentinel, not exit-code
+# guesswork (#630): the launcher's dind-only PID-1 keepalive
+# (watch/internal/sandbox/launcher/launch.go) traps TERM/INT and touches
+# .cenci-dockerd-shutdown before dockerd is force-killed by container
+# teardown. If dockerd exits non-zero AND that sentinel is NOT present, the
+# subshell writes a timestamped .cenci-dockerd-startup-error marker under
+# /home/dev (mirrors the existing .cenci-agent-startup-error convention,
+# #572: UTC ISO-8601 prefix via `date -u +%Y-%m-%dT%H:%M:%SZ`, one line, real
+# diagnostic content — here the tail of dockerd's own captured stderr) so a
+# genuinely broken daemon (e.g. corrupted /var/lib/docker) surfaces its real
+# cause on first `docker` touch instead of a generic connection error. A
+# clean exit (rc==0), one still running when reaped, or one whose exit is
+# superseded by the sentinel must never leave a marker behind. This replaces
+# the previous exit-code allow-list (0|129|130|131|137|143), which could not
+# distinguish an intentional `docker stop` from a genuine SIGKILL/OOM — the
+# exact guesswork the ticket forbids relying on.
+#
+# start_dind() clears (rm -f) any stale .cenci-dockerd-shutdown sentinel and
+# any prior .cenci-dockerd-startup-error marker at entry — supersede-only
+# clearing, mirroring entrypoint.sh's own .cenci-agent-startup-error
+# supersede-clear convention, so a leftover sentinel/marker from a previous
+# container lifetime never pollutes this run's own classification.
 #
 # start_dind() runs in entrypoint.sh's ROOT phase, before the `exec sudo -u
 # dev` re-exec that sets HOME=/home/dev — root's own $HOME is /root, NOT
-# /home/dev. So the marker/log path is hardcoded to /home/dev, exactly like
-# every other root-phase marker write in entrypoint.sh (e.g. the
+# /home/dev. So the marker/log/sentinel paths are hardcoded to /home/dev,
+# exactly like every other root-phase marker write in entrypoint.sh (e.g. the
 # .cenci-startup-failed/.cenci-boot.log/.cenci-agent-startup-error paths),
 # instead of reading $HOME — using $HOME here would silently land the marker
 # in the ephemeral container root filesystem instead of the persisted
@@ -38,11 +52,6 @@
 # (same convention as agent_cli_root()'s CENCI_AGENT_CLI_ROOT in
 # lib/agent-cli.sh) so dind.test.sh can redirect it into a scratch dir
 # without touching a real /home/dev — production never sets it.
-#
-# A dockerd exit code that matches a common termination signal (SIGHUP=129,
-# SIGINT=130, SIGQUIT=131, SIGKILL=137, SIGTERM=143) means `docker stop`/a
-# normal container shutdown killed it — not a crash — so no marker is written
-# for those; every other non-zero rc is treated as a genuine failure.
 
 start_dind() {
     # flush_boot_log (entrypoint.sh) must run before exit here — without
@@ -58,21 +67,23 @@ start_dind() {
     local home="${CENCI_DIND_HOME_ROOT:-/home/dev}"
     local log="${home}/.cenci-dockerd.log"
     local marker="${home}/.cenci-dockerd-startup-error"
+    local sentinel="${home}/.cenci-dockerd-shutdown"
+
+    # Supersede-only clearing: a stale sentinel/marker from a previous
+    # container lifetime must never leak forward into this run's
+    # classification.
+    rm -f "${sentinel}" "${marker}"
 
     (
         dockerd >"${log}" 2>&1
         rc=$?
-        case ${rc} in
-        # rc=137 (SIGKILL) can't be distinguished between an intentional
-        # `docker stop` escalation and a genuine OOM-kill — accepted
-        # tradeoff, not a bug.
-        0 | 129 | 130 | 131 | 137 | 143) ;; # clean exit or normal termination signal — no marker
-        *)
+        if [[ ${rc} -eq 0 || -e "${sentinel}" ]]; then
+            : # clean exit, or an intentional shutdown already superseded the exit — no marker
+        else
             tail_diag="$(tail -c 2000 "${log}" 2>/dev/null | tr '\n' ' ')"
             printf '%s dockerd exited with status %s: %s\n' \
                 "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${rc}" "${tail_diag}" > "${marker}" \
                 || echo "dind: failed to write dockerd startup-error marker at ${marker}" >&2
-            ;;
-        esac
+        fi
     ) &
 }

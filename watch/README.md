@@ -737,6 +737,8 @@ cenci open --agent opencode --name mybox
 cenci open ch -- --resume       # forward flags after -- straight to the agent CLI
 cenci open ch --dry-run -- --resume
                                  # print the exact launch commands (and posture) without creating anything
+cenci open --dind                # force-enable nested Docker (Sysbox-isolated), overriding a repo's sandbox.dind config
+cenci open --no-dind             # force-disable nested Docker, overriding a repo's sandbox.dind config
 ```
 
 `open`'s one-token shortcuts (recognized only as the first argument):

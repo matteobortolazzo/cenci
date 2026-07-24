@@ -23,12 +23,20 @@ make_common_tools() {
     # instead makes `docker info --format ...` itself fail (exit 1, no
     # stdout) — simulating a genuine `docker info` failure (daemon down,
     # permission denied, misconfigured context) distinct from a Docker that's
-    # up but genuinely has no sysbox-runc runtime registered.
+    # up but genuinely has no sysbox-runc runtime registered. DOCKER_INFO_MALFORMED
+    # (optional, #630), when set, instead prints unparsable non-JSON garbage
+    # (exit 0) — a third distinct failure mode doctor_sysbox's 4-state parsing
+    # must tell apart from both a query failure (DOCKER_INFO_FAIL) and a
+    # genuinely absent sysbox-runc registration.
     cat > "${bin}/docker" <<'EOF'
 #!/bin/sh
 if [ "${1:-}" = image ] && [ "${2:-}" = inspect ]; then exit 1; fi
 if [ "${1:-}" = info ] && [ "${2:-}" = --format ]; then
     if [ -n "${DOCKER_INFO_FAIL:-}" ]; then exit 1; fi
+    if [ -n "${DOCKER_INFO_MALFORMED:-}" ]; then
+        printf '%s\n' 'not-json-at-all{{{unterminated'
+        exit 0
+    fi
     runtimes=${DOCKER_INFO_RUNTIMES:-}
     if [ -z "$runtimes" ]; then
         runtimes='{"runc":{"path":"runc"}}'
@@ -585,6 +593,69 @@ EOF
     run_doctor_case "${name}" "${clients}"
 }
 
+# run_doctor_case_with_podman_preferred_and_docker_runtimes <name> <clients>
+# <runtimes_json> — like run_doctor_case_with_podman, but ALSO scripts
+# DOCKER_INFO_RUNTIMES for the run (make_common_tools already stubs a docker
+# mock unconditionally). This is the dual-runtime host #630 fixes:
+# container_runtime() still resolves "podman" first (have podman is checked
+# before docker), but doctor_sysbox must now probe Docker's sysbox
+# registration independently whenever `have docker`, regardless of which
+# runtime is preferred for ordinary launches.
+run_doctor_case_with_podman_preferred_and_docker_runtimes() {
+    local name="$1" clients="$2" runtimes_json="$3"
+    local bin="${WORK}/${name}/bin"
+    mkdir -p "${bin}"
+    cat > "${bin}/podman" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+    chmod +x "${bin}/podman"
+    run_doctor_case "${name}" "${clients}" "DOCKER_INFO_RUNTIMES=${runtimes_json}"
+}
+
+# make_sysbox_runc_binary <path> <version-line> [exit-code=0] — writes an
+# executable at an arbitrary absolute path (not necessarily on PATH) that
+# answers `<path> --version` with <version-line>, simulating the real
+# sysbox-runc binary doctor_sysbox resolves via the "path" field of the
+# `docker info --format '{{json .Runtimes}}'` sysbox-runc entry (#630's Q2).
+make_sysbox_runc_binary() {
+    local path="$1" version_line="$2" exit_code="${3:-0}"
+    mkdir -p "$(dirname "${path}")"
+    cat > "${path}" <<EOF
+#!/bin/sh
+if [ "\${1:-}" = --version ]; then
+    printf '%s\n' "${version_line}"
+    exit ${exit_code}
+fi
+exit 0
+EOF
+    chmod +x "${path}"
+}
+
+# run_doctor_case_with_sysbox_path_fallback <name> <clients> <runtimes_json>
+# <version-line> — like run_doctor_case_with_docker_runtimes, but pre-creates
+# a `sysbox-runc` binary directly on the case's own PATH (its bin dir)
+# BEFORE run_case's own `mkdir -p` (idempotent, same pre-creation order as
+# run_doctor_case_with_daemon_status above) so it's in place when doctor_sysbox
+# falls back to `sysbox-runc --version` on PATH — exercised when the
+# runtimes_json's sysbox-runc entry has no usable "path" field (#630's Q2
+# fallback chain: JSON path -> PATH -> "unknown").
+run_doctor_case_with_sysbox_path_fallback() {
+    local name="$1" clients="$2" runtimes_json="$3" version_line="$4"
+    local bin="${WORK}/${name}/bin"
+    mkdir -p "${bin}"
+    cat > "${bin}/sysbox-runc" <<EOF
+#!/bin/sh
+if [ "\${1:-}" = --version ]; then
+    printf '%s\n' "${version_line}"
+    exit 0
+fi
+exit 0
+EOF
+    chmod +x "${bin}/sysbox-runc"
+    run_doctor_case_with_docker_runtimes "${name}" "${clients}" "${runtimes_json}"
+}
+
 # run_case_opencode <name> <clients> <opencode-version|absent> [build_flag]
 # [extra args...] — like run_case, but additionally provisions a mocked
 # `opencode` executable (unless <opencode-version> is the literal string
@@ -912,10 +983,28 @@ run_doctor_case_with_daemon_status doctor-daemon-down claude 1
 [[ "${DOCTOR_EXIT}" -eq 0 ]]
 assert_contains "${DOCTOR_OUTPUT}" "cenci daemon: not running"
 
-echo "case: doctor reports sysbox-runc registered when present under Docker (#587, mirrors #585's SysboxRegistered presence check)"
-run_doctor_case_with_docker_runtimes doctor-sysbox-present claude '{"runc":{"path":"runc"},"sysbox-runc":{"path":"/usr/bin/sysbox-runc"}}'
+echo "case: doctor reports sysbox-runc registered and its resolved version when present under Docker, resolving the runtime path from docker info's Runtimes JSON (#587 presence + #630 version reporting, Q2)"
+sysbox_present_bin="${WORK}/sysbox-binaries/doctor-sysbox-present/sysbox-runc"
+make_sysbox_runc_binary "${sysbox_present_bin}" "sysbox-runc version 0.6.4"
+run_doctor_case_with_docker_runtimes doctor-sysbox-present claude \
+    "{\"runc\":{\"path\":\"runc\"},\"sysbox-runc\":{\"path\":\"${sysbox_present_bin}\"}}"
 [[ "${DOCTOR_EXIT}" -eq 0 ]]
 assert_contains "${DOCTOR_OUTPUT}" "sysbox-runc registered"
+assert_contains "${DOCTOR_OUTPUT}" "0.6.4"
+
+echo "case: doctor reports the sysbox-runc version as unknown when it's registered but both the JSON path and the PATH fallback fail to resolve a version (#630's Q2 fallback chain: JSON path -> PATH -> unknown)"
+run_doctor_case_with_docker_runtimes doctor-sysbox-present-version-unknown claude \
+    '{"runc":{"path":"runc"},"sysbox-runc":{"path":"/nonexistent/sysbox-runc-binary-630"}}'
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "sysbox-runc registered"
+assert_contains "${DOCTOR_OUTPUT}" "unknown"
+
+echo "case: doctor falls back to a bare 'sysbox-runc --version' on PATH when the JSON path field is missing, and reports the resolved version (#630's Q2 fallback chain)"
+run_doctor_case_with_sysbox_path_fallback doctor-sysbox-path-fallback claude \
+    '{"runc":{"path":"runc"},"sysbox-runc":{}}' "sysbox-runc version 0.5.2"
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "sysbox-runc registered"
+assert_contains "${DOCTOR_OUTPUT}" "0.5.2"
 
 echo "case: doctor self-skips sysbox with a neutral line (no failure marker) when Docker has no sysbox-runc runtime, and never fails doctor"
 run_doctor_case_with_docker_runtimes doctor-sysbox-absent claude '{"runc":{"path":"runc"}}'
@@ -929,10 +1018,18 @@ run_doctor_case_with_docker_info_failure doctor-sysbox-docker-info-fail claude
 assert_contains "${DOCTOR_OUTPUT}" "could not query docker info — sysbox-runc status unknown"
 assert_not_contains "${DOCTOR_OUTPUT}" "sysbox-runc not registered"
 
-echo "case: doctor skips the sysbox check entirely when the resolved container runtime is Podman, not Docker (#585's sysbox preflight is Docker-only)"
-run_doctor_case_with_podman doctor-sysbox-podman claude
+echo "case: doctor distinguishes malformed/unparsable docker info Runtimes JSON from both a query failure and a genuine absence (#630's 4-state parsing: query-fail / malformed / absent / present)"
+run_doctor_case doctor-sysbox-malformed claude "DOCKER_INFO_MALFORMED=1"
 [[ "${DOCTOR_EXIT}" -eq 0 ]]
-assert_not_contains "${DOCTOR_OUTPUT}" "sysbox"
+assert_contains "${DOCTOR_OUTPUT}" "malformed"
+assert_not_contains "${DOCTOR_OUTPUT}" "sysbox-runc not registered"
+assert_not_contains "${DOCTOR_OUTPUT}" "could not query docker info — sysbox-runc status unknown"
+
+echo "case: doctor probes Docker's sysbox registration even when Podman is the preferred runtime for ordinary launches — the exact dual-runtime bug #630 fixes: sysbox dind always requires Docker as the outer runtime regardless of container_runtime()'s podman-first launch preference"
+run_doctor_case_with_podman_preferred_and_docker_runtimes doctor-sysbox-podman-preferred-docker-present claude \
+    '{"runc":{"path":"runc"},"sysbox-runc":{"path":"runc"}}'
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "sysbox-runc registered"
 
 echo "case: doctor fails when no supported client is available"
 run_doctor_case doctor-none none
@@ -1329,5 +1426,27 @@ set -e
 [[ "${onfile_no_probe_exit}" -eq 0 ]]
 assert_not_contains "${curl_log}" "releases/latest"
 assert_contains "${calls}" "claude plugin install cenci@cenci"
+
+# --- doc regression assertions (#630) ----------------------------------------
+# Direct content checks against the checked-out repo's own doc files (no
+# install.sh run involved) — the natural home per the plan's Assumptions,
+# since no dedicated docs-guidance.test.sh exists yet and these are small,
+# focused regression assertions alongside the installer's own doc-content
+# conventions.
+
+echo "case: the retired --docker (DooD host-socket) guidance is no longer present in the sandbox boundary diagram"
+assert_not_contains "${ROOT}/docs/assets/cenci-sandbox-boundary.svg" "--docker mounts the host socket"
+
+echo "case: watch/README.md's canonical CLI reference includes direct cenci open --dind and --no-dind examples"
+assert_contains "${ROOT}/watch/README.md" "cenci open --dind"
+assert_contains "${ROOT}/watch/README.md" "cenci open --no-dind"
+
+echo "case: SECURITY.md describes DinD volumes as potentially sensitive application/build state"
+assert_contains "${ROOT}/SECURITY.md" "potentially sensitive application/build state"
+
+echo "case: SECURITY.md explains DinD retains an inner daemon and shared-kernel attack surface rather than implying VM-grade isolation"
+assert_contains "${ROOT}/SECURITY.md" "inner daemon"
+assert_contains "${ROOT}/SECURITY.md" "shared-kernel attack surface"
+assert_not_contains "${ROOT}/SECURITY.md" "VM-grade isolation"
 
 echo "passed: client detection, installation, launchers, and summaries"

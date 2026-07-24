@@ -279,3 +279,103 @@ func TestParseReusePosture_ValidShapeStillParses(t *testing.T) {
 		t.Errorf("parseReusePosture mounts = %+v, want %+v", p.Mounts, want)
 	}
 }
+
+// dindShutdownSentinelPath is the shutdown-sentinel file the dind-only
+// keepalive TERM/INT trap must write (#630's Assumptions: hardcoded under
+// /home/dev, mirroring the marker's own hardcoded root-phase path — never
+// $HOME, since this runs as PID 1 inside the container where dev's home is
+// always /home/dev).
+const dindShutdownSentinelPath = "/home/dev/.cenci-dockerd-shutdown"
+
+// buildRunArgvTrailingCommand builds a minimal argv via buildRunArgv and
+// returns its trailing PID-1 command string (the argument right after
+// "-c"), failing the test if the argv doesn't end in the expected
+// "<image> -c <command>" shape.
+func buildRunArgvTrailingCommand(t *testing.T, dindOn bool) string {
+	t.Helper()
+	home := t.TempDir()
+	e := &Engine{Runtime: "docker", Stderr: &bytes.Buffer{}}
+	scope := Scope{
+		ContainerName:     "claude-cenci-repo",
+		VolumeName:        "claude-cenci-repo-home",
+		DindVolumeName:    "claude-cenci-dind-repo",
+		Hostname:          "cenci-repo",
+		Image:             "claude-cenci-repo:latest",
+		WorkspaceBindHost: t.TempDir(),
+		Workdir:           "/workspace",
+		WorkspaceScope:    "repo",
+	}
+
+	argv, err := e.buildRunArgv("claude", "/usr/local/bin/cenci", "/run/user/1000/cenci", true, scope, Options{Agent: "claude"}, home, dindOn)
+	if err != nil {
+		t.Fatalf("buildRunArgv(dindOn=%v): %v", dindOn, err)
+	}
+	if len(argv) < 3 || argv[len(argv)-2] != "-c" {
+		t.Fatalf("buildRunArgv(dindOn=%v) argv does not end in \"-c\" <command>; got: %v", dindOn, argv)
+	}
+	return argv[len(argv)-1]
+}
+
+// TestBuildRunArgv_NonDind_KeepsExecSleepInfinityVerbatim pins the
+// non-regression half of #630's keepalive change: a non-dind launch's
+// trailing PID-1 command must stay byte-identical to today's
+// "touch /tmp/cenci-ready && exec sleep infinity" — `exec` replaces bash
+// entirely, which is fine (and cheaper) when there's no dind-only shutdown
+// signal to trap.
+func TestBuildRunArgv_NonDind_KeepsExecSleepInfinityVerbatim(t *testing.T) {
+	got := buildRunArgvTrailingCommand(t, false)
+	want := "touch /tmp/cenci-ready && exec sleep infinity"
+	if got != want {
+		t.Errorf("non-dind trailing command = %q, want %q verbatim", got, want)
+	}
+}
+
+// TestBuildRunArgv_Dind_KeepaliveTrapsTermAndWritesSentinel pins #630's
+// dind-only keepalive: it must still touch the readiness marker, but must
+// NOT `exec sleep infinity` (exec would replace bash and make it unable to
+// trap/handle TERM), must install a trap on TERM and INT that touches the
+// shutdown-sentinel file dind.sh's sentinel-based classification reads
+// (dindShutdownSentinelPath), and must still block indefinitely via some
+// `sleep infinity` backgrounded and `wait`ed on (the standard trap-then-wait
+// container keepalive shape), so a normal container lifetime doesn't exit
+// early absent a signal.
+func TestBuildRunArgv_Dind_KeepaliveTrapsTermAndWritesSentinel(t *testing.T) {
+	got := buildRunArgvTrailingCommand(t, true)
+
+	if !strings.Contains(got, "touch /tmp/cenci-ready") {
+		t.Errorf("dind trailing command missing the readiness marker touch, got: %q", got)
+	}
+	if strings.Contains(got, "exec sleep infinity") {
+		t.Errorf("dind trailing command must not `exec sleep infinity` (exec would replace bash, so it could never trap TERM to write the shutdown sentinel), got: %q", got)
+	}
+	if !strings.Contains(got, "trap") {
+		t.Errorf("dind trailing command missing a `trap` installation, got: %q", got)
+	}
+	if !strings.Contains(got, "TERM") {
+		t.Errorf("dind trailing command's trap must cover TERM (docker/podman stop's signal), got: %q", got)
+	}
+	if !strings.Contains(got, dindShutdownSentinelPath) {
+		t.Errorf("dind trailing command's trap must write the shutdown sentinel at %q, got: %q", dindShutdownSentinelPath, got)
+	}
+	if !strings.Contains(got, "sleep infinity") {
+		t.Errorf("dind trailing command must still block indefinitely (sleep infinity) absent a signal, got: %q", got)
+	}
+	if !strings.Contains(got, "wait") {
+		t.Errorf("dind trailing command must `wait` on the backgrounded sleep so the trap fires while the shell blocks, got: %q", got)
+	}
+}
+
+// TestBuildRunArgv_Dind_DoesNotLeakIntoNonDindLaunch is a sibling-instance
+// regression: dind's keepalive changes must be strictly gated on dindOn —
+// asserting both trailing commands in the same test guards against a future
+// edit accidentally making the dind trap unconditional.
+func TestBuildRunArgv_Dind_DoesNotLeakIntoNonDindLaunch(t *testing.T) {
+	nonDind := buildRunArgvTrailingCommand(t, false)
+	dind := buildRunArgvTrailingCommand(t, true)
+	if nonDind == dind {
+		t.Fatalf("non-dind and dind trailing commands must differ; both were: %q", nonDind)
+	}
+	if strings.Contains(nonDind, "trap") || strings.Contains(nonDind, dindShutdownSentinelPath) {
+		t.Errorf("non-dind trailing command must not carry the dind-only TERM trap/sentinel, got: %q", nonDind)
+	}
+}

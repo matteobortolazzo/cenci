@@ -52,6 +52,22 @@ import (
 //	                     stay byte-parallel with sandbox_open_test.go's
 //	                     writeScriptedRuntime FAKE_REUSE_POSTURE var (#493
 //	                     keep-in-sync note).
+//	FAKE_INSPECT_STATE  → `inspect --format ...` stdout for the
+//	                     "{{.State.Status}} {{.State.ExitCode}}" format
+//	                     containerStartupState uses (Diagnose's
+//	                     container-status probe, #630); defaults to
+//	                     "running 0", mirroring sandbox_open_test.go's
+//	                     writeScriptedRuntime default.
+//	FAKE_VOLUME_INSPECT_EXIT → `volume inspect <name>` exit code (default 0 =
+//	                     the volume exists); Diagnose's dind-session probe
+//	                     (#630) treats a non-zero exit as "not a dind
+//	                     session" (scope.DindVolumeName was never created).
+//	FAKE_DOCKERD_MARKER → content returned by the short-lived
+//	                     `run --entrypoint /bin/cat ... .cenci-dockerd-
+//	                     startup-error` home-volume read (#630's dind
+//	                     failure marker); unset/empty simulates "no failure
+//	                     recorded". FAKE_DOCKERD_MARKER_EXIT (default 0) is
+//	                     that same read's exit code.
 //
 // Plain /bin/sh (not env) so it resolves under a minimal overridden PATH.
 func writeFakeRuntime(t *testing.T, dir, name, callLog string) {
@@ -80,11 +96,26 @@ images)
   fi
   ;;
 ps) printf '%s' "${FAKE_PS:-}" ;;
-volume) [ "$2" = ls ] && printf '%s' "${FAKE_VOLUMES:-}" ;;
+volume)
+  case "$2" in
+  ls) printf '%s' "${FAKE_VOLUMES:-}" ;;
+  inspect) exit "${FAKE_VOLUME_INSPECT_EXIT:-0}" ;;
+  esac
+  ;;
 info) printf '%s' "${FAKE_INFO_RUNTIMES:-{\}}" ;;
+run)
+  case "$*" in
+  *'/bin/cat'*)
+    case "$*" in
+    *'.cenci-dockerd-startup-error'*) printf '%s' "${FAKE_DOCKERD_MARKER:-}"; exit "${FAKE_DOCKERD_MARKER_EXIT:-0}" ;;
+    esac
+    ;;
+  esac
+  ;;
 inspect)
   case "$*" in
   *'cenci-sand.dind'*) printf '%b' "${FAKE_REUSE_POSTURE:-|runc|0\nworkspace-vol::/workspace\n}" ;;
+  *State.Status*) printf '%s\n' "${FAKE_INSPECT_STATE:-running 0}" ;;
   *'.RW'*) printf '%b' "${FAKE_INSPECT_MOUNTS:-}" ;;
   esac
   ;;

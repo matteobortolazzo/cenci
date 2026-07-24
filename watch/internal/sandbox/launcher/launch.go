@@ -301,6 +301,7 @@ func (e *Engine) Launch(opts Options) error {
 				return err
 			}
 		}
+		e.warnDockerdStartupFailure(ctx)
 		return e.runAgent(ctx.Scope.ContainerName, ctx.Agent, agentCmdArgs, execEnvArgs, opts)
 	}
 
@@ -330,6 +331,7 @@ func (e *Engine) Launch(opts Options) error {
 	if err := e.waitUntilReady(ctx.Scope); err != nil {
 		return err
 	}
+	e.warnDockerdStartupFailure(ctx)
 	return e.runAgent(ctx.Scope.ContainerName, ctx.Agent, agentCmdArgs, execEnvArgs, opts)
 }
 
@@ -504,8 +506,52 @@ func (e *Engine) buildRunArgv(agent, cenciBin, socketDir string, cenciAvailable 
 	if err != nil {
 		return nil, err
 	}
-	runArgs = append(runArgs, scope.Image, "-c", "touch /tmp/cenci-ready && exec sleep infinity")
+	runArgs = append(runArgs, scope.Image, "-c", pid1KeepaliveCommand(dindOn))
 	return append([]string{"run"}, runArgs...), nil
+}
+
+// pid1KeepaliveCommand builds the trailing PID-1 keepalive command. Non-dind
+// keeps the original `exec sleep infinity` verbatim — `exec` replaces bash
+// entirely, cheaper when there's no shutdown signal to trap. Dind mode
+// instead needs to distinguish an intentional container stop from a dockerd
+// crash/OOM (#630): it installs a TERM/INT trap that touches the shutdown
+// sentinel (hardcoded /home/dev/.cenci-dockerd-shutdown — this runs as PID 1
+// inside the container, where dev's home is always /home/dev, mirroring
+// dockerdFailureMarkerPath's own hardcoded path) before backgrounding `sleep
+// infinity` and `wait`ing on it — the standard trap-then-wait container
+// keepalive shape, which lets the trap actually fire while the shell blocks
+// (an `exec sleep infinity` here would replace bash and make it unable to
+// trap at all). sandbox/lib/dind.sh reads this same sentinel path
+// (CENCI_DIND_HOME_ROOT-overridable there for tests) to classify a non-zero
+// dockerd exit as an intentional shutdown, not a crash.
+func pid1KeepaliveCommand(dindOn bool) string {
+	if !dindOn {
+		return "touch /tmp/cenci-ready && exec sleep infinity"
+	}
+	return "touch /tmp/cenci-ready && trap 'touch /home/dev/.cenci-dockerd-shutdown; exit 0' TERM INT && sleep infinity & wait"
+}
+
+// dockerdFailureMarkerPath is the persistent dockerd startup-failure marker
+// sandbox/lib/dind.sh writes for a genuine (non-superseded) non-zero dockerd
+// exit. Read via readHomeVolumeFile by both warnDockerdStartupFailure (before
+// the first agent attach) and diagnose.go's "Nested Docker:" section.
+const dockerdFailureMarkerPath = "/home/dev/.cenci-dockerd-startup-error"
+
+// warnDockerdStartupFailure surfaces a persistent dockerd startup-failure
+// marker as a prominent, non-fatal warning right before the first agent
+// attach (#630's Q1: warn, still attach — matches #586's non-blocking
+// dockerd-start mandate; never hard-blocks or returns an error). Gated on
+// ctx.DindOn so a non-dind launch never even attempts the marker read (that
+// path never exists for a non-dind session's home volume).
+func (e *Engine) warnDockerdStartupFailure(ctx launchCtx) {
+	if !ctx.DindOn {
+		return
+	}
+	content, ok := e.readHomeVolumeFile(ctx.Scope, dockerdFailureMarkerPath)
+	if !ok {
+		return
+	}
+	_, _ = fmt.Fprintf(e.Stderr, "Warning: the nested Docker daemon (DinD) failed to start [%s]: %s\n", errcode.SandboxDindStartupFailure, content)
 }
 
 // baseRunArgs builds the container identity/lifecycle flags shared by every

@@ -416,28 +416,85 @@ doctor_codex_support() {
 	warn "Codex hook trust state is not exposed non-interactively; inspect /hooks after plugin updates (cenci never changes trust)"
 }
 
+# sysbox_runc_version <path> — resolves the sysbox-runc version string per
+# #630's Q2 fallback chain: first exec <path> (the runtime path docker info's
+# Runtimes JSON reported for the sysbox-runc entry) with --version, then fall
+# back to a bare `sysbox-runc --version` on PATH if <path> is empty/
+# unusable/yields no version, else report "unknown". The candidate version
+# token (the last whitespace-separated field of the version output's first
+# line) is validated with a whole-string `[[ =~ ]]` regex — not line-oriented
+# grep — before being trusted for display (per the project's own
+# whole-string-validation lesson), so a truncated/malformed version string
+# can never masquerade as a real one.
+sysbox_runc_version() {
+	local path="$1" raw="" line token
+	if [ -n "$path" ] && [ -x "$path" ]; then
+		raw="$("$path" --version 2>/dev/null)" || raw=""
+	fi
+	if [ -z "$raw" ] && have sysbox-runc; then
+		raw="$(sysbox-runc --version 2>/dev/null)" || raw=""
+	fi
+	line="$(printf '%s\n' "$raw" | head -1)"
+	token="${line##* }"
+	if [[ "$token" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)*$ ]]; then
+		printf '%s' "$token"
+	else
+		printf 'unknown'
+	fi
+}
+
 # doctor_sysbox reports whether Docker has the sysbox-runc container runtime
-# registered for nested Docker (dind) sandbox sessions. This is an
-# informational, presence-only mirror of Go's sandbox.SysboxRegistered
-# (watch/internal/sandbox/sandbox.go), which probes the exact same
-# `docker info --format '{{json .Runtimes}}'` output for the same
-# "sysbox-runc" key — keep both detections in sync if either changes.
-# Docker-gated only (sysbox dind requires Docker, not Podman — #585's
-# preflight is Docker-only) and never sets DOCTOR_FAILED: sysbox is an
-# opt-in capability, expected to be absent on hosts/CI that don't need it
-# (#587).
+# registered for nested Docker (dind) sandbox sessions, and (#630) its
+# registered version. This is an informational mirror of Go's
+# sandbox.SysboxRegistered (watch/internal/sandbox/sandbox.go), which probes
+# the exact same `docker info --format '{{json .Runtimes}}'` output for the
+# same "sysbox-runc" key — keep both detections in sync if either changes
+# (Q4: the Go helper itself stays a 3-state present/absent/error probe with
+# no version; only this bash doctor check gets the 4-state + version
+# treatment). Never sets DOCTOR_FAILED: sysbox is an opt-in capability,
+# expected to be absent on hosts/CI that don't need it (#587). Distinguishes
+# four states:
+#   1. query failure — `docker info` itself failed (daemon down, permission
+#      denied, misconfigured context) — reported distinctly from absence so
+#      an operator doesn't mistake a broken Docker for a genuinely
+#      unregistered sysbox-runc.
+#   2. malformed — docker info answered, but its Runtimes JSON is
+#      unparsable (validated via `jq -e .`, a real parser rather than a
+#      grep-based guess, when jq is available; falls back to the old
+#      presence-only grep check when jq is absent, since a curl|bash install
+#      may not have jq — #630's Risks).
+#   3. absent — well-formed JSON with no "sysbox-runc" key.
+#   4. present — resolves and reports the sysbox-runc version via
+#      sysbox_runc_version.
 doctor_sysbox() {
-	local runtime="$1" runtimes
-	[ "$runtime" = docker ] || return 0
-	if ! runtimes="$(docker info --format '{{json .Runtimes}}' 2>/dev/null)"; then
+	local runtimes
+	if ! runtimes="$(docker info --format '{{json .Runtimes}}' 2>/dev/null)" || [ -z "$runtimes" ]; then
 		say "    could not query docker info — sysbox-runc status unknown"
 		return 0
 	fi
-	if printf '%s' "$runtimes" | grep -q '"sysbox-runc"'; then
-		ok "sysbox-runc registered — nested Docker (dind) available"
-	else
-		say "    sysbox-runc not registered — nested Docker (dind) unavailable (see sandbox/README.md#nested-docker-sysbox)"
+	if ! have jq; then
+		# No jq: fall back to the pre-#630 presence-only substring probe.
+		# Cannot distinguish malformed JSON from genuine absence without a
+		# real parser, but this never fails doctor either way.
+		if printf '%s' "$runtimes" | grep -q '"sysbox-runc"'; then
+			ok "sysbox-runc registered — nested Docker (dind) available"
+		else
+			say "    sysbox-runc not registered — nested Docker (dind) unavailable (see sandbox/README.md#nested-docker-sysbox)"
+		fi
+		return 0
 	fi
+	if ! printf '%s' "$runtimes" | jq -e . >/dev/null 2>&1; then
+		say "    docker info returned malformed runtimes data — sysbox-runc status unknown"
+		return 0
+	fi
+	if [ "$(printf '%s' "$runtimes" | jq -r 'has("sysbox-runc")' 2>/dev/null)" != "true" ]; then
+		say "    sysbox-runc not registered — nested Docker (dind) unavailable (see sandbox/README.md#nested-docker-sysbox)"
+		return 0
+	fi
+	local sysbox_path version
+	sysbox_path="$(printf '%s' "$runtimes" | jq -r '."sysbox-runc".path // empty' 2>/dev/null)"
+	version="$(sysbox_runc_version "$sysbox_path")"
+	ok "sysbox-runc registered — nested Docker (dind) available (version ${version})"
 }
 
 # opencode_config_dir — OpenCode's config directory, matching the exact
@@ -646,7 +703,14 @@ run_doctor() {
 	if runtime="$(container_runtime 2>/dev/null)"; then
 		check "cenci-sandbox:latest image" optional "$image_hint" \
 			"$runtime" image inspect cenci-sandbox:latest
-		doctor_sysbox "$runtime"
+	fi
+	# Sysbox/dind requires Docker specifically (not Podman) as the outer
+	# runtime, so this probe is gated on `have docker` independently of
+	# container_runtime()'s podman-first preference for ordinary launches —
+	# a dual-runtime host preferring Podman must still see Docker's sysbox
+	# registration status (#630).
+	if have docker; then
+		doctor_sysbox
 	fi
 
 	say ""
@@ -1743,22 +1807,43 @@ sandbox_cleanup_summary_line() {
 	[ -n "$names" ] || return 0
 	read -ra name_arr <<<"$names"
 	count="${#name_arr[@]}"
-	say "  • $count cenci sandbox $kind across every repo on this machine: ${names// /, }"
+	local note="" n
+	if [ "$kind" = "volume(s)" ]; then
+		for n in "${name_arr[@]}"; do
+			case "$n" in
+			claude-cenci-dind-* | codex-cenci-dind-* | opencode-cenci-dind-*)
+				note=" (dind volumes may hold sensitive nested-Docker build/application state)"
+				break
+				;;
+			esac
+		done
+	fi
+	say "  • $count cenci sandbox $kind across every repo on this machine: ${names// /, }${note}"
 }
 
 # collect_sandbox_cleanup_targets is a read-only enumeration (#458) of every
-# cenci-owned container/image/volume across every repo on this machine, via
-# the detected container runtime (podman, then docker — container_runtime,
-# above). Populates SANDBOX_RUNTIME/SANDBOX_CONTAINERS/SANDBOX_IMAGES/
-# SANDBOX_VOLUMES (space-separated names) for uninstall_sandbox_cleanup to
-# reuse verbatim, so what's shown in the confirmation list is exactly what
-# gets removed — enumerate once, never re-enumerate, to avoid
-# shown-vs-removed drift (TOCTOU). Containers use the same
-# claude-cenci-/codex-cenci-/opencode-cenci- prefix as
+# cenci-owned container/image/volume across every repo on this machine,
+# across EVERY installed container runtime (#630: docker AND podman
+# independently whenever each is installed — not just container_runtime()'s
+# single podman-first preference for ordinary launches, since a dual-runtime
+# host can have cenci-owned resources left behind on either one). Populates
+# SANDBOX_RUNTIMES (space-separated list of installed runtimes actually
+# enumerated) plus SANDBOX_CONTAINERS/SANDBOX_IMAGES/SANDBOX_VOLUMES
+# (space-separated display names, combined across every runtime, for the
+# confirmation-list summary) and their runtime-tagged sibling
+# SANDBOX_CONTAINER_RECORDS/SANDBOX_IMAGE_RECORDS/SANDBOX_VOLUME_RECORDS
+# (newline-separated "runtime<TAB>name" records — bash 3.2 has no
+# associative arrays, so a delimited record is the portable substitute) for
+# uninstall_sandbox_cleanup to reuse verbatim, so what's shown in the
+# confirmation list is exactly what gets removed on exactly the runtime it
+# was enumerated from — enumerate once, never re-enumerate, to avoid
+# shown-vs-removed drift (TOCTOU) and cross-runtime contamination. Containers
+# use the same claude-cenci-/codex-cenci-/opencode-cenci- prefix as
 # IsSandboxContainerName (watch/internal/sandbox/sandbox.go) but, unlike
 # `cenci sandbox prune` (which only targets exited/created containers),
 # matches running containers too — every cenci-owned container must go.
-# Volumes mirror prune.go's IsHomeVolumeName/IsAgentCLIVolumeName verbatim.
+# Volumes mirror prune.go's IsHomeVolumeName/IsAgentCLIVolumeName/
+# IsDindVolumeName verbatim (the *-cenci-dind-* pattern added for #630).
 # Images match the cenci-sandbox:latest monolith, every cenci-sandbox-base
 # tag (including its :latest alias), and each per-repo
 # cenci-sandbox-<slug>:latest image, with an optional podman localhost/
@@ -1770,61 +1855,77 @@ sandbox_cleanup_summary_line() {
 # watch/internal/sandbox/sandbox.go's SupportedAgents, the Go source of
 # truth for which agents cenci's sandbox owns resources for (#528).
 collect_sandbox_cleanup_targets() {
-	SANDBOX_RUNTIME=""
+	SANDBOX_RUNTIMES=""
 	SANDBOX_CONTAINERS=""
 	SANDBOX_IMAGES=""
 	SANDBOX_VOLUMES=""
+	SANDBOX_CONTAINER_RECORDS=""
+	SANDBOX_IMAGE_RECORDS=""
+	SANDBOX_VOLUME_RECORDS=""
 
 	local runtime
-	runtime="$(container_runtime 2>/dev/null)" || return 0
-	SANDBOX_RUNTIME="$runtime"
+	for runtime in docker podman; do
+		have "$runtime" || continue
+		SANDBOX_RUNTIMES="${SANDBOX_RUNTIMES:+$SANDBOX_RUNTIMES }$runtime"
 
-	local out line repo tag bare_repo
-	if ! out="$("$runtime" ps -a --format '{{.Names}}' 2>/dev/null)"; then
-		warn "could not list $runtime containers — skipping sandbox container cleanup"
-		out=""
-	fi
-	while IFS= read -r line; do
-		[ -n "$line" ] || continue
-		case "$line" in
-		claude-cenci-* | codex-cenci-* | opencode-cenci-*)
-			SANDBOX_CONTAINERS="${SANDBOX_CONTAINERS:+$SANDBOX_CONTAINERS }$line"
-			;;
-		esac
-	done <<<"$out"
+		local out line repo tag bare_repo
+		if ! out="$("$runtime" ps -a --format '{{.Names}}' 2>/dev/null)"; then
+			warn "could not list $runtime containers — skipping sandbox container cleanup"
+			out=""
+		fi
+		while IFS= read -r line; do
+			[ -n "$line" ] || continue
+			case "$line" in
+			claude-cenci-* | codex-cenci-* | opencode-cenci-*)
+				SANDBOX_CONTAINERS="${SANDBOX_CONTAINERS:+$SANDBOX_CONTAINERS }$line"
+				SANDBOX_CONTAINER_RECORDS="${SANDBOX_CONTAINER_RECORDS}${runtime}	${line}
+"
+				;;
+			esac
+		done <<<"$out"
 
-	if ! out="$("$runtime" images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null)"; then
-		warn "could not list $runtime images — skipping sandbox image cleanup"
-		out=""
-	fi
-	while IFS= read -r line; do
-		[ -n "$line" ] || continue
-		repo="${line%%:*}"
-		tag="${line#*:}"
-		bare_repo="${repo#localhost/}"
-		case "$bare_repo" in
-		cenci-sandbox-base)
-			SANDBOX_IMAGES="${SANDBOX_IMAGES:+$SANDBOX_IMAGES }$line"
-			;;
-		cenci-sandbox | cenci-sandbox-*)
-			[ "$tag" = latest ] && SANDBOX_IMAGES="${SANDBOX_IMAGES:+$SANDBOX_IMAGES }$line"
-			;;
-		esac
-	done <<<"$out"
+		if ! out="$("$runtime" images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null)"; then
+			warn "could not list $runtime images — skipping sandbox image cleanup"
+			out=""
+		fi
+		while IFS= read -r line; do
+			[ -n "$line" ] || continue
+			repo="${line%%:*}"
+			tag="${line#*:}"
+			bare_repo="${repo#localhost/}"
+			case "$bare_repo" in
+			cenci-sandbox-base)
+				SANDBOX_IMAGES="${SANDBOX_IMAGES:+$SANDBOX_IMAGES }$line"
+				SANDBOX_IMAGE_RECORDS="${SANDBOX_IMAGE_RECORDS}${runtime}	${line}
+"
+				;;
+			cenci-sandbox | cenci-sandbox-*)
+				if [ "$tag" = latest ]; then
+					SANDBOX_IMAGES="${SANDBOX_IMAGES:+$SANDBOX_IMAGES }$line"
+					SANDBOX_IMAGE_RECORDS="${SANDBOX_IMAGE_RECORDS}${runtime}	${line}
+"
+				fi
+				;;
+			esac
+		done <<<"$out"
 
-	if ! out="$("$runtime" volume ls --format '{{.Name}}' 2>/dev/null)"; then
-		warn "could not list $runtime volumes — skipping sandbox volume cleanup"
-		out=""
-	fi
-	while IFS= read -r line; do
-		[ -n "$line" ] || continue
-		case "$line" in
-		claude-cenci-home-* | codex-cenci-home-* | opencode-cenci-home-* | \
-			cenci-agent-cli-claude | cenci-agent-cli-codex | cenci-agent-cli-opencode)
-			SANDBOX_VOLUMES="${SANDBOX_VOLUMES:+$SANDBOX_VOLUMES }$line"
-			;;
-		esac
-	done <<<"$out"
+		if ! out="$("$runtime" volume ls --format '{{.Name}}' 2>/dev/null)"; then
+			warn "could not list $runtime volumes — skipping sandbox volume cleanup"
+			out=""
+		fi
+		while IFS= read -r line; do
+			[ -n "$line" ] || continue
+			case "$line" in
+			claude-cenci-home-* | codex-cenci-home-* | opencode-cenci-home-* | \
+				cenci-agent-cli-claude | cenci-agent-cli-codex | cenci-agent-cli-opencode | \
+				claude-cenci-dind-* | codex-cenci-dind-* | opencode-cenci-dind-*)
+				SANDBOX_VOLUMES="${SANDBOX_VOLUMES:+$SANDBOX_VOLUMES }$line"
+				SANDBOX_VOLUME_RECORDS="${SANDBOX_VOLUME_RECORDS}${runtime}	${line}
+"
+				;;
+			esac
+		done <<<"$out"
+	done
 
 	sandbox_cleanup_summary_line "container(s)" "$SANDBOX_CONTAINERS"
 	sandbox_cleanup_summary_line "image(s)" "$SANDBOX_IMAGES"
@@ -2161,43 +2262,50 @@ print_manual_path_note() {
 	say "    export PATH=\"\$HOME/.local/bin:\$PATH\""
 }
 
-# uninstall_sandbox_cleanup (#458) removes every cenci-owned sandbox
-# container/image/volume across every repo on this machine, consuming the
-# SANDBOX_RUNTIME/SANDBOX_CONTAINERS/SANDBOX_IMAGES/SANDBOX_VOLUMES globals
-# collect_sandbox_cleanup_targets already populated during
-# collect_uninstall_targets — never re-enumerates. A no-op when no container
-# runtime was found (SANDBOX_RUNTIME empty). Order matters: containers
-# before images before volumes, since an image `rmi` can fail while a
-# not-yet-removed container still references it. Each removal is
-# best-effort, reported per-object like unlink_launcher/uninstall_fallback_rm
-# above.
+# uninstall_sandbox_cleanup (#458, multi-runtime per #630) removes every
+# cenci-owned sandbox container/image/volume across every repo on this
+# machine, on every runtime it was found on, consuming the
+# SANDBOX_RUNTIMES/SANDBOX_CONTAINER_RECORDS/SANDBOX_IMAGE_RECORDS/
+# SANDBOX_VOLUME_RECORDS globals collect_sandbox_cleanup_targets already
+# populated during collect_uninstall_targets — never re-enumerates. Each
+# *_RECORDS variable is a newline-separated set of "runtime<TAB>name"
+# records (bash 3.2 has no associative arrays), so every removal call is
+# issued against exactly the runtime that record was enumerated from,
+# never cross-runtime. A no-op when no container runtime was found
+# (SANDBOX_RUNTIMES empty). Order matters: containers before images before
+# volumes, since an image `rmi` can fail while a not-yet-removed container
+# still references it. Each removal is best-effort, reported per-object like
+# unlink_launcher/uninstall_fallback_rm above.
 uninstall_sandbox_cleanup() {
-	[ -n "${SANDBOX_RUNTIME:-}" ] || return 0
+	[ -n "${SANDBOX_RUNTIMES:-}" ] || return 0
 
-	local name
-	for name in ${SANDBOX_CONTAINERS:-}; do
-		if "$SANDBOX_RUNTIME" rm -f "$name" >/dev/null 2>&1; then
+	local runtime name
+	while IFS=$'\t' read -r runtime name; do
+		[ -n "$name" ] || continue
+		if "$runtime" rm -f "$name" >/dev/null 2>&1; then
 			ok "removed sandbox container $name"
 		else
-			warn "could not remove sandbox container $name — remove it manually: $SANDBOX_RUNTIME rm -f $name"
+			warn "could not remove sandbox container $name — remove it manually: $runtime rm -f $name"
 		fi
-	done
+	done <<<"${SANDBOX_CONTAINER_RECORDS:-}"
 
-	for name in ${SANDBOX_IMAGES:-}; do
-		if "$SANDBOX_RUNTIME" rmi "$name" >/dev/null 2>&1; then
+	while IFS=$'\t' read -r runtime name; do
+		[ -n "$name" ] || continue
+		if "$runtime" rmi "$name" >/dev/null 2>&1; then
 			ok "removed sandbox image $name"
 		else
-			warn "could not remove sandbox image $name — remove it manually: $SANDBOX_RUNTIME rmi $name"
+			warn "could not remove sandbox image $name — remove it manually: $runtime rmi $name"
 		fi
-	done
+	done <<<"${SANDBOX_IMAGE_RECORDS:-}"
 
-	for name in ${SANDBOX_VOLUMES:-}; do
-		if "$SANDBOX_RUNTIME" volume rm "$name" >/dev/null 2>&1; then
+	while IFS=$'\t' read -r runtime name; do
+		[ -n "$name" ] || continue
+		if "$runtime" volume rm "$name" >/dev/null 2>&1; then
 			ok "removed sandbox volume $name"
 		else
-			warn "could not remove sandbox volume $name — remove it manually: $SANDBOX_RUNTIME volume rm $name"
+			warn "could not remove sandbox volume $name — remove it manually: $runtime volume rm $name"
 		fi
-	done
+	done <<<"${SANDBOX_VOLUME_RECORDS:-}"
 }
 
 # uninstall_widget_cleanup removes each detected bar's widget as part of the

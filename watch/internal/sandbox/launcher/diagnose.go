@@ -51,7 +51,7 @@ func severityForCode(code errcode.Code) Severity {
 	switch code {
 	case errcode.SandboxStartAgentCLIMissing, errcode.SandboxStartGenericEntrypoint, errcode.SandboxSessionNotFound:
 		return SeverityFatal
-	case errcode.SandboxStartReadinessTimeout, errcode.DaemonConnUnreachable, errcode.DaemonSocketMissing:
+	case errcode.SandboxStartReadinessTimeout, errcode.DaemonConnUnreachable, errcode.DaemonSocketMissing, errcode.SandboxDindStartupFailure:
 		return SeverityDegraded
 	default:
 		return SeverityWarning
@@ -176,6 +176,36 @@ func (e *Engine) inspectMounts(name string) (string, bool) {
 	}
 	trimmed := strings.TrimSpace(string(out))
 	return trimmed, trimmed != ""
+}
+
+// isDindSession probes whether scope's dind storage volume was ever created
+// (`volume inspect scope.DindVolumeName`) — the same signal a genuine
+// --dind launch would have left behind. A non-zero exit means the volume
+// was never created, i.e. this session was never launched with --dind.
+func (e *Engine) isDindSession(scope Scope) bool {
+	return exec.Command(e.Runtime, "volume", "inspect", scope.DindVolumeName).Run() == nil
+}
+
+// nestedDockerFinding implements #630's Q3: Diagnose must always print a
+// "Nested Docker:" line (the package's #572 failure-visibility convention —
+// never partial silence). It probes dind-session-ness via isDindSession,
+// then reads the dockerd-startup-error marker (present only for a genuine
+// dind session — that path is meaningless for a non-dind one) and returns
+// the display line plus an optional Degraded finding when the marker is
+// present.
+func (e *Engine) nestedDockerFinding(scope Scope) (line string, f *finding) {
+	if !e.isDindSession(scope) {
+		return "not a dind session", nil
+	}
+	content, ok := e.readHomeVolumeFile(scope, dockerdFailureMarkerPath)
+	if !ok {
+		return "no failure recorded", nil
+	}
+	return content, &finding{
+		Message:  content,
+		Code:     errcode.SandboxDindStartupFailure,
+		Severity: severityForCode(errcode.SandboxDindStartupFailure),
+	}
 }
 
 // daemonDialTimeout bounds diagnose's read-only reachability probe.
@@ -407,6 +437,12 @@ func (e *Engine) Diagnose(scope Scope) error {
 			Message:  "plugin manifest version could not be determined",
 			Severity: SeverityWarning,
 		})
+	}
+
+	nestedDockerLine, nestedDockerFnd := e.nestedDockerFinding(scope)
+	_, _ = fmt.Fprintf(e.Stdout, "Nested Docker: %s\n", nestedDockerLine)
+	if nestedDockerFnd != nil {
+		findings = append(findings, *nestedDockerFnd)
 	}
 
 	if len(findings) == 0 {
