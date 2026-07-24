@@ -42,6 +42,46 @@ else
   block_contains "$ASSETS_BLOCK" $'\n            install.sh.bundle\n' "release assets array missing install.sh.bundle"
 fi
 
+# ── every `run: bash .github/scripts/...` step must be preceded by an
+# actions/checkout, or the script isn't on disk yet and the step dies with
+# exit 127 (#690). #677 extracted the "Resolve version and tag" step's
+# inline shell into .github/scripts/resolve-release-version.sh but left the
+# step first in the job, ahead of the checkout at refs/tags/watch/v<version>
+# — which silently broke every watch release from v0.28.0 on. Asserted
+# positionally by line number rather than by step name so any future
+# script-invoking step added above the checkout fails here too. ──
+FIRST_CHECKOUT_LINE="$(grep -n 'uses: actions/checkout@' "$RELEASE" | sed -n 1p | cut -d: -f1)"
+if [[ -z "$FIRST_CHECKOUT_LINE" ]]; then
+  fail "watch-release.yml has no actions/checkout step"
+else
+  while IFS=: read -r line _; do
+    [[ -n "$line" ]] || continue
+    (( line > FIRST_CHECKOUT_LINE )) ||
+      fail "watch-release.yml line ${line} runs a .github/scripts/ script before the first actions/checkout (line ${FIRST_CHECKOUT_LINE}) — the repo isn't on disk yet, so the step fails with exit 127"
+  done < <(grep -n 'bash \.github/scripts/' "$RELEASE")
+fi
+
+# ── that first checkout must be the cheap script-only one, not a full
+# clone: it exists solely to make .github/scripts available to the resolve
+# step, and the authoritative build checkout is the later tagged one. ──
+PRE_CHECKOUT_BLOCK="$(sed -n "${FIRST_CHECKOUT_LINE:-1},/^      - name:/p" "$RELEASE")"
+block_contains "$PRE_CHECKOUT_BLOCK" "sparse-checkout: .github/scripts" \
+  "the pre-resolve checkout must sparse-checkout .github/scripts"
+
+# ── the release must still BUILD from the tag's commit: the resolve step's
+# output has to drive a later checkout, so the signed/published bytes come
+# from refs/tags/watch/v<version> and never from a mutable branch (#626). ──
+contains "$RELEASE" 'ref: refs/tags/watch/v${{ steps.v.outputs.version }}' \
+  "watch-release.yml must check out refs/tags/watch/v<version> for the build"
+TAGGED_CHECKOUT_LINE="$(grep -n 'ref: refs/tags/watch/v' "$RELEASE" | sed -n 1p | cut -d: -f1)"
+RESOLVE_LINE="$(grep -n 'bash \.github/scripts/resolve-release-version\.sh' "$RELEASE" | sed -n 1p | cut -d: -f1)"
+if [[ -n "$TAGGED_CHECKOUT_LINE" && -n "$RESOLVE_LINE" ]]; then
+  (( TAGGED_CHECKOUT_LINE > RESOLVE_LINE )) ||
+    fail "the tagged checkout (line ${TAGGED_CHECKOUT_LINE}) must come after the resolve step (line ${RESOLVE_LINE}) that produces its version output"
+else
+  fail "watch-release.yml missing either the tagged checkout or the resolve step"
+fi
+
 # Sanity-check the file is actually being read (a typo'd $RELEASE path
 # would otherwise make every check above vacuously pass on an empty var).
 contains "$RELEASE" "name: watch — Release" "unexpected watch-release.yml content — wrong file resolved?"

@@ -24,6 +24,16 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      # The resolve step below runs a script from .github/scripts, so the repo
+      # has to be on disk before it — a job's first step starts on an empty
+      # workspace. This can't be solved by reordering: the build checkout's ref
+      # is refs/tags/watch/v${{ steps.v.outputs.version }}, which that very step
+      # produces. So check out just the scripts dir first, cheaply (#690).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/scripts
+          fetch-depth: 1
+
       - name: Resolve version and tag
         id: v
         env:
