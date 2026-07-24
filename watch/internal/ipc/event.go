@@ -11,6 +11,7 @@ type HookEvent struct {
 	TaskName         string `json:"task_name,omitempty"`         // compact first-prompt label; raw prompt is never sent
 	IsInterrupt      bool   `json:"is_interrupt,omitempty"`      // PostToolUseFailure: true if user pressed ESC
 	AgentID          string `json:"agent_id,omitempty"`          // set when the hook fires inside a subagent (Task tool) call; empty for the main agent
+	BackgroundWork   bool   `json:"background_work,omitempty"`   // Stop events: the turn ended with in-flight background work still registered (#698)
 	Timestamp        string `json:"timestamp"`
 }
 

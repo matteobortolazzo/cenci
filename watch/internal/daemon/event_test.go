@@ -776,3 +776,84 @@ func TestDaemon_SessionEndForStalePaneIgnored(t *testing.T) {
 		t.Errorf("expected restore to 'fish', got %q (found=%v)", name, ok)
 	}
 }
+
+// TestDaemon_StopWithInFlightBackgroundWorkKeepsSessionRunning covers ticket
+// #698: when the main agent backgrounds work (a background subagent/fork, a
+// Workflow, a run_in_background Bash command, a Monitor), its turn ends and
+// Claude Code fires a normal main-agent Stop — but the session is paused
+// waiting to be woken, not done. The Stop carries a non-empty in-flight
+// background_tasks array, which must keep the session running.
+func TestDaemon_StopWithInFlightBackgroundWorkKeepsSessionRunning(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "✳ delegating work", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "PreToolUse", SessionID: "sess1", TmuxPane: "%0", ToolName: "Agent"})
+
+	if got := d.sessions["sess1"].Status; got != detect.StatusRunning {
+		t.Fatalf("precondition: expected StatusRunning after PreToolUse(Agent), got %v", got)
+	}
+
+	// Main-agent Stop while a backgrounded subagent is still in flight.
+	d.handleEvent(ipc.HookEvent{EventType: "Stop", SessionID: "sess1", TmuxPane: "%0", BackgroundWork: true})
+
+	if got := d.sessions["sess1"].Status; got != detect.StatusRunning {
+		t.Errorf("expected StatusRunning after Stop with in-flight background work, got %v — session reported done while a background subagent is still running", got)
+	}
+}
+
+// TestDaemon_StopWithoutBackgroundWorkStillMarksDone pins the ordinary turn:
+// a Stop with an empty/absent background_tasks array must still map to done
+// (no regression from the #698 in-flight override).
+func TestDaemon_StopWithoutBackgroundWorkStillMarksDone(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "✳ working", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "Stop", SessionID: "sess1", TmuxPane: "%0"})
+
+	if got := d.sessions["sess1"].Status; got != detect.StatusDone {
+		t.Errorf("expected StatusDone after Stop with no background work, got %v", got)
+	}
+}
+
+// TestDaemon_SubagentStopWithBackgroundWorkStaysSuppressed keeps the #277
+// guard narrow: the #698 override applies only to main-agent Stop events. A
+// subagent-scoped Stop (OpenCode's plugin synthesizes exactly this shape) must
+// remain a no-op even if it reports background work, rather than resurrecting
+// the main session.
+func TestDaemon_SubagentStopWithBackgroundWorkStaysSuppressed(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "✳ waiting", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "PreToolUse", SessionID: "sess1", TmuxPane: "%0", ToolName: "AskUserQuestion"})
+
+	if got := d.sessions["sess1"].Status; got != detect.StatusNeedInput {
+		t.Fatalf("precondition: expected StatusNeedInput, got %v", got)
+	}
+
+	d.handleEvent(ipc.HookEvent{EventType: "Stop", SessionID: "sess1", TmuxPane: "%0", AgentID: "sub1", BackgroundWork: true})
+
+	if got := d.sessions["sess1"].Status; got != detect.StatusNeedInput {
+		t.Errorf("expected StatusNeedInput to survive a subagent Stop reporting background work, got %v", got)
+	}
+}
