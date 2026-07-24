@@ -42,14 +42,16 @@ var (
 	ErrMultipleAssignees = errors.New("ticket has multiple assignees")
 )
 
-// labelStagePrecondition maps each label transition to the pipeline stage
-// it requires (ticket #559's Files to Modify): "working" requires
-// StagePrepared, "planned" requires StageWaitingForPlanApproval,
-// "in-review" requires StageFinalized.
-var labelStagePrecondition = map[string]Stage{
-	"working":   StagePrepared,
-	"planned":   StageWaitingForPlanApproval,
-	"in-review": StageFinalized,
+// labelStagePrecondition maps each label transition to the pipeline stages
+// it accepts (ticket #559's Files to Modify): "working" accepts
+// StagePrepared (new-plan session) or StageWaitingForPlanApproval (a
+// saved-plan pickup re-applies Working before Phase 2's `plan --approve`
+// runs, #668), "planned" requires StageWaitingForPlanApproval, "in-review"
+// requires StageFinalized.
+var labelStagePrecondition = map[string][]Stage{
+	"working":   {StagePrepared, StageWaitingForPlanApproval},
+	"planned":   {StageWaitingForPlanApproval},
+	"in-review": {StageFinalized},
 }
 
 // labelName is the gh label applied by each transition.
@@ -93,7 +95,7 @@ type LabelOpts struct {
 // unassigned), then self-healingly creates and applies the corresponding gh
 // label(s), returning the resulting State.
 func ApplyLabelTransition(o LabelOpts) (State, error) {
-	requiredStage, ok := labelStagePrecondition[o.Transition]
+	requiredStages, ok := labelStagePrecondition[o.Transition]
 	if !ok {
 		return State{}, fmt.Errorf("unknown label transition %q", o.Transition)
 	}
@@ -108,9 +110,9 @@ func ApplyLabelTransition(o LabelOpts) (State, error) {
 	if err != nil {
 		return State{}, err
 	}
-	if current.Stage != requiredStage {
-		return State{}, fmt.Errorf("label transition %q requires stage %q, ticket %s is at stage %q: %w",
-			o.Transition, requiredStage, o.ID, current.Stage, ErrWrongStageForLabel)
+	if !stageAllowed(current.Stage, requiredStages) {
+		return State{}, fmt.Errorf("label transition %q requires stage %s, ticket %s is at stage %q: %w",
+			o.Transition, quoteStages(requiredStages), o.ID, current.Stage, ErrWrongStageForLabel)
 	}
 
 	cfg := defaultRetryConfig()
@@ -143,6 +145,27 @@ func ApplyLabelTransition(o LabelOpts) (State, error) {
 	}
 
 	return recordLabelState(path, name, removeLabel)
+}
+
+// stageAllowed reports whether stage is one of the transition's accepted
+// stages.
+func stageAllowed(stage Stage, allowed []Stage) bool {
+	for _, s := range allowed {
+		if stage == s {
+			return true
+		}
+	}
+	return false
+}
+
+// quoteStages renders an accepted-stage list for the ErrWrongStageForLabel
+// message: `"prepared"` or `"prepared" or "waiting_for_plan_approval"`.
+func quoteStages(stages []Stage) string {
+	quoted := make([]string, 0, len(stages))
+	for _, s := range stages {
+		quoted = append(quoted, fmt.Sprintf("%q", string(s)))
+	}
+	return strings.Join(quoted, " or ")
 }
 
 // verifyAndClaimOwnership mirrors flow/skills/ticket-ownership/SKILL.md's

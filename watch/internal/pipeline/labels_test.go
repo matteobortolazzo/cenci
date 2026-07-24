@@ -202,6 +202,34 @@ func TestApplyLabelTransition_Working_HappyPath_SoleAssigneeMatches(t *testing.T
 	}
 }
 
+func TestApplyLabelTransition_Working_FromWaitingForPlanApproval_PlanFileResume(t *testing.T) {
+	// A saved-plan pickup (plan-file mode) re-applies Working while the
+	// persisted stage is still waiting_for_plan_approval — bare `plan`
+	// recorded that stage when the plan was persisted, and `plan --approve`
+	// only runs later in Phase 2's Gate Check (#668).
+	stateDir := t.TempDir()
+	mustSeedState(t, stateDir, "42", StageWaitingForPlanApproval)
+	gh := newFakeGh(t, "octocat", []string{"octocat"})
+	gh.install()
+
+	if _, err := ApplyLabelTransition(LabelOpts{ID: "42", StateDir: stateDir, RepoSlug: "o/r", Transition: "working"}); err != nil {
+		t.Fatalf("ApplyLabelTransition(working) from waiting_for_plan_approval: %v", err)
+	}
+
+	found := false
+	for _, c := range gh.callsMatching("issue", "edit") {
+		if c.hasFlag("--add-label", "Working") {
+			found = true
+			if c.hasFlag("--remove-label", "") {
+				t.Errorf("working transition must not remove any label, got %v", c)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected a `gh issue edit --add-label Working` call")
+	}
+}
+
 func TestApplyLabelTransition_Planned_HappyPath_AddsPlannedRemovesWorking(t *testing.T) {
 	stateDir := t.TempDir()
 	mustSeedState(t, stateDir, "42", StageWaitingForPlanApproval)
