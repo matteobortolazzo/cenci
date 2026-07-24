@@ -49,6 +49,16 @@ type State struct {
 	PRNumber     int               `json:"prNumber,omitempty"`
 	Labels       []string          `json:"labels,omitempty"`
 	Session      map[string]string `json:"session,omitempty"`
+
+	// TicketUpdatedAt is the ticket's GitHub updatedAt (RFC3339, verbatim
+	// from gh) as observed immediately after the pipeline's own most recent
+	// `gh issue edit` label transition (#669). CheckPlan's freshness verdict
+	// treats the ticket as user-edited only when its updatedAt is after
+	// BOTH the plan's createdAt and this baseline — without it, the label
+	// swap that follows every plan persist would mark the plan stale.
+	// Stored as a string (not time.Time) so an absent baseline round-trips
+	// as "" under omitempty.
+	TicketUpdatedAt string `json:"ticketUpdatedAt,omitempty"`
 }
 
 // idPattern is the validation gate every <id> must pass before it is used to

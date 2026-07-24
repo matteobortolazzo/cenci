@@ -135,14 +135,15 @@ func seedPipelineState(t *testing.T, path, id, stage string) {
 }
 
 // writeFakeGhForLabelApply is a minimal fake `gh` covering only the label
-// self-healing create/apply calls -- enough for the "planned" transition's
-// happy path, which (per labels.go's contract) never touches ownership/
-// assignee gh calls.
+// self-healing create/apply calls plus the post-edit updatedAt baseline
+// fetch (#669) -- enough for the "planned" transition's happy path, which
+// (per labels.go's contract) never touches ownership/assignee gh calls.
 func writeFakeGhForLabelApply(t *testing.T, dir string) {
 	t.Helper()
 	body := "#!/bin/sh\n" +
 		"if [ \"$1\" = \"label\" ] && [ \"$2\" = \"create\" ]; then exit 0; fi\n" +
 		"if [ \"$1\" = \"issue\" ] && [ \"$2\" = \"edit\" ]; then exit 0; fi\n" +
+		"if [ \"$1\" = \"issue\" ] && [ \"$2\" = \"view\" ]; then echo '{\"updatedAt\":\"2024-01-01T00:00:00Z\"}'; exit 0; fi\n" +
 		"echo \"unexpected gh invocation: $*\" 1>&2\n" +
 		"exit 1\n"
 	exectest.WriteExecutable(t, filepath.Join(dir, "gh"), body)

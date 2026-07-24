@@ -144,7 +144,18 @@ func ApplyLabelTransition(o LabelOpts) (State, error) {
 		}
 	}
 
-	return recordLabelState(path, name, removeLabel)
+	// Record the post-edit updatedAt as the plan-freshness baseline (#669):
+	// the label edit above just bumped the ticket's updatedAt, and without
+	// this baseline CheckPlan would classify the pipeline's own edit as
+	// user drift and mark the plan stale. Must run AFTER every gh edit of
+	// this ticket, and a fetch failure propagates rather than silently
+	// dropping the baseline (#560 item 1).
+	ticketUpdatedAt, err := ghIssueUpdatedAt(o.ID, o.RepoSlug, cfg)
+	if err != nil {
+		return State{}, err
+	}
+
+	return recordLabelState(path, name, removeLabel, ticketUpdatedAt)
 }
 
 // stageAllowed reports whether stage is one of the transition's accepted
@@ -213,9 +224,9 @@ func checkSoleAssignee(id string, assignees []string, login string) error {
 }
 
 // recordLabelState persists the applied/removed label into the ticket's
-// Labels field under the same per-ticket flock lock pipeline.Run and
-// SetArtifacts use.
-func recordLabelState(path, add, remove string) (State, error) {
+// Labels field — plus the post-edit ticketUpdatedAt freshness baseline —
+// under the same per-ticket flock lock pipeline.Run and SetArtifacts use.
+func recordLabelState(path, add, remove, ticketUpdatedAt string) (State, error) {
 	var result State
 	lockErr := withLock(path+".lock", defaultRetryConfig(), func() error {
 		s, lerr := loadState(path)
@@ -228,6 +239,7 @@ func recordLabelState(path, add, remove string) (State, error) {
 		}
 		labels = addLabelToSlice(labels, add)
 		s.Labels = labels
+		s.TicketUpdatedAt = ticketUpdatedAt
 		s.SchemaVersion = CurrentSchemaVersion
 		s.UpdatedAt = time.Now().UTC()
 		if serr := saveState(path, s); serr != nil {
@@ -328,6 +340,31 @@ func ghIssueAssignees(id, repoSlug string, cfg retryConfig) ([]string, error) {
 		logins = append(logins, a.Login)
 	}
 	return logins, nil
+}
+
+// ghIssueUpdatedAt fetches the ticket's current updatedAt (RFC3339,
+// verbatim) for the post-label-edit freshness baseline (#669), validating
+// it parses before it is persisted — a malformed value stored now would
+// surface as a confusing plan-check failure much later.
+func ghIssueUpdatedAt(id, repoSlug string, cfg retryConfig) (string, error) {
+	args := []string{"issue", "view", id, "--json", "updatedAt"}
+	if repoSlug != "" {
+		args = append(args, "--repo", repoSlug)
+	}
+	out, err := ghRetry(cfg, args...)
+	if err != nil {
+		return "", fmt.Errorf("fetch post-edit updatedAt baseline for ticket %s: %w", id, err)
+	}
+	var payload struct {
+		UpdatedAt string `json:"updatedAt"`
+	}
+	if jerr := json.Unmarshal(out, &payload); jerr != nil {
+		return "", fmt.Errorf("decode post-edit updatedAt baseline for ticket %s: %w", id, jerr)
+	}
+	if _, perr := time.Parse(time.RFC3339, payload.UpdatedAt); perr != nil {
+		return "", fmt.Errorf("parse post-edit updatedAt baseline %q for ticket %s: %w", payload.UpdatedAt, id, perr)
+	}
+	return payload.UpdatedAt, nil
 }
 
 // ghClaimAssignee claims ticket id for login (mirrors ticket-ownership's
