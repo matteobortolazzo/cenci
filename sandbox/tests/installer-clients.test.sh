@@ -10,7 +10,7 @@ make_common_tools() {
     local bin="$1"
     mkdir -p "${bin}"
     local tool
-    for tool in bash cat touch uname grep git mkdir dirname ln readlink sleep pkill pgrep nohup chmod sed head tail cut tr rm mktemp jq mv sort cp; do
+    for tool in bash cat touch uname grep git mkdir dirname ln readlink sleep pkill pgrep nohup chmod sed head tail cut tr rm mktemp jq mv sort cp cmp; do
         ln -s "$(command -v "${tool}")" "${bin}/${tool}"
     done
     # docker mock: `image inspect` fails (no cenci-sandbox:latest yet, the
@@ -66,7 +66,23 @@ EOF
     #     CENCI_FAKE_EMPTY_INSTALL (optional), when set, instead leaves the
     #     destination a 0-byte file — simulating a truncated/dropped download
     #     that curl -fsSL still exits 0 for — to exercise install.sh's own
-    #     empty-download guard (#590).
+    #     empty-download guard (#590). CENCI_FAKE_CORRUPT_INSTALL (optional),
+    #     when set, instead copies the real install.sh and appends a trailing
+    #     tamper marker — a non-empty but corrupted/truncated-in-transit body
+    #     (#626) — whose bytes no longer byte-match $ROOT/install.sh, so the
+    #     cosign mock's signature-mismatch check (see make_cosign) rejects it
+    #     exactly like a real signature mismatch would, without a zero-byte
+    #     body (AC3: "testing is not limited to a zero-byte body").
+    #   */install.sh.bundle — the tag's cosign verify-blob bundle download
+    #     (#626). CENCI_FAKE_MISSING_BUNDLE (optional), when set, fails the
+    #     download outright (curl exit 1, nothing written) — simulating a
+    #     404/network failure, mirroring how a real `curl -fsSL` fails closed
+    #     on a missing asset. CENCI_FAKE_EMPTY_BUNDLE (optional), when set,
+    #     leaves the destination a 0-byte file — the bundle analogue of
+    #     CENCI_FAKE_EMPTY_INSTALL. Otherwise writes a fixed non-empty
+    #     placeholder bundle body (the cosign mock never parses real Sigstore
+    #     bundle bytes — it only checks non-emptiness plus the invocation
+    #     shape, see make_cosign).
     #   anything else — legacy generic stub retained for the cenci-installer
     #     wrapper's self-update fetch path.
     cat > "${bin}/curl" <<'EOF'
@@ -90,8 +106,22 @@ case "${url}" in
     [ -n "${out}" ] || exit 1
     if [ -n "${CENCI_FAKE_EMPTY_INSTALL:-}" ]; then
         : >"${out}"
+    elif [ -n "${CENCI_FAKE_CORRUPT_INSTALL:-}" ]; then
+        cp "${ROOT}/install.sh" "${out}"
+        printf '\n# tampered-in-transit\n' >>"${out}"
     else
         cp "${ROOT}/install.sh" "${out}"
+    fi
+    exit 0
+    ;;
+*/install.sh.bundle)
+    [ -n "${out}" ] || exit 1
+    if [ -n "${CENCI_FAKE_MISSING_BUNDLE:-}" ]; then
+        exit 1
+    elif [ -n "${CENCI_FAKE_EMPTY_BUNDLE:-}" ]; then
+        : >"${out}"
+    else
+        printf 'fake-sigstore-bundle-body\n' >"${out}"
     fi
     exit 0
     ;;
@@ -102,6 +132,75 @@ printf 'forwarded installer args: %s\n' "$*"
 INSTALLER
 EOF
     chmod +x "${bin}/curl"
+}
+
+# make_cosign <bin> — installs a scriptable cosign mock at <bin>/cosign for
+# the installer's cosign verify-blob call (#626). Every invocation is logged
+# to COSIGN_LOG (defaulted to /dev/null). COSIGN_MODE=fail (optional) makes
+# the mock exit non-zero unconditionally — simulating a black-box
+# verify-blob rejection unrelated to the downloaded content (the
+# "cosign-nonzero" test case). Otherwise ("pass", the default) the mock
+# still enforces the real cosign verify-blob interface contract rather than
+# permissively accepting anything (sandbox lesson #490 / this ticket's
+# Risks: "a permissive cosign mock could mask a real verify bug"): it only
+# exits 0 if invoked with the verify-blob subcommand, a non-empty --bundle
+# file, the pinned --certificate-identity-regexp (must reference the fully
+# dot-escaped \.github/workflows/watch-release\.yml@refs/tags/watch/v, per
+# the plan's locked identity string) and --certificate-oidc-issuer
+# (https://token.actions.githubusercontent.com), a target file that exists,
+# AND that target file's bytes exactly match the known-good reference
+# $ROOT/install.sh. That last check is what makes CENCI_FAKE_CORRUPT_INSTALL
+# (a genuinely tampered download) fail verification on its own, the same way
+# a real signature mismatch would, without any separate opt-in from the
+# caller — a real decoy, not a rubber stamp.
+make_cosign() {
+    local bin="$1"
+    mkdir -p "${bin}"
+    cat > "${bin}/cosign" <<'EOF'
+#!/bin/sh
+printf 'cosign %s\n' "$*" >>"${COSIGN_LOG:-/dev/null}"
+if [ "${COSIGN_MODE:-pass}" = "fail" ]; then
+    echo "cosign mock: verify-blob rejected (COSIGN_MODE=fail)" >&2
+    exit 1
+fi
+bundle= identity_regexp= oidc_issuer= subcommand= target=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+      verify-blob) subcommand=verify-blob; shift ;;
+      --bundle) bundle=$2; shift 2 ;;
+      --certificate-identity-regexp) identity_regexp=$2; shift 2 ;;
+      --certificate-oidc-issuer) oidc_issuer=$2; shift 2 ;;
+      -*) shift ;;
+      *) target=$1; shift ;;
+    esac
+done
+if [ "${subcommand}" != verify-blob ]; then
+    echo "cosign mock: expected verify-blob subcommand, got '${subcommand}'" >&2
+    exit 1
+fi
+if [ -z "${bundle}" ] || [ ! -s "${bundle}" ]; then
+    echo "cosign mock: --bundle missing or empty" >&2
+    exit 1
+fi
+case "${identity_regexp}" in
+  *'\.github/workflows/watch-release\.yml@refs/tags/watch/v'*) : ;;
+  *) echo "cosign mock: unexpected --certificate-identity-regexp '${identity_regexp}'" >&2; exit 1 ;;
+esac
+if [ "${oidc_issuer}" != "https://token.actions.githubusercontent.com" ]; then
+    echo "cosign mock: unexpected --certificate-oidc-issuer '${oidc_issuer}'" >&2
+    exit 1
+fi
+if [ -z "${target}" ] || [ ! -f "${target}" ]; then
+    echo "cosign mock: target file missing" >&2
+    exit 1
+fi
+if [ -z "${ROOT:-}" ] || ! cmp -s "${target}" "${ROOT}/install.sh"; then
+    echo "cosign mock: signature mismatch" >&2
+    exit 1
+fi
+exit 0
+EOF
+    chmod +x "${bin}/cosign"
 }
 
 make_claude() {
@@ -450,9 +549,20 @@ run_case() {
 # Assumptions). <env_extra> is a single word-split string of NAME=value pairs
 # (e.g. "CENCI_FAKE_RELEASE_TAG=watch/v9.9.9 CENCI_REF=main") layered onto the
 # env -i scrub — pass "" for none. Sets CASE_CURL_LOG (every curl-mock
-# invocation, argv only — never the resolved redirect body) alongside the
-# usual run_case CASE_* outputs, so callers can assert whether/how the
-# /releases/latest probe and the tag's install.sh download happened.
+# invocation, argv only — never the resolved redirect body) and
+# CASE_COSIGN_LOG (every cosign-mock invocation, argv only — #626) alongside
+# the usual run_case CASE_* outputs, so callers can assert whether/how the
+# /releases/latest probe, the tag's install.sh + install.sh.bundle download,
+# and the cosign verify-blob call happened.
+#
+# A cosign mock (make_cosign, "pass" mode) is placed on this case's PATH by
+# default — cosign is a new mandatory prerequisite for the default piped
+# install path (#626), so every case that doesn't specifically test cosign's
+# absence needs it present to reach a genuine verified success. Passing the
+# literal token "COSIGN_MODE=absent" anywhere in <env_extra> both skips
+# planting the mock (so `command -v cosign` genuinely fails, exercising the
+# cosign-missing die path) and is otherwise inert once forwarded into the
+# env -i call below (no mock exists to read it).
 #
 # Every case's CWD-for-the-invocation is case_dir, and case_dir always
 # contains a readable regular file literally named "bash" (a decoy) planted
@@ -470,14 +580,19 @@ run_piped_case() {
     local install_args=("$@")
     local case_dir="${WORK}/${name}" home="${WORK}/${name}/home"
     local bin="${WORK}/${name}/bin" output="${WORK}/${name}/output" calls="${WORK}/${name}/calls"
-    local curl_log="${WORK}/${name}/curl-log"
+    local curl_log="${WORK}/${name}/curl-log" cosign_log="${WORK}/${name}/cosign-log"
     mkdir -p "${home}" "${bin}"
     : >"${calls}"
     : >"${curl_log}"
+    : >"${cosign_log}"
     # Decoy: a readable regular file literally named "bash" in the CWD the
     # piped invocation below runs from (see doc comment above).
     printf 'not a real shell\n' >"${case_dir}/bash"
     make_common_tools "${bin}"
+    case "${env_extra}" in
+      *COSIGN_MODE=absent*) : ;; # cosign intentionally left off PATH
+      *) make_cosign "${bin}" ;;
+    esac
     case "${clients}" in
       claude) make_claude "${bin}"; prepare_checkout "${home}" claude; prepare_bootstrap_cenci "${home}" claude ;;
       codex) make_codex "${bin}"; prepare_checkout "${home}" codex; prepare_bootstrap_cenci "${home}" codex ;;
@@ -492,7 +607,7 @@ run_piped_case() {
     (
         cd "${case_dir}" && \
         env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
-            ROOT="${ROOT}" CURL_LOG="${curl_log}" \
+            ROOT="${ROOT}" CURL_LOG="${curl_log}" COSIGN_LOG="${cosign_log}" \
             CLAUDE_MARKETPLACE_FILE="${case_dir}/claude-marketplace" \
             CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
             CODEX_MARKETPLACE_FILE="${case_dir}/codex-marketplace" \
@@ -505,6 +620,7 @@ run_piped_case() {
     CASE_OUTPUT="${output}"
     CASE_CALLS="${calls}"
     CASE_CURL_LOG="${curl_log}"
+    CASE_COSIGN_LOG="${cosign_log}"
     CASE_HOME="${home}"
     CASE_BIN="${bin}"
 }
@@ -654,6 +770,22 @@ exit 0
 EOF
     chmod +x "${bin}/sysbox-runc"
     run_doctor_case_with_docker_runtimes "${name}" "${clients}" "${runtimes_json}"
+}
+
+# run_doctor_case_with_cosign <name> <clients> <present|absent> — like
+# run_doctor_case, but places a cosign mock on this doctor run's PATH only
+# when <present|absent> is the literal string "present"; any other value
+# (e.g. "absent") leaves cosign genuinely missing (#626). Exercises
+# run_doctor's cosign presence check — a new mandatory prerequisite for the
+# default verified piped install path — which must warn (not hard-fail) when
+# cosign is absent, per the check <label> optional <hint> pattern (install.sh
+# ~321).
+run_doctor_case_with_cosign() {
+    local name="$1" clients="$2" cosign_present="$3"
+    local bin="${WORK}/${name}/bin"
+    mkdir -p "${bin}"
+    [ "${cosign_present}" = present ] && make_cosign "${bin}"
+    run_doctor_case "${name}" "${clients}"
 }
 
 # run_case_opencode <name> <clients> <opencode-version|absent> [build_flag]
@@ -1031,6 +1163,18 @@ run_doctor_case_with_podman_preferred_and_docker_runtimes doctor-sysbox-podman-p
 [[ "${DOCTOR_EXIT}" -eq 0 ]]
 assert_contains "${DOCTOR_OUTPUT}" "sysbox-runc registered"
 
+echo "case: doctor warns when cosign is absent — a new mandatory prerequisite for the default verified piped install path (#626), without hard-failing doctor"
+run_doctor_case_with_cosign doctor-cosign-absent claude absent
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "cosign"
+assert_contains "${DOCTOR_OUTPUT}" "install cosign"
+
+echo "case: doctor reports cosign present without the absence warning (#626)"
+run_doctor_case_with_cosign doctor-cosign-present claude present
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "cosign"
+assert_not_contains "${DOCTOR_OUTPUT}" "install cosign"
+
 echo "case: doctor fails when no supported client is available"
 run_doctor_case doctor-none none
 [[ "${DOCTOR_EXIT}" -ne 0 ]]
@@ -1401,6 +1545,56 @@ echo "case: a resolved release tag whose install.sh download is empty (curl -fsS
 run_piped_case piped-empty-download claude "CENCI_FAKE_RELEASE_TAG=watch/v9.9.9 CENCI_FAKE_EMPTY_INSTALL=1"
 [[ "${CASE_EXIT}" -ne 0 ]]
 assert_contains "${CASE_OUTPUT}" "CENCI_REF=main"
+
+# --- Supply chain: verify the release-pinned install.sh + install.sh.bundle
+# with cosign before executing them (#626). Every case below reuses
+# run_piped_case's default "cosign present, pass mode" mock unless
+# specifically exercising cosign's own absence/failure.
+
+echo "case: install.sh + install.sh.bundle both download successfully and cosign verify-blob succeeds — the verified installer proceeds to run (#626 AC2/AC7)"
+run_piped_case piped-verify-valid claude "CENCI_FAKE_RELEASE_TAG=watch/v9.9.9"
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_contains "${CASE_CURL_LOG}" "install.sh.bundle"
+assert_contains "${CASE_COSIGN_LOG}" "verify-blob"
+assert_contains "${CASE_COSIGN_LOG}" "--certificate-identity-regexp"
+assert_contains "${CASE_COSIGN_LOG}" "--certificate-oidc-issuer"
+assert_contains "${CASE_CALLS}" "claude plugin install cenci@cenci"
+
+echo "case: install.sh.bundle download failure hard-fails with a distinct message naming the bundle, never falls back to main (#626 AC2/AC4)"
+run_piped_case piped-verify-missing-bundle claude "CENCI_FAKE_RELEASE_TAG=watch/v9.9.9 CENCI_FAKE_MISSING_BUNDLE=1"
+[[ "${CASE_EXIT}" -ne 0 ]]
+assert_contains "${CASE_OUTPUT}" "could not download install.sh.bundle"
+assert_contains "${CASE_OUTPUT}" "CENCI_REF=main"
+assert_not_contains "${CASE_CALLS}" "claude plugin install cenci@cenci"
+
+echo "case: an empty (but present) install.sh.bundle hard-fails with a distinct message, never falls back to main (#626 AC3/AC4)"
+run_piped_case piped-verify-empty-bundle claude "CENCI_FAKE_RELEASE_TAG=watch/v9.9.9 CENCI_FAKE_EMPTY_BUNDLE=1"
+[[ "${CASE_EXIT}" -ne 0 ]]
+assert_contains "${CASE_OUTPUT}" "install.sh.bundle"
+assert_contains "${CASE_OUTPUT}" "was empty"
+assert_contains "${CASE_OUTPUT}" "CENCI_REF=main"
+assert_not_contains "${CASE_CALLS}" "claude plugin install cenci@cenci"
+
+echo "case: a non-empty but corrupted/tampered install.sh download fails cosign verify-blob on the real byte mismatch, never falls back to main — testing is not limited to a zero-byte body (#626 AC3/AC4)"
+run_piped_case piped-verify-corrupt-install claude "CENCI_FAKE_RELEASE_TAG=watch/v9.9.9 CENCI_FAKE_CORRUPT_INSTALL=1"
+[[ "${CASE_EXIT}" -ne 0 ]]
+assert_contains "${CASE_OUTPUT}" "installer verification failed"
+assert_contains "${CASE_OUTPUT}" "CENCI_REF=main"
+assert_not_contains "${CASE_CALLS}" "claude plugin install cenci@cenci"
+
+echo "case: cosign absent from PATH hard-fails with a distinct 'cosign not found' message, never falls back to main — cosign is a new mandatory prerequisite (#626)"
+run_piped_case piped-verify-cosign-missing claude "CENCI_FAKE_RELEASE_TAG=watch/v9.9.9 COSIGN_MODE=absent"
+[[ "${CASE_EXIT}" -ne 0 ]]
+assert_contains "${CASE_OUTPUT}" "cosign not found"
+assert_contains "${CASE_OUTPUT}" "CENCI_REF=main"
+assert_not_contains "${CASE_CALLS}" "claude plugin install cenci@cenci"
+
+echo "case: cosign present but verify-blob exits non-zero hard-fails with the same 'installer verification failed' message class as a corrupt install.sh, never falls back to main (#626 AC4)"
+run_piped_case piped-verify-cosign-nonzero claude "CENCI_FAKE_RELEASE_TAG=watch/v9.9.9 COSIGN_MODE=fail"
+[[ "${CASE_EXIT}" -ne 0 ]]
+assert_contains "${CASE_OUTPUT}" "installer verification failed"
+assert_contains "${CASE_OUTPUT}" "CENCI_REF=main"
+assert_not_contains "${CASE_CALLS}" "claude plugin install cenci@cenci"
 
 echo "case: a normal from-file install.sh run never probes /releases/latest (regression — proves the piped-only guard can't break existing from-file suites, #590)"
 name=onfile-no-probe

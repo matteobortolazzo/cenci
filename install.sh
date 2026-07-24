@@ -18,12 +18,20 @@
 #                                and every cenci sandbox container/image/
 #                                volume on this machine
 #
-#   curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
+#   The canonical install is a download-verify-run sequence: fetch install.sh
+#   and its cosign sign-blob bundle from the latest `watch/vX.Y.Z` release
+#   asset, verify the bundle against cenci's pinned release identity with
+#   `cosign verify-blob`, then run only the verified bytes (see
+#   docs/getting-started.md for the exact commands). cosign
+#   (https://docs.sigstore.dev/system_config/installation/) is required —
+#   verification fails closed with no fallback to any unverified ref.
 #
-#   The command above resolves to the latest release tag by default (not
-#   live main) — piped runs with CENCI_REF unset re-exec themselves from the
-#   newest `<layer>/vX.Y.Z` release tag's install.sh. Set CENCI_REF=main (or
-#   pass --ref main) to opt into bleeding-edge main instead.
+#   The legacy one-liner (`curl -fsSL .../main/install.sh | bash`) still
+#   works: piped runs with CENCI_REF unset re-exec themselves through the
+#   same verified download-verify-run path, from the newest release tag's
+#   install.sh — never live main. Set CENCI_REF=main (or pass --ref main) to
+#   explicitly opt into bleeding-edge, unverified main instead (unsafe;
+#   development use only).
 #
 # Flags:
 #   --yes                                 accept defaults, never prompt
@@ -712,6 +720,14 @@ run_doctor() {
 	if have docker; then
 		doctor_sysbox
 	fi
+	# cosign is a new mandatory prerequisite for the default verified piped
+	# install path (#626): the release-pin block fails closed if it's
+	# absent, with no fallback to an unverified ref. Warn here (not a hard
+	# doctor failure) so a fresh install with cosign missing is caught by
+	# doctor before the piped install would fail closed anyway.
+	check "cosign (installer verification)" optional \
+		"install cosign (https://docs.sigstore.dev/system_config/installation/) — required for the default installer's fail-closed release verification" \
+		command -v cosign
 
 	say ""
 	say "  ${BOLD}Board orchestration (optional)${RESET}"
@@ -1483,16 +1499,44 @@ lazyboards_latest_version() {
 # than lazyboards' single-segment semver, so the tail is stripped up to
 # `/releases/tag/` instead of lazyboards' `${url##*/}`. The result is
 # strictly whole-string validated before use with bash `[[ =~ ]]` (not
-# line-oriented grep) — it flows straight into a raw.githubusercontent.com
-# download URL, so a malformed or injected redirect must never be trusted.
-# This is the supply-chain trust boundary the immutable-tag default exists
-# to enforce.
+# line-oriented grep) — it flows straight into a GitHub release asset
+# download URL (releases/download/<tag>/...), so a malformed or injected
+# redirect must never be trusted. This is the supply-chain trust boundary
+# the immutable-tag default exists to enforce.
 cenci_latest_ref() {
 	local url tag
 	url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${MARKETPLACE_REPO}/releases/latest" 2>/dev/null)" || return 1
 	tag="${url#*/releases/tag/}"
 	[[ "$tag" =~ ^(flow|watch|sandbox)/v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
 	printf '%s\n' "$tag"
+}
+
+# verify_installer_asset <file> <bundle> — verifies <file> (a downloaded
+# install.sh) against <bundle> (its cosign sign-blob bundle) using the
+# canonical, tag-refs-only release identity (#626). Requires cosign on
+# PATH — cosign is a new mandatory prerequisite for the default verified
+# install path — and dies with a distinct message for each failure class:
+# cosign missing, or cosign verify-blob rejecting the bundle/file pair
+# (corrupt/truncated/tampered download, signature mismatch, or any other
+# verify-blob rejection). Never returns on failure; the caller must not
+# exec the file unless this function returns 0. Both failure paths remove
+# <file>/<bundle> before calling die() — the caller's staged temp files —
+# so this function's failures clean up exactly like the pin block's other
+# checks (which all go through its pin_die wrapper).
+verify_installer_asset() {
+	local file="$1" bundle="$2"
+	if ! command -v cosign >/dev/null 2>&1; then
+		rm -f "$file" "$bundle"
+		die "cosign not found — required to verify the installer before running it; install cosign (https://docs.sigstore.dev/system_config/installation/) and retry, or set CENCI_REF=main (or pass --ref main) to install from main instead (unverified)"
+	fi
+	cosign verify-blob \
+		--bundle "$bundle" \
+		--certificate-identity-regexp '^https://github\.com/matteobortolazzo/cenci/\.github/workflows/watch-release\.yml@refs/tags/watch/v' \
+		--certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+		"$file" >/dev/null 2>&1 || {
+		rm -f "$file" "$bundle"
+		die "installer verification failed for the downloaded install.sh — cosign could not verify it against the pinned release identity (tampered, truncated, or mismatched signature); retry, or set CENCI_REF=main (or pass --ref main) to install from main instead (unverified)"
+	}
 }
 
 # lazyboards_installed_version prints the bare semver of the installed binary
@@ -2462,12 +2506,19 @@ Usage:
                                 and every cenci sandbox container/image/
                                 volume on this machine
 
-Initial install:
-  curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
+Initial install (canonical — download, verify, run):
+  See docs/getting-started.md for the download-verify-run sequence: fetch
+  install.sh + install.sh.bundle from the latest release, verify with
+  `cosign verify-blob`, then run only the verified bytes. cosign is required.
+
+  The legacy one-liner still works:
+    curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
 
   Resolves to the latest release tag by default (not live main) — a piped
-  run with CENCI_REF unset re-execs itself from the newest release tag's
-  install.sh. Set CENCI_REF=main (or pass --ref main) for bleeding-edge main.
+  run with CENCI_REF unset re-execs itself, verified, from the newest
+  release tag's install.sh. Set CENCI_REF=main (or pass --ref main) to
+  explicitly opt into bleeding-edge, unverified main instead (unsafe;
+  development use only).
 
 From a source checkout, ./install.sh accepts the same arguments.
 
@@ -2480,7 +2531,8 @@ Flags:
                                          auto-close action (`cleanup: "cenci close {number}"`)
                                          that closes a card's tmux window when its ticket does
   --ref <ref>                           install from this ref instead of the resolved latest
-                                         release tag (e.g. --ref main); same as CENCI_REF=<ref>
+                                         release tag (e.g. --ref main, unverified — see above);
+                                         same as CENCI_REF=<ref>
   --help                                this text
 EOF
 }
@@ -2522,10 +2574,14 @@ done
 # file with a path component, so this guard is a no-op there (verified
 # empirically; see the plan's Risks). Only the piped path, and only when
 # CENCI_REF is still unset (env, --ref, or a prior re-exec's own
-# CENCI_REF="$pin_tag" all skip this), resolves the latest release tag and
-# re-execs from it — the
-# AC1 default: a fresh piped install runs reviewed released code, never live
-# main, unless the caller explicitly opts out.
+# CENCI_REF="$pin_tag" all skip this), resolves the latest release tag,
+# downloads install.sh + install.sh.bundle from that release's assets,
+# cryptographically verifies them with cosign, and only then re-execs — the
+# AC1/AC2 default: a fresh piped install runs only cryptographically
+# verified, release-pinned code, never live main, unless the caller
+# explicitly opts out. Verification failure always calls die() with a
+# distinct message per failure class and never falls back to running main
+# or any other unverified ref (AC4).
 pin_self="${BASH_SOURCE[0]:-$0}"
 # A real `curl | bash` invocation reports $0 as the bare word "bash" — no
 # path separator at all, since bash never resolves it against $PATH into a
@@ -2546,22 +2602,42 @@ case "$pin_self" in
 esac
 if [ -z "$CENCI_REF" ] && [ ! -t 0 ] && { [ -z "$pin_self" ] || [ ! -f "$pin_self" ] || [ ! -r "$pin_self" ]; }; then
 	pin_tag="$(cenci_latest_ref)" || die "could not resolve the latest cenci release tag to install from (offline, or no release has been published yet) — retry, or set CENCI_REF=main (or pass --ref main) to install from main instead"
+	pin_release_base="https://github.com/${MARKETPLACE_REPO}/releases/download/${pin_tag}"
 	# Re-exec from a temp *file*, never a re-pipe: the child then sees a
 	# real, readable BASH_SOURCE[0] and skips this block outright. Setting
 	# CENCI_REF="$pin_tag" for the child below is a second, independent
 	# guard against an infinite re-exec loop.
+	# pin_die <message> — reports a failure of this download-verify block:
+	# cleans up whichever staged temp files exist so far, then die()s. Used
+	# instead of repeating "rm -f $pin_tmp $pin_bundle_tmp" at every one of
+	# this block's several fail-closed checks below.
+	pin_die() {
+		rm -f "$pin_tmp" "$pin_bundle_tmp"
+		die "$1"
+	}
+	pin_tmp="" pin_bundle_tmp=""
 	pin_tmp="$(mktemp)" || pin_tmp=""
 	if [ -z "$pin_tmp" ] || [ ! -f "$pin_tmp" ]; then
-		die "could not create a temporary file to stage the pinned install.sh"
+		pin_die "could not create a temporary file to stage the pinned install.sh"
 	fi
-	if ! curl -fsSL -o "$pin_tmp" "https://raw.githubusercontent.com/${MARKETPLACE_REPO}/${pin_tag}/install.sh"; then
-		rm -f "$pin_tmp"
-		die "could not download install.sh from release tag '${pin_tag}' — retry, or set CENCI_REF=main (or pass --ref main) to install from main instead"
+	pin_bundle_tmp="$(mktemp)" || pin_bundle_tmp=""
+	if [ -z "$pin_bundle_tmp" ] || [ ! -f "$pin_bundle_tmp" ]; then
+		pin_die "could not create a temporary file to stage the pinned install.sh.bundle"
+	fi
+	if ! curl -fsSL -o "$pin_tmp" "${pin_release_base}/install.sh"; then
+		pin_die "could not download install.sh from release tag '${pin_tag}' — retry, or set CENCI_REF=main (or pass --ref main) to install from main instead"
 	fi
 	if [ ! -s "$pin_tmp" ]; then
-		rm -f "$pin_tmp"
-		die "downloaded install.sh from release tag '${pin_tag}' was empty — retry, or set CENCI_REF=main (or pass --ref main) to install from main instead"
+		pin_die "downloaded install.sh from release tag '${pin_tag}' was empty — retry, or set CENCI_REF=main (or pass --ref main) to install from main instead"
 	fi
+	if ! curl -fsSL -o "$pin_bundle_tmp" "${pin_release_base}/install.sh.bundle"; then
+		pin_die "could not download install.sh.bundle from release tag '${pin_tag}' — retry, or set CENCI_REF=main (or pass --ref main) to install from main instead"
+	fi
+	if [ ! -s "$pin_bundle_tmp" ]; then
+		pin_die "downloaded install.sh.bundle from release tag '${pin_tag}' was empty — retry, or set CENCI_REF=main (or pass --ref main) to install from main instead"
+	fi
+	verify_installer_asset "$pin_tmp" "$pin_bundle_tmp"
+	rm -f "$pin_bundle_tmp"
 	CENCI_REF="$pin_tag" exec bash "$pin_tmp" ${CENCI_ORIG_ARGS[@]+"${CENCI_ORIG_ARGS[@]}"}
 fi
 

@@ -173,3 +173,38 @@ After the next `watch` release lands:
    `attestations: write`.
 
 Only consider #593 complete once this verification step has passed on a real release.
+
+## 8. Mandatory post-merge verification: installer release trust (#626)
+
+**Not optional.** #626 hardened `install.sh`'s release-pin path to require `cosign
+verify-blob` against a `watch-release.yml`-signed `install.sh.bundle` before executing
+any release-pinned installer bytes. This can only be proven end-to-end on a real
+release — the workflow needs a genuine OIDC token minted on a tag/dispatch run, which
+isn't available inside a PR (this is AC8 of #626).
+
+After the next `watch` release lands:
+
+1. Download the published installer asset and its bundle, e.g.:
+   ```bash
+   curl -fsSL -o install.sh https://github.com/matteobortolazzo/cenci/releases/download/watch/v<ver>/install.sh
+   curl -fsSL -o install.sh.bundle https://github.com/matteobortolazzo/cenci/releases/download/watch/v<ver>/install.sh.bundle
+   ```
+2. Verify with `cosign` against the pinned identity, the same command
+   `verify_installer_asset()` in `install.sh` runs internally:
+   ```bash
+   cosign verify-blob --bundle install.sh.bundle \
+     --certificate-identity-regexp '^https://github\.com/matteobortolazzo/cenci/\.github/workflows/watch-release\.yml@refs/tags/watch/v' \
+     --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+     install.sh
+   ```
+3. Confirm `cosign` reports a verified signature tying `install.sh` to the
+   `watch-release.yml` run and the `watch/v<ver>` tag that built it.
+4. Run the verified script (`bash install.sh`) and confirm it executes normally —
+   proving sign → publish → download → verify → execute end to end.
+5. If verification fails, check that the "sign install.sh" step actually ran and
+   uploaded both `install.sh` and `install.sh.bundle` as release assets in that
+   release's workflow run, and that the workflow's `permissions:` block still grants
+   `id-token: write`.
+
+Only consider #626's AC8 complete once this verification step has passed on a real
+release.

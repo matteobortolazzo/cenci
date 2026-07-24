@@ -49,12 +49,27 @@ than standing alone.
 **1. Install and verify.**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
+curl -fsSL -o install.sh https://github.com/matteobortolazzo/cenci/releases/latest/download/install.sh
+curl -fsSL -o install.sh.bundle https://github.com/matteobortolazzo/cenci/releases/latest/download/install.sh.bundle
+cosign verify-blob --bundle install.sh.bundle \
+  --certificate-identity-regexp '^https://github\.com/matteobortolazzo/cenci/\.github/workflows/watch-release\.yml@refs/tags/watch/v' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  install.sh
+bash install.sh
 cenci doctor
 ```
 
-Resolves to the latest release tag by default; set `CENCI_REF=main` (or pass
-`--ref main`) for bleeding-edge main instead.
+Requires [cosign](https://docs.sigstore.dev/system_config/installation/) — the installer
+verifies its own bytes against the release before running, and fails closed with no
+fallback to an unverified ref. The legacy one-liner still works and re-execs itself
+through this same verified path:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
+```
+
+Set `CENCI_REF=main` (or pass `--ref main`) to explicitly opt into bleeding-edge,
+unverified main instead (unsafe; development use only).
 
 The installer detects your clients, reconciles all three layers on every run (adding
 missing components and refreshing existing ones), and puts `cenci` and its `cn` launch
