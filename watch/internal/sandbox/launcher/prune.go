@@ -32,7 +32,34 @@ var repoImagePattern = regexp.MustCompile(`^cenci-sandbox-[a-z0-9_.-]+:latest$`)
 // does; when both prompts fire, they share a single bufio.Reader over
 // e.Stdin so the second prompt's answer isn't lost to the first reader's
 // internal read-ahead buffer.
+//
+// Prune constructs that bufio.Reader itself, fresh, on every call — correct
+// for a single invocation, but NOT safe to call more than once against the
+// same e.Stdin: a second, independent bufio.NewReader(e.Stdin) would still
+// buffer-ahead from the same underlying stream, so it could silently observe
+// EOF (bytes already drained into the first call's now-discarded reader)
+// even though a genuine confirmation answer for the second call was piped in.
+// The dual-runtime host-wide prune loop (`cenci sandbox prune`'s
+// runSandboxPrune, which calls Prune/PruneWithReader once per installed
+// runtime against the very same e.Stdin) must use PruneWithReader with one
+// shared reader instead.
 func (e *Engine) Prune(images, volumes bool) error {
+	return e.prune(images, volumes, bufio.NewReader(e.Stdin))
+}
+
+// PruneWithReader is like Prune but reads confirmation input from reader (a
+// caller-owned *bufio.Reader) instead of constructing a fresh one internally.
+// Callers that invoke Prune's logic more than once against the same
+// underlying e.Stdin (the dual-runtime host-wide prune loop, one call per
+// installed runtime) must construct a single bufio.NewReader(stdin) once and
+// pass it into every call, so a piped confirmation answer intended for a
+// later call is never silently swallowed by an earlier call's own
+// independent reader's read-ahead buffering.
+func (e *Engine) PruneWithReader(images, volumes bool, reader *bufio.Reader) error {
+	return e.prune(images, volumes, reader)
+}
+
+func (e *Engine) prune(images, volumes bool, reader *bufio.Reader) error {
 	_, _ = fmt.Fprintln(e.Stdout, "Removing superseded cenci-sandbox-base tags...")
 	out, err := exec.Command(e.Runtime, "images", "--format", "{{.Repository}}:{{.Tag}}", baseImageRepo).Output()
 	if err != nil {
@@ -71,12 +98,6 @@ func (e *Engine) Prune(images, volumes bool) error {
 	if !images && !volumes {
 		return nil
 	}
-
-	// One shared reader for both prompts below: two independent
-	// bufio.NewReader(e.Stdin) instances would each buffer ahead from the
-	// same underlying stream, so the first reader could swallow bytes meant
-	// for the second prompt's confirmation.
-	reader := bufio.NewReader(e.Stdin)
 
 	if images {
 		if err := e.pruneRepoImages(reader); err != nil {

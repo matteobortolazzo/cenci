@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -129,7 +131,10 @@ func runSandboxBuild(args []string) {
 // claude|codex] [--version exact-semver]` for the host-global agent volume.
 // The updater always targets the shared monolith image (never the current
 // directory's own per-repo image, if any — see UpdateAgent), so this verb
-// never needs to resolve or build a per-repo scope.
+// never needs to resolve or build a per-repo scope. On a dual-runtime host it
+// updates the shared agent-CLI volume in every runtime that already has it
+// (never a runtime that doesn't), and bootstraps it in the preferred
+// (podman-first) runtime only when it exists nowhere (Q4).
 func runSandboxUpdateAgent(args []string) {
 	fs := flag.NewFlagSet("sandbox update-agent", flag.ExitOnError)
 	agent := fs.String("agent", "claude", "agent CLI to update (claude, codex, or opencode)")
@@ -151,7 +156,39 @@ func runSandboxUpdateAgent(args []string) {
 	}
 
 	eng := newEngine("update-agent")
-	if err := eng.UpdateAgent(*agent, *version); err != nil {
+
+	runtimes, err := sandbox.AvailableRuntimes()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cenci sandbox update-agent: %v\n", err)
+		os.Exit(1)
+	}
+
+	// A per-runtime `volume ls` failure is aggregated into errs rather than
+	// aborting immediately: when the other runtime's query still resolved a
+	// genuine owner, that owner must still be updated (mirroring ls/stop's
+	// partial-result handling) — only an empty owners set (nothing resolved
+	// anywhere) falls through to the bootstrap fallback below.
+	var errs []error
+	volumeName := launcher.AgentCLIVolumeName(*agent)
+	owners, err := sandbox.RuntimesWithVolume(runtimes, volumeName)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	if len(owners) == 0 {
+		// Absent everywhere (or every query failed): bootstrap in the
+		// preferred (podman-first) runtime rather than every installed one.
+		// eng.Runtime is already that preferred runtime (newEngine resolves
+		// it via sandbox.ContainerRuntime()), so no separate re-resolution is
+		// needed here.
+		owners = []string{eng.Runtime}
+	}
+
+	for _, rt := range owners {
+		if err := eng.WithRuntime(rt).UpdateAgent(*agent, *version); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
 		fmt.Fprintf(os.Stderr, "cenci sandbox update-agent: %v\n", err)
 		os.Exit(1)
 	}
@@ -219,13 +256,57 @@ func runSandboxUpdatePlugins(args []string) {
 
 	scope := currentScope("update-plugins", *agent, *name)
 	eng := newEngine("update-plugins")
-	// cenci-sand ensured the selected image existed before its
-	// --update-plugins block ran; the one-shot volume branch needs it.
-	if err := eng.EnsureImage(scope); err != nil {
+
+	// Resolve every runtime that actually owns this scope's target: a
+	// running container wins first; else the runtime(s) holding the scope's
+	// home volume; else fall back to the single preferred runtime (matching
+	// prior behavior when no evidence of prior use exists under either
+	// runtime). A same-name collision (both runtimes have it) runs the
+	// update against both in sequence (Q3) — never silently one.
+	runtimes, err := sandbox.AvailableRuntimes()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "cenci sandbox update-plugins: %v\n", err)
 		os.Exit(1)
 	}
-	if err := eng.UpdatePlugins(*agent, scope); err != nil {
+	// A per-runtime enumeration failure (container or volume listing) is
+	// aggregated into errs rather than aborting immediately: when the other
+	// runtime's query still resolved a genuine owner, that owner must still
+	// be updated (mirroring ls/stop/prune's partial-result handling) — a
+	// tier only falls through to the next when owners is genuinely empty,
+	// never merely because that tier's query errored on one runtime.
+	var errs []error
+	owners, err := sandbox.RuntimesWithContainer(runtimes, scope.ContainerName)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	if len(owners) == 0 {
+		var volErr error
+		owners, volErr = sandbox.RuntimesWithVolume(runtimes, scope.VolumeName)
+		if volErr != nil {
+			errs = append(errs, volErr)
+		}
+	}
+	if len(owners) == 0 {
+		owners = []string{eng.Runtime}
+	}
+
+	for _, rt := range owners {
+		target := eng.WithRuntime(rt)
+		// cenci-sand ensured the selected image existed before its
+		// --update-plugins block ran; the one-shot volume branch needs it. A
+		// failure on one owner (e.g. the same-name collision case) must not
+		// prevent the operation from still being attempted against the
+		// other owning runtime (Q3) — collect and continue, matching
+		// update-agent/prune/ls/stop's pattern in this file.
+		if err := target.EnsureImage(scope); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if err := target.UpdatePlugins(*agent, scope); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
 		fmt.Fprintf(os.Stderr, "cenci sandbox update-plugins: %v\n", err)
 		os.Exit(1)
 	}
@@ -283,7 +364,18 @@ func runSandboxReseedCreds(args []string) {
 // containers; with --images, also prompt (default-deny) before removing
 // per-repo sandbox images (cenci-sandbox-<slug>:latest); with --volumes,
 // also prompt (default-deny) before removing stale home volumes. --images
-// and --volumes are independent and may be combined.
+// and --volumes are independent and may be combined. On a dual-runtime host
+// this runs once per installed runtime (reassigning the engine's runtime via
+// WithRuntime each pass) so a Docker-backed DinD container or image is
+// pruned even when Podman is also installed; a per-runtime failure still
+// lets the healthy runtime's pass complete, surfacing the failure on stderr
+// with a non-zero exit (AC #4). Every pass shares one *bufio.Reader
+// constructed once, up front, over eng.Stdin (via PruneWithReader) rather
+// than letting each runtime's Prune call build its own fresh reader: a fresh
+// bufio.NewReader(os.Stdin) per pass would independently buffer-ahead from
+// the same underlying stdin stream, so a piped confirmation answer meant for
+// the second runtime's pass could be silently swallowed by the first pass's
+// reader (see prune.go's PruneWithReader doc comment).
 func runSandboxPrune(args []string) {
 	fs := flag.NewFlagSet("sandbox prune", flag.ExitOnError)
 	images := fs.Bool("images", false, "prompt to remove per-repo sandbox images (cenci-sandbox-<slug>:latest)")
@@ -291,45 +383,82 @@ func runSandboxPrune(args []string) {
 	_ = fs.Parse(args)
 	rejectExtraArgs("prune", fs)
 
-	if err := newEngine("prune").Prune(*images, *volumes); err != nil {
+	eng := newEngine("prune")
+	runtimes, err := sandbox.AvailableRuntimes()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cenci sandbox prune: %v\n", err)
+		os.Exit(1)
+	}
+
+	reader := bufio.NewReader(eng.Stdin)
+	var errs []error
+	for _, rt := range runtimes {
+		if err := eng.WithRuntime(rt).PruneWithReader(*images, *volumes, reader); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
 		fmt.Fprintf(os.Stderr, "cenci sandbox prune: %v\n", err)
 		os.Exit(1)
 	}
 }
 
 // runSandboxLs implements `cenci sandbox ls`: lists every
-// claude-cenci-*/codex-cenci-* container (running or stopped) as a table.
+// claude-cenci-*/codex-cenci-* container (running or stopped) across every
+// installed runtime as a table, tagging each row with its owning runtime in
+// a RUNTIME column so a same-name container under both docker and podman
+// shows up as two distinct rows (AC #1, #3) instead of collapsing to one
+// preferred runtime. A per-runtime listing failure still prints the healthy
+// runtime's rows, plus the failure on stderr and a non-zero exit (AC #4).
 func runSandboxLs(args []string) {
 	fs := flag.NewFlagSet("sandbox ls", flag.ExitOnError)
 	_ = fs.Parse(args)
 	rejectExtraArgs("ls", fs)
 
-	runtime, err := sandbox.ContainerRuntime()
+	runtimes, err := sandbox.AvailableRuntimes()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cenci sandbox ls: %v\n", err)
 		os.Exit(1)
 	}
-	containers, err := sandbox.ListContainers(runtime)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "cenci sandbox ls: %v\n", err)
-		os.Exit(1)
+	rows, listErr := sandbox.ListAllContainers(runtimes)
+	if listErr != nil {
+		fmt.Fprintf(os.Stderr, "cenci sandbox ls: %v\n", listErr)
 	}
-	if len(containers) == 0 {
-		fmt.Println("no sandbox containers found")
+
+	if len(rows) == 0 {
+		// A total query failure (every runtime's listing errored) is not the
+		// same as a genuinely empty result — only print the "nothing found"
+		// message when the emptiness is trustworthy (listErr == nil); the
+		// stderr error above already explains the failure case.
+		if listErr == nil {
+			fmt.Println("no sandbox containers found")
+		}
+		if listErr != nil {
+			os.Exit(1)
+		}
 		return
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "NAME\tSTATUS\tIMAGE")
-	for _, c := range containers {
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\n", c.Name, c.Status, c.Image)
+	_, _ = fmt.Fprintln(w, "NAME\tSTATUS\tIMAGE\tRUNTIME")
+	for _, r := range rows {
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", r.Container.Name, r.Container.Status, r.Container.Image, r.Runtime)
 	}
 	_ = w.Flush()
+
+	if listErr != nil {
+		os.Exit(1)
+	}
 }
 
 // runSandboxStop implements `cenci sandbox stop [name-or-slug-filter]`:
-// stops every running claude-cenci-*/codex-cenci-* container, optionally
-// narrowed to names containing the given filter substring.
+// stops every running claude-cenci-*/codex-cenci-* container across every
+// installed runtime, optionally narrowed to names containing the given
+// filter substring, tagging each stopped-container line with its runtime
+// (`stopped <name> (<runtime>)`) so a same-name container under both docker
+// and podman is stoppable and distinguishable (AC #1, #3). A per-runtime
+// listing/stop failure still stops the healthy runtime's containers, plus
+// the failure on stderr and a non-zero exit (AC #4).
 func runSandboxStop(args []string) {
 	fs := flag.NewFlagSet("sandbox stop", flag.ExitOnError)
 	_ = fs.Parse(args)
@@ -342,26 +471,43 @@ func runSandboxStop(args []string) {
 		filter = extra[0]
 	}
 
-	runtime, err := sandbox.ContainerRuntime()
+	runtimes, err := sandbox.AvailableRuntimes()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cenci sandbox stop: %v\n", err)
 		os.Exit(1)
 	}
-	names, err := sandbox.RunningSandboxContainers(runtime, filter)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "cenci sandbox stop: %v\n", err)
-		os.Exit(1)
+	targets, listErr := sandbox.RunningSandboxContainersAll(runtimes, filter)
+	if listErr != nil {
+		fmt.Fprintf(os.Stderr, "cenci sandbox stop: %v\n", listErr)
 	}
-	if len(names) == 0 {
-		fmt.Println("no matching sandbox containers running")
+
+	if len(targets) == 0 {
+		// A total query failure (every runtime's listing errored) is not the
+		// same as a genuinely empty result — only print the "nothing found"
+		// message when the emptiness is trustworthy (listErr == nil); the
+		// stderr error above already explains the failure case.
+		if listErr == nil {
+			fmt.Println("no matching sandbox containers running")
+		}
+		if listErr != nil {
+			os.Exit(1)
+		}
 		return
 	}
 
-	if err := sandbox.StopContainers(runtime, names, os.Stdout, os.Stderr); err != nil {
-		fmt.Fprintf(os.Stderr, "cenci sandbox stop: %v\n", err)
-		os.Exit(1)
+	exitCode := 0
+	if listErr != nil {
+		exitCode = 1
 	}
-	for _, name := range names {
-		fmt.Printf("stopped %s\n", name)
+	for _, t := range targets {
+		if err := sandbox.StopContainers(t.Runtime, []string{t.Name}, os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintf(os.Stderr, "cenci sandbox stop: %v\n", err)
+			exitCode = 1
+			continue
+		}
+		fmt.Printf("stopped %s (%s)\n", t.Name, t.Runtime)
+	}
+	if exitCode != 0 {
+		os.Exit(exitCode)
 	}
 }

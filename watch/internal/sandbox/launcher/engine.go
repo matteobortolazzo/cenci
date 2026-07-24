@@ -92,6 +92,20 @@ func (e *Engine) BaseImage() string {
 	return baseImageRepo + ":" + e.BaseTag
 }
 
+// WithRuntime returns a shallow copy of e with Runtime reassigned to
+// runtime, sharing every other field (AssetDir, BaseTag, and the stdio
+// streams) with e. It is the small helper host-wide/scope-resolving
+// callers (sandbox_cmd.go, diagnose_cmd.go, support_bundle_cmd.go) use to
+// run a single-runtime-signature engine action (UpdateAgent, UpdatePlugins,
+// Diagnose, Prune, ...) against a specific runtime in a caller-side loop,
+// without widening Engine.Runtime itself into a set — the launch path
+// depends on Engine carrying exactly one resolved runtime (#629).
+func (e *Engine) WithRuntime(runtime string) *Engine {
+	targeted := *e
+	targeted.Runtime = runtime
+	return &targeted
+}
+
 // command builds a runtime invocation with stdout/stderr wired to the
 // engine's streams (build progress, warnings).
 func (e *Engine) command(args ...string) *exec.Cmd {
@@ -519,29 +533,43 @@ func (e *Engine) UpdatePlugins(agent string, scope Scope) error {
 }
 
 // RefreshRunningPlugins refreshes plugins in every currently running sandbox
-// container on the host (not scoped to the caller's repo, matching the
-// scope-independence of the daemon-restart auto-behavior it mirrors),
-// inferring each container's agent from its name. Best-effort: a single
-// container's failure doesn't stop the rest from refreshing — every failure
-// is aggregated into one returned error via errors.Join. Zero running
-// containers is not an error; a note is printed instead.
+// container on the host, across EVERY installed runtime (not just e.Runtime)
+// — the one Engine method that genuinely sweeps every runtime internally
+// rather than being invoked once per runtime by a caller-side WithRuntime
+// loop, since it has no single scope/container a caller could resolve
+// ownership for first (#629). It is not scoped to the caller's repo, matching
+// the scope-independence of the daemon-restart auto-behavior it mirrors, and
+// infers each container's agent from its name. Best-effort: a single
+// container's failure, or a single runtime's listing failure, doesn't stop
+// the rest from refreshing — every failure is aggregated into one returned
+// error via errors.Join (AC #4: a failed runtime's containers are never
+// silently treated as "none running"). Zero running containers across every
+// runtime is not an error; a note is printed instead.
 func (e *Engine) RefreshRunningPlugins() error {
-	names, err := sandbox.RunningSandboxContainers(e.Runtime, "")
+	runtimes, err := sandbox.AvailableRuntimes()
 	if err != nil {
 		return err
 	}
-	if len(names) == 0 {
+
+	all, listErr := sandbox.RunningSandboxContainersAll(runtimes, "")
+	if len(all) == 0 {
+		if listErr != nil {
+			return listErr
+		}
 		_, _ = fmt.Fprintln(e.Stdout, "No running sandbox containers to refresh.")
 		return nil
 	}
 
 	var errs []error
-	for _, name := range names {
-		agent, ok := sandbox.AgentForContainerName(name)
+	if listErr != nil {
+		errs = append(errs, listErr)
+	}
+	for _, rc := range all {
+		agent, ok := sandbox.AgentForContainerName(rc.Name)
 		if !ok {
 			continue
 		}
-		if err := e.refreshRunningContainerPlugins(agent, name); err != nil {
+		if err := e.WithRuntime(rc.Runtime).refreshRunningContainerPlugins(agent, rc.Name); err != nil {
 			errs = append(errs, err)
 		}
 	}

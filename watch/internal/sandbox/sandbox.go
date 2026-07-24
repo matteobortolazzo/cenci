@@ -21,6 +21,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -209,6 +210,93 @@ func resolveRuntime(order ...string) (string, error) {
 	return "", fmt.Errorf("none of %s found on PATH", strings.Join(order, ", "))
 }
 
+// AvailableRuntimes enumerates every supported container runtime actually
+// installed on PATH, in a deterministic docker-then-podman order — unlike
+// ContainerRuntime/ContainerRuntimePreferDocker, which each resolve to a
+// single *preferred* runtime, this never collapses to one when both are
+// present. Host-wide sandbox commands (ls/stop/prune/update-agent/
+// update-plugins --all) enumerate every runtime this returns instead of
+// picking one, so a Docker-backed container is never invisible on a host
+// that also has Podman installed (#629). Returns an error naming both
+// candidates when neither is found, mirroring resolveRuntime.
+func AvailableRuntimes() ([]string, error) {
+	var found []string
+	for _, name := range []string{"docker", "podman"} {
+		if _, err := exec.LookPath(name); err == nil {
+			found = append(found, name)
+		}
+	}
+	if len(found) == 0 {
+		return nil, fmt.Errorf("none of docker, podman found on PATH")
+	}
+	return found, nil
+}
+
+// RuntimesWithContainer reports every runtime in runtimes that has a
+// container named exactly name, so callers can resolve which runtime(s)
+// actually own a scope/container-specific target instead of guessing a
+// single preferred one. On a same-name collision (the container exists
+// independently under more than one runtime) every owning runtime is
+// returned, never silently one (AC #3). A per-runtime listing failure is
+// aggregated into the returned error via errors.Join rather than being read
+// as "this runtime doesn't have it" (AC #4); the failing runtime is simply
+// omitted from owners, never falsely reported as owning or not owning it.
+func RuntimesWithContainer(runtimes []string, name string) ([]string, error) {
+	var owners []string
+	var errs []error
+	for _, rt := range runtimes {
+		containers, err := ListContainers(rt)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		for _, c := range containers {
+			if c.Name == name {
+				owners = append(owners, rt)
+				break
+			}
+		}
+	}
+	return owners, errors.Join(errs...)
+}
+
+// RuntimesWithVolume mirrors RuntimesWithContainer for volumes: every
+// runtime in runtimes that has a volume named exactly name, both owners on a
+// same-name collision, and a per-runtime `volume ls` failure aggregated via
+// errors.Join rather than read as absence (AC #4). Used by `update-agent` to
+// resolve every runtime that already has the shared agent-CLI volume (Q4).
+func RuntimesWithVolume(runtimes []string, name string) ([]string, error) {
+	var owners []string
+	var errs []error
+	for _, rt := range runtimes {
+		out, err := exec.Command(rt, "volume", "ls", "--format", "{{.Name}}").Output()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s volume ls: %w", rt, err))
+			continue
+		}
+		for _, line := range splitNonEmptyLines(string(out)) {
+			if line == name {
+				owners = append(owners, rt)
+				break
+			}
+		}
+	}
+	return owners, errors.Join(errs...)
+}
+
+// splitNonEmptyLines splits raw on newlines, dropping empty lines (a
+// trailing newline from command output would otherwise produce one).
+func splitNonEmptyLines(raw string) []string {
+	var lines []string
+	scanner := bufio.NewScanner(strings.NewReader(raw))
+	for scanner.Scan() {
+		if line := scanner.Text(); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
 // SysboxRegistered reports whether the sysbox-runc OCI runtime is registered
 // with runtime (via `<runtime> info --format '{{json .Runtimes}}'`), the
 // dind preflight's check that the host has sysbox installed and wired up
@@ -241,6 +329,37 @@ func ListContainers(runtime string) ([]Container, error) {
 		return nil, fmt.Errorf("%s ps: %w", runtime, err)
 	}
 	return parseContainers(string(out)), nil
+}
+
+// ContainerRow is one runtime-tagged row of the host-wide aggregating
+// lister ListAllContainers, so `sandbox ls` can display a Docker and a
+// Podman container that happen to share a name as two distinct rows rather
+// than silently deduplicating them (AC #3).
+type ContainerRow struct {
+	Runtime   string
+	Container Container
+}
+
+// ListAllContainers lists every sandbox container across every runtime in
+// runtimes, tagging each row with its owning runtime. It returns partial
+// rows (from whichever runtimes succeeded) plus an errors.Join of every
+// per-runtime failure, so a failed runtime query is never silently read as
+// "no containers" (AC #4) — callers must check the returned error even when
+// rows is non-empty.
+func ListAllContainers(runtimes []string) ([]ContainerRow, error) {
+	var rows []ContainerRow
+	var errs []error
+	for _, rt := range runtimes {
+		containers, err := ListContainers(rt)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		for _, c := range containers {
+			rows = append(rows, ContainerRow{Runtime: rt, Container: c})
+		}
+	}
+	return rows, errors.Join(errs...)
 }
 
 // parseContainers is the pure parsing/filtering step behind ListContainers,
@@ -293,6 +412,35 @@ func parseNames(raw, filter string) []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+// RunningContainer is one runtime-tagged name from the host-wide aggregating
+// lister RunningSandboxContainersAll.
+type RunningContainer struct {
+	Runtime string
+	Name    string
+}
+
+// RunningSandboxContainersAll mirrors RunningSandboxContainers across every
+// runtime in runtimes, tagging each name with its owning runtime (so
+// `sandbox stop` can stop a same-named container under both docker and
+// podman, and report each distinctly). Like ListAllContainers, it returns
+// partial results plus an errors.Join of every per-runtime failure rather
+// than silently reporting "nothing running" (AC #4).
+func RunningSandboxContainersAll(runtimes []string, filter string) ([]RunningContainer, error) {
+	var all []RunningContainer
+	var errs []error
+	for _, rt := range runtimes {
+		names, err := RunningSandboxContainers(rt, filter)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		for _, name := range names {
+			all = append(all, RunningContainer{Runtime: rt, Name: name})
+		}
+	}
+	return all, errors.Join(errs...)
 }
 
 // StopContainers stops each named container in turn via `<runtime> stop
