@@ -21,8 +21,12 @@ container, but the container is what stands between it and your host. See
 - Host process/credential access — the agent cannot see host processes, host
   environment variables (beyond what's explicitly forwarded), or host files outside the
   mount points documented in the [sandbox README](./sandbox/README.md#what-persists-home-volume).
-- Inbound network exposure — the container publishes no inbound ports; network access is
-  outbound-only by default.
+- Inbound network exposure — by default the container runs in its own separate network
+  namespace (bridge mode) and publishes no inbound ports, so nothing on your host or
+  network can initiate a connection into the container. This is a "no published inbound
+  ports" guarantee, not a claim of complete outbound-only isolation: outbound connections
+  initiated from inside the container may still reach routable host, LAN, or internet
+  services, depending on your container runtime and firewall configuration.
 
 ### What it does NOT protect against
 
@@ -41,10 +45,18 @@ container, but the container is what stands between it and your host. See
 Off by default and must be explicitly requested per-launch:
 
 - **`--host-network`** — switches the container to host networking, needed for OAuth
-  flows that require a browser callback to `localhost`. This removes the container's
-  network isolation from the host for the life of that session. Prefer the default
-  (bridged) network and only reach for `--host-network` when a login flow fails without
-  it. A louder, more visible warning when this flag is used is tracked in
+  flows that require a browser callback to `localhost`. The container joins a *shared*
+  host network namespace instead of its own isolated bridge namespace: it loses network
+  namespace separation from the host for the life of that session, and any port the
+  container binds to `localhost` is reachable exactly as if that process were running
+  directly on your host — the increased blast radius is the same for the life of the
+  session regardless of which process inside the container opens the port. Prefer the
+  default (bridged) network and only reach for `--host-network` when a login flow fails
+  without it. `cenci audit`/`cenci security explain` report this weakening automatically
+  whenever a running scoped container was actually launched with host networking — even
+  if the current invocation didn't pass `--host-network` — see
+  [watch/README.md](./watch/README.md#effective-security-posture-cenci-audit). A louder, more visible
+  warning when this flag is used is tracked in
   [#148](https://github.com/matteobortolazzo/cenci/issues/148) (not yet landed).
 
 ### Nested Docker (`--dind`) preserves the boundary

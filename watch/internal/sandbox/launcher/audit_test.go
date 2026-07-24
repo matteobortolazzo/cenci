@@ -981,3 +981,474 @@ func TestAudit_JSON_HasStableFieldNamesAndNeverSerializesEnvValue(t *testing.T) 
 		t.Errorf("JSON output must never serialize a \"value\" key (env values are never captured); got:\n%s", out)
 	}
 }
+
+// -- ticket #627: observed vs planned posture -------------------------------
+//
+// When the scoped container is actually running, Audit derives its posture
+// from real inspect data (basis:"running") instead of the hypothetical
+// next-launch derivation (basis:"planned"). These tests drive Audit against
+// auditEngineWithFakeRuntime's fake docker (faketest_test.go) so they can
+// script ps/inspect responses without a real container runtime.
+//
+// NOTE (red phase): PostureBasisRunning/PostureBasisPlanned, Posture.Basis,
+// and Posture.InspectWarning do not exist yet (land in audit.go, a later
+// phase) — every test below fails to COMPILE until then. That is the
+// intended red-phase state.
+
+// TestAudit_ObservedMode_RunningHostNetwork_BasisRunningWeakenedWithoutFlag
+// covers AC #1: a running host-network container must be reported as
+// weakened purely from observed inspect data, without the caller repeating
+// --host-network.
+func TestAudit_ObservedMode_RunningHostNetwork_BasisRunningWeakenedWithoutFlag(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	scope := ComputeScope("claude", "", repo, home)
+	eng, _ := auditEngineWithFakeRuntime(t)
+	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
+	t.Setenv("FAKE_OBSERVED_POSTURE", "cenci-sandbox:latest|host|runc||0\n"+
+		"/host/repo::/workspace::true\n")
+
+	posture, err := eng.Audit(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+
+	if posture.Basis != PostureBasisRunning {
+		t.Errorf("Basis = %q, want %q for a running scoped container", posture.Basis, PostureBasisRunning)
+	}
+	if posture.Network.Mode != NetworkModeHost || !posture.Network.Weakened {
+		t.Errorf("Network = %+v, want host/weakened from the observed inspect data — no --host-network flag was passed", posture.Network)
+	}
+	found := false
+	for _, w := range posture.BoundaryWeakenings {
+		if w.Option == "--host-network" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a --host-network boundary weakening reported automatically from the observed running container, got %+v", posture.BoundaryWeakenings)
+	}
+	if posture.InspectWarning != "" {
+		t.Errorf("InspectWarning = %q, want empty for a successful observed inspect", posture.InspectWarning)
+	}
+}
+
+// TestAudit_ObservedMode_MountsImageDindRuntimeVolumesFromInspect covers
+// AC #2: mounts (kind/ro-rw), image, dind runtime, and named volumes must
+// come from actual inspect data, not the repo-scope-computed planned
+// derivation — the observed image here deliberately differs from what
+// ComputeScope would select, and .RW/true maps to ReadOnly:false.
+func TestAudit_ObservedMode_MountsImageDindRuntimeVolumesFromInspect(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	scope := ComputeScope("claude", "", repo, home)
+	eng, _ := auditEngineWithFakeRuntime(t)
+	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
+	t.Setenv("FAKE_OBSERVED_POSTURE", "my-repo-image:latest|bridge|sysbox-runc|on|1\n"+
+		repo+"::/workspace::true\n"+
+		"claude-cenci-home-repo::/home/dev::true\n"+
+		"claude-cenci-dind-repo::/var/lib/docker::true\n"+
+		"/run/user/1000/cenci-sockets::"+cenciSocketMountDest+"::true\n")
+
+	posture, err := eng.Audit(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+
+	if posture.Image.Reference != "my-repo-image:latest" {
+		t.Errorf("Image.Reference = %q, want the inspected image %q, not the repo-scope-computed image", posture.Image.Reference, "my-repo-image:latest")
+	}
+	if !posture.Dind.Enabled {
+		t.Fatalf("Dind.Enabled = false, want true (observed cenci-sand.dind label is \"on\")")
+	}
+	if posture.Dind.Runtime != "sysbox-runc" {
+		t.Errorf("Dind.Runtime = %q, want the observed OCI runtime %q", posture.Dind.Runtime, "sysbox-runc")
+	}
+
+	kinds := map[string]bool{}
+	for _, m := range posture.Mounts {
+		kinds[m.Kind] = true
+		if m.Kind == MountKindWorkspace {
+			if m.Source != repo {
+				t.Errorf("observed workspace mount Source = %q, want %q", m.Source, repo)
+			}
+			if m.ReadOnly {
+				t.Errorf("observed workspace mount ReadOnly = true, want false (probe's RW field was \"true\")")
+			}
+		}
+	}
+	for _, want := range []string{MountKindWorkspace, MountKindHomeVolume, MountKindDindVolume, MountKindCenciSocket} {
+		if !kinds[want] {
+			t.Errorf("expected an observed mount with kind %q, got mounts %+v", want, posture.Mounts)
+		}
+	}
+
+	volKinds := map[string]bool{}
+	for _, v := range posture.Volumes {
+		volKinds[v.Kind] = true
+	}
+	for _, want := range []string{MountKindHomeVolume, MountKindDindVolume} {
+		if !volKinds[want] {
+			t.Errorf("expected an observed named volume with kind %q, got volumes %+v", want, posture.Volumes)
+		}
+	}
+}
+
+// TestAudit_ObservedMode_HostSocketMount_BoundaryWeakening covers AC #2's
+// socket-exposure clause: an observed host Docker/Podman socket mount must
+// surface as a boundary weakening even though network mode stays bridge
+// (unweakened) — distinct from the --host-network weakening.
+func TestAudit_ObservedMode_HostSocketMount_BoundaryWeakening(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	scope := ComputeScope("claude", "", repo, home)
+	eng, _ := auditEngineWithFakeRuntime(t)
+	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
+	t.Setenv("FAKE_OBSERVED_POSTURE", "cenci-sandbox:latest|bridge|runc||0\n"+
+		"/var/run/docker.sock::/var/run/docker.sock::true\n")
+
+	posture, err := eng.Audit(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+
+	if posture.Network.Weakened {
+		t.Errorf("Network.Weakened = true, want false (bridge mode, no host-network) — the weakening under test is the observed host socket, not network mode")
+	}
+	found := false
+	for _, w := range posture.BoundaryWeakenings {
+		if strings.Contains(strings.ToLower(w.Option), "socket") || strings.Contains(strings.ToLower(w.Effect), "socket") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a boundary weakening reported for the observed host Docker/Podman socket mount, got %+v", posture.BoundaryWeakenings)
+	}
+}
+
+// TestAudit_ObservedMode_ContainerNotRunning_BasisPlannedNoWarning covers
+// AC #3: `docker ps` only lists running containers, so a never-launched and
+// a stopped/stale container are indistinguishable at this probe and must
+// both report the same unweakened planned posture, with no inspectWarning
+// (a host with no running scoped session legitimately has a planned-only
+// posture — not an inspect failure).
+func TestAudit_ObservedMode_ContainerNotRunning_BasisPlannedNoWarning(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	eng, _ := auditEngineWithFakeRuntime(t)
+	// FAKE_PS deliberately left unset: no container of this name is running.
+
+	posture, err := eng.Audit(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	if posture.Basis != PostureBasisPlanned {
+		t.Errorf("Basis = %q, want %q for a not-running container", posture.Basis, PostureBasisPlanned)
+	}
+	if posture.InspectWarning != "" {
+		t.Errorf("InspectWarning = %q, want empty — a legitimately absent/stopped container is not an inspect failure", posture.InspectWarning)
+	}
+}
+
+// TestAudit_ObservedMode_MalformedInspect_BasisPlannedWithInspectWarningNoBaseline
+// covers Q2/AC #9/#11: a running container whose combined inspect probe
+// returns unparsable output must still render a report — basis:"planned",
+// a non-empty InspectWarning, exit-equivalent nil error, and NEVER the
+// reassuring "default-safe baseline" line.
+func TestAudit_ObservedMode_MalformedInspect_BasisPlannedWithInspectWarningNoBaseline(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	scope := ComputeScope("claude", "", repo, home)
+	eng, _ := auditEngineWithFakeRuntime(t)
+	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
+	t.Setenv("FAKE_OBSERVED_POSTURE", "not-the-expected-shape\n")
+
+	posture, err := eng.Audit(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Audit: %v, want nil error (an inspect failure degrades to a warning, never a hard failure)", err)
+	}
+	if posture.Basis != PostureBasisPlanned {
+		t.Errorf("Basis = %q, want %q — an inspect failure must never report basis:\"running\"", posture.Basis, PostureBasisPlanned)
+	}
+	if posture.InspectWarning == "" {
+		t.Fatal("InspectWarning is empty, want a non-empty warning that the running container's actual posture could not be verified")
+	}
+
+	var buf bytes.Buffer
+	if err := posture.WriteText(&buf); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+	if strings.Contains(buf.String(), "default-safe baseline") {
+		t.Errorf("WriteText output claims the default-safe baseline despite an inspect failure, got:\n%s", buf.String())
+	}
+}
+
+// TestAudit_ObservedMode_PsUnreachable_BasisPlannedWithInspectWarningNoBaseline
+// covers AC #9: a ps/daemon failure (runtime present but unreachable) must
+// degrade the same way as a malformed inspect — never a hard error, never a
+// silent collapse to the default-safe baseline.
+func TestAudit_ObservedMode_PsUnreachable_BasisPlannedWithInspectWarningNoBaseline(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	eng, _ := auditEngineWithFakeRuntime(t)
+	t.Setenv("FAKE_PS_EXIT", "1")
+
+	posture, err := eng.Audit(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Audit: %v, want nil error (a ps/daemon failure degrades to a warning, never a hard failure)", err)
+	}
+	if posture.Basis != PostureBasisPlanned {
+		t.Errorf("Basis = %q, want %q — a ps/daemon failure must never report basis:\"running\"", posture.Basis, PostureBasisPlanned)
+	}
+	if posture.InspectWarning == "" {
+		t.Fatal("InspectWarning is empty, want a non-empty warning that container disposition could not be determined")
+	}
+
+	var buf bytes.Buffer
+	if err := posture.WriteText(&buf); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+	if strings.Contains(buf.String(), "default-safe baseline") {
+		t.Errorf("WriteText output claims the default-safe baseline despite a ps/daemon failure, got:\n%s", buf.String())
+	}
+}
+
+// TestAudit_ObservedMode_NextExecQualifier_ForwardedEnvAndReseedCreds covers
+// Q4: forwardedEnv/reseedCreds have no inspect source (they are per-exec-only
+// values), so observed mode must keep deriving them from the same planned
+// construction logic while clearly labeling them "next-exec" in the
+// text/narrative rendering — never presented as observed facts.
+func TestAudit_ObservedMode_NextExecQualifier_ForwardedEnvAndReseedCreds(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+	t.Setenv("PEN_CLI_KEY", "sentinel-secret-value-nextexec1")
+
+	scope := ComputeScope("claude", "", repo, home)
+	eng, _ := auditEngineWithFakeRuntime(t)
+	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
+
+	posture, err := eng.Audit(Options{Agent: "claude", ReseedCreds: true})
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	if posture.Basis != PostureBasisRunning {
+		t.Fatalf("Basis = %q, want %q (precondition for this test)", posture.Basis, PostureBasisRunning)
+	}
+	if len(posture.ForwardedEnv) == 0 {
+		t.Fatalf("ForwardedEnv is empty, want PEN_CLI_KEY (planned-derivation values still populate observed mode)")
+	}
+	if !posture.ReseedCreds {
+		t.Fatalf("ReseedCreds = false, want true (planned-derivation value still populates observed mode)")
+	}
+
+	var buf bytes.Buffer
+	if err := posture.WriteText(&buf); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "next-exec") {
+		t.Errorf("expected a \"next-exec\" qualifier on the forwarded-env/reseed section for a running-basis report, got:\n%s", out)
+	}
+	if !strings.Contains(out, "not observed") {
+		t.Errorf("expected the next-exec qualifier to explicitly say these values are \"not observed\" from the running container, got:\n%s", out)
+	}
+}
+
+// TestAudit_ObservedMode_NoMutation_CallLogOnlyPsAndInspect is a dedicated
+// regression test (mirroring dryrun_test.go's
+// TestDryRun_NoSideEffects_NoMutatingRuntimeCallsAndExecAttachNeverCalled):
+// Audit's observed-mode dispatch must never issue a mutating runtime verb —
+// only the read-only ps/inspect probes.
+func TestAudit_ObservedMode_NoMutation_CallLogOnlyPsAndInspect(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	scope := ComputeScope("claude", "", repo, home)
+	eng, callLog := auditEngineWithFakeRuntime(t)
+	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
+
+	if _, err := eng.Audit(Options{Agent: "claude"}); err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+
+	lines := readCallLog(t, callLog)
+	if len(lines) == 0 {
+		t.Fatal("expected at least a ps call in the call log, got none")
+	}
+	for _, mutatingPrefix := range []string{"run ", "create ", "rm ", "start ", "stop "} {
+		if containsPrefix(lines, mutatingPrefix) {
+			t.Errorf("Audit issued a mutating runtime call with prefix %q; want read-only ps/inspect only. calls:\n%s", mutatingPrefix, strings.Join(lines, "\n"))
+		}
+	}
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if verb := fields[0]; verb != "ps" && verb != "inspect" {
+			t.Errorf("Audit issued an unexpected runtime call %q; want only ps/inspect probes, calls:\n%s", line, strings.Join(lines, "\n"))
+		}
+	}
+}
+
+// -- ticket #627: JSON basis/inspectWarning ----------------------------------
+
+// TestAudit_JSON_BasisFieldPresent_PlannedAndRunning covers AC #4/#8's JSON
+// side: basis is present with the correct value in both modes.
+func TestAudit_JSON_BasisFieldPresent_PlannedAndRunning(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	planned, err := auditEngine().Audit(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Audit (planned): %v", err)
+	}
+	if planned.Basis != PostureBasisPlanned {
+		t.Errorf("Basis = %q, want %q for a runtime-less engine", planned.Basis, PostureBasisPlanned)
+	}
+	plannedJSON, err := json.Marshal(planned)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(plannedJSON), `"basis":"planned"`) {
+		t.Errorf("planned JSON output missing \"basis\":\"planned\", got:\n%s", plannedJSON)
+	}
+	if strings.Contains(string(plannedJSON), `"inspectWarning"`) {
+		t.Errorf("planned JSON output must omit inspectWarning when empty (omitempty), got:\n%s", plannedJSON)
+	}
+
+	scope := ComputeScope("claude", "", repo, home)
+	eng, _ := auditEngineWithFakeRuntime(t)
+	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
+
+	running, err := eng.Audit(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Audit (running): %v", err)
+	}
+	if running.Basis != PostureBasisRunning {
+		t.Errorf("Basis = %q, want %q for a running scoped container", running.Basis, PostureBasisRunning)
+	}
+	runningJSON, err := json.Marshal(running)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(runningJSON), `"basis":"running"`) {
+		t.Errorf("running JSON output missing \"basis\":\"running\", got:\n%s", runningJSON)
+	}
+}
+
+// TestAudit_JSON_InspectWarningPresentOnFailure covers the inverse of
+// #588's omitempty regression: when InspectWarning IS set, it must actually
+// appear in the JSON (not just be non-omitted-when-empty).
+func TestAudit_JSON_InspectWarningPresentOnFailure(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	scope := ComputeScope("claude", "", repo, home)
+	eng, _ := auditEngineWithFakeRuntime(t)
+	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
+	t.Setenv("FAKE_OBSERVED_POSTURE", "not-the-expected-shape\n")
+
+	posture, err := eng.Audit(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	data, err := json.Marshal(posture)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	out := string(data)
+	if !strings.Contains(out, `"inspectWarning":"`) {
+		t.Errorf("JSON output missing a non-empty \"inspectWarning\" field on inspect failure, got:\n%s", out)
+	}
+	if !strings.Contains(out, `"basis":"planned"`) {
+		t.Errorf("JSON output missing \"basis\":\"planned\" on inspect failure, got:\n%s", out)
+	}
+}
+
+// TestAudit_ObservedMode_DindLabelUnknown_NotRenderedAsDisabledOrBaseline
+// covers #598/#627: a running container whose cenci-sand.dind label is an
+// unrecognized value must report Dind.Source == DindSourceUnknown (never a
+// confident dindOff/DindSourceObserved "disabled" attribution), and
+// WriteText must not claim the "default-safe baseline" — an indeterminate
+// dind state must not co-occur with that reassuring line, even though this
+// case has no InspectWarning (the inspect call itself succeeded; only the
+// label's meaning is ambiguous).
+func TestAudit_ObservedMode_DindLabelUnknown_NotRenderedAsDisabledOrBaseline(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	scope := ComputeScope("claude", "", repo, home)
+	eng, _ := auditEngineWithFakeRuntime(t)
+	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
+	t.Setenv("FAKE_OBSERVED_POSTURE", "cenci-sandbox:latest|bridge|runc|some-unrecognized-value|0\n"+
+		"/host/repo::/workspace::true\n")
+
+	posture, err := eng.Audit(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	if posture.Basis != PostureBasisRunning {
+		t.Fatalf("Basis = %q, want %q for a running scoped container", posture.Basis, PostureBasisRunning)
+	}
+	if posture.InspectWarning != "" {
+		t.Errorf("InspectWarning = %q, want empty — the inspect call itself succeeded, only the dind label's meaning is ambiguous", posture.InspectWarning)
+	}
+	if posture.Dind.Source != DindSourceUnknown {
+		t.Fatalf("Dind.Source = %q, want %q for an unrecognized cenci-sand.dind label", posture.Dind.Source, DindSourceUnknown)
+	}
+	if posture.Dind.Enabled {
+		t.Errorf("Dind.Enabled = true, want false (unknown is reported via Source, not Enabled)")
+	}
+
+	var buf bytes.Buffer
+	if err := posture.WriteText(&buf); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "default-safe baseline") {
+		t.Errorf("WriteText output claims the default-safe baseline despite an indeterminate dind state, got:\n%s", out)
+	}
+	if !strings.Contains(out, "source: "+DindSourceUnknown) {
+		t.Errorf("WriteText output missing the unknown dind source, got:\n%s", out)
+	}
+
+	dataJSON, err := json.Marshal(posture)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(dataJSON), `"source":"`+DindSourceUnknown+`"`) {
+		t.Errorf("JSON output missing dind source %q, got:\n%s", DindSourceUnknown, dataJSON)
+	}
+	if strings.Contains(string(dataJSON), `"inspectWarning"`) {
+		t.Errorf("JSON output must omit inspectWarning when empty (omitempty) even though dind is indeterminate, got:\n%s", dataJSON)
+	}
+}

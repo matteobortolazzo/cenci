@@ -59,7 +59,11 @@ func runSecurityExplain(args []string) {
 		os.Exit(2)
 	}
 
-	eng := launcher.NewForAudit(os.Stdin, os.Stdout)
+	// See audit_cmd.go's runAudit for why NewForAuditWithRuntime (ticket
+	// #627): best-effort runtime resolution lets WriteExplanation narrate a
+	// running scoped container's actual observed posture, degrading to the
+	// same runtime-less planned-only behavior when no runtime is installed.
+	eng := launcher.NewForAuditWithRuntime(os.Stdin, os.Stdout)
 	posture, err := eng.Audit(launcher.Options{
 		Agent:       *agentFlag,
 		Name:        *nameFlag,

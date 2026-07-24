@@ -44,12 +44,15 @@ func runAudit(args []string) {
 		os.Exit(2)
 	}
 
-	// No resolved Runtime/AssetDir/BaseTag: Audit never shells out to the
-	// container runtime or needs the sandbox asset dir, so NewForAudit
-	// (rather than launcher.New/NewForLaunch) avoids an unrelated
-	// asset-dir/runtime-resolution failure for what is otherwise a pure,
-	// read-only report.
-	eng := launcher.NewForAudit(os.Stdin, os.Stdout)
+	// No resolved AssetDir/BaseTag: Audit never needs the sandbox asset dir,
+	// so NewForAuditWithRuntime (rather than launcher.New/NewForLaunch)
+	// avoids an unrelated asset-dir-resolution failure for what is otherwise
+	// a read-only report. Unlike NewForAudit, it best-effort resolves the
+	// container runtime (ticket #627) so Audit can report a running scoped
+	// container's actual inspected posture (basis:"running") instead of
+	// always deriving a hypothetical plan; a missing runtime degrades to the
+	// same runtime-less, planned-only behavior NewForAudit always had.
+	eng := launcher.NewForAuditWithRuntime(os.Stdin, os.Stdout)
 	posture, err := eng.Audit(launcher.Options{
 		Agent:       *agentFlag,
 		Name:        *nameFlag,

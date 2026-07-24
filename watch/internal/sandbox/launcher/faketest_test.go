@@ -1,6 +1,7 @@
 package launcher
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +23,11 @@ import (
 //	                     with no positional, every FAKE_IMAGES line is
 //	                     returned unfiltered.
 //	FAKE_PS            → `ps ...` stdout (any form)
+//	FAKE_PS_EXIT       → `ps ...` exit code (default 0); nonzero simulates a
+//	                     daemon-unreachable/runtime-invocation failure for
+//	                     containerRunning (ticket #627's Audit dispatch must
+//	                     treat this as inconclusive — inspectWarning +
+//	                     basis:"planned" — never as "not running").
 //	FAKE_VOLUMES       → `volume ls ...` stdout
 //	FAKE_INFO_RUNTIMES → `info --format ...` stdout (the sysbox-runc
 //	                     registration probe, sandbox.SysboxRegistered);
@@ -68,6 +74,36 @@ import (
 //	                     failure marker); unset/empty simulates "no failure
 //	                     recorded". FAKE_DOCKERD_MARKER_EXIT (default 0) is
 //	                     that same read's exit code.
+//	FAKE_OBSERVED_POSTURE → `inspect --format ...` stdout for ticket #627's
+//	                     combined observed-inspect probe (Audit's
+//	                     running-container derivation: image reference,
+//	                     network mode, OCI runtime, the `cenci-sand.dind`
+//	                     label, dind env, and every mount's source/
+//	                     destination/read-only state), told apart by the
+//	                     distinctive `.HostConfig.NetworkMode` format-string
+//	                     token (checked before the `cenci-sand.dind` and
+//	                     `.RW` arms above, whose format strings do not
+//	                     contain this token). Line 1 is
+//	                     "<image>|<networkMode>|<runtime>|<dindLabel>|
+//	                     <dindenv 0-or-1>"; remaining lines are
+//	                     "<source>::<destination>::<rw true-or-false>" per
+//	                     mount. Defaults to an unweakened bridge-mode,
+//	                     no-mounts, dind-off header so existing tests that
+//	                     don't care about observed content still parse
+//	                     cleanly. Per the plan's #493 keep-in-sync note:
+//	                     sandbox_open_test.go's writeScriptedRuntime does
+//	                     NOT need this format — it never exercises Audit's
+//	                     observed path (only the launch/dry-run paths,
+//	                     which reuse FAKE_REUSE_POSTURE/FAKE_INSPECT_MOUNTS
+//	                     instead). watch/audit_security_faketest_test.go
+//	                     (package main_test) carries an independent,
+//	                     byte-parallel copy of this same token/format for
+//	                     the black-box `cenci audit`/`security explain`
+//	                     subprocess tests, since that package cannot import
+//	                     this unexported test helper.
+//	FAKE_OBSERVED_POSTURE_EXIT → combined observed-inspect probe exit code
+//	                     (default 0); nonzero simulates an inspect failure
+//	                     on an otherwise-running container.
 //
 // Plain /bin/sh (not env) so it resolves under a minimal overridden PATH.
 func writeFakeRuntime(t *testing.T, dir, name, callLog string) {
@@ -95,7 +131,7 @@ images)
     printf '%s' "${FAKE_IMAGES:-}"
   fi
   ;;
-ps) printf '%s' "${FAKE_PS:-}" ;;
+ps) printf '%s' "${FAKE_PS:-}"; exit "${FAKE_PS_EXIT:-0}" ;;
 volume)
   case "$2" in
   ls) printf '%s' "${FAKE_VOLUMES:-}" ;;
@@ -114,6 +150,7 @@ run)
   ;;
 inspect)
   case "$*" in
+  *'.HostConfig.NetworkMode'*) printf '%b' "${FAKE_OBSERVED_POSTURE:-cenci-sandbox:latest|bridge|runc||\n}"; exit "${FAKE_OBSERVED_POSTURE_EXIT:-0}" ;;
   *'cenci-sand.dind'*) printf '%b' "${FAKE_REUSE_POSTURE:-|runc|0\nworkspace-vol::/workspace\n}" ;;
   *State.Status*) printf '%s\n' "${FAKE_INSPECT_STATE:-running 0}" ;;
   *'.RW'*) printf '%b' "${FAKE_INSPECT_MOUNTS:-}" ;;
@@ -137,6 +174,22 @@ func setFakeDockerNotRunning(t *testing.T) {
 	callLog := filepath.Join(fakeDir, "calls.txt")
 	writeFakeRuntime(t, fakeDir, "docker", callLog)
 	t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
+}
+
+// auditEngineWithFakeRuntime returns an Engine with Runtime set to an
+// absolute path pointing at a fake docker (writeFakeRuntime) — for ticket
+// #627's Audit observed-mode dispatch (e.Runtime != ""), so tests can script
+// ps/inspect responses via t.Setenv(FAKE_PS/FAKE_OBSERVED_POSTURE/...)
+// without a real container runtime and without perturbing the test
+// process's PATH (the absolute Runtime path bypasses PATH lookup entirely,
+// unlike setFakeDockerNotRunning's PATH-prepend approach). Returns the
+// Engine and the fake's call-log path for no-mutation assertions.
+func auditEngineWithFakeRuntime(t *testing.T) (*Engine, string) {
+	t.Helper()
+	fakeDir := t.TempDir()
+	callLog := filepath.Join(fakeDir, "calls.txt")
+	writeFakeRuntime(t, fakeDir, "docker", callLog)
+	return &Engine{Runtime: filepath.Join(fakeDir, "docker"), Stderr: io.Discard}, callLog
 }
 
 // readCallLog returns the fake runtime's call log lines.
