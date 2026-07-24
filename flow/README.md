@@ -108,6 +108,7 @@ companion) for every skill, including the internal ones not listed above.
 
 | Agent | Purpose | Referencing skills |
 |---|---|---|
+| `backlog-maintainer` | Audits the open Followup-ticket backlog for duplicates and small items worth grouping, producing consolidation findings with proposed merges, promotions, and batch polish tickets. Use from the /cenci:maintain skill's backlog mode. Read-only: it inventories issues and classifies them, it never closes, edits, or creates anything. | maintain |
 | `code-reviewer` | Strict senior developer that reviews PRs for quality, conventions, bugs, and test coverage. Use after implementation for final review before PR. | configure,implement |
 | `context-gatherer` | Gathers ticket, design, and project context into a compact bundle file before planning. Use at the start of the implement pipeline so large context (ticket body, comments, DESIGN.md, per-project CLAUDE.md) stays out of the main conversation. | attachments,implement |
 | `docs-maintainer` | Audits the flow project's documentation and generated-index consistency for maintenance drift, producing findings with proposed repairs. Use from the /cenci:maintain skill's docs and all modes. | maintain |
@@ -140,7 +141,7 @@ companion) for every skill, including the internal ones not listed above.
 | `design` | codex.md | attachments, codex-runtime, project-core, shell-rules, ticket-ownership | — | — |
 | `frontend-classification` | — | implement, refine | — | — |
 | `implement` | codex.md, phases/phase-1-plan.md, phases/phase-2-worktree.md, phases/phase-3-test-red.md, phases/phase-4-implement-green.md, phases/phase-5-refactor.md, phases/phase-6-7-review.md, phases/phase-8-docs.md, phases/phase-9-pr.md | address-review, attachments, babysit, codex-runtime, frontend-classification, project-core, review, shell-rules, subagent-safety, testing, ticket-ownership, verify-ui | run-artifact-dir.sh | code-reviewer, context-gatherer, implementer, lessons-collector, planner, security-reviewer, silent-failure-hunter |
-| `maintain` | codex.md, modes/clients.md, modes/docs.md, modes/rules.md, modes/structure.md | codex-runtime, project-core, shell-rules, subagent-safety, worktrees | check.sh | docs-maintainer, portability-maintainer, rules-maintainer, structure-maintainer |
+| `maintain` | codex.md, modes/backlog.md, modes/clients.md, modes/docs.md, modes/rules.md, modes/structure.md | codex-runtime, project-core, shell-rules, subagent-safety, worktrees | check.sh | backlog-maintainer, docs-maintainer, portability-maintainer, rules-maintainer, structure-maintainer |
 | `pr-comment-filter` | — | address-review, babysit | — | — |
 | `project-core` | — | — | — | — |
 | `refactor` | codex.md | codex-runtime, project-core, shell-rules, subagent-safety | — | — |
@@ -167,6 +168,7 @@ companion) for every skill, including the internal ones not listed above.
 
 **Core workflow docs**
 - `docs/adapter-contract.md`
+- `docs/followup-triage.md`
 - `docs/git-workflow.md`
 - `docs/pipeline-safety.md`
 - `docs/shell-scripting-gotchas.md`
@@ -387,7 +389,7 @@ The skills drive a ticket through a label-based state machine (`gh issue edit`).
 | `Implemented` | `/cenci:babysit` — on PR merge | PR merged — done |
 | `Followup` | `/cenci:implement` — Phase 9, and `/cenci:address-review` | Deferred/out-of-scope item captured from a session — triage before working |
 
-`Followup` is a separate capture tag applied to followup tickets created at PR time (and appended to by `address-review`'s Acknowledge action) — it is not a board-progression state and is not part of the linear lifecycle below.
+`Followup` is a separate capture tag applied to followup tickets created at PR time (and appended to by `address-review`'s Acknowledge action) — it is an untriaged capture queue, never release-blocking, not a board-progression state, and not part of the linear lifecycle below. Items leave the queue only when triaged: grouped and supersede-closed via `/cenci:maintain backlog`, or promoted via `/cenci:refine` (see `flow/docs/followup-triage.md`).
 
 Full lifecycle: `New → Refined → [Designed] → Planned → Working → In Review → Implemented`. **Design always happens on a dedicated design ticket**: when a frontend ticket lacks an approved design, `/cenci:refine` creates a `Design`-labeled companion ticket (or leads a split with a design child) that the implementation ticket depends on. `/cenci:implement` redirects `Design` tickets to `/cenci:design`, which commits the spec on main, propagates `Designed` to the dependent implementation tickets (satisfying implement's design gate), and closes the design ticket (`New → Refined → Designed → closed`; no PR — the one exception to "1 ticket = 1 PR"). On the board, the `Designed` column holds implementation tickets whose design is ready. A planning session ends on **`Planned`** — a saved plan sits in `.plans/`, waiting; picking it up with `/cenci:implement .plans/<file>` swaps `Planned → Working` — except the Trivial Fast Path, which arms the goal and continues into Phase 2 without a separate plan-file relaunch. Opening the PR (Phase 9) only advances the ticket to **`In Review`**; the transition to **`Implemented`** happens when the PR merges — [babysit](#babysitting-a-pr) performs that swap using the merged PR's `closingIssuesReferences`. (`configure` documents these labels but does not create them; add the matching columns to your board.)
 

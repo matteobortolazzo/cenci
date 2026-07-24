@@ -10,8 +10,10 @@ explicitly. Keep authenticated mutations and every user question in the root age
 ## Phase 1 — Scope
 
 Parse the first argument as the mode when it is `structure`, `docs`, `clients`, `rules`,
-or `all`; blank defaults to `all`. Parse the next token as scope only when it exactly
-matches a configured project slug. The remaining text is additional context.
+`backlog`, or `all`; blank defaults to `all`. Mode `backlog` mutates GitHub issues rather
+than repo files, so it is excluded from `all` and must be requested explicitly. Parse the
+next token as scope only when it exactly matches a configured project slug. The remaining
+text is additional context.
 
 Read the root and applicable project `AGENTS.md` files. If scope is `watch` or `sandbox`, report `not yet covered` and stop before Phase 2. Scope `flow`, or omitted scope in the configured repository, continues.
 
@@ -33,6 +35,8 @@ bounded prompts from `flow/agents/*-maintainer.md`:
 - Mode `docs` launches only `docs-maintainer`.
 - Mode `clients` launches only `portability-maintainer`.
 - Mode `rules` launches only `rules-maintainer`.
+- Mode `backlog` launches only `backlog-maintainer`; it is never part of `all`, since its
+  apply path mutates GitHub issues rather than repo files.
 - Mode `all` launches all four workers in parallel.
 
 Give every worker the resolved mode, scope, additional context, applicable mode file,
@@ -48,8 +52,8 @@ category, or imply that category was verified clean.
 
 Present the deterministic results grouped by pass, warn, fail, and skip, including each
 non-pass result's concrete fix. Then list worker findings grouped by Structure,
-Documentation drift, Generated index drift, Client mismatch, Test gap, and Rule hygiene,
-with severity and repair confidence visible.
+Documentation drift, Generated index drift, Client mismatch, Test gap, Rule hygiene, and
+Followup backlog, with severity and repair confidence visible.
 
 List every incomplete worker category separately with its reason. Completion counts and
 approval scope include only checks and workers that actually completed.
@@ -73,6 +77,12 @@ The normal-mode invocation must receive this approved plan explicitly; it must n
 the selection or silently substitute a new audit.
 
 ## Phase 6 — Apply
+
+Mode `backlog` uses a different apply path: it consolidates GitHub issues (merge duplicates,
+batch small items, promote) and mutates no repository files, so it creates no worktree,
+branch, commit, or PR, and skips the `check.sh`/health-gate re-verify — follow the
+GitHub-issue apply path in `modes/backlog.md`. The rest of this section applies to the four
+repo-audit modes.
 
 Verify the normal-mode invocation includes the approved apply plan. Persist a maintain
 checkpoint, then generate and validate one run token following the shared worktree

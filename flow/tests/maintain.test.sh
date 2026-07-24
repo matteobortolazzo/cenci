@@ -1645,6 +1645,8 @@ MAINTAIN_MODE_DOCS="${MAINTAIN_SKILL_DIR}/modes/docs.md"
 MAINTAIN_MODE_CLIENTS="${MAINTAIN_SKILL_DIR}/modes/clients.md"
 MAINTAIN_MODE_RULES="${MAINTAIN_SKILL_DIR}/modes/rules.md"
 MAINTAIN_AGENT_RULES="${FLOW_DIR}/agents/rules-maintainer.md"
+MAINTAIN_MODE_BACKLOG="${MAINTAIN_SKILL_DIR}/modes/backlog.md"
+MAINTAIN_AGENT_BACKLOG="${FLOW_DIR}/agents/backlog-maintainer.md"
 
 # assert_file_has_phrase <file> <phrase> <label> -- fails if the file is
 # missing OR the exact (grep -F, literal) phrase is not present.
@@ -1759,8 +1761,8 @@ assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "launch only \`rules-maintainer\`"
 
 # --- SKILL.md grammar: rules is now a valid first-token mode alongside
 # structure/docs/clients, and the "not yet a valid mode" sentence is gone --
-MAINTAIN_MODE_LIST_PHRASE='`structure`, `docs`, `clients`, or `rules`'
-assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "${MAINTAIN_MODE_LIST_PHRASE}" "MC32 SKILL.md grammar lists rules as a valid mode token"
+MAINTAIN_MODE_LIST_PHRASE='`structure`, `docs`, `clients`, `rules`, or `backlog`'
+assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "${MAINTAIN_MODE_LIST_PHRASE}" "MC32 SKILL.md grammar lists rules and backlog as valid mode tokens"
 assert_file_lacks_phrase "${MAINTAIN_SKILL_MD}" "is not yet a valid mode" "MC33 SKILL.md no longer says rules is not yet a valid mode"
 
 # --- codex.md parity mention: a rule/lesson-curation mention is added to the
@@ -1785,6 +1787,55 @@ assert_file_lacks_phrase "${MAINTAIN_MODE_RULES}" "~10" "MC41 rules.md must not 
 assert_file_lacks_phrase "${MAINTAIN_MODE_RULES}" "~25" "MC42 rules.md must not restate the topic-doc numeric threshold"
 assert_file_has_phrase "${MAINTAIN_MODE_RULES}" "lessons-learned*.md" "MC43 rules.md names legacy lessons-learned*.md files"
 assert_file_has_phrase "${MAINTAIN_MODE_RULES}" "same PR" "MC44 rules.md states legacy survivors are relocated and the legacy file deleted in the same PR"
+
+# =====================================================================
+# backlog mode -- consolidation of the open Followup queue (merge dups,
+# batch small items, promote). backlog is a fifth single mode, deliberately
+# EXCLUDED from `all` because its apply path mutates GitHub issues, not repo
+# files. Mirrors the #545/#546 anchor-phrase idiom above.
+# =====================================================================
+
+# --- Mode parsing: backlog.md names backlog-maintainer as its sole analyzer,
+# mirroring MC1-3/MC26 -------------------------------------------------------
+assert_file_has_phrase "${MAINTAIN_MODE_BACKLOG}" "backlog-maintainer" "MCB1 backlog.md names backlog-maintainer"
+
+# --- One-mode-one-analyzer gating: backlog.md must not name the other four
+# analyzers, mirroring the MC4-9/MC27-29 negative-test pattern ---------------
+assert_file_lacks_phrase "${MAINTAIN_MODE_BACKLOG}" "structure-maintainer" "MCB2 backlog.md must not name structure-maintainer"
+assert_file_lacks_phrase "${MAINTAIN_MODE_BACKLOG}" "docs-maintainer" "MCB3 backlog.md must not name docs-maintainer"
+assert_file_lacks_phrase "${MAINTAIN_MODE_BACKLOG}" "portability-maintainer" "MCB4 backlog.md must not name portability-maintainer"
+assert_file_lacks_phrase "${MAINTAIN_MODE_BACKLOG}" "rules-maintainer" "MCB5 backlog.md must not name rules-maintainer"
+
+# --- SKILL.md Phase 3 dispatch: mode backlog launches only backlog-maintainer,
+# same "launch only \`<agent>\`" phrasing as the other modes (also the
+# backtick reference check.sh --write resolves into the agents/workflow-deps
+# tables) -------------------------------------------------------------------
+assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "launch only \`backlog-maintainer\`" "MCB6 SKILL.md Phase 3 dispatches mode backlog to launch only backlog-maintainer"
+
+# --- backlog is excluded from `all` in both client files (it mutates GitHub
+# issues, not repo files) ---------------------------------------------------
+assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "is excluded from \`all\`" "MCB7 SKILL.md documents backlog as excluded from all"
+assert_file_has_phrase "${MAINTAIN_CODEX_MD}" "is excluded from \`all\`" "MCB8 codex.md documents backlog as excluded from all"
+
+# --- codex.md dispatch parity: mode backlog launches only backlog-maintainer,
+# and mode all still launches exactly the four repo-audit workers -----------
+assert_file_has_phrase "${MAINTAIN_CODEX_MD}" "Mode \`backlog\` launches only \`backlog-maintainer\`" "MCB9 codex.md dispatches mode backlog to backlog-maintainer"
+assert_file_has_phrase "${MAINTAIN_CODEX_MD}" "Mode \`all\` launches all four workers in parallel." "MCB10 codex.md keeps mode all at the four repo-audit workers (backlog excluded)"
+
+# --- backlog-maintainer.md: sole-owned category, read-only discipline, the
+# default-Keep classification, and no stale-close action --------------------
+assert_file_has_phrase "${MAINTAIN_AGENT_BACKLOG}" "Followup backlog" "MCB11 backlog-maintainer.md documents Category: Followup backlog"
+assert_file_has_phrase "${MAINTAIN_AGENT_BACKLOG}" "you never close, edit, or create issues" "MCB12 backlog-maintainer.md states it is read-only and never mutates GitHub"
+assert_file_has_phrase "${MAINTAIN_AGENT_BACKLOG}" "Default is Keep" "MCB13 backlog-maintainer.md preserves default-Keep classification"
+assert_file_has_phrase "${MAINTAIN_AGENT_BACKLOG}" "no Close-stale action" "MCB14 backlog-maintainer.md has no stale-close action (no expiry)"
+
+# --- modes/backlog.md apply path: GitHub-issue mutations, not a worktree/PR;
+# supersede-close preserves content; created polish ticket carries no Followup
+# label ---------------------------------------------------------------------
+assert_file_has_phrase "${MAINTAIN_MODE_BACKLOG}" "no worktree, no branch, no commit, no PR" "MCB15 backlog.md apply path opens no worktree/branch/commit/PR"
+assert_file_has_phrase "${MAINTAIN_MODE_BACKLOG}" "Superseded by #<new> — consolidated via /cenci:maintain backlog." "MCB16 backlog.md supersede-closes each source with the consolidation comment"
+assert_file_has_phrase "${MAINTAIN_MODE_BACKLOG}" "Create the ticket with **no** \`Followup\` label" "MCB17 backlog.md creates the polish ticket without the Followup label"
+assert_file_has_phrase "${MAINTAIN_MODE_BACKLOG}" "stop before closing any source" "MCB18 backlog.md never closes a source before the new ticket exists"
 
 # --- Garden retirement (#547): flow/skills/garden/ must be gone, and no
 # retired-command literal (the old skill's slash-invocation prefixed with
