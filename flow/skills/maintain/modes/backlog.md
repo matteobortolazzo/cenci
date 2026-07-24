@@ -40,9 +40,11 @@ and reuse its trailing token to scope this run's temp files, per AGENTS.md's rul
 **Batch** (consolidate a group into one polish ticket):
 
 1. Write the new ticket's title and body to run-token-scoped temp files. The body cites each source ticket, carries a `Supersedes #a #b #c` line, and states the combined-ticket sizing rationale (`docs/ticket-sizing.md:36-41`).
-2. Create the ticket with **no** `Followup` label — a human chose to consolidate it, so it enters the backlog as a normal, unrefined ticket:
+2. Create the ticket with **no** `Followup` label — a human chose to consolidate it, so it enters the backlog as a normal, unrefined ticket. Read the title back from its temp file and guard against an empty read before the create, exactly as `phase-9-pr.md` does (the title is externally-derived free text; there is no `--title-file` flag, so it must never be inline-interpolated from an issue body):
 
    ```bash
+   TITLE=$(cat <title-path>) || { echo "backlog polish-ticket title read failed" >&2; exit 1; }
+   [[ -n "$TITLE" ]] || { echo "backlog polish-ticket title is empty" >&2; exit 1; }
    gh issue create --repo <owner>/<repo> --title "$TITLE" --body-file <body-path>
    ```
 

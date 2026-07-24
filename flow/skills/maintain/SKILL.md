@@ -17,11 +17,13 @@ allowed-tools: Read, Edit, Write, Grep, Glob, Task, Bash(git:*), Bash(gh:*), Bas
 
 There is no unified maintenance command. Structural, documentation, client-portability, and rule
 hygiene consistency each drift independently as the repo grows. This skill pairs a deterministic,
-LLM-free checker (`scripts/check.sh`) with four lightweight judgment-layer agents, reports every
+LLM-free checker (`scripts/check.sh`) with four lightweight repo-audit judgment agents (plus a
+fifth, opt-in `backlog` agent that consolidates the `Followup` ticket queue), reports every
 finding with evidence and a proposed repair, and only ever mutates the repo after explicit human
 approval, in a dedicated worktree, as one reviewed PR. `rules` mode curates `## Critical Rules`
 and topic-doc rule bullets — the same curation the retired garden skill used to perform, folded
-into this unified flow.
+into this unified flow; `backlog` mode groups and supersede-closes open `Followup` tickets, its
+one apply path that mutates GitHub issues rather than repo files.
 
 ## Context
 
