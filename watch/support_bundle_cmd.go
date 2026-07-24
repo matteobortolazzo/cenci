@@ -98,16 +98,16 @@ type bundleEntry struct {
 // versions, per-container logs) degrades to an in-band placeholder instead of
 // aborting the whole run.
 func collectSupportBundle() (entries []bundleEntry, manifestText string, err error) {
-	runtimeName, runtimeErr := sandbox.ContainerRuntime()
+	runtimes, runtimesErr := sandbox.AvailableRuntimes()
 
-	var containers []sandbox.Container
+	var rows []sandbox.ContainerRow
 	var listErr error
-	if runtimeErr == nil {
-		containers, listErr = sandbox.ListContainers(runtimeName)
+	if runtimesErr == nil {
+		rows, listErr = sandbox.ListAllContainers(runtimes)
 	}
 
 	entries = append(entries,
-		bundleEntry{"versions.txt", []byte(versionsText(runtimeName, runtimeErr, listErr))},
+		bundleEntry{"versions.txt", []byte(versionsText(runtimes, runtimesErr, listErr))},
 		bundleEntry{"environment.txt", []byte(environmentNamesText())},
 		bundleEntry{"daemon-status.txt", []byte(daemonStatusText())},
 		bundleEntry{"config.json", configEntryContent()},
@@ -115,31 +115,45 @@ func collectSupportBundle() (entries []bundleEntry, manifestText string, err err
 
 	var eng *launcher.Engine
 	var buf bytes.Buffer
-	if len(containers) > 0 {
+	if len(rows) > 0 {
 		eng, err = launcher.New(os.Stdin, &buf, io.Discard)
 		if err != nil {
 			return nil, "", fmt.Errorf("initialize sandbox engine: %w", err)
 		}
 	}
 
-	for _, c := range containers {
+	// A container name appearing under more than one runtime (a same-name
+	// collision) must produce distinct, runtime-disambiguated bundle entry
+	// filenames rather than one silently overwriting the other.
+	nameCounts := make(map[string]int, len(rows))
+	for _, r := range rows {
+		nameCounts[r.Container.Name]++
+	}
+
+	for _, r := range rows {
+		c := r.Container
+		suffix := ""
+		if nameCounts[c.Name] > 1 {
+			suffix = "-" + r.Runtime
+		}
+
 		buf.Reset()
 		scope := launcher.ScopeForContainer(c.Name, c.Image)
 		// Diagnose is a best-effort report: it always returns nil on a
 		// successful render (see internal/sandbox/launcher/diagnose.go), so
 		// its buffered output is used regardless of the return value.
-		_ = eng.Diagnose(scope)
+		_ = eng.WithRuntime(r.Runtime).Diagnose(scope)
 		diagContent := append([]byte(nil), buf.Bytes()...)
-		entries = append(entries, bundleEntry{"diagnose-" + c.Name + ".txt", diagContent})
+		entries = append(entries, bundleEntry{"diagnose-" + c.Name + suffix + ".txt", diagContent})
 
-		logData, logErr := exec.Command(runtimeName, "logs", "--tail", "500", c.Name).CombinedOutput()
+		logData, logErr := exec.Command(r.Runtime, "logs", "--tail", "500", c.Name).CombinedOutput()
 		if logErr != nil {
 			logData = []byte(fmt.Sprintf("(logs unavailable: %v)\n", logErr))
 		}
-		entries = append(entries, bundleEntry{"logs/boot-" + c.Name + ".log", logData})
+		entries = append(entries, bundleEntry{"logs/boot-" + c.Name + suffix + ".log", logData})
 	}
 
-	manifestText = buildManifest(entries, len(containers))
+	manifestText = buildManifest(entries, len(rows))
 	entries = append([]bundleEntry{{"manifest.txt", []byte(manifestText)}}, entries...)
 
 	return entries, manifestText, nil
@@ -170,24 +184,28 @@ func buildManifest(entries []bundleEntry, containerCount int) string {
 	return b.String()
 }
 
-// versionsText reports the cenci binary version and the resolved container
-// runtime's name and self-reported version, or notes why the runtime could
-// not be resolved. When the runtime resolved but listing its containers
+// versionsText reports the cenci binary version and every installed
+// container runtime's name and self-reported version (one "runtime: ..." +
+// "runtime version: ..." pair per runtime, since a dual-runtime host has
+// more than one to report on), or notes why no runtime could be resolved at
+// all. When at least one runtime resolved but listing containers across them
 // failed (listErr), that failure is surfaced as a visible "containers:
 // unavailable: <err>" line rather than silently presenting as zero
 // containers found (#572's failure-visibility-consistency rule).
-func versionsText(runtimeName string, runtimeErr error, listErr error) string {
+func versionsText(runtimes []string, runtimesErr error, listErr error) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "cenci: %s\n", version)
-	if runtimeErr != nil {
-		fmt.Fprintf(&b, "runtime: unavailable: %v\n", runtimeErr)
+	if runtimesErr != nil {
+		fmt.Fprintf(&b, "runtime: unavailable: %v\n", runtimesErr)
 		return b.String()
 	}
-	fmt.Fprintf(&b, "runtime: %s\n", runtimeName)
-	if out, err := exec.Command(runtimeName, "--version").Output(); err == nil && strings.TrimSpace(string(out)) != "" {
-		fmt.Fprintf(&b, "runtime version: %s\n", strings.TrimSpace(string(out)))
-	} else {
-		fmt.Fprintf(&b, "runtime version: unknown\n")
+	for _, rt := range runtimes {
+		fmt.Fprintf(&b, "runtime: %s\n", rt)
+		if out, err := exec.Command(rt, "--version").Output(); err == nil && strings.TrimSpace(string(out)) != "" {
+			fmt.Fprintf(&b, "runtime version: %s\n", strings.TrimSpace(string(out)))
+		} else {
+			fmt.Fprintf(&b, "runtime version: unknown\n")
+		}
 	}
 	if listErr != nil {
 		fmt.Fprintf(&b, "containers: unavailable: %v\n", listErr)

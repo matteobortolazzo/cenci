@@ -24,13 +24,33 @@ import (
 
 // writeFakeDocker writes a fake `docker` (or `podman`) to dir that appends
 // each invocation's argv (space-joined) as a line to callLog, and — when
-// invoked as `<name> ps ...` — prints psOutput to stdout.
+// invoked as `<name> ps ...` — answers psOutput (a tab-separated
+// name/status/image row per line, ListContainers' `ps -a --format ...`
+// shape): `ps -a` prints psOutput verbatim, while a plain `ps` (the
+// RunningSandboxContainers(All) `--format {{.Names}}` shape `sandbox stop`
+// relies on) prints only the first (name) field of each line — so a caller
+// asserting on the exact stopped-container name (not just a call-log
+// substring) gets a clean name, never the whole tab-joined row (#629).
 func writeFakeDocker(t *testing.T, dir, name, callLog, psOutput string) {
 	t.Helper()
 	body := "#!/bin/sh\n" +
 		"printf '%s\\n' \"$*\" >> " + exectest.ShellQuote(callLog) + "\n" +
-		"if [ \"$1\" = \"ps\" ]; then printf '%s' " + exectest.ShellQuote(psOutput) + "; fi\n" +
-		"exit 0\n"
+		"psout=" + exectest.ShellQuote(psOutput) + "\n" +
+		`if [ "$1" = "ps" ]; then
+  if [ "$2" = "-a" ]; then
+    printf '%s' "$psout"
+  else
+    tab=$(printf '\t')
+    IFS='
+'
+    for line in $psout; do
+      fname=${line%%"$tab"*}
+      [ -n "$fname" ] && printf '%s\n' "$fname"
+    done
+  fi
+fi
+exit 0
+`
 	exectest.WriteExecutable(t, filepath.Join(dir, name), body)
 }
 
@@ -172,57 +192,148 @@ func joinArgv(argv []string) string {
 // (startupFailureDetail's short-lived home-volume reads, and diagnose's
 // plugin-manifest read) is told apart by the requested path, one of the four
 // FAKE_* vars above.
+//
+// Every FAKE_<VERB>[_EXIT] var above also has a FAKE_<VERB>_DOCKER/
+// FAKE_<VERB>_PODMAN (or FAKE_<VERB>_EXIT_DOCKER/FAKE_<VERB>_EXIT_PODMAN)
+// override, resolved from the invoking binary's own name and falling back to
+// the plain var — see internal/sandbox/launcher/faketest_test.go's
+// writeFakeRuntime doc comment for the full rationale (ticket #629's
+// dual-runtime test-fake keying: dual-runtime tests put both a docker and a
+// podman fake on PATH at once, one shared process environment, so a single
+// FAKE_PS could never script them to answer differently in the same test).
+// This fv/fe/fset trio must stay byte-parallel with that one (watch
+// AGENTS.md's #493 keep-in-sync rule).
 func writeScriptedRuntime(t *testing.T, dir, name, callLog string) {
 	t.Helper()
-	body := "#!/bin/sh\n" +
-		"printf '%s\\n' \"$*\" >> " + exectest.ShellQuote(callLog) + "\n" +
-		"case \"$1\" in\n" +
-		"image) if [ \"$2\" = inspect ]; then printf '%s|%s\\n' \"${FAKE_IMAGE_AGENT_LIFECYCLE:-shared-v2}\" \"${FAKE_IMAGE_BASE_VERSION:-}\"; exit \"${FAKE_IMAGE_INSPECT_EXIT:-0}\"; fi ;;\n" +
-		"build) exit \"${FAKE_BUILD_EXIT:-0}\" ;;\n" +
-		"images) if [ -n \"${FAKE_IMAGES+x}\" ]; then printf '%s' \"${FAKE_IMAGES}\"; else for last do :; done; printf '%s\\n' \"${last}\"; fi; exit \"${FAKE_INSPECT_EXIT:-0}\" ;;\n" +
-		"ps) printf '%s' \"${FAKE_PS:-}\"; exit \"${FAKE_PS_EXIT:-0}\" ;;\n" +
-		"volume) case \"$2\" in\n" +
-		"  ls) printf '%s' \"${FAKE_VOLUMES:-}\"; exit \"${FAKE_VOLUME_LS_EXIT:-0}\" ;;\n" +
-		"  inspect) exit \"${FAKE_VOLUME_INSPECT_EXIT:-0}\" ;;\n" +
-		"  esac ;;\n" +
-		// The default value's "\}" backslash-escapes the inner brace so the
-		// shell's ${VAR:-word} parser can't mistake it for the expansion's
-		// own closing brace; the fallback still evaluates to the literal
-		// two-character JSON "{}" (empty runtimes map = sysbox-runc
-		// unregistered) — not a stray typo.
-		"info) printf '%s' \"${FAKE_INFO_RUNTIMES:-{\\}}\" ;;\n" +
-		"rm) exit 0 ;;\n" +
-		"run) case \"$*\" in\n" +
-		"  *'/bin/cat'*)\n" +
-		"    case \"$*\" in\n" +
-		"    *'.cenci-agent-startup-error'*) printf '%s' \"${FAKE_STARTUP_ERROR:-}\"; exit \"${FAKE_STARTUP_ERROR_EXIT:-0}\" ;;\n" +
-		"    *'.cenci-boot.log'*) printf '%s' \"${FAKE_BOOT_LOG:-}\"; exit \"${FAKE_BOOT_LOG_EXIT:-0}\" ;;\n" +
-		"    *'.cenci-startup-failed'*) printf '%s' \"${FAKE_STARTUP_MARKER:-}\"; exit \"${FAKE_STARTUP_MARKER_EXIT:-0}\" ;;\n" +
-		"    *'.cenci-dockerd-startup-error'*) printf '%s' \"${FAKE_DOCKERD_MARKER:-}\"; exit \"${FAKE_DOCKERD_MARKER_EXIT:-0}\" ;;\n" +
-		"    *'marketplace.json'*) printf '%s' \"${FAKE_PLUGIN_MANIFEST:-}\"; exit \"${FAKE_PLUGIN_MANIFEST_EXIT:-0}\" ;;\n" +
-		"    esac\n" +
-		"    ;;\n" +
-		"  *'agent-cli.sh update'*) [ -z \"${FAKE_RUN_STDERR:-}\" ] || printf '%s\\n' \"${FAKE_RUN_STDERR}\" >&2; exit \"${FAKE_RUN_EXIT:-0}\" ;;\n" +
-		"  *'test -x /opt/cenci-agent'*) exit \"${FAKE_AGENT_CHECK_EXIT:-0}\" ;;\n" +
-		"  esac\n" +
-		"  printf '%s\\n' fake-container-id ;;\n" +
-		"inspect)\n" +
-		"  case \"$*\" in\n" +
-		// Checked first: the format string below deliberately contains the
-		// literal substrings "Labels" and "Mounts" (it reads
-		// .Config.Labels and ranges over .Mounts), so it must be matched
-		// before the generic *Labels*/*Mounts* arms or those would shadow it.
-		"  *'cenci-sand.dind'*) printf '%b' \"${FAKE_REUSE_POSTURE:-|runc|0\\nworkspace-vol::/workspace\\n}\"; exit \"${FAKE_CONTAINER_INSPECT_EXIT:-0}\" ;;\n" +
-		"  *State.Status*) printf '%s\\n' \"${FAKE_INSPECT_STATE:-running 0}\"; exit \"${FAKE_CONTAINER_INSPECT_EXIT:-0}\" ;;\n" +
-		"  *Labels*) printf '%s\\n' \"${FAKE_INSPECT_LABEL:-}\" ;;\n" +
-		"  *'.RW'*) printf '%b' \"${FAKE_AGENT_MOUNTS:-cenci-agent-cli-claude|/opt/cenci-agent|false\\n}\"; exit \"${FAKE_CONTAINER_INSPECT_EXIT:-0}\" ;;\n" +
-		"  *Mounts*) printf '%b' \"${FAKE_INSPECT_MOUNTS:-}\"; exit \"${FAKE_CONTAINER_INSPECT_EXIT:-0}\" ;;\n" +
-		"  esac\n" +
-		"  ;;\n" +
-		"logs) printf '%s' \"${FAKE_LOGS:-}\" ;;\n" +
-		"exec) if [ \"$2\" = \"-it\" ]; then exit \"${FAKE_ATTACH_EXIT:-0}\"; fi; case \"$*\" in *'/tmp/cenci-ready'*) exit \"${FAKE_READY_EXIT:-0}\" ;; esac; exit 0 ;;\n" +
-		"esac\n" +
-		"exit 0\n"
+	body := `#!/bin/sh
+printf '%s\n' "$*" >> ` + exectest.ShellQuote(callLog) + `
+rtname=${0##*/}
+rt=""
+case "$rtname" in
+docker) rt=DOCKER ;;
+podman) rt=PODMAN ;;
+esac
+fv() {
+  n=$1; d=$2
+  if [ -n "$rt" ]; then
+    v="FAKE_${n}_${rt}"
+    eval "s=\${${v}+x}"
+    if [ "$s" = x ]; then eval "printf '%s' \"\${${v}}\""; return; fi
+  fi
+  eval "s=\${FAKE_${n}+x}"
+  if [ "$s" = x ]; then eval "printf '%s' \"\${FAKE_${n}}\""; else printf '%s' "$d"; fi
+}
+fe() {
+  n=$1
+  if [ -n "$rt" ]; then
+    v="FAKE_${n}_EXIT_${rt}"
+    eval "s=\${${v}+x}"
+    if [ "$s" = x ]; then eval "printf '%s' \"\${${v}}\""; return; fi
+  fi
+  eval "s=\${FAKE_${n}_EXIT+x}"
+  if [ "$s" = x ]; then eval "printf '%s' \"\${FAKE_${n}_EXIT}\""; else printf '%s' 0; fi
+}
+fset() {
+  n=$1
+  if [ -n "$rt" ]; then
+    v="FAKE_${n}_${rt}"
+    eval "s=\${${v}+x}"
+    if [ "$s" = x ]; then printf x; return; fi
+  fi
+  eval "s=\${FAKE_${n}+x}"
+  [ "$s" = x ] && printf x
+}
+# fvb is fv's %b-format counterpart (interprets backslash escapes, e.g. a
+# literal "\n" default). fv/fvb are called directly as statements (never
+# wrapped in "$(...)") wherever the resolved value is the entire printed
+# output: command substitution unconditionally strips every trailing
+# newline, which would silently corrupt a verbatim multi-line value like
+# FAKE_LOGS (must stay byte-parallel with faketest_test.go's writeFakeRuntime
+# fv/fe/fvb — #629's dual-runtime keying commit).
+fvb() {
+  n=$1; d=$2
+  if [ -n "$rt" ]; then
+    v="FAKE_${n}_${rt}"
+    eval "s=\${${v}+x}"
+    if [ "$s" = x ]; then eval "printf '%b' \"\${${v}}\""; return; fi
+  fi
+  eval "s=\${FAKE_${n}+x}"
+  if [ "$s" = x ]; then eval "printf '%b' \"\${FAKE_${n}}\""; else printf '%b' "$d"; fi
+}
+case "$1" in
+image) if [ "$2" = inspect ]; then printf '%s|%s\n' "$(fv IMAGE_AGENT_LIFECYCLE "shared-v2")" "$(fv IMAGE_BASE_VERSION "")"; exit "$(fe IMAGE_INSPECT)"; fi ;;
+build) exit "$(fe BUILD)" ;;
+images)
+  if [ -n "$(fset IMAGES)" ]; then
+    fv IMAGES ""
+  else
+    for last do :; done
+    printf '%s\n' "${last}"
+  fi
+  exit "$(fe INSPECT)"
+  ;;
+ps)
+  case "$*" in
+  *'{{.Status}}'*)
+    # ListContainers/ListAllContainers/RuntimesWithContainer's tri-field
+    # "ps -a --format {{.Names}}\t{{.Status}}\t{{.Image}}" shape (#629):
+    # every other ps invocation in this codebase (RunningSandboxContainers,
+    # containerRunning, prune's name-only "ps -a --format {{.Names}}") wants
+    # bare names, so FAKE_PS is conventionally scripted as one plain name
+    # per line; synthesize a status/image suffix per name here rather than
+    # requiring every existing FAKE_PS value to carry tabs, while still
+    # passing an already-tab-shaped FAKE_PS line through verbatim.
+    tab=$(printf '\t')
+    IFS='
+'
+    for n in $(fv PS ""); do
+      [ -n "$n" ] || continue
+      case "$n" in
+      *"$tab"*) printf '%s\n' "$n" ;;
+      *) printf '%s\tUp 1 hour\tcenci-sandbox:latest\n' "$n" ;;
+      esac
+    done
+    ;;
+  *) fv PS "" ;;
+  esac
+  exit "$(fe PS)"
+  ;;
+volume)
+  case "$2" in
+  ls) fv VOLUMES ""; exit "$(fe VOLUME_LS)" ;;
+  inspect) exit "$(fe VOLUME_INSPECT)" ;;
+  esac
+  ;;
+info) fv INFO_RUNTIMES "{}" ;;
+rm) exit 0 ;;
+run) case "$*" in
+  *'/bin/cat'*)
+    case "$*" in
+    *'.cenci-agent-startup-error'*) fv STARTUP_ERROR ""; exit "$(fe STARTUP_ERROR)" ;;
+    *'.cenci-boot.log'*) fv BOOT_LOG ""; exit "$(fe BOOT_LOG)" ;;
+    *'.cenci-startup-failed'*) fv STARTUP_MARKER ""; exit "$(fe STARTUP_MARKER)" ;;
+    *'.cenci-dockerd-startup-error'*) fv DOCKERD_MARKER ""; exit "$(fe DOCKERD_MARKER)" ;;
+    *'marketplace.json'*) fv PLUGIN_MANIFEST ""; exit "$(fe PLUGIN_MANIFEST)" ;;
+    esac
+    ;;
+  *'agent-cli.sh update'*) rs="$(fv RUN_STDERR "")"; [ -z "$rs" ] || printf '%s\n' "$rs" >&2; exit "$(fe RUN)" ;;
+  *'test -x /opt/cenci-agent'*) exit "$(fe AGENT_CHECK)" ;;
+  esac
+  printf '%s\n' fake-container-id ;;
+inspect)
+  case "$*" in
+  *'cenci-sand.dind'*) fvb REUSE_POSTURE "|runc|0\nworkspace-vol::/workspace\n"; exit "$(fe CONTAINER_INSPECT)" ;;
+  *State.Status*) printf '%s\n' "$(fv INSPECT_STATE "running 0")"; exit "$(fe CONTAINER_INSPECT)" ;;
+  *Labels*) printf '%s\n' "$(fv INSPECT_LABEL "")" ;;
+  *'.RW'*) fvb AGENT_MOUNTS "cenci-agent-cli-claude|/opt/cenci-agent|false\n"; exit "$(fe CONTAINER_INSPECT)" ;;
+  *Mounts*) fvb INSPECT_MOUNTS ""; exit "$(fe CONTAINER_INSPECT)" ;;
+  esac
+  ;;
+logs) fv LOGS "" ;;
+exec) if [ "$2" = "-it" ]; then exit "$(fe ATTACH)"; fi; case "$*" in *'/tmp/cenci-ready'*) exit "$(fe READY)" ;; esac; exit 0 ;;
+esac
+exit 0
+`
 	exectest.WriteExecutable(t, filepath.Join(dir, name), body)
 }
 
@@ -234,6 +345,21 @@ func writeScriptedRuntimes(t *testing.T, dir string) string {
 	writeScriptedRuntime(t, dir, "docker", callLog)
 	writeScriptedRuntime(t, dir, "podman", callLog)
 	return callLog
+}
+
+// writeScriptedRuntimePair writes both a docker and a podman fake to dir,
+// each with its OWN call log — unlike writeScriptedRuntimes' single shared
+// log (fine when only one of the two ever actually runs, the pre-#629
+// single-preferred-runtime world), a dual-runtime test needs to tell which
+// binary actually ran a given argv apart, since the sandbox commands under
+// test now genuinely invoke both docker and podman in the same run (#629).
+func writeScriptedRuntimePair(t *testing.T, dir string) (dockerLog, podmanLog string) {
+	t.Helper()
+	dockerLog = filepath.Join(dir, "docker-calls.txt")
+	podmanLog = filepath.Join(dir, "podman-calls.txt")
+	writeScriptedRuntime(t, dir, "docker", dockerLog)
+	writeScriptedRuntime(t, dir, "podman", podmanLog)
+	return dockerLog, podmanLog
 }
 
 // writeDockerOnlyRuntime writes only a fake docker (no podman) to dir. Dind

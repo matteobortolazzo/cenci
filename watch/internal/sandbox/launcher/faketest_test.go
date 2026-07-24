@@ -23,12 +23,17 @@ import (
 //	                     with no positional, every FAKE_IMAGES line is
 //	                     returned unfiltered.
 //	FAKE_PS            → `ps ...` stdout (any form)
-//	FAKE_PS_EXIT       → `ps ...` exit code (default 0); nonzero simulates a
+//	FAKE_PS_EXIT       → `ps ...` exit code (default 0); set nonzero to
+//	                     simulate one runtime's container-listing failure
+//	                     (the dual-runtime one-runtime-fails cases, #629) or a
 //	                     daemon-unreachable/runtime-invocation failure for
 //	                     containerRunning (ticket #627's Audit dispatch must
 //	                     treat this as inconclusive — inspectWarning +
 //	                     basis:"planned" — never as "not running").
 //	FAKE_VOLUMES       → `volume ls ...` stdout
+//	FAKE_VOLUME_LS_EXIT → `volume ls ...` exit code (default 0); set
+//	                     nonzero to simulate one runtime's volume-listing
+//	                     failure (#629)
 //	FAKE_INFO_RUNTIMES → `info --format ...` stdout (the sysbox-runc
 //	                     registration probe, sandbox.SysboxRegistered);
 //	                     defaults to "{}" (no runtimes registered), mirroring
@@ -105,22 +110,86 @@ import (
 //	                     (default 0); nonzero simulates an inspect failure
 //	                     on an otherwise-running container.
 //
+// Every FAKE_<VERB>[_EXIT] var above also has a FAKE_<VERB>_DOCKER/
+// FAKE_<VERB>_PODMAN (or FAKE_<VERB>_EXIT_DOCKER/FAKE_<VERB>_EXIT_PODMAN)
+// override, resolved from the invoking binary's own name (argv[0]'s
+// basename) and falling back to the plain FAKE_<VERB>[_EXIT] var when the
+// runtime-suffixed one isn't set. This is needed because dual-runtime tests
+// put both a docker fake and a podman fake on PATH simultaneously — one
+// shared process environment — so a single FAKE_PS could never script
+// docker and podman to report different containers in the same test run
+// (ticket #629's dual-runtime host-wide command coverage). A var "set" to
+// the empty string counts as set (distinct from unset), so a test can
+// deliberately script one runtime's listing as empty while the other
+// runtime's plain (non-suffixed) fallback still answers something.
+//
 // Plain /bin/sh (not env) so it resolves under a minimal overridden PATH.
 func writeFakeRuntime(t *testing.T, dir, name, callLog string) {
 	t.Helper()
 	// PATH is overridden to only the fake-runtime dir for these tests, so
-	// the images filter below must stay shell-builtin-only (case/for, no
-	// grep/awk) or it silently fails with "command not found" once the
-	// real PATH is gone.
+	// the images filter below (and the runtime-name lookup, which
+	// deliberately uses the shell builtin "${0##*/}" rather than the
+	// external `basename` command) must stay shell-builtin-only (case/for,
+	// no external commands) or it silently fails with "command not found"
+	// once the real PATH is gone.
 	body := `#!/bin/sh
 printf '%s\n' "$*" >> ` + exectest.ShellQuote(callLog) + `
+rtname=${0##*/}
+rt=""
+case "$rtname" in
+docker) rt=DOCKER ;;
+podman) rt=PODMAN ;;
+esac
+# fv NAME DEFAULT prints FAKE_<NAME>_<rt> when that exact var is set (even to
+# an empty string), else FAKE_<NAME> when set, else DEFAULT — see the doc
+# comment above for why (#629 dual-runtime test-fake keying). Must stay
+# byte-parallel with sandbox_open_test.go's writeScriptedRuntime fv/fe/fset.
+fv() {
+  n=$1; d=$2
+  if [ -n "$rt" ]; then
+    v="FAKE_${n}_${rt}"
+    eval "s=\${${v}+x}"
+    if [ "$s" = x ]; then eval "printf '%s' \"\${${v}}\""; return; fi
+  fi
+  eval "s=\${FAKE_${n}+x}"
+  if [ "$s" = x ]; then eval "printf '%s' \"\${FAKE_${n}}\""; else printf '%s' "$d"; fi
+}
+# fe NAME is fv's exit-code counterpart: FAKE_<NAME>_EXIT_<rt> falling back
+# to FAKE_<NAME>_EXIT, defaulting to 0.
+fe() {
+  n=$1
+  if [ -n "$rt" ]; then
+    v="FAKE_${n}_EXIT_${rt}"
+    eval "s=\${${v}+x}"
+    if [ "$s" = x ]; then eval "printf '%s' \"\${${v}}\""; return; fi
+  fi
+  eval "s=\${FAKE_${n}_EXIT+x}"
+  if [ "$s" = x ]; then eval "printf '%s' \"\${FAKE_${n}_EXIT}\""; else printf '%s' 0; fi
+}
+# fvb is fv's %b-format counterpart (interprets backslash escapes in the
+# resolved value, e.g. a literal "\n" default). fv/fvb are called directly as
+# statements (never wrapped in "$(...)") wherever the resolved value is the
+# entire printed output: command substitution unconditionally strips every
+# trailing newline, which would silently corrupt a verbatim multi-line value
+# (see #629's dual-runtime keying commit — this bit an early draft of this
+# fake on FAKE_PS/FAKE_VOLUMES/FAKE_IMAGES output).
+fvb() {
+  n=$1; d=$2
+  if [ -n "$rt" ]; then
+    v="FAKE_${n}_${rt}"
+    eval "s=\${${v}+x}"
+    if [ "$s" = x ]; then eval "printf '%b' \"\${${v}}\""; return; fi
+  fi
+  eval "s=\${FAKE_${n}+x}"
+  if [ "$s" = x ]; then eval "printf '%b' \"\${FAKE_${n}}\""; else printf '%b' "$d"; fi
+}
 case "$1" in
 images)
   if [ -n "$4" ]; then
     result=""
     IFS='
 '
-    for line in ${FAKE_IMAGES:-}; do
+    for line in $(fv IMAGES ""); do
       case "$line" in
         "$4":*) result="${result}${line}
 " ;;
@@ -128,32 +197,32 @@ images)
     done
     printf '%s' "$result"
   else
-    printf '%s' "${FAKE_IMAGES:-}"
+    fv IMAGES ""
   fi
   ;;
-ps) printf '%s' "${FAKE_PS:-}"; exit "${FAKE_PS_EXIT:-0}" ;;
+ps) fv PS ""; exit "$(fe PS)" ;;
 volume)
   case "$2" in
-  ls) printf '%s' "${FAKE_VOLUMES:-}" ;;
-  inspect) exit "${FAKE_VOLUME_INSPECT_EXIT:-0}" ;;
+  ls) fv VOLUMES ""; exit "$(fe VOLUME_LS)" ;;
+  inspect) exit "$(fe VOLUME_INSPECT)" ;;
   esac
   ;;
-info) printf '%s' "${FAKE_INFO_RUNTIMES:-{\}}" ;;
+info) fv INFO_RUNTIMES "{}" ;;
 run)
   case "$*" in
   *'/bin/cat'*)
     case "$*" in
-    *'.cenci-dockerd-startup-error'*) printf '%s' "${FAKE_DOCKERD_MARKER:-}"; exit "${FAKE_DOCKERD_MARKER_EXIT:-0}" ;;
+    *'.cenci-dockerd-startup-error'*) fv DOCKERD_MARKER ""; exit "$(fe DOCKERD_MARKER)" ;;
     esac
     ;;
   esac
   ;;
 inspect)
   case "$*" in
-  *'.HostConfig.NetworkMode'*) printf '%b' "${FAKE_OBSERVED_POSTURE:-cenci-sandbox:latest|bridge|runc||\n}"; exit "${FAKE_OBSERVED_POSTURE_EXIT:-0}" ;;
-  *'cenci-sand.dind'*) printf '%b' "${FAKE_REUSE_POSTURE:-|runc|0\nworkspace-vol::/workspace\n}" ;;
-  *State.Status*) printf '%s\n' "${FAKE_INSPECT_STATE:-running 0}" ;;
-  *'.RW'*) printf '%b' "${FAKE_INSPECT_MOUNTS:-}" ;;
+  *'.HostConfig.NetworkMode'*) fvb OBSERVED_POSTURE "cenci-sandbox:latest|bridge|runc||\n"; exit "$(fe OBSERVED_POSTURE)" ;;
+  *'cenci-sand.dind'*) fvb REUSE_POSTURE "|runc|0\nworkspace-vol::/workspace\n" ;;
+  *State.Status*) fv INSPECT_STATE "running 0"; printf '\n' ;;
+  *'.RW'*) fvb INSPECT_MOUNTS "" ;;
   esac
   ;;
 esac

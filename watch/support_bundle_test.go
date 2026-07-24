@@ -143,7 +143,16 @@ func entryNames(entries map[string][]byte) []string {
 
 func TestSupportBundle_WritesArchiveWithExpectedEntries(t *testing.T) {
 	fakeDir := t.TempDir()
-	writeScriptedRuntimes(t, fakeDir)
+	// Docker-only (not writeScriptedRuntimes' both-fakes setup): this test
+	// verifies general bundle contents, not dual-runtime behavior, and
+	// FAKE_PS below is unscoped (not _DOCKER/_PODMAN-keyed) so both fakes
+	// would otherwise report the same two containers under both runtimes —
+	// a genuine same-name collision (#629) that legitimately produces
+	// runtime-disambiguated diagnose-*/logs/boot-* filenames, which would
+	// break this test's plain-filename expectations below. See
+	// TestSupportBundle_Collision_SameNameContainersUnderBothRuntimes_BothAppearAsDistinctEntries
+	// in sandbox_dual_runtime_test.go for that collision behavior itself.
+	writeDockerOnlyRuntime(t, fakeDir)
 	assets := writeAssetFixture(t)
 	env, home := sbEnv(t, fakeDir, assets)
 	writeConfigJSON(t, home, `{"marker":"config-marker-xyz"}`)

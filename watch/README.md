@@ -719,6 +719,24 @@ launches ship with the [cenci-sandbox](../sandbox/README.md) plugin, resolved
 from the installed plugin automatically (`CENCI_SANDBOX_ASSETS=<dir>` overrides
 the resolution for development).
 
+On a host with both Docker and Podman installed, every management/diagnostic
+command below spans both engines instead of collapsing to one preferred
+runtime: `ls`, `stop`, `prune`, `update-agent`, `update-plugins` (scoped and
+`--all`), `diagnose`, and `support-bundle` all enumerate every installed
+runtime and act on whichever one(s) actually own the target, so a
+Docker-backed container is never invisible merely because Podman is also on
+PATH. `ls` tags every row with a `RUNTIME` column, and `stop` tags every
+stopped-container line as `stopped <name> (<runtime>)`; a same-name container
+existing independently under both engines shows up as two distinct,
+runtime-tagged entries rather than being silently deduplicated. `update-agent`
+updates the shared agent-CLI volume in every runtime that already has it,
+bootstrapping it in the preferred (Podman-first) runtime only when it exists
+nowhere. A failed per-runtime query still lets the healthy runtime's output
+through, plus a stderr error and a non-zero exit — never a silently empty
+result. (Launch-time runtime selection — Docker-first for `dind` mode,
+Podman-first otherwise — is unaffected; see `resolveLaunchContext` in
+`launch.go`.)
+
 ```bash
 # One-shot maintenance verbs
 cenci sandbox build             # build cenci-sandbox:latest (or the repo image if <repo>/.cenci/Dockerfile exists); builds the base first if missing
@@ -740,8 +758,9 @@ cenci sandbox reseed-creds      # alias for: cenci open --reseed-creds
 cenci sandbox reap-orphans      # kill container-side agent processes whose tmux pane is gone
 
 # List / stop sandbox containers
-cenci sandbox ls
+cenci sandbox ls                # NAME/STATUS/IMAGE/RUNTIME table across every installed runtime
 cenci sandbox stop              # stops every claude-cenci-*/codex-cenci-*/opencode-cenci-* container
+                                 # across every installed runtime; prints "stopped <name> (<runtime>)"
 cenci sandbox stop agentstack   # only containers whose name contains "agentstack"
 
 # Launch or attach an interactive session

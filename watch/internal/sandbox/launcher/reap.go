@@ -105,13 +105,8 @@ func ReapOrphans(stdout, stderr io.Writer) error {
 	}
 
 	// ── Runtimes to scan (independent of the single preferred runtime) ──
-	var runtimes []string
-	for _, rt := range []string{"docker", "podman"} {
-		if _, err := exec.LookPath(rt); err == nil {
-			runtimes = append(runtimes, rt)
-		}
-	}
-	if len(runtimes) == 0 {
+	runtimes, err := sandbox.AvailableRuntimes()
+	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "Error: no container runtime (docker/podman) found on PATH.")
 		return fmt.Errorf("no container runtime found")
 	}
