@@ -28,19 +28,24 @@
 #
 #   The legacy one-liner (`curl -fsSL .../main/install.sh | bash`) still
 #   works: piped runs with CENCI_REF unset re-exec themselves through the
-#   same verified download-verify-run path, from the newest release tag's
-#   install.sh — never live main. Set CENCI_REF=main (or pass --ref main) to
-#   explicitly opt into bleeding-edge, unverified main instead (unsafe;
-#   development use only).
+#   same verified download-verify-run path, from the newest `<layer>/vX.Y.Z`
+#   release tag's install.sh — never live main. That same resolved ref then
+#   pins the client marketplace registration and all three installed
+#   plugins' content — not just which install.sh runs — on every path
+#   (initial install, `cenci-installer update`, repair, dev-from-clone). Set
+#   CENCI_REF=main (or pass --ref main) to explicitly opt into bleeding-edge,
+#   unverified main instead (unsafe; development use only) — it is the only
+#   path that intentionally tracks main.
 #
 # Flags:
 #   --yes                                 accept defaults, never prompt
 #   --build / --no-build                  force / skip the sandbox image build
 #   --lazyboards / --no-lazyboards        force / skip lazyboards install
 #                                          (uninstall mode: --lazyboards also removes it)
-#   --ref <ref>                           install from this ref instead of the
-#                                          resolved latest release tag (e.g.
-#                                          --ref main); same as CENCI_REF=<ref>
+#   --ref <ref>                           marketplace + plugin content, and the installer
+#                                          itself, all come from this ref instead of the
+#                                          resolved latest release tag (e.g. --ref main);
+#                                          same as CENCI_REF=<ref>
 #   --help                                this text
 
 set -u
@@ -48,6 +53,12 @@ set -u
 MARKETPLACE_REPO="matteobortolazzo/cenci"
 MARKETPLACE_NAME="cenci"
 ALL_PLUGINS="cenci cenci-watch cenci-sandbox"
+# RESOLVED_REF is the single validated ref that governs marketplace
+# registration (and, through it, all three plugins' content) for this run —
+# resolved once in main and consumed by step_marketplace. Empty until main
+# resolves it (see resolve_install_ref / validate_ref_format / ref_available
+# near cenci_latest_ref).
+RESOLVED_REF=""
 LAZYBOARDS_REPO="matteobortolazzo/lazyboards"
 CODEX_MARKETPLACE_READY=0
 CLAUDE_MARKETPLACE_READY=0
@@ -779,14 +790,25 @@ step_marketplace() {
 	if [ "$HAS_CLAUDE" -eq 0 ]; then
 		:
 	elif marketplace_registered; then
-		# Registration alone doesn't mean the checkout is current — refresh it so
-		# find_plugin_path (cenci-installer launcher, macOS/Linux widget
-		# scripts) sees files added since the last update.
-		if claude plugin marketplace update "$MARKETPLACE_NAME" >/dev/null 2>&1; then
-			ok "Claude: marketplace '$MARKETPLACE_NAME' refreshed"
-			CLAUDE_MARKETPLACE_READY=1
+		# Registered, possibly at a different (or unpinned) ref. Neither
+		# client's in-place add/update semantics for repointing an existing
+		# registration are verified, so remove then re-add at RESOLVED_REF —
+		# the only mechanism that deterministically moves the registration
+		# (#625, Q4). Destructive-prerequisite convention: verify the remove
+		# succeeded before re-adding; don't proceed optimistically.
+		if claude plugin marketplace remove "$MARKETPLACE_NAME" >/dev/null 2>&1; then
+			if claude plugin marketplace add "${MARKETPLACE_REPO}@${RESOLVED_REF}" >/dev/null 2>&1; then
+				ok "Claude: marketplace '$MARKETPLACE_NAME' repointed to $RESOLVED_REF"
+				CLAUDE_MARKETPLACE_READY=1
+			else
+				fail "Claude: removed marketplace '$MARKETPLACE_NAME' but could not re-register it at $RESOLVED_REF. Run manually:
+  claude plugin marketplace add ${MARKETPLACE_REPO}@${RESOLVED_REF}"
+				INSTALL_FAILED=1
+			fi
 		else
-			fail "Claude: could not refresh marketplace '$MARKETPLACE_NAME'. Run manually: claude plugin marketplace update $MARKETPLACE_NAME"
+			fail "Claude: could not remove the existing marketplace registration before repointing it to $RESOLVED_REF. Run manually:
+  claude plugin marketplace remove $MARKETPLACE_NAME
+  claude plugin marketplace add ${MARKETPLACE_REPO}@${RESOLVED_REF}"
 			INSTALL_FAILED=1
 		fi
 	else
@@ -794,23 +816,32 @@ step_marketplace() {
 		if [ "$state" -eq 2 ]; then
 			fail "Claude: could not query registered marketplaces"
 			INSTALL_FAILED=1
-		elif claude plugin marketplace add "$MARKETPLACE_REPO" >/dev/null 2>&1; then
-			ok "Claude: registered $MARKETPLACE_REPO"
+		elif claude plugin marketplace add "${MARKETPLACE_REPO}@${RESOLVED_REF}" >/dev/null 2>&1; then
+			ok "Claude: registered ${MARKETPLACE_REPO}@${RESOLVED_REF}"
 			CLAUDE_MARKETPLACE_READY=1
 		else
 			fail "Claude: could not register the marketplace. Run manually:
-  claude plugin marketplace add $MARKETPLACE_REPO"
+  claude plugin marketplace add ${MARKETPLACE_REPO}@${RESOLVED_REF}"
 			INSTALL_FAILED=1
 		fi
 	fi
 
 	[ "$HAS_CODEX" -eq 1 ] || return 0
 	if codex_marketplace_registered; then
-		if codex plugin marketplace upgrade "$MARKETPLACE_NAME" >/dev/null 2>&1; then
-			ok "Codex: marketplace '$MARKETPLACE_NAME' refreshed"
-			CODEX_MARKETPLACE_READY=1
+		# Same remove+re-add contract as Claude above (#625, Q4).
+		if codex plugin marketplace remove "$MARKETPLACE_NAME" >/dev/null 2>&1; then
+			if codex plugin marketplace add "$MARKETPLACE_REPO" --ref "$RESOLVED_REF" >/dev/null 2>&1; then
+				ok "Codex: marketplace '$MARKETPLACE_NAME' repointed to $RESOLVED_REF"
+				CODEX_MARKETPLACE_READY=1
+			else
+				fail "Codex: removed marketplace '$MARKETPLACE_NAME' but could not re-register it at $RESOLVED_REF. Run manually:
+  codex plugin marketplace add $MARKETPLACE_REPO --ref $RESOLVED_REF"
+				INSTALL_FAILED=1
+			fi
 		else
-			fail "Codex: could not refresh marketplace '$MARKETPLACE_NAME'. Run manually: codex plugin marketplace upgrade $MARKETPLACE_NAME"
+			fail "Codex: could not remove the existing marketplace registration before repointing it to $RESOLVED_REF. Run manually:
+  codex plugin marketplace remove $MARKETPLACE_NAME
+  codex plugin marketplace add $MARKETPLACE_REPO --ref $RESOLVED_REF"
 			INSTALL_FAILED=1
 		fi
 	else
@@ -818,11 +849,11 @@ step_marketplace() {
 		if [ "$state" -eq 2 ]; then
 			fail "Codex: could not query registered marketplaces"
 			INSTALL_FAILED=1
-		elif codex plugin marketplace add "$MARKETPLACE_REPO" >/dev/null 2>&1; then
-			ok "Codex: registered $MARKETPLACE_REPO"
+		elif codex plugin marketplace add "$MARKETPLACE_REPO" --ref "$RESOLVED_REF" >/dev/null 2>&1; then
+			ok "Codex: registered $MARKETPLACE_REPO --ref $RESOLVED_REF"
 			CODEX_MARKETPLACE_READY=1
 		else
-			fail "Codex marketplace registration failed. Run manually: codex plugin marketplace add $MARKETPLACE_REPO"
+			fail "Codex marketplace registration failed. Run manually: codex plugin marketplace add $MARKETPLACE_REPO --ref $RESOLVED_REF"
 			INSTALL_FAILED=1
 		fi
 	fi
@@ -831,6 +862,11 @@ step_marketplace() {
 step_reconcile_plugins() {
 	local p old state
 	step "Reconciling plugins"
+	# No ref argument needed here: step_marketplace already pinned the
+	# marketplace registration to RESOLVED_REF, so `plugin install`/`plugin
+	# update`/`plugin add` below pull from that pinned checkout for every
+	# plugin. Do not reintroduce a ref-less registration path upstream of
+	# this step (#625) — the pin flows through the marketplace, not per-plugin.
 	if [ "$CLAUDE_MARKETPLACE_READY" -eq 1 ]; then
 		for p in $SELECTED; do
 			if plugin_installed "$p"; then
@@ -1537,6 +1573,51 @@ verify_installer_asset() {
 		rm -f "$file" "$bundle"
 		die "installer verification failed for the downloaded install.sh — cosign could not verify it against the pinned release identity (tampered, truncated, or mismatched signature); retry, or set CENCI_REF=main (or pass --ref main) to install from main instead (unverified)"
 	}
+}
+
+# resolve_install_ref prints the ref that must govern this run's marketplace
+# registration (and, through it, every installed plugin's content): the
+# caller-selected CENCI_REF when set (env, --ref, or a piped re-exec's own
+# CENCI_REF="$pin_tag" — see the immutable-release-pin block below), else the
+# newest release tag via cenci_latest_ref. Applies uniformly to every
+# dispatch path (install, `cenci-installer update`, repair, dev-from-clone),
+# not just the piped re-exec (#625). Capture-only: prints exactly the ref and
+# nothing else — no warn/echo leakage — so `ref="$(resolve_install_ref)"`
+# callers never see a diagnostic swallowed into the captured value.
+resolve_install_ref() {
+	if [ -n "$CENCI_REF" ]; then
+		printf '%s\n' "$CENCI_REF"
+		return 0
+	fi
+	cenci_latest_ref
+}
+
+# validate_ref_format <ref> — whole-string whitelist ([A-Za-z0-9._/-]) via
+# bash `[[ =~ ]]` (never line-oriented grep — a multi-line value with a
+# matching first line must not slip through). The ref flows straight into a
+# marketplace-registration URL/argv for both clients, so anything outside
+# this whitelist (spaces, quotes, shell metacharacters) is rejected before
+# it's ever interpolated. Also rejects a `..` path segment (which could let
+# the ref_available manifest probe resolve a different ref's content than
+# the one actually registered with the client CLI) and a leading `-` (which
+# risks Codex's `--ref <value>` invocation being misparsed as another flag
+# by some arg parsers) — both still empty-string-safe, and neither weakens
+# the whitelist's acceptance of slash-containing tags like `watch/v1.2.3`.
+validate_ref_format() {
+	case "$1" in
+	'' | -* | *..*) return 1 ;;
+	esac
+	[[ "$1" =~ ^[A-Za-z0-9._/-]+$ ]]
+}
+
+# ref_available <ref> — probes whether <ref> actually has published
+# marketplace content by requesting the repo-root manifest
+# (`.claude-plugin/marketplace.json`) both clients' registration ultimately
+# reads from. A syntactically valid but unpublished ref (typo'd tag, deleted
+# branch, or a release published before its plugin content) must fail here
+# rather than silently registering a marketplace with nothing to install.
+ref_available() {
+	curl -fsSL -o /dev/null "https://raw.githubusercontent.com/${MARKETPLACE_REPO}/$1/.claude-plugin/marketplace.json" 2>/dev/null
 }
 
 # lazyboards_installed_version prints the bare semver of the installed binary
@@ -2516,9 +2597,12 @@ Initial install (canonical — download, verify, run):
 
   Resolves to the latest release tag by default (not live main) — a piped
   run with CENCI_REF unset re-execs itself, verified, from the newest
-  release tag's install.sh. Set CENCI_REF=main (or pass --ref main) to
-  explicitly opt into bleeding-edge, unverified main instead (unsafe;
-  development use only).
+  release tag's install.sh. That resolved ref then pins the client
+  marketplace registration and all three installed plugins' content too, on
+  every path (install, update, repair, dev-from-clone) — not just which
+  install.sh runs. Set CENCI_REF=main (or pass --ref main) to explicitly
+  opt into bleeding-edge, unverified main instead (unsafe; development use
+  only); it is the only path that intentionally tracks main.
 
 From a source checkout, ./install.sh accepts the same arguments.
 
@@ -2530,8 +2614,10 @@ Flags:
   --cleanup / --no-cleanup              seed the lazyboards board config with / without the
                                          auto-close action (`cleanup: "cenci close {number}"`)
                                          that closes a card's tmux window when its ticket does
-  --ref <ref>                           install from this ref instead of the resolved latest
-                                         release tag (e.g. --ref main, unverified — see above);
+  --ref <ref>                           marketplace + plugin content, and the installer
+                                         itself, all come from this ref instead of the
+                                         resolved latest release tag (e.g. --ref main,
+                                         unverified — see above);
                                          same as CENCI_REF=<ref>
   --help                                this text
 EOF
@@ -2669,6 +2755,19 @@ if [ "$MODE" = uninstall ]; then
 fi
 
 have_supported_client || die "no supported client found. Install Claude Code, Codex, or both, then re-run this script."
+
+# ---------------------------------------------------- resolved install ref ----
+
+# The ref that governs marketplace registration — and, through it, all three
+# plugins' content — for the rest of this run. Applies to both dispatch
+# branches below (install and update), matching the piped re-exec's own
+# default: explicit CENCI_REF/--ref (including "main") wins, otherwise the
+# latest release tag is resolved. Malformed, unavailable, or unresolvable
+# refs are fatal here — never fall through to an unverified default-branch
+# checkout (#625).
+RESOLVED_REF="$(resolve_install_ref)" || die "could not resolve the latest cenci release tag to install from (offline, or no release has been published yet) — retry, or set CENCI_REF=main (or pass --ref main) to install from main instead"
+validate_ref_format "$RESOLVED_REF" || die "invalid ref '${RESOLVED_REF}' — refs may only contain letters, digits, '.', '_', '/', and '-' — retry, or set CENCI_REF=main (or pass --ref main) to install from main instead"
+ref_available "$RESOLVED_REF" || die "ref '${RESOLVED_REF}' is not available (no published marketplace manifest was found at that ref) — retry, or set CENCI_REF=main (or pass --ref main) to install from main instead"
 
 if [ "$MODE" = update ]; then
 	step_marketplace

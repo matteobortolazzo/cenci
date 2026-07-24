@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Stable front door for installing, updating, and diagnosing cenci. The
-# installed wrapper executes the installer from its exact cenci marketplace
-# checkout; update/repair refreshes that checkout through the owning client
-# first, while doctor remains strictly local and read-only.
+# installed wrapper resolves and validates its checkout root, then executes
+# the installer from that exact cenci marketplace checkout; the ref-aware
+# marketplace refresh itself is delegated entirely to install.sh's own
+# step_marketplace (#625) rather than being repeated here, while doctor
+# remains strictly local and read-only.
 set -euo pipefail
 
 source_path=${BASH_SOURCE[0]}
@@ -54,6 +56,15 @@ doctor | --help | -h)
 	# should still work.
 	;;
 *)
+	# install.sh's own step_marketplace (#625) now removes and re-adds the
+	# marketplace registration at the resolved ref on every run, so a
+	# pre-exec `marketplace update`/`upgrade` here would be redundant at
+	# best — and, since neither client's ref-less update/upgrade semantics
+	# are verified, could transiently repoint the checkout to an
+	# unpinned/main state before install.sh corrects it right back. Leave
+	# the checkout refresh to install.sh's single, ref-aware seam instead;
+	# this block only still needs to confirm source_dir is either that
+	# managed checkout or an explicit local dev checkout.
 	managed_claude_dir=${HOME}/.claude/plugins/marketplaces/cenci
 	resolved_claude_dir=""
 	if [[ -d "${managed_claude_dir}" ]]; then
@@ -71,11 +82,8 @@ doctor | --help | -h)
 	fi
 
 	case "${source_dir}" in
-	"${resolved_claude_dir}")
-		claude plugin marketplace update cenci >/dev/null
-		;;
-	"${resolved_codex_dir}")
-		codex plugin marketplace upgrade cenci >/dev/null
+	"${resolved_claude_dir}" | "${resolved_codex_dir}")
+		: # managed checkout; install.sh's step_marketplace refreshes it.
 		;;
 	*)
 		# A directly invoked source checkout is already an explicit, local
