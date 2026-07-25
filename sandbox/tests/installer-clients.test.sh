@@ -1026,7 +1026,7 @@ run_doctor_case_with_stale_pin_checkout() {
     esac
     set +e
     env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
-        ${release_env} \
+        "${release_env}" \
         CLAUDE_MARKETPLACE_FILE="${WORK}/${name}/claude-marketplace" \
         CLAUDE_INSTALLED_FILE="${WORK}/${name}/claude-installed" \
         CODEX_MARKETPLACE_FILE="${WORK}/${name}/codex-marketplace" \
