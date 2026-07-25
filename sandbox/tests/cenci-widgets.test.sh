@@ -64,6 +64,22 @@ printf 'pkill %s\n' "$*" >>"${WIDGET_CALLS}"
 exit 0
 EOF
     chmod +x "${bin}/docker" "${bin}/curl" "${bin}/sudo" "${bin}/pkill"
+    # cosign mock: doctor's cosign check is now `required` rather than
+    # `optional` (#700 — cosign is a hard prerequisite for cenci update's own
+    # release-verification bootstrap, not only the piped install path), so
+    # every install/update invocation in this suite needs cosign on PATH or
+    # doctor would hard-fail and (with --yes not overriding the default "n"
+    # on "Continue anyway?") abort before ever reaching widget wiring. This
+    # suite is about GUI bar-widget detect/install/reload, not #626's own
+    # cosign verification scenarios (installer-clients.test.sh covers those
+    # directly), so a bare pass-through is enough — install.sh always runs
+    # from $ROOT directly here (managed_checkout_dir never matches), never
+    # triggering the update-mode bootstrap that would actually exercise it.
+    cat >"${bin}/cosign" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+    chmod +x "${bin}/cosign"
 }
 
 # make_claude reports cenci-watch (only) installed and the marketplace registered,

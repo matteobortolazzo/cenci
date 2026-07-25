@@ -151,6 +151,17 @@ printf 'forwarded installer args: %s\n' "$*"
 INSTALLER
 EOF
     chmod +x "${bin}/curl"
+    # cosign mock: ambient like git/curl for every doctor-relevant and
+    # update-mode setup path (#700), since promoting doctor's cosign check
+    # from optional to required, plus the new update-mode bootstrap's own
+    # hard cosign requirement, would otherwise fail nearly every existing
+    # doctor/update case — none of which previously planted a cosign mock.
+    # Default "pass" mode (make_cosign, defined below — forward reference is
+    # fine since this only runs once every function in the file is defined).
+    # A case that needs cosign genuinely absent must `rm -f "${bin}/cosign"`
+    # after calling make_common_tools, not merely skip a call that no longer
+    # needs skipping.
+    make_cosign "${bin}"
 }
 
 # make_cosign <bin> — installs a scriptable cosign mock at <bin>/cosign for
@@ -372,6 +383,27 @@ prepare_checkout() {
         chmod +x "${checkout}/cenci"
     fi
     cp "${ROOT}/install.sh" "${checkout}/install.sh"
+}
+
+# prepare_git_tagged_checkout <checkout-dir> <tag> — turns an existing
+# checkout directory (already populated by prepare_checkout) into a git repo
+# with a single commit tagged <tag> and checked out at that tag in detached
+# HEAD (mirrors the real `claude`/`codex plugin marketplace add` git
+# checkout mechanism, the #625/#678 remove+re-add contract), so `git -C
+# <checkout-dir> describe --tags --exact-match HEAD` resolves to exactly
+# <tag> — the same primitive both the update-mode bootstrap gate
+# (managed_checkout_dir, #700) and the doctor stale-pin check use to
+# determine "already current". A local user/email is configured so the
+# commit succeeds regardless of the host's own git config.
+prepare_git_tagged_checkout() {
+    local dir="$1" tag="$2"
+    git -C "${dir}" init -q
+    git -C "${dir}" config user.email "cenci-test@example.com"
+    git -C "${dir}" config user.name "cenci-test"
+    git -C "${dir}" add -A
+    git -C "${dir}" commit -q -m "checkout at ${tag}"
+    git -C "${dir}" tag "${tag}"
+    git -C "${dir}" -c advice.detachedHead=false checkout -q "${tag}"
 }
 
 # prepare_opencode_checkout_assets <home> <client> — stages the real,
@@ -670,7 +702,9 @@ run_piped_case() {
     printf 'not a real shell\n' >"${case_dir}/bash"
     make_common_tools "${bin}"
     case "${env_extra}" in
-      *COSIGN_MODE=absent*) : ;; # cosign intentionally left off PATH
+      # make_common_tools now plants cosign ambiently (#700); genuine
+      # absence must remove it again after that setup ran.
+      *COSIGN_MODE=absent*) rm -f "${bin}/cosign" ;;
       *) make_cosign "${bin}" ;;
     esac
     case "${clients}" in
@@ -695,6 +729,84 @@ run_piped_case() {
             ${env_extra} \
             bash -s -- --yes --no-build ${install_args[@]+"${install_args[@]}"} <"${ROOT}/install.sh" >"${output}" 2>&1
     )
+    CASE_EXIT=$?
+    set -e
+    CASE_OUTPUT="${output}"
+    CASE_CALLS="${calls}"
+    CASE_CURL_LOG="${curl_log}"
+    CASE_COSIGN_LOG="${cosign_log}"
+    CASE_HOME="${home}"
+    CASE_BIN="${bin}"
+}
+
+# run_update_bootstrap_case <name> <clients> <env_extra> <checkout_tag>
+# [install.sh args...] — simulates `cenci update` running straight out of an
+# installed, managed marketplace checkout, the way the `cenci` wrapper execs
+# it (`installer=${source_dir}/install.sh`, cenci:44): BASH_SOURCE[0]
+# resolves inside ~/.claude or ~/.codex's plugins/marketplaces/cenci
+# checkout, so the update-mode bootstrap gate (managed_checkout_dir, #700)
+# can fire. Unlike run_piped_case (stdin, no on-disk path), this is a
+# genuine from-file invocation of the checkout's own install.sh. <env_extra>
+# follows run_piped_case's convention: a single word-split string of
+# NAME=value pairs layered onto the env -i scrub (pass "" for none); the
+# literal token "COSIGN_MODE=absent" additionally removes the ambient
+# cosign mock (make_common_tools, #700) so `command -v cosign` genuinely
+# fails. <checkout_tag> — pass "" to leave the checkout a plain (non-git)
+# directory, which drives the bootstrap gate's fail-closed "can't prove
+# currency" branch (`git describe` fails outright); pass a tag (e.g.
+# "watch/v0.27.7") to git-tag the checkout via prepare_git_tagged_checkout
+# so the gate instead exercises its actual `update_current_ref !=
+# RESOLVED_REF` stale-tag comparison. Sets CASE_CURL_LOG / CASE_COSIGN_LOG
+# (argv-only invocation logs) alongside the usual run_case CASE_* outputs so
+# callers can assert whether/how the bootstrap's releases/latest probe,
+# install.sh + install.sh.bundle download, and cosign verify-blob call
+# happened.
+run_update_bootstrap_case() {
+    local name="$1" clients="$2" env_extra="$3" checkout_tag="$4"
+    shift 4
+    local install_args=("$@")
+    local case_dir="${WORK}/${name}" home="${WORK}/${name}/home"
+    local bin="${WORK}/${name}/bin" output="${WORK}/${name}/output" calls="${WORK}/${name}/calls"
+    local curl_log="${WORK}/${name}/curl-log" cosign_log="${WORK}/${name}/cosign-log"
+    local checkout
+    mkdir -p "${home}" "${bin}"
+    : >"${calls}"
+    : >"${curl_log}"
+    : >"${cosign_log}"
+    make_common_tools "${bin}"
+    case "${env_extra}" in
+      *COSIGN_MODE=absent*) rm -f "${bin}/cosign" ;;
+    esac
+    case "${clients}" in
+      claude)
+        make_claude "${bin}"
+        prepare_checkout "${home}" claude
+        prepare_bootstrap_cenci "${home}" claude
+        checkout="${home}/.claude/plugins/marketplaces/cenci"
+        ;;
+      codex)
+        make_codex "${bin}"
+        prepare_checkout "${home}" codex
+        prepare_bootstrap_cenci "${home}" codex
+        checkout="${home}/.codex/plugins/marketplaces/cenci"
+        ;;
+    esac
+    if [[ -n "${checkout_tag}" ]]; then
+        prepare_git_tagged_checkout "${checkout}" "${checkout_tag}"
+    fi
+
+    set +e
+    # shellcheck disable=SC2086 # env_extra is intentionally word-split into
+    # zero or more separate NAME=value tokens for env -i (see run_piped_case's
+    # identical convention).
+    env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
+        ROOT="${ROOT}" CURL_LOG="${curl_log}" COSIGN_LOG="${cosign_log}" \
+        CLAUDE_MARKETPLACE_FILE="${case_dir}/claude-marketplace" \
+        CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
+        CODEX_MARKETPLACE_FILE="${case_dir}/codex-marketplace" \
+        CODEX_INSTALLED_FILE="${case_dir}/codex-installed" \
+        ${env_extra} \
+        bash "${checkout}/install.sh" --yes --no-build update ${install_args[@]+"${install_args[@]}"} >"${output}" 2>&1
     CASE_EXIT=$?
     set -e
     CASE_OUTPUT="${output}"
@@ -853,19 +965,76 @@ EOF
 }
 
 # run_doctor_case_with_cosign <name> <clients> <present|absent> — like
-# run_doctor_case, but places a cosign mock on this doctor run's PATH only
-# when <present|absent> is the literal string "present"; any other value
-# (e.g. "absent") leaves cosign genuinely missing (#626). Exercises
-# run_doctor's cosign presence check — a new mandatory prerequisite for the
-# default verified piped install path — which must warn (not hard-fail) when
-# cosign is absent, per the check <label> optional <hint> pattern (install.sh
-# ~321).
+# run_doctor_case, but explicitly controls cosign's presence for the doctor
+# run specifically. make_common_tools now plants a "pass"-mode cosign mock
+# ambiently (like git/curl) for every setup path (#700), so this can no
+# longer simply skip planting one to model "absent" — run_case's own
+# make_common_tools call (inside the inlined run_doctor_case body below)
+# would recreate it before the doctor invocation ran. Instead this inlines
+# run_doctor_case's body with an `rm -f "${bin}/cosign"` interposed between
+# run_case's setup and the doctor invocation itself, so <cosign_present>=
+# "absent" still genuinely exercises cosign's absence (#626); any other
+# value (e.g. "present") leaves the ambient mock as-is. Exercises doctor's
+# cosign check, promoted from optional to required (#700) since cosign is
+# now also a hard prerequisite for the update-mode bootstrap, not only the
+# piped install path.
 run_doctor_case_with_cosign() {
     local name="$1" clients="$2" cosign_present="$3"
-    local bin="${WORK}/${name}/bin"
-    mkdir -p "${bin}"
-    [ "${cosign_present}" = present ] && make_cosign "${bin}"
-    run_doctor_case "${name}" "${clients}"
+    run_case "${name}" "${clients}"
+    local bin="${WORK}/${name}/bin" output="${WORK}/${name}/doctor-output"
+    [ "${cosign_present}" = present ] || rm -f "${bin}/cosign"
+    set +e
+    env -i HOME="${CASE_HOME}" PATH="${bin}" CALLS_FILE="${CASE_CALLS}" \
+        CLAUDE_MARKETPLACE_FILE="${WORK}/${name}/claude-marketplace" \
+        CLAUDE_INSTALLED_FILE="${WORK}/${name}/claude-installed" \
+        CODEX_MARKETPLACE_FILE="${WORK}/${name}/codex-marketplace" \
+        CODEX_INSTALLED_FILE="${WORK}/${name}/codex-installed" \
+        bash "${ROOT}/install.sh" doctor >"${output}" 2>&1
+    DOCTOR_EXIT=$?
+    set -e
+    DOCTOR_OUTPUT="${output}"
+}
+
+# run_doctor_case_with_stale_pin_checkout <name> <clients> <checkout-tag>
+# <release-env> — like run_doctor_case, but pre-tags the managed marketplace
+# checkout at <checkout-tag> (prepare_git_tagged_checkout) before the doctor
+# run, and layers <release-env> (a single NAME=value token, e.g.
+# "CENCI_FAKE_RELEASE_TAG=watch/v9.9.9" or "CENCI_FAKE_NO_RELEASE=1") onto
+# the doctor invocation's env. Exercises check_stale_marketplace_pin's
+# comparison between the checkout's actual pinned ref and cenci_latest_ref
+# (#700) — AC7/AC8.
+run_doctor_case_with_stale_pin_checkout() {
+    local name="$1" clients="$2" checkout_tag="$3" release_env="$4"
+    local home="${WORK}/${name}/home" bin="${WORK}/${name}/bin"
+    local calls="${WORK}/${name}/calls" output="${WORK}/${name}/doctor-output"
+    mkdir -p "${home}" "${bin}"
+    : >"${calls}"
+    make_common_tools "${bin}"
+    case "${clients}" in
+      claude)
+        make_claude "${bin}"
+        prepare_checkout "${home}" claude
+        prepare_git_tagged_checkout "${home}/.claude/plugins/marketplaces/cenci" "${checkout_tag}"
+        prepare_bootstrap_cenci "${home}" claude
+        ;;
+      codex)
+        make_codex "${bin}"
+        prepare_checkout "${home}" codex
+        prepare_git_tagged_checkout "${home}/.codex/plugins/marketplaces/cenci" "${checkout_tag}"
+        prepare_bootstrap_cenci "${home}" codex
+        ;;
+    esac
+    set +e
+    env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
+        "${release_env}" \
+        CLAUDE_MARKETPLACE_FILE="${WORK}/${name}/claude-marketplace" \
+        CLAUDE_INSTALLED_FILE="${WORK}/${name}/claude-installed" \
+        CODEX_MARKETPLACE_FILE="${WORK}/${name}/codex-marketplace" \
+        CODEX_INSTALLED_FILE="${WORK}/${name}/codex-installed" \
+        bash "${ROOT}/install.sh" doctor >"${output}" 2>&1
+    DOCTOR_EXIT=$?
+    set -e
+    DOCTOR_OUTPUT="${output}"
 }
 
 # run_case_opencode <name> <clients> <opencode-version|absent> [build_flag]
@@ -1277,9 +1446,9 @@ run_doctor_case_with_podman_preferred_and_docker_runtimes doctor-sysbox-podman-p
 [[ "${DOCTOR_EXIT}" -eq 0 ]]
 assert_contains "${DOCTOR_OUTPUT}" "sysbox-runc registered"
 
-echo "case: doctor warns when cosign is absent — a new mandatory prerequisite for the default verified piped install path (#626), without hard-failing doctor"
+echo "case: doctor hard-fails when cosign is absent — cosign is a mandatory prerequisite for both the default verified piped install path (#626) and the update-mode bootstrap (#700), promoted from optional to required"
 run_doctor_case_with_cosign doctor-cosign-absent claude absent
-[[ "${DOCTOR_EXIT}" -eq 0 ]]
+[[ "${DOCTOR_EXIT}" -ne 0 ]]
 assert_contains "${DOCTOR_OUTPUT}" "cosign"
 assert_contains "${DOCTOR_OUTPUT}" "install cosign"
 
@@ -1337,6 +1506,11 @@ mkdir -p "${home}" "${bin}"
 : >"${calls}"
 make_common_tools "${bin}"
 make_claude "${bin}"
+# make_common_tools already plants cosign ambiently (#700); this explicit
+# call is kept for clarity even though it's now redundant, per the plan's
+# fix for this test (this run now hits the update-mode bootstrap gate,
+# which hard-requires cosign).
+make_cosign "${bin}"
 
 real_claude_dir="${home}/dot-claude"
 checkout="${real_claude_dir}/plugins/marketplaces/cenci"
@@ -1348,7 +1522,7 @@ ln -s "${real_claude_dir}" "${home}/.claude"
 prepare_bootstrap_cenci "${home}" claude
 
 set +e
-env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
+env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" ROOT="${ROOT}" \
     CLAUDE_MARKETPLACE_FILE="${case_dir}/claude-marketplace" \
     CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
     "${home}/.claude/plugins/marketplaces/cenci/cenci" update --yes >"${output}" 2>&1
@@ -1897,6 +2071,143 @@ set -e
 assert_contains "${output}" "CENCI_REF=main"
 assert_not_contains "${calls}" "marketplace add"
 assert_not_contains "${calls}" "marketplace remove"
+
+# --- cenci update bootstraps the resolved release's installer instead of
+# trusting a stale local copy (#700): on installs pinned before #678, the
+# installed installer's own step_marketplace can't move the pin, so
+# `cenci update` was a permanent silent no-op. Every case below invokes the
+# checkout's own install.sh directly (run_update_bootstrap_case), the same
+# way the `cenci` wrapper execs it, so BASH_SOURCE[0] resolves inside the
+# managed marketplace checkout and the new bootstrap gate can fire.
+
+echo "case: AC1 - cenci update from a managed checkout registered at an old ref bootstraps the target release's installer and installs the new plugin versions through it, not the on-disk installer's own step_marketplace (verified via the ref that actually supplied installed content, not merely which ref was requested)"
+name=update-bootstrap-repoints-stale-pin
+mkdir -p "${WORK}/${name}"
+printf 'watch/v0.27.7' >"${WORK}/${name}/claude-marketplace"
+run_update_bootstrap_case "${name}" claude "CENCI_FAKE_RELEASE_TAG=watch/v9.9.9" "watch/v0.27.7"
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_contains "${CASE_CURL_LOG}" "install.sh"
+assert_contains "${CASE_COSIGN_LOG}" "verify-blob"
+assert_contains "${WORK}/${name}/claude-installed-cenci" "watch/v9.9.9"
+assert_not_contains "${WORK}/${name}/claude-installed-cenci" "watch/v0.27.7"
+
+echo "case: AC2 - the update-mode bootstrap re-execs at most once — install.sh is fetched exactly one time from the resolved release, the child never re-enters the gate (#700)"
+name=update-bootstrap-single-reexec
+mkdir -p "${WORK}/${name}"
+printf 'watch/v0.27.7' >"${WORK}/${name}/claude-marketplace"
+run_update_bootstrap_case "${name}" claude "CENCI_FAKE_RELEASE_TAG=watch/v9.9.9" ""
+[[ "${CASE_EXIT}" -eq 0 ]]
+[[ "$(grep -c 'install\.sh$' "${CASE_CURL_LOG}")" -eq 1 ]]
+
+echo "case: AC3 - an explicit --ref suppresses the update-mode bootstrap entirely, even for a checkout whose currency can't be proven, and pins the marketplace + installed content to exactly that ref"
+name=update-bootstrap-suppressed-by-ref-flag
+mkdir -p "${WORK}/${name}"
+printf 'watch/v0.27.7' >"${WORK}/${name}/claude-marketplace"
+run_update_bootstrap_case "${name}" claude "CENCI_FAKE_RELEASE_TAG=watch/v9.9.9" "" --ref watch/v2.3.4
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_not_contains "${CASE_CURL_LOG}" "install.sh"
+assert_not_contains "${CASE_COSIGN_LOG}" "verify-blob"
+assert_contains "${WORK}/${name}/claude-installed-cenci" "watch/v2.3.4"
+
+echo "case: AC3 - CENCI_REF=main suppresses the update-mode bootstrap entirely — the only path that actually pins the marketplace and installed plugin content to live main"
+name=update-bootstrap-suppressed-by-cenci-ref-main
+mkdir -p "${WORK}/${name}"
+printf 'watch/v0.27.7' >"${WORK}/${name}/claude-marketplace"
+run_update_bootstrap_case "${name}" claude "CENCI_FAKE_RELEASE_TAG=watch/v9.9.9 CENCI_REF=main" ""
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_not_contains "${CASE_CURL_LOG}" "install.sh"
+assert_not_contains "${CASE_COSIGN_LOG}" "verify-blob"
+assert_contains "${WORK}/${name}/claude-installed-cenci" "main"
+
+echo "case: AC4 - a dev run directly from the git source checkout (\$ROOT/install.sh update) never downloads or re-execs a pinned installer — the managed-checkout gate excludes a source checkout even though CENCI_REF is unset and its currency can't be proven"
+name=update-dev-checkout-no-bootstrap
+case_dir="${WORK}/${name}" home="${WORK}/${name}/home"
+bin="${WORK}/${name}/bin" output="${WORK}/${name}/output" calls="${WORK}/${name}/calls"
+curl_log="${WORK}/${name}/curl-log"
+mkdir -p "${home}" "${bin}"
+: >"${calls}"
+: >"${curl_log}"
+make_common_tools "${bin}"
+make_claude "${bin}"
+prepare_checkout "${home}" claude
+prepare_bootstrap_cenci "${home}" claude
+set +e
+env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" ROOT="${ROOT}" CURL_LOG="${curl_log}" \
+    CENCI_FAKE_RELEASE_TAG="watch/v9.9.9" \
+    CLAUDE_MARKETPLACE_FILE="${case_dir}/claude-marketplace" \
+    CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
+    bash "${ROOT}/install.sh" --yes --no-build update >"${output}" 2>&1
+dev_checkout_update_exit=$?
+set -e
+[[ "${dev_checkout_update_exit}" -eq 0 ]]
+assert_not_contains "${curl_log}" "/install.sh"
+assert_contains "${calls}" "claude plugin marketplace add matteobortolazzo/cenci@watch/v9.9.9"
+
+echo "case: AC5 - cosign missing hard-fails the update-mode bootstrap with the actionable install-cosign message, never falling back to the stale local installer's own marketplace mutation"
+name=update-bootstrap-cosign-missing
+mkdir -p "${WORK}/${name}"
+printf 'watch/v0.27.7' >"${WORK}/${name}/claude-marketplace"
+run_update_bootstrap_case "${name}" claude "CENCI_FAKE_RELEASE_TAG=watch/v9.9.9 COSIGN_MODE=absent" ""
+[[ "${CASE_EXIT}" -ne 0 ]]
+assert_contains "${CASE_OUTPUT}" "cosign not found"
+assert_contains "${CASE_OUTPUT}" "CENCI_REF=main"
+assert_not_contains "${CASE_CALLS}" "marketplace add"
+
+echo "case: AC6 - a corrupted/tampered install.sh downloaded by the update-mode bootstrap fails cosign verification and never falls back to running the stale local installer's own marketplace mutation"
+name=update-bootstrap-corrupt-install
+mkdir -p "${WORK}/${name}"
+printf 'watch/v0.27.7' >"${WORK}/${name}/claude-marketplace"
+run_update_bootstrap_case "${name}" claude "CENCI_FAKE_RELEASE_TAG=watch/v9.9.9 CENCI_FAKE_CORRUPT_INSTALL=1" ""
+[[ "${CASE_EXIT}" -ne 0 ]]
+assert_contains "${CASE_OUTPUT}" "installer verification failed"
+assert_contains "${CASE_OUTPUT}" "CENCI_REF=main"
+assert_not_contains "${CASE_CALLS}" "marketplace add"
+
+echo "case: AC9 - cenci update from a managed checkout already pinned at the resolved latest ref performs no installer download — the bootstrap skips its own re-exec when the checkout is provably current"
+name=update-bootstrap-skips-when-current
+case_dir="${WORK}/${name}" home="${WORK}/${name}/home"
+bin="${WORK}/${name}/bin" output="${WORK}/${name}/output" calls="${WORK}/${name}/calls"
+curl_log="${WORK}/${name}/curl-log" cosign_log="${WORK}/${name}/cosign-log"
+mkdir -p "${home}" "${bin}"
+: >"${calls}"
+: >"${curl_log}"
+: >"${cosign_log}"
+make_common_tools "${bin}"
+make_claude "${bin}"
+prepare_checkout "${home}" claude
+prepare_git_tagged_checkout "${home}/.claude/plugins/marketplaces/cenci" "watch/v9.9.9"
+prepare_bootstrap_cenci "${home}" claude
+printf 'watch/v9.9.9' >"${case_dir}/claude-marketplace"
+set +e
+env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" ROOT="${ROOT}" \
+    CURL_LOG="${curl_log}" COSIGN_LOG="${cosign_log}" \
+    CENCI_FAKE_RELEASE_TAG="watch/v9.9.9" \
+    CLAUDE_MARKETPLACE_FILE="${case_dir}/claude-marketplace" \
+    CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
+    bash "${home}/.claude/plugins/marketplaces/cenci/install.sh" --yes --no-build update >"${output}" 2>&1
+already_current_exit=$?
+set -e
+[[ "${already_current_exit}" -eq 0 ]]
+assert_contains "${curl_log}" "releases/latest"
+assert_not_contains "${curl_log}" "/install.sh"
+
+# --- cenci doctor: stale marketplace pin detection (#700). The only signal
+# a stranded pre-#678 install can get — must warn (never fail doctor) on a
+# stale pin, and must never conflate "couldn't determine latest" (offline)
+# with "your pin is stale".
+
+echo "case: AC7 - cenci doctor warns on a stale marketplace pin and prints the exact remove/re-add/update recovery commands, without failing doctor"
+run_doctor_case_with_stale_pin_checkout doctor-stale-pin-warns claude "watch/v0.27.7" "CENCI_FAKE_RELEASE_TAG=watch/v9.9.9"
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "claude plugin marketplace remove cenci"
+assert_contains "${DOCTOR_OUTPUT}" "claude plugin marketplace add matteobortolazzo/cenci@watch/v9.9.9"
+assert_contains "${DOCTOR_OUTPUT}" "cenci update"
+
+echo "case: AC8 - cenci doctor degrades gracefully when it can't reach the latest release (offline) — reports that it could not determine the latest release, and never claims the pin is stale or prints the stale-pin recovery commands"
+run_doctor_case_with_stale_pin_checkout doctor-stale-pin-offline claude "watch/v1.0.0" "CENCI_FAKE_NO_RELEASE=1"
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "could not determine the latest release"
+assert_not_contains "${DOCTOR_OUTPUT}" "claude plugin marketplace remove cenci"
 
 # --- doc regression assertions (#630) ----------------------------------------
 # Direct content checks against the checked-out repo's own doc files (no

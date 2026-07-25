@@ -409,6 +409,46 @@ check_stale_tmux_vars() {
 	fi
 }
 
+# check_stale_marketplace_pin <client> — the only signal a stranded pre-#678
+# install can ever get (#700): compares <client>'s managed marketplace
+# checkout's currently-pinned ref (`git -C <dir> describe --tags
+# --exact-match HEAD`, the same primitive the update-mode bootstrap gate
+# uses) against the newest published release (cenci_latest_ref), and on
+# mismatch warns with the exact remove/re-add/update recovery commands.
+# Read-only like check_stale_tmux_vars: never writes to the checkout, and
+# never sets DOCTOR_FAILED — this is optional/informational, not a hard
+# doctor failure. Must degrade gracefully offline: a failed cenci_latest_ref
+# probe reports that the latest release could not be determined and is never
+# conflated with "the pin is stale" (AC8). Silently returns (no signal
+# either way) when the checkout isn't present, or its current ref can't be
+# determined (not a git repo, or an unexpected non-exact-tag state) — there
+# is nothing conclusive to warn about in either case.
+check_stale_marketplace_pin() {
+	local client="$1" dir latest current add_cmd
+	dir="${HOME}/.${client}/plugins/marketplaces/cenci"
+	[ -d "$dir" ] || return 0
+	# Resolve the checkout's own currently-pinned ref first, before ever
+	# probing the network: a directory that merely looks like a checkout
+	# (not actually git-tracked, or not checked out at an exact tag) has no
+	# pin to compare — nothing conclusive to warn about — and must never
+	# trigger a network round-trip in that case.
+	current="$(git -C "$dir" describe --tags --exact-match HEAD 2>/dev/null)" || return 0
+	if ! latest="$(cenci_latest_ref)"; then
+		warn "${client}: could not determine the latest release — offline, or no release has been published yet; cannot check whether the marketplace pin is stale"
+		return 0
+	fi
+	[ "$current" = "$latest" ] && return 0
+	if [ "$client" = codex ]; then
+		add_cmd="codex plugin marketplace add ${MARKETPLACE_REPO} --ref ${latest}"
+	else
+		add_cmd="claude plugin marketplace add ${MARKETPLACE_REPO}@${latest}"
+	fi
+	warn "${client}: marketplace pin is stale — registered at ${current}, latest release is ${latest}. This install predates #678's remove+re-add fix, so cenci update alone cannot repoint it; recover with:
+    ${client} plugin marketplace remove cenci
+    ${add_cmd}
+    cenci update"
+}
+
 doctor_codex_support() {
 	[ "$HAS_CODEX" -eq 1 ] || return 0
 	local raw version config method notifications project_root
@@ -647,6 +687,12 @@ run_doctor() {
 		fail "no supported client — install Claude Code, Codex, or both"
 		DOCTOR_FAILED=1
 	fi
+	if [ "$HAS_CLAUDE" -eq 1 ]; then
+		check_stale_marketplace_pin claude
+	fi
+	if [ "$HAS_CODEX" -eq 1 ]; then
+		check_stale_marketplace_pin codex
+	fi
 
 	say ""
 	say "  ${BOLD}For cenci (workflow)${RESET}"
@@ -731,13 +777,14 @@ run_doctor() {
 	if have docker; then
 		doctor_sysbox
 	fi
-	# cosign is a new mandatory prerequisite for the default verified piped
-	# install path (#626): the release-pin block fails closed if it's
-	# absent, with no fallback to an unverified ref. Warn here (not a hard
-	# doctor failure) so a fresh install with cosign missing is caught by
-	# doctor before the piped install would fail closed anyway.
-	check "cosign (installer verification)" optional \
-		"install cosign (https://docs.sigstore.dev/system_config/installation/) — required for the default installer's fail-closed release verification" \
+	# cosign is a mandatory prerequisite for the default verified piped
+	# install path (#626) and, since #700, for cenci update's own
+	# release-verification bootstrap — both fail closed if it's absent, with
+	# no fallback to an unverified ref or a stale local installer. Required
+	# (not just a warning) so a missing cosign is caught by doctor before
+	# either path would fail closed anyway.
+	check "cosign (installer verification)" required \
+		"install cosign (https://docs.sigstore.dev/system_config/installation/) — required for cenci update's release-verification bootstrap and the default installer's fail-closed release verification" \
 		command -v cosign
 
 	say ""
@@ -1573,6 +1620,86 @@ verify_installer_asset() {
 		rm -f "$file" "$bundle"
 		die "installer verification failed for the downloaded install.sh — cosign could not verify it against the pinned release identity (tampered, truncated, or mismatched signature); retry, or set CENCI_REF=main (or pass --ref main) to install from main instead (unverified)"
 	}
+}
+
+# exec_pinned_installer <tag> — downloads release <tag>'s install.sh and
+# install.sh.bundle, verifies them with verify_installer_asset, and execs the
+# verified install.sh, replacing the running process. This is the shared
+# download→verify→re-exec sequence originally inlined in the piped-invocation
+# immutable release pin below; the update-mode bootstrap (#700) reuses it
+# verbatim so there is exactly one implementation instead of two independently
+# maintained copies. CENCI_REF="<tag>" on the re-exec is the loop guard both
+# callers rely on: the child sees CENCI_REF already set and skips its own
+# gate outright, so at most one re-exec ever happens per trigger. Never
+# returns on success; on any failure this cleans up its staged temp files and
+# die()s with a message distinct per failure class — it never falls back to
+# running an unverified or stale local installer.
+exec_pinned_installer() {
+	local tag="$1" release_base tmp bundle_tmp
+	release_base="https://github.com/${MARKETPLACE_REPO}/releases/download/${tag}"
+
+	# pin_die <message> — reports a failure of this download-verify sequence:
+	# cleans up whichever staged temp files exist so far, then die()s. Used
+	# instead of repeating "rm -f $tmp $bundle_tmp" at every one of this
+	# function's several fail-closed checks below.
+	pin_die() {
+		rm -f "$tmp" "$bundle_tmp"
+		die "$1"
+	}
+
+	tmp="" bundle_tmp=""
+	tmp="$(mktemp)" || tmp=""
+	if [ -z "$tmp" ] || [ ! -f "$tmp" ]; then
+		pin_die "could not create a temporary file to stage the pinned install.sh"
+	fi
+	bundle_tmp="$(mktemp)" || bundle_tmp=""
+	if [ -z "$bundle_tmp" ] || [ ! -f "$bundle_tmp" ]; then
+		pin_die "could not create a temporary file to stage the pinned install.sh.bundle"
+	fi
+	if ! curl -fsSL -o "$tmp" "${release_base}/install.sh"; then
+		pin_die "could not download install.sh from release tag '${tag}' — retry, or set CENCI_REF=main (or pass --ref main) to install from main instead"
+	fi
+	if [ ! -s "$tmp" ]; then
+		pin_die "downloaded install.sh from release tag '${tag}' was empty — retry, or set CENCI_REF=main (or pass --ref main) to install from main instead"
+	fi
+	if ! curl -fsSL -o "$bundle_tmp" "${release_base}/install.sh.bundle"; then
+		pin_die "could not download install.sh.bundle from release tag '${tag}' — retry, or set CENCI_REF=main (or pass --ref main) to install from main instead"
+	fi
+	if [ ! -s "$bundle_tmp" ]; then
+		pin_die "downloaded install.sh.bundle from release tag '${tag}' was empty — retry, or set CENCI_REF=main (or pass --ref main) to install from main instead"
+	fi
+	verify_installer_asset "$tmp" "$bundle_tmp"
+	rm -f "$bundle_tmp"
+	CENCI_REF="$tag" exec bash "$tmp" ${CENCI_ORIG_ARGS[@]+"${CENCI_ORIG_ARGS[@]}"}
+}
+
+# managed_checkout_dir <script-path> — mirrors the `cenci` wrapper's own
+# managed-vs-dev checkout discrimination (`cenci:68-97`) exactly, so the
+# wrapper and this installer always agree on what "managed" means. Resolves
+# <script-path>'s containing directory (symlink-resolved via `cd -P`, same as
+# the wrapper) and, if it matches either client's managed marketplace
+# checkout (~/.claude/plugins/marketplaces/cenci or
+# ~/.codex/plugins/marketplaces/cenci), prints that resolved directory and
+# returns 0. Otherwise — a dev run from a git source checkout, an unmanaged
+# copy, or a resolution failure — prints nothing and returns 1. This is a
+# gate, not a diagnostic: like resolve_install_ref, it must never print
+# anything but the resolved path (or nothing), so `dir="$(managed_checkout_dir ...)"`
+# callers never capture a leaked warning.
+managed_checkout_dir() {
+	local script_path="$1" parent resolved client managed_dir resolved_managed_dir
+	parent="$(dirname "$script_path")" || return 1
+	resolved="$(cd -P "$parent" >/dev/null 2>&1 && pwd)" || return 1
+
+	for client in claude codex; do
+		managed_dir="${HOME}/.${client}/plugins/marketplaces/cenci"
+		[ -d "$managed_dir" ] || continue
+		resolved_managed_dir="$(cd -P "$managed_dir" >/dev/null 2>&1 && pwd)" || continue
+		if [ "$resolved" = "$resolved_managed_dir" ]; then
+			printf '%s\n' "$resolved"
+			return 0
+		fi
+	done
+	return 1
 }
 
 # resolve_install_ref prints the ref that must govern this run's marketplace
@@ -2688,43 +2815,11 @@ case "$pin_self" in
 esac
 if [ -z "$CENCI_REF" ] && [ ! -t 0 ] && { [ -z "$pin_self" ] || [ ! -f "$pin_self" ] || [ ! -r "$pin_self" ]; }; then
 	pin_tag="$(cenci_latest_ref)" || die "could not resolve the latest cenci release tag to install from (offline, or no release has been published yet) — retry, or set CENCI_REF=main (or pass --ref main) to install from main instead"
-	pin_release_base="https://github.com/${MARKETPLACE_REPO}/releases/download/${pin_tag}"
 	# Re-exec from a temp *file*, never a re-pipe: the child then sees a
 	# real, readable BASH_SOURCE[0] and skips this block outright. Setting
-	# CENCI_REF="$pin_tag" for the child below is a second, independent
-	# guard against an infinite re-exec loop.
-	# pin_die <message> — reports a failure of this download-verify block:
-	# cleans up whichever staged temp files exist so far, then die()s. Used
-	# instead of repeating "rm -f $pin_tmp $pin_bundle_tmp" at every one of
-	# this block's several fail-closed checks below.
-	pin_die() {
-		rm -f "$pin_tmp" "$pin_bundle_tmp"
-		die "$1"
-	}
-	pin_tmp="" pin_bundle_tmp=""
-	pin_tmp="$(mktemp)" || pin_tmp=""
-	if [ -z "$pin_tmp" ] || [ ! -f "$pin_tmp" ]; then
-		pin_die "could not create a temporary file to stage the pinned install.sh"
-	fi
-	pin_bundle_tmp="$(mktemp)" || pin_bundle_tmp=""
-	if [ -z "$pin_bundle_tmp" ] || [ ! -f "$pin_bundle_tmp" ]; then
-		pin_die "could not create a temporary file to stage the pinned install.sh.bundle"
-	fi
-	if ! curl -fsSL -o "$pin_tmp" "${pin_release_base}/install.sh"; then
-		pin_die "could not download install.sh from release tag '${pin_tag}' — retry, or set CENCI_REF=main (or pass --ref main) to install from main instead"
-	fi
-	if [ ! -s "$pin_tmp" ]; then
-		pin_die "downloaded install.sh from release tag '${pin_tag}' was empty — retry, or set CENCI_REF=main (or pass --ref main) to install from main instead"
-	fi
-	if ! curl -fsSL -o "$pin_bundle_tmp" "${pin_release_base}/install.sh.bundle"; then
-		pin_die "could not download install.sh.bundle from release tag '${pin_tag}' — retry, or set CENCI_REF=main (or pass --ref main) to install from main instead"
-	fi
-	if [ ! -s "$pin_bundle_tmp" ]; then
-		pin_die "downloaded install.sh.bundle from release tag '${pin_tag}' was empty — retry, or set CENCI_REF=main (or pass --ref main) to install from main instead"
-	fi
-	verify_installer_asset "$pin_tmp" "$pin_bundle_tmp"
-	rm -f "$pin_bundle_tmp"
-	CENCI_REF="$pin_tag" exec bash "$pin_tmp" ${CENCI_ORIG_ARGS[@]+"${CENCI_ORIG_ARGS[@]}"}
+	# CENCI_REF="$pin_tag" for the child (inside exec_pinned_installer) is a
+	# second, independent guard against an infinite re-exec loop.
+	exec_pinned_installer "$pin_tag"
 fi
 
 # Non-interactive runs never start a minutes-long image build unless asked.
@@ -2768,6 +2863,52 @@ have_supported_client || die "no supported client found. Install Claude Code, Co
 RESOLVED_REF="$(resolve_install_ref)" || die "could not resolve the latest cenci release tag to install from (offline, or no release has been published yet) — retry, or set CENCI_REF=main (or pass --ref main) to install from main instead"
 validate_ref_format "$RESOLVED_REF" || die "invalid ref '${RESOLVED_REF}' — refs may only contain letters, digits, '.', '_', '/', and '-' — retry, or set CENCI_REF=main (or pass --ref main) to install from main instead"
 ref_available "$RESOLVED_REF" || die "ref '${RESOLVED_REF}' is not available (no published marketplace manifest was found at that ref) — retry, or set CENCI_REF=main (or pass --ref main) to install from main instead"
+
+# ------------------------------------------------ update-mode bootstrap ----
+
+# `cenci update` normally executes install.sh out of the installed
+# marketplace checkout — the very artifact it is supposed to be updating
+# (#700). On any install pinned before #678, that on-disk install.sh's own
+# step_marketplace cannot move the pin (the managed checkout is a detached
+# HEAD at a release tag, so a fetch/pull moves nothing), so the update is a
+# permanent, silently-successful no-op. Mirror the piped path's fail-closed
+# download→verify→re-exec via exec_pinned_installer so update mode always
+# runs the *target* release's installer instead of trusting whatever happens
+# to be on disk.
+#
+# Gated so this never fires outside the one case it exists for:
+#   - only in update mode;
+#   - only when CENCI_REF is still unset (env and --ref) — an explicit ref
+#     (including "main") already pins this run and must never be silently
+#     overridden (AC3);
+#   - only when this script itself resolves inside a managed marketplace
+#     checkout (managed_checkout_dir, mirroring the cenci wrapper's own
+#     managed-vs-dev discrimination) — a dev run from a git source checkout
+#     must never have its installer silently replaced by a released one
+#     (AC4).
+#
+# Skipped (no download, no re-exec) when the checkout can already be proven
+# current: its own `git describe --tags --exact-match HEAD` equals
+# RESOLVED_REF (AC9). When that currency can't be proven at all (not a git
+# repo, or describe fails — a corrupted or unusually shallow checkout), the
+# bootstrap fires anyway: refreshing when unsure is safer than trusting
+# unprovable local state, matching the fail-closed convention already used
+# for cosign verification elsewhere in this file.
+#
+# exec_pinned_installer sets CENCI_REF="$RESOLVED_REF" on its re-exec, which
+# is the loop guard: the child sees CENCI_REF already set and skips this
+# block outright, so at most one re-exec ever happens per trigger (AC2). Its
+# cosign-missing / verification-failure paths die() and never fall back to
+# running the stale local installer — silently falling back would just
+# reinstate this exact bug (AC5, AC6).
+if [ "$MODE" = update ] && [ -z "$CENCI_REF" ]; then
+	if update_checkout_dir="$(managed_checkout_dir "${BASH_SOURCE[0]:-$0}")"; then
+		update_current_ref=""
+		if ! update_current_ref="$(git -C "$update_checkout_dir" describe --tags --exact-match HEAD 2>/dev/null)" || [ "$update_current_ref" != "$RESOLVED_REF" ]; then
+			exec_pinned_installer "$RESOLVED_REF"
+		fi
+	fi
+fi
 
 if [ "$MODE" = update ]; then
 	step_marketplace
