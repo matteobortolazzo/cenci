@@ -226,6 +226,11 @@ lifecycle must be stopped and relaunched before attachment.
 repo's — including pinning or downgrading via `--version`. Every repository and named
 instance on the host resolves the same `current` symlink.
 
+**Interim pin behavior:** `--version` now writes a persistent pin to the shared volume, and
+a subsequent bare `update-agent` (no `--version`) refuses rather than silently reinstalling
+`latest`. Until an `--unpin` flag lands, the only way to clear the pin is running
+`agent-cli.sh unpin <agent>` directly inside the updater container.
+
 **Version-retention race:** only the current and previous releases are kept on disk. An
 already-running sandbox holds its agent CLI open from the release directory it started
 with, so two `update-agent` calls in a row (while that session is still running) can prune
