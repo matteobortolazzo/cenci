@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"testing"
+	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/internal/detect"
 	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
@@ -88,9 +89,12 @@ func TestDaemon_SweepDetectsIdlePaneTitle(t *testing.T) {
 		t.Fatalf("precondition: expected StatusRunning, got %v", sess.Status)
 	}
 
-	// Simulate: pane title reverts to idle marker (user pressed ESC during text gen).
+	// Simulate: pane title reverts to idle marker (user pressed ESC during text
+	// gen). A real ESC fires no hook event, so the backstop requires hook-event
+	// quiescence before trusting the title (#706) — age the last event past it.
 	mc.Panes[0].PaneTitle = "✳ writing tests"
 	mc.WindowOpts = nil
+	sess.LastEvent = time.Now().Add(-10 * time.Second)
 
 	d.runSweep()
 
@@ -151,6 +155,152 @@ func TestDaemon_SweepIgnoresNonRunningWindows(t *testing.T) {
 	// Should remain Done — sweep idle detection only applies to Running windows.
 	if sess.Status != detect.StatusDone {
 		t.Errorf("expected StatusDone unchanged, got %v", sess.Status)
+	}
+}
+
+// TestDaemon_SweepDoesNotStopSessionHeldForBackgroundWork covers #706: a
+// main-agent Stop with in-flight background work holds the session at running
+// (#698), and the pane title then legitimately reverts to an idle marker
+// ("✳ …") while the session waits at the prompt to be woken. The Phase-3
+// title sweep must not override the hold — no matter how long the wait, since
+// no hook event fires until the background work wakes the session.
+func TestDaemon_SweepDoesNotStopSessionHeldForBackgroundWork(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "⠋ delegating work", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "Stop", SessionID: "sess1", TmuxPane: "%0", BackgroundWork: true})
+
+	sess := d.sessions["sess1"]
+	if sess == nil || sess.Status != detect.StatusRunning {
+		t.Fatalf("precondition: expected StatusRunning after held Stop, got %v", sess.Status)
+	}
+
+	// Paused at the prompt: idle-marker title, and hook events long quiet.
+	mc.Panes[0].PaneTitle = "✳ delegating work"
+	sess.LastEvent = time.Now().Add(-10 * time.Second)
+	mc.WindowOpts = nil
+
+	d.runSweep()
+
+	if sess.Status != detect.StatusRunning {
+		t.Errorf("expected StatusRunning to survive the sweep while background work is in flight, got %v", sess.Status)
+	}
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-symbol"); ok && v == "⏹" {
+		t.Errorf("expected no stopped symbol while held for background work, got %q", v)
+	}
+}
+
+// TestDaemon_SweepDoesNotStopFreshlyActiveSession covers the #706 race: a
+// pane title sampled in the same second as fresh hook events must not outrank
+// them — the sweep may only trust an idle-marker title after hook events have
+// gone quiet.
+func TestDaemon_SweepDoesNotStopFreshlyActiveSession(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "✳ writing tests", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+
+	sess := d.sessions["sess1"]
+	if sess == nil || sess.Status != detect.StatusRunning {
+		t.Fatalf("precondition: expected StatusRunning, got %v", sess.Status)
+	}
+
+	// LastEvent is fresh (just set by handleEvent) — the sweep must leave the
+	// session running even though the title shows a non-braille marker.
+	d.runSweep()
+
+	if sess.Status != detect.StatusRunning {
+		t.Errorf("expected StatusRunning to survive a sweep with fresh hook events, got %v", sess.Status)
+	}
+}
+
+// TestDaemon_SubagentEventDoesNotClearBackgroundHold pins the hold against
+// the background work itself: a backgrounded subagent's own tool events land
+// on the same session key (AgentID set), and they are exactly the in-flight
+// work the hold protects. They must not clear it — otherwise any >quiescence
+// gap between the subagent's tool calls (a long shell command, a slow API
+// call) re-exposes the idle-marker title to the sweep and stops the session
+// mid-flight, the very bug (#706) the hold exists to fix.
+func TestDaemon_SubagentEventDoesNotClearBackgroundHold(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "⠋ delegating work", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "Stop", SessionID: "sess1", TmuxPane: "%0", BackgroundWork: true})
+
+	// The backgrounded subagent keeps working on the same session key.
+	d.handleEvent(ipc.HookEvent{EventType: "PreToolUse", SessionID: "sess1", TmuxPane: "%0", ToolName: "Bash", AgentID: "sub1"})
+
+	sess := d.sessions["sess1"]
+	if sess == nil || sess.Status != detect.StatusRunning {
+		t.Fatalf("precondition: expected StatusRunning, got %v", sess.Status)
+	}
+
+	// A long gap inside the subagent's tool call: idle-marker title, hooks
+	// quiet past the quiescence window. The hold must still protect the
+	// session.
+	mc.Panes[0].PaneTitle = "✳ delegating work"
+	sess.LastEvent = time.Now().Add(-10 * time.Second)
+
+	d.runSweep()
+
+	if sess.Status != detect.StatusRunning {
+		t.Errorf("expected StatusRunning to survive the sweep while the subagent is mid-flight, got %v", sess.Status)
+	}
+}
+
+// TestDaemon_EventAfterHoldClearsBackgroundHold pins the hold's lifecycle: a
+// later main-agent event (the background work woke the session, it worked and
+// went quiet again) clears the hold, so a subsequent quiescent idle-marker
+// title may stop the session via the ESC backstop again.
+func TestDaemon_EventAfterHoldClearsBackgroundHold(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "⠋ delegating work", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "Stop", SessionID: "sess1", TmuxPane: "%0", BackgroundWork: true})
+
+	// Background work woke the session; a new main-agent prompt runs a turn.
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+
+	sess := d.sessions["sess1"]
+	if sess == nil || sess.Status != detect.StatusRunning {
+		t.Fatalf("precondition: expected StatusRunning, got %v", sess.Status)
+	}
+
+	// User ESCs during pure text generation: idle-marker title, hooks quiet.
+	mc.Panes[0].PaneTitle = "✳ delegating work"
+	sess.LastEvent = time.Now().Add(-10 * time.Second)
+
+	d.runSweep()
+
+	if sess.Status != detect.StatusStopped {
+		t.Errorf("expected StatusStopped after hold was cleared by a later event, got %v", sess.Status)
 	}
 }
 

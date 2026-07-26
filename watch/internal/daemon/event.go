@@ -88,6 +88,17 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 		return
 	}
 	sess.Status = status
+	// Track the #698 background-work hold for the sweep (#706): set exactly
+	// when a held main-agent Stop is applied, cleared by the main agent's next
+	// applied event. Subagent events (AgentID set) must not touch it — the
+	// backgrounded subagent's own PreToolUse/PostToolUse land on the same
+	// session key, and they are the very in-flight work the hold protects;
+	// letting them clear it would re-expose the session to the title sweep in
+	// the gaps between the subagent's tool calls. Suppressed/dropped events
+	// return above and never clear it either.
+	if event.AgentID == "" {
+		sess.BackgroundHold = event.EventType == "Stop" && event.BackgroundWork
+	}
 	switch status {
 	case detect.StatusNeedInput:
 		sess.AttentionSource = attentionSource(event)

@@ -23,6 +23,12 @@ type SessionState struct {
 	PromptTaskName bool
 	TmuxPane       string    // tmux pane ID (e.g. %5); empty = paneless session
 	LastEvent      time.Time // last event time, drives paneless TTL expiry
+	// BackgroundHold is true while the session's latest main-agent Stop was
+	// held at running because in-flight background work will wake it (#698).
+	// While set, the tmux sweep's idle-title detection must not flip the
+	// session to stopped — the pane legitimately sits at the prompt with an
+	// idle-marker title until the background work wakes it (#706).
+	BackgroundHold bool
 }
 
 // Key returns the session key used in the daemon's sessions map: the agent
