@@ -639,7 +639,6 @@ run_doctor() {
 	local launcher_hint="re-run the installer to create it"
 	local image_hint="build it with: cenci sandbox build"
 	local lazyboards_hint="optional; install with: cenci-installer --lazyboards"
-	local seed_hint="re-run the installer to seed the default, or see docs/orchestration.md"
 	if [ "$MODE" = install ]; then
 		launcher_hint="created later in this run"
 		[ "$BUILD_IMAGE" = no ] || image_hint="you'll be offered the build later in this run"
@@ -647,11 +646,6 @@ run_doctor() {
 		ask) lazyboards_hint="optional; you'll be asked later in this run" ;;
 		yes) lazyboards_hint="optional; installed later in this run" ;;
 		esac
-		# Mirrors step_lazyboards_setup's guard: only an explicit --no-lazyboards
-		# skips seeding for an already-installed binary.
-		if ! { [ "$LAZYBOARDS" = no ] && [ "$LAZYBOARDS_EXPLICIT" -eq 1 ]; }; then
-			seed_hint="seeded later in this run (see docs/orchestration.md)"
-		fi
 	fi
 	step "Checking your system ($(platform_label))"
 
@@ -790,20 +784,23 @@ run_doctor() {
 	say ""
 	say "  ${BOLD}Board orchestration (optional)${RESET}"
 	local lb_ver
+	# cenci itself no longer creates or expects
+	# ~/.config/lazyboards/config.yml — board config is self-contained
+	# per-repo (see docs/orchestration.md). This guard exists solely to
+	# detect a legacy file left behind by a pre-#716 install and warn if
+	# it still carries #415's vulnerable Checkout PR pattern; its
+	# presence/absence is otherwise unreported. It runs regardless of
+	# which lazyboards binary variant (if any) is detected below, since a
+	# stale global config can outlive a switch to an unmanaged binary.
+	local lb_config="${XDG_CONFIG_HOME:-$HOME/.config}/lazyboards/config.yml"
+	if [ -f "$lb_config" ] && grep -q 'git fetch origin {pr_branch}' "$lb_config" 2>/dev/null; then
+		warn "legacy ~/.config/lazyboards/config.yml: Checkout PR action uses the vulnerable git fetch/git switch pattern — update to gh pr checkout {pr_number}"
+	fi
 	if lazyboards_managed_binary >/dev/null 2>&1; then
 		if lb_ver="$(lazyboards_installed_version)" && [ -n "$lb_ver" ]; then
 			ok "lazyboards installed (v${lb_ver})"
 		else
 			ok "lazyboards installed"
-		fi
-		local lb_config="${XDG_CONFIG_HOME:-$HOME/.config}/lazyboards/config.yml"
-		if [ -f "$lb_config" ]; then
-			ok "board config present (~/.config/lazyboards/config.yml)"
-			if grep -q 'git fetch origin {pr_branch}' "$lb_config" 2>/dev/null; then
-				warn "Checkout PR action uses the vulnerable git fetch/git switch pattern — update to gh pr checkout {pr_number}"
-			fi
-		else
-			warn "no board config — $seed_hint"
 		fi
 		if ! verify_lazyboards_resolution; then
 			warn "lazyboards PATH resolution needs attention"
@@ -1855,70 +1852,6 @@ verify_lazyboards_resolution() {
 	ok "lazyboards command resolves to the managed binary"
 }
 
-# disable_cleanup_line comments out the board config's `cleanup:` action in
-# place, so the seeded file keeps the setting visible (and trivially
-# re-enabled) instead of silently dropping it. It fails loud rather than
-# silently leaving auto-close on: it verifies the substitution actually fired,
-# guarding against a future template whose cleanup line no longer matches.
-disable_cleanup_line() {
-	local cfg="$1" tmp
-	tmp="$(mktemp)" || return 1
-	if ! sed 's|^cleanup:.*|# &  # auto-close disabled at install; uncomment to enable|' "$cfg" >"$tmp"; then
-		rm -f "$tmp"
-		return 1
-	fi
-	if ! grep -q '^# cleanup:' "$tmp"; then
-		rm -f "$tmp"
-		return 1
-	fi
-	mv "$tmp" "$cfg"
-}
-
-# seed_lazyboards_config copies the packaged default board config (columns
-# wired to the cenci workflow — see docs/orchestration.md) into
-# ~/.config/lazyboards/config.yml, only when no config exists yet. An existing
-# config is never merged into or overwritten: lazyboards has its own config
-# UI, and YAML has no managed-marker regeneration story.
-#
-# On a fresh seed it resolves the optional auto-close action: an interactive
-# run asks (default on); --no-cleanup / --cleanup force it; and a
-# non-interactive or --yes run keeps the template default (on) so the seeded
-# file matches flow/templates/lazyboards-config.yml byte-for-byte.
-seed_lazyboards_config() {
-	local cfg_dir cfg template cleanup="$CLEANUP"
-	cfg_dir="${XDG_CONFIG_HOME:-$HOME/.config}/lazyboards"
-	cfg="$cfg_dir/config.yml"
-	if [ -e "$cfg" ]; then
-		ok "board config already exists — left untouched ($cfg)"
-		return 0
-	fi
-	if ! template="$(find_plugin_path "flow/templates/lazyboards-config.yml")"; then
-		warn "board config template not found in the marketplace checkout — copy it from docs/orchestration.md"
-		return 0
-	fi
-	if [ "$cleanup" = ask ]; then
-		# ask_yn returns the default (yes) untouched under --yes / no tty.
-		if ask_yn "Auto-close a card's tmux window when its ticket closes (lazyboards runs 'cenci close')?" y; then
-			cleanup=yes
-		else
-			cleanup=no
-		fi
-	fi
-	if ! { mkdir -p "$cfg_dir" && cp "$template" "$cfg"; }; then
-		warn "could not write $cfg — copy flow/templates/lazyboards-config.yml there manually"
-		return 0
-	fi
-	if [ "$cleanup" = no ]; then
-		if disable_cleanup_line "$cfg"; then
-			ok "seeded default board config → $cfg (auto-close disabled — uncomment cleanup: to enable)"
-		else
-			warn "seeded board config but could not disable the cleanup action — edit $cfg by hand"
-		fi
-		return 0
-	fi
-	ok "seeded default board config → $cfg (columns wired to cenci run refine/design/implement)"
-}
-
 step_lazyboards_setup() {
 	local installed_ver latest_ver path_bin="" managed_present=0
 	# An explicit skip applies in every mode, including updates of an existing
@@ -1965,7 +1898,6 @@ step_lazyboards_setup() {
 		INSTALL_FAILED=1
 		return 0
 	fi
-	seed_lazyboards_config
 	if ! verify_lazyboards_resolution; then
 		INSTALL_FAILED=1
 	fi
@@ -2694,7 +2626,6 @@ MODE=install
 BUILD_IMAGE=ask
 LAZYBOARDS=ask
 LAZYBOARDS_EXPLICIT=0
-CLEANUP=ask
 INSTALL_FAILED=0
 CENCI_REF="${CENCI_REF:-}"
 # Captured before the arg-parse loop below consumes "$@" via shift, so the
@@ -2738,9 +2669,6 @@ Flags:
   --build / --no-build                  force / skip the sandbox image build
   --lazyboards / --no-lazyboards        force / skip the optional lazyboards board install
                                          (uninstall mode: --lazyboards also removes it)
-  --cleanup / --no-cleanup              seed the lazyboards board config with / without the
-                                         auto-close action (`cleanup: "cenci close {number}"`)
-                                         that closes a card's tmux window when its ticket does
   --ref <ref>                           marketplace + plugin content, and the installer
                                          itself, all come from this ref instead of the
                                          resolved latest release tag (e.g. --ref main,
@@ -2760,8 +2688,6 @@ while [ $# -gt 0 ]; do
 	--no-build) BUILD_IMAGE=no ;;
 	--lazyboards) LAZYBOARDS=yes; LAZYBOARDS_EXPLICIT=1 ;;
 	--no-lazyboards) LAZYBOARDS=no; LAZYBOARDS_EXPLICIT=1 ;;
-	--cleanup) CLEANUP=yes ;;
-	--no-cleanup) CLEANUP=no ;;
 	--ref)
 		[ $# -ge 2 ] || die "--ref requires a value (see --help)"
 		CENCI_REF="$2"
