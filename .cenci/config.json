@@ -1,5 +1,5 @@
 {
-  "configVersion": "0.22.0",
+  "configVersion": "0.27.1",
   "branchPattern": "feature/<id>-<description>",
   "isMonorepo": true,
   "stack": {
@@ -28,7 +28,8 @@
       "lintCommand": "make lint",
       "gateCommand": "make test",
       "serveCommand": "go run .",
-      "boardKey": "W"
+      "boardKey": "Sw",
+      "testKey": "Tw"
     },
     {
       "slug": "sandbox",
@@ -46,13 +47,14 @@
     "context7": true
   },
   "lspServers": {
-    "gopls": true
+    "gopls": true,
+    "pyright": true
   },
   "autoCompactDisabled": true,
   "pinSubagents200K": false,
   "sandbox": {
     "enabled": true,
-    "baseVersion": "1.3.2"
+    "baseVersion": "1.15.0"
   },
   "lazyboards": {
     "enabled": true

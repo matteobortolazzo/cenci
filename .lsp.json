@@ -5,5 +5,10 @@
     "extensionToLanguage": {
       ".go": "go"
     }
+  },
+  "pyright": {
+    "command": "pyright-langserver",
+    "args": ["--stdio"],
+    "extensionToLanguage": { ".py": "python" }
   }
 }

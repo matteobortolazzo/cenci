@@ -35,10 +35,20 @@ columns:
   - name: In Review
     actions:
       W:
+        name: Open worktree
+        type: shell
+        scope: pr
+        command: 'tmux new-window -d -n pr-{pr_number} -c {pr_worktree}'
+      Sw:
         name: Run watch worktree
         type: shell
         scope: pr
         command: 'tmux new-window -d -n pr-{pr_number} -c {pr_worktree}/''watch'' "go run ."'
+      Tw:
+        name: Test watch worktree
+        type: shell
+        scope: pr
+        command: 'tmux new-window -d -n pr-{pr_number} -c {pr_worktree}/''watch'' "make test"'
 
 # Board-level actions (default scope is "card" — they act on the selected card)
 actions:
