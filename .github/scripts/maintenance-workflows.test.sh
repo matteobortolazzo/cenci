@@ -48,7 +48,7 @@ contains "$SCHEDULED" "cancel-in-progress: false" "scheduled workflow must not c
 contains "$SCHEDULED" 'runner.temp' "scheduled report must live in runner-local temporary storage"
 contains "$SCHEDULED" 'github.run_attempt' "scheduled report artifact must be unique to the workflow attempt"
 contains "$SCHEDULED" "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" "scheduled workflow must pin report upload"
-contains "$SCHEDULED" "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" "scheduled workflow must pin report download"
+contains "$SCHEDULED" "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" "scheduled workflow must pin report download"
 contains "$SCHEDULED" "if-no-files-found: error" "scheduled workflow must fail instead of reconciling a missing/stale report"
 contains "$LINT" "docker://rhysd/actionlint:1.7.7" "workflow lint must run a pinned actionlint image"
 lacks "$LINT" "docker://rhysd/actionlint:latest" "workflow lint must not use an unpinned actionlint image"
