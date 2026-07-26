@@ -227,6 +227,47 @@ func TestDaemon_SweepDoesNotStopFreshlyActiveSession(t *testing.T) {
 	}
 }
 
+// TestDaemon_SubagentEventDoesNotClearBackgroundHold pins the hold against
+// the background work itself: a backgrounded subagent's own tool events land
+// on the same session key (AgentID set), and they are exactly the in-flight
+// work the hold protects. They must not clear it — otherwise any >quiescence
+// gap between the subagent's tool calls (a long shell command, a slow API
+// call) re-exposes the idle-marker title to the sweep and stops the session
+// mid-flight, the very bug (#706) the hold exists to fix.
+func TestDaemon_SubagentEventDoesNotClearBackgroundHold(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "⠋ delegating work", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "Stop", SessionID: "sess1", TmuxPane: "%0", BackgroundWork: true})
+
+	// The backgrounded subagent keeps working on the same session key.
+	d.handleEvent(ipc.HookEvent{EventType: "PreToolUse", SessionID: "sess1", TmuxPane: "%0", ToolName: "Bash", AgentID: "sub1"})
+
+	sess := d.sessions["sess1"]
+	if sess == nil || sess.Status != detect.StatusRunning {
+		t.Fatalf("precondition: expected StatusRunning, got %v", sess.Status)
+	}
+
+	// A long gap inside the subagent's tool call: idle-marker title, hooks
+	// quiet past the quiescence window. The hold must still protect the
+	// session.
+	mc.Panes[0].PaneTitle = "✳ delegating work"
+	sess.LastEvent = time.Now().Add(-10 * time.Second)
+
+	d.runSweep()
+
+	if sess.Status != detect.StatusRunning {
+		t.Errorf("expected StatusRunning to survive the sweep while the subagent is mid-flight, got %v", sess.Status)
+	}
+}
+
 // TestDaemon_EventAfterHoldClearsBackgroundHold pins the hold's lifecycle: a
 // later main-agent event (the background work woke the session, it worked and
 // went quiet again) clears the hold, so a subsequent quiescent idle-marker
