@@ -376,8 +376,9 @@ Include the server in `.lsp.json` regardless — it activates once the binary is
     Auto-compact compresses conversation history as the context window fills,
     which can lose important context during long sessions. (Recommended: Yes — disable it)"
    - Default: Yes
-   - If Yes: merge `{"env": {"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "1"}}` into `~/.claude/settings.json` using jq (create the file if it doesn't exist). This sets compaction to trigger at 1% — effectively manual-only.
-   - If No: remove the `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` key from the `env` object in `~/.claude/settings.json` (if present)
+   - If Yes: set `"autoCompactEnabled": false` in `~/.claude/settings.json` using jq (create the file if it doesn't exist)
+   - If No: remove the `autoCompactEnabled` key from `~/.claude/settings.json` (if present)
+   - Either way, also remove any `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` key from the `env` object in `~/.claude/settings.json`. Earlier versions of this skill set it to `"1"` believing that meant manual-only compaction; Claude Code interprets it as "compact once 1% of the context window is used", so any leftover value causes constant compaction and must be purged.
 
 7b. **Pin subagents to 200K context**: "Do you want to pin cenci's subagents to a 200K-context
     model? cenci delegates reviews to subagents, and on 1M-context sessions that delegation can be
@@ -827,19 +828,20 @@ For each MCP selected in question 5:
    ```
 
 5c. **Configure auto-compact** (from question 7):
-   - If disabled: merge the env var into `~/.claude/settings.json`:
+   - If disabled: set the setting in `~/.claude/settings.json`:
      ```bash
      mkdir -p ~/.claude && \
      [ -f ~/.claude/settings.json ] \
-       && jq '. * {"env": {"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "1"}}' ~/.claude/settings.json > ~/.claude/settings.json.tmp \
+       && jq '.autoCompactEnabled = false | del(.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE) | if .env == {} then del(.env) else . end' ~/.claude/settings.json > ~/.claude/settings.json.tmp \
        && mv ~/.claude/settings.json.tmp ~/.claude/settings.json \
-       || echo '{"env": {"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "1"}}' > ~/.claude/settings.json
+       || echo '{"autoCompactEnabled": false}' > ~/.claude/settings.json
      ```
-   - If enabled (re-enable): remove the env var key:
+   - If enabled (re-enable): remove the setting:
      ```bash
-     jq 'del(.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE) | if .env == {} then del(.env) else . end' ~/.claude/settings.json > ~/.claude/settings.json.tmp \
+     jq 'del(.autoCompactEnabled) | del(.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE) | if .env == {} then del(.env) else . end' ~/.claude/settings.json > ~/.claude/settings.json.tmp \
        && mv ~/.claude/settings.json.tmp ~/.claude/settings.json
      ```
+   Both paths also delete any `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` env key left behind by earlier versions of this skill — that override makes compaction trigger at 1% of context *used*, i.e. constantly (#725).
    This writes to `~/.claude/settings.json` (user-level Claude Code settings).
 
 5c-bis. **Pin subagents to 200K context** (from question 7b):
