@@ -39,7 +39,7 @@ columns:
         type: shell
         scope: pr
         command: 'tmux new-window -d -n pr-{pr_number} -c {pr_worktree}'
-      Sw:
+      Rw:
         name: Run watch worktree
         type: shell
         scope: pr
