@@ -129,7 +129,7 @@ rm -f "${CFG}"
 UNREADABLE_CFG="$(write_config '{"configVersion":"0.22.0"}')"
 chmod 000 "${UNREADABLE_CFG}"
 if [[ "$(id -u)" -eq 0 ]]; then
-  echo "SKIP: case10 unreadable-config test requires a non-root user" >&2
+  echo "SKIP: case10 unreadable-config test requires a non-root user"
 else
   run_merge "${UNREADABLE_CFG}" --dockerfile true --base-version 24.04 --dind true
   [[ "${CODE}" -ne 0 ]] || fail "case10 unreadable config must fail closed (non-zero exit), got exit 0 with output [${OUT}]"

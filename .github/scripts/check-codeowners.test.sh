@@ -164,9 +164,19 @@ CASE8="${TEST_ROOT}/case8-unreadable"
 write_codeowners "${CASE8}" \
 ".github/scripts/check-workflow-permissions.sh  @matteobortolazzo"
 chmod 000 "${CASE8}/.github/CODEOWNERS"
-run_check "${CASE8}"
-assert_exit "case8 unreadable CODEOWNERS file fails" 1
-assert_stderr_contains "case8 message names the unreadable file" "is not readable"
+# uid 0 bypasses DAC, and access(2) grants root read on every regular file, so
+# the `[ ! -r ]` branch under test is unreachable as root. Every alternative
+# lever (FIFO/dir/symlink loop) also makes the earlier `[ ! -f ]` guard false
+# and diverts to the "not found" branch — a different assertion. So this one
+# case is guard + visible SKIP (#642); see
+# flow/docs/shell-scripting-gotchas.md.
+if [[ "$(id -u)" -eq 0 ]]; then
+    echo "SKIP: case8 unreadable-CODEOWNERS test requires a non-root user"
+else
+    run_check "${CASE8}"
+    assert_exit "case8 unreadable CODEOWNERS file fails" 1
+    assert_stderr_contains "case8 message names the unreadable file" "is not readable"
+fi
 chmod 644 "${CASE8}/.github/CODEOWNERS"
 
 # ── Case 9: glob-skip line does not mask a genuinely missing literal path ─

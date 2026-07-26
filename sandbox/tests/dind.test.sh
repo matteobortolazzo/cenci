@@ -381,13 +381,15 @@ STDERR7="${CASE7_DIR}/stderr.log"
 mkdir -p "${HOME7}"
 : >"${CALL_LOG7}"
 make_mocks "${BIN7}" 1 "boom: dockerd crashed"
-# Remove write permission on the marker's own directory so the final
-# `> "${marker}"` redirection fails (e.g. an unwritable /home/dev in
-# production) — restored immediately after so the outer WORK cleanup trap
-# can still remove it.
-chmod 500 "${HOME7}"
+# Root-proof lever: the marker path is pre-created as a *directory*, so the
+# final `> "${marker}"` redirection in dind.sh fails with EISDIR — uid 0
+# cannot bypass it (`chmod 500` on the parent was a no-op for root, #642).
+# start_dind's supersede-only `rm -f "${sentinel}" "${marker}"` cannot remove
+# a directory and its failure is ignored (run_start_dind's driver runs
+# `bash -c 'source ...; start_dind; wait'` with no `set -e`), so the directory
+# survives to the redirection.
+mkdir -p "${HOME7}/${MARKER_NAME}"
 run_start_dind "${BIN7}" "${HOME7}" "${CALL_LOG7}" "${STDERR7}"
-chmod 700 "${HOME7}"
 
 if grep -q 'failed to write dockerd startup-error marker' "${STDERR7}"; then
     pass
