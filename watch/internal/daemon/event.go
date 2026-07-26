@@ -88,6 +88,10 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 		return
 	}
 	sess.Status = status
+	// Track the #698 background-work hold for the sweep (#706): set exactly
+	// when a held main-agent Stop is applied, cleared by any other applied
+	// event. Suppressed/dropped events return above and never clear it.
+	sess.BackgroundHold = event.EventType == "Stop" && event.BackgroundWork && event.AgentID == ""
 	switch status {
 	case detect.StatusNeedInput:
 		sess.AttentionSource = attentionSource(event)

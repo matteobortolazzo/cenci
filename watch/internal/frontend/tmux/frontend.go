@@ -7,6 +7,7 @@ package tmux
 import (
 	"log"
 	"strings"
+	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/internal/config"
 	"github.com/matteobortolazzo/cenci/watch/internal/detect"
@@ -26,6 +27,13 @@ type Frontend struct {
 }
 
 var _ frontend.Frontend = (*Frontend)(nil)
+
+// titleStopQuiescence is how long hook events must have been quiet before the
+// sweep's idle-title detection may flip a Running session to stopped (#706).
+// A real ESC during pure text generation fires no hook event at all, so
+// silence is its signature; a title sampled while events are still fresh must
+// never outrank them. 3× the default 1s SweepInterval.
+const titleStopQuiescence = 3 * time.Second
 
 // New creates a tmux frontend backed by the given client.
 func New(cfg config.Config, client tmuxc.Client) *Frontend {
@@ -387,7 +395,15 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 		}
 		r := firstRune(p.PaneTitle)
 		if detect.IsStatusSymbol(r) && !detect.IsBraille(r) {
-			// Pane title shows an idle marker (✶ ✻ ✳) — Claude returned to prompt.
+			// Pane title shows an idle marker (✶ ✻ ✳) — but the title alone
+			// cannot tell "user pressed ESC" from "paused at the prompt while
+			// background work is in flight" (#706). Event state wins: never
+			// flip a session the core holds at running for background work
+			// (#698), and require hook-event quiescence for the ESC backstop.
+			// Untracked windows (no core session) keep the plain backstop.
+			if sess, ok := sessions[ws.SessionKey]; ok && (sess.BackgroundHold || time.Since(sess.LastEvent) < titleStopQuiescence) {
+				continue
+			}
 			taskName := frontend.SanitizeName(detect.TaskName(p.PaneTitle))
 			f.applyStatus(wt, ws, detect.StatusStopped, taskName)
 			if ws.SessionKey != "" {
