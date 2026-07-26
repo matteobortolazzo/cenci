@@ -129,6 +129,45 @@ func TestDaemon_PendingClosePrunedWhenWindowGoneViaSweep(t *testing.T) {
 	}
 }
 
+// TestDaemon_PendingCloseSurvivesSessionHandoff pins the pending-close ×
+// handoff interaction (#707): a SessionEnd with reason "clear"/"resume" hands
+// the window to a successor session, so a registered pending-close must NOT
+// kill the window mid-continuation. The entry stays registered — it is keyed
+// by "session:index", which survives the handoff — and fires once the
+// successor session's own SessionEnd arrives.
+func TestDaemon_PendingCloseSurvivesSessionHandoff(t *testing.T) {
+	mc := trackedSessionMock()
+	d := newTestDaemon(mc)
+	fk := d.killer.(*fakeKiller)
+
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+
+	d.registerPendingClose(ipc.PendingClose{Session: "main", WindowIndex: "0", WindowName: "bash"})
+
+	// /clear ends sess1 but the successor continues in the same pane: the
+	// window must survive and the pending-close entry must stay registered.
+	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sess1", TmuxPane: "%0", SessionEndReason: "clear"})
+
+	if len(fk.killed) != 0 {
+		t.Fatalf("killed = %v, want none on a clear/resume handoff — the successor still owns the window", fk.killed)
+	}
+	if len(d.pending) != 1 {
+		t.Fatalf("pending registry size = %d, want the entry retained across the handoff", len(d.pending))
+	}
+
+	// The successor session takes over the window, then ends for real.
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess2", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sess2", TmuxPane: "%0"})
+
+	if len(fk.killed) != 1 || fk.killed[0] != "=main:0" {
+		t.Errorf("killed = %v, want exactly [=main:0] once the successor session ends", fk.killed)
+	}
+	if len(d.pending) != 0 {
+		t.Errorf("pending registry size = %d, want 0 after the successor's SessionEnd fired the kill", len(d.pending))
+	}
+}
+
 // TestDaemon_SubagentSessionEndDoesNotKillPendingClose asserts that a
 // subagent's own SessionEnd (non-empty AgentID) never triggers a
 // pending-close kill — only the main agent's own SessionEnd does (mirrors

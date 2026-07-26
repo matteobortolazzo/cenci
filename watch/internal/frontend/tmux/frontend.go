@@ -228,6 +228,50 @@ func (f *Frontend) OnSessionEnd(sess *frontend.SessionState) {
 	delete(f.panes, pane)
 }
 
+// OnSessionHandoff releases the ended session's claim on its window while
+// leaving the window tracked and styled: after a /clear (or an interactive
+// /resume switch) the agent continues on the same pane under a new session
+// id, and that successor's first event re-keys the window via the takeover
+// in OnEvent (#707). When the pane is already gone there is no successor to
+// hand the window to — fall back to the full OnSessionEnd teardown.
+func (f *Frontend) OnSessionHandoff(sess *frontend.SessionState) {
+	if sess.TmuxPane == "" {
+		return
+	}
+
+	panes, err := f.client.ListPanes()
+	if err != nil {
+		if f.cfg.Verbose {
+			log.Printf("event: error listing panes for %s: %v", sess.TmuxPane, err)
+		}
+		return
+	}
+	alive := false
+	for i := range panes {
+		if panes[i].PaneID == sess.TmuxPane {
+			alive = true
+			break
+		}
+	}
+	if !alive {
+		f.OnSessionEnd(sess)
+		return
+	}
+
+	key := sess.Key()
+	wt, ok := f.sessionKeys[key]
+	if !ok {
+		return
+	}
+	delete(f.sessionKeys, key)
+	if ws := f.windows[wt]; ws != nil && ws.SessionKey == key {
+		ws.SessionKey = ""
+	}
+	if f.cfg.Verbose {
+		log.Printf("session %s handed off window %s to its successor", key, wt)
+	}
+}
+
 // Sweep migrates renumbered panes, cleans up windows whose pane is gone,
 // detects idle pane titles and exited agents, and reports which core sessions
 // to update or remove.

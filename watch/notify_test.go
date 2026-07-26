@@ -122,6 +122,52 @@ func TestNotifyParsesAgentIDFromStdin(t *testing.T) {
 	}
 }
 
+// TestNotifyParsesSessionEndReasonFromStdin covers ticket #707's real entry
+// point: the runNotify stdin-parsing path must decode Claude Code's "reason"
+// JSON key on SessionEnd into ipc.HookEvent.SessionEndReason, since that's
+// the field the daemon's clear/resume window handoff keys on
+// (internal/daemon/event.go). Covers both continuation reasons and the
+// absent-reason fallback from an older Claude Code.
+func TestNotifyParsesSessionEndReasonFromStdin(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"clear", `{"hook_event_name":"SessionEnd","session_id":"s1","reason":"clear"}`, "clear"},
+		{"resume", `{"hook_event_name":"SessionEnd","session_id":"s1","reason":"resume"}`, "resume"},
+		{"absent reason stays empty", `{"hook_event_name":"SessionEnd","session_id":"s1"}`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			socket := filepath.Join(t.TempDir(), "events.sock")
+			receiver, err := ipc.NewEventReceiver(socket)
+			if err != nil {
+				t.Fatalf("listen: %v", err)
+			}
+			defer func() { _ = receiver.Close() }()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go receiver.Accept(ctx)
+
+			cmd := exec.Command(binaryPath, "notify", "-agent", "claude", "-event-socket", socket)
+			cmd.Stdin = strings.NewReader(tc.input)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("notify: %v: %s", err, output)
+			}
+
+			select {
+			case event := <-receiver.Events():
+				if event.SessionEndReason != tc.want {
+					t.Fatalf("session_end_reason = %q, want %q", event.SessionEndReason, tc.want)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out waiting for notify event")
+			}
+		})
+	}
+}
+
 func mustJSON(t *testing.T, value string) []byte {
 	t.Helper()
 	b, err := json.Marshal(value)

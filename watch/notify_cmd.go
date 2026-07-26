@@ -55,6 +55,10 @@ func runNotify(args []string) {
 		IsInterrupt bool `json:"is_interrupt"`
 		// AgentID is set when the hook fires inside a subagent (Task tool) call.
 		AgentID string `json:"agent_id"`
+		// SessionEnd field: why the session ended. "clear" and "resume" are
+		// continuations — a successor session keeps the pane — and route to
+		// the window handoff instead of a full teardown (#707).
+		Reason string `json:"reason"`
 		// Stop field. Only each task's status is read: descriptions and shell
 		// command lines stay local, like the raw prompt above.
 		BackgroundTasks []struct {
@@ -84,6 +88,9 @@ func runNotify(args []string) {
 		IsInterrupt:      hookInput.IsInterrupt,
 		AgentID:          hookInput.AgentID,
 		Timestamp:        time.Now().UTC().Format(time.RFC3339),
+	}
+	if event.EventType == "SessionEnd" {
+		event.SessionEndReason = hookInput.Reason
 	}
 	for _, task := range hookInput.BackgroundTasks {
 		if !terminalBackgroundTaskStatus[task.Status] {
