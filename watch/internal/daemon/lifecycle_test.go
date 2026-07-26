@@ -949,3 +949,148 @@ func TestDaemon_WindowRenumberingMigratesState(t *testing.T) {
 		}
 	}
 }
+
+// TestDaemon_SessionEndClearHandsWindowToSuccessor covers #707: /clear ends
+// the session id but not the pane — Claude Code immediately starts a
+// successor session in the same window (SessionStart source "clear", new
+// session id). The sandbox seeds clear-context-on-plan-accept, so pipeline
+// sessions hit this mid-run: the window must stay tracked and styled through
+// the handoff instead of reverting to its original name.
+func TestDaemon_SessionEndClearHandsWindowToSuccessor(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "docker", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "⠋ implementing plan", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sessA", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sessA", TmuxPane: "%0"})
+
+	if wi := d.frontend.WindowInfo("sessA"); wi == nil {
+		t.Fatal("precondition: expected window tracked for sessA")
+	}
+
+	mc.Renames = nil
+	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sessA", TmuxPane: "%0", SessionEndReason: "clear"})
+
+	if _, ok := d.sessions["sessA"]; ok {
+		t.Error("expected sessA removed from core sessions after SessionEnd(clear)")
+	}
+	for _, r := range mc.Renames {
+		if r.Name == "docker" {
+			t.Errorf("window restored to original name %q on SessionEnd(clear) — must stay tracked for the successor", r.Name)
+		}
+	}
+
+	// Successor session takes over the same pane.
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sessB", TmuxPane: "%0"})
+	if wi := d.frontend.WindowInfo("sessB"); wi == nil {
+		t.Error("expected the successor session to own the handed-off window")
+	}
+	if wi := d.frontend.WindowInfo("sessA"); wi != nil {
+		t.Error("expected the ended session to have released the window")
+	}
+}
+
+// TestDaemon_SessionEndResumeSwitchHandsWindowToSuccessor pins the same
+// handoff for reason "resume": an interactive /resume ends the old session
+// while the pane lives on under the newly resumed one.
+func TestDaemon_SessionEndResumeSwitchHandsWindowToSuccessor(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "docker", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "⠋ working", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sessA", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sessA", TmuxPane: "%0"})
+
+	mc.Renames = nil
+	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sessA", TmuxPane: "%0", SessionEndReason: "resume"})
+
+	for _, r := range mc.Renames {
+		if r.Name == "docker" {
+			t.Errorf("window restored to original name %q on SessionEnd(resume) — must stay tracked for the successor", r.Name)
+		}
+	}
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sessB", TmuxPane: "%0"})
+	if wi := d.frontend.WindowInfo("sessB"); wi == nil {
+		t.Error("expected the resumed session to own the handed-off window")
+	}
+}
+
+// TestDaemon_SessionEndOtherStillRestoresWindow pins today's behavior for a
+// real exit: any non-continuation reason keeps the full teardown.
+func TestDaemon_SessionEndOtherStillRestoresWindow(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "docker", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "⠋ working", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sessA", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sessA", TmuxPane: "%0"})
+
+	mc.Renames = nil
+	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sessA", TmuxPane: "%0", SessionEndReason: "other"})
+
+	if name, ok := lastRename(mc.Renames, "main:0"); !ok || name != "docker" {
+		t.Errorf("expected restore to original name 'docker' on SessionEnd(other), got %q (found=%v)", name, ok)
+	}
+}
+
+// TestDaemon_SessionEndEmptyReasonStillRestoresWindow keeps the exclusion
+// narrow (watch Critical Rule): an absent reason (older Claude Code) must not
+// silently broaden into the handoff path — full teardown stays the default.
+func TestDaemon_SessionEndEmptyReasonStillRestoresWindow(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "docker", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "⠋ working", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sessA", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sessA", TmuxPane: "%0"})
+
+	mc.Renames = nil
+	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sessA", TmuxPane: "%0"})
+
+	if name, ok := lastRename(mc.Renames, "main:0"); !ok || name != "docker" {
+		t.Errorf("expected restore to original name 'docker' on SessionEnd with empty reason, got %q (found=%v)", name, ok)
+	}
+}
+
+// TestDaemon_SessionEndClearWithPaneGoneStillTearsDown covers the fallback:
+// a continuation reason whose pane has already vanished is a real teardown —
+// there is no successor to hand the window to (#522 closure-path coverage).
+func TestDaemon_SessionEndClearWithPaneGoneStillTearsDown(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "docker", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "⠋ working", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sessA", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sessA", TmuxPane: "%0"})
+
+	// Pane vanishes before the SessionEnd(clear) arrives.
+	mc.Panes = nil
+	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sessA", TmuxPane: "%0", SessionEndReason: "clear"})
+
+	if _, ok := d.sessions["sessA"]; ok {
+		t.Error("expected sessA removed from core sessions")
+	}
+	if wi := d.frontend.WindowInfo("sessA"); wi != nil {
+		t.Error("expected no window tracked for sessA after pane-gone SessionEnd(clear)")
+	}
+}

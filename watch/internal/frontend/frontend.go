@@ -46,6 +46,13 @@ type Frontend interface {
 	// OnSessionEnd releases any presentation state for the session
 	// (tmux: restore the window).
 	OnSessionEnd(sess *SessionState)
+	// OnSessionHandoff releases the ended session's claim on its
+	// presentation state while keeping that state alive for a successor
+	// session on the same pane — SessionEnd reason "clear" or "resume",
+	// where the agent continues under a new session id (tmux: keep the
+	// window tracked and styled; the successor's first event re-keys it).
+	// Implementations fall back to OnSessionEnd when the pane is gone (#707).
+	OnSessionHandoff(sess *SessionState)
 	// Sweep reconciles presentation state with reality (tmux: pane
 	// migrate/cleanup/idle-detect) and reports core-state changes.
 	Sweep(sessions map[string]*SessionState) []SweepAction
