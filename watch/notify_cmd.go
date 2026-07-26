@@ -60,6 +60,11 @@ func runNotify(args []string) {
 		BackgroundTasks []struct {
 			Status string `json:"status"`
 		} `json:"background_tasks"`
+		// Stop field. ScheduleWakeup and /loop timers are reported here, not
+		// in background_tasks. Entries carry no status — presence alone means
+		// the session will be woken (#705). Only the count is read: schedules
+		// and prompts stay local, like the raw prompt above.
+		SessionCrons []json.RawMessage `json:"session_crons"`
 	}
 	if err := json.Unmarshal(data, &hookInput); err != nil {
 		os.Exit(0) // fail silently
@@ -85,6 +90,9 @@ func runNotify(args []string) {
 			event.BackgroundWork = true
 			break
 		}
+	}
+	if len(hookInput.SessionCrons) > 0 {
+		event.BackgroundWork = true
 	}
 	if (event.Agent == "codex" || event.Agent == "opencode") && event.EventType == "UserPromptSubmit" {
 		event.TaskName = frontend.PromptTaskName(hookInput.Prompt)

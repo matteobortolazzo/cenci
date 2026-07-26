@@ -381,3 +381,67 @@ func TestNotifyStopWithPausedOrPendingBackgroundTaskReportsWork(t *testing.T) {
 		})
 	}
 }
+
+// TestNotifyStopWithPendingSessionCronReportsBackgroundWork covers ticket
+// #705: ScheduleWakeup and /loop timers are NOT reported in background_tasks —
+// they appear in the sibling session_crons array on the same Stop input.
+// Entries carry no status field; any entry means the session will be woken,
+// so it must flag the event exactly like in-flight background work. The
+// cron's prompt must never reach IPC, matching the raw-prompt privacy posture
+// of UserPromptSubmit and background_tasks.
+func TestNotifyStopWithPendingSessionCronReportsBackgroundWork(t *testing.T) {
+	for name, tc := range map[string]struct {
+		payload string
+		want    bool
+	}{
+		"pending cron": {
+			payload: `,"background_tasks":[],"session_crons":[{"id":"c1","schedule":"in 20m",` +
+				`"recurring":false,"prompt":"secret loop prompt"}]`,
+			want: true,
+		},
+		"empty crons and tasks": {
+			payload: `,"background_tasks":[],"session_crons":[]`,
+			want:    false,
+		},
+		"terminal tasks but pending cron": {
+			payload: `,"background_tasks":[{"id":"t1","type":"shell","status":"completed","description":"d"}],` +
+				`"session_crons":[{"id":"c1","schedule":"*/5 * * * *","recurring":true,"prompt":"secret loop prompt"}]`,
+			want: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			socket := filepath.Join(t.TempDir(), "events.sock")
+			receiver, err := ipc.NewEventReceiver(socket)
+			if err != nil {
+				t.Fatalf("listen: %v", err)
+			}
+			defer func() { _ = receiver.Close() }()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go receiver.Accept(ctx)
+
+			input := `{"hook_event_name":"Stop","session_id":"sess1","stop_hook_active":false` + tc.payload + `}`
+			cmd := exec.Command(binaryPath, "notify", "-agent", "claude", "-event-socket", socket)
+			cmd.Stdin = strings.NewReader(input)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("notify: %v: %s", err, output)
+			}
+
+			select {
+			case event := <-receiver.Events():
+				if event.BackgroundWork != tc.want {
+					t.Fatalf("background_work = %v, want %v for %s", event.BackgroundWork, tc.want, name)
+				}
+				encoded, err := json.Marshal(event)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(string(encoded), "secret loop prompt") {
+					t.Fatalf("session cron prompt leaked into IPC: %s", encoded)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out waiting for notify event")
+			}
+		})
+	}
+}
