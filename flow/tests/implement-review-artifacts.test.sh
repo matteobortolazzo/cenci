@@ -59,21 +59,25 @@ fi
 
 # =====================================================================
 # Case 2: fail-closed helper (AC #3 support) — when the helper cannot
-# create a directory (unwritable TMPDIR), it must exit non-zero and print
-# no path to stdout, so a caller never proceeds with an empty/root-relative
-# path.
+# create a directory (non-directory TMPDIR), it must exit non-zero and
+# print no path to stdout, so a caller never proceeds with an empty/
+# root-relative path.
+# Root-proof lever: TMPDIR points at a *regular file*, so the helper's
+# `mkdir -p "${TMPDIR}/claude"` fails with ENOTDIR — a kernel path-resolution
+# error uid 0 cannot bypass. `chmod 000` was a no-op for root, which made this
+# assertion false-fail in root containers (#642); see
+# flow/docs/shell-scripting-gotchas.md.
 # =====================================================================
-UNWRITABLE_PARENT="$(mktemp -d)"
-chmod 000 "${UNWRITABLE_PARENT}"
+NON_DIR_TMPDIR="$(mktemp)" || { echo "case2: failed to create non-directory TMPDIR fixture" >&2; exit 2; }
+trap 'rm -f "${NON_DIR_TMPDIR}"' EXIT
 
-OUT_C="$(TMPDIR="${UNWRITABLE_PARENT}" bash "${HELPER}" 2>/dev/null)"
+OUT_C="$(TMPDIR="${NON_DIR_TMPDIR}" bash "${HELPER}" 2>/dev/null)"
 CODE_C=$?
 
-chmod 700 "${UNWRITABLE_PARENT}"
-rm -rf "${UNWRITABLE_PARENT}"
+rm -f "${NON_DIR_TMPDIR}"
 
-assert_exit_nonzero "${CODE_C}" "case2 unwritable TMPDIR must exit non-zero"
-assert_eq "${OUT_C}" "" "case2 unwritable TMPDIR must print no path to stdout"
+assert_exit_nonzero "${CODE_C}" "case2 non-directory TMPDIR must exit non-zero"
+assert_eq "${OUT_C}" "" "case2 non-directory TMPDIR must print no path to stdout"
 
 # =====================================================================
 # Case 3: contract (AC #4) — none of the four Phase 6/7 ticket-scoped

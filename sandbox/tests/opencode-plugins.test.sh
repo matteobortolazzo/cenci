@@ -342,10 +342,12 @@ make_fake_git
 make_decoy_install_skills
 mkdir -p "${SRC_DIR}/flow"
 stage_install_skills "${SRC_DIR}"
-chmod a-w "${SRC_DIR}"
+# Root-proof lever: the stamp path is a self-referential symlink, so
+# `touch "${stamp}"` fails with ELOOP regardless of uid (`chmod a-w` was a
+# no-op for root, #642).
+ln -s "${STAMP_NAME}" "${SRC_DIR}/${STAMP_NAME}"
 STDERR_LOG="${CASE_DIR}/stderr.log"
 run_update "${SRC_DIR}" "${REPO_URL}" 0 >/dev/null 2>"${STDERR_LOG}"
-chmod u+w "${SRC_DIR}"
 if grep -Fq "failed to record OpenCode plugin refresh time" "${STDERR_LOG}"; then
     pass
 else
