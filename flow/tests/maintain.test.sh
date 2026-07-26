@@ -174,6 +174,8 @@ setup_base() {
 
   cat > "${root}/.gitignore" <<'EOF'
 .worktrees/
+.plans/
+.cenci/pipeline/
 EOF
 
   cat > "${root}/AGENTS.md" <<'EOF'
@@ -549,14 +551,46 @@ assert_all_fixes_present "case13 structural-tests fail must carry a fix"
 rm -rf "${ROOT}"
 
 # =====================================================================
-# Case 14: worktree-ignored — the worktree directory is not git-ignored
+# Case 14: worktree-ignored / plans-ignored / pipeline-state-ignored —
+# the worktree, plan-file, and pipeline-state directories are not
+# git-ignored
 # =====================================================================
 ROOT="$(mktemp -d)"
 setup_base "${ROOT}"
 printf '' > "${ROOT}/.gitignore"
 run_check "${ROOT}"
 assert_has_result "worktree-ignored" "fail" "case14 .worktrees/ missing from .gitignore"
-assert_all_fixes_present "case14 worktree-ignored fail must carry a fix"
+assert_has_result "plans-ignored" "fail" "case14 .plans/ missing from .gitignore"
+assert_has_result "pipeline-state-ignored" "fail" "case14 .cenci/pipeline/ missing from .gitignore"
+assert_all_fixes_present "case14 gitignore-entry fails must carry a fix"
+rm -rf "${ROOT}"
+
+# Case 14b: only .plans/ missing — plans-ignored fails in isolation,
+# worktree-ignored/pipeline-state-ignored still pass
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+cat > "${ROOT}/.gitignore" <<'EOF'
+.worktrees/
+.cenci/pipeline/
+EOF
+run_check "${ROOT}"
+assert_has_result "plans-ignored" "fail" "case14b .plans/ missing from .gitignore"
+assert_has_result "worktree-ignored" "pass" "case14b .worktrees/ still ignored"
+assert_has_result "pipeline-state-ignored" "pass" "case14b .cenci/pipeline/ still ignored"
+rm -rf "${ROOT}"
+
+# Case 14c: only .cenci/pipeline/ missing — pipeline-state-ignored fails
+# in isolation, worktree-ignored/plans-ignored still pass
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+cat > "${ROOT}/.gitignore" <<'EOF'
+.worktrees/
+.plans/
+EOF
+run_check "${ROOT}"
+assert_has_result "pipeline-state-ignored" "fail" "case14c .cenci/pipeline/ missing from .gitignore"
+assert_has_result "worktree-ignored" "pass" "case14c .worktrees/ still ignored"
+assert_has_result "plans-ignored" "pass" "case14c .plans/ still ignored"
 rm -rf "${ROOT}"
 
 # =====================================================================

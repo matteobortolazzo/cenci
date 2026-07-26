@@ -437,7 +437,7 @@ is_relevant() {
         case "$f" in flow/skills/*|flow/agents/*|flow/opencode/install-skills.sh|flow/README.md|flow/docs/*.md) return 0 ;; esac ;;
       structural-tests)
         case "$f" in flow/tests/*.test.sh) return 0 ;; esac ;;
-      worktree-ignored)
+      worktree-ignored|plans-ignored|pipeline-state-ignored)
         case "$f" in .gitignore) return 0 ;; esac ;;
       claude-rules-imports)
         case "$f" in .claude/rules/*|AGENTS.md|CLAUDE.md|flow/AGENTS.md|flow/CLAUDE.md) return 0 ;; esac ;;
@@ -1116,6 +1116,26 @@ check_worktree_ignored() {
   fi
 }
 
+check_plans_ignored() {
+  if [[ -f "$ROOT/.gitignore" ]] && grep -qE '^\.plans/?$' "$ROOT/.gitignore"; then
+    add_result plans-ignored "(repo)" pass ".plans/ is git-ignored" ""
+  else
+    add_result plans-ignored ".gitignore" fail \
+      ".plans/ (session-specific plan files) is not listed in .gitignore" \
+      "add '.plans/' to .gitignore"
+  fi
+}
+
+check_pipeline_state_ignored() {
+  if [[ -f "$ROOT/.gitignore" ]] && grep -qE '^\.cenci/pipeline/?$' "$ROOT/.gitignore"; then
+    add_result pipeline-state-ignored "(repo)" pass ".cenci/pipeline/ is git-ignored" ""
+  else
+    add_result pipeline-state-ignored ".gitignore" fail \
+      ".cenci/pipeline/ (transient per-run cenci pipeline state) is not listed in .gitignore" \
+      "add '.cenci/pipeline/' to .gitignore"
+  fi
+}
+
 # check_gate_command intentionally executes the repo-configured gateCommand
 # (a test/build command from trusted, committed .cenci/config.json -- see
 # docs/health-gates.md's trust-boundary note) via flow/hooks/scripts/run-gate.sh,
@@ -1663,6 +1683,8 @@ main() {
     is_relevant structural-tests && check_structural_tests
   fi
   is_relevant worktree-ignored && check_worktree_ignored
+  is_relevant plans-ignored && check_plans_ignored
+  is_relevant pipeline-state-ignored && check_pipeline_state_ignored
   if [[ "$MODE_ADVISORY" -eq 1 ]]; then
     add_result gate-command "(repo)" skip "advisory mode skips executable gate commands" ""
   elif [[ "$PROJECT_PATHS_OK" -ne 1 ]]; then
