@@ -782,6 +782,8 @@ For each MCP selected in question 5:
 5. Update `.gitignore`:
    - Add `.worktrees/` if not present
    - Add `.plans/` if not present (plan files are ephemeral, session-specific)
+   - Add `.cenci/pipeline/` if not present (transient per-run `cenci pipeline` state, anchored to the main-checkout root — see `phase-2-worktree.md`'s Gate Check)
+   - Add `**/.cenci/maintain-report.json` if not present (`/cenci:maintain`'s generated report; matched at any depth since it can land in any project subdir, e.g. `watch/.cenci/`)
    - Check each entry individually before adding — skip any that are already in `.gitignore`. (If a prior cenci version appended a `# Claude Code sandbox artifacts` block, leave it in place — the entries are harmless and removing them would violate the append-only rule.)
 5b. **Generate `.claudeignore`**: Create or update `.claudeignore` in the project root. This file tells Claude Code to ignore files that are tracked by git but not useful as context (binary assets, lock files, generated bundles). Claude already respects `.gitignore`, so `.claudeignore` is only for tracked files.
 
