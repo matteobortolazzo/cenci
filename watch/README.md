@@ -1403,6 +1403,49 @@ KDE Plasma 6 users get a native panel widget that consumes the identical
 list, hidden from the panel when no sessions are live. See
 [`plugin/plasma/README.md`](plugin/plasma/README.md) for install and settings.
 
+#### Remote host over SSH
+
+Nothing above needs any change to work over SSH: the daemon, sockets, tmux, and
+the agent hooks all run on whichever host you're actually working on, so
+`ssh`ing in and running `tmux` + `claude`/`codex` there behaves exactly like a
+local session — window renaming/coloring shows up the moment you attach.
+
+The one piece that doesn't cross the SSH boundary on its own is a **desktop bar
+widget on your local machine** pointed at a **daemon on a remote host**: every
+widget above reads the broadcast socket via `cenci widget-json -socket <path>`,
+and a Unix socket is host-local IPC, not something reachable over the network.
+Bridge it explicitly with OpenSSH's Unix-socket forwarding (OpenSSH 6.7+):
+
+```bash
+# Find the remote socket path:
+ssh myhost cenci socket-dir
+# /run/user/1000/cenci
+
+# Forward it to a local path and leave the tunnel running:
+ssh -N -L "$HOME/.cenci-myhost.sock:/run/user/1000/cenci/cenci.sock" myhost &
+
+# Read it locally exactly like a local daemon:
+cenci widget-json -socket "$HOME/.cenci-myhost.sock"
+```
+
+Then point your widget at the forwarded socket:
+
+- **Waybar** manages its own config, so just add the flag to the module's `exec`:
+  `"exec": "cenci widget-json -socket /home/you/.cenci-myhost.sock"`.
+- **DMS, KDE Plasma, GNOME Shell, macOS (SwiftBar)** invoke `<cenciPath>
+  widget-json` (or `waybar`) without room for extra flags in their `cenciPath`/
+  `cenci-path`/`CENCI_BIN` setting, so point it at a small wrapper instead:
+  ```bash
+  #!/bin/sh
+  # ~/.local/bin/cenci-myhost — chmod +x, then set cenciPath/CENCI_BIN to this path
+  exec cenci "$1" -socket "$HOME/.cenci-myhost.sock" "${@:2}"
+  ```
+
+The forwarded socket reflects one remote host at a time; to watch sessions on
+more than one host from the same local bar, run one tunnel per host to a
+distinct local path and switch which wrapper the widget's `cenciPath` points
+at (or run separate widget instances where the surface supports more than one).
+
 ## Consuming status from your own tool
 
 The daemon broadcasts live status as newline-delimited JSON over a Unix socket.
