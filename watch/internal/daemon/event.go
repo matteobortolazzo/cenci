@@ -65,11 +65,18 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 		// Claude Code — keeps the full teardown: the handoff is narrowed to
 		// the exact continuation reasons, never a catch-all.
 		if event.SessionEndReason == "clear" || event.SessionEndReason == "resume" {
+			// A pending-close means "close once the agent's work ends" — and on
+			// a handoff the work continues in this window under a successor
+			// session. Keep the registry entry (keyed by session:index, which
+			// survives the handoff) so the kill fires on the successor's own
+			// SessionEnd instead of destroying the window mid-continuation. If
+			// the handoff fell back to teardown because the pane is already
+			// gone, the sweep's prunePendingCloseForWindow reclaims the entry.
 			d.frontend.OnSessionHandoff(sess)
 		} else {
 			d.frontend.OnSessionEnd(sess)
+			d.killPendingClose(wi)
 		}
-		d.killPendingClose(wi)
 		d.broadcast()
 		return
 	}
