@@ -246,7 +246,8 @@ prepare_full_layout() {
 
 # add_lazyboards <home> — pre-creates a managed lazyboards binary + config,
 # mirroring lazyboards_managed_binary's guard (a real, non-symlink executable
-# at ~/.local/bin/lazyboards) and seed_lazyboards_config's target file.
+# at ~/.local/bin/lazyboards) and a legacy ~/.config/lazyboards/config.yml
+# left behind by an older install.
 add_lazyboards() {
     local home="$1"
     mkdir -p "${home}/.local/bin" "${home}/.config/lazyboards"

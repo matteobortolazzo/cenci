@@ -27,9 +27,9 @@ create_label() {
     || gh label edit   "$name" --color "$color" --description "$desc" >/dev/null
 }
 
-# Column labels — match cenci's default lazyboards board
-# (flow/templates/lazyboards-config.yml), minus the optional Designed and
-# Implemented columns the demo board doesn't pin.
+# Column labels — match the per-repo lazyboards board cenci generates
+# (flow/skills/configure/SKILL.md step 5f / docs/orchestration.md), minus the
+# optional Designed and Implemented columns the demo board doesn't pin.
 create_label "New"       "c5def5" "Incoming, not yet triaged"
 create_label "Refined"   "bfd4f2" "Requirements clarified, ready to plan"
 create_label "Planned"   "d4c5f9" "Approved plan committed, ready to dispatch"

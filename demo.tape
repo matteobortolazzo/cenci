@@ -3,10 +3,10 @@
 # fake cenci daemon that drives agent badges and the dispatch panel), the
 # lazyboards binary, and a seeded demo repo at ~/Repos/lazyboards-demo
 # (see docs/demo-repo-seed.sh).
-# The recording machine is expected to carry cenci's default global lazyboards
-# config (flow/templates/lazyboards-config.yml) — the canonical setup this GIF
-# advertises; the hidden .lazyboards.yml below only pins columns and the
-# column actions so the recording is deterministic.
+# The recording machine is expected to carry a per-repo .lazyboards.yml — the
+# canonical setup this GIF advertises (see docs/orchestration.md and
+# flow/skills/configure/SKILL.md step 5f); the hidden .lazyboards.yml below
+# only pins columns and the column actions so the recording is deterministic.
 # Regenerate with: vhs demo.tape   (from the repo root)
 
 Output docs/assets/cenci-demo.gif
