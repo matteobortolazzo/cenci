@@ -33,6 +33,65 @@ agent_cli_is_exact_semver() {
     [[ "${1:-}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]
 }
 
+# The single definition of "populated" -- consulted from the pin-gate
+# bypass, the same-version short-circuit, and `status`. A shared predicate
+# prevents the three from drifting (sandbox/AGENTS.md #491).
+agent_cli_populated() {
+    local root="$1" agent="$2"
+    [[ -x "${root}/current/node_modules/.bin/${agent}" ]]
+}
+
+# Reads a root-level fact file and prints *only* its content (trailing
+# newline stripped by the caller's command substitution) -- never a
+# warning, per the command-substitution-must-only-print-captured-value rule.
+# Absent/unreadable files print nothing; callers default-deny on the result.
+agent_cli_read_fact() {
+    local path="$1"
+    [[ -r "${path}" ]] || return 0
+    cat -- "${path}" 2>/dev/null
+}
+
+# Atomically writes a root-level state file: mktemp (never $$-derived) ->
+# printf -> chmod 0644 -> mv -Tf. The lock-free, read-only `status` reader
+# (and #709's Go probe) must never observe a torn or transiently-0600 file.
+agent_cli_write_atomic() {
+    local path="$1" content="$2" dir state_staging
+    dir="$(dirname -- "${path}")" || {
+        printf 'agent-cli: failed to resolve directory of %s\n' "${path}" >&2
+        return 1
+    }
+    [[ -n "${dir}" ]] || {
+        printf 'agent-cli: empty directory resolved for %s\n' "${path}" >&2
+        return 1
+    }
+    state_staging="$(mktemp "${dir}/.state-XXXXXXXX")" || {
+        printf 'agent-cli: failed to create a staging file under %s.\n' "${dir}" >&2
+        return 1
+    }
+    if ! printf '%s\n' "${content}" >"${state_staging}"; then
+        printf 'agent-cli: failed to write %s.\n' "${state_staging}" >&2
+        rm -f -- "${state_staging}"
+        return 1
+    fi
+    if ! chmod 0644 -- "${state_staging}"; then
+        printf 'agent-cli: failed to set permissions on %s.\n' "${state_staging}" >&2
+        rm -f -- "${state_staging}"
+        return 1
+    fi
+    if ! mv -Tf -- "${state_staging}" "${path}"; then
+        printf 'agent-cli: failed to activate %s.\n' "${path}" >&2
+        rm -f -- "${state_staging}"
+        return 1
+    fi
+}
+
+# Stamps ${root}/${name} with the current epoch seconds.
+agent_cli_stamp() {
+    local root="$1" name="$2" epoch
+    epoch="$(date +%s)" || return 1
+    agent_cli_write_atomic "${root}/${name}" "${epoch}"
+}
+
 agent_cli_resolve_metadata() {
     local agent="${1:-}" requested="${2:-}" package spec metadata version integrity
     package="$(agent_cli_package "${agent}")" || return $?
@@ -103,15 +162,44 @@ agent_cli_cleanup_versions() {
 }
 
 install_agent_cli_unlocked() {
-    local agent="${1:-}" requested="${2:-}" package label root resolved version integrity metadata
-    local staging release current_target executable lock_integrity
+    local agent="${1:-}" requested="${2:-}" skip_if_pinned="${3:-0}" package label root resolved version integrity metadata
+    local staging release current_target executable lock_integrity pin_value current_version
     package="$(agent_cli_package "${agent}")" || return $?
     label="$(agent_cli_label "${agent}")" || return $?
     root="$(agent_cli_root)"
-    resolved="$(agent_cli_resolve_metadata "${agent}" "${requested}")" || return $?
-    version="$(sed -n '1p' <<<"${resolved}")"
-    integrity="$(sed -n '2p' <<<"${resolved}")"
-    metadata="$(sed -n '3,$p' <<<"${resolved}")"
+
+    # Best-effort sweep of orphaned state-file temps: a SIGKILL between
+    # mktemp and mv -Tf inside agent_cli_write_atomic can leave a
+    # .state-XXXXXXXX behind forever (no other cleanup path touches it).
+    # Safe here specifically because this function runs inside the
+    # exclusive flock, so any .state-* present at this point cannot belong
+    # to a concurrent writer -- it is guaranteed to be a prior orphan.
+    rm -f "${root}"/.state-* 2>/dev/null || true
+
+    # Pin gate: evaluated first -- before any mkdir, any stamp, any npm
+    # call -- so a refusal or skip never touches the volume or the
+    # registry. Only a bare `update` (no explicit version) is subject to it.
+    if [[ -z "${requested}" ]]; then
+        pin_value="$(agent_cli_read_fact "${root}/PIN")"
+        if agent_cli_is_exact_semver "${pin_value}"; then
+            if ! agent_cli_populated "${root}" "${agent}"; then
+                # Default-deny/full-reinstall-as-repair: an unpopulated
+                # volume can never serve the pin, so fall through to a
+                # normal (latest) install rather than refuse forever.
+                # PIN is deliberately left untouched -- see the plan's
+                # rejected alternatives for why.
+                printf 'agent-cli: warning: shared %s CLI volume is pinned to %s but has no executable release; reinstalling the latest version to repair it. The pin no longer matches the installed version -- run agent-cli.sh unpin %s to clear it.\n' \
+                    "${agent}" "${pin_value}" "${agent}" >&2
+            elif [[ "${skip_if_pinned}" == 1 ]]; then
+                printf 'Shared %s volume is pinned to %s; skipping update.\n' "${label}" "${pin_value}"
+                return 0
+            else
+                printf 'agent-cli: shared %s CLI volume is pinned to %s; pass --unpin to clear the pin and update, or --version to change the pin\n' \
+                    "${agent}" "${pin_value}" >&2
+                return 2
+            fi
+        fi
+    fi
 
     mkdir -p "${root}/versions" || {
         printf 'agent-cli: failed to create %s/versions.\n' "${root}" >&2
@@ -124,6 +212,36 @@ install_agent_cli_unlocked() {
         printf 'agent-cli: failed to make %s world-traversable.\n' "${root}" >&2
         return 1
     }
+
+    # .last-attempt is stamped before any registry contact so it stays fresh
+    # after a failure at any later stage. A stamp-write failure only warns
+    # and continues -- it must not block the update itself.
+    agent_cli_stamp "${root}" ".last-attempt" \
+        || printf 'agent-cli: warning: failed to record %s/.last-attempt.\n' "${root}" >&2
+
+    resolved="$(agent_cli_resolve_metadata "${agent}" "${requested}")" || return $?
+    version="$(sed -n '1p' <<<"${resolved}")"
+    integrity="$(sed -n '2p' <<<"${resolved}")"
+    metadata="$(sed -n '3,$p' <<<"${resolved}")"
+
+    # Same-version short-circuit: a missing/unreadable VERSION or a
+    # non-executable current binary can never equal a validated exact
+    # semver, so default-deny falls out of this comparison -- no separate
+    # "is VERSION present" check is needed.
+    current_version="$(agent_cli_read_fact "${root}/current/VERSION")"
+    if [[ "${current_version}" == "${version}" ]] && agent_cli_populated "${root}" "${agent}"; then
+        if [[ -n "${requested}" ]]; then
+            agent_cli_write_atomic "${root}/PIN" "${version}" || {
+                printf 'agent-cli: failed to write %s/PIN.\n' "${root}" >&2
+                return 1
+            }
+        fi
+        agent_cli_stamp "${root}" ".last-success" \
+            || printf 'agent-cli: warning: failed to record %s/.last-success.\n' "${root}" >&2
+        printf 'Shared %s already at %s; nothing to install.\n' "${label}" "${version}"
+        return 0
+    fi
+
     # Names must not derive from $$: the script always runs as the updater
     # container's PID-1 shell, so $$ collides across runs and a same-version
     # re-update would mv its staging tree INSIDE the existing release
@@ -226,14 +344,56 @@ install_agent_cli_unlocked() {
         return 1
     fi
 
+    # PIN is only written for an explicit version, on the same success path
+    # as the short-circuit's PIN write above. A write failure here is loud
+    # (return 1) because the activation itself already succeeded and the
+    # caller's requested pin would otherwise be silently dropped.
+    if [[ -n "${requested}" ]]; then
+        agent_cli_write_atomic "${root}/PIN" "${version}" || {
+            printf 'agent-cli: failed to write %s/PIN.\n' "${root}" >&2
+            return 1
+        }
+    fi
+
     agent_cli_cleanup_versions "${root}"
+    agent_cli_stamp "${root}" ".last-success" \
+        || printf 'agent-cli: warning: failed to record %s/.last-success.\n' "${root}" >&2
     printf 'Activated %s %s. Running sandboxes keep using the version they started with —\n' "${label}" "${version}"
     printf 'relaunch them to pick up this update.\n'
 }
 
 update_agent_cli() {
-    local agent="${1:-}" requested="${2:-}" root lock_file
+    local agent="${1:-}" root lock_file arg requested="" skip_if_pinned=0
     agent_cli_package "${agent}" >/dev/null || return $?
+    shift || true
+
+    # Strict parsing: an unknown -* token or a second positional exits 2
+    # (previously silently discarded). No in-repo caller passes extra args.
+    for arg in "$@"; do
+        case "${arg}" in
+        --skip-if-pinned)
+            skip_if_pinned=1
+            ;;
+        -*)
+            printf 'agent-cli: unknown option %q for update.\n' "${arg}" >&2
+            return 2
+            ;;
+        *)
+            if [[ -n "${requested}" ]]; then
+                printf 'agent-cli: update accepts at most one version argument (unexpected extra %q).\n' "${arg}" >&2
+                return 2
+            fi
+            requested="${arg}"
+            ;;
+        esac
+    done
+    if [[ -n "${requested}" ]] && [[ "${skip_if_pinned}" == 1 ]]; then
+        # With an explicit version the pin gate never fires, so the flag
+        # would be silently inert -- a conflicting-flags usage error instead.
+        printf 'agent-cli: --skip-if-pinned cannot be combined with an explicit version.\n' >&2
+        return 2
+    fi
+
     root="$(agent_cli_root)"
     mkdir -p "${root}"
     lock_file="${root}/.update.lock"
@@ -243,7 +403,80 @@ update_agent_cli() {
     fi
     (
         flock -x 9 || { echo "agent-cli: failed to lock the shared CLI volume." >&2; exit 1; }
-        install_agent_cli_unlocked "${agent}" "${requested}"
+        install_agent_cli_unlocked "${agent}" "${requested}" "${skip_if_pinned}"
+    ) 9>"${lock_file}"
+}
+
+status_agent_cli() {
+    local agent="${1:-}" root populated_str version pin last_success last_attempt
+    agent_cli_package "${agent}" >/dev/null || return $?
+    shift || true
+    if [[ $# -gt 0 ]]; then
+        printf 'agent-cli: status takes no arguments after the agent name.\n' >&2
+        return 2
+    fi
+
+    # No mkdir, no flock, no writes: this runs as the non-root `dev` user
+    # against a :ro mount, so it must be read-only end to end.
+    root="$(agent_cli_root)"
+    version="" # only fallback that matters: overwritten below in the "yes" branch
+
+    if agent_cli_populated "${root}" "${agent}"; then
+        populated_str=yes
+        version="$(agent_cli_read_fact "${root}/current/VERSION")"
+        agent_cli_is_exact_semver "${version}" || version=""
+    else
+        populated_str=no
+    fi
+
+    pin="$(agent_cli_read_fact "${root}/PIN")"
+    agent_cli_is_exact_semver "${pin}" || pin=""
+
+    last_success="$(agent_cli_read_fact "${root}/.last-success")"
+    [[ "${last_success}" =~ ^[0-9]+$ ]] || last_success=""
+
+    last_attempt="$(agent_cli_read_fact "${root}/.last-attempt")"
+    [[ "${last_attempt}" =~ ^[0-9]+$ ]] || last_attempt=""
+
+    # Always print all five lines, even on the unpopulated/error path, so a
+    # captured value never breaks the key=value framing (default-deny on
+    # every value validated whole-string before printing).
+    printf 'populated=%s\n' "${populated_str}"
+    printf 'version=%s\n' "${version}"
+    printf 'pin=%s\n' "${pin}"
+    printf 'last_success=%s\n' "${last_success}"
+    printf 'last_attempt=%s\n' "${last_attempt}"
+
+    [[ "${populated_str}" == yes ]]
+}
+
+unpin_agent_cli() {
+    local agent="${1:-}" root lock_file
+    agent_cli_package "${agent}" >/dev/null || return $?
+    shift || true
+    if [[ $# -gt 0 ]]; then
+        printf 'agent-cli: unpin takes no arguments after the agent name.\n' >&2
+        return 2
+    fi
+
+    root="$(agent_cli_root)"
+    mkdir -p "${root}" || {
+        printf 'agent-cli: failed to create %s\n' "${root}" >&2
+        return 1
+    }
+    lock_file="${root}/.update.lock"
+    if ! command -v flock >/dev/null 2>&1; then
+        echo "agent-cli: flock is required to serialize shared CLI updates." >&2
+        return 1
+    fi
+    (
+        flock -x 9 || { echo "agent-cli: failed to lock the shared CLI volume." >&2; exit 1; }
+        # rm -f is already idempotent: exit 0 whether or not PIN existed.
+        if ! rm -f -- "${root}/PIN"; then
+            printf 'agent-cli: failed to remove %s/PIN.\n' "${root}" >&2
+            exit 1
+        fi
+        printf 'agent-cli: cleared the pin for %s.\n' "${agent}"
     ) 9>"${lock_file}"
 }
 
@@ -252,6 +485,11 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     shift || true
     case "${command_name}" in
     update) update_agent_cli "$@" ;;
-    *) echo "usage: agent-cli.sh update <claude|codex|opencode> [exact-version]" >&2; exit 2 ;;
+    status) status_agent_cli "$@" ;;
+    unpin) unpin_agent_cli "$@" ;;
+    *)
+        echo "usage: agent-cli.sh update <claude|codex|opencode> [exact-version] [--skip-if-pinned] | status <agent> | unpin <agent>" >&2
+        exit 2
+        ;;
     esac
 fi

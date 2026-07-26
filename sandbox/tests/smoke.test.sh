@@ -197,29 +197,90 @@ else
     fail "shared CLI differed between images or its workload mount was writable"
 fi
 
-echo "case: update atomically changes current and a failed update retains it"
+# This case is split into four steps (a-d) because #708's same-version
+# short-circuit removes the atomic-rotation behavior this case used to prove
+# unconditionally on every same-version update -- (a) proves the
+# short-circuit itself now fires and leaves `current` untouched; (b) removes
+# `current/VERSION` (the short-circuit's own documented no-op condition) to
+# force a real reinstall and recover the original atomic-rotation assertion;
+# (c) re-asserts the pre-existing failed-update rollback contract against
+# (b)'s target; (d) is the container-side non-root, :ro-mount readability +
+# mode-0644 assertion for the three new state files, which the host suite
+# (agent-cli.test.sh) cannot exercise.
 BEFORE_TARGET="$(run_with_timeout "${RUNTIME}" run --rm --entrypoint /bin/bash \
     -v "${SHARED_VOLUME}:/opt/cenci-agent:ro" cenci-sandbox:latest \
     -c 'readlink /opt/cenci-agent/current')"
-if run_with_timeout "${RUNTIME}" run --rm --user root --entrypoint /bin/bash \
+
+echo "case: (a) same-version update with VERSION present short-circuits and leaves current untouched"
+A_OUTPUT="$(run_with_timeout "${RUNTIME}" run --rm --user root --entrypoint /bin/bash \
+    -v "${SHARED_VOLUME}:/opt/cenci-agent" cenci-sandbox:latest \
+    /usr/local/bin/lib/agent-cli.sh update codex "${MONOLITH_VERSION}" 2>&1)"
+A_STATUS=$?
+A_AFTER_TARGET="$(run_with_timeout "${RUNTIME}" run --rm --entrypoint /bin/bash \
+    -v "${SHARED_VOLUME}:/opt/cenci-agent:ro" cenci-sandbox:latest \
+    -c 'readlink /opt/cenci-agent/current')"
+if [[ "${A_STATUS}" -eq 0 ]] && [[ "${A_OUTPUT}" == *'already at'* ]] && [[ "${A_AFTER_TARGET}" == "${BEFORE_TARGET}" ]]; then
+    pass
+else
+    fail "same-version update with VERSION present did not short-circuit (status=${A_STATUS}, target=${A_AFTER_TARGET}, expected=${BEFORE_TARGET}): ${A_OUTPUT}"
+fi
+
+echo "case: (b) missing current/VERSION forces a full reinstall that still rotates current atomically"
+if ! run_with_timeout "${RUNTIME}" run --rm --user root --entrypoint /bin/bash \
+    -v "${SHARED_VOLUME}:/opt/cenci-agent" cenci-sandbox:latest \
+    -c 'rm -f /opt/cenci-agent/current/VERSION'; then
+    fail "failed to remove current/VERSION ahead of the missing-VERSION reinstall case"
+elif run_with_timeout "${RUNTIME}" run --rm --user root --entrypoint /bin/bash \
     -v "${SHARED_VOLUME}:/opt/cenci-agent" cenci-sandbox:latest \
     /usr/local/bin/lib/agent-cli.sh update codex "${MONOLITH_VERSION}"; then
     AFTER_TARGET="$(run_with_timeout "${RUNTIME}" run --rm --entrypoint /bin/bash \
         -v "${SHARED_VOLUME}:/opt/cenci-agent:ro" cenci-sandbox:latest \
         -c 'readlink /opt/cenci-agent/current')"
-    if [[ "${AFTER_TARGET}" != "${BEFORE_TARGET}" ]] \
-        && ! run_with_timeout "${RUNTIME}" run --rm --user root --entrypoint /bin/bash \
-            -v "${SHARED_VOLUME}:/opt/cenci-agent" cenci-sandbox:latest \
-            /usr/local/bin/lib/agent-cli.sh update codex 999999.0.0 \
-        && [[ "$(run_with_timeout "${RUNTIME}" run --rm --entrypoint /bin/bash \
-            -v "${SHARED_VOLUME}:/opt/cenci-agent:ro" cenci-sandbox:latest \
-            -c 'readlink /opt/cenci-agent/current')" == "${AFTER_TARGET}" ]]; then
+    if [[ "${AFTER_TARGET}" != "${BEFORE_TARGET}" ]]; then
         pass
     else
-        fail "atomic update or failed-update rollback contract did not hold"
+        fail "reinstall after removing current/VERSION did not rotate current"
     fi
 else
-    fail "same-version atomic update failed"
+    fail "reinstall after removing current/VERSION failed"
+fi
+
+echo "case: (c) a failed update leaves current and PIN unchanged"
+if ! run_with_timeout "${RUNTIME}" run --rm --user root --entrypoint /bin/bash \
+    -v "${SHARED_VOLUME}:/opt/cenci-agent" cenci-sandbox:latest \
+    /usr/local/bin/lib/agent-cli.sh update codex 999999.0.0; then
+    FAILED_TARGET="$(run_with_timeout "${RUNTIME}" run --rm --entrypoint /bin/bash \
+        -v "${SHARED_VOLUME}:/opt/cenci-agent:ro" cenci-sandbox:latest \
+        -c 'readlink /opt/cenci-agent/current')"
+    FAILED_PIN="$(run_with_timeout "${RUNTIME}" run --rm --entrypoint /bin/bash \
+        -v "${SHARED_VOLUME}:/opt/cenci-agent:ro" cenci-sandbox:latest \
+        -c 'cat /opt/cenci-agent/PIN')"
+    if [[ "${FAILED_TARGET}" == "${AFTER_TARGET}" ]] && [[ "${FAILED_PIN}" == "${MONOLITH_VERSION}" ]]; then
+        pass
+    else
+        fail "a failed update changed current (${FAILED_TARGET} != ${AFTER_TARGET}) or PIN (${FAILED_PIN} != ${MONOLITH_VERSION})"
+    fi
+else
+    fail "update to a nonexistent version unexpectedly succeeded"
+fi
+
+echo "case: (d) .last-success/.last-attempt/PIN are readable by non-root dev at mode 644 through the :ro mount"
+# shellcheck disable=SC2016 # Expansion happens in the container, not on the host.
+STATE_CHECK_OUT="$(run_with_timeout "${RUNTIME}" run --rm --entrypoint /bin/bash \
+    -v "${SHARED_VOLUME}:/opt/cenci-agent:ro" cenci-sandbox:latest -c '
+        for f in .last-success .last-attempt PIN; do
+            content="$(cat "/opt/cenci-agent/${f}")" || exit 1
+            [[ -n "${content}" ]] || exit 1
+            mode="$(stat -c %a "/opt/cenci-agent/${f}")" || exit 1
+            [[ "${mode}" == 644 ]] || exit 1
+        done
+        echo STATE_FILES_OK
+    ' 2>&1)"
+STATE_CHECK_STATUS=$?
+if [[ "${STATE_CHECK_STATUS}" -eq 0 ]] && [[ "${STATE_CHECK_OUT}" == *STATE_FILES_OK* ]]; then
+    pass
+else
+    fail "non-root :ro readability/mode-644 check for .last-success/.last-attempt/PIN failed (status=${STATE_CHECK_STATUS}): ${STATE_CHECK_OUT}"
 fi
 
 # Regression guard for the libicu74 FailFast bug: if it regresses,
