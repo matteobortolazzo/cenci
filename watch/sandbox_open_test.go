@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/internal/exectest"
 	"github.com/matteobortolazzo/cenci/watch/internal/sandbox/launcher"
@@ -165,8 +166,22 @@ func joinArgv(argv []string) string {
 //	                        /home/dev/.cenci-boot.log
 //	FAKE_STARTUP_MARKER  — generic entrypoint-failure trap marker text, read
 //	                        from /home/dev/.cenci-startup-failed
-//	FAKE_AGENT_CHECK_EXIT — EnsureAgentVolume's populated-check exit code
-//	                        (default 0 = the shared volume is populated)
+//	FAKE_AGENT_CHECK_EXIT — the `agent-cli.sh status <agent>` populated-check
+//	                        probe's exit code (default 0 = the shared volume
+//	                        is populated)
+//	FAKE_AGENT_STATUS    — the `agent-cli.sh status <agent>` probe's stdout:
+//	                        the five populated/version/pin/last_success/
+//	                        last_attempt key=value lines (ticket #710's
+//	                        agent-cli.sh swap). Defaults to a freshly
+//	                        succeeded, unpinned status
+//	                        (last_success=$(date +%s), evaluated at fake-
+//	                        invocation time, not fixture-write time) so
+//	                        pre-existing open tests that don't care about TTL
+//	                        staleness never trigger the launch-time refresh.
+//	                        Must stay byte-parallel with engine_test.go's
+//	                        volumeCheckEngine/volumeCheckEngineStatus and
+//	                        dual_runtime_test.go's writeAgentRuntimeStub
+//	                        (watch AGENTS.md #493).
 //	FAKE_ATTACH_EXIT     — exit code of the final `exec -it ...` attach
 //	FAKE_PLUGIN_MANIFEST — `cenci diagnose`'s best-effort plugin-manifest
 //	                        read, from either agent's marketplace.json
@@ -324,7 +339,10 @@ run) case "$*" in
     esac
     ;;
   *'agent-cli.sh update'*) rs="$(fv RUN_STDERR "")"; [ -z "$rs" ] || printf '%s\n' "$rs" >&2; exit "$(fe RUN)" ;;
-  *'test -x /opt/cenci-agent'*) exit "$(fe AGENT_CHECK)" ;;
+  *'agent-cli.sh status'*)
+    fvb AGENT_STATUS "populated=yes\nversion=1.2.3\npin=\nlast_success=$(date +%s)\nlast_attempt=\n"
+    exit "$(fe AGENT_CHECK)"
+    ;;
   esac
   printf '%s\n' fake-container-id ;;
 inspect)
@@ -1514,7 +1532,7 @@ func TestOpen_ExistingSharedVolumePerformsNoUpdaterOrVersionCheck(t *testing.T) 
 	}
 	// The cheap populated-check (finding 3a) still runs against the existing
 	// volume; it just never falls through to the updater when it passes.
-	if !anyLineContains(lines, "test -x /opt/cenci-agent/current/node_modules/.bin/claude") {
+	if !anyLineContains(lines, "agent-cli.sh status claude") {
 		t.Errorf("expected the populated-check to run against the existing volume, got calls:\n%s", strings.Join(lines, "\n"))
 	}
 }
@@ -1551,6 +1569,58 @@ func TestOpen_ExistingButUnpopulatedVolume_FallsThroughToUpdater(t *testing.T) {
 	if updater < 0 || workload < 0 || updater >= workload {
 		t.Errorf("an existing-but-unpopulated volume must fall through to the updater before workload create; calls:\n%s", strings.Join(lines, "\n"))
 	}
+}
+
+// agentStatusFakeLine builds a FAKE_AGENT_STATUS env assignment for
+// writeScriptedRuntime's `agent-cli.sh status` branch: the five key=value
+// lines (populated=yes, a fixed version, pin, last_success, last_attempt),
+// with lastSuccess/lastAttempt resolved to unix-epoch-seconds at
+// fixture-write time (zero time.Time renders as the empty "unset" fact) —
+// ticket #710's staleness policy is exercised via these Go-computed relative
+// timestamps rather than a production clock seam.
+func agentStatusFakeLine(pin string, lastSuccess, lastAttempt time.Time) string {
+	ls, la := "", ""
+	if !lastSuccess.IsZero() {
+		ls = fmt.Sprintf("%d", lastSuccess.Unix())
+	}
+	if !lastAttempt.IsZero() {
+		la = fmt.Sprintf("%d", lastAttempt.Unix())
+	}
+	return fmt.Sprintf("FAKE_AGENT_STATUS=populated=yes\\nversion=1.2.3\\npin=%s\\nlast_success=%s\\nlast_attempt=%s\\n", pin, ls, la)
+}
+
+// TestOpen_StaleAgentVolume_RefreshesBeforeWorkloadCreate pins ticket #710's
+// headline AC: a populated shared agent volume whose last_success is older
+// than the (default 24h) TTL refreshes via the updater before the workload
+// container is created, and the launch still succeeds afterwards.
+func TestOpen_StaleAgentVolume_RefreshesBeforeWorkloadCreate(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	stale := time.Now().Add(-25 * time.Hour)
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = append(env, agentStatusFakeLine("", stale, time.Time{}))
+	cmd.Dir = t.TempDir()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("open (TTL-stale existing volume): %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	updater, workload := -1, -1
+	for i, line := range lines {
+		if strings.Contains(line, "agent-cli.sh update claude") {
+			updater = i
+		}
+		if strings.HasPrefix(line, "run --name claude-cenci-default") {
+			workload = i
+		}
+	}
+	if updater < 0 || workload < 0 || updater >= workload {
+		t.Errorf("a TTL-stale shared agent volume must refresh via the updater before workload create; calls:\n%s", strings.Join(lines, "\n"))
+	}
+	attachLine(t, lines)
 }
 
 func TestOpen_VolumeInspectionFailureIsNotMissingVolume(t *testing.T) {
@@ -2644,6 +2714,74 @@ func TestOpen_AttachToRunning_SkipsCreate(t *testing.T) {
 	attachLine(t, lines)
 	if strings.Contains(string(output), "created without cenci wiring") {
 		t.Errorf("wired container must not warn, got:\n%s", output)
+	}
+}
+
+// TestOpen_RunningContainer_StaleAgentVolume_SkipsRefresh pins ticket #710's
+// attach skip: EnsureAgentVolume's TTL staleness branch must be skipped
+// entirely (no updater run) when the scoped container is already running —
+// an attach must stay instant — even though the shared agent volume itself
+// is well past the TTL. The populated/bootstrap check still runs (it's not
+// container-scoped: the volume is host-global).
+func TestOpen_RunningContainer_StaleAgentVolume_SkipsRefresh(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	stale := time.Now().Add(-25 * time.Hour)
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = append(env,
+		"FAKE_PS=claude-cenci-default\n",
+		agentStatusFakeLine("", stale, time.Time{}),
+	)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("open ch (running, stale shared agent volume): %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	if !anyLineContains(lines, "agent-cli.sh status claude") {
+		t.Errorf("expected the populated/bootstrap probe to still run on the attach path, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if anyLineContains(lines, "agent-cli.sh update") {
+		t.Errorf("expected a running (attach) container to skip the TTL staleness refresh even with a stale shared agent volume; calls:\n%s", strings.Join(lines, "\n"))
+	}
+	attachLine(t, lines)
+}
+
+// TestOpen_ContainerRunningProbeFailure_AbortsBeforeAgentVolumeBootstrap pins
+// the ticket's ordering regression (watch AGENTS.md #620): hoisting
+// containerRunning into Launch (between EnsureImage and EnsureAgentVolume)
+// means a `ps` failure now aborts BEFORE the agent-volume bootstrap/refresh
+// probe ever runs — not after it, as it did pre-#710. EnsureAgentVolume's
+// very first side effect is volumeExists (`docker volume ls`), so its
+// absence from the call log proves EnsureAgentVolume was never entered.
+func TestOpen_ContainerRunningProbeFailure_AbortsBeforeAgentVolumeBootstrap(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = append(env, "FAKE_PS_EXIT=1")
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected a ps-failure runtime error, got %T %v\n%s", err, err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	if anyLineContains(lines, "volume ls") {
+		t.Errorf("a containerRunning (ps) failure must abort before EnsureAgentVolume's volumeExists probe ever runs (#620 ordering); calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if anyLineContains(lines, "agent-cli.sh") {
+		t.Errorf("a ps failure must abort before any agent-volume bootstrap/refresh work; calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if anyLineContains(lines, "exec -it") {
+		t.Errorf("attach must not run after a ps failure")
 	}
 }
 

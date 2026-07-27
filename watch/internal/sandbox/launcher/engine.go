@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/internal/sandbox"
 )
@@ -390,18 +392,18 @@ func (e *Engine) agentUpdateRunArgs(agent, version string) []string {
 }
 
 // agentVolumeCheckRunArgs builds a cheap, short-lived probe that verifies an
-// already-existing shared agent volume actually contains an installed CLI:
-// network-isolated (npm access is never needed for a read-only check),
-// non-root, read-only volume mount, and hardened the same way as the
-// updater. It always runs against MonolithImage for the same reason
-// agentUpdateRunArgs does.
+// already-existing shared agent volume actually contains an installed CLI
+// and reports its populated/version/pin/last_success/last_attempt facts via
+// `agent-cli.sh status <agent>` (landed in #708): network-isolated (npm
+// access is never needed for a read-only check), non-root, read-only volume
+// mount, and hardened the same way as the updater. It always runs against
+// MonolithImage for the same reason agentUpdateRunArgs does.
 func (e *Engine) agentVolumeCheckRunArgs(agent string) []string {
-	path := "/opt/cenci-agent/current/node_modules/.bin/" + agent
 	return []string{"run", "--rm", "--network", "none", "--user", "dev",
 		"--cap-drop=ALL", "--security-opt=no-new-privileges",
-		"--entrypoint", "/bin/sh",
+		"--entrypoint", "/bin/bash",
 		"-v", AgentCLIVolumeName(agent) + ":/opt/cenci-agent:ro",
-		MonolithImage, "-c", "test -x " + path}
+		MonolithImage, "/usr/local/bin/lib/agent-cli.sh", "status", agent}
 }
 
 // maintenanceRunArgs is retained for plugin maintenance, which legitimately
@@ -437,8 +439,113 @@ func (e *Engine) UpdateAgent(agent, version string) error {
 	return nil
 }
 
+// agentVolumeStatus is agent-cli.sh status <agent>'s parsed facts: whether
+// the volume is populated, its installed version, an optional pinned version
+// (non-empty means auto-refresh is disabled until --unpin), and the last
+// successful/attempted refresh times (the zero time.Time when the
+// corresponding fact was absent or unparseable — see parseAgentVolumeStatus).
+type agentVolumeStatus struct {
+	Populated   bool
+	Version     string
+	Pin         string
+	LastSuccess time.Time
+	LastAttempt time.Time
+}
+
+// parseAgentVolumeStatus parses agent-cli.sh status's five contractually
+// fixed key=value lines (populated, version, pin, last_success,
+// last_attempt — sandbox/lib/agent-cli.sh:444-448). It is a default-deny
+// parser (watch AGENTS.md #628, the parseReusePosture lesson): empty stdout,
+// a missing/truncated line, or an unrecognized "populated" value all return
+// ok=false, treated as unpopulated (bootstrap), never a permissive
+// zero-value guess. An empty or unparseable last_success/last_attempt on an
+// otherwise well-formed status degrades only that one field to the zero
+// time.Time (per the plan's resolved Q1: unknown -> stale) rather than
+// failing the whole parse.
+func parseAgentVolumeStatus(stdout []byte) (agentVolumeStatus, bool) {
+	facts := make(map[string]string)
+	for _, line := range splitLines(string(stdout)) {
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			return agentVolumeStatus{}, false
+		}
+		facts[key] = value
+	}
+	for _, key := range []string{"populated", "version", "pin", "last_success", "last_attempt"} {
+		if _, ok := facts[key]; !ok {
+			return agentVolumeStatus{}, false
+		}
+	}
+	status := agentVolumeStatus{
+		Version: facts["version"],
+		Pin:     facts["pin"],
+	}
+	switch facts["populated"] {
+	case "yes":
+		status.Populated = true
+	case "no":
+		status.Populated = false
+	default:
+		return agentVolumeStatus{}, false
+	}
+	status.LastSuccess = parseAgentVolumeStatusEpoch(facts["last_success"])
+	status.LastAttempt = parseAgentVolumeStatusEpoch(facts["last_attempt"])
+	return status, true
+}
+
+// parseAgentVolumeStatusEpoch parses an agent-cli.sh status epoch-seconds
+// fact, degrading an empty or unparseable value to the zero time.Time.
+func parseAgentVolumeStatusEpoch(v string) time.Time {
+	if v == "" {
+		return time.Time{}
+	}
+	secs, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return time.Time{}
+	}
+	return time.Unix(secs, 0)
+}
+
+// defaultAgentCLITTL is the default staleness window for the launch-time
+// agent-CLI refresh, overridable via CENCI_SANDBOX_AGENT_CLI_TTL_HOURS.
+const defaultAgentCLITTL = 24 * time.Hour
+
+// agentCLIRefreshBackoff throttles the launch-time refresh to at most once
+// per hour after a refresh attempt (successful or not), so an offline/
+// captive-portal host doesn't eat the npm-timeout cost on every launch.
+const agentCLIRefreshBackoff = time.Hour
+
+// maxAgentCLITTLHours bounds CENCI_SANDBOX_AGENT_CLI_TTL_HOURS (10 years) so
+// the int-hours-to-time.Duration conversion below can never overflow: a
+// parsed value beyond this ceiling is rejected the same way an unparseable
+// or negative value is, rather than silently wrapping time.Duration's
+// int64-nanoseconds range into 0 (indistinguishable from the documented
+// "0=disabled") or a nonsense negative duration (security review finding B).
+const maxAgentCLITTLHours = 24 * 365 * 10
+
+// agentCLITTL reads CENCI_SANDBOX_AGENT_CLI_TTL_HOURS (integer hours; unset
+// or empty means the 24h default; 0 disables auto-refresh entirely). Unlike
+// reap.go:79's silent ParseFloat fallback, an unparseable, negative, or
+// implausibly large (overflow-risking) value must never silently disable
+// auto-refresh: it warns to stderr (naming the variable and the offending
+// value, per watch AGENTS.md #446) and falls back to the 24h default.
+func agentCLITTL(stderr io.Writer) time.Duration {
+	raw := os.Getenv("CENCI_SANDBOX_AGENT_CLI_TTL_HOURS")
+	if raw == "" {
+		return defaultAgentCLITTL
+	}
+	hours, err := strconv.Atoi(raw)
+	if err != nil || hours < 0 || hours > maxAgentCLITTLHours {
+		_, _ = fmt.Fprintf(stderr, "Warning: CENCI_SANDBOX_AGENT_CLI_TTL_HOURS=%q is invalid (must be a non-negative integer number of hours, at most %d); falling back to the %dh default.\n", raw, maxAgentCLITTLHours, int(defaultAgentCLITTL.Hours()))
+		return defaultAgentCLITTL
+	}
+	return time.Duration(hours) * time.Hour
+}
+
 // agentVolumePopulated cheaply verifies that an already-existing shared agent
-// volume actually contains an installed CLI. Two real failure modes make
+// volume actually contains an installed CLI, and returns its parsed
+// populated/version/pin/last_success/last_attempt facts (agentVolumeStatus)
+// for EnsureAgentVolume's staleness policy. Two real failure modes make
 // volumeExists alone untrustworthy: (a) a concurrent first launch's `docker
 // run -v` auto-creates the named volume long before that launch's own
 // install finishes, so a later launch's volumeExists check can observe a
@@ -447,39 +554,96 @@ func (e *Engine) UpdateAgent(agent, version string) error {
 // volume that would otherwise be trusted forever. A non-zero exit from the
 // probe itself (agent binary missing/not executable) means "not populated";
 // any other failure (exec transport, runtime error) is reported as an error
-// rather than silently treated as unpopulated.
-func (e *Engine) agentVolumePopulated(agent string) (bool, error) {
+// rather than silently treated as unpopulated; exit 0 with unparseable
+// stdout is also treated as unpopulated (default-deny).
+func (e *Engine) agentVolumePopulated(agent string) (agentVolumeStatus, bool, error) {
 	if err := e.EnsureMonolithImage(); err != nil {
-		return false, err
+		return agentVolumeStatus{}, false, err
 	}
-	err := exec.Command(e.Runtime, e.agentVolumeCheckRunArgs(agent)...).Run()
+	out, err := exec.Command(e.Runtime, e.agentVolumeCheckRunArgs(agent)...).Output()
 	if err == nil {
-		return true, nil
+		status, ok := parseAgentVolumeStatus(out)
+		if !ok {
+			return agentVolumeStatus{}, false, nil
+		}
+		return status, status.Populated, nil
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		return false, nil
+		return agentVolumeStatus{}, false, nil
 	}
-	return false, fmt.Errorf("%s agent volume check failed: %w", e.Runtime, err)
+	return agentVolumeStatus{}, false, fmt.Errorf("%s agent volume check failed: %w", e.Runtime, err)
+}
+
+// refreshStaleAgentVolumeIfNeeded implements the launch-time TTL refresh
+// policy for an already-populated shared agent volume (the design's
+// staleness branch): skip entirely when the scoped container is already
+// running (attach must stay instant — a running container keeps its
+// started-with version regardless) or when the TTL is disabled
+// (CENCI_SANDBOX_AGENT_CLI_TTL_HOURS=0); otherwise a missing/unparseable
+// last_success is treated as stale (unknown -> stale, per the plan's
+// resolved Q1), refresh-eligible subject to the same 1h last_attempt
+// backoff and pin skip as a normal TTL-stale volume. A last_success in the
+// future (a corrupted stamp file, or a host clock that jumped backward via
+// NTP correction) is also treated as stale rather than "impossibly fresh" —
+// otherwise now.Sub(LastSuccess) goes negative and is never greater than the
+// TTL, permanently suppressing the security-relevant auto-refresh (security
+// review finding A). Symmetrically, a future last_attempt is anomalous data
+// and must never throttle a refresh: only a non-negative duration under the
+// 1h backoff counts as "recently attempted". A non-empty pin skips the
+// refresh with a one-line notice naming the pinned version and the --unpin
+// remedy (writing no stamps, so the notice repeats on later stale launches
+// by design); otherwise it prints the refresh notice and calls UpdateAgent,
+// which is best-effort — a failed refresh warns to stderr and the launch
+// proceeds on the existing (already-populated, just-stale) version.
+func (e *Engine) refreshStaleAgentVolumeIfNeeded(agent string, status agentVolumeStatus, containerRunning bool) {
+	ttl := agentCLITTL(e.Stderr)
+	if containerRunning || ttl == 0 {
+		return
+	}
+	now := time.Now()
+	stale := status.LastSuccess.IsZero() || status.LastSuccess.After(now) || now.Sub(status.LastSuccess) > ttl
+	if !stale {
+		return
+	}
+	if !status.LastAttempt.IsZero() {
+		sinceAttempt := now.Sub(status.LastAttempt)
+		if sinceAttempt >= 0 && sinceAttempt < agentCLIRefreshBackoff {
+			return
+		}
+	}
+	if status.Pin != "" {
+		_, _ = fmt.Fprintf(e.Stdout, "Note: shared %s CLI is pinned to %s and more than %dh stale; run 'cenci sandbox update-agent %s --unpin' to resume automatic updates.\n", agent, status.Pin, int(ttl.Hours()), agent)
+		return
+	}
+	_, _ = fmt.Fprintf(e.Stdout, "Shared %s CLI is more than %dh stale; refreshing before launch...\n", agent, int(ttl.Hours()))
+	if err := e.UpdateAgent(agent, ""); err != nil {
+		_, _ = fmt.Fprintf(e.Stderr, "Warning: best-effort launch-time refresh of shared %s CLI failed (%v); continuing with the existing version.\n", agent, err)
+	}
 }
 
 // EnsureAgentVolume bootstraps a genuinely absent shared volume and, for an
 // already-existing one, cheaply verifies it is actually populated before
 // trusting it (see agentVolumePopulated). Only a missing or verified-empty
-// volume triggers UpdateAgent; the updater script's own flock on the
-// volume's lock file makes a concurrent/redundant update safe.
-func (e *Engine) EnsureAgentVolume(agent string) error {
+// volume triggers UpdateAgent as a bootstrap; the updater script's own flock
+// on the volume's lock file makes a concurrent/redundant update safe. For an
+// already-populated volume, refreshStaleAgentVolumeIfNeeded applies the
+// launch-time TTL staleness policy. containerRunning is threaded in from
+// Launch's hoisted containerRunning probe (see launch.go) so the staleness
+// branch can skip entirely on the attach path.
+func (e *Engine) EnsureAgentVolume(agent string, containerRunning bool) error {
 	name := AgentCLIVolumeName(agent)
 	exists, err := e.volumeExists(name)
 	if err != nil {
 		return err
 	}
 	if exists {
-		populated, err := e.agentVolumePopulated(agent)
+		status, populated, err := e.agentVolumePopulated(agent)
 		if err != nil {
 			return err
 		}
 		if populated {
+			e.refreshStaleAgentVolumeIfNeeded(agent, status, containerRunning)
 			return nil
 		}
 	}

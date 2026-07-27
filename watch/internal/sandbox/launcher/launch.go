@@ -258,7 +258,21 @@ func (e *Engine) Launch(opts Options) error {
 	if err := e.EnsureImage(ctx.Scope); err != nil {
 		return err
 	}
-	if err := e.EnsureAgentVolume(ctx.Agent); err != nil {
+
+	// Hoisted ahead of EnsureAgentVolume (ticket #710): a running scoped
+	// container keeps its started-with agent version regardless, so the
+	// staleness-refresh branch inside EnsureAgentVolume must be skipped
+	// entirely on the attach path — an attach must stay instant. This is a
+	// deliberate ordering change (watch AGENTS.md #620): a containerRunning
+	// (`ps`) probe failure now aborts the launch BEFORE the agent-volume
+	// bootstrap/refresh probe ever runs, not after it as before this ticket.
+	// planArgvs keeps its own separate containerRunning call below so it
+	// stays pure and DryRun can keep reusing it unchanged.
+	running, err := e.containerRunning(ctx.Scope.ContainerName)
+	if err != nil {
+		return err
+	}
+	if err := e.EnsureAgentVolume(ctx.Agent, running); err != nil {
 		return err
 	}
 

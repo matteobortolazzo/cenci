@@ -379,6 +379,38 @@ func TestDryRun_NoSideEffects_NoMutatingRuntimeCallsAndExecAttachNeverCalled(t *
 	}
 }
 
+// TestDryRun_NoAgentVolumeStatusProbe_RegressionForLaunchTimeTTLRefresh pins
+// ticket #710's explicit regression AC: DryRun must still perform no
+// probe-driven refresh. EnsureAgentVolume (and, inside it, the new
+// agent-cli.sh status/update TTL staleness branch) is a Launch-only side
+// effect DryRun has always deliberately skipped (dryrun.go's doc comment);
+// this stays true even though Launch itself now performs the probe/refresh
+// unconditionally before planArgvs. Named explicitly (rather than relying
+// solely on TestDryRun_NoSideEffects_NoMutatingRuntimeCallsAndExecAttachNeverCalled's
+// broader ps/inspect-only allowlist above) so a future regression that
+// reintroduces the probe into DryRun's path fails with a message naming the
+// exact ticket-#710 behavior it broke.
+func TestDryRun_NoAgentVolumeStatusProbe_RegressionForLaunchTimeTTLRefresh(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	fakeDir := t.TempDir()
+	callLog := filepath.Join(fakeDir, "calls.txt")
+	writeFakeRuntime(t, fakeDir, "docker", callLog)
+	t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
+
+	eng := &Engine{Runtime: "docker", Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	if _, err := eng.DryRun(Options{Agent: "claude"}); err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+
+	if lines := readCallLog(t, callLog); containsLineWithAll(lines, "agent-cli.sh") {
+		t.Errorf("DryRun must never invoke the agent-cli.sh status/update probe (EnsureAgentVolume is a Launch-only side effect); calls:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
 // -- launch-branch fidelity (ticket #620) -----------------------------------
 
 // TestDryRun_ExistingCompatibleContainer_RendersAttachOnlyWithNoCreateArgv

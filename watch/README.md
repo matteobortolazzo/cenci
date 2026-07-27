@@ -775,6 +775,26 @@ cenci open --dind                # force-enable nested Docker (Sysbox-isolated),
 cenci open --no-dind             # force-disable nested Docker, overriding a repo's sandbox.dind config
 ```
 
+Beyond the explicit `update-agent` verb, every `cenci open` launch also
+best-effort refreshes an already-populated shared agent-CLI volume when it is
+stale: the default TTL is 24h (override with
+`CENCI_SANDBOX_AGENT_CLI_TTL_HOURS=<hours>`; `0` disables auto-refresh
+entirely), and a refresh attempt is throttled to at most once per hour via a
+1h `last_attempt` backoff so an offline/captive-portal host doesn't eat the
+`npm` timeout cost on every launch. A volume pinned via
+`cenci sandbox update-agent --version <exact-semver>` skips the refresh
+entirely while stale, printing a one-line notice naming the pinned version and
+the `cenci sandbox update-agent <agent> --unpin` remedy to resume automatic
+updates; a pinned volume still inside the TTL launches silently. A failed
+refresh only warns to stderr — the launch still proceeds on the existing
+(already-populated) version. The staleness check (and any refresh) is skipped
+entirely when attaching to an already-running scoped container, so attach
+stays instant. Security note: because the shared agent-CLI updater has
+network access, this makes an automatic, network-enabled CLI update happen
+every TTL period on any host that keeps launching sandboxes — set
+`CENCI_SANDBOX_AGENT_CLI_TTL_HOURS=0` or pin the agent's version
+(`cenci sandbox update-agent --version <exact-semver>`) to opt out.
+
 `open`'s one-token shortcuts (recognized only as the first argument):
 
 | Shortcut | Agent | Model |
