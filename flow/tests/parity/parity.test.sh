@@ -21,9 +21,9 @@
 # Follows the established flow test idiom (flow/tests/maintain.test.sh,
 # flow/hooks/scripts/run-gate.test.sh, flow/tests/subagent-cwd-contract.test.sh):
 # `set -uo pipefail`, mktemp -d fixtures, a `failures=` counter, small assert_*
-# helpers, self-contained, auto-discovered by flow's gateCommand
-# (`find . -name '*.test.sh' -print0 | sort -z | xargs -0 -r -n1 bash`, run from
-# the flow/ project directory -- see .cenci/config.json).
+# helpers, self-contained, auto-discovered by flow's shared executor
+# (`flow/scripts/run-checks.sh`, invoked by both CI's flow-test job and the
+# flow gateCommand -- see .cenci/config.json).
 #
 # Read-only sources of truth this harness inspects/drives but never edits:
 # flow/skills/implement/**, flow/hooks/scripts/**, flow/codex/**.

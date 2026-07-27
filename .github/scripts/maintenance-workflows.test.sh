@@ -10,6 +10,7 @@ failures=0
 fail() { echo "FAIL: $1" >&2; failures=$((failures + 1)); }
 contains() { grep -qF -- "$2" "$1" || fail "$3"; }
 lacks() { ! grep -qF -- "$2" "$1" || fail "$3"; }
+lacks_re() { ! grep -qE -- "$2" "$1" || fail "$3"; }
 
 echo "maintenance-workflows.test.sh"
 
@@ -30,6 +31,10 @@ lacks "$FLOW" "needs.changes.outputs.maintenance == 'true' && github.event_name 
 lacks "$FLOW" "run: bash flow/skills/maintain/scripts/check.sh" "flow-ci has a checker invocation without an explicit CWD block"
 contains "$FLOW" 'git -C "$CHECKOUT_ROOT" diff --name-only "${BASE_SHA}"...HEAD > "$CHANGED_FILE"' "flow-ci must check changed-file discovery before mapfile"
 lacks "$FLOW" 'mapfile -t CHANGED < <(' "flow-ci must not hide git diff failure behind process substitution"
+
+contains "$FLOW" "bash flow/scripts/run-checks.sh" "flow-ci must run the shared flow test discovery script"
+lacks_re "$FLOW" 'run: bash flow/.*\.test\.sh' "flow-ci must not enumerate per-suite test steps (ticket #720 replaces them with run-checks.sh discovery)"
+lacks "$FLOW" "Validate flow JSON" "flow-ci must not have a standalone Validate flow JSON step (run-checks.sh owns JSON validation)"
 
 contains "$SCHEDULED" "contents: read" "scheduled workflow must use contents: read"
 contains "$SCHEDULED" "issues: write" "scheduled workflow must use issues: write"

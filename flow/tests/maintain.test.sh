@@ -536,18 +536,57 @@ assert_all_fixes_present "case12 adapter-drift fail must carry a fix"
 rm -rf "${ROOT}"
 
 # =====================================================================
-# Case 13: structural-tests — an existing flow/tests/*.test.sh fails
+# Case 13: structural-tests — non-executing discovery assertion (ticket
+# #720). check_structural_tests no longer executes any suite (that's owned
+# exclusively by flow/scripts/run-checks.sh, invoked by both CI and the flow
+# gateCommand); it only asserts that discovery itself is healthy.
+#   13a: an empty discovered suite fails.
+#   13b: a *failing* suite is no longer this checker's concern -- gate-command
+#        owns that (already covered by case 15a) -- and discovery must never
+#        execute it.
+#   13c: an unreadable discovered suite fails, but this is unobservable under
+#        root (uid 0 bypasses DAC read permission bits), so it's guarded with
+#        an id -u check per flow/docs/shell-scripting-gotchas.md and
+#        flow/tests/root-safe-perms-contract.test.sh (which requires the
+#        guard to appear within the 10 lines AFTER the permission-removing
+#        chmod call).
 # =====================================================================
+
+# 13a: an empty discovered suite fails.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+: > "${ROOT}/flow/tests/empty.test.sh"
+run_check "${ROOT}"
+assert_has_result "structural-tests" "fail" "case13a empty discovered suite fails"
+assert_all_fixes_present "case13a structural-tests fail must carry a fix"
+rm -rf "${ROOT}"
+
+# 13b: a failing (but readable, non-empty) suite is not structural-tests'
+# concern, and discovery never executes it.
 ROOT="$(mktemp -d)"
 setup_base "${ROOT}"
 cat > "${ROOT}/flow/tests/broken.test.sh" <<'EOF'
 #!/usr/bin/env bash
-echo "broken.test.sh: failures=1"
+touch "$(dirname "$0")/../../structural-executed"
 exit 1
 EOF
 run_check "${ROOT}"
-assert_has_result "structural-tests" "fail" "case13 broken.test.sh fails"
-assert_all_fixes_present "case13 structural-tests fail must carry a fix"
+assert_eq "$(count_results "structural-tests" "fail")" "0" "case13b a failing discovered suite is not structural-tests' concern"
+[[ ! -e "${ROOT}/structural-executed" ]] || fail "case13b discovery executed a discovered suite"
+rm -rf "${ROOT}"
+
+# 13c: an unreadable discovered suite fails (root-unobservable; guarded).
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+: > "${ROOT}/flow/tests/unreadable.test.sh"
+chmod 000 "${ROOT}/flow/tests/unreadable.test.sh"
+if [[ "$(id -u)" -eq 0 ]]; then
+  echo "SKIP: case13c unreadable-suite assertion requires a non-root user (uid 0 reads any regular file)"
+else
+  run_check "${ROOT}"
+  assert_has_result "structural-tests" "fail" "case13c unreadable discovered suite fails"
+fi
+chmod 644 "${ROOT}/flow/tests/unreadable.test.sh"
 rm -rf "${ROOT}"
 
 # =====================================================================
@@ -1613,7 +1652,7 @@ BEFORE_HASHES="$(find "${ROOT}" -type f ! -path '*/.git/*' -print0 | sort -z | x
 run_advisory "${ROOT}"
 assert_exit_zero "case42 advisory clean run exits zero"
 jq -e '.summary.mode == "advisory"' <<< "${REPORT_STDOUT}" >/dev/null 2>&1 || fail "case42 advisory stdout is one valid JSON report"
-assert_has_result "structural-tests" "skip" "case42 structural tests explicitly skip"
+assert_has_result "structural-tests" "pass" "case42 structural tests run (read-only discovery) even in advisory mode"
 assert_has_result "gate-command" "skip" "case42 gate command explicitly skips"
 assert_has_result "github-labels" "skip" "case42 GitHub check explicitly skips"
 [[ ! -e "${ROOT}/advisory-gate-ran" && ! -e "${ROOT}/advisory-structural-ran" ]] || fail "case42 advisory executed a skipped check"
@@ -1654,6 +1693,37 @@ run_check "${ROOT}"
 assert_has_result "stale-generated" "skip" "case44 generatedDocs=false explicitly skips generated sections"
 assert_has_result "front-matter" "pass" "case44 core checks still run"
 assert_has_result "structural-tests" "pass" "case44 executable checks still run outside advisory"
+rm -rf "${ROOT}"
+
+# Case 44b: structural-tests discovery reaches nested subdirectories (e.g.
+# tests/parity/-shaped paths) -- the divergence this ticket exists to close:
+# the old check_structural_tests glob (flow/tests/*.test.sh, non-recursive)
+# missed tests/parity/parity.test.sh entirely.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/flow/tests/parity"
+cat > "${ROOT}/flow/tests/parity/nested.test.sh" <<'EOF'
+#!/usr/bin/env bash
+set -uo pipefail
+echo "nested.test.sh: failures=0"
+exit 0
+EOF
+run_check "${ROOT}"
+assert_has_result "structural-tests" "pass" "case44b nested tests/parity/*.test.sh is discovered"
+N_STRUCTURAL_FAIL="$(count_results "structural-tests" "fail")"
+is_eq0 "${N_STRUCTURAL_FAIL}" || fail "case44b nested suite unexpectedly failed discovery (count=${N_STRUCTURAL_FAIL})"
+rm -rf "${ROOT}"
+
+# Case 44c: --changed relevance widened to flow/*.test.sh (ticket #720) -- a
+# changed suite outside flow/tests/ still triggers structural-tests in
+# --changed mode, closing the same enumeration divergence one level up
+# (is_relevant's structural-tests mapping now matches any flow/**/*.test.sh,
+# not just flow/tests/*.test.sh).
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+bootstrap_markers "${ROOT}"
+run_check "${ROOT}" --changed flow/codex/hooks.test.sh
+assert_check_ran "structural-tests" "case44c --changed flow/codex/*.test.sh triggers structural-tests (widened is_relevant)"
 rm -rf "${ROOT}"
 
 # =====================================================================

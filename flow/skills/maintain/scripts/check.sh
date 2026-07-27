@@ -436,7 +436,7 @@ is_relevant() {
       stale-generated|capability-table|adapter-drift)
         case "$f" in flow/skills/*|flow/agents/*|flow/opencode/install-skills.sh|flow/README.md|flow/docs/*.md) return 0 ;; esac ;;
       structural-tests)
-        case "$f" in flow/tests/*.test.sh) return 0 ;; esac ;;
+        case "$f" in flow/*.test.sh) return 0 ;; esac ;;
       worktree-ignored|plans-ignored|pipeline-state-ignored)
         case "$f" in .gitignore) return 0 ;; esac ;;
       claude-rules-imports)
@@ -1086,23 +1086,49 @@ check_adapter_drift() {
   [[ "$any_fail" -eq 0 ]] && add_result adapter-drift "(repo)" pass "every PORTABLE_SKILLS entry has a matching flow/skills/ directory" ""
 }
 
+# check_structural_tests — non-executing discovery assertion (ticket #720).
+# Execution of *.test.sh suites is owned exclusively by flow/scripts/
+# run-checks.sh (CI's flow-test job and the flow gateCommand both invoke it),
+# and check_gate_command already runs that full 33+-suite gate in this same
+# check.sh invocation -- executing suites here too would double-run the gate
+# for zero added signal. This check instead only asserts that discovery
+# itself is healthy: every *.test.sh under FLOW_DIR is readable and
+# non-empty, and at least one was found.
+#
+# Discovery prunes .git/node_modules/vendor/.worktrees because in a
+# single-project (non-monorepo) consumer repo, resolve_flow_dir sets
+# FLOW_DIR="$ROOT" (check.sh's resolve_flow_dir), so unpruned discovery would
+# walk the whole repository rather than just the flow tree.
 check_structural_tests() {
-  local any_fail=0 count=0 f out rc
-  for f in "$FLOW_DIR"/tests/*.test.sh; do
-    [[ -f "$f" ]] || continue
+  local any_fail=0 count=0 f
+  local list
+  list="$(mktemp)" || { echo "check.sh: mktemp failed" >&2; exit 2; }
+  if ! find "$FLOW_DIR" \( -name .git -o -name node_modules -o -name vendor -o -name .worktrees \) -prune \
+    -o -type f -name '*.test.sh' -print0 | sort -z > "$list"; then
+    add_result structural-tests "(repo)" fail "*.test.sh discovery under $(relpath "$FLOW_DIR") failed" \
+      "investigate why find/sort failed while discovering *.test.sh files"
+    rm -f "$list"
+    return
+  fi
+  [[ -r "$list" ]] || { echo "check.sh: discovery list is not readable: $list" >&2; exit 2; }
+  while IFS= read -r -d '' f; do
     count=$((count+1))
-    out="$(bash "$f" 2>&1)"; rc=$?
-    if [[ "$rc" -ne 0 ]]; then
-      add_result structural-tests "$(relpath "$f")" fail "$(basename "$f") failed (exit ${rc})" \
-        "fix the failing assertions in $(relpath "$f")"
+    if [[ ! -r "$f" ]]; then
+      add_result structural-tests "$(relpath "$f")" fail "$(basename "$f") is not readable" \
+        "restore read permission on $(relpath "$f")"
+      any_fail=1
+    elif [[ ! -s "$f" ]]; then
+      add_result structural-tests "$(relpath "$f")" fail "$(basename "$f") is empty" \
+        "restore the test assertions in $(relpath "$f") or remove the empty file"
       any_fail=1
     fi
-  done
+  done < "$list" || { echo "check.sh: failed to read discovery list: $list" >&2; exit 2; }
+  rm -f "$list"
   if [[ "$count" -eq 0 ]]; then
-    add_result structural-tests "(repo)" fail "zero structural tests ran under flow/tests/" \
-      "add at least one flow/tests/*.test.sh integration test"
+    add_result structural-tests "(repo)" fail "zero *.test.sh files discovered under $(relpath "$FLOW_DIR")" \
+      "add at least one *.test.sh integration test under the flow tree"
   elif [[ "$any_fail" -eq 0 ]]; then
-    add_result structural-tests "(repo)" pass "all ${count} flow/tests/*.test.sh scripts pass" ""
+    add_result structural-tests "(repo)" pass "discovered ${count} *.test.sh scripts, all readable and non-empty" ""
   fi
 }
 
@@ -1677,11 +1703,7 @@ main() {
   is_relevant shell-syntax && check_shell_syntax
   is_relevant capability-table && check_capability_table
   is_relevant adapter-drift && check_adapter_drift
-  if [[ "$MODE_ADVISORY" -eq 1 ]]; then
-    add_result structural-tests "(repo)" skip "advisory mode skips executable structural tests" ""
-  else
-    is_relevant structural-tests && check_structural_tests
-  fi
+  is_relevant structural-tests && check_structural_tests
   is_relevant worktree-ignored && check_worktree_ignored
   is_relevant plans-ignored && check_plans_ignored
   is_relevant pipeline-state-ignored && check_pipeline_state_ignored

@@ -106,31 +106,5 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - name: Validate flow JSON
-        run: find flow -name '*.json' -print0 | xargs -0 -n1 jq empty
-      - name: Verify Codex hook isolation
-        run: bash flow/codex/hooks.test.sh
-      - name: Verify settings permission lists
-        run: bash flow/templates/settings-permissions.test.sh
-      - name: Verify main-worktree guard hook
-        run: bash flow/hooks/scripts/guard-main-worktree.test.sh
-      - name: Verify sensitive-files guard hook
-        run: bash flow/hooks/scripts/check-sensitive-files.test.sh
-      - name: Verify config-staleness hook
-        run: bash flow/hooks/scripts/check-config-staleness.test.sh
-      - name: Verify maintenance-reminder hook
-        run: bash flow/hooks/scripts/maintenance-reminder.test.sh
-      - name: Verify configure detect script
-        run: bash flow/skills/configure/scripts/detect-project.test.sh
-      - name: Verify maintain checker test suite
-        run: bash flow/tests/maintain.test.sh
-      - name: Verify implement review-artifact scoping
-        run: bash flow/tests/implement-review-artifacts.test.sh
-      - name: Verify followup ticket milestone/label inheritance
-        run: bash flow/tests/followup-ticket-inheritance.test.sh
-      - name: Verify followup ticket generation limits and dedup
-        run: bash flow/tests/followup-generation-limits.test.sh
-      - name: Verify root-safe chmod contract
-        run: bash flow/tests/root-safe-perms-contract.test.sh
-      - name: Verify design host-only sandbox guard
-        run: bash flow/tests/design-sandbox-guard.test.sh
+      - name: Run flow checks
+        run: bash flow/scripts/run-checks.sh

@@ -15,7 +15,7 @@
       "stack": { "framework": "markdown-shell" },
       "buildCommand": "",
       "testCommand": "",
-      "gateCommand": "find . -name '*.json' -print0 | xargs -0 -r -n1 jq empty && find . -name '*.test.sh' -print0 | sort -z | xargs -0 -r -n1 bash"
+      "gateCommand": "bash scripts/run-checks.sh"
     },
     {
       "slug": "watch",
