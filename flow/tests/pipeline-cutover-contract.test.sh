@@ -281,6 +281,15 @@ if CONTENT="$(read_doc "${FILE}")"; then
     fail "${FILE}: could not locate '### Plan Verification' section"
   else
     assert_contains "${PLAN_VERIFICATION_SECTION}" "cenci pipeline plan-check" "${FILE} (### Plan Verification section)"
+    # Ticket #636: a resume against a missing state file (stage `new` --
+    # .cenci/pipeline/ is gitignored, or the plan file predates the
+    # pipeline CLI) must not dead-end on `label --transition working`/bare
+    # `plan`. Plan Verification's resume/stale (and multiple-disambiguated-
+    # to-resume) branches gain a closing `cenci pipeline prepare <id>` call
+    # before Ticket Ownership -- scoped to this section so it cannot be
+    # satisfied by an unrelated `cenci pipeline prepare` mention elsewhere
+    # in the file (e.g. Context Gathering's own prepare call site).
+    assert_contains "${PLAN_VERIFICATION_SECTION}" "cenci pipeline prepare" "${FILE} (### Plan Verification section)"
   fi
   assert_not_contains "${CONTENT}" 'glob for `.plans/<id>-*.md`' "${FILE} (mode-detection section)"
 fi

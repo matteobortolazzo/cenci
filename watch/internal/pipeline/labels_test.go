@@ -488,6 +488,100 @@ func TestApplyLabelTransition_InReview_WrongStage_ReturnsErrWrongStageForLabel(t
 	}
 }
 
+// -- minimum-stage gating (#636): at-minimum and past-minimum success -------
+//
+// labelStagePrecondition became a single minimum Stage per transition
+// instead of an exact-stage whitelist. The at-minimum case for each
+// transition is already covered by the happy-path tests above
+// (TestApplyLabelTransition_Working_HappyPath_SoleAssigneeMatches at
+// StagePrepared, TestApplyLabelTransition_Planned_HappyPath_... at
+// StageWaitingForPlanApproval, TestApplyLabelTransition_InReview_HappyPath_...
+// at StageFinalized); the tests below cover the past-minimum case, which the
+// old exact-stage whitelist rejected but the new minimum gate must accept.
+
+func TestApplyLabelTransition_Working_PastMinimum_AtExecuted_Succeeds(t *testing.T) {
+	stateDir := t.TempDir()
+	mustSeedState(t, stateDir, "42", StageExecuted)
+	gh := newFakeGh(t, "octocat", []string{"octocat"})
+	gh.install()
+
+	if _, err := ApplyLabelTransition(LabelOpts{ID: "42", StateDir: stateDir, RepoSlug: "o/r", Transition: "working"}); err != nil {
+		t.Fatalf("ApplyLabelTransition(working) past minimum stage (executed): %v", err)
+	}
+
+	found := false
+	for _, c := range gh.callsMatching("issue", "edit") {
+		if c.hasFlag("--add-label", "Working") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected the Working label to still be applied when re-applied past the minimum stage")
+	}
+}
+
+func TestApplyLabelTransition_Planned_PastMinimum_AtExecuted_Succeeds(t *testing.T) {
+	stateDir := t.TempDir()
+	mustSeedState(t, stateDir, "42", StageExecuted)
+	gh := newFakeGh(t, "octocat", nil)
+	gh.install()
+
+	if _, err := ApplyLabelTransition(LabelOpts{ID: "42", StateDir: stateDir, RepoSlug: "o/r", Transition: "planned"}); err != nil {
+		t.Fatalf("ApplyLabelTransition(planned) past minimum stage (executed): %v", err)
+	}
+
+	found := false
+	for _, c := range gh.callsMatching("issue", "edit") {
+		if c.hasFlag("--add-label", "Planned") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected the Planned label to still be applied when re-applied past the minimum stage")
+	}
+}
+
+// TestApplyLabelTransition_InReview_MinimumIsMaximumRank_PastMinimumUnreachable
+// documents, rather than silently omits, that "in-review"'s minimum stage
+// (finalized) is also the state machine's maximum rank: there is no stage
+// past finalized, so unlike working's and planned's, a past-minimum success
+// case for in-review cannot exist. The at-minimum case is already covered by
+// TestApplyLabelTransition_InReview_HappyPath_AddsInReviewRemovesWorking.
+func TestApplyLabelTransition_InReview_MinimumIsMaximumRank_PastMinimumUnreachable(t *testing.T) {
+	t.Skip("in-review's minimum stage (finalized) is the maximum rank in the total order; no stage exists past it, so no past-minimum case is possible -- see TestApplyLabelTransition_InReview_HappyPath_AddsInReviewRemovesWorking for the at-minimum case")
+}
+
+// -- unknown persisted stage (#636): hard fail, never a silent no-op --------
+
+// TestApplyLabelTransition_UnknownPersistedStage_HardFails locks in the
+// default-deny requirement (watch/AGENTS.md #598/#628): a corrupt/forward-
+// incompatible persisted stage value must never satisfy any transition's
+// minimum-stage gate, must still be classified as ErrWrongStageForLabel
+// (preserving the CLI's existing exit-code path), with a message that is
+// content-distinct from the ordinary wrong-stage case (it names the
+// persisted value as unknown/unrecognized, not merely "too early"), and
+// must make zero gh calls.
+func TestApplyLabelTransition_UnknownPersistedStage_HardFails(t *testing.T) {
+	stateDir := t.TempDir()
+	mustSeedState(t, stateDir, "42", Stage("bogus"))
+	gh := newFakeGh(t, "octocat", []string{"octocat"})
+	gh.install()
+
+	_, err := ApplyLabelTransition(LabelOpts{ID: "42", StateDir: stateDir, RepoSlug: "o/r", Transition: "working"})
+	if err == nil {
+		t.Fatal("ApplyLabelTransition(working) with an unknown persisted stage: want an error, got nil")
+	}
+	if !errors.Is(err, ErrWrongStageForLabel) {
+		t.Errorf("error = %v, want errors.Is(_, ErrWrongStageForLabel)", err)
+	}
+	if !strings.Contains(err.Error(), "unknown") {
+		t.Errorf("error = %q, want a content-distinct message naming the unknown persisted stage", err.Error())
+	}
+	if len(gh.calls) != 0 {
+		t.Errorf("gh calls = %v, want none (the stage gate must fail before any gh call)", gh.calls)
+	}
+}
+
 // -- ownership branches (only for "working") --------------------------------
 
 func TestApplyLabelTransition_Working_ForeignAssignee_ReturnsErrForeignAssignee(t *testing.T) {

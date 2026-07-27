@@ -1,21 +1,70 @@
 package pipeline
 
 // Unit tests for the pipeline state machine: the transition table and its
-// preconditions (ticket #558). Table-driven per docs/plan-fidelity.md's
-// state table, including the acceptance criteria's key guard ("execute"
-// blocked before "plan_approved"). Sentinel errors are asserted via
-// errors.Is at the package boundary per watch/AGENTS.md rule #412 — this is
-// an in-package ("white box") test file, matching internal/babysit's own
-// convention (babysit_test.go is `package babysit`), so it exercises the
-// unexported transition() function directly rather than only indirectly via
-// a higher-level Run().
+// preconditions (ticket #558), extended by ticket #636 for the monotonic
+// no-op rule -- a total stage order, a no-op result when the persisted stage
+// is already at or past a command's target, and a hard fail (never a silent
+// no-op) on an unrecognized persisted stage. Table-driven per
+// docs/plan-fidelity.md's state table, including the acceptance criteria's
+// key guard ("execute" blocked before "plan_approved"). Sentinel errors are
+// asserted via errors.Is at the package boundary per watch/AGENTS.md rule
+// #412 -- this is an in-package ("white box") test file, matching
+// internal/babysit's own convention (babysit_test.go is `package babysit`),
+// so it exercises the unexported transition()/stageRank()/noopWarning()
+// functions directly rather than only indirectly via a higher-level Run().
+//
+// transition() now returns a third value, noop bool, signaling that the
+// persisted stage was already at or past the command's target and the call
+// is a monotonic no-op (returns the *persisted* stage unchanged, nil error).
+// Every call site below is updated to the 3-value signature.
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
-// -- valid transitions --------------------------------------------------
+// -- stage ordering helper (#636 AC1) ---------------------------------------
+
+// TestStageRank_TotalOrder locks in the documented total order (new <
+// prepared < waiting_for_plan_approval < plan_approved < executed <
+// reviewed < finalized): each stage's rank must be strictly greater than
+// the previous one's.
+func TestStageRank_TotalOrder(t *testing.T) {
+	order := []Stage{
+		StageNew,
+		StagePrepared,
+		StageWaitingForPlanApproval,
+		StagePlanApproved,
+		StageExecuted,
+		StageReviewed,
+		StageFinalized,
+	}
+	prev := -1
+	for _, s := range order {
+		rank, ok := stageRank(s)
+		if !ok {
+			t.Fatalf("stageRank(%s) ok = false, want true", s)
+		}
+		if rank <= prev {
+			t.Errorf("stageRank(%s) = %d, want strictly greater than the previous stage's rank %d", s, rank, prev)
+		}
+		prev = rank
+	}
+}
+
+// TestStageRank_UnknownStage_NotOk locks in the default-deny requirement
+// (watch/AGENTS.md #598/#628): an unrecognized stage must never rank
+// alongside the known total order, which is what makes it possible for
+// transition()/ApplyLabelTransition to reject it explicitly rather than
+// having it silently compare as "before" or "at or past" some target.
+func TestStageRank_UnknownStage_NotOk(t *testing.T) {
+	if rank, ok := stageRank(Stage("bogus")); ok {
+		t.Errorf("stageRank(bogus) = (%d, true), want ok = false for an unrecognized stage", rank)
+	}
+}
+
+// -- valid transitions (from < target: real forward transitions, never a no-op) --
 
 func TestTransition_ValidSequence(t *testing.T) {
 	cases := []struct {
@@ -26,7 +75,6 @@ func TestTransition_ValidSequence(t *testing.T) {
 		want    Stage
 	}{
 		{"prepare from new", StageNew, "prepare", false, StagePrepared},
-		{"prepare is idempotent once already prepared", StagePrepared, "prepare", false, StagePrepared},
 		{"plan from prepared", StagePrepared, "plan", false, StageWaitingForPlanApproval},
 		{"plan --approve from waiting_for_plan_approval", StageWaitingForPlanApproval, "plan", true, StagePlanApproved},
 		{"execute from plan_approved", StagePlanApproved, "execute", false, StageExecuted},
@@ -35,12 +83,78 @@ func TestTransition_ValidSequence(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := transition(c.from, c.command, c.approve)
+			got, noop, err := transition(c.from, c.command, c.approve)
 			if err != nil {
 				t.Fatalf("transition(%s, %q, approve=%v) unexpected error: %v", c.from, c.command, c.approve, err)
 			}
 			if got != c.want {
 				t.Errorf("transition(%s, %q, approve=%v) = %s, want %s", c.from, c.command, c.approve, got, c.want)
+			}
+			if noop {
+				t.Errorf("transition(%s, %q, approve=%v) noop = true, want false (a real forward transition, not a no-op)", c.from, c.command, c.approve)
+			}
+		})
+	}
+}
+
+// -- monotonic no-op table (#636 AC2/AC3): from every stage >= target -------
+
+// TestTransition_NoOp_WhenAtOrPastTarget is the plan's "No-op table":
+// for every command, every persisted stage at or past that command's target
+// returns the *persisted* stage unchanged (never the target), noop == true,
+// and a nil error.
+func TestTransition_NoOp_WhenAtOrPastTarget(t *testing.T) {
+	cases := []struct {
+		name    string
+		from    Stage
+		command string
+		approve bool
+	}{
+		// prepare: target prepared
+		{"prepare at target (prepared)", StagePrepared, "prepare", false},
+		{"prepare past target (waiting_for_plan_approval)", StageWaitingForPlanApproval, "prepare", false},
+		{"prepare past target (plan_approved)", StagePlanApproved, "prepare", false},
+		{"prepare past target (executed)", StageExecuted, "prepare", false},
+		{"prepare past target (reviewed)", StageReviewed, "prepare", false},
+		{"prepare past target (finalized)", StageFinalized, "prepare", false},
+
+		// plan (bare): target waiting_for_plan_approval
+		{"plan at target (waiting_for_plan_approval)", StageWaitingForPlanApproval, "plan", false},
+		{"plan past target (plan_approved)", StagePlanApproved, "plan", false},
+		{"plan past target (executed)", StageExecuted, "plan", false},
+		{"plan past target (reviewed)", StageReviewed, "plan", false},
+		{"plan past target (finalized)", StageFinalized, "plan", false},
+
+		// plan --approve: target plan_approved
+		{"plan --approve at target (plan_approved)", StagePlanApproved, "plan", true},
+		{"plan --approve past target (executed)", StageExecuted, "plan", true},
+		{"plan --approve past target (reviewed)", StageReviewed, "plan", true},
+		{"plan --approve past target (finalized)", StageFinalized, "plan", true},
+
+		// execute: target executed
+		{"execute at target (executed)", StageExecuted, "execute", false},
+		{"execute past target (reviewed)", StageReviewed, "execute", false},
+		{"execute past target (finalized)", StageFinalized, "execute", false},
+
+		// review: target reviewed
+		{"review at target (reviewed)", StageReviewed, "review", false},
+		{"review past target (finalized)", StageFinalized, "review", false},
+
+		// finalize: target finalized -- finalized is the maximum rank, so
+		// "at target" is the only case; there is no stage past it.
+		{"finalize at target (finalized)", StageFinalized, "finalize", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, noop, err := transition(c.from, c.command, c.approve)
+			if err != nil {
+				t.Fatalf("transition(%s, %q, approve=%v) unexpected error: %v", c.from, c.command, c.approve, err)
+			}
+			if !noop {
+				t.Errorf("transition(%s, %q, approve=%v) noop = false, want true", c.from, c.command, c.approve)
+			}
+			if got != c.from {
+				t.Errorf("transition(%s, %q, approve=%v) = %s, want the persisted stage %s unchanged (a no-op never rewinds and never jumps to the target)", c.from, c.command, c.approve, got, c.from)
 			}
 		})
 	}
@@ -68,12 +182,15 @@ func TestTransition_InvalidFromExamplesReturnSentinelErrors(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := transition(c.from, c.command, c.approve)
+			got, noop, err := transition(c.from, c.command, c.approve)
 			if err == nil {
-				t.Fatalf("transition(%s, %q, approve=%v) = %s, <nil>, want a sentinel error", c.from, c.command, c.approve, got)
+				t.Fatalf("transition(%s, %q, approve=%v) = %s, noop=%v, <nil>, want a sentinel error", c.from, c.command, c.approve, got, noop)
 			}
 			if !errors.Is(err, c.wantErr) {
 				t.Errorf("transition(%s, %q, approve=%v) error = %v, want errors.Is(_, %v)", c.from, c.command, c.approve, err, c.wantErr)
+			}
+			if noop {
+				t.Errorf("transition(%s, %q, approve=%v) noop = true, want false (a too-early call is a hard failure, never a no-op)", c.from, c.command, c.approve)
 			}
 		})
 	}
@@ -82,17 +199,96 @@ func TestTransition_InvalidFromExamplesReturnSentinelErrors(t *testing.T) {
 // TestTransition_ExecuteNeverSucceedsWithoutApproval directly locks in the
 // acceptance criteria's key guard as its own standalone assertion (not just
 // buried in the table above): for every stage short of plan_approved,
-// "execute" must fail with ErrPlanNotApproved, never silently advance.
+// "execute" must fail with ErrPlanNotApproved, never silently advance and
+// never silently no-op.
 func TestTransition_ExecuteNeverSucceedsWithoutApproval(t *testing.T) {
 	for _, from := range []Stage{StageNew, StagePrepared, StageWaitingForPlanApproval} {
-		got, err := transition(from, "execute", false)
+		got, noop, err := transition(from, "execute", false)
 		if err == nil {
-			t.Errorf("transition(%s, execute) = %s, <nil>, want ErrPlanNotApproved", from, got)
+			t.Errorf("transition(%s, execute) = %s, noop=%v, <nil>, want ErrPlanNotApproved", from, got, noop)
 			continue
 		}
 		if !errors.Is(err, ErrPlanNotApproved) {
 			t.Errorf("transition(%s, execute) error = %v, want errors.Is(_, ErrPlanNotApproved)", from, err)
 		}
+		if noop {
+			t.Errorf("transition(%s, execute) noop = true, want false", from)
+		}
+	}
+}
+
+// -- unknown persisted stage (#636): hard fail, never a silent no-op --------
+
+// TestTransition_UnknownPersistedStage_HardFailsForEveryCommand locks in the
+// default-deny requirement (watch/AGENTS.md #598/#628): a corrupt/forward-
+// incompatible persisted stage value must never rank as "at or past" any
+// command's target (which would silently no-op every command instead of
+// failing), and must be classified as ErrInvalidTransition specifically
+// (not one of the other sentinels, which would be misleading for a
+// corrupt-state condition rather than a genuine "too early" one).
+func TestTransition_UnknownPersistedStage_HardFailsForEveryCommand(t *testing.T) {
+	bogus := Stage("bogus")
+	cases := []struct {
+		command string
+		approve bool
+	}{
+		{"prepare", false},
+		{"plan", false},
+		{"plan", true},
+		{"execute", false},
+		{"review", false},
+		{"finalize", false},
+	}
+	for _, c := range cases {
+		t.Run(c.command+"_approve_"+boolLabel(c.approve), func(t *testing.T) {
+			got, noop, err := transition(bogus, c.command, c.approve)
+			if err == nil {
+				t.Fatalf("transition(bogus, %q, approve=%v) = %s, noop=%v, <nil>, want ErrInvalidTransition", c.command, c.approve, got, noop)
+			}
+			if !errors.Is(err, ErrInvalidTransition) {
+				t.Errorf("transition(bogus, %q, approve=%v) error = %v, want errors.Is(_, ErrInvalidTransition)", c.command, c.approve, err)
+			}
+			if !strings.Contains(err.Error(), "unknown persisted stage") {
+				t.Errorf("transition(bogus, %q, approve=%v) error = %q, want it to contain %q", c.command, c.approve, err.Error(), "unknown persisted stage")
+			}
+			if noop {
+				t.Errorf("transition(bogus, %q, approve=%v) noop = true, want false (an unknown stage must never be treated as at-or-past a target)", c.command, c.approve)
+			}
+		})
+	}
+}
+
+func boolLabel(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
+// -- no-op warning text (#636 AC5) ------------------------------------------
+
+// TestNoopWarning_ExactText locks in the AC's exact wording, including the
+// `plan --approve` rendering for the approve variant.
+func TestNoopWarning_ExactText(t *testing.T) {
+	cases := []struct {
+		name        string
+		current     Stage
+		command     string
+		approve     bool
+		wantWarning string
+	}{
+		{"plan --approve no-op", StageExecuted, "plan", true, `already at stage "executed"; plan --approve is a no-op`},
+		{"bare plan no-op", StageWaitingForPlanApproval, "plan", false, `already at stage "waiting_for_plan_approval"; plan is a no-op`},
+		{"prepare no-op", StagePrepared, "prepare", false, `already at stage "prepared"; prepare is a no-op`},
+		{"execute no-op", StageExecuted, "execute", false, `already at stage "executed"; execute is a no-op`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := noopWarning(c.current, c.command, c.approve)
+			if got != c.wantWarning {
+				t.Errorf("noopWarning(%s, %q, approve=%v) = %q, want %q", c.current, c.command, c.approve, got, c.wantWarning)
+			}
+		})
 	}
 }
 

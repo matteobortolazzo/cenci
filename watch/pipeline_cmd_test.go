@@ -124,7 +124,10 @@ func TestPipelinePrepare_ContractAllArraysPresentExit0(t *testing.T) {
 
 // TestPipelinePrepare_Idempotent_ReprepareSucceeds covers the plan's
 // assumption that prepare is idempotent: running it twice for the same
-// ticket must not error the second time.
+// ticket must not error the second time. Ticket #636: the second run is now
+// a monotonic no-op specifically -- exit 0 (asserted via exitErr == nil,
+// i.e. process exit code 0) with the no-op warning surfaced in the JSON
+// contract's warnings[], not just a bare "no error" outcome.
 func TestPipelinePrepare_Idempotent_ReprepareSucceeds(t *testing.T) {
 	fakeDir := t.TempDir()
 	writeFakeGh(t, fakeDir, false)
@@ -135,13 +138,20 @@ func TestPipelinePrepare_Idempotent_ReprepareSucceeds(t *testing.T) {
 	}
 	c, _, exitErr := runPipelineCLI(t, fakeDir, "prepare", "42", "--state-dir", stateDir)
 	if exitErr != nil {
-		t.Fatalf("second prepare: unexpected exit %d, want idempotent success", exitErr.ExitCode())
+		t.Fatalf("second prepare: unexpected exit %d, want idempotent success (exit 0)", exitErr.ExitCode())
 	}
 	if c.State != "prepared" {
 		t.Errorf("state = %q, want %q (idempotent re-run)", c.State, "prepared")
 	}
 	if len(c.Errors) != 0 {
 		t.Errorf("errors = %v, want none on idempotent re-prepare", c.Errors)
+	}
+	if len(c.Warnings) != 1 {
+		t.Fatalf("warnings = %v, want exactly one no-op warning on the idempotent re-prepare", c.Warnings)
+	}
+	wantWarning := `already at stage "prepared"; prepare is a no-op`
+	if c.Warnings[0] != wantWarning {
+		t.Errorf("warnings[0] = %q, want %q", c.Warnings[0], wantWarning)
 	}
 }
 

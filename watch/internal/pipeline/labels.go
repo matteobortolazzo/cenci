@@ -42,16 +42,19 @@ var (
 	ErrMultipleAssignees = errors.New("ticket has multiple assignees")
 )
 
-// labelStagePrecondition maps each label transition to the pipeline stages
-// it accepts (ticket #559's Files to Modify): "working" accepts
-// StagePrepared (new-plan session) or StageWaitingForPlanApproval (a
-// saved-plan pickup re-applies Working before Phase 2's `plan --approve`
-// runs, #668), "planned" requires StageWaitingForPlanApproval, "in-review"
-// requires StageFinalized.
-var labelStagePrecondition = map[string][]Stage{
-	"working":   {StagePrepared, StageWaitingForPlanApproval},
-	"planned":   {StageWaitingForPlanApproval},
-	"in-review": {StageFinalized},
+// labelStagePrecondition maps each label transition to the minimum pipeline
+// stage it requires (ticket #636: a minimum gate, not an exact-stage
+// whitelist): "working" requires at least StagePrepared (so a saved-plan
+// pickup can re-apply Working before Phase 2's `plan --approve` runs, #668,
+// and so can a resume or re-plan from any later stage), "planned" requires
+// at least StageWaitingForPlanApproval (so a re-plan over an
+// already-executed ticket can still re-apply Planned), "in-review" requires
+// at least StageFinalized (the maximum rank in the total order, so
+// "at or past" only ever means "at").
+var labelStagePrecondition = map[string]Stage{
+	"working":   StagePrepared,
+	"planned":   StageWaitingForPlanApproval,
+	"in-review": StageFinalized,
 }
 
 // labelName is the gh label applied by each transition.
@@ -95,7 +98,7 @@ type LabelOpts struct {
 // unassigned), then self-healingly creates and applies the corresponding gh
 // label(s), returning the resulting State.
 func ApplyLabelTransition(o LabelOpts) (State, error) {
-	requiredStages, ok := labelStagePrecondition[o.Transition]
+	minimum, ok := labelStagePrecondition[o.Transition]
 	if !ok {
 		return State{}, fmt.Errorf("unknown label transition %q", o.Transition)
 	}
@@ -110,9 +113,26 @@ func ApplyLabelTransition(o LabelOpts) (State, error) {
 	if err != nil {
 		return State{}, err
 	}
-	if !stageAllowed(current.Stage, requiredStages) {
-		return State{}, fmt.Errorf("label transition %q requires stage %s, ticket %s is at stage %q: %w",
-			o.Transition, quoteStages(requiredStages), o.ID, current.Stage, ErrWrongStageForLabel)
+	currentRank, currentOk := stageRank(current.Stage)
+	if !currentOk {
+		return State{}, fmt.Errorf("label transition %q: unknown persisted stage %q for ticket %s: %w",
+			o.Transition, current.Stage, o.ID, ErrWrongStageForLabel)
+	}
+	// Defensive invariant, not reachable via any external input today:
+	// labelStagePrecondition only ever maps a transition to a Stage
+	// registered in stageOrder, so minimumOk is always true in practice.
+	// Checked anyway (default-deny per watch/AGENTS.md #598/#628) so that a
+	// future labelStagePrecondition entry referencing an unregistered Stage
+	// constant hard-fails loudly instead of silently ranking as 0 and
+	// turning currentRank < minimumRank into an unconditional pass.
+	minimumRank, minimumOk := stageRank(minimum)
+	if !minimumOk {
+		return State{}, fmt.Errorf("label transition %q: unknown minimum stage %q: %w",
+			o.Transition, minimum, ErrWrongStageForLabel)
+	}
+	if currentRank < minimumRank {
+		return State{}, fmt.Errorf("label transition %q requires stage %q or later, ticket %s is at stage %q: %w",
+			o.Transition, minimum, o.ID, current.Stage, ErrWrongStageForLabel)
 	}
 
 	cfg := defaultRetryConfig()
@@ -156,27 +176,6 @@ func ApplyLabelTransition(o LabelOpts) (State, error) {
 	}
 
 	return recordLabelState(path, name, removeLabel, ticketUpdatedAt)
-}
-
-// stageAllowed reports whether stage is one of the transition's accepted
-// stages.
-func stageAllowed(stage Stage, allowed []Stage) bool {
-	for _, s := range allowed {
-		if stage == s {
-			return true
-		}
-	}
-	return false
-}
-
-// quoteStages renders an accepted-stage list for the ErrWrongStageForLabel
-// message: `"prepared"` or `"prepared" or "waiting_for_plan_approval"`.
-func quoteStages(stages []Stage) string {
-	quoted := make([]string, 0, len(stages))
-	for _, s := range stages {
-		quoted = append(quoted, fmt.Sprintf("%q", string(s)))
-	}
-	return strings.Join(quoted, " or ")
 }
 
 // verifyAndClaimOwnership mirrors flow/skills/ticket-ownership/SKILL.md's

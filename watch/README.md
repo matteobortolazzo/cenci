@@ -634,8 +634,15 @@ Behavior:
   linked worktree created for the ticket (`review`/`finalize`). Concurrent
   invocations for the same ticket serialize through a file lock, retried
   with deterministic backoff on contention.
-- `prepare` is idempotent — re-running it once a ticket is already `prepared`
-  re-emits the current state instead of erroring.
+- Every stage command is a monotonic no-op once the ticket's persisted stage
+  is already at or past that command's target: it returns the persisted
+  stage unchanged (never rewound, never jumped to the target), a
+  `warnings[]` entry reading `already at stage "<current>"; <command> is a
+  no-op` (`<command>` renders as `plan --approve` for the approve variant),
+  empty `errors[]`, and exits `0`. The stage machine never moves backward —
+  a domain error now means strictly "too early" (the persisted stage is
+  before the command's required predecessor) or a corrupt/unrecognized
+  persisted stage value.
 - `execute` is blocked until the plan has been explicitly approved
   (`plan --approve`); running it any earlier is a domain error, not a
   transition.
@@ -670,11 +677,16 @@ cenci pipeline plan-check 42 [--replan-requested] [--repo-slug OWNER/REPO]
 
 Behavior:
 - `label`'s three transitions each require the ticket's persisted pipeline
-  stage to match (`working` requires `prepared`, `planned` requires
-  `waiting_for_plan_approval`, `in-review` requires `finalized`); a mismatch
-  is a domain error. `working` additionally mirrors the `ticket-ownership`
-  skill: verify exclusive gh-assignee ownership, auto-claiming only when the
-  ticket is unassigned, never replacing an existing assignee.
+  stage to be at or past a minimum (`working` requires `prepared` or later,
+  `planned` requires `waiting_for_plan_approval` or later, `in-review`
+  requires `finalized`); a stage short of the minimum is a domain error.
+  Unlike the stage commands, label transitions are never no-ops — they
+  always perform their `gh` work when the minimum is met, even when
+  reapplied from a later stage (e.g. a resume or a re-plan over an
+  already-executed ticket). `working` additionally mirrors the
+  `ticket-ownership` skill: verify exclusive gh-assignee ownership,
+  auto-claiming only when the ticket is unassigned, never replacing an
+  existing assignee.
 - `worktree` rolls back any partial worktree/branch state on failure;
   `worktree-cleanup` removes both the worktree and its branch and is used
   only on that rollback path (not on a "baseline gate failed" retry path,

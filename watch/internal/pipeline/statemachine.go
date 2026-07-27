@@ -33,53 +33,121 @@ var (
 	ErrTicketNotFound    = errors.New("ticket not found")
 )
 
+// stageOrder is the pipeline's total order (ticket #636): each command's
+// target is monotonic against this order, and a command whose persisted
+// stage is already at or past its target is a no-op rather than a hard
+// failure.
+var stageOrder = []Stage{
+	StageNew,
+	StagePrepared,
+	StageWaitingForPlanApproval,
+	StagePlanApproved,
+	StageExecuted,
+	StageReviewed,
+	StageFinalized,
+}
+
+// stageRank reports stage's position in stageOrder. The second return value
+// is false for any value not in stageOrder (default-deny per
+// watch/AGENTS.md #598/#628): an unrecognized stage must never rank
+// alongside the known total order, so it can never compare as "at or past"
+// some target.
+func stageRank(stage Stage) (int, bool) {
+	for i, s := range stageOrder {
+		if s == stage {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// commandTarget returns command's target stage, its required immediate
+// predecessor (the "too early" boundary), and the sentinel error returned
+// when invoked before that predecessor. approve selects between "plan"
+// (bare, target waiting_for_plan_approval) and "plan --approve" (target
+// plan_approved). ok is false for an unrecognized command.
+func commandTarget(command string, approve bool) (target, predecessor Stage, sentinel error, ok bool) {
+	switch command {
+	case "prepare":
+		return StagePrepared, StageNew, ErrInvalidTransition, true
+	case "plan":
+		if approve {
+			return StagePlanApproved, StageWaitingForPlanApproval, ErrInvalidTransition, true
+		}
+		return StageWaitingForPlanApproval, StagePrepared, ErrNotPrepared, true
+	case "execute":
+		return StageExecuted, StagePlanApproved, ErrPlanNotApproved, true
+	case "review":
+		return StageReviewed, StageExecuted, ErrInvalidTransition, true
+	case "finalize":
+		return StageFinalized, StageReviewed, ErrInvalidTransition, true
+	default:
+		return "", "", nil, false
+	}
+}
+
+// commandLabel renders command (with approve) for error/warning text: bare
+// "plan" stays "plan", the approve variant renders as "plan --approve",
+// every other command renders as itself.
+func commandLabel(command string, approve bool) string {
+	if command == "plan" && approve {
+		return "plan --approve"
+	}
+	return command
+}
+
+// noopWarning renders the AC5 no-op warning text for a command that is
+// already at or past its target: `already at stage "<current>"; <command>
+// is a no-op`.
+func noopWarning(current Stage, command string, approve bool) string {
+	return fmt.Sprintf("already at stage %q; %s is a no-op", current, commandLabel(command, approve))
+}
+
 // transition computes the next stage for command (one of "prepare", "plan",
 // "execute", "review", "finalize") given the current stage, enforcing the
 // plan's State Machine Design table. approve is only meaningful for "plan"
 // (Q&A #1: bare `plan` records waiting_for_plan_approval, `plan --approve`
 // advances to plan_approved).
-func transition(from Stage, command string, approve bool) (Stage, error) {
-	switch command {
-	case "prepare":
-		switch from {
-		case StageNew:
-			return StagePrepared, nil
-		case StagePrepared:
-			// Idempotent: re-running prepare once already prepared re-emits
-			// the current state without error.
-			return StagePrepared, nil
-		default:
-			return from, fmt.Errorf("prepare from %s: %w", from, ErrInvalidTransition)
-		}
-	case "plan":
-		if approve {
-			if from != StageWaitingForPlanApproval {
-				return from, fmt.Errorf("plan --approve from %s: %w", from, ErrInvalidTransition)
-			}
-			return StagePlanApproved, nil
-		}
-		if from != StagePrepared {
-			return from, fmt.Errorf("plan from %s: %w", from, ErrNotPrepared)
-		}
-		return StageWaitingForPlanApproval, nil
-	case "execute":
-		if from != StagePlanApproved {
-			return from, fmt.Errorf("execute from %s: %w", from, ErrPlanNotApproved)
-		}
-		return StageExecuted, nil
-	case "review":
-		if from != StageExecuted {
-			return from, fmt.Errorf("review from %s: %w", from, ErrInvalidTransition)
-		}
-		return StageReviewed, nil
-	case "finalize":
-		if from != StageReviewed {
-			return from, fmt.Errorf("finalize from %s: %w", from, ErrInvalidTransition)
-		}
-		return StageFinalized, nil
-	default:
-		return from, fmt.Errorf("unknown pipeline command %q: %w", command, ErrInvalidTransition)
+//
+// The second return value, noop, signals a monotonic no-op (#636): when the
+// persisted stage is already at or past command's target, transition
+// returns the persisted stage unchanged (never the target -- the machine is
+// strictly forward-only and never rewinds), noop=true, and a nil error.
+// Otherwise the existing exact-predecessor precondition applies unchanged:
+// a stage before the required predecessor hard-fails with its sentinel
+// error, noop=false. An unrecognized persisted stage is default-deny: it
+// never ranks as "at or past" a target and always hard-fails with
+// ErrInvalidTransition, noop=false.
+func transition(from Stage, command string, approve bool) (Stage, bool, error) {
+	target, predecessor, sentinel, ok := commandTarget(command, approve)
+	if !ok {
+		return from, false, fmt.Errorf("unknown pipeline command %q: %w", command, ErrInvalidTransition)
 	}
+
+	fromRank, fromOk := stageRank(from)
+	if !fromOk {
+		return from, false, fmt.Errorf("%s from %s: unknown persisted stage: %w", commandLabel(command, approve), from, ErrInvalidTransition)
+	}
+	// Defensive invariant, not reachable via any external input today:
+	// commandTarget only ever returns a Stage registered in stageOrder, so
+	// targetOk is always true in practice. Checked anyway (default-deny per
+	// watch/AGENTS.md #598/#628) so that a future commandTarget entry
+	// referencing an unregistered Stage constant hard-fails loudly instead of
+	// silently ranking as 0 and turning fromRank >= targetRank into an
+	// unconditional no-op-success.
+	targetRank, targetOk := stageRank(target)
+	if !targetOk {
+		return from, false, fmt.Errorf("%s target %s: unknown target stage: %w", commandLabel(command, approve), target, ErrInvalidTransition)
+	}
+
+	if fromRank >= targetRank {
+		return from, true, nil
+	}
+
+	if from != predecessor {
+		return from, false, fmt.Errorf("%s from %s: %w", commandLabel(command, approve), from, sentinel)
+	}
+	return target, false, nil
 }
 
 // NextActionsFor is the exported form of nextActionsFor (ticket #559): the
