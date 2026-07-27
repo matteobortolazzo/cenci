@@ -1774,11 +1774,14 @@ func agentStatusFakeLine(pin string, lastSuccess, lastAttempt time.Time) string 
 	return fmt.Sprintf("FAKE_AGENT_STATUS=populated=yes\\nversion=1.2.3\\npin=%s\\nlast_success=%s\\nlast_attempt=%s\\n", pin, ls, la)
 }
 
-// TestOpen_StaleAgentVolume_RefreshesBeforeWorkloadCreate pins ticket #710's
-// headline AC: a populated shared agent volume whose last_success is older
-// than the (default 24h) TTL refreshes via the updater before the workload
-// container is created, and the launch still succeeds afterwards.
-func TestOpen_StaleAgentVolume_RefreshesBeforeWorkloadCreate(t *testing.T) {
+// TestOpen_StaleAgentVolume_StartsDetachedRefreshBeforeWorkloadCreate pins
+// ticket #710's staleness policy under ticket #745's non-blocking refinement:
+// a populated shared agent volume whose last_success is older than the
+// (default 24h) TTL starts the updater *detached* (--detach, under the fixed
+// cenci-agent-cli-refresh-<agent> name) before the workload container is
+// created, tells the user the refresh happens in the background, and the
+// launch still succeeds without waiting for the update's outcome.
+func TestOpen_StaleAgentVolume_StartsDetachedRefreshBeforeWorkloadCreate(t *testing.T) {
 	fakeDir := t.TempDir()
 	callLog := writeScriptedRuntimes(t, fakeDir)
 	assets := writeAssetFixture(t)
@@ -1788,8 +1791,12 @@ func TestOpen_StaleAgentVolume_RefreshesBeforeWorkloadCreate(t *testing.T) {
 	cmd := exec.Command(binaryPath, "open", "ch")
 	cmd.Env = append(env, agentStatusFakeLine("", stale, time.Time{}))
 	cmd.Dir = t.TempDir()
-	if output, err := cmd.CombinedOutput(); err != nil {
+	output, err := cmd.CombinedOutput()
+	if err != nil {
 		t.Fatalf("open (TTL-stale existing volume): %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "background") {
+		t.Errorf("expected the stale-refresh notice to say the refresh happens in the background, got:\n%s", output)
 	}
 
 	lines := callLogLines(t, callLog)
@@ -1797,13 +1804,16 @@ func TestOpen_StaleAgentVolume_RefreshesBeforeWorkloadCreate(t *testing.T) {
 	for i, line := range lines {
 		if strings.Contains(line, "agent-cli.sh update claude") {
 			updater = i
+			if !strings.Contains(line, "--detach") || !strings.Contains(line, "--name cenci-agent-cli-refresh-claude") {
+				t.Errorf("expected the stale-refresh updater to start detached under the fixed refresh name, got: %s", line)
+			}
 		}
 		if strings.HasPrefix(line, "run --name claude-cenci-default") {
 			workload = i
 		}
 	}
 	if updater < 0 || workload < 0 || updater >= workload {
-		t.Errorf("a TTL-stale shared agent volume must refresh via the updater before workload create; calls:\n%s", strings.Join(lines, "\n"))
+		t.Errorf("a TTL-stale shared agent volume must start its detached refresh before workload create; calls:\n%s", strings.Join(lines, "\n"))
 	}
 	attachLine(t, lines)
 }
