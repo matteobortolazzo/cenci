@@ -2,9 +2,11 @@ package launcher
 
 import (
 	"bytes"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/internal/exectest"
 )
@@ -54,18 +56,26 @@ func dualRuntimeAgentEngine(t *testing.T) (e *Engine, dockerLog, podmanLog strin
 
 // writeAgentRuntimeStub writes a fake runtime binary that reports the
 // monolith image as present/current, the claude agent-CLI volume as already
-// existing and populated, so UpdateAgent/EnsureAgentVolume/Diagnose can run
-// against it without a real container runtime.
+// existing and populated — the `agent-cli.sh status claude` probe
+// (ticket #710's agent-cli.sh swap; must stay byte-parallel with
+// engine_test.go's volumeCheckEngine and sandbox_open_test.go's
+// writeScriptedRuntime per watch AGENTS.md #493) reports a fresh
+// last_success (computed at fixture-write time, "now") so
+// TestEnsureAgentVolume_ViaWithRuntime_BootstrapsUnderSpecifiedRuntimeOnly's
+// sibling bootstrap-only tests below keep exercising only the
+// populated-check branch, never the new TTL staleness branch — so
+// UpdateAgent/EnsureAgentVolume/Diagnose can run against it without a real
+// container runtime.
 func writeAgentRuntimeStub(t *testing.T, dir, name, callLog string) {
 	t.Helper()
-	body := `#!/bin/sh
-printf '%s\n' "$*" >> ` + exectest.ShellQuote(callLog) + `
+	body := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %s
 if [ "$1" = images ]; then
   printf 'cenci-sandbox:latest\n'
   exit 0
 fi
 if [ "$1" = image ] && [ "$2" = inspect ]; then
-  printf '%s\n' 'shared-v2|abc123def456'
+  printf '%%s\n' 'shared-v2|abc123def456'
   exit 0
 fi
 if [ "$1" = volume ] && [ "$2" = ls ]; then
@@ -74,12 +84,12 @@ if [ "$1" = volume ] && [ "$2" = ls ]; then
 fi
 if [ "$1" = run ]; then
   case "$*" in
-  *'test -x /opt/cenci-agent'*) exit 0 ;;
+  *'agent-cli.sh status'*) printf 'populated=yes\nversion=1.2.3\npin=\nlast_success=%d\nlast_attempt=\n'; exit 0 ;;
   esac
   exit 0
 fi
 exit 0
-`
+`, exectest.ShellQuote(callLog), time.Now().Unix())
 	exectest.WriteExecutable(t, filepath.Join(dir, name), body)
 }
 
@@ -171,7 +181,7 @@ exit 0
 	var out bytes.Buffer
 	e := &Engine{Runtime: "docker", AssetDir: "/assets", BaseTag: "abc123def456", Stdin: strings.NewReader(""), Stdout: &out, Stderr: &out}
 
-	if err := e.WithRuntime("podman").EnsureAgentVolume("claude"); err != nil {
+	if err := e.WithRuntime("podman").EnsureAgentVolume("claude", false); err != nil {
 		t.Fatalf("EnsureAgentVolume: %v", err)
 	}
 

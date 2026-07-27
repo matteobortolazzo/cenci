@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/internal/exectest"
 )
@@ -345,15 +347,37 @@ func TestUpdateAgent_NeverAcceptsAnImageParameter(t *testing.T) {
 	}
 }
 
-// volumeCheckEngine wires an Engine to a fake docker that always reports the
-// current monolith image as present/current — the `image inspect` branch
-// emits the combined agent-cli/base-version label format
+// agentVolumeStatusLines builds the five key=value lines the real
+// `agent-cli.sh status <agent>` probe prints (populated, version, pin,
+// last_success, last_attempt — sandbox/lib/agent-cli.sh:444-448), always
+// reporting populated=yes with a fixed version. lastSuccess/lastAttempt are
+// resolved to unix-epoch-seconds strings at fixture-write time (the zero
+// time.Time renders as the empty string, matching the shell contract's
+// "unset fact" framing) — the plan's chosen alternative to a clock seam: the
+// fake runtime fully controls staleness via relative Go-computed timestamps,
+// never a production-only injection point.
+func agentVolumeStatusLines(pin string, lastSuccess, lastAttempt time.Time) string {
+	ls, la := "", ""
+	if !lastSuccess.IsZero() {
+		ls = fmt.Sprintf("%d", lastSuccess.Unix())
+	}
+	if !lastAttempt.IsZero() {
+		la = fmt.Sprintf("%d", lastAttempt.Unix())
+	}
+	return fmt.Sprintf("populated=yes\nversion=1.2.3\npin=%s\nlast_success=%s\nlast_attempt=%s\n", pin, ls, la)
+}
+
+// volumeCheckEngineStatus wires an Engine to a fake docker that always
+// reports the current monolith image as present/current — the `image
+// inspect` branch emits the combined agent-cli/base-version label format
 // (shared-v2|abc123def456, matching the Engine's own BaseTag below) so image
 // builds never interfere — and the given agent's shared volume as already
-// existing, with controllable exit codes for the populated-check run, the
-// updater run, and `volume rm` — so tests can drive EnsureAgentVolume's
-// fallback and warning paths (finding 3) without a real container runtime.
-func volumeCheckEngine(t *testing.T, checkExit, updateExit, rmExit int) (e *Engine, callLog string, stderr *bytes.Buffer) {
+// existing. The `agent-cli.sh status <agent>` probe (agentVolumeCheckRunArgs)
+// prints statusLines verbatim and exits checkExit; `agent-cli.sh update`
+// exits updateExit; `volume rm` exits rmExit — so tests can drive
+// EnsureAgentVolume's populated-check, TTL/backoff/pin staleness branch, and
+// warning paths without a real container runtime.
+func volumeCheckEngineStatus(t *testing.T, statusLines string, checkExit, updateExit, rmExit int) (e *Engine, callLog string, stderr *bytes.Buffer) {
 	t.Helper()
 	dir := t.TempDir()
 	callLogPath := filepath.Join(dir, "calls.txt")
@@ -376,13 +400,13 @@ if [ "$1" = volume ] && [ "$2" = rm ]; then
 fi
 if [ "$1" = run ]; then
   case "$*" in
-  *'test -x /opt/cenci-agent'*) exit %d ;;
+  *'agent-cli.sh status'*) printf '%%s' %s; exit %d ;;
   *'agent-cli.sh update'*) exit %d ;;
   esac
   exit 0
 fi
 exit 0
-`, exectest.ShellQuote(callLogPath), rmExit, checkExit, updateExit)
+`, exectest.ShellQuote(callLogPath), rmExit, exectest.ShellQuote(statusLines), checkExit, updateExit)
 	exectest.WriteExecutable(t, filepath.Join(dir, "docker"), body)
 	t.Setenv("PATH", dir)
 
@@ -397,6 +421,18 @@ exit 0
 	}, callLogPath, &errOut
 }
 
+// volumeCheckEngine is volumeCheckEngineStatus's 3-int wrapper, kept so the
+// four pre-#710 EnsureAgentVolume tests below keep their original meaning: it
+// defaults the probe's status to populated=yes with a `last_success` fixed at
+// "now" (fresh, well inside the default 24h TTL) and an empty pin/
+// last_attempt, so those tests exercise only the populated-check branch, never
+// the new TTL staleness branch.
+func volumeCheckEngine(t *testing.T, checkExit, updateExit, rmExit int) (e *Engine, callLog string, stderr *bytes.Buffer) {
+	t.Helper()
+	statusLines := agentVolumeStatusLines("", time.Now(), time.Time{})
+	return volumeCheckEngineStatus(t, statusLines, checkExit, updateExit, rmExit)
+}
+
 // TestEnsureAgentVolume_ExistingButUnpopulated_FallsThroughToUpdate pins
 // finding 3a: volumeExists alone is not trusted for an existing volume;
 // EnsureAgentVolume must cheaply verify it is populated and fall through to
@@ -404,7 +440,7 @@ exit 0
 func TestEnsureAgentVolume_ExistingButUnpopulated_FallsThroughToUpdate(t *testing.T) {
 	e, callLog, _ := volumeCheckEngine(t, 1, 0, 0) // check fails, update succeeds
 
-	if err := e.EnsureAgentVolume("claude"); err != nil {
+	if err := e.EnsureAgentVolume("claude", false); err != nil {
 		t.Fatalf("EnsureAgentVolume: %v", err)
 	}
 
@@ -419,7 +455,7 @@ func TestEnsureAgentVolume_ExistingButUnpopulated_FallsThroughToUpdate(t *testin
 func TestEnsureAgentVolume_Populated_SkipsUpdate(t *testing.T) {
 	e, callLog, _ := volumeCheckEngine(t, 0, 0, 0) // check succeeds
 
-	if err := e.EnsureAgentVolume("claude"); err != nil {
+	if err := e.EnsureAgentVolume("claude", false); err != nil {
 		t.Fatalf("EnsureAgentVolume: %v", err)
 	}
 
@@ -437,7 +473,7 @@ func TestEnsureAgentVolume_Populated_SkipsUpdate(t *testing.T) {
 func TestEnsureAgentVolume_UpdateFailureAndVolumeRmFailure_WarnsOperator(t *testing.T) {
 	e, _, stderr := volumeCheckEngine(t, 1, 1, 1) // check fails, update fails, rm fails
 
-	if err := e.EnsureAgentVolume("claude"); err == nil {
+	if err := e.EnsureAgentVolume("claude", false); err == nil {
 		t.Fatal("expected EnsureAgentVolume to return the update failure")
 	}
 
@@ -456,12 +492,527 @@ func TestEnsureAgentVolume_UpdateFailureAndVolumeRmFailure_WarnsOperator(t *test
 func TestEnsureAgentVolume_UpdateFailureButRmSucceeds_NoWarning(t *testing.T) {
 	e, _, stderr := volumeCheckEngine(t, 1, 1, 0) // check fails, update fails, rm succeeds
 
-	if err := e.EnsureAgentVolume("claude"); err == nil {
+	if err := e.EnsureAgentVolume("claude", false); err == nil {
 		t.Fatal("expected EnsureAgentVolume to return the update failure")
 	}
 
 	if strings.Contains(stderr.String(), "could not be removed") {
 		t.Errorf("expected no broken-volume warning when removal succeeds, got:\n%s", stderr.String())
+	}
+}
+
+// -- agentVolumeCheckRunArgs (ticket #710) ----------------------------------
+
+// TestAgentVolumeCheckRunArgs_InvokesAgentCLIStatusWithHardening pins the
+// #708-era probe swap: the populated-check now runs `agent-cli.sh status
+// <agent>` (mirroring agentUpdateRunArgs' --entrypoint /bin/bash shape)
+// instead of `test -x <path>`, while keeping every hardening flag the old
+// probe had (network-isolated, non-root, read-only mount, dropped
+// capabilities, no-new-privileges) and always targeting MonolithImage.
+func TestAgentVolumeCheckRunArgs_InvokesAgentCLIStatusWithHardening(t *testing.T) {
+	e := &Engine{}
+	got := e.agentVolumeCheckRunArgs("claude")
+	want := []string{"run", "--rm", "--network", "none", "--user", "dev",
+		"--cap-drop=ALL", "--security-opt=no-new-privileges",
+		"--entrypoint", "/bin/bash",
+		"-v", "cenci-agent-cli-claude:/opt/cenci-agent:ro",
+		MonolithImage, "/usr/local/bin/lib/agent-cli.sh", "status", "claude"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("agentVolumeCheckRunArgs(\"claude\") = %#v, want %#v", got, want)
+	}
+}
+
+// -- parseAgentVolumeStatus (ticket #710) -----------------------------------
+//
+// parseAgentVolumeStatus parses agent-cli.sh status's five key=value lines
+// (populated, version, pin, last_success, last_attempt). It is a
+// default-deny parser (watch AGENTS.md #628, parseReusePosture lesson):
+// missing/absent "populated=yes|no" framing or any other unrecognized shape
+// returns ok=false (treated as unpopulated -> bootstrap), never a permissive
+// zero-value guess. A malformed/absent last_success or last_attempt on an
+// otherwise well-formed "populated=yes" status parses to the zero time.Time
+// (per the plan's resolved Q1: unknown -> stale, refresh-eligible), which is
+// a distinct, narrower failure mode than the overall default-deny direction.
+
+func TestParseAgentVolumeStatus_PopulatedYesFullFacts_Parses(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	attempt := now.Add(-10 * time.Minute)
+	stdout := fmt.Sprintf("populated=yes\nversion=1.2.3\npin=1.0.0\nlast_success=%d\nlast_attempt=%d\n", now.Unix(), attempt.Unix())
+
+	status, ok := parseAgentVolumeStatus([]byte(stdout))
+	if !ok {
+		t.Fatalf("parseAgentVolumeStatus(%q) ok = false, want true", stdout)
+	}
+	if !status.Populated {
+		t.Error("expected Populated = true")
+	}
+	if status.Version != "1.2.3" {
+		t.Errorf("Version = %q, want 1.2.3", status.Version)
+	}
+	if status.Pin != "1.0.0" {
+		t.Errorf("Pin = %q, want 1.0.0", status.Pin)
+	}
+	if !status.LastSuccess.Equal(now) {
+		t.Errorf("LastSuccess = %v, want %v", status.LastSuccess, now)
+	}
+	if !status.LastAttempt.Equal(attempt) {
+		t.Errorf("LastAttempt = %v, want %v", status.LastAttempt, attempt)
+	}
+}
+
+func TestParseAgentVolumeStatus_PopulatedNo_ReportsUnpopulated(t *testing.T) {
+	stdout := "populated=no\nversion=\npin=\nlast_success=\nlast_attempt=\n"
+
+	status, ok := parseAgentVolumeStatus([]byte(stdout))
+	if !ok {
+		t.Fatalf("parseAgentVolumeStatus(%q) ok = false, want true (well-formed, just unpopulated)", stdout)
+	}
+	if status.Populated {
+		t.Error("expected Populated = false for populated=no")
+	}
+}
+
+func TestParseAgentVolumeStatus_EmptyLastSuccessAndLastAttempt_ParseToZeroTime(t *testing.T) {
+	stdout := "populated=yes\nversion=1.2.3\npin=\nlast_success=\nlast_attempt=\n"
+
+	status, ok := parseAgentVolumeStatus([]byte(stdout))
+	if !ok {
+		t.Fatalf("parseAgentVolumeStatus(%q) ok = false, want true", stdout)
+	}
+	if !status.LastSuccess.IsZero() {
+		t.Errorf("LastSuccess = %v, want the zero time for an empty fact", status.LastSuccess)
+	}
+	if !status.LastAttempt.IsZero() {
+		t.Errorf("LastAttempt = %v, want the zero time for an empty fact", status.LastAttempt)
+	}
+}
+
+func TestParseAgentVolumeStatus_UnparseableLastSuccess_ParsesToZeroTimeNotDefaultDeny(t *testing.T) {
+	// Per the plan's resolved Q1: an unparseable/garbled last_success on an
+	// otherwise well-formed status is "unknown -> stale", not a whole-status
+	// default-deny rejection -- the overall parse still succeeds (ok=true),
+	// only LastSuccess degrades to the zero time.
+	stdout := "populated=yes\nversion=1.2.3\npin=\nlast_success=not-a-number\nlast_attempt=\n"
+
+	status, ok := parseAgentVolumeStatus([]byte(stdout))
+	if !ok {
+		t.Fatalf("parseAgentVolumeStatus(%q) ok = false, want true (malformed last_success alone must not default-deny the whole status)", stdout)
+	}
+	if !status.LastSuccess.IsZero() {
+		t.Errorf("LastSuccess = %v, want the zero time for an unparseable fact", status.LastSuccess)
+	}
+}
+
+func TestParseAgentVolumeStatus_EmptyStdout_DefaultDeny(t *testing.T) {
+	_, ok := parseAgentVolumeStatus([]byte(""))
+	if ok {
+		t.Error("parseAgentVolumeStatus(\"\") ok = true, want false (default-deny on empty stdout)")
+	}
+}
+
+func TestParseAgentVolumeStatus_MissingPopulatedLine_DefaultDeny(t *testing.T) {
+	stdout := "version=1.2.3\npin=\nlast_success=\nlast_attempt=\n"
+
+	_, ok := parseAgentVolumeStatus([]byte(stdout))
+	if ok {
+		t.Errorf("parseAgentVolumeStatus(%q) ok = true, want false (default-deny: no populated= line)", stdout)
+	}
+}
+
+func TestParseAgentVolumeStatus_TruncatedOutput_DefaultDeny(t *testing.T) {
+	// Only two of the five contractually-fixed lines are present.
+	stdout := "populated=yes\nversion=1.2.3\n"
+
+	_, ok := parseAgentVolumeStatus([]byte(stdout))
+	if ok {
+		t.Errorf("parseAgentVolumeStatus(%q) ok = true, want false (default-deny: truncated framing)", stdout)
+	}
+}
+
+func TestParseAgentVolumeStatus_UnrecognizedPopulatedValue_DefaultDeny(t *testing.T) {
+	// "populated" is a closed yes/no enum; any other value is ambiguous
+	// metadata and must be rejected conservatively (watch AGENTS.md #598),
+	// never silently collapsed into either yes or no.
+	stdout := "populated=maybe\nversion=\npin=\nlast_success=\nlast_attempt=\n"
+
+	_, ok := parseAgentVolumeStatus([]byte(stdout))
+	if ok {
+		t.Errorf("parseAgentVolumeStatus(%q) ok = true, want false (default-deny: unrecognized populated= value)", stdout)
+	}
+}
+
+func TestParseAgentVolumeStatus_GarbageStdout_DefaultDeny(t *testing.T) {
+	stdout := "this is not key=value framing at all\n\x00\x01garbage"
+
+	_, ok := parseAgentVolumeStatus([]byte(stdout))
+	if ok {
+		t.Errorf("parseAgentVolumeStatus(%q) ok = true, want false (default-deny on garbage stdout)", stdout)
+	}
+}
+
+// -- agentVolumePopulated classification (ticket #710) ----------------------
+//
+// agentVolumePopulated's exit-code classification is unchanged by the #710
+// probe swap: any *exec.ExitError from the probe still means "unpopulated"
+// (never a hard error), a non-ExitError (runtime/transport failure) still
+// stays a hard error, and exit 0 with unparseable stdout is newly, explicitly
+// treated as unpopulated too (default-deny).
+
+func TestAgentVolumePopulated_ProbeExitError_ReturnsUnpopulatedNoHardError(t *testing.T) {
+	statusLines := agentVolumeStatusLines("", time.Now(), time.Time{})
+	e, _, _ := volumeCheckEngineStatus(t, statusLines, 1, 0, 0) // probe exits 1 (unpopulated)
+
+	_, populated, err := e.agentVolumePopulated("claude")
+	if err != nil {
+		t.Fatalf("expected a nonzero probe exit (*exec.ExitError) to classify as unpopulated, not a hard error: %v", err)
+	}
+	if populated {
+		t.Error("populated = true, want false for a nonzero probe exit")
+	}
+}
+
+func TestAgentVolumePopulated_ProbeExitZeroWithUnparsableStdout_DefaultDenyUnpopulated(t *testing.T) {
+	e, _, _ := volumeCheckEngineStatus(t, "not-a-valid-status-line\n", 0, 0, 0)
+
+	_, populated, err := e.agentVolumePopulated("claude")
+	if err != nil {
+		t.Fatalf("expected exit-0-but-unparsable probe stdout to default-deny (unpopulated), not a hard error: %v", err)
+	}
+	if populated {
+		t.Error("populated = true, want false (default-deny) for unparsable exit-0 stdout")
+	}
+}
+
+func TestAgentVolumePopulated_RuntimeUnreachable_ReturnsHardError(t *testing.T) {
+	e := &Engine{
+		Runtime: "cenci-test-runtime-does-not-exist-710",
+		Stdout:  &bytes.Buffer{},
+		Stderr:  &bytes.Buffer{},
+	}
+
+	_, populated, err := e.agentVolumePopulated("claude")
+	if err == nil {
+		t.Fatal("expected a hard error when the runtime binary itself cannot be executed, not a silent \"unpopulated\" classification")
+	}
+	if populated {
+		t.Error("populated must be false alongside the hard error")
+	}
+}
+
+func TestEnsureAgentVolume_ProbeExitZeroWithUnparsableStdout_DefaultDenyBootstraps(t *testing.T) {
+	e, callLog, _ := volumeCheckEngineStatus(t, "not-a-valid-status-line\n", 0, 0, 0)
+
+	if err := e.EnsureAgentVolume("claude", false); err != nil {
+		t.Fatalf("EnsureAgentVolume: %v", err)
+	}
+
+	if calls := readCallLog(t, callLog); !containsLineWithAll(calls, "agent-cli.sh", "update", "claude") {
+		t.Errorf("expected exit-0-but-unparsable probe stdout to default-deny (treated as unpopulated) and fall through to bootstrap; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+// -- agentCLITTL env parsing (ticket #710) -----------------------------------
+//
+// CENCI_SANDBOX_AGENT_CLI_TTL_HOURS overrides the 24h default TTL in integer
+// hours. Unlike reap.go:79's silent ParseFloat fallback, an unparseable or
+// negative value must warn to stderr (content-specific, watch AGENTS.md
+// #446) and fall back to 24h -- it must never silently disable auto-refresh.
+
+func TestAgentCLITTL_Unset_DefaultsTo24HoursNoWarning(t *testing.T) {
+	var stderr bytes.Buffer
+	if got := agentCLITTL(&stderr); got != defaultAgentCLITTL {
+		t.Errorf("agentCLITTL() = %v, want %v", got, defaultAgentCLITTL)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("expected no warning when the env var is unset, got:\n%s", stderr.String())
+	}
+}
+
+func TestAgentCLITTL_EmptyString_DefaultsTo24HoursNoWarning(t *testing.T) {
+	t.Setenv("CENCI_SANDBOX_AGENT_CLI_TTL_HOURS", "")
+	var stderr bytes.Buffer
+	if got := agentCLITTL(&stderr); got != defaultAgentCLITTL {
+		t.Errorf("agentCLITTL() = %v, want %v", got, defaultAgentCLITTL)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("expected no warning for an explicitly empty value, got:\n%s", stderr.String())
+	}
+}
+
+func TestAgentCLITTL_Zero_DisablesWithNoWarning(t *testing.T) {
+	t.Setenv("CENCI_SANDBOX_AGENT_CLI_TTL_HOURS", "0")
+	var stderr bytes.Buffer
+	if got := agentCLITTL(&stderr); got != 0 {
+		t.Errorf("agentCLITTL() = %v, want 0 (disabled)", got)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("expected no warning for the documented 0=disabled value, got:\n%s", stderr.String())
+	}
+}
+
+func TestAgentCLITTL_PositiveOverride_NoWarning(t *testing.T) {
+	t.Setenv("CENCI_SANDBOX_AGENT_CLI_TTL_HOURS", "6")
+	var stderr bytes.Buffer
+	if got := agentCLITTL(&stderr); got != 6*time.Hour {
+		t.Errorf("agentCLITTL() = %v, want 6h", got)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("expected no warning for a valid positive override, got:\n%s", stderr.String())
+	}
+}
+
+func TestAgentCLITTL_Unparseable_WarnsAndFallsBackTo24Hours(t *testing.T) {
+	t.Setenv("CENCI_SANDBOX_AGENT_CLI_TTL_HOURS", "not-a-number")
+	var stderr bytes.Buffer
+	if got := agentCLITTL(&stderr); got != defaultAgentCLITTL {
+		t.Errorf("agentCLITTL() = %v, want the 24h fallback", got)
+	}
+	if !strings.Contains(stderr.String(), "CENCI_SANDBOX_AGENT_CLI_TTL_HOURS") {
+		t.Errorf("expected the warning to name CENCI_SANDBOX_AGENT_CLI_TTL_HOURS, got:\n%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "not-a-number") {
+		t.Errorf("expected the warning to include the offending value, got:\n%s", stderr.String())
+	}
+}
+
+func TestAgentCLITTL_Negative_WarnsAndFallsBackTo24Hours(t *testing.T) {
+	t.Setenv("CENCI_SANDBOX_AGENT_CLI_TTL_HOURS", "-1")
+	var stderr bytes.Buffer
+	if got := agentCLITTL(&stderr); got != defaultAgentCLITTL {
+		t.Errorf("agentCLITTL() = %v, want the 24h fallback", got)
+	}
+	if !strings.Contains(stderr.String(), "CENCI_SANDBOX_AGENT_CLI_TTL_HOURS") {
+		t.Errorf("expected the warning to name CENCI_SANDBOX_AGENT_CLI_TTL_HOURS, got:\n%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "-1") {
+		t.Errorf("expected the warning to include the offending value, got:\n%s", stderr.String())
+	}
+}
+
+// TestAgentCLITTL_HugeValue_WarnsAndFallsBackTo24Hours pins security review
+// finding B: time.Duration(hours) * time.Hour overflows silently for very
+// large hours (e.g. wrapping to exactly 0 -- indistinguishable from the
+// documented "0=disabled" -- or to a nonsense negative duration), which
+// would violate the invariant that unparseable/negative input must never
+// silently disable auto-refresh. A value beyond maxAgentCLITTLHours must warn
+// and fall back to the 24h default via the same warning path as an
+// unparseable/negative value, not silently disable or corrupt the TTL.
+func TestAgentCLITTL_HugeValue_WarnsAndFallsBackTo24Hours(t *testing.T) {
+	t.Setenv("CENCI_SANDBOX_AGENT_CLI_TTL_HOURS", "999999999999999")
+	var stderr bytes.Buffer
+	if got := agentCLITTL(&stderr); got != defaultAgentCLITTL {
+		t.Errorf("agentCLITTL() = %v, want the 24h fallback (not silently 0 or negative from overflow)", got)
+	}
+	if !strings.Contains(stderr.String(), "CENCI_SANDBOX_AGENT_CLI_TTL_HOURS") {
+		t.Errorf("expected the warning to name CENCI_SANDBOX_AGENT_CLI_TTL_HOURS, got:\n%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "999999999999999") {
+		t.Errorf("expected the warning to include the offending value, got:\n%s", stderr.String())
+	}
+}
+
+// -- EnsureAgentVolume staleness policy (ticket #710) ------------------------
+
+func TestEnsureAgentVolume_FreshWithinTTL_NoUpdaterRuns(t *testing.T) {
+	statusLines := agentVolumeStatusLines("", time.Now(), time.Time{})
+	e, callLog, _ := volumeCheckEngineStatus(t, statusLines, 0, 0, 0)
+
+	if err := e.EnsureAgentVolume("claude", false); err != nil {
+		t.Fatalf("EnsureAgentVolume: %v", err)
+	}
+
+	if calls := readCallLog(t, callLog); containsLineWithAll(calls, "agent-cli.sh", "update") {
+		t.Errorf("expected a fresh (within-TTL) volume to skip the updater; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+func TestEnsureAgentVolume_StaleLastSuccess_RefreshesViaUpdater(t *testing.T) {
+	stale := time.Now().Add(-25 * time.Hour)
+	statusLines := agentVolumeStatusLines("", stale, time.Time{})
+	e, callLog, _ := volumeCheckEngineStatus(t, statusLines, 0, 0, 0)
+
+	if err := e.EnsureAgentVolume("claude", false); err != nil {
+		t.Fatalf("EnsureAgentVolume: %v", err)
+	}
+
+	if calls := readCallLog(t, callLog); !containsLineWithAll(calls, "agent-cli.sh", "update", "claude") {
+		t.Errorf("expected a TTL-stale volume to refresh via the updater; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+// TestEnsureAgentVolume_MissingLastSuccess_TreatedAsStaleAndRefreshes pins the
+// plan's resolved Q1: a populated volume with an absent/unparseable
+// last_success (e.g. created before #708 shipped stamp files) is unknown ->
+// stale, triggering a one-time refresh.
+func TestEnsureAgentVolume_MissingLastSuccess_TreatedAsStaleAndRefreshes(t *testing.T) {
+	statusLines := agentVolumeStatusLines("", time.Time{}, time.Time{})
+	e, callLog, _ := volumeCheckEngineStatus(t, statusLines, 0, 0, 0)
+
+	if err := e.EnsureAgentVolume("claude", false); err != nil {
+		t.Fatalf("EnsureAgentVolume: %v", err)
+	}
+
+	if calls := readCallLog(t, callLog); !containsLineWithAll(calls, "agent-cli.sh", "update", "claude") {
+		t.Errorf("expected a populated volume with no recorded last_success to be treated as stale and refreshed; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+// TestEnsureAgentVolume_StaleRefreshFails_WarnsButStillReturnsNil pins the
+// best-effort AC: a failed refresh warns and the launch proceeds on the
+// existing (already-populated, just-stale) version -- it must NOT remove the
+// volume the way the bootstrap-failure path does, since the volume already
+// has a working install.
+func TestEnsureAgentVolume_StaleRefreshFails_WarnsButStillReturnsNil(t *testing.T) {
+	stale := time.Now().Add(-25 * time.Hour)
+	statusLines := agentVolumeStatusLines("", stale, time.Time{})
+	e, callLog, stderr := volumeCheckEngineStatus(t, statusLines, 0, 1, 0) // populated+stale, update fails
+
+	if err := e.EnsureAgentVolume("claude", false); err != nil {
+		t.Fatalf("expected EnsureAgentVolume to be best-effort and return nil on a failed refresh, got: %v", err)
+	}
+
+	if !strings.Contains(stderr.String(), "claude") {
+		t.Errorf("expected a stderr warning naming the agent for the failed best-effort refresh, got:\n%s", stderr.String())
+	}
+	if calls := readCallLog(t, callLog); containsPrefix(calls, "volume rm") {
+		t.Errorf("a stale-refresh failure must not remove the already-populated volume; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+// TestEnsureAgentVolume_BackoffWithinLastAttempt_NoRefresh pins the 1h
+// last_attempt throttle: an offline/captive-portal host must not eat the
+// npm-timeout cost on every launch, only once per hour.
+func TestEnsureAgentVolume_BackoffWithinLastAttempt_NoRefresh(t *testing.T) {
+	stale := time.Now().Add(-25 * time.Hour)
+	recentAttempt := time.Now().Add(-30 * time.Minute)
+	statusLines := agentVolumeStatusLines("", stale, recentAttempt)
+	e, callLog, _ := volumeCheckEngineStatus(t, statusLines, 0, 0, 0)
+
+	if err := e.EnsureAgentVolume("claude", false); err != nil {
+		t.Fatalf("EnsureAgentVolume: %v", err)
+	}
+
+	if calls := readCallLog(t, callLog); containsLineWithAll(calls, "agent-cli.sh", "update") {
+		t.Errorf("expected a stale volume within the 1h last_attempt backoff to skip the refresh; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+func TestEnsureAgentVolume_PinnedAndStale_PrintsNoticeNoRefresh(t *testing.T) {
+	stale := time.Now().Add(-25 * time.Hour)
+	statusLines := agentVolumeStatusLines("1.2.3", stale, time.Time{})
+	e, callLog, _ := volumeCheckEngineStatus(t, statusLines, 0, 0, 0)
+
+	if err := e.EnsureAgentVolume("claude", false); err != nil {
+		t.Fatalf("EnsureAgentVolume: %v", err)
+	}
+
+	if calls := readCallLog(t, callLog); containsLineWithAll(calls, "agent-cli.sh", "update") {
+		t.Errorf("expected a pinned, TTL-stale volume to skip the refresh; calls:\n%s", strings.Join(calls, "\n"))
+	}
+	out := e.Stdout.(*bytes.Buffer).String()
+	if !strings.Contains(out, "1.2.3") {
+		t.Errorf("expected the pinned-stale notice to name the pinned version, got:\n%s", out)
+	}
+	if !strings.Contains(out, "--unpin") {
+		t.Errorf("expected the pinned-stale notice to mention the --unpin remedy, got:\n%s", out)
+	}
+}
+
+// TestEnsureAgentVolume_PinnedButFresh_LaunchesSilently pins the design's
+// explicit ordering: the pin check lives inside the staleness branch, after
+// the TTL comparison, so a pinned volume still inside the TTL launches
+// silently instead of nagging on every launch.
+func TestEnsureAgentVolume_PinnedButFresh_LaunchesSilently(t *testing.T) {
+	statusLines := agentVolumeStatusLines("1.2.3", time.Now(), time.Time{})
+	e, callLog, _ := volumeCheckEngineStatus(t, statusLines, 0, 0, 0)
+
+	if err := e.EnsureAgentVolume("claude", false); err != nil {
+		t.Fatalf("EnsureAgentVolume: %v", err)
+	}
+
+	if calls := readCallLog(t, callLog); containsLineWithAll(calls, "agent-cli.sh", "update") {
+		t.Errorf("expected a pinned, fresh volume to skip the refresh; calls:\n%s", strings.Join(calls, "\n"))
+	}
+	out := e.Stdout.(*bytes.Buffer).String()
+	if strings.Contains(out, "--unpin") {
+		t.Errorf("expected a pinned volume inside the TTL to launch silently (no notice), got:\n%s", out)
+	}
+}
+
+// TestEnsureAgentVolume_RunningContainer_SkipsStalenessBranchButStillChecksPopulated
+// pins the attach skip: a running scoped container keeps its started-with
+// version regardless, so the staleness branch is skipped entirely (even with
+// a very stale volume), while the populated/bootstrap check still runs.
+func TestEnsureAgentVolume_RunningContainer_SkipsStalenessBranchButStillChecksPopulated(t *testing.T) {
+	stale := time.Now().Add(-25 * time.Hour)
+	statusLines := agentVolumeStatusLines("", stale, time.Time{})
+	e, callLog, _ := volumeCheckEngineStatus(t, statusLines, 0, 0, 0)
+
+	if err := e.EnsureAgentVolume("claude", true); err != nil {
+		t.Fatalf("EnsureAgentVolume: %v", err)
+	}
+
+	calls := readCallLog(t, callLog)
+	if !containsLineWithAll(calls, "agent-cli.sh", "status") {
+		t.Errorf("expected the populated/bootstrap probe to still run on the attach path; calls:\n%s", strings.Join(calls, "\n"))
+	}
+	if containsLineWithAll(calls, "agent-cli.sh", "update") {
+		t.Errorf("expected a running (attach) container to skip the staleness refresh even with a TTL-stale volume; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+// TestEnsureAgentVolume_FutureLastSuccess_TreatedAsStaleAndRefreshes pins
+// security review finding A: a last_success timestamp in the future (a
+// corrupted stamp file, or a host clock that jumped backward via an NTP
+// correction) must not permanently suppress the auto-refresh. Without the
+// fix, now.Sub(LastSuccess) is negative and never greater than the TTL, so
+// the volume looks "fresh" forever.
+func TestEnsureAgentVolume_FutureLastSuccess_TreatedAsStaleAndRefreshes(t *testing.T) {
+	future := time.Now().Add(48 * time.Hour)
+	statusLines := agentVolumeStatusLines("", future, time.Time{})
+	e, callLog, _ := volumeCheckEngineStatus(t, statusLines, 0, 0, 0)
+
+	if err := e.EnsureAgentVolume("claude", false); err != nil {
+		t.Fatalf("EnsureAgentVolume: %v", err)
+	}
+
+	if calls := readCallLog(t, callLog); !containsLineWithAll(calls, "agent-cli.sh", "update", "claude") {
+		t.Errorf("expected a future last_success to be treated as stale and refreshed; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+// TestEnsureAgentVolume_FutureLastAttempt_DoesNotThrottleStaleRefresh pins the
+// backoff half of security review finding A: a last_attempt timestamp in the
+// future makes now.Sub(LastAttempt) negative, which must not be misread as
+// "recently attempted" (negative duration < the 1h backoff) and silently
+// block a stale volume's refresh forever.
+func TestEnsureAgentVolume_FutureLastAttempt_DoesNotThrottleStaleRefresh(t *testing.T) {
+	stale := time.Now().Add(-25 * time.Hour)
+	futureAttempt := time.Now().Add(48 * time.Hour)
+	statusLines := agentVolumeStatusLines("", stale, futureAttempt)
+	e, callLog, _ := volumeCheckEngineStatus(t, statusLines, 0, 0, 0)
+
+	if err := e.EnsureAgentVolume("claude", false); err != nil {
+		t.Fatalf("EnsureAgentVolume: %v", err)
+	}
+
+	if calls := readCallLog(t, callLog); !containsLineWithAll(calls, "agent-cli.sh", "update", "claude") {
+		t.Errorf("expected a future last_attempt to not throttle a stale volume's refresh; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+func TestEnsureAgentVolume_TTLZero_DisablesStalenessBranchEntirely(t *testing.T) {
+	t.Setenv("CENCI_SANDBOX_AGENT_CLI_TTL_HOURS", "0")
+	stale := time.Now().Add(-9999 * time.Hour)
+	statusLines := agentVolumeStatusLines("", stale, time.Time{})
+	e, callLog, _ := volumeCheckEngineStatus(t, statusLines, 0, 0, 0)
+
+	if err := e.EnsureAgentVolume("claude", false); err != nil {
+		t.Fatalf("EnsureAgentVolume: %v", err)
+	}
+
+	if calls := readCallLog(t, callLog); containsLineWithAll(calls, "agent-cli.sh", "update") {
+		t.Errorf("expected CENCI_SANDBOX_AGENT_CLI_TTL_HOURS=0 to disable auto-refresh entirely; calls:\n%s", strings.Join(calls, "\n"))
 	}
 }
 
