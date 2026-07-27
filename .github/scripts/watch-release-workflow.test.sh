@@ -82,6 +82,39 @@ else
   fail "watch-release.yml missing either the tagged checkout or the resolve step"
 fi
 
+# ── the release must verify its own published installer signature after
+# publishing (#736): a regression to the wrong --certificate-identity-regexp
+# (or any other drift) must fail the release job itself, not rely solely on
+# the manual runbook step in docs/release-hygiene.md#8 — the step that
+# evidently never actually ran against a real automated release. ──
+VERIFY_LINE="$(grep -n 'name: Verify the published installer signature' "$RELEASE" | sed -n 1p | cut -d: -f1)"
+PUBLISH_LINE="$(grep -n 'name: Publish release to the watch/v\* tag' "$RELEASE" | sed -n 1p | cut -d: -f1)"
+if [[ -z "$VERIFY_LINE" ]]; then
+  fail "watch-release.yml missing a 'Verify the published installer signature' step"
+else
+  if [[ -n "$PUBLISH_LINE" ]]; then
+    (( VERIFY_LINE > PUBLISH_LINE )) ||
+      fail "the installer-signature verification step (line ${VERIFY_LINE}) must run after the publish step (line ${PUBLISH_LINE}) — it verifies the just-published release asset"
+  else
+    fail "watch-release.yml missing the 'Publish release to the watch/v* tag' step to compare against"
+  fi
+
+  VERIFY_BLOCK="$(sed -n "${VERIFY_LINE},/^      - name:/p" "$RELEASE")"
+  block_contains "$VERIFY_BLOCK" "gh release download" \
+    "the verification step must re-download the published install.sh/install.sh.bundle via gh release download, not reuse the local checkout copy"
+  block_contains "$VERIFY_BLOCK" "cosign verify-blob" \
+    "the verification step must run cosign verify-blob against the re-downloaded assets"
+  block_contains "$VERIFY_BLOCK" "grep" \
+    "the verification step must derive --certificate-identity-regexp from install.sh via grep, not a hardcoded literal"
+  block_contains "$VERIFY_BLOCK" "install.sh" \
+    "the verification step must read the identity regexp out of install.sh"
+  # Must NOT hardcode the actual regexp value in the workflow — only ever
+  # extract it from the checked-out install.sh, so this step can't itself
+  # drift from what install.sh enforces (the same drift #736 exists to fix).
+  [[ "$VERIFY_BLOCK" != *'--certificate-identity-regexp '"'"'^https'* ]] ||
+    fail "the verification step must not hardcode a --certificate-identity-regexp literal — it must grep the value out of install.sh"
+fi
+
 # Sanity-check the file is actually being read (a typo'd $RELEASE path
 # would otherwise make every check above vacuously pass on an empty var).
 contains "$RELEASE" "name: watch — Release" "unexpected watch-release.yml content — wrong file resolved?"

@@ -59,7 +59,7 @@ also wires the desktop bar widget for whichever bar it detects:
 curl -fsSL -o install.sh https://github.com/matteobortolazzo/cenci/releases/latest/download/install.sh
 curl -fsSL -o install.sh.bundle https://github.com/matteobortolazzo/cenci/releases/latest/download/install.sh.bundle
 cosign verify-blob --bundle install.sh.bundle \
-  --certificate-identity-regexp '^https://github\.com/matteobortolazzo/cenci/\.github/workflows/watch-release\.yml@refs/tags/watch/v' \
+  --certificate-identity-regexp '^https://github\.com/matteobortolazzo/cenci/\.github/workflows/watch-release\.yml@refs/(heads/main|tags/watch/v[0-9]+\.[0-9]+\.[0-9]+)$' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
   install.sh
 bash install.sh
@@ -1697,13 +1697,17 @@ with in transit or on a mirror.
 
 Download `checksums.txt` and `checksums.txt.bundle` from the
 release, then verify the signature. This workflow runs on both a `watch/v*` tag push
-and a `workflow_dispatch` from `watch-version-bump.yml`, and the Fulcio-issued
-certificate's SAN identity differs between those two trigger paths — so verification
-matches the workflow file by identity regexp rather than a single fixed identity:
+and a `workflow_dispatch` from `plugin-version-bump.yml` (dispatched with `--ref main`),
+and the Fulcio-issued certificate's SAN identity differs between those two trigger
+paths — a tag push binds `refs/tags/watch/v<version>`, while the dispatch path binds
+`refs/heads/main` (the ref that *triggered* the run, not the release tag the job
+resolves and publishes to later) — so verification matches the workflow file by an
+identity regexp naming exactly those two alternatives, rather than a single fixed
+identity:
 
 ```bash
 cosign verify-blob \
-  --certificate-identity-regexp '^https://github\.com/matteobortolazzo/cenci/\.github/workflows/watch-release\.yml@' \
+  --certificate-identity-regexp '^https://github\.com/matteobortolazzo/cenci/\.github/workflows/watch-release\.yml@refs/(heads/main|tags/watch/v[0-9]+\.[0-9]+\.[0-9]+)$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --bundle checksums.txt.bundle \
   checksums.txt

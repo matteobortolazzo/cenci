@@ -28,6 +28,7 @@ jobs:
               - '.github/workflows/**'
               - '.github/scripts/**'
               - '**/*.md'
+              - 'install.sh'
 
   check-permissions:
     needs: changes
@@ -53,6 +54,8 @@ jobs:
         run: bash .github/scripts/resolve-release-version.test.sh
       - name: Run watch-release workflow contract tests
         run: bash .github/scripts/watch-release-workflow.test.sh
+      - name: Run installer identity-regexp drift tests
+        run: bash .github/scripts/installer-identity-drift.test.sh
       - name: Lint GitHub Actions workflows
         uses: docker://rhysd/actionlint:1.7.7
         with:
