@@ -140,8 +140,12 @@ EOF
 # showing the rebuild prompt) exits check_exit: default 1 (not current /
 # needs rebuild) so callers that never care about the check keep exercising
 # today's always-ask behavior unless they opt into a current-image (0) fixture.
+# `sandbox update-agent --all` (the shared agent-CLI volume refresh,
+# step_sandbox_update_agents, #709) exits agent_update_exit (default 0), so a
+# test can simulate a refresh failure and assert it only warns rather than
+# failing the update — mirrors refresh_exit's role for update-plugins --all.
 make_cenci() {
-    local path="$1" restart_exit="${2:-0}" refresh_exit="${3:-0}" check_exit="${4:-1}"
+    local path="$1" restart_exit="${2:-0}" refresh_exit="${3:-0}" check_exit="${4:-1}" agent_update_exit="${5:-0}"
     mkdir -p "$(dirname "${path}")"
     cat >"${path}" <<EOF
 #!/bin/sh
@@ -164,6 +168,9 @@ if [ "\${1:-}" = sandbox ] && [ "\${2:-}" = update-plugins ] && [ "\${3:-}" = --
 fi
 if [ "\${1:-}" = sandbox ] && [ "\${2:-}" = build ] && [ "\${3:-}" = --check ]; then
     exit ${check_exit}
+fi
+if [ "\${1:-}" = sandbox ] && [ "\${2:-}" = update-agent ] && [ "\${3:-}" = --all ]; then
+    exit ${agent_update_exit}
 fi
 exit 0
 EOF
@@ -194,9 +201,11 @@ prepare_checkout() {
 # it also runs on update; refresh_exit scripts that step's
 # `sandbox update-plugins --all` exit code (default 0); check_exit scripts
 # that binary's `sandbox build --check` exit code (default 1 — see
-# make_cenci) for the #519 rebuild-prompt-skip PTY cases below.
+# make_cenci) for the #519 rebuild-prompt-skip PTY cases below; agent_update_exit
+# scripts step_sandbox_update_agents's `sandbox update-agent --all` exit code
+# (default 0, #709).
 setup_layout() {
-    local name="$1" client="$2" restart_exit="$3" refresh_exit="${4:-0}" check_exit="${5:-1}"
+    local name="$1" client="$2" restart_exit="$3" refresh_exit="${4:-0}" check_exit="${5:-1}" agent_update_exit="${6:-0}"
     local home="${WORK}/${name}/home" mock_bin="${WORK}/${name}/bin"
     local call_log="${WORK}/${name}/calls" pkill_log="${WORK}/${name}/pkill-calls"
     mkdir -p "${home}"
@@ -217,7 +226,7 @@ setup_layout() {
     fi
     new_root="${cache_dir}/2.0.0"
     new_bin="${new_root}/bin/cenci"
-    make_cenci "${new_bin}" "${restart_exit}" "${refresh_exit}" "${check_exit}"
+    make_cenci "${new_bin}" "${restart_exit}" "${refresh_exit}" "${check_exit}" "${agent_update_exit}"
     mkdir -p "${new_root}/${manifest_dir}"
     printf '{"name":"cenci-watch","version":"2.0.0"}\n' >"${new_root}/${manifest_dir}/plugin.json"
 
@@ -610,6 +619,49 @@ if ! grep -q "cenci binary not available — skipping running-sandbox plugin ref
 fi
 if grep -qx "sandbox update-plugins --all" "${LAYOUT_CALL_LOG}"; then
     echo "FAIL: expected the refresh to never invoke 'sandbox update-plugins --all' without a resolvable binary" >&2
+    cat "${LAYOUT_CALL_LOG}" >&2
+    exit 1
+fi
+
+echo "case: update refreshes shared agent CLI volumes via 'sandbox update-agent --all' (#709, step_sandbox_update_agents)"
+setup_layout agent-refresh claude 0
+run_update
+[[ "${UPDATE_EXIT}" -eq 0 ]]
+if ! grep -qx "sandbox update-agent --all" "${LAYOUT_CALL_LOG}"; then
+    echo "FAIL: expected 'sandbox update-agent --all' invocation in ${LAYOUT_CALL_LOG}" >&2
+    cat "${LAYOUT_CALL_LOG}" >&2
+    exit 1
+fi
+
+echo "case: a shared agent CLI volume refresh failure warns but does not fail the update (#709)"
+setup_layout agent-refresh-fails claude 0 0 1 1
+run_update
+if ! grep -qx "sandbox update-agent --all" "${LAYOUT_CALL_LOG}"; then
+    echo "FAIL: expected 'sandbox update-agent --all' to still be attempted" >&2
+    cat "${LAYOUT_CALL_LOG}" >&2
+    exit 1
+fi
+if [[ "${UPDATE_EXIT}" -ne 0 ]]; then
+    echo "FAIL: a shared agent CLI volume refresh failure must not fail the update (UPDATE_EXIT=${UPDATE_EXIT})" >&2
+    cat "${WORK}/last-output" >&2
+    exit 1
+fi
+if ! grep -q "cenci sandbox update-agent --all" "${WORK}/last-output"; then
+    echo "FAIL: expected the refresh failure's manual-command hint to be reported (warned) in the update output" >&2
+    cat "${WORK}/last-output" >&2
+    exit 1
+fi
+
+echo "case: when current_cenci_binary can't provision a binary, the shared agent CLI volume refresh warns instead of failing silently (#709)"
+setup_broken_binary_layout no-binary-agent-refresh claude
+run_update
+if ! grep -q "cenci binary not available — skipping shared agent CLI volume refresh; run manually with: cenci sandbox update-agent --all" "${WORK}/last-output"; then
+    echo "FAIL: expected the shared agent CLI volume refresh to warn when current_cenci_binary fails" >&2
+    cat "${WORK}/last-output" >&2
+    exit 1
+fi
+if grep -qx "sandbox update-agent --all" "${LAYOUT_CALL_LOG}"; then
+    echo "FAIL: expected the refresh to never invoke 'sandbox update-agent --all' without a resolvable binary" >&2
     cat "${LAYOUT_CALL_LOG}" >&2
     exit 1
 fi

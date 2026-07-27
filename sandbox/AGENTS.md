@@ -98,7 +98,9 @@ digest of `Dockerfile.base` + `entrypoint.sh` + `lib/` (Ubuntu, system packages,
 layers on the runtime stacks in order: .NET, Node, Playwright, and Go. Agent CLIs are not
 image layers: the launcher bootstraps absent `cenci-agent-cli-<agent>` volumes through a
 credential-free updater, and workloads mount them read-only at `/opt/cenci-agent`.
-`cenci sandbox update-agent` updates that global volume explicitly and atomically.
+`cenci sandbox update-agent` updates that global volume explicitly and atomically
+(see "Dependency version pins" below for how `cenci update` now also refreshes it
+automatically).
 Credentials are still staged only into per-scope home volumes. Derived images (the
 monolith and per-repo builds) are stamped with a `cenci.base-version` label at build
 time, so `cenci open` / `cenci sandbox build` detect base drift and auto-rebuild with a
@@ -134,11 +136,17 @@ Image dependency versions are pinned via Dockerfile `ARG`s, all checked daily by
 `.github/workflows/deps-bump.yml`. Three tiers, by breaking-change risk:
 
 - **Runtime-managed (agent CLIs)** — Codex and Claude Code bootstrap at a verified exact
-  `latest` version into global read-only-at-workload volumes and update only through
-  `cenci sandbox update-agent`. There is no image version ARG, so `deps-bump.yml` does not
-  track them. Integrity and signatures do not defend against a legitimately published
-  malicious vendor release; Codex additionally requires provenance for `openai/codex`,
-  while Claude currently has no npm provenance and retains that vendor-release trust.
+  `latest` version into global read-only-at-workload volumes. `cenci sandbox update-agent`
+  still updates the volume explicitly (and its `--unpin`/`--all` flags manage pins and
+  bulk refreshes), but refresh is no longer purely manual: `cenci update`'s installer hook
+  (`step_sandbox_update_agents`) now also runs `cenci sandbox update-agent --all`
+  automatically after every normal `cenci update`, best-effort (warn-not-fail), refreshing
+  every agent-CLI volume that already exists rather than leaving it on a stale version
+  until someone remembers to update it by hand. There is no image version ARG, so
+  `deps-bump.yml` does not track them. Integrity and signatures do not defend against a
+  legitimately published malicious vendor release; Codex additionally requires provenance
+  for `openai/codex`, while Claude currently has no npm provenance and retains that
+  vendor-release trust.
 - **Auto-bumped, auto-merged** — one auto-merged PR per outdated dependency, then the
   cenci-sandbox rebuild is dispatched once the merge lands:
   - `GO_VERSION` — `Dockerfile` **and** `fragments/go.dockerfile` (both stamped, kept in sync).

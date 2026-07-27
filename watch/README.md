@@ -740,14 +740,22 @@ Docker-backed container is never invisible merely because Podman is also on
 PATH. `ls` tags every row with a `RUNTIME` column, and `stop` tags every
 stopped-container line as `stopped <name> (<runtime>)`; a same-name container
 existing independently under both engines shows up as two distinct,
-runtime-tagged entries rather than being silently deduplicated. `update-agent`
-updates the shared agent-CLI volume in every runtime that already has it,
-bootstrapping it in the preferred (Podman-first) runtime only when it exists
-nowhere. A failed per-runtime query still lets the healthy runtime's output
-through, plus a stderr error and a non-zero exit — never a silently empty
-result. (Launch-time runtime selection — Docker-first for `dind` mode,
-Podman-first otherwise — is unaffected; see `resolveLaunchContext` in
-`launch.go`.)
+runtime-tagged entries rather than being silently deduplicated. Bare
+`update-agent` and `update-agent --unpin` update the shared agent-CLI volume
+in every runtime that already has it, bootstrapping it in the preferred
+(Podman-first) runtime only when it exists nowhere; `update-agent --all`
+instead sweeps every supported agent, refreshing its volume in every runtime
+that already owns it, but never bootstraps a volume for an (agent, runtime)
+pair that has none. A failed per-runtime query still lets the healthy
+runtime's output through, plus a stderr error and a non-zero exit — never a
+silently empty result. (Launch-time runtime selection — Docker-first for
+`dind` mode, Podman-first otherwise — is unaffected; see
+`resolveLaunchContext` in `launch.go`.)
+
+A bare `cenci sandbox update-agent` against a volume pinned to an exact
+version (via a prior `--version`) now refuses and exits 2, naming `--unpin`
+and `--version` as the ways forward, instead of silently updating past the
+pin — a deliberate behavior change from earlier versions of this command.
 
 ```bash
 # One-shot maintenance verbs
@@ -760,7 +768,17 @@ cenci sandbox prune --images    # …and prompt ([y/N], default deny) for per-re
 cenci sandbox prune --volumes   # …and prompt ([y/N], default deny) for home and shared CLI volumes
                                 # --images and --volumes are independent; combine them for both prompts
 cenci sandbox update-agent [--agent claude|codex|opencode] [--version <exact-semver>]
-                                # atomically update the host-global, workload-read-only CLI volume
+                                # atomically update the host-global, workload-read-only CLI volume;
+                                # refuses (exit 2) if the volume is pinned, naming --unpin/--version
+cenci sandbox update-agent --unpin
+                                # clear the volume's version pin (if any), then update to latest;
+                                # usage error if combined with --version
+cenci sandbox update-agent --all
+                                # refresh every agent-CLI volume that already exists, across every
+                                # supported agent and every runtime that owns it; never bootstraps a
+                                # volume that doesn't exist; ignores TTL/backoff; skips a pinned
+                                # volume with a notice instead of refusing; usage error if combined
+                                # with an explicit --agent, --version, or --unpin
 cenci sandbox update-plugins [--agent claude|codex|opencode] [--name <n>]
                                 # force-refresh the plugins inside the container/volume (ttl 0)
 cenci sandbox update-plugins --all
@@ -1129,6 +1147,13 @@ sandbox container (`cenci sandbox update-plugins --all`, after the image
 build/daemon-restart steps), so an already-running sandbox doesn't stay on a
 stale plugin cache until you manually run `cenci sandbox update-plugins`. A
 per-container refresh failure only warns — it never fails the update.
+
+Right after that plugin refresh, `cenci update` also best-effort runs `cenci
+sandbox update-agent --all` (via `step_sandbox_update_agents`), refreshing
+every shared agent-CLI volume that already exists so it doesn't stay on a
+stale version until you manually run `cenci sandbox update-agent --all`. Same
+shape as the plugin refresh above: warn-not-fail, never blocks the rest of
+the update.
 
 ## Advanced / development
 
