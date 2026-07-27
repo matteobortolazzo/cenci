@@ -548,6 +548,19 @@ Bash call, per `cenci:shell-rules`) and branch:
    plain shell and runs no command (see the generated example below). `W` is never
    assigned to serve, test, or any other action.
 
+   **Prefix-dispatch constraint**: lazyboards dispatches on the shortest matching
+   key — if any standalone single-letter key (e.g. a lone `S`) is bound anywhere in
+   a column's merged action set (its own actions plus every board-level top-level
+   `actions:` entry, default or user-added), no other key sequence in that column
+   may start with that same letter, since the single-letter binding fires before a
+   longer sequence can be typed. Before assigning the `S`/`T` mnemonic prefixes
+   below, check the existing top-level `actions:` map — including any user-added
+   custom action such as a manually bound `S: Sync` — for a standalone
+   single-letter key sharing the leading letter. If one is claimed, pick a
+   different leading letter for that project's serve/test group instead (e.g. `R`
+   for "Run") and call out the substitution explicitly in the AskUserQuestion
+   mapping prompt below so the user can approve or rename it.
+
    Assign **serve** keys as `S` followed by a project-specific mnemonic letter:
    pick whichever second letter best identifies the project for its type — e.g. `Sb`
    for a backend/API project, `Sf` for a frontend project, or the first letter of the
@@ -562,8 +575,10 @@ Bash call, per `cenci:shell-rules`) and branch:
    Never use `C` or `X` (the generated file's own top-level `actions:` map claims
    them for the Claude/Codex board-level launch actions), never use `E` or `V` (the
    Planned column's Edit-plan and View-plan actions claim them), never reuse a key
-   or key sequence already assigned to a serve action, and never repurpose `W` for
-   anything but Open worktree.
+   or key sequence already assigned to a serve action, never repurpose `W` for
+   anything but Open worktree, and never assign a leading letter already bound as a
+   standalone single-letter action anywhere in the file per the prefix-dispatch
+   constraint above.
 
    Present the proposed mapping with AskUserQuestion before generating, e.g.:
    "Proposed In Review actions: `W` → open PR worktree, `Sb` → api serve
@@ -1132,10 +1147,18 @@ For each MCP selected in question 5:
         Match by column + action intent (name/command) — or, for the column-less
         top-level `C`/`X`/`cleanup` actions, by intent alone — **not** by raw key,
         so a user's custom key binding is respected rather than flagged as
-        "missing".
+        "missing". Before assigning a key to any delta action, apply the
+        prefix-dispatch constraint from the key-assignment step above: if the
+        existing file already binds a standalone single-letter key (default or
+        user-added, e.g. a custom `S: Sync` board-level action) that would
+        prefix-collide with the proposed `S`/`T` key, pick a different leading
+        letter for that action instead.
      3. **Delta non-empty** → present the concrete additions via `AskUserQuestion`,
         e.g. "`.lazyboards.yml` is missing a PR-worktree test action: `T` → run tests
-        (`dotnet test`) in the PR worktree. Add it?" Options: "Apply suggested
+        (`dotnet test`) in the PR worktree. Add it?" — or, when a leading letter had
+        to be substituted for the reason above, surface it explicitly, e.g.
+        "`.lazyboards.yml`'s custom `S` (Sync) action would block `Sw` (serve
+        watch) — proposing `Rw` instead. Add it?" Options: "Apply suggested
         additions (Recommended)", "Overwrite fully — regenerate from scratch", "Keep
         as-is — no changes", "Show existing — display the current file". **Apply** and
         **Overwrite** both rewrite the whole file — a local `columns:` list *replaces*
