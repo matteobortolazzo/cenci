@@ -77,7 +77,26 @@ FORBIDDEN_COST_CONTROLS='arms a `/goal` completion condition at Phase 2 start wh
 # from today's unfixed prose (also making this test red before the fix).
 # =====================================================================
 ATTEMPT_MARKER='attempt to arm `/goal` directly via the `SlashCommand` tool, treating a missing tool, unknown command, or error as Goal Autopilot being unavailable'
-NOTICE_MARKER='Goal autopilot unavailable (/goal not supported in this session) — running without a completion guarantee.'
+
+# =====================================================================
+# #563 -- the single-cause NOTICE_MARKER collapses three distinct causes
+# (missing SlashCommand tool, unknown /goal command, genuine /goal error)
+# into one message. The fix keeps a fixed frame but names the actual cause
+# via one of three literal cause strings. These frame-halves and cause
+# literals are strictly additive to the #557 contract above -- ATTEMPT_MARKER
+# and every FORBIDDEN_* marker stay unchanged, so this does not weaken that
+# regression guard.
+# =====================================================================
+NOTICE_FRAME_PREFIX='Goal autopilot unavailable ('
+NOTICE_FRAME_SUFFIX=') — running without a completion guarantee.'
+CAUSE_NO_TOOL='SlashCommand tool not available in this session'
+CAUSE_UNKNOWN_COMMAND='/goal is not a known command in this session'
+CAUSE_INVOCATION_ERROR='/goal invocation returned an error'
+
+# phase-2-worktree.md must print the notice with the cause that actually
+# matched, not a fixed/generic cause -- distinct from just repeating
+# SKILL.md's frame text.
+PHASE2_CAUSE_SELECTION_MARKER='print the one-line unavailable notice from `SKILL.md`, naming the cause that actually matched'
 
 # =====================================================================
 # skills/implement/SKILL.md -- the "Version + availability gate" section
@@ -90,7 +109,11 @@ if CONTENT="$(read_doc "${FILE}")"; then
   assert_not_contains "${CONTENT}" "${FORBIDDEN_VERSION_PROBE_SKILL}" "${FILE}"
   assert_not_contains "${CONTENT}" "${FORBIDDEN_COST_CONTROLS}" "${FILE}"
   assert_contains "${CONTENT}" "${ATTEMPT_MARKER}" "${FILE}"
-  assert_contains "${CONTENT}" "${NOTICE_MARKER}" "${FILE}"
+  assert_contains "${CONTENT}" "${NOTICE_FRAME_PREFIX}" "${FILE}"
+  assert_contains "${CONTENT}" "${NOTICE_FRAME_SUFFIX}" "${FILE}"
+  assert_contains "${CONTENT}" "${CAUSE_NO_TOOL}" "${FILE}"
+  assert_contains "${CONTENT}" "${CAUSE_UNKNOWN_COMMAND}" "${FILE}"
+  assert_contains "${CONTENT}" "${CAUSE_INVOCATION_ERROR}" "${FILE}"
 fi
 
 # =====================================================================
@@ -102,6 +125,7 @@ FILE="skills/implement/phases/phase-2-worktree.md"
 if CONTENT="$(read_doc "${FILE}")"; then
   assert_not_contains "${CONTENT}" "${FORBIDDEN_VERSION_PROBE_PHASE2}" "${FILE}"
   assert_contains "${CONTENT}" "${ATTEMPT_MARKER}" "${FILE}"
+  assert_contains "${CONTENT}" "${PHASE2_CAUSE_SELECTION_MARKER}" "${FILE}"
 fi
 
 echo "goal-autopilot-gate-contract.test.sh: failures=${failures}"

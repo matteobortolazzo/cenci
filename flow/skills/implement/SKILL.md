@@ -364,7 +364,12 @@ Phases 2–9 run unattended, but a turn that stops mid-phase (context limit, tra
 **Availability gate (do this once).** `/goal` needs no separate version or binary check — older Claude Code clients below 2.1.139 lack `/goal` support, but the pipeline never checks that directly; step 2 below is both the check and the arming attempt. When entering Phase 2 in plan-file mode (or via the Trivial Fast Path reaching Phase 2 with `hasPlanFile = true`):
 
 1. If the resolved config has `cenci.goalAutopilot: false`, skip the goal entirely.
-2. Otherwise attempt to arm `/goal` directly via the `SlashCommand` tool, treating a missing tool, unknown command, or error as Goal Autopilot being unavailable. On that outcome, **skip silently** and proceed exactly as today — print one line: `Goal autopilot unavailable (/goal not supported in this session) — running without a completion guarantee.` The pipeline's behavior with no goal is unchanged from prior versions.
+2. Otherwise attempt to arm `/goal` directly via the `SlashCommand` tool, treating a missing tool, unknown command, or error as Goal Autopilot being unavailable. On that outcome, **skip silently** and proceed exactly as today — print one line naming the specific cause that matched: `Goal autopilot unavailable (<cause>) — running without a completion guarantee.` where `<cause>` is one of:
+   - `SlashCommand tool not available in this session` — the client itself lacks the `SlashCommand` tool; remedy is upgrading to a client version that supports it.
+   - `/goal is not a known command in this session` — the client has `SlashCommand` but no `/goal` command registered; remedy is adding `SlashCommand(/goal:*)` to `.claude/settings.json`.
+   - `/goal invocation returned an error` — the command exists but the arming call itself failed; remedy is reporting the error text the invocation returned.
+
+   The pipeline's behavior with no goal is unchanged from prior versions.
 
 **Arming.** The attempt in step 2 above IS the arming call — there is no separate probe-then-arm sequence. Invoke the `/goal` slash command (via the `SlashCommand` tool) with a condition that references the persisted plan file so it stays consistent with the `check-pending-plans` SessionStart hook (which treats a still-present `.plans/<filename>` as "resume this"):
 

@@ -237,5 +237,39 @@ assert_contains "${out}" "GATE_STATUS=green"
 assert_eq "${code}" "0"
 rm -rf "${ROOT}"
 
+# --- Case 14: mktemp failure fallback preserves jq's diagnostic and never
+# rm's /dev/null (#550) -----------------------------------------------------
+# PATH is prepended (not replaced, per Case 13's style) with a curated dir
+# containing a `mktemp` that always fails and an `rm` that logs its argv
+# before delegating to the real rm (path captured via `command -v rm`).
+# Malformed .cenci/config.json triggers jq's parse failure.
+ROOT="$(mktemp -d)"
+mkdir -p "${ROOT}/.cenci" "${ROOT}/bin"
+printf '{ not json' > "${ROOT}/.cenci/config.json"
+RM_LOG="${ROOT}/rm-log.txt"
+: > "${RM_LOG}"
+cat > "${ROOT}/bin/mktemp" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+chmod +x "${ROOT}/bin/mktemp"
+REAL_RM="$(command -v rm)"
+cat > "${ROOT}/bin/rm" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "${RM_LOG}"
+exec "${REAL_RM}" "\$@"
+EOF
+chmod +x "${ROOT}/bin/rm"
+out="$(cd "${ROOT}" && PATH="${ROOT}/bin:${PATH}" sh "${RUN_GATE}" 2>/dev/null)"
+err="$(cd "${ROOT}" && PATH="${ROOT}/bin:${PATH}" sh "${RUN_GATE}" 2>&1 1>/dev/null)"
+code=$?
+assert_eq "${code}" "1"
+assert_not_contains "${out}" "GATE_STATUS="
+assert_contains "${err}" "run-gate.sh: warning: mktemp failed; jq errors are written directly to stderr below"
+assert_contains "${err}" "parse error"
+RM_LOG_CONTENT="$(cat "${RM_LOG}" 2>/dev/null)"
+assert_not_contains "${RM_LOG_CONTENT}" "/dev/null"
+rm -rf "${ROOT}"
+
 echo "run-gate.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]

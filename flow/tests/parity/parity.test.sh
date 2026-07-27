@@ -303,6 +303,59 @@ if _markers_strictly_increasing "${codex_bad_order_copy}" "${_CODEX_STOP_MARKER}
   fail "Codex ordering self-test: a deliberately-reordered synthetic copy must be REJECTED by _markers_strictly_increasing, but it passed"
 fi
 
+# --- Dual-doc pinpointing synthetic-fixture self-test (#553) ----------------
+# check_codex_adapter's P1 (baseline-gate) and P4 (gate-result-integrity)
+# properties each read TWO docs (skills/implement/codex.md and
+# skills/codex-runtime/SKILL.md) and pass if EITHER documents the required
+# content. When both fail to, today's fail reason is a generic
+# "codex.md never invokes..."/"no run-gate.sh output..." sentence that never
+# says WHICH of the two docs is actually missing from disk versus present but
+# lacking the marker. These two synthetic flow-dir fixtures -- built fresh
+# under mktemp -d, never touching the real committed docs, per this file's
+# established self-test idiom -- each have exactly one of the two docs on
+# disk (with content that deliberately omits the required markers, so the
+# property fails either way), proving the fail reason names the absent doc
+# and never mis-names the present one as also missing.
+DUAL_DOC_CODEX_ONLY="$(mktemp -d)" || { echo "parity.test.sh: mktemp failed (dual-doc codex-only)" >&2; exit 2; }
+mkdir -p "${DUAL_DOC_CODEX_ONLY}/skills/implement"
+cat > "${DUAL_DOC_CODEX_ONLY}/skills/implement/codex.md" <<'EOF'
+# Codex implement procedure (fixture -- deliberately missing the baseline gate)
+This fixture intentionally omits the baseline-gate script call and its status interpretation.
+EOF
+
+codex_only_out="$(check_codex_adapter "${DUAL_DOC_CODEX_ONLY}")"
+codex_only_baseline="$(get_prop_line "${codex_only_out}" "baseline-gate")"
+codex_only_gate_integrity="$(get_prop_line "${codex_only_out}" "gate-result-integrity")"
+assert_contains "${codex_only_baseline}" "skills/codex-runtime/SKILL.md is missing/unreadable" \
+  "dual-doc (codex.md only): baseline-gate fail reason must name the absent codex-runtime/SKILL.md"
+assert_not_contains "${codex_only_baseline}" "skills/implement/codex.md is missing/unreadable" \
+  "dual-doc (codex.md only): baseline-gate fail reason must not mis-name the present codex.md as absent"
+assert_contains "${codex_only_gate_integrity}" "skills/codex-runtime/SKILL.md is missing/unreadable" \
+  "dual-doc (codex.md only): gate-result-integrity fail reason must name the absent codex-runtime/SKILL.md"
+assert_not_contains "${codex_only_gate_integrity}" "skills/implement/codex.md is missing/unreadable" \
+  "dual-doc (codex.md only): gate-result-integrity fail reason must not mis-name the present codex.md as absent"
+rm -rf "${DUAL_DOC_CODEX_ONLY}"
+
+DUAL_DOC_RUNTIME_ONLY="$(mktemp -d)" || { echo "parity.test.sh: mktemp failed (dual-doc runtime-only)" >&2; exit 2; }
+mkdir -p "${DUAL_DOC_RUNTIME_ONLY}/skills/codex-runtime"
+cat > "${DUAL_DOC_RUNTIME_ONLY}/skills/codex-runtime/SKILL.md" <<'EOF'
+# Codex runtime (fixture -- deliberately missing the baseline gate)
+This fixture intentionally omits the baseline-gate script call and its status interpretation.
+EOF
+
+runtime_only_out="$(check_codex_adapter "${DUAL_DOC_RUNTIME_ONLY}")"
+runtime_only_baseline="$(get_prop_line "${runtime_only_out}" "baseline-gate")"
+runtime_only_gate_integrity="$(get_prop_line "${runtime_only_out}" "gate-result-integrity")"
+assert_contains "${runtime_only_baseline}" "skills/implement/codex.md is missing/unreadable" \
+  "dual-doc (runtime only): baseline-gate fail reason must name the absent codex.md"
+assert_not_contains "${runtime_only_baseline}" "skills/codex-runtime/SKILL.md is missing/unreadable" \
+  "dual-doc (runtime only): baseline-gate fail reason must not mis-name the present codex-runtime/SKILL.md as absent"
+assert_contains "${runtime_only_gate_integrity}" "skills/implement/codex.md is missing/unreadable" \
+  "dual-doc (runtime only): gate-result-integrity fail reason must name the absent codex.md"
+assert_not_contains "${runtime_only_gate_integrity}" "skills/codex-runtime/SKILL.md is missing/unreadable" \
+  "dual-doc (runtime only): gate-result-integrity fail reason must not mis-name the present codex-runtime/SKILL.md as absent"
+rm -rf "${DUAL_DOC_RUNTIME_ONLY}"
+
 # --- _contains_ws_insensitive self-test (#556) ------------------------------
 # check_codex_adapter's P8 push-policy check requires the exact contiguous
 # sentence "Never force-push or bypass security/design/approval gates.", but

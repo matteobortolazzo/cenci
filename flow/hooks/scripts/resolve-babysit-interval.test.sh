@@ -151,5 +151,35 @@ code=$?
 assert_eq "${out}" ""
 rm -rf "${ROOT}"
 
+# --- Case 10: mktemp failure fallback preserves jq's diagnostic and never
+# rm's /dev/null (#550) -----------------------------------------------------
+ROOT="$(mktemp -d)"
+mkdir -p "${ROOT}/.cenci" "${ROOT}/bin"
+printf '{ not json' > "${ROOT}/.cenci/config.json"
+RM_LOG="${ROOT}/rm-log.txt"
+: > "${RM_LOG}"
+cat > "${ROOT}/bin/mktemp" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+chmod +x "${ROOT}/bin/mktemp"
+REAL_RM="$(command -v rm)"
+cat > "${ROOT}/bin/rm" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "${RM_LOG}"
+exec "${REAL_RM}" "\$@"
+EOF
+chmod +x "${ROOT}/bin/rm"
+out="$(cd "${ROOT}" && PATH="${ROOT}/bin:${PATH}" sh "${RESOLVER}" 2>/dev/null)"
+err="$(cd "${ROOT}" && PATH="${ROOT}/bin:${PATH}" sh "${RESOLVER}" 2>&1 1>/dev/null)"
+code=$?
+assert_eq "${code}" "1"
+assert_eq "${out}" ""
+assert_contains "${err}" "resolve-babysit-interval.sh: warning: mktemp failed; jq errors are written directly to stderr below"
+assert_contains "${err}" "parse error"
+RM_LOG_CONTENT="$(cat "${RM_LOG}" 2>/dev/null)"
+[[ "${RM_LOG_CONTENT}" != *"/dev/null"* ]] || { echo "FAIL: rm must never be invoked with /dev/null" >&2; failures=$((failures+1)); }
+rm -rf "${ROOT}"
+
 echo "resolve-babysit-interval.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]

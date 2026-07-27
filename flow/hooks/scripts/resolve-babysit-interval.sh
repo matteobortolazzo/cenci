@@ -44,14 +44,46 @@ fi
 
 SLUG="${1:-}"
 
-JQ_ERR="$(mktemp 2>/dev/null)" || {
-  echo "resolve-babysit-interval.sh: warning: mktemp failed, jq error detail will be unavailable" >&2
-  JQ_ERR=/dev/null
+# mktemp-failure fallback (#550): if a temp file can be created, jq's stderr
+# is captured there (fd 9 points at it) so the normal-path message keeps its
+# exact inline-detail format. If mktemp fails (e.g. TMPDIR exhaustion), fd 9
+# is instead dup'd straight to the script's own stderr — /dev/null is never
+# assigned to JQ_ERR, so it can never be handed to `rm` (which as root would
+# unlink the /dev/null device node), and jq's diagnostic is never dropped.
+if JQ_ERR="$(mktemp 2>/dev/null)"; then
+  exec 9>"${JQ_ERR}"
+else
+  JQ_ERR=""
+  exec 9>&2
+  echo "resolve-babysit-interval.sh: warning: mktemp failed; jq errors are written directly to stderr below" >&2
+fi
+
+# jq_err_detail — the jq diagnostic text to interpolate into a failure
+# message: the captured temp-file content when one exists, else a pointer to
+# the raw jq stderr already printed above (fd 9 passthrough case).
+jq_err_detail() {
+  if [ -n "${JQ_ERR}" ]; then
+    cat "${JQ_ERR}" 2>/dev/null
+  else
+    echo "(see the jq error printed on stderr above)"
+  fi
 }
 
-if ! jq -e . "${CONFIG}" >/dev/null 2>"${JQ_ERR}"; then
-  echo "resolve-babysit-interval.sh: failed to parse ${CONFIG}: $(cat "${JQ_ERR}" 2>/dev/null)" >&2
-  [ "${JQ_ERR}" != /dev/null ] && rm -f "${JQ_ERR}"
+# jq_err_cleanup — close fd 9 and remove the temp file, only when one exists.
+# Always returns 0 on success: an `if` whose final command is unconditional,
+# not a `&&`-chain whose truth value would become the function's return code
+# (which would make the no-temp-file case return 1 even though cleanup
+# succeeded — harmless today since no caller uses `set -e`, but latent).
+jq_err_cleanup() {
+  exec 9>&-
+  if [ -n "${JQ_ERR}" ]; then
+    rm -f "${JQ_ERR}"
+  fi
+}
+
+if ! jq -e . "${CONFIG}" >/dev/null 2>&9; then
+  echo "resolve-babysit-interval.sh: failed to parse ${CONFIG}: $(jq_err_detail)" >&2
+  jq_err_cleanup
   exit 1
 fi
 
@@ -60,43 +92,43 @@ INTERVAL=""
 if [ -n "${SLUG}" ]; then
   if ! MATCH_COUNT=$(jq -r --arg slug "${SLUG}" \
       '[.projects[]? | select(.slug == $slug)] | length' \
-      "${CONFIG}" 2>"${JQ_ERR}"); then
-    echo "resolve-babysit-interval.sh: failed to evaluate slug match for '${SLUG}': $(cat "${JQ_ERR}" 2>/dev/null)" >&2
-    [ "${JQ_ERR}" != /dev/null ] && rm -f "${JQ_ERR}"
+      "${CONFIG}" 2>&9); then
+    echo "resolve-babysit-interval.sh: failed to evaluate slug match for '${SLUG}': $(jq_err_detail)" >&2
+    jq_err_cleanup
     exit 1
   fi
 
   if [ "${MATCH_COUNT}" = "0" ]; then
     echo "resolve-babysit-interval.sh: no project with slug '${SLUG}' found in ${CONFIG}." >&2
-    [ "${JQ_ERR}" != /dev/null ] && rm -f "${JQ_ERR}"
+    jq_err_cleanup
     exit 1
   fi
 
   if [ "${MATCH_COUNT}" != "1" ]; then
     echo "resolve-babysit-interval.sh: ambiguous slug '${SLUG}': ${MATCH_COUNT} projects match in ${CONFIG}." >&2
-    [ "${JQ_ERR}" != /dev/null ] && rm -f "${JQ_ERR}"
+    jq_err_cleanup
     exit 1
   fi
 
   if ! INTERVAL=$(jq -r --arg slug "${SLUG}" '
       .projects[]? | select(.slug == $slug) |
       if (.babysitInterval // "") != "" then .babysitInterval else empty end
-    ' "${CONFIG}" 2>"${JQ_ERR}"); then
-    echo "resolve-babysit-interval.sh: failed to read babysitInterval for slug '${SLUG}': $(cat "${JQ_ERR}" 2>/dev/null)" >&2
-    [ "${JQ_ERR}" != /dev/null ] && rm -f "${JQ_ERR}"
+    ' "${CONFIG}" 2>&9); then
+    echo "resolve-babysit-interval.sh: failed to read babysitInterval for slug '${SLUG}': $(jq_err_detail)" >&2
+    jq_err_cleanup
     exit 1
   fi
 else
   if ! INTERVAL=$(jq -r '
       if (.babysitInterval // "") != "" then .babysitInterval else empty end
-    ' "${CONFIG}" 2>"${JQ_ERR}"); then
-    echo "resolve-babysit-interval.sh: failed to read babysitInterval: $(cat "${JQ_ERR}" 2>/dev/null)" >&2
-    [ "${JQ_ERR}" != /dev/null ] && rm -f "${JQ_ERR}"
+    ' "${CONFIG}" 2>&9); then
+    echo "resolve-babysit-interval.sh: failed to read babysitInterval: $(jq_err_detail)" >&2
+    jq_err_cleanup
     exit 1
   fi
 fi
 
-[ "${JQ_ERR}" != /dev/null ] && rm -f "${JQ_ERR}"
+jq_err_cleanup
 
 # Unset/empty babysitInterval → emit nothing, exit 0; caller uses the CLI default.
 [ -n "${INTERVAL}" ] && printf '%s\n' "${INTERVAL}"

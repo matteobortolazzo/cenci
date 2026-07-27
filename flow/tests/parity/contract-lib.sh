@@ -141,6 +141,28 @@ _prop() {
   fi
 }
 
+# _dual_doc_note <codex_ok> <runtime_ok> <generic_reason> -- pinpoints which of
+# the two Codex docs (skills/implement/codex.md, skills/codex-runtime/SKILL.md)
+# is actually absent from disk when a dual-doc property (baseline-gate,
+# gate-result-integrity) fails, instead of reporting a generic content-based
+# reason that is silent on whether the failure is a missing file or a present
+# file simply lacking the required marker (#553). <codex_ok>/<runtime_ok> are
+# the 0/1 exit statuses read_doc returned for each doc. <generic_reason> is
+# used only when both docs are present and readable (i.e. the failure is
+# genuinely about missing content, not a missing file).
+_dual_doc_note() {
+  local codex_ok="$1" runtime_ok="$2" generic="$3"
+  if [[ "${codex_ok}" -ne 0 && "${runtime_ok}" -ne 0 ]]; then
+    echo "skills/implement/codex.md and skills/codex-runtime/SKILL.md not found/unreadable"
+  elif [[ "${codex_ok}" -ne 0 ]]; then
+    echo "skills/implement/codex.md is missing/unreadable"
+  elif [[ "${runtime_ok}" -ne 0 ]]; then
+    echo "skills/codex-runtime/SKILL.md is missing/unreadable"
+  else
+    echo "${generic}"
+  fi
+}
+
 # _marker_offset <content> <marker> -- prints the byte offset of <marker>'s
 # first occurrence within <content> to stdout and returns 0, or returns 1
 # (prints nothing) if <marker> is absent. <marker> is always used quoted
@@ -450,12 +472,10 @@ check_codex_adapter() {
   hooks_json="$(read_doc "codex/hooks.json" "${flow_dir}")"; hooks_ok=$?
 
   # P1 baseline-gate: codex.md invokes run-gate.sh (#555 closed the prior gap).
-  if [[ "${codex_ok}" -ne 0 && "${runtime_ok}" -ne 0 ]]; then
-    _prop "baseline-gate" 1 "skills/implement/codex.md and skills/codex-runtime/SKILL.md not found/unreadable"
-  elif [[ "${codex_doc}" == *"run-gate.sh"* ]] || [[ "${runtime_doc}" == *"run-gate.sh"* ]]; then
+  if [[ "${codex_doc}" == *"run-gate.sh"* ]] || [[ "${runtime_doc}" == *"run-gate.sh"* ]]; then
     _prop "baseline-gate" 0
   else
-    _prop "baseline-gate" 1 "codex.md never invokes hooks/scripts/run-gate.sh (#517 Codex implement gate parity)"
+    _prop "baseline-gate" 1 "$(_dual_doc_note "${codex_ok}" "${runtime_ok}" "codex.md never invokes hooks/scripts/run-gate.sh (#517 Codex implement gate parity)")"
   fi
   overall=$((overall + $?))
 
@@ -495,12 +515,10 @@ check_codex_adapter() {
 
   # P4 gate-result-integrity: codex.md interprets run-gate.sh's GATE_STATUS
   # output (#555 closed the prior gap).
-  if [[ "${codex_ok}" -ne 0 && "${runtime_ok}" -ne 0 ]]; then
-    _prop "gate-result-integrity" 1 "skills/implement/codex.md and skills/codex-runtime/SKILL.md not found/unreadable"
-  elif [[ "${codex_doc}" == *"GATE_STATUS"* ]] || [[ "${runtime_doc}" == *"GATE_STATUS"* ]]; then
+  if [[ "${codex_doc}" == *"GATE_STATUS"* ]] || [[ "${runtime_doc}" == *"GATE_STATUS"* ]]; then
     _prop "gate-result-integrity" 0
   else
-    _prop "gate-result-integrity" 1 "no run-gate.sh output for codex.md to interpret (#517 Codex implement gate parity)"
+    _prop "gate-result-integrity" 1 "$(_dual_doc_note "${codex_ok}" "${runtime_ok}" "no run-gate.sh output for codex.md to interpret (#517 Codex implement gate parity)")"
   fi
   overall=$((overall + $?))
 
