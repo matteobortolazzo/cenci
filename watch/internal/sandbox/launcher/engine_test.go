@@ -374,7 +374,8 @@ func agentVolumeStatusLines(pin string, lastSuccess, lastAttempt time.Time) stri
 // builds never interfere — and the given agent's shared volume as already
 // existing. The `agent-cli.sh status <agent>` probe (agentVolumeCheckRunArgs)
 // prints statusLines verbatim and exits checkExit; `agent-cli.sh update`
-// exits updateExit; `volume rm` exits rmExit — so tests can drive
+// prints a fake container id (a real runtime's --detach stdout) and exits
+// updateExit; `volume rm` exits rmExit — so tests can drive
 // EnsureAgentVolume's populated-check, TTL/backoff/pin staleness branch, and
 // warning paths without a real container runtime.
 func volumeCheckEngineStatus(t *testing.T, statusLines string, checkExit, updateExit, rmExit int) (e *Engine, callLog string, stderr *bytes.Buffer) {
@@ -401,7 +402,7 @@ fi
 if [ "$1" = run ]; then
   case "$*" in
   *'agent-cli.sh status'*) printf '%%s' %s; exit %d ;;
-  *'agent-cli.sh update'*) exit %d ;;
+  *'agent-cli.sh update'*) printf 'fake-refresh-container-id\n'; exit %d ;;
   esac
   exit 0
 fi
@@ -447,6 +448,24 @@ func TestEnsureAgentVolume_ExistingButUnpopulated_FallsThroughToUpdate(t *testin
 	calls := readCallLog(t, callLog)
 	if !containsLineWithAll(calls, "agent-cli.sh", "update", "claude") {
 		t.Errorf("expected an unpopulated existing volume to fall through to the updater; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+// TestEnsureAgentVolume_Bootstrap_UpdaterStaysForeground pins #745's
+// deliberate scope boundary: only the staleness-refresh branch detaches.
+// Bootstrap (missing/unpopulated volume) must keep running the updater in
+// the foreground — there is nothing to launch with until the install
+// finishes, and its failure path (error return + compensating volume rm)
+// depends on observing the update's outcome.
+func TestEnsureAgentVolume_Bootstrap_UpdaterStaysForeground(t *testing.T) {
+	e, callLog, _ := volumeCheckEngine(t, 1, 0, 0) // check fails, update succeeds
+
+	if err := e.EnsureAgentVolume("claude", false); err != nil {
+		t.Fatalf("EnsureAgentVolume: %v", err)
+	}
+
+	if calls := readCallLog(t, callLog); containsLineWithAll(calls, "agent-cli.sh", "update", "--detach") {
+		t.Errorf("expected the bootstrap updater to run in the foreground (no --detach); calls:\n%s", strings.Join(calls, "\n"))
 	}
 }
 
@@ -519,6 +538,28 @@ func TestAgentVolumeCheckRunArgs_InvokesAgentCLIStatusWithHardening(t *testing.T
 		MonolithImage, "/usr/local/bin/lib/agent-cli.sh", "status", "claude"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("agentVolumeCheckRunArgs(\"claude\") = %#v, want %#v", got, want)
+	}
+}
+
+// -- agentRefreshRunArgs (ticket #745) --------------------------------------
+
+// TestAgentRefreshRunArgs_DetachedNamedWithHardening pins the launch-time
+// background refresh invocation (#745): identical to agentUpdateRunArgs'
+// hardening, image, and script invocation, but --detach (the launch must
+// never wait on the npm download) and --name'd with the fixed
+// cenci-agent-cli-refresh-<agent> so a concurrent duplicate start fails
+// closed on the name conflict instead of stacking redundant updaters. Never
+// a version argument — the background path only ever tracks latest.
+func TestAgentRefreshRunArgs_DetachedNamedWithHardening(t *testing.T) {
+	e := &Engine{}
+	got := e.agentRefreshRunArgs("claude")
+	want := []string{"run", "--rm", "--detach", "--name", "cenci-agent-cli-refresh-claude",
+		"--user", "root", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+		"--entrypoint", "/bin/bash",
+		"-v", "cenci-agent-cli-claude:/opt/cenci-agent",
+		MonolithImage, "/usr/local/bin/lib/agent-cli.sh", "update", "claude"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("agentRefreshRunArgs(\"claude\") = %#v, want %#v", got, want)
 	}
 }
 
@@ -826,7 +867,17 @@ func TestEnsureAgentVolume_FreshWithinTTL_NoUpdaterRuns(t *testing.T) {
 	}
 }
 
-func TestEnsureAgentVolume_StaleLastSuccess_RefreshesViaUpdater(t *testing.T) {
+// TestEnsureAgentVolume_StaleLastSuccess_StartsDetachedRefresh pins ticket
+// #745's headline AC: a TTL-stale populated volume starts the updater
+// detached (--detach, runtime-daemon-owned) under the fixed dedup name
+// cenci-agent-cli-refresh-<agent>, so the launch never blocks on the
+// (potentially very large — ~130MB for codex) npm download. The runtime's
+// --detach stdout (the started container's id) must be swallowed, never
+// echoed into the launch output, and the stdout notice must say the refresh
+// happens in the background — not the foreground "Updating ... in shared
+// volume" message, which stays reserved for the blocking bootstrap/explicit
+// paths.
+func TestEnsureAgentVolume_StaleLastSuccess_StartsDetachedRefresh(t *testing.T) {
 	stale := time.Now().Add(-25 * time.Hour)
 	statusLines := agentVolumeStatusLines("", stale, time.Time{})
 	e, callLog, _ := volumeCheckEngineStatus(t, statusLines, 0, 0, 0)
@@ -835,8 +886,19 @@ func TestEnsureAgentVolume_StaleLastSuccess_RefreshesViaUpdater(t *testing.T) {
 		t.Fatalf("EnsureAgentVolume: %v", err)
 	}
 
-	if calls := readCallLog(t, callLog); !containsLineWithAll(calls, "agent-cli.sh", "update", "claude") {
-		t.Errorf("expected a TTL-stale volume to refresh via the updater; calls:\n%s", strings.Join(calls, "\n"))
+	calls := readCallLog(t, callLog)
+	if !containsLineWithAll(calls, "agent-cli.sh", "update", "claude", "--detach", "--name cenci-agent-cli-refresh-claude") {
+		t.Errorf("expected a TTL-stale volume to start a detached, named refresh via the updater; calls:\n%s", strings.Join(calls, "\n"))
+	}
+	out := e.Stdout.(*bytes.Buffer).String()
+	if !strings.Contains(out, "background") {
+		t.Errorf("expected the stale-refresh notice to say the refresh happens in the background, got:\n%s", out)
+	}
+	if strings.Contains(out, "Updating claude in shared volume") {
+		t.Errorf("expected the stale-refresh path to not print the blocking foreground update message, got:\n%s", out)
+	}
+	if strings.Contains(out, "fake-refresh-container-id") {
+		t.Errorf("expected the detached run's container-id stdout to be swallowed, not echoed into the launch output, got:\n%s", out)
 	}
 }
 
@@ -858,10 +920,12 @@ func TestEnsureAgentVolume_MissingLastSuccess_TreatedAsStaleAndRefreshes(t *test
 }
 
 // TestEnsureAgentVolume_StaleRefreshFails_WarnsButStillReturnsNil pins the
-// best-effort AC: a failed refresh warns and the launch proceeds on the
-// existing (already-populated, just-stale) version -- it must NOT remove the
-// volume the way the bootstrap-failure path does, since the volume already
-// has a working install.
+// best-effort AC: a refresh that fails to start (since #745 the launch only
+// observes the detached start, e.g. a name conflict with an
+// already-running refresh, never the update's own outcome) warns and the
+// launch proceeds on the existing (already-populated, just-stale) version
+// -- it must NOT remove the volume the way the bootstrap-failure path does,
+// since the volume already has a working install.
 func TestEnsureAgentVolume_StaleRefreshFails_WarnsButStillReturnsNil(t *testing.T) {
 	stale := time.Now().Add(-25 * time.Hour)
 	statusLines := agentVolumeStatusLines("", stale, time.Time{})

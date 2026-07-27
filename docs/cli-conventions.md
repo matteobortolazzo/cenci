@@ -62,6 +62,7 @@ cenci <verb> [subverb] [args] [flags]
 | Home volume | `${agent}-cenci-home-<slug>` |
 | Dind storage volume | `${agent}-cenci-dind-<slug>` |
 | Shared agent CLI volume | `cenci-agent-cli-${agent}` |
+| Background CLI refresh container | `cenci-agent-cli-refresh-${agent}` (transient, auto-removed) |
 | Monolith image | `cenci-sandbox:latest` |
 | Per-repo image | `cenci-sandbox-<slug>:latest` |
 | Base image | `cenci-sandbox-base:<content-hash>` (+ `:latest` alias) |

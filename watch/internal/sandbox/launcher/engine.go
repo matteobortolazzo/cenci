@@ -391,6 +391,53 @@ func (e *Engine) agentUpdateRunArgs(agent, version string) []string {
 	return args
 }
 
+// agentRefreshContainerName names the detached background-refresh container
+// for agent (docs/cli-conventions.md runtime-object table). The fixed name
+// makes a concurrent duplicate start fail closed on the runtime's name
+// conflict instead of stacking redundant updaters, and lets an operator who
+// spots the container in `docker ps` identify what it is.
+func agentRefreshContainerName(agent string) string {
+	return "cenci-agent-cli-refresh-" + agent
+}
+
+// agentRefreshRunArgs is agentUpdateRunArgs' detached variant for the
+// launch-time TTL refresh (#745): --detach hands the updater to the runtime
+// daemon so the launch never waits on the (potentially very large — ~130MB
+// on the wire for codex) npm download, and the fixed --name provides
+// duplicate-start dedup (see agentRefreshContainerName). Same hardening,
+// image, and script invocation as agentUpdateRunArgs; never a version
+// argument — the background path only ever tracks latest, since an explicit
+// version pin always goes through the foreground UpdateAgent.
+func (e *Engine) agentRefreshRunArgs(agent string) []string {
+	return []string{"run", "--rm", "--detach", "--name", agentRefreshContainerName(agent),
+		"--user", "root", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+		"--entrypoint", "/bin/bash",
+		"-v", AgentCLIVolumeName(agent) + ":/opt/cenci-agent",
+		MonolithImage, "/usr/local/bin/lib/agent-cli.sh", "update", agent}
+}
+
+// startAgentRefreshDetached starts the isolated updater detached and returns
+// as soon as the runtime has accepted it, capturing (not echoing) the
+// --detach stdout so the started container's id never leaks into the launch
+// output (the agentVolumePopulated exec pattern, not e.command's wired
+// streams). Callers must have ensured MonolithImage already — on the only
+// call path (refreshStaleAgentVolumeIfNeeded, reached via EnsureAgentVolume)
+// agentVolumePopulated has just done so. A start failure carries the
+// runtime's stderr so a name conflict with an already-running refresh stays
+// diagnosable; the update's own outcome is deliberately unobserved — the
+// volume stays populated either way, and agent-cli.sh's .last-attempt stamp
+// keeps the 1h backoff throttling retries.
+func (e *Engine) startAgentRefreshDetached(agent string) error {
+	if _, err := exec.Command(e.Runtime, e.agentRefreshRunArgs(agent)...).Output(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+			return fmt.Errorf("%s detached agent refresh failed to start: %w: %s", e.Runtime, err, strings.TrimSpace(string(exitErr.Stderr)))
+		}
+		return fmt.Errorf("%s detached agent refresh failed to start: %w", e.Runtime, err)
+	}
+	return nil
+}
+
 // agentVolumeCheckRunArgs builds a cheap, short-lived probe that verifies an
 // already-existing shared agent volume actually contains an installed CLI
 // and reports its populated/version/pin/last_success/last_attempt facts via
@@ -593,9 +640,13 @@ func (e *Engine) agentVolumePopulated(agent string) (agentVolumeStatus, bool, er
 // 1h backoff counts as "recently attempted". A non-empty pin skips the
 // refresh with a one-line notice naming the pinned version and the --unpin
 // remedy (writing no stamps, so the notice repeats on later stale launches
-// by design); otherwise it prints the refresh notice and calls UpdateAgent,
-// which is best-effort — a failed refresh warns to stderr and the launch
-// proceeds on the existing (already-populated, just-stale) version.
+// by design); otherwise it prints the refresh notice and starts the updater
+// detached (#745, startAgentRefreshDetached) — the launch proceeds
+// immediately on the existing (already-populated, just-stale) version and
+// the next launch picks up the refreshed CLI, so a full-download refresh
+// (~15min for codex on a slow link) never stalls `cenci open`. The refresh
+// stays best-effort: a start failure (e.g. a name conflict with an
+// already-running refresh) only warns to stderr.
 func (e *Engine) refreshStaleAgentVolumeIfNeeded(agent string, status agentVolumeStatus, containerRunning bool) {
 	ttl := agentCLITTL(e.Stderr)
 	if containerRunning || ttl == 0 {
@@ -616,9 +667,9 @@ func (e *Engine) refreshStaleAgentVolumeIfNeeded(agent string, status agentVolum
 		_, _ = fmt.Fprintf(e.Stdout, "Note: shared %s CLI is pinned to %s and more than %dh stale; run 'cenci sandbox update-agent %s --unpin' to resume automatic updates.\n", agent, status.Pin, int(ttl.Hours()), agent)
 		return
 	}
-	_, _ = fmt.Fprintf(e.Stdout, "Shared %s CLI is more than %dh stale; refreshing before launch...\n", agent, int(ttl.Hours()))
-	if err := e.UpdateAgent(agent, ""); err != nil {
-		_, _ = fmt.Fprintf(e.Stderr, "Warning: best-effort launch-time refresh of shared %s CLI failed (%v); continuing with the existing version.\n", agent, err)
+	_, _ = fmt.Fprintf(e.Stdout, "Shared %s CLI is more than %dh stale; refreshing it in the background — this launch keeps the current version, the next one picks up the update.\n", agent, int(ttl.Hours()))
+	if err := e.startAgentRefreshDetached(agent); err != nil {
+		_, _ = fmt.Fprintf(e.Stderr, "Warning: could not start the background refresh of shared %s CLI (%v); continuing with the existing version.\n", agent, err)
 	}
 }
 
