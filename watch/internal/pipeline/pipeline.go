@@ -78,10 +78,15 @@ func Run(o Opts) (Output, error) {
 			}
 		}
 
-		next, tErr := transition(s.Stage, o.Stage, o.Approve)
+		next, noop, tErr := transition(s.Stage, o.Stage, o.Approve)
 		if tErr != nil {
 			out = errOutput(s.Stage, path, tErr)
 			return tErr
+		}
+
+		warnings := []string{}
+		if noop {
+			warnings = []string{noopWarning(next, o.Stage, o.Approve)}
 		}
 
 		s.Stage = next
@@ -93,7 +98,7 @@ func Run(o Opts) (Output, error) {
 			return serr
 		}
 
-		out = successOutput(next, path)
+		out = successOutput(next, path, warnings)
 		return nil
 	})
 
@@ -134,12 +139,12 @@ func resolveStatePath(o Opts) (string, error) {
 	return statePath(repoRoot, o.ID)
 }
 
-func successOutput(stage Stage, path string) Output {
+func successOutput(stage Stage, path string, warnings []string) Output {
 	return Output{
 		State:       string(stage),
 		NextActions: nextActionsFor(stage),
 		Artifacts:   []string{path},
-		Warnings:    []string{},
+		Warnings:    warnings,
 		Errors:      []string{},
 	}
 }
