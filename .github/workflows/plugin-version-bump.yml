@@ -37,17 +37,33 @@ on:
         type: string
         default: ''
 
-# Serializes all plugin version bumps onto a single queue instead of one
-# concurrency group per caller: this workflow reads/writes the same shared
-# state (marketplace.json + a push to main), so two callers running at once
-# (e.g. two plugins' paths changing in the same push) could race pushing
-# and clobber each other's commit. cancel-in-progress stays false — a
-# queued run must still execute, not be dropped, since it may bump a
-# different plugin. No caller may declare this same concurrency group
-# itself (see the caller workflows) — GitHub cancels the caller run when a
-# reusable workflow it invoked enters a concurrency group it also holds.
+# One concurrency group PER PLUGIN, not one shared queue for all of them
+# (#743). The shared `version-bump-main` queue this replaces was lossy:
+# GitHub keeps at most ONE pending run per concurrency group and cancels any
+# previously pending run, so a commit touching all three project paths fired
+# three bumps — one ran, one queued, and the third silently displaced the
+# queued one. A real release (the #742 installer-verification fix) was
+# dropped exactly that way, reported as `cancelled` rather than `failure`,
+# so nothing alerted. No `cancel-in-progress` setting removes that
+# single-pending-slot limit, so serialization-by-queue cannot be made
+# lossless and is not the right mechanism here.
+#
+# Keying the group on tag-prefix means different plugins never contend at
+# all, while two runs for the SAME plugin still serialize — the only case
+# where ordering genuinely matters, since they bump the same version file.
+# The cross-plugin push race the shared queue was meant to prevent is now
+# handled where it belongs, inside bump-plugin-version.sh: every attempt
+# re-derives the whole bump from the live tip of origin/main, so a rejected
+# push retries against the new tip instead of replaying a stale diff. That
+# is strictly stronger than the old queue — it also survives races against
+# any other pusher to main, which the queue never covered.
+#
+# cancel-in-progress stays false: a queued run for the same plugin must
+# still execute, never be dropped. No caller may declare a version-bump-main
+# concurrency group itself (see the caller workflows) — GitHub cancels the
+# caller run when a reusable workflow it invoked enters a group it also holds.
 concurrency:
-  group: version-bump-main
+  group: version-bump-main-${{ inputs.tag-prefix }}
   cancel-in-progress: false
 
 jobs:
@@ -57,8 +73,9 @@ jobs:
       # `ref: main` pins the checked-out tree (and therefore the push base)
       # to the live tip of main at run start, separate from ORIGINAL_SHA
       # below (the commit that triggered this run) — by the time a queued
-      # run executes, main may already be ahead due to an earlier run in
-      # this same concurrency group.
+      # run executes, main may already be ahead due to an earlier run for
+      # this same plugin. fetch-depth: 0 also keeps ORIGINAL_SHA reachable
+      # after bump-plugin-version.sh resets to a refreshed origin/main.
       - name: Checkout main
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -71,6 +88,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+      # The bump itself lives in .github/scripts/bump-plugin-version.sh and is
+      # covered by bump-plugin-version.test.sh. Keeping it out of this YAML is
+      # what makes the push-retry loop testable — the loop is the #743 fix that
+      # replaced the lossy shared concurrency queue, so it must not regress
+      # silently. check-version-bump-concurrency.sh rule 5 enforces that this
+      # step keeps delegating to the script rather than re-inlining the logic.
       - name: Bump version
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -82,94 +105,8 @@ jobs:
           # The commit that triggered this run — NOT necessarily main's tip
           # by the time this step executes (see the checkout step's ref:
           # main comment above). Used only for the skip guard and bump-type
-          # classification below, both of which must inspect the triggering
-          # commit itself, not whatever else landed on main while this run
-          # was queued behind the concurrency group.
+          # classification, both of which must inspect the triggering commit
+          # itself, not whatever else landed on main while this run was
+          # waiting or retrying its push.
           ORIGINAL_SHA: ${{ github.sha }}
-        run: |
-          # Skip if last commit is already a release commit
-          LAST_MSG=$(git log -1 --pretty=format:"%s" "$ORIGINAL_SHA")
-          if echo "$LAST_MSG" | grep -q "^chore(release): ${PLUGIN_NAME}/v"; then
-            echo "Last commit is a release commit, skipping"
-            exit 0
-          fi
-
-          # Read current version from the first plugin.json path (source of truth)
-          # shellcheck disable=SC2086
-          set -- $PLUGIN_JSON_PATHS
-          SOURCE_JSON="$1"
-          VERSION=$(jq -r '.version' "$SOURCE_JSON")
-          MAJOR=$(echo "$VERSION" | cut -d. -f1)
-          MINOR=$(echo "$VERSION" | cut -d. -f2)
-          PATCH=$(echo "$VERSION" | cut -d. -f3)
-
-          # Determine bump type from the triggering commit
-          COMMITS=$(git log -1 --pretty=format:"%s%n%b" "$ORIGINAL_SHA")
-          BUMP="patch"
-
-          if echo "$COMMITS" | grep -qiE '^feat!:|^[a-z]+\(.*\)!:|^BREAKING[ -]CHANGE:'; then
-            BUMP="major"
-          elif echo "$COMMITS" | grep -qiE '^feat(\(|:)'; then
-            BUMP="minor"
-          fi
-
-          # Apply bump
-          case $BUMP in
-            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
-            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
-            patch) PATCH=$((PATCH + 1)) ;;
-          esac
-
-          NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
-          echo "Bumping $BUMP: $VERSION -> $NEW_VERSION"
-
-          # Stamp every manifest path (source of truth + Codex manifest + any
-          # status-bar frontend manifests). Frontends keep the version under
-          # different keys: KDE Plasma applets use .KPlugin.Version; GNOME
-          # extensions must keep .version an integer (managed by
-          # extensions.gnome.org), so the semver goes into ."version-name"
-          # (a string field GNOME Shell 45+ displays); everything else uses
-          # a top-level .version.
-          for p in $PLUGIN_JSON_PATHS; do
-            if jq -e 'has("KPlugin")' "$p" > /dev/null; then
-              # shellcheck disable=SC2016 # $v is a jq --arg placeholder, not a shell variable
-              FILTER='.KPlugin.Version = $v'
-            elif jq -e 'has("shell-version")' "$p" > /dev/null; then
-              # shellcheck disable=SC2016 # $v is a jq --arg placeholder, not a shell variable
-              FILTER='."version-name" = $v'
-            else
-              # shellcheck disable=SC2016 # $v is a jq --arg placeholder, not a shell variable
-              FILTER='.version = $v'
-            fi
-            jq --arg v "$NEW_VERSION" "$FILTER" "$p" > tmp.json && mv tmp.json "$p"
-          done
-          # Stamp the marketplace entry. Fail loudly if the name matches no entry
-          # (e.g. a typo in a caller's marketplace-name input) — otherwise the jq
-          # filter would silently no-op and ship a stale marketplace version.
-          jq -e --arg n "$MARKETPLACE_NAME" '.plugins[] | select(.name == $n)' \
-            .claude-plugin/marketplace.json > /dev/null \
-            || { echo "no marketplace entry named '$MARKETPLACE_NAME' in .claude-plugin/marketplace.json" >&2; exit 1; }
-          jq --arg v "$NEW_VERSION" --arg n "$MARKETPLACE_NAME" \
-            '(.plugins[] | select(.name == $n)).version = $v' \
-            .claude-plugin/marketplace.json > tmp.json && mv tmp.json .claude-plugin/marketplace.json
-
-          # Commit and push
-          # shellcheck disable=SC2086
-          git add $PLUGIN_JSON_PATHS .claude-plugin/marketplace.json
-          git commit -m "chore(release): ${PLUGIN_NAME}/v${NEW_VERSION}"
-          git push origin HEAD:main
-
-          # Create tag via GitHub API
-          gh api repos/${{ github.repository }}/git/refs \
-            -f ref="refs/tags/${TAG_PREFIX}/v${NEW_VERSION}" \
-            -f sha="$(git rev-parse HEAD)"
-
-          # Optionally dispatch a downstream workflow (watch release).
-          # A tag pushed with GITHUB_TOKEN does NOT fire an `on: push: tags`
-          # workflow (recursion guard), but dispatching one IS allowed. Run the
-          # workflow definition from main (latest); it checks out the tag to build.
-          if [ -n "$DISPATCH_WORKFLOW" ]; then
-            gh workflow run "$DISPATCH_WORKFLOW" \
-              --ref main \
-              -f version="${NEW_VERSION}"
-          fi
+        run: bash .github/scripts/bump-plugin-version.sh

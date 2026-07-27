@@ -1,13 +1,23 @@
 #!/usr/bin/env bash
 # Statically validates the concurrency/push-race guards around the reusable
 # plugin-version-bump.yml workflow and its per-plugin caller workflows
-# (ticket #342).
+# (tickets #342, #743).
 #
 # Rules enforced:
 #   1. The reusable workflow (plugin-version-bump.yml) must declare a
-#      top-level concurrency: block with .group == "version-bump-main" and
-#      .cancel-in-progress == false — this serializes all plugin version
-#      bumps onto one queue instead of racing pushes to main.
+#      top-level concurrency: block whose .group is keyed PER PLUGIN —
+#      exactly "version-bump-main-${{ inputs.tag-prefix }}" — with
+#      .cancel-in-progress == false.
+#
+#      #743: this replaced a single shared "version-bump-main" queue. GitHub
+#      keeps at most ONE pending run per concurrency group and cancels any
+#      previously pending run, so the shared queue silently dropped a third
+#      simultaneous bump — which is how the #742 installer fix missed its
+#      release, reported as `cancelled` rather than `failure`. Keying on
+#      tag-prefix means different plugins never contend, while two runs for
+#      the same plugin still serialize. Reverting to a constant group
+#      reintroduces the dropped-release bug, so this rule pins the exact
+#      templated string.
 #   2. The reusable workflow's "Checkout main" step must declare
 #      .with.ref == "main" and .with.fetch-depth == 0 — the
 #      checked-out tree (and push base) must be the live tip of main at run
@@ -17,12 +27,21 @@
 #      used for the skip guard and bump-type classification, kept separate
 #      from the live main tree checked out by rule 2.
 #   4. Every caller workflow (jobs.*.uses ending in plugin-version-bump.yml)
-#      must NOT declare its own top-level concurrency.group ==
+#      must NOT declare its own top-level concurrency.group beginning with
 #      "version-bump-main" — GitHub's documented gotcha is that a caller
 #      declaring the same concurrency group as a reusable workflow it
 #      invokes gets cancelled when the reusable workflow enters that group.
+#      The check is a prefix match rather than an equality test because the
+#      reusable workflow's group is now templated per plugin (#743), so the
+#      exact string a caller would have to collide with varies.
 #      At least one caller must be discovered — guards against a yq path
 #      typo silently passing with zero workflows checked.
+#   5. The reusable workflow's "Bump version" step must delegate to
+#      .github/scripts/bump-plugin-version.sh, and that script must exist.
+#      The push-retry loop that replaced queue-based serialization lives in
+#      that script precisely so it is unit-testable (#743); re-inlining the
+#      bump logic into the workflow YAML would drop it back out of test
+#      coverage, where the original race went unnoticed.
 #
 # Failures are accumulated rather than exiting on the first one, so a single
 # run reports every offending file. GitHub Actions' default `run:` shell has
@@ -36,6 +55,14 @@ set +e
 WORKFLOWS_DIR=".github/workflows"
 REUSABLE_WORKFLOW="${WORKFLOWS_DIR}/plugin-version-bump.yml"
 REUSABLE_SUFFIX="plugin-version-bump.yml"
+BUMP_SCRIPT=".github/scripts/bump-plugin-version.sh"
+# The exact per-plugin concurrency group required by rule 1. Single-quoted
+# throughout: this is the literal GitHub Actions expression as written in the
+# YAML, not something the shell should expand.
+# shellcheck disable=SC2016
+EXPECTED_GROUP='version-bump-main-${{ inputs.tag-prefix }}'
+# The prefix no caller may collide with (rule 4).
+CALLER_FORBIDDEN_GROUP_PREFIX="version-bump-main"
 
 FAILED=0
 
@@ -68,8 +95,8 @@ concurrency_group=$(yq '.concurrency.group // ""' "$REUSABLE_WORKFLOW") || {
   fail "$REUSABLE_WORKFLOW: yq failed to read .concurrency.group"
   concurrency_group=""
 }
-if [ "$concurrency_group" != "version-bump-main" ]; then
-  fail "$REUSABLE_WORKFLOW: rule 1 violated — .concurrency.group must be 'version-bump-main' (got '${concurrency_group:-<absent>}')"
+if [ "$concurrency_group" != "$EXPECTED_GROUP" ]; then
+  fail "$REUSABLE_WORKFLOW: rule 1 violated — .concurrency.group must be per-plugin, exactly '${EXPECTED_GROUP}' (got '${concurrency_group:-<absent>}'); a constant group silently drops a third simultaneous bump"
 fi
 
 # Note: no `// ""` fallback here — cancel-in-progress's expected value
@@ -146,10 +173,28 @@ for f in "${callers[@]}"; do
     fail "$f: yq failed to read .concurrency.group"
     continue
   }
-  if [ "$caller_group" == "version-bump-main" ]; then
-    fail "$f: rule 4 violated — caller must not declare concurrency.group == 'version-bump-main' (this cancels the caller run when the reusable workflow it invokes enters that same group)"
-  fi
+  case "$caller_group" in
+    "${CALLER_FORBIDDEN_GROUP_PREFIX}"*)
+      fail "$f: rule 4 violated — caller must not declare a concurrency.group starting with '${CALLER_FORBIDDEN_GROUP_PREFIX}' (got '${caller_group}'); this cancels the caller run when the reusable workflow it invokes enters that same group"
+      ;;
+  esac
 done
+
+# --- Rule 5: the "Bump version" step delegates to the tested script --------
+if [ ! -f "$BUMP_SCRIPT" ]; then
+  fail "rule 5 violated — $BUMP_SCRIPT not found; the reusable workflow's Bump version step must delegate to it"
+fi
+
+bump_run=$(yq '[.jobs.*.steps[] | select(.name == "Bump version")][0].run // ""' "$REUSABLE_WORKFLOW") || {
+  fail "$REUSABLE_WORKFLOW: yq failed to read the Bump version step's .run"
+  bump_run=""
+}
+case "$bump_run" in
+  *"$BUMP_SCRIPT"*) : ;;
+  *)
+    fail "$REUSABLE_WORKFLOW: rule 5 violated — the Bump version step's run: must invoke '${BUMP_SCRIPT}' (the push-retry loop lives there so it stays unit-testable), got '${bump_run:-<absent>}'"
+    ;;
+esac
 
 if [ "$FAILED" -ne 0 ]; then
   echo "check-version-bump-concurrency: FAILED" >&2
