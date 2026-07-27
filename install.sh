@@ -1621,7 +1621,7 @@ cenci_latest_ref() {
 
 # verify_installer_asset <file> <bundle> — verifies <file> (a downloaded
 # install.sh) against <bundle> (its cosign sign-blob bundle) using the
-# canonical, tag-refs-only release identity (#626). Requires cosign on
+# canonical release identity (#626, corrected #736). Requires cosign on
 # PATH — cosign is a new mandatory prerequisite for the default verified
 # install path — and dies with a distinct message for each failure class:
 # cosign missing, or cosign verify-blob rejecting the bundle/file pair
@@ -1631,6 +1631,21 @@ cenci_latest_ref() {
 # <file>/<bundle> before calling die() — the caller's staged temp files —
 # so this function's failures clean up exactly like the pin block's other
 # checks (which all go through its pin_die wrapper).
+#
+# The --certificate-identity-regexp below accepts exactly two canonical
+# trigger identities, both documented on watch-release.yml itself: a
+# `watch/v*` tag push (`.../watch-release.yml@refs/tags/watch/v<version>`)
+# and a `workflow_dispatch` invocation with `--ref main`, which is how
+# plugin-version-bump.yml actually dispatches every automated release
+# (`.../watch-release.yml@refs/heads/main`). The dispatch path's
+# Fulcio-issued certificate binds the ref that *triggered* the run
+# (`refs/heads/main`), not the release tag the job later resolves and
+# publishes to — the certificate cannot bind a value the workflow computes
+# only after it starts — so a regexp that only matches the tag-push
+# identity silently rejects every automated release's install.sh (#736).
+# Both alternatives are pinned to *this* repo and *this* workflow file; the
+# `\.` -escaped dots and the trailing `$` anchor keep the match from
+# widening past those two exact identities.
 verify_installer_asset() {
 	local file="$1" bundle="$2"
 	if ! command -v cosign >/dev/null 2>&1; then
@@ -1639,7 +1654,7 @@ verify_installer_asset() {
 	fi
 	cosign verify-blob \
 		--bundle "$bundle" \
-		--certificate-identity-regexp '^https://github\.com/matteobortolazzo/cenci/\.github/workflows/watch-release\.yml@refs/tags/watch/v' \
+		--certificate-identity-regexp '^https://github\.com/matteobortolazzo/cenci/\.github/workflows/watch-release\.yml@refs/(heads/main|tags/watch/v[0-9]+\.[0-9]+\.[0-9]+)$' \
 		--certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
 		"$file" >/dev/null 2>&1 || {
 		rm -f "$file" "$bundle"
@@ -1673,6 +1688,18 @@ exec_pinned_installer() {
 	}
 
 	tmp="" bundle_tmp=""
+
+	# Only watch/* releases publish a signed install.sh (#736) — flow/*
+	# and sandbox/* version bumps create bare tags with no Release object
+	# and never sign an install.sh asset at all, so resolving to one of
+	# those as "latest" must fail fast here, before any network call,
+	# with a message naming the invariant — never a confusing install.sh
+	# download 404 further down.
+	case "$tag" in
+		watch/v*) : ;;
+		*) pin_die "only watch/* releases publish a signed install.sh — got tag: $tag" ;;
+	esac
+
 	tmp="$(mktemp)" || tmp=""
 	if [ -z "$tmp" ] || [ ! -f "$tmp" ]; then
 		pin_die "could not create a temporary file to stage the pinned install.sh"

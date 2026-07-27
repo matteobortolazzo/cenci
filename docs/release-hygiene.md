@@ -174,34 +174,52 @@ After the next `watch` release lands:
 
 Only consider #593 complete once this verification step has passed on a real release.
 
-## 8. Mandatory post-merge verification: installer release trust (#626)
+## 8. Mandatory post-merge verification: installer release trust (#626, #736)
 
-**Not optional.** #626 hardened `install.sh`'s release-pin path to require `cosign
-verify-blob` against a `watch-release.yml`-signed `install.sh.bundle` before executing
-any release-pinned installer bytes. This can only be proven end-to-end on a real
-release — the workflow needs a genuine OIDC token minted on a tag/dispatch run, which
-isn't available inside a PR (this is AC8 of #626).
+**Not optional, but no longer the only guard.** #626 hardened `install.sh`'s
+release-pin path to require `cosign verify-blob` against a `watch-release.yml`-signed
+`install.sh.bundle` before executing any release-pinned installer bytes. AC8 of #626
+asked for this to be proven end-to-end on a real release — the workflow needs a
+genuine OIDC token minted on a tag/dispatch run, which isn't available inside a PR —
+but that manual check evidently never ran: every automated release is actually
+published via `workflow_dispatch --ref main` (from `plugin-version-bump.yml`), whose
+Fulcio certificate binds `refs/heads/main`, not the release tag. The
+`--certificate-identity-regexp` pinned by #626 only ever matched the tag-push identity
+(`refs/tags/watch/v<version>`), so `install.sh`'s own verification — and this runbook's
+manual check, had anyone run it against an automated release — would have failed
+closed on every automated `watch` release since #626 landed. #736 fixed the regexp to
+accept both canonical identities (tag push and dispatch-from-main) and, since a manual
+runbook step is easy to forget or skip, also added an automated
+"Verify the published installer signature" step to `watch-release.yml` itself: it
+re-downloads the just-published `install.sh`/`install.sh.bundle` and runs the same
+`cosign verify-blob` check in CI, failing the release job if it doesn't verify. That
+step is now the primary guard against this class of regression; the manual steps
+below are a backstop for validating the released artifact by hand, not the only check.
 
 After the next `watch` release lands:
 
-1. Download the published installer asset and its bundle, e.g.:
+1. Confirm the release workflow run's own "Verify the published installer signature"
+   step passed — that's the automated version of everything below, and it runs on
+   every release, not just when someone remembers this runbook.
+2. Download the published installer asset and its bundle, e.g.:
    ```bash
    curl -fsSL -o install.sh https://github.com/matteobortolazzo/cenci/releases/download/watch/v<ver>/install.sh
    curl -fsSL -o install.sh.bundle https://github.com/matteobortolazzo/cenci/releases/download/watch/v<ver>/install.sh.bundle
    ```
-2. Verify with `cosign` against the pinned identity, the same command
+3. Verify with `cosign` against the pinned identity, the same command
    `verify_installer_asset()` in `install.sh` runs internally:
    ```bash
    cosign verify-blob --bundle install.sh.bundle \
-     --certificate-identity-regexp '^https://github\.com/matteobortolazzo/cenci/\.github/workflows/watch-release\.yml@refs/tags/watch/v' \
+     --certificate-identity-regexp '^https://github\.com/matteobortolazzo/cenci/\.github/workflows/watch-release\.yml@refs/(heads/main|tags/watch/v[0-9]+\.[0-9]+\.[0-9]+)$' \
      --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
      install.sh
    ```
-3. Confirm `cosign` reports a verified signature tying `install.sh` to the
-   `watch-release.yml` run and the `watch/v<ver>` tag that built it.
-4. Run the verified script (`bash install.sh`) and confirm it executes normally —
+4. Confirm `cosign` reports a verified signature tying `install.sh` to the
+   `watch-release.yml` run and whichever trigger (tag push or dispatch-from-main)
+   built it.
+5. Run the verified script (`bash install.sh`) and confirm it executes normally —
    proving sign → publish → download → verify → execute end to end.
-5. If verification fails, check that the "sign install.sh" step actually ran and
+6. If verification fails, check that the "sign install.sh" step actually ran and
    uploaded both `install.sh` and `install.sh.bundle` as release assets in that
    release's workflow run, and that the workflow's `permissions:` block still grants
    `id-token: write`.

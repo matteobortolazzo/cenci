@@ -174,15 +174,35 @@ EOF
 # permissively accepting anything (sandbox lesson #490 / this ticket's
 # Risks: "a permissive cosign mock could mask a real verify bug"): it only
 # exits 0 if invoked with the verify-blob subcommand, a non-empty --bundle
-# file, the pinned --certificate-identity-regexp (must reference the fully
-# dot-escaped \.github/workflows/watch-release\.yml@refs/tags/watch/v, per
-# the plan's locked identity string) and --certificate-oidc-issuer
-# (https://token.actions.githubusercontent.com), a target file that exists,
-# AND that target file's bytes exactly match the known-good reference
-# $ROOT/install.sh. That last check is what makes CENCI_FAKE_CORRUPT_INSTALL
-# (a genuinely tampered download) fail verification on its own, the same way
-# a real signature mismatch would, without any separate opt-in from the
-# caller — a real decoy, not a rubber stamp.
+# file, a --certificate-oidc-issuer of https://token.actions.githubusercontent.com,
+# a target file that exists, AND that target file's bytes exactly match the
+# known-good reference $ROOT/install.sh. That last check is what makes
+# CENCI_FAKE_CORRUPT_INSTALL (a genuinely tampered download) fail
+# verification on its own, the same way a real signature mismatch would,
+# without any separate opt-in from the caller — a real decoy, not a rubber
+# stamp.
+#
+# --certificate-identity-regexp gets a *behavioral* contract (#736) instead
+# of the old literal-string match against one fixed pattern: rather than
+# asserting what the regexp's source text looks like, the mock takes the
+# regexp actually passed by the caller and, via `grep -E` (bash `[[ =~ ]]`
+# and POSIX ERE agree on this pattern's syntax), proves it behaves the way
+# the real Sigstore certificate-identity matcher must against real-world
+# sample identity strings: it must match BOTH documented canonical trigger
+# identities — the tag-push identity
+# (".../watch-release.yml@refs/tags/watch/v1.2.3") and the
+# workflow_dispatch-from-main identity
+# (".../watch-release.yml@refs/heads/main", what watch-release.yml actually
+# signs with today per plugin-version-bump.yml's `--ref main` dispatch) — and
+# must reject six decoys: a different workflow file, a different ref off
+# the right workflow, the right workflow/ref off a different repo, a ref
+# that merely starts with an allowed ref (`refs/heads/main-attacker`, `refs
+# /tags/watch/v1.2.3-evil` — proving the regexp's trailing `$` anchor is
+# intact), and a variant with the escaped literal dots swapped for a
+# different character (proving they aren't accidentally acting as `.`
+# any-char wildcards). Any failure exits non-zero with a message naming
+# which check failed, so a regression to an overly narrow OR overly
+# permissive regexp fails loudly instead of being silently masked.
 make_cosign() {
     local bin="$1"
     mkdir -p "${bin}"
@@ -212,10 +232,30 @@ if [ -z "${bundle}" ] || [ ! -s "${bundle}" ]; then
     echo "cosign mock: --bundle missing or empty" >&2
     exit 1
 fi
-case "${identity_regexp}" in
-  *'\.github/workflows/watch-release\.yml@refs/tags/watch/v'*) : ;;
-  *) echo "cosign mock: unexpected --certificate-identity-regexp '${identity_regexp}'" >&2; exit 1 ;;
-esac
+if [ -z "${identity_regexp}" ]; then
+    echo "cosign mock: --certificate-identity-regexp missing" >&2
+    exit 1
+fi
+if ! printf '%s' "https://github.com/matteobortolazzo/cenci/.github/workflows/watch-release.yml@refs/tags/watch/v1.2.3" | grep -Eq -- "${identity_regexp}"; then
+    echo "cosign mock: --certificate-identity-regexp '${identity_regexp}' does not match the tag-push identity (.../watch-release.yml@refs/tags/watch/v1.2.3)" >&2
+    exit 1
+fi
+if ! printf '%s' "https://github.com/matteobortolazzo/cenci/.github/workflows/watch-release.yml@refs/heads/main" | grep -Eq -- "${identity_regexp}"; then
+    echo "cosign mock: --certificate-identity-regexp '${identity_regexp}' does not match the workflow_dispatch-from-main identity (.../watch-release.yml@refs/heads/main)" >&2
+    exit 1
+fi
+for decoy in \
+    "https://github.com/matteobortolazzo/cenci/.github/workflows/evil.yml@refs/heads/main" \
+    "https://github.com/matteobortolazzo/cenci/.github/workflows/watch-release.yml@refs/heads/attacker" \
+    "https://github.com/someone-else/other-repo/.github/workflows/watch-release.yml@refs/heads/main" \
+    "https://github.com/matteobortolazzo/cenci/.github/workflows/watch-release.yml@refs/heads/main-attacker" \
+    "https://github.com/matteobortolazzo/cenci/.github/workflows/watch-release.yml@refs/tags/watch/v1.2.3-evil" \
+    "https://github.com/matteobortolazzo/cenci/Xgithub/workflows/watch-releaseXyml@refs/heads/main"; do
+    if printf '%s' "${decoy}" | grep -Eq -- "${identity_regexp}"; then
+        echo "cosign mock: --certificate-identity-regexp '${identity_regexp}' incorrectly matches decoy identity '${decoy}'" >&2
+        exit 1
+    fi
+done
 if [ "${oidc_issuer}" != "https://token.actions.githubusercontent.com" ]; then
     echo "cosign mock: unexpected --certificate-oidc-issuer '${oidc_issuer}'" >&2
     exit 1
@@ -1884,6 +1924,12 @@ run_piped_case piped-verify-cosign-nonzero claude "CENCI_FAKE_RELEASE_TAG=watch/
 assert_contains "${CASE_OUTPUT}" "installer verification failed"
 assert_contains "${CASE_OUTPUT}" "CENCI_REF=main"
 assert_not_contains "${CASE_CALLS}" "claude plugin install cenci@cenci"
+
+echo "case: a resolved release tag that is not watch/* (only watch releases publish and sign install.sh — flow/sandbox version bumps create bare tags with no Release object) is rejected by exec_pinned_installer's own prefix guard before any install.sh download is attempted, with a distinct message naming the invariant, never a confusing download 404 (#736)"
+run_piped_case piped-verify-non-watch-prefix claude "CENCI_FAKE_RELEASE_TAG=flow/v1.0.0"
+[[ "${CASE_EXIT}" -ne 0 ]]
+assert_contains "${CASE_OUTPUT}" "only watch/* releases publish a signed install.sh"
+assert_not_contains "${CASE_CURL_LOG}" "/install.sh"
 
 echo "case: a normal from-file install.sh run never re-execs itself via the piped-only pin block (regression — proves the piped-only guard can't break existing from-file suites, #590), but — per #625's Q1 — DOES resolve and pin the marketplace + plugin content to the default release ref since CENCI_REF is unset, not live main"
 name=onfile-no-reexec-but-pins-default-ref

@@ -144,3 +144,34 @@ jobs:
                 --generate-notes
             fi
           fi
+
+      - name: Verify the published installer signature
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.v.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Re-download the just-published install.sh/install.sh.bundle from
+          # the release (not the local checkout copy) and verify them the
+          # same way install.sh's own verify_installer_asset() does, closing
+          # the loop the manual runbook step in docs/release-hygiene.md#8
+          # used to be the only check for (#736 — that manual step evidently
+          # never ran, and the regexp it was meant to validate had been
+          # silently broken for every workflow_dispatch-triggered release).
+          # The --certificate-identity-regexp value is grepped out of the
+          # tagged checkout's own install.sh, never hardcoded here, so this
+          # step can't itself drift from what install.sh actually enforces.
+          identity_regexp="$(grep -m1 -- "--certificate-identity-regexp '" install.sh | sed -E "s/^[^']*'([^']*)'.*/\1/")"
+          if [ -z "$identity_regexp" ]; then
+            echo "could not extract --certificate-identity-regexp from install.sh" >&2
+            exit 1
+          fi
+          verify_dir="$(mktemp -d)" || { echo "::error::failed to create temp directory for installer verification"; exit 1; }
+          gh release download "$TAG" \
+            -p 'install.sh' -p 'install.sh.bundle' \
+            -D "$verify_dir" --clobber
+          cosign verify-blob \
+            --bundle "$verify_dir/install.sh.bundle" \
+            --certificate-identity-regexp "$identity_regexp" \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            "$verify_dir/install.sh"

@@ -174,7 +174,7 @@ in that repo to regenerate it with the new `cenci sandbox build` form.
    curl -fsSL -o install.sh https://github.com/matteobortolazzo/cenci/releases/latest/download/install.sh
    curl -fsSL -o install.sh.bundle https://github.com/matteobortolazzo/cenci/releases/latest/download/install.sh.bundle
    cosign verify-blob --bundle install.sh.bundle \
-     --certificate-identity-regexp '^https://github\.com/matteobortolazzo/cenci/\.github/workflows/watch-release\.yml@refs/tags/watch/v' \
+     --certificate-identity-regexp '^https://github\.com/matteobortolazzo/cenci/\.github/workflows/watch-release\.yml@refs/(heads/main|tags/watch/v[0-9]+\.[0-9]+\.[0-9]+)$' \
      --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
      install.sh
    bash install.sh
