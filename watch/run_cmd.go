@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -13,7 +14,7 @@ import (
 func runRun(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	agent := fs.String("agent", "", "agent to launch (claude, codex, ...); default from config or claude")
-	sandbox := fs.Bool("sandbox", false, "launch inside the sandbox container (the default)")
+	sandbox := fs.Bool("sandbox", false, "launch inside the sandbox container (the default, except host-only workflows like design)")
 	noSandbox := fs.Bool("no-sandbox", false, "force a host launch (overrides the sandbox default)")
 	model := fs.String("model", "", "model override passed to the agent")
 	session := fs.String("session", "", "target tmux session (default: current session)")
@@ -60,6 +61,9 @@ func runRun(args []string) {
 
 	if err := run.Run(opts, &tmux.ExecClient{}); err != nil {
 		fmt.Fprintf(os.Stderr, "cenci run: %v\n", err)
+		if errors.Is(err, run.ErrHostOnlyWorkflow) {
+			os.Exit(2)
+		}
 		os.Exit(1)
 	}
 }

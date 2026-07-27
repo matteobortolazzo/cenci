@@ -6,7 +6,7 @@ argument-hint: <ticket-id | design description> [additional context]
 user-invocable: true
 disable-model-invocation: true
 model: opus
-allowed-tools: Read, Write, Bash(pencil:*), Bash(gh:*), Bash(git:*), Bash(curl:*), Bash(mkdir:*), Glob, Grep, AskUserQuestion, WebFetch, mcp__pencil__get_editor_state, mcp__pencil__get_guidelines, mcp__pencil__batch_get, mcp__pencil__batch_design, mcp__pencil__get_screenshot, mcp__pencil__export_nodes, mcp__pencil__find_empty_space_on_canvas, mcp__pencil__snapshot_layout, mcp__pencil__open_document, mcp__pencil__get_variables, mcp__pencil__set_variables, mcp__pencil__replace_all_matching_properties, mcp__pencil__search_all_unique_properties
+allowed-tools: Read, Write, Bash(pencil:*), Bash(gh:*), Bash(git:*), Bash(curl:*), Bash(mkdir:*), Bash(echo:*), Bash(test:*), Glob, Grep, AskUserQuestion, WebFetch, mcp__pencil__get_editor_state, mcp__pencil__get_guidelines, mcp__pencil__batch_get, mcp__pencil__batch_design, mcp__pencil__get_screenshot, mcp__pencil__export_nodes, mcp__pencil__find_empty_space_on_canvas, mcp__pencil__snapshot_layout, mcp__pencil__open_document, mcp__pencil__get_variables, mcp__pencil__set_variables, mcp__pencil__replace_all_matching_properties, mcp__pencil__search_all_unique_properties
 ---
 
 > **Client dispatch**: In Codex, read `codex-runtime` and `design/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
@@ -19,7 +19,7 @@ allowed-tools: Read, Write, Bash(pencil:*), Bash(gh:*), Bash(git:*), Bash(curl:*
      2. agent-config agents have no cenci context (config, CLAUDE.md, docs/)
      3. For complex designs, we batch via multiple `batch_design` calls within one session
      The Pencil editor is the design engine; Claude Code drives it via CLI subprocess (or MCP as legacy fallback).
-     CLI mode (`pencil interactive -a desktop`) avoids loading MCP tool schemas into every conversation,
+     CLI mode (`pencil interactive`, desktop-app-backed) avoids loading MCP tool schemas into every conversation,
      saving ~3,000-5,000 tokens per conversation and enabling command batching via heredocs. -->
 
 ## Phase 0 — Context Loading
@@ -42,7 +42,7 @@ Read `pencil.mode` from the resolved config and store as `$PENCIL_MODE`. Default
 
 **Convention**: All Pencil tool calls in this skill follow `$PENCIL_MODE`:
 
-- **`"cli-app"`** (default for new installs): Execute tool calls via `pencil interactive -a desktop` heredoc using the Bash tool. Multiple independent commands can be batched in a single heredoc.
+- **`"cli-app"`** (default for new installs): Execute tool calls via a `pencil interactive` heredoc (targeting the desktop app — see Phase 0.5 below for the exact invocation) using the Bash tool. Multiple independent commands can be batched in a single heredoc.
 
   ```bash
   pencil interactive -a desktop <<'EOF'
@@ -66,6 +66,19 @@ Read `pencil.mode` from the resolved config and store as `$PENCIL_MODE`. Default
 When this skill says "Call `<tool_name>(...)`", execute it according to `$PENCIL_MODE`. Explicit CLI/MCP examples are only given where the modes diverge.
 
 ## Phase 0.5 — Pencil Availability Check
+
+**Sandbox guard (host-only)**: `/cenci:design` is host-only — the Pencil desktop app it drives is never reachable inside the cenci sandbox. In-sandbox sessions only get design access through headless reads via `/cenci:implement` and `verify-ui`, never through this skill.
+
+Before doing anything else in this phase — before any Pencil probe, any background auto-launch of Pencil, and any retry, in both `cli-app` and `editor` mode below — detect an in-container session with the same two-step check as `configure/scripts/detect-project.sh`, each as its own Bash call:
+
+1. `echo "${CENCI_SANDBOX:-}"` — if it prints `1` → in container.
+2. If step 1 did not match, `test -f /.dockerenv` — exit 0 → in container.
+
+**If either check matches**, stop immediately and tell the user:
+"`/cenci:design` must run from a host session: the Pencil desktop app is not reachable from inside the cenci sandbox. Exit the container and re-run `/cenci:design <args>` on the host. Sandboxed sessions get design access through headless reads only (`/cenci:implement`, `verify-ui`)."
+**Stop.**
+
+If neither check matches, proceed with the normal availability check below.
 
 Before parsing arguments, verify that Pencil is reachable.
 
