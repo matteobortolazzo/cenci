@@ -126,7 +126,10 @@ cleanup: "cenci close {number}"
 a single uppercase letter (`R`, `D`, `I`); `cenci run <workflow> {number}`
 builds the `<number>-<skill>` window and launches the agent.
 `cenci run` chooses `refine`/`design`/`implement` from its built-in Claude templates
-with zero extra config.
+with zero extra config. The design workflow — design dispatches on the host, since the
+Pencil desktop app it drives is never reachable inside the cenci sandbox — always
+resolves to the host command regardless of the sandbox default, and an explicit
+`--sandbox` for it is a usage error.
 
 **`cleanup`** fires when a card leaves the column (detected on refresh). A single
 top-level `cleanup` covers every column that doesn't define its own. `cenci close
@@ -177,7 +180,8 @@ file is already complete, skips silently with a short log line. Because a local
 `columns:` list replaces the global list entirely (it never merges), the generated
 file declares every column and its actions inline: `New` gets a local `R`
 (Refine) action, `Refined` gets local `I` (Implement) and, when `pencil.enabled`
-is on, a gated `D` (Design) action, and `Planned` gets a local `I` (Implement)
+is on, a gated `D` (Design) action — `cenci run design {number} --no-sandbox`,
+since design dispatches on the host — and `Planned` gets a local `I` (Implement)
 action so an already-planned ticket can still be manually re-dispatched from the
 board, plus `E` (Edit plan) and `V` (View plan) actions on its saved plan file. `Designed`
 and `Implemented` are labels in the ticket lifecycle but not board columns — only

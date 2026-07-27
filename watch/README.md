@@ -180,7 +180,7 @@ descriptive slug: `--slug` if given, else the whole description slugified.
 | Flag | Purpose |
 |------|---------|
 | `--agent <name>` | Agent to launch (`claude`, `codex`, …); default from config, else `claude` |
-| `--sandbox` / `--no-sandbox` | Sandbox is the default (`claude`→`cenci open`, the container being the mandatory runtime); `--no-sandbox` is the host opt-out. Both override the config default |
+| `--sandbox` / `--no-sandbox` | Sandbox is the default (`claude`→`cenci open`, the container being the mandatory runtime); `--no-sandbox` is the host opt-out. Both override the config default. Exception: `design` is host-only (the Pencil desktop app it drives is unreachable inside the sandbox) — passing `--sandbox` for it is a usage error, exit 2 |
 | `--model <model>` | Model override passed to the agent (substituted into `{model}`, else appended as `--model`) |
 | `--session <name>` | Target tmux session (default: the current session) |
 | `--slug <slug>` | Window-name slug for free-text runs; ignored for numeric tickets (named `<number>-<skill>`) |
@@ -211,9 +211,10 @@ spawn into a grouped session (non-zero exit, no window created). Pass an ungroup
 Built-in Go templates cover Claude `refine`/`design`/`implement` with zero config. An
 optional `config.json` (respecting `$XDG_CONFIG_HOME`, or `--config`) overrides the
 defaults and adds agents or workflows — the tokens `{ticket}` and `{model}` are
-substituted at launch. Launches run inside the cenci-sandbox container by default; the
-`"sandbox"` field below is optional and, when set to `false`, opts every launch out to
-the host (the same as passing `--no-sandbox`):
+substituted at launch. Launches run inside the cenci-sandbox container by default,
+**except `design`, which is host-only** (see below); the `"sandbox"` field below is
+optional and, when set to `false`, opts every non-host-only launch out to the host (the
+same as passing `--no-sandbox`):
 
 ```json
 {
@@ -224,7 +225,8 @@ the host (the same as passing `--no-sandbox`):
       "command": "claude",
       "sandboxCommand": "cenci open",
       "workflows": {
-        "implement": { "args": ["--", "/cenci:implement {ticket}"] }
+        "implement": { "args": ["--", "/cenci:implement {ticket}"] },
+        "design": { "host": true }
       }
     },
     "codex": {
@@ -243,6 +245,13 @@ the host (the same as passing `--no-sandbox`):
   }
 }
 ```
+
+Each workflow entry may also carry a `"host"` field (a nullable boolean; unset is
+distinct from `false`). When `true`, that (agent, workflow) always resolves the host
+command — an explicit `--sandbox` becomes a usage error (exit 2) instead of a silent
+override. `design` ships `"host": true` for all three built-in agents (the Pencil
+desktop app it drives is never reachable inside the sandbox); set `"host": false` in
+your `config.json` to opt a workflow back into sandbox dispatch.
 
 Only the built-in Claude templates ship today; Codex and opencode require a
 `config.json` entry. Until one is configured, `--agent codex` exits with a helpful "no

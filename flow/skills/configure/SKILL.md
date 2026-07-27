@@ -293,7 +293,11 @@ If no frontend framework is detected, skip this section entirely (do not set `pe
    question 9). Headless auth comes from the host's `~/.pencil/session-cli.json`
    (created by `pencil login`, staged into the container automatically) or a
    `PEN_CLI_KEY` set in the host environment (forwarded per agent session, never baked
-   into the image).
+   into the image). This headless fallback covers the *pipeline's* reads only:
+   design itself is host-only and refuses to run in-container — `/cenci:design`
+   fails fast with host-session guidance (see `design/SKILL.md` Phase 0.5).
+   `cenci run design {number} --no-sandbox` is how the generated board dispatches
+   it (see the `D` action below).
 
 ### Playwright CLI Setup
 
@@ -1020,7 +1024,7 @@ For each MCP selected in question 5:
          D:
            name: Design
            type: shell
-           command: "cenci run design {number}"
+           command: "cenci run design {number} --no-sandbox"
 
      - name: Planned
        actions:
@@ -1138,11 +1142,11 @@ For each MCP selected in question 5:
      recorded flag:
      1. Read the existing file and derive the **recommended action set** this repo
         would generate above: Refine/Implement on `New`/`Refined`/`Planned`,
-        pencil-gated Design on `Refined`, Edit-plan (`E`) and View-plan (`V`) actions
-        on `Planned`, an unconditional `W` (Open worktree) on `In Review`, and per
-        runnable/testable project a serve (`S`/`Sb`/`Sf`/…) and test (`T`/`Tb`/`Tf`/…)
-        In Review action. Outside `columns:`, at top level, it also includes the
-        board-level `C`/`X` launch actions and `cleanup: "cenci close {number}"`.
+        pencil-gated Design on `Refined` (recommended command:
+        `cenci run design {number} --no-sandbox`), Edit-plan (`E`) and View-plan (`V`)
+        actions on `Planned`, an unconditional `W` (Open worktree) on `In Review`, and
+        per runnable/testable project a serve (`S`/`Sb`/`Sf`/…) and test
+        (`T`/`Tb`/`Tf`/…) In Review action. Outside `columns:`, at top level, it also includes the board-level `C`/`X` launch actions and `cleanup: "cenci close {number}"`.
      2. Compute the **delta** = recommended actions absent from the existing file.
         Match by column + action intent (name/command) — or, for the column-less
         top-level `C`/`X`/`cleanup` actions, by intent alone — **not** by raw key,
@@ -1153,6 +1157,13 @@ For each MCP selected in question 5:
         user-added, e.g. a custom `S: Sync` board-level action) that would
         prefix-collide with the proposed `S`/`T` key, pick a different leading
         letter for that action instead.
+        - **Design-only exception (narrow, do not generalize to other actions)**:
+          an existing `Refined.D` (Design) action whose command lacks
+          `--no-sandbox` still matches by intent, so it is not flagged as
+          "missing" — but it counts toward the delta as an **update** (not an
+          "add"), since its command must become
+          `cenci run design {number} --no-sandbox`. No other action's command is
+          diff-compared this way.
      3. **Delta non-empty** → present the concrete additions via `AskUserQuestion`,
         e.g. "`.lazyboards.yml` is missing a PR-worktree test action: `T` → run tests
         (`dotnet test`) in the PR worktree. Add it?" — or, when a leading letter had

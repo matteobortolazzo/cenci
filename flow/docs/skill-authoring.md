@@ -86,3 +86,16 @@ from external or semi-trusted sources.
   → parse response → rename), give each new intermediate step its own explicit
   failure-handling instruction — a single blanket sentence written for the original
   step doesn't automatically cover steps inserted before or after it.
+- When writing a contract test for a skill file, never weaken the skill's authoritative
+  prose or documented patterns (e.g. a "Convention" section's code example) to satisfy
+  the test's search logic. Instead, scope and refine the test's predicates — e.g., if a
+  test needs to find a guarded invocation of `pencil interactive -a desktop` but the
+  file also legitimately mentions that pattern in an earlier Convention section, scope
+  the test's grep to search only from the guard's phase heading onward (using `tail -n
+  +<line_number>` plus line-offset math), not by deleting `-a desktop` from the earlier
+  section. Weakening prose to dodge naive whole-file matching creates a silent
+  regression: an agent following the skill literally will miss the stripped-out `-a
+  desktop` flag and silently fail. Self-referential edits (modifying both the skill
+  file and its own contract test in the same change) deserve extra scrutiny in review
+  because a test-logic regression and a prose regression can be hard to tell apart at a
+  glance.

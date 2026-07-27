@@ -14,7 +14,7 @@ scope and planning decisions human-gated.
 |-------|-------------|
 | `/cenci:configure` | Interactive project setup: tech stack, sandboxing, MCP/LSP servers |
 | `/cenci:refine <ticket-id>` | Iterative ticket refinement until it's ready for planning |
-| `/cenci:design <ticket-id \| description>` | Interactive design reasoning and `.pen` file creation using Pencil |
+| `/cenci:design <ticket-id \| description>` | Interactive design reasoning and `.pen` file creation using Pencil (host-only — refuses to run inside the cenci sandbox) |
 | `/cenci:implement <ticket-id>` | Full pipeline: plan, test, implement, refactor, security review, code review, lessons, PR |
 | `/cenci:refactor [scope]` | Analyze a codebase with specialized subagents and propose refactoring tickets |
 | `/cenci:review <pr-number \| file-paths>` | Review code with specialized security, quality, and silent-failure subagents |
@@ -138,7 +138,7 @@ companion) for every skill, including the internal ones not listed above.
 | `ci-repair` | — | project-core, shell-rules, subagent-safety, testing | — | — |
 | `codex-runtime` | — | — | — | — |
 | `configure` | codex.md | babysit, codex-runtime, implement, project-core, shell-rules, testing, verify-ui | detect-project.sh, merge-sandbox-config.sh | code-reviewer |
-| `design` | codex.md | attachments, codex-runtime, project-core, shell-rules, ticket-ownership | — | — |
+| `design` | codex.md | attachments, codex-runtime, project-core, shell-rules, ticket-ownership, verify-ui | — | — |
 | `frontend-classification` | — | implement, refine | — | — |
 | `implement` | codex.md, phases/phase-1-plan.md, phases/phase-2-worktree.md, phases/phase-3-test-red.md, phases/phase-4-implement-green.md, phases/phase-5-refactor.md, phases/phase-6-7-review.md, phases/phase-8-docs.md, phases/phase-9-pr.md | address-review, attachments, babysit, codex-runtime, frontend-classification, project-core, review, shell-rules, subagent-safety, testing, ticket-ownership, verify-ui | run-artifact-dir.sh | code-reviewer, context-gatherer, implementer, lessons-collector, planner, security-reviewer, silent-failure-hunter |
 | `maintain` | codex.md, modes/backlog.md, modes/clients.md, modes/docs.md, modes/rules.md, modes/structure.md | codex-runtime, project-core, shell-rules, subagent-safety, worktrees | check.sh | backlog-maintainer, docs-maintainer, portability-maintainer, rules-maintainer, structure-maintainer |

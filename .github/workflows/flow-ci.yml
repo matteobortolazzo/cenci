@@ -132,3 +132,5 @@ jobs:
         run: bash flow/tests/followup-generation-limits.test.sh
       - name: Verify root-safe chmod contract
         run: bash flow/tests/root-safe-perms-contract.test.sh
+      - name: Verify design host-only sandbox guard
+        run: bash flow/tests/design-sandbox-guard.test.sh

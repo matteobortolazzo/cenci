@@ -600,7 +600,7 @@ extract_column "Refined" >"${REFINED_COL}"
 assert_contains "${REFINED_COL}" "name: Implement"
 assert_contains "${REFINED_COL}" 'command: "cenci run implement {number}"'
 assert_contains "${REFINED_COL}" "name: Design"
-assert_contains "${REFINED_COL}" 'command: "cenci run design {number}"'
+assert_contains "${REFINED_COL}" 'command: "cenci run design {number} --no-sandbox"'
 assert_contains "${EXTRACTED_5F}" "pencil.enabled"
 
 echo "case: 5f template gives the Planned column local I (Implement), E (Edit plan), and V (View plan) actions"

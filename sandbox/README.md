@@ -335,6 +335,13 @@ limitations.
 
 ### Pencil auth (headless design reads)
 
+`/cenci:design` itself never runs in-container — the Pencil desktop app it drives is
+never reachable from inside the cenci sandbox, so the skill fails fast with
+host-session guidance rather than attempting the headless CLI (see
+`flow/skills/design/SKILL.md` Phase 0.5). What this section documents is narrower:
+the headless reads the *pipeline* performs (`implement`, `verify-ui`) once a design
+already exists.
+
 Repos with Pencil design workflows enabled (`pencil.enabled` in `.cenci/config.json`)
 run their `implement`/`verify-ui` design reads inside the sandbox through
 `@pen.dev/cli`'s **headless** mode (`pencil interactive -i <design>.pen`) — the CLI

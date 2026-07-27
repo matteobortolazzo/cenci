@@ -1,6 +1,7 @@
 package run
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -8,6 +9,26 @@ import (
 
 	"github.com/matteobortolazzo/cenci/watch/internal/daemon"
 )
+
+// ErrHostOnlyWorkflow is the sentinel a caller detects via errors.Is to
+// distinguish a host-only-workflow usage error from any other Run failure
+// (e.g. run_cmd.go maps it to exit 2 instead of the default exit 1).
+var ErrHostOnlyWorkflow = errors.New("workflow runs on the host only")
+
+// hostOnlyWorkflowError wraps ErrHostOnlyWorkflow with the exact one-line
+// stderr hint (ticket #647 Q1). A plain fmt.Errorf("%w: ...", ErrHostOnlyWorkflow)
+// would prefix the sentinel's own text, so Error() is implemented directly.
+type hostOnlyWorkflowError struct {
+	workflow string
+}
+
+func (e hostOnlyWorkflowError) Error() string {
+	return e.workflow + " runs on the host only — the Pencil desktop app is unreachable inside the sandbox; drop --sandbox (or pass --no-sandbox)"
+}
+
+func (e hostOnlyWorkflowError) Unwrap() error {
+	return ErrHostOnlyWorkflow
+}
 
 // Controller is the small consumer-side tmux interface the launcher needs.
 // *tmux.ExecClient satisfies it structurally (SetWindowOption already exists;
@@ -27,10 +48,13 @@ type Opts struct {
 	// any additional context (e.g. "42 focus on the API layer"). It is
 	// substituted whole into {ticket}; only the first token drives gh lookup
 	// and the numeric window-name prefix.
-	Ticket     string
-	Agent      string // --agent; empty falls back to config defaultAgent then "claude"
-	Sandbox    bool   // resolved --sandbox value; only honored when SandboxSet
-	SandboxSet bool   // whether --sandbox/--no-sandbox was passed (flag > config)
+	Ticket  string
+	Agent   string // --agent; empty falls back to config defaultAgent then "claude"
+	Sandbox bool   // resolved --sandbox value; only honored when SandboxSet
+	// SandboxSet is whether --sandbox/--no-sandbox was passed (flag > config).
+	// Ignored for a host-only workflow (e.g. design): an explicit --sandbox=true
+	// there is a usage error (ErrHostOnlyWorkflow), not a silent override.
+	SandboxSet bool
 	Model      string // --model
 	Session    string // --session; empty uses the current tmux session
 	Slug       string // --slug
@@ -87,7 +111,9 @@ func Run(opts Opts, ctrl Controller) error {
 	}
 
 	// Resolve sandbox: explicit flag wins, else config default, else sandbox
-	// (the container is the mandatory runtime — #98). --no-sandbox opts out.
+	// (the container is the mandatory runtime — #98), except for a host-only
+	// workflow (e.g. design), which always forces host below.
+	// --no-sandbox opts out.
 	sandbox := opts.Sandbox
 	if !opts.SandboxSet {
 		if cfg.Sandbox != nil {
@@ -95,6 +121,18 @@ func Run(opts Opts, ctrl Controller) error {
 		} else {
 			sandbox = true
 		}
+	}
+
+	// A host-only workflow (e.g. design, whose Pencil desktop app is never
+	// reachable inside the sandbox) always resolves host. An explicit
+	// --sandbox is a usage error rather than a silent downgrade (per
+	// docs/cli-conventions.md:26-28); this must run before BuildCommand and
+	// the dry-run print below so `--sandbox --dry-run` exits with no output.
+	if cfg.hostOnly(agent, opts.Workflow) {
+		if opts.SandboxSet && opts.Sandbox {
+			return hostOnlyWorkflowError{workflow: opts.Workflow}
+		}
+		sandbox = false
 	}
 
 	// 2 + 5. Resolve template and build the launcher command.
