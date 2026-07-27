@@ -67,6 +67,8 @@ When dynamically discovering a file set (via `find`, glob, etc.) to loop over an
 
 - **`xargs` invocations**: Always include the `-r` / `--no-run-if-empty` flag. Without it, if the `find` matches zero files, GNU `xargs` invokes the target command once with zero arguments. For `bash` specifically, this may silently exit 0 (reading from inherited stdin) or hang, causing a health check to report green despite running zero tests.
 - **Shell loop patterns**: Explicitly verify that at least one iteration actually executed a non-skip command. Use a counter (e.g., `n=0; ... n=$((n+1)); done; [ "$n" -gt 0 ] || exit 1`) or similar guard. If the glob pattern or conditionals cause every iteration to be skipped (e.g., all matched files are excluded), the loop exits 0, falsely reporting health.
+- **Type filtering with `find`**: Always use `find -type f` (not bare glob patterns or symlink-following globs) when discovering executable scripts or data files—a symlink named `*.sh` or `*.test.sh` pointing at arbitrary code should never be discovered and executed. Bare patterns like `*.test.sh` will follow symlinks; `-type f` restricts to regular files only (ticket #720).
+- **Pre-execution file validation**: When discovering files to execute (especially via `find`), validate each file before invocation. Check that it is readable and non-empty (e.g., `[[ -r "$f" && -s "$f" ]]`) rather than relying solely on post-invocation error handling. This prevents false-greens from unreadable or zero-byte files, which would silently exit 0 when invoked as `bash <empty-file>` (mirroring the pattern used by `flow/skills/maintain/scripts/check.sh`'s `check_structural_tests`, ticket #720).
 
 ## This repo's gates (dogfooding)
 
@@ -75,9 +77,13 @@ This repo configures a `gateCommand` for each of its three projects in
 
 | Project | `gateCommand` |
 |---|---|
-| `flow` | `find . -name '*.json' -print0 \| xargs -0 -r -n1 jq empty && find . -name '*.test.sh' -print0 \| sort -z \| xargs -0 -r -n1 bash` |
+| `flow` | `bash scripts/run-checks.sh` |
 | `watch` | `make test` |
 | `sandbox` | `n=0; for t in tests/*.test.sh; do [ "$t" = tests/smoke.test.sh ] && continue; bash "$t" \|\| exit 1; n=$((n+1)); done; [ "$n" -gt 0 ] \|\| exit 1` |
+
+`flow`'s gate delegates its JSON-validation and discovery/execution false-green
+guards (the two bullets above) to `flow/scripts/run-checks.sh` — the same
+script CI's `flow-test` job invokes, so the two never drift apart.
 
 ## See also
 

@@ -23,8 +23,8 @@
 # Follows the established flow test idiom (flow/tests/parity/parity.test.sh,
 # flow/codex/runtime.test.sh): `set -uo pipefail`, mktemp -d fixtures, a
 # `failures=` counter, small assert_* helpers, self-contained, auto-discovered
-# by flow's gateCommand (`find . -name '*.test.sh' -print0 | sort -z | xargs
-# -0 -r -n1 bash`, run from the flow/ project directory).
+# by flow's shared executor (`flow/scripts/run-checks.sh`, invoked by both
+# CI's flow-test job and the flow gateCommand).
 #
 # Doc assertions use stable literal phrases anchored at the new gate step's
 # expected content, never a generic marker that might already exist
