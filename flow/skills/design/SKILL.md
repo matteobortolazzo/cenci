@@ -6,7 +6,7 @@ argument-hint: <ticket-id | design description> [additional context]
 user-invocable: true
 disable-model-invocation: true
 model: opus
-allowed-tools: Read, Write, Bash(pencil:*), Bash(gh:*), Bash(git:*), Bash(curl:*), Bash(mkdir:*), Bash(echo:*), Bash(test:*), Glob, Grep, AskUserQuestion, WebFetch, mcp__pencil__get_editor_state, mcp__pencil__get_guidelines, mcp__pencil__batch_get, mcp__pencil__batch_design, mcp__pencil__get_screenshot, mcp__pencil__export_nodes, mcp__pencil__find_empty_space_on_canvas, mcp__pencil__snapshot_layout, mcp__pencil__open_document, mcp__pencil__get_variables, mcp__pencil__set_variables, mcp__pencil__replace_all_matching_properties, mcp__pencil__search_all_unique_properties
+allowed-tools: Read, Write, Bash(pencil), Bash(pencil interactive:*), Bash(which pencil:*), Bash(gh issue:*), Bash(gh label create:*), Bash(gh api user:*), Bash(git remote get-url:*), Bash(git add:*), Bash(git commit:*), Bash(git rev-parse:*), Bash(mkdir:*), Bash(echo:*), Bash(test:*), Glob, Grep, AskUserQuestion, WebFetch, mcp__pencil__get_editor_state, mcp__pencil__get_guidelines, mcp__pencil__batch_get, mcp__pencil__batch_design, mcp__pencil__get_screenshot, mcp__pencil__export_nodes, mcp__pencil__find_empty_space_on_canvas, mcp__pencil__snapshot_layout, mcp__pencil__open_document, mcp__pencil__get_variables, mcp__pencil__set_variables, mcp__pencil__replace_all_matching_properties, mcp__pencil__search_all_unique_properties
 ---
 
 > **Client dispatch**: In Codex, read `codex-runtime` and `design/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
@@ -92,7 +92,7 @@ Before parsing arguments, verify that Pencil is reachable.
    ```
 2. **If the call succeeds** → Pencil is available. Check the response for the currently active document file path and store it as `$PENCIL_OPEN_DOC` (set to the file path string if a document is open, or empty if no document is open). Proceed to argument parsing.
 3. **If the call fails** → attempt auto-launch:
-   a. Run `pencil &` to launch Pencil in the background, then retry the probe up to 3 times with 3-second pauses between attempts.
+   a. Launch Pencil in the background: run the bare command `pencil` with the Bash tool's background-execution mode (the equivalent of `pencil &`). The command string must be exactly `pencil` — never append `&` to it, or the invocation stops matching the exact-match `Bash(pencil)` grant and prompts. Then retry the probe up to 3 times with 3-second pauses between attempts.
       - If a retry succeeds → proceed to argument parsing.
       - If all 3 retries fail → tell the user:
         "Pencil was launched but the CLI connection could not be established. Ensure Pencil is running and accepting CLI connections."
@@ -104,7 +104,7 @@ Before parsing arguments, verify that Pencil is reachable.
 2. **If the call succeeds** → Pencil MCP is available. Store active document path as `$PENCIL_OPEN_DOC`. Proceed to argument parsing.
 3. **If the call fails** → attempt auto-launch:
    a. Run `which pencil 2>/dev/null` to check if the `pencil` command is available.
-   b. **If found**: Run `pencil &` to launch Pencil in the background, then retry `get_editor_state(include_schema: false)` up to 3 times with 3-second pauses between attempts.
+   b. **If found**: Launch Pencil in the background: run the bare command `pencil` with the Bash tool's background-execution mode (the equivalent of `pencil &`). The command string must be exactly `pencil` — never append `&`. Then retry `get_editor_state(include_schema: false)` up to 3 times with 3-second pauses between attempts.
       - If a retry succeeds → proceed to argument parsing.
       - If all 3 retries fail → tell the user:
         "Pencil was launched but the MCP connection could not be established. Check MCP server status in Pencil (View → MCP Server Status) and ensure the Pencil MCP server is listed in your Claude Code MCP configuration."
@@ -462,8 +462,16 @@ Options: "Saved, proceed", "Cancel commit"
 
 Stage and commit the design artifacts on the current branch. **Do not stage screenshots** — the `.pen` file is the source of truth and any `screenshots/` directory inside `<designPath>` is local-only scratch.
 
+Stage and commit as **two standalone Bash calls** — never a `&&` compound (per `shell-rules`, Claude Code evaluates every segment of a compound, so a compound can prompt even when both halves are granted).
+
 ```bash
-git add <designPath>/*.pen <designPath>/DESIGN.md && git commit -m "feat(design): <description>"
+git add <designPath>/*.pen <designPath>/DESIGN.md
+```
+
+Verify both files were actually staged before committing, using only the client's file tools (e.g. Glob or Read — no additional Bash grant needed): confirm the `.pen` file exists at `<designPath>` so the `git add` glob above is known to have matched it, rather than silently resolving to nothing. If it's missing, stop and apply the same recovery as Step 6D's "Commit fails" case rather than committing an incomplete change.
+
+```bash
+git commit -m "feat(design): <description>" -- <designPath>/*.pen <designPath>/DESIGN.md
 ```
 
 - **If ticket mode:** Include ticket ref in the commit body: `#<ticket-id>`

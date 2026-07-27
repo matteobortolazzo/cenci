@@ -10,6 +10,18 @@
 # `sandbox/README.md`, `docs/orchestration.md`) that keep the host-only split
 # discoverable.
 #
+# #738 addendum: because design dispatches unsandboxed on the host (#734)
+# while reading untrusted GitHub issue bodies/comments, its blanket
+# Bash(curl:*)/Bash(gh:*)/Bash(git:*)/Bash(pencil:*) grants would let a
+# prompt-injected issue body reach curl/gh/git/pencil with no container
+# boundary. This test also pins the narrowed, exact-prefix `allowed-tools`
+# grant set (negative substring checks + exhaustive set equality against the
+# 13-entry expected list + a bare-`Bash` rejection), the git add/commit
+# compound split into two standalone Bash calls, and invocation-vs-grant
+# scans that every `gh`/`git` call in the skill body falls under a granted
+# prefix — so a future edit cannot silently re-widen the grant back to a
+# blanket form.
+#
 # Follows the idiom of flow/tests/refine-skill-contract.test.sh: a
 # `failures=` counter, small assert_* helpers, exact substring markers (never
 # generic keywords — see docs/shell-scripting-gotchas.md), self-contained,
@@ -129,6 +141,94 @@ if [[ -n "${skill}" ]]; then
   assert_contains "${skill}" "Bash(echo:*)" "skills/design/SKILL.md allowed-tools echo grant"
   assert_contains "${skill}" "Bash(test:*)" "skills/design/SKILL.md allowed-tools test grant"
 
+  # skill_path is shared by both the least-privilege block below and the
+  # placement block further down (hoisted from its original placement-block
+  # assignment so both blocks can use it).
+  skill_path="${FLOW_DIR}/skills/design/SKILL.md"
+
+  # --- #738: least-privilege allowed-tools ---------------------------------
+  # design dispatches unsandboxed on the host (#734) while reading untrusted
+  # GitHub issue bodies/comments; blanket Bash(curl:*)/Bash(gh:*)/Bash(git:*)
+  # grants would let a prompt-injected issue body reach curl/gh/git with no
+  # container boundary. These assertions pin the narrowed, exact-prefix grant
+  # set so a future edit cannot silently re-widen it back to a blanket form.
+
+  # AC #1/#2/#3: the four old blanket grants must never reappear, and no
+  # `curl` reference (grant or invocation) may exist anywhere in the skill —
+  # the domain-gated WebFetch grant already covers every legitimate fetch.
+  assert_not_contains "${skill}" "Bash(curl:*)" "skills/design/SKILL.md blanket curl grant"
+  assert_not_contains "${skill}" "Bash(gh:*)"   "skills/design/SKILL.md blanket gh grant"
+  assert_not_contains "${skill}" "Bash(git:*)"  "skills/design/SKILL.md blanket git grant"
+  assert_not_contains "${skill}" "Bash(pencil:*)" "skills/design/SKILL.md blanket pencil grant"
+  assert_not_contains "${skill}" "curl" "skills/design/SKILL.md any curl reference"
+
+  # Exhaustive set equality: parse the frontmatter's Bash(...) entries and
+  # compare against the exact expected 13-entry least-privilege list, both
+  # sorted so the comparison is order- and locale-independent.
+  EXPECTED_BASH_GRANTS='Bash(pencil)
+Bash(pencil interactive:*)
+Bash(which pencil:*)
+Bash(gh issue:*)
+Bash(gh label create:*)
+Bash(gh api user:*)
+Bash(git remote get-url:*)
+Bash(git add:*)
+Bash(git commit:*)
+Bash(git rev-parse:*)
+Bash(mkdir:*)
+Bash(echo:*)
+Bash(test:*)'
+  allowed_line="$(grep -m1 '^allowed-tools:' "${skill_path}")"
+  actual_bash_grants="$(printf '%s\n' "${allowed_line}" | grep -o 'Bash([^)]*)' | LC_ALL=C sort -u)"
+  expected_bash_grants="$(printf '%s\n' "${EXPECTED_BASH_GRANTS}" | LC_ALL=C sort -u)"
+  if [[ "${actual_bash_grants}" != "${expected_bash_grants}" ]]; then
+    fail "skills/design/SKILL.md allowed-tools Bash grant set mismatch:
+--- expected ---
+${expected_bash_grants}
+--- actual ---
+${actual_bash_grants}"
+  fi
+
+  # Bare-`Bash` rejection: the grep above is blind to a parenthesis-less
+  # entry (e.g. a bare `Bash` with no scoping at all), so split the raw
+  # frontmatter value on commas and check each trimmed field explicitly.
+  allowed_value="${allowed_line#allowed-tools:}"
+  IFS=',' read -r -a allowed_fields <<< "${allowed_value}"
+  for field in "${allowed_fields[@]}"; do
+    field="${field#"${field%%[![:space:]]*}"}"
+    field="${field%"${field##*[![:space:]]}"}"
+    if [[ "${field}" == "Bash" ]]; then
+      fail "skills/design/SKILL.md allowed-tools: bare, unscoped 'Bash' entry grants every shell command"
+    fi
+  done
+
+  # Compound-split: the git add/commit must be two standalone Bash calls,
+  # never a `&&` compound (shell-rules: Claude Code evaluates every segment
+  # of a compound, so a compound can prompt even when both halves are
+  # granted).
+  assert_not_contains "${skill}" "&& git commit" "skills/design/SKILL.md git add/commit compound"
+  assert_contains "${skill}" 'git add <designPath>/*.pen <designPath>/DESIGN.md' "skills/design/SKILL.md standalone git add"
+  assert_contains "${skill}" 'git commit -m "feat(design): ' "skills/design/SKILL.md standalone git commit"
+
+  # Invocation-vs-grant scans (guardrails against future widening): every
+  # `gh`/`git` invocation token pair actually present in the file must fall
+  # under one of the granted prefixes above.
+  while IFS= read -r cmd; do
+    [[ -n "${cmd}" ]] || continue
+    case "${cmd}" in
+      "gh issue"*|"gh label create"*|"gh api user"*) ;;
+      *) fail "skills/design/SKILL.md: ungranted gh invocation: [${cmd}]" ;;
+    esac
+  done < <(grep -oE '\bgh [a-z]+( [a-z]+)?' "${skill_path}" | LC_ALL=C sort -u)
+
+  while IFS= read -r cmd; do
+    [[ -n "${cmd}" ]] || continue
+    case "${cmd}" in
+      "git add"*|"git commit"*|"git rev-parse"*|"git remote get-url"*) ;;
+      *) fail "skills/design/SKILL.md: ungranted git invocation: [${cmd}]" ;;
+    esac
+  done < <(grep -oE '\bgit [a-z-]+( [a-z-]+){0,2}' "${skill_path}" | LC_ALL=C sort -u)
+
   # 2. Placement: the guard precedes both the `pencil interactive -a desktop`
   #    probe and the `pencil &` auto-launch in either mode, and follows the
   #    `## Phase 0.5` heading (guard lives in Phase 0.5, not Phase 0 — Phase
@@ -143,7 +243,6 @@ if [[ -n "${skill}" ]]; then
   #    block elsewhere in the skill; scanning the whole file would mistake
   #    that earlier, correctly-unguarded mention for the guarded
   #    probe/auto-launch invocation.
-  skill_path="${FLOW_DIR}/skills/design/SKILL.md"
   line_phase="$(grep -n '^## Phase 0\.5' "${skill_path}" | head -1 | cut -d: -f1)"
   line_guard="$(grep -n 'CENCI_SANDBOX' "${skill_path}" | head -1 | cut -d: -f1)"
   if [[ -n "${line_phase}" ]]; then
