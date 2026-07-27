@@ -462,6 +462,215 @@ func TestSandboxUpdateAgent_OneRuntimeVolumeQueryFails_HealthyRuntimeStillUpdate
 	}
 }
 
+// TestSandboxUpdateAgentUnpin_NoVolumeAnywhere_RunsInPreferredRuntime pins
+// #709: `--unpin` follows the same owner-resolution as a bare update-agent —
+// when the volume exists nowhere, the unpin-then-update sequence runs once,
+// in the preferred (podman-first) runtime, never docker.
+func TestSandboxUpdateAgentUnpin_NoVolumeAnywhere_RunsInPreferredRuntime(t *testing.T) {
+	fakeDir := t.TempDir()
+	dockerLog, podmanLog := writeScriptedRuntimePair(t, fakeDir)
+	assets := writeAssetFixture(t)
+
+	cmd := exec.Command(binaryPath, "sandbox", "update-agent", "--agent", "claude", "--unpin")
+	cmd.Env = append(batchEnv(t, fakeDir, assets),
+		"FAKE_VOLUMES_DOCKER=",
+		"FAKE_VOLUMES_PODMAN=",
+	)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandbox update-agent --unpin: %v\n%s", err, output)
+	}
+
+	podmanCalls, _ := os.ReadFile(podmanLog)
+	if !strings.Contains(string(podmanCalls), "agent-cli.sh unpin claude") || !strings.Contains(string(podmanCalls), "agent-cli.sh update claude") {
+		t.Errorf("expected the unpin-then-update sequence to run in the preferred (podman-first) runtime, got podman calls:\n%s", podmanCalls)
+	}
+	dockerCalls, _ := os.ReadFile(dockerLog)
+	if strings.Contains(string(dockerCalls), "agent-cli.sh unpin") || strings.Contains(string(dockerCalls), "agent-cli.sh update") {
+		t.Errorf("expected docker left untouched (podman is preferred), got docker calls:\n%s", dockerCalls)
+	}
+}
+
+// TestSandboxUpdateAgent_DualRuntime_MixedRefusalAndFailure_Exits1 pins
+// #709's refusal-aware exit classification: exit 2 only fires when EVERY
+// collected error is a pin refusal. Here docker refuses (pinned, exit 2) but
+// podman fails for an ordinary reason (exit 1) — the mix must exit 1, not 2.
+func TestSandboxUpdateAgent_DualRuntime_MixedRefusalAndFailure_Exits1(t *testing.T) {
+	fakeDir := t.TempDir()
+	writeScriptedRuntimePair(t, fakeDir)
+	assets := writeAssetFixture(t)
+
+	cmd := exec.Command(binaryPath, "sandbox", "update-agent", "--agent", "claude")
+	cmd.Env = append(batchEnv(t, fakeDir, assets),
+		"FAKE_VOLUMES_DOCKER=cenci-agent-cli-claude\n",
+		"FAKE_VOLUMES_PODMAN=cenci-agent-cli-claude\n",
+		"FAKE_RUN_EXIT_DOCKER=2",
+		"FAKE_RUN_EXIT_PODMAN=1",
+	)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected a mix of pin-refusal and ordinary failure to exit 1 (not every owner refused), got %T %v\n%s", err, err, output)
+	}
+}
+
+// TestSandboxUpdateAgent_DualRuntime_BothRefused_Exits2 pins #709's
+// refusal-aware exit classification's other half: when EVERY collected error
+// is a pin refusal (both runtimes' volumes are pinned), the aggregate exit
+// is 2, not the generic 1.
+func TestSandboxUpdateAgent_DualRuntime_BothRefused_Exits2(t *testing.T) {
+	fakeDir := t.TempDir()
+	writeScriptedRuntimePair(t, fakeDir)
+	assets := writeAssetFixture(t)
+
+	cmd := exec.Command(binaryPath, "sandbox", "update-agent", "--agent", "claude")
+	cmd.Env = append(batchEnv(t, fakeDir, assets),
+		"FAKE_VOLUMES_DOCKER=cenci-agent-cli-claude\n",
+		"FAKE_VOLUMES_PODMAN=cenci-agent-cli-claude\n",
+		"FAKE_RUN_EXIT_DOCKER=2",
+		"FAKE_RUN_EXIT_PODMAN=2",
+	)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("expected both owners refusing (pinned) to exit 2, got %T %v\n%s", err, err, output)
+	}
+	if !strings.Contains(string(output), "--unpin") || !strings.Contains(string(output), "--version") {
+		t.Errorf("expected the refusal message to name both --unpin and --version, got:\n%s", output)
+	}
+}
+
+// TestSandboxUpdateAgent_DualRuntime_VolumeLsFailurePlusPodmanRefusal_Exits1
+// pins #709's classification edge case: docker's `volume ls` enumeration
+// query fails outright (a generic infrastructure error, never a pin
+// refusal), while podman resolves ownership and refuses (pinned, exit 2).
+// Since not every collected error is a pin refusal, the aggregate must exit
+// 1, not 2.
+func TestSandboxUpdateAgent_DualRuntime_VolumeLsFailurePlusPodmanRefusal_Exits1(t *testing.T) {
+	fakeDir := t.TempDir()
+	writeScriptedRuntimePair(t, fakeDir)
+	assets := writeAssetFixture(t)
+
+	cmd := exec.Command(binaryPath, "sandbox", "update-agent", "--agent", "claude")
+	cmd.Env = append(batchEnv(t, fakeDir, assets),
+		"FAKE_VOLUME_LS_EXIT_DOCKER=1", // docker's volume ls query fails outright
+		"FAKE_VOLUMES_PODMAN=cenci-agent-cli-claude\n",
+		"FAKE_RUN_EXIT_PODMAN=2",
+	)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected a volume-ls enumeration failure plus a pin refusal to exit 1 (not every error is a refusal), got %T %v\n%s", err, err, output)
+	}
+}
+
+// TestSandboxUpdateAgentAll_DualRuntime_SpansAgentsAndRuntimes pins #709:
+// --all iterates sandbox.SupportedAgents across every runtime that already
+// owns each agent's volume — docker owns claude, podman owns codex — and
+// refreshes each only in its owner, never cross-contaminating.
+func TestSandboxUpdateAgentAll_DualRuntime_SpansAgentsAndRuntimes(t *testing.T) {
+	fakeDir := t.TempDir()
+	dockerLog, podmanLog := writeScriptedRuntimePair(t, fakeDir)
+	assets := writeAssetFixture(t)
+
+	cmd := exec.Command(binaryPath, "sandbox", "update-agent", "--all")
+	cmd.Env = append(batchEnv(t, fakeDir, assets),
+		"FAKE_VOLUMES_DOCKER=cenci-agent-cli-claude\n",
+		"FAKE_VOLUMES_PODMAN=cenci-agent-cli-codex\n",
+	)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandbox update-agent --all: %v\n%s", err, output)
+	}
+
+	dockerCalls, _ := os.ReadFile(dockerLog)
+	if !strings.Contains(string(dockerCalls), "agent-cli.sh update claude --skip-if-pinned") {
+		t.Errorf("expected docker's claude volume refreshed, got docker calls:\n%s", dockerCalls)
+	}
+	if strings.Contains(string(dockerCalls), "agent-cli.sh update codex") || strings.Contains(string(dockerCalls), "agent-cli.sh update opencode") {
+		t.Errorf("expected docker never touched for agents it doesn't own, got docker calls:\n%s", dockerCalls)
+	}
+	podmanCalls, _ := os.ReadFile(podmanLog)
+	if !strings.Contains(string(podmanCalls), "agent-cli.sh update codex --skip-if-pinned") {
+		t.Errorf("expected podman's codex volume refreshed, got podman calls:\n%s", podmanCalls)
+	}
+	if strings.Contains(string(podmanCalls), "agent-cli.sh update claude") || strings.Contains(string(podmanCalls), "agent-cli.sh update opencode") {
+		t.Errorf("expected podman never touched for agents it doesn't own, got podman calls:\n%s", podmanCalls)
+	}
+}
+
+// TestSandboxUpdateAgentAll_DualRuntime_SameAgentOwnedByBothRuntimes_RefreshesBoth
+// pins #709: when the same agent's volume genuinely exists under both
+// runtimes (a same-name collision, using scoped FAKE_VOLUMES_DOCKER/
+// FAKE_VOLUMES_PODMAN so ownership isn't a shared-fake artifact), --all
+// refreshes every owning runtime's copy, not just one.
+func TestSandboxUpdateAgentAll_DualRuntime_SameAgentOwnedByBothRuntimes_RefreshesBoth(t *testing.T) {
+	fakeDir := t.TempDir()
+	dockerLog, podmanLog := writeScriptedRuntimePair(t, fakeDir)
+	assets := writeAssetFixture(t)
+
+	cmd := exec.Command(binaryPath, "sandbox", "update-agent", "--all")
+	cmd.Env = append(batchEnv(t, fakeDir, assets),
+		"FAKE_VOLUMES_DOCKER=cenci-agent-cli-claude\n",
+		"FAKE_VOLUMES_PODMAN=cenci-agent-cli-claude\n",
+	)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandbox update-agent --all: %v\n%s", err, output)
+	}
+
+	dockerCalls, _ := os.ReadFile(dockerLog)
+	if !strings.Contains(string(dockerCalls), "agent-cli.sh update claude --skip-if-pinned") {
+		t.Errorf("expected docker's copy of claude refreshed, got docker calls:\n%s", dockerCalls)
+	}
+	podmanCalls, _ := os.ReadFile(podmanLog)
+	if !strings.Contains(string(podmanCalls), "agent-cli.sh update claude --skip-if-pinned") {
+		t.Errorf("expected podman's copy of claude refreshed too, got podman calls:\n%s", podmanCalls)
+	}
+}
+
+// TestSandboxUpdateAgentAll_DualRuntime_PartialSuccess_DockerVolumeLsFails_PodmanStillRefreshedNonZeroExit
+// pins #709's partial-success requirement: docker's `volume ls` fails
+// outright, but podman's genuinely resolved ownership of claude must still
+// be refreshed, with the failure aggregated and a non-zero final exit.
+func TestSandboxUpdateAgentAll_DualRuntime_PartialSuccess_DockerVolumeLsFails_PodmanStillRefreshedNonZeroExit(t *testing.T) {
+	fakeDir := t.TempDir()
+	dockerLog, podmanLog := writeScriptedRuntimePair(t, fakeDir)
+	assets := writeAssetFixture(t)
+
+	cmd := exec.Command(binaryPath, "sandbox", "update-agent", "--all")
+	cmd.Env = append(batchEnv(t, fakeDir, assets),
+		"FAKE_VOLUME_LS_EXIT_DOCKER=1", // docker's volume ls query fails outright
+		"FAKE_VOLUMES_PODMAN=cenci-agent-cli-claude\n",
+	)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected sandbox update-agent --all to exit non-zero when one runtime's volume ls query fails, output:\n%s", output)
+	}
+
+	podmanCalls, _ := os.ReadFile(podmanLog)
+	if !strings.Contains(string(podmanCalls), "agent-cli.sh update claude --skip-if-pinned") {
+		t.Errorf("expected the healthy podman runtime's claude volume still refreshed despite docker's enumeration failure, got podman calls:\n%s", podmanCalls)
+	}
+	dockerCalls, _ := os.ReadFile(dockerLog)
+	if !strings.Contains(string(dockerCalls), "volume ls") {
+		t.Errorf("expected docker's volume ls to have been attempted (and failed), got docker calls:\n%s", dockerCalls)
+	}
+	if !strings.Contains(strings.ToLower(string(output)), "docker") {
+		t.Errorf("expected the docker enumeration failure surfaced on output, got:\n%s", output)
+	}
+}
+
 // -- sandbox update-plugins -------------------------------------------------------------
 
 // TestSandboxUpdatePlugins_Scoped_SameContainerRunningUnderBothRuntimes_UpdatesBoth

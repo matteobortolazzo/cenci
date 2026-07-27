@@ -182,6 +182,11 @@ func joinArgv(argv []string) string {
 //	                        volumeCheckEngine/volumeCheckEngineStatus and
 //	                        dual_runtime_test.go's writeAgentRuntimeStub
 //	                        (watch AGENTS.md #493).
+//	FAKE_AGENT_UNPIN_EXIT — 'agent-cli.sh unpin <agent>' exit code (default 0);
+//	                        `update-agent --unpin`'s unpin-then-update
+//	                        sequence for a given owner runs the plain
+//	                        'agent-cli.sh update' only when the unpin call
+//	                        itself succeeds (#709).
 //	FAKE_ATTACH_EXIT     — exit code of the final `exec -it ...` attach
 //	FAKE_PLUGIN_MANIFEST — `cenci diagnose`'s best-effort plugin-manifest
 //	                        read, from either agent's marketplace.json
@@ -338,6 +343,7 @@ run) case "$*" in
     *'marketplace.json'*) fv PLUGIN_MANIFEST ""; exit "$(fe PLUGIN_MANIFEST)" ;;
     esac
     ;;
+  *'agent-cli.sh unpin'*) exit "$(fe AGENT_UNPIN)" ;;
   *'agent-cli.sh update'*) rs="$(fv RUN_STDERR "")"; [ -z "$rs" ] || printf '%s\n' "$rs" >&2; exit "$(fe RUN)" ;;
   *'agent-cli.sh status'*)
     fvb AGENT_STATUS "populated=yes\nversion=1.2.3\npin=\nlast_success=$(date +%s)\nlast_attempt=\n"
@@ -869,6 +875,16 @@ func TestSandboxUpdateAgent_UsageErrorsMakeNoRuntimeCalls(t *testing.T) {
 		{"sandbox", "update-agent", "--name", "old"},
 		{"sandbox", "update-agent", "--bogus"},
 		{"sandbox", "update-agent", "extra"},
+		// #709: --all sweeps every existing agent-CLI volume across every
+		// runtime and cannot be combined with an explicitly-set --agent,
+		// --version, or --unpin (mirrors update-plugins --all's guard).
+		{"sandbox", "update-agent", "--all", "--agent", "codex"},
+		{"sandbox", "update-agent", "--all", "--version", "1.2.3"},
+		{"sandbox", "update-agent", "--all", "--unpin"},
+		// #709: --unpin clears the pin and updates to latest, so a
+		// simultaneous --version (which would instead re-pin to that
+		// version) is a conflicting-input usage error.
+		{"sandbox", "update-agent", "--unpin", "--version", "1.2.3"},
 	}
 	for _, args := range tests {
 		t.Run(strings.Join(args[2:], "_"), func(t *testing.T) {
@@ -886,6 +902,175 @@ func TestSandboxUpdateAgent_UsageErrorsMakeNoRuntimeCalls(t *testing.T) {
 				t.Errorf("expected no runtime calls, got:\n%s", strings.Join(lines, "\n"))
 			}
 		})
+	}
+}
+
+// TestSandboxUpdateAgent_PinnedRefusal_Exits2WithMessage pins #709's pin-gate
+// propagation: a bare `update-agent` against a pinned shared volume must
+// surface the isolated updater's exit-2 refusal as the CLI's own exit code
+// (not the generic exit-1 "some error occurred" every other updater failure
+// gets), with the refusal message naming both escape hatches.
+func TestSandboxUpdateAgent_PinnedRefusal_Exits2WithMessage(t *testing.T) {
+	fakeDir := t.TempDir()
+	writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+
+	cmd := exec.Command(binaryPath, "sandbox", "update-agent")
+	cmd.Env = append(batchEnv(t, fakeDir, assets), "FAKE_RUN_EXIT=2")
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("expected the pin refusal to propagate as exit 2, got %T %v\n%s", err, err, output)
+	}
+	if !strings.Contains(string(output), "--unpin") || !strings.Contains(string(output), "--version") {
+		t.Errorf("expected the refusal message to name both --unpin and --version, got:\n%s", output)
+	}
+}
+
+// TestSandboxUpdateAgent_OrdinaryUpdaterFailure_Exits1 is the sibling
+// baseline to the pin-refusal case: a non-pin-related updater failure (exit
+// 1 from agent-cli.sh, e.g. a network error) must still exit 1, proving the
+// new refusal-aware exit classification doesn't broaden exit-2 to every
+// updater failure.
+func TestSandboxUpdateAgent_OrdinaryUpdaterFailure_Exits1(t *testing.T) {
+	fakeDir := t.TempDir()
+	writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+
+	cmd := exec.Command(binaryPath, "sandbox", "update-agent")
+	cmd.Env = append(batchEnv(t, fakeDir, assets), "FAKE_RUN_EXIT=1")
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected an ordinary updater failure to exit 1, got %T %v\n%s", err, err, output)
+	}
+}
+
+// TestSandboxUpdateAgent_Unpin_RunsUnpinBeforeUpdate pins #709's --unpin
+// sequence: `agent-cli.sh unpin <agent>` runs (hardened the same way as the
+// updater, but network-isolated and with no version argument) strictly
+// before the plain `agent-cli.sh update <agent>` (no version, no
+// --skip-if-pinned — the pin is already cleared).
+func TestSandboxUpdateAgent_Unpin_RunsUnpinBeforeUpdate(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+
+	cmd := exec.Command(binaryPath, "sandbox", "update-agent", "--agent", "claude", "--unpin")
+	cmd.Env = batchEnv(t, fakeDir, assets)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandbox update-agent --unpin: %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	unpinLine := "run --rm --user root --cap-drop=ALL --security-opt=no-new-privileges --network none --entrypoint /bin/bash -v cenci-agent-cli-claude:/opt/cenci-agent cenci-sandbox:latest /usr/local/bin/lib/agent-cli.sh unpin claude"
+	updateLine := "run --rm --user root --cap-drop=ALL --security-opt=no-new-privileges --entrypoint /bin/bash -v cenci-agent-cli-claude:/opt/cenci-agent cenci-sandbox:latest /usr/local/bin/lib/agent-cli.sh update claude"
+	unpinIdx, updateIdx := -1, -1
+	for i, l := range lines {
+		if l == unpinLine {
+			unpinIdx = i
+		}
+		if l == updateLine {
+			updateIdx = i
+		}
+	}
+	if unpinIdx < 0 {
+		t.Fatalf("expected the exact hardened unpin call [%s], got calls:\n%s", unpinLine, strings.Join(lines, "\n"))
+	}
+	if updateIdx < 0 {
+		t.Fatalf("expected the exact no-version, no-flag update call [%s], got calls:\n%s", updateLine, strings.Join(lines, "\n"))
+	}
+	if unpinIdx >= updateIdx {
+		t.Errorf("expected unpin to run before update, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// TestSandboxUpdateAgent_UnpinFailure_SkipsUpdateExits1 pins #709: when the
+// unpin call itself fails for an owner, that owner's update must never run
+// (an un-cleared pin would make the following plain `update` re-refuse), and
+// the overall command exits 1.
+func TestSandboxUpdateAgent_UnpinFailure_SkipsUpdateExits1(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+
+	cmd := exec.Command(binaryPath, "sandbox", "update-agent", "--agent", "claude", "--unpin")
+	cmd.Env = append(batchEnv(t, fakeDir, assets), "FAKE_AGENT_UNPIN_EXIT=1")
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected an unpin failure to exit 1, got %T %v\n%s", err, err, output)
+	}
+	lines := callLogLines(t, callLog)
+	if !anyLineContains(lines, "agent-cli.sh unpin claude") {
+		t.Errorf("expected the unpin call to have been attempted, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if anyLineContains(lines, "agent-cli.sh update claude") {
+		t.Errorf("expected no update call after a failed unpin, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// TestSandboxUpdateAgent_All_NeverBootstraps_OnlyRefreshesExistingVolume pins
+// #709: --all refreshes only agent-CLI volumes that already exist, passing
+// --skip-if-pinned, and never bootstraps a volume for an agent that has none
+// anywhere. writeScriptedRuntimes puts both a docker and a podman fake on
+// PATH sharing one unscoped FAKE_VOLUMES, so both fakes genuinely report
+// owning the claude volume here — this pins that --all refreshes every
+// runtime that owns a volume (not just one), while codex/opencode (which
+// neither fake reports owning) are still never bootstrapped.
+func TestSandboxUpdateAgent_All_NeverBootstraps_OnlyRefreshesExistingVolume(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+
+	cmd := exec.Command(binaryPath, "sandbox", "update-agent", "--all")
+	cmd.Env = append(batchEnv(t, fakeDir, assets), "FAKE_VOLUMES=cenci-agent-cli-claude\n")
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandbox update-agent --all: %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	count := 0
+	for _, l := range lines {
+		if strings.Contains(l, "agent-cli.sh update") {
+			count++
+			if !strings.HasSuffix(l, "agent-cli.sh update claude --skip-if-pinned") {
+				t.Errorf("expected every updater call to target claude with --skip-if-pinned, got: %s", l)
+			}
+		}
+	}
+	if count != 2 {
+		t.Fatalf("expected exactly two updater calls (claude in both docker and podman, which both own the volume; codex/opencode never bootstrapped), got %d; calls:\n%s", count, strings.Join(lines, "\n"))
+	}
+}
+
+// TestSandboxUpdateAgent_All_NoVolumesAnywhere_ZeroUpdaterRunsExitZero pins
+// #709: when no agent-CLI volume exists anywhere, --all is a no-op success
+// (never bootstraps anything).
+func TestSandboxUpdateAgent_All_NoVolumesAnywhere_ZeroUpdaterRunsExitZero(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+
+	cmd := exec.Command(binaryPath, "sandbox", "update-agent", "--all")
+	cmd.Env = append(batchEnv(t, fakeDir, assets), "FAKE_VOLUMES=")
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandbox update-agent --all (no volumes anywhere): %v\n%s", err, output)
+	}
+	if lines := callLogLines(t, callLog); anyLineContains(lines, "agent-cli.sh update") {
+		t.Errorf("expected zero updater runs when no volume exists anywhere, got calls:\n%s", strings.Join(lines, "\n"))
 	}
 }
 

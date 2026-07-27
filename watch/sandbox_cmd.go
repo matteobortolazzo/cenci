@@ -128,19 +128,70 @@ func runSandboxBuild(args []string) {
 }
 
 // runSandboxUpdateAgent implements `cenci sandbox update-agent [--agent
-// claude|codex] [--version exact-semver]` for the host-global agent volume.
-// The updater always targets the shared monolith image (never the current
-// directory's own per-repo image, if any — see UpdateAgent), so this verb
-// never needs to resolve or build a per-repo scope. On a dual-runtime host it
-// updates the shared agent-CLI volume in every runtime that already has it
-// (never a runtime that doesn't), and bootstraps it in the preferred
-// (podman-first) runtime only when it exists nowhere (Q4).
+// claude|codex] [--version exact-semver]`, `--unpin`, and `--all` for the
+// host-global agent volume(s). The updater always targets the shared
+// monolith image (never the current directory's own per-repo image, if any
+// — see UpdateAgent), so this verb never needs to resolve or build a
+// per-repo scope. On a dual-runtime host it updates the shared agent-CLI
+// volume in every runtime that already has it (never a runtime that
+// doesn't), and bootstraps it in the preferred (podman-first) runtime only
+// when it exists nowhere (Q4).
+//
+// --unpin clears a version pin the shared volume may carry (#708's
+// pin/unpin/skip-if-pinned contract) before updating: for each owner
+// runtime, `agent-cli.sh unpin` runs first, and that owner's update only
+// runs when the unpin itself succeeds — an uncleared pin would make the
+// following plain update re-refuse. --unpin follows the same owner
+// resolution as the bare form (bootstrapping in the preferred runtime only
+// when the volume exists nowhere) and cannot be combined with --version
+// (unpinning updates to latest; --version would instead re-pin).
+//
+// --all sweeps every agent in sandbox.SupportedAgents across every runtime
+// that already owns that agent's volume, passing --skip-if-pinned so a
+// deliberately pinned volume is left alone rather than refused — it never
+// bootstraps a volume for an (agent, runtime) pair that has none, and cannot
+// be combined with an explicitly-set --agent, --version, or --unpin (those
+// select a single agent/behavior that --all's host-wide sweep would
+// silently ignore).
+//
+// A bare `update-agent` run's owner-loop errors are exit-code classified: if
+// every collected error is the isolated updater's pin-refusal (exit 2), the
+// command exits 2 (naming --unpin/--version); if any error is an ordinary
+// failure, it exits 1 — a real failure must never silently collapse into
+// "pinned".
 func runSandboxUpdateAgent(args []string) {
 	fs := flag.NewFlagSet("sandbox update-agent", flag.ExitOnError)
 	agent := fs.String("agent", "claude", "agent CLI to update (claude, codex, or opencode)")
 	version := fs.String("version", "", "exact semantic version (default: official latest)")
+	unpin := fs.Bool("unpin", false, "clear the shared volume's version pin (if any), then update to latest")
+	all := fs.Bool("all", false, "refresh every existing agent-CLI volume across every installed runtime, leaving pinned volumes untouched")
 	_ = fs.Parse(args)
 	rejectExtraArgs("update-agent", fs)
+
+	var agentSet, versionSet, unpinSet bool
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "agent":
+			agentSet = true
+		case "version":
+			versionSet = true
+		case "unpin":
+			unpinSet = true
+		}
+	})
+
+	if *all {
+		if agentSet || versionSet || unpinSet {
+			fmt.Fprintln(os.Stderr, "cenci sandbox update-agent: --all refreshes every existing agent-CLI volume across every runtime and cannot be combined with --agent, --version, or --unpin")
+			os.Exit(2)
+		}
+		runSandboxUpdateAgentAll()
+		return
+	}
+	if *unpin && versionSet {
+		fmt.Fprintln(os.Stderr, "cenci sandbox update-agent: --unpin clears the pin and updates to latest, and cannot be combined with --version")
+		os.Exit(2)
+	}
 
 	if err := launcher.ValidateAgent(*agent); err != nil {
 		fmt.Fprintf(os.Stderr, "cenci sandbox update-agent: %v\n", err)
@@ -184,8 +235,83 @@ func runSandboxUpdateAgent(args []string) {
 	}
 
 	for _, rt := range owners {
-		if err := eng.WithRuntime(rt).UpdateAgent(*agent, *version); err != nil {
+		target := eng.WithRuntime(rt)
+		if *unpin {
+			if err := target.UnpinAgent(*agent); err != nil {
+				// An uncleared pin would make the following plain update
+				// re-refuse — never run it for this owner.
+				errs = append(errs, err)
+				continue
+			}
+		}
+		if err := target.UpdateAgent(*agent, *version); err != nil {
 			errs = append(errs, err)
+		}
+	}
+	exitOnUpdateAgentErrors("update-agent", errs)
+}
+
+// exitOnUpdateAgentErrors classifies a bare/--unpin `update-agent` owner
+// loop's collected errors: no errors is success (returns, exit code
+// untouched); every error being the isolated updater's pin-refusal (exit 2)
+// propagates that same exit 2, naming both escape hatches (--unpin,
+// --version); any other error exits 1 — a genuine failure must never
+// silently collapse into "pinned" (the ticket's Q1).
+func exitOnUpdateAgentErrors(verb string, errs []error) {
+	if len(errs) == 0 {
+		return
+	}
+	allRefusals := true
+	for _, e := range errs {
+		if !launcher.IsAgentPinRefusal(e) {
+			allRefusals = false
+			break
+		}
+	}
+	joined := errors.Join(errs...)
+	if allRefusals {
+		fmt.Fprintf(os.Stderr, "cenci sandbox %s: %v (the shared agent CLI volume is pinned to an exact version — use --unpin to clear the pin, or --version to update to a different exact version)\n", verb, joined)
+		os.Exit(2)
+	}
+	fmt.Fprintf(os.Stderr, "cenci sandbox %s: %v\n", verb, joined)
+	os.Exit(1)
+}
+
+// runSandboxUpdateAgentAll implements `cenci sandbox update-agent --all`:
+// refresh every agent-CLI volume that already exists, passing
+// --skip-if-pinned so a deliberately pinned volume is left alone rather than
+// refused. Never bootstraps a volume for an agent that has none anywhere.
+// When the same agent's volume exists under more than one runtime, every
+// resolved owner is refreshed — matching the bare/--unpin form's explicit Q4
+// same-name-collision handling (which also updates every owner). Zero owners
+// anywhere is a no-op success.
+func runSandboxUpdateAgentAll() {
+	eng := newEngine("update-agent")
+
+	runtimes, err := sandbox.AvailableRuntimes()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cenci sandbox update-agent: %v\n", err)
+		os.Exit(1)
+	}
+
+	// A per-runtime `volume ls` failure is aggregated into errs rather than
+	// aborting immediately, mirroring the bare form's partial-result
+	// handling — the other runtime's genuinely resolved owner must still be
+	// refreshed.
+	var errs []error
+	for _, agent := range sandbox.SupportedAgents {
+		volumeName := launcher.AgentCLIVolumeName(agent)
+		owners, err := sandbox.RuntimesWithVolume(runtimes, volumeName)
+		if err != nil {
+			errs = append(errs, err)
+		}
+		if len(owners) == 0 {
+			continue
+		}
+		for _, owner := range owners {
+			if err := eng.WithRuntime(owner).UpdateAgentSkipIfPinned(agent); err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
 	if err := errors.Join(errs...); err != nil {

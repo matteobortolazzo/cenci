@@ -1120,6 +1120,34 @@ step_sandbox_refresh_plugins() {
 	fi
 }
 
+# step_sandbox_update_agents refreshes the shared agent-CLI volume(s) after an
+# update (#709), so `cenci update` doesn't leave an already-provisioned agent
+# CLI on a stale version until a manual `cenci sandbox update-agent --all`.
+# Modeled line-for-line on step_sandbox_refresh_plugins above (same gates,
+# same best-effort warn-not-fail shape): a failure only warns (never sets
+# INSTALL_FAILED) — update-agent --all is itself best-effort per (agent,
+# runtime) and skips pinned volumes rather than refusing.
+step_sandbox_update_agents() {
+	selected cenci-sandbox || return 0
+	local runtime
+	runtime="$(container_runtime || true)"
+	[ -n "$runtime" ] || return 0
+
+	local cenci_bin
+	cenci_bin="$(current_cenci_binary || true)"
+	if [ -z "$cenci_bin" ]; then
+		warn "cenci binary not available — skipping shared agent CLI volume refresh; run manually with: cenci sandbox update-agent --all"
+		return 0
+	fi
+
+	step "Refreshing shared agent CLI volumes"
+	if "$cenci_bin" sandbox update-agent --all; then
+		ok "refreshed shared agent CLI volumes"
+	else
+		warn "'$cenci_bin sandbox update-agent --all' did not succeed — refresh the shared agent CLI volumes manually with: cenci sandbox update-agent --all"
+	fi
+}
+
 # newest_cenci_root — path to the most recently installed version-pinned
 # Claude plugin cache root. Plugin updates refresh the active manifest, making
 # it a reliable selector even before that version's binary has bootstrapped.
@@ -2845,6 +2873,7 @@ if [ "$MODE" = update ]; then
 	step_cenci_watch_setup
 	step_opencode_setup
 	step_sandbox_refresh_plugins
+	step_sandbox_update_agents
 	step_lazyboards_setup
 	final_summary
 	exit $((INSTALL_FAILED))
