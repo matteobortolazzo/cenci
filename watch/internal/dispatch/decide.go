@@ -7,7 +7,21 @@ import (
 	"strings"
 	"time"
 
+	"github.com/matteobortolazzo/cenci/watch/internal/pipeline"
 	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
+)
+
+// Stage-gate skip reasons (#732). reasonStageProbeUnknown is deliberately
+// distinct from reasonPipelineUnreadable: watch/AGENTS.md #598 requires the
+// enum switch's default to be asserted by a test, and #446 requires
+// content-specific assertions per failure class -- if the default reused
+// reasonPipelineUnreadable, that test would pass identically after a
+// regression collapsed the default into the StageProbeError branch,
+// defeating its purpose.
+const (
+	reasonPipelineFinalized  = "pipeline finalized (reset to re-dispatch)"
+	reasonPipelineUnreadable = "pipeline state unreadable"
+	reasonStageProbeUnknown  = "pipeline stage probe unrecognized"
 )
 
 // Inputs is the full, explicit input to Decide. Now is an injected clock value
@@ -86,6 +100,11 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 	}
 	if t.HasOpenPR {
 		return skip("open PR exists")
+	}
+	if in.Config.PipelineStageGate {
+		if reason, gated := stageGateSkip(t); gated {
+			return skip(reason)
+		}
 	}
 
 	// Pickup rule 2: exclusive human ownership. Multiple assignees are
@@ -256,6 +275,38 @@ func containsStr(ss []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// stageGateSkip evaluates the persisted-pipeline-stage gate (#732) for t.
+// It returns (reason, true) when the ticket should be skipped on stage
+// grounds, and ("", false) when the gate passes.
+func stageGateSkip(t Ticket) (string, bool) {
+	switch t.StageProbe {
+	case StageProbeAbsent:
+		return "", false // no pipeline run here: the documented permissive exception
+	case StageProbeError:
+		return reasonPipelineUnreadable, true // broken input, not absent input
+	case StageProbePresent:
+		switch {
+		case pipeline.Stage(t.Stage) == pipeline.StageFinalized:
+			return reasonPipelineFinalized, true
+		case !pipeline.IsKnownStage(pipeline.Stage(t.Stage)):
+			// Defensive: today's collector classifies an unrecognized stage
+			// as StageProbeError, so this pair is unreachable via
+			// CollectTickets. Checked anyway (default-deny per
+			// watch/AGENTS.md #636) so a future collector change can never
+			// make an unknown stage dispatch silently.
+			return reasonPipelineUnreadable, true
+		default:
+			return "", false // prepared/waiting/plan_approved/executed/reviewed: NOT gated
+		}
+	default:
+		// Unrecognized StageProbe value: default-deny with its own distinct
+		// reason (not reasonPipelineUnreadable) so a regression collapsing
+		// this branch into StageProbeError is caught by assertion, per
+		// #446/#598.
+		return reasonStageProbeUnknown, true
+	}
 }
 
 func hasLabel(labels []string, name string) bool {

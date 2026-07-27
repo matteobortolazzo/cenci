@@ -56,6 +56,7 @@ Structured error-identifier (`CENCI-*`) naming convention and registered-code in
   - `close_cmd.go` — `close` + decision rendering
   - `sandbox_cmd.go` — `sandbox build|build-base|prune|update-agent|update-plugins|reseed-creds|reap-orphans|ls|stop`: flag parsing, usage errors (exit 2), and dispatch into `internal/sandbox` + `internal/sandbox/launcher`
   - `open_cmd.go` — `open` (interactive sandbox launch, shortcut/model resolution)
+  - `pipeline_cmd.go` — `pipeline` (five stage transitions) + `pipeline_mechanics_cmd.go` (label/worktree/worktree-cleanup/artifact), `pipeline_plan_cmd.go` (plan-check), `pipeline_reset_cmd.go` (reset)
 - `plugin/` — Claude Code plugin (hooks that call `cenci notify`)
 - `internal/daemon/` — Session-keyed event loop, hook→status mapping, paneless TTL sweep; delegates window work via `frontend.Frontend`
 - `internal/frontend/` — Seam types: `SessionState`, `Frontend` interface, `Observations`, `SweepAction`, `WindowInfo`; shared name sanitizers
@@ -69,6 +70,8 @@ Structured error-identifier (`CENCI-*`) naming convention and registered-code in
 - `internal/reap/` — `Reaper` seam + `ExecReaper`: single-flight, non-blocking self-exec of `cenci sandbox reap-orphans`
 - `internal/sandbox/` — shared sandbox primitives and the SOURCE OF TRUTH for CLI tables: runtime detection (podman, then docker), the ch/cs/co/cf + xl/xt/xs shortcut tables, the `claude-cenci-`/`codex-cenci-` name-prefix pattern, and native container listing/stopping for `sandbox ls`/`sandbox stop`
 - `internal/sandbox/launcher/` — the native launch engine (ported from the retired `sandbox/cenci-sand` bash launcher): asset-dir resolution (`CENCI_SANDBOX_ASSETS` override → marketplace → plugin cache), byte-exact BASE_TAG content hash, repo scoping, image builds, plugin updates, interactive launch (in-process cenci wiring, RUN_ARGS, readiness poll, syscall.Exec attach), prune, and the orphan reaper (verbatim in-container scan/liveness scripts)
+- `internal/dispatch/` — pickup gate engine: `Ticket`/`Decision` types, the pure `Decide` gate chain, the `CollectTickets` gh+filesystem collector, the reconciler, and `Config` serialization
+- `internal/pipeline/` — pipeline state machine and artifact storage: the `Stage` enum and `stageOrder` total order, flock-guarded transitions, `GetArtifacts`/`SetArtifacts`, worktree and label mechanics, plan-file discovery/validation, `Reset`, and the `.cenci/pipeline/<id>.json` format
 
 ## Key Conventions
 
