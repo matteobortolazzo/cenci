@@ -43,6 +43,7 @@ trap 'rm -rf "${TEST_ROOT}"' EXIT
 write_reusable() {
     local wf_dir="$1" concurrency_block="$2" checkout_with_block="$3" bump_env_block="$4"
     local checkout_uses="${5:-actions/checkout@v7}"
+    local bump_run="${6:-bash .github/scripts/bump-plugin-version.sh}"
     cat > "${wf_dir}/plugin-version-bump.yml" <<EOF
 name: Reusable — Plugin Version Bump
 
@@ -69,8 +70,17 @@ ${checkout_with_block}
       - name: Bump version
         env:
 ${bump_env_block}
-        run: echo noop
+        run: ${bump_run}
 EOF
+
+    # Rule 5 also requires the delegated script to exist on disk. Create it
+    # alongside the workflow so every case satisfies that half of the rule by
+    # default; the "script is missing" case deletes it afterwards.
+    local repo_root
+    repo_root="$(cd "${wf_dir}/../.." && pwd)"
+    mkdir -p "${repo_root}/.github/scripts"
+    printf '#!/usr/bin/env bash\nexit 0\n' \
+        > "${repo_root}/.github/scripts/bump-plugin-version.sh"
 }
 
 # write_caller <workflows_dir> <filename> <concurrency_block> — writes a
@@ -104,7 +114,7 @@ EOF
 # The concurrency/checkout/env blocks that should make every rule pass.
 # Individual cases override exactly one of these to force one rule to fail.
 GOOD_CONCURRENCY="concurrency:
-  group: version-bump-main
+  group: version-bump-main-\${{ inputs.tag-prefix }}
   cancel-in-progress: false
 "
 GOOD_CHECKOUT_WITH="          fetch-depth: 0
@@ -191,7 +201,7 @@ echo "case: cancel-in-progress true must fail"
 CASE4="${TEST_ROOT}/case4-cancel-in-progress-true"
 mkdir -p "${CASE4}/.github/workflows"
 CANCEL_TRUE_CONCURRENCY="concurrency:
-  group: version-bump-main
+  group: version-bump-main-\${{ inputs.tag-prefix }}
   cancel-in-progress: true
 "
 write_reusable "${CASE4}/.github/workflows" "${CANCEL_TRUE_CONCURRENCY}" "${GOOD_CHECKOUT_WITH}" "${GOOD_BUMP_ENV}"
@@ -236,7 +246,7 @@ CASE7="${TEST_ROOT}/case7-caller-redeclares-group"
 mkdir -p "${CASE7}/.github/workflows"
 write_reusable "${CASE7}/.github/workflows" "${GOOD_CONCURRENCY}" "${GOOD_CHECKOUT_WITH}" "${GOOD_BUMP_ENV}"
 CALLER_REDECLARE_CONCURRENCY="concurrency:
-  group: version-bump-main
+  group: version-bump-main-\${{ inputs.tag-prefix }}
   cancel-in-progress: false
 "
 write_caller "${CASE7}/.github/workflows" "case7-caller.yml" "${CALLER_REDECLARE_CONCURRENCY}"
@@ -331,6 +341,85 @@ write_reusable "${CASE11}/.github/workflows" "${GOOD_CONCURRENCY}" "${GOOD_CHECK
 write_caller "${CASE11}/.github/workflows" "case11-caller.yml" ""
 run_check "${CASE11}"
 assert_exit "case11 checkout uses: version bumped, name matches" 0
+
+# ── Case 12: THE #743 REGRESSION — a constant, shared group must fail ──
+# The pre-#743 shape: one `version-bump-main` queue shared by all three
+# callers. GitHub keeps at most one pending run per concurrency group, so a
+# third simultaneous bump was silently cancelled and its release never
+# shipped. Reverting to any constant group must be rejected by rule 1.
+echo "case: reverting to a constant shared concurrency group must fail"
+CASE12="${TEST_ROOT}/case12-constant-shared-group"
+mkdir -p "${CASE12}/.github/workflows"
+CONSTANT_CONCURRENCY="concurrency:
+  group: version-bump-main
+  cancel-in-progress: false
+"
+write_reusable "${CASE12}/.github/workflows" "${CONSTANT_CONCURRENCY}" "${GOOD_CHECKOUT_WITH}" "${GOOD_BUMP_ENV}"
+write_caller "${CASE12}/.github/workflows" "case12-caller.yml" ""
+run_check "${CASE12}"
+assert_exit "case12 constant shared concurrency group" 1
+assert_stderr_contains "case12 failure message identifies rule 1" "rule 1"
+assert_stderr_contains "case12 failure message names the required per-plugin key" "inputs.tag-prefix"
+
+# ── Case 13: rule 5 — re-inlining the bump logic must fail ────────────
+# The push-retry loop is only unit-testable while it lives in the script.
+# A workflow that re-inlines the bump into its own run: block drops it back
+# out of coverage, which is where the original race went unnoticed.
+echo "case: re-inlining the bump logic instead of delegating to the script must fail"
+CASE13="${TEST_ROOT}/case13-inlined-bump"
+mkdir -p "${CASE13}/.github/workflows"
+write_reusable "${CASE13}/.github/workflows" "${GOOD_CONCURRENCY}" "${GOOD_CHECKOUT_WITH}" "${GOOD_BUMP_ENV}" \
+    "actions/checkout@v7" "jq '.version = \"1.0.0\"' plugin.json && git push origin HEAD:main"
+write_caller "${CASE13}/.github/workflows" "case13-caller.yml" ""
+run_check "${CASE13}"
+assert_exit "case13 inlined bump logic" 1
+assert_stderr_contains "case13 failure message identifies rule 5" "rule 5"
+assert_stderr_contains "case13 failure message names the script" "bump-plugin-version.sh"
+
+# ── Case 14: rule 5 — the delegated script must exist on disk ─────────
+echo "case: a Bump version step delegating to a missing script must fail"
+CASE14="${TEST_ROOT}/case14-missing-script"
+mkdir -p "${CASE14}/.github/workflows"
+write_reusable "${CASE14}/.github/workflows" "${GOOD_CONCURRENCY}" "${GOOD_CHECKOUT_WITH}" "${GOOD_BUMP_ENV}"
+write_caller "${CASE14}/.github/workflows" "case14-caller.yml" ""
+rm -f "${CASE14}/.github/scripts/bump-plugin-version.sh"
+run_check "${CASE14}"
+assert_exit "case14 missing delegated script" 1
+assert_stderr_contains "case14 failure message identifies rule 5" "rule 5"
+assert_stderr_contains "case14 failure message names the missing script" "bump-plugin-version.sh"
+
+# ── Case 15: rule 4 — a caller colliding with a per-plugin group ──────
+# Rule 4 is a prefix match, not an equality test: now that the reusable
+# workflow's group is templated, a caller declaring any concrete
+# version-bump-main-* group can still collide and self-cancel.
+echo "case: a caller declaring a per-plugin version-bump-main-* group must fail"
+CASE15="${TEST_ROOT}/case15-caller-per-plugin-group"
+mkdir -p "${CASE15}/.github/workflows"
+write_reusable "${CASE15}/.github/workflows" "${GOOD_CONCURRENCY}" "${GOOD_CHECKOUT_WITH}" "${GOOD_BUMP_ENV}"
+CALLER_CONCRETE_GROUP="concurrency:
+  group: version-bump-main-flow
+  cancel-in-progress: false
+"
+write_caller "${CASE15}/.github/workflows" "case15-caller.yml" "${CALLER_CONCRETE_GROUP}"
+run_check "${CASE15}"
+assert_exit "case15 caller declares a concrete per-plugin group" 1
+assert_stderr_contains "case15 failure message identifies rule 4" "rule 4"
+assert_stderr_contains "case15 failure message names the offending caller" "case15-caller.yml"
+
+# ── Case 16: an unrelated caller concurrency group is still allowed ────
+# Rule 4 must not over-reach: a caller may serialize itself on any group
+# that cannot collide with the reusable workflow's.
+echo "case: a caller with an unrelated concurrency group still passes"
+CASE16="${TEST_ROOT}/case16-caller-unrelated-group"
+mkdir -p "${CASE16}/.github/workflows"
+write_reusable "${CASE16}/.github/workflows" "${GOOD_CONCURRENCY}" "${GOOD_CHECKOUT_WITH}" "${GOOD_BUMP_ENV}"
+CALLER_UNRELATED_GROUP="concurrency:
+  group: docs-publish
+  cancel-in-progress: false
+"
+write_caller "${CASE16}/.github/workflows" "case16-caller.yml" "${CALLER_UNRELATED_GROUP}"
+run_check "${CASE16}"
+assert_exit "case16 caller with an unrelated group" 0
 
 # ── Summary ──────────────────────────────────────────────────────────
 echo
