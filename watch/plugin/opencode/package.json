@@ -1,6 +1,6 @@
 {
   "name": "cenci-watch-opencode",
-  "version": "0.29.3",
+  "version": "0.30.0",
   "description": "cenci attention layer: send OpenCode lifecycle events to the shared cenci daemon.",
   "author": {
     "name": "Matteo Bortolazzo",
