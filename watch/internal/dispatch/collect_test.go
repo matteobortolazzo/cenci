@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -57,7 +58,7 @@ case "$1 $2" in
 esac
 `)
 
-	tickets, err := collectRepoTickets("o/r")
+	tickets, err := collectRepoTickets(RepoConfig{Repo: "o/r"})
 	if err != nil {
 		t.Fatalf("collectRepoTickets returned unexpected error: %v", err)
 	}
@@ -269,5 +270,130 @@ func TestGitCommitsBehindPathAware(t *testing.T) {
 	}
 	if got, err := planfile.CommitsBehind(dir, sha, []string{"watch", "flow"}); err != nil || got != 3 {
 		t.Errorf("multi-path count = %d, err = %v, want 3, nil", got, err)
+	}
+}
+
+// -- #732: probeStage (the collector's persisted-stage classifier) ---------
+
+// writeStateFile writes a raw pipeline state file at
+// <dir>/.cenci/pipeline/<number>.json, driving probeStage directly against a
+// real on-disk file rather than through gh.
+func writeStateFile(t *testing.T, dir string, number int, content string) {
+	t.Helper()
+	pipelineDir := filepath.Join(dir, ".cenci", "pipeline")
+	if err := os.MkdirAll(pipelineDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(pipelineDir, strconv.Itoa(number)+".json")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestProbeStage_PresentKnownStage covers the AC's "readable, known stage"
+// case: the persisted stage is recorded verbatim and classified Present.
+func TestProbeStage_PresentKnownStage(t *testing.T) {
+	dir := t.TempDir()
+	writeStateFile(t, dir, 42, `{"schemaVersion":2,"id":"42","stage":"plan_approved"}`)
+
+	stage, probe := probeStage(dir, 42)
+	if stage != "plan_approved" || probe != StageProbePresent {
+		t.Errorf(`probeStage = (%q, %q), want ("plan_approved", StageProbePresent)`, stage, probe)
+	}
+}
+
+// TestProbeStage_FileAbsent_MapsToAbsent covers the AC's "no state file"
+// case: GetArtifacts returns StageNew with a nil error, and that must map to
+// StageProbeAbsent -- the deliberate permissive exception, since
+// .cenci/pipeline/ is gitignored and "no pipeline run here" is the normal
+// case that must not block dispatch.
+func TestProbeStage_FileAbsent_MapsToAbsent(t *testing.T) {
+	dir := t.TempDir()
+
+	stage, probe := probeStage(dir, 42)
+	if stage != "new" || probe != StageProbeAbsent {
+		t.Errorf(`probeStage(missing file) = (%q, %q), want ("new", StageProbeAbsent)`, stage, probe)
+	}
+}
+
+// TestProbeStage_LiteralNewStage_MapsToAbsent covers the AC's "a persisted
+// stage that is literally new also maps to StageProbeAbsent" case: a state
+// file that genuinely exists but records stage "new" must be
+// indistinguishable from no state file at all.
+func TestProbeStage_LiteralNewStage_MapsToAbsent(t *testing.T) {
+	dir := t.TempDir()
+	writeStateFile(t, dir, 42, `{"schemaVersion":2,"id":"42","stage":"new"}`)
+
+	stage, probe := probeStage(dir, 42)
+	if stage != "new" || probe != StageProbeAbsent {
+		t.Errorf(`probeStage(stage="new") = (%q, %q), want ("new", StageProbeAbsent)`, stage, probe)
+	}
+}
+
+// TestProbeStage_CorruptJSON_MapsToError covers the "unreadable/undecodable"
+// half of the AC's default-deny case: a state file that fails to decode
+// must classify StageProbeError, not be silently treated as absent.
+func TestProbeStage_CorruptJSON_MapsToError(t *testing.T) {
+	dir := t.TempDir()
+	writeStateFile(t, dir, 42, `{not valid json`)
+
+	stage, probe := probeStage(dir, 42)
+	if stage != "" || probe != StageProbeError {
+		t.Errorf(`probeStage(corrupt json) = (%q, %q), want ("", StageProbeError)`, stage, probe)
+	}
+}
+
+// TestProbeStage_UnknownStageString_MapsToErrorWithStageRecorded covers the
+// AC's "a stage value not registered in pipeline's stage order" case: the
+// offending value must still be recorded verbatim (for logging) even though
+// the probe classifies it as an error.
+func TestProbeStage_UnknownStageString_MapsToErrorWithStageRecorded(t *testing.T) {
+	dir := t.TempDir()
+	writeStateFile(t, dir, 42, `{"schemaVersion":2,"id":"42","stage":"bogus"}`)
+
+	stage, probe := probeStage(dir, 42)
+	if stage != "bogus" || probe != StageProbeError {
+		t.Errorf(`probeStage(unknown stage "bogus") = (%q, %q), want ("bogus", StageProbeError)`, stage, probe)
+	}
+}
+
+// TestProbeStage_EmptyStageField_MapsToError covers a state file with the
+// stage field absent/empty: it decodes successfully but is not a known
+// stage, so it must classify StageProbeError, not Absent (only a genuinely
+// missing file or an explicit stage:"new" get the permissive Absent
+// classification).
+func TestProbeStage_EmptyStageField_MapsToError(t *testing.T) {
+	dir := t.TempDir()
+	writeStateFile(t, dir, 42, `{"schemaVersion":2,"id":"42"}`)
+
+	stage, probe := probeStage(dir, 42)
+	if stage != "" || probe != StageProbeError {
+		t.Errorf(`probeStage(empty/absent stage field) = (%q, %q), want ("", StageProbeError)`, stage, probe)
+	}
+}
+
+// TestProbeStage_EmptyDir_NeverProbes_NoCwdRelativeRead covers the AC's
+// "when rc.Dir is empty, the collector does not probe" requirement: dir=="""
+// must never let pipeline.GetArtifacts fall back to resolving a repo root
+// from the process cwd, which would read an unrelated repo's state. Proven
+// by chdir'ing into a real repo dir that DOES have a finalized state at
+// ticket 42, and asserting probeStage("", 42) still reports Absent rather
+// than leaking that cwd-relative state in.
+func TestProbeStage_EmptyDir_NeverProbes_NoCwdRelativeRead(t *testing.T) {
+	repoDir := t.TempDir()
+	writeStateFile(t, repoDir, 42, `{"schemaVersion":2,"id":"42","stage":"finalized"}`)
+
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(repoDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origWd) })
+
+	stage, probe := probeStage("", 42)
+	if stage != "" || probe != StageProbeAbsent {
+		t.Errorf(`probeStage("", 42) with cwd containing a finalized state = (%q, %q), want ("", StageProbeAbsent) -- dir="" must never probe`, stage, probe)
 	}
 }

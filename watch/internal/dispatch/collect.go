@@ -8,8 +8,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
+	"github.com/matteobortolazzo/cenci/watch/internal/pipeline"
 	"github.com/matteobortolazzo/cenci/watch/internal/planfile"
 	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
 )
@@ -39,7 +41,7 @@ func CollectTickets(repos []RepoConfig) ([]Ticket, error) {
 	var out []Ticket
 	var errs []error
 	for _, rc := range repos {
-		tickets, err := collectRepoTickets(rc.Repo)
+		tickets, err := collectRepoTickets(rc)
 		if err != nil {
 			errs = append(errs, err)
 			continue
@@ -49,7 +51,8 @@ func CollectTickets(repos []RepoConfig) ([]Ticket, error) {
 	return out, errors.Join(errs...)
 }
 
-func collectRepoTickets(repo string) ([]Ticket, error) {
+func collectRepoTickets(rc RepoConfig) ([]Ticket, error) {
+	repo := rc.Repo
 	data, err := exec.Command("gh", "issue", "list",
 		"--repo", repo, "--state", "open",
 		"--json", "number,title,labels,assignees", "--limit", "200").Output()
@@ -85,17 +88,43 @@ func collectRepoTickets(repo string) ([]Ticket, error) {
 		for i, a := range is.Assignees {
 			assignees[i] = a.Login
 		}
+		stage, probe := probeStage(rc.Dir, is.Number)
 		tickets = append(tickets, Ticket{
-			Repo:      repo,
-			Number:    is.Number,
-			Title:     is.Title,
-			Labels:    labels,
-			Assignees: assignees,
-			HasOpenPR: openPR[is.Number],
-			Agent:     agentFromLabels(labels),
+			Repo:       repo,
+			Number:     is.Number,
+			Title:      is.Title,
+			Labels:     labels,
+			Assignees:  assignees,
+			HasOpenPR:  openPR[is.Number],
+			Agent:      agentFromLabels(labels),
+			Stage:      stage,
+			StageProbe: probe,
 		})
 	}
 	return tickets, nil
+}
+
+// probeStage classifies dir's persisted `cenci pipeline` stage for one
+// ticket into the StageProbe closed set (#732). An empty dir is NEVER
+// probed: pipeline.GetArtifacts with both RepoRoot and StateDir empty falls
+// back to resolving a repo root from the daemon's own working directory,
+// which would read an unrelated repo's state.
+func probeStage(dir string, number int) (string, StageProbe) {
+	if dir == "" {
+		return "", StageProbeAbsent
+	}
+	s, err := pipeline.GetArtifacts(pipeline.ArtifactOpts{ID: strconv.Itoa(number), RepoRoot: dir})
+	if err != nil {
+		return "", StageProbeError // unreadable/undecodable → default-deny
+	}
+	switch {
+	case s.Stage == pipeline.StageNew:
+		return string(s.Stage), StageProbeAbsent // missing file AND a literal "new" both land here
+	case !pipeline.IsKnownStage(s.Stage):
+		return string(s.Stage), StageProbeError // e.g. "bogus", or a file with an empty/absent stage field
+	default:
+		return string(s.Stage), StageProbePresent
+	}
 }
 
 // openPRIssues returns the set of issue numbers with an open linked PR, via each

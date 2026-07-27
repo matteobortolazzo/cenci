@@ -16,7 +16,7 @@ import (
 // invocation of `cenci pipeline` (unknown/missing stage, missing/non-numeric
 // id, unrecognized flag, trailing positional, --approve on a non-plan
 // stage) — exit 2, per docs/cli-conventions.md.
-const pipelineUsage = "cenci pipeline: usage: cenci pipeline prepare|plan|execute|review|finalize <id> [--approve] [--state-dir DIR] [--repo PATH]"
+const pipelineUsage = "cenci pipeline: usage: cenci pipeline prepare|plan|execute|review|finalize|reset <id> [--approve] [--state-dir DIR] [--repo PATH]"
 
 // pipelineStages are the five valid `cenci pipeline` subcommands, in the
 // plan's State Machine Design order.
@@ -61,6 +61,9 @@ func runPipeline(args []string) {
 		return
 	case "plan-check":
 		runPipelinePlanCheck(args[1:])
+		return
+	case "reset":
+		runPipelineReset(args[1:])
 		return
 	}
 

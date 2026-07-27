@@ -402,7 +402,8 @@ reconcile invocations likewise exit nonzero when their pass fails.
 A ticket is dispatched only when **all** of these hold, evaluated in order (the first
 failing gate is the logged skip reason):
 
-1. carries `Planned`, not `Blocked`, and has no open linked PR;
+1. carries `Planned`, not `Blocked`, has no open linked PR, and its persisted pipeline
+   stage is not `finalized`;
 2. a matching plan for the ticket exists with `status: planned`;
 3. the plan is fresh — default-branch commits since its `planCommitSha` are within
    `planStalenessTolerance` (else `plan stale, re-plan`); when the plan's front
@@ -421,6 +422,35 @@ failing gate is the logged skip reason):
 10. the resolved agent still has budget (see [Usage budgets](#usage-budgets) — when
     `agentLimits` is set this is computed from real token usage, otherwise from the
     static `agentBudgetFloors`).
+
+Gate 1's pipeline-stage check reads the ticket's persisted `cenci pipeline` state
+(`.cenci/pipeline/<id>.json`) and skips only on `finalized` — deliberately not "at or
+past `executed`": `cenci pipeline execute` fires at the *start* of Phase 2, so an
+`executed`-based threshold would also swallow every agent that crashed
+mid-implementation, exactly the population the reconciler's crash-recovery retry
+flips back to `Planned` to be re-dispatched. Three read outcomes:
+
+- **no state file → dispatch.** `.cenci/pipeline/` is gitignored and expendable; "no
+  pipeline run here" is the normal case and must not block dispatch. This is a
+  deliberate, documented permissive exception — the only one in this gate chain.
+- **readable, known stage → gate on it.** Only `finalized` skips; every other known
+  stage (`prepared`, `waiting_for_plan_approval`, `plan_approved`, `executed`,
+  `reviewed`) dispatches normally.
+- **unreadable, undecodable, or an unrecognized stage value → skip.** Default-deny:
+  broken input is treated as blocking, not as absent input.
+
+The two operator-visible skip reasons are `pipeline finalized (reset to
+re-dispatch)` and `pipeline state unreadable`. `cenci pipeline reset <id>` (see
+[Mechanics verbs](#mechanics-verbs-label-worktree-worktree-cleanup-artifact-plan-check-reset))
+is the remedy for both — it deletes the ticket's state file, so a `finalized` ticket
+with no PR (or a corrupted state file) becomes dispatchable again. Set
+`dispatch.pipelineStageGate` to `false` to disable the gate entirely (see
+[Configuration](#configuration)).
+
+**Limitation:** the probe reads `dispatch.repos[].dir` verbatim. If `dir` points at a
+linked worktree rather than the ticket's main checkout, the probe will not see the
+main checkout's pipeline state (the state file lives at the main checkout's git
+root) and the gate fails open there — matching pre-#732 behavior.
 
 #### Path-aware staleness
 
@@ -451,6 +481,7 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
     "dailyQuota": 20,
     "quietHours": { "startHour": 22, "endHour": 7 },
     "planStalenessTolerance": 5,
+    "pipelineStageGate": true,
     "gracePeriod": "5m",
     "retryBudget": 2,
     "daemonInterval": "5m",
@@ -475,6 +506,7 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 | `dailyQuota` | `20` | Max dispatches per process run (resets on restart) |
 | `quietHours` | none | Local-clock window to suppress dispatch; `startHour > endHour` wraps midnight, `start == end` disables |
 | `planStalenessTolerance` | `5` | Max commits a plan may fall behind before it is skipped as stale (see [Path-aware staleness](#path-aware-staleness) for scoping the count via `stalenessPaths`) |
+| `pipelineStageGate` | `true` | Skip tickets whose persisted `cenci pipeline` stage is `finalized` (see [Pickup rules and gates](#pickup-rules-and-gates)); set `false` to disable the gate entirely |
 | `gracePeriod` | `5m` | How long the failure signal must hold continuously before the reconciler recovers a stranded ticket (Go duration string) |
 | `retryBudget` | `2` | Retries (`Working` → `Planned`) a stranded ticket gets before it is marked `dispatch-failed`; an explicit `0` disables retries |
 | `daemonInterval` | none | Dispatch cadence once the embedded loop is enabled (Go duration string); setting this alone does **not** start dispatch — see `loopEnabled`. Configuration is independently polled at least every 60 seconds; nonpositive values use a 60s internal fallback but are not reported as a configured interval |
@@ -664,7 +696,7 @@ Behavior:
   unexpected argument) prints a one-line hint to stderr and exits `2` —
   no JSON is printed for these.
 
-### Mechanics verbs (`label`, `worktree`, `worktree-cleanup`, `artifact`, `plan-check`)
+### Mechanics verbs (`label`, `worktree`, `worktree-cleanup`, `artifact`, `plan-check`, `reset`)
 
 Alongside the five stage transitions, `cenci pipeline` also exposes the
 deterministic side-effect mechanics that used to live in flow's skill prose:
@@ -682,6 +714,7 @@ cenci pipeline artifact 42 --plan .plans/42-add-thing.md --branch feature/42-add
 cenci pipeline artifact 42 --get                                  # read-only fetch of the current artifacts
 cenci pipeline plan-check 42 [--replan-requested] [--repo-slug OWNER/REPO]
                                                                    # discovers/validates .plans/42-*.md and classifies it
+cenci pipeline reset 42   # deletes .cenci/pipeline/42.json: stage returns to "new", all recorded artifacts dropped from tracking
 ```
 
 Behavior:
@@ -729,6 +762,27 @@ Behavior:
 - `--repo-slug OWNER/REPO` (`label` and `plan-check`) and `--slug SLUG`
   (worktree/worktree-cleanup, required) are additional flags on top of the
   stage commands' `--state-dir`/`--repo` test hooks.
+- `reset` deletes the ticket's persisted state file outright — delete-everything
+  semantics, not a stage rewrite: stage returns to `new` and every recorded
+  artifact (branch, worktree path, PR URL/number, plan path) is dropped from
+  tracking. It never refuses based on the current stage — including
+  `finalized`, and including mid-run, since a human may need to rewind a
+  ticket while an agent is still working — and it never calls `gh` and never
+  touches labels. The branch, worktree, PR, and plan file the dropped
+  artifacts pointed at all survive on disk/GitHub; they are merely untracked,
+  and `reset`'s warnings enumerate exactly which ones were dropped. A
+  surviving worktree is the practical consequence to watch for: a subsequent
+  `cenci pipeline worktree <id> --slug <slug>` against it fails with
+  "worktree or branch already exists" until the operator cleans it up.
+  `reset` is idempotent — when no state file exists it is a no-op that still
+  exits `0` with the warning `no pipeline state for <id>; nothing to reset`.
+  It also recovers a corrupt/undecodable state file (deletes it, exits `0`
+  with a decode warning), which makes it the documented remedy for the
+  dispatcher's `pipeline state unreadable` skip (see
+  [Pickup rules and gates](#pickup-rules-and-gates)). A delete failure (e.g.
+  permissions) reports the full `{state, next_actions, artifacts, warnings,
+  errors}` contract with `errors[]` populated and `state` set to whatever
+  stage is genuinely still on disk, and exits `1`.
 
 ## Sandbox management and session launching (`cenci sandbox`, `cenci open`)
 

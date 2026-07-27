@@ -71,6 +71,14 @@ type Config struct {
 	// on. Resolved from an explicit "loopEnabled" when present, else absent
 	// means disabled.
 	LoopEnabled bool
+
+	// PipelineStageGate is the #732 kill switch for the persisted-pipeline-
+	// stage gate: when true (the default), a ticket whose persisted
+	// `cenci pipeline` stage is "finalized" (or unreadable) is skipped even
+	// if its board state otherwise permits dispatch. It can only ever
+	// reduce dispatches, so it defaults on; set false to disable the gate
+	// entirely during rollout.
+	PipelineStageGate bool
 }
 
 // DefaultConfig returns the built-in policy used when no config file (or no
@@ -85,6 +93,7 @@ func DefaultConfig() Config {
 		GracePeriod:            5 * time.Minute,
 		RetryBudget:            2,
 		ApplyRetryBudget:       3,
+		PipelineStageGate:      true,
 	}
 }
 
@@ -105,11 +114,12 @@ type dispatchFile struct {
 	ClaudeSessionDir       string                `json:"claudeSessionDir"`
 	CodexDBPath            string                `json:"codexDBPath"`
 	Session                string                `json:"session"`
-	GracePeriod            string                `json:"gracePeriod"`      // Go duration string, e.g. "5m"
-	RetryBudget            *int                  `json:"retryBudget"`      // pointer so an explicit 0 (no retries) is distinguishable from unset
-	DaemonInterval         string                `json:"daemonInterval"`   // Go duration string, e.g. "5m"; empty/0 disables the embedded loop
-	LoopEnabled            *bool                 `json:"loopEnabled"`      // pointer so absence resolves to disabled (not inferred from DaemonInterval)
-	ApplyRetryBudget       *int                  `json:"applyRetryBudget"` // pointer so an explicit 0 is distinguishable from unset
+	GracePeriod            string                `json:"gracePeriod"`       // Go duration string, e.g. "5m"
+	RetryBudget            *int                  `json:"retryBudget"`       // pointer so an explicit 0 (no retries) is distinguishable from unset
+	DaemonInterval         string                `json:"daemonInterval"`    // Go duration string, e.g. "5m"; empty/0 disables the embedded loop
+	LoopEnabled            *bool                 `json:"loopEnabled"`       // pointer so absence resolves to disabled (not inferred from DaemonInterval)
+	ApplyRetryBudget       *int                  `json:"applyRetryBudget"`  // pointer so an explicit 0 is distinguishable from unset
+	PipelineStageGate      *bool                 `json:"pipelineStageGate"` // pointer so an explicit false is distinguishable from unset
 }
 
 // LoadConfig returns the default policy with the config.json "dispatch" block
@@ -201,6 +211,9 @@ func mergeConfig(base Config, o dispatchFile) Config {
 	}
 	if o.ApplyRetryBudget != nil {
 		base.ApplyRetryBudget = *o.ApplyRetryBudget
+	}
+	if o.PipelineStageGate != nil {
+		base.PipelineStageGate = *o.PipelineStageGate
 	}
 	return base
 }

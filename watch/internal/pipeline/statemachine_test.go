@@ -64,6 +64,37 @@ func TestStageRank_UnknownStage_NotOk(t *testing.T) {
 	}
 }
 
+// TestIsKnownStage locks in IsKnownStage's contract (ticket #732): every
+// member of stageOrder must report true, and any unrecognized value --
+// including the empty string and a wrong-case near-match of a real stage --
+// must report false (default-deny per watch/AGENTS.md #598/#628).
+func TestIsKnownStage(t *testing.T) {
+	cases := []struct {
+		name  string
+		stage Stage
+		want  bool
+	}{
+		{"new", StageNew, true},
+		{"prepared", StagePrepared, true},
+		{"waiting_for_plan_approval", StageWaitingForPlanApproval, true},
+		{"plan_approved", StagePlanApproved, true},
+		{"executed", StageExecuted, true},
+		{"reviewed", StageReviewed, true},
+		{"finalized", StageFinalized, true},
+		{"empty string", Stage(""), false},
+		{"bogus", Stage("bogus"), false},
+		{"wrong case", Stage("FINALIZED"), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := IsKnownStage(c.stage)
+			if got != c.want {
+				t.Errorf("IsKnownStage(%q) = %v, want %v", c.stage, got, c.want)
+			}
+		})
+	}
+}
+
 // -- valid transitions (from < target: real forward transitions, never a no-op) --
 
 func TestTransition_ValidSequence(t *testing.T) {

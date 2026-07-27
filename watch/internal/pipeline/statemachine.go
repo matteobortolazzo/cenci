@@ -150,6 +150,13 @@ func transition(from Stage, command string, approve bool) (Stage, bool, error) {
 	return target, false, nil
 }
 
+// IsKnownStage reports whether stage is registered in the pipeline's total
+// stage order. It is the exported validity check for callers outside this
+// package (internal/dispatch's stage probe, #732) so stage-order knowledge
+// is never re-implemented elsewhere. Default-deny: an unrecognized value
+// reports false (watch/AGENTS.md #598/#628).
+func IsKnownStage(stage Stage) bool { _, ok := stageRank(stage); return ok }
+
 // NextActionsFor is the exported form of nextActionsFor (ticket #559): the
 // mechanics verbs' CLI rendering (pipeline_cmd.go, package main) renders the
 // same {state, next_actions, artifacts, warnings, errors} contract the five

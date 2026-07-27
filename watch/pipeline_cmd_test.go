@@ -430,3 +430,172 @@ func initGitRepoForCLITest(t *testing.T, dir string) {
 		t.Fatalf("git init %s: %v\n%s", dir, err, out)
 	}
 }
+
+// -- `cenci pipeline reset <id>` (#732) --------------------------------------
+
+// TestPipelineReset_AfterFinalize_ContractShowsNewStateAndStageWarning drives
+// prepare through finalize, then resets: state returns to "new", next_actions
+// is non-empty (StageNew's guidance), artifacts is empty (the file is gone),
+// no errors, and a warning names the stage it was reset from.
+func TestPipelineReset_AfterFinalize_ContractShowsNewStateAndStageWarning(t *testing.T) {
+	fakeDir := t.TempDir()
+	writeFakeGh(t, fakeDir, false)
+	stateDir := t.TempDir()
+
+	for _, step := range [][]string{
+		{"prepare", "42"}, {"plan", "42"}, {"plan", "42", "--approve"},
+		{"execute", "42"}, {"review", "42"}, {"finalize", "42"},
+	} {
+		args := append(append([]string{}, step...), "--state-dir", stateDir)
+		if _, _, exitErr := runPipelineCLI(t, fakeDir, args...); exitErr != nil {
+			t.Fatalf("%v: unexpected exit %d", step, exitErr.ExitCode())
+		}
+	}
+
+	c, _, exitErr := runPipelineCLI(t, fakeDir, "reset", "42", "--state-dir", stateDir)
+	if exitErr != nil {
+		t.Fatalf("pipeline reset: unexpected exit %d", exitErr.ExitCode())
+	}
+	if c.State != "new" {
+		t.Errorf("state = %q, want %q", c.State, "new")
+	}
+	if len(c.NextActions) == 0 {
+		t.Error("next_actions = [], want the StageNew guidance")
+	}
+	if len(c.Artifacts) != 0 {
+		t.Errorf("artifacts = %v, want empty (the file is gone)", c.Artifacts)
+	}
+	if len(c.Errors) != 0 {
+		t.Errorf("errors = %v, want none", c.Errors)
+	}
+	foundStageWarning := false
+	for _, w := range c.Warnings {
+		if strings.Contains(w, `from stage "finalized"`) {
+			foundStageWarning = true
+		}
+	}
+	if !foundStageWarning {
+		t.Errorf("warnings = %v, want one naming the reset stage %q", c.Warnings, "finalized")
+	}
+}
+
+// TestPipelineReset_NoStateFile_IdempotentWarningExit0 covers the missing-
+// state-file idempotent case.
+func TestPipelineReset_NoStateFile_IdempotentWarningExit0(t *testing.T) {
+	stateDir := t.TempDir()
+
+	c, _, exitErr := runPipelineCLI(t, "", "reset", "42", "--state-dir", stateDir)
+	if exitErr != nil {
+		t.Fatalf("pipeline reset (no state): unexpected exit %d", exitErr.ExitCode())
+	}
+	if c.State != "new" {
+		t.Errorf("state = %q, want %q", c.State, "new")
+	}
+	if len(c.Warnings) != 1 || c.Warnings[0] != "no pipeline state for 42; nothing to reset" {
+		t.Errorf("warnings = %v, want the idempotent no-op warning", c.Warnings)
+	}
+	if len(c.Errors) != 0 {
+		t.Errorf("errors = %v, want none", c.Errors)
+	}
+}
+
+// TestPipelineReset_CorruptFile_DecodeWarningExit0FileGone covers the
+// corrupt-state-file recovery path.
+func TestPipelineReset_CorruptFile_DecodeWarningExit0FileGone(t *testing.T) {
+	stateDir := t.TempDir()
+	path := filepath.Join(stateDir, "42.json")
+	if err := os.WriteFile(path, []byte("{not valid json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c, _, exitErr := runPipelineCLI(t, "", "reset", "42", "--state-dir", stateDir)
+	if exitErr != nil {
+		t.Fatalf("pipeline reset (corrupt): unexpected exit %d", exitErr.ExitCode())
+	}
+	if c.State != "new" {
+		t.Errorf("state = %q, want %q", c.State, "new")
+	}
+	found := false
+	for _, w := range c.Warnings {
+		if strings.Contains(w, "could not be decoded") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("warnings = %v, want a decode-failure warning", c.Warnings)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Errorf("corrupt state file %s still exists, want it deleted", path)
+	}
+}
+
+// TestPipelineReset_DeleteFails_Exit1WithErrorsPopulated covers the delete-
+// failure domain-error path: full contract on stdout, errors[] populated,
+// exit 1.
+func TestPipelineReset_DeleteFails_Exit1WithErrorsPopulated(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root bypasses Unix directory permission checks; cannot simulate a delete failure")
+	}
+	stateDir := t.TempDir()
+	path := filepath.Join(stateDir, "42.json")
+	seedPipelineState(t, path, "42", "finalized")
+	if err := os.WriteFile(path+".lock", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(stateDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(stateDir, 0o755) })
+
+	c, output, exitErr := runPipelineCLI(t, "", "reset", "42", "--state-dir", stateDir)
+	if exitErr == nil {
+		t.Fatal("pipeline reset with an undeletable state dir: want a non-zero exit, got 0")
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("exit = %d, want 1 (domain error)", exitErr.ExitCode())
+	}
+	if len(output) == 0 {
+		t.Fatal("stdout is empty, want the full JSON contract even on a delete failure")
+	}
+	if len(c.Errors) == 0 {
+		t.Error("errors = [], want the delete error populated")
+	}
+	if c.State != "finalized" {
+		t.Errorf("state = %q, want %q (the stage still on disk)", c.State, "finalized")
+	}
+}
+
+// -- malformed CLI: exit 2, reset's own usage hint, no stdout JSON ----------
+
+func TestPipelineReset_MissingID_Exit2(t *testing.T) {
+	assertPipelineVerbUsageExit2(t, "cenci pipeline reset: usage:", "pipeline", "reset")
+}
+
+func TestPipelineReset_NonNumericID_Exit2(t *testing.T) {
+	assertPipelineVerbUsageExit2(t, "cenci pipeline reset: usage:", "pipeline", "reset", "abc")
+}
+
+func TestPipelineReset_UnknownFlag_Exit2(t *testing.T) {
+	assertPipelineVerbUsageExit2(t, "cenci pipeline reset: usage:", "pipeline", "reset", "42", "--bogus-flag")
+}
+
+func TestPipelineReset_TrailingPositional_Exit2(t *testing.T) {
+	assertPipelineVerbUsageExit2(t, "cenci pipeline reset: usage:", "pipeline", "reset", "42", "unexpected")
+}
+
+// -- #588: empty arrays marshal as [], never null ----------------------------
+
+// TestPipelineReset_NeverEmitsNullInJSON guards the stable JSON contract on
+// reset's own output specifically (the idempotent no-op path, whose
+// artifacts[] is always empty).
+func TestPipelineReset_NeverEmitsNullInJSON(t *testing.T) {
+	stateDir := t.TempDir()
+
+	_, output, exitErr := runPipelineCLI(t, "", "reset", "42", "--state-dir", stateDir)
+	if exitErr != nil {
+		t.Fatalf("pipeline reset: unexpected exit %d", exitErr.ExitCode())
+	}
+	if strings.Contains(string(output), ":null") {
+		t.Errorf("reset JSON contains \":null\": %s (#588: empty arrays must marshal as [], never null)", output)
+	}
+}

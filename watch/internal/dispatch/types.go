@@ -13,6 +13,28 @@
 // `dispatch-failed`, which means the dispatched work failed.
 package dispatch
 
+// StageProbe classifies the collector's read of a ticket's persisted
+// `cenci pipeline` stage (#732) into a closed set, rather than collapsing
+// distinct failure classes (watch/AGENTS.md #598/#628). StageProbeAbsent is
+// the zero value ("") so every existing Ticket construction site (reconcile
+// paths, tests) keeps today's behavior unchanged without being touched.
+type StageProbe string
+
+const (
+	// StageProbeAbsent is the zero value: no state file, or a persisted
+	// stage that is literally "new" -- both mean "no pipeline run here",
+	// which must never block dispatch (.cenci/pipeline/ is gitignored and
+	// expendable; a deliberate permissive exception, #732).
+	StageProbeAbsent StageProbe = ""
+	// StageProbePresent means a readable, known stage was found; Stage
+	// carries it verbatim.
+	StageProbePresent StageProbe = "present"
+	// StageProbeError means the read failed, the file could not be decoded,
+	// or the persisted stage is not registered in pipeline's stage order --
+	// broken input, not absent input, so it default-denies.
+	StageProbeError StageProbe = "error"
+)
+
 // Ticket is one open GitHub issue, as collected from a repo. Labels carry the
 // board state (Planned, Blocked, agent:<name>, ...); Assignees carry GitHub
 // logins; Agent is the pre-resolved agent:<name> value, if any.
@@ -24,6 +46,16 @@ type Ticket struct {
 	Assignees []string // GitHub logins; dispatch requires exactly CurrentUser
 	HasOpenPR bool     // an open linked PR exists
 	Agent     string   // resolved from an `agent:<name>` label, else ""
+
+	// Stage is the ticket's persisted `cenci pipeline` stage, verbatim
+	// (collector-filled, #732; mirrors Plan.CommitsBehind above). Set
+	// whenever a read succeeded, including the unknown-stage ->
+	// StageProbeError case (so logs can name the offending value); stays ""
+	// when no probe happened or the read failed.
+	Stage string
+	// StageProbe classifies how Stage was obtained (collector-filled, #732;
+	// mirrors Plan.CommitsBehind above).
+	StageProbe StageProbe
 }
 
 // Plan is the parsed front matter of one .plans/<id>-<slug>.md file.

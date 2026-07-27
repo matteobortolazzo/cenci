@@ -8,6 +8,10 @@ import (
 )
 
 // testConfig has generous caps so no gate trips unless a case sets it.
+// PipelineStageGate matches DefaultConfig()'s default-on value (#732) so the
+// whole existing gate suite runs with the stage gate live; every existing
+// test ticket is StageProbeAbsent (the zero value), which always passes the
+// gate, so no existing expectation changes.
 func testConfig() Config {
 	return Config{
 		ConcurrencyCap:         10,
@@ -15,6 +19,7 @@ func testConfig() Config {
 		DailyQuota:             100,
 		PlanStalenessTolerance: 5,
 		DefaultAgent:           "claude",
+		PipelineStageGate:      true,
 	}
 }
 
@@ -182,6 +187,86 @@ func TestDecideGates(t *testing.T) {
 			name:   "budget exhausted",
 			mutate: func(in *Inputs) { in.Budgets = FloorProvider{Floors: map[string]float64{"claude": 0}} },
 			want:   []wantDecision{{42, ActionSkip, "budget exhausted", ""}},
+		},
+
+		// -- #732: persisted pipeline stage gate --------------------------
+
+		{
+			name: "stage gate: finalized + present skips with the reset-to-redispatch reason",
+			mutate: func(in *Inputs) {
+				in.Tickets[0].Stage = "finalized"
+				in.Tickets[0].StageProbe = StageProbePresent
+			},
+			want: []wantDecision{{42, ActionSkip, "pipeline finalized (reset to re-dispatch)", ""}},
+		},
+		{
+			name: "stage gate: executed + present still dispatches (RecoveryRetry path unchanged)",
+			mutate: func(in *Inputs) {
+				in.Tickets[0].Stage = "executed"
+				in.Tickets[0].StageProbe = StageProbePresent
+			},
+			want: []wantDecision{{42, ActionDispatch, "dispatch", "claude"}},
+		},
+		{
+			name: "stage gate: prepared + present dispatches (not gated)",
+			mutate: func(in *Inputs) {
+				in.Tickets[0].Stage = "prepared"
+				in.Tickets[0].StageProbe = StageProbePresent
+			},
+			want: []wantDecision{{42, ActionDispatch, "dispatch", "claude"}},
+		},
+		{
+			name: "stage gate: waiting_for_plan_approval + present dispatches (not gated)",
+			mutate: func(in *Inputs) {
+				in.Tickets[0].Stage = "waiting_for_plan_approval"
+				in.Tickets[0].StageProbe = StageProbePresent
+			},
+			want: []wantDecision{{42, ActionDispatch, "dispatch", "claude"}},
+		},
+		{
+			name: "stage gate: plan_approved + present dispatches (not gated)",
+			mutate: func(in *Inputs) {
+				in.Tickets[0].Stage = "plan_approved"
+				in.Tickets[0].StageProbe = StageProbePresent
+			},
+			want: []wantDecision{{42, ActionDispatch, "dispatch", "claude"}},
+		},
+		{
+			name: "stage gate: reviewed + present dispatches (not gated)",
+			mutate: func(in *Inputs) {
+				in.Tickets[0].Stage = "reviewed"
+				in.Tickets[0].StageProbe = StageProbePresent
+			},
+			want: []wantDecision{{42, ActionDispatch, "dispatch", "claude"}},
+		},
+		{
+			name: "stage gate: probe error skips with the unreadable reason",
+			mutate: func(in *Inputs) {
+				in.Tickets[0].StageProbe = StageProbeError
+			},
+			want: []wantDecision{{42, ActionSkip, "pipeline state unreadable", ""}},
+		},
+		{
+			name: "stage gate: explicit absent probe dispatches (matches the zero-value/no-state-file behavior)",
+			mutate: func(in *Inputs) {
+				in.Tickets[0].StageProbe = StageProbeAbsent
+			},
+			want: []wantDecision{{42, ActionDispatch, "dispatch", "claude"}},
+		},
+		{
+			name: "stage gate: present + unrecognized stage string defensively skips with the unreadable reason (Q3)",
+			mutate: func(in *Inputs) {
+				in.Tickets[0].Stage = "bogus"
+				in.Tickets[0].StageProbe = StageProbePresent
+			},
+			want: []wantDecision{{42, ActionSkip, "pipeline state unreadable", ""}},
+		},
+		{
+			name: "stage gate: unrecognized StageProbe enum value skips with its own distinct reason",
+			mutate: func(in *Inputs) {
+				in.Tickets[0].StageProbe = StageProbe("wat")
+			},
+			want: []wantDecision{{42, ActionSkip, "pipeline stage probe unrecognized", ""}},
 		},
 	}
 
@@ -483,5 +568,79 @@ func TestQuietHoursContains(t *testing.T) {
 	off := QuietHours{StartHour: 0, EndHour: 0}
 	if off.Contains(time.Date(2026, 7, 10, 3, 0, 0, 0, time.UTC)) {
 		t.Error("start==end must disable the window")
+	}
+}
+
+// -- #732: pipeline stage gate, dedicated tests ------------------------------
+
+// TestTicketStageProbeZeroValueIsAbsent locks in AC1's specific requirement:
+// StageProbeAbsent must be the zero value ("") so every pre-#732 Ticket
+// construction site (reconcile paths, existing tests) keeps today's
+// behavior unchanged without being touched.
+func TestTicketStageProbeZeroValueIsAbsent(t *testing.T) {
+	var tk Ticket
+	if tk.StageProbe != StageProbeAbsent {
+		t.Errorf("zero-value Ticket.StageProbe = %q, want StageProbeAbsent", tk.StageProbe)
+	}
+	if StageProbeAbsent != "" {
+		t.Errorf("StageProbeAbsent = %q, want the empty string (the zero value)", string(StageProbeAbsent))
+	}
+}
+
+// TestDecideStageGateDisabled_KillSwitchDispatchesFinalizedTicket covers the
+// AC's kill switch: Config.PipelineStageGate = false must dispatch a
+// finalized ticket that would otherwise be gated, without changing any
+// other gate's behavior.
+func TestDecideStageGateDisabled_KillSwitchDispatchesFinalizedTicket(t *testing.T) {
+	in := baseInputs()
+	in.Config.PipelineStageGate = false
+	in.Tickets[0].Stage = "finalized"
+	in.Tickets[0].StageProbe = StageProbePresent
+
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+}
+
+// TestDecideStageGate_OrderingSitsBetweenOpenPRAndAssigneeGates proves the
+// stage gate is evaluated after the HasOpenPR check but before the assignee
+// gate (AC: "immediately after the HasOpenPR check ... before the assignee
+// gate"), so the first-failing-gate skip reason names the real cause in
+// both directions.
+func TestDecideStageGate_OrderingSitsBetweenOpenPRAndAssigneeGates(t *testing.T) {
+	t.Run("finalized ticket with an open PR reports open PR exists first", func(t *testing.T) {
+		in := baseInputs()
+		in.Tickets[0].Stage = "finalized"
+		in.Tickets[0].StageProbe = StageProbePresent
+		in.Tickets[0].HasOpenPR = true
+
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "open PR exists", ""}})
+	})
+
+	t.Run("finalized unassigned ticket reports the stage-gate reason, not unassigned", func(t *testing.T) {
+		in := baseInputs()
+		in.Tickets[0].Stage = "finalized"
+		in.Tickets[0].StageProbe = StageProbePresent
+		in.Tickets[0].Assignees = nil
+
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "pipeline finalized (reset to re-dispatch)", ""}})
+	})
+}
+
+// TestDecideStageGate_Determinism locks in that Decide stays pure with the
+// stage-probe fields on Inputs: identical Inputs, run twice, yield an
+// identical ordered []Decision.
+func TestDecideStageGate_Determinism(t *testing.T) {
+	in := baseInputs()
+	in.Tickets[0].Stage = "finalized"
+	in.Tickets[0].StageProbe = StageProbePresent
+
+	got1 := Decide(in)
+	got2 := Decide(in)
+	if len(got1) != len(got2) {
+		t.Fatalf("non-deterministic decision count: %d vs %d", len(got1), len(got2))
+	}
+	for i := range got1 {
+		if got1[i].Ticket.Number != got2[i].Ticket.Number || got1[i].Action != got2[i].Action || got1[i].Reason != got2[i].Reason {
+			t.Errorf("[%d] non-deterministic: %+v vs %+v", i, got1[i], got2[i])
+		}
 	}
 }
