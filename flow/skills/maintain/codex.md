@@ -81,8 +81,9 @@ the selection or silently substitute a new audit.
 Mode `backlog` uses a different apply path: it consolidates GitHub issues (merge duplicates,
 batch small items, promote) and mutates no repository files, so it creates no worktree,
 branch, commit, or PR, and skips the `check.sh`/health-gate re-verify — follow the
-GitHub-issue apply path in `modes/backlog.md`. The rest of this section applies to the four
-repo-audit modes.
+GitHub-issue apply path in `modes/backlog.md`. Its title-carrying polish-ticket create uses
+`gh api ... --input` with a file-tool-authored JSON payload, never an inline `--title`. The
+rest of this section applies to the four repo-audit modes.
 
 Verify the normal-mode invocation includes the approved apply plan. Persist a maintain
 checkpoint, then generate and validate one run token following the shared worktree
