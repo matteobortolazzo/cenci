@@ -499,7 +499,7 @@ fi
 # to dev; passing "-c" "sleep infinity" as CMD keeps the container's
 # foreground process (and therefore tini/--init, and the dockerd it
 # reparented) alive long enough to probe. `docker exec -u dev` is required
-# for the inner probes: per this project's Entrypoint patterns note,
+# for the inner probes: per `sandbox/docs/entrypoint.md`,
 # `docker run --user root` persists as the container's default exec user for
 # every later `docker exec` that doesn't pass its own `-u`, so an unqualified
 # exec would run as root instead of exercising the docker-group membership
