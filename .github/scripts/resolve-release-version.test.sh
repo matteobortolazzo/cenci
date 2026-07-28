@@ -17,7 +17,7 @@
 #   - The complete resulting value must whole-string match
 #     ^[0-9]+\.[0-9]+\.[0-9]+$ via bash `[[ =~ ]]` (never line-oriented grep,
 #     which would let a malicious multi-line value with a valid first line
-#     slip through — sandbox/AGENTS.md bash-regex-vs-grep rule).
+#     slip through — sandbox/docs/test-harness.md bash-regex-vs-grep rule).
 #   - On success: writes "version=<version>" and "tag=watch/v<version>" to
 #     $GITHUB_OUTPUT and exits 0.
 #   - On any non-semver result (including injection payloads that don't
