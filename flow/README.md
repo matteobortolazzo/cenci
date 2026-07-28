@@ -21,7 +21,7 @@ scope and planning decisions human-gated.
 | `/cenci:address-review <pr-number>` | Address PR review comments — fetch, evaluate, fix, reply, push, re-request review |
 | `/cenci:babysit <pr-number>` | Persistent PR follow-through — periodically checks CI and new review comments and drives them to resolution until the PR merges or closes |
 | `/cenci:sync` | Pull latest main, rebase active worktrees, prune stale remotes, clean up merged branches |
-| `/cenci:maintain [structure\|docs\|clients\|rules]` | Audit and repair the project's workflow structure, documentation and generated indexes, client-adapter consistency (Claude Code, Codex, OpenCode), and accumulated rules — `rules` replaces the retired garden skill. Runs all four modes by default, or a single named mode; reports findings with proposed repairs for approval, then applies them in one PR. Independent of lazyboards |
+| `/cenci:maintain [structure\|docs\|clients\|rules\|backlog]` | Audit and repair the project's workflow structure, documentation and generated indexes, client-adapter consistency (Claude Code, Codex, OpenCode), accumulated rules, and the open `Followup` backlog — `rules` replaces the retired garden skill. Runs the four repo-audit modes by default, or a single named mode; `backlog` mutates GitHub issues instead of repo files and is excluded from the default run, so it must be requested explicitly. Reports findings with proposed repairs for approval, then applies them in one PR (except `backlog`, which applies as GitHub-issue mutations, no PR). Independent of lazyboards |
 
 **Codex support**: Codex receives the portable convention skills below plus the full
 implementation workflow as a documented `AGENTS.md` equivalent. The interactive
@@ -443,8 +443,8 @@ On merge, babysit performs the `In Review → Implemented` board transition (see
 Maintenance is a core cenci workflow feature, independent of lazyboards — it works the
 same whether or not a board is set up.
 
-**On demand, full audit.** `/cenci:maintain [structure|docs|clients|rules] [scope]`
-pairs the deterministic checker (`flow/skills/maintain/scripts/check.sh`) with four
+**On demand, full audit.** `/cenci:maintain [structure|docs|clients|rules|backlog] [scope]`
+pairs the deterministic checker (`flow/skills/maintain/scripts/check.sh`) with five
 analyzer agents:
 
 - `structure` — workflow structural conventions and test-suite coverage
@@ -452,14 +452,20 @@ analyzer agents:
 - `clients` — Claude Code/Codex/OpenCode client-adapter consistency
 - `rules` — curates `AGENTS.md`/`CLAUDE.md` Critical Rules and topic-doc rule bullets;
   this mode replaces the retired garden skill's curation duties
+- `backlog` — consolidates the open `Followup` backlog (merges duplicates, promotes
+  ready items, batches small items into polish tickets); unlike the other modes its
+  apply phase mutates GitHub issues, not repo files, so it's excluded from `all` and
+  only runs when requested explicitly
 
-An omitted mode (or `all`) runs every mode together. Each run reports every finding
-with evidence and a proposed repair, then asks once which actions to apply (all
-deterministic repairs, critical+high only, docs+indexes only, rules only, pick
-individually, or report only) — nothing is written until you approve. Approved repairs
-are applied in a dedicated worktree, re-verified against the checker and the project's
-health gate, and shipped as a single reviewed PR (Phase 6 Apply) — the same
-worktree/single-PR guarantee every other pipeline skill follows.
+An omitted mode (or `all`) runs the four repo-audit modes together; `backlog` never
+runs as part of `all`. Each run reports every finding with evidence and a proposed
+repair, then asks once which actions to apply (all deterministic repairs, critical+high
+only, docs+indexes only, rules only, pick individually, or report only) — nothing is
+written until you approve. Approved repairs are applied in a dedicated worktree,
+re-verified against the checker and the project's health gate, and shipped as a single
+reviewed PR (Phase 6 Apply) — the same worktree/single-PR guarantee every other
+pipeline skill follows, except `backlog`, whose Phase 6 applies GitHub-issue mutations
+directly with no worktree, branch, commit, or PR.
 
 **Automatic, during-implement.** `/cenci:implement`'s Phase 8 already runs the
 deterministic maintenance checker automatically against doc-affecting changed files on
@@ -605,7 +611,12 @@ flow/
 │   ├── duplication-analyzer.md
 │   ├── security-analyzer.md
 │   ├── structure-analyzer.md
-│   └── lessons-collector.md
+│   ├── lessons-collector.md
+│   ├── backlog-maintainer.md       # Audits the open Followup-ticket backlog for duplicates and batchable items
+│   ├── docs-maintainer.md          # Audits documentation and generated-index consistency for maintenance drift
+│   ├── portability-maintainer.md   # Audits client-portability consistency (Claude Code, Codex, OpenCode)
+│   ├── rules-maintainer.md         # Audits rule sources (Critical Rules, topic-doc bullets) for curation drift
+│   └── structure-maintainer.md     # Audits structural conventions and test-suite coverage for maintenance drift
 ├── skills/
 │   ├── configure/SKILL.md
 │   ├── refine/SKILL.md
@@ -638,23 +649,28 @@ flow/
 │   ├── install-skills.sh      # Symlinks portable skills into OpenCode's global skills dir
 │   └── install-skills.test.sh # Install/remove/idempotency regression
 ├── skills/maintain/
-│   ├── SKILL.md                # /cenci:maintain skill: structure, docs, clients, rules
+│   ├── SKILL.md                # /cenci:maintain skill: structure, docs, clients, rules, backlog
 │   ├── codex.md                # Native six-phase Codex maintain procedure
 │   ├── modes/
 │   │   ├── structure.md
 │   │   ├── docs.md
 │   │   ├── clients.md
-│   │   └── rules.md
+│   │   ├── rules.md
+│   │   └── backlog.md          # Consolidates the open Followup ticket backlog (merge/promote/batch)
 │   └── scripts/
-│       └── check.sh            # Deterministic repo-consistency checker (23 categories, JSON+text report)
+│       └── check.sh            # Deterministic repo-consistency checker (JSON+text report)
 ├── tests/
 │   └── maintain.test.sh       # check.sh fixture-driven regression suite
 ├── docs/
-│   ├── git-workflow.md        # On-demand reference (read by skills as needed)
-│   ├── skill-authoring.md     # Writing skills that generate/regenerate files from external-sourced values
-│   ├── ticket-sizing.md       # How tickets are sized against the ~200k agent context budget, and when to split
-│   ├── codex.md               # What cenci offers OpenAI Codex, and how it wires
-│   └── opencode.md            # What cenci offers OpenCode, and how it wires
+│   ├── git-workflow.md             # On-demand reference (read by skills as needed)
+│   ├── skill-authoring.md          # Writing skills that generate/regenerate files from external-sourced values
+│   ├── ticket-sizing.md            # How tickets are sized against the ~200k agent context budget, and when to split
+│   ├── pipeline-safety.md          # Restart/recovery, risk-profile re-evaluation, and shared-temp-file scoping for multi-phase pipelines
+│   ├── shell-scripting-gotchas.md  # Narrow shell/jq/grep pitfalls (CWD persistence, jq fallback semantics, contract-test markers)
+│   ├── adapter-contract.md         # The 8-property behavioral-parity contract client adapters (Claude Code, Codex) must satisfy
+│   ├── followup-triage.md          # The Followup capture-queue invariant and the /cenci:maintain backlog consolidation mechanics
+│   ├── codex.md                    # What cenci offers OpenAI Codex, and how it wires
+│   └── opencode.md                 # What cenci offers OpenCode, and how it wires
 ├── templates/
 │   ├── claudeignore
 │   ├── claude-md-root.md
