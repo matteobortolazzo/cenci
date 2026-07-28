@@ -218,6 +218,82 @@ func TestPipelineWorktreeCleanup_HappyPath_ProducesContractJSON(t *testing.T) {
 	assertArraysNonNil(t, "worktree-cleanup", c)
 }
 
+// -- ticket #688: `cenci pipeline worktree <id> --attach PATH` reuse mode --
+//
+// RED: --attach does not exist on runPipelineWorktree's flag set yet. Every
+// invocation below either (a) hits the pre-existing generic `--slug` usage
+// path (whose text never mentions "--attach", the marker these assertions
+// pin, mirroring this file's own false-green guard idiom above for
+// verb-specific vs. generic-fallback text) or (b) fails flag.Parse outright
+// on the unrecognized `--attach` flag -- exit 2 either way, but never with
+// "--attach" in the output, and the happy-path case never reaches exit 0 at
+// all since no verb recognizes the flag.
+
+func TestPipelineWorktree_SlugAndAttachTogether_Exit2(t *testing.T) {
+	assertPipelineVerbUsageExit2(t, "--attach", "pipeline", "worktree", "42", "--slug", "add-thing", "--attach", "/tmp/somewhere")
+}
+
+// TestPipelineWorktree_NeitherSlugNorAttach_Exit2WithAttachNamed covers the
+// "exactly one of --slug/--attach" mutual-exclusion gate's other half:
+// omitting both must exit 2, and the usage hint must name --attach
+// specifically -- proving the CLI surface actually grew the new flag rather
+// than silently continuing to treat --slug as the only reuse path.
+func TestPipelineWorktree_NeitherSlugNorAttach_Exit2WithAttachNamed(t *testing.T) {
+	assertPipelineVerbUsageExit2(t, "--attach", "pipeline", "worktree", "42")
+}
+
+// TestPipelineWorktree_EmptyAttach_Exit2 covers the plan's explicit
+// "empty-string --attach value must exit 2" case: an empty value is a
+// malformed CLI input, not a domain error (distinct from --attach naming a
+// genuinely non-existent path, which is ErrWorktreeNotFound, a domain
+// error).
+func TestPipelineWorktree_EmptyAttach_Exit2(t *testing.T) {
+	assertPipelineVerbUsageExit2(t, "--attach", "pipeline", "worktree", "42", "--attach", "")
+}
+
+// TestPipelineWorktree_AttachHappyPath_ProducesContractJSONWithAttachedPathInArtifacts
+// covers the CLI-level attach happy path (case 24's E2E scope): a real
+// pre-existing worktree on a non-standard branch, attached via the real
+// built binary, with the attached path present in the contract's
+// artifacts[].
+func TestPipelineWorktree_AttachHappyPath_ProducesContractJSONWithAttachedPathInArtifacts(t *testing.T) {
+	repoDir := t.TempDir()
+	initGitRepoWithCommitForCLITest(t, repoDir)
+	stateDir := t.TempDir()
+
+	worktreeDir := filepath.Join(t.TempDir(), "attach-me")
+	if out, err := exec.Command("git", "-C", repoDir, "worktree", "add", "-q", worktreeDir, "-b", "non-standard-branch").CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, out)
+	}
+
+	cmd := exec.Command(binaryPath, "pipeline", "worktree", "42", "--attach", worktreeDir, "--repo", repoDir, "--state-dir", stateDir)
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("pipeline worktree --attach: unexpected error: %v\n%s", err, output)
+	}
+	var c pipelineContract
+	if jerr := json.Unmarshal(output, &c); jerr != nil {
+		t.Fatalf("pipeline worktree --attach: stdout is not valid JSON: %v\n%s", jerr, output)
+	}
+	assertArraysNonNil(t, "worktree --attach", c)
+	if len(c.Errors) != 0 {
+		t.Errorf("errors = %v, want none on success", c.Errors)
+	}
+	wantPath, evalErr := filepath.EvalSymlinks(worktreeDir)
+	if evalErr != nil {
+		t.Fatalf("EvalSymlinks(worktreeDir): %v", evalErr)
+	}
+	found := false
+	for _, a := range c.Artifacts {
+		if a == wantPath {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("artifacts = %v, want the attached path %q present", c.Artifacts, wantPath)
+	}
+}
+
 func TestPipelineArtifact_SetThenGet_HappyPath_ProducesContractJSON(t *testing.T) {
 	stateDir := t.TempDir()
 	seedPipelineState(t, filepath.Join(stateDir, "42.json"), "42", "prepared")
@@ -246,6 +322,43 @@ func TestPipelineArtifact_SetThenGet_HappyPath_ProducesContractJSON(t *testing.T
 		t.Fatalf("pipeline artifact (get): stdout is not valid JSON: %v\n%s", jerr, getOut)
 	}
 	assertArraysNonNil(t, "artifact get", getContract)
+}
+
+// TestPipelineArtifact_Get_ArtifactsContainsBranchKeyValueEntry covers the
+// code-review finding (ticket #688 fix-up) that `--get`'s contract JSON
+// never actually exposed `branch` anywhere: flow/skills/implement/phases/
+// phase-9-pr.md's Push step sources the branch to push from this call's
+// `artifacts[]`, so a `branch:<value>` entry must genuinely be present, not
+// just an empty `artifacts: []`.
+func TestPipelineArtifact_Get_ArtifactsContainsBranchKeyValueEntry(t *testing.T) {
+	stateDir := t.TempDir()
+	seedPipelineState(t, filepath.Join(stateDir, "42.json"), "42", "prepared")
+
+	setCmd := exec.Command(binaryPath, "pipeline", "artifact", "42", "--state-dir", stateDir, "--branch", "feature/42-add-thing")
+	if out, err := setCmd.Output(); err != nil {
+		t.Fatalf("pipeline artifact (set --branch): unexpected error: %v\n%s", err, out)
+	}
+
+	getCmd := exec.Command(binaryPath, "pipeline", "artifact", "42", "--state-dir", stateDir, "--get")
+	getOut, err := getCmd.Output()
+	if err != nil {
+		t.Fatalf("pipeline artifact (get): unexpected error: %v\n%s", err, getOut)
+	}
+	var getContract pipelineContract
+	if jerr := json.Unmarshal(getOut, &getContract); jerr != nil {
+		t.Fatalf("pipeline artifact (get): stdout is not valid JSON: %v\n%s", jerr, getOut)
+	}
+	assertArraysNonNil(t, "artifact get (branch check)", getContract)
+
+	found := false
+	for _, a := range getContract.Artifacts {
+		if a == "branch:feature/42-add-thing" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("artifacts = %v, want a %q entry", getContract.Artifacts, "branch:feature/42-add-thing")
+	}
 }
 
 // -- the crux: cross-worktree state continuity ------------------------------

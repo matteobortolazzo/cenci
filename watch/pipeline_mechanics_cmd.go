@@ -23,7 +23,7 @@ import (
 const (
 	pipelineLabelUsage = "cenci pipeline label: usage: cenci pipeline label <id> --transition working|planned|in-review " +
 		"[--trivial] [--parent N] [--repo-slug OWNER/REPO] [--state-dir DIR] [--repo PATH]"
-	pipelineWorktreeUsage = "cenci pipeline worktree: usage: cenci pipeline worktree <id> --slug SLUG " +
+	pipelineWorktreeUsage = "cenci pipeline worktree: usage: cenci pipeline worktree <id> (--slug SLUG | --attach PATH) " +
 		"[--state-dir DIR] [--repo PATH]"
 	pipelineWorktreeCleanupUsage = "cenci pipeline worktree-cleanup: usage: cenci pipeline worktree-cleanup <id> --slug SLUG " +
 		"[--state-dir DIR] [--repo PATH]"
@@ -95,18 +95,26 @@ func mechanicsID(rest []string, usageExit func()) string {
 // loading/returning any State), it best-effort re-reads the persisted state
 // for a more informative `state` field, exactly as pipeline.Run's own
 // lock-contention fallback does.
-func renderMechanicsOutput(id, repoRoot, stateDir string, state pipeline.State, artifacts []string, err error) {
+//
+// warnings (ticket #688) is every non-stage-command advisory a mechanics
+// verb wants to surface -- today only AttachWorktree's "replaced tracked
+// worktree" notice; every other call site passes nil, which marshals as the
+// #588-mandated `[]`, never `null`.
+func renderMechanicsOutput(id, repoRoot, stateDir string, state pipeline.State, artifacts []string, warnings []string, err error) {
 	if err != nil && state.Stage == "" {
 		if fallback, gerr := pipeline.GetArtifacts(pipeline.ArtifactOpts{ID: id, RepoRoot: repoRoot, StateDir: stateDir}); gerr == nil {
 			state = fallback
 		}
+	}
+	if warnings == nil {
+		warnings = []string{}
 	}
 
 	out := pipeline.Output{
 		State:       string(state.Stage),
 		NextActions: pipeline.NextActionsFor(state.Stage),
 		Artifacts:   artifacts,
-		Warnings:    []string{},
+		Warnings:    warnings,
 		Errors:      []string{},
 	}
 	if err != nil {
@@ -183,17 +191,22 @@ func runPipelineLabel(rest []string) {
 		Trivial:    *trivial,
 		ParentID:   *parent,
 	})
-	renderMechanicsOutput(id, *repo, *stateDir, s, []string{}, err)
+	renderMechanicsOutput(id, *repo, *stateDir, s, []string{}, nil, err)
 }
 
-// runPipelineWorktree implements `cenci pipeline worktree <id> --slug SLUG
-// [--state-dir DIR] [--repo PATH]`.
+// runPipelineWorktree implements `cenci pipeline worktree <id> (--slug SLUG
+// | --attach PATH) [--state-dir DIR] [--repo PATH]`. Exactly one of --slug
+// (create mode, pipeline.CreateWorktree) / --attach (reuse mode, ticket
+// #688's pipeline.AttachWorktree) is required: neither or both set is a
+// conflicting-input usage error (exit 2), never silent precedence
+// (docs/cli-conventions.md).
 func runPipelineWorktree(rest []string) {
 	id := mechanicsID(rest, pipelineWorktreeUsageExit)
 
 	fs := flag.NewFlagSet("pipeline worktree", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	slug := fs.String("slug", "", "worktree/branch slug (required)")
+	slug := fs.String("slug", "", "worktree/branch slug (create mode)")
+	attach := fs.String("attach", "", "path to an existing worktree to attach/reuse (reuse mode)")
 	stateDir := fs.String("state-dir", "", "override the pipeline state directory (test hook)")
 	repo := fs.String("repo", "", "override the resolved repo root (test hook)")
 	if err := fs.Parse(rest[1:]); err != nil {
@@ -202,16 +215,41 @@ func runPipelineWorktree(rest []string) {
 	if len(fs.Args()) > 0 {
 		pipelineWorktreeUsageExit()
 	}
-	if *slug == "" {
+
+	slugSet, attachSet := false, false
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "slug":
+			slugSet = true
+		case "attach":
+			attachSet = true
+		}
+	})
+	if slugSet == attachSet {
+		// Neither set, or both set: a conflicting/ambiguous mode is always
+		// a usage error, never resolved by silent precedence.
+		pipelineWorktreeUsageExit()
+	}
+	if slugSet && *slug == "" {
+		pipelineWorktreeUsageExit()
+	}
+	if attachSet && *attach == "" {
 		pipelineWorktreeUsageExit()
 	}
 
-	s, err := pipeline.CreateWorktree(pipeline.WorktreeOpts{ID: id, Slug: *slug, RepoRoot: *repo, StateDir: *stateDir})
+	var s pipeline.State
+	var warnings []string
+	var err error
+	if attachSet {
+		s, warnings, err = pipeline.AttachWorktree(pipeline.WorktreeOpts{ID: id, RepoRoot: *repo, StateDir: *stateDir, AttachPath: *attach})
+	} else {
+		s, err = pipeline.CreateWorktree(pipeline.WorktreeOpts{ID: id, Slug: *slug, RepoRoot: *repo, StateDir: *stateDir})
+	}
 	artifacts := []string{}
 	if s.WorktreePath != "" {
 		artifacts = []string{s.WorktreePath}
 	}
-	renderMechanicsOutput(id, *repo, *stateDir, s, artifacts, err)
+	renderMechanicsOutput(id, *repo, *stateDir, s, artifacts, warnings, err)
 }
 
 // runPipelineWorktreeCleanup implements `cenci pipeline worktree-cleanup
@@ -241,7 +279,7 @@ func runPipelineWorktreeCleanup(rest []string) {
 			s = got
 		}
 	}
-	renderMechanicsOutput(id, *repo, *stateDir, s, []string{}, err)
+	renderMechanicsOutput(id, *repo, *stateDir, s, []string{}, nil, err)
 }
 
 // runPipelineArtifact implements `cenci pipeline artifact <id> [--get]
@@ -249,6 +287,14 @@ func runPipelineWorktreeCleanup(rest []string) {
 // KEY=VALUE ...] [--state-dir DIR] [--repo PATH]`. Without --get it sets the
 // non-zero fields provided; with --get it is a read-only point-in-time
 // fetch and every other flag is ignored.
+//
+// --get's contract JSON exposes the tracked State fields through the
+// frozen {state, next_actions, artifacts, warnings, errors} shape's
+// `artifacts` array, never as new top-level JSON keys: each non-empty
+// tracked field is a self-describing `key:value` string entry --
+// `branch:<value>`, `worktree:<value>`, `plan:<value>` -- so a caller (e.g.
+// flow's phase-9-pr.md, sourcing the branch to push) greps/selects the
+// entry it needs by its `key:` prefix.
 func runPipelineArtifact(rest []string) {
 	id := mechanicsID(rest, pipelineArtifactUsageExit)
 
@@ -286,7 +332,17 @@ func runPipelineArtifact(rest []string) {
 			pipelineArtifactUsageExit()
 		}
 		s, err := pipeline.GetArtifacts(pipeline.ArtifactOpts{ID: id, RepoRoot: *repo, StateDir: *stateDir})
-		renderMechanicsOutput(id, *repo, *stateDir, s, []string{}, err)
+		artifacts := []string{}
+		if s.Branch != "" {
+			artifacts = append(artifacts, "branch:"+s.Branch)
+		}
+		if s.WorktreePath != "" {
+			artifacts = append(artifacts, "worktree:"+s.WorktreePath)
+		}
+		if s.PlanPath != "" {
+			artifacts = append(artifacts, "plan:"+s.PlanPath)
+		}
+		renderMechanicsOutput(id, *repo, *stateDir, s, artifacts, nil, err)
 		return
 	}
 
@@ -308,5 +364,5 @@ func runPipelineArtifact(rest []string) {
 		PRNumberSet: prNumberSet,
 		Session:     sess.m,
 	})
-	renderMechanicsOutput(id, *repo, *stateDir, s, []string{}, err)
+	renderMechanicsOutput(id, *repo, *stateDir, s, []string{}, nil, err)
 }

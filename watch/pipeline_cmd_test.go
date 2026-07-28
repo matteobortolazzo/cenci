@@ -599,3 +599,69 @@ func TestPipelineReset_NeverEmitsNullInJSON(t *testing.T) {
 		t.Errorf("reset JSON contains \":null\": %s (#588: empty arrays must marshal as [], never null)", output)
 	}
 }
+
+// -- ticket #688: plan-file-triggered stage adoption (closing #718 item 1) --
+
+// writePlanFileForCLITest writes a minimal, validly-shaped
+// `.plans/<id>-<slug>.md` under repoDir (all four sections adoptPlanFileStage's
+// reused parseAndValidatePlan requires, plus a matching slug/ticketId). This
+// file lives in package main_test, a separate package from
+// internal/pipeline's own test fixtures (adopt_test.go's writePlanFile), so
+// it cannot reuse those package-internal helpers directly.
+func writePlanFileForCLITest(t *testing.T, repoDir, id, slug string) string {
+	t.Helper()
+	dir := filepath.Join(repoDir, ".plans")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir .plans: %v", err)
+	}
+	path := filepath.Join(dir, id+"-"+slug+".md")
+	content := "---\n" +
+		"slug: " + slug + "\n" +
+		"ticketId: " + id + "\n" +
+		"---\n" +
+		"\n## Ticket Details\nsome details\n\n" +
+		"## Implementation Plan\ndo things\n\n" +
+		"## Architectural Context\nsome context\n\n" +
+		"## Design Context\nsome design\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write plan file: %v", err)
+	}
+	return path
+}
+
+// TestPipelinePlanApprove_AdoptsPreStageTrackingPlan_Exit0WithWarning is the
+// plan's case-13 CLI-level E2E: a ticket with a valid `.plans/<id>-*.md`
+// file on disk but NO prior pipeline state file at all (the literal #718
+// repro -- stage tracking predates or was deleted for this ticket) must
+// still succeed on `plan --approve` via the real binary, landing at
+// plan_approved with the adoption warning surfaced in warnings[]. Uses
+// --repo (not --state-dir) so plan discovery and the canonical state path
+// both resolve under the same real temp git repo, exactly like
+// TestPipeline_StateFilePersistedAtCanonicalRepoPath above. No fake `gh` is
+// installed: adoption is offline (adopt_test.go's own case 12 pins that the
+// `command` seam is never invoked), so a real ambient PATH suffices.
+func TestPipelinePlanApprove_AdoptsPreStageTrackingPlan_Exit0WithWarning(t *testing.T) {
+	repoDir := t.TempDir()
+	initGitRepoForCLITest(t, repoDir)
+	writePlanFileForCLITest(t, repoDir, "42", "add-thing")
+
+	c, _, exitErr := runPipelineCLI(t, "", "plan", "42", "--approve", "--repo", repoDir)
+	if exitErr != nil {
+		t.Fatalf("plan --approve (adoption): unexpected exit %d", exitErr.ExitCode())
+	}
+	if c.State != "plan_approved" {
+		t.Errorf("state = %q, want %q", c.State, "plan_approved")
+	}
+	if len(c.Errors) != 0 {
+		t.Errorf("errors = %v, want none on a successful adoption", c.Errors)
+	}
+	found := false
+	for _, w := range c.Warnings {
+		if strings.Contains(w, "adopted plan file") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("warnings = %v, want an adoption warning", c.Warnings)
+	}
+}

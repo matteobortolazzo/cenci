@@ -47,11 +47,13 @@ type Output struct {
 
 // Run executes one pipeline stage command: it acquires the per-ticket state
 // lock, loads the current stage, (for prepare, on the first run) confirms
-// the ticket exists via a retried `gh issue view`, applies the state-machine
-// transition, persists the result, and returns the structured contract.
-// A non-nil error always pairs with a fully-populated Output (state,
-// next_actions, and errors[] all set) so callers can render the contract
-// regardless of success or domain-level failure.
+// the ticket exists via a retried `gh issue view`, (for `plan --approve`
+// only, ticket #688) grants plan-file-triggered stage adoption when
+// adoptPlanFileStage's default-deny gate is satisfied, applies the
+// state-machine transition, persists the result, and returns the structured
+// contract. A non-nil error always pairs with a fully-populated Output
+// (state, next_actions, and errors[] all set) so callers can render the
+// contract regardless of success or domain-level failure.
 func Run(o Opts) (Output, error) {
 	path, err := resolveStatePath(o)
 	if err != nil {
@@ -78,6 +80,20 @@ func Run(o Opts) (Output, error) {
 			}
 		}
 
+		// Plan-file-triggered stage adoption (ticket #688, closing #718
+		// item 1): mutates s.Stage/s.PlanPath in memory, inside this same
+		// lock acquisition, before the untouched transition() runs. See
+		// adopt.go's doc comment for the full default-deny gate.
+		var adoptedPath string
+		var adopted bool
+		oldStage := s.Stage
+		if adoptedPath, adopted = adoptPlanFileStage(o, s); adopted {
+			s.Stage = StageWaitingForPlanApproval
+			if s.PlanPath == "" {
+				s.PlanPath = adoptedPath
+			}
+		}
+
 		next, noop, tErr := transition(s.Stage, o.Stage, o.Approve)
 		if tErr != nil {
 			out = errOutput(s.Stage, path, tErr)
@@ -85,8 +101,11 @@ func Run(o Opts) (Output, error) {
 		}
 
 		warnings := []string{}
+		if adopted {
+			warnings = append(warnings, planAdoptionWarning(adoptedPath, oldStage))
+		}
 		if noop {
-			warnings = []string{noopWarning(next, o.Stage, o.Approve)}
+			warnings = append(warnings, noopWarning(next, o.Stage, o.Approve))
 		}
 
 		s.Stage = next
