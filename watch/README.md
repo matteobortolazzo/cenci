@@ -630,8 +630,35 @@ Behavior:
   unless `--force` is given. The daemon remembers the skip and closes the window
   itself once it observes that session end, so a caller never needs to retry —
   no second `cenci close` invocation is required.
+- Windows whose ticket is still owned by a live `cenci babysit` supervisor whose
+  PR's CI is not green are skipped too, again unless `--force` is given:
+
+  ```
+  skip 782-implement (main:3): babysit supervising PR #790, CI not green — will close once CI passes (or use --force now)
+  ```
+
+  This covers the window `/cenci:implement` leaves behind — Phase 9 relabels the
+  ticket to `In Review` (which fires a board's cleanup hook) and only then arms
+  the supervisor, so the session is already idle while CI is still running. The
+  daemon applies the same guard to a deferred pending-close, re-checking it on
+  its sweep instead of killing at session end, and closes the window on its own
+  once the guard clears.
 - No matching windows is not an error — it exits 0 with no output, so it's safe
   to run unconditionally after a window may already be gone.
+
+Caveats on the babysit guard:
+- It reads `cenci babysit`'s state files (`$XDG_STATE_HOME/cenci/babysit`) and
+  makes **no** network calls — a board refresh may run `cenci close` constantly.
+  That state is refreshed once per supervision interval (default `15m`), so a
+  window can stay closable-but-open for up to one interval after CI turns green.
+- Every read failure (no state directory, unreadable or corrupt file) fails
+  *open*: the window closes. A machine that never runs `cenci babysit` behaves
+  exactly as it did before.
+- `cenci close` scopes the match to the current checkout's repo root, but the
+  daemon's deferred re-check has no repo context (a registered pending-close
+  carries none) and matches on ticket number alone. Two repos babysitting PRs
+  that close the same issue number concurrently cross-match; the only effect is
+  a window staying open longer, and `--force` overrides.
 
 This is the recommended cleanup command for any tool driving cenci-managed
 tmux windows, e.g. a kanban board's column-cleanup hook:

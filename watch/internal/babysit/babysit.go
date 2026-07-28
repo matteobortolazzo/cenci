@@ -40,6 +40,19 @@ type State struct {
 	PID                 int       `json:"pid,omitempty"`
 	Status              string    `json:"status"`
 	UpdatedAt           time.Time `json:"updatedAt"`
+
+	// RepoRoot is the supervised repository's local checkout root, resolved
+	// once at startup. It is the repo half of BlocksClose's join key; a
+	// network-free `git rev-parse` rather than repository()'s `gh` call,
+	// because the close path must make no network calls (#787).
+	RepoRoot string `json:"repoRoot,omitempty"`
+	// ClosingIssues are the issue numbers the supervised PR closes — the
+	// ticket half of BlocksClose's join key (#787).
+	ClosingIssues []int `json:"closingIssues,omitempty"`
+	// CIStatus is the collapsed CI verdict for the supervised PR: "green",
+	// "failing", "pending", or "" when unknown (no checks at all, or no tick
+	// has completed yet). Only "failing"/"pending" hold a window open (#787).
+	CIStatus string `json:"ciStatus,omitempty"`
 }
 type prView struct {
 	Number                  int                    `json:"number"`
@@ -136,6 +149,15 @@ func Run(o Options) error {
 	}
 	s.PID = os.Getpid()
 	s.Status = "running"
+	s.RepoRoot = localRepoRoot()
+	// Persist once *before* the first poll: `cenci close` reads this file to
+	// decide whether a supervisor still owns the ticket, and without an eager
+	// save there is an arm-to-first-poll window (a full interval wide) in
+	// which the supervisor is live but invisible to the guard (#787).
+	s.UpdatedAt = time.Now().UTC()
+	if err := save(path, s); err != nil {
+		return err
+	}
 	for {
 		terminal, delay, err := tick(&s)
 		s.UpdatedAt = time.Now().UTC()
@@ -195,6 +217,13 @@ func tick(s *State) (bool, time.Duration, error) {
 	if err := ghJSON(&checks, "pr", "checks", s.PR, "--repo", s.Repo, "--json", "bucket,name,state"); err != nil {
 		return false, 0, err
 	}
+	// Publish the close guard's join key and verdict from data this tick
+	// already fetched — no extra API calls (#787).
+	s.ClosingIssues = nil
+	for _, i := range pr.ClosingIssuesReferences {
+		s.ClosingIssues = append(s.ClosingIssues, i.Number)
+	}
+	s.CIStatus = ciStatus(checks)
 	actionable := false
 	if len(s.PendingKeys) > 0 && pr.HeadRefOID != s.PendingHeadSHA {
 		s.AddressedKeys = append(s.AddressedKeys, s.PendingKeys...)
@@ -393,11 +422,139 @@ func Stop(pr, explicit string) error {
 	return nil
 }
 
-func processOwned(pid int, pr string) bool {
+// processOwned is a test seam over defaultProcessOwned, mirroring the
+// package's existing `command` seam: BlocksClose's decision matrix must be
+// testable without spawning real supervisor processes.
+var processOwned = defaultProcessOwned
+
+func defaultProcessOwned(pid int, pr string) bool {
 	b, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
 	if err != nil {
-		return false
+		// Where procfs is readable (Linux), an unreadable cmdline means the
+		// pid is gone or hidden — stay strict, since Stop signals on this
+		// answer and a recycled pid must never be signalled. Where procfs is
+		// unavailable *entirely* (no /proc mount, non-Linux), ownership
+		// cannot be established at all and an unconditional false would make
+		// BlocksClose a silent no-op, so fall back to a liveness-only probe
+		// there (#787).
+		if procfsReadable() {
+			return false
+		}
+		return syscall.Kill(pid, 0) == nil
 	}
 	cmdline := strings.ReplaceAll(string(b), "\x00", " ")
 	return strings.Contains(cmdline, "babysit") && strings.Contains(cmdline, pr)
+}
+
+// procfsReadable reports whether this process can read its own procfs cmdline
+// — i.e. whether /proc is mounted and readable for the caller at all.
+func procfsReadable() bool {
+	_, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(os.Getpid()), "cmdline"))
+	return err == nil
+}
+
+// localRepoRoot resolves the supervised checkout's root without touching the
+// network. "" when it cannot be resolved, which makes the guard's repo
+// comparison fail open rather than block on an unknown repo (#787).
+func localRepoRoot() string {
+	out, err := command("git", "rev-parse", "--show-toplevel")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// ciStatus collapses a PR's check buckets into the guard's verdict: any
+// failing check wins, then any pending one, otherwise green. A PR with no
+// checks at all reports "" (unknown), which never holds a window open — a
+// repo without CI must not wedge its windows open forever (#787).
+func ciStatus(checks []check) string {
+	if len(checks) == 0 {
+		return ""
+	}
+	pending := false
+	for _, c := range checks {
+		switch c.Bucket {
+		case "fail":
+			return "failing"
+		case "pending":
+			pending = true
+		}
+	}
+	if pending {
+		return "pending"
+	}
+	return "green"
+}
+
+// BlocksClose reports whether a live supervisor owns a PR that closes the
+// given ticket with CI not yet green, plus a human-readable reason for the
+// skip line. It is the read side of the `cenci close` × `cenci babysit` join
+// (#787): closing an agent's window while its PR is still being supervised
+// destroys work in progress, since the ticket is "In Review", not
+// "Implemented", until babysit says so.
+//
+// repoRoot scopes the answer to one checkout; an empty repoRoot on either
+// side (caller or state file) skips the comparison rather than rejecting the
+// match, so an unresolvable repo root degrades to a ticket-only match instead
+// of silently disabling the guard. stateDirOverride mirrors babysit's
+// --state-dir; "" uses the standard location.
+//
+// Every failure — missing directory, unreadable or corrupt state file, no
+// procfs — fails *open* (returns false), and nothing is ever written to
+// stdout: this runs on every lazyboards board refresh, and a guard that
+// errored into "never close anything" would be worse than the bug it fixes.
+// It makes no network calls for the same reason.
+func BlocksClose(ticket, repoRoot, stateDirOverride string) (bool, string) {
+	number, err := strconv.Atoi(strings.TrimPrefix(ticket, "#"))
+	if err != nil {
+		return false, ""
+	}
+	dir, err := stateDir(stateDirOverride)
+	if err != nil {
+		return false, ""
+	}
+	paths, err := filepath.Glob(filepath.Join(dir, "*.json"))
+	if err != nil {
+		return false, ""
+	}
+	for _, p := range paths {
+		s := load(p) // corrupt/unreadable decodes to the zero State: no match
+		if !closesIssue(s, number) {
+			continue
+		}
+		if repoRoot != "" && s.RepoRoot != "" && repoRoot != s.RepoRoot {
+			continue
+		}
+		if s.CIStatus != "failing" && s.CIStatus != "pending" {
+			continue
+		}
+		if !supervisorLive(s) {
+			continue
+		}
+		return true, fmt.Sprintf("babysit supervising PR #%s, CI not green", s.PR)
+	}
+	return false, ""
+}
+
+// closesIssue reports whether s's supervised PR closes issue number.
+func closesIssue(s State, number int) bool {
+	for _, i := range s.ClosingIssues {
+		if i == number {
+			return true
+		}
+	}
+	return false
+}
+
+// supervisorLive reports whether the supervisor described by s is still on
+// the hook for its PR. A running supervisor is identified by its own pid; a
+// supervisor paused for human input deliberately zeroes its pid (see Run's
+// errNeedsInput branch) but has *not* finished the work, so its window must
+// stay open too (#787).
+func supervisorLive(s State) bool {
+	if s.PID > 0 && processOwned(s.PID, s.PR) {
+		return true
+	}
+	return s.Status == "needs-input"
 }

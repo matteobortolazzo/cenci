@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/matteobortolazzo/cenci/watch/internal/babysit"
 	"github.com/matteobortolazzo/cenci/watch/internal/config"
 	"github.com/matteobortolazzo/cenci/watch/internal/detect"
 	"github.com/matteobortolazzo/cenci/watch/internal/frontend"
@@ -38,12 +39,23 @@ type Daemon struct {
 	reaper        reap.Reaper             // triggers cenci sandbox reap-orphans on pane-gone sweep/startup (#292)
 	killer        windowKiller            // kills a pending-close window's target at SessionEnd (#522)
 
+	// closeGuard reports whether a window's ticket is still owned by a live
+	// `cenci babysit` supervisor with CI not green, holding back a deferred
+	// pending-close kill until it clears (#787). Production is
+	// babysit.BlocksClose with an empty repo root: the daemon is
+	// repo-agnostic (ipc.PendingClose carries no repo), so its match is by
+	// ticket number alone — a benign cross-match across two repos
+	// babysitting the same issue number only keeps a window open longer, and
+	// `cenci close --force` overrides. Nil disables the guard entirely
+	// (tests).
+	closeGuard func(ticket string) (bool, string)
+
 	// pending is the in-memory pending-close registry (#522), keyed by
 	// "session:index" (the same identity closecmd kills by). Dropped on
 	// daemon restart, per plan assumption; pruned when the owning session is
 	// removed (runSweep/ttlSweep) to bound growth from windows closed by
 	// other means.
-	pending map[string]ipc.PendingClose
+	pending map[string]*pendingCloseEntry
 
 	// attention is the reconciler's overlay of synthetic "failed" windows
 	// (#46). It is appended to every snapshot until the next overlay replaces
@@ -72,7 +84,10 @@ func newDaemon(cfg config.Config, fe frontend.Frontend, events <-chan ipc.HookEv
 		now:      time.Now,
 		reaper:   reaper,
 		killer:   &tmux.ExecClient{},
-		pending:  make(map[string]ipc.PendingClose),
+		pending:  make(map[string]*pendingCloseEntry),
+		closeGuard: func(ticket string) (bool, string) {
+			return babysit.BlocksClose(ticket, "", "")
+		},
 	}
 }
 
@@ -203,6 +218,10 @@ func (d *Daemon) runSweep() {
 	if d.ttlSweep() {
 		changed = true
 	}
+	// Re-check pending-closes held back by the babysit guard *after* the
+	// prune above, so an entry whose window has already disappeared is
+	// reclaimed rather than retried against a dead target (#787).
+	d.retryBlockedPendingCloses()
 	if changed {
 		d.broadcast()
 	}
