@@ -18,3 +18,9 @@ fail mid-run or get reused in a new context.
   loop), re-evaluate and explicitly restate the error-handling for the new risk profile.
   The original rule may have worked at its original stopping point but be under-specified
   for the new path.
+
+- All shared temp files written by phases or agents (e.g.
+  `/tmp/claude/cenci-<ticket-id-or-slug>-diff.patch`) must be uniquely scoped by worktree
+  path, run ID, or session UUID. Fixed paths without scoping let multiple concurrent
+  `/cenci:implement` jobs in the same monorepo silently overwrite each other's state, so a
+  reviewer can end up analyzing the wrong diff or broken context.
