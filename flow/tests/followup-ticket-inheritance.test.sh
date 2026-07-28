@@ -24,6 +24,13 @@ assert_file_contains() {
   [[ -n "$2" ]] || { fail "$3: empty needle"; return; }
   grep -qF -- "$2" "$1" || fail "$(basename "$1") $3 (expected to contain: $2)"
 }
+assert_file_lacks() {
+  # $1=file $2=needle $3=description
+  [[ -n "$2" ]] || { fail "$3: empty needle"; return; }
+  [[ -f "$1" ]] || { fail "$3: file not found: $1"; return; }
+  grep -qF -- "$2" "$1" && fail "$(basename "$1") $3 (expected to NOT contain: $2)"
+  return 0
+}
 
 # =====================================================================
 # Anchors (single source line each, per docs/shell-scripting-gotchas.md:
@@ -32,24 +39,44 @@ assert_file_contains() {
 # =====================================================================
 MILESTONE_LABELS_FETCH='--json milestone,labels'
 LIFECYCLE_EXCLUSION_MARKER='"Refined","Working","Planned","In Review","Implemented","Design","Designed"'
-MILESTONE_FLAG_MARKER='--milestone'
-FOLLOWUP_LABEL_MARKER='--label "Followup"'
+MILESTONE_NUMBER_MARKER='.milestone.number'
+FOLLOWUP_LABEL_ARRAY_MARKER='["Followup"]'
 TICKET_MODE_GUARD_MARKER="Ticket mode only: before creating the follow-up issue, fetch the original ticket's milestone and labels"
 GRACEFUL_DEGRADE_MARKER='milestone/label inheritance was skipped'
+POST_INPUT_MARKER='-X POST --input'
+NUMBER_JQ_MARKER='--jq .number'
 
+# #756: title/body/labels/milestone move into a single jq -n --rawfile
+# payload sent via `gh api ... -X POST --input`, replacing
+# `gh issue create --title "$TITLE" --label ... --milestone ...` built from
+# a `TITLE=$(cat ...)` read-back and `mapfile`-collected label array args.
+# The milestone anchor moves from the `--milestone` CLI flag to the
+# `.milestone.number` jq source field (REST requires the numeric id, not the
+# title); the Followup label anchor moves from `--label "Followup"` to a
+# `["Followup"]` JSON array element inside the jq filter.
 for FILE in "${PHASE_9}" "${ADDRESS_REVIEW_SKILL}"; do
   assert_file_contains "${FILE}" "${MILESTONE_LABELS_FETCH}" \
     "must fetch the original ticket's milestone and labels via gh issue view"
   assert_file_contains "${FILE}" "${LIFECYCLE_EXCLUSION_MARKER}" \
     "must exclude the 7 lifecycle labels on a single source line"
-  assert_file_contains "${FILE}" "${MILESTONE_FLAG_MARKER}" \
-    "must pass the inherited milestone via --milestone"
-  assert_file_contains "${FILE}" "${FOLLOWUP_LABEL_MARKER}" \
-    "must retain --label \"Followup\" on the created issue"
+  assert_file_contains "${FILE}" "${MILESTONE_NUMBER_MARKER}" \
+    "must source the inherited milestone as the numeric .milestone.number, not the title"
+  assert_file_contains "${FILE}" "${FOLLOWUP_LABEL_ARRAY_MARKER}" \
+    "must apply Followup via a [\"Followup\"] JSON labels array"
   assert_file_contains "${FILE}" "${TICKET_MODE_GUARD_MARKER}" \
     "must gate inheritance to ticket mode only"
   assert_file_contains "${FILE}" "${GRACEFUL_DEGRADE_MARKER}" \
     "must graceful-degrade and note the skip when the metadata fetch fails"
+  assert_file_contains "${FILE}" "${POST_INPUT_MARKER}" \
+    "must create the followup ticket via gh api ... -X POST --input"
+  assert_file_contains "${FILE}" "${NUMBER_JQ_MARKER}" \
+    "must parse the new issue number via --jq .number, not the create command's output URL"
+  assert_file_lacks "${FILE}" "gh issue create" \
+    "must not use gh issue create (migrated to gh api ... -X POST --input)"
+  assert_file_lacks "${FILE}" 'TITLE=$(cat' \
+    "must not read the title back via TITLE=\$(cat ...)"
+  assert_file_lacks "${FILE}" "mapfile" \
+    "must not use mapfile (forbidden by shell-rules for Codex portability)"
 done
 
 echo "followup-ticket-inheritance.test.sh: failures=${failures}"

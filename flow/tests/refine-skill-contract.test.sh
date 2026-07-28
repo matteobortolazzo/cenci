@@ -185,7 +185,8 @@ Bash(gh api repos/:*)
 Bash(git remote get-url:*)
 Bash(mktemp -u /tmp/claude/:*)
 Bash(cat /tmp/claude/:*)
-Bash(rm -f /tmp/claude/:*)'
+Bash(rm -f /tmp/claude/:*)
+Bash(jq -n:*)'
   allowed_line="$(grep -m1 '^allowed-tools:' "${skill_path}")"
   actual_bash_grants="$(printf '%s\n' "${allowed_line}" | grep -o 'Bash([^)]*)' | LC_ALL=C sort -u)"
   expected_bash_grants="$(printf '%s\n' "${EXPECTED_BASH_GRANTS}" | LC_ALL=C sort -u)"

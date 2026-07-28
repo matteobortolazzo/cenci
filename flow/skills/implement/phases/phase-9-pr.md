@@ -213,7 +213,7 @@ The `## Notes` section above — **excluding its `### Considered and discarded` 
 
 If there is **nothing** to capture (no tracked `## Notes` items — entries under `### Considered and discarded` do not count), create no ticket and skip this section entirely.
 
-If ≥1 deferred item exists, ensure the label exists (its own Bash call — note `2>/dev/null || true` suppresses **every** failure, not just "already exists"; a genuine failure (auth, network, permissions) surfaces on the next command as a "label not found" error from `gh issue create` — treat that as the label-create failure it is):
+If ≥1 deferred item exists, ensure the label exists (its own Bash call — note `2>/dev/null || true` suppresses **every** failure, not just "already exists"; a genuine failure (auth, network, permissions) surfaces on the next command as a "label not found" error from the followup create — treat that as the label-create failure it is):
 
 ```bash
 gh label create "Followup" --repo <owner>/<repo> --color "C5DEF5" --description "Deferred/out-of-scope item captured from a session — triage before working" 2>/dev/null || true
@@ -256,24 +256,37 @@ If the `gh issue edit` append fails, do **not** post the original-ticket comment
 
 ### Create the followup ticket
 
-Reach this block only when `SKIP_FOLLOWUP_CREATE` is unset **and** no `MATCH_N` was found (or in ticketless mode). Write the body to `/tmp/claude/cenci-<ticket-id-or-slug>-followup-body.md` with the file tool — and the title too, to `/tmp/claude/cenci-<ticket-id-or-slug>-followup-title.txt`: the PR title is free text and must never be interpolated directly into the command line (a title containing `$(…)`, backticks, or quotes would be shell-interpreted). Then create the ticket in one call, reading the title (and, when the fetch above succeeded, the inherited milestone/labels) back the same way Posting Replies in `address-review` reads reply text. Labels and the milestone are externally-sourced free text, so they are passed as array args (`--label "$l"` per label, `--milestone "$MILESTONE"`), never inline-interpolated into the command string. Carry over every original label except the 7 lifecycle/transient markers — `"Refined","Working","Planned","In Review","Implemented","Design","Designed"` — and `Followup` itself (which is always applied on top regardless of what's carried over); the milestone is applied only when the original ticket actually has one, via an explicit jq emptiness check rather than a bare `//` fallback (see `docs/shell-scripting-gotchas.md`):
+Reach this block only when `SKIP_FOLLOWUP_CREATE` is unset **and** no `MATCH_N` was found (or in ticketless mode). Use the `Write` tool to create the raw title and body as plain text — `/tmp/claude/cenci-<ticket-id-or-slug>-followup-title.txt` and `/tmp/claude/cenci-<ticket-id-or-slug>-followup-body.md` — never a hand-escaped JSON literal; the title is free text and must never be interpolated directly into the command line (a title containing `$(…)`, backticks, or quotes would be shell-interpreted). Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet: labels become a JSON `labels` array and the milestone becomes a numeric `milestone` field in the same payload, sourced from `.milestone.number` (the REST endpoint requires the milestone's number, not its title). Carry over every original label except the 7 lifecycle/transient markers — `"Refined","Working","Planned","In Review","Implemented","Design","Designed"` — and `Followup` itself (which is always applied on top regardless of what's carried over); the `milestone` key is included only when the original ticket actually has one, via an explicit jq emptiness check that omits the key entirely rather than a bare `//` fallback that would emit `null` (see `docs/shell-scripting-gotchas.md`).
+
+Two documented `jq` forms replace the old `if [[ -f … ]]` shell branch:
+
+**With-meta** (the fetch above succeeded):
 
 ```bash
-TITLE=$(cat /tmp/claude/cenci-<ticket-id-or-slug>-followup-title.txt) || { echo "followup title read failed" >&2; exit 1; }
-LABEL_ARGS=(--label "Followup")
-MILESTONE_ARGS=()
-if [[ -f /tmp/claude/cenci-<ticket-id-or-slug>-followup-meta.json ]]; then
-  MILESTONE=$(jq -r 'if (.milestone.title // "") != "" then .milestone.title else empty end' /tmp/claude/cenci-<ticket-id-or-slug>-followup-meta.json)
-  mapfile -t CARRIED < <(jq -r '.labels[].name | select(. as $n | (["Refined","Working","Planned","In Review","Implemented","Design","Designed","Followup"] | index($n)) | not)' /tmp/claude/cenci-<ticket-id-or-slug>-followup-meta.json)
-  for l in "${CARRIED[@]}"; do LABEL_ARGS+=(--label "$l"); done
-  [[ -n "$MILESTONE" ]] && MILESTONE_ARGS=(--milestone "$MILESTONE")
-fi
-gh issue create --repo <owner>/<repo> --title "$TITLE" \
-  "${LABEL_ARGS[@]}" "${MILESTONE_ARGS[@]}" \
-  --body-file /tmp/claude/cenci-<ticket-id-or-slug>-followup-body.md
+jq -n --rawfile title "/tmp/claude/cenci-<ticket-id-or-slug>-followup-title.txt" --rawfile body "/tmp/claude/cenci-<ticket-id-or-slug>-followup-body.md" --slurpfile meta "/tmp/claude/cenci-<ticket-id-or-slug>-followup-meta.json" '{title: ($title | rtrimstr("\n")), body: $body, labels: (["Followup"] + [$meta[0].labels[].name | select(. as $n | (["Refined","Working","Planned","In Review","Implemented","Design","Designed","Followup"] | index($n)) | not)])} + (if ($meta[0].milestone.number // "") != "" then {milestone: $meta[0].milestone.number} else {} end)' > "/tmp/claude/cenci-<ticket-id-or-slug>-followup-payload.json"
 ```
 
-Ticketless mode falls through this same command unchanged: `LABEL_ARGS`/`MILESTONE_ARGS` stay at their defaults and the issue is created with `--label "Followup"` only — ticketless has no original ticket, so there is nothing to inherit and no lineage to check. Ticket mode reaches this block only after a *successful* meta fetch (a failed fetch was already handled fail-closed by the generation limit above, which skipped creation), so inheritance is a visibility enhancement, not a correctness gate; if that successful fetch nonetheless returned an empty milestone and no carry-over labels, note in the final session summary that milestone/label inheritance was skipped so the gap is visible.
+**No-meta** (ticketless mode, or a degraded fetch — no `--slurpfile`, `labels` is `["Followup"]` only):
+
+```bash
+jq -n --rawfile title "/tmp/claude/cenci-<ticket-id-or-slug>-followup-title.txt" --rawfile body "/tmp/claude/cenci-<ticket-id-or-slug>-followup-body.md" '{title: ($title | rtrimstr("\n")), body: $body, labels: ["Followup"]}' > "/tmp/claude/cenci-<ticket-id-or-slug>-followup-payload.json"
+```
+
+Then, whichever form ran:
+
+```bash
+gh api repos/<owner>/<repo>/issues -X POST --input /tmp/claude/cenci-<ticket-id-or-slug>-followup-payload.json --jq .number
+```
+
+The `--jq .number` output *is* the new ticket's issue number `<n>` — this confirms the API accepted valid JSON, but not that the title text itself is correct (a JSON-escaping mistake can mangle a title while still parsing). **Verify the title persisted correctly** by re-fetching the new issue and comparing against the intended title:
+
+```bash
+gh issue view <n> --repo <owner>/<repo> --json title --jq '.title'
+```
+
+If the create fails, or `--jq .number` returns empty or non-numeric output, or the command exits non-zero, or the re-fetched title does not match, follow the same report/retry-once/STOP protocol as the rest of this phase: report the error (or mismatch), retry once (fresh `Write` of the raw files, fresh `jq` build, fresh `gh api` call), then re-verify; if it still fails, do not fabricate `<n>` and do not post any text referencing it — skip the comment below and report the exact error (with the deferred-item list) in the final session summary so the items aren't silently lost. This also covers the raw title/body `Write` calls and the `jq` invocation: if either `Write` call fails, or `jq` exits non-zero, or the payload file is missing/empty/stale when `gh api --input` runs, retry the failed step once before invoking `gh api` — do not mistake a local Write or jq failure for an API-side rejection.
+
+Ticketless mode falls through to the no-meta form unchanged — the issue is created with `labels: ["Followup"]` only, no `milestone` key — since ticketless has no original ticket, so there is nothing to inherit and no lineage to check. Ticket mode reaches this block only after a *successful* meta fetch (a failed fetch was already handled fail-closed by the generation limit above, which skipped creation), so inheritance is a visibility enhancement, not a correctness gate; if that successful fetch nonetheless returned an empty milestone and no carry-over labels, note in the final session summary that milestone/label inheritance was skipped so the gap is visible.
 
 Body content (checklist of items, each with a one-line context and file/area reference):
 
@@ -290,9 +303,9 @@ Ticket mode: include the `Related to #<original-ticket>` line — `<original-tic
 
 Assume the issue is world-readable: never transcribe secret values, credentials, or exploitable vulnerability detail into the body. Reference deferred security findings abstractly — one neutral line plus the file/area, not the finding's specifics.
 
-If `gh issue create` fails, or no issue number can be parsed from its output URL, do **not** fabricate `<n>` and do not post any text referencing it — skip the comment below and report the exact error (with the deferred-item list) in the final session summary so the items aren't silently lost.
+If the create fails, or `--jq .number` returns empty, non-numeric output, or a non-zero exit, or the re-fetched title does not match, do **not** fabricate `<n>` and do not post any text referencing it — skip the comment below and report the exact error (with the deferred-item list) in the final session summary so the items aren't silently lost.
 
-Ticket mode only, and only when `SKIP_FOLLOWUP_CREATE` is unset: after the followup issue is created successfully — or after this run appended to an existing `MATCH_N` above — comment on the original ticket (this run's ticket ID) with the followup ticket number `<n>` (parsed from a fresh create's output URL, or `$MATCH_N` for an append):
+Ticket mode only, and only when `SKIP_FOLLOWUP_CREATE` is unset: after the followup issue is created successfully — or after this run appended to an existing `MATCH_N` above — comment on the original ticket (this run's ticket ID) with the followup ticket number `<n>` (the `--jq .number` value from a fresh create, or `$MATCH_N` for an append — never a value parsed from a command's output URL):
 
 ```bash
 gh issue comment <original-number> --repo <owner>/<repo> --body "Followups tracked in #<n>"
@@ -328,6 +341,7 @@ rm -f \
   /tmp/claude/cenci-<ticket-id-or-slug>-followup-title.txt \
   /tmp/claude/cenci-<ticket-id-or-slug>-followup-body.md \
   /tmp/claude/cenci-<ticket-id-or-slug>-followup-meta.json \
+  /tmp/claude/cenci-<ticket-id-or-slug>-followup-payload.json \
   /tmp/claude/cenci-<ticket-id-or-slug>-followup-search.json \
   /tmp/claude/cenci-<ticket-id-or-slug>-followup-existing-body.md \
   /tmp/claude/cenci-<ticket-id-or-slug>-explore-1.md \
