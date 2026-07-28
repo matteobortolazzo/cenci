@@ -37,7 +37,11 @@
 # --changed relevance (is_relevant()) so a change under any configured
 # sibling project (e.g. watch/, sandbox/) maps to the three cross-project
 # checks (command-flags, config-examples, roadmap-status) instead of being a
-# silent no-op. No existing check body gained project-generalization logic.
+# silent no-op. No existing check body gained project-generalization logic,
+# with one deliberate, documented exception: ticket #753 widens
+# check_context_budget itself into a cross-project check BODY — it now scans
+# the repo root plus every configured projects[].path (via PROJECT_PATHS),
+# not just $ROOT + $FLOW_DIR. Every other check body stays flow-scoped.
 set -uo pipefail
 
 # Force deterministic sort/glob ordering regardless of the invoking
@@ -55,6 +59,30 @@ export LC_ALL=C
 # constants rather than copying the numbers.
 CRITICAL_RULES_MAX=10
 TOPIC_DOC_RULES_MAX=25
+# CRITICAL_RULE_MAX_LEN (#753) — per-bullet length cap, AGENTS.md's
+# "## Critical Rules" only (topic-doc "## Rules" bullets are deliberately
+# uncapped). Measured on the raw source line, including the "- " prefix and
+# all markdown formatting (backticks, links) as-is; hard-wrapped continuation
+# lines are joined into one logical bullet first (see check_context_budget)
+# so a hard-wrap can't dodge the cap. Measured in bytes, under this script's
+# `export LC_ALL=C` (line 51). This repo's current longest bullet
+# (watch/AGENTS.md) is 291 bytes — only 9 bytes of headroom under 300.
+CRITICAL_RULE_MAX_LEN=300
+# EVASION_BULLET_MIN (#753) — the >=N top-level-bullet trigger for the
+# anti-evasion warn below.
+EVASION_BULLET_MIN=5
+# EVASION_EXEMPT_HEADINGS (#753) — newline-delimited heading texts exempt
+# from the anti-evasion warn: the two rule-ledger headings, plus the
+# allowlisted structural headings. Exact-match, case-sensitive.
+EVASION_EXEMPT_HEADINGS="Critical Rules
+Rules
+Reference Docs
+Rule Files
+Build & Test
+Project Structure
+Stack
+Dependency version pins
+Key Conventions"
 
 # This script's own directory -- deliberately independent of $FLOW_DIR, which
 # is the *target* repo's flow project directory and, under
@@ -282,10 +310,12 @@ project_path_is_safe() {
 
 # Populate PROJECT_PATHS (repo-root-relative dir prefixes for every configured
 # project) from .cenci/config.json's projects[].path. Single-repo configs yield
-# ("") meaning the repo root. Used only by is_relevant()'s --changed mapping so a
+# ("") meaning the repo root. Used by is_relevant()'s --changed mapping so a
 # change under any project subtree maps to the cross-project checks instead of a
 # silent no-op; it never widens what a check body scans (that stays flow-scoped
-# per the #530 charter).
+# per the #530 charter) -- except that PROJECT_PATHS now additionally feeds
+# check_context_budget's scan list via context_budget_scan_dirs() (#753);
+# every other check body remains flow-scoped.
 resolve_project_dirs() {
   local cfg="$ROOT/.cenci/config.json" p slug jq_out jq_rc=0 any_fail=0 checked=0
   PROJECT_PATHS=()
@@ -1301,42 +1331,204 @@ check_github_labels() {
   [[ "$any_fail" -eq 0 ]] && add_result github-labels "$owner_repo" pass "all canonical lifecycle labels are present" ""
 }
 
-check_context_budget() {
-  local target rel count status any_fail=0
-
-  for target in "$ROOT/AGENTS.md" "$FLOW_DIR/AGENTS.md"; do
-    [[ -f "$target" ]] || continue
-    count="$(awk '/^## Critical Rules/{f=1;next} /^## /{f=0} f && /^- /{c++} END{print c+0}' "$target")"
-    if [[ "$count" -gt "$CRITICAL_RULES_MAX" ]]; then
-      rel="$(relpath "$target")"
-      status=fail
-      if [[ "$MODE_CHANGED" -eq 1 ]] && ! is_changed "$rel"; then status=warn; fi
-      add_result context-budget "$rel" "$status" \
-        "Critical Rules section has ${count} bullets (max ${CRITICAL_RULES_MAX})" \
-        "run /cenci:maintain rules on ${rel} to curate the Critical Rules section back under the ${CRITICAL_RULES_MAX}-bullet threshold"
-      any_fail=1
-    fi
+# context_budget_scan_dirs (#753) — prints one absolute directory per line
+# for check_context_budget's scan list: always $ROOT first, then $ROOT/<p>
+# for every non-empty PROJECT_PATHS entry, deduped. The "" sentinel
+# (resolve_project_dirs' single-repo *or* absent-config marker) yields root
+# only -- this deliberately drops the implicit $FLOW_DIR fallback that older
+# revisions of check_context_budget used: an absent .cenci/config.json now
+# scans root AGENTS.md + root docs/ only, not flow/ (#753, Q4). This is an
+# intentional behavior change for absent-config repos, not an oversight.
+context_budget_scan_dirs() {
+  printf '%s\n' "$ROOT"
+  local p dir seen=$'\n'
+  for p in "${PROJECT_PATHS[@]}"; do
+    [[ -n "$p" ]] || continue
+    dir="$ROOT/$p"
+    case "$seen" in
+      *$'\n'"$dir"$'\n'*) continue ;;
+    esac
+    seen="${seen}${dir}"$'\n'
+    printf '%s\n' "$dir"
   done
+}
 
-  local docdir
-  for docdir in "$ROOT/docs" "$FLOW_DIR/docs"; do
-    [[ -d "$docdir" ]] || continue
-    for target in "$docdir"/*.md; do
-      [[ -f "$target" ]] || continue
-      grep -q '^## Rules' "$target" || continue
-      count="$(awk '/^## Rules/{f=1;next} /^## /{f=0} f && /^- /{c++} END{print c+0}' "$target")"
-      if [[ "$count" -gt "$TOPIC_DOC_RULES_MAX" ]]; then
+# context_budget_path_safe (#753 review fix, security-reviewer LOW +
+# silent-failure-hunter follow-up) —
+# PROJECT_PATHS entries are already-vetted safe directory prefixes
+# (project_path_is_safe()), but the individual AGENTS.md/topic-doc files
+# opened under them are not: [[ -f ]] follows symlinks, so a committed
+# symlink pointing outside the repo could have its target read and reported
+# on. Rejects $1 outright if it is itself a symlink (mirrors the leaf-level
+# check in canonicalize_dir_allow_missing()) -- resolving only the parent
+# directory and re-appending basename would let a symlinked leaf file (e.g.
+# AGENTS.md -> /etc/passwd) resolve back under $ROOT and be wrongly treated
+# as safe. Also resolves $1's parent dir to its real path and requires it
+# stays under $ROOT, catching a symlinked ancestor directory. Returns 1
+# (caller must skip the candidate, not read it) if either check fails.
+context_budget_path_safe() {
+  local target="$1" dirreal real
+  [[ ! -L "$target" ]] || return 1
+  dirreal="$(cd "$(dirname "$target")" 2>/dev/null && pwd -P)" || return 1
+  real="$dirreal/$(basename "$target")"
+  case "$real" in
+    "$ROOT"|"$ROOT"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# check_context_budget (#753) — three dimensions over context_budget_scan_dirs:
+#   1. count: unchanged semantics (## Critical Rules / topic-doc ## Rules
+#      bullet counts vs CRITICAL_RULES_MAX/TOPIC_DOC_RULES_MAX), now run for
+#      every scanned project directory instead of just $ROOT + $FLOW_DIR.
+#      Note: "### " sub-headings don't match /^## /, so bullets nested under
+#      a ### sub-heading already roll up into the parent ## section's count
+#      -- this is existing awk behavior, not new logic (Q3).
+#   2. length: new. AGENTS.md's "## Critical Rules" only -- caps each
+#      logical bullet (hard-wrap continuation lines joined) at
+#      CRITICAL_RULE_MAX_LEN raw bytes.
+#   3. anti-evasion: new, warn-only. Any "## " section in a scanned
+#      AGENTS.md with >= EVASION_BULLET_MIN top-level bullets whose heading
+#      isn't on EVASION_EXEMPT_HEADINGS.
+#
+# Every scanned AGENTS.md/topic-doc candidate is guarded twice before it's
+# read (#753 review fixes): context_budget_path_safe() requires its resolved
+# real path stays under $ROOT (a symlink escaping the repo is silently
+# skipped, mirroring check_structural_tests' non-crashing discovery), and
+# [[ -r ]] requires it's actually readable (an unreadable file emits an
+# explicit context-budget fail -- mirrors check_structural_tests' readability
+# guard, ~line 1146 -- rather than silently reporting a false "pass" for a
+# file it never inspected).
+check_context_budget() {
+  local target rel count status any_finding=0 scan_dir docdir agents_md agents_md_ok
+
+  while IFS= read -r scan_dir; do
+    agents_md="$scan_dir/AGENTS.md"
+    agents_md_ok=0
+    if [[ -f "$agents_md" ]] && context_budget_path_safe "$agents_md"; then
+      if [[ -r "$agents_md" ]]; then
+        agents_md_ok=1
+      else
+        rel="$(relpath "$agents_md")"
+        add_result context-budget "$rel" fail "$(basename "$agents_md") is not readable" \
+          "restore read permission on ${rel}"
+        any_finding=1
+      fi
+    fi
+
+    # --- Dimension 1: count (unchanged semantics) --------------------------
+    target="$agents_md"
+    if [[ "$agents_md_ok" -eq 1 ]]; then
+      count="$(awk '/^## Critical Rules/{f=1;next} /^## /{f=0} f && /^- /{c++} END{print c+0}' "$target")"
+      if [[ "$count" -gt "$CRITICAL_RULES_MAX" ]]; then
         rel="$(relpath "$target")"
         status=fail
         if [[ "$MODE_CHANGED" -eq 1 ]] && ! is_changed "$rel"; then status=warn; fi
         add_result context-budget "$rel" "$status" \
-          "Rules section has ${count} bullets (max ${TOPIC_DOC_RULES_MAX})" \
-          "run /cenci:maintain rules on ${rel} to curate the Rules section back under the ${TOPIC_DOC_RULES_MAX}-bullet threshold"
-        any_fail=1
+          "Critical Rules section has ${count} bullets (max ${CRITICAL_RULES_MAX})" \
+          "run /cenci:maintain rules on ${rel} to curate the Critical Rules section back under the ${CRITICAL_RULES_MAX}-bullet threshold"
+        any_finding=1
       fi
-    done
-  done
-  [[ "$any_fail" -eq 0 ]] && add_result context-budget "(repo)" pass "all rule sections are within checker-owned context budgets" ""
+    fi
+
+    docdir="$scan_dir/docs"
+    if [[ -d "$docdir" ]]; then
+      for target in "$docdir"/*.md; do
+        [[ -f "$target" ]] || continue
+        context_budget_path_safe "$target" || continue
+        if [[ ! -r "$target" ]]; then
+          rel="$(relpath "$target")"
+          add_result context-budget "$rel" fail "$(basename "$target") is not readable" \
+            "restore read permission on ${rel}"
+          any_finding=1
+          continue
+        fi
+        grep -q '^## Rules' "$target" || continue
+        count="$(awk '/^## Rules/{f=1;next} /^## /{f=0} f && /^- /{c++} END{print c+0}' "$target")"
+        if [[ "$count" -gt "$TOPIC_DOC_RULES_MAX" ]]; then
+          rel="$(relpath "$target")"
+          status=fail
+          if [[ "$MODE_CHANGED" -eq 1 ]] && ! is_changed "$rel"; then status=warn; fi
+          add_result context-budget "$rel" "$status" \
+            "Rules section has ${count} bullets (max ${TOPIC_DOC_RULES_MAX})" \
+            "run /cenci:maintain rules on ${rel} to curate the Rules section back under the ${TOPIC_DOC_RULES_MAX}-bullet threshold"
+          any_finding=1
+        fi
+      done
+    fi
+
+    # --- Dimension 2: length (AGENTS.md ## Critical Rules only) ------------
+    target="$agents_md"
+    if [[ "$agents_md_ok" -eq 1 ]]; then
+      local ord len
+      while IFS=$'\t' read -r ord len; do
+        [[ -n "$ord" ]] || continue
+        rel="$(relpath "$target")"
+        status=fail
+        if [[ "$MODE_CHANGED" -eq 1 ]] && ! is_changed "$rel"; then status=warn; fi
+        add_result context-budget "$rel" "$status" \
+          "Critical Rules bullet ${ord} is ${len} chars (max ${CRITICAL_RULE_MAX_LEN})" \
+          "run /cenci:maintain rules on ${rel} to tighten the over-length Critical Rules bullet back under the ${CRITICAL_RULE_MAX_LEN}-character cap"
+        any_finding=1
+      done < <(awk -v max="$CRITICAL_RULE_MAX_LEN" '
+        function flush() { if (open && len > max) print n"\t"len; open=0 }
+        /^## Critical Rules/ { f=1; next }
+        /^## / { if (f) flush(); f=0; next }
+        !f { next }
+        /^- / { flush(); n++; len=length($0); open=1; next }
+        /^[[:space:]]*$/ || /^#/ || /^[[:space:]]*[-*+][[:space:]]/ || /^```/ { flush(); next }
+        {
+          if (open) {
+            stripped=$0
+            sub(/^[[:space:]]+/, "", stripped)
+            len += 1 + length(stripped)
+          }
+        }
+        END { flush() }
+      ' "$target")
+    fi
+
+    # --- Dimension 3: anti-evasion (AGENTS.md only, warn-only) -------------
+    target="$agents_md"
+    if [[ "$agents_md_ok" -eq 1 ]]; then
+      local sec_count heading safe_heading
+      while IFS=$'\t' read -r sec_count heading; do
+        [[ -n "$heading" ]] || continue
+        [[ "$sec_count" -ge "$EVASION_BULLET_MIN" ]] || continue
+        # Comparison always uses the raw, unsanitized heading -- sanitizing
+        # before comparison could change matching behavior against
+        # EVASION_EXEMPT_HEADINGS.
+        grep -qxF -- "$heading" <<< "$EVASION_EXEMPT_HEADINGS" && continue
+        rel="$(relpath "$target")"
+        # The heading is untrusted content from a scanned repo file, and this
+        # message reaches both a terminal and a downstream LLM (#753 review
+        # fix, security-reviewer LOW) -- strip control characters (terminal
+        # escape-sequence spoofing) and cap length before it's reported.
+        safe_heading="${heading//[[:cntrl:]]/}"
+        if [[ "${#safe_heading}" -gt 80 ]]; then
+          safe_heading="${safe_heading:0:80}..."
+        fi
+        add_result context-budget "$rel" warn \
+          "section '## ${safe_heading}' has ${sec_count} top-level bullets but is not a rule ledger or a recognized structural section" \
+          "run /cenci:maintain rules on ${rel} to fold these bullets into ## Critical Rules or a docs/<topic>.md, or rename the section to a recognized structural heading"
+        any_finding=1
+      done < <(awk '
+        function flush() { if (heading != "" && count > 0) print count"\t"heading }
+        /^## / {
+          flush()
+          heading=$0
+          sub(/^## /, "", heading)
+          sub(/[ \t]+$/, "", heading)
+          count=0
+          next
+        }
+        /^- / { count++ }
+        END { flush() }
+      ' "$target")
+    fi
+  done < <(context_budget_scan_dirs)
+
+  [[ "$any_finding" -eq 0 ]] && add_result context-budget "(repo)" pass "all rule sections are within checker-owned context budgets" ""
 }
 
 # ============================================================================

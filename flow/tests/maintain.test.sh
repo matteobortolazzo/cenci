@@ -295,6 +295,28 @@ bootstrap_markers() {
   run_check "$1" --write
 }
 
+# add_second_project <root> <slug> -- registers a second, non-flow project in
+# the base fixture's .cenci/config.json, with a small in-budget AGENTS.md at
+# "<slug>/AGENTS.md" and a "<slug>/docs/" directory ready for topic docs.
+# Verified side-effect free per the #753 plan: check_gate_command only ever
+# reads the "flow" project entry, and no other check body iterates
+# projects[] -- only the widened context-budget scan (#753) does.
+add_second_project() {
+  local root="$1" slug="$2"
+  mkdir -p "${root}/${slug}/docs"
+  cat > "${root}/${slug}/AGENTS.md" <<EOF
+# Project: ${slug}
+
+## Critical Rules
+- ${slug} rule one.
+- ${slug} rule two.
+EOF
+  jq --arg slug "${slug}" --arg path "${slug}" \
+    '.projects += [{"slug": $slug, "path": $path}]' \
+    "${root}/.cenci/config.json" > "${root}/.cenci/config.json.tmp"
+  mv "${root}/.cenci/config.json.tmp" "${root}/.cenci/config.json"
+}
+
 add_fixture_client_matrix() {
   local root="$1"
   awk '
@@ -1727,6 +1749,297 @@ assert_check_ran "structural-tests" "case44c --changed flow/codex/*.test.sh trig
 rm -rf "${ROOT}"
 
 # =====================================================================
+# Case 45: context-budget is config-driven -- an over-cap Critical Rules
+# section in a non-flow configured project's AGENTS.md (ticket #753) fails
+# the same way a flow-scoped breach would, naming that project's file.
+# =====================================================================
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+add_second_project "${ROOT}" "watch"
+{
+  echo "# Project: watch"
+  echo
+  echo "## Critical Rules"
+  for i in $(seq 1 11); do echo "- Watch rule number ${i}."; done
+} > "${ROOT}/watch/AGENTS.md"
+run_check "${ROOT}"
+assert_has_result "context-budget" "fail" "case45 non-flow project Critical Rules exceeds threshold"
+assert_contains "${REPORT_TEXT}" "watch/AGENTS.md" "case45 report names the non-flow project's AGENTS.md"
+rm -rf "${ROOT}"
+
+# =====================================================================
+# Case 46: context-budget's docs/*.md scan is likewise config-driven -- an
+# over-cap ## Rules topic doc under a non-flow project's docs/ fails,
+# naming that file.
+# =====================================================================
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+add_second_project "${ROOT}" "watch"
+{
+  echo "# Watch topic"
+  echo
+  echo "## Rules"
+  for i in $(seq 1 26); do echo "- Watch topic rule number ${i}."; done
+} > "${ROOT}/watch/docs/topic.md"
+run_check "${ROOT}"
+assert_has_result "context-budget" "fail" "case46 non-flow project topic-doc Rules section exceeds threshold"
+assert_contains "${REPORT_TEXT}" "watch/docs/topic.md" "case46 report names the non-flow project's topic doc"
+rm -rf "${ROOT}"
+
+# =====================================================================
+# Case 47: new per-bullet length cap (300 chars), scoped to AGENTS.md's
+# ## Critical Rules only -- a single over-length bullet fails with a fix,
+# while the identical bullet text in a topic doc's ## Rules section (not
+# length-capped, per plan) produces no context-budget result at all.
+# =====================================================================
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+LONG_BULLET_BODY="$(printf 'A%.0s' $(seq 1 398))"
+{
+  echo "# demo-repo"
+  echo
+  echo "## Critical Rules"
+  echo "- Rule one."
+  echo "- ${LONG_BULLET_BODY}"
+  echo "- Rule three."
+} > "${ROOT}/AGENTS.md"
+{
+  echo "# Sample topic"
+  echo
+  echo "## Rules"
+  echo "- Sample rule one."
+  echo "- ${LONG_BULLET_BODY}"
+} > "${ROOT}/flow/docs/sample-topic.md"
+run_check "${ROOT}"
+assert_has_result "context-budget" "fail" "case47 over-length (400-char) Critical Rules bullet fails"
+assert_all_fixes_present "case47 length-cap fail must carry a fix"
+N_CB_FAIL_47="$(count_results "context-budget" "fail")"
+[[ "${N_CB_FAIL_47}" -eq 1 ]] || fail "case47: expected exactly 1 context-budget fail (topic-doc ## Rules bullets are not length-capped), got ${N_CB_FAIL_47}"
+N_TOPIC_LEN_47="$(printf '%s' "${REPORT_JSON}" | jq '[.results[]? | select(.check=="context-budget" and (.target|test("sample-topic.md")))] | length' 2>/dev/null)"
+is_eq0 "${N_TOPIC_LEN_47}" || fail "case47: topic-doc ## Rules bullets must not be length-capped, got ${N_TOPIC_LEN_47} context-budget result(s) naming sample-topic.md"
+rm -rf "${ROOT}"
+
+# =====================================================================
+# Case 47b (Q2 regression): the loophole-closing case -- the same
+# over-length bullet content hard-wrapped across three source lines, each
+# individually under 300 chars, must still fail once its logical bullet is
+# reassembled by joining continuation lines.
+# =====================================================================
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+WRAP_A="$(printf 'A%.0s' $(seq 1 100))"
+WRAP_B="$(printf 'B%.0s' $(seq 1 100))"
+WRAP_C="$(printf 'C%.0s' $(seq 1 100))"
+{
+  echo "# demo-repo"
+  echo
+  echo "## Critical Rules"
+  echo "- Rule one."
+  echo "- ${WRAP_A}"
+  echo "${WRAP_B}"
+  echo "${WRAP_C}"
+  echo "- Rule three."
+} > "${ROOT}/AGENTS.md"
+run_check "${ROOT}"
+assert_has_result "context-budget" "fail" "case47b hard-wrapped bullet (3 lines, each <300 chars) still exceeds the length cap once joined"
+N_JOINED_LEN_MSG="$(printf '%s' "${REPORT_JSON}" | jq '[.results[]? | select(.check=="context-budget" and .status=="fail" and (.message|test("chars \\(max 300\\)")))] | length' 2>/dev/null)"
+is_ge1 "${N_JOINED_LEN_MSG}" || fail "case47b: expected a context-budget fail whose message reports the joined length against the 300-char cap, got ${N_JOINED_LEN_MSG:-N/A}"
+rm -rf "${ROOT}"
+
+# =====================================================================
+# Case 48: anti-evasion warn -- a non-rule-ledger ## section with >=5
+# top-level bullets warns (never fails); the same bullet count under an
+# allowlisted structural heading is silent; heading matching is exact and
+# case-sensitive (Q3), so a lowercase variant of an allowlisted heading is
+# NOT exempt and still warns.
+# =====================================================================
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+bootstrap_markers "${ROOT}"
+{
+  echo "# demo-repo"
+  echo
+  echo "## Critical Rules"
+  echo "- Rule one."
+  echo
+  echo "## Deployment patterns"
+  for i in $(seq 1 6); do echo "- Deployment bullet ${i}."; done
+} > "${ROOT}/AGENTS.md"
+run_check "${ROOT}"
+assert_has_result "context-budget" "warn" "case48a non-allowlisted ## section with >=5 bullets triggers the anti-evasion warn"
+assert_exit_zero "case48a default mode: anti-evasion warn alone does not block"
+run_check "${ROOT}" --strict
+assert_exit_nonzero "case48a --strict mode: anti-evasion warn blocks"
+rm -rf "${ROOT}"
+
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+{
+  echo "# demo-repo"
+  echo
+  echo "## Critical Rules"
+  echo "- Rule one."
+  echo
+  echo "## Project Structure"
+  for i in $(seq 1 6); do echo "- Structure bullet ${i}."; done
+} > "${ROOT}/AGENTS.md"
+run_check "${ROOT}"
+N_EVASION_ALLOWLISTED="$(printf '%s' "${REPORT_JSON}" | jq '[.results[]? | select(.check=="context-budget" and .status=="warn" and (.message|test("Project Structure")))] | length' 2>/dev/null)"
+is_eq0 "${N_EVASION_ALLOWLISTED}" || fail "case48b allowlisted heading ## Project Structure must not trigger the anti-evasion warn, got ${N_EVASION_ALLOWLISTED}"
+rm -rf "${ROOT}"
+
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+{
+  echo "# demo-repo"
+  echo
+  echo "## Critical Rules"
+  echo "- Rule one."
+  echo
+  echo "## project structure"
+  for i in $(seq 1 6); do echo "- lowercase structure bullet ${i}."; done
+} > "${ROOT}/AGENTS.md"
+run_check "${ROOT}"
+assert_has_result "context-budget" "warn" "case48c lowercase '## project structure' does not case-insensitively match the allowlist (Q3) and still warns"
+rm -rf "${ROOT}"
+
+# =====================================================================
+# Case 48b (Q3 rollup): bullets nested under a ### sub-heading roll up into
+# their parent ## section's total -- 3 direct bullets (under threshold
+# alone) plus 3 nested ### bullets reach the >=5 threshold together.
+# =====================================================================
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+{
+  echo "# demo-repo"
+  echo
+  echo "## Critical Rules"
+  echo "- Rule one."
+  echo
+  echo "## Deployment patterns"
+  echo "- Deployment bullet 1."
+  echo "- Deployment bullet 2."
+  echo "- Deployment bullet 3."
+  echo
+  echo "### Sub-heading"
+  echo "- Sub bullet 1."
+  echo "- Sub bullet 2."
+  echo "- Sub bullet 3."
+} > "${ROOT}/AGENTS.md"
+run_check "${ROOT}"
+assert_has_result "context-budget" "warn" "case48b nested ### sub-heading bullets roll up into the parent ## section's bullet total (Q3), reaching the >=5 threshold"
+rm -rf "${ROOT}"
+
+# =====================================================================
+# Case 49 (Q4): with no .cenci/config.json at all, the implicit flow/
+# fallback scan is dropped -- an over-budget flow/AGENTS.md produces no
+# context-budget fail, but an over-budget root AGENTS.md in the same
+# absent-config repo still fails (root is always scanned).
+# =====================================================================
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+rm -f "${ROOT}/.cenci/config.json"
+{
+  echo "# Project: flow"
+  echo
+  echo "## Critical Rules"
+  for i in $(seq 1 11); do echo "- Flow rule number ${i}."; done
+} > "${ROOT}/flow/AGENTS.md"
+run_check "${ROOT}"
+N_CB_FAIL_49_NOCFG="$(count_results "context-budget" "fail")"
+is_eq0 "${N_CB_FAIL_49_NOCFG}" || fail "case49: absent .cenci/config.json must drop the implicit flow/ fallback scan, got ${N_CB_FAIL_49_NOCFG} context-budget fail(s)"
+N_FLOW_NAMED_49="$(printf '%s' "${REPORT_JSON}" | jq '[.results[]? | select(.check=="context-budget" and (.target|test("flow/AGENTS.md")))] | length' 2>/dev/null)"
+is_eq0 "${N_FLOW_NAMED_49}" || fail "case49: absent .cenci/config.json must not scan flow/AGENTS.md at all, got ${N_FLOW_NAMED_49} context-budget result(s) naming it"
+
+{
+  echo "# demo-repo"
+  echo
+  echo "## Critical Rules"
+  for i in $(seq 1 11); do echo "- Root rule number ${i}."; done
+} > "${ROOT}/AGENTS.md"
+run_check "${ROOT}"
+assert_has_result "context-budget" "fail" "case49b absent .cenci/config.json still scans root AGENTS.md"
+N_ROOT_NAMED_49="$(printf '%s' "${REPORT_JSON}" | jq --arg root "${ROOT}" '[.results[]? | select(.check=="context-budget" and .status=="fail" and .target=="AGENTS.md")] | length' 2>/dev/null)"
+is_ge1 "${N_ROOT_NAMED_49}" || fail "case49b: expected a context-budget fail targeting root AGENTS.md, got ${N_ROOT_NAMED_49:-N/A}"
+rm -rf "${ROOT}"
+
+# =====================================================================
+# Case 50: a configured project whose path escapes the repository root is
+# excluded from the context-budget scan (never crashes the checker), while
+# the existing config-paths fail for that escaping path still fires --
+# mirrors Case 41's shape for the widened, config-driven scan.
+# =====================================================================
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+add_second_project "${ROOT}" "extra"
+jq '(.projects[] | select(.slug=="extra") | .path) = "../outside"' \
+  "${ROOT}/.cenci/config.json" > "${ROOT}/.cenci/config.json.tmp"
+mv "${ROOT}/.cenci/config.json.tmp" "${ROOT}/.cenci/config.json"
+run_check "${ROOT}"
+[[ "${REPORT_JSON}" != "null" ]] || fail "case50: expected a JSON report to be written (checker must not crash on an escaping project path)"
+assert_exit_nonzero "case50 escaping second project path is rejected"
+assert_has_result "config-paths" "fail" "case50 config-paths fail still fires for the escaping second project"
+N_EXTRA_NAMED_50="$(printf '%s' "${REPORT_JSON}" | jq '[.results[]? | select(.check=="context-budget" and (.target|test("extra")))] | length' 2>/dev/null)"
+is_eq0 "${N_EXTRA_NAMED_50}" || fail "case50: escaping project must be excluded from the context-budget scan, got ${N_EXTRA_NAMED_50} context-budget result(s) naming it"
+rm -rf "${ROOT}"
+
+# =====================================================================
+# Case 51: context-budget — an unreadable scanned AGENTS.md must fail, not
+# silently pass (#753 review fix, silent-failure-hunter WARNING). Without an
+# explicit [[ -r ]] guard, awk/grep on an unreadable file fail silently to
+# stderr, counts become empty strings, and every threshold comparison
+# evaluates false -- a false "pass" for a file the checker never actually
+# inspected. Mirrors case 13c's chmod 000 pattern (root-unobservable; guarded
+# per flow/docs/shell-scripting-gotchas.md and
+# flow/tests/root-safe-perms-contract.test.sh).
+# =====================================================================
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+chmod 000 "${ROOT}/AGENTS.md"
+if [[ "$(id -u)" -eq 0 ]]; then
+  echo "SKIP: case51 unreadable-AGENTS.md assertion requires a non-root user (uid 0 reads any regular file)"
+else
+  run_check "${ROOT}"
+  assert_has_result "context-budget" "fail" "case51 unreadable root AGENTS.md fails, not a silent pass"
+  N_CB_UNREADABLE_MSG="$(printf '%s' "${REPORT_JSON}" | jq '[.results[]? | select(.check=="context-budget" and .status=="fail" and (.message|test("is not readable")))] | length' 2>/dev/null)"
+  is_ge1 "${N_CB_UNREADABLE_MSG}" || fail "case51: expected a context-budget fail whose message reports the file as not readable, got ${N_CB_UNREADABLE_MSG:-N/A}"
+fi
+chmod 644 "${ROOT}/AGENTS.md"
+rm -rf "${ROOT}"
+
+# =====================================================================
+# Case 52: context-budget — a symlinked leaf topic doc (the file itself is a
+# symlink, not just under a symlinked directory) is excluded from the scan,
+# not followed (#753 Phase 6+7 review fix, security-reviewer +
+# silent-failure-hunter). context_budget_path_safe() previously only
+# canonicalized the candidate's *parent directory* and re-appended
+# basename, so a symlinked leaf (e.g. docs/sample-topic.md -> an outside
+# file) still resolved back under $ROOT and was wrongly treated as safe,
+# even though [[ -f ]]/awk transparently follow the symlink and would leak
+# the external target's content into the report. Mirrors Case 50's
+# escaping-path exclusion shape (silently excluded, not a fail/warn), but
+# for a symlink at the leaf rather than an escaping directory path.
+# =====================================================================
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+OUTSIDE="$(mktemp -d)"
+{
+  echo "# outside-secret"
+  echo
+  echo "## Rules"
+  for i in $(seq 1 26); do echo "- Outside rule number ${i}."; done
+} > "${OUTSIDE}/leaked.md"
+rm -f "${ROOT}/flow/docs/sample-topic.md"
+ln -s "${OUTSIDE}/leaked.md" "${ROOT}/flow/docs/sample-topic.md"
+run_check "${ROOT}"
+[[ "${REPORT_JSON}" != "null" ]] || fail "case52: expected a JSON report to be written (checker must not crash on a symlinked leaf topic doc)"
+N_SYMLINK_NAMED_52="$(printf '%s' "${REPORT_JSON}" | jq '[.results[]? | select(.check=="context-budget" and (.target|test("sample-topic")))] | length' 2>/dev/null)"
+is_eq0 "${N_SYMLINK_NAMED_52}" || fail "case52: symlinked topic doc must be excluded from the context-budget scan, got ${N_SYMLINK_NAMED_52} context-budget result(s) naming it"
+N_LEAKED_52="$(printf '%s' "${REPORT_JSON}" | jq '[.results[]? | select(.check=="context-budget" and ((.message // "")|test("outside-secret")))] | length' 2>/dev/null)"
+is_eq0 "${N_LEAKED_52}" || fail "case52: symlink target content (outside-secret heading) must never leak into a context-budget message"
+rm -rf "${ROOT}" "${OUTSIDE}"
+
+# =====================================================================
 # Skill markdown contract cases (ticket #545) -- grep-based anchor-phrase
 # assertions against flow/skills/maintain/{SKILL.md,codex.md,modes/*.md},
 # none of which exist yet at RED-phase time (the skill/mode/agent files are
@@ -1832,6 +2145,17 @@ MAINTAIN_SCOPE_PROJECTS_PHRASE='`watch`/`sandbox`'
 
 assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "${MAINTAIN_SCOPE_NOOP_PHRASE}" "MC24 SKILL.md documents the out-of-scope-project no-op wording (not yet covered)"
 assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "${MAINTAIN_SCOPE_PROJECTS_PHRASE}" "MC25 SKILL.md names watch/sandbox as the out-of-scope no-op projects"
+
+# --- Ticket #753: the watch/sandbox no-op narrows to structure/docs/clients/
+# all only; SKILL.md must name all four no-op modes and explicitly exempt
+# rules mode (context-budget is now cross-project and rules-maintainer is
+# already project-generic, so /cenci:maintain rules watch|sandbox run
+# normally instead of no-opping). ------------------------------------------
+MAINTAIN_SCOPE_NOOP_MODES_PHRASE='for modes `structure`/`docs`/`clients`/`all`'
+MAINTAIN_SCOPE_RULES_EXEMPT_PHRASE='Mode `rules` is the exception: `/cenci:maintain rules watch` and `/cenci:maintain rules sandbox` run normally, because the `context-budget` check in `scripts/check.sh` and `rules-maintainer` are both project-generic.'
+
+assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "${MAINTAIN_SCOPE_NOOP_MODES_PHRASE}" "MC26 SKILL.md names the four no-op modes (structure/docs/clients/all)"
+assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "${MAINTAIN_SCOPE_RULES_EXEMPT_PHRASE}" "MC27 SKILL.md exempts rules mode from the watch/sandbox no-op"
 
 # =====================================================================
 # Ticket #546 -- port Garden's rule curation into /cenci:maintain rules mode.
