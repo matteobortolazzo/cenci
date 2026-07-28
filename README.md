@@ -41,7 +41,7 @@ theme is user-provided.
 
 ## Quickstart
 
-Requirements: Linux, macOS, or WSL2; git; curl; Docker or Podman; and Claude Code,
+Requirements: Linux, macOS, or WSL2; git; curl; jq; Docker or Podman; and Claude Code,
 Codex, or both. [OpenCode](flow/docs/opencode.md) is supported as an additional,
 opt-in agent — it layers on top of an existing Claude Code or Codex install rather
 than standing alone.

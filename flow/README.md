@@ -183,6 +183,7 @@ companion) for every skill, including the internal ones not listed above.
 ### Required
 - **Claude Code** CLI installed and authenticated
 - **GitHub CLI** (`gh`): for GitHub Issues and PRs — [install](https://cli.github.com/)
+- **jq**: required by several hooks and installer checks for JSON parsing — [install](https://jqlang.github.io/jq/download/)
 - **Node.js**: only required if using Context7 (MCP server for live documentation lookup)
 
 ### Optional: LSP Servers
