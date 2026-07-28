@@ -2,6 +2,7 @@ package main_test
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,17 @@ import (
 )
 
 // -- close subcommand (ticket #314) ------------------------------------------
+
+// emptyStateHome returns an environment whose XDG_STATE_HOME points at an
+// empty temp directory. `cenci close` consults `cenci babysit`'s state files
+// there before killing a window (#787), so any test asserting a close/skip
+// decision must isolate itself from a real supervisor that happens to be
+// running on the dev machine — same discipline as the ambient daemon-socket
+// isolation in watch/docs/test-isolation.md.
+func emptyStateHome(t *testing.T) []string {
+	t.Helper()
+	return append(os.Environ(), "XDG_STATE_HOME="+t.TempDir())
+}
 
 // TestClose_UnreachableDaemon_ErrorsExit1_NoKill locks in the hard fail-safe:
 // when the daemon socket cannot be reached, `close` exits 1 and never reports
@@ -87,6 +99,7 @@ func TestClose_DryRun_PrintsCloseAndSkipDecisions(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 
 	cmd := exec.Command(binaryPath, "close", "77", "--dry-run", "--socket", socket)
+	cmd.Env = emptyStateHome(t)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("close --dry-run: %v\n%s", err, output)
@@ -105,6 +118,80 @@ func TestClose_DryRun_PrintsCloseAndSkipDecisions(t *testing.T) {
 	// automatically at session end, not just "use --force to close now".
 	if !strings.Contains(string(output), "will retry automatically") {
 		t.Errorf("skip line should communicate automatic retry at session end, got:\n%s", output)
+	}
+}
+
+// TestClose_BabysitSupervisedWindow_SkippedAndForceable drives the whole
+// #787 guard end to end against the real binary: a supervisor state file on
+// disk that owns a PR closing ticket 77 with CI not green must make
+// `cenci close 77` report a babysit skip instead of killing the window (the
+// killer is never reached, so no tmux binary is required), while `--force`
+// bypasses the guard.
+func TestClose_BabysitSupervisedWindow_SkippedAndForceable(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "babysit.sock")
+	srv, err := ipc.NewServer(socket)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go srv.Accept(ctx)
+	time.Sleep(20 * time.Millisecond)
+
+	srv.Broadcast(ipc.StateSnapshot{
+		Windows: []ipc.WindowState{
+			{Session: "sess-a", WindowIndex: "0", WindowName: "77-implement", Status: "done"},
+		},
+	})
+	time.Sleep(20 * time.Millisecond)
+
+	// A supervisor paused for human input records PID 0 but is still working
+	// on the PR — that state blocks the close without needing a live process.
+	stateHome := t.TempDir()
+	stateDir := filepath.Join(stateHome, "cenci", "babysit")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	state := `{"schemaVersion":1,"pr":"790","repo":"o/r","agent":"claude","closingIssues":[77],"ciStatus":"pending","status":"needs-input"}`
+	if err := os.WriteFile(filepath.Join(stateDir, "abc123-790.json"), []byte(state), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command(binaryPath, args...)
+		cmd.Env = append(os.Environ(), "XDG_STATE_HOME="+stateHome)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("close %v: %v\n%s", args, err, output)
+		}
+		return string(output)
+	}
+
+	for _, args := range [][]string{
+		{"close", "77", "--socket", socket},
+		{"close", "77", "--dry-run", "--socket", socket},
+	} {
+		output := run(args...)
+		wantLine := "skip 77-implement (sess-a:0): babysit supervising PR #790, CI not green — will close once CI passes (or use --force now)"
+		if !strings.Contains(output, wantLine) {
+			t.Errorf("%v: output missing the babysit skip line\n want: %s\n  got:\n%s", args, wantLine, output)
+		}
+		if strings.Contains(output, "closed 77-implement") || strings.Contains(output, "would close 77-implement") {
+			t.Errorf("%v: a babysit-guarded window must never be reported as closed, got:\n%s", args, output)
+		}
+	}
+
+	// --force bypasses the guard entirely: it reaches the killer, which is
+	// the only path here that needs a real tmux, so assert on the decision
+	// rather than on success.
+	cmd := exec.Command(binaryPath, "close", "77", "--force", "--socket", socket)
+	cmd.Env = append(os.Environ(), "XDG_STATE_HOME="+stateHome)
+	forced, _ := cmd.CombinedOutput()
+	if strings.Contains(string(forced), "babysit supervising") {
+		t.Errorf("--force must bypass the babysit guard, got:\n%s", forced)
 	}
 }
 
@@ -134,6 +221,7 @@ func TestClose_NoMatches_EmptyStdoutExit0(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 
 	cmd := exec.Command(binaryPath, "close", "42", "--socket", socket)
+	cmd.Env = emptyStateHome(t)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("close with zero matches: unexpected error/exit code: %v\n%s", err, output)

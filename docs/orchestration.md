@@ -139,7 +139,30 @@ whose agent is still running or awaiting input (unless passed `--force`). A
 busy-skipped window is self-healing: `cenci close` registers it with the daemon as
 pending-close, and the daemon closes it itself the moment it observes that session's
 end — no second `cenci close` invocation (from lazyboards or anything else) is
-required. When no window matches at all, `cenci close` produces no output and exits
+required.
+
+`cenci close` also refuses to kill a window whose ticket is still owned by a live
+`cenci babysit` supervisor whose PR's CI is not green — including through the
+deferred pending-close path above, where the daemon re-checks the guard instead of
+killing at `SessionEnd`. This matters because Phase 9 relabels the ticket `Working` →
+`In Review` (moving the card, which fires `cleanup`) and *then* arms the supervisor:
+without the guard, cleanup reaps the window while CI is still running and review
+feedback has not arrived. The skip is reported, `--force` overrides it, and the close
+happens by itself once CI passes or the supervisor stops. Two caveats:
+
+- **The daemon's re-check matches on ticket number alone.** A registered
+  pending-close carries no repo, so two repos babysitting PRs that close the same
+  issue number at the same time cross-match. The failure mode is benign — a window
+  stays open a little longer — and `--force` overrides. `cenci close` itself does
+  scope the match to the current checkout's repo root.
+- **The guard reads babysit's on-disk state, refreshed once per supervision
+  interval** (default `15m`), so a window can stay closable-but-open for up to one
+  interval after CI turns green. That is deliberate: the close path must make no
+  network calls, since lazyboards runs it on every board refresh. Everything unknown
+  or unreadable fails *open* (closes), so machines that never run babysit are
+  unaffected.
+
+When no window matches at all, `cenci close` produces no output and exits
 `0` — safe on cards that never had an agent, and quiet enough that lazyboards never
 surfaces a legitimate no-op as a spurious warning. A raw
 `tmux kill-window -t ={window}` still works but resolves bare names only within

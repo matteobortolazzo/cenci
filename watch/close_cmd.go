@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 
+	"github.com/matteobortolazzo/cenci/watch/internal/babysit"
 	"github.com/matteobortolazzo/cenci/watch/internal/closecmd"
 	"github.com/matteobortolazzo/cenci/watch/internal/dispatch"
 	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
@@ -26,6 +28,31 @@ func registerPendingClose(w watch.WindowState) error {
 		WindowIndex: w.WindowIndex,
 		WindowName:  w.WindowName,
 	})
+}
+
+// babysitCloseGuard returns the production closecmd.Opts.Guard: a check for a
+// live `cenci babysit` supervisor that still owns the ticket's PR with CI not
+// green (#787). The repo root is resolved once per invocation and scopes the
+// answer to this checkout; it is empty when the command runs outside a git
+// repository, which degrades the guard to a ticket-only match rather than
+// disabling it. babysit.BlocksClose itself makes no network calls and fails
+// open on every read error, so a machine that never runs babysit is
+// unaffected.
+func babysitCloseGuard() func(string) (bool, string) {
+	root := gitRepoRoot()
+	return func(ticket string) (bool, string) {
+		return babysit.BlocksClose(ticket, root, "")
+	}
+}
+
+// gitRepoRoot returns the current checkout's root, or "" when it cannot be
+// resolved (not a repository, no git binary). Never fails the close.
+func gitRepoRoot() string {
+	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // runClose implements `cenci close <ticket-number|window-name> [--force]
@@ -60,6 +87,7 @@ func runClose(args []string) {
 		ReadSnapshot: dispatch.ReadSnapshot,
 		Killer:       &tmux.ExecClient{},
 		Register:     registerPendingClose,
+		Guard:        babysitCloseGuard(),
 	})
 	if err != nil && len(decisions) == 0 {
 		// Daemon unreachable (or every match failed to kill): fail safe, no
@@ -92,6 +120,8 @@ func printCloseDecisions(w io.Writer, target string, decisions []closecmd.Decisi
 			_, _ = fmt.Fprintf(w, "would close %s (%s:%s)\n", d.Window.WindowName, d.Window.Session, d.Window.WindowIndex)
 		case closecmd.ActionSkippedBusy:
 			_, _ = fmt.Fprintf(w, "skip %s (%s:%s): status=%s, will retry automatically once the session ends (or use --force now)\n", d.Window.WindowName, d.Window.Session, d.Window.WindowIndex, d.Window.Status)
+		case closecmd.ActionSkippedBabysit:
+			_, _ = fmt.Fprintf(w, "skip %s (%s:%s): %s — will close once CI passes (or use --force now)\n", d.Window.WindowName, d.Window.Session, d.Window.WindowIndex, d.Reason)
 		}
 	}
 }

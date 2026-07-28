@@ -21,15 +21,21 @@ import (
 type Action string
 
 const (
-	ActionClosed      Action = "closed"       // window was killed
-	ActionWouldClose  Action = "would-close"  // --dry-run: window would be killed
-	ActionSkippedBusy Action = "skipped-busy" // running/need-input and --force not set
+	ActionClosed         Action = "closed"          // window was killed
+	ActionWouldClose     Action = "would-close"     // --dry-run: window would be killed
+	ActionSkippedBusy    Action = "skipped-busy"    // running/need-input and --force not set
+	ActionSkippedBabysit Action = "skipped-babysit" // a live babysit supervisor still owns the ticket's PR (#787)
 )
 
 // Decision records the outcome for one matched window.
 type Decision struct {
 	Window watch.WindowState
 	Action Action
+	// Reason carries the guard's human-readable explanation for an
+	// ActionSkippedBabysit decision (e.g. "babysit supervising PR #790, CI
+	// not green"). Empty for every other action, whose rendering is derived
+	// from Window alone (#787).
+	Reason string
 }
 
 // windowKiller is the minimal seam Run needs to kill a tmux window.
@@ -65,6 +71,16 @@ type Opts struct {
 	// a Register error never fails Run or changes rendered decisions, since
 	// the snapshot read already succeeded.
 	Register func(watch.WindowState) error
+	// Guard, if non-nil, reports whether a window's ticket is still owned by
+	// a live `cenci babysit` supervisor whose PR has not gone green, plus a
+	// reason for the skip line (#787). Production: a closure over
+	// babysit.BlocksClose bound to the caller's repo root. Injected like
+	// ReadSnapshot/Killer/Register so this package's tests stay
+	// filesystem-free. It is consulted only for windows whose name carries a
+	// ticket number and never under --force; it must fail open (report
+	// false) on any error, and must make no network calls — lazyboards runs
+	// `cenci close` on every board refresh.
+	Guard func(ticket string) (bool, string)
 }
 
 // Run reads a one-shot snapshot from the daemon, matches Target against the
@@ -103,6 +119,21 @@ func Run(opts Opts) ([]Decision, error) {
 				_ = opts.Register(w)
 			}
 			continue
+		}
+		// A window whose agent has already gone idle can still be the
+		// working window of a PR `cenci babysit` is supervising — Phase 9
+		// arms the supervisor as its last act, so the session ends while CI
+		// is still running (#787). Unlike a busy skip this registers no
+		// pending-close: the guard is tied to the PR's lifetime, not the
+		// session's, and the daemon re-checks the guard on its own deferred
+		// closes.
+		if opts.Guard != nil && !opts.Force {
+			if ticket := detect.TicketFromWindowName(w.WindowName); ticket != "" {
+				if blocked, reason := opts.Guard(ticket); blocked {
+					decisions = append(decisions, Decision{Window: w, Action: ActionSkippedBabysit, Reason: reason})
+					continue
+				}
+			}
 		}
 		if opts.DryRun {
 			decisions = append(decisions, Decision{Window: w, Action: ActionWouldClose})

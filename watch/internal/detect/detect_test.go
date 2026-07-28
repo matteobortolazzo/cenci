@@ -84,3 +84,23 @@ func TestStatusString(t *testing.T) {
 		}
 	}
 }
+
+func TestTicketFromWindowName(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+	}{
+		{"782-implement", "782"},
+		{"782", "782"},
+		{"782-implement-retry", "782"},
+		{"add-dark-mode", ""},
+		{"782x-implement", ""},
+		{"", ""},
+		{"-782", ""},
+	}
+	for _, tt := range tests {
+		if got := TicketFromWindowName(tt.name); got != tt.want {
+			t.Errorf("TicketFromWindowName(%q) = %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}

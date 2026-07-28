@@ -11,3 +11,9 @@ Guidance for testing code that branches on ambient process/container state (e.g.
 **Context**: `dispatch status`/`dispatch loop` tests assert `daemon_running: false`, but the CLI resolves the daemon socket via `watch.DefaultSocketPath()` (which honors `$XDG_RUNTIME_DIR`) with no override — so if a real cenci daemon happens to be running on the dev/CI machine, these tests dial it instead of finding nothing, and fail.
 
 **Rule**: Any test asserting `daemon_running: false` (or otherwise depending on no daemon being reachable) must redirect socket resolution to an isolated, empty temp directory as its first statement — either via the package's `useTempSocketDir(t)` helper (see `main_test.go`, `internal/daemon/ensure_test.go`) or, where no such helper exists yet, directly with `t.Setenv("XDG_RUNTIME_DIR", t.TempDir())`. `t.TempDir()` is created 0700, satisfying `secureSocketDir()`'s permission check (no fallback to `/tmp`). Don't call `t.Parallel()` in tests that use `t.Setenv`.
+
+## Ambient babysit state isolation
+
+**Context**: `cenci close` consults `cenci babysit`'s supervisor state under `$XDG_STATE_HOME/cenci/babysit` before killing a window (#787), so a real supervisor running on the dev/CI machine can flip a close decision to a babysit skip.
+
+**Rule**: Any test asserting a `cenci close` decision must run the binary with `XDG_STATE_HOME` pointed at an empty temp directory (`close_test.go`'s `emptyStateHome(t)` helper). Isolating pre-existing tests that exercise the *un-guarded* path matters as much as isolating the new guard tests. The same reasoning applies inside `internal/daemon`, whose default guard reads the same directory — `newTestDaemon` disables it outright.

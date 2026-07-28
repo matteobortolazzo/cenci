@@ -67,5 +67,9 @@ func newTestDaemon(mc *tmuxtest.MockClient) *Daemon {
 	cfg := testConfig()
 	d := newDaemon(cfg, tmuxfe.New(cfg, mc), ch, &mockReaper{})
 	d.killer = &fakeKiller{}
+	// The babysit close guard is disabled by default so the suite never
+	// reads the developer's ambient supervisor state directory (#787); the
+	// guard's own tests wire an explicit fake.
+	d.closeGuard = nil
 	return d
 }

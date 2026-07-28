@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"testing"
+	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
 	"github.com/matteobortolazzo/cenci/watch/internal/tmux"
@@ -165,6 +166,150 @@ func TestDaemon_PendingCloseSurvivesSessionHandoff(t *testing.T) {
 	}
 	if len(d.pending) != 0 {
 		t.Errorf("pending registry size = %d, want 0 after the successor's SessionEnd fired the kill", len(d.pending))
+	}
+}
+
+// -- babysit close guard (#787) ----------------------------------------------
+
+// countingGuard is a call-recording babysit close guard for daemon tests
+// (#787). blocked is flipped by the test to simulate CI turning green.
+type countingGuard struct {
+	asked   []string
+	blocked bool
+}
+
+func (g *countingGuard) guard(ticket string) (bool, string) {
+	g.asked = append(g.asked, ticket)
+	if g.blocked {
+		return true, "babysit supervising PR #790, CI not green"
+	}
+	return false, ""
+}
+
+// babysitTrackedMock mirrors trackedSessionMock but names the window with the
+// "<ticket>-<skill>" convention the close guard joins on.
+func babysitTrackedMock() *tmuxtest.MockClient {
+	return &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "782-implement", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "⠋ writing tests", PaneID: "%0"},
+		},
+	}
+}
+
+// startTrackedSession drives the two events that make the daemon track a
+// session's window, then registers it as pending-close.
+func startTrackedSession(d *Daemon) {
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+	d.registerPendingClose(ipc.PendingClose{Session: "main", WindowIndex: "0", WindowName: "782-implement"})
+}
+
+// TestDaemon_PendingCloseHeldWhileBabysitBlocks covers the deferred-kill half
+// of #787: the implement session ends while `cenci babysit` is still
+// supervising its PR, so the daemon must NOT fire the registered
+// pending-close — and must keep the entry so it can retry later.
+func TestDaemon_PendingCloseHeldWhileBabysitBlocks(t *testing.T) {
+	d := newTestDaemon(babysitTrackedMock())
+	fk := d.killer.(*fakeKiller)
+	g := &countingGuard{blocked: true}
+	d.closeGuard = g.guard
+
+	startTrackedSession(d)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sess1", TmuxPane: "%0"})
+
+	if len(fk.killed) != 0 {
+		t.Fatalf("killed = %v, want none while babysit still owns the ticket", fk.killed)
+	}
+	if len(d.pending) != 1 {
+		t.Fatalf("pending registry size = %d, want the entry retained for a later retry", len(d.pending))
+	}
+	if len(g.asked) == 0 || g.asked[0] != "782" {
+		t.Errorf("guard asked about %v, want the ticket number from the window name", g.asked)
+	}
+}
+
+// TestDaemon_BlockedPendingCloseKilledOnceGuardClears covers the retry half of
+// #787: once babysit stops blocking (CI green, or the supervisor exits), the
+// next re-check from the sweep closes the window — exactly once.
+func TestDaemon_BlockedPendingCloseKilledOnceGuardClears(t *testing.T) {
+	d := newTestDaemon(babysitTrackedMock())
+	fk := d.killer.(*fakeKiller)
+	g := &countingGuard{blocked: true}
+	d.closeGuard = g.guard
+	now := time.Now()
+	d.now = func() time.Time { return now }
+
+	startTrackedSession(d)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sess1", TmuxPane: "%0"})
+	if len(fk.killed) != 0 {
+		t.Fatalf("killed = %v, want none while blocked", fk.killed)
+	}
+
+	g.blocked = false
+	now = now.Add(pendingCloseRecheckInterval + time.Second)
+	d.runSweep()
+
+	if len(fk.killed) != 1 || fk.killed[0] != "=main:0" {
+		t.Fatalf("killed = %v, want exactly [=main:0] once the guard clears", fk.killed)
+	}
+	if len(d.pending) != 0 {
+		t.Errorf("pending registry size = %d, want 0 after the retry fired", len(d.pending))
+	}
+
+	// A further sweep must not kill the same window a second time.
+	now = now.Add(pendingCloseRecheckInterval + time.Second)
+	d.runSweep()
+	if len(fk.killed) != 1 {
+		t.Errorf("killed = %v, want the retry to fire exactly once", fk.killed)
+	}
+}
+
+// TestDaemon_BlockedPendingCloseRecheckIsThrottled pins the re-check cadence
+// (#787): runSweep ticks once a second, but a blocked entry must consult the
+// guard at most once per pendingCloseRecheckInterval.
+func TestDaemon_BlockedPendingCloseRecheckIsThrottled(t *testing.T) {
+	d := newTestDaemon(babysitTrackedMock())
+	g := &countingGuard{blocked: true}
+	d.closeGuard = g.guard
+	now := time.Now()
+	d.now = func() time.Time { return now }
+
+	startTrackedSession(d)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sess1", TmuxPane: "%0"})
+	atSessionEnd := len(g.asked)
+
+	for i := 0; i < 5; i++ {
+		now = now.Add(time.Second)
+		d.runSweep()
+	}
+	if len(g.asked) != atSessionEnd {
+		t.Errorf("guard consulted %d times over 5s of sweeps, want no re-check inside the %s throttle", len(g.asked)-atSessionEnd, pendingCloseRecheckInterval)
+	}
+
+	now = now.Add(pendingCloseRecheckInterval)
+	d.runSweep()
+	if len(g.asked) != atSessionEnd+1 {
+		t.Errorf("guard consulted %d times past the throttle window, want exactly 1", len(g.asked)-atSessionEnd)
+	}
+}
+
+// TestDaemon_NonBlockingGuardKeepsSessionEndKill asserts a guard that never
+// blocks leaves the existing #522 behavior byte-for-byte intact.
+func TestDaemon_NonBlockingGuardKeepsSessionEndKill(t *testing.T) {
+	d := newTestDaemon(babysitTrackedMock())
+	fk := d.killer.(*fakeKiller)
+	g := &countingGuard{}
+	d.closeGuard = g.guard
+
+	startTrackedSession(d)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sess1", TmuxPane: "%0"})
+
+	if len(fk.killed) != 1 || fk.killed[0] != "=main:0" {
+		t.Errorf("killed = %v, want the pending-close to fire at SessionEnd when nothing blocks", fk.killed)
+	}
+	if len(d.pending) != 0 {
+		t.Errorf("pending registry size = %d, want 0 after the kill", len(d.pending))
 	}
 }
 

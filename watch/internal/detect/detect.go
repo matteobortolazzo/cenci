@@ -48,6 +48,29 @@ func TaskName(title string) string {
 	return strings.TrimSpace(rest)
 }
 
+// TicketFromWindowName extracts the ticket number from a cenci window name,
+// or "" when the name carries none. The convention is "<ticket>-<skill>" (see
+// pkg/watch.WindowState's WindowName doc), and a bare "<ticket>" is also
+// valid; anything else — a free-text/slug window like "add-dark-mode" — has no
+// ticket to join on. The separating hyphen is required so "782x-implement"
+// never yields "782". This lives beside TaskName rather than in either
+// consumer because both internal/closecmd (the `cenci close` guard) and
+// internal/daemon (its deferred pending-close re-check) need the same parse
+// and both already depend on this package (#787).
+func TicketFromWindowName(windowName string) string {
+	i := 0
+	for i < len(windowName) && windowName[i] >= '0' && windowName[i] <= '9' {
+		i++
+	}
+	if i == 0 {
+		return ""
+	}
+	if i < len(windowName) && windowName[i] != '-' {
+		return ""
+	}
+	return windowName[:i]
+}
+
 // IsStatusSymbol reports whether r is a known Claude Code status symbol
 // (braille spinner characters, or the idle/running markers ✶ ✻ ✳).
 func IsStatusSymbol(r rune) bool {
