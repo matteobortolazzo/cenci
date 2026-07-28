@@ -77,7 +77,7 @@ If either check fails — a relative path, or an absolute path with **no** `/.wo
 
 If `<project-root>/docs/` doesn't exist and you need to create a topic file (option 3), create the directory first.
 
-5. **Size check (maintain hint).** After writing all entries, count the rule bullets in each section you touched. If a `## Critical Rules` section now exceeds **10** bullets, or a `docs/<topic>.md` rules section exceeds **25** bullets, add a `### Maintain suggestion` section to your output summary naming the file and its count. Do NOT edit, merge, or remove anything based on size — curation is `/cenci:maintain rules`'s job and is human-gated; your only action is the suggestion line.
+5. **Size check (maintain hint).** After writing all entries, count the rule bullets in each section you touched. If a `## Critical Rules` section now exceeds **10** bullets, or a `docs/<topic>.md` rules section exceeds **25** bullets, or if any `## Critical Rules` bullet you wrote or touched exceeds **300** characters on its raw source line, add a `### Maintain suggestion` section to your output summary naming the file and its count (or the over-length bullet). Do NOT edit, merge, or remove anything based on size — curation is `/cenci:maintain rules`'s job and is human-gated; your only action is the suggestion line.
 
 ## Entry Formats
 

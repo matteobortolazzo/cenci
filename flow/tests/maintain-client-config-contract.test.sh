@@ -73,7 +73,8 @@ assert_contains "${codex}" 'Mode `all` launches all four workers in parallel.' "
 assert_contains "${codex}" 'Mode `backlog` launches only `backlog-maintainer`;' "Codex backlog worker dispatch"
 assert_contains "${codex}" 'it is excluded from `all` and must be requested explicitly.' "Codex backlog excluded from all"
 assert_contains "${codex}" 'Mode `backlog` uses a different apply path:' "Codex backlog GitHub-issue apply-path redirect"
-assert_contains "${codex}" 'If scope is `watch` or `sandbox`, report `not yet covered` and stop before Phase 2.' "Codex scope no-op"
+assert_contains "${codex}" 'If mode is `structure`, `docs`, `clients`, or `all` and scope is `watch` or `sandbox`, report `not yet covered` and stop before Phase 2.' "Codex scope no-op"
+assert_contains "${codex}" 'Mode `rules` continues normally for scope `watch` or `sandbox` because the `context-budget` check in `check.sh` and `rules-maintainer` are both project-generic.' "Codex rules mode exempt from the watch/sandbox no-op (#753)"
 assert_contains "${codex}" 'Treat an errored, timed-out, or malformed worker result as an incomplete run' "Codex worker failure remains incomplete"
 
 for option in \

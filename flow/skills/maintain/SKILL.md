@@ -40,12 +40,8 @@ Read the `shell-rules`, `worktrees`, and `subagent-safety` reference skills befo
 - **Scope** — the next token, if it exactly matches a project `slug` from `.cenci/config.json`'s
   `projects` array (`flow`, `watch`, `sandbox`), narrows analysis to that project. Everything else
   is optional **additional context** (focus areas or constraints).
-- **Out-of-scope project no-op**: `scripts/check.sh` and every analyzer agent below are
-  flow-scoped today. If `scope` resolves to `watch` or `sandbox`, treat it as an explicit
-  **not yet covered** no-op for that project — report "not yet covered" and stop before Phase 2,
-  rather than silently running the full flow-scoped audit against an unrelated project. This
-  applies to `watch`/`sandbox` specifically; `flow` (or an omitted scope in a single-project repo)
-  runs normally.
+- **Out-of-scope project no-op**: the `structure-maintainer`/`docs-maintainer`/`portability-maintainer` analyzer agents are flow-scoped today. If `scope` resolves to `watch` or `sandbox`, treat it as an explicit **not yet covered** no-op for modes `structure`/`docs`/`clients`/`all` — report "not yet covered" and stop before Phase 2, rather than silently running the full flow-scoped audit against an unrelated project. This applies to `watch`/`sandbox` specifically; `flow` (or an omitted scope in a single-project repo) runs normally.
+  Mode `rules` is the exception: `/cenci:maintain rules watch` and `/cenci:maintain rules sandbox` run normally, because the `context-budget` check in `scripts/check.sh` and `rules-maintainer` are both project-generic.
 
 **Read-only guarantee**: Phases 1-5 (Scope, Deterministic check, Parallel audit, Report, Approval)
 never write, delete, or push anything — no file mutation, no worktree, no ticket/label mutation,

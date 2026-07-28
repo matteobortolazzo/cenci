@@ -15,7 +15,7 @@ than repo files, so it is excluded from `all` and must be requested explicitly. 
 next token as scope only when it exactly matches a configured project slug. The remaining
 text is additional context.
 
-Read the root and applicable project `AGENTS.md` files. If scope is `watch` or `sandbox`, report `not yet covered` and stop before Phase 2. Scope `flow`, or omitted scope in the configured repository, continues.
+Read the root and applicable project `AGENTS.md` files. If mode is `structure`, `docs`, `clients`, or `all` and scope is `watch` or `sandbox`, report `not yet covered` and stop before Phase 2. Scope `flow`, or omitted scope in the configured repository, continues. Mode `rules` continues normally for scope `watch` or `sandbox` because the `context-budget` check in `check.sh` and `rules-maintainer` are both project-generic.
 
 ## Phase 2 — Deterministic check
 
