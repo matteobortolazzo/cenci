@@ -194,8 +194,9 @@ func TestWriteExplanation_DindEnabled_SeparateSectionNotWeakening(t *testing.T) 
 // -- 5. regression: --docker must never appear -------------------------------
 
 // TestWriteExplanation_NeverMentionsDocker is a dedicated regression test
-// (per watch/AGENTS.md's rule on content-specific assertions): asserts the
-// literal string "--docker" never appears in WriteExplanation's output,
+// (per watch/docs/error-handling.md's rule on content-specific assertions
+// (#446)): asserts the literal string "--docker" never appears in
+// WriteExplanation's output,
 // across every fixture used by the tests above (default-safe, host-network,
 // dind, and both credential-absence variants) — --docker was removed from
 // cenci and must never resurface in this narrative.
@@ -407,7 +408,7 @@ func TestWriteExplanation_CredentialPresentButNotStaged_NoStagedClaim(t *testing
 // TestWriteExplanation_CredentialProbeError_DistinguishesFromAbsent covers
 // the unreadable/error probe state: the narrative must distinguish it from
 // plain absence (e.g. must not say the credential is simply "absent") —
-// content-specific, per AGENTS.md #446.
+// content-specific, per watch/docs/error-handling.md #446.
 func TestWriteExplanation_CredentialProbeError_DistinguishesFromAbsent(t *testing.T) {
 	p := baselinePosture()
 	p.CredentialSources = []CredentialSource{
@@ -441,7 +442,7 @@ func TestWriteExplanation_CredentialProbeError_DistinguishesFromAbsent(t *testin
 // compiler-enforced enum, so a CredentialSource carrying an
 // unrecognized/zero-value Probe must be narrated as inconclusive — never as
 // the plain, most-reassuring "absent" wording used for a genuinely missing
-// credential (content-specific per AGENTS.md #446).
+// credential (content-specific per watch/docs/error-handling.md #446).
 func TestWriteExplanation_CredentialProbeUnrecognized_NotNarratedAsAbsent(t *testing.T) {
 	p := baselinePosture()
 	p.CredentialSources = []CredentialSource{
@@ -545,9 +546,10 @@ func TestWriteExplanation_Basis_StatesObservedVsPlanned(t *testing.T) {
 }
 
 // TestWriteExplanation_Basis_RunningAndPlanned_UseDistinctFraming is a
-// dedicated content-specific regression (AGENTS.md #446): the running and
-// planned intros must render visibly different text, not the same generic
-// sentence with the basis word swapped out silently losing meaning.
+// dedicated content-specific regression (watch/docs/error-handling.md
+// #446): the running and planned intros must render visibly different
+// text, not the same generic sentence with the basis word swapped out
+// silently losing meaning.
 func TestWriteExplanation_Basis_RunningAndPlanned_UseDistinctFraming(t *testing.T) {
 	running := baselinePosture()
 	running.Basis = PostureBasisRunning

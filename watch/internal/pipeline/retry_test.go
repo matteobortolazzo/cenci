@@ -5,8 +5,9 @@ package pipeline
 // Q&A #2). Deterministic via an injected clock (retryConfig.Sleep), never
 // wall-clock timing. The `command` seam mirrors internal/babysit's `var
 // command = func(...)` gh/git test seam. Content-specific error assertions
-// distinguish lock-contention from gh-transient failure per watch/AGENTS.md
-// rule #446 — not just empty/non-empty checks. In-package ("white box")
+// distinguish lock-contention from gh-transient failure per
+// watch/docs/error-handling.md rule #446 — not just empty/non-empty
+// checks. In-package ("white box")
 // test file, matching internal/babysit/babysit_test.go's own convention.
 
 import (

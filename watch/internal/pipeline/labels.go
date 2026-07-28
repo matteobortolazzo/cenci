@@ -121,8 +121,9 @@ func ApplyLabelTransition(o LabelOpts) (State, error) {
 	// Defensive invariant, not reachable via any external input today:
 	// labelStagePrecondition only ever maps a transition to a Stage
 	// registered in stageOrder, so minimumOk is always true in practice.
-	// Checked anyway (default-deny per watch/AGENTS.md #598/#628) so that a
-	// future labelStagePrecondition entry referencing an unregistered Stage
+	// Checked anyway (default-deny per watch/docs/go-gotchas.md #598,
+	// watch/docs/error-handling.md #628) so that a future
+	// labelStagePrecondition entry referencing an unregistered Stage
 	// constant hard-fails loudly instead of silently ranking as 0 and
 	// turning currentRank < minimumRank into an unconditional pass.
 	minimumRank, minimumOk := stageRank(minimum)

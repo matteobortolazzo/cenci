@@ -19,7 +19,7 @@ package pipeline
 // parseAndValidatePlan, (6) front-matter ticketId is absent/0 or equals
 // <id>. Any failure means no adoption and today's ErrInvalidTransition/
 // ErrNotPrepared behavior is preserved verbatim -- default-deny throughout
-// (watch/AGENTS.md #598/#628).
+// (watch/docs/go-gotchas.md #598, watch/docs/error-handling.md #628).
 //
 // RED: adopt.go does not exist yet, so Run never calls adoptPlanFileStage.
 // Every "should adopt" case below currently hard-fails with

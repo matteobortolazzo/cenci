@@ -110,8 +110,8 @@ func TestBaseTag_MissingInputsError(t *testing.T) {
 	}
 }
 
-// TestBaseTag_MatchesBashPipeline runs the real cenci-sand / smoke.test.sh
-// shell pipeline over the same fixture and asserts byte-exact agreement —
+// TestBaseTag_MatchesBashPipeline runs the real smoke.test.sh shell
+// pipeline over the same fixture and asserts byte-exact agreement —
 // this is the guard against the Go port drifting from the digest
 // sandbox/tests/smoke.test.sh independently re-derives.
 func TestBaseTag_MatchesBashPipeline(t *testing.T) {

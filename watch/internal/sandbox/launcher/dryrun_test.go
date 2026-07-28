@@ -222,7 +222,7 @@ func TestDryRun_Posture_FullBodyPresentInWriteText(t *testing.T) {
 	}
 }
 
-// -- error-path mirroring (content-specific, per watch/AGENTS.md #446) ------
+// -- error-path mirroring (watch/docs/error-handling.md #446) ------------
 
 // TestDryRun_CodexNoAuth_ReturnsNonUsageErrorMentioningCodexAuth covers
 // DryRun's faithful mirror of Launch's hard credential-validation failure: a
@@ -461,13 +461,14 @@ func TestDryRun_ExistingCompatibleContainer_RendersAttachOnlyWithNoCreateArgv(t 
 }
 
 // TestDryRun_Posture_StaysPlannedBasisEvenWhenContainerRunning is a
-// regression test (per watch/AGENTS.md #620: "do not assume existing tests
-// will detect the behavior change") for the `clone.Runtime = ""` fix in
-// DryRun: the Posture breakdown DryRun composes must always stay
-// basis:"planned" -- a preview of what a real launch WOULD apply -- even
-// when a real scoped container happens to be running under that name (the
-// same precondition TestDryRun_ExistingCompatibleContainer_... exercises for
-// the attach-branch argv). Without clearing clone.Runtime, Audit's
+// regression test (per watch/docs/test-strategy.md #620: "do not assume
+// existing tests will detect the behavior change") for the
+// `clone.Runtime = ""` fix in DryRun: the Posture breakdown DryRun
+// composes must always stay basis:"planned" -- a preview of what a real
+// launch WOULD apply -- even when a real scoped container happens to be
+// running under that name (the same precondition
+// TestDryRun_ExistingCompatibleContainer_... exercises for the
+// attach-branch argv). Without clearing clone.Runtime, Audit's
 // ticket #627 observed-mode dispatch would fire on the clone and flip this
 // Posture to basis:"running", contradicting DryRun's own "preview, not
 // observation" contract (dryrun.go's DryRun doc comment).

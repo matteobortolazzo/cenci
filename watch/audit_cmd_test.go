@@ -47,7 +47,7 @@ func auditRepoDir(t *testing.T) string {
 // internal/sandbox.ContainerRuntime(), so every pre-existing hermetic test in
 // this file must pin PATH the same way — otherwise a host with a real
 // docker/podman installed (daemon up or down) could perturb these
-// exact-output assertions (watch AGENTS.md #620).
+// exact-output assertions (watch/docs/test-strategy.md #620).
 func TestAudit_TextOutput_ReportsAgentAndSections(t *testing.T) {
 	repo := auditRepoDir(t)
 	home := t.TempDir()

@@ -33,8 +33,9 @@ func TestRepoDindConfig_ReadsSandboxDindKey(t *testing.T) {
 // and wrong-typed "sandbox"/"dind" fields — must resolve to (false, error)
 // with a path-bearing, non-usage error (so it maps to exit 1, not exit 2,
 // per launch.go's IsUsage/exit-code convention), and each failure class's
-// error text must be distinguishable from every other class's (AGENTS.md
-// watch rule #446) rather than collapsing to a single generic message.
+// error text must be distinguishable from every other class's
+// (watch/docs/error-handling.md rule #446) rather than collapsing to a
+// single generic message.
 func TestRepoDindConfig_ValueAndErrorClasses(t *testing.T) {
 	const configRelPath = ".cenci/config.json"
 

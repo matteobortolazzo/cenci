@@ -12,8 +12,8 @@ import (
 
 // BaseTag computes the content-hash tag of the base image build inputs
 // (Dockerfile.base + entrypoint.sh + every file under lib/), byte-exact with
-// the bash pipeline in sandbox/cenci-sand — which is independently re-derived
-// by sandbox/tests/smoke.test.sh, so any drift here breaks that suite:
+// the bash pipeline independently re-derived by sandbox/tests/smoke.test.sh,
+// so any drift here breaks that suite:
 //
 //	cd <assetDir> && find Dockerfile.base entrypoint.sh lib -type f |
 //	    LC_ALL=C sort | xargs -r sha256sum | sha256sum | cut -c1-12

@@ -263,11 +263,11 @@ func (e *Engine) Launch(opts Options) error {
 	// container keeps its started-with agent version regardless, so the
 	// staleness-refresh branch inside EnsureAgentVolume must be skipped
 	// entirely on the attach path — an attach must stay instant. This is a
-	// deliberate ordering change (watch AGENTS.md #620): a containerRunning
-	// (`ps`) probe failure now aborts the launch BEFORE the agent-volume
-	// bootstrap/refresh probe ever runs, not after it as before this ticket.
-	// planArgvs keeps its own separate containerRunning call below so it
-	// stays pure and DryRun can keep reusing it unchanged.
+	// deliberate ordering change (watch/docs/test-strategy.md #620): a
+	// containerRunning (`ps`) probe failure now aborts the launch BEFORE the
+	// agent-volume bootstrap/refresh probe ever runs, not after it as before
+	// this ticket. planArgvs keeps its own separate containerRunning call
+	// below so it stays pure and DryRun can keep reusing it unchanged.
 	running, err := e.containerRunning(ctx.Scope.ContainerName)
 	if err != nil {
 		return err
@@ -856,15 +856,16 @@ func (e *Engine) inspectReusePosture(name string) (reusePosture, error) {
 // "<label>|<runtime>|<dindenv 0-or-1>"; remaining lines are
 // "<source>::<destination>" per mount.
 //
-// It fails closed (watch AGENTS.md #598) rather than silently defaulting to
-// the zero-value reusePosture{} on unrecognized shape: an empty/truncated/
-// garbled inspect response would produce that same zero value, which
-// deriveDindPosture and mountExposesHostSocket both read as the fully
-// permissive outcome (no host socket, dindOff) — indistinguishable from a
-// legitimately compatible legacy container. A line that fails to split on
-// "::" is rejected the same way rather than silently dropped, since the
-// dropped line could be exactly the host-socket bind or DinD storage mount
-// the security checks depend on (ticket #628).
+// It fails closed (watch/docs/go-gotchas.md #598) rather than silently
+// defaulting to the zero-value reusePosture{} on unrecognized shape: an
+// empty/truncated/garbled inspect response would produce that same zero
+// value, which deriveDindPosture and mountExposesHostSocket both read as
+// the fully permissive outcome (no host socket, dindOff) —
+// indistinguishable from a legitimately compatible legacy container. A
+// line that fails to split on "::" is rejected the same way rather than
+// silently dropped, since the dropped line could be exactly the
+// host-socket bind or DinD storage mount the security checks depend on
+// (ticket #628).
 //
 // Real `docker inspect --format` appends its own trailing newline on top of
 // the template's own per-mount "\n", so the captured stdout always ends with
@@ -911,9 +912,9 @@ func parseReusePosture(out string) (reusePosture, error) {
 //     from HostConfig.Runtime == "sysbox-runc" OR CENCI_SANDBOX_DIND=1 OR a
 //     /var/lib/docker mount — any single signal means dindOn, else dindOff.
 //   - Any other label value is ambiguous metadata and must be rejected
-//     conservatively (watch AGENTS.md #598: never collapse an unrecognized
-//     enum value into the safest-looking case) rather than treated as either
-//     dindOn or dindOff.
+//     conservatively (watch/docs/go-gotchas.md #598: never collapse an
+//     unrecognized enum value into the safest-looking case) rather than
+//     treated as either dindOn or dindOff.
 func deriveDindPosture(p reusePosture) reuseDindPosture {
 	switch p.DindLabel {
 	case "on":

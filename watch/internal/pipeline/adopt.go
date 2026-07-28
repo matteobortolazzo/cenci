@@ -33,9 +33,9 @@ import (
 // adoptPlanFileStage implements the ticket #688 plan's "Detection semantics
 // -- item 1 (exact)" gate. Adoption is granted only when ALL of the
 // following hold; any failure means no adoption (default-deny, per
-// watch/AGENTS.md #598/#628) and the caller must fall through to today's
-// unmodified transition()/ErrInvalidTransition (or ErrNotPrepared) behavior,
-// verbatim:
+// watch/docs/go-gotchas.md #598, watch/docs/error-handling.md #628) and the
+// caller must fall through to today's unmodified
+// transition()/ErrInvalidTransition (or ErrNotPrepared) behavior, verbatim:
 //
 //  1. o.Stage == "plan" && o.Approve == true -- adoption is narrowly scoped
 //     to `plan --approve` only; bare `plan` keeps its own strict precondition.

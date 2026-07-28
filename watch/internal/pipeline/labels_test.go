@@ -554,8 +554,9 @@ func TestApplyLabelTransition_InReview_MinimumIsMaximumRank_PastMinimumUnreachab
 // -- unknown persisted stage (#636): hard fail, never a silent no-op --------
 
 // TestApplyLabelTransition_UnknownPersistedStage_HardFails locks in the
-// default-deny requirement (watch/AGENTS.md #598/#628): a corrupt/forward-
-// incompatible persisted stage value must never satisfy any transition's
+// default-deny requirement (watch/docs/go-gotchas.md #598,
+// watch/docs/error-handling.md #628): a corrupt/forward-incompatible
+// persisted stage value must never satisfy any transition's
 // minimum-stage gate, must still be classified as ErrWrongStageForLabel
 // (preserving the CLI's existing exit-code path), with a message that is
 // content-distinct from the ordinary wrong-stage case (it names the

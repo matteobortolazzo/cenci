@@ -567,13 +567,14 @@ func TestAgentRefreshRunArgs_DetachedNamedWithHardening(t *testing.T) {
 //
 // parseAgentVolumeStatus parses agent-cli.sh status's five key=value lines
 // (populated, version, pin, last_success, last_attempt). It is a
-// default-deny parser (watch AGENTS.md #628, parseReusePosture lesson):
-// missing/absent "populated=yes|no" framing or any other unrecognized shape
-// returns ok=false (treated as unpopulated -> bootstrap), never a permissive
-// zero-value guess. A malformed/absent last_success or last_attempt on an
-// otherwise well-formed "populated=yes" status parses to the zero time.Time
-// (per the plan's resolved Q1: unknown -> stale, refresh-eligible), which is
-// a distinct, narrower failure mode than the overall default-deny direction.
+// default-deny parser (watch/docs/error-handling.md #628, parseReusePosture
+// lesson): missing/absent "populated=yes|no" framing or any other
+// unrecognized shape returns ok=false (treated as unpopulated -> bootstrap),
+// never a permissive zero-value guess. A malformed/absent last_success or
+// last_attempt on an otherwise well-formed "populated=yes" status parses to
+// the zero time.Time (per the plan's resolved Q1: unknown -> stale,
+// refresh-eligible), which is a distinct, narrower failure mode than the
+// overall default-deny direction.
 
 func TestParseAgentVolumeStatus_PopulatedYesFullFacts_Parses(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
@@ -672,8 +673,9 @@ func TestParseAgentVolumeStatus_TruncatedOutput_DefaultDeny(t *testing.T) {
 
 func TestParseAgentVolumeStatus_UnrecognizedPopulatedValue_DefaultDeny(t *testing.T) {
 	// "populated" is a closed yes/no enum; any other value is ambiguous
-	// metadata and must be rejected conservatively (watch AGENTS.md #598),
-	// never silently collapsed into either yes or no.
+	// metadata and must be rejected conservatively
+	// (watch/docs/go-gotchas.md #598), never silently collapsed into either
+	// yes or no.
 	stdout := "populated=maybe\nversion=\npin=\nlast_success=\nlast_attempt=\n"
 
 	_, ok := parseAgentVolumeStatus([]byte(stdout))
@@ -756,8 +758,9 @@ func TestEnsureAgentVolume_ProbeExitZeroWithUnparsableStdout_DefaultDenyBootstra
 //
 // CENCI_SANDBOX_AGENT_CLI_TTL_HOURS overrides the 24h default TTL in integer
 // hours. Unlike reap.go:79's silent ParseFloat fallback, an unparseable or
-// negative value must warn to stderr (content-specific, watch AGENTS.md
-// #446) and fall back to 24h -- it must never silently disable auto-refresh.
+// negative value must warn to stderr (content-specific,
+// watch/docs/error-handling.md #446) and fall back to 24h -- it must never
+// silently disable auto-refresh.
 
 func TestAgentCLITTL_Unset_DefaultsTo24HoursNoWarning(t *testing.T) {
 	var stderr bytes.Buffer

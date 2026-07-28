@@ -4,7 +4,7 @@ Host-runnable `sandbox/tests/*.test.sh` suites: mocks/fixtures, environment scru
 
 ## Rules
 
-- **Guard clauses must be mirrored across duplicated logic.** When the same validation/parsing pattern appears in both a test file and its corresponding production script (e.g., `smoke.test.sh` and `cenci-sand` both resolve a version string with jq + sed fallback), the error-handling guards must be duplicated too. A test file that is more careful than the production code it exercises is a code-review red flag — check for silent failures (e.g., empty Docker tags, null strings propagating downstream).
+- **Guard clauses must be mirrored across duplicated logic.** When the same validation/parsing pattern appears in both a test file and the production code it mirrors (e.g. `smoke.test.sh`'s `BASE_TAG` shell pipeline and `BaseTag` in `watch/internal/sandbox/launcher/basetag.go` independently re-derive the same base-image content hash, kept byte-exact by `TestBaseTag_MatchesBashPipeline`), the error-handling guards must be duplicated too. A test file that is more careful than the production code it exercises is a code-review red flag — check for silent failures (e.g., empty Docker tags, null strings propagating downstream).
 
 - **Preserve all pre-existing logic when splitting a script into conditional branches.** When refactoring a script to introduce a new conditional branch (e.g., adding git-based per-repo scoping alongside a legacy non-git fallback), the fallback branch can appear "unchanged" in the diff while actually being accidentally simplified during the rewrite (e.g., dropping a computed value and hardcoding a default). Test both branches independently to catch silent failures.
 

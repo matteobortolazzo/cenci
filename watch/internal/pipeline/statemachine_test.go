@@ -7,8 +7,9 @@ package pipeline
 // no-op) on an unrecognized persisted stage. Table-driven per
 // docs/plan-fidelity.md's state table, including the acceptance criteria's
 // key guard ("execute" blocked before "plan_approved"). Sentinel errors are
-// asserted via errors.Is at the package boundary per watch/AGENTS.md rule
-// #412 -- this is an in-package ("white box") test file, matching
+// asserted via errors.Is at the package boundary per
+// watch/docs/error-handling.md rule #412 -- this is an in-package ("white
+// box") test file, matching
 // internal/babysit's own convention (babysit_test.go is `package babysit`),
 // so it exercises the unexported transition()/stageRank()/noopWarning()
 // functions directly rather than only indirectly via a higher-level Run().
@@ -54,7 +55,8 @@ func TestStageRank_TotalOrder(t *testing.T) {
 }
 
 // TestStageRank_UnknownStage_NotOk locks in the default-deny requirement
-// (watch/AGENTS.md #598/#628): an unrecognized stage must never rank
+// (watch/docs/go-gotchas.md #598, watch/docs/error-handling.md #628): an
+// unrecognized stage must never rank
 // alongside the known total order, which is what makes it possible for
 // transition()/ApplyLabelTransition to reject it explicitly rather than
 // having it silently compare as "before" or "at or past" some target.
@@ -67,7 +69,8 @@ func TestStageRank_UnknownStage_NotOk(t *testing.T) {
 // TestIsKnownStage locks in IsKnownStage's contract (ticket #732): every
 // member of stageOrder must report true, and any unrecognized value --
 // including the empty string and a wrong-case near-match of a real stage --
-// must report false (default-deny per watch/AGENTS.md #598/#628).
+// must report false (default-deny per watch/docs/go-gotchas.md #598,
+// watch/docs/error-handling.md #628).
 func TestIsKnownStage(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -251,8 +254,9 @@ func TestTransition_ExecuteNeverSucceedsWithoutApproval(t *testing.T) {
 // -- unknown persisted stage (#636): hard fail, never a silent no-op --------
 
 // TestTransition_UnknownPersistedStage_HardFailsForEveryCommand locks in the
-// default-deny requirement (watch/AGENTS.md #598/#628): a corrupt/forward-
-// incompatible persisted stage value must never rank as "at or past" any
+// default-deny requirement (watch/docs/go-gotchas.md #598,
+// watch/docs/error-handling.md #628): a corrupt/forward-incompatible
+// persisted stage value must never rank as "at or past" any
 // command's target (which would silently no-op every command instead of
 // failing), and must be classified as ErrInvalidTransition specifically
 // (not one of the other sentinels, which would be misleading for a
