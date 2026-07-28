@@ -48,18 +48,40 @@ dot-only value could traverse:
 gh issue edit <number> --body-file "${TMPDIR:-/tmp}/cenci/issue-body-<scope>.md"
 ```
 
-Any write that also sets a title goes through `gh api ... --input` with a file-tool-authored
-JSON payload instead of `gh issue edit --title`/`gh issue create --title` — neither has a
-`--title-file` equivalent, so a title carried as a shell argument is always an interpolation
-risk:
+Any write that also sets a title goes through `gh api ... --input` instead of
+`gh issue edit --title`/`gh issue create --title` — neither has a `--title-file`
+equivalent, so a title carried as a shell argument is always an interpolation risk.
+Compose the JSON payload mechanically instead of hand-escaping it, in three steps:
 
-```bash
-gh api repos/<owner>/<repo>/issues/<number> -X PATCH --input "${TMPDIR:-/tmp}/cenci/issue-<scope>.json"
-```
+1. The file tool writes the raw title and body as plain text to `<scope>`-suffixed
+   files — never a hand-escaped JSON literal.
+2. A standalone `jq -n --rawfile title <f> --rawfile body <f>` call builds the
+   payload on one source line and redirects it to a payload file. General form:
+   `jq -n --rawfile title <f> --rawfile body <f> '{title: ($title | rtrimstr("\n")), body: $body}' > <payload>.json`.
+   Concretely:
+
+   ```bash
+   jq -n --rawfile title "${TMPDIR:-/tmp}/cenci/issue-title-<scope>.txt" --rawfile body "${TMPDIR:-/tmp}/cenci/issue-body-<scope>.md" '{title: ($title | rtrimstr("\n")), body: $body}' > "${TMPDIR:-/tmp}/cenci/issue-<scope>.json"
+   ```
+
+   `rtrimstr("\n")` strips the file tool's trailing newline from the title — an
+   untrimmed title breaks the post-write title re-fetch comparison. `jq` cannot let
+   `--rawfile` content influence the payload's *structure*, so a well-formed
+   injection attempt in the title/body still can't add or change JSON keys.
+3. A separate `gh api ... --input <payload>.json` call sends it:
+
+   ```bash
+   gh api repos/<owner>/<repo>/issues/<number> -X PATCH --input "${TMPDIR:-/tmp}/cenci/issue-<scope>.json"
+   ```
+
+As with the body file above, the raw title/body files and the payload file are all run-scoped by the existing `<scope>` rule above. The `jq` call and the `gh api` call are separate Bash calls (no pipe, no `&&`) — each is a single non-compound command whose result the agent inspects before proceeding.
 
 ```bash
 gh pr create --title "<title>" --body-file "${TMPDIR:-/tmp}/cenci/pr-body-<scope>.md"
 ```
+
+`gh pr create` has no `--input`/`--title-file` equivalent, so its title stays a
+plain `--title` argument (out of scope for the `jq` pattern above).
 
 Never print or interpolate authentication tokens into command output.
 

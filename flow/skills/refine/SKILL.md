@@ -6,7 +6,7 @@ argument-hint: <ticket-id> [additional context]
 user-invocable: true
 disable-model-invocation: true
 model: sonnet
-allowed-tools: Read, Write, Glob, Task, Bash(gh issue view:*), Bash(gh issue edit:*), Bash(gh label create:*), Bash(gh api user --jq:*), Bash(gh api repos/:*), Bash(git remote get-url:*), Bash(mktemp -u /tmp/claude/:*), Bash(cat /tmp/claude/:*), Bash(rm -f /tmp/claude/:*), AskUserQuestion
+allowed-tools: Read, Write, Glob, Task, Bash(gh issue view:*), Bash(gh issue edit:*), Bash(gh label create:*), Bash(gh api user --jq:*), Bash(gh api repos/:*), Bash(git remote get-url:*), Bash(jq -n:*), Bash(mktemp -u /tmp/claude/:*), Bash(cat /tmp/claude/:*), Bash(rm -f /tmp/claude/:*), AskUserQuestion
 ---
 
 > **Client dispatch**: In Codex, read `codex-runtime` and `refine/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
@@ -143,7 +143,7 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
 > **CRITICAL**: This section is mandatory after refinement. Do NOT skip it.
 > This section runs unconditionally after refinement — there is no confirmation prompt before writing. The human gate is the Q&A loop (steps 6-8); review happens after the writes, via the final message.
 
-> **Write-failure protocol**: Every *edit* in this section (ticket body/title updates, parent tracking updates, label add/remove) MUST be verified by re-fetching the resource with `gh issue view ... --json ...` and confirming the expected change is actually present — a command exiting 0 is not sufficient proof. Ticket *creation* is the one exception: `--jq .number` on the `gh api repos/...` response returns the new issue number directly — a numeric value is the proof; empty output, non-numeric output, or a non-zero exit is a failed create, so no separate re-fetch is required there. A malformed JSON payload surfaces as an API 4xx parse error and is itself a failed write — handle it with the single documented retry below, not a hand-patch loop. This retry also covers the local `Write` tool call that authors the JSON payload file itself: if that `Write` call fails, or the payload file is missing/empty/stale when the `gh api repos/... --input` command is about to read it, retry the `Write` once before (re-)invoking that `gh api repos/...` command — do not assume a local Write failure is instead an API-side rejection. If the write or the verification fails:
+> **Write-failure protocol**: Every *edit* in this section (ticket body/title updates, parent tracking updates, label add/remove) MUST be verified by re-fetching the resource with `gh issue view ... --json ...` and confirming the expected change is actually present — a command exiting 0 is not sufficient proof. Ticket *creation* is the one exception: `--jq .number` on the `gh api repos/...` response returns the new issue number directly — a numeric value is the proof; empty output, non-numeric output, or a non-zero exit is a failed create, so no separate re-fetch is required there. A malformed JSON payload surfaces as an API 4xx parse error and is itself a failed write — handle it with the single documented retry below, not a hand-patch loop. This retry also covers the local `Write` tool call that authors the raw title/body files and the `jq -n --rawfile` invocation that composes the JSON payload from them (see the `shell-rules` skill's canonical snippet): if a raw-file `Write` call fails, or the subsequent `jq` invocation exits non-zero, or the payload file is missing/empty/stale when the `gh api repos/... --input` command is about to read it, retry the failed step (`Write` or `jq`) once before (re-)invoking that `gh api repos/...` command — do not assume a local Write or jq failure is instead an API-side rejection. If the write or the verification fails:
 > 1. Report the error to the user.
 > 2. Retry the write once, then verify again.
 > 3. If it still fails, **STOP** — do not proceed to the next step — and emit a partial-state report: what succeeded so far (with concrete issue/label numbers or names), what failed, and what the user needs to do manually to reconcile it. Each write point below states what belongs in that report.
@@ -154,11 +154,11 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
 
    > **IMPORTANT**: Writing a temp file is NOT updating the ticket. You MUST execute the update command after writing the file. Never stop between writing the temp file and running the update command.
 
-   **When the proposal adopted in step 9 includes an `### Updated Title`**, use the `Write` tool to create `/tmp/claude/issue-<number>-<token>-edit.json` containing a JSON object carrying both fields together — the title is free text and must never be interpolated directly into a command line (a title containing `$(…)`, backticks, or quotes would be shell-interpreted):
-   ```json
-   {"title": "<updated title>", "body": "<updated description>"}
+   **When the proposal adopted in step 9 includes an `### Updated Title`**, use the `Write` tool to create the raw title and body as plain text — `/tmp/claude/issue-<number>-<token>-edit-title.txt` (the updated title) and `/tmp/claude/issue-<number>-<token>-edit-body.md` (the updated description) — never a hand-escaped JSON literal (the title is free text and must never be interpolated directly into a command line; a title containing `$(…)`, backticks, or quotes would be shell-interpreted). Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet:
+   ```bash
+   jq -n --rawfile title /tmp/claude/issue-<number>-<token>-edit-title.txt --rawfile body /tmp/claude/issue-<number>-<token>-edit-body.md '{title: ($title | rtrimstr("\n")), body: $body}' > /tmp/claude/issue-<number>-<token>-edit.json
    ```
-   Escape every `"` as `\"`, every `\` as `\\`, and every newline as `\n` inside both JSON string values — no literal newline may appear inside a JSON string. Then run:
+   Then run:
    ```bash
    gh api repos/<owner>/<repo>/issues/<number> -X PATCH --input /tmp/claude/issue-<number>-<token>-edit.json
    ```
@@ -192,11 +192,11 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
 
    Capture each created issue number from the command output.
 
-   Use the `Write` tool to create `/tmp/claude/issue-<number>-<token>-child-K.json` with a JSON object carrying the title, body, and labels together — the title is free text and must never be interpolated directly into the command line:
-   ```json
-   {"title": "<ticket-title> (K/N)", "body": "Related to #<original-number>\nDepends on #<sibling-number>\nParallel with #<sibling-number>\n\n<ticket-body>", "labels": ["Refined"]}
+   Use the `Write` tool to create the raw title and body as plain text — `/tmp/claude/issue-<number>-<token>-child-K-title.txt` (`<ticket-title> (K/N)`) and `/tmp/claude/issue-<number>-<token>-child-K-body.md` (`Related to #<original-number>\nDepends on #<sibling-number>\nParallel with #<sibling-number>\n\n<ticket-body>`) — never a hand-escaped JSON literal; the title is free text and must never be interpolated directly into the command line. Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet, keeping the `labels` array as a literal inline value (it is not externally sourced, so it needs no `--rawfile`):
+   ```bash
+   jq -n --rawfile title /tmp/claude/issue-<number>-<token>-child-K-title.txt --rawfile body /tmp/claude/issue-<number>-<token>-child-K-body.md '{title: ($title | rtrimstr("\n")), body: $body, labels: ["Refined"]}' > /tmp/claude/issue-<number>-<token>-child-K.json
    ```
-   Escape every `"` as `\"`, every `\` as `\\`, and every newline as `\n` inside every JSON string value — no literal newline may appear inside a JSON string. Then run:
+   Then run:
    ```bash
    gh api repos/<owner>/<repo>/issues -X POST --input /tmp/claude/issue-<number>-<token>-child-K.json --jq .number
    ```
@@ -257,11 +257,11 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
 
    If `designNeeded` is true, the ticket is **not** being split, and `isDesignTicket` is false, create a dedicated design ticket — design never runs on the implementation ticket itself:
 
-   Use the `Write` tool to create `/tmp/claude/issue-<number>-<token>-design.json` with a JSON object carrying the title, body, and labels together — the title is free text and must never be interpolated directly into the command line:
-   ```json
-   {"title": "Design: <feature title>", "body": "Related to #<number>\nBlocks #<number>\n\n### Goal\nProduce the design spec (`.pen` + `DESIGN.md`) for #<number> via `/cenci:design`.\n\n### Design Direction\n<the Design Direction section from this refinement>", "labels": ["Refined", "Design"]}
+   Use the `Write` tool to create the raw title and body as plain text — `/tmp/claude/issue-<number>-<token>-design-title.txt` (`Design: <feature title>`) and `/tmp/claude/issue-<number>-<token>-design-body.md` (`Related to #<number>\nBlocks #<number>\n\n### Goal\nProduce the design spec (`.pen` + `DESIGN.md`) for #<number> via `/cenci:design`.\n\n### Design Direction\n<the Design Direction section from this refinement>`) — never a hand-escaped JSON literal; the title is free text and must never be interpolated directly into the command line. Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet, keeping `labels` as a literal inline value:
+   ```bash
+   jq -n --rawfile title /tmp/claude/issue-<number>-<token>-design-title.txt --rawfile body /tmp/claude/issue-<number>-<token>-design-body.md '{title: ($title | rtrimstr("\n")), body: $body, labels: ["Refined","Design"]}' > /tmp/claude/issue-<number>-<token>-design.json
    ```
-   Escape every `"` as `\"`, every `\` as `\\`, and every newline as `\n` inside every JSON string value — no literal newline may appear inside a JSON string. Then run:
+   Then run:
    ```bash
    gh api repos/<owner>/<repo>/issues -X POST --input /tmp/claude/issue-<number>-<token>-design.json --jq .number
    ```
@@ -335,7 +335,7 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
 
    **If the marker is present** — every write in steps 10-12 succeeded and was verified, so it's safe to delete this run's temp files by explicit path (never a glob — an unmatched glob errors under some shells, and `rm -f` already ignores paths that don't exist, so listing files a given run didn't create — e.g. child/design files when there was no split or companion design ticket — is harmless):
    ```bash
-   rm -f /tmp/claude/issue-<number>-<token>.md /tmp/claude/issue-<number>-<token>-bundle.md /tmp/claude/issue-<number>-<token>-edit.json /tmp/claude/issue-<number>-<token>-design.json /tmp/claude/issue-<number>-<token>-child-K.json /tmp/claude/issue-<number>-<token>.ok
+   rm -f /tmp/claude/issue-<number>-<token>.md /tmp/claude/issue-<number>-<token>-bundle.md /tmp/claude/issue-<number>-<token>-edit.json /tmp/claude/issue-<number>-<token>-edit-title.txt /tmp/claude/issue-<number>-<token>-edit-body.md /tmp/claude/issue-<number>-<token>-design.json /tmp/claude/issue-<number>-<token>-design-title.txt /tmp/claude/issue-<number>-<token>-design-body.md /tmp/claude/issue-<number>-<token>-child-K.json /tmp/claude/issue-<number>-<token>-child-K-title.txt /tmp/claude/issue-<number>-<token>-child-K-body.md /tmp/claude/issue-<number>-<token>.ok
    ```
    Repeat the child-K paths (with the actual `K` value substituted) for each child created in Pass 1 this run.
 

@@ -1972,6 +1972,22 @@ assert_file_lacks_phrase "${MAINTAIN_SKILL_MD}" "Bash(mkdir:*)" "MCB25 SKILL.md 
 assert_file_has_phrase "${MAINTAIN_MODE_BACKLOG}" "gh issue close" "MCB26 backlog.md still uses gh issue close for Duplicate merge/supersede"
 assert_file_has_phrase "${MAINTAIN_MODE_BACKLOG}" '--remove-label "Followup"' "MCB27 backlog.md still uses --remove-label \"Followup\" for Promote"
 
+# =====================================================================
+# #756 -- MCB28+ hardening: backlog.md's Batch polish-ticket payload build
+# migrates from hand-escaped JSON ("Escape every ...") to mechanical
+# jq -n --rawfile encoding, per the canonical snippet centralized in
+# shell-rules/SKILL.md. maintain's allowed-tools gains a symmetric
+# Bash(jq -n:*) grant (backlog.md's jq -n is maintain's first jq binary
+# invocation -- without the grant it hard-prompts). None of these
+# production edits exist yet at RED-phase time (a later implementation
+# phase's job) -- every assertion below is expected to fail until then.
+# =====================================================================
+
+assert_file_lacks_phrase "${MAINTAIN_MODE_BACKLOG}" "Escape every" "MCB28 backlog.md must not retain a hand-escaping instruction"
+assert_file_has_phrase "${MAINTAIN_MODE_BACKLOG}" "jq -n" "MCB29 backlog.md Batch create payload built with jq -n"
+assert_file_has_phrase "${MAINTAIN_MODE_BACKLOG}" "--rawfile" "MCB30 backlog.md Batch create payload uses --rawfile for the raw title/body"
+assert_file_has_phrase "${MAINTAIN_SKILL_MD}" "Bash(jq -n:*)" "MCB31 SKILL.md frontmatter grants Bash(jq -n:*), symmetric with refine"
+
 # --- Garden retirement (#547): flow/skills/garden/ must be gone, and no
 # retired-command literal (the old skill's slash-invocation prefixed with
 # either the Claude or Codex client sigil) may remain live anywhere in the

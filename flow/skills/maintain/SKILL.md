@@ -6,7 +6,7 @@ argument-hint: [mode] [scope] [additional context]
 user-invocable: true
 disable-model-invocation: true
 model: opus
-allowed-tools: Read, Edit, Write, Grep, Glob, Task, Bash(git:*), Bash(gh:*), Bash(bash flow/skills/maintain/scripts/check.sh:*), Bash(sh flow/hooks/scripts/run-gate.sh:*), Bash(mktemp:*), AskUserQuestion
+allowed-tools: Read, Edit, Write, Grep, Glob, Task, Bash(git:*), Bash(gh:*), Bash(bash flow/skills/maintain/scripts/check.sh:*), Bash(sh flow/hooks/scripts/run-gate.sh:*), Bash(mktemp:*), Bash(jq -n:*), AskUserQuestion
 ---
 
 > **Client dispatch**: In Codex, read `codex-runtime` and `maintain/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.

@@ -29,17 +29,17 @@ from external or semi-trusted sources.
 - **Canonical: `gh api ... --input` for title/body-carrying writes.** Route every write
   that sets a title (issue/PR create, or an edit that also changes the title) through
   `gh api <endpoint> -X <METHOD> --input <json-file>`, where `<json-file>` is a JSON
-  payload authored entirely by a file tool (e.g. `Write`) — never hand-interpolated
-  shell text. This has zero shell interpolation: the JSON file is the only externally-
-  sourced input, and `-X`/`--input` bypass the shell's quoting rules entirely. Escape
-  every `"` as `\"`, every `\` as `\\`, and every newline as `\n` inside each JSON string
-  value — a literal, unescaped newline inside a JSON string is invalid JSON, not a
-  formatting nicety.
+  payload mechanically composed with `jq -n --rawfile` from raw title/body files a file
+  tool (e.g. `Write`) authored as plain text — never hand-interpolated shell text and
+  never a hand-escaped JSON literal. This has zero shell interpolation: the raw
+  title/body files are the only externally-sourced input, and `jq` cannot let
+  `--rawfile` content influence the payload's *structure* — see the `shell-rules`
+  skill's canonical snippet for the exact three-step procedure.
 - **Rescoped fallback: temp-file + read-back, for CLIs with no `--input` equivalent.**
   When the target CLI surface has no `--input`/`--*-file` flag for a given free-text
-  value (e.g. the `--label`/`--milestone` array arguments that `phase-9-pr.md` and
-  `address-review` pass alongside a title), route that value into the documented shell
-  command template through the temp-file + read-back pattern (`value=$(cat
+  value (e.g. `address-review`'s Posting Replies, which sends inline reply text through
+  `gh api ... -f body="$REPLY"`), route that value into the documented shell command
+  template through the temp-file + read-back pattern (`value=$(cat
   /tmp/claude/value.txt)` then `--flag "$value"`), never inline interpolation — direct
   interpolation allows shell injection via `$(...)` or backticks, in any interpolation
   context, not just message bodies. When using this fallback, guard against empty reads
