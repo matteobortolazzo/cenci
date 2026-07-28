@@ -30,8 +30,12 @@ ARCHIVE="lazyboards_${FAKE_VER}_${HOST_GOOS}_${HOST_ARCH}.tar.gz"
 make_common_tools() {
     local bin="$1" tool
     mkdir -p "${bin}"
+    # jq is linked for the same reason as the cosign mock below: doctor's jq
+    # check is `required` (#784 — check-pending-plans.sh now builds its
+    # SessionStart payload exclusively through jq), so without it on PATH
+    # doctor hard-fails before the lazyboards step is ever reached.
     for tool in bash cat touch uname grep git mkdir dirname basename ln readlink sleep \
-        pkill pgrep nohup chmod sed head rm mktemp cp mv tar gzip cut sha256sum; do
+        pkill pgrep nohup chmod sed head rm mktemp cp mv tar gzip cut sha256sum jq; do
         ln -s "$(command -v "${tool}")" "${bin}/${tool}"
     done
     cat >"${bin}/docker" <<'EOF'
