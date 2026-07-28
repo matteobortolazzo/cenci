@@ -1941,6 +1941,37 @@ assert_file_has_phrase "${MAINTAIN_MODE_BACKLOG}" "Superseded by #<new> — cons
 assert_file_has_phrase "${MAINTAIN_MODE_BACKLOG}" "Create the ticket with **no** \`Followup\` label" "MCB17 backlog.md creates the polish ticket without the Followup label"
 assert_file_has_phrase "${MAINTAIN_MODE_BACKLOG}" "stop before closing any source" "MCB18 backlog.md never closes a source before the new ticket exists"
 
+# =====================================================================
+# #740 -- migrate backlog mode's polish-ticket create off the
+# `TITLE=$(cat ...) && [[ -n "$TITLE" ]] && gh issue create ... --title
+# "$TITLE"` read-back pattern (a `&&` compound that can never auto-approve
+# under any prefix rule) onto `gh api repos/<owner>/<repo>/issues -X POST
+# --input <json-file>` with a Write-authored JSON payload, and narrow
+# maintain's allowed-tools to drop the three grants (`cat`/`rm`/`mkdir`) that
+# existed only to support that pattern and are otherwise unused in SKILL.md
+# or modes/*.md. None of these production edits exist yet at RED-phase time
+# (a later implementation phase's job) -- every assertion below is expected
+# to fail until then.
+# =====================================================================
+
+assert_file_has_phrase "${MAINTAIN_MODE_BACKLOG}" "-X POST --input" "MCB19 backlog.md Batch create uses gh api ... -X POST --input"
+assert_file_has_phrase "${MAINTAIN_MODE_BACKLOG}" "--jq .number" "MCB20 backlog.md Batch create parses the new issue number via --jq .number"
+assert_file_lacks_phrase "${MAINTAIN_MODE_BACKLOG}" 'TITLE=$(cat' "MCB21 backlog.md must not read a title back via TITLE=\$(cat"
+assert_file_lacks_phrase "${MAINTAIN_MODE_BACKLOG}" '--title "$TITLE"' "MCB22 backlog.md must not inline-interpolate --title \"\$TITLE\""
+
+# --- SKILL.md frontmatter: drop the three grants that existed only to
+# support the removed read-back pattern (neither cat, rm, nor mkdir is
+# invoked anywhere in SKILL.md or modes/*.md once the migration lands) -----
+assert_file_lacks_phrase "${MAINTAIN_SKILL_MD}" "Bash(cat:*)" "MCB23 SKILL.md frontmatter must not grant Bash(cat:*)"
+assert_file_lacks_phrase "${MAINTAIN_SKILL_MD}" "Bash(rm:*)" "MCB24 SKILL.md frontmatter must not grant Bash(rm:*)"
+assert_file_lacks_phrase "${MAINTAIN_SKILL_MD}" "Bash(mkdir:*)" "MCB25 SKILL.md frontmatter must not grant Bash(mkdir:*)"
+
+# --- Over-migration guard: the unchanged gh issue close / --remove-label
+# calls (Duplicate merge / Promote) carry no interpolated free text and must
+# still be present verbatim -- only title-carrying writes migrate ----------
+assert_file_has_phrase "${MAINTAIN_MODE_BACKLOG}" "gh issue close" "MCB26 backlog.md still uses gh issue close for Duplicate merge/supersede"
+assert_file_has_phrase "${MAINTAIN_MODE_BACKLOG}" '--remove-label "Followup"' "MCB27 backlog.md still uses --remove-label \"Followup\" for Promote"
+
 # --- Garden retirement (#547): flow/skills/garden/ must be gone, and no
 # retired-command literal (the old skill's slash-invocation prefixed with
 # either the Claude or Codex client sigil) may remain live anywhere in the

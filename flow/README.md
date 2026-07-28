@@ -208,7 +208,7 @@ The `gh` CLI stores credentials in `~/.config/gh/hosts.yml`. It also respects `G
 
 ### Runtime — the cenci-sandbox container
 
-cenci runs inside the [`sandbox`](../sandbox) container with `--dangerously-skip-permissions`. The **container is the security boundary** — it provides the filesystem and network isolation for autonomous execution, so Claude Code's own host sandbox stays disabled. `permissions.allow`/`deny` are still written to `.claude/settings.json` as defense-in-depth for the case where you run plain `claude` (no skip-permissions) inside the container, e.g. via `cenci open --shell`.
+cenci runs inside the [`sandbox`](../sandbox) container with `--dangerously-skip-permissions`. The **container is the security boundary** — it provides the filesystem and network isolation for autonomous execution, so Claude Code's own host sandbox stays disabled. `permissions.allow`/`deny` are still written to `.claude/settings.json` as defense-in-depth for the case where you run plain `claude` (no skip-permissions) inside the container, e.g. via `cenci open --shell`; the deny list covers the broader destructive/history-rewriting git surface (config/exec-path tampering, working-tree destruction, history rewriting), not just force-push and hard-reset.
 
 There are no bubblewrap/socat prerequisites — the container supplies the isolation. Launch it with `cn` / `cenci open` (see the [`sandbox` README](../sandbox)), then run `/cenci:configure` inside it.
 

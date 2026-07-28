@@ -26,16 +26,26 @@ from external or semi-trusted sources.
   actually reads, not only as an inline comment in the generated file — a user who never
   opens the generated file should still learn that a value went unresolved and where to
   fix it manually.
-- Route all free-text values substituted from user input or external sources into a
-  documented shell command template (e.g. `gh issue create --title "Followup: <PR
-  title>"`) through the temp-file + read-back pattern (`value=$(cat
+- **Canonical: `gh api ... --input` for title/body-carrying writes.** Route every write
+  that sets a title (issue/PR create, or an edit that also changes the title) through
+  `gh api <endpoint> -X <METHOD> --input <json-file>`, where `<json-file>` is a JSON
+  payload authored entirely by a file tool (e.g. `Write`) — never hand-interpolated
+  shell text. This has zero shell interpolation: the JSON file is the only externally-
+  sourced input, and `-X`/`--input` bypass the shell's quoting rules entirely. Escape
+  every `"` as `\"`, every `\` as `\\`, and every newline as `\n` inside each JSON string
+  value — a literal, unescaped newline inside a JSON string is invalid JSON, not a
+  formatting nicety.
+- **Rescoped fallback: temp-file + read-back, for CLIs with no `--input` equivalent.**
+  When the target CLI surface has no `--input`/`--*-file` flag for a given free-text
+  value (e.g. the `--label`/`--milestone` array arguments that `phase-9-pr.md` and
+  `address-review` pass alongside a title), route that value into the documented shell
+  command template through the temp-file + read-back pattern (`value=$(cat
   /tmp/claude/value.txt)` then `--flag "$value"`), never inline interpolation — direct
   interpolation allows shell injection via `$(...)` or backticks, in any interpolation
-  context, not just message bodies.
-- When using the temp-file + read-back pattern, guard against empty reads with
-  `[ -n "$VAR" ]` between the `cat` and the external command — a silent write failure
-  (zero-length or unwritten temp file) produces an empty string that succeeds with `cat`
-  but creates a malformed external command.
+  context, not just message bodies. When using this fallback, guard against empty reads
+  with `[ -n "$VAR" ]` between the `cat` and the external command — a silent write
+  failure (zero-length or unwritten temp file) produces an empty string that succeeds
+  with `cat` but creates a malformed external command.
 - When the same ticket/target could plausibly be operated on by concurrent skill runs,
   scope temp-file paths with a per-run random token (from `mktemp -u`, carried forward
   as literal text, never re-derived from `$$`, which doesn't persist across separate

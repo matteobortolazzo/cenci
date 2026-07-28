@@ -48,6 +48,15 @@ dot-only value could traverse:
 gh issue edit <number> --body-file "${TMPDIR:-/tmp}/cenci/issue-body-<scope>.md"
 ```
 
+Any write that also sets a title goes through `gh api ... --input` with a file-tool-authored
+JSON payload instead of `gh issue edit --title`/`gh issue create --title` — neither has a
+`--title-file` equivalent, so a title carried as a shell argument is always an interpolation
+risk:
+
+```bash
+gh api repos/<owner>/<repo>/issues/<number> -X PATCH --input "${TMPDIR:-/tmp}/cenci/issue-<scope>.json"
+```
+
 ```bash
 gh pr create --title "<title>" --body-file "${TMPDIR:-/tmp}/cenci/pr-body-<scope>.md"
 ```

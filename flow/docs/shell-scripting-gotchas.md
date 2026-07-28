@@ -33,3 +33,4 @@ hooks, and tests.
   }
   ```
   The function's return status is now the `fi` statement itself (success), regardless of whether the `rm` executed. Apply this rule to any helper function that performs conditional resource cleanup or rollback, not just temp files.
+- When narrowing or dropping a Bash grant from a skill's `allowed-tools` (e.g., removing `Bash(mkdir:*)` or `Bash(rm:*)`), grep the *entire* skill file — not just re-reading identified edit sites — for prose references to the removed tool or capability. Stale references can survive in unrelated sections (e.g., a "Hard gate" security description 130 lines below the frontmatter) when re-read guidance is narrowly scoped to only files with many edit locations. Always run a full-file search for each removed tool name when any grant is dropped, regardless of how many locations were edited (#740).

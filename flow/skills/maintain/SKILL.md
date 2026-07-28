@@ -6,7 +6,7 @@ argument-hint: [mode] [scope] [additional context]
 user-invocable: true
 disable-model-invocation: true
 model: opus
-allowed-tools: Read, Edit, Write, Grep, Glob, Task, Bash(git:*), Bash(gh:*), Bash(bash flow/skills/maintain/scripts/check.sh:*), Bash(sh flow/hooks/scripts/run-gate.sh:*), Bash(mktemp:*), Bash(mkdir:*), Bash(rm:*), Bash(cat:*), AskUserQuestion
+allowed-tools: Read, Edit, Write, Grep, Glob, Task, Bash(git:*), Bash(gh:*), Bash(bash flow/skills/maintain/scripts/check.sh:*), Bash(sh flow/hooks/scripts/run-gate.sh:*), Bash(mktemp:*), AskUserQuestion
 ---
 
 > **Client dispatch**: In Codex, read `codex-runtime` and `maintain/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
@@ -168,8 +168,8 @@ Create a dedicated worktree following the `worktrees` skill:
 git -C <repo-root> worktree add .worktrees/maintain-<run-token> -b chore/maintain-<run-token> main
 ```
 
-**Hard gate**: every filesystem mutation in this phase — including `Edit`, `Write`, `mkdir`, and
-`rm` — MUST target an absolute path containing `/.worktrees/`. Before each mutation, verify its
+**Hard gate**: every filesystem mutation in this phase — including `Edit` and `Write` — MUST
+target an absolute path containing `/.worktrees/`. Before each mutation, verify its
 resolved target satisfies that check. If any staged mutation would resolve to the main worktree,
 **stop immediately** and report — do not write or delete anything, and do not rescue a stranded
 edit with git commands.
