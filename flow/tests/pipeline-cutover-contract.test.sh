@@ -313,5 +313,108 @@ if CONTENT="$(read_doc "${FILE}")"; then
   assert_not_contains "${CONTENT}" "sanctioned exception to the" "${FILE} (## Existing Plan section)"
 fi
 
+# =====================================================================
+# Ticket #688 -- the two remaining #718 pipeline-tooling-friction items:
+# (1) plan --approve self-adopts a stage-less-but-plan-file-present ticket
+# (watch/internal/pipeline/adopt.go); (2) `cenci pipeline worktree <id>
+# --attach PATH` reuse mode (watch/internal/pipeline/worktree.go). Both get a
+# `flow/` skill-doc call site: phase-2-worktree.md's `## Gate Check` documents
+# the adoption warning as informational (not a failure gate), and its
+# `## Create Worktree` gains the `--attach <path>` reuse bullet.
+# phase-9-pr.md's `## Push` step must source the pushed branch from the
+# recorded pipeline artifact rather than reconstructing it from
+# `feature/<ticket-id>-<description>` alone, so an attached non-standard
+# branch pushes the correct ref.
+#
+# Marker choice mirrors the #558/#559/#560 blocks above: assert_contains pins
+# literal new text scoped to the specific section it must appear in (so a
+# match elsewhere in the file cannot vacuously satisfy it, per
+# flow/docs/shell-scripting-gotchas.md rule 3); assert_not_contains pins the
+# exact pre-#688 line this ticket's diff must remove (verified against the
+# real committed phase-9-pr.md content while writing this test).
+# =====================================================================
+
+# extract_gate_check_section <phase-2-worktree-md-content>
+# Returns phase-2-worktree.md's "## Gate Check" section body only (through
+# the next "## "-level heading, "## Arm Goal Autopilot"), so the adoption-
+# warning assertion below cannot be satisfied by unrelated `cenci pipeline`
+# mentions elsewhere in the file.
+extract_gate_check_section() {
+  awk '
+    /^## Gate Check$/ { on=1 }
+    on && /^## / && !/^## Gate Check$/ { exit }
+    on { print }
+  ' <<<"$1"
+}
+
+# extract_create_worktree_section <phase-2-worktree-md-content>
+# Returns phase-2-worktree.md's "## Create Worktree" section body only
+# (through the next "## "-level heading, "## Baseline Gate Check").
+extract_create_worktree_section() {
+  awk '
+    /^## Create Worktree$/ { on=1 }
+    on && /^## / && !/^## Create Worktree$/ { exit }
+    on { print }
+  ' <<<"$1"
+}
+
+# extract_push_section <phase-9-pr-md-content>
+# Returns phase-9-pr.md's "## Push" section body only (through the next
+# "## "-level heading, "## Screenshots (UI Work)"), so the assertions below
+# cannot be satisfied by the artifact-recording call already present
+# elsewhere in this same section for a DIFFERENT purpose (recording the
+# branch post-push) versus reading it back to source the push itself.
+extract_push_section() {
+  awk '
+    /^## Push$/ { on=1 }
+    on && /^## / && !/^## Push$/ { exit }
+    on { print }
+  ' <<<"$1"
+}
+
+# ---------------------------------------------------------------------
+# phase-2-worktree.md -- ## Gate Check step 3 must document that a
+# pre-stage-tracking plan self-adopts via `plan --approve`, and that the
+# resulting `warnings[]` entry is informational, not a failure gate.
+# ---------------------------------------------------------------------
+FILE="skills/implement/phases/phase-2-worktree.md"
+if CONTENT="$(read_doc "${FILE}")"; then
+  GATE_CHECK_SECTION="$(extract_gate_check_section "${CONTENT}")"
+  if [[ -z "${GATE_CHECK_SECTION}" ]]; then
+    fail "${FILE}: could not locate '## Gate Check' section"
+  else
+    assert_contains "${GATE_CHECK_SECTION}" "self-adopt" "${FILE} (## Gate Check section, plan-file adoption)"
+    assert_contains "${GATE_CHECK_SECTION}" "informational, not a failure" "${FILE} (## Gate Check section, adoption warning is informational)"
+  fi
+
+  # ---------------------------------------------------------------------
+  # phase-2-worktree.md -- ## Create Worktree must document the ticket-mode
+  # `--attach <path>` reuse bullet.
+  # ---------------------------------------------------------------------
+  CREATE_WORKTREE_SECTION="$(extract_create_worktree_section "${CONTENT}")"
+  if [[ -z "${CREATE_WORKTREE_SECTION}" ]]; then
+    fail "${FILE}: could not locate '## Create Worktree' section"
+  else
+    assert_contains "${CREATE_WORKTREE_SECTION}" "--attach" "${FILE} (## Create Worktree section)"
+  fi
+fi
+
+# ---------------------------------------------------------------------
+# phase-9-pr.md -- ## Push must no longer reconstruct the pushed branch
+# from `feature/<ticket-id>-<description>` alone (wrong for an attached
+# non-standard branch); it must source the branch from the recorded
+# pipeline artifact (`cenci pipeline artifact <id> --get`) instead.
+# ---------------------------------------------------------------------
+FILE="skills/implement/phases/phase-9-pr.md"
+if CONTENT="$(read_doc "${FILE}")"; then
+  PUSH_SECTION="$(extract_push_section "${CONTENT}")"
+  if [[ -z "${PUSH_SECTION}" ]]; then
+    fail "${FILE}: could not locate '## Push' section"
+  else
+    assert_not_contains "${PUSH_SECTION}" "git -C <worktree-path> push -u origin feature/<ticket-id>-<description>" "${FILE} (## Push, ticket mode)"
+    assert_contains "${PUSH_SECTION}" "--get" "${FILE} (## Push sources branch via artifact --get)"
+  fi
+fi
+
 echo "pipeline-cutover-contract.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]

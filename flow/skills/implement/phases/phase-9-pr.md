@@ -61,8 +61,14 @@ Ticketless mode: no ticket reference.
 
 Push the branch:
 
-- Ticket mode: `git -C <worktree-path> push -u origin feature/<ticket-id>-<description>`
-- Ticketless mode: `git -C <worktree-path> push -u origin feature/<auto-slug>`
+- Ticket mode: source the branch to push from the recorded pipeline artifact rather than reconstructing it — `cenci pipeline artifact <id> --get` returns the frozen `{state, next_actions, artifacts, warnings, errors}` contract; its `branch` value is one of the self-describing `key:value` entries in `artifacts[]`, extracted with:
+
+  ```bash
+  BRANCH=$(cenci pipeline artifact <id> --get | jq -r '.artifacts[] | select(startswith("branch:")) | sub("^branch:";"")')
+  ```
+
+  This is `feature/<ticket-id>-<description>` on the standard path, or a non-standard branch when this run reused an existing worktree via `cenci pipeline worktree <id> --attach <path>` at Phase 2 — see `phase-2-worktree.md`'s `## Create Worktree`. Then push that branch: `git -C <worktree-path> push -u origin "$BRANCH"`.
+- Ticketless mode: `git -C <worktree-path> push -u origin feature/<auto-slug>` — unchanged; ticketless mode has no pipeline artifact to source a branch from.
 
 If this branch was already pushed in a prior turn (a Goal Autopilot resume) and the atomicity rule's mandatory Rebase restart above rewrote local commit SHAs, the plain push above is rejected as non-fast-forward — this is expected, not a failure. Retry once with `git -C <worktree-path> push --force-with-lease -u origin <branch>`: `--force-with-lease` still refuses if the remote tip isn't what this rebase started from (i.e. someone else pushed to the branch), which surfaces as a genuine conflict to report rather than silently overwriting work.
 

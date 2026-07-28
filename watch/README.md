@@ -687,6 +687,20 @@ Behavior:
 - `execute` is blocked until the plan has been explicitly approved
   (`plan --approve`); running it any earlier is a domain error, not a
   transition.
+- `plan --approve` self-adopts a pre-stage-tracking plan (ticket #688,
+  closing #718): when the persisted stage is `new` or `prepared` (never
+  later) and exactly one validly-shaped `.plans/<id>-*.md` exists on disk
+  (front matter's `ticketId`, if present, matching `<id>`), the persisted
+  stage is treated as if it were already `waiting_for_plan_approval` before
+  the transition runs, landing directly at `plan_approved` instead of
+  failing with "invalid pipeline transition". This is purely local/offline
+  evidence — no `gh`/`git` freshness re-check — and surfaces a `warnings[]`
+  entry reading `adopted plan file <path> as stage "waiting_for_plan_approval"
+  (persisted stage was "<old-stage>"; no prior plan approval was recorded)`;
+  it is informational, not a failure. Bare `plan` (no `--approve`) is
+  unaffected and keeps its own strict precondition (an ambiguous/missing/
+  malformed plan file, or a `ticketId` mismatch, falls back to today's
+  unmodified error, unchanged).
 - A transition that's invalid for the ticket's current stage (e.g. `execute`
   before `plan --approve`, or a ticket `gh issue view` can't find) is a
   **domain error**: the full JSON contract still prints on stdout with
@@ -709,6 +723,7 @@ cenci pipeline label 42 --transition working                     # verifies/clai
 cenci pipeline label 42 --transition planned [--trivial]          # applies "Planned", removes "Working" unless --trivial
 cenci pipeline label 42 --transition in-review [--parent 10]      # applies "In Review", removes "Working"; --parent cascades to the parent ticket
 cenci pipeline worktree 42 --slug add-thing                       # git worktree add .worktrees/42-add-thing -b feature/42-add-thing
+cenci pipeline worktree 42 --attach /path/to/existing-worktree     # reuse mode: validates against `git worktree list --porcelain`, records Branch+WorktreePath, creates nothing
 cenci pipeline worktree-cleanup 42 --slug add-thing               # removes both the worktree dir and the branch (creation-failure rollback only)
 cenci pipeline artifact 42 --plan .plans/42-add-thing.md --branch feature/42-add-thing --session runId=abc123
 cenci pipeline artifact 42 --get                                  # read-only fetch of the current artifacts
@@ -733,6 +748,24 @@ Behavior:
   `worktree-cleanup` removes both the worktree and its branch and is used
   only on that rollback path (not on a "baseline gate failed" retry path,
   which deliberately keeps the worktree/branch around).
+- `worktree --attach PATH` (ticket #688, closing #718) is the reuse-mode
+  counterpart to `--slug`: exactly one of `--slug`/`--attach` is required
+  (neither or both is a usage error, exit `2` — conflicting inputs are
+  never silently resolved). `PATH` (relative paths resolve against the
+  main checkout root) must already be a registered worktree of this repo
+  per `git worktree list --porcelain`; it never creates a worktree or
+  branch, and it never attaches the **main checkout**. A path that isn't a
+  registered worktree of this repo (missing, a plain directory, or a
+  worktree of a *different* repo) is a domain error naming `--slug` as the
+  remedy; the main checkout or a detached-HEAD worktree are domain errors
+  naming the specific reason. On success it records `Branch` (derived from
+  git, never trusted from a flag) and the resolved `WorktreePath` exactly
+  like `--slug` does; re-attaching the same path is an idempotent no-op,
+  while attaching a *different* path than what was previously recorded
+  emits a `warnings[]` entry reading `replaced tracked worktree <old> with
+  <new>`. `worktree-cleanup` does **not** remove an attached worktree —
+  it is documented as a creation-failure rollback path only, and attach
+  creates nothing to roll back.
 - `artifact` records/reads `PlanPath`, `Branch`, `WorktreePath`, `PRURL`,
   `PRNumber`, and `--session KEY=VALUE` metadata (repeatable; merges into the
   persisted map without clobbering keys from earlier calls) on the pipeline
@@ -760,8 +793,9 @@ Behavior:
     flag, trailing positional) still exit `2` with a one-line stderr hint,
     same as every other verb.
 - `--repo-slug OWNER/REPO` (`label` and `plan-check`) and `--slug SLUG`
-  (worktree/worktree-cleanup, required) are additional flags on top of the
-  stage commands' `--state-dir`/`--repo` test hooks.
+  (worktree-cleanup, required; worktree, required unless `--attach PATH` is
+  given instead) are additional flags on top of the stage commands'
+  `--state-dir`/`--repo` test hooks.
 - `reset` deletes the ticket's persisted state file outright — delete-everything
   semantics, not a stage rewrite: stage returns to `new` and every recorded
   artifact (branch, worktree path, PR URL/number, plan path) is dropped from

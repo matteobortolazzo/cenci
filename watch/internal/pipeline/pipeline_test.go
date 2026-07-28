@@ -16,6 +16,7 @@ package pipeline
 // new pipeline_test.go").
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 )
@@ -296,5 +297,41 @@ func TestResumeSequence_StageNew_PrepareThenFullSequence(t *testing.T) {
 	}
 	if out.State != string(StageExecuted) {
 		t.Errorf("execute: Output.State = %q, want %q", out.State, StageExecuted)
+	}
+}
+
+// -- ticket #688: audit that plan-file-triggered stage adoption (adopt.go)
+// cannot silently flip an existing no-op/hard-fail Run assertion above ------
+
+// TestRun_PlanApproveFromPreparedNoPlanFile_StillHardFailsNoWarnings is the
+// complementary case to TestRun_RealTransition_StillEmitsNoWarnings above: a
+// genuinely adoption-eligible persisted stage (`prepared`, rank strictly
+// below `waiting_for_plan_approval`) with NO `.plans/<id>-*.md` file on disk
+// must still hard-fail with ErrInvalidTransition and zero warnings, per
+// adopt.go's own "exactly one plan file" precondition (adopt_test.go's case
+// 3 covers this same scenario directly against adopt.go; this copy lives
+// here specifically because every *existing* `plan --approve` assertion in
+// this file above seeds a persisted stage at or past
+// waiting_for_plan_approval (rank >= target: executed/waiting_for_plan_
+// approval), so adoption's "rank strictly below target" precondition never
+// applies to any of them -- this is the one case in this file where it
+// could, and it must keep failing exactly as it did before ticket #688).
+func TestRun_PlanApproveFromPreparedNoPlanFile_StillHardFailsNoWarnings(t *testing.T) {
+	repoRoot := t.TempDir() // no .plans/ dir at all: adoption's glob precondition denies
+	stateDir := t.TempDir()
+	mustSeedState(t, stateDir, "42", StagePrepared)
+
+	out, err := Run(Opts{Stage: "plan", ID: "42", Approve: true, RepoRoot: repoRoot, StateDir: stateDir})
+	if err == nil {
+		t.Fatal("plan --approve from prepared with no plan file: want an error, got nil")
+	}
+	if !errors.Is(err, ErrInvalidTransition) {
+		t.Errorf("error = %v, want errors.Is(_, ErrInvalidTransition)", err)
+	}
+	if len(out.Warnings) != 0 {
+		t.Errorf("Warnings = %v, want none (no adoption, no no-op)", out.Warnings)
+	}
+	if out.State != string(StagePrepared) {
+		t.Errorf("Output.State = %q, want unchanged %q", out.State, StagePrepared)
 	}
 }
