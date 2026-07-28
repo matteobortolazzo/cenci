@@ -3,8 +3,14 @@
 Read `project-core` and `codex-runtime`. In `/plan`, gather context with the read-heavy
 agent, ask material questions, and return an approved plan in the conversation without
 writing files or labels. Stop before mutations and instruct `cenci run implement apply
-<ticket> --agent codex`. In normal apply mode persist `.plans/<ticket>-<slug>.md`, initialize
-the checkpoint, create the worktree, then run the baseline gate: resolve affected projects
+<ticket> --agent codex`. In normal apply mode persist `.plans/<ticket>-<slug>.md`, then verify the
+assembled file contains all four required headings (`## Ticket Details`, `## Implementation
+Plan`, `## Architectural Context`, `## Design Context` — the `requiredPlanSections` list in
+`watch/internal/pipeline/planfile.go`): if `## Design Context` alone is missing, append `##
+Design Context` and `N/A`, re-check, and report the repair — if the re-check still fails, stop
+before the checkpoint/label mutations and report the append failure instead; if any of the other three is
+missing, stop before the checkpoint/label mutations and report the missing heading(s). Otherwise,
+initialize the checkpoint, create the worktree, then run the baseline gate: resolve affected projects
 by matching the plan's `## Project Context` `# Project: <name>` headers against
 `.cenci/config.json`'s `projects[].name` to get each `slug`. When the primary signal
 under-matches, fall back to the `### Technical Notes` "Affected services"/"Affected components" lines inside `## Ticket Details`, matched against each `projects[]` entry's `slug`, `name`, or `path`
