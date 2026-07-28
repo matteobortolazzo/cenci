@@ -321,9 +321,26 @@ After successful PR creation, first clear the Goal Autopilot condition — the P
 /goal clear
 ```
 
-Run it via the `SlashCommand` tool; it is a no-op if no goal was armed. Clearing before the plan-file deletion below keeps the two "work is done" signals in sync: the goal's condition references `.plans/<filename>`, which is removed next.
+Run it via the `SlashCommand` tool; it is a no-op if no goal was armed. Clearing before the plan-file archiving below keeps the two "work is done" signals in sync: the goal's condition references `.plans/<filename>`, which is moved out of `.plans/` next.
 
-Then delete the consumed plan file. If `.plans/` is empty, remove it. If the pipeline fails before PR creation, preserve the plan file for retry (and, as above, clear the goal at whichever error gate stopped the run).
+Then archive the consumed plan file instead of deleting it — move it into `.plans/done/` so it survives as a record of what was implemented. `.plans/` lives only in the main checkout (repo root), not in the worktree — it is written during Phase 1, before the worktree even exists, and is never copied into the worktree — so this step must target `<repo-root>` (the main checkout containing `.worktrees/` — resolve via `git -C <worktree-path> rev-parse --path-format=absolute --git-common-dir` if needed, not the worktree itself), not `<worktree-path>`. Guard with a file-existence check: plan-file/ticketless runs where no `.plans/<filename>` exists for this run make this a no-op.
+
+A single `&&`-chained guard cannot distinguish "no-op" from "guard true but mkdir/mv genuinely failed" — both produce the same non-zero exit. Use an if/else that emits a distinguishable marker for each of the three real outcomes instead:
+
+```bash
+if [ -f "<repo-root>/.plans/<filename>" ]; then
+  mkdir -p "<repo-root>/.plans/done" && mv -n "<repo-root>/.plans/<filename>" "<repo-root>/.plans/done/" \
+    && echo "ARCHIVE_OK" || echo "ARCHIVE_FAILED"
+else
+  echo "ARCHIVE_SKIPPED (no plan file for this run)"
+fi
+```
+
+This is a plain `mv`, not a git operation — `.plans/` is untracked/gitignored. If the pipeline fails before PR creation, preserve the plan file in place (do not archive it) for retry (and, as above, clear the goal at whichever error gate stopped the run).
+
+`mv -n` (no-clobber) intentionally leaves a pre-existing `.plans/done/<filename>` in place rather than overwriting it — if this ticket is re-implemented and produces the same `<id>-<slug>.md` name, the earlier archived record is preserved rather than destroyed.
+
+Key the final session summary off the marker, not the command's exit code: report `ARCHIVE_FAILED` (a real failure — permission denied, disk full, cross-device error) in the summary; `ARCHIVE_SKIPPED` and `ARCHIVE_OK` are both expected outcomes and need no special reporting (`ARCHIVE_OK` prints even when `mv -n` silently preserved a pre-existing same-named archive instead of moving into it — `mv -n` exits 0 on that no-clobber skip, same as a normal move).
 
 Finally, delete this run's scoped shared temp files — they were only ever intermediate state for this ticket's pipeline run, and the PR now carries everything they contributed. Phase 6 + 7's four review artifacts (diff patch, changed-file list, stat, review-path) live together in `$RUN_DIR`, so remove the whole directory in one step, guarded on `RUN_DIR` actually being known:
 
@@ -351,11 +368,11 @@ rm -f \
 
 This deliberately excludes two other scoped temp locations: the screenshots dir (`/tmp/claude/cenci-screenshots/<ticket-id-or-slug>/`) is a documented fallback location kept for gist-upload failures (see Screenshots above), and the gist clone temp dir (`/tmp/claude/cenci-gist-<gist-id>/`) is already uniquely scoped by gist ID — neither needs this pass to stay collision-safe.
 
-Like the plan-file deletion above, this cleanup only runs on the success path (PR created). If the pipeline fails before PR creation, these files are preserved for retry/debugging, same as the plan file.
+Like the plan-file archiving above, this cleanup only runs on the success path (PR created). If the pipeline fails before PR creation, these files are preserved for retry/debugging, same as the plan file.
 
 ## Babysit
 
-This is the **final** Phase-9 action — do it only after `## Cleanup` above has settled the session's own completion (`/goal clear` ran, the plan file was deleted). Ordering matters: this step arms an *unattended* `cenci babysit` supervisor that keeps running after this session exits, so per `flow/AGENTS.md` the goal-clear-before-handoff rule is restated here for that new "arms an unattended loop" risk profile — the goal must already be cleared (Cleanup) before the supervisor is launched, so a still-armed goal can never re-loop the turn *after* an external watcher is live.
+This is the **final** Phase-9 action — do it only after `## Cleanup` above has settled the session's own completion (`/goal clear` ran, the plan file was archived). Ordering matters: this step arms an *unattended* `cenci babysit` supervisor that keeps running after this session exits, so per `flow/AGENTS.md` the goal-clear-before-handoff rule is restated here for that new "arms an unattended loop" risk profile — the goal must already be cleared (Cleanup) before the supervisor is launched, so a still-armed goal can never re-loop the turn *after* an external watcher is live.
 
 The PR is open but unverified — CI has not run, review feedback has not arrived, and the ticket is still `In Review`, not `Implemented`. Hand the PR off to the persistent supervisor, which carries it the rest of the way (CI watch, review handling, and the final `In Review` → `Implemented` relabel on merge) exactly as the standalone `babysit` skill does when invoked by hand. `cenci babysit` detaches its own background supervisor and returns immediately, so this launch is non-blocking — the session ends here; babysit runs on.
 

@@ -7,7 +7,7 @@ if [ ! -d "$PLANS_DIR" ]; then
 fi
 
 # Find plan files
-PLANS=$(find "$PLANS_DIR" -name "*.md" -type f 2>/dev/null)
+PLANS=$(find "$PLANS_DIR" -maxdepth 1 -name "*.md" -type f 2>/dev/null)
 
 if [ -z "$PLANS" ]; then
   exit 0
