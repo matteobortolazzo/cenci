@@ -59,8 +59,8 @@ func dualRuntimeAgentEngine(t *testing.T) (e *Engine, dockerLog, podmanLog strin
 // existing and populated — the `agent-cli.sh status claude` probe
 // (ticket #710's agent-cli.sh swap; must stay byte-parallel with
 // engine_test.go's volumeCheckEngine and sandbox_open_test.go's
-// writeScriptedRuntime per watch AGENTS.md #493) reports a fresh
-// last_success (computed at fixture-write time, "now") so
+// writeScriptedRuntime per watch/docs/test-strategy.md #493) reports a
+// fresh last_success (computed at fixture-write time, "now") so
 // TestEnsureAgentVolume_ViaWithRuntime_BootstrapsUnderSpecifiedRuntimeOnly's
 // sibling bootstrap-only tests below keep exercising only the
 // populated-check branch, never the new TTL staleness branch — so

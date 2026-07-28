@@ -502,13 +502,13 @@ type agentVolumeStatus struct {
 // parseAgentVolumeStatus parses agent-cli.sh status's five contractually
 // fixed key=value lines (populated, version, pin, last_success,
 // last_attempt — sandbox/lib/agent-cli.sh:444-448). It is a default-deny
-// parser (watch AGENTS.md #628, the parseReusePosture lesson): empty stdout,
-// a missing/truncated line, or an unrecognized "populated" value all return
-// ok=false, treated as unpopulated (bootstrap), never a permissive
-// zero-value guess. An empty or unparseable last_success/last_attempt on an
-// otherwise well-formed status degrades only that one field to the zero
-// time.Time (per the plan's resolved Q1: unknown -> stale) rather than
-// failing the whole parse.
+// parser (watch/docs/error-handling.md #628, the parseReusePosture lesson):
+// empty stdout, a missing/truncated line, or an unrecognized "populated"
+// value all return ok=false, treated as unpopulated (bootstrap), never a
+// permissive zero-value guess. An empty or unparseable
+// last_success/last_attempt on an otherwise well-formed status degrades only
+// that one field to the zero time.Time (per the plan's resolved Q1:
+// unknown -> stale) rather than failing the whole parse.
 func parseAgentVolumeStatus(stdout []byte) (agentVolumeStatus, bool) {
 	facts := make(map[string]string)
 	for _, line := range splitLines(string(stdout)) {
@@ -575,7 +575,8 @@ const maxAgentCLITTLHours = 24 * 365 * 10
 // reap.go:79's silent ParseFloat fallback, an unparseable, negative, or
 // implausibly large (overflow-risking) value must never silently disable
 // auto-refresh: it warns to stderr (naming the variable and the offending
-// value, per watch AGENTS.md #446) and falls back to the 24h default.
+// value, per watch/docs/error-handling.md #446) and falls back to the 24h
+// default.
 func agentCLITTL(stderr io.Writer) time.Duration {
 	raw := os.Getenv("CENCI_SANDBOX_AGENT_CLI_TTL_HOURS")
 	if raw == "" {

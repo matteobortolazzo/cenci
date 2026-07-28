@@ -448,9 +448,9 @@ func TestWindowName(t *testing.T) {
 // a config-level "sandbox": true.
 
 // TestRunDesignSandboxFlagReturnsHostOnlySentinel is the direct package-
-// boundary unit test mandated by watch/AGENTS.md (#412): a refactor could
-// break errors.Is() while message-based integration assertions still pass,
-// so the sentinel itself must be asserted directly.
+// boundary unit test mandated by watch/docs/error-handling.md (#412): a
+// refactor could break errors.Is() while message-based integration
+// assertions still pass, so the sentinel itself must be asserted directly.
 func TestRunDesignSandboxFlagReturnsHostOnlySentinel(t *testing.T) {
 	m := &mockCtrl{session: "work"}
 	opts := noConfigOpts(t)

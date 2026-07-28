@@ -41,12 +41,13 @@ type observedInspect struct {
 
 // ErrMalformedObservedInspect is the sentinel parseObservedInspect returns
 // (wrapped with context via %w) for any unparsable inspect response —
-// detectable via errors.Is per watch AGENTS.md #412. Its whole purpose is to
-// let deriveObservedPosture/Audit distinguish "inspect genuinely failed" from
-// "the observed posture legitimately parsed to some value" so a malformed
-// response can never be silently read as the permissive zero-value
-// observedInspect{} (bridge/no-mounts/dind-off — indistinguishable from a
-// real default-safe running container) per watch AGENTS.md #628/#598.
+// detectable via errors.Is per watch/docs/error-handling.md #412. Its whole
+// purpose is to let deriveObservedPosture/Audit distinguish "inspect
+// genuinely failed" from "the observed posture legitimately parsed to some
+// value" so a malformed response can never be silently read as the
+// permissive zero-value observedInspect{} (bridge/no-mounts/dind-off —
+// indistinguishable from a real default-safe running container) per
+// watch/docs/error-handling.md #628, watch/docs/go-gotchas.md #598.
 var ErrMalformedObservedInspect = errors.New("malformed observed inspect output")
 
 // inspectObservedPosture issues the single combined read-only inspect probe
@@ -83,12 +84,13 @@ func (e *Engine) inspectObservedPosture(name string) (observedInspect, error) {
 // "<image>|<networkMode>|<runtime>|<dindLabel>|<dindenv 0-or-1>"; remaining
 // lines are "<source>::<destination>::<rw true-or-false>" per mount.
 //
-// It fails closed (watch AGENTS.md #598, mirroring parseReusePosture #628)
-// rather than silently defaulting to the permissive zero-value
-// observedInspect{} on unrecognized shape: an empty/truncated/garbled
-// inspect response would otherwise read as bridge/no-mounts/dind-off — a
-// confident default-safe posture deriveObservedPosture must never report for
-// a container whose actual state could not be determined. A header that
+// It fails closed (watch/docs/go-gotchas.md #598, mirroring
+// parseReusePosture #628) rather than silently defaulting to the permissive
+// zero-value observedInspect{} on unrecognized shape: an
+// empty/truncated/garbled inspect response would otherwise read as
+// bridge/no-mounts/dind-off — a confident default-safe posture
+// deriveObservedPosture must never report for a container whose actual
+// state could not be determined. A header that
 // doesn't split into exactly 5 "|"-delimited fields, a mount line that
 // doesn't split into exactly 3 "::"-delimited components, or a mount RW
 // field that isn't exactly "true" or "false" are all rejected the same way
@@ -168,7 +170,7 @@ func hostSocketBoundaryWeakening() BoundaryWeakening {
 // mounts (via deriveDindPosture, launch.go #628) into this package's own
 // DindPosture. dindUnknown (an unrecognized label value) is deliberately
 // mapped to Source: DindSourceUnknown with a non-reassuring note — it must
-// never render as a confident "disabled" (watch AGENTS.md #598).
+// never render as a confident "disabled" (watch/docs/go-gotchas.md #598).
 func deriveObservedDind(obs observedInspect) DindPosture {
 	rp := reusePosture{
 		DindLabel: obs.DindLabel,

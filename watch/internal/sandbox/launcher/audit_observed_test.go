@@ -120,9 +120,9 @@ func TestParseObservedInspect_EmptyOutput_FailsClosedWithSentinel(t *testing.T) 
 // TestParseObservedInspect_MalformedHeader_FailsClosedWithSentinel covers a
 // header line that doesn't split into exactly 5 "|"-delimited fields (e.g.
 // a truncated/garbled `docker inspect --format` response) — content-specific
-// per AGENTS.md #446/#628: this must be distinguishable, via the same
-// sentinel, from a well-formed empty-mounts response, not silently collapsed
-// into the permissive zero value.
+// per watch/docs/error-handling.md #446/#628: this must be distinguishable,
+// via the same sentinel, from a well-formed empty-mounts response, not
+// silently collapsed into the permissive zero value.
 func TestParseObservedInspect_MalformedHeader_FailsClosedWithSentinel(t *testing.T) {
 	tests := []struct {
 		name string

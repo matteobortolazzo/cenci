@@ -149,8 +149,9 @@ func joinArgv(argv []string) string {
 //	                        runtime, no dind env, and a workspace-only mount
 //	                        (derives dindOff, no host socket) so existing
 //	                        reuse tests that don't care about posture keep
-//	                        passing; watch AGENTS.md #493 keep-in-sync note
-//	                        applies — this must stay byte-parallel with
+//	                        passing; watch/docs/test-strategy.md #493
+//	                        keep-in-sync note applies — this must stay
+//	                        byte-parallel with
 //	                        internal/sandbox/launcher/faketest_test.go's
 //	                        writeFakeRuntime.
 //	FAKE_INSPECT_STATE   — container startup state (default "running 0")
@@ -181,7 +182,7 @@ func joinArgv(argv []string) string {
 //	                        Must stay byte-parallel with engine_test.go's
 //	                        volumeCheckEngine/volumeCheckEngineStatus and
 //	                        dual_runtime_test.go's writeAgentRuntimeStub
-//	                        (watch AGENTS.md #493).
+//	                        (watch/docs/test-strategy.md #493).
 //	FAKE_AGENT_UNPIN_EXIT — 'agent-cli.sh unpin <agent>' exit code (default 0);
 //	                        `update-agent --unpin`'s unpin-then-update
 //	                        sequence for a given owner runs the plain
@@ -228,8 +229,8 @@ func joinArgv(argv []string) string {
 // dual-runtime test-fake keying: dual-runtime tests put both a docker and a
 // podman fake on PATH at once, one shared process environment, so a single
 // FAKE_PS could never script them to answer differently in the same test).
-// This fv/fe/fset trio must stay byte-parallel with that one (watch
-// AGENTS.md's #493 keep-in-sync rule).
+// This fv/fe/fset trio must stay byte-parallel with that one
+// (watch/docs/test-strategy.md's #493 keep-in-sync rule).
 func writeScriptedRuntime(t *testing.T, dir, name, callLog string) {
 	t.Helper()
 	body := `#!/bin/sh
@@ -2947,12 +2948,13 @@ func TestOpen_RunningContainer_StaleAgentVolume_SkipsRefresh(t *testing.T) {
 }
 
 // TestOpen_ContainerRunningProbeFailure_AbortsBeforeAgentVolumeBootstrap pins
-// the ticket's ordering regression (watch AGENTS.md #620): hoisting
-// containerRunning into Launch (between EnsureImage and EnsureAgentVolume)
-// means a `ps` failure now aborts BEFORE the agent-volume bootstrap/refresh
-// probe ever runs — not after it, as it did pre-#710. EnsureAgentVolume's
-// very first side effect is volumeExists (`docker volume ls`), so its
-// absence from the call log proves EnsureAgentVolume was never entered.
+// the ticket's ordering regression (watch/docs/test-strategy.md #620):
+// hoisting containerRunning into Launch (between EnsureImage and
+// EnsureAgentVolume) means a `ps` failure now aborts BEFORE the agent-volume
+// bootstrap/refresh probe ever runs — not after it, as it did pre-#710.
+// EnsureAgentVolume's very first side effect is volumeExists (`docker
+// volume ls`), so its absence from the call log proves EnsureAgentVolume
+// was never entered.
 func TestOpen_ContainerRunningProbeFailure_AbortsBeforeAgentVolumeBootstrap(t *testing.T) {
 	fakeDir := t.TempDir()
 	callLog := writeScriptedRuntimes(t, fakeDir)
@@ -3040,8 +3042,8 @@ func TestOpen_RunningContainerInspectFailureIsInfrastructureError(t *testing.T) 
 // "cenci sandbox stop <name>", then relaunch instruction as the sibling
 // "predates shared read-only agent CLIs" rejection, and all provably never
 // reaching the interactive agent exec (anyLineContains(lines, "exec -it")
-// is false), per watch AGENTS.md #446 (content-specific error assertions
-// distinguishing each rejection class).
+// is false), per watch/docs/error-handling.md #446 (content-specific error
+// assertions distinguishing each rejection class).
 
 func TestOpen_RunningContainerWithHostSocketMount_RejectsEvenWithCompatibleAgentMount(t *testing.T) {
 	fakeDir := t.TempDir()
@@ -3154,7 +3156,7 @@ func TestOpen_AmbiguousDindLabel_Rejects(t *testing.T) {
 		t.Fatalf("expected the ambiguous-label rejection to exit 1, got %T %v\n%s", err, err, output)
 	}
 	if !strings.Contains(string(output), "ambiguous") {
-		t.Errorf("expected the rejection to call the posture ambiguous (watch AGENTS.md #598: never collapse an unrecognized enum value into the safest-looking case), got:\n%s", output)
+		t.Errorf("expected the rejection to call the posture ambiguous (watch/docs/go-gotchas.md #598: never collapse an unrecognized enum value into the safest-looking case), got:\n%s", output)
 	}
 	if !strings.Contains(string(output), "cenci sandbox stop claude-cenci-default") || !strings.Contains(string(output), "then relaunch") {
 		t.Errorf("missing precise migration instruction:\n%s", output)

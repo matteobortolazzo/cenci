@@ -49,9 +49,9 @@ var stageOrder = []Stage{
 
 // stageRank reports stage's position in stageOrder. The second return value
 // is false for any value not in stageOrder (default-deny per
-// watch/AGENTS.md #598/#628): an unrecognized stage must never rank
-// alongside the known total order, so it can never compare as "at or past"
-// some target.
+// watch/docs/go-gotchas.md #598, watch/docs/error-handling.md #628): an
+// unrecognized stage must never rank alongside the known total order, so it
+// can never compare as "at or past" some target.
 func stageRank(stage Stage) (int, bool) {
 	for i, s := range stageOrder {
 		if s == stage {
@@ -131,10 +131,10 @@ func transition(from Stage, command string, approve bool) (Stage, bool, error) {
 	// Defensive invariant, not reachable via any external input today:
 	// commandTarget only ever returns a Stage registered in stageOrder, so
 	// targetOk is always true in practice. Checked anyway (default-deny per
-	// watch/AGENTS.md #598/#628) so that a future commandTarget entry
-	// referencing an unregistered Stage constant hard-fails loudly instead of
-	// silently ranking as 0 and turning fromRank >= targetRank into an
-	// unconditional no-op-success.
+	// watch/docs/go-gotchas.md #598, watch/docs/error-handling.md #628) so
+	// that a future commandTarget entry referencing an unregistered Stage
+	// constant hard-fails loudly instead of silently ranking as 0 and turning
+	// fromRank >= targetRank into an unconditional no-op-success.
 	targetRank, targetOk := stageRank(target)
 	if !targetOk {
 		return from, false, fmt.Errorf("%s target %s: unknown target stage: %w", commandLabel(command, approve), target, ErrInvalidTransition)
@@ -154,7 +154,8 @@ func transition(from Stage, command string, approve bool) (Stage, bool, error) {
 // stage order. It is the exported validity check for callers outside this
 // package (internal/dispatch's stage probe, #732) so stage-order knowledge
 // is never re-implemented elsewhere. Default-deny: an unrecognized value
-// reports false (watch/AGENTS.md #598/#628).
+// reports false (watch/docs/go-gotchas.md #598,
+// watch/docs/error-handling.md #628).
 func IsKnownStage(stage Stage) bool { _, ok := stageRank(stage); return ok }
 
 // NextActionsFor is the exported form of nextActionsFor (ticket #559): the

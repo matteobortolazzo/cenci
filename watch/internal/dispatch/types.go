@@ -15,9 +15,10 @@ package dispatch
 
 // StageProbe classifies the collector's read of a ticket's persisted
 // `cenci pipeline` stage (#732) into a closed set, rather than collapsing
-// distinct failure classes (watch/AGENTS.md #598/#628). StageProbeAbsent is
-// the zero value ("") so every existing Ticket construction site (reconcile
-// paths, tests) keeps today's behavior unchanged without being touched.
+// distinct failure classes (watch/docs/go-gotchas.md #598,
+// watch/docs/error-handling.md #628). StageProbeAbsent is the zero value
+// ("") so every existing Ticket construction site (reconcile paths, tests)
+// keeps today's behavior unchanged without being touched.
 type StageProbe string
 
 const (

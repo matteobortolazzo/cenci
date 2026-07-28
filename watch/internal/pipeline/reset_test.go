@@ -148,8 +148,9 @@ func TestReset_CorruptFile_DecodeWarningStillDeletesExit0(t *testing.T) {
 // -- unreadable file (non-ENOENT read failure): same recovery path -----------
 
 // TestReset_UnreadableFile_ReadFailureWarningStillDeletesExit0 covers the
-// sibling malformed-input class to corrupt JSON (watch/AGENTS.md #710: audit
-// all related malformed-input classes under the same principle): a state
+// sibling malformed-input class to corrupt JSON
+// (watch/docs/error-handling.md #710: audit all related malformed-input
+// classes under the same principle): a state
 // file that exists but cannot be read (EACCES on the file itself, not
 // ENOENT) must be treated the same way -- warn, still delete, exit 0.
 func TestReset_UnreadableFile_ReadFailureWarningStillDeletesExit0(t *testing.T) {

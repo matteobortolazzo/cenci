@@ -15,8 +15,8 @@ import (
 // daemon, and without attaching. These black-box tests drive the real built
 // `cenci` binary as a subprocess against the scripted-runtime harness
 // already shared by sandbox_open_test.go (writeScriptedRuntimes,
-// openTestEnv, callLogLines, buildArgv0Alias, etc. -- watch/AGENTS.md #493)
-// rather than reinventing it.
+// openTestEnv, callLogLines, buildArgv0Alias, etc. --
+// watch/docs/test-strategy.md #493) rather than reinventing it.
 //
 // Since #620, DryRun performs its own read-only container-disposition
 // probing (a `ps` call via the shared planArgvs helper, mirroring a real

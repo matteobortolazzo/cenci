@@ -12,10 +12,10 @@ import (
 )
 
 // Stage-gate skip reasons (#732). reasonStageProbeUnknown is deliberately
-// distinct from reasonPipelineUnreadable: watch/AGENTS.md #598 requires the
-// enum switch's default to be asserted by a test, and #446 requires
-// content-specific assertions per failure class -- if the default reused
-// reasonPipelineUnreadable, that test would pass identically after a
+// distinct from reasonPipelineUnreadable: watch/docs/go-gotchas.md #598
+// requires the enum switch's default to be asserted by a test, and #446
+// requires content-specific assertions per failure class -- if the default
+// reused reasonPipelineUnreadable, that test would pass identically after a
 // regression collapsed the default into the StageProbeError branch,
 // defeating its purpose.
 const (
@@ -294,8 +294,8 @@ func stageGateSkip(t Ticket) (string, bool) {
 			// Defensive: today's collector classifies an unrecognized stage
 			// as StageProbeError, so this pair is unreachable via
 			// CollectTickets. Checked anyway (default-deny per
-			// watch/AGENTS.md #636) so a future collector change can never
-			// make an unknown stage dispatch silently.
+			// watch/docs/error-handling.md #636) so a future collector
+			// change can never make an unknown stage dispatch silently.
 			return reasonPipelineUnreadable, true
 		default:
 			return "", false // prepared/waiting/plan_approved/executed/reviewed: NOT gated

@@ -108,7 +108,7 @@ func TestAssembleRunArgs_NoCreationTimeTmuxPane(t *testing.T) {
 // conflicting one), a legacy unlabeled container derives its posture from any
 // one of the three independent create-time DinD signals, and an unrecognized
 // label value is ambiguous -- never collapsed into the safest-looking case
-// (watch AGENTS.md #598).
+// (watch/docs/go-gotchas.md #598).
 func TestDeriveDindPosture(t *testing.T) {
 	cases := []struct {
 		name string
@@ -218,7 +218,8 @@ func TestMountExposesHostSocket(t *testing.T) {
 // the zero-value reusePosture{} (which derives to the fully permissive
 // "no host socket, dindOff" outcome) -- it must return an error instead,
 // exactly like containerStartupState's existing "unexpected container
-// state" shape check (watch AGENTS.md #572, #598).
+// state" shape check (watch/docs/error-handling.md #572,
+// watch/docs/go-gotchas.md #598).
 func TestParseReusePosture_FailsClosedOnMalformedOrEmptyOutput(t *testing.T) {
 	cases := []struct {
 		name       string

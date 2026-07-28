@@ -662,8 +662,9 @@ func credentialSources(home, agent string, stagedKinds map[string]bool) []Creden
 
 // probeCredentialFile classifies path's filesystem state into one of the
 // three CredentialProbe* states: CredentialProbeMissing when the path does
-// not exist (errors.Is(err, fs.ErrNotExist) — the AGENTS.md-documented way
-// to classify a filesystem-call error), CredentialProbeError for any other
+// not exist (errors.Is(err, fs.ErrNotExist) — the
+// watch/docs/go-gotchas.md-documented way to classify a filesystem-call
+// error), CredentialProbeError for any other
 // stat failure or a path that exists but is not a regular file (e.g. a
 // directory sitting where a credential file is expected), and
 // CredentialProbePresent for a readable regular file — the same condition

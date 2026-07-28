@@ -533,7 +533,7 @@ func TestAudit_StagedImpliesApplicableAndPresent_AcrossAgents(t *testing.T) {
 // Probe:CredentialProbeError, distinctly. Both cases keep Present:false
 // (isRegularFile stays false for a directory), and WriteText's rendered text
 // must differ between the two states — a content-specific assertion, not
-// just a non-empty check (AGENTS.md #446).
+// just a non-empty check (watch/docs/error-handling.md #446).
 func TestAudit_CredentialProbe_MissingVsDirectoryInPlace_DistinctFieldsAndText(t *testing.T) {
 	repo := newAuditTestRepo(t)
 	home := t.TempDir()
@@ -796,11 +796,12 @@ func TestAudit_ReseedCredsReflectsOption(t *testing.T) {
 // -- secret-leak regression ------------------------------------------------
 
 // TestAudit_SecretLeakRegression_NeverEmitsSecretValues is a dedicated,
-// content-specific regression test (per watch/AGENTS.md's rule on
-// error/content-specific assertions): it seeds real secret VALUES (never
-// just checking for non-empty output) into credential files and provider
-// API key env vars, then asserts neither WriteText's text output nor the
-// marshaled JSON contains any of those sentinel byte strings anywhere.
+// content-specific regression test (per watch/docs/error-handling.md's
+// rule on error/content-specific assertions (#446)): it seeds real secret
+// VALUES (never just checking for non-empty output) into credential files
+// and provider API key env vars, then asserts neither WriteText's text
+// output nor the marshaled JSON contains any of those sentinel byte
+// strings anywhere.
 func TestAudit_SecretLeakRegression_NeverEmitsSecretValues(t *testing.T) {
 	repo := newAuditTestRepo(t)
 	home := t.TempDir()
@@ -888,12 +889,12 @@ func TestAudit_SecretLeakRegression_NeverEmitsSecretValues(t *testing.T) {
 }
 
 // TestAudit_JSON_EmptySlicesSerializeAsEmptyArrayNotNull is a dedicated,
-// content-specific regression test (per watch/AGENTS.md's rule on
-// error/content-specific assertions): for the default (no --dind, no
-// --host-network) case, boundaryWeakenings and forwardedEnv must both be
-// empty — Go's json.Marshal serializes a nil slice as `null`, not `[]`, and
-// since "no boundary weakenings" / "no forwarded env" are the common
-// default-safe cases, a nil slice here would routinely break
+// content-specific regression test (per watch/docs/error-handling.md's
+// rule on error/content-specific assertions (#446)): for the default (no
+// --dind, no --host-network) case, boundaryWeakenings and forwardedEnv
+// must both be empty — Go's json.Marshal serializes a nil slice as
+// `null`, not `[]`, and since "no boundary weakenings" / "no forwarded
+// env" are the common default-safe cases, a nil slice here would routinely break
 // jq '.boundaryWeakenings[]'-style scripting consumers. Asserted via
 // strings.Contains on the raw JSON bytes (not by unmarshaling back into a Go
 // slice, which wouldn't distinguish null from [] after unmarshaling).

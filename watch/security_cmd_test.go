@@ -46,7 +46,7 @@ func securityRepoDir(t *testing.T) string {
 // defaults to empty (no running container). Ticket #627's
 // NewForAuditWithRuntime resolves a real runtime via
 // internal/sandbox.ContainerRuntime(), so every pre-existing hermetic test in
-// this file must pin PATH the same way (watch AGENTS.md #620).
+// this file must pin PATH the same way (watch/docs/test-strategy.md #620).
 func TestSecurityExplain_TextOutput_ReportsFramingAndWeakenings(t *testing.T) {
 	repo := securityRepoDir(t)
 	home := t.TempDir()
