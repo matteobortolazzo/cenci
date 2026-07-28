@@ -10,7 +10,7 @@
 # wording from before the native-URL-match rewrite, a stale `tick.sh` script
 # name, a partially-migrated `/tmp/claude/` temp root, bare (non-`/cenci:`)
 # slash-command mentions, a worktree-creation invocation that dropped both
-# `-C <repo-root>` and the explicit `main` base branch, a `.`/`..`-rejection
+# `-C <repo-root>` and an explicit default-branch base, a `.`/`..`-rejection
 # clause restated in one file but not its sibling, misnumbered Design phase
 # headings, and an inconsistent "degraded" framing between address-review and
 # implement's Phase 9. This suite pins each fixed shape down so a future edit
@@ -126,6 +126,16 @@ if [[ -n "${address_review}" ]]; then
     "772 flow/skills/address-review/SKILL.md Related to #<original-ticket> back-link"
   assert_not_contains "${address_review}" "the PR's \`#<number>\`" \
     "772 flow/skills/address-review/SKILL.md stale bare #<pr-number> fallback wording"
+  # Both dedup keys must be whole-line matches: plain `grep -qF` is a
+  # within-line substring match, so `.../pull/7` would still match a body
+  # containing `.../pull/70` — only `grep -qxF` delivers the collision-safety
+  # the predicate claims.
+  assert_contains "${address_review}" "matched as an exact whole line" \
+    "772 flow/skills/address-review/SKILL.md whole-line dedup match wording"
+  assert_contains "${address_review}" "grep -qxF" \
+    "772 flow/skills/address-review/SKILL.md grep -qxF whole-line dedup primitive"
+  assert_not_contains "${address_review}" "trailing newline included" \
+    "772 flow/skills/address-review/SKILL.md unachievable trailing-newline grep recipe"
 fi
 
 # =====================================================================
@@ -169,14 +179,21 @@ fi
 
 # =====================================================================
 # 6. flow/skills/implement/phases/phase-2-worktree.md — ticketless worktree
-#    creation carries -C <repo-root> and an explicit main base branch
+#    creation carries -C <repo-root> and an explicit, resolved default-branch
+#    base (never a hardcoded `main`, which fails on master/trunk repos)
 # =====================================================================
 
 require_doc phase2 "skills/implement/phases/phase-2-worktree.md" || true
 if [[ -n "${phase2}" ]]; then
   assert_contains "${phase2}" \
-    'git -C <repo-root> worktree add .worktrees/<auto-slug> -b feature/<auto-slug> main' \
+    'git -C <repo-root> worktree add .worktrees/<auto-slug> -b feature/<auto-slug> <default-branch>' \
     "772 flow/skills/implement/phases/phase-2-worktree.md ticketless worktree-add invocation"
+  assert_contains "${phase2}" \
+    'symbolic-ref --short refs/remotes/origin/HEAD' \
+    "772 flow/skills/implement/phases/phase-2-worktree.md default-branch resolution command"
+  assert_not_contains "${phase2}" \
+    '-b feature/<auto-slug> main' \
+    "772 flow/skills/implement/phases/phase-2-worktree.md hardcoded main base branch"
 fi
 
 # =====================================================================
@@ -253,6 +270,13 @@ if [[ -n "${phase9}" ]]; then
     "772 flow/skills/implement/phases/phase-9-pr.md ticketless-mode-only framing"
   assert_not_contains "${phase9}" "degraded fetch" \
     "772 flow/skills/implement/phases/phase-9-pr.md stale 'degraded fetch' wording"
+  # phase-9 is the canonical source of the whole-line dedup rule that
+  # address-review mirrors (case 2) — pin the same grep -qxF semantics here
+  # so the two files cannot drift apart on the collision-safety primitive.
+  assert_contains "${phase9}" "grep -qxF 'Related to #<original-ticket>'" \
+    "772 flow/skills/implement/phases/phase-9-pr.md grep -qxF whole-line back-link match"
+  assert_not_contains "${phase9}" "trailing newline included" \
+    "772 flow/skills/implement/phases/phase-9-pr.md unachievable trailing-newline grep recipe"
 fi
 
 if [[ -n "${address_review}" ]]; then
