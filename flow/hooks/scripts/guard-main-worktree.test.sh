@@ -48,6 +48,15 @@ run_guard_with_path() {
     GUARD_EXIT=$?
 }
 
+# run_guard_with_tmpdir <cwd> <tmpdir_override> <json> — like run_guard, but
+# sets TMPDIR to <tmpdir_override> for a single invocation. Used to drive the
+# #749 TMPDIR-widening cases below. Sets GUARD_EXIT and GUARD_STDERR.
+run_guard_with_tmpdir() {
+    local cwd="$1" tmpdir_override="$2" json="$3"
+    GUARD_STDERR="$(cd "${cwd}" && echo "${json}" | TMPDIR="${tmpdir_override}" sh "${GUARD_SH}" 2>&1 >/dev/null)"
+    GUARD_EXIT=$?
+}
+
 # make_curated_bin <dir> <tool>... — creates <dir> containing symlinks to the
 # real binaries for each named tool (resolved from the current PATH) and
 # nothing else. Used with run_guard_with_path to simulate a PATH that is
@@ -110,6 +119,16 @@ echo "guard-main-worktree.test.sh"
 # case exit 0 regardless of the config gate. /var/tmp is not allowlisted.
 TEST_ROOT="$(mktemp -d /var/tmp/guard-main-worktree-test.XXXXXX)"
 trap 'rm -rf "${TEST_ROOT}"' EXIT
+
+# Normalize TMPDIR for the whole suite (#749): TEST_ROOT deliberately lives
+# under /var/tmp specifically to dodge the /tmp/* arm, and run-checks.sh:137
+# runs every suite with the ambient environment -- an inherited
+# TMPDIR=/var/tmp (or any other custom value) would silently widen the new
+# TMPDIR allowlist and turn every pre-existing "should still be blocked" case
+# into a false pass. Each #749 case below sets TMPDIR explicitly for its own
+# single invocation via run_guard_with_tmpdir; every other case must run with
+# TMPDIR genuinely unset.
+unset TMPDIR
 
 make_git_repo() {
     local dir="$1"
@@ -419,6 +438,99 @@ if [[ "${RM_LOG_GUARD_CONTENT}" != *"/dev/null"* ]]; then
 else
     fail "mktemp failure fallback: rm must never be invoked with /dev/null (log: ${RM_LOG_GUARD_CONTENT})"
 fi
+
+# ── TMPDIR widening (#749) ──────────────────────────────────────────
+# guard-main-worktree.sh's TMPDIR_ALLOW block additionally admits paths under
+# a canonicalized $TMPDIR, so the repo-wide `${TMPDIR:-/tmp}/cenci/` body-file
+# convention (shell-rules) stops being blocked. TMPDIR_REPO is a dedicated
+# repo (not reused from earlier cases) so these cases are order-independent.
+# CUSTOM_TMP is a *sibling* of TMPDIR_REPO under TEST_ROOT (never nested
+# inside it), so it is not an ancestor of TMPDIR_REPO -- proving the
+# ancestor-of-$ROOT guard does not gut this legitimate use.
+TMPDIR_REPO="${TEST_ROOT}/tmpdir-widening"
+make_git_repo "${TMPDIR_REPO}"
+mkdir -p "${TMPDIR_REPO}/.cenci"
+touch "${TMPDIR_REPO}/.cenci/config.json"
+CUSTOM_TMP="${TEST_ROOT}/custom-tmp"
+mkdir -p "${CUSTOM_TMP}"
+
+echo "case: TMPDIR widening allows the \${TMPDIR}/cenci/ body-file convention"
+run_guard_with_tmpdir "${TMPDIR_REPO}" "${CUSTOM_TMP}" "{\"tool_input\":{\"file_path\":\"${CUSTOM_TMP}/cenci/design-comment-749.md\"}}"
+assert_exit "TMPDIR widening: cenci/ body file" 0
+
+echo "case: TMPDIR widening covers every skill's \${TMPDIR}/... convention, not just /cenci/"
+run_guard_with_tmpdir "${TMPDIR_REPO}" "${CUSTOM_TMP}" "{\"tool_input\":{\"file_path\":\"${CUSTOM_TMP}/claude/cenci-749-diff.patch\"}}"
+assert_exit "TMPDIR widening: claude/ convention coverage" 0
+
+echo "case: TMPDIR widening canonicalizes a symlinked TMPDIR before matching"
+SYMLINK_TMP="${TEST_ROOT}/custom-tmp-link"
+ln -s "${CUSTOM_TMP}" "${SYMLINK_TMP}"
+run_guard_with_tmpdir "${TMPDIR_REPO}" "${SYMLINK_TMP}" "{\"tool_input\":{\"file_path\":\"${CUSTOM_TMP}/cenci/x.md\"}}"
+assert_exit "TMPDIR widening: symlinked TMPDIR resolves to the real path" 0
+
+echo "case: TMPDIR widening does not gut the guard for the repo it protects"
+run_guard_with_tmpdir "${TMPDIR_REPO}" "${CUSTOM_TMP}" "{\"tool_input\":{\"file_path\":\"${TMPDIR_REPO}/src/foo.txt\"}}"
+assert_exit "TMPDIR widening: repo source write still blocked" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "TMPDIR widening: repo source write should contain BLOCKED"
+fi
+
+# Negative controls: each of these must still block the main-worktree source
+# write. The equals/ancestor pair are the discriminating ones -- without the
+# ancestor-of-$ROOT check they would flip to exit 0.
+echo "case: TMPDIR unset skips the widening entirely (source write blocked)"
+run_guard "${TMPDIR_REPO}" "{\"tool_input\":{\"file_path\":\"${TMPDIR_REPO}/src/foo.txt\"}}"
+assert_exit "TMPDIR unset: source write blocked" 2
+
+echo "case: TMPDIR unset skips the widening even for a would-be-allowed custom-tmp path"
+run_guard "${TMPDIR_REPO}" "{\"tool_input\":{\"file_path\":\"${CUSTOM_TMP}/cenci/design-comment-749.md\"}}"
+assert_exit "TMPDIR unset: custom-tmp path still blocked (proves unset genuinely skips widening)" 2
+
+echo "case: relative TMPDIR skips the widening"
+run_guard_with_tmpdir "${TMPDIR_REPO}" "relative-tmp" "{\"tool_input\":{\"file_path\":\"${TMPDIR_REPO}/src/foo.txt\"}}"
+assert_exit "relative TMPDIR: source write blocked" 2
+
+echo "case: TMPDIR equal to \$ROOT skips the widening"
+run_guard_with_tmpdir "${TMPDIR_REPO}" "${TMPDIR_REPO}" "{\"tool_input\":{\"file_path\":\"${TMPDIR_REPO}/src/foo.txt\"}}"
+assert_exit "TMPDIR == ROOT: source write blocked" 2
+
+echo "case: TMPDIR an ancestor of \$ROOT skips the widening"
+run_guard_with_tmpdir "${TMPDIR_REPO}" "${TEST_ROOT}" "{\"tool_input\":{\"file_path\":\"${TMPDIR_REPO}/src/foo.txt\"}}"
+assert_exit "TMPDIR ancestor of ROOT: source write blocked" 2
+
+# TMPDIR nested INSIDE $ROOT (a descendant, e.g. $ROOT/tmp) is the reverse of
+# the ancestor case above: without a symmetric rejection, TMPDIR_ALLOW would
+# be set to $ROOT/tmp and the guard would allowlist every write under that
+# main-worktree subtree -- defeating the guard's purpose. A write under
+# $ROOT/tmp itself (not just some other $ROOT/src path) is the discriminating
+# assertion here: it is the exact path the containment bug would wrongly let
+# through.
+echo "case: TMPDIR a descendant of \$ROOT (inside the repo) skips the widening"
+INSIDE_TMP="${TMPDIR_REPO}/tmp"
+mkdir -p "${INSIDE_TMP}"
+run_guard_with_tmpdir "${TMPDIR_REPO}" "${INSIDE_TMP}" "{\"tool_input\":{\"file_path\":\"${INSIDE_TMP}/x\"}}"
+assert_exit "TMPDIR descendant of ROOT: write under \$ROOT/tmp blocked" 2
+
+echo "case: TMPDIR pointing at a non-existent directory skips the widening"
+run_guard_with_tmpdir "${TMPDIR_REPO}" "${TEST_ROOT}/no-such-dir" "{\"tool_input\":{\"file_path\":\"${TMPDIR_REPO}/src/foo.txt\"}}"
+assert_exit "TMPDIR non-existent dir: source write blocked" 2
+
+# ── Deferred item 4 cross-file pin (#749) ────────────────────────────
+# design's two Write targets: <designPath>/DESIGN.md (main-worktree design
+# artifact, allowlisted via the existing */DESIGN.md arm) and
+# ${TMPDIR:-/tmp}/cenci/design-comment-<number>.md (the body-file convention,
+# allowlisted by the TMPDIR widening above). Pinning both here means a
+# future change to either target's shape fails in this suite rather than
+# silently prompting at runtime.
+echo "case: cross-file pin -- design's designs/DESIGN.md Write target"
+run_guard_with_tmpdir "${TMPDIR_REPO}" "${CUSTOM_TMP}" "{\"tool_input\":{\"file_path\":\"${TMPDIR_REPO}/designs/DESIGN.md\"}}"
+assert_exit "cross-file pin: designs/DESIGN.md" 0
+
+echo "case: cross-file pin -- design's \${TMPDIR}/cenci/design-comment-<n>.md Write target"
+run_guard_with_tmpdir "${TMPDIR_REPO}" "${CUSTOM_TMP}" "{\"tool_input\":{\"file_path\":\"${CUSTOM_TMP}/cenci/design-comment-749.md\"}}"
+assert_exit "cross-file pin: cenci/design-comment-749.md" 0
 
 # ── Summary ──────────────────────────────────────────────────────────
 echo

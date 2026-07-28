@@ -133,15 +133,31 @@ fi
 # below pins that self-consistent 8-entry set; if a later phase lands a
 # deliberate 9th grant, this assertion is the signal to reconcile it against
 # the plan rather than silently drift.
+#
+# #749 addendum: refine carries the identical grant defects #738/#740 left
+# unaddressed. `Bash(gh issue:*)` narrows to exactly two per-verb grants
+# (`view`, `edit`) — refine's body invokes no `comment`/`list`/`close`/
+# `create` (issue creation goes through `gh api repos/... -X POST`, already
+# covered by the `Bash(gh api repos/:*)` grant). `Bash(gh api user:*)`
+# narrows to `Bash(gh api user --jq:*)` (sole call site: `ticket-ownership`'s
+# `gh api user --jq .login`, read by refine). Blanket `Bash(mktemp:*)`
+# narrows to `Bash(mktemp -u /tmp/claude/:*)` — refine's only `mktemp` call
+# is a dry-run `-u` name generator (`mktemp -u /tmp/claude/issue-<n>-
+# XXXXXX`), never `mktemp -d`; mirroring design's literal `mktemp -d` string
+# would simultaneously break refine's token generation and add a grant with
+# no call site. `WebFetch` is dropped — zero invocations (only prose meaning
+# `gh issue view`). This grows the set from 8 to 9 entries.
 # =====================================================================
 
 skill_path="${FLOW_DIR}/skills/refine/SKILL.md"
 
 if [[ -n "${skill}" ]]; then
   # --- Dropped blanket grants must be gone, and no curl reference may remain
-  # anywhere in the skill body -- the domain-gated WebFetch grant already
-  # covers legitimate fetches; refine's only inherited curl use is via the
+  # anywhere in the skill body -- refine's only inherited curl use is via the
   # attachments reference skill (out of scope) and is expected to now prompt.
+  # #749: WebFetch is dropped entirely (zero invocations -- only prose
+  # meaning `gh issue view`), so there is no domain-gated (or any) WebFetch
+  # grant left to cover legitimate fetches.
   assert_not_contains "${skill}" "Bash(curl:*)"  "740 skills/refine/SKILL.md blanket curl grant"
   assert_not_contains "${skill}" "Bash(gh:*)"    "740 skills/refine/SKILL.md blanket gh grant"
   assert_not_contains "${skill}" "Bash(git:*)"   "740 skills/refine/SKILL.md blanket git grant"
@@ -150,15 +166,24 @@ if [[ -n "${skill}" ]]; then
   assert_not_contains "${skill}" "Bash(mkdir:*)" "740 skills/refine/SKILL.md unused mkdir grant"
   assert_not_contains "${skill}" "curl" "740 skills/refine/SKILL.md any curl reference"
 
+  # --- #749: negative assertions for every grant narrowed or dropped this
+  # ticket -- the blanket gh issue/api user grants, blanket mktemp, and
+  # WebFetch must all be absent.
+  assert_not_contains "${skill}" "Bash(gh issue:*)" "749 skills/refine/SKILL.md blanket gh issue grant"
+  assert_not_contains "${skill}" "Bash(gh api user:*)" "749 skills/refine/SKILL.md blanket gh api user grant"
+  assert_not_contains "${skill}" "Bash(mktemp:*)" "749 skills/refine/SKILL.md blanket mktemp grant"
+  assert_not_contains "${skill}" "WebFetch" "749 skills/refine/SKILL.md WebFetch grant"
+
   # --- Exhaustive set equality: parse the frontmatter's Bash(...) entries and
-  # compare against the expected least-privilege list, both sorted so the
-  # comparison is order- and locale-independent.
-  EXPECTED_BASH_GRANTS='Bash(gh issue:*)
+  # compare against the expected least-privilege list (#749: 9 entries), both
+  # sorted so the comparison is order- and locale-independent.
+  EXPECTED_BASH_GRANTS='Bash(gh issue view:*)
+Bash(gh issue edit:*)
 Bash(gh label create:*)
-Bash(gh api user:*)
+Bash(gh api user --jq:*)
 Bash(gh api repos/:*)
 Bash(git remote get-url:*)
-Bash(mktemp:*)
+Bash(mktemp -u /tmp/claude/:*)
 Bash(cat /tmp/claude/:*)
 Bash(rm -f /tmp/claude/:*)'
   allowed_line="$(grep -m1 '^allowed-tools:' "${skill_path}")"
@@ -206,17 +231,25 @@ ${actual_bash_grants}"
   assert_contains "${skill}" "rm -f /tmp/claude/issue-" "740 skills/refine/SKILL.md single-line rm -f cleanup"
   assert_not_contains "${skill}" 'rm -f \' "740 skills/refine/SKILL.md multi-line rm -f continuation"
 
+  # --- #749: refine's only mktemp call is a dry-run `-u` name generator, path
+  # -scoped to /tmp/claude/ -- pin that the actual invocation shape matches
+  # the granted Bash(mktemp -u /tmp/claude/:*) prefix (mirroring design's own
+  # cross-file pin for Bash(mktemp -d:*)).
+  assert_contains "${skill}" "mktemp -u /tmp/claude/issue-" "749 skills/refine/SKILL.md mktemp -u invocation shape"
+
   # --- Invocation-vs-grant scans (guardrails against future widening): every
   # `gh`/`git` invocation token pair actually present in the file must fall
   # under one of the granted prefixes above -- docs/shell-scripting-gotchas.md
-  # names #738 *and* #740 as the recurrence this guards against.
+  # names #738, #740, *and* #749 as the recurrence this guards against.
+  # #749: per-verb gh arm (view/edit only -- refine posts no comments and
+  # never lists/closes) so a newly-introduced ungranted verb fails here.
   while IFS= read -r cmd; do
     [[ -n "${cmd}" ]] || continue
     case "${cmd}" in
-      "gh issue"*|"gh label create"*|"gh api user"*|"gh api repos"*) ;;
+      "gh issue view"*|"gh issue edit"*|"gh label create"*|"gh api user --jq"*|"gh api repos"*) ;;
       *) fail "740 skills/refine/SKILL.md: ungranted gh invocation: [${cmd}]" ;;
     esac
-  done < <(grep -oE '\bgh [a-z]+( [a-z]+)?' "${skill_path}" | LC_ALL=C sort -u)
+  done < <(grep -oE '\bgh api user --jq|\bgh [a-z]+( [a-z]+)?' "${skill_path}" | LC_ALL=C sort -u)
 
   while IFS= read -r cmd; do
     [[ -n "${cmd}" ]] || continue
@@ -232,6 +265,7 @@ fi
 if [[ -n "${codex}" ]]; then
   assert_contains "${codex}" "gh api repos/" "740 skills/refine/codex.md gh api repos/ mention"
   assert_contains "${codex}" "Command surface (least privilege)" "740 skills/refine/codex.md least-privilege command-surface marker"
+  assert_not_contains "${codex}" "goes through the client's own web-fetch capability" "749 skills/refine/codex.md stale web-fetch clause"
 fi
 
 if [[ "${failures}" -gt 0 ]]; then

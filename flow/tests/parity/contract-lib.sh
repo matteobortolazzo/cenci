@@ -605,7 +605,15 @@ drive_baseline_gate() {
 drive_worktree_guard() {
   local repo_root="$1" file_path="$2" input rc err
   input="$(jq -n --arg fp "${file_path}" '{tool_input:{file_path:$fp}}')"
-  err="$( (cd "${repo_root}" && printf '%s' "${input}" | sh "${FLOW_DIR}/hooks/scripts/guard-main-worktree.sh") 2>&1 1>/dev/null )"
+  # TMPDIR="" (#749): guard-main-worktree.sh's TMPDIR-widening allowlist
+  # treats an empty TMPDIR as unset (its own `-n` check), so this is
+  # portable and needs no `env -u`. P2/P5's "bad sim" fixtures are rooted at
+  # `mktemp -d /var/tmp/parity-*` (parity.test.sh:105,133) specifically to
+  # escape the /tmp/* arm; without pinning TMPDIR here, a runner whose own
+  # ambient TMPDIR happens to be /var/tmp (or any ancestor of those fixture
+  # roots) would silently widen the allowlist and flip those assertions from
+  # "blocked" to "allowed".
+  err="$( (cd "${repo_root}" && printf '%s' "${input}" | TMPDIR="" sh "${FLOW_DIR}/hooks/scripts/guard-main-worktree.sh") 2>&1 1>/dev/null )"
   rc=$?
   if [[ "${rc}" -eq 0 ]]; then
     echo "allowed"
