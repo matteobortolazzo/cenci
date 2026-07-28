@@ -27,7 +27,7 @@ The approval options offered for this mode are the shared set defined in `SKILL.
 
 ## Phase 6 contribution — GitHub-issue apply path (no worktree, no branch, no commit, no PR)
 
-`backlog` mode does **not** take `SKILL.md`'s worktree/commit/PR apply path — no repository files change, so there is nothing to branch, commit, or open a PR for. Apply the approved findings as GitHub-issue mutations from the main session instead, in the order below. Read `docs/skill-authoring.md` before writing any issue title or body: externally-visible free text always goes through a temp file that is read back, never interpolated inline into the command.
+`backlog` mode does **not** take `SKILL.md`'s worktree/commit/PR apply path — no repository files change, so there is nothing to branch, commit, or open a PR for. Apply the approved findings as GitHub-issue mutations from the main session instead, in the order below. Read `docs/skill-authoring.md` before writing any issue title or body: a title-carrying write goes through `gh api ... --input` with a file-tool-authored JSON payload, never interpolated inline into the command; a body-only write stays on `gh issue ... --body-file`.
 
 **Run token** (temp-file scoping only — no worktree is created): generate one with the shared
 
@@ -39,16 +39,20 @@ and reuse its trailing token to scope this run's temp files, per AGENTS.md's rul
 
 **Batch** (consolidate a group into one polish ticket):
 
-1. Write the new ticket's title and body to run-token-scoped temp files. The body cites each source ticket, carries a `Supersedes #a #b #c` line, and states the combined-ticket sizing rationale (`docs/ticket-sizing.md:36-41`).
-2. Create the ticket with **no** `Followup` label — a human chose to consolidate it, so it enters the backlog as a normal, unrefined ticket. Read the title back from its temp file and guard against an empty read before the create, exactly as `phase-9-pr.md` does (the title is externally-derived free text; there is no `--title-file` flag, so it must never be inline-interpolated from an issue body):
+1. Write the new ticket's title and body to one run-token-scoped JSON file — use the `Write` tool to create `/tmp/claude/cenci-maintain-<run-token>-batch.json` containing `{"title": …, "body": …}`. The body cites each source ticket, carries a `Supersedes #a #b #c` line, and states the combined-ticket sizing rationale (`docs/ticket-sizing.md:36-41`). Escape every `"` as `\"`, every `\` as `\\`, and every newline as `\n` inside both JSON string values — no literal newline may appear inside a JSON string.
+2. Create the ticket with **no** `Followup` label — a human chose to consolidate it, so it enters the backlog as a normal, unrefined ticket. The title is externally-derived free text, so create it via `gh api ... --input` with the `Write`-authored JSON payload, never an inline `--title`:
 
    ```bash
-   TITLE=$(cat <title-path>) || { echo "backlog polish-ticket title read failed" >&2; exit 1; }
-   [[ -n "$TITLE" ]] || { echo "backlog polish-ticket title is empty" >&2; exit 1; }
-   gh issue create --repo <owner>/<repo> --title "$TITLE" --body-file <body-path>
+   gh api repos/<owner>/<repo>/issues -X POST --input /tmp/claude/cenci-maintain-<run-token>-batch.json --jq .number
    ```
 
-3. Parse `#<new>` from the create command's output URL. If create fails, or no number can be parsed, **stop before closing any source** and never fabricate `#<new>` — report the error with the group's source numbers so nothing is lost.
+3. The `--jq .number` output *is* the new ticket's issue number `#<new>` — this confirms the API accepted valid JSON, but not that the title text itself is correct (a JSON-escaping mistake can mangle a title while still parsing). **Verify the title persisted correctly** before treating the create as successful:
+
+   ```bash
+   gh issue view <new> --repo <owner>/<repo> --json title --jq '.title'
+   ```
+
+   Confirm it exactly matches the title written to the JSON payload in step 1. If create fails, or `--jq .number` returns empty or non-numeric output, or the command exits non-zero, or the re-fetched title does not match, **stop before closing any source** and never fabricate or rely on `#<new>` — report the error (or mismatch) with the group's source numbers so nothing is lost. This also covers the `Write` call from step 1: if it fails, or the JSON file is missing/empty/stale when `gh api --input` runs, retry the `Write` once before invoking `gh api` — do not mistake a local Write failure for an API-side rejection.
 4. Only after the create succeeds, close each source ticket, preserving its content in `#<new>`:
 
    ```bash
