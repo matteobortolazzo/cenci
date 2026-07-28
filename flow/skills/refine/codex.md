@@ -21,7 +21,7 @@ no comments and never lists/closes an issue), plus `gh label create …`, `gh ap
 (via `ticket-ownership`), and `gh api repos/…`; its `git` surface is limited to `git remote
 get-url`; and its payload-composition surface is a standalone `jq -n --rawfile …` call, per
 the `shell-rules` skill's canonical snippet. The only temp-name primitive is a standalone
-`mktemp -u /tmp/claude/…` call — a dry-run name generator, never `mktemp -d`; the file tool
+`mktemp -u ${TMPDIR:-/tmp}/cenci/…` call — a dry-run name generator, never `mktemp -d`; the file tool
 creates the actual file, and the printed token is carried forward as literal text, never
 shell state. Every title-carrying issue write (the retitle edit, each child-ticket create,
 and the companion design-ticket create) goes through `gh api repos/<owner>/<repo>/… -X

@@ -63,7 +63,7 @@ fi
 # print no path to stdout, so a caller never proceeds with an empty/
 # root-relative path.
 # Root-proof lever: TMPDIR points at a *regular file*, so the helper's
-# `mkdir -p "${TMPDIR}/claude"` fails with ENOTDIR — a kernel path-resolution
+# `mkdir -p "${TMPDIR}/cenci"` fails with ENOTDIR — a kernel path-resolution
 # error uid 0 cannot bypass. `chmod 000` was a no-op for root, which made this
 # assertion false-fail in root containers (#642); see
 # flow/docs/shell-scripting-gotchas.md.

@@ -52,11 +52,11 @@ columns:
 
 # Board-level actions (default scope is "card" — they act on the selected card)
 actions:
-  C: { name: Claude, type: shell, command: "tmux new-window cn cs" }
-  X: { name: Codex, type: shell, command: "tmux new-window cn xt" }
+  C: { name: Claude, type: shell, command: "tmux new-window cenci open --agent claude" }
+  X: { name: Codex, type: shell, command: "tmux new-window cenci open --agent codex" }
   S:
     {
       name: Sync,
       type: shell,
-      command: 'tmux new-window -n sync "cn -- ''/sync''"',
+      command: 'tmux new-window -n sync "cenci open -- ''/sync''"',
     }

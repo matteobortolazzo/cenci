@@ -32,22 +32,22 @@ The approval options offered for this mode are the shared set defined in `SKILL.
 **Run token** (temp-file scoping only — no worktree is created): generate one with the shared
 
 ```bash
-mktemp -u /tmp/claude/cenci-maintain-XXXXXX
+mktemp -u ${TMPDIR:-/tmp}/cenci/cenci-maintain-XXXXXX
 ```
 
-and reuse its trailing token to scope this run's temp files, per AGENTS.md's rule against unchecked command substitution for security-critical paths. Verify the command succeeded and the token matches `^[A-Za-z0-9._-]+$` before using it in any path.
+and reuse its trailing token to scope this run's temp files, per AGENTS.md's rule against unchecked command substitution for security-critical paths. Verify the command succeeded and the token is non-empty and matches `^[A-Za-z0-9._-]+$` (rejecting `.`, `..`, or any value containing `..`) before using it in any path. If verification fails, stop and report — never fall back to an unscoped path.
 
 **Batch** (consolidate a group into one polish ticket):
 
-1. Use the `Write` tool to create the raw title and body as plain text, run-token-scoped — `/tmp/claude/cenci-maintain-<run-token>-batch-title.txt` and `/tmp/claude/cenci-maintain-<run-token>-batch-body.md` — never a hand-escaped JSON literal. The body cites each source ticket, carries a `Supersedes #a #b #c` line, and states the combined-ticket sizing rationale (`docs/ticket-sizing.md:36-41`). Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet:
+1. Use the `Write` tool to create the raw title and body as plain text, run-token-scoped — `${TMPDIR:-/tmp}/cenci/cenci-maintain-<run-token>-batch-title.txt` and `${TMPDIR:-/tmp}/cenci/cenci-maintain-<run-token>-batch-body.md` — never a hand-escaped JSON literal. The body cites each source ticket, carries a `Supersedes #a #b #c` line, and states the combined-ticket sizing rationale (`docs/ticket-sizing.md:36-41`). Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet:
 
    ```bash
-   jq -n --rawfile title "/tmp/claude/cenci-maintain-<run-token>-batch-title.txt" --rawfile body "/tmp/claude/cenci-maintain-<run-token>-batch-body.md" '{title: ($title | rtrimstr("\n")), body: $body}' > "/tmp/claude/cenci-maintain-<run-token>-batch.json"
+   jq -n --rawfile title "${TMPDIR:-/tmp}/cenci/cenci-maintain-<run-token>-batch-title.txt" --rawfile body "${TMPDIR:-/tmp}/cenci/cenci-maintain-<run-token>-batch-body.md" '{title: ($title | rtrimstr("\n")), body: $body}' > "${TMPDIR:-/tmp}/cenci/cenci-maintain-<run-token>-batch.json"
    ```
 2. Create the ticket with **no** `Followup` label — a human chose to consolidate it, so it enters the backlog as a normal, unrefined ticket. The title is externally-derived free text, so create it via `gh api ... --input` with the `Write`-authored JSON payload, never an inline `--title`:
 
    ```bash
-   gh api repos/<owner>/<repo>/issues -X POST --input /tmp/claude/cenci-maintain-<run-token>-batch.json --jq .number
+   gh api repos/<owner>/<repo>/issues -X POST --input ${TMPDIR:-/tmp}/cenci/cenci-maintain-<run-token>-batch.json --jq .number
    ```
 
 3. The `--jq .number` output *is* the new ticket's issue number `#<new>` — this confirms the API accepted valid JSON, but not that the title text itself is correct (a JSON-escaping mistake can mangle a title while still parsing). **Verify the title persisted correctly** before treating the create as successful:

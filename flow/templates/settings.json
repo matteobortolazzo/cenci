@@ -9,6 +9,8 @@
       "Read(~/.claude/plugins/**)",
       "Read(//tmp/claude*/**)",
       "Edit(//tmp/claude*/**)",
+      "Read(//tmp/cenci*/**)",
+      "Edit(//tmp/cenci*/**)",
       "Bash(cd:*)",
       "Bash(dotnet:*)",
       "Bash(npm:*)",

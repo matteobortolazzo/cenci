@@ -24,7 +24,7 @@ If `hasPlanFile` is false and the main agent's Trivial-Ticket Triage (see `SKILL
 
 1. The AC-mandated line (`` Judged trivial: `<reason>` — skipping planning, implementing directly ``) was already printed once by `SKILL.md`'s `## Trivial-Ticket Triage` when it set `trivial = true`. Do **not** print it again here.
 2. Skip the planner delegation and the Q&A loop entirely — there are no clarifying questions to ask on this path.
-3. Write the plan file using the **same** "Persist the Plan" machinery below, verbatim: the same front-matter shape, the same ticket-title→slug derivation, a `Write` step for the main-agent-owned sections, then `cat /tmp/claude/cenci-context-<id>.md >> .plans/<filename>` to append `## Ticket Details`, `## Design Context`, and `## Project Context`. Two content differences: `## Implementation Plan` in this minimal file is a one-liner pointing at `## Ticket Details`, e.g. "Trivial ticket — implementation follows the ticket body directly; see ## Ticket Details." Likewise, `## Architectural Context` is a one-liner in place of the planner's discovered patterns/conventions, e.g. "N/A — no codebase exploration; triage judged the ticket unambiguous from its own body." Then run assembly step 3's four-heading verification exactly as written (see `## Persist the Plan`, step 3), including its `## Design Context` self-repair and its hard stop — on this path the hard stop additionally means not running step 5's `--trivial` label call, not recording the artifact in step 6, not setting `hasPlanFile = true`, not arming the goal, and not entering Phase 2.
+3. Write the plan file using the **same** "Persist the Plan" machinery below, verbatim: the same front-matter shape, the same ticket-title→slug derivation, a `Write` step for the main-agent-owned sections, then `cat ${TMPDIR:-/tmp}/cenci/cenci-context-<id>.md >> .plans/<filename>` to append `## Ticket Details`, `## Design Context`, and `## Project Context`. Two content differences: `## Implementation Plan` in this minimal file is a one-liner pointing at `## Ticket Details`, e.g. "Trivial ticket — implementation follows the ticket body directly; see ## Ticket Details." Likewise, `## Architectural Context` is a one-liner in place of the planner's discovered patterns/conventions, e.g. "N/A — no codebase exploration; triage judged the ticket unambiguous from its own body." Then run assembly step 3's four-heading verification exactly as written (see `## Persist the Plan`, step 3), including its `## Design Context` self-repair and its hard stop — on this path the hard stop additionally means not running step 5's `--trivial` label call, not recording the artifact in step 6, not setting `hasPlanFile = true`, not arming the goal, and not entering Phase 2.
 4. If `cenci.planComment: true`, post the minimal plan as an audit comment exactly as today (see `## Persist the Plan`). As there, the comment must come **before** the label call in the next step — the label call records the ticket's post-edit `updatedAt` as the plan-freshness baseline, so it must be the last call that edits the ticket.
 5. Apply the `Planned` label exactly as `## Persist the Plan`'s "Mark the ticket `Planned`" step does, **except** retain `Working` instead of swapping it out — this session is continuing rather than stopping, so the normal flow's
    ```bash
@@ -58,8 +58,8 @@ Never begin Phase 2 in a session that created a new plan — not in the same tur
 
 If the resolved config has `"deepExploration": true`, launch two Explore-type subagents before planner delegation:
 
-- Explorer 1: feature area, related components/services/patterns. Write full notes to `/tmp/claude/cenci-<ticket-id-or-slug>-explore-1.md`.
-- Explorer 2: cross-cutting concerns, shared utilities, middleware, configuration, integrations. Write full notes to `/tmp/claude/cenci-<ticket-id-or-slug>-explore-2.md`.
+- Explorer 1: feature area, related components/services/patterns. Write full notes to `${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-explore-1.md`.
+- Explorer 2: cross-cutting concerns, shared utilities, middleware, configuration, integrations. Write full notes to `${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-explore-2.md`.
 
 Each explorer must write its detailed findings to its notes file and return only a summary of 10 lines or fewer. Pass the two file paths (not the notes content) to the planner, which reads them itself. If `deepExploration` is absent or false, skip this.
 
@@ -111,7 +111,7 @@ Once the planner has no remaining questions, create `.plans/` and assemble:
 **Assemble, don't re-emit.** Write the plan file in two steps so bundle content never passes through the main context again:
 
 1. `Write` the plan file with the YAML front matter and only the sections the main agent owns: `## User Context`, `## Q&A from Planning`, `## Implementation Plan`, `## Architectural Context`, `## Attachment Summaries`.
-2. Append the context bundle verbatim via shell: `cat /tmp/claude/cenci-context-<id|slug>.md >> .plans/<filename>` — this contributes `## Ticket Details`, `## Design Context`, and `## Project Context`.
+2. Append the context bundle verbatim via shell: `cat ${TMPDIR:-/tmp}/cenci/cenci-context-<id|slug>.md >> .plans/<filename>` — this contributes `## Ticket Details`, `## Design Context`, and `## Project Context`.
 3. **Verify the assembled plan.** Before anything in the `Mark the ticket `Planned`` step below runs, confirm the assembled file actually contains every heading `cenci pipeline plan-check` requires:
 
    ```bash
@@ -233,7 +233,7 @@ Review the plan above. To implement, start a fresh session and run:
 
 To discard it and re-plan, re-run /cenci:implement <ticket-id or task> with `replan` as context.
 
-If the task risks exceeding the implementing agent's context budget (see `docs/ticket-sizing.md`), consider running /refine to split it first.
+If the task risks exceeding the implementing agent's context budget (see `docs/ticket-sizing.md`), consider running /cenci:refine to split it first.
 
 The SessionStart hook will also remind you of pending plans.
 ```

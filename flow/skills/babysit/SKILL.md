@@ -56,7 +56,7 @@ cenci babysit stop <pr>
 ```
 
 Report the command's result. Do not reproduce the polling pipeline in the agent session,
-arm Claude `/loop`, create a Codex goal, or maintain `/tmp/claude` state.
+arm Claude `/loop`, create a Codex goal, or maintain `${TMPDIR:-/tmp}/cenci` state.
 
 ## Safety guarantees
 

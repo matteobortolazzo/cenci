@@ -715,7 +715,7 @@ After gathering answers:
 
    Then **append** to it:
 
-   > **IMPORTANT**: All base permissions from the template (`Write`, `Edit`, `Read(~/.claude/plugins/**)`, `Read(//tmp/claude*/**)`, `Edit(//tmp/claude*/**)`, `Bash(cd:*)`, `Bash(git:*)`, `Bash(gh:*)`, `Bash(wc:*)`, `SlashCommand(/goal:*)`, `SlashCommand(/loop:*)`, etc.) **MUST** remain in `permissions.allow`. Only **append** new entries — never remove or replace existing ones. When updating an **existing** `settings.json`, also ensure these base entries are present — add any that are missing (older configs predate them — e.g. `SlashCommand(/goal:*)` for the implement autopilot and `SlashCommand(/loop:*)` for `/cenci:babysit`). The `Read(~/.claude/plugins/**)` rule lets the pipeline read its own plugin files (phase docs resolve to `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/skills/…`) without prompting — it is deliberately scoped to `plugins/` so subagents cannot read session transcripts or global config under `~/.claude/`; the `//tmp/claude*/**` rules cover the `shell-rules` heredoc temp-file pattern and the session scratchpad.
+   > **IMPORTANT**: All base permissions from the template (`Write`, `Edit`, `Read(~/.claude/plugins/**)`, `Read(//tmp/claude*/**)`, `Edit(//tmp/claude*/**)`, `Read(//tmp/cenci*/**)`, `Edit(//tmp/cenci*/**)`, `Bash(cd:*)`, `Bash(git:*)`, `Bash(gh:*)`, `Bash(wc:*)`, `SlashCommand(/goal:*)`, `SlashCommand(/loop:*)`, etc.) **MUST** remain in `permissions.allow`. Only **append** new entries — never remove or replace existing ones. When updating an **existing** `settings.json`, also ensure these base entries are present — add any that are missing (older configs predate them — e.g. `SlashCommand(/goal:*)` for the implement autopilot, `SlashCommand(/loop:*)` for `/cenci:babysit`, and the `//tmp/cenci*/**` pair for the `${TMPDIR:-/tmp}/cenci/` temp-root migration). The `Read(~/.claude/plugins/**)` rule lets the pipeline read its own plugin files (phase docs resolve to `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/skills/…`) without prompting — it is deliberately scoped to `plugins/` so subagents cannot read session transcripts or global config under `~/.claude/`. The two `//tmp/*` rule pairs cover two temp roots side by side: `//tmp/claude*/**` still covers the `shell-rules` heredoc temp-file pattern's legacy paths and the Claude Code session scratchpad; `//tmp/cenci*/**` covers the canonical `${TMPDIR:-/tmp}/cenci/` root skills now write under — but only under the default `TMPDIR`, since a custom `TMPDIR` cannot be expressed as a static permission rule, so those writes may still prompt.
 
    > **IMPORTANT**: All base deny rules from the template **MUST** be present in `permissions.deny`. Only **append** new entries — never remove or replace existing ones, including user-added entries. When updating an **existing** `settings.json`, also ensure these base entries are present — add any that are missing (older configs predate them: they shipped only `Bash(git push --force:*)` and `Bash(git reset --hard:*)`). Two healing specifics: (a) **remove** the legacy `Bash(git push --force:*)` and `Bash(git reset --hard:*)` entries when adding the base list — the boundary-safe forms below supersede them, and the legacy `--force` form also blocks `git push --force-with-lease`, which implement's PR phase requires; (b) deduplicate — never add a base entry the list already contains. **Verify** after healing that every base deny entry is present and neither legacy entry remains.
 
@@ -1229,8 +1229,8 @@ For each MCP selected in question 5:
 
    # Board-level actions (default scope is "card" — they act on the selected card)
    actions:
-     C: { name: Claude, type: shell, command: "tmux new-window cn cs" }
-     X: { name: Codex, type: shell, command: "tmux new-window cn xt" }
+     C: { name: Claude, type: shell, command: "tmux new-window cenci open --agent claude" }
+     X: { name: Codex, type: shell, command: "tmux new-window cenci open --agent codex" }
 
    # Auto-close a card's agent window when its ticket closes
    cleanup: "cenci close {number}"
@@ -1649,9 +1649,9 @@ When migrating from an older config that has `ticketSystem`, `prSystem`, `ticket
    ```
    If push fails due to sandbox/network/auth, show the exact command and use `AskUserQuestion` ("Pushed, continue" / "Abort") to wait for the user to push manually before continuing.
 
-   **PR**: write the body to `/tmp/claude/cenci-configure-<slug>-pr-body.md` first (never a heredoc or large inline string), then:
+   **PR**: write the body to `${TMPDIR:-/tmp}/cenci/cenci-configure-<slug>-pr-body.md` first (never a heredoc or large inline string), then:
    ```bash
-   gh pr create --title "chore(configure): <one-line summary>" --body-file /tmp/claude/cenci-configure-<slug>-pr-body.md
+   gh pr create --title "chore(configure): <one-line summary>" --body-file ${TMPDIR:-/tmp}/cenci/cenci-configure-<slug>-pr-body.md
    ```
    Body:
    ```markdown

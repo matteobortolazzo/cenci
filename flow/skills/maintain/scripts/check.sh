@@ -768,7 +768,7 @@ check_duplicate_names() {
 }
 
 check_broken_refs() {
-  local d f refs r candidate candidate_owner matches any_fail=0
+  local d f refs r any_fail=0
   for d in "$FLOW_DIR"/skills/*/; do
     [[ -f "${d}SKILL.md" ]] || continue
     for f in "${d}SKILL.md" "${d}codex.md" "${d}"phases/*.md "${d}"modes/*.md; do
@@ -778,19 +778,6 @@ check_broken_refs() {
       while IFS= read -r r; do
         [[ -n "$r" ]] || continue
         if [[ ! -f "$d/$r" ]]; then
-          matches=0
-          candidate_owner=""
-          for candidate in "$FLOW_DIR"/skills/*/"$r"; do
-            [[ -f "$candidate" ]] || continue
-            matches=$((matches+1))
-            candidate_owner="$(basename "$(dirname "$(dirname "$candidate")")")"
-          done
-          # Cross-skill references must explicitly name the owning skill.
-          # This keeps `babysit`'s `scripts/tick.sh` valid while preventing an
-          # unrelated duplicate basename from satisfying a local reference.
-          if [[ "$matches" -eq 1 ]] && grep -qE "\`${candidate_owner}\`" "$f" 2>/dev/null; then
-            continue
-          fi
           add_result broken-refs "$(relpath "$f")" fail \
             "referenced script '$r' does not exist relative to its owning skill $(relpath "$d")" \
             "create $r under $(relpath "$d") or fix the reference in $(relpath "$f")"

@@ -137,7 +137,7 @@ Runs **after** the Pre-flight Check above — the `gh auth status` check is the 
 **If ticket mode:** Delegate to the `context-gatherer` agent. Pass:
 
 - The ticket number and `owner/repo`
-- The bundle output path: `/tmp/claude/cenci-context-<ticket-id>.md`
+- The bundle output path: `${TMPDIR:-/tmp}/cenci/cenci-context-<ticket-id>.md`
 - Config facts: `isMonorepo`, `projects`, and the design path when enabled
 
 The gatherer fetches the ticket and comments, performs parent-child detection, discovers attachments, loads design and per-project context, writes the bundle file, and returns a compact digest. From the digest, store:
@@ -151,7 +151,7 @@ If the digest reports errors (ticket not found, auth failure), surface them to t
 
 After the digest is stored, invoke `cenci pipeline prepare <id>` to record `prepared` state and confirm the ticket exists (the command itself re-verifies via a retried `gh issue view <id>`). Render the returned `next_actions` and `warnings` as the pre-flight status update instead of narrating what comes next — a `warnings` entry here means this `prepare` call was a monotonic no-op (the ticket's persisted stage was already at or past `prepared`), which is worth showing in the transcript like every other stage call site. If it returns non-empty `errors[]`, surface them to the user and stop — do not proceed to Attachments/Ticket Readiness. Ticketless mode: skip this call — the pipeline commands operate on ticket IDs.
 
-**If ticketless mode:** Delegate to the `context-gatherer` only when there is context to bundle (design enabled or monorepo), with the task description in place of the ticket and bundle path `/tmp/claude/cenci-context-<slug>.md`. Otherwise skip — the task description is the entire input.
+**If ticketless mode:** Delegate to the `context-gatherer` only when there is context to bundle (design enabled or monorepo), with the task description in place of the ticket and bundle path `${TMPDIR:-/tmp}/cenci/cenci-context-<slug>.md`. Otherwise skip — the task description is the entire input.
 
 **Parent-child edge cases** (resolved inside the gatherer, recorded here for downstream phases):
 - Parent already closed → `isLastChild = false` (skip auto-close)
@@ -238,7 +238,7 @@ This is informational only — it does not block the pipeline.
 
 **If ticket mode:** before triage, invoke `cenci pipeline label <id> --transition working` — the CLI now owns both the ownership verify/auto-claim logic (mirroring the `ticket-ownership` reference skill's own logic: verify exclusive ownership, auto-claim an unassigned ticket, never replace an existing assignee) **and** applying the `Working` label in one call (see the **Label "Working"** section below, which this same call also satisfies). Render the returned `state`/`next_actions`/`warnings`/`errors` as this step's status update; if it returns non-empty `errors[]` (foreign/multiple assignee, wrong pipeline stage), surface them and stop before proceeding to triage or the pipeline.
 
-The `ticket-ownership` reference skill itself stays in place — it is still read directly by `/refine` and `/design`, which don't run through the pipeline CLI. This call site no longer reads it directly; the CLI reimplements the same logic instead.
+The `ticket-ownership` reference skill itself stays in place — it is still read directly by `/cenci:refine` and `/cenci:design`, which don't run through the pipeline CLI. This call site no longer reads it directly; the CLI reimplements the same logic instead.
 
 ## Trivial-Ticket Triage
 

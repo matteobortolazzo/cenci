@@ -164,6 +164,18 @@ Read any relevant `docs/<topic>.md` files for entries related to design or this 
 
 This is the forced reasoning phase. Do not create or modify any `.pen` files yet.
 
+### Label "Working" (at start)
+
+**If ticketless mode:** Skip this.
+
+**If ticket mode:** Before starting design work (at the beginning of Phase 2), add the "Working" label. `gh issue edit --add-label` fails when the label does not exist in the repository, so ensure it exists first — each as its own Bash call (`|| true` swallows only the "already exists" error):
+```bash
+gh label create "Working" --repo <owner>/<repo> --color "FBCA04" --description "Actively being refined, designed, or implemented" 2>/dev/null || true
+```
+```bash
+gh issue edit <number> --repo <owner>/<repo> --add-label "Working"
+```
+
 ### Step 2A: Classify Design Type
 
 Based on the ticket description (or design description in ticketless mode), classify what needs designing:
@@ -378,7 +390,7 @@ If **"Start Over"**:
 
 **Only proceed to Phase 5 after the user selects "Approve".**
 
-## Phase 5.5 — Generate DESIGN.md
+## Phase 5 — Generate DESIGN.md
 
 After the user approves the design in Phase 4, generate a `DESIGN.md` spec that documents the design for implementation.
 
@@ -427,7 +439,7 @@ Options: "Overwrite with new spec", "Merge (add new entries, keep existing)"
 - **Overwrite**: Replace the file entirely.
 - **Merge**: Read the existing file, add new screens/components/tokens that don't already exist, preserve existing entries.
 
-## Phase 5 — Report Summary
+## Phase 6 — Report Summary
 
 ### Report
 
@@ -441,23 +453,11 @@ Summarize what was created:
 Include this note at the end of the report:
 > "Note: Pencil does not auto-save. Save the `.pen` file manually in Pencil (Cmd/Ctrl+S) before closing — unsaved `batch_design` changes will be lost. The design file remains open for your review."
 
-### Label "Working" (at start)
+## Phase 7 — Commit Design
 
-**If ticketless mode:** Skip this.
+After Phase 6 reporting is complete, commit the design artifacts on the current branch. **No branch switch, no push, no PR.**
 
-**If ticket mode:** Before starting design work (at the beginning of Phase 2), add the "Working" label. `gh issue edit --add-label` fails when the label does not exist in the repository, so ensure it exists first — each as its own Bash call (`|| true` swallows only the "already exists" error):
-```bash
-gh label create "Working" --repo <owner>/<repo> --color "FBCA04" --description "Actively being refined, designed, or implemented" 2>/dev/null || true
-```
-```bash
-gh issue edit <number> --repo <owner>/<repo> --add-label "Working"
-```
-
-## Phase 6 — Commit Design
-
-After Phase 5 reporting is complete, commit the design artifacts on the current branch. **No branch switch, no push, no PR.**
-
-### Step 6.0: Manual Save Reminder (REQUIRED)
+### Step 7.0: Manual Save Reminder (REQUIRED)
 
 **Pencil does NOT auto-save `.pen` files.** Changes made via `batch_design` exist only in the open editor until the user manually saves. `git add` reads from disk, so committing without saving captures a stale `.pen` file.
 
@@ -466,10 +466,10 @@ Before proceeding, prompt the user via `AskUserQuestion`:
 
 Options: "Saved, proceed", "Cancel commit"
 
-- **"Saved, proceed"** → continue to Step 6A.
+- **"Saved, proceed"** → continue to Step 7A.
 - **"Cancel commit"** → **Stop.** Do not commit.
 
-### Step 6A: Commit
+### Step 7A: Commit
 
 Stage and commit the design artifacts on the current branch. **Do not stage screenshots** — the `.pen` file is the source of truth and any `screenshots/` directory inside `<designPath>` is local-only scratch.
 
@@ -479,7 +479,7 @@ Stage and commit as **two standalone Bash calls** — never a `&&` compound (per
 git add <designPath>/*.pen <designPath>/DESIGN.md
 ```
 
-Verify both files were actually staged before committing, using only the client's file tools (e.g. Glob or Read — no additional Bash grant needed): confirm the `.pen` file exists at `<designPath>` so the `git add` glob above is known to have matched it, rather than silently resolving to nothing. If it's missing, stop and apply the same recovery as Step 6D's "Commit fails" case rather than committing an incomplete change.
+Verify both files were actually staged before committing, using only the client's file tools (e.g. Glob or Read — no additional Bash grant needed): confirm the `.pen` file exists at `<designPath>` so the `git add` glob above is known to have matched it, rather than silently resolving to nothing. If it's missing, stop and apply the same recovery as Step 7D's "Commit fails" case rather than committing an incomplete change.
 
 ```bash
 git commit -m "feat(design): <description>" -- <designPath>/*.pen <designPath>/DESIGN.md
@@ -488,7 +488,7 @@ git commit -m "feat(design): <description>" -- <designPath>/*.pen <designPath>/D
 - **If ticket mode:** Include ticket ref in the commit body: `#<ticket-id>`
 - **If ticketless mode:** Use the design description slug in the commit message
 
-### Step 6B: Post Design Comment
+### Step 7B: Post Design Comment
 
 **If ticketless mode:** Skip this step.
 
@@ -503,17 +503,17 @@ git commit -m "feat(design): <description>" -- <designPath>/*.pen <designPath>/D
    - Commit: `<commit-sha>`
 
    ### Design Decisions
-   - Aesthetic tone: <from Phase 5 report>
-   - Color palette: <from Phase 5 report>
-   - Typography: <from Phase 5 report>
-   - Layout approach: <from Phase 5 report>
+   - Aesthetic tone: <from Phase 6 report>
+   - Color palette: <from Phase 6 report>
+   - Typography: <from Phase 6 report>
+   - Layout approach: <from Phase 6 report>
    ```
 3. Post it:
    ```bash
    gh issue comment <number> --repo <owner>/<repo> --body-file "${TMPDIR:-/tmp}/cenci/design-comment-<number>.md"
    ```
 
-### Step 6C: Label Ticket
+### Step 7C: Label Ticket
 
 **If ticketless mode:** Skip labeling.
 
@@ -539,7 +539,7 @@ gh issue edit <number> --repo <owner>/<repo> --add-label "Designed" --remove-lab
    ```bash
    gh issue edit <dependent> --repo <owner>/<repo> --add-label "Designed"
    ```
-   Also post the same comment from **Step 6B** on each dependent (reuse the temp file written there) via `gh issue comment <dependent> --repo <owner>/<repo> --body-file "${TMPDIR:-/tmp}/cenci/design-comment-<number>.md"`. Implement itself locates `DESIGN.md` via the configured `designPath` (see `implement/SKILL.md`), so this comment is for human/planning context — the context-gatherer bundles ticket comments when implement runs.
+   Also post the same comment from **Step 7B** on each dependent (reuse the temp file written there) via `gh issue comment <dependent> --repo <owner>/<repo> --body-file "${TMPDIR:-/tmp}/cenci/design-comment-<number>.md"`. Implement itself locates `DESIGN.md` via the configured `designPath` (see `implement/SKILL.md`), so this comment is for human/planning context — the context-gatherer bundles ticket comments when implement runs.
 
 3. **Close the design ticket** — its deliverable is done:
    ```bash
@@ -548,7 +548,7 @@ gh issue edit <number> --repo <owner>/<repo> --add-label "Designed" --remove-lab
 
 If no dependents are found, still close the ticket — just note it in the closing comment so a missing `Depends on` link is visible.
 
-### Step 6D: Error Recovery
+### Step 7D: Error Recovery
 
 - **Commit fails** → Display the `git add` / `git commit` commands, then use `AskUserQuestion` ("Ran them, continue" / "Skip") to confirm before proceeding. Do not retry automatically.
 - **Design comment post fails** → Report the failure and continue; do not block on it.
@@ -558,7 +558,7 @@ If no dependents are found, still close the ticket — just note it in the closi
 
 **STOP.** Do not:
 - Enter plan mode or propose an implementation plan
-- Offer to run `/implement` or start implementation
+- Offer to run `/cenci:implement` or start implementation
 - Suggest next steps beyond telling the user to run `/cenci:implement` when ready
 
 Final message:

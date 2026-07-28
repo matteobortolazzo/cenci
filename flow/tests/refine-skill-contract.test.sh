@@ -141,9 +141,9 @@ fi
 # covered by the `Bash(gh api repos/:*)` grant). `Bash(gh api user:*)`
 # narrows to `Bash(gh api user --jq:*)` (sole call site: `ticket-ownership`'s
 # `gh api user --jq .login`, read by refine). Blanket `Bash(mktemp:*)`
-# narrows to `Bash(mktemp -u /tmp/claude/:*)` — refine's only `mktemp` call
-# is a dry-run `-u` name generator (`mktemp -u /tmp/claude/issue-<n>-
-# XXXXXX`), never `mktemp -d`; mirroring design's literal `mktemp -d` string
+# narrows to `Bash(mktemp -u ${TMPDIR:-/tmp}/cenci/:*)` — refine's only
+# `mktemp` call is a dry-run `-u` name generator (`mktemp -u
+# ${TMPDIR:-/tmp}/cenci/issue-<n>-XXXXXX`), never `mktemp -d`; mirroring design's literal `mktemp -d` string
 # would simultaneously break refine's token generation and add a grant with
 # no call site. `WebFetch` is dropped — zero invocations (only prose meaning
 # `gh issue view`). This grows the set from 8 to 9 entries.
@@ -183,9 +183,9 @@ Bash(gh label create:*)
 Bash(gh api user --jq:*)
 Bash(gh api repos/:*)
 Bash(git remote get-url:*)
-Bash(mktemp -u /tmp/claude/:*)
-Bash(cat /tmp/claude/:*)
-Bash(rm -f /tmp/claude/:*)
+Bash(mktemp -u ${TMPDIR:-/tmp}/cenci/:*)
+Bash(cat ${TMPDIR:-/tmp}/cenci/:*)
+Bash(rm -f ${TMPDIR:-/tmp}/cenci/:*)
 Bash(jq -n:*)'
   allowed_line="$(grep -m1 '^allowed-tools:' "${skill_path}")"
   actual_bash_grants="$(printf '%s\n' "${allowed_line}" | grep -o 'Bash([^)]*)' | LC_ALL=C sort -u)"
@@ -226,17 +226,17 @@ ${actual_bash_grants}"
   assert_contains "${skill}" "--jq .number" "740 skills/refine/SKILL.md --jq .number creation-success parsing"
 
   # --- Step 13 cleanup: rm -f reformatted onto a single line so its command
-  # string actually matches the narrowed Bash(rm -f /tmp/claude/:*) prefix
-  # rule (a multi-line `rm -f \` continuation makes the command string start
-  # with a trailing backslash, which the prefix rule would not match).
-  assert_contains "${skill}" "rm -f /tmp/claude/issue-" "740 skills/refine/SKILL.md single-line rm -f cleanup"
+  # string actually matches the narrowed Bash(rm -f ${TMPDIR:-/tmp}/cenci/:*)
+  # prefix rule (a multi-line `rm -f \` continuation makes the command string
+  # start with a trailing backslash, which the prefix rule would not match).
+  assert_contains "${skill}" 'rm -f ${TMPDIR:-/tmp}/cenci/issue-' "740 skills/refine/SKILL.md single-line rm -f cleanup"
   assert_not_contains "${skill}" 'rm -f \' "740 skills/refine/SKILL.md multi-line rm -f continuation"
 
   # --- #749: refine's only mktemp call is a dry-run `-u` name generator, path
-  # -scoped to /tmp/claude/ -- pin that the actual invocation shape matches
-  # the granted Bash(mktemp -u /tmp/claude/:*) prefix (mirroring design's own
-  # cross-file pin for Bash(mktemp -d:*)).
-  assert_contains "${skill}" "mktemp -u /tmp/claude/issue-" "749 skills/refine/SKILL.md mktemp -u invocation shape"
+  # -scoped to ${TMPDIR:-/tmp}/cenci/ -- pin that the actual invocation shape
+  # matches the granted Bash(mktemp -u ${TMPDIR:-/tmp}/cenci/:*) prefix
+  # (mirroring design's own cross-file pin for Bash(mktemp -d:*)).
+  assert_contains "${skill}" 'mktemp -u ${TMPDIR:-/tmp}/cenci/issue-' "749 skills/refine/SKILL.md mktemp -u invocation shape"
 
   # --- Invocation-vs-grant scans (guardrails against future widening): every
   # `gh`/`git` invocation token pair actually present in the file must fall

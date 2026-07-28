@@ -15,7 +15,7 @@
 # the printed path -- never proceed on an unverified/empty path.
 set -u
 
-BASE_DIR="${TMPDIR:-/tmp}/claude"
+BASE_DIR="${TMPDIR:-/tmp}/cenci"
 
 if ! mkdir -p "${BASE_DIR}" 2>/dev/null; then
   echo "run-artifact-dir.sh: failed to create base directory: ${BASE_DIR}" >&2
