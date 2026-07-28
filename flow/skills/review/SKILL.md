@@ -5,7 +5,7 @@ compatibility: Requires Claude Code subagents and interactive gates.
 argument-hint: [<pr-number> | <file-paths>]
 user-invocable: true
 disable-model-invocation: true
-allowed-tools: Read, Bash, Glob, Grep, Task, AskUserQuestion
+allowed-tools: Read, Write, Glob, Grep, Task, AskUserQuestion, Bash(git diff:*), Bash(git remote get-url:*), Bash(gh pr diff:*), Bash(gh pr view:*), Bash(gh pr comment:*)
 ---
 
 > **Client dispatch**: In Codex, read `codex-runtime` and `review/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
@@ -66,7 +66,7 @@ Expand any glob patterns with the Glob tool and collect the **list of file paths
 
 ## Phase 2: Parallel Review
 
-**Prepare shared context by path, not by paste.** For diff/PR mode: if the diff is small (roughly under 200 lines), it may be passed inline; otherwise write it once to `${TMPDIR:-/tmp}/cenci/cenci-review-<scope>-diff.patch` (plus the changed-file list from `git diff --name-only`) and pass reviewers the path — the same `diffContextMode: "file"` discipline the implement pipeline uses. `<scope>` is the PR number in PR mode; in diff and file mode, where no PR number is in scope, use a run-unique `<run-id>` (e.g. a timestamp literal captured once when this skill starts, which is inherently safe under the `shell-rules` scope-key format rule) instead, so no fixed-name path survives in any mode. For file mode: pass the file path list only.
+**Prepare shared context by path, not by paste.** For diff/PR mode: if the diff is small (roughly under 200 lines), it may be passed inline; otherwise produce the patch file by redirecting the already-granted diff command's own output straight to `${TMPDIR:-/tmp}/cenci/cenci-review-<scope>-diff.patch` — `git diff ... > ${TMPDIR:-/tmp}/cenci/cenci-review-<scope>-diff.patch` in diff mode, `gh pr diff <number> --repo <owner>/<repo> > ${TMPDIR:-/tmp}/cenci/cenci-review-<scope>-diff.patch` in PR mode — never re-paste the diff content through the `Write` tool (plus the changed-file list from `git diff --name-only`) and pass reviewers the path — the same `diffContextMode: "file"` discipline the implement pipeline uses. `<scope>` is the PR number in PR mode; in diff and file mode, where no PR number is in scope, use a run-unique `<run-id>` instead — a literal the agent picks once when this skill starts (e.g. a timestamp value written into its own reasoning, never fetched via a `date` shell call, so no additional grant is needed), which is inherently safe under the `shell-rules` scope-key format rule — so no fixed-name path survives in any mode. For file mode: pass the file path list only.
 
 Launch **all three reviewers as parallel Task tool calls in a SINGLE message**:
 
@@ -166,11 +166,11 @@ If multiple reviewers flag the same location:
 
 > "Would you like me to post this review as a PR comment?"
 
-If yes (`<pr-number>` below is the same value as `<number>`, this skill's PR identifier):
+If yes (`<pr-number>` below is the same value as `<number>`, this skill's PR identifier): use the
+`Write` tool to create `${TMPDIR:-/tmp}/cenci/cenci-review-<pr-number>-comment.md` with the `<review
+report>` as its content, then run:
 ```bash
-printf '%s' '<review report>' > ${TMPDIR:-/tmp}/cenci/cenci-review-<pr-number>-comment.md
-BODY=$(cat ${TMPDIR:-/tmp}/cenci/cenci-review-<pr-number>-comment.md)
-gh pr comment <number> --repo <owner>/<repo> --body "$BODY"
+gh pr comment <number> --repo <owner>/<repo> --body-file ${TMPDIR:-/tmp}/cenci/cenci-review-<pr-number>-comment.md
 ```
 
 If no → stop after presenting the report.

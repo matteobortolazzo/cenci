@@ -35,17 +35,21 @@ from external or semi-trusted sources.
   title/body files are the only externally-sourced input, and `jq` cannot let
   `--rawfile` content influence the payload's *structure* — see the `shell-rules`
   skill's canonical snippet for the exact three-step procedure.
-- **Rescoped fallback: temp-file + read-back, for CLIs with no `--input` equivalent.**
-  When the target CLI surface has no `--input`/`--*-file` flag for a given free-text
-  value (e.g. `address-review`'s Posting Replies, which sends inline reply text through
-  `gh api ... -f body="$REPLY"`), route that value into the documented shell command
-  template through the temp-file + read-back pattern (`value=$(cat
-  /tmp/claude/value.txt)` then `--flag "$value"`), never inline interpolation — direct
-  interpolation allows shell injection via `$(...)` or backticks, in any interpolation
-  context, not just message bodies. When using this fallback, guard against empty reads
-  with `[ -n "$VAR" ]` between the `cat` and the external command — a silent write
-  failure (zero-length or unwritten temp file) produces an empty string that succeeds
-  with `cat` but creates a malformed external command.
+- **Retired: temp-file + read-back for a body-only `gh api -f` write.** `address-review`'s
+  Posting Replies previously sent inline PR reply text through
+  `gh api ... -f body="$REPLY"` via a temp-file + read-back (`value=$(cat
+  /tmp/claude/value.txt)` then `--flag "$value"`). #773 migrated it onto the same
+  `jq -n --rawfile` + `gh api ... --input` pattern as the canonical bullet above —
+  `gh api` accepts `--input` for a body-only payload the same as a title-carrying one, so
+  this CLI-specific fallback is no longer needed for that site. No flow skill currently
+  needs a genuinely `--input`-less body flow; a plain body-only write with no title
+  should prefer `--body-file` directly (`gh pr comment ... --body-file`, `gh issue edit
+  ... --body-file`) over hand-composing JSON. If a future CLI surface truly has neither
+  `--input` nor a body-file flag, only then fall back to the temp-file + read-back
+  pattern above, and guard against empty reads with `[ -n "$VAR" ]` between the `cat` and
+  the external command — a silent write failure (zero-length or unwritten temp file)
+  produces an empty string that succeeds with `cat` but creates a malformed external
+  command.
 - When the same ticket/target could plausibly be operated on by concurrent skill runs,
   scope temp-file paths with a per-run random token (from `mktemp -u`, carried forward
   as literal text, never re-derived from `$$`, which doesn't persist across separate

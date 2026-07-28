@@ -1,9 +1,12 @@
 ---
 name: babysit
 description: "Follow an open PR with the client-neutral cenci supervisor until it merges or closes."
+compatibility: Portable — invokes the client-neutral `cenci babysit` CLI directly, no client-specific tools required.
 argument-hint: <pr-number> [interval e.g. 15m]
 user-invocable: true
-allowed-tools: Bash
+disable-model-invocation: true
+model: sonnet
+allowed-tools: Read, Bash(cenci babysit:*), Bash(sh "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/resolve-babysit-interval.sh":*)
 ---
 
 # Babysit a pull request
@@ -27,9 +30,14 @@ Phase 9 arms `cenci babysit` the same way), so a manual and an auto-armed superv
 cadence: **explicit interval arg → the `babysitInterval` config field → `15m` default.** When
 no second argument is given, resolve `.cenci/config.json`'s optional `babysitInterval` via the
 shared `hooks/scripts/resolve-babysit-interval.sh` resolver — the single source of truth for
-this field (`${CLAUDE_PLUGIN_ROOT}/hooks/scripts/resolve-babysit-interval.sh` under Claude,
-`${PLUGIN_ROOT}/hooks/scripts/resolve-babysit-interval.sh` under Codex; pass the affected
-project's slug for a monorepo, no slug for a single-repo top-level lookup). Non-empty output →
+this field. Run it under Claude as:
+
+```bash
+sh "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/resolve-babysit-interval.sh"
+```
+
+(under Codex, `${PLUGIN_ROOT}` replaces `${CLAUDE_PLUGIN_ROOT}`); pass the affected
+project's slug for a monorepo, no slug for a single-repo top-level lookup. Non-empty output →
 use it as `<interval>`; empty output (field unset, or no config file) → omit `--interval`
 entirely and let `cenci babysit` apply its built-in `15m` default. An explicit second argument
 always wins over the config.

@@ -2,7 +2,7 @@
 
 Read `project-core` and `codex-runtime`. Enter `/plan`, inspect the repository, and gather
 configuration choices with Plan-mode questions. Produce a migration preview using
-`flow/scripts/migrate-project-core.sh`; do not apply it in Plan mode. After approval,
+`"${PLUGIN_ROOT}/scripts/migrate-project-core.sh"`; do not apply it in Plan mode. After approval,
 instruct the user to invoke `cenci run configure apply <checkpoint-id> --agent codex`;
 the approved plan remains in the prior conversation and the checkpoint records its digest. In normal mode,
 write `.cenci/config.json`, AGENTS/CLAUDE adapters, `.claude/settings.json`,

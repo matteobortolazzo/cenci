@@ -14,7 +14,7 @@ description: |
   assistant: "I'll re-invoke the refiner agent with the bundle path and the accumulated Q&A so it can ask follow-ups or emit the refined ticket proposal"
   <commentary>Each round carries the full Q&A history; the refiner decides between more questions and the final proposal.</commentary>
   </example>
-tools: Read, Grep, Glob, Bash, mcp__context7
+tools: Read, Grep, Glob, Bash, mcp__context7__resolve-library-id, mcp__context7__query-docs
 model: opus
 effort: high
 color: green
