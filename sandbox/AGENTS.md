@@ -35,7 +35,18 @@ bash sandbox/tests/agent-cli.test.sh             # shared, verified, atomic agen
 bash sandbox/tests/fragments-drift.test.sh       # Dockerfile vs fragments/*.dockerfile byte-parity
 bash sandbox/tests/heal-plugins.test.sh          # plugin self-heal (Write->Edit allow conversion)
 bash sandbox/tests/dind.test.sh                  # lib/dind.sh start_dind() background dockerd + marker
+bash sandbox/tests/uninstall.test.sh             # `install.sh uninstall` MODE (plugins, PATH links, daemon, sandbox cleanup)
+bash sandbox/tests/lazyboards-install.test.sh    # optional lazyboards step: download, update refresh, doctor report
+bash sandbox/tests/opencode-config.test.sh       # lib/opencode-config.sh opencode.json permission/plugin seeding
+bash sandbox/tests/opencode-plugins.test.sh      # OpenCode cenci-src provisioning + TTL-gated refresh
+bash sandbox/tests/setup-skill-content.test.sh   # sandbox/skills/setup/SKILL.md content accuracy
+bash sandbox/tests/startup-marker.test.sh        # entrypoint.sh timestamped startup-failure marker prefix
 ```
+
+CI's `sandbox-test` job discovers and runs every `sandbox/tests/*.test.sh`
+automatically, so a new suite is covered the moment it is added — do not
+replace that discovery loop with an enumerated list. Only `fragments-drift`
+and `smoke` are excluded there, because they own separate jobs.
 
 The launcher-behavior suites live with the launcher code in `watch/`: Go
 black-box tests in `watch/sandbox_open_test.go` plus the reap contract suite

@@ -331,5 +331,49 @@ assert_eq "${CODE}" "0" "case17 exit"
 assert_eq "${OUT}" "" "case17 jq-absent: silent"
 cleanup_fixture
 
+# --- Case 18: non-UTF-8 filename → excluded and counted, never mangled -----
+# A latin-1 \xff byte contains no control character, so it survives the
+# control-byte pass, but jq's --arg encoding would rewrite it to U+FFFD and
+# emit a "/cenci:implement .plans/<mangled>" instruction pointing at nothing.
+# Skipped where the filesystem itself rejects non-UTF-8 names (e.g. APFS on
+# macOS), since the fixture cannot be constructed there at all.
+make_fixture
+mkdir -p "${ROOT}/.plans"
+BAD_UTF8_NAME=$'bad\xffutf8.md'
+REPLACEMENT_CHAR=$'\xef\xbf\xbd'
+if : > "${ROOT}/.plans/${BAD_UTF8_NAME}" 2>/dev/null && [[ -e "${ROOT}/.plans/${BAD_UTF8_NAME}" ]]; then
+  : > "${ROOT}/.plans/good-18.md"
+  run_hook
+  assert_eq "${CODE}" "0" "case18 exit"
+  echo "${OUT}" | jq empty >/dev/null 2>&1 || fail "case18 output must be valid JSON (got: ${OUT})"
+  CTX="$(echo "${OUT}" | jq -r '.hookSpecificOutput.additionalContext')"
+  assert_contains "${CTX}" "good-18.md" "case18 valid sibling plan still listed"
+  assert_contains "${CTX}" "1 plan file(s) with unsafe names were omitted" "case18 notice with N=1"
+  assert_not_contains "${OUT}" "utf8.md" "case18 non-UTF-8 name's ASCII fragment absent from payload"
+  assert_not_contains "${OUT}" "${REPLACEMENT_CHAR}" "case18 no U+FFFD replacement char leaks into payload"
+else
+  echo "  skip: filesystem rejects non-UTF-8 filenames; case18 not applicable here"
+fi
+cleanup_fixture
+
+# --- Case 19: valid multibyte UTF-8 names survive intact -------------------
+# Guards the case-18 filter against over-reach: `export LC_ALL=C` makes the
+# script byte-oriented, but legitimately non-ASCII plan names must still be
+# listed unchanged rather than swept up as "unsafe".
+make_fixture
+mkdir -p "${ROOT}/.plans"
+ACCENT_NAME='19-planificación.md'
+CJK_NAME='19-日本語.md'
+: > "${ROOT}/.plans/${ACCENT_NAME}"
+: > "${ROOT}/.plans/${CJK_NAME}"
+run_hook
+assert_eq "${CODE}" "0" "case19 exit"
+echo "${OUT}" | jq empty >/dev/null 2>&1 || fail "case19 output must be valid JSON (got: ${OUT})"
+CTX="$(echo "${OUT}" | jq -r '.hookSpecificOutput.additionalContext')"
+assert_contains "${CTX}" "${ACCENT_NAME}" "case19 accented UTF-8 name intact"
+assert_contains "${CTX}" "${CJK_NAME}" "case19 CJK UTF-8 name intact"
+assert_not_contains "${OUT}" "with unsafe names were omitted" "case19 valid UTF-8 names are not counted as unsafe"
+cleanup_fixture
+
 echo "check-pending-plans.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]
