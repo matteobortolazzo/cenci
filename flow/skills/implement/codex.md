@@ -28,7 +28,23 @@ Core checking remains active regardless of `maintenance.enabled`;
 `maintenance.generatedDocs=false` disables generated-section maintenance. Otherwise,
 auto-repair only drift caused by this same change and route any ambiguous or policy-affecting
 finding through the client's available user-input mechanism — commit, push, and open the PR. Clear the goal
-before any question/error and after PR creation. Then, as the final step once the goal is
+before any question/error and after PR creation. After a successful PR creation (never on a
+failed `gh pr create`), archive the consumed plan file instead of deleting it. `.plans/` lives
+only in the main checkout (repo root), not in the worktree, so anchor the command to
+`<repo-root>` (the main checkout containing `.worktrees/` — resolve via `git -C <worktree-path>
+rev-parse --path-format=absolute --git-common-dir` if needed, not the worktree itself). A single
+`&&`-chained guard cannot distinguish "no plan file" from "guard true but mkdir/mv genuinely
+failed" (both exit non-zero), so use an if/else that emits a distinct marker per outcome: `if [ -f
+"<repo-root>/.plans/<filename>" ]; then mkdir -p "<repo-root>/.plans/done" && mv -n
+"<repo-root>/.plans/<filename>" "<repo-root>/.plans/done/" && echo ARCHIVE_OK || echo
+ARCHIVE_FAILED; else echo ARCHIVE_SKIPPED; fi` (a plain `mv`, no git — `.plans/` is
+untracked/gitignored; `mv -n` no-clobber intentionally leaves a pre-existing same-named
+`.plans/done/<filename>` in place on a re-implementation rather than overwriting the earlier
+archived record, and still reports `ARCHIVE_OK` since the skip itself is not an error). Key the
+final session summary off the marker, not the exit code: report `ARCHIVE_FAILED` (a real
+failure — permissions, disk full, cross-device); `ARCHIVE_SKIPPED` (no plan file for this run)
+and `ARCHIVE_OK` need no special reporting. Then,
+as the final step once the goal is
 cleared, hand the open PR to the persistent supervisor so it carries the PR to merge and does
 the final `In Review` → `Implemented` relabel: resolve the watch interval from
 `.cenci/config.json`'s optional `babysitInterval` via
