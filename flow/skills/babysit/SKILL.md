@@ -34,8 +34,8 @@ use it as `<interval>`; empty output (field unset, or no config file) → omit `
 entirely and let `cenci babysit` apply its built-in `15m` default. An explicit second argument
 always wins over the config.
 
-Detect the current client and run exactly one of (dropping `--interval <interval>` when the
-interval was neither passed as an argument nor resolved from config):
+Detect the current client and run exactly one of the three (dropping `--interval <interval>`
+when the interval was neither passed as an argument nor resolved from config):
 
 ```bash
 cenci babysit <pr> --agent claude --interval <interval>
@@ -43,6 +43,10 @@ cenci babysit <pr> --agent claude --interval <interval>
 
 ```bash
 cenci babysit <pr> --agent codex --interval <interval>
+```
+
+```bash
+cenci babysit <pr> --agent opencode --interval <interval>
 ```
 
 Use `--once` only when the user explicitly requests one tick. To stop a supervisor:
