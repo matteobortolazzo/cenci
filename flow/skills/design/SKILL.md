@@ -6,7 +6,7 @@ argument-hint: <ticket-id | design description> [additional context]
 user-invocable: true
 disable-model-invocation: true
 model: opus
-allowed-tools: Read, Write, Bash(pencil), Bash(pencil interactive:*), Bash(which pencil:*), Bash(gh issue:*), Bash(gh label create:*), Bash(gh api user:*), Bash(git remote get-url:*), Bash(git add:*), Bash(git commit:*), Bash(git rev-parse:*), Bash(mkdir:*), Bash(echo:*), Bash(test:*), Glob, Grep, AskUserQuestion, WebFetch, mcp__pencil__get_editor_state, mcp__pencil__get_guidelines, mcp__pencil__batch_get, mcp__pencil__batch_design, mcp__pencil__get_screenshot, mcp__pencil__export_nodes, mcp__pencil__find_empty_space_on_canvas, mcp__pencil__snapshot_layout, mcp__pencil__open_document, mcp__pencil__get_variables, mcp__pencil__set_variables, mcp__pencil__replace_all_matching_properties, mcp__pencil__search_all_unique_properties
+allowed-tools: Read, Write, Bash(pencil), Bash(pencil interactive:*), Bash(which pencil:*), Bash(gh issue view:*), Bash(gh issue edit:*), Bash(gh issue comment:*), Bash(gh issue list:*), Bash(gh issue close:*), Bash(gh label create:*), Bash(gh api user --jq:*), Bash(git remote get-url:*), Bash(git add:*), Bash(git commit:*), Bash(git rev-parse:*), Bash(mkdir:*), Bash(mktemp -d:*), Bash(test:*), Glob, Grep, AskUserQuestion, mcp__pencil__get_editor_state, mcp__pencil__get_guidelines, mcp__pencil__batch_get, mcp__pencil__batch_design, mcp__pencil__get_screenshot, mcp__pencil__export_nodes, mcp__pencil__find_empty_space_on_canvas, mcp__pencil__snapshot_layout, mcp__pencil__open_document, mcp__pencil__get_variables, mcp__pencil__set_variables, mcp__pencil__replace_all_matching_properties, mcp__pencil__search_all_unique_properties
 ---
 
 > **Client dispatch**: In Codex, read `codex-runtime` and `design/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
@@ -71,8 +71,8 @@ When this skill says "Call `<tool_name>(...)`", execute it according to `$PENCIL
 
 Before doing anything else in this phase — before any Pencil probe, any background auto-launch of Pencil, and any retry, in both `cli-app` and `editor` mode below — detect an in-container session with the same two-step check as `configure/scripts/detect-project.sh`, each as its own Bash call:
 
-1. `echo "${CENCI_SANDBOX:-}"` — if it prints `1` → in container.
-2. If step 1 did not match, `test -f /.dockerenv` — exit 0 → in container.
+1. `test "${CENCI_SANDBOX:-}" = "1"` — exit 0 → in container.
+2. If step 1 exited non-zero, `test -f /.dockerenv` — exit 0 → in container.
 
 **If either check matches**, stop immediately and tell the user:
 "`/cenci:design` must run from a host session: the Pencil desktop app is not reachable from inside the cenci sandbox. Exit the container and re-run `/cenci:design <args>` on the host. Sandboxed sessions get design access through headless reads only (`/cenci:implement`, `verify-ui`)."
@@ -324,14 +324,25 @@ For each screen/component created:
 
 1. Capture a visual snapshot:
    - **CLI mode**: Call `export_nodes` to save screenshots to a scratch directory **outside the repo**, then Read the exported PNG. These are local validation artifacts only — never committed.
+
+     Create the screenshot directory **once**, on first entry into this step, as its own standalone Bash call — never a shell-variable assignment that captures the command's own output, and never any other form of command substitution: `shell-rules` forbids command substitution where the agent can run the command and read the result, and an assignment wrapper would not match the granted `Bash(mktemp -d:*)` prefix.
      ```bash
-     mkdir -p "$TMPDIR/cenci-design/screenshots"
+     mktemp -d "${TMPDIR:-/tmp}/cenci-design-XXXXXX"
+     ```
+     Verify the printed path with its own standalone Bash call before using it:
+     ```bash
+     test -d "<printed-path>"
+     ```
+     If this verification fails, stop the step immediately using the same error-recovery convention as Phase 0/0.5 — do not proceed to `export_nodes` with an unverified directory.
+
+     Substitute the **printed literal path** (never an unsubstituted shell-variable reference — a quoted `<<'EOF'` heredoc never expands shell variables, so leaving one in place would reach `export_nodes` as literal, wrong text instead of the resolved path) into the heredoc's `outputDir`, the subsequent `Read(...)` call, and Step 4B's re-screenshot loop — reuse the same printed path for every screenshot taken during this design session, in both this step and Step 4B:
+     ```bash
      pencil interactive -a desktop <<'EOF'
-     export_nodes({ nodeIds: ["<node-id>"], outputDir: "$TMPDIR/cenci-design/screenshots", format: "png" })
+     export_nodes({ nodeIds: ["<node-id>"], outputDir: "<screenshot-dir>", format: "png" })
      snapshot_layout({ parentId: "<node-id>", problemsOnly: true })
      EOF
      ```
-     Then: `Read("$TMPDIR/cenci-design/screenshots/<node-id>.png")` to view and analyze.
+     Then: `Read("<screenshot-dir>/<node-id>.png")` to view and analyze.
    - **Editor mode**: Call `get_screenshot(nodeId)` to receive the image inline.
 2. **Analyze the screenshot** for:
    - Alignment issues (elements not lined up properly)

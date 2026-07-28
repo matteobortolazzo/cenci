@@ -6,7 +6,7 @@ argument-hint: <ticket-id> [additional context]
 user-invocable: true
 disable-model-invocation: true
 model: sonnet
-allowed-tools: Read, Write, Glob, Task, Bash(gh issue:*), Bash(gh label create:*), Bash(gh api user:*), Bash(gh api repos/:*), Bash(git remote get-url:*), Bash(mktemp:*), Bash(cat /tmp/claude/:*), Bash(rm -f /tmp/claude/:*), AskUserQuestion, WebFetch
+allowed-tools: Read, Write, Glob, Task, Bash(gh issue view:*), Bash(gh issue edit:*), Bash(gh label create:*), Bash(gh api user --jq:*), Bash(gh api repos/:*), Bash(git remote get-url:*), Bash(mktemp -u /tmp/claude/:*), Bash(cat /tmp/claude/:*), Bash(rm -f /tmp/claude/:*), AskUserQuestion
 ---
 
 > **Client dispatch**: In Codex, read `codex-runtime` and `refine/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.

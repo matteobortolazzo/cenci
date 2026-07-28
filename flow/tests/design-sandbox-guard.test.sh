@@ -22,6 +22,31 @@
 # prefix — so a future edit cannot silently re-widen the grant back to a
 # blanket form.
 #
+# #749 addendum: #738 narrowed to blanket-verb prefixes; #749 narrows
+# further to per-verb / exact-invocation-shape grants and closes three
+# residual gaps found while doing so. `Bash(gh issue:*)` becomes five
+# per-verb grants (`view`, `edit`, `comment`, `list`, `close`) so the
+# invocation-vs-grant scan below (retuned to a per-verb arm) catches a newly
+# ungranted verb like `create`/`transfer`/`develop`. `Bash(gh api user:*)`
+# narrows to `Bash(gh api user --jq:*)` (the sole call site is `ticket-
+# ownership`'s `gh api user --jq .login`). `Bash(echo:*)` is dropped — not
+# because `echo` gained a new call site, but because the `Write|Edit`
+# guard-hook matcher can never see `echo … > .git/hooks/pre-commit`
+# redirection, which chained with design's own granted `git commit` is a
+# live injection → host-code-execution path; this reverses #738's "do not
+# touch echo" instruction, superseded by that redirection analysis. The
+# Phase 0.5 probe's first step moves to `test "${CENCI_SANDBOX:-}" = "1"`
+# under the already-granted `Bash(test:*)`, mirroring
+# `configure/scripts/detect-project.sh` more closely than the old
+# echo-and-eyeball form. `WebFetch` is dropped — zero invocations anywhere in
+# the skill body, the same "grant with no call site" evidence that justified
+# dropping `Bash(curl:*)` in #738; the L158 comment claiming a "domain-gated
+# WebFetch grant" is corrected since the grant was never domain-gated.
+# `Bash(mktemp -d:*)` is added (exact invocation shape, not blanket
+# `Bash(mktemp:*)`) so Phase 4A's screenshot directory can be created via a
+# standalone `mktemp -d` call instead of the old bare-`$TMPDIR` `mkdir -p`
+# whose path was also never expanded inside the quoted Phase 4A heredoc.
+#
 # Follows the idiom of flow/tests/refine-skill-contract.test.sh: a
 # `failures=` counter, small assert_* helpers, exact substring markers (never
 # generic keywords — see docs/shell-scripting-gotchas.md), self-contained,
@@ -134,11 +159,12 @@ if [[ -n "${skill}" ]]; then
   assert_contains "${skill}" "CENCI_SANDBOX" "skills/design/SKILL.md CENCI_SANDBOX anchor"
   assert_contains "${skill}" "/.dockerenv" "skills/design/SKILL.md /.dockerenv anchor"
 
-  # 4. Frontmatter grants the two Bash primitives the guard's host-path probe
-  #    needs (Bash(echo:*) for the CENCI_SANDBOX check, Bash(test:*) for the
-  #    /.dockerenv check) — a future edit stripping them would silently make
-  #    the guard prompt-blocked on the host.
-  assert_contains "${skill}" "Bash(echo:*)" "skills/design/SKILL.md allowed-tools echo grant"
+  # 4. Frontmatter grants the Bash primitive the guard's host-path probe
+  #    needs (#749: Bash(test:*) now backs BOTH legs of the Phase 0.5 probe
+  #    — `test "${CENCI_SANDBOX:-}" = "1"` and `test -f /.dockerenv` — plus
+  #    Phase 4A's `test -d <screenshot-dir>` verification. Bash(echo:*) is
+  #    gone: the Phase 0.5 probe no longer uses echo at all (see the #749
+  #    addendum above).
   assert_contains "${skill}" "Bash(test:*)" "skills/design/SKILL.md allowed-tools test grant"
 
   # skill_path is shared by both the least-privilege block below and the
@@ -154,29 +180,44 @@ if [[ -n "${skill}" ]]; then
   # set so a future edit cannot silently re-widen it back to a blanket form.
 
   # AC #1/#2/#3: the four old blanket grants must never reappear, and no
-  # `curl` reference (grant or invocation) may exist anywhere in the skill —
-  # the domain-gated WebFetch grant already covers every legitimate fetch.
+  # `curl` reference (grant or invocation) may exist anywhere in the skill.
+  # #749: WebFetch is dropped entirely — it was never domain-gated, and had
+  # zero invocations anywhere in the skill body (the same "grant with no
+  # call site" evidence that justified dropping Bash(curl:*) in #738).
   assert_not_contains "${skill}" "Bash(curl:*)" "skills/design/SKILL.md blanket curl grant"
   assert_not_contains "${skill}" "Bash(gh:*)"   "skills/design/SKILL.md blanket gh grant"
   assert_not_contains "${skill}" "Bash(git:*)"  "skills/design/SKILL.md blanket git grant"
   assert_not_contains "${skill}" "Bash(pencil:*)" "skills/design/SKILL.md blanket pencil grant"
   assert_not_contains "${skill}" "curl" "skills/design/SKILL.md any curl reference"
 
+  # #749: negative assertions for every grant narrowed or dropped this
+  # ticket — the blanket gh issue/api user grants, echo, blanket mktemp, and
+  # WebFetch must all be absent.
+  assert_not_contains "${skill}" "Bash(gh issue:*)" "749 skills/design/SKILL.md blanket gh issue grant"
+  assert_not_contains "${skill}" "Bash(gh api user:*)" "749 skills/design/SKILL.md blanket gh api user grant"
+  assert_not_contains "${skill}" "Bash(echo:*)" "749 skills/design/SKILL.md echo grant"
+  assert_not_contains "${skill}" "Bash(mktemp:*)" "749 skills/design/SKILL.md blanket mktemp grant"
+  assert_not_contains "${skill}" "WebFetch" "749 skills/design/SKILL.md WebFetch grant"
+
   # Exhaustive set equality: parse the frontmatter's Bash(...) entries and
-  # compare against the exact expected 13-entry least-privilege list, both
-  # sorted so the comparison is order- and locale-independent.
+  # compare against the exact expected 17-entry least-privilege list (#749),
+  # both sorted so the comparison is order- and locale-independent.
   EXPECTED_BASH_GRANTS='Bash(pencil)
 Bash(pencil interactive:*)
 Bash(which pencil:*)
-Bash(gh issue:*)
+Bash(gh issue view:*)
+Bash(gh issue edit:*)
+Bash(gh issue comment:*)
+Bash(gh issue list:*)
+Bash(gh issue close:*)
 Bash(gh label create:*)
-Bash(gh api user:*)
+Bash(gh api user --jq:*)
 Bash(git remote get-url:*)
 Bash(git add:*)
 Bash(git commit:*)
 Bash(git rev-parse:*)
 Bash(mkdir:*)
-Bash(echo:*)
+Bash(mktemp -d:*)
 Bash(test:*)'
   allowed_line="$(grep -m1 '^allowed-tools:' "${skill_path}")"
   actual_bash_grants="$(printf '%s\n' "${allowed_line}" | grep -o 'Bash([^)]*)' | LC_ALL=C sort -u)"
@@ -212,14 +253,16 @@ ${actual_bash_grants}"
 
   # Invocation-vs-grant scans (guardrails against future widening): every
   # `gh`/`git` invocation token pair actually present in the file must fall
-  # under one of the granted prefixes above.
+  # under one of the granted prefixes above. #749: the gh arm is per-verb
+  # (mirroring the per-verb frontmatter grants) so a newly-introduced
+  # ungranted verb (e.g. `gh issue create`, `gh issue transfer`) fails here.
   while IFS= read -r cmd; do
     [[ -n "${cmd}" ]] || continue
     case "${cmd}" in
-      "gh issue"*|"gh label create"*|"gh api user"*) ;;
+      "gh issue view"*|"gh issue edit"*|"gh issue comment"*|"gh issue list"*|"gh issue close"*|"gh label create"*|"gh api user --jq"*) ;;
       *) fail "skills/design/SKILL.md: ungranted gh invocation: [${cmd}]" ;;
     esac
-  done < <(grep -oE '\bgh [a-z]+( [a-z]+)?' "${skill_path}" | LC_ALL=C sort -u)
+  done < <(grep -oE '\bgh api user --jq|\bgh [a-z]+( [a-z]+)?' "${skill_path}" | LC_ALL=C sort -u)
 
   while IFS= read -r cmd; do
     [[ -n "${cmd}" ]] || continue
@@ -282,6 +325,29 @@ ${actual_bash_grants}"
       fail "skills/design/SKILL.md placement: guard (line ${line_guard}) does not precede the 'pencil &' auto-launch (line ${line_pencil_launch})"
     fi
   fi
+
+  # --- #749: body-AC pins (cheap, pin the body ACs behaviorally) -----------
+
+  # Phase 0.5 step 1 is now a `test` check under the already-granted
+  # Bash(test:*), not an echo-and-eyeball probe.
+  assert_contains "${skill}" 'test "${CENCI_SANDBOX:-}" = "1"' "749 skills/design/SKILL.md Phase 0.5 test check"
+  # No echo invocation remains anywhere in the skill body.
+  assert_not_contains "${skill}" "echo" "749 skills/design/SKILL.md no echo reference"
+  # Phase 4A creates its screenshot directory via a standalone `mktemp -d`
+  # call whose literal invocation matches the granted Bash(mktemp -d:*)
+  # prefix — never an assignment wrapper or $(...) command substitution.
+  assert_contains "${skill}" 'mktemp -d "${TMPDIR:-/tmp}/cenci-design-' "749 skills/design/SKILL.md standalone mktemp -d invocation"
+  assert_not_contains "${skill}" "SCREENSHOT_DIR=" "749 skills/design/SKILL.md no SCREENSHOT_DIR= assignment wrapper"
+  assert_not_contains "${skill}" '$(mktemp' "749 skills/design/SKILL.md no \$(mktemp command substitution"
+  # The stale predictable-path mkdir is gone.
+  assert_not_contains "${skill}" 'mkdir -p "$TMPDIR/cenci-design/screenshots"' "749 skills/design/SKILL.md stale predictable mkdir"
+  # No bare $TMPDIR (unqualified by :-) remains anywhere in the skill —
+  # every reference must use the ${TMPDIR:-/tmp} fallback form.
+  bare_tmpdir="$(grep -nE '\$\{?TMPDIR' "${skill_path}" | grep -v '\${TMPDIR:-' || true)"
+  if [[ -n "${bare_tmpdir}" ]]; then
+    fail "749 skills/design/SKILL.md: bare \$TMPDIR (unqualified by :-) found:
+${bare_tmpdir}"
+  fi
 fi
 
 # --- skills/design/codex.md — the guard mirrored for Codex ------------------
@@ -292,6 +358,11 @@ if [[ -n "${codex}" ]]; then
   assert_contains "${codex}" "CENCI_SANDBOX" "skills/design/codex.md CENCI_SANDBOX anchor"
   assert_contains "${codex}" "/.dockerenv" "skills/design/codex.md /.dockerenv anchor"
   assert_contains_ws "${codex}" "${STOP_MESSAGE_CORE}" "skills/design/codex.md load-bearing sentence"
+
+  # --- #749: command-surface paragraph rewrite ------------------------------
+  assert_contains "${codex}" "gh api user --jq" "749 skills/design/codex.md gh api user --jq positive"
+  assert_contains "${codex}" "mktemp -d" "749 skills/design/codex.md mktemp -d positive"
+  assert_not_contains "${codex}" "goes through the client's own web-fetch capability" "749 skills/design/codex.md stale web-fetch clause"
 fi
 
 # --- flow/README.md — design row marked host-only ----------------------------

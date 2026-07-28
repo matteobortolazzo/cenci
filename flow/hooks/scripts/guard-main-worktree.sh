@@ -15,6 +15,25 @@
 # generates) are NOT allowlisted here — configure creates its own feature
 # worktree and ships its changes as a PR like every other skill; see
 # flow/skills/configure/SKILL.md's "Create Worktree" section.
+#
+# TMPDIR widening (#749): several skills follow shell-rules' repo-wide
+# `${TMPDIR:-/tmp}/cenci/<name>-<scope>.md` body-file convention (e.g.
+# design's `${TMPDIR:-/tmp}/cenci/design-comment-<number>.md` ticket-comment
+# temp file). Under a custom TMPDIR that write is outside the pre-existing
+# /tmp/*, /private/tmp/*, /var/folders/* arms and would be blocked. Below,
+# the allowlist additionally admits paths under a canonicalized $TMPDIR,
+# gated on TMPDIR being set, absolute, resolvable to an existing directory,
+# and neither equal to, an ancestor of, nor a descendant of (i.e. nested
+# inside) the resolved repo root. The descendant rejection matters just as
+# much as the ancestor one: a TMPDIR set to e.g. $ROOT/tmp would otherwise set
+# TMPDIR_ALLOW to that path and allowlist writes under a main-worktree
+# subtree, defeating the guard's purpose. A `*/cenci/*.md` glob-only arm was
+# considered and rejected: it matches any
+# fully-resolved absolute path containing a `cenci` path segment, so
+# `~/src/cenci/AGENTS.md` in *this* repo's own main worktree would be
+# silently allowed too — gutting the guard for the very repo it protects.
+# Canonicalizing $TMPDIR itself has no such repo-name hole and automatically
+# covers every skill's convention, not just design's.
 
 # Only enforce in repos configured for cenci. .cenci/config.json is canonical;
 # .claude/config.json remains a read-only migration signal. In unconfigured repos this
@@ -183,6 +202,48 @@ else
   FILE_PATH=$(lexical_collapse "$RESOLVED_ANCESTOR/$TAIL")
 fi
 
+# Compute the canonicalized TMPDIR-widening allowlist prefix once (#749).
+# Empty TMPDIR_ALLOW means the widening is disabled; every failure mode below
+# (unset, relative, non-existent, unresolvable) falls through to that empty
+# default rather than failing closed — this widening is purely additive.
+TMPDIR_ALLOW=""
+if [ -n "${TMPDIR:-}" ]; then
+  case "$TMPDIR" in
+    /*)
+      if [ -d "$TMPDIR" ] \
+        && RESOLVED_TMPDIR=$(resolve_path "$TMPDIR" 2>/dev/null) \
+        && RESOLVED_ROOT=$(resolve_path "$ROOT" 2>/dev/null); then
+        # Strip exactly one trailing "/" so TMPDIR=/ collapses to "" — an
+        # empty TMPDIR_ALLOW is never used as a case pattern prefix below,
+        # so this can't accidentally allowlist "/*".
+        RESOLVED_TMPDIR="${RESOLVED_TMPDIR%/}"
+        if [ "$RESOLVED_TMPDIR" = "$RESOLVED_ROOT" ]; then
+          : # TMPDIR resolves to the repo root itself — reject.
+        else
+          case "$RESOLVED_ROOT" in
+            "$RESOLVED_TMPDIR"/*)
+              : # TMPDIR resolves to an ancestor of $ROOT — reject (would
+                # otherwise allowlist the entire repository).
+              ;;
+            *)
+              case "$RESOLVED_TMPDIR" in
+                "$RESOLVED_ROOT"/*)
+                  : # TMPDIR resolves to a path INSIDE $ROOT — reject (would
+                    # otherwise allowlist a main-worktree subtree, defeating
+                    # the guard's purpose).
+                  ;;
+                *)
+                  TMPDIR_ALLOW="$RESOLVED_TMPDIR"
+                  ;;
+              esac
+              ;;
+          esac
+        fi
+      fi
+      ;;
+  esac
+fi
+
 case "$FILE_PATH" in
   # Feature worktrees — the intended write target
   */.worktrees/* | .worktrees/*) exit 0 ;;
@@ -195,6 +256,20 @@ case "$FILE_PATH" in
   # Design artifacts live in the main worktree by design (/cenci:design)
   *.pen | */DESIGN.md | DESIGN.md | */designs/* | designs/*) exit 0 ;;
 esac
+
+# The TMPDIR widening is a separate, guarded case rather than an arm folded
+# into the case above (#749): an empty TMPDIR_ALLOW would degrade a bare
+# "$TMPDIR_ALLOW"/* pattern to "/*" — allowlisting every absolute path, a
+# silent total bypass one refactor away. Keeping it behind its own
+# `[ -n "$TMPDIR_ALLOW" ]` guard means a disabled widening can never affect
+# the case above. A quoted "$TMPDIR_ALLOW" is matched literally by POSIX sh
+# case patterns, so glob metacharacters inside a resolved TMPDIR value
+# cannot widen the match beyond an exact path-prefix comparison.
+if [ -n "$TMPDIR_ALLOW" ]; then
+  case "$FILE_PATH" in
+    "$TMPDIR_ALLOW"/*) exit 0 ;;
+  esac
+fi
 
 # Everything else is a main-worktree write → block with guidance.
 {
