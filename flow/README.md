@@ -401,7 +401,7 @@ The pipeline closes that gap with the native [`/goal`](https://code.claude.com/d
 
 - **Launching the plan-file run is the human gate that arms it.** No goal is ever set in an ordinary planning session — reviewing the saved plan and launching `/cenci:implement .plans/<id>.md` authorizes the autonomous run, and that is when the goal is armed — except the Trivial Fast Path, which arms the goal and continues into Phase 2 without a separate plan-file relaunch.
 - **The condition references the plan file**, matching the SessionStart hook that reminds you of pending `.plans/` — a still-present plan file means "not done."
-- **Graceful when unavailable.** If arming `/goal` fails (missing tool, unknown command, or error — for example older Claude Code clients below 2.1.139, which lack `/goal` support) the pipeline behaves exactly as before — it just prints a one-line notice and runs without the completion guarantee.
+- **Graceful when unavailable.** If arming `/goal` fails (missing tool, unknown command, or error — for example older Claude Code clients below 2.1.139, which lack `/goal` support) the pipeline behaves exactly as before — it prints a one-line notice naming which of the three causes applied (`SlashCommand` tool not available, `/goal` not a known command, or the invocation itself returned an error) and runs without the completion guarantee.
 - **Stall cap.** The armed condition also carries a fixed 20-turn cap — if the goal restarts the turn more than 20 times without the pipeline advancing to a new phase, it stops retrying, clears itself, and reports the stall instead of looping forever.
 - **Opt out** with `"cenci": { "goalAutopilot": false }` in `.cenci/config.json`.
 

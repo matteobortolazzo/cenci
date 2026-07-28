@@ -66,6 +66,44 @@ make_curated_bin() {
     done
 }
 
+# make_mktemp_fail_bin <dir> <rm_log> <tool>... — like make_curated_bin, but
+# additionally plants a fake `mktemp` that always fails (exit 1, no output,
+# simulating e.g. TMPDIR exhaustion) and a fake `rm` that appends its argv to
+# <rm_log> (one invocation per line) before delegating to the real `rm` (its
+# path captured at shim-creation time via `command -v rm`, never hardcoded).
+# Used to prove the mktemp-failure fallback (#550): the fallback must never
+# assign /dev/null to a path later passed to rm, and must not drop jq's own
+# diagnostic.
+make_mktemp_fail_bin() {
+    local dir="$1" rm_log="$2"
+    shift 2
+    mkdir -p "${dir}"
+    cat > "${dir}/mktemp" <<'SCRIPT'
+#!/bin/sh
+exit 1
+SCRIPT
+    chmod +x "${dir}/mktemp"
+    local real_rm
+    real_rm="$(command -v rm)" || {
+        echo "make_mktemp_fail_bin: 'rm' not found on PATH" >&2
+        exit 1
+    }
+    cat > "${dir}/rm" <<SCRIPT
+#!/bin/sh
+printf '%s\n' "\$*" >> '${rm_log}'
+exec '${real_rm}' "\$@"
+SCRIPT
+    chmod +x "${dir}/rm"
+    local tool real
+    for tool in "$@"; do
+        real="$(command -v "${tool}")" || {
+            echo "make_mktemp_fail_bin: '${tool}' not found on PATH" >&2
+            exit 1
+        }
+        ln -s "${real}" "${dir}/${tool}"
+    done
+}
+
 echo "guard-main-worktree.test.sh"
 
 # Not under /tmp: the guard allowlists /tmp/* paths, which would make every
@@ -347,6 +385,39 @@ if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
     pass
 else
     fail "empty file_path falls back to filePath: stderr should contain BLOCKED"
+fi
+
+# ── mktemp-failure fallback (#550) ──────────────────────────────────
+# The mktemp-failure fallback (`JQ_ERR=$(mktemp 2>/dev/null) || JQ_ERR=/dev/null`)
+# must never assign /dev/null to a path later handed to `rm` (as root that
+# unlinks the /dev/null device node), and must not silently drop jq's own
+# parse-error text. PATH is curated so mktemp always fails and rm is shimmed
+# to log its argv (then delegate to the real rm), so the test can observe
+# both what gets unlinked and what stderr actually says. Malformed JSON on
+# stdin (rather than a config file, since this hook reads JSON from stdin)
+# triggers the jq parse failure.
+echo "case: mktemp failure preserves jq's diagnostic and never rm's /dev/null"
+MKTEMP_FAIL_BIN="${TEST_ROOT}/bin-mktemp-fail-guard"
+RM_LOG_GUARD="${TEST_ROOT}/rm-log-guard.txt"
+: > "${RM_LOG_GUARD}"
+make_mktemp_fail_bin "${MKTEMP_FAIL_BIN}" "${RM_LOG_GUARD}" sh git cat jq realpath
+run_guard_with_path "${HARDEN_REPO}" "${MKTEMP_FAIL_BIN}" '{"tool_input":'
+assert_exit "mktemp failure fallback (exit code unchanged)" 2
+if [[ "${GUARD_STDERR}" == *"guard-main-worktree.sh: warning: mktemp failed; jq errors are written directly to stderr below"* ]]; then
+    pass
+else
+    fail "mktemp failure fallback: stderr should contain the mktemp-failure warning line"
+fi
+if [[ "${GUARD_STDERR}" == *"parse error"* ]]; then
+    pass
+else
+    fail "mktemp failure fallback: stderr should contain jq's own parse-error diagnostic, not an empty detail"
+fi
+RM_LOG_GUARD_CONTENT="$(cat "${RM_LOG_GUARD}" 2>/dev/null)"
+if [[ "${RM_LOG_GUARD_CONTENT}" != *"/dev/null"* ]]; then
+    pass
+else
+    fail "mktemp failure fallback: rm must never be invoked with /dev/null (log: ${RM_LOG_GUARD_CONTENT})"
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────

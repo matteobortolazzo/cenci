@@ -91,6 +91,7 @@ for spec in \
   "edit:one::0:issue:edit" \
   "resolve:one::0:issue:close" \
   "resolve-none:none::0:issue:close" \
+  "resolve-lookup-failure:lookup-fail::1:issue:close" \
   "lookup-failure:lookup-fail::1:issue:create" \
   "malformed:malformed::1:issue:create" \
   "ambiguous:ambiguous::1:issue:edit" \
@@ -114,7 +115,7 @@ do
     [[ "$CODE" -ne 0 ]] && pass || fail "$name: expected nonzero exit"
   fi
   calls="$(count_call "$log" "$call_a" "$call_b")"
-  if [[ "$name" == "resolve-none" || "$name" == "lookup-failure" || "$name" == "malformed" || "$name" == "ambiguous" ]]; then
+  if [[ "$name" == "resolve-none" || "$name" == "resolve-lookup-failure" || "$name" == "lookup-failure" || "$name" == "malformed" || "$name" == "ambiguous" ]]; then
     assert_eq "$calls" "0" "$name mutation count"
   else
     assert_eq "$calls" "1" "$name mutation count"

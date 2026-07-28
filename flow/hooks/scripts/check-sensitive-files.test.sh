@@ -75,6 +75,44 @@ make_curated_bin() {
     done
 }
 
+# make_mktemp_fail_bin <dir> <rm_log> <tool>... — like make_curated_bin, but
+# additionally plants a fake `mktemp` that always fails (exit 1, no output,
+# simulating e.g. TMPDIR exhaustion) and a fake `rm` that appends its argv to
+# <rm_log> (one invocation per line) before delegating to the real `rm` (its
+# path captured at shim-creation time via `command -v rm`, never hardcoded).
+# Used to prove the mktemp-failure fallback (#550): the fallback must never
+# assign /dev/null to a path later passed to rm, and must not drop jq's own
+# diagnostic.
+make_mktemp_fail_bin() {
+    local dir="$1" rm_log="$2"
+    shift 2
+    mkdir -p "${dir}"
+    cat > "${dir}/mktemp" <<'SCRIPT'
+#!/bin/sh
+exit 1
+SCRIPT
+    chmod +x "${dir}/mktemp"
+    local real_rm
+    real_rm="$(command -v rm)" || {
+        echo "make_mktemp_fail_bin: 'rm' not found on PATH" >&2
+        exit 1
+    }
+    cat > "${dir}/rm" <<SCRIPT
+#!/bin/sh
+printf '%s\n' "\$*" >> '${rm_log}'
+exec '${real_rm}' "\$@"
+SCRIPT
+    chmod +x "${dir}/rm"
+    local tool real
+    for tool in "$@"; do
+        real="$(command -v "${tool}")" || {
+            echo "make_mktemp_fail_bin: '${tool}' not found on PATH" >&2
+            exit 1
+        }
+        ln -s "${real}" "${dir}/${tool}"
+    done
+}
+
 echo "check-sensitive-files.test.sh"
 
 TEST_ROOT="$(mktemp -d /var/tmp/check-sensitive-files-test.XXXXXX)"
@@ -300,6 +338,34 @@ NESTED_LOOKALIKE_JSON=$(jq -n --arg decoy "${TEST_ROOT}/lookalike/decoy-benign.t
 run_check "${NESTED_LOOKALIKE_JSON}"
 assert_exit "nested second file_path key ignored" 2
 assert_blocked_stderr "nested second file_path key ignored"
+
+# ── mktemp-failure fallback (#550) ──────────────────────────────────
+# Same requirement as guard-main-worktree.sh: the mktemp-failure fallback
+# must never assign /dev/null to a path later handed to rm, and must not
+# silently drop jq's own parse-error text.
+echo "case: mktemp failure preserves jq's diagnostic and never rm's /dev/null"
+MKTEMP_FAIL_BIN="${TEST_ROOT}/bin-mktemp-fail-check"
+RM_LOG_CHECK="${TEST_ROOT}/rm-log-check.txt"
+: > "${RM_LOG_CHECK}"
+make_mktemp_fail_bin "${MKTEMP_FAIL_BIN}" "${RM_LOG_CHECK}" sh cat jq realpath
+run_check_with_path "${MKTEMP_FAIL_BIN}" '{"tool_input":'
+assert_exit "mktemp failure fallback (exit code unchanged)" 2
+if [[ "${CHECK_STDERR}" == *"check-sensitive-files.sh: warning: mktemp failed; jq errors are written directly to stderr below"* ]]; then
+    pass
+else
+    fail "mktemp failure fallback: stderr should contain the mktemp-failure warning line"
+fi
+if [[ "${CHECK_STDERR}" == *"parse error"* ]]; then
+    pass
+else
+    fail "mktemp failure fallback: stderr should contain jq's own parse-error diagnostic, not an empty detail"
+fi
+RM_LOG_CHECK_CONTENT="$(cat "${RM_LOG_CHECK}" 2>/dev/null)"
+if [[ "${RM_LOG_CHECK_CONTENT}" != *"/dev/null"* ]]; then
+    pass
+else
+    fail "mktemp failure fallback: rm must never be invoked with /dev/null (log: ${RM_LOG_CHECK_CONTENT})"
+fi
 
 # ── Summary ──────────────────────────────────────────────────────────
 echo

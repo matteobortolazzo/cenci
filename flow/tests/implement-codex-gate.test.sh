@@ -136,5 +136,23 @@ assert_contains "${codex_content}" 're-run `cenci run implement apply`' \
 assert_not_contains "${codex_content}" '${CLAUDE_PLUGIN_ROOT}' \
   "procedure-text: codex.md must never reference \${CLAUDE_PLUGIN_ROOT} (Claude-only var, unresolvable at Codex runtime)"
 
+# ===========================================================================
+# 5. project-resolution fallback (#565) -- codex.md's baseline-gate project
+# resolution must carry the same Technical Notes ("Affected services"/
+# "Affected components") fallback signal Claude's adapter has
+# (phase-2-worktree.md's "### 2. Resolve targets" Fallback bullet), so a
+# thin `## Project Context` cannot silently skip the gate on Codex. Asserts
+# the specific literal mirrored from phase-2-worktree.md's Fallback bullet,
+# not a generic marker (docs/shell-scripting-gotchas.md rule 3).
+# ===========================================================================
+TECHNICAL_NOTES_FALLBACK_MARKER='the `### Technical Notes` "Affected services"/"Affected components" lines inside `## Ticket Details`, matched against each'
+PROJECT_ENTRY_FIELDS_MARKER='entry'"'"'s `slug`, `name`, or `path`'
+
+assert_contains "${codex_content}" "${TECHNICAL_NOTES_FALLBACK_MARKER}" \
+  "procedure-text: codex.md must document the Technical Notes fallback for project resolution, mirroring phase-2-worktree.md"
+
+assert_contains "${codex_content}" "${PROJECT_ENTRY_FIELDS_MARKER}" \
+  "procedure-text: codex.md must match the Technical Notes fallback against each project entry's slug, name, or path"
+
 echo "implement-codex-gate.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]

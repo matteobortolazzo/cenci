@@ -6,7 +6,9 @@ writing files or labels. Stop before mutations and instruct `cenci run implement
 <ticket> --agent codex`. In normal apply mode persist `.plans/<ticket>-<slug>.md`, initialize
 the checkpoint, create the worktree, then run the baseline gate: resolve affected projects
 by matching the plan's `## Project Context` `# Project: <name>` headers against
-`.cenci/config.json`'s `projects[].name` to get each `slug` (dedupe; a no-match prints a
+`.cenci/config.json`'s `projects[].name` to get each `slug`. When the primary signal
+under-matches, fall back to the `### Technical Notes` "Affected services"/"Affected components" lines inside `## Ticket Details`, matched against each `projects[]` entry's `slug`, `name`, or `path`
+(dedupe; a no-match prints a
 one-line notice and no-ops, while an unset gate is a fully silent no-op), and for each
 resolved target run `( cd "<abs-worktree-path>" && sh "${PLUGIN_ROOT}/hooks/scripts/run-gate.sh" "<slug>" )`.
 `GATE_STATUS=green` or `GATE_STATUS=unset` → proceed.
