@@ -1,5 +1,7 @@
 # Cenci for Codex
 
+> A [cenci-watch](../../README.md) integration for native Codex hooks.
+
 Forwards Codex lifecycle hooks to `cenci notify` so the cenci daemon can update tmux window indicators and Waybar-compatible counts.
 
 ## Requirements

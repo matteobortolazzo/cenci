@@ -29,9 +29,10 @@ When the agent exits or cenci stops, the original window name is restored.
 summarizes every live agent session; click it to find work that is running, done,
 or waiting for input.*
 
-Other desktop integrations are available for
-[GNOME Shell](plugin/gnome/README.md), [KDE Plasma](plugin/plasma/README.md), and
-the [macOS menu bar](plugin/macos/README.md).
+Other integrations are available for [Waybar](#waybar-config),
+[noctalia-shell](plugin/noctalia/README.md), [GNOME Shell](plugin/gnome/README.md),
+[KDE Plasma](plugin/plasma/README.md), and the
+[macOS menu bar](plugin/macos/README.md).
 
 **tmux appearance:** no tmux theme is bundled or required. cenci-watch augments
 tmux's default window list automatically and applies the state colors above. If
@@ -39,16 +40,27 @@ your theme replaces `window-status-format` or `window-status-current-format`, wi
 its two stable user variables into the theme instead; see
 [Custom status-format integration](#custom-status-format-integration).
 
-## Architecture
+## How live status reaches you
 
 ![cenci-watch routes Claude Code and Codex hook events to tmux and desktop status surfaces](../docs/assets/cenci-surfaces.svg)
 
-The core daemon keys state by agent session id, maps hook events to statuses, and owns the paneless TTL sweep. All window work is delegated to an injected frontend:
+1. **The agent reports a lifecycle event.** Native Claude Code and Codex hooks send
+   session start, activity, input, completion, and exit events over a local Unix socket.
+2. **One daemon turns events into shared state.** It keys status by agent session,
+   coalesces updates, and removes stale sessions when a pane or paneless run disappears.
+3. **Every surface reads the same answer.** tmux updates interactively; desktop widgets
+   consume the read-only `cenci widget-json` snapshot.
+
+Normal state changes are push-driven—there is no polling loop watching agent processes.
+Only stale-session cleanup runs periodically.
+
+### Architecture details
+
+The core daemon keys state by agent session id, maps hook events to statuses, and owns
+the paneless TTL sweep. All window work is delegated to an injected frontend:
 
 - **tmux frontend** (`internal/frontend/tmux/`): the one interactive frontend — window rename, style, pane-based stale sweep, renumber migration.
 - **status JSON** (`internal/frontend/status/`): read-only broadcast in the [Waybar custom module protocol](https://github.com/Alexays/Waybar/wiki/Module:-Custom); consumed by `cenci widget-json` (hidden alias `waybar`) and the Waybar, noctalia, [DMS](plugin/dms/README.md), [GNOME Shell](plugin/gnome/README.md), [KDE Plasma](plugin/plasma/README.md), and macOS menu bar ([SwiftBar](https://swiftbar.app), [setup](plugin/macos/README.md)) display widgets.
-
-No polling for normal state changes. Agent hooks push state changes to the daemon instantly via a Unix socket; the daemon sweeps periodically for stale/exited sessions.
 
 ## Installation
 

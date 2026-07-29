@@ -1,5 +1,7 @@
 # Cenci — GNOME Shell extension
 
+> A [cenci-watch](../../README.md) status surface for GNOME Shell.
+
 Live counts of Claude Code and Codex agent sessions in the GNOME Shell top bar
 (Ubuntu's default desktop). Polls `cenci widget-json` and renders the snapshot —
 a read-only frontend over the same Waybar JSON contract as the waybar, noctalia,

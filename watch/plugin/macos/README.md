@@ -1,5 +1,7 @@
 # Cenci — macOS menu bar (SwiftBar)
 
+> A [cenci-watch](../../README.md) status surface for SwiftBar.
+
 Live counts of Claude Code and Codex sessions in your macOS menu bar. Polls
 `cenci widget-json` and renders the snapshot as a [SwiftBar](https://swiftbar.app)
 plugin — the same Waybar JSON contract the noctalia and dms widgets consume, so

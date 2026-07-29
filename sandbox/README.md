@@ -16,6 +16,24 @@ shortcut table — lives in
 
 ![cenci-sandbox mounts the current repository into a deliberately small container boundary for a full-permission coding agent](../docs/assets/cenci-sandbox-boundary.svg)
 
+## How a session starts
+
+1. **Resolve the scope.** `cenci open` detects the current git root, selected agent,
+   and available container runtime.
+2. **Prepare trusted runtime assets.** It builds or reuses the sandbox image and, on
+   first use, bootstraps the selected official agent CLI into a shared volume that
+   workloads mount read-only.
+3. **Start or reuse the repository container.** The repository is mounted at
+   `/workspace`; agent configuration lives in an agent- and repository-specific home
+   volume so later sessions can resume.
+4. **Enter at full permissions.** The launcher execs the agent inside the container.
+   No inbound ports are published by default; `--host-network` and `--dind` are explicit
+   boundary-widening choices.
+
+The container limits host exposure; it does not make code inside the repository
+trusted. The agent can still modify the mounted repository and use outbound network
+access. See the [security model](../SECURITY.md) for guarantees and non-goals.
+
 ## Prerequisites
 
 - Docker or Podman installed on the host
@@ -31,23 +49,6 @@ shortcut table — lives in
 - OpenCode auth on the host when using `--agent opencode` — run `opencode auth login` to
   create `~/.local/share/opencode/auth.json` (staged read-only, mode 600, mirrors Codex), or
   export `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`.
-
-## Limitations
-
-**Legacy `~/Repos` mount and pre-existing files.** The container's `dev` user is baked
-in at UID/GID 1000, but `entrypoint.sh` auto-remaps it to your host `HOST_UID`/`HOST_GID`
-on every launch (the launcher passes them in), so files newly written into the per-repo
-`/workspace` mount always come out owned by your host user — no manual `chown` needed.
-Renumbering a live account requires no process running under it yet, so the container now
-briefly starts as `root` for this remap step before `entrypoint.sh` unconditionally drops
-privileges to (the host-remapped) `dev` for everything else — the exec/attach path
-(`cenci open --shell`, agent sessions) is unaffected and always resolves to `dev`.
-The one remaining caveat is the legacy whole-`~/Repos` mount (used outside a git repo):
-the remap does **not** retroactively `chown` that tree, since rewriting ownership across
-your entire `~/Repos` from inside the container is too large a blast radius to automate.
-If you have pre-existing files there from before this fix, or you're not UID 1000 and hit
-permission errors under the legacy mount, `chown -R $(id -u):$(id -g) ~/Repos` on the host
-clears it up.
 
 ## Installation
 
@@ -816,6 +817,22 @@ docker save cenci-sandbox:latest | gzip > cenci-sandbox.tar.gz
 docker load < cenci-sandbox.tar.gz
 ```
 
+## Known limitations
+
+**Legacy `~/Repos` mount and pre-existing files.** The container's `dev` user is baked
+in at UID/GID 1000, but `entrypoint.sh` auto-remaps it to your host `HOST_UID`/`HOST_GID`
+on every launch (the launcher passes them in), so files newly written into the per-repo
+`/workspace` mount always come out owned by your host user—no manual `chown` needed.
+Renumbering a live account requires no process running under it yet, so the container
+briefly starts as `root` for this remap step before `entrypoint.sh` unconditionally drops
+privileges to the host-remapped `dev` user.
+
+The remaining caveat is the legacy whole-`~/Repos` mount used outside a git repo. The
+remap does not retroactively `chown` that tree because rewriting ownership across the
+entire directory is too large a blast radius to automate. If it contains stale,
+mis-owned files from an older cenci version, run
+`chown -R $(id -u):$(id -g) ~/Repos` on the host.
+
 ## Troubleshooting
 
 **Permission errors on `/workspace` files**
@@ -823,7 +840,7 @@ docker load < cenci-sandbox.tar.gz
 launch, so this should no longer happen for the per-repo mount. If you're on the legacy
 whole-`~/Repos` mount (outside a git repo) and see stale mis-owned files from before this
 fix, run `chown -R $(id -u):$(id -g) ~/Repos` on the host — see
-[Limitations](#limitations).
+[Known limitations](#known-limitations).
 
 **`claude`, `codex`, or `opencode` not found inside the container**
 The selected CLI is executed from `/opt/cenci-agent/current`. Check bootstrap diagnostics for
