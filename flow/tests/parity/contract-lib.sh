@@ -364,6 +364,10 @@ check_claude_adapter() {
   elif ! _markers_strictly_increasing "${phase2}" \
       "${_CLAUDE_WT_MARKER}" "${_CLAUDE_GATE_MARKER}" "${_CLAUDE_STATUS_MARKER}"; then
     _prop "worktree-isolation" 1 "out of order in phase-2-worktree.md: worktree creation must precede the baseline-gate invocation (hooks/scripts/run-gate.sh), which must precede GATE_STATUS interpretation"
+  elif [[ "${hooks_json}" != *'"matcher": "Bash"'* ]]; then
+    # #795: guard-main-worktree.sh must also be wired under a Bash matcher so
+    # Bash redirection/tee write targets are enforced, not only Write|Edit.
+    _prop "worktree-isolation" 1 "hooks.json does not wire a Bash PreToolUse matcher for guard-main-worktree.sh (#795)"
   else
     _prop "worktree-isolation" 0
   fi
@@ -407,13 +411,16 @@ check_claude_adapter() {
   fi
   overall=$((overall + $?))
 
-  # P6 sensitive-file-refusal: hooks.json wires check-sensitive-files.sh.
+  # P6 sensitive-file-refusal: hooks.json wires check-sensitive-files.sh
+  # under both Write|Edit and a Bash matcher (#795).
   if [[ "${hooks_json_ok}" -ne 0 ]]; then
     _prop "sensitive-file-refusal" 1 "hooks/hooks.json not found/unreadable"
-  elif [[ "${hooks_json}" == *"check-sensitive-files.sh"* ]]; then
-    _prop "sensitive-file-refusal" 0
-  else
+  elif [[ "${hooks_json}" != *"check-sensitive-files.sh"* ]]; then
     _prop "sensitive-file-refusal" 1 "hooks.json does not wire check-sensitive-files.sh"
+  elif [[ "${hooks_json}" != *'"matcher": "Bash"'* ]]; then
+    _prop "sensitive-file-refusal" 1 "hooks.json does not wire a Bash PreToolUse matcher for check-sensitive-files.sh (#795)"
+  else
+    _prop "sensitive-file-refusal" 0
   fi
   overall=$((overall + $?))
 
@@ -498,6 +505,10 @@ check_codex_adapter() {
     _prop "worktree-isolation" 1 "codex.md is missing the 'Stop before mutations' anchor needed for the planning-before-worktree-creation ordering check"
   elif ! _markers_strictly_increasing "${codex_doc}" "${_CODEX_STOP_MARKER}" "${_CODEX_CREATE_MARKER}"; then
     _prop "worktree-isolation" 1 "out of order in codex.md: planning-mode 'Stop before mutations' must precede apply-mode worktree creation ('create the worktree')"
+  elif [[ "${hooks_json}" != *'"matcher": "Bash"'* ]]; then
+    # #795: guard-main-worktree.sh must also be wired under a Bash matcher so
+    # Bash redirection/tee write targets are enforced, not only Write|Edit.
+    _prop "worktree-isolation" 1 "codex/hooks.json does not wire a Bash PreToolUse matcher for guard-main-worktree.sh (#795)"
   else
     _prop "worktree-isolation" 0
   fi
@@ -535,13 +546,16 @@ check_codex_adapter() {
   fi
   overall=$((overall + $?))
 
-  # P6 sensitive-file-refusal: codex/hooks.json wires check-sensitive-files.sh.
+  # P6 sensitive-file-refusal: codex/hooks.json wires check-sensitive-files.sh
+  # under both Write|Edit and a Bash matcher (#795).
   if [[ "${hooks_ok}" -ne 0 ]]; then
     _prop "sensitive-file-refusal" 1 "codex/hooks.json not found/unreadable"
-  elif [[ "${hooks_json}" == *"check-sensitive-files.sh"* ]]; then
-    _prop "sensitive-file-refusal" 0
-  else
+  elif [[ "${hooks_json}" != *"check-sensitive-files.sh"* ]]; then
     _prop "sensitive-file-refusal" 1 "codex/hooks.json does not wire check-sensitive-files.sh"
+  elif [[ "${hooks_json}" != *'"matcher": "Bash"'* ]]; then
+    _prop "sensitive-file-refusal" 1 "codex/hooks.json does not wire a Bash PreToolUse matcher for check-sensitive-files.sh (#795)"
+  else
+    _prop "sensitive-file-refusal" 0
   fi
   overall=$((overall + $?))
 

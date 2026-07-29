@@ -3,8 +3,12 @@
 # guard-main-worktree.test.sh: plain bash, no framework, PASS/FAIL counters,
 # non-zero exit on failure. Each case drives the hook script with
 # PreToolUse-style JSON on stdin. Unlike guard-main-worktree.sh, this hook
-# does not consult cwd/git state — it only reads tool_input.file_path (or
-# filePath) from stdin, so no per-case cwd/repo setup is needed.
+# does not gate on cenci configuration or consult git state — it runs
+# unconditionally in every repo. The Write|Edit arm only reads
+# tool_input.file_path (or filePath) from stdin, so no per-case cwd/repo
+# setup is needed there; the Bash arm (#795) resolves a relative redirect
+# target against the hook process's cwd, so those cases use
+# run_check_in_dir to set an explicit cwd.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,6 +31,15 @@ pass() {
 run_check() {
     local json="$1"
     CHECK_STDERR="$(echo "${json}" | sh "${CHECK_SH}" 2>&1 >/dev/null)"
+    CHECK_EXIT=$?
+}
+
+# run_check_in_dir <cwd> <json> — like run_check, but runs from <cwd>. Used
+# for the Bash-mode relative-target case (#795), where a relative redirect
+# target must be resolved against the hook process's cwd.
+run_check_in_dir() {
+    local cwd="$1" json="$2"
+    CHECK_STDERR="$(cd "${cwd}" && echo "${json}" | sh "${CHECK_SH}" 2>&1 >/dev/null)"
     CHECK_EXIT=$?
 }
 
@@ -366,6 +379,268 @@ if [[ "${RM_LOG_CHECK_CONTENT}" != *"/dev/null"* ]]; then
 else
     fail "mktemp failure fallback: rm must never be invoked with /dev/null (log: ${RM_LOG_CHECK_CONTENT})"
 fi
+
+# ── Bash mode (#795): tool_input.command redirection/tee targets ────
+# check-sensitive-files.sh must also inspect Bash tool_input.command for
+# `>`/`>>`/`>|`/tee write targets, extracted via the shared
+# flow/hooks/scripts/lib/bash-write-targets.sh lib, and run those targets
+# through the same blocklist as file_path/filePath. Runs unconditionally in
+# every repo (Q2), matching the Write|Edit arm's unconditional behavior.
+# Normalize TMPDIR for this section so the "${TMPDIR:-/tmp}/cenci/..."
+# allowed case below is deterministic regardless of the ambient environment
+# (mirrors guard-main-worktree.test.sh's #749 precedent).
+unset TMPDIR
+
+BASH_TEST_ROOT="$(mktemp -d /var/tmp/check-sensitive-files-bash-test.XXXXXX)"
+trap 'rm -rf "${TEST_ROOT}" "${BASH_TEST_ROOT}"' EXIT
+
+echo "case: Bash command with a sensitive > redirect target is blocked"
+BASH_CMD="echo x > ${BASH_TEST_ROOT}/.env"
+JSON=$(jq -n --arg cmd "${BASH_CMD}" '{tool_input:{command:$cmd}}')
+run_check "${JSON}"
+assert_exit "bash > sensitive target" 2
+assert_blocked_stderr "bash > sensitive target"
+
+echo "case: Bash command with a sensitive tee -a target is blocked"
+BASH_CMD="jq . ${BASH_TEST_ROOT}/in.json | tee -a ${BASH_TEST_ROOT}/deploy/credentials.json"
+JSON=$(jq -n --arg cmd "${BASH_CMD}" '{tool_input:{command:$cmd}}')
+run_check "${JSON}"
+assert_exit "bash tee -a sensitive target" 2
+assert_blocked_stderr "bash tee -a sensitive target"
+
+echo "case: Bash command redirecting stderr to /dev/null is allowed (exempt device)"
+BASH_CMD="cmd 2>/dev/null"
+JSON=$(jq -n --arg cmd "${BASH_CMD}" '{tool_input:{command:$cmd}}')
+run_check "${JSON}"
+assert_exit "bash 2>/dev/null allowed" 0
+
+echo "case: Bash command redirecting through an unresolved \$OUT variable is blocked and names the target"
+BASH_CMD='cmd > "$OUT"'
+JSON=$(jq -n --arg cmd "${BASH_CMD}" '{tool_input:{command:$cmd}}')
+run_check "${JSON}"
+assert_exit "bash > \"\$OUT\" blocked" 2
+if [[ "${CHECK_STDERR}" == *'$OUT'* ]]; then
+    pass
+else
+    fail "bash > \"\$OUT\" blocked: stderr should name the unresolved target (\$OUT): ${CHECK_STDERR}"
+fi
+
+echo "case: Bash command redirecting through \$(mktemp) is blocked and names the target"
+BASH_CMD='cmd > $(mktemp)'
+JSON=$(jq -n --arg cmd "${BASH_CMD}" '{tool_input:{command:$cmd}}')
+run_check "${JSON}"
+assert_exit "bash > \$(mktemp) blocked" 2
+if [[ "${CHECK_STDERR}" == *'$(mktemp)'* ]]; then
+    pass
+else
+    fail "bash > \$(mktemp) blocked: stderr should name the unresolved target (\$(mktemp)): ${CHECK_STDERR}"
+fi
+
+echo "case: Bash command with no redirect and no tee is allowed via early exit"
+BASH_CMD="git status"
+JSON=$(jq -n --arg cmd "${BASH_CMD}" '{tool_input:{command:$cmd}}')
+run_check "${JSON}"
+assert_exit "bash no-redirect early exit" 0
+
+echo "case: Bash command redirecting to \${TMPDIR:-/tmp}/cenci/... is allowed"
+BASH_CMD='cmd > "${TMPDIR:-/tmp}/cenci/x.md"'
+JSON=$(jq -n --arg cmd "${BASH_CMD}" '{tool_input:{command:$cmd}}')
+run_check "${JSON}"
+assert_exit "bash \${TMPDIR:-/tmp}/cenci/... allowed" 0
+
+echo "case: Bash command with multiple redirects, only the second target sensitive, is blocked"
+BASH_CMD="cmd > ${BASH_TEST_ROOT}/first.txt 2> ${BASH_TEST_ROOT}/.env"
+JSON=$(jq -n --arg cmd "${BASH_CMD}" '{tool_input:{command:$cmd}}')
+run_check "${JSON}"
+assert_exit "bash multi-redirect second sensitive" 2
+assert_blocked_stderr "bash multi-redirect second sensitive"
+
+echo "case: Bash command with multiple tee operands, only the last sensitive, is blocked"
+BASH_CMD="foo | tee ${BASH_TEST_ROOT}/a.txt ${BASH_TEST_ROOT}/.env"
+JSON=$(jq -n --arg cmd "${BASH_CMD}" '{tool_input:{command:$cmd}}')
+run_check "${JSON}"
+assert_exit "bash multi-tee last sensitive" 2
+assert_blocked_stderr "bash multi-tee last sensitive"
+
+echo "case: Bash command with tee as the first token on a new line (no leading whitespace) is blocked (Fix 2 regression)"
+BASH_CMD="$(printf 'cd /workspace\ntee -a %s/deploy/.env' "${BASH_TEST_ROOT}")"
+JSON=$(jq -n --arg cmd "${BASH_CMD}" '{tool_input:{command:$cmd}}')
+run_check "${JSON}"
+assert_exit "bash multi-line tee on new line blocked" 2
+assert_blocked_stderr "bash multi-line tee on new line blocked"
+
+echo "case: Bash command with a relative redirect target is resolved against cwd and blocked"
+RELATIVE_TARGET_DIR="${BASH_TEST_ROOT}/relative-target-cwd"
+mkdir -p "${RELATIVE_TARGET_DIR}"
+BASH_CMD="echo x > .env"
+JSON=$(jq -n --arg cmd "${BASH_CMD}" '{tool_input:{command:$cmd}}')
+run_check_in_dir "${RELATIVE_TARGET_DIR}" "${JSON}"
+assert_exit "bash relative target resolved against cwd" 2
+assert_blocked_stderr "bash relative target resolved against cwd"
+
+# ── Fix F (silent-failure-hunter, #795 round 2): end-to-end integration
+# coverage for the awk-missing fail-closed path. bash-write-targets.test.sh
+# unit-tests bwt_extract_targets directly with awk removed from PATH, but
+# nothing previously proved the caller-side block (exit 2, BLOCKED message)
+# actually fires through this hook's real JSON-on-stdin entry point.
+echo "case: Bash command inspection fails closed when awk is unavailable (Fix F integration)"
+AWK_MISSING_BIN="${BASH_TEST_ROOT}/bin-no-awk"
+make_curated_bin "${AWK_MISSING_BIN}" sh cat jq mktemp rm
+BASH_CMD="echo x > ${BASH_TEST_ROOT}/no-awk-target.txt"
+JSON=$(jq -n --arg cmd "${BASH_CMD}" '{tool_input:{command:$cmd}}')
+run_check_with_path "${AWK_MISSING_BIN}" "${JSON}"
+assert_exit "bash command inspection blocked when awk missing" 2
+assert_blocked_stderr "bash command inspection blocked when awk missing"
+
+# ── Should-fix (#795 round 3): end-to-end integration coverage for the
+# command-too-long fail-closed path. bash-write-targets.test.sh unit-tests
+# bwt_extract_targets's length pre-check directly, but nothing previously
+# proved the caller-side block (exit 2, the specific "too long to inspect"
+# BLOCKED message) actually fires through this hook's real JSON-on-stdin
+# entry point. Mirrors the awk-missing integration case above.
+echo "case: Bash command inspection fails closed when the command is too long to inspect (length pre-check integration)"
+LONG_BASH_CMD="echo $(printf '%*s' 100005 '' | tr ' ' 'a') > ${BASH_TEST_ROOT}/too-long-target.txt"
+JSON=$(jq -n --arg cmd "${LONG_BASH_CMD}" '{tool_input:{command:$cmd}}')
+run_check "${JSON}"
+assert_exit "bash command inspection blocked when command too long" 2
+if [[ "${CHECK_STDERR}" == *"too long to inspect"* ]]; then
+    pass
+else
+    fail "bash command inspection blocked when command too long: stderr should contain the 'too long to inspect' message, got: ${CHECK_STDERR}"
+fi
+
+# ── Should-fix (#795 round 4): end-to-end integration coverage for the
+# wc-missing fail-closed path. bash-write-targets.test.sh unit-tests
+# bwt_extract_targets's length pre-check's wc dependency directly, but
+# nothing previously proved the caller-side block (exit 2, the specific "wc
+# was not found on PATH" BLOCKED message) actually fires through this hook's
+# real JSON-on-stdin entry point. Mirrors the awk-missing integration case
+# above; PATH is curated with awk present but wc absent, isolating this
+# specific dependency.
+echo "case: Bash command inspection fails closed when wc is unavailable (wc-missing integration)"
+WC_MISSING_BIN="${BASH_TEST_ROOT}/bin-no-wc"
+make_curated_bin "${WC_MISSING_BIN}" sh cat jq mktemp rm awk realpath
+BASH_CMD="echo x > ${BASH_TEST_ROOT}/no-wc-target.txt"
+JSON=$(jq -n --arg cmd "${BASH_CMD}" '{tool_input:{command:$cmd}}')
+run_check_with_path "${WC_MISSING_BIN}" "${JSON}"
+assert_exit "bash command inspection blocked when wc missing" 2
+if [[ "${CHECK_STDERR}" == *"wc was not found on PATH"* ]]; then
+    pass
+else
+    fail "bash command inspection blocked when wc missing: stderr should contain the 'wc was not found on PATH' message, got: ${CHECK_STDERR}"
+fi
+
+# ── #795 final round: historical-bypass regression table ────────────
+# Every construct found across the five adversarial review rounds, driven
+# end-to-end through the hook's real JSON-on-stdin entry point, asserting a
+# block. Constructs the tokenizer now parses ({backtick,sudo,if-then} tee,
+# the mid-command redirect) block via extracted targets; constructs it still
+# does not model (brace expansion) block via the empty-parse backstop
+# (check_sensitive_raw). Either way: never a silent allow.
+echo "case: historical bypass constructs from all five review rounds are blocked end-to-end"
+HIST_DIR="${BASH_TEST_ROOT}/hist"
+mkdir -p "${HIST_DIR}"
+HIST_CMDS=(
+    "{tee,cat} ${HIST_DIR}/.env"
+    "\`tee ${HIST_DIR}/.env\`"
+    "sudo tee ${HIST_DIR}/.env"
+    "if true; then tee ${HIST_DIR}/.env; fi"
+    "tee /tmp/decoy >/dev/null ${HIST_DIR}/.env"
+    "echo x > /dev/fd/../..${HIST_DIR}/.env"
+)
+for HIST_CMD in "${HIST_CMDS[@]}"; do
+    JSON=$(jq -n --arg cmd "${HIST_CMD}" '{tool_input:{command:$cmd}}')
+    run_check "${JSON}"
+    assert_exit "historical bypass blocked (${HIST_CMD})" 2
+    assert_blocked_stderr "historical bypass blocked (${HIST_CMD})"
+done
+
+# ── #795 final round: Bash-arm symlink resolution ───────────────────
+# The Bash arm was purely lexical -- `>> notes.txt` where notes.txt symlinks
+# to a real .env was allowed. It now canonicalizes each target via the same
+# parent-anchored canonicalize_path as the Write|Edit arm and checks the
+# union (raw + collapsed + canonical).
+echo "case: >> through a benign-named symlink resolving to .env is blocked (Bash-arm canonicalization)"
+touch "${HIST_DIR}/real.env"
+ln -s "${HIST_DIR}/real.env" "${HIST_DIR}/notes.txt"
+JSON=$(jq -n --arg cmd ">> notes.txt" '{tool_input:{command:$cmd}}')
+run_check_in_dir "${HIST_DIR}" "${JSON}"
+assert_exit "bash symlink to .env blocked" 2
+assert_blocked_stderr "bash symlink to .env blocked"
+
+# ── #795 final round: empty-parse backstop (check_sensitive_raw) ────
+# Zero extracted targets from a command that still looks like it might write
+# (any `>`, or a delimited tee token) triggers a raw-text marker scan: a
+# marker mention blocks, no marker allows. An alnum-embedded "tee"
+# (esteemed, committee) is not a write candidate shape and never triggers
+# the scan at all.
+echo "case: empty-parse backstop blocks a marker mention (zero targets, quoted >)"
+JSON=$(jq -n --arg cmd "echo \"a -> b\" ${BASH_TEST_ROOT}/secrets.yaml" '{tool_input:{command:$cmd}}')
+run_check "${JSON}"
+assert_exit "backstop marker mention blocked" 2
+assert_blocked_stderr "backstop marker mention blocked"
+
+echo "case: empty-parse backstop stays quiet with no marker (quoted > false-positive check)"
+JSON=$(jq -n --arg cmd 'echo "a > b"' '{tool_input:{command:$cmd}}')
+run_check "${JSON}"
+assert_exit "quoted > no marker allowed" 0
+
+echo "case: alnum-embedded tee with a marker mention is not a write-candidate shape (allowed)"
+JSON=$(jq -n --arg cmd "cat ${BASH_TEST_ROOT}/committee-credentials-review.md" '{tool_input:{command:$cmd}}')
+run_check "${JSON}"
+assert_exit "embedded tee + marker read allowed" 0
+
+echo "case: grep -r credentials src/ | head is allowed (no write candidate at all)"
+JSON=$(jq -n --arg cmd 'grep -r credentials src/ | head' '{tool_input:{command:$cmd}}')
+run_check "${JSON}"
+assert_exit "grep credentials pipeline allowed" 0
+
+# ── #795 final round: marker-sync contract ───────────────────────────
+# check_sensitive_raw's substring markers must cover every check_sensitive
+# whole-path glob: for each glob pattern, its literal core (asterisks
+# stripped) must CONTAIN at least one raw marker's core -- then any string
+# matching the glob necessarily contains that marker, so the backstop can
+# never lag behind a blocklist addition. Precedent: the three-way
+# permissions.deny sync contract in
+# flow/templates/settings-permissions.test.sh.
+echo "case: every check_sensitive pattern has a covering check_sensitive_raw marker (marker-sync contract)"
+CS_PATTERNS="$(awk '/^check_sensitive\(\) \{/,/^\}$/' "${CHECK_SH}" \
+    | grep -E '^[[:space:]]+\*.*\)[[:space:]]*$' | sed 's/[[:space:]]//g; s/)$//' | tr '|' '\n' | grep -v '^$')"
+RAW_MARKERS="$(awk '/^check_sensitive_raw\(\) \{/,/^\}$/' "${CHECK_SH}" \
+    | grep -E '^[[:space:]]+\*.*\)[[:space:]]*$' | sed 's/[[:space:]]//g; s/)$//' | tr '|' '\n' | grep -v '^$')"
+if [[ -n "${CS_PATTERNS}" ]]; then
+    pass
+else
+    fail "marker-sync: extracted no check_sensitive patterns (extraction broken or function renamed)"
+fi
+if [[ -n "${RAW_MARKERS}" ]]; then
+    pass
+else
+    fail "marker-sync: extracted no check_sensitive_raw markers (extraction broken or function renamed)"
+fi
+while IFS= read -r CS_PAT; do
+    [[ -z "${CS_PAT}" ]] && continue
+    CS_CORE="${CS_PAT//\*/}"
+    CS_CORE="${CS_CORE#/}"
+    if [[ -z "${CS_CORE}" ]]; then
+        fail "marker-sync: check_sensitive pattern '${CS_PAT}' has an empty literal core"
+        continue
+    fi
+    COVERED=0
+    while IFS= read -r RAW_PAT; do
+        RAW_CORE="${RAW_PAT//\*/}"
+        [[ -z "${RAW_CORE}" ]] && continue
+        if [[ "${CS_CORE}" == *"${RAW_CORE}"* ]]; then
+            COVERED=1
+            break
+        fi
+    done <<< "${RAW_MARKERS}"
+    if [[ "${COVERED}" -eq 1 ]]; then
+        pass
+    else
+        fail "marker-sync: check_sensitive pattern '${CS_PAT}' has no covering check_sensitive_raw marker -- add a substring marker for it"
+    fi
+done <<< "${CS_PATTERNS}"
 
 # ── Summary ──────────────────────────────────────────────────────────
 echo

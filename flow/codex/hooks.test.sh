@@ -55,6 +55,21 @@ else
     fail "Codex hook handlers contain unsupported keys"
 fi
 
+# ── #795: a Bash PreToolUse matcher must wire both guard scripts ────
+# Extends the existing Write|Edit matcher's write-guard coverage to Bash
+# redirection/tee targets. Both check-sensitive-files.sh and
+# guard-main-worktree.sh must be wired under a "Bash" matcher entry.
+if jq -e '
+  [.hooks.PreToolUse[] | select(.matcher == "Bash")] as $bash_matchers
+  | ($bash_matchers | length) > 0
+  and ([$bash_matchers[].hooks[].command] | any(contains("check-sensitive-files.sh")))
+  and ([$bash_matchers[].hooks[].command] | any(contains("guard-main-worktree.sh")))
+' "${CODEX_HOOKS}" >/dev/null; then
+    pass
+else
+    fail "Codex hooks must wire a Bash PreToolUse matcher covering both check-sensitive-files.sh and guard-main-worktree.sh"
+fi
+
 CONTRACT_DIR="$(mktemp -d)"
 trap 'rm -rf "${CONTRACT_DIR}"' EXIT
 session="$(cd "${CONTRACT_DIR}" && PLUGIN_ROOT="${FLOW_DIR}" node "${FLOW_DIR}/codex/hook-output.mjs" session)"

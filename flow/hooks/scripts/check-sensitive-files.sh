@@ -26,6 +26,19 @@
 # only matching would miss a benign-looking name that resolves to a
 # sensitive canonical target. The union preserves today's raw-name blocking
 # while adding canonical-path protection, with no regressions either way.
+#
+# Second input mode (#795): when tool_input.file_path/filePath are both
+# absent but tool_input.command is non-empty (a Bash tool call), the same
+# blocklist is applied to every `>`/`>>`/`>|`/`tee` write target found in the
+# command, extracted via the shared lib/bash-write-targets.sh tokenizer.
+# This mode runs unconditionally in every repo too, matching the
+# Write|Edit arm's unconditional behavior (ticket #795, Q2). The tokenizer
+# is a precision layer, not a completeness proof: when it extracts ZERO
+# targets from a command that still looks like it might write, the
+# empty-parse backstop scans the raw command text for this guard's markers
+# (check_sensitive_raw) and blocks on a hit — an unmodelled shell construct
+# costs a false positive, never a silent permit. See the lib header's
+# "Threat model and accepted residuals" block for the coverage boundary.
 
 command -v jq >/dev/null 2>&1 || {
   echo "BLOCKED: jq is required by check-sensitive-files.sh but was not found on PATH." >&2
@@ -71,12 +84,25 @@ jq_err_cleanup() {
   fi
 }
 
-if ! FILE_PATH=$(printf '%s' "$INPUT" | jq -r '
-    if (.tool_input.file_path // "") != "" then
-      .tool_input.file_path
-    else
-      (.tool_input.filePath // empty)
-    end
+# Dual-mode extraction (#795): a single jq call extracts EITHER the
+# Write|Edit file_path/filePath field OR, when neither is present, the Bash
+# tool_input.command string. Two logical values are printed, one per line:
+# line 1 is the resolved file_path/filePath (or empty string), and every
+# remaining line (2 onward, rejoined with newlines) is tool_input.command (or
+# empty) — rejoining rather than taking a single line 2 means an embedded
+# literal newline inside a multi-line Bash command is never truncated.
+# Explicit emptiness checks throughout (never bare '//', which only falls
+# back on null/false, not on an empty string — flow/docs/shell-scripting-
+# gotchas.md rule 2).
+if ! JQ_OUT=$(printf '%s' "$INPUT" | jq -r '
+    (if (.tool_input.file_path // "") != "" then
+       .tool_input.file_path
+     elif (.tool_input.filePath // "") != "" then
+       .tool_input.filePath
+     else
+       ""
+     end),
+    (.tool_input.command // "")
   ' 2>&9); then
   echo "BLOCKED: check-sensitive-files.sh could not parse the tool call's JSON input: $(jq_err_detail)" >&2
   jq_err_cleanup
@@ -84,15 +110,14 @@ if ! FILE_PATH=$(printf '%s' "$INPUT" | jq -r '
 fi
 jq_err_cleanup
 
-[ -z "$FILE_PATH" ] && exit 0
+# Split JQ_OUT's two logical values without depending on sed (kept out of
+# this hook's tool dependency footprint): `read` (a shell builtin) peels off
+# line 1, then `cat` passes the remainder straight through, preserving any
+# embedded newlines in a multi-line Bash command.
+FILE_PATH=$(printf '%s\n' "$JQ_OUT" | { IFS= read -r JQ_LINE1; printf '%s' "$JQ_LINE1"; })
+BASH_COMMAND=$(printf '%s\n' "$JQ_OUT" | { IFS= read -r JQ_DISCARD; cat; })
 
-case "$FILE_PATH" in
-  /*) ;;
-  *)
-    echo "BLOCKED: check-sensitive-files.sh received a non-absolute file_path: $FILE_PATH" >&2
-    exit 2
-    ;;
-esac
+[ -z "$FILE_PATH" ] && [ -z "$BASH_COMMAND" ] && exit 0
 
 # Detect a path resolver able to canonicalize an *existing* path. Prefer
 # realpath; fall back to GNU readlink -f (probed via a known-existing path so
@@ -140,50 +165,47 @@ lexical_collapse() {
   printf '%s\n' "$result"
 }
 
-# Parent-anchored canonicalization: only ever feed *existing* paths to the
-# resolver, sidestepping realpath/readlink -f divergence on non-existent
-# trailing components (no -m / -f-on-missing-target usage). When FILE_PATH
-# itself does not exist, walk up toward / to find the nearest *existing*
-# ancestor — not just the immediate parent — so a symlink several levels
-# above a not-yet-existing tail still gets resolved. "/" always exists, so
-# the walk is guaranteed to terminate.
-if [ -e "$FILE_PATH" ]; then
-  if ! CANONICAL_PATH=$(resolve_path "$FILE_PATH"); then
-    echo "BLOCKED: check-sensitive-files.sh could not resolve $FILE_PATH" >&2
-    exit 2
+# canonicalize_path <abs-path> — parent-anchored canonicalization shared by
+# both arms below: prints the canonical form (symlinks resolved via the
+# nearest existing ancestor, "."/".." collapsed) to stdout and returns 0.
+# Only ever feeds *existing* paths to the resolver, sidestepping
+# realpath/readlink -f divergence on non-existent trailing components. When
+# the path itself does not exist, walks up toward / to find the nearest
+# *existing* ancestor — not just the immediate parent — so a symlink several
+# levels above a not-yet-existing tail still gets resolved ("/" always
+# exists, so the walk terminates). Returns 1 (prints nothing) when a path
+# component is a symlink node ([ -L ], no dereference) that does not resolve
+# to an existing target ([ -e ] false — dangling target or ELOOP cycle), or
+# when resolve_path itself fails; callers must fail closed (block) on that.
+# Mirrors guard-main-worktree.sh's canonicalize_target.
+canonicalize_path() {
+  _cp_path="$1"
+  if [ -e "$_cp_path" ]; then
+    resolve_path "$_cp_path" 2>/dev/null || return 1
+    return 0
   fi
-else
-  ANCESTOR="$FILE_PATH"
-  TAIL=""
-  while [ -n "$ANCESTOR" ] && [ ! -d "$ANCESTOR" ]; do
-    # A component present as a symlink node (lstat via [ -L ], which does not
-    # dereference) but unresolvable to an existing target ([ -e ] follows the
-    # link and is false for a dangling target or an ELOOP cycle) must fail
-    # closed rather than be walked past as a not-yet-existing segment.
-    # A genuinely absent component ([ -L ] false) still walks up unchanged.
-    if [ -L "$ANCESTOR" ] && [ ! -e "$ANCESTOR" ]; then
-      echo "BLOCKED: check-sensitive-files.sh refusing to resolve $FILE_PATH: component $ANCESTOR is a symlink that does not resolve (dangling target or symlink loop)." >&2
-      exit 2
+  _cp_ancestor="$_cp_path"
+  _cp_tail=""
+  while [ -n "$_cp_ancestor" ] && [ ! -d "$_cp_ancestor" ]; do
+    if [ -L "$_cp_ancestor" ] && [ ! -e "$_cp_ancestor" ]; then
+      return 1
     fi
-    SEG="${ANCESTOR##*/}"
-    if [ -z "$TAIL" ]; then
-      TAIL="$SEG"
+    _cp_seg="${_cp_ancestor##*/}"
+    if [ -z "$_cp_tail" ]; then
+      _cp_tail="$_cp_seg"
     else
-      TAIL="$SEG/$TAIL"
+      _cp_tail="$_cp_seg/$_cp_tail"
     fi
-    ANCESTOR="${ANCESTOR%/*}"
+    _cp_ancestor="${_cp_ancestor%/*}"
   done
-  [ -z "$ANCESTOR" ] && ANCESTOR="/"
-  if ! RESOLVED_ANCESTOR=$(resolve_path "$ANCESTOR"); then
-    echo "BLOCKED: check-sensitive-files.sh could not resolve $ANCESTOR" >&2
-    exit 2
-  fi
-  CANONICAL_PATH=$(lexical_collapse "$RESOLVED_ANCESTOR/$TAIL")
-fi
+  [ -z "$_cp_ancestor" ] && _cp_ancestor="/"
+  _cp_resolved_ancestor=$(resolve_path "$_cp_ancestor" 2>/dev/null) || return 1
+  lexical_collapse "$_cp_resolved_ancestor/$_cp_tail"
+}
 
 # Check against sensitive file patterns. Run against BOTH the raw path and
 # the canonicalized path — block (exit 2) if either matches (see header
-# comment for the union-matching rationale).
+# comment for the union-matching rationale). Shared by both arms below.
 check_sensitive() {
   case "$1" in
     *.env|*.env.*|*/.env|*/.env.*)
@@ -204,7 +226,163 @@ check_sensitive() {
   esac
 }
 
-check_sensitive "$FILE_PATH"
-check_sensitive "$CANONICAL_PATH"
+# check_sensitive_raw <raw-command> — the empty-parse backstop's marker scan
+# (#795): applied to a whole Bash command string, not a single path, when the
+# tokenizer saw a write candidate but extracted ZERO targets (the observable
+# proxy for "we did not understand this command" — e.g. brace expansion like
+# `{tee,cat} /repo/.env`). Blocks (exit 2) if the raw text mentions any
+# sensitive marker anywhere.
+#
+# Deliberately SUBSTRING-form markers, not check_sensitive's whole-path
+# globs: those are anchored for path endings — `*.env` matches a string
+# *ending* in .env, so it would hit `{tee,cat} /repo/.env` but miss
+# `tee /repo/.env && echo ok`. Each marker below is the substring core of a
+# check_sensitive pattern; the two lists MUST stay in sync — every
+# check_sensitive pattern needs a covering marker here, pinned by the
+# marker-sync contract test in check-sensitive-files.test.sh.
+#
+# Over-blocking is the accepted cost: a command the tokenizer cannot model
+# that merely *mentions* a marker (e.g. `-> .env` inside a quoted string) is
+# blocked. The alternative — zero targets silently means allow — is the
+# fail-open path #795's refinement forbids ("neither guard may gain a
+# fail-open path"); a false positive here can be rephrased around, a silent
+# permit cannot.
+check_sensitive_raw() {
+  case "$1" in
+    *.env*)
+      _csr_marker=".env"
+      ;;
+    *credentials*|*secrets*|*secret.*|*.pem*|*.key*|*.pfx*|*.p12*)
+      _csr_marker="credentials/secrets/key-file"
+      ;;
+    *id_rsa*|*id_ed25519*|*id_ecdsa*|*.keystore*|*.jks*)
+      _csr_marker="cryptographic-key-file"
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+  {
+    echo "BLOCKED: check-sensitive-files.sh could not extract this Bash command's write targets (unmodelled shell construct), and the raw command text mentions a sensitive-file marker (${_csr_marker}): $1"
+    echo "Rewrite the command using a plain, directly-parseable redirect (>, >>) or tee form — or edit the file manually if needed."
+  } >&2
+  exit 2
+}
 
-exit 0
+if [ -n "$FILE_PATH" ]; then
+  case "$FILE_PATH" in
+    /*) ;;
+    *)
+      echo "BLOCKED: check-sensitive-files.sh received a non-absolute file_path: $FILE_PATH" >&2
+      exit 2
+      ;;
+  esac
+
+  # Parent-anchored canonicalization via the shared canonicalize_path
+  # (see its definition above) — fails closed on an unresolvable path or an
+  # ancestor component that is a dangling/looping symlink.
+  if ! CANONICAL_PATH=$(canonicalize_path "$FILE_PATH"); then
+    echo "BLOCKED: check-sensitive-files.sh refusing to resolve $FILE_PATH: the path could not be canonicalized (a component is a symlink that does not resolve — dangling target or symlink loop — or the resolver failed)." >&2
+    exit 2
+  fi
+
+  check_sensitive "$FILE_PATH"
+  check_sensitive "$CANONICAL_PATH"
+
+  exit 0
+elif [ -n "$BASH_COMMAND" ]; then
+  # Bash arm (#795): tool_input.command redirection/tee write targets are
+  # extracted via the shared lib and checked against the same blocklist as
+  # the Write|Edit arm above. Runs unconditionally (Q2) -- no config gate.
+  LIB_DIR="${0%/*}"
+  [ "$LIB_DIR" = "$0" ] && LIB_DIR="."
+  BWT_LIB="$LIB_DIR/lib/bash-write-targets.sh"
+  if [ ! -r "$BWT_LIB" ]; then
+    echo "BLOCKED: check-sensitive-files.sh could not find its required helper library ($BWT_LIB) to inspect this Bash command's write targets." >&2
+    exit 2
+  fi
+  # shellcheck source=./lib/bash-write-targets.sh
+  . "$BWT_LIB"
+
+  bwt_has_write_candidate "$BASH_COMMAND" || exit 0
+
+  # bwt_extract_targets fails closed (non-zero, no output) when awk is
+  # missing from PATH, when the command is too long to safely inspect (#795
+  # round 2, Fix D), or when wc is missing from PATH (#795 round 3, needed by
+  # the length pre-check) -- an empty result in any of these cases must never
+  # be treated as "no write targets found" (which would silently allow the
+  # command). The three failure modes get distinct exit codes (3, 4, 5) from
+  # bwt_extract_targets so the message here is accurate rather than
+  # misreporting one failure as another.
+  BWT_TARGETS=$(bwt_extract_targets "$BASH_COMMAND")
+  BWT_EXTRACT_STATUS=$?
+  if [ "$BWT_EXTRACT_STATUS" -ne 0 ]; then
+    if [ "$BWT_EXTRACT_STATUS" -eq 4 ]; then
+      echo "BLOCKED: check-sensitive-files.sh: command too long to inspect for write targets (bwt_extract_targets)." >&2
+    elif [ "$BWT_EXTRACT_STATUS" -eq 5 ]; then
+      echo "BLOCKED: check-sensitive-files.sh requires wc (via lib/bash-write-targets.sh) to inspect this Bash command's write targets, but wc was not found on PATH." >&2
+    else
+      echo "BLOCKED: check-sensitive-files.sh requires awk (via lib/bash-write-targets.sh) to inspect this Bash command's write targets, but awk was not found on PATH." >&2
+    fi
+    exit 2
+  fi
+  # Empty-parse backstop (#795): zero extracted targets is byte-identical
+  # for "this command genuinely writes nothing" and "the tokenizer met a
+  # construct it does not model" (brace expansion, heredoc bodies, arbitrary
+  # metacharacter gluing). When the command still looks like it might write
+  # (bwt_zero_parse_suspicious: any `>`, or a delimited `tee` token), scan
+  # the RAW command text for this guard's sensitive markers and block on a
+  # hit — an unmodelled construct costs a false positive, never a silent
+  # permit. Without this, `{tee,cat} /repo/.env` extracted nothing and was
+  # silently allowed (#795 review rounds 1-5, the non-converging root cause).
+  if [ -z "$BWT_TARGETS" ]; then
+    if bwt_zero_parse_suspicious "$BASH_COMMAND"; then
+      check_sensitive_raw "$BASH_COMMAND"
+    fi
+    exit 0
+  fi
+
+  while IFS= read -r BWT_TARGET; do
+    [ -z "$BWT_TARGET" ] && continue
+
+    bwt_is_exempt_device "$BWT_TARGET" && continue
+
+    BWT_EXPANDED=$(bwt_expand_safe_vars "$BWT_TARGET")
+
+    if bwt_is_unresolved "$BWT_EXPANDED"; then
+      {
+        echo "BLOCKED: check-sensitive-files.sh cannot resolve the Bash write target '$BWT_EXPANDED' in: $BASH_COMMAND"
+        echo "Use a literal absolute path, or one of \${TMPDIR:-/tmp}, \$TMPDIR, \$HOME, \$PWD."
+      } >&2
+      exit 2
+    fi
+
+    case "$BWT_EXPANDED" in
+      /*) BWT_ABS="$BWT_EXPANDED" ;;
+      *) BWT_ABS="$(pwd)/$BWT_EXPANDED" ;;
+    esac
+
+    BWT_COLLAPSED=$(lexical_collapse "$BWT_ABS")
+
+    # Symlink resolution (#795 final round): the two lexical forms above
+    # never touch the filesystem, so `>> notes.txt` where notes.txt symlinks
+    # to .env matched nothing. Canonicalize via the same parent-anchored
+    # canonicalize_path the Write|Edit arm uses, and check the union of all
+    # three forms (raw + collapsed + canonical) — same union rationale as
+    # the header comment. Fails closed on an unresolvable component.
+    if ! BWT_CANON=$(canonicalize_path "$BWT_ABS"); then
+      echo "BLOCKED: check-sensitive-files.sh refusing to resolve Bash write target $BWT_ABS: the path could not be canonicalized (a component is a symlink that does not resolve — dangling target or symlink loop — or the resolver failed)." >&2
+      exit 2
+    fi
+
+    check_sensitive "$BWT_ABS"
+    check_sensitive "$BWT_COLLAPSED"
+    check_sensitive "$BWT_CANON"
+  done <<BWT_TARGETS_EOF
+$BWT_TARGETS
+BWT_TARGETS_EOF
+
+  exit 0
+else
+  exit 0
+fi
