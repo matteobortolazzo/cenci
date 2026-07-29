@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests for guard-main-worktree.sh. Follows the repo's shell-test precedent
-# (flow/skills/babysit/scripts/tick.test.sh, sandbox/tests/*.test.sh):
+# (flow/hooks/scripts/check-sensitive-files.test.sh, sandbox/tests/*.test.sh):
 # plain bash, no framework, PASS/FAIL counters, non-zero exit on failure.
 # Each case runs in a fresh directory under one mktemp root and drives the
 # hook script with PreToolUse-style JSON on stdin.

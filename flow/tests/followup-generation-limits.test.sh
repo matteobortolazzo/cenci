@@ -72,7 +72,7 @@ assert_contains "${PHASE_9}" 'not as a graceful degrade: create no new followup 
 # ---------------------------------------------------------------------
 # 4. Dedup before create + resume-safe append (Phase 9).
 # ---------------------------------------------------------------------
-assert_contains "${PHASE_9}" 'match on the literal body substring' \
+assert_contains "${PHASE_9}" 'match on the literal whole back-link line only' \
   "must dedup on the literal back-link, not fuzzy heuristics"
 assert_contains "${PHASE_9}" 'never match on title similarity' \
   "must never dedup on title similarity"

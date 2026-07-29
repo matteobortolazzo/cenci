@@ -86,30 +86,30 @@ Skip this section unless `isUiTicket` is true.
 
 Screenshots are temporary review aids — never commit them to the repo. Host them in a **secret GitHub gist**: it lives under the user's account, is unlisted, and is disposable (`gh gist delete <gist-id>` after merge).
 
-1. **Collect**: use the images Phase 4 persisted to `/tmp/claude/cenci-screenshots/<ticket-id-or-slug>/`. If the directory is missing or empty and `playwright-cli` is available, capture the affected screens now against the dev build. If capture is not possible, skip the upload and use the fallback body in step 5.
+1. **Collect**: use the images Phase 4 persisted to `${TMPDIR:-/tmp}/cenci/cenci-screenshots/<ticket-id-or-slug>/`. If the directory is missing or empty and `playwright-cli` is available, capture the affected screens now against the dev build. If capture is not possible, skip the upload and use the fallback body in step 5.
 2. **Privacy check**: secret gists are unlisted but readable by anyone with the URL. Screenshots must show only local/dev data — no real user data, tokens, or internal URLs. Crop or re-capture rather than upload.
 3. **Create the gist** (gists require a text file at creation; images are pushed via git afterwards):
 
    ```bash
-   printf 'Screenshots for %s — temporary, delete after merge.\n' "<branch>" > /tmp/claude/cenci-screenshots/<ticket-id-or-slug>-README.md
-   gh gist create --desc "cenci screenshots: <owner/repo> <branch>" /tmp/claude/cenci-screenshots/<ticket-id-or-slug>-README.md
+   printf 'Screenshots for %s — temporary, delete after merge.\n' "<branch>" > ${TMPDIR:-/tmp}/cenci/cenci-screenshots/<ticket-id-or-slug>-README.md
+   gh gist create --desc "cenci screenshots: <owner/repo> <branch>" ${TMPDIR:-/tmp}/cenci/cenci-screenshots/<ticket-id-or-slug>-README.md
    ```
 
    The command prints the gist URL; extract `<gist-id>` from it. Do not pass `--public` — the gist must stay secret.
 4. **Push the images** through the gist's git remote (no `cd` compounds — see the `shell-rules` skill):
 
    ```bash
-   gh gist clone <gist-id> /tmp/claude/cenci-gist-<gist-id>
-   cp /tmp/claude/cenci-screenshots/<ticket-id-or-slug>/*.png /tmp/claude/cenci-gist-<gist-id>/
-   git -C /tmp/claude/cenci-gist-<gist-id> add -A
-   git -C /tmp/claude/cenci-gist-<gist-id> commit -m "PR screenshots"
-   git -C /tmp/claude/cenci-gist-<gist-id> push
+   gh gist clone <gist-id> ${TMPDIR:-/tmp}/cenci/cenci-gist-<gist-id>
+   cp ${TMPDIR:-/tmp}/cenci/cenci-screenshots/<ticket-id-or-slug>/*.png ${TMPDIR:-/tmp}/cenci/cenci-gist-<gist-id>/
+   git -C ${TMPDIR:-/tmp}/cenci/cenci-gist-<gist-id> add -A
+   git -C ${TMPDIR:-/tmp}/cenci/cenci-gist-<gist-id> commit -m "PR screenshots"
+   git -C ${TMPDIR:-/tmp}/cenci/cenci-gist-<gist-id> push
    ```
-5. **Build embed URLs**: `https://gist.githubusercontent.com/<gh-user>/<gist-id>/raw/<filename>.png`, where `<gh-user>` comes from `gh api user -q .login`. These go into the PR body's `## Screenshots` section (template below). If any gist step fails (auth, network), do not block PR creation — write `## Screenshots` with "Not uploaded (<reason>); local copies at `/tmp/claude/cenci-screenshots/<ticket-id-or-slug>/`" instead.
+5. **Build embed URLs**: `https://gist.githubusercontent.com/<gh-user>/<gist-id>/raw/<filename>.png`, where `<gh-user>` comes from `gh api user -q .login`. These go into the PR body's `## Screenshots` section (template below). If any gist step fails (auth, network), do not block PR creation — write `## Screenshots` with "Not uploaded (<reason>); local copies at `${TMPDIR:-/tmp}/cenci/cenci-screenshots/<ticket-id-or-slug>/`" instead.
 
 ## PR
 
-Create the PR with `gh pr create`. Write body content to `/tmp/claude/cenci-<ticket-id-or-slug>-pr-body.md` first and read it back; do not use heredocs or a large inline body string.
+Create the PR with `gh pr create`. Write body content to `${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-pr-body.md` first and read it back; do not use heredocs or a large inline body string.
 
 If a prior turn already created the PR (a Goal Autopilot resume re-entering after PR creation ran once but the turn ended before `/goal clear`), `gh pr create` fails with "a pull request for branch ... already exists." That is not a failure — run `gh pr view <branch> --json url,number -q '.url + " " + (.number | tostring)'` to recover the existing PR URL and number, and continue to Labels/Cleanup as if creation had just succeeded.
 
@@ -205,7 +205,7 @@ cenci pipeline label <id> --transition in-review --parent <parentId>
 
 The parent's real completion — the transition to "Implemented" — arrives when this last child's PR merges: the last-child commit carries `Fixes #<parentId>` (see Commit above), so the parent appears in the PR's `closingIssuesReferences` and babysit relabels it on merge.
 
-The `Working` → `In Review` → `Implemented` progression finishes on merge: babysit swaps `In Review` for `Implemented` on any issue closed by the merged PR (see the babysit skill's terminal check). PR-open never applies `Implemented`.
+The `Working` → `In Review` → `Implemented` progression finishes on merge: the `cenci babysit` supervisor swaps `In Review` for `Implemented` on any issue closed by the merged PR (see the babysit skill's Safety guarantees section). PR-open never applies `Implemented`.
 
 ## Followup Ticket
 
@@ -222,7 +222,7 @@ gh label create "Followup" --repo <owner>/<repo> --color "C5DEF5" --description 
 Ticket mode only: before creating the follow-up issue, fetch the original ticket's milestone and labels so the follow-up can inherit them. Run this as its own Bash call so a fetch failure surfaces distinctly, before the create call below:
 
 ```bash
-gh issue view <original-ticket> --repo <owner>/<repo> --json milestone,labels > /tmp/claude/cenci-<ticket-id-or-slug>-followup-meta.json || rm -f /tmp/claude/cenci-<ticket-id-or-slug>-followup-meta.json
+gh issue view <original-ticket> --repo <owner>/<repo> --json milestone,labels > ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-meta.json || rm -f ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-meta.json
 ```
 
 Ticketless mode skips this fetch entirely — same as it already omits `Related to #<original-ticket>` below.
@@ -238,44 +238,44 @@ If the meta fetch failed in ticket mode (no `followup-meta.json` present even th
 Run this step (and the create block below, and the comment) only when `SKIP_FOLLOWUP_CREATE` is unset. In ticket mode, before minting anything, search the open Followup backlog for a ticket already tracking this run's original ticket and append to it instead of opening a duplicate:
 
 ```bash
-gh issue list --repo <owner>/<repo> --label "Followup" --state open --json number,body --limit 200 > /tmp/claude/cenci-<ticket-id-or-slug>-followup-search.json
+gh issue list --repo <owner>/<repo> --label "Followup" --state open --json number,body --limit 200 > ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-search.json
 ```
 
 `--limit 200` is required: `gh issue list` otherwise caps at its default page size (~30), which would silently miss older open Followups and defeat the dedup once the backlog grows past a page.
 
-Set `MATCH_N` to the lowest-numbered open issue whose `body` contains the back-link `Related to #<original-ticket>` **as a complete line** — matched with its trailing newline included (`Related to #<original-ticket>\n`), so a numeric-prefix collision can never fire: ticket #7 must never match a body that only contains `Related to #70`. `<original-ticket>` is this run's own ticket ID, and the back-link is the exact line this section writes below. This must match on the literal body substring only (the whole back-link line, `grep -qF` against the fetched body — not a fuzzy compare); never match on title similarity or any fuzzy heuristic — the back-link is the sole join key, so an unrelated ticket that merely shares words in its title is never treated as a duplicate. If no open issue contains that exact line (or in ticketless mode, which has no back-link to search on), there is no `MATCH_N`: fall through to the create block below unchanged.
+Set `MATCH_N` to the lowest-numbered open issue whose `body` contains the back-link `Related to #<original-ticket>` **as a complete line** — matched as an exact whole line via `grep -qxF 'Related to #<original-ticket>'` against the fetched body (the `-x` is load-bearing: plain `grep -qF` is a within-line *substring* match, so ticket #7 would still match a body that only contains `Related to #70`), so a numeric-prefix collision can never fire. `<original-ticket>` is this run's own ticket ID, and the back-link is the exact line this section writes below. This must match on the literal whole back-link line only (`grep -qxF` — never a fuzzy compare); never match on title similarity or any fuzzy heuristic — the back-link is the sole join key, so an unrelated ticket that merely shares words in its title is never treated as a duplicate. If no open issue contains that exact line (or in ticketless mode, which has no back-link to search on), there is no `MATCH_N`: fall through to the create block below unchanged.
 
-If `MATCH_N` is set, append this run's deferred items to it instead of creating a new ticket. Re-read the matched issue's current body, then form the new checklist lines in the same one-line-context + `<file/area>` format as the create body below. Apply a resume-safe idempotency guard against a Goal Autopilot re-entry double-appending: `grep -qF` each candidate line against the existing body and drop any already present; if nothing new remains, skip the edit entirely rather than pushing an empty change. Otherwise write the full updated body — the existing body with the surviving new lines appended under its existing `## Deferred Items` checklist — to `/tmp/claude/cenci-<ticket-id-or-slug>-followup-body.md`, re-applying no label or milestone (the matched ticket already carries them):
+If `MATCH_N` is set, append this run's deferred items to it instead of creating a new ticket. Re-read the matched issue's current body, then form the new checklist lines in the same one-line-context + `<file/area>` format as the create body below. Apply a resume-safe idempotency guard against a Goal Autopilot re-entry double-appending: `grep -qF` each candidate line against the existing body and drop any already present; if nothing new remains, skip the edit entirely rather than pushing an empty change. Otherwise write the full updated body — the existing body with the surviving new lines appended under its existing `## Deferred Items` checklist — to `${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-body.md`, re-applying no label or milestone (the matched ticket already carries them):
 
 ```bash
-gh issue view "$MATCH_N" --repo <owner>/<repo> --json body -q .body > /tmp/claude/cenci-<ticket-id-or-slug>-followup-existing-body.md
-gh issue edit "$MATCH_N" --repo <owner>/<repo> --body-file /tmp/claude/cenci-<ticket-id-or-slug>-followup-body.md
+gh issue view "$MATCH_N" --repo <owner>/<repo> --json body -q .body > ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-existing-body.md
+gh issue edit "$MATCH_N" --repo <owner>/<repo> --body-file ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-body.md
 ```
 
 If the `gh issue edit` append fails, do **not** post the original-ticket comment referencing `$MATCH_N` and do **not** treat the items as tracked — report the exact error with the deferred-item list in the session summary, exactly as a failed create is handled below, so the items are not silently lost. On a successful append, set `<n>` = `$MATCH_N` for the original-ticket comment below and skip the create block entirely — the comment then fires so the original ticket links to the followup that now carries its items.
 
 ### Create the followup ticket
 
-Reach this block only when `SKIP_FOLLOWUP_CREATE` is unset **and** no `MATCH_N` was found (or in ticketless mode). Use the `Write` tool to create the raw title and body as plain text — `/tmp/claude/cenci-<ticket-id-or-slug>-followup-title.txt` and `/tmp/claude/cenci-<ticket-id-or-slug>-followup-body.md` — never a hand-escaped JSON literal; the title is free text and must never be interpolated directly into the command line (a title containing `$(…)`, backticks, or quotes would be shell-interpreted). Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet: labels become a JSON `labels` array and the milestone becomes a numeric `milestone` field in the same payload, sourced from `.milestone.number` (the REST endpoint requires the milestone's number, not its title). Carry over every original label except the 7 lifecycle/transient markers — `"Refined","Working","Planned","In Review","Implemented","Design","Designed"` — and `Followup` itself (which is always applied on top regardless of what's carried over); the `milestone` key is included only when the original ticket actually has one, via an explicit jq emptiness check that omits the key entirely rather than a bare `//` fallback that would emit `null` (see `docs/shell-scripting-gotchas.md`).
+Reach this block only when `SKIP_FOLLOWUP_CREATE` is unset **and** no `MATCH_N` was found (or in ticketless mode). Use the `Write` tool to create the raw title and body as plain text — `${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-title.txt` and `${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-body.md` — never a hand-escaped JSON literal; the title is free text and must never be interpolated directly into the command line (a title containing `$(…)`, backticks, or quotes would be shell-interpreted). Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet: labels become a JSON `labels` array and the milestone becomes a numeric `milestone` field in the same payload, sourced from `.milestone.number` (the REST endpoint requires the milestone's number, not its title). Carry over every original label except the 7 lifecycle/transient markers — `"Refined","Working","Planned","In Review","Implemented","Design","Designed"` — and `Followup` itself (which is always applied on top regardless of what's carried over); the `milestone` key is included only when the original ticket actually has one, via an explicit jq emptiness check that omits the key entirely rather than a bare `//` fallback that would emit `null` (see `docs/shell-scripting-gotchas.md`).
 
 Two documented `jq` forms replace the old `if [[ -f … ]]` shell branch:
 
 **With-meta** (the fetch above succeeded):
 
 ```bash
-jq -n --rawfile title "/tmp/claude/cenci-<ticket-id-or-slug>-followup-title.txt" --rawfile body "/tmp/claude/cenci-<ticket-id-or-slug>-followup-body.md" --slurpfile meta "/tmp/claude/cenci-<ticket-id-or-slug>-followup-meta.json" '{title: ($title | rtrimstr("\n")), body: $body, labels: (["Followup"] + [$meta[0].labels[].name | select(. as $n | (["Refined","Working","Planned","In Review","Implemented","Design","Designed","Followup"] | index($n)) | not)])} + (if ($meta[0].milestone.number // "") != "" then {milestone: $meta[0].milestone.number} else {} end)' > "/tmp/claude/cenci-<ticket-id-or-slug>-followup-payload.json"
+jq -n --rawfile title "${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-title.txt" --rawfile body "${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-body.md" --slurpfile meta "${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-meta.json" '{title: ($title | rtrimstr("\n")), body: $body, labels: (["Followup"] + [$meta[0].labels[].name | select(. as $n | (["Refined","Working","Planned","In Review","Implemented","Design","Designed","Followup"] | index($n)) | not)])} + (if ($meta[0].milestone.number // "") != "" then {milestone: $meta[0].milestone.number} else {} end)' > "${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-payload.json"
 ```
 
-**No-meta** (ticketless mode, or a degraded fetch — no `--slurpfile`, `labels` is `["Followup"]` only):
+**No-meta** (ticketless mode only — no `--slurpfile`, `labels` is `["Followup"]` only):
 
 ```bash
-jq -n --rawfile title "/tmp/claude/cenci-<ticket-id-or-slug>-followup-title.txt" --rawfile body "/tmp/claude/cenci-<ticket-id-or-slug>-followup-body.md" '{title: ($title | rtrimstr("\n")), body: $body, labels: ["Followup"]}' > "/tmp/claude/cenci-<ticket-id-or-slug>-followup-payload.json"
+jq -n --rawfile title "${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-title.txt" --rawfile body "${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-body.md" '{title: ($title | rtrimstr("\n")), body: $body, labels: ["Followup"]}' > "${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-payload.json"
 ```
 
 Then, whichever form ran:
 
 ```bash
-gh api repos/<owner>/<repo>/issues -X POST --input /tmp/claude/cenci-<ticket-id-or-slug>-followup-payload.json --jq .number
+gh api repos/<owner>/<repo>/issues -X POST --input ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-payload.json --jq .number
 ```
 
 The `--jq .number` output *is* the new ticket's issue number `<n>` — this confirms the API accepted valid JSON, but not that the title text itself is correct (a JSON-escaping mistake can mangle a title while still parsing). **Verify the title persisted correctly** by re-fetching the new issue and comparing against the intended title:
@@ -354,19 +354,19 @@ The remaining per-ticket temp files stay ticket-slug-scoped and out of this tick
 
 ```bash
 rm -f \
-  /tmp/claude/cenci-<ticket-id-or-slug>-pr-body.md \
-  /tmp/claude/cenci-<ticket-id-or-slug>-followup-title.txt \
-  /tmp/claude/cenci-<ticket-id-or-slug>-followup-body.md \
-  /tmp/claude/cenci-<ticket-id-or-slug>-followup-meta.json \
-  /tmp/claude/cenci-<ticket-id-or-slug>-followup-payload.json \
-  /tmp/claude/cenci-<ticket-id-or-slug>-followup-search.json \
-  /tmp/claude/cenci-<ticket-id-or-slug>-followup-existing-body.md \
-  /tmp/claude/cenci-<ticket-id-or-slug>-explore-1.md \
-  /tmp/claude/cenci-<ticket-id-or-slug>-explore-2.md \
-  /tmp/claude/cenci-context-<ticket-id-or-slug>.md
+  ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-pr-body.md \
+  ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-title.txt \
+  ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-body.md \
+  ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-meta.json \
+  ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-payload.json \
+  ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-search.json \
+  ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-existing-body.md \
+  ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-explore-1.md \
+  ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-explore-2.md \
+  ${TMPDIR:-/tmp}/cenci/cenci-context-<ticket-id-or-slug>.md
 ```
 
-This deliberately excludes two other scoped temp locations: the screenshots dir (`/tmp/claude/cenci-screenshots/<ticket-id-or-slug>/`) is a documented fallback location kept for gist-upload failures (see Screenshots above), and the gist clone temp dir (`/tmp/claude/cenci-gist-<gist-id>/`) is already uniquely scoped by gist ID — neither needs this pass to stay collision-safe.
+This deliberately excludes two other scoped temp locations: the screenshots dir (`${TMPDIR:-/tmp}/cenci/cenci-screenshots/<ticket-id-or-slug>/`) is a documented fallback location kept for gist-upload failures (see Screenshots above), and the gist clone temp dir (`${TMPDIR:-/tmp}/cenci/cenci-gist-<gist-id>/`) is already uniquely scoped by gist ID — neither needs this pass to stay collision-safe.
 
 Like the plan-file archiving above, this cleanup only runs on the success path (PR created). If the pipeline fails before PR creation, these files are preserved for retry/debugging, same as the plan file.
 

@@ -134,7 +134,7 @@ companion) for every skill, including the internal ones not listed above.
 | `address-review` | codex.md | babysit, codex-runtime, implement, pr-comment-filter, project-core, shell-rules, subagent-safety, verify-ui | — | — |
 | `attachments` | — | shell-rules | — | context-gatherer |
 | `babysit-attention` | — | — | — | — |
-| `babysit` | — | project-core, shell-rules | tick.sh | — |
+| `babysit` | — | project-core, shell-rules | — | — |
 | `ci-repair` | — | project-core, shell-rules, subagent-safety, testing | — | — |
 | `codex-runtime` | — | — | — | — |
 | `configure` | codex.md | babysit, codex-runtime, implement, project-core, shell-rules, testing, verify-ui | detect-project.sh, merge-sandbox-config.sh | code-reviewer |

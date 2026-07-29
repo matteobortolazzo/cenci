@@ -149,7 +149,7 @@ this section applies to the four repo-audit modes.
 against unchecked command substitution for security-critical paths:
 
 ```bash
-mktemp -u /tmp/claude/cenci-maintain-XXXXXX
+mktemp -u ${TMPDIR:-/tmp}/cenci/cenci-maintain-XXXXXX
 ```
 
 Take the trailing `XXXXXX` portion of the printed path as `<run-token>`. Verify the command

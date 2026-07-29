@@ -97,7 +97,7 @@ if [[ -n "${skill}" ]]; then
   # Context flows through the token-scoped verbatim bundle, and the bundle is
   # cleaned up with the run's other temp files.
   bundle_count="$(printf '%s' "${skill}" | grep -c -- "-bundle.md")"
-  assert_contains "${skill}" "/tmp/claude/issue-<number>-<token>-bundle.md" "skills/refine/SKILL.md"
+  assert_contains "${skill}" '${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-bundle.md' "skills/refine/SKILL.md"
   if [[ "${bundle_count}" -lt 2 ]]; then
     fail "skills/refine/SKILL.md: bundle file referenced fewer than 2 times (need creation + cleanup): ${bundle_count}"
   fi

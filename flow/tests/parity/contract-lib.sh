@@ -300,7 +300,7 @@ check_synthetic_adapter() {
 # check_claude_adapter's presence/ordering checks below and parity.test.sh's
 # real-adapter ordering self-test, so both sides can never drift apart.
 # Verified verbatim against phase-2-worktree.md (grepped, not guessed).
-_CLAUDE_WT_MARKER="git worktree add .worktrees/"
+_CLAUDE_WT_MARKER="worktree add .worktrees/"
 _CLAUDE_GATE_MARKER="hooks/scripts/run-gate.sh"
 _CLAUDE_STATUS_MARKER='`GATE_STATUS=green` or `GATE_STATUS=unset` → this target passes.'
 

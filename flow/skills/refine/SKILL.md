@@ -6,7 +6,7 @@ argument-hint: <ticket-id> [additional context]
 user-invocable: true
 disable-model-invocation: true
 model: sonnet
-allowed-tools: Read, Write, Glob, Task, Bash(gh issue view:*), Bash(gh issue edit:*), Bash(gh label create:*), Bash(gh api user --jq:*), Bash(gh api repos/:*), Bash(git remote get-url:*), Bash(jq -n:*), Bash(mktemp -u /tmp/claude/:*), Bash(cat /tmp/claude/:*), Bash(rm -f /tmp/claude/:*), AskUserQuestion
+allowed-tools: Read, Write, Glob, Task, Bash(gh issue view:*), Bash(gh issue edit:*), Bash(gh label create:*), Bash(gh api user --jq:*), Bash(gh api repos/:*), Bash(git remote get-url:*), Bash(jq -n:*), Bash(mktemp -u ${TMPDIR:-/tmp}/cenci/:*), Bash(cat ${TMPDIR:-/tmp}/cenci/:*), Bash(rm -f ${TMPDIR:-/tmp}/cenci/:*), AskUserQuestion
 ---
 
 > **Client dispatch**: In Codex, read `codex-runtime` and `refine/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
@@ -106,9 +106,9 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
 
    The **Design Coverage Check** (`.pen`/`DESIGN.md` evaluation and the `designNeeded` determination) is performed by the refiner agent, not here — its result arrives in the proposal's `### Design Coverage` section (step 7). **Design always happens on a dedicated design ticket, never on the implementation ticket itself** — when `designNeeded` is true, the design ticket is created later, either as the first child of a split (see **Design-first splits** in step 9) or as a companion ticket (see **Companion design ticket** in the Update Ticket section).
 
-3. **Create the per-run temp-file token.** Run `mktemp -u /tmp/claude/issue-<number>-XXXXXX` once and capture the trailing random segment as `<token>` (the token is the random suffix only, e.g. `a1b2c3` — not the full mktemp basename). As with `<ticket-id-or-slug>` in the implement phases, carry the literal `<token>` value forward as text into every temp-file path for the rest of this run — do NOT re-derive it per Bash call, and do not use `$$`/shell state (it does not persist across separate Bash tool invocations). `-u` is a dry-run name generator — it only produces a unique-ish suffix, not an atomically-created file — which is why the `Write` tool is what actually creates each temp file in this run. The `<token>` is a **collision-avoidance mechanism only** — it reduces the chance of two concurrent runs picking the same temp-file basename — and is explicitly **not** an atomic reservation (a second run could theoretically generate the same suffix before either run's `Write` call lands) and **not** a security boundary (it provides no protection against a malicious or adversarial process targeting the same path).
+3. **Create the per-run temp-file token.** Run `mktemp -u ${TMPDIR:-/tmp}/cenci/issue-<number>-XXXXXX` once and capture the trailing random segment as `<token>` (the token is the random suffix only, e.g. `a1b2c3` — not the full mktemp basename). As with `<ticket-id-or-slug>` in the implement phases, carry the literal `<token>` value forward as text into every temp-file path for the rest of this run — do NOT re-derive it per Bash call, and do not use `$$`/shell state (it does not persist across separate Bash tool invocations). `-u` is a dry-run name generator — it only produces a unique-ish suffix, not an atomically-created file — which is why the `Write` tool is what actually creates each temp file in this run. The `<token>` is a **collision-avoidance mechanism only** — it reduces the chance of two concurrent runs picking the same temp-file basename — and is explicitly **not** an atomic reservation (a second run could theoretically generate the same suffix before either run's `Write` call lands) and **not** a security boundary (it provides no protection against a malicious or adversarial process targeting the same path).
 
-4. **Write the context bundle.** Use the `Write` tool to create `/tmp/claude/issue-<number>-<token>-bundle.md` containing, in order:
+4. **Write the context bundle.** Use the `Write` tool to create `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-bundle.md` containing, in order:
    - The **verbatim** ticket title, body, labels, state, and comments from the fetch above — full text, never a digest or paraphrase (the refiner's decisions require source fidelity; see `docs/skill-authoring.md`).
    - Each attachment's summary alongside its downloaded file path (from the Attachments step).
    - The user context parsed from `$ARGUMENTS`, verbatim (or `None`).
@@ -154,18 +154,18 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
 
    > **IMPORTANT**: Writing a temp file is NOT updating the ticket. You MUST execute the update command after writing the file. Never stop between writing the temp file and running the update command.
 
-   **When the proposal adopted in step 9 includes an `### Updated Title`**, use the `Write` tool to create the raw title and body as plain text — `/tmp/claude/issue-<number>-<token>-edit-title.txt` (the updated title) and `/tmp/claude/issue-<number>-<token>-edit-body.md` (the updated description) — never a hand-escaped JSON literal (the title is free text and must never be interpolated directly into a command line; a title containing `$(…)`, backticks, or quotes would be shell-interpreted). Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet:
+   **When the proposal adopted in step 9 includes an `### Updated Title`**, use the `Write` tool to create the raw title and body as plain text — `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-edit-title.txt` (the updated title) and `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-edit-body.md` (the updated description) — never a hand-escaped JSON literal (the title is free text and must never be interpolated directly into a command line; a title containing `$(…)`, backticks, or quotes would be shell-interpreted). Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet:
    ```bash
-   jq -n --rawfile title /tmp/claude/issue-<number>-<token>-edit-title.txt --rawfile body /tmp/claude/issue-<number>-<token>-edit-body.md '{title: ($title | rtrimstr("\n")), body: $body}' > /tmp/claude/issue-<number>-<token>-edit.json
+   jq -n --rawfile title ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-edit-title.txt --rawfile body ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-edit-body.md '{title: ($title | rtrimstr("\n")), body: $body}' > ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-edit.json
    ```
    Then run:
    ```bash
-   gh api repos/<owner>/<repo>/issues/<number> -X PATCH --input /tmp/claude/issue-<number>-<token>-edit.json
+   gh api repos/<owner>/<repo>/issues/<number> -X PATCH --input ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-edit.json
    ```
 
-   Otherwise (no title change), use the `Write` tool to create `/tmp/claude/issue-<number>-<token>.md` with the `<updated description>` as its content, then run:
+   Otherwise (no title change), use the `Write` tool to create `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>.md` with the `<updated description>` as its content, then run:
    ```bash
-   gh issue edit <number> --repo <owner>/<repo> --body-file /tmp/claude/issue-<number>-<token>.md
+   gh issue edit <number> --repo <owner>/<repo> --body-file ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>.md
    ```
 
    **Verify the update succeeded** — re-fetch the ticket and confirm the body (and, when retitled, the title) changed. Compare against a meaningfully wide slice of the body, not just its opening — mid-body corruption from an escaping mistake could otherwise land past a short truncation and go unnoticed:
@@ -177,7 +177,7 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
 
    If splitting, create the child tickets using a **two-pass approach**:
 
-   Split tickets must also receive the "Refined" label/tag since they were refined during this session — `/implement` checks for it as a pre-flight condition.
+   Split tickets must also receive the "Refined" label/tag since they were refined during this session — `/cenci:implement` checks for it as a pre-flight condition.
 
    #### Pass 1: Create children with numbered titles and dependency info
 
@@ -192,13 +192,13 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
 
    Capture each created issue number from the command output.
 
-   Use the `Write` tool to create the raw title and body as plain text — `/tmp/claude/issue-<number>-<token>-child-K-title.txt` (`<ticket-title> (K/N)`) and `/tmp/claude/issue-<number>-<token>-child-K-body.md` (`Related to #<original-number>\nDepends on #<sibling-number>\nParallel with #<sibling-number>\n\n<ticket-body>`) — never a hand-escaped JSON literal; the title is free text and must never be interpolated directly into the command line. Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet, keeping the `labels` array as a literal inline value (it is not externally sourced, so it needs no `--rawfile`):
+   Use the `Write` tool to create the raw title and body as plain text — `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt` (`<ticket-title> (K/N)`) and `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md` (`Related to #<original-number>\nDepends on #<sibling-number>\nParallel with #<sibling-number>\n\n<ticket-body>`) — never a hand-escaped JSON literal; the title is free text and must never be interpolated directly into the command line. Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet, keeping the `labels` array as a literal inline value (it is not externally sourced, so it needs no `--rawfile`):
    ```bash
-   jq -n --rawfile title /tmp/claude/issue-<number>-<token>-child-K-title.txt --rawfile body /tmp/claude/issue-<number>-<token>-child-K-body.md '{title: ($title | rtrimstr("\n")), body: $body, labels: ["Refined"]}' > /tmp/claude/issue-<number>-<token>-child-K.json
+   jq -n --rawfile title ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt --rawfile body ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md '{title: ($title | rtrimstr("\n")), body: $body, labels: ["Refined"]}' > ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K.json
    ```
    Then run:
    ```bash
-   gh api repos/<owner>/<repo>/issues -X POST --input /tmp/claude/issue-<number>-<token>-child-K.json --jq .number
+   gh api repos/<owner>/<repo>/issues -X POST --input ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K.json --jq .number
    ```
    The `--jq .number` output *is* the new child's issue number — this confirms the API accepted valid JSON, but not that the title text itself is correct (a JSON-escaping mistake can mangle a title while still parsing).
 
@@ -234,7 +234,7 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
    ```
    If any child is missing from the list, follow the write-failure protocol: report which child is not linked, retry that child's `gh issue edit <child> --parent <original-number>` once, then verify again; if still failing, STOP and report that children #`<c1>`, #`<c2>`, … exist but child #`<cN>` is not linked as a sub-issue of parent #`<original-number>`, so the user can link it manually with `gh issue edit <cN> --parent <original-number>`.
 
-   **(b) Execution Order (only when the split has real ordering).** If any child `Depends on` another (i.e. the children are not all independent), append a concise **prose** `### Execution Order` section to the parent body — never a `- [ ]` checklist. Use the `Write` tool to create `/tmp/claude/issue-<original-number>-<token>.md` with the following content (this uses `<original-number>` — parent == original — with the SAME run token from step 10, not a new one):
+   **(b) Execution Order (only when the split has real ordering).** If any child `Depends on` another (i.e. the children are not all independent), append a concise **prose** `### Execution Order` section to the parent body — never a `- [ ]` checklist. Use the `Write` tool to create `${TMPDIR:-/tmp}/cenci/issue-<original-number>-<token>.md` with the following content (this uses `<original-number>` — parent == original — with the SAME run token from step 10, not a new one):
    ```
    <existing-body>
 
@@ -243,7 +243,7 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
    ```
    Then run:
    ```bash
-   gh issue edit <original-number> --repo <owner>/<repo> --body-file /tmp/claude/issue-<original-number>-<token>.md
+   gh issue edit <original-number> --repo <owner>/<repo> --body-file ${TMPDIR:-/tmp}/cenci/issue-<original-number>-<token>.md
    ```
    **Verify** by re-fetching the parent and confirming the `### Execution Order` section is present in the body:
    ```bash
@@ -257,13 +257,13 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
 
    If `designNeeded` is true, the ticket is **not** being split, and `isDesignTicket` is false, create a dedicated design ticket — design never runs on the implementation ticket itself:
 
-   Use the `Write` tool to create the raw title and body as plain text — `/tmp/claude/issue-<number>-<token>-design-title.txt` (`Design: <feature title>`) and `/tmp/claude/issue-<number>-<token>-design-body.md` (`Related to #<number>\nBlocks #<number>\n\n### Goal\nProduce the design spec (`.pen` + `DESIGN.md`) for #<number> via `/cenci:design`.\n\n### Design Direction\n<the Design Direction section from this refinement>`) — never a hand-escaped JSON literal; the title is free text and must never be interpolated directly into the command line. Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet, keeping `labels` as a literal inline value:
+   Use the `Write` tool to create the raw title and body as plain text — `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-title.txt` (`Design: <feature title>`) and `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-body.md` (`Related to #<number>\nBlocks #<number>\n\n### Goal\nProduce the design spec (`.pen` + `DESIGN.md`) for #<number> via `/cenci:design`.\n\n### Design Direction\n<the Design Direction section from this refinement>`) — never a hand-escaped JSON literal; the title is free text and must never be interpolated directly into the command line. Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet, keeping `labels` as a literal inline value:
    ```bash
-   jq -n --rawfile title /tmp/claude/issue-<number>-<token>-design-title.txt --rawfile body /tmp/claude/issue-<number>-<token>-design-body.md '{title: ($title | rtrimstr("\n")), body: $body, labels: ["Refined","Design"]}' > /tmp/claude/issue-<number>-<token>-design.json
+   jq -n --rawfile title ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-title.txt --rawfile body ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-body.md '{title: ($title | rtrimstr("\n")), body: $body, labels: ["Refined","Design"]}' > ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design.json
    ```
    Then run:
    ```bash
-   gh api repos/<owner>/<repo>/issues -X POST --input /tmp/claude/issue-<number>-<token>-design.json --jq .number
+   gh api repos/<owner>/<repo>/issues -X POST --input ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design.json --jq .number
    ```
 
    The `--jq .number` output *is* the new design ticket's issue number `<D>` — this confirms the API accepted valid JSON, but not that the title text itself is correct. **Verify the title persisted correctly** by re-fetching and comparing against the intended `Design: <feature title>`:
@@ -273,7 +273,7 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
 
    If creation fails, or the numeric issue number is returned but the re-fetched title does not exactly match, follow the write-failure protocol: report the error (or mismatch), retry once, and if still failing, STOP and report that the design ticket was not created (or was created with corrupted content — note `<D>` for manual cleanup), so the implementation ticket's body cannot be updated with a dependency line.
 
-   No URL parsing is needed for `<D>`. Append a dependency line to the implementation ticket's body. Use the `Write` tool to create `/tmp/claude/issue-<number>-<token>.md` (reusing the bare `issue-<number>-<token>.md` path from step 10, not a `-design` suffixed one) with the implementation ticket's current body plus an appended:
+   No URL parsing is needed for `<D>`. Append a dependency line to the implementation ticket's body. Use the `Write` tool to create `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>.md` (reusing the bare `issue-<number>-<token>.md` path from step 10, not a `-design` suffixed one) with the implementation ticket's current body plus an appended:
 
    ```
    Depends on #<D> (design)
@@ -281,7 +281,7 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
 
    Then run:
    ```bash
-   gh issue edit <number> --repo <owner>/<repo> --body-file /tmp/claude/issue-<number>-<token>.md
+   gh issue edit <number> --repo <owner>/<repo> --body-file ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>.md
    ```
 
    **Verify** by re-fetching the implementation ticket and confirming the `Depends on #<D> (design)` line is present in the body:
@@ -323,19 +323,19 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
 
    This label signals to the implement skill that interactive browser verification via Playwright CLI should be used.
 
-   **Mark this run complete.** Once step 12 has taken its action or been correctly skipped (`isDesignTicket` is true), and the write-failure protocol has not STOPped anywhere in steps 10-12, use the `Write` tool to create an empty file at `/tmp/claude/issue-<number>-<token>.ok`. This marker is what step 13 checks before deleting anything. Confirm the write succeeded by re-reading it with `cat /tmp/claude/issue-<number>-<token>.ok` — if that `cat` errors, treat the marker write itself as failed (report it as such, distinct from a steps-10-12 failure) rather than letting step 13 silently read it as "absent" for an unrelated reason.
+   **Mark this run complete.** Once step 12 has taken its action or been correctly skipped (`isDesignTicket` is true), and the write-failure protocol has not STOPped anywhere in steps 10-12, use the `Write` tool to create an empty file at `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>.ok`. This marker is what step 13 checks before deleting anything. Confirm the write succeeded by re-reading it with `cat ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>.ok` — if that `cat` errors, treat the marker write itself as failed (report it as such, distinct from a steps-10-12 failure) rather than letting step 13 silently read it as "absent" for an unrelated reason.
 
 13. **Clean up this run's scoped temp files.**
 
    Check whether this run completed successfully by attempting to read the marker file:
    ```bash
-   cat /tmp/claude/issue-<number>-<token>.ok
+   cat ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>.ok
    ```
    If the command errors (non-zero exit, e.g. `No such file or directory`), the marker is absent. If it exits 0 (silently, since the marker is an empty file), the marker is present.
 
    **If the marker is present** — every write in steps 10-12 succeeded and was verified, so it's safe to delete this run's temp files by explicit path (never a glob — an unmatched glob errors under some shells, and `rm -f` already ignores paths that don't exist, so listing files a given run didn't create — e.g. child/design files when there was no split or companion design ticket — is harmless):
    ```bash
-   rm -f /tmp/claude/issue-<number>-<token>.md /tmp/claude/issue-<number>-<token>-bundle.md /tmp/claude/issue-<number>-<token>-edit.json /tmp/claude/issue-<number>-<token>-edit-title.txt /tmp/claude/issue-<number>-<token>-edit-body.md /tmp/claude/issue-<number>-<token>-design.json /tmp/claude/issue-<number>-<token>-design-title.txt /tmp/claude/issue-<number>-<token>-design-body.md /tmp/claude/issue-<number>-<token>-child-K.json /tmp/claude/issue-<number>-<token>-child-K-title.txt /tmp/claude/issue-<number>-<token>-child-K-body.md /tmp/claude/issue-<number>-<token>.ok
+   rm -f ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-bundle.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-edit.json ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-edit-title.txt ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-edit-body.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design.json ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-title.txt ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-body.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K.json ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>.ok
    ```
    Repeat the child-K paths (with the actual `K` value substituted) for each child created in Pass 1 this run.
 
@@ -349,13 +349,13 @@ After steps 10-13 complete, present the refiner's Refined Ticket Proposal adopte
 >
 > Review the summary above.
 
-Do not display the summary earlier in the flow — it is shown once, here, after all writes complete. Do not name or suggest the next command to run (`/implement`, `/cenci:design`, etc.) here — that's covered by the **After Refinement** section below.
+Do not display the summary earlier in the flow — it is shown once, here, after all writes complete. Do not name or suggest the next command to run (`/cenci:implement`, `/cenci:design`, etc.) here — that's covered by the **After Refinement** section below.
 
 ## After Refinement
 
 **STOP HERE.** Your job is done. Do not:
 - Enter plan mode or propose an implementation plan
-- Offer to run `/implement` or start implementation
+- Offer to run `/cenci:implement` or start implementation
 - Suggest next steps beyond what's described above
 
-The user will explicitly invoke `/implement` when they're ready to proceed — or `/cenci:design` for design-only tickets (labeled `Design`).
+The user will explicitly invoke `/cenci:implement` when they're ready to proceed — or `/cenci:design` for design-only tickets (labeled `Design`).
