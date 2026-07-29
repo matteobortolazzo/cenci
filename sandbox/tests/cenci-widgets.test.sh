@@ -18,8 +18,12 @@ PLASMA_ID="com.github.matteobortolazzo.cenci"
 link_tools() {
     local bin="$1" tool
     mkdir -p "${bin}"
+    # jq is linked for the same reason as the cosign mock below: doctor's jq
+    # check is `required` (#784 — check-pending-plans.sh now builds its
+    # SessionStart payload exclusively through jq), so without it on PATH
+    # doctor hard-fails before widget wiring is ever reached.
     for tool in bash cat touch uname grep git mkdir dirname ln readlink sleep pgrep nohup chmod sed head rm mktemp cp \
-        rmdir tail cut tr id basename; do
+        rmdir tail cut tr id basename jq; do
         ln -s "$(command -v "${tool}")" "${bin}/${tool}"
     done
     cat >"${bin}/docker" <<'EOF'

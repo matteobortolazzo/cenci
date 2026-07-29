@@ -16,6 +16,7 @@ Install:
 - Linux, macOS, or WSL2
 - git
 - curl
+- jq
 - Docker or Podman
 - Claude Code, Codex, or both
 

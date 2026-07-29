@@ -60,14 +60,41 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run host-runnable test suites
         run: |
-          bash sandbox/tests/settings-merge.test.sh
-          bash sandbox/tests/heal-plugins.test.sh
-          bash sandbox/tests/agent-cli.test.sh
-          bash sandbox/tests/codex-config.test.sh
-          bash sandbox/tests/seed-auth.test.sh
-          bash sandbox/tests/installer-clients.test.sh
-          bash sandbox/tests/install-update.test.sh
-          bash sandbox/tests/cenci-widgets.test.sh
+          set -uo pipefail
+          # Discover suites instead of enumerating them (flow's #720 principle,
+          # applied here). The previous hand-written list had silently drifted:
+          # dind, lazyboards-install, opencode-config, opencode-plugins,
+          # setup-skill-content, startup-marker and uninstall all existed and
+          # were documented in sandbox/AGENTS.md but never ran in CI, so a
+          # change to a shared gate could break them undetected (#784).
+          #
+          # EXCLUDE holds only suites owned by another job in this workflow, so
+          # they are not run twice — never a suite that is merely failing.
+          EXCLUDE="fragments-drift.test.sh smoke.test.sh"
+          failed=""
+          ran=0
+          for suite in sandbox/tests/*.test.sh; do
+            [ -e "${suite}" ] || continue
+            name="$(basename "${suite}")"
+            case " ${EXCLUDE} " in *" ${name} "*) continue ;; esac
+            echo "::group::${name}"
+            if bash "${suite}"; then
+              echo "::endgroup::"
+            else
+              echo "::endgroup::"
+              failed="${failed} ${name}"
+            fi
+            ran=$((ran + 1))
+          done
+          echo "suites run=${ran} failed=${failed:-none}"
+          if [ "${ran}" -eq 0 ]; then
+            echo "no suites discovered — glob or path is wrong" >&2
+            exit 1
+          fi
+          if [ -n "${failed}" ]; then
+            echo "FAILED suites:${failed}" >&2
+            exit 1
+          fi
 
   fragment-drift:
     name: sandbox-fragment-drift

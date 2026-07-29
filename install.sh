@@ -652,6 +652,7 @@ run_doctor() {
 	say "  ${BOLD}Required platform dependencies${RESET}"
 	check "git" required "install git from your package manager" command -v git
 	check "curl" required "install curl from your package manager" command -v curl
+	check "jq" required "install jq from your package manager" command -v jq
 	if [ "$OS" = macos ]; then
 		check "Docker or Podman" required \
 			"install Docker Desktop (https://docker.com/products/docker-desktop) or Podman" \
