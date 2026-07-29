@@ -316,7 +316,32 @@ fi
 # `filter-repo`/`filter-repo *`) — bringing the total to 154. The floor is
 # raised to 154 to catch regressions; 141 and 101 remain valid floors under
 # the pre-third-round counts.
-MIN_DENY_LEN=154
+#
+# A fourth round (#794, security review MEDIUM finding) adds 32 more
+# entries: `gh api` destructive-method denies for DELETE and PUT across all
+# eight syntactic forms (method-first/path-first x -X M/-XM/--method M/
+# --method=M) x {DELETE, PUT} x {upper, lower} case, mirroring the file's
+# established lowercase-config-key mirror precedent — bringing the total to
+# 186. The floor is raised to 186 to catch regressions; 154, 141, and 101
+# remain valid floors under the pre-fourth-round counts. As with the second
+# round, this is unverified empirically (no `claude` binary available in
+# this environment to confirm Claude Code's Bash-matcher semantics against
+# the new entries).
+#
+# A fifth round (#794 follow-up, security review MEDIUM finding) adds 8
+# more entries covering the `-X=METHOD` syntactic form (method-first and
+# path-first) x {DELETE, PUT} x {upper, lower} case, which `gh`'s
+# Cobra/pflag argument parsing also accepts but which none of the fourth
+# round's eight forms matched — bringing the gh api destructive-method
+# coverage to 9 syntactic forms total (method-first `-X M`/`-XM`/`-X=M`/
+# `--method M`/`--method=M` and path-first mirrors of the same, x
+# {DELETE, PUT} x {upper, lower}) and the deny-array total to 194. The
+# floor is raised to 194 to catch regressions; 186, 154, 141, and 101
+# remain valid floors under the pre-fifth-round counts. As with the second
+# and fourth rounds, this is unverified empirically (no `claude` binary
+# available in this environment to confirm Claude Code's Bash-matcher
+# semantics against the new entries).
+MIN_DENY_LEN=194
 
 DENY_LABELS=("flow/templates/settings.json" ".claude/settings.json" "flow/skills/configure/SKILL.md marker block")
 DENY_FILES=("${TEMPLATE_DENY}" "${CLAUDE_DENY}" "${SKILL_DENY}")
@@ -340,12 +365,82 @@ for i in 0 1 2; do
         fail "${label}: permissions.deny extraction failed (see above) — cannot verify >= ${MIN_DENY_LEN} entries"
     fi
 
-    for group in "git config" "git -c " "git filter-branch" "git reset --hard" "git clean" "git push --force"; do
+    for group in "git config" "git -c " "git filter-branch" "git reset --hard" "git clean" "git push --force" "gh api"; do
         echo "case: ${label} permissions.deny has at least one entry matching group '${group}'"
         if [[ "${ok}" -eq 1 ]] && jq -e --arg g "${group}" 'any(.[]; contains($g))' "${file}" >/dev/null 2>&1; then
             pass
         else
             fail "${label}: permissions.deny has no entry matching group '${group}'"
+        fi
+    done
+done
+
+# ── gh api destructive-method coverage (#794) ────────────────────────────
+# The generic `contains("gh api")` group check above is satisfied by a
+# single surviving entry — it does not prove all ten syntactic forms x
+# {DELETE, PUT} x {upper, lower} case are actually present. This array
+# holds all 40 entries verbatim, in insertion order, so exact-equality
+# presence proves AC #1's full ten-form x two-method x two-case coverage
+# (root AGENTS.md: a claimed assertion must be exercised by an explicit
+# case).
+GH_API_DENY_FORMS=(
+    "Bash(gh api -X DELETE*)"
+    "Bash(gh api -X delete*)"
+    "Bash(gh api -XDELETE*)"
+    "Bash(gh api -Xdelete*)"
+    "Bash(gh api --method DELETE*)"
+    "Bash(gh api --method delete*)"
+    "Bash(gh api --method=DELETE*)"
+    "Bash(gh api --method=delete*)"
+    "Bash(gh api * -X DELETE*)"
+    "Bash(gh api * -X delete*)"
+    "Bash(gh api * -XDELETE*)"
+    "Bash(gh api * -Xdelete*)"
+    "Bash(gh api * --method DELETE*)"
+    "Bash(gh api * --method delete*)"
+    "Bash(gh api * --method=DELETE*)"
+    "Bash(gh api * --method=delete*)"
+    "Bash(gh api -X PUT*)"
+    "Bash(gh api -X put*)"
+    "Bash(gh api -XPUT*)"
+    "Bash(gh api -Xput*)"
+    "Bash(gh api --method PUT*)"
+    "Bash(gh api --method put*)"
+    "Bash(gh api --method=PUT*)"
+    "Bash(gh api --method=put*)"
+    "Bash(gh api * -X PUT*)"
+    "Bash(gh api * -X put*)"
+    "Bash(gh api * -XPUT*)"
+    "Bash(gh api * -Xput*)"
+    "Bash(gh api * --method PUT*)"
+    "Bash(gh api * --method put*)"
+    "Bash(gh api * --method=PUT*)"
+    "Bash(gh api * --method=put*)"
+    "Bash(gh api -X=DELETE*)"
+    "Bash(gh api -X=delete*)"
+    "Bash(gh api -X=PUT*)"
+    "Bash(gh api -X=put*)"
+    "Bash(gh api * -X=DELETE*)"
+    "Bash(gh api * -X=delete*)"
+    "Bash(gh api * -X=PUT*)"
+    "Bash(gh api * -X=put*)"
+)
+
+for i in 0 1 2; do
+    label="${DENY_LABELS[$i]}"
+    file="${DENY_FILES[$i]}"
+    ok="${DENY_OKS[$i]}"
+
+    for form in "${GH_API_DENY_FORMS[@]}"; do
+        echo "case: ${label} denies destructive gh api form '${form}'"
+        if [[ "${ok}" -ne 1 ]]; then
+            fail "${label}: cannot verify presence of '${form}' — extraction failed (see above)"
+            continue
+        fi
+        if jq -e --arg e "${form}" 'any(.[]; . == $e)' "${file}" >/dev/null 2>&1; then
+            pass
+        else
+            fail "${label}: permissions.deny missing gh api destructive-method entry '${form}'"
         fi
     done
 done

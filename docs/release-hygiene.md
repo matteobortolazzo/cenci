@@ -12,6 +12,10 @@ elsewhere the placeholder form is used since these commands are otherwise generi
 
 ## 1. Repo topics
 
+Note: this repo's own `.claude/settings.json` denies `gh api -X PUT`, so run this
+outside a permission-enforcing Claude Code session (e.g. plain `gh` in a regular
+terminal).
+
 ```bash
 gh api -X PUT repos/matteobortolazzo/cenci/topics \
   -H "Accept: application/vnd.github+json" \
@@ -40,6 +44,10 @@ gh api -X PATCH repos/{owner}/{repo} \
 
 Enables the reporting channel that `SECURITY.md` references as "preferred, once
 enabled."
+
+Note: this repo's own `.claude/settings.json` denies `gh api -X PUT`, so run this
+outside a permission-enforcing Claude Code session (e.g. plain `gh` in a regular
+terminal).
 
 ```bash
 gh api -X PUT repos/{owner}/{repo}/private-vulnerability-reporting \
