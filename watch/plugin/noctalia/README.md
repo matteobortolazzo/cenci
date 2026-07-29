@@ -1,5 +1,7 @@
 # Cenci — noctalia-shell bar widget
 
+> A [cenci-watch](../../README.md) status surface for noctalia-shell.
+
 Live counts of Claude Code and Codex tmux sessions in your noctalia bar. Polls `cenci waybar` and renders the snapshot.
 
 ## Requirements

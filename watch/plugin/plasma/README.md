@@ -1,5 +1,7 @@
 # Cenci — KDE Plasma widget
 
+> A [cenci-watch](../../README.md) status surface for KDE Plasma.
+
 Live counts of Claude Code and Codex agent sessions in the KDE Plasma panel
 (Kubuntu's default desktop). Polls `cenci widget-json` and renders the snapshot —
 a read-only frontend over the same Waybar JSON contract as the waybar, noctalia,

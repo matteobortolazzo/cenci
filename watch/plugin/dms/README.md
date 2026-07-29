@@ -1,5 +1,7 @@
 # Cenci — DankMaterialShell bar widget
 
+> A [cenci-watch](../../README.md) status surface for DankMaterialShell.
+
 Live counts of Claude Code and Codex tmux sessions in your DankMaterialShell (DMS) bar. Polls `cenci waybar` and renders the snapshot.
 
 ![The Cenci DMS widget showing aggregate status counts and a popout with five agent sessions](../../../docs/assets/cenci-dms-widget.png)

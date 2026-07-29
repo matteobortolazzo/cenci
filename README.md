@@ -17,15 +17,32 @@ live state returns to tmux and optional desktop surfaces so you know when to ste
 
 ![cenci combines isolation, workflow, and attention into a safe path from issue to reviewed pull request](docs/assets/cenci-overview.svg)
 
-One install adds the three operating layers that make longer agent runs practical:
+One install adds three cooperating layers:
 
-- **Isolation:** limit a full-permission session to a Docker or Podman container.
-- **Workflow:** turn an issue into a tested, specialist-reviewed pull request with
-  human gates for the decisions that matter.
-- **Attention:** see which sessions are running, done, idle, or waiting for you.
-- **Maintenance:** keep the repo's own workflow, docs, and client adapters healthy —
-  `/cenci:maintain` audits and repairs structure, docs, client adapters, and
-  accumulated rules, and works whether or not lazyboards is set up.
+- **[Isolation](sandbox/README.md):** run the agent at full permissions inside a
+  repository-scoped Docker or Podman container.
+- **[Workflow](flow/README.md):** turn an issue into a tested, specialist-reviewed
+  pull request, with human gates for the decisions that matter.
+- **[Attention](watch/README.md):** see which sessions are running, done, idle, or
+  waiting for you without watching every terminal.
+
+Maintenance spans all three: `/cenci:maintain` audits and repairs workflow structure,
+documentation, client adapters, and accumulated rules without requiring lazyboards.
+
+## How the pieces work together
+
+1. **Frame the work.** Start from a GitHub issue, refine its scope, and complete a
+   design pass for UI work.
+2. **Approve the handoff.** cenci saves the implementation plan in `.plans/`; that
+   file preserves the decisions behind the run and makes it resumable.
+3. **Deliver inside the boundary.** The implementation run creates a worktree, writes
+   tests first, implements, refactors, runs specialist reviews, and opens the PR—all
+   inside the repository-scoped container.
+4. **Stay informed while it runs.** Native hooks publish live state to tmux and any
+   enabled desktop surface, so attention is pulled only when the agent finishes or
+   needs input.
+5. **Follow through.** PR babysitting watches CI and review activity until merge while
+   preserving approval gates for ambiguous fixes and reviewer feedback.
 
 ## See every session without watching every terminal
 
