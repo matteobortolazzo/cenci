@@ -78,33 +78,55 @@ failures=0
 
 fail() { echo "FAIL: $1" >&2; failures=$((failures+1)); }
 
-read_doc() {
-  # read_doc <flow-relative-path> — prints the real committed file's content,
-  # or fails closed with a distinct "not found" message (a missing file must
-  # never masquerade as empty content, which would make assert_not_contains
-  # trivially pass).
-  local path="${FLOW_DIR}/$1"
-  local content
-  if ! content="$(cat "${path}" 2>/dev/null)"; then
-    fail "$1: doc not found/unreadable: ${path}"
-    printf ''
-    return 1
-  fi
-  printf '%s' "${content}"
+read_doc_raw() {
+  # read_doc_raw <flow-relative-path> — pure extraction, no fail() side
+  # effect here: it is deliberately safe to call inside a $(...) command
+  # substitution.
+  local _relpath="$1"
+  local _path="${FLOW_DIR}/${_relpath}"
+  cat "${_path}" 2>/dev/null
 }
 
-read_repo_doc() {
-  # read_repo_doc <repo-relative-path> — same fail-closed contract as
-  # read_doc, but resolved from REPO_ROOT for the two cross-project docs
-  # (sandbox/README.md, docs/orchestration.md) that live outside flow/**.
-  local path="${REPO_ROOT}/$1"
-  local content
-  if ! content="$(cat "${path}" 2>/dev/null)"; then
-    fail "$1: doc not found/unreadable: ${path}"
-    printf ''
+# require_doc <result-var> <flow-relative-path> — nameref wrapper that
+# assigns the real committed file's content into <result-var>, or fails
+# closed with a distinct "not found" message and assigns "" if not found (a
+# missing file must never masquerade as empty content, which would make
+# assert_not_contains trivially pass). Must NOT be invoked via $(...).
+require_doc() {
+  local -n _result="$1"
+  local _relpath="$2"
+  local _content
+  if ! _content="$(read_doc_raw "${_relpath}")"; then
+    fail "${_relpath}: doc not found/unreadable: ${FLOW_DIR}/${_relpath}"
+    _result=""
     return 1
   fi
-  printf '%s' "${content}"
+  _result="${_content}"
+}
+
+read_repo_doc_raw() {
+  # read_repo_doc_raw <repo-relative-path> — same pure-extraction contract as
+  # read_doc_raw, but resolved from REPO_ROOT for the two cross-project docs
+  # (sandbox/README.md, docs/orchestration.md) that live outside flow/**. No
+  # fail() side effect here: it is deliberately safe to call inside a $(...)
+  # command substitution.
+  local _relpath="$1"
+  local _path="${REPO_ROOT}/${_relpath}"
+  cat "${_path}" 2>/dev/null
+}
+
+# require_repo_doc <result-var> <repo-relative-path> — nameref wrapper
+# around read_repo_doc_raw. Must NOT be invoked via $(...).
+require_repo_doc() {
+  local -n _result="$1"
+  local _relpath="$2"
+  local _content
+  if ! _content="$(read_repo_doc_raw "${_relpath}")"; then
+    fail "${_relpath}: doc not found/unreadable: ${REPO_ROOT}/${_relpath}"
+    _result=""
+    return 1
+  fi
+  _result="${_content}"
 }
 
 # assert_contains <content> <required-substring> <label>
@@ -150,7 +172,7 @@ STOP_MESSAGE_CORE='the Pencil desktop app is not reachable from inside the cenci
 
 # --- skills/design/SKILL.md — the host-only guard ---------------------------
 
-skill="$(read_doc "skills/design/SKILL.md")" || true
+require_doc skill "skills/design/SKILL.md" || true
 if [[ -n "${skill}" ]]; then
   # 1. Exact stop-message sentence, whitespace-normalized (markdown wraps lines).
   assert_contains_ws "${skill}" "${STOP_MESSAGE}" "skills/design/SKILL.md stop message"
@@ -352,7 +374,7 @@ fi
 
 # --- skills/design/codex.md — the guard mirrored for Codex ------------------
 
-codex="$(read_doc "skills/design/codex.md")" || true
+require_doc codex "skills/design/codex.md" || true
 if [[ -n "${codex}" ]]; then
   # 5. Same detection order, same load-bearing sentence.
   assert_contains "${codex}" "CENCI_SANDBOX" "skills/design/codex.md CENCI_SANDBOX anchor"
@@ -367,7 +389,7 @@ fi
 
 # --- flow/README.md — design row marked host-only ----------------------------
 
-readme="$(read_doc "README.md")" || true
+require_doc readme "README.md" || true
 if [[ -n "${readme}" ]]; then
   design_row="$(grep -F '/cenci:design' "${FLOW_DIR}/README.md" | head -1)"
   if [[ -z "${design_row}" ]]; then
@@ -379,7 +401,7 @@ fi
 
 # --- skills/configure/SKILL.md — generated D action + sandbox note ----------
 
-configure="$(read_doc "skills/configure/SKILL.md")" || true
+require_doc configure "skills/configure/SKILL.md" || true
 if [[ -n "${configure}" ]]; then
   # 7. Generated D action carries --no-sandbox.
   assert_contains "${configure}" 'command: "cenci run design {number} --no-sandbox"' "skills/configure/SKILL.md generated D action"
@@ -391,7 +413,7 @@ fi
 
 # --- Cross-project: sandbox/README.md ----------------------------------------
 
-sandbox_readme="$(read_repo_doc "sandbox/README.md")" || true
+require_repo_doc sandbox_readme "sandbox/README.md" || true
 if [[ -n "${sandbox_readme}" ]]; then
   # 8. /cenci:design never runs in-container, fails fast with host-session guidance.
   assert_contains "${sandbox_readme}" "/cenci:design" "sandbox/README.md design cross-reference"
@@ -400,7 +422,7 @@ fi
 
 # --- Cross-project: docs/orchestration.md ------------------------------------
 
-orchestration="$(read_repo_doc "docs/orchestration.md")" || true
+require_repo_doc orchestration "docs/orchestration.md" || true
 if [[ -n "${orchestration}" ]]; then
   # 8. design dispatches on the host.
   assert_contains_ws "${orchestration}" "design dispatches on the host" "docs/orchestration.md design-dispatches-on-host clause"

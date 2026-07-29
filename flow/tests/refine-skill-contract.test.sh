@@ -28,19 +28,30 @@ failures=0
 
 fail() { echo "FAIL: $1" >&2; failures=$((failures+1)); }
 
-read_doc() {
-  # read_doc <flow-relative-path> — prints the real committed file's content,
-  # or fails closed with a distinct "not found" message (a missing file must
-  # never masquerade as empty content, which would make assert_not_contains
-  # trivially pass).
-  local path="${FLOW_DIR}/$1"
-  local content
-  if ! content="$(cat "${path}" 2>/dev/null)"; then
-    fail "$1: doc not found/unreadable: ${path}"
-    printf ''
+read_doc_raw() {
+  # read_doc_raw <flow-relative-path> — pure extraction, no fail() side
+  # effect here: it is deliberately safe to call inside a $(...) command
+  # substitution.
+  local _relpath="$1"
+  local _path="${FLOW_DIR}/${_relpath}"
+  cat "${_path}" 2>/dev/null
+}
+
+# require_doc <result-var> <flow-relative-path> — nameref wrapper that
+# assigns the real committed file's content into <result-var>, or fails
+# closed with a distinct "not found" message and assigns "" if not found (a
+# missing file must never masquerade as empty content, which would make
+# assert_not_contains trivially pass). Must NOT be invoked via $(...).
+require_doc() {
+  local -n _result="$1"
+  local _relpath="$2"
+  local _content
+  if ! _content="$(read_doc_raw "${_relpath}")"; then
+    fail "${_relpath}: doc not found/unreadable: ${FLOW_DIR}/${_relpath}"
+    _result=""
     return 1
   fi
-  printf '%s' "${content}"
+  _result="${_content}"
 }
 
 # assert_contains <content> <required-substring> <label>
@@ -59,7 +70,7 @@ assert_not_contains() {
 
 # --- skills/refine/SKILL.md — native sub-issue linking replaces the checklist ---
 
-skill="$(read_doc "skills/refine/SKILL.md")" || true
+require_doc skill "skills/refine/SKILL.md" || true
 if [[ -n "${skill}" ]]; then
   # Pass 1 links each child as a native sub-issue of the parent. Accept either
   # gh spelling of the primitive (child-side `--parent` or parent-side
@@ -86,7 +97,7 @@ fi
 
 # --- agents/context-gatherer.md — detection via the native sub-issue graph ---
 
-gatherer="$(read_doc "agents/context-gatherer.md")" || true
+require_doc gatherer "agents/context-gatherer.md" || true
 if [[ -n "${gatherer}" ]]; then
   # parentId primary source is the native parent field.
   assert_contains "${gatherer}" "--json parent" "agents/context-gatherer.md"
@@ -101,7 +112,7 @@ fi
 
 # --- skills/refine/codex.md — native behavior is portable ---
 
-codex="$(read_doc "skills/refine/codex.md")" || true
+require_doc codex "skills/refine/codex.md" || true
 if [[ -n "${codex}" ]]; then
   assert_contains "${codex}" "sub-issue" "skills/refine/codex.md"
   assert_contains "${codex}" "--parent" "skills/refine/codex.md"

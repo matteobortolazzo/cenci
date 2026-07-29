@@ -12,14 +12,27 @@ failures=0
 
 fail() { echo "FAIL: $1" >&2; failures=$((failures+1)); }
 
-read_doc() {
-  local path="$1" content
-  if ! content="$(cat "${path}" 2>/dev/null)"; then
-    fail "doc not found/unreadable: ${path}"
-    printf ''
+read_doc_raw() {
+  # read_doc_raw <abs-path> — pure extraction, no fail() side effect here: it
+  # is deliberately safe to call inside a $(...) command substitution.
+  local _path="$1"
+  cat "${_path}" 2>/dev/null
+}
+
+# require_doc <result-var> <abs-path> — nameref wrapper around read_doc_raw
+# that assigns the file's content into <result-var>, or fails closed with a
+# distinct "not found" message and assigns "" if not found. Must NOT be
+# invoked via $(...).
+require_doc() {
+  local -n _result="$1"
+  local _path="$2"
+  local _content
+  if ! _content="$(read_doc_raw "${_path}")"; then
+    fail "doc not found/unreadable: ${_path}"
+    _result=""
     return 1
   fi
-  printf '%s' "${content}"
+  _result="${_content}"
 }
 
 assert_contains() {
@@ -45,14 +58,14 @@ assert_before() {
   [[ "${#before_first}" -lt "${#before_second}" ]] || fail "${label}: markers are out of order"
 }
 
-codex="$(read_doc "${FLOW_DIR}/skills/maintain/codex.md")" || true
-maintain_skill="$(read_doc "${FLOW_DIR}/skills/maintain/SKILL.md")" || true
-phase8="$(read_doc "${FLOW_DIR}/skills/implement/phases/phase-8-docs.md")" || true
-implement_codex="$(read_doc "${FLOW_DIR}/skills/implement/codex.md")" || true
-configure="$(read_doc "${FLOW_DIR}/skills/configure/SKILL.md")" || true
-readme="$(read_doc "${FLOW_DIR}/README.md")" || true
-getting_started="$(read_doc "${REPO_ROOT}/docs/getting-started.md")" || true
-gotchas="$(read_doc "${FLOW_DIR}/docs/shell-scripting-gotchas.md")" || true
+require_doc codex "${FLOW_DIR}/skills/maintain/codex.md" || true
+require_doc maintain_skill "${FLOW_DIR}/skills/maintain/SKILL.md" || true
+require_doc phase8 "${FLOW_DIR}/skills/implement/phases/phase-8-docs.md" || true
+require_doc implement_codex "${FLOW_DIR}/skills/implement/codex.md" || true
+require_doc configure "${FLOW_DIR}/skills/configure/SKILL.md" || true
+require_doc readme "${FLOW_DIR}/README.md" || true
+require_doc getting_started "${REPO_ROOT}/docs/getting-started.md" || true
+require_doc gotchas "${FLOW_DIR}/docs/shell-scripting-gotchas.md" || true
 
 # Codex maintain is a complete six-phase native workflow.
 for phase in \

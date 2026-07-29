@@ -32,19 +32,31 @@ failures=0
 
 fail() { echo "FAIL: $1" >&2; failures=$((failures+1)); }
 
-read_doc() {
-  # read_doc <flow-relative-path> -- prints the real committed file's content,
-  # or fails closed with a distinct "not found" message if it cannot be read
-  # (a missing/unreadable file must never silently masquerade as empty
-  # content, which would make assert_not_contains trivially "pass").
-  local path="${FLOW_DIR}/$1"
-  local content
-  if ! content="$(cat "${path}" 2>/dev/null)"; then
-    fail "$1: doc not found/unreadable: ${path}"
-    printf ''
+read_doc_raw() {
+  # read_doc_raw <flow-relative-path> -- pure extraction, no fail() side
+  # effect here: it is deliberately safe to call inside a $(...) command
+  # substitution.
+  local _relpath="$1"
+  local _path="${FLOW_DIR}/${_relpath}"
+  cat "${_path}" 2>/dev/null
+}
+
+# require_doc <result-var> <flow-relative-path> -- nameref wrapper that
+# assigns the real committed file's content into <result-var>, or fails
+# closed with a distinct "not found" message and assigns "" if not found (a
+# missing/unreadable file must never silently masquerade as empty content,
+# which would make assert_not_contains trivially "pass"). Must NOT be
+# invoked via $(...).
+require_doc() {
+  local -n _result="$1"
+  local _relpath="$2"
+  local _content
+  if ! _content="$(read_doc_raw "${_relpath}")"; then
+    fail "${_relpath}: doc not found/unreadable: ${FLOW_DIR}/${_relpath}"
+    _result=""
     return 1
   fi
-  printf '%s' "${content}"
+  _result="${_content}"
 }
 
 # assert_not_contains <content> <forbidden-substring> <label>
@@ -105,7 +117,7 @@ PHASE2_CAUSE_SELECTION_MARKER='print the one-line unavailable notice from `SKILL
 # version-dependent phrasing.
 # =====================================================================
 FILE="skills/implement/SKILL.md"
-if CONTENT="$(read_doc "${FILE}")"; then
+if require_doc CONTENT "${FILE}"; then
   assert_not_contains "${CONTENT}" "${FORBIDDEN_VERSION_PROBE_SKILL}" "${FILE}"
   assert_not_contains "${CONTENT}" "${FORBIDDEN_COST_CONTROLS}" "${FILE}"
   assert_contains "${CONTENT}" "${ATTEMPT_MARKER}" "${FILE}"
@@ -122,7 +134,7 @@ fi
 # 2.1.139 before ever attempting to invoke `/goal`.
 # =====================================================================
 FILE="skills/implement/phases/phase-2-worktree.md"
-if CONTENT="$(read_doc "${FILE}")"; then
+if require_doc CONTENT "${FILE}"; then
   assert_not_contains "${CONTENT}" "${FORBIDDEN_VERSION_PROBE_PHASE2}" "${FILE}"
   assert_contains "${CONTENT}" "${ATTEMPT_MARKER}" "${FILE}"
   assert_contains "${CONTENT}" "${PHASE2_CAUSE_SELECTION_MARKER}" "${FILE}"

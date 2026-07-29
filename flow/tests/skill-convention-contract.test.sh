@@ -71,14 +71,14 @@ read_doc_raw() {
 # fail() from within $(...)" rule).
 require_doc() {
   local -n _result="$1"
-  local relpath="$2"
-  local content
-  if ! content="$(read_doc_raw "${relpath}")"; then
-    fail "772 ${relpath}: doc not found/unreadable: ${FLOW_DIR}/${relpath}"
+  local _relpath="$2"
+  local _content
+  if ! _content="$(read_doc_raw "${_relpath}")"; then
+    fail "772 ${_relpath}: doc not found/unreadable: ${FLOW_DIR}/${_relpath}"
     _result=""
     return 1
   fi
-  _result="${content}"
+  _result="${_content}"
 }
 
 # assert_contains <content> <required-substring> <label>

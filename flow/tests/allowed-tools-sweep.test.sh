@@ -58,19 +58,33 @@ failures=0
 
 fail() { echo "FAIL: $1" >&2; failures=$((failures+1)); }
 
-read_doc() {
-  # read_doc <flow-relative-path> -- prints the real committed file's content,
-  # or fails closed with a distinct "not found" message (a missing file must
-  # never masquerade as empty content, which would make assert_not_contains
-  # trivially pass).
-  local path="${FLOW_DIR}/$1"
-  local content
-  if ! content="$(cat "${path}" 2>/dev/null)"; then
-    fail "$1: doc not found/unreadable: ${path}"
-    printf ''
+read_doc_raw() {
+  # read_doc_raw <flow-relative-path> -- pure extraction, no fail() side
+  # effect here: it is deliberately safe to call inside a $(...) command
+  # substitution.
+  local _relpath="$1"
+  local _path="${FLOW_DIR}/${_relpath}"
+  cat "${_path}" 2>/dev/null
+}
+
+# require_doc <result-var> <flow-relative-path> -- nameref wrapper that
+# assigns the real committed file's content into <result-var>, or fails
+# closed with a distinct "not found" message and assigns "" if not found (a
+# missing file must never masquerade as empty content, which would make
+# assert_not_contains trivially pass). Must NOT be invoked via $(...).
+# Wrapper internals are underscore-prefixed so a caller-local var named
+# `relpath`/`content` (e.g. check_context7_enumerated below) never shadows
+# the nameref target.
+require_doc() {
+  local -n _result="$1"
+  local _relpath="$2"
+  local _content
+  if ! _content="$(read_doc_raw "${_relpath}")"; then
+    fail "${_relpath}: doc not found/unreadable: ${FLOW_DIR}/${_relpath}"
+    _result=""
     return 1
   fi
-  printf '%s' "${content}"
+  _result="${_content}"
 }
 
 # assert_contains <content> <required-substring> <label>
@@ -167,7 +181,7 @@ assert_dropped_blanket_grants() {
 # =====================================================================
 
 babysit_path="${FLOW_DIR}/skills/babysit/SKILL.md"
-babysit="$(read_doc "skills/babysit/SKILL.md")" || true
+require_doc babysit "skills/babysit/SKILL.md" || true
 if [[ -n "${babysit}" ]]; then
   BABYSIT_EXPECTED_GRANTS='Bash(cenci babysit:*)
 Bash(sh "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/resolve-babysit-interval.sh":*)'
@@ -222,7 +236,7 @@ fi
 # =====================================================================
 
 sync_path="${FLOW_DIR}/skills/sync/SKILL.md"
-sync="$(read_doc "skills/sync/SKILL.md")" || true
+require_doc sync "skills/sync/SKILL.md" || true
 if [[ -n "${sync}" ]]; then
   SYNC_EXPECTED_GRANTS='Bash(git status:*)
 Bash(git stash:*)
@@ -261,7 +275,7 @@ fi
 # =====================================================================
 
 review_path="${FLOW_DIR}/skills/review/SKILL.md"
-review="$(read_doc "skills/review/SKILL.md")" || true
+require_doc review "skills/review/SKILL.md" || true
 if [[ -n "${review}" ]]; then
   REVIEW_EXPECTED_GRANTS='Bash(git diff:*)
 Bash(git remote get-url:*)
@@ -301,7 +315,7 @@ fi
 # =====================================================================
 
 refactor_path="${FLOW_DIR}/skills/refactor/SKILL.md"
-refactor="$(read_doc "skills/refactor/SKILL.md")" || true
+require_doc refactor "skills/refactor/SKILL.md" || true
 if [[ -n "${refactor}" ]]; then
   REFACTOR_EXPECTED_GRANTS='Bash(git diff --name-only:*)
 Bash(git log:*)
@@ -350,7 +364,7 @@ fi
 # =====================================================================
 
 address_review_path="${FLOW_DIR}/skills/address-review/SKILL.md"
-address_review="$(read_doc "skills/address-review/SKILL.md")" || true
+require_doc address_review "skills/address-review/SKILL.md" || true
 if [[ -n "${address_review}" ]]; then
   ADDRESS_REVIEW_EXPECTED_GRANTS='Bash(gh pr view:*)
 Bash(gh pr checkout:*)
@@ -410,7 +424,7 @@ fi
 # =====================================================================
 
 configure_path="${FLOW_DIR}/skills/configure/SKILL.md"
-configure="$(read_doc "skills/configure/SKILL.md")" || true
+require_doc configure "skills/configure/SKILL.md" || true
 if [[ -n "${configure}" ]]; then
   CONFIGURE_EXPECTED_GRANTS='Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/detect-project.sh")
 Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/merge-sandbox-config.sh":*)
@@ -474,7 +488,7 @@ CONTEXT7_BARE_EOL=$'mcp__context7\n'
 
 check_context7_enumerated() {
   local relpath="$1" content
-  content="$(read_doc "${relpath}")" || return
+  require_doc content "${relpath}" || return
   [[ -n "${content}" ]] || return
   assert_contains "${content}" "${CONTEXT7_ENUMERATED}" "${relpath} enumerated context7 grant"
   assert_not_contains "${content}" "${CONTEXT7_BARE_COMMA}" "${relpath} bare context7 grant (mid-list comma form)"
