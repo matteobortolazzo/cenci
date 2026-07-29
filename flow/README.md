@@ -443,7 +443,7 @@ pass a second argument to change it (for example `42 10m`). Each tick:
 2. **Auto-fixes red CI** — diagnoses the failing checks, pushes a fix (never force-pushes),
    and retries up to a per-commit cap. When the cap is hit or the cause is ambiguous
    (flaky/infra/external), it escalates to you via a question instead of looping blindly.
-3. **Drives new review comments** through [`/cenci:address-review`](#what-it-does), which
+3. **Drives new review comments** through [`/cenci:address-review`](#workflow-commands), which
    keeps its own approval gate — you still confirm the plan before any fix is pushed. A
    watermark tracks already-handled comments so the same feedback is never re-addressed.
 
