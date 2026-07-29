@@ -115,8 +115,8 @@ generated `.lazyboards.yml`, outside `columns:`:
 ```yaml
 # Board-level actions (default scope is "card" — they act on the selected card)
 actions:
-  C: { name: Claude, type: shell, command: "tmux new-window cn cs" }
-  X: { name: Codex, type: shell, command: "tmux new-window cn xt" }
+  C: { name: Claude, type: shell, command: "tmux new-window cenci open --agent claude" }
+  X: { name: Codex, type: shell, command: "tmux new-window cenci open --agent codex" }
 
 # Auto-close a card's agent window when its ticket closes
 cleanup: "cenci close {number}"
@@ -214,7 +214,8 @@ Checkout PR fallback beyond it.
 
 **`C` (Claude) and `X` (Codex)** are the two board-level actions in the generated
 `.lazyboards.yml`, at top level. Each opens a fresh agent in a detached tmux window
-via the sandbox launcher (`cn cs` → Claude/Sonnet, `cn xt` → Codex) so you can start
+via the sandbox launcher (`cenci open --agent claude`, `cenci open --agent codex` — each
+agent's own default model, not a pinned shortcut) so you can start
 an ad-hoc session from the board without leaving it. They take no card variables,
 so they work whether or not a card is selected.
 

@@ -626,8 +626,12 @@ assert_not_contains "${EXTRACTED_5F}" "- name: Implemented"
 
 echo "case: 5f template emits the C/X launch actions at top level, outside \`columns:\`"
 grep -q '^actions:$' "${DEDENTED_5F}"
-assert_contains "${DEDENTED_5F}" 'C: { name: Claude, type: shell, command: "tmux new-window cn cs" }'
-assert_contains "${DEDENTED_5F}" 'X: { name: Codex, type: shell, command: "tmux new-window cn xt" }'
+# Long-form `cenci open --agent <agent>`, never a one-token shortcut: the
+# shortcut table has exactly one home in docs (watch/README.md's CLI
+# reference) and must not be copied into a generated template — the same rule
+# setup-skill-content.test.sh enforces for skill content (#790, #800).
+assert_contains "${DEDENTED_5F}" 'C: { name: Claude, type: shell, command: "tmux new-window cenci open --agent claude" }'
+assert_contains "${DEDENTED_5F}" 'X: { name: Codex, type: shell, command: "tmux new-window cenci open --agent codex" }'
 
 echo "case: 5f template emits a top-level \`cleanup:\` auto-close action"
 grep -q '^cleanup: "cenci close {number}"$' "${DEDENTED_5F}"
