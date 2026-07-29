@@ -175,6 +175,7 @@ else
 #!/usr/bin/env bash
 echo "no read_* helpers in this file"
 EOF
+  # root-safe: DAC-specific branch, root cannot reach it any other way
   chmod 000 "${UNREADABLE}"
   assert_count "${UNREADABLE}" 1 "unreadable"
   chmod 644 "${UNREADABLE}"
