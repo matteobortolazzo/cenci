@@ -532,6 +532,225 @@ echo "case: cross-file pin -- design's \${TMPDIR}/cenci/design-comment-<n>.md Wr
 run_guard_with_tmpdir "${TMPDIR_REPO}" "${CUSTOM_TMP}" "{\"tool_input\":{\"file_path\":\"${CUSTOM_TMP}/cenci/design-comment-749.md\"}}"
 assert_exit "cross-file pin: cenci/design-comment-749.md" 0
 
+# ── Bash mode (#795): tool_input.command redirection/tee targets ────
+# guard-main-worktree.sh must also inspect Bash tool_input.command for
+# `>`/`>>`/`>|`/tee write targets, extracted via the shared
+# flow/hooks/scripts/lib/bash-write-targets.sh lib, behind the same
+# .cenci/config.json / .claude/config.json gate. The Bash arm is
+# deliberately MORE permissive than the Write|Edit arm: an out-of-repo-root
+# target (e.g. $HOME/.claude/settings.json) is allowed (Q1a), unlike the
+# Write|Edit arm.
+BASH_REPO="${TEST_ROOT}/bash-mode"
+make_git_repo "${BASH_REPO}"
+mkdir -p "${BASH_REPO}/.cenci"
+touch "${BASH_REPO}/.cenci/config.json"
+
+echo "case: Bash command with >> to a main-worktree source file is blocked"
+JSON=$(jq -n --arg cmd "echo x >> ${BASH_REPO}/src/foo.c" '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "bash >> main-worktree source blocked" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "bash >> main-worktree source blocked: stderr should contain BLOCKED"
+fi
+
+echo "case: Bash command redirecting into .worktrees/ is allowed"
+JSON=$(jq -n --arg cmd "echo x > ${BASH_REPO}/.worktrees/1-x/src/foo.c" '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "bash > .worktrees/ allowed" 0
+
+echo "case: Bash command redirecting to \${TMPDIR:-/tmp}/cenci/... is allowed under a custom TMPDIR"
+CUSTOM_TMP_BASH="${TEST_ROOT}/bash-custom-tmp"
+mkdir -p "${CUSTOM_TMP_BASH}"
+JSON=$(jq -n --arg cmd 'echo x > "${TMPDIR:-/tmp}/cenci/x.md"' '{tool_input:{command:$cmd}}')
+run_guard_with_tmpdir "${BASH_REPO}" "${CUSTOM_TMP_BASH}" "${JSON}"
+assert_exit "bash custom TMPDIR cenci/ allowed" 0
+
+echo "case: Bash command redirecting stderr to /dev/null is allowed (exempt device)"
+JSON=$(jq -n --arg cmd "cmd 2>/dev/null" '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "bash 2>/dev/null allowed" 0
+
+echo "case: Bash command redirecting through an unresolved \$OUT variable is blocked"
+JSON=$(jq -n --arg cmd 'cmd > "$OUT"' '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "bash > \"\$OUT\" blocked" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "bash > \"\$OUT\" blocked: stderr should contain BLOCKED"
+fi
+
+echo "case: Bash command redirecting through \$(mktemp) is blocked"
+JSON=$(jq -n --arg cmd 'cmd > $(mktemp)' '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "bash > \$(mktemp) blocked" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "bash > \$(mktemp) blocked: stderr should contain BLOCKED"
+fi
+
+# Pins Q1a: the Bash arm's repo-root scope pre-check allows a target that
+# resolves outside RESOLVED_ROOT, even though it is a redirect into a
+# genuinely sensitive file -- this is the resolution that lets
+# /cenci:configure's `jq ... ~/.claude/settings.json > ~/.claude/settings.json.tmp`
+# pattern through. Deliberately more permissive than the Write|Edit arm.
+echo "case: Bash command redirecting to \$HOME/.claude/settings.json (out-of-root) is allowed (Q1a)"
+JSON=$(jq -n --arg cmd 'echo x > "$HOME/.claude/settings.json"' '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "bash \$HOME/.claude/settings.json out-of-root allowed (Q1a)" 0
+
+# The #749 descendant-of-$ROOT rejection must still apply in Bash mode: a
+# TMPDIR pointed inside the repo must not allowlist writes under it.
+echo "case: Bash command with TMPDIR=\${BASH_REPO}/tmp (descendant of ROOT) is still blocked"
+mkdir -p "${BASH_REPO}/tmp"
+JSON=$(jq -n --arg cmd "echo x > ${BASH_REPO}/tmp/x" '{tool_input:{command:$cmd}}')
+run_guard_with_tmpdir "${BASH_REPO}" "${BASH_REPO}/tmp" "${JSON}"
+assert_exit "bash TMPDIR descendant of ROOT still blocked" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "bash TMPDIR descendant of ROOT still blocked: stderr should contain BLOCKED"
+fi
+
+echo "case: unconfigured repo is a no-op even for an in-root Bash redirect"
+BASH_UNCONFIGURED_REPO="${TEST_ROOT}/bash-unconfigured"
+make_git_repo "${BASH_UNCONFIGURED_REPO}"
+JSON=$(jq -n --arg cmd "echo x > ${BASH_UNCONFIGURED_REPO}/src/foo.c" '{tool_input:{command:$cmd}}')
+run_guard "${BASH_UNCONFIGURED_REPO}" "${JSON}"
+assert_exit "bash unconfigured repo no-op" 0
+
+echo "case: Bash command with no redirect and no tee is allowed"
+JSON=$(jq -n --arg cmd "git status" '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "bash no-redirect allowed" 0
+
+# ── Fix F (silent-failure-hunter, #795 round 2): end-to-end integration
+# coverage for the awk-missing fail-closed path. bash-write-targets.test.sh
+# unit-tests bwt_extract_targets directly with awk removed from PATH, but
+# nothing previously proved the caller-side block (exit 2, BLOCKED message)
+# actually fires through this hook's real JSON-on-stdin entry point.
+echo "case: Bash command inspection fails closed when awk is unavailable (Fix F integration)"
+AWK_MISSING_BIN="${TEST_ROOT}/bin-no-awk"
+make_curated_bin "${AWK_MISSING_BIN}" sh git cat jq mktemp rm realpath
+JSON=$(jq -n --arg cmd "echo x >> ${BASH_REPO}/src/foo.c" '{tool_input:{command:$cmd}}')
+run_guard_with_path "${BASH_REPO}" "${AWK_MISSING_BIN}" "${JSON}"
+assert_exit "bash command inspection blocked when awk missing" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "bash command inspection blocked when awk missing: stderr should contain BLOCKED"
+fi
+
+# ── Should-fix (#795 round 3): end-to-end integration coverage for the
+# command-too-long fail-closed path. bash-write-targets.test.sh unit-tests
+# bwt_extract_targets's length pre-check directly, but nothing previously
+# proved the caller-side block (exit 2, the specific "too long to inspect"
+# BLOCKED message) actually fires through this hook's real JSON-on-stdin
+# entry point. Mirrors the awk-missing integration case above.
+echo "case: Bash command inspection fails closed when the command is too long to inspect (length pre-check integration)"
+LONG_BASH_CMD="echo $(printf '%*s' 100005 '' | tr ' ' 'a') >> ${BASH_REPO}/src/too-long.c"
+JSON=$(jq -n --arg cmd "${LONG_BASH_CMD}" '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "bash command inspection blocked when command too long" 2
+if [[ "${GUARD_STDERR}" == *"too long to inspect"* ]]; then
+    pass
+else
+    fail "bash command inspection blocked when command too long: stderr should contain the 'too long to inspect' message, got: ${GUARD_STDERR}"
+fi
+
+# ── Should-fix (#795 round 4): end-to-end integration coverage for the
+# wc-missing fail-closed path. bash-write-targets.test.sh unit-tests
+# bwt_extract_targets's length pre-check's wc dependency directly, but
+# nothing previously proved the caller-side block (exit 2, the specific "wc
+# was not found on PATH" BLOCKED message) actually fires through this hook's
+# real JSON-on-stdin entry point. Mirrors the awk-missing integration case
+# above; PATH is curated with awk present but wc absent, isolating this
+# specific dependency.
+echo "case: Bash command inspection fails closed when wc is unavailable (wc-missing integration)"
+WC_MISSING_BIN="${TEST_ROOT}/bin-no-wc"
+make_curated_bin "${WC_MISSING_BIN}" sh git cat jq mktemp rm realpath awk
+JSON=$(jq -n --arg cmd "echo x >> ${BASH_REPO}/src/no-wc.c" '{tool_input:{command:$cmd}}')
+run_guard_with_path "${BASH_REPO}" "${WC_MISSING_BIN}" "${JSON}"
+assert_exit "bash command inspection blocked when wc missing" 2
+if [[ "${GUARD_STDERR}" == *"wc was not found on PATH"* ]]; then
+    pass
+else
+    fail "bash command inspection blocked when wc missing: stderr should contain the 'wc was not found on PATH' message, got: ${GUARD_STDERR}"
+fi
+
+# ── #795 final round: empty-parse backstop + tilde expansion ─────────
+# Zero extracted targets from a command that still looks like it might
+# write (any `>`, or a delimited tee token) triggers a raw-text scan for
+# the repo root; a root mention blocks, no mention allows. Mentions of the
+# always-allowlisted subtrees (.worktrees/, .plans/, .claude/plans) are
+# neutralized first so the pipeline's own `git -C <root>/.worktrees/<id>
+# commit -m "a -> b"` shape never trips the backstop.
+
+# run_guard_with_home <cwd> <home_override> <json> — like run_guard, but
+# sets HOME for a single invocation. Used by the tilde-expansion cases so
+# the out-of-root verdict is deterministic regardless of the ambient HOME.
+run_guard_with_home() {
+    local cwd="$1" home_override="$2" json="$3"
+    GUARD_STDERR="$(cd "${cwd}" && echo "${json}" | HOME="${home_override}" sh "${GUARD_SH}" 2>&1 >/dev/null)"
+    GUARD_EXIT=$?
+}
+
+echo "case: brace-expansion tee construct mentioning the root is blocked (empty-parse backstop)"
+JSON=$(jq -n --arg cmd "{tee,cat} ${BASH_REPO}/src/foo.c" '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "backstop brace tee in-root blocked" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "backstop brace tee in-root blocked: stderr should contain BLOCKED"
+fi
+
+echo "case: zero-parse construct not mentioning the root is allowed"
+JSON=$(jq -n --arg cmd "{tee,cat} /var/tmp/unrelated-elsewhere.txt" '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "backstop no root mention allowed" 0
+
+echo "case: quoted -> plus a feature-worktree path mention is allowed (allowlisted-subtree neutralization)"
+JSON=$(jq -n --arg cmd "git -C ${BASH_REPO}/.worktrees/1-x commit -m \"a -> b\"" '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "backstop worktree-path mention neutralized" 0
+
+echo "case: quoted -> plus a .plans path mention is allowed (allowlisted-subtree neutralization)"
+JSON=$(jq -n --arg cmd "ls ${BASH_REPO}/.plans \"a > b\"" '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "backstop .plans-path mention neutralized" 0
+
+echo "case: alnum-embedded tee with an absolute in-root path is allowed (delimited-tee trigger)"
+JSON=$(jq -n --arg cmd "grep guarantee ${BASH_REPO}/docs/notes.md" '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "embedded tee in-root grep allowed" 0
+
+# Tilde expansion (#795 final round): a plain unquoted ~/... target expands
+# via HOME (mirroring \$HOME) and lands out-of-root -> allowed (Q1a), fixing
+# the over-block that broke /cenci:configure's documented
+# `... > ~/.claude/settings.json.tmp` pattern. A QUOTED leading tilde is a
+# literal in-root filename character in real shells and must stay blocked
+# (the tokenizer neutralizes it to ./~ so it is never expanded).
+echo "case: unquoted ~ redirect expands via HOME and is allowed out-of-root (Q1a tilde expansion)"
+TILDE_HOME="${TEST_ROOT}/tilde-home"
+mkdir -p "${TILDE_HOME}"
+JSON=$(jq -n --arg cmd 'echo x > ~/.claude/settings.json.tmp' '{tool_input:{command:$cmd}}')
+run_guard_with_home "${BASH_REPO}" "${TILDE_HOME}" "${JSON}"
+assert_exit "unquoted tilde out-of-root allowed" 0
+
+echo "case: quoted ~ redirect is a literal in-root path and stays blocked (no tilde expansion for quoted tilde)"
+JSON=$(jq -n --arg cmd 'echo x > "~/notes.txt"' '{tool_input:{command:$cmd}}')
+run_guard_with_home "${BASH_REPO}" "${TILDE_HOME}" "${JSON}"
+assert_exit "quoted tilde literal in-root blocked" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "quoted tilde literal in-root blocked: stderr should contain BLOCKED"
+fi
+
 # ── Summary ──────────────────────────────────────────────────────────
 echo
 echo "passed: ${PASSES}, failed: ${FAILURES}"

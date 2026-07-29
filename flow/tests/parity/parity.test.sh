@@ -356,6 +356,91 @@ assert_not_contains "${runtime_only_gate_integrity}" "skills/codex-runtime/SKILL
   "dual-doc (runtime only): gate-result-integrity fail reason must not mis-name the present codex-runtime/SKILL.md as absent"
 rm -rf "${DUAL_DOC_RUNTIME_ONLY}"
 
+# --- Bash-matcher-missing synthetic-fixture self-test (#795) ----------------
+# check_claude_adapter/check_codex_adapter's worktree-isolation and
+# sensitive-file-refusal properties now ALSO require a "Bash" PreToolUse
+# matcher wiring both guard scripts (ticket #795 extends both guards to Bash
+# redirection/tee write targets, and the real hooks.json files were updated
+# accordingly). These fixtures prove the new assertion actually REJECTS a
+# hooks.json that still wires both scripts under Write|Edit only -- rather
+# than passing vacuously on the real, already-correct files (mirrors this
+# file's established self-test idiom: never assert a checker rejects
+# something without a fixture proving it actually does). Every OTHER
+# requirement for these two properties is satisfied by each fixture (the
+# WT/GATE/STATUS markers in phase-2-worktree.md, in the correct order; the
+# STOP/CREATE markers in codex.md, in the correct order; both scripts wired
+# in hooks.json) so the Bash matcher's absence is the ONLY possible reason
+# either property can fail here.
+BASH_MATCHER_MISSING_CLAUDE="$(mktemp -d)" || { echo "parity.test.sh: mktemp failed (bash-matcher-missing claude)" >&2; exit 2; }
+mkdir -p "${BASH_MATCHER_MISSING_CLAUDE}/skills/implement/phases" "${BASH_MATCHER_MISSING_CLAUDE}/hooks"
+cat > "${BASH_MATCHER_MISSING_CLAUDE}/skills/implement/phases/phase-2-worktree.md" <<EOF
+# Phase 2 (fixture)
+Create the feature worktree: ${_CLAUDE_WT_MARKER}<id>-<desc>
+Baseline Gate Check invokes ${_CLAUDE_GATE_MARKER}.
+Interpret: ${_CLAUDE_STATUS_MARKER}
+EOF
+cat > "${BASH_MATCHER_MISSING_CLAUDE}/hooks/hooks.json" <<'EOF'
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {"type":"command","command":"hooks/scripts/check-sensitive-files.sh","timeout":10000},
+          {"type":"command","command":"hooks/scripts/guard-main-worktree.sh","timeout":10000}
+        ]
+      }
+    ]
+  }
+}
+EOF
+
+bash_matcher_missing_claude_out="$(check_claude_adapter "${BASH_MATCHER_MISSING_CLAUDE}")"
+bash_matcher_missing_claude_wt="$(get_prop_line "${bash_matcher_missing_claude_out}" "worktree-isolation")"
+bash_matcher_missing_claude_sfr="$(get_prop_line "${bash_matcher_missing_claude_out}" "sensitive-file-refusal")"
+assert_contains "${bash_matcher_missing_claude_wt}" "fail" \
+  "Claude Bash-matcher-missing fixture: worktree-isolation must fail when hooks.json wires no Bash matcher"
+assert_contains "${bash_matcher_missing_claude_wt}" "Bash" \
+  "Claude Bash-matcher-missing fixture: worktree-isolation fail reason must name the missing Bash matcher"
+assert_contains "${bash_matcher_missing_claude_sfr}" "fail" \
+  "Claude Bash-matcher-missing fixture: sensitive-file-refusal must fail when hooks.json wires no Bash matcher"
+assert_contains "${bash_matcher_missing_claude_sfr}" "Bash" \
+  "Claude Bash-matcher-missing fixture: sensitive-file-refusal fail reason must name the missing Bash matcher"
+rm -rf "${BASH_MATCHER_MISSING_CLAUDE}"
+
+BASH_MATCHER_MISSING_CODEX="$(mktemp -d)" || { echo "parity.test.sh: mktemp failed (bash-matcher-missing codex)" >&2; exit 2; }
+mkdir -p "${BASH_MATCHER_MISSING_CODEX}/skills/implement" "${BASH_MATCHER_MISSING_CODEX}/codex"
+cat > "${BASH_MATCHER_MISSING_CODEX}/skills/implement/codex.md" <<EOF
+# Codex implement procedure (fixture)
+${_CODEX_STOP_MARKER}; later, ${_CODEX_CREATE_MARKER}.
+EOF
+cat > "${BASH_MATCHER_MISSING_CODEX}/codex/hooks.json" <<'EOF'
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "Write|Edit",
+      "hooks": [
+        {"type":"command","command":"hooks/scripts/check-sensitive-files.sh","timeout":10},
+        {"type":"command","command":"hooks/scripts/guard-main-worktree.sh","timeout":10}
+      ]
+    }]
+  }
+}
+EOF
+
+bash_matcher_missing_codex_out="$(check_codex_adapter "${BASH_MATCHER_MISSING_CODEX}")"
+bash_matcher_missing_codex_wt="$(get_prop_line "${bash_matcher_missing_codex_out}" "worktree-isolation")"
+bash_matcher_missing_codex_sfr="$(get_prop_line "${bash_matcher_missing_codex_out}" "sensitive-file-refusal")"
+assert_contains "${bash_matcher_missing_codex_wt}" "fail" \
+  "Codex Bash-matcher-missing fixture: worktree-isolation must fail when hooks.json wires no Bash matcher"
+assert_contains "${bash_matcher_missing_codex_wt}" "Bash" \
+  "Codex Bash-matcher-missing fixture: worktree-isolation fail reason must name the missing Bash matcher"
+assert_contains "${bash_matcher_missing_codex_sfr}" "fail" \
+  "Codex Bash-matcher-missing fixture: sensitive-file-refusal must fail when hooks.json wires no Bash matcher"
+assert_contains "${bash_matcher_missing_codex_sfr}" "Bash" \
+  "Codex Bash-matcher-missing fixture: sensitive-file-refusal fail reason must name the missing Bash matcher"
+rm -rf "${BASH_MATCHER_MISSING_CODEX}"
+
 # --- _contains_ws_insensitive self-test (#556) ------------------------------
 # check_codex_adapter's P8 push-policy check requires the exact contiguous
 # sentence "Never force-push or bypass security/design/approval gates.", but
