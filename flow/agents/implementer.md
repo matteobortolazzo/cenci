@@ -20,7 +20,7 @@ description: |
   assistant: "I'll delegate to the implementer agent to fix the SQL injection issue, then re-run tests to verify the fix"
   <commentary>Implementer handles fixes identified by review agents.</commentary>
   </example>
-tools: Read, Write, Edit, Glob, Grep, Bash, mcp__context7
+tools: Read, Write, Edit, Glob, Grep, Bash, mcp__context7__resolve-library-id, mcp__context7__query-docs
 model: sonnet
 effort: high
 color: green

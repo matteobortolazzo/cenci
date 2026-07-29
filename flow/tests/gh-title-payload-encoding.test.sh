@@ -30,7 +30,10 @@
 #   - skills/maintain/modes/backlog.md (1 site: batch polish-ticket create)
 #   - skills/implement/phases/phase-9-pr.md (1 site, 2 jq forms: with-meta,
 #     no-meta)
-#   - skills/address-review/SKILL.md (1 site, 2 jq forms: with-meta, no-meta)
+#   - skills/address-review/SKILL.md (2 sites: followup-ticket create with 2
+#     jq forms (with-meta, no-meta), plus #773's new inline-reply payload)
+#   - skills/refactor/SKILL.md (1 site, #773: ticket-creation payload,
+#     replacing the last live `gh issue create --title` in flow)
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || { echo "gh-title-payload-encoding.test.sh: failed to resolve script directory." >&2; exit 2; }
@@ -70,6 +73,7 @@ REFINE_SKILL="${FLOW_DIR}/skills/refine/SKILL.md"
 MAINTAIN_BACKLOG="${FLOW_DIR}/skills/maintain/modes/backlog.md"
 PHASE_9="${FLOW_DIR}/skills/implement/phases/phase-9-pr.md"
 ADDRESS_REVIEW_SKILL="${FLOW_DIR}/skills/address-review/SKILL.md"
+REFACTOR_SKILL="${FLOW_DIR}/skills/refactor/SKILL.md"
 SHELL_GOTCHAS_DOC="${FLOW_DIR}/docs/shell-scripting-gotchas.md"
 
 # =====================================================================
@@ -105,13 +109,16 @@ assert_file_contains "${SHELL_RULES}" "${PR_CREATE_EXAMPLE_MARKER}" \
   "must retain the existing gh pr create --title example verbatim (out of scope, unchanged)"
 
 # =====================================================================
-# Per-site canonical encoding -- all six title-carrying gh api payload
-# sites build via jq -n --rawfile, never a Write-authored JSON literal.
+# Per-site canonical encoding -- all title-carrying gh api payload sites
+# build via jq -n --rawfile, never a Write-authored JSON literal.
 # refine/SKILL.md has three sites (retitle PATCH, Pass 1 child create,
 # companion design create); maintain/modes/backlog.md, phase-9-pr.md, and
 # address-review/SKILL.md each have one call site -- phase-9-pr.md and
 # address-review/SKILL.md each document two jq forms there (with-meta,
-# no-meta), so their occurrence floors are doubled.
+# no-meta), so their occurrence floors are doubled. #773 adds refactor's
+# ticket-creation payload (1 site) and raises address-review's floor for its
+# new inline-reply payload (Q2: `-f body="$REPLY"` migrates to `jq -n
+# --rawfile body` + `gh api ... --input`).
 # =====================================================================
 
 assert_min_occurrences "${REFINE_SKILL}" "jq -n" 3 \
@@ -131,8 +138,13 @@ assert_min_occurrences "${PHASE_9}" "--rawfile" 4 \
 
 assert_min_occurrences "${ADDRESS_REVIEW_SKILL}" "jq -n" 2 \
   "must document both the with-meta and no-meta jq forms"
-assert_min_occurrences "${ADDRESS_REVIEW_SKILL}" "--rawfile" 4 \
-  "must pass raw title/body via --rawfile in both jq forms"
+assert_min_occurrences "${ADDRESS_REVIEW_SKILL}" "--rawfile" 5 \
+  "must pass raw title/body via --rawfile in both followup jq forms plus the new inline-reply payload (#773)"
+
+assert_min_occurrences "${REFACTOR_SKILL}" "jq -n" 1 \
+  "must build the ticket-creation payload via jq -n (#773, replaces gh issue create --title)"
+assert_min_occurrences "${REFACTOR_SKILL}" "--rawfile" 2 \
+  "must pass the raw title/body via --rawfile (#773)"
 
 # =====================================================================
 # Hardening sweep -- no file under flow/skills/ or flow/docs/ may retain a
@@ -163,23 +175,27 @@ fi
 
 # =====================================================================
 # Repo-wide sweep -- no flow/**/*.md file may reintroduce the vulnerable
-# `gh issue create --title` pattern this ticket moved off of (title
-# interpolated directly into a command line rather than via jq --rawfile
-# and gh api --input). Two files are excluded, each for the same reason:
-# their one occurrence is inline-code prose naming the retired anti-pattern
-# to explain why it's unsafe, not a live example to copy -- the same kind
-# of intentional, non-executable carve-out as PR_CREATE_EXAMPLE_MARKER
-# above.
+# `gh issue create` pattern this ticket (and #773's refactor site) moved
+# off of (title interpolated directly into a command line rather than via
+# jq --rawfile and gh api --input). The marker is the bare `gh issue create`
+# verb pair, not `gh issue create --title` -- refactor/SKILL.md's live site
+# interleaves `--repo <owner>/<repo>` between `create` and `--title`
+# (`gh issue create --repo <owner>/<repo> --title "refactor: <title>" ...`),
+# so the narrower `--title`-suffixed marker never caught it (#773). Two
+# files are excluded, each for the same reason: their one occurrence is
+# inline-code prose naming the retired anti-pattern to explain why it's
+# unsafe, not a live example to copy -- the same kind of intentional,
+# non-executable carve-out as PR_CREATE_EXAMPLE_MARKER above.
 #   - shell-rules/SKILL.md (line ~52)
 #   - docs/shell-scripting-gotchas.md (documents this exact sweep's own
 #     carve-out convention, and so necessarily names the retired pattern
 #     as an example)
 # =====================================================================
 
-ISSUE_CREATE_TITLE_MARKER='gh issue create --title'
-ISSUE_CREATE_TITLE_HITS="$(grep -rlF -- "${ISSUE_CREATE_TITLE_MARKER}" "${SKILLS_DIR}" "${DOCS_DIR}" 2>/dev/null | grep -vF -- "${SHELL_RULES}" | grep -vF -- "${SHELL_GOTCHAS_DOC}")"
-if [[ -n "${ISSUE_CREATE_TITLE_HITS}" ]]; then
-  fail "no file under flow/skills/ or flow/docs/ may reintroduce \"gh issue create --title\"; found in: ${ISSUE_CREATE_TITLE_HITS}"
+ISSUE_CREATE_MARKER='gh issue create'
+ISSUE_CREATE_HITS="$(grep -rlF -- "${ISSUE_CREATE_MARKER}" "${SKILLS_DIR}" "${DOCS_DIR}" 2>/dev/null | grep -vF -- "${SHELL_RULES}" | grep -vF -- "${SHELL_GOTCHAS_DOC}")"
+if [[ -n "${ISSUE_CREATE_HITS}" ]]; then
+  fail "no file under flow/skills/ or flow/docs/ may reintroduce \"gh issue create\"; found in: ${ISSUE_CREATE_HITS}"
 fi
 
 echo "gh-title-payload-encoding.test.sh: failures=${failures}"

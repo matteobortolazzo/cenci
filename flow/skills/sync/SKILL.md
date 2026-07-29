@@ -6,7 +6,7 @@ argument-hint: [additional context]
 user-invocable: true
 disable-model-invocation: true
 model: haiku
-allowed-tools: Bash, Read, AskUserQuestion
+allowed-tools: Read, AskUserQuestion, Bash(git status:*), Bash(git stash:*), Bash(git add:*), Bash(git commit:*), Bash(git fetch:*), Bash(git checkout:*), Bash(git pull --ff-only:*), Bash(git branch -v:*), Bash(git branch -D:*), Bash(git worktree list:*), Bash(git worktree prune:*), Bash(git worktree remove:*), Bash(git -C:*)
 ---
 
 > **Client dispatch**: In Codex, read `codex-runtime` and `sync/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
@@ -39,14 +39,24 @@ If the current branch has uncommitted changes, use `AskUserQuestion` to ask how 
 
 ### Step 2: Update main
 
+Fetch all remotes and prune deleted remote branches, as its own Bash call:
 ```bash
-# Fetch all remotes and prune deleted remote branches
 git fetch --all --prune
+```
 
-# Switch to main (or master — use whichever exists)
-git checkout main 2>/dev/null || git checkout master
+Switch to `main` as its own standalone call:
+```bash
+git checkout main
+```
+If that call fails (no `main` branch in this repo), switch to `master` instead, as a
+second standalone call — never compound the two with `||` (shell-rules: every segment
+of a compound is evaluated independently by the approval system):
+```bash
+git checkout master
+```
 
-# Fast-forward to latest
+Fast-forward to latest, as its own Bash call:
+```bash
 git pull --ff-only
 ```
 
@@ -96,17 +106,16 @@ List branches whose remote tracking branch has been deleted (marked `[gone]`):
 git branch -v
 ```
 
-Capture the worktree list once, then check each gone branch against the captured output:
+Run `git worktree list` once as its own Bash call and keep its output in context:
 
 ```bash
-WORKTREES=$(git worktree list)
+git worktree list
 ```
 
 For each branch marked `[gone]`:
-1. Find any associated worktree in the captured output:
-   ```bash
-   echo "$WORKTREES" | grep "\[$branch\]"
-   ```
+1. Match the branch name against that captured output in reasoning (no further shell
+   call needed — this is a text comparison over output already in context, not a new
+   command).
 2. If a worktree exists and is **not** the main worktree, remove it:
    ```bash
    git worktree remove <worktree-path>

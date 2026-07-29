@@ -14,7 +14,7 @@ description: |
   assistant: "I'll use the planner agent to analyze the codebase, identify all affected files and dependencies, and produce an implementation plan"
   <commentary>Complex tasks need architectural analysis and breakdown before any code is written.</commentary>
   </example>
-tools: Read, Grep, Glob, Bash, mcp__context7
+tools: Read, Grep, Glob, Bash, mcp__context7__resolve-library-id, mcp__context7__query-docs
 model: opus
 effort: high
 color: blue

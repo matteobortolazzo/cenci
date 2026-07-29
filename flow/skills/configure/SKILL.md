@@ -5,7 +5,7 @@ compatibility: Requires Claude Code settings, plugin environment variables, and 
 argument-hint: [additional context]
 user-invocable: true
 disable-model-invocation: true
-allowed-tools: Read, Write, Edit, Bash, Glob, Grep, AskUserQuestion
+allowed-tools: Read, Write, Edit, Glob, Grep, AskUserQuestion, Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/detect-project.sh"), Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/merge-sandbox-config.sh":*), Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/migrate-project-core.sh":*), Bash(test:*), Bash(which:*), Bash(jq:*), Bash(mv ~/.claude/settings.json.tmp ~/.claude/settings.json), Bash(mkdir -p:*), Bash(rm -f .claude/hooks/check-pending-plans.sh), Bash(rmdir .claude/hooks:*), Bash(gh auth status:*), Bash(gh label list:*), Bash(gh label create:*), Bash(gh pr create:*), Bash(gh pr view:*), Bash(git rev-parse:*), Bash(git add:*), Bash(git commit:*), Bash(git worktree add:*), Bash(git -C:*), Bash(git diff --no-index:*), Bash(rm -f ${TMPDIR:-/tmp}/cenci/cenci-configure-:*)
 ---
 
 > **Client dispatch**: In Codex, read `codex-runtime` and `configure/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
@@ -32,8 +32,12 @@ Resolve project configuration in this order:
 On migration, preserve every unknown key from `legacyConfig`; new writes go only to
 `.cenci/config.json`. If both files exist, recursively merge them into one
 `migrationBase` with canonical values winning, then overlay managed answers. Use
-`flow/scripts/migrate-project-core.sh <root>` to preview the exact config/guidance diff;
-rerun it with `--apply` only after approval, with `<root>` set to `<worktree-path>` (see
+`"${CLAUDE_PLUGIN_ROOT}/scripts/migrate-project-core.sh" <root>` to preview the exact
+config/guidance diff:
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/migrate-project-core.sh" <root> [--apply]
+```
+Rerun it with `--apply` only after approval, with `<root>` set to `<worktree-path>` (see
 Create Worktree below — the worktree exists by the time any `--apply` can run). Never
 rewrite or delete `.claude/config.json`; it is a read-only compatibility artifact.
 
@@ -48,7 +52,7 @@ Reconfiguration runs are how a project picks up configure features added since i
 
 Create the worktree now, before any file is written (including a migration `--apply` above) and before the detection/question steps below, since none of them depend on it existing yet:
 
-1. Verify at least one commit exists: `git rev-parse HEAD 2>/dev/null`. If the repository has no commits, create an initial commit: `git add -A && git commit -m "chore: initial commit" --allow-empty`.
+1. Verify at least one commit exists: `git rev-parse HEAD 2>/dev/null`. If the repository has no commits, create an initial commit as two standalone Bash calls (never compound `&&` — shell-rules: every segment of a compound is evaluated independently by the approval system): `git add -A`, then `git commit -m "chore: initial commit" --allow-empty`.
 2. Derive a slug: `init` when `existingConfig` is null (first-ever configure run), `update` for a plain reconfiguration, or a short kebab-case description of the user's focus when `$ARGUMENTS` names one (e.g. "refresh MCP servers" → `mcp-refresh`).
 3. Create the worktree: `git worktree add .worktrees/configure-<slug> -b chore/configure-<slug> main`. If that branch/directory name is already taken by an unrelated prior run, append `-2`, `-3`, etc. until it's free.
 
@@ -100,7 +104,7 @@ Use `detection.inContainer` (the detector checks `CENCI_SANDBOX`, then `/.docker
 
 **Manual fallback** (only if Scripted Detection failed) — detect the container (stop at the first match; run each check as its **own** Bash call, per `cenci:shell-rules` — never compound them):
 
-1. **`CENCI_SANDBOX` env var** (works for both Docker and Podman): run `echo "${CENCI_SANDBOX:-}"` as its own Bash call. If it prints `1` → in container.
+1. **`CENCI_SANDBOX` env var** (works for both Docker and Podman): run `test "${CENCI_SANDBOX:-}" = "1"` as its own Bash call. Exit 0 → in container.
 2. **Docker fallback**: run `test -f /.dockerenv` as its own Bash call. Exit 0 → in container.
 
 This detection is a **non-blocking advisory** — it never gates configuration and never uses `AskUserQuestion`:
@@ -402,7 +406,7 @@ Include the server in `.lsp.json` regardless — it activates once the binary is
    - Platform: GitHub Actions
 
    **Conflict check**: If the user selects Yes, scan for existing CI configuration:
-   - List `.github/workflows/*.yml` and `.github/workflows/*.yaml` (e.g., `ls .github/workflows/*.yml .github/workflows/*.yaml 2>/dev/null`)
+   - Use the `Glob` tool with patterns `.github/workflows/*.yml` and `.github/workflows/*.yaml`
 
    If any files are found, present them and ask:
    - **Single file**: "Found existing CI configuration at `<path>`. What would you like to do?"
@@ -1015,35 +1019,85 @@ For each MCP selected in question 5:
    ```
 
 5c. **Configure auto-compact** (from question 7):
-   - If disabled: set the setting in `~/.claude/settings.json`:
+   - If disabled: set the setting in `~/.claude/settings.json`. Ensure the directory
+     exists, as its own Bash call:
      ```bash
-     mkdir -p ~/.claude && \
-     [ -f ~/.claude/settings.json ] \
-       && jq '.autoCompactEnabled = false | del(.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE) | if .env == {} then del(.env) else . end' ~/.claude/settings.json > ~/.claude/settings.json.tmp \
-       && mv ~/.claude/settings.json.tmp ~/.claude/settings.json \
-       || echo '{"autoCompactEnabled": false}' > ~/.claude/settings.json
+     mkdir -p ~/.claude
      ```
-   - If enabled (re-enable): remove the setting:
+     If `~/.claude/settings.json` exists, update it in place with two standalone Bash
+     calls (never compound with `&&` — shell-rules):
      ```bash
-     jq 'del(.autoCompactEnabled) | del(.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE) | if .env == {} then del(.env) else . end' ~/.claude/settings.json > ~/.claude/settings.json.tmp \
-       && mv ~/.claude/settings.json.tmp ~/.claude/settings.json
+     jq '.autoCompactEnabled = false | del(.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE) | if .env == {} then del(.env) else . end' ~/.claude/settings.json > ~/.claude/settings.json.tmp
+     ```
+     The `jq` call and the `mv` call are separate Bash calls (no pipe, no `&&`) — this
+     is a single non-compound command whose result the agent inspects before proceeding.
+     `>` creates `~/.claude/settings.json.tmp` even when `jq` fails, so before running
+     `mv`, verify the `jq` call exited 0 and that `~/.claude/settings.json.tmp` is
+     valid non-empty JSON. Only run `mv` if that check passes; otherwise stop and
+     report the failure instead of proceeding — an unconditional `mv` would silently
+     clobber the user's real settings file with a broken/empty one.
+     ```bash
+     mv ~/.claude/settings.json.tmp ~/.claude/settings.json
+     ```
+     If `~/.claude/settings.json` does not exist, use the `Write` tool to create it
+     directly with `{"autoCompactEnabled": false}` as its content — no `jq`/`mv` needed
+     for a file being created from scratch.
+   - If enabled (re-enable): remove the setting with two standalone Bash calls (the
+     file necessarily already exists on this path — it was written by the "If disabled"
+     branch above on an earlier run):
+     ```bash
+     jq 'del(.autoCompactEnabled) | del(.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE) | if .env == {} then del(.env) else . end' ~/.claude/settings.json > ~/.claude/settings.json.tmp
+     ```
+     The `jq` call and the `mv` call are separate Bash calls (no pipe, no `&&`) — this
+     is a single non-compound command whose result the agent inspects before proceeding.
+     `>` creates `~/.claude/settings.json.tmp` even when `jq` fails, so before running
+     `mv`, verify the `jq` call exited 0 and that `~/.claude/settings.json.tmp` is
+     valid non-empty JSON. Only run `mv` if that check passes; otherwise stop and
+     report the failure instead of proceeding — an unconditional `mv` would silently
+     clobber the user's real settings file with a broken/empty one.
+     ```bash
+     mv ~/.claude/settings.json.tmp ~/.claude/settings.json
      ```
    Both paths also delete any `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` env key left behind by earlier versions of this skill — that override makes compaction trigger at 1% of context *used*, i.e. constantly (#725).
    This writes to `~/.claude/settings.json` (user-level Claude Code settings).
 
 5c-bis. **Pin subagents to 200K context** (from question 7b):
-   - If enabled (pin subagents): merge the env var into `~/.claude/settings.json`:
+   - If enabled (pin subagents): merge the env var into `~/.claude/settings.json`.
+     Ensure the directory exists, as its own Bash call:
      ```bash
-     mkdir -p ~/.claude && \
-     [ -f ~/.claude/settings.json ] \
-       && jq '. * {"env": {"CLAUDE_CODE_SUBAGENT_MODEL": "claude-sonnet-5"}}' ~/.claude/settings.json > ~/.claude/settings.json.tmp \
-       && mv ~/.claude/settings.json.tmp ~/.claude/settings.json \
-       || echo '{"env": {"CLAUDE_CODE_SUBAGENT_MODEL": "claude-sonnet-5"}}' > ~/.claude/settings.json
+     mkdir -p ~/.claude
      ```
-   - If disabled (unpin): remove the env var key:
+     If `~/.claude/settings.json` exists, update it in place with two standalone Bash
+     calls:
      ```bash
-     jq 'del(.env.CLAUDE_CODE_SUBAGENT_MODEL) | if .env == {} then del(.env) else . end' ~/.claude/settings.json > ~/.claude/settings.json.tmp \
-       && mv ~/.claude/settings.json.tmp ~/.claude/settings.json
+     jq '. * {"env": {"CLAUDE_CODE_SUBAGENT_MODEL": "claude-sonnet-5"}}' ~/.claude/settings.json > ~/.claude/settings.json.tmp
+     ```
+     The `jq` call and the `mv` call are separate Bash calls (no pipe, no `&&`) — this
+     is a single non-compound command whose result the agent inspects before proceeding.
+     `>` creates `~/.claude/settings.json.tmp` even when `jq` fails, so before running
+     `mv`, verify the `jq` call exited 0 and that `~/.claude/settings.json.tmp` is
+     valid non-empty JSON. Only run `mv` if that check passes; otherwise stop and
+     report the failure instead of proceeding — an unconditional `mv` would silently
+     clobber the user's real settings file with a broken/empty one.
+     ```bash
+     mv ~/.claude/settings.json.tmp ~/.claude/settings.json
+     ```
+     If `~/.claude/settings.json` does not exist, use the `Write` tool to create it
+     directly with `{"env": {"CLAUDE_CODE_SUBAGENT_MODEL": "claude-sonnet-5"}}` as its
+     content.
+   - If disabled (unpin): remove the env var key with two standalone Bash calls:
+     ```bash
+     jq 'del(.env.CLAUDE_CODE_SUBAGENT_MODEL) | if .env == {} then del(.env) else . end' ~/.claude/settings.json > ~/.claude/settings.json.tmp
+     ```
+     The `jq` call and the `mv` call are separate Bash calls (no pipe, no `&&`) — this
+     is a single non-compound command whose result the agent inspects before proceeding.
+     `>` creates `~/.claude/settings.json.tmp` even when `jq` fails, so before running
+     `mv`, verify the `jq` call exited 0 and that `~/.claude/settings.json.tmp` is
+     valid non-empty JSON. Only run `mv` if that check passes; otherwise stop and
+     report the failure instead of proceeding — an unconditional `mv` would silently
+     clobber the user's real settings file with a broken/empty one.
+     ```bash
+     mv ~/.claude/settings.json.tmp ~/.claude/settings.json
      ```
    This writes to `~/.claude/settings.json` (user-level Claude Code settings). Takes effect on **new** sessions only — remind the user to restart if the current session is on a `[1m]` model.
 
@@ -1666,7 +1720,10 @@ When migrating from an older config that has `ticketSystem`, `prSystem`, `ticket
    ```
    If `gh pr create` fails because a PR for this branch already exists (re-entry after a prior turn already created it), recover the URL with `gh pr view chore/configure-<slug> --json url -q .url` and continue. For any other failure (auth, network, validation), show the exact error and use `AskUserQuestion` ("Created, continue" / "Abort") to let the user resolve it before continuing.
 
-   Delete the PR-body temp file after a successful `gh pr create` (or a successful recovery via `gh pr view`).
+   Delete the PR-body temp file after a successful `gh pr create` (or a successful recovery via `gh pr view`):
+   ```bash
+   rm -f ${TMPDIR:-/tmp}/cenci/cenci-configure-<slug>-pr-body.md
+   ```
 
 Report what was created and suggest next steps (e.g., "Try `/cenci:refine <ticket-id>` on a ticket"), including the PR URL from step 7. If `sandbox.enabled` is `true`, mention the generated `.cenci/Dockerfile` and that `cenci sandbox build` (run from inside the repo, after the PR merges) builds the repo's own tailored image on top of the shared base. If `lazyboards.enabled` is `true`, list the generated `.lazyboards.yml` In Review actions with their keys, serve, and test commands (e.g., "`W` serves web-client's PR worktree with `ng serve`, `T` runs its tests with `ng test --watch=false`") and point at `docs/orchestration.md` for the board recipe. When the suggest-or-skip branch ran instead, report what happened (added actions, or "already complete — no changes"). If `sandbox.baseVersion` resolved to `null` (unresolved — see the baseVersion resolution in step 5e), the chat summary must explicitly say so (e.g., "Base version could not be auto-detected — see `sandbox/README.md` to pin `BASE_VERSION` manually") rather than leaving it only as an inline Dockerfile comment, so a user who doesn't open the generated file still learns the base version wasn't pinned.
 

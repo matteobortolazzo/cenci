@@ -6,7 +6,7 @@ argument-hint: <ticket-id | task description> [additional context]
 user-invocable: true
 disable-model-invocation: true
 model: sonnet
-allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Task, AskUserQuestion, SlashCommand, mcp__context7, mcp__pencil__batch_get, mcp__pencil__get_variables, mcp__pencil__get_screenshot, mcp__pencil__snapshot_layout, mcp__pencil__get_editor_state
+allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Task, AskUserQuestion, SlashCommand, mcp__context7__resolve-library-id, mcp__context7__query-docs, mcp__pencil__batch_get, mcp__pencil__get_variables, mcp__pencil__get_screenshot, mcp__pencil__snapshot_layout, mcp__pencil__get_editor_state
 ---
 
 > **Client dispatch**: In Codex, read `codex-runtime` and `implement/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.

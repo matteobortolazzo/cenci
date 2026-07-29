@@ -5,7 +5,7 @@ compatibility: Requires Claude Code tools, interactive gates, and cenci pipeline
 argument-hint: <pr-number> [additional context]
 disable-model-invocation: true
 user-invocable: true
-allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Task, AskUserQuestion
+allowed-tools: Read, Write, Edit, Glob, Grep, Task, AskUserQuestion, Bash(gh pr view:*), Bash(gh pr checkout:*), Bash(gh pr comment:*), Bash(gh pr edit:*), Bash(gh api repos/:*), Bash(gh issue view:*), Bash(gh issue edit:*), Bash(gh issue list:*), Bash(gh label create:*), Bash(git remote get-url:*), Bash(git worktree list:*), Bash(git pull --rebase:*), Bash(git diff --name-only:*), Bash(git add:*), Bash(git commit:*), Bash(git push origin:*), Bash(jq -n:*), Bash(rm -f ${TMPDIR:-/tmp}/cenci/:*)
 ---
 
 > **Client dispatch**: In Codex, read `codex-runtime` and `address-review/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
@@ -225,6 +225,9 @@ After all individual fixes are applied, run the full build and test suite:
 <build command from config or CLAUDE.md>
 <test command from config or CLAUDE.md>
 ```
+The project's build/test commands are project-specific and not enumerable in advance, so
+they are deliberately left ungranted — expect a client approval prompt on this call, unlike
+every other command in this skill.
 
 ## Error Recovery
 
@@ -325,18 +328,24 @@ Capture `<n>` (found or created) for the Acknowledge reply template below. If th
 
 ## Posting Replies
 
-For each inline review comment:
+For each inline review comment, use the `Write` tool to create
+`${TMPDIR:-/tmp}/cenci/pr-reply-<comment-id>.md` with the `<reply text>` as its content. Build the
+payload with the `shell-rules` skill's canonical `jq -n --rawfile` snippet (body-only form,
+no title), as its own standalone Bash call:
 ```bash
-printf '%s' '<reply text>' > ${TMPDIR:-/tmp}/cenci/pr-reply-<comment-id>.md
-REPLY=$(cat ${TMPDIR:-/tmp}/cenci/pr-reply-<comment-id>.md)
-gh api repos/<owner>/<repo>/pulls/<number>/comments/<comment-id>/replies -f body="$REPLY"
+jq -n --rawfile body ${TMPDIR:-/tmp}/cenci/pr-reply-<comment-id>.md '{body: $body}' > ${TMPDIR:-/tmp}/cenci/pr-reply-<comment-id>-payload.json
 ```
-
-For general PR review comments, post as a PR comment:
+Then post the reply with a separate standalone Bash call:
 ```bash
-printf '%s' '<reply text>' > ${TMPDIR:-/tmp}/cenci/cenci-<pr-number>-pr-comment.md
-COMMENT=$(cat ${TMPDIR:-/tmp}/cenci/cenci-<pr-number>-pr-comment.md)
-gh pr comment <number> --repo <owner>/<repo> --body "$COMMENT"
+gh api repos/<owner>/<repo>/pulls/<number>/comments/<comment-id>/replies -X POST --input ${TMPDIR:-/tmp}/cenci/pr-reply-<comment-id>-payload.json
+```
+(`-X POST` explicit, rather than relying on `gh api`'s input-implies-POST default.)
+
+For general PR review comments, post as a PR comment: use the `Write` tool to create
+`${TMPDIR:-/tmp}/cenci/cenci-<pr-number>-pr-comment.md` with the `<reply text>` as its content, then
+run:
+```bash
+gh pr comment <number> --repo <owner>/<repo> --body-file ${TMPDIR:-/tmp}/cenci/cenci-<pr-number>-pr-comment.md
 ```
 
 ## Resolve Threads
