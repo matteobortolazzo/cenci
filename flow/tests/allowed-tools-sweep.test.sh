@@ -433,7 +433,7 @@ Bash(git commit:*)
 Bash(git worktree add:*)
 Bash(git -C:*)
 Bash(git diff --no-index:*)
-Bash(rm -f /tmp/claude/cenci-configure-:*)'
+Bash(rm -f ${TMPDIR:-/tmp}/cenci/cenci-configure-:*)'
   check_bash_grant_set "${configure_path}" "${CONFIGURE_EXPECTED_GRANTS}" "skills/configure/SKILL.md"
   # Test-bug fix (#773, narrow): unlike the other five swept skills,
   # assert_dropped_blanket_grants is NOT called for configure here. Per the
