@@ -29,14 +29,14 @@
 # point of view.
 
 # ---------------------------------------------------------------------------
-# read_doc <path> [base-dir]
+# read_doc_raw <path> [base-dir]
 #
 # Fail-closed doc reader (mirrors flow/tests/subagent-cwd-contract.test.sh's
 # idiom): prints file content to stdout; returns 1 and prints nothing on a
 # missing/unreadable file so a dangling reference can never vacuously pass.
 # <path> may be absolute (used as-is) or relative to <base-dir> (defaults to
 # the global FLOW_DIR set by parity.test.sh before it sources this file).
-read_doc() {
+read_doc_raw() {
   local path="$1" base="${2:-${FLOW_DIR:-}}" full content
   case "${path}" in
     /*) full="${path}" ;;
@@ -147,7 +147,7 @@ _prop() {
 # gate-result-integrity) fails, instead of reporting a generic content-based
 # reason that is silent on whether the failure is a missing file or a present
 # file simply lacking the required marker (#553). <codex_ok>/<runtime_ok> are
-# the 0/1 exit statuses read_doc returned for each doc. <generic_reason> is
+# the 0/1 exit statuses read_doc_raw returned for each doc. <generic_reason> is
 # used only when both docs are present and readable (i.e. the failure is
 # genuinely about missing content, not a missing file).
 _dual_doc_note() {
@@ -262,7 +262,7 @@ _SYNTH_PROP_REASONS=(
 check_synthetic_adapter() {
   local fixture_dir="$1" content overall=0
 
-  if ! content="$(read_doc "${fixture_dir}/procedure.md")"; then
+  if ! content="$(read_doc_raw "${fixture_dir}/procedure.md")"; then
     local prop
     for prop in "${_SYNTH_PROP_IDS[@]}"; do
       echo "${prop}:fail:procedure.md not found/unreadable: ${fixture_dir}/procedure.md"
@@ -311,23 +311,23 @@ _CLAUDE_STATUS_MARKER='`GATE_STATUS=green` or `GATE_STATUS=unset` → this targe
 # phase docs plus hooks/hooks.json wiring.
 check_claude_adapter() {
   local flow_dir="$1" overall=0
-  # Read every doc up front and capture read_doc's own return status per
+  # Read every doc up front and capture read_doc_raw's own return status per
   # call site (mirroring check_synthetic_adapter's fail-closed pattern) so a
   # missing/renamed file is reported as "<path> not found/unreadable"
   # instead of the misleadingly generic "does not document X" content-gap
-  # reason -- read_doc's fail-closed contract (empty content on a missing
+  # reason -- read_doc_raw's fail-closed contract (empty content on a missing
   # file) already made every property fail closed; this only makes the
   # REASON honestly distinguish "missing file" from "wrong content".
   local phase2 phase2_ok phase3 phase3_ok phase4 phase4_ok phase1 phase1_ok
   local hooks_json hooks_json_ok implementer_doc implementer_ok phase9 phase9_ok phase67 phase67_ok
-  phase2="$(read_doc "skills/implement/phases/phase-2-worktree.md" "${flow_dir}")"; phase2_ok=$?
-  phase3="$(read_doc "skills/implement/phases/phase-3-test-red.md" "${flow_dir}")"; phase3_ok=$?
-  phase4="$(read_doc "skills/implement/phases/phase-4-implement-green.md" "${flow_dir}")"; phase4_ok=$?
-  phase1="$(read_doc "skills/implement/phases/phase-1-plan.md" "${flow_dir}")"; phase1_ok=$?
-  hooks_json="$(read_doc "hooks/hooks.json" "${flow_dir}")"; hooks_json_ok=$?
-  implementer_doc="$(read_doc "agents/implementer.md" "${flow_dir}")"; implementer_ok=$?
-  phase9="$(read_doc "skills/implement/phases/phase-9-pr.md" "${flow_dir}")"; phase9_ok=$?
-  phase67="$(read_doc "skills/implement/phases/phase-6-7-review.md" "${flow_dir}")"; phase67_ok=$?
+  phase2="$(read_doc_raw "skills/implement/phases/phase-2-worktree.md" "${flow_dir}")"; phase2_ok=$?
+  phase3="$(read_doc_raw "skills/implement/phases/phase-3-test-red.md" "${flow_dir}")"; phase3_ok=$?
+  phase4="$(read_doc_raw "skills/implement/phases/phase-4-implement-green.md" "${flow_dir}")"; phase4_ok=$?
+  phase1="$(read_doc_raw "skills/implement/phases/phase-1-plan.md" "${flow_dir}")"; phase1_ok=$?
+  hooks_json="$(read_doc_raw "hooks/hooks.json" "${flow_dir}")"; hooks_json_ok=$?
+  implementer_doc="$(read_doc_raw "agents/implementer.md" "${flow_dir}")"; implementer_ok=$?
+  phase9="$(read_doc_raw "skills/implement/phases/phase-9-pr.md" "${flow_dir}")"; phase9_ok=$?
+  phase67="$(read_doc_raw "skills/implement/phases/phase-6-7-review.md" "${flow_dir}")"; phase67_ok=$?
 
   # P1 baseline-gate: phase-2-worktree.md invokes run-gate.sh.
   if [[ "${phase2_ok}" -ne 0 ]]; then
@@ -474,9 +474,9 @@ check_codex_adapter() {
   local flow_dir="$1" overall=0
   local codex_doc codex_ok runtime_doc runtime_ok hooks_json hooks_ok
 
-  codex_doc="$(read_doc "skills/implement/codex.md" "${flow_dir}")"; codex_ok=$?
-  runtime_doc="$(read_doc "skills/codex-runtime/SKILL.md" "${flow_dir}")"; runtime_ok=$?
-  hooks_json="$(read_doc "codex/hooks.json" "${flow_dir}")"; hooks_ok=$?
+  codex_doc="$(read_doc_raw "skills/implement/codex.md" "${flow_dir}")"; codex_ok=$?
+  runtime_doc="$(read_doc_raw "skills/codex-runtime/SKILL.md" "${flow_dir}")"; runtime_ok=$?
+  hooks_json="$(read_doc_raw "codex/hooks.json" "${flow_dir}")"; hooks_ok=$?
 
   # P1 baseline-gate: codex.md invokes run-gate.sh (#555 closed the prior gap).
   if [[ "${codex_doc}" == *"run-gate.sh"* ]] || [[ "${runtime_doc}" == *"run-gate.sh"* ]]; then
