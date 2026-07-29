@@ -175,6 +175,29 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
 
    If the update or verification failed, follow the write-failure protocol: report the error, retry once, and if still failing, STOP — do not create children, do not run Pass 2, do not create the companion design ticket, do not proceed to steps 11-12 — and report to the user that ticket #`<number>`'s description/title update did not persist, so they can retry manually.
 
+   #### Parent metadata for inherited labels/milestone
+
+   Every ticket this skill creates — each split child **and** the companion design ticket — inherits the parent's milestone and its non-lifecycle labels, so a split never drops its children out of the milestone or loses the parent's `area:*`/priority/team labels. Skip this sub-step entirely when this run creates neither split children nor a companion design ticket; there is nothing to inherit into.
+
+   Fetch the parent's milestone and labels **to a file**, as its own Bash call (a fetch failure then surfaces distinctly, before any create), mirroring the same pattern in `implement/phases/phase-9-pr.md`. Do not reuse the `labels`/`milestone` already in context from the Context section's fetch: they are stale (this skill added `Working` to the parent after that fetch), and externally-sourced label names must never be interpolated into a command line (`docs/skill-authoring.md`) — the file is consumed mechanically by `jq --slurpfile` below, never read back into shell text. The trailing `|| rm -f` is load-bearing: it removes a partially-written file so the presence gate below can never mistake one for a good fetch.
+   ```bash
+   gh issue view <number> --repo <owner>/<repo> --json milestone,labels > ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-parent-meta.json || rm -f ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-parent-meta.json
+   ```
+
+   **Presence gate** — choose between the **with-meta** and **no-meta** payload forms at every creation site below by reading the file back:
+   ```bash
+   cat ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-parent-meta.json
+   ```
+   If the command errors (non-zero exit, e.g. `No such file or directory`), the metadata is absent → use the **no-meta** form. If it exits 0 and prints the JSON object, the metadata is present → use the **with-meta** form.
+
+   **On failure: retry once, then graceful-degrade — do NOT STOP.** If the fetch fails, retry it once. If it still fails, fall through to the **no-meta** form at every creation site and record that the **Final Message** must state that `milestone/label inheritance was skipped`. This deliberately differs both from the write-failure protocol governing every other write in this section and from the fail-closed treatment of the same fetch at `implement/phases/phase-9-pr.md` (whose risk was a runaway followup chain, not a missing label): inheritance here is cosmetic — a child created without the parent's milestone is still a correct, complete ticket — and STOPping at this point would abort the split *after* the parent's body was already rewritten, which is strictly worse than an un-inherited child.
+
+   **What is inherited.** Carry over every label the parent currently has except the 7 lifecycle/transient markers — `"Refined","Working","Planned","In Review","Implemented","Design","Designed"` — which are per-ticket state rather than classification. The labels this skill seeds (`Refined`, plus `Design` for a design-only child or the companion design ticket) are applied on top regardless of what is carried over. Two invariants carry over verbatim from phase-9's already-tested form, and are the non-obvious parts:
+   - the milestone must be the numeric `.milestone.number`, not the title — the REST endpoint requires the id;
+   - the `milestone` key is omitted entirely via an explicit jq emptiness check, never a bare `//` fallback that would emit `null` (see `docs/shell-scripting-gotchas.md`).
+
+   **Documented limitation**: children inherit the labels the parent carries *at split time*. `Browser` and `ui:visual-check` are applied to the parent later, in steps 11-12, and so are **not** propagated. That is an accepted consequence of the ordering (children are created here in step 10), not a bug.
+
    If splitting, create the child tickets using a **two-pass approach**:
 
    Split tickets must also receive the "Refined" label/tag since they were refined during this session — `/cenci:implement` checks for it as a pre-flight condition.
@@ -192,11 +215,18 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
 
    Capture each created issue number from the command output.
 
-   Use the `Write` tool to create the raw title and body as plain text — `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt` (`<ticket-title> (K/N)`) and `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md` (`Related to #<original-number>\nDepends on #<sibling-number>\nParallel with #<sibling-number>\n\n<ticket-body>`) — never a hand-escaped JSON literal; the title is free text and must never be interpolated directly into the command line. Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet, keeping the `labels` array as a literal inline value (it is not externally sourced, so it needs no `--rawfile`):
+   Use the `Write` tool to create the raw title and body as plain text — `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt` (`<ticket-title> (K/N)`) and `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md` (`Related to #<original-number>\nDepends on #<sibling-number>\nParallel with #<sibling-number>\n\n<ticket-body>`) — never a hand-escaped JSON literal; the title is free text and must never be interpolated directly into the command line. Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet, in whichever of the two forms the presence gate above selected. The parent's label names are externally sourced, so they enter the payload **only** via `--slurpfile` from the fetched metadata file — never interpolated into the command line, and `jq` cannot let slurped content influence the payload's structure.
+
+   **With-meta** (the parent-metadata fetch above succeeded):
+   ```bash
+   jq -n --rawfile title ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt --rawfile body ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md --slurpfile meta ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-parent-meta.json '{title: ($title | rtrimstr("\n")), body: $body, labels: (["Refined"] + [$meta[0].labels[].name | select(. as $n | (["Refined","Working","Planned","In Review","Implemented","Design","Designed"] | index($n)) | not)])} + (if ($meta[0].milestone.number // "") != "" then {milestone: $meta[0].milestone.number} else {} end)' > ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K.json
+   ```
+
+   **No-meta** (the fetch still failed after its one retry — the graceful degrade above; `labels` is `["Refined"]` only, no `milestone` key):
    ```bash
    jq -n --rawfile title ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt --rawfile body ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md '{title: ($title | rtrimstr("\n")), body: $body, labels: ["Refined"]}' > ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K.json
    ```
-   Then run:
+   Then, whichever form ran:
    ```bash
    gh api repos/<owner>/<repo>/issues -X POST --input ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K.json --jq .number
    ```
@@ -222,7 +252,7 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
 
    Omit `Depends on` / `Parallel with` lines that don't apply (e.g. the first child typically has no dependencies).
 
-   Design-only children (see **Design-first splits** above) additionally carry `"Design"` in that child's JSON `labels` array, and their body includes the `### Design Direction` section from this refinement (that's where `/cenci:design` reads it from). A design-only first child is a real child of the parent → link it as a sub-issue exactly like the others.
+   Design-only children (see **Design-first splits** above) additionally carry `"Design"` in that child's JSON `labels` array — the seed array becomes `["Refined","Design"]` in whichever form ran (with-meta: `(["Refined","Design"] + [ …carried-over parent labels… ])`; no-meta: `labels: ["Refined","Design"]`) — and their body includes the `### Design Direction` section from this refinement (that's where `/cenci:design` reads it from). A design-only first child is a real child of the parent → link it as a sub-issue exactly like the others.
 
    #### Pass 2: Final sub-issue verification and (if ordered) an Execution Order note
 
@@ -257,11 +287,18 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
 
    If `designNeeded` is true, the ticket is **not** being split, and `isDesignTicket` is false, create a dedicated design ticket — design never runs on the implementation ticket itself:
 
-   Use the `Write` tool to create the raw title and body as plain text — `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-title.txt` (`Design: <feature title>`) and `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-body.md` (`Related to #<number>\nBlocks #<number>\n\n### Goal\nProduce the design spec (`.pen` + `DESIGN.md`) for #<number> via `/cenci:design`.\n\n### Design Direction\n<the Design Direction section from this refinement>`) — never a hand-escaped JSON literal; the title is free text and must never be interpolated directly into the command line. Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet, keeping `labels` as a literal inline value:
+   Use the `Write` tool to create the raw title and body as plain text — `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-title.txt` (`Design: <feature title>`) and `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-body.md` (`Related to #<number>\nBlocks #<number>\n\n### Goal\nProduce the design spec (`.pen` + `DESIGN.md`) for #<number> via `/cenci:design`.\n\n### Design Direction\n<the Design Direction section from this refinement>`) — never a hand-escaped JSON literal; the title is free text and must never be interpolated directly into the command line. Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet, in whichever of the two forms the presence gate in **Parent metadata for inherited labels/milestone** selected — the companion design ticket inherits exactly like a split child, with `["Refined","Design"]` as its seed array:
+
+   **With-meta** (the parent-metadata fetch succeeded):
+   ```bash
+   jq -n --rawfile title ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-title.txt --rawfile body ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-body.md --slurpfile meta ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-parent-meta.json '{title: ($title | rtrimstr("\n")), body: $body, labels: (["Refined","Design"] + [$meta[0].labels[].name | select(. as $n | (["Refined","Working","Planned","In Review","Implemented","Design","Designed"] | index($n)) | not)])} + (if ($meta[0].milestone.number // "") != "" then {milestone: $meta[0].milestone.number} else {} end)' > ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design.json
+   ```
+
+   **No-meta** (the fetch still failed after its one retry — the graceful degrade above; `labels` is `["Refined","Design"]` only, no `milestone` key):
    ```bash
    jq -n --rawfile title ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-title.txt --rawfile body ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-body.md '{title: ($title | rtrimstr("\n")), body: $body, labels: ["Refined","Design"]}' > ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design.json
    ```
-   Then run:
+   Then, whichever form ran:
    ```bash
    gh api repos/<owner>/<repo>/issues -X POST --input ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design.json --jq .number
    ```
@@ -335,7 +372,7 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
 
    **If the marker is present** — every write in steps 10-12 succeeded and was verified, so it's safe to delete this run's temp files by explicit path (never a glob — an unmatched glob errors under some shells, and `rm -f` already ignores paths that don't exist, so listing files a given run didn't create — e.g. child/design files when there was no split or companion design ticket — is harmless):
    ```bash
-   rm -f ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-bundle.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-edit.json ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-edit-title.txt ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-edit-body.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design.json ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-title.txt ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-body.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K.json ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>.ok
+   rm -f ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-bundle.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-edit.json ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-edit-title.txt ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-edit-body.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design.json ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-title.txt ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-body.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K.json ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-parent-meta.json ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>.ok
    ```
    Repeat the child-K paths (with the actual `K` value substituted) for each child created in Pass 1 this run.
 
@@ -345,7 +382,7 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
 
 After steps 10-13 complete, present the refiner's Refined Ticket Proposal adopted in step 9 in the final message, followed by a short notice of what was persisted:
 
-> Ticket #`<n>` updated. Labels: Refined[, Design][, Browser][, ui:visual-check]. [Created `N` child tickets: #`<c1>`, #`<c2>`, ….] [Created companion design ticket #`<D>`.]
+> Ticket #`<n>` updated. Labels: Refined[, Design][, Browser][, ui:visual-check]. [Created `N` child tickets: #`<c1>`, #`<c2>`, ….] [Created companion design ticket #`<D>`.] [Note: milestone/label inheritance was skipped — the parent's metadata could not be fetched, so the created tickets carry only their seed labels and no milestone.]
 >
 > Review the summary above.
 
