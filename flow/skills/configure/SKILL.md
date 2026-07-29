@@ -205,14 +205,14 @@ The dependency scan is scripted: `detection.mcpServers` carries the MCP catalog 
 
 | Trigger Package | Server Name | Command | Args | Env Vars | Scope |
 |---|---|---|---|---|---|
-| *(always available)* | context7 | `npx` | `["-y", "@upstash/context7-mcp"]` | `CONTEXT7_API_KEY` | plugin |
+| *(always available)* | context7 | `npx` | `["-y", "@upstash/context7-mcp@3.2.5"]` | `CONTEXT7_API_KEY` | project |
 | *(Pencil editor open)* | pencil | (connected via editor) | — | — | editor |
 | `@angular/core` | angular | `npx` | `["-y", "@angular/cli", "mcp"]` | — | project |
 | `primeng` | primeng | `npx` | `["-y", "@primeng/mcp"]` | — | project |
 
 **Scope:**
-- **plugin**: Already defined in cenci's `.mcp.json`. Enable by setting `disabled: false`.
 - **project**: Add to the project's root `.mcp.json`.
+- **editor**: Provided by the Pencil editor over its own connection — nothing is written to `.mcp.json`; enablement is driven by `pencil.enabled` in `.cenci/config.json`.
 
 ### LSP Server Catalog
 
@@ -892,10 +892,9 @@ After gathering answers:
    **Append to `permissions.allow`:**
    - Stack-specific rules (e.g., `Bash(dotnet:*)` for .NET, `Bash(ng:*)` for Angular, `Bash(go:*)` for Go)
    - For each enabled MCP, add its tool permissions. Look up the server's available tools
-     and add entries in the format `mcp__<server-name>__<tool-name>` (for project-scoped)
-     or `mcp__plugin_cenci_<server-name>__<tool-name>` (for plugin-scoped).
+     and add entries in the format `mcp__<server-name>__<tool-name>` (for project-scoped).
      Known tools:
-     - **Context7**: `mcp__plugin_cenci_context7__resolve-library-id`, `mcp__plugin_cenci_context7__query-docs`
+     - **Context7**: `mcp__context7__resolve-library-id`, `mcp__context7__query-docs`
      - **Pencil** (only if `pencil.enabled` is `true`): `mcp__pencil__*` (auto-allow all Pencil editor MCP tools — only relevant when Pencil editor is open)
      - **Angular**: `mcp__angular__:*` (auto-allow all Angular CLI MCP tools)
      - **PrimeNG**: `mcp__primeng__:*` (auto-allow all PrimeNG MCP tools)
@@ -943,21 +942,39 @@ After gathering answers:
       the problem). If any remain, the heal step above was incomplete — fix
       before continuing.
 
+   **Legacy cleanup (Context7 scope migration)** — heal projects configured by an older
+   cenci that granted the plugin-scoped Context7 permission pair before Context7 moved
+   to project scope:
+   1. Remove every `permissions.allow` entry matching the `mcp__plugin_cenci_context7__*`
+      prefix. Leave every other `permissions.allow` entry untouched, including other
+      `mcp__*` grants — this cleanup is scoped to the Context7 prefix only, never a
+      broader `mcp__plugin_*` or `mcp__*` match.
+   2. If Context7 is enabled this run, ensure the project-scoped
+      `mcp__context7__resolve-library-id` and `mcp__context7__query-docs` pair is present
+      in `permissions.allow` — add whichever is missing, and deduplicate rather than
+      appending a duplicate entry.
+   3. If Context7 is declined this run, remove the pair without adding a replacement.
+   4. **Verify**: after healing, confirm `permissions.allow` contains no remaining entry
+      with the `mcp__plugin_cenci_context7__*` prefix, and that every non-Context7 entry
+      present before this step is still present unchanged. If either check fails, the
+      heal step above was incomplete or over-broad — fix before continuing.
+
 ### MCP Server Configuration
 
 For each MCP selected in question 5:
 
-**Plugin-scoped (Context7):**
-- In cenci's `.mcp.json` (`${CLAUDE_PLUGIN_ROOT}/.mcp.json`), set `mcpServers.context7.disabled` to `false`
-- Note to user: "Set CONTEXT7_API_KEY in your shell environment (free key from context7.com/dashboard)"
-
-**Project-scoped (Angular, PrimeNG, etc.):**
-- Only create or modify the project's root `.mcp.json` if at least one project-scoped MCP server was selected. Never create an empty `.mcp.json`.
+**Project-scoped (Context7, Angular, PrimeNG):**
+- Only create or modify the project's root `.mcp.json` if at least one project-scoped MCP server was selected. Never *create* an empty `.mcp.json`.
 - Create or update the project's root `.mcp.json`
 - Add entries from the catalog, e.g.:
   ```json
   {
     "mcpServers": {
+      "context7": {
+        "command": "npx",
+        "args": ["-y", "@upstash/context7-mcp@3.2.5"],
+        "env": { "CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}" }
+      },
       "angular": {
         "command": "npx",
         "args": ["-y", "@angular/cli", "mcp"]
@@ -969,7 +986,10 @@ For each MCP selected in question 5:
     }
   }
   ```
-- If the file already exists, merge into the existing `mcpServers` object — never overwrite existing entries
+- If Context7 was selected: note to user: "Set CONTEXT7_API_KEY in your shell environment (free key from context7.com/dashboard)"
+- If the file already exists, merge into the existing `mcpServers` object — never overwrite existing entries, with two field-scoped exceptions:
+  - **Version-pin refresh**: for a catalog server whose catalog `Args` are version-pinned (e.g. Context7), if an existing entry's `args` differ from the catalog value, overwrite **`args` only** — every other key (including `env` and any user-added keys) is preserved. This is the single explicit, documented exception to "never overwrite existing entries."
+  - **Declined servers**: for each catalog server recorded `false` in `mcpServers` (question 5's answer), delete that entry from an existing `.mcp.json` if present. If `mcpServers` becomes empty as a result, leave the file in place with an empty `mcpServers` object — never delete the file. (The "never create an empty `.mcp.json`" rule above applies to *creating* a new file only, not to editing an existing one down to empty.)
 
 5. Update `.gitignore`:
    - Add `.worktrees/` if not present
