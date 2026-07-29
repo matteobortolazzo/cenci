@@ -41,19 +41,31 @@ failures=0
 
 fail() { echo "FAIL: $1" >&2; failures=$((failures+1)); }
 
-read_doc() {
-  # read_doc <flow-relative-path> -- prints the real committed file's content,
-  # or fails closed with a distinct "not found" message if it cannot be read
-  # (a missing/unreadable file must never silently masquerade as empty
-  # content, which would make assert_not_contains trivially "pass").
-  local path="${FLOW_DIR}/$1"
-  local content
-  if ! content="$(cat "${path}" 2>/dev/null)"; then
-    fail "$1: doc not found/unreadable: ${path}"
-    printf ''
+read_doc_raw() {
+  # read_doc_raw <flow-relative-path> -- pure extraction, no fail() side
+  # effect here: it is deliberately safe to call inside a $(...) command
+  # substitution.
+  local _relpath="$1"
+  local _path="${FLOW_DIR}/${_relpath}"
+  cat "${_path}" 2>/dev/null
+}
+
+# require_doc <result-var> <flow-relative-path> -- nameref wrapper that
+# assigns the real committed file's content into <result-var>, or fails
+# closed with a distinct "not found" message and assigns "" if not found (a
+# missing/unreadable file must never silently masquerade as empty content,
+# which would make assert_not_contains trivially "pass"). Must NOT be
+# invoked via $(...).
+require_doc() {
+  local -n _result="$1"
+  local _relpath="$2"
+  local _content
+  if ! _content="$(read_doc_raw "${_relpath}")"; then
+    fail "${_relpath}: doc not found/unreadable: ${FLOW_DIR}/${_relpath}"
+    _result=""
     return 1
   fi
-  printf '%s' "${content}"
+  _result="${_content}"
 }
 
 # assert_contains <content> <required-substring> <label>
@@ -96,7 +108,7 @@ extract_pipeline_section() {
 # state/next_actions/warnings/errors, per the plan's Flow Cutover subsection.
 # =====================================================================
 FILE="skills/implement/SKILL.md"
-if CONTENT="$(read_doc "${FILE}")"; then
+if require_doc CONTENT "${FILE}"; then
   PIPELINE_SECTION="$(extract_pipeline_section "${CONTENT}")"
   if [[ -z "${PIPELINE_SECTION}" ]]; then
     fail "${FILE}: could not locate '## Pipeline' section"
@@ -112,7 +124,7 @@ fi
 # waiting_for_plan_approval), rendering its next_actions.
 # =====================================================================
 FILE="skills/implement/phases/phase-1-plan.md"
-if CONTENT="$(read_doc "${FILE}")"; then
+if require_doc CONTENT "${FILE}"; then
   assert_contains "${CONTENT}" "cenci pipeline plan" "${FILE}"
 fi
 
@@ -124,7 +136,7 @@ fi
 # next_actions.
 # =====================================================================
 FILE="skills/implement/phases/phase-2-worktree.md"
-if CONTENT="$(read_doc "${FILE}")"; then
+if require_doc CONTENT "${FILE}"; then
   assert_contains "${CONTENT}" "cenci pipeline plan" "${FILE} (plan --approve)"
   assert_contains "${CONTENT}" "--approve" "${FILE} (plan --approve)"
   assert_contains "${CONTENT}" "cenci pipeline execute" "${FILE} (execute)"
@@ -136,7 +148,7 @@ fi
 # line with rendered next_actions.
 # =====================================================================
 FILE="skills/implement/phases/phase-6-7-review.md"
-if CONTENT="$(read_doc "${FILE}")"; then
+if require_doc CONTENT "${FILE}"; then
   assert_contains "${CONTENT}" "cenci pipeline review" "${FILE}"
 fi
 
@@ -146,8 +158,8 @@ fi
 # =====================================================================
 FILE_8="skills/implement/phases/phase-8-docs.md"
 FILE_9="skills/implement/phases/phase-9-pr.md"
-CONTENT_8="$(read_doc "${FILE_8}")" || CONTENT_8=""
-CONTENT_9="$(read_doc "${FILE_9}")" || CONTENT_9=""
+require_doc CONTENT_8 "${FILE_8}" || true
+require_doc CONTENT_9 "${FILE_9}" || true
 if [[ "${CONTENT_8}" != *"cenci pipeline finalize"* && "${CONTENT_9}" != *"cenci pipeline finalize"* ]]; then
   fail "${FILE_8} or ${FILE_9}: expected cenci pipeline invocation not found: [cenci pipeline finalize]"
 fi
@@ -176,7 +188,7 @@ fi
 # Working-label creation), and pin `cenci pipeline label` as present.
 # ---------------------------------------------------------------------
 FILE="skills/implement/SKILL.md"
-if CONTENT="$(read_doc "${FILE}")"; then
+if require_doc CONTENT "${FILE}"; then
   assert_contains "${CONTENT}" "cenci pipeline label" "${FILE} (Label \"Working\" section)"
   assert_not_contains "${CONTENT}" 'gh label create "Working"' "${FILE} (Label \"Working\" section)"
 fi
@@ -190,7 +202,7 @@ fi
 # must also be recorded via `cenci pipeline artifact <id> --plan`.
 # ---------------------------------------------------------------------
 FILE="skills/implement/phases/phase-1-plan.md"
-if CONTENT="$(read_doc "${FILE}")"; then
+if require_doc CONTENT "${FILE}"; then
   assert_contains "${CONTENT}" "cenci pipeline label" "${FILE} (Mark the ticket Planned)"
   assert_contains "${CONTENT}" "--transition planned" "${FILE} (Mark the ticket Planned)"
   assert_not_contains "${CONTENT}" 'gh label create "Planned"' "${FILE} (Mark the ticket Planned)"
@@ -206,7 +218,7 @@ fi
 # prose, e.g. a `cenci:worktrees` reference or comment).
 # ---------------------------------------------------------------------
 FILE="skills/implement/phases/phase-2-worktree.md"
-if CONTENT="$(read_doc "${FILE}")"; then
+if require_doc CONTENT "${FILE}"; then
   assert_contains "${CONTENT}" "cenci pipeline worktree" "${FILE} (Create Worktree)"
   assert_not_contains "${CONTENT}" "git worktree add .worktrees/<ticket-id>-<description>" "${FILE} (Create Worktree)"
 fi
@@ -220,7 +232,7 @@ fi
 # `cenci pipeline artifact <id> --branch/--pr/--pr-number`.
 # ---------------------------------------------------------------------
 FILE="skills/implement/phases/phase-9-pr.md"
-if CONTENT="$(read_doc "${FILE}")"; then
+if require_doc CONTENT "${FILE}"; then
   assert_contains "${CONTENT}" "cenci pipeline label" "${FILE} (Labels)"
   assert_contains "${CONTENT}" "--transition in-review" "${FILE} (Labels)"
   assert_not_contains "${CONTENT}" 'gh label create "In Review"' "${FILE} (Labels)"
@@ -275,7 +287,7 @@ extract_existing_plan_section() {
 # block (glob `.plans/<id>-*.md` directly in skill prose) must be gone.
 # ---------------------------------------------------------------------
 FILE="skills/implement/SKILL.md"
-if CONTENT="$(read_doc "${FILE}")"; then
+if require_doc CONTENT "${FILE}"; then
   PLAN_VERIFICATION_SECTION="$(extract_plan_verification_section "${CONTENT}")"
   if [[ -z "${PLAN_VERIFICATION_SECTION}" ]]; then
     fail "${FILE}: could not locate '### Plan Verification' section"
@@ -302,7 +314,7 @@ fi
 # gone -- that judgment call and that re-fetch now live in the CLI.
 # ---------------------------------------------------------------------
 FILE="skills/implement/phases/phase-1-plan.md"
-if CONTENT="$(read_doc "${FILE}")"; then
+if require_doc CONTENT "${FILE}"; then
   EXISTING_PLAN_SECTION="$(extract_existing_plan_section "${CONTENT}")"
   if [[ -z "${EXISTING_PLAN_SECTION}" ]]; then
     fail "${FILE}: could not locate '## Existing Plan' section"
@@ -378,7 +390,7 @@ extract_push_section() {
 # resulting `warnings[]` entry is informational, not a failure gate.
 # ---------------------------------------------------------------------
 FILE="skills/implement/phases/phase-2-worktree.md"
-if CONTENT="$(read_doc "${FILE}")"; then
+if require_doc CONTENT "${FILE}"; then
   GATE_CHECK_SECTION="$(extract_gate_check_section "${CONTENT}")"
   if [[ -z "${GATE_CHECK_SECTION}" ]]; then
     fail "${FILE}: could not locate '## Gate Check' section"
@@ -406,7 +418,7 @@ fi
 # pipeline artifact (`cenci pipeline artifact <id> --get`) instead.
 # ---------------------------------------------------------------------
 FILE="skills/implement/phases/phase-9-pr.md"
-if CONTENT="$(read_doc "${FILE}")"; then
+if require_doc CONTENT "${FILE}"; then
   PUSH_SECTION="$(extract_push_section "${CONTENT}")"
   if [[ -z "${PUSH_SECTION}" ]]; then
     fail "${FILE}: could not locate '## Push' section"

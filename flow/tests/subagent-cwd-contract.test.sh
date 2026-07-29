@@ -35,19 +35,31 @@ failures=0
 
 fail() { echo "FAIL: $1" >&2; failures=$((failures+1)); }
 
-read_doc() {
-  # read_doc <flow-relative-path> -- prints the real committed file's content,
-  # or fails closed with a distinct "not found" message if it cannot be read
-  # (a missing/unreadable file must never silently masquerade as empty
-  # content, which would make assert_not_contains trivially "pass").
-  local path="${FLOW_DIR}/$1"
-  local content
-  if ! content="$(cat "${path}" 2>/dev/null)"; then
-    fail "$1: doc not found/unreadable: ${path}"
-    printf ''
+read_doc_raw() {
+  # read_doc_raw <flow-relative-path> -- pure extraction, no fail() side
+  # effect here: it is deliberately safe to call inside a $(...) command
+  # substitution.
+  local _relpath="$1"
+  local _path="${FLOW_DIR}/${_relpath}"
+  cat "${_path}" 2>/dev/null
+}
+
+# require_doc <result-var> <flow-relative-path> -- nameref wrapper that
+# assigns the real committed file's content into <result-var>, or fails
+# closed with a distinct "not found" message and assigns "" if not found (a
+# missing/unreadable file must never silently masquerade as empty content,
+# which would make assert_not_contains trivially "pass"). Must NOT be
+# invoked via $(...).
+require_doc() {
+  local -n _result="$1"
+  local _relpath="$2"
+  local _content
+  if ! _content="$(read_doc_raw "${_relpath}")"; then
+    fail "${_relpath}: doc not found/unreadable: ${FLOW_DIR}/${_relpath}"
+    _result=""
     return 1
   fi
-  printf '%s' "${content}"
+  _result="${_content}"
 }
 
 # assert_not_contains <content> <forbidden-substring> <label>
@@ -77,7 +89,7 @@ PHASE_3_4_5_MARKER='target the worktree explicitly on every command — via `git
 # standalone `cd` at session start and claims CWD persists for later calls.
 # =====================================================================
 FILE="agents/implementer.md"
-if CONTENT="$(read_doc "${FILE}")"; then
+if require_doc CONTENT "${FILE}"; then
   assert_not_contains "${CONTENT}" 'CWD persists between Bash calls' "${FILE}"
   assert_contains "${CONTENT}" 'Bash CWD does not reliably persist across calls. Use `git -C <worktree-path> ...` for git commands, absolute paths for file operations' "${FILE}"
 fi
@@ -93,7 +105,7 @@ for FILE in \
   "skills/implement/phases/phase-4-implement-green.md" \
   "skills/implement/phases/phase-5-refactor.md"
 do
-  if CONTENT="$(read_doc "${FILE}")"; then
+  if require_doc CONTENT "${FILE}"; then
     assert_not_contains "${CONTENT}" 'CWD persists for later calls' "${FILE}"
     assert_not_contains "${CONTENT}" 'standalone `cd <worktree-path>` as the first Bash call' "${FILE}"
     assert_contains "${CONTENT}" "${PHASE_3_4_5_MARKER}" "${FILE}"
@@ -106,7 +118,7 @@ done
 # resolve against the worktree.
 # =====================================================================
 FILE="skills/implement/phases/phase-6-7-review.md"
-if CONTENT="$(read_doc "${FILE}")"; then
+if require_doc CONTENT "${FILE}"; then
   assert_not_contains "${CONTENT}" 'run a standalone `cd <worktree-path>` before these commands' "${FILE}"
   assert_contains "${CONTENT}" 'Target the worktree explicitly with `git -C <worktree-path>` on each `git diff` call so it resolves against the worktree and stays auto-approved; redirect to an absolute temp-file path' "${FILE}"
 fi
@@ -117,7 +129,7 @@ fi
 # against the worktree.
 # =====================================================================
 FILE="skills/implement/phases/phase-9-pr.md"
-if CONTENT="$(read_doc "${FILE}")"; then
+if require_doc CONTENT "${FILE}"; then
   assert_not_contains "${CONTENT}" 'run a standalone `cd <worktree-path>` before the rebase/commit/push commands' "${FILE}"
   assert_contains "${CONTENT}" 'Target the worktree explicitly with `git -C <worktree-path>` on every rebase/commit/push command below so they resolve against the worktree and stay auto-approved' "${FILE}"
 fi
@@ -128,7 +140,7 @@ fi
 # <worktree-path>` first so the commands below resolve against the worktree.
 # =====================================================================
 FILE="skills/configure/SKILL.md"
-if CONTENT="$(read_doc "${FILE}")"; then
+if require_doc CONTENT "${FILE}"; then
   assert_not_contains "${CONTENT}" 'Run a standalone `cd <worktree-path>` first so the commands below resolve against the worktree' "${FILE}"
   assert_contains "${CONTENT}" 'Target the worktree explicitly with `git -C <worktree-path>` on every command below so they resolve against the worktree and stay auto-approved' "${FILE}"
 fi

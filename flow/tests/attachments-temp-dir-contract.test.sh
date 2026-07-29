@@ -33,19 +33,30 @@ failures=0
 
 fail() { echo "FAIL: $1" >&2; failures=$((failures+1)); }
 
-read_doc() {
-  # read_doc <flow-relative-path> — prints the real committed file's content,
-  # or fails closed with a distinct "not found" message (a missing file must
-  # never masquerade as empty content, which would make assert_not_contains
-  # trivially pass).
-  local path="${FLOW_DIR}/$1"
-  local content
-  if ! content="$(cat "${path}" 2>/dev/null)"; then
-    fail "$1: doc not found/unreadable: ${path}"
-    printf ''
+read_doc_raw() {
+  # read_doc_raw <flow-relative-path> — pure extraction, no fail() side
+  # effect here: it is deliberately safe to call inside a $(...) command
+  # substitution.
+  local _relpath="$1"
+  local _path="${FLOW_DIR}/${_relpath}"
+  cat "${_path}" 2>/dev/null
+}
+
+# require_doc <result-var> <flow-relative-path> — nameref wrapper that
+# assigns the real committed file's content into <result-var>, or fails
+# closed with a distinct "not found" message and assigns "" if not found (a
+# missing file must never masquerade as empty content, which would make
+# assert_not_contains trivially pass). Must NOT be invoked via $(...).
+require_doc() {
+  local -n _result="$1"
+  local _relpath="$2"
+  local _content
+  if ! _content="$(read_doc_raw "${_relpath}")"; then
+    fail "${_relpath}: doc not found/unreadable: ${FLOW_DIR}/${_relpath}"
+    _result=""
     return 1
   fi
-  printf '%s' "${content}"
+  _result="${_content}"
 }
 
 # assert_contains <content> <required-substring> <label>
@@ -62,7 +73,7 @@ assert_not_contains() {
   [[ "${content}" != *"${pattern}"* ]] || fail "${label}: forbidden stale text still present: [${pattern}]"
 }
 
-skill="$(read_doc "skills/attachments/SKILL.md")" || true
+require_doc skill "skills/attachments/SKILL.md" || true
 if [[ -n "${skill}" ]]; then
   # Standalone mktemp -d invocation present -- no assignment wrapper, no
   # $(...) command substitution.
@@ -90,7 +101,7 @@ fi
 # attachments' own mktemp -d invocation shape must never drift apart -- a
 # caller granting exactly `Bash(mktemp -d:*)` depends on attachments' command
 # actually beginning with `mktemp -d `.
-design_skill="$(read_doc "skills/design/SKILL.md")" || true
+require_doc design_skill "skills/design/SKILL.md" || true
 if [[ -n "${skill}" && -n "${design_skill}" ]]; then
   assert_contains "${design_skill}" "Bash(mktemp -d:*)" "749 cross-file pin: skills/design/SKILL.md grants Bash(mktemp -d:*)"
   assert_contains "${skill}" "mktemp -d " "749 cross-file pin: skills/attachments/SKILL.md invocation begins mktemp -d "

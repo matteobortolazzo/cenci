@@ -27,19 +27,31 @@ failures=0
 
 fail() { echo "FAIL: $1" >&2; failures=$((failures+1)); }
 
-read_doc() {
-  # read_doc <flow-relative-path> — prints the real committed file's content, or
-  # fails closed with a distinct "not found" message if it cannot be read (a
-  # missing/unreadable file must never silently masquerade as empty content,
-  # which would make an assert_contains trivially fail with a confusing reason).
-  local path="${FLOW_DIR}/$1"
-  local content
-  if ! content="$(cat "${path}" 2>/dev/null)"; then
-    fail "$1: doc not found/unreadable: ${path}"
-    printf ''
+read_doc_raw() {
+  # read_doc_raw <flow-relative-path> — pure extraction, no fail() side
+  # effect here: it is deliberately safe to call inside a $(...) command
+  # substitution.
+  local _relpath="$1"
+  local _path="${FLOW_DIR}/${_relpath}"
+  cat "${_path}" 2>/dev/null
+}
+
+# require_doc <result-var> <flow-relative-path> — nameref wrapper that
+# assigns the real committed file's content into <result-var>, or fails
+# closed with a distinct "not found" message and assigns "" if not found (a
+# missing/unreadable file must never silently masquerade as empty content,
+# which would make an assert_contains trivially fail with a confusing
+# reason). Must NOT be invoked via $(...).
+require_doc() {
+  local -n _result="$1"
+  local _relpath="$2"
+  local _content
+  if ! _content="$(read_doc_raw "${_relpath}")"; then
+    fail "${_relpath}: doc not found/unreadable: ${FLOW_DIR}/${_relpath}"
+    _result=""
     return 1
   fi
-  printf '%s' "${content}"
+  _result="${_content}"
 }
 
 assert_contains() {
@@ -74,7 +86,7 @@ RESOLVER="${FLOW_DIR}/hooks/scripts/resolve-babysit-interval.sh"
 # expected success.
 # =====================================================================
 FILE="skills/implement/phases/phase-9-pr.md"
-if CONTENT="$(read_doc "${FILE}")"; then
+if require_doc CONTENT "${FILE}"; then
   assert_contains "${CONTENT}" "cenci babysit" "${FILE} (babysit launch)"
   assert_contains "${CONTENT}" "--agent claude" "${FILE} (babysit launch)"
   assert_contains "${CONTENT}" "resolve-babysit-interval.sh" "${FILE} (interval resolution)"
@@ -88,7 +100,7 @@ fi
 # anchor while inserting the babysit line).
 # =====================================================================
 FILE="skills/implement/codex.md"
-if CONTENT="$(read_doc "${FILE}")"; then
+if require_doc CONTENT "${FILE}"; then
   assert_contains "${CONTENT}" "cenci babysit" "${FILE} (babysit launch)"
   assert_contains "${CONTENT}" "--agent codex" "${FILE} (babysit launch)"
   assert_contains_ws "${CONTENT}" "Never force-push or bypass security/design/approval gates." "${FILE} (push-policy anchor intact)"
@@ -99,7 +111,7 @@ fi
 # optional babysitInterval field so a project can set the watch cadence.
 # =====================================================================
 FILE="skills/configure/SKILL.md"
-if CONTENT="$(read_doc "${FILE}")"; then
+if require_doc CONTENT "${FILE}"; then
   assert_contains "${CONTENT}" "babysitInterval" "${FILE} (config field documented)"
 fi
 
