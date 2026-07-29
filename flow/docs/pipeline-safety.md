@@ -24,3 +24,11 @@ fail mid-run or get reused in a new context.
   path, run ID, or session UUID. Fixed paths without scoping let multiple concurrent
   `/cenci:implement` jobs in the same monorepo silently overwrite each other's state, so a
   reviewer can end up analyzing the wrong diff or broken context.
+
+- When delegating work to a subagent that must edit repo-root config files (e.g.
+  `.mcp.json`, `.claude/settings.json`) as part of a feature-worktree PR, delegate targeting
+  the worktree's own root paths (at identical relative location), never the literal
+  main-checkout absolute paths. The feature worktree mirrors the repo structure; delegating
+  to `/workspace/...` (main checkout) will violate `guard-main-worktree.sh` safety blocks by
+  design. Instead, delegate to `/workspace/.worktrees/<id>-<desc>/.mcp.json` etc. These
+  changes will commit and ship with the PR branch exactly as intended.

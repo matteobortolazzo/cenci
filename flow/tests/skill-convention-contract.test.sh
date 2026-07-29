@@ -29,8 +29,12 @@
 # graceful degrade" sub-assertion is the one expected exception: it pins
 # existing, unchanged behavior.
 #
+# Case 1 was re-pointed by #796: context7 MCP moves from plugin scope to
+# project scope, pinned to a specific version, and flow/.mcp.json is removed.
+#
 # Covered files:
-#   - flow/.mcp.json
+#   - flow/.mcp.json (asserted absent)
+#   - flow/skills/configure/SKILL.md
 #   - flow/skills/address-review/SKILL.md
 #   - flow/ (repo-wide, tick.sh + bare slash-commands)
 #   - flow/skills/ (repo-wide, /tmp/claude/ literal)
@@ -92,25 +96,44 @@ assert_not_contains() {
 }
 
 # =====================================================================
-# 1. flow/.mcp.json — context7 MCP server config, disabled by default
+# 1. flow/.mcp.json (removed) + flow/skills/configure/SKILL.md — context7
+#    MCP server moves from plugin scope to project scope, pinned to a
+#    specific version (#796)
 # =====================================================================
 
 mcp_path="${FLOW_DIR}/.mcp.json"
-if [[ ! -f "${mcp_path}" ]]; then
-  fail "772 flow/.mcp.json: file not found: ${mcp_path}"
+if [[ ! -e "${mcp_path}" ]]; then
+  true # expected: removed by #796 (context7 moves to project scope)
 else
-  if ! jq -e '.mcpServers.context7.command == "npx"' "${mcp_path}" >/dev/null 2>&1; then
-    fail "772 flow/.mcp.json: .mcpServers.context7.command != \"npx\""
-  fi
-  if ! jq -e '.mcpServers.context7.args == ["-y","@upstash/context7-mcp"]' "${mcp_path}" >/dev/null 2>&1; then
-    fail "772 flow/.mcp.json: .mcpServers.context7.args != [\"-y\",\"@upstash/context7-mcp\"]"
-  fi
-  if ! jq -e '.mcpServers.context7.env | has("CONTEXT7_API_KEY")' "${mcp_path}" >/dev/null 2>&1; then
-    fail "772 flow/.mcp.json: .mcpServers.context7.env is missing a CONTEXT7_API_KEY key"
-  fi
-  if ! jq -e '.mcpServers.context7.disabled == true' "${mcp_path}" >/dev/null 2>&1; then
-    fail "772 flow/.mcp.json: .mcpServers.context7.disabled != true"
-  fi
+  fail "796 flow/.mcp.json: file still exists (expected removed): ${mcp_path}"
+fi
+
+require_doc configure_skill "skills/configure/SKILL.md" || true
+if [[ -n "${configure_skill}" ]]; then
+  assert_contains "${configure_skill}" \
+    '| *(always available)* | context7 | `npx` | `["-y", "@upstash/context7-mcp@3.2.5"]` | `CONTEXT7_API_KEY` | project |' \
+    "796 skills/configure/SKILL.md: pinned project-scoped context7 catalog row missing"
+  assert_not_contains "${configure_skill}" \
+    '@upstash/context7-mcp"]' \
+    "796 skills/configure/SKILL.md: stale unpinned context7 args marker still present"
+  assert_not_contains "${configure_skill}" \
+    "- **plugin**: Already defined in cenci's" \
+    "796 skills/configure/SKILL.md: stale plugin-scope legend bullet still present"
+  assert_contains "${configure_skill}" \
+    "- **editor**:" \
+    "796 skills/configure/SKILL.md: new editor-scope legend bullet missing"
+  assert_not_contains "${configure_skill}" \
+    '${CLAUDE_PLUGIN_ROOT}/.mcp.json' \
+    "796 skills/configure/SKILL.md: stale plugin-scoped .mcp.json reference still present"
+  assert_contains "${configure_skill}" \
+    "mcp__context7__resolve-library-id" \
+    "796 skills/configure/SKILL.md: new project-scoped context7 tool-permission emit line missing"
+  assert_not_contains "${configure_skill}" \
+    "mcp__plugin_cenci_context7__resolve-library-id" \
+    "796 skills/configure/SKILL.md: stale plugin-scoped context7 tool permission still present"
+  assert_contains "${configure_skill}" \
+    "mcp__plugin_cenci_context7__*" \
+    "796 skills/configure/SKILL.md: legacy plugin-scoped context7 permission cleanup wildcard missing"
 fi
 
 # =====================================================================
