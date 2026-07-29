@@ -6,7 +6,12 @@ ticket proposal. Do not edit GitHub in Plan mode. Hand off `$cenci:refine apply 
 <approved-plan>` to normal mode, then update the ticket and labels and clear the checkpoint.
 When a split is applied, link each child of the split to the parent as a native GitHub sub-issue
 (`gh issue edit <child> --parent <parent>`) — do not append a child-ticket markdown checklist; the
-native sub-issue list carries the enumeration.
+native sub-issue list carries the enumeration. Every ticket this workflow creates — each split child
+and the companion design ticket — inherits the parent's milestone (as the numeric `.milestone.number`,
+omitted entirely when the parent has none) and every parent label except the 7 lifecycle markers
+(`Refined`, `Working`, `Planned`, `In Review`, `Implemented`, `Design`, `Designed`), on top of its own
+seed labels; if the parent-metadata fetch fails after one retry, create the tickets without inheritance
+and say so in the final message rather than aborting the split.
 
 Divergence: the refiner agent split is Claude-only — Codex has no subagent model tiering, so
 this native procedure performs the refinement analysis inline as described above.
@@ -19,7 +24,9 @@ will prompt for approval — an accepted tradeoff, not a regression.) Its `gh` s
 limited to exactly two `gh issue` verbs — `view` and `edit` — and no other verb (refine posts
 no comments and never lists/closes an issue), plus `gh label create …`, `gh api user --jq …`
 (via `ticket-ownership`), and `gh api repos/…`; its `git` surface is limited to `git remote
-get-url`; and its payload-composition surface is a standalone `jq -n --rawfile …` call, per
+get-url`; and its payload-composition surface is a standalone `jq -n --rawfile …` call — plus
+`--slurpfile` on the two creating sites, which is how the parent's externally-sourced
+label names reach the payload without ever touching a command line — per
 the `shell-rules` skill's canonical snippet. The only temp-name primitive is a standalone
 `mktemp -u ${TMPDIR:-/tmp}/cenci/…` call — a dry-run name generator, never `mktemp -d`; the file tool
 creates the actual file, and the printed token is carried forward as literal text, never

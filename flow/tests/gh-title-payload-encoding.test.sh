@@ -119,6 +119,14 @@ assert_file_contains "${SHELL_RULES}" "${PR_CREATE_EXAMPLE_MARKER}" \
 # ticket-creation payload (1 site) and raises address-review's floor for its
 # new inline-reply payload (Q2: `-f body="$REPLY"` migrates to `jq -n
 # --rawfile body` + `gh api ... --input`).
+#
+# #798 addendum: refine's two *creating* sites (child, companion design) now
+# also document two jq forms each (with-meta, no-meta) for milestone/label
+# inheritance from the parent, so refine's real counts are 5 `jq -n` and 10
+# `--rawfile`. The floors below stay at this ticket's 3/6 -- they are
+# per-site minimums pinning "every site builds via jq -n --rawfile", not an
+# exact form count; the inheritance forms themselves are pinned by
+# flow/tests/refine-child-ticket-inheritance.test.sh.
 # =====================================================================
 
 assert_min_occurrences "${REFINE_SKILL}" "jq -n" 3 \
