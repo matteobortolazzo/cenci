@@ -97,6 +97,13 @@ needed, put it in a reviewed repository script with an explicit interpreter.
 - Keep the main worktree read-only for implementation and direct edits to the feature
   worktree with an absolute path or the tool's working-directory option.
 - Do not combine `cd <other-dir>` with a write, redirection, or unrelated command.
+- The same absolute-path rule applies to Bash redirect (`>`, `>>`) and `tee` write
+  targets specifically: `guard-main-worktree.sh` also refuses any relative target
+  that isn't one of the allowlisted shapes (`.plans/`, `.worktrees/`,
+  `.claude/plans/`, `designs/`, `*.pen`, `DESIGN.md`), because a preceding `cd` (or
+  the hook simply running from a different cwd than the command's effective one)
+  can move where the write actually lands, and the guard cannot safely prove
+  otherwise without executing the command.
 - Never rescue an edit made in the wrong worktree with stash, checkout, or file
   copying. Reapply the intended edit to the correct absolute path, then restore only
   changes created by the current operation.

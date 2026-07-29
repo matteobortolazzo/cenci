@@ -708,10 +708,24 @@ else
     fail "backstop brace tee in-root blocked: stderr should contain BLOCKED"
 fi
 
-echo "case: zero-parse construct not mentioning the root is allowed"
+# {tee,cat} /var/tmp/unrelated-elsewhere.txt brace-expands (in COMMAND
+# position, which the exit-6 unsupported-construct detection surface does
+# not model -- that surface is scoped to write-TARGET position only; #808
+# owns the command-position per-verb decision) to the literal words `tee cat
+# /var/tmp/unrelated-elsewhere.txt` -- a bash invocation of `tee` with
+# operand "cat" (a RELATIVE, in-root write target -- a file literally named
+# "cat"), not merely an out-of-root absolute write as the old rationale
+# assumed. The tokenizer still sees a zero-target parse here (its one
+# "word" is the whole "{tee,cat}" string, whose basename never equals
+# "tee"), so under the new design (#810 Requirement A) this now blocks via
+# the unconditional delimited-tee zero-parse branch ("a delimited tee token
+# in the raw text blocks unconditionally; its target may be relative to the
+# main worktree") -- not the old "no root mention -> allow" backstop path
+# this case originally exercised (flipped expectation, was exit 0).
+echo "case: {tee,cat} /var/tmp/unrelated-elsewhere.txt is a relative in-root write (of a file named \"cat\"), not an out-of-root target, and is blocked (#810, flipped from exit 0)"
 JSON=$(jq -n --arg cmd "{tee,cat} /var/tmp/unrelated-elsewhere.txt" '{tool_input:{command:$cmd}}')
 run_guard "${BASH_REPO}" "${JSON}"
-assert_exit "backstop no root mention allowed" 0
+assert_exit "brace-tee relative 'cat' target blocked (flipped from exit 0)" 2
 
 echo "case: quoted -> plus a feature-worktree path mention is allowed (allowlisted-subtree neutralization)"
 JSON=$(jq -n --arg cmd "git -C ${BASH_REPO}/.worktrees/1-x commit -m \"a -> b\"" '{tool_input:{command:$cmd}}')
@@ -741,6 +755,13 @@ JSON=$(jq -n --arg cmd 'echo x > ~/.claude/settings.json.tmp' '{tool_input:{comm
 run_guard_with_home "${BASH_REPO}" "${TILDE_HOME}" "${JSON}"
 assert_exit "unquoted tilde out-of-root allowed" 0
 
+# Under the new design (#810), this quoted-tilde case still discriminates
+# tilde NON-expansion (a genuinely-expanded ~ would be absolute and
+# out-of-root -> allowed, Q1a) -- but it now blocks via the new
+# non-allowlisted relative-target policy (the neutralized "./~/notes.txt"
+# target lexically collapses to the relative form "~/notes.txt", which
+# matches no allowlist arm) rather than the old cwd-trusting canonicalize
+# + repo-root-scope resolution logic.
 echo "case: quoted ~ redirect is a literal in-root path and stays blocked (no tilde expansion for quoted tilde)"
 JSON=$(jq -n --arg cmd 'echo x > "~/notes.txt"' '{tool_input:{command:$cmd}}')
 run_guard_with_home "${BASH_REPO}" "${TILDE_HOME}" "${JSON}"
@@ -749,6 +770,373 @@ if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
     pass
 else
     fail "quoted tilde literal in-root blocked: stderr should contain BLOCKED"
+fi
+
+# ── Ticket #810: stabilize Bash write guards for shell expansion, cwd
+# changes, and comparison contexts (closes three #795 regressions) ─────────
+
+# AC 2 / the ticket's fourth pinned case: {tee,cat} AGENTS.md brace-expands
+# its command word to `tee cat AGENTS.md` -- a RELATIVE target with no
+# root-string anywhere in the raw command text for the OLD backstop to
+# find. Requirement A: "absence of a literal repo-root string is not
+# sufficient evidence a write is out-of-root" -- a zero-parse command
+# containing a delimited tee token must block unconditionally instead.
+echo "case: {tee,cat} AGENTS.md (relative brace-expansion tee target) blocks from the configured main worktree (#810 AC 2)"
+JSON=$(jq -n --arg cmd '{tee,cat} AGENTS.md' '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "brace-tee relative AGENTS.md target blocked" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "brace-tee relative AGENTS.md target blocked: stderr should contain BLOCKED"
+fi
+
+# AC 3 / Requirement B: a relative write target must not be resolved solely
+# against the hook process's cwd -- the command text itself can `cd` before
+# the write executes. Repro: the hook cwd is a FEATURE worktree (created via
+# a real `git worktree add`), but the Bash command first `cd`s to the MAIN
+# worktree root and then writes a relative target. Today's guard resolves
+# "flow/should-not-write" against the feature-worktree cwd (whose own path
+# already contains "/.worktrees/") and wrongly allowlists it.
+WORKTREE_REPRO_REPO="${TEST_ROOT}/worktree-cwd-repro"
+make_git_repo "${WORKTREE_REPRO_REPO}"
+mkdir -p "${WORKTREE_REPRO_REPO}/.cenci"
+touch "${WORKTREE_REPRO_REPO}/.cenci/config.json"
+git -C "${WORKTREE_REPRO_REPO}" config user.email "test@example.com"
+git -C "${WORKTREE_REPRO_REPO}" config user.name "Test"
+git -C "${WORKTREE_REPRO_REPO}" add -A
+git -C "${WORKTREE_REPRO_REPO}" commit -q -m "init"
+FEATURE_WORKTREE_REPRO="${WORKTREE_REPRO_REPO}/.worktrees/1-x"
+git -C "${WORKTREE_REPRO_REPO}" worktree add -q -b feat-1-x "${FEATURE_WORKTREE_REPRO}" >/dev/null
+
+echo "case: relative Bash write target after a cd to the main worktree is blocked from a feature-worktree cwd (stale-cwd regression, #810 AC 3)"
+JSON=$(jq -n --arg cmd "cd ${WORKTREE_REPRO_REPO} && printf x > flow/should-not-write" '{tool_input:{command:$cmd}}')
+run_guard "${FEATURE_WORKTREE_REPRO}" "${JSON}"
+assert_exit "relative target after cd to main worktree blocked" 2
+if [[ "${GUARD_STDERR,,}" == *"cwd"* ]]; then
+    pass
+else
+    fail "relative target after cd to main worktree blocked: stderr should name the cwd uncertainty, got: ${GUARD_STDERR}"
+fi
+
+echo "case: control -- same command shape with an absolute .worktrees/-scoped target is allowed"
+JSON=$(jq -n --arg cmd "cd ${WORKTREE_REPRO_REPO} && printf x > ${FEATURE_WORKTREE_REPRO}/flow/should-write" '{tool_input:{command:$cmd}}')
+run_guard "${FEATURE_WORKTREE_REPRO}" "${JSON}"
+assert_exit "control: absolute .worktrees-scoped target allowed" 0
+
+# ── Ticket #810 stabilization review (second cycle), availability fix:
+# the relative-target policy's per-target loop had no equivalent to the
+# empty-parse backstop's narrowing 1 (RESOLVED_ROOT itself a feature
+# worktree -- nothing to protect), so an ordinary, non-adversarial command
+# with NO cd (e.g. `pytest 2> errors.log`) run with cwd already inside a
+# feature worktree was wrongly blocked, since its relative target doesn't
+# match any .plans/.worktrees/etc. allowlist shape. Reuses
+# FEATURE_WORKTREE_REPRO (a real feature worktree created via `git worktree
+# add` above) so RESOLVED_ROOT is genuinely feature-worktree-shaped.
+echo "case: an ordinary relative-write command with no cd is allowed from a feature-worktree cwd (availability fix)"
+JSON=$(jq -n --arg cmd 'pytest 2> errors.log' '{tool_input:{command:$cmd}}')
+run_guard "${FEATURE_WORKTREE_REPRO}" "${JSON}"
+assert_exit "plain relative write, no cd, feature-worktree cwd allowed" 0
+
+echo "case: another ordinary relative-write shape (git diff > diff.txt) with no cd is allowed from a feature-worktree cwd (availability fix)"
+JSON=$(jq -n --arg cmd 'git diff > diff.txt' '{tool_input:{command:$cmd}}')
+run_guard "${FEATURE_WORKTREE_REPRO}" "${JSON}"
+assert_exit "git diff > diff.txt, no cd, feature-worktree cwd allowed" 0
+
+# Critical non-regression: the availability fix must NOT weaken the
+# regression-2 case above -- re-run it explicitly here, right alongside the
+# new availability cases, since both scenarios share the IDENTICAL
+# feature-worktree-shaped RESOLVED_ROOT and are only distinguished by the
+# presence of a `cd` in the raw command text.
+echo "case: non-regression -- relative target after a cd to the main worktree is STILL blocked from a feature-worktree cwd (availability fix must not weaken this)"
+JSON=$(jq -n --arg cmd "cd ${WORKTREE_REPRO_REPO} && printf x > flow/should-not-write" '{tool_input:{command:$cmd}}')
+run_guard "${FEATURE_WORKTREE_REPRO}" "${JSON}"
+assert_exit "availability fix non-regression: relative target after cd to main worktree still blocked" 2
+if [[ "${GUARD_STDERR,,}" == *"cwd"* ]]; then
+    pass
+else
+    fail "availability fix non-regression: stderr should still name the cwd uncertainty, got: ${GUARD_STDERR}"
+fi
+
+# ── Ticket #810 round-3 stabilization review, Finding 3 [HIGH]: the
+# availability narrowing above `continue`d (allowed) before checking whether
+# the target actually escapes upward past the feature-worktree root, and
+# bash_command_might_cd only detected a delimited "cd" token, missing
+# "pushd" -- a different directory-changing builtin that reproduces
+# regression-2 through a different command form.
+
+# Finding 3A: with NO cd/pushd anywhere in the command, a "../.."-relative
+# target still genuinely resolves (via ordinary shell cwd-relative
+# semantics, no cd required) to somewhere above the feature-worktree cwd it
+# started from -- here, the main worktree's own AGENTS.md. This must block,
+# not be waved through by the availability narrowing.
+echo "case: relative Bash write target traversing upward with .. is blocked even with no cd (Finding 3A regression)"
+JSON=$(jq -n --arg cmd 'printf x > ../../AGENTS.md' '{tool_input:{command:$cmd}}')
+run_guard "${FEATURE_WORKTREE_REPRO}" "${JSON}"
+assert_exit "relative .. traversal with no cd blocked (Finding 3A)" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "relative .. traversal with no cd blocked: stderr should contain BLOCKED, got: ${GUARD_STDERR}"
+fi
+
+# Finding 3A non-regression: an ordinary relative write that does NOT
+# traverse upward (the availability fix's own target case) must still be
+# allowed -- re-confirms the case above (lines 836-839) is not weakened by
+# the added escape check.
+echo "case: non-regression -- an ordinary non-traversing relative write with no cd is still allowed from a feature-worktree cwd (Finding 3A must not weaken the availability fix)"
+JSON=$(jq -n --arg cmd 'pytest 2> errors.log' '{tool_input:{command:$cmd}}')
+run_guard "${FEATURE_WORKTREE_REPRO}" "${JSON}"
+assert_exit "non-traversing relative write, no cd, feature-worktree cwd still allowed (Finding 3A non-regression)" 0
+
+# Finding 3B: bash_command_might_cd previously only matched a delimited "cd"
+# token; "pushd" (which contains no "cd" substring) evaded it entirely, so
+# `pushd <main-root> && printf x > flow/should-not-write` -- a real
+# directory-change command -- passed as "no cd detected" and the
+# availability narrowing wrongly allowed the main-worktree write.
+echo "case: relative Bash write target after a pushd to the main worktree is blocked from a feature-worktree cwd (Finding 3B regression)"
+JSON=$(jq -n --arg cmd "pushd ${WORKTREE_REPRO_REPO} && printf x > flow/should-not-write" '{tool_input:{command:$cmd}}')
+run_guard "${FEATURE_WORKTREE_REPRO}" "${JSON}"
+assert_exit "relative target after pushd to main worktree blocked (Finding 3B)" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "relative target after pushd to main worktree blocked: stderr should contain BLOCKED, got: ${GUARD_STDERR}"
+fi
+
+# Pins the pipeline's own documented plan-persist step
+# (flow/skills/implement/phases/phase-1-plan.md): a relative,
+# allowlist-shaped `.plans/`-rooted target must keep working under the new
+# cwd-independent relative-target policy (lexical collapse + allowlist
+# match, never real cwd resolution).
+echo "case: relative .plans/-shaped Bash write target is allowed (pins phase-1-plan.md's documented plan-persist step, #810)"
+JSON=$(jq -n --arg cmd 'cat /tmp/x >> .plans/1-foo.md' '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "relative .plans/ write target allowed" 0
+
+# AC 4 / Requirement C: `>` inside a CLOSED [[ ... ]] / (( ... )) comparison
+# context is not a redirect at all -- must never be classified as a write
+# target.
+echo "case: [[ z > a ]] and (( z > a )) are comparison contexts, not redirects, and are allowed (#810 AC 4)"
+JSON=$(jq -n --arg cmd '[[ z > a ]]' '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "bash [[ z > a ]] allowed" 0
+
+JSON=$(jq -n --arg cmd '(( z > a ))' '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "bash (( z > a )) allowed" 0
+
+# AC 5: a real redirect immediately after a [[ ... ]] region must still be
+# extracted and checked.
+echo "case: a real redirect immediately after [[ ... ]] is still extracted and blocked (#810 AC 5)"
+JSON=$(jq -n --arg cmd "[[ -f x ]] > ${BASH_REPO}/src/foo.c" '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "bash [[ -f x ]] > src/foo.c (adjacent real redirect) blocked" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "bash [[ -f x ]] > src/foo.c (adjacent real redirect) blocked: stderr should contain BLOCKED"
+fi
+
+# AC 1: unquoted brace expansion in write-target position must fail closed
+# (new bwt_extract_targets exit code 6), never emit a bogus literal target
+# -- and the guard must name the unsupported construct.
+echo "case: tee <root>/src/{a,b}.c (unquoted brace expansion in tee operand position) is blocked, naming the unsupported construct (#810 AC 1)"
+JSON=$(jq -n --arg cmd "tee ${BASH_REPO}/src/{a,b}.c" '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "brace expansion tee target blocked" 2
+if [[ "${GUARD_STDERR,,}" == *"brace"* ]]; then
+    pass
+else
+    fail "brace expansion tee target blocked: stderr should name the unsupported brace-expansion construct, got: ${GUARD_STDERR}"
+fi
+
+# ── Ticket #810 stabilization review, Bug 1 [CRITICAL] (e2e): a sticky
+# `curregion` flag left over from a closed (( ... )) region disabled
+# tee-ARMING for the very next word, silently permitting a real write.
+# Confirmed against real bash: `(( 1 )) ; tee AGENTS.md > /dev/null`
+# genuinely writes to AGENTS.md.
+echo "case: Bash command with a closed (( )) region before tee still blocks the tee write (Bug 1 e2e regression)"
+JSON=$(jq -n --arg cmd '(( 1 )) ; tee AGENTS.md > /dev/null' '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "(( 1 )) ; tee AGENTS.md > /dev/null blocked" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "(( 1 )) ; tee AGENTS.md > /dev/null blocked: stderr should contain BLOCKED"
+fi
+
+# ── Ticket #810 stabilization review, Bug 2 [HIGH] (e2e): mark_regions() had
+# no token-boundary check, so a "[[" glued mid-word (never the reserved
+# conditional token in real bash) could still suppress a real, adjacent
+# redirect. Confirmed against real bash: `echo x[[ z > AGENTS.md ]] b`
+# genuinely writes to AGENTS.md.
+echo "case: Bash command with a glued [[ (not its own token) still blocks the real redirect (Bug 2 e2e regression)"
+JSON=$(jq -n --arg cmd 'echo x[[ z > AGENTS.md ]] b' '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "echo x[[ z > AGENTS.md ]] b blocked" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "echo x[[ z > AGENTS.md ]] b blocked: stderr should contain BLOCKED"
+fi
+
+# ── Ticket #810 stabilization review (second cycle), Bug 3 [CRITICAL] (e2e):
+# is_opener_boundary/find_close accepted spans bash does not actually treat
+# as "[[ ]]"/"(( ))", allowing three fail-open bypass vectors.
+
+# Vector 1: process substitution glued to (( is not a real (( opener.
+# Confirmed against real bash: `echo x >(( : > /repo/.env ))` genuinely
+# writes to /repo/.env (the subshell `( : > /repo/.env )`).
+echo "case: Bash command with process substitution glued to (( still blocks the real write (Bug 3 Vector 1 e2e regression)"
+JSON=$(jq -n --arg cmd "echo x >(( : > ${BASH_REPO}/src/bug3-procsub.env ))" '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "echo x >(( : > src/bug3-procsub.env )) blocked" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "echo x >(( : > src/bug3-procsub.env )) blocked: stderr should contain BLOCKED"
+fi
+
+# Vector 2: "[[" preceded by a plain word (not command position) is not a
+# real conditional opener. Confirmed against real bash:
+# `echo x [[ z > AGENTS.md ]] b` genuinely writes to AGENTS.md.
+echo "case: Bash command with [[ preceded by a plain word (not command position) still blocks the real redirect (Bug 3 Vector 2 e2e regression)"
+JSON=$(jq -n --arg cmd "echo x [[ z > ${BASH_REPO}/src/bug3-notcmdpos.md ]] b" '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "echo x [[ z > src/bug3-notcmdpos.md ]] b blocked" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "echo x [[ z > src/bug3-notcmdpos.md ]] b blocked: stderr should contain BLOCKED"
+fi
+
+# Vector 3: bash terminates "[[ ... ]]" at the FIRST standalone "]]", not
+# the last one in the text. Confirmed against real bash:
+# `[[ [[ ]] ; echo x > AGENTS.md ]]` genuinely writes to AGENTS.md.
+echo "case: Bash command where the first standalone ]] closes [[ still blocks the real redirect in between (Bug 3 Vector 3 e2e regression)"
+JSON=$(jq -n --arg cmd "[[ [[ ]] ; echo x > ${BASH_REPO}/src/bug3-firstclose.md ]]" '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "[[ [[ ]] ; echo x > src/bug3-firstclose.md ]] blocked" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "[[ [[ ]] ; echo x > src/bug3-firstclose.md ]] blocked: stderr should contain BLOCKED"
+fi
+
+# Non-regression: a real redirect after a genuine [[ ... ]] region (with a
+# glued POSIX character class inside it) is still extracted and blocked.
+echo "case: [[ \$x =~ [[:alpha:]] ]] followed by a real redirect still blocks (Bug 3 Vector 3 e2e non-regression)"
+JSON=$(jq -n --arg cmd "[[ \$x =~ [[:alpha:]] ]] > ${BASH_REPO}/src/bug3-posixclass.out" '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "[[ \$x =~ [[:alpha:]] ]] > src/bug3-posixclass.out blocked" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "[[ \$x =~ [[:alpha:]] ]] > src/bug3-posixclass.out blocked: stderr should contain BLOCKED"
+fi
+
+# ── Ticket #810 round-4 security review [CRITICAL] (e2e): is_opener_boundary()
+# previously accepted the &/| TAIL of the compound redirect operators >&/<&/
+# >| as if it were a bare separator/pipe, wrongly opening a suppressed [[ ]]
+# region and hiding a real redirect inside it. Confirmed against real bash:
+# `echo hi >| [[ x > AGENTS.md ]]` truncate-redirects to a file literally
+# named "[[", and the `[[ x > AGENTS.md ]]` that follows is NOT the reserved
+# conditional token in that (redirect-target) position -- `> AGENTS.md`
+# genuinely writes to AGENTS.md.
+echo "case: Bash command with >| immediately before [[ still blocks the real redirect inside (round-4 e2e regression)"
+JSON=$(jq -n --arg cmd 'echo hi >| [[ x > AGENTS.md ]]' '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "echo hi >| [[ x > AGENTS.md ]] blocked" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "echo hi >| [[ x > AGENTS.md ]] blocked: stderr should contain BLOCKED"
+fi
+
+echo "case: Bash command with >& immediately before [[ still blocks the real redirect inside (round-4 e2e regression)"
+JSON=$(jq -n --arg cmd 'echo hi >& [[ x > AGENTS.md ]]' '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "echo hi >& [[ x > AGENTS.md ]] blocked" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "echo hi >& [[ x > AGENTS.md ]] blocked: stderr should contain BLOCKED"
+fi
+
+# ── Ticket #810 round-5 security review [CRITICAL] (e2e): a real write
+# hidden inside command/process substitution nested in [[ ]] / (( )) was
+# previously swallowed by mark_regions()'s region suppression -- the benign
+# earlier target made the parse non-empty, so the zero-parse backstop never
+# ran, and the real write inside the suppressed [[ ]] span was never
+# extracted. Confirmed against real bash: both commands below genuinely
+# write to AGENTS.md in the configured main worktree.
+echo "case: Bash command with a real write hidden inside \$( ) nested in [[ ]] still blocks (round-5 e2e regression)"
+JSON=$(jq -n --arg cmd 'echo ok > /tmp/ok ; [[ $(printf x > AGENTS.md) ]]' '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "echo ok > /tmp/ok ; [[ \$(printf x > AGENTS.md) ]] blocked" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "echo ok > /tmp/ok ; [[ \$(printf x > AGENTS.md) ]] blocked: stderr should contain BLOCKED"
+fi
+
+echo "case: Bash command with a tee operand hidden inside \$( ) nested in [[ ]] still blocks (round-5 e2e regression)"
+JSON=$(jq -n --arg cmd 'echo ok > /tmp/ok ; [[ $(echo p | tee AGENTS.md) ]]' '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "echo ok > /tmp/ok ; [[ \$(echo p | tee AGENTS.md) ]] blocked" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "echo ok > /tmp/ok ; [[ \$(echo p | tee AGENTS.md) ]] blocked: stderr should contain BLOCKED"
+fi
+
+# ── Ticket #810 round-6 stabilization [HIGH] (e2e): bash 5.3+'s function
+# substitution forms `${ cmd; }` / `${| cmd; }` execute a real command from
+# inside a [[ ]]/(( )) construct just like `$(...)`, but were not recognized
+# as a substitution marker -- the region was suppressed as an ordinary
+# comparison, so the real write nested inside was never extracted and never
+# blocked. Confirmed against real bash: this command genuinely writes to
+# AGENTS.md in the configured main worktree.
+echo "case: Bash command with a real write hidden inside \${ cmd; } funsub nested in [[ ]] still blocks (round-6 e2e regression)"
+JSON=$(jq -n --arg cmd 'echo ok > /tmp/ok ; [[ -n ${ printf x > AGENTS.md; } ]]' '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "echo ok > /tmp/ok ; [[ -n \${ printf x > AGENTS.md; } ]] blocked" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "echo ok > /tmp/ok ; [[ -n \${ printf x > AGENTS.md; } ]] blocked: stderr should contain BLOCKED"
+fi
+
+# ── Ticket #810 stabilization (e2e): a command/process/function substitution
+# marker found INSIDE a double-quoted span within a [[ ]]/(( )) region's
+# interior is a deliberately blunt, maximally conservative unsupported
+# construct: this tokenizer has no safe way to resume precise parsing through
+# such a marker's real syntax once wrapped in an outer double-quoted string,
+# so the whole command fails closed unconditionally (bwt_extract_targets
+# exit 7) rather than attempting to precisely resolve what write is inside
+# it. Confirmed against real bash: this command genuinely writes to
+# AGENTS.md in the configured main worktree, but this guard now blocks it
+# purely because the construct is unsupported for extraction -- not because
+# it precisely resolved AGENTS.md as the target.
+echo "case: Bash command with a real write hidden inside a double-quoted \$( ) command substitution nested in [[ ]] fails closed (exit 7 e2e)"
+JSON=$(jq -n --arg cmd '[[ -n "$(printf x > AGENTS.md)" ]]' '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "[[ -n \"\$(printf x > AGENTS.md)\" ]] blocked" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "[[ -n \"\$(printf x > AGENTS.md)\" ]] blocked: stderr should contain BLOCKED, got: ${GUARD_STDERR}"
+fi
+if [[ "${GUARD_STDERR}" == *"cannot be safely resolved"* ]]; then
+    pass
+else
+    fail "[[ -n \"\$(printf x > AGENTS.md)\" ]] blocked: stderr should name the unsupported double-quoted-nested-substitution construct, got: ${GUARD_STDERR}"
+fi
+if [[ "${GUARD_STDERR}" == *'[[ -n "$(printf x > AGENTS.md)" ]]'* ]]; then
+    pass
+else
+    fail "[[ -n \"\$(printf x > AGENTS.md)\" ]] blocked: stderr should name the offending command, got: ${GUARD_STDERR}"
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────

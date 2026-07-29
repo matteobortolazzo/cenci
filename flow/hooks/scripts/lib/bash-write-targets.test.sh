@@ -41,7 +41,7 @@ fi
 # shellcheck source=/dev/null
 . "${LIB_SH}"
 
-for fn in bwt_has_write_candidate bwt_extract_targets bwt_zero_parse_suspicious bwt_is_exempt_device bwt_expand_safe_vars bwt_is_unresolved; do
+for fn in bwt_has_write_candidate bwt_extract_targets bwt_zero_parse_suspicious bwt_has_delimited_tee bwt_is_exempt_device bwt_expand_safe_vars bwt_is_unresolved; do
     if ! command -v "${fn}" >/dev/null 2>&1; then
         fail "lib did not define expected function: ${fn}"
     fi
@@ -425,6 +425,416 @@ assert_true "command-substitution tee is suspicious" bwt_zero_parse_suspicious '
 assert_false "alnum-embedded tee (guarantee) is not suspicious" bwt_zero_parse_suspicious 'grep guarantee /workspace/x'
 assert_false "alnum-embedded tee (sixteen) is not suspicious" bwt_zero_parse_suspicious 'echo sixteen items'
 assert_false "no > and no tee at all is not suspicious" bwt_zero_parse_suspicious 'git status'
+
+# ── bwt_has_delimited_tee (#810): extracted from bwt_zero_parse_suspicious's
+# existing delimited-tee scan into its own named helper so
+# guard-main-worktree.sh can call it directly from its zero-parse backstop
+# (ticket #810's fix for regression #2's relative-target hole: a zero-parse
+# command containing a delimited tee token must block unconditionally,
+# since its target may be relative). Same delimited-match semantics as
+# bwt_zero_parse_suspicious's tee half: a literal "tee" adjacent to a
+# non-word character (comma, backslash, backtick, ...), never an
+# alnum-embedded substring (guarantee, sixteen, committee).
+echo "case: bwt_has_delimited_tee (new helper, #810)"
+assert_true "brace-expansion tee construct has a delimited tee" bwt_has_delimited_tee '{tee,cat} f'
+assert_true "backtick-wrapped tee has a delimited tee" bwt_has_delimited_tee '`tee f`'
+assert_true "backslash-prefixed \\tee has a delimited tee" bwt_has_delimited_tee '\tee f'
+assert_false "alnum-embedded tee (guarantee) has no delimited tee" bwt_has_delimited_tee 'grep guarantee /x'
+assert_false "no tee at all has no delimited tee" bwt_has_delimited_tee 'git status'
+
+# ── Ticket #810 fix 1: unquoted brace expansion in write-target position ──
+# must fail closed with a new distinct exit code (6), joining 3/4/5 -- never
+# silently emit a bogus literal target that bash would actually multiplex
+# into several real write targets (Requirement A).
+echo "case: unquoted brace expansion in write-target position fails closed with exit 6 (#810 Fix 1)"
+assert_extract_exit "tee /tmp/x/{notes,.env} (comma form, tee operand) returns exit 6" \
+    "tee /tmp/x/{notes,.env}" 6
+assert_extract_exit "echo x > /repo/f{1,2}.txt (comma form, redirect target) returns exit 6" \
+    "echo x > /repo/f{1,2}.txt" 6
+assert_extract_exit "echo x > /repo/f{1..3} (range form, redirect target) returns exit 6" \
+    "echo x > /repo/f{1..3}" 6
+assert_extract_exit "tee -a /repo/{a,b} (comma form, tee operand after option) returns exit 6" \
+    "tee -a /repo/{a,b}" 6
+
+# Non-regressions: brace text a real shell does NOT expand (no unquoted
+# comma/range inside an unquoted brace pair) must stay exit 0 and extract
+# the FULL literal target, never truncate and never misfire the new exit 6.
+echo "case: literal/quoted/escaped brace text is not brace expansion and stays exit 0 (#810 non-regression)"
+assert_extract_exit "echo x > \$TEST_ROOT/{decoy}.env (no comma/range) returns exit 0" \
+    "echo x > ${TEST_ROOT}/{decoy}.env" 0
+assert_targets "echo x > \$TEST_ROOT/{decoy}.env (no comma/range) still extracts the full literal target" \
+    "echo x > ${TEST_ROOT}/{decoy}.env" "${TEST_ROOT}/{decoy}.env"
+
+SQ_BRACE_CMD="echo x > '${TEST_ROOT}/{a,b}.txt'"
+assert_extract_exit "single-quoted {a,b} literal returns exit 0" "${SQ_BRACE_CMD}" 0
+assert_targets "single-quoted {a,b} literal extracts the full literal target" \
+    "${SQ_BRACE_CMD}" "${TEST_ROOT}/{a,b}.txt"
+
+DQ_BRACE_CMD="echo x > \"${TEST_ROOT}/{a,b}.txt\""
+assert_extract_exit "double-quoted {a,b} literal returns exit 0" "${DQ_BRACE_CMD}" 0
+assert_targets "double-quoted {a,b} literal extracts the full literal target" \
+    "${DQ_BRACE_CMD}" "${TEST_ROOT}/{a,b}.txt"
+
+ESC_BRACE_CMD="echo x > ${TEST_ROOT}/\\{a,b\\}.txt"
+assert_extract_exit "escaped \\{a,b\\} literal returns exit 0" "${ESC_BRACE_CMD}" 0
+assert_targets "escaped \\{a,b\\} literal extracts the full literal target" \
+    "${ESC_BRACE_CMD}" "${TEST_ROOT}/{a,b}.txt"
+
+echo "case: { tee X; } bash grouping syntax still correctly detects target X (#810 non-regression)"
+assert_extract_exit "{ tee X; } grouping returns exit 0" \
+    "{ tee ${TEST_ROOT}/grouping-target.txt; }" 0
+assert_targets "{ tee X; } grouping still detects the tee invocation and target" \
+    "{ tee ${TEST_ROOT}/grouping-target.txt; }" "${TEST_ROOT}/grouping-target.txt"
+
+# ── Ticket #810 fix 3: `>` inside a CLOSED [[ ... ]] / (( ... )) comparison
+# context must never be tokenized as a redirect (Requirement C) -- but a
+# real redirect immediately adjacent to such a construct must still be
+# extracted, and an UNCLOSED [[ (anti-fail-open risk) must never suppress a
+# real redirect either.
+echo "case: > inside a closed [[ ... ]] / (( ... )) region is not a redirect (#810 Fix 3)"
+assert_extract_exit "[[ z > a ]] returns exit 0" "[[ z > a ]]" 0
+assert_targets "[[ z > a ]] emits no write target" "[[ z > a ]]" ""
+assert_extract_exit "(( z > a )) returns exit 0" "(( z > a ))" 0
+assert_targets "(( z > a )) emits no write target" "(( z > a ))" ""
+
+echo "case: a real redirect adjacent to a [[ / (( region is still extracted (#810 Fix 3 non-regression)"
+assert_targets "[[ -f x ]] > /repo/out still extracts /repo/out" \
+    "[[ -f x ]] > ${TEST_ROOT}/region-adjacent-1.out" "${TEST_ROOT}/region-adjacent-1.out"
+assert_targets "echo \$(( 1 > 2 )) > /repo/out still extracts /repo/out" \
+    "echo \$(( 1 > 2 )) > ${TEST_ROOT}/region-adjacent-2.out" "${TEST_ROOT}/region-adjacent-2.out"
+
+echo "case: an unclosed [[ never suppresses a real redirect (anti-fail-open, #810 Fix 3)"
+UNCLOSED_1="echo '[[' ; cat x > ${TEST_ROOT}/unclosed-1.out"
+assert_targets "echo '[[' ; cat x > /repo/out still extracts /repo/out (quoted [[ earlier in the command)" \
+    "${UNCLOSED_1}" "${TEST_ROOT}/unclosed-1.out"
+UNCLOSED_2="echo [[ > ${TEST_ROOT}/unclosed-2.out"
+assert_targets "echo [[ > /repo/out (unclosed [[, never closed) still extracts /repo/out" \
+    "${UNCLOSED_2}" "${TEST_ROOT}/unclosed-2.out"
+
+# ── Ticket #810 stabilization review, Bug 1 [CRITICAL]: a sticky `curregion`
+# flag leaked from a closed (( ... )) / $(( ... )) region into the NEXT
+# word's state, since flush() reset curregion only AFTER its
+# `if (!wordhas) return` early exit -- a (( ... )) region always ends by
+# dispatching an empty-word flush(), so curregion stayed 1 and disabled
+# tee-ARMING for a following `tee` word that was never actually inside any
+# region. Confirmed against real bash: both commands below genuinely write
+# to their target.
+echo "case: a closed (( ... )) region does not leak curregion into the next word, disabling tee detection (Bug 1 regression)"
+assert_targets "(( 1 )) ; tee AGENTS.md > /dev/null -- tee still arms after a closed (( )) region" \
+    "(( 1 )) ; tee ${TEST_ROOT}/bug1-parens.md > /dev/null" \
+    "$(printf '%s\n%s' "${TEST_ROOT}/bug1-parens.md" "/dev/null")"
+assert_targets "echo \$((1+1)) | tee AGENTS.md > /dev/null -- tee still arms after a closed \$(( )) region" \
+    "echo \$((1+1)) | tee ${TEST_ROOT}/bug1-dollar-parens.md > /dev/null" \
+    "$(printf '%s\n%s' "${TEST_ROOT}/bug1-dollar-parens.md" "/dev/null")"
+
+# ── Ticket #810 stabilization review, Bug 2 [HIGH]: mark_regions() had no
+# token-boundary check (so it could pair a "[[" glued mid-word, which real
+# bash never treats as the reserved conditional token, with a later "]]")
+# and no balance/nesting check (so it could pair a mismatched/malformed
+# "((" ... "))"-shaped span that bash's real parser does NOT treat as one
+# arithmetic construct). Both let a real redirect get wrongly suppressed.
+echo "case: a glued [[ (not its own token) is never treated as a region opener (Bug 2 Part A regression)"
+assert_targets "echo x[[ z > AGENTS.md ]] b -- glued [[ does not suppress the real redirect" \
+    "echo x[[ z > ${TEST_ROOT}/bug2-glued.md ]] b" "${TEST_ROOT}/bug2-glued.md"
+
+echo "case: [[ with no space after it is never treated as a region opener (Bug 2 Part A regression)"
+assert_targets "[[z > AGENTS.md ]] -- [[ with no trailing space does not suppress the real redirect" \
+    "[[z > ${TEST_ROOT}/bug2-nospace.md ]]" "${TEST_ROOT}/bug2-nospace.md"
+
+echo "case: a mismatched/malformed ((...)) -shaped span is never treated as one closed region (Bug 2 Part B regression)"
+assert_targets "((printf x > AGENTS.md); (true)) -- malformed (( )) does not suppress the real redirect" \
+    "((printf x > ${TEST_ROOT}/bug2-malformed.md); (true))" "${TEST_ROOT}/bug2-malformed.md"
+
+# ── Also fix separately (code-review-flagged test gap) ───────────────
+# The case immediately above never actually reaches find_close(): "((printf"
+# has no whitespace after the "((" opener, so is_opener_followed_by_ws()
+# already rejects it before find_close() ever runs -- its outcome is
+# correct but does not exercise what its label claims. This case adds a
+# "((" opener WITH a trailing space (so it genuinely reaches find_close())
+# whose interior is still malformed/mismatched, proving find_close()'s own
+# balance/nesting-abandon logic (not just the earlier whitespace-boundary
+# check) correctly leaves the real redirect unsuppressed.
+echo "case: a ((-with-trailing-space, still-malformed span genuinely reaches find_close()'s abandon path (test-gap fix)"
+assert_targets "(( printf x > AGENTS.md); (true)) -- malformed (( )) with a real space after (( still does not suppress the real redirect" \
+    "(( printf x > ${TEST_ROOT}/bug2-malformed-spaced.md); (true))" "${TEST_ROOT}/bug2-malformed-spaced.md"
+
+# ── Ticket #810 stabilization review (second cycle), Bug 3 [CRITICAL]:
+# is_opener_boundary/find_close accepted spans bash does not actually treat
+# as "[[ ]]"/"(( ))", allowing three fail-open bypass vectors.
+
+# Vector 1: `<`/`>` immediately followed by another `(` is bash PROCESS
+# SUBSTITUTION, not a real "((" arithmetic-construct start. Confirmed
+# exploit: `echo x >(( : > /repo/.env ))` really runs the subshell
+# `( : > /repo/.env )` (truncating /repo/.env) under real bash.
+echo "case: process substitution glued to (( is never treated as a real (( opener (Bug 3 Vector 1 regression)"
+assert_targets "echo x >(( : > /repo/.env )) -- the real write inside the process-substitution subshell is extracted, not suppressed" \
+    "echo x >(( : > ${TEST_ROOT}/bug3-procsub.env ))" "$(printf ':\n%s' "${TEST_ROOT}/bug3-procsub.env")"
+
+# Vector 2: "[[" is a bash reserved word recognized only in genuine COMMAND
+# POSITION -- not merely "preceded by whitespace". Confirmed exploit:
+# `echo x [[ z > AGENTS.md ]] b` is, in real bash, just `echo` with a
+# genuine redirect to AGENTS.md.
+echo "case: [[ preceded by a plain word (not command position) is never treated as a region opener (Bug 3 Vector 2 regression)"
+assert_targets "echo x [[ z > AGENTS.md ]] b -- [[ preceded by the plain word \"x\" is not command position, real redirect extracted" \
+    "echo x [[ z > ${TEST_ROOT}/bug3-notcmdpos.md ]] b" "${TEST_ROOT}/bug3-notcmdpos.md"
+
+# Vector 3: bash terminates a "[[ ... ]]" conditional at the FIRST standalone
+# "]]" token, it does NOT balance nested "["/"]" characters the way
+# find_close's depth-counting genuinely models "(( ))" nesting. Confirmed
+# exploit: `[[ [[ ]] ; echo x > AGENTS.md ]]` is valid bash where
+# `[[ [[ ]]` is itself a complete (if degenerate) conditional and
+# `echo x > AGENTS.md` afterward really executes the write.
+echo "case: the first standalone ]] closes [[, not the last ]] in the text (Bug 3 Vector 3 regression)"
+assert_targets "[[ [[ ]] ; echo x > AGENTS.md ]] -- the real redirect between the two conditionals is extracted, not suppressed" \
+    "[[ [[ ]] ; echo x > ${TEST_ROOT}/bug3-firstclose.md ]]" "${TEST_ROOT}/bug3-firstclose.md"
+
+# Non-regression: a real redirect AFTER a genuine [[ ... ]] region is still
+# extracted, and the POSIX character class [[:alpha:]]'s glued "]]" is
+# never mistaken for the standalone terminator (only the final, whitespace-
+# preceded " ]]" is).
+echo "case: [[ \$x =~ [[:alpha:]] ]] > /repo/out still extracts the real redirect after the region (Bug 3 Vector 3 non-regression)"
+assert_targets "[[ \$x =~ [[:alpha:]] ]] > /repo/out extracts /repo/out, glued POSIX-class ]] is not the terminator" \
+    "[[ \$x =~ [[:alpha:]] ]] > ${TEST_ROOT}/bug3-posixclass.out" "${TEST_ROOT}/bug3-posixclass.out"
+
+echo "case: the bare [[ \$x =~ [[:alpha:]] ]] alone still emits zero targets (Bug 3 Vector 3 non-regression)"
+assert_targets "bare [[ \$x =~ [[:alpha:]] ]] with no trailing redirect emits zero targets" \
+    '[[ $x =~ [[:alpha:]] ]]' ""
+
+# ── Ticket #810 round-3 stabilization review, Finding 1 [CRITICAL]:
+# is_bracket_command_position() previously accepted "[[" preceded by a `)`,
+# `{`, `}`, or bare reserved word (`if`/`then`/`do`/...) as "command
+# position" without recursively checking THAT token's own position -- an
+# open-ended, unbounded amount of shell-grammar replication this ticket is
+# explicitly scoped to avoid. That accepted set is now dropped entirely: a
+# "[[" (or "((") is only ever a real region opener when the character
+# immediately preceding it (after skipping whitespace) is start-of-string,
+# `;`, `&`, `|`, or a newline -- nothing else. Confirmed exploits below, all
+# real bash writes that a wider accepted set previously suppressed.
+echo "case: [[ preceded by a closing command-substitution ) is not command position -- the real redirect is extracted (Finding 1 regression)"
+assert_targets "echo \$(date) [[ x > /repo/.env ]] > /tmp/ok -- both targets extracted, not suppressed" \
+    "echo \$(date) [[ x > ${TEST_ROOT}/finding1-paren.env ]] > ${TEST_ROOT}/finding1-paren.ok" \
+    "$(printf '%s\n%s' "${TEST_ROOT}/finding1-paren.env" "${TEST_ROOT}/finding1-paren.ok")"
+
+echo "case: [[ preceded by the bare reserved word \"do\" (used as a plain argument here) is not command position -- the real redirect is extracted (Finding 1 regression)"
+assert_targets "echo do [[ x > /repo/.env ]] > /tmp/ok -- both targets extracted, not suppressed" \
+    "echo do [[ x > ${TEST_ROOT}/finding1-do.env ]] > ${TEST_ROOT}/finding1-do.ok" \
+    "$(printf '%s\n%s' "${TEST_ROOT}/finding1-do.env" "${TEST_ROOT}/finding1-do.ok")"
+
+echo "case: [[ preceded by a bare } (used as a plain argument here) is not command position -- the real redirect is extracted (Finding 1 regression)"
+assert_targets "echo } [[ x > /repo/.env ]] > /tmp/ok -- both targets extracted, not suppressed" \
+    "echo } [[ x > ${TEST_ROOT}/finding1-brace.env ]] > ${TEST_ROOT}/finding1-brace.ok" \
+    "$(printf '%s\n%s' "${TEST_ROOT}/finding1-brace.env" "${TEST_ROOT}/finding1-brace.ok")"
+
+echo "case: [[ preceded by a bare ! (used as a plain argument here) is not command position -- the real redirect is extracted (Finding 1 regression)"
+assert_targets "echo ! [[ x > /repo/.env ]] > /tmp/ok -- both targets extracted, not suppressed" \
+    "echo ! [[ x > ${TEST_ROOT}/finding1-bang.env ]] > ${TEST_ROOT}/finding1-bang.ok" \
+    "$(printf '%s\n%s' "${TEST_ROOT}/finding1-bang.env" "${TEST_ROOT}/finding1-bang.ok")"
+
+# Non-regressions (Finding 1 design directive): bare [[ / (( at genuine
+# simple statement-start positions (start-of-string, or after `;`/`|`) must
+# still resolve to zero targets -- the minimal, non-recursible allowlist
+# still accepts these positions, it only stops accepting the wider,
+# recursive ones above.
+echo "case: bare [[ z > a ]] and (( z > a )) at start-of-string still resolve to zero targets (Finding 1 non-regression)"
+assert_targets "bare [[ z > a ]] emits no write target" "[[ z > a ]]" ""
+assert_targets "bare (( z > a )) emits no write target" "(( z > a ))" ""
+
+echo "case: [[ z > a ]] preceded by ; still resolves to zero targets (Finding 1 non-regression)"
+assert_targets "true ; [[ z > a ]] emits no write target" "true ; [[ z > a ]]" ""
+
+echo "case: [[ z > a ]] preceded by | still resolves to zero targets (Finding 1 non-regression)"
+assert_targets "true | [[ z > a ]] emits no write target" "true | [[ z > a ]]" ""
+
+# ── Ticket #810 round-3 stabilization review, Finding 2 [HIGH]:
+# find_close_bracket()'s post-"]]" delimiter set previously omitted `>`/`<`,
+# even though real bash terminates the "]]" word at ANY unquoted
+# metacharacter, including a glued redirect. A "]]" immediately glued to a
+# redirect (`]]>`) was therefore wrongly rejected as the real closer, and the
+# scan continued past it to a LATER standalone "]]", extending the
+# suppressed region over the real redirect in between.
+echo "case: a ]] immediately glued to a redirect (]]>) is recognized as the real closer, not skipped past (Finding 2 regression)"
+assert_targets "[[ a ]]>/repo/out ; echo ]] > /tmp/ok -- the real redirect right after ]] is extracted, not suppressed" \
+    "[[ a ]]>${TEST_ROOT}/finding2.out ; echo ]] > ${TEST_ROOT}/finding2.ok" \
+    "$(printf '%s\n%s' "${TEST_ROOT}/finding2.out" "${TEST_ROOT}/finding2.ok")"
+
+# ── Ticket #810 round-4 security review [CRITICAL]: is_opener_boundary()'s
+# minimal accepted-preceding-char set ({start-of-string, ;, &, |, newline})
+# was determined by a stateless backward substr() re-scan of the raw command
+# text that (a) accepted the & / | TAIL of the compound redirect operators
+# >&, <&, >| as if they were a bare separator/pipe, even though bash parses
+# what follows one of those as an ordinary WORD, not a reserved [[ / ((
+# opener, and (b) had no quote/escape awareness, so a backslash-escaped or
+# quoted ;/&/| was wrongly accepted as a valid boundary. Both are fixed by
+# moving boundary determination into mark_regions()'s own quote/escape-aware
+# forward scan (lastsig/beforesig), consulted via is_boundary_char().
+# ── round-5 review, Medium finding: the two cases below previously inserted
+# a filename BETWEEN the >|/>& operator and [[ (e.g. "echo hi >| <path>
+# [[ ..."), so `lastsig` at the [[ boundary check was that filename's last
+# character, not `|`/`&` -- the beforesig == ">" branch of is_boundary_char
+# was never actually exercised (these would pass identically against the
+# pre-round-4 code too). Fixed to direct adjacency, matching the real PoC
+# shape: `echo hi >| [[ x > <path> ]]` truncates/dups to a file literally
+# NAMED "[[" (real bash: `>|`/`>&` redirect to whatever WORD follows), so
+# both the literal word "[[" and the real `> <path>` redirect inside must be
+# extracted as separate targets.
+echo "case: >| does not make the following [[ a real opener -- both the literal [[ redirect target and the real redirect inside are extracted (round-4 regression, round-5 fixed adjacency)"
+assert_targets "echo hi >| [[ x > /repo/.env ]] -- >| truncates to a file literally named [[, the redirect inside is real" \
+    "echo hi >| [[ x > ${TEST_ROOT}/round4-pipe.env ]]" \
+    "$(printf '%s\n%s' '[[' "${TEST_ROOT}/round4-pipe.env")"
+
+echo "case: >& does not make the following [[ a real opener -- both the literal [[ redirect target and the real redirect inside are extracted (round-4 regression, round-5 fixed adjacency)"
+assert_targets "echo hi >& [[ x > /repo/.env ]] -- >& redirects to a file literally named [[, the redirect inside is real" \
+    "echo hi >& [[ x > ${TEST_ROOT}/round4-amp.env ]]" \
+    "$(printf '%s\n%s' '[[' "${TEST_ROOT}/round4-amp.env")"
+
+echo "case: <& does not make the following [[ a real opener -- the real redirect inside is extracted (round-4 regression)"
+assert_targets "cat 0<& [[ x > /repo/.env ]] -- <& is an input-fd-dup operator, the redirect inside [[ ]] is still real" \
+    "cat 0<& [[ x > ${TEST_ROOT}/round4-inamp.env ]]" \
+    "${TEST_ROOT}/round4-inamp.env"
+
+echo "case: a backslash-escaped ; does not count as a valid boundary -- the real redirect inside [[ ]] is extracted (round-4 regression)"
+assert_targets "echo \; [[ x > /repo/.env ]] -- the escaped ; is a literal argument character, not a separator" \
+    "echo \\; [[ x > ${TEST_ROOT}/round4-escsemi.env ]]" \
+    "${TEST_ROOT}/round4-escsemi.env"
+
+# Non-regression: every REAL separator/pipe form must still suppress the
+# region exactly as before -- widening rejection of >&/<&/>| tails must not
+# narrow acceptance of genuine && / || / |& / ;& / bare ; / bare & / bare |
+# / start-of-string / newline boundaries.
+echo "case: real separators still correctly suppress a following [[ / (( region (round-4 non-regression)"
+assert_targets "true && [[ z > a ]] emits no write target" "true && [[ z > a ]]" ""
+assert_targets "false || (( z > a )) emits no write target" "false || (( z > a ))" ""
+assert_targets "true |& [[ z > a ]] emits no write target" "true |& [[ z > a ]]" ""
+assert_targets "true ;& [[ z > a ]] emits no write target (degenerate but a real bash token pair)" "true ;& [[ z > a ]]" ""
+assert_targets "true ; [[ z > a ]] emits no write target (bare unescaped ;)" "true ; [[ z > a ]]" ""
+assert_targets "true & [[ z > a ]] emits no write target (bare unescaped &)" "true & [[ z > a ]]" ""
+assert_targets "true | [[ z > a ]] emits no write target (bare unescaped |)" "true | [[ z > a ]]" ""
+assert_targets "[[ z > a ]] at start-of-string emits no write target" "[[ z > a ]]" ""
+NEWLINE_BOUNDARY_CMD="$(printf 'true\n[[ z > a ]]')"
+assert_targets "[[ z > a ]] preceded by a newline emits no write target" "${NEWLINE_BOUNDARY_CMD}" ""
+
+# ── Ticket #810 round-5 security review [CRITICAL]: region suppression
+# swallows real writes hidden inside command/process substitution nested in
+# [[ ]] / (( )). Bash performs command substitution (backticks, $(...)) and
+# process substitution (<(...), >(...)) INSIDE both [[ ... ]] and (( ... )),
+# so a redirect or `tee` invocation nested inside one of those is a real,
+# executing write -- but mark_regions() previously suppressed every
+# character position between a recognized opener and its matched closer
+# unconditionally, including the substitution's own contents, so the real
+# write inside was never extracted and never blocked. Fixed by re-scanning
+# the region's INTERIOR for any unquoted substitution marker (backtick, `$(`,
+# `<(`, `>(`) before committing to suppress it -- a region whose interior
+# contains one is not suppressed at all.
+echo "case: a real write hidden inside \$( ) nested in [[ ]] is extracted, not suppressed (round-5 regression)"
+assert_targets "echo ok > .ok ; [[ \$(printf x > .env) ]] -- both the benign and the nested-substitution write are extracted" \
+    "echo ok > ${TEST_ROOT}/round5-nested1.ok ; [[ \$(printf x > ${TEST_ROOT}/round5-nested1.env) ]]" \
+    "$(printf '%s\n%s' "${TEST_ROOT}/round5-nested1.ok" "${TEST_ROOT}/round5-nested1.env")"
+
+echo "case: a real write hidden inside \$( ) nested in (( )) is extracted, not suppressed (round-5 regression)"
+assert_targets "echo ok > .ok ; (( \$(printf x > .env; echo 1) > 0 )) -- both the benign and the nested-substitution write are extracted" \
+    "echo ok > ${TEST_ROOT}/round5-nested2.ok ; (( \$(printf x > ${TEST_ROOT}/round5-nested2.env; echo 1) > 0 ))" \
+    "$(printf '%s\n%s\n%s' "${TEST_ROOT}/round5-nested2.ok" "${TEST_ROOT}/round5-nested2.env" "0")"
+
+echo "case: a tee operand hidden inside \$( ) nested in [[ ]] arms tee and is extracted (round-5 regression -- exercises the !wregion tee-arming suppression, not just >)"
+assert_targets "echo ok > .ok ; [[ \$(echo p | tee .env) ]] -- the tee operand nested inside the substitution is extracted" \
+    "echo ok > ${TEST_ROOT}/round5-nested3.ok ; [[ \$(echo p | tee ${TEST_ROOT}/round5-nested3.env) ]]" \
+    "$(printf '%s\n%s' "${TEST_ROOT}/round5-nested3.ok" "${TEST_ROOT}/round5-nested3.env")"
+
+echo "case: a backtick-wrapped write nested in [[ ]] is extracted, not suppressed (round-5 regression)"
+assert_targets "[[ \`printf x > .env\` ]] -- the backtick-substitution write is extracted" \
+    "[[ \`printf x > ${TEST_ROOT}/round5-backtick.env\` ]]" \
+    "${TEST_ROOT}/round5-backtick.env"
+
+echo "case: a write nested inside process substitution <( ) inside [[ ]] is extracted, not suppressed (round-5 regression)"
+assert_targets "[[ -e <(printf x > .env) ]] -- the process-substitution write is extracted" \
+    "[[ -e <(printf x > ${TEST_ROOT}/round5-procsub.env) ]]" \
+    "${TEST_ROOT}/round5-procsub.env"
+
+# Non-regression: every prior legitimate-region case with NO substitution
+# inside must still correctly suppress its comparison operator.
+echo "case: legitimate comparison regions with no nested substitution still correctly suppress (round-5 non-regression)"
+assert_targets "[[ z > a ]] emits no write target" "[[ z > a ]]" ""
+assert_targets "(( z > a )) emits no write target" "(( z > a ))" ""
+assert_targets "(( 1 > 0 )) emits no write target" "(( 1 > 0 ))" ""
+assert_targets "[[ \$x =~ [[:alpha:]] ]] emits no write target" '[[ $x =~ [[:alpha:]] ]]' ""
+
+# ── Ticket #810 round-6 stabilization [HIGH]: has_nested_substitution() did
+# not recognize bash 5.3+'s function substitution forms `${ cmd; }` /
+# `${| cmd; }`, which execute a real command from inside a [[ ]]/(( ))
+# construct just like `$(...)`. A region containing one was previously
+# suppressed as an ordinary comparison, so a real write nested inside was
+# never extracted and never blocked. Fixed by additionally recognizing `${`
+# followed by whitespace or `|` (which distinguishes a funsub from an
+# ordinary parameter expansion like `${var}`/`${x:-default}`, neither of
+# which executes arbitrary commands) as a substitution marker.
+echo "case: a real write hidden inside \${ cmd; } funsub nested in [[ ]] is extracted, not suppressed (round-6 regression)"
+assert_targets "echo ok > .ok ; [[ -n \${ printf x > .env; } ]] -- both the decoy and the nested-funsub write are extracted" \
+    "echo ok > ${TEST_ROOT}/round6-funsub1.ok ; [[ -n \${ printf x > ${TEST_ROOT}/round6-funsub1.env; } ]]" \
+    "$(printf '%s\n%s' "${TEST_ROOT}/round6-funsub1.ok" "${TEST_ROOT}/round6-funsub1.env")"
+
+echo "case: legitimate parameter expansion \${x} / \${y} (no space/pipe after \${) still correctly suppresses (round-6 non-regression)"
+assert_targets "[[ \${x} > \${y} ]] emits no write target" '[[ ${x} > ${y} ]]' ""
+
+echo "case: a real write hidden inside \${| cmd; } value-substitution funsub nested in [[ ]] is extracted, not suppressed (round-6 regression)"
+assert_targets "echo ok > .ok ; [[ -n \${| printf x > .env; } ]] -- both the decoy and the nested-funsub write are extracted" \
+    "echo ok > ${TEST_ROOT}/round6-funsub-pipe.ok ; [[ -n \${| printf x > ${TEST_ROOT}/round6-funsub-pipe.env; } ]]" \
+    "$(printf '%s\n%s' "${TEST_ROOT}/round6-funsub-pipe.ok" "${TEST_ROOT}/round6-funsub-pipe.env")"
+
+echo "case: a real write hidden inside \${ cmd; } funsub nested in (( )) is extracted, not suppressed (round-6 regression)"
+assert_targets "(( \${ printf 1 > .env; } > 0 )) -- both the nested-funsub write and the region's own unsuppressed > 0 are extracted" \
+    "(( \${ printf 1 > ${TEST_ROOT}/round6-funsub-arith.env; } > 0 ))" \
+    "$(printf '%s\n%s' "${TEST_ROOT}/round6-funsub-arith.env" "0")"
+
+# ── Ticket #810 stabilization: a command/process/function substitution
+# marker found INSIDE a double-quoted span within a [[ ]]/(( )) region's
+# interior is treated as a deliberately blunt, maximally conservative
+# unsupported construct: bash lets the substitution escape the enclosing
+# double quote for its own real syntax, but this tokenizer's own
+# double-quote handling has no safe way to resume precise parsing through
+# that mid-scan. Earlier attempts at a precise resume-parsing mechanism
+# (tracking the substitution's real close position and forcing quote state
+# back to double-quoted afterward) repeatedly introduced new bugs across
+# several review rounds, so rather than continue chasing them, the WHOLE
+# extraction now fails closed unconditionally with exit code 7 whenever such
+# a marker is found -- blocking the whole command rather than attempting to
+# precisely resolve what is inside it. The same marker in UNQUOTED text is
+# unaffected: it is already correctly handled by the tokenizer's ordinary
+# unquoted dispatch (see the round-5/6 cases above), with no special
+# mechanism needed.
+echo "case: a real write hidden inside a double-quoted \$( ) command substitution nested in [[ ]] fails closed (exit 7)"
+assert_extract_exit "[[ -n \"\$(printf x > .env)\" ]] -- the double-quoted \$( ) substitution fails the whole extraction closed" \
+    "[[ -n \"\$(printf x > ${TEST_ROOT}/round7-dq-cmdsub.env)\" ]]" \
+    7
+
+echo "case: a real write hidden inside a double-quoted \$( ) nested in (( )) fails closed (exit 7)"
+assert_extract_exit "(( \"\$(printf x > .env; echo 1)\" > 0 )) -- the double-quoted substitution fails the whole extraction closed" \
+    "(( \"\$(printf x > ${TEST_ROOT}/round7-dq-arith.env; echo 1)\" > 0 ))" \
+    7
+
+echo "case: a double-quoted backtick-wrapped write nested in [[ ]] fails closed (exit 7)"
+assert_extract_exit "[[ -n \"\`printf x > .env\`\" ]] -- the double-quoted backtick-substitution fails the whole extraction closed" \
+    "[[ -n \"\`printf x > ${TEST_ROOT}/round7-dq-backtick.env\`\" ]]" \
+    7
+
+echo "case: a double-quoted \${ cmd; } funsub write nested in [[ ]] fails closed (exit 7)"
+assert_extract_exit "[[ -n \"\${ printf x > .env; }\" ]] -- the double-quoted funsub fails the whole extraction closed" \
+    "[[ -n \"\${ printf x > ${TEST_ROOT}/round7-dq-funsub.env; }\" ]]" \
+    7
+
+echo "case: a doubly-nested double-quoted command substitution nested in [[ ]] fails closed (exit 7)"
+assert_extract_exit "[[ -n \"\$(printf '%s' \"\$(echo y)\" > .env)\" ]] -- the outer double-quoted \$( ) fails the whole extraction closed regardless of its own nested content" \
+    "[[ -n \"\$(printf '%s' \"\$(echo y)\" > ${TEST_ROOT}/round7-dq-doublenest.env)\" ]]" \
+    7
+
+echo "case: a single-quoted nested-substitution-shaped string remains fully inert -- the region is still correctly suppressed as an ordinary comparison (non-regression)"
+assert_targets "[[ '\$(printf x > /repo/.env)' > /repo/other ]] emits no write target -- single quotes suppress everything, including command substitution" \
+    "[[ '\$(printf x > /repo/.env)' > /repo/other ]]" \
+    ""
+
+echo "case: a plain double-quoted comparison with no nested substitution still correctly suppresses (non-regression)"
+assert_targets "[[ \"a\" > \"b\" ]] emits no write target" \
+    "[[ \"a\" > \"b\" ]]" \
+    ""
 
 # ── Fix D (should-fix, #795 round 2): an oversized command must fail closed
 # with a distinct exit code (4), not be confused with "awk not found" (3).

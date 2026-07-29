@@ -530,6 +530,77 @@ else
     fail "bash command inspection blocked when wc missing: stderr should contain the 'wc was not found on PATH' message, got: ${CHECK_STDERR}"
 fi
 
+# ── Ticket #810 fix 1: unquoted brace expansion in a Bash write target ──
+# must fail closed unconditionally (new bwt_extract_targets exit code 6),
+# regardless of whether the raw command also mentions a sensitive marker
+# (Q3) -- the extraction layer itself must never hand back a bogus literal,
+# non-expanded target that check_sensitive's suffix globs can't match
+# (verified repro: `tee /tmp/cenci-test/{notes,.env}` currently emits the
+# single literal target `/tmp/cenci-test/{notes,.env}`, whose trailing `}`
+# never matches `*.env`, so this is currently ALLOWED).
+echo "case: Bash command with an unquoted brace-expansion write target is blocked (#810 Fix 1, AC 1)"
+BRACE_DIR="${BASH_TEST_ROOT}/brace-810"
+mkdir -p "${BRACE_DIR}"
+BASH_CMD="tee ${BRACE_DIR}/{notes,.env}"
+JSON=$(jq -n --arg cmd "${BASH_CMD}" '{tool_input:{command:$cmd}}')
+run_check "${JSON}"
+assert_exit "bash brace expansion tee target blocked" 2
+assert_blocked_stderr "bash brace expansion tee target blocked"
+if [[ "${CHECK_STDERR,,}" == *"brace"* ]]; then
+    pass
+else
+    fail "bash brace expansion tee target blocked: stderr should name the unsupported brace-expansion construct, got: ${CHECK_STDERR}"
+fi
+
+echo "case: Bash command with an unquoted brace-expansion write target is blocked even with no sensitive marker at all (#810 Fix 1, Q3 unconditional block)"
+BASH_CMD="tee ${BRACE_DIR}/{a,b}.txt"
+JSON=$(jq -n --arg cmd "${BASH_CMD}" '{tool_input:{command:$cmd}}')
+run_check "${JSON}"
+assert_exit "bash brace expansion tee target blocked (no marker)" 2
+assert_blocked_stderr "bash brace expansion tee target blocked (no marker)"
+
+# ── Ticket #810 fix 3: `>` inside a CLOSED [[ ... ]] / (( ... )) comparison
+# context is not a redirect (Requirement C) -- must never be classified as
+# a write target -- but a real redirect immediately adjacent to such a
+# construct must still be extracted and checked.
+echo "case: [[ z > a ]] and (( z > a )) are comparison contexts, not redirects, and are allowed (#810 Fix 3, AC 4)"
+JSON=$(jq -n --arg cmd '[[ z > a ]]' '{tool_input:{command:$cmd}}')
+run_check "${JSON}"
+assert_exit "bash [[ z > a ]] allowed" 0
+
+JSON=$(jq -n --arg cmd '(( z > a ))' '{tool_input:{command:$cmd}}')
+run_check "${JSON}"
+assert_exit "bash (( z > a )) allowed" 0
+
+echo "case: a real redirect immediately after a [[ ... ]] region is still checked (#810 Fix 3, AC 5)"
+mkdir -p "${BASH_TEST_ROOT}/region-adjacent"
+BASH_CMD="[[ -f x ]] > ${BASH_TEST_ROOT}/region-adjacent/.env"
+JSON=$(jq -n --arg cmd "${BASH_CMD}" '{tool_input:{command:$cmd}}')
+run_check "${JSON}"
+assert_exit "bash [[ -f x ]] > .env (adjacent real redirect) blocked" 2
+assert_blocked_stderr "bash [[ -f x ]] > .env (adjacent real redirect) blocked"
+
+# ── Ticket #810 stabilization: a command/process/function substitution
+# marker found INSIDE a double-quoted span within a [[ ]]/(( )) region's
+# interior is a deliberately blunt, maximally conservative unsupported
+# construct -- this tokenizer has no safe way to resume precise parsing
+# through such a marker's real syntax once wrapped in an outer double-quoted
+# string, so the whole command fails closed unconditionally (bwt_extract_targets
+# exit 7), naming the unsupported construct, regardless of whether the raw
+# command also happens to mention a sensitive marker (mirrors the exit-6
+# brace-expansion unconditional-block behavior above).
+echo "case: Bash command with a real write hidden inside a double-quoted \$( ) command substitution nested in [[ ]] is blocked unconditionally (#810 stabilization, exit 7)"
+BASH_CMD='[[ -n "$(printf x > .env)" ]]'
+JSON=$(jq -n --arg cmd "${BASH_CMD}" '{tool_input:{command:$cmd}}')
+run_check "${JSON}"
+assert_exit "bash [[ -n \"\$(printf x > .env)\" ]] blocked" 2
+assert_blocked_stderr "bash [[ -n \"\$(printf x > .env)\" ]] blocked"
+if [[ "${CHECK_STDERR}" == *"cannot be safely resolved"* ]]; then
+    pass
+else
+    fail "bash [[ -n \"\$(printf x > .env)\" ]] blocked: stderr should name the unsupported double-quoted-nested-substitution construct, got: ${CHECK_STDERR}"
+fi
+
 # ── #795 final round: historical-bypass regression table ────────────
 # Every construct found across the five adversarial review rounds, driven
 # end-to-end through the hook's real JSON-on-stdin entry point, asserting a
