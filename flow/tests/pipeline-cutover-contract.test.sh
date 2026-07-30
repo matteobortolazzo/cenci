@@ -5,8 +5,8 @@
 # .plans/558-pipeline-engine-core.md's "Flow Cutover (deeper rewrite —
 # concrete diffs)" subsection for the per-file diff list this test pins.
 #
-# Follows the fixture-driven idiom of flow/tests/goal-autopilot-gate-contract.test.sh
-# and flow/tests/subagent-cwd-contract.test.sh: a `failures=` counter, small
+# Follows the fixture-driven idiom of flow/tests/subagent-cwd-contract.test.sh:
+# a `failures=` counter, small
 # assert_* helpers, self-contained, auto-discovered by the flow gate's
 # `*.test.sh` glob. This test greps the real committed docs directly
 # (relative to FLOW_DIR) since the contract under test lives in those docs'
@@ -348,7 +348,7 @@ fi
 
 # extract_gate_check_section <phase-2-worktree-md-content>
 # Returns phase-2-worktree.md's "## Gate Check" section body only (through
-# the next "## "-level heading, "## Arm Goal Autopilot"), so the adoption-
+# the next "## "-level heading, "## Create Worktree"), so the adoption-
 # warning assertion below cannot be satisfied by unrelated `cenci pipeline`
 # mentions elsewhere in the file.
 extract_gate_check_section() {

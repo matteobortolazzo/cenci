@@ -65,7 +65,7 @@ After implementation:
 3. Run lint (when `lintCommand` is set). An absent `lintCommand` skips this step cleanly — no error, no false hard-gate failure.
 4. Report exact commands and results.
 
-If build/tests/lint fail, analyze root cause, fix, and rerun. Retry up to 3 times, then clear the Goal Autopilot (`/goal clear` via `SlashCommand`, a no-op if none is armed — see `SKILL.md`) and stop, reporting exact errors, attempts, and best hypothesis. Clearing prevents the goal from restarting the turn straight back into the same failing build. Lint failures are held to the same hard gate as build/test failures — no silent pass-through.
+If build/tests/lint fail, analyze root cause, fix, and rerun. Retry up to 3 times, then stop, reporting exact errors, attempts, and best hypothesis. Lint failures are held to the same hard gate as build/test failures — no silent pass-through.
 
 ## Visual Verification
 
@@ -96,4 +96,4 @@ Delegate one `implementer` with the standard Delegation Context above (worktree 
 4. Fix any cross-lane integration failure — this delegation may touch any file, the per-lane file restriction no longer applies.
 5. Report exact commands and results, including which failures were cross-lane integration issues.
 
-This barrier is held to the same hard gate as this phase's Verification section: analyze root cause, fix, rerun; after 3 failed attempts, clear the Goal Autopilot (`/goal clear` via `SlashCommand`, a no-op if none is armed — see `SKILL.md`) and stop, reporting exact errors, attempts, and best hypothesis. Do not proceed to Phase 5 until build, full test suite, and lint all pass here.
+This barrier is held to the same hard gate as this phase's Verification section: analyze root cause, fix, rerun; after 3 failed attempts, stop and report exact errors, attempts, and best hypothesis. Do not proceed to Phase 5 until build, full test suite, and lint all pass here.

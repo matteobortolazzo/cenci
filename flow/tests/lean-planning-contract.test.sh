@@ -7,7 +7,7 @@
 # (skills/implement/phases/phase-1-plan.md), the Gate Check's third entrance
 # (skills/implement/phases/phase-2-worktree.md), the document-only config
 # schema entry (skills/configure/SKILL.md), and the "two checkpoint-free
-# exceptions" wording at the hard-stop/goal-arming rules
+# exceptions" wording at the hard-stop rule
 # (skills/implement/SKILL.md).
 #
 # Follows the fixture-free, grep-based idiom of
@@ -143,8 +143,8 @@ LEAN_APPROVAL_HEADING_MARKER='## Lean Approval Path'
 TRIVIAL_FLAG_REUSE_MARKER='The flag is named for its first caller, but its implemented behavior is exactly what this path needs'
 FOUR_HEADING_CHECK_MARKER="Run assembly step 3's four-heading check exactly as written"
 HALT_BEFORE_AUTONOMOUS_MARKER='the lean run must halt *before* it becomes autonomous'
-LEAN_HARD_STOP_CHAIN_MARKER='skip the `planComment` comment, skip step 5'"'"'s label call, skip step 6'"'"'s artifact recording, leave `hasPlanFile` unset, arm no goal, and do not enter Phase 2.'
-STOP_LABEL_VERIFICATION_MARKER='surface them and **STOP**: leave `hasPlanFile` unset, arm no goal, and do not proceed into Phase 2 on an unconfirmed board state.'
+LEAN_HARD_STOP_CHAIN_MARKER='skip the `planComment` comment, skip step 5'"'"'s label call, skip step 6'"'"'s artifact recording, leave `hasPlanFile` unset, and do not enter Phase 2.'
+STOP_LABEL_VERIFICATION_MARKER='surface them and **STOP**: leave `hasPlanFile` unset, and do not proceed into Phase 2 on an unconfirmed board state.'
 LABEL_VERIFICATION_MARKER='lean mode deliberately removes exactly that checkpoint'
 ESCALATIONS_NEVER_APPROVED_MARKER='the plan is never implicitly approved even after the human answers it'
 TRIVIAL_PRECEDENCE_MARKER='the Trivial Fast Path did not apply (it takes precedence — a trivial ticket never reaches this section)'
@@ -171,7 +171,7 @@ assert_file_contains "${PHASE1_PLAN}" "${FOUR_HEADING_CHECK_MARKER}" \
 assert_file_contains "${PHASE1_PLAN}" "${HALT_BEFORE_AUTONOMOUS_MARKER}" \
   "Lean Approval Path must state the lean run halts before it becomes autonomous on a missing heading"
 assert_file_contains "${PHASE1_PLAN}" "${LEAN_HARD_STOP_CHAIN_MARKER}" \
-  "Lean Approval Path must restate its own checkpoint-free hard-stop chain (skip planComment/label/artifact, leave hasPlanFile unset, arm no goal, no Phase 2 entry)"
+  "Lean Approval Path must restate its own checkpoint-free hard-stop chain (skip planComment/label/artifact, leave hasPlanFile unset, no Phase 2 entry)"
 assert_file_contains "${PHASE1_PLAN}" "${STOP_LABEL_VERIFICATION_MARKER}" \
   "Lean Approval Path must restate the label-call verification STOP consequence"
 assert_file_contains "${PHASE1_PLAN}" "${LABEL_VERIFICATION_MARKER}" \
@@ -250,16 +250,13 @@ assert_file_contains "${CONFIGURE_SKILL}" "${CONFIGURE_PLANNING_EXAMPLE_JSON_MAR
 
 # =====================================================================
 # skills/implement/SKILL.md — both checkpoint-free exceptions named at the
-# hard-stop and goal-arming rules.
+# hard-stop rule.
 # =====================================================================
 
 HARD_STOP_BOTH_EXCEPTIONS_MARKER='the **Trivial Fast Path** and the **Lean Approval Path**'
-GOAL_ARM_LEAN_MARKER='The Lean Approval Path also arms at Phase 2 start.'
 
 assert_file_contains "${IMPLEMENT_SKILL}" "${HARD_STOP_BOTH_EXCEPTIONS_MARKER}" \
   "hard-stop-after-planning rule must name both checkpoint-free exceptions"
-assert_file_contains "${IMPLEMENT_SKILL}" "${GOAL_ARM_LEAN_MARKER}" \
-  "goal-arming rule must name the Lean Approval Path as also arming at Phase 2 start"
 
 echo "lean-planning-contract.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]

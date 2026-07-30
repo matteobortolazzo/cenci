@@ -3,7 +3,7 @@
 # of implement Phase 9 (after the PR exists and the Working -> In Review swap),
 # both client adapters must auto-launch the persistent `cenci babysit`
 # supervisor for the new PR, non-blocking, treating "supervisor already running"
-# as expected success (Goal-Autopilot re-entry idempotency). The watch interval
+# as expected success (re-run idempotency). The watch interval
 # is resolved from `.cenci/config.json`'s optional `babysitInterval` via the new
 # shared resolver, falling back to babysit's built-in `15m` default.
 #
