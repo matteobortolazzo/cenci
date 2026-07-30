@@ -86,6 +86,36 @@ func (m MainSync) String() string {
 	return string(m)
 }
 
+// DependencyState classifies the resolved openness of one entry in
+// Ticket.DependsOn (#825) into a closed set, rather than collapsing distinct
+// failure classes (watch/docs/go-gotchas.md #598, watch/docs/error-handling.md
+// #628). Unlike StageProbe/MainSync above, there is deliberately NO zero-value
+// ("unknown") constant here: this gate is opt-in per ticket -- only tickets
+// whose body actually contains a `Depends on #N` line are ever gated at all,
+// and Ticket.DependsOn empty/nil is the true "ungated" case, exercised by
+// every pre-#825 Ticket construction site. A missing classification for a
+// number the ticket DOES declare a dependency on (a DependencyStates map
+// lookup miss, indistinguishable from the zero value) is never the
+// expected/normal case, so it must fail closed via decide.go's
+// dependencyGateSkip switch default, not be given its own permissive zero
+// value the way StageProbeAbsent/MainSyncSkipped are.
+type DependencyState string
+
+const (
+	// DependencyStateClosed means gh issue view resolved the referenced issue
+	// as closed: it no longer blocks dispatch.
+	DependencyStateClosed DependencyState = "closed"
+	// DependencyStateOpen means the referenced issue is open -- either found
+	// directly in the pass's own collected open-issue set, or via the gh
+	// issue view fallback for numbers outside that set. Blocks dispatch while
+	// it stays open.
+	DependencyStateOpen DependencyState = "open"
+	// DependencyStateUnresolved means the referenced issue's state could not
+	// be determined (gh issue view failed, or returned malformed JSON) --
+	// fails closed rather than assuming closed.
+	DependencyStateUnresolved DependencyState = "unresolved"
+)
+
 // Ticket is one open GitHub issue, as collected from a repo. Labels carry the
 // board state (Planned, Blocked, agent:<name>, ...); Assignees carry GitHub
 // logins; Agent is the pre-resolved agent:<name> value, if any.
@@ -114,6 +144,19 @@ type Ticket struct {
 	// to CollectTickets (the reconciler's path) or the repo's sync was
 	// itself skipped.
 	MainSync MainSync
+
+	// DependsOn is the set of same-repo issue numbers this ticket's body
+	// declares a "Depends on #N" line for (collector-filled, #825, via
+	// parseDependsOn). Empty/nil, the zero value, is the true "ungated"
+	// case -- every pre-#825 Ticket construction site keeps today's
+	// behavior unchanged without being touched.
+	DependsOn []int
+	// DependencyStates classifies each DependsOn entry's resolved openness
+	// (collector-filled, #825, via resolveDependencyStates). A number in
+	// DependsOn with no corresponding key here is treated identically to an
+	// unrecognized DependencyState value by dependencyGateSkip's switch
+	// default -- it fails closed, never as satisfied.
+	DependencyStates map[int]DependencyState
 }
 
 // Plan is the parsed front matter of one .plans/<id>-<slug>.md file.

@@ -318,8 +318,14 @@ func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer,
 	// The reconciler deliberately never runs the local-main sync (#822):
 	// RunOnce owns it exclusively, once per combined pass (combined.go runs
 	// RunOnce then RunReconcileOnce in the same pass) -- passing nil here
-	// leaves every collected ticket at the ungated zero value.
-	tickets, err := CollectTickets(cfg.Repos, nil)
+	// leaves every collected ticket at the ungated zero value. It also
+	// deliberately never resolves dependencies (#825 review fix #1): the
+	// reconciler never reads Ticket.DependsOn/DependencyStates, and
+	// resolving them here would burn this call's own
+	// maxDependencyResolutions gh issue view budget per repo on a result
+	// that's immediately discarded, doubling the API-rate-limit exposure of
+	// a combined pass for no benefit.
+	tickets, err := CollectTickets(cfg.Repos, nil, false, out)
 	if err != nil {
 		logf(out, "reconcile: collecting tickets: %v\n", err)
 	}
