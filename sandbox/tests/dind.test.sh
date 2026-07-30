@@ -503,6 +503,116 @@ else
     fail "expected a marker for this run's genuine crash despite a stale sentinel left over from a previous run — start_dind must clear the stale sentinel at entry (supersede-only), not let it leak forward"
 fi
 
+# ── Case 11: dockerd is not installed in the image at all (#831) ─────────
+#    Since the Docker engine moved out of Dockerfile.base into the
+#    config-selected fragments/docker.dockerfile, a repo whose
+#    .cenci/Dockerfile predates that change (or was generated without the
+#    fragment) can still resolve dind-on and boot with CENCI_SANDBOX_DIND=1
+#    while carrying no dockerd. That must surface as a named, actionable
+#    cause — not as a generic "exit status 127" tail, and not as a silent
+#    no-op that only shows up later as a connection-refused on first docker
+#    touch. The container itself stays usable, so start_dind must NOT
+#    hard-fail startup the way the groupadd/usermod guards do.
+#
+#    PATH here is curated rather than reusing run_start_dind's
+#    "${bin}:/usr/bin:/bin": a host that happens to have a real dockerd
+#    installed would otherwise satisfy the lookup and silently void the case.
+echo "case: a missing dockerd binary writes a named, actionable marker instead of a generic non-zero exit"
+CASE11_DIR="${WORK}/dockerd-absent"
+BIN11="${CASE11_DIR}/bin"
+COREUTILS11="${CASE11_DIR}/coreutils"
+HOME11="${CASE11_DIR}/home"
+CALL_LOG11="${CASE11_DIR}/calls.log"
+MARKER11="${HOME11}/${MARKER_NAME}"
+STDERR11="${CASE11_DIR}/stderr.txt"
+mkdir -p "${HOME11}" "${COREUTILS11}"
+: >"${CALL_LOG11}"
+# Full mock set, then delete dockerd so only it is absent.
+make_mocks "${BIN11}" 0 ""
+rm -f "${BIN11}/dockerd"
+# Only the externals lib/dind.sh (and the `env -i` shell invocation) need;
+# deliberately no dockerd.
+for util in bash rm tail date tr; do
+    util_path="$(command -v "${util}")" || {
+        fail "test harness could not resolve ${util} on PATH"
+        continue
+    }
+    ln -sf "${util_path}" "${COREUTILS11}/${util}"
+done
+# shellcheck disable=SC2016  # $1 must expand in the child bash, not here
+env -i PATH="${BIN11}:${COREUTILS11}" CENCI_DIND_HOME_ROOT="${HOME11}" CALL_LOG="${CALL_LOG11}" \
+    bash -c 'source "$1"; start_dind; wait' _ "${DIND_LIB}" 2>"${STDERR11}"
+CASE11_RC=$?
+
+if [[ -f "${MARKER11}" ]]; then
+    pass
+else
+    fail "expected a startup-error marker at ${MARKER11} when dockerd is absent from the image, but none was written"
+fi
+
+MARKER11_CONTENT="$(cat "${MARKER11}" 2>/dev/null || true)"
+
+echo "case: the missing-dockerd marker starts with a UTC ISO-8601 timestamp like every other marker"
+if [[ "${MARKER11_CONTENT}" =~ ${TIMESTAMP_REGEX} ]]; then
+    pass
+else
+    fail "missing-dockerd marker does not start with a UTC ISO-8601 timestamp: ${MARKER11_CONTENT}"
+fi
+
+echo "case: the missing-dockerd marker names dockerd as the missing binary"
+if [[ "${MARKER11_CONTENT}" == *"dockerd"* && "${MARKER11_CONTENT}" == *"not installed"* ]]; then
+    pass
+else
+    fail "missing-dockerd marker does not name the absent dockerd binary as the cause: ${MARKER11_CONTENT}"
+fi
+
+echo "case: the missing-dockerd marker points at the fragment/rebuild remedy"
+if [[ "${MARKER11_CONTENT}" == *"docker.dockerfile"* && "${MARKER11_CONTENT}" == *"cenci sandbox build"* ]]; then
+    pass
+else
+    fail "missing-dockerd marker gives no actionable remedy (expected the docker.dockerfile fragment and a 'cenci sandbox build' pointer): ${MARKER11_CONTENT}"
+fi
+
+echo "case: a missing dockerd is reported loudly on stderr too"
+if grep -q "dockerd" "${STDERR11}"; then
+    pass
+else
+    fail "expected a stderr warning naming dockerd; got: $(cat "${STDERR11}")"
+fi
+
+echo "case: a missing dockerd does not hard-fail container startup"
+if [[ "${CASE11_RC}" -eq 0 ]]; then
+    pass
+else
+    fail "start_dind exited ${CASE11_RC} when dockerd was absent — the container must stay usable for non-Docker work (unlike the groupadd/usermod guards, which are genuinely fatal)"
+fi
+
+# ── Case 11b: the absent-dockerd marker must not be a stale leftover ──────
+#    Case 11 would also "pass" if start_dind wrote nothing and a marker from
+#    a previous container lifetime simply survived. Pre-seed one with known
+#    content and assert it was superseded, not preserved.
+echo "case: a prior run's marker is superseded (not preserved) when dockerd is absent"
+CASE11B_DIR="${WORK}/dockerd-absent-stale"
+BIN11B="${CASE11B_DIR}/bin"
+HOME11B="${CASE11B_DIR}/home"
+CALL_LOG11B="${CASE11B_DIR}/calls.log"
+MARKER11B="${HOME11B}/${MARKER_NAME}"
+mkdir -p "${HOME11B}"
+: >"${CALL_LOG11B}"
+make_mocks "${BIN11B}" 0 ""
+rm -f "${BIN11B}/dockerd"
+echo "STALE-MARKER-FROM-A-PREVIOUS-CONTAINER-LIFETIME" >"${MARKER11B}"
+# shellcheck disable=SC2016  # $1 must expand in the child bash, not here
+env -i PATH="${BIN11B}:${COREUTILS11}" CENCI_DIND_HOME_ROOT="${HOME11B}" CALL_LOG="${CALL_LOG11B}" \
+    bash -c 'source "$1"; start_dind; wait' _ "${DIND_LIB}" 2>/dev/null
+
+MARKER11B_CONTENT="$(cat "${MARKER11B}" 2>/dev/null || true)"
+if [[ "${MARKER11B_CONTENT}" != *"STALE-MARKER-FROM-A-PREVIOUS-CONTAINER-LIFETIME"* && "${MARKER11B_CONTENT}" == *"dockerd"* ]]; then
+    pass
+else
+    fail "expected this run's own missing-dockerd marker to supersede the stale one; got: ${MARKER11B_CONTENT}"
+fi
+
 # ── lib/dind.sh must be sourceable standalone with no side effects ────────
 echo "case: sandbox/lib/dind.sh is sourceable standalone"
 if bash -c 'set -e; source "$1"' _ "${DIND_LIB}"; then

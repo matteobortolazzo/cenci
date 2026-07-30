@@ -458,6 +458,7 @@ Include the server in `.lsp.json` regardless — it activates once the binary is
    | `go` | Go block |
    | `python` | Python + uv block |
    | `rust` | Rust block |
+   | *(none — config-selected)* | Docker block, when `sandbox.dind: true` (question 9b) |
 
    Playwright is scoped to the frontend-framework tokens, not plain `node` — a Node-based
    backend/API project gets the Node block without paying Chromium's image-size cost for a
@@ -471,11 +472,24 @@ Include the server in `.lsp.json` regardless — it activates once the binary is
    editor and its MCP server are unreachable. Like Playwright, it is scoped to repos that
    actually need it rather than every Node image.
 
+   **Docker fragment** (config-selected, not stack-token-selected): when the config being
+   written enables nested Docker (`sandbox.dind: true`, question 9b), additionally include
+   `sandbox/fragments/docker.dockerfile` — it installs the Docker CLI, the `docker-ce`
+   engine and `containerd.io` so `entrypoint.sh` can start an inner daemon under
+   `sysbox-runc`. This block used to live in `Dockerfile.base` and so shipped in every
+   image; since #831 it is selected only for repos that actually run nested Docker.
+   **A `dind: true` repo whose `.cenci/Dockerfile` omits this fragment builds an image
+   with no `dockerd`** — the sandbox still boots and stays usable, but nested Docker is
+   unavailable and `~/.cenci-dockerd-startup-error` explains why. So when Q9 is answered
+   No (no `.cenci/Dockerfile` generated) and Q9b is answered Yes, tell the user their repo
+   will use the shared `cenci-sandbox:latest` monolith, which carries the Docker block
+   already — no action needed.
+
    **Monorepo**: take the union of all `projects[].stack.framework` values, deduplicated — e.g. a repo with a Go API project and a React web client project selects both the Go and Node fragments. Node is still emitted only once because the mandatory runtime set and stack-selected set are deduplicated.
 
    A stack token that matches no row above (e.g. `markdown-shell`, `docker-shell`) contributes no additional project fragment. This is not an error — the generated Dockerfile still contains the mandatory Node runtime fragment.
 
-   **.NET version substitution** (the only row with a version-from-token adjustment): `sandbox/fragments/dotnet.dockerfile` ships with `ARG DOTNET_SDK_VERSION=10.0.100` as its own default. When including this fragment, replace that default's version with `<major>.0.100`, where `<major>` is extracted from the stack token using the same extraction as the CI mapping's version-pinning table above (`dotnet10` → `10`) — e.g. a `dotnet8` stack writes `ARG DOTNET_SDK_VERSION=8.0.100`. **Monorepo tie-break**: when multiple projects map to the dotnet fragment with different major versions (e.g. one project on `dotnet8`, another on `dotnet10`), use the **highest** major version found across all matching projects. If no major version can be extracted from the token, leave the fragment's own default (`10.0.100`) unmodified — and add an inline comment immediately after the `ARG DOTNET_SDK_VERSION` line noting the version could not be auto-detected from the stack token and the fragment's default was used instead, e.g. `# .NET version could not be auto-detected from the stack token — using fragment default. See sandbox/README.md to pin manually.` (mirrors the unresolved-`baseVersion` comment pattern in the baseVersion resolution above). The other fragments (node, playwright, go, python, rust, pencil) are included verbatim with their own `ARG` defaults unmodified — every fragment `ARG` (including `DOTNET_SDK_VERSION` and `BASE_VERSION`) remains overridable at build time via `--build-arg`, so an unmodified default is never a hard lock-in.
+   **.NET version substitution** (the only row with a version-from-token adjustment): `sandbox/fragments/dotnet.dockerfile` ships with `ARG DOTNET_SDK_VERSION=10.0.100` as its own default. When including this fragment, replace that default's version with `<major>.0.100`, where `<major>` is extracted from the stack token using the same extraction as the CI mapping's version-pinning table above (`dotnet10` → `10`) — e.g. a `dotnet8` stack writes `ARG DOTNET_SDK_VERSION=8.0.100`. **Monorepo tie-break**: when multiple projects map to the dotnet fragment with different major versions (e.g. one project on `dotnet8`, another on `dotnet10`), use the **highest** major version found across all matching projects. If no major version can be extracted from the token, leave the fragment's own default (`10.0.100`) unmodified — and add an inline comment immediately after the `ARG DOTNET_SDK_VERSION` line noting the version could not be auto-detected from the stack token and the fragment's default was used instead, e.g. `# .NET version could not be auto-detected from the stack token — using fragment default. See sandbox/README.md to pin manually.` (mirrors the unresolved-`baseVersion` comment pattern in the baseVersion resolution above). The other fragments (node, playwright, go, python, rust, pencil, docker) are included verbatim with their own `ARG` defaults unmodified — every fragment `ARG` (including `DOTNET_SDK_VERSION` and `BASE_VERSION`) remains overridable at build time via `--build-arg`, so an unmodified default is never a hard lock-in.
 
    > **Sync obligation**: `sandbox/fragments/*.dockerfile` is the source of truth for these blocks; the mapping table above mirrors their content and existence, not their byte contents (generation reads the fragment files directly — see step 5e). If a fragment is added, removed, or renamed, this table needs a matching manual update. Low risk in practice — both live in the same monorepo and are maintained together — but currently unenforced by tooling.
 
@@ -486,6 +500,7 @@ Include the server in `.lsp.json` regardless — it activates once the binary is
    - Default: Yes when `dindDetected` is `true` (a Testcontainers/Docker-SDK trigger was found above), otherwise No
    - This question is independent of question 9 (Sandbox Dockerfile) — ask it regardless of how Q9 was answered, and record its answer separately (see the `sandbox.dind` schema note below).
    - If Yes: inform the user that nested Docker requires the host to have Docker (not Podman) with the `sysbox-runc` container runtime registered — `cenci doctor` reports this — and point at `sandbox/README.md#nested-docker-sysbox` for host install instructions per distro.
+   - If Yes **and** question 9 generated a `.cenci/Dockerfile`: that Dockerfile must include `sandbox/fragments/docker.dockerfile` (see the mapping table's Docker rule under question 9). Because Q9b is asked after Q9, generate the Dockerfile only once this answer is known — or regenerate it here — so a `dind: true` repo never ends up with an image that has no `dockerd`. Tell the user to run `cenci sandbox build` to pick the fragment up.
 
 ### Board Config (lazyboards)
 
@@ -1257,7 +1272,7 @@ For each MCP selected in question 5:
    - If `baseVersion` resolved (path a or b): write it as the ARG default, e.g. `ARG BASE_VERSION=0.9.0`.
    - If unresolved (path c): write `ARG BASE_VERSION=latest`, then a comment line immediately after: `# No cenci-sandbox plugin version detected — using the :latest base image alias. See sandbox/README.md to pin BASE_VERSION manually, or install the cenci-sandbox plugin and re-run /cenci:configure.`
 
-   **Fragment concatenation order** (when multiple fragments apply, e.g. a monorepo union): **dotnet → node → playwright → go → python → rust → pencil**, regardless of the order projects were discovered in. Node is mandatory; the remaining fragments are stack-selected (pencil is config-selected — see the mapping table's Pencil rule). Concatenate the selected `sandbox/fragments/*.dockerfile` file contents in that fixed order, applying the **.NET version substitution** from the mapping table above to the dotnet fragment only — every other fragment is included verbatim. Deduplicate — each fragment appears at most once even when multiple monorepo projects map to the same fragment.
+   **Fragment concatenation order** (when multiple fragments apply, e.g. a monorepo union): **dotnet → node → playwright → go → python → rust → pencil → docker**, regardless of the order projects were discovered in. Node is mandatory; the remaining fragments are stack-selected (pencil and docker are config-selected — see the mapping table's Pencil and Docker rules). Concatenate the selected `sandbox/fragments/*.dockerfile` file contents in that fixed order, applying the **.NET version substitution** from the mapping table above to the dotnet fragment only — every other fragment is included verbatim. Deduplicate — each fragment appears at most once even when multiple monorepo projects map to the same fragment.
 
    **Merge-safe regeneration**: the whole block above (from `# cenci:managed-begin` through `# cenci:managed-end` inclusive) is the managed block.
    - **File doesn't exist**: create `.cenci/` (`mkdir -p .cenci`) and write the managed block as the full file content.
@@ -1269,7 +1284,7 @@ For each MCP selected in question 5:
      - If Show existing: read and display the file, then re-ask Overwrite/Skip.
    - **File exists with malformed markers** (exactly one of `# cenci:managed-begin` / `# cenci:managed-end` present, markers out of order, or duplicate marker pairs): do **not** attempt a partial text replace — a malformed marker pair cannot be trusted to safely bound the managed block (and could itself be the result of a spoofed end-marker smuggled in via an unvalidated `baseVersion` — see the validation step above). Route this through the exact same Overwrite/Skip/Show conflict-check UX as the "no markers" case above — same prompt text, same three options, same behavior.
 
-   **Monorepo**: fragments are the mandatory Node runtime fragment plus the deduplicated union described in the Stack-to-fragment mapping table under question 9, concatenated in the dotnet → node → playwright → go → python → rust → pencil order above — one `.cenci/Dockerfile` for the whole repo, not one per project.
+   **Monorepo**: fragments are the mandatory Node runtime fragment plus the deduplicated union described in the Stack-to-fragment mapping table under question 9, concatenated in the dotnet → node → playwright → go → python → rust → pencil → docker order above — one `.cenci/Dockerfile` for the whole repo, not one per project.
 
    **Committed, not ignored**: `.cenci/Dockerfile` is committed to the repo. Do **not** add `.cenci/` or `.cenci/Dockerfile` to `.gitignore` — the whole point is a team-shared, reviewed Dockerfile that the launcher's per-repo image selection (see `sandbox/README.md`) builds identically for every teammate.
 

@@ -74,6 +74,28 @@ start_dind() {
     # classification.
     rm -f "${sentinel}" "${marker}"
 
+    # The Docker engine is no longer part of Dockerfile.base — it moved to the
+    # config-selected fragments/docker.dockerfile (#831). So an image whose
+    # .cenci/Dockerfile predates that change, or was generated without the
+    # fragment, can still be launched with CENCI_SANDBOX_DIND=1 and carry no
+    # dockerd at all. Detect that explicitly instead of letting the generic
+    # path report it as a bare "dockerd exited with status 127": the cause
+    # (image built without the fragment) and the remedy (regenerate and
+    # rebuild) are both knowable here, and a 127 tail states neither.
+    #
+    # Deliberately NOT fatal, unlike the groupadd/usermod guards above: those
+    # leave a dind container that would fail confusingly later, whereas this
+    # one is fully usable for every non-Docker task. The marker is the same
+    # channel the daemon-crash path uses, so it still surfaces on the first
+    # `docker` touch rather than vanishing.
+    if ! command -v dockerd >/dev/null 2>&1; then
+        echo "dind: dockerd is not installed in this image — nested Docker is unavailable for this session. Enable the docker fragment for this repo and rebuild (see the marker at ${marker})." >&2
+        printf '%s dockerd is not installed in this image, so the inner Docker engine could not be started. This image was built without sandbox/fragments/docker.dockerfile. Re-run /cenci:configure to regenerate .cenci/Dockerfile with the docker fragment (it is selected when sandbox.dind is true), then rebuild with: cenci sandbox build\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${marker}" \
+            || echo "dind: failed to write dockerd startup-error marker at ${marker}" >&2
+        return 0
+    fi
+
     (
         dockerd >"${log}" 2>&1
         rc=$?
