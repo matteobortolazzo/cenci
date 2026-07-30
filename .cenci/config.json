@@ -29,7 +29,13 @@
       "gateCommand": "make test",
       "serveCommand": "go run .",
       "boardKey": "Sw",
-      "testKey": "Tw"
+      "testKey": "Tw",
+      "automerge": {
+        "protectedPaths": ["watch/internal/sandbox/", "watch/internal/babysit/", "watch/plugin/", "*credential*", "*secret*"],
+        "maxChangedFiles": 15,
+        "maxDiffLines": 800,
+        "mergeMethod": "squash"
+      }
     },
     {
       "slug": "sandbox",

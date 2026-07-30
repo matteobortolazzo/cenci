@@ -1671,6 +1671,11 @@ CONFIG_SCHEMA=(
   'maintenance|object' 'maintenance.enabled|boolean'
   'maintenance.checkDuringImplement|boolean' 'maintenance.remindAfterDays|number'
   'maintenance.generatedDocs|boolean'
+  'automerge|object' 'automerge.protectedPaths|array' 'automerge.protectedPaths[]|string'
+  'automerge.maxChangedFiles|number' 'automerge.maxDiffLines|number' 'automerge.mergeMethod|string'
+  'projects[].automerge|object' 'projects[].automerge.protectedPaths|array'
+  'projects[].automerge.protectedPaths[]|string' 'projects[].automerge.maxChangedFiles|number'
+  'projects[].automerge.maxDiffLines|number' 'projects[].automerge.mergeMethod|string'
 )
 
 CONFIG_SIGNAL_KEYS=()

@@ -13,6 +13,22 @@ import (
 	"time"
 )
 
+// TestMain pins the fleetConfigPath seam to "" (disabled) for every test in
+// the package (watch/docs/test-isolation.md's "audit ALL existing tests"
+// rule): without this, a dev machine with automerge.enabled: true in
+// ~/.config/cenci/config.json would make every pre-existing tick test issue
+// an unscripted 5th gh call and fail. Tests that need automerge enabled
+// override the seam themselves (see automerge_test.go's
+// withFleetAutomergeEnabled) and restore it via t.Cleanup, which puts the
+// seam back to this "" pin, not whatever the real environment had set.
+func TestMain(m *testing.M) {
+	original := fleetConfigPath
+	fleetConfigPath = func() string { return "" }
+	code := m.Run()
+	fleetConfigPath = original
+	os.Exit(code)
+}
+
 func TestGhJSONAcceptsChecksExitWithValidJSON(t *testing.T) {
 	original := command
 	command = func(string, ...string) ([]byte, error) {
@@ -318,4 +334,47 @@ func unusedPID(t *testing.T) int {
 	}
 	t.Skip("no unused pid available")
 	return 0
+}
+
+// -- automerge State persistence (#824) --------------------------------------
+
+// TestStateSaveLoadRoundTripsAutomergeFields pins the data contract the close
+// guard and the supervisor's own detached-mode logging depend on: since the
+// supervisor's cmd.Stdout is nil under detached mode, the automerge decision
+// log line only reaches a terminal under --once, so the decision must survive
+// a save/load round trip through the state file instead.
+func TestStateSaveLoadRoundTripsAutomergeFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	want := State{
+		PR:                "42",
+		Repo:              "o/r",
+		AutomergeDecision: "held",
+		AutomergeReason:   reasonLabelMissing,
+		AutomergeDetail:   "some captured gh output",
+		AutomergeConditions: []conditionResult{
+			{Key: "enabled", Reached: true, Pass: true},
+			{Key: "label", Reached: true, Pass: false},
+		},
+		AutomergeCheckedAt: time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC),
+	}
+	if err := save(path, want); err != nil {
+		t.Fatal(err)
+	}
+	got := load(path)
+	if got.AutomergeDecision != want.AutomergeDecision {
+		t.Errorf("AutomergeDecision = %q, want %q", got.AutomergeDecision, want.AutomergeDecision)
+	}
+	if got.AutomergeReason != want.AutomergeReason {
+		t.Errorf("AutomergeReason = %q, want %q", got.AutomergeReason, want.AutomergeReason)
+	}
+	if got.AutomergeDetail != want.AutomergeDetail {
+		t.Errorf("AutomergeDetail = %q, want %q", got.AutomergeDetail, want.AutomergeDetail)
+	}
+	if !reflect.DeepEqual(got.AutomergeConditions, want.AutomergeConditions) {
+		t.Errorf("AutomergeConditions = %#v, want %#v", got.AutomergeConditions, want.AutomergeConditions)
+	}
+	if !got.AutomergeCheckedAt.Equal(want.AutomergeCheckedAt) {
+		t.Errorf("AutomergeCheckedAt = %v, want %v", got.AutomergeCheckedAt, want.AutomergeCheckedAt)
+	}
 }

@@ -1712,6 +1712,60 @@ Each project entry's `gateCommand` is optional — unlike `lintCommand`, its pre
 
 Existing single-project configs (no `isMonorepo` field) work unchanged.
 
+The `automerge` field is optional and is **never written by a configure prompt** — there
+is no question for it. It is a manually-editable escape hatch, like `security` and
+`babysitInterval` above, and merge semantics (step 6) preserve a hand-added value
+untouched across reconfiguration. Do **not** add `automerge` to the migration-removal
+list below — it is a supported optional field, not a legacy one.
+
+`automerge` is split across two config locations, each with a distinct scope and default:
+
+- `automerge.enabled` — the fleet-wide kill switch, read from `~/.config/cenci/config.json`
+  (or `$XDG_CONFIG_HOME/cenci/config.json`), **not** `.cenci/config.json`. Default `false`;
+  the `cenci babysit` supervisor never evaluates automerge for any repo until this is
+  explicitly set `true`.
+- A per-repo `automerge` block in this repo's `.cenci/config.json` — top-level for a
+  single-project repo, or per-`projects[]` entry in a monorepo (falling back to the
+  top-level block when a project sets none). Schema:
+  - `automerge.protectedPaths` — an array of glob-pattern strings (same matching rules as
+    `security.sensitivePaths`: `*` matches any characters including `/`, case-insensitive).
+    A changed file matching any pattern denies automerge for that PR. Absent means an empty
+    denylist — a genuine "nothing is protected" statement, not a malformed block.
+  - `automerge.maxChangedFiles` — required whenever an `automerge` block is present; a
+    missing or non-positive value makes the whole block malformed (denied), it does **not**
+    fall back to a built-in default.
+  - `automerge.maxDiffLines` — required on the same terms as `maxChangedFiles` (additions +
+    deletions combined).
+  - `automerge.mergeMethod` — one of `"squash"`, `"merge"`, `"rebase"`; defaults to
+    `"squash"` when omitted. Validated at merge time against the repo's actual allowed merge
+    methods (repository settings), not just this config — a configured method the repo
+    itself disallows is a logged hold, never a retry loop.
+
+In a monorepo, a changed file is resolved to the `projects[]` entry with the longest
+matching `path` prefix; that project's own `automerge` block applies, falling back to the
+top-level block when the project sets none, and to the top-level block directly for files
+owned by no project. When a PR's changed files span more than one applicable block, the
+effective policy is the **most restrictive** merge: the minimum of each numeric cap and the
+union of `protectedPaths` across every block actually touched. **Any required block
+missing is a deny** — an `.cenci/config.json` that is unreadable, not valid JSON, or simply
+has no applicable `automerge` key (top-level or per-project) denies automerge for that PR;
+there is no fallback to built-in thresholds. This means enabling `automerge.enabled`
+fleet-wide with only one `projects[]` entry's `automerge` block defined immediately denies
+every PR touching files outside that project — expected, not a bug, until a top-level
+block (or per-project blocks for the other projects) is added.
+
+The per-repo block is always read from the **PR's base branch**, never the PR's own head
+branch or worktree — this is deliberate: reading policy from the head ref would let a PR
+widen its own `protectedPaths`/caps and self-approve, exactly the fail-open hole this
+feature exists to close.
+
+See the `automerge:ok` label (label table above) for the complementary per-ticket grant —
+`.cenci/config.json`'s `automerge` block is the repo-wide risk *policy* (paths, size caps,
+merge method); `automerge:ok` is the per-ticket *grant* a human adds at refinement, with no
+repo-level default (there is no `automerge.defaultRisk` setting) — see the "no repo-level
+default" note further below. Both must hold, alongside green CI and a mergeable PR, before
+`cenci babysit` will merge.
+
 The `maintenance` field is optional and is **never written by a configure prompt** —
 there is no question for it. It is a manually-editable escape hatch, like `security`
 above, and merge semantics (step 6) preserve a hand-added value untouched across

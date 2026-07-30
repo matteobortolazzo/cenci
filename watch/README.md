@@ -709,6 +709,36 @@ tmux windows, e.g. a kanban board's column-cleanup hook:
 cleanup: 'cenci close {number}'
 ```
 
+### Automerge (`cenci babysit`)
+
+The same `cenci babysit` supervisor that watches CI and review feedback can also
+merge a PR itself, once every one of these holds on a given tick:
+
+- The fleet-wide kill switch `automerge.enabled` is `true` in
+  `~/.config/cenci/config.json` (default `false` — off everywhere until set).
+- Every issue the PR closes carries the `automerge:ok` label — a human grant made
+  at refinement time, per-ticket, with no repo-level default.
+- CI is green, no CI repair is in flight, and no review feedback is pending.
+- The PR is not a draft and GitHub reports it `MERGEABLE`.
+- The diff stays within the supervised repo's `.cenci/config.json` `automerge`
+  policy block (`protectedPaths`, `maxChangedFiles`, `maxDiffLines`, `mergeMethod`)
+  — read from the PR's **base branch**, never its own head branch, so a PR can
+  never widen its own policy to self-approve. An unreadable, malformed, or absent
+  block denies automerge outright; there is no built-in fallback threshold.
+
+A denied or held tick is logged once, e.g.:
+
+```
+babysit: automerge PR #42 held: ticket lacks automerge:ok [enabled=yes label=no ci=- review=- mergeable=- policy=- files=- lines=- protected=- method=-]
+```
+
+When every condition passes, babysit merges with `gh pr merge --squash` (never
+`--delete-branch` — a PR worktree still references the branch) after confirming
+squash is an allowed merge method on the repo. A merge rejected by branch
+protection is logged and retried on the next tick, never bypassed. See
+`flow/skills/configure/SKILL.md`'s `automerge` schema section for the full field
+reference.
+
 ## Pipeline stage commands (`cenci pipeline`)
 
 `cenci pipeline <stage> <id>` drives the implement pipeline's state machine —
