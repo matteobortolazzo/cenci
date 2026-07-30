@@ -84,7 +84,7 @@ gh label create "Working" --repo <owner>/<repo> --color "FBCA04" --description "
 ```bash
 gh issue edit <number> --repo <owner>/<repo> --add-label "Working"
 ```
-Apply the same ensure-then-add pattern to every label this skill applies later (`Refined`, `Design`, `ui:visual-check`, …): before the first `--add-label <name>` of a label, run its `gh label create <name> … || true` with the color/description from the lifecycle table in `/cenci:configure`.
+Apply the same ensure-then-add pattern to every label this skill applies later (`Refined`, `Design`, `Browser`, `ui:visual-check`, `automerge:ok`, …): before the first `--add-label <name>` of a label, run its `gh label create <name> … || true` with the color/description from the lifecycle table in `/cenci:configure`.
 
 ## Your Role
 
@@ -132,7 +132,7 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
    - If **yes** → note `browserRequired: true` for the labeling step
    - If **no** → proceed normally
 
-9. **When refined**, adopt the refiner's `## Refined Ticket Proposal` **verbatim** as the summary content — its sections (`### Updated Title` (optional), `### Updated Description`, `### Acceptance Criteria`, `### Technical Notes`, `### Design Coverage`, `### Design Direction`, `### Size Estimate`, `### Suggested Split` with `#### Execution Order`) map 1:1 onto the persistence steps below; the section formats themselves are specified in `agents/refiner.md`. Do not rewrite, summarize, or reorder the proposal's content. It is not shown yet — steps 10-12 first persist the ticket update, any split or companion design ticket, and the labels; the summary is then presented in the final message together with a notice of what was persisted (see the **Final Message** note at the end of the Update Ticket section).
+9. **When refined**, adopt the refiner's `## Refined Ticket Proposal` **verbatim** as the summary content — its sections (`### Updated Title` (optional), `### Updated Description`, `### Acceptance Criteria`, `### Assumptions (auto-adopted)`, `### Decisions`, `### Technical Notes`, `### Design Coverage`, `### Design Direction`, `### Automation`, `### Size Estimate`, `### Suggested Split` with `#### Execution Order`) map 1:1 onto the persistence steps below; the section formats themselves are specified in `agents/refiner.md`. `### Assumptions (auto-adopted)` and `### Decisions` persist into the ticket body in step 10, same as `### Acceptance Criteria`; `### Automation` drives step 11's `automerge:ok` label decision only and is never written into the body. Do not rewrite, summarize, or reorder the proposal's content. It is not shown yet — steps 10-12 first persist the ticket update, any split or companion design ticket, and the labels; the summary is then presented in the final message together with a notice of what was persisted (see the **Final Message** note at the end of the Update Ticket section).
 
    A `### Suggested Split` in the proposal means each child becomes its own numbered ticket and PR, linked to the parent as a native GitHub sub-issue, with dependency ordering captured in the child bodies (Pass 1/Pass 2 below).
 
@@ -168,6 +168,8 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
    gh issue edit <number> --repo <owner>/<repo> --body-file ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>.md
    ```
 
+   `<updated description>` is not description-only: the body file's content is the concatenation of every ticket-body section the proposal carries — `### Updated Description`, `### Acceptance Criteria`, `### Assumptions (auto-adopted)`, `### Decisions`, `### Technical Notes`, plus `### Design Coverage`/`### Design Direction` when present — in that order; `### Automation` is never included.
+
    **Verify the update succeeded** — re-fetch the ticket and confirm the body (and, when retitled, the title) changed. Compare against a meaningfully wide slice of the body, not just its opening — mid-body corruption from an escaping mistake could otherwise land past a short truncation and go unnoticed:
    ```bash
    gh issue view <number> --repo <owner>/<repo> --json title,body --jq '.title, (.body[:2000])'
@@ -196,7 +198,7 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
    - the milestone must be the numeric `.milestone.number`, not the title — the REST endpoint requires the id;
    - the `milestone` key is omitted entirely via an explicit jq emptiness check, never a bare `//` fallback that would emit `null` (see `docs/shell-scripting-gotchas.md`).
 
-   **Documented limitation**: children inherit the labels the parent carries *at split time*. `Browser` and `ui:visual-check` are applied to the parent later, in steps 11-12, and so are **not** propagated. That is an accepted consequence of the ordering (children are created here in step 10), not a bug.
+   **Documented limitation**: children inherit the labels the parent carries *at split time*. `Browser`, `ui:visual-check`, and `automerge:ok` are applied to the parent later, in steps 11-12, and so are **not** propagated. That is an accepted consequence of the ordering (children are created here in step 10), not a bug. **Re-refine exception**: on a re-refine, a pre-existing `automerge:ok` already on the parent from a prior run *is* carried over by the with-meta payload above (it is not in the 7-marker lifecycle exclusion list) — closing that gap by adding it to the exclusion list is deferred to a later ticket.
 
    If splitting, create the child tickets using a **two-pass approach**:
 
@@ -331,6 +333,14 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
    When `/cenci:design <D>` completes, it closes #<D> and propagates the `Designed` label to this ticket, satisfying implement's Design gate.
 
 11. **Add the "Refined" label and remove "Working":**
+
+   **Compute the effective `automerge:ok` grant** before editing labels: `effective grant = refiner verdict is grant AND NOT isDesignTicket AND NOT browserRequired AND NOT visual-check-signals-match`. The refiner's `### Automation` verdict (`grant`/`withhold`) is a necessary but not sufficient condition — the skill ANDs in three skill-local safety overrides the refiner cannot know at proposal time: `isDesignTicket` (step 2), `browserRequired` (step 8), and whether this ticket matches the **visual-check signals** subset in the `frontend-classification` reference skill (the same signal set step 12 uses to decide whether to *write* `ui:visual-check` — it is *evaluated* here in step 11, even though it is *written* in step 12). If any override is true, or the refiner withheld, the effective grant is withhold. **Fail-closed default**: if the proposal's `### Automation` section is absent or empty, or its `automerge` field is anything other than exactly `grant`, treat the refiner's verdict as `withhold`.
+
+   Ensure the `automerge:ok` label exists (its own Bash call, same ensure-then-add pattern as `Working` above):
+   ```bash
+   gh label create "automerge:ok" --repo <owner>/<repo> --color "006B75" --description "Human granted hands-off merge at refinement — babysit may merge this PR without review" 2>/dev/null || true
+   ```
+
    - If `isDesignTicket` is true:
      `gh issue edit <number> --repo <owner>/<repo> --add-label "Refined" --add-label "Design" --remove-label "Working"`
    - Else if `browserRequired` is true:
@@ -339,8 +349,9 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
      `gh issue edit <number> --repo <owner>/<repo> --add-label "Refined" --remove-label "Working"`
    - If re-refining and `browserRequired` is false but the issue currently has the `Browser` label, also add `--remove-label "Browser"`
    - If re-refining and `isDesignTicket` is false but the issue currently has the `Design` label, also add `--remove-label "Design"`
+   - Append to whichever branch's command ran, orthogonally to the labels above: if the effective grant holds, append `--add-label "automerge:ok"`; otherwise, if the issue currently carries `automerge:ok` (re-refine withdrawing a prior grant), append `--remove-label "automerge:ok"`; otherwise append nothing.
 
-   **Verify** by re-fetching the issue's labels and confirming the expected set is present/absent:
+   **Verify** by re-fetching the issue's labels and confirming the expected set — including `automerge:ok`'s presence or absence — is present/absent:
    ```bash
    gh issue view <number> --repo <owner>/<repo> --json labels --jq '.labels[].name'
    ```
@@ -382,7 +393,7 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
 
 After steps 10-13 complete, present the refiner's Refined Ticket Proposal adopted in step 9 in the final message, followed by a short notice of what was persisted:
 
-> Ticket #`<n>` updated. Labels: Refined[, Design][, Browser][, ui:visual-check]. [Created `N` child tickets: #`<c1>`, #`<c2>`, ….] [Created companion design ticket #`<D>`.] [Note: milestone/label inheritance was skipped — the parent's metadata could not be fetched, so the created tickets carry only their seed labels and no milestone.]
+> Ticket #`<n>` updated. Labels: Refined[, Design][, Browser][, ui:visual-check][, automerge:ok]. [Created `N` child tickets: #`<c1>`, #`<c2>`, ….] [Created companion design ticket #`<D>`.] [Note: milestone/label inheritance was skipped — the parent's metadata could not be fetched, so the created tickets carry only their seed labels and no milestone.]
 >
 > Review the summary above.
 

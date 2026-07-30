@@ -694,6 +694,9 @@ After gathering answers:
    | `In Review` | `A2EEEF` | PR open, under review / CI running |
    | `Implemented` | `6F42C1` | PR merged — done |
    | `Followup` | `C5DEF5` | Deferred/out-of-scope item captured from a session — triage before working |
+   | `Browser` | `BFD4F2` | Implementation needs interactive browser access (Playwright CLI) |
+   | `ui:visual-check` | `FEF2C0` | Visual/layout change — verify in a browser before merge |
+   | `automerge:ok` | `006B75` | Human granted hands-off merge at refinement — babysit may merge this PR without review |
    | `dispatch-failed` | `b60205` | cenci: dispatched work failed after exhausting its retry budget |
    | `plan-invalid` | `d93f0b` | cenci: ticket is Planned but has no parseable plan file |
    | `reconcile-stuck` | `5319e7` | cenci: reconciliation itself is stuck (apply-retry budget exhausted) |
@@ -1810,6 +1813,8 @@ in the completion summary so the user can mirror it as columns on their board:
 | `Followup` | implement Phase 9 / address-review | Deferred/out-of-scope item captured from a session — triage before working; enters backlog unrefined |
 
 `Followup` is orthogonal to the linear lifecycle above — it is never part of the `New → … → Implemented` chain and applies to a separate followup ticket (not the original). It is a capture-queue marker, never release-blocking; it is removed when the item is triaged out of the queue — promoted to real work via `/cenci:refine`, or grouped/superseded via `/cenci:maintain backlog` (see `docs/followup-triage.md`).
+
+`Browser`, `ui:visual-check`, and `automerge:ok` are likewise refine-applied orthogonal markers, not columns in the `New → … → Implemented` chain — like `Followup`, they are not rows in the "Applied by / Meaning" table above, which enumerates board columns only; `automerge:ok` in particular is a per-ticket grant made by `/cenci:refine` at refinement time, with no repo-level default (there is no `automerge.defaultRisk` setting).
 
 A ticket judged trivial by implement's Trivial-Ticket Triage still transits through `Planned` — same labels, same board columns as any other ticket — just collapsed into one session instead of a stop-and-relaunch between `Planned` and `Working`. No new label state is introduced by the trivial-ticket fast path.
 
