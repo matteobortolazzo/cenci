@@ -47,14 +47,15 @@
 # in-root absolute Bash target still falls through to the exact same
 # allowlist/TMPDIR-widening/block logic as the Write|Edit arm.
 #
-# RELATIVE Bash targets get their own, separate policy (#810 Fix 2): this
-# hook process's cwd is not trustworthy evidence of where a relative target
-# actually resolves, since the command text itself can `cd` first. A relative
-# target is therefore never resolved against cwd or the repo-root scope
-# pre-check at all -- it is lexically collapsed and checked directly against
-# bash_target_allowed's relative-path arms (.plans/*, .worktrees/*,
-# .claude/plans/*, designs/*, *.pen, DESIGN.md); anything else blocks, naming
-# the cwd-uncertainty explicitly (see the per-target loop below).
+# PARSED RELATIVE Bash targets get their own, separate policy (#810 Fix 2):
+# this hook process's cwd is not trustworthy evidence of where a relative
+# target actually resolves, since the command text itself can `cd` first.
+# Even a lexically allowlisted shape can resolve under the wrong directory
+# or traverse a symlink in the command's effective cwd. Extracted relative
+# targets are therefore rejected; callers must use an absolute target so it
+# can be canonicalized before the allowlist/repo-scope decision. Constructs
+# that produce zero extracted targets retain the bounded backstop/residual
+# documented in the Bash-arm comment below and adapter-contract.md.
 
 # Only enforce in repos configured for cenci. .cenci/config.json is canonical;
 # .claude/config.json remains a read-only migration signal. In unconfigured repos this
@@ -274,15 +275,15 @@ bash_target_allowed() {
   _bt_path="$1"
   case "$_bt_path" in
     # Feature worktrees — the intended write target
-    */.worktrees/* | .worktrees/*) return 0 ;;
+    */.worktrees/*) return 0 ;;
     # Plan persistence (implement Phase 1)
-    */.plans/* | .plans/*) return 0 ;;
+    */.plans/*) return 0 ;;
     # Claude Code native Plan Mode storage
-    */.claude/plans/* | .claude/plans/*) return 0 ;;
+    */.claude/plans/*) return 0 ;;
     # Temp paths: body files, context bundles, attachments, scratchpads
     /tmp/* | /private/tmp/* | /var/folders/* | */cenci-attachments-*/*) return 0 ;;
     # Design artifacts live in the main worktree by design (/cenci:design)
-    *.pen | */DESIGN.md | DESIGN.md | */designs/* | designs/*) return 0 ;;
+    *.pen | */DESIGN.md | */designs/*) return 0 ;;
   esac
   # TMPDIR widening (#749) — see the guard above for the full rationale. A
   # quoted "$TMPDIR_ALLOW" is matched literally by POSIX sh case patterns, so
@@ -292,118 +293,6 @@ bash_target_allowed() {
       "$TMPDIR_ALLOW"/*) return 0 ;;
     esac
   fi
-  return 1
-}
-
-# bash_command_might_cd <command> -- true (exit 0) when <command>'s raw text
-# contains a DELIMITED "cd" or "pushd" token (a literal token not embedded
-# inside a longer alphanumeric/underscore word -- "cd ", "cd;", "cd|",
-# "$(cd x)", "pushd ", "pushd;" all match; "record", "included", "checked" do
-# not), mirroring bwt_has_delimited_tee's delimited-match design
-# (lib/bash-write-targets.sh) so an alnum-embedded "cd"/"pushd" substring is
-# never mistaken for a real invocation.
-#
-# "pushd" detection added (#810 round-3 stabilization review, Finding 3B):
-# `pushd <main-root> && printf x > flow/should-not-write` is a real
-# directory-change command that this predicate previously missed entirely
-# (`pushd` contains no "cd" substring, so the old cheap pre-check filtered it
-# out before the awk match ever ran) -- a reproduction of regression-2
-# through a different directory-changing builtin. This is a deliberately
-# best-effort, non-exhaustive check, consistent with this file's "no shell
-# interpreter, no eval" constraint (bash has other ways to change directory
-# -- `cd`-via-function-wrapper, `exec bash -c 'cd ...'`, etc. -- enumerating
-# every one of them is the same open-ended shell-grammar trap Finding 1 in
-# lib/bash-write-targets.sh explicitly rejects chasing). `cd` and `pushd`
-# cover the realistic, common cases; the primary correctness backstop for
-# whatever this predicate misses is Fix A below (path-escape detection via
-# relative_target_escapes_upward), which catches the actual harmful outcome
-# (a target resolving outside the feature worktree) regardless of which
-# command form caused the cd-equivalent.
-#
-# Used ONLY to gate the relative-target policy's feature-worktree-root
-# narrowing below (availability fix, #810 second stabilization cycle) --
-# never to gate a block. The narrowing exists to stop an ordinary,
-# non-adversarial command (e.g. `pytest 2> errors.log`) from being wrongly
-# blocked when the hook's own cwd already IS a feature worktree, but the
-# very reason the relative-target policy exists at all is that the command
-# text can `cd`/`pushd` to a DIFFERENT directory before its relative write
-# actually executes -- in which case the hook's cwd (and the RESOLVED_ROOT
-# computed from it) is no longer trustworthy evidence of where that write
-# lands, even though RESOLVED_ROOT itself still looks like a feature
-# worktree (see the regression-2 case this must not weaken: `cd <main-root>
-# && printf x > flow/should-not-write`, run from a feature-worktree hook
-# cwd, has the IDENTICAL feature-worktree-shaped RESOLVED_ROOT as the safe
-# case, and still needs to block). A false positive here (an alnum-embedded
-# "cd"/"pushd" that isn't a real invocation) only costs skipping the
-# narrowing and falling through to the existing, stricter relative-target
-# check -- never a fail-open. Fails closed (true -- "might cd", i.e. skip
-# the narrowing) if awk is unavailable, matching bwt_has_delimited_tee's own
-# fail-closed default.
-bash_command_might_cd() {
-  _bcm_cmd="$1"
-  case "$_bcm_cmd" in
-    *cd* | *pushd*) ;;
-    *) return 1 ;;
-  esac
-  command -v awk >/dev/null 2>&1 || return 0
-  BCM_CMD="$_bcm_cmd" awk 'BEGIN {
-    if (ENVIRON["BCM_CMD"] ~ /(^|[^A-Za-z0-9_])cd([^A-Za-z0-9_]|$)/) exit 0
-    if (ENVIRON["BCM_CMD"] ~ /(^|[^A-Za-z0-9_])pushd([^A-Za-z0-9_]|$)/) exit 0
-    exit 1
-  }'
-}
-
-# relative_target_escapes_upward <relative-path> -- true (exit 0) when
-# lexically walking <relative-path> (an already safe-var-expanded, NOT yet
-# collapsed, relative Bash write target) would require popping more ".."
-# segments than there are preceding real segments to cancel them out -- i.e.
-# the path traverses above the directory it starts from (#810 round-3
-# stabilization review, Finding 3A).
-#
-# This is deliberately NOT implemented by calling lexical_collapse (which is
-# anchored at "/" and silently no-ops an unmatched ".." once its internal
-# stack is empty, e.g. lexical_collapse("/../../AGENTS.md") is "/AGENTS.md",
-# not something that visibly "starts with .."): that anchoring throws away
-# exactly the information this check needs. Walking the RAW (uncollapsed)
-# segments with a simple depth counter preserves it: each real segment
-# increments depth, each ".." decrements it if depth > 0, and each ".." hit
-# at depth 0 sets the escaped flag (there is nothing left to cancel, so this
-# segment necessarily walks above the starting directory).
-#
-# Used by the relative-target policy's feature-worktree-root narrowing below
-# (Fix A): a target that escapes upward must never be waved through by that
-# narrowing, even when RESOLVED_ROOT is itself a feature worktree -- e.g.
-# `printf x > ../../AGENTS.md` run with no `cd` in the command text, from a
-# feature-worktree cwd, resolves (once the shell's real cwd-relative
-# semantics are applied) to the main worktree's AGENTS.md, and must fall
-# through to the normal, stricter relative-target allowlist check instead of
-# being allowed outright.
-relative_target_escapes_upward() {
-  _peu_path="$1"
-  _peu_old_ifs=$IFS
-  IFS='/'
-  set -f
-  # shellcheck disable=SC2086 # intentional IFS='/' word-splitting to
-  # enumerate path segments; globbing is disabled via `set -f` above.
-  set -- $_peu_path
-  set +f
-  IFS=$_peu_old_ifs
-  _peu_depth=0
-  for _peu_seg in "$@"; do
-    case "$_peu_seg" in
-      "" | ".") ;;
-      "..")
-        if [ "$_peu_depth" -gt 0 ]; then
-          _peu_depth=$((_peu_depth - 1))
-        else
-          return 0
-        fi
-        ;;
-      *)
-        _peu_depth=$((_peu_depth + 1))
-        ;;
-    esac
-  done
   return 1
 }
 
@@ -579,21 +468,15 @@ elif [ -n "$BASH_COMMAND" ]; then
   # truncated-but-non-empty parse here still resolves in-root and blocks
   # (path containment degrades safe), unlike the filename-glob guard.
   #
-  # Two narrowings keep this from blocking the pipeline's own bread-and-
-  # butter commands (e.g. `git -C <root>/.worktrees/<id> commit -m "a -> b"`
-  # — a quoted `>`, zero targets, and a root-prefixed path in the text):
-  # 1. A resolved root that is ITSELF a feature worktree is skipped
-  #    entirely — every in-root target there is allowlisted by the
-  #    */.worktrees/* arm anyway, so an unparsed in-root write is allowed
-  #    just as a parsed one would be.
-  # 2. Mentions of the always-allowlisted subtrees (<root>/.worktrees,
-  #    <root>/.plans, <root>/.claude/plans) are neutralized (replaced with a
-  #    newline, which can never glue adjacent text back into a root match)
-  #    before the scan, so referencing a feature-worktree or plan path does
-  #    not read as a main-worktree mention. The neutralization runs in awk
-  #    (index/substr, no regex — root text must match literally); if awk is
-  #    missing the raw text is scanned un-neutralized (fail closed:
-  #    over-block, never allow).
+  # Mentions of the always-allowlisted subtrees (<root>/.worktrees,
+  # <root>/.plans, <root>/.claude/plans) are neutralized (replaced with a
+  # newline, which can never glue adjacent text back into a root match)
+  # before the scan, so a bread-and-butter command such as
+  # `git -C <root>/.worktrees/<id> commit -m "a -> b"` is not blocked merely
+  # because its quoted `>` and allowlisted absolute path produce zero
+  # extracted targets. The neutralization runs in awk (index/substr, no
+  # regex — root text must match literally); if awk is missing the raw text
+  # is scanned un-neutralized (fail closed: over-block, never allow).
   #
   # #810 Fix 2: a zero-parse command containing a DELIMITED tee token
   # (bwt_has_delimited_tee) blocks UNCONDITIONALLY, before the root-mention
@@ -611,11 +494,6 @@ elif [ -n "$BASH_COMMAND" ]; then
   # is an accepted residual of the root-mention scan below (closed by the
   # unconditional tee check above for the tee case specifically).
   if [ -z "$BWT_TARGETS" ]; then
-    case "$RESOLVED_ROOT" in
-      */.worktrees/*)
-        exit 0 # narrowing 1: feature-worktree root — nothing to protect.
-        ;;
-    esac
     if bwt_has_delimited_tee "$BASH_COMMAND"; then
       {
         echo "BLOCKED: guard-main-worktree.sh could not extract this Bash command's write targets (unmodelled construct containing a tee invocation); its target may be relative to the main worktree: $BASH_COMMAND"
@@ -679,67 +557,13 @@ elif [ -n "$BASH_COMMAND" ]; then
         # Relative-target policy (#810 Fix 2): a relative Bash write target
         # cannot be trusted to resolve against this hook process's cwd --
         # the command text itself may `cd` to a different directory before
-        # the write actually executes (e.g. `cd <root> && printf x >
-        # flow/should-not-write` run from a feature-worktree cwd, whose own
-        # path already contains "/.worktrees/" and would otherwise be
-        # wrongly swallowed by the absolute-target */.worktrees/* allowlist
-        # arm below). Lexically collapse the target anchored at "/" (this
-        # also neutralizes a ".plans/../src/x"-style traversal attempt),
-        # then check the collapsed relative form against
-        # bash_target_allowed's relative-path arms (.plans/*, .worktrees/*,
-        # .claude/plans/*, designs/*, *.pen, DESIGN.md) -- the only relative
-        # shapes this guard can verify without trusting cwd. This must run
-        # BEFORE the absolute-target root-scope pre-check/allowlist below,
-        # never after (see this ordering rationale above).
-        #
-        # Availability fix (#810 second stabilization cycle): mirrors
-        # narrowing 1 in the empty-parse backstop above -- when
-        # RESOLVED_ROOT is ITSELF a feature worktree, there is nothing to
-        # protect there, so an ordinary, non-adversarial relative write
-        # (e.g. `pytest 2> errors.log`, `git diff > diff.txt`) should not be
-        # blocked just because it doesn't happen to match the .plans/
-        # .worktrees/ etc. allowlist shapes. Gated on TWO independent
-        # conditions (#810 round-3 stabilization review, Finding 3 hardens
-        # this to require both):
-        #
-        # 1. bash_command_might_cd: the regression-2 case (`cd <main-root>
-        #    && printf x > flow/should-not-write`, run from a
-        #    feature-worktree hook cwd) has the IDENTICAL feature-worktree-
-        #    shaped RESOLVED_ROOT as this safe case, but its `cd`/`pushd`
-        #    moves the actual write outside the feature worktree -- this
-        #    narrowing must never fire there, so it is skipped whenever the
-        #    raw command text contains anything that might be a `cd` or
-        #    `pushd` invocation (bash_command_might_cd), falling through to
-        #    the strict allowlist check below instead.
-        # 2. relative_target_escapes_upward (Finding 3A): even with NO
-        #    `cd`/`pushd` anywhere in the command, a target like
-        #    `../../AGENTS.md` genuinely resolves (via ordinary shell
-        #    cwd-relative semantics, no `cd` required) to somewhere above the
-        #    feature-worktree cwd it started from -- possibly the main
-        #    worktree itself. This must be checked on the RAW (uncollapsed)
-        #    expanded target, before BWT_RELCOLLAPSED below is computed:
-        #    lexical_collapse is anchored at "/" and silently absorbs an
-        #    unmatched leading "..", which would otherwise let an escaping
-        #    path slip through this narrowing undetected.
-        #
-        # The narrowing only fires (continues -- allows) when NEITHER
-        # condition holds; either one skips it, falling through to the
-        # normal, stricter relative-target allowlist check.
-        case "$RESOLVED_ROOT" in
-          */.worktrees/*)
-            if ! bash_command_might_cd "$BASH_COMMAND" && ! relative_target_escapes_upward "$BWT_EXPANDED"; then
-              continue
-            fi
-            ;;
-        esac
-        BWT_RELCOLLAPSED=$(lexical_collapse "/$BWT_EXPANDED")
-        BWT_RELCOLLAPSED="${BWT_RELCOLLAPSED#/}"
-        if bash_target_allowed "$BWT_RELCOLLAPSED"; then
-          continue
-        fi
+        # the write actually executes. Lexical shape is not sufficient
+        # either: `.plans/x` can resolve under a subdirectory rather than
+        # the repo root, and an allowlisted-looking relative path can be a
+        # symlink to protected source.
         {
           echo "BLOCKED: guard-main-worktree.sh cannot verify the relative Bash write target '$BWT_EXPANDED' in: $BASH_COMMAND"
-          echo "The relative write target cannot be verified against the command's effective cwd (the command may cd before writing); use an absolute path, or one of the allowlisted relative forms (.plans/, .worktrees/, .claude/plans/, designs/, *.pen, DESIGN.md)."
+          echo "The relative write target cannot be verified against the command's effective cwd or canonicalized safely; use an absolute feature-worktree, plan, design, or temp path."
         } >&2
         exit 2
         ;;

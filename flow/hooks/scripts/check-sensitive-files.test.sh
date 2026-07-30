@@ -552,6 +552,13 @@ else
     fail "bash brace expansion tee target blocked: stderr should name the unsupported brace-expansion construct, got: ${CHECK_STDERR}"
 fi
 
+echo "case: a backslash-newline cannot hide a brace range that expands to .env"
+BASH_CMD=$'tee .{e.\\\n.f}nv'
+JSON=$(jq -n --arg cmd "${BASH_CMD}" '{tool_input:{command:$cmd}}')
+run_check "${JSON}"
+assert_exit "bash continued brace range targeting .env blocked" 2
+assert_blocked_stderr "bash continued brace range targeting .env blocked"
+
 echo "case: Bash command with an unquoted brace-expansion write target is blocked even with no sensitive marker at all (#810 Fix 1, Q3 unconditional block)"
 BASH_CMD="tee ${BRACE_DIR}/{a,b}.txt"
 JSON=$(jq -n --arg cmd "${BASH_CMD}" '{tool_input:{command:$cmd}}')
@@ -599,6 +606,18 @@ if [[ "${CHECK_STDERR}" == *"cannot be safely resolved"* ]]; then
     pass
 else
     fail "bash [[ -n \"\$(printf x > .env)\" ]] blocked: stderr should name the unsupported double-quoted-nested-substitution construct, got: ${CHECK_STDERR}"
+fi
+
+echo "case: a backslash-newline cannot hide a double-quoted \$( ) command substitution from the sensitive-file guard"
+BASH_CMD=$'[[ -n "$\\\n(printf x > ordinary.txt)" ]]'
+JSON=$(jq -n --arg cmd "${BASH_CMD}" '{tool_input:{command:$cmd}}')
+run_check "${JSON}"
+assert_exit "bash backslash-newline-spliced double-quoted command substitution blocked" 2
+assert_blocked_stderr "bash backslash-newline-spliced double-quoted command substitution blocked"
+if [[ "${CHECK_STDERR}" == *"cannot be safely resolved"* ]]; then
+    pass
+else
+    fail "bash backslash-newline-spliced double-quoted command substitution: stderr should name the unsupported construct, got: ${CHECK_STDERR}"
 fi
 
 # ── #795 final round: historical-bypass regression table ────────────

@@ -95,6 +95,13 @@ assert_extract_exit() {
     else
         fail "${label}: bwt_extract_targets exit=${actual_exit}, expected ${expected} (output=<${actual_out}>)"
     fi
+    if [[ "${expected}" -ne 0 ]]; then
+        if [[ -z "${actual_out}" ]]; then
+            pass
+        else
+            fail "${label}: non-zero extraction emitted partial output <${actual_out}>"
+        fi
+    fi
 }
 
 assert_expand() {
@@ -453,6 +460,9 @@ assert_extract_exit "echo x > /repo/f{1,2}.txt (comma form, redirect target) ret
     "echo x > /repo/f{1,2}.txt" 6
 assert_extract_exit "echo x > /repo/f{1..3} (range form, redirect target) returns exit 6" \
     "echo x > /repo/f{1..3}" 6
+CONTINUED_BRACE_RANGE=$'tee .{e.\\\n.f}nv'
+assert_extract_exit "a backslash-newline cannot hide a brace range that expands to .env" \
+    "${CONTINUED_BRACE_RANGE}" 6
 assert_extract_exit "tee -a /repo/{a,b} (comma form, tee operand after option) returns exit 6" \
     "tee -a /repo/{a,b}" 6
 
@@ -750,6 +760,16 @@ assert_targets "[[ -e <(printf x > .env) ]] -- the process-substitution write is
     "[[ -e <(printf x > ${TEST_ROOT}/round5-procsub.env) ]]" \
     "${TEST_ROOT}/round5-procsub.env"
 
+echo "case: backslash-newline removal is honored before unquoted command/process-substitution marker recognition"
+CONTINUED_UNQUOTED_CMDSUB="$(printf '[[ $\\\n(printf x > %s) ]]' "${TEST_ROOT}/round5-continued-cmdsub.env")"
+assert_targets "a continued \$( marker still exposes its nested write" \
+    "${CONTINUED_UNQUOTED_CMDSUB}" \
+    "${TEST_ROOT}/round5-continued-cmdsub.env"
+CONTINUED_UNQUOTED_PROCSUB="$(printf '[[ -e <\\\n(printf x > %s) ]]' "${TEST_ROOT}/round5-continued-procsub.env")"
+assert_targets "a continued <( marker still exposes its nested write" \
+    "${CONTINUED_UNQUOTED_PROCSUB}" \
+    "${TEST_ROOT}/round5-continued-procsub.env"
+
 # Non-regression: every prior legitimate-region case with NO substitution
 # inside must still correctly suppress its comparison operator.
 echo "case: legitimate comparison regions with no nested substitution still correctly suppress (round-5 non-regression)"
@@ -771,6 +791,12 @@ echo "case: a real write hidden inside \${ cmd; } funsub nested in [[ ]] is extr
 assert_targets "echo ok > .ok ; [[ -n \${ printf x > .env; } ]] -- both the decoy and the nested-funsub write are extracted" \
     "echo ok > ${TEST_ROOT}/round6-funsub1.ok ; [[ -n \${ printf x > ${TEST_ROOT}/round6-funsub1.env; } ]]" \
     "$(printf '%s\n%s' "${TEST_ROOT}/round6-funsub1.ok" "${TEST_ROOT}/round6-funsub1.env")"
+
+echo "case: backslash-newline removal is honored around an unquoted function-substitution marker"
+CONTINUED_UNQUOTED_FUNSUB="$(printf '[[ -n $\\\n{\\\n printf x > %s; } ]]' "${TEST_ROOT}/round6-continued-funsub.env")"
+assert_targets "continued \${ plus continued post-brace whitespace still exposes the nested write" \
+    "${CONTINUED_UNQUOTED_FUNSUB}" \
+    "${TEST_ROOT}/round6-continued-funsub.env"
 
 echo "case: legitimate parameter expansion \${x} / \${y} (no space/pipe after \${) still correctly suppresses (round-6 non-regression)"
 assert_targets "[[ \${x} > \${y} ]] emits no write target" '[[ ${x} > ${y} ]]' ""
@@ -804,6 +830,12 @@ assert_targets "(( \${ printf 1 > .env; } > 0 )) -- both the nested-funsub write
 echo "case: a real write hidden inside a double-quoted \$( ) command substitution nested in [[ ]] fails closed (exit 7)"
 assert_extract_exit "[[ -n \"\$(printf x > .env)\" ]] -- the double-quoted \$( ) substitution fails the whole extraction closed" \
     "[[ -n \"\$(printf x > ${TEST_ROOT}/round7-dq-cmdsub.env)\" ]]" \
+    7
+
+echo "case: a backslash-newline cannot hide a double-quoted \$( ) command substitution nested in [[ ]]"
+DQ_CONTINUED_CMDSUB=$'[[ -n "$\\\n(printf x > .env)" ]]'
+assert_extract_exit "Bash removes backslash-newline before recognizing the double-quoted command substitution, so extraction fails closed" \
+    "${DQ_CONTINUED_CMDSUB}" \
     7
 
 echo "case: a real write hidden inside a double-quoted \$( ) nested in (( )) fails closed (exit 7)"

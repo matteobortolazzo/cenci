@@ -819,57 +819,63 @@ else
     fail "relative target after cd to main worktree blocked: stderr should name the cwd uncertainty, got: ${GUARD_STDERR}"
 fi
 
+echo "case: shell token composition cannot hide cd before a parsed relative redirect"
+JSON=$(jq -n --arg cmd "c\\d ${WORKTREE_REPRO_REPO} && printf x > flow/should-not-write" '{tool_input:{command:$cmd}}')
+run_guard "${FEATURE_WORKTREE_REPRO}" "${JSON}"
+assert_exit "escaped cd before parsed relative target blocked" 2
+if [[ "${GUARD_STDERR,,}" == *"cwd"* ]]; then
+    pass
+else
+    fail "escaped cd before parsed relative target blocked: stderr should name the cwd uncertainty, got: ${GUARD_STDERR}"
+fi
+
+echo "case: feature-worktree cwd cannot bypass zero-parse relative tee protection"
+JSON=$(jq -n --arg cmd "c\\d ${WORKTREE_REPRO_REPO} && {tee,cat} AGENTS.md" '{tool_input:{command:$cmd}}')
+run_guard "${FEATURE_WORKTREE_REPRO}" "${JSON}"
+assert_exit "escaped cd before zero-parse relative tee target blocked" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "escaped cd before zero-parse relative tee target blocked: stderr should contain BLOCKED, got: ${GUARD_STDERR}"
+fi
+
 echo "case: control -- same command shape with an absolute .worktrees/-scoped target is allowed"
 JSON=$(jq -n --arg cmd "cd ${WORKTREE_REPRO_REPO} && printf x > ${FEATURE_WORKTREE_REPRO}/flow/should-write" '{tool_input:{command:$cmd}}')
 run_guard "${FEATURE_WORKTREE_REPRO}" "${JSON}"
 assert_exit "control: absolute .worktrees-scoped target allowed" 0
 
-# ── Ticket #810 stabilization review (second cycle), availability fix:
-# the relative-target policy's per-target loop had no equivalent to the
-# empty-parse backstop's narrowing 1 (RESOLVED_ROOT itself a feature
-# worktree -- nothing to protect), so an ordinary, non-adversarial command
-# with NO cd (e.g. `pytest 2> errors.log`) run with cwd already inside a
-# feature worktree was wrongly blocked, since its relative target doesn't
-# match any .plans/.worktrees/etc. allowlist shape. Reuses
-# FEATURE_WORKTREE_REPRO (a real feature worktree created via `git worktree
-# add` above) so RESOLVED_ROOT is genuinely feature-worktree-shaped.
-echo "case: an ordinary relative-write command with no cd is allowed from a feature-worktree cwd (availability fix)"
+# Conservative policy: the hook cannot prove that the Bash command preserves
+# its starting cwd. Even when the hook starts inside a feature worktree,
+# non-allowlisted relative targets must use an absolute worktree path.
+echo "case: an ordinary relative-write command is blocked from a feature-worktree cwd"
 JSON=$(jq -n --arg cmd 'pytest 2> errors.log' '{tool_input:{command:$cmd}}')
 run_guard "${FEATURE_WORKTREE_REPRO}" "${JSON}"
-assert_exit "plain relative write, no cd, feature-worktree cwd allowed" 0
-
-echo "case: another ordinary relative-write shape (git diff > diff.txt) with no cd is allowed from a feature-worktree cwd (availability fix)"
-JSON=$(jq -n --arg cmd 'git diff > diff.txt' '{tool_input:{command:$cmd}}')
-run_guard "${FEATURE_WORKTREE_REPRO}" "${JSON}"
-assert_exit "git diff > diff.txt, no cd, feature-worktree cwd allowed" 0
-
-# Critical non-regression: the availability fix must NOT weaken the
-# regression-2 case above -- re-run it explicitly here, right alongside the
-# new availability cases, since both scenarios share the IDENTICAL
-# feature-worktree-shaped RESOLVED_ROOT and are only distinguished by the
-# presence of a `cd` in the raw command text.
-echo "case: non-regression -- relative target after a cd to the main worktree is STILL blocked from a feature-worktree cwd (availability fix must not weaken this)"
-JSON=$(jq -n --arg cmd "cd ${WORKTREE_REPRO_REPO} && printf x > flow/should-not-write" '{tool_input:{command:$cmd}}')
-run_guard "${FEATURE_WORKTREE_REPRO}" "${JSON}"
-assert_exit "availability fix non-regression: relative target after cd to main worktree still blocked" 2
+assert_exit "plain relative write, feature-worktree cwd blocked" 2
 if [[ "${GUARD_STDERR,,}" == *"cwd"* ]]; then
     pass
 else
-    fail "availability fix non-regression: stderr should still name the cwd uncertainty, got: ${GUARD_STDERR}"
+    fail "plain relative write, feature-worktree cwd blocked: stderr should name the cwd uncertainty, got: ${GUARD_STDERR}"
 fi
 
-# ── Ticket #810 round-3 stabilization review, Finding 3 [HIGH]: the
-# availability narrowing above `continue`d (allowed) before checking whether
-# the target actually escapes upward past the feature-worktree root, and
-# bash_command_might_cd only detected a delimited "cd" token, missing
-# "pushd" -- a different directory-changing builtin that reproduces
-# regression-2 through a different command form.
+echo "case: another ordinary relative-write shape is blocked from a feature-worktree cwd"
+JSON=$(jq -n --arg cmd 'git diff > diff.txt' '{tool_input:{command:$cmd}}')
+run_guard "${FEATURE_WORKTREE_REPRO}" "${JSON}"
+assert_exit "git diff > diff.txt, feature-worktree cwd blocked" 2
 
-# Finding 3A: with NO cd/pushd anywhere in the command, a "../.."-relative
-# target still genuinely resolves (via ordinary shell cwd-relative
-# semantics, no cd required) to somewhere above the feature-worktree cwd it
-# started from -- here, the main worktree's own AGENTS.md. This must block,
-# not be waved through by the availability narrowing.
+# Re-run the original regression alongside the conservative cases: their
+# identical feature-worktree hook cwd must not change the decision.
+echo "case: non-regression -- relative target after a cd to the main worktree stays blocked"
+JSON=$(jq -n --arg cmd "cd ${WORKTREE_REPRO_REPO} && printf x > flow/should-not-write" '{tool_input:{command:$cmd}}')
+run_guard "${FEATURE_WORKTREE_REPRO}" "${JSON}"
+assert_exit "relative target after cd to main worktree still blocked" 2
+if [[ "${GUARD_STDERR,,}" == *"cwd"* ]]; then
+    pass
+else
+    fail "relative target after cd to main worktree: stderr should still name the cwd uncertainty, got: ${GUARD_STDERR}"
+fi
+
+# An upward-traversing relative target is one concrete demonstration of why
+# relative resolution against the hook cwd is unsafe.
 echo "case: relative Bash write target traversing upward with .. is blocked even with no cd (Finding 3A regression)"
 JSON=$(jq -n --arg cmd 'printf x > ../../AGENTS.md' '{tool_input:{command:$cmd}}')
 run_guard "${FEATURE_WORKTREE_REPRO}" "${JSON}"
@@ -880,20 +886,15 @@ else
     fail "relative .. traversal with no cd blocked: stderr should contain BLOCKED, got: ${GUARD_STDERR}"
 fi
 
-# Finding 3A non-regression: an ordinary relative write that does NOT
-# traverse upward (the availability fix's own target case) must still be
-# allowed -- re-confirms the case above (lines 836-839) is not weakened by
-# the added escape check.
-echo "case: non-regression -- an ordinary non-traversing relative write with no cd is still allowed from a feature-worktree cwd (Finding 3A must not weaken the availability fix)"
+# A non-traversing relative target follows the same policy because shell
+# syntax can change cwd before the redirect.
+echo "case: non-regression -- an ordinary non-traversing relative write stays blocked from a feature-worktree cwd"
 JSON=$(jq -n --arg cmd 'pytest 2> errors.log' '{tool_input:{command:$cmd}}')
 run_guard "${FEATURE_WORKTREE_REPRO}" "${JSON}"
-assert_exit "non-traversing relative write, no cd, feature-worktree cwd still allowed (Finding 3A non-regression)" 0
+assert_exit "non-traversing relative write, feature-worktree cwd blocked" 2
 
-# Finding 3B: bash_command_might_cd previously only matched a delimited "cd"
-# token; "pushd" (which contains no "cd" substring) evaded it entirely, so
-# `pushd <main-root> && printf x > flow/should-not-write` -- a real
-# directory-change command -- passed as "no cd detected" and the
-# availability narrowing wrongly allowed the main-worktree write.
+# A different directory-changing builtin must yield the same conservative
+# decision; the policy does not depend on recognizing a particular verb.
 echo "case: relative Bash write target after a pushd to the main worktree is blocked from a feature-worktree cwd (Finding 3B regression)"
 JSON=$(jq -n --arg cmd "pushd ${WORKTREE_REPRO_REPO} && printf x > flow/should-not-write" '{tool_input:{command:$cmd}}')
 run_guard "${FEATURE_WORKTREE_REPRO}" "${JSON}"
@@ -904,15 +905,54 @@ else
     fail "relative target after pushd to main worktree blocked: stderr should contain BLOCKED, got: ${GUARD_STDERR}"
 fi
 
-# Pins the pipeline's own documented plan-persist step
-# (flow/skills/implement/phases/phase-1-plan.md): a relative,
-# allowlist-shaped `.plans/`-rooted target must keep working under the new
-# cwd-independent relative-target policy (lexical collapse + allowlist
-# match, never real cwd resolution).
-echo "case: relative .plans/-shaped Bash write target is allowed (pins phase-1-plan.md's documented plan-persist step, #810)"
+# Relative allowlist shapes remain untrusted; the pipeline's own plan-persist
+# step now supplies the absolute repo-root path.
+echo "case: relative .plans/-shaped Bash write target is blocked"
 JSON=$(jq -n --arg cmd 'cat /tmp/x >> .plans/1-foo.md' '{tool_input:{command:$cmd}}')
 run_guard "${BASH_REPO}" "${JSON}"
-assert_exit "relative .plans/ write target allowed" 0
+assert_exit "relative .plans/ write target blocked" 2
+
+echo "case: absolute repo-root .plans target remains allowed"
+JSON=$(jq -n --arg cmd "cat /tmp/x >> ${BASH_REPO}/.plans/1-foo.md" '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "absolute .plans/ write target allowed" 0
+
+echo "case: implement plan persistence uses the absolute repo-root .plans path"
+PHASE_1_PLAN="${SCRIPT_DIR}/../../skills/implement/phases/phase-1-plan.md"
+if grep -qF '>> "<repo-root>/.plans/<filename>"' "${PHASE_1_PLAN}"; then
+    pass
+else
+    fail "phase-1-plan.md should append context through the quoted absolute <repo-root>/.plans path"
+fi
+if grep -qF '>> <repo-root>/.plans/<filename>' "${PHASE_1_PLAN}"; then
+    fail "phase-1-plan.md must quote its absolute .plans target for repo roots containing spaces"
+else
+    pass
+fi
+if grep -qF '>> .plans/<filename>' "${PHASE_1_PLAN}"; then
+    fail "phase-1-plan.md must not append context through a cwd-relative .plans path"
+else
+    pass
+fi
+
+echo "case: a relative allowlist shape is not treated as repo-root-relative from a subdirectory cwd"
+mkdir -p "${BASH_REPO}/src/nested"
+JSON=$(jq -n --arg cmd 'printf x > .plans/pwn' '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}/src/nested" "${JSON}"
+assert_exit "relative .plans/ target from subdirectory blocked" 2
+
+echo "case: a relative .plans symlink cannot escape to a protected source file"
+mkdir -p "${BASH_REPO}/.plans"
+ln -s ../AGENTS.md "${BASH_REPO}/.plans/link.md"
+JSON=$(jq -n --arg cmd 'printf x > .plans/link.md' '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "relative .plans/ symlink escape blocked" 2
+
+echo "case: a relative DESIGN.md symlink cannot escape to a protected source file"
+ln -s AGENTS.md "${BASH_REPO}/DESIGN.md"
+JSON=$(jq -n --arg cmd 'printf x > DESIGN.md' '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "relative DESIGN.md symlink escape blocked" 2
 
 # AC 4 / Requirement C: `>` inside a CLOSED [[ ... ]] / (( ... )) comparison
 # context is not a redirect at all -- must never be classified as a write
@@ -1137,6 +1177,17 @@ if [[ "${GUARD_STDERR}" == *'[[ -n "$(printf x > AGENTS.md)" ]]'* ]]; then
     pass
 else
     fail "[[ -n \"\$(printf x > AGENTS.md)\" ]] blocked: stderr should name the offending command, got: ${GUARD_STDERR}"
+fi
+
+echo "case: a backslash-newline cannot hide a double-quoted \$( ) command substitution from the main-worktree guard"
+BASH_CMD=$'[[ -n "$\\\n(printf x > AGENTS.md)" ]]'
+JSON=$(jq -n --arg cmd "${BASH_CMD}" '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "backslash-newline-spliced double-quoted command substitution blocked" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* && "${GUARD_STDERR}" == *"cannot be safely resolved"* ]]; then
+    pass
+else
+    fail "backslash-newline-spliced double-quoted command substitution: stderr should identify the unsupported construct, got: ${GUARD_STDERR}"
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────

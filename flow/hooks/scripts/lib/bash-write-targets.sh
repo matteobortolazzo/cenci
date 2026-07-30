@@ -861,7 +861,10 @@ bwt_extract_targets() {
         if (c == "{") { bracedepth++ }
         if (c == "," && bracedepth > 0) { bracehasdelim = 1 }
         if (c == "." && bracedepth > 0) {
-          nc = (i <= n) ? substr(cmd, i, 1) : ""
+          # Bash removes backslash-newline before recognizing the two-dot
+          # range delimiter, just as it does for substitution markers.
+          ncpos = logical_next_pos(i, n)
+          nc = (ncpos <= n) ? substr(cmd, ncpos, 1) : ""
           if (nc == ".") bracehasdelim = 1
         }
         if (c == "}" && bracedepth > 0) {
@@ -1177,7 +1180,16 @@ bwt_extract_targets() {
     # hquote==2 branch -- it IS genuinely inert inside double quotes in real
     # bash (bash performs no special handling of `<(`/`>(` inside "..."), so
     # excluding it there is correct.
-    function has_nested_substitution(start_pos, end_pos,   hi, hc, hquote, hesc, hnc, hn2) {
+    # Return the first raw position at or after pos that survives Bash
+    # pre-tokenization removal of backslash-newline pairs.
+    function logical_next_pos(pos, end_pos,   lp) {
+      lp = pos
+      while (lp + 1 <= end_pos && substr(cmd, lp, 1) == bsl && substr(cmd, lp + 1, 1) == nl)
+        lp += 2
+      return lp
+    }
+
+    function has_nested_substitution(start_pos, end_pos,   hi, hc, hquote, hesc, hnc, hn2, hnpos, hn2pos) {
       hquote = 0
       hesc = 0
       hi = start_pos
@@ -1207,10 +1219,12 @@ bwt_extract_targets() {
           # excluded here; that exclusion must stay.
           if (hc == "`") return 2
           if (hc == "$") {
-            hnc = (hi + 1 <= end_pos) ? substr(cmd, hi + 1, 1) : ""
+            hnpos = logical_next_pos(hi + 1, end_pos)
+            hnc = (hnpos <= end_pos) ? substr(cmd, hnpos, 1) : ""
             if (hnc == "(") return 2
             if (hnc == "{") {
-              hn2 = (hi + 2 <= end_pos) ? substr(cmd, hi + 2, 1) : ""
+              hn2pos = logical_next_pos(hnpos + 1, end_pos)
+              hn2 = (hn2pos <= end_pos) ? substr(cmd, hn2pos, 1) : ""
               if (hn2 == " " || hn2 == "\t" || hn2 == "\n" || hn2 == "|") return 2
             }
           }
@@ -1223,10 +1237,12 @@ bwt_extract_targets() {
 
         if (hc == "`") return 1
         if (hc == "$" || hc == "<" || hc == ">") {
-          hnc = (hi + 1 <= end_pos) ? substr(cmd, hi + 1, 1) : ""
+          hnpos = logical_next_pos(hi + 1, end_pos)
+          hnc = (hnpos <= end_pos) ? substr(cmd, hnpos, 1) : ""
           if (hnc == "(") return 1
           if (hc == "$" && hnc == "{") {
-            hn2 = (hi + 2 <= end_pos) ? substr(cmd, hi + 2, 1) : ""
+            hn2pos = logical_next_pos(hnpos + 1, end_pos)
+            hn2 = (hn2pos <= end_pos) ? substr(cmd, hn2pos, 1) : ""
             if (hn2 == " " || hn2 == "\t" || hn2 == "\n" || hn2 == "|") return 1
           }
         }
