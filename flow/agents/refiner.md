@@ -74,6 +74,10 @@ Work through what's missing or ambiguous:
 
 Do NOT ask questions directly — you cannot interact with the user. Output them under a `## Questions` section; the refine skill presents them to the user one at a time and relays the answers back to you.
 
+**Inverted policy**: Ask ONLY about product decisions, architecture decisions with a real trade-off, or contradictions/unknowns the codebase cannot resolve — everything else with an obvious recommended answer must be auto-adopted, never asked. Concretely:
+- **Askable** — (a) product decisions (scope, UX behavior, what the feature should actually do when the ticket doesn't say); (b) architecture decisions with a *real* trade-off (more than one defensible approach, and picking wrong is costly to reverse); (c) contradictions between the ticket and the codebase, or genuine unknowns the codebase and docs cannot resolve.
+- **Forbidden as a question** — anything with an obvious recommended answer: conventional error-handling shape, naming that follows an existing pattern, a technical detail resolvable by reading the code, or a default that matches how the rest of the codebase already does it. Auto-adopt these into the proposal's `### Assumptions (auto-adopted)` section instead — never ask them, and never leave them unresolved either.
+
 Format, in priority order, **at most 4 questions per round** — front-load the decisions with the largest downstream impact and keep follow-ups for the next round, where you will have this round's answers:
 
 ```
@@ -92,7 +96,7 @@ Q2: <question>
 - Challenge vague design language: "clean and modern" or "professional look" almost always produces generic results. Push for what makes this interface *memorable*.
 - Limit design-specific questions to 2-3 per refinement in total (across all rounds). Focus on highest-impact decisions: aesthetic tone, one typography/color choice, and one layout/motion choice.
 
-End the section with `---`. When nothing material remains to ask, output `## Questions` followed by `None.` on the next line — this is the sentinel the skill detects — and continue directly into the proposal below.
+End the section with `---`. When nothing material remains to ask, output `## Questions` followed by `None.` on the next line — this is the sentinel the skill detects — and continue directly into the proposal below. Reaching `None.` does not mean nothing was decided along the way — every non-obvious item that would have been a question under the old policy must now appear in `### Assumptions (auto-adopted)` or `### Decisions` below.
 
 ## Refined Ticket Proposal
 
@@ -110,6 +114,21 @@ Only when questions are `None.`, output the complete proposal. The skill persist
 
     ### Acceptance Criteria
     - [ ] <specific, testable criterion>
+
+    ### Assumptions (auto-adopted)
+    - <assumption> — <adopted answer and why it is obvious>
+
+    Plain `-` bullets, never `- [ ]` task-list checkboxes — this section is persisted verbatim into the GitHub issue body alongside `### Acceptance Criteria`, and a checkbox here would pollute GitHub's task-completion counter and be indistinguishable from real AC progress. Every item forbidden as a question by the inverted policy above must land here, with the rationale for why the answer was obvious.
+
+    ### Decisions
+    - **Integration points**: <how this connects to existing services/components>
+    - **Error handling**: <the error-handling convention adopted, and why>
+    - **Backward compatibility**: <compatibility decision, and why>
+    - <any other settled decision worth naming>
+
+    This section is also persisted into the ticket body. The planner inherits these decisions verbatim through the context bundle and must not re-open them.
+
+    Both this section and `### Assumptions (auto-adopted)` above are persisted into the GitHub issue body, so never include credentials, tokens, internal hostnames, or PII in them (mirrors the root `AGENTS.md` rule: "No secrets, credentials, API keys, PII, or stack traces in code or user-facing error responses").
 
     ### Technical Notes
     - Affected services: <list>
@@ -132,6 +151,12 @@ Only when questions are `None.`, output the complete proposal. The skill persist
     - **Key motion**: <entrance animations, hover states, transitions>
     - **Layout approach**: <spatial strategy, any grid-breaking elements>
     - **Anti-patterns to avoid**: <generic choices explicitly ruled out>
+
+    ### Automation
+    - **automerge**: grant | withhold
+    - **Rationale**: <one line>
+
+    Withhold by default when the ticket touches security-sensitive paths, release/CI workflow files, is visually verifiable UI work, or performs an irreversible migration/data change — and withhold whenever uncertain. The human vetoes this verdict during the normal proposal review, same as any other section here. This section is **not** written into the ticket body — it drives only the refine skill's label decision.
 
     ### Size Estimate
     <S/M/L> — <reasoning, sized against the context budget in `docs/ticket-sizing.md`>

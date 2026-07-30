@@ -1,9 +1,29 @@
 # Codex refine procedure
 
 Read `project-core` and `codex-runtime`. Require `/plan`. Gather ticket context, classify
-frontend/design scope, ask material scope and acceptance questions, and produce the refined
-ticket proposal. Do not edit GitHub in Plan mode. Hand off `$cenci:refine apply <ticket>
+frontend/design scope, and produce the refined ticket proposal. Ask ONLY about product
+decisions, architecture decisions with a real trade-off, or contradictions/unknowns the
+codebase cannot resolve — everything else with an obvious recommended answer must be
+auto-adopted, never asked, into the proposal's `### Assumptions (auto-adopted)` section
+(plain `-` bullets, never task-list checkboxes: `- <assumption> — <adopted answer and why
+it is obvious>`). Also carry a `### Decisions` section (integration points, error-handling
+convention, backward-compatibility decision, plus any other settled decision) — both
+sections persist into the ticket body alongside `### Acceptance Criteria`, and the planner
+inherits them verbatim and must not re-open them. Carry an `### Automation` verdict
+(`grant`/`withhold` plus a one-line rationale) — withhold by default for security-sensitive
+paths, release/CI workflow files, visually verifiable UI work, or irreversible
+migration/data changes, and whenever uncertain; this section is not written into the ticket
+body. Do not edit GitHub in Plan mode. Hand off `$cenci:refine apply <ticket>
 <approved-plan>` to normal mode, then update the ticket and labels and clear the checkpoint.
+
+**`automerge:ok` grant (apply mode, parent ticket only)**: as part of the same label edit
+that applies `Refined`/`Design`/`Browser`, compute the effective grant — refiner verdict is
+grant AND NOT isDesignTicket AND NOT browserRequired AND NOT the `ui:visual-check` signal
+match — ensure the label exists (`gh label create "automerge:ok" --repo <owner>/<repo>
+--color "006B75" --description "Human granted hands-off merge at refinement — babysit may
+merge this PR without review" 2>/dev/null || true`), then append `--add-label
+"automerge:ok"` when the effective grant holds, or `--remove-label "automerge:ok"` when it
+does not and the issue currently carries the label (re-refine), or nothing otherwise.
 When a split is applied, link each child of the split to the parent as a native GitHub sub-issue
 (`gh issue edit <child> --parent <parent>`) — do not append a child-ticket markdown checklist; the
 native sub-issue list carries the enumeration. Every ticket this workflow creates — each split child
