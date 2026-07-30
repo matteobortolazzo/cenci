@@ -24,6 +24,17 @@ const (
 	reasonStageProbeUnknown  = "pipeline stage probe unrecognized"
 )
 
+// Main-sync gate skip reasons (#822). reasonMainSyncUnknown is deliberately
+// distinct from reasonMainSyncFailed for the same reason reasonStageProbeUnknown
+// is distinct from reasonPipelineUnreadable above: a regression collapsing the
+// default branch into a known case must be caught by a content-specific
+// assertion (#446/#598), not silently pass.
+const (
+	reasonMainDiverged    = "local main diverged"
+	reasonMainSyncFailed  = "local main sync failed"
+	reasonMainSyncUnknown = "local main sync probe unrecognized"
+)
+
 // Inputs is the full, explicit input to Decide. Now is an injected clock value
 // and Snapshot is nil when the daemon is unreachable — both keep Decide pure.
 type Inputs struct {
@@ -86,6 +97,17 @@ func planKey(repo string, id int) string {
 func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatchedThisPass int, dispatchedChildByParent map[string]int) Decision {
 	skip := func(reason string) Decision {
 		return Decision{Ticket: t, Action: ActionSkip, Reason: reason}
+	}
+
+	// Pickup rule 0: local main sync (#822). Evaluated first, before every
+	// other gate -- plan freshness (CommitsBehind) and the pipeline stage
+	// gate are both computed against the local tree, so nothing downstream
+	// in this chain is trustworthy when main failed to sync. A repo whose
+	// sync was never attempted or itself skipped (MainSyncSkipped, the zero
+	// value) or whose fetch merely failed transiently (MainSyncFetchFailed,
+	// self-heals next pass) is deliberately left ungated.
+	if reason, gated := mainSyncSkip(t); gated {
+		return skip(reason)
 	}
 
 	// Pickup rule 1: board state.
@@ -306,6 +328,27 @@ func stageGateSkip(t Ticket) (string, bool) {
 		// this branch into StageProbeError is caught by assertion, per
 		// #446/#598.
 		return reasonStageProbeUnknown, true
+	}
+}
+
+// mainSyncSkip evaluates the local-main-sync gate (#822) for t. It returns
+// (reason, true) when t's repo failed to sync main and every ticket in that
+// repo must be skipped, and ("", false) when the gate passes -- including
+// MainSyncFetchFailed, which is deliberately left ungated since a transient
+// fetch failure self-heals next pass.
+func mainSyncSkip(t Ticket) (string, bool) {
+	switch t.MainSync {
+	case MainSyncSkipped, MainSyncSynced, MainSyncFetchFailed:
+		return "", false
+	case MainSyncDiverged:
+		return reasonMainDiverged, true
+	case MainSyncFailed:
+		return reasonMainSyncFailed, true
+	default:
+		// Unrecognized MainSync value: default-deny with its own distinct
+		// reason (not reasonMainSyncFailed) so a regression collapsing this
+		// branch is caught by assertion, per #446/#598.
+		return reasonMainSyncUnknown, true
 	}
 }
 

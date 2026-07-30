@@ -37,11 +37,17 @@ func currentGitHubLogin() (string, error) {
 // run's gh usage. A failure on one repo does not block collection from the rest:
 // every repo is attempted, and any per-repo failures are joined into the
 // returned error so the caller's log names every failing repo, not just the first.
-func CollectTickets(repos []RepoConfig) ([]Ticket, error) {
+//
+// mainSync stamps each collected ticket with its repo's local-main-sync
+// outcome (#822, collector-filled, mirrors Stage/StageProbe). A nil map (the
+// reconciler's CollectTickets call, which deliberately never syncs) leaves
+// every ticket at the ungated zero value (MainSyncSkipped) -- a nil-map
+// lookup is safe in Go and needs no special-casing here.
+func CollectTickets(repos []RepoConfig, mainSync map[string]MainSync) ([]Ticket, error) {
 	var out []Ticket
 	var errs []error
 	for _, rc := range repos {
-		tickets, err := collectRepoTickets(rc)
+		tickets, err := collectRepoTickets(rc, mainSync[rc.Repo])
 		if err != nil {
 			errs = append(errs, err)
 			continue
@@ -51,7 +57,7 @@ func CollectTickets(repos []RepoConfig) ([]Ticket, error) {
 	return out, errors.Join(errs...)
 }
 
-func collectRepoTickets(rc RepoConfig) ([]Ticket, error) {
+func collectRepoTickets(rc RepoConfig, sync MainSync) ([]Ticket, error) {
 	repo := rc.Repo
 	data, err := exec.Command("gh", "issue", "list",
 		"--repo", repo, "--state", "open",
@@ -99,6 +105,7 @@ func collectRepoTickets(rc RepoConfig) ([]Ticket, error) {
 			Agent:      agentFromLabels(labels),
 			Stage:      stage,
 			StageProbe: probe,
+			MainSync:   sync,
 		})
 	}
 	return tickets, nil

@@ -22,6 +22,23 @@ func installFakeGH(t *testing.T, script string) {
 	t.Setenv("PATH", dir)
 }
 
+// installFakeGHOnPath installs a fake `gh` exactly like installFakeGH, but
+// PREPENDS its directory to PATH rather than replacing PATH wholesale. Any
+// test that also exercises the #822 main-sync path (syncMain/syncMains, or a
+// RunOnce/RunReconcileOnce pass over a real repo) needs the real `git` binary
+// to remain resolvable -- installFakeGH's PATH replacement would make `git`
+// unresolvable and silently reclassify every repo as MainSyncFailed, a
+// green-looking false pass (see mainsync_test.go's wiring tests).
+func installFakeGHOnPath(t *testing.T, script string) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gh")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 func TestCurrentGitHubLogin(t *testing.T) {
 	t.Run("returns trimmed active login", func(t *testing.T) {
 		installFakeGH(t, "printf 'OctoCat\\n'\n")
@@ -58,12 +75,67 @@ case "$1 $2" in
 esac
 `)
 
-	tickets, err := collectRepoTickets(RepoConfig{Repo: "o/r"})
+	tickets, err := collectRepoTickets(RepoConfig{Repo: "o/r"}, MainSyncSkipped)
 	if err != nil {
 		t.Fatalf("collectRepoTickets returned unexpected error: %v", err)
 	}
 	if len(tickets) != 1 || !equalStrings(tickets[0].Assignees, []string{"octocat"}) {
 		t.Fatalf("tickets = %+v, want one ticket assigned to octocat", tickets)
+	}
+}
+
+// twoIssuesFakeGHScript returns two open issues (numbers 10 and 11) and no
+// open PRs, for the #822 collector-stamping tests below.
+const twoIssuesFakeGHScript = `
+case "$1 $2" in
+  "issue list") printf '[{"number":10,"title":"First"},{"number":11,"title":"Second"}]' ;;
+  "pr list") printf '[]' ;;
+  *) exit 1 ;;
+esac
+`
+
+// TestCollectTickets_StampsMainSyncFromMap covers plan test 19: every ticket
+// collected from a repo present in the mainSync map is stamped with that
+// repo's outcome.
+func TestCollectTickets_StampsMainSyncFromMap(t *testing.T) {
+	installFakeGHOnPath(t, twoIssuesFakeGHScript)
+
+	repos := []RepoConfig{{Repo: "o/r"}}
+	mainSync := map[string]MainSync{"o/r": MainSyncDiverged}
+
+	tickets, err := CollectTickets(repos, mainSync)
+	if err != nil {
+		t.Fatalf("CollectTickets returned unexpected error: %v", err)
+	}
+	if len(tickets) != 2 {
+		t.Fatalf("got %d tickets, want 2: %+v", len(tickets), tickets)
+	}
+	for _, tk := range tickets {
+		if tk.MainSync != MainSyncDiverged {
+			t.Errorf("ticket #%d MainSync = %q, want MainSyncDiverged", tk.Number, tk.MainSync)
+		}
+	}
+}
+
+// TestCollectTickets_NilMainSyncMapLeavesZeroValue covers plan test 20: the
+// reconciler's CollectTickets(repos, nil) call must leave every ticket at the
+// ungated zero value, never panicking on a nil map lookup.
+func TestCollectTickets_NilMainSyncMapLeavesZeroValue(t *testing.T) {
+	installFakeGHOnPath(t, twoIssuesFakeGHScript)
+
+	repos := []RepoConfig{{Repo: "o/r"}}
+
+	tickets, err := CollectTickets(repos, nil)
+	if err != nil {
+		t.Fatalf("CollectTickets returned unexpected error: %v", err)
+	}
+	if len(tickets) != 2 {
+		t.Fatalf("got %d tickets, want 2: %+v", len(tickets), tickets)
+	}
+	for _, tk := range tickets {
+		if tk.MainSync != MainSyncSkipped {
+			t.Errorf("ticket #%d MainSync = %q, want the zero value MainSyncSkipped with a nil sync map", tk.Number, tk.MainSync)
+		}
 	}
 }
 
@@ -82,7 +154,7 @@ func TestCollectTicketsAttemptsEveryRepoOnFailure(t *testing.T) {
 		{Repo: "o/nonexistent-c", Dir: t.TempDir()},
 	}
 
-	tickets, err := CollectTickets(repos)
+	tickets, err := CollectTickets(repos, nil)
 
 	if err == nil {
 		t.Fatal("expected a joined error from three failing repos, got nil")
@@ -109,7 +181,7 @@ func TestCollectTicketsJoinsMultipleErrors(t *testing.T) {
 		{Repo: "o/nonexistent-y", Dir: t.TempDir()},
 	}
 
-	_, err := CollectTickets(repos)
+	_, err := CollectTickets(repos, nil)
 	if err == nil {
 		t.Fatal("expected a non-nil joined error")
 	}

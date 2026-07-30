@@ -320,7 +320,7 @@ cenci dispatch --reconcile
 | `--once` | Run a single dispatch pass then exit (the default when neither `--once` nor `--interval` is given) |
 | `--interval <dur>` | Re-run on this interval (e.g. `5m`); mutually exclusive with `--once` |
 | `--reconcile` | Run one failure-reconciliation pass instead of a dispatch pass (see [Failure reconciliation](#failure-reconciliation)); pair with a cron entry |
-| `--dry-run` | Print the decision (or reconciliation) table and mutate nothing |
+| `--dry-run` | Print the decision (or reconciliation) table and never merge; it still runs the local-main sync's `git fetch` for real (updates each enrolled repo's remote-tracking refs only, so the decision table reflects an accurate gate) — see [Pickup rules and gates](#pickup-rules-and-gates) |
 | `--config <path>` | Config file (default: `$XDG_CONFIG_HOME/cenci/config.json`) |
 | `--model <model>` | Model override for every session dispatched this pass — overrides `dispatch.model` and `agents.*.model` in `config.json`. With `--interval`, re-applied on every tick (a config reload can't drop it). |
 
@@ -414,28 +414,58 @@ reconcile invocations likewise exit nonzero when their pass fails.
 A ticket is dispatched only when **all** of these hold, evaluated in order (the first
 failing gate is the logged skip reason):
 
-1. carries `Planned`, not `Blocked`, has no open linked PR, and its persisted pipeline
+1. **local `main` sync** — the ticket's repo's local `main` checkout synced cleanly
+   with `origin/main` this pass (see [Local main sync](#local-main-sync) below);
+2. carries `Planned`, not `Blocked`, has no open linked PR, and its persisted pipeline
    stage is not `finalized`;
-2. a matching plan for the ticket exists with `status: planned`;
-3. the plan is fresh — default-branch commits since its `planCommitSha` are within
+3. a matching plan for the ticket exists with `status: planned`;
+4. the plan is fresh — default-branch commits since its `planCommitSha` are within
    `planStalenessTolerance` (else `plan stale, re-plan`); when the plan's front
    matter lists `stalenessPaths`, only commits touching those paths are counted
    (see [Path-aware staleness](#path-aware-staleness) below);
-4. **siblings serialize** — if the plan is a child (`isChild: true`), it waits while
+5. **siblings serialize** — if the plan is a child (`isChild: true`), it waits while
    any sibling (same `parentId`) is active (`Working`, an open PR, or a running
    window) or was already dispatched this pass, so at most one child per parent runs
    at a time;
-5. the daemon is reachable (else `daemon unreachable` — never dispatch on unknown
+6. the daemon is reachable (else `daemon unreachable` — never dispatch on unknown
    state);
-6. fewer than `needInputThreshold` windows are awaiting input;
-7. `running + dispatched-this-pass` is below `concurrencyCap`;
-8. the daily quota is not yet spent;
-9. the current local time is outside `quietHours`;
-10. the resolved agent still has budget (see [Usage budgets](#usage-budgets) — when
+7. fewer than `needInputThreshold` windows are awaiting input;
+8. `running + dispatched-this-pass` is below `concurrencyCap`;
+9. the daily quota is not yet spent;
+10. the current local time is outside `quietHours`;
+11. the resolved agent still has budget (see [Usage budgets](#usage-budgets) — when
     `agentLimits` is set this is computed from real token usage, otherwise from the
     static `agentBudgetFloors`).
 
-Gate 1's pipeline-stage check reads the ticket's persisted `cenci pipeline` state
+#### Local main sync
+
+Before evaluating any ticket, each dispatch pass runs `git fetch origin` and a
+fast-forward-only merge of `origin/main` into `main`, once per enrolled repo — but
+only when the repo's checkout is currently on `main`; a repo on any other branch (or
+with a detached HEAD) is left untouched and ungated. This runs unconditionally, even
+on a pass with zero collected tickets, and only ever touches `main` — never `--reset`,
+`--force`, or a branch other than `main`.
+
+Each repo's sync lands in one of three outcomes:
+
+- **synced** — `main` is now caught up with (or was already at or ahead of)
+  `origin/main`. Ungated: every ticket in the repo proceeds to the next gate.
+- **fetch-failed, ungated** — `git fetch origin` itself failed (network, auth,
+  unresolvable remote). Left ungated deliberately: transient, and self-heals next
+  pass.
+- **diverged or failed, gated** — local `main` and `origin/main` have both moved
+  independently (`local main diverged`), or the fast-forward merge itself failed for
+  some other reason, e.g. a dirty tracked file it would overwrite (`local main sync
+  failed`). Either way every ticket in that repo is skipped this pass, since plan
+  freshness and the pipeline-stage gate below are both computed against the local
+  tree and are not trustworthy until a human resolves the underlying git state.
+
+This gate is scoped to `main` only — repos whose default branch isn't literally named
+`main` are never synced or gated by this rule. `--dry-run` still performs the real
+`git fetch` and classification (an accurate decision table needs it) but never runs
+the merge itself.
+
+Gate 2's pipeline-stage check reads the ticket's persisted `cenci pipeline` state
 (`.cenci/pipeline/<id>.json`) and skips only on `finalized` — deliberately not "at or
 past `executed`": `cenci pipeline execute` fires at the *start* of Phase 2, so an
 `executed`-based threshold would also swallow every agent that crashed

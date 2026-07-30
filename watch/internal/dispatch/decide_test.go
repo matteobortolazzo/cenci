@@ -644,3 +644,87 @@ func TestDecideStageGate_Determinism(t *testing.T) {
 		}
 	}
 }
+
+// -- #822: local main sync gate, dedicated tests -----------------------------
+
+// TestDecideMainSyncGate_DivergedRepoSkipsEveryTicket covers plan test 13: a
+// diverged repo (o/a) must skip EVERY ticket in it with exactly "local main
+// diverged" -- including a ticket that would otherwise report "not Planned",
+// which locks in that the main-sync gate is evaluated first in decideTicket's
+// chain, before the board-state gates. A synced repo (o/b) dispatches
+// normally in the same pass, proving the gate is per-repo, not global.
+func TestDecideMainSyncGate_DivergedRepoSkipsEveryTicket(t *testing.T) {
+	in := baseInputs()
+	in.Tickets = []Ticket{
+		{Repo: "o/a", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}, MainSync: MainSyncDiverged},
+		{Repo: "o/a", Number: 43, Labels: nil, MainSync: MainSyncDiverged}, // would otherwise report "not Planned"
+		{Repo: "o/b", Number: 44, Labels: []string{"Planned"}, Assignees: []string{"octocat"}, MainSync: MainSyncSynced},
+	}
+	in.Plans = []Plan{
+		{Repo: "o/a", Path: ".plans/42-x.md", TicketID: 42, Status: "planned"},
+		{Repo: "o/b", Path: ".plans/44-x.md", TicketID: 44, Status: "planned"},
+	}
+	assertDecisions(t, Decide(in), []wantDecision{
+		{42, ActionSkip, "local main diverged", ""},
+		{43, ActionSkip, "local main diverged", ""},
+		{44, ActionDispatch, "dispatch", "claude"},
+	})
+}
+
+// TestDecideMainSyncGate_FailedSkipsWithDistinctReason covers plan test 14:
+// MainSyncFailed skips with exactly "local main sync failed", asserted
+// content-specifically as NOT "local main diverged" (watch/docs/error-handling.md
+// #446 -- a regression collapsing the two failure classes must be caught).
+func TestDecideMainSyncGate_FailedSkipsWithDistinctReason(t *testing.T) {
+	in := baseInputs()
+	in.Tickets[0].MainSync = MainSyncFailed
+
+	got := Decide(in)
+	assertDecisions(t, got, []wantDecision{{42, ActionSkip, "local main sync failed", ""}})
+	if got[0].Reason == "local main diverged" {
+		t.Fatalf("reason %q must not collapse into the diverged reason", got[0].Reason)
+	}
+}
+
+// TestDecideMainSyncGate_FetchFailedIsUngated covers plan test 15: a
+// transient `git fetch` failure must never gate dispatch -- it self-heals
+// next pass.
+func TestDecideMainSyncGate_FetchFailedIsUngated(t *testing.T) {
+	in := baseInputs()
+	in.Tickets[0].MainSync = MainSyncFetchFailed
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+}
+
+// TestDecideMainSyncGate_ExplicitSkippedIsUngated covers plan test 16: an
+// explicit MainSyncSkipped (feature branch checked out, detached HEAD, empty
+// dir, non-main default branch) must dispatch normally.
+func TestDecideMainSyncGate_ExplicitSkippedIsUngated(t *testing.T) {
+	in := baseInputs()
+	in.Tickets[0].MainSync = MainSyncSkipped
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+}
+
+// TestDecideMainSyncGate_ZeroValueIsUngated covers plan test 17: a Ticket
+// literal that never sets MainSync at all (every pre-#822 construction site,
+// including the reconciler's nil-sync-map CollectTickets call) must dispatch
+// normally -- the zero value is the permissive one.
+func TestDecideMainSyncGate_ZeroValueIsUngated(t *testing.T) {
+	in := baseInputs() // in.Tickets[0].MainSync left at its zero value
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+}
+
+// TestDecideMainSyncGate_UnrecognizedValueSkipsWithDistinctReason covers plan
+// test 18: an unregistered MainSync value must default-deny with its own
+// distinct reason, not silently collapse into either known failure reason
+// (watch/docs/go-gotchas.md #598 requires the enum switch's default branch be
+// asserted).
+func TestDecideMainSyncGate_UnrecognizedValueSkipsWithDistinctReason(t *testing.T) {
+	in := baseInputs()
+	in.Tickets[0].MainSync = MainSync("bogus")
+
+	got := Decide(in)
+	assertDecisions(t, got, []wantDecision{{42, ActionSkip, "local main sync probe unrecognized", ""}})
+	if got[0].Reason == "local main diverged" || got[0].Reason == "local main sync failed" {
+		t.Fatalf("unrecognized MainSync must not collapse into a known reason, got %q", got[0].Reason)
+	}
+}

@@ -315,7 +315,11 @@ func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer,
 		out = os.Stdout
 	}
 
-	tickets, err := CollectTickets(cfg.Repos)
+	// The reconciler deliberately never runs the local-main sync (#822):
+	// RunOnce owns it exclusively, once per combined pass (combined.go runs
+	// RunOnce then RunReconcileOnce in the same pass) -- passing nil here
+	// leaves every collected ticket at the ungated zero value.
+	tickets, err := CollectTickets(cfg.Repos, nil)
 	if err != nil {
 		logf(out, "reconcile: collecting tickets: %v\n", err)
 	}
