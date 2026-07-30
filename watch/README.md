@@ -423,17 +423,21 @@ failing gate is the logged skip reason):
    `planStalenessTolerance` (else `plan stale, re-plan`); when the plan's front
    matter lists `stalenessPaths`, only commits touching those paths are counted
    (see [Path-aware staleness](#path-aware-staleness) below);
-5. **siblings serialize** — if the plan is a child (`isChild: true`), it waits while
+5. **ticket dependency gate** — every `Depends on #N` reference in the ticket's body
+   is closed (else `waiting on dependency #N`, or `dependency #N unresolved` when
+   that issue's state couldn't be determined; see
+   [Ticket dependency gate](#ticket-dependency-gate) below);
+6. **siblings serialize** — if the plan is a child (`isChild: true`), it waits while
    any sibling (same `parentId`) is active (`Working`, an open PR, or a running
    window) or was already dispatched this pass, so at most one child per parent runs
    at a time;
-6. the daemon is reachable (else `daemon unreachable` — never dispatch on unknown
+7. the daemon is reachable (else `daemon unreachable` — never dispatch on unknown
    state);
-7. fewer than `needInputThreshold` windows are awaiting input;
-8. `running + dispatched-this-pass` is below `concurrencyCap`;
-9. the daily quota is not yet spent;
-10. the current local time is outside `quietHours`;
-11. the resolved agent still has budget (see [Usage budgets](#usage-budgets) — when
+8. fewer than `needInputThreshold` windows are awaiting input;
+9. `running + dispatched-this-pass` is below `concurrencyCap`;
+10. the daily quota is not yet spent;
+11. the current local time is outside `quietHours`;
+12. the resolved agent still has budget (see [Usage budgets](#usage-budgets) — when
     `agentLimits` is set this is computed from real token usage, otherwise from the
     static `agentBudgetFloors`).
 
@@ -505,6 +509,33 @@ present, gate 3 above counts only default-branch commits that touch those paths
 back to whole-repo commit counting as before. The `cenci` plan template (see its
 `/implement` plan phase) records this field from the project directories the plan
 touches.
+
+#### Ticket dependency gate
+
+A ticket's body may declare it depends on another same-repo issue with a
+line-anchored `Depends on #N` reference — case-insensitive, tolerant of an optional
+leading `- `/`* ` list marker and arbitrary trailing text (e.g.
+`- Depends on #822 (local main sync) since ...`). `Related to #N` and
+`Parallel with #N` never match — only the literal `Depends on` phrase gates dispatch.
+Only bare same-repo `#N` syntax is recognized; cross-repo `owner/repo#N` references
+are out of scope.
+
+Each referenced issue's openness resolves against the pass's own collected open-issue
+set first (no extra API call); a number outside that set falls back to a
+`gh issue view` call, memoized once per repo per pass so N tickets depending on the
+same out-of-window issue cost exactly one call, not N (bounded by a per-pass call
+cap to protect against a ticket body listing an unbounded number of dependencies).
+Gate 5 above blocks the ticket while any referenced issue is still open
+(`waiting on dependency #N`) and fails closed with a distinct reason
+(`dependency #N unresolved`) when an issue's state can't be determined at all.
+
+This gate blocks both planning pickup and implementation pickup — a plan written
+before its dependency merges is considered stale on arrival by gate 4's path-aware
+staleness check in the common case (a same-repo dependency touching shared files),
+so there's little practical benefit to planning before a dependency resolves.
+
+Native GitHub `blockedBy` issue links are not recognized; only body-text
+`Depends on #N` references gate dispatch.
 
 ### Configuration
 

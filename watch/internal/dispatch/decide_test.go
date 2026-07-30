@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -727,4 +728,137 @@ func TestDecideMainSyncGate_UnrecognizedValueSkipsWithDistinctReason(t *testing.
 	if got[0].Reason == "local main diverged" || got[0].Reason == "local main sync failed" {
 		t.Fatalf("unrecognized MainSync must not collapse into a known reason, got %q", got[0].Reason)
 	}
+}
+
+// -- #825: Depends on #N dependency gate -------------------------------------
+
+// TestDecideDependencyGate_SingleClosedDependencyDispatches covers plan test
+// 17: a single DependencyStateClosed dependency does not gate dispatch.
+func TestDecideDependencyGate_SingleClosedDependencyDispatches(t *testing.T) {
+	in := baseInputs()
+	in.Tickets[0].DependsOn = []int{100}
+	in.Tickets[0].DependencyStates = map[int]DependencyState{100: DependencyStateClosed}
+
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+}
+
+// TestDecideDependencyGate_SingleOpenDependencySkipsWaiting covers plan test
+// 18: a single DependencyStateOpen dependency skips with exactly
+// "waiting on dependency #<N>".
+func TestDecideDependencyGate_SingleOpenDependencySkipsWaiting(t *testing.T) {
+	in := baseInputs()
+	in.Tickets[0].DependsOn = []int{100}
+	in.Tickets[0].DependencyStates = map[int]DependencyState{100: DependencyStateOpen}
+
+	want := fmt.Sprintf(reasonDependencyWaitingFmt, 100)
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, want, ""}})
+}
+
+// TestDecideDependencyGate_SingleUnresolvedDependencySkipsDistinctReason
+// covers plan test 19: DependencyStateUnresolved skips with exactly
+// "dependency #<N> unresolved", content-specifically asserted NOT equal to
+// the waiting reason (#446 -- distinct failure classes must never collapse).
+func TestDecideDependencyGate_SingleUnresolvedDependencySkipsDistinctReason(t *testing.T) {
+	in := baseInputs()
+	in.Tickets[0].DependsOn = []int{100}
+	in.Tickets[0].DependencyStates = map[int]DependencyState{100: DependencyStateUnresolved}
+
+	got := Decide(in)
+	want := fmt.Sprintf(reasonDependencyUnresolvedFmt, 100)
+	assertDecisions(t, got, []wantDecision{{42, ActionSkip, want, ""}})
+	if got[0].Reason == fmt.Sprintf(reasonDependencyWaitingFmt, 100) {
+		t.Fatalf("unresolved reason %q must not collapse into the waiting reason", got[0].Reason)
+	}
+}
+
+// TestDecideDependencyGate_MapLookupMissSkipsStateUnrecognized covers plan
+// test 20 (Q2): a DependsOn entry with no matching key in DependencyStates
+// (map lookup miss) skips with exactly "dependency #<N> state unrecognized",
+// content-specifically distinct from both other dependency reasons --
+// #598's asserted-default-branch requirement, matching reasonStageProbeUnknown
+// and reasonMainSyncUnknown's existing convention.
+func TestDecideDependencyGate_MapLookupMissSkipsStateUnrecognized(t *testing.T) {
+	in := baseInputs()
+	in.Tickets[0].DependsOn = []int{100}
+	in.Tickets[0].DependencyStates = map[int]DependencyState{} // 100 absent: lookup miss
+
+	got := Decide(in)
+	want := fmt.Sprintf(reasonDependencyStateUnknownFmt, 100)
+	assertDecisions(t, got, []wantDecision{{42, ActionSkip, want, ""}})
+	if got[0].Reason == fmt.Sprintf(reasonDependencyWaitingFmt, 100) || got[0].Reason == fmt.Sprintf(reasonDependencyUnresolvedFmt, 100) {
+		t.Fatalf("map-lookup-miss reason %q must not collapse into either known dependency reason", got[0].Reason)
+	}
+}
+
+// TestDecideDependencyGate_LowestNumberedBlockerReported covers plan test 21:
+// two open dependencies supplied out of order (DependsOn: [50, 10]) report
+// the lowest blocking number (#10), mirroring blockingSibling's existing
+// "lowest number reported, for determinism" convention.
+func TestDecideDependencyGate_LowestNumberedBlockerReported(t *testing.T) {
+	in := baseInputs()
+	in.Tickets[0].DependsOn = []int{50, 10}
+	in.Tickets[0].DependencyStates = map[int]DependencyState{50: DependencyStateOpen, 10: DependencyStateOpen}
+
+	want := fmt.Sprintf(reasonDependencyWaitingFmt, 10)
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, want, ""}})
+}
+
+// TestDecideDependencyGate_OnlyActuallyBlockingDependencyReported covers plan
+// test 22: a lower-numbered CLOSED dependency and a higher-numbered OPEN one
+// (DependsOn: [3, 9], #3 closed) report only the actually-blocking #9.
+func TestDecideDependencyGate_OnlyActuallyBlockingDependencyReported(t *testing.T) {
+	in := baseInputs()
+	in.Tickets[0].DependsOn = []int{3, 9}
+	in.Tickets[0].DependencyStates = map[int]DependencyState{3: DependencyStateClosed, 9: DependencyStateOpen}
+
+	want := fmt.Sprintf(reasonDependencyWaitingFmt, 9)
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, want, ""}})
+}
+
+// TestDecideDependencyGate_EmptyDependsOnIsUngated covers plan test 23: the
+// zero value (nil DependsOn) -- every pre-#825 Ticket literal -- dispatches
+// normally, unaffected by the new gate.
+func TestDecideDependencyGate_EmptyDependsOnIsUngated(t *testing.T) {
+	in := baseInputs() // in.Tickets[0].DependsOn left at its zero value (nil)
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+}
+
+// TestDecideDependencyGate_OrderingAfterPlanFreshness covers plan test 24: a
+// ticket with both a stale plan and an open dependency skips with
+// "plan stale, re-plan" -- proving Pickup rule 4 (plan freshness) is
+// evaluated before the dependency gate, per the plan's placement decision.
+func TestDecideDependencyGate_OrderingAfterPlanFreshness(t *testing.T) {
+	in := baseInputs()
+	in.Plans[0].CommitsBehind = 10 // stale: exceeds testConfig's tolerance of 5
+	in.Tickets[0].DependsOn = []int{100}
+	in.Tickets[0].DependencyStates = map[int]DependencyState{100: DependencyStateOpen}
+
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "plan stale, re-plan", ""}})
+}
+
+// TestDecideDependencyGate_OrderingBeforeSiblingSerialization covers plan
+// test 25: a plan-fresh, dependency-blocked child ticket whose sibling is
+// also active skips with the dependency reason, not "waiting on sibling
+// #N" -- proving the dependency gate is evaluated before the (renumbered)
+// Pickup rule 6 sibling-serialization check.
+func TestDecideDependencyGate_OrderingBeforeSiblingSerialization(t *testing.T) {
+	in := baseInputs()
+	in.Tickets = []Ticket{
+		{Repo: "o/r", Number: 41, Labels: []string{"Working"}},
+		{
+			Repo: "o/r", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"},
+			DependsOn:        []int{100},
+			DependencyStates: map[int]DependencyState{100: DependencyStateOpen},
+		},
+	}
+	in.Plans = []Plan{
+		{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "planned", IsChild: true, ParentID: 40},
+		{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "planned", IsChild: true, ParentID: 40},
+	}
+
+	want := fmt.Sprintf(reasonDependencyWaitingFmt, 100)
+	assertDecisions(t, Decide(in), []wantDecision{
+		{41, ActionSkip, "not Planned", ""},
+		{42, ActionSkip, want, ""},
+	})
 }
