@@ -402,7 +402,7 @@ Everything persists in the home volume — only needs to happen once per instanc
 | build-essential | latest | — |
 | Python 3 | latest | — |
 | uv | latest | `UV_VERSION` |
-| Docker CLI | latest | — |
+| Docker CLI + engine | latest | — (monolith and `dind`-enabled per-repo images only) |
 
 Override versions at build time. The monolith `Dockerfile` builds `FROM
 cenci-sandbox-base:${BASE_VERSION}`, so build (or pull) the base image first and pass
@@ -432,8 +432,10 @@ The image is built in two layers:
   alias tag. The hash is a 12-char digest of `Dockerfile.base` + `entrypoint.sh` + `lib/`
   (all its `COPY` inputs), so the base only rebuilds when those actually change — not on
   every plugin.json version bump. Stack-agnostic: Ubuntu 24.04, system packages, locale,
-  `uv`, GitHub CLI, Docker CLI, the non-root `dev` user, and the entrypoint. No language
-  runtimes. `cenci sandbox build-base` builds it explicitly, and `cenci sandbox build` /
+  `uv`, GitHub CLI, the non-root `dev` user, and the entrypoint. No language
+  runtimes, and — since #831 — no Docker CLI or engine either: those moved to the
+  config-selected `fragments/docker.dockerfile` so only images that actually run nested
+  Docker carry them. `cenci sandbox build-base` builds it explicitly, and `cenci sandbox build` /
   `cenci open` builds it automatically the first time (or whenever the current content-hash
   tag is missing locally). Run `cenci sandbox prune` to clean up superseded hash tags left
   behind by earlier `Dockerfile.base` changes.
@@ -580,6 +582,18 @@ registered. `cenci doctor` reports whether it's registered.
 launch with `cenci open --dind` (force on) / `cenci open --no-dind` (force off — always
 works as an escape hatch, even if the repo config has `dind: true`). Combining `--dind` and
 `--no-dind` is a usage error.
+
+**Image requirement**: the inner daemon needs the Docker CLI, `docker-ce` and
+`containerd.io` *in the image*. These are not in `Dockerfile.base` — since #831 they live
+in the config-selected `fragments/docker.dockerfile`, so images that never run nested
+Docker do not carry the engine. Two cases:
+- **No `.cenci/Dockerfile`** — the repo launches the shared `cenci-sandbox:latest`
+  monolith, which includes the Docker block. Nothing to do.
+- **A per-repo `.cenci/Dockerfile`** — it must include the docker fragment.
+  `/cenci:configure` adds it whenever `sandbox.dind` is true. A repo whose Dockerfile was
+  generated before #831 (or without the fragment) still boots and stays usable, but has no
+  `dockerd`: `entrypoint.sh` writes `~/.cenci-dockerd-startup-error` naming the cause.
+  Fix it by re-running `/cenci:configure` and then `cenci sandbox build`.
 
 **Volume lifecycle**: each repo gets its own persistent Docker storage volume, named
 `<agent>-cenci-dind-<slug>[-<name>]` and mounted at `/var/lib/docker` inside the container —

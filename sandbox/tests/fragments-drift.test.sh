@@ -1,14 +1,41 @@
 #!/usr/bin/env bash
-# Guards the byte-identity invariant documented in sandbox/CLAUDE.md:
+# Guards the byte-identity invariant documented in sandbox/AGENTS.md:
 # every fragments/*.dockerfile block must appear verbatim inside Dockerfile
 # (the monolith), including the Codex runtime required by per-repo images.
 #
-# Runs on the host — no Docker required, plain grep/diff.
+# Two fragment classes exist, and this suite distinguishes them:
+#   * monolith-backed — the fragment has a corresponding block in Dockerfile
+#     and must match it byte-for-byte (dotnet, node, playwright, go, docker).
+#   * monolith-less — the fragment is config- or stack-selected only and this
+#     repo's own stack does not use it, so Dockerfile deliberately carries no
+#     such block (see MONOLITH_LESS below). These are asserted to be absent
+#     from Dockerfile, so silently adding a block without also adding it to
+#     this list is caught too.
+#
+# Matching is a true multi-line fixed-string containment via bash's own
+# `[[ haystack == *needle* ]]`. It deliberately does NOT use
+# `grep -zqF "${content}"`: with a multi-line pattern, `grep -F` treats each
+# pattern LINE as a separate alternative, so a fragment "matched" as soon as
+# any single one of its lines (e.g. a bare `USER root`) appeared anywhere in
+# the monolith. Under that bug this suite reported 7/7 passing while three
+# fragments had no monolith block at all — the invariant it exists to guard
+# was never actually enforced (#831).
+#
+# Runs on the host — no Docker required, pure bash string comparison.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SANDBOX_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DOCKERFILE="${SANDBOX_DIR}/Dockerfile"
+
+# Fragments that intentionally have no block in the monolith Dockerfile,
+# because this repo's own stack does not use them. Kept in sync with the
+# "Image architecture: base + fragments" section of sandbox/AGENTS.md.
+MONOLITH_LESS=(
+    python.dockerfile
+    rust.dockerfile
+    pencil.dockerfile
+)
 
 FAILURES=0
 PASSES=0
@@ -16,7 +43,22 @@ PASSES=0
 fail() { echo "  FAIL: $1" >&2; FAILURES=$((FAILURES + 1)); }
 pass() { PASSES=$((PASSES + 1)); }
 
+is_monolith_less() {
+    local candidate="$1" entry
+    for entry in "${MONOLITH_LESS[@]}"; do
+        [[ "${entry}" == "${candidate}" ]] && return 0
+    done
+    return 1
+}
+
 echo "fragments-drift.test.sh"
+
+if ! DOCKERFILE_CONTENT="$(cat "${DOCKERFILE}")"; then
+    fail "could not read ${DOCKERFILE}"
+    echo
+    echo "passed: ${PASSES}, failed: ${FAILURES}"
+    exit 1
+fi
 
 shopt -s nullglob
 FRAGMENTS=("${SANDBOX_DIR}"/fragments/*.dockerfile)
@@ -28,21 +70,45 @@ fi
 
 for fragment in "${FRAGMENTS[@]}"; do
     name="$(basename "${fragment}")"
-    echo "case: ${name} is byte-identical to its block in Dockerfile"
     if ! content="$(cat "${fragment}")"; then
+        echo "case: ${name} is readable"
         fail "${name} could not be read"
         continue
     fi
     if [[ -z "${content}" ]]; then
+        echo "case: ${name} is non-empty"
         fail "${name} is empty"
         continue
     fi
-    if grep -zqF "${content}" "${DOCKERFILE}"; then
+
+    if is_monolith_less "${name}"; then
+        echo "case: ${name} is deliberately absent from Dockerfile (monolith-less fragment)"
+        if [[ "${DOCKERFILE_CONTENT}" == *"${content}"* ]]; then
+            fail "${name} is listed as monolith-less but its content IS present in ${DOCKERFILE} — remove it from MONOLITH_LESS so drift is enforced, and update sandbox/AGENTS.md"
+        else
+            pass
+        fi
+        continue
+    fi
+
+    echo "case: ${name} is byte-identical to its block in Dockerfile"
+    if [[ "${DOCKERFILE_CONTENT}" == *"${content}"* ]]; then
         pass
     else
-        fail "${name} is not verbatim inside ${DOCKERFILE} — hand-duplicate the edit (see sandbox/CLAUDE.md)"
+        fail "${name} is not verbatim inside ${DOCKERFILE} — hand-duplicate the edit (see sandbox/AGENTS.md)"
     fi
 done
+
+# The matcher itself must reject a near-miss, not just accept exact copies.
+# Without this, a regression back to the line-wise `grep -F` behaviour would
+# leave every case above passing and go unnoticed.
+echo "case: the matcher rejects a fragment whose content is only partially present"
+PROBE=$'USER root\n\n# ── Not A Real Block ─────────────────────────────────────────────\nRUN false-command-that-is-not-in-the-monolith\n\nUSER dev'
+if [[ "${DOCKERFILE_CONTENT}" == *"${PROBE}"* ]]; then
+    fail "the containment check matched a probe block that is not in ${DOCKERFILE} — the byte-identity invariant is not being enforced"
+else
+    pass
+fi
 
 echo
 echo "passed: ${PASSES}, failed: ${FAILURES}"

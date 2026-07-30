@@ -33,6 +33,7 @@ bash sandbox/tests/seed-auth.test.sh             # lib/seed-auth.sh credential s
 bash sandbox/tests/codex-config.test.sh          # lib/codex-config.sh config generation
 bash sandbox/tests/agent-cli.test.sh             # shared, verified, atomic agent update lifecycle
 bash sandbox/tests/fragments-drift.test.sh       # Dockerfile vs fragments/*.dockerfile byte-parity
+bash sandbox/tests/docker-fragment.test.sh       # Docker engine lives in the fragment, never in Dockerfile.base
 bash sandbox/tests/heal-plugins.test.sh          # plugin self-heal (Write->Edit allow conversion)
 bash sandbox/tests/dind.test.sh                  # lib/dind.sh start_dind() background dockerd + marker
 bash sandbox/tests/uninstall.test.sh             # `install.sh uninstall` MODE (plugins, PATH links, daemon, sandbox cleanup)
@@ -65,7 +66,8 @@ black-box tests in `watch/sandbox_open_test.go` plus the reap contract suite
 `Dockerfile.base` builds the stack-agnostic `cenci-sandbox-base:<content-hash>` image
 (plus an `cenci-sandbox-base:latest` alias tag), where `<content-hash>` is a 12-char
 digest of `Dockerfile.base` + `entrypoint.sh` + `lib/` (Ubuntu, system packages, locale,
-`uv`, GitHub CLI, Docker CLI, non-root `dev` user, entrypoint — no language runtimes).
+`uv`, GitHub CLI, non-root `dev` user, entrypoint — no language runtimes, and no Docker
+CLI or engine: those moved to the config-selected `docker` fragment in #831).
 `Dockerfile` (the monolith) builds `cenci-sandbox:latest` `FROM` that base image and
 layers on the runtime stacks in order: .NET, Node, Playwright, and Go. Agent CLIs are not
 image layers: the launcher bootstraps absent `cenci-agent-cli-<agent>` volumes through a
@@ -90,18 +92,25 @@ the last *published* plugin version, not your working tree — un-merged edits t
 `flow/skills/` only reach it after the plugin version bumps.
 
 `fragments/*.dockerfile` holds the same composable blocks (`dotnet`, `node`, `playwright`,
-`go`, `python`, `rust`, `pencil`) as standalone snippets used to assemble per-project images.
+`go`, `python`, `rust`, `pencil`, `docker`) as standalone snippets used to assemble per-project images.
 Generated images always include Node so the isolated updater can install either npm package;
 the remaining fragments (including `playwright`, used for `verify-ui`'s Chromium
 screenshot capture) follow the detected project stack — except `pencil`, which is
 config-selected (`pencil.enabled: true`), baking `@pen.dev/cli` in so `implement`/`verify-ui`
 run design reads via the CLI's headless editor engine (no desktop app reachable from a
 container). Headless auth is a seeded `~/.pencil/session-cli.json` (staged by the launcher,
-seeded once by `entrypoint.sh`) or a per-exec `PEN_CLI_KEY` — never baked into the image. Per-repo images include the shared
+seeded once by `entrypoint.sh`) or a per-exec `PEN_CLI_KEY` — never baked into the image. `docker` is
+config-selected the same way (`sandbox.dind: true`): it carries the Docker CLI, `docker-ce` engine and
+`containerd.io` that the inner daemon needs, and lived in `Dockerfile.base` until #831 — so a `dind: true`
+repo whose `.cenci/Dockerfile` predates that change builds an image with no `dockerd`, which `start_dind`
+reports by name in `~/.cenci-dockerd-startup-error` (non-fatal; the container stays usable). Per-repo images include the shared
 Node runtime, never the agent packages. **Invariant:** each fragment and its corresponding block in `Dockerfile` must stay
 byte-identical — hand-duplicated on every change (e.g. bumping `DOTNET_SDK_VERSION` or adding a
 package to a stack block means editing both `Dockerfile` and `fragments/<stack>.dockerfile`
-identically).
+identically). The exceptions are `python`, `rust` and `pencil`, which deliberately have **no** monolith
+block because this repo's own stack doesn't use them; `fragments-drift.test.sh` enforces both directions
+(byte-identity for monolith-backed fragments, deliberate absence for the three monolith-less ones), so
+adding a monolith block for one of them means removing it from that suite's `MONOLITH_LESS` list.
 
 ## Dependency version pins
 Image dependency versions are pinned via Dockerfile `ARG`s, all checked daily by
