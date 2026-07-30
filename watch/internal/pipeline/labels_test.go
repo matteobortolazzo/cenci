@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -47,6 +48,20 @@ func (c ghCall) hasFlag(flag, value string) bool {
 		}
 	}
 	return false
+}
+
+// flagValues returns every value that follows an occurrence of flag, so a
+// call carrying repeated flags (`--remove-label A --remove-label B`) can be
+// asserted in full. hasFlag deliberately inspects only the first occurrence,
+// which would silently pass a test that meant to check the second.
+func (c ghCall) flagValues(flag string) []string {
+	var out []string
+	for i, a := range c.args {
+		if a == flag && i+1 < len(c.args) {
+			out = append(out, c.args[i+1])
+		}
+	}
+	return out
 }
 
 func (c ghCall) is(tokens ...string) bool {
@@ -175,6 +190,17 @@ func mustSeedState(t *testing.T, stateDir, id string, stage Stage) {
 	}
 }
 
+// mustSeedStateWithLabels is mustSeedState plus a pre-populated Labels slice,
+// so a transition's effect on the persisted label set can be asserted rather
+// than only its gh command line.
+func mustSeedStateWithLabels(t *testing.T, stateDir, id string, stage Stage, labels []string) {
+	t.Helper()
+	path := filepath.Join(stateDir, id+".json")
+	if err := saveState(path, State{SchemaVersion: CurrentSchemaVersion, ID: id, Stage: stage, Labels: labels, UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+}
+
 // -- happy paths: one per transition ---------------------------------------
 
 func TestApplyLabelTransition_Working_HappyPath_SoleAssigneeMatches(t *testing.T) {
@@ -256,8 +282,15 @@ func TestApplyLabelTransition_Planned_HappyPath_AddsPlannedRemovesWorking(t *tes
 	for _, c := range gh.callsMatching("issue", "edit") {
 		if c.hasFlag("--add-label", "Planned") {
 			found = true
-			if !c.hasFlag("--remove-label", "Working") {
-				t.Errorf("non-trivial planned transition must remove Working, got %v", c)
+			removed := c.flagValues("--remove-label")
+			if !slices.Contains(removed, "Working") {
+				t.Errorf("non-trivial planned transition must remove Working, removed %v (call: %v)", removed, c)
+			}
+			// #834 widened in-review's removal set; planned must stay
+			// narrow -- a planned transition that dropped Planned would
+			// remove the label it just applied.
+			if len(removed) != 1 {
+				t.Errorf("planned transition must remove Working and nothing else, removed %v (call: %v)", removed, c)
 			}
 		}
 	}
@@ -290,7 +323,11 @@ func TestApplyLabelTransition_Planned_Trivial_KeepsWorking(t *testing.T) {
 	}
 }
 
-func TestApplyLabelTransition_InReview_HappyPath_AddsInReviewRemovesWorking(t *testing.T) {
+func TestApplyLabelTransition_InReview_HappyPath_AddsInReviewRemovesWorkingAndPlanned(t *testing.T) {
+	// #834: the PR is open and the pipeline is green, so the ticket's board
+	// state is exactly "In Review" -- both working-lifecycle labels come off.
+	// Leaving Planned behind reads as "still queued for pickup" on a ticket
+	// that is already in review.
 	stateDir := t.TempDir()
 	mustSeedState(t, stateDir, "42", StageFinalized)
 	gh := newFakeGh(t, "octocat", nil)
@@ -302,15 +339,64 @@ func TestApplyLabelTransition_InReview_HappyPath_AddsInReviewRemovesWorking(t *t
 
 	found := false
 	for _, c := range gh.callsMatching("issue", "edit") {
-		if c.hasFlag("--add-label", "In Review") {
-			found = true
-			if !c.hasFlag("--remove-label", "Working") {
-				t.Errorf("in-review transition must remove Working, got %v", c)
+		if !c.hasFlag("--add-label", "In Review") {
+			continue
+		}
+		found = true
+		removed := c.flagValues("--remove-label")
+		for _, want := range []string{"Working", "Planned"} {
+			if !slices.Contains(removed, want) {
+				t.Errorf("in-review transition must remove %q, removed %v (call: %v)", want, removed, c)
 			}
 		}
 	}
 	if !found {
 		t.Error("expected a `gh issue edit --add-label \"In Review\"` call")
+	}
+}
+
+func TestApplyLabelTransition_InReview_PersistsLabelsWithoutWorkingOrPlanned(t *testing.T) {
+	// The gh command line and the persisted State.Labels are two separate
+	// writes; asserting only the former would let the state file keep a stale
+	// Planned that every later reader still sees.
+	stateDir := t.TempDir()
+	mustSeedStateWithLabels(t, stateDir, "42", StageFinalized, []string{"Refined", "Planned", "Working"})
+	gh := newFakeGh(t, "octocat", nil)
+	gh.install()
+
+	s, err := ApplyLabelTransition(LabelOpts{ID: "42", StateDir: stateDir, RepoSlug: "o/r", Transition: "in-review"})
+	if err != nil {
+		t.Fatalf("ApplyLabelTransition(in-review): %v", err)
+	}
+
+	if !slices.Contains(s.Labels, "In Review") {
+		t.Errorf("persisted Labels = %v, want it to contain %q", s.Labels, "In Review")
+	}
+	for _, gone := range []string{"Working", "Planned"} {
+		if slices.Contains(s.Labels, gone) {
+			t.Errorf("persisted Labels = %v, want %q removed", s.Labels, gone)
+		}
+	}
+	if !slices.Contains(s.Labels, "Refined") {
+		t.Errorf("persisted Labels = %v, want the unrelated %q label untouched", s.Labels, "Refined")
+	}
+}
+
+func TestApplyLabelTransition_InReview_WithoutPlanned_Succeeds(t *testing.T) {
+	// Removing a label the ticket never carried is a no-op for `gh issue
+	// edit`, so the widened removal set must not turn a Planned-less ticket
+	// (a ticketless or manually-labelled run) into an error.
+	stateDir := t.TempDir()
+	mustSeedStateWithLabels(t, stateDir, "42", StageFinalized, []string{"Working"})
+	gh := newFakeGh(t, "octocat", nil)
+	gh.install()
+
+	s, err := ApplyLabelTransition(LabelOpts{ID: "42", StateDir: stateDir, RepoSlug: "o/r", Transition: "in-review"})
+	if err != nil {
+		t.Fatalf("ApplyLabelTransition(in-review) without a Planned label: %v", err)
+	}
+	if slices.Contains(s.Labels, "Planned") {
+		t.Errorf("persisted Labels = %v, want no %q", s.Labels, "Planned")
 	}
 }
 
@@ -328,6 +414,12 @@ func TestApplyLabelTransition_InReview_WithParent_CascadesToParent(t *testing.T)
 	for _, c := range gh.callsMatching("issue", "edit") {
 		if len(c.args) > 2 && c.args[2] == "10" && c.hasFlag("--add-label", "In Review") {
 			foundParent = true
+			// The cascade is additive only: the parent is not the ticket
+			// this run implemented, so its own Working/Planned state is
+			// none of this transition's business (#834).
+			if removed := c.flagValues("--remove-label"); len(removed) != 0 {
+				t.Errorf("parent cascade must not remove any label, removed %v (call: %v)", removed, c)
+			}
 		}
 	}
 	if !foundParent {
