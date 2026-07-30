@@ -17,13 +17,34 @@ fail mid-run or get reused in a new context.
   checkpoint, continues into further autonomous phases, or arms an unattended completion
   loop), re-evaluate and explicitly restate the error-handling for the new risk profile.
   The original rule may have worked at its original stopping point but be under-specified
-  for the new path.
+  for the new path. Two named instances of this rule in `/cenci:implement`: the Trivial Fast
+  Path (`skills/implement/phases/phase-1-plan.md`'s `## Trivial Fast Path`), and lean
+  planning (`planning.autonomy: "lean"`, `skills/implement/phases/phase-1-plan.md`'s
+  `## Lean Approval Path`) — both reuse `## Persist the Plan`'s write/comment/label/artifact
+  machinery but restate its verification and error-surfacing rules for a checkpoint-free,
+  same-session continuation into Phase 2.
 
 - All shared temp files written by phases or agents (e.g.
   `/tmp/claude/cenci-<ticket-id-or-slug>-diff.patch`) must be uniquely scoped by worktree
   path, run ID, or session UUID. Fixed paths without scoping let multiple concurrent
   `/cenci:implement` jobs in the same monorepo silently overwrite each other's state, so a
   reviewer can end up analyzing the wrong diff or broken context.
+
+- When a new checkpoint-free path cites an existing path as its structural model, explicitly
+  verify that deterministic safety backstops (checks that can only disqualify the path, never
+  promote it) present in the model are also reused in the new path — e.g., the sensitive-path
+  pattern-match backstop in the Trivial Fast Path. The model's sub-patterns may not be
+  mandatory in all paths but become essential when the new path removes a human checkpoint or
+  arms autonomous continuation. Such backstops gate safety-critical file changes and detect
+  mismatches that planner judgment alone cannot catch.
+
+- Session-scoped safety flags that guard autonomous continuation (e.g., a sticky "escalated"
+  flag that blocks checkpoint-free approval once any escalation question fires) must be backed
+  by durable, independently-verifiable state on disk (a marker file, checked with deterministic
+  logic), not solely by in-context model recall. Context compaction or subagent re-invocation
+  between turns can silently lose in-memory state; a written marker file survives the gap and
+  enables fail-closed behavior (treat inconclusive checks as "gate active" rather than "gate
+  absent").
 
 - When delegating work to a subagent that must edit repo-root config files (e.g.
   `.mcp.json`, `.claude/settings.json`) as part of a feature-worktree PR, delegate targeting

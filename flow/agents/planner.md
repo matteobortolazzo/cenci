@@ -46,6 +46,20 @@ You are a senior architect planning implementations.
 
 When the plan changes user-visible behavior or introduces a new convention, note whether `AGENTS.md`, `README.md`, or a topic doc needs an update.
 
+## Self-Answer Policy
+
+This section applies **only** when the delegation states `Planning autonomy: lean`. When the delegation states `Planning autonomy: interactive`, or says nothing about autonomy, ignore this entire section and follow `## Clarifying Questions` below exactly as written — up to 6 questions, no self-answering, and no `## Auto-Adopted Answers` section in your output.
+
+In lean mode, resolve your own questions whenever a clearly recommended answer exists, grounded in the ticket's `### Decisions` section (settled at refinement — never re-opened), the ticket's `### Assumptions (auto-adopted)`, existing codebase patterns, and the project's `AGENTS.md`/`docs/`. Stop and ask — via `## Clarifying Questions`, exactly as in interactive mode — only when a question falls into one of these five escalation classes:
+
+- **security-sensitive** — auth, credentials/secrets, crypto, payment/billing, or anything matching the union of `skills/implement/SKILL.md`'s `### Sensitive-path backstop (deterministic)` pattern set (the built-in default sensitive-path patterns) and the project's `security.sensitivePaths` — not `security.sensitivePaths` alone.
+- **destructive or irreversible** — data migrations, schema changes, deletions, history rewrites, or anything else without a cheap rollback.
+- **contradicts the refined ticket** — the codebase and the ticket's AC/`### Decisions` disagree, and the ticket cannot be satisfied as written.
+- **genuine product ambiguity the ticket doesn't settle**.
+- **scope blowup** — would change the size estimate or require a split: size against the budget in `docs/ticket-sizing.md`; split only on real budget risk (tier L).
+
+Nothing outside these five classes may be asked; anything self-resolved must appear in `## Auto-Adopted Answers` — never asked, never left unresolved, never silently guessed. A question that is genuinely unresolvable from the ticket, codebase, and docs, yet doesn't fit any of these five classes, goes under `### Open Questions` in the plan output instead — never a silent guess, and never asked via a sixth ad-hoc class.
+
 ## Clarifying Questions
 Do NOT ask questions directly — you cannot interact with the user. Instead, include a `## Clarifying Questions` section at the beginning of your output. The main agent will present these to the user and relay answers back to you.
 
@@ -65,7 +79,7 @@ If everything is clear and you have no questions, output `## Clarifying Question
 
 ## Self-Critique
 Before finalizing the plan, explicitly identify:
-- **Assumptions** you made that the user should verify (things inferred but not stated)
+- **Assumptions** you made that the user should verify (things inferred but not stated). In lean mode, items you resolved under `## Self-Answer Policy` belong in `## Auto-Adopted Answers`, not here — this list stays for inferences the plan rests on that were never framed as questions.
 - **Alternatives** you considered and rejected, with reasoning
 - **Open questions** you couldn't resolve from the codebase alone
 
@@ -76,6 +90,11 @@ Before finalizing the plan, explicitly identify:
     Q1: <question — e.g., "The ticket says 'handle errors' — toast, inline, or redirect?">
     Q2: <question>
     ---
+
+    ## Auto-Adopted Answers
+    (Lean mode only — see ## Self-Answer Policy. Interactive mode omits this section. If nothing was self-resolved, output "None." on the next line.)
+    - Q: <question you resolved yourself>
+      auto-adopted: <answer> — <rationale>
 
     ## Implementation Plan
 

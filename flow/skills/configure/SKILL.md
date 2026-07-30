@@ -1532,6 +1532,7 @@ For each MCP selected in question 5:
     "goalAutopilot": true,
     "planComment": false
   },
+  "planning": { "autonomy": "interactive" },
   "cicd": {
     "enabled": true,
     "platform": "github-actions"
@@ -1637,6 +1638,23 @@ Because the config write below uses merge semantics (step 6 — start from `exis
 overwrite only the fields the skill manages), a hand-added `security` block is **preserved
 untouched** across re-configuration. Do **not** add `security` to the migration-removal list
 below — it is a supported optional field, not a legacy one.
+
+The `planning` field is optional and is **never written by a configure prompt** — there is
+no question for it, following the `security` block precedent above. It is a manually-editable
+safety/checkpoint toggle read by the implement skill's Phase 1 (see `skills/implement/SKILL.md`
+and `skills/implement/phases/phase-1-plan.md`'s `## Lean Approval Path`). Schema:
+- `planning.autonomy` — `"lean"` or `"interactive"`, default `"interactive"`. Only the exact
+  string `"lean"` changes behavior — a missing `planning` block, a missing `autonomy` key, or
+  any other value all resolve to `"interactive"` (today's behavior: the planner asks up to 6
+  clarifying questions via `AskUserQuestion` and never self-answers). `"lean"` activates
+  `agents/planner.md`'s `## Self-Answer Policy`: the planner self-resolves everything except
+  its five named escalation classes, and a plan persisted with no escalations is implicitly
+  approved and continues straight into Phase 2 in the same session.
+
+Because the config write below uses merge semantics, a hand-added `planning` block is
+**preserved untouched** across re-configuration, exactly like `security`. Do **not** add
+`planning` to the migration-removal list below — it is a supported optional field, not a
+legacy one.
 
 **Monorepo config** — when `isMonorepo` is true, add `isMonorepo` and `projects` fields:
 

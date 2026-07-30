@@ -363,7 +363,8 @@ rm -f \
   ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-existing-body.md \
   ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-explore-1.md \
   ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-explore-2.md \
-  ${TMPDIR:-/tmp}/cenci/cenci-context-<ticket-id-or-slug>.md
+  ${TMPDIR:-/tmp}/cenci/cenci-context-<ticket-id-or-slug>.md \
+  ${TMPDIR:-/tmp}/cenci/cenci-escalated-<ticket-id-or-slug>.marker
 ```
 
 This deliberately excludes two other scoped temp locations: the screenshots dir (`${TMPDIR:-/tmp}/cenci/cenci-screenshots/<ticket-id-or-slug>/`) is a documented fallback location kept for gist-upload failures (see Screenshots above), and the gist clone temp dir (`${TMPDIR:-/tmp}/cenci/cenci-gist-<gist-id>/`) is already uniquely scoped by gist ID — neither needs this pass to stay collision-safe.
