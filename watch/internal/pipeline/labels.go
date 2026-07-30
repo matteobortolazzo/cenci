@@ -144,23 +144,32 @@ func ApplyLabelTransition(o LabelOpts) (State, error) {
 		}
 	}
 
-	removeLabel := ""
+	// Labels this transition retires, as a set: "in-review" clears the whole
+	// working lifecycle (#834), since a ticket whose PR is open and whose
+	// pipeline reached StageFinalized is neither queued for pickup
+	// ("Planned") nor being worked ("Working"). Removing a label the ticket
+	// does not carry is a no-op for `gh issue edit`, so the set needs no
+	// membership check first.
+	var removeLabels []string
 	if o.Transition == "planned" && !o.Trivial {
-		removeLabel = labelName["working"]
+		removeLabels = []string{labelName["working"]}
 	}
 	if o.Transition == "in-review" {
-		removeLabel = labelName["working"]
+		removeLabels = []string{labelName["working"], labelName["planned"]}
 	}
 
 	if err := ghLabelCreate(name, o.RepoSlug, cfg); err != nil {
 		return State{}, err
 	}
-	if err := ghApplyLabel(o.ID, name, removeLabel, o.RepoSlug, cfg); err != nil {
+	if err := ghApplyLabel(o.ID, name, removeLabels, o.RepoSlug, cfg); err != nil {
 		return State{}, err
 	}
 
+	// The parent cascade is additive only: the parent is not the ticket this
+	// run implemented, so its own working-lifecycle labels are not this
+	// transition's to retire.
 	if o.Transition == "in-review" && o.ParentID != "" {
-		if err := ghApplyLabel(o.ParentID, name, "", o.RepoSlug, cfg); err != nil {
+		if err := ghApplyLabel(o.ParentID, name, nil, o.RepoSlug, cfg); err != nil {
 			return State{}, err
 		}
 	}
@@ -176,7 +185,7 @@ func ApplyLabelTransition(o LabelOpts) (State, error) {
 		return State{}, err
 	}
 
-	return recordLabelState(path, name, removeLabel, ticketUpdatedAt)
+	return recordLabelState(path, name, removeLabels, ticketUpdatedAt)
 }
 
 // verifyAndClaimOwnership mirrors flow/skills/ticket-ownership/SKILL.md's
@@ -223,10 +232,13 @@ func checkSoleAssignee(id string, assignees []string, login string) error {
 	}
 }
 
-// recordLabelState persists the applied/removed label into the ticket's
-// Labels field — plus the post-edit ticketUpdatedAt freshness baseline —
-// under the same per-ticket flock lock pipeline.Run and SetArtifacts use.
-func recordLabelState(path, add, remove, ticketUpdatedAt string) (State, error) {
+// recordLabelState persists the applied label and every removed label into
+// the ticket's Labels field — plus the post-edit ticketUpdatedAt freshness
+// baseline — under the same per-ticket flock lock pipeline.Run and
+// SetArtifacts use. The gh edit and this persisted set are two separate
+// writes; both must retire the same labels or later readers keep seeing a
+// label the board no longer shows (#834).
+func recordLabelState(path, add string, remove []string, ticketUpdatedAt string) (State, error) {
 	var result State
 	lockErr := withLock(path+".lock", defaultRetryConfig(), func() error {
 		s, lerr := loadState(path)
@@ -234,8 +246,8 @@ func recordLabelState(path, add, remove, ticketUpdatedAt string) (State, error) 
 			return lerr
 		}
 		labels := s.Labels
-		if remove != "" {
-			labels = removeLabelFromSlice(labels, remove)
+		for _, r := range remove {
+			labels = removeLabelFromSlice(labels, r)
 		}
 		labels = addLabelToSlice(labels, add)
 		s.Labels = labels
@@ -406,12 +418,16 @@ func ghLabelCreate(name, repoSlug string, cfg retryConfig) error {
 	return nil
 }
 
-// ghApplyLabel applies `--add-label add` (and, when remove is non-empty,
-// `--remove-label remove`) to ticket id.
-func ghApplyLabel(id, add, remove, repoSlug string, cfg retryConfig) error {
+// ghApplyLabel applies `--add-label add` plus one `--remove-label` per entry
+// in remove to ticket id. gh accepts the flag repeatedly and treats removing
+// a label the ticket does not carry as success, so remove needs no filtering.
+func ghApplyLabel(id, add string, remove []string, repoSlug string, cfg retryConfig) error {
 	args := []string{"issue", "edit", id, "--add-label", add}
-	if remove != "" {
-		args = append(args, "--remove-label", remove)
+	for _, r := range remove {
+		if r == "" {
+			continue
+		}
+		args = append(args, "--remove-label", r)
 	}
 	if repoSlug != "" {
 		args = append(args, "--repo", repoSlug)

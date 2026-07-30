@@ -47,7 +47,7 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 	// map and never syncs, so a fetch+merge never runs twice per pass.
 	syncs := syncMains(cfg.Repos, out, dryRun)
 
-	tickets, err := CollectTickets(cfg.Repos, syncs)
+	tickets, err := CollectTickets(cfg.Repos, syncs, true, out)
 	if err != nil {
 		logf(out, "dispatch: collecting tickets: %v\n", err)
 	}

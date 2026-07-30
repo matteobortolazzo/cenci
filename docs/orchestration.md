@@ -37,7 +37,7 @@ New → Refined → [Designed] → Planned → Working → In Review → Impleme
 |---|---|---|
 | New → Refined | `/cenci:refine` | `+Working` while running, then `+Refined` `−Working` |
 | Refined → Designed (optional) | `/cenci:design` on the dedicated design ticket | Propagates `+Designed` to dependent implementation tickets |
-| Refined/Designed → Planned | `/cenci:implement` planning | Persists `.plans/<id>-*.md`, then `+Planned` `−Working` (trivial-ticket fast path: `Working` is retained, not removed — see note below) |
+| Refined/Designed → Planned | `/cenci:implement` planning | Persists `.plans/<id>-*.md`, then `+Planned` `−Working` (trivial-ticket fast path and lean planning with no escalations: `Working` is retained, not removed — see note below) |
 | Planned → Working | plan-file implementation or `cenci dispatch` pickup | `+Working`; `Planned` remains as a milestone |
 | Working → In Review | `/cenci:implement` phase 9 | `+In Review` `−Working` when the PR opens |
 | In Review → Implemented | `/cenci:babysit` (on PR merge) | `+Implemented` `−In Review` |
@@ -48,11 +48,13 @@ the final swap: it watches the open PR and, on merge, replaces `In Review` with
 `Implemented` on every issue the PR closed (including a parent ticket reached via
 `Fixes #<parent>`). PR-open never applies `Implemented`.
 
-For a ticket judged trivial by `/cenci:implement`'s Trivial-Ticket Triage, the
-`Refined → Planned → Working` transitions collapse into a single session — there is no
-stop-and-relaunch between `Planned` and `Working`, since planning and implementation run
-back-to-back without a human plan-review gate in between. The labels and board columns
-themselves are unchanged; only the number of sessions/relaunches differs.
+The `Refined → Planned → Working` transitions collapse into a single session on two
+triggers: a ticket judged trivial by `/cenci:implement`'s Trivial-Ticket Triage, or a plan
+produced under `planning.autonomy: "lean"` that comes back with no escalations (the Lean
+Approval Path). In both cases there is no stop-and-relaunch between `Planned` and `Working`,
+since planning and implementation run back-to-back without a human plan-review gate in
+between. The labels and board columns themselves are unchanged; only the number of
+sessions/relaunches differs.
 
 **`Working` is transient activity, not a persisted handoff.** lazyboards'
 `working_label` (default

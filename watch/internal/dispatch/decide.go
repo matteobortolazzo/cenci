@@ -35,6 +35,19 @@ const (
 	reasonMainSyncUnknown = "local main sync probe unrecognized"
 )
 
+// Dependency-gate skip reasons (#825). reasonDependencyStateUnknownFmt is
+// deliberately distinct from both reasonDependencyWaitingFmt and
+// reasonDependencyUnresolvedFmt for the same reason reasonStageProbeUnknown
+// and reasonMainSyncUnknown are each distinct from their sibling reasons
+// above: a regression collapsing the gate switch's default branch into a
+// known case must be caught by a content-specific assertion (#446/#598), not
+// silently pass.
+const (
+	reasonDependencyWaitingFmt      = "waiting on dependency #%d"
+	reasonDependencyUnresolvedFmt   = "dependency #%d unresolved"
+	reasonDependencyStateUnknownFmt = "dependency #%d state unrecognized"
+)
+
 // Inputs is the full, explicit input to Decide. Now is an injected clock value
 // and Snapshot is nil when the daemon is unreachable — both keep Decide pure.
 type Inputs struct {
@@ -156,7 +169,14 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 		return skip("plan stale, re-plan")
 	}
 
-	// Pickup rule 5: serialize siblings — at most one child per parent active.
+	// Pickup rule 5: Depends on #N dependency gate (#825). A plan written
+	// before its dependency merges is stale on arrival, so this sits right
+	// after plan freshness -- see dependencyGateSkip's doc comment.
+	if reason, gated := dependencyGateSkip(t); gated {
+		return skip(reason)
+	}
+
+	// Pickup rule 6: serialize siblings — at most one child per parent active.
 	if plan.IsChild {
 		if m, blocked := blockingSibling(t, plan, in, dispatchedChildByParent); blocked {
 			return skip(fmt.Sprintf("waiting on sibling #%d", m))
@@ -350,6 +370,49 @@ func mainSyncSkip(t Ticket) (string, bool) {
 		// branch is caught by assertion, per #446/#598.
 		return reasonMainSyncUnknown, true
 	}
+}
+
+// dependencyGateSkip evaluates the Depends-on-#N dependency gate (#825) for
+// t, with zero I/O -- every DependencyState was already resolved by the
+// collector (dependency.go/collect.go), never here (Decide's own purity
+// contract). It returns (reason, true) when the lowest-numbered blocking
+// dependency in t.DependsOn should skip dispatch, and ("", false) when every
+// dependency resolves DependencyStateClosed (including the empty/nil
+// DependsOn zero value, the true "ungated" case). Mirrors blockingSibling's
+// lowest-number-wins determinism rather than reporting body-parse order: the
+// lowest blocking number is reported when multiple dependencies block.
+func dependencyGateSkip(t Ticket) (string, bool) {
+	blocking := -1
+	var reason string
+	consider := func(n int, r string) {
+		if blocking < 0 || n < blocking {
+			blocking = n
+			reason = r
+		}
+	}
+
+	for _, n := range t.DependsOn {
+		switch t.DependencyStates[n] {
+		case DependencyStateClosed:
+			// not blocking
+		case DependencyStateOpen:
+			consider(n, fmt.Sprintf(reasonDependencyWaitingFmt, n))
+		case DependencyStateUnresolved:
+			consider(n, fmt.Sprintf(reasonDependencyUnresolvedFmt, n))
+		default:
+			// Unrecognized/missing DependencyState (a DependencyStates map
+			// lookup miss for a number the ticket DOES declare a dependency
+			// on): default-deny with its own distinct reason (not either
+			// known reason above) so a regression collapsing this branch is
+			// caught by assertion, per #446/#598.
+			consider(n, fmt.Sprintf(reasonDependencyStateUnknownFmt, n))
+		}
+	}
+
+	if blocking >= 0 {
+		return reason, true
+	}
+	return "", false
 }
 
 func hasLabel(labels []string, name string) bool {

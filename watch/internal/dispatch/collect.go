@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -43,31 +44,47 @@ func currentGitHubLogin() (string, error) {
 // reconciler's CollectTickets call, which deliberately never syncs) leaves
 // every ticket at the ungated zero value (MainSyncSkipped) -- a nil-map
 // lookup is safe in Go and needs no special-casing here.
-func CollectTickets(repos []RepoConfig, mainSync map[string]MainSync) ([]Ticket, error) {
-	var out []Ticket
+//
+// resolveDeps opts this call in or out of "Depends on #N" parsing/resolution
+// (#825 review fix #1), mirroring how mainSync already opts in/out of the
+// local-main sync per call -- a second, independent axis on the same call.
+// RunOnce passes true (dispatch decisions need the gate); RunReconcileOnce
+// passes false, since the reconciler never reads DependsOn/DependencyStates
+// and would otherwise burn its own maxDependencyResolutions gh-call budget
+// on a result it discards. false leaves every ticket's DependsOn/
+// DependencyStates at their nil zero value -- the same "ungated" state a
+// dependency-free issue already gets.
+//
+// out receives one log line per gh issue view fallback failure and per
+// pass-wide dependency-resolution cap hit (#825 review fix #3); callers are
+// expected to guarantee a non-nil out (RunOnce/RunReconcileOnce already
+// default it to os.Stdout before calling here).
+func CollectTickets(repos []RepoConfig, mainSync map[string]MainSync, resolveDeps bool, out io.Writer) ([]Ticket, error) {
+	var tickets []Ticket
 	var errs []error
 	for _, rc := range repos {
-		tickets, err := collectRepoTickets(rc, mainSync[rc.Repo])
+		ts, err := collectRepoTickets(rc, mainSync[rc.Repo], resolveDeps, out)
 		if err != nil {
 			errs = append(errs, err)
 			continue
 		}
-		out = append(out, tickets...)
+		tickets = append(tickets, ts...)
 	}
-	return out, errors.Join(errs...)
+	return tickets, errors.Join(errs...)
 }
 
-func collectRepoTickets(rc RepoConfig, sync MainSync) ([]Ticket, error) {
+func collectRepoTickets(rc RepoConfig, sync MainSync, resolveDeps bool, out io.Writer) ([]Ticket, error) {
 	repo := rc.Repo
 	data, err := exec.Command("gh", "issue", "list",
 		"--repo", repo, "--state", "open",
-		"--json", "number,title,labels,assignees", "--limit", "200").Output()
+		"--json", "number,title,body,labels,assignees", "--limit", "200").Output()
 	if err != nil {
 		return nil, fmt.Errorf("gh issue list %s: %w", repo, err)
 	}
 	var issues []struct {
 		Number int    `json:"number"`
 		Title  string `json:"title"`
+		Body   string `json:"body"`
 		Labels []struct {
 			Name string `json:"name"`
 		} `json:"labels"`
@@ -84,6 +101,27 @@ func collectRepoTickets(rc RepoConfig, sync MainSync) ([]Ticket, error) {
 		return nil, err
 	}
 
+	// openNumbers is the pass's own collected open-issue set for repo,
+	// consulted by resolveDependencyStates as the fast path (#825): a number
+	// found here is DependencyStateOpen with no gh call. depCache memoizes
+	// every gh issue view fallback call across every issue in this one repo
+	// call, so N tickets depending on the same out-of-window number cost
+	// exactly one gh issue view call, not N. depBudget bounds the total gh
+	// issue view fallback calls across this whole pass (#825 review fix #1),
+	// created once here -- the same lifetime/scope as depCache. Both are
+	// unused (and left nil/zero) when resolveDeps is false.
+	var openNumbers map[int]bool
+	var depCache map[int]DependencyState
+	var depBudget *dependencyResolutionBudget
+	if resolveDeps {
+		openNumbers = make(map[int]bool, len(issues))
+		for _, is := range issues {
+			openNumbers[is.Number] = true
+		}
+		depCache = map[int]DependencyState{}
+		depBudget = &dependencyResolutionBudget{}
+	}
+
 	tickets := make([]Ticket, 0, len(issues))
 	for _, is := range issues {
 		labels := make([]string, len(is.Labels))
@@ -95,17 +133,34 @@ func collectRepoTickets(rc RepoConfig, sync MainSync) ([]Ticket, error) {
 			assignees[i] = a.Login
 		}
 		stage, probe := probeStage(rc.Dir, is.Number)
+
+		// resolveDeps==false (the reconciler's call, #825 review fix #1) skips
+		// parseDependsOn/resolveDependencyStates entirely for every issue,
+		// leaving DependsOn/DependencyStates at their nil zero value -- the
+		// reconciler never reads these fields, so resolving them would only
+		// waste the pass's gh issue view budget on a discarded result.
+		var dependsOn []int
+		var depStates map[int]DependencyState
+		if resolveDeps {
+			if nums := parseDependsOn(is.Body); len(nums) > 0 {
+				dependsOn = nums
+				depStates = resolveDependencyStates(repo, nums, openNumbers, depCache, depBudget, out)
+			}
+		}
+
 		tickets = append(tickets, Ticket{
-			Repo:       repo,
-			Number:     is.Number,
-			Title:      is.Title,
-			Labels:     labels,
-			Assignees:  assignees,
-			HasOpenPR:  openPR[is.Number],
-			Agent:      agentFromLabels(labels),
-			Stage:      stage,
-			StageProbe: probe,
-			MainSync:   sync,
+			Repo:             repo,
+			Number:           is.Number,
+			Title:            is.Title,
+			Labels:           labels,
+			Assignees:        assignees,
+			HasOpenPR:        openPR[is.Number],
+			Agent:            agentFromLabels(labels),
+			Stage:            stage,
+			StageProbe:       probe,
+			MainSync:         sync,
+			DependsOn:        dependsOn,
+			DependencyStates: depStates,
 		})
 	}
 	return tickets, nil

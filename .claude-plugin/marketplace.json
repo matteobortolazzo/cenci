@@ -8,7 +8,7 @@
       "name": "cenci",
       "source": "./flow",
       "description": "cenci workflow layer: portable engineering conventions and Claude Code's gated GitHub ticket-to-PR pipeline",
-      "version": "0.33.1",
+      "version": "0.34.0",
       "author": {
         "name": "Matteo Bortolazzo"
       },
@@ -18,7 +18,7 @@
       "name": "cenci-watch",
       "source": "./watch/plugin",
       "description": "cenci attention layer for Claude Code and Codex: live status, dispatch, and optional display integrations",
-      "version": "0.31.0",
+      "version": "0.32.0",
       "author": {
         "name": "Matteo Bortolazzo"
       },
@@ -28,7 +28,7 @@
       "name": "cenci-sandbox",
       "source": "./sandbox",
       "description": "cenci isolation layer: Docker/Podman security boundary for full-permission Claude Code and Codex sessions",
-      "version": "1.16.8",
+      "version": "1.16.9",
       "author": {
         "name": "Matteo Bortolazzo"
       },

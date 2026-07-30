@@ -2,6 +2,8 @@ package dispatch
 
 import (
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -75,7 +77,7 @@ case "$1 $2" in
 esac
 `)
 
-	tickets, err := collectRepoTickets(RepoConfig{Repo: "o/r"}, MainSyncSkipped)
+	tickets, err := collectRepoTickets(RepoConfig{Repo: "o/r"}, MainSyncSkipped, true, io.Discard)
 	if err != nil {
 		t.Fatalf("collectRepoTickets returned unexpected error: %v", err)
 	}
@@ -103,7 +105,7 @@ func TestCollectTickets_StampsMainSyncFromMap(t *testing.T) {
 	repos := []RepoConfig{{Repo: "o/r"}}
 	mainSync := map[string]MainSync{"o/r": MainSyncDiverged}
 
-	tickets, err := CollectTickets(repos, mainSync)
+	tickets, err := CollectTickets(repos, mainSync, true, io.Discard)
 	if err != nil {
 		t.Fatalf("CollectTickets returned unexpected error: %v", err)
 	}
@@ -118,14 +120,15 @@ func TestCollectTickets_StampsMainSyncFromMap(t *testing.T) {
 }
 
 // TestCollectTickets_NilMainSyncMapLeavesZeroValue covers plan test 20: the
-// reconciler's CollectTickets(repos, nil) call must leave every ticket at the
-// ungated zero value, never panicking on a nil map lookup.
+// reconciler's CollectTickets(repos, nil, false, io.Discard) call must leave
+// every ticket at the ungated zero value, never panicking on a nil map
+// lookup.
 func TestCollectTickets_NilMainSyncMapLeavesZeroValue(t *testing.T) {
 	installFakeGHOnPath(t, twoIssuesFakeGHScript)
 
 	repos := []RepoConfig{{Repo: "o/r"}}
 
-	tickets, err := CollectTickets(repos, nil)
+	tickets, err := CollectTickets(repos, nil, false, io.Discard)
 	if err != nil {
 		t.Fatalf("CollectTickets returned unexpected error: %v", err)
 	}
@@ -154,7 +157,7 @@ func TestCollectTicketsAttemptsEveryRepoOnFailure(t *testing.T) {
 		{Repo: "o/nonexistent-c", Dir: t.TempDir()},
 	}
 
-	tickets, err := CollectTickets(repos, nil)
+	tickets, err := CollectTickets(repos, nil, true, io.Discard)
 
 	if err == nil {
 		t.Fatal("expected a joined error from three failing repos, got nil")
@@ -181,7 +184,7 @@ func TestCollectTicketsJoinsMultipleErrors(t *testing.T) {
 		{Repo: "o/nonexistent-y", Dir: t.TempDir()},
 	}
 
-	_, err := CollectTickets(repos, nil)
+	_, err := CollectTickets(repos, nil, true, io.Discard)
 	if err == nil {
 		t.Fatal("expected a non-nil joined error")
 	}
@@ -467,5 +470,169 @@ func TestProbeStage_EmptyDir_NeverProbes_NoCwdRelativeRead(t *testing.T) {
 	stage, probe := probeStage("", 42)
 	if stage != "" || probe != StageProbeAbsent {
 		t.Errorf(`probeStage("", 42) with cwd containing a finalized state = (%q, %q), want ("", StageProbeAbsent) -- dir="" must never probe`, stage, probe)
+	}
+}
+
+// -- #825: Depends on #N dependency gate, collector stamping -----------------
+
+// TestCollectRepoTickets_DependsOnResolvesViaOpenSet covers plan test 26:
+// issue #10's body declares "Depends on #11", and #11 is itself present in
+// the pass's own collected open-issue set -- the resolver's open-set fast
+// path must classify it DependencyStateOpen.
+func TestCollectRepoTickets_DependsOnResolvesViaOpenSet(t *testing.T) {
+	installFakeGH(t, `
+case "$1 $2" in
+  "issue list") printf '[{"number":10,"title":"First","body":"Depends on #11"},{"number":11,"title":"Second","body":""}]' ;;
+  "pr list") printf '[]' ;;
+  *) exit 1 ;;
+esac
+`)
+
+	tickets, err := collectRepoTickets(RepoConfig{Repo: "o/r"}, MainSyncSkipped, true, io.Discard)
+	if err != nil {
+		t.Fatalf("collectRepoTickets returned unexpected error: %v", err)
+	}
+	if len(tickets) != 2 {
+		t.Fatalf("got %d tickets, want 2: %+v", len(tickets), tickets)
+	}
+
+	var ten *Ticket
+	for i := range tickets {
+		if tickets[i].Number == 10 {
+			ten = &tickets[i]
+		}
+	}
+	if ten == nil {
+		t.Fatalf("ticket #10 not found: %+v", tickets)
+	}
+	if !equalInts(ten.DependsOn, []int{11}) {
+		t.Errorf("ticket #10 DependsOn = %v, want [11]", ten.DependsOn)
+	}
+	if got := ten.DependencyStates[11]; got != DependencyStateOpen {
+		t.Errorf("ticket #10 DependencyStates[11] = %q, want DependencyStateOpen", got)
+	}
+}
+
+// TestCollectRepoTickets_DependsOnOutsideWindowResolvesViaGhIssueView covers
+// plan test 27: a body dependency on an issue absent from the pass's open
+// set is resolved via the gh issue view fallback, reporting CLOSED.
+func TestCollectRepoTickets_DependsOnOutsideWindowResolvesViaGhIssueView(t *testing.T) {
+	installFakeGH(t, `
+case "$1 $2" in
+  "issue list") printf '[{"number":10,"title":"First","body":"Depends on #99"}]' ;;
+  "pr list") printf '[]' ;;
+  "issue view") printf '{"number":99,"state":"CLOSED"}' ;;
+  *) exit 1 ;;
+esac
+`)
+
+	tickets, err := collectRepoTickets(RepoConfig{Repo: "o/r"}, MainSyncSkipped, true, io.Discard)
+	if err != nil {
+		t.Fatalf("collectRepoTickets returned unexpected error: %v", err)
+	}
+	if len(tickets) != 1 {
+		t.Fatalf("got %d tickets, want 1: %+v", len(tickets), tickets)
+	}
+	if !equalInts(tickets[0].DependsOn, []int{99}) {
+		t.Errorf("DependsOn = %v, want [99]", tickets[0].DependsOn)
+	}
+	if got := tickets[0].DependencyStates[99]; got != DependencyStateClosed {
+		t.Errorf("DependencyStates[99] = %q, want DependencyStateClosed", got)
+	}
+}
+
+// TestCollectRepoTickets_NoDependencyLineLeavesFieldsNil covers plan test 28:
+// an issue whose body has no "Depends on #N" line leaves both new fields
+// nil/empty.
+func TestCollectRepoTickets_NoDependencyLineLeavesFieldsNil(t *testing.T) {
+	installFakeGH(t, `
+case "$1 $2" in
+  "issue list") printf '[{"number":10,"title":"First","body":"just some prose"}]' ;;
+  "pr list") printf '[]' ;;
+  *) exit 1 ;;
+esac
+`)
+
+	tickets, err := collectRepoTickets(RepoConfig{Repo: "o/r"}, MainSyncSkipped, true, io.Discard)
+	if err != nil {
+		t.Fatalf("collectRepoTickets returned unexpected error: %v", err)
+	}
+	if len(tickets) != 1 {
+		t.Fatalf("got %d tickets, want 1: %+v", len(tickets), tickets)
+	}
+	if len(tickets[0].DependsOn) != 0 {
+		t.Errorf("DependsOn = %v, want nil/empty", tickets[0].DependsOn)
+	}
+	if len(tickets[0].DependencyStates) != 0 {
+		t.Errorf("DependencyStates = %v, want nil/empty", tickets[0].DependencyStates)
+	}
+}
+
+// TestCollectRepoTickets_ResolveDepsFalse_NeverShellsOutToGhIssueView covers
+// the #825 review fix #1 regression: with resolveDeps=false (the
+// reconciler's call), an issue whose body has a "Depends on #N" line for a
+// number outside the pass's own open set must never invoke `gh issue view`
+// at all -- parseDependsOn/resolveDependencyStates must be skipped entirely,
+// not merely capped -- and DependsOn/DependencyStates must stay nil/empty.
+// The fake gh script records a marker file on any "issue view" invocation so
+// a regression that resolves dependencies anyway is caught even though it
+// would otherwise still produce the same nil/empty fields via the
+// (unwanted) call happening to fail.
+func TestCollectRepoTickets_ResolveDepsFalse_NeverShellsOutToGhIssueView(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "issue-view.called")
+	installFakeGH(t, fmt.Sprintf(`
+case "$1 $2" in
+  "issue list") printf '[{"number":10,"title":"First","body":"Depends on #99"}]' ;;
+  "pr list") printf '[]' ;;
+  "issue view") printf 'x' >> "%s"; printf '{"number":99,"state":"OPEN"}' ;;
+  *) exit 1 ;;
+esac
+`, marker))
+
+	tickets, err := collectRepoTickets(RepoConfig{Repo: "o/r"}, MainSyncSkipped, false, io.Discard)
+	if err != nil {
+		t.Fatalf("collectRepoTickets returned unexpected error: %v", err)
+	}
+	if len(tickets) != 1 {
+		t.Fatalf("got %d tickets, want 1: %+v", len(tickets), tickets)
+	}
+	if len(tickets[0].DependsOn) != 0 {
+		t.Errorf("DependsOn = %v, want nil/empty (resolveDeps=false must skip parsing entirely)", tickets[0].DependsOn)
+	}
+	if len(tickets[0].DependencyStates) != 0 {
+		t.Errorf("DependencyStates = %v, want nil/empty (resolveDeps=false must skip resolution entirely)", tickets[0].DependencyStates)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("gh issue view was invoked despite resolveDeps=false")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("checking marker file: %v", err)
+	}
+}
+
+// TestCollectTickets_FixtureOmittingBody_LeavesDependencyFieldsNil covers
+// plan test 29: a pre-#825 fake-gh fixture that omits body from its issue
+// list JSON (twoIssuesFakeGHScript, already used by
+// TestCollectTickets_StampsMainSyncFromMap and
+// TestCollectTickets_NilMainSyncMapLeavesZeroValue above) must continue to
+// produce tickets with nil DependsOn/DependencyStates -- confirming the new
+// fields are additive and never break an existing fixture.
+func TestCollectTickets_FixtureOmittingBody_LeavesDependencyFieldsNil(t *testing.T) {
+	installFakeGHOnPath(t, twoIssuesFakeGHScript)
+
+	tickets, err := CollectTickets([]RepoConfig{{Repo: "o/r"}}, nil, true, io.Discard)
+	if err != nil {
+		t.Fatalf("CollectTickets returned unexpected error: %v", err)
+	}
+	if len(tickets) != 2 {
+		t.Fatalf("got %d tickets, want 2: %+v", len(tickets), tickets)
+	}
+	for _, tk := range tickets {
+		if len(tk.DependsOn) != 0 {
+			t.Errorf("ticket #%d DependsOn = %v, want nil/empty (body omitted from fixture)", tk.Number, tk.DependsOn)
+		}
+		if len(tk.DependencyStates) != 0 {
+			t.Errorf("ticket #%d DependencyStates = %v, want nil/empty (body omitted from fixture)", tk.Number, tk.DependencyStates)
+		}
 	}
 }

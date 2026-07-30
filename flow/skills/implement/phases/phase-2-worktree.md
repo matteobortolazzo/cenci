@@ -7,13 +7,14 @@ Read this file only when Phase 2 starts.
 Phase 2 runs when either of these holds:
 
 - (a) the skill was **invoked** with a `.plans/<filename>.md` argument — `hasPlanFile` set to true either during mode detection itself (ticketless-mode filename, no numeric prefix) or during Pre-flight Check's Plan Verification step (ticket-mode filename, numeric prefix — mode detection only extracts the ticket ID and defers to `cenci pipeline plan-check`; see `SKILL.md`), or
-- (b) the Trivial Fast Path in Phase 1 wrote a plan file this session (Trivial-Ticket Triage set `trivial = true`, and Phase 1's `## Trivial Fast Path` set `hasPlanFile = true`).
+- (b) the Trivial Fast Path in Phase 1 wrote a plan file this session (Trivial-Ticket Triage set `trivial = true`, and Phase 1's `## Trivial Fast Path` set `hasPlanFile = true`), or
+- (c) the Lean Approval Path in Phase 1 wrote a plan file this session (`planning.autonomy: "lean"`, no escalations, and Phase 1's `## Lean Approval Path` set `hasPlanFile = true`).
 
-In both cases a plan file exists on disk and `hasPlanFile` is true — that is the actual invariant this gate protects, not literally "was the skill invoked with a path argument." A plan file written by Phase 1's `## New Plan` branch in the current session does NOT satisfy this gate: ordinary new-plan sessions end at Phase 1, and implementation resumes in a fresh session.
+In all three cases a plan file exists on disk and `hasPlanFile` is true — that is the actual invariant this gate protects, not literally "was the skill invoked with a path argument." A plan file written by Phase 1's `## New Plan` branch in the current session does NOT satisfy this gate: ordinary new-plan sessions end at Phase 1, and implementation resumes in a fresh session.
 
 Verify:
 
-1. Either the invocation used a `.plans/<filename>.md` path (plan file mode from mode detection), or the Trivial Fast Path ran this session.
+1. Either the invocation used a `.plans/<filename>.md` path (plan file mode from mode detection), or the Trivial Fast Path ran this session, or the Lean Approval Path ran this session.
 2. The plan file exists and was read.
 
 If either check fails, stop and tell the user to run `/cenci:implement .plans/<filename>` in a fresh session.
