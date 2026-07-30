@@ -39,7 +39,15 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 		out = os.Stdout
 	}
 
-	tickets, err := CollectTickets(cfg.Repos)
+	// Once per pass, per enrolled repo, sync local main with origin/main
+	// before collecting tickets/plans (#822) -- so staleness and new
+	// planning sessions never evaluate against stale code. RunOnce is the
+	// sole owner of this sync: RunReconcileOnce also calls CollectTickets in
+	// the same combined pass (combined.go) but deliberately passes a nil
+	// map and never syncs, so a fetch+merge never runs twice per pass.
+	syncs := syncMains(cfg.Repos, out, dryRun)
+
+	tickets, err := CollectTickets(cfg.Repos, syncs)
 	if err != nil {
 		logf(out, "dispatch: collecting tickets: %v\n", err)
 	}
