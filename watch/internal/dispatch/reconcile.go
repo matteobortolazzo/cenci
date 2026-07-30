@@ -16,6 +16,12 @@ const (
 	labelPlanned        = "Planned"
 	labelDispatchFailed = "dispatch-failed"
 	labelPlanInvalid    = "plan-invalid"
+	// labelInputNeeded (#826) marks a ticket the unattended planner
+	// escalated: it stopped cleanly (no dispatched work in flight, so it is
+	// never a dispatch failure), and is blocked on a human answering the
+	// open questions posted on the ticket. Distinct from labelDispatchFailed
+	// and labelPlanInvalid -- see ReconcileResult.Escalated.
+	labelInputNeeded = "Input Needed"
 	// labelReconcileStuck (#265) is a terminal label the reconciler may apply:
 	// it marks a ticket whose apply-retry budget was exhausted, i.e.
 	// reconciliation itself is stuck (distinct from dispatch-failed, which
@@ -78,11 +84,15 @@ type ReconcileInputs struct {
 // ReconcileResult is Reconcile's output. NextObservations is the grace map to
 // persist for the next pass; Failed lists every ticket that ends this pass in a
 // surfaced leak state (dispatch-failed or plan-invalid) so the daemon can badge
-// the snapshot.
+// the snapshot. Escalated (#826) lists every ticket labeled Input Needed --
+// a distinct, non-failure attention state (see watch/pkg/watch/snapshot.go's
+// reciprocal NeedInput/Escalated doc comments): it must never be appended to
+// Failed, and must never feed dispatch's fleet-wide NeedInput pause.
 type ReconcileResult struct {
 	Recoveries       []Recovery
 	NextObservations map[string]time.Time
 	Failed           []Ticket
+	Escalated        []Ticket
 }
 
 // Reconcile is pure: identical ReconcileInputs yield an identical ordered
@@ -126,6 +136,16 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 		// never resurfaces for it again.
 		if hasLabel(t.Labels, labelDispatchFailed) || hasLabel(t.Labels, labelPlanInvalid) || hasLabel(t.Labels, labelReconcileStuck) {
 			res.Failed = append(res.Failed, t)
+			continue
+		}
+
+		// Escalated (#826): the unattended planner stopped cleanly to ask a
+		// human a question. Its window is gone by design (the escalating run
+		// exited, not crashed), so it must never enter crash-recovery -- record
+		// it and move on, distinct from every leak state above (never Failed)
+		// and never reconciled (no Recovery, no grace observation).
+		if hasLabel(t.Labels, labelInputNeeded) {
+			res.Escalated = append(res.Escalated, t)
 			continue
 		}
 

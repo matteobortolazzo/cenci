@@ -427,6 +427,138 @@ func TestApplyLabelTransition_InReview_WithParent_CascadesToParent(t *testing.T)
 	}
 }
 
+// -- input-needed transition (#826): escalation label swap ------------------
+
+func TestApplyLabelTransition_InputNeeded_HappyPath_AddsInputNeededRemovesWorking(t *testing.T) {
+	stateDir := t.TempDir()
+	mustSeedState(t, stateDir, "42", StageWaitingForInput)
+	gh := newFakeGh(t, "octocat", nil)
+	gh.install()
+
+	if _, err := ApplyLabelTransition(LabelOpts{ID: "42", StateDir: stateDir, RepoSlug: "o/r", Transition: "input-needed"}); err != nil {
+		t.Fatalf("ApplyLabelTransition(input-needed): %v", err)
+	}
+
+	found := false
+	for _, c := range gh.callsMatching("issue", "edit") {
+		if c.hasFlag("--add-label", "Input Needed") {
+			found = true
+			removed := c.flagValues("--remove-label")
+			if !slices.Contains(removed, "Working") {
+				t.Errorf("input-needed transition must remove Working, removed %v (call: %v)", removed, c)
+			}
+			if len(removed) != 1 {
+				t.Errorf("input-needed transition must remove Working and nothing else, removed %v (call: %v)", removed, c)
+			}
+		}
+	}
+	if !found {
+		t.Error(`expected a "gh issue edit --add-label \"Input Needed\"" call`)
+	}
+}
+
+// TestApplyLabelTransition_InputNeeded_WrongStage_ReturnsErrWrongStageForLabel
+// covers the stage gate: input-needed requires at least waiting_for_input, so
+// a ticket only at prepared (never escalated) must be rejected.
+func TestApplyLabelTransition_InputNeeded_WrongStage_ReturnsErrWrongStageForLabel(t *testing.T) {
+	stateDir := t.TempDir()
+	mustSeedState(t, stateDir, "42", StagePrepared)
+	gh := newFakeGh(t, "octocat", nil)
+	gh.install()
+
+	_, err := ApplyLabelTransition(LabelOpts{ID: "42", StateDir: stateDir, RepoSlug: "o/r", Transition: "input-needed"})
+	if err == nil {
+		t.Fatal("ApplyLabelTransition(input-needed) from the wrong stage: want an error, got nil")
+	}
+	if !errors.Is(err, ErrWrongStageForLabel) {
+		t.Errorf("error = %v, want errors.Is(_, ErrWrongStageForLabel)", err)
+	}
+	if len(gh.calls) != 0 {
+		t.Errorf("gh calls = %v, want none (the stage gate must fail before any gh call)", gh.calls)
+	}
+}
+
+// TestApplyLabelTransition_InputNeeded_PastMinimum_Succeeds mirrors the
+// minimum-stage-gating convention (#636): a re-application past the minimum
+// stage must still succeed, not be rejected by an exact-stage whitelist.
+func TestApplyLabelTransition_InputNeeded_PastMinimum_Succeeds(t *testing.T) {
+	stateDir := t.TempDir()
+	mustSeedState(t, stateDir, "42", StageWaitingForPlanApproval)
+	gh := newFakeGh(t, "octocat", nil)
+	gh.install()
+
+	if _, err := ApplyLabelTransition(LabelOpts{ID: "42", StateDir: stateDir, RepoSlug: "o/r", Transition: "input-needed"}); err != nil {
+		t.Fatalf("ApplyLabelTransition(input-needed) past minimum stage: %v", err)
+	}
+}
+
+// TestApplyLabelTransition_InputNeeded_NoOwnershipCheck proves input-needed
+// never calls verifyAndClaimOwnership: unlike "working", a foreign assignee
+// must not block the escalation label swap.
+func TestApplyLabelTransition_InputNeeded_NoOwnershipCheck(t *testing.T) {
+	stateDir := t.TempDir()
+	mustSeedState(t, stateDir, "42", StageWaitingForInput)
+	gh := newFakeGh(t, "octocat", []string{"someone-else"})
+	gh.install()
+
+	if _, err := ApplyLabelTransition(LabelOpts{ID: "42", StateDir: stateDir, RepoSlug: "o/r", Transition: "input-needed"}); err != nil {
+		t.Fatalf("ApplyLabelTransition(input-needed) with a foreign assignee: want success (no ownership check), got: %v", err)
+	}
+	for _, c := range gh.callsMatching("issue", "view") {
+		if c.hasFlag("--json", "assignees") {
+			t.Errorf("expected no assignee lookup for input-needed (ownership check is working-only), got %v", c)
+		}
+	}
+}
+
+// TestApplyLabelTransition_InputNeeded_PersistsLabelsWithoutWorkingKeepsRefined
+// asserts the persisted State.Labels side, not just the gh command line
+// (#834's own precedent): Working comes off, Refined (unrelated) stays.
+func TestApplyLabelTransition_InputNeeded_PersistsLabelsWithoutWorkingKeepsRefined(t *testing.T) {
+	stateDir := t.TempDir()
+	mustSeedStateWithLabels(t, stateDir, "42", StageWaitingForInput, []string{"Refined", "Working"})
+	gh := newFakeGh(t, "octocat", nil)
+	gh.install()
+
+	s, err := ApplyLabelTransition(LabelOpts{ID: "42", StateDir: stateDir, RepoSlug: "o/r", Transition: "input-needed"})
+	if err != nil {
+		t.Fatalf("ApplyLabelTransition(input-needed): %v", err)
+	}
+	if !slices.Contains(s.Labels, "Input Needed") {
+		t.Errorf("persisted Labels = %v, want it to contain %q", s.Labels, "Input Needed")
+	}
+	if slices.Contains(s.Labels, "Working") {
+		t.Errorf("persisted Labels = %v, want %q removed", s.Labels, "Working")
+	}
+	if !slices.Contains(s.Labels, "Refined") {
+		t.Errorf("persisted Labels = %v, want the unrelated %q label untouched", s.Labels, "Refined")
+	}
+}
+
+// TestApplyLabelTransition_InputNeeded_Reapply_Idempotent covers
+// re-escalation's metadata refresh: re-applying input-needed a second time
+// (the ticket is already labeled Input Needed) must still succeed and
+// re-record a fresh TicketUpdatedAt baseline.
+func TestApplyLabelTransition_InputNeeded_Reapply_Idempotent(t *testing.T) {
+	stateDir := t.TempDir()
+	mustSeedState(t, stateDir, "42", StageWaitingForInput)
+	gh := newFakeGh(t, "octocat", nil)
+	gh.ticketUpdatedAt = "2026-07-20T20:10:00Z"
+	gh.install()
+
+	if _, err := ApplyLabelTransition(LabelOpts{ID: "42", StateDir: stateDir, RepoSlug: "o/r", Transition: "input-needed"}); err != nil {
+		t.Fatalf("first ApplyLabelTransition(input-needed): %v", err)
+	}
+	gh.ticketUpdatedAt = "2026-07-20T20:20:00Z"
+	s, err := ApplyLabelTransition(LabelOpts{ID: "42", StateDir: stateDir, RepoSlug: "o/r", Transition: "input-needed"})
+	if err != nil {
+		t.Fatalf("second ApplyLabelTransition(input-needed) (re-escalation): %v", err)
+	}
+	if s.TicketUpdatedAt != "2026-07-20T20:20:00Z" {
+		t.Errorf("re-applied TicketUpdatedAt = %q, want the fresh baseline %q", s.TicketUpdatedAt, "2026-07-20T20:20:00Z")
+	}
+}
+
 // -- freshness baseline: post-edit ticketUpdatedAt recording (#669) --------
 
 func TestApplyLabelTransition_Planned_RecordsTicketUpdatedAtBaseline(t *testing.T) {

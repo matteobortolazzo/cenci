@@ -30,6 +30,23 @@ package main
 // unrecognized flag, trailing positional) still exit 2 with a one-line
 // stderr hint, per docs/cli-conventions.md, and never reach
 // pipeline.CheckPlan at all.
+//
+// Decision/exit-code table (ticket #560, extended by #826):
+//
+//	resume          exit 0, errors: []   -- plan is valid and fresh
+//	stale           exit 0, errors: []   -- plan is valid but stale
+//	replan          exit 0, errors: []   -- --replan-requested short-circuit
+//	awaiting-input  exit 0, errors: []   -- plan front matter carries
+//	                                        status: awaiting-input (#826): a
+//	                                        draft persisted by the unattended
+//	                                        escalation path, blocked on a
+//	                                        human; nil error like
+//	                                        resume/stale/replan, so it also
+//	                                        exits 0 trivially
+//	none            exit 0, errors: [_]  -- no .plans/<id>-*.md match yet
+//	multiple        exit 0, errors: [_]  -- 2+ matches, ambiguous
+//	"" (unset)      exit 1, errors: [_]  -- ErrPlanMalformed or a
+//	                                        freshness-check failure
 import (
 	"encoding/json"
 	"flag"

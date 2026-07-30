@@ -171,6 +171,44 @@ func TestPipelineLabel_PlannedTransition_HappyPath_ProducesContractJSON(t *testi
 	}
 }
 
+// TestPipelineLabel_InputNeededTransition_HappyPath_ProducesContractJSON
+// covers the escalation label swap (#826) at the CLI surface.
+func TestPipelineLabel_InputNeededTransition_HappyPath_ProducesContractJSON(t *testing.T) {
+	fakeDir := t.TempDir()
+	writeFakeGhForLabelApply(t, fakeDir)
+	stateDir := t.TempDir()
+	seedPipelineState(t, filepath.Join(stateDir, "42.json"), "42", "waiting_for_input")
+
+	cmd := exec.Command(binaryPath, "pipeline", "label", "42", "--transition", "input-needed", "--state-dir", stateDir, "--repo-slug", "octo/repo")
+	cmd.Env = pipelineEnv(fakeDir)
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("pipeline label input-needed: unexpected error: %v\n%s", err, output)
+	}
+	var c pipelineContract
+	if jerr := json.Unmarshal(output, &c); jerr != nil {
+		t.Fatalf("pipeline label input-needed: stdout is not valid JSON: %v\n%s", jerr, output)
+	}
+	assertArraysNonNil(t, "label input-needed", c)
+	if len(c.Errors) != 0 {
+		t.Errorf("errors = %v, want none on success", c.Errors)
+	}
+}
+
+// TestPipelineLabel_TrivialOnInputNeededTransition_Exit2 mirrors
+// TestPipelineLabel_TrivialOnNonPlannedTransition_Exit2: --trivial stays
+// meaningful only for --transition planned.
+func TestPipelineLabel_TrivialOnInputNeededTransition_Exit2(t *testing.T) {
+	assertPipelineVerbUsageExit2(t, "cenci pipeline label: usage:", "pipeline", "label", "42", "--transition", "input-needed", "--trivial", "--repo-slug", "o/r")
+}
+
+// TestPipelineLabel_ParentOnInputNeededTransition_Exit2 mirrors
+// TestPipelineLabel_ParentOnNonInReviewTransition_Exit2: --parent stays
+// meaningful only for --transition in-review.
+func TestPipelineLabel_ParentOnInputNeededTransition_Exit2(t *testing.T) {
+	assertPipelineVerbUsageExit2(t, "cenci pipeline label: usage:", "pipeline", "label", "42", "--transition", "input-needed", "--parent", "10", "--repo-slug", "o/r")
+}
+
 func TestPipelineWorktree_HappyPath_ProducesContractJSON(t *testing.T) {
 	repoDir := t.TempDir()
 	initGitRepoForCLITest(t, repoDir)

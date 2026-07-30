@@ -65,14 +65,31 @@ func (d *Daemon) buildSnapshot() ipc.StateSnapshot {
 		snap.Windows = append(snap.Windows, e.w)
 	}
 
-	// Append the reconciler's synthetic failure overlay (#46). These entries
-	// have no backing session, so they are counted here, after the real ones.
+	// Append the reconciler's synthetic attention overlay (#46, extended by
+	// #826 to include "escalated"). These entries have no backing session,
+	// so they are counted here, after the real ones.
 	for _, w := range d.attention {
 		snap.Windows = append(snap.Windows, w)
 		snap.Summary.Total++
-		snap.Summary.Failed++
+		countAttentionStatus(&snap.Summary, w.Status)
 	}
 	return snap
+}
+
+// countAttentionStatus increments the summary counter matching a synthetic
+// attention entry's status. "escalated" (#826) is narrowly excluded from
+// the old blanket Failed++ and counted into its own Escalated field instead
+// -- every other value, including today's "failed" and any future/unknown
+// status, keeps the original visible fallback (watch's match-miss rule:
+// narrow the exclusion to the exact case being excluded, never broaden into
+// a silent discard).
+func countAttentionStatus(sum *ipc.StatusSummary, status string) {
+	switch status {
+	case "escalated":
+		sum.Escalated++
+	default:
+		sum.Failed++
+	}
 }
 
 func countStatus(sum *ipc.StatusSummary, s detect.Status) {

@@ -32,6 +32,7 @@ func runWidgetJSON(args []string) {
 		SymbolNeedInput:       defaults.SymbolNeedInput,
 		SymbolStopped:         defaults.SymbolStopped,
 		SymbolFailed:          defaults.SymbolFailed,
+		SymbolEscalated:       defaults.SymbolEscalated,
 		SymbolDispatch:        status.DefaultSymbolDispatch,
 		SymbolDispatchRunning: status.DefaultSymbolDispatchRunning,
 	}
@@ -42,6 +43,7 @@ func runWidgetJSON(args []string) {
 	fs.StringVar(&wcfg.SymbolNeedInput, "symbol-input", wcfg.SymbolNeedInput, "symbol for need-input state")
 	fs.StringVar(&wcfg.SymbolStopped, "symbol-stopped", wcfg.SymbolStopped, "symbol for stopped (interrupted) state")
 	fs.StringVar(&wcfg.SymbolFailed, "symbol-failed", wcfg.SymbolFailed, "symbol for dispatch-failed state")
+	fs.StringVar(&wcfg.SymbolEscalated, "symbol-escalated", wcfg.SymbolEscalated, "symbol for a planner-escalated (Input Needed) ticket")
 	fs.StringVar(&wcfg.SymbolDispatch, "symbol-dispatch", wcfg.SymbolDispatch, "symbol for the fleet dispatch loop indicator")
 	fs.StringVar(&wcfg.SymbolDispatchRunning, "symbol-dispatch-running", wcfg.SymbolDispatchRunning, "symbol for a fleet dispatch pass actively running")
 	_ = fs.Parse(args)

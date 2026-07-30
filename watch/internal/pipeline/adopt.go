@@ -31,8 +31,9 @@ import (
 )
 
 // adoptPlanFileStage implements the ticket #688 plan's "Detection semantics
-// -- item 1 (exact)" gate. Adoption is granted only when ALL of the
-// following hold; any failure means no adoption (default-deny, per
+// -- item 1 (exact)" gate, retargeted by ticket #826 (gate 2) and extended
+// with a new gate 7. Adoption is granted only when ALL of the following
+// hold; any failure means no adoption (default-deny, per
 // watch/docs/go-gotchas.md #598, watch/docs/error-handling.md #628) and the
 // caller must fall through to today's unmodified
 // transition()/ErrInvalidTransition (or ErrNotPrepared) behavior, verbatim:
@@ -40,8 +41,11 @@ import (
 //  1. o.Stage == "plan" && o.Approve == true -- adoption is narrowly scoped
 //     to `plan --approve` only; bare `plan` keeps its own strict precondition.
 //  2. The persisted stage s.Stage is a KNOWN stage (stageRank ok) ranking
-//     STRICTLY BELOW StageWaitingForPlanApproval (i.e. new or prepared). An
-//     unknown/corrupt persisted stage is default-deny.
+//     STRICTLY BELOW StageWaitingForInput (i.e. new or prepared; #826
+//     retargeted this from StageWaitingForPlanApproval so a ticket already
+//     parked at waiting_for_input -- escalated, blocked on a human -- is
+//     never silently adopted). An unknown/corrupt persisted stage is
+//     default-deny.
 //  3. The plan repo root resolves (resolvePlanRepoRoot(o.RepoRoot)); a
 //     resolution failure (e.g. --state-dir used outside a git repo) is
 //     non-fatal and simply means no adoption.
@@ -51,6 +55,11 @@ import (
 //     plan-check applies (front matter, all four required sections, slug).
 //  6. The plan's front-matter ticketId is either absent/0 (pre-dating the
 //     field) or equal to <id>. A mismatch means no adoption.
+//  7. The plan's front-matter status is NOT "awaiting-input" (#826). Gate
+//     (2)'s stage retarget alone cannot close this hole: if the
+//     `.cenci/pipeline/<id>.json` state file itself was deleted (or never
+//     written), the persisted stage reads as new/prepared regardless of what
+//     the draft on disk says, so the front matter must be checked directly.
 //
 // adoptPlanFileStage makes no gh/git call: the decision is purely local and
 // offline (TestAdopt_InvokesCommandSeamZeroTimes pins this).
@@ -61,13 +70,13 @@ func adoptPlanFileStage(o Opts, s State) (planPath string, ok bool) {
 	}
 
 	// (2) Persisted stage must be known and rank strictly below the
-	// adoption target.
+	// adoption gate (waiting_for_input, #826).
 	fromRank, fromOk := stageRank(s.Stage)
 	if !fromOk {
 		return "", false
 	}
-	targetRank, targetOk := stageRank(StageWaitingForPlanApproval)
-	if !targetOk || fromRank >= targetRank {
+	gateRank, gateOk := stageRank(StageWaitingForInput)
+	if !gateOk || fromRank >= gateRank {
 		return "", false
 	}
 
@@ -91,7 +100,7 @@ func adoptPlanFileStage(o Opts, s State) (planPath string, ok bool) {
 
 	// (5) The single match must pass the identical validation gate
 	// plan-check applies.
-	_, meta, err := parseAndValidatePlan(path, string(content))
+	fm, meta, err := parseAndValidatePlan(path, string(content))
 	if err != nil {
 		return "", false
 	}
@@ -105,6 +114,11 @@ func adoptPlanFileStage(o Opts, s State) (planPath string, ok bool) {
 		if convErr != nil || meta.TicketID != wantID {
 			return "", false
 		}
+	}
+
+	// (7) Never adopt a draft still awaiting human input (#826).
+	if fm["status"] == "awaiting-input" {
+		return "", false
 	}
 
 	return path, true

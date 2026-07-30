@@ -57,9 +57,10 @@ type Daemon struct {
 	// other means.
 	pending map[string]*pendingCloseEntry
 
-	// attention is the reconciler's overlay of synthetic "failed" windows
-	// (#46). It is appended to every snapshot until the next overlay replaces
-	// it. Empty when the embedded dispatch loop is disabled.
+	// attention is the reconciler's overlay of synthetic "failed"/"escalated"
+	// windows (#46, extended by #826). It is appended to every snapshot
+	// until the next overlay replaces it. Empty when the embedded dispatch
+	// loop is disabled.
 	attention []ipc.WindowState
 
 	// headroom is the reconciler's per-agent-type token-budget headroom

@@ -16,27 +16,30 @@ import (
 // invocation of `cenci pipeline` (unknown/missing stage, missing/non-numeric
 // id, unrecognized flag, trailing positional, --approve on a non-plan
 // stage) — exit 2, per docs/cli-conventions.md.
-const pipelineUsage = "cenci pipeline: usage: cenci pipeline prepare|plan|execute|review|finalize|reset <id> [--approve] [--state-dir DIR] [--repo PATH]"
+const pipelineUsage = "cenci pipeline: usage: cenci pipeline prepare|plan|await-input|execute|review|finalize|reset <id> [--approve] [--state-dir DIR] [--repo PATH]"
 
-// pipelineStages are the five valid `cenci pipeline` subcommands, in the
-// plan's State Machine Design order.
+// pipelineStages are the six valid `cenci pipeline` subcommands: the five
+// stages from the plan's State Machine Design order, plus "await-input"
+// (ticket #826: the unattended planner-escalation stage, target
+// waiting_for_input).
 var pipelineStages = map[string]bool{
-	"prepare":  true,
-	"plan":     true,
-	"execute":  true,
-	"review":   true,
-	"finalize": true,
+	"prepare":     true,
+	"plan":        true,
+	"await-input": true,
+	"execute":     true,
+	"review":      true,
+	"finalize":    true,
 }
 
 var pipelineIDPattern = regexp.MustCompile(`^\d+$`)
 
 // runPipeline implements `cenci pipeline <stage|verb> <id> [flags]`: the
-// first token is either one of the five stage transitions (unchanged from
-// ticket #558), one of ticket #559's mechanics verbs (label/worktree/
-// worktree-cleanup/artifact), or ticket #560's plan-check verb, each with
-// its own usage hint and flag set. It
-// parses and validates the CLI surface (usage errors exit 2 with a one-line
-// stderr hint, per docs/cli-conventions.md), dispatches into
+// first token is either one of the six stage transitions (five unchanged
+// from ticket #558, plus "await-input" added by ticket #826), one of ticket
+// #559's mechanics verbs (label/worktree/worktree-cleanup/artifact), or
+// ticket #560's plan-check verb, each with its own usage hint and flag set.
+// It parses and validates the CLI surface (usage errors exit 2 with a
+// one-line stderr hint, per docs/cli-conventions.md), dispatches into
 // internal/pipeline's engine, and renders the returned {state, next_actions,
 // artifacts, warnings, errors} contract as JSON on stdout. Domain errors
 // (invalid transition, ticket not found, etc.) still print the full

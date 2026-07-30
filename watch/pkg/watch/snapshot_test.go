@@ -8,6 +8,26 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
 )
 
+// -- StatusSummary.Escalated (#826) -----------------------------------------
+
+// TestStatusSummary_EscalatedWireKey locks in the JSON key "escalated" for
+// the new counter, distinct from the pre-existing "need_input" key -- the
+// exact naming asymmetry the plan calls out (label "Input Needed", internal
+// counter "Escalated"/"escalated", deliberately NOT "input_needed" so it
+// cannot be confused with NeedInput/"need_input" at a glance).
+func TestStatusSummary_EscalatedWireKey(t *testing.T) {
+	data, err := json.Marshal(watch.StatusSummary{NeedInput: 1, Escalated: 2})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"escalated":2`) {
+		t.Errorf("marshaled summary = %s, want an %q key", data, `"escalated":2`)
+	}
+	if !strings.Contains(string(data), `"need_input":1`) {
+		t.Errorf("marshaled summary = %s, want the pre-existing %q key preserved", data, `"need_input":1`)
+	}
+}
+
 // -- StateSnapshot.Dispatch (#219) -----------------------------------------
 
 // TestStateSnapshot_DispatchOmittedWhenNil locks in that a nil Dispatch field

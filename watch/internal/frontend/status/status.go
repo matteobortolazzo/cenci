@@ -93,13 +93,19 @@ func FormatSessionLine(w ipc.WindowState, escape func(string) string) string {
 
 // Config holds the symbol settings for waybar output.
 type Config struct {
-	SocketPath            string
-	SymbolIdle            string
-	SymbolRunning         string
-	SymbolDone            string
-	SymbolNeedInput       string
-	SymbolStopped         string
-	SymbolFailed          string
+	SocketPath      string
+	SymbolIdle      string
+	SymbolRunning   string
+	SymbolDone      string
+	SymbolNeedInput string
+	SymbolStopped   string
+	SymbolFailed    string
+	// SymbolEscalated (#826) is the glyph for Summary.Escalated -- a ticket
+	// the unattended planner escalated (Input Needed), distinct from
+	// SymbolNeedInput's live-session-mid-turn meaning. Deliberately a
+	// different glyph from both SymbolNeedInput and SymbolFailed so the two
+	// concepts never render identically.
+	SymbolEscalated       string
 	SymbolDispatch        string
 	SymbolDispatchRunning string
 }
@@ -157,11 +163,15 @@ func Format(snap *ipc.StateSnapshot, cfg Config) output {
 		return out
 	}
 
-	// Build text: counts for non-zero statuses. Failed leads — it is the loudest
-	// and highest-priority state.
+	// Build text: counts for non-zero statuses. Failed leads — it is the
+	// loudest and highest-priority state; Escalated (#826) is next, ahead of
+	// need-input/running.
 	var parts []string
 	if snap.Summary.Failed > 0 {
 		parts = append(parts, fmt.Sprintf("%s %d", cfg.SymbolFailed, snap.Summary.Failed))
+	}
+	if snap.Summary.Escalated > 0 {
+		parts = append(parts, fmt.Sprintf("%s %d", cfg.SymbolEscalated, snap.Summary.Escalated))
 	}
 	if snap.Summary.Running > 0 {
 		parts = append(parts, fmt.Sprintf("%s %d", cfg.SymbolRunning, snap.Summary.Running))
@@ -326,10 +336,15 @@ func headroomClass(pct int) string {
 	}
 }
 
-// highestClass returns the CSS class for the highest-priority status.
+// highestClass returns the CSS class for the highest-priority status:
+// failed > escalated > need-input > running > done > stopped > idle (#826
+// inserted escalated between failed and need-input).
 func highestClass(snap *ipc.StateSnapshot) string {
 	if snap.Summary.Failed > 0 {
 		return "failed"
+	}
+	if snap.Summary.Escalated > 0 {
+		return "escalated"
 	}
 	if snap.Summary.NeedInput > 0 {
 		return "need-input"

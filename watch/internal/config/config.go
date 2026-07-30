@@ -20,6 +20,11 @@ type Config struct {
 	SymbolNeedInput string
 	SymbolStopped   string
 	SymbolFailed    string
+	// SymbolEscalated (#826) is the glyph for a ticket the unattended
+	// planner escalated (Input Needed), deliberately distinct from
+	// SymbolNeedInput ("!", a live session waiting mid-turn) and
+	// SymbolFailed ("✗") so the three never render identically.
+	SymbolEscalated string
 }
 
 func Default() Config {
@@ -39,5 +44,6 @@ func Default() Config {
 		SymbolNeedInput: "!",
 		SymbolStopped:   "⏹",
 		SymbolFailed:    "✗",
+		SymbolEscalated: "?",
 	}
 }

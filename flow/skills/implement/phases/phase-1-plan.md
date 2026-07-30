@@ -4,7 +4,7 @@ Read this file only when Phase 1 starts.
 
 ## Pipeline: Plan Stage
 
-Ticket mode only, regardless of which branch below runs: at planning start, invoke `cenci pipeline plan <id>` to record `waiting_for_plan_approval` and obtain this stage's `next_actions`/`warnings`/`errors`. Render this as the one-line status update in place of the phase-transition prose each branch below used to narrate on its own. If it returns non-empty `errors[]` (e.g. `plan` invoked before `prepare`), surface them and stop before continuing into any branch below. `plan` here does not itself gate Phase 2 — approval is recorded separately when the human launches the plan-file run (see `phase-2-worktree.md`'s Gate Check). Ticketless mode: skip this invocation — the pipeline commands operate on ticket IDs.
+Ticket mode only: each branch below invokes this stage's `cenci pipeline` call itself, once, at the *end* of that branch — after the planner has actually returned (or, for the Trivial Fast Path, after triage decided there was nothing to ask) — never at planning start. This lets each branch report its own actual outcome (a persisted plan, a resumed plan, or an escalated draft) instead of a single generic status line printed before any branch is even chosen. Every branch except `## Unattended Escalation Path` (which records `waiting_for_input` via `cenci pipeline await-input <id>` instead — see that section) calls `cenci pipeline plan <id>` to record `waiting_for_plan_approval` and obtain this stage's `next_actions`/`warnings`/`errors`; render the return as the one-line status update in place of the phase-transition prose each branch used to narrate on its own. If it returns non-empty `errors[]` (e.g. `plan` invoked before `prepare`), surface them and stop before continuing. `plan` here does not itself gate Phase 2 — approval is recorded separately when the human launches the plan-file run (see `phase-2-worktree.md`'s Gate Check). Ticketless mode: skip this invocation — the pipeline commands operate on ticket IDs.
 
 ## Existing Plan
 
@@ -16,7 +16,7 @@ If `hasPlanFile` is true, skip new planning:
    - The `multiple`-disambiguation case (see `SKILL.md`'s Plan Verification `multiple` bullet): `cenci pipeline plan-check` never computed a freshness verdict for a file picked by hand from several candidates, so there is no commits-behind signal to analyze — do not run the `git log` analysis. Explain that freshness could not be automatically verified for this file (not that it is known to be behind), before asking the same "Continue with existing plan" / "Re-plan from scratch" question.
 
    If re-planning, delete the plan file and run normal planning. No board-label change is needed here: this is a plan-file-mode run, so `Working` was already added at pipeline start (`Planned` stays — see the **Label "Working"** section of `SKILL.md`); the re-run's new-plan path re-applies (harmlessly re-adds) `Planned` at the end when it persists the fresh plan.
-3. Render the `next_actions` from the `cenci pipeline plan <id>` call above (see `## Pipeline: Plan Stage`) as this step's status update; they point to Phase 2.
+3. Invoke `cenci pipeline plan <id>` now (see `## Pipeline: Plan Stage`) and render its `next_actions` as this step's status update; they point to Phase 2.
 
 ## Trivial Fast Path
 
@@ -41,7 +41,7 @@ If `hasPlanFile` is false and the main agent's Trivial-Ticket Triage (see `SKILL
    ```bash
    cenci pipeline artifact <id> --plan .plans/<filename>
    ```
-7. Set `hasPlanFile = true` and continue into Phase 2 in the same session, per the `next_actions` rendered from the `cenci pipeline plan <id>` call above (see `## Pipeline: Plan Stage`). Do **not** stop, do **not** present the plan for review, do **not** end the turn — this is the sole exception to "a session that creates a new plan always ends at Phase 1" (see `SKILL.md`'s Pipeline section).
+7. Invoke `cenci pipeline plan <id>` now (see `## Pipeline: Plan Stage`). Set `hasPlanFile = true` and continue into Phase 2 in the same session, per its `next_actions`. Do **not** stop, do **not** present the plan for review, do **not** end the turn — this is the sole exception to "a session that creates a new plan always ends at Phase 1" (see `SKILL.md`'s Pipeline section).
 
 ## Lean Approval Path
 
@@ -64,17 +64,60 @@ Two further deterministic disqualifiers run over the planner output already in h
 
    **Verify this call succeeded before continuing** — render its `state`/`next_actions`/`warnings`/`errors`. This restates, rather than references, `## Persist the Plan`'s error-surfacing rule, and the restatement is load-bearing for the same reason it is on the Trivial Fast Path: the normal flow's plan-review stop is itself a human checkpoint that would catch a silently-failed label swap, and lean mode deliberately removes exactly that checkpoint — this session continues straight into Phase 2 and runs unattended through to PR creation. If this call returns non-empty `errors[]`, surface them and **STOP**: leave `hasPlanFile` unset, and do not proceed into Phase 2 on an unconfirmed board state.
 6. Record the artifact: `cenci pipeline artifact <id> --plan .plans/<filename>`. Render its `state`/`next_actions`/`warnings`/`errors` and surface any `errors[]`, but this is **not** a hard stop — re-evaluated for this path: the artifact is a tracking record, and Phase 2's Gate Check re-derives eligibility from `hasPlanFile` plus the plan file on disk, so a failed artifact write degrades observability, not safety.
-7. Set `hasPlanFile = true` and continue into Phase 2 in the same session, per the `next_actions` rendered from the `cenci pipeline plan <id>` call (see `## Pipeline: Plan Stage`). Do **not** stop, do **not** present the plan for review, do **not** end the turn. Phase 2's Gate Check records the implicit approval by invoking `cenci pipeline plan <id> --approve` exactly as it does for every other entrance — no separate lean-mode approval call, no new CLI flag.
+7. Invoke `cenci pipeline plan <id>` now (see `## Pipeline: Plan Stage`). Set `hasPlanFile = true` and continue into Phase 2 in the same session, per its `next_actions`. Do **not** stop, do **not** present the plan for review, do **not** end the turn. Phase 2's Gate Check records the implicit approval by invoking `cenci pipeline plan <id> --approve` exactly as it does for every other entrance — no separate lean-mode approval call, no new CLI flag.
 8. Emit a 3-5 line status summary only (the plan's `### Summary`, its size estimate, and `escalations: none`) plus the saved path — **not** the full plan. The full plan lives at `.plans/<filename>` and, when `cenci.planComment: true`, in the ticket comment; reprinting it here would burn context in a session that must still run Phases 2–9.
+
+## Unattended Escalation Path
+
+Entry: `## Route Planner Output`'s "questions exist" bullet routes here — instead of `AskUserQuestion` — whenever `planning.autonomy` is exactly `"lean"`; lean autonomy is itself the unattended signal, so every lean-mode escalation uses this path, never the inline question/answer loop. Interactive mode is unaffected (see that bullet). Once this path runs, the plan is never implicitly approved even after the human answers it, even if the planner would report no further questions on some hypothetical re-invocation — there is no re-invocation: this session stops for good at step 5 below, and only a **fresh** `/cenci:implement <id>` session, after `cenci pipeline plan-check` reads the draft's `status: awaiting-input`, can move the ticket forward (see `SKILL.md`'s Plan Verification `awaiting-input` branch).
+
+Before step 1, record the durable escalation flag exactly as an in-session lean escalation always has (the in-context session state alone does not survive a context compaction or subagent re-invocation, so it must be backed by a file per `flow/docs/pipeline-safety.md`), as two standalone Bash calls — each a single non-compound command per the `shell-rules` skill, not one compound call:
+
+```bash
+mkdir -p "${TMPDIR:-/tmp}/cenci"
+printf 'escalated\n' > "${TMPDIR:-/tmp}/cenci/cenci-escalated-<id-or-slug>.marker"
+```
+
+Confirm both commands above actually succeeded — re-check that the marker file now exists and holds `escalated` (or inspect each command's exit status) — before moving on to step 1. If either the directory creation or the write fails, halt right here and report the failure; an unwritten durability marker must never be treated as a silent pass-through.
+
+Run the four numbered steps below **in this exact order** — the ordering is load-bearing, not stylistic: the ticket comment (step 2) must post before either pipeline call (steps 3 and 4), because `cenci pipeline label <id> --transition input-needed` records the ticket's post-edit `updatedAt` as the plan-freshness baseline a later `plan-check` compares against — a comment posted afterward would re-bump `updatedAt` past that baseline. `cenci pipeline await-input <id>` (step 3) must run before the label call (step 4), because `--transition input-needed` requires the persisted stage to already be at or past `waiting_for_input`.
+
+1. **Persist the draft plan.** Assemble `.plans/<id>-<slug>.md` with the same front-matter shape and `Write`-then-`cat`-append machinery as `## Persist the Plan` below, with two differences: front matter carries `status: awaiting-input` (not `status: planned`), and the assembled file gains a `## Open Questions` section holding exactly the planner's unresolved `## Clarifying Questions`, verbatim — nothing else. Run assembly step 3's four-heading check exactly as written (see `## Persist the Plan`), plus a fifth check here for `## Open Questions` — a draft missing its questions section is exactly as broken for this path as a draft missing `## Ticket Details` is for the normal path.
+
+   **Restated for this path, not referenced**: a missing `## Ticket Details`, `## Implementation Plan`, `## Architectural Context`, or `## Open Questions` means the escalation must halt *before it ever contacts the ticket* — skip posting the comment in step 2, skip `await-input` in step 3, skip the label swap in step 4, and leave `hasPlanFile` unset. Report which heading(s) are missing and leave the malformed draft on disk for inspection — the same fail-open-for-inspection handling `## Persist the Plan`'s own hard stop uses. A `## Design Context`-only gap still self-repairs exactly as `## Persist the Plan` describes (append `## Design Context` / `N/A`, re-check, continue).
+
+   **Recovery on retry**: this step is idempotent — `Write` always replaces the whole file, so a partial or malformed draft left by a previous failed attempt is harmless; the next attempt starts from a clean file. Never hand-edit or patch a previous attempt's draft.
+
+2. **Post the questions comment.** Write a body containing only the unresolved questions (a numbered list of the planner's `## Clarifying Questions`, not the full draft plan) plus the hidden anchor `<!-- cenci-planner-escalation -->` on its own line — so a resumed session can locate it — to an explicit, uniquely-scoped questions file: `"${TMPDIR:-/tmp}/cenci/cenci-escalation-<id-or-slug>-<session-uuid>.md"` (same worktree/run/session scoping requirement as the marker file above — never a fixed path). Run `mkdir -p "${TMPDIR:-/tmp}/cenci"` and confirm it succeeded before writing the questions file; do not proceed on a failed directory creation.
+
+   The comment body must hold the question text and nothing else: never quote file contents, environment or configuration values, credentials, tokens, secrets, or raw command output in it. Where a question needs to point at something concrete, name a repo-relative path or identifier instead of pasting the sensitive material itself — nobody reviews this body before it reaches GitHub.
+
+   ```bash
+   gh issue comment <number> --repo <owner>/<repo> --body-file <questions-file>
+   ```
+
+   **Verify this call succeeded before continuing.** If `gh issue comment` fails (auth, network, the ticket closing underneath the run), stop here — do not run step 3 or step 4, and leave the questions file on disk for inspection. Nothing is lost: the draft from step 1 is already on disk with `status: awaiting-input`, step 1 is idempotent, and step 2 has not posted, so the very next `/cenci:implement <id>` attempt retries cleanly from step 1. Once the comment posts successfully, remove the questions file — its only purpose was staging the `--body-file` argument, and no later step reads it.
+
+   **Recovery on retry / re-escalation**: a second questions comment on retry (or a genuine re-escalation with refreshed questions) is intentionally not deduplicated — each comment is a timestamped audit entry, and a resumed session locates "the" comment by scanning for the anchor and taking the most recent match, so a duplicate anchor comment is a monotonic no-op for that lookup, never a correctness hazard.
+
+3. **Record the stage.** Run `cenci pipeline await-input <id>` and render the returned `state`/`next_actions`/`warnings`/`errors`.
+
+   **Verify this call succeeded before continuing.** If it returns non-empty `errors[]` (e.g. invoked before `prepare`), surface them and stop — do not run step 4. This call is a monotonic no-op on retry: re-running `await-input` against a ticket already at `waiting_for_input` returns the same stage unchanged with a no-op `warnings[]` entry, never an error and never a rewind — a retry after a prior partial run (e.g. step 4 failed and the whole path re-ran) is always safe.
+
+4. **Swap the label.** Run `cenci pipeline label <id> --transition input-needed` and render its `state`/`next_actions`/`warnings`/`errors`. This removes `Working` and keeps `Refined` — the ticket is no longer actively being worked (a human's reply is now the blocking dependency), but it was already refined before this run started, so that milestone marker stays.
+
+   **Verify this call succeeded before continuing.** If it returns non-empty `errors[]`, surface them and stop. The ticket is left in a safe, resumable degraded state — comment posted, stage recorded, board still showing `Working` — because re-running this one step alone is the correct recovery: the CLI self-heals the `Input Needed` label's existence and treats "already applied" as success, and the stage precondition is already satisfied from step 3, so there is no need to repeat steps 1-3.
+
+5. **Stop cleanly.** Do not read `phases/phase-2-worktree.md` or any later phase file, and do not present the full plan for review — the draft is not yet a reviewable plan. Leave `hasPlanFile` unset. Report a short summary: that planning escalated, the saved draft's path, and that the ticket now awaits a reply on the linked comment.
 
 ## New Plan
 
-If `hasPlanFile` is false (and the Trivial Fast Path above did not apply), analyze the codebase, ask clarifying questions, produce a plan, persist it, present it, and stop. In lean mode with no escalations, `## Route Planner Output` below routes to `## Lean Approval Path` instead of this section.
+If `hasPlanFile` is false (and the Trivial Fast Path above did not apply), analyze the codebase, ask clarifying questions, produce a plan, persist it, present it, and stop. In lean mode with no escalations, `## Route Planner Output` below routes to `## Lean Approval Path` instead of this section; in lean mode with an escalation, it routes to `## Unattended Escalation Path` above instead.
 
 Mandatory stops:
 
 1. If the planner has clarifying questions, ask them with `AskUserQuestion` and end the turn.
-2. Once the planner has no remaining questions, persist the plan and stop, presenting the full plan together with the `next_actions` rendered from the `cenci pipeline plan <id>` call above (see `## Pipeline: Plan Stage`) in the final message. There is **no plan-approval prompt**: answering the clarifying questions is the user's input to planning; reviewing the saved plan and launching the plan-file run is the approval — which is what advances the pipeline state past `waiting_for_plan_approval` (see `phase-2-worktree.md`'s Gate Check). Implementation resumes by invoking `/cenci:implement .plans/<filename>` in a fresh session.
+2. Once the planner has no remaining questions, persist the plan and stop, presenting the full plan together with the `next_actions` from the `cenci pipeline plan <id>` call that `## Persist the Plan` makes at the end of that process (see `## Pipeline: Plan Stage`) in the final message. There is **no plan-approval prompt**: answering the clarifying questions is the user's input to planning; reviewing the saved plan and launching the plan-file run is the approval — which is what advances the pipeline state past `waiting_for_plan_approval` (see `phase-2-worktree.md`'s Gate Check). Implementation resumes by invoking `/cenci:implement .plans/<filename>` in a fresh session.
 
 Never begin Phase 2 in a session that created a new plan — not in the same turn, and not in a later turn. Phases 2–9 require invocation with a plan-file argument, except the Trivial Fast Path (see `## Trivial Fast Path` above). The Lean Approval Path is the other exception (see `## Lean Approval Path` above): a lean-mode plan with no escalations also continues into Phase 2 in the same session.
 
@@ -123,14 +166,7 @@ Question categories to evaluate: scope boundaries, edge cases, error handling, p
 
 Parse `## Clarifying Questions` and, in lean mode, `## Auto-Adopted Answers` — carry any entries the latter contains into `## Q&A from Planning` as `auto-adopted: <answer> — <rationale>` pairs when the plan is persisted.
 
-- If questions exist and are not "None", present all questions using the planner's wording via `AskUserQuestion`; end the turn. **Lean mode**: set the sticky session flag `escalated = true` before ending the turn — once set, it never clears for the rest of this session, because the plan is never implicitly approved even after the human answers it, even if no further questions remain on re-invocation. The in-context flag alone is not durable across a context compaction or subagent re-invocation, so also write a scoped marker file recording that an escalation occurred, before ending the turn, as two standalone Bash calls — each a single non-compound command per the `shell-rules` skill, not one compound call:
-
-  ```bash
-  mkdir -p "${TMPDIR:-/tmp}/cenci"
-  printf 'escalated\n' > "${TMPDIR:-/tmp}/cenci/cenci-escalated-<id-or-slug>.marker"
-  ```
-
-  (`<id-or-slug>` = ticket ID in ticket mode, slug in ticketless mode — the same scoping convention already used for `cenci-context-<id|slug>.md` elsewhere in this file/`SKILL.md`.) When the answers arrive, re-invoke the planner with the bundle path and the Q&A pairs — do not re-paste ticket or design content — and route its output through this section again.
+- If questions exist and are not "None": **interactive mode** — byte-unchanged — presents all questions using the planner's wording via `AskUserQuestion` and ends the turn. **Lean mode** (`planning.autonomy` is exactly `"lean"`) never calls `AskUserQuestion` for this bullet: lean autonomy is itself the unattended signal, so every lean-mode escalation instead goes to `## Unattended Escalation Path` above, which persists a draft plan, posts the questions to the ticket, and stops cleanly — see that section for its own restated error handling, ordering, and per-step recovery/idempotency (including the `<id-or-slug>`-scoped escalation marker file — `<id-or-slug>` = ticket ID in ticket mode, slug in ticketless mode, the same scoping convention already used for `cenci-context-<id|slug>.md` elsewhere in this file/`SKILL.md`).
 - If no questions (or none remain): **interactive mode**, or **lean mode with `escalated` set this session**, persist the plan directly via `## New Plan` above — do **not** ask for approval. The human gate is launching the plan-file run: the user reviews the saved plan in the final message and either launches implementation or re-plans (`replan` as user context discards the saved plan).
 - **Lean mode, `## Clarifying Questions` is `None`, and `escalated` was never set this session** — go to `## Lean Approval Path` above instead of `## New Plan`, only after that section's own entry conditions (marker file, sensitive-path backstop, Open Questions) have all been evaluated — reaching this bullet alone does not license executing any of its numbered steps.
 
@@ -192,6 +228,9 @@ stalenessPaths: watch/internal/pipeline/planfile.go, flow/skills/implement/phase
 ## Q&A from Planning
 <numbered Q&A pairs — human answers as `A:`, planner self-resolved entries as `auto-adopted: <answer> — <rationale>` — or "No questions asked">
 
+## Open Questions
+<only present in an `awaiting-input` draft persisted by `## Unattended Escalation Path` — the planner's unresolved `## Clarifying Questions`, verbatim; absent from every other plan, including a normal `## New Plan`/Trivial Fast Path/Lean Approval Path save>
+
 ## Implementation Plan
 <planner output>
 
@@ -207,6 +246,8 @@ stalenessPaths: watch/internal/pipeline/planfile.go, flow/skills/implement/phase
 ## Attachment Summaries
 <summaries or "None">
 ```
+
+`status` is `planned` for every plan persisted by this section, its Trivial Fast Path variant, and its Lean Approval Path variant — the one exception is a draft persisted by `## Unattended Escalation Path`, which uses `status: awaiting-input` instead (see that section).
 
 Record `planCommitSha` from `git rev-parse HEAD`. Source `isChild`, `isLastChild`, and `parentId` from the context-gatherer digest stored earlier in this session. Source `stalenessPaths` from the plan's **dependency file set** — the exact repo-relative files under `### Files to Modify` and `### Files to Create` in the planner output, plus any files the planner explicitly flags as contracts/interfaces this plan reads and relies on (not just the ones it edits). List the files, comma-separated, not the enclosing project directory: `cenci pipeline plan-check` and `cenci dispatch` both scope their commits-behind count with `git rev-list -- <stalenessPaths>`, which counts commits touching those exact paths, so a directory value (e.g. `cenci`) marks the plan stale on *every* commit anywhere in that project — in a busy repo that fires on unrelated churn and the plan is perpetually "stale". File-level paths count only commits that actually touch what this plan depends on. This applies in single-project repos too: prefer the plan's file set over a bare repo-root/whole-repo value there as well, for the same reason. Only fall back to a directory (or omitting `stalenessPaths` entirely) when the plan genuinely cannot enumerate its files. For ticketless mode, omit ticket fields.
 
@@ -238,7 +279,9 @@ Record the saved plan path as a tracked artifact:
 cenci pipeline artifact <id> --plan .plans/<filename>
 ```
 
-After the plan file is written and (in ticket mode) any optional comment, the label transition, and artifact recording are done, the **only remaining actions** are those `cenci pipeline`/`gh` calls plus the final message below — no other tool calls, and never read `phases/phase-2-worktree.md` or any later phase file in this session. The session that created a plan always ends here; implementation runs in a fresh session. (This "always ends here" rule is what `## New Plan` follows; the **Trivial Fast Path** and the **Lean Approval Path** above both reuse this section's front-matter/write/comment/label/artifact machinery but do not stop — see the Trivial Fast Path's step 7 and the Lean Approval Path's step 7.)
+Ticket mode only: invoke `cenci pipeline plan <id>` now (see `## Pipeline: Plan Stage`) to record `waiting_for_plan_approval` and obtain this stage's `next_actions`/`warnings`/`errors` — this is the call whose return the final message below presents. Render the returned state; if it returns non-empty `errors[]`, surface them here too. Ticketless mode: skip this call — there is no ticket ID to pass, and the final message below is presented without it.
+
+After the plan file is written and (in ticket mode) any optional comment, the label transition, artifact recording, and the `cenci pipeline plan` call above are done, the **only remaining actions** are those `cenci pipeline`/`gh` calls plus the final message below — no other tool calls, and never read `phases/phase-2-worktree.md` or any later phase file in this session. The session that created a plan always ends here; implementation runs in a fresh session. (This "always ends here" rule is what `## New Plan` follows; the **Trivial Fast Path** and the **Lean Approval Path** above both reuse this section's front-matter/write/comment/label/artifact machinery but do not stop — see the Trivial Fast Path's step 7 and the Lean Approval Path's step 7.)
 
 Stop and present the full plan together with the save notice — this final message is the user's review point before launching implementation, so never abbreviate the plan here:
 

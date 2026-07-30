@@ -82,6 +82,51 @@ func TestWidgetJSONAndWaybarOutputByteIdentical(t *testing.T) {
 	}
 }
 
+// TestWidgetJSON_EscalatedDefaultSymbolAndFlagOverride (#826) covers
+// status_cmd.go's wiring of the new counter into widget-json's rendered
+// text: the default "?" symbol renders for a broadcast snapshot carrying
+// Summary.Escalated, and -symbol-escalated overrides it.
+func TestWidgetJSON_EscalatedDefaultSymbolAndFlagOverride(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "esc.sock")
+	srv, err := ipc.NewServer(socket)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go srv.Accept(ctx)
+	time.Sleep(20 * time.Millisecond)
+
+	snap := ipc.StateSnapshot{
+		Windows: []ipc.WindowState{
+			{WindowName: "42-implement", Status: "escalated"},
+		},
+		Summary: ipc.StatusSummary{Total: 1, Escalated: 1},
+	}
+
+	srv.Broadcast(snap)
+	time.Sleep(20 * time.Millisecond)
+	defaultOut, err := exec.Command(binaryPath, "widget-json", "-socket", socket).CombinedOutput()
+	if err != nil {
+		t.Fatalf("widget-json (default symbol): %v\n%s", err, defaultOut)
+	}
+	if !strings.Contains(string(defaultOut), `"text":"? 1"`) {
+		t.Errorf("widget-json default output = %q, want it to contain the default escalated symbol/count %q", defaultOut, `"text":"? 1"`)
+	}
+
+	srv.Broadcast(snap)
+	time.Sleep(20 * time.Millisecond)
+	overrideOut, err := exec.Command(binaryPath, "widget-json", "-socket", socket, "-symbol-escalated", "@").CombinedOutput()
+	if err != nil {
+		t.Fatalf("widget-json (-symbol-escalated override): %v\n%s", err, overrideOut)
+	}
+	if !strings.Contains(string(overrideOut), `"text":"@ 1"`) {
+		t.Errorf("widget-json overridden output = %q, want it to contain the overridden escalated symbol/count %q", overrideOut, `"text":"@ 1"`)
+	}
+}
+
 // TestStatusSubcommand_HumanReadable_DegradesGracefullyWithNoDaemon covers
 // the new human-readable `cenci status` (distinct from `widget-json`):
 // with nothing listening on either socket it must still print a report and

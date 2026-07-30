@@ -21,6 +21,7 @@ func testConfig() Config {
 		SymbolNeedInput:       "!",
 		SymbolStopped:         "⏹",
 		SymbolFailed:          "✗",
+		SymbolEscalated:       "?",
 		SymbolDispatch:        "⟳",
 		SymbolDispatchRunning: "⚙",
 	}
@@ -61,6 +62,88 @@ func TestFormat_FailedWinsHighestClass(t *testing.T) {
 	}
 	if out.Text != "✗ 1  ▶ 1  ! 1" {
 		t.Errorf("expected failed count to lead, got %q", out.Text)
+	}
+}
+
+// -- Escalated (#826): its own status/counter/class, distinct from Failed --
+
+func TestFormat_EscalatedOnly(t *testing.T) {
+	snap := &ipc.StateSnapshot{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Windows: []ipc.WindowState{
+			{WindowName: "42-implement", Status: "escalated"},
+		},
+		Summary: ipc.StatusSummary{Total: 1, Escalated: 1},
+	}
+	out := Format(snap, testConfig())
+
+	if out.Text != "? 1" {
+		t.Errorf("expected '? 1', got %q", out.Text)
+	}
+	if out.Class != "escalated" {
+		t.Errorf("expected class 'escalated', got %q", out.Class)
+	}
+}
+
+// TestFormat_EscalatedWinsOverNeedInputAndRunning locks in the plan's
+// updated priority order: failed > escalated > need-input > running > done >
+// stopped > idle -- escalated must outrank need-input/running for both the
+// leading text part and the CSS class, but must still lose to failed.
+func TestFormat_EscalatedWinsOverNeedInputAndRunning(t *testing.T) {
+	snap := &ipc.StateSnapshot{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Windows: []ipc.WindowState{
+			{Session: "s", WindowIndex: "0", TaskName: "a", Status: "running"},
+			{Session: "s", WindowIndex: "1", TaskName: "b", Status: "need-input"},
+			{WindowName: "42-implement", Status: "escalated"},
+		},
+		Summary: ipc.StatusSummary{Total: 3, Running: 1, NeedInput: 1, Escalated: 1},
+	}
+	out := Format(snap, testConfig())
+
+	if out.Class != "escalated" {
+		t.Errorf("expected class 'escalated' (above need-input/running), got %q", out.Class)
+	}
+	if out.Text != "? 1  ▶ 1  ! 1" {
+		t.Errorf("expected escalated count to lead (after any failed), got %q", out.Text)
+	}
+}
+
+// TestFormat_FailedStillWinsOverEscalated proves failed remains the single
+// highest-priority state even with escalated also present.
+func TestFormat_FailedStillWinsOverEscalated(t *testing.T) {
+	snap := &ipc.StateSnapshot{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Windows: []ipc.WindowState{
+			{WindowName: "1-implement", Status: "failed"},
+			{WindowName: "2-implement", Status: "escalated"},
+		},
+		Summary: ipc.StatusSummary{Total: 2, Failed: 1, Escalated: 1},
+	}
+	out := Format(snap, testConfig())
+
+	if out.Class != "failed" {
+		t.Errorf("expected class 'failed' (highest priority, above escalated), got %q", out.Class)
+	}
+	if out.Text != "✗ 1  ? 1" {
+		t.Errorf("expected failed count to lead escalated, got %q", out.Text)
+	}
+}
+
+// TestFormat_EscalatedSymbolOverride proves the symbol is config-driven, not
+// hardcoded, mirroring every other status symbol's own override test.
+func TestFormat_EscalatedSymbolOverride(t *testing.T) {
+	cfg := testConfig()
+	cfg.SymbolEscalated = "@"
+	snap := &ipc.StateSnapshot{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Windows:   []ipc.WindowState{{WindowName: "42-implement", Status: "escalated"}},
+		Summary:   ipc.StatusSummary{Total: 1, Escalated: 1},
+	}
+	out := Format(snap, cfg)
+
+	if out.Text != "@ 1" {
+		t.Errorf("expected '@ 1' with the overridden symbol, got %q", out.Text)
 	}
 }
 

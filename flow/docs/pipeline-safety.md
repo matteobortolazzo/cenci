@@ -17,12 +17,18 @@ fail mid-run or get reused in a new context.
   checkpoint, continues into further autonomous phases, or arms an unattended completion
   loop), re-evaluate and explicitly restate the error-handling for the new risk profile.
   The original rule may have worked at its original stopping point but be under-specified
-  for the new path. Two named instances of this rule in `/cenci:implement`: the Trivial Fast
-  Path (`skills/implement/phases/phase-1-plan.md`'s `## Trivial Fast Path`), and lean
+  for the new path. Three named instances of this rule in `/cenci:implement`: the Trivial Fast
+  Path (`skills/implement/phases/phase-1-plan.md`'s `## Trivial Fast Path`), lean
   planning (`planning.autonomy: "lean"`, `skills/implement/phases/phase-1-plan.md`'s
   `## Lean Approval Path`) — both reuse `## Persist the Plan`'s write/comment/label/artifact
   machinery but restate its verification and error-surfacing rules for a checkpoint-free,
-  same-session continuation into Phase 2.
+  same-session continuation into Phase 2 — and the unattended planner escalation path
+  (`skills/implement/phases/phase-1-plan.md`'s `## Unattended Escalation Path`), which reuses
+  the same `## Persist the Plan` assemble-don't-re-emit machinery but restates its
+  verification/error-handling for a *different* new risk profile: not a checkpoint-free
+  continuation into further phases, but a path that posts a ticket comment and swaps board
+  labels — each with its own ordering constraint and per-step recovery/idempotency
+  documented — before stopping cleanly at Phase 1, never reaching Phase 2 at all.
 
 - All shared temp files written by phases or agents (e.g.
   `/tmp/claude/cenci-<ticket-id-or-slug>-diff.patch`) must be uniquely scoped by worktree

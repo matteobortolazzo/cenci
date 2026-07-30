@@ -35,6 +35,7 @@ func TestStageRank_TotalOrder(t *testing.T) {
 	order := []Stage{
 		StageNew,
 		StagePrepared,
+		StageWaitingForInput,
 		StageWaitingForPlanApproval,
 		StagePlanApproved,
 		StageExecuted,
@@ -79,6 +80,7 @@ func TestIsKnownStage(t *testing.T) {
 	}{
 		{"new", StageNew, true},
 		{"prepared", StagePrepared, true},
+		{"waiting_for_input", StageWaitingForInput, true},
 		{"waiting_for_plan_approval", StageWaitingForPlanApproval, true},
 		{"plan_approved", StagePlanApproved, true},
 		{"executed", StageExecuted, true},
@@ -128,6 +130,131 @@ func TestTransition_ValidSequence(t *testing.T) {
 				t.Errorf("transition(%s, %q, approve=%v) noop = true, want false (a real forward transition, not a no-op)", c.from, c.command, c.approve)
 			}
 		})
+	}
+}
+
+// -- await-input (#826): new stage, its own command, dual-predecessor bare
+// `plan` -------------------------------------------------------------------
+
+// TestTransition_AwaitInput_FromPrepared_Succeeds locks in the new
+// `await-input` command's real forward transition: prepared -> waiting_for_input.
+func TestTransition_AwaitInput_FromPrepared_Succeeds(t *testing.T) {
+	got, noop, err := transition(StagePrepared, "await-input", false)
+	if err != nil {
+		t.Fatalf("transition(prepared, await-input) unexpected error: %v", err)
+	}
+	if noop {
+		t.Error("transition(prepared, await-input) noop = true, want false (a real forward transition)")
+	}
+	if got != StageWaitingForInput {
+		t.Errorf("transition(prepared, await-input) = %s, want %s", got, StageWaitingForInput)
+	}
+}
+
+// TestTransition_AwaitInput_BeforePrepared_ErrNotPrepared locks in
+// await-input's sentinel: it reuses ErrNotPrepared (same failure class as
+// bare `plan`), per the plan's Assumptions.
+func TestTransition_AwaitInput_BeforePrepared_ErrNotPrepared(t *testing.T) {
+	got, noop, err := transition(StageNew, "await-input", false)
+	if err == nil {
+		t.Fatalf("transition(new, await-input) = %s, noop=%v, <nil>, want ErrNotPrepared", got, noop)
+	}
+	if !errors.Is(err, ErrNotPrepared) {
+		t.Errorf("transition(new, await-input) error = %v, want errors.Is(_, ErrNotPrepared)", err)
+	}
+	if noop {
+		t.Error("transition(new, await-input) noop = true, want false")
+	}
+}
+
+// TestTransition_AwaitInput_NoOp_WhenAtOrPastTarget locks in the monotonic
+// no-op rule (#636) for the new command: re-escalating (or escalating past
+// the point of escalation) must never rewind and must never hard-fail.
+func TestTransition_AwaitInput_NoOp_WhenAtOrPastTarget(t *testing.T) {
+	cases := []Stage{
+		StageWaitingForInput,
+		StageWaitingForPlanApproval,
+		StagePlanApproved,
+		StageExecuted,
+		StageReviewed,
+		StageFinalized,
+	}
+	for _, from := range cases {
+		t.Run(string(from), func(t *testing.T) {
+			got, noop, err := transition(from, "await-input", false)
+			if err != nil {
+				t.Fatalf("transition(%s, await-input) unexpected error: %v", from, err)
+			}
+			if !noop {
+				t.Errorf("transition(%s, await-input) noop = false, want true", from)
+			}
+			if got != from {
+				t.Errorf("transition(%s, await-input) = %s, want the persisted stage %s unchanged", from, got, from)
+			}
+		})
+	}
+}
+
+// TestTransition_BarePlan_FromWaitingForInput_ResumesToWaitingForPlanApproval
+// locks in the dual-predecessor rule: bare `plan` must accept
+// waiting_for_input as a predecessor too (the escalation resume path), not
+// just prepared, and must land at the *same* target waiting_for_plan_approval
+// as the prepared path -- never a rewind, never a distinct target.
+func TestTransition_BarePlan_FromWaitingForInput_ResumesToWaitingForPlanApproval(t *testing.T) {
+	got, noop, err := transition(StageWaitingForInput, "plan", false)
+	if err != nil {
+		t.Fatalf("transition(waiting_for_input, plan) unexpected error: %v", err)
+	}
+	if noop {
+		t.Error("transition(waiting_for_input, plan) noop = true, want false (a real forward transition, the escalation resume path)")
+	}
+	if got != StageWaitingForPlanApproval {
+		t.Errorf("transition(waiting_for_input, plan) = %s, want %s", got, StageWaitingForPlanApproval)
+	}
+}
+
+// TestTransition_BarePlan_FromWaitingForInput_ReEscalation_MonotonicNoOp
+// covers the plan's "re-escalation is a monotonic no-op" requirement from
+// the opposite direction: once bare `plan` has already advanced a ticket to
+// waiting_for_plan_approval, `await-input` called again must not rewind it
+// back to waiting_for_input -- it must land as a no-op at the persisted
+// (later) stage.
+func TestTransition_BarePlan_FromWaitingForInput_ReEscalation_MonotonicNoOp(t *testing.T) {
+	got, noop, err := transition(StageWaitingForPlanApproval, "await-input", false)
+	if err != nil {
+		t.Fatalf("transition(waiting_for_plan_approval, await-input) unexpected error: %v", err)
+	}
+	if !noop {
+		t.Error("transition(waiting_for_plan_approval, await-input) noop = false, want true (re-escalation must never rewind)")
+	}
+	if got != StageWaitingForPlanApproval {
+		t.Errorf("transition(waiting_for_plan_approval, await-input) = %s, want unchanged %s", got, StageWaitingForPlanApproval)
+	}
+}
+
+// TestCommandTarget_Plan_PredecessorSet directly asserts the "predecessor
+// set" data fact commandTarget now owns for bare `plan`: exactly
+// {prepared, waiting_for_input}, per the plan's chosen alternative
+// ("commandTarget returns a predecessor set").
+func TestCommandTarget_Plan_PredecessorSet(t *testing.T) {
+	target, predecessors, sentinel, ok := commandTarget("plan", false)
+	if !ok {
+		t.Fatal("commandTarget(plan, false) ok = false, want true")
+	}
+	if target != StageWaitingForPlanApproval {
+		t.Errorf("commandTarget(plan, false) target = %s, want %s", target, StageWaitingForPlanApproval)
+	}
+	if !errors.Is(sentinel, ErrNotPrepared) {
+		t.Errorf("commandTarget(plan, false) sentinel = %v, want ErrNotPrepared", sentinel)
+	}
+	want := map[Stage]bool{StagePrepared: true, StageWaitingForInput: true}
+	if len(predecessors) != len(want) {
+		t.Fatalf("commandTarget(plan, false) predecessors = %v, want exactly %v", predecessors, want)
+	}
+	for _, p := range predecessors {
+		if !want[p] {
+			t.Errorf("commandTarget(plan, false) predecessors = %v, unexpected member %s", predecessors, p)
+		}
 	}
 }
 
@@ -206,6 +333,7 @@ func TestTransition_InvalidFromExamplesReturnSentinelErrors(t *testing.T) {
 	}{
 		{"plan before prepare", StageNew, "plan", false, ErrNotPrepared},
 		{"plan --approve before plan", StagePrepared, "plan", true, ErrInvalidTransition},
+		{"await-input before prepare", StageNew, "await-input", false, ErrNotPrepared},
 		// AC's key guard: execute must not be reachable before plan_approved,
 		// from either intermediate stage short of it.
 		{"execute at prepared (AC key guard)", StagePrepared, "execute", false, ErrPlanNotApproved},
@@ -268,6 +396,7 @@ func TestTransition_UnknownPersistedStage_HardFailsForEveryCommand(t *testing.T)
 		approve bool
 	}{
 		{"prepare", false},
+		{"await-input", false},
 		{"plan", false},
 		{"plan", true},
 		{"execute", false},
@@ -367,6 +496,7 @@ func TestNextActionsFor_AlwaysNonNil(t *testing.T) {
 	for _, stage := range []Stage{
 		StageNew,
 		StagePrepared,
+		StageWaitingForInput,
 		StageWaitingForPlanApproval,
 		StagePlanApproved,
 		StageExecuted,
@@ -377,6 +507,21 @@ func TestNextActionsFor_AlwaysNonNil(t *testing.T) {
 		if got == nil {
 			t.Errorf("nextActionsFor(%s) = nil, want a non-nil slice (possibly empty)", stage)
 		}
+	}
+}
+
+// TestNextActionsFor_WaitingForInput_MentionsResumeViaBarePlan locks in
+// guidance content for the new escalation stage: it must point at the
+// resume path (bare `plan`, per the dual-predecessor rule), not at
+// `await-input` again (which would just no-op).
+func TestNextActionsFor_WaitingForInput_MentionsResumeViaBarePlan(t *testing.T) {
+	got := nextActionsFor(StageWaitingForInput)
+	if len(got) == 0 {
+		t.Fatal("nextActionsFor(StageWaitingForInput) = [], want guidance")
+	}
+	joined := strings.Join(got, " ")
+	if !strings.Contains(joined, "cenci pipeline plan") {
+		t.Errorf("nextActionsFor(StageWaitingForInput) = %v, want it to mention `cenci pipeline plan <id>` (the resume path)", got)
 	}
 }
 

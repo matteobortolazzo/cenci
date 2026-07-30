@@ -192,6 +192,119 @@ func TestPipelineFullValidSequence_AllFiveStagesExit0(t *testing.T) {
 	}
 }
 
+// -- await-input (#826): new stage command, dual-predecessor bare `plan` --
+
+// TestPipelineAwaitInput_FromPrepared_ContractExit0 covers await-input's own
+// forward transition at the CLI surface.
+func TestPipelineAwaitInput_FromPrepared_ContractExit0(t *testing.T) {
+	fakeDir := t.TempDir()
+	writeFakeGh(t, fakeDir, false)
+	stateDir := t.TempDir()
+
+	if _, _, exitErr := runPipelineCLI(t, fakeDir, "prepare", "42", "--state-dir", stateDir); exitErr != nil {
+		t.Fatalf("prepare: unexpected exit %d", exitErr.ExitCode())
+	}
+	c, _, exitErr := runPipelineCLI(t, fakeDir, "await-input", "42", "--state-dir", stateDir)
+	if exitErr != nil {
+		t.Fatalf("await-input: unexpected exit %d", exitErr.ExitCode())
+	}
+	if c.State != "waiting_for_input" {
+		t.Errorf("state = %q, want %q", c.State, "waiting_for_input")
+	}
+	assertArraysNonNil(t, "await-input", c)
+	if len(c.Errors) != 0 {
+		t.Errorf("errors = %v, want none on success", c.Errors)
+	}
+}
+
+// TestPipelineAwaitInput_BeforePrepared_Exit1WithErrors covers await-input's
+// "too early" sentinel: reuses ErrNotPrepared, same failure class as bare
+// `plan` (the plan's Assumptions).
+func TestPipelineAwaitInput_BeforePrepared_Exit1WithErrors(t *testing.T) {
+	fakeDir := t.TempDir()
+	stateDir := t.TempDir()
+
+	c, _, exitErr := runPipelineCLI(t, fakeDir, "await-input", "42", "--state-dir", stateDir)
+	if exitErr == nil {
+		t.Fatal("await-input before prepare: want a non-zero exit, got 0")
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("await-input before prepare: exit = %d, want 1 (domain error)", exitErr.ExitCode())
+	}
+	if len(c.Errors) == 0 {
+		t.Error("await-input before prepare: errors = [], want at least one populated error")
+	}
+}
+
+// TestPipelineAwaitInput_ApproveFlag_Exit2 covers the CLI-grammar guard:
+// --approve is meaningful only for `plan`, so using it on await-input is a
+// usage error (exit 2), like every other non-plan stage.
+func TestPipelineAwaitInput_ApproveFlag_Exit2(t *testing.T) {
+	assertPipelineUsageExit2(t, "pipeline", "await-input", "42", "--approve")
+}
+
+// TestPipelineBarePlan_FromWaitingForInput_ResumesToWaitingForPlanApproval
+// drives the full escalation-resume sequence at the CLI surface: prepare ->
+// await-input -> bare plan must land at waiting_for_plan_approval, exactly
+// like the never-escalated prepare -> plan path -- the dual-predecessor rule
+// end to end, not just the in-package transition() unit test.
+func TestPipelineBarePlan_FromWaitingForInput_ResumesToWaitingForPlanApproval(t *testing.T) {
+	fakeDir := t.TempDir()
+	writeFakeGh(t, fakeDir, false)
+	stateDir := t.TempDir()
+
+	for _, step := range [][]string{{"prepare", "42"}, {"await-input", "42"}} {
+		args := append(append([]string{}, step...), "--state-dir", stateDir)
+		if _, _, exitErr := runPipelineCLI(t, fakeDir, args...); exitErr != nil {
+			t.Fatalf("%v: unexpected exit %d", step, exitErr.ExitCode())
+		}
+	}
+
+	c, _, exitErr := runPipelineCLI(t, fakeDir, "plan", "42", "--state-dir", stateDir)
+	if exitErr != nil {
+		t.Fatalf("plan (resume from waiting_for_input): unexpected exit %d", exitErr.ExitCode())
+	}
+	if c.State != "waiting_for_plan_approval" {
+		t.Errorf("state = %q, want %q", c.State, "waiting_for_plan_approval")
+	}
+	if len(c.Errors) != 0 {
+		t.Errorf("errors = %v, want none on the resume path", c.Errors)
+	}
+}
+
+// TestPipelineAwaitInput_ReEscalation_MonotonicNoOp covers the epic's
+// "re-escalation is a monotonic no-op" requirement at the CLI surface: once
+// bare `plan` has already advanced a ticket to waiting_for_plan_approval,
+// calling await-input again must not rewind it and must surface the #636
+// no-op warning.
+func TestPipelineAwaitInput_ReEscalation_MonotonicNoOp(t *testing.T) {
+	fakeDir := t.TempDir()
+	writeFakeGh(t, fakeDir, false)
+	stateDir := t.TempDir()
+
+	for _, step := range [][]string{{"prepare", "42"}, {"await-input", "42"}, {"plan", "42"}} {
+		args := append(append([]string{}, step...), "--state-dir", stateDir)
+		if _, _, exitErr := runPipelineCLI(t, fakeDir, args...); exitErr != nil {
+			t.Fatalf("%v: unexpected exit %d", step, exitErr.ExitCode())
+		}
+	}
+
+	c, _, exitErr := runPipelineCLI(t, fakeDir, "await-input", "42", "--state-dir", stateDir)
+	if exitErr != nil {
+		t.Fatalf("re-escalation: unexpected exit %d", exitErr.ExitCode())
+	}
+	if c.State != "waiting_for_plan_approval" {
+		t.Errorf("state = %q, want unchanged %q (re-escalation must never rewind)", c.State, "waiting_for_plan_approval")
+	}
+	if len(c.Warnings) != 1 {
+		t.Fatalf("warnings = %v, want exactly one no-op warning", c.Warnings)
+	}
+	wantWarning := `already at stage "waiting_for_plan_approval"; await-input is a no-op`
+	if c.Warnings[0] != wantWarning {
+		t.Errorf("warnings[0] = %q, want %q", c.Warnings[0], wantWarning)
+	}
+}
+
 // -- domain errors: exit 1, full contract with errors[] -------------------
 
 // TestPipelineExecute_BeforePlanApproved_Exit1WithErrors is the AC's key

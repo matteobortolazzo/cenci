@@ -217,6 +217,14 @@ func TestDecideGates(t *testing.T) {
 			want: []wantDecision{{42, ActionDispatch, "dispatch", "claude"}},
 		},
 		{
+			name: "stage gate: waiting_for_input + present dispatches (not gated)",
+			mutate: func(in *Inputs) {
+				in.Tickets[0].Stage = "waiting_for_input"
+				in.Tickets[0].StageProbe = StageProbePresent
+			},
+			want: []wantDecision{{42, ActionDispatch, "dispatch", "claude"}},
+		},
+		{
 			name: "stage gate: waiting_for_plan_approval + present dispatches (not gated)",
 			mutate: func(in *Inputs) {
 				in.Tickets[0].Stage = "waiting_for_plan_approval"
@@ -861,4 +869,24 @@ func TestDecideDependencyGate_OrderingBeforeSiblingSerialization(t *testing.T) {
 		{41, ActionSkip, "not Planned", ""},
 		{42, ActionSkip, want, ""},
 	})
+}
+
+// -- #826: unattended planner escalation, dispatch regression tests --------
+
+// TestDecideEscalatedCounterNeverTripsNeedInputPause is the plan's
+// Implementation Order step 6 / Test Strategy table regression: Decide's
+// fleet-wide "need-input pause" gate reads only Snapshot.Summary.NeedInput
+// (decide.go's `in.Snapshot.Summary.NeedInput >= in.Config.NeedInputThreshold`
+// check) -- the new Escalated counter must never feed it, so a fleet with
+// several escalated (Input Needed) tickets and zero live need-input sessions
+// must still dispatch an unrelated, otherwise-eligible ticket normally. This
+// is the epic's core acceptance criterion: "one escalation must never freeze
+// the whole fleet."
+func TestDecideEscalatedCounterNeverTripsNeedInputPause(t *testing.T) {
+	in := baseInputs()
+	in.Config.NeedInputThreshold = 1
+	in.Snapshot = &watch.StateSnapshot{
+		Summary: watch.StatusSummary{Running: 0, NeedInput: 0, Escalated: 5},
+	}
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
 }

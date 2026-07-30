@@ -2,7 +2,7 @@ package main
 
 // Deterministic pipeline mechanics verbs (ticket #559): `cenci pipeline
 // label|worktree|worktree-cleanup|artifact <id> [flags]`, dispatched from
-// runPipeline (pipeline_cmd.go) alongside the existing five stage
+// runPipeline (pipeline_cmd.go) alongside the existing six stage
 // transitions. Each verb parses and validates its own flag set (usage
 // errors exit 2 with a one-line stderr hint naming that verb specifically,
 // per docs/cli-conventions.md), dispatches into internal/pipeline, and
@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	pipelineLabelUsage = "cenci pipeline label: usage: cenci pipeline label <id> --transition working|planned|in-review " +
+	pipelineLabelUsage = "cenci pipeline label: usage: cenci pipeline label <id> --transition working|input-needed|planned|in-review " +
 		"[--trivial] [--parent N] [--repo-slug OWNER/REPO] [--state-dir DIR] [--repo PATH]"
 	pipelineWorktreeUsage = "cenci pipeline worktree: usage: cenci pipeline worktree <id> (--slug SLUG | --attach PATH) " +
 		"[--state-dir DIR] [--repo PATH]"
@@ -141,7 +141,7 @@ func runPipelineLabel(rest []string) {
 
 	fs := flag.NewFlagSet("pipeline label", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	transition := fs.String("transition", "", "label transition: working|planned|in-review")
+	transition := fs.String("transition", "", "label transition: working|input-needed|planned|in-review")
 	trivial := fs.Bool("trivial", false, "planned transition only: keep Working instead of removing it")
 	parent := fs.String("parent", "", "in-review transition only: cascade the label to this parent ticket id")
 	repoSlug := fs.String("repo-slug", "", "override the resolved owner/repo gh target (test hook)")
@@ -154,7 +154,7 @@ func runPipelineLabel(rest []string) {
 		pipelineLabelUsageExit()
 	}
 	switch *transition {
-	case "working", "planned", "in-review":
+	case "working", "input-needed", "planned", "in-review":
 	default:
 		pipelineLabelUsageExit()
 	}

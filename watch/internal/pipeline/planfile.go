@@ -4,7 +4,9 @@ package pipeline
 // decision function. Discovers `.plans/<id>-*.md` (0/1/2+ matches ->
 // none/validate/multiple), validates the single match's front matter,
 // required sections, and slug via internal/planfile's shared parser, then --
-// unless --replan-requested short-circuits first -- computes a deterministic
+// unless --replan-requested short-circuits first, or the front matter
+// carries status: awaiting-input (#826: a draft persisted by the unattended
+// escalation path, blocked on a human) -- computes a deterministic
 // freshness verdict from git commits-behind (planfile.CommitsBehind, scoped
 // to the plan's stalenessPaths) and a retry-wrapped `gh issue view
 // <id> --json state,updatedAt` (reusing retry.go's command/retryDo/ghRetry
@@ -79,12 +81,17 @@ type PlanCheckOpts struct {
 
 // PlanCheck is CheckPlan's decision result.
 type PlanCheck struct {
-	// Decision is one of "resume", "stale", "replan", "none", "multiple".
+	// Decision is one of "resume", "stale", "replan", "awaiting-input",
+	// "none", "multiple". "awaiting-input" (#826) means the plan's front
+	// matter carries status: awaiting-input -- a draft persisted by the
+	// unattended escalation path, blocked on a human answering the open
+	// questions on the ticket; it carries a nil error like the other
+	// non-"none"/"multiple" decisions.
 	Decision string
 
 	// Paths holds every matched .plans/<id>-*.md path: empty for "none",
-	// the single match for "resume"/"stale"/"replan", every match for
-	// "multiple".
+	// the single match for "resume"/"stale"/"replan"/"awaiting-input",
+	// every match for "multiple".
 	Paths []string
 
 	// Plan is populated whenever exactly one plan file parsed and
@@ -153,6 +160,16 @@ func CheckPlan(o PlanCheckOpts) (State, PlanCheck, error) {
 
 	if o.ReplanRequested {
 		return state, PlanCheck{Decision: "replan", Paths: matches, Plan: meta}, nil
+	}
+
+	// #826: a draft persisted by the unattended escalation path
+	// (status: awaiting-input) is not implementable yet -- it is blocked on
+	// a human answering the open questions on the ticket. Checked after the
+	// replan short-circuit (replan is the deliberate discard escape hatch,
+	// and must win) but before planIsStale, so a plan still awaiting input
+	// never pays for a git/gh freshness round-trip it can't act on anyway.
+	if fm["status"] == "awaiting-input" {
+		return state, PlanCheck{Decision: "awaiting-input", Paths: matches, Plan: meta}, nil
 	}
 
 	stale, err := planIsStale(o, fm, repoRoot, state.TicketUpdatedAt)
