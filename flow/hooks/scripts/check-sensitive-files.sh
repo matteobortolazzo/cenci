@@ -311,7 +311,7 @@ elif [ -n "$BASH_COMMAND" ]; then
   # round 2, Fix D), or when wc is missing from PATH (#795 round 3, needed by
   # the length pre-check) -- an empty result in any of these cases must never
   # be treated as "no write targets found" (which would silently allow the
-  # command). The three failure modes get distinct exit codes (3, 4, 5) from
+  # command). These failure modes get distinct exit codes (3, 4, 5, 6, 7) from
   # bwt_extract_targets so the message here is accurate rather than
   # misreporting one failure as another.
   BWT_TARGETS=$(bwt_extract_targets "$BASH_COMMAND")
@@ -321,6 +321,25 @@ elif [ -n "$BASH_COMMAND" ]; then
       echo "BLOCKED: check-sensitive-files.sh: command too long to inspect for write targets (bwt_extract_targets)." >&2
     elif [ "$BWT_EXTRACT_STATUS" -eq 5 ]; then
       echo "BLOCKED: check-sensitive-files.sh requires wc (via lib/bash-write-targets.sh) to inspect this Bash command's write targets, but wc was not found on PATH." >&2
+    elif [ "$BWT_EXTRACT_STATUS" -eq 6 ]; then
+      # #810 Fix 1: an unquoted brace expansion ({a,b}, {1..3}) in
+      # write-target position is not supported for direct extraction --
+      # handing back the raw un-expanded literal would misreport what bash
+      # actually writes to. Unconditional: this blocks regardless of whether
+      # the raw command also happens to mention a sensitive marker.
+      echo "BLOCKED: check-sensitive-files.sh could not inspect this Bash command's write targets: it contains an unquoted brace expansion (e.g. {a,b} or {1..3}) in write-target position, which is not supported for direct extraction: $BASH_COMMAND" >&2
+      echo "Rewrite the command without brace expansion (e.g. one command per target) or edit the file manually if needed." >&2
+    elif [ "$BWT_EXTRACT_STATUS" -eq 7 ]; then
+      # #810 stabilization: a command/process/function substitution appears
+      # inside a double-quoted string within a comparison construct
+      # (`[[ ]]`/`(( ))`), which cannot be safely resolved -- this tokenizer
+      # has no safe way to resume precise parsing through the real syntax of
+      # such a substitution once it is wrapped in an outer double-quoted
+      # string, so the whole command fails closed unconditionally, regardless
+      # of whether the raw command also happens to mention a sensitive
+      # marker.
+      echo "BLOCKED: check-sensitive-files.sh could not inspect this Bash command's write targets: a command/process/function substitution appears inside a double-quoted string within a comparison construct, which cannot be safely resolved: $BASH_COMMAND" >&2
+      echo "Rewrite the command without a double-quoted nested substitution inside [[ ]] / (( )) (e.g. hoist it to its own statement first) or edit the file manually if needed." >&2
     else
       echo "BLOCKED: check-sensitive-files.sh requires awk (via lib/bash-write-targets.sh) to inspect this Bash command's write targets, but awk was not found on PATH." >&2
     fi

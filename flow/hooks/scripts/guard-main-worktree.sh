@@ -37,15 +37,25 @@
 # covers every skill's convention, not just design's.
 #
 # Bash arm asymmetry (#795, Q1a): the Bash arm below is DELIBERATELY more
-# permissive than the Write|Edit arm above. A Bash write target that
-# canonicalizes to somewhere OUTSIDE the resolved repo root is allowed
-# outright, never even reaching the allowlist/block logic -- this guard's
-# purpose is keeping THIS repo's main worktree read-only, not blocking every
-# possible Bash write anywhere on the filesystem. This is what lets
-# /cenci:configure's documented `jq '...' ~/.claude/settings.json >
-# ~/.claude/settings.json.tmp` pattern through. An in-root Bash target still
-# falls through to the exact same allowlist/TMPDIR-widening/block logic as
-# the Write|Edit arm.
+# permissive than the Write|Edit arm above, for ABSOLUTE targets only (#810).
+# An absolute Bash write target that canonicalizes to somewhere OUTSIDE the
+# resolved repo root is allowed outright, never even reaching the
+# allowlist/block logic -- this guard's purpose is keeping THIS repo's main
+# worktree read-only, not blocking every possible Bash write anywhere on the
+# filesystem. This is what lets /cenci:configure's documented `jq '...'
+# ~/.claude/settings.json > ~/.claude/settings.json.tmp` pattern through. An
+# in-root absolute Bash target still falls through to the exact same
+# allowlist/TMPDIR-widening/block logic as the Write|Edit arm.
+#
+# PARSED RELATIVE Bash targets get their own, separate policy (#810 Fix 2):
+# this hook process's cwd is not trustworthy evidence of where a relative
+# target actually resolves, since the command text itself can `cd` first.
+# Even a lexically allowlisted shape can resolve under the wrong directory
+# or traverse a symlink in the command's effective cwd. Extracted relative
+# targets are therefore rejected; callers must use an absolute target so it
+# can be canonicalized before the allowlist/repo-scope decision. Constructs
+# that produce zero extracted targets retain the bounded backstop/residual
+# documented in the Bash-arm comment below and adapter-contract.md.
 
 # Only enforce in repos configured for cenci. .cenci/config.json is canonical;
 # .claude/config.json remains a read-only migration signal. In unconfigured repos this
@@ -265,15 +275,15 @@ bash_target_allowed() {
   _bt_path="$1"
   case "$_bt_path" in
     # Feature worktrees — the intended write target
-    */.worktrees/* | .worktrees/*) return 0 ;;
+    */.worktrees/*) return 0 ;;
     # Plan persistence (implement Phase 1)
-    */.plans/* | .plans/*) return 0 ;;
+    */.plans/*) return 0 ;;
     # Claude Code native Plan Mode storage
-    */.claude/plans/* | .claude/plans/*) return 0 ;;
+    */.claude/plans/*) return 0 ;;
     # Temp paths: body files, context bundles, attachments, scratchpads
     /tmp/* | /private/tmp/* | /var/folders/* | */cenci-attachments-*/*) return 0 ;;
     # Design artifacts live in the main worktree by design (/cenci:design)
-    *.pen | */DESIGN.md | DESIGN.md | */designs/* | designs/*) return 0 ;;
+    *.pen | */DESIGN.md | */designs/*) return 0 ;;
   esac
   # TMPDIR widening (#749) — see the guard above for the full rationale. A
   # quoted "$TMPDIR_ALLOW" is matched literally by POSIX sh case patterns, so
@@ -409,7 +419,7 @@ elif [ -n "$BASH_COMMAND" ]; then
   # round 2, Fix D), or when wc is missing from PATH (#795 round 3, needed by
   # the length pre-check) -- an empty result in any of these cases must never
   # be treated as "no write targets found" (which would silently allow the
-  # command). The three failure modes get distinct exit codes (3, 4, 5) from
+  # command). These failure modes get distinct exit codes (3, 4, 5, 6, 7) from
   # bwt_extract_targets so the message here is accurate rather than
   # misreporting one failure as another.
   BWT_TARGETS=$(bwt_extract_targets "$BASH_COMMAND")
@@ -419,6 +429,23 @@ elif [ -n "$BASH_COMMAND" ]; then
       echo "BLOCKED: guard-main-worktree.sh: command too long to inspect for write targets (bwt_extract_targets)." >&2
     elif [ "$BWT_EXTRACT_STATUS" -eq 5 ]; then
       echo "BLOCKED: guard-main-worktree.sh requires wc (via lib/bash-write-targets.sh) to inspect this Bash command's write targets, but wc was not found on PATH." >&2
+    elif [ "$BWT_EXTRACT_STATUS" -eq 6 ]; then
+      # #810 Fix 1: an unquoted brace expansion ({a,b}, {1..3}) in
+      # write-target position is not supported for direct extraction --
+      # handing back the raw un-expanded literal would misreport what bash
+      # actually writes to (possibly a main-worktree target).
+      echo "BLOCKED: guard-main-worktree.sh could not inspect this Bash command's write targets: it contains an unquoted brace expansion (e.g. {a,b} or {1..3}) in write-target position, which is not supported for direct extraction: $BASH_COMMAND" >&2
+      echo "Rewrite the command without brace expansion (e.g. one command per target) targeting the feature worktree (.worktrees/<id>-<desc>/) or edit manually if needed." >&2
+    elif [ "$BWT_EXTRACT_STATUS" -eq 7 ]; then
+      # #810 stabilization: a command/process/function substitution appears
+      # inside a double-quoted string within a comparison construct
+      # (`[[ ]]`/`(( ))`), which cannot be safely resolved -- this tokenizer
+      # has no safe way to resume precise parsing through the real syntax of
+      # such a substitution once it is wrapped in an outer double-quoted
+      # string (possibly hiding a main-worktree target), so the whole command
+      # fails closed unconditionally.
+      echo "BLOCKED: guard-main-worktree.sh could not inspect this Bash command's write targets: a command/process/function substitution appears inside a double-quoted string within a comparison construct, which cannot be safely resolved: $BASH_COMMAND" >&2
+      echo "Rewrite the command without a double-quoted nested substitution inside [[ ]] / (( )) (e.g. hoist it to its own statement first) targeting the feature worktree (.worktrees/<id>-<desc>/) or edit manually if needed." >&2
     else
       echo "BLOCKED: guard-main-worktree.sh requires awk (via lib/bash-write-targets.sh) to inspect this Bash command's write targets, but awk was not found on PATH." >&2
     fi
@@ -441,32 +468,39 @@ elif [ -n "$BASH_COMMAND" ]; then
   # truncated-but-non-empty parse here still resolves in-root and blocks
   # (path containment degrades safe), unlike the filename-glob guard.
   #
-  # Two narrowings keep this from blocking the pipeline's own bread-and-
-  # butter commands (e.g. `git -C <root>/.worktrees/<id> commit -m "a -> b"`
-  # — a quoted `>`, zero targets, and a root-prefixed path in the text):
-  # 1. A resolved root that is ITSELF a feature worktree is skipped
-  #    entirely — every in-root target there is allowlisted by the
-  #    */.worktrees/* arm anyway, so an unparsed in-root write is allowed
-  #    just as a parsed one would be.
-  # 2. Mentions of the always-allowlisted subtrees (<root>/.worktrees,
-  #    <root>/.plans, <root>/.claude/plans) are neutralized (replaced with a
-  #    newline, which can never glue adjacent text back into a root match)
-  #    before the scan, so referencing a feature-worktree or plan path does
-  #    not read as a main-worktree mention. The neutralization runs in awk
-  #    (index/substr, no regex — root text must match literally); if awk is
-  #    missing the raw text is scanned un-neutralized (fail closed:
-  #    over-block, never allow).
+  # Mentions of the always-allowlisted subtrees (<root>/.worktrees,
+  # <root>/.plans, <root>/.claude/plans) are neutralized (replaced with a
+  # newline, which can never glue adjacent text back into a root match)
+  # before the scan, so a bread-and-butter command such as
+  # `git -C <root>/.worktrees/<id> commit -m "a -> b"` is not blocked merely
+  # because its quoted `>` and allowlisted absolute path produce zero
+  # extracted targets. The neutralization runs in awk (index/substr, no
+  # regex — root text must match literally); if awk is missing the raw text
+  # is scanned un-neutralized (fail closed: over-block, never allow).
+  #
+  # #810 Fix 2: a zero-parse command containing a DELIMITED tee token
+  # (bwt_has_delimited_tee) blocks UNCONDITIONALLY, before the root-mention
+  # scan ever runs — the absence of a literal repo-root string in the raw
+  # text is not sufficient evidence a tee's target is out-of-root, since the
+  # target may be RELATIVE (e.g. `{tee,cat} AGENTS.md` brace-expands to a
+  # `tee` invocation writing a file literally named "AGENTS.md", with no root
+  # string anywhere in the command for the scan below to find). Only once
+  # this narrower, more certain signal is ruled out does the broader `>`-or-
+  # delimited-tee `bwt_zero_parse_suspicious` scan run (unchanged from
+  # before).
   #
   # An unmodelled construct costs a false positive, never a silent permit; a
-  # RELATIVE in-root target inside such a construct (no root text to match)
-  # is an accepted residual of this raw-text scan.
+  # RELATIVE in-root target inside such a construct (no root string to match)
+  # is an accepted residual of the root-mention scan below (closed by the
+  # unconditional tee check above for the tee case specifically).
   if [ -z "$BWT_TARGETS" ]; then
-    case "$RESOLVED_ROOT" in
-      */.worktrees/*)
-        exit 0 # narrowing 1: feature-worktree root — nothing to protect.
-        ;;
-    esac
-    if bwt_zero_parse_suspicious "$BASH_COMMAND"; then
+    if bwt_has_delimited_tee "$BASH_COMMAND"; then
+      {
+        echo "BLOCKED: guard-main-worktree.sh could not extract this Bash command's write targets (unmodelled construct containing a tee invocation); its target may be relative to the main worktree: $BASH_COMMAND"
+        echo "Rewrite the command using a plain, directly-parseable tee form targeting the feature worktree (.worktrees/<id>-<desc>/) or a temp path."
+      } >&2
+      exit 2
+    elif bwt_zero_parse_suspicious "$BASH_COMMAND"; then
       BWT_SCAN_TEXT="$BASH_COMMAND"
       if command -v awk >/dev/null 2>&1; then
         BWT_SCAN_TEXT=$(BWT_SCAN_CMD="$BASH_COMMAND" BWT_SCAN_ROOT="$ROOT" BWT_SCAN_RROOT="$RESOLVED_ROOT" awk '
@@ -516,8 +550,23 @@ elif [ -n "$BASH_COMMAND" ]; then
     fi
 
     case "$BWT_EXPANDED" in
-      /*) BWT_ABS="$BWT_EXPANDED" ;;
-      *) BWT_ABS="$(pwd)/$BWT_EXPANDED" ;;
+      /*)
+        BWT_ABS="$BWT_EXPANDED"
+        ;;
+      *)
+        # Relative-target policy (#810 Fix 2): a relative Bash write target
+        # cannot be trusted to resolve against this hook process's cwd --
+        # the command text itself may `cd` to a different directory before
+        # the write actually executes. Lexical shape is not sufficient
+        # either: `.plans/x` can resolve under a subdirectory rather than
+        # the repo root, and an allowlisted-looking relative path can be a
+        # symlink to protected source.
+        {
+          echo "BLOCKED: guard-main-worktree.sh cannot verify the relative Bash write target '$BWT_EXPANDED' in: $BASH_COMMAND"
+          echo "The relative write target cannot be verified against the command's effective cwd or canonicalized safely; use an absolute feature-worktree, plan, design, or temp path."
+        } >&2
+        exit 2
+        ;;
     esac
 
     if ! BWT_CANON=$(canonicalize_target "$BWT_ABS"); then

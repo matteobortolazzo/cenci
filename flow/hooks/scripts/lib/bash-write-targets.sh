@@ -25,18 +25,28 @@
 # construct; this is not an exhaustive bypass list, only the known ones):
 #
 #   The tokenizer is a PRECISION layer, not a completeness proof. Full shell
-#   grammar is deliberately not modelled: brace expansion (`{tee,cat} f`),
-#   heredoc bodies, and arbitrary metacharacter gluing all tokenize to
-#   something that is not a recognized write construct. For those, the
-#   guarantee is made by the callers' empty-parse backstop
-#   (bwt_zero_parse_suspicious below): when a command looked like it might
-#   write (a `>` anywhere, or a delimited `tee` token) but the tokenizer
+#   grammar is deliberately not modelled: heredoc bodies and arbitrary
+#   metacharacter gluing tokenize to something that is not a recognized write
+#   construct. For those, the guarantee is made by the callers' empty-parse
+#   backstop (bwt_zero_parse_suspicious below): when a command looked like it
+#   might write (a `>` anywhere, or a delimited `tee` token) but the tokenizer
 #   extracted ZERO targets, both guards fall back to scanning the RAW command
 #   text for their own sensitive markers and block on a hit. An unmodelled
 #   construct therefore costs a false positive (an over-block the agent can
 #   rephrase around), never a silent permit. Do not add per-construct parser
 #   fixes to chase completeness — that loop does not converge (#795 review
 #   rounds 1-5); the backstop is the terminating design.
+#
+#   Unquoted brace expansion in WRITE-TARGET position (`tee f{1,2}`,
+#   `> f{1..3}`) is no longer a backstop-only case (#810): it is caught
+#   directly at extraction and fails the whole call closed with exit code 6
+#   (see bwt_extract_targets below), since silently handing back the raw
+#   un-expanded literal as "the" target would misreport what bash would
+#   actually write to (one word, multiplexed by the shell into several real
+#   targets). The remaining residual is brace expansion in COMMAND position
+#   for a non-tee verb (e.g. `{cp,x} f` expanding to a `cp`/`x` invocation) —
+#   that shape is still out of scope here (tracked separately, #808; do not
+#   implement it in this file).
 #
 #   Named residuals, accepted by settled #795 refinement decisions:
 #   - `cp`, `mv`, `dd of=`, `sed -i`, `truncate` are out of detection scope
@@ -50,10 +60,106 @@
 #     treating every backslash as suspicious, which was rejected on
 #     false-positive grounds; it is a known, documented residual.
 #
+#   Comparison-context recognition is intentionally narrow, PERMANENTLY
+#   (#810, round-3 stabilization review — this is a settled design choice,
+#   not a residual gap to keep chasing): a `[[`/`((` is only ever treated as
+#   a suppressible comparison-region opener when the character immediately
+#   preceding it (skipping only spaces/tabs, never newlines) is
+#   start-of-string, `;`, `&`, `|`, or a newline — plus a literal `$`
+#   directly before `((`, for `$(( ))` arithmetic expansion specifically.
+#   Two prior review rounds tried to widen this to also accept a preceding
+#   `)`/`{`/`}` or bare reserved word (`if`, `then`, `do`, ...) on the theory
+#   that those positions are "also command position" — each attempt required
+#   recursively checking THAT token's own position in turn, an open-ended
+#   amount of shell-grammar replication with no natural stopping point (the
+#   same "general adversarial shell-grammar sweep" this ticket's scope guard
+#   already says not to chase), and each one left a residual gap (confirmed
+#   bypasses via `)`-preceded, `do`/`!`-preceded, and brace-preceded `[[`).
+#   The fix is to never widen past the minimal, non-recursible set above.
+#   The deliberate, permanent consequence: `[[`/`((` used in an embedded or
+#   compound-statement position — after `if`/`while`/`do`/`elif`/`else`/`!`,
+#   inside `$(...)`, right after a `)`/`{`/`}`, etc. — is NOT recognized as a
+#   comparison region at all; the tokenizer falls through to ordinary
+#   redirect handling and extracts any `>` inside it as a real write target.
+#   This can only ever over-block a legitimate embedded comparison (the
+#   agent rephrases, e.g. hoists the `[[ ]]` to its own statement) — it can
+#   never under-block, since narrowing the accepted-opener set only shrinks
+#   the suppressed span, never grows it. NOTE: this "narrowing can only
+#   shrink, never grow, the suppressed span" claim covers the region's
+#   BOUNDARY (which openers are even recognized) — it does not, on its own,
+#   cover the region's INTERIOR; see the round-5 paragraph below for the
+#   interior-specific guarantee that closes that gap.
+#
+#   (#810 round-5 security review [CRITICAL]): bash performs command
+#   substitution (`` `...` ``, `$(...)`) and process substitution (`<(...)`,
+#   `>(...)`) INSIDE both `[[ ... ]]` and `(( ... ))` — a redirect or `tee`
+#   invocation nested inside such a substitution is a real, executing write,
+#   but mark_regions()'s marking loops used to suppress every character
+#   position between a recognized opener and its matched closer
+#   unconditionally, including the substitution's own contents, so a write
+#   hidden inside one was never extracted and never blocked (e.g. `[[
+#   $(printf x > /repo/.env) ]]`, `(( $(printf x > /repo/.env; echo 1) > 0
+#   ))`, `[[ $(echo p | tee /repo/.env) ]]`). Fixed by re-scanning a
+#   candidate region's INTERIOR (the span strictly between the opener and
+#   closer) for any unquoted, unescaped substitution marker — a backtick, a
+#   `$` immediately followed by `(`, a `<` immediately followed by `(`, or a
+#   `>` immediately followed by `(` — before committing to suppress it: a
+#   region whose interior contains ANY such marker is not suppressed at all
+#   (nothing marked, exactly like the existing unclosed/malformed-closer
+#   abandon path), and every character in it falls through to ordinary
+#   redirect/tee handling instead. Regions containing a nested
+#   command/process substitution are therefore NEVER suppressed — this is
+#   the interior-specific guarantee correcting the note above: narrowing the
+#   accepted-opener set alone was never sufficient to guarantee no
+#   under-blocking, since a region's interior can itself hide a real write
+#   regardless of how narrowly its opener is recognized. See
+#   has_nested_substitution() below.
+#
+#   (#810 stabilization): the interior marker described above can appear in
+#   two different contexts, and they are handled differently. A marker found
+#   in UNQUOTED interior text needs no special mechanism at all: `(`, `)`,
+#   and a backtick are already unconditional word-boundary characters in the
+#   main tokenizer's ordinary unquoted dispatch, so a bare
+#   `$(printf x > /repo/.env)`, `` `printf x > /repo/.env` ``, or
+#   `${ printf x > /repo/.env; }` in unquoted position is already tokenized
+#   correctly by simply not suppressing the region — the existing unquoted
+#   handling takes over and extracts the real target. A marker found INSIDE a
+#   double-quoted span within the region's interior is different: bash lets
+#   the substitution escape the enclosing double quote for its own real
+#   syntax, but this tokenizer's own double-quote handling treats all
+#   double-quoted content as opaque and has no safe way to "escape into" the
+#   substitution's real syntax mid-scan. Rather than build a precise
+#   resume-parsing mechanism for that case (tried and reverted after
+#   repeatedly introducing new bugs), this is instead treated as a
+#   deliberately blunt, maximally conservative unsupported construct: the
+#   WHOLE extraction fails closed with a new distinct exit code, 7 (see
+#   bwt_extract_targets), blocking the whole command rather than attempting
+#   to precisely resolve what is inside it. See has_nested_substitution()'s
+#   return-value convention below for how these two cases are distinguished.
+#
+#   (#810 round-4 security review): the accepted preceding-char set itself
+#   is unchanged (still exactly start-of-string/`;`/`&`/`|`/newline, plus
+#   `$` before `((`), but HOW it is determined moved from a stateless
+#   backward `substr()` re-scan of the raw command text into mark_regions()'s
+#   own single forward pass, which already tracks quote/escape state. Two
+#   bugs in the old backward re-scan are fixed by this move: (1) it had no
+#   quote/escape awareness, so a backslash-escaped or quoted `;`/`&`/`|`
+#   (e.g. `\;`, a literal argument character, never a real separator) was
+#   wrongly accepted as a valid boundary; (2) it treated a bare `&`/`|`
+#   preceding char as always sufficient, without checking whether that
+#   `&`/`|` was itself the tail of a compound redirect operator (`>&`, `<&`,
+#   `>|`) rather than a real separator/pipe — `echo hi >| [[ x > /repo/.env
+#   ]]` is real bash where `>|` redirects to a file literally named `[[`, so
+#   `[[` there is an ordinary WORD, not the reserved conditional token, and
+#   the `>` inside is a genuine redirect that must not be suppressed. See
+#   mark_regions(), is_boundary_char(), is_opener_boundary(), and
+#   is_bracket_command_position() below.
+#
 # Functions:
 #   bwt_has_write_candidate <command>    -- cheap early-exit predicate
 #   bwt_extract_targets <command>        -- emits one raw target per line
 #   bwt_zero_parse_suspicious <command>  -- empty-parse backstop trigger
+#   bwt_has_delimited_tee <command>      -- delimited-tee raw-text scan (#810)
 #   bwt_is_exempt_device <target>        -- true for /dev/null etc.
 #   bwt_expand_safe_vars <target>        -- internal expansion, never eval
 #   bwt_is_unresolved <expanded-target>  -- true if still unresolved
@@ -105,14 +211,43 @@ bwt_has_write_candidate() {
 # targets only costs a raw-marker scan, and only blocks when that scan hits
 # a sensitive marker -- an accepted, narrow false-positive surface.
 #
-# The delimited-tee scan runs in awk (already a hard dependency of
+# The tee half delegates to bwt_has_delimited_tee (below), which runs the
+# delimited-tee scan in awk (already a hard dependency of
 # bwt_extract_targets, which necessarily ran before any caller reaches this
-# predicate). If awk vanished from PATH in between, fail closed: report
-# suspicious rather than silently allowing.
+# predicate) and fails closed (reports a delimited tee -- "suspicious") if
+# awk vanished from PATH in between.
 bwt_zero_parse_suspicious() {
   case "$1" in
     *'>'*) return 0 ;;
   esac
+  bwt_has_delimited_tee "$1"
+}
+
+# ---------------------------------------------------------------------------
+# bwt_has_delimited_tee <command>
+#
+# True when <command>'s raw text contains a DELIMITED `tee` token (a literal
+# `tee` not embedded inside a longer alphanumeric/underscore word) -- e.g.
+# `{tee,cat}`, `$(tee ...)`, `` `tee ...` ``, `\tee`, `''tee`. False for an
+# alnum-embedded "tee" (`sixteen`, `steel`, `committee`, `guarantee`): no
+# expansion mechanism splits a plain alphanumeric word, so those can never
+# invoke tee under any shell parse -- treating them as suspicious would turn
+# every `grep guarantee <abs-path>` into a block. (An escape-SPLIT `t\ee`
+# contains no contiguous "tee" substring at all and already evades
+# bwt_has_write_candidate upstream -- a documented residual, see the file
+# header; it is not reachable here.)
+#
+# Extracted from bwt_zero_parse_suspicious's original tee-detection logic
+# (#810) so guard-main-worktree.sh's zero-parse backstop can invoke this
+# signal directly: a zero-parse command containing a delimited tee token must
+# block unconditionally there, since the tee's target may be RELATIVE to the
+# main worktree -- with no repo-root string anywhere in the raw text for the
+# root-mention scan to find (the "absence of a root string" backstop is
+# necessary but not sufficient evidence of an out-of-root write).
+#
+# If `awk` is missing from PATH, fails closed: reports a delimited tee found
+# (true) rather than silently reporting none.
+bwt_has_delimited_tee() {
   case "$1" in
     *tee*) ;;
     *) return 1 ;;
@@ -404,9 +539,30 @@ bwt_is_unresolved() {
 # from PATH this function returns 5 (also emitting nothing) -- a third,
 # distinct fail-closed signal for diagnostic accuracy, mirroring the `awk`-
 # missing check (a `wc` failure must never silently collapse to a length of
-# 0, which would be misread as "under threshold"). Callers must treat ANY
-# non-zero exit from this function as fail-closed (block), never as an
-# empty-result allow. The command string is
+# 0, which would be misread as "under threshold"). An unquoted brace
+# expansion (`{a,b}`, `{1..3}`) reaching write-target position (a redirect
+# target, a `>&` non-fd operand, or a `tee`/`tee -a` operand) is a fourth
+# distinct fail-closed signal, returning 6 (#810): handing back the raw
+# un-expanded word as "the" target would misreport what bash actually writes
+# to (one word the shell itself multiplexes into several real targets), so
+# the whole call fails closed instead of emitting a bogus literal. A
+# command/process/function substitution marker discovered INSIDE a
+# double-quoted string within a `[[ ]]`/`(( ))` comparison region's interior
+# (see has_nested_substitution() and mark_regions() below) is a fifth
+# distinct fail-closed signal, returning 7 (#810 stabilization): this
+# tokenizer's own double-quote handling has no safe way to resume precise
+# parsing through such a marker's real syntax, so rather than attempt that
+# (and risk the class of bugs a precise-resume mechanism kept introducing),
+# the whole call fails closed instead -- deliberately blunt and maximally
+# conservative, but never silently wrong. The same substitution appearing in
+# UNQUOTED text is unaffected by this and is still precisely handled: the
+# existing unquoted-path tokenizing already extracts the real write inside
+# it, no special mechanism needed. All extracted-target output is buffered
+# internally and only printed once the whole scan completes successfully, so
+# a non-zero exit (3, 4, 5, 6, or 7) is guaranteed to emit nothing,
+# preserving this function's "non-zero -> emits nothing" contract. Callers
+# must treat ANY non-zero exit from this function as fail-closed (block),
+# never as an empty-result allow. The command string is
 # handed to awk via ENVIRON (an environment variable), never via `-v` (which
 # applies string-escape processing to its value and would corrupt a command
 # containing backslashes) and never via stdin (which would require a
@@ -468,10 +624,53 @@ bwt_extract_targets() {
       # cwd-relative path and lexical collapse later removes the "." segment.
       wtilde = 0
 
+      # Brace-expansion tracking (#810): per-word flags mirroring the
+      # wtilde idiom above. bracedepth counts unquoted, unescaped `{` not
+      # yet closed by a matching unquoted `}` (reaching this code only in
+      # unquoted, unescaped context -- quoted/escaped braces never reach
+      # these checks, see the dispatch site below). bracehasdelim latches
+      # true once an unquoted `,` or unquoted `..` (range form) is seen
+      # while bracedepth > 0. wordbrace latches true (for the CURRENT word
+      # only -- reset every flush()) once a `}` closes with bracehasdelim
+      # true: a bare `{x}` with no comma/range inside never sets it, since
+      # real bash does not brace-expand that shape (see the
+      # bwt_extract_targets header comment).
+      bracedepth = 0
+      bracehasdelim = 0
+      wordbrace = 0
+
+      # curregion: 1 when any character consumed into the CURRENT word fell
+      # inside a closed [[ ... ]] / (( ... )) region (see mark_regions()
+      # below), reset every flush(). Used only to suppress tee-ARMING for a
+      # word entirely inside such a region (#810 Fix 3) -- the `>`
+      # suppression itself is handled inline at the dispatch site via the
+      # suppress[] array directly, not via this flag.
+      curregion = 0
+
+      # outbuf/outn: emit() buffers every extracted target here instead of
+      # printing directly, so a brace-expansion failure (exit 6, detected
+      # mid-scan) can discard everything already "emitted" simply by never
+      # reaching the print loop at the end of this BEGIN block -- preserving
+      # the documented "non-zero exit -> emits nothing" contract.
+      outn = 0
+
+      # Pre-pass (#810 Fix 3): populate suppress[] with every character
+      # position that falls inside a CLOSED, unquoted, standalone
+      # [[ ... ]] or (( ... )) region, so the main loop below can treat a
+      # `>` inside one as an ordinary literal character (a comparison, never
+      # a redirect) instead of a redirect operator. An UNCLOSED opener (e.g.
+      # `echo [[ > /repo/out`, never closed) leaves suppress[] untouched for
+      # that span -- deliberately anti-fail-open: a construct this scan
+      # cannot prove closed must never suppress a real redirect.
+      mark_regions()
+
       i = 1
       while (i <= n) {
         c = substr(cmd, i, 1)
+        p = i
         i++
+
+        if (suppress[p]) curregion = 1
 
         if (esc == 1) {
           if (c == "\n") {
@@ -500,14 +699,23 @@ bwt_extract_targets() {
         }
 
         if (quote == 2) {
-          if (c == dq) {
-            quote = 0
-          } else if (c == bsl) {
-            esc = 1
-          } else {
-            word = word c
-            wordhas = 1
-          }
+          # Double-quoted content is opaque/literal, full stop -- no attempt
+          # is made here to detect or "escape into" the internal syntax of a
+          # nested substitution from this main loop. A `[[ ]]`/`(( ))` region
+          # whose interior contains a command/process/function substitution
+          # marker INSIDE a double-quoted span is instead caught upstream by
+          # has_nested_substitution() / mark_regions() and fails the whole
+          # extraction closed (exit 7) before this loop ever runs on it --
+          # see the file header and the bwt_extract_targets comment. A marker in
+          # UNQUOTED text needs no special handling at all here either: `(`,
+          # `)`, and backtick are already unconditional word-boundary
+          # characters in the unquoted dispatch below, so that case is
+          # already correctly tokenized without this branch doing anything
+          # special.
+          if (c == dq) { quote = 0; continue }
+          if (c == bsl) { esc = 1; continue }
+          word = word c
+          wordhas = 1
           continue
         }
 
@@ -578,6 +786,17 @@ bwt_extract_targets() {
         # can never catch). Only genuine command separators reset tee:
         # `;`, `|`, newline, `(`, `)`, backtick, and plain job-control `&`.
         if (c == ">") {
+          # #810 Fix 3: a `>` at a position inside a CLOSED, unquoted [[ ... ]]
+          # / (( ... )) region (see mark_regions()) is a comparison operator
+          # in that context, never a redirect -- treat it as an ordinary
+          # literal word character instead of dispatching redirect-operator
+          # handling. An unclosed opener never populates suppress[], so this
+          # can never suppress a real redirect (anti-fail-open).
+          if (suppress[p]) {
+            word = word c
+            wordhas = 1
+            continue
+          }
           # A digits-only word glued immediately before > is an fd number
           # (POSIX IO_NUMBER: `2>>log`, `1>out`) -- discard it rather than
           # flushing it as a word. Flushing it mattered once tee state
@@ -631,6 +850,28 @@ bwt_extract_targets() {
 
         if (c == "|" || c == ";") { flush(); tee = 0; continue }
 
+        # Unquoted brace-expansion tracking (#810 Fix 1): `{`, an in-between
+        # unquoted `,` or unquoted `..` (range form), and a matching `}` mark
+        # the CURRENT word as an unresolved brace-expansion word (see the
+        # bracedepth/bracehasdelim/wordbrace comment in BEGIN above). These
+        # checks deliberately do NOT `continue`: the brace/comma/dot
+        # characters themselves are still ordinary literal word characters
+        # in bash (whether or not the pair ends up expanding) and must still
+        # reach the default append at the bottom of this dispatch.
+        if (c == "{") { bracedepth++ }
+        if (c == "," && bracedepth > 0) { bracehasdelim = 1 }
+        if (c == "." && bracedepth > 0) {
+          # Bash removes backslash-newline before recognizing the two-dot
+          # range delimiter, just as it does for substitution markers.
+          ncpos = logical_next_pos(i, n)
+          nc = (ncpos <= n) ? substr(cmd, ncpos, 1) : ""
+          if (nc == ".") bracehasdelim = 1
+        }
+        if (c == "}" && bracedepth > 0) {
+          bracedepth--
+          if (bracehasdelim) wordbrace = 1
+        }
+
         # A plain unquoted tilde opening a word is the only tilde a real
         # shell expands -- record it so flush() can tell it apart from a
         # quoted/escaped literal ~ (see the wtilde comment in BEGIN).
@@ -639,9 +880,570 @@ bwt_extract_targets() {
         wordhas = 1
       }
       flush()
+
+      # #810: only print buffered targets once the whole scan completes
+      # successfully -- any exit 6 above (brace-expansion fail-closed) exits
+      # immediately from inside flush(), before this loop ever runs, so the
+      # buffer is silently discarded rather than partially printed. An exit 7
+      # (double-quoted nested-substitution fail-closed) exits even earlier,
+      # from inside mark_regions() itself (called once, before this loop
+      # starts at all -- see mark_regions()), so outn is guaranteed to still
+      # be 0 at that point regardless.
+      for (k = 1; k <= outn; k++) print outbuf[k]
     }
 
-    function flush() {
+    # is_boundary_char(lastsig, beforesig) (#810 round-4 security review):
+    # the actual boundary-determination logic, consuming state that the
+    # mark_regions() forward scan maintains as it goes (see mark_regions()
+    # below) rather than re-deriving it via a separate stateless backward
+    # `substr()` re-scan of the raw command text. `lastsig` is the last
+    # UNQUOTED, UNESCAPED, non-space/tab character mark_regions() has seen
+    # so far (the empty string "" means start-of-string / nothing
+    # significant seen yet); `beforesig` is the character mark_regions() saw
+    # immediately before THAT one (also unquoted/unescaped-tracked, never a
+    # raw re-derivation). This is the exact same minimal, non-recursible
+    # allowlist as before -- start-of-string, `;`, `&`, `|`, or a newline --
+    # plus one added refinement (round-4 Finding, was the missing piece):
+    # a preceding `&`/`|` is accepted ONLY IF the character immediately
+    # before THAT `&`/`|` is not `>` and not `<` -- i.e. rejected when the
+    # real preceding token is the compound redirect operator `>&`, `<&`, or
+    # `>|` (bash parses what follows one of those as an ordinary WORD, not a
+    # reserved conditional/arithmetic opener) rather than a bare `&`/`|`/
+    # `&&`/`||`/`|&`/`;&`. Confirmed exploit this closes: `echo hi >| [[ x >
+    # /repo/.env ]]` is real bash where `>|` redirects to a file literally
+    # named `[[` and the `>` inside is a genuine, unsuppressed redirect.
+    # Because `lastsig`/`beforesig` are only ever updated by mark_regions()
+    # for characters reaching its truly unquoted/unescaped dispatch (see
+    # below), a backslash-escaped or quoted `;`/`&`/`|` never updates them
+    # and therefore can never count as a boundary -- the second bug this
+    # move fixes, since the old raw-text re-scan had no quote/escape
+    # awareness at all.
+    function is_boundary_char(lastsig, beforesig) {
+      if (lastsig == "") return 1 # start-of-string
+      if (lastsig == ";" || lastsig == "\n") return 1
+      if (lastsig == "&" || lastsig == "|") {
+        if (beforesig == ">" || beforesig == "<") return 0
+        return 1
+      }
+      return 0
+    }
+
+    # is_opener_boundary(pos, allow_dollar, lastsig, beforesig) (#810 Fix 5,
+    # re-narrowed by the #810 round-3 review, Finding 1; restructured to
+    # consume the mark_regions() forward-scan state by the round-4 review):
+    # true when "((" starting at `pos` is a real arithmetic-expansion/
+    # standalone-construct opener. `allow_dollar` additionally permits a
+    # preceding `$` with NO intervening whitespace (checked via a direct,
+    # single-character, position-based lookback -- unchanged by the round-4
+    # move, since `$((` is only ever a single glued token) -- needed for
+    # `$(( ... ))` arithmetic expansion. Otherwise delegates to
+    # is_boundary_char (above) using `lastsig`/`beforesig` as maintained by
+    # the mark_regions() single forward pass, never a separate backward
+    # re-scan. See the file-header "Comparison-context recognition" note for
+    # why the accepted set itself stays minimal and non-recursible.
+    function is_opener_boundary(pos, allow_dollar, lastsig, beforesig) {
+      if (allow_dollar && pos > 1 && substr(cmd, pos - 1, 1) == "$") return 1
+      return is_boundary_char(lastsig, beforesig)
+    }
+
+    # is_bracket_command_position(lastsig, beforesig) (#810 stabilization
+    # review, Bug 3 Vector 2; re-narrowed by round-3 Finding 1; restructured
+    # by round-4): "[[" has no `$`-before-`((`-style exception, so this
+    # simply delegates to is_boundary_char (above) using the mark_regions()
+    # forward-scan state.
+    function is_bracket_command_position(lastsig, beforesig) {
+      return is_boundary_char(lastsig, beforesig)
+    }
+
+    # is_opener_followed_by_ws(pos) (#810 Fix 5): true when the character
+    # immediately AFTER a two-char opener starting at `pos` (i.e. at
+    # pos+2) is whitespace. Real bash requires a space after "[["; this
+    # tokenizer applies the same requirement to "((" for simplicity/
+    # precision (a deliberately conservative choice: an unspaced "((x>0))"
+    # is treated as NOT a region, costing only a false-positive over-block,
+    # never a silent permit). Without this check, `[[z > path ]]` (no space
+    # after "[[") wrongly opened a suppressed region even though real bash
+    # does not parse a glued "[[z" as the reserved conditional token at
+    # all -- the `>` there is a genuine redirect.
+    function is_opener_followed_by_ws(pos,   nc2) {
+      nc2 = (pos + 2 <= n) ? substr(cmd, pos + 2, 1) : ""
+      return (nc2 == " " || nc2 == "\t" || nc2 == "\n")
+    }
+
+    # find_close(open_pos, ochar, cchar) (#810 Fix 5): scans forward from
+    # just after a two-char opener (ochar repeated twice) at `open_pos`,
+    # tracking quote/escape state AND single-character nesting depth of
+    # ochar/cchar, looking for the well-formed, properly nested matching
+    # double-close (cchar repeated twice). Returns the index of the SECOND
+    # cchar of that matching pair on success. Returns -1 (abandon -- mark
+    # nothing) when: the region runs off the end of the command unclosed
+    # (existing anti-fail-open behavior), OR a lone/unbalanced cchar is hit
+    # with no pending nested depth to unwind (well-formedness broken by a
+    # mismatched close before any valid match is found) -- e.g.
+    # `((printf x > f); (true))` is not a real `(( ))` arithmetic construct
+    # (bash arithmetic parse fails and this actually runs as nested
+    # subshells); "cannot prove a well-formed region" is treated exactly
+    # like "unclosed", per the same anti-fail-open principle already
+    # applied there. Depth tracking also correctly balances legitimate
+    # nested content that reuses the same characters, e.g. a POSIX
+    # character class inside `[[ $x =~ [[:alpha:]] ]]` ("[[:alpha:]]"
+    # contains one extra "[" and one extra "]", which balance to net zero).
+    function find_close(open_pos, ochar, cchar,   fi, fc, fquote, fesc, fdepth, fnc) {
+      fquote = 0
+      fesc = 0
+      fdepth = 0
+      fi = open_pos + 2
+      while (fi <= n) {
+        fc = substr(cmd, fi, 1)
+
+        if (fesc == 1) { fesc = 0; fi++; continue }
+        if (fquote == 1) {
+          if (fc == sq) fquote = 0
+          fi++
+          continue
+        }
+        if (fquote == 2) {
+          if (fc == dq) fquote = 0
+          else if (fc == bsl) fesc = 1
+          fi++
+          continue
+        }
+        if (fc == sq) { fquote = 1; fi++; continue }
+        if (fc == dq) { fquote = 2; fi++; continue }
+        if (fc == bsl) { fesc = 1; fi++; continue }
+
+        if (fc == ochar) { fdepth++; fi++; continue }
+        if (fc == cchar) {
+          if (fdepth > 0) {
+            fdepth--
+            fi++
+            continue
+          }
+          fnc = (fi + 1 <= n) ? substr(cmd, fi + 1, 1) : ""
+          if (fnc == cchar) return fi + 1
+          return -1
+        }
+        fi++
+      }
+      return -1
+    }
+
+    # find_close_bracket(open_pos) (#810 stabilization review, Bug 3 Vector
+    # 3): scans forward from just after a "[[" opener at `open_pos` for the
+    # FIRST standalone "]]" token, matching the REAL termination rule bash
+    # applies for a conditional expression -- bash closes "[[ ... ]]" at the
+    # first "]]" that is its own whitespace-delimited token; it does NOT
+    # balance nested "["/"]" characters the way the generic depth-counting
+    # in find_close models real arithmetic/subshell nesting for "(( ))".
+    # Confirmed exploit: `[[ [[ ]] ; echo x > AGENTS.md ]]` is valid bash
+    # where `[[ [[ ]]` is itself a complete (if degenerate) conditional and
+    # `echo x > AGENTS.md` afterward really executes the write -- but the
+    # depth-counting in find_close incorrectly consumed the inner "]]" as a
+    # nesting decrement and paired the opener with the FAR TRAILING "]]"
+    # instead, suppressing the real redirect in between.
+    #
+    # A candidate "]]" (two consecutive, unquoted, unescaped "]" characters)
+    # is the real standalone closer only when: the character immediately
+    # before it is whitespace (space/tab/newline -- always true for a
+    # well-formed "[[ ... ]]", since is_opener_followed_by_ws already
+    # requires whitespace right after the opener, so there is always at
+    # least one whitespace char somewhere before any candidate closer), AND
+    # the character immediately after it is whitespace, `;`, `|`, `&`, `)`,
+    # `>`, `<`, or end-of-string. `>`/`<` are included (round-3 stabilization
+    # review, Finding 2): real bash terminates the "]]" word at ANY unquoted
+    # metacharacter, including a glued redirect (`]]>file`, `]]<file`) --
+    # the prior set omitted them, so a "]]" immediately glued to a real
+    # redirect was wrongly rejected as the closer and the scan continued
+    # past it looking for a later standalone "]]", extending the suppressed
+    # region over the real redirect in between. Widening this set can only
+    # ever SHORTEN a recognized region (a candidate now accepted was
+    # previously rejected, never the reverse), so this is a safe,
+    # one-directional fix with no new ambiguity. A glued "]]" that fails
+    # either check (e.g. the "]]" ending a POSIX character class like
+    # "[[:alpha:]]", glued to the preceding ":" with no whitespace) is left
+    # as ordinary content and the scan continues past it looking for the
+    # next candidate. Quote/escape state is tracked exactly like find_close,
+    # so a quoted/escaped "]]" never counts. Returns -1 (abandon -- mark
+    # nothing, same anti-fail-open principle as find_close) when the command
+    # ends with no standalone "]]" ever found.
+    function find_close_bracket(open_pos,   fi, fc, fquote, fesc, fnc, fafter, prevc) {
+      fquote = 0
+      fesc = 0
+      prevc = substr(cmd, open_pos + 1, 1) # second "[" of the opener -- never "]"/whitespace, a safe seed
+      fi = open_pos + 2
+      while (fi <= n) {
+        fc = substr(cmd, fi, 1)
+
+        if (fesc == 1) { fesc = 0; prevc = fc; fi++; continue }
+        if (fquote == 1) {
+          if (fc == sq) fquote = 0
+          prevc = fc; fi++; continue
+        }
+        if (fquote == 2) {
+          if (fc == dq) fquote = 0
+          else if (fc == bsl) fesc = 1
+          prevc = fc; fi++; continue
+        }
+        if (fc == sq) { fquote = 1; prevc = fc; fi++; continue }
+        if (fc == dq) { fquote = 2; prevc = fc; fi++; continue }
+        if (fc == bsl) { fesc = 1; prevc = fc; fi++; continue }
+
+        if (fc == "]") {
+          fnc = (fi + 1 <= n) ? substr(cmd, fi + 1, 1) : ""
+          if (fnc == "]" && (prevc == " " || prevc == "\t" || prevc == "\n")) {
+            fafter = (fi + 2 <= n) ? substr(cmd, fi + 2, 1) : ""
+            if (fafter == "" || fafter == " " || fafter == "\t" || fafter == "\n" || fafter == ";" || fafter == "|" || fafter == "&" || fafter == ")" || fafter == ">" || fafter == "<") {
+              return fi + 1
+            }
+          }
+        }
+        prevc = fc
+        fi++
+      }
+      return -1
+    }
+
+    # has_nested_substitution(start_pos, end_pos) (#810 round-5 security
+    # review [CRITICAL]; return-value convention split by #810
+    # stabilization): scans cmd[start_pos..end_pos] -- the INTERIOR of a
+    # candidate [[ ... ]] / (( ... )) region, i.e. everything strictly
+    # between the two-char opener and its matched two-char closer -- for any
+    # unquoted, unescaped command/process-substitution marker: a backtick, a
+    # `$` immediately followed by `(`, a `<` immediately followed by `(`, or
+    # a `>` immediately followed by `(`. Uses the same quote/escape state
+    # machine as find_close/find_close_bracket, started fresh (quote=0,
+    # esc=0) since the interior always begins immediately after a two-char
+    # opener that is never itself a quote-opening or escape character, so no
+    # state needs to carry over the boundary. Returns 0 (false) when the
+    # interior is clean, including when start_pos > end_pos (an empty
+    # interior, e.g. "[[]]" with no opener/closer gap); 1 when the FIRST
+    # marker found was in UNQUOTED interior text; 2 when the FIRST marker
+    # found was INSIDE a double-quoted span within the interior. This is a
+    # single-pass, non-recursive check either way: it never evaluates what is
+    # INSIDE the substitution as a nested command, it only detects that one
+    # might be present at all (and where) and reports that fact upward so
+    # the caller (mark_regions()) can decide what to do with it -- return 1
+    # means "do not suppress the region, fall through to ordinary tokenizing"
+    # (already correctly handled there with no special mechanism, since `(`,
+    # `)`, and backtick are already unconditional word-boundary characters in
+    # the main tokenizer unquoted dispatch); return 2 means "fail the whole
+    # extraction closed" (exit 7), since this tokenizer own double-quote
+    # handling has no safe way to resume precise parsing through a nested
+    # substitution real syntax mid-scan (see the bwt_extract_targets and
+    # file header comments for why a precise-resume mechanism was tried and
+    # reverted rather than pursued further).
+    #
+    # Root cause this closes: bash performs command/process substitution
+    # INSIDE both [[ ... ]] and (( ... )) -- a redirect or `tee` invocation
+    # nested inside such a substitution is a real, executing write, but the
+    # mark_regions marking loops previously suppressed every character
+    # position between the opener and closer unconditionally, including the
+    # substitution content itself, so the real write inside was never
+    # extracted and never blocked. Confirmed exploits: `[[ $(printf x >
+    # /repo/.env) ]]`, `(( $(printf x > /repo/.env; echo 1) > 0 ))`,
+    # `[[ $(echo p | tee /repo/.env) ]]` (tee-arming, not just `>`
+    # suppression), a backtick variant, and a `<(...)` process-substitution
+    # variant -- all in UNQUOTED interior text, so all return 1 here.
+    #
+    # Later addition: bash 5.3+ also introduces function substitution forms
+    # `${ cmd; }` and `${| cmd; }`, which execute a real command from inside
+    # a `[[ ]]`/`(( ))` construct just like `$(...)`. These are distinguished
+    # from an ordinary parameter expansion (`${var}`, `${x:-default}`, which
+    # never execute arbitrary commands) by requiring whitespace or `|`
+    # immediately after the `${`. Confirmed exploit: `[[ -n ${ printf x >
+    # /repo/.env; } ]]`.
+    #
+    # Deliberately over-blocks in the safe direction: `(( $((1+1)) > 0 ))`
+    # now leaves its whole region unsuppressed too (an arithmetic expansion
+    # is a substitution marker, same as command/process substitution), so
+    # "0" is extracted as an apparent write target even though this specific
+    # case is actually benign -- accepted per the anti-fail-open philosophy
+    # already established in this file: erring toward extraction, never
+    # suppression, whenever a substitution might be present.
+    #
+    # The hquote==2 (double-quote) branch below ALSO checks for a backtick /
+    # `$(`/`${`-funsub marker before skipping past a double-quoted character,
+    # returning 2 on a hit (distinct from the unquoted path return of 1).
+    # Bash double-quote state does not extend into a nested
+    # `$(...)`/backtick command substitution or `${ ...; }`/`${| ...; }`
+    # function substitution -- those still parse and execute as real
+    # commands, real redirects included, even wrapped in outer double
+    # quotes -- but this tokenizer own quote state cannot safely resume
+    # precise parsing through one, so these are reported as the
+    # fail-closed-eligible case rather than the fall-through case. Confirmed
+    # exploits that must return 2 here: `[[ -n "$(printf x > /repo/.env)" ]]`,
+    # the `(( ))` variant, a double-quoted backtick variant, and a
+    # double-quoted `${ ...; }` funsub variant. The hquote==1 (single-quote)
+    # branch is intentionally left unchanged -- single quotes genuinely
+    # suppress everything in real bash, including command substitution.
+    # Process substitution (`<(`/`>(`) is intentionally NOT added to the
+    # hquote==2 branch -- it IS genuinely inert inside double quotes in real
+    # bash (bash performs no special handling of `<(`/`>(` inside "..."), so
+    # excluding it there is correct.
+    # Return the first raw position at or after pos that survives Bash
+    # pre-tokenization removal of backslash-newline pairs.
+    function logical_next_pos(pos, end_pos,   lp) {
+      lp = pos
+      while (lp + 1 <= end_pos && substr(cmd, lp, 1) == bsl && substr(cmd, lp + 1, 1) == nl)
+        lp += 2
+      return lp
+    }
+
+    function has_nested_substitution(start_pos, end_pos,   hi, hc, hquote, hesc, hnc, hn2, hnpos, hn2pos) {
+      hquote = 0
+      hesc = 0
+      hi = start_pos
+      while (hi <= end_pos) {
+        hc = substr(cmd, hi, 1)
+
+        if (hesc == 1) { hesc = 0; hi++; continue }
+        if (hquote == 1) {
+          if (hc == sq) hquote = 0
+          hi++
+          continue
+        }
+        if (hquote == 2) {
+          if (hc == dq) { hquote = 0; hi++; continue }
+          if (hc == bsl) { hesc = 1; hi++; continue }
+          # Bash double-quote state does NOT extend into the internal syntax
+          # of a nested command substitution (backtick or `$(...)`) or
+          # function substitution (`${ ...; }` / `${| ...; }`) -- those still
+          # parse and execute their contents as real commands, with real
+          # redirects, regardless of being wrapped in outer double quotes. So
+          # these markers must be checked here too, but -- unlike the
+          # unquoted path below -- a marker found here means this tokenizer
+          # cannot safely resume precise parsing through it, so this returns
+          # 2 (fail closed), not 1. Only genuinely inert markers inside
+          # double quotes -- process substitution `<(...)`/`>(...)`, which
+          # bash does NOT treat specially inside "..." -- are deliberately
+          # excluded here; that exclusion must stay.
+          if (hc == "`") return 2
+          if (hc == "$") {
+            hnpos = logical_next_pos(hi + 1, end_pos)
+            hnc = (hnpos <= end_pos) ? substr(cmd, hnpos, 1) : ""
+            if (hnc == "(") return 2
+            if (hnc == "{") {
+              hn2pos = logical_next_pos(hnpos + 1, end_pos)
+              hn2 = (hn2pos <= end_pos) ? substr(cmd, hn2pos, 1) : ""
+              if (hn2 == " " || hn2 == "\t" || hn2 == "\n" || hn2 == "|") return 2
+            }
+          }
+          hi++
+          continue
+        }
+        if (hc == sq) { hquote = 1; hi++; continue }
+        if (hc == dq) { hquote = 2; hi++; continue }
+        if (hc == bsl) { hesc = 1; hi++; continue }
+
+        if (hc == "`") return 1
+        if (hc == "$" || hc == "<" || hc == ">") {
+          hnpos = logical_next_pos(hi + 1, end_pos)
+          hnc = (hnpos <= end_pos) ? substr(cmd, hnpos, 1) : ""
+          if (hnc == "(") return 1
+          if (hc == "$" && hnc == "{") {
+            hn2pos = logical_next_pos(hnpos + 1, end_pos)
+            hn2 = (hn2pos <= end_pos) ? substr(cmd, hn2pos, 1) : ""
+            if (hn2 == " " || hn2 == "\t" || hn2 == "\n" || hn2 == "|") return 1
+          }
+        }
+        hi++
+      }
+      return 0
+    }
+
+    # mark_regions() (#810 Fix 3, hardened by Fix 5; restructured by the
+    # round-4 security review): a self-contained quote/escape-aware pre-pass
+    # over `cmd`, run once before the main tokenizer loop, that populates
+    # suppress[] with every character position falling inside a CLOSED,
+    # unquoted, standalone [[ ... ]] or (( ... )) region. Uses its own local
+    # quote/escape state (never the main tokenizer loop) so it can run to
+    # completion independently beforehand. A region opens on an unquoted,
+    # unescaped "[[" or "((" -- for "((", ONLY when it is its own token
+    # (is_opener_boundary) followed by whitespace (is_opener_followed_by_ws),
+    # per Fix 5, and closes on the next well-formed, properly nested "))"
+    # found by find_close() (depth-counting genuinely models real
+    # arithmetic/subshell nesting here, per the #810 stabilization review
+    # Bug 3 confirmation -- left unchanged). For "[[" (#810 stabilization
+    # review, Bug 3 Vectors 2-3; re-narrowed by the round-3 review,
+    # Finding 1), ONLY when it is preceded by the same minimal,
+    # non-recursible boundary rule as "((" (is_bracket_command_position)
+    # followed by whitespace (is_opener_followed_by_ws), and closes on the
+    # FIRST standalone "]]" token found by find_close_bracket() -- the real
+    # termination rule bash applies for a conditional expression, which does
+    # NOT balance nested "["/"]" characters the way the arithmetic/subshell
+    # nesting for "(( ))" genuinely does. An opener that fails either
+    # boundary/position check is left completely alone (not even a
+    # candidate); an opener that passes both but has no matching closer is
+    # also left unmarked (anti-fail-open in both cases -- a construct this
+    # scan cannot prove is a real, closed conditional/arithmetic region must
+    # never suppress a real redirect). A quoted "[[" (e.g. inside a
+    # single-quoted echo argument) never opens a region at all, since the
+    # quote-state checks below consume it first.
+    #
+    # Round-4 addition: this SAME forward pass now also maintains the
+    # rolling `lastsig`/`beforesig` state consumed by is_opener_boundary /
+    # is_bracket_command_position (via is_boundary_char), replacing what was
+    # previously a separate, stateless backward `substr()` re-scan of the
+    # raw command text (is_opener_boundary used to walk backward from each
+    # candidate position itself). `lastsig` is the last character seen so
+    # far that reached this functions truly unquoted, unescaped dispatch
+    # (the branches below this comment, never the rquote==1/rquote==2/
+    # resc==1 early-continue branches above) AND was not a space/tab;
+    # `beforesig` is whatever `lastsig` -- via the also-forward-scan-derived
+    # `prevunq` (every unquoted/unescaped character, space/tab included) --
+    # held immediately before that update. Both start at "" (start-of-
+    # string). This single O(1)-extra-state-per-character forward pass gets
+    # both round-4 fixes for free: (1) a backslash-escaped or quoted
+    # `;`/`&`/`|` never reaches the dispatch that updates lastsig/beforesig,
+    # so it can never count as a boundary; (2) `beforesig` lets
+    # is_boundary_char reject a `&`/`|` that is really the tail of `>&`/
+    # `<&`/`>|` rather than a bare separator. Updating lastsig/beforesig/
+    # prevunq happens AFTER a candidate "[["/"((" is checked (so the check
+    # sees state as of just before the candidate, exactly mirroring the old
+    # backward scans intent of looking at what precedes this position) but
+    # for EVERY character that reaches the dispatch, including "["/"("
+    # themselves when they do not end up matching as a real, closed region
+    # (so a later candidate correctly sees them as ordinary preceding
+    # content), and including the quote-opening/escape-starting characters
+    # themselves (a single quote, a double quote, a backslash) -- none of
+    # which can ever equal the recognized separator or `>`/`<` values, so
+    # including them in the rolling state is harmless. When a region IS
+    # matched and suppressed, lastsig/beforesig/prevunq are advanced to
+    # reflect the closing tokens own last two characters (e.g. the second
+    # `]` of `]]`) before `ri` jumps past it, so a construct immediately
+    # following the region still sees accurate preceding-character state.
+    #
+    # Round-5 addition (#810, CRITICAL; routing split by #810 stabilization):
+    # once a candidate region is found closed (a matching, well-formed
+    # "))"/"]]"), its INTERIOR (the span strictly between the two-char opener
+    # and the two-char closer) is re-scanned by has_nested_substitution()
+    # (above) before the suppress[] marking loop runs, and its return value
+    # routed one of three ways:
+    #   0 (no marker) -- suppress the region as an ordinary comparison,
+    #     exactly as before.
+    #   1 (marker found in UNQUOTED interior text) -- the region is NOT
+    #     suppressed at all: nothing is marked for it, and every character in
+    #     the span falls through to ordinary redirect/tee handling in the
+    #     main tokenizer loop, exactly as an unclosed/malformed region already
+    #     does. This is unaffected by the stabilization split -- the existing
+    #     unquoted-path tokenizing already correctly extracts a real write
+    #     nested this way, no special mechanism needed.
+    #   2 (marker found INSIDE a double-quoted span within the interior) --
+    #     this tokenizer cannot safely resume precise parsing through the
+    #     real syntax of the substitution from inside the main loop own
+    #     double-quote handling, so rather than attempt that, the WHOLE
+    #     extraction fails closed immediately: `exit 7`. This exits the
+    #     entire awk program right here, before the main tokenizing loop
+    #     (which has not even started yet -- mark_regions() is a pre-pass) and
+    #     before any emit() call, so the "non-zero exit -> emits nothing"
+    #     contract holds trivially (see the bwt_extract_targets comment).
+    # In cases 0 and 1, `ri` still advances past the whole matched region and
+    # lastsig/beforesig/prevunq still update as if it were recognized (it WAS
+    # a real, well-formed [[ ]]/(( )) as far as real bash grammar is
+    # concerned -- only case 1 interior is deliberately left unsuppressed),
+    # so a construct immediately following it still sees accurate boundary
+    # state.
+    function mark_regions(   ri, rc, rquote, resc, rnc, rk, close_pos, lastsig, beforesig, prevunq, nsub) {
+      rquote = 0
+      resc = 0
+      lastsig = ""
+      beforesig = ""
+      prevunq = ""
+      ri = 1
+      while (ri <= n) {
+        rc = substr(cmd, ri, 1)
+
+        if (resc == 1) {
+          resc = 0
+          ri++
+          continue
+        }
+        if (rquote == 1) {
+          if (rc == sq) rquote = 0
+          ri++
+          continue
+        }
+        if (rquote == 2) {
+          if (rc == dq) rquote = 0
+          else if (rc == bsl) resc = 1
+          ri++
+          continue
+        }
+
+        # Unquoted, unescaped dispatch: `rc` is a real character bash itself
+        # would see unquoted and unescaped at this exact position.
+
+        if (rc == "[") {
+          rnc = (ri + 1 <= n) ? substr(cmd, ri + 1, 1) : ""
+          if (rnc == "[" && is_bracket_command_position(lastsig, beforesig) && is_opener_followed_by_ws(ri)) {
+            close_pos = find_close_bracket(ri)
+            if (close_pos > 0) {
+              nsub = has_nested_substitution(ri + 2, close_pos - 2)
+              if (nsub == 2) exit 7
+              if (nsub == 0) {
+                for (rk = ri; rk <= close_pos; rk++) suppress[rk] = 1
+              }
+              beforesig = (close_pos - 1 >= 1) ? substr(cmd, close_pos - 1, 1) : ""
+              lastsig = substr(cmd, close_pos, 1)
+              prevunq = lastsig
+              ri = close_pos + 1
+              continue
+            }
+          }
+        }
+        if (rc == "(") {
+          rnc = (ri + 1 <= n) ? substr(cmd, ri + 1, 1) : ""
+          if (rnc == "(" && is_opener_boundary(ri, 1, lastsig, beforesig) && is_opener_followed_by_ws(ri)) {
+            close_pos = find_close(ri, "(", ")")
+            if (close_pos > 0) {
+              nsub = has_nested_substitution(ri + 2, close_pos - 2)
+              if (nsub == 2) exit 7
+              if (nsub == 0) {
+                for (rk = ri; rk <= close_pos; rk++) suppress[rk] = 1
+              }
+              beforesig = (close_pos - 1 >= 1) ? substr(cmd, close_pos - 1, 1) : ""
+              lastsig = substr(cmd, close_pos, 1)
+              prevunq = lastsig
+              ri = close_pos + 1
+              continue
+            }
+          }
+        }
+
+        if (rc == sq) { rquote = 1 }
+        else if (rc == dq) { rquote = 2 }
+        else if (rc == bsl) { resc = 1 }
+
+        if (rc != " " && rc != "\t") {
+          beforesig = prevunq
+          lastsig = rc
+        }
+        prevunq = rc
+        ri++
+      }
+    }
+
+    function flush(   wb, wregion) {
+      # #810 Fix 4 (critical): capture-then-reset every PER-WORD flag
+      # (wordbrace/bracedepth/bracehasdelim/curregion) unconditionally, at
+      # the very top of flush(), BEFORE the `if (!wordhas) return` early
+      # exit below. A `(( ... ))` / `$(( ... ))` region always ends by
+      # dispatching a flush() call with no pending word (the region-closing
+      # `)` characters are boundary characters, not word content) -- if the
+      # early return ran first, curregion (and these brace flags) would
+      # never be cleared for that no-op flush and would leak into the
+      # state for the NEXT word instead. A leaked curregion=1 silently
+      # suppressed tee-ARMING for a following `tee` word that was never
+      # actually inside any region (e.g. `echo $((1+1)) | tee /repo/.env`),
+      # a fail-open confirmed against real bash. Every word boundary must
+      # clear the previous words leftover per-word flags regardless of
+      # whether the new word turns out to be empty.
+      wb = wordbrace
+      wordbrace = 0
+      bracedepth = 0
+      bracehasdelim = 0
+      wregion = curregion
+      curregion = 0
       if (!wordhas) return
       w = word
       word = ""
@@ -655,13 +1457,21 @@ bwt_extract_targets() {
       wtilde = 0
 
       if (mode == "target") {
+        # #810 Fix 1: an unresolved brace-expansion word reaching
+        # write-target position fails the WHOLE extraction closed (exit 6)
+        # rather than emitting the raw, un-expanded literal -- see the
+        # bwt_extract_targets header comment.
+        if (wb) exit 6
         emit(w)
         mode = ""
         return
       }
       if (mode == "fddup") {
         if (w !~ /^[0-9]+$/) {
-          if (w != "-") emit(w)
+          if (w != "-") {
+            if (wb) exit 6
+            emit(w)
+          }
         }
         mode = ""
         return
@@ -673,12 +1483,14 @@ bwt_extract_targets() {
         } else if (substr(w, 1, 1) == "-") {
           # option word (e.g. -a) -- consumed, nothing to do
         } else {
+          if (wb) exit 6
           emit(w)
           tee = 2
         }
         return
       }
       if (tee == 2) {
+        if (wb) exit 6
         emit(w)
         return
       }
@@ -687,29 +1499,34 @@ bwt_extract_targets() {
       # match is ALWAYS treated as a tee invocation, unconditionally,
       # regardless of position (#795 round 3 -- see the function-level
       # header comment for why command-position tracking was reverted).
+      # #810 Fix 3: a word entirely inside a closed [[ ... ]] / (( ... ))
+      # region never arms tee (defense-in-depth alongside the `>`
+      # suppression above).
       bn = w
       sub(/.*\//, "", bn) # basename, so /usr/bin/tee and ./tee are matched too
-      if (bn == "tee") tee = 1
+      if (bn == "tee" && !wregion) tee = 1
     }
 
-    # emit(w) -- print an extracted target, with a print-time backstop
-    # (Fix A / #795 round 2 defense-in-depth) against ever emitting a raw
-    # embedded newline: the caller side reads targets one per physical line,
-    # so a word containing an embedded newline would otherwise silently
-    # fragment into two separate (individually innocuous-looking) lines. In
-    # practice this should no longer occur after the esc==1 line-continuation
-    # fix above, but if it ever does, replace the embedded newline with a
-    # character ("$") that bwt_is_unresolved already treats as unresolved --
-    # so a future edge case fails closed (block) rather than silently
-    # fragmenting again.
+    # emit(w) -- buffer an extracted target into outbuf[] (printed only once
+    # the whole scan completes successfully, see the print loop above), with
+    # a buffer-time backstop (Fix A / #795 round 2 defense-in-depth) against
+    # ever emitting a raw embedded newline: the caller side reads targets one
+    # per physical line, so a word containing an embedded newline would
+    # otherwise silently fragment into two separate (individually innocuous-
+    # looking) lines. In practice this should no longer occur after the
+    # esc==1 line-continuation fix above, but if it ever does, replace the
+    # embedded newline with a character ("$") that bwt_is_unresolved already
+    # treats as unresolved -- so a future edge case fails closed (block)
+    # rather than silently fragmenting again.
     function emit(w2,   e) {
+      outn++
       if (index(w2, nl) > 0) {
         e = w2
         gsub(nl, "$", e)
-        print e
+        outbuf[outn] = e
         return
       }
-      print w2
+      outbuf[outn] = w2
     }
   '
 }
