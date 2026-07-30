@@ -76,7 +76,7 @@ assert_contains "${PHASE_9}" 'match on the literal whole back-link line only' \
   "must dedup on the literal back-link, not fuzzy heuristics"
 assert_contains "${PHASE_9}" 'never match on title similarity' \
   "must never dedup on title similarity"
-assert_contains "${PHASE_9}" 'resume-safe idempotency guard against a Goal Autopilot re-entry double-appending' \
+assert_contains "${PHASE_9}" 'resume-safe idempotency guard against a re-run double-appending' \
   "must guard the append against a re-entry double-append"
 
 # ---------------------------------------------------------------------

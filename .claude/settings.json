@@ -18,8 +18,6 @@
       "Bash(git:*)",
       "Bash(gh:*)",
       "Bash(wc:*)",
-      "SlashCommand(/goal:*)",
-      "SlashCommand(/loop:*)",
       "mcp__context7__resolve-library-id",
       "mcp__context7__query-docs"
     ],

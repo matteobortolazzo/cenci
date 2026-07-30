@@ -185,7 +185,7 @@ These are Claude Code pipeline mechanics that cenci does not port to Codex. Use
 Codex's native interaction and delegation capabilities where helpful, but do not try
 to invoke the corresponding Claude workflow skills:
 
-- `/goal` autopilot and `.plans/` plan files.
+- `.plans/` plan files.
 - Babysit label automation and the board lifecycle.
 - Pencil design tooling.
 - `.claude/settings.json`, hooks, and `CLAUDE_PLUGIN_ROOT`.

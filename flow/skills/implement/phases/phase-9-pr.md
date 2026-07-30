@@ -4,9 +4,7 @@ Read this file only when Phase 9 starts.
 
 This phase is pre-approved — commit, push, and create the PR without asking for confirmation. The only exceptions are the error cases defined below (rebase conflicts, build/test/lint failures after rebase, push auth/network failures).
 
-**Goal Autopilot**: if a goal was armed at Phase 2 (see `SKILL.md` → Goal Autopilot), it must be cleared here. Clear it on success (right after the PR is created, before plan-file cleanup) **and** before any of this phase's error gates hands control back to the user — an un-cleared goal restarts the turn and would loop on an unrecoverable state (a rebase conflict, a failed push). Run `/goal clear` (via the `SlashCommand` tool) at those points; it is a safe no-op if no goal was armed or `/goal` is unavailable.
-
-**Atomicity rule — always restart at Rebase.** Any (re)entry into this phase — a fresh run or a Goal Autopilot resume mid-phase — MUST restart at the Rebase step below and run the steps in order: Rebase → build → test → lint → Commit → Push → PR. Never resume directly at Commit, Push, or PR creation, even if a prior turn already reached one of those steps. This guarantees push/PR creation is always immediately preceded, in the same turn, by a passing rebase + build + test + lint on the current tree — main may have moved between turns, and a stale rebase/verify from an earlier turn cannot be trusted. This is a stateless, markdown-level rule (no marker file, no new state): rebase and re-verify are cheap and idempotent, so restarting from the top on every entry is always safe. The Commit step below handles the case where a prior turn already committed (nothing left to stage) so the restart cannot double-commit or error out.
+**Atomicity rule — always restart at Rebase.** Any (re)entry into this phase — a fresh run, or a re-run after an earlier attempt stopped mid-phase — MUST restart at the Rebase step below and run the steps in order: Rebase → build → test → lint → Commit → Push → PR. Never resume directly at Commit, Push, or PR creation, even if a prior turn already reached one of those steps. This guarantees push/PR creation is always immediately preceded, in the same turn, by a passing rebase + build + test + lint on the current tree — main may have moved between turns, and a stale rebase/verify from an earlier turn cannot be trusted. This is a stateless, markdown-level rule (no marker file, no new state): rebase and re-verify are cheap and idempotent, so restarting from the top on every entry is always safe. The Commit step below handles the case where a prior turn already committed (nothing left to stage) so the restart cannot double-commit or error out.
 
 Prerequisites: all required reviews complete, Must Fix/Critical/High items resolved, build, tests, and lint pass.
 
@@ -25,9 +23,9 @@ git -C <worktree-path> fetch origin main
 git -C <worktree-path> rebase origin/main
 ```
 
-If rebase succeeds, rerun full build and tests, then lint (when `lintCommand` is set). An absent `lintCommand` skips the lint step cleanly — no error. If build, tests, or lint fail, clear the goal (`/goal clear`), then stop and report the rebase-induced failure. Lint is an unconditional hard gate here, exactly like build/test: no PR is created if it fails.
+If rebase succeeds, rerun full build and tests, then lint (when `lintCommand` is set). An absent `lintCommand` skips the lint step cleanly — no error. If build, tests, or lint fail, stop and report the rebase-induced failure. Lint is an unconditional hard gate here, exactly like build/test: no PR is created if it fails.
 
-If rebase conflicts, abort, clear the goal (`/goal clear`), report conflicting files, and stop:
+If rebase conflicts, abort, report conflicting files, and stop:
 
 ```bash
 git -C <worktree-path> rebase --abort
@@ -48,7 +46,7 @@ git -C <worktree-path> commit -m "<type>(<scope>): <description>
 <ticket-ref>"
 ```
 
-If a prior turn already committed this work (e.g. a Goal Autopilot resume re-entering after Commit ran once), `git -C <worktree-path> add -A` stages nothing new and `git -C <worktree-path> commit` reports nothing to commit — that is expected, not an error. Skip the commit in that case and proceed to Push; do not create an empty commit or fail the phase over it.
+If an earlier attempt already committed this work (a re-run re-entering after Commit ran once), `git -C <worktree-path> add -A` stages nothing new and `git -C <worktree-path> commit` reports nothing to commit — that is expected, not an error. Skip the commit in that case and proceed to Push; do not create an empty commit or fail the phase over it.
 
 Ticket mode:
 
@@ -70,9 +68,9 @@ Push the branch:
   This is `feature/<ticket-id>-<description>` on the standard path, or a non-standard branch when this run reused an existing worktree via `cenci pipeline worktree <id> --attach <path>` at Phase 2 — see `phase-2-worktree.md`'s `## Create Worktree`. Then push that branch: `git -C <worktree-path> push -u origin "$BRANCH"`.
 - Ticketless mode: `git -C <worktree-path> push -u origin feature/<auto-slug>` — unchanged; ticketless mode has no pipeline artifact to source a branch from.
 
-If this branch was already pushed in a prior turn (a Goal Autopilot resume) and the atomicity rule's mandatory Rebase restart above rewrote local commit SHAs, the plain push above is rejected as non-fast-forward — this is expected, not a failure. Retry once with `git -C <worktree-path> push --force-with-lease -u origin <branch>`: `--force-with-lease` still refuses if the remote tip isn't what this rebase started from (i.e. someone else pushed to the branch), which surfaces as a genuine conflict to report rather than silently overwriting work.
+If this branch was already pushed by an earlier attempt and the atomicity rule's mandatory Rebase restart above rewrote local commit SHAs, the plain push above is rejected as non-fast-forward — this is expected, not a failure. Retry once with `git -C <worktree-path> push --force-with-lease -u origin <branch>`: `--force-with-lease` still refuses if the remote tip isn't what this rebase started from (i.e. someone else pushed to the branch), which surfaces as a genuine conflict to report rather than silently overwriting work.
 
-If push fails due to sandbox/network/auth, clear the goal (`/goal clear`), show the exact command, and use `AskUserQuestion` ("Pushed, continue" / "Abort") to wait for the user to push manually before continuing.
+If push fails due to sandbox/network/auth, show the exact command, and use `AskUserQuestion` ("Pushed, continue" / "Abort") to wait for the user to push manually before continuing.
 
 After a successful push (ticket mode only — ticketless mode has no ticket ID to key the artifact on), record the branch as a tracked artifact:
 
@@ -111,9 +109,9 @@ Screenshots are temporary review aids — never commit them to the repo. Host th
 
 Create the PR with `gh pr create`. Write body content to `${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-pr-body.md` first and read it back; do not use heredocs or a large inline body string.
 
-If a prior turn already created the PR (a Goal Autopilot resume re-entering after PR creation ran once but the turn ended before `/goal clear`), `gh pr create` fails with "a pull request for branch ... already exists." That is not a failure — run `gh pr view <branch> --json url,number -q '.url + " " + (.number | tostring)'` to recover the existing PR URL and number, and continue to Labels/Cleanup as if creation had just succeeded.
+If an earlier attempt already created the PR (a re-run re-entering after PR creation ran once), `gh pr create` fails with "a pull request for branch ... already exists." That is not a failure — run `gh pr view <branch> --json url,number -q '.url + " " + (.number | tostring)'` to recover the existing PR URL and number, and continue to Labels/Cleanup as if creation had just succeeded.
 
-If `gh pr create` fails for any other reason (auth, network, validation), clear the goal (`/goal clear`), show the exact failing command and its error output, and use `AskUserQuestion` ("Created, continue" / "Abort") to let the user resolve the issue and confirm before continuing to Labels/Cleanup, or abort the run — mirroring the Push gate above. On "Created, continue," re-run `gh pr view <branch> --json url,number -q '.url + " " + (.number | tostring)'` to obtain the PR URL/number before proceeding — the same recovery call as the "already exists" case above — since Labels/Cleanup and the Followup Ticket step below need it.
+If `gh pr create` fails for any other reason (auth, network, validation), show the exact failing command and its error output, and use `AskUserQuestion` ("Created, continue" / "Abort") to let the user resolve the issue and confirm before continuing to Labels/Cleanup, or abort the run — mirroring the Push gate above. On "Created, continue," re-run `gh pr view <branch> --json url,number -q '.url + " " + (.number | tostring)'` to obtain the PR URL/number before proceeding — the same recovery call as the "already exists" case above — since Labels/Cleanup and the Followup Ticket step below need it.
 
 However the PR URL/number was obtained above (fresh `gh pr create`, or either recovery path), record it as a tracked artifact (ticket mode only):
 
@@ -166,7 +164,7 @@ For child tickets that are not last child, use `Related to #<parentId>` for the 
 - `lite-docs` → "Review: lite (docs-only — no reviewers)"
 - `lite-small` → "Review: lite (code-reviewer only)"
 
-If `$RUN_DIR` is unknown (e.g. lost to a context compaction or a goal-autopilot resume in a fresh session that never re-ran Phase 6 + 7's Shared Context step) or the file at that path is absent, do not default to any of the three known paths — write "Review: unknown (RUN_DIR lost — could not determine which review path ran)". An unrecoverable path must never be silently reported as `full`, `lite-docs`, or `lite-small`: claiming `full` would be a false assurance (the actual run could have been `lite-docs`, with no reviewers at all), so the PR body must surface the gap honestly instead of guessing.
+If `$RUN_DIR` is unknown (e.g. lost to a context compaction, or a re-run in a fresh session that never re-ran Phase 6 + 7's Shared Context step) or the file at that path is absent, do not default to any of the three known paths — write "Review: unknown (RUN_DIR lost — could not determine which review path ran)". An unrecoverable path must never be silently reported as `full`, `lite-docs`, or `lite-small`: claiming `full` would be a false assurance (the actual run could have been `lite-docs`, with no reviewers at all), so the PR body must surface the gap honestly instead of guessing.
 
 The `## Checklist` security line is derived from the same `$RUN_DIR/review-path.txt` file, in the same read:
 
@@ -189,7 +187,7 @@ Any reported or deferred maintenance findings (from a `— reported` status) eac
 
 ## Labels
 
-Ticket mode: after PR creation, replace "Working" with "In Review" (the PR is open but not yet merged):
+Ticket mode: after PR creation, apply "In Review" and retire both working-lifecycle labels, "Working" and "Planned" (the PR is open but not yet merged, and the ticket is no longer queued for pickup):
 
 ```bash
 cenci pipeline label <id> --transition in-review
@@ -245,7 +243,7 @@ gh issue list --repo <owner>/<repo> --label "Followup" --state open --json numbe
 
 Set `MATCH_N` to the lowest-numbered open issue whose `body` contains the back-link `Related to #<original-ticket>` **as a complete line** — matched as an exact whole line via `grep -qxF 'Related to #<original-ticket>'` against the fetched body (the `-x` is load-bearing: plain `grep -qF` is a within-line *substring* match, so ticket #7 would still match a body that only contains `Related to #70`), so a numeric-prefix collision can never fire. `<original-ticket>` is this run's own ticket ID, and the back-link is the exact line this section writes below. This must match on the literal whole back-link line only (`grep -qxF` — never a fuzzy compare); never match on title similarity or any fuzzy heuristic — the back-link is the sole join key, so an unrelated ticket that merely shares words in its title is never treated as a duplicate. If no open issue contains that exact line (or in ticketless mode, which has no back-link to search on), there is no `MATCH_N`: fall through to the create block below unchanged.
 
-If `MATCH_N` is set, append this run's deferred items to it instead of creating a new ticket. Re-read the matched issue's current body, then form the new checklist lines in the same one-line-context + `<file/area>` format as the create body below. Apply a resume-safe idempotency guard against a Goal Autopilot re-entry double-appending: `grep -qF` each candidate line against the existing body and drop any already present; if nothing new remains, skip the edit entirely rather than pushing an empty change. Otherwise write the full updated body — the existing body with the surviving new lines appended under its existing `## Deferred Items` checklist — to `${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-body.md`, re-applying no label or milestone (the matched ticket already carries them):
+If `MATCH_N` is set, append this run's deferred items to it instead of creating a new ticket. Re-read the matched issue's current body, then form the new checklist lines in the same one-line-context + `<file/area>` format as the create body below. Apply a resume-safe idempotency guard against a re-run double-appending: `grep -qF` each candidate line against the existing body and drop any already present; if nothing new remains, skip the edit entirely rather than pushing an empty change. Otherwise write the full updated body — the existing body with the surviving new lines appended under its existing `## Deferred Items` checklist — to `${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-body.md`, re-applying no label or milestone (the matched ticket already carries them):
 
 ```bash
 gh issue view "$MATCH_N" --repo <owner>/<repo> --json body -q .body > ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-existing-body.md
@@ -315,15 +313,7 @@ Ticketless mode: skip this comment (there is no original ticket to comment on).
 
 ## Cleanup
 
-After successful PR creation, first clear the Goal Autopilot condition — the PR now exists, so the goal is met:
-
-```
-/goal clear
-```
-
-Run it via the `SlashCommand` tool; it is a no-op if no goal was armed. Clearing before the plan-file archiving below keeps the two "work is done" signals in sync: the goal's condition references `.plans/<filename>`, which is moved out of `.plans/` next.
-
-Then archive the consumed plan file instead of deleting it — move it into `.plans/done/` so it survives as a record of what was implemented. `.plans/` lives only in the main checkout (repo root), not in the worktree — it is written during Phase 1, before the worktree even exists, and is never copied into the worktree — so this step must target `<repo-root>` (the main checkout containing `.worktrees/` — resolve via `git -C <worktree-path> rev-parse --path-format=absolute --git-common-dir` if needed, not the worktree itself), not `<worktree-path>`. Guard with a file-existence check: plan-file/ticketless runs where no `.plans/<filename>` exists for this run make this a no-op.
+After successful PR creation, archive the consumed plan file instead of deleting it — move it into `.plans/done/` so it survives as a record of what was implemented. `.plans/` lives only in the main checkout (repo root), not in the worktree — it is written during Phase 1, before the worktree even exists, and is never copied into the worktree — so this step must target `<repo-root>` (the main checkout containing `.worktrees/` — resolve via `git -C <worktree-path> rev-parse --path-format=absolute --git-common-dir` if needed, not the worktree itself), not `<worktree-path>`. Guard with a file-existence check: plan-file/ticketless runs where no `.plans/<filename>` exists for this run make this a no-op.
 
 A single `&&`-chained guard cannot distinguish "no-op" from "guard true but mkdir/mv genuinely failed" — both produce the same non-zero exit. Use an if/else that emits a distinguishable marker for each of the three real outcomes instead:
 
@@ -336,7 +326,7 @@ else
 fi
 ```
 
-This is a plain `mv`, not a git operation — `.plans/` is untracked/gitignored. If the pipeline fails before PR creation, preserve the plan file in place (do not archive it) for retry (and, as above, clear the goal at whichever error gate stopped the run).
+This is a plain `mv`, not a git operation — `.plans/` is untracked/gitignored. If the pipeline fails before PR creation, preserve the plan file in place (do not archive it) for retry.
 
 `mv -n` (no-clobber) intentionally leaves a pre-existing `.plans/done/<filename>` in place rather than overwriting it — if this ticket is re-implemented and produces the same `<id>-<slug>.md` name, the earlier archived record is preserved rather than destroyed.
 
@@ -372,7 +362,7 @@ Like the plan-file archiving above, this cleanup only runs on the success path (
 
 ## Babysit
 
-This is the **final** Phase-9 action — do it only after `## Cleanup` above has settled the session's own completion (`/goal clear` ran, the plan file was archived). Ordering matters: this step arms an *unattended* `cenci babysit` supervisor that keeps running after this session exits, so per `flow/AGENTS.md` the goal-clear-before-handoff rule is restated here for that new "arms an unattended loop" risk profile — the goal must already be cleared (Cleanup) before the supervisor is launched, so a still-armed goal can never re-loop the turn *after* an external watcher is live.
+This is the **final** Phase-9 action — do it only after `## Cleanup` above has settled the session's own completion (the plan file was archived). Ordering matters: this step arms an *unattended* `cenci babysit` supervisor that keeps running after this session exits, so the session's own cleanup must be finished before an external watcher is live.
 
 The PR is open but unverified — CI has not run, review feedback has not arrived, and the ticket is still `In Review`, not `Implemented`. Hand the PR off to the persistent supervisor, which carries it the rest of the way (CI watch, review handling, and the final `In Review` → `Implemented` relabel on merge) exactly as the standalone `babysit` skill does when invoked by hand. `cenci babysit` detaches its own background supervisor and returns immediately, so this launch is non-blocking — the session ends here; babysit runs on.
 
@@ -394,7 +384,7 @@ The PR is open but unverified — CI has not run, review feedback has not arrive
 
    Drop `--interval <interval>` when step 1 resolved nothing.
 
-3. **Non-fatal & idempotent.** If the launch prints `supervisor already running for PR #<pr-number>`, that is **expected success**, not an error — a Goal-Autopilot re-entry (or a manual re-run) already armed the watcher, and `cenci babysit` refuses to start a second supervisor for the same PR. Treat it exactly like the "PR already exists" / "label already exists" cases earlier in this phase: proceed to the report below. Any *other* launch failure (auth, network, missing binary) is reported to the user but does **not** fail the phase or re-loop the goal — the PR already exists and is the pipeline's real deliverable; a failed watcher launch just means the user should arm it manually.
+3. **Non-fatal & idempotent.** If the launch prints `supervisor already running for PR #<pr-number>`, that is **expected success**, not an error — an earlier attempt already armed the watcher, and `cenci babysit` refuses to start a second supervisor for the same PR. Treat it exactly like the "PR already exists" / "label already exists" cases earlier in this phase: proceed to the report below. Any *other* launch failure (auth, network, missing binary) is reported to the user but does **not** fail the phase — the PR already exists and is the pipeline's real deliverable; a failed watcher launch just means the user should arm it manually.
 
 Finally, report the terminal state as the PR being open and watched, not as done/merged:
 

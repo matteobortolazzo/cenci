@@ -447,8 +447,8 @@ done
 
 # ── Negative guard: boundary-unsafe legacy forms (#739, Q3) ──────────────
 # Bash(git push --force:*) and Bash(git push --force*) also match
-# `git push --force-with-lease`, which the Goal-Autopilot resume path in
-# flow/skills/implement/phases/phase-9-pr.md:67 requires. Pins the
+# `git push --force-with-lease`, which Phase 9's re-run push path in
+# flow/skills/implement/phases/phase-9-pr.md requires. Pins the
 # `--force-with-lease` carve-out so a future "simplification" cannot
 # silently re-break it.
 LEGACY_FORMS=("Bash(git push --force:*)" "Bash(git push --force*)")

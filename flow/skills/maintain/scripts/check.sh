@@ -1658,7 +1658,7 @@ CONFIG_SCHEMA=(
   'cenci|object' 'cenci.compactImplementation|boolean'
   'cenci.reviewConcurrency|string' 'cenci.implementerConcurrency|string'
   'cenci.diffContextMode|string' 'cenci.liteReviewEnabled|boolean'
-  'cenci.goalAutopilot|boolean' 'cenci.planComment|boolean'
+  'cenci.planComment|boolean'
   'cicd|object' 'cicd.enabled|boolean' 'cicd.platform|string'
   'sandbox|object' 'sandbox.enabled|boolean' 'sandbox.baseVersion|string,null'
   'sandbox.dind|boolean'

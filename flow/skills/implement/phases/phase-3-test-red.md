@@ -37,7 +37,7 @@ If the plan file's `## Implementation Plan` contains a `### Parallel Lanes` sect
 
 If the resolved config has `cenci.implementerConcurrency: "sequential"`, run the same lane delegations one after another instead of concurrently; otherwise (default `"parallel"`) launch them together. The lane structure, rules, and gates are identical in both modes.
 
-**Error gate (restated for the parallel risk profile — see `docs/pipeline-safety.md`).** A lane implementer applies the same analyze-fix-rerun loop as Phase 4, up to 3 attempts within its lane. If any lane still fails after that (red tests that cannot be written, green that cannot be reached, or a needed out-of-lane file), let already-running lanes finish, then clear the Goal Autopilot (`/goal clear` via `SlashCommand`, a no-op if none is armed — see `SKILL.md`) and stop, reporting per-lane status: which lanes completed red→green, which failed, exact errors and attempts. Completed lanes' work stays in the worktree — do not revert it; the user decides whether to continue sequentially or abort. Do not proceed to the Lane Verification Barrier with a failed lane.
+**Error gate (restated for the parallel risk profile — see `docs/pipeline-safety.md`).** A lane implementer applies the same analyze-fix-rerun loop as Phase 4, up to 3 attempts within its lane. If any lane still fails after that (red tests that cannot be written, green that cannot be reached, or a needed out-of-lane file), let already-running lanes finish, then stop, reporting per-lane status: which lanes completed red→green, which failed, exact errors and attempts. Completed lanes' work stays in the worktree — do not revert it; the user decides whether to continue sequentially or abort. Do not proceed to the Lane Verification Barrier with a failed lane.
 
 When lanes run, skip the single-implementer delegation below and Phase 4's standard delegation — Phase 4 runs only its `## Lane Verification Barrier`.
 
@@ -79,4 +79,4 @@ If any new test passes before implementation, investigate whether it actually co
 
 ## Error Recovery
 
-If tests cannot be written, identify the blocker. Fix missing test infrastructure or dependencies when safe. If requirements are unclear, clear the Goal Autopilot first (`/goal clear` via `SlashCommand`, a no-op if none is armed — see `SKILL.md`), then stop and ask the user via `AskUserQuestion`.
+If tests cannot be written, identify the blocker. Fix missing test infrastructure or dependencies when safe. If requirements are unclear, stop and ask the user via `AskUserQuestion`.
