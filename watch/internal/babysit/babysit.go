@@ -53,6 +53,24 @@ type State struct {
 	// "failing", "pending", or "" when unknown (no checks at all, or no tick
 	// has completed yet). Only "failing"/"pending" hold a window open (#787).
 	CIStatus string `json:"ciStatus,omitempty"`
+
+	// Automerge fields (#824). The supervisor's detached mode sets
+	// cmd.Stdout = nil, so the automerge decision log line only reaches a
+	// terminal under --once -- these persist the decision into the state
+	// file so it survives that, for both `cenci babysit status` and
+	// debugging.
+	AutomergeDecision string `json:"automergeDecision,omitempty"`
+	AutomergeReason   string `json:"automergeReason,omitempty"`
+	// AutomergeDetail is optional, purely diagnostic context layered onto
+	// AutomergeReason -- e.g. a rejected merge's captured `gh` output, or a
+	// wrapped policy/labels/allowed-methods fetch error's message. It never
+	// replaces AutomergeReason's stable reason-constant contract.
+	AutomergeDetail     string            `json:"automergeDetail,omitempty"`
+	AutomergeConditions []conditionResult `json:"automergeConditions,omitempty"`
+	AutomergeCheckedAt  time.Time         `json:"automergeCheckedAt,omitempty"`
+}
+type prFile struct {
+	Path string `json:"path"`
 }
 type prView struct {
 	Number                  int                    `json:"number"`
@@ -60,9 +78,16 @@ type prView struct {
 	State                   string                 `json:"state"`
 	HeadRefName             string                 `json:"headRefName"`
 	HeadRefOID              string                 `json:"headRefOid"`
+	BaseRefName             string                 `json:"baseRefName"`
 	URL                     string                 `json:"url"`
 	MergedAt                *time.Time             `json:"mergedAt"`
 	ClosingIssuesReferences []struct{ Number int } `json:"closingIssuesReferences"`
+	Mergeable               string                 `json:"mergeable"`
+	IsDraft                 bool                   `json:"isDraft"`
+	ChangedFiles            int                    `json:"changedFiles"`
+	Additions               int                    `json:"additions"`
+	Deletions               int                    `json:"deletions"`
+	Files                   []prFile               `json:"files"`
 }
 type check struct{ Bucket, Name, State string }
 type comment struct {
@@ -198,7 +223,7 @@ func Run(o Options) error {
 
 func tick(s *State) (bool, time.Duration, error) {
 	var pr prView
-	if err := ghJSON(&pr, "pr", "view", s.PR, "--repo", s.Repo, "--json", "number,title,state,headRefName,headRefOid,mergedAt,closingIssuesReferences,url"); err != nil {
+	if err := ghJSON(&pr, "pr", "view", s.PR, "--repo", s.Repo, "--json", "number,title,state,headRefName,headRefOid,mergedAt,closingIssuesReferences,url,baseRefName,mergeable,isDraft,changedFiles,additions,deletions,files"); err != nil {
 		return false, 0, err
 	}
 	if pr.State == "MERGED" || pr.State == "CLOSED" {
@@ -302,6 +327,9 @@ func tick(s *State) (bool, time.Duration, error) {
 		s.PendingKeys = append(s.PendingKeys, keys...)
 		s.PendingCommentAt = newest
 		s.PendingHeadSHA = pr.HeadRefOID
+		actionable = true
+	}
+	if runAutomerge(s, pr, checks) {
 		actionable = true
 	}
 	if actionable {
