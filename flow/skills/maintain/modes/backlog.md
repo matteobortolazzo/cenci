@@ -39,7 +39,7 @@ and reuse its trailing token to scope this run's temp files, per AGENTS.md's rul
 
 **Batch** (consolidate a group into one polish ticket):
 
-1. Use the `Write` tool to create the raw title and body as plain text, run-token-scoped — `${TMPDIR:-/tmp}/cenci/cenci-maintain-<run-token>-batch-title.txt` and `${TMPDIR:-/tmp}/cenci/cenci-maintain-<run-token>-batch-body.md` — never a hand-escaped JSON literal. The body cites each source ticket, carries a `Supersedes #a #b #c` line, and states the combined-ticket sizing rationale (`docs/ticket-sizing.md:36-41`). Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet:
+1. Use the `Write` tool to create the raw title and body as plain text, run-token-scoped — `${TMPDIR:-/tmp}/cenci/cenci-maintain-<run-token>-batch-title.txt` and `${TMPDIR:-/tmp}/cenci/cenci-maintain-<run-token>-batch-body.md` — never a hand-escaped JSON literal. The body cites each source ticket, carries a `Supersedes #a #b #c` line, and states the combined-ticket sizing rationale (`docs/ticket-sizing.md:42-47`). Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet:
 
    ```bash
    jq -n --rawfile title "${TMPDIR:-/tmp}/cenci/cenci-maintain-<run-token>-batch-title.txt" --rawfile body "${TMPDIR:-/tmp}/cenci/cenci-maintain-<run-token>-batch-body.md" '{title: ($title | rtrimstr("\n")), body: $body}' > "${TMPDIR:-/tmp}/cenci/cenci-maintain-<run-token>-batch.json"

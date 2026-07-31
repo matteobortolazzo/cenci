@@ -65,7 +65,7 @@ Classify every open `Followup` into **exactly one** action. **Default is Keep**:
 | **Keep** | A distinct, still-relevant capture with no open duplicate and nothing to batch it with | None |
 | **Flag duplicate** | Shares a root cause with another open issue (any label). Advisory only — it becomes a mutation solely when the user selects it as part of a Batch/merge | Quote both issues' numbers and the overlapping root-cause text |
 | **Promote** | Worth becoming a real ticket now → remove the `Followup` label (never auto-apply `Refined`; that is `/cenci:refine`'s job) | Say why it is ready to be picked up as normal unrefined work |
-| **Batch** | One of a group of small, independent surviving concerns that fit a single polish ticket per the `docs/ticket-sizing.md:36-41` tiers | List the group's issue numbers and the combined-ticket sizing rationale |
+| **Batch** | One of a group of small, independent surviving concerns that fit a single polish ticket per the `docs/ticket-sizing.md:42-47` tiers | List the group's issue numbers and the combined-ticket sizing rationale |
 
 There is **no Close-stale action.** Age is never a reason to close a `Followup` (see
 `docs/followup-triage.md`'s "No expiry"). Every closure you propose is a Batch-supersede or a

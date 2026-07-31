@@ -20,7 +20,7 @@ Promoting a `Followup` to real work means **removing the `Followup` label only**
 
 ## Batch and supersede
 
-Multiple small, independent surviving items that each fit comfortably in one implementation pass should be **grouped into a single polish ticket** rather than left as separate `Followup` tickets. Size the combined ticket against the existing tiers in `docs/ticket-sizing.md:36-41` — multiple small independent concerns fitting one pass should not be split back out.
+Multiple small, independent surviving items that each fit comfortably in one implementation pass should be **grouped into a single polish ticket** rather than left as separate `Followup` tickets. Size the combined ticket against the existing tiers in `docs/ticket-sizing.md:42-47` — multiple small independent concerns fitting one pass should not be split back out.
 
 Grouping mechanics (all approval-gated, run by `/cenci:maintain backlog`):
 
