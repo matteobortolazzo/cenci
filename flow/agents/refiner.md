@@ -153,24 +153,53 @@ Only when questions are `None.`, output the complete proposal. The skill persist
     - **Anti-patterns to avoid**: <generic choices explicitly ruled out>
 
     ### Automation
-    - **automerge**: grant | withhold
-    - **Rationale**: <one line>
+    - **automerge (parent)**: grant | withhold — <rationale>
+    - **automerge (K/N) <child title>**: grant | withhold — <rationale>
 
-    Withhold by default when the ticket touches security-sensitive paths, release/CI workflow files, is visually verifiable UI work, or performs an irreversible migration/data change — and withhold whenever uncertain. The human vetoes this verdict during the normal proposal review, same as any other section here. This section is **not** written into the ticket body — it drives only the refine skill's label decision.
+    One parent line always, plus one `automerge (K/N) <child title>` line per ticket proposed in `### Suggested Split` below (omit the child lines entirely when the proposal carries no split) — this is a per-ticket verdict **registry**, not a single value. Withhold by default when the ticket touches security-sensitive paths, release/CI workflow files, is visually verifiable UI work, or performs an irreversible migration/data change — and withhold whenever uncertain; apply this rule independently to the parent and to every child (a child can grant while a sibling withholds, and vice versa). The human's single confirmation at the refine skill's `## Confirmation Gate` authorizes every verdict listed here — not the proposal review earlier in the Q&A loop, which shapes content, not authorization. Granting the parent on a split authorizes the last child's PR to merge the epic: that PR carries `Fixes #<parentId>` and so closes both parent and child in one merge, and `evaluateAutomerge` requires an explicit `automerge:ok` grant on *every* issue a PR closes — so the parent's grant is a precondition for that automation, not a formality. This section is **not** written into the ticket body — it drives only the refine skill's per-ticket label decisions.
 
     ### Size Estimate
     <S/M/L> — <reasoning, sized against the context budget in `docs/ticket-sizing.md`>
 
     ### Suggested Split (only if L — real risk of exceeding the context budget per `docs/ticket-sizing.md`)
-    - Ticket 1 (1/N): <description>
-      Acceptance criteria:
-      - [ ] <criterion assigned to this child from ### Acceptance Criteria above>
-    - Ticket 2 (2/N): <description> — depends on Ticket 1
-      Acceptance criteria:
-      - [ ] <criterion assigned to this child from ### Acceptance Criteria above>
-    - Ticket 3 (3/N): <description> — parallel with Ticket 2
-      Acceptance criteria:
-      - [ ] <criterion assigned to this child from ### Acceptance Criteria above>
+
+    Each child is a **decision-complete block** — plannable without undocumented parent context (AC 5), never a one-line description. Ticket #848's own body is the reference shape: every child carries its own `### Goal`, `### Decisions`, `### Assumptions (auto-adopted)`, `### Acceptance criteria`, and `### Dependencies`.
+
+    **Ticket 1 (1/N): <title>**
+    ### Goal
+    <what this child delivers, standalone>
+    ### Decisions
+    - <settled decision this child needs, scoped from the parent's ### Decisions above>
+    ### Assumptions (auto-adopted)
+    - <assumption this child needs, scoped from the parent's ### Assumptions (auto-adopted) above>
+    ### Acceptance criteria
+    - [ ] <criterion assigned to this child from ### Acceptance Criteria above>
+    ### Dependencies
+    None.
+
+    **Ticket 2 (2/N): <title>** — depends on Ticket 1
+    ### Goal
+    <what this child delivers, standalone>
+    ### Decisions
+    - <settled decision this child needs, scoped from the parent's ### Decisions above>
+    ### Assumptions (auto-adopted)
+    - <assumption this child needs, scoped from the parent's ### Assumptions (auto-adopted) above>
+    ### Acceptance criteria
+    - [ ] <criterion assigned to this child from ### Acceptance Criteria above>
+    ### Dependencies
+    Depends on Ticket 1.
+
+    **Ticket 3 (3/N): <title>** — parallel with Ticket 2
+    ### Goal
+    <what this child delivers, standalone>
+    ### Decisions
+    - <settled decision this child needs, scoped from the parent's ### Decisions above>
+    ### Assumptions (auto-adopted)
+    - <assumption this child needs, scoped from the parent's ### Assumptions (auto-adopted) above>
+    ### Acceptance criteria
+    - [ ] <criterion assigned to this child from ### Acceptance Criteria above>
+    ### Dependencies
+    Depends on Ticket 1. Parallel with Ticket 2.
 
     #### Execution Order
     - Ticket 1 → first (no dependencies)
@@ -178,6 +207,6 @@ Only when questions are `None.`, output the complete proposal. The skill persist
 
 When analyzing a split, determine which child tickets have data/API/schema dependencies on others (sequential) vs. which touch independent areas (parallel), and annotate each. Do not propose a split for S or M tickets just because they touch multiple independent concerns — the budget-risk-only trigger in `docs/ticket-sizing.md` governs. **Design-first splits** (if frontend feature AND `pencil.enabled` AND `designNeeded`): make the first child a design-only ticket (e.g., "Design <feature> screens") that every UI implementation child depends on, and include the `### Design Direction` section in its described body — the skill labels it `Design` when creating it.
 
-**Acceptance-criteria partition.** A split does not just divide the work — it divides the proof. Every criterion in the proposal's `### Acceptance Criteria` must be assigned to exactly one child's `Acceptance criteria:` checklist — none left unassigned, none duplicated across children — so that "every child closed" is by construction equivalent to "every parent criterion delivered" (#661). Criteria may be reworded only to scope them to the child, never weakened. Integration-scoped criteria — those only verifiable once every child's work is assembled (end-to-end flows, cross-cutting docs, config surfaces spanning children) — must be assigned to a child that depends on every other child; when no such child exists naturally, add a final integration child to carry them. A child may carry zero parent criteria (e.g. a design-only first child) — the rule constrains criteria, not children. The refine skill verifies this partition before creating any child and rejects the split if a criterion is unassigned or duplicated.
+**Acceptance-criteria partition.** A split does not just divide the work — it divides the proof. Every criterion in the proposal's `### Acceptance Criteria` must be assigned to exactly one child's `### Acceptance criteria` checklist — none left unassigned, none duplicated across children — so that "every child closed" is by construction equivalent to "every parent criterion delivered" (#661). Criteria may be reworded only to scope them to the child, never weakened. Integration-scoped criteria — those only verifiable once every child's work is assembled (end-to-end flows, cross-cutting docs, config surfaces spanning children) — must be assigned to a child that depends on every other child; when no such child exists naturally, add a final integration child to carry them. A child may carry zero parent criteria (e.g. a design-only first child) — the rule constrains criteria, not children. The refine skill verifies this partition before creating any child and rejects the split if a criterion is unassigned or duplicated.
 
 Use ultrathink for complex analysis.

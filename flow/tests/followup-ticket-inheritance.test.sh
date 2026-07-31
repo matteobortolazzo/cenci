@@ -39,6 +39,13 @@ assert_file_lacks() {
 # =====================================================================
 MILESTONE_LABELS_FETCH='--json milestone,labels'
 LIFECYCLE_EXCLUSION_MARKER='"Refined","Working","Planned","In Review","Implemented","Design","Designed"'
+# #848: a followup is an untriaged capture-queue item (flow/docs/
+# followup-triage.md) that leaves the queue only via triage or promotion
+# through /cenci:refine, so it must not arrive pre-carrying
+# refinement-granted markers — least of all a hands-off-merge grant. This
+# extends the exclusion set from 7 to 10 entries; LIFECYCLE_EXCLUSION_MARKER
+# above (a substring of this extended list) keeps passing unchanged.
+EXTENDED_EXCLUSION_MARKER='"Refined","Working","Planned","In Review","Implemented","Design","Designed","automerge:ok","Browser","ui:visual-check"'
 MILESTONE_NUMBER_MARKER='.milestone.number'
 FOLLOWUP_LABEL_ARRAY_MARKER='["Followup"]'
 TICKET_MODE_GUARD_MARKER="Ticket mode only: before creating the follow-up issue, fetch the original ticket's milestone and labels"
@@ -59,6 +66,8 @@ for FILE in "${PHASE_9}" "${ADDRESS_REVIEW_SKILL}"; do
     "must fetch the original ticket's milestone and labels via gh issue view"
   assert_file_contains "${FILE}" "${LIFECYCLE_EXCLUSION_MARKER}" \
     "must exclude the 7 lifecycle labels on a single source line"
+  assert_file_contains "${FILE}" "${EXTENDED_EXCLUSION_MARKER}" \
+    "must extend the exclusion array to 10 entries so automerge:ok, Browser, and ui:visual-check are never inherited by a followup ticket (#848)"
   assert_file_contains "${FILE}" "${MILESTONE_NUMBER_MARKER}" \
     "must source the inherited milestone as the numeric .milestone.number, not the title"
   assert_file_contains "${FILE}" "${FOLLOWUP_LABEL_ARRAY_MARKER}" \
