@@ -149,6 +149,7 @@ effect immediately. The `PluginDirectory` default itself is left untouched.
   | class | SF Symbol | color |
   |---|---|---|
   | `need-input` | `exclamationmark.triangle.fill` | red |
+  | `escalated` | `questionmark.circle.fill` | yellow |
   | `running` | `brain.head.profile.fill` | blue |
   | `done` | `checkmark.circle.fill` | green |
   | `stopped` | `pause.circle.fill` | orange |

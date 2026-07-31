@@ -21,9 +21,13 @@ import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
 // class -> panel icon (symbolic, follows the active icon theme). Priority order
-// mirrors the formatter: failed > need-input > running > done > stopped > idle.
+// mirrors the formatter: failed > escalated > need-input > running > done >
+// stopped > idle. `escalated` (#826) is a planner-escalated ticket blocked on a
+// human answering on the board — a question, not a warning, and deliberately a
+// different icon from both `failed` and `need-input`.
 const ICON_FOR_CLASS = {
     'failed': 'dialog-error-symbolic',
+    'escalated': 'dialog-question-symbolic',
     'need-input': 'dialog-warning-symbolic',
     'running': 'emblem-synchronizing-symbolic',
     'done': 'emblem-ok-symbolic',

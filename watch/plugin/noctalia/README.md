@@ -64,7 +64,7 @@ effect immediately.
 
 - Polls every `pollIntervalMs` (default 2000ms).
 - Hides when cenci reports no sessions (or daemon is down).
-- Icon and color reflect the highest-priority status: `need-input` (red) > `running` (primary) > `done` > `stopped` > `idle`.
+- Icon and color reflect the highest-priority status: `need-input` (red) > `escalated` (secondary) > `running` (primary) > `done` > `stopped` > `idle`.
 - Hover tooltip lists each window: `session:index - name (status)`.
 - Per-agent budget headroom (when reported) renders as a small percent badge next to the status text, colored by threshold: >25% normal (primary), 10-25% warning (tertiary), <10% critical (error). No badge is shown when headroom data is absent.
 - When the daemon's fleet dispatch loop is enabled, a compact `⟳` glyph and a `dispatch: on (...)` tooltip line appear. The widget no longer hides when there are zero live sessions but the loop is enabled (`alt: "dispatch-only"`) — only a true `alt: "none"` (no sessions and dispatch disabled/absent) hides it.

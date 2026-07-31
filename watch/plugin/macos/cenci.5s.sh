@@ -105,10 +105,14 @@ function run() {
   // icons use SF Symbols, which has no literal robot glyph, so `running` uses
   // brain.head.profile.fill instead of the QML widgets' robot/smart_toy. A null
   // symbol means no attention treatment (idle / unknown). need-input is the
-  // loudest treatment — that's the attention layer's whole job.
+  // loudest treatment — that's the attention layer's whole job. `escalated`
+  // (#826) is a planner-escalated ticket blocked on a human answering on the
+  // board: attention-worthy, but a question rather than an alert, so it gets
+  // its own symbol/color instead of need-input's red triangle.
   function styleFor(c) {
     switch (c) {
       case 'need-input': return ['exclamationmark.triangle.fill', 'red']
+      case 'escalated':  return ['questionmark.circle.fill', 'yellow']
       case 'running':    return ['brain.head.profile.fill', 'blue']
       case 'done':       return ['checkmark.circle.fill', 'green']
       case 'stopped':    return ['pause.circle.fill', 'orange']

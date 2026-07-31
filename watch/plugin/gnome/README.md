@@ -80,8 +80,8 @@ takes effect immediately — no Shell reload needed.
   fleet dispatch loop is disabled/absent), or the daemon is down (non-zero exit).
 - Panel shows a status icon + the count string (`▶ 2  ! 1`). The icon color
   reflects the highest-priority status:
-  `failed`/`need-input` (red) > `running` (blue) > `done` (green) >
-  `stopped` (orange) > `idle` (grey).
+  `failed`/`need-input` (red) > `escalated` (yellow) > `running` (blue) >
+  `done` (green) > `stopped` (orange) > `idle` (grey).
 - Click the indicator to open a menu listing each session
   (`session:index - name`), with a per-session status icon colored independently.
 - When the daemon's fleet dispatch loop is enabled, a compact `⟳` glyph appears

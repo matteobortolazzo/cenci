@@ -9,6 +9,10 @@
     color: #e01b24; /* red — attention */
 }
 
+.cenci-escalated {
+    color: #e5a50a; /* yellow — blocked on a human, not broken (#826) */
+}
+
 .cenci-running {
     color: #3584e4; /* blue — working */
 }
