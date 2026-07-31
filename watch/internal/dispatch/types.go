@@ -226,7 +226,7 @@ const (
 // loop can log every outcome (silent skips are undebuggable).
 type Decision struct {
 	Ticket Ticket
-	Plan   *Plan // matched plan; non-nil on dispatch (drives the .plans/<file> arg)
+	Plan   *Plan // matched plan; non-nil on dispatch except a planning pickup (Planning && !Replan), which is nil by design
 	Action Action
 	Reason string // always set
 	Agent  string // resolved agent for the dispatch
@@ -241,4 +241,19 @@ type Decision struct {
 	// content-distinct Reason ("resume — human answered") keeps that
 	// contract byte-unchanged.
 	Resume bool
+
+	// Planning (#828) is true when this dispatch is a stage-aware planning
+	// session rather than an ordinary status: planned pickup: either a
+	// Refined ticket with no plan yet (Plan == nil), or an autonomous
+	// re-plan of an existing-but-stale plan (Plan != nil, Replan also
+	// true). Deliberately additive to Action (never a third Action value),
+	// for the same lazyboards-substring-contract reason documented on
+	// Resume above. Invariant: Replan ⇒ Planning.
+	Planning bool
+
+	// Replan (#828) is true when Planning is also true and the dispatch is
+	// an autonomous re-plan of a stale plan, rather than a fresh planning
+	// pickup for a Refined ticket with no plan yet. Invariants: Replan ⇒
+	// Plan != nil; Planning && !Replan ⇒ Plan == nil.
+	Replan bool
 }

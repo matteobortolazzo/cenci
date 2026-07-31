@@ -505,3 +505,255 @@ func TestFormatDecisionRendersResumeLine(t *testing.T) {
 		t.Errorf("resume line %q must still carry the load-bearing %q substring", got, " dispatch ")
 	}
 }
+
+// -- #828: stage-aware Refined pickup and autonomous re-plan ----------------
+
+// planningDispatchDeps is the planning-pickup happy path: one Refined ticket
+// #42 with no plan file and a reachable, idle daemon.
+func planningDispatchDeps(now time.Time) dispatchDeps {
+	return dispatchDeps{
+		Tickets:     []Ticket{{Repo: "o/r", Number: 42, Title: "Fix thing", Labels: []string{"Refined"}, Assignees: []string{"octocat"}}},
+		Snapshot:    &watch.StateSnapshot{},
+		Now:         now,
+		CurrentUser: "octocat",
+	}
+}
+
+// replanDispatchDeps is the autonomous re-plan happy path: one Planned
+// ticket #42 whose plan is stale beyond testConfig's tolerance.
+func replanDispatchDeps(now time.Time) dispatchDeps {
+	return dispatchDeps{
+		Tickets:     []Ticket{{Repo: "o/r", Number: 42, Title: "Fix thing", Labels: []string{"Planned"}, Assignees: []string{"octocat"}}},
+		Plans:       []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "planned", CommitsBehind: 10}},
+		Snapshot:    &watch.StateSnapshot{},
+		Now:         now,
+		CurrentUser: "octocat",
+	}
+}
+
+// TestApplyDispatchPlanningPickupLaunchArgs covers the Test Strategy table's
+// launch-shape requirement: runFn receives Ticket == "42" (the bare ticket
+// number, no plan file) and WindowTicket == "42" for a planning pickup.
+func TestApplyDispatchPlanningPickupLaunchArgs(t *testing.T) {
+	var captured run.Opts
+	stubRunFn(t, func(opts run.Opts, _ run.Controller) error {
+		captured = opts
+		return nil
+	})
+
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	mut := &fakeMutator{}
+	prior := 0
+	var buf bytes.Buffer
+
+	cfg := testConfig()
+	cfg.PlanRefined = true
+
+	if _, err := applyDispatch(cfg, planningDispatchDeps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
+		t.Fatalf("applyDispatch returned unexpected error: %v", err)
+	}
+
+	if captured.Ticket != "42" {
+		t.Errorf("captured Opts.Ticket = %q, want %q (bare ticket number, no plan file)", captured.Ticket, "42")
+	}
+	if captured.WindowTicket != "42" {
+		t.Errorf("captured Opts.WindowTicket = %q, want %q", captured.WindowTicket, "42")
+	}
+}
+
+// TestApplyDispatchReplanLaunchArgs covers the Test Strategy table's
+// launch-shape requirement: runFn receives Ticket == "42 replan" (the
+// --replan-requested escape hatch) and WindowTicket == "42" for a re-plan.
+func TestApplyDispatchReplanLaunchArgs(t *testing.T) {
+	var captured run.Opts
+	stubRunFn(t, func(opts run.Opts, _ run.Controller) error {
+		captured = opts
+		return nil
+	})
+
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	mut := &fakeMutator{}
+	prior := 0
+	var buf bytes.Buffer
+
+	cfg := testConfig()
+	cfg.PlanRefined = true
+
+	if _, err := applyDispatch(cfg, replanDispatchDeps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
+		t.Fatalf("applyDispatch returned unexpected error: %v", err)
+	}
+
+	if captured.Ticket != "42 replan" {
+		t.Errorf("captured Opts.Ticket = %q, want %q (the --replan-requested escape hatch)", captured.Ticket, "42 replan")
+	}
+	if captured.WindowTicket != "42" {
+		t.Errorf("captured Opts.WindowTicket = %q, want %q (bare number, always)", captured.WindowTicket, "42")
+	}
+}
+
+// TestApplyDispatchPlanningPickupThreadsModelAndSession locks in that
+// Model/Session are threaded to a planning dispatch identically to an
+// ordinary dispatch.
+func TestApplyDispatchPlanningPickupThreadsModelAndSession(t *testing.T) {
+	var captured run.Opts
+	stubRunFn(t, func(opts run.Opts, _ run.Controller) error {
+		captured = opts
+		return nil
+	})
+
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	mut := &fakeMutator{}
+	prior := 0
+
+	cfg := testConfig()
+	cfg.PlanRefined = true
+	cfg.Model = "claude-sonnet-5"
+	cfg.Session = "cenci"
+
+	if _, err := applyDispatch(cfg, planningDispatchDeps(now), fakeController{}, mut, false, nil, &prior); err != nil {
+		t.Fatalf("applyDispatch returned unexpected error: %v", err)
+	}
+	if captured.Model != "claude-sonnet-5" || captured.Session != "cenci" {
+		t.Errorf("Model/Session = %q/%q, want threaded identically to an ordinary dispatch", captured.Model, captured.Session)
+	}
+}
+
+// TestApplyDispatchPlanningPickupClaimsWorkingAfterSpawn covers the Test
+// Strategy table's "Working added after a successful spawn for both kinds"
+// requirement for the planning-pickup kind.
+func TestApplyDispatchPlanningPickupClaimsWorkingAfterSpawn(t *testing.T) {
+	stubRunFn(t, func(run.Opts, run.Controller) error { return nil })
+
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	mut := &fakeMutator{}
+	prior := 0
+	var buf bytes.Buffer
+
+	cfg := testConfig()
+	cfg.PlanRefined = true
+
+	if _, err := applyDispatch(cfg, planningDispatchDeps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
+		t.Fatalf("applyDispatch returned unexpected error: %v", err)
+	}
+
+	if len(mut.labelEdits) != 1 {
+		t.Fatalf("expected 1 label edit (the Working claim), got %d: %+v", len(mut.labelEdits), mut.labelEdits)
+	}
+	e := mut.labelEdits[0]
+	if e.repo != "o/r" || e.number != 42 || !containsStr(e.add, labelWorking) || len(e.remove) != 0 {
+		t.Errorf("unexpected claim edit: %+v, want add=[%s] remove=[] on o/r#42", e, labelWorking)
+	}
+}
+
+// TestApplyDispatchReplanClaimsWorkingAfterSpawn covers the Test Strategy
+// table's "Working added after a successful spawn for both kinds"
+// requirement for the re-plan kind.
+func TestApplyDispatchReplanClaimsWorkingAfterSpawn(t *testing.T) {
+	stubRunFn(t, func(run.Opts, run.Controller) error { return nil })
+
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	mut := &fakeMutator{}
+	prior := 0
+	var buf bytes.Buffer
+
+	cfg := testConfig()
+	cfg.PlanRefined = true
+
+	if _, err := applyDispatch(cfg, replanDispatchDeps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
+		t.Fatalf("applyDispatch returned unexpected error: %v", err)
+	}
+
+	if len(mut.labelEdits) != 1 {
+		t.Fatalf("expected 1 label edit (the Working claim), got %d: %+v", len(mut.labelEdits), mut.labelEdits)
+	}
+	e := mut.labelEdits[0]
+	if e.repo != "o/r" || e.number != 42 || !containsStr(e.add, labelWorking) || len(e.remove) != 0 {
+		t.Errorf("unexpected claim edit: %+v, want add=[%s] remove=[] on o/r#42", e, labelWorking)
+	}
+}
+
+// TestApplyDispatchPlanningPickupNoClaimOnSpawnFailure covers the Test
+// Strategy table's "no claim on spawn failure" requirement for the
+// planning-pickup kind.
+func TestApplyDispatchPlanningPickupNoClaimOnSpawnFailure(t *testing.T) {
+	stubRunFn(t, func(run.Opts, run.Controller) error { return errors.New("tmux exploded") })
+
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	mut := &fakeMutator{}
+	prior := 0
+	var buf bytes.Buffer
+
+	cfg := testConfig()
+	cfg.PlanRefined = true
+
+	_, err := applyDispatch(cfg, planningDispatchDeps(now), fakeController{}, mut, false, &buf, &prior)
+	if err == nil || !strings.Contains(err.Error(), "tmux exploded") {
+		t.Fatalf("spawn failure error = %v, want tmux exploded", err)
+	}
+	if len(mut.labelEdits) != 0 {
+		t.Errorf("a failed spawn must not claim the ticket, got %+v", mut.labelEdits)
+	}
+}
+
+// TestApplyDispatchPlanningPickupDryRunSkipsClaim covers the Test Strategy
+// table's "no claim on dry-run" requirement for the planning-pickup kind.
+func TestApplyDispatchPlanningPickupDryRunSkipsClaim(t *testing.T) {
+	stubRunFn(t, func(run.Opts, run.Controller) error {
+		t.Error("dry-run must not spawn")
+		return nil
+	})
+
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	mut := &fakeMutator{}
+	prior := 0
+
+	cfg := testConfig()
+	cfg.PlanRefined = true
+
+	if _, err := applyDispatch(cfg, planningDispatchDeps(now), fakeController{}, mut, true, nil, &prior); err != nil {
+		t.Fatalf("dry-run returned unexpected error: %v", err)
+	}
+	if len(mut.labelEdits) != 0 {
+		t.Errorf("dry-run must not claim, got %+v", mut.labelEdits)
+	}
+}
+
+// TestFormatDecisionRendersPlanningPickupLine covers the Test Strategy
+// table's formatDecision justification: a Plan == nil dispatch (the
+// planning-pickup kind) must render with the load-bearing " dispatch "
+// substring, not silently fall into the " skip:" branch.
+func TestFormatDecisionRendersPlanningPickupLine(t *testing.T) {
+	d := Decision{
+		Ticket:   Ticket{Repo: "o/r", Number: 42},
+		Action:   ActionDispatch,
+		Planning: true,
+		Reason:   "plan — Refined, no plan file",
+		Agent:    "claude",
+	}
+	got := formatDecision(d)
+	if !strings.Contains(got, " dispatch ") {
+		t.Errorf("planning-pickup line %q must carry the load-bearing %q substring, not render as a skip", got, " dispatch ")
+	}
+	if strings.Contains(got, "skip:") {
+		t.Errorf("planning-pickup line %q must never render as a skip (today's Plan == nil branch falls through to skip:)", got)
+	}
+}
+
+// TestFormatDecisionRendersReplanLine covers the re-plan variant of the same
+// contract: Plan != nil, Planning && Replan both true, still carries the
+// load-bearing " dispatch " substring.
+func TestFormatDecisionRendersReplanLine(t *testing.T) {
+	d := Decision{
+		Ticket:   Ticket{Repo: "o/r", Number: 42},
+		Plan:     &Plan{Path: ".plans/42-x.md"},
+		Action:   ActionDispatch,
+		Planning: true,
+		Replan:   true,
+		Reason:   "re-plan — plan stale",
+		Agent:    "claude",
+	}
+	got := formatDecision(d)
+	if !strings.Contains(got, " dispatch ") {
+		t.Errorf("re-plan line %q must carry the load-bearing %q substring", got, " dispatch ")
+	}
+}

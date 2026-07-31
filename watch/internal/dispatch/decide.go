@@ -157,8 +157,26 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 	// with the ordinary path, because it is literally the same code.
 	resuming := hasLabel(t.Labels, labelInputNeeded)
 
+	// Plan lookup is hoisted above rule 1 (#828, pure map read, no I/O and no
+	// behavior change) so `planning` can be computed before the board-state
+	// gate: a Refined ticket with no plan must be admitted past rule 1
+	// instead of being turned away as "not Planned".
+	plan := planByTicket[planKey(t.Repo, t.Number)]
+
+	// planning (#828) is true when this ticket is a fresh stage-aware
+	// planning candidate: dispatch.planRefined is on, it carries Refined but
+	// not yet Planned, and no plan file has been matched to it yet.
+	// Deliberately implies plan == nil (mirrors resuming's shape above) --
+	// every gate below that dereferences plan guards on !planning (or
+	// plan != nil) accordingly. The sibling case -- an existing but stale
+	// plan re-planned autonomously -- is the separate replanning flag
+	// computed at rule 4 below; Decision.Planning is set on both paths, but
+	// only replanning also sets Decision.Replan.
+	planning := !resuming && in.Config.PlanRefined && plan == nil &&
+		hasLabel(t.Labels, labelRefined) && !hasLabel(t.Labels, labelPlanned)
+
 	// Pickup rule 1: board state.
-	if !resuming && !hasLabel(t.Labels, "Planned") {
+	if !resuming && !planning && !hasLabel(t.Labels, "Planned") {
 		return skip("not Planned")
 	}
 	if hasLabel(t.Labels, "Working") {
@@ -189,12 +207,15 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 		return skip("multiple assignees")
 	}
 
-	// Pickup rule 3: a matching plan exists, in the status this path expects.
-	plan := planByTicket[planKey(t.Repo, t.Number)]
+	// Pickup rule 3: a matching plan exists, in the status this path expects
+	// -- except for a planning candidate, which by definition (above) has no
+	// matched plan yet and skips this check entirely rather than terminally
+	// "no plan file".
 	if plan == nil {
-		return skip("no plan file")
-	}
-	if resuming {
+		if !planning {
+			return skip("no plan file")
+		}
+	} else if resuming {
 		if plan.Status != "awaiting-input" {
 			return skip(reasonDraftNotAwaitingInput)
 		}
@@ -217,9 +238,19 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 	// mirroring CheckPlan's own awaiting-input-before-planIsStale
 	// short-circuit (watch/internal/pipeline/planfile.go:165-173): a draft
 	// that waited days on a human is almost always commits-behind, and
-	// applying this gate here would mean it could never re-resume.
-	if !resuming && plan.CommitsBehind > in.Config.PlanStalenessTolerance {
-		return skip("plan stale, re-plan")
+	// applying this gate here would mean it could never re-resume. Also
+	// skipped when planning: a planning candidate has no matched plan (nil),
+	// so there is nothing to measure staleness against. When the plan IS
+	// stale, dispatch.planRefined off keeps today's terminal skip byte-
+	// identical ("plan stale, re-plan"); on, it turns into an actionable
+	// autonomous re-plan (#828) -- replanning falls through the remaining
+	// gates instead of terminating here.
+	replanning := false
+	if !resuming && !planning && plan.CommitsBehind > in.Config.PlanStalenessTolerance {
+		if !in.Config.PlanRefined {
+			return skip("plan stale, re-plan")
+		}
+		replanning = true
 	}
 
 	// Pickup rule 5: Depends on #N dependency gate (#825). A plan written
@@ -230,7 +261,10 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 	}
 
 	// Pickup rule 6: serialize siblings — at most one child per parent active.
-	if plan.IsChild {
+	// No-ops for a planning candidate (plan == nil, #828 Q2/Risks: sibling
+	// serialization is derived from the plan file, which doesn't exist yet
+	// for a Refined-with-no-plan ticket -- documented limitation, not a bug).
+	if plan != nil && plan.IsChild {
 		if m, blocked := blockingSibling(t, plan, in, dispatchedChildByParent); blocked {
 			return skip(fmt.Sprintf("waiting on sibling #%d", m))
 		}
@@ -260,6 +294,12 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 
 	if resuming {
 		return Decision{Ticket: t, Plan: plan, Action: ActionDispatch, Resume: true, Reason: "resume — human answered", Agent: agent}
+	}
+	if planning || replanning {
+		if replanning {
+			return Decision{Ticket: t, Plan: plan, Action: ActionDispatch, Planning: true, Replan: true, Reason: "re-plan — plan stale", Agent: agent}
+		}
+		return Decision{Ticket: t, Plan: nil, Action: ActionDispatch, Planning: true, Reason: "plan — Refined, no plan file", Agent: agent}
 	}
 	return Decision{Ticket: t, Plan: plan, Action: ActionDispatch, Reason: "dispatch", Agent: agent}
 }

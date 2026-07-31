@@ -12,7 +12,10 @@ import (
 // PipelineStageGate matches DefaultConfig()'s default-on value (#732) so the
 // whole existing gate suite runs with the stage gate live; every existing
 // test ticket is StageProbeAbsent (the zero value), which always passes the
-// gate, so no existing expectation changes.
+// gate, so no existing expectation changes. PlanRefined is pinned to false
+// (#828), matching DefaultConfig()'s default-deny value, so the whole
+// existing gate suite runs with stage-aware pickup off -- every flag-on
+// behavior is opted into explicitly per test.
 func testConfig() Config {
 	return Config{
 		ConcurrencyCap:         10,
@@ -21,6 +24,7 @@ func testConfig() Config {
 		PlanStalenessTolerance: 5,
 		DefaultAgent:           "claude",
 		PipelineStageGate:      true,
+		PlanRefined:            false,
 	}
 }
 
@@ -1102,5 +1106,347 @@ func TestDecideNonInputNeededTicketIgnoresAnswersMap(t *testing.T) {
 	assertDecisions(t, got, []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
 	if got[0].Resume {
 		t.Error("a non-Input-Needed ticket must never resume, regardless of a populated Answers map")
+	}
+}
+
+// -- #828: stage-aware Refined pickup and autonomous re-plan ----------------
+
+// planningCandidateInputs is the planning-pickup happy path: one Refined
+// ticket #42 with no plan file and dispatch.planRefined enabled.
+func planningCandidateInputs() Inputs {
+	in := baseInputs()
+	in.Config.PlanRefined = true
+	in.Tickets[0].Labels = []string{"Refined"}
+	in.Plans = nil
+	return in
+}
+
+// TestDecidePlanRefinedFlagOff_RefinedNoPlanSkipsNotPlanned locks in the
+// flag-off regression: a Refined ticket with no plan must skip with exactly
+// "not Planned", byte-identical to pre-#828 behavior, even though it would be
+// a planning candidate if the flag were on.
+func TestDecidePlanRefinedFlagOff_RefinedNoPlanSkipsNotPlanned(t *testing.T) {
+	in := baseInputs()
+	in.Tickets[0].Labels = []string{"Refined"}
+	in.Plans = nil
+	// PlanRefined stays false via testConfig()'s pinned default.
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "not Planned", ""}})
+}
+
+// TestDecidePlanRefinedFlagOff_StalePlanSkipsPlanStaleRePlan locks in the
+// flag-off regression: a stale plan must still terminally skip with exactly
+// "plan stale, re-plan", byte-identical to pre-#828 behavior.
+func TestDecidePlanRefinedFlagOff_StalePlanSkipsPlanStaleRePlan(t *testing.T) {
+	in := baseInputs()
+	in.Plans[0].CommitsBehind = 10
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "plan stale, re-plan", ""}})
+}
+
+// TestDecidePlanningPickup_RefinedNoPlanDispatches covers the flag-on
+// planning-pickup happy path: Refined + no plan -> ActionDispatch,
+// Planning: true, Replan: false, Plan == nil, reason
+// "plan — Refined, no plan file".
+func TestDecidePlanningPickup_RefinedNoPlanDispatches(t *testing.T) {
+	in := planningCandidateInputs()
+
+	got := Decide(in)
+	if len(got) != 1 {
+		t.Fatalf("got %d decisions, want 1: %+v", len(got), got)
+	}
+	d := got[0]
+	if d.Action != ActionDispatch {
+		t.Fatalf("action = %q, want %q (reason %q)", d.Action, ActionDispatch, d.Reason)
+	}
+	if !d.Planning {
+		t.Error("Planning = false, want true")
+	}
+	if d.Replan {
+		t.Error("Replan = true, want false")
+	}
+	if d.Plan != nil {
+		t.Errorf("Plan = %+v, want nil", d.Plan)
+	}
+	if want := "plan — Refined, no plan file"; d.Reason != want {
+		t.Errorf("reason = %q, want %q", d.Reason, want)
+	}
+}
+
+// TestDecidePlanningPickup_RefinedWithExistingPlanUnchanged covers the Test
+// Strategy table's "Refined + an existing plan -> unchanged behavior" case:
+// a Refined ticket that lacks the Planned label is never a planning
+// candidate once a plan already exists (planning requires Plan == nil), so
+// it still skips "not Planned" exactly as before #828.
+func TestDecidePlanningPickup_RefinedWithExistingPlanUnchanged(t *testing.T) {
+	in := baseInputs()
+	in.Config.PlanRefined = true
+	in.Tickets[0].Labels = []string{"Refined"} // no Planned label; a plan file exists
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "not Planned", ""}})
+}
+
+// TestDecidePlanningPickup_RefinedPlannedNoPlanStillNoPlanFile covers the
+// Test Strategy table's "Refined + Planned + no plan -> still 'no plan
+// file'" case: the planning-candidate predicate explicitly excludes tickets
+// that already carry Planned (the Assumptions section's race-avoidance
+// rule), so this stays the reconciler's plan-invalid territory, not a
+// planning dispatch.
+func TestDecidePlanningPickup_RefinedPlannedNoPlanStillNoPlanFile(t *testing.T) {
+	in := baseInputs()
+	in.Config.PlanRefined = true
+	in.Tickets[0].Labels = []string{"Refined", "Planned"}
+	in.Plans = nil
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "no plan file", ""}})
+}
+
+// TestDecidePlanningPickup_StillGatedByEarlierBoardStateChecks covers the
+// Test Strategy table's "planning candidate still skipped by each earlier
+// gate" requirement: main-sync, Working, Blocked, open PR, the stage gate,
+// and the assignee gate all still gate a planning candidate with their
+// today's reasons.
+func TestDecidePlanningPickup_StillGatedByEarlierBoardStateChecks(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(in *Inputs)
+		want   wantDecision
+	}{
+		{
+			name:   "main sync diverged",
+			mutate: func(in *Inputs) { in.Tickets[0].MainSync = MainSyncDiverged },
+			want:   wantDecision{42, ActionSkip, "local main diverged", ""},
+		},
+		{
+			name:   "already Working",
+			mutate: func(in *Inputs) { in.Tickets[0].Labels = []string{"Refined", "Working"} },
+			want:   wantDecision{42, ActionSkip, "already Working", ""},
+		},
+		{
+			name:   "Blocked",
+			mutate: func(in *Inputs) { in.Tickets[0].Labels = []string{"Refined", "Blocked"} },
+			want:   wantDecision{42, ActionSkip, "blocked", ""},
+		},
+		{
+			name:   "open PR",
+			mutate: func(in *Inputs) { in.Tickets[0].HasOpenPR = true },
+			want:   wantDecision{42, ActionSkip, "open PR exists", ""},
+		},
+		{
+			name: "stage gate finalized",
+			mutate: func(in *Inputs) {
+				in.Tickets[0].Stage = "finalized"
+				in.Tickets[0].StageProbe = StageProbePresent
+			},
+			want: wantDecision{42, ActionSkip, "pipeline finalized (reset to re-dispatch)", ""},
+		},
+		{
+			name:   "unassigned",
+			mutate: func(in *Inputs) { in.Tickets[0].Assignees = nil },
+			want:   wantDecision{42, ActionSkip, "unassigned", ""},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			in := planningCandidateInputs()
+			tc.mutate(&in)
+			assertDecisions(t, Decide(in), []wantDecision{tc.want})
+		})
+	}
+}
+
+// TestDecidePlanningPickup_StillGatedByLaterGates covers the Test Strategy
+// table's "planning candidate still skipped by each later gate" requirement:
+// the dependency gate, daemon-unreachable, need-input pause, concurrency
+// cap, daily quota, quiet hours, and budget gates all still gate a planning
+// candidate with their today's reasons.
+func TestDecidePlanningPickup_StillGatedByLaterGates(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(in *Inputs)
+		want   wantDecision
+	}{
+		{
+			name: "dependency gate",
+			mutate: func(in *Inputs) {
+				in.Tickets[0].DependsOn = []int{100}
+				in.Tickets[0].DependencyStates = map[int]DependencyState{100: DependencyStateOpen}
+			},
+			want: wantDecision{42, ActionSkip, fmt.Sprintf(reasonDependencyWaitingFmt, 100), ""},
+		},
+		{
+			name:   "daemon unreachable",
+			mutate: func(in *Inputs) { in.Snapshot = nil },
+			want:   wantDecision{42, ActionSkip, "daemon unreachable", ""},
+		},
+		{
+			name: "need-input pause",
+			mutate: func(in *Inputs) {
+				in.Config.NeedInputThreshold = 1
+				in.Snapshot = snapshot(0, 1)
+			},
+			want: wantDecision{42, ActionSkip, "need-input pause", ""},
+		},
+		{
+			name: "concurrency cap reached",
+			mutate: func(in *Inputs) {
+				in.Config.ConcurrencyCap = 1
+				in.Snapshot = snapshot(1, 0)
+			},
+			want: wantDecision{42, ActionSkip, "concurrency cap reached", ""},
+		},
+		{
+			name: "daily quota reached",
+			mutate: func(in *Inputs) {
+				in.Config.DailyQuota = 1
+				in.Prior = 1
+			},
+			want: wantDecision{42, ActionSkip, "daily quota reached", ""},
+		},
+		{
+			name: "quiet hours",
+			mutate: func(in *Inputs) {
+				in.Config.QuietHours = &QuietHours{StartHour: 22, EndHour: 7}
+				in.Now = time.Date(2026, 7, 10, 23, 0, 0, 0, time.UTC)
+			},
+			want: wantDecision{42, ActionSkip, "quiet hours", ""},
+		},
+		{
+			name:   "budget exhausted",
+			mutate: func(in *Inputs) { in.Budgets = FloorProvider{Floors: map[string]float64{"claude": 0}} },
+			want:   wantDecision{42, ActionSkip, "budget exhausted", ""},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			in := planningCandidateInputs()
+			tc.mutate(&in)
+			assertDecisions(t, Decide(in), []wantDecision{tc.want})
+		})
+	}
+}
+
+// TestDecidePlanningPickup_CountsIntoDispatchedThisPass covers the Test
+// Strategy table's "a planning dispatch counts into dispatchedThisPass
+// (multi-ticket cap test)" requirement: a planning dispatch fills the
+// concurrency cap exactly like an ordinary dispatch.
+func TestDecidePlanningPickup_CountsIntoDispatchedThisPass(t *testing.T) {
+	in := planningCandidateInputs()
+	in.Config.ConcurrencyCap = 1
+	in.Tickets = append(in.Tickets, Ticket{Repo: "o/r", Number: 43, Labels: []string{"Refined"}, Assignees: []string{"octocat"}})
+
+	got := Decide(in)
+	if len(got) != 2 {
+		t.Fatalf("got %d decisions, want 2: %+v", len(got), got)
+	}
+	if got[0].Ticket.Number != 42 || got[0].Action != ActionDispatch || !got[0].Planning {
+		t.Fatalf("#42 = %+v, want a planning dispatch", got[0])
+	}
+	if got[1].Ticket.Number != 43 || got[1].Action != ActionSkip || got[1].Reason != "concurrency cap reached" {
+		t.Fatalf("#43 = %+v, want a concurrency-cap skip (proves the planning dispatch filled the cap)", got[1])
+	}
+}
+
+// TestDecideReplan_StalePlanFlagOnDispatches covers the flag-on autonomous
+// re-plan happy path: a stale plan with PlanRefined on -> ActionDispatch,
+// Planning: true, Replan: true, Plan != nil, reason "re-plan — plan stale".
+func TestDecideReplan_StalePlanFlagOnDispatches(t *testing.T) {
+	in := baseInputs()
+	in.Config.PlanRefined = true
+	in.Plans[0].CommitsBehind = 10 // stale: exceeds testConfig's tolerance of 5
+
+	got := Decide(in)
+	if len(got) != 1 {
+		t.Fatalf("got %d decisions, want 1: %+v", len(got), got)
+	}
+	d := got[0]
+	if d.Action != ActionDispatch {
+		t.Fatalf("action = %q, want %q (reason %q)", d.Action, ActionDispatch, d.Reason)
+	}
+	if !d.Planning || !d.Replan {
+		t.Errorf("Planning = %v, Replan = %v, want both true", d.Planning, d.Replan)
+	}
+	if d.Plan == nil {
+		t.Error("Plan = nil, want non-nil (the stale plan itself)")
+	}
+	if want := "re-plan — plan stale"; d.Reason != want {
+		t.Errorf("reason = %q, want %q", d.Reason, want)
+	}
+}
+
+// TestDecideReplan_StillBlockedByDependencyGate covers the Test Strategy
+// table's "a re-plan is still blocked by the dependency gate" ordering
+// assertion, mirroring TestDecideDependencyGate_OrderingAfterPlanFreshness:
+// with the flag ON, a stale-plan-plus-open-dependency ticket now falls
+// through rule 4 (replanning, not skipping) and is skipped by the dependency
+// gate instead, reporting the dependency reason rather than
+// "plan stale, re-plan".
+func TestDecideReplan_StillBlockedByDependencyGate(t *testing.T) {
+	in := baseInputs()
+	in.Config.PlanRefined = true
+	in.Plans[0].CommitsBehind = 10 // stale
+	in.Tickets[0].DependsOn = []int{100}
+	in.Tickets[0].DependencyStates = map[int]DependencyState{100: DependencyStateOpen}
+
+	want := fmt.Sprintf(reasonDependencyWaitingFmt, 100)
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, want, ""}})
+}
+
+// TestDecideReplan_StillBlockedBySiblingSerialization covers the Test
+// Strategy table's "a re-plan is still blocked by ... sibling serialization"
+// requirement: a stale, plan-fresh-gate-passing child ticket whose sibling
+// is active still waits on it.
+func TestDecideReplan_StillBlockedBySiblingSerialization(t *testing.T) {
+	in := baseInputs()
+	in.Config.PlanRefined = true
+	in.Tickets = []Ticket{
+		{Repo: "o/r", Number: 41, Labels: []string{"Working"}},
+		{Repo: "o/r", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
+	}
+	in.Plans = []Plan{
+		{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "planned", IsChild: true, ParentID: 40},
+		{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "planned", IsChild: true, ParentID: 40, CommitsBehind: 10},
+	}
+	assertDecisions(t, Decide(in), []wantDecision{
+		{41, ActionSkip, "not Planned", ""},
+		{42, ActionSkip, "waiting on sibling #41", ""},
+	})
+}
+
+// TestDecideReplan_StillBlockedByCapacityAndBudgetGates covers the Test
+// Strategy table's "a re-plan is still blocked by ... capacity/budget gates"
+// requirement.
+func TestDecideReplan_StillBlockedByCapacityAndBudgetGates(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(in *Inputs)
+		want   wantDecision
+	}{
+		{
+			name: "concurrency cap reached",
+			mutate: func(in *Inputs) {
+				in.Config.ConcurrencyCap = 1
+				in.Snapshot = snapshot(1, 0)
+			},
+			want: wantDecision{42, ActionSkip, "concurrency cap reached", ""},
+		},
+		{
+			name: "daily quota reached",
+			mutate: func(in *Inputs) {
+				in.Config.DailyQuota = 1
+				in.Prior = 1
+			},
+			want: wantDecision{42, ActionSkip, "daily quota reached", ""},
+		},
+		{
+			name:   "budget exhausted",
+			mutate: func(in *Inputs) { in.Budgets = FloorProvider{Floors: map[string]float64{"claude": 0}} },
+			want:   wantDecision{42, ActionSkip, "budget exhausted", ""},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			in := baseInputs()
+			in.Config.PlanRefined = true
+			in.Plans[0].CommitsBehind = 10
+			tc.mutate(&in)
+			assertDecisions(t, Decide(in), []wantDecision{tc.want})
+		})
 	}
 }

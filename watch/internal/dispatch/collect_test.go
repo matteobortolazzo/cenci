@@ -245,7 +245,7 @@ body
 	plans, err := ReadPlans("o/r", dir, func(sha string, paths []string) int {
 		pathsBySha[sha] = paths
 		return 7
-	})
+	}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,6 +270,40 @@ body
 	}
 	if got, ok := pathsBySha["bbb222"]; !ok || len(got) != 0 {
 		t.Errorf("commitsBehind for bbb222 must be called with no paths, got %v (called=%v)", got, ok)
+	}
+}
+
+// TestReadPlansLogsDroppedFiles covers #828 review fix #2: a plan file that
+// cannot be read or whose front matter cannot be parsed is still dropped
+// (unchanged behavior) but now must be logged to out by path and reason, so
+// an operator can distinguish "never planned" from "a valid plan file had a
+// transient read/parse hiccup this pass" -- otherwise indistinguishable
+// under the stage-aware planning-pickup gate, where plan == nil now triggers
+// a real dispatch rather than a no-op skip.
+func TestReadPlansLogsDroppedFiles(t *testing.T) {
+	dir := t.TempDir()
+	writePlan(t, dir, "42-unparseable.md", "no front matter here\n")
+	writePlan(t, dir, "43-good.md", `---
+ticketId: 43
+status: planned
+---
+body
+`)
+
+	var buf strings.Builder
+	plans, err := ReadPlans("o/r", dir, func(sha string, paths []string) int { return 0 }, &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("expected the unparseable file dropped and the good one kept, got %d plans: %+v", len(plans), plans)
+	}
+	if plans[0].TicketID != 43 {
+		t.Errorf("expected the surviving plan to be ticket 43, got %+v", plans[0])
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "42-unparseable.md") {
+		t.Errorf("expected the dropped file's path logged, got %q", logged)
 	}
 }
 

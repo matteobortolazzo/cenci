@@ -333,7 +333,7 @@ func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer,
 
 	var plans []Plan
 	for _, rc := range cfg.Repos {
-		ps, err := ReadPlans(rc.Repo, rc.Dir, nil)
+		ps, err := ReadPlans(rc.Repo, rc.Dir, nil, out)
 		if err != nil {
 			logf(out, "reconcile: reading plans in %s: %v\n", rc.Dir, err)
 			if collectErr == nil {

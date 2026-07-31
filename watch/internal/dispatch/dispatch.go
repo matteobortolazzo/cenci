@@ -17,6 +17,34 @@ import (
 // internal/daemon's spawn var).
 var runFn = run.Run
 
+// replanContextToken (#828) is the escape-hatch token appended to the run
+// Ticket argument for an autonomous re-plan dispatch ("<number> replan"), so
+// the dispatched implement session's --replan-requested branch
+// (flow/skills/implement/SKILL.md:116) skips Phase 1's human-confirmation
+// gate for the stale-plan branch -- an unattended session that landed on that
+// gate would hang as a Working ticket until the reconciler reaped it.
+// Literal shared across projects (#357, watch/AGENTS.md): grep both ends
+// before ever renaming it.
+const replanContextToken = "replan"
+
+// dispatchTicketArg builds the run.Opts.Ticket argument for d, per kind
+// (#828): the ordinary and resume kinds launch the matched plan file exactly
+// as before; a planning-pickup dispatch (Plan == nil) launches the bare
+// ticket number so the implement session's Phase 1 discovers there is no
+// plan yet; an autonomous re-plan (Planning && Replan, Plan != nil) appends
+// replanContextToken so the session's --replan-requested branch skips
+// Phase 1's human-confirmation gate on the stale-plan path. WindowTicket is
+// always the bare ticket number, set separately at the call site.
+func dispatchTicketArg(d Decision) string {
+	if d.Plan == nil {
+		return strconv.Itoa(d.Ticket.Number)
+	}
+	if d.Planning && d.Replan {
+		return strconv.Itoa(d.Ticket.Number) + " " + replanContextToken
+	}
+	return filepath.Join(".plans", filepath.Base(d.Plan.Path))
+}
+
 // dispatchDeps are the collected, impure inputs to a dispatch pass. Separating
 // them from RunOnce lets applyDispatch be exercised without gh or a daemon.
 type dispatchDeps struct {
@@ -71,7 +99,7 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 
 	var plans []Plan
 	for _, rc := range cfg.Repos {
-		ps, err := ReadPlans(rc.Repo, rc.Dir, nil)
+		ps, err := ReadPlans(rc.Repo, rc.Dir, nil, out)
 		if err != nil {
 			logf(out, "dispatch: reading plans in %s: %v\n", rc.Dir, err)
 			if collectErr == nil {
@@ -157,7 +185,10 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 
 	var firstErr error
 	for _, d := range decisions {
-		if d.Action != ActionDispatch || d.Plan == nil {
+		// A planning-pickup dispatch (#828) carries Plan == nil by design (no
+		// plan file exists yet) -- admit it alongside the ordinary/resume/
+		// re-plan kinds, all of which carry a non-nil Plan.
+		if d.Action != ActionDispatch || (d.Plan == nil && !d.Planning) {
 			continue
 		}
 
@@ -177,7 +208,7 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 
 		err := runFn(run.Opts{
 			Workflow:     "implement",
-			Ticket:       filepath.Join(".plans", filepath.Base(d.Plan.Path)),
+			Ticket:       dispatchTicketArg(d),
 			WindowTicket: strconv.Itoa(d.Ticket.Number),
 			Agent:        d.Agent,
 			Model:        cfg.Model,
@@ -315,6 +346,14 @@ func formatDecision(d Decision) string {
 	if d.Action == ActionDispatch && d.Plan != nil {
 		return fmt.Sprintf("%s#%d dispatch (%s, %s): %s",
 			d.Ticket.Repo, d.Ticket.Number, d.Agent, filepath.Base(d.Plan.Path), d.Reason)
+	}
+	// A planning-pickup dispatch (#828) carries Plan == nil by design -- no
+	// plan file exists yet -- so it needs its own branch rather than falling
+	// through to the skip: rendering below, which would silently break the
+	// lazyboards " dispatch " substring contract for this dispatch kind.
+	if d.Action == ActionDispatch && d.Planning {
+		return fmt.Sprintf("%s#%d dispatch (%s): %s",
+			d.Ticket.Repo, d.Ticket.Number, d.Agent, d.Reason)
 	}
 	return fmt.Sprintf("%s#%d skip: %s", d.Ticket.Repo, d.Ticket.Number, d.Reason)
 }

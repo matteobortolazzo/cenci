@@ -79,6 +79,15 @@ type Config struct {
 	// reduce dispatches, so it defaults on; set false to disable the gate
 	// entirely during rollout.
 	PipelineStageGate bool
+
+	// PlanRefined (#828) gates two stage-aware dispatch behaviors in
+	// lean-planning repos: a Refined ticket with no plan becomes a planning
+	// dispatch (`cenci run implement <n>`), and a terminal "plan stale,
+	// re-plan" skip becomes an autonomous re-plan dispatch
+	// (`cenci run implement "<n> replan"`). Defaults false (default-deny) --
+	// a pure operator assertion the dispatcher trusts rather than verifies;
+	// it never reads the repo's own planning.autonomy config.
+	PlanRefined bool
 }
 
 // DefaultConfig returns the built-in policy used when no config file (or no
@@ -120,6 +129,7 @@ type dispatchFile struct {
 	LoopEnabled            *bool                 `json:"loopEnabled"`       // pointer so absence resolves to disabled (not inferred from DaemonInterval)
 	ApplyRetryBudget       *int                  `json:"applyRetryBudget"`  // pointer so an explicit 0 is distinguishable from unset
 	PipelineStageGate      *bool                 `json:"pipelineStageGate"` // pointer so an explicit false is distinguishable from unset
+	PlanRefined            *bool                 `json:"planRefined"`       // pointer so an explicit false is distinguishable from unset
 }
 
 // LoadConfig returns the default policy with the config.json "dispatch" block
@@ -214,6 +224,9 @@ func mergeConfig(base Config, o dispatchFile) Config {
 	}
 	if o.PipelineStageGate != nil {
 		base.PipelineStageGate = *o.PipelineStageGate
+	}
+	if o.PlanRefined != nil {
+		base.PlanRefined = *o.PlanRefined
 	}
 	return base
 }
