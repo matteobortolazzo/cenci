@@ -37,12 +37,14 @@ type planCheckContract struct {
 	Errors      []string `json:"errors"`
 	Decision    string   `json:"decision"`
 	Plan        *struct {
-		Mode        string `json:"mode"`
-		Slug        string `json:"slug"`
-		TicketID    int    `json:"ticketId"`
-		IsChild     bool   `json:"isChild"`
-		IsLastChild bool   `json:"isLastChild"`
-		ParentID    int    `json:"parentId"`
+		Mode                string `json:"mode"`
+		Slug                string `json:"slug"`
+		TicketID            int    `json:"ticketId"`
+		IsChild             bool   `json:"isChild"`
+		IsLastChild         bool   `json:"isLastChild"`
+		ParentID            int    `json:"parentId"`
+		EscalationNonce     string `json:"escalationNonce"`
+		EscalationCommentID int64  `json:"escalationCommentId"`
 	} `json:"plan"`
 }
 
@@ -85,6 +87,47 @@ func gitCommitPlanFileWithStatus(t *testing.T, repoRoot, id, slug, sha, createdA
 		"planCommitSha: " + sha + "\n" +
 		"stalenessPaths: watch\n" +
 		"---\n" +
+		"## Ticket Details\nsome ticket details\n\n" +
+		"## Implementation Plan\ndo the thing\n\n" +
+		"## Architectural Context\nsome architectural context\n\n" +
+		"## Design Context\nsome design context\n"
+	path := filepath.Join(dir, id+"-"+slug+".md")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write plan file: %v", err)
+	}
+}
+
+// gitCommitPlanFileAwaitingInputWithEscalation is gitCommitPlanFileWithStatus's
+// awaiting-input variant extended with escalationNonce/escalationCommentId
+// (#849): a distinct helper rather than widening gitCommitPlanFileWithStatus's
+// signature, so every existing call site stays untouched. nonce/commentID
+// empty means "omit the key" (the absent-anchor case).
+func gitCommitPlanFileAwaitingInputWithEscalation(t *testing.T, repoRoot, id, slug, sha, createdAt, nonce, commentID string) {
+	t.Helper()
+	dir := filepath.Join(repoRoot, ".plans")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir .plans: %v", err)
+	}
+	content := "---\n" +
+		"version: 1\n" +
+		"mode: ticket\n" +
+		"ticketId: " + id + "\n" +
+		"ticketTitle: \"Some ticket\"\n" +
+		"slug: " + slug + "\n" +
+		"isChild: false\n" +
+		"isLastChild: false\n" +
+		"parentId: null\n" +
+		"createdAt: " + createdAt + "\n" +
+		"status: awaiting-input\n" +
+		"planCommitSha: " + sha + "\n" +
+		"stalenessPaths: watch\n"
+	if nonce != "" {
+		content += "escalationNonce: " + nonce + "\n"
+	}
+	if commentID != "" {
+		content += "escalationCommentId: " + commentID + "\n"
+	}
+	content += "---\n" +
 		"## Ticket Details\nsome ticket details\n\n" +
 		"## Implementation Plan\ndo the thing\n\n" +
 		"## Architectural Context\nsome architectural context\n\n" +
@@ -296,6 +339,84 @@ func TestPipelinePlanCheck_AwaitingInputStatus_DecisionExit0(t *testing.T) {
 	}
 	if c.Plan.Slug != "add-thing" || c.Plan.TicketID != 42 {
 		t.Errorf("plan metadata = %+v, want slug=add-thing ticketId=42", c.Plan)
+	}
+}
+
+// -- escalation anchor echo (#849): plan.escalationNonce/escalationCommentId
+// alongside the awaiting-input decision, at the CLI JSON surface. CheckPlan
+// echoes whatever the front matter carries verbatim (unvalidated), so both
+// present and absent front-matter values surface here without changing the
+// decision or exit code.
+
+// TestPipelinePlanCheck_AwaitingInputStatus_EscalationAnchorEchoed_PresentValid
+// covers AC5's "present" case at the CLI boundary: no fake `gh` on PATH at
+// all, proving the awaiting-input short-circuit never reaches the freshness
+// check even with the new fields set.
+func TestPipelinePlanCheck_AwaitingInputStatus_EscalationAnchorEchoed_PresentValid(t *testing.T) {
+	repoDir := t.TempDir()
+	initGitRepoWithCommitForCLITest(t, repoDir)
+	gitCommitPlanFileAwaitingInputWithEscalation(t, repoDir, "42", "add-thing", "deadbeef", "2026-07-20T20:00:00Z",
+		"0123456789abcdef0123456789abcdef", "123456789")
+
+	cmd := exec.Command(binaryPath, "pipeline", "plan-check", "42", "--repo", repoDir)
+	cmd.Env = append(os.Environ(), "PATH="+t.TempDir()) // no gh on PATH at all
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("plan-check awaiting-input with escalation anchor: unexpected error: %v\n%s", err, output)
+	}
+	var c planCheckContract
+	if jerr := json.Unmarshal(output, &c); jerr != nil {
+		t.Fatalf("stdout is not valid JSON: %v\n%s", jerr, output)
+	}
+	if c.Decision != "awaiting-input" {
+		t.Errorf("decision = %q, want awaiting-input", c.Decision)
+	}
+	if c.Plan == nil {
+		t.Fatal("plan metadata must be echoed on an awaiting-input decision")
+	}
+	if c.Plan.EscalationNonce != "0123456789abcdef0123456789abcdef" {
+		t.Errorf("plan.escalationNonce = %q, want the front-matter nonce echoed verbatim", c.Plan.EscalationNonce)
+	}
+	if c.Plan.EscalationCommentID != 123456789 {
+		t.Errorf("plan.escalationCommentId = %d, want 123456789", c.Plan.EscalationCommentID)
+	}
+}
+
+// TestPipelinePlanCheck_AwaitingInputStatus_EscalationAnchorAbsent_ZeroValuesUnaffectedDecision
+// is a non-regression confirmation (AC5's "absent fields echo zero values
+// without changing the decision or the exit code"): it is expected to PASS
+// already today, since json.Unmarshal leaves the contract's new fields at
+// their zero value when the plan's escalationNonce/escalationCommentId keys
+// are absent -- there is no new logic gap exposed by this specific case.
+func TestPipelinePlanCheck_AwaitingInputStatus_EscalationAnchorAbsent_ZeroValuesUnaffectedDecision(t *testing.T) {
+	repoDir := t.TempDir()
+	initGitRepoWithCommitForCLITest(t, repoDir)
+	gitCommitPlanFileWithStatus(t, repoDir, "42", "add-thing", "deadbeef", "2026-07-20T20:00:00Z", "awaiting-input")
+
+	cmd := exec.Command(binaryPath, "pipeline", "plan-check", "42", "--repo", repoDir)
+	cmd.Env = append(os.Environ(), "PATH="+t.TempDir())
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("plan-check awaiting-input without escalation anchor: unexpected error: %v\n%s", err, output)
+	}
+	var c planCheckContract
+	if jerr := json.Unmarshal(output, &c); jerr != nil {
+		t.Fatalf("stdout is not valid JSON: %v\n%s", jerr, output)
+	}
+	if c.Decision != "awaiting-input" {
+		t.Errorf("decision = %q, want awaiting-input (absent anchor fields must not change the decision)", c.Decision)
+	}
+	if len(c.Errors) != 0 {
+		t.Errorf("errors = %v, want none (absent anchor fields must not fail the exit code)", c.Errors)
+	}
+	if c.Plan == nil {
+		t.Fatal("plan metadata must be echoed")
+	}
+	if c.Plan.EscalationNonce != "" {
+		t.Errorf("plan.escalationNonce = %q, want empty (absent from front matter)", c.Plan.EscalationNonce)
+	}
+	if c.Plan.EscalationCommentID != 0 {
+		t.Errorf("plan.escalationCommentId = %d, want 0 (absent from front matter)", c.Plan.EscalationCommentID)
 	}
 }
 

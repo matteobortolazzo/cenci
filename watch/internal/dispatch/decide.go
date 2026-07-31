@@ -106,10 +106,17 @@ const (
 // permissive zero-value constant (types.go).
 const (
 	reasonAnswerWaiting         = "escalation still awaiting a human answer"
-	reasonAnswerNoAnchor        = "no escalation anchor found"
 	reasonAnswerUnresolved      = "escalation answer probe failed"
 	reasonAnswerProbeUnknown    = "escalation answer probe unrecognized"
 	reasonDraftNotAwaitingInput = "draft not awaiting input"
+)
+
+// Anchor-identity skip reasons (#849): resumeGateSkip's dedicated cases for
+// AnswerProbeAnchorUnset/AnswerProbeAnchorMismatch, each content-distinct
+// from reasonAnswerProbeUnknown and from each other (#446/#598).
+const (
+	reasonAnswerAnchorUnset    = "escalation anchor missing or malformed"
+	reasonAnswerAnchorMismatch = "escalation anchor comment not found or nonce mismatch"
 )
 
 // Inputs is the full, explicit input to Decide. Now is an injected clock value
@@ -161,16 +168,11 @@ func Decide(in Inputs) []Decision {
 	sort.Slice(tickets, func(i, j int) bool { return tickets[i].Number < tickets[j].Number })
 
 	// Match a plan to a ticket by (repo, ticketId) — issue numbers are only
-	// unique within a repo, so a bare ticketId would collide across repos. First
-	// wins on duplicates.
-	planByTicket := make(map[string]*Plan, len(in.Plans))
-	for i := range in.Plans {
-		p := &in.Plans[i]
-		key := planKey(p.Repo, p.TicketID)
-		if _, ok := planByTicket[key]; !ok {
-			planByTicket[key] = p
-		}
-	}
+	// unique within a repo, so a bare ticketId would collide across repos.
+	// First wins on duplicates. indexPlans is shared with RunOnce/
+	// resolveAnswerProbes (#849) so both consumers agree on exactly the same
+	// "which plan belongs to this ticket" rule.
+	planByTicket := indexPlans(in.Plans)
 
 	// Running tallies so a single pass never over-commits beyond caps, plus the
 	// per-parent record of children dispatched this pass (sibling serialization).
@@ -196,6 +198,24 @@ func Decide(in Inputs) []Decision {
 // never collide.
 func planKey(repo string, id int) string {
 	return repo + "#" + strconv.Itoa(id)
+}
+
+// indexPlans builds a plan lookup keyed by planKey(repo, ticketId), first
+// wins on duplicates (#849): shared by Decide (matching a plan to each
+// ticket in the pure gate chain) and RunOnce/resolveAnswerProbes (matching a
+// plan to look up its escalation anchor fields for the REST probe), so both
+// consumers agree on exactly the same "which plan belongs to this ticket"
+// rule.
+func indexPlans(plans []Plan) map[string]*Plan {
+	m := make(map[string]*Plan, len(plans))
+	for i := range plans {
+		p := &plans[i]
+		key := planKey(p.Repo, p.TicketID)
+		if _, ok := m[key]; !ok {
+			m[key] = p
+		}
+	}
+	return m
 }
 
 func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatchedThisPass int, dispatchedChildByParent map[string]int) Decision {
@@ -734,13 +754,15 @@ func resumeGateSkip(t Ticket, probe AnswerProbe) (string, bool) {
 		return "", false
 	case AnswerProbeWaiting:
 		return reasonAnswerWaiting, true
-	case AnswerProbeNoAnchor:
-		return reasonAnswerNoAnchor, true
 	case AnswerProbeUnresolved:
 		return reasonAnswerUnresolved, true
+	case AnswerProbeAnchorUnset:
+		return reasonAnswerAnchorUnset, true
+	case AnswerProbeAnchorMismatch:
+		return reasonAnswerAnchorMismatch, true
 	default:
 		// Unrecognized/missing AnswerProbe value: default-deny with its own
-		// distinct reason (not any of the three known reasons above) so a
+		// distinct reason (not any of the four known reasons above) so a
 		// regression collapsing this branch is caught by assertion, per
 		// #446/#598.
 		return reasonAnswerProbeUnknown, true

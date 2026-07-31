@@ -893,3 +893,147 @@ func TestCollectTickets_FixtureOmittingBody_LeavesDependencyFieldsNil(t *testing
 		}
 	}
 }
+
+// -- escalation anchor (#849): ReadPlans fills Plan.EscalationNonce/
+// EscalationCommentID from the escalationNonce/escalationCommentId
+// front-matter keys, validating nonce format (^[0-9a-f]{32}$) and comment-ID
+// parse (strconv.ParseInt base 10/64, <= 0 treated as absent); malformed ->
+// left at the zero value, never a plan-file drop.
+
+func TestReadPlans_EscalationAnchor_PresentValid_Populated(t *testing.T) {
+	dir := t.TempDir()
+	writePlan(t, dir, "42-x.md", `---
+ticketId: 42
+status: awaiting-input
+escalationNonce: 0123456789abcdef0123456789abcdef
+escalationCommentId: 123456789
+---
+body
+`)
+
+	plans, _, err := ReadPlans("o/r", dir, func(sha string, paths []string) (int, error) { return 0, nil }, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("expected 1 plan, got %d: %+v", len(plans), plans)
+	}
+	if plans[0].EscalationNonce != "0123456789abcdef0123456789abcdef" {
+		t.Errorf("EscalationNonce = %q, want the front-matter nonce", plans[0].EscalationNonce)
+	}
+	if plans[0].EscalationCommentID != 123456789 {
+		t.Errorf("EscalationCommentID = %d, want 123456789", plans[0].EscalationCommentID)
+	}
+}
+
+// TestReadPlans_EscalationAnchor_Absent_LeftZero is a non-regression
+// confirmation (matching the plan's "malformed -> left zero, never a
+// plan-file drop" requirement for the absent case too): it is expected to
+// PASS already today, since a plan file with neither key present leaves
+// both new fields at their zero value with no logic gap to expose. Kept
+// for a complete present/absent/malformed table.
+func TestReadPlans_EscalationAnchor_Absent_LeftZero(t *testing.T) {
+	dir := t.TempDir()
+	writePlan(t, dir, "42-x.md", `---
+ticketId: 42
+status: planned
+---
+body
+`)
+
+	plans, _, err := ReadPlans("o/r", dir, func(sha string, paths []string) (int, error) { return 0, nil }, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("expected 1 plan (never dropped), got %d: %+v", len(plans), plans)
+	}
+	if plans[0].EscalationNonce != "" {
+		t.Errorf("EscalationNonce = %q, want empty (absent from front matter)", plans[0].EscalationNonce)
+	}
+	if plans[0].EscalationCommentID != 0 {
+		t.Errorf("EscalationCommentID = %d, want 0 (absent from front matter)", plans[0].EscalationCommentID)
+	}
+}
+
+// TestReadPlans_EscalationAnchor_MalformedNonce_LeftZeroNeverDropped covers
+// the malformed-nonce half: a nonce not matching ^[0-9a-f]{32}$ must be
+// rejected (left at the zero value), and the plan file must still be kept
+// (never dropped) -- distinct from planfile.go's PlanMeta echo, which is
+// deliberately unvalidated; ReadPlans is a real consumer and must fail
+// closed here. Paired with a valid escalationCommentId so this test stays
+// red purely on the not-yet-wired nonce validation, not incidentally on the
+// ID.
+func TestReadPlans_EscalationAnchor_MalformedNonce_LeftZeroNeverDropped(t *testing.T) {
+	dir := t.TempDir()
+	writePlan(t, dir, "42-x.md", `---
+ticketId: 42
+status: awaiting-input
+escalationNonce: not-hex-and-wrong-length
+escalationCommentId: 42
+---
+body
+`)
+
+	plans, _, err := ReadPlans("o/r", dir, func(sha string, paths []string) (int, error) { return 0, nil }, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("expected 1 plan (never dropped despite the malformed nonce), got %d: %+v", len(plans), plans)
+	}
+	if plans[0].TicketID != 42 {
+		t.Errorf("TicketID = %d, want 42 (the rest of the plan must still parse)", plans[0].TicketID)
+	}
+	if plans[0].EscalationNonce != "" {
+		t.Errorf("EscalationNonce = %q, want empty (a malformed nonce must be rejected, not passed through)", plans[0].EscalationNonce)
+	}
+	if plans[0].EscalationCommentID != 42 {
+		t.Errorf("EscalationCommentID = %d, want the paired valid 42", plans[0].EscalationCommentID)
+	}
+}
+
+// TestReadPlans_EscalationAnchor_MalformedCommentId_LeftZeroNeverDropped
+// covers the malformed/non-positive-ID half, table-driven over the
+// documented failure modes: a non-numeric value, a negative value, and
+// zero must all resolve to the zero value (<= 0 or a parse error is treated
+// as absent per the plan's Assumptions), and the plan file must never be
+// dropped. Paired with a valid nonce so each case stays red purely on the
+// not-yet-wired ID validation, not incidentally on the nonce.
+func TestReadPlans_EscalationAnchor_MalformedCommentId_LeftZeroNeverDropped(t *testing.T) {
+	cases := []struct {
+		name      string
+		commentID string
+	}{
+		{"non-numeric", "not-a-number"},
+		{"negative", "-5"},
+		{"zero", "0"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writePlan(t, dir, "42-x.md", fmt.Sprintf(`---
+ticketId: 42
+status: awaiting-input
+escalationNonce: 0123456789abcdef0123456789abcdef
+escalationCommentId: %s
+---
+body
+`, tc.commentID))
+
+			plans, _, err := ReadPlans("o/r", dir, func(sha string, paths []string) (int, error) { return 0, nil }, io.Discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(plans) != 1 {
+				t.Fatalf("expected 1 plan (never dropped despite the malformed comment ID), got %d: %+v", len(plans), plans)
+			}
+			if plans[0].EscalationCommentID != 0 {
+				t.Errorf("EscalationCommentID = %d, want 0 (%q must resolve to absent)", plans[0].EscalationCommentID, tc.commentID)
+			}
+			if plans[0].EscalationNonce != "0123456789abcdef0123456789abcdef" {
+				t.Errorf("EscalationNonce = %q, want the paired valid nonce", plans[0].EscalationNonce)
+			}
+		})
+	}
+}

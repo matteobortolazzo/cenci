@@ -951,12 +951,6 @@ func TestDecideResumeGate(t *testing.T) {
 			wantReason: reasonAnswerWaiting,
 		},
 		{
-			name:       "probe no_anchor skips with its own distinct reason",
-			mutate:     func(in *Inputs) { in.Answers["o/r#42"] = AnswerProbeNoAnchor },
-			wantAction: ActionSkip,
-			wantReason: reasonAnswerNoAnchor,
-		},
-		{
 			name:       "probe unresolved skips with its own distinct reason",
 			mutate:     func(in *Inputs) { in.Answers["o/r#42"] = AnswerProbeUnresolved },
 			wantAction: ActionSkip,
@@ -967,6 +961,24 @@ func TestDecideResumeGate(t *testing.T) {
 			mutate:     func(in *Inputs) { delete(in.Answers, "o/r#42") },
 			wantAction: ActionSkip,
 			wantReason: reasonAnswerProbeUnknown,
+		},
+		{
+			// #849: resumeGateSkip has a dedicated case for
+			// AnswerProbeAnchorUnset, distinct from the shared switch
+			// default's reasonAnswerProbeUnknown.
+			name:       "probe anchor_unset skips with its own distinct reason (#849)",
+			mutate:     func(in *Inputs) { in.Answers["o/r#42"] = AnswerProbeAnchorUnset },
+			wantAction: ActionSkip,
+			wantReason: reasonAnswerAnchorUnset,
+		},
+		{
+			// #849: resumeGateSkip has a dedicated case for
+			// AnswerProbeAnchorMismatch, distinct from the shared switch
+			// default's reasonAnswerProbeUnknown.
+			name:       "probe anchor_mismatch skips with its own distinct reason (#849)",
+			mutate:     func(in *Inputs) { in.Answers["o/r#42"] = AnswerProbeAnchorMismatch },
+			wantAction: ActionSkip,
+			wantReason: reasonAnswerAnchorMismatch,
 		},
 		{
 			name:       "unrecognized AnswerProbe enum value hits the same switch default",
@@ -1079,6 +1091,30 @@ func TestDecideResumeGate(t *testing.T) {
 				t.Errorf("Resume = %v, want %v", d.Resume, tc.wantResume)
 			}
 		})
+	}
+}
+
+// TestDecideResumeGate_AnchorReasonsAreContentDistinct pins rule #446/#598
+// for the two #849 anchor skip reasons: reasonAnswerAnchorUnset and
+// reasonAnswerAnchorMismatch must never collapse into each other or into any
+// pre-#849 resume-gate reason.
+func TestDecideResumeGate_AnchorReasonsAreContentDistinct(t *testing.T) {
+	in := resumeInputs()
+	in.Answers["o/r#42"] = AnswerProbeAnchorUnset
+	gotUnset := Decide(in)[0].Reason
+
+	in2 := resumeInputs()
+	in2.Answers["o/r#42"] = AnswerProbeAnchorMismatch
+	gotMismatch := Decide(in2)[0].Reason
+
+	if gotUnset == gotMismatch {
+		t.Fatalf("AnswerProbeAnchorUnset and AnswerProbeAnchorMismatch produced the identical reason %q, want distinct reasons (#446)", gotUnset)
+	}
+	if gotUnset != reasonAnswerAnchorUnset {
+		t.Errorf("AnswerProbeAnchorUnset reason = %q, want %q", gotUnset, reasonAnswerAnchorUnset)
+	}
+	if gotMismatch != reasonAnswerAnchorMismatch {
+		t.Errorf("AnswerProbeAnchorMismatch reason = %q, want %q", gotMismatch, reasonAnswerAnchorMismatch)
 	}
 }
 
@@ -1707,6 +1743,7 @@ func TestDecideAutonomyGate_ReplanLeanDispatches(t *testing.T) {
 	in.Plans[0].CommitsBehind = 10 // stale
 	assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "re-plan — plan stale", "claude"}})
 }
+
 // -- #852 AC2: mixed valid and malformed dependency lines --------------------
 
 // TestDecideDependencyGate_MixedValidAndMalformedDependency_HeldWithTruncatedToken

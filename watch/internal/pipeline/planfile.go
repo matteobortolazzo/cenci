@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -107,13 +108,24 @@ type PlanCheck struct {
 // classification decision. JSON field names mirror the plan front matter's
 // own key names (Q&A #1: "echoing validated front-matter metadata (mode,
 // slug, ticketId, isChild/isLastChild/parentId) in the JSON output").
+//
+// EscalationNonce/EscalationCommentID (#849) are echo-only: unlike every
+// other field above, they are never validated here -- CheckPlan echoes
+// whatever the front matter carries (including a malformed nonce, or a
+// comment ID that fails to parse) without promoting it to ErrPlanMalformed,
+// so an awaiting-input draft with an incomplete anchor stays repairable
+// rather than becoming an unopenable plan file. Each consumer
+// (flow/skills/implement/SKILL.md, internal/dispatch) validates and fails
+// closed on its own.
 type PlanMeta struct {
-	Mode        string `json:"mode"`
-	Slug        string `json:"slug"`
-	TicketID    int    `json:"ticketId"`
-	IsChild     bool   `json:"isChild"`
-	IsLastChild bool   `json:"isLastChild"`
-	ParentID    int    `json:"parentId"`
+	Mode                string `json:"mode"`
+	Slug                string `json:"slug"`
+	TicketID            int    `json:"ticketId"`
+	IsChild             bool   `json:"isChild"`
+	IsLastChild         bool   `json:"isLastChild"`
+	ParentID            int    `json:"parentId"`
+	EscalationNonce     string `json:"escalationNonce"`
+	EscalationCommentID int64  `json:"escalationCommentId"`
 }
 
 // CheckPlan discovers, validates, and classifies the `.plans/<id>-*.md`
@@ -224,13 +236,25 @@ func parseAndValidatePlan(path, content string) (map[string]string, *PlanMeta, e
 		return nil, nil, fmt.Errorf("plan file %s: invalid slug %q: %w", path, slug, ErrPlanMalformed)
 	}
 
+	// EscalationCommentID (#849) is echoed as a parsed int64, unlike every
+	// other PlanMeta field's plain string/bool conversion -- a non-numeric
+	// value parses to 0 (never propagated as an error): this echo is
+	// deliberately unvalidated (see PlanMeta's doc comment), so a malformed
+	// value must never become ErrPlanMalformed.
+	commentID, err := strconv.ParseInt(fm["escalationCommentId"], 10, 64)
+	if err != nil {
+		commentID = 0
+	}
+
 	meta := &PlanMeta{
-		Mode:        fm["mode"],
-		Slug:        slug,
-		TicketID:    planfile.AtoiSafe(fm["ticketId"]),
-		IsChild:     fm["isChild"] == "true",
-		IsLastChild: fm["isLastChild"] == "true",
-		ParentID:    planfile.AtoiSafe(fm["parentId"]),
+		Mode:                fm["mode"],
+		Slug:                slug,
+		TicketID:            planfile.AtoiSafe(fm["ticketId"]),
+		IsChild:             fm["isChild"] == "true",
+		IsLastChild:         fm["isLastChild"] == "true",
+		ParentID:            planfile.AtoiSafe(fm["parentId"]),
+		EscalationNonce:     fm["escalationNonce"],
+		EscalationCommentID: commentID,
 	}
 	return fm, meta, nil
 }

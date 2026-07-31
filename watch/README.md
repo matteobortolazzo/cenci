@@ -550,20 +550,30 @@ root) and the gate fails open there — matching pre-#732 behavior.
 Ticket #827 teaches dispatch to auto-resume an `Input Needed` ticket (the unattended
 planner's escalation label, ticket #826) once a human answers its question, rather
 than waiting for a fresh `/cenci:implement` run to pick the draft back up manually.
+Ticket #849 hardens the anchor identity this resume depends on: rather than scanning
+the comment thread for the last comment that *looks like* an anchor, each `Input
+Needed` ticket's persisted plan front matter carries the exact identity of its own
+escalation comment — a per-escalation nonce (`escalationNonce`) plus the immutable
+numeric comment ID the REST comments API returned when the question was posted
+(`escalationCommentId`).
 
-Each pass runs a targeted, per-ticket `gh issue view <n> --json comments` probe for
-every `Input Needed` ticket — never a bulk fleet-wide read — and classifies the
-comment thread: a comment counts as a human answer iff it is positioned after the
-**last** comment containing the hidden `<!-- cenci-planner-escalation -->` anchor,
-its body — with `>`-prefixed blockquote lines stripped first (so GitHub's "Quote
-reply" copying the anchor verbatim into a reply is never misread as cenci's own
-comment) — contains no `<!-- cenci-` marker, its author login is neither
-`*[bot]` nor `app/*`, and its author association is one of `OWNER`, `MEMBER`, or
-`COLLABORATOR`. That last check is load-bearing on a public or wide-collaborator
-repo: without it, any GitHub user able to comment on an `Input Needed` issue could
-trigger an unattended `implement` planning session with broad tool access —
-`CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, and `NONE` associations are deliberately
-never authorized. See [Cenci-authored comment markers in
+Each pass runs a targeted, per-ticket REST probe for every `Input Needed` ticket —
+`gh api "repos/<owner>/<repo>/issues/<n>/comments?per_page=100" --paginate`, never a
+bulk fleet-wide read — and classifies the comment thread by exact ID: the anchor is
+the comment whose numeric `id` equals the plan's stored `escalationCommentId`, and it
+is verified by confirming its blockquote-stripped body contains the exact marker
+`<!-- cenci-planner-escalation:<escalationNonce> -->` (blockquote lines stripped
+first, so GitHub's "Quote reply" copying the marker verbatim into a reply is never
+misread as a second anchor). A comment counts as a human answer iff it is positioned
+after that verified anchor, its own body — also blockquote-stripped — contains no
+`<!-- cenci-` marker, its author login is neither `*[bot]` nor `app/*` and its
+`user.type` is not `"Bot"` (the REST API's first-class bot flag, replacing the
+pre-#849 login-shape-only heuristic), and its author association is one of `OWNER`,
+`MEMBER`, or `COLLABORATOR`. That last check is load-bearing on a public or
+wide-collaborator repo: without it, any GitHub user able to comment on an
+`Input Needed` issue could trigger an unattended `implement` planning session with
+broad tool access — `CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, and `NONE` associations
+are deliberately never authorized. See [Cenci-authored comment markers in
 `watch/docs/dispatch-reconcile.md`](docs/dispatch-reconcile.md#cenci-authored-comment-markers)
 for why every comment cenci posts must carry one of these markers.
 
@@ -593,17 +603,31 @@ owner/name#42 dispatch (claude, 42-slug.md): resume — human answered
 ```
 
 Every other probe outcome skips with its own distinct reason: `escalation still
-awaiting a human answer` (no qualifying comment yet), `no escalation anchor found`
-(the thread has no anchor at all), `escalation answer probe failed` (the `gh` call
-itself errored or returned malformed JSON), and `escalation answer probe unrecognized`
-(an internal default-deny case). `draft not awaiting input` fires when the matched
-plan's `status` isn't `awaiting-input` (e.g. it was already finalized).
+awaiting a human answer` (no qualifying comment yet), `escalation answer probe
+failed` (the `gh` call itself errored, returned malformed JSON, or its
+`--paginate` payload exceeded the probe's stdout cap), and `escalation answer
+probe unrecognized` (an internal default-deny case). Two reasons are specific to
+the anchor itself (#849): `escalation anchor missing or malformed` fires when the
+matched plan never recorded a usable `escalationNonce`/`escalationCommentId` pair
+at all (nonce failing its `^[0-9a-f]{32}$` format, or a comment ID that is absent
+or not a positive integer); `escalation anchor comment not found or nonce
+mismatch` fires when the pair is well-formed but the stored comment ID can't be
+found in the thread, or the comment at that ID doesn't carry the exact nonce
+marker. Both are fail-closed exactly like every other probe outcome — dispatch
+never repairs an anchor itself, it only reports the gap; repair is exclusively a
+human-triggered `/cenci:implement <id>` run (see `## Repair Escalation Anchor` in
+`flow/skills/implement/phases/phase-1-plan.md`). `draft not awaiting input` fires
+when the matched plan's `status` isn't `awaiting-input` (e.g. it was already
+finalized).
 
-**Bot detection is login-shape-based** (`*[bot]`/`app/*`), since `gh issue view
---json comments` exposes only `author.login`, no dedicated bot flag. A self-hosted
-automation posting under a plain user login would be misread as a human reply and
-trigger a resume — bounded impact: the flow side then finds no answers to the open
-questions and re-escalates rather than guessing.
+**Bot detection now has a real flag, not just a login-shape guess** (#849): the REST
+comments API's `user.type == "Bot"` field is checked alongside the pre-existing
+`*[bot]`/`app/*` login-shape heuristic (`gh issue view --json comments`, the
+pre-#849 call, exposed only `author.login`, no dedicated bot flag). A self-hosted
+automation posting under a plain user login with `user.type` still `"User"` would
+still be misread as a human reply and trigger a resume — bounded impact, same as
+before: the flow side then finds no answers to the open questions and re-escalates
+rather than guessing.
 
 #### Planning pickup and autonomous re-plan
 
