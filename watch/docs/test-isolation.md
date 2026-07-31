@@ -17,3 +17,9 @@ Guidance for testing code that branches on ambient process/container state (e.g.
 **Context**: `cenci close` consults `cenci babysit`'s supervisor state under `$XDG_STATE_HOME/cenci/babysit` before killing a window (#787), so a real supervisor running on the dev/CI machine can flip a close decision to a babysit skip.
 
 **Rule**: Any test asserting a `cenci close` decision must run the binary with `XDG_STATE_HOME` pointed at an empty temp directory (`close_test.go`'s `emptyStateHome(t)` helper). Isolating pre-existing tests that exercise the *un-guarded* path matters as much as isolating the new guard tests. The same reasoning applies inside `internal/daemon`, whose default guard reads the same directory — `newTestDaemon` disables it outright.
+
+## File-persisted fixture state isolation
+
+**Context**: Test fixtures that persist state to a JSON or other file and allow multiple subprocess helpers or concurrent code to read-modify-write that file can silently drop concurrent mutations when no locking is present. A last-writer-wins race is especially dangerous for negative/absence assertions ("this field must not be present"), which fail open when a concurrent mutation gets lost.
+
+**Rule**: Any test fixture that persists state to a file and has multiple helpers (re-exec'd subprocesses, goroutines, async operations) read-modify-write that file must use explicit file-level locking during the load-mutate-save cycle. Use `syscall.Flock` on a sibling `.lock` file (see `chainfake_test.go`'s `withChainWorldLock` pattern for a reference implementation) to serialize access. Without locking, concurrent `gh` calls (e.g., `CollectTickets` querying multiple repos), dispatcher/pipeline/babysit independent invocations, or future refactors that add concurrency will silently lose updates and make assertions pass when they should fail (#855).
