@@ -921,7 +921,17 @@ merge a PR itself, once every one of these holds on a given tick:
   `~/.config/cenci/config.json` (default `false` — off everywhere until set).
 - Every issue the PR closes carries the `automerge:ok` label — a human grant made
   at refinement time, per-ticket, with no repo-level default.
-- CI is green, no CI repair is in flight, and no review feedback is pending.
+- CI is green, no CI repair is in flight, and no review feedback is pending —
+  resolution is GitHub-authoritative, not push-based: a pushed commit no longer
+  clears feedback by itself. An inline comment thread clears only when GitHub
+  reports it `isResolved`; a `CHANGES_REQUESTED` review clears only when it's
+  `DISMISSED` or the reviewer's latest effective review is `APPROVED`.
+- Any review-feedback state babysit can't positively confirm holds automerge
+  under its own reason: unreadable (API/parse failure), truncated (incomplete
+  pagination), unknown (GitHub stopped reporting the item, or reported an
+  unrecognized review state), or unsupported (a feedback key type babysit
+  doesn't recognize). An item GitHub stops reporting at all — deleted comment,
+  purged thread — holds indefinitely; merge it manually.
 - The PR is not a draft and GitHub reports it `MERGEABLE`.
 - The diff stays within the supervised repo's `.cenci/config.json` `automerge`
   policy block (`protectedPaths`, `maxChangedFiles`, `maxDiffLines`, `mergeMethod`)

@@ -20,14 +20,22 @@ import (
 // must be caught by a content-specific test assertion, not a bare
 // true/false check.
 const (
-	reasonAutomergeDisabled     = "automerge disabled (fleet config)"
-	reasonNoClosingIssue        = "PR closes no issue"
-	reasonLabelUnreadable       = "closing issue labels unreadable"
-	reasonLabelMissing          = "ticket lacks automerge:ok"
-	reasonNoChecks              = "no CI checks reported"
-	reasonCINotGreen            = "CI not green"
-	reasonRepairPending         = "CI repair pending"
-	reasonReviewPending         = "review feedback pending"
+	reasonAutomergeDisabled = "automerge disabled (fleet config)"
+	reasonNoClosingIssue    = "PR closes no issue"
+	reasonLabelUnreadable   = "closing issue labels unreadable"
+	reasonLabelMissing      = "ticket lacks automerge:ok"
+	reasonNoChecks          = "no CI checks reported"
+	reasonCINotGreen        = "CI not green"
+	reasonRepairPending     = "CI repair pending"
+	reasonReviewPending     = "review feedback pending"
+	// The four #850 feedback-hold reasons: distinct from reasonReviewPending
+	// (an ordinary, resolvable hold) because none of these states can ever
+	// resolve on their own -- an unreadable/truncated/unknown/unsupported
+	// feedback state holds automerge indefinitely and needs a human merge.
+	reasonFeedbackUnreadable    = "review feedback state unreadable"
+	reasonFeedbackTruncated     = "review feedback state truncated"
+	reasonReviewStateUnknown    = "review feedback state unknown"
+	reasonFeedbackUnsupported   = "unsupported review feedback type"
 	reasonDraft                 = "PR is a draft"
 	reasonMergeableUnknown      = "mergeable state unknown"
 	reasonNotMergeable          = "PR not mergeable"
@@ -128,6 +136,17 @@ type automergeInputs struct {
 
 	RepairPending bool
 	PendingKeys   []string
+	// FeedbackHold is reconcilePendingFeedback's verdict (#850): one of the
+	// four feedback-hold reason constants when GitHub's review-feedback state
+	// is unreadable, truncated, unknown, or unsupported, "" when clean. It is
+	// checked after RepairPending and before len(PendingKeys) so a fail-
+	// closed feedback state never masquerades as the ordinary
+	// reasonReviewPending hold. FeedbackDetail is the raw, unsanitized
+	// diagnostic string -- like LabelsErr/PolicyErr/AllowedMethodsErr below,
+	// it is sanitized exactly once, inside evaluateAutomerge, not at this
+	// struct's construction site.
+	FeedbackHold   string
+	FeedbackDetail string
 
 	IsDraft   bool
 	Mergeable string
@@ -204,9 +223,17 @@ func evaluateAutomerge(in automergeInputs) automergeDecision {
 	}
 	pass("ci")
 
-	// 4. !RepairPending && len(PendingKeys) == 0.
+	// 4. !RepairPending && no feedback hold && len(PendingKeys) == 0.
 	if in.RepairPending {
 		return fail("review", reasonRepairPending)
+	}
+	// #850: FeedbackHold is checked before the ordinary PendingKeys check so
+	// an unreadable/truncated/unknown/unsupported feedback state is never
+	// collapsed into the resolvable reasonReviewPending hold.
+	if in.FeedbackHold != "" {
+		d := fail("review", in.FeedbackHold)
+		d.Detail = sanitizeDetail(in.FeedbackDetail)
+		return d
 	}
 	if len(in.PendingKeys) != 0 {
 		return fail("review", reasonReviewPending)
@@ -674,21 +701,30 @@ func mergeMethodFlag(method string) string {
 // zero-valued) shows every earlier stage already passed -- so a PR held by
 // an earlier stage (disabled, unlabeled, CI not green, review pending, not
 // mergeable, no/truncated diff) costs zero extra `gh` calls beyond the
-// labels fetch. It logs exactly one decision line and persists it onto s for
-// the detached supervisor (whose cmd.Stdout is nil). It returns whether a
-// merge was actually issued this tick, so tick can reset the backoff delay.
-func runAutomerge(s *State, pr prView, checks []check) bool {
+// labels fetch. verdict is reconcilePendingFeedback's already-computed
+// result (#850): tick calls reconcilePendingFeedback once, unconditionally,
+// at the end of tick -- after the reviews loop and after this tick's new
+// keys are appended -- immediately before calling runAutomerge, so
+// s.PendingKeys already reflects GitHub-authoritative resolution by the time
+// runAutomerge reads it below. There is deliberately no second re-fetch
+// inside runAutomerge (that is #854's scope). It logs exactly one decision
+// line and persists it onto s for the detached supervisor (whose
+// cmd.Stdout is nil). It returns whether a merge was actually issued this
+// tick, so tick can reset the backoff delay.
+func runAutomerge(s *State, pr prView, checks []check, verdict feedbackVerdict) bool {
 	in := automergeInputs{
-		Enabled:       loadFleetEnabled(),
-		CIStatus:      ciStatus(checks),
-		RepairPending: s.RepairPending,
-		PendingKeys:   s.PendingKeys,
-		IsDraft:       pr.IsDraft,
-		Mergeable:     pr.Mergeable,
-		HeadRefOID:    pr.HeadRefOID,
-		ChangedFiles:  pr.ChangedFiles,
-		Additions:     pr.Additions,
-		Deletions:     pr.Deletions,
+		Enabled:        loadFleetEnabled(),
+		CIStatus:       ciStatus(checks),
+		RepairPending:  s.RepairPending,
+		PendingKeys:    s.PendingKeys,
+		FeedbackHold:   verdict.Hold,
+		FeedbackDetail: verdict.Detail,
+		IsDraft:        pr.IsDraft,
+		Mergeable:      pr.Mergeable,
+		HeadRefOID:     pr.HeadRefOID,
+		ChangedFiles:   pr.ChangedFiles,
+		Additions:      pr.Additions,
+		Deletions:      pr.Deletions,
 	}
 	for _, i := range pr.ClosingIssuesReferences {
 		in.ClosingIssues = append(in.ClosingIssues, i.Number)
