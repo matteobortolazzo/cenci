@@ -60,3 +60,6 @@ actions:
       type: shell,
       command: 'tmux new-window -n sync "cenci open -- ''/sync''"',
     }
+
+# Auto-close a card's agent window when its ticket closes
+cleanup: "cenci close {number}"
