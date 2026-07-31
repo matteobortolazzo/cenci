@@ -10,9 +10,19 @@ package planfile
 import (
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 )
+
+// commitShaPattern constrains sha before it reaches `git rev-list --count
+// <sha>..<ref>`: a value starting with `-` could otherwise be parsed as a
+// git option instead of a revision. Mirrors pipeline/planfile.go's own
+// planCommitShaPattern exactly (same field, same front-matter source,
+// same semantics) -- kept as its own unexported constant here rather than
+// imported cross-package, since pipeline already validates the field before
+// calling CommitsBehind and this package must not import pipeline.
+var commitShaPattern = regexp.MustCompile(`^[0-9a-fA-F]{7,40}$`)
 
 // ParseFrontMatter reads the leading `---`-delimited block as flat key: value
 // scalars (no yaml dependency). It returns false when no front matter is
@@ -71,10 +81,15 @@ func SplitPaths(s string) []string {
 	return paths
 }
 
-// CommitsBehind counts default-branch commits since sha. With paths it
-// counts only commits touching them (`rev-list -- <paths>`), so unrelated
-// monorepo churn cannot mark a scoped plan stale; without paths it keeps the
-// whole-repo count.
+// CommitsBehind counts default-branch commits since sha, against local HEAD.
+// With paths it counts only commits touching them (`rev-list -- <paths>`),
+// so unrelated monorepo churn cannot mark a scoped plan stale; without paths
+// it keeps the whole-repo count.
+//
+// A thin ref="HEAD" wrapper around CommitsBehindRef (#851) -- kept as its
+// own function rather than inlined at every call site because
+// pipeline/planfile.go:276 also calls it and must not have its signature
+// changed by this ticket.
 //
 // A git failure (unreachable sha, shallow clone, corrupted worktree,
 // transient error) is propagated rather than swallowed to 0 -- callers that
@@ -83,13 +98,38 @@ func SplitPaths(s string) []string {
 // Callers that only display the count (e.g. internal/dispatch's ReadPlans)
 // may choose to ignore the returned error and degrade gracefully.
 func CommitsBehind(dir, sha string, paths []string) (int, error) {
-	args := []string{"-C", dir, "rev-list", "--count", sha + "..HEAD"}
+	return CommitsBehindRef(dir, sha, "HEAD", paths)
+}
+
+// CommitsBehindRef counts default-branch commits since sha, scoped to an
+// arbitrary ref rather than hardcoded to HEAD (#851): dispatch's dry-run pass
+// needs to compute staleness against the fetched origin/main blob when a
+// fast-forward is pending, without ever mutating local HEAD to do so. With
+// paths it counts only commits touching them (`rev-list -- <paths>`), so
+// unrelated monorepo churn cannot mark a scoped plan stale; without paths it
+// keeps the whole-repo count.
+//
+// A git failure (unreachable sha/ref, shallow clone, corrupted worktree,
+// transient error) is propagated rather than swallowed to 0 -- see
+// CommitsBehind's own doc comment above for the full rationale.
+//
+// sha is validated against commitShaPattern before it ever reaches git argv
+// construction: a value beginning with `-` (e.g. "--upload-pack=x") would
+// otherwise be interpreted as a git option rather than a revision, since sha
+// comes straight from a `.plans/<id>-*.md` file's untrusted front matter. An
+// empty sha skips validation (matching pipeline/planfile.go's own
+// planIsStale guard exactly) and is passed through to git as before.
+func CommitsBehindRef(dir, sha, ref string, paths []string) (int, error) {
+	if sha != "" && !commitShaPattern.MatchString(sha) {
+		return 0, fmt.Errorf("invalid planCommitSha %q: must match %s", sha, commitShaPattern.String())
+	}
+	args := []string{"-C", dir, "rev-list", "--count", sha + ".." + ref}
 	if len(paths) > 0 {
 		args = append(append(args, "--"), paths...)
 	}
 	out, err := exec.Command("git", args...).Output()
 	if err != nil {
-		return 0, fmt.Errorf("git rev-list --count %s..HEAD: %w", sha, err)
+		return 0, fmt.Errorf("git rev-list --count %s..%s: %w", sha, ref, err)
 	}
 	return AtoiSafe(strings.TrimSpace(string(out))), nil
 }

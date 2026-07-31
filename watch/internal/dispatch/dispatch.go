@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/matteobortolazzo/cenci/watch/internal/planfile"
 	"github.com/matteobortolazzo/cenci/watch/internal/run"
 	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
 )
@@ -57,6 +58,11 @@ type dispatchDeps struct {
 	// every `Input Needed` ticket this pass (#827), resolved by
 	// resolveAnswerProbes (resume.go) before applyDispatch/Decide ever run.
 	Answers map[string]AnswerProbe
+
+	// RepoAutonomy maps repo -> the resolved RepoAutonomy for that repo this
+	// pass (#851), resolved by probeRepoAutonomies before applyDispatch/
+	// Decide ever run -- threaded straight through to Inputs.RepoAutonomy.
+	RepoAutonomy map[string]RepoAutonomy
 }
 
 // RunOnce gathers inputs (tickets, plans, snapshot, clock), runs the pure
@@ -79,7 +85,13 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 	// map and never syncs, so a fetch+merge never runs twice per pass.
 	syncs := syncMains(cfg.Repos, out, dryRun)
 
-	tickets, err := CollectTickets(cfg.Repos, syncs, true, out)
+	// Repo-autonomy probe (#851): reads each repo's committed
+	// `planning.autonomy` at its own resolved FreshRef (from syncs above),
+	// so a Refined planning pickup or autonomous re-plan can no longer be
+	// authorized by dispatch.planRefined alone.
+	autonomies := probeRepoAutonomies(cfg.Repos, syncs, out)
+
+	tickets, err := CollectTickets(cfg.Repos, syncStatuses(syncs), true, out)
 	if err != nil {
 		logf(out, "dispatch: collecting tickets: %v\n", err)
 	}
@@ -97,17 +109,9 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 		}
 	}
 
-	var plans []Plan
-	for _, rc := range cfg.Repos {
-		ps, err := ReadPlans(rc.Repo, rc.Dir, nil, out)
-		if err != nil {
-			logf(out, "dispatch: reading plans in %s: %v\n", rc.Dir, err)
-			if collectErr == nil {
-				collectErr = err
-			}
-			continue
-		}
-		plans = append(plans, ps...)
+	plans, err := readPlansForRepos(cfg.Repos, syncs, out)
+	if err != nil && collectErr == nil {
+		collectErr = err
 	}
 
 	snap, _ := ReadSnapshot(watch.DefaultSocketPath()) // nil on error ⇒ Decide skips safely
@@ -123,14 +127,61 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 	answers := resolveAnswerProbes(tickets, out)
 
 	decisions, applyErr := applyDispatch(cfg, dispatchDeps{
-		Tickets:     tickets,
-		Plans:       plans,
-		Snapshot:    snap,
-		Now:         time.Now(),
-		CurrentUser: currentUser,
-		Answers:     answers,
+		Tickets:      tickets,
+		Plans:        plans,
+		Snapshot:     snap,
+		Now:          time.Now(),
+		CurrentUser:  currentUser,
+		Answers:      answers,
+		RepoAutonomy: autonomies,
 	}, ctrl, mut, dryRun, out, prior)
 	return decisions, firstNonNil(collectErr, applyErr)
+}
+
+// readPlansForRepos reads every repo's .plans directory (#851), extracted
+// from RunOnce's own inline loop so it can be exercised directly against a
+// real temp repo (the dry-run/real-pass parity test at this seam). Each
+// repo's commitsBehind closure is FreshRef-aware: when a repo's resolved
+// FreshRef (from syncs, the syncMains map) is "HEAD" (the common case), nil
+// is passed through -- ReadPlans' existing default wiring already reads
+// planfile.CommitsBehind against local HEAD. Otherwise (the dry-run
+// strictly-behind fast-forward-pending case, FreshRef == "origin/main"), the
+// closure scopes the read to that ref via planfile.CommitsBehindRef, so
+// dry-run's staleness computation matches the fetched blob the subsequent
+// real pass would consume, rather than stale local HEAD. A repo absent from
+// syncs (should not happen via RunOnce's own wiring, but defensive) falls
+// back to "HEAD".
+func readPlansForRepos(repos []RepoConfig, syncs map[string]mainSyncResult, out io.Writer) ([]Plan, error) {
+	var plans []Plan
+	var firstErr error
+	for _, rc := range repos {
+		ref := "HEAD"
+		if s, ok := syncs[rc.Repo]; ok && s.FreshRef != "" {
+			ref = s.FreshRef
+		}
+		var commitsBehind func(sha string, paths []string) int
+		if ref != "HEAD" {
+			dir, refCopy, repo := rc.Dir, ref, rc.Repo
+			commitsBehind = func(sha string, paths []string) int {
+				n, err := planfile.CommitsBehindRef(dir, sha, refCopy, paths)
+				if err != nil {
+					logf(out, "dispatch: commits-behind check failed for repo %s @ %s: %v\n", repo, refCopy, err)
+					return 0
+				}
+				return n
+			}
+		}
+		ps, err := ReadPlans(rc.Repo, rc.Dir, commitsBehind, out)
+		if err != nil {
+			logf(out, "dispatch: reading plans in %s: %v\n", rc.Dir, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		plans = append(plans, ps...)
+	}
+	return plans, firstErr
 }
 
 // applyDispatch runs the pure engine over already-collected deps, logs, spawns
@@ -155,15 +206,16 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 	}
 
 	decisions := Decide(Inputs{
-		Tickets:     deps.Tickets,
-		Plans:       deps.Plans,
-		Snapshot:    deps.Snapshot,
-		Budgets:     buildBudgetProvider(cfg, deps.Now),
-		Now:         deps.Now,
-		Prior:       priorVal,
-		CurrentUser: deps.CurrentUser,
-		Config:      cfg,
-		Answers:     deps.Answers,
+		Tickets:      deps.Tickets,
+		Plans:        deps.Plans,
+		Snapshot:     deps.Snapshot,
+		Budgets:      buildBudgetProvider(cfg, deps.Now),
+		Now:          deps.Now,
+		Prior:        priorVal,
+		CurrentUser:  deps.CurrentUser,
+		Config:       cfg,
+		Answers:      deps.Answers,
+		RepoAutonomy: deps.RepoAutonomy,
 	})
 
 	// Surface the pinned model in the same log stream as the decision table so

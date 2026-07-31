@@ -69,9 +69,15 @@ func TestSyncMain_BehindOrigin_FastForwardsAndReportsSynced(t *testing.T) {
 	commitFile(t, origin, "advance.txt", "advance")
 	originHEAD := gitTest(t, origin, "rev-parse", "HEAD")
 
-	status, _ := syncMain(local, false)
-	if status != MainSyncSynced {
-		t.Fatalf("status = %q, want MainSyncSynced", status)
+	result := syncMain(local, false)
+	if result.Status != MainSyncSynced {
+		t.Fatalf("status = %q, want MainSyncSynced", result.Status)
+	}
+	// #851: a real (non-dry-run) strictly-behind pass merges into local HEAD,
+	// so subsequent reads (staleness, config) must consult HEAD itself, not
+	// the fetched origin/main blob -- that's reserved for the dry-run branch.
+	if result.FreshRef != "HEAD" {
+		t.Errorf("FreshRef = %q, want %q (a real strictly-behind pass reads against the post-fast-forward local HEAD)", result.FreshRef, "HEAD")
 	}
 	if got := gitTest(t, local, "rev-parse", "HEAD"); got != originHEAD {
 		t.Errorf("local HEAD = %s, want it fast-forwarded to origin HEAD %s", got, originHEAD)
@@ -84,9 +90,9 @@ func TestSyncMain_EqualToOrigin_ReportsSynced(t *testing.T) {
 	mainSyncGitEnv(t)
 	local, _ := initOriginAndLocal(t)
 
-	status, _ := syncMain(local, false)
-	if status != MainSyncSynced {
-		t.Fatalf("status = %q, want MainSyncSynced", status)
+	result := syncMain(local, false)
+	if result.Status != MainSyncSynced {
+		t.Fatalf("status = %q, want MainSyncSynced", result.Status)
 	}
 }
 
@@ -99,9 +105,14 @@ func TestSyncMain_LocalAheadOfOrigin_ReportsSyncedHeadUnchanged(t *testing.T) {
 	commitFile(t, local, "ahead.txt", "local ahead")
 	beforeHEAD := gitTest(t, local, "rev-parse", "HEAD")
 
-	status, _ := syncMain(local, false)
-	if status != MainSyncSynced {
-		t.Fatalf("status = %q, want MainSyncSynced", status)
+	result := syncMain(local, false)
+	if result.Status != MainSyncSynced {
+		t.Fatalf("status = %q, want MainSyncSynced", result.Status)
+	}
+	// #851: local-ahead is not the dry-run-strictly-behind branch, so it
+	// always reads against local HEAD.
+	if result.FreshRef != "HEAD" {
+		t.Errorf("FreshRef = %q, want %q (local-ahead reads against local HEAD)", result.FreshRef, "HEAD")
 	}
 	if got := gitTest(t, local, "rev-parse", "HEAD"); got != beforeHEAD {
 		t.Errorf("local HEAD = %s, want unchanged %s (local-ahead must be a no-op)", got, beforeHEAD)
@@ -118,9 +129,9 @@ func TestSyncMain_BothSidesMoved_ReportsDivergedHeadUnchanged(t *testing.T) {
 	commitFile(t, origin, "origin-only.txt", "origin change")
 	beforeHEAD := gitTest(t, local, "rev-parse", "HEAD")
 
-	status, _ := syncMain(local, false)
-	if status != MainSyncDiverged {
-		t.Fatalf("status = %q, want MainSyncDiverged", status)
+	result := syncMain(local, false)
+	if result.Status != MainSyncDiverged {
+		t.Fatalf("status = %q, want MainSyncDiverged", result.Status)
 	}
 	if got := gitTest(t, local, "rev-parse", "HEAD"); got != beforeHEAD {
 		t.Errorf("local HEAD = %s, want unchanged %s (a diverged repo must never be mutated)", got, beforeHEAD)
@@ -139,12 +150,12 @@ func TestSyncMain_OriginUnresolvable_ReportsFetchFailedDistinctFromDivergedAndFa
 	commitFile(t, local, "base.txt", "base")
 	gitTest(t, local, "remote", "add", "origin", filepath.Join(t.TempDir(), "does-not-exist"))
 
-	status, _ := syncMain(local, false)
-	if status != MainSyncFetchFailed {
-		t.Fatalf("status = %q, want MainSyncFetchFailed", status)
+	result := syncMain(local, false)
+	if result.Status != MainSyncFetchFailed {
+		t.Fatalf("status = %q, want MainSyncFetchFailed", result.Status)
 	}
-	if status == MainSyncDiverged || status == MainSyncFailed {
-		t.Fatalf("MainSyncFetchFailed must not collapse into Diverged or Failed, got %q", status)
+	if result.Status == MainSyncDiverged || result.Status == MainSyncFailed {
+		t.Fatalf("MainSyncFetchFailed must not collapse into Diverged or Failed, got %q", result.Status)
 	}
 }
 
@@ -161,33 +172,56 @@ func TestSyncMain_DirtyTrackedFileBlocksFastForward_ReportsFailedNotDivergedOrSy
 		t.Fatal(err)
 	}
 
-	status, _ := syncMain(local, false)
-	if status != MainSyncFailed {
-		t.Fatalf("status = %q, want MainSyncFailed", status)
+	result := syncMain(local, false)
+	if result.Status != MainSyncFailed {
+		t.Fatalf("status = %q, want MainSyncFailed", result.Status)
 	}
-	if status == MainSyncDiverged || status == MainSyncSynced {
-		t.Fatalf("a dirty-tree-blocked fast-forward must not collapse into Diverged or Synced, got %q", status)
+	if result.Status == MainSyncDiverged || result.Status == MainSyncSynced {
+		t.Fatalf("a dirty-tree-blocked fast-forward must not collapse into Diverged or Synced, got %q", result.Status)
 	}
 }
 
 // TestSyncMain_NonRepoDir_ReportsFailed covers plan test 7 (Q1): a plain
-// non-repo temp dir must report MainSyncFailed.
+// non-repo temp dir (one that exists on disk, so the #851 os.Stat precheck
+// passes) must report MainSyncFailed -- distinct from a configured dir that
+// does not exist on disk at all (MainSyncMissing, tested separately below).
 func TestSyncMain_NonRepoDir_ReportsFailed(t *testing.T) {
 	mainSyncGitEnv(t)
 	dir := t.TempDir()
 
-	status, _ := syncMain(dir, false)
-	if status != MainSyncFailed {
-		t.Fatalf("status = %q, want MainSyncFailed", status)
+	result := syncMain(dir, false)
+	if result.Status != MainSyncFailed {
+		t.Fatalf("status = %q, want MainSyncFailed", result.Status)
 	}
 }
 
-// TestSyncMain_FeatureBranchCheckedOut_SkipsWithoutTouchingMainOrFeatureHEAD
-// covers plan test 8 (Q2): a repo with a feature branch checked out while
-// origin/main advances must be skipped entirely -- never fast-forward the
-// wrong branch -- and neither the local `main` ref nor the checked-out
-// feature branch's HEAD may move.
-func TestSyncMain_FeatureBranchCheckedOut_SkipsWithoutTouchingMainOrFeatureHEAD(t *testing.T) {
+// TestSyncMain_ConfiguredDirAbsentFromDisk_ReportsMissing covers #851's new
+// os.Stat precheck: a configured (non-empty) Dir that does not exist on disk
+// at all must report the new gated MainSyncMissing -- distinct from
+// MainSyncFailed (a real, existing dir that merely isn't a git repo, tested
+// above) and distinct from the ungated MainSyncSkipped zero value reserved
+// for dir == "" (no Dir configured at all, tested below).
+func TestSyncMain_ConfiguredDirAbsentFromDisk_ReportsMissing(t *testing.T) {
+	mainSyncGitEnv(t)
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "does-not-exist-on-disk")
+
+	result := syncMain(dir, false)
+	if result.Status != MainSyncMissing {
+		t.Fatalf("status = %q, want MainSyncMissing", result.Status)
+	}
+	if result.Status == MainSyncFailed || result.Status == MainSyncSkipped {
+		t.Fatalf("a configured-but-absent dir must not collapse into MainSyncFailed or the ungated MainSyncSkipped zero value, got %q", result.Status)
+	}
+}
+
+// TestSyncMain_FeatureBranchCheckedOut_ReportsNotMainWithoutTouchingMainOrFeatureHEAD
+// covers plan test 8 (Q2) as updated by #851: a repo with a feature branch
+// checked out while origin/main advances must report the new gated
+// MainSyncNotMain (previously the ungated MainSyncSkipped) -- never
+// fast-forward the wrong branch -- and neither the local `main` ref nor the
+// checked-out feature branch's HEAD may move.
+func TestSyncMain_FeatureBranchCheckedOut_ReportsNotMainWithoutTouchingMainOrFeatureHEAD(t *testing.T) {
 	mainSyncGitEnv(t)
 	local, origin := initOriginAndLocal(t)
 	gitTest(t, local, "checkout", "-b", "feature")
@@ -195,9 +229,9 @@ func TestSyncMain_FeatureBranchCheckedOut_SkipsWithoutTouchingMainOrFeatureHEAD(
 	mainRefBefore := gitTest(t, local, "rev-parse", "main")
 	commitFile(t, origin, "advance.txt", "advance")
 
-	status, _ := syncMain(local, false)
-	if status != MainSyncSkipped {
-		t.Fatalf("status = %q, want MainSyncSkipped", status)
+	result := syncMain(local, false)
+	if result.Status != MainSyncNotMain {
+		t.Fatalf("status = %q, want MainSyncNotMain", result.Status)
 	}
 	if got := gitTest(t, local, "rev-parse", "main"); got != mainRefBefore {
 		t.Errorf("local main ref = %s, want unchanged %s (no wrong-branch fast-forward)", got, mainRefBefore)
@@ -207,18 +241,24 @@ func TestSyncMain_FeatureBranchCheckedOut_SkipsWithoutTouchingMainOrFeatureHEAD(
 	}
 }
 
-// TestSyncMain_DetachedHEAD_ReportsSkippedNotFailed covers plan test 9: a
-// detached HEAD in a real repo is a Skipped case (the dir IS a repo, it just
-// isn't on main), distinct from the non-repo-dir MainSyncFailed case (test 7).
-func TestSyncMain_DetachedHEAD_ReportsSkippedNotFailed(t *testing.T) {
+// TestSyncMain_DetachedHEAD_ReportsDetachedNotFailed covers plan test 9 as
+// updated by #851: a detached HEAD in a real repo now reports the new gated
+// MainSyncDetached (previously the ungated MainSyncSkipped) -- the dir IS a
+// repo, it just isn't on main -- distinct from the non-repo-dir
+// MainSyncFailed case (test 7) and from the feature-branch MainSyncNotMain
+// case above.
+func TestSyncMain_DetachedHEAD_ReportsDetachedNotFailed(t *testing.T) {
 	mainSyncGitEnv(t)
 	local, _ := initOriginAndLocal(t)
 	sha := gitTest(t, local, "rev-parse", "HEAD")
 	gitTest(t, local, "checkout", "--detach", sha)
 
-	status, _ := syncMain(local, false)
-	if status != MainSyncSkipped {
-		t.Fatalf("status = %q, want MainSyncSkipped (detached HEAD, not Failed)", status)
+	result := syncMain(local, false)
+	if result.Status != MainSyncDetached {
+		t.Fatalf("status = %q, want MainSyncDetached (detached HEAD, not Failed or NotMain)", result.Status)
+	}
+	if result.Status == MainSyncNotMain {
+		t.Fatalf("detached HEAD must not collapse into MainSyncNotMain -- distinct checkout-state classes, got %q", result.Status)
 	}
 }
 
@@ -226,6 +266,12 @@ func TestSyncMain_DetachedHEAD_ReportsSkippedNotFailed(t *testing.T) {
 // TestProbeStage_EmptyDir_NeverProbes_NoCwdRelativeRead, collect_test.go):
 // dir=="" must skip entirely rather than resolve a repo root from the
 // daemon's own cwd, even when the cwd IS a real repo behind its origin.
+//
+// #851: dir=="" is the deliberately preserved exception that stays the
+// ungated MainSyncSkipped zero value ("no sync attempted at all" -- no Dir
+// was configured for this repo), distinct from the new gated
+// MainSyncMissing (a configured, non-empty Dir that is absent from disk,
+// tested by TestSyncMain_ConfiguredDirAbsentFromDisk_ReportsMissing above).
 func TestSyncMain_EmptyDir_NeverProbesCwd(t *testing.T) {
 	mainSyncGitEnv(t)
 	local, origin := initOriginAndLocal(t)
@@ -241,9 +287,12 @@ func TestSyncMain_EmptyDir_NeverProbesCwd(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chdir(origWd) })
 
-	status, _ := syncMain("", false)
-	if status != MainSyncSkipped {
-		t.Fatalf("status = %q, want MainSyncSkipped -- dir=\"\" must never probe/sync", status)
+	result := syncMain("", false)
+	if result.Status != MainSyncSkipped {
+		t.Fatalf("status = %q, want MainSyncSkipped -- dir=\"\" must never probe/sync", result.Status)
+	}
+	if result.Status == MainSyncMissing {
+		t.Fatalf("dir==\"\" must not collapse into MainSyncMissing -- that state is reserved for a configured-but-absent dir, got %q", result.Status)
 	}
 	if got := gitTest(t, local, "rev-parse", "HEAD"); got != beforeHEAD {
 		t.Errorf("cwd repo HEAD = %s, want unchanged %s -- dir=\"\" must never mutate the cwd repo", got, beforeHEAD)
@@ -253,16 +302,22 @@ func TestSyncMain_EmptyDir_NeverProbesCwd(t *testing.T) {
 // TestSyncMain_DryRun_ReportsSyncedWithoutMutatingHead covers plan test 11:
 // dryRun=true still fetches and classifies (an accurate gate needs the fetch)
 // but must never run the merge -- HEAD stays put even though the outcome
-// reported is the would-be-synced status.
+// reported is the would-be-synced status. #851: the dry-run strictly-behind
+// branch is the one case where FreshRef must be "origin/main" rather than
+// "HEAD", so staleness/config reads consult the fetched blob, not stale local
+// HEAD, giving dry-run parity with the subsequent real pass.
 func TestSyncMain_DryRun_ReportsSyncedWithoutMutatingHead(t *testing.T) {
 	mainSyncGitEnv(t)
 	local, origin := initOriginAndLocal(t)
 	commitFile(t, origin, "advance.txt", "advance")
 	beforeHEAD := gitTest(t, local, "rev-parse", "HEAD")
 
-	status, _ := syncMain(local, true)
-	if status != MainSyncSynced {
-		t.Fatalf("status = %q, want MainSyncSynced (classified, not merged)", status)
+	result := syncMain(local, true)
+	if result.Status != MainSyncSynced {
+		t.Fatalf("status = %q, want MainSyncSynced (classified, not merged)", result.Status)
+	}
+	if result.FreshRef != "origin/main" {
+		t.Errorf("FreshRef = %q, want %q (dry-run strictly-behind must read the fetched blob, not local HEAD)", result.FreshRef, "origin/main")
 	}
 	if got := gitTest(t, local, "rev-parse", "HEAD"); got != beforeHEAD {
 		t.Errorf("local HEAD = %s, want unchanged %s -- dry-run must never merge", got, beforeHEAD)
@@ -290,11 +345,11 @@ func TestSyncMains_TwoRepos_MapCarriesBothAndLogsDistinctOutcomesSafely(t *testi
 	var buf bytes.Buffer
 	got := syncMains(repos, &buf, false)
 
-	if got["o/r1"] != MainSyncSynced {
-		t.Errorf(`syncMains()["o/r1"] = %q, want MainSyncSynced`, got["o/r1"])
+	if got["o/r1"].Status != MainSyncSynced {
+		t.Errorf(`syncMains()["o/r1"].Status = %q, want MainSyncSynced`, got["o/r1"].Status)
 	}
-	if got["o/r2"] != MainSyncDiverged {
-		t.Errorf(`syncMains()["o/r2"] = %q, want MainSyncDiverged`, got["o/r2"])
+	if got["o/r2"].Status != MainSyncDiverged {
+		t.Errorf(`syncMains()["o/r2"].Status = %q, want MainSyncDiverged`, got["o/r2"].Status)
 	}
 
 	foundR1, foundR2 := false, false
@@ -374,12 +429,12 @@ exec "%s" "$@"
 	}
 	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	status, detail := syncMain(local, false)
-	if status != MainSyncFailed {
-		t.Fatalf("status = %q, detail = %q, want MainSyncFailed", status, detail)
+	result := syncMain(local, false)
+	if result.Status != MainSyncFailed {
+		t.Fatalf("status = %q, detail = %q, want MainSyncFailed", result.Status, result.Detail)
 	}
-	if status == MainSyncDiverged || status == MainSyncSynced {
-		t.Fatalf("a genuine merge-base command error must not collapse into Diverged or Synced, got %q", status)
+	if result.Status == MainSyncDiverged || result.Status == MainSyncSynced {
+		t.Fatalf("a genuine merge-base command error must not collapse into Diverged or Synced, got %q", result.Status)
 	}
 }
 
@@ -462,15 +517,18 @@ func envContainsExact(env []string, kv string) bool {
 	return false
 }
 
-// TestSyncMain_BranchChangedBetweenFetchAndMerge_SkipsWithoutFastForwardingWrongBranch
-// covers review fix #4 (TOCTOU): if the checked-out branch changes during
-// the fetch window, the merge must never run against the wrong branch --
-// syncMain must re-verify HEAD immediately before merging. Simulated
-// deterministically (no real race) via a `git` PATH shim that, only for the
-// `fetch` subcommand, delegates to the real git fetch and then checks the
-// repo out onto a different branch as a side effect -- exercising the same
-// re-check code path a genuine mid-fetch checkout would hit.
-func TestSyncMain_BranchChangedBetweenFetchAndMerge_SkipsWithoutFastForwardingWrongBranch(t *testing.T) {
+// TestSyncMain_BranchChangedBetweenFetchAndMerge_ReportsNotMainWithoutFastForwardingWrongBranch
+// covers review fix #4 (TOCTOU), updated by #851: if the checked-out branch
+// changes during the fetch window, the merge must never run against the
+// wrong branch -- syncMain must re-verify HEAD immediately before merging,
+// and the outcome is now the gated MainSyncNotMain (previously the ungated
+// MainSyncSkipped) -- a legitimate off-main checkout gates every pickup for
+// the repo, not only planning. Simulated deterministically (no real race)
+// via a `git` PATH shim that, only for the `fetch` subcommand, delegates to
+// the real git fetch and then checks the repo out onto a different branch as
+// a side effect -- exercising the same re-check code path a genuine
+// mid-fetch checkout would hit.
+func TestSyncMain_BranchChangedBetweenFetchAndMerge_ReportsNotMainWithoutFastForwardingWrongBranch(t *testing.T) {
 	mainSyncGitEnv(t)
 	local, origin := initOriginAndLocal(t)
 	commitFile(t, origin, "advance.txt", "advance")
@@ -502,9 +560,9 @@ exec "%s" "$@"
 	}
 	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	status, detail := syncMain(local, false)
-	if status != MainSyncSkipped {
-		t.Fatalf("status = %q, detail = %q, want MainSyncSkipped", status, detail)
+	result := syncMain(local, false)
+	if result.Status != MainSyncNotMain {
+		t.Fatalf("status = %q, detail = %q, want MainSyncNotMain", result.Status, result.Detail)
 	}
 	if got := gitTest(t, local, "rev-parse", "main"); got != mainRefBefore {
 		t.Errorf("local main ref = %s, want unchanged %s (must never fast-forward after a mid-fetch branch change)", got, mainRefBefore)
@@ -512,12 +570,14 @@ exec "%s" "$@"
 }
 
 // TestSyncMain_PreMergeHEADRecheckErrors_ReportsFailedNotSkipped covers #822
-// review round 2 fix #1: a genuine probe error on the pre-merge HEAD re-check
-// (not merely a legitimate branch change, already covered by
-// TestSyncMain_BranchChangedBetweenFetchAndMerge_SkipsWithoutFastForwardingWrongBranch)
-// must report MainSyncFailed, not MainSyncSkipped -- mainSyncSkip (decide.go)
-// treats Skipped as ungated, so folding a real error into it would silently
-// downgrade the gate to permissive on a broken git state.
+// review round 2 fix #1, updated by #851: a genuine probe error on the
+// pre-merge HEAD re-check (not merely a legitimate branch change, already
+// covered by
+// TestSyncMain_BranchChangedBetweenFetchAndMerge_ReportsNotMainWithoutFastForwardingWrongBranch)
+// must report MainSyncFailed, distinct from MainSyncNotMain (the now-gated
+// legitimate-branch-change outcome) -- collapsing a genuine probe error into
+// MainSyncNotMain would blur two different failure classes together even
+// though both are gated today.
 //
 // Triggered deterministically via a `git` PATH shim that lets the first
 // `symbolic-ref --short HEAD` call (the early on-main check) succeed for
@@ -552,15 +612,35 @@ exec "%[1]s" "$@"
 	}
 	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	status, detail := syncMain(local, false)
-	if status != MainSyncFailed {
-		t.Fatalf("status = %q, detail = %q, want MainSyncFailed", status, detail)
+	result := syncMain(local, false)
+	if result.Status != MainSyncFailed {
+		t.Fatalf("status = %q, detail = %q, want MainSyncFailed", result.Status, result.Detail)
 	}
-	if status == MainSyncSkipped {
-		t.Fatalf("a genuine pre-merge HEAD re-check error must not collapse into MainSyncSkipped (ungated), got %q", status)
+	if result.Status == MainSyncNotMain {
+		t.Fatalf("a genuine pre-merge HEAD re-check error must not collapse into MainSyncNotMain (the legitimate-branch-change case), got %q", result.Status)
 	}
 	if got := gitTest(t, local, "rev-parse", "main"); got != mainRefBefore {
 		t.Errorf("local main ref = %s, want unchanged %s (a failed re-check must never fast-forward)", got, mainRefBefore)
+	}
+}
+
+// TestMainSyncNewCheckoutStates_StringsAreNonBlankAndDistinct covers #851's
+// Implementation Order step 1 ("non-blank String() for each"), mirroring
+// MainSyncSkipped's existing non-blank convention (review nitpick fix #6): a
+// regression that collapses any two of the three new gated checkout states'
+// rendered forms into the same word would otherwise be silent.
+func TestMainSyncNewCheckoutStates_StringsAreNonBlankAndDistinct(t *testing.T) {
+	values := []MainSync{MainSyncNotMain, MainSyncDetached, MainSyncMissing}
+	seen := map[string]MainSync{}
+	for _, v := range values {
+		s := v.String()
+		if s == "" {
+			t.Errorf("%v.String() = %q, want a non-empty display string", v, s)
+		}
+		if prior, ok := seen[s]; ok {
+			t.Errorf("both %v and %v render as %q; String() must be distinct per state", prior, v, s)
+		}
+		seen[s] = v
 	}
 }
 
@@ -585,8 +665,8 @@ func TestSyncMains_SkippedRepo_LogsNonBlankStatusWord(t *testing.T) {
 	var buf bytes.Buffer
 	got := syncMains(repos, &buf, false)
 
-	if got["o/r"] != MainSyncSkipped {
-		t.Fatalf(`syncMains()["o/r"] = %q, want MainSyncSkipped`, got["o/r"])
+	if got["o/r"].Status != MainSyncSkipped {
+		t.Fatalf(`syncMains()["o/r"].Status = %q, want MainSyncSkipped`, got["o/r"].Status)
 	}
 	line := strings.TrimSpace(buf.String())
 	if strings.Contains(line, "o/r:  (") {

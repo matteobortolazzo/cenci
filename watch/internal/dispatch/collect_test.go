@@ -307,6 +307,42 @@ body
 	}
 }
 
+// -- #851: syncMains' return-type change (map[string]mainSyncResult) must
+// not perturb CollectTickets' own signature/behavior -----------------------
+
+// TestSyncStatuses_AdaptsMainSyncResultMapForCollectTickets covers the
+// plan's "syncStatuses() adapter keeps CollectTickets backward compatible"
+// requirement: syncStatuses extracts just the MainSync half of each
+// mainSyncResult, and CollectTickets, fed the adapted map, stamps tickets
+// exactly as it did before syncMains' return type changed (#822's original
+// TestCollectTickets_StampsMainSyncFromMap contract, unperturbed).
+func TestSyncStatuses_AdaptsMainSyncResultMapForCollectTickets(t *testing.T) {
+	syncs := map[string]mainSyncResult{
+		"o/r": {Status: MainSyncDiverged, Detail: "local main and origin/main have diverged", FreshRef: "HEAD"},
+	}
+	adapted := syncStatuses(syncs)
+	if len(adapted) != 1 {
+		t.Fatalf("got %d adapted entries, want 1: %+v", len(adapted), adapted)
+	}
+	if adapted["o/r"] != MainSyncDiverged {
+		t.Fatalf(`syncStatuses(syncs)["o/r"] = %q, want MainSyncDiverged`, adapted["o/r"])
+	}
+
+	installFakeGHOnPath(t, twoIssuesFakeGHScript)
+	tickets, err := CollectTickets([]RepoConfig{{Repo: "o/r"}}, adapted, true, io.Discard)
+	if err != nil {
+		t.Fatalf("CollectTickets returned unexpected error: %v", err)
+	}
+	if len(tickets) != 2 {
+		t.Fatalf("got %d tickets, want 2: %+v", len(tickets), tickets)
+	}
+	for _, tk := range tickets {
+		if tk.MainSync != MainSyncDiverged {
+			t.Errorf("ticket #%d MainSync = %q, want MainSyncDiverged (via the syncStatuses adapter)", tk.Number, tk.MainSync)
+		}
+	}
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

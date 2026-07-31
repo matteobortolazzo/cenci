@@ -28,6 +28,15 @@ func testConfig() Config {
 	}
 }
 
+// leanAutonomy builds an Inputs.RepoAutonomy map granting repo the lean
+// classification (#851): dispatch.planRefined alone is insufficient to
+// authorize unattended planning/re-plan -- every existing PlanRefined: true
+// fixture must also carry an explicit lean grant for its own repo to keep
+// passing once the autonomy gate exists.
+func leanAutonomy(repo string) map[string]RepoAutonomy {
+	return map[string]RepoAutonomy{repo: RepoAutonomyLean}
+}
+
 func snapshot(running, needInput int, windows ...watch.WindowState) *watch.StateSnapshot {
 	return &watch.StateSnapshot{
 		Windows: windows,
@@ -1116,6 +1125,7 @@ func TestDecideNonInputNeededTicketIgnoresAnswersMap(t *testing.T) {
 func planningCandidateInputs() Inputs {
 	in := baseInputs()
 	in.Config.PlanRefined = true
+	in.RepoAutonomy = leanAutonomy("o/r")
 	in.Tickets[0].Labels = []string{"Refined"}
 	in.Plans = nil
 	return in
@@ -1179,6 +1189,7 @@ func TestDecidePlanningPickup_RefinedNoPlanDispatches(t *testing.T) {
 func TestDecidePlanningPickup_RefinedWithExistingPlanUnchanged(t *testing.T) {
 	in := baseInputs()
 	in.Config.PlanRefined = true
+	in.RepoAutonomy = leanAutonomy("o/r")
 	in.Tickets[0].Labels = []string{"Refined"} // no Planned label; a plan file exists
 	assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "not Planned", ""}})
 }
@@ -1192,6 +1203,7 @@ func TestDecidePlanningPickup_RefinedWithExistingPlanUnchanged(t *testing.T) {
 func TestDecidePlanningPickup_RefinedPlannedNoPlanStillNoPlanFile(t *testing.T) {
 	in := baseInputs()
 	in.Config.PlanRefined = true
+	in.RepoAutonomy = leanAutonomy("o/r")
 	in.Tickets[0].Labels = []string{"Refined", "Planned"}
 	in.Plans = nil
 	assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "no plan file", ""}})
@@ -1349,6 +1361,7 @@ func TestDecidePlanningPickup_CountsIntoDispatchedThisPass(t *testing.T) {
 func TestDecideReplan_StalePlanFlagOnDispatches(t *testing.T) {
 	in := baseInputs()
 	in.Config.PlanRefined = true
+	in.RepoAutonomy = leanAutonomy("o/r")
 	in.Plans[0].CommitsBehind = 10 // stale: exceeds testConfig's tolerance of 5
 
 	got := Decide(in)
@@ -1380,6 +1393,7 @@ func TestDecideReplan_StalePlanFlagOnDispatches(t *testing.T) {
 func TestDecideReplan_StillBlockedByDependencyGate(t *testing.T) {
 	in := baseInputs()
 	in.Config.PlanRefined = true
+	in.RepoAutonomy = leanAutonomy("o/r")
 	in.Plans[0].CommitsBehind = 10 // stale
 	in.Tickets[0].DependsOn = []int{100}
 	in.Tickets[0].DependencyStates = map[int]DependencyState{100: DependencyStateOpen}
@@ -1395,6 +1409,7 @@ func TestDecideReplan_StillBlockedByDependencyGate(t *testing.T) {
 func TestDecideReplan_StillBlockedBySiblingSerialization(t *testing.T) {
 	in := baseInputs()
 	in.Config.PlanRefined = true
+	in.RepoAutonomy = leanAutonomy("o/r")
 	in.Tickets = []Ticket{
 		{Repo: "o/r", Number: 41, Labels: []string{"Working"}},
 		{Repo: "o/r", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
@@ -1444,9 +1459,250 @@ func TestDecideReplan_StillBlockedByCapacityAndBudgetGates(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			in := baseInputs()
 			in.Config.PlanRefined = true
+			in.RepoAutonomy = leanAutonomy("o/r")
 			in.Plans[0].CommitsBehind = 10
 			tc.mutate(&in)
 			assertDecisions(t, Decide(in), []wantDecision{tc.want})
 		})
 	}
+}
+
+// -- #851: gated checkout states (NotMain/Detached/Missing) gate every
+// pickup type; per-repository lean-authorization gate -------------------
+//
+// Design note (Phase 3/red): decide.go does not define reason constants for
+// these new gates yet (that is Phase 4's job), so the exact skip-reason
+// strings below are literal, chosen here as the contract Phase 4 must
+// satisfy, mirroring the existing reasonMainDiverged/reasonMainSyncFailed
+// convention:
+//   - MainSyncNotMain  -> "local main not on main"
+//   - MainSyncDetached -> "local main detached"
+//   - MainSyncMissing  -> "local main missing"
+//   - RepoAutonomyInteractive -> "repo autonomy not lean"
+//   - RepoAutonomyMissing    -> "repo config missing"
+//   - RepoAutonomyMalformed  -> "repo config malformed"
+//   - RepoAutonomyUnreadable -> "repo config unreadable"
+//   - unrecognized/nil-map-miss/zero-value RepoAutonomy -> "repo autonomy probe unrecognized"
+//   - the composed stale/re-plan-denied-by-autonomy reason is
+//     fmt.Sprintf("plan stale, re-plan blocked: %s", <the autonomy reason above>)
+
+// TestDecideMainSyncGate_NewCheckoutStatesGateEveryPickupType covers the
+// plan's Q&A 1 resolution: each of the three new gated checkout states
+// (NotMain, Detached, Missing) must gate ALL pickup types for that repo --
+// an ordinary already-Planned dispatch, a fresh Refined planning candidate,
+// and an autonomous re-plan candidate alike -- not only planning/re-plan,
+// exactly like the existing MainSyncDiverged/MainSyncFailed gates.
+func TestDecideMainSyncGate_NewCheckoutStatesGateEveryPickupType(t *testing.T) {
+	tests := []struct {
+		name       string
+		mainSync   MainSync
+		wantReason string
+	}{
+		{"not main", MainSyncNotMain, "local main not on main"},
+		{"detached", MainSyncDetached, "local main detached"},
+		{"missing", MainSyncMissing, "local main missing"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name+"/ordinary Planned pickup", func(t *testing.T) {
+			in := baseInputs()
+			in.Tickets[0].MainSync = tc.mainSync
+			assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, tc.wantReason, ""}})
+		})
+		t.Run(tc.name+"/fresh Refined planning candidate", func(t *testing.T) {
+			in := planningCandidateInputs()
+			in.Tickets[0].MainSync = tc.mainSync
+			assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, tc.wantReason, ""}})
+		})
+		t.Run(tc.name+"/autonomous re-plan candidate", func(t *testing.T) {
+			in := baseInputs()
+			in.Config.PlanRefined = true
+			in.RepoAutonomy = leanAutonomy("o/r")
+			in.Plans[0].CommitsBehind = 10 // stale
+			in.Tickets[0].MainSync = tc.mainSync
+			assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, tc.wantReason, ""}})
+		})
+	}
+
+	// Content-specific cross-checks (#446/#598): the three new reasons must
+	// never collapse into each other or into the pre-existing
+	// diverged/failed reasons.
+	reasons := map[string]string{
+		"not main": "local main not on main",
+		"detached": "local main detached",
+		"missing":  "local main missing",
+	}
+	seen := map[string]string{}
+	for name, r := range reasons {
+		if prior, ok := seen[r]; ok {
+			t.Fatalf("both %q and %q share the reason %q -- must be distinct", prior, name, r)
+		}
+		seen[r] = name
+		if r == reasonMainDiverged || r == reasonMainSyncFailed {
+			t.Fatalf("%q must not collapse into an existing mainsync reason (%q or %q)", r, reasonMainDiverged, reasonMainSyncFailed)
+		}
+	}
+}
+
+// TestDecideMainSyncGate_SyncedIsUngated covers the plan's requirement that
+// MainSyncSynced (unlike the three new checkout states above) stays ungated,
+// unchanged by #851.
+func TestDecideMainSyncGate_SyncedIsUngated(t *testing.T) {
+	in := baseInputs()
+	in.Tickets[0].MainSync = MainSyncSynced
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+}
+
+// TestDecideAutonomyGate_Matrix covers the full RepoAutonomy config-state
+// matrix for a fresh Refined planning candidate: lean allows the planning
+// dispatch through; every other classification denies with its own distinct
+// reason (default-deny).
+func TestDecideAutonomyGate_Matrix(t *testing.T) {
+	tests := []struct {
+		name       string
+		autonomy   RepoAutonomy
+		wantAction Action
+		wantReason string
+	}{
+		{"lean dispatches", RepoAutonomyLean, ActionDispatch, "plan — Refined, no plan file"},
+		{"interactive denies", RepoAutonomyInteractive, ActionSkip, "repo autonomy not lean"},
+		{"missing config denies", RepoAutonomyMissing, ActionSkip, "repo config missing"},
+		{"malformed config denies", RepoAutonomyMalformed, ActionSkip, "repo config malformed"},
+		{"unreadable config denies", RepoAutonomyUnreadable, ActionSkip, "repo config unreadable"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			in := planningCandidateInputs()
+			in.RepoAutonomy = map[string]RepoAutonomy{"o/r": tc.autonomy}
+			got := Decide(in)
+			if len(got) != 1 {
+				t.Fatalf("got %d decisions, want 1: %+v", len(got), got)
+			}
+			if got[0].Action != tc.wantAction {
+				t.Errorf("action = %q, want %q (reason %q)", got[0].Action, tc.wantAction, got[0].Reason)
+			}
+			if got[0].Reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", got[0].Reason, tc.wantReason)
+			}
+		})
+	}
+}
+
+// TestDecideAutonomyGate_NilMapDefaultDenies covers the "no permissive zero
+// value" contract (mirroring DependencyState/AnswerProbe): a nil
+// Inputs.RepoAutonomy map (no probe result at all for this repo) must
+// default-deny with its own distinct reason, not silently permit.
+func TestDecideAutonomyGate_NilMapDefaultDenies(t *testing.T) {
+	in := planningCandidateInputs()
+	in.RepoAutonomy = nil
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "repo autonomy probe unrecognized", ""}})
+}
+
+// TestDecideAutonomyGate_ZeroValueDefaultDenies covers the same "no
+// permissive zero value" contract for an explicit zero-value RepoAutonomy(""
+// ) entry (a map lookup hit on an unset value), which must land in the same
+// default-deny branch as the nil-map case above, not its own separate
+// silent pass-through.
+func TestDecideAutonomyGate_ZeroValueDefaultDenies(t *testing.T) {
+	in := planningCandidateInputs()
+	in.RepoAutonomy = map[string]RepoAutonomy{"o/r": RepoAutonomy("")}
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "repo autonomy probe unrecognized", ""}})
+}
+
+// TestDecideAutonomyGate_UnrecognizedValueDefaultDenies covers an
+// unregistered RepoAutonomy value (a future/garbled probe result) hitting
+// the same default-deny branch, per #598's asserted-default-branch
+// requirement.
+func TestDecideAutonomyGate_UnrecognizedValueDefaultDenies(t *testing.T) {
+	in := planningCandidateInputs()
+	in.RepoAutonomy = map[string]RepoAutonomy{"o/r": RepoAutonomy("bogus")}
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "repo autonomy probe unrecognized", ""}})
+}
+
+// TestDecideAutonomyGate_PlanRefinedFalseIgnoresAutonomyEntirely is the
+// plan's Assumptions-section regression: autonomy is only ever consulted
+// when Config.PlanRefined is true, so every PlanRefined: false decision must
+// stay byte-identical to today (the happy-path "dispatch" reason) no matter
+// what RepoAutonomy says -- the fleet-wide kill switch off means the new
+// gate is never even reached.
+func TestDecideAutonomyGate_PlanRefinedFalseIgnoresAutonomyEntirely(t *testing.T) {
+	autonomies := []RepoAutonomy{
+		RepoAutonomyLean, RepoAutonomyInteractive, RepoAutonomyMissing,
+		RepoAutonomyMalformed, RepoAutonomyUnreadable, RepoAutonomy("bogus"), RepoAutonomy(""),
+	}
+	for _, a := range autonomies {
+		t.Run(string(a), func(t *testing.T) {
+			in := baseInputs() // PlanRefined stays false via testConfig()'s pinned default
+			in.RepoAutonomy = map[string]RepoAutonomy{"o/r": a}
+			assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+		})
+	}
+}
+
+// TestDecideAutonomyGate_OrdinaryPlannedPickupUnaffectedByAutonomy covers
+// the plan's explicit "ordinary Planned pickup on a lean-gated repo is
+// unaffected by autonomy (only by checkout state)" requirement: with
+// PlanRefined true (the fleet kill switch on) but a ticket that is already
+// Planned with a fresh (non-stale) plan -- never a planning or re-plan
+// candidate -- every RepoAutonomy value, including the denying ones, must
+// leave the ordinary dispatch untouched.
+func TestDecideAutonomyGate_OrdinaryPlannedPickupUnaffectedByAutonomy(t *testing.T) {
+	autonomies := []RepoAutonomy{
+		RepoAutonomyLean, RepoAutonomyInteractive, RepoAutonomyMissing,
+		RepoAutonomyMalformed, RepoAutonomyUnreadable,
+	}
+	for _, a := range autonomies {
+		t.Run(string(a), func(t *testing.T) {
+			in := baseInputs()
+			in.Config.PlanRefined = true
+			in.RepoAutonomy = map[string]RepoAutonomy{"o/r": a}
+			assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+		})
+	}
+}
+
+// TestDecideAutonomyGate_ReplanDeniedComposesStaleAndAutonomyReason covers
+// the plan's "composed reason string on the stale/re-plan path" requirement:
+// a stale plan with PlanRefined on but a denying RepoAutonomy must not
+// terminate with the flag-off literal "plan stale, re-plan" (which would
+// misleadingly imply the flag itself is off) nor with the bare autonomy
+// reason alone (which would lose the staleness context) -- it composes both
+// facts into one reason.
+func TestDecideAutonomyGate_ReplanDeniedComposesStaleAndAutonomyReason(t *testing.T) {
+	tests := []struct {
+		name       string
+		autonomy   RepoAutonomy
+		wantReason string
+	}{
+		{"interactive", RepoAutonomyInteractive, "plan stale, re-plan blocked: repo autonomy not lean"},
+		{"missing config", RepoAutonomyMissing, "plan stale, re-plan blocked: repo config missing"},
+		{"malformed config", RepoAutonomyMalformed, "plan stale, re-plan blocked: repo config malformed"},
+		{"unreadable config", RepoAutonomyUnreadable, "plan stale, re-plan blocked: repo config unreadable"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			in := baseInputs()
+			in.Config.PlanRefined = true
+			in.RepoAutonomy = map[string]RepoAutonomy{"o/r": tc.autonomy}
+			in.Plans[0].CommitsBehind = 10 // stale
+			got := Decide(in)
+			assertDecisions(t, got, []wantDecision{{42, ActionSkip, tc.wantReason, ""}})
+			if got[0].Reason == "plan stale, re-plan" {
+				t.Fatalf("a denied re-plan must not collapse into the flag-off literal %q", "plan stale, re-plan")
+			}
+		})
+	}
+}
+
+// TestDecideAutonomyGate_ReplanLeanDispatches is the replan-side positive
+// counterpart: a stale plan with PlanRefined on and a lean RepoAutonomy
+// dispatches as an autonomous re-plan exactly as before #851 (the existing
+// TestDecideReplan_StalePlanFlagOnDispatches, now updated to grant lean
+// explicitly, covers the full assertion shape; this pins the matrix
+// membership alongside the denied cases above for a single readable table).
+func TestDecideAutonomyGate_ReplanLeanDispatches(t *testing.T) {
+	in := baseInputs()
+	in.Config.PlanRefined = true
+	in.RepoAutonomy = leanAutonomy("o/r")
+	in.Plans[0].CommitsBehind = 10 // stale
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "re-plan — plan stale", "claude"}})
 }

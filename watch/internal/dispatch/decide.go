@@ -35,6 +35,33 @@ const (
 	reasonMainSyncUnknown = "local main sync probe unrecognized"
 )
 
+// New gated checkout-state skip reasons (#851): a repo parked off `main`,
+// detached, or configured-but-absent from disk is untrustworthy for both
+// plan-freshness and pipeline-stage gating, so it gates every pickup in the
+// repo exactly like reasonMainDiverged/reasonMainSyncFailed above -- each
+// with its own distinct reason, per the plan's Q&A 1 resolution.
+const (
+	reasonMainNotMain  = "local main not on main"
+	reasonMainDetached = "local main detached"
+	reasonMainMissing  = "local main missing"
+)
+
+// Repo-autonomy gate skip reasons (#851). reasonAutonomyUnknown is
+// deliberately distinct from every other reason below for the same reason
+// reasonMainSyncUnknown is distinct from reasonMainSyncFailed above: a
+// regression collapsing the switch's default branch into a known case must
+// be caught by a content-specific assertion (#446/#598). A nil
+// Inputs.RepoAutonomy map, a map lookup miss, or an explicit zero-value
+// RepoAutonomy("") entry all land here too, since RepoAutonomy deliberately
+// has no permissive zero-value constant (types.go).
+const (
+	reasonAutonomyInteractive = "repo autonomy not lean"
+	reasonAutonomyMissing     = "repo config missing"
+	reasonAutonomyMalformed   = "repo config malformed"
+	reasonAutonomyUnreadable  = "repo config unreadable"
+	reasonAutonomyUnknown     = "repo autonomy probe unrecognized"
+)
+
 // Dependency-gate skip reasons (#825). reasonDependencyStateUnknownFmt is
 // deliberately distinct from both reasonDependencyWaitingFmt and
 // reasonDependencyUnresolvedFmt for the same reason reasonStageProbeUnknown
@@ -83,6 +110,17 @@ type Inputs struct {
 	// (Decide's own purity contract). A ticket not present in this map (any
 	// non-`Input Needed` ticket) is simply never a resume candidate.
 	Answers map[string]AnswerProbe
+
+	// RepoAutonomy maps repo -> the resolved RepoAutonomy for that repo this
+	// pass (#851), resolved by probeRepoAutonomies (autonomy.go) before
+	// Decide is ever called -- all I/O for the probe happens in RunOnce,
+	// never inside this gate chain (Decide's own purity contract, mirroring
+	// Answers above). Consulted only when Config.PlanRefined is true AND the
+	// ticket is a fresh Refined planning candidate or an autonomous re-plan
+	// candidate -- never for an ordinary already-Planned dispatch, and never
+	// at all when PlanRefined is false (dispatch.planRefined remains the
+	// fleet kill switch, but repo-lean alone never authorizes planning).
+	RepoAutonomy map[string]RepoAutonomy
 }
 
 // Decide is pure: identical Inputs yield an identical ordered []Decision with no
@@ -175,6 +213,20 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 	planning := !resuming && in.Config.PlanRefined && plan == nil &&
 		hasLabel(t.Labels, labelRefined) && !hasLabel(t.Labels, labelPlanned)
 
+	// Per-repository lean-authorization gate (#851): a fresh Refined
+	// planning candidate additionally requires the repo's own committed
+	// `planning.autonomy` to resolve lean -- dispatch.planRefined (the fleet
+	// kill switch) is necessary but no longer sufficient. Evaluated here,
+	// immediately after planning is determined and before every board-state
+	// gate below, so a denial reports its own specific reason rather than
+	// falling through to "not Planned". Never consulted for an ordinary
+	// already-Planned ticket (planning is false there).
+	if planning {
+		if reason, gated := autonomyGateSkip(in.RepoAutonomy[t.Repo]); gated {
+			return skip(reason)
+		}
+	}
+
 	// Pickup rule 1: board state.
 	if !resuming && !planning && !hasLabel(t.Labels, "Planned") {
 		return skip("not Planned")
@@ -249,6 +301,16 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 	if !resuming && !planning && plan.CommitsBehind > in.Config.PlanStalenessTolerance {
 		if !in.Config.PlanRefined {
 			return skip("plan stale, re-plan")
+		}
+		// Per-repository lean-authorization gate (#851): an autonomous
+		// re-plan is subject to the same repo-lean requirement as a fresh
+		// planning pickup above. A denial composes the staleness fact with
+		// the autonomy reason, rather than either the flag-off literal
+		// "plan stale, re-plan" (which would misleadingly imply the flag
+		// itself is off) or the bare autonomy reason alone (which would lose
+		// the staleness context).
+		if reason, gated := autonomyGateSkip(in.RepoAutonomy[t.Repo]); gated {
+			return skip(fmt.Sprintf("plan stale, re-plan blocked: %s", reason))
 		}
 		replanning = true
 	}
@@ -460,11 +522,44 @@ func mainSyncSkip(t Ticket) (string, bool) {
 		return reasonMainDiverged, true
 	case MainSyncFailed:
 		return reasonMainSyncFailed, true
+	case MainSyncNotMain:
+		return reasonMainNotMain, true
+	case MainSyncDetached:
+		return reasonMainDetached, true
+	case MainSyncMissing:
+		return reasonMainMissing, true
 	default:
 		// Unrecognized MainSync value: default-deny with its own distinct
 		// reason (not reasonMainSyncFailed) so a regression collapsing this
 		// branch is caught by assertion, per #446/#598.
 		return reasonMainSyncUnknown, true
+	}
+}
+
+// autonomyGateSkip evaluates the per-repository lean-authorization gate
+// (#851) for a: it returns (reason, true) when a denies an unattended
+// planning/re-plan dispatch, and ("", false) only for RepoAutonomyLean.
+// Called only when Config.PlanRefined is true AND the ticket is a fresh
+// Refined planning candidate or an autonomous re-plan candidate (decideTicket
+// below) -- dispatch.planRefined remains the fleet kill switch, but is
+// insufficient alone to authorize unattended planning.
+func autonomyGateSkip(a RepoAutonomy) (string, bool) {
+	switch a {
+	case RepoAutonomyLean:
+		return "", false
+	case RepoAutonomyInteractive:
+		return reasonAutonomyInteractive, true
+	case RepoAutonomyMissing:
+		return reasonAutonomyMissing, true
+	case RepoAutonomyMalformed:
+		return reasonAutonomyMalformed, true
+	case RepoAutonomyUnreadable:
+		return reasonAutonomyUnreadable, true
+	default:
+		// Unrecognized/nil-map-miss/zero-value RepoAutonomy: default-deny
+		// with its own distinct reason so a regression collapsing this
+		// branch is caught by assertion, per #446/#598.
+		return reasonAutonomyUnknown, true
 	}
 }
 
