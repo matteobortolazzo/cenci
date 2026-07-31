@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -21,11 +20,15 @@ import (
 // this identity instead of Git commit metadata because author name/email are
 // not reliable GitHub-account identifiers.
 func currentGitHubLogin() (string, error) {
-	data, err := exec.Command("gh", "api", "user", "--jq", ".login").CombinedOutput()
+	stdout, stderr, err := execGh("api", "user", "--jq", ".login")
 	if err != nil {
-		return "", fmt.Errorf("gh api user: %w: %s", err, strings.TrimSpace(string(data)))
+		// Detail is truncated to maxProbeLogDetailBytes (#852 review finding
+		// #3): a ghTimeout kill mid-stream can leave stdout holding a large
+		// partial payload, and this detail is spliced verbatim into an error
+		// string that may end up logged.
+		return "", fmt.Errorf("gh api user: %w: %s", err, truncateDetail(collapseLines(stdout+stderr), maxProbeLogDetailBytes))
 	}
-	login := strings.TrimSpace(string(data))
+	login := strings.TrimSpace(stdout)
 	if login == "" {
 		return "", fmt.Errorf("gh api user returned an empty login")
 	}
@@ -75,11 +78,17 @@ func CollectTickets(repos []RepoConfig, mainSync map[string]MainSync, resolveDep
 
 func collectRepoTickets(rc RepoConfig, sync MainSync, resolveDeps bool, out io.Writer) ([]Ticket, error) {
 	repo := rc.Repo
-	data, err := exec.Command("gh", "issue", "list",
+	stdout, stderr, err := execGh("issue", "list",
 		"--repo", repo, "--state", "open",
-		"--json", "number,title,body,labels,assignees", "--limit", "200").Output()
+		"--json", "number,title,body,labels,assignees", "--limit", "200")
 	if err != nil {
-		return nil, fmt.Errorf("gh issue list %s: %w", repo, err)
+		// Detail is truncated to maxProbeLogDetailBytes (#852 second review
+		// round, finding B): `--json number,title,body,labels,assignees
+		// --limit 200` can return up to 200 full issue bodies (potentially
+		// attacker-authored content on a public repo) in stdout, and a
+		// ghTimeout/WaitDelay kill mid-stream can leave that large partial
+		// payload spliced into this error string verbatim.
+		return nil, fmt.Errorf("gh issue list %s: %w: %s", repo, err, truncateDetail(collapseLines(stdout+stderr), maxProbeLogDetailBytes))
 	}
 	var issues []struct {
 		Number int    `json:"number"`
@@ -92,7 +101,7 @@ func collectRepoTickets(rc RepoConfig, sync MainSync, resolveDeps bool, out io.W
 			Login string `json:"login"`
 		} `json:"assignees"`
 	}
-	if err := json.Unmarshal(data, &issues); err != nil {
+	if err := json.Unmarshal([]byte(stdout), &issues); err != nil {
 		return nil, fmt.Errorf("parsing issues for %s: %w", repo, err)
 	}
 
@@ -141,26 +150,30 @@ func collectRepoTickets(rc RepoConfig, sync MainSync, resolveDeps bool, out io.W
 		// waste the pass's gh issue view budget on a discarded result.
 		var dependsOn []int
 		var depStates map[int]DependencyState
+		var depAnomalies []string
 		if resolveDeps {
-			if nums := parseDependsOn(is.Body); len(nums) > 0 {
+			nums, anomalies := parseDependsOn(is.Body)
+			depAnomalies = anomalies
+			if len(nums) > 0 {
 				dependsOn = nums
 				depStates = resolveDependencyStates(repo, nums, openNumbers, depCache, depBudget, out)
 			}
 		}
 
 		tickets = append(tickets, Ticket{
-			Repo:             repo,
-			Number:           is.Number,
-			Title:            is.Title,
-			Labels:           labels,
-			Assignees:        assignees,
-			HasOpenPR:        openPR[is.Number],
-			Agent:            agentFromLabels(labels),
-			Stage:            stage,
-			StageProbe:       probe,
-			MainSync:         sync,
-			DependsOn:        dependsOn,
-			DependencyStates: depStates,
+			Repo:                repo,
+			Number:              is.Number,
+			Title:               is.Title,
+			Labels:              labels,
+			Assignees:           assignees,
+			HasOpenPR:           openPR[is.Number],
+			Agent:               agentFromLabels(labels),
+			Stage:               stage,
+			StageProbe:          probe,
+			MainSync:            sync,
+			DependsOn:           dependsOn,
+			DependencyStates:    depStates,
+			DependencyAnomalies: depAnomalies,
 		})
 	}
 	return tickets, nil
@@ -192,18 +205,23 @@ func probeStage(dir string, number int) (string, StageProbe) {
 // openPRIssues returns the set of issue numbers with an open linked PR, via each
 // open PR's closingIssuesReferences.
 func openPRIssues(repo string) (map[int]bool, error) {
-	data, err := exec.Command("gh", "pr", "list",
+	stdout, stderr, err := execGh("pr", "list",
 		"--repo", repo, "--state", "open",
-		"--json", "closingIssuesReferences", "--limit", "200").Output()
+		"--json", "closingIssuesReferences", "--limit", "200")
 	if err != nil {
-		return nil, fmt.Errorf("gh pr list %s: %w", repo, err)
+		// Detail is truncated to maxProbeLogDetailBytes (#852 review finding
+		// #3): `--json closingIssuesReferences` stdout on a busy repo can be
+		// large, and a ghTimeout kill mid-stream can leave a large partial
+		// payload in stdout -- both would otherwise flood this error string
+		// unbounded.
+		return nil, fmt.Errorf("gh pr list %s: %w: %s", repo, err, truncateDetail(collapseLines(stdout+stderr), maxProbeLogDetailBytes))
 	}
 	var prs []struct {
 		ClosingIssuesReferences []struct {
 			Number int `json:"number"`
 		} `json:"closingIssuesReferences"`
 	}
-	if err := json.Unmarshal(data, &prs); err != nil {
+	if err := json.Unmarshal([]byte(stdout), &prs); err != nil {
 		return nil, fmt.Errorf("parsing prs for %s: %w", repo, err)
 	}
 	m := make(map[int]bool)
@@ -227,47 +245,93 @@ func agentFromLabels(labels []string) string {
 // ReadPlans globs <dir>/.plans/*.md, parses each file's flat YAML front matter,
 // stamps repo (owner/repo) onto each plan, and fills CommitsBehind. commitsBehind
 // resolves default-branch commits since a plan's sha, restricted to paths when
-// the plan lists stalenessPaths; nil uses git rev-list against dir. A file that
-// cannot be read or whose front matter cannot be parsed is dropped -- and logged
-// to out (#828 review fix #2): under the stage-aware planning-pickup gate,
-// plan == nil now triggers a real dispatch rather than a no-op skip, so a
-// transient parse hiccup on an actually-valid plan file is operationally
-// equivalent to "never planned" and could otherwise launch a spurious/
-// duplicate planning session with zero trace. Callers are expected to
-// guarantee a non-nil out, mirroring CollectTickets above (RunOnce/
-// RunReconcileOnce already default it to os.Stdout before calling here).
-func ReadPlans(repo, dir string, commitsBehind func(sha string, paths []string) int, out io.Writer) ([]Plan, error) {
+// the plan lists stalenessPaths; nil uses planfile.CommitsBehind against dir.
+// Callers are expected to guarantee a non-nil out, mirroring CollectTickets
+// above (RunOnce/RunReconcileOnce already default it to os.Stdout before
+// calling here).
+//
+// The returned map[string]PlanProbe (#852), keyed by planKey(repo,
+// ticketId), lets a caller distinguish a genuinely absent plan (no entry at
+// all -- the zero-value PlanProbeAbsent) from one that exists but is broken
+// in some way (read error, parse error, ticket-id error, staleness error)
+// instead of both collapsing into "no matched Plan", the exact ambiguity
+// this ticket exists to remove: under the stage-aware planning-pickup gate
+// (decide.go), plan == nil used to trigger a real dispatch rather than a
+// no-op skip, so a transient read/parse hiccup on an actually-valid plan
+// file was operationally equivalent to "never planned" and could launch a
+// spurious/duplicate planning session with zero trace (#828 review fix #2);
+// under the reconciler (reconcile.go), it used to escalate to plan-invalid
+// on the very same transient hiccup. A broken-but-present file is logged to
+// out either way, and classified into probes when it can be attributed to a
+// ticket (planFileTicketID falls back to the filename's numeric prefix when
+// front matter can't be trusted); a file whose name doesn't start with
+// digits either is logged but left unattributed -- it could never have
+// matched a ticket under today's front-matter-only TicketID resolution
+// either, so there is no ticket key to gate.
+//
+// probes is written success-wins-over-error, first-wins-among-equals per key
+// (#852 second review round, finding A), so that probes[key] always
+// describes whichever plan file actually wins the planByTicket match below
+// -- not merely "the first file glob-processed for this key". Those are NOT
+// the same "first": plans/planByTicket is first-wins only over files that
+// parsed successfully (a probe-errored file is dropped from plans entirely,
+// never added), so a plain first-wins-over-everything guard on probes alone
+// (the Phase 6+7 review's original fix, finding #1) only closes the
+// healthy-first/broken-second ordering. The reverse ordering -- a broken
+// file that glob-sorts before its healthy duplicate -- still locked in the
+// broken file's error classification even though the healthy file, being
+// the first (and only) file added to plans, is exactly the one
+// planByTicket/Decide/Reconcile will match. See setProbeFirstWins.
+func ReadPlans(repo, dir string, commitsBehind func(sha string, paths []string) (int, error), out io.Writer) ([]Plan, map[string]PlanProbe, error) {
 	if commitsBehind == nil {
-		// Display-only usage (not decision-gating): degrade gracefully to 0
-		// on a git failure rather than propagating it, preserving this
-		// package's existing tested behavior (#560 item 1).
-		commitsBehind = func(sha string, paths []string) int {
-			n, _ := planfile.CommitsBehind(dir, sha, paths)
-			return n
+		commitsBehind = func(sha string, paths []string) (int, error) {
+			return planfile.CommitsBehind(dir, sha, paths)
 		}
 	}
 	matches, err := filepath.Glob(filepath.Join(dir, ".plans", "*.md"))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	sort.Strings(matches)
 
+	probes := map[string]PlanProbe{}
 	var plans []Plan
 	for _, path := range matches {
 		data, err := os.ReadFile(path)
 		if err != nil {
-			logf(out, "dispatch: dropping plan file %s: reading: %v\n", path, err)
+			logf(out, "dispatch: plan file %s unreadable: %v\n", path, err)
+			if id, ok := planFileTicketID(path); ok {
+				setProbeFirstWins(probes, planKey(repo, id), PlanProbeReadError)
+			}
 			continue
 		}
 		fm, ok := planfile.ParseFrontMatter(string(data))
 		if !ok {
-			logf(out, "dispatch: dropping plan file %s: front matter did not parse\n", path)
+			logf(out, "dispatch: plan file %s: front matter did not parse\n", path)
+			if id, ok := planFileTicketID(path); ok {
+				setProbeFirstWins(probes, planKey(repo, id), PlanProbeParseError)
+			}
 			continue
 		}
+
+		ticketID := planfile.AtoiSafe(fm["ticketId"])
+		if ticketID <= 0 {
+			id, ok := planFileTicketID(path)
+			if !ok {
+				logf(out, "dispatch: plan file %s: ticket id unresolvable (front matter and filename both unattributable)\n", path)
+				continue
+			}
+			logf(out, "dispatch: plan file %s: ticketId front matter unresolvable, attributed to #%d via filename\n", path, id)
+			ticketID = id
+			key := planKey(repo, ticketID)
+			setProbeFirstWins(probes, key, PlanProbeTicketIDError)
+			continue
+		}
+
 		p := Plan{
 			Repo:           repo,
 			Path:           path,
-			TicketID:       planfile.AtoiSafe(fm["ticketId"]),
+			TicketID:       ticketID,
 			Status:         fm["status"],
 			PlanCommitSha:  fm["planCommitSha"],
 			IsChild:        fm["isChild"] == "true",
@@ -275,12 +339,91 @@ func ReadPlans(repo, dir string, commitsBehind func(sha string, paths []string) 
 			ParentID:       planfile.AtoiSafe(fm["parentId"]),
 			StalenessPaths: planfile.SplitPaths(fm["stalenessPaths"]),
 		}
+		key := planKey(repo, ticketID)
 		if p.PlanCommitSha != "" {
-			p.CommitsBehind = commitsBehind(p.PlanCommitSha, p.StalenessPaths)
+			n, err := commitsBehind(p.PlanCommitSha, p.StalenessPaths)
+			if err != nil {
+				logf(out, "dispatch: plan file %s: staleness could not be determined: %v\n", path, err)
+				setProbeFirstWins(probes, key, PlanProbeStalenessError)
+				plans = append(plans, p)
+				continue
+			}
+			p.CommitsBehind = n
 		}
+		setProbeFirstWins(probes, key, PlanProbeOk)
 		plans = append(plans, p)
 	}
-	return plans, nil
+	return plans, probes, nil
+}
+
+// setProbeFirstWins records classification for key in probes, but ONLY a
+// plain first-wins guard (matching Reconcile/Decide's planByTicket
+// first-wins guard, `if _, ok := planByTicket[key]; !ok { ... }`) is not
+// enough (#852 second review round, finding A): plans/planByTicket is
+// first-wins only over successfully-parsed files, since a probe-errored
+// file is dropped from plans entirely. So the rule here has two parts:
+//
+//   - A success (PlanProbeOk / PlanProbeStalenessError) always wins over a
+//     previously-recorded error (PlanProbeReadError / PlanProbeParseError /
+//     PlanProbeTicketIDError) for the same key, regardless of processing
+//     order -- a file that parsed fine and was added to plans is, by
+//     construction, the one planByTicket will match, so its classification
+//     must be the one probes reports even if a broken duplicate for the
+//     same ticket happened to glob-sort (and so get probed) first.
+//   - Among two classifications of the same kind (two successes, or two
+//     errors), the existing first-wins-in-plans order still governs: the
+//     first one recorded is kept, and later ones of the same kind are
+//     ignored.
+//
+// In other words: errors are the only classification ever downgraded/
+// overwritten, and only by a success -- a success is never overwritten by
+// anything.
+func setProbeFirstWins(probes map[string]PlanProbe, key string, classification PlanProbe) {
+	existing, ok := probes[key]
+	if !ok {
+		probes[key] = classification
+		return
+	}
+	if isPlanProbeError(existing) && !isPlanProbeError(classification) {
+		probes[key] = classification
+	}
+}
+
+// isPlanProbeError reports whether probe is one of the "broken file" error
+// classifications (read/parse/ticket-id errors) as opposed to a success
+// classification (Ok/StalenessError) -- used by setProbeFirstWins (#852
+// second review round, finding A) to let a success always overwrite a
+// previously-recorded error for the same key.
+func isPlanProbeError(probe PlanProbe) bool {
+	switch probe {
+	case PlanProbeReadError, PlanProbeParseError, PlanProbeTicketIDError:
+		return true
+	default:
+		return false
+	}
+}
+
+// planFileTicketID extracts the leading numeric ticket id from a plan
+// file's base name (`.plans/<ticketId>-<slug>.md`), so a probe failure
+// (read/parse error) that leaves front matter unavailable can still be
+// attributed to the right ticket (#852). Returns (0, false) when the name
+// doesn't start with a digit run -- unattributable, since such a file could
+// never have matched a ticket under today's front-matter-only TicketID
+// resolution either.
+func planFileTicketID(path string) (int, bool) {
+	base := filepath.Base(path)
+	i := 0
+	for i < len(base) && base[i] >= '0' && base[i] <= '9' {
+		i++
+	}
+	if i == 0 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(base[:i])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // ReadSnapshot dials the daemon broadcast socket, reads one snapshot, and

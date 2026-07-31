@@ -8,11 +8,13 @@
 package planfile
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // commitShaPattern constrains sha before it reaches `git rev-list --count
@@ -81,6 +83,33 @@ func SplitPaths(s string) []string {
 	return paths
 }
 
+// gitTimeout bounds every git invocation CommitsBehindRef makes (#852),
+// mirroring internal/dispatch's execGit rationale (mainsync.go): a hung git
+// process must never stall a caller indefinitely. Deliberately a
+// package-local constant, not shared with internal/dispatch's own
+// gitTimeout/execGit -- see #852's D1 decision: internal/planfile cannot
+// import internal/dispatch, and a shared internal/boundedexec package would
+// drag execGit into an unwanted refactor.
+const gitTimeout = 60 * time.Second
+
+// gitWaitDelay bounds how long cmd.Wait can block after the git process
+// itself has exited or been killed by gitTimeout's context, mirroring
+// internal/dispatch's gitWaitDelay (mainsync.go).
+const gitWaitDelay = 5 * time.Second
+
+// IsValidCommitSha reports whether sha has the shape of a legitimate git
+// commit sha: 7-40 hex characters, per commitShaPattern above -- rejecting,
+// in particular, a sha that begins with `-` (which git would otherwise
+// parse as an option once concatenated into "<sha>..<ref>") or one that is
+// otherwise malformed. Deliberately does NOT special-case the empty
+// string: an absent planCommitSha is a distinct, deliberately-permissive
+// "legacy plan file" case (see CommitsBehindRef's own sha == "" short-circuit),
+// not a malformed one, and callers are expected to check for emptiness
+// themselves before ever consulting this function.
+func IsValidCommitSha(sha string) bool {
+	return commitShaPattern.MatchString(sha)
+}
+
 // CommitsBehind counts default-branch commits since sha, against local HEAD.
 // With paths it counts only commits touching them (`rev-list -- <paths>`),
 // so unrelated monorepo churn cannot mark a scoped plan stale; without paths
@@ -89,7 +118,7 @@ func SplitPaths(s string) []string {
 // A thin ref="HEAD" wrapper around CommitsBehindRef (#851) -- kept as its
 // own function rather than inlined at every call site because
 // pipeline/planfile.go:276 also calls it and must not have its signature
-// changed by this ticket.
+// changed by that ticket.
 //
 // A git failure (unreachable sha, shallow clone, corrupted worktree,
 // transient error) is propagated rather than swallowed to 0 -- callers that
@@ -97,6 +126,23 @@ func SplitPaths(s string) []string {
 // not confuse "genuinely 0 commits behind" with "could not be determined".
 // Callers that only display the count (e.g. internal/dispatch's ReadPlans)
 // may choose to ignore the returned error and degrade gracefully.
+//
+// The git invocation itself is bounded by gitTimeout/gitWaitDelay (#852) so
+// a hung git process can never stall a caller indefinitely.
+//
+// sha == "" short-circuits to (0, nil) before ever invoking git (#852 D2):
+// an empty planCommitSha is deliberate absence-by-design for a legacy
+// pre-planCommitSha plan file, not a staleness-calculation error, so it
+// must never reach AC5's "staleness calculation errors" default-deny path.
+// This makes today's "fresh" behavior for an empty sha explicit rather than
+// an accidental consequence of git resolving "..HEAD" as "HEAD..HEAD" = 0.
+//
+// A non-empty sha is validated via IsValidCommitSha before ever shelling
+// out (#852): a malformed sha -- in particular one beginning with `-`,
+// which git would otherwise parse as an option once concatenated into
+// "<sha>..HEAD" -- is rejected with an error rather than spliced into the
+// git invocation (closing an argument-injection hole internal/pipeline
+// already guards against, but ReadPlans historically did not).
 func CommitsBehind(dir, sha string, paths []string) (int, error) {
 	return CommitsBehindRef(dir, sha, "HEAD", paths)
 }
@@ -113,21 +159,34 @@ func CommitsBehind(dir, sha string, paths []string) (int, error) {
 // transient error) is propagated rather than swallowed to 0 -- see
 // CommitsBehind's own doc comment above for the full rationale.
 //
-// sha is validated against commitShaPattern before it ever reaches git argv
-// construction: a value beginning with `-` (e.g. "--upload-pack=x") would
-// otherwise be interpreted as a git option rather than a revision, since sha
-// comes straight from a `.plans/<id>-*.md` file's untrusted front matter. An
-// empty sha skips validation (matching pipeline/planfile.go's own
-// planIsStale guard exactly) and is passed through to git as before.
+// sha == "" short-circuits to (0, nil) before ever invoking git (#852 D2):
+// an empty planCommitSha is deliberate absence-by-design for a legacy
+// pre-planCommitSha plan file, not a staleness-calculation error, so it must
+// never reach AC5's "staleness calculation errors" default-deny path. This
+// makes the "fresh" verdict for an empty sha explicit rather than an
+// accidental consequence of git resolving "..<ref>" as "<ref>..<ref>" = 0.
+//
+// A non-empty sha is validated via IsValidCommitSha before it ever reaches
+// git argv construction: a value beginning with `-` (e.g. "--upload-pack=x")
+// would otherwise be interpreted as a git option rather than a revision,
+// since sha comes straight from a `.plans/<id>-*.md` file's untrusted front
+// matter.
 func CommitsBehindRef(dir, sha, ref string, paths []string) (int, error) {
-	if sha != "" && !commitShaPattern.MatchString(sha) {
+	if sha == "" {
+		return 0, nil
+	}
+	if !IsValidCommitSha(sha) {
 		return 0, fmt.Errorf("invalid planCommitSha %q: must match %s", sha, commitShaPattern.String())
 	}
 	args := []string{"-C", dir, "rev-list", "--count", sha + ".." + ref}
 	if len(paths) > 0 {
 		args = append(append(args, "--"), paths...)
 	}
-	out, err := exec.Command("git", args...).Output()
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.WaitDelay = gitWaitDelay
+	out, err := cmd.Output()
 	if err != nil {
 		return 0, fmt.Errorf("git rev-list --count %s..%s: %w", sha, ref, err)
 	}

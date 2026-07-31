@@ -161,16 +161,29 @@ func probeEscalationAnswer(repo string, number int, budget *answerProbeBudget, o
 	return classifyComments(v.Comments)
 }
 
-// maxProbeLogDetailBytes bounds the collapsed gh output logged on a failed
-// escalation-answer probe (#827 review fix #3): unlike dependency.go's small
-// `{"state":...}` payload this logging pattern was copied from, `--json
-// comments` stdout can be the entire comment thread on a busy ticket — an
-// unbounded log line here would let one ticket's comment content flood
-// dispatch's log output.
+// maxProbeLogDetailBytes bounds the collapsed gh output logged/errored on a
+// failed gh call whose stdout can carry substantial (possibly
+// attacker-authored, on a public repo) content (#827 review fix #3): unlike
+// dependency.go's small `{"state":...}` payload this logging pattern was
+// originally copied from, a call like `--json comments` or `--json
+// closingIssuesReferences` can return an entire comment thread or PR list on
+// a busy repo — an unbounded log line/error string here would let that
+// content flood dispatch's log output, and a ghTimeout kill mid-stream
+// (#852 review finding #3) can additionally leave a large partial payload in
+// stdout even on an otherwise-small call. Reused at every execGh call site
+// in this package whose diagnostic detail is not already known-small
+// (currentGitHubLogin/openPRIssues in collect.go, countAttempts in
+// reconcile_run.go, probeEscalationAnswer below).
 const maxProbeLogDetailBytes = 500
 
-// truncateDetail bounds s to at most max bytes for logging, appending a
-// truncation marker when it cuts content off. Byte-based (not rune-aware) is
+// truncationMarker is appended by truncateDetail when it cuts content off,
+// counted against max so the result never exceeds max bytes overall (#852:
+// dependency.go's maxDependencyTokenBytes cap on an anomaly token relies on
+// this being a hard, inclusive bound, not merely a floor).
+const truncationMarker = "... (truncated)"
+
+// truncateDetail bounds s to at most max bytes for logging (inclusive of
+// truncationMarker when it cuts content off). Byte-based (not rune-aware) is
 // acceptable here: this is diagnostic log detail only, never parsed
 // downstream, so a severed multi-byte rune at the cut boundary is a cosmetic
 // wrinkle at worst.
@@ -178,7 +191,10 @@ func truncateDetail(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
-	return s[:max] + "... (truncated)"
+	if max <= len(truncationMarker) {
+		return s[:max]
+	}
+	return s[:max-len(truncationMarker)] + truncationMarker
 }
 
 // classifyComments is the pure core of the answer probe (#827): it never

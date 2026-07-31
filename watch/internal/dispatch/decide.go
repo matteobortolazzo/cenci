@@ -73,6 +73,27 @@ const (
 	reasonDependencyWaitingFmt      = "waiting on dependency #%d"
 	reasonDependencyUnresolvedFmt   = "dependency #%d unresolved"
 	reasonDependencyStateUnknownFmt = "dependency #%d state unrecognized"
+	// reasonDependencyMalformedFmt (#852) names the malformed token itself
+	// (already truncated to maxDependencyTokenBytes by parseDependsOn) so a
+	// syntactically matching "Depends on #N" number that overflows or
+	// cannot be represented is reported distinctly from every known
+	// DependencyState reason above -- fails closed rather than being
+	// silently dropped as "no dependency declared".
+	reasonDependencyMalformedFmt = "dependency reference malformed: %q"
+)
+
+// Plan-probe gate skip reasons (#852). reasonPlanProbeUnknown is
+// deliberately distinct from every other reason here, for the same reason
+// reasonStageProbeUnknown/reasonMainSyncUnknown/reasonDependencyStateUnknownFmt
+// are each distinct from their siblings above: a regression collapsing the
+// gate switch's default branch into a known case must be caught by a
+// content-specific assertion (#446/#598), not silently pass.
+const (
+	reasonPlanProbeUnreadable      = "plan file unreadable"
+	reasonPlanProbeMalformed       = "plan file malformed"
+	reasonPlanProbeTicketIDInvalid = "plan file ticket id unresolvable"
+	reasonPlanProbeStale           = "plan staleness could not be determined"
+	reasonPlanProbeUnknown         = "plan probe unrecognized"
 )
 
 // Resume-gate skip reasons (#827). reasonAnswerProbeUnknown is deliberately
@@ -121,6 +142,14 @@ type Inputs struct {
 	// at all when PlanRefined is false (dispatch.planRefined remains the
 	// fleet kill switch, but repo-lean alone never authorizes planning).
 	RepoAutonomy map[string]RepoAutonomy
+
+	// PlanProbes maps planKey(repo, ticketId) -> the resolved PlanProbe for
+	// every plan file ReadPlans encountered this pass (#852), resolved
+	// entirely inside the collector -- Decide only ever reads this map, it
+	// never does I/O itself (Decide's own purity contract, mirroring
+	// Answers above). A ticket with no entry here is the true "verified
+	// absent" case (PlanProbeAbsent, the zero value).
+	PlanProbes map[string]PlanProbe
 }
 
 // Decide is pure: identical Inputs yield an identical ordered []Decision with no
@@ -200,6 +229,23 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 	// gate: a Refined ticket with no plan must be admitted past rule 1
 	// instead of being turned away as "not Planned".
 	plan := planByTicket[planKey(t.Repo, t.Number)]
+
+	// Plan-probe gate (#852), evaluated immediately after the plan lookup
+	// and BEFORE planning (below) is computed: a plan file that exists but
+	// is broken in some way (unreadable, malformed front matter, an
+	// unresolvable ticket id) must never be treated as "no plan file" and
+	// fall through into the stage-aware planning-pickup gate as a fresh
+	// planning candidate (AC4, the ticket's headline regression) -- that
+	// would launch a spurious/duplicate planning session on top of a plan
+	// file that is simply mid-write or otherwise broken. A verified-absent
+	// plan (PlanProbeAbsent, the zero value -- no entry in PlanProbes at
+	// all) and a healthy plan (PlanProbeOk) both pass through unaffected,
+	// as does a staleness-calculation error (PlanProbeStalenessError,
+	// handled separately at rule 4 below, since content-trust and
+	// staleness are distinct failure classes).
+	if reason, gated := planProbeSkip(in.PlanProbes[planKey(t.Repo, t.Number)]); gated {
+		return skip(reason)
+	}
 
 	// planning (#828) is true when this ticket is a fresh stage-aware
 	// planning candidate: dispatch.planRefined is on, it carries Refined but
@@ -298,21 +344,33 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 	// autonomous re-plan (#828) -- replanning falls through the remaining
 	// gates instead of terminating here.
 	replanning := false
-	if !resuming && !planning && plan.CommitsBehind > in.Config.PlanStalenessTolerance {
-		if !in.Config.PlanRefined {
-			return skip("plan stale, re-plan")
+	if !resuming && !planning {
+		// A staleness-calculation error (#852 AC5) must never resolve to
+		// unknown-fresh: it is checked alongside the CommitsBehind
+		// comparison, inside this same !resuming && !planning guard, so it
+		// never gates a resuming ticket (mirroring CheckPlan's own
+		// awaiting-input-before-planIsStale short-circuit) and never
+		// applies to a planning candidate (which has no matched plan to
+		// measure staleness against in the first place).
+		if reason, gated := planStalenessSkip(in.PlanProbes[planKey(t.Repo, t.Number)]); gated {
+			return skip(reason)
 		}
-		// Per-repository lean-authorization gate (#851): an autonomous
-		// re-plan is subject to the same repo-lean requirement as a fresh
-		// planning pickup above. A denial composes the staleness fact with
-		// the autonomy reason, rather than either the flag-off literal
-		// "plan stale, re-plan" (which would misleadingly imply the flag
-		// itself is off) or the bare autonomy reason alone (which would lose
-		// the staleness context).
-		if reason, gated := autonomyGateSkip(in.RepoAutonomy[t.Repo]); gated {
-			return skip(fmt.Sprintf("plan stale, re-plan blocked: %s", reason))
+		if plan.CommitsBehind > in.Config.PlanStalenessTolerance {
+			if !in.Config.PlanRefined {
+				return skip("plan stale, re-plan")
+			}
+			// Per-repository lean-authorization gate (#851): an autonomous
+			// re-plan is subject to the same repo-lean requirement as a fresh
+			// planning pickup above. A denial composes the staleness fact with
+			// the autonomy reason, rather than either the flag-off literal
+			// "plan stale, re-plan" (which would misleadingly imply the flag
+			// itself is off) or the bare autonomy reason alone (which would lose
+			// the staleness context).
+			if reason, gated := autonomyGateSkip(in.RepoAutonomy[t.Repo]); gated {
+				return skip(fmt.Sprintf("plan stale, re-plan blocked: %s", reason))
+			}
+			replanning = true
 		}
-		replanning = true
 	}
 
 	// Pickup rule 5: Depends on #N dependency gate (#825). A plan written
@@ -563,6 +621,47 @@ func autonomyGateSkip(a RepoAutonomy) (string, bool) {
 	}
 }
 
+// planProbeSkip evaluates the content-trust half of the plan-probe gate
+// (#852) for probe -- the PlanProbe classification of the plan file matched
+// (or not) to one ticket. It returns (reason, true) when the plan file is
+// broken input that must default-deny, and ("", false) for the three
+// classes that pass: PlanProbeAbsent (verified absence -- no plan file
+// matched this ticket at all, the zero value), PlanProbeOk (a healthy,
+// cleanly parsed plan), and PlanProbeStalenessError (a distinct failure
+// class handled separately by planStalenessSkip at rule 4, since a
+// staleness-calculation error does not impugn the plan's own content).
+func planProbeSkip(probe PlanProbe) (string, bool) {
+	switch probe {
+	case PlanProbeAbsent, PlanProbeOk, PlanProbeStalenessError:
+		return "", false
+	case PlanProbeReadError:
+		return reasonPlanProbeUnreadable, true
+	case PlanProbeParseError:
+		return reasonPlanProbeMalformed, true
+	case PlanProbeTicketIDError:
+		return reasonPlanProbeTicketIDInvalid, true
+	default:
+		// Unrecognized PlanProbe value: default-deny with its own distinct
+		// reason (not any of the three known reasons above) so a regression
+		// collapsing this branch is caught by assertion, per #446/#598.
+		return reasonPlanProbeUnknown, true
+	}
+}
+
+// planStalenessSkip evaluates the staleness-calculation half of the
+// plan-probe gate (#852) for probe. Only PlanProbeStalenessError gates here
+// -- every other PlanProbe value (including an unrecognized one, already
+// caught by planProbeSkip above) is content-trust territory, not staleness.
+// A staleness-calculation error must never resolve to unknown-fresh (AC5):
+// treating it as "0 commits behind" would silently readmit a ticket whose
+// freshness could not actually be verified.
+func planStalenessSkip(probe PlanProbe) (string, bool) {
+	if probe == PlanProbeStalenessError {
+		return reasonPlanProbeStale, true
+	}
+	return "", false
+}
+
 // dependencyGateSkip evaluates the Depends-on-#N dependency gate (#825) for
 // t, with zero I/O -- every DependencyState was already resolved by the
 // collector (dependency.go/collect.go), never here (Decide's own purity
@@ -572,7 +671,18 @@ func autonomyGateSkip(a RepoAutonomy) (string, bool) {
 // DependsOn zero value, the true "ungated" case). Mirrors blockingSibling's
 // lowest-number-wins determinism rather than reporting body-parse order: the
 // lowest blocking number is reported when multiple dependencies block.
+//
+// t.DependencyAnomalies (#852) is checked first, before the numeric loop:
+// a ticket whose body declares a syntactically matching "Depends on #N"
+// reference that could not be classified as a valid dependency at all (an
+// overflowing/out-of-range number) must hold rather than silently dispatch
+// as if the reference never existed. The first anomaly in body order is
+// reported (AC2), naming the malformed token via reasonDependencyMalformedFmt.
 func dependencyGateSkip(t Ticket) (string, bool) {
+	if len(t.DependencyAnomalies) > 0 {
+		return fmt.Sprintf(reasonDependencyMalformedFmt, t.DependencyAnomalies[0]), true
+	}
+
 	blocking := -1
 	var reason string
 	consider := func(n int, r string) {

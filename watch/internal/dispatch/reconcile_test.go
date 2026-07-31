@@ -374,6 +374,52 @@ func TestReconcilePlannedNotReadyPlanLeftAlone(t *testing.T) {
 	}
 }
 
+// -- #852 AC3: verified plan absence vs. plan-probe errors, reconciler side -
+
+// TestReconcilePlanProbeGate_MissingPlan_EscalatesToPlanInvalid pins the
+// "missing" half of AC3 at the reconciler layer: a Planned, not-Working
+// ticket with a verified-absent plan probe (nothing in PlanProbes, the zero
+// value) still escalates to RecoveryPlanInvalid once grace has elapsed --
+// unchanged from before #852.
+func TestReconcilePlanProbeGate_MissingPlan_EscalatesToPlanInvalid(t *testing.T) {
+	in := workingInputs()
+	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Planned"}}}
+	in.Plans = nil
+
+	res := Reconcile(in)
+	rec := onlyRecovery(t, res)
+	if rec.Kind != RecoveryPlanInvalid {
+		t.Errorf("kind = %q, want %q", rec.Kind, RecoveryPlanInvalid)
+	}
+	if !hasFailed(res, "o/r", 42) {
+		t.Error("a genuinely missing plan must still be surfaced in Failed")
+	}
+}
+
+// TestReconcilePlanProbeGate_UnreadablePlan_DefersRatherThanEscalating pins
+// the "unreadable" half of AC3: a Planned, not-Working ticket whose plan
+// file exists but could not be read (PlanProbeReadError) must never be
+// escalated to plan-invalid on a transient os.ReadFile hiccup -- it defers
+// (no Recovery, no Failed entry), preserving the grace observation so a
+// later pass can retry once the transient condition clears.
+func TestReconcilePlanProbeGate_UnreadablePlan_DefersRatherThanEscalating(t *testing.T) {
+	in := workingInputs()
+	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Planned"}}}
+	in.Plans = nil
+	in.PlanProbes = map[string]PlanProbe{"o/r#42": PlanProbeReadError}
+
+	res := Reconcile(in)
+	if len(res.Recoveries) != 0 {
+		t.Fatalf("an unreadable plan must produce no recovery, got %+v", res.Recoveries)
+	}
+	if hasFailed(res, "o/r", 42) {
+		t.Error("an unreadable plan must never be surfaced in Failed (deferred, not failed)")
+	}
+	if ts, ok := res.NextObservations["o/r#42"]; !ok || !ts.Equal(reconcileNow.Add(-10*time.Minute)) {
+		t.Errorf("expected the grace observation preserved at the original first-seen time, got %v (present=%v)", ts, ok)
+	}
+}
+
 func TestReconcileOrphanPlanReportOnly(t *testing.T) {
 	in := workingInputs()
 	// A plan whose ticket is not open (not in Tickets).
@@ -565,6 +611,37 @@ func TestReconcileWorkingRefinedAndPlannedNoPlan_FallsThroughToStageAwareRetry(t
 	}
 }
 
+// TestReconcileCrashedPlanningPickup_ProbeErrorDefersRatherThanTreatingAbsent
+// covers the Phase 6+7 review's medium finding #2, mirroring
+// TestReconcilePlanProbeGate_UnreadablePlan_DefersRatherThanEscalating's
+// pattern for the RecoveryRetry stage-aware branch: a Working+Refined ticket
+// with no matched plan file whose plan probe errored (PlanProbeReadError,
+// e.g. a mid-write file) must NOT be treated as verified-absent -- it must
+// fall back to the ordinary +Planned retry (AddLabels: [Planned]), not the
+// stage-aware nil AddLabels reserved for a genuinely absent plan. Before the
+// fix, planByTicket[key] == nil alone (ambiguous between verified-absent and
+// probe-errored) drove this decision, so a probe-errored plan silently
+// withheld the Planned label at this state-mutating call site exactly like
+// a verified-absent one.
+func TestReconcileCrashedPlanningPickup_ProbeErrorDefersRatherThanTreatingAbsent(t *testing.T) {
+	in := workingInputs()
+	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Working", "Refined"}}}
+	in.Plans = nil
+	in.PlanProbes = map[string]PlanProbe{"o/r#42": PlanProbeReadError}
+	res := Reconcile(in)
+
+	rec := onlyRecovery(t, res)
+	if rec.Kind != RecoveryRetry {
+		t.Errorf("kind = %q, want %q", rec.Kind, RecoveryRetry)
+	}
+	if !containsStr(rec.AddLabels, labelPlanned) || len(rec.AddLabels) != 1 {
+		t.Errorf("AddLabels = %v, want exactly [%s] (a probe-errored plan must defer to the ordinary retry, never treated as verified-absent)", rec.AddLabels, labelPlanned)
+	}
+	if !containsStr(rec.RemoveLabels, labelWorking) || len(rec.RemoveLabels) != 1 {
+		t.Errorf("RemoveLabels = %v, want exactly [%s]", rec.RemoveLabels, labelWorking)
+	}
+}
+
 // TestReconcileWorkingPlannedTicketPastGrace_RecoveryRetryReachable is the
 // dedicated regression test for the reconciler branch-ordering bug (#828
 // review fix #1): before the fix, ANY Planned ticket with a matched plan
@@ -658,5 +735,22 @@ func TestCountAttemptsRegressionAgainstTheThreeNewMarkers(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("countAttempts = %d, want 0 (none of the three new markers is attemptMarker)", n)
+	}
+}
+
+// TestCountAttempts_LargeGhOutputOnFailure_ErrorBounded pins #852 review
+// finding #3: `--json comments` stdout can be an entire (possibly
+// attacker-authored, on a public repo) comment thread, and a ghTimeout kill
+// mid-stream can leave a large partial payload -- the returned error string
+// must be bounded rather than splicing that content in verbatim.
+func TestCountAttempts_LargeGhOutputOnFailure_ErrorBounded(t *testing.T) {
+	installFakeGHOnPath(t, "yes x | tr -d '\\n' | head -c 5000 >&2\nexit 1\n")
+
+	_, err := countAttempts("o/r", 42)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if got := len(err.Error()); got > maxProbeLogDetailBytes+200 {
+		t.Fatalf("error string not bounded: got %d bytes (want roughly <= %d): %q", got, maxProbeLogDetailBytes, err.Error()[:200])
 	}
 }

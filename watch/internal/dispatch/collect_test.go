@@ -66,6 +66,27 @@ func TestCurrentGitHubLogin(t *testing.T) {
 			t.Fatalf("error = %v, want empty-login error", err)
 		}
 	})
+
+	// TestCurrentGitHubLogin/large gh output on failure is bounded pins #852
+	// review finding #3: a ghTimeout kill mid-stream (or a verbose gh
+	// diagnostic) can leave a large payload in stdout/stderr, and the
+	// resulting error string must be bounded, not splice that content in
+	// verbatim. Uses installFakeGHOnPath (#852 second review round, finding
+	// C), not installFakeGH: installFakeGH replaces PATH wholesale, which
+	// makes the shim's own `yes`/`tr`/`head` pipeline unresolvable (no shell
+	// builtins on PATH), so it emits a short "command not found" message
+	// instead of the intended 5000-byte payload -- the test would then still
+	// pass even with truncateDetail removed entirely.
+	t.Run("large gh output on failure is bounded", func(t *testing.T) {
+		installFakeGHOnPath(t, "yes x | tr -d '\\n' | head -c 5000 >&2\nexit 1\n")
+		_, err := currentGitHubLogin()
+		if err == nil {
+			t.Fatal("expected an error")
+		}
+		if got := len(err.Error()); got > maxProbeLogDetailBytes+200 {
+			t.Fatalf("error string not bounded: got %d bytes (want roughly <= %d): %q", got, maxProbeLogDetailBytes, err.Error()[:200])
+		}
+	})
 }
 
 func TestCollectRepoTicketsIncludesAssignees(t *testing.T) {
@@ -83,6 +104,62 @@ esac
 	}
 	if len(tickets) != 1 || !equalStrings(tickets[0].Assignees, []string{"octocat"}) {
 		t.Fatalf("tickets = %+v, want one ticket assigned to octocat", tickets)
+	}
+}
+
+// TestOpenPRIssues_LargeGhOutputOnFailure_ErrorBounded pins #852 review
+// finding #3 for openPRIssues: `--json closingIssuesReferences` stdout on a
+// busy repo can be large, and a ghTimeout kill mid-stream can leave a large
+// partial payload -- the returned error string must be bounded rather than
+// splicing that content in verbatim, exercised via the collectRepoTickets
+// caller since openPRIssues is not directly exported. Uses
+// installFakeGHOnPath (#852 second review round, finding C): installFakeGH
+// replaces PATH wholesale, leaving the shim's `yes`/`tr`/`head` pipeline
+// unresolvable, so it would emit a short error instead of the intended
+// 5000-byte payload and the test would pass even with truncateDetail
+// removed.
+func TestOpenPRIssues_LargeGhOutputOnFailure_ErrorBounded(t *testing.T) {
+	installFakeGHOnPath(t, `
+case "$1 $2" in
+  "issue list") printf '[]' ;;
+  "pr list") yes x | tr -d '\n' | head -c 5000 >&2; exit 1 ;;
+  *) exit 1 ;;
+esac
+`)
+
+	_, err := collectRepoTickets(RepoConfig{Repo: "o/r"}, MainSyncSkipped, true, io.Discard)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if got := len(err.Error()); got > maxProbeLogDetailBytes+200 {
+		t.Fatalf("error string not bounded: got %d bytes (want roughly <= %d): %q", got, maxProbeLogDetailBytes, err.Error()[:200])
+	}
+}
+
+// TestCollectRepoTickets_IssueListLargeGhOutputOnFailure_ErrorBounded pins
+// #852 second review round, finding B: the `gh issue list` error path was
+// newly introduced by this ticket's execGh migration and left unbounded --
+// `--json number,title,body,labels,assignees --limit 200` can return up to
+// 200 full issue bodies (potentially attacker-authored content on a public
+// repo), and a ghTimeout/WaitDelay kill mid-stream can leave a large partial
+// payload spliced into the propagated error verbatim. Uses
+// installFakeGHOnPath, mirroring the other two bounded-output regression
+// tests in this file, so the shim's `yes`/`tr`/`head` pipeline actually
+// produces the intended large payload instead of a vacuous short error.
+func TestCollectRepoTickets_IssueListLargeGhOutputOnFailure_ErrorBounded(t *testing.T) {
+	installFakeGHOnPath(t, `
+case "$1 $2" in
+  "issue list") yes x | tr -d '\n' | head -c 5000 >&2; exit 1 ;;
+  *) exit 1 ;;
+esac
+`)
+
+	_, err := collectRepoTickets(RepoConfig{Repo: "o/r"}, MainSyncSkipped, true, io.Discard)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if got := len(err.Error()); got > maxProbeLogDetailBytes+200 {
+		t.Fatalf("error string not bounded: got %d bytes (want roughly <= %d): %q", got, maxProbeLogDetailBytes, err.Error()[:200])
 	}
 }
 
@@ -242,9 +319,9 @@ body
 `)
 
 	pathsBySha := make(map[string][]string)
-	plans, err := ReadPlans("o/r", dir, func(sha string, paths []string) int {
+	plans, _, err := ReadPlans("o/r", dir, func(sha string, paths []string) (int, error) {
 		pathsBySha[sha] = paths
-		return 7
+		return 7, nil
 	}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
@@ -291,7 +368,7 @@ body
 `)
 
 	var buf strings.Builder
-	plans, err := ReadPlans("o/r", dir, func(sha string, paths []string) int { return 0 }, &buf)
+	plans, _, err := ReadPlans("o/r", dir, func(sha string, paths []string) (int, error) { return 0, nil }, &buf)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,6 +417,116 @@ func TestSyncStatuses_AdaptsMainSyncResultMapForCollectTickets(t *testing.T) {
 		if tk.MainSync != MainSyncDiverged {
 			t.Errorf("ticket #%d MainSync = %q, want MainSyncDiverged (via the syncStatuses adapter)", tk.Number, tk.MainSync)
 		}
+	}
+}
+
+// -- #852 AC5: staleness-calculation errors classify PlanProbeStalenessError
+
+// TestReadPlans_CommitsBehindSeamError_ClassifiesStalenessError covers AC5's
+// collector-side half: when the injected commitsBehind seam returns an
+// error, ReadPlans must classify PlanProbeStalenessError for that plan's
+// key rather than silently swallowing the error and leaving CommitsBehind
+// at its zero-value "fresh" -- the exact bug this ticket targets (today's
+// `n, _ := planfile.CommitsBehind(...)` swallows the error).
+func TestReadPlans_CommitsBehindSeamError_ClassifiesStalenessError(t *testing.T) {
+	dir := t.TempDir()
+	writePlan(t, dir, "42-x.md", `---
+ticketId: 42
+status: planned
+planCommitSha: aaa111
+---
+body
+`)
+
+	plans, probes, err := ReadPlans("o/r", dir, func(sha string, paths []string) (int, error) {
+		return 0, fmt.Errorf("boom")
+	}, io.Discard)
+	if err != nil {
+		t.Fatalf("ReadPlans returned unexpected top-level error: %v", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("expected the plan kept (content-trust fields parsed fine), got %d: %+v", len(plans), plans)
+	}
+	key := planKey("o/r", 42)
+	if got := probes[key]; got != PlanProbeStalenessError {
+		t.Errorf("PlanProbes[%q] = %q, want PlanProbeStalenessError", key, got)
+	}
+}
+
+// TestReadPlans_DuplicateTicketID_ProbeFirstWinsMatchesMatchedPlan covers the
+// Phase 6+7 review's critical finding #1: two plan files that both resolve
+// to the same ticketId -- a healthy one processed first, and a broken
+// (mid-write) duplicate processed second -- must leave probes[key] at the
+// healthy first file's classification (PlanProbeOk), matching the plan
+// actually selected into plans (first-wins, mirroring Reconcile/Decide's own
+// planByTicket matching). Before the fix, probes recorded last-write-wins,
+// so the second (broken) file's classification silently clobbered the
+// first's healthy one even though the matched plan itself was unaffected --
+// a false-positive plan-probe gate block on a ticket with a perfectly good
+// matched plan.
+func TestReadPlans_DuplicateTicketID_ProbeFirstWinsMatchesMatchedPlan(t *testing.T) {
+	dir := t.TempDir()
+	// Sorted so the healthy file is processed first and the broken
+	// (unparseable front matter) duplicate second -- "42-a" < "42-b".
+	writePlan(t, dir, "42-a-healthy.md", `---
+ticketId: 42
+status: planned
+---
+body
+`)
+	writePlan(t, dir, "42-b-broken.md", "no front matter here, mid-write\n")
+
+	var buf strings.Builder
+	plans, probes, err := ReadPlans("o/r", dir, func(sha string, paths []string) (int, error) { return 0, nil }, &buf)
+	if err != nil {
+		t.Fatalf("ReadPlans returned unexpected error: %v", err)
+	}
+	if len(plans) != 1 || plans[0].TicketID != 42 {
+		t.Fatalf("expected exactly the healthy plan matched, got %d plans: %+v", len(plans), plans)
+	}
+
+	key := planKey("o/r", 42)
+	if got := probes[key]; got != PlanProbeOk {
+		t.Errorf("PlanProbes[%q] = %q, want PlanProbeOk (must match the plan actually selected, never overwritten by the later broken duplicate)", key, got)
+	}
+}
+
+// TestReadPlans_DuplicateTicketID_ProbeFirstWinsMatchesMatchedPlan_ReverseOrder
+// covers the reverse ordering left open by the Phase 6+7 review's original
+// fix (#852 second review round, finding A): a broken/unparseable file that
+// glob-sorts BEFORE its healthy duplicate for the same ticketId. plans/
+// planByTicket is first-wins only over successfully-parsed files (a
+// probe-errored file is dropped from plans entirely, never added), so the
+// healthy file here is still the one matched into plans even though the
+// broken file was probed first. probes[key] must reflect that match
+// (PlanProbeOk), not the broken file's error classification -- a plain
+// first-wins-over-everything guard on probes alone locks in the broken
+// file's classification and would falsely gate a ticket that has a
+// perfectly good matched plan.
+func TestReadPlans_DuplicateTicketID_ProbeFirstWinsMatchesMatchedPlan_ReverseOrder(t *testing.T) {
+	dir := t.TempDir()
+	// Sorted so the broken (unparseable front matter) file is processed
+	// first and the healthy duplicate second -- "42-a" < "42-b".
+	writePlan(t, dir, "42-a-broken.md", "no front matter here, mid-write\n")
+	writePlan(t, dir, "42-b-healthy.md", `---
+ticketId: 42
+status: planned
+---
+body
+`)
+
+	var buf strings.Builder
+	plans, probes, err := ReadPlans("o/r", dir, func(sha string, paths []string) (int, error) { return 0, nil }, &buf)
+	if err != nil {
+		t.Fatalf("ReadPlans returned unexpected error: %v", err)
+	}
+	if len(plans) != 1 || plans[0].TicketID != 42 {
+		t.Fatalf("expected exactly the healthy plan matched, got %d plans: %+v", len(plans), plans)
+	}
+
+	key := planKey("o/r", 42)
+	if got := probes[key]; got != PlanProbeOk {
+		t.Errorf("PlanProbes[%q] = %q, want PlanProbeOk (must match the plan actually selected, not the earlier-processed broken file's error classification)", key, got)
 	}
 }
 

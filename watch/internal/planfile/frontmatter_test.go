@@ -1,11 +1,13 @@
 package planfile
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // gitTest runs a git command in dir with a pinned identity, failing the test
@@ -110,6 +112,120 @@ func TestAtoiSafe(t *testing.T) {
 		if got := AtoiSafe(in); got != want {
 			t.Errorf("AtoiSafe(%q) = %d, want %d", in, got, want)
 		}
+	}
+}
+
+// installFakeGitOnPath installs a fake `git` on PATH, PREPENDED (not
+// replacing PATH wholesale), mirroring internal/dispatch's
+// installFakeGHOnPath convention -- lets a test drive CommitsBehind against
+// a scripted `git` without needing a real repo.
+func installFakeGitOnPath(t *testing.T, script string) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "git")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// -- #852 D2: CommitsBehind's empty-sha short-circuit ------------------------
+
+// TestCommitsBehind_EmptyShaShortCircuits_NoGitInvocation covers D2: an
+// empty planCommitSha (a legacy pre-planCommitSha plan file) must return
+// (0, nil) via an explicit short-circuit BEFORE ever invoking git, not by
+// relying on git's own "..HEAD" == "HEAD..HEAD" == 0 coincidence. Proven by
+// a fake `git` that records a marker file on any invocation and always
+// fails -- if the short-circuit were bypassed, the fake would both be
+// invoked (marker present) and return a non-nil error.
+func TestCommitsBehind_EmptyShaShortCircuits_NoGitInvocation(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "git.invoked")
+	installFakeGitOnPath(t, fmt.Sprintf("printf 'x' >> %q\nexit 1\n", marker))
+
+	got, err := CommitsBehind(dir, "", nil)
+	if err != nil || got != 0 {
+		t.Fatalf(`CommitsBehind(dir, "", nil) = (%d, %v), want (0, nil)`, got, err)
+	}
+	if _, statErr := os.Stat(marker); statErr == nil {
+		t.Fatal("CommitsBehind invoked git for an empty sha; want the empty-sha short-circuit to never shell out")
+	} else if !os.IsNotExist(statErr) {
+		t.Fatalf("checking marker file: %v", statErr)
+	}
+}
+
+// -- #852 D2: IsValidCommitSha -----------------------------------------------
+
+// TestIsValidCommitSha covers D2's hex-pattern validation, mirroring
+// internal/pipeline's own planCommitShaPattern (^[0-9a-fA-F]{7,40}$):
+// valid full and abbreviated hex shas pass; a too-short/too-long/non-hex/
+// leading-dash sha (the argument-injection shape) and the empty string all
+// fail.
+func TestIsValidCommitSha(t *testing.T) {
+	cases := map[string]bool{
+		"abc123d": true, // 7 hex chars: the minimum valid abbreviation
+		"1234567890abcdef1234567890abcdef12345678": true, // 40 hex chars: a full sha
+		"abc12": false, // too short (5 hex chars)
+		"1234567890abcdef1234567890abcdef123456789ab": false, // too long (44 hex chars)
+		"abcdefg": false, // 'g' is not a hex digit
+		"-rf":     false, // leading-dash argument-injection shape
+		"--force": false, // leading-dash argument-injection shape
+		"":        false, // empty: callers must short-circuit before ever consulting this
+	}
+	for sha, want := range cases {
+		if got := IsValidCommitSha(sha); got != want {
+			t.Errorf("IsValidCommitSha(%q) = %v, want %v", sha, got, want)
+		}
+	}
+}
+
+// TestCommitsBehind_MalformedShaRejectedBeforeShellingOut covers D2's
+// argument-injection closure: a sha beginning with `-` must be rejected by
+// IsValidCommitSha before CommitsBehind ever shells out to git -- otherwise
+// it is spliced verbatim into "<sha>..HEAD" and handed to `git rev-list`,
+// which could parse it as an option rather than a revision. Proven the same
+// way as the empty-sha test above: a fake `git` that records invocation and
+// always fails.
+func TestCommitsBehind_MalformedShaRejectedBeforeShellingOut(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "git.invoked")
+	installFakeGitOnPath(t, fmt.Sprintf("printf 'x' >> %q\nexit 1\n", marker))
+
+	if _, err := CommitsBehind(dir, "-rf", nil); err == nil {
+		t.Fatal("expected an error for a malformed/leading-dash sha")
+	}
+	if _, statErr := os.Stat(marker); statErr == nil {
+		t.Fatal("CommitsBehind invoked git for a malformed sha; want IsValidCommitSha to reject it before shelling out")
+	} else if !os.IsNotExist(statErr) {
+		t.Fatalf("checking marker file: %v", statErr)
+	}
+}
+
+// -- #852 AC6: CommitsBehind's git rev-list subprocess bounding --------------
+
+// TestCommitsBehind_HungGrandchildHoldingStdout_ReturnsWithinWaitDelay
+// mirrors internal/dispatch's TestExecGit_HungGrandchildHoldingStdout_
+// ReturnsWithinWaitDelay (mainsync_test.go:392) and TestExecGh's sibling
+// test (gh_test.go): a `git` invocation whose process exits normally but
+// leaves a background grandchild holding the stdout pipe open must not
+// stall CommitsBehind past its bounded WaitDelay.
+func TestCommitsBehind_HungGrandchildHoldingStdout_ReturnsWithinWaitDelay(t *testing.T) {
+	dir := t.TempDir()
+	script := "#!/bin/sh\n(sleep 30 &) \nexit 0\n"
+	installFakeGitOnPath(t, script)
+
+	start := time.Now()
+	_, err := CommitsBehind(dir, "deadbeef", nil)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("CommitsBehind returned nil error; expected the documented WaitDelay-forced-close error")
+	}
+	if elapsed > 20*time.Second {
+		t.Fatalf("CommitsBehind took %v, want it to return well within gitTimeout thanks to WaitDelay (~%v)", elapsed, gitWaitDelay)
+	}
+	if elapsed < gitWaitDelay {
+		t.Fatalf("CommitsBehind returned in %v, faster than gitWaitDelay (%v) -- test may not be exercising the intended lingering-grandchild path", elapsed, gitWaitDelay)
 	}
 }
 

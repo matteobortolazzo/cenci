@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -1705,4 +1706,148 @@ func TestDecideAutonomyGate_ReplanLeanDispatches(t *testing.T) {
 	in.RepoAutonomy = leanAutonomy("o/r")
 	in.Plans[0].CommitsBehind = 10 // stale
 	assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "re-plan — plan stale", "claude"}})
+}
+// -- #852 AC2: mixed valid and malformed dependency lines --------------------
+
+// TestDecideDependencyGate_MixedValidAndMalformedDependency_HeldWithTruncatedToken
+// covers AC2: a body containing both a valid, already-closed dependency
+// (#10) and a malformed/overflowing token holds the ticket, naming the
+// malformed token in the skip reason, and that token is truncated to
+// maxDependencyTokenBytes so a hostile digit run can never flood the log
+// line.
+func TestDecideDependencyGate_MixedValidAndMalformedDependency_HeldWithTruncatedToken(t *testing.T) {
+	hugeDigits := strings.Repeat("9", maxDependencyTokenBytes*2)
+	body := "Depends on #10\nDepends on #" + hugeDigits
+
+	nums, anomalies := parseDependsOn(body)
+	if !equalInts(nums, []int{10}) {
+		t.Fatalf("nums = %v, want [10] (the huge digit run must never resolve to a valid dependency)", nums)
+	}
+	if len(anomalies) != 1 {
+		t.Fatalf("anomalies = %v, want exactly one anomaly for the huge digit run", anomalies)
+	}
+	if len(anomalies[0]) > maxDependencyTokenBytes {
+		t.Fatalf("anomaly token length = %d bytes, want truncated to at most maxDependencyTokenBytes (%d)", len(anomalies[0]), maxDependencyTokenBytes)
+	}
+
+	in := baseInputs()
+	in.Tickets[0].DependsOn = nums
+	in.Tickets[0].DependencyStates = map[int]DependencyState{10: DependencyStateClosed}
+	in.Tickets[0].DependencyAnomalies = anomalies
+
+	got := Decide(in)
+	if len(got) != 1 {
+		t.Fatalf("got %d decisions, want 1: %+v", len(got), got)
+	}
+	d := got[0]
+	if d.Action != ActionSkip {
+		t.Fatalf("action = %q, want %q (a malformed dependency token must hold the ticket)", d.Action, ActionSkip)
+	}
+	if !strings.Contains(d.Reason, anomalies[0]) {
+		t.Errorf("reason %q does not name the malformed token %q", d.Reason, anomalies[0])
+	}
+}
+
+// -- #852 AC3: verified plan absence vs. plan-probe errors -------------------
+
+// TestDecidePlanProbeGate_VerifiedAbsence_SkipsNoPlanFile covers AC3's
+// "missing" half: a ticket with no PlanProbes entry at all (verified
+// absence, the zero value) skips with the existing "no plan file" text --
+// proving the new plan-probe gate does not disturb pre-#852 behavior for a
+// genuinely absent plan.
+func TestDecidePlanProbeGate_VerifiedAbsence_SkipsNoPlanFile(t *testing.T) {
+	in := baseInputs()
+	in.Plans = nil
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "no plan file", ""}})
+}
+
+// TestDecidePlanProbeGate_UnreadablePlan_SkipsWithDistinctReason covers
+// AC3's "unreadable" half: a plan file that exists but could not be read
+// (PlanProbeReadError) must skip with a reason distinct from "no plan
+// file" -- proving "missing" and "unreadable" produce different decisions
+// rather than collapsing into the same skip.
+func TestDecidePlanProbeGate_UnreadablePlan_SkipsWithDistinctReason(t *testing.T) {
+	in := baseInputs()
+	in.Plans = nil
+	in.PlanProbes = map[string]PlanProbe{"o/r#42": PlanProbeReadError}
+
+	got := Decide(in)
+	assertDecisions(t, got, []wantDecision{{42, ActionSkip, reasonPlanProbeUnreadable, ""}})
+	if got[0].Reason == "no plan file" {
+		t.Fatalf("an unreadable plan must not collapse into the verified-absence reason, got %q", got[0].Reason)
+	}
+}
+
+// -- #852 AC4: a mid-write/malformed plan never launches fresh planning -----
+
+// TestDecidePlanProbeGate_MidWriteMalformedPlan_NeverLaunchesFreshPlanning
+// covers AC4, the ticket's headline regression: a Refined ticket (not
+// Planned) whose .plans/<id>-*.md exists but is mid-write (truncated front
+// matter) must classify PlanProbeParseError and skip -- never fall through
+// to the stage-aware planning-pickup gate and launch a fresh, duplicate
+// planning session just because ReadPlans produced no matched Plan for it.
+func TestDecidePlanProbeGate_MidWriteMalformedPlan_NeverLaunchesFreshPlanning(t *testing.T) {
+	in := planningCandidateInputs() // Refined, PlanRefined on, Plans == nil
+	in.PlanProbes = map[string]PlanProbe{"o/r#42": PlanProbeParseError}
+
+	got := Decide(in)
+	assertDecisions(t, got, []wantDecision{{42, ActionSkip, reasonPlanProbeMalformed, ""}})
+	if got[0].Planning {
+		t.Fatal("Planning = true, want false -- a plan-probe error must never become a fresh planning candidate")
+	}
+	if got[0].Action == ActionDispatch {
+		t.Fatal("a plan-probe error must never dispatch")
+	}
+}
+
+// -- #852 AC5: staleness-calculation errors ----------------------------------
+
+// TestDecidePlanProbeGate_StalenessError_SkipsRatherThanTreatingAsFresh
+// covers AC5: a plan whose CommitsBehind could not be computed
+// (PlanProbeStalenessError) must skip dispatch rather than be silently
+// treated as 0-commits-behind (unknown-fresh).
+func TestDecidePlanProbeGate_StalenessError_SkipsRatherThanTreatingAsFresh(t *testing.T) {
+	in := baseInputs() // Plans[0].CommitsBehind left at its zero value (0)
+	in.PlanProbes = map[string]PlanProbe{"o/r#42": PlanProbeStalenessError}
+
+	got := Decide(in)
+	assertDecisions(t, got, []wantDecision{{42, ActionSkip, reasonPlanProbeStale, ""}})
+}
+
+// TestDecidePlanProbeGate_StalenessError_NeverGatesAResumingTicket covers
+// AC5's resume-path counter-test: an Input Needed + awaiting-input plan
+// with a staleness-probe error still resumes -- staleness is never gated on
+// the resume path (rule 4's freshness check is already deliberately skipped
+// there).
+func TestDecidePlanProbeGate_StalenessError_NeverGatesAResumingTicket(t *testing.T) {
+	in := resumeInputs()
+	in.PlanProbes = map[string]PlanProbe{"o/r#42": PlanProbeStalenessError}
+
+	got := Decide(in)
+	if len(got) != 1 {
+		t.Fatalf("got %d decisions, want 1: %+v", len(got), got)
+	}
+	if got[0].Action != ActionDispatch || !got[0].Resume {
+		t.Fatalf("decision = %+v, want a resumed dispatch (staleness must never gate the resume path)", got[0])
+	}
+}
+
+// -- #852: default-branch coverage (watch/docs/go-gotchas.md #598) ----------
+
+// TestDecidePlanProbeGate_UnregisteredValueSkipsWithDistinctReason covers
+// the Test Strategy's default-branch-coverage requirement: an unregistered
+// PlanProbe value must default-deny with its own distinct
+// reasonPlanProbeUnknown, not silently collapse into any known reason.
+func TestDecidePlanProbeGate_UnregisteredValueSkipsWithDistinctReason(t *testing.T) {
+	in := baseInputs()
+	in.Plans = nil
+	in.PlanProbes = map[string]PlanProbe{"o/r#42": PlanProbe("bogus")}
+
+	got := Decide(in)
+	assertDecisions(t, got, []wantDecision{{42, ActionSkip, reasonPlanProbeUnknown, ""}})
+	for _, r := range []string{"no plan file", reasonPlanProbeUnreadable, reasonPlanProbeMalformed, reasonPlanProbeStale} {
+		if got[0].Reason == r {
+			t.Fatalf("unrecognized PlanProbe must not collapse into %q", r)
+		}
+	}
 }

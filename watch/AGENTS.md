@@ -8,7 +8,7 @@ GitHub Issues for tracking. GitHub for code and PRs.
 - When changing a literal value (exec flag, environment variable, version) referenced in comments, grep the whole file for all references to that literal rather than relying on a change plan's enumerated sites — doc comments and docstrings can reference the same value and go stale (#357).
 - When adding a plugin package with a version-pinned manifest, register its path in `.github/workflows/watch-version-bump.yml`'s `plugin-json-paths` list — grep that file for the existing pattern. Unregistered manifests are never bumped and stay frozen at creation-time version (#488).
 - Verify every caller of a precondition-dependent path uses the right constructor variant — `NewForLaunch` leaves `Engine.Runtime` unset for deferred re-resolution, `New` sets it eagerly, and `Engine.Launch` needs the former. A shared helper can hide a misclassified caller (#585).
-- When adding subprocess calls in `internal/dispatch`, mirror `mainsync.go`'s timeout/`WaitDelay`/separate-stderr-capture/single-line-logging conventions instead of a bare `exec.Command` — review otherwise catches this, not authorship (#825).
+- When adding subprocess calls in `internal/dispatch`, mirror `mainsync.go`'s timeout/`WaitDelay`/stderr-capture/logging conventions instead of bare `exec.Command`; new `gh` calls must use the shared `execGh` helper (`gh.go`) (#825, #852).
 
 ## Rule Files
 
