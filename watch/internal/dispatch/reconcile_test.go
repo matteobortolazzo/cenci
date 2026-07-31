@@ -26,10 +26,13 @@ var reconcileNow = time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 
 // workingInputs is the failure happy path: one Working ticket #42 whose window
 // is gone (empty snapshot) and which has no open PR, observed as failing long
-// enough ago that grace has elapsed.
+// enough ago that grace has elapsed. Labels carry both Working and Planned
+// (#828 review fix #1): Planned is never removed while Working is added, so
+// Working+Planned -- not bare Working -- is the realistic combined-label
+// state of every in-flight implementation session on a real board.
 func workingInputs() ReconcileInputs {
 	return ReconcileInputs{
-		Tickets:      []Ticket{{Repo: "o/r", Number: 42, Title: "Fix thing", Labels: []string{"Working"}}},
+		Tickets:      []Ticket{{Repo: "o/r", Number: 42, Title: "Fix thing", Labels: []string{"Working", "Planned"}}},
 		Plans:        []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "planned"}},
 		Snapshot:     &watch.StateSnapshot{},
 		Now:          reconcileNow,
@@ -471,6 +474,146 @@ func TestCommentHelpersEachCarryADistinctCenciMarker(t *testing.T) {
 			t.Errorf("%s and %s share the same marker %q, want each helper's marker distinct", name, other, marker)
 		}
 		seen[marker] = name
+	}
+}
+
+// -- #828: crashed planning-pickup recovery ----------------------------------
+
+// TestReconcileCrashedPlanningPickup_RecoversToRefined covers the plan's
+// stage-aware RecoveryRetry requirement: a Working ticket carrying Refined,
+// not Planned, with no matched plan file, is a crashed planning pickup --
+// recover it with RemoveLabels: [Working] and empty AddLabels, so it returns
+// to plain Refined and is re-picked as a planning candidate next pass,
+// rather than today's +Planned recovery which would dead-end it at
+// plan-invalid (Planned added, still no plan file).
+func TestReconcileCrashedPlanningPickup_RecoversToRefined(t *testing.T) {
+	in := workingInputs()
+	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Working", "Refined"}}}
+	in.Plans = nil
+	res := Reconcile(in)
+
+	rec := onlyRecovery(t, res)
+	if rec.Kind != RecoveryRetry {
+		t.Errorf("kind = %q, want %q", rec.Kind, RecoveryRetry)
+	}
+	if len(rec.AddLabels) != 0 {
+		t.Errorf("AddLabels = %v, want empty (must not add Planned for a plan-less planning pickup)", rec.AddLabels)
+	}
+	if !containsStr(rec.RemoveLabels, labelWorking) || len(rec.RemoveLabels) != 1 {
+		t.Errorf("RemoveLabels = %v, want exactly [%s]", rec.RemoveLabels, labelWorking)
+	}
+}
+
+// TestReconcileOrdinaryWorkingTicketPlanPresent_UnchangedRetry confirms the
+// existing ordinary Working-ticket retry path (+Planned -Working, no
+// Refined label involved) stays byte-identical alongside the new
+// stage-aware branch above -- mirrors workingInputs()'s own happy path
+// (already covered by TestReconcileRetryUnderBudget), asserted directly here
+// as the #828 "every other Working ticket keeps today's path verbatim"
+// requirement.
+//
+// workingInputs()'s ticket carries both Working AND Planned (#828 review fix
+// #1) -- the realistic combined-label state of every in-flight
+// implementation session, since Planned is never removed while Working is
+// added. Before the fix, the Planned inverse-leak branch's `continue` fired
+// for this exact combination whenever a plan file matched, silently
+// swallowing this recovery (0 recoveries, not 1) -- this test would have
+// failed with "got 0 recoveries, want 1" pre-fix and passes post-fix, so it
+// is the regression test proving the reconciler branch-ordering bug is
+// fixed for the plan-present sub-case.
+func TestReconcileOrdinaryWorkingTicketPlanPresent_UnchangedRetry(t *testing.T) {
+	in := workingInputs() // Working+Planned, no Refined label, plan file present
+	res := Reconcile(in)
+
+	rec := onlyRecovery(t, res)
+	if rec.Kind != RecoveryRetry {
+		t.Errorf("kind = %q, want %q", rec.Kind, RecoveryRetry)
+	}
+	if !containsStr(rec.AddLabels, labelPlanned) || !containsStr(rec.RemoveLabels, labelWorking) {
+		t.Errorf("expected Working→Planned swap unchanged, got add=%v remove=%v", rec.AddLabels, rec.RemoveLabels)
+	}
+}
+
+// TestReconcileWorkingRefinedAndPlannedNoPlan_FallsThroughToStageAwareRetry
+// locks in the corrected crashed-planning-pickup predicate boundary (#828
+// review fix #1). Before the fix, the Planned inverse-leak branch fired for
+// ANY Planned ticket regardless of Working, so a ticket carrying Working +
+// Refined + Planned with no plan file was wrongly intercepted and routed to
+// plan-invalid, never reaching the failure/retry path below. Post-fix, the
+// branch is narrowed to `hasLabel(Planned) && !hasLabel(Working)`, so this
+// Working ticket falls through to the ordinary failure/grace/retry path and
+// is recovered by the stage-aware RecoveryRetry branch (Refined, no matched
+// plan file -> AddLabels nil), exactly like a Refined-only crashed planning
+// pickup (TestReconcileCrashedPlanningPickup_RecoversToRefined). A
+// Planned-NOT-Working ticket with no plan file still hits plan-invalid
+// unchanged (TestReconcilePlannedNoPlanIsInvalid).
+func TestReconcileWorkingRefinedAndPlannedNoPlan_FallsThroughToStageAwareRetry(t *testing.T) {
+	in := workingInputs()
+	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Working", "Refined", "Planned"}}}
+	in.Plans = nil
+	res := Reconcile(in)
+
+	rec := onlyRecovery(t, res)
+	if rec.Kind != RecoveryRetry {
+		t.Errorf("kind = %q, want %q (a Working+Planned ticket must fall through to the failure/retry path, not be intercepted by the Planned inverse-leak branch)", rec.Kind, RecoveryRetry)
+	}
+	if len(rec.AddLabels) != 0 {
+		t.Errorf("AddLabels = %v, want empty (stage-aware: Refined with no matched plan must not add Planned)", rec.AddLabels)
+	}
+	if !containsStr(rec.RemoveLabels, labelWorking) || len(rec.RemoveLabels) != 1 {
+		t.Errorf("RemoveLabels = %v, want exactly [%s]", rec.RemoveLabels, labelWorking)
+	}
+}
+
+// TestReconcileWorkingPlannedTicketPastGrace_RecoveryRetryReachable is the
+// dedicated regression test for the reconciler branch-ordering bug (#828
+// review fix #1): before the fix, ANY Planned ticket with a matched plan
+// file -- including the normal Planned+Working state of every in-flight
+// implementation session -- was silently `continue`d by the Planned
+// inverse-leak branch before ever reaching the failure/grace/retry path
+// below, so a crashed Working+Planned session could never retry or
+// escalate (Working stuck forever). This proves the failure/grace/retry
+// path is actually reachable post-fix: a Working+Planned ticket with a
+// matched (non-Refined) plan file, past GracePeriod, no live window, under
+// RetryBudget gets an ordinary RecoveryRetry with AddLabels: [Planned],
+// RemoveLabels: [Working].
+func TestReconcileWorkingPlannedTicketPastGrace_RecoveryRetryReachable(t *testing.T) {
+	in := workingInputs() // Working+Planned, matched plan file, past grace, empty snapshot, attempts under budget
+
+	rec := onlyRecovery(t, Reconcile(in))
+	if rec.Kind != RecoveryRetry {
+		t.Fatalf("kind = %q, want %q -- the crashed-retry recovery path must be reachable for a Working+Planned ticket", rec.Kind, RecoveryRetry)
+	}
+	if !containsStr(rec.AddLabels, labelPlanned) || len(rec.AddLabels) != 1 {
+		t.Errorf("AddLabels = %v, want exactly [%s]", rec.AddLabels, labelPlanned)
+	}
+	if !containsStr(rec.RemoveLabels, labelWorking) || len(rec.RemoveLabels) != 1 {
+		t.Errorf("RemoveLabels = %v, want exactly [%s]", rec.RemoveLabels, labelWorking)
+	}
+}
+
+// TestReconcileCrashedPlanningPickup_RetryBudgetExhaustionStillEscalates
+// covers the Test Strategy table's "retry-budget exhaustion still escalates
+// to dispatch-failed for the planning-pickup case" requirement: once the
+// durable attempt count reaches RetryBudget, a crashed planning pickup
+// escalates to RecoveryFailed exactly like any other stranded Working
+// ticket -- the stage-aware label payload only changes the retry branch.
+func TestReconcileCrashedPlanningPickup_RetryBudgetExhaustionStillEscalates(t *testing.T) {
+	in := workingInputs()
+	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Working", "Refined"}}}
+	in.Plans = nil
+	in.Attempts = map[string]int{"o/r#42": 2} // 2 >= reconcileConfig's budget of 2
+	res := Reconcile(in)
+
+	rec := onlyRecovery(t, res)
+	if rec.Kind != RecoveryFailed {
+		t.Errorf("kind = %q, want %q", rec.Kind, RecoveryFailed)
+	}
+	if !containsStr(rec.AddLabels, labelDispatchFailed) || !containsStr(rec.RemoveLabels, labelWorking) {
+		t.Errorf("expected Working→dispatch-failed swap, got add=%v remove=%v", rec.AddLabels, rec.RemoveLabels)
+	}
+	if !hasFailed(res, "o/r", 42) {
+		t.Error("a budget-exhausted crashed planning pickup must appear in Failed")
 	}
 }
 

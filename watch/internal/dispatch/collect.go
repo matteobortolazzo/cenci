@@ -227,9 +227,16 @@ func agentFromLabels(labels []string) string {
 // ReadPlans globs <dir>/.plans/*.md, parses each file's flat YAML front matter,
 // stamps repo (owner/repo) onto each plan, and fills CommitsBehind. commitsBehind
 // resolves default-branch commits since a plan's sha, restricted to paths when
-// the plan lists stalenessPaths; nil uses git rev-list against dir. Unparseable
-// files are skipped.
-func ReadPlans(repo, dir string, commitsBehind func(sha string, paths []string) int) ([]Plan, error) {
+// the plan lists stalenessPaths; nil uses git rev-list against dir. A file that
+// cannot be read or whose front matter cannot be parsed is dropped -- and logged
+// to out (#828 review fix #2): under the stage-aware planning-pickup gate,
+// plan == nil now triggers a real dispatch rather than a no-op skip, so a
+// transient parse hiccup on an actually-valid plan file is operationally
+// equivalent to "never planned" and could otherwise launch a spurious/
+// duplicate planning session with zero trace. Callers are expected to
+// guarantee a non-nil out, mirroring CollectTickets above (RunOnce/
+// RunReconcileOnce already default it to os.Stdout before calling here).
+func ReadPlans(repo, dir string, commitsBehind func(sha string, paths []string) int, out io.Writer) ([]Plan, error) {
 	if commitsBehind == nil {
 		// Display-only usage (not decision-gating): degrade gracefully to 0
 		// on a git failure rather than propagating it, preserving this
@@ -249,10 +256,12 @@ func ReadPlans(repo, dir string, commitsBehind func(sha string, paths []string) 
 	for _, path := range matches {
 		data, err := os.ReadFile(path)
 		if err != nil {
+			logf(out, "dispatch: dropping plan file %s: reading: %v\n", path, err)
 			continue
 		}
 		fm, ok := planfile.ParseFrontMatter(string(data))
 		if !ok {
+			logf(out, "dispatch: dropping plan file %s: front matter did not parse\n", path)
 			continue
 		}
 		p := Plan{

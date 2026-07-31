@@ -185,6 +185,65 @@ func TestLoadConfigPipelineStageGate_KeyAbsent_DefaultsTrue(t *testing.T) {
 	}
 }
 
+// -- PlanRefined resolution (#828) -------------------------------------------
+
+// TestLoadConfigPlanRefined_KeyAbsent_DefaultsFalse locks in the default-deny
+// requirement: an absent "planRefined" key must resolve to false
+// (DefaultConfig()'s value).
+func TestLoadConfigPlanRefined_KeyAbsent_DefaultsFalse(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"dispatch": {"defaultAgent": "codex"}}`), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.PlanRefined {
+		t.Errorf("cfg.PlanRefined = %v, want false (default-deny when the key is absent)", cfg.PlanRefined)
+	}
+}
+
+// TestLoadConfigPlanRefined_ExplicitTrue locks in that an explicit
+// "planRefined": true round-trips through LoadConfig unchanged.
+func TestLoadConfigPlanRefined_ExplicitTrue(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"dispatch": {"planRefined": true}}`), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.PlanRefined {
+		t.Errorf("cfg.PlanRefined = %v, want true", cfg.PlanRefined)
+	}
+}
+
+// TestLoadConfigPlanRefined_ExplicitFalse locks in that an explicit
+// "planRefined": false round-trips through LoadConfig unchanged -- a pointer
+// field so an explicit false is distinguishable from unset, mirroring
+// PipelineStageGate.
+func TestLoadConfigPlanRefined_ExplicitFalse(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"dispatch": {"planRefined": false}}`), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.PlanRefined {
+		t.Errorf("cfg.PlanRefined = %v, want false (explicit opt-out)", cfg.PlanRefined)
+	}
+}
+
 // TestPipelineStageGate_ConfigFalse_DispatchesFinalizedTicket is the AC's
 // integration case: a "pipelineStageGate": false config, loaded end to end
 // through LoadConfig (not just DefaultConfig()'s Go literal), must dispatch

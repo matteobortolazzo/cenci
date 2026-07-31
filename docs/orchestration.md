@@ -38,7 +38,9 @@ New → Refined → [Designed] → Planned → Working → In Review → Impleme
 | New → Refined | `/cenci:refine` | `+Working` while running, then `+Refined` `−Working` |
 | Refined → Designed (optional) | `/cenci:design` on the dedicated design ticket | Propagates `+Designed` to dependent implementation tickets |
 | Refined/Designed → Planned | `/cenci:implement` planning | Persists `.plans/<id>-*.md`, then `+Planned` `−Working` (trivial-ticket fast path and lean planning with no escalations: `Working` is retained, not removed — see note below) |
+| Refined → Working (planning pickup) | `cenci dispatch` (planning pickup, `dispatch.planRefined: true`) | `+Working`; `Refined` retained — no plan file existed yet, so `cenci run implement <n>` launches a fresh planning session unattended, in lean-planning repos only |
 | Planned → Working | plan-file implementation or `cenci dispatch` pickup | `+Working`; `Planned` remains as a milestone |
+| Planned → Working (re-plan) | `cenci dispatch` (autonomous re-plan, `dispatch.planRefined: true`) | `+Working`; `Planned` retained — the existing plan was stale (past `planStalenessTolerance`), so `cenci run implement "<n> replan"` relaunches planning against it unattended instead of terminally skipping |
 | Working → Input Needed (escalation) | `/cenci:implement` planning (unattended, `planning.autonomy: "lean"`) | Persists a draft `.plans/<id>-*.md` (`status: awaiting-input`), then `+Input Needed` `−Working` (`Refined` retained) |
 | Input Needed → Working (resume) | `cenci dispatch` (auto-resume) | `+Working` `−Input Needed` once a qualifying human reply is detected after the escalation anchor; `Refined` retained |
 | Working → In Review | `/cenci:implement` phase 9 | `+In Review` `−Working` when the PR opens |
@@ -85,6 +87,27 @@ incomplete — it never guesses. This mirrors the collapsed `Refined → Planned
 sessions above in spirit (no human plan-review gate on the relaunch), but it is a distinct
 case: the plan itself was already escalated once, so this round trip can repeat if answers
 stay incomplete, bounded by dispatch's existing concurrency/budget/quiet-hours gates.
+
+**Stage-aware pickup closes the loop (ticket #828).** With `dispatch.planRefined:
+true` in a repo's `dispatch` config, `cenci dispatch` no longer stops at `Planned`
+tickets: a `Refined` ticket with no plan file yet becomes a planning pickup (the
+`Refined → Working (planning pickup)` row above), and a `Planned` ticket whose
+plan has gone stale — the routine case after an automerged dependency PR shifts
+the shared files a sibling plan touched — becomes an autonomous re-plan (the
+`Planned → Working (re-plan)` row above) instead of a terminal `plan stale,
+re-plan` skip. Both launch the same `cenci run implement` command an ordinary
+pickup does, under every other gate (assignee, dependency, sibling
+serialization, capacity, budget, quiet hours) unchanged. Chained end to end,
+this closes the full autonomous loop: refine → plan → implement → PR →
+automerge → next dependent ticket's stale plan self-heals and gets re-planned
+→ implemented in turn, with no human touch between refine and merge. This is
+**lean-planning repos only**: `dispatch.planRefined` is a pure operator
+assertion — dispatch never verifies the repo's own `planning.autonomy: "lean"`
+setting — so enabling it on a repo whose planning stage still expects a human
+review gate is the operator's responsibility, not something the flag checks
+for you. See [cenci-watch's
+README](../watch/README.md#planning-pickup-and-autonomous-re-plan) for the
+sibling-serialization and unbounded-re-plan limitations this loop accepts.
 
 **`Working` is transient activity, not a persisted handoff.** lazyboards'
 `working_label` (default

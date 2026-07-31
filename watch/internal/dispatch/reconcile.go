@@ -22,6 +22,11 @@ const (
 	// open questions posted on the ticket. Distinct from labelDispatchFailed
 	// and labelPlanInvalid -- see ReconcileResult.Escalated.
 	labelInputNeeded = "Input Needed"
+	// labelRefined (#828) marks a ticket the refiner has broken down into an
+	// actionable plan candidate but not yet planned -- the stage-aware
+	// planning pickup gate (decide.go) and the crashed-planning-pickup
+	// recovery branch below both key off it.
+	labelRefined = "Refined"
 	// labelReconcileStuck (#265) is a terminal label the reconciler may apply:
 	// it marks a ticket whose apply-retry budget was exhausted, i.e.
 	// reconciliation itself is stuck (distinct from dispatch-failed, which
@@ -170,11 +175,23 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 			continue
 		}
 
-		// Inverse leak: a Planned ticket with no parseable plan file. ReadPlans
-		// drops unparseable files, so "missing" and "unparseable" both present as
-		// no matched plan. A plan that exists but does not yet carry
-		// status: planned is a normal human-in-loop state — left alone.
-		if hasLabel(t.Labels, labelPlanned) {
+		// Inverse leak: a Planned, not-Working ticket with no parseable plan
+		// file. ReadPlans drops unparseable files, so "missing" and
+		// "unparseable" both present as no matched plan. A plan that exists
+		// but does not yet carry status: planned is a normal human-in-loop
+		// state — left alone.
+		//
+		// The `&& !hasLabel(t.Labels, labelWorking)` guard is load-bearing
+		// (#828 review fix #1): Planned is never removed while Working is
+		// added, so a Planned+Working ticket is the NORMAL state of every
+		// in-flight implementation or crashed-planning-pickup session, not
+		// just a plan-missing leak. Without this guard, this branch would
+		// `continue` for every such ticket whenever a plan file is present,
+		// permanently starving the failure/grace/retry path below --
+		// including this ticket's own stage-aware RecoveryRetry branch --
+		// of any Planned+Working ticket, so a crashed session would never
+		// retry or escalate.
+		if hasLabel(t.Labels, labelPlanned) && !hasLabel(t.Labels, labelWorking) {
 			if planByTicket[key] != nil {
 				continue
 			}
@@ -259,10 +276,28 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 
 		if attempts < in.Config.RetryBudget {
 			attempt := attempts + 1
+
+			// Stage-aware retry (#828): a Working ticket carrying Refined
+			// with no matched plan file is a crashed planning pickup, not a
+			// crashed implementation run -- Planned may or may not also be
+			// present (the inverse-leak branch above only claims Planned
+			// tickets that are not Working, so a Planned+Refined+Working
+			// ticket with no plan file legitimately reaches here too; see
+			// TestReconcileWorkingRefinedAndPlannedNoPlan_FallsThroughToStageAwareRetry).
+			// Recovering it with today's +Planned would dead-end it at
+			// plan-invalid next pass (Planned added, still no plan file);
+			// instead, drop only Working so it returns to plain Refined and
+			// is re-picked as a planning candidate. Every other Working
+			// ticket keeps today's +Planned -Working retry verbatim.
+			addLabels := []string{labelPlanned}
+			if hasLabel(t.Labels, labelRefined) && planByTicket[key] == nil {
+				addLabels = nil
+			}
+
 			res.Recoveries = append(res.Recoveries, Recovery{
 				Ticket:       t,
 				Kind:         RecoveryRetry,
-				AddLabels:    []string{labelPlanned},
+				AddLabels:    addLabels,
 				RemoveLabels: []string{labelWorking},
 				Comment:      retryComment(attempt, name, lastStatus),
 				Attempt:      attempt,

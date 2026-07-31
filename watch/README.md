@@ -416,18 +416,27 @@ failing gate is the logged skip reason):
 
 1. **local `main` sync** — the ticket's repo's local `main` checkout synced cleanly
    with `origin/main` this pass (see [Local main sync](#local-main-sync) below);
-2. carries `Planned`, **or** carries `Input Needed` with a human answer newer than the
-   escalation anchor (see [Escalation auto-resume](#escalation-auto-resume) below); not
-   `Blocked`, has no open linked PR, and its persisted pipeline stage is not
+2. carries `Planned`, **or** carries `Refined` (and not yet `Planned`) in a
+   lean-planning repo with `dispatch.planRefined: true` — a *planning pickup* (see
+   [Planning pickup and autonomous re-plan](#planning-pickup-and-autonomous-re-plan)
+   below) — **or** carries `Input Needed` with a human answer newer than the
+   escalation anchor (see [Escalation auto-resume](#escalation-auto-resume) below);
+   not `Blocked`, has no open linked PR, and its persisted pipeline stage is not
    `finalized`;
 3. a matching plan for the ticket exists with `status: planned` (or, on the resume
-   path, `status: awaiting-input`);
+   path, `status: awaiting-input`) — **skipped for a planning pickup**, which by
+   definition has no plan file matched yet;
 4. the plan is fresh — default-branch commits since its `planCommitSha` are within
-   `planStalenessTolerance` (else `plan stale, re-plan`); when the plan's front
+   `planStalenessTolerance` (else, with `dispatch.planRefined: false`, terminal
+   `plan stale, re-plan`; with it `true`, an autonomous *re-plan* dispatch instead
+   — see [Planning pickup and autonomous
+   re-plan](#planning-pickup-and-autonomous-re-plan) below); when the plan's front
    matter lists `stalenessPaths`, only commits touching those paths are counted
-   (see [Path-aware staleness](#path-aware-staleness) below). **Deliberately skipped
-   on the resume path** — a draft that waited on a human is almost always
-   commits-behind, and applying this gate there would mean it could never re-resume;
+   (see [Path-aware staleness](#path-aware-staleness) below). **Deliberately
+   skipped on the resume and planning-pickup paths** — a draft that waited on a
+   human is almost always commits-behind, and applying this gate there would mean
+   it could never re-resume; a planning pickup has no plan file to measure
+   staleness against in the first place;
 5. **ticket dependency gate** — every `Depends on #N` reference in the ticket's body
    is closed (else `waiting on dependency #N`, or `dependency #N unresolved` when
    that issue's state couldn't be determined; see
@@ -570,6 +579,64 @@ automation posting under a plain user login would be misread as a human reply an
 trigger a resume — bounded impact: the flow side then finds no answers to the open
 questions and re-escalates rather than guessing.
 
+#### Planning pickup and autonomous re-plan
+
+Ticket #828 makes gate 2 stage-aware: with `dispatch.planRefined: true` (default
+`false`), a `Refined` ticket with no matched plan file becomes a *planning pickup*
+instead of a terminal `not Planned` skip, and a stale `Planned` plan becomes an
+autonomous *re-plan* instead of a terminal `plan stale, re-plan` skip. Both launch
+`cenci run implement`; every other gate (assignee, dependency, sibling
+serialization, capacity, budget, quiet hours) applies identically to an ordinary
+`Planned` pickup, because it is literally the same gate chain — see [Ticket
+dependency gate](#ticket-dependency-gate) above. `Designed` needs no separate
+handling: it is always propagated alongside `Refined`, so the `Refined` check
+covers it.
+
+**Lean-planning repos only.** `dispatch.planRefined` is a pure operator assertion
+— `internal/dispatch` never reads a repo's own `planning.autonomy` setting and
+never verifies it is `"lean"`. Enabling the flag on a repo whose planning stage
+still expects a human review is the operator's call, not something dispatch
+checks for you.
+
+**Trust boundary.** Enabling `dispatch.planRefined` treats the `Refined` label
+(plus the existing assignee-ownership gate) as sufficient authorization to
+launch an unattended planning session whose primary input is the ticket's own
+body/comment text. Unlike the [escalation auto-resume](#escalation-auto-resume)
+path (#827), which requires an authorized `authorAssociation` on the human
+reply before resuming, there is no author-authorization check on the issue
+text a planning pickup consumes. Do not enable this flag on a repo that
+accepts externally-authored issues from untrusted parties.
+
+**Launch shapes.** A planning pickup launches with the bare ticket number
+(`cenci run implement <n>`) since there is no plan file yet for the implement
+session's Phase 1 to discover. An autonomous re-plan appends the
+`--replan-requested` escape hatch (`cenci run implement "<n> replan"`) so the
+unattended session's stale-plan branch skips Phase 1's human-confirmation gate
+instead of hanging as a `Working` ticket waiting on a prompt that will never
+come. Both claim `Working` synchronously after a successful spawn, exactly like
+an ordinary dispatch.
+
+**Sibling-serialization limitation (accepted, documented).** Gate 6 (sibling
+serialization) is derived entirely from the plan file's `isChild`/`parentId`
+front matter, which doesn't exist yet for a `Refined`-with-no-plan ticket, so it
+is inert for a planning pickup. A parent with several `Refined` children can have
+planning sessions launched for multiple siblings in the same pass, up to
+`concurrencyCap`. The existing `Depends on #N` dependency gate still serializes
+any chain the refiner actually declared, and `concurrencyCap`/`dailyQuota` bound
+the rest — there is no new sibling-detection logic for this case.
+
+**Unbounded re-plan (accepted, documented).** Nothing caps how many times a
+ticket can be autonomously re-planned; a successful re-plan rewrites
+`planCommitSha`, which self-limits the common case, but a repo with an
+over-broad `stalenessPaths` value can re-plan repeatedly. `dailyQuota` and
+`concurrencyCap` are the rate limiter, and raising `planStalenessTolerance`
+raises the trigger threshold.
+
+A crashed planning pickup (a `Working` ticket that still carries `Refined`, not
+`Planned`, with no plan file) is recovered by the reconciler back to plain
+`Refined` rather than `Planned` — see [Failure
+reconciliation](#failure-reconciliation) below.
+
 #### Path-aware staleness
 
 In a monorepo, unrelated commits elsewhere in the tree shouldn't invalidate a plan
@@ -601,10 +668,12 @@ Gate 5 above blocks the ticket while any referenced issue is still open
 (`waiting on dependency #N`) and fails closed with a distinct reason
 (`dependency #N unresolved`) when an issue's state can't be determined at all.
 
-This gate blocks both planning pickup and implementation pickup — a plan written
-before its dependency merges is considered stale on arrival by gate 4's path-aware
-staleness check in the common case (a same-repo dependency touching shared files),
-so there's little practical benefit to planning before a dependency resolves.
+This gate blocks both planning pickup and implementation pickup (see [Planning
+pickup and autonomous re-plan](#planning-pickup-and-autonomous-re-plan) above,
+ticket #828) — a plan written before its dependency merges is considered stale on
+arrival by gate 4's path-aware staleness check in the common case (a same-repo
+dependency touching shared files), so there's little practical benefit to
+planning before a dependency resolves.
 
 Native GitHub `blockedBy` issue links are not recognized; only body-text
 `Depends on #N` references gate dispatch.
@@ -627,6 +696,7 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
     "quietHours": { "startHour": 22, "endHour": 7 },
     "planStalenessTolerance": 5,
     "pipelineStageGate": true,
+    "planRefined": false,
     "gracePeriod": "5m",
     "retryBudget": 2,
     "daemonInterval": "5m",
@@ -652,6 +722,7 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 | `quietHours` | none | Local-clock window to suppress dispatch; `startHour > endHour` wraps midnight, `start == end` disables |
 | `planStalenessTolerance` | `5` | Max commits a plan may fall behind before it is skipped as stale (see [Path-aware staleness](#path-aware-staleness) for scoping the count via `stalenessPaths`) |
 | `pipelineStageGate` | `true` | Skip tickets whose persisted `cenci pipeline` stage is `finalized` (see [Pickup rules and gates](#pickup-rules-and-gates)); set `false` to disable the gate entirely |
+| `planRefined` | `false` | Enable stage-aware planning pickup of `Refined` tickets and autonomous re-plan of stale plans, in lean-planning repos only (see [Planning pickup and autonomous re-plan](#planning-pickup-and-autonomous-re-plan)); a pure operator assertion, never verified against the repo's own planning config |
 | `gracePeriod` | `5m` | How long the failure signal must hold continuously before the reconciler recovers a stranded ticket (Go duration string) |
 | `retryBudget` | `2` | Retries (`Working` → `Planned`) a stranded ticket gets before it is marked `dispatch-failed`; an explicit `0` disables retries |
 | `daemonInterval` | none | Dispatch cadence once the embedded loop is enabled (Go duration string); setting this alone does **not** start dispatch — see `loopEnabled`. Configuration is independently polled at least every 60 seconds; nonpositive values use a 60s internal fallback but are not reported as a configured interval |
@@ -710,6 +781,19 @@ window (gone, or `stopped`), no open linked PR, and that signal has held continu
   still exists, so the ticket re-enters the dispatch queue naturally;
 - **at `retryBudget`** → `Working` → `dispatch-failed`, surfaced for a human and never
   touched again.
+
+**Crashed planning pickup (ticket #828).** A `Working` ticket that still carries
+`Refined` with no matched plan file is a crashed *planning*
+pickup (`Planned` may or may not also be present — see
+[Planning pickup and autonomous
+re-plan](#planning-pickup-and-autonomous-re-plan) above), not a crashed
+implementation run. Recovering it with the ordinary `Working` → `Planned` retry
+above would dead-end it at `plan-invalid` next pass (`Planned` added, still no
+plan file). Instead, under `retryBudget` it recovers with only `Working` removed
+— no label added — so it returns to plain `Refined` and is re-picked as a
+planning candidate next pass. At `retryBudget` it still escalates to
+`dispatch-failed` exactly like any other stranded `Working` ticket; only the
+retry branch's label payload is stage-aware.
 
 The inverse leak — a `Planned` ticket whose planned plan file cannot be read — becomes
 `plan-invalid` (also grace-gated, to tolerate a plan that is mid-write or has not yet
