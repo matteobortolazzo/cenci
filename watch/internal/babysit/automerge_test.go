@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // -- test helpers -------------------------------------------------------------
@@ -24,18 +25,20 @@ func intp(n int) *int { return &n }
 // a shared pointer would let one case's mutation silently corrupt another's).
 func greenAutomergeInputs() automergeInputs {
 	return automergeInputs{
-		Enabled:       true,
-		ClosingIssues: []int{9},
-		IssueLabels:   map[int][]string{9: {"automerge:ok"}},
-		CIStatus:      "green",
-		RepairPending: false,
-		PendingKeys:   nil,
-		IsDraft:       false,
-		Mergeable:     "MERGEABLE",
-		HeadRefOID:    "abc",
-		ChangedFiles:  2,
-		Additions:     10,
-		Deletions:     5,
+		Enabled:          true,
+		ClosingIssues:    []int{9},
+		IssueLabels:      map[int][]string{9: {"automerge:ok"}},
+		Checks:           []check{{Bucket: "pass", Name: "test"}},
+		RepairPending:    false,
+		PendingKeys:      nil,
+		CommentsComplete: true,
+		ReviewsComplete:  true,
+		IsDraft:          false,
+		Mergeable:        "MERGEABLE",
+		HeadRefOID:       "abc",
+		ChangedFiles:     2,
+		Additions:        10,
+		Deletions:        5,
 		Files: []string{
 			"watch/internal/babysit/automerge.go",
 			"watch/internal/babysit/automerge_test.go",
@@ -51,29 +54,42 @@ func greenAutomergeInputs() automergeInputs {
 	}
 }
 
-// withScriptedCommands replaces the package's command seam for the test's
-// duration with one that serves script in order for every "gh" invocation
-// (each entry providing both an output body and an error, so a rejected `gh
-// pr merge` can be modeled -- unlike babysit_test.go's withCommands, which
-// always returns a nil error). Every invocation, gh or not, is recorded into
-// calls.
+// withScriptedCommands replaces the package's execGh seam (for every `gh`
+// invocation) and its command seam (for the package's remaining non-`gh`
+// calls: `git rev-parse` and the `cenci run` self-exec) for the test's
+// duration. script serves each `gh` call in order, each entry providing
+// both an output body and an error so a rejected `gh pr merge` can be
+// modeled -- unlike babysit_test.go's withCommands, which always returns a
+// nil error. An error entry delivers its body on stderr (never stdout), so
+// existing Detail assertions built on a captured `gh pr merge` failure
+// still hold once execGh's separated-stream contract replaces the old
+// CombinedOutput-shaped `command` seam. Every invocation, gh or not, is
+// recorded into calls in call order.
 func withScriptedCommands(t *testing.T, script []scriptedCall, calls *[][]string) {
 	t.Helper()
-	original := command
+	originalCommand := command
+	originalExecGh := execGh
 	i := 0
 	command = func(name string, args ...string) ([]byte, error) {
 		*calls = append(*calls, append([]string{name}, args...))
-		if name != "gh" {
-			return []byte(""), nil
-		}
+		return []byte(""), nil
+	}
+	execGh = func(args ...string) (string, string, error) {
+		*calls = append(*calls, append([]string{"gh"}, args...))
 		if i >= len(script) {
-			return nil, fmt.Errorf("unexpected command: %s", strings.Join(args, " "))
+			return "", "", fmt.Errorf("unexpected command: %s", strings.Join(args, " "))
 		}
 		c := script[i]
 		i++
-		return []byte(c.out), c.err
+		if c.err != nil {
+			return "", c.out, c.err
+		}
+		return c.out, "", nil
 	}
-	t.Cleanup(func() { command = original })
+	t.Cleanup(func() {
+		command = originalCommand
+		execGh = originalExecGh
+	})
 }
 
 type scriptedCall struct {
@@ -104,6 +120,70 @@ func withFleetAutomergeEnabled(t *testing.T, enabled bool) {
 // (never headRefName) has something to actually distinguish.
 func automergeEligiblePR() string {
 	return `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"abc","baseRefName":"main","mergeable":"MERGEABLE","isDraft":false,"changedFiles":1,"additions":5,"deletions":2,"files":[{"path":"watch/internal/babysit/x.go"}],"url":"https://example/pr/42","closingIssuesReferences":[{"number":9}]}`
+}
+
+// queueProbeResponse renders the merge-queue GraphQL probe's response body
+// (merge.go's fetchMergeQueueState): inQueue/enabled feed automergeQueueHold,
+// and headRefOID doubles as runAutomerge's pre-merge head-SHA re-check
+// (Decision 9) -- the same lazy probe serves both purposes at no extra `gh`
+// call cost.
+func queueProbeResponse(inQueue, enabled bool, headRefOID string) string {
+	return fmt.Sprintf(`{"data":{"repository":{"pullRequest":{"isInMergeQueue":%v,"isMergeQueueEnabled":%v,"headRefOid":%q}}}}`, inQueue, enabled, headRefOID)
+}
+
+// automergeFirstPassScript renders the first, genuine full-evaluation
+// pass's script (Decisions 1-4): pr view, checks, comments, reviews,
+// closing-issue labels, base-ref policy, repo allowed-methods, merge-queue
+// probe -- every field green, head commit pinned to automergeEligiblePR's
+// "abc" throughout -- the common prefix every merge-eligible tick test
+// shares before #854's pre-merge re-evaluation (recheckAutomergeInputs)
+// fetches everything a second time.
+func automergeFirstPassScript() []scriptedCall {
+	return []scriptedCall{
+		{out: automergeEligiblePR()},
+		{out: `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`},
+		{out: `[]`},
+		{out: `[]`},
+		{out: `{"labels":[{"name":"automerge:ok"}]}`},
+		{out: `{"automerge":{"maxChangedFiles":10,"maxDiffLines":500,"mergeMethod":"squash"}}`},
+		{out: `{"squash":true,"merge":false,"rebase":true}`},
+		{out: queueProbeResponse(false, false, "abc")},
+	}
+}
+
+// automergeGreenRecheckScript renders the pre-merge re-evaluation's own
+// full re-fetch (Decision 9, #854, merge.go's recheckAutomergeInputs): pr
+// view, checks, comments, reviews, closing-issue labels, base-ref policy,
+// merge-queue probe -- no allowed-methods re-fetch, since that carries over
+// unchanged from the first pass. Every field green by default (matching
+// automergeFirstPassScript's evidence), for tests that only care about the
+// merge/verification path beyond the re-check.
+func automergeGreenRecheckScript() []scriptedCall {
+	return automergeRecheckScript(
+		automergeEligiblePR(),
+		`[{"bucket":"pass","name":"test","state":"SUCCESS"}]`,
+		`[]`,
+		`[]`,
+		`{"labels":[{"name":"automerge:ok"}]}`,
+		`{"automerge":{"maxChangedFiles":10,"maxDiffLines":500,"mergeMethod":"squash"}}`,
+		queueProbeResponse(false, false, "abc"),
+	)
+}
+
+// automergeRecheckScript renders the pre-merge re-evaluation's full re-
+// fetch script from explicit bodies, so a test can mutate exactly one call
+// to isolate the recheck holding on that single piece of newly-changed
+// evidence.
+func automergeRecheckScript(pr, checks, comments, reviews, labels, policy, queue string) []scriptedCall {
+	return []scriptedCall{
+		{out: pr},
+		{out: checks},
+		{out: comments},
+		{out: reviews},
+		{out: labels},
+		{out: policy},
+		{out: queue},
+	}
 }
 
 // hasArg reports whether call contains arg anywhere after the command name.
@@ -146,9 +226,11 @@ func TestEvaluateAutomergeConditionMatrix(t *testing.T) {
 		{"no closing issue", func(in *automergeInputs) { in.ClosingIssues = nil }, reasonNoClosingIssue},
 		{"closing issue labels unreadable", func(in *automergeInputs) { in.LabelsErr = errors.New("boom") }, reasonLabelUnreadable},
 		{"closing issue lacks automerge:ok", func(in *automergeInputs) { in.IssueLabels = map[int][]string{9: {"bug"}} }, reasonLabelMissing},
-		{"no CI checks at all", func(in *automergeInputs) { in.CIStatus = "" }, reasonNoChecks},
-		{"CI not green", func(in *automergeInputs) { in.CIStatus = "pending" }, reasonCINotGreen},
+		{"no CI checks at all", func(in *automergeInputs) { in.Checks = nil }, reasonNoChecks},
+		{"CI not green (pending)", func(in *automergeInputs) { in.Checks = []check{{Bucket: "pending"}} }, reasonCICheckPending},
 		{"CI repair pending", func(in *automergeInputs) { in.RepairPending = true }, reasonRepairPending},
+		{"comments detection read truncated", func(in *automergeInputs) { in.CommentsComplete = false }, reasonCommentsReadTruncated},
+		{"reviews detection read truncated", func(in *automergeInputs) { in.ReviewsComplete = false }, reasonReviewsReadTruncated},
 		{"review feedback pending", func(in *automergeInputs) { in.PendingKeys = []string{"comment:1"} }, reasonReviewPending},
 		// The four new #850 feedback-hold reasons: FeedbackHold is checked
 		// after RepairPending and before len(PendingKeys), so any of these
@@ -171,10 +253,20 @@ func TestEvaluateAutomergeConditionMatrix(t *testing.T) {
 		{"touches a protected path", func(in *automergeInputs) {
 			in.Policy.ProtectedPaths = []string{"watch/internal/babysit/*"}
 		}, reasonProtectedPath},
-		{"merge method disallowed", func(in *automergeInputs) { in.MergeMethod = "merge" }, reasonMergeMethodDisallowed},
+		{"merge method is not squash", func(in *automergeInputs) { in.MergeMethod = "merge" }, reasonMergeMethodNotSquash},
+		{"merge method disallowed by repo", func(in *automergeInputs) {
+			in.AllowedMethods = map[string]bool{"squash": false, "merge": true, "rebase": true}
+		}, reasonMergeMethodDisallowed},
 		{"repo allowed merge methods unknown", func(in *automergeInputs) {
 			in.AllowedMethodsErr = errors.New("boom")
 		}, reasonMergeMethodUnknown},
+		{"already in the merge queue", func(in *automergeInputs) {
+			t := true
+			f := false
+			in.QueueInMergeQueue = &t
+			in.QueueEnabled = &f
+		}, reasonMergeQueueRequired},
+		{"merge queue state unknown (probe error)", func(in *automergeInputs) { in.QueueErr = errors.New("boom") }, reasonMergeQueueUnknown},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			in := greenAutomergeInputs()
@@ -217,7 +309,7 @@ func TestEvaluateAutomergeAllGreenMerges(t *testing.T) {
 	if !got.Merge {
 		t.Fatalf("Merge = false (reason %q), want true", got.Reason)
 	}
-	wantStages := []string{"enabled", "label", "ci", "review", "mergeable", "headsha", "files", "policy", "filecap", "lines", "protected", "method"}
+	wantStages := []string{"enabled", "label", "ci", "review", "mergeable", "headsha", "files", "policy", "filecap", "lines", "protected", "method", "queue"}
 	seen := map[string]bool{}
 	for _, c := range got.Conditions {
 		if !c.Reached || !c.Pass {
@@ -331,6 +423,126 @@ func TestEvaluateAutomergeSanitizesMultilineAndLongDetail(t *testing.T) {
 	}
 }
 
+// TestSanitizeDetailStripsAllControlCharactersNotJustNewline pins #854's
+// item 5 fix: sanitizeDetail previously stripped only "\n", leaving "\r"
+// and other C0 control bytes (form feed, vertical tab, ...) and DEL free to
+// break the single-line logLine format or corrupt the persisted state
+// file. Every rune below 0x20, plus DEL (0x7f), must be replaced.
+func TestSanitizeDetailStripsAllControlCharactersNotJustNewline(t *testing.T) {
+	raw := "line one\rline two\x0bline three\x0cline four\x7fend"
+	got := sanitizeDetail(raw)
+	for _, r := range got {
+		if r < 0x20 || r == 0x7f {
+			t.Fatalf("sanitizeDetail(%q) = %q, still contains control byte %q", raw, got, r)
+		}
+	}
+	if !strings.Contains(got, "line one") || !strings.Contains(got, "end") {
+		t.Fatalf("sanitizeDetail(%q) = %q, want the surrounding text preserved", raw, got)
+	}
+}
+
+// TestSanitizeDetailTruncatesOnRuneBoundary pins the polish fix to #854's
+// item 2: a multi-byte UTF-8 character straddling detailMaxLen's byte
+// cutoff must never be split mid-encoding. The fixture places 199 ASCII
+// bytes before a run of 2-byte "é" (U+00E9) characters, so the naive
+// sanitized[:detailMaxLen] byte slice (detailMaxLen==200) would cut after
+// only the first byte of the first "é", leaving invalid UTF-8 in the
+// persisted state file / log line.
+func TestSanitizeDetailTruncatesOnRuneBoundary(t *testing.T) {
+	raw := strings.Repeat("x", 199) + strings.Repeat("é", 10)
+	got := sanitizeDetail(raw)
+	if !utf8.ValidString(got) {
+		t.Fatalf("sanitizeDetail(%q) = %q, want valid UTF-8, got invalid encoding from a mid-rune split", raw, got)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Fatalf("sanitizeDetail(%q) = %q, want a truncated value to end with \"...\"", raw, got)
+	}
+	if len(got) > detailMaxLen+len("...") {
+		t.Fatalf("sanitizeDetail(%q) length = %d, want capped at roughly %d", raw, len(got), detailMaxLen)
+	}
+}
+
+// -- automergeCIHold / automergeQueueHold: pure classifiers (#854) -----------
+//
+// Unit tests, per the plan's Test Strategy ("unit-level only for pure
+// classifiers and the pagination helper") -- these two functions mirror
+// evaluateAutomerge's pure, I/O-free discipline (automerge.go's automergeCIHold/
+// automergeQueueHold doc comments), so the bucket/queue matrices are testable
+// without any `gh` scripting.
+
+// TestAutomergeCIHoldBucketMatrix pins the strict pass-only CI classifier
+// (Decisions 1/2): every bucket combination holds under its own distinct
+// reason, per watch/docs/error-handling.md #446 -- the assertion is the
+// exact reason string, never a bare pass/fail check, so a regression
+// collapsing two failure classes into the same reason is caught.
+func TestAutomergeCIHoldBucketMatrix(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		checks []check
+		want   string
+	}{
+		{"zero checks at all", nil, reasonNoChecks},
+		{"all pass merges", []check{{Bucket: "pass"}, {Bucket: "pass"}}, ""},
+		{"single pass merges", []check{{Bucket: "pass"}}, ""},
+		{"any fail holds", []check{{Bucket: "pass"}, {Bucket: "fail"}}, reasonCICheckFailed},
+		{"any pending holds", []check{{Bucket: "pass"}, {Bucket: "pending"}}, reasonCICheckPending},
+		{"any cancel holds", []check{{Bucket: "pass"}, {Bucket: "cancel"}}, reasonCICheckCancelled},
+		{"any skipping holds", []check{{Bucket: "pass"}, {Bucket: "skipping"}}, reasonCICheckSkipped},
+		{"empty-string bucket holds", []check{{Bucket: ""}}, reasonCIBucketEmpty},
+		{"unknown future bucket holds", []check{{Bucket: "neutral"}}, reasonCIBucketUnknown},
+		{"mixed: fail found before pending in appearance order", []check{{Bucket: "fail"}, {Bucket: "pending"}}, reasonCICheckFailed},
+		{"mixed: pending found before cancel in appearance order", []check{{Bucket: "pending"}, {Bucket: "cancel"}}, reasonCICheckPending},
+		{"mixed: skipping found before an unknown bucket in appearance order", []check{{Bucket: "skipping"}, {Bucket: "neutral"}}, reasonCICheckSkipped},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := automergeCIHold(tc.checks)
+			if got != tc.want {
+				t.Fatalf("automergeCIHold(%v) = %q, want %q", tc.checks, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAutomergeQueueHoldMatrix pins the merge-queue gate (Decision 4, Q3):
+// an explicit isInMergeQueue or isMergeQueueEnabled true holds under
+// reasonMergeQueueRequired (never enqueue as a side effect); a probe error
+// or either field left absent (nil, not merely false) holds under
+// reasonMergeQueueUnknown, since absence must never be read as "not
+// required". probed disambiguates the "not yet probed" lazy-fetch trial
+// sentinel (both fields nil, probed == false) from a probe that genuinely
+// ran and came back with nothing (both fields nil, probed == true) -- a
+// real GraphQL response shaped like {"pullRequest":null} decodes to exactly
+// that same both-nil shape, and previously the two were indistinguishable
+// (#854 fix, item 1).
+func TestAutomergeQueueHoldMatrix(t *testing.T) {
+	boolp := func(b bool) *bool { return &b }
+	for _, tc := range []struct {
+		name    string
+		inQueue *bool
+		enabled *bool
+		err     error
+		probed  bool
+		want    string
+	}{
+		{"already in the merge queue", boolp(true), boolp(false), nil, true, reasonMergeQueueRequired},
+		{"queue required/enabled on the base branch", boolp(false), boolp(true), nil, true, reasonMergeQueueRequired},
+		{"both true", boolp(true), boolp(true), nil, true, reasonMergeQueueRequired},
+		{"neither required nor enqueued merges normally", boolp(false), boolp(false), nil, true, ""},
+		{"GraphQL probe error", nil, nil, errors.New("boom"), true, reasonMergeQueueUnknown},
+		{"isInMergeQueue field absent (nil, not false)", nil, boolp(false), nil, true, reasonMergeQueueUnknown},
+		{"isMergeQueueEnabled field absent (nil, not false)", boolp(false), nil, nil, true, reasonMergeQueueUnknown},
+		{"not yet probed: the lazy-fetch trial sentinel passes through", nil, nil, nil, false, ""},
+		{"probed but pullRequest came back null: both fields genuinely absent after the probe ran", nil, nil, nil, true, reasonMergeQueueUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := automergeQueueHold(tc.inQueue, tc.enabled, tc.err, tc.probed)
+			if got != tc.want {
+				t.Fatalf("automergeQueueHold(inQueue=%v, enabled=%v, err=%v, probed=%v) = %q, want %q", tc.inQueue, tc.enabled, tc.err, tc.probed, got, tc.want)
+			}
+		})
+	}
+}
+
 // -- automergeDecision.logLine (#824) ----------------------------------------
 
 // TestAutomergeDecisionLogLine pins the exact one-line log format from the
@@ -346,7 +558,7 @@ func TestAutomergeDecisionLogLine(t *testing.T) {
 			{Key: "label", Reached: true, Pass: false},
 		},
 	}
-	want := `babysit: automerge PR #42 held: ticket lacks automerge:ok [enabled=yes label=no ci=- review=- mergeable=- headsha=- policy=- files=- filecap=- lines=- protected=- method=-]`
+	want := `babysit: automerge PR #42 held: ticket lacks automerge:ok [enabled=yes label=no ci=- review=- mergeable=- headsha=- policy=- files=- filecap=- lines=- protected=- method=- queue=-]`
 	got := d.logLine()
 	if got != want {
 		t.Fatalf("logLine() = %q, want %q", got, want)
@@ -559,12 +771,12 @@ func TestResolvePolicyAbsentBlockDenies(t *testing.T) {
 // own policy to self-approve by editing .cenci/config.json on its own branch.
 func TestFetchPolicyUsesBaseRefNotHeadRef(t *testing.T) {
 	var calls [][]string
-	original := command
-	command = func(name string, args ...string) ([]byte, error) {
-		calls = append(calls, append([]string{name}, args...))
-		return []byte(`{"automerge":{"maxChangedFiles":5,"maxDiffLines":200,"mergeMethod":"squash"}}`), nil
+	original := execGh
+	execGh = func(args ...string) (string, string, error) {
+		calls = append(calls, append([]string{"gh"}, args...))
+		return `{"automerge":{"maxChangedFiles":5,"maxDiffLines":200,"mergeMethod":"squash"}}`, "", nil
 	}
-	t.Cleanup(func() { command = original })
+	t.Cleanup(func() { execGh = original })
 
 	if _, err := fetchPolicy("o/r", "main"); err != nil {
 		t.Fatalf("fetchPolicy: %v", err)
@@ -585,12 +797,12 @@ func TestFetchPolicyUsesBaseRefNotHeadRef(t *testing.T) {
 // bogus second query parameter at "&").
 func TestFetchPolicyEscapesBaseRef(t *testing.T) {
 	var calls [][]string
-	original := command
-	command = func(name string, args ...string) ([]byte, error) {
-		calls = append(calls, append([]string{name}, args...))
-		return []byte(`{"automerge":{"maxChangedFiles":5,"maxDiffLines":200,"mergeMethod":"squash"}}`), nil
+	original := execGh
+	execGh = func(args ...string) (string, string, error) {
+		calls = append(calls, append([]string{"gh"}, args...))
+		return `{"automerge":{"maxChangedFiles":5,"maxDiffLines":200,"mergeMethod":"squash"}}`, "", nil
 	}
-	t.Cleanup(func() { command = original })
+	t.Cleanup(func() { execGh = original })
 
 	if _, err := fetchPolicy("o/r", "feature#1&x"); err != nil {
 		t.Fatalf("fetchPolicy: %v", err)
@@ -605,9 +817,9 @@ func TestFetchPolicyEscapesBaseRef(t *testing.T) {
 }
 
 func TestFetchPolicyNonJSONBodyIsUnreadable(t *testing.T) {
-	original := command
-	command = func(string, ...string) ([]byte, error) { return []byte("not json"), nil }
-	t.Cleanup(func() { command = original })
+	original := execGh
+	execGh = func(...string) (string, string, error) { return "not json", "", nil }
+	t.Cleanup(func() { execGh = original })
 	_, err := fetchPolicy("o/r", "main")
 	if err == nil || !strings.Contains(err.Error(), reasonPolicyUnreadable) {
 		t.Fatalf("fetchPolicy non-JSON body: err = %v, want an error containing %q", err, reasonPolicyUnreadable)
@@ -624,16 +836,13 @@ func TestFetchPolicyNonJSONBodyIsUnreadable(t *testing.T) {
 func TestTickIssuesAutomergeWhenGreenLabeledAndWithinPolicy(t *testing.T) {
 	withFleetAutomergeEnabled(t, true)
 	var calls [][]string
-	withScriptedCommands(t, []scriptedCall{
-		{out: automergeEligiblePR()},                                 // pr view
-		{out: `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`}, // pr checks
-		{out: `[]`}, // comments
-		{out: `[]`}, // reviews
-		{out: `{"labels":[{"name":"automerge:ok"}]}`},                                           // closing issue #9 labels
-		{out: `{"automerge":{"maxChangedFiles":10,"maxDiffLines":500,"mergeMethod":"squash"}}`}, // base-ref policy
-		{out: `{"squash":true,"merge":false,"rebase":true}`},                                    // repo allowed-methods probe
-		{out: "Merged pull request #42 (o/r)"},                                                  // gh pr merge
-	}, &calls)
+	script := automergeFirstPassScript()                      // the first, genuine full-evaluation pass
+	script = append(script, automergeGreenRecheckScript()...) // #854 Decision 9: the pre-merge re-evaluation's own full re-fetch, still all-green
+	script = append(script,
+		scriptedCall{out: "Merged pull request #42 (o/r)"}, // gh pr merge, zero exit
+		scriptedCall{out: `{"number":42,"title":"Change","state":"MERGED","headRefName":"feature","headRefOid":"abc","baseRefName":"main","mergeable":"MERGEABLE","isDraft":false,"changedFiles":1,"additions":5,"deletions":2,"files":[{"path":"watch/internal/babysit/x.go"}],"url":"https://example/pr/42","closingIssuesReferences":[{"number":9}]}`}, // post-merge verification refetch
+	)
+	withScriptedCommands(t, script, &calls)
 
 	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900}
 	terminal, delay, err := tick(&s)
@@ -691,10 +900,16 @@ func TestTickIssuesAutomergeWhenGreenLabeledAndWithinPolicy(t *testing.T) {
 	}
 }
 
-// TestTickAutomergeUsesResolvedMergeMethod pins that the merge actually
-// issued uses the resolved policy's mergeMethod ("rebase" here), not a
-// hardcoded --squash regardless of what stage 10 validated.
-func TestTickAutomergeUsesResolvedMergeMethod(t *testing.T) {
+// TestTickAutomergeSquashOnlyHoldsOnNonSquashPolicy inverts the old
+// TestTickAutomergeUsesResolvedMergeMethod (#854 squash-only, Decision 3):
+// mergeMethod stays readable for configuration compatibility, but only
+// "squash" is ever executed -- a resolved policy mergeMethod of "rebase"
+// (or "merge") must hold under its own distinct reason and issue no merge
+// at all, never fall through to --rebase/--merge. The method-not-squash
+// stage is evaluated before any allowed-merge-methods fetch, so a
+// non-squash policy also costs zero extra gh calls beyond the policy fetch
+// itself.
+func TestTickAutomergeSquashOnlyHoldsOnNonSquashPolicy(t *testing.T) {
 	withFleetAutomergeEnabled(t, true)
 	var calls [][]string
 	withScriptedCommands(t, []scriptedCall{
@@ -704,28 +919,92 @@ func TestTickAutomergeUsesResolvedMergeMethod(t *testing.T) {
 		{out: `[]`},
 		{out: `{"labels":[{"name":"automerge:ok"}]}`},
 		{out: `{"automerge":{"maxChangedFiles":10,"maxDiffLines":500,"mergeMethod":"rebase"}}`},
-		{out: `{"squash":false,"merge":false,"rebase":true}`},
-		{out: "Merged pull request #42 (o/r)"},
 	}, &calls)
 
 	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900}
 	if _, _, err := tick(&s); err != nil {
 		t.Fatal(err)
 	}
-	var mergeCall []string
+	if s.AutomergeReason != reasonMergeMethodNotSquash {
+		t.Fatalf("AutomergeReason = %q, want %q: a rebase policy must hold, never merge", s.AutomergeReason, reasonMergeMethodNotSquash)
+	}
 	for _, c := range calls {
 		if len(c) > 2 && c[1] == "pr" && c[2] == "merge" {
-			mergeCall = c
+			t.Fatalf("gh pr merge must not be issued for a non-squash policy: %#v", calls)
+		}
+		if len(c) > 1 && c[1] == "api" && strings.Contains(strings.Join(c, " "), "allow_squash_merge") {
+			t.Fatalf("the repo allowed-methods probe must not be fetched: the method-not-squash stage is evaluated before it, so a non-squash policy costs zero extra gh calls: %#v", calls)
 		}
 	}
-	if mergeCall == nil {
-		t.Fatalf("gh pr merge was not issued: %#v", calls)
+}
+
+// TestTickAutomergeSquashDisallowedByRepoStillHoldsDistinctReason pins the
+// other half of squash-only: when the policy itself already specifies
+// "squash" but the repo's own settings disallow it, the pre-existing
+// reasonMergeMethodDisallowed reason still applies (distinct from
+// reasonMergeMethodNotSquash, which never even reaches the allowed-methods
+// fetch).
+func TestTickAutomergeSquashDisallowedByRepoStillHoldsDistinctReason(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	withScriptedCommands(t, []scriptedCall{
+		{out: automergeEligiblePR()},
+		{out: `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`},
+		{out: `[]`},
+		{out: `[]`},
+		{out: `{"labels":[{"name":"automerge:ok"}]}`},
+		{out: `{"automerge":{"maxChangedFiles":10,"maxDiffLines":500,"mergeMethod":"squash"}}`},
+		{out: `{"squash":false,"merge":true,"rebase":true}`},
+	}, &calls)
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
 	}
-	if !hasArg(mergeCall, "--rebase") {
-		t.Errorf("merge call = %#v, want --rebase (the resolved policy mergeMethod)", mergeCall)
+	if s.AutomergeReason != reasonMergeMethodDisallowed {
+		t.Fatalf("AutomergeReason = %q, want %q: squash is the policy's mergeMethod, but the repo itself disallows it", s.AutomergeReason, reasonMergeMethodDisallowed)
 	}
-	if hasArg(mergeCall, "--squash") {
-		t.Errorf("merge call = %#v, must not default to --squash when the resolved policy specifies rebase", mergeCall)
+	for _, c := range calls {
+		if len(c) > 2 && c[1] == "pr" && c[2] == "merge" {
+			t.Fatalf("gh pr merge must not be issued when the repo disallows squash: %#v", calls)
+		}
+	}
+}
+
+// TestTickAutomergeHoldsOnMergeQueueProbeNullPullRequest is the unanimous
+// critical fix all three #854 reviewers flagged (item 1): a real GraphQL
+// queue-probe response shaped like {"data":{"repository":{"pullRequest":
+// null}}} -- zero exit, no top-level errors[], a deleted/renumbered/
+// inaccessible PR or transient null-propagation -- decodes to the exact
+// same (nil, nil, nil) shape as the "queue stage not yet reached" lazy-
+// fetch trial sentinel. It must hold under reasonMergeQueueUnknown (the
+// probe genuinely ran and came back with nothing), never silently pass as
+// if the probe had never run at all.
+func TestTickAutomergeHoldsOnMergeQueueProbeNullPullRequest(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	withScriptedCommands(t, []scriptedCall{
+		{out: automergeEligiblePR()},
+		{out: `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`},
+		{out: `[]`},
+		{out: `[]`},
+		{out: `{"labels":[{"name":"automerge:ok"}]}`},
+		{out: `{"automerge":{"maxChangedFiles":10,"maxDiffLines":500,"mergeMethod":"squash"}}`},
+		{out: `{"squash":true,"merge":false,"rebase":true}`},
+		{out: `{"data":{"repository":{"pullRequest":null}}}`}, // genuinely probed: zero exit, no errors[], but pullRequest is null
+	}, &calls)
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if s.AutomergeReason != reasonMergeQueueUnknown {
+		t.Fatalf("AutomergeReason = %q, want %q: a genuinely-probed GraphQL response with pullRequest:null must hold, not pass through as if the probe never ran", s.AutomergeReason, reasonMergeQueueUnknown)
+	}
+	for _, c := range calls {
+		if len(c) > 2 && c[1] == "pr" && c[2] == "merge" {
+			t.Fatalf("gh pr merge must not be issued when the merge-queue probe returns a null pullRequest: %#v", calls)
+		}
 	}
 }
 
@@ -832,16 +1111,10 @@ func TestTickAutomergeHeldOnRepairOrReviewPending(t *testing.T) {
 func TestTickAutomergeHeldWhenMergeRejected(t *testing.T) {
 	withFleetAutomergeEnabled(t, true)
 	var calls [][]string
-	withScriptedCommands(t, []scriptedCall{
-		{out: automergeEligiblePR()},
-		{out: `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`},
-		{out: `[]`},
-		{out: `[]`},
-		{out: `{"labels":[{"name":"automerge:ok"}]}`},
-		{out: `{"automerge":{"maxChangedFiles":10,"maxDiffLines":500,"mergeMethod":"squash"}}`},
-		{out: `{"squash":true,"merge":false,"rebase":true}`},
-		{out: "branch protection required review", err: errors.New("exit status 1")},
-	}, &calls)
+	script := automergeFirstPassScript()
+	script = append(script, automergeGreenRecheckScript()...)
+	script = append(script, scriptedCall{out: "branch protection required review", err: errors.New("exit status 1")})
+	withScriptedCommands(t, script, &calls)
 
 	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60}
 	terminal, _, err := tick(&s)
@@ -903,16 +1176,10 @@ func TestTickAutomergeSanitizesRejectedMergeDetail(t *testing.T) {
 	withFleetAutomergeEnabled(t, true)
 	var calls [][]string
 	longOutput := "branch protection required review\nsecond line\nthird line: " + strings.Repeat("y", 250)
-	withScriptedCommands(t, []scriptedCall{
-		{out: automergeEligiblePR()},
-		{out: `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`},
-		{out: `[]`},
-		{out: `[]`},
-		{out: `{"labels":[{"name":"automerge:ok"}]}`},
-		{out: `{"automerge":{"maxChangedFiles":10,"maxDiffLines":500,"mergeMethod":"squash"}}`},
-		{out: `{"squash":true,"merge":false,"rebase":true}`},
-		{out: longOutput, err: errors.New("exit status 1")},
-	}, &calls)
+	script := automergeFirstPassScript()
+	script = append(script, automergeGreenRecheckScript()...)
+	script = append(script, scriptedCall{out: longOutput, err: errors.New("exit status 1")})
+	withScriptedCommands(t, script, &calls)
 
 	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60}
 	if _, _, err := tick(&s); err != nil {
@@ -1002,5 +1269,491 @@ func TestTickFeedbackHoldsAutomerge(t *testing.T) {
 				t.Fatalf("PendingKeys = %v, want unchanged %v: a fail-closed hold must not clear the item", s.PendingKeys, tc.pendingKeys)
 			}
 		})
+	}
+}
+
+// -- #854: post-merge verification -------------------------------------------
+
+// TestTickAutomergePostMergeVerificationConfirmsMerged pins Decisions 5/6: a
+// zero-exit `gh pr merge` must be followed by exactly one refetch, and
+// AutomergeDecision == "merge" (plus the backoff reset) is recorded only
+// once that refetch itself reports MERGED -- the exit status alone is never
+// proof.
+func TestTickAutomergePostMergeVerificationConfirmsMerged(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	mergedPR := `{"number":42,"title":"Change","state":"MERGED","headRefName":"feature","headRefOid":"abc","baseRefName":"main","mergeable":"MERGEABLE","isDraft":false,"changedFiles":1,"additions":5,"deletions":2,"files":[{"path":"watch/internal/babysit/x.go"}],"url":"https://example/pr/42","closingIssuesReferences":[{"number":9}]}`
+	script := automergeFirstPassScript()
+	script = append(script, automergeGreenRecheckScript()...)
+	script = append(script,
+		scriptedCall{out: "Merged pull request #42 (o/r)"}, // gh pr merge, zero exit
+		scriptedCall{out: mergedPR},                        // the required post-merge refetch
+	)
+	withScriptedCommands(t, script, &calls)
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if s.AutomergeDecision != "merge" {
+		t.Fatalf("AutomergeDecision = %q, want \"merge\": confirmed by the post-merge refetch reporting MERGED", s.AutomergeDecision)
+	}
+	viewCalls := 0
+	for _, c := range calls {
+		if len(c) > 2 && c[1] == "pr" && c[2] == "view" {
+			viewCalls++
+		}
+	}
+	// #854: the tick's own fetch, the pre-merge re-evaluation's own fresh
+	// `gh pr view` re-fetch (Decision 9), plus one post-merge verification
+	// refetch (Q5: one refetch, no polling) -- three total.
+	if viewCalls != 3 {
+		t.Fatalf("pr view calls = %d, want exactly 3: the tick's own fetch, the pre-merge re-check's re-fetch, plus one post-merge verification refetch", viewCalls)
+	}
+}
+
+// TestTickAutomergePostMergeVerificationIndeterminateWhenNotMerged pins
+// Decision 6: a zero exit whose refetch reports a state other than MERGED
+// (e.g. still OPEN -- GitHub replication lag, or the queue deferred the
+// actual merge) is an indeterminate failure, never success.
+func TestTickAutomergePostMergeVerificationIndeterminateWhenNotMerged(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	stillOpenPR := automergeEligiblePR() // state OPEN, unchanged after the "merge"
+	script := automergeFirstPassScript()
+	script = append(script, automergeGreenRecheckScript()...)
+	script = append(script,
+		scriptedCall{out: "Merged pull request #42 (o/r)"},
+		scriptedCall{out: stillOpenPR},
+	)
+	withScriptedCommands(t, script, &calls)
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if s.AutomergeDecision != "held" {
+		t.Fatalf("AutomergeDecision = %q, want \"held\": a zero exit with a non-MERGED refetch is indeterminate, never success", s.AutomergeDecision)
+	}
+	if s.AutomergeReason != reasonMergeIndeterminate {
+		t.Fatalf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonMergeIndeterminate)
+	}
+}
+
+// TestTickAutomergePostMergeVerificationReadFailureIsDistinctReason pins
+// that a failed post-merge refetch is a distinct reason from an
+// indeterminate-but-successfully-read non-MERGED state -- the two failure
+// classes must never collapse together.
+func TestTickAutomergePostMergeVerificationReadFailureIsDistinctReason(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	script := automergeFirstPassScript()
+	script = append(script, automergeGreenRecheckScript()...)
+	script = append(script,
+		scriptedCall{out: "Merged pull request #42 (o/r)"},
+		scriptedCall{out: "rate limited", err: errors.New("exit status 1")}, // the refetch itself fails
+	)
+	withScriptedCommands(t, script, &calls)
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if s.AutomergeReason != reasonMergeVerifyUnreadable {
+		t.Fatalf("AutomergeReason = %q, want %q: a refetch failure must be distinct from reasonMergeIndeterminate", s.AutomergeReason, reasonMergeVerifyUnreadable)
+	}
+}
+
+// -- #854: pre-merge re-evaluation --------------------------------------------
+
+// TestTickAutomergePreMergeRecheckCatchesHeadSHAChange pins the pre-merge
+// re-evaluation gate (Decision 9): immediately before issuing `gh pr merge`,
+// the re-check's own fresh `gh pr view` re-fetch (merge.go's
+// recheckAutomergeInputs) reports the PR's current head commit -- a head
+// commit that changed between the first evaluation and the merge attempt
+// (e.g. a last-second push) must hold, never merge on stale evidence, and
+// never pin --match-head-commit to the stale SHA.
+func TestTickAutomergePreMergeRecheckCatchesHeadSHAChange(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	movedPR := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"moved","baseRefName":"main","mergeable":"MERGEABLE","isDraft":false,"changedFiles":1,"additions":5,"deletions":2,"files":[{"path":"watch/internal/babysit/x.go"}],"url":"https://example/pr/42","closingIssuesReferences":[{"number":9}]}`
+	script := automergeFirstPassScript() // the first, genuine full-evaluation pass (headRefOid "abc" throughout)
+	script = append(script, automergeRecheckScript(
+		movedPR, // the re-check's own pr view re-fetch reports a moved head
+		`[{"bucket":"pass","name":"test","state":"SUCCESS"}]`,
+		`[]`,
+		`[]`,
+		`{"labels":[{"name":"automerge:ok"}]}`,
+		`{"automerge":{"maxChangedFiles":10,"maxDiffLines":500,"mergeMethod":"squash"}}`,
+		queueProbeResponse(false, false, "moved"),
+	)...)
+	withScriptedCommands(t, script, &calls)
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range calls {
+		if len(c) > 2 && c[1] == "pr" && c[2] == "merge" {
+			t.Fatalf("gh pr merge must not be issued: the pre-merge re-check found a head SHA change since the first evaluation: %#v", calls)
+		}
+	}
+	if s.AutomergeDecision == "merge" {
+		t.Fatal("AutomergeDecision = \"merge\", want held: a stale-evidence merge on a changed head SHA must never succeed")
+	}
+	if s.AutomergeReason != reasonHeadSHAChanged {
+		t.Fatalf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonHeadSHAChanged)
+	}
+}
+
+// TestTickAutomergePreMergeRecheckClearsConditionsWhenRecheckFetchFails pins
+// the polish fix to #854's item 3: when the pre-merge recheck's own upstream
+// re-fetch fails outright (never getting far enough to produce a second,
+// fresh Conditions set), the first pass's all-"yes" Conditions must not
+// survive onto the held decision -- otherwise logLine renders a self-
+// contradictory "held: PR view unreadable [enabled=yes ... queue=yes]"
+// during incident triage. Conditions must be cleared so every stage renders
+// "-" (never reached) instead.
+func TestTickAutomergePreMergeRecheckClearsConditionsWhenRecheckFetchFails(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	script := automergeFirstPassScript()                                    // the first, genuine full-evaluation pass: every stage passes
+	script = append(script, scriptedCall{err: errors.New("exit status 1")}) // the recheck's own `gh pr view` re-fetch fails outright
+	withScriptedCommands(t, script, &calls)
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900}
+	if _, _, err := tick(&s); err != nil {
+		// Like a rejected merge (TestTickAutomergeHeldWhenMergeRejected), a
+		// recheck-phase failure is a logged hold inside runAutomerge, not a
+		// tick error: it's retried next tick, no backoff escalation.
+		t.Fatalf("tick returned an error on a recheck fetch failure, want nil: %v", err)
+	}
+	if s.AutomergeReason != reasonUpstreamPRUnreadable {
+		t.Fatalf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonUpstreamPRUnreadable)
+	}
+	if len(s.AutomergeConditions) != 0 {
+		t.Fatalf("AutomergeConditions = %#v, want empty: the second pass never completed, so the first pass's all-passing Conditions must not survive onto this held decision", s.AutomergeConditions)
+	}
+}
+
+// TestTickAutomergePreMergeRecheckHoldsOnChangedEvidence pins the rest of
+// Decision 9's pre-merge re-evaluation matrix (the plan's Test Strategy):
+// a label revoked, a check flipping to fail, a new non-bot review comment
+// appearing, base-ref policy tightened, mergeable flipping to CONFLICTING,
+// and the merge queue turning on -- each between the first evaluation and
+// the merge attempt -- must hold under an existing reason constant with a
+// "recheck: "-prefixed Detail (the plan's Assumption), issue no merge, and
+// never merge on stale evidence.
+func TestTickAutomergePreMergeRecheckHoldsOnChangedEvidence(t *testing.T) {
+	greenPR := automergeEligiblePR()
+	greenChecks := `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`
+	greenComments := `[]`
+	greenReviews := `[]`
+	greenLabels := `{"labels":[{"name":"automerge:ok"}]}`
+	greenPolicy := `{"automerge":{"maxChangedFiles":10,"maxDiffLines":500,"mergeMethod":"squash"}}`
+	greenQueue := queueProbeResponse(false, false, "abc")
+	conflictingPR := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"abc","baseRefName":"main","mergeable":"CONFLICTING","isDraft":false,"changedFiles":1,"additions":5,"deletions":2,"files":[{"path":"watch/internal/babysit/x.go"}],"url":"https://example/pr/42","closingIssuesReferences":[{"number":9}]}`
+
+	for _, tc := range []struct {
+		name                                                 string
+		pr, checks, comments, reviews, labels, policy, queue string
+		wantReason                                           string
+	}{
+		{"label revoked since evaluation", greenPR, greenChecks, greenComments, greenReviews, `{"labels":[]}`, greenPolicy, greenQueue, reasonLabelMissing},
+		{"a check flips to fail since evaluation", greenPR, `[{"bucket":"fail","name":"test","state":"FAILURE"}]`, greenComments, greenReviews, greenLabels, greenPolicy, greenQueue, reasonCICheckFailed},
+		{"a new non-bot review comment appears since evaluation", greenPR, greenChecks, `[{"id":77,"updated_at":"2026-01-02T00:00:00Z","user":{"login":"reviewer"}}]`, greenReviews, greenLabels, greenPolicy, greenQueue, reasonReviewPending},
+		{"base-ref policy tightened since evaluation", greenPR, greenChecks, greenComments, greenReviews, greenLabels, `{"automerge":{"maxChangedFiles":10,"maxDiffLines":1,"mergeMethod":"squash"}}`, greenQueue, reasonTooManyLines},
+		{"mergeable flips to CONFLICTING since evaluation", conflictingPR, greenChecks, greenComments, greenReviews, greenLabels, greenPolicy, greenQueue, reasonNotMergeable},
+		{"merge queue turns on since evaluation", greenPR, greenChecks, greenComments, greenReviews, greenLabels, greenPolicy, queueProbeResponse(true, false, "abc"), reasonMergeQueueRequired},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withFleetAutomergeEnabled(t, true)
+			var calls [][]string
+			script := automergeFirstPassScript()
+			script = append(script, automergeRecheckScript(tc.pr, tc.checks, tc.comments, tc.reviews, tc.labels, tc.policy, tc.queue)...)
+			withScriptedCommands(t, script, &calls)
+
+			s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900}
+			if _, _, err := tick(&s); err != nil {
+				t.Fatal(err)
+			}
+			if s.AutomergeReason != tc.wantReason {
+				t.Fatalf("AutomergeReason = %q, want %q", s.AutomergeReason, tc.wantReason)
+			}
+			if !strings.HasPrefix(s.AutomergeDetail, "recheck") {
+				t.Fatalf("AutomergeDetail = %q, want it prefixed with %q (the plan's Assumption: reuse existing reason constants with a recheck: marker, not a parallel constant set)", s.AutomergeDetail, "recheck")
+			}
+			if s.AutomergeDecision == "merge" {
+				t.Fatal("AutomergeDecision = \"merge\", want held: the pre-merge re-check found changed evidence since the first evaluation")
+			}
+			for _, c := range calls {
+				if len(c) > 2 && c[1] == "pr" && c[2] == "merge" {
+					t.Fatalf("gh pr merge must not be issued: the pre-merge re-check found changed evidence: %#v", calls)
+				}
+			}
+		})
+	}
+}
+
+// -- #854: one decision per tick (upstream read failures) --------------------
+
+// TestTickPersistsOneAutomergeDecisionOnUpstreamReadFailure pins Decision 7
+// and the AC "upstream read failures still produce one persisted decision":
+// a failure reading the PR, its checks, its comments, or its reviews must
+// still record exactly one AutomergeReason/AutomergeCheckedAt, even though
+// tick() itself still returns the underlying error. Previously these read
+// failures aborted tick() before runAutomerge ever ran at all, leaving no
+// automerge decision recorded for that tick.
+func TestTickPersistsOneAutomergeDecisionOnUpstreamReadFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		responses  []string
+		wantReason string
+	}{
+		{"pr view fails", nil, reasonUpstreamPRUnreadable},
+		{"pr checks fails", []string{automergeEligiblePR()}, reasonUpstreamChecksUnreadable},
+		{"comments read fails", []string{automergeEligiblePR(), `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`}, reasonUpstreamCommentsUnreadable},
+		{"reviews read fails", []string{automergeEligiblePR(), `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`}, reasonUpstreamReviewsUnreadable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withFleetAutomergeEnabled(t, true)
+			var calls [][]string
+			script := make([]scriptedCall, 0, len(tc.responses)+1)
+			for _, r := range tc.responses {
+				script = append(script, scriptedCall{out: r})
+			}
+			// The seam errors on the next call past the scripted responses --
+			// exactly the upstream read this subtest targets.
+			script = append(script, scriptedCall{out: "rate limited", err: errors.New("exit status 1")})
+			withScriptedCommands(t, script, &calls)
+
+			s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60}
+			if _, _, err := tick(&s); err == nil {
+				t.Fatal("tick: err = nil, want the upstream read failure to still surface as a tick error")
+			}
+			if s.AutomergeReason != tc.wantReason {
+				t.Fatalf("AutomergeReason = %q, want %q: every enabled automerge tick must persist exactly one decision, including on an upstream read failure", s.AutomergeReason, tc.wantReason)
+			}
+			if s.AutomergeCheckedAt.IsZero() {
+				t.Fatal("AutomergeCheckedAt was not stamped on the upstream-read-failure path")
+			}
+		})
+	}
+}
+
+// TestTickRecordsKillSwitchReasonEvenWhenUpstreamReadAlsoFails pins Q4: with
+// the fleet kill switch off AND an upstream read also failing, the recorded
+// reason must stay reasonAutomergeDisabled (matching today's healthy-tick
+// behavior), never the specific upstream-read failure.
+func TestTickRecordsKillSwitchReasonEvenWhenUpstreamReadAlsoFails(t *testing.T) {
+	// fleetConfigPath stays pinned to "" (disabled) by the package's
+	// TestMain -- no withFleetAutomergeEnabled call needed.
+	var calls [][]string
+	withCommands(t, nil, &calls) // pr view fails immediately: no responses scripted
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60}
+	if _, _, err := tick(&s); err == nil {
+		t.Fatal("tick: err = nil, want the pr view failure to still surface as a tick error")
+	}
+	if s.AutomergeReason != reasonAutomergeDisabled {
+		t.Fatalf("AutomergeReason = %q, want %q: with the kill switch off, the recorded reason must stay the kill-switch reason even when an upstream read also fails (Q4)", s.AutomergeReason, reasonAutomergeDisabled)
+	}
+}
+
+// -- #854: one decision per tick (workflow launch failures, item 4) ----------
+
+// TestTickRecordsAutomergeHoldWhenAddressReviewLaunchFails pins item 4: a
+// failed launch() call (here, address-review, dispatched before runAutomerge
+// ever runs) during an automerge-enabled tick must still persist and log
+// exactly one automerge decision -- under reasonWorkflowLaunchFailed --
+// before tick returns the underlying error, rather than silently leaving a
+// stale decision from the previous tick displayed (Decision 7).
+func TestTickRecordsAutomergeHoldWhenAddressReviewLaunchFails(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	responses := []string{
+		openPR(),
+		`[]`,
+		`[{"id":7,"updated_at":"2026-01-02T00:00:00Z","user":{"login":"reviewer"}}]`,
+		`[]`,
+	}
+	originalCommand := command
+	originalExecGh := execGh
+	i := 0
+	execGh = func(args ...string) (string, string, error) {
+		calls = append(calls, append([]string{"gh"}, args...))
+		if i >= len(responses) {
+			return "", "", fmt.Errorf("unexpected command: %s", strings.Join(args, " "))
+		}
+		out := responses[i]
+		i++
+		return out, "", nil
+	}
+	command = func(name string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string{name}, args...))
+		return []byte("boom"), errors.New("exit status 1")
+	}
+	t.Cleanup(func() {
+		command = originalCommand
+		execGh = originalExecGh
+	})
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900}
+	if _, _, err := tick(&s); err == nil {
+		t.Fatal("tick: err = nil, want the address-review launch failure to still surface as a tick error")
+	}
+	if s.AutomergeReason != reasonWorkflowLaunchFailed {
+		t.Fatalf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonWorkflowLaunchFailed)
+	}
+	if s.AutomergeCheckedAt.IsZero() {
+		t.Fatal("AutomergeCheckedAt was not stamped when the address-review launch failed")
+	}
+}
+
+// TestTickRecordsAutomergeHoldWhenCIRepairLaunchFails pins item 4: a failed
+// launch() call for ci-repair (failing CI checks, FixAttempts still below
+// fixCap) during an automerge-enabled tick must still persist and log
+// exactly one automerge decision -- under reasonWorkflowLaunchFailed --
+// before tick returns the underlying error, mirroring
+// TestTickRecordsAutomergeHoldWhenAddressReviewLaunchFails for the ci-repair
+// launch() call site.
+func TestTickRecordsAutomergeHoldWhenCIRepairLaunchFails(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	responses := []string{
+		openPR(),
+		`[{"bucket":"fail","name":"test","state":"FAILURE"}]`,
+	}
+	originalCommand := command
+	originalExecGh := execGh
+	i := 0
+	execGh = func(args ...string) (string, string, error) {
+		calls = append(calls, append([]string{"gh"}, args...))
+		if i >= len(responses) {
+			return "", "", fmt.Errorf("unexpected command: %s", strings.Join(args, " "))
+		}
+		out := responses[i]
+		i++
+		return out, "", nil
+	}
+	command = func(name string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string{name}, args...))
+		return []byte("boom"), errors.New("exit status 1")
+	}
+	t.Cleanup(func() {
+		command = originalCommand
+		execGh = originalExecGh
+	})
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900, FixAttempts: 0}
+	if _, _, err := tick(&s); err == nil {
+		t.Fatal("tick: err = nil, want the ci-repair launch failure to still surface as a tick error")
+	}
+	if s.AutomergeReason != reasonWorkflowLaunchFailed {
+		t.Fatalf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonWorkflowLaunchFailed)
+	}
+	if s.AutomergeCheckedAt.IsZero() {
+		t.Fatal("AutomergeCheckedAt was not stamped when the ci-repair launch failed")
+	}
+}
+
+// TestTickRecordsAutomergeHoldWhenBabysitAttentionLaunchFails pins item 4: a
+// failed launch() call for babysit-attention (failing CI checks, FixAttempts
+// already at fixCap) during an automerge-enabled tick must still persist and
+// log exactly one automerge decision -- under reasonWorkflowLaunchFailed --
+// before tick returns the underlying error, mirroring
+// TestTickRecordsAutomergeHoldWhenAddressReviewLaunchFails for the
+// babysit-attention launch() call site.
+func TestTickRecordsAutomergeHoldWhenBabysitAttentionLaunchFails(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	responses := []string{
+		openPR(),
+		`[{"bucket":"fail","name":"test","state":"FAILURE"}]`,
+	}
+	originalCommand := command
+	originalExecGh := execGh
+	i := 0
+	execGh = func(args ...string) (string, string, error) {
+		calls = append(calls, append([]string{"gh"}, args...))
+		if i >= len(responses) {
+			return "", "", fmt.Errorf("unexpected command: %s", strings.Join(args, " "))
+		}
+		out := responses[i]
+		i++
+		return out, "", nil
+	}
+	command = func(name string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string{name}, args...))
+		return []byte("boom"), errors.New("exit status 1")
+	}
+	t.Cleanup(func() {
+		command = originalCommand
+		execGh = originalExecGh
+	})
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900, FixAttempts: fixCap}
+	if _, _, err := tick(&s); err == nil {
+		t.Fatal("tick: err = nil, want the babysit-attention launch failure to still surface as a tick error")
+	}
+	if s.AutomergeReason != reasonWorkflowLaunchFailed {
+		t.Fatalf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonWorkflowLaunchFailed)
+	}
+	if s.AutomergeCheckedAt.IsZero() {
+		t.Fatal("AutomergeCheckedAt was not stamped when the babysit-attention launch failed")
+	}
+}
+
+// -- #854: detection-read pagination feeding an automerge hold ---------------
+
+// TestTickHoldsAutomergeWhenCommentsDetectionReadPossiblyTruncated pins the
+// pagination completeness signal (#854, pulled in from #862's scope): a
+// comments detection read that comes back exactly page-sized (100 items,
+// GitHub REST's default/max per_page) can never be proven complete without
+// actually fetching a second page -- until the paginated fetcher confirms a
+// short/empty terminating page, automerge must hold under its own
+// truncation reason rather than silently treat the page as the full list.
+func TestTickHoldsAutomergeWhenCommentsDetectionReadPossiblyTruncated(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	// A full-sized page (< feedbackPageSize items would terminate as
+	// complete) that keeps coming back full all the way to maxFeedbackPages
+	// -- the cap-exhaustion case: fetchPaged can never prove completeness
+	// without the traversal itself producing a short/empty page, so the
+	// comments detection read must exhaust the full page cap to genuinely
+	// test the pagination-completeness signal, not merely "one full page".
+	fullPage := func(offset int) string {
+		items := make([]string, feedbackPageSize)
+		for i := range items {
+			// All from a "[bot]" login: the detection loop already ignores
+			// bot comments, so this fixture isolates the pagination-
+			// completeness question from the "new pending feedback" one.
+			items[i] = fmt.Sprintf(`{"id":%d,"updated_at":"2025-01-01T00:00:00Z","user":{"login":"bot[bot]"}}`, offset*feedbackPageSize+i)
+		}
+		return "[" + strings.Join(items, ",") + "]"
+	}
+
+	script := []scriptedCall{
+		{out: automergeEligiblePR()},
+		{out: `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`},
+	}
+	for page := 0; page < maxFeedbackPages; page++ {
+		script = append(script, scriptedCall{out: fullPage(page)})
+	}
+	script = append(script, scriptedCall{out: `[]`})                                   // reviews
+	script = append(script, scriptedCall{out: `{"labels":[{"name":"automerge:ok"}]}`}) // closing issue #9 labels
+
+	var calls [][]string
+	withScriptedCommands(t, script, &calls)
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if s.AutomergeReason != reasonCommentsReadTruncated {
+		t.Fatalf("AutomergeReason = %q, want %q: a full-page comments read cannot be proven complete without a paginated fetch confirming a short terminating page", s.AutomergeReason, reasonCommentsReadTruncated)
+	}
+	for _, c := range calls {
+		if len(c) > 2 && c[1] == "pr" && c[2] == "merge" {
+			t.Fatalf("gh pr merge must not be issued while the comments detection read is possibly truncated: %#v", calls)
+		}
 	}
 }

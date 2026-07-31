@@ -98,6 +98,12 @@ type prView struct {
 	Deletions               int                    `json:"deletions"`
 	Files                   []prFile               `json:"files"`
 }
+
+// prViewFields is the --json field set every `gh pr view` call in this
+// package requests -- shared by tick's own fetch and merge.go's post-merge
+// verification refetch so both decode the identical prView shape.
+const prViewFields = "number,title,state,headRefName,headRefOid,mergedAt,closingIssuesReferences,url,baseRefName,mergeable,isDraft,changedFiles,additions,deletions,files"
+
 type check struct{ Bucket, Name, State string }
 type comment struct {
 	ID        int64  `json:"id"`
@@ -232,15 +238,16 @@ func Run(o Options) error {
 
 func tick(s *State) (bool, time.Duration, error) {
 	var pr prView
-	if err := ghJSON(&pr, "pr", "view", s.PR, "--repo", s.Repo, "--json", "number,title,state,headRefName,headRefOid,mergedAt,closingIssuesReferences,url,baseRefName,mergeable,isDraft,changedFiles,additions,deletions,files"); err != nil {
+	if err := ghJSON(&pr, "pr", "view", s.PR, "--repo", s.Repo, "--json", prViewFields); err != nil {
+		recordUpstreamReadFailure(s, reasonUpstreamPRUnreadable, err)
 		return false, 0, err
 	}
 	if pr.State == "MERGED" || pr.State == "CLOSED" {
 		if pr.State == "MERGED" {
-			_, _ = command("gh", "label", "create", "Implemented", "--repo", s.Repo, "--color", "6F42C1", "--description", "PR merged — done")
+			_, _, _ = execGh("label", "create", "Implemented", "--repo", s.Repo, "--color", "6F42C1", "--description", "PR merged — done")
 			for _, i := range pr.ClosingIssuesReferences {
-				if out, err := command("gh", "issue", "edit", strconv.Itoa(i.Number), "--repo", s.Repo, "--add-label", "Implemented", "--remove-label", "In Review"); err != nil {
-					return false, 0, fmt.Errorf("label issue #%d: %s: %w", i.Number, strings.TrimSpace(string(out)), err)
+				if _, stderr, err := execGh("issue", "edit", strconv.Itoa(i.Number), "--repo", s.Repo, "--add-label", "Implemented", "--remove-label", "In Review"); err != nil {
+					return false, 0, fmt.Errorf("label issue #%d: %s: %w", i.Number, strings.TrimSpace(stderr), err)
 				}
 			}
 		}
@@ -249,6 +256,7 @@ func tick(s *State) (bool, time.Duration, error) {
 	}
 	var checks []check
 	if err := ghJSON(&checks, "pr", "checks", s.PR, "--repo", s.Repo, "--json", "bucket,name,state"); err != nil {
+		recordUpstreamReadFailure(s, reasonUpstreamChecksUnreadable, err)
 		return false, 0, err
 	}
 	// Publish the close guard's join key and verdict from data this tick
@@ -269,12 +277,19 @@ func tick(s *State) (bool, time.Duration, error) {
 		if s.FixAttempts >= fixCap {
 			s.Status = "needs-input"
 			if err := launch(s, "babysit-attention", s.PR+" CI retry cap reached; decide whether to retry, pause, or stop"); err != nil {
+				// One-decision-per-tick (Decision 7, #854): without this, a
+				// failed workflow dispatch on an enabled automerge tick
+				// returned tick's error with no automerge decision recorded
+				// at all, leaving a stale decision from the previous tick
+				// displayed.
+				recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
 				return false, 0, err
 			}
 			return false, 0, errNeedsInput
 		} else {
 			prompt := fmt.Sprintf("PR #%s (%s) has failing CI checks: %s. Diagnose, fix, test, commit, and push without force-pushing.", s.PR, pr.HeadRefName, strings.Join(failing, ", "))
 			if err := launch(s, "ci-repair", prompt); err != nil {
+				recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
 				return false, 0, err
 			}
 			s.FixAttempts++
@@ -287,49 +302,28 @@ func tick(s *State) (bool, time.Duration, error) {
 		s.RepairPending = false
 		s.LastHeadSHA = pr.HeadRefOID
 	}
-	// Unpaginated by design in this ticket -- comments beyond the default
-	// page size are silently missed; hardening this read is #854's scope.
-	var comments []comment
-	if err := ghJSON(&comments, "api", "repos/"+s.Repo+"/pulls/"+s.PR+"/comments"); err != nil {
+	// Fully paginated (#854): fetchPaged follows every page up to
+	// maxFeedbackPages, so a PR with more comments than one page no longer
+	// silently misses them; commentsComplete records whether the traversal
+	// actually proved completeness (a short/empty terminating page) or hit
+	// the page cap while still full-sized.
+	comments, commentsComplete, err := fetchPaged[comment]("repos/" + s.Repo + "/pulls/" + s.PR + "/comments")
+	if err != nil {
+		recordUpstreamReadFailure(s, reasonUpstreamCommentsUnreadable, err)
 		return false, 0, err
 	}
-	seen := map[string]bool{}
-	for _, key := range append(append([]string{}, s.AddressedKeys...), s.PendingKeys...) {
-		seen[key] = true
-	}
-	newest := s.LastCommentAt
-	var keys []string
-	for _, c := range comments {
-		ts := c.UpdatedAt
-		if ts == "" {
-			ts = c.CreatedAt
-		}
-		key := "comment:" + strconv.FormatInt(c.ID, 10)
-		if !seen[key] && ts > s.LastCommentAt && !strings.HasSuffix(c.User.Login, "[bot]") {
-			keys = append(keys, key)
-			if ts > newest {
-				newest = ts
-			}
-		}
-	}
-	// Unpaginated by design in this ticket too (reviewsPageSize in feedback.go
-	// is a fail-closed tripwire against this, not a fix) -- full pagination
-	// of this read is also #854's scope.
-	var reviews []review
-	if err := ghJSON(&reviews, "api", "repos/"+s.Repo+"/pulls/"+s.PR+"/reviews"); err != nil {
+	// Fully paginated (#854): reviewsComplete feeds feedbackState.ReviewsComplete
+	// (feedback.go), replacing #850's reviewsPageSize length tripwire with the
+	// actual completeness signal from the traversal.
+	reviews, reviewsComplete, err := fetchPaged[review]("repos/" + s.Repo + "/pulls/" + s.PR + "/reviews")
+	if err != nil {
+		recordUpstreamReadFailure(s, reasonUpstreamReviewsUnreadable, err)
 		return false, 0, err
 	}
-	for _, r := range reviews {
-		key := "review:" + strconv.FormatInt(r.ID, 10)
-		if r.State == "CHANGES_REQUESTED" && !seen[key] && r.SubmittedAt > s.LastCommentAt && !strings.HasSuffix(r.User.Login, "[bot]") {
-			keys = append(keys, key)
-			if r.SubmittedAt > newest {
-				newest = r.SubmittedAt
-			}
-		}
-	}
+	keys, newest := detectNewFeedbackKeys(s, comments, reviews)
 	if len(keys) > 0 {
 		if err := launch(s, "address-review", s.PR); err != nil {
+			recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
 			return false, 0, err
 		}
 		s.PendingKeys = append(s.PendingKeys, keys...)
@@ -342,8 +336,8 @@ func tick(s *State) (bool, time.Duration, error) {
 	// automerge decision (Q6) -- runs unconditionally, regardless of whether
 	// automerge itself is enabled, since the launch-dedup/AddressedKeys
 	// bookkeeping it performs matters independent of automerge.
-	verdict := reconcilePendingFeedback(s, reviews)
-	if runAutomerge(s, pr, checks, verdict) {
+	verdict := reconcilePendingFeedback(s, reviews, reviewsComplete)
+	if runAutomerge(s, pr, checks, verdict, commentsComplete, reviewsComplete) {
 		actionable = true
 	}
 	if actionable {
@@ -365,26 +359,80 @@ func launch(s *State, workflow, arg string) error {
 	}
 	return nil
 }
+
+// detectNewFeedbackKeys is the pure, read-only new-feedback detection
+// predicate, extracted out of tick's own inline loop so both tick and the
+// pre-merge re-check (merge.go's recheckAutomergeInputs) share exactly one
+// implementation (#854's rejected "reuse reconcilePendingFeedback"
+// alternative: that function mutates State and re-fetches GraphQL thread
+// resolution, risking double-bookkeeping and unable to detect feedback that
+// landed strictly between this tick's own fetch and the merge attempt).
+// Given s's already-recorded AddressedKeys/PendingKeys and LastCommentAt, it
+// reports every comment/review key in comments/reviews not already seen,
+// ignoring bot authors, plus the newest timestamp found (s.LastCommentAt
+// when nothing new was found) -- identical to tick's pre-#854 inline
+// computation, just factored out; it mutates nothing.
+func detectNewFeedbackKeys(s *State, comments []comment, reviews []review) (keys []string, newest string) {
+	seen := map[string]bool{}
+	for _, key := range append(append([]string{}, s.AddressedKeys...), s.PendingKeys...) {
+		seen[key] = true
+	}
+	newest = s.LastCommentAt
+	for _, c := range comments {
+		ts := c.UpdatedAt
+		if ts == "" {
+			ts = c.CreatedAt
+		}
+		key := "comment:" + strconv.FormatInt(c.ID, 10)
+		if !seen[key] && ts > s.LastCommentAt && !strings.HasSuffix(c.User.Login, "[bot]") {
+			keys = append(keys, key)
+			if ts > newest {
+				newest = ts
+			}
+		}
+	}
+	for _, r := range reviews {
+		key := "review:" + strconv.FormatInt(r.ID, 10)
+		if r.State == "CHANGES_REQUESTED" && !seen[key] && r.SubmittedAt > s.LastCommentAt && !strings.HasSuffix(r.User.Login, "[bot]") {
+			keys = append(keys, key)
+			if r.SubmittedAt > newest {
+				newest = r.SubmittedAt
+			}
+		}
+	}
+	return keys, newest
+}
+
+// ghJSON decodes dst from `gh <args...>`'s stdout. A bounded-output
+// truncation (errGhOutputTruncated) is reported unconditionally, even when
+// the truncated stdout still happens to decode successfully as valid JSON
+// (#854 fix, item 3) -- a truncated read is unreliable by construction
+// (watch/docs/error-handling.md's default-deny rule) and must never be
+// silently treated as complete just because it parses. Once truncation is
+// ruled out, ghJSON keeps its pre-existing deliberate tolerance: a non-zero
+// `gh` exit whose stdout still decodes is still success (`gh pr checks`
+// exits 8 while checks are pending, pinned by
+// TestGhJSONAcceptsChecksExitWithValidJSON).
 func ghJSON(dst any, args ...string) error {
-	out, err := command("gh", args...)
-	decodeErr := json.Unmarshal(out, dst)
+	stdout, stderr, err := execGh(args...)
+	if errors.Is(err, errGhOutputTruncated) {
+		return fmt.Errorf("gh %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(stderr), err)
+	}
+	decodeErr := json.Unmarshal([]byte(stdout), dst)
 	if decodeErr == nil {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("gh %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
+		return fmt.Errorf("gh %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(stderr), err)
 	}
-	if decodeErr != nil {
-		return fmt.Errorf("decode gh output: %w", decodeErr)
-	}
-	return nil
+	return fmt.Errorf("decode gh output: %w", decodeErr)
 }
 func repository() (string, error) {
-	out, err := command("gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner")
+	stdout, stderr, err := execGh("repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner")
 	if err != nil {
-		return "", fmt.Errorf("resolve repository: %s: %w", strings.TrimSpace(string(out)), err)
+		return "", fmt.Errorf("resolve repository: %s: %w", strings.TrimSpace(stderr), err)
 	}
-	r := strings.TrimSpace(string(out))
+	r := strings.TrimSpace(stdout)
 	if !strings.Contains(r, "/") {
 		return "", errors.New("could not resolve owner/repository")
 	}

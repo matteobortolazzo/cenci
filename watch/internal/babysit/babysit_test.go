@@ -30,11 +30,11 @@ func TestMain(m *testing.M) {
 }
 
 func TestGhJSONAcceptsChecksExitWithValidJSON(t *testing.T) {
-	original := command
-	command = func(string, ...string) ([]byte, error) {
-		return []byte(`[{"bucket":"fail","name":"test"}]`), errors.New("exit status 1")
+	original := execGh
+	execGh = func(...string) (string, string, error) {
+		return `[{"bucket":"fail","name":"test"}]`, "", errors.New("exit status 1")
 	}
-	t.Cleanup(func() { command = original })
+	t.Cleanup(func() { execGh = original })
 	var checks []check
 	if err := ghJSON(&checks, "pr", "checks", "42"); err != nil {
 		t.Fatal(err)
@@ -44,23 +44,56 @@ func TestGhJSONAcceptsChecksExitWithValidJSON(t *testing.T) {
 	}
 }
 
+// TestGhJSONReturnsErrorWhenOutputTruncatedEvenIfDecodable pins #854's item
+// 3 fix: execGh's errGhOutputTruncated must surface unconditionally, even
+// when the (truncated) stdout still happens to decode successfully as
+// valid JSON -- previously ghJSON's "decode succeeded ⇒ success" shortcut
+// ran before the error was ever inspected, silently discarding the
+// truncation signal and treating a possibly-incomplete read as complete.
+func TestGhJSONReturnsErrorWhenOutputTruncatedEvenIfDecodable(t *testing.T) {
+	original := execGh
+	execGh = func(...string) (string, string, error) {
+		return `[{"bucket":"pass","name":"test"}]`, "", errGhOutputTruncated
+	}
+	t.Cleanup(func() { execGh = original })
+	var checks []check
+	err := ghJSON(&checks, "pr", "checks", "42")
+	if err == nil {
+		t.Fatal("ghJSON: err = nil, want an error when execGh reports truncation, even though stdout still decodes as valid JSON")
+	}
+	if !errors.Is(err, errGhOutputTruncated) {
+		t.Fatalf("ghJSON err = %v, want errors.Is(err, errGhOutputTruncated)", err)
+	}
+}
+
+// withCommands stubs both the package's `gh` seam (execGh) and its
+// non-`gh` seam (command, still used for `git rev-parse` and the `cenci
+// run` self-exec) for the duration of a test, serving responses in order
+// for every `gh` invocation and recording every call (both seams) into
+// calls in call order -- preserving the pre-#854 `[]string{"gh", ...}`
+// recorded-call shape so every existing assertion keeps working unchanged.
 func withCommands(t *testing.T, responses []string, calls *[][]string) {
 	t.Helper()
-	original := command
+	originalCommand := command
+	originalExecGh := execGh
 	i := 0
 	command = func(name string, args ...string) ([]byte, error) {
 		*calls = append(*calls, append([]string{name}, args...))
-		if name != "gh" {
-			return []byte(""), nil
-		}
+		return []byte(""), nil
+	}
+	execGh = func(args ...string) (string, string, error) {
+		*calls = append(*calls, append([]string{"gh"}, args...))
 		if i >= len(responses) {
-			return nil, fmt.Errorf("unexpected command: %s", strings.Join(args, " "))
+			return "", "", fmt.Errorf("unexpected command: %s", strings.Join(args, " "))
 		}
 		out := responses[i]
 		i++
-		return []byte(out), nil
+		return out, "", nil
 	}
-	t.Cleanup(func() { command = original })
+	t.Cleanup(func() {
+		command = originalCommand
+		execGh = originalExecGh
+	})
 }
 
 func openPR() string {
@@ -174,6 +207,32 @@ func TestTickRecordsClosingIssuesAndCIStatus(t *testing.T) {
 	}
 }
 
+// TestCancelBucketCIStillAllowsClose is a #787 regression pin (#854 Test
+// Strategy): the strict pass-only automerge classifier (automergeCIHold) is
+// deliberately a separate function from ciStatus(), which still feeds
+// BlocksClose -- a cancel-bucket check must not make ciStatus() report
+// "failing"/"pending" and wedge a tmux window open, even though the same
+// cancel bucket now holds automerge under its own reason.
+func TestCancelBucketCIStillAllowsClose(t *testing.T) {
+	stubProcessOwned(t, true)
+	dir := t.TempDir()
+	prWithIssue := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"abc","url":"https://example/pr/42","closingIssuesReferences":[{"number":782}]}`
+	var calls [][]string
+	withCommands(t, []string{prWithIssue, `[{"bucket":"cancel","name":"a"}]`, `[]`, `[]`}, &calls)
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if s.CIStatus != "green" {
+		t.Fatalf("CIStatus = %q, want %q: ciStatus() must keep collapsing a cancel-only bucket to green (#787 unchanged), even though automergeCIHold now holds it under its own reason", s.CIStatus, "green")
+	}
+	writeGuardState(t, dir, s)
+	blocks, _ := BlocksClose("782", "", dir)
+	if blocks {
+		t.Fatal("BlocksClose = true, want false: a cancel-bucket-only CI result must not hold the window open")
+	}
+}
+
 // TestRunWritesStateBeforeFirstTick covers the arm-to-first-poll window
 // (#787): `cenci babysit` writes its state file before the supervisor loop
 // starts polling, so a lazyboards cleanup firing between "supervisor armed"
@@ -181,21 +240,29 @@ func TestTickRecordsClosingIssuesAndCIStatus(t *testing.T) {
 func TestRunWritesStateBeforeFirstTick(t *testing.T) {
 	dir := t.TempDir()
 	var atFirstTick *State
-	original := command
+	originalCommand := command
 	command = func(name string, args ...string) ([]byte, error) {
-		switch {
-		case name == "git":
+		if name == "git" {
 			return []byte("/repo/root\n"), nil
-		case name == "gh" && len(args) > 1 && args[0] == "repo":
-			return []byte("o/r\n"), nil
-		case name == "gh" && len(args) > 1 && args[0] == "pr" && args[1] == "view":
-			s := load(statePath(dir, "o/r", "42"))
-			atFirstTick = &s
-			return nil, errors.New("exit status 1")
 		}
 		return []byte(""), nil
 	}
-	t.Cleanup(func() { command = original })
+	originalExecGh := execGh
+	execGh = func(args ...string) (string, string, error) {
+		switch {
+		case len(args) > 0 && args[0] == "repo":
+			return "o/r\n", "", nil
+		case len(args) > 1 && args[0] == "pr" && args[1] == "view":
+			s := load(statePath(dir, "o/r", "42"))
+			atFirstTick = &s
+			return "", "", errors.New("exit status 1")
+		}
+		return "", "", nil
+	}
+	t.Cleanup(func() {
+		command = originalCommand
+		execGh = originalExecGh
+	})
 
 	if err := Run(Options{PR: "42", Agent: "claude", StateDir: dir, Interval: time.Minute, Once: true}); err == nil {
 		t.Fatal("Run: want the stubbed gh failure to surface")

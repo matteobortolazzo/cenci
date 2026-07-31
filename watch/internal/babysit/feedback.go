@@ -48,6 +48,14 @@ const (
 type feedbackState struct {
 	ThreadResolved map[int64]bool
 	Reviews        []review
+
+	// ReviewsComplete records whether this tick's reviews detection read
+	// was proven complete via fetchPaged's completeness signal (#854) --
+	// replaces the reviewsPageSize length tripwire, which failed closed on
+	// any reviews slice at exactly reviewsPageSize length even when that
+	// read was genuinely complete. Defaults to the zero value (false) so
+	// an un-set fixture fails closed rather than silently resolving.
+	ReviewsComplete bool
 }
 
 // feedbackVerdict is reconcilePendingFeedback's output. An empty Hold means
@@ -95,16 +103,10 @@ func classifyCommentKey(id string, fs feedbackState) keyStatus {
 }
 
 // reviewsPageSize is GitHub's default REST per_page for the
-// repos/:owner/:repo/pulls/:number/reviews fetch babysit.go's tick() makes
-// every tick -- that read does not paginate (full pagination is #854's
-// scope), so a reviews slice at exactly this length cannot be proven
-// complete. A stale APPROVED visible in the fetched page could otherwise be
-// misread as a reviewer's latest word while a genuinely newer, still-
-// blocking CHANGES_REQUESTED sits on an unfetched page. This is only a
-// fail-closed tripwire, not real completeness proof: a fetch that happens to
-// return exactly reviewsPageSize reviews and is actually complete also fails
-// closed, which is the deliberately conservative tradeoff (#850 security
-// review).
+// repos/:owner/:repo/pulls/:number/reviews fetch -- retained only as the
+// exact-page-size fixture size feedback_test.go's matrix uses; classifyReviewKey
+// itself no longer compares against it (#854 replaces the length tripwire
+// with feedbackState.ReviewsComplete below).
 const reviewsPageSize = 30
 
 // classifyReviewKey classifies a "review:<id>" key. A DISMISSED review
@@ -115,12 +117,14 @@ const reviewsPageSize = 30
 // including a review ID no longer present in fs.Reviews at all, or a state
 // outside {DISMISSED, CHANGES_REQUESTED} (PendingKeys entries are only ever
 // created for CHANGES_REQUESTED reviews, so anything else is anomalous) --
-// fails closed to keyUnknown rather than guessing. A possibly-truncated
-// fs.Reviews (reviewsPageSize) fails closed unconditionally, before any of
-// that resolution logic runs at all -- an unpaginated fetch can never prove
-// a reviewer's visible "latest" review really is their latest.
+// fails closed to keyUnknown rather than guessing. A reviews read that
+// cannot be proven complete (fs.ReviewsComplete false, #854's fetchPaged
+// completeness signal) fails closed unconditionally, before any of that
+// resolution logic runs at all -- an incomplete fetch can never prove a
+// reviewer's visible "latest" review really is their latest, regardless of
+// how short the fetched slice happens to be.
 func classifyReviewKey(id string, fs feedbackState) keyStatus {
-	if len(fs.Reviews) >= reviewsPageSize {
+	if !fs.ReviewsComplete {
 		return keyUnknown
 	}
 	reviewID, err := strconv.ParseInt(id, 10, 64)
@@ -299,13 +303,13 @@ func fetchReviewThreads(repo, pr string) (map[int64]bool, error) {
 		if cursor != "" {
 			args = append(args, "-f", "cursor="+cursor)
 		}
-		out, err := command("gh", args...)
+		stdout, stderr, err := execGh(args...)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %s: %w", reasonFeedbackUnreadable, strings.TrimSpace(string(out)), err)
+			return nil, fmt.Errorf("%s: %s: %w", reasonFeedbackUnreadable, strings.TrimSpace(stderr), err)
 		}
 		var resp graphQLThreadsResponse
-		if err := json.Unmarshal(out, &resp); err != nil {
-			return nil, fmt.Errorf("%s: %s", reasonFeedbackUnreadable, strings.TrimSpace(string(out)))
+		if err := json.Unmarshal([]byte(stdout), &resp); err != nil {
+			return nil, fmt.Errorf("%s: %s", reasonFeedbackUnreadable, strings.TrimSpace(stdout))
 		}
 		if len(resp.Errors) > 0 {
 			return nil, fmt.Errorf("%s: %s", reasonFeedbackUnreadable, resp.Errors[0].Message)
@@ -336,7 +340,11 @@ func fetchReviewThreads(repo, pr string) (map[int64]bool, error) {
 // (clearing PendingCommentAt/PendingHeadSHA) only once the pending set fully
 // empties. A fetchReviewThreads failure holds every comment: key unchanged
 // (fail closed) and never touches AddressedKeys/LastCommentAt for this tick.
-func reconcilePendingFeedback(s *State, reviews []review) feedbackVerdict {
+// reviewsComplete is this tick's fetchPaged completeness signal (#854) for
+// the reviews read: threaded straight into feedbackState so
+// classifyReviewKey fails closed on an unproven-complete reviews list
+// regardless of how short it happens to be.
+func reconcilePendingFeedback(s *State, reviews []review, reviewsComplete bool) feedbackVerdict {
 	hasCommentKey := false
 	for _, k := range s.PendingKeys {
 		if strings.HasPrefix(k, "comment:") {
@@ -345,7 +353,7 @@ func reconcilePendingFeedback(s *State, reviews []review) feedbackVerdict {
 		}
 	}
 
-	fs := feedbackState{Reviews: reviews}
+	fs := feedbackState{Reviews: reviews, ReviewsComplete: reviewsComplete}
 	if hasCommentKey {
 		threads, err := fetchReviewThreads(s.Repo, s.PR)
 		if err != nil {

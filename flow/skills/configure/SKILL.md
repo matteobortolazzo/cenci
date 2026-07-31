@@ -1763,9 +1763,10 @@ list below — it is a supported optional field, not a legacy one.
   - `automerge.maxDiffLines` — required on the same terms as `maxChangedFiles` (additions +
     deletions combined).
   - `automerge.mergeMethod` — one of `"squash"`, `"merge"`, `"rebase"`; defaults to
-    `"squash"` when omitted. Validated at merge time against the repo's actual allowed merge
-    methods (repository settings), not just this config — a configured method the repo
-    itself disallows is a logged hold, never a retry loop.
+    `"squash"` when omitted. The field stays readable for configuration compatibility, but
+    only `"squash"` is ever executed at merge time: a `"merge"` or `"rebase"` value produces
+    its own logged policy hold instead of being validated against the repo's allowed merge
+    methods or executed, and is never a retry loop.
 
 In a monorepo, a changed file is resolved to the `projects[]` entry with the longest
 matching `path` prefix; that project's own `automerge` block applies, falling back to the
