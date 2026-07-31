@@ -36,6 +36,15 @@ var dependsOnPattern = regexp.MustCompile(`(?im)^(?:[-*]\s+)?depends on #(\d+)`)
 // closed (blocks dispatch), it just stops making gh calls.
 const maxDependencyResolutions = 50
 
+// maxDependencyTokenBytes bounds each anomaly token parseDependsOn records
+// in Ticket.DependencyAnomalies (#852): a hostile issue body could carry an
+// arbitrarily long digit run after "Depends on #", and logging/reasoning
+// about it verbatim would let that single ticket flood memory or a
+// downstream one-record-per-line log (lazyboards). Mirrors
+// maxProbeLogDetailBytes' rationale (resume.go), scaled down since a
+// dependency token is expected to be short.
+const maxDependencyTokenBytes = 200
+
 // ghIssueViewTimeout bounds every individual `gh issue view` fallback call
 // the dependency resolver makes (#825 review fix #2), mirroring gitTimeout's
 // rationale (mainsync.go): a hung network call must never stall a dispatch
@@ -52,23 +61,36 @@ const ghIssueViewTimeout = 60 * time.Second
 const ghIssueViewWaitDelay = 5 * time.Second
 
 // parseDependsOn extracts every "Depends on #N" reference from body, in body
-// order. Pure -- no I/O. Returns nil when body contains no such line (plan
-// test 9); duplicates are preserved in encounter order (the caller,
+// order. Pure -- no I/O. Returns nil nums when body contains no such line
+// (plan test 9); duplicates are preserved in encounter order (the caller,
 // resolveDependencyStates, tolerates a duplicate number).
-func parseDependsOn(body string) []int {
+//
+// anomalies (#852) records one entry, in body order, per reference whose
+// number could not be classified as a valid dependency at all -- e.g. one
+// that overflows strconv.Atoi's int range (the regex's `\d+` matches an
+// arbitrarily long digit run, so this is NOT unreachable, contrary to what
+// an earlier version of this function's comment claimed), or #0 (never a
+// valid GitHub issue reference) -- so it is fed to dependencyGateSkip
+// (decide.go) as a distinct, fail-closed gate class rather than silently
+// treated as "this ticket declares no dependency" the way a dropped number
+// used to be. Each anomaly token is truncated to maxDependencyTokenBytes
+// (via truncateDetail) so a hostile digit run can never flood memory or a
+// downstream one-record-per-line log.
+func parseDependsOn(body string) (nums []int, anomalies []string) {
 	matches := dependsOnPattern.FindAllStringSubmatch(body, -1)
 	if len(matches) == 0 {
-		return nil
+		return nil, nil
 	}
-	nums := make([]int, 0, len(matches))
+	nums = make([]int, 0, len(matches))
 	for _, m := range matches {
 		n, err := strconv.Atoi(m[1])
-		if err != nil {
-			continue // unreachable: \d+ only matches digits
+		if err != nil || n <= 0 {
+			anomalies = append(anomalies, truncateDetail("#"+m[1], maxDependencyTokenBytes))
+			continue
 		}
 		nums = append(nums, n)
 	}
-	return nums
+	return nums, anomalies
 }
 
 // dependencyResolutionBudget bounds and tracks one collectRepoTickets pass's

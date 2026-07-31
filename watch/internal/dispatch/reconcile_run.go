@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -69,8 +68,9 @@ func (m *GHMutator) EditLabels(repo string, number int, add, remove []string) er
 	for _, l := range remove {
 		args = append(args, "--remove-label", l)
 	}
-	if out, err := exec.Command("gh", args...).CombinedOutput(); err != nil {
-		return fmt.Errorf("gh issue edit #%d in %s: %w: %s", number, repo, err, strings.TrimSpace(string(out)))
+	stdout, stderr, err := execGh(args...)
+	if err != nil {
+		return fmt.Errorf("gh issue edit #%d in %s: %w: %s", number, repo, err, collapseLines(stdout+stderr))
 	}
 	return nil
 }
@@ -163,11 +163,18 @@ func (m *GHMutator) EnsureLabels(repo string, names []string) error {
 // createLabelViaGH is the default createLabel implementation: it shells out
 // to `gh label create`, classifying "already exists" output as success
 // (lessons-learned.md: never infer resource state from a blanket exec error).
+//
+// labelAlreadyExists is checked against stdout+stderr combined (#852): `gh
+// label create` writes its "already exists" diagnostic to stderr, not
+// stdout, so checking stdout alone (a mechanical but incorrect port of the
+// separate-stream execGh convention) would misclassify every already-exists
+// case as a genuine failure and hard-fail every managed-label create on a
+// repo where the label already exists.
 func (m *GHMutator) createLabelViaGH(repo, name, color, description string) error {
-	out, err := exec.Command("gh", "label", "create", name,
-		"--repo", repo, "--color", color, "--description", description).CombinedOutput()
-	if err != nil && !labelAlreadyExists(string(out)) {
-		return fmt.Errorf("gh label create %s in %s: %w: %s", name, repo, err, strings.TrimSpace(string(out)))
+	stdout, stderr, err := execGh("label", "create", name,
+		"--repo", repo, "--color", color, "--description", description)
+	if err != nil && !labelAlreadyExists(stdout+stderr) {
+		return fmt.Errorf("gh label create %s in %s: %w: %s", name, repo, err, collapseLines(stdout+stderr))
 	}
 	return nil
 }
@@ -183,9 +190,10 @@ func labelAlreadyExists(output string) bool {
 // Comment posts a comment on an issue. The body is passed as an argv element (no
 // shell), so newlines and markup need no escaping.
 func (m *GHMutator) Comment(repo string, number int, body string) error {
-	if out, err := exec.Command("gh", "issue", "comment", strconv.Itoa(number),
-		"--repo", repo, "--body", body).CombinedOutput(); err != nil {
-		return fmt.Errorf("gh issue comment #%d in %s: %w: %s", number, repo, err, strings.TrimSpace(string(out)))
+	stdout, stderr, err := execGh("issue", "comment", strconv.Itoa(number),
+		"--repo", repo, "--body", body)
+	if err != nil {
+		return fmt.Errorf("gh issue comment #%d in %s: %w: %s", number, repo, err, collapseLines(stdout+stderr))
 	}
 	return nil
 }
@@ -196,17 +204,22 @@ func (m *GHMutator) Comment(repo string, number int, body string) error {
 // 0: the caller must not confuse "no attempts yet" with "could not read", since
 // the count gates the retry-vs-fail decision.
 func countAttempts(repo string, number int) (int, error) {
-	out, err := exec.Command("gh", "issue", "view", strconv.Itoa(number),
-		"--repo", repo, "--json", "comments").Output()
+	stdout, stderr, err := execGh("issue", "view", strconv.Itoa(number),
+		"--repo", repo, "--json", "comments")
 	if err != nil {
-		return 0, fmt.Errorf("gh issue view #%d in %s: %w", number, repo, err)
+		// Detail is truncated to maxProbeLogDetailBytes (#852 review finding
+		// #3): `--json comments` stdout can be an entire (attacker-authored,
+		// on a public repo) comment thread, and a ghTimeout kill mid-stream
+		// can leave a large partial JSON payload in stdout -- both would
+		// otherwise flood this error string unbounded.
+		return 0, fmt.Errorf("gh issue view #%d in %s: %w: %s", number, repo, err, truncateDetail(collapseLines(stdout+stderr), maxProbeLogDetailBytes))
 	}
 	var v struct {
 		Comments []struct {
 			Body string `json:"body"`
 		} `json:"comments"`
 	}
-	if err := json.Unmarshal(out, &v); err != nil {
+	if err := json.Unmarshal([]byte(stdout), &v); err != nil {
 		return 0, fmt.Errorf("parsing comments for #%d in %s: %w", number, repo, err)
 	}
 	n := 0
@@ -301,6 +314,11 @@ type reconcileDeps struct {
 	Attempts        map[string]int
 	AttemptsUnknown map[string]bool
 	Now             time.Time
+	// PlanProbes maps planKey(repo, ticketId) -> the resolved PlanProbe for
+	// every plan file ReadPlans encountered this pass (#852), merged across
+	// every repo's ReadPlans call, mirroring dispatchDeps.PlanProbes
+	// (dispatch.go). Threaded straight through to ReconcileInputs.PlanProbes.
+	PlanProbes map[string]PlanProbe
 }
 
 // RunReconcileOnce collects tickets, plans, the daemon snapshot, and durable
@@ -332,8 +350,9 @@ func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer,
 	collectErr := err
 
 	var plans []Plan
+	planProbes := map[string]PlanProbe{}
 	for _, rc := range cfg.Repos {
-		ps, err := ReadPlans(rc.Repo, rc.Dir, nil, out)
+		ps, probes, err := ReadPlans(rc.Repo, rc.Dir, nil, out)
 		if err != nil {
 			logf(out, "reconcile: reading plans in %s: %v\n", rc.Dir, err)
 			if collectErr == nil {
@@ -342,6 +361,9 @@ func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer,
 			continue
 		}
 		plans = append(plans, ps...)
+		for k, v := range probes {
+			planProbes[k] = v
+		}
 	}
 
 	snap, _ := ReadSnapshot(watch.DefaultSocketPath()) // nil on error ⇒ Reconcile never reconciles blind
@@ -374,6 +396,7 @@ func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer,
 		Attempts:        attempts,
 		AttemptsUnknown: attemptsUnknown,
 		Now:             time.Now(),
+		PlanProbes:      planProbes,
 	}, mut, dryRun, out, store)
 	return result, firstNonNil(collectErr, applyErr)
 }
@@ -410,6 +433,7 @@ func applyReconcile(cfg Config, deps reconcileDeps, mut TicketMutator, dryRun bo
 		Attempts:        deps.Attempts,
 		AttemptsUnknown: deps.AttemptsUnknown,
 		Config:          cfg,
+		PlanProbes:      deps.PlanProbes,
 	})
 
 	for _, rec := range result.Recoveries {

@@ -63,6 +63,13 @@ type dispatchDeps struct {
 	// pass (#851), resolved by probeRepoAutonomies before applyDispatch/
 	// Decide ever run -- threaded straight through to Inputs.RepoAutonomy.
 	RepoAutonomy map[string]RepoAutonomy
+
+	// PlanProbes maps planKey(repo, ticketId) -> the resolved PlanProbe for
+	// every plan file ReadPlans encountered this pass (#852), merged across
+	// every repo's ReadPlans call in RunOnce. Threaded straight through to
+	// Inputs.PlanProbes so Decide can distinguish a verified-absent plan
+	// from one that is broken in some way, without doing any I/O itself.
+	PlanProbes map[string]PlanProbe
 }
 
 // RunOnce gathers inputs (tickets, plans, snapshot, clock), runs the pure
@@ -109,7 +116,7 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 		}
 	}
 
-	plans, err := readPlansForRepos(cfg.Repos, syncs, out)
+	plans, planProbes, err := readPlansForRepos(cfg.Repos, syncs, out)
 	if err != nil && collectErr == nil {
 		collectErr = err
 	}
@@ -134,6 +141,7 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 		CurrentUser:  currentUser,
 		Answers:      answers,
 		RepoAutonomy: autonomies,
+		PlanProbes:   planProbes,
 	}, ctrl, mut, dryRun, out, prior)
 	return decisions, firstNonNil(collectErr, applyErr)
 }
@@ -151,27 +159,34 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 // real pass would consume, rather than stale local HEAD. A repo absent from
 // syncs (should not happen via RunOnce's own wiring, but defensive) falls
 // back to "HEAD".
-func readPlansForRepos(repos []RepoConfig, syncs map[string]mainSyncResult, out io.Writer) ([]Plan, error) {
+func readPlansForRepos(repos []RepoConfig, syncs map[string]mainSyncResult, out io.Writer) ([]Plan, map[string]PlanProbe, error) {
 	var plans []Plan
+	planProbes := map[string]PlanProbe{}
 	var firstErr error
 	for _, rc := range repos {
 		ref := "HEAD"
 		if s, ok := syncs[rc.Repo]; ok && s.FreshRef != "" {
 			ref = s.FreshRef
 		}
-		var commitsBehind func(sha string, paths []string) int
+		var commitsBehind func(sha string, paths []string) (int, error)
 		if ref != "HEAD" {
 			dir, refCopy, repo := rc.Dir, ref, rc.Repo
-			commitsBehind = func(sha string, paths []string) int {
+			// The error is propagated, never swallowed to 0 (#852 AC5): a
+			// commits-behind failure against the fetched ref must reach
+			// ReadPlans so it classifies as PlanProbeStalenessError and
+			// default-denies, rather than masquerading as "0 commits
+			// behind" (unknown-fresh) and readmitting a ticket whose
+			// freshness was never actually verified.
+			commitsBehind = func(sha string, paths []string) (int, error) {
 				n, err := planfile.CommitsBehindRef(dir, sha, refCopy, paths)
 				if err != nil {
 					logf(out, "dispatch: commits-behind check failed for repo %s @ %s: %v\n", repo, refCopy, err)
-					return 0
+					return 0, err
 				}
-				return n
+				return n, nil
 			}
 		}
-		ps, err := ReadPlans(rc.Repo, rc.Dir, commitsBehind, out)
+		ps, probes, err := ReadPlans(rc.Repo, rc.Dir, commitsBehind, out)
 		if err != nil {
 			logf(out, "dispatch: reading plans in %s: %v\n", rc.Dir, err)
 			if firstErr == nil {
@@ -180,8 +195,11 @@ func readPlansForRepos(repos []RepoConfig, syncs map[string]mainSyncResult, out 
 			continue
 		}
 		plans = append(plans, ps...)
+		for k, v := range probes {
+			planProbes[k] = v
+		}
 	}
-	return plans, firstErr
+	return plans, planProbes, firstErr
 }
 
 // applyDispatch runs the pure engine over already-collected deps, logs, spawns
@@ -216,6 +234,7 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 		Config:       cfg,
 		Answers:      deps.Answers,
 		RepoAutonomy: deps.RepoAutonomy,
+		PlanProbes:   deps.PlanProbes,
 	})
 
 	// Surface the pinned model in the same log stream as the decision table so

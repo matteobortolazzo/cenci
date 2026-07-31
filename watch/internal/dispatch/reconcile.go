@@ -105,6 +105,15 @@ type ReconcileInputs struct {
 	// so it preserves the grace clock and defers the decision to a later pass.
 	AttemptsUnknown map[string]bool
 	Config          Config
+
+	// PlanProbes maps planKey(repo, ticketId) -> the resolved PlanProbe for
+	// every plan file ReadPlans encountered this pass (#852), mirroring
+	// Inputs.PlanProbes (decide.go): lets Reconcile distinguish a
+	// verified-absent plan from one that is broken in some way (read/parse/
+	// ticket-id/staleness error), so the inverse-leak branch below defers
+	// (preserves the grace clock) instead of escalating to plan-invalid on a
+	// transient read/parse hiccup.
+	PlanProbes map[string]PlanProbe
 }
 
 // ReconcileResult is Reconcile's output. NextObservations is the grace map to
@@ -175,11 +184,10 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 			continue
 		}
 
-		// Inverse leak: a Planned, not-Working ticket with no parseable plan
-		// file. ReadPlans drops unparseable files, so "missing" and
-		// "unparseable" both present as no matched plan. A plan that exists
-		// but does not yet carry status: planned is a normal human-in-loop
-		// state — left alone.
+		// Inverse leak: a Planned, not-Working ticket with a verified-absent
+		// plan file (no PlanProbes entry, or PlanProbeAbsent -- #852). A plan
+		// that exists but does not yet carry status: planned is a normal
+		// human-in-loop state — left alone.
 		//
 		// The `&& !hasLabel(t.Labels, labelWorking)` guard is load-bearing
 		// (#828 review fix #1): Planned is never removed while Working is
@@ -195,12 +203,28 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 			if planByTicket[key] != nil {
 				continue
 			}
-			// A Planned ticket with no local plan file is not always a leak: plan
-			// files are ephemeral and may be mid-write, or the plan legitimately
-			// lives on another host (cenci treats "Planned, no local plan" as a
-			// normal state). So this path mirrors the failure path's guards —
-			// never act blind on a nil snapshot, and require the signal to hold
-			// past the grace period before escalating to plan-invalid.
+			// A plan-probe error (#852) -- the plan file exists but could not
+			// be read/parsed/attributed, or its staleness could not be
+			// computed -- must never be escalated to plan-invalid on what may
+			// be a transient hiccup (a mid-write file, a momentary read
+			// error): defer instead, preserving the grace observation exactly
+			// like the nil-snapshot guard below, so a later pass can retry
+			// once the condition clears. Only a genuinely verified-absent
+			// plan (PlanProbeAbsent, the zero value -- no entry at all) falls
+			// through to the escalation path.
+			if _, gated := planProbeSkip(in.PlanProbes[key]); gated {
+				if ts, ok := in.Observations[key]; ok {
+					res.NextObservations[key] = ts
+				}
+				continue
+			}
+			// A Planned ticket with a verified-absent local plan file is not
+			// always a leak: plan files are ephemeral and may be mid-write, or
+			// the plan legitimately lives on another host (cenci treats
+			// "Planned, no local plan" as a normal state). So this path
+			// mirrors the failure path's guards — never act blind on a nil
+			// snapshot, and require the signal to hold past the grace period
+			// before escalating to plan-invalid.
 			if in.Snapshot == nil {
 				if ts, ok := in.Observations[key]; ok {
 					res.NextObservations[key] = ts
@@ -289,8 +313,21 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 			// instead, drop only Working so it returns to plain Refined and
 			// is re-picked as a planning candidate. Every other Working
 			// ticket keeps today's +Planned -Working retry verbatim.
+			// planByTicket[key] == nil is ambiguous exactly the way #852
+			// exists to fix: nil both for a verified-absent plan and for a
+			// plan file that exists but hit a probe error (ReadPlans drops
+			// probe-errored files from `plans`, so they are indistinguishable
+			// from "no file at all" here). Only a verified-absent plan
+			// (PlanProbeAbsent, the zero value -- no PlanProbes entry at all)
+			// may nil AddLabels; a probe-errored plan must defer to the
+			// ordinary +Planned retry below rather than being treated as
+			// verified absence (Phase 6+7 review finding #2) -- this is a
+			// state-mutating call site (a durable GitHub label change plus a
+			// comment), so acting on unverified input here is exactly the
+			// class of bug this ticket closes, mirroring the inverse-leak
+			// branch's planProbeSkip gate above.
 			addLabels := []string{labelPlanned}
-			if hasLabel(t.Labels, labelRefined) && planByTicket[key] == nil {
+			if hasLabel(t.Labels, labelRefined) && planByTicket[key] == nil && in.PlanProbes[key] == PlanProbeAbsent {
 				addLabels = nil
 			}
 

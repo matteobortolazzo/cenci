@@ -890,7 +890,7 @@ func TestReadPlansForRepos_DryRunCommitsBehindMatchesPostFastForwardRealPass(t *
 
 	// Dry-run pass: fetch + classify only, never merge.
 	dryRunSyncs := syncMains(repos, io.Discard, true)
-	dryPlans, err := readPlansForRepos(repos, dryRunSyncs, io.Discard)
+	dryPlans, _, err := readPlansForRepos(repos, dryRunSyncs, io.Discard)
 	if err != nil {
 		t.Fatalf("readPlansForRepos (dry-run) returned unexpected error: %v", err)
 	}
@@ -906,7 +906,7 @@ func TestReadPlansForRepos_DryRunCommitsBehindMatchesPostFastForwardRealPass(t *
 
 	// Real pass: fetch + fast-forward.
 	realSyncs := syncMains(repos, io.Discard, false)
-	realPlans, err := readPlansForRepos(repos, realSyncs, io.Discard)
+	realPlans, _, err := readPlansForRepos(repos, realSyncs, io.Discard)
 	if err != nil {
 		t.Fatalf("readPlansForRepos (real pass) returned unexpected error: %v", err)
 	}

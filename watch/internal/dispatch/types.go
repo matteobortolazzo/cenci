@@ -216,6 +216,56 @@ const (
 	RepoAutonomyUnreadable RepoAutonomy = "unreadable"
 )
 
+// PlanProbe classifies the collector's read of one .plans/<ticketId>-*.md
+// file (#852) into a closed set, rather than collapsing distinct failure
+// classes (watch/docs/go-gotchas.md #598, watch/docs/error-handling.md
+// #628): a plan file that is missing entirely (verified absence) is a
+// fundamentally different situation from one that exists but could not be
+// read, whose front matter could not be parsed, whose ticketId could not be
+// resolved, or whose staleness (CommitsBehind) could not be computed --
+// ReadPlans previously collapsed every one of these into "no matched plan",
+// which under the stage-aware planning-pickup gate (decide.go) launches a
+// fresh planning session, and under the reconciler (reconcile.go) escalates
+// to plan-invalid. PlanProbeAbsent is the zero value ("") so every
+// pre-#852 construction site (tests, reconcile paths) keeps today's
+// behavior unchanged without being touched -- mirrors StageProbeAbsent/
+// MainSyncSkipped above. Unlike those two, every non-absent value here is a
+// broken-input class that must default-deny, not a permissive exception:
+// `.plans/` files are real, present-but-unreadable input, the opposite of
+// `.cenci/pipeline/`'s gitignored-and-expendable StageProbeAbsent rationale.
+type PlanProbe string
+
+const (
+	// PlanProbeAbsent is the zero value: no plan file matched this ticket at
+	// all -- the true "verified absence" case (#852). Every pre-#852
+	// construction site (ReadPlans callers, tests) keeps today's behavior
+	// unchanged without being touched.
+	PlanProbeAbsent PlanProbe = ""
+	// PlanProbeOk means the plan file was read, its front matter parsed, and
+	// its ticketId resolved cleanly -- a normal, healthy plan.
+	PlanProbeOk PlanProbe = "ok"
+	// PlanProbeReadError means the plan file exists (matched the .plans/*.md
+	// glob) but os.ReadFile failed -- e.g. a permission error, or a transient
+	// filesystem hiccup. Broken input, not absent input: must default-deny.
+	PlanProbeReadError PlanProbe = "read_error"
+	// PlanProbeParseError means the plan file was read but its front matter
+	// could not be parsed (planfile.ParseFrontMatter returned false) --
+	// e.g. a mid-write file with a truncated/never-closed front-matter
+	// fence. Broken input, not absent input: must default-deny.
+	PlanProbeParseError PlanProbe = "parse_error"
+	// PlanProbeTicketIDError means the plan file's front matter parsed, but
+	// its ticketId field could not be attributed to a real ticket (e.g. the
+	// field is missing/malformed AND the filename itself carries no
+	// attributable numeric prefix either). Broken input, not absent input:
+	// must default-deny.
+	PlanProbeTicketIDError PlanProbe = "ticket_id_error"
+	// PlanProbeStalenessError means the plan file itself was read and
+	// parsed cleanly, but its CommitsBehind count could not be computed
+	// (the commitsBehind seam returned an error) -- must never be treated
+	// as unknown-fresh (0 commits behind); fails closed instead.
+	PlanProbeStalenessError PlanProbe = "staleness_error"
+)
+
 // Ticket is one open GitHub issue, as collected from a repo. Labels carry the
 // board state (Planned, Blocked, agent:<name>, ...); Assignees carry GitHub
 // logins; Agent is the pre-resolved agent:<name> value, if any.
@@ -257,6 +307,15 @@ type Ticket struct {
 	// unrecognized DependencyState value by dependencyGateSkip's switch
 	// default -- it fails closed, never as satisfied.
 	DependencyStates map[int]DependencyState
+	// DependencyAnomalies records, in body order, one entry per "Depends on
+	// #N" reference whose number could not be classified as a valid
+	// dependency at all -- e.g. one that overflows strconv.Atoi's int range,
+	// or is otherwise out of range (#852, via parseDependsOn). Each entry is
+	// truncated to maxDependencyTokenBytes so a hostile digit run can never
+	// flood memory or a log line. Nil/empty, the zero value, is the true
+	// "no anomalies" case -- every pre-#852 Ticket construction site keeps
+	// today's behavior unchanged without being touched.
+	DependencyAnomalies []string
 }
 
 // Plan is the parsed front matter of one .plans/<id>-<slug>.md file.

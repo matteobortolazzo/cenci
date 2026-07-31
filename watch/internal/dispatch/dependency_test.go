@@ -83,11 +83,63 @@ func TestParseDependsOn(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := parseDependsOn(tc.body)
+			got, anomalies := parseDependsOn(tc.body)
 			if !equalInts(got, tc.want) {
-				t.Errorf("parseDependsOn(%q) = %v, want %v", tc.body, got, tc.want)
+				t.Errorf("parseDependsOn(%q) nums = %v, want %v", tc.body, got, tc.want)
+			}
+			if len(anomalies) != 0 {
+				t.Errorf("parseDependsOn(%q) anomalies = %v, want none (every case here is well-formed)", tc.body, anomalies)
 			}
 		})
+	}
+}
+
+// -- #852 AC1: overflowing/out-of-range dependency numbers fail closed ------
+
+// TestParseDependsOn_OverflowNumberBecomesAnomalyNotSilentlyDropped covers
+// AC1: a dependency number that overflows strconv.Atoi's int range must be
+// classified as an anomaly (yielding zero valid nums), not silently dropped
+// as if the ticket declared no dependency at all -- the exact bug this
+// ticket exists to close (watch/AGENTS.md's first Critical Rule: never
+// broaden a match-miss into a silent "no match -> discard").
+func TestParseDependsOn_OverflowNumberBecomesAnomalyNotSilentlyDropped(t *testing.T) {
+	nums, anomalies := parseDependsOn("Depends on #99999999999999999999999")
+	if len(nums) != 0 {
+		t.Fatalf("nums = %v, want none (the overflowing number must never resolve to a valid dependency)", nums)
+	}
+	if len(anomalies) != 1 {
+		t.Fatalf("anomalies = %v, want exactly one anomaly for the overflowing token", anomalies)
+	}
+}
+
+// TestParseDependsOn_ZeroBecomesAnomaly covers AC1's "#0" case: issue number
+// 0 is never a valid GitHub issue reference and must be classified an
+// anomaly rather than silently accepted as a valid dependency #0.
+func TestParseDependsOn_ZeroBecomesAnomaly(t *testing.T) {
+	nums, anomalies := parseDependsOn("Depends on #0")
+	if len(nums) != 0 {
+		t.Fatalf("nums = %v, want none (#0 must never resolve to a valid dependency)", nums)
+	}
+	if len(anomalies) != 1 {
+		t.Fatalf("anomalies = %v, want exactly one anomaly for #0", anomalies)
+	}
+}
+
+// TestDependencyGateSkip_AnomalousDependency_SkipsWithExactMalformedReason
+// covers AC1's "the resulting ticket is skipped" requirement: a ticket
+// carrying one dependency anomaly must be gated by dependencyGateSkip with
+// the exact reasonDependencyMalformedFmt text naming the malformed token
+// (#446: content-specific, not merely "some skip").
+func TestDependencyGateSkip_AnomalousDependency_SkipsWithExactMalformedReason(t *testing.T) {
+	tk := Ticket{DependencyAnomalies: []string{"#99999999999999999999999"}}
+
+	reason, gated := dependencyGateSkip(tk)
+	if !gated {
+		t.Fatal("expected dependencyGateSkip to gate a ticket carrying a dependency anomaly")
+	}
+	want := fmt.Sprintf(reasonDependencyMalformedFmt, "#99999999999999999999999")
+	if reason != want {
+		t.Errorf("reason = %q, want %q", reason, want)
 	}
 }
 
