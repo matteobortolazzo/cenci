@@ -980,7 +980,17 @@ merge a PR itself, once every one of these holds on a given tick:
   resolution is GitHub-authoritative, not push-based: a pushed commit no longer
   clears feedback by itself. An inline comment thread clears only when GitHub
   reports it `isResolved`; a `CHANGES_REQUESTED` review clears only when it's
-  `DISMISSED` or the reviewer's latest effective review is `APPROVED`.
+  `DISMISSED` or the reviewer's latest effective review is `APPROVED`. "Green"
+  is pass-only and strict: at least one check must exist, and every check's
+  bucket must be exactly `pass` — `cancel`, `skipping`, an empty bucket string
+  (malformed), and any future/unrecognized bucket value each hold under their
+  own distinct reason rather than being folded into a generic "not green".
+- Comment and review detection reads are fully paginated, with an explicit
+  completeness signal — pagination stopping short (page cap hit, mid-read
+  failure) never gets silently treated as a complete read. Detection still
+  fires normally for any feedback key actually found on the pages read; a
+  truncated read additionally forces its own hold reason on top of that, since
+  babysit can't yet rule out a fresher offstage item.
 - Any review-feedback state babysit can't positively confirm holds automerge
   under its own reason: unreadable (API/parse failure), truncated (incomplete
   pagination), unknown (GitHub stopped reporting the item, or reported an
@@ -988,24 +998,34 @@ merge a PR itself, once every one of these holds on a given tick:
   doesn't recognize). An item GitHub stops reporting at all — deleted comment,
   purged thread — holds indefinitely; merge it manually.
 - The PR is not a draft and GitHub reports it `MERGEABLE`.
+- The PR doesn't require a merge queue or other deferred-merge handling — a
+  GraphQL probe (`isInMergeQueue`/`isMergeQueueEnabled`) checked as the final
+  gate before mutation. Required, already-queued, or unreadable/unknown queue
+  state all hold; babysit never enqueues a PR as a side effect.
 - The diff stays within the supervised repo's `.cenci/config.json` `automerge`
   policy block (`protectedPaths`, `maxChangedFiles`, `maxDiffLines`, `mergeMethod`)
   — read from the PR's **base branch**, never its own head branch, so a PR can
   never widen its own policy to self-approve. An unreadable, malformed, or absent
   block denies automerge outright; there is no built-in fallback threshold.
+  `mergeMethod` stays readable for configuration compatibility, but only
+  `squash` is ever executed: a `merge` or `rebase` policy holds under its own
+  reason instead of being validated or executed.
 
 A denied or held tick is logged once, e.g.:
 
 ```
-babysit: automerge PR #42 held: ticket lacks automerge:ok [enabled=yes label=no ci=- review=- mergeable=- policy=- files=- lines=- protected=- method=-]
+babysit: automerge PR #42 held: ticket lacks automerge:ok [enabled=yes label=no ci=- review=- mergeable=- policy=- files=- lines=- protected=- method=- queue=-]
 ```
 
 When every condition passes, babysit merges with `gh pr merge --squash` (never
 `--delete-branch` — a PR worktree still references the branch) after confirming
 squash is an allowed merge method on the repo. A merge rejected by branch
-protection is logged and retried on the next tick, never bypassed. See
-`flow/skills/configure/SKILL.md`'s `automerge` schema section for the full field
-reference.
+protection is logged and retried on the next tick, never bypassed. A zero-exit
+`gh pr merge` doesn't by itself prove the merge landed, so babysit refetches
+the PR exactly once afterward and requires it to report `MERGED`; a zero-exit
+result that isn't `MERGED` on that single refetch is treated as indeterminate,
+never as success. See `flow/skills/configure/SKILL.md`'s `automerge` schema
+section for the full field reference.
 
 ## Pipeline stage commands (`cenci pipeline`)
 

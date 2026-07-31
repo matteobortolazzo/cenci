@@ -55,7 +55,7 @@ func TestClassifyPendingKeyMatrix(t *testing.T) {
 		{
 			"dismissed-review: GitHub rewrites a dismissed review's own state to DISMISSED in place",
 			"review:10",
-			feedbackState{Reviews: []review{{ID: 10, State: "DISMISSED", SubmittedAt: "2026-01-02T00:00:00Z", User: login("alice")}}},
+			feedbackState{Reviews: []review{{ID: 10, State: "DISMISSED", SubmittedAt: "2026-01-02T00:00:00Z", User: login("alice")}}, ReviewsComplete: true},
 			keyResolved,
 		},
 		{
@@ -64,7 +64,7 @@ func TestClassifyPendingKeyMatrix(t *testing.T) {
 			feedbackState{Reviews: []review{
 				{ID: 10, State: "CHANGES_REQUESTED", SubmittedAt: "2026-01-01T00:00:00Z", User: login("alice")},
 				{ID: 11, State: "APPROVED", SubmittedAt: "2026-01-02T00:00:00Z", User: login("alice")},
-			}},
+			}, ReviewsComplete: true},
 			keyResolved,
 		},
 		{
@@ -73,19 +73,19 @@ func TestClassifyPendingKeyMatrix(t *testing.T) {
 			feedbackState{Reviews: []review{
 				{ID: 10, State: "CHANGES_REQUESTED", SubmittedAt: "2026-01-01T00:00:00Z", User: login("alice")},
 				{ID: 12, State: "CHANGES_REQUESTED", SubmittedAt: "2026-01-02T00:00:00Z", User: login("alice")},
-			}},
+			}, ReviewsComplete: true},
 			keyPending,
 		},
 		{
 			"absent-review: GitHub no longer reports this review ID at all",
 			"review:10",
-			feedbackState{Reviews: []review{{ID: 55, State: "APPROVED", SubmittedAt: "2026-01-01T00:00:00Z", User: login("bob")}}},
+			feedbackState{Reviews: []review{{ID: 55, State: "APPROVED", SubmittedAt: "2026-01-01T00:00:00Z", User: login("bob")}}, ReviewsComplete: true},
 			keyUnknown,
 		},
 		{
 			"unknown-state-string: a review state outside {APPROVED, CHANGES_REQUESTED, DISMISSED, COMMENTED, PENDING}",
 			"review:10",
-			feedbackState{Reviews: []review{{ID: 10, State: "REQUEST_CHANGES", SubmittedAt: "2026-01-01T00:00:00Z", User: login("alice")}}},
+			feedbackState{Reviews: []review{{ID: 10, State: "REQUEST_CHANGES", SubmittedAt: "2026-01-01T00:00:00Z", User: login("alice")}}, ReviewsComplete: true},
 			keyUnknown,
 		},
 		{
@@ -145,8 +145,8 @@ func TestClassifyReviewKeyFailsClosedWhenReviewsListPotentiallyTruncated(t *test
 }
 
 // TestClassifyReviewKeyResolvesNormallyBelowPageSize is the regression
-// counterpart: a reviews slice below reviewsPageSize is unaffected by the
-// truncation guard and resolves exactly as before.
+// counterpart: a reviews slice below reviewsPageSize that is proven complete
+// resolves exactly as before.
 func TestClassifyReviewKeyResolvesNormallyBelowPageSize(t *testing.T) {
 	reviews := []review{
 		{ID: 10, State: "CHANGES_REQUESTED", SubmittedAt: "2026-01-01T00:00:00Z", User: login("alice")},
@@ -155,9 +155,51 @@ func TestClassifyReviewKeyResolvesNormallyBelowPageSize(t *testing.T) {
 	if len(reviews) >= reviewsPageSize {
 		t.Fatalf("test setup: len(reviews) = %d, want below reviewsPageSize (%d)", len(reviews), reviewsPageSize)
 	}
-	got := classifyPendingKey("review:10", feedbackState{Reviews: reviews})
+	got := classifyPendingKey("review:10", feedbackState{Reviews: reviews, ReviewsComplete: true})
 	if got != keyResolved {
-		t.Fatalf("classifyPendingKey(review:10) = %v, want keyResolved: below the page-size cap, the reviewer's later APPROVED still supersedes normally", got)
+		t.Fatalf("classifyPendingKey(review:10) = %v, want keyResolved: below the page-size cap and proven complete, the reviewer's later APPROVED still supersedes normally", got)
+	}
+}
+
+// TestClassifyReviewKeyResolvesAtPageSizeWhenComplete pins the #854 fix
+// replacing the reviewsPageSize length tripwire: a reviews slice at exactly
+// reviewsPageSize length that IS proven complete (ReviewsComplete: true)
+// must resolve normally -- the previous len(fs.Reviews) >= reviewsPageSize
+// guard alone fails closed on any PR with exactly reviewsPageSize reviews,
+// regardless of whether the read is actually complete.
+func TestClassifyReviewKeyResolvesAtPageSizeWhenComplete(t *testing.T) {
+	reviews := make([]review, reviewsPageSize)
+	reviews[0] = review{ID: 10, State: "DISMISSED", SubmittedAt: "2026-01-01T00:00:00Z", User: login("alice")}
+	for i := 1; i < reviewsPageSize; i++ {
+		reviews[i] = review{ID: int64(1000 + i), State: "APPROVED", SubmittedAt: "2026-01-01T00:00:00Z", User: login(fmt.Sprintf("filler%d", i))}
+	}
+	if len(reviews) != reviewsPageSize {
+		t.Fatalf("test setup: len(reviews) = %d, want exactly reviewsPageSize (%d)", len(reviews), reviewsPageSize)
+	}
+	fs := feedbackState{Reviews: reviews, ReviewsComplete: true}
+	got := classifyPendingKey("review:10", fs)
+	if got != keyResolved {
+		t.Fatalf("classifyPendingKey(review:10) = %v, want keyResolved: a proven-complete reviews list at exactly reviewsPageSize must resolve normally, not fail closed on length alone", got)
+	}
+}
+
+// TestClassifyReviewKeyFailsClosedWhenIncomplete pins the fail-closed half
+// of the same fix: a SHORT reviews slice (well under reviewsPageSize) that
+// is explicitly marked incomplete (ReviewsComplete: false) must still fail
+// closed -- the truncation signal, not the length heuristic, is now the
+// source of truth for completeness.
+func TestClassifyReviewKeyFailsClosedWhenIncomplete(t *testing.T) {
+	reviews := []review{
+		{ID: 10, State: "CHANGES_REQUESTED", SubmittedAt: "2026-01-01T00:00:00Z", User: login("alice")},
+		{ID: 11, State: "APPROVED", SubmittedAt: "2026-01-02T00:00:00Z", User: login("alice")},
+	}
+	if len(reviews) >= reviewsPageSize {
+		t.Fatalf("test setup: len(reviews) = %d, want well under reviewsPageSize (%d)", len(reviews), reviewsPageSize)
+	}
+	fs := feedbackState{Reviews: reviews, ReviewsComplete: false}
+	got := classifyPendingKey("review:10", fs)
+	if got != keyUnknown {
+		t.Fatalf("classifyPendingKey(review:10) = %v, want keyUnknown: an explicitly-incomplete reviews read must fail closed even well under reviewsPageSize", got)
 	}
 }
 
@@ -192,6 +234,7 @@ func TestPartitionPendingKeysMixedState(t *testing.T) {
 			{ID: 10, State: "DISMISSED", SubmittedAt: "2026-01-01T00:00:00Z", User: login("bob")},
 			{ID: 11, State: "CHANGES_REQUESTED", SubmittedAt: "2026-01-01T00:00:00Z", User: login("carol")},
 		},
+		ReviewsComplete: true,
 	}
 	stillPending, resolved, hold, detail := partitionPendingKeys(pending, fs)
 
@@ -237,25 +280,25 @@ func TestPartitionPendingKeysUnsupportedKeyPoisonsVerdict(t *testing.T) {
 // per watch/AGENTS.md's existing single-seam convention), with an explicit
 // cursor loop bounded by maxThreadPages.
 
-// scriptedGraphQLCommand stubs the command seam to serve bodies in order for
+// scriptedGraphQLCommand stubs the execGh seam to serve bodies in order for
 // every invocation (always a nil error -- a non-nil `gh` exit combined with a
 // still-parseable body is exercised separately, mirroring ghJSON's tolerant
 // contract; these tests focus on the GraphQL-specific failure shapes), and
 // records every call into calls.
 func scriptedGraphQLCommand(t *testing.T, bodies []string, calls *[][]string) {
 	t.Helper()
-	original := command
+	original := execGh
 	i := 0
-	command = func(name string, args ...string) ([]byte, error) {
-		*calls = append(*calls, append([]string{name}, args...))
+	execGh = func(args ...string) (string, string, error) {
+		*calls = append(*calls, append([]string{"gh"}, args...))
 		if i >= len(bodies) {
-			t.Fatalf("unexpected extra command call: %s %v", name, args)
+			t.Fatalf("unexpected extra command call: %v", args)
 		}
 		out := bodies[i]
 		i++
-		return []byte(out), nil
+		return out, "", nil
 	}
-	t.Cleanup(func() { command = original })
+	t.Cleanup(func() { execGh = original })
 }
 
 func threadPage(hasNextPage bool, endCursor string, nodes ...string) string {
@@ -385,11 +428,11 @@ func TestFetchReviewThreadsFailsClosedOnGraphQLErrors(t *testing.T) {
 	})
 
 	t.Run("gh command itself fails", func(t *testing.T) {
-		original := command
-		command = func(name string, args ...string) ([]byte, error) {
-			return []byte("authentication required"), errors.New("exit status 1")
+		original := execGh
+		execGh = func(args ...string) (string, string, error) {
+			return "", "authentication required", errors.New("exit status 1")
 		}
-		t.Cleanup(func() { command = original })
+		t.Cleanup(func() { execGh = original })
 
 		_, err := fetchReviewThreads("o/r", "42")
 		if err == nil {
@@ -412,17 +455,17 @@ func TestFetchReviewThreadsFailsClosedOnGraphQLErrors(t *testing.T) {
 // zero GraphQL calls -- asserted on recorded calls, not just the outcome.
 func TestReconcileSkipsGraphQLWhenOnlyReviewKeysPending(t *testing.T) {
 	var calls [][]string
-	original := command
-	command = func(name string, args ...string) ([]byte, error) {
-		calls = append(calls, append([]string{name}, args...))
-		return nil, fmt.Errorf("unexpected command: %s %v", name, args)
+	original := execGh
+	execGh = func(args ...string) (string, string, error) {
+		calls = append(calls, append([]string{"gh"}, args...))
+		return "", "", fmt.Errorf("unexpected command: %v", args)
 	}
-	t.Cleanup(func() { command = original })
+	t.Cleanup(func() { execGh = original })
 
 	s := &State{Repo: "o/r", PR: "42", PendingKeys: []string{"review:10"}, PendingCommentAt: "2026-01-01T00:00:00Z", PendingHeadSHA: "abc"}
 	reviews := []review{{ID: 10, State: "DISMISSED", SubmittedAt: "2026-01-02T00:00:00Z", User: login("alice")}}
 
-	verdict := reconcilePendingFeedback(s, reviews)
+	verdict := reconcilePendingFeedback(s, reviews, true)
 
 	if verdict.Hold != "" {
 		t.Fatalf("verdict.Hold = %q, want empty (the dismissed review resolves cleanly)", verdict.Hold)
@@ -449,7 +492,7 @@ func TestReconcileSkipsGraphQLWhenOnlyReviewKeysPending(t *testing.T) {
 // silently overwriting LastCommentAt when nothing was reconciled.
 func TestReconcileNoPendingKeysLeavesLastCommentAtUnchanged(t *testing.T) {
 	s := &State{Repo: "o/r", PR: "42", LastCommentAt: "2025-12-01T00:00:00Z"}
-	verdict := reconcilePendingFeedback(s, nil)
+	verdict := reconcilePendingFeedback(s, nil, true)
 	if verdict.Hold != "" {
 		t.Fatalf("verdict.Hold = %q, want empty", verdict.Hold)
 	}

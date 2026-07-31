@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Automerge skip/hold reasons (#824). Every stage of the condition chain has
@@ -25,7 +26,6 @@ const (
 	reasonLabelUnreadable   = "closing issue labels unreadable"
 	reasonLabelMissing      = "ticket lacks automerge:ok"
 	reasonNoChecks          = "no CI checks reported"
-	reasonCINotGreen        = "CI not green"
 	reasonRepairPending     = "CI repair pending"
 	reasonReviewPending     = "review feedback pending"
 	// The four #850 feedback-hold reasons: distinct from reasonReviewPending
@@ -56,10 +56,93 @@ const (
 	reasonMergeFailed = "gh pr merge failed"
 )
 
+// #854 additions: strict pass-only CI bucket holds, squash-only execution,
+// the merge-queue gate, merge execution/verification, detection-read
+// pagination truncation, and per-upstream-read tick failures. Each stays its
+// own distinct constant per watch/docs/error-handling.md #446 -- never
+// collapsed into an existing reason, even though several are conceptually
+// related to one already above.
+const (
+	// automergeCIHold's per-bucket holds (Decision 1/2): CI is green only
+	// when at least one check exists and every check's bucket is exactly
+	// "pass". reasonNoChecks (zero checks at all) already exists above and
+	// is reused unchanged. These are the buckets the strict pass-only
+	// classifier distinguishes
+	// individually: fail, pending, cancel, skipping (gh 2.97's closed
+	// bucket set), an empty bucket string (malformed), and any
+	// future/unknown bucket value.
+	reasonCICheckFailed    = "CI check failed"
+	reasonCICheckPending   = "CI check pending"
+	reasonCICheckCancelled = "CI check cancelled"
+	reasonCICheckSkipped   = "CI check skipped"
+	reasonCIBucketEmpty    = "CI check bucket empty"
+	reasonCIBucketUnknown  = "CI check bucket unrecognized"
+
+	// Squash-only execution (Decision 3): a resolved policy mergeMethod
+	// other than "squash" holds here, evaluated before any allowed-merge-
+	// methods fetch -- distinct from reasonMergeMethodDisallowed, which is
+	// the repo's own settings rejecting the (already-squash) method.
+	reasonMergeMethodNotSquash = "merge method is not squash"
+
+	// Merge-queue gate (Decision 4, Q3): an explicit isInMergeQueue or
+	// isMergeQueueEnabled true holds under reasonMergeQueueRequired --
+	// automerge must never enqueue as a side effect. A probe error or
+	// either field left absent (nil, not merely false) holds under
+	// reasonMergeQueueUnknown: absence must never be read as "not
+	// required".
+	reasonMergeQueueRequired = "PR requires the merge queue"
+	reasonMergeQueueUnknown  = "merge queue state unknown"
+
+	// reasonHeadSHAChanged is runAutomerge's pre-merge TOCTOU guard (Decision
+	// 9): the pre-merge re-evaluation's own fresh `gh pr view` re-fetch
+	// reports the PR's current head commit, so a push landing between the
+	// first evaluation and the merge attempt is caught here -- distinct
+	// from reasonHeadSHAUnknown (an empty SHA at evaluation time) and from
+	// a rejected `gh pr merge` (reasonMergeFailed), since this hold happens
+	// before the merge command is ever issued at all.
+	reasonHeadSHAChanged = "PR head commit changed since evaluation"
+
+	// Detection-read pagination (#854, pulled in from #862's scope): a
+	// cap-exhausted (or otherwise unproven-complete) comments/reviews
+	// detection read forces an automerge hold under its own reason --
+	// distinct from the pre-existing #850 feedback-resolution truncation
+	// reasons (reasonFeedbackTruncated etc.), which cover the separate
+	// GraphQL review-thread resolution read, not this detection read.
+	reasonCommentsReadTruncated = "PR comments detection read truncated"
+	reasonReviewsReadTruncated  = "PR reviews detection read truncated"
+
+	// Post-merge verification (Decisions 5/6): a zero-exit `gh pr merge`
+	// followed by a single refetch that does not report MERGED is
+	// indeterminate, never success (Q5: one refetch, no polling); a refetch
+	// that itself fails to read is a distinct reason from an indeterminate
+	// but successfully-read non-MERGED state.
+	reasonMergeIndeterminate    = "gh pr merge exited zero but PR is not MERGED"
+	reasonMergeVerifyUnreadable = "post-merge verification read failed"
+
+	// One-decision-per-tick (Decision 7): every enabled automerge tick
+	// persists and logs exactly one full decision, including an upstream
+	// PR/check/comment/review read failure -- previously these read
+	// failures aborted tick() before runAutomerge ever ran, leaving no
+	// automerge decision recorded at all for that tick.
+	reasonUpstreamPRUnreadable       = "PR view unreadable"
+	reasonUpstreamChecksUnreadable   = "CI checks unreadable"
+	reasonUpstreamCommentsUnreadable = "PR comments unreadable"
+	reasonUpstreamReviewsUnreadable  = "PR reviews unreadable"
+
+	// reasonWorkflowLaunchFailed covers the same one-decision-per-tick gap
+	// (Decision 7) for the three launch() call sites in tick() (babysit-
+	// attention, ci-repair, address-review): a failed workflow dispatch
+	// previously returned tick's error without ever recording an automerge
+	// decision, leaving a stale decision from the previous tick displayed.
+	reasonWorkflowLaunchFailed = "workflow launch failed"
+)
+
 // automergeStageKeys is the fixed, ordered set of condition-chain stages
 // logLine renders -- independent of the order evaluateAutomerge actually
-// reaches them, since a stage not yet reached always renders "-".
-var automergeStageKeys = []string{"enabled", "label", "ci", "review", "mergeable", "headsha", "policy", "files", "filecap", "lines", "protected", "method"}
+// reaches them, since a stage not yet reached always renders "-". "queue" is
+// #854's new terminal stage (Decision 4): appended last since it is always
+// the final gate evaluateAutomerge reaches on an otherwise-passing chain.
+var automergeStageKeys = []string{"enabled", "label", "ci", "review", "mergeable", "headsha", "policy", "files", "filecap", "lines", "protected", "method", "queue"}
 
 // conditionResult records one evaluated stage of the automerge condition
 // chain, for the full-verdict log line and for State persistence (the
@@ -132,8 +215,6 @@ type automergeInputs struct {
 	IssueLabels   map[int][]string
 	LabelsErr     error
 
-	CIStatus string
-
 	RepairPending bool
 	PendingKeys   []string
 	// FeedbackHold is reconcilePendingFeedback's verdict (#850): one of the
@@ -175,6 +256,116 @@ type automergeInputs struct {
 	MergeMethod       string
 	AllowedMethods    map[string]bool
 	AllowedMethodsErr error
+
+	// Checks is the strict pass-only CI classifier's input (#854): unlike
+	// ciStatus() (babysit.go), the pre-collapsed verdict that still feeds
+	// BlocksClose (#787) and must keep its existing semantics unchanged,
+	// Checks carries every check bucket so automergeCIHold can distinguish
+	// fail/pending/cancel/skipping/empty/unknown buckets individually
+	// instead of collapsing them into a single "not green" reason.
+	Checks []check
+
+	// Merge-queue gate inputs (#854, Q3): pointer fields so an absent
+	// GraphQL field is distinguishable from an explicit false
+	// (dispatch/config.go:102-123's absent-vs-false pattern) -- an absent
+	// isInMergeQueue/isMergeQueueEnabled must never be read as "not
+	// required". QueueProbed disambiguates runAutomerge's lazy-fetch "not
+	// yet probed" trial sentinel (QueueProbed == false, both fields still
+	// zero) from a probe that has genuinely run and come back with nothing
+	// (QueueProbed == true, both fields nil) -- a real GraphQL response
+	// shaped like {"pullRequest":null} (deleted/renumbered/inaccessible PR,
+	// transient null-propagation, zero exit, no top-level errors[]) decodes
+	// to exactly that same both-nil shape, and without this flag it would
+	// be indistinguishable from "queue stage not yet reached" and pass
+	// through as if the probe had never run at all.
+	QueueInMergeQueue *bool
+	QueueEnabled      *bool
+	QueueErr          error
+	QueueProbed       bool
+
+	// Detection-read completeness (#854): false when the comments or
+	// reviews detection read hit its pagination cap while still returning
+	// full pages (or otherwise could not be proven complete) -- forces
+	// reasonCommentsReadTruncated/reasonReviewsReadTruncated rather than
+	// silently treating a partial detection read as complete.
+	CommentsComplete bool
+	ReviewsComplete  bool
+}
+
+// automergeCIHold classifies checks under the strict pass-only rule
+// (Decision 1/2): CI is green only when at least one check exists and every
+// check's bucket is exactly "pass"; cancel, skipping, an empty bucket
+// string, and any future/unknown bucket each hold under their own distinct
+// reason. Buckets are scanned in the order checks appear, and the first
+// non-pass bucket found wins -- unlike ciStatus's severity-priority
+// ordering (fail beats pending), automerge's contract denies on ANY
+// non-pass bucket, so first-found-in-order is the simplest, most
+// predictable contract to specify and test. An empty checks slice reuses
+// the existing reasonNoChecks ("no CI checks reported") rather than a new
+// constant.
+func automergeCIHold(checks []check) string {
+	if len(checks) == 0 {
+		return reasonNoChecks
+	}
+	for _, c := range checks {
+		switch c.Bucket {
+		case "pass":
+			continue
+		case "fail":
+			return reasonCICheckFailed
+		case "pending":
+			return reasonCICheckPending
+		case "cancel":
+			return reasonCICheckCancelled
+		case "skipping":
+			return reasonCICheckSkipped
+		case "":
+			return reasonCIBucketEmpty
+		default:
+			return reasonCIBucketUnknown
+		}
+	}
+	return ""
+}
+
+// automergeQueueHold classifies the merge-queue GraphQL probe's result
+// under Decision 4 (Q3): an explicit isInMergeQueue or isMergeQueueEnabled
+// true holds under reasonMergeQueueRequired (automerge must never enqueue
+// as a side effect); a probe error holds under reasonMergeQueueUnknown; and
+// a probe result with exactly one of the two fields nil (a malformed/partial
+// GraphQL response) also holds under reasonMergeQueueUnknown -- absence is
+// never read as "not required".
+//
+// Both fields nil with no error is ambiguous by itself: it's both
+// runAutomerge's lazy-fetch "not yet probed" trial sentinel (mirroring the
+// policy/allowed-methods absent-sentinel pattern) AND the shape a genuine
+// GraphQL response with a null pullRequest decodes to (deleted/renumbered/
+// inaccessible PR, transient null-propagation, zero exit, no top-level
+// errors[]). probed disambiguates the two: probed == false means the
+// lazy-fetch loop hasn't triggered the probe yet, so this passes through
+// (the loop reads that as "every earlier stage passed" and fetches for
+// real); probed == true means the probe genuinely ran and came back with
+// nothing, which must hold under reasonMergeQueueUnknown rather than pass
+// through as if the probe had never run (#854 fix -- previously both cases
+// were indistinguishable and a genuinely-probed null response silently
+// passed as if the probe were still pending).
+func automergeQueueHold(inQueue, enabled *bool, err error, probed bool) string {
+	if err != nil {
+		return reasonMergeQueueUnknown
+	}
+	if inQueue == nil && enabled == nil {
+		if !probed {
+			return ""
+		}
+		return reasonMergeQueueUnknown
+	}
+	if inQueue == nil || enabled == nil {
+		return reasonMergeQueueUnknown
+	}
+	if *inQueue || *enabled {
+		return reasonMergeQueueRequired
+	}
+	return ""
 }
 
 // evaluateAutomerge is pure: identical automergeInputs yield an identical
@@ -214,18 +405,29 @@ func evaluateAutomerge(in automergeInputs) automergeDecision {
 	}
 	pass("label")
 
-	// 3. ciStatus(checks).
-	if in.CIStatus == "" {
-		return fail("ci", reasonNoChecks)
-	}
-	if in.CIStatus != "green" {
-		return fail("ci", reasonCINotGreen)
+	// 3. Strict pass-only CI (Decisions 1/2, #854): every check bucket must
+	// be exactly "pass"; cancel/skipping/empty/unknown buckets each hold
+	// under their own distinct reason via automergeCIHold.
+	if hold := automergeCIHold(in.Checks); hold != "" {
+		return fail("ci", hold)
 	}
 	pass("ci")
 
-	// 4. !RepairPending && no feedback hold && len(PendingKeys) == 0.
+	// 4. !RepairPending && detection reads proven complete && no feedback
+	// hold && len(PendingKeys) == 0.
 	if in.RepairPending {
 		return fail("review", reasonRepairPending)
+	}
+	// #854: a comments/reviews detection read that could not be proven
+	// complete (pagination cap exhausted, or otherwise unproven) forces a
+	// hold under its own distinct reason -- checked before the ordinary
+	// feedback-hold/PendingKeys checks, since an incomplete read means
+	// PendingKeys itself may be missing entries GitHub actually reports.
+	if !in.CommentsComplete {
+		return fail("review", reasonCommentsReadTruncated)
+	}
+	if !in.ReviewsComplete {
+		return fail("review", reasonReviewsReadTruncated)
 	}
 	// #850: FeedbackHold is checked before the ordinary PendingKeys check so
 	// an unreadable/truncated/unknown/unsupported feedback state is never
@@ -314,36 +516,70 @@ func evaluateAutomerge(in automergeInputs) automergeDecision {
 	}
 	pass("protected")
 
-	// 10. mergeMethod allowed on this repo.
+	// 10. Squash-only execution (Decision 3, #854): mergeMethod stays
+	// readable for configuration compatibility, but only "squash" ever
+	// executes -- any other resolved policy mergeMethod holds here, before
+	// any allowed-merge-methods fetch, so a non-squash policy costs zero
+	// extra gh calls beyond the policy fetch itself.
+	if in.MergeMethod != "squash" {
+		return fail("method", reasonMergeMethodNotSquash)
+	}
 	if in.AllowedMethodsErr != nil {
 		d := fail("method", reasonMergeMethodUnknown)
 		d.Detail = sanitizeDetail(in.AllowedMethodsErr.Error())
 		return d
 	}
-	if !in.AllowedMethods[in.MergeMethod] {
+	if !in.AllowedMethods["squash"] {
 		return fail("method", reasonMergeMethodDisallowed)
 	}
 	pass("method")
 
+	// 11. Merge-queue gate (Decision 4, #854): terminal stage, evaluated
+	// only once every earlier stage has passed -- a lazy GraphQL probe
+	// plugs into runAutomerge's fetch loop the same way policy/allowed-
+	// methods do.
+	if hold := automergeQueueHold(in.QueueInMergeQueue, in.QueueEnabled, in.QueueErr, in.QueueProbed); hold != "" {
+		return fail("queue", hold)
+	}
+	pass("queue")
+
 	return automergeDecision{Merge: true, Reason: "", Conditions: conds}
 }
 
-// detailMaxLen bounds sanitizeDetail's output length (runes truncated by
-// byte length is acceptable here: Detail is diagnostic-only, and a `gh`
-// failure body is overwhelmingly ASCII).
+// detailMaxLen bounds sanitizeDetail's output length in bytes. Truncation
+// itself is rune-boundary-safe (see sanitizeDetail) so a multi-byte UTF-8
+// character straddling this cutoff is never split mid-encoding.
 const detailMaxLen = 200
 
-// sanitizeDetail collapses embedded newlines and truncates detail to a
-// bounded length before it's assigned onto automergeDecision.Detail --
-// Detail is raw `gh` failure output, unbounded and potentially multi-line,
-// but it feeds into logLine's single-line-per-tick format that downstream
-// tooling (lazyboards) substring-classifies, and it's also persisted onto
-// State. Without this, an embedded newline or a very long body could break
-// that one-line contract or bloat the persisted state file.
+// sanitizeDetail collapses every C0 control character (not just "\n") and
+// truncates detail to a bounded length before it's assigned onto
+// automergeDecision.Detail -- Detail is raw `gh` failure output, unbounded
+// and potentially multi-line, but it feeds into logLine's single-line-per-
+// tick format that downstream tooling (lazyboards) substring-classifies,
+// and it's also persisted onto State. Stripping "\n" alone left "\r" and
+// other control bytes (form feed, vertical tab, ANSI escape sequences, ...)
+// free to break that one-line contract or corrupt the persisted state file;
+// every rune below 0x20, plus DEL (0x7f), is replaced with a single space.
 func sanitizeDetail(detail string) string {
-	sanitized := strings.ReplaceAll(detail, "\n", " ")
+	var sb strings.Builder
+	sb.Grow(len(detail))
+	for _, r := range detail {
+		if r < 0x20 || r == 0x7f {
+			sb.WriteByte(' ')
+			continue
+		}
+		sb.WriteRune(r)
+	}
+	sanitized := sb.String()
 	if len(sanitized) > detailMaxLen {
-		sanitized = sanitized[:detailMaxLen] + "..."
+		// Walk back from the byte cutoff to the nearest rune start so a
+		// multi-byte UTF-8 character straddling detailMaxLen is never split
+		// mid-encoding in the persisted state file or log line.
+		cut := detailMaxLen
+		for cut > 0 && !utf8.RuneStart(sanitized[cut]) {
+			cut--
+		}
+		sanitized = sanitized[:cut] + "..."
 	}
 	return sanitized
 }
@@ -616,12 +852,12 @@ func loadFleetEnabled() bool {
 // interpolation: a branch ref name can legally contain characters (e.g. "#",
 // "&") that would otherwise corrupt the query string.
 func fetchPolicy(repo, baseRef string) (repoConfigFile, error) {
-	out, err := command("gh", "api", "-H", "Accept: application/vnd.github.raw", "repos/"+repo+"/contents/.cenci/config.json?ref="+url.QueryEscape(baseRef))
+	stdout, stderr, err := execGh("api", "-H", "Accept: application/vnd.github.raw", "repos/"+repo+"/contents/.cenci/config.json?ref="+url.QueryEscape(baseRef))
 	if err != nil {
-		return repoConfigFile{}, fmt.Errorf("%s: %s: %w", reasonPolicyUnreadable, strings.TrimSpace(string(out)), err)
+		return repoConfigFile{}, fmt.Errorf("%s: %s: %w", reasonPolicyUnreadable, strings.TrimSpace(stderr), err)
 	}
 	var cfg repoConfigFile
-	if err := json.Unmarshal(out, &cfg); err != nil {
+	if err := json.Unmarshal([]byte(stdout), &cfg); err != nil {
 		return repoConfigFile{}, fmt.Errorf("%s: %w", reasonPolicyUnreadable, err)
 	}
 	return cfg, nil
@@ -670,61 +906,82 @@ func fetchAllowedMethods(repo string) (map[string]bool, error) {
 	return map[string]bool{"squash": resp.Squash, "merge": resp.Merge, "rebase": resp.Rebase}, nil
 }
 
-// mergeMethodFlag maps a resolved policy mergeMethod to its `gh pr merge`
-// flag. Stage 10 of evaluateAutomerge already validates method against the
-// repo's allowed merge methods, so this only ever sees "squash"/"merge"/
-// "rebase" on a real Merge==true verdict; an unrecognized value defaults to
-// --squash defensively rather than passing an unvalidated method straight
-// through to the `gh` invocation.
-func mergeMethodFlag(method string) string {
-	switch method {
-	case "merge":
-		return "--merge"
-	case "rebase":
-		return "--rebase"
-	default:
-		return "--squash"
+// recordDecision persists d onto s (for the detached supervisor, whose
+// cmd.Stdout is nil) and emits automerge's one-line-per-tick log line
+// (Decision 7, #854) -- the single place both runAutomerge's own outcomes
+// and tick's upstream-read-failure paths (via recordHold) funnel through, so
+// every enabled automerge tick persists and logs exactly one full decision.
+func recordDecision(s *State, d automergeDecision, merged bool) {
+	d.PR = s.PR
+	s.AutomergeReason = d.Reason
+	s.AutomergeDetail = d.Detail
+	s.AutomergeConditions = d.Conditions
+	s.AutomergeCheckedAt = time.Now().UTC()
+	if merged {
+		s.AutomergeDecision = "merge"
+	} else {
+		s.AutomergeDecision = "held"
 	}
+	fmt.Println(d.logLine())
+}
+
+// recordHold persists reason/detail as a held automerge decision -- shared
+// by tick's upstream-read-failure paths (which never reach runAutomerge or
+// evaluateAutomerge at all) and any other hold recorded outside the pure
+// condition chain.
+func recordHold(s *State, reason, detail string) {
+	recordDecision(s, automergeDecision{Reason: reason, Detail: detail}, false)
+}
+
+// recordUpstreamReadFailure records reason as a held automerge decision for
+// an upstream PR/checks/comments/reviews read failure (Decision 7) -- with
+// the fleet kill switch off, the recorded reason stays reasonAutomergeDisabled
+// even though an upstream read also failed (Q4), matching today's healthy-
+// tick behavior rather than surfacing the specific read failure when
+// automerge was never going to run anyway.
+func recordUpstreamReadFailure(s *State, reason string, err error) {
+	if !loadFleetEnabled() {
+		reason = reasonAutomergeDisabled
+	}
+	recordHold(s, reason, sanitizeDetail(err.Error()))
 }
 
 // runAutomerge evaluates the automerge condition chain for pr and, on a
-// Merge==true verdict, issues `gh pr merge` with the resolved policy's
-// mergeMethod flag (never --delete-branch, per epic #661 Decision 4 -- PR
-// worktrees still reference the branch and delete_branch_on_merge is off on
-// this repo), pinned to the exact head commit evaluateAutomerge actually
-// evaluated via --match-head-commit -- so a push landing between evaluation
-// and merge can never get content merged that was never checked. It fetches
-// lazily: labels are
-// fetched only when automerge is enabled and the PR closes an issue; the
-// base-ref policy and the repo's allowed-merge-methods are each fetched only
-// once evaluateAutomerge's trial verdict (with that stage's inputs still
-// zero-valued) shows every earlier stage already passed -- so a PR held by
-// an earlier stage (disabled, unlabeled, CI not green, review pending, not
-// mergeable, no/truncated diff) costs zero extra `gh` calls beyond the
+// Merge==true verdict, issues `gh pr merge --squash` (never --delete-branch,
+// per epic #661 Decision 4 -- PR worktrees still reference the branch and
+// delete_branch_on_merge is off on this repo), pinned to the exact head
+// commit evaluateAutomerge actually evaluated via --match-head-commit -- so
+// a push landing between evaluation and merge can never get content merged
+// that was never checked. It fetches lazily: labels are fetched only when
+// automerge is enabled and the PR closes an issue; the base-ref policy, the
+// repo's allowed-merge-methods, and the merge-queue/head-SHA probe are each
+// fetched only once evaluateAutomerge's trial verdict (with that stage's
+// inputs still zero-valued) shows every earlier stage already passed -- so
+// a PR held by an earlier stage costs zero extra `gh` calls beyond the
 // labels fetch. verdict is reconcilePendingFeedback's already-computed
 // result (#850): tick calls reconcilePendingFeedback once, unconditionally,
 // at the end of tick -- after the reviews loop and after this tick's new
 // keys are appended -- immediately before calling runAutomerge, so
 // s.PendingKeys already reflects GitHub-authoritative resolution by the time
-// runAutomerge reads it below. There is deliberately no second re-fetch
-// inside runAutomerge (that is #854's scope). It logs exactly one decision
-// line and persists it onto s for the detached supervisor (whose
-// cmd.Stdout is nil). It returns whether a merge was actually issued this
-// tick, so tick can reset the backoff delay.
-func runAutomerge(s *State, pr prView, checks []check, verdict feedbackVerdict) bool {
+// runAutomerge reads it below. It persists exactly one decision via
+// recordDecision and returns whether a merge was actually issued this tick,
+// so tick can reset the backoff delay.
+func runAutomerge(s *State, pr prView, checks []check, verdict feedbackVerdict, commentsComplete, reviewsComplete bool) bool {
 	in := automergeInputs{
-		Enabled:        loadFleetEnabled(),
-		CIStatus:       ciStatus(checks),
-		RepairPending:  s.RepairPending,
-		PendingKeys:    s.PendingKeys,
-		FeedbackHold:   verdict.Hold,
-		FeedbackDetail: verdict.Detail,
-		IsDraft:        pr.IsDraft,
-		Mergeable:      pr.Mergeable,
-		HeadRefOID:     pr.HeadRefOID,
-		ChangedFiles:   pr.ChangedFiles,
-		Additions:      pr.Additions,
-		Deletions:      pr.Deletions,
+		Enabled:          loadFleetEnabled(),
+		Checks:           checks,
+		RepairPending:    s.RepairPending,
+		PendingKeys:      s.PendingKeys,
+		FeedbackHold:     verdict.Hold,
+		FeedbackDetail:   verdict.Detail,
+		IsDraft:          pr.IsDraft,
+		Mergeable:        pr.Mergeable,
+		HeadRefOID:       pr.HeadRefOID,
+		ChangedFiles:     pr.ChangedFiles,
+		Additions:        pr.Additions,
+		Deletions:        pr.Deletions,
+		CommentsComplete: commentsComplete,
+		ReviewsComplete:  reviewsComplete,
 	}
 	for _, i := range pr.ClosingIssuesReferences {
 		in.ClosingIssues = append(in.ClosingIssues, i.Number)
@@ -736,7 +993,7 @@ func runAutomerge(s *State, pr prView, checks []check, verdict feedbackVerdict) 
 		in.IssueLabels, in.LabelsErr = fetchClosingIssueLabels(s.Repo, in.ClosingIssues)
 	}
 
-	policyFetched, methodsFetched := false, false
+	policyFetched, methodsFetched, queueFetched := false, false, false
 	var decision automergeDecision
 	for {
 		decision = evaluateAutomerge(in)
@@ -766,31 +1023,84 @@ func runAutomerge(s *State, pr prView, checks []check, verdict feedbackVerdict) 
 			}
 			continue
 		}
+		// Merge-queue gate (Decision 4, #854): the terminal stage of the
+		// first, trial evaluation pass -- probed lazily exactly once every
+		// earlier stage's trial verdict already passes. QueueProbed is set
+		// unconditionally right after the fetch (#854 fix, item 1): a
+		// genuinely-probed null/malformed response must hold under
+		// reasonMergeQueueUnknown via automergeQueueHold, never pass
+		// through as if the probe had never run.
+		if !queueFetched && decision.Merge {
+			queueFetched = true
+			inQueue, enabled, _, err := fetchMergeQueueState(s.Repo, s.PR)
+			in.QueueInMergeQueue = inQueue
+			in.QueueEnabled = enabled
+			in.QueueErr = err
+			in.QueueProbed = true
+			continue
+		}
 		break
+	}
+
+	// Pre-merge re-evaluation (Decision 9, #854): immediately before ever
+	// issuing `gh pr merge`, re-fetch everything the first pass evaluated --
+	// PR view (head SHA, mergeable, files), checks, labels, base-ref
+	// policy, paginated comments/reviews (feeding a fresh new-feedback
+	// detection pass), and merge-queue state -- and re-run the same
+	// evaluator against this freshly-fetched automergeInputs (the plan's
+	// chosen design: one evaluator, one decision shape, one log line).
+	// AllowedMethods and the fleet kill switch carry over unchanged from
+	// the first pass (repo settings / local config, not PR state, per the
+	// plan's Assumption). Only a still-Merge==true second verdict proceeds
+	// to executeMerge; every hold here reuses an existing reason constant
+	// with a "recheck: "-prefixed Detail rather than a parallel constant
+	// set, per the plan's Assumption.
+	if decision.Merge {
+		recheck, failReason, err := recheckAutomergeInputs(s, in)
+		switch {
+		case err != nil:
+			decision.Merge = false
+			decision.Reason = failReason
+			decision.Detail = sanitizeDetail("recheck: " + err.Error())
+			// The second pass never ran, so pass 1's Conditions (all "yes",
+			// since decision.Merge was true) would render as a self-
+			// contradictory "held: ... [enabled=yes ... queue=yes]" log line
+			// during incident triage -- clear it so every stage renders "-"
+			// (never reached) instead, distinct from the "recheck ran and
+			// found a regression" branch below, which sets fresh Conditions
+			// from recheckDecision and must not be touched here.
+			decision.Conditions = nil
+		default:
+			recheckDecision := evaluateAutomerge(recheck)
+			// The TOCTOU guard (Decision 9): a head commit that changed
+			// between the first evaluation and this point must hold under
+			// reasonHeadSHAChanged, never merge on stale evidence, even if
+			// the fresh commit would otherwise independently evaluate
+			// green (its checks/mergeable state may not even be settled
+			// yet).
+			if recheck.HeadRefOID != "" && in.HeadRefOID != "" && recheck.HeadRefOID != in.HeadRefOID {
+				recheckDecision.Merge = false
+				recheckDecision.Reason = reasonHeadSHAChanged
+				recheckDecision.Detail = ""
+			}
+			if recheckDecision.Merge {
+				in = recheck
+			} else {
+				detail := "recheck"
+				if recheckDecision.Detail != "" {
+					detail = "recheck: " + recheckDecision.Detail
+				}
+				recheckDecision.Detail = detail
+			}
+			decision = recheckDecision
+		}
 	}
 
 	merged := false
 	if decision.Merge {
-		out, err := command("gh", "pr", "merge", s.PR, "--repo", s.Repo, mergeMethodFlag(in.MergeMethod), "--match-head-commit", pr.HeadRefOID)
-		if err != nil {
-			decision.Merge = false
-			decision.Reason = reasonMergeFailed
-			decision.Detail = sanitizeDetail(strings.TrimSpace(string(out)))
-		} else {
-			merged = true
-		}
+		merged, decision = executeMerge(s, in.HeadRefOID, decision)
 	}
 
-	decision.PR = s.PR
-	s.AutomergeReason = decision.Reason
-	s.AutomergeDetail = decision.Detail
-	s.AutomergeConditions = decision.Conditions
-	s.AutomergeCheckedAt = time.Now().UTC()
-	if merged {
-		s.AutomergeDecision = "merge"
-	} else {
-		s.AutomergeDecision = "held"
-	}
-	fmt.Println(decision.logLine())
+	recordDecision(s, decision, merged)
 	return merged
 }
