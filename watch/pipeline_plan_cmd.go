@@ -47,7 +47,19 @@ package main
 //	                                        escalationNonce/escalationCommentId
 //	                                        (#849) verbatim -- unvalidated, so
 //	                                        a missing/malformed anchor never
-//	                                        changes the decision or exit code
+//	                                        changes the decision or exit code.
+//	                                        Also carries `draft_freshness`
+//	                                        (#853): "fresh"/"stale" from a
+//	                                        git-only commits-behind check
+//	                                        (no gh round-trip), or "unknown"
+//	                                        for an unverifiable baseline
+//	                                        (empty/malformed planCommitSha, or
+//	                                        a CommitsBehind failure) -- an
+//	                                        "unknown" freshness adds one
+//	                                        warnings[] entry but never changes
+//	                                        the decision or exit code; the
+//	                                        consuming skill treats "unknown"
+//	                                        exactly like "stale"
 //	none            exit 0, errors: [_]  -- no .plans/<id>-*.md match yet
 //	multiple        exit 0, errors: [_]  -- 2+ matches, ambiguous
 //	"" (unset)      exit 1, errors: [_]  -- ErrPlanMalformed or a
@@ -101,16 +113,37 @@ func runPipelinePlanCheck(rest []string) {
 		artifacts = []string{}
 	}
 	out := pipeline.Output{
-		State:       string(state.Stage),
-		NextActions: pipeline.NextActionsFor(state.Stage),
-		Artifacts:   artifacts,
-		Warnings:    []string{},
-		Errors:      []string{},
-		Decision:    check.Decision,
-		Plan:        check.Plan,
+		State:          string(state.Stage),
+		NextActions:    pipeline.NextActionsFor(state.Stage),
+		Artifacts:      artifacts,
+		Warnings:       []string{},
+		Errors:         []string{},
+		Decision:       check.Decision,
+		Plan:           check.Plan,
+		DraftFreshness: check.DraftFreshness,
 	}
 	if err != nil {
 		out.Errors = []string{err.Error()}
+	}
+	// #853: an "unknown" draft freshness means the git-only staleness check
+	// could not verify a baseline (empty/malformed planCommitSha, or a
+	// CommitsBehind failure) -- surfaced as a warning, not an error, since
+	// the decision/exit code are unaffected (see this file's decision table
+	// above): the consuming skill treats "unknown" exactly like "stale".
+	//
+	// Review fix: the empty/malformed-sha cases keep this exact wording
+	// unchanged -- they're already self-explanatory. A genuine
+	// CommitsBehind failure (unreachable sha, transient git error,
+	// corrupted worktree) additionally carries check.DraftFreshnessErr, so
+	// that case's underlying error is appended rather than silently
+	// discarded, matching this same file's sibling planIsStale/dispatch.go
+	// convention of propagating that error class in full.
+	if check.Decision == "awaiting-input" && check.DraftFreshness == "unknown" {
+		warning := "draft freshness unknown: planCommitSha is empty, malformed, or unreachable in git -- treated as stale"
+		if check.DraftFreshnessErr != "" {
+			warning += fmt.Sprintf(" (commits-behind check failed: %s)", check.DraftFreshnessErr)
+		}
+		out.Warnings = append(out.Warnings, warning)
 	}
 
 	b, marshalErr := json.Marshal(out)

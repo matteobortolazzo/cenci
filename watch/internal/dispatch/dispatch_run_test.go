@@ -3,6 +3,7 @@ package dispatch
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -231,12 +232,21 @@ type orderRecordingMutator struct {
 	callOrder      []string
 	edits          []labelEdit
 	failEditLabels bool
+	// failRollback, when set, fails only the SECOND EditLabels call (the
+	// post-spawn-failure rollback) while the first (the pre-spawn claim
+	// swap) still succeeds -- unlike failEditLabels, which fails every call
+	// including the first (#853).
+	failRollback bool
 }
 
 func (m *orderRecordingMutator) EditLabels(repo string, number int, add, remove []string) error {
 	if m.failEditLabels {
 		m.callOrder = append(m.callOrder, "edit-fail")
 		return errors.New("swap failed")
+	}
+	if m.failRollback && len(m.edits) == 1 {
+		m.callOrder = append(m.callOrder, "rollback-fail")
+		return errors.New("rollback failed")
 	}
 	m.edits = append(m.edits, labelEdit{repo, number, add, remove})
 	m.callOrder = append(m.callOrder, "edit")
@@ -310,8 +320,12 @@ func TestApplyDispatchResumeSwapFailurePreventsSpawnAndClaim(t *testing.T) {
 }
 
 // TestApplyDispatchResumeSpawnFailureAfterGoodSwapDoesNotDoubleEdit covers: a
-// spawn failure that follows a successful pre-spawn swap must not attempt a
-// second (post-spawn) label edit -- the resume path never claims twice.
+// spawn failure that follows a successful pre-spawn swap must, on an
+// ordinary (non-ErrWindowSpawned) failure, roll the ticket back to Input
+// Needed -- exactly one further edit, and that edit must be a rollback
+// (+Input Needed -Working), never a second claim (+Working again). The
+// "never claims twice" intent from before #853 survives as "the second edit
+// is a rollback, not a claim" (#853).
 func TestApplyDispatchResumeSpawnFailureAfterGoodSwapDoesNotDoubleEdit(t *testing.T) {
 	stubRunFn(t, func(run.Opts, run.Controller) error { return errors.New("tmux exploded") })
 
@@ -324,11 +338,88 @@ func TestApplyDispatchResumeSpawnFailureAfterGoodSwapDoesNotDoubleEdit(t *testin
 	if err == nil || !strings.Contains(err.Error(), "tmux exploded") {
 		t.Fatalf("error = %v, want tmux exploded", err)
 	}
-	if len(mut.edits) != 1 {
-		t.Fatalf("expected exactly 1 label edit (the pre-spawn swap only, no second post-spawn claim), got %d: %+v", len(mut.edits), mut.edits)
+	if len(mut.edits) != 2 {
+		t.Fatalf("expected exactly 2 label edits (the pre-spawn claim swap, then a rollback), got %d: %+v", len(mut.edits), mut.edits)
+	}
+	claim := mut.edits[0]
+	if !containsStr(claim.add, labelWorking) || !containsStr(claim.remove, labelInputNeeded) {
+		t.Errorf("unexpected first edit (claim swap): %+v, want add=[%s] remove=[%s]", claim, labelWorking, labelInputNeeded)
+	}
+	rollback := mut.edits[1]
+	if rollback.repo != "o/r" || rollback.number != 42 || !containsStr(rollback.add, labelInputNeeded) || !containsStr(rollback.remove, labelWorking) {
+		t.Errorf("unexpected second edit: %+v, want add=[%s] remove=[%s] on o/r#42 (a rollback, not a second claim)", rollback, labelInputNeeded, labelWorking)
+	}
+	if containsStr(rollback.add, labelWorking) {
+		t.Errorf("the rollback edit must never re-add Working (that would be a second claim): %+v", rollback)
 	}
 	if prior != 0 {
 		t.Errorf("prior = %d, want 0 (a failed spawn must not consume quota)", prior)
+	}
+}
+
+// TestApplyDispatchResumeSpawnFailureWithErrWindowSpawned_RetainsWorkingNoRollback
+// covers Q1's confirmed-alive launch evidence: when the spawn failure is
+// wrapped with run.ErrWindowSpawned (the tmux window was demonstrably
+// created before the failure, e.g. a post-NewWindow SetWindowOption error),
+// Working must be retained -- no rollback edit -- since the reconciler's
+// interrupted-resume recovery is the backstop if the session turns out to be
+// dead.
+func TestApplyDispatchResumeSpawnFailureWithErrWindowSpawned_RetainsWorkingNoRollback(t *testing.T) {
+	stubRunFn(t, func(run.Opts, run.Controller) error {
+		return fmt.Errorf("setting automatic-rename off: %w", run.ErrWindowSpawned)
+	})
+
+	mut := &orderRecordingMutator{}
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	prior := 0
+	var buf bytes.Buffer
+
+	_, err := applyDispatch(testConfig(), resumeDispatchDeps(now), fakeController{}, mut, false, &buf, &prior)
+	if err == nil || !errors.Is(err, run.ErrWindowSpawned) {
+		t.Fatalf("error = %v, want errors.Is(_, run.ErrWindowSpawned)", err)
+	}
+	if len(mut.edits) != 1 {
+		t.Fatalf("expected exactly 1 label edit (the claim swap only, no rollback -- the window was demonstrably created), got %d: %+v", len(mut.edits), mut.edits)
+	}
+	claim := mut.edits[0]
+	if !containsStr(claim.add, labelWorking) || !containsStr(claim.remove, labelInputNeeded) {
+		t.Errorf("unexpected edit: %+v, want the claim swap retained (add=[%s] remove=[%s])", claim, labelWorking, labelInputNeeded)
+	}
+	if prior != 0 {
+		t.Errorf("prior = %d, want 0 (a failed spawn must not consume quota even when Working is retained)", prior)
+	}
+}
+
+// TestApplyDispatchResumeSpawnFailureRollbackAlsoFails_QuotaUntouchedErrorSurfaced
+// covers the rollback-failure case: the spawn fails (ordinary failure, not
+// ErrWindowSpawned), and the rollback edit itself also fails. Quota (prior)
+// must stay untouched and the error must surface -- both the spawn and
+// rollback failures are the caller's problem, never silently swallowed.
+func TestApplyDispatchResumeSpawnFailureRollbackAlsoFails_QuotaUntouchedErrorSurfaced(t *testing.T) {
+	stubRunFn(t, func(run.Opts, run.Controller) error { return errors.New("tmux exploded") })
+
+	mut := &orderRecordingMutator{failRollback: true}
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	prior := 0
+	var buf bytes.Buffer
+
+	_, err := applyDispatch(testConfig(), resumeDispatchDeps(now), fakeController{}, mut, false, &buf, &prior)
+	if err == nil {
+		t.Fatal("expected an error when both the spawn and the rollback fail")
+	}
+	if !strings.Contains(err.Error(), "tmux exploded") && !strings.Contains(err.Error(), "rollback failed") {
+		t.Errorf("error = %v, want it to surface the spawn or rollback failure", err)
+	}
+	if prior != 0 {
+		t.Errorf("prior = %d, want 0 (a failed spawn must not consume quota, regardless of rollback outcome)", prior)
+	}
+	// Only the pre-spawn claim swap actually landed; the rollback attempt
+	// itself failed, so it never lands in edits.
+	if len(mut.edits) != 1 {
+		t.Errorf("expected exactly 1 successful edit (the claim swap; the rollback failed), got %d: %+v", len(mut.edits), mut.edits)
+	}
+	if !strings.Contains(buf.String(), "rollback") {
+		t.Errorf("expected the rollback failure to be logged, got %q", buf.String())
 	}
 }
 

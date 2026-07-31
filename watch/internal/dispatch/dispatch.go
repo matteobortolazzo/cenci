@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -271,7 +272,15 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 		// is safely recovered by the reconciler next pass; here it would
 		// leave the ticket at Input Needed forever, so every subsequent
 		// pass would re-resume it and spawn an unbounded stream of planning
-		// sessions. A failed swap therefore skips the spawn entirely.
+		// sessions. A failed swap therefore skips the spawn entirely. This
+		// "+Working -Input Needed" claim/rollback label-set contract is
+		// shared with the manual lane (pipeline.ApplyLabelTransition's
+		// "working" transition, watch/internal/pipeline/labels.go, #853):
+		// both realize +Working -Input Needed on claim, and its exact
+		// inverse (+Input Needed -Working) on rollback/restore -- here, on a
+		// non-ErrWindowSpawned spawn failure (below); there, via the
+		// "input-needed" transition or the reconciler's interrupted-resume
+		// recovery.
 		if d.Resume {
 			if err := mut.EditLabels(d.Ticket.Repo, d.Ticket.Number, []string{labelWorking}, []string{labelInputNeeded}); err != nil {
 				logf(out, "dispatch: #%d resume claim failed: %v\n", d.Ticket.Number, err)
@@ -292,6 +301,25 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 		if err != nil {
 			logf(out, "dispatch: #%d run failed: %v\n", d.Ticket.Number, err)
 			firstErr = firstNonNil(firstErr, err)
+			// A resume spawn failure needs a label decision (#853): a
+			// demonstrably-created tmux window (ErrWindowSpawned, i.e. the
+			// failure happened after ctrl.NewWindow already succeeded)
+			// counts as confirmed-alive launch evidence -- Working is
+			// retained, and the reconciler's interrupted-resume recovery is
+			// the backstop if that session turns out to be dead. Any other
+			// resume spawn failure rolls the claim back to Input Needed so
+			// the ticket stays resumable on a later pass rather than being
+			// stranded at Working with no live session.
+			if d.Resume {
+				if errors.Is(err, run.ErrWindowSpawned) {
+					logf(out, "dispatch: #%d window created, retaining Working; reconciler will recover if the session is dead\n", d.Ticket.Number)
+				} else if rerr := mut.EditLabels(d.Ticket.Repo, d.Ticket.Number, []string{labelInputNeeded}, []string{labelWorking}); rerr != nil {
+					logf(out, "dispatch: #%d resume rollback failed: %v\n", d.Ticket.Number, rerr)
+					firstErr = firstNonNil(firstErr, rerr)
+				} else {
+					logf(out, "dispatch: #%d resume spawn failed, rolled back to Input Needed\n", d.Ticket.Number)
+				}
+			}
 			continue
 		}
 		if prior != nil {

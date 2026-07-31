@@ -23,6 +23,56 @@ In `applyReconcile`:
    - If NOT `mutated`, re-inject the prior observation and increment counter; if counter exceeds budget, escalate.
 4. After all recoveries, clear stale counters: only clear if the key is absent from BOTH `recoveredKeys` (no recovery this pass) AND `result.NextObservations` (not deferred).
 
+## Interrupted-resume recovery (ticket #853)
+
+`RecoveryResumeInterrupted` (`reconcile.go`) classifies a dead `Working`
+ticket whose matched plan is still `status: awaiting-input` as an
+interrupted resume — the manual or dispatch-triggered resume launch died
+before it could finalize the plan — rather than an ordinary crashed
+implementation run. It restores `+Input Needed` `−Working` instead of the
+ordinary retry's `+Planned` `−Working`: converting an awaiting-input draft
+to `Planned` would silently discard the still-open escalation (the human's
+answer was never collected into a finalized plan) and route the ticket back
+into ordinary dispatch as if it were a fresh, answerable plan. The
+classification is checked in the `attempts < RetryBudget` branch, *before*
+the stage-aware Refined-no-plan case, since `planByTicket[key] != nil`
+already implies clean front-matter parsing (`ReadPlans` drops
+probe-errored files) — no extra `PlanProbes` gate needed, unlike the
+`plan == nil` cases.
+
+**Shares the ordinary retry budget, not a second counter.** The recovery's
+comment (`resumeInterruptedComment`) deliberately embeds the *same*
+`attemptMarker` `retryComment` uses, so `countAttempts` tallies it into the
+one durable, cross-restart counter every other retry consumes — a ticket
+that alternates between ordinary retries and interrupted resumes for any
+reason still terminates once `attempts >= RetryBudget`, escalating to the
+existing `RecoveryFailed` branch (`+dispatch-failed −Working`) exactly like
+any other stranded `Working` ticket. No unbounded restore loop, and no
+distinct marker to double the budget.
+
+**Crash-after-partial-label-mutation cleanup.** The `Input Needed`
+short-circuit (the branch that ordinarily records a ticket into
+`Escalated` and never touches it again) additionally emits a
+`RecoveryResumeInterrupted` when the ticket carries **both** `Input Needed`
+and `Working` — the signature of a crash between the two label edits of a
+partial resume claim or rollback. This cleanup recovery uses `AddLabels:
+nil` (Input Needed is already present — this is cleanup, not a fresh
+restore) and `RemoveLabels: []string{labelWorking}` only. It applies the
+same never-reconcile-blind, no-live-window/no-open-PR, and past-grace gates
+the ordinary failure path uses, and the ticket is still recorded into
+`Escalated` regardless of whether the cleanup recovery itself fires this
+pass — it must never leak into `Failed` or feed dispatch's `NeedInput`
+pause.
+
+**Dispatch's own claim/rollback (`dispatch.go`)** realizes the mirror-image
+contract on a failed resume launch: `errors.Is(err, run.ErrWindowSpawned)`
+(the failure happened *after* `ctrl.NewWindow` already succeeded — a
+demonstrably-created tmux window) retains `Working`, relying on this
+section's interrupted-resume recovery as the backstop if that session turns
+out to be dead. Every other resume spawn failure rolls the claim back to
+`+Input Needed` `−Working` immediately via `mut.EditLabels`, so the ticket
+stays resumable on the very next pass without waiting on the grace period.
+
 ## Cenci-authored comment markers
 
 Every comment cenci itself posts to a ticket — the attempt marker on a retry

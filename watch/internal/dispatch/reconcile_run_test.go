@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -231,6 +232,81 @@ func TestRunReconcileAttemptCountDrivesFailTransition(t *testing.T) {
 	}
 	if !hasFailed(res, "o/r", 42) {
 		t.Error("failed ticket must be present in the result's Failed list")
+	}
+}
+
+// -- #853: interrupted-resume recovery applies through applyReconcile -------
+
+// resumeAwaitingInputDeps mirrors deadWorkingDeps(now) but with the matched
+// plan at status: awaiting-input rather than planned -- the runner-level
+// twin of reconcile_test.go's resumeAwaitingInputInputs().
+func resumeAwaitingInputDeps(now time.Time) reconcileDeps {
+	deps := deadWorkingDeps(now)
+	deps.Plans = []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "awaiting-input"}}
+	return deps
+}
+
+// TestRunReconcileResumeInterruptedAppliesLabelAndComment covers the applied
+// side effects: the +Input Needed -Working swap lands via EditLabels, and
+// the posted comment carries attemptMarker for durable shared counting
+// (mirrors TestRunReconcileRetryAppliesLabelAndComment's pattern for the new
+// kind).
+func TestRunReconcileResumeInterruptedAppliesLabelAndComment(t *testing.T) {
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	deps := resumeAwaitingInputDeps(now)
+	deps.Attempts = map[string]int{"o/r#42": 0}
+
+	mut := &fakeMutator{}
+	store := &memStore{state: ReconcileState{Observations: map[string]time.Time{"o/r#42": now.Add(-10 * time.Minute)}}}
+	cfg := reconcileConfig()
+
+	var buf bytes.Buffer
+	if _, err := applyReconcile(cfg, deps, mut, false, &buf, store); err != nil {
+		t.Fatalf("applyReconcile returned unexpected error: %v", err)
+	}
+
+	if len(mut.labelEdits) != 1 {
+		t.Fatalf("expected 1 label edit, got %d", len(mut.labelEdits))
+	}
+	e := mut.labelEdits[0]
+	if e.number != 42 || !containsStr(e.add, labelInputNeeded) || !containsStr(e.remove, labelWorking) {
+		t.Errorf("unexpected label edit: %+v, want add=[%s] remove=[%s]", e, labelInputNeeded, labelWorking)
+	}
+	if len(mut.comments) != 1 || mut.comments[0].number != 42 {
+		t.Fatalf("expected 1 comment on #42, got %+v", mut.comments)
+	}
+	if !strings.Contains(mut.comments[0].body, attemptMarker) {
+		t.Error("resume-interrupted comment must carry the attempt marker for durable shared counting")
+	}
+}
+
+// TestRunReconcileResumeInterrupted_BudgetExhausted_EscalatesToDispatchFailed
+// is the runner-level twin of the pure-engine budget-exhaustion test:
+// applied through applyReconcile, a budget-exhausted interrupted resume must
+// land the ordinary Working→dispatch-failed swap, never another Input
+// Needed restore.
+func TestRunReconcileResumeInterrupted_BudgetExhausted_EscalatesToDispatchFailed(t *testing.T) {
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	deps := resumeAwaitingInputDeps(now)
+	deps.Attempts = map[string]int{"o/r#42": 2} // budget reached
+
+	mut := &fakeMutator{}
+	store := &memStore{state: ReconcileState{Observations: map[string]time.Time{"o/r#42": now.Add(-10 * time.Minute)}}}
+	cfg := reconcileConfig()
+
+	res, err := applyReconcile(cfg, deps, mut, false, nil, store)
+	if err != nil {
+		t.Fatalf("applyReconcile returned unexpected error: %v", err)
+	}
+	if len(mut.labelEdits) != 1 {
+		t.Fatalf("expected 1 label edit, got %d", len(mut.labelEdits))
+	}
+	e := mut.labelEdits[0]
+	if !containsStr(e.add, labelDispatchFailed) || !containsStr(e.remove, labelWorking) {
+		t.Errorf("expected Working→dispatch-failed once the shared attempt budget is exhausted, got %+v", e)
+	}
+	if !hasFailed(res, "o/r", 42) {
+		t.Error("a budget-exhausted interrupted resume must appear in Failed")
 	}
 }
 

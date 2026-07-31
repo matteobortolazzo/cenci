@@ -102,6 +102,30 @@ type PlanCheck struct {
 	// stays nil only for "none", "multiple", and the "" decision's other
 	// sub-case (ErrPlanMalformed, where validation itself failed).
 	Plan *PlanMeta
+
+	// DraftFreshness (#853) is populated only on the "awaiting-input"
+	// decision: "fresh" (zero commits behind planCommitSha, scoped to
+	// stalenessPaths), "stale" (one or more), or "unknown" (an empty or
+	// malformed planCommitSha, or a CommitsBehind failure -- an
+	// unverifiable baseline). See draftFreshness's doc comment for the
+	// deliberate divergence from planfile.CommitsBehindRef's sha == "" ⇒
+	// fresh convention. Empty string for every other decision.
+	DraftFreshness string
+
+	// DraftFreshnessErr (#853 review) carries the underlying
+	// planfile.CommitsBehind error's text when DraftFreshness is "unknown"
+	// specifically because that call failed (an unreachable sha, a
+	// transient git error, a corrupted worktree) -- as opposed to the
+	// empty/malformed-sha cases, which never reach CommitsBehind and leave
+	// this empty. Mirrors planIsStale's identical class of CommitsBehind
+	// error, which is propagated in full via fmt.Errorf's %w rather than
+	// discarded (see planIsStale's own doc comment); this field lets
+	// pipeline_plan_cmd.go extend its "unknown"-case CLI warning with the
+	// same diagnostic detail instead of collapsing every unverifiable
+	// baseline into an indistinguishable message. Empty string whenever
+	// DraftFreshness is not "unknown", or is "unknown" for a reason other
+	// than a CommitsBehind failure.
+	DraftFreshnessErr string
 }
 
 // PlanMeta is the validated front-matter metadata echoed alongside a
@@ -179,9 +203,19 @@ func CheckPlan(o PlanCheckOpts) (State, PlanCheck, error) {
 	// a human answering the open questions on the ticket. Checked after the
 	// replan short-circuit (replan is the deliberate discard escape hatch,
 	// and must win) but before planIsStale, so a plan still awaiting input
-	// never pays for a git/gh freshness round-trip it can't act on anyway.
+	// never pays for a gh freshness round-trip it can't act on anyway
+	// (planIsStale's `gh issue view ... --json state,updatedAt` call). It
+	// still pays for a git-only DraftFreshness check (#853, below) -- a
+	// resume decision that skips re-exploration must be authorized by a
+	// verified freshness baseline, and git carries none of gh's cost/rate
+	// concerns.
 	if fm["status"] == "awaiting-input" {
-		return state, PlanCheck{Decision: "awaiting-input", Paths: matches, Plan: meta}, nil
+		freshness, freshnessErr := draftFreshness(fm, repoRoot)
+		check := PlanCheck{Decision: "awaiting-input", Paths: matches, Plan: meta, DraftFreshness: freshness}
+		if freshnessErr != nil {
+			check.DraftFreshnessErr = freshnessErr.Error()
+		}
+		return state, check, nil
 	}
 
 	stale, err := planIsStale(o, fm, repoRoot, state.TicketUpdatedAt)
@@ -268,6 +302,52 @@ func isValidPlanSlug(slug string) bool {
 		return false
 	}
 	return planSlugPattern.MatchString(slug)
+}
+
+// draftFreshness computes PlanCheck.DraftFreshness for the "awaiting-input"
+// decision (#853): a deterministic, git-only staleness check (no gh
+// round-trip) over the draft's planCommitSha, scoped to stalenessPaths --
+// exactly the same commits-behind primitive planIsStale uses, but skipping
+// planIsStale's ticket-state/updatedAt gh comparison entirely, since a
+// still-open escalation has no "ticket closed" or "ticket edited" freshness
+// signal to check yet.
+//
+// "unknown" is returned for every unverifiable baseline: an empty
+// planCommitSha, a malformed one (fails planCommitShaPattern), or a
+// CommitsBehind failure (unreachable sha, transient git error, corrupted
+// worktree). This is a deliberate divergence from
+// planfile.CommitsBehindRef's sha == "" ⇒ fresh convention (#852 D2): that
+// convention exists for a legacy pre-planCommitSha plan file, where
+// "no baseline recorded" is absence-by-design and safe to treat as fresh.
+// Here the resume decision that DraftFreshness feeds directly controls
+// whether Phase 1 skips re-exploration -- an unverifiable baseline must
+// never be treated as authorization to skip it, so empty/malformed/
+// unreachable all fall to "unknown", which flow/skills/implement's
+// consuming skill treats exactly like "stale" (never like "fresh").
+//
+// The returned error is non-nil only for a genuine CommitsBehind failure
+// (the third "unknown" cause above) -- the empty/malformed-sha cases return
+// ("unknown", nil), since they never reach CommitsBehind and already have
+// their own self-explanatory reason. Callers thread this error into
+// PlanCheck.DraftFreshnessErr (review fix, #853) instead of discarding it:
+// planIsStale, this function's sibling below, propagates the identical
+// class of CommitsBehind error in full rather than collapsing it to a bare
+// sentinel, and this keeps that same diagnostic trail available at the CLI
+// boundary.
+func draftFreshness(fm map[string]string, repoRoot string) (string, error) {
+	sha := fm["planCommitSha"]
+	if sha == "" || !planCommitShaPattern.MatchString(sha) {
+		return "unknown", nil
+	}
+	paths := planfile.SplitPaths(fm["stalenessPaths"])
+	behind, err := planfile.CommitsBehind(repoRoot, sha, paths)
+	if err != nil {
+		return "unknown", err
+	}
+	if behind > 0 {
+		return "stale", nil
+	}
+	return "fresh", nil
 }
 
 // planIsStale computes the deterministic freshness verdict (Q&A #3/#39):

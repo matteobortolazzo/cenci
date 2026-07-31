@@ -713,6 +713,152 @@ func TestCheckPlan_AwaitingInputStatus_ReturnsAwaitingInputDecision(t *testing.T
 	}
 }
 
+// -- #853: PlanCheck.DraftFreshness -- deterministic git-only staleness check
+// on the awaiting-input decision, so a resumed escalation can route through
+// autonomous re-plan only when relevant code actually moved. Against a real
+// temp git repo (worktree_test.go/planfile_test.go's own "no fakes for git"
+// convention, mirroring TestReadPlansForRepos_DryRunCommitsBehindMatchesPostFastForwardRealPass's
+// pattern in internal/dispatch): a commit touching a stalenessPaths file ⇒
+// stale; an unrelated commit ⇒ fresh; an unreachable/empty planCommitSha ⇒
+// unknown. In every case, the decision stays "awaiting-input" (draft
+// freshness must never change the decision itself) and CheckPlan returns no
+// error. Deliberately diverges from planfile.CommitsBehindRef's sha == ""
+// ⇒ fresh convention (#852 D2): a resume decision that skips
+// re-exploration must not be authorized by an unverifiable baseline, so an
+// empty/malformed sha resolves "unknown" here, not "fresh".
+
+func TestCheckPlan_AwaitingInputStatus_DraftFreshness_StalenessPathTouched_ReturnsStale(t *testing.T) {
+	repoRoot := t.TempDir()
+	initGitRepoWithCommit(t, repoRoot)
+	sha := gitHeadSha(t, repoRoot)
+	calls := recordingCommand(t)
+	fields := defaultPlanFields("42", "add-thing", sha, "2026-07-20T20:00:00Z")
+	fields["status"] = "awaiting-input"
+	writePlanFile(t, repoRoot, "42", "add-thing", fields, validPlanBody)
+	// stalenessPaths is "watch, flow" (defaultPlanFields) -- touch a path in
+	// scope so the commits-behind count is non-zero.
+	gitCommitFile(t, repoRoot, "watch/main.go", "watch change")
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, RepoSlug: "o/r"})
+	if err != nil {
+		t.Fatalf("CheckPlan with an awaiting-input draft: unexpected error: %v", err)
+	}
+	if check.Decision != "awaiting-input" {
+		t.Errorf("Decision = %q, want awaiting-input (draft freshness must never change the decision)", check.Decision)
+	}
+	if check.DraftFreshness != "stale" {
+		t.Errorf("DraftFreshness = %q, want stale (a commit touched a stalenessPaths file)", check.DraftFreshness)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("gh calls = %v, want none (draft freshness is git-only, no gh round-trip)", *calls)
+	}
+}
+
+func TestCheckPlan_AwaitingInputStatus_DraftFreshness_UnrelatedCommit_ReturnsFresh(t *testing.T) {
+	repoRoot := t.TempDir()
+	initGitRepoWithCommit(t, repoRoot)
+	sha := gitHeadSha(t, repoRoot)
+	calls := recordingCommand(t)
+	fields := defaultPlanFields("42", "add-thing", sha, "2026-07-20T20:00:00Z")
+	fields["status"] = "awaiting-input"
+	writePlanFile(t, repoRoot, "42", "add-thing", fields, validPlanBody)
+	// stalenessPaths is "watch, flow" -- this commit touches neither.
+	gitCommitFile(t, repoRoot, "docs/unrelated.md", "unrelated change")
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, RepoSlug: "o/r"})
+	if err != nil {
+		t.Fatalf("CheckPlan with an awaiting-input draft: unexpected error: %v", err)
+	}
+	if check.Decision != "awaiting-input" {
+		t.Errorf("Decision = %q, want awaiting-input", check.Decision)
+	}
+	if check.DraftFreshness != "fresh" {
+		t.Errorf("DraftFreshness = %q, want fresh (an unrelated-path commit outside stalenessPaths must not mark the draft stale)", check.DraftFreshness)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("gh calls = %v, want none", *calls)
+	}
+}
+
+func TestCheckPlan_AwaitingInputStatus_DraftFreshness_UnreachableSha_ReturnsUnknown(t *testing.T) {
+	repoRoot := t.TempDir()
+	initGitRepoWithCommit(t, repoRoot)
+	calls := recordingCommand(t)
+	sha := "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" // valid format, unreachable
+	fields := defaultPlanFields("42", "add-thing", sha, "2026-07-20T20:00:00Z")
+	fields["status"] = "awaiting-input"
+	writePlanFile(t, repoRoot, "42", "add-thing", fields, validPlanBody)
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, RepoSlug: "o/r"})
+	if err != nil {
+		t.Fatalf("CheckPlan with an awaiting-input draft: unexpected error: %v (an unreachable planCommitSha must not turn into a CheckPlan error on the awaiting-input path)", err)
+	}
+	if check.Decision != "awaiting-input" {
+		t.Errorf("Decision = %q, want awaiting-input", check.Decision)
+	}
+	if check.DraftFreshness != "unknown" {
+		t.Errorf("DraftFreshness = %q, want unknown (an unreachable planCommitSha is an unverifiable freshness baseline)", check.DraftFreshness)
+	}
+	if check.DraftFreshnessErr == "" {
+		t.Errorf("DraftFreshnessErr = %q, want non-empty (review fix: an unreachable sha is a genuine CommitsBehind failure, whose error must not be silently discarded)", check.DraftFreshnessErr)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("gh calls = %v, want none", *calls)
+	}
+}
+
+func TestCheckPlan_AwaitingInputStatus_DraftFreshness_EmptySha_ReturnsUnknown(t *testing.T) {
+	repoRoot := t.TempDir()
+	initGitRepoWithCommit(t, repoRoot)
+	calls := recordingCommand(t)
+	fields := defaultPlanFields("42", "add-thing", "", "2026-07-20T20:00:00Z") // empty planCommitSha
+	fields["status"] = "awaiting-input"
+	writePlanFile(t, repoRoot, "42", "add-thing", fields, validPlanBody)
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, RepoSlug: "o/r"})
+	if err != nil {
+		t.Fatalf("CheckPlan with an awaiting-input draft: unexpected error: %v", err)
+	}
+	if check.Decision != "awaiting-input" {
+		t.Errorf("Decision = %q, want awaiting-input", check.Decision)
+	}
+	if check.DraftFreshness != "unknown" {
+		t.Errorf("DraftFreshness = %q, want unknown -- deliberately diverging from CommitsBehindRef's sha==\"\" fresh convention (#852 D2): a resume decision that skips re-exploration must not be authorized by an unverifiable baseline", check.DraftFreshness)
+	}
+	if check.DraftFreshnessErr != "" {
+		t.Errorf("DraftFreshnessErr = %q, want empty (an empty sha short-circuits before ever calling CommitsBehind, so there is no underlying error to carry)", check.DraftFreshnessErr)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("gh calls = %v, want none", *calls)
+	}
+}
+
+func TestCheckPlan_AwaitingInputStatus_DraftFreshness_MalformedShaFormat_ReturnsUnknown(t *testing.T) {
+	repoRoot := t.TempDir()
+	initGitRepoWithCommit(t, repoRoot)
+	calls := recordingCommand(t)
+	fields := defaultPlanFields("42", "add-thing", "-not-a-sha", "2026-07-20T20:00:00Z")
+	fields["status"] = "awaiting-input"
+	writePlanFile(t, repoRoot, "42", "add-thing", fields, validPlanBody)
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, RepoSlug: "o/r"})
+	if err != nil {
+		t.Fatalf("CheckPlan with an awaiting-input draft: unexpected error: %v (a malformed planCommitSha must not become ErrPlanMalformed on the awaiting-input path)", err)
+	}
+	if check.Decision != "awaiting-input" {
+		t.Errorf("Decision = %q, want awaiting-input", check.Decision)
+	}
+	if check.DraftFreshness != "unknown" {
+		t.Errorf("DraftFreshness = %q, want unknown", check.DraftFreshness)
+	}
+	if check.DraftFreshnessErr != "" {
+		t.Errorf("DraftFreshnessErr = %q, want empty (a malformed sha fails the local format check before ever calling CommitsBehind, so there is no underlying error to carry)", check.DraftFreshnessErr)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("gh calls = %v, want none", *calls)
+	}
+}
+
 // TestCheckPlan_AwaitingInputStatus_WinsOverStaleness proves the decision
 // ordering: even a plan whose planCommitSha is unreachable (which would
 // otherwise surface a commits-behind error, or -- if reachable and stale --

@@ -35,14 +35,17 @@ type Opts struct {
 // Decision and Plan (ticket #560) are omitempty additions carried only by
 // `cenci pipeline plan-check`'s output -- every existing stage/mechanics
 // command leaves them absent, preserving the frozen #558 contract.
+// DraftFreshness (#853) is the same shape: omitempty, populated only
+// alongside plan-check's "awaiting-input" decision.
 type Output struct {
-	State       string    `json:"state"`
-	NextActions []string  `json:"next_actions"`
-	Artifacts   []string  `json:"artifacts"`
-	Warnings    []string  `json:"warnings"`
-	Errors      []string  `json:"errors"`
-	Decision    string    `json:"decision,omitempty"`
-	Plan        *PlanMeta `json:"plan,omitempty"`
+	State          string    `json:"state"`
+	NextActions    []string  `json:"next_actions"`
+	Artifacts      []string  `json:"artifacts"`
+	Warnings       []string  `json:"warnings"`
+	Errors         []string  `json:"errors"`
+	Decision       string    `json:"decision,omitempty"`
+	Plan           *PlanMeta `json:"plan,omitempty"`
+	DraftFreshness string    `json:"draft_freshness,omitempty"`
 }
 
 // Run executes one pipeline stage command: it acquires the per-ticket state

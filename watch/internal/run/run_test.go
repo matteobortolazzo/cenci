@@ -16,6 +16,9 @@ type mockCtrl struct {
 	grouped      bool
 	groupedErr   error
 	newWindowErr error
+	// optErr, when set, is returned by every SetWindowOption call -- the
+	// post-NewWindow failure ErrWindowSpawned wraps (#853).
+	optErr error
 
 	windows []winCall
 	options []optCall
@@ -32,7 +35,7 @@ func (m *mockCtrl) NewWindow(session, name, cmd string) error {
 }
 func (m *mockCtrl) SetWindowOption(target, key, value string) error {
 	m.options = append(m.options, optCall{target, key, value})
-	return nil
+	return m.optErr
 }
 
 // noConfigOpts returns Opts pinned to a non-existent config (built-ins only),
@@ -269,6 +272,62 @@ func TestRunRefusesGroupedSession(t *testing.T) {
 	}
 	if len(m.windows) != 0 {
 		t.Errorf("must not spawn into a grouped session, got %+v", m.windows)
+	}
+}
+
+// -- ErrWindowSpawned (#853): a post-NewWindow SetWindowOption failure is
+// confirmed-alive launch evidence -- the tmux window was demonstrably
+// created even though this call failed -- so the caller (dispatch's resume
+// rollback) can retain Working instead of rolling back to Input Needed. Every
+// failure that happens before ctrl.NewWindow ever succeeds must NOT carry the
+// sentinel, since no window exists at all in that case.
+
+// TestRunSetWindowOptionFailureWrapsErrWindowSpawned covers the positive
+// case: NewWindow succeeds (so the window was demonstrably created), then
+// SetWindowOption fails -- the returned error must be detectable via
+// errors.Is(_, ErrWindowSpawned).
+func TestRunSetWindowOptionFailureWrapsErrWindowSpawned(t *testing.T) {
+	m := &mockCtrl{session: "work", optErr: errors.New("tmux set-option failed")}
+	opts := noConfigOpts(t)
+	opts.Workflow, opts.Ticket, opts.Slug = "implement", "40", "demo"
+
+	err := Run(opts, m)
+	if err == nil {
+		t.Fatal("expected an error when SetWindowOption fails")
+	}
+	if !errors.Is(err, ErrWindowSpawned) {
+		t.Errorf("error = %v, want errors.Is(_, ErrWindowSpawned) -- the window was already created before this failure", err)
+	}
+	if len(m.windows) != 1 {
+		t.Errorf("expected the window to have been created before the failure, got %+v", m.windows)
+	}
+}
+
+// TestRunPreNewWindowFailuresNeverWrapErrWindowSpawned covers every failure
+// class that can occur before ctrl.NewWindow ever succeeds: none of them may
+// carry ErrWindowSpawned, since no tmux window was ever demonstrably created.
+func TestRunPreNewWindowFailuresNeverWrapErrWindowSpawned(t *testing.T) {
+	cases := []struct {
+		name string
+		ctrl *mockCtrl
+	}{
+		{"grouped session refused", &mockCtrl{session: "work", grouped: true}},
+		{"no session and none passed", &mockCtrl{session: "", sessionErr: errors.New("no server running")}},
+		{"NewWindow itself fails", &mockCtrl{session: "work", newWindowErr: errors.New("tmux new-window failed")}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := noConfigOpts(t)
+			opts.Workflow, opts.Ticket, opts.Slug = "implement", "40", "demo"
+
+			err := Run(opts, tc.ctrl)
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if errors.Is(err, ErrWindowSpawned) {
+				t.Errorf("error = %v, must NOT wrap ErrWindowSpawned -- no window was ever demonstrably created", err)
+			}
+		})
 	}
 }
 

@@ -694,6 +694,261 @@ func TestReconcileCrashedPlanningPickup_RetryBudgetExhaustionStillEscalates(t *t
 	}
 }
 
+// -- #853: interrupted-resume recovery ---------------------------------------
+//
+// Classifies a dead Working ticket whose matched plan carries
+// `status: awaiting-input` as an interrupted resume (RecoveryResumeInterrupted,
+// +Input Needed -Working) rather than an ordinary retry -- it must NEVER
+// yield +Planned, which would silently discard the still-unanswered
+// escalation and dead-end the ticket. Bounded by the same durable attempt
+// budget ordinary retries use (Q2): the recovery's comment shares
+// attemptMarker with retryComment so countAttempts tallies it, and once
+// attempts >= RetryBudget it escalates to dispatch-failed exactly like any
+// other stranded Working ticket, never restoring Input Needed again.
+
+// resumeAwaitingInputDeps mirrors workingInputs()'s realistic Working ticket
+// but WITHOUT the Planned label (#828's fixture-realism rule: a ticket mid-
+// resume, before finalization, has not yet earned Planned) and with its
+// matched plan at status: awaiting-input rather than planned.
+func resumeAwaitingInputInputs() ReconcileInputs {
+	in := workingInputs()
+	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Working"}}}
+	in.Plans = []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "awaiting-input"}}
+	return in
+}
+
+// TestReconcileDeadWorkingAwaitingInputPlan_ClassifiesAsResumeInterrupted
+// covers the classification itself: a dead Working ticket matched to an
+// awaiting-input draft, under the retry budget, past grace, produces exactly
+// one RecoveryResumeInterrupted restoring Input Needed.
+func TestReconcileDeadWorkingAwaitingInputPlan_ClassifiesAsResumeInterrupted(t *testing.T) {
+	in := resumeAwaitingInputInputs()
+	res := Reconcile(in)
+
+	rec := onlyRecovery(t, res)
+	if rec.Kind != RecoveryResumeInterrupted {
+		t.Errorf("kind = %q, want %q", rec.Kind, RecoveryResumeInterrupted)
+	}
+	if !containsStr(rec.AddLabels, labelInputNeeded) || len(rec.AddLabels) != 1 {
+		t.Errorf("AddLabels = %v, want exactly [%s]", rec.AddLabels, labelInputNeeded)
+	}
+	if !containsStr(rec.RemoveLabels, labelWorking) || len(rec.RemoveLabels) != 1 {
+		t.Errorf("RemoveLabels = %v, want exactly [%s]", rec.RemoveLabels, labelWorking)
+	}
+	if rec.Comment == "" {
+		t.Error("expected a resume-interrupted comment")
+	}
+	if hasFailed(res, "o/r", 42) {
+		t.Error("an interrupted resume under budget must not be surfaced as Failed")
+	}
+}
+
+// TestReconcileDeadWorkingAwaitingInputPlan_NeverYieldsPlanned is the
+// dedicated regression test for the plan's central invariant: an interrupted
+// resume must never be recovered with +Planned, which would silently
+// abandon the still-open escalation (the human's answer was never collected)
+// and route the ticket back into ordinary dispatch as if it were a fresh,
+// answerable plan.
+func TestReconcileDeadWorkingAwaitingInputPlan_NeverYieldsPlanned(t *testing.T) {
+	in := resumeAwaitingInputInputs()
+	res := Reconcile(in)
+
+	rec := onlyRecovery(t, res)
+	if containsStr(rec.AddLabels, labelPlanned) {
+		t.Errorf("AddLabels = %v, must never include %q -- an interrupted resume must return to Input Needed, never ordinary Planned", rec.AddLabels, labelPlanned)
+	}
+}
+
+// TestReconcileDeadWorkingAwaitingInputPlan_BudgetExhausted_EscalatesToDispatchFailed
+// covers Q2's bounded restore: once the durable attempt count reaches
+// RetryBudget, an interrupted resume escalates to RecoveryFailed exactly
+// like any other stranded Working ticket, instead of restoring Input Needed
+// yet again -- an environment that fails every relaunch must terminate, not
+// loop forever.
+func TestReconcileDeadWorkingAwaitingInputPlan_BudgetExhausted_EscalatesToDispatchFailed(t *testing.T) {
+	in := resumeAwaitingInputInputs()
+	in.Attempts = map[string]int{"o/r#42": 2} // 2 >= reconcileConfig's budget of 2
+	res := Reconcile(in)
+
+	rec := onlyRecovery(t, res)
+	if rec.Kind != RecoveryFailed {
+		t.Errorf("kind = %q, want %q (budget exhausted must escalate to dispatch-failed, not keep restoring Input Needed)", rec.Kind, RecoveryFailed)
+	}
+	if !containsStr(rec.AddLabels, labelDispatchFailed) || !containsStr(rec.RemoveLabels, labelWorking) {
+		t.Errorf("expected Working→dispatch-failed swap, got add=%v remove=%v", rec.AddLabels, rec.RemoveLabels)
+	}
+	if !hasFailed(res, "o/r", 42) {
+		t.Error("a budget-exhausted interrupted resume must appear in Failed")
+	}
+}
+
+// -- #853: Working+Input Needed cleanup branch (crash-after-partial-label-
+// mutation) -------------------------------------------------------------
+//
+// A ticket carrying BOTH Input Needed and Working is the signature of a
+// crash between the two label edits of a partial resume-rollback or claim:
+// still recorded into Escalated (never Failed, never dispatch's NeedInput
+// pause -- the existing #826 short-circuit), but also cleaned up by removing
+// the stray Working with AddLabels: nil (Input Needed is already present --
+// this is not a fresh restore).
+
+func inputNeededAndWorkingInputs() ReconcileInputs {
+	in := workingInputs()
+	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Input Needed", "Working"}}}
+	return in
+}
+
+// TestReconcileInputNeededAndWorking_PastGraceDeadWindow_EmitsCleanupRecoveryAddLabelsNil
+// covers the positive case: snapshot present, no live window, no open PR,
+// past grace -- the cleanup recovery fires with AddLabels nil (Input Needed
+// is already on the ticket) and RemoveLabels: [Working] only.
+func TestReconcileInputNeededAndWorking_PastGraceDeadWindow_EmitsCleanupRecoveryAddLabelsNil(t *testing.T) {
+	in := inputNeededAndWorkingInputs()
+	res := Reconcile(in)
+
+	if !hasEscalated(res, "o/r", 42) {
+		t.Error("a ticket carrying both Input Needed and Working must still be recorded in Escalated")
+	}
+	if hasFailed(res, "o/r", 42) {
+		t.Error("the cleanup recovery must never be surfaced as Failed")
+	}
+	rec := onlyRecovery(t, res)
+	if rec.Kind != RecoveryResumeInterrupted {
+		t.Errorf("kind = %q, want %q", rec.Kind, RecoveryResumeInterrupted)
+	}
+	if len(rec.AddLabels) != 0 {
+		t.Errorf("AddLabels = %v, want nil (Input Needed is already present -- this is cleanup, not a fresh restore)", rec.AddLabels)
+	}
+	if !containsStr(rec.RemoveLabels, labelWorking) || len(rec.RemoveLabels) != 1 {
+		t.Errorf("RemoveLabels = %v, want exactly [%s]", rec.RemoveLabels, labelWorking)
+	}
+}
+
+// TestReconcileInputNeededAndWorking_NilSnapshot_DefersPreservesGrace covers
+// the never-reconcile-blind guard: without a snapshot the cleanup recovery
+// must defer, preserving the grace observation exactly like the ordinary
+// failure path does.
+func TestReconcileInputNeededAndWorking_NilSnapshot_DefersPreservesGrace(t *testing.T) {
+	in := inputNeededAndWorkingInputs()
+	in.Snapshot = nil
+	res := Reconcile(in)
+
+	if len(res.Recoveries) != 0 {
+		t.Fatalf("nil snapshot must never fire the cleanup recovery, got %+v", res.Recoveries)
+	}
+	if !hasEscalated(res, "o/r", 42) {
+		t.Error("must still be recorded in Escalated even while the cleanup recovery defers")
+	}
+	if _, ok := res.NextObservations["o/r#42"]; !ok {
+		t.Error("nil snapshot must preserve the pending grace observation, exactly like the failure path")
+	}
+}
+
+// TestReconcileInputNeededAndWorking_WithinGrace_NoRecoveryYet covers the
+// grace-period guard: a just-observed crash state must not immediately fire
+// the cleanup recovery.
+func TestReconcileInputNeededAndWorking_WithinGrace_NoRecoveryYet(t *testing.T) {
+	in := inputNeededAndWorkingInputs()
+	in.Observations = map[string]time.Time{} // just observed
+	res := Reconcile(in)
+
+	if len(res.Recoveries) != 0 {
+		t.Fatalf("within-grace must produce no recovery yet, got %+v", res.Recoveries)
+	}
+	if !hasEscalated(res, "o/r", 42) {
+		t.Error("must still be recorded in Escalated while within grace")
+	}
+	if ts, ok := res.NextObservations["o/r#42"]; !ok || !ts.Equal(reconcileNow) {
+		t.Errorf("expected a fresh observation at %v, got %v (present=%v)", reconcileNow, ts, ok)
+	}
+}
+
+// TestReconcileInputNeededAndWorking_LiveWindow_NoCleanupRecovery covers the
+// negative: a live window means the session is not actually interrupted, so
+// no cleanup recovery must fire even though the ticket carries the crash-
+// shaped label combination.
+func TestReconcileInputNeededAndWorking_LiveWindow_NoCleanupRecovery(t *testing.T) {
+	in := inputNeededAndWorkingInputs()
+	in.Snapshot = &watch.StateSnapshot{Windows: []watch.WindowState{{WindowName: "42-x", Status: "running"}}}
+	res := Reconcile(in)
+
+	if len(res.Recoveries) != 0 {
+		t.Fatalf("a live window must produce no cleanup recovery, got %+v", res.Recoveries)
+	}
+	if !hasEscalated(res, "o/r", 42) {
+		t.Error("must still be recorded in Escalated")
+	}
+}
+
+// TestReconcileInputNeededAndWorking_OpenPR_NoCleanupRecovery mirrors the
+// live-window negative for the open-PR signal.
+func TestReconcileInputNeededAndWorking_OpenPR_NoCleanupRecovery(t *testing.T) {
+	in := inputNeededAndWorkingInputs()
+	in.Tickets[0].HasOpenPR = true
+	res := Reconcile(in)
+
+	if len(res.Recoveries) != 0 {
+		t.Fatalf("an open PR must produce no cleanup recovery, got %+v", res.Recoveries)
+	}
+	if !hasEscalated(res, "o/r", 42) {
+		t.Error("must still be recorded in Escalated")
+	}
+}
+
+// -- #853: resumeInterruptedComment shares attemptMarker with retryComment --
+
+// TestResumeInterruptedComment_SharesAttemptMarkerButContentDistinctFromRetry
+// covers Q2's wiring: resumeInterruptedComment deliberately embeds the SAME
+// attemptMarker retryComment uses (so countAttempts' shared tally is not
+// doubled by a distinct marker), while its text stays content-distinct from
+// retryComment (#446).
+func TestResumeInterruptedComment_SharesAttemptMarkerButContentDistinctFromRetry(t *testing.T) {
+	retry := retryComment(1, "42-x", "gone")
+	resume := resumeInterruptedComment(1, "42-x", "gone")
+	if !strings.Contains(retry, attemptMarker) || !strings.Contains(resume, attemptMarker) {
+		t.Fatalf("expected both comments to carry attemptMarker: retry=%q resume=%q", retry, resume)
+	}
+	if retry == resume {
+		t.Error("resumeInterruptedComment must be content-distinct from retryComment (#446), even though it deliberately shares attemptMarker")
+	}
+}
+
+// TestCountAttempts_CountsResumeInterruptedComment is the direct
+// countAttempts-boundary regression for the shared-marker wiring (mirrors
+// TestCountAttemptsRegressionAgainstTheThreeNewMarkers's pattern, but
+// asserts the OPPOSITE: unlike failedMarker/planInvalidMarker/
+// reconcileStuckMarker, a resumeInterruptedComment MUST be counted, since it
+// consumes the same durable budget retryComment does.
+func TestCountAttempts_CountsResumeInterruptedComment(t *testing.T) {
+	type payloadComment struct {
+		Body string `json:"body"`
+	}
+	payload := struct {
+		Comments []payloadComment `json:"comments"`
+	}{
+		Comments: []payloadComment{
+			{Body: resumeInterruptedComment(1, "42-x", "gone")},
+		},
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshaling fixture payload: %v", err)
+	}
+	fixture := filepath.Join(t.TempDir(), "comments.json")
+	if err := os.WriteFile(fixture, data, 0o644); err != nil {
+		t.Fatalf("writing fixture payload: %v", err)
+	}
+	installFakeGHOnPath(t, fmt.Sprintf("cat %q\n", fixture))
+
+	n, err := countAttempts("o/r", 42)
+	if err != nil {
+		t.Fatalf("countAttempts returned unexpected error: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("countAttempts = %d, want 1 (resumeInterruptedComment must share attemptMarker with retryComment, per #853's shared-budget wiring)", n)
+	}
+}
+
 // TestCountAttemptsRegressionAgainstTheThreeNewMarkers pins that
 // countAttempts' strings.Contains(c.Body, attemptMarker) check still returns
 // 0 for a comment thread containing only the three newly back-filled markers
