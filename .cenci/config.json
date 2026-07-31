@@ -1,5 +1,5 @@
 {
-  "configVersion": "0.27.1",
+  "configVersion": "0.35.3",
   "branchPattern": "feature/<id>-<description>",
   "isMonorepo": true,
   "stack": {
@@ -28,7 +28,7 @@
       "lintCommand": "make lint",
       "gateCommand": "make test",
       "serveCommand": "go run .",
-      "boardKey": "Sw",
+      "boardKey": "Rw",
       "testKey": "Tw",
       "automerge": {
         "protectedPaths": ["watch/internal/sandbox/", "watch/internal/babysit/", "watch/plugin/", "*credential*", "*secret*"],
@@ -60,7 +60,7 @@
   "pinSubagents200K": false,
   "sandbox": {
     "enabled": true,
-    "baseVersion": "1.15.0"
+    "baseVersion": "1.16.9"
   },
   "lazyboards": {
     "enabled": true
