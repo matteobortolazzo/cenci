@@ -165,6 +165,8 @@ Only when questions are `None.`, output the complete proposal. The skill persist
 
     Each child is a **decision-complete block** — plannable without undocumented parent context (AC 5), never a one-line description. Ticket #848's own body is the reference shape: every child carries its own `### Goal`, `### Decisions`, `### Assumptions (auto-adopted)`, `### Acceptance criteria`, and `### Dependencies`.
 
+    **"None." sentinel rule**: `### Decisions`, `### Assumptions (auto-adopted)`, and `### Dependencies` are always present in every child block, even when genuinely empty — when a child has no scoped decision, assumption, or dependency, write exactly "None." rather than omitting the subsection or leaving it blank, so the coverage gate's structural completeness check (`skills/refine/SKILL.md`) is deterministic.
+
     **Ticket 1 (1/N): <title>**
     ### Goal
     <what this child delivers, standalone>
