@@ -216,6 +216,60 @@ func TestReconcileReconcileStuckSurfacedNotTouched(t *testing.T) {
 	}
 }
 
+// -- escalated tickets (#826): Input Needed -> Escalated, never Failed -----
+
+func hasEscalated(res ReconcileResult, repo string, number int) bool {
+	for _, e := range res.Escalated {
+		if e.Repo == repo && e.Number == number {
+			return true
+		}
+	}
+	return false
+}
+
+// TestReconcileInputNeededTicket_EscalatedNeverFailed covers the plan's
+// central reconciler requirement: a ticket labeled "Input Needed" must be
+// recorded in ReconcileResult.Escalated, never touched (zero Recoveries),
+// never surfaced in Failed (which would badge it as a dispatch failure
+// instead of an escalation), and never observed (its window is gone by
+// design -- the escalating run stopped cleanly).
+func TestReconcileInputNeededTicket_EscalatedNeverFailed(t *testing.T) {
+	in := workingInputs()
+	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Input Needed"}}}
+	res := Reconcile(in)
+
+	if len(res.Recoveries) != 0 {
+		t.Fatalf("an escalated ticket must not be touched, got %+v", res.Recoveries)
+	}
+	if hasFailed(res, "o/r", 42) {
+		t.Error("an escalated ticket must never appear in Failed")
+	}
+	if !hasEscalated(res, "o/r", 42) {
+		t.Error("an escalated ticket must appear in Escalated")
+	}
+	if _, ok := res.NextObservations["o/r#42"]; ok {
+		t.Error("an escalated ticket must not carry forward a grace-period observation")
+	}
+}
+
+// TestReconcileInputNeededTicket_EvaluatedBeforePlannedBranch proves the
+// short-circuit's placement: a ticket that somehow carries both Input
+// Needed and Planned must classify as escalated, not fall into the
+// plan-invalid inverse-leak branch.
+func TestReconcileInputNeededTicket_EvaluatedBeforePlannedBranch(t *testing.T) {
+	in := workingInputs()
+	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Input Needed", "Planned"}}}
+	in.Plans = nil // would trip RecoveryPlanInvalid if evaluated
+	res := Reconcile(in)
+
+	if len(res.Recoveries) != 0 {
+		t.Fatalf("an escalated ticket must not be touched even if mislabeled Planned too, got %+v", res.Recoveries)
+	}
+	if !hasEscalated(res, "o/r", 42) {
+		t.Error("an escalated ticket must appear in Escalated")
+	}
+}
+
 func TestReconcilePlanInvalidSurfacedNotTouched(t *testing.T) {
 	in := workingInputs()
 	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"plan-invalid"}}}

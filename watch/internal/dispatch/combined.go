@@ -162,7 +162,7 @@ func runCombinedPass(ctx context.Context, cfg Config, ctrl run.Controller, mut T
 	state.LastDispatched = *prior - before
 	state.LastSkipped = countSkipped(decisions)
 	state.LastError = sanitizeLastError(passError(dispatchErr, reconcileErr))
-	*windows = failedWindows(result.Failed)
+	*windows = append(failedWindows(result.Failed), escalatedWindows(result.Escalated)...)
 	*headroom = computeHeadroom(cfg)
 	publish(ctx, attention, state, *windows, *headroom)
 }
@@ -227,3 +227,16 @@ func failedWindows(failed []Ticket) []watch.WindowState {
 }
 
 func failedWindowName(t Ticket) string { return fmt.Sprintf("%d-implement", t.Number) }
+
+// escalatedWindows mirrors failedWindows (#826): the reconciler's Escalated
+// list (tickets labeled Input Needed) becomes synthetic attention windows
+// with status "escalated", reusing the same `<number>-implement` join-key
+// name helper. Kept as its own status (never "failed") so the daemon can
+// count it into Summary.Escalated instead of Summary.Failed.
+func escalatedWindows(escalated []Ticket) []watch.WindowState {
+	out := make([]watch.WindowState, 0, len(escalated))
+	for _, t := range escalated {
+		out = append(out, watch.WindowState{WindowName: failedWindowName(t), Status: "escalated"})
+	}
+	return out
+}

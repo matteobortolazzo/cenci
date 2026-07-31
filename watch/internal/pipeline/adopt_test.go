@@ -345,6 +345,76 @@ func TestAdopt_RepoRootUnresolvableOutsideGitRepo_NoAdoptionNoNewErrorClass(t *t
 	}
 }
 
+// -- case 13 (#826): gate (2) retargeted to waiting_for_input -- a persisted
+// stage already at waiting_for_input must not be adopted, even with a
+// perfectly valid, non-draft plan file on disk (the gate boundary itself
+// moved, not just the front-matter check below) --------------------------
+
+func TestAdopt_PersistedStageWaitingForInput_NoAdoption_GateTwoRetarget(t *testing.T) {
+	repoRoot := t.TempDir()
+	stateDir := t.TempDir()
+	mustSeedState(t, stateDir, "42", StageWaitingForInput)
+	mustWriteValidAdoptPlan(t, repoRoot, "42", "add-thing") // status: planned (defaultPlanFields), not a draft
+
+	out, err := Run(Opts{Stage: "plan", ID: "42", Approve: true, RepoRoot: repoRoot, StateDir: stateDir})
+	if err == nil {
+		t.Fatal("plan --approve with persisted stage waiting_for_input: want an error, got nil")
+	}
+	if !errors.Is(err, ErrInvalidTransition) {
+		t.Errorf("error = %v, want errors.Is(_, ErrInvalidTransition) (gate 2 must deny adoption once the persisted stage reaches waiting_for_input)", err)
+	}
+	assertNoAdoptionWarning(t, out.Warnings)
+	if got := loadPersistedStage(t, stateDir, "42"); got != StageWaitingForInput {
+		t.Errorf("persisted stage = %q, want unchanged %q", got, StageWaitingForInput)
+	}
+}
+
+// -- case 14 (#826): new gate (7) -- a valid plan file whose front matter
+// carries status: awaiting-input must never be adopted, even when the
+// persisted stage itself was deleted/never tracked (ranks strictly below
+// waiting_for_input, so gate (2) alone would let it through) ---------------
+
+func TestAdopt_AwaitingInputDraftStatus_GateSevenDenial_StateFileDeleted(t *testing.T) {
+	repoRoot := t.TempDir()
+	stateDir := t.TempDir() // no state file at all: simulates "state file deleted"
+	fields := defaultPlanFields("42", "add-thing", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "2026-07-20T20:00:00Z")
+	fields["status"] = "awaiting-input"
+	writePlanFile(t, repoRoot, "42", "add-thing", fields, validPlanBody)
+
+	out, err := Run(Opts{Stage: "plan", ID: "42", Approve: true, RepoRoot: repoRoot, StateDir: stateDir})
+	if err == nil {
+		t.Fatal("plan --approve with an awaiting-input draft plan and no state file: want an error, got nil")
+	}
+	if !errors.Is(err, ErrInvalidTransition) {
+		t.Errorf("error = %v, want errors.Is(_, ErrInvalidTransition) (gate 7 must deny adoption of an awaiting-input draft)", err)
+	}
+	assertNoAdoptionWarning(t, out.Warnings)
+}
+
+// TestAdopt_AwaitingInputDraftStatus_GateSevenDenial_StagePrepared covers
+// the same gate-7 denial with a tracked (not deleted) prepared state, so the
+// front-matter check is proven independent of gate (2)'s rank comparison.
+func TestAdopt_AwaitingInputDraftStatus_GateSevenDenial_StagePrepared(t *testing.T) {
+	repoRoot := t.TempDir()
+	stateDir := t.TempDir()
+	mustSeedState(t, stateDir, "42", StagePrepared)
+	fields := defaultPlanFields("42", "add-thing", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "2026-07-20T20:00:00Z")
+	fields["status"] = "awaiting-input"
+	writePlanFile(t, repoRoot, "42", "add-thing", fields, validPlanBody)
+
+	out, err := Run(Opts{Stage: "plan", ID: "42", Approve: true, RepoRoot: repoRoot, StateDir: stateDir})
+	if err == nil {
+		t.Fatal("plan --approve with an awaiting-input draft plan at stage prepared: want an error, got nil")
+	}
+	if !errors.Is(err, ErrInvalidTransition) {
+		t.Errorf("error = %v, want errors.Is(_, ErrInvalidTransition)", err)
+	}
+	assertNoAdoptionWarning(t, out.Warnings)
+	if got := loadPersistedStage(t, stateDir, "42"); got != StagePrepared {
+		t.Errorf("persisted stage = %q, want unchanged %q", got, StagePrepared)
+	}
+}
+
 // -- case 12: adoption path invokes the `command` seam zero times (proves it
 // is offline -- no gh/git freshness call) -----------------------------------
 

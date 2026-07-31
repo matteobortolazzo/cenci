@@ -100,6 +100,11 @@ from external or semi-trusted sources.
   → parse response → rename), give each new intermediate step its own explicit
   failure-handling instruction — a single blanket sentence written for the original
   step doesn't automatically cover steps inserted before or after it.
+- Skill sections with sequential file writes must show exact command templates (with
+  session-uuid and run-ID scoping) in code blocks, document verify-before-continuing
+  or recovery handling for every file write and external call, and use consistent
+  verification patterns across all steps in the section. Don't rely on prose
+  descriptions alone for critical paths — enforce consistency by example.
 - When writing a contract test for a skill file, never weaken the skill's authoritative
   prose or documented patterns (e.g. a "Convention" section's code example) to satisfy
   the test's search logic. Instead, scope and refine the test's predicates — e.g., if a

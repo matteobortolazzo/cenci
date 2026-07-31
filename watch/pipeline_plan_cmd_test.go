@@ -59,6 +59,14 @@ func writeFakeGhTicketView(t *testing.T, dir, state, updatedAt string) {
 
 func gitCommitPlanFile(t *testing.T, repoRoot, id, slug, sha, createdAt string) {
 	t.Helper()
+	gitCommitPlanFileWithStatus(t, repoRoot, id, slug, sha, createdAt, "planned")
+}
+
+// gitCommitPlanFileWithStatus is gitCommitPlanFile's underlying writer, with
+// the front-matter `status` value exposed so the awaiting-input decision
+// test (#826) can override it away from the default "planned".
+func gitCommitPlanFileWithStatus(t *testing.T, repoRoot, id, slug, sha, createdAt, status string) {
+	t.Helper()
 	dir := filepath.Join(repoRoot, ".plans")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir .plans: %v", err)
@@ -73,7 +81,7 @@ func gitCommitPlanFile(t *testing.T, repoRoot, id, slug, sha, createdAt string) 
 		"isLastChild: false\n" +
 		"parentId: null\n" +
 		"createdAt: " + createdAt + "\n" +
-		"status: planned\n" +
+		"status: " + status + "\n" +
 		"planCommitSha: " + sha + "\n" +
 		"stalenessPaths: watch\n" +
 		"---\n" +
@@ -253,6 +261,41 @@ func TestPipelinePlanCheck_ReplanRequested_DecisionReplanExit0(t *testing.T) {
 	}
 	if len(c.Errors) != 0 {
 		t.Errorf("errors = %v, want none on replan", c.Errors)
+	}
+}
+
+// -- decision "awaiting-input" (#826): exit 0, no errors[], zero gh calls --
+
+// TestPipelinePlanCheck_AwaitingInputStatus_DecisionExit0 covers the new
+// plan-check decision at the CLI surface: no fake `gh` on PATH at all --
+// a real gh invocation would fail the subprocess outright, proving the
+// awaiting-input short-circuit never reaches the freshness check.
+func TestPipelinePlanCheck_AwaitingInputStatus_DecisionExit0(t *testing.T) {
+	repoDir := t.TempDir()
+	initGitRepoWithCommitForCLITest(t, repoDir)
+	gitCommitPlanFileWithStatus(t, repoDir, "42", "add-thing", "deadbeef", "2026-07-20T20:00:00Z", "awaiting-input")
+
+	cmd := exec.Command(binaryPath, "pipeline", "plan-check", "42", "--repo", repoDir)
+	cmd.Env = append(os.Environ(), "PATH="+t.TempDir()) // no gh on PATH at all
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("plan-check awaiting-input: unexpected error: %v\n%s", err, output)
+	}
+	var c planCheckContract
+	if jerr := json.Unmarshal(output, &c); jerr != nil {
+		t.Fatalf("stdout is not valid JSON: %v\n%s", jerr, output)
+	}
+	if c.Decision != "awaiting-input" {
+		t.Errorf("decision = %q, want awaiting-input", c.Decision)
+	}
+	if len(c.Errors) != 0 {
+		t.Errorf("errors = %v, want none on an awaiting-input decision", c.Errors)
+	}
+	if c.Plan == nil {
+		t.Fatal("plan metadata must be echoed on an awaiting-input decision")
+	}
+	if c.Plan.Slug != "add-thing" || c.Plan.TicketID != 42 {
+		t.Errorf("plan metadata = %+v, want slug=add-thing ticketId=42", c.Plan)
 	}
 }
 

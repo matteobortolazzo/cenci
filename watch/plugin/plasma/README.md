@@ -77,8 +77,9 @@ change takes effect immediately.
   exit).
 - Compact panel view shows a status icon + the count string (`▶ 2  ! 1`). The
   icon color reflects the highest-priority status:
-  `failed`/`need-input` (negative) > `running` (highlight) > `done` (positive) >
-  `stopped` (neutral) > `idle` (disabled).
+  `failed`/`need-input` (negative) > `escalated` (neutral) >
+  `running` (highlight) > `done` (positive) > `stopped` (neutral) >
+  `idle` (disabled).
 - When the daemon's fleet dispatch loop is enabled, a compact `⟳` glyph appears
   in the panel text. The widget no longer hides from the panel when there are
   zero live sessions but the loop is enabled (`alt: "dispatch-only"`) — only

@@ -24,7 +24,7 @@ package pipeline
 //	}
 //
 //	type PlanCheck struct {
-//	    Decision string    // "resume" | "stale" | "replan" | "none" | "multiple"
+//	    Decision string    // "resume" | "stale" | "replan" | "awaiting-input" | "none" | "multiple"
 //	    Paths    []string  // matched .plans/<id>-*.md path(s)
 //	    Plan     *PlanMeta // populated whenever exactly one plan file parsed cleanly
 //	}
@@ -56,7 +56,10 @@ package pipeline
 // commits-behind (git, scoped to the plan's stalenessPaths) > 0, ticket
 // state != OPEN, or ticket updatedAt > plan's createdAt. ReplanRequested
 // short-circuits straight to "replan" without ever computing freshness (no
-// git or gh calls).
+// git or gh calls). A front matter status of "awaiting-input" (#826)
+// short-circuits straight to "awaiting-input" the same way -- checked after
+// ReplanRequested (so --replan-requested remains the deliberate discard
+// escape hatch even for a draft) but before freshness.
 //
 // CheckPlan never gates on or mutates the persisted pipeline Stage -- it
 // only echoes whatever is on disk (StageNew when no state file exists yet),
@@ -667,6 +670,87 @@ func TestCheckPlan_MalformedBaselineInState_ReturnsErrorNotResume(t *testing.T) 
 	}
 	if !strings.Contains(err.Error(), "ticketUpdatedAt") {
 		t.Errorf("error = %q, want it to name the malformed ticketUpdatedAt baseline", err.Error())
+	}
+}
+
+// -- awaiting-input (#826): a draft plan short-circuits before freshness ----
+
+// TestCheckPlan_AwaitingInputStatus_ReturnsAwaitingInputDecision covers the
+// new decision itself: a plan file whose front matter carries
+// status: awaiting-input must classify as "awaiting-input", carry the
+// echoed plan metadata, a nil error, and make zero git/gh calls (it must
+// never reach planIsStale).
+func TestCheckPlan_AwaitingInputStatus_ReturnsAwaitingInputDecision(t *testing.T) {
+	repoRoot := t.TempDir()
+	calls := recordingCommand(t)
+	fields := defaultPlanFields("42", "add-thing", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "2026-07-20T20:00:00Z")
+	fields["status"] = "awaiting-input"
+	path := writePlanFile(t, repoRoot, "42", "add-thing", fields, validPlanBody)
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, RepoSlug: "o/r"})
+	if err != nil {
+		t.Fatalf("CheckPlan with an awaiting-input draft: unexpected error: %v", err)
+	}
+	if check.Decision != "awaiting-input" {
+		t.Errorf("Decision = %q, want awaiting-input", check.Decision)
+	}
+	if len(check.Paths) != 1 || check.Paths[0] != path {
+		t.Errorf("Paths = %v, want [%s]", check.Paths, path)
+	}
+	if check.Plan == nil {
+		t.Fatal("Plan metadata must be echoed on an awaiting-input decision")
+	}
+	if check.Plan.Slug != "add-thing" || check.Plan.TicketID != 42 {
+		t.Errorf("Plan = %+v, want slug=add-thing ticketId=42", check.Plan)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("gh/git calls = %v, want none (awaiting-input must short-circuit before any freshness check)", *calls)
+	}
+}
+
+// TestCheckPlan_AwaitingInputStatus_WinsOverStaleness proves the decision
+// ordering: even a plan whose planCommitSha is unreachable (which would
+// otherwise surface a commits-behind error, or -- if reachable and stale --
+// a "stale" decision) must classify as "awaiting-input" instead, since the
+// awaiting-input check runs strictly before planIsStale.
+func TestCheckPlan_AwaitingInputStatus_WinsOverStaleness(t *testing.T) {
+	repoRoot := t.TempDir()
+	calls := recordingCommand(t)
+	fields := defaultPlanFields("42", "add-thing", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "2026-07-20T20:00:00Z")
+	fields["status"] = "awaiting-input"
+	writePlanFile(t, repoRoot, "42", "add-thing", fields, validPlanBody)
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, RepoSlug: "o/r"})
+	if err != nil {
+		t.Fatalf("CheckPlan: unexpected error: %v", err)
+	}
+	if check.Decision != "awaiting-input" {
+		t.Errorf("Decision = %q, want awaiting-input (must win over a would-be staleness/freshness-failure verdict)", check.Decision)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("gh/git calls = %v, want none", *calls)
+	}
+}
+
+// TestCheckPlan_AwaitingInputStatus_LosesToReplanRequested proves the
+// escape-hatch ordering (the plan's Assumptions): --replan-requested still
+// short-circuits first, ahead of the awaiting-input check.
+func TestCheckPlan_AwaitingInputStatus_LosesToReplanRequested(t *testing.T) {
+	repoRoot := t.TempDir()
+	calls := recordingCommand(t)
+	fields := defaultPlanFields("42", "add-thing", "deadbeef", "2026-07-20T20:00:00Z")
+	fields["status"] = "awaiting-input"
+	writePlanFile(t, repoRoot, "42", "add-thing", fields, validPlanBody)
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, RepoSlug: "o/r", ReplanRequested: true})
+	if err != nil {
+		t.Fatalf("CheckPlan: unexpected error: %v", err)
+	}
+	if check.Decision != "replan" {
+		t.Errorf("Decision = %q, want replan (--replan-requested must short-circuit ahead of the awaiting-input check)", check.Decision)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("gh/git calls = %v, want none", *calls)
 	}
 }
 

@@ -39,6 +39,7 @@ New → Refined → [Designed] → Planned → Working → In Review → Impleme
 | Refined → Designed (optional) | `/cenci:design` on the dedicated design ticket | Propagates `+Designed` to dependent implementation tickets |
 | Refined/Designed → Planned | `/cenci:implement` planning | Persists `.plans/<id>-*.md`, then `+Planned` `−Working` (trivial-ticket fast path and lean planning with no escalations: `Working` is retained, not removed — see note below) |
 | Planned → Working | plan-file implementation or `cenci dispatch` pickup | `+Working`; `Planned` remains as a milestone |
+| Working → Input Needed (escalation) | `/cenci:implement` planning (unattended, `planning.autonomy: "lean"`) | Persists a draft `.plans/<id>-*.md` (`status: awaiting-input`), then `+Input Needed` `−Working` (`Refined` retained) |
 | Working → In Review | `/cenci:implement` phase 9 | `+In Review` `−Working` when the PR opens |
 | In Review → Implemented | `/cenci:babysit` (on PR merge) | `+Implemented` `−In Review` |
 
@@ -55,6 +56,17 @@ Approval Path). In both cases there is no stop-and-relaunch between `Planned` an
 since planning and implementation run back-to-back without a human plan-review gate in
 between. The labels and board columns themselves are unchanged; only the number of
 sessions/relaunches differs.
+
+The `Working → Input Needed` transition is the opposite case: `planning.autonomy: "lean"`
+produced a plan that *does* have an unresolved escalation in an unattended run. The session
+removes `Working` and keeps `Refined` — the ticket is no longer actively being worked (a
+human's reply on the ticket is now the blocking dependency), but it was already refined
+before the run started, so that milestone marker stays. Removing `Working` here is
+deliberate, not cosmetic: a `Working` ticket whose tmux window/session has died is exactly
+what the dispatch reconciler's crash-recovery retries (see `watch/docs/dispatch-reconcile.md`);
+leaving `Working` on an escalated ticket would make it a retry candidate instead of the
+human-input candidate it actually is. A human answer on the ticket, followed by a fresh
+`/cenci:implement` session, resumes from the draft plan.
 
 **`Working` is transient activity, not a persisted handoff.** lazyboards'
 `working_label` (default

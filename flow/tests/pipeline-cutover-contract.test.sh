@@ -120,12 +120,19 @@ fi
 # =====================================================================
 # skills/implement/phases/phase-1-plan.md -- replace "Proceed to Phase 2…",
 # "continue directly into Phase 2", and the hard-stop-after-planning
-# narration with `cenci pipeline plan <id>` at planning start (→
-# waiting_for_plan_approval), rendering its next_actions.
+# narration with `cenci pipeline plan <id>`, rendering its next_actions.
+# Ticket #826 relocated the invocation itself from planning *start* to the
+# *end* of each branch (`## New Plan` via `## Persist the Plan`, `##
+# Existing Plan`, `## Trivial Fast Path`, `## Lean Approval Path` each
+# invoke it once at their own end point) -- pin both the invocation's
+# continued presence and the old start-of-planning framing's absence, per
+# .plans/826-unattended-planner-escalation-awaiting-input.md's Lane 2 scope.
 # =====================================================================
 FILE="skills/implement/phases/phase-1-plan.md"
 if require_doc CONTENT "${FILE}"; then
   assert_contains "${CONTENT}" "cenci pipeline plan" "${FILE}"
+  assert_not_contains "${CONTENT}" "at planning start, invoke \`cenci pipeline plan <id>\`" "${FILE} (relocated to branch end, ticket #826)"
+  assert_contains "${CONTENT}" "never at planning start" "${FILE} (relocated to branch end, ticket #826)"
 fi
 
 # =====================================================================

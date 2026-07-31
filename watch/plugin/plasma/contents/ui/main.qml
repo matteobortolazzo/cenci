@@ -68,10 +68,13 @@ PlasmoidItem {
     Plasmoid.status: hasOutput ? PlasmaCore.Types.ActiveStatus : PlasmaCore.Types.HiddenStatus
 
     // class -> panel icon (Breeze names). Priority mirrors the formatter:
-    // failed > need-input > running > done > stopped > idle.
+    // failed > escalated > need-input > running > done > stopped > idle.
+    // "escalated" (#826) is a planner-escalated ticket blocked on a human
+    // answering on the board — a question, not an error or a warning.
     function iconForClass(c) {
         switch (c) {
         case "failed":     return "dialog-error"
+        case "escalated":  return "dialog-question"
         case "need-input": return "dialog-warning"
         case "running":    return "state-sync"
         case "done":       return "dialog-ok"
@@ -84,6 +87,7 @@ PlasmoidItem {
     function colorForClass(c) {
         switch (c) {
         case "failed":     return Kirigami.Theme.negativeTextColor
+        case "escalated":  return Kirigami.Theme.neutralTextColor
         case "need-input": return Kirigami.Theme.negativeTextColor
         case "running":    return Kirigami.Theme.highlightColor
         case "done":       return Kirigami.Theme.positiveTextColor

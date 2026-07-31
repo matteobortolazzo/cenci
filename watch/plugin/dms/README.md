@@ -73,7 +73,7 @@ effect immediately.
 - Polls every `pollIntervalMs` (default 2000 ms).
 - Hides when cenci reports no sessions (or the daemon is down).
 - Icon + color reflect the highest-priority status:
-  `need-input` (error) > `running` (primary) > `done` (tertiary) > `stopped` (secondary) > `idle` (muted).
+  `need-input` (error) > `escalated` (secondary) > `running` (primary) > `done` (tertiary) > `stopped` (secondary) > `idle` (muted).
 - Click the pill to open a popout listing each window: `session:index - name` with the per-session status badge.
 - When the daemon's fleet dispatch loop is enabled, a compact `⟳` glyph and a `dispatch: on (...)` tooltip line appear. The pill no longer hides when there are zero live sessions but the loop is enabled (`alt: "dispatch-only"`) — only a true `alt: "none"` (no sessions and dispatch disabled/absent) hides it.
 - Right-click is unused (open plugin settings via Settings → Plugins → Cenci).

@@ -1,11 +1,14 @@
 package pipeline
 
-// Label lifecycle transitions (ticket #559): working / planned / in-review,
-// each stage-gated against the ticket's persisted pipeline stage, with the
-// "working" transition additionally enforcing exclusive gh-assignee
-// ownership (mirrors flow/skills/ticket-ownership/SKILL.md's full contract:
-// resolve the current login, compare against the ticket's assignees,
-// auto-claim only when unassigned, never replace an existing assignee).
+// Label lifecycle transitions (ticket #559): working / input-needed /
+// planned / in-review, each stage-gated against the ticket's persisted
+// pipeline stage, with the "working" transition additionally enforcing
+// exclusive gh-assignee ownership (mirrors
+// flow/skills/ticket-ownership/SKILL.md's full contract: resolve the
+// current login, compare against the ticket's assignees, auto-claim only
+// when unassigned, never replace an existing assignee). "input-needed"
+// (#826) is the unattended-escalation label swap (Working -> Input Needed,
+// keeping Refined) and carries no ownership check.
 // Label application self-heals via `gh label create` (treating "already
 // exists" as success) before `gh issue edit --add-label`/`--remove-label`.
 // All gh calls are retry-wrapped through retry.go's existing
@@ -46,22 +49,30 @@ var (
 // stage it requires (ticket #636: a minimum gate, not an exact-stage
 // whitelist): "working" requires at least StagePrepared (so a saved-plan
 // pickup can re-apply Working before Phase 2's `plan --approve` runs, #668,
-// and so can a resume or re-plan from any later stage), "planned" requires
-// at least StageWaitingForPlanApproval (so a re-plan over an
-// already-executed ticket can still re-apply Planned), "in-review" requires
-// at least StageFinalized (the maximum rank in the total order, so
-// "at or past" only ever means "at").
+// and so can a resume or re-plan from any later stage), "input-needed"
+// requires at least StageWaitingForInput (#826: the unattended escalation
+// path's label swap, applied only once `await-input` has recorded the
+// stage), "planned" requires at least StageWaitingForPlanApproval (so a
+// re-plan over an already-executed ticket can still re-apply Planned),
+// "in-review" requires at least StageFinalized (the maximum rank in the
+// total order, so "at or past" only ever means "at").
 var labelStagePrecondition = map[string]Stage{
-	"working":   StagePrepared,
-	"planned":   StageWaitingForPlanApproval,
-	"in-review": StageFinalized,
+	"working":      StagePrepared,
+	"input-needed": StageWaitingForInput,
+	"planned":      StageWaitingForPlanApproval,
+	"in-review":    StageFinalized,
 }
 
-// labelName is the gh label applied by each transition.
+// labelName is the gh label applied by each transition. "input-needed" ->
+// "Input Needed" (#826) is deliberately spelled differently from the
+// transition/stage/plan-status identifiers for the same concept (stage
+// waiting_for_input, plan status awaiting-input) -- see watch/README.md's
+// naming-asymmetry note.
 var labelName = map[string]string{
-	"working":   "Working",
-	"planned":   "Planned",
-	"in-review": "In Review",
+	"working":      "Working",
+	"input-needed": "Input Needed",
+	"planned":      "Planned",
+	"in-review":    "In Review",
 }
 
 // LabelOpts are the resolved inputs to one label-transition invocation.
@@ -74,7 +85,7 @@ type LabelOpts struct {
 	StateDir string
 	RepoSlug string
 
-	// Transition is one of "working", "planned", "in-review".
+	// Transition is one of "working", "input-needed", "planned", "in-review".
 	Transition string
 
 	// Trivial, meaningful only for the "planned" transition, keeps
@@ -90,12 +101,13 @@ type LabelOpts struct {
 	ParentID string
 }
 
-// ApplyLabelTransition executes one of the three label-lifecycle
-// transitions (working/planned/in-review): stage-gates against the
+// ApplyLabelTransition executes one of the label-lifecycle transitions
+// (working/input-needed/planned/in-review): stage-gates against the
 // persisted pipeline stage (ErrWrongStageForLabel on mismatch), for
 // "working" also verifies/claims exclusive gh assignee ownership
 // (ErrForeignAssignee / ErrMultipleAssignees on conflict, auto-claim when
-// unassigned), then self-healingly creates and applies the corresponding gh
+// unassigned; "input-needed" and the other transitions carry no ownership
+// check), then self-healingly creates and applies the corresponding gh
 // label(s), returning the resulting State.
 func ApplyLabelTransition(o LabelOpts) (State, error) {
 	minimum, ok := labelStagePrecondition[o.Transition]
@@ -147,11 +159,17 @@ func ApplyLabelTransition(o LabelOpts) (State, error) {
 	// Labels this transition retires, as a set: "in-review" clears the whole
 	// working lifecycle (#834), since a ticket whose PR is open and whose
 	// pipeline reached StageFinalized is neither queued for pickup
-	// ("Planned") nor being worked ("Working"). Removing a label the ticket
-	// does not carry is a no-op for `gh issue edit`, so the set needs no
-	// membership check first.
+	// ("Planned") nor being worked ("Working"). "input-needed" (#826) removes
+	// Working too -- the ticket's window is gone (the run stopped cleanly to
+	// escalate), so leaving Working behind is exactly what the reconciler's
+	// crash-recovery would otherwise retry against a dead window. Removing a
+	// label the ticket does not carry is a no-op for `gh issue edit`, so the
+	// set needs no membership check first.
 	var removeLabels []string
 	if o.Transition == "planned" && !o.Trivial {
+		removeLabels = []string{labelName["working"]}
+	}
+	if o.Transition == "input-needed" {
 		removeLabels = []string{labelName["working"]}
 	}
 	if o.Transition == "in-review" {

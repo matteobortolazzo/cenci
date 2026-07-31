@@ -31,6 +31,26 @@ func TestFailedWindowsMapping(t *testing.T) {
 	}
 }
 
+// TestEscalatedWindowsMapping mirrors TestFailedWindowsMapping (#826): the
+// synthetic entry reuses the same `<number>-implement` name helper as
+// failedWindows, but with status "escalated" -- distinct from "failed" so
+// the daemon can count it separately (never through Summary.Failed).
+func TestEscalatedWindowsMapping(t *testing.T) {
+	got := escalatedWindows([]Ticket{
+		{Repo: "o/r", Number: 42, Title: "Fix the thing!"},
+		{Repo: "o/r", Number: 7, Title: ""},
+	})
+	if len(got) != 2 {
+		t.Fatalf("got %d windows, want 2", len(got))
+	}
+	if got[0].WindowName != "42-implement" || got[0].Status != "escalated" {
+		t.Errorf("window[0] = %+v, want 42-implement/escalated", got[0])
+	}
+	if got[1].WindowName != "7-implement" || got[1].Status != "escalated" {
+		t.Errorf("window[1] = %+v, want 7-implement/escalated", got[1])
+	}
+}
+
 // --- combinedTick headroom wiring (#169) ---
 //
 // combinedTick computes per-agent-type headroom from the same UsageProvider

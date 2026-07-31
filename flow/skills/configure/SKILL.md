@@ -708,6 +708,7 @@ After gathering answers:
    | `Planned` | `1D76DB` | Plan on disk, ready to pick up |
    | `In Review` | `A2EEEF` | PR open, under review / CI running |
    | `Implemented` | `6F42C1` | PR merged — done |
+   | `Input Needed` | `D4C5F9` | Planner escalated a question — answer on the ticket to auto-resume |
    | `Followup` | `C5DEF5` | Deferred/out-of-scope item captured from a session — triage before working |
    | `Browser` | `BFD4F2` | Implementation needs interactive browser access (Playwright CLI) |
    | `ui:visual-check` | `FEF2C0` | Visual/layout change — verify in a browser before merge |
@@ -1904,6 +1905,8 @@ in the completion summary so the user can mirror it as columns on their board:
 A ticket judged trivial by implement's Trivial-Ticket Triage still transits through `Planned` — same labels, same board columns as any other ticket — just collapsed into one session instead of a stop-and-relaunch between `Planned` and `Working`. No new label state is introduced by the trivial-ticket fast path.
 
 **Reconciler-managed labels**: `dispatch-failed`, `plan-invalid`, and `reconcile-stuck` are not applied by refine, design, or implement — cenci's dispatch reconciler applies them automatically when it detects a stuck or failed automation state (dispatched work exhausted its retry budget, a `Planned` ticket has no parseable plan file, or reconciliation itself is stuck with its apply-retry budget exhausted). Like `Followup`, they are orthogonal to the `New → … → Implemented` lifecycle above and are not columns in that chain.
+
+`Input Needed` is likewise orthogonal — like `Followup`, it is never part of the `New → … → Implemented` chain and is not a column in it. Unlike the skill-applied lifecycle labels above (which self-heal via each skill's own `gh label create … || true` fallback), `Input Needed` is applied by implement's unattended lean-mode escalation path via the `cenci pipeline label --transition input-needed` CLI call, which self-heals the label's existence through cenci's Go `ghLabelCreate` — the same mechanism `dispatch-failed`/`plan-invalid`/`reconcile-stuck` use, not a skill-level fallback. It is removed (swapping back to `Working`) when the ticket resumes.
 
 Lifecycle: `New → Refined → [Designed] → Planned → Working → In Review → Implemented`.
 

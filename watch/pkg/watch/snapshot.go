@@ -20,10 +20,12 @@ type StateSnapshot struct {
 }
 
 // AttentionUpdate is the reconciler's per-tick push onto the daemon's
-// attention channel: the current set of synthetic "failed" windows (#46)
-// alongside the current per-agent-type headroom snapshot (#169).
+// attention channel: the current set of synthetic "failed"/"escalated"
+// windows (#46, extended by #826) alongside the current per-agent-type
+// headroom snapshot (#169).
 type AttentionUpdate struct {
-	// Windows is the current set of synthetic "failed" window entries.
+	// Windows is the current set of synthetic "failed"/"escalated" window
+	// entries.
 	Windows []WindowState
 	// Headroom reports per-agent-type token-budget headroom (0.0-1.0). Empty
 	// when the embedded loop's BudgetProvider is not a *UsageProvider or no
@@ -49,8 +51,11 @@ type WindowState struct {
 	// TaskName is the human-readable task extracted for the window, if any.
 	TaskName string `json:"task_name"`
 	// Status is the window's current status (for example "idle", "running",
-	// "done", "stopped", "need_input", or "failed"). "failed" marks a synthetic
-	// entry for a dispatch-failed or plan-invalid ticket that has no live window.
+	// "done", "stopped", "need_input", "failed", or "escalated"). "failed"
+	// marks a synthetic entry for a dispatch-failed or plan-invalid ticket
+	// that has no live window. "escalated" (#826) marks a synthetic entry
+	// for a ticket the unattended planner escalated (Input Needed) -- also
+	// no live window, but distinct from "failed": see StatusSummary.Escalated.
 	Status string `json:"status"`
 	// Agent identifies the coding agent detected in the window, if known.
 	// Omitted from the JSON when empty.
@@ -109,9 +114,23 @@ type StatusSummary struct {
 	Done int `json:"done"`
 	// Stopped counts windows in the stopped status.
 	Stopped int `json:"stopped"`
-	// NeedInput counts windows awaiting user input.
+	// NeedInput counts windows awaiting user input from a live, running
+	// agent session (a hook-reported detect.StatusNeedInput). This is the
+	// counter internal/dispatch/decide.go's fleet-wide "need-input pause"
+	// gate reads (Summary.NeedInput >= NeedInputThreshold) -- it is about a
+	// live session blocked mid-turn, not about the reconciler's Input
+	// Needed board label. See Escalated below: the two must never be
+	// conflated, and only NeedInput feeds that pause.
 	NeedInput int `json:"need_input"`
 	// Failed counts synthetic entries for dispatch-failed or plan-invalid
 	// tickets surfaced by the reconciler (they have no live window).
 	Failed int `json:"failed"`
+	// Escalated (#826) counts synthetic entries for tickets the unattended
+	// planner escalated (the reconciler's Input Needed label -> Escalated
+	// window, status "escalated"). This is a DIFFERENT concept from
+	// NeedInput above -- a live session waiting mid-turn versus a stopped
+	// run blocked on a ticket-comment answer -- and deliberately does not
+	// feed dispatch's fleet-wide NeedInput pause: a single escalation must
+	// never freeze the whole fleet.
+	Escalated int `json:"escalated"`
 }

@@ -43,6 +43,88 @@ func TestBuildSnapshot_AttentionOverlayAppendsFailed(t *testing.T) {
 	}
 }
 
+// TestBuildSnapshot_AttentionOverlayAppendsEscalated (#826) covers the
+// status switch's "escalated" branch: an attention entry with status
+// "escalated" must count into Summary.Escalated, never Summary.Failed.
+func TestBuildSnapshot_AttentionOverlayAppendsEscalated(t *testing.T) {
+	mc := &tmuxtest.MockClient{}
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1"})
+
+	d.attention = []ipc.WindowState{
+		{WindowName: "42-implement", Status: "escalated"},
+	}
+
+	snap := d.buildSnapshot()
+
+	if snap.Summary.Total != 2 {
+		t.Errorf("Summary.Total = %d, want 2", snap.Summary.Total)
+	}
+	if snap.Summary.Escalated != 1 {
+		t.Errorf("Summary.Escalated = %d, want 1", snap.Summary.Escalated)
+	}
+	if snap.Summary.Failed != 0 {
+		t.Errorf("Summary.Failed = %d, want 0 (an escalated entry must never count as Failed)", snap.Summary.Failed)
+	}
+
+	var found bool
+	for _, w := range snap.Windows {
+		if w.WindowName == "42-implement" && w.Status == "escalated" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected synthetic escalated window in snapshot, got %+v", snap.Windows)
+	}
+}
+
+// TestBuildSnapshot_AttentionOverlayMixedFailedAndEscalated proves both
+// statuses count independently within the same overlay -- a regression
+// collapsing the switch into a single counter would pass a failed-only or
+// escalated-only test but fail this one.
+func TestBuildSnapshot_AttentionOverlayMixedFailedAndEscalated(t *testing.T) {
+	mc := &tmuxtest.MockClient{}
+	d := newTestDaemon(mc)
+
+	d.attention = []ipc.WindowState{
+		{WindowName: "42-fix-thing", Status: "failed"},
+		{WindowName: "7-implement", Status: "escalated"},
+	}
+
+	snap := d.buildSnapshot()
+
+	if snap.Summary.Failed != 1 {
+		t.Errorf("Summary.Failed = %d, want 1", snap.Summary.Failed)
+	}
+	if snap.Summary.Escalated != 1 {
+		t.Errorf("Summary.Escalated = %d, want 1", snap.Summary.Escalated)
+	}
+}
+
+// TestBuildSnapshot_AttentionOverlay_UnrecognizedStatusFallsBackToFailed
+// pins the match-miss default (watch's Critical Rules: keep the original
+// visible fallback for every other case and add a regression test for the
+// non-matching case). No real producer emits an attention status other than
+// "failed"/"escalated" today, but the switch's default branch must still
+// resolve to the pre-#826 behavior (Failed++), not silently drop the count.
+func TestBuildSnapshot_AttentionOverlay_UnrecognizedStatusFallsBackToFailed(t *testing.T) {
+	mc := &tmuxtest.MockClient{}
+	d := newTestDaemon(mc)
+
+	d.attention = []ipc.WindowState{
+		{WindowName: "99-implement", Status: "bogus-unrecognized-status"},
+	}
+
+	snap := d.buildSnapshot()
+
+	if snap.Summary.Failed != 1 {
+		t.Errorf("Summary.Failed = %d, want 1 (unrecognized attention status must default-fall-back to Failed)", snap.Summary.Failed)
+	}
+	if snap.Summary.Escalated != 0 {
+		t.Errorf("Summary.Escalated = %d, want 0", snap.Summary.Escalated)
+	}
+}
+
 func TestBuildSnapshot_NoAttentionIsUnchanged(t *testing.T) {
 	mc := &tmuxtest.MockClient{}
 	d := newTestDaemon(mc)

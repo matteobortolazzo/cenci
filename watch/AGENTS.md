@@ -46,7 +46,7 @@ Project topic docs — read the one matching your work area:
   - `close_cmd.go` — `close` + decision rendering
   - `sandbox_cmd.go` — `sandbox build|build-base|prune|update-agent|update-plugins|reseed-creds|reap-orphans|ls|stop`: flag parsing, usage errors (exit 2), and dispatch into `internal/sandbox` + `internal/sandbox/launcher`
   - `open_cmd.go` — `open` (interactive sandbox launch, shortcut/model resolution)
-  - `pipeline_cmd.go` — `pipeline` (five stage transitions) + `pipeline_mechanics_cmd.go` (label/worktree/worktree-cleanup/artifact), `pipeline_plan_cmd.go` (plan-check), `pipeline_reset_cmd.go` (reset)
+  - `pipeline_cmd.go` — `pipeline` (six stage transitions: prepare/plan/await-input/execute/review/finalize) + `pipeline_mechanics_cmd.go` (label/worktree/worktree-cleanup/artifact), `pipeline_plan_cmd.go` (plan-check), `pipeline_reset_cmd.go` (reset)
 - `plugin/` — Claude Code plugin (hooks that call `cenci notify`)
 - `internal/daemon/` — Session-keyed event loop, hook→status mapping, paneless TTL sweep; delegates window work via `frontend.Frontend`
 - `internal/frontend/` — Seam types: `SessionState`, `Frontend` interface, `Observations`, `SweepAction`, `WindowInfo`; shared name sanitizers

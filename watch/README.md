@@ -441,6 +441,13 @@ failing gate is the logged skip reason):
     `agentLimits` is set this is computed from real token usage, otherwise from the
     static `agentBudgetFloors`).
 
+Gate 8's `needInputThreshold` reads only `StatusSummary.NeedInput` — a live
+session waiting mid-turn for a permission prompt or similar. It deliberately
+never reads `StatusSummary.Escalated` (ticket #826: a ticket the unattended
+planner escalated, `Input Needed`). The two are different concepts and must
+never be conflated: a single planner escalation must never freeze dispatch
+for the whole fleet the way `needInputThreshold` windows-awaiting-input can.
+
 #### Local main sync
 
 Before evaluating any ticket, each dispatch pass runs `git fetch origin` and a
@@ -480,8 +487,8 @@ flips back to `Planned` to be re-dispatched. Three read outcomes:
   pipeline run here" is the normal case and must not block dispatch. This is a
   deliberate, documented permissive exception — the only one in this gate chain.
 - **readable, known stage → gate on it.** Only `finalized` skips; every other known
-  stage (`prepared`, `waiting_for_plan_approval`, `plan_approved`, `executed`,
-  `reviewed`) dispatches normally.
+  stage (`prepared`, `waiting_for_input`, `waiting_for_plan_approval`, `plan_approved`,
+  `executed`, `reviewed`) dispatches normally.
 - **unreadable, undecodable, or an unrecognized stage value → skip.** Default-deny:
   broken input is treated as blocking, not as absent input.
 
@@ -651,6 +658,16 @@ hidden-marker comments on the ticket, so recovery survives cron invocations and 
 restarts. A pass never acts blind: if the daemon snapshot or a ticket's attempt count
 cannot be read, it defers rather than guess.
 
+**Escalated tickets (ticket #826).** A ticket labeled `Input Needed` (the unattended
+planner's escalation label, applied by `cenci pipeline label <id> --transition
+input-needed`) is recorded separately and never touched again: no recovery is
+attempted, and it is never counted into the `Failed` list above. This is deliberate —
+the escalating run stopped cleanly (it is not a stranded/crashed session), so treating
+it as a dispatch failure or retrying it would be wrong. The reconciler feeds the
+daemon a synthetic `escalated` entry (distinct status from `failed`), which the status
+output counts into `StatusSummary.Escalated`, never `StatusSummary.Failed` or
+`StatusSummary.NeedInput`.
+
 Run it two ways:
 
 ```bash
@@ -779,7 +796,8 @@ Go tests rather than prompt interpretation:
 
 ```bash
 cenci pipeline prepare 42            # new -> prepared (confirms the ticket exists via `gh issue view`)
-cenci pipeline plan 42               # prepared -> waiting_for_plan_approval
+cenci pipeline plan 42               # prepared -> waiting_for_plan_approval (or waiting_for_input -> waiting_for_plan_approval on resume)
+cenci pipeline await-input 42        # prepared -> waiting_for_input (unattended planner escalation; ticket #826)
 cenci pipeline plan 42 --approve     # waiting_for_plan_approval -> plan_approved (run after human approval)
 cenci pipeline execute 42            # plan_approved -> executed (blocked before a plan is approved)
 cenci pipeline review 42             # executed -> reviewed
@@ -817,20 +835,39 @@ Behavior:
 - `execute` is blocked until the plan has been explicitly approved
   (`plan --approve`); running it any earlier is a domain error, not a
   transition.
+- `await-input` (ticket #826) is the unattended planner-escalation stage:
+  `prepared -> waiting_for_input`, reusing bare `plan`'s own "too early"
+  sentinel (a ticket that never reached `prepared` cannot escalate either).
+  Bare `plan` accepts **either** `prepared` or `waiting_for_input` as its
+  predecessor and always lands at `waiting_for_plan_approval` — the
+  escalation-resume path (a human answers the open questions on the ticket,
+  then planning continues) and the never-escalated path converge on the
+  same target. Re-escalating a ticket already at or past
+  `waiting_for_plan_approval` is the ordinary monotonic no-op (never a
+  rewind): the persisted stage is returned unchanged with the usual
+  `already at stage "<current>"; await-input is a no-op` warning.
 - `plan --approve` self-adopts a pre-stage-tracking plan (ticket #688,
-  closing #718): when the persisted stage is `new` or `prepared` (never
-  later) and exactly one validly-shaped `.plans/<id>-*.md` exists on disk
-  (front matter's `ticketId`, if present, matching `<id>`), the persisted
-  stage is treated as if it were already `waiting_for_plan_approval` before
-  the transition runs, landing directly at `plan_approved` instead of
-  failing with "invalid pipeline transition". This is purely local/offline
-  evidence — no `gh`/`git` freshness re-check — and surfaces a `warnings[]`
-  entry reading `adopted plan file <path> as stage "waiting_for_plan_approval"
-  (persisted stage was "<old-stage>"; no prior plan approval was recorded)`;
-  it is informational, not a failure. Bare `plan` (no `--approve`) is
-  unaffected and keeps its own strict precondition (an ambiguous/missing/
-  malformed plan file, or a `ticketId` mismatch, falls back to today's
-  unmodified error, unchanged).
+  closing #718): when the persisted stage is `new` or `prepared` — strictly
+  below `waiting_for_input` (ticket #826 retargeted this gate from
+  `waiting_for_plan_approval`, so a ticket already parked at
+  `waiting_for_input` — escalated, blocked on a human — is never silently
+  adopted) — and exactly one validly-shaped `.plans/<id>-*.md` exists on disk
+  (front matter's `ticketId`, if present, matching `<id>`, and front
+  matter's `status` NOT `awaiting-input`), the persisted stage is treated as
+  if it were already `waiting_for_plan_approval` before the transition runs,
+  landing directly at `plan_approved` instead of failing with "invalid
+  pipeline transition". The `status: awaiting-input` check (ticket #826)
+  closes a hole the stage retarget alone cannot: if the
+  `.cenci/pipeline/<id>.json` state file itself was deleted, the persisted
+  stage reads as `new`/`prepared` regardless of what the draft on disk says,
+  so a still-awaiting-input draft must be checked directly. This is purely
+  local/offline evidence — no `gh`/`git` freshness re-check — and surfaces a
+  `warnings[]` entry reading `adopted plan file <path> as stage
+  "waiting_for_plan_approval" (persisted stage was "<old-stage>"; no prior
+  plan approval was recorded)`; it is informational, not a failure. Bare
+  `plan` (no `--approve`) is unaffected and keeps its own strict
+  precondition (an ambiguous/missing/malformed plan file, or a `ticketId`
+  mismatch, falls back to today's unmodified error, unchanged).
 - A transition that's invalid for the ticket's current stage (e.g. `execute`
   before `plan --approve`, or a ticket `gh issue view` can't find) is a
   **domain error**: the full JSON contract still prints on stdout with
@@ -842,7 +879,7 @@ Behavior:
 
 ### Mechanics verbs (`label`, `worktree`, `worktree-cleanup`, `artifact`, `plan-check`, `reset`)
 
-Alongside the five stage transitions, `cenci pipeline` also exposes the
+Alongside the six stage transitions, `cenci pipeline` also exposes the
 deterministic side-effect mechanics that used to live in flow's skill prose:
 label lifecycle, worktree create/cleanup, artifact tracking, and read-only
 plan-file discovery/validation/freshness. Each verb renders the same JSON
@@ -850,6 +887,7 @@ contract as the stage commands.
 
 ```bash
 cenci pipeline label 42 --transition working                     # verifies/claims exclusive gh assignee ownership, applies "Working"
+cenci pipeline label 42 --transition input-needed                 # applies "Input Needed", removes "Working" (ticket #826 escalation swap; no ownership check)
 cenci pipeline label 42 --transition planned [--trivial]          # applies "Planned", removes "Working" unless --trivial
 cenci pipeline label 42 --transition in-review [--parent 10]      # applies "In Review", removes "Working"; --parent cascades to the parent ticket
 cenci pipeline worktree 42 --slug add-thing                       # git worktree add .worktrees/42-add-thing -b feature/42-add-thing
@@ -863,17 +901,19 @@ cenci pipeline reset 42   # deletes .cenci/pipeline/42.json: stage returns to "n
 ```
 
 Behavior:
-- `label`'s three transitions each require the ticket's persisted pipeline
+- `label`'s four transitions each require the ticket's persisted pipeline
   stage to be at or past a minimum (`working` requires `prepared` or later,
-  `planned` requires `waiting_for_plan_approval` or later, `in-review`
-  requires `finalized`); a stage short of the minimum is a domain error.
-  Unlike the stage commands, label transitions are never no-ops — they
-  always perform their `gh` work when the minimum is met, even when
-  reapplied from a later stage (e.g. a resume or a re-plan over an
-  already-executed ticket). `working` additionally mirrors the
-  `ticket-ownership` skill: verify exclusive gh-assignee ownership,
-  auto-claiming only when the ticket is unassigned, never replacing an
-  existing assignee.
+  `input-needed` requires `waiting_for_input` or later, `planned` requires
+  `waiting_for_plan_approval` or later, `in-review` requires `finalized`); a
+  stage short of the minimum is a domain error. Unlike the stage commands,
+  label transitions are never no-ops — they always perform their `gh` work
+  when the minimum is met, even when reapplied from a later stage (e.g. a
+  resume, a re-escalation, or a re-plan over an already-executed ticket).
+  `working` additionally mirrors the `ticket-ownership` skill: verify
+  exclusive gh-assignee ownership, auto-claiming only when the ticket is
+  unassigned, never replacing an existing assignee. `input-needed` carries
+  no ownership check (the ticket is being handed *back* to a human, not
+  claimed).
 - `worktree` rolls back any partial worktree/branch state on failure;
   `worktree-cleanup` removes both the worktree and its branch and is used
   only on that rollback path (not on a "baseline gate failed" retry path,
@@ -901,15 +941,20 @@ Behavior:
   persisted map without clobbering keys from earlier calls) on the pipeline
   state file.
 - `plan-check` globs `.plans/<id>-*.md`, validates the single match's front
-  matter/required sections/slug, and (unless `--replan-requested`
-  short-circuits first) computes a deterministic freshness verdict from git
-  commits-behind (scoped to the plan's `stalenessPaths`) and the ticket's
-  `gh issue view` state/`updatedAt`. It never gates on or mutates the
+  matter/required sections/slug, and then — in order — checks
+  `--replan-requested` first, then the front matter's `status` for
+  `awaiting-input` (ticket #826: a draft persisted by the unattended
+  escalation path, blocked on a human answering the open questions on the
+  ticket), and only then (unless either short-circuits) computes a
+  deterministic freshness verdict from git commits-behind (scoped to the
+  plan's `stalenessPaths`) and the ticket's `gh issue view`
+  state/`updatedAt`. The `awaiting-input` check runs with zero `git`/`gh`
+  calls, same as `--replan-requested`. It never gates on or mutates the
   persisted pipeline stage — read-only, like `artifact --get`. Its JSON
   output adds two fields beyond the shared contract: `decision` (one of
-  `resume` | `stale` | `replan` | `none` | `multiple`) and `plan` (the
-  validated front-matter metadata, present on every decision except `none`
-  and `multiple`).
+  `resume` | `stale` | `replan` | `awaiting-input` | `none` | `multiple`)
+  and `plan` (the validated front-matter metadata, present on every
+  decision except `none` and `multiple`).
   - **Exit-code framing deliberately deviates from the other mechanics
     verbs' blanket "errors[] non-empty → exit 1"**: `none` (no plan file
     yet — the everyday first-run outcome) and `multiple` (ambiguous — ask
@@ -1558,6 +1603,7 @@ cenci widget-json
 | `-symbol-running` | `▶` | Symbol for running count |
 | `-symbol-done` | `✓` | Symbol for done count |
 | `-symbol-input` | `!` | Symbol for need-input count |
+| `-symbol-escalated` | `?` | Symbol for a planner-escalated (`Input Needed` label) ticket count (ticket #826) — a different concept from need-input above (a live session waiting mid-turn) and deliberately a different glyph from both `-symbol-input`'s `!` and the failed-count symbol `✗` |
 | `-symbol-dispatch` | `⟳` | Symbol for the fleet dispatch loop indicator (idle/enabled state) |
 | `-symbol-dispatch-running` | `⚙` | Symbol for a fleet dispatch pass actively running |
 
@@ -1575,11 +1621,19 @@ Then add `"custom/cenci"` to your bar's modules.
 
 #### Waybar styling
 
-The module sets a `class` based on the highest-priority status: `need-input` > `running` > `done` > `idle`.
+The module sets a `class` based on the highest-priority status: `failed` >
+`escalated` > `need-input` > `running` > `done` > `stopped` > `idle` (ticket
+#826 inserted `escalated` between `failed` and `need-input` — a
+planner-escalated ticket outranks a live need-input session but never a
+genuine dispatch failure).
 
 ```css
 #custom-cenci {
     padding: 0 8px;
+}
+
+#custom-cenci.escalated {
+    color: #f9e2af;
 }
 
 #custom-cenci.need-input {
