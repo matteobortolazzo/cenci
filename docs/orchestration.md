@@ -42,7 +42,7 @@ New → Refined → [Designed] → Planned → Working → In Review → Impleme
 | Planned → Working | plan-file implementation or `cenci dispatch` pickup | `+Working`; `Planned` remains as a milestone |
 | Planned → Working (re-plan) | `cenci dispatch` (autonomous re-plan, `dispatch.planRefined: true`) | `+Working`; `Planned` retained — the existing plan was stale (past `planStalenessTolerance`), so `cenci run implement "<n> replan"` relaunches planning against it unattended instead of terminally skipping |
 | Working → Input Needed (escalation) | `/cenci:implement` planning (unattended, `planning.autonomy: "lean"`) | Persists a draft `.plans/<id>-*.md` (`status: awaiting-input`), then `+Input Needed` `−Working` (`Refined` retained) |
-| Input Needed → Working (resume) | `cenci dispatch` (auto-resume) | `+Working` `−Input Needed` once a qualifying human reply is detected after the escalation anchor; `Refined` retained |
+| Input Needed → Working (resume) | `cenci dispatch` (auto-resume) or a manual `/cenci:implement <id>` re-run | `+Working` `−Input Needed` (atomic, one label call) once a qualifying human reply is detected after the escalation anchor; `Refined` retained. Reverses to `+Input Needed` `−Working` on a failed auto-resume launch (unless the tmux window was demonstrably created) or on the reconciler's bounded interrupted-resume recovery |
 | Working → In Review | `/cenci:implement` phase 9 | `+In Review` `−Working` when the PR opens |
 | In Review → Implemented | `/cenci:babysit` (on PR merge) | `+Implemented` `−In Review` |
 
@@ -86,20 +86,51 @@ pre-#849 marker-only anchor would silently never resume under an ordinary, non-b
 `gh` identity). A qualifying reply is positioned after that verified anchor, marker-free,
 not authored by a `*[bot]`/`app/*` login or the REST API's `user.type == "Bot"`, and posted
 by an author whose association is one of `OWNER`, `MEMBER`, or `COLLABORATOR` — and, when
-found, swaps `+Working` `−Input Needed` before relaunching the planning session against the
-persisted `status: awaiting-input` draft. A draft whose anchor fields are missing, malformed,
+found, swaps `+Working` `−Input Needed` in one atomic label call (`ticket #853`: the same
+transition contract the manual `/cenci:implement <id>` re-run's `pipeline label --transition
+working` uses) before relaunching the planning session against the persisted
+`status: awaiting-input` draft. A draft whose anchor fields are missing, malformed,
 or unverifiable (the stored comment ID absent from the thread, or its body lacking the exact
 nonce marker) fails closed instead — dispatch never repairs an anchor itself, it only reports
 the gap; repair is a separate, human-triggered `/cenci:implement <id>` run. This is the same relaunch shape
-as an ordinary `Planned` pickup, just pointed at a draft instead of a finished plan. The
-relaunched session re-delegates to the planner with the draft's `## Architectural Context` as
-its prior exploration (no re-exploration permitted), appends the human's answers to the
-ticket's `### Decisions` section, and either finalizes the plan (`+Planned` `−Working`, same
-as any other planning session) or re-escalates with a follow-up comment when the answers are
-incomplete — it never guesses. This mirrors the collapsed `Refined → Planned → Working`
-sessions above in spirit (no human plan-review gate on the relaunch), but it is a distinct
-case: the plan itself was already escalated once, so this round trip can repeat if answers
-stay incomplete, bounded by dispatch's existing concurrency/budget/quiet-hours gates.
+as an ordinary `Planned` pickup, just pointed at a draft instead of a finished plan.
+
+**Failed-launch rollback and interrupted-resume recovery (ticket #853).** A resume launch
+that fails to spawn a tmux window at all rolls the claim straight back to `+Input Needed`
+`−Working`, so the ticket stays resumable on the next pass. A launch failure that happens
+*after* the window was demonstrably created (e.g. the trailing `set-window-option` call)
+instead retains `Working` — the session may well be alive — and leaves recovery to the
+reconciler: a dead `Working` ticket whose matched plan is still `status: awaiting-input` is
+classified as an interrupted resume, not an ordinary crashed implementation run, and is
+restored to `+Input Needed` `−Working` rather than ever being converted to `+Planned` (which
+would silently discard the still-open escalation). This restore is bounded by the same
+durable attempt budget ordinary retries use — once exhausted it escalates to
+`dispatch-failed` like any other stranded `Working` ticket instead of restoring indefinitely
+(see `watch/docs/dispatch-reconcile.md`).
+
+The relaunched session's re-delegation to the planner is freshness-aware, not an
+unconditional "no re-exploration" rule: `cenci pipeline plan-check` computes a git-only
+`draft_freshness` verdict (`fresh`/`stale`/`unknown`, the latter treated exactly like
+`stale`) by counting commits behind the draft's `planCommitSha`, scoped to its
+`stalenessPaths`. On `fresh` the session re-delegates with the draft's
+`## Architectural Context` as its prior exploration and no re-exploration — the classic
+no-re-exploration contract. On `stale`/`unknown` it instead routes through an autonomous
+re-plan, passing the human's already-collected answers as fixed decisions (never re-opened)
+while the planner re-explores the codebase for its architectural context; the draft's
+original `planCommitSha`/`stalenessPaths` are preserved verbatim on the fresh path and
+regenerated on the re-plan path, so the SHA itself can never be spoofed to claim a freshness
+it doesn't have. Freshness is fresh/stale relative to the plan's declared `stalenessPaths`,
+not an absolute guarantee that no relevant code changed elsewhere: a plan whose
+`stalenessPaths` under- or mis-scopes its actual dependencies can still return `fresh` while a
+relevant change lands outside that declared scope. Either way, the session appends the human's
+answers to the ticket's `### Decisions`
+section, and either finalizes the plan (`+Planned` `−Working`, same as any other planning
+session) or re-escalates with a follow-up comment and a new trusted anchor when the answers
+are incomplete or a re-plan surfaces a new escalation — it never guesses. This mirrors the
+collapsed `Refined → Planned → Working` sessions above in spirit (no human plan-review gate
+on the relaunch), but it is a distinct case: the plan itself was already escalated once, so
+this round trip can repeat if answers stay incomplete, bounded by dispatch's existing
+concurrency/budget/quiet-hours gates.
 
 **Stage-aware pickup closes the loop (ticket #828).** With `dispatch.planRefined:
 true` in a repo's `dispatch` config, `cenci dispatch` no longer stops at `Planned`

@@ -178,6 +178,43 @@ else
   if ! { [[ "${R1}" -lt "${R2}" ]] && [[ "${R2}" -lt "${R3}" ]] && [[ "${R3}" -lt "${R4}" ]]; }; then
     fail "phase-1-plan.md: ## Resume From Draft ordering violated (expected strictly increasing): decisions-edit=${R1} plan-call=${R2} label-transition=${R3} artifact-record=${R4}"
   fi
+
+  # --- #853: Abort contract -- any stop in this section after `Working` is
+  #     applied must first restore the board, restated at each hard stop
+  #     (flow/docs/pipeline-safety.md's reused-safety-rule-on-a-new-risk-
+  #     profile rule) -------------------------------------------------------
+  assert_section_contains '**Abort contract**' \
+    "must state an Abort contract"
+  ABORT_RESTORE_PHRASE='any stop in this section after `Working` is applied must first run `cenci pipeline await-input <id>` then `cenci pipeline label <id> --transition input-needed`'
+  assert_section_contains "${ABORT_RESTORE_PHRASE}" \
+    "must state the abort-contract restore sequence verbatim (await-input, then --transition input-needed)"
+  ABORT_RESTATE_COUNT=$(grep -c -F -- "${ABORT_RESTORE_PHRASE}" <<<"${RESUME_SECTION}")
+  if [[ "${ABORT_RESTATE_COUNT}" -lt 2 ]]; then
+    fail "phase-1-plan.md (## Resume From Draft) must restate the Abort contract's restore sequence at more than one hard stop (found ${ABORT_RESTATE_COUNT} occurrence(s), want >= 2)"
+  fi
+
+  # --- #853: unknown ⇒ stale literal --------------------------------------
+  assert_section_contains '`unknown` is treated exactly as `stale`' \
+    "must state the unknown ⇒ stale literal verbatim"
+
+  # --- #853: planCommitSha/stalenessPaths preserve-vs-refresh split; createdAt
+  #     is explicitly NOT claimed as preserved (Q3) ------------------------
+  assert_section_contains 'preserved verbatim from the draft on the fresh path' \
+    "must state that planCommitSha/stalenessPaths are preserved verbatim on the fresh (unchanged-code) path"
+  assert_section_contains 'regenerated' \
+    "must state that planCommitSha/stalenessPaths are regenerated on the re-plan (stale-code) path"
+  assert_section_contains 'on the re-plan path' \
+    "must scope the regeneration to the re-plan path specifically"
+  assert_section_contains "createdAt\` stays on \`## Persist the Plan\`'s ordinary fresh-timestamp default on both branches" \
+    "must state that createdAt is NOT preserved -- it follows the ordinary fresh-finalize default on both the fresh and re-plan branches (Q3)"
+  [[ "${RESUME_SECTION}" != *'createdAt` is preserved'* ]] || \
+    fail "phase-1-plan.md (## Resume From Draft) must NOT claim createdAt is preserved -- only planCommitSha/stalenessPaths carry the preserve-vs-refresh split (Q3)"
+
+  # --- #853: fixed-decisions wording for the re-plan delegation -----------
+  assert_section_contains 'the human'"'"'s answers as **fixed decisions**' \
+    "a re-plan delegation must pass the human's answers as fixed decisions, never to be re-opened"
+  assert_section_contains 'never to be re-opened' \
+    "must state that fixed decisions are never to be re-opened during a re-plan"
 fi
 
 # =====================================================================
@@ -249,6 +286,21 @@ else
   REPAIR_CLEANUP_COUNT=$(grep -c 'remove the scoped questions file' <<<"${REPAIR_SECTION}")
   if [[ "${REPAIR_CLEANUP_COUNT}" -lt 2 ]]; then
     fail "phase-1-plan.md (## Repair Escalation Anchor) must remove the scoped questions file inline in both case (ii) and case (iii) (found ${REPAIR_CLEANUP_COUNT} occurrence(s))"
+  fi
+
+  # --- #853: every case restores the board (await-input no-op + --transition
+  #     input-needed) before stopping -- Ticket Ownership already swapped the
+  #     ticket to Working by the time Phase 1 runs, and with the `working`
+  #     transition now retiring Input Needed the old state no longer lingers
+  #     by accident, so the repair ladder must restore it explicitly in all
+  #     three cases before it stops -------------------------------------------
+  REPAIR_AWAIT_INPUT_COUNT=$(grep -c -F -- 'cenci pipeline await-input <id>' <<<"${REPAIR_SECTION}")
+  if [[ "${REPAIR_AWAIT_INPUT_COUNT}" -lt 3 ]]; then
+    fail "phase-1-plan.md (## Repair Escalation Anchor) must run \`cenci pipeline await-input <id>\` before stopping in all three cases (found ${REPAIR_AWAIT_INPUT_COUNT} occurrence(s), want >= 3)"
+  fi
+  REPAIR_INPUT_NEEDED_LABEL_COUNT=$(grep -c -F -- 'cenci pipeline label <id> --transition input-needed' <<<"${REPAIR_SECTION}")
+  if [[ "${REPAIR_INPUT_NEEDED_LABEL_COUNT}" -lt 3 ]]; then
+    fail "phase-1-plan.md (## Repair Escalation Anchor) must run \`cenci pipeline label <id> --transition input-needed\` before stopping in all three cases (found ${REPAIR_INPUT_NEEDED_LABEL_COUNT} occurrence(s), want >= 3)"
   fi
 fi
 

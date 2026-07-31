@@ -74,6 +74,16 @@ const (
 	// gh apply kept failing for cfg.ApplyRetryBudget consecutive passes to the
 	// reconcile-stuck terminal label.
 	RecoveryReconcileStuck RecoveryKind = "reconcile-stuck"
+	// RecoveryResumeInterrupted (#853) classifies a dead Working ticket whose
+	// matched plan is a still-open awaiting-input draft: the resume launch
+	// (manual or dispatch-triggered) was interrupted before it could finalize
+	// -- Working→Input Needed, restoring the ticket to the human-input queue
+	// rather than converting it to ordinary Planned, which would silently
+	// discard the unanswered escalation. Also covers the crash-after-partial-
+	// label-mutation cleanup: a ticket already carrying both Input Needed and
+	// Working (a claim or rollback that landed its first label edit but not
+	// its second) removes the stray Working with no relabeling needed.
+	RecoveryResumeInterrupted RecoveryKind = "resume-interrupted"
 )
 
 // Recovery is the reconciler's verdict for a single stranded item. AddLabels/
@@ -181,6 +191,42 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 		// and never reconciled (no Recovery, no grace observation).
 		if hasLabel(t.Labels, labelInputNeeded) {
 			res.Escalated = append(res.Escalated, t)
+
+			// Crash-after-partial-label-mutation cleanup (#853 AC3): a
+			// ticket carrying BOTH Input Needed and Working is the
+			// signature of a crash between the two label edits of a
+			// partial resume-rollback or claim -- Input Needed is
+			// already present, so this is cleanup (remove the stray
+			// Working), not a fresh restore (AddLabels stays nil). It
+			// still must never reconcile blind, never fire on a live
+			// window/open PR, and only fire once past grace -- exactly
+			// the same signals the ordinary failure path below applies
+			// to a stranded Working ticket.
+			if hasLabel(t.Labels, labelWorking) {
+				if in.Snapshot == nil {
+					if ts, ok := in.Observations[key]; ok {
+						res.NextObservations[key] = ts
+					}
+					continue
+				}
+				if hasLiveWindow(t.Number, in.Snapshot) || t.HasOpenPR {
+					continue
+				}
+				firstSeen, ok := in.Observations[key]
+				if !ok {
+					firstSeen = in.Now
+				}
+				if in.Now.Sub(firstSeen) < in.Config.GracePeriod {
+					res.NextObservations[key] = firstSeen
+					continue
+				}
+				res.Recoveries = append(res.Recoveries, Recovery{
+					Ticket:       t,
+					Kind:         RecoveryResumeInterrupted,
+					RemoveLabels: []string{labelWorking},
+					Detail:       "ticket carries both Input Needed and Working (crash after partial label mutation); removing the stray Working",
+				})
+			}
 			continue
 		}
 
@@ -300,6 +346,37 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 
 		if attempts < in.Config.RetryBudget {
 			attempt := attempts + 1
+
+			// Interrupted resume (#853): a Working ticket matched to a
+			// plan still at status: awaiting-input is a resume launch
+			// (manual or dispatch-triggered) that never finalized -- the
+			// human's answer was collected but the session died before
+			// it could complete. Recovering it with the ordinary
+			// +Planned retry below would silently discard the still-open
+			// escalation and route the ticket back into dispatch as if
+			// it were a fresh, answerable plan (the plan's central
+			// never-Planned invariant). Restore Input Needed instead,
+			// bounded by the same durable attempt budget (Q2): the
+			// comment below shares attemptMarker with retryComment, so
+			// countAttempts tallies it, and once attempts >= RetryBudget
+			// the existing RecoveryFailed branch below takes over -- no
+			// unbounded restore loop. planByTicket[key] != nil already
+			// implies clean front-matter parsing (ReadPlans drops
+			// probe-errored files), so no extra PlanProbes gate is
+			// needed here -- unlike the plan == nil cases below, which
+			// remain ambiguous per #852.
+			if p := planByTicket[key]; p != nil && p.Status == "awaiting-input" {
+				res.Recoveries = append(res.Recoveries, Recovery{
+					Ticket:       t,
+					Kind:         RecoveryResumeInterrupted,
+					AddLabels:    []string{labelInputNeeded},
+					RemoveLabels: []string{labelWorking},
+					Comment:      resumeInterruptedComment(attempt, name, lastStatus),
+					Attempt:      attempt,
+					Detail:       fmt.Sprintf("window %s, last status %s (attempt %d): resume interrupted, restoring Input Needed", name, lastStatus, attempt),
+				})
+				continue
+			}
 
 			// Stage-aware retry (#828): a Working ticket carrying Refined
 			// with no matched plan file is a crashed planning pickup, not a
@@ -436,6 +513,17 @@ func windowDetail(number int, w *watch.WindowState) (name, status string) {
 func retryComment(attempt int, window, status string) string {
 	return fmt.Sprintf("%s\n🔄 cenci dispatch attempt %d: window `%s` is gone (last status %s). "+
 		"Re-queuing the ticket for pickup.", attemptMarker, attempt, window, status)
+}
+
+// resumeInterruptedComment (#853) is posted when the reconciler classifies a
+// dead Working ticket with an awaiting-input draft as an interrupted resume.
+// It deliberately embeds the SAME attemptMarker retryComment uses, so
+// countAttempts' shared durable tally is not doubled by a distinct marker
+// (Q2's bounded-restore requirement) -- its text is otherwise content-
+// distinct from retryComment (#446).
+func resumeInterruptedComment(attempt int, window, status string) string {
+	return fmt.Sprintf("%s\n↩️ cenci dispatch attempt %d: the resumed session's window `%s` is gone (last status %s) "+
+		"before it could finish. Restoring `%s` so the escalation can be re-triggered.", attemptMarker, attempt, window, status, labelInputNeeded)
 }
 
 func failedComment(attempts int, window, status string) string {

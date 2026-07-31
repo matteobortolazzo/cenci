@@ -6,9 +6,12 @@ package pipeline
 // exclusive gh-assignee ownership (mirrors
 // flow/skills/ticket-ownership/SKILL.md's full contract: resolve the
 // current login, compare against the ticket's assignees, auto-claim only
-// when unassigned, never replace an existing assignee). "input-needed"
-// (#826) is the unattended-escalation label swap (Working -> Input Needed,
-// keeping Refined) and carries no ownership check.
+// when unassigned, never replace an existing assignee) and atomically
+// retiring "Input Needed" when the ticket carries it (#853: the manual and
+// dispatch-triggered resume lanes share this "+Working -Input Needed"
+// transition contract). "input-needed" (#826) is the unattended-escalation
+// label swap (Working -> Input Needed, keeping Refined) and carries no
+// ownership check.
 // Label application self-heals via `gh label create` (treating "already
 // exists" as success) before `gh issue edit --add-label`/`--remove-label`.
 // All gh calls are retry-wrapped through retry.go's existing
@@ -21,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -150,10 +154,13 @@ func ApplyLabelTransition(o LabelOpts) (State, error) {
 
 	cfg := defaultRetryConfig()
 
+	var ticketLabels []string
 	if o.Transition == "working" {
-		if err := verifyAndClaimOwnership(o.ID, o.RepoSlug, cfg); err != nil {
+		labels, err := verifyAndClaimOwnership(o.ID, o.RepoSlug, cfg)
+		if err != nil {
 			return State{}, err
 		}
+		ticketLabels = labels
 	}
 
 	// Labels this transition retires, as a set: "in-review" clears the whole
@@ -163,9 +170,21 @@ func ApplyLabelTransition(o LabelOpts) (State, error) {
 	// Working too -- the ticket's window is gone (the run stopped cleanly to
 	// escalate), so leaving Working behind is exactly what the reconciler's
 	// crash-recovery would otherwise retry against a dead window. Removing a
-	// label the ticket does not carry is a no-op for `gh issue edit`, so the
-	// set needs no membership check first.
+	// label the ticket does not carry is a no-op for `gh issue edit`, so
+	// those sets need no membership check first. "working" is the exception
+	// (#853): it retires "Input Needed" only when the ticket actually carries
+	// it, per the combined `--json assignees,labels` read above -- an
+	// unconditional `--remove-label "Input Needed"` would hard-fail against a
+	// repo that has never escalated and therefore never had the label
+	// created, breaking the working transition everywhere. This closes the
+	// resume round trip: the manual `pipeline label --transition working` and
+	// the dispatch auto-resume claim both realize the same "+Working -Input
+	// Needed" contract; the reverse "+Input Needed -Working" is realized by
+	// the "input-needed" transition below and by the reconciler's rollback.
 	var removeLabels []string
+	if o.Transition == "working" && slices.Contains(ticketLabels, labelName["input-needed"]) {
+		removeLabels = []string{labelName["input-needed"]}
+	}
 	if o.Transition == "planned" && !o.Trivial {
 		removeLabels = []string{labelName["working"]}
 	}
@@ -209,29 +228,35 @@ func ApplyLabelTransition(o LabelOpts) (State, error) {
 // verifyAndClaimOwnership mirrors flow/skills/ticket-ownership/SKILL.md's
 // full contract: resolve the current gh login, compare it against the
 // ticket's assignees, auto-claim only when unassigned (then re-verify), and
-// never replace an existing assignee.
-func verifyAndClaimOwnership(id, repoSlug string, cfg retryConfig) error {
+// never replace an existing assignee. It returns the ticket's current
+// labels (from the same combined `--json assignees,labels` read that
+// resolved ownership, #853) so the "working" transition can decide whether
+// to retire "Input Needed" without an extra gh call.
+func verifyAndClaimOwnership(id, repoSlug string, cfg retryConfig) ([]string, error) {
 	login, err := ghCurrentLogin(cfg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	assignees, err := ghIssueAssignees(id, repoSlug, cfg)
+	assignees, labels, err := ghIssueAssigneesAndLabels(id, repoSlug, cfg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if len(assignees) == 0 {
 		if err := ghClaimAssignee(id, login, repoSlug, cfg); err != nil {
-			return err
+			return nil, err
 		}
-		assignees, err = ghIssueAssignees(id, repoSlug, cfg)
+		assignees, labels, err = ghIssueAssigneesAndLabels(id, repoSlug, cfg)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	return checkSoleAssignee(id, assignees, login)
+	if err := checkSoleAssignee(id, assignees, login); err != nil {
+		return nil, err
+	}
+	return labels, nil
 }
 
 // checkSoleAssignee reports whether login is the ticket's sole assignee,
@@ -346,30 +371,40 @@ func ghCurrentLogin(cfg retryConfig) (string, error) {
 	return login, nil
 }
 
-// ghIssueAssignees fetches the ticket's current assignee logins (mirrors
-// ticket-ownership's `gh issue view <id> --json assignees`).
-func ghIssueAssignees(id, repoSlug string, cfg retryConfig) ([]string, error) {
-	args := []string{"issue", "view", id, "--json", "assignees"}
+// ghIssueAssigneesAndLabels fetches the ticket's current assignee logins and
+// label names in one combined read (mirrors ticket-ownership's `gh issue
+// view <id> --json assignees`, extended with `labels` (#853) so the
+// "working" transition's conditional "Input Needed" removal costs zero
+// extra gh calls over the original assignees-only read).
+func ghIssueAssigneesAndLabels(id, repoSlug string, cfg retryConfig) ([]string, []string, error) {
+	args := []string{"issue", "view", id, "--json", "assignees,labels"}
 	if repoSlug != "" {
 		args = append(args, "--repo", repoSlug)
 	}
 	out, err := ghRetry(cfg, args...)
 	if err != nil {
-		return nil, fmt.Errorf("fetch assignees for ticket %s: %w", id, err)
+		return nil, nil, fmt.Errorf("fetch assignees and labels for ticket %s: %w", id, err)
 	}
 	var payload struct {
 		Assignees []struct {
 			Login string `json:"login"`
 		} `json:"assignees"`
+		Labels []struct {
+			Name string `json:"name"`
+		} `json:"labels"`
 	}
 	if jerr := json.Unmarshal(out, &payload); jerr != nil {
-		return nil, fmt.Errorf("decode assignees for ticket %s: %w", id, jerr)
+		return nil, nil, fmt.Errorf("decode assignees and labels for ticket %s: %w", id, jerr)
 	}
 	logins := make([]string, 0, len(payload.Assignees))
 	for _, a := range payload.Assignees {
 		logins = append(logins, a.Login)
 	}
-	return logins, nil
+	labels := make([]string, 0, len(payload.Labels))
+	for _, l := range payload.Labels {
+		labels = append(labels, l.Name)
+	}
+	return logins, labels, nil
 }
 
 // ghIssueUpdatedAt fetches the ticket's current updatedAt (RFC3339,

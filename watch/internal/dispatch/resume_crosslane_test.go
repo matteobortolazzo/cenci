@@ -85,6 +85,76 @@ func TestResumeCrossLane_ProducerTemplateThroughRealClassifyComments(t *testing.
 	}
 }
 
+// -- #853: label-set contract + unknown⇒stale rule, cross-lane -------------
+//
+// Extends the #849 AC6 precedent above: the real producer doc is the input,
+// the real Go constants/behavior are the consumer -- no synthetic contract
+// on either side. Two distinct cross-lane checks:
+//
+//  1. SKILL.md's `## Label "Working"` section must literally name both
+//     labels the "working" transition's atomic swap touches (#853's Q1/D1):
+//     the exact strings labelWorking ("Working") and labelInputNeeded
+//     ("Input Needed") -- already-existing Go constants (reconcile.go), so
+//     this half needs no new production symbol and is real coverage today.
+//  2. phase-1-plan.md's `## Resume From Draft` section must state the
+//     unknown⇒stale rule using the same literal freshness values
+//     PlanCheck.DraftFreshness resolves to ("unknown", "stale") -- these are
+//     plain string literals (mirroring PlanCheck.Decision's own
+//     "resume"/"stale"/"awaiting-input" convention, never exported Go
+//     constants), hardcoded here as the two the design fixes, per this
+//     ticket's Alternatives Considered section ("draft_freshness:
+//     'fresh'|'stale'|'unknown'").
+
+func TestResumeCrossLane_LabelSetContractStatedInSkillMdMatchesGoConstants(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "flow", "skills", "implement", "SKILL.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("cross-lane (#853): could not read the producer doc at %s: %v -- this is a hard failure, never a skip", path, err)
+	}
+	content := string(data)
+
+	section := extractMarkdownSection(content, `## Label "Working"`)
+	if section == "" {
+		t.Fatalf("cross-lane (#853): could not locate '## Label \"Working\"' in %s -- this is a hard failure, never a skip", path)
+	}
+
+	if !strings.Contains(section, labelWorking) {
+		t.Errorf("cross-lane (#853): %s's '## Label \"Working\"' section does not mention the real Go label constant labelWorking (%q)", path, labelWorking)
+	}
+	if !strings.Contains(section, labelInputNeeded) {
+		t.Errorf("cross-lane (#853): %s's '## Label \"Working\"' section does not mention the real Go label constant labelInputNeeded (%q) -- the doc must state that --transition working atomically retires it", path, labelInputNeeded)
+	}
+	if !strings.Contains(section, "atomically retires") {
+		t.Errorf("cross-lane (#853): %s's '## Label \"Working\"' section must state the atomic-retirement wording (\"atomically retires `Input Needed`\") verbatim", path)
+	}
+}
+
+func TestResumeCrossLane_UnknownStaleRuleStatedInPhase1PlanMatchesDraftFreshnessValues(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "flow", "skills", "implement", "phases", "phase-1-plan.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("cross-lane (#853): could not read the producer doc at %s: %v -- this is a hard failure, never a skip", path, err)
+	}
+	content := string(data)
+
+	section := extractMarkdownSection(content, "## Resume From Draft")
+	if section == "" {
+		t.Fatalf("cross-lane (#853): could not locate '## Resume From Draft' in %s -- this is a hard failure, never a skip", path)
+	}
+
+	// The two literal freshness values PlanCheck.DraftFreshness resolves to
+	// (plain string literals, mirroring PlanCheck.Decision's own convention
+	// -- see this file's doc comment above).
+	for _, want := range []string{"unknown", "stale"} {
+		if !strings.Contains(section, "`"+want+"`") {
+			t.Errorf("cross-lane (#853): %s's '## Resume From Draft' section does not mention the literal draft_freshness value `%s`", path, want)
+		}
+	}
+	if !strings.Contains(section, "`unknown` is treated exactly as `stale`") {
+		t.Errorf("cross-lane (#853): %s's '## Resume From Draft' section must state the unknown⇒stale rule verbatim (\"`unknown` is treated exactly as `stale`\")", path)
+	}
+}
+
 // extractMarkdownSection returns the body of the named "## <heading>"
 // section in content, bounded to the next "## "-level heading (fence-aware:
 // a "## " line inside a fenced ``` code block does not end the section) --

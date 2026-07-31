@@ -36,7 +36,11 @@ type planCheckContract struct {
 	Warnings    []string `json:"warnings"`
 	Errors      []string `json:"errors"`
 	Decision    string   `json:"decision"`
-	Plan        *struct {
+	// DraftFreshness (#853) is populated only alongside an "awaiting-input"
+	// decision -- omitted (zero value) for every other decision, per
+	// pipeline.Output's `omitempty` json tag.
+	DraftFreshness string `json:"draft_freshness"`
+	Plan           *struct {
 		Mode                string `json:"mode"`
 		Slug                string `json:"slug"`
 		TicketID            int    `json:"ticketId"`
@@ -339,6 +343,150 @@ func TestPipelinePlanCheck_AwaitingInputStatus_DecisionExit0(t *testing.T) {
 	}
 	if c.Plan.Slug != "add-thing" || c.Plan.TicketID != 42 {
 		t.Errorf("plan metadata = %+v, want slug=add-thing ticketId=42", c.Plan)
+	}
+}
+
+// -- draft_freshness field (#853): git-only staleness check on the
+// awaiting-input decision, echoed alongside the existing plan fields. Real
+// git is left reachable on PATH (no gh needed either -- this branch pays for
+// no gh round-trip). Decision stays "awaiting-input" and exit code stays 0
+// in every case.
+
+// commitFileForCLITest adds one commit touching relPath under repoRoot, the
+// CLI-test-package twin of planfile_test.go's gitCommitFile (this file lives
+// in `package main_test`, not `package pipeline`, so it needs its own copy).
+func commitFileForCLITest(t *testing.T, repoRoot, relPath, content string) {
+	t.Helper()
+	full := filepath.Join(repoRoot, relPath)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(full), err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", relPath, err)
+	}
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repoRoot}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("add", relPath)
+	run("commit", "-q", "-m", "update "+relPath)
+}
+
+func TestPipelinePlanCheck_AwaitingInputStatus_DraftFreshness_StalenessPathTouched_Stale(t *testing.T) {
+	repoDir := t.TempDir()
+	initGitRepoWithCommitForCLITest(t, repoDir)
+	sha := gitHeadShaForCLITest(t, repoDir)
+	gitCommitPlanFileWithStatus(t, repoDir, "42", "add-thing", sha, "2026-07-20T20:00:00Z", "awaiting-input")
+	// gitCommitPlanFileWithStatus's stalenessPaths is "watch" -- touch it.
+	commitFileForCLITest(t, repoDir, "watch/main.go", "watch change")
+
+	cmd := exec.Command(binaryPath, "pipeline", "plan-check", "42", "--repo", repoDir)
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("plan-check awaiting-input, stale draft: unexpected error: %v\n%s", err, output)
+	}
+	var c planCheckContract
+	if jerr := json.Unmarshal(output, &c); jerr != nil {
+		t.Fatalf("stdout is not valid JSON: %v\n%s", jerr, output)
+	}
+	if c.Decision != "awaiting-input" {
+		t.Errorf("decision = %q, want awaiting-input (draft freshness must never change the decision)", c.Decision)
+	}
+	if len(c.Errors) != 0 {
+		t.Errorf("errors = %v, want none", c.Errors)
+	}
+	if c.DraftFreshness != "stale" {
+		t.Errorf("draft_freshness = %q, want stale", c.DraftFreshness)
+	}
+}
+
+func TestPipelinePlanCheck_AwaitingInputStatus_DraftFreshness_UnrelatedCommit_Fresh(t *testing.T) {
+	repoDir := t.TempDir()
+	initGitRepoWithCommitForCLITest(t, repoDir)
+	sha := gitHeadShaForCLITest(t, repoDir)
+	gitCommitPlanFileWithStatus(t, repoDir, "42", "add-thing", sha, "2026-07-20T20:00:00Z", "awaiting-input")
+	// gitCommitPlanFileWithStatus's stalenessPaths is "watch" -- this commit
+	// touches an unrelated path.
+	commitFileForCLITest(t, repoDir, "docs/unrelated.md", "unrelated change")
+
+	cmd := exec.Command(binaryPath, "pipeline", "plan-check", "42", "--repo", repoDir)
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("plan-check awaiting-input, fresh draft: unexpected error: %v\n%s", err, output)
+	}
+	var c planCheckContract
+	if jerr := json.Unmarshal(output, &c); jerr != nil {
+		t.Fatalf("stdout is not valid JSON: %v\n%s", jerr, output)
+	}
+	if c.Decision != "awaiting-input" {
+		t.Errorf("decision = %q, want awaiting-input", c.Decision)
+	}
+	if len(c.Errors) != 0 {
+		t.Errorf("errors = %v, want none", c.Errors)
+	}
+	if c.DraftFreshness != "fresh" {
+		t.Errorf("draft_freshness = %q, want fresh (an unrelated-path commit outside stalenessPaths)", c.DraftFreshness)
+	}
+}
+
+func TestPipelinePlanCheck_AwaitingInputStatus_DraftFreshness_UnreachableOrEmptySha_Unknown(t *testing.T) {
+	const baseWarning = "draft freshness unknown: planCommitSha is empty, malformed, or unreachable in git -- treated as stale"
+	cases := []struct {
+		name string
+		sha  string
+		// wantErrDetail distinguishes the two "unknown" causes reachable
+		// here (review fix): "unreachable sha" is a valid-looking 40-hex
+		// value that fails planfile.CommitsBehind's `git rev-list --count`
+		// call (a genuine CommitsBehind failure, the same class
+		// planIsStale/dispatch.go already propagate in full) -- its
+		// warning must carry that underlying error text appended to
+		// baseWarning. "empty sha" short-circuits inside draftFreshness
+		// before ever calling CommitsBehind, so it has no underlying error
+		// to append and keeps baseWarning's exact existing wording.
+		wantErrDetail bool
+	}{
+		{"unreachable sha", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", true},
+		{"empty sha", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repoDir := t.TempDir()
+			initGitRepoWithCommitForCLITest(t, repoDir)
+			gitCommitPlanFileWithStatus(t, repoDir, "42", "add-thing", tc.sha, "2026-07-20T20:00:00Z", "awaiting-input")
+
+			cmd := exec.Command(binaryPath, "pipeline", "plan-check", "42", "--repo", repoDir)
+			output, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("plan-check awaiting-input, %s: unexpected error: %v\n%s", tc.name, err, output)
+			}
+			var c planCheckContract
+			if jerr := json.Unmarshal(output, &c); jerr != nil {
+				t.Fatalf("stdout is not valid JSON: %v\n%s", jerr, output)
+			}
+			if c.Decision != "awaiting-input" {
+				t.Errorf("decision = %q, want awaiting-input (an unverifiable planCommitSha must not change the decision or fail the command)", c.Decision)
+			}
+			if len(c.Errors) != 0 {
+				t.Errorf("errors = %v, want none", c.Errors)
+			}
+			if c.DraftFreshness != "unknown" {
+				t.Errorf("draft_freshness = %q, want unknown (%s is an unverifiable freshness baseline)", c.DraftFreshness, tc.name)
+			}
+			if len(c.Warnings) != 1 {
+				t.Fatalf("warnings = %v, want exactly one entry", c.Warnings)
+			}
+			warning := c.Warnings[0]
+			if tc.wantErrDetail {
+				if warning == baseWarning || !strings.HasPrefix(warning, baseWarning) || !strings.Contains(warning, "commits-behind check failed:") {
+					t.Errorf("warning = %q, want baseWarning plus an appended commits-behind failure detail (%s must surface its underlying git error, not collapse to the bare unknown message)", warning, tc.name)
+				}
+			} else if warning != baseWarning {
+				t.Errorf("warning = %q, want exactly %q (%s never reaches CommitsBehind, so it has no underlying error to append)", warning, baseWarning, tc.name)
+			}
+		})
 	}
 }
 

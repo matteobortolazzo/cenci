@@ -84,7 +84,12 @@ type fakeGh struct {
 	t         *testing.T
 	login     string
 	assignees []string
-	calls     []ghCall
+	// labels is the ticket's current label set, consulted only by the
+	// combined `--json assignees,labels` read the "working" transition uses
+	// (#853) so its conditional Input-Needed removal can be exercised
+	// deterministically. Every other transition/test leaves this nil.
+	labels []string
+	calls  []ghCall
 
 	// labelCreateBehavior configures the response to `gh label create`:
 	// "ok" (exit 0), "already-exists" (gh's real "already exists" error
@@ -124,6 +129,8 @@ func (f *fakeGh) respond(call ghCall) ([]byte, error) {
 		return []byte(f.login + "\n"), nil
 	case call.name == "gh" && call.is("issue", "view") && call.hasFlag("--json", "updatedAt"):
 		return []byte(`{"updatedAt":"` + f.ticketUpdatedAt + `"}`), nil
+	case call.name == "gh" && call.is("issue", "view") && call.hasFlag("--json", "assignees,labels"):
+		return []byte(f.assigneesLabelsJSON()), nil
 	case call.name == "gh" && call.is("issue", "view"):
 		return []byte(f.assigneesJSON()), nil
 	case call.name == "gh" && call.is("issue", "edit") && call.hasFlag("--add-assignee", ""):
@@ -163,6 +170,35 @@ func (f *fakeGh) assigneesJSON() string {
 	b, err := json.Marshal(p)
 	if err != nil {
 		f.t.Fatalf("marshal fake assignees payload: %v", err)
+	}
+	return string(b)
+}
+
+// assigneesLabelsJSON responds to the combined `--json assignees,labels`
+// read (#853): the "working" transition's extended ownership check needs
+// both the ticket's assignees (unchanged) and its current label set, so the
+// conditional Input-Needed removal can be exercised deterministically.
+func (f *fakeGh) assigneesLabelsJSON() string {
+	type assignee struct {
+		Login string `json:"login"`
+	}
+	type label struct {
+		Name string `json:"name"`
+	}
+	type payload struct {
+		Assignees []assignee `json:"assignees"`
+		Labels    []label    `json:"labels"`
+	}
+	p := payload{}
+	for _, login := range f.assignees {
+		p.Assignees = append(p.Assignees, assignee{Login: login})
+	}
+	for _, name := range f.labels {
+		p.Labels = append(p.Labels, label{Name: name})
+	}
+	b, err := json.Marshal(p)
+	if err != nil {
+		f.t.Fatalf("marshal fake assignees+labels payload: %v", err)
 	}
 	return string(b)
 }
@@ -236,6 +272,83 @@ func TestApplyLabelTransition_Working_HappyPath_SoleAssigneeMatches(t *testing.T
 			if c.hasFlag("--add-assignee", "") {
 				t.Errorf("sole-assignee-matches path must never claim an assignee, got %v", c)
 			}
+		}
+	}
+}
+
+// -- working transition retires Input Needed conditionally (#853): a resumed
+// escalation's claim swap must atomically remove Input Needed when the
+// ticket actually carries it, via a single combined `--json
+// assignees,labels` read (no extra gh call over today's assignees-only
+// read) -- and must never emit --remove-label at all when the ticket does
+// not carry Input Needed (a repo that has never escalated must not risk `gh
+// issue edit --remove-label` hard-failing on a label absent from the repo).
+
+// TestApplyLabelTransition_Working_TicketCarriesInputNeeded_RemovesItConditionally
+// covers the resume claim: the ticket's current labels (carrying "Input
+// Needed") are read via one combined ownership+labels call, and the
+// resulting `gh issue edit --add-label Working` removes "Input Needed"
+// alongside it.
+func TestApplyLabelTransition_Working_TicketCarriesInputNeeded_RemovesItConditionally(t *testing.T) {
+	stateDir := t.TempDir()
+	mustSeedState(t, stateDir, "42", StagePrepared)
+	gh := newFakeGh(t, "octocat", []string{"octocat"})
+	gh.labels = []string{"Input Needed"}
+	gh.install()
+
+	if _, err := ApplyLabelTransition(LabelOpts{ID: "42", StateDir: stateDir, RepoSlug: "o/r", Transition: "working"}); err != nil {
+		t.Fatalf("ApplyLabelTransition(working) with Input Needed present: %v", err)
+	}
+
+	combinedRead := false
+	for _, c := range gh.callsMatching("issue", "view") {
+		if c.hasFlag("--json", "assignees,labels") {
+			combinedRead = true
+		}
+	}
+	if !combinedRead {
+		t.Error("expected the working transition to read assignees and labels in one combined `--json assignees,labels` call")
+	}
+
+	removed := false
+	for _, c := range gh.callsMatching("issue", "edit") {
+		if c.hasFlag("--add-label", "Working") && slices.Contains(c.flagValues("--remove-label"), "Input Needed") {
+			removed = true
+		}
+	}
+	if !removed {
+		t.Error("expected the working transition to remove \"Input Needed\" when the ticket carries it")
+	}
+}
+
+// TestApplyLabelTransition_Working_TicketLacksInputNeeded_NoRemoveLabelAtAll
+// covers the negative: a ticket that never escalated (no "Input Needed"
+// label) must produce a `gh issue edit --add-label Working` call with no
+// --remove-label flag at all -- an unconditional removal would hard-fail
+// against a repo that has never had the label created.
+func TestApplyLabelTransition_Working_TicketLacksInputNeeded_NoRemoveLabelAtAll(t *testing.T) {
+	stateDir := t.TempDir()
+	mustSeedState(t, stateDir, "42", StagePrepared)
+	gh := newFakeGh(t, "octocat", []string{"octocat"})
+	gh.install() // gh.labels left nil: the ticket never escalated
+
+	if _, err := ApplyLabelTransition(LabelOpts{ID: "42", StateDir: stateDir, RepoSlug: "o/r", Transition: "working"}); err != nil {
+		t.Fatalf("ApplyLabelTransition(working) without Input Needed: %v", err)
+	}
+
+	combinedRead := false
+	for _, c := range gh.callsMatching("issue", "view") {
+		if c.hasFlag("--json", "assignees,labels") {
+			combinedRead = true
+		}
+	}
+	if !combinedRead {
+		t.Error("expected the working transition to read assignees and labels in one combined `--json assignees,labels` call even when Input Needed is absent")
+	}
+
+	for _, c := range gh.callsMatching("issue", "edit") {
+		if c.hasFlag("--add-label", "Working") && c.hasFlag("--remove-label", "") {
+			t.Errorf("expected no --remove-label at all when the ticket lacks Input Needed, got %v", c)
 		}
 	}
 }

@@ -527,10 +527,11 @@ func applyReconcile(cfg Config, deps reconcileDeps, mut TicketMutator, dryRun bo
 			Kind:      RecoveryReconcileStuck,
 			AddLabels: []string{labelReconcileStuck},
 			// Reuses rec.RemoveLabels as-is: every mutating Recovery kind
-			// today (retry/failed/plan-invalid) removes exactly the one
-			// source label (Working/Planned) the escalation must also
-			// remove. Revisit this passthrough if a future recovery kind
-			// removes a different/additional set of labels.
+			// today (retry/failed/plan-invalid/resume-interrupted, #853)
+			// removes exactly the one source label (Working/Planned) the
+			// escalation must also remove. Revisit this passthrough if a
+			// future recovery kind removes a different/additional set of
+			// labels.
 			RemoveLabels: rec.RemoveLabels,
 			Comment:      reconcileStuckComment(),
 			Detail:       fmt.Sprintf("apply-retry budget (%d) exhausted: %s", cfg.ApplyRetryBudget, rec.Detail),
@@ -637,6 +638,8 @@ func formatRecovery(rec Recovery) string {
 		return fmt.Sprintf("#%d orphan-plan (report only): %s", rec.Ticket.Number, rec.Detail)
 	case RecoveryReconcileStuck:
 		return fmt.Sprintf("#%d reconcile-stuck: %s", rec.Ticket.Number, rec.Detail)
+	case RecoveryResumeInterrupted:
+		return fmt.Sprintf("#%d resume-interrupted: %s", rec.Ticket.Number, rec.Detail)
 	default:
 		return fmt.Sprintf("#%d %s: %s", rec.Ticket.Number, rec.Kind, rec.Detail)
 	}

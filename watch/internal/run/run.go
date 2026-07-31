@@ -15,6 +15,17 @@ import (
 // (e.g. run_cmd.go maps it to exit 2 instead of the default exit 1).
 var ErrHostOnlyWorkflow = errors.New("workflow runs on the host only")
 
+// ErrWindowSpawned is the sentinel a caller detects via errors.Is to
+// distinguish a failure that happened AFTER ctrl.NewWindow already succeeded
+// (#853) from any other Run failure. A tmux window was demonstrably created
+// in that case -- an agent session is actually starting -- even though this
+// call still returns an error, so dispatch's resume rollback can retain
+// Working instead of restoring Input Needed (relying on the reconciler's
+// interrupted-resume recovery as the backstop if that session turns out to
+// be dead). Every failure that occurs before ctrl.NewWindow ever succeeds
+// must NOT wrap this sentinel.
+var ErrWindowSpawned = errors.New("tmux window already spawned")
+
 // hostOnlyWorkflowError wraps ErrHostOnlyWorkflow with the exact one-line
 // stderr hint (ticket #647 Q1). A plain fmt.Errorf("%w: ...", ErrHostOnlyWorkflow)
 // would prefix the sentinel's own text, so Error() is implemented directly.
@@ -208,7 +219,7 @@ func Run(opts Opts, ctrl Controller) error {
 	// the join key instead of renaming it to the detected task.
 	target := session + ":" + name
 	if err := ctrl.SetWindowOption(target, "automatic-rename", "off"); err != nil {
-		return fmt.Errorf("setting automatic-rename off on %q: %w", target, err)
+		return fmt.Errorf("setting automatic-rename off on %q: %w: %w", target, err, ErrWindowSpawned)
 	}
 	return nil
 }
