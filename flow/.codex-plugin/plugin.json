@@ -1,6 +1,6 @@
 {
   "name": "cenci",
-  "version": "0.35.4",
+  "version": "0.36.0",
   "description": "cenci workflow layer: portable conventions, PR supervision, and Codex and Claude Code's gated ticket-to-PR pipeline.",
   "author": {
     "name": "Matteo Bortolazzo",
