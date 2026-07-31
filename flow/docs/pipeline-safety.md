@@ -46,11 +46,16 @@ fail mid-run or get reused in a new context.
 
 - Session-scoped safety flags that guard autonomous continuation (e.g., a sticky "escalated"
   flag that blocks checkpoint-free approval once any escalation question fires) must be backed
-  by durable, independently-verifiable state on disk (a marker file, checked with deterministic
-  logic), not solely by in-context model recall. Context compaction or subagent re-invocation
-  between turns can silently lose in-memory state; a written marker file survives the gap and
-  enables fail-closed behavior (treat inconclusive checks as "gate active" rather than "gate
-  absent").
+  by durable, independently-verifiable state on disk, checked with deterministic logic, not
+  solely by in-context model recall. Context compaction or subagent re-invocation between turns
+  can silently lose in-memory state; durable on-disk state survives the gap and enables
+  fail-closed behavior (treat inconclusive checks as "gate active" rather than "gate absent").
+  The durable state need not be a dedicated marker file: `/cenci:implement`'s Lean Approval
+  Path (`skills/implement/phases/phase-1-plan.md`) uses the persisted `status: awaiting-input`
+  draft itself — plus its `escalationNonce`/`escalationCommentId` anchor fields — as this
+  durable state (#849), checked with a deterministic on-disk backstop over `.plans/<id>-*.md`
+  rather than a second, separately-maintained bookkeeping file that could drift out of sync
+  with the draft it was meant to describe.
 
 - When delegating work to a subagent that must edit repo-root config files (e.g.
   `.mcp.json`, `.claude/settings.json`) as part of a feature-worktree PR, delegate targeting

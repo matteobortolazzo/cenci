@@ -129,7 +129,19 @@ PIN_LABEL_NAME='Input Needed'
 PIN_STAGE='waiting_for_input'
 PIN_PLAN_STATUS='status: awaiting-input'
 PIN_PLANCHECK_DECISION='awaiting-input'
-PIN_COMMENT_ANCHOR='<!-- cenci-planner-escalation -->'
+# PIN_COMMENT_ANCHOR (#849): the marker template is now nonce-bearing --
+# `<nonce>` is the literal placeholder token the phase text substitutes the
+# validated nonce into, mirroring escalation-anchor-contract.test.sh's own
+# PIN_MARKER_PREFIX/producer-template literal.
+PIN_COMMENT_ANCHOR='<!-- cenci-planner-escalation:<nonce> -->'
+PIN_NONCE_MINT='openssl rand -hex 16'
+PIN_NONCE_REGEX='^[0-9a-f]{32}$'
+PIN_NONCE_STOP='stop with an error'
+PIN_REST_CREATE='gh api repos/<owner>/<repo>/issues/<number>/comments -F body=@<questions-file> --jq .id'
+PIN_FM_NONCE_KEY='escalationNonce'
+PIN_FM_COMMENTID_KEY='escalationCommentId'
+PIN_PERSIST_ID_RECOVERY='the comment is already posted (step 2 succeeded), so do not re-post it'
+PIN_READBACK="gh api repos/<owner>/<repo>/issues/<number>/comments/<id> --jq '{id, body}'"
 
 assert_section_contains "${ESCALATION_SECTION}" "${PIN_AWAIT_INPUT_CMD}" \
   "must name the pinned command cenci pipeline await-input <id> verbatim"
@@ -144,13 +156,32 @@ assert_section_contains "${ESCALATION_SECTION}" "${PIN_PLAN_STATUS}" \
 assert_section_contains "${ESCALATION_SECTION}" "${PIN_PLANCHECK_DECISION}" \
   "must name the pinned plan-check decision awaiting-input verbatim"
 assert_section_contains "${ESCALATION_SECTION}" "${PIN_COMMENT_ANCHOR}" \
-  "must name the pinned comment anchor <!-- cenci-planner-escalation --> verbatim"
+  "must name the pinned nonce-bearing comment anchor template verbatim"
+assert_section_contains "${ESCALATION_SECTION}" "${PIN_NONCE_MINT}" \
+  "must name the openssl rand -hex 16 mint command verbatim (restated, not merely referenced)"
+assert_section_contains "${ESCALATION_SECTION}" "${PIN_NONCE_REGEX}" \
+  "must restate the nonce format validation regex verbatim"
+assert_section_contains "${ESCALATION_SECTION}" "${PIN_NONCE_STOP}" \
+  "must restate the stop-on-mismatch/failure rule (never a weaker fallback)"
+assert_section_contains "${ESCALATION_SECTION}" "${PIN_REST_CREATE}" \
+  "must name the REST comment-create call verbatim"
+assert_section_contains "${ESCALATION_SECTION}" "${PIN_FM_NONCE_KEY}" \
+  "must name the escalationNonce front-matter key"
+assert_section_contains "${ESCALATION_SECTION}" "${PIN_FM_COMMENTID_KEY}" \
+  "must name the escalationCommentId front-matter key"
+assert_section_contains "${ESCALATION_SECTION}" "${PIN_PERSIST_ID_RECOVERY}" \
+  "must document the persist-ID-then-verify step's recovery (never re-post a duplicate comment)"
+assert_section_contains "${ESCALATION_SECTION}" "${PIN_READBACK}" \
+  "must name step 2's comment body read-back verification call verbatim"
 
 # --- Ordering + restated recovery/idempotency per step (flow/docs/pipeline-safety.md
 #     rules 1-2: restate, don't merely reference; document recovery for every
 #     downstream step) ---------------------------------------------------
 
-ORDERING_MARKER='the ticket comment (step 2) must post before either pipeline call (steps 3 and 4)'
+# Step numbering shifted (#849): step 0 mints/validates the nonce, step 3
+# persists the returned comment ID, so the two pipeline calls that were
+# steps 3/4 pre-#849 are now steps 4/5.
+ORDERING_MARKER='the ticket comment (step 2) must post before either pipeline call (steps 4 and 5)'
 STEP2_RECOVERY_MARKER='the very next `/cenci:implement <id>` attempt retries cleanly from step 1'
 STEP3_NOOP_MARKER='This call is a monotonic no-op on retry'
 STEP4_RECOVERY_MARKER='re-running this one step alone is the correct recovery'

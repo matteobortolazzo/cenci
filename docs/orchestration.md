@@ -78,11 +78,19 @@ human-input candidate it actually is. A human answer on the ticket, followed by 
 
 The `Input Needed → Working (resume)` transition is the round trip back, and it no longer
 requires that manual re-run: `cenci dispatch` now probes every `Input Needed` ticket for a
-qualifying human reply on the escalation comment — positioned after the most recent
-`<!-- cenci-planner-escalation -->` anchor, marker-free, not authored by a `*[bot]`/`app/*`
-login, and posted by an author whose association is one of `OWNER`, `MEMBER`, or
-`COLLABORATOR` — and, when found, swaps `+Working` `−Input Needed` before relaunching the planning
-session against the persisted `status: awaiting-input` draft. This is the same relaunch shape
+qualifying human reply on the escalation comment — its anchor identity is the exact,
+immutable numeric comment ID persisted in the draft's front matter (`escalationCommentId`),
+verified by the matching `escalationNonce` marker in that comment's body, not a scan for
+"the last comment that looks like an anchor" (ticket #849 hardens this after verifying the
+pre-#849 marker-only anchor would silently never resume under an ordinary, non-bot-shaped
+`gh` identity). A qualifying reply is positioned after that verified anchor, marker-free,
+not authored by a `*[bot]`/`app/*` login or the REST API's `user.type == "Bot"`, and posted
+by an author whose association is one of `OWNER`, `MEMBER`, or `COLLABORATOR` — and, when
+found, swaps `+Working` `−Input Needed` before relaunching the planning session against the
+persisted `status: awaiting-input` draft. A draft whose anchor fields are missing, malformed,
+or unverifiable (the stored comment ID absent from the thread, or its body lacking the exact
+nonce marker) fails closed instead — dispatch never repairs an anchor itself, it only reports
+the gap; repair is a separate, human-triggered `/cenci:implement <id>` run. This is the same relaunch shape
 as an ordinary `Planned` pickup, just pointed at a draft instead of a finished plan. The
 relaunched session re-delegates to the planner with the draft's `## Architectural Context` as
 its prior exploration (no re-exploration permitted), appends the human's answers to the

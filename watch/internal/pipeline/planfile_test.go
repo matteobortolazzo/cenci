@@ -115,10 +115,15 @@ func defaultPlanFields(id, slug, sha, createdAt string) map[string]string {
 
 // planFrontMatterOrder keeps front-matter emission deterministic across the
 // map iteration, matching real .plans/*.md files' key ordering.
+//
+// escalationNonce/escalationCommentId (#849) are appended at the end: they
+// are only ever present on an awaiting-input draft, and defaultPlanFields
+// below never sets them, so their presence here is additive/backward
+// compatible with every existing fixture.
 var planFrontMatterOrder = []string{
 	"version", "mode", "ticketId", "ticketTitle", "slug", "isChild",
 	"isLastChild", "parentId", "createdAt", "status", "planCommitSha",
-	"stalenessPaths",
+	"stalenessPaths", "escalationNonce", "escalationCommentId",
 }
 
 func planFrontMatter(fields map[string]string) string {
@@ -870,6 +875,135 @@ func TestCheckPlan_StageAgnostic_EchoesPersistedStageWithoutMutating(t *testing.
 				t.Errorf("persisted State.Stage after CheckPlan = %q, want unchanged %q", reloaded.Stage, stage)
 			}
 		})
+	}
+}
+
+// -- escalation anchor echo (#849): PlanMeta gains EscalationNonce/
+// EscalationCommentID, echoed alongside every other front-matter field on
+// the awaiting-input decision. Per the plan's Assumptions, this echo is
+// deliberately unvalidated -- CheckPlan never promotes a missing/malformed
+// anchor to ErrPlanMalformed, so a draft stays repairable.
+
+func TestCheckPlan_AwaitingInput_EscalationAnchor_PresentValid_Echoed(t *testing.T) {
+	repoRoot := t.TempDir()
+	calls := recordingCommand(t)
+	fields := defaultPlanFields("42", "add-thing", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "2026-07-20T20:00:00Z")
+	fields["status"] = "awaiting-input"
+	fields["escalationNonce"] = "0123456789abcdef0123456789abcdef"
+	fields["escalationCommentId"] = "123456789"
+	writePlanFile(t, repoRoot, "42", "add-thing", fields, validPlanBody)
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, RepoSlug: "o/r"})
+	if err != nil {
+		t.Fatalf("CheckPlan: unexpected error: %v", err)
+	}
+	if check.Decision != "awaiting-input" {
+		t.Fatalf("Decision = %q, want awaiting-input", check.Decision)
+	}
+	if check.Plan == nil {
+		t.Fatal("Plan metadata must be echoed on an awaiting-input decision")
+	}
+	if check.Plan.EscalationNonce != "0123456789abcdef0123456789abcdef" {
+		t.Errorf("Plan.EscalationNonce = %q, want the front-matter nonce echoed verbatim", check.Plan.EscalationNonce)
+	}
+	if check.Plan.EscalationCommentID != 123456789 {
+		t.Errorf("Plan.EscalationCommentID = %d, want 123456789", check.Plan.EscalationCommentID)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("gh/git calls = %v, want none (awaiting-input must short-circuit before any freshness check)", *calls)
+	}
+}
+
+// TestCheckPlan_AwaitingInput_EscalationAnchor_Absent_ZeroValues is a
+// non-regression assertion (AC5's "absent fields echo zero values without
+// changing the decision or the exit code"): it is expected to PASS already
+// today, since PlanMeta's stub fields default to the zero value with no
+// front-matter keys present at all -- there is no new logic gap to expose
+// here. Kept alongside the present/malformed cases below for a complete
+// present/absent/malformed table per the plan's Test Strategy.
+func TestCheckPlan_AwaitingInput_EscalationAnchor_Absent_ZeroValues(t *testing.T) {
+	repoRoot := t.TempDir()
+	fields := defaultPlanFields("42", "add-thing", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "2026-07-20T20:00:00Z")
+	fields["status"] = "awaiting-input"
+	writePlanFile(t, repoRoot, "42", "add-thing", fields, validPlanBody)
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, RepoSlug: "o/r"})
+	if err != nil {
+		t.Fatalf("CheckPlan: unexpected error: %v", err)
+	}
+	if check.Decision != "awaiting-input" {
+		t.Errorf("Decision = %q, want awaiting-input (absent anchor fields must not change the decision)", check.Decision)
+	}
+	if check.Plan == nil {
+		t.Fatal("Plan metadata must be echoed")
+	}
+	if check.Plan.EscalationNonce != "" {
+		t.Errorf("Plan.EscalationNonce = %q, want empty (absent from front matter)", check.Plan.EscalationNonce)
+	}
+	if check.Plan.EscalationCommentID != 0 {
+		t.Errorf("Plan.EscalationCommentID = %d, want 0 (absent from front matter)", check.Plan.EscalationCommentID)
+	}
+}
+
+// TestCheckPlan_AwaitingInput_EscalationAnchor_MalformedNonce_EchoedRaw
+// covers the malformed-nonce half of the present/absent/malformed table:
+// PlanMeta's echo is deliberately unvalidated (the plan's Assumptions:
+// "echoes ... but does not promote missing/malformed anchor data to
+// ErrPlanMalformed"), so a nonce that fails escalationNoncePattern must
+// still be echoed verbatim -- rejection is each consumer's job, not
+// plan-check's. Paired with a valid escalationCommentId so this test stays
+// red purely on the not-yet-wired nonce echo, not incidentally on the ID.
+func TestCheckPlan_AwaitingInput_EscalationAnchor_MalformedNonce_EchoedRaw(t *testing.T) {
+	repoRoot := t.TempDir()
+	fields := defaultPlanFields("42", "add-thing", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "2026-07-20T20:00:00Z")
+	fields["status"] = "awaiting-input"
+	fields["escalationNonce"] = "not-hex-and-wrong-length"
+	fields["escalationCommentId"] = "42"
+	writePlanFile(t, repoRoot, "42", "add-thing", fields, validPlanBody)
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, RepoSlug: "o/r"})
+	if err != nil {
+		t.Fatalf("CheckPlan: unexpected error: %v (malformed anchor data must never become ErrPlanMalformed)", err)
+	}
+	if check.Decision != "awaiting-input" {
+		t.Errorf("Decision = %q, want awaiting-input (a malformed nonce must not change the decision)", check.Decision)
+	}
+	if check.Plan == nil {
+		t.Fatal("Plan metadata must be echoed")
+	}
+	if check.Plan.EscalationNonce != "not-hex-and-wrong-length" {
+		t.Errorf("Plan.EscalationNonce = %q, want the malformed value echoed verbatim (echo-only, unvalidated)", check.Plan.EscalationNonce)
+	}
+	if check.Plan.EscalationCommentID != 42 {
+		t.Errorf("Plan.EscalationCommentID = %d, want 42 (the paired valid ID)", check.Plan.EscalationCommentID)
+	}
+}
+
+// TestCheckPlan_AwaitingInput_EscalationAnchor_MalformedCommentId_ParsesToZero
+// covers the malformed-ID half: a non-numeric escalationCommentId must
+// parse to 0 (a strconv.ParseInt failure), never propagate as a validation
+// error. Paired with a valid nonce so this test stays red purely on the
+// not-yet-wired ID echo, not incidentally on the nonce.
+func TestCheckPlan_AwaitingInput_EscalationAnchor_MalformedCommentId_ParsesToZero(t *testing.T) {
+	repoRoot := t.TempDir()
+	fields := defaultPlanFields("42", "add-thing", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "2026-07-20T20:00:00Z")
+	fields["status"] = "awaiting-input"
+	fields["escalationNonce"] = "0123456789abcdef0123456789abcdef"
+	fields["escalationCommentId"] = "not-a-number"
+	writePlanFile(t, repoRoot, "42", "add-thing", fields, validPlanBody)
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, RepoSlug: "o/r"})
+	if err != nil {
+		t.Fatalf("CheckPlan: unexpected error: %v (malformed anchor data must never become ErrPlanMalformed)", err)
+	}
+	if check.Plan == nil {
+		t.Fatal("Plan metadata must be echoed")
+	}
+	if check.Plan.EscalationCommentID != 0 {
+		t.Errorf("Plan.EscalationCommentID = %d, want 0 (non-numeric value must parse to 0, never propagate as an error)", check.Plan.EscalationCommentID)
+	}
+	if check.Plan.EscalationNonce != "0123456789abcdef0123456789abcdef" {
+		t.Errorf("Plan.EscalationNonce = %q, want the paired valid nonce echoed verbatim", check.Plan.EscalationNonce)
 	}
 }
 

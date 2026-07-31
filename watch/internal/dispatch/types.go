@@ -157,24 +157,41 @@ const (
 	// AnswerProbeAnswered means a non-bot comment with no `<!-- cenci-`
 	// marker (blockquote-stripped first) and an authorized authorAssociation
 	// (`OWNER`, `MEMBER`, or `COLLABORATOR` -- #827 review fix #1) was found
-	// positioned after the last `<!-- cenci-planner-escalation -->` anchor
-	// comment -- a human answered the escalation.
+	// positioned after the comment classifyComments verified is the anchor
+	// (#849): anchor identity is the persisted EscalationCommentID/
+	// EscalationNonce pair -- the exact stored comment ID whose
+	// blockquote-stripped body contains the exact
+	// `escalationAnchorPrefix + nonce` marker, never a content scan for "the
+	// last anchor-shaped comment" -- a human answered the escalation.
 	AnswerProbeAnswered AnswerProbe = "answered"
-	// AnswerProbeWaiting means an escalation anchor was found, but every
-	// comment after it is either cenci-authored (carries a `<!-- cenci-`
-	// marker), bot-authored (`*[bot]`/`app/*` login), or lacks an authorized
-	// authorAssociation (`OWNER`, `MEMBER`, or `COLLABORATOR` -- #827 review
-	// fix #1) -- still waiting on a human.
+	// AnswerProbeWaiting means classifyComments (#849) located and verified
+	// the persisted anchor (the exact stored comment ID/nonce pair), but
+	// every comment after it is either cenci-authored (carries a `<!--
+	// cenci-` marker), bot-authored (`*[bot]`/`app/*` login), or lacks an
+	// authorized authorAssociation (`OWNER`, `MEMBER`, or `COLLABORATOR` --
+	// #827 review fix #1) -- still waiting on a human.
 	AnswerProbeWaiting AnswerProbe = "waiting"
-	// AnswerProbeNoAnchor means the comment thread contains no
-	// `<!-- cenci-planner-escalation -->` anchor at all (including an empty
-	// thread) -- there is nothing to resume from yet.
-	AnswerProbeNoAnchor AnswerProbe = "no_anchor"
-	// AnswerProbeUnresolved means the probe itself failed: the `gh issue
-	// view` call errored, its JSON was malformed, or the pass's per-pass
-	// call budget (maxAnswerProbes) was already spent -- fails closed
-	// rather than assuming answered or waiting.
+	// AnswerProbeUnresolved means the probe itself failed: the `gh api
+	// .../comments --paginate` call errored, its JSON was malformed, or the
+	// pass's per-pass call budget (maxAnswerProbes) was already spent --
+	// fails closed rather than assuming answered or waiting.
 	AnswerProbeUnresolved AnswerProbe = "unresolved"
+
+	// AnswerProbeAnchorUnset means the ticket's matched Plan carries no
+	// usable escalation anchor (#849): EscalationNonce is empty or fails
+	// escalationNoncePattern, or EscalationCommentID is <= 0 -- the
+	// persisted draft itself never recorded a usable anchor, a fail-closed
+	// case the human-triggered repair ladder
+	// (flow/skills/implement/phases/phase-1-plan.md's
+	// `## Repair Escalation Anchor`) exists to fix. Dispatch never repairs
+	// it itself; it only fails closed.
+	AnswerProbeAnchorUnset AnswerProbe = "anchor_unset"
+	// AnswerProbeAnchorMismatch means the Plan carries a well-formed
+	// nonce/comment-ID pair, but the stored comment ID could not be located
+	// in the thread, or the comment at that ID does not contain the exact
+	// nonce marker (#849) -- fails closed rather than falling back to a
+	// content/last-comment scan.
+	AnswerProbeAnchorMismatch AnswerProbe = "anchor_mismatch"
 )
 
 // RepoAutonomy classifies the resolved per-repository `planning.autonomy`
@@ -334,6 +351,16 @@ type Plan struct {
 	// key; when non-empty, only commits touching them count toward CommitsBehind.
 	// Empty = whole-repo counting (plan files without the key).
 	StalenessPaths []string
+
+	// EscalationNonce/EscalationCommentID (#849) are the awaiting-input
+	// draft's persisted escalation-anchor fields, collector-filled by
+	// ReadPlans from the plan's escalationNonce/escalationCommentId
+	// front-matter keys. Left at their zero value ("" / 0) when absent or
+	// malformed (nonce not matching escalationNoncePattern, or the comment
+	// ID failing strconv.ParseInt base 10/64 or resolving <= 0) -- never a
+	// plan-file drop; the malformed value is simply not trusted.
+	EscalationNonce     string
+	EscalationCommentID int64
 }
 
 // Action is the outcome the engine chose for a ticket.

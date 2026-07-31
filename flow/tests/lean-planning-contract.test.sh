@@ -61,7 +61,6 @@ FLOW_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)" || { echo "lean-planning-contract.tes
 PLANNER_AGENT="${FLOW_DIR}/agents/planner.md"
 PHASE1_PLAN="${FLOW_DIR}/skills/implement/phases/phase-1-plan.md"
 PHASE2_WORKTREE="${FLOW_DIR}/skills/implement/phases/phase-2-worktree.md"
-PHASE9_PR="${FLOW_DIR}/skills/implement/phases/phase-9-pr.md"
 CONFIGURE_SKILL="${FLOW_DIR}/skills/configure/SKILL.md"
 IMPLEMENT_SKILL="${FLOW_DIR}/skills/implement/SKILL.md"
 failures=0
@@ -151,8 +150,11 @@ TRIVIAL_PRECEDENCE_MARKER='the Trivial Fast Path did not apply (it takes precede
 QANDA_AUTOADOPTED_TEMPLATE_MARKER='planner self-resolved entries as `auto-adopted: <answer> — <rationale>`'
 SENSITIVE_PATH_BACKSTOP_MARKER='**Deterministic sensitive-path backstop.** Run `SKILL.md`'"'"'s `### Sensitive-path backstop (deterministic)` pattern set'
 OPEN_QUESTIONS_DISQUALIFIER_MARKER='**Unresolved Open Questions.** A non-empty, non-"None" `### Open Questions` in the planner'"'"'s output disqualifies the Lean Approval Path'
-ESCALATED_MARKER_WRITE_MARKER="printf 'escalated\\n' > \"\${TMPDIR:-/tmp}/cenci/cenci-escalated-<id-or-slug>.marker\""
-ESCALATED_MARKER_CHECK_MARKER='the marker file `${TMPDIR:-/tmp}/cenci/cenci-escalated-<id-or-slug>.marker` does not exist'
+# #849: the shared temp-file escalation marker was retired in favor of the
+# persisted `awaiting-input` draft itself as the durable lean-approval
+# blocker -- see the repo-wide negative assertion and the durable-draft
+# entry-condition marker below.
+DURABLE_DRAFT_ENTRY_CONDITION_MARKER='a deterministic on-disk backstop confirms no `.plans/<id>-*.md` file'"'"'s front matter carries `status: awaiting-input`'
 
 assert_file_contains "${PHASE1_PLAN}" "${PLANNING_AUTONOMY_KEY_MARKER}" \
   "must reference the planning.autonomy config key"
@@ -186,10 +188,19 @@ assert_file_contains "${PHASE1_PLAN}" "${SENSITIVE_PATH_BACKSTOP_MARKER}" \
   "Lean Approval Path entry conditions must run the deterministic sensitive-path backstop over Files to Modify/Create before qualifying"
 assert_file_contains "${PHASE1_PLAN}" "${OPEN_QUESTIONS_DISQUALIFIER_MARKER}" \
   "Lean Approval Path entry conditions must disqualify on a non-empty, non-None ### Open Questions"
-assert_file_contains "${PHASE1_PLAN}" "${ESCALATED_MARKER_WRITE_MARKER}" \
-  "Route Planner Output's escalation branch must write the durable cenci-escalated-<id-or-slug>.marker file, not just set the in-context flag"
-assert_file_contains "${PHASE1_PLAN}" "${ESCALATED_MARKER_CHECK_MARKER}" \
-  "Lean Approval Path entry conditions must also require the escalated marker file to not exist"
+assert_file_contains "${PHASE1_PLAN}" "${DURABLE_DRAFT_ENTRY_CONDITION_MARKER}" \
+  "Lean Approval Path entry conditions must require the durable-draft on-disk backstop (status: awaiting-input), replacing the retired marker-file check (#849)"
+
+# --- Negative: the retired shared temp-file escalation marker must appear
+#     nowhere in flow/ (#849) -- excludes this test file itself, which
+#     necessarily spells the retired literal out once, in a Bash single-quoted
+#     string, to define what the scan searches for. ------------------------
+
+RETIRED_MARKER_LITERAL='cenci-escalated-'
+RETIRED_MARKER_HITS="$(grep -rlF --exclude="$(basename "${BASH_SOURCE[0]}")" -- "${RETIRED_MARKER_LITERAL}" "${FLOW_DIR}" 2>/dev/null || true)"
+if [[ -n "${RETIRED_MARKER_HITS}" ]]; then
+  fail "the retired ${RETIRED_MARKER_LITERAL} marker literal must appear nowhere in flow/ (#849) -- found in: $(tr '\n' ' ' <<<"${RETIRED_MARKER_HITS}")"
+fi
 
 # --- Negative: must not reuse plan-persist-sections-contract.test.sh's four
 #     assert_occurs_once markers (would break its file-wide occurs-once
@@ -219,16 +230,6 @@ GATE_CHECK_LEAN_ENTRANCE_MARKER='the Lean Approval Path in Phase 1 wrote a plan 
 
 assert_file_contains "${PHASE2_WORKTREE}" "${GATE_CHECK_LEAN_ENTRANCE_MARKER}" \
   "Gate Check must name the Lean Approval Path as a third entrance alongside (a)/(b)"
-
-# =====================================================================
-# skills/implement/phases/phase-9-pr.md — Cleanup rm -f list must remove the
-# escalation marker file alongside the other ticket-slug-scoped temp files.
-# =====================================================================
-
-PHASE9_CLEANUP_MARKER_RM_MARKER='${TMPDIR:-/tmp}/cenci/cenci-escalated-<ticket-id-or-slug>.marker'
-
-assert_file_contains "${PHASE9_PR}" "${PHASE9_CLEANUP_MARKER_RM_MARKER}" \
-  "Cleanup's rm -f list must remove the cenci-escalated-<ticket-id-or-slug>.marker file"
 
 # =====================================================================
 # skills/configure/SKILL.md — document-only planning schema block.

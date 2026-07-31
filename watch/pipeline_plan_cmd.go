@@ -42,7 +42,12 @@ package main
 //	                                        escalation path, blocked on a
 //	                                        human; nil error like
 //	                                        resume/stale/replan, so it also
-//	                                        exits 0 trivially
+//	                                        exits 0 trivially. The `plan`
+//	                                        object also echoes this decision's
+//	                                        escalationNonce/escalationCommentId
+//	                                        (#849) verbatim -- unvalidated, so
+//	                                        a missing/malformed anchor never
+//	                                        changes the decision or exit code
 //	none            exit 0, errors: [_]  -- no .plans/<id>-*.md match yet
 //	multiple        exit 0, errors: [_]  -- 2+ matches, ambiguous
 //	"" (unset)      exit 1, errors: [_]  -- ErrPlanMalformed or a

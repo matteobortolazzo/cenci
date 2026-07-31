@@ -329,15 +329,17 @@ func ReadPlans(repo, dir string, commitsBehind func(sha string, paths []string) 
 		}
 
 		p := Plan{
-			Repo:           repo,
-			Path:           path,
-			TicketID:       ticketID,
-			Status:         fm["status"],
-			PlanCommitSha:  fm["planCommitSha"],
-			IsChild:        fm["isChild"] == "true",
-			IsLastChild:    fm["isLastChild"] == "true",
-			ParentID:       planfile.AtoiSafe(fm["parentId"]),
-			StalenessPaths: planfile.SplitPaths(fm["stalenessPaths"]),
+			Repo:                repo,
+			Path:                path,
+			TicketID:            ticketID,
+			Status:              fm["status"],
+			PlanCommitSha:       fm["planCommitSha"],
+			IsChild:             fm["isChild"] == "true",
+			IsLastChild:         fm["isLastChild"] == "true",
+			ParentID:            planfile.AtoiSafe(fm["parentId"]),
+			StalenessPaths:      planfile.SplitPaths(fm["stalenessPaths"]),
+			EscalationNonce:     validEscalationNonce(fm["escalationNonce"]),
+			EscalationCommentID: validEscalationCommentID(fm["escalationCommentId"]),
 		}
 		key := planKey(repo, ticketID)
 		if p.PlanCommitSha != "" {
@@ -424,6 +426,32 @@ func planFileTicketID(path string) (int, bool) {
 		return 0, false
 	}
 	return n, true
+}
+
+// validEscalationNonce validates v -- a plan's escalationNonce front-matter
+// value -- against escalationNoncePattern (#849). A malformed or absent
+// value resolves to "" (absent), never a plan-file drop: ReadPlans is a real
+// consumer of the anchor (unlike pipeline.CheckPlan's deliberately
+// unvalidated echo), so it must fail closed here rather than trust an
+// unverified nonce.
+func validEscalationNonce(v string) string {
+	if escalationNoncePattern.MatchString(v) {
+		return v
+	}
+	return ""
+}
+
+// validEscalationCommentID parses v -- a plan's escalationCommentId
+// front-matter value -- as a base-10 int64 (#849). A parse failure or a
+// non-positive result resolves to 0 (absent), per the plan's Assumptions:
+// "escalationCommentId is parsed with strconv.ParseInt(_, 10, 64); <= 0 or a
+// parse error is treated as absent (fails closed)."
+func validEscalationCommentID(v string) int64 {
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
 }
 
 // ReadSnapshot dials the daemon broadcast socket, reads one snapshot, and

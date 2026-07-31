@@ -33,15 +33,31 @@ its body (`cenciMarkerPrefix`, `reconcile.go`).
 
 This is load-bearing for ticket #827's dispatch auto-resume: the escalation
 answer classifier (`resume.go`'s `classifyComments`) treats any comment
-positioned after the last `<!-- cenci-planner-escalation -->` anchor as a
-human answer **unless** it carries a `<!-- cenci-` marker (after `>`-quoted
-blockquote lines are stripped first), its author login is bot-shaped
-(`*[bot]`/`app/*`), or its author association is not one of `OWNER`,
-`MEMBER`, or `COLLABORATOR` (`isAuthorizedAssociation`, #827 review fix #1) —
-a required, additional check, not a substitute for the marker/bot-shape
-checks. A future comment helper that forgets to embed a marker would
-silently become a false "answered" trigger — it would look exactly like a
-human reply and could resume a ticket nobody actually answered.
+positioned after the anchor as a human answer **unless** it carries a
+`<!-- cenci-` marker (after `>`-quoted blockquote lines are stripped first),
+its author login is bot-shaped (`*[bot]`/`app/*`) or its `user.type` is
+`"Bot"` (the REST comments API's first-class bot flag, #849), or its author
+association is not one of `OWNER`, `MEMBER`, or `COLLABORATOR`
+(`isAuthorizedAssociation`, #827 review fix #1) — a required, additional
+check, not a substitute for the marker/bot-shape checks. A future comment
+helper that forgets to embed a marker would silently become a false
+"answered" trigger — it would look exactly like a human reply and could
+resume a ticket nobody actually answered.
+
+**The anchor itself is no longer located by scanning for a marker (#849).**
+Pre-#849, `classifyComments` treated the *last* bot-authored comment
+containing `<!-- cenci-planner-escalation -->` as "the" anchor — a content
+scan, not an identity check. Ticket #849 replaces that with the persisted
+plan's exact stored `escalationCommentId`: the anchor is the comment whose
+numeric `id` matches that value, verified by confirming its
+blockquote-stripped body contains the exact marker
+`<!-- cenci-planner-escalation:<escalationNonce> -->`. The `<!-- cenci-`
+marker-prefix convention above is now scoped to the *answer* exclusion only
+(a candidate reply carrying any cenci marker is never treated as a human
+answer) — it no longer has any role in finding the anchor itself, since a
+forged or duplicate marker-shaped comment anywhere else in the thread can
+never become "the" anchor once identity is a stored numeric ID rather than a
+content match.
 
 **Rule:** any new comment helper added to this package (or to a flow skill
 that posts to a ticket cenci also dispatches) must embed a `<!-- cenci-<kind>
@@ -53,4 +69,4 @@ yet. `attemptMarker`'s own `strings.Contains` check in `countAttempts` is
 unaffected: each marker is a distinct string, so back-filling the other three
 never inflates the attempt tally.
 
-- **Strip blockquote-prefixed lines before the anchor scan:** When determining the last (most recent) escalation anchor in a comment thread, strip `>`-prefixed blockquote lines from each comment's body before checking whether it contains the escalation anchor. A human using GitHub's "Quote reply" on the escalation comment copies the anchor verbatim into their own body's blockquoted lines; if the anchor scan does not strip blockquotes first, it would misidentify the quoted-reply comment as a new anchor, incorrectly resetting "last anchor" past the genuine human answer that follows, thus breaking auto-resume (#827).
+- **Strip blockquote-prefixed lines before verifying the anchor's marker:** Strip `>`-prefixed blockquote lines from a comment's body before checking whether it contains the escalation anchor's marker. A human using GitHub's "Quote reply" on the escalation comment copies the marker verbatim into their own body's blockquoted lines; if the check does not strip blockquotes first, a quote-reply comment could be misread as carrying a genuine marker of its own (#827; still load-bearing under #849's exact-ID anchor matching, since the stripped check now runs both on the anchor comment's own body and on every candidate answer after it).

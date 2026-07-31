@@ -124,14 +124,17 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 	snap, _ := ReadSnapshot(watch.DefaultSocketPath()) // nil on error ⇒ Decide skips safely
 
 	// Probe every `Input Needed` ticket for a human answer to its escalation
-	// (#827), keyed by planKey so Decide's Inputs.Answers can look it up --
-	// mirrors RunReconcileOnce's countAttempts loop, a label-scoped
-	// per-ticket gh read outside the collector. A probe failure fails closed
-	// (AnswerProbeUnresolved) and is only logged -- it never feeds
-	// collectErr, matching fetchDependencyState (a gate input) rather than
-	// countAttempts (a destructive-verdict input): one transient gh hiccup
-	// must never paint the whole pass dispatch_pass_failed.
-	answers := resolveAnswerProbes(tickets, out)
+	// (#827/#849), keyed by planKey so Decide's Inputs.Answers can look it
+	// up -- mirrors RunReconcileOnce's countAttempts loop, a label-scoped
+	// per-ticket gh read outside the collector. planByTicket (indexPlans,
+	// decide.go) supplies each ticket's persisted escalation anchor fields
+	// so the REST probe knows which comment ID/nonce to verify. A probe
+	// failure fails closed (AnswerProbeUnresolved) and is only logged -- it
+	// never feeds collectErr, matching fetchDependencyState (a gate input)
+	// rather than countAttempts (a destructive-verdict input): one
+	// transient gh hiccup must never paint the whole pass
+	// dispatch_pass_failed.
+	answers := resolveAnswerProbes(tickets, indexPlans(plans), out)
 
 	decisions, applyErr := applyDispatch(cfg, dispatchDeps{
 		Tickets:      tickets,
