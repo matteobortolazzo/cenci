@@ -23,23 +23,32 @@ type Options struct {
 	Once                bool
 }
 type State struct {
-	SchemaVersion       int       `json:"schemaVersion"`
-	PR                  string    `json:"pr"`
-	Repo                string    `json:"repo"`
-	Agent               string    `json:"agent"`
-	IntervalSeconds     int64     `json:"intervalSeconds"`
-	CurrentDelaySeconds int64     `json:"currentDelaySeconds"`
-	LastHeadSHA         string    `json:"lastCiHeadSha,omitempty"`
-	FixAttempts         int       `json:"ciFixAttempts"`
-	RepairPending       bool      `json:"ciRepairPending"`
-	LastCommentAt       string    `json:"lastCommentTimestamp,omitempty"`
-	AddressedKeys       []string  `json:"addressedCommentKeys,omitempty"`
-	PendingKeys         []string  `json:"pendingCommentKeys,omitempty"`
-	PendingCommentAt    string    `json:"pendingCommentTimestamp,omitempty"`
-	PendingHeadSHA      string    `json:"pendingCommentHeadSha,omitempty"`
-	PID                 int       `json:"pid,omitempty"`
-	Status              string    `json:"status"`
-	UpdatedAt           time.Time `json:"updatedAt"`
+	SchemaVersion       int      `json:"schemaVersion"`
+	PR                  string   `json:"pr"`
+	Repo                string   `json:"repo"`
+	Agent               string   `json:"agent"`
+	IntervalSeconds     int64    `json:"intervalSeconds"`
+	CurrentDelaySeconds int64    `json:"currentDelaySeconds"`
+	LastHeadSHA         string   `json:"lastCiHeadSha,omitempty"`
+	FixAttempts         int      `json:"ciFixAttempts"`
+	RepairPending       bool     `json:"ciRepairPending"`
+	LastCommentAt       string   `json:"lastCommentTimestamp,omitempty"`
+	AddressedKeys       []string `json:"addressedCommentKeys,omitempty"`
+	PendingKeys         []string `json:"pendingCommentKeys,omitempty"`
+	PendingCommentAt    string   `json:"pendingCommentTimestamp,omitempty"`
+	// PendingHeadSHA is repair-attempt/deduplication metadata only -- it
+	// records the head commit SHA at the moment new feedback was detected --
+	// and is never proof of resolution (#850). A push landing after this SHA
+	// (repair or otherwise) does not, by itself, mean a reviewer accepted
+	// anything; only reconcilePendingFeedback's GitHub-authoritative check
+	// (resolved review thread, or a dismissed/superseded CHANGES_REQUESTED
+	// review) clears a PendingKeys entry. Still written at detection time
+	// (see the new-key append below), just no longer read to decide
+	// resolution.
+	PendingHeadSHA string    `json:"pendingCommentHeadSha,omitempty"`
+	PID            int       `json:"pid,omitempty"`
+	Status         string    `json:"status"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 
 	// RepoRoot is the supervised repository's local checkout root, resolved
 	// once at startup. It is the repo half of BlocksClose's join key; a
@@ -250,12 +259,6 @@ func tick(s *State) (bool, time.Duration, error) {
 	}
 	s.CIStatus = ciStatus(checks)
 	actionable := false
-	if len(s.PendingKeys) > 0 && pr.HeadRefOID != s.PendingHeadSHA {
-		s.AddressedKeys = append(s.AddressedKeys, s.PendingKeys...)
-		s.PendingKeys = nil
-		s.LastCommentAt = s.PendingCommentAt
-		s.PendingCommentAt, s.PendingHeadSHA = "", ""
-	}
 	var failing []string
 	for _, c := range checks {
 		if c.Bucket == "fail" {
@@ -284,6 +287,8 @@ func tick(s *State) (bool, time.Duration, error) {
 		s.RepairPending = false
 		s.LastHeadSHA = pr.HeadRefOID
 	}
+	// Unpaginated by design in this ticket -- comments beyond the default
+	// page size are silently missed; hardening this read is #854's scope.
 	var comments []comment
 	if err := ghJSON(&comments, "api", "repos/"+s.Repo+"/pulls/"+s.PR+"/comments"); err != nil {
 		return false, 0, err
@@ -307,6 +312,9 @@ func tick(s *State) (bool, time.Duration, error) {
 			}
 		}
 	}
+	// Unpaginated by design in this ticket too (reviewsPageSize in feedback.go
+	// is a fail-closed tripwire against this, not a fix) -- full pagination
+	// of this read is also #854's scope.
 	var reviews []review
 	if err := ghJSON(&reviews, "api", "repos/"+s.Repo+"/pulls/"+s.PR+"/reviews"); err != nil {
 		return false, 0, err
@@ -329,7 +337,13 @@ func tick(s *State) (bool, time.Duration, error) {
 		s.PendingHeadSHA = pr.HeadRefOID
 		actionable = true
 	}
-	if runAutomerge(s, pr, checks) {
+	// #850: re-fetch authoritative review-feedback state at the end of tick,
+	// after this tick's new keys are appended and immediately before the
+	// automerge decision (Q6) -- runs unconditionally, regardless of whether
+	// automerge itself is enabled, since the launch-dedup/AddressedKeys
+	// bookkeeping it performs matters independent of automerge.
+	verdict := reconcilePendingFeedback(s, reviews)
+	if runAutomerge(s, pr, checks, verdict) {
 		actionable = true
 	}
 	if actionable {

@@ -150,6 +150,13 @@ func TestEvaluateAutomergeConditionMatrix(t *testing.T) {
 		{"CI not green", func(in *automergeInputs) { in.CIStatus = "pending" }, reasonCINotGreen},
 		{"CI repair pending", func(in *automergeInputs) { in.RepairPending = true }, reasonRepairPending},
 		{"review feedback pending", func(in *automergeInputs) { in.PendingKeys = []string{"comment:1"} }, reasonReviewPending},
+		// The four new #850 feedback-hold reasons: FeedbackHold is checked
+		// after RepairPending and before len(PendingKeys), so any of these
+		// four never masquerades as the ordinary reasonReviewPending hold.
+		{"review feedback state unreadable (API error)", func(in *automergeInputs) { in.FeedbackHold = reasonFeedbackUnreadable }, reasonFeedbackUnreadable},
+		{"review feedback state truncated (incomplete pagination)", func(in *automergeInputs) { in.FeedbackHold = reasonFeedbackTruncated }, reasonFeedbackTruncated},
+		{"review feedback state unknown (absent thread/review or unknown review state)", func(in *automergeInputs) { in.FeedbackHold = reasonReviewStateUnknown }, reasonReviewStateUnknown},
+		{"unsupported review feedback type", func(in *automergeInputs) { in.FeedbackHold = reasonFeedbackUnsupported }, reasonFeedbackUnsupported},
 		{"draft PR", func(in *automergeInputs) { in.IsDraft = true }, reasonDraft},
 		{"mergeable state UNKNOWN", func(in *automergeInputs) { in.Mergeable = "UNKNOWN" }, reasonMergeableUnknown},
 		{"mergeable state CONFLICTING", func(in *automergeInputs) { in.Mergeable = "CONFLICTING" }, reasonNotMergeable},
@@ -758,33 +765,50 @@ func TestTickAutomergeDisabledMakesNoExtraGHCalls(t *testing.T) {
 // reaching the policy fetch or merge call.
 func TestTickAutomergeHeldOnRepairOrReviewPending(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		setup      func(*State)
-		wantReason string
+		name  string
+		setup func(*State)
+		// extraScript is the lazy GraphQL thread fetch (#850): reconcile
+		// runs in tick() via reconcilePendingFeedback unconditionally, right
+		// before runAutomerge is even called -- i.e. before runAutomerge's
+		// own labels fetch -- but only the "review feedback pending"
+		// subtest's "comment:1" PendingKeys entry actually triggers it.
+		extraScript []scriptedCall
+		wantReason  string
 	}{
-		// LastHeadSHA/PendingHeadSHA are pinned to automergeEligiblePR's
-		// "abc" headRefOid: tick's own pre-existing (out-of-scope) head-
-		// advance detection treats a HeadRefOID/LastHeadSHA or
-		// HeadRefOID/PendingHeadSHA *mismatch* as "the head moved on since
-		// this was recorded, so it's now stale" and resets RepairPending to
-		// false / clears PendingKeys accordingly -- both well before
-		// automerge's insertion point after the review-feedback block.
-		// Without pinning these, the fixture's RepairPending/PendingKeys
-		// would already be wiped by the time automerge runs, and both
-		// subtests would spuriously fall through to the policy stage.
-		{"CI repair pending", func(s *State) { s.RepairPending = true; s.LastHeadSHA = "abc" }, reasonRepairPending},
-		{"review feedback pending", func(s *State) { s.PendingKeys = []string{"comment:1"}; s.PendingHeadSHA = "abc" }, reasonReviewPending},
+		// LastHeadSHA is pinned to automergeEligiblePR's "abc" headRefOid: the
+		// pre-existing (out-of-scope) CI-repair head-advance detection treats
+		// a HeadRefOID/LastHeadSHA mismatch as "the head moved on since this
+		// was recorded, so it's now stale" and resets RepairPending to false
+		// -- well before automerge's insertion point after the
+		// review-feedback block. Without pinning it, the "CI repair pending"
+		// subtest's RepairPending would already be wiped by the time
+		// automerge runs and would spuriously fall through to the policy
+		// stage. PendingHeadSHA is no longer compared for clearing purposes
+		// at all (#850 deletes that rule) -- it survives only as
+		// repair-attempt/dedup metadata, so the "review feedback pending"
+		// subtest sets it purely for fixture realism, not because anything
+		// still reads it to decide resolution.
+		{"CI repair pending", func(s *State) { s.RepairPending = true; s.LastHeadSHA = "abc" }, nil, reasonRepairPending},
+		{"review feedback pending", func(s *State) { s.PendingKeys = []string{"comment:1"}; s.PendingHeadSHA = "abc" }, []scriptedCall{
+			// Left unresolved so PendingKeys stays non-empty and the hold
+			// still reaches reasonReviewPending (an ordinary hold, not one
+			// of the four new feedback-hold reasons -- see
+			// TestTickFeedbackHoldsAutomerge for those).
+			{out: `{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"isResolved":false,"comments":{"totalCount":1,"nodes":[{"databaseId":1}]}}]}}}}}`},
+		}, reasonReviewPending},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			withFleetAutomergeEnabled(t, true)
 			var calls [][]string
-			withScriptedCommands(t, []scriptedCall{
+			script := []scriptedCall{
 				{out: automergeEligiblePR()},
 				{out: `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`},
 				{out: `[]`},
 				{out: `[]`},
-				{out: `{"labels":[{"name":"automerge:ok"}]}`},
-			}, &calls)
+			}
+			script = append(script, tc.extraScript...)
+			script = append(script, scriptedCall{out: `{"labels":[{"name":"automerge:ok"}]}`})
+			withScriptedCommands(t, script, &calls)
 			s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60}
 			tc.setup(&s)
 			if _, _, err := tick(&s); err != nil {
@@ -899,5 +923,84 @@ func TestTickAutomergeSanitizesRejectedMergeDetail(t *testing.T) {
 	}
 	if len(s.AutomergeDetail) > detailMaxLen+len("...") {
 		t.Fatalf("AutomergeDetail length = %d, want capped at roughly %d", len(s.AutomergeDetail), detailMaxLen)
+	}
+}
+
+// -- #850: feedback-hold reasons wired into automerge -------------------------
+
+// TestTickFeedbackHoldsAutomerge is AC 5: an API/parsing failure, an unknown
+// review state, or an unsupported feedback-key type each hold automerge under
+// their own distinct reason constant -- asserting the exact AutomergeReason
+// (per watch/docs/error-handling.md #446) and that no `gh pr merge` call ever
+// appears in recorded calls.
+func TestTickFeedbackHoldsAutomerge(t *testing.T) {
+	unreadableThread := "not json"
+	truncatedThread := `{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"isResolved":false,"comments":{"totalCount":2,"nodes":[{"databaseId":5}]}}]}}}}}`
+
+	for _, tc := range []struct {
+		name        string
+		pendingKeys []string
+		extraScript []scriptedCall // the lazy GraphQL fetch, only for comment: keys
+		wantReason  string
+	}{
+		{
+			"unreadable: the GraphQL thread fetch itself fails (malformed body)",
+			[]string{"comment:5"},
+			[]scriptedCall{{out: unreadableThread}},
+			reasonFeedbackUnreadable,
+		},
+		{
+			"truncated: a thread's comments.totalCount exceeds its fetched node count",
+			[]string{"comment:5"},
+			[]scriptedCall{{out: truncatedThread}},
+			reasonFeedbackTruncated,
+		},
+		{
+			"unknown: a pending review key GitHub no longer reports at all (no GraphQL call needed)",
+			[]string{"review:99"},
+			nil,
+			reasonReviewStateUnknown,
+		},
+		{
+			"unsupported: a pending key of a type this classifier does not recognize (no GraphQL call needed)",
+			[]string{"label:1"},
+			nil,
+			reasonFeedbackUnsupported,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withFleetAutomergeEnabled(t, true)
+			var calls [][]string
+			// The lazy GraphQL thread fetch (tc.extraScript, when a
+			// comment: key is pending) runs in tick() via
+			// reconcilePendingFeedback immediately before runAutomerge is
+			// called -- i.e. before runAutomerge's own labels fetch, which
+			// must come last in the script.
+			script := []scriptedCall{
+				{out: automergeEligiblePR()},
+				{out: `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`},
+				{out: `[]`},
+				{out: `[]`},
+			}
+			script = append(script, tc.extraScript...)
+			script = append(script, scriptedCall{out: `{"labels":[{"name":"automerge:ok"}]}`})
+			withScriptedCommands(t, script, &calls)
+
+			s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60, PendingKeys: tc.pendingKeys}
+			if _, _, err := tick(&s); err != nil {
+				t.Fatal(err)
+			}
+			if s.AutomergeReason != tc.wantReason {
+				t.Fatalf("AutomergeReason = %q, want %q", s.AutomergeReason, tc.wantReason)
+			}
+			for _, c := range calls {
+				if len(c) > 2 && c[1] == "pr" && c[2] == "merge" {
+					t.Fatalf("gh pr merge must not be issued while a feedback hold is in effect: %#v", calls)
+				}
+			}
+			if !reflect.DeepEqual(s.PendingKeys, tc.pendingKeys) {
+				t.Fatalf("PendingKeys = %v, want unchanged %v: a fail-closed hold must not clear the item", s.PendingKeys, tc.pendingKeys)
+			}
+		})
 	}
 }

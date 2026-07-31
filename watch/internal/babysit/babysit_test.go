@@ -85,7 +85,13 @@ func TestTickQuietBacksOff(t *testing.T) {
 
 func TestTickLaunchesAddressReviewForNewFeedback(t *testing.T) {
 	var calls [][]string
-	withCommands(t, []string{openPR(), `[]`, `[{"id":7,"updated_at":"2026-01-02T00:00:00Z","user":{"login":"reviewer"}}]`, `[]`}, &calls)
+	// A new comment:7 key is appended to PendingKeys before the #850
+	// resolution pass runs later in the same tick, so the lazy GraphQL thread
+	// fetch fires immediately -- the 5th scripted response. Left unresolved
+	// so PendingKeys still equals [comment:7] afterward, matching the
+	// pre-existing assertions below.
+	unresolvedThread := `{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"isResolved":false,"comments":{"totalCount":1,"nodes":[{"databaseId":7}]}}]}}}}}`
+	withCommands(t, []string{openPR(), `[]`, `[{"id":7,"updated_at":"2026-01-02T00:00:00Z","user":{"login":"reviewer"}}]`, `[]`, unresolvedThread}, &calls)
 	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900}
 	_, delay, err := tick(&s)
 	if err != nil {
@@ -376,5 +382,252 @@ func TestStateSaveLoadRoundTripsAutomergeFields(t *testing.T) {
 	}
 	if !got.AutomergeCheckedAt.Equal(want.AutomergeCheckedAt) {
 		t.Errorf("AutomergeCheckedAt = %v, want %v", got.AutomergeCheckedAt, want.AutomergeCheckedAt)
+	}
+}
+
+// -- #850: GitHub-authoritative review-feedback resolution --------------------
+
+// unresolvedThreadFor builds a GraphQL reviewThreads response reporting a
+// single unresolved thread whose one comment carries id.
+func unresolvedThreadFor(id int64) string {
+	return fmt.Sprintf(`{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"isResolved":false,"comments":{"totalCount":1,"nodes":[{"databaseId":%d}]}}]}}}}}`, id)
+}
+
+// resolvedThreadFor builds a GraphQL reviewThreads response reporting a
+// single resolved thread whose one comment carries id.
+func resolvedThreadFor(id int64) string {
+	return fmt.Sprintf(`{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"isResolved":true,"comments":{"totalCount":1,"nodes":[{"databaseId":%d}]}}]}}}}}`, id)
+}
+
+// TestTickUnrelatedPushLeavesFeedbackPending is AC 1: the PR's head commit
+// advances for a reason unrelated to the pending feedback (GitHub still
+// reports the thread unresolved) -- PendingKeys must stay unchanged and
+// AddressedKeys must stay empty. This is the exact regression the deleted
+// head-change-clearing block (babysit.go:253-258) caused.
+func TestTickUnrelatedPushLeavesFeedbackPending(t *testing.T) {
+	var calls [][]string
+	pr := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"new-sha","closingIssuesReferences":[],"url":"https://example/pr/42"}`
+	withCommands(t, []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`, unresolvedThreadFor(5)}, &calls)
+	s := State{
+		PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60,
+		LastHeadSHA:      "old-sha",
+		PendingKeys:      []string{"comment:5"},
+		PendingCommentAt: "2026-01-01T00:00:00Z",
+		PendingHeadSHA:   "old-sha",
+	}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(s.PendingKeys, []string{"comment:5"}) {
+		t.Fatalf("PendingKeys = %v, want unchanged [comment:5]: an unrelated push must not resolve pending feedback", s.PendingKeys)
+	}
+	if len(s.AddressedKeys) != 0 {
+		t.Fatalf("AddressedKeys = %v, want empty", s.AddressedKeys)
+	}
+}
+
+// TestTickRepairPushWithoutResolutionLeavesFeedbackPending is AC 2: a push
+// from babysit's own repair session (ci-repair or address-review) is still
+// just a local signal -- proving an attempt, not reviewer acceptance -- so it
+// must not clear PendingKeys either, even though it advances the head exactly
+// the way the deleted rule keyed off of (PendingHeadSHA no longer proves
+// anything).
+func TestTickRepairPushWithoutResolutionLeavesFeedbackPending(t *testing.T) {
+	var calls [][]string
+	pr := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"repair-sha","closingIssuesReferences":[],"url":"https://example/pr/42"}`
+	withCommands(t, []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`, unresolvedThreadFor(5)}, &calls)
+	s := State{
+		PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60,
+		LastHeadSHA:      "pre-repair-sha",
+		PendingKeys:      []string{"comment:5"},
+		PendingCommentAt: "2026-01-01T00:00:00Z",
+		PendingHeadSHA:   "pre-repair-sha",
+	}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(s.PendingKeys, []string{"comment:5"}) {
+		t.Fatalf("PendingKeys = %v, want unchanged [comment:5]: a repair push alone is not proof of reviewer resolution", s.PendingKeys)
+	}
+	if len(s.AddressedKeys) != 0 {
+		t.Fatalf("AddressedKeys = %v, want empty", s.AddressedKeys)
+	}
+}
+
+// TestTickResolvedThreadClearsPendingKey is AC 3's thread path: once
+// GitHub's review-thread state reports isResolved, the key moves to
+// AddressedKeys, LastCommentAt advances to the cleared set's watermark, and
+// PendingCommentAt/PendingHeadSHA both clear.
+func TestTickResolvedThreadClearsPendingKey(t *testing.T) {
+	var calls [][]string
+	pr := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"new-sha","closingIssuesReferences":[],"url":"https://example/pr/42"}`
+	withCommands(t, []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`, resolvedThreadFor(5)}, &calls)
+	s := State{
+		PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60,
+		LastHeadSHA:      "old-sha",
+		LastCommentAt:    "2025-12-01T00:00:00Z",
+		PendingKeys:      []string{"comment:5"},
+		PendingCommentAt: "2026-01-01T00:00:00Z",
+		PendingHeadSHA:   "old-sha",
+	}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.PendingKeys) != 0 {
+		t.Fatalf("PendingKeys = %v, want empty once GitHub reports the thread resolved", s.PendingKeys)
+	}
+	if !reflect.DeepEqual(s.AddressedKeys, []string{"comment:5"}) {
+		t.Fatalf("AddressedKeys = %v, want [comment:5]", s.AddressedKeys)
+	}
+	if s.LastCommentAt != "2026-01-01T00:00:00Z" {
+		t.Errorf("LastCommentAt = %q, want it advanced to the cleared pending set's watermark", s.LastCommentAt)
+	}
+	if s.PendingCommentAt != "" || s.PendingHeadSHA != "" {
+		t.Errorf("PendingCommentAt/PendingHeadSHA = %q/%q, want both cleared once the pending set empties", s.PendingCommentAt, s.PendingHeadSHA)
+	}
+}
+
+// TestTickDismissedOrSupersededChangeRequestClears is AC 3's review path:
+// a CHANGES_REQUESTED review clears only when it is DISMISSED or the
+// reviewer's latest effective review is APPROVED -- asserted as separate
+// subtests. Neither subtest's pending set contains a comment: key, so the
+// lazy GraphQL thread fetch must never be invoked either.
+func TestTickDismissedOrSupersededChangeRequestClears(t *testing.T) {
+	pr := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"new-sha","closingIssuesReferences":[],"url":"https://example/pr/42"}`
+	for _, tc := range []struct {
+		name    string
+		reviews string
+	}{
+		{"blocking review dismissed", `[{"id":10,"state":"DISMISSED","submitted_at":"2026-01-02T00:00:00Z","user":{"login":"alice"}}]`},
+		{"reviewer's latest effective review is approved", `[{"id":10,"state":"CHANGES_REQUESTED","submitted_at":"2026-01-01T00:00:00Z","user":{"login":"alice"}},{"id":11,"state":"APPROVED","submitted_at":"2026-01-02T00:00:00Z","user":{"login":"alice"}}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls [][]string
+			withCommands(t, []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, tc.reviews}, &calls)
+			s := State{
+				PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60,
+				LastHeadSHA:      "old-sha",
+				PendingKeys:      []string{"review:10"},
+				PendingCommentAt: "2026-01-01T00:00:00Z",
+				PendingHeadSHA:   "old-sha",
+			}
+			if _, _, err := tick(&s); err != nil {
+				t.Fatal(err)
+			}
+			if len(s.PendingKeys) != 0 {
+				t.Fatalf("PendingKeys = %v, want empty", s.PendingKeys)
+			}
+			if !reflect.DeepEqual(s.AddressedKeys, []string{"review:10"}) {
+				t.Fatalf("AddressedKeys = %v, want [review:10]", s.AddressedKeys)
+			}
+			for _, c := range calls {
+				if len(c) > 2 && c[1] == "api" && c[2] == "graphql" {
+					t.Fatalf("a review:-only pending set must never call the GraphQL thread fetch: %#v", calls)
+				}
+			}
+		})
+	}
+}
+
+// TestTickNewFeedbackAfterRepairTrackedIndependently is AC 4: a brand-new
+// comment arriving while an older comment is still unresolved gets its own
+// independent key and does not clear (or get merged with) the older one.
+func TestTickNewFeedbackAfterRepairTrackedIndependently(t *testing.T) {
+	var calls [][]string
+	pr := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"new-sha","closingIssuesReferences":[],"url":"https://example/pr/42"}`
+	newComment := `[{"id":9,"updated_at":"2026-01-03T00:00:00Z","user":{"login":"reviewer"}}]`
+	bothUnresolved := `{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"isResolved":false,"comments":{"totalCount":1,"nodes":[{"databaseId":5}]}},{"isResolved":false,"comments":{"totalCount":1,"nodes":[{"databaseId":9}]}}]}}}}}`
+	withCommands(t, []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, newComment, `[]`, bothUnresolved}, &calls)
+	s := State{
+		PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60,
+		LastHeadSHA:      "old-sha",
+		LastCommentAt:    "2026-01-01T00:00:00Z",
+		PendingKeys:      []string{"comment:5"},
+		PendingCommentAt: "2026-01-01T00:00:00Z",
+		PendingHeadSHA:   "old-sha",
+	}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(s.PendingKeys, []string{"comment:5", "comment:9"}) {
+		t.Fatalf("PendingKeys = %v, want [comment:5 comment:9]: the new comment must be tracked independently, not merged with or clearing the old one", s.PendingKeys)
+	}
+}
+
+// TestTickDoesNotRelaunchAddressReviewForStillPendingFeedback pins that the
+// pre-existing launch-dedup discipline survives #850's changes: a comment
+// that is already pending and still unresolved must not trigger a second
+// address-review launch on a later tick.
+func TestTickDoesNotRelaunchAddressReviewForStillPendingFeedback(t *testing.T) {
+	pr := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"new-sha","closingIssuesReferences":[],"url":"https://example/pr/42"}`
+	comments := `[{"id":5,"updated_at":"2026-01-01T00:00:00Z","user":{"login":"reviewer"}}]`
+
+	var calls [][]string
+	withCommands(t, []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, comments, `[]`, unresolvedThreadFor(5)}, &calls)
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	launches := 0
+	for _, c := range calls {
+		if len(c) > 3 && c[1] == "run" && c[2] == "address-review" {
+			launches++
+		}
+	}
+	if launches != 1 {
+		t.Fatalf("first tick: address-review launches = %d, want exactly 1", launches)
+	}
+
+	calls = nil
+	withCommands(t, []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, comments, `[]`, unresolvedThreadFor(5)}, &calls)
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range calls {
+		if len(c) > 3 && c[1] == "run" && c[2] == "address-review" {
+			t.Fatalf("second tick: address-review must not relaunch for a comment that is already pending and still unresolved: %#v", calls)
+		}
+	}
+	if !reflect.DeepEqual(s.PendingKeys, []string{"comment:5"}) {
+		t.Fatalf("PendingKeys = %v, want [comment:5] still pending after the second tick", s.PendingKeys)
+	}
+}
+
+// TestPendingFeedbackSurvivesRestart is AC 6: a save/load round trip with
+// SchemaVersion 1 and pre-existing PendingKeys, then a tick, proving the hold
+// reproduces purely from persisted state -- no in-memory-only carry-over
+// field is required.
+func TestPendingFeedbackSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	saved := State{
+		SchemaVersion:       1,
+		PR:                  "42",
+		Repo:                "o/r",
+		Agent:               "codex",
+		IntervalSeconds:     60,
+		CurrentDelaySeconds: 60,
+		LastHeadSHA:         "old-sha",
+		PendingKeys:         []string{"comment:5"},
+		PendingCommentAt:    "2026-01-01T00:00:00Z",
+		PendingHeadSHA:      "old-sha",
+	}
+	if err := save(path, saved); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := load(path)
+	if restarted.SchemaVersion != 1 || !reflect.DeepEqual(restarted.PendingKeys, []string{"comment:5"}) {
+		t.Fatalf("restarted state = %#v, want the persisted SchemaVersion/PendingKeys to round-trip", restarted)
+	}
+
+	var calls [][]string
+	pr := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"new-sha","closingIssuesReferences":[],"url":"https://example/pr/42"}`
+	withCommands(t, []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`, unresolvedThreadFor(5)}, &calls)
+	if _, _, err := tick(&restarted); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(restarted.PendingKeys, []string{"comment:5"}) {
+		t.Fatalf("PendingKeys = %v, want the hold to reproduce from persisted state alone: [comment:5]", restarted.PendingKeys)
 	}
 }
