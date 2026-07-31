@@ -163,13 +163,21 @@ Only when questions are `None.`, output the complete proposal. The skill persist
 
     ### Suggested Split (only if L — real risk of exceeding the context budget per `docs/ticket-sizing.md`)
     - Ticket 1 (1/N): <description>
+      Acceptance criteria:
+      - [ ] <criterion assigned to this child from ### Acceptance Criteria above>
     - Ticket 2 (2/N): <description> — depends on Ticket 1
+      Acceptance criteria:
+      - [ ] <criterion assigned to this child from ### Acceptance Criteria above>
     - Ticket 3 (3/N): <description> — parallel with Ticket 2
+      Acceptance criteria:
+      - [ ] <criterion assigned to this child from ### Acceptance Criteria above>
 
     #### Execution Order
     - Ticket 1 → first (no dependencies)
     - Ticket 2, Ticket 3 → can start after Ticket 1 (parallel with each other)
 
 When analyzing a split, determine which child tickets have data/API/schema dependencies on others (sequential) vs. which touch independent areas (parallel), and annotate each. Do not propose a split for S or M tickets just because they touch multiple independent concerns — the budget-risk-only trigger in `docs/ticket-sizing.md` governs. **Design-first splits** (if frontend feature AND `pencil.enabled` AND `designNeeded`): make the first child a design-only ticket (e.g., "Design <feature> screens") that every UI implementation child depends on, and include the `### Design Direction` section in its described body — the skill labels it `Design` when creating it.
+
+**Acceptance-criteria partition.** A split does not just divide the work — it divides the proof. Every criterion in the proposal's `### Acceptance Criteria` must be assigned to exactly one child's `Acceptance criteria:` checklist — none left unassigned, none duplicated across children — so that "every child closed" is by construction equivalent to "every parent criterion delivered" (#661). Criteria may be reworded only to scope them to the child, never weakened. Integration-scoped criteria — those only verifiable once every child's work is assembled (end-to-end flows, cross-cutting docs, config surfaces spanning children) — must be assigned to a child that depends on every other child; when no such child exists naturally, add a final integration child to carry them. A child may carry zero parent criteria (e.g. a design-only first child) — the rule constrains criteria, not children. The refine skill verifies this partition before creating any child and rejects the split if a criterion is unassigned or duplicated.
 
 Use ultrathink for complex analysis.

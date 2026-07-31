@@ -24,7 +24,11 @@ match — ensure the label exists (`gh label create "automerge:ok" --repo <owner
 merge this PR without review" 2>/dev/null || true`), then append `--add-label
 "automerge:ok"` when the effective grant holds, or `--remove-label "automerge:ok"` when it
 does not and the issue currently carries the label (re-refine), or nothing otherwise.
-When a split is applied, link each child of the split to the parent as a native GitHub sub-issue
+When a split is applied, first verify the proposal partitions the parent's acceptance criteria:
+every parent criterion assigned to exactly one child (integration-scoped criteria on a child that
+depends on all others); an unassigned or duplicated criterion aborts the split before any GitHub
+write. Each child body then carries its own `### Acceptance Criteria` section — its slice of the parent's partition —
+after the dependency lines and description. Link each child of the split to the parent as a native GitHub sub-issue
 (`gh issue edit <child> --parent <parent>`) — do not append a child-ticket markdown checklist; the
 native sub-issue list carries the enumeration. Every ticket this workflow creates — each split child
 and the companion design ticket — inherits the parent's milestone (as the numeric `.milestone.number`,

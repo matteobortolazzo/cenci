@@ -204,6 +204,10 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
 
    Split tickets must also receive the "Refined" label/tag since they were refined during this session — `/cenci:implement` checks for it as a pre-flight condition.
 
+   #### Coverage gate — verify the split's acceptance-criteria partition
+
+   Before creating any child, verify the proposal partitions the parent's acceptance criteria per `agents/refiner.md`'s **Acceptance-criteria partition** rule: every `- [ ]` item in the proposal's `### Acceptance Criteria` must appear in exactly one child's `Acceptance criteria:` checklist (scoped rewording is fine as long as the mapping is evident), and no criterion may appear under two children. If any criterion is unassigned or duplicated, STOP — create no tickets, run no Pass 2 — and report the violating criteria to the user so the split can be corrected in another refinement round. Unlike the write-failure protocol governing the writes below, nothing has been written at this point, so stopping here is free; proceeding would mint children whose closure can no longer prove the parent's criteria (#661).
+
    #### Pass 1: Create children with numbered titles and dependency info
 
    Create children **in dependency order** — independent children first, then children that depend on them (so you have their issue numbers for `Depends on` references).
@@ -214,10 +218,11 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
    - `Related to #<parent>` (links back to parent)
    - `Depends on #<sibling>` lines for any children it depends on (if applicable)
    - `Parallel with #<sibling>` lines for children it can run alongside (if applicable)
+   - Its own `### Acceptance Criteria` section — the criteria the proposal's split assigned to this child (its slice of the parent's partition, verified by the coverage gate above); omit the section only for a child the split assigned zero criteria (e.g. a design-only first child)
 
    Capture each created issue number from the command output.
 
-   Use the `Write` tool to create the raw title and body as plain text — `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt` (`<ticket-title> (K/N)`) and `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md` (`Related to #<original-number>\nDepends on #<sibling-number>\nParallel with #<sibling-number>\n\n<ticket-body>`) — never a hand-escaped JSON literal; the title is free text and must never be interpolated directly into the command line. Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet, in whichever of the two forms the presence gate above selected. The parent's label names are externally sourced, so they enter the payload **only** via `--slurpfile` from the fetched metadata file — never interpolated into the command line, and `jq` cannot let slurped content influence the payload's structure.
+   Use the `Write` tool to create the raw title and body as plain text — `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt` (`<ticket-title> (K/N)`) and `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md` (`Related to #<original-number>\nDepends on #<sibling-number>\nParallel with #<sibling-number>\n\n<ticket-body>\n\n### Acceptance Criteria\n- [ ] <each criterion the split assigned to this child>`) — never a hand-escaped JSON literal; the title is free text and must never be interpolated directly into the command line. Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet, in whichever of the two forms the presence gate above selected. The parent's label names are externally sourced, so they enter the payload **only** via `--slurpfile` from the fetched metadata file — never interpolated into the command line, and `jq` cannot let slurped content influence the payload's structure.
 
    **With-meta** (the parent-metadata fetch above succeeded):
    ```bash
