@@ -33,6 +33,32 @@ git -C <worktree-path> rebase --abort
 
 Tell the user to resolve manually. Per the atomicity rule above, the next entry into this phase still restarts at the Rebase step, not at Commit — the fetch+rebase is a no-op once the user has already resolved and completed it locally, and this guarantees a fresh build/test/lint pass on the rebased tree before Commit runs.
 
+## Parent Close Gate (last child only)
+
+Skip this section entirely unless `isLastChild` is true. It produces a single verdict — `close` or `hold` — consumed by the Commit trailer, the PR body's parent reference, and the Labels `--parent` cascade below. `isLastChild` is a graph-topology signal (zero open siblings), never proof the parent is done (#661): a parent ticket may only be closed when its acceptance criteria are verifiably met, so the parent-closing trailer is gated on this audit's verdict. Re-entry under the atomicity rule re-runs the gate like every other step — the audit is read-only against GitHub plus this worktree's diff, so re-running it is safe and cheap, and a re-run may legitimately flip an earlier verdict if the tree changed.
+
+1. **Fetch the parent's body** to a file (the `|| rm -f` guard mirrors the followup-meta fetch below — a partially-written file must never pass an existence check):
+
+   ```bash
+   gh issue view <parentId> --repo <owner>/<repo> --json body --jq .body > ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-parent-body.md || rm -f ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-parent-body.md
+   ```
+
+   If the fetch fails, retry once; if it still fails, the verdict is `hold` — an unreadable parent can never be proven complete (fail-closed) — and the final session summary must report that the parent audit could not run.
+
+2. **Extract the criteria.** `Read` the fetched body and collect the `- [ ]`/`- [x]` items under its `### Acceptance Criteria` heading. If the parent body has no `### Acceptance Criteria` section, there is nothing to audit: the verdict is `close`, and the final session summary must note that parent #`<parentId>` closed without an acceptance-criteria audit (the parent carries no such section).
+
+3. **Audit every criterion** — checked and unchecked alike; checkbox state on the parent is not maintained by the pipeline and proves nothing. A criterion counts as **met** only with concrete, citable evidence: a specific change or test in this worktree's diff, or a specific merged sibling PR. Locate siblings via `gh issue view <parentId> --repo <owner>/<repo> --json subIssues` and map each closed sibling to its merged PR (its `Fixes #<sibling>` reference; `gh pr list --repo <owner>/<repo> --state merged --search "<siblingId>"` when needed). A criterion with no evidence, or whose evidence you cannot pin to a citation, counts as **unmet** — uncertainty is a `hold`, never a guess into the met column.
+
+4. **Verdict.** Every criterion met → `close`: the Commit, PR, and Labels steps below take their `close` branches. One or more unmet (or the fetch failure above) → `hold`:
+   - Use the `Write` tool to create the gap report at `${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-parent-gaps.md` — one line per unmet criterion with a one-line reason it is unmet, opening with a sentence that this last-child PR deliberately did not close the parent — then post it on the parent:
+
+     ```bash
+     gh issue comment <parentId> --repo <owner>/<repo> --body-file ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-parent-gaps.md
+     ```
+
+     If the comment fails after one retry, keep the `hold` verdict regardless (the downgrade below is the safety mechanism; the comment is only its visibility) and report the failed comment together with the gap list in the final session summary so the gaps are never silently lost.
+   - The parent stays open for human triage — typically a re-refine of the remaining gaps into new children — and the final session summary reports that parent #`<parentId>` was left open, listing the unmet criteria.
+
 ## Commit
 
 Stage and commit:
@@ -51,7 +77,8 @@ If an earlier attempt already committed this work (a re-run re-entering after Co
 Ticket mode:
 
 - Normal child/non-child: `Fixes #<childId or ticketId>`.
-- Last child: include both `Fixes #<childId>` and `Fixes #<parentId>`.
+- Last child with a `close` verdict from the Parent Close Gate: `Fixes #<childId>` plus `Fixes #<parentId>` — the parent-closing trailer is written only on a `close` verdict, never from `isLastChild` alone.
+- Last child with a `hold` verdict: `Fixes #<childId>` plus `Related to #<parentId>` — the parent stays open; its unmet criteria were posted on the parent by the gate.
 
 Ticketless mode: no ticket reference.
 
@@ -156,7 +183,7 @@ _Temporary secret gist, not part of the repo — delete after merge: `gh gist de
 <One line per discarded finding — what was found + why it was discarded — or "None">
 ```
 
-For child tickets that are not last child, use `Related to #<parentId>` for the parent so it is not auto-closed. For ticketless mode, omit `## Ticket`.
+For child tickets that are not last child — and for a last child whose Parent Close Gate verdict is `hold` — use `Related to #<parentId>` for the parent so it is not auto-closed. For ticketless mode, omit `## Ticket`.
 
 `## Review` reports which Phase 6 + 7 path ran, sourced from `$RUN_DIR/review-path.txt` (written during Phase 6 + 7's Review Path Classification):
 
@@ -195,13 +222,15 @@ cenci pipeline label <id> --transition in-review
 
 Render the returned `state`/`next_actions`/`warnings`/`errors`. The CLI self-heals `In Review`'s existence in the repository and treats "already exists" as success, so no separate self-heal call is needed.
 
-If `isLastChild`, pass `--parent <parentId>` on the same call so the CLI also cascades "In Review" to the parent ticket:
+If `isLastChild` and the Parent Close Gate verdict is `close`, pass `--parent <parentId>` on the same call so the CLI also cascades "In Review" to the parent ticket:
 
 ```bash
 cenci pipeline label <id> --transition in-review --parent <parentId>
 ```
 
-The parent's real completion — the transition to "Implemented" — arrives when this last child's PR merges: the last-child commit carries `Fixes #<parentId>` (see Commit above), so the parent appears in the PR's `closingIssuesReferences` and babysit relabels it on merge.
+On a `hold` verdict, omit `--parent` — the parent is not completing with this PR; it stays open with the gate's gap comment, outside this PR's label lifecycle.
+
+The parent's real completion — the transition to "Implemented" — arrives when this last child's PR merges: on a `close` verdict the last-child commit carries `Fixes #<parentId>` (see Commit above), so the parent appears in the PR's `closingIssuesReferences` and babysit relabels it on merge.
 
 The `Working` → `In Review` → `Implemented` progression finishes on merge: the `cenci babysit` supervisor swaps `In Review` for `Implemented` on any issue closed by the merged PR (see the babysit skill's Safety guarantees section). PR-open never applies `Implemented`.
 
@@ -351,6 +380,8 @@ rm -f \
   ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-payload.json \
   ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-search.json \
   ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-existing-body.md \
+  ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-parent-body.md \
+  ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-parent-gaps.md \
   ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-explore-1.md \
   ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-explore-2.md \
   ${TMPDIR:-/tmp}/cenci/cenci-context-<ticket-id-or-slug>.md \
