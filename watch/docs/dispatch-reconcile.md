@@ -22,3 +22,35 @@ In `applyReconcile`:
    - If `mutated`, delete counter and observation (recovery landed).
    - If NOT `mutated`, re-inject the prior observation and increment counter; if counter exceeds budget, escalate.
 4. After all recoveries, clear stale counters: only clear if the key is absent from BOTH `recoveredKeys` (no recovery this pass) AND `result.NextObservations` (not deferred).
+
+## Cenci-authored comment markers
+
+Every comment cenci itself posts to a ticket — the attempt marker on a retry
+comment, the terminal-state comments (`dispatch-failed`, `plan-invalid`,
+`reconcile-stuck`), and the unattended planner's escalation comment — carries
+a hidden HTML comment of the form `<!-- cenci-<kind> -->` as the first line of
+its body (`cenciMarkerPrefix`, `reconcile.go`).
+
+This is load-bearing for ticket #827's dispatch auto-resume: the escalation
+answer classifier (`resume.go`'s `classifyComments`) treats any comment
+positioned after the last `<!-- cenci-planner-escalation -->` anchor as a
+human answer **unless** it carries a `<!-- cenci-` marker (after `>`-quoted
+blockquote lines are stripped first), its author login is bot-shaped
+(`*[bot]`/`app/*`), or its author association is not one of `OWNER`,
+`MEMBER`, or `COLLABORATOR` (`isAuthorizedAssociation`, #827 review fix #1) —
+a required, additional check, not a substitute for the marker/bot-shape
+checks. A future comment helper that forgets to embed a marker would
+silently become a false "answered" trigger — it would look exactly like a
+human reply and could resume a ticket nobody actually answered.
+
+**Rule:** any new comment helper added to this package (or to a flow skill
+that posts to a ticket cenci also dispatches) must embed a `<!-- cenci-<kind>
+-->` marker as part of its body. `dispatch-failed`, `plan-invalid`, and
+`reconcile-stuck` were back-filled with markers for exactly this reason
+(`failedMarker`/`planInvalidMarker`/`reconcileStuckMarker`) — they previously
+had none, since the classifier that would have cared about them didn't exist
+yet. `attemptMarker`'s own `strings.Contains` check in `countAttempts` is
+unaffected: each marker is a distinct string, so back-filling the other three
+never inflates the attempt tally.
+
+- **Strip blockquote-prefixed lines before the anchor scan:** When determining the last (most recent) escalation anchor in a comment thread, strip `>`-prefixed blockquote lines from each comment's body before checking whether it contains the escalation anchor. A human using GitHub's "Quote reply" on the escalation comment copies the anchor verbatim into their own body's blockquoted lines; if the anchor scan does not strip blockquotes first, it would misidentify the quoted-reply comment as a new anchor, incorrectly resetting "last anchor" past the genuine human answer that follows, thus breaking auto-resume (#827).

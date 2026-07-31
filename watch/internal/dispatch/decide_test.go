@@ -890,3 +890,217 @@ func TestDecideEscalatedCounterNeverTripsNeedInputPause(t *testing.T) {
 	}
 	assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
 }
+
+// -- #827: dispatch auto-resume of Input Needed tickets ----------------------
+
+// resumeInputs is the resume happy path (#827): one Input Needed ticket #42
+// with an awaiting-input draft and an Answered probe -- every gate passes.
+func resumeInputs() Inputs {
+	return Inputs{
+		Tickets:     []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Input Needed"}, Assignees: []string{"octocat"}}},
+		Plans:       []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "awaiting-input"}},
+		Snapshot:    snapshot(0, 0),
+		Budgets:     FloorProvider{},
+		Now:         time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC),
+		CurrentUser: "octocat",
+		Config:      testConfig(),
+		Answers:     map[string]AnswerProbe{"o/r#42": AnswerProbeAnswered},
+	}
+}
+
+// TestDecideResumeGate covers the resume variant of the gate chain: the
+// happy resume, each AnswerProbe class's own distinct skip reason (including
+// the switch-default/map-miss case), the plan-status swap, and every
+// non-board/non-plan gate (Blocked, open PR, Working-drift, multiple
+// assignees, dependency, nil snapshot, concurrency cap, quiet hours, budget)
+// still gating a resume identically to the ordinary path. A stale draft
+// still resumes because freshness (rule 4) is deliberately skipped when
+// resuming.
+func TestDecideResumeGate(t *testing.T) {
+	tests := []struct {
+		name       string
+		mutate     func(in *Inputs)
+		wantAction Action
+		wantReason string
+		wantResume bool
+	}{
+		{
+			name:       "happy resume",
+			wantAction: ActionDispatch,
+			wantReason: "resume — human answered",
+			wantResume: true,
+		},
+		{
+			name:       "probe waiting skips with its own distinct reason",
+			mutate:     func(in *Inputs) { in.Answers["o/r#42"] = AnswerProbeWaiting },
+			wantAction: ActionSkip,
+			wantReason: reasonAnswerWaiting,
+		},
+		{
+			name:       "probe no_anchor skips with its own distinct reason",
+			mutate:     func(in *Inputs) { in.Answers["o/r#42"] = AnswerProbeNoAnchor },
+			wantAction: ActionSkip,
+			wantReason: reasonAnswerNoAnchor,
+		},
+		{
+			name:       "probe unresolved skips with its own distinct reason",
+			mutate:     func(in *Inputs) { in.Answers["o/r#42"] = AnswerProbeUnresolved },
+			wantAction: ActionSkip,
+			wantReason: reasonAnswerUnresolved,
+		},
+		{
+			name:       "probe map miss falls into the switch default, distinct from every known reason",
+			mutate:     func(in *Inputs) { delete(in.Answers, "o/r#42") },
+			wantAction: ActionSkip,
+			wantReason: reasonAnswerProbeUnknown,
+		},
+		{
+			name:       "unrecognized AnswerProbe enum value hits the same switch default",
+			mutate:     func(in *Inputs) { in.Answers["o/r#42"] = AnswerProbe("bogus") },
+			wantAction: ActionSkip,
+			wantReason: reasonAnswerProbeUnknown,
+		},
+		{
+			name:       "draft already status: planned (not awaiting-input) skips with a distinct reason",
+			mutate:     func(in *Inputs) { in.Plans[0].Status = "planned" },
+			wantAction: ActionSkip,
+			wantReason: reasonDraftNotAwaitingInput,
+		},
+		{
+			name:       "no plan file still gates a resume",
+			mutate:     func(in *Inputs) { in.Plans = nil },
+			wantAction: ActionSkip,
+			wantReason: "no plan file",
+		},
+		{
+			name:       "Blocked still gates a resume",
+			mutate:     func(in *Inputs) { in.Tickets[0].Labels = []string{"Input Needed", "Blocked"} },
+			wantAction: ActionSkip,
+			wantReason: "blocked",
+		},
+		{
+			name:       "open PR still gates a resume",
+			mutate:     func(in *Inputs) { in.Tickets[0].HasOpenPR = true },
+			wantAction: ActionSkip,
+			wantReason: "open PR exists",
+		},
+		{
+			name:       "Working-drift still gates a resume",
+			mutate:     func(in *Inputs) { in.Tickets[0].Labels = []string{"Input Needed", "Working"} },
+			wantAction: ActionSkip,
+			wantReason: "already Working",
+		},
+		{
+			name:       "multiple assignees still gates a resume",
+			mutate:     func(in *Inputs) { in.Tickets[0].Assignees = []string{"octocat", "hubot"} },
+			wantAction: ActionSkip,
+			wantReason: "multiple assignees",
+		},
+		{
+			name: "an open dependency still gates a resume",
+			mutate: func(in *Inputs) {
+				in.Tickets[0].DependsOn = []int{100}
+				in.Tickets[0].DependencyStates = map[int]DependencyState{100: DependencyStateOpen}
+			},
+			wantAction: ActionSkip,
+			wantReason: fmt.Sprintf(reasonDependencyWaitingFmt, 100),
+		},
+		{
+			name:       "nil snapshot still gates a resume",
+			mutate:     func(in *Inputs) { in.Snapshot = nil },
+			wantAction: ActionSkip,
+			wantReason: "daemon unreachable",
+		},
+		{
+			name: "concurrency cap still gates a resume",
+			mutate: func(in *Inputs) {
+				in.Config.ConcurrencyCap = 1
+				in.Snapshot = snapshot(1, 0)
+			},
+			wantAction: ActionSkip,
+			wantReason: "concurrency cap reached",
+		},
+		{
+			name: "quiet hours still gates a resume",
+			mutate: func(in *Inputs) {
+				in.Config.QuietHours = &QuietHours{StartHour: 22, EndHour: 7}
+				in.Now = time.Date(2026, 7, 10, 23, 0, 0, 0, time.UTC)
+			},
+			wantAction: ActionSkip,
+			wantReason: "quiet hours",
+		},
+		{
+			name:       "budget exhausted still gates a resume",
+			mutate:     func(in *Inputs) { in.Budgets = FloorProvider{Floors: map[string]float64{"claude": 0}} },
+			wantAction: ActionSkip,
+			wantReason: "budget exhausted",
+		},
+		{
+			name:       "a stale draft still resumes (freshness deliberately skipped)",
+			mutate:     func(in *Inputs) { in.Plans[0].CommitsBehind = 999 },
+			wantAction: ActionDispatch,
+			wantReason: "resume — human answered",
+			wantResume: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			in := resumeInputs()
+			if tc.mutate != nil {
+				tc.mutate(&in)
+			}
+			got := Decide(in)
+			if len(got) != 1 {
+				t.Fatalf("got %d decisions, want 1: %+v", len(got), got)
+			}
+			d := got[0]
+			if d.Action != tc.wantAction {
+				t.Errorf("action = %q, want %q (reason %q)", d.Action, tc.wantAction, d.Reason)
+			}
+			if d.Reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", d.Reason, tc.wantReason)
+			}
+			if d.Resume != tc.wantResume {
+				t.Errorf("Resume = %v, want %v", d.Resume, tc.wantResume)
+			}
+		})
+	}
+}
+
+// TestDecideResumeCountsIntoDispatchedThisPass covers the Test Strategy
+// table's "a resume counts into dispatchedThisPass" case: a resumed ticket
+// fills the concurrency cap exactly like an ordinary dispatch, so a second,
+// otherwise-eligible ordinary Planned ticket in the same pass is capped.
+func TestDecideResumeCountsIntoDispatchedThisPass(t *testing.T) {
+	in := resumeInputs()
+	in.Config.ConcurrencyCap = 1
+	in.Tickets = append(in.Tickets, Ticket{Repo: "o/r", Number: 43, Labels: []string{"Planned"}, Assignees: []string{"octocat"}})
+	in.Plans = append(in.Plans, Plan{Repo: "o/r", Path: ".plans/43-x.md", TicketID: 43, Status: "planned"})
+
+	got := Decide(in)
+	if len(got) != 2 {
+		t.Fatalf("got %d decisions, want 2: %+v", len(got), got)
+	}
+	if got[0].Ticket.Number != 42 || got[0].Action != ActionDispatch || !got[0].Resume {
+		t.Fatalf("#42 = %+v, want a resumed dispatch", got[0])
+	}
+	if got[1].Ticket.Number != 43 || got[1].Action != ActionSkip || got[1].Reason != "concurrency cap reached" {
+		t.Fatalf("#43 = %+v, want a concurrency-cap skip (proves the resume filled the cap)", got[1])
+	}
+}
+
+// TestDecideNonInputNeededTicketIgnoresAnswersMap covers the Test Strategy
+// table's non-regression case: a ticket that never carried Input Needed
+// dispatches byte-identically to the pre-#827 behavior, Resume=false, even
+// when Inputs.Answers happens to hold an entry keyed to it.
+func TestDecideNonInputNeededTicketIgnoresAnswersMap(t *testing.T) {
+	in := baseInputs()
+	in.Answers = map[string]AnswerProbe{planKey("o/r", 42): AnswerProbeAnswered}
+
+	got := Decide(in)
+	assertDecisions(t, got, []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+	if got[0].Resume {
+		t.Error("a non-Input-Needed ticket must never resume, regardless of a populated Answers map")
+	}
+}

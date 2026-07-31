@@ -205,6 +205,156 @@ func TestApplyDispatchClaimFailureLogsAndContinues(t *testing.T) {
 	}
 }
 
+// resumeDispatchDeps is the resume happy path (#827): one Input Needed
+// ticket #42 with an awaiting-input draft, an Answered probe, and a
+// reachable, idle daemon -- every gate passes and Decide returns Resume=true.
+func resumeDispatchDeps(now time.Time) dispatchDeps {
+	return dispatchDeps{
+		Tickets:     []Ticket{{Repo: "o/r", Number: 42, Title: "Fix thing", Labels: []string{"Input Needed"}, Assignees: []string{"octocat"}}},
+		Plans:       []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "awaiting-input"}},
+		Snapshot:    &watch.StateSnapshot{},
+		Now:         now,
+		CurrentUser: "octocat",
+		Answers:     map[string]AnswerProbe{"o/r#42": AnswerProbeAnswered},
+	}
+}
+
+// orderRecordingMutator records EditLabels calls into callOrder, alongside
+// runFn's own "spawn" entry (appended directly by the test's stub, which
+// captures mut by closure), so a test can assert the swap-before-spawn
+// ordering across both seams without depending on either's internals --
+// mirrors fakeMutator/escalatingMutator's callOrder convention
+// (reconcile_run_test.go). failEditLabels simulates the resume swap's gh
+// call failing.
+type orderRecordingMutator struct {
+	callOrder      []string
+	edits          []labelEdit
+	failEditLabels bool
+}
+
+func (m *orderRecordingMutator) EditLabels(repo string, number int, add, remove []string) error {
+	if m.failEditLabels {
+		m.callOrder = append(m.callOrder, "edit-fail")
+		return errors.New("swap failed")
+	}
+	m.edits = append(m.edits, labelEdit{repo, number, add, remove})
+	m.callOrder = append(m.callOrder, "edit")
+	return nil
+}
+
+func (m *orderRecordingMutator) Comment(string, int, string) error { return nil }
+
+func (m *orderRecordingMutator) EnsureLabels(string, []string) error { return nil }
+
+// TestApplyDispatchResumeSwapsLabelBeforeSpawn covers the Test Strategy
+// table's swap-before-spawn ordering assertion: on a resume dispatch, the
+// Input Needed -> Working label swap must land BEFORE the spawn, exactly
+// once, with add=[Working] remove=[Input Needed] -- and prior increments
+// exactly as an ordinary dispatch would.
+func TestApplyDispatchResumeSwapsLabelBeforeSpawn(t *testing.T) {
+	mut := &orderRecordingMutator{}
+	stubRunFn(t, func(run.Opts, run.Controller) error {
+		mut.callOrder = append(mut.callOrder, "spawn")
+		return nil
+	})
+
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	prior := 0
+
+	if _, err := applyDispatch(testConfig(), resumeDispatchDeps(now), fakeController{}, mut, false, nil, &prior); err != nil {
+		t.Fatalf("applyDispatch returned unexpected error: %v", err)
+	}
+
+	want := []string{"edit", "spawn"}
+	if len(mut.callOrder) != len(want) || mut.callOrder[0] != want[0] || mut.callOrder[1] != want[1] {
+		t.Fatalf("call order = %v, want %v (the label swap must land before the spawn)", mut.callOrder, want)
+	}
+	if len(mut.edits) != 1 {
+		t.Fatalf("expected exactly 1 label edit (the resume swap), got %d: %+v", len(mut.edits), mut.edits)
+	}
+	e := mut.edits[0]
+	if e.repo != "o/r" || e.number != 42 || !containsStr(e.add, labelWorking) || !containsStr(e.remove, labelInputNeeded) {
+		t.Errorf("unexpected resume swap edit: %+v, want add=[%s] remove=[%s] on o/r#42", e, labelWorking, labelInputNeeded)
+	}
+	if prior != 1 {
+		t.Errorf("prior = %d, want 1 (incremented per successful resume dispatch)", prior)
+	}
+}
+
+// TestApplyDispatchResumeSwapFailurePreventsSpawnAndClaim covers: a failed
+// pre-spawn swap must never spawn, must never increment prior, and must
+// surface the error -- unlike the ordinary path's post-spawn claim failure
+// (which is logged-and-continue, since the spawn already happened there).
+func TestApplyDispatchResumeSwapFailurePreventsSpawnAndClaim(t *testing.T) {
+	stubRunFn(t, func(run.Opts, run.Controller) error {
+		t.Fatal("a failed resume swap must never spawn")
+		return nil
+	})
+
+	mut := &orderRecordingMutator{failEditLabels: true}
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	prior := 0
+	var buf bytes.Buffer
+
+	_, err := applyDispatch(testConfig(), resumeDispatchDeps(now), fakeController{}, mut, false, &buf, &prior)
+	if err == nil || !strings.Contains(err.Error(), "swap failed") {
+		t.Fatalf("error = %v, want the swap failure surfaced", err)
+	}
+	if !strings.Contains(buf.String(), "resume claim failed") {
+		t.Errorf("expected the resume claim failure to be logged, got %q", buf.String())
+	}
+	if prior != 0 {
+		t.Errorf("prior = %d, want 0 (a failed swap must never spawn or consume quota)", prior)
+	}
+}
+
+// TestApplyDispatchResumeSpawnFailureAfterGoodSwapDoesNotDoubleEdit covers: a
+// spawn failure that follows a successful pre-spawn swap must not attempt a
+// second (post-spawn) label edit -- the resume path never claims twice.
+func TestApplyDispatchResumeSpawnFailureAfterGoodSwapDoesNotDoubleEdit(t *testing.T) {
+	stubRunFn(t, func(run.Opts, run.Controller) error { return errors.New("tmux exploded") })
+
+	mut := &orderRecordingMutator{}
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	prior := 0
+	var buf bytes.Buffer
+
+	_, err := applyDispatch(testConfig(), resumeDispatchDeps(now), fakeController{}, mut, false, &buf, &prior)
+	if err == nil || !strings.Contains(err.Error(), "tmux exploded") {
+		t.Fatalf("error = %v, want tmux exploded", err)
+	}
+	if len(mut.edits) != 1 {
+		t.Fatalf("expected exactly 1 label edit (the pre-spawn swap only, no second post-spawn claim), got %d: %+v", len(mut.edits), mut.edits)
+	}
+	if prior != 0 {
+		t.Errorf("prior = %d, want 0 (a failed spawn must not consume quota)", prior)
+	}
+}
+
+// TestApplyDispatchResumeDryRunSkipsSwapButPrintsTable covers: --dry-run must
+// never swap labels or spawn, but the resume decision line must still print.
+func TestApplyDispatchResumeDryRunSkipsSwapButPrintsTable(t *testing.T) {
+	stubRunFn(t, func(run.Opts, run.Controller) error {
+		t.Error("dry-run must not spawn")
+		return nil
+	})
+
+	mut := &orderRecordingMutator{}
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	prior := 0
+	var buf bytes.Buffer
+
+	if _, err := applyDispatch(testConfig(), resumeDispatchDeps(now), fakeController{}, mut, true, &buf, &prior); err != nil {
+		t.Fatalf("dry-run returned unexpected error: %v", err)
+	}
+	if len(mut.edits) != 0 {
+		t.Errorf("dry-run must not swap labels, got %+v", mut.edits)
+	}
+	if !strings.Contains(buf.String(), "resume — human answered") {
+		t.Errorf("expected the resume decision line to still be printed, got %q", buf.String())
+	}
+}
+
 // failingMutator errors on every mutation, for the claim-failure path.
 type failingMutator struct{}
 
@@ -329,5 +479,29 @@ func TestFormatDecisionPrefixesRepo(t *testing.T) {
 	}
 	if got, want := formatDecision(dispatch), "o/r#78 dispatch (claude, 78-add-cache.md): dispatch"; got != want {
 		t.Errorf("dispatch line = %q, want %q", got, want)
+	}
+}
+
+// TestFormatDecisionRendersResumeLine covers the Test Strategy table's
+// formatDecision resume-line assertion (#827): the exact rendered line, and
+// that it still carries the load-bearing ` dispatch ` substring downstream
+// consumers (lazyboards) match on -- Resume must never perturb that
+// contract.
+func TestFormatDecisionRendersResumeLine(t *testing.T) {
+	d := Decision{
+		Ticket: Ticket{Repo: "o/r", Number: 42},
+		Plan:   &Plan{Path: ".plans/42-slug.md"},
+		Action: ActionDispatch,
+		Resume: true,
+		Reason: "resume — human answered",
+		Agent:  "claude",
+	}
+	got := formatDecision(d)
+	want := "o/r#42 dispatch (claude, 42-slug.md): resume — human answered"
+	if got != want {
+		t.Errorf("resume line = %q, want %q", got, want)
+	}
+	if !strings.Contains(got, " dispatch ") {
+		t.Errorf("resume line %q must still carry the load-bearing %q substring", got, " dispatch ")
 	}
 }
