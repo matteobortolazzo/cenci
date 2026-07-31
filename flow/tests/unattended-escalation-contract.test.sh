@@ -103,6 +103,11 @@ if ! PHASE1_CONTENT="$(cat "${PHASE1_PLAN}" 2>/dev/null)"; then
   PHASE1_CONTENT=""
 fi
 
+if ! IMPLEMENT_SKILL_CONTENT="$(cat "${IMPLEMENT_SKILL}" 2>/dev/null)"; then
+  fail "SKILL.md: doc not found/unreadable: ${IMPLEMENT_SKILL}"
+  IMPLEMENT_SKILL_CONTENT=""
+fi
+
 # =====================================================================
 # ## Unattended Escalation Path -- must exist and name all 7 pinned
 # cross-lane contract strings verbatim (see the plan's "Pinned cross-lane
@@ -213,6 +218,16 @@ fi
 # =====================================================================
 # skills/implement/SKILL.md -- Plan Verification's awaiting-input branch:
 # hasPlanFile left unset, hard STOP, never falls through to ## New Plan.
+#
+# #827 (dispatch auto-resume) splits this branch into an Answered
+# sub-bullet (routes to the new `## Resume From Draft` section instead of
+# hard-stopping -- see flow/tests/dispatch-resume-contract.test.sh) and a
+# Not answered sub-bullet (today's report-and-STOP, byte-unchanged). The
+# hard-STOP assertions below are therefore retargeted (section-scoped) to
+# the Not answered sub-bullet specifically -- a whole-branch or whole-file
+# match would also vacuously pass if the STOP text were ever accidentally
+# duplicated into the Answered sub-bullet, and would not fail if the STOP
+# text were removed from Not answered but left present elsewhere.
 # =====================================================================
 
 AWAITING_INPUT_BRANCH_MARKER='**`awaiting-input`**'
@@ -222,12 +237,45 @@ REPLAN_ESCAPE_HATCH_MARKER='`replan` (passed as user context) is the deliberate 
 
 assert_file_contains "${IMPLEMENT_SKILL}" "${AWAITING_INPUT_BRANCH_MARKER}" \
   "Plan Verification must add a bolded awaiting-input decision branch"
-assert_file_contains "${IMPLEMENT_SKILL}" "${HASPLANFILE_UNSET_STOP_MARKER}" \
-  "awaiting-input branch must leave hasPlanFile unset and hard STOP"
-assert_file_contains "${IMPLEMENT_SKILL}" "${NEVER_FALL_THROUGH_MARKER}" \
-  "awaiting-input branch must explicitly forbid falling through into ## New Plan"
 assert_file_contains "${IMPLEMENT_SKILL}" "${REPLAN_ESCAPE_HATCH_MARKER}" \
   "awaiting-input branch must name replan as the deliberate discard escape hatch, same mechanism as stale/multiple"
+
+# extract_awaiting_input_branch <content> -- bounds the awaiting-input bullet
+# through (not including) the next top-level Plan Verification bullet, so a
+# hard-STOP match cannot be vacuously satisfied by an unrelated bullet.
+# Pure extraction, no fail() side effect: safe to call inside $(...).
+extract_awaiting_input_branch() {
+  awk '
+    /^- \*\*`awaiting-input`\*\*/ { on=1; print; next }
+    on && /^- \*\*Unrecognized/ { exit }
+    on { print }
+  ' <<<"$1"
+}
+
+# extract_not_answered_subbranch <awaiting-input-branch-content> -- returns
+# only the Not answered sub-bullet (the last sub-bullet in the branch, so no
+# further boundary is needed once it starts). Pure, no fail() side effect.
+extract_not_answered_subbranch() {
+  awk '
+    /^  - \*\*Not answered\*\*/ { on=1; print; next }
+    on { print }
+  ' <<<"$1"
+}
+
+AWAITING_INPUT_BRANCH="$(extract_awaiting_input_branch "${IMPLEMENT_SKILL_CONTENT}")"
+if [[ -z "${AWAITING_INPUT_BRANCH}" ]]; then
+  fail "SKILL.md: could not locate the awaiting-input branch (extract_awaiting_input_branch returned empty)"
+else
+  NOT_ANSWERED_SUBBRANCH="$(extract_not_answered_subbranch "${AWAITING_INPUT_BRANCH}")"
+  if [[ -z "${NOT_ANSWERED_SUBBRANCH}" ]]; then
+    fail "SKILL.md: could not locate the awaiting-input branch's Not answered sub-bullet (extract_not_answered_subbranch returned empty)"
+  else
+    [[ "${NOT_ANSWERED_SUBBRANCH}" == *"${HASPLANFILE_UNSET_STOP_MARKER}"* ]] || \
+      fail "SKILL.md (awaiting-input branch, Not answered sub-bullet) must leave hasPlanFile unset and hard STOP (expected to contain: ${HASPLANFILE_UNSET_STOP_MARKER})"
+    [[ "${NOT_ANSWERED_SUBBRANCH}" == *"${NEVER_FALL_THROUGH_MARKER}"* ]] || \
+      fail "SKILL.md (awaiting-input branch, Not answered sub-bullet) must explicitly forbid falling through into ## New Plan (expected to contain: ${NEVER_FALL_THROUGH_MARKER})"
+  fi
+fi
 
 # --- Hard-stop / session-shape rule gains the escalation stop as a third
 #     named session shape -------------------------------------------------

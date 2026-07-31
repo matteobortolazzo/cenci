@@ -48,6 +48,22 @@ const (
 	reasonDependencyStateUnknownFmt = "dependency #%d state unrecognized"
 )
 
+// Resume-gate skip reasons (#827). reasonAnswerProbeUnknown is deliberately
+// distinct from the enumerated probe-class reasons below, for the same
+// reason reasonStageProbeUnknown is distinct from reasonPipelineUnreadable
+// above: a regression collapsing the switch's default branch into a known
+// case must be caught by a content-specific assertion (#446/#598). A map
+// miss in Inputs.Answers (an `Input Needed` ticket resolveAnswerProbes never
+// covered this pass) also lands here, since AnswerProbe deliberately has no
+// permissive zero-value constant (types.go).
+const (
+	reasonAnswerWaiting         = "escalation still awaiting a human answer"
+	reasonAnswerNoAnchor        = "no escalation anchor found"
+	reasonAnswerUnresolved      = "escalation answer probe failed"
+	reasonAnswerProbeUnknown    = "escalation answer probe unrecognized"
+	reasonDraftNotAwaitingInput = "draft not awaiting input"
+)
+
 // Inputs is the full, explicit input to Decide. Now is an injected clock value
 // and Snapshot is nil when the daemon is unreachable — both keep Decide pure.
 type Inputs struct {
@@ -59,6 +75,14 @@ type Inputs struct {
 	Prior       int       // dispatches already counted in the current quota window
 	CurrentUser string    // active gh login; tickets must be solely assigned to it
 	Config      Config
+
+	// Answers maps planKey(repo, number) -> the resolved AnswerProbe for
+	// every ticket that carried `Input Needed` this pass (#827), resolved by
+	// resolveAnswerProbes (resume.go) before Decide is ever called -- all
+	// I/O for the probe happens in RunOnce, never inside this gate chain
+	// (Decide's own purity contract). A ticket not present in this map (any
+	// non-`Input Needed` ticket) is simply never a resume candidate.
+	Answers map[string]AnswerProbe
 }
 
 // Decide is pure: identical Inputs yield an identical ordered []Decision with no
@@ -123,8 +147,18 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 		return skip(reason)
 	}
 
+	// resuming (#827) is true when this ticket carries `Input Needed`: the
+	// unattended planner escalated it and stopped cleanly, and it is a
+	// dispatch candidate again once a human answers. Swaps only rule 1's
+	// board-state check and rule 3's plan-status check below (an escalated
+	// ticket never carries `Planned`, and its plan is `awaiting-input`, not
+	// `planned`); skips rule 4 freshness entirely; every other gate
+	// (assignee, dependency, sibling, capacity/budget) is shared verbatim
+	// with the ordinary path, because it is literally the same code.
+	resuming := hasLabel(t.Labels, labelInputNeeded)
+
 	// Pickup rule 1: board state.
-	if !hasLabel(t.Labels, "Planned") {
+	if !resuming && !hasLabel(t.Labels, "Planned") {
 		return skip("not Planned")
 	}
 	if hasLabel(t.Labels, "Working") {
@@ -155,17 +189,36 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 		return skip("multiple assignees")
 	}
 
-	// Pickup rule 3: a planned plan exists.
+	// Pickup rule 3: a matching plan exists, in the status this path expects.
 	plan := planByTicket[planKey(t.Repo, t.Number)]
 	if plan == nil {
 		return skip("no plan file")
 	}
-	if plan.Status != "planned" {
+	if resuming {
+		if plan.Status != "awaiting-input" {
+			return skip(reasonDraftNotAwaitingInput)
+		}
+	} else if plan.Status != "planned" {
 		return skip("plan not ready")
 	}
 
-	// Pickup rule 4: plan freshness.
-	if plan.CommitsBehind > in.Config.PlanStalenessTolerance {
+	// Resume-only gate (#827): does the ticket's comment thread hold a human
+	// answer to its escalation? Zero I/O here -- the probe was already
+	// resolved by resolveAnswerProbes/RunOnce before Decide was ever called
+	// (Decide's own purity contract, mirroring dependencyGateSkip's doc
+	// comment above).
+	if resuming {
+		if reason, gated := resumeGateSkip(t, in.Answers[planKey(t.Repo, t.Number)]); gated {
+			return skip(reason)
+		}
+	}
+
+	// Pickup rule 4: plan freshness. Deliberately skipped when resuming,
+	// mirroring CheckPlan's own awaiting-input-before-planIsStale
+	// short-circuit (watch/internal/pipeline/planfile.go:165-173): a draft
+	// that waited days on a human is almost always commits-behind, and
+	// applying this gate here would mean it could never re-resume.
+	if !resuming && plan.CommitsBehind > in.Config.PlanStalenessTolerance {
 		return skip("plan stale, re-plan")
 	}
 
@@ -205,6 +258,9 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 		return skip("budget exhausted")
 	}
 
+	if resuming {
+		return Decision{Ticket: t, Plan: plan, Action: ActionDispatch, Resume: true, Reason: "resume — human answered", Agent: agent}
+	}
 	return Decision{Ticket: t, Plan: plan, Action: ActionDispatch, Reason: "dispatch", Agent: agent}
 }
 
@@ -413,6 +469,37 @@ func dependencyGateSkip(t Ticket) (string, bool) {
 		return reason, true
 	}
 	return "", false
+}
+
+// resumeGateSkip evaluates the escalation-answer gate (#827) for a resuming
+// ticket t, with zero I/O -- probe was already resolved by
+// resolveAnswerProbes/RunOnce, never here (Decide's own purity contract,
+// mirroring dependencyGateSkip's doc comment above). It returns (reason,
+// true) when probe should skip dispatch, and ("", false) only for
+// AnswerProbeAnswered. A map miss (the zero value "" -- Inputs.Answers never
+// covered this ticket) lands in the default branch alongside any other
+// unrecognized value, since AnswerProbe deliberately has no permissive
+// zero-value constant (types.go). t is accepted (unused today) to keep this
+// gate's signature symmetric with the ticket-scoped gates above and leave
+// room for a future ticket-scoped reason without an incompatible signature
+// change.
+func resumeGateSkip(t Ticket, probe AnswerProbe) (string, bool) {
+	switch probe {
+	case AnswerProbeAnswered:
+		return "", false
+	case AnswerProbeWaiting:
+		return reasonAnswerWaiting, true
+	case AnswerProbeNoAnchor:
+		return reasonAnswerNoAnchor, true
+	case AnswerProbeUnresolved:
+		return reasonAnswerUnresolved, true
+	default:
+		// Unrecognized/missing AnswerProbe value: default-deny with its own
+		// distinct reason (not any of the three known reasons above) so a
+		// regression collapsing this branch is caught by assertion, per
+		// #446/#598.
+		return reasonAnswerProbeUnknown, true
+	}
 }
 
 func hasLabel(labels []string, name string) bool {

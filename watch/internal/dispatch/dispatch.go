@@ -25,6 +25,10 @@ type dispatchDeps struct {
 	Snapshot    *watch.StateSnapshot
 	Now         time.Time
 	CurrentUser string
+	// Answers maps planKey(repo, number) -> the resolved AnswerProbe for
+	// every `Input Needed` ticket this pass (#827), resolved by
+	// resolveAnswerProbes (resume.go) before applyDispatch/Decide ever run.
+	Answers map[string]AnswerProbe
 }
 
 // RunOnce gathers inputs (tickets, plans, snapshot, clock), runs the pure
@@ -80,12 +84,23 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 
 	snap, _ := ReadSnapshot(watch.DefaultSocketPath()) // nil on error ⇒ Decide skips safely
 
+	// Probe every `Input Needed` ticket for a human answer to its escalation
+	// (#827), keyed by planKey so Decide's Inputs.Answers can look it up --
+	// mirrors RunReconcileOnce's countAttempts loop, a label-scoped
+	// per-ticket gh read outside the collector. A probe failure fails closed
+	// (AnswerProbeUnresolved) and is only logged -- it never feeds
+	// collectErr, matching fetchDependencyState (a gate input) rather than
+	// countAttempts (a destructive-verdict input): one transient gh hiccup
+	// must never paint the whole pass dispatch_pass_failed.
+	answers := resolveAnswerProbes(tickets, out)
+
 	decisions, applyErr := applyDispatch(cfg, dispatchDeps{
 		Tickets:     tickets,
 		Plans:       plans,
 		Snapshot:    snap,
 		Now:         time.Now(),
 		CurrentUser: currentUser,
+		Answers:     answers,
 	}, ctrl, mut, dryRun, out, prior)
 	return decisions, firstNonNil(collectErr, applyErr)
 }
@@ -120,6 +135,7 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 		Prior:       priorVal,
 		CurrentUser: deps.CurrentUser,
 		Config:      cfg,
+		Answers:     deps.Answers,
 	})
 
 	// Surface the pinned model in the same log stream as the decision table so
@@ -144,6 +160,21 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 		if d.Action != ActionDispatch || d.Plan == nil {
 			continue
 		}
+
+		// Resume path (#827): swap Input Needed -> Working BEFORE spawning,
+		// not after. A failed post-spawn claim on the ordinary path (below)
+		// is safely recovered by the reconciler next pass; here it would
+		// leave the ticket at Input Needed forever, so every subsequent
+		// pass would re-resume it and spawn an unbounded stream of planning
+		// sessions. A failed swap therefore skips the spawn entirely.
+		if d.Resume {
+			if err := mut.EditLabels(d.Ticket.Repo, d.Ticket.Number, []string{labelWorking}, []string{labelInputNeeded}); err != nil {
+				logf(out, "dispatch: #%d resume claim failed: %v\n", d.Ticket.Number, err)
+				firstErr = firstNonNil(firstErr, err)
+				continue
+			}
+		}
+
 		err := runFn(run.Opts{
 			Workflow:     "implement",
 			Ticket:       filepath.Join(".plans", filepath.Base(d.Plan.Path)),
@@ -161,9 +192,14 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 		if prior != nil {
 			*prior++
 		}
-		if err := mut.EditLabels(d.Ticket.Repo, d.Ticket.Number, []string{labelWorking}, nil); err != nil {
-			logf(out, "dispatch: #%d claim label failed: %v\n", d.Ticket.Number, err)
-			firstErr = firstNonNil(firstErr, err)
+		// The resume path already claimed Working above, before the spawn;
+		// the ordinary path claims it here, synchronously after, so no later
+		// pass can re-pick the ticket during the spawn→self-label window.
+		if !d.Resume {
+			if err := mut.EditLabels(d.Ticket.Repo, d.Ticket.Number, []string{labelWorking}, nil); err != nil {
+				logf(out, "dispatch: #%d claim label failed: %v\n", d.Ticket.Number, err)
+				firstErr = firstNonNil(firstErr, err)
+			}
 		}
 	}
 	return decisions, firstErr

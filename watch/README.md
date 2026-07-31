@@ -416,13 +416,18 @@ failing gate is the logged skip reason):
 
 1. **local `main` sync** — the ticket's repo's local `main` checkout synced cleanly
    with `origin/main` this pass (see [Local main sync](#local-main-sync) below);
-2. carries `Planned`, not `Blocked`, has no open linked PR, and its persisted pipeline
-   stage is not `finalized`;
-3. a matching plan for the ticket exists with `status: planned`;
+2. carries `Planned`, **or** carries `Input Needed` with a human answer newer than the
+   escalation anchor (see [Escalation auto-resume](#escalation-auto-resume) below); not
+   `Blocked`, has no open linked PR, and its persisted pipeline stage is not
+   `finalized`;
+3. a matching plan for the ticket exists with `status: planned` (or, on the resume
+   path, `status: awaiting-input`);
 4. the plan is fresh — default-branch commits since its `planCommitSha` are within
    `planStalenessTolerance` (else `plan stale, re-plan`); when the plan's front
    matter lists `stalenessPaths`, only commits touching those paths are counted
-   (see [Path-aware staleness](#path-aware-staleness) below);
+   (see [Path-aware staleness](#path-aware-staleness) below). **Deliberately skipped
+   on the resume path** — a draft that waited on a human is almost always
+   commits-behind, and applying this gate there would mean it could never re-resume;
 5. **ticket dependency gate** — every `Depends on #N` reference in the ticket's body
    is closed (else `waiting on dependency #N`, or `dependency #N unresolved` when
    that issue's state couldn't be determined; see
@@ -504,6 +509,66 @@ with no PR (or a corrupted state file) becomes dispatchable again. Set
 linked worktree rather than the ticket's main checkout, the probe will not see the
 main checkout's pipeline state (the state file lives at the main checkout's git
 root) and the gate fails open there — matching pre-#732 behavior.
+
+#### Escalation auto-resume
+
+Ticket #827 teaches dispatch to auto-resume an `Input Needed` ticket (the unattended
+planner's escalation label, ticket #826) once a human answers its question, rather
+than waiting for a fresh `/cenci:implement` run to pick the draft back up manually.
+
+Each pass runs a targeted, per-ticket `gh issue view <n> --json comments` probe for
+every `Input Needed` ticket — never a bulk fleet-wide read — and classifies the
+comment thread: a comment counts as a human answer iff it is positioned after the
+**last** comment containing the hidden `<!-- cenci-planner-escalation -->` anchor,
+its body — with `>`-prefixed blockquote lines stripped first (so GitHub's "Quote
+reply" copying the anchor verbatim into a reply is never misread as cenci's own
+comment) — contains no `<!-- cenci-` marker, its author login is neither
+`*[bot]` nor `app/*`, and its author association is one of `OWNER`, `MEMBER`, or
+`COLLABORATOR`. That last check is load-bearing on a public or wide-collaborator
+repo: without it, any GitHub user able to comment on an `Input Needed` issue could
+trigger an unattended `implement` planning session with broad tool access —
+`CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, and `NONE` associations are deliberately
+never authorized. See [Cenci-authored comment markers in
+`watch/docs/dispatch-reconcile.md`](docs/dispatch-reconcile.md#cenci-authored-comment-markers)
+for why every comment cenci posts must carry one of these markers.
+
+When answered, gate 2 dispatches the ticket exactly like an ordinary `Planned` pickup
+— every other gate (assignee, dependency, sibling, capacity, budget, quiet hours)
+applies identically — except: gate 2 accepts `Input Needed` in place of `Planned`,
+gate 3 requires the matched plan's `status: awaiting-input` (the persisted draft the
+unattended planner stopped on) rather than `status: planned`, and gate 4 (plan
+freshness) is skipped entirely, mirroring `CheckPlan`'s own
+awaiting-input-before-staleness short-circuit — a draft that waited days on a human
+is almost always commits-behind, and gating on that would mean it could never
+re-resume. `applyDispatch` swaps the `Input Needed` label for `Working` **before**
+relaunching (not after, the way an ordinary dispatch claims its label) — a failed
+swap skips the spawn entirely, since a failed *post*-spawn claim on the ordinary path
+is safely recovered by the reconciler next pass, but here it would leave the ticket at
+`Input Needed` forever and re-resume it every subsequent pass.
+
+The relaunched session re-delegates to the `planner` agent against the same draft
+(its `## Architectural Context` is treated as prior exploration — no re-exploration),
+appends the human's answers to the ticket's `### Decisions`, and either finalizes the
+plan (`status: planned`, back onto the ordinary dispatch rail next pass) or
+re-escalates on an incomplete answer rather than guessing. A resumed decision renders
+in the log/`--dry-run` table exactly like any other dispatch:
+
+```
+owner/name#42 dispatch (claude, 42-slug.md): resume — human answered
+```
+
+Every other probe outcome skips with its own distinct reason: `escalation still
+awaiting a human answer` (no qualifying comment yet), `no escalation anchor found`
+(the thread has no anchor at all), `escalation answer probe failed` (the `gh` call
+itself errored or returned malformed JSON), and `escalation answer probe unrecognized`
+(an internal default-deny case). `draft not awaiting input` fires when the matched
+plan's `status` isn't `awaiting-input` (e.g. it was already finalized).
+
+**Bot detection is login-shape-based** (`*[bot]`/`app/*`), since `gh issue view
+--json comments` exposes only `author.login`, no dedicated bot flag. A self-hosted
+automation posting under a plain user login would be misread as a human reply and
+trigger a resume — bounded impact: the flow side then finds no answers to the open
+questions and re-escalates rather than guessing.
 
 #### Path-aware staleness
 
@@ -667,6 +732,12 @@ it as a dispatch failure or retrying it would be wrong. The reconciler feeds the
 daemon a synthetic `escalated` entry (distinct status from `failed`), which the status
 output counts into `StatusSummary.Escalated`, never `StatusSummary.Failed` or
 `StatusSummary.NeedInput`.
+
+`Input Needed` is no longer only a reconciler no-op, though (ticket #827): it is also
+now a *dispatch* input. The reconciler's own handling above is unchanged — it still
+never touches an `Input Needed` ticket — but each dispatch pass separately probes it
+for a human answer and auto-resumes it once one arrives; see [Escalation
+auto-resume](#escalation-auto-resume) above.
 
 Run it two ways:
 

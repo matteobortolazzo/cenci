@@ -40,6 +40,7 @@ New → Refined → [Designed] → Planned → Working → In Review → Impleme
 | Refined/Designed → Planned | `/cenci:implement` planning | Persists `.plans/<id>-*.md`, then `+Planned` `−Working` (trivial-ticket fast path and lean planning with no escalations: `Working` is retained, not removed — see note below) |
 | Planned → Working | plan-file implementation or `cenci dispatch` pickup | `+Working`; `Planned` remains as a milestone |
 | Working → Input Needed (escalation) | `/cenci:implement` planning (unattended, `planning.autonomy: "lean"`) | Persists a draft `.plans/<id>-*.md` (`status: awaiting-input`), then `+Input Needed` `−Working` (`Refined` retained) |
+| Input Needed → Working (resume) | `cenci dispatch` (auto-resume) | `+Working` `−Input Needed` once a qualifying human reply is detected after the escalation anchor; `Refined` retained |
 | Working → In Review | `/cenci:implement` phase 9 | `+In Review` `−Working` when the PR opens |
 | In Review → Implemented | `/cenci:babysit` (on PR merge) | `+Implemented` `−In Review` |
 
@@ -67,6 +68,23 @@ what the dispatch reconciler's crash-recovery retries (see `watch/docs/dispatch-
 leaving `Working` on an escalated ticket would make it a retry candidate instead of the
 human-input candidate it actually is. A human answer on the ticket, followed by a fresh
 `/cenci:implement` session, resumes from the draft plan.
+
+The `Input Needed → Working (resume)` transition is the round trip back, and it no longer
+requires that manual re-run: `cenci dispatch` now probes every `Input Needed` ticket for a
+qualifying human reply on the escalation comment — positioned after the most recent
+`<!-- cenci-planner-escalation -->` anchor, marker-free, not authored by a `*[bot]`/`app/*`
+login, and posted by an author whose association is one of `OWNER`, `MEMBER`, or
+`COLLABORATOR` — and, when found, swaps `+Working` `−Input Needed` before relaunching the planning
+session against the persisted `status: awaiting-input` draft. This is the same relaunch shape
+as an ordinary `Planned` pickup, just pointed at a draft instead of a finished plan. The
+relaunched session re-delegates to the planner with the draft's `## Architectural Context` as
+its prior exploration (no re-exploration permitted), appends the human's answers to the
+ticket's `### Decisions` section, and either finalizes the plan (`+Planned` `−Working`, same
+as any other planning session) or re-escalates with a follow-up comment when the answers are
+incomplete — it never guesses. This mirrors the collapsed `Refined → Planned → Working`
+sessions above in spirit (no human plan-review gate on the relaunch), but it is a distinct
+case: the plan itself was already escalated once, so this round trip can repeat if answers
+stay incomplete, bounded by dispatch's existing concurrency/budget/quiet-hours gates.
 
 **`Working` is transient activity, not a persisted handoff.** lazyboards'
 `working_label` (default

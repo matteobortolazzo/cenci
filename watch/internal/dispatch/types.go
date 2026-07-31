@@ -116,6 +116,42 @@ const (
 	DependencyStateUnresolved DependencyState = "unresolved"
 )
 
+// AnswerProbe classifies the resolved outcome of probing an `Input Needed`
+// ticket's comment thread for a human answer to its escalation (#827) into a
+// closed set, rather than collapsing distinct failure classes
+// (watch/docs/go-gotchas.md #598, watch/docs/error-handling.md #628). Like
+// DependencyState above, there is deliberately NO permissive zero-value
+// constant here: a ticket carrying `Input Needed` that resolveAnswerProbes
+// never covered (an Inputs.Answers map lookup miss) is indistinguishable
+// from the zero value and must fail closed via decide.go's resumeGateSkip
+// switch default, not be given its own permissive zero value the way
+// StageProbeAbsent/MainSyncSkipped are.
+type AnswerProbe string
+
+const (
+	// AnswerProbeAnswered means a non-bot comment with no `<!-- cenci-`
+	// marker (blockquote-stripped first) and an authorized authorAssociation
+	// (`OWNER`, `MEMBER`, or `COLLABORATOR` -- #827 review fix #1) was found
+	// positioned after the last `<!-- cenci-planner-escalation -->` anchor
+	// comment -- a human answered the escalation.
+	AnswerProbeAnswered AnswerProbe = "answered"
+	// AnswerProbeWaiting means an escalation anchor was found, but every
+	// comment after it is either cenci-authored (carries a `<!-- cenci-`
+	// marker), bot-authored (`*[bot]`/`app/*` login), or lacks an authorized
+	// authorAssociation (`OWNER`, `MEMBER`, or `COLLABORATOR` -- #827 review
+	// fix #1) -- still waiting on a human.
+	AnswerProbeWaiting AnswerProbe = "waiting"
+	// AnswerProbeNoAnchor means the comment thread contains no
+	// `<!-- cenci-planner-escalation -->` anchor at all (including an empty
+	// thread) -- there is nothing to resume from yet.
+	AnswerProbeNoAnchor AnswerProbe = "no_anchor"
+	// AnswerProbeUnresolved means the probe itself failed: the `gh issue
+	// view` call errored, its JSON was malformed, or the pass's per-pass
+	// call budget (maxAnswerProbes) was already spent -- fails closed
+	// rather than assuming answered or waiting.
+	AnswerProbeUnresolved AnswerProbe = "unresolved"
+)
+
 // Ticket is one open GitHub issue, as collected from a repo. Labels carry the
 // board state (Planned, Blocked, agent:<name>, ...); Assignees carry GitHub
 // logins; Agent is the pre-resolved agent:<name> value, if any.
@@ -194,4 +230,15 @@ type Decision struct {
 	Action Action
 	Reason string // always set
 	Agent  string // resolved agent for the dispatch
+
+	// Resume (#827) is true when this dispatch relaunches an `Input Needed`
+	// ticket's `status: awaiting-input` draft after a human answered its
+	// escalation, rather than picking up an ordinary `status: planned` plan.
+	// Deliberately additive to Action (never a third Action value): a new
+	// ActionResume would perturb formatDecision's `dispatch`/`skip:`
+	// substrings, a documented downstream contract with lazyboards
+	// (dispatch.go's formatDecision doc comment) -- Resume plus a
+	// content-distinct Reason ("resume — human answered") keeps that
+	// contract byte-unchanged.
+	Resume bool
 }

@@ -1,6 +1,11 @@
 package dispatch
 
 import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -426,4 +431,89 @@ func hasRecovery(res ReconcileResult, repo string, number int, kind RecoveryKind
 		}
 	}
 	return false
+}
+
+// -- #827: every cenci-authored comment carries a distinct <!-- cenci- marker
+
+// TestCommentHelpersEachCarryADistinctCenciMarker covers the plan's
+// constraint that every reconciler/skill-authored ticket comment must carry
+// a `<!-- cenci-<kind> -->` marker from #827 onward -- resume.go's
+// classifier treats a marker-free non-bot comment as a human escalation
+// answer, so an unmarked comment helper would silently become a false
+// "answered" trigger. Each helper's body must contain a `<!-- cenci-` marker,
+// and every helper's marker must be pairwise distinct (#446: content-specific
+// assertions, not just non-empty checks).
+func TestCommentHelpersEachCarryADistinctCenciMarker(t *testing.T) {
+	bodies := map[string]string{
+		"retryComment":          retryComment(1, "42-x", "gone"),
+		"failedComment":         failedComment(2, "42-x", "gone"),
+		"planInvalidComment":    planInvalidComment(),
+		"reconcileStuckComment": reconcileStuckComment(),
+	}
+
+	markers := make(map[string]string, len(bodies))
+	for name, body := range bodies {
+		if !strings.Contains(body, cenciMarkerPrefix) {
+			t.Errorf("%s body does not carry a %q marker: %q", name, cenciMarkerPrefix, body)
+			continue
+		}
+		start := strings.Index(body, cenciMarkerPrefix)
+		end := strings.Index(body[start:], "-->")
+		if end < 0 {
+			t.Fatalf("%s marker has no closing --> : %q", name, body)
+		}
+		markers[name] = body[start : start+end+len("-->")]
+	}
+
+	seen := make(map[string]string, len(markers))
+	for name, marker := range markers {
+		if other, ok := seen[marker]; ok {
+			t.Errorf("%s and %s share the same marker %q, want each helper's marker distinct", name, other, marker)
+		}
+		seen[marker] = name
+	}
+}
+
+// TestCountAttemptsRegressionAgainstTheThreeNewMarkers pins that
+// countAttempts' strings.Contains(c.Body, attemptMarker) check still returns
+// 0 for a comment thread containing only the three newly back-filled markers
+// (failedMarker/planInvalidMarker/reconcileStuckMarker) and no
+// attemptMarker -- none of them must be misclassified as a dispatch-attempt
+// comment.
+func TestCountAttemptsRegressionAgainstTheThreeNewMarkers(t *testing.T) {
+	type payloadComment struct {
+		Body string `json:"body"`
+	}
+	payload := struct {
+		Comments []payloadComment `json:"comments"`
+	}{
+		Comments: []payloadComment{
+			{Body: failedComment(3, "42-x", "gone")},
+			{Body: planInvalidComment()},
+			{Body: reconcileStuckComment()},
+		},
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshaling fixture payload: %v", err)
+	}
+	// Written to a file and `cat`, rather than shell-quoted inline, since the
+	// comment bodies contain apostrophes (e.g. "ticket's") that would
+	// otherwise break a single-quoted shell literal.
+	fixture := filepath.Join(t.TempDir(), "comments.json")
+	if err := os.WriteFile(fixture, data, 0o644); err != nil {
+		t.Fatalf("writing fixture payload: %v", err)
+	}
+	// installFakeGHOnPath (not installFakeGH): the script below shells out to
+	// the real `cat`, which installFakeGH's wholesale PATH replacement would
+	// make unresolvable.
+	installFakeGHOnPath(t, fmt.Sprintf("cat %q\n", fixture))
+
+	n, err := countAttempts("o/r", 42)
+	if err != nil {
+		t.Fatalf("countAttempts returned unexpected error: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("countAttempts = %d, want 0 (none of the three new markers is attemptMarker)", n)
+	}
 }
