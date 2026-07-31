@@ -118,3 +118,14 @@ from external or semi-trusted sources.
   file and its own contract test in the same change) deserve extra scrutiny in review
   because a test-logic regression and a prose regression can be hard to tell apart at a
   glance.
+- When a skill's gate or authorization logic defines multiple boolean signals or decision
+  points, ensure each signal's prose description is distinct and unambiguous — e.g.,
+  "per-child frontend status" (childIsFrontend) vs. "design-only child from a split"
+  are distinct roles and must not be described as equivalent or interchangeable. Contract
+  tests that check for gate-step text presence cannot detect semantic confusion between
+  signals. Reviewers must verify that each gate step wires the *intended* signal, not a
+  similarly-named alternative, especially in security-relevant gates where signal-wiring
+  errors can silently allow or withhold access incorrectly. This pattern parallels the
+  #824 rule ("validate then use") but applies to signal *selection* rather than
+  validate-vs-hardcode: the gate may be syntactically complete yet wire the wrong boolean
+  signal (#848).

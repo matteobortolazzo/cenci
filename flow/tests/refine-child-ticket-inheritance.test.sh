@@ -48,6 +48,11 @@ assert_file_lacks() {
 # =====================================================================
 MILESTONE_LABELS_FETCH='--json milestone,labels'
 LIFECYCLE_EXCLUSION_MARKER='"Refined","Working","Planned","In Review","Implemented","Design","Designed"'
+# #848: automerge:ok, Browser, and ui:visual-check are per-ticket grants that
+# must never be inherited by a split child or the companion design ticket —
+# LIFECYCLE_EXCLUSION_MARKER above (a substring of this extended list) keeps
+# passing; this marker is what actually pins the 10-entry extension.
+LIFECYCLE_EXCLUSION_10_MARKER='"Refined","Working","Planned","In Review","Implemented","Design","Designed","automerge:ok","Browser","ui:visual-check"'
 MILESTONE_NUMBER_MARKER='.milestone.number'
 SLURPFILE_MARKER='--slurpfile meta'
 CHILD_SEED_MARKER='(["Refined"] +'
@@ -61,6 +66,8 @@ assert_file_contains "${REFINE_SKILL}" "${MILESTONE_LABELS_FETCH}" \
   "must fetch the parent ticket's milestone and labels via gh issue view"
 assert_file_contains "${REFINE_SKILL}" "${LIFECYCLE_EXCLUSION_MARKER}" \
   "must exclude the 7 lifecycle labels on a single source line"
+assert_file_contains "${REFINE_SKILL}" "${LIFECYCLE_EXCLUSION_10_MARKER}" \
+  "must extend the exclusion array to 10 entries so automerge:ok, Browser, and ui:visual-check are never inherited by a split child or the companion design ticket (#848)"
 assert_file_contains "${REFINE_SKILL}" "${MILESTONE_NUMBER_MARKER}" \
   "must source the inherited milestone as the numeric .milestone.number, not the title"
 assert_file_contains "${REFINE_SKILL}" "${SLURPFILE_MARKER}" \

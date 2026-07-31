@@ -46,6 +46,8 @@ New → Refined → [Designed] → Planned → Working → In Review → Impleme
 | Working → In Review | `/cenci:implement` phase 9 | `+In Review` `−Working` when the PR opens |
 | In Review → Implemented | `/cenci:babysit` (on PR merge) | `+Implemented` `−In Review` |
 
+`automerge:ok` is a per-ticket grant confirmed at refine's Confirmation Gate, never inherited — a split child, the companion design ticket, and a followup ticket each earn it (or not) on their own merit, never from the parent.
+
 `In Review` is applied when the PR **opens**, not when it merges — so a PR still
 looping through review is visibly distinct from a merged one. `/cenci:babysit` owns
 the final swap: it watches the open PR and, on merge, replaces `In Review` with

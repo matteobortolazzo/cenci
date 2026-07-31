@@ -9,32 +9,59 @@ auto-adopted, never asked, into the proposal's `### Assumptions (auto-adopted)` 
 it is obvious>`). Also carry a `### Decisions` section (integration points, error-handling
 convention, backward-compatibility decision, plus any other settled decision) — both
 sections persist into the ticket body alongside `### Acceptance Criteria`, and the planner
-inherits them verbatim and must not re-open them. Carry an `### Automation` verdict
-(`grant`/`withhold` plus a one-line rationale) — withhold by default for security-sensitive
-paths, release/CI workflow files, visually verifiable UI work, or irreversible
-migration/data changes, and whenever uncertain; this section is not written into the ticket
-body. Do not edit GitHub in Plan mode. Hand off `$cenci:refine apply <ticket>
-<approved-plan>` to normal mode, then update the ticket and labels and clear the checkpoint.
+inherits them verbatim and must not re-open them. Carry a per-ticket `### Automation` verdict
+registry — one line for the parent (`automerge (parent): grant|withhold — <rationale>`) plus
+one line per proposed split child (`automerge (K/N) <child title>: grant|withhold —
+<rationale>`) — withhold by default for security-sensitive paths, release/CI workflow files,
+visually verifiable UI work, or irreversible migration/data changes, and whenever uncertain,
+applied independently per ticket; this section is not written into the ticket body. A split's
+`### Suggested Split` carries each child as a decision-complete block (`### Goal`,
+`### Decisions`, `### Assumptions (auto-adopted)`, `### Acceptance Criteria`,
+`### Dependencies`) so it is plannable without undocumented parent context. Do not edit
+GitHub in Plan mode. Hand off `$cenci:refine apply <ticket> <approved-plan>` to normal mode.
 
-**`automerge:ok` grant (apply mode, parent ticket only)**: as part of the same label edit
-that applies `Refined`/`Design`/`Browser`, compute the effective grant — refiner verdict is
-grant AND NOT isDesignTicket AND NOT browserRequired AND NOT the `ui:visual-check` signal
-match — ensure the label exists (`gh label create "automerge:ok" --repo <owner>/<repo>
---color "006B75" --description "Human granted hands-off merge at refinement — babysit may
-merge this PR without review" 2>/dev/null || true`), then append `--add-label
-"automerge:ok"` when the effective grant holds, or `--remove-label "automerge:ok"` when it
-does not and the issue currently carries the label (re-refine), or nothing otherwise.
+**Confirmation Gate (apply mode, before any GitHub write)**: no ticket, label, or sub-issue
+mutation happens until this gate confirms. For each proposed split child, apply the
+`frontend-classification` reference skill to that child's own block text to determine whether
+it needs a scoped browser question (skipped entirely for a design-only child) — the parent's
+own browser question is independent and is never propagated to any child. Compute each
+ticket's effective `automerge:ok` grant (`### Automation` verdict is exactly `grant` AND NOT
+`isDesignTicket` AND NOT `browserRequired` AND NOT the `ui:visual-check` signal match,
+evaluated independently per ticket; fail-closed to `withhold` on an absent/other value) and
+each ticket's final label set (parent per the label edit below; each child = inherited
+non-excluded parent labels + `Refined` [+ `Design`] [+ `Browser`] [+ `ui:visual-check`] [+
+`automerge:ok` when granted]). Render the complete proposal plus a per-ticket manifest (title,
+label set, grant/withhold + rationale), then ask, via the client's available user-input
+mechanism, "Apply this refinement as shown?" with Confirm/Decline options — no adjust loop. A
+**Decline** makes no ticket, label, or sub-issue mutation of any kind; report that `Working`
+and the assignee claim remain, and that re-running refine is how to adjust. Only a Confirm
+proceeds to update the ticket and labels and clear the checkpoint.
+
+**`automerge:ok` grant (apply mode, parent ticket)**: as part of the same label edit
+that applies `Refined`/`Design`/`Browser`, use the effective grant computed at the
+Confirmation Gate above (do not recompute) — ensure the label exists (`gh label create
+"automerge:ok" --repo <owner>/<repo> --color "006B75" --description "Human granted
+hands-off merge at refinement — babysit may merge this PR without review" 2>/dev/null ||
+true`), then append `--add-label "automerge:ok"` when the effective grant holds, or
+`--remove-label "automerge:ok"` when it does not and the issue currently carries the label
+(re-refine), or nothing otherwise. Every proposed split child gets its own independently
+computed grant/withhold from the same gate, applied when that child is created (see below) —
+never inherited from the parent.
 When a split is applied, first verify the proposal partitions the parent's acceptance criteria:
 every parent criterion assigned to exactly one child (integration-scoped criteria on a child that
 depends on all others); an unassigned or duplicated criterion aborts the split before any GitHub
 write. Each child body then carries its own `### Acceptance Criteria` section — its slice of the parent's partition —
-after the dependency lines and description. Link each child of the split to the parent as a native GitHub sub-issue
+after the dependency lines and description, plus that child's own `### Decisions` and
+`### Assumptions (auto-adopted)` persisted from its `### Suggested Split` block. Link each child of the split to the parent as a native GitHub sub-issue
 (`gh issue edit <child> --parent <parent>`) — do not append a child-ticket markdown checklist; the
 native sub-issue list carries the enumeration. Every ticket this workflow creates — each split child
 and the companion design ticket — inherits the parent's milestone (as the numeric `.milestone.number`,
-omitted entirely when the parent has none) and every parent label except the 7 lifecycle markers
-(`Refined`, `Working`, `Planned`, `In Review`, `Implemented`, `Design`, `Designed`), on top of its own
-seed labels; if the parent-metadata fetch fails after one retry, create the tickets without inheritance
+omitted entirely when the parent has none) and every parent label except the 10 lifecycle/transient
+and refinement-granted markers (`Refined`, `Working`, `Planned`, `In Review`, `Implemented`,
+`Design`, `Designed`, `automerge:ok`, `Browser`, `ui:visual-check`), on top of its own seed
+labels — `automerge:ok`, `Browser`, `ui:visual-check` are never inherited from the parent's
+current labels; each child's own copy of those three, if any, comes only from the Confirmation
+Gate above; if the parent-metadata fetch fails after one retry, create the tickets without inheritance
 and say so in the final message rather than aborting the split.
 
 Divergence: the refiner agent split is Claude-only — Codex has no subagent model tiering, so
