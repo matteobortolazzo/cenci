@@ -3,6 +3,7 @@ package dispatch
 import (
 	"bytes"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -509,25 +510,30 @@ func TestFormatDecisionRendersResumeLine(t *testing.T) {
 // -- #828: stage-aware Refined pickup and autonomous re-plan ----------------
 
 // planningDispatchDeps is the planning-pickup happy path: one Refined ticket
-// #42 with no plan file and a reachable, idle daemon.
+// #42 with no plan file and a reachable, idle daemon. RepoAutonomy grants
+// "o/r" lean (#851): dispatch.planRefined alone is no longer sufficient to
+// authorize an unattended planning dispatch.
 func planningDispatchDeps(now time.Time) dispatchDeps {
 	return dispatchDeps{
-		Tickets:     []Ticket{{Repo: "o/r", Number: 42, Title: "Fix thing", Labels: []string{"Refined"}, Assignees: []string{"octocat"}}},
-		Snapshot:    &watch.StateSnapshot{},
-		Now:         now,
-		CurrentUser: "octocat",
+		Tickets:      []Ticket{{Repo: "o/r", Number: 42, Title: "Fix thing", Labels: []string{"Refined"}, Assignees: []string{"octocat"}}},
+		Snapshot:     &watch.StateSnapshot{},
+		Now:          now,
+		CurrentUser:  "octocat",
+		RepoAutonomy: leanAutonomy("o/r"),
 	}
 }
 
 // replanDispatchDeps is the autonomous re-plan happy path: one Planned
-// ticket #42 whose plan is stale beyond testConfig's tolerance.
+// ticket #42 whose plan is stale beyond testConfig's tolerance. RepoAutonomy
+// grants "o/r" lean (#851), matching planningDispatchDeps above.
 func replanDispatchDeps(now time.Time) dispatchDeps {
 	return dispatchDeps{
-		Tickets:     []Ticket{{Repo: "o/r", Number: 42, Title: "Fix thing", Labels: []string{"Planned"}, Assignees: []string{"octocat"}}},
-		Plans:       []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "planned", CommitsBehind: 10}},
-		Snapshot:    &watch.StateSnapshot{},
-		Now:         now,
-		CurrentUser: "octocat",
+		Tickets:      []Ticket{{Repo: "o/r", Number: 42, Title: "Fix thing", Labels: []string{"Planned"}, Assignees: []string{"octocat"}}},
+		Plans:        []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "planned", CommitsBehind: 10}},
+		Snapshot:     &watch.StateSnapshot{},
+		Now:          now,
+		CurrentUser:  "octocat",
+		RepoAutonomy: leanAutonomy("o/r"),
 	}
 }
 
@@ -755,5 +761,192 @@ func TestFormatDecisionRendersReplanLine(t *testing.T) {
 	got := formatDecision(d)
 	if !strings.Contains(got, " dispatch ") {
 		t.Errorf("re-plan line %q must carry the load-bearing %q substring", got, " dispatch ")
+	}
+}
+
+// -- #851: dispatchDeps.RepoAutonomy wiring end-to-end through RunOnce, and
+// the dry-run/real-pass parity tests at the readPlansForRepos /
+// probeRepoAutonomies seams -------------------------------------------------
+
+// runOnceFakeGHWithIdentity returns a fake gh script serving one open issue
+// (numbered 42, the given labels, assigned to "octocat") plus the "api user"
+// identity call RunOnce needs whenever it collects a non-empty ticket set.
+func runOnceFakeGHWithIdentity(labelsJSON string) string {
+	return `
+case "$1 $2" in
+  "issue list") printf '[{"number":42,"title":"Fix thing","labels":[` + labelsJSON + `],"assignees":[{"login":"octocat"}]}]' ;;
+  "pr list") printf '[]' ;;
+  "api user") printf 'octocat\n' ;;
+  *) exit 1 ;;
+esac
+`
+}
+
+// isolateDaemonSocket redirects socket resolution to an empty temp dir
+// (watch/docs/test-isolation.md's "ambient daemon socket isolation" rule),
+// so RunOnce's ReadSnapshot deterministically fails (nil snapshot) rather
+// than dialing a real daemon that might happen to be running on the
+// dev/CI machine.
+func isolateDaemonSocket(t *testing.T) {
+	t.Helper()
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+}
+
+// TestRunOnce_InteractiveRepoConfigDeniesPlanningPickup covers the
+// dispatchDeps.RepoAutonomy wiring end-to-end through RunOnce (#851): a real
+// enrolled repo whose committed .cenci/config.json is NOT lean must deny a
+// Refined planning pickup with the autonomy-specific reason -- proving
+// RunOnce's probeRepoAutonomies -> dispatchDeps.RepoAutonomy -> Decide
+// plumbing is actually wired, not merely present on the struct. This
+// terminates before RunOnce's daemon-reachability check (rule 0's autonomy
+// gate for a planning candidate is evaluated first), so it needs no fake
+// daemon.
+func TestRunOnce_InteractiveRepoConfigDeniesPlanningPickup(t *testing.T) {
+	mainSyncGitEnv(t)
+	isolateDaemonSocket(t)
+	local, _ := initOriginAndLocal(t)
+	writeCommittedConfig(t, local, interactiveConfigJSON)
+
+	installFakeGHOnPath(t, runOnceFakeGHWithIdentity(`{"name":"Refined"}`))
+	stubRunFn(t, func(run.Opts, run.Controller) error {
+		t.Fatal("an autonomy-denied repo must never spawn")
+		return nil
+	})
+
+	cfg := testConfig()
+	cfg.PlanRefined = true
+	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: local}}
+
+	var buf bytes.Buffer
+	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil); err != nil {
+		t.Fatalf("RunOnce returned unexpected error: %v", err)
+	}
+
+	log := buf.String()
+	if !strings.Contains(log, "repo autonomy not lean") {
+		t.Errorf("expected the interactive-config denial reason logged, got %q", log)
+	}
+	if strings.Contains(log, "not Planned") {
+		t.Errorf("must be denied via the autonomy gate specifically, not fall through to \"not Planned\", got %q", log)
+	}
+}
+
+// TestRunOnce_LeanRepoConfigPassesAutonomyGate is the positive counterpart:
+// a real enrolled repo whose committed config IS lean must NOT be denied by
+// the autonomy gate. No fake daemon is wired up (isolateDaemonSocket), so
+// the decision terminates at the next gate down the chain
+// ("daemon unreachable") -- proving autonomy passed without requiring a full
+// dispatch to actually fire in this test environment.
+func TestRunOnce_LeanRepoConfigPassesAutonomyGate(t *testing.T) {
+	mainSyncGitEnv(t)
+	isolateDaemonSocket(t)
+	local, _ := initOriginAndLocal(t)
+	writeCommittedConfig(t, local, leanConfigJSON)
+
+	installFakeGHOnPath(t, runOnceFakeGHWithIdentity(`{"name":"Refined"}`))
+	stubRunFn(t, func(run.Opts, run.Controller) error {
+		t.Fatal("no live daemon is wired up in this test; a spawn here would mean a snapshot leaked in unexpectedly")
+		return nil
+	})
+
+	cfg := testConfig()
+	cfg.PlanRefined = true
+	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: local}}
+
+	var buf bytes.Buffer
+	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil); err != nil {
+		t.Fatalf("RunOnce returned unexpected error: %v", err)
+	}
+
+	log := buf.String()
+	if strings.Contains(log, "repo autonomy not lean") {
+		t.Errorf("a lean config must never be denied by the autonomy gate, got %q", log)
+	}
+	if !strings.Contains(log, "daemon unreachable") {
+		t.Errorf("expected the pass to fall through to the daemon-unreachable gate (proving autonomy passed), got %q", log)
+	}
+}
+
+// TestReadPlansForRepos_DryRunCommitsBehindMatchesPostFastForwardRealPass
+// covers the plan's Implementation Order step 8 dry-run parity test at the
+// readPlansForRepos seam: origin ahead by N commits past a plan's
+// planCommitSha. Dry-run's CommitsBehind (computed against the fetched
+// origin/main blob, FreshRef=="origin/main") must equal the post-fast-forward
+// real pass's CommitsBehind (computed against local HEAD, FreshRef=="HEAD"),
+// dry-run must leave local HEAD unmoved, and the real pass must actually
+// fast-forward.
+func TestReadPlansForRepos_DryRunCommitsBehindMatchesPostFastForwardRealPass(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, origin := initOriginAndLocal(t)
+	planSha := gitTest(t, local, "rev-parse", "HEAD")
+	commitFile(t, origin, "advance1.txt", "a")
+	commitFile(t, origin, "advance2.txt", "b")
+	commitFile(t, origin, "advance3.txt", "c")
+	const wantCommitsBehind = 3
+
+	writePlan(t, local, "42-x.md", "---\nticketId: 42\nstatus: planned\nplanCommitSha: "+planSha+"\n---\nbody\n")
+
+	repos := []RepoConfig{{Repo: "o/r", Dir: local}}
+
+	// Dry-run pass: fetch + classify only, never merge.
+	dryRunSyncs := syncMains(repos, io.Discard, true)
+	dryPlans, err := readPlansForRepos(repos, dryRunSyncs, io.Discard)
+	if err != nil {
+		t.Fatalf("readPlansForRepos (dry-run) returned unexpected error: %v", err)
+	}
+	if len(dryPlans) != 1 {
+		t.Fatalf("got %d dry-run plans, want 1: %+v", len(dryPlans), dryPlans)
+	}
+	if dryPlans[0].CommitsBehind != wantCommitsBehind {
+		t.Errorf("dry-run CommitsBehind = %d, want %d", dryPlans[0].CommitsBehind, wantCommitsBehind)
+	}
+	if got := gitTest(t, local, "rev-parse", "HEAD"); got != planSha {
+		t.Errorf("dry-run must never move local HEAD, got %s want %s", got, planSha)
+	}
+
+	// Real pass: fetch + fast-forward.
+	realSyncs := syncMains(repos, io.Discard, false)
+	realPlans, err := readPlansForRepos(repos, realSyncs, io.Discard)
+	if err != nil {
+		t.Fatalf("readPlansForRepos (real pass) returned unexpected error: %v", err)
+	}
+	if len(realPlans) != 1 {
+		t.Fatalf("got %d real-pass plans, want 1: %+v", len(realPlans), realPlans)
+	}
+	if realPlans[0].CommitsBehind != dryPlans[0].CommitsBehind {
+		t.Errorf("real-pass CommitsBehind = %d, want it to match the dry-run's %d", realPlans[0].CommitsBehind, dryPlans[0].CommitsBehind)
+	}
+	originHEAD := gitTest(t, origin, "rev-parse", "HEAD")
+	if got := gitTest(t, local, "rev-parse", "HEAD"); got != originHEAD {
+		t.Errorf("real pass must fast-forward local HEAD to origin HEAD, got %s want %s", got, originHEAD)
+	}
+}
+
+// TestProbeRepoAutonomies_DryRunAndRealPassAgreeUsingSameFreshRef is the
+// autonomy-side twin of the CommitsBehind parity test above: a lean config
+// committed only on origin (not yet merged locally) must be visible to
+// BOTH the dry-run pass (reading the fetched origin/main blob) and the
+// subsequent real pass (reading post-fast-forward local HEAD) -- rendering
+// the identical eligibility verdict, per the ticket's "render the same
+// eligibility/re-plan result that the subsequent real synchronized pass
+// would produce" acceptance criterion.
+func TestProbeRepoAutonomies_DryRunAndRealPassAgreeUsingSameFreshRef(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, origin := initOriginAndLocal(t)
+	commitFile(t, origin, "advance.txt", "advance")
+	writeCommittedConfig(t, origin, leanConfigJSON) // committed only on origin
+
+	repos := []RepoConfig{{Repo: "o/r", Dir: local}}
+
+	dryRunSyncs := syncMains(repos, io.Discard, true)
+	dryAutonomy := probeRepoAutonomies(repos, dryRunSyncs, io.Discard)
+	if dryAutonomy["o/r"] != RepoAutonomyLean {
+		t.Errorf("dry-run autonomy = %q, want RepoAutonomyLean (fetched origin/main blob)", dryAutonomy["o/r"])
+	}
+
+	realSyncs := syncMains(repos, io.Discard, false)
+	realAutonomy := probeRepoAutonomies(repos, realSyncs, io.Discard)
+	if realAutonomy["o/r"] != RepoAutonomyLean {
+		t.Errorf("real-pass autonomy = %q, want RepoAutonomyLean (post-fast-forward local HEAD blob)", realAutonomy["o/r"])
 	}
 }

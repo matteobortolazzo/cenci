@@ -85,8 +85,12 @@ type Config struct {
 	// dispatch (`cenci run implement <n>`), and a terminal "plan stale,
 	// re-plan" skip becomes an autonomous re-plan dispatch
 	// (`cenci run implement "<n> replan"`). Defaults false (default-deny) --
-	// a pure operator assertion the dispatcher trusts rather than verifies;
-	// it never reads the repo's own planning.autonomy config.
+	// a fleet-wide kill switch, not sufficient authorization on its own
+	// (#851): Refined pickup and autonomous re-plan additionally require the
+	// repo's own committed `planning.autonomy == "lean"`, read from
+	// `.cenci/config.json` via the probeRepoAutonomy gate (autonomy.go) --
+	// fleet configuration can disable lean planning but can no longer
+	// independently authorize it for a repo that hasn't opted in itself.
 	PlanRefined bool
 }
 

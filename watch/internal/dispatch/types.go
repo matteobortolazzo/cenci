@@ -44,15 +44,24 @@ const (
 // today's behavior unchanged without being touched, and so a repo the
 // collector never synced (nil mainSync map, e.g. the reconciler's
 // CollectTickets call) is never gated.
+//
+// #851: a checked-out branch that is not `main`, a detached HEAD, or a
+// configured-but-absent directory used to all collapse into the ungated
+// MainSyncSkipped below -- they are now their own gated states
+// (MainSyncNotMain/MainSyncDetached/MainSyncMissing), each blocking every
+// pickup in the repo exactly like MainSyncDiverged/MainSyncFailed already
+// did, per the plan's Q&A 1 resolution. MainSyncSkipped itself is preserved
+// only for dir == "" (no Dir configured at all -- "no sync attempted"),
+// distinct from a configured Dir that is absent from disk.
 type MainSync string
 
 const (
-	// MainSyncSkipped is the zero value: the sync was never attempted for
-	// this ticket's repo -- no `.plans`/pipeline gate is trustworthy or
-	// untrustworthy either way, so dispatch proceeds as if the gate did not
-	// exist. Also the explicit outcome when the repo's checked-out branch is
-	// not `main` (or HEAD is detached, or dir is empty) -- the sync
-	// deliberately never touches a tree it can't safely fast-forward.
+	// MainSyncSkipped is the zero value: dir == "" for this ticket's repo, so
+	// no Dir was configured at all and no sync was ever attempted -- no
+	// `.plans`/pipeline gate is trustworthy or untrustworthy either way, so
+	// dispatch proceeds as if the gate did not exist. Distinct from
+	// MainSyncMissing (#851), which is a configured, non-empty Dir that does
+	// not exist on disk.
 	MainSyncSkipped MainSync = ""
 	// MainSyncSynced means `main` is now caught up with (or was already at
 	// or ahead of) origin/main -- includes both an actual fast-forward and
@@ -71,6 +80,22 @@ const (
 	// auth, unresolvable remote). Transient -- ungated, self-heals next
 	// pass.
 	MainSyncFetchFailed MainSync = "fetch_failed"
+	// MainSyncNotMain means the repo is checked out on a branch other than
+	// `main` (#851, previously the ungated MainSyncSkipped). A non-main
+	// checkout is untrustworthy for both plan-freshness and pipeline-stage
+	// gating, so it gates every pickup in the repo, not only planning.
+	MainSyncNotMain MainSync = "not_main"
+	// MainSyncDetached means the repo's HEAD is detached (#851, previously
+	// the ungated MainSyncSkipped) -- the dir IS a repo, it just isn't on any
+	// branch. Gates every pickup in the repo, distinct from MainSyncNotMain
+	// and from the non-repo-dir MainSyncFailed case.
+	MainSyncDetached MainSync = "detached"
+	// MainSyncMissing means a configured, non-empty Dir does not exist on
+	// disk at all (#851, a new os.Stat precheck) -- distinct from
+	// MainSyncFailed (a real, existing dir that merely isn't a git repo) and
+	// from the ungated MainSyncSkipped zero value reserved for dir == "" (no
+	// Dir configured). Gates every pickup in the repo.
+	MainSyncMissing MainSync = "missing"
 )
 
 // String renders m for logging (#822 review nitpick fix #6). MainSyncSkipped
@@ -150,6 +175,45 @@ const (
 	// call budget (maxAnswerProbes) was already spent -- fails closed
 	// rather than assuming answered or waiting.
 	AnswerProbeUnresolved AnswerProbe = "unresolved"
+)
+
+// RepoAutonomy classifies the resolved per-repository `planning.autonomy`
+// authorization (#851), read from the enrolled repo's committed
+// `.cenci/config.json` after main sync, into a closed set, rather than
+// collapsing distinct failure classes (watch/docs/go-gotchas.md #598,
+// watch/docs/error-handling.md #628). Like DependencyState/AnswerProbe
+// above, there is deliberately NO permissive zero-value constant here:
+// dispatch.planRefined remains the fleet kill switch, but is insufficient
+// alone to authorize unattended planning/re-plan -- a repo this pass never
+// probed (a nil Inputs.RepoAutonomy map, or a map lookup miss) must fail
+// closed via decide.go's autonomyGateSkip switch default, not silently
+// permit.
+type RepoAutonomy string
+
+const (
+	// RepoAutonomyLean means the repo's committed `.cenci/config.json` has
+	// `planning.autonomy` set to the exact, case-sensitive string "lean" --
+	// the sole state that authorizes an unattended Refined pickup or
+	// autonomous re-plan.
+	RepoAutonomyLean RepoAutonomy = "lean"
+	// RepoAutonomyInteractive means the committed config was read
+	// successfully but does not grant lean: a missing `planning` block, a
+	// missing `autonomy` key, an explicit non-"lean" value, or a wrong-case
+	// match ("Lean") all resolve here -- default-deny, not a distinct
+	// failure class per value.
+	RepoAutonomyInteractive RepoAutonomy = "interactive"
+	// RepoAutonomyMissing means `.cenci/config.json` is absent from the
+	// resolved ref entirely (never committed), or dir == "" (no Dir
+	// configured -- never probed, mirrors probeStage/syncMain's own
+	// dir == "" convention).
+	RepoAutonomyMissing RepoAutonomy = "missing"
+	// RepoAutonomyMalformed means the committed config.json was read but
+	// failed to decode as JSON.
+	RepoAutonomyMalformed RepoAutonomy = "malformed"
+	// RepoAutonomyUnreadable means the probe itself failed to run: a bad ref,
+	// a non-git directory, or any other git command failure distinct from
+	// "path absent from an otherwise-resolvable ref" (RepoAutonomyMissing).
+	RepoAutonomyUnreadable RepoAutonomy = "unreadable"
 )
 
 // Ticket is one open GitHub issue, as collected from a repo. Labels carry the

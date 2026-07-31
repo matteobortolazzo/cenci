@@ -1650,6 +1650,15 @@ and `skills/implement/phases/phase-1-plan.md`'s `## Lean Approval Path`). Schema
   its five named escalation classes, and a plan persisted with no escalations is implicitly
   approved and continues straight into Phase 2 in the same session.
 
+  `planning.autonomy` has a second consumer besides `skills/implement/phases/phase-1-plan.md`:
+  `cenci dispatch`'s pickup gate (`watch/internal/dispatch/autonomy.go`) reads this same
+  committed `.cenci/config.json` field to authorize an unattended planning pickup or
+  autonomous re-plan (`dispatch.planRefined: true`) — only the exact string `"lean"`
+  authorizes either consumer; both default-deny identically on a missing block, missing
+  key, or any other value. See [`watch/README.md`'s Planning pickup and autonomous
+  re-plan](../../../watch/README.md#planning-pickup-and-autonomous-re-plan) for the
+  dispatch-side gate.
+
 Because the config write below uses merge semantics, a hand-added `planning` block is
 **preserved untouched** across re-configuration, exactly like `security`. Do **not** add
 `planning` to the migration-removal list below — it is a supported optional field, not a

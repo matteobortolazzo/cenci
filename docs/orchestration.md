@@ -106,11 +106,13 @@ serialization, capacity, budget, quiet hours) unchanged. Chained end to end,
 this closes the full autonomous loop: refine → plan → implement → PR →
 automerge → next dependent ticket's stale plan self-heals and gets re-planned
 → implemented in turn, with no human touch between refine and merge. This is
-**lean-planning repos only**: `dispatch.planRefined` is a pure operator
-assertion — dispatch never verifies the repo's own `planning.autonomy: "lean"`
-setting — so enabling it on a repo whose planning stage still expects a human
-review gate is the operator's responsibility, not something the flag checks
-for you. See [cenci-watch's
+**lean-planning repos only**: `dispatch.planRefined` remains a fleet-wide kill
+switch, but it is no longer sufficient authorization on its own (#851) —
+dispatch also reads the repo's own committed `planning.autonomy` setting from
+`.cenci/config.json` (never the working tree) and requires the literal value
+`"lean"` before treating a planning pickup or autonomous re-plan as authorized;
+a missing, unreadable, malformed, or non-`"lean"` repo config denies both, with
+its own distinct skip reason. See [cenci-watch's
 README](../watch/README.md#planning-pickup-and-autonomous-re-plan) for the
 sibling-serialization and unbounded-re-plan limitations this loop accepts.
 

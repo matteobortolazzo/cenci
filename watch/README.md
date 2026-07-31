@@ -466,29 +466,55 @@ for the whole fleet the way `needInputThreshold` windows-awaiting-input can.
 
 Before evaluating any ticket, each dispatch pass runs `git fetch origin` and a
 fast-forward-only merge of `origin/main` into `main`, once per enrolled repo — but
-only when the repo's checkout is currently on `main`; a repo on any other branch (or
-with a detached HEAD) is left untouched and ungated. This runs unconditionally, even
+only when the repo's checkout is currently on `main`. This runs unconditionally, even
 on a pass with zero collected tickets, and only ever touches `main` — never `--reset`,
 `--force`, or a branch other than `main`.
 
-Each repo's sync lands in one of three outcomes:
+Each repo's sync lands in one of six outcomes:
 
-- **synced** — `main` is now caught up with (or was already at or ahead of)
-  `origin/main`. Ungated: every ticket in the repo proceeds to the next gate.
-- **fetch-failed, ungated** — `git fetch origin` itself failed (network, auth,
+- **`MainSyncSkipped`** — no `dir` is configured for the repo at all
+  (`dispatch.repos[].dir` is empty). The zero value: "no sync attempted," distinct
+  from every state below. Ungated: every ticket in the repo proceeds to the next
+  gate.
+- **`MainSyncSynced`** — `main` is now caught up with (or was already at or ahead
+  of) `origin/main`. Ungated: every ticket in the repo proceeds to the next gate.
+- **`MainSyncFetchFailed`** — `git fetch origin` itself failed (network, auth,
   unresolvable remote). Left ungated deliberately: transient, and self-heals next
   pass.
-- **diverged or failed, gated** — local `main` and `origin/main` have both moved
-  independently (`local main diverged`), or the fast-forward merge itself failed for
-  some other reason, e.g. a dirty tracked file it would overwrite (`local main sync
-  failed`). Either way every ticket in that repo is skipped this pass, since plan
-  freshness and the pipeline-stage gate below are both computed against the local
-  tree and are not trustworthy until a human resolves the underlying git state.
+- **`MainSyncNotMain`** — the checkout is currently on a branch other than `main`.
+  **Gated.**
+- **`MainSyncDetached`** — the checkout's `HEAD` is detached (on no branch at all).
+  **Gated.**
+- **`MainSyncMissing`** — a `dir` is configured but that directory does not exist
+  on disk. **Gated.** Distinct from `MainSyncSkipped` (no `dir` configured at all)
+  and from the pre-existing "not a git repository"/diverged/merge-failed
+  `MainSyncFailed`/`MainSyncDiverged` states (also gated, unchanged from before).
+
+**User-visible behavior change:** `MainSyncNotMain`, `MainSyncDetached`, and
+`MainSyncMissing` gate **every ticket in that repo this pass** — ordinary `Planned`
+pickups included, not only planning pickups or autonomous re-plan. An enrolled repo
+parked on a feature branch, left detached, or whose configured directory has gone
+missing from disk used to keep dispatching ordinary `Planned` tickets normally; it
+no longer does — it is skipped exactly like the pre-existing `MainSyncDiverged`/
+`MainSyncFailed` gated states. Rationale: plan freshness and the pipeline-stage gate
+below are both computed against the local tree, so a checkout state that isn't
+trustworthy for the sync itself isn't trustworthy for any other pickup either — see
+gate 1 in [Pickup rules and gates](#pickup-rules-and-gates).
 
 This gate is scoped to `main` only — repos whose default branch isn't literally named
 `main` are never synced or gated by this rule. `--dry-run` still performs the real
 `git fetch` and classification (an accurate decision table needs it) but never runs
 the merge itself.
+
+**Dry-run staleness parity.** When a fast-forward is pending (local `main` is
+strictly behind `origin/main`), dry-run and the subsequent real pass share one
+resolved `FreshRef` per repo per pass: the fetched `origin/main` blob rather than
+local `HEAD`. Both plan staleness (gate 4 in [Pickup rules and
+gates](#pickup-rules-and-gates)) and the repo-local lean-authorization config read
+(below) are evaluated against that same `FreshRef`, so a dry-run's rendered
+decision table matches exactly what the subsequent real (fast-forwarded) pass would
+produce. In every other outcome — already up to date, local `main` ahead, or any
+gated state — `FreshRef` is `HEAD`.
 
 Gate 2's pipeline-stage check reads the ticket's persisted `cenci pipeline` state
 (`.cenci/pipeline/<id>.json`) and skips only on `finalized` — deliberately not "at or
@@ -592,11 +618,16 @@ dependency gate](#ticket-dependency-gate) above. `Designed` needs no separate
 handling: it is always propagated alongside `Refined`, so the `Refined` check
 covers it.
 
-**Lean-planning repos only.** `dispatch.planRefined` is a pure operator assertion
-— `internal/dispatch` never reads a repo's own `planning.autonomy` setting and
-never verifies it is `"lean"`. Enabling the flag on a repo whose planning stage
-still expects a human review is the operator's call, not something dispatch
-checks for you.
+**Lean-planning repos only.** `dispatch.planRefined` remains the fleet-wide kill
+switch, but it is no longer sufficient authorization on its own (#851): after the
+local main sync above, dispatch also reads the repo's own committed
+`.cenci/config.json` (via `git show <FreshRef>:.cenci/config.json`, never the
+working tree) and requires the literal value `planning.autonomy == "lean"` before
+treating a planning pickup or autonomous re-plan as authorized. A missing,
+unreadable, malformed, or non-`"lean"` repo config denies both with its own
+distinct skip reason — exactly as if `dispatch.planRefined` were `false` for that
+repo. Enabling `dispatch.planRefined` fleet-wide can no longer override a repo
+that hasn't itself opted into lean planning.
 
 **Trust boundary.** Enabling `dispatch.planRefined` treats the `Refined` label
 (plus the existing assignee-ownership gate) as sufficient authorization to
