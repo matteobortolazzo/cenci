@@ -47,7 +47,16 @@ true`), then append `--add-label "automerge:ok"` when the effective grant holds,
 (re-refine), or nothing otherwise. Every proposed split child gets its own independently
 computed grant/withhold from the same gate, applied when that child is created (see below) —
 never inherited from the parent.
-When a split is applied, first verify the proposal partitions the parent's acceptance criteria:
+When a split is applied, first verify each child block is structurally complete — every child in the
+adopted `### Suggested Split` has all five subsections present (`### Goal`, `### Decisions`, `### Assumptions (auto-adopted)`, `### Acceptance criteria`, `### Dependencies`), each satisfying its emptiness
+rule: `### Goal` non-empty prose; `### Dependencies` non-empty ("None." valid); `### Decisions` and
+`### Assumptions (auto-adopted)` each non-empty or exactly "None."; `### Acceptance criteria` empty only
+for a child the partition assigned zero criteria; a missing or empty-violating child aborts the split
+before any GitHub write and before the acceptance-criteria partition check runs. This structural check only
+confirms presence/absence and does not itself judge whether an empty `### Acceptance criteria` section is
+legitimate — the partition check below is the sole verifier of correct assignment, and a child wrongly left
+empty will surface there as an unassigned criterion. Only then verify the
+proposal partitions the parent's acceptance criteria:
 every parent criterion assigned to exactly one child (integration-scoped criteria on a child that
 depends on all others); an unassigned or duplicated criterion aborts the split before any GitHub
 write. Each child body then carries its own `### Acceptance Criteria` section — its slice of the parent's partition —
