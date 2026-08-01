@@ -141,6 +141,16 @@ type PlanCheck struct {
 // rather than becoming an unopenable plan file. Each consumer
 // (flow/skills/implement/SKILL.md, internal/dispatch) validates and fails
 // closed on its own.
+//
+// EscalationNonce non-empty with EscalationCommentID <= 0 is the *named*
+// nonce-without-ID mid-transaction state (#880): the state a crash between
+// persisting a fresh replacement nonce and persisting its comment ID leaves
+// behind, deliberately reusing this existing shape rather than a new
+// front-matter key. It is never treated as corruption by any consumer --
+// flow/skills/implement/SKILL.md's awaiting-input Plan Verification names it
+// explicitly and routes to `## Repair Escalation Anchor` case (i), and
+// internal/dispatch's classifyComments fails closed on it as
+// AnswerProbeAnchorUnset. See TestCheckPlan_AwaitingInput_EscalationAnchor_NonceWithoutID_CommentIDZero.
 type PlanMeta struct {
 	Mode                string `json:"mode"`
 	Slug                string `json:"slug"`
@@ -170,6 +180,12 @@ func CheckPlan(o PlanCheckOpts) (State, PlanCheck, error) {
 		return state, PlanCheck{}, err
 	}
 
+	// The glob deliberately never matches a dot-prefixed candidate file
+	// (`.plans/.<id>-<slug>.candidate.md`, #880): `## Resume From Draft` step
+	// 6 assembles the finalized plan there and validates it before an atomic
+	// `mv` replaces the real draft, so a candidate sitting alongside a valid
+	// awaiting-input draft mid-transaction must never turn a single real
+	// match into "multiple" -- see TestCheckPlan_CandidateFileAlongsideDraft_StillSingleMatch_AwaitingInput.
 	matches, err := filepath.Glob(filepath.Join(repoRoot, ".plans", o.ID+"-*.md"))
 	if err != nil {
 		return state, PlanCheck{}, fmt.Errorf("glob plan files for ticket %s: %w", o.ID, err)

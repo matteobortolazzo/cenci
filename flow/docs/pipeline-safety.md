@@ -30,6 +30,19 @@ fail mid-run or get reused in a new context.
   labels — each with its own ordering constraint and per-step recovery/idempotency
   documented — before stopping cleanly at Phase 1, never reaching Phase 2 at all.
 
+- When a restatement of a multi-step procedure explicitly claims to mirror or model an
+  existing case or section (e.g. "exactly as case (iii) does" or "mint a fresh nonce, then
+  fall through to the write-questions-file/post sub-steps below"), verify the restatement
+  includes every intermediate state-persistence step and validation action, not just the
+  terminal action or outcome. A restatement focused on matching the final behavior can
+  silently drop a load-bearing intermediate step (e.g. "persist the nonce before posting")
+  that is essential to recovery on retry; this creates an orphaned or incorrect anchor state.
+  Concrete instance: `/cenci:implement`'s `## Resume From Draft` step 3 author-mismatch
+  branch (#880), which claimed to model `## Repair Escalation Anchor` case (iii)'s
+  nonce-posting sequence but skipped the intermediate persist-nonce-to-front-matter step,
+  leaving an unverified fresh nonce published while the draft retained a stale persisted
+  nonce — an unmappable state that enabled further validation bypasses on retry.
+
 - All shared temp files written by phases or agents (e.g.
   `/tmp/claude/cenci-<ticket-id-or-slug>-diff.patch`) must be uniquely scoped by worktree
   path, run ID, or session UUID. Fixed paths without scoping let multiple concurrent
@@ -102,3 +115,37 @@ fail mid-run or get reused in a new context.
   previously-persisted verdict to decide whether reconciliation is even needed.
 
 - When designing a fail-closed guard (a check that blocks operations on policy violations), distinguish explicitly between three cases: (1) the guarded resource doesn't exist yet (safe to proceed, e.g. a PR that hasn't been created on first entry), (2) the resource exists in an ambiguous or bad state (fail closed, stop and surface the issue), (3) we can't determine the resource's state due to infrastructure error (fail closed, surface the error). Conflating cases 1 and 2 causes the guard to hard-stop legitimate initial entries. Example: a guard checking if a PR exists with `gh pr view` must treat "no PR found" (first entry) differently from "PR is in bad state" — catching the not-yet-exists case and allowing safe continuation, while failing when the state is truly bad. A guard that collapses both into a single "fail closed" branch blocks every first-time run that legitimately lacks the guarded resource. (#879)
+
+- Every hard stop after a `Working` claim in a multi-section escalating flow should funnel
+  through one named, restated-at-each-call-site restoration routine rather than each section
+  inventing its own ad hoc board-recovery prose — and a finalized artifact that could be
+  malformed must never overwrite the last-known-good durable state in place; assemble it to a
+  separate candidate and atomically replace only after validation. Concrete instance:
+  `/cenci:implement`'s `## Restore Awaiting-Input State` routine (`skills/implement/phases/phase-1-plan.md`,
+  #880, 3/12 of #661) — the single procedure `## Resume From Draft`, `## Unattended Escalation
+  Path`, and `## Repair Escalation Anchor` all funnel through on every enumerated hard stop
+  after `Working`, restoring `status: awaiting-input` plus the `Input Needed` label while
+  preserving human answers and the original freshness baseline (`planCommitSha`/
+  `stalenessPaths`) — paired with `## Resume From Draft` step 6's candidate-then-atomic-replace
+  rule: the finalized plan assembles to `.plans/.<id>-<slug>.candidate.md` (dot-prefixed, so it
+  never collides with `CheckPlan`'s `.plans/<id>-*.md` glob), is validated in place, and only
+  then `mv`'d over the draft — a malformed candidate is left on disk for inspection while the
+  last valid `awaiting-input` draft stays untouched.
+
+- When creating or maintaining a large procedural-doc inventory or table that enumerates
+  hard-stops, exceptions, or recovery scenarios (e.g. Hard-Stop Inventory in
+  `skills/implement/phases/phase-1-plan.md`), verify before committing that: (1) any summary
+  statement claiming to enumerate all entries (e.g. "exactly one non-restoring exception")
+  accurately reflects all actual entries in the inventory — adding a new entry that changes
+  this count must prompt update of the summary statement; (2) citations to recovery mechanisms
+  explicitly document their full applicability conditions (e.g. "requires existing
+  status: awaiting-input plan on disk") rather than oversimplifying conditional recovery into
+  a single 'universal' backstop — when multiple recovery paths branch on different conditions,
+  the doc must name which mechanism applies to which case. Summary drift and mischaracterized
+  recovery citations cause reviewers to question coverage that is actually present but
+  miscounted, and leave operators looking at the wrong tool when failures occur. Concrete
+  instance: `/cenci:implement`'s `## Hard-Stop Inventory` table (`#880, 3/12 of #661`): the
+  intro sentence must accurately count non-restoring exceptions, and Step 4 of `## Resume From
+  Draft` must explicitly document that its backstop (`RecoveryResumeInterrupted`) requires an
+  existing `status: awaiting-input` draft on disk and that step 1's "no valid draft exists at
+  all" case has a different backstop (reconciler's stage-aware retry per #828).

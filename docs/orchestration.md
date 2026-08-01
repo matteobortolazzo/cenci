@@ -133,6 +133,20 @@ on the relaunch), but it is a distinct case: the plan itself was already escalat
 this round trip can repeat if answers stay incomplete, bounded by dispatch's existing
 concurrency/budget/quiet-hours gates.
 
+**Resume/escalation abort is restored in-session, not by the reconciler (ticket #880).** Every
+hard stop after the `Working → resume` claim above — across the re-escalation round trip, the
+unattended escalation path, and the human-triggered anchor-repair path — restores
+`+Input Needed` `−Working` on a valid `status: awaiting-input` draft *before that same session
+stops*, not by waiting on a later pass. The dispatch reconciler's interrupted-resume recovery
+(described above) remains a backstop for a genuinely dead tmux window past its grace period,
+never the normal abort mechanism a clean-but-failing session relies on. One consequence is
+accepted deliberately rather than mitigated in this ticket: because restoring `Input Needed`
+leaves the anchor and the human's already-collected answer unchanged, `cenci dispatch`
+re-resumes the same ticket on its very next pass — a persistent failure loops
+restore-then-re-resume unbounded, with no attempt counter guarding it (unlike the reconciler's
+own `RetryBudget`-bounded dead-window recovery). Bounding this loop is deferred to a later
+ticket in the #661 series.
+
 **Stage-aware pickup closes the loop (ticket #828).** With `dispatch.planRefined:
 true` in a repo's `dispatch` config, `cenci dispatch` no longer stops at `Planned`
 tickets: a `Refined` ticket with no plan file yet becomes a planning pickup (the

@@ -1153,6 +1153,94 @@ func TestCheckPlan_AwaitingInput_EscalationAnchor_MalformedCommentId_ParsesToZer
 	}
 }
 
+// -- #880: candidate-plan file must never break CheckPlan's single-match
+// glob ---------------------------------------------------------------------
+
+// TestCheckPlan_CandidateFileAlongsideDraft_StillSingleMatch_AwaitingInput
+// pins the #880 candidate-then-atomic-replace design's dot-prefix
+// requirement: `## Resume From Draft` step 6 assembles a
+// `.plans/.<id>-<slug>.candidate.md` candidate, validates it, and only then
+// atomically replaces the real draft -- so mid-transaction (or after a crash
+// between assembly and replace), both files legitimately sit side by side in
+// `.plans/`. CheckPlan's `.plans/<id>-*.md` glob must still resolve to
+// exactly the one real draft, never "multiple" -- a "multiple" decision here
+// would break every consumer for this ticket (plan-check, dispatch, resume)
+// on every single mid-transaction crash, defeating the whole point of the
+// candidate-then-replace design.
+func TestCheckPlan_CandidateFileAlongsideDraft_StillSingleMatch_AwaitingInput(t *testing.T) {
+	repoRoot := t.TempDir()
+	calls := recordingCommand(t)
+	fields := defaultPlanFields("42", "add-thing", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "2026-07-20T20:00:00Z")
+	fields["status"] = "awaiting-input"
+	path := writePlanFile(t, repoRoot, "42", "add-thing", fields, validPlanBody)
+
+	// The dot-prefixed candidate sitting alongside the real draft, exactly as
+	// ## Resume From Draft step 6 leaves it mid-transaction.
+	candidatePath := filepath.Join(repoRoot, ".plans", ".42-add-thing.candidate.md")
+	candidateContent := "---\n" + planFrontMatter(fields) + "---\n" + validPlanBody
+	if err := os.WriteFile(candidatePath, []byte(candidateContent), 0o644); err != nil {
+		t.Fatalf("write candidate file: %v", err)
+	}
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, RepoSlug: "o/r"})
+	if err != nil {
+		t.Fatalf("CheckPlan with a candidate file alongside the real draft: unexpected error: %v", err)
+	}
+	if check.Decision != "awaiting-input" {
+		t.Errorf("Decision = %q, want awaiting-input (a dot-prefixed candidate file must never turn a single real draft into a 'multiple' decision)", check.Decision)
+	}
+	if len(check.Paths) != 1 || check.Paths[0] != path {
+		t.Errorf("Paths = %v, want exactly [%s] (the candidate file must be excluded from the glob)", check.Paths, path)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("gh/git calls = %v, want none (awaiting-input must short-circuit before any freshness check)", *calls)
+	}
+}
+
+// -- #880: the nonce-without-ID intermediate state, specifically ------------
+
+// TestCheckPlan_AwaitingInput_EscalationAnchor_NonceWithoutID_CommentIDZero
+// covers #880's reused representation (Q2) for the mid-re-escalation-
+// transaction state: a fresh escalationNonce persisted with
+// escalationCommentId cleared/absent -- the state a crash between
+// persist-nonce and persist-comment-ID leaves behind. Distinct from
+// TestCheckPlan_AwaitingInput_EscalationAnchor_Absent_ZeroValues above (which
+// covers BOTH fields absent, the pre-escalation-at-all baseline): here the
+// nonce is present and valid while only the comment ID is missing. PlanMeta's
+// echo is unvalidated either way (per PlanMeta's own doc comment), so this
+// must yield "awaiting-input" with the nonce echoed verbatim and
+// EscalationCommentID == 0 -- the same repairable shape
+// `## Repair Escalation Anchor` case (i) already recovers.
+func TestCheckPlan_AwaitingInput_EscalationAnchor_NonceWithoutID_CommentIDZero(t *testing.T) {
+	repoRoot := t.TempDir()
+	calls := recordingCommand(t)
+	fields := defaultPlanFields("42", "add-thing", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "2026-07-20T20:00:00Z")
+	fields["status"] = "awaiting-input"
+	fields["escalationNonce"] = "0123456789abcdef0123456789abcdef"
+	// escalationCommentId deliberately absent -- the nonce-without-ID state.
+	writePlanFile(t, repoRoot, "42", "add-thing", fields, validPlanBody)
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, RepoSlug: "o/r"})
+	if err != nil {
+		t.Fatalf("CheckPlan with a nonce-without-ID draft: unexpected error: %v", err)
+	}
+	if check.Decision != "awaiting-input" {
+		t.Errorf("Decision = %q, want awaiting-input", check.Decision)
+	}
+	if check.Plan == nil {
+		t.Fatal("Plan metadata must be echoed")
+	}
+	if check.Plan.EscalationNonce != "0123456789abcdef0123456789abcdef" {
+		t.Errorf("Plan.EscalationNonce = %q, want the persisted nonce echoed verbatim", check.Plan.EscalationNonce)
+	}
+	if check.Plan.EscalationCommentID != 0 {
+		t.Errorf("Plan.EscalationCommentID = %d, want 0 (comment ID cleared/absent -- the nonce-without-ID intermediate state)", check.Plan.EscalationCommentID)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("gh/git calls = %v, want none (awaiting-input must short-circuit before any freshness check)", *calls)
+	}
+}
+
 // -- sentinel identity (#412: a direct unit test at the package boundary) --
 
 func TestPlanCheckSentinelErrors_AreDistinctAndDetectableViaErrorsIs(t *testing.T) {
