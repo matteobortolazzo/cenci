@@ -53,9 +53,10 @@ looping through review is visibly distinct from a merged one. `/cenci:babysit` o
 the final swap: it watches the open PR and, on merge, replaces `In Review` with
 `Implemented` on every issue the PR closed (including a parent ticket reached via
 `Fixes #<parent>` — written only after phase 9's Parent Close Gate verified the
-parent's acceptance criteria against delivered evidence; on gaps the last-child PR
-references the parent as `Related to` and the parent stays open with a gap
-comment). PR-open never applies `Implemented`.
+parent's acceptance criteria against delivered evidence, and reconciled to the
+current verdict on every re-entry rather than trusting an earlier attempt's write;
+on gaps the last-child PR references the parent as `Related to` and the parent
+stays open with a gap comment). PR-open never applies `Implemented`.
 
 The `Refined → Planned → Working` transitions collapse into a single session on two
 triggers: a ticket judged trivial by `/cenci:implement`'s Trivial-Ticket Triage, or a plan

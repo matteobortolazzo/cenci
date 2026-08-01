@@ -88,3 +88,17 @@ fail mid-run or get reused in a new context.
   is treated as fail-closed (never a silent re-create), and the checkpoint is cleared only on
   a run's confirmed success — an aborted run retains it deliberately, so the next attempt has
   something to resume from.
+
+- On re-entry, the authority for deciding whether a step needs to redo its work is externally
+  effective state — the text GitHub or git itself will act on (a commit message, a PR body,
+  GitHub's own `closingIssuesReferences`) — never a persisted verdict from an earlier turn. A
+  persisted verdict is evidence of what an earlier turn believed, not proof of what is
+  externally effective now; context compaction, a subagent re-invocation, or a fresh session
+  can lose the persisted record entirely, and even an intact record can't rule out a manual
+  edit or a partially-completed prior run. Concrete instance: `/cenci:implement` phase 9's
+  Parent Close Gate reconciliation (`skills/implement/phases/phase-9-pr.md`, #879, 4/12 of
+  #661), which re-reads the live commit message, PR body, and `closingIssuesReferences` on
+  every entry and reconciles them to the current audit verdict, rather than trusting a
+  previously-persisted verdict to decide whether reconciliation is even needed.
+
+- When designing a fail-closed guard (a check that blocks operations on policy violations), distinguish explicitly between three cases: (1) the guarded resource doesn't exist yet (safe to proceed, e.g. a PR that hasn't been created on first entry), (2) the resource exists in an ambiguous or bad state (fail closed, stop and surface the issue), (3) we can't determine the resource's state due to infrastructure error (fail closed, surface the error). Conflating cases 1 and 2 causes the guard to hard-stop legitimate initial entries. Example: a guard checking if a PR exists with `gh pr view` must treat "no PR found" (first entry) differently from "PR is in bad state" — catching the not-yet-exists case and allowing safe continuation, while failing when the state is truly bad. A guard that collapses both into a single "fail closed" branch blocks every first-time run that legitimately lacks the guarded resource. (#879)

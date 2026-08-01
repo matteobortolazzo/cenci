@@ -1,0 +1,11 @@
+{
+  "state": "OPEN",
+  "mergedAt": null,
+  "number": 923,
+  "url": "https://github.com/acme/widgets/pull/923",
+  "body": "## Summary\nBind the parent close verdict.\n\n## Ticket\nFixes #800\nFixes #900\n\n## Changes\n- reconcile trailers\n",
+  "closingIssuesReferences": [
+    { "number": 800 },
+    { "number": 900 }
+  ]
+}
