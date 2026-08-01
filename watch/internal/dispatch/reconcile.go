@@ -124,6 +124,21 @@ type ReconcileInputs struct {
 	// (preserves the grace clock) instead of escalating to plan-invalid on a
 	// transient read/parse hiccup.
 	PlanProbes map[string]PlanProbe
+
+	// PlanInventories maps repo -> the resolved PlanInventory for that
+	// repo's `.plans` directory read this pass (#884), mirroring
+	// Inputs.PlanInventories (decide.go): a top-level, repo-wide hold near
+	// the start of Reconcile's per-ticket loop (review round 2 finding #1)
+	// defers every ticket in a repo whose inventory could not be fully
+	// proven this pass -- preserving the grace clock -- before it can ever
+	// reach a plan-dependent recovery decision (the inverse-leak
+	// plan-invalid escalation, the interrupted-resume restore, the
+	// stage-aware AddLabels-nil branch, and the ordinary +Planned retry
+	// alike). Those individual branches keep their own inline
+	// PlanInventoryVerified checks as defense-in-depth, but are no longer
+	// the only thing standing between an unproven directory read and a
+	// durable GitHub mutation.
+	PlanInventories map[string]PlanInventory
 }
 
 // ReconcileResult is Reconcile's output. NextObservations is the grace map to
@@ -230,6 +245,35 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 			continue
 		}
 
+		// Plan-inventory hold (#884, Q5; review round 2 finding #1): mirrors
+		// decide.go's rule 0.5 (planInventorySkip), placed before every
+		// plan-dependent branch below -- an unreadable or mid-enumeration-
+		// partial `.plans` directory for this ticket's repo can never prove
+		// ANY plan-dependent fact (absence, a matched plan's status, its
+		// staleness) for ANY ticket in that repo this pass, so it defers
+		// every such ticket wholesale rather than letting it fall through to
+		// a plan-dependent recovery decision.
+		//
+		// This is load-bearing beyond the two individually-gated branches
+		// below (inverse leak, stage-aware AddLabels-nil -- both keep their
+		// own inline PlanInventories checks as defense-in-depth): a real
+		// ReadPlans directory-read failure always yields planByTicket[key]
+		// == nil (ReadPlans returns an empty Plans slice on that error), so
+		// the interrupted-resume branch's own `p != nil` guard below can
+		// never even enter its body in production -- without this top-level
+		// gate, control would silently fall through to the ordinary
+		// RecoveryRetry path and mutate GitHub state (+Planned, -Working,
+		// comment) on an unproven plan state, discarding what may actually
+		// be a still-open awaiting-input escalation. Terminal-state and
+		// Escalated-crash-cleanup bookkeeping above are unaffected: neither
+		// reads plan data.
+		if in.PlanInventories[t.Repo] != PlanInventoryVerified {
+			if ts, ok := in.Observations[key]; ok {
+				res.NextObservations[key] = ts
+			}
+			continue
+		}
+
 		// Inverse leak: a Planned, not-Working ticket with a verified-absent
 		// plan file (no PlanProbes entry, or PlanProbeAbsent -- #852). A plan
 		// that exists but does not yet carry status: planned is a normal
@@ -259,6 +303,23 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 			// plan (PlanProbeAbsent, the zero value -- no entry at all) falls
 			// through to the escalation path.
 			if _, gated := planProbeSkip(in.PlanProbes[key]); gated {
+				if ts, ok := in.Observations[key]; ok {
+					res.NextObservations[key] = ts
+				}
+				continue
+			}
+			// A repo whose `.plans` directory could not be fully enumerated
+			// this pass (#884, Q5) can never prove this ticket's plan file
+			// is genuinely absent -- defer exactly like the planProbeSkip
+			// guard above, rather than escalating to plan-invalid on an
+			// unproven repo-wide read failure. Defense-in-depth only (review
+			// round 2 finding #1): the top-level plan-inventory hold above
+			// already `continue`s past this whole branch whenever
+			// PlanInventories[t.Repo] != PlanInventoryVerified, so this
+			// condition can never actually be true here today -- kept so a
+			// future refactor that removes or narrows the top-level gate
+			// cannot silently reopen this branch's own exposure.
+			if in.PlanInventories[t.Repo] != PlanInventoryVerified {
 				if ts, ok := in.Observations[key]; ok {
 					res.NextObservations[key] = ts
 				}
@@ -366,6 +427,27 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 			// needed here -- unlike the plan == nil cases below, which
 			// remain ambiguous per #852.
 			if p := planByTicket[key]; p != nil && p.Status == "awaiting-input" {
+				// A repo whose `.plans` directory could not be fully
+				// enumerated this pass (#884, Q5) can never prove this
+				// resumed ticket's matched plan/status either -- defer
+				// exactly like the inverse-leak branch above, rather than
+				// taking this state-mutating action (label swap + comment)
+				// on unproven inventory data (Phase 6+7 review finding #2).
+				// Defense-in-depth only (review round 2 finding #1): the
+				// top-level plan-inventory hold at the top of the loop
+				// already defers the whole ticket before this branch is
+				// ever reached whenever the inventory is unverified -- this
+				// specific branch additionally requires p != nil, which a
+				// real ReadPlans directory-read failure can never produce
+				// (Plans is always empty on that error), so this condition
+				// is unreachable in production today. Kept only as a
+				// backstop if the top-level gate is ever narrowed --
+				// nothing currently distinguishes this inner guard from the
+				// top-level one in either production or tests.
+				if in.PlanInventories[t.Repo] != PlanInventoryVerified {
+					res.NextObservations[key] = firstSeen
+					continue
+				}
 				res.Recoveries = append(res.Recoveries, Recovery{
 					Ticket:       t,
 					Kind:         RecoveryResumeInterrupted,
@@ -402,9 +484,19 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 			// state-mutating call site (a durable GitHub label change plus a
 			// comment), so acting on unverified input here is exactly the
 			// class of bug this ticket closes, mirroring the inverse-leak
-			// branch's planProbeSkip gate above.
+			// branch's planProbeSkip gate above. Additionally requires
+			// PlanInventoryVerified (#884, Q5): a repo-wide directory read
+			// failure can never prove this ticket's plan is genuinely
+			// absent either, so an unverified inventory falls through to
+			// the ordinary +Planned retry below instead of nil-ing
+			// AddLabels. Defense-in-depth only (review round 2 finding #1):
+			// the top-level plan-inventory hold at the top of the loop
+			// already defers the whole ticket before this branch is ever
+			// reached whenever the inventory is unverified, so this
+			// comparison is always true here today -- kept as a backstop
+			// if the top-level gate is ever narrowed.
 			addLabels := []string{labelPlanned}
-			if hasLabel(t.Labels, labelRefined) && planByTicket[key] == nil && in.PlanProbes[key] == PlanProbeAbsent {
+			if hasLabel(t.Labels, labelRefined) && planByTicket[key] == nil && in.PlanProbes[key] == PlanProbeAbsent && in.PlanInventories[t.Repo] == PlanInventoryVerified {
 				addLabels = nil
 			}
 

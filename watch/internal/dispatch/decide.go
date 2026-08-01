@@ -94,6 +94,31 @@ const (
 	reasonPlanProbeTicketIDInvalid = "plan file ticket id unresolvable"
 	reasonPlanProbeStale           = "plan staleness could not be determined"
 	reasonPlanProbeUnknown         = "plan probe unrecognized"
+	// reasonPlanProbeAmbiguous (#884, AC3/AC4) fires when two or more
+	// claims (any mix of healthy/broken) attribute themselves to one plan
+	// key -- never resolved first-wins.
+	reasonPlanProbeAmbiguous = "plan file ambiguous: multiple claims for this ticket"
+	// reasonPlanProbeIdentityMismatch (#884, Q2) fires when a plan file's
+	// numeric filename prefix and front-matter ticketId disagree (or the
+	// ticketId is missing entirely, Q4) -- both the filename claim and the
+	// front-matter claim are held with this same reason.
+	reasonPlanProbeIdentityMismatch = "plan file ticket identity mismatch"
+	// reasonPlanProbePathAnomaly (#884) fires when a .plans entry
+	// attributable to this ticket by filename is not a regular file (a
+	// symlink, a directory, or other non-regular entry).
+	reasonPlanProbePathAnomaly = "plan file path anomaly"
+)
+
+// Plan-inventory gate skip reasons (#884). reasonPlanInventoryUnknown is
+// deliberately distinct from reasonPlanInventoryUnreadable/
+// reasonPlanInventoryPartial for the same reason reasonPlanProbeUnknown is
+// distinct from its siblings above: a regression collapsing the gate
+// switch's default branch into a known case must be caught by a
+// content-specific assertion (#446/#598).
+const (
+	reasonPlanInventoryUnreadable = "plan inventory directory unreadable"
+	reasonPlanInventoryPartial    = "plan inventory directory partially read"
+	reasonPlanInventoryUnknown    = "plan inventory probe unrecognized"
 )
 
 // Resume-gate skip reasons (#827). reasonAnswerProbeUnknown is deliberately
@@ -157,6 +182,16 @@ type Inputs struct {
 	// Answers above). A ticket with no entry here is the true "verified
 	// absent" case (PlanProbeAbsent, the zero value).
 	PlanProbes map[string]PlanProbe
+
+	// PlanInventories maps repo -> the resolved PlanInventory for that
+	// repo's `.plans` directory read this pass (#884), resolved entirely
+	// inside the collector (readPlansForRepos) -- Decide only ever reads
+	// this map, it never does I/O itself (Decide's own purity contract,
+	// mirroring PlanProbes above). A repo with no entry here (a nil map, or
+	// a map lookup miss) is the permissive zero value (PlanInventoryVerified),
+	// mirroring RepoAutonomy's own map-miss convention documented at
+	// types.go.
+	PlanInventories map[string]PlanInventory
 }
 
 // Decide is pure: identical Inputs yield an identical ordered []Decision with no
@@ -231,6 +266,17 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 	// value) or whose fetch merely failed transiently (MainSyncFetchFailed,
 	// self-heals next pass) is deliberately left ungated.
 	if reason, gated := mainSyncSkip(t); gated {
+		return skip(reason)
+	}
+
+	// Pickup rule 0.5: plan inventory (#884, Q5). Evaluated immediately
+	// after the local-main-sync gate and before the plan lookup: an
+	// unreadable or mid-enumeration-partial `.plans` directory can never
+	// prove absence for ANY ticket in the repo, so it holds every ticket in
+	// that repo -- ordinary Planned dispatch, resume, and planning pickup
+	// alike, not merely the ticket whose own plan file happened to be
+	// unreadable.
+	if reason, gated := planInventorySkip(in.PlanInventories[t.Repo]); gated {
 		return skip(reason)
 	}
 
@@ -660,11 +706,39 @@ func planProbeSkip(probe PlanProbe) (string, bool) {
 		return reasonPlanProbeMalformed, true
 	case PlanProbeTicketIDError:
 		return reasonPlanProbeTicketIDInvalid, true
+	case PlanProbeAmbiguous:
+		return reasonPlanProbeAmbiguous, true
+	case PlanProbeIDMismatch:
+		return reasonPlanProbeIdentityMismatch, true
+	case PlanProbePathAnomaly:
+		return reasonPlanProbePathAnomaly, true
 	default:
 		// Unrecognized PlanProbe value: default-deny with its own distinct
-		// reason (not any of the three known reasons above) so a regression
+		// reason (not any of the known reasons above) so a regression
 		// collapsing this branch is caught by assertion, per #446/#598.
 		return reasonPlanProbeUnknown, true
+	}
+}
+
+// planInventorySkip evaluates the plan-inventory gate (#884) for inv -- the
+// PlanInventory classification of the repo's whole `.plans` directory read
+// this pass. It returns (reason, true) when the directory could not be
+// fully enumerated (unreadable or a mid-enumeration partial read), and
+// ("", false) only for PlanInventoryVerified (the permissive zero value,
+// including a nil-map/map-miss repo).
+func planInventorySkip(inv PlanInventory) (string, bool) {
+	switch inv {
+	case PlanInventoryVerified:
+		return "", false
+	case PlanInventoryUnreadable:
+		return reasonPlanInventoryUnreadable, true
+	case PlanInventoryPartial:
+		return reasonPlanInventoryPartial, true
+	default:
+		// Unrecognized PlanInventory value: default-deny with its own
+		// distinct reason so a regression collapsing this branch is caught
+		// by assertion, per #446/#598.
+		return reasonPlanInventoryUnknown, true
 	}
 }
 

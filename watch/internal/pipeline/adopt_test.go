@@ -12,12 +12,16 @@ package pipeline
 // not unit tests of the not-yet-written adoptPlanFileStage directly.
 //
 // Detection semantics under test (plan's "Detection semantics -- item 1
-// (exact)" section): adopt only when ALL of (1) o.Stage=="plan" &&
+// (exact)" section, unified onto the shared planfile.Read/Select identity
+// contract by #884): adopt only when ALL of (1) o.Stage=="plan" &&
 // o.Approve==true, (2) the persisted stage ranks strictly below
 // waiting_for_plan_approval (new or prepared), (3) the plan repo root
-// resolves, (4) exactly one `.plans/<id>-*.md` match, (5) that file passes
-// parseAndValidatePlan, (6) front-matter ticketId is absent/0 or equals
-// <id>. Any failure means no adoption and today's ErrInvalidTransition/
+// resolves, (4) planfile.Read(repoRoot).Select(id) resolves exactly one
+// healthy claim, (5) that file passes parseAndValidatePlan, (6) (#884, Q4:
+// unify) a front-matter ticketId that is absent/0 is NO LONGER exempt -- it
+// is already denied at gate (4) as an identity mismatch, so a legacy plan
+// file needs a ticketId line added, or a re-plan, to become adoptable
+// again. Any failure means no adoption and today's ErrInvalidTransition/
 // ErrNotPrepared behavior is preserved verbatim -- default-deny throughout
 // (watch/docs/go-gotchas.md #598, watch/docs/error-handling.md #628).
 //
@@ -231,6 +235,34 @@ func TestAdopt_TicketIDMismatch_NoAdoption(t *testing.T) {
 	out, err := Run(Opts{Stage: "plan", ID: "42", Approve: true, RepoRoot: repoRoot, StateDir: stateDir})
 	if err == nil {
 		t.Fatal("plan --approve with a ticketId front-matter mismatch: want an error, got nil")
+	}
+	if !errors.Is(err, ErrInvalidTransition) {
+		t.Errorf("error = %v, want errors.Is(_, ErrInvalidTransition)", err)
+	}
+	assertNoAdoptionWarning(t, out.Warnings)
+}
+
+// -- #884 Q4: legacy plan file with no ticketId at all -> no adoption -------
+
+// TestAdopt_LegacyPlanFileNoTicketID_NoAdoption_UnifiedRule covers Q4: the
+// pre-#884 exemption for a legacy plan file pre-dating the ticketId field
+// (front-matter ticketId absent/0) is dropped -- it is now denied exactly
+// like TestAdopt_TicketIDMismatch_NoAdoption above (unified onto the same
+// identity contract), with the caller falling through to today's unchanged
+// ErrInvalidTransition behavior. A ticketId line added, or a re-plan, is the
+// escape hatch back to adoptable.
+func TestAdopt_LegacyPlanFileNoTicketID_NoAdoption_UnifiedRule(t *testing.T) {
+	repoRoot := t.TempDir()
+	stateDir := t.TempDir()
+	mustSeedState(t, stateDir, "42", StagePrepared)
+
+	fields := defaultPlanFields("42", "add-thing", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "2026-07-20T20:00:00Z")
+	delete(fields, "ticketId") // legacy plan file, pre-dating the ticketId field
+	writePlanFile(t, repoRoot, "42", "add-thing", fields, validPlanBody)
+
+	out, err := Run(Opts{Stage: "plan", ID: "42", Approve: true, RepoRoot: repoRoot, StateDir: stateDir})
+	if err == nil {
+		t.Fatal("plan --approve with a legacy no-ticketId plan file: want an error, got nil (Q4: no legacy exemption)")
 	}
 	if !errors.Is(err, ErrInvalidTransition) {
 		t.Errorf("error = %v, want errors.Is(_, ErrInvalidTransition)", err)

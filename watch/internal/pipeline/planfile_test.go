@@ -73,6 +73,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/matteobortolazzo/cenci/watch/internal/planfile"
 )
 
 // -- fixtures ---------------------------------------------------------------
@@ -979,6 +981,99 @@ func TestCheckPlan_Discovery_TwoMatches_ReturnsMultiple(t *testing.T) {
 	}
 }
 
+// -- #884: plan-inventory discovery (unreadable directory, identity
+// mismatch, identity-based ambiguity) ----------------------------------------
+
+// TestCheckPlan_PlansDirUnreadable_ReturnsErrPlanInventoryUnreadable covers
+// #884 Q3: an unreadable `.plans` directory (here, a regular file at that
+// path -- ENOTDIR, no root/permission dependency) can never prove absence,
+// so it routes through the "" decision with ErrPlanInventoryUnreadable
+// rather than misleadingly reporting "none".
+func TestCheckPlan_PlansDirUnreadable_ReturnsErrPlanInventoryUnreadable(t *testing.T) {
+	repoRoot := t.TempDir()
+	calls := recordingCommand(t)
+	if err := os.WriteFile(filepath.Join(repoRoot, ".plans"), []byte("not a directory\n"), 0o644); err != nil {
+		t.Fatalf("write .plans as a regular file: %v", err)
+	}
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, RepoSlug: "o/r"})
+	if err == nil {
+		t.Fatal("CheckPlan with an unreadable .plans directory: want an error, got nil")
+	}
+	if !errors.Is(err, ErrPlanInventoryUnreadable) {
+		t.Errorf("error = %v, want errors.Is(_, ErrPlanInventoryUnreadable)", err)
+	}
+	if check.Decision != "" {
+		t.Errorf(`Decision = %q, want "" (Q3: routed through the closed decision set)`, check.Decision)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("gh/git calls = %v, want none (an unreadable inventory must fail before any freshness check)", *calls)
+	}
+}
+
+// TestCheckPlan_IdentityMismatch_ReturnsErrPlanIdentityMismatch covers #884
+// Q2: a plan file named for one ticket but whose front matter claims
+// another must hold BOTH keys with ErrPlanIdentityMismatch, not be silently
+// resolved via either claim.
+func TestCheckPlan_IdentityMismatch_ReturnsErrPlanIdentityMismatch(t *testing.T) {
+	repoRoot := t.TempDir()
+	calls := recordingCommand(t)
+	fields := defaultPlanFields("884", "add-thing", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "2026-07-20T20:00:00Z")
+	writePlanFile(t, repoRoot, "900", "add-thing", fields, validPlanBody) // filename says 900, front matter says 884
+
+	for _, id := range []string{"900", "884"} {
+		_, check, err := CheckPlan(PlanCheckOpts{ID: id, RepoRoot: repoRoot, RepoSlug: "o/r"})
+		if err == nil {
+			t.Fatalf("CheckPlan(%s) with a filename/front-matter identity mismatch: want an error, got nil", id)
+		}
+		if !errors.Is(err, ErrPlanIdentityMismatch) {
+			t.Errorf("CheckPlan(%s) error = %v, want errors.Is(_, ErrPlanIdentityMismatch)", id, err)
+		}
+		if check.Decision != "" {
+			t.Errorf(`CheckPlan(%s).Decision = %q, want ""`, id, check.Decision)
+		}
+	}
+	if len(*calls) != 0 {
+		t.Errorf("gh/git calls = %v, want none (an identity mismatch must fail before any freshness check)", *calls)
+	}
+}
+
+// TestCheckPlan_IdentityBasedAmbiguity_ReturnsMultipleWithEveryClaimPath
+// covers the Files-to-Modify note that "multiple" now also covers
+// identity-based duplicate claims: a healthy plan for #42 alongside a
+// SEPARATE file whose filename also claims #42 but whose front matter
+// disagrees (an identity-mismatched claim) -- both claim ticket 42, so
+// Select resolves ambiguous and CheckPlan reports "multiple" with every
+// claiming path, not just the healthy one.
+func TestCheckPlan_IdentityBasedAmbiguity_ReturnsMultipleWithEveryClaimPath(t *testing.T) {
+	repoRoot := t.TempDir()
+	calls := recordingCommand(t)
+	healthyPath := writePlanFile(t, repoRoot, "42", "healthy", defaultPlanFields("42", "healthy", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "2026-07-20T20:00:00Z"), validPlanBody)
+	mismatchFields := defaultPlanFields("999", "mismatched", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "2026-07-20T20:00:00Z")
+	mismatchPath := writePlanFile(t, repoRoot, "42", "mismatched", mismatchFields, validPlanBody) // filename says 42, front matter says 999
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, RepoSlug: "o/r"})
+	if err == nil {
+		t.Fatal("CheckPlan with a healthy claim plus an identity-mismatched duplicate claim: want an error, got nil")
+	}
+	if !errors.Is(err, ErrMultiplePlans) {
+		t.Errorf("error = %v, want errors.Is(_, ErrMultiplePlans)", err)
+	}
+	if check.Decision != "multiple" {
+		t.Errorf("Decision = %q, want multiple", check.Decision)
+	}
+	got := append([]string{}, check.Paths...)
+	sort.Strings(got)
+	want := []string{healthyPath, mismatchPath}
+	sort.Strings(want)
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("Paths = %v, want both %v (every claiming path, not just the healthy one)", check.Paths, want)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("gh/git calls = %v, want none (ambiguous discovery must fail before any freshness check)", *calls)
+	}
+}
+
 // -- state combos: CheckPlan is stage-agnostic and read-only ----------------
 
 func TestCheckPlan_StageAgnostic_EchoesPersistedStageWithoutMutating(t *testing.T) {
@@ -1197,6 +1292,54 @@ func TestCheckPlan_CandidateFileAlongsideDraft_StillSingleMatch_AwaitingInput(t 
 	}
 }
 
+// TestCheckPlan_CandidateFileAlongsideDraft_StillSingleMatch_Resume is the
+// #884 companion to TestCheckPlan_CandidateFileAlongsideDraft_StillSingleMatch_AwaitingInput
+// above (plan Assumptions, #899-drift update, 2026-08-01): that test only
+// exercises the awaiting-input short-circuit, which never reaches
+// planIsStale's freshness computation at all. This case pins the identical
+// dot-prefixed-candidate-exclusion invariant on the ordinary status: planned
+// path instead, which DOES reach planIsStale/CommitsBehind and a `gh issue
+// view` freshness round-trip -- proving the exclusion holds deeper in
+// CheckPlan's decision tree, not merely at the awaiting-input short-circuit.
+// Once Phase 4 rewires CheckPlan onto planfile.Read/Select (#884), this case
+// must keep passing unmodified, exactly like its awaiting-input sibling: a
+// dot-prefixed candidate file must never be selected as a claim, never flip
+// a single real match to "multiple", and never appear in check.Paths,
+// regardless of which decision branch CheckPlan ultimately takes.
+func TestCheckPlan_CandidateFileAlongsideDraft_StillSingleMatch_Resume(t *testing.T) {
+	repoRoot := t.TempDir()
+	initGitRepoWithCommit(t, repoRoot)
+	sha := gitHeadSha(t, repoRoot)
+	createdAt := "2026-07-20T20:00:00Z"
+	path := writePlanFile(t, repoRoot, "42", "add-thing", defaultPlanFields("42", "add-thing", sha, createdAt), validPlanBody)
+
+	// The dot-prefixed candidate sitting alongside the real, ordinary
+	// (non-awaiting-input) draft.
+	fields := defaultPlanFields("42", "add-thing", sha, createdAt)
+	candidatePath := filepath.Join(repoRoot, ".plans", ".42-add-thing.candidate.md")
+	candidateContent := "---\n" + planFrontMatter(fields) + "---\n" + validPlanBody
+	if err := os.WriteFile(candidatePath, []byte(candidateContent), 0o644); err != nil {
+		t.Fatalf("write candidate file: %v", err)
+	}
+
+	gh := newFakeGhTicket(t, "OPEN", "2026-07-20T19:00:00Z") // updatedAt <= createdAt: fresh
+	gh.install()
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, RepoSlug: "o/r"})
+	if err != nil {
+		t.Fatalf("CheckPlan with a candidate file alongside the real draft: unexpected error: %v", err)
+	}
+	if check.Decision != "resume" {
+		t.Errorf("Decision = %q, want resume (a dot-prefixed candidate file must never turn a single real draft into a 'multiple' decision)", check.Decision)
+	}
+	if len(check.Paths) != 1 || check.Paths[0] != path {
+		t.Errorf("Paths = %v, want exactly [%s] (the candidate file must be excluded from discovery)", check.Paths, path)
+	}
+	if len(gh.calls) == 0 {
+		t.Error("expected a `gh issue view` freshness call (proves this path reached planIsStale, unlike the awaiting-input short-circuit)")
+	}
+}
+
 // -- #880: the nonce-without-ID intermediate state, specifically ------------
 
 // TestCheckPlan_AwaitingInput_EscalationAnchor_NonceWithoutID_CommentIDZero
@@ -1238,6 +1381,63 @@ func TestCheckPlan_AwaitingInput_EscalationAnchor_NonceWithoutID_CommentIDZero(t
 	}
 	if len(*calls) != 0 {
 		t.Errorf("gh/git calls = %v, want none (awaiting-input must short-circuit before any freshness check)", *calls)
+	}
+}
+
+// -- TOCTOU regression (#884 review round 2 item 4) -------------------------
+
+// TestSelectEntryContent_TOCTOU_OriginalContentSurvivesDiskSwap pins the
+// TOCTOU fix (Phase 6+7 review finding #3): sel.Entry.Content is captured
+// once during planfile.Read's single classification pass, and
+// CheckPlan/adoptPlanFileStage both consume that captured value via
+// parseAndValidatePlan(path, sel.Entry.Content) instead of ever re-opening
+// sel.Entry.Path by path -- exactly what those two call sites' own doc
+// comments state ("a second by-path os.ReadFile is a TOCTOU window ...
+// identity was proven against the first read"). This test replaces the file
+// on disk with unrelated content AFTER Select has already resolved
+// SelectSingle but BEFORE parseAndValidatePlan (the exact function
+// CheckPlan/adoptPlanFileStage call) consumes sel.Entry.Content, and asserts
+// the ORIGINAL read-time content is what gets validated -- proving a future
+// refactor that reintroduces a path-based re-read (e.g. swapping
+// sel.Entry.Content for os.ReadFile(sel.Entry.Path) at the consumption
+// site) would be caught: the disk now holds content that fails validation
+// entirely, so any re-read would surface as a spurious ErrPlanMalformed.
+func TestSelectEntryContent_TOCTOU_OriginalContentSurvivesDiskSwap(t *testing.T) {
+	repoRoot := t.TempDir()
+	initGitRepoWithCommit(t, repoRoot)
+	sha := gitHeadSha(t, repoRoot)
+	path := writePlanFile(t, repoRoot, "42", "add-thing", defaultPlanFields("42", "add-thing", sha, "2026-07-20T20:00:00Z"), validPlanBody)
+
+	sel := planfile.Read(repoRoot).Select(42)
+	if sel.Result != planfile.SelectSingle {
+		t.Fatalf("Select(42).Result = %q, want SelectSingle", sel.Result)
+	}
+	if sel.Entry.Path != path {
+		t.Fatalf("Entry.Path = %q, want %q", sel.Entry.Path, path)
+	}
+	originalContent := sel.Entry.Content
+	if !strings.Contains(originalContent, "slug: add-thing") {
+		t.Fatalf("captured content missing expected slug marker: %q", originalContent)
+	}
+
+	// Swap the file on disk between selection and consumption: unrelated,
+	// deliberately-invalid content (fails front-matter parsing outright), so
+	// any accidental re-read by path would surface as a distinct,
+	// detectable failure rather than silently validating different-but-
+	// still-valid content.
+	if err := os.WriteFile(path, []byte("not a plan file at all, no front matter"), 0o644); err != nil {
+		t.Fatalf("swap plan file on disk: %v", err)
+	}
+
+	fm, meta, err := parseAndValidatePlan(sel.Entry.Path, sel.Entry.Content)
+	if err != nil {
+		t.Fatalf("parseAndValidatePlan: %v, want the original read-time content to still validate (a re-read would fail on the swapped-in content)", err)
+	}
+	if fm["slug"] != "add-thing" || meta.Slug != "add-thing" {
+		t.Errorf("Slug = %q/%q, want add-thing (the original content), not whatever now sits on disk", fm["slug"], meta.Slug)
+	}
+	if sel.Entry.Content != originalContent {
+		t.Errorf("Entry.Content mutated after the disk swap: %q, want unchanged %q", sel.Entry.Content, originalContent)
 	}
 }
 

@@ -22,9 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -45,6 +43,23 @@ var (
 
 	// ErrMultiplePlans is returned when two or more files match.
 	ErrMultiplePlans = errors.New("multiple plan files found")
+
+	// ErrPlanInventoryUnreadable (#884) is returned when the repo's `.plans`
+	// directory itself could not be fully enumerated (unreadable, or a
+	// mid-enumeration partial read) -- a proven-incomplete read can never
+	// distinguish absence from a hidden second/matching file, so it is
+	// routed through the same "" decision as ErrPlanMalformed/the freshness
+	// failure (Q3: closed decision set, no new plan-check decision string)
+	// rather than reusing ErrPlanNotFound, which would misleadingly claim
+	// verified absence.
+	ErrPlanInventoryUnreadable = errors.New("plan inventory directory unreadable")
+
+	// ErrPlanIdentityMismatch (#884, Q2) is returned when a plan file's
+	// numeric filename prefix and front-matter ticketId disagree (or the
+	// front matter carries no ticketId at all, Q4: no legacy exemption) --
+	// both the filename claim and the front-matter claim are held with this
+	// same failure class.
+	ErrPlanIdentityMismatch = errors.New("plan file ticket identity mismatch")
 )
 
 // requiredPlanSections are the headings plan-check requires, per the plan's
@@ -180,32 +195,74 @@ func CheckPlan(o PlanCheckOpts) (State, PlanCheck, error) {
 		return state, PlanCheck{}, err
 	}
 
-	// The glob deliberately never matches a dot-prefixed candidate file
-	// (`.plans/.<id>-<slug>.candidate.md`, #880): `## Resume From Draft` step
-	// 6 assembles the finalized plan there and validates it before an atomic
-	// `mv` replaces the real draft, so a candidate sitting alongside a valid
-	// awaiting-input draft mid-transaction must never turn a single real
-	// match into "multiple" -- see TestCheckPlan_CandidateFileAlongsideDraft_StillSingleMatch_AwaitingInput.
-	matches, err := filepath.Glob(filepath.Join(repoRoot, ".plans", o.ID+"-*.md"))
+	// o.ID is already validated against ^\d+$ above, so strconv.Atoi never
+	// fails here in practice.
+	id, err := strconv.Atoi(o.ID)
 	if err != nil {
-		return state, PlanCheck{}, fmt.Errorf("glob plan files for ticket %s: %w", o.ID, err)
+		return state, PlanCheck{}, fmt.Errorf("invalid ticket id %q: %w", o.ID, err)
 	}
-	sort.Strings(matches)
 
-	if len(matches) == 0 {
+	// planfile.Read/Select (#884) is the single shared identity contract
+	// also used by dispatch.ReadPlans and adoptPlanFileStage: the numeric
+	// filename prefix and front-matter ticketId must agree for a healthy
+	// claim, and it never attributes a dot-prefixed candidate file
+	// (`.plans/.<id>-<slug>.candidate.md`, #880) to any ticket -- `##
+	// Resume From Draft` step 6 assembles the finalized plan there and
+	// validates it before an atomic `mv` replaces the real draft, so a
+	// candidate sitting alongside a valid awaiting-input draft
+	// mid-transaction must never turn a single real match into "multiple"
+	// -- see TestCheckPlan_CandidateFileAlongsideDraft_StillSingleMatch_AwaitingInput/
+	// _Resume.
+	inv := planfile.Read(repoRoot)
+	if !inv.Complete() {
+		return state, PlanCheck{}, fmt.Errorf("plan inventory for ticket %s: %s could not be fully read: %v: %w", o.ID, inv.Dir, inv.Err, ErrPlanInventoryUnreadable)
+	}
+
+	sel := inv.Select(id)
+	var path string
+	switch sel.Result {
+	case planfile.SelectAbsent:
 		return state, PlanCheck{Decision: "none"}, fmt.Errorf("no plan file found for ticket %s: %w", o.ID, ErrPlanNotFound)
+	case planfile.SelectAmbiguous:
+		paths := entryPaths(sel.Entries)
+		return state, PlanCheck{Decision: "multiple", Paths: paths}, fmt.Errorf("multiple plan files found for ticket %s: %w", o.ID, ErrMultiplePlans)
+	case planfile.SelectBroken:
+		// Defensive (Phase 6+7 review finding #6): Select's construction
+		// never returns SelectBroken with zero Entries against a Complete()
+		// inventory today, but this guards a future refactor from turning an
+		// index into a panic instead of a bounded error.
+		if len(sel.Entries) == 0 {
+			return state, PlanCheck{}, fmt.Errorf("plan inventory for ticket %s: broken selection with no claiming entries: %w", o.ID, ErrPlanInventoryUnreadable)
+		}
+		e := sel.Entries[0]
+		switch e.Health {
+		case planfile.HealthIDMismatch:
+			return state, PlanCheck{Paths: []string{e.Path}}, fmt.Errorf("plan file %s: %s: %w", e.Path, e.Reason, ErrPlanIdentityMismatch)
+		case planfile.HealthMalformed:
+			return state, PlanCheck{Paths: []string{e.Path}}, fmt.Errorf("plan file %s: missing or unterminated front matter: %w", e.Path, ErrPlanMalformed)
+		default: // HealthUnreadable, HealthPathAnomaly
+			return state, PlanCheck{Paths: []string{e.Path}}, fmt.Errorf("plan file %s: %s", e.Path, e.Reason)
+		}
+	case planfile.SelectSingle:
+		path = sel.Entry.Path
+	default:
+		// Fail-closed default-deny (Phase 6+7 review finding #6), mirroring
+		// this file's other closed-set switches: an unrecognized future
+		// SelectResult value must never silently fall into the healthy
+		// SelectSingle path and dereference a nil sel.Entry.
+		return state, PlanCheck{}, fmt.Errorf("plan inventory for ticket %s: unrecognized selection result %q", o.ID, sel.Result)
 	}
-	if len(matches) > 1 {
-		return state, PlanCheck{Decision: "multiple", Paths: matches}, fmt.Errorf("multiple plan files found for ticket %s: %w", o.ID, ErrMultiplePlans)
-	}
+	matches := []string{path}
 
-	path := matches[0]
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return state, PlanCheck{Paths: matches}, fmt.Errorf("read plan file %s: %w", path, err)
-	}
-
-	fm, meta, err := parseAndValidatePlan(path, string(content))
+	// Consume the content planfile.Read already read once during the
+	// inventory scan (sel.Entry.Content, populated for every HealthOK
+	// entry -- the only entries planfile.Select ever returns via
+	// SelectSingle) instead of re-opening path (Phase 6+7 review finding
+	// #3): a second by-path os.ReadFile is a TOCTOU window -- identity was
+	// proven against the first read, but a second read follows whatever
+	// (possibly a symlink, possibly a mid-transaction replacement, #880)
+	// now sits at that path.
+	fm, meta, err := parseAndValidatePlan(path, sel.Entry.Content)
 	if err != nil {
 		return state, PlanCheck{Paths: matches}, err
 	}
@@ -244,6 +301,17 @@ func CheckPlan(o PlanCheckOpts) (State, PlanCheck, error) {
 		decision = "stale"
 	}
 	return state, PlanCheck{Decision: decision, Paths: matches, Plan: meta}, nil
+}
+
+// entryPaths extracts each entry's Path, in order, for PlanCheck.Paths on
+// the "multiple" decision (#884): entries is already sorted by Path
+// (planfile.Inventory's own contract).
+func entryPaths(entries []planfile.Entry) []string {
+	paths := make([]string, len(entries))
+	for i, e := range entries {
+		paths[i] = e.Path
+	}
+	return paths
 }
 
 // resolvePlanRepoRoot mirrors resolveStatePath's RepoRoot precedence (Opts'

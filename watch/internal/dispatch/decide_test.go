@@ -1888,3 +1888,126 @@ func TestDecidePlanProbeGate_UnregisteredValueSkipsWithDistinctReason(t *testing
 		}
 	}
 }
+
+// -- #884 AC2-AC4: the new PlanProbe classes (ambiguous, identity mismatch,
+// path anomaly) ---------------------------------------------------------
+
+// TestDecidePlanProbeGate_Ambiguous_SkipsWithDistinctReason covers AC3: two
+// or more claims on one ticket key must skip with reasonPlanProbeAmbiguous,
+// distinct from every other plan-probe reason.
+func TestDecidePlanProbeGate_Ambiguous_SkipsWithDistinctReason(t *testing.T) {
+	in := baseInputs()
+	in.Plans = nil
+	in.PlanProbes = map[string]PlanProbe{"o/r#42": PlanProbeAmbiguous}
+
+	got := Decide(in)
+	assertDecisions(t, got, []wantDecision{{42, ActionSkip, reasonPlanProbeAmbiguous, ""}})
+}
+
+// TestDecidePlanProbeGate_IdentityMismatch_SkipsWithDistinctReason covers
+// AC2/Q2: a filename/front-matter identity mismatch must skip with
+// reasonPlanProbeIdentityMismatch, distinct from every other plan-probe
+// reason.
+func TestDecidePlanProbeGate_IdentityMismatch_SkipsWithDistinctReason(t *testing.T) {
+	in := baseInputs()
+	in.Plans = nil
+	in.PlanProbes = map[string]PlanProbe{"o/r#42": PlanProbeIDMismatch}
+
+	got := Decide(in)
+	assertDecisions(t, got, []wantDecision{{42, ActionSkip, reasonPlanProbeIdentityMismatch, ""}})
+}
+
+// TestDecidePlanProbeGate_PathAnomaly_SkipsWithDistinctReason covers AC6: a
+// symlink/directory entry attributable to this ticket must skip with
+// reasonPlanProbePathAnomaly, distinct from every other plan-probe reason.
+func TestDecidePlanProbeGate_PathAnomaly_SkipsWithDistinctReason(t *testing.T) {
+	in := baseInputs()
+	in.Plans = nil
+	in.PlanProbes = map[string]PlanProbe{"o/r#42": PlanProbePathAnomaly}
+
+	got := Decide(in)
+	assertDecisions(t, got, []wantDecision{{42, ActionSkip, reasonPlanProbePathAnomaly, ""}})
+}
+
+// -- #884 Q5: the plan-inventory gate (rule 0.5) -----------------------------
+
+// TestDecidePlanInventoryGate_Verified_ZeroValuePermissive covers the
+// permissive-zero-value contract: an Inputs.PlanInventories map miss (or a
+// nil map, baseInputs' own default) never gates -- the happy path dispatches
+// exactly as it did before #884.
+func TestDecidePlanInventoryGate_Verified_ZeroValuePermissive(t *testing.T) {
+	in := baseInputs()
+	if in.PlanInventories != nil {
+		t.Fatal("test assumption broken: baseInputs must leave PlanInventories nil")
+	}
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+}
+
+// TestDecidePlanInventoryGate_Unreadable_HoldsOrdinaryResumeAndPlanningAlike
+// covers Q5's headline guarantee: an unreadable `.plans` directory holds
+// EVERY ticket in the repo -- ordinary Planned dispatch, resume (Input
+// Needed), and planning pickup (Refined) alike -- each with the same
+// reasonPlanInventoryUnreadable reason, since a partial/unreadable
+// enumeration can never prove no second file claims any given ticket.
+func TestDecidePlanInventoryGate_Unreadable_HoldsOrdinaryResumeAndPlanningAlike(t *testing.T) {
+	inventories := map[string]PlanInventory{"o/r": PlanInventoryUnreadable}
+
+	ordinary := baseInputs()
+	ordinary.PlanInventories = inventories
+	assertDecisions(t, Decide(ordinary), []wantDecision{{42, ActionSkip, reasonPlanInventoryUnreadable, ""}})
+
+	resume := resumeInputs()
+	resume.PlanInventories = inventories
+	assertDecisions(t, Decide(resume), []wantDecision{{42, ActionSkip, reasonPlanInventoryUnreadable, ""}})
+
+	planning := planningCandidateInputs()
+	planning.PlanInventories = inventories
+	got := Decide(planning)
+	assertDecisions(t, got, []wantDecision{{42, ActionSkip, reasonPlanInventoryUnreadable, ""}})
+	if got[0].Planning {
+		t.Fatal("Planning = true, want false -- an unreadable inventory must never launch a fresh planning pickup")
+	}
+}
+
+// TestDecidePlanInventoryGate_Partial_HoldsWithDistinctReason covers the
+// Partial half of Q5: a mid-enumeration-partial read holds with its own
+// distinct reason, not collapsed into the unreadable reason.
+func TestDecidePlanInventoryGate_Partial_HoldsWithDistinctReason(t *testing.T) {
+	in := baseInputs()
+	in.PlanInventories = map[string]PlanInventory{"o/r": PlanInventoryPartial}
+
+	got := Decide(in)
+	assertDecisions(t, got, []wantDecision{{42, ActionSkip, reasonPlanInventoryPartial, ""}})
+	if got[0].Reason == reasonPlanInventoryUnreadable {
+		t.Fatal("a partial read must not collapse into the unreadable reason")
+	}
+}
+
+// TestDecidePlanInventoryGate_UnregisteredValueSkipsWithDistinctReason
+// covers the Test Strategy's default-branch-coverage requirement
+// (watch/docs/go-gotchas.md #598): an unregistered PlanInventory value must
+// default-deny with its own distinct reasonPlanInventoryUnknown, not
+// silently collapse into any known reason or (worse) the permissive zero
+// value.
+func TestDecidePlanInventoryGate_UnregisteredValueSkipsWithDistinctReason(t *testing.T) {
+	in := baseInputs()
+	in.PlanInventories = map[string]PlanInventory{"o/r": PlanInventory("bogus")}
+
+	got := Decide(in)
+	assertDecisions(t, got, []wantDecision{{42, ActionSkip, reasonPlanInventoryUnknown, ""}})
+	for _, r := range []string{reasonPlanInventoryUnreadable, reasonPlanInventoryPartial} {
+		if got[0].Reason == r {
+			t.Fatalf("unrecognized PlanInventory must not collapse into %q", r)
+		}
+	}
+}
+
+// TestDecidePlanInventoryGate_OtherRepoUnaffected covers the per-repo
+// scoping half of Q5: an unreadable inventory in one repo must never gate a
+// ticket in a different repo.
+func TestDecidePlanInventoryGate_OtherRepoUnaffected(t *testing.T) {
+	in := baseInputs()
+	in.PlanInventories = map[string]PlanInventory{"other/repo": PlanInventoryUnreadable}
+
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+}

@@ -319,13 +319,14 @@ body
 `)
 
 	pathsBySha := make(map[string][]string)
-	plans, _, err := ReadPlans("o/r", dir, func(sha string, paths []string) (int, error) {
+	scan, err := ReadPlans("o/r", dir, func(sha string, paths []string) (int, error) {
 		pathsBySha[sha] = paths
 		return 7, nil
 	}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
+	plans := scan.Plans
 	if len(plans) != 2 {
 		t.Fatalf("expected 2 plans, got %d: %+v", len(plans), plans)
 	}
@@ -350,6 +351,47 @@ body
 	}
 }
 
+// TestReadPlans_EmptyDir_NeverProbes_NoCwdRelativeRead covers #884 review
+// round 2 finding #3, ReadPlans' own dir=="" guard, mirroring
+// TestProbeStage_EmptyDir_NeverProbes_NoCwdRelativeRead's identical
+// no-cwd-relative-read requirement: dir=="" must never let planfile.Read
+// resolve a `.plans` directory relative to the daemon's own working
+// directory, and -- unlike probeStage's permissive StageProbeAbsent
+// treatment of dir=="" -- must classify PlanInventoryUnreadable, never be
+// silently reported as verified absence. Proven by chdir'ing into a real
+// repo dir that DOES have a healthy plan file for ticket 42, and asserting
+// ReadPlans("o/r", "", ...) still reports the unreadable hold rather than
+// leaking that cwd-relative plan in as a verified match.
+func TestReadPlans_EmptyDir_NeverProbes_NoCwdRelativeRead(t *testing.T) {
+	repoDir := t.TempDir()
+	writePlan(t, repoDir, "42-x.md", `---
+ticketId: 42
+status: planned
+---
+body
+`)
+
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(repoDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origWd) })
+
+	scan, err := ReadPlans("o/r", "", nil, io.Discard)
+	if err == nil {
+		t.Fatal("ReadPlans with dir=\"\" must return a non-nil error, want the empty-dir guard to fire")
+	}
+	if scan.Inventory != PlanInventoryUnreadable {
+		t.Errorf("scan.Inventory = %q, want PlanInventoryUnreadable -- dir=\"\" must never be reported as verified absence", scan.Inventory)
+	}
+	if len(scan.Plans) != 0 {
+		t.Errorf("scan.Plans = %v, want none -- dir=\"\" must never leak a cwd-relative plan file in", scan.Plans)
+	}
+}
+
 // TestReadPlansLogsDroppedFiles covers #828 review fix #2: a plan file that
 // cannot be read or whose front matter cannot be parsed is still dropped
 // (unchanged behavior) but now must be logged to out by path and reason, so
@@ -368,10 +410,11 @@ body
 `)
 
 	var buf strings.Builder
-	plans, _, err := ReadPlans("o/r", dir, func(sha string, paths []string) (int, error) { return 0, nil }, &buf)
+	scan, err := ReadPlans("o/r", dir, func(sha string, paths []string) (int, error) { return 0, nil }, &buf)
 	if err != nil {
 		t.Fatal(err)
 	}
+	plans := scan.Plans
 	if len(plans) != 1 {
 		t.Fatalf("expected the unparseable file dropped and the good one kept, got %d plans: %+v", len(plans), plans)
 	}
@@ -438,12 +481,13 @@ planCommitSha: aaa111
 body
 `)
 
-	plans, probes, err := ReadPlans("o/r", dir, func(sha string, paths []string) (int, error) {
+	scan, err := ReadPlans("o/r", dir, func(sha string, paths []string) (int, error) {
 		return 0, fmt.Errorf("boom")
 	}, io.Discard)
 	if err != nil {
 		t.Fatalf("ReadPlans returned unexpected top-level error: %v", err)
 	}
+	plans, probes := scan.Plans, scan.Probes
 	if len(plans) != 1 {
 		t.Fatalf("expected the plan kept (content-trust fields parsed fine), got %d: %+v", len(plans), plans)
 	}
@@ -453,18 +497,14 @@ body
 	}
 }
 
-// TestReadPlans_DuplicateTicketID_ProbeFirstWinsMatchesMatchedPlan covers the
-// Phase 6+7 review's critical finding #1: two plan files that both resolve
-// to the same ticketId -- a healthy one processed first, and a broken
-// (mid-write) duplicate processed second -- must leave probes[key] at the
-// healthy first file's classification (PlanProbeOk), matching the plan
-// actually selected into plans (first-wins, mirroring Reconcile/Decide's own
-// planByTicket matching). Before the fix, probes recorded last-write-wins,
-// so the second (broken) file's classification silently clobbered the
-// first's healthy one even though the matched plan itself was unaffected --
-// a false-positive plan-probe gate block on a ticket with a perfectly good
-// matched plan.
-func TestReadPlans_DuplicateTicketID_ProbeFirstWinsMatchesMatchedPlan(t *testing.T) {
+// TestReadPlans_DuplicateTicketID_HealthyThenBroken_IsAmbiguityHold covers
+// #884's AC4: two plan files that both resolve to the same ticketId -- a
+// healthy one processed first, and a broken (mid-write) duplicate processed
+// second -- must never silently resolve to the healthy file (superseding
+// #852's success-overwrites-error first-wins rule for duplicate claims, per
+// the plan's Assumptions): the pair is an ambiguity hold, so neither file is
+// added to plans and probes[key] reports PlanProbeAmbiguous.
+func TestReadPlans_DuplicateTicketID_HealthyThenBroken_IsAmbiguityHold(t *testing.T) {
 	dir := t.TempDir()
 	// Sorted so the healthy file is processed first and the broken
 	// (unparseable front matter) duplicate second -- "42-a" < "42-b".
@@ -477,33 +517,26 @@ body
 	writePlan(t, dir, "42-b-broken.md", "no front matter here, mid-write\n")
 
 	var buf strings.Builder
-	plans, probes, err := ReadPlans("o/r", dir, func(sha string, paths []string) (int, error) { return 0, nil }, &buf)
+	scan, err := ReadPlans("o/r", dir, func(sha string, paths []string) (int, error) { return 0, nil }, &buf)
 	if err != nil {
 		t.Fatalf("ReadPlans returned unexpected error: %v", err)
 	}
-	if len(plans) != 1 || plans[0].TicketID != 42 {
-		t.Fatalf("expected exactly the healthy plan matched, got %d plans: %+v", len(plans), plans)
+	if len(scan.Plans) != 0 {
+		t.Fatalf("expected no plan matched (ambiguous duplicate claim), got %d plans: %+v", len(scan.Plans), scan.Plans)
 	}
 
 	key := planKey("o/r", 42)
-	if got := probes[key]; got != PlanProbeOk {
-		t.Errorf("PlanProbes[%q] = %q, want PlanProbeOk (must match the plan actually selected, never overwritten by the later broken duplicate)", key, got)
+	if got := scan.Probes[key]; got != PlanProbeAmbiguous {
+		t.Errorf("PlanProbes[%q] = %q, want PlanProbeAmbiguous (a broken duplicate must never be silently absorbed into a healthy single, #884 AC4)", key, got)
 	}
 }
 
-// TestReadPlans_DuplicateTicketID_ProbeFirstWinsMatchesMatchedPlan_ReverseOrder
-// covers the reverse ordering left open by the Phase 6+7 review's original
-// fix (#852 second review round, finding A): a broken/unparseable file that
-// glob-sorts BEFORE its healthy duplicate for the same ticketId. plans/
-// planByTicket is first-wins only over successfully-parsed files (a
-// probe-errored file is dropped from plans entirely, never added), so the
-// healthy file here is still the one matched into plans even though the
-// broken file was probed first. probes[key] must reflect that match
-// (PlanProbeOk), not the broken file's error classification -- a plain
-// first-wins-over-everything guard on probes alone locks in the broken
-// file's classification and would falsely gate a ticket that has a
-// perfectly good matched plan.
-func TestReadPlans_DuplicateTicketID_ProbeFirstWinsMatchesMatchedPlan_ReverseOrder(t *testing.T) {
+// TestReadPlans_DuplicateTicketID_BrokenThenHealthy_IsAmbiguityHold is the
+// reverse-sort-order sibling of the case above (#884 AC3: ambiguity holds
+// regardless of directory sort order) -- a broken/unparseable file that
+// glob-sorts BEFORE its healthy duplicate for the same ticketId must reach
+// the identical ambiguity verdict.
+func TestReadPlans_DuplicateTicketID_BrokenThenHealthy_IsAmbiguityHold(t *testing.T) {
 	dir := t.TempDir()
 	// Sorted so the broken (unparseable front matter) file is processed
 	// first and the healthy duplicate second -- "42-a" < "42-b".
@@ -516,17 +549,17 @@ body
 `)
 
 	var buf strings.Builder
-	plans, probes, err := ReadPlans("o/r", dir, func(sha string, paths []string) (int, error) { return 0, nil }, &buf)
+	scan, err := ReadPlans("o/r", dir, func(sha string, paths []string) (int, error) { return 0, nil }, &buf)
 	if err != nil {
 		t.Fatalf("ReadPlans returned unexpected error: %v", err)
 	}
-	if len(plans) != 1 || plans[0].TicketID != 42 {
-		t.Fatalf("expected exactly the healthy plan matched, got %d plans: %+v", len(plans), plans)
+	if len(scan.Plans) != 0 {
+		t.Fatalf("expected no plan matched (ambiguous duplicate claim), got %d plans: %+v", len(scan.Plans), scan.Plans)
 	}
 
 	key := planKey("o/r", 42)
-	if got := probes[key]; got != PlanProbeOk {
-		t.Errorf("PlanProbes[%q] = %q, want PlanProbeOk (must match the plan actually selected, not the earlier-processed broken file's error classification)", key, got)
+	if got := scan.Probes[key]; got != PlanProbeAmbiguous {
+		t.Errorf("PlanProbes[%q] = %q, want PlanProbeAmbiguous (order must never matter, #884 AC3/AC4)", key, got)
 	}
 }
 
@@ -911,10 +944,11 @@ escalationCommentId: 123456789
 body
 `)
 
-	plans, _, err := ReadPlans("o/r", dir, func(sha string, paths []string) (int, error) { return 0, nil }, io.Discard)
+	scan, err := ReadPlans("o/r", dir, func(sha string, paths []string) (int, error) { return 0, nil }, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
+	plans := scan.Plans
 	if len(plans) != 1 {
 		t.Fatalf("expected 1 plan, got %d: %+v", len(plans), plans)
 	}
@@ -941,10 +975,11 @@ status: planned
 body
 `)
 
-	plans, _, err := ReadPlans("o/r", dir, func(sha string, paths []string) (int, error) { return 0, nil }, io.Discard)
+	scan, err := ReadPlans("o/r", dir, func(sha string, paths []string) (int, error) { return 0, nil }, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
+	plans := scan.Plans
 	if len(plans) != 1 {
 		t.Fatalf("expected 1 plan (never dropped), got %d: %+v", len(plans), plans)
 	}
@@ -975,10 +1010,11 @@ escalationCommentId: 42
 body
 `)
 
-	plans, _, err := ReadPlans("o/r", dir, func(sha string, paths []string) (int, error) { return 0, nil }, io.Discard)
+	scan, err := ReadPlans("o/r", dir, func(sha string, paths []string) (int, error) { return 0, nil }, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
+	plans := scan.Plans
 	if len(plans) != 1 {
 		t.Fatalf("expected 1 plan (never dropped despite the malformed nonce), got %d: %+v", len(plans), plans)
 	}
@@ -1021,10 +1057,11 @@ escalationCommentId: %s
 body
 `, tc.commentID))
 
-			plans, _, err := ReadPlans("o/r", dir, func(sha string, paths []string) (int, error) { return 0, nil }, io.Discard)
+			scan, err := ReadPlans("o/r", dir, func(sha string, paths []string) (int, error) { return 0, nil }, io.Discard)
 			if err != nil {
 				t.Fatal(err)
 			}
+			plans := scan.Plans
 			if len(plans) != 1 {
 				t.Fatalf("expected 1 plan (never dropped despite the malformed comment ID), got %d: %+v", len(plans), plans)
 			}
