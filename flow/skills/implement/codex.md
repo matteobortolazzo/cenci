@@ -1,9 +1,15 @@
 # Codex implement procedure
 
 Read `project-core` and `codex-runtime`. In `/plan`, gather context with the read-heavy
-agent, ask material questions, and return an approved plan in the conversation without
-writing files or labels. Stop before mutations and instruct `cenci run implement apply
-<ticket> --agent codex`. In normal apply mode persist `.plans/<ticket>-<slug>.md`, then verify the
+agent and ask material questions. When the planner's output carries a non-empty
+`### Split Recommendation` or a `### Size Estimate` of `L`, the Split Gate asks, via
+the client's available user-input mechanism, whether to stop — split via
+`/cenci:refine`, persisting nothing — or proceed as a single PR; only Proceed
+continues planning. One run persists at most one plan file and opens at most one PR:
+never persist a second plan file or open a second or stacked PR for one ticket.
+Then return an approved plan in the conversation without writing files or labels.
+Stop before mutations and instruct `cenci run implement apply <ticket> --agent codex`.
+In normal apply mode persist `.plans/<ticket>-<slug>.md`, then verify the
 assembled file contains all four required headings (`## Ticket Details`, `## Implementation
 Plan`, `## Architectural Context`, `## Design Context` — the `requiredPlanSections` list in
 `watch/internal/pipeline/planfile.go`): if `## Design Context` alone is missing, append `##
