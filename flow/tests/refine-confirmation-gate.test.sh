@@ -84,7 +84,13 @@ assert_file_lacks() {
 GATE_SECTION_MARKER='## Confirmation Gate'
 GATE_QUESTION_MARKER='Apply this refinement as shown?'
 GATE_CONFIRM_OPTION_MARKER='Confirm — apply as shown'
-GATE_PRECEDES_WRITES_MARKER='No proposal-related GitHub write occurs before'
+# #878 supersedes #848: "No proposal-related GitHub write occurs before" was the
+# weasel-word qualifier that let the pre-gate ownership claim and `Working` label
+# slip through #848's own gate — #878 moves both of those writes to after the
+# gate too, so the marker drops "proposal-related" entirely. The old marker is
+# now asserted ABSENT (below) so the weakened qualifier cannot creep back in.
+GATE_PRECEDES_WRITES_MARKER='No GitHub write of any kind occurs before'
+GATE_PRECEDES_WRITES_OLD_MARKER='No proposal-related GitHub write occurs before'
 GATE_AUTHORIZES_VERDICTS_MARKER='authorizes every verdict listed'
 GATE_PARENT_AUTHORIZES_LAST_CHILD_MARKER='authorizes the last child'
 
@@ -96,7 +102,13 @@ GATE_LABEL_SET_GRANT_MARKER='[+ `automerge:ok` when its effective grant holds]'
 # --- Block 3: Rejected proposal ---------------------------------------------
 GATE_DECLINE_OPTION_MARKER='Decline — make no changes'
 GATE_DECLINED_CLEANUP_BRANCH_MARKER='declined-cleanup branch'
+# #878 supersedes #848: a decline now performs ZERO GitHub writes (the ownership
+# claim and `Working` no longer happen pre-gate at all, so there is nothing left
+# to "remain"). GATE_WORKING_REMAINS_MARKER flips from a positive to a negative
+# assertion on both SKILL.md and codex.md below, replaced by a positive
+# assertion on the new zero-write decline text.
 GATE_WORKING_REMAINS_MARKER='`Working` and the assignee claim remain'
+GATE_DECLINE_ZERO_WRITES_MARKER='no cleanup mutation'
 GATE_REREFINE_ADJUST_MARKER='is how to adjust'
 STEP13_DECLINED_INTENTIONAL_MARKER='intentionally absent'
 
@@ -142,7 +154,9 @@ assert_file_contains "${REFINE_SKILL}" "${GATE_QUESTION_MARKER}" \
 assert_file_contains "${REFINE_SKILL}" "${GATE_CONFIRM_OPTION_MARKER}" \
   "must offer the exact Confirm option label"
 assert_file_contains "${REFINE_SKILL}" "${GATE_PRECEDES_WRITES_MARKER}" \
-  "must state that no proposal-related GitHub write occurs before the gate's confirmation, replacing the old post-write CRITICAL note"
+  "must state that no GitHub write of any kind occurs before the gate's confirmation, replacing the old post-write CRITICAL note (#878 supersedes #848)"
+assert_file_lacks "${REFINE_SKILL}" "${GATE_PRECEDES_WRITES_OLD_MARKER}" \
+  "must not retain the weakened 'proposal-related' qualifier #878 dropped, since it previously let the pre-gate ownership claim and Working label slip through"
 assert_file_contains "${REFINER_AGENT}" "${GATE_AUTHORIZES_VERDICTS_MARKER}" \
   "must note that the human's single confirmation authorizes every verdict listed"
 assert_file_contains "${REFINER_AGENT}" "${GATE_PARENT_AUTHORIZES_LAST_CHILD_MARKER}" \
@@ -169,8 +183,14 @@ assert_file_contains "${REFINE_SKILL}" "${GATE_DECLINE_OPTION_MARKER}" \
   "must offer the exact Decline option label"
 assert_file_contains "${REFINE_SKILL}" "${GATE_DECLINED_CLEANUP_BRANCH_MARKER}" \
   "must jump straight to a declined-cleanup branch of step 13 on decline"
-assert_file_contains "${REFINE_SKILL}" "${GATE_WORKING_REMAINS_MARKER}" \
-  "must report that Working and the assignee claim remain after a decline"
+assert_file_lacks "${REFINE_SKILL}" "${GATE_WORKING_REMAINS_MARKER}" \
+  "must NOT report that Working and the assignee claim remain after a decline (#878 supersedes #848: both are now post-confirm writes, so a decline never applies them in the first place)"
+assert_file_lacks "${REFINE_CODEX}" "${GATE_WORKING_REMAINS_MARKER}" \
+  "codex.md must NOT report that Working and the assignee claim remain after a decline (#878 supersedes #848)"
+assert_file_contains "${REFINE_SKILL}" "${GATE_DECLINE_ZERO_WRITES_MARKER}" \
+  "must report the new zero-write, no-cleanup-mutation decline contract (#878)"
+assert_file_contains "${REFINE_CODEX}" "${GATE_DECLINE_ZERO_WRITES_MARKER}" \
+  "codex.md must mirror the new zero-write, no-cleanup-mutation decline contract (#878)"
 assert_file_contains "${REFINE_SKILL}" "${GATE_REREFINE_ADJUST_MARKER}" \
   "must tell the user re-running /cenci:refine <id> is how to adjust after a decline"
 assert_file_contains "${REFINE_SKILL}" "${STEP13_DECLINED_INTENTIONAL_MARKER}" \

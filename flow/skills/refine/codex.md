@@ -20,22 +20,38 @@ applied independently per ticket; this section is not written into the ticket bo
 `### Dependencies`) so it is plannable without undocumented parent context. Do not edit
 GitHub in Plan mode. Hand off `$cenci:refine apply <ticket> <approved-plan>` to normal mode.
 
-**Confirmation Gate (apply mode, before any GitHub write)**: no ticket, label, or sub-issue
-mutation happens until this gate confirms. For each proposed split child, apply the
-`frontend-classification` reference skill to that child's own block text to determine whether
-it needs a scoped browser question (skipped entirely for a design-only child) — the parent's
-own browser question is independent and is never propagated to any child. Compute each
-ticket's effective `automerge:ok` grant (`### Automation` verdict is exactly `grant` AND NOT
-`isDesignTicket` AND NOT `browserRequired` AND NOT the `ui:visual-check` signal match,
-evaluated independently per ticket; fail-closed to `withhold` on an absent/other value) and
-each ticket's final label set (parent per the label edit below; each child = inherited
+The pre-confirmation phase performs only read-only GitHub calls (`gh issue view`, `gh api
+user --jq .login`) and local temp-file writes — no ownership claim, no `Working` label, and no
+ticket/label/sub-issue mutation of any kind runs before the gate below confirms.
+
+**Confirmation Gate (apply mode, before any GitHub write)**: no ticket, label, or sub-issue mutation of any kind — including the ownership claim and the `Working` label — happens until
+this gate confirms. For
+each proposed split child, apply the `frontend-classification` reference skill to that child's
+own block text to determine whether it needs a scoped browser question (skipped entirely for a
+design-only child) — the parent's own browser question is independent and is never propagated
+to any child. Compute each ticket's effective `automerge:ok` grant (`### Automation` verdict is
+exactly `grant` AND NOT `isDesignTicket` AND NOT `browserRequired` AND NOT the `ui:visual-check`
+signal match, evaluated independently per ticket; fail-closed to `withhold` on an absent/other
+value) and each ticket's final label set (parent per the label edit below; each child = inherited
 non-excluded parent labels + `Refined` [+ `Design`] [+ `Browser`] [+ `ui:visual-check`] [+
 `automerge:ok` when granted]). Render the complete proposal plus a per-ticket manifest (title,
-label set, grant/withhold + rationale), then ask, via the client's available user-input
-mechanism, "Apply this refinement as shown?" with Confirm/Decline options — no adjust loop. A
-**Decline** makes no ticket, label, or sub-issue mutation of any kind; report that `Working`
-and the assignee claim remain, and that re-running refine is how to adjust. Only a Confirm
-proceeds to update the ticket and labels and clear the checkpoint.
+label set, milestone, intended hierarchy/dependencies, grant/withhold + rationale, plus the
+parent's own pending ownership-claim and `Working` transition), then ask, via the client's
+available user-input mechanism, "Apply this refinement as shown?" with Confirm/Decline options —
+no adjust loop. A **Decline** performs zero GitHub writes and requires no cleanup mutation: title,
+body, labels, assignees, milestone, and native sub-issues are state-for-state unchanged, and
+re-running refine is how to adjust. Only a Confirm proceeds to the write phase below.
+
+Once confirmed, every write proceeds in this order: claim → Working → parent body →
+children+links → Pass 2/design → Refined/-Working → ui:visual-check (see `### Write order`
+at the end of this file). Before any of those writes, re-fetch the parent's milestone/labels
+(unconditionally, even on a parent-only run) and re-verify exclusive ownership; a conflict on
+the re-verify stops with zero writes, same as the pre-confirm check. Diff the re-fetched labels
+against the gate-time snapshot: **authorization-sensitive drift** (`automerge:ok`, `Browser`, or
+`ui:visual-check` changed on the parent) stops the run with zero writes and asks for a fresh
+`$cenci:refine apply` from scratch — no in-session re-gate; **cosmetic drift** (milestone,
+`area:*`, priority, team, `Design`, or any other label) proceeds using the freshly fetched
+snapshot and discloses the drift in the final message.
 
 **`automerge:ok` grant (apply mode, parent ticket)**: as part of the same label edit
 that applies `Refined`/`Design`/`Browser`, use the effective grant computed at the
@@ -47,12 +63,12 @@ true`), then append `--add-label "automerge:ok"` when the effective grant holds,
 (re-refine), or nothing otherwise. Every proposed split child gets its own independently
 computed grant/withhold from the same gate, applied when that child is created (see below) —
 never inherited from the parent.
-When a split is applied, first verify each child block is structurally complete — every child in the
+Before the Confirmation Gate renders its manifest, when a split is proposed, first verify each child block is structurally complete — every child in the
 adopted `### Suggested Split` has all five subsections present (`### Goal`, `### Decisions`, `### Assumptions (auto-adopted)`, `### Acceptance criteria`, `### Dependencies`), each satisfying its emptiness
 rule: `### Goal` non-empty prose; `### Dependencies` non-empty ("None." valid); `### Decisions` and
 `### Assumptions (auto-adopted)` each non-empty or exactly "None."; `### Acceptance criteria` empty only
 for a child the partition assigned zero criteria; a missing or empty-violating child aborts the split
-before any GitHub write and before the acceptance-criteria partition check runs. This structural check only
+before any GitHub write, before the gate renders a manifest, and before the acceptance-criteria partition check runs. This structural check only
 confirms presence/absence and does not itself judge whether an empty `### Acceptance criteria` section is
 legitimate — the partition check below is the sole verifier of correct assignment, and a child wrongly left
 empty will surface there as an unassigned criterion. Only then verify the
@@ -70,8 +86,10 @@ and refinement-granted markers (`Refined`, `Working`, `Planned`, `In Review`, `I
 `Design`, `Designed`, `automerge:ok`, `Browser`, `ui:visual-check`), on top of its own seed
 labels — `automerge:ok`, `Browser`, `ui:visual-check` are never inherited from the parent's
 current labels; each child's own copy of those three, if any, comes only from the Confirmation
-Gate above; if the parent-metadata fetch fails after one retry, create the tickets without inheritance
-and say so in the final message rather than aborting the split.
+Gate above; the parent-metadata fetch is unconditional and runs before any write — if it fails
+after one retry, the parent cannot be read after one retry, so **stop with zero writes** (D1):
+create no tickets, update no ticket body, claim no ownership, add no `Working` label, and report
+that re-running `$cenci:refine apply <ticket> <approved-plan>` is how to retry.
 
 Divergence: the refiner agent split is Claude-only — Codex has no subagent model tiering, so
 this native procedure performs the refinement analysis inline as described above.
@@ -94,3 +112,16 @@ shell state. Every title-carrying issue write (the retitle edit, each child-tick
 and the companion design-ticket create) goes through `gh api repos/<owner>/<repo>/… -X
 PATCH|POST --input <json-file>` with a payload `jq`-composed from file-tool-authored raw
 title/body inputs — never an inline `--title` and never a hand-escaped JSON literal.
+
+### Write order
+
+claim (the ownership claim, first write) → working (the Working label ensure + add) →
+parent body (the parent ticket edit) → for each split child in dependency order, child-create
+immediately followed by its own child-link, and so on, all before parent-exec-order →
+parent-exec-order (the Execution Order note, or the companion design ticket's create when
+there is no split) → refined (the Refined label add / Working label removal) → visual-check
+(the ui:visual-check label add, skipped when isDesignTicket).
+
+Op tokens, in canonical order for a 2-child split: `claim` `working` `parent-body`
+`child-create:1` `child-link:1` `child-create:2` `child-link:2` `parent-exec-order` `refined`
+`visual-check`.
