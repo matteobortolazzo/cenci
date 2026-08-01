@@ -77,9 +77,41 @@ every parent criterion assigned to exactly one child (integration-scoped criteri
 depends on all others); an unassigned or duplicated criterion aborts the split before any GitHub
 write. Each child body then carries its own `### Acceptance Criteria` section — its slice of the parent's partition —
 after the dependency lines and description, plus that child's own `### Decisions` and
-`### Assumptions (auto-adopted)` persisted from its `### Suggested Split` block. Link each child of the split to the parent as a native GitHub sub-issue
-(`gh issue edit <child> --parent <parent>`) — do not append a child-ticket markdown checklist; the
-native sub-issue list carries the enumeration. Every ticket this workflow creates — each split child
+`### Assumptions (auto-adopted)` persisted from its `### Suggested Split` block.
+
+**Creation checkpoint (idempotent create/recover/repair/link, #876)**: every split child and the
+companion design ticket are created through `"${PLUGIN_ROOT}/skills/refine/scripts/ensure-issue.sh"`
+— invoked exactly as this same script is invoked from Claude's SKILL.md, and exactly as
+`configure/codex.md:12` invokes `detect-project.sh` — via its `ensure-issue.sh init`,
+`ensure-issue.sh ensure`, `ensure-issue.sh link`, and `ensure-issue.sh clear` subcommands. This
+makes creation recoverably idempotent across timeouts, retries, crashes, and a resumed apply-mode
+run: each manifest entry mints a nonce at `init` time and embeds a hidden
+`<!-- cenci-refine-create:<nonce> -->` marker in the created issue's body, so a resumed run
+recovers the same issue by re-scanning for that exact marker instead of re-creating blind.
+
+Before the first create, run `"${PLUGIN_ROOT}/skills/refine/scripts/ensure-issue.sh" init --repo <owner>/<repo> --parent <parent> --checkpoint .plans/.refine-<parent>.checkpoint.json --manifest <manifest-file>`
+(add `--parent-meta <parent-meta-file>` — the parent-metadata fetch below is unconditional and fail-closed before any write, so it always succeeds by the time this runs; the flag is always passed, never omitted). The
+checkpoint lives at `.plans/.refine-<parent>.checkpoint.json` — keyed by the repo and parent issue
+it recovers, not this run, so it survives a crash across separate invocations. For each split
+child, run `ensure-issue.sh ensure --checkpoint <path> --repo <owner>/<repo> --slot child-K-of-N
+--title <title-file> --body <body-file>` to resolve it to exactly one issue, then
+`ensure-issue.sh link --checkpoint <path> --repo <owner>/<repo> --slot child-K-of-N --parent
+<parent>` to link it as a native GitHub sub-issue — `link` checks the parent's existing sub-issue
+list first (already-linked is a no-op success, never a duplicate `--parent` edit) and verifies
+from the parent side before returning success; do not append a child-ticket markdown checklist —
+the native sub-issue list carries the enumeration. The companion design ticket uses the same
+`init`/`ensure` pair with a single `"design"` slot and no `link` call (it is related via a body
+dependency line, not native sub-issue hierarchy).
+
+If the checkpoint is missing or corrupt (bad JSON, wrong schema version) on any call other than
+`init`, `ensure-issue.sh` itself exits non-zero and this is by design — it must **fail closed** and
+never silently re-create. Treat that, and any other non-zero `ensure-issue.sh` exit, as a hard
+stop: report the error and do not create any further children or the design ticket. Once the run
+completes successfully, run `ensure-issue.sh clear --checkpoint <path>` (idempotent — a second
+`clear` is not an error); an aborted run instead retains the checkpoint so the next attempt
+resumes from it rather than re-creating already-created issues.
+
+Every ticket this workflow creates — each split child
 and the companion design ticket — inherits the parent's milestone (as the numeric `.milestone.number`,
 omitted entirely when the parent has none) and every parent label except the 10 lifecycle/transient
 and refinement-granted markers (`Refined`, `Working`, `Planned`, `In Review`, `Implemented`,
@@ -89,7 +121,10 @@ current labels; each child's own copy of those three, if any, comes only from th
 Gate above; the parent-metadata fetch is unconditional and runs before any write — if it fails
 after one retry, the parent cannot be read after one retry, so **stop with zero writes** (D1):
 create no tickets, update no ticket body, claim no ownership, add no `Working` label, and report
-that re-running `$cenci:refine apply <ticket> <approved-plan>` is how to retry.
+that re-running `$cenci:refine apply <ticket> <approved-plan>` is how to retry. This inheritance
+merge (the `--slurpfile`-based label exclusion and the numeric-milestone-only rule) now runs
+inside `ensure-issue.sh init`'s own `--parent-meta` handling rather than being computed inline
+here (#876).
 
 Divergence: the refiner agent split is Claude-only — Codex has no subagent model tiering, so
 this native procedure performs the refinement analysis inline as described above.
@@ -101,15 +136,25 @@ invokes neither. (Attachment downloads via the `attachments` reference skill may
 will prompt for approval — an accepted tradeoff, not a regression.) Its `gh` surface is
 limited to exactly two `gh issue` verbs — `view` and `edit` — and no other verb (refine posts
 no comments and never lists/closes an issue), plus `gh label create …`, `gh api user --jq …`
-(via `ticket-ownership`), and `gh api repos/…`; its `git` surface is limited to `git remote
-get-url`; and its payload-composition surface is a standalone `jq -n --rawfile …` call — plus
-`--slurpfile` on the two creating sites, which is how the parent's externally-sourced
-label names reach the payload without ever touching a command line — per
-the `shell-rules` skill's canonical snippet. The only temp-name primitive is a standalone
+(via `ticket-ownership`), `gh api repos/…`, and `"${PLUGIN_ROOT}/skills/refine/scripts/ensure-issue.sh"`
+itself; its `git` surface is limited to `git remote
+get-url` (the script derives nothing from `git` itself — it receives `--repo <owner>/<repo>` as an
+argument); and its own payload-composition surface is a standalone `jq -n --rawfile …` call at the
+retitle site. Every child-ticket create and the companion design-ticket create now go through
+`ensure-issue.sh` rather than this procedure's own inline `gh api` calls (#876): internally the
+script composes its create/repair payloads via `jq -n --rawfile …` plus `--slurpfile` for the
+parent-metadata label/milestone merge — the same mechanism that lets externally-sourced label
+names reach the payload without ever touching a command line, per the `shell-rules` skill's
+canonical snippet — and its own `gh` surface (candidate listing via `gh api repos/…/issues?…
+--paginate`, create via `gh api repos/…/issues -X POST --input … --jq .number`, repair via
+`gh api repos/…/issues/<n> -X PATCH --input …`, and linking via `gh issue edit <child> --parent
+<parent>` / `gh issue view <parent> --json subIssues`) stays inside this same documented
+least-privilege set — no new verb or prefix. The only temp-name primitive is a standalone
 `mktemp -u ${TMPDIR:-/tmp}/cenci/…` call — a dry-run name generator, never `mktemp -d`; the file tool
 creates the actual file, and the printed token is carried forward as literal text, never
-shell state. Every title-carrying issue write (the retitle edit, each child-ticket create,
-and the companion design-ticket create) goes through `gh api repos/<owner>/<repo>/… -X
+shell state. Every title-carrying issue write (the retitle edit here, and — inside
+`ensure-issue.sh` — each child-ticket create/repair and the companion design-ticket
+create/repair) goes through `gh api repos/<owner>/<repo>/… -X
 PATCH|POST --input <json-file>` with a payload `jq`-composed from file-tool-authored raw
 title/body inputs — never an inline `--title` and never a hand-escaped JSON literal.
 

@@ -185,7 +185,7 @@ companion) for every skill, including the internal ones not listed above.
 | `pr-comment-filter` | — | address-review, babysit | — | — |
 | `project-core` | — | — | — | — |
 | `refactor` | codex.md | codex-runtime, project-core, shell-rules, subagent-safety | — | — |
-| `refine` | codex.md | attachments, codex-runtime, frontend-classification, project-core, shell-rules, subagent-safety, ticket-ownership | — | refiner |
+| `refine` | codex.md | attachments, codex-runtime, frontend-classification, project-core, shell-rules, subagent-safety, ticket-ownership | ensure-issue.sh | refiner |
 | `review` | codex.md | codex-runtime, project-core, shell-rules, subagent-safety | — | — |
 | `shell-rules` | — | implement | — | — |
 | `stack-angular` | — | testing | — | — |
