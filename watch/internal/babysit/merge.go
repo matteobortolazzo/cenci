@@ -43,17 +43,27 @@ const mergeQueueQuery = `query($owner:String!,$name:String!,$number:Int!){reposi
 // `gh pr merge` on a first-pass Merge==true verdict: PR view (head SHA,
 // mergeable, changed files), checks, closing-issue labels, base-ref policy,
 // paginated comments/reviews (feeding a read-only new-feedback detection
-// pass via detectNewFeedbackKeys, never reconcilePendingFeedback -- see the
-// plan's rejected alternative), and merge-queue state. Enabled and
+// pass via detectNewFeedbackKeys), a full revalidation of every known
+// feedback key -- pending AND previously addressed -- via revalidateFeedback
+// (#885: this pass rereads authoritative GraphQL thread/review state fresh,
+// it never carries the first pass's already-computed FeedbackHold/
+// FeedbackDetail forward, since a thread or review can be reopened strictly
+// between the two passes), and merge-queue state. Enabled and
 // AllowedMethods carry over unchanged from first (repo settings / local
-// config, not PR state, per the plan's Assumption); FeedbackHold/
-// FeedbackDetail also carry over from first (a first-pass Merge==true
-// verdict already proved they were clean, and re-running #850's GraphQL
-// thread-resolution read here would risk double-bookkeeping -- see the
-// plan's rejected alternative). On any read failure, returns a distinct
-// reasonUpstream*Unreadable reason for the caller to hold under (reusing
-// the existing one-decision-per-tick constants, per the plan's Assumption)
-// rather than a new parallel constant set.
+// config, not PR state, per the plan's Assumption). revalidateFeedback is
+// read-only -- unlike tick's own reconcileFeedback, it never mutates s, so a
+// reopen discovered here holds this merge attempt but is only persisted (and
+// its address-review relaunch dispatched) by the *next* tick's own reconcile
+// pass; this preserves the "no double-bookkeeping in the recheck" property
+// #854 already established (reconcileFeedback's own doc comment). A
+// revalidateFeedback fetch failure is routed into FeedbackHold/FeedbackDetail
+// below, not the err return path, so the second evaluateAutomerge pass still
+// runs and produces its own fresh Conditions rather than the first pass's
+// stale all-"yes" set. On any of the four earlier upstream-read failures
+// (PR/checks/comments/reviews), returns a distinct reasonUpstream*Unreadable
+// reason for the caller to hold under (reusing the existing
+// one-decision-per-tick constants, per the plan's Assumption) rather than a
+// new parallel constant set.
 func recheckAutomergeInputs(s *State, first automergeInputs) (automergeInputs, string, error) {
 	var pr prView
 	if err := ghJSON(&pr, "pr", "view", s.PR, "--repo", s.Repo, "--json", prViewFields); err != nil {
@@ -72,12 +82,14 @@ func recheckAutomergeInputs(s *State, first automergeInputs) (automergeInputs, s
 		return automergeInputs{}, reasonUpstreamReviewsUnreadable, err
 	}
 
+	revalidatedPending, verdict := revalidateFeedback(s, reviews, reviewsComplete)
+
 	in := automergeInputs{
 		Enabled:           first.Enabled,
 		Checks:            checks,
 		RepairPending:     s.RepairPending,
-		FeedbackHold:      first.FeedbackHold,
-		FeedbackDetail:    first.FeedbackDetail,
+		FeedbackHold:      verdict.Hold,
+		FeedbackDetail:    verdict.Detail,
 		IsDraft:           pr.IsDraft,
 		Mergeable:         pr.Mergeable,
 		HeadRefOID:        pr.HeadRefOID,
@@ -100,7 +112,7 @@ func recheckAutomergeInputs(s *State, first automergeInputs) (automergeInputs, s
 	}
 
 	newKeys, _ := detectNewFeedbackKeys(s, comments, reviews)
-	in.PendingKeys = append(append([]string{}, s.PendingKeys...), newKeys...)
+	in.PendingKeys = append(append([]string{}, revalidatedPending...), newKeys...)
 
 	cfg, err := fetchPolicy(s.Repo, pr.BaseRefName)
 	switch {

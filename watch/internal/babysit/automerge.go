@@ -32,10 +32,18 @@ const (
 	// (an ordinary, resolvable hold) because none of these states can ever
 	// resolve on their own -- an unreadable/truncated/unknown/unsupported
 	// feedback state holds automerge indefinitely and needs a human merge.
-	reasonFeedbackUnreadable    = "review feedback state unreadable"
-	reasonFeedbackTruncated     = "review feedback state truncated"
-	reasonReviewStateUnknown    = "review feedback state unknown"
-	reasonFeedbackUnsupported   = "unsupported review feedback type"
+	reasonFeedbackUnreadable  = "review feedback state unreadable"
+	reasonFeedbackTruncated   = "review feedback state truncated"
+	reasonReviewStateUnknown  = "review feedback state unknown"
+	reasonFeedbackUnsupported = "unsupported review feedback type"
+	// reasonFeedbackReopened (#885) is a revoked-resolution class, distinct
+	// from the plain, resolvable reasonReviewPending: it fires only when a
+	// key that was previously in AddressedKeys is reclassified back to
+	// pending against fresh GitHub state (a resolved thread reopened, or a
+	// dismissed/superseded CHANGES_REQUESTED review became blocking again),
+	// never for an ordinary first-time pending key. Carries the reopened
+	// key name(s) in Detail (Q2).
+	reasonFeedbackReopened      = "review feedback reopened"
 	reasonDraft                 = "PR is a draft"
 	reasonMergeableUnknown      = "mergeable state unknown"
 	reasonNotMergeable          = "PR not mergeable"
@@ -217,15 +225,23 @@ type automergeInputs struct {
 
 	RepairPending bool
 	PendingKeys   []string
-	// FeedbackHold is reconcilePendingFeedback's verdict (#850): one of the
-	// four feedback-hold reason constants when GitHub's review-feedback state
-	// is unreadable, truncated, unknown, or unsupported, "" when clean. It is
-	// checked after RepairPending and before len(PendingKeys) so a fail-
-	// closed feedback state never masquerades as the ordinary
-	// reasonReviewPending hold. FeedbackDetail is the raw, unsanitized
-	// diagnostic string -- like LabelsErr/PolicyErr/AllowedMethodsErr below,
-	// it is sanitized exactly once, inside evaluateAutomerge, not at this
-	// struct's construction site.
+	// FeedbackHold is the feedback-resolution verdict for this evaluation
+	// pass -- reconcileFeedback's (tick's mutating end-of-tick pass) or
+	// revalidateFeedback's (the pre-merge recheck's read-only pass, #885):
+	// one of the five feedback-hold reason constants (unreadable, truncated,
+	// unknown, unsupported, or reopened) when GitHub's review-feedback state
+	// -- across both PendingKeys and previously-AddressedKeys -- fails to
+	// positively confirm resolution, "" when clean. It is checked after
+	// RepairPending and before len(PendingKeys) so a fail-closed feedback
+	// state never masquerades as the ordinary reasonReviewPending hold. Both
+	// callers reread authoritative GitHub state fresh for their own pass --
+	// neither ever carries a stale verdict forward from an earlier pass
+	// (#885: the pre-merge recheck previously carried the first pass's
+	// already-computed verdict, which let a PR merge with feedback reopened
+	// strictly between the two passes). FeedbackDetail is the raw,
+	// unsanitized diagnostic string -- like LabelsErr/PolicyErr/
+	// AllowedMethodsErr below, it is sanitized exactly once, inside
+	// evaluateAutomerge, not at this struct's construction site.
 	FeedbackHold   string
 	FeedbackDetail string
 
@@ -958,12 +974,14 @@ func recordUpstreamReadFailure(s *State, reason string, err error) {
 // fetched only once evaluateAutomerge's trial verdict (with that stage's
 // inputs still zero-valued) shows every earlier stage already passed -- so
 // a PR held by an earlier stage costs zero extra `gh` calls beyond the
-// labels fetch. verdict is reconcilePendingFeedback's already-computed
-// result (#850): tick calls reconcilePendingFeedback once, unconditionally,
-// at the end of tick -- after the reviews loop and after this tick's new
-// keys are appended -- immediately before calling runAutomerge, so
-// s.PendingKeys already reflects GitHub-authoritative resolution by the time
-// runAutomerge reads it below. It persists exactly one decision via
+// labels fetch. verdict is reconcileFeedback's already-computed result
+// (#850, generalized by #885 to reclassify AddressedKeys too): tick calls
+// reconcileFeedback once, unconditionally, at the end of tick -- after the
+// reviews loop, after this tick's new keys are recorded onto PendingKeys,
+// and after the single PendingKeys-\-LaunchedKeys address-review launch --
+// immediately before calling runAutomerge, so s.PendingKeys/s.AddressedKeys
+// already reflect GitHub-authoritative resolution (including any reopen) by
+// the time runAutomerge reads them below. It persists exactly one decision via
 // recordDecision and returns whether a merge was actually issued this tick,
 // so tick can reset the backoff delay.
 func runAutomerge(s *State, pr prView, checks []check, verdict feedbackVerdict, commentsComplete, reviewsComplete bool) bool {

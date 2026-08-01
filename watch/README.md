@@ -996,7 +996,15 @@ merge a PR itself, once every one of these holds on a given tick:
   pagination), unknown (GitHub stopped reporting the item, or reported an
   unrecognized review state), or unsupported (a feedback key type babysit
   doesn't recognize). An item GitHub stops reporting at all — deleted comment,
-  purged thread — holds indefinitely; merge it manually.
+  purged thread — holds indefinitely, whether it was still pending or already
+  addressed; merge it manually.
+- Immediately before merge, babysit revalidates every known feedback key —
+  still-pending and previously-addressed alike — against fresh GitHub thread
+  and review state, rather than reusing the tick's earlier verdict. If a
+  previously-addressed inline comment's thread now comes back unresolved, it
+  moves back to pending and holds the merge under its own reason, distinct
+  from ordinary pending feedback, since GitHub revoked a resolution babysit
+  had already relied on.
 - The PR is not a draft and GitHub reports it `MERGEABLE`.
 - The PR doesn't require a merge queue or other deferred-merge handling — a
   GraphQL probe (`isInMergeQueue`/`isMergeQueueEnabled`) checked as the final

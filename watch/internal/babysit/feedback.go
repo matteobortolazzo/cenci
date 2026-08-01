@@ -19,6 +19,15 @@ import (
 // -- an absent thread/review, an unrecognized review state, an unsupported
 // key type, or an API/parsing failure -- holds indefinitely rather than
 // silently resolving (watch/docs/error-handling.md's default-deny rule).
+//
+// #885 extends this same default-deny discipline to previously-resolved
+// keys: AddressedKeys is not a permanent verdict either. Both the end-of-tick
+// pass (reconcileFeedback) and the pre-merge boundary (revalidateFeedback)
+// reclassify AddressedKeys against fresh GitHub state every time, so a
+// resolved thread/review GitHub later reports reopened returns to pending
+// under its own reasonFeedbackReopened hold, and an addressed key GitHub no
+// longer reports at all holds under reasonReviewStateUnknown rather than
+// being silently treated as still resolved.
 
 // keyStatus is classifyPendingKey's per-key classification outcome.
 type keyStatus int
@@ -58,15 +67,24 @@ type feedbackState struct {
 	ReviewsComplete bool
 }
 
-// feedbackVerdict is reconcilePendingFeedback's output. An empty Hold means
-// clean: no held item. A non-empty Hold is one of the four #850 automerge
-// reason constants, layered with optional diagnostic Detail -- raw and
-// unsanitized here; evaluateAutomerge's stage 4 is the single sanitization
-// point once Detail reaches automergeInputs.FeedbackDetail (automerge.go's
-// FeedbackHold/FeedbackDetail field comment).
+// feedbackVerdict is reconcileFeedback's (tick's mutating pass) and
+// revalidateFeedback's (the pre-merge recheck's read-only pass) shared
+// output. An empty Hold means clean: no held item. A non-empty Hold is one
+// of the five #850/#885 automerge reason constants, layered with optional
+// diagnostic Detail -- raw and unsanitized here; evaluateAutomerge's stage 4
+// is the single sanitization point once Detail reaches
+// automergeInputs.FeedbackDetail (automerge.go's FeedbackHold/FeedbackDetail
+// field comment). Reopened (#885) names every previously-addressed key this
+// pass just reclassified back to pending, independent of whether Hold itself
+// ended up as reasonFeedbackReopened (a classification-level unknown/
+// unsupported key elsewhere in the same pass can outrank it in Hold -- see
+// classifyFeedback) -- callers that need "did anything reopen at all"
+// (tick's own actionable bookkeeping) read this field directly rather than
+// string-comparing Hold.
 type feedbackVerdict struct {
-	Hold   string
-	Detail string
+	Hold     string
+	Detail   string
+	Reopened []string
 }
 
 // classifyPendingKey classifies one PendingKeys entry against fs. Default-
@@ -169,7 +187,12 @@ func findReview(reviews []review, id int64) *review {
 // latestEffectiveReview returns the most recently submitted review by login
 // whose state is in the effective closed set {APPROVED, CHANGES_REQUESTED,
 // DISMISSED} -- COMMENTED and PENDING (and any other state string) are
-// ignored, never counted as supersession, per the plan's Assumption 2.
+// ignored, never counted as supersession, per the plan's Assumption 2. Ties
+// on SubmittedAt (GitHub returns uniform RFC3339 "Z" timestamps, so a
+// same-second double-submission is possible) are broken by the higher
+// database ID (#885's AC 4): review IDs are monotonic enough to
+// deterministically order same-timestamp reviews, and the result must be
+// independent of the order the API happens to return them in.
 func latestEffectiveReview(reviews []review, login string) (review, bool) {
 	var best review
 	found := false
@@ -182,7 +205,7 @@ func latestEffectiveReview(reviews []review, login string) (review, bool) {
 		default:
 			continue
 		}
-		if !found || r.SubmittedAt > best.SubmittedAt {
+		if !found || r.SubmittedAt > best.SubmittedAt || (r.SubmittedAt == best.SubmittedAt && r.ID > best.ID) {
 			best = r
 			found = true
 		}
@@ -220,6 +243,67 @@ func partitionPendingKeys(pending []string, fs feedbackState) (stillPending, res
 		}
 	}
 	return stillPending, resolved, hold, detail
+}
+
+// feedbackClassification is classifyFeedback's pure output: Pending/Resolved
+// mirror partitionPendingKeys' outcome for the pending set exactly (today's
+// semantics, unchanged), Reopened names every previously-addressed key this
+// pass reclassified back to pending (#885, AC 1/AC 2), and Hold/Detail carry
+// the single overall verdict for the whole pass -- both sets combined --
+// under the plan's exact precedence: a fetch-level hold is decided by the
+// caller before classifyFeedback ever runs; within classifyFeedback itself, a
+// classification-level hold (reasonReviewStateUnknown / reasonFeedbackUnsupported,
+// pending set scanned before addressed) always outranks reasonFeedbackReopened,
+// which itself only wins when nothing in either set is unknown/unsupported.
+// Deterministic output order: Pending/Resolved in original pending order,
+// Reopened in original addressed order.
+type feedbackClassification struct {
+	Pending  []string
+	Resolved []string
+	Reopened []string
+	Hold     string
+	Detail   string
+}
+
+// classifyFeedback generalizes partitionPendingKeys to also reclassify
+// AddressedKeys against fresh GitHub state (#885): pending-set keys keep
+// partitionPendingKeys' exact semantics (classifyFeedback delegates to it
+// directly, so "no addressed keys" is byte-for-byte identical to the pre-#885
+// behavior); addressed-set keys contribute Reopened on keyPending (a
+// previously-resolved thread/review found blocking again), and extend the
+// classification-level hold to keyUnknown/keyUnsupported while staying
+// addressed either way (Q1's fail-closed extension: absence is never proof
+// of resolution for a previously-addressed key either, and it is also never
+// proof of a reopen). A keyResolved addressed key is a silent no-op -- it
+// stays in AddressedKeys, appearing in none of Pending/Resolved/Reopened.
+func classifyFeedback(pending, addressed []string, fs feedbackState) feedbackClassification {
+	stillPending, resolved, hold, detail := partitionPendingKeys(pending, fs)
+	out := feedbackClassification{Pending: stillPending, Resolved: resolved, Hold: hold, Detail: detail}
+
+	for _, key := range addressed {
+		switch classifyPendingKey(key, fs) {
+		case keyResolved:
+			// No-op: GitHub still confirms this key resolved, it stays in
+			// AddressedKeys untouched.
+		case keyPending:
+			out.Reopened = append(out.Reopened, key)
+			if out.Hold == "" {
+				out.Hold = reasonFeedbackReopened
+				out.Detail = key + ": review feedback reopened"
+			}
+		case keyUnknown:
+			if out.Hold == "" || out.Hold == reasonFeedbackReopened {
+				out.Hold = reasonReviewStateUnknown
+				out.Detail = key + ": not found or in an unrecognized state"
+			}
+		case keyUnsupported:
+			if out.Hold == "" || out.Hold == reasonFeedbackReopened {
+				out.Hold = reasonFeedbackUnsupported
+				out.Detail = key + ": unsupported key type"
+			}
+		}
+	}
+	return out
 }
 
 // maxThreadPages bounds fetchReviewThreads' cursor loop: hasNextPage still
@@ -331,53 +415,141 @@ func fetchReviewThreads(repo, pr string) (map[int64]bool, error) {
 	return nil, fmt.Errorf("%w: exceeded maxThreadPages (%d) with more pages still reported", errFeedbackTruncated, maxThreadPages)
 }
 
-// reconcilePendingFeedback is the end-of-tick, GitHub-authoritative
-// resolution pass (Q6): it lazily re-fetches review-thread state -- only when
-// s.PendingKeys holds at least one "comment:"-prefixed entry, since
-// "review:"-prefixed entries resolve entirely from reviews, already fetched
-// this tick -- partitions s.PendingKeys accordingly, moves resolved keys to
-// s.AddressedKeys, and advances s.LastCommentAt from s.PendingCommentAt
-// (clearing PendingCommentAt/PendingHeadSHA) only once the pending set fully
-// empties. A fetchReviewThreads failure holds every comment: key unchanged
-// (fail closed) and never touches AddressedKeys/LastCommentAt for this tick.
-// reviewsComplete is this tick's fetchPaged completeness signal (#854) for
-// the reviews read: threaded straight into feedbackState so
-// classifyReviewKey fails closed on an unproven-complete reviews list
-// regardless of how short it happens to be.
-func reconcilePendingFeedback(s *State, reviews []review, reviewsComplete bool) feedbackVerdict {
+// fetchFeedbackState builds this pass's feedbackState: the lazy GraphQL
+// thread fetch only runs when keys (pending union addressed, per #885's Q3 --
+// widened from pending-only) holds at least one "comment:"-prefixed entry,
+// since "review:"-prefixed entries resolve entirely from reviews, already
+// fetched by the caller. hold/detail are non-empty only on a
+// fetchReviewThreads failure (reasonFeedbackUnreadable/reasonFeedbackTruncated);
+// the caller must not classify or mutate anything when hold != "" -- the read
+// itself could not be trusted.
+func fetchFeedbackState(repo, pr string, keys []string, reviews []review, reviewsComplete bool) (fs feedbackState, hold, detail string) {
 	hasCommentKey := false
-	for _, k := range s.PendingKeys {
+	for _, k := range keys {
 		if strings.HasPrefix(k, "comment:") {
 			hasCommentKey = true
 			break
 		}
 	}
 
-	fs := feedbackState{Reviews: reviews, ReviewsComplete: reviewsComplete}
-	if hasCommentKey {
-		threads, err := fetchReviewThreads(s.Repo, s.PR)
-		if err != nil {
-			hold := reasonFeedbackUnreadable
-			if errors.Is(err, errFeedbackTruncated) {
-				hold = reasonFeedbackTruncated
-			}
-			return feedbackVerdict{Hold: hold, Detail: err.Error()}
+	fs = feedbackState{Reviews: reviews, ReviewsComplete: reviewsComplete}
+	if !hasCommentKey {
+		return fs, "", ""
+	}
+	threads, err := fetchReviewThreads(repo, pr)
+	if err != nil {
+		hold = reasonFeedbackUnreadable
+		if errors.Is(err, errFeedbackTruncated) {
+			hold = reasonFeedbackTruncated
 		}
-		fs.ThreadResolved = threads
+		return fs, hold, err.Error()
+	}
+	fs.ThreadResolved = threads
+	return fs, "", ""
+}
+
+// fetchAndClassifyFeedback runs the fetch+classify sequence shared by
+// reconcileFeedback (mutating) and revalidateFeedback (read-only, #885): it
+// fetches this pass's feedbackState via fetchFeedbackState (the widened lazy
+// gate: pending union addressed) and, on success, classifies both
+// s.PendingKeys and s.AddressedKeys via classifyFeedback. ok is false only on
+// a fetchFeedbackState failure, in which case hold/detail carry that failure
+// and c is the zero value -- callers must not classify or mutate anything in
+// that case (fail closed).
+func fetchAndClassifyFeedback(s *State, reviews []review, reviewsComplete bool) (c feedbackClassification, hold, detail string, ok bool) {
+	keys := append(append([]string{}, s.PendingKeys...), s.AddressedKeys...)
+	fs, fetchHold, fetchDetail := fetchFeedbackState(s.Repo, s.PR, keys, reviews, reviewsComplete)
+	if fetchHold != "" {
+		return feedbackClassification{}, fetchHold, fetchDetail, false
+	}
+	return classifyFeedback(s.PendingKeys, s.AddressedKeys, fs), "", "", true
+}
+
+// reconcileFeedback is the end-of-tick, GitHub-authoritative resolution pass
+// (Q6, generalized by #885 to reclassify AddressedKeys too): it runs
+// fetchAndClassifyFeedback and applies the verdict onto State -- resolved
+// keys move PendingKeys -> AddressedKeys and drop out of LaunchedKeys (their
+// episode is over, #885's split of resolution truth from launch dedup);
+// reopened keys move AddressedKeys -> PendingKeys (LaunchedKeys is left
+// alone: a reopened key was already dropped from LaunchedKeys when it
+// originally resolved, so it starts its new episode unlaunched and tick's
+// own PendingKeys \ LaunchedKeys launch trigger picks it up again).
+// LastCommentAt advances (clearing PendingCommentAt/PendingHeadSHA) only once
+// every key pending at this pass's *start* has cleared and this pass
+// actually resolved something -- scoped via classifyFeedback's Pending
+// output, which (per partitionPendingKeys' unchanged semantics) never
+// includes a newly reopened key, so a reopen landing in the same pass a
+// resolution happens can never spuriously suppress -- or a reopen alone can
+// never spuriously trigger -- the watermark advance. A fetch failure holds
+// every key unchanged in both directions (fail closed): reconcileFeedback
+// returns before classifying or mutating anything. reviewsComplete is this
+// tick's fetchPaged completeness signal (#854) for the reviews read:
+// threaded straight into feedbackState so classifyReviewKey fails closed on
+// an unproven-complete reviews list regardless of how short it happens to be.
+func reconcileFeedback(s *State, reviews []review, reviewsComplete bool) feedbackVerdict {
+	c, fetchHold, fetchDetail, ok := fetchAndClassifyFeedback(s, reviews, reviewsComplete)
+	if !ok {
+		return feedbackVerdict{Hold: fetchHold, Detail: fetchDetail}
 	}
 
-	stillPending, resolved, hold, detail := partitionPendingKeys(s.PendingKeys, fs)
-	s.PendingKeys = stillPending
-	if len(resolved) > 0 {
-		s.AddressedKeys = append(s.AddressedKeys, resolved...)
+	s.PendingKeys = append(append([]string{}, c.Pending...), c.Reopened...)
+	if len(c.Resolved) > 0 {
+		s.AddressedKeys = append(s.AddressedKeys, c.Resolved...)
+		s.LaunchedKeys = removeKeys(s.LaunchedKeys, c.Resolved)
 	}
-	// Advance only when the pending set fully empties *and* this tick
-	// actually resolved something -- guards the edge case where PendingKeys
-	// was already empty (nothing to reconcile at all) from silently
-	// overwriting LastCommentAt with a stray, inconsistent PendingCommentAt.
-	if len(s.PendingKeys) == 0 && len(resolved) > 0 && s.PendingCommentAt != "" {
+	if len(c.Reopened) > 0 {
+		s.AddressedKeys = removeKeys(s.AddressedKeys, c.Reopened)
+	}
+
+	if len(c.Pending) == 0 && len(c.Resolved) > 0 && s.PendingCommentAt != "" {
 		s.LastCommentAt = s.PendingCommentAt
 		s.PendingCommentAt, s.PendingHeadSHA = "", ""
 	}
-	return feedbackVerdict{Hold: hold, Detail: detail}
+	return feedbackVerdict{Hold: c.Hold, Detail: c.Detail, Reopened: c.Reopened}
+}
+
+// revalidateFeedback is reconcileFeedback's non-mutating counterpart for the
+// pre-merge boundary (merge.go's recheckAutomergeInputs, Decision 9, #885):
+// it runs the same fetchAndClassifyFeedback pass as reconcileFeedback -- same
+// widened lazy gate, same classification of both s.PendingKeys and
+// s.AddressedKeys -- but never writes back onto s, since the recheck must not
+// double-book State (#854's rejected "reuse the mutating reconcile"
+// alternative still holds -- merge.go's own doc comment). Returns the
+// revalidated pending set (still-pending plus newly-reopened keys, in
+// classifyFeedback's deterministic order) for the caller to fold in alongside
+// its own new-feedback detection, plus the verdict. On a fetch failure the
+// returned pending set falls back to s.PendingKeys unchanged (fail closed --
+// the caller is expected to route verdict.Hold into its own FeedbackHold
+// rather than treat this as success).
+func revalidateFeedback(s *State, reviews []review, reviewsComplete bool) (pending []string, verdict feedbackVerdict) {
+	c, fetchHold, fetchDetail, ok := fetchAndClassifyFeedback(s, reviews, reviewsComplete)
+	if !ok {
+		return append([]string{}, s.PendingKeys...), feedbackVerdict{Hold: fetchHold, Detail: fetchDetail}
+	}
+
+	pending = append(append([]string{}, c.Pending...), c.Reopened...)
+	return pending, feedbackVerdict{Hold: c.Hold, Detail: c.Detail, Reopened: c.Reopened}
+}
+
+// removeKeys returns a new slice containing every element of keys not
+// present in remove -- keys \ remove. Used both here (dropping resolved keys
+// out of LaunchedKeys and reopened keys out of AddressedKeys, #885's split of
+// resolution truth from launch-dedup bookkeeping) and in babysit.go's tick
+// (PendingKeys \ LaunchedKeys, the single per-tick address-review launch
+// trigger). keys itself is never mutated in place.
+func removeKeys(keys, remove []string) []string {
+	if len(remove) == 0 {
+		return keys
+	}
+	drop := make(map[string]bool, len(remove))
+	for _, k := range remove {
+		drop[k] = true
+	}
+	var out []string
+	for _, k := range keys {
+		if !drop[k] {
+			out = append(out, k)
+		}
+	}
+	return out
 }

@@ -118,11 +118,13 @@ func TestTickQuietBacksOff(t *testing.T) {
 
 func TestTickLaunchesAddressReviewForNewFeedback(t *testing.T) {
 	var calls [][]string
-	// A new comment:7 key is appended to PendingKeys before the #850
-	// resolution pass runs later in the same tick, so the lazy GraphQL thread
-	// fetch fires immediately -- the 5th scripted response. Left unresolved
-	// so PendingKeys still equals [comment:7] afterward, matching the
-	// pre-existing assertions below.
+	// A new comment:7 key is appended to PendingKeys before reconcileFeedback's
+	// end-of-tick resolution pass runs later in the same tick, so the lazy
+	// GraphQL thread fetch fires immediately -- the 5th scripted response.
+	// Left unresolved so PendingKeys still equals [comment:7] afterward,
+	// matching the assertions below; the #885 dedup-driven address-review
+	// launch (PendingKeys \ LaunchedKeys, fired after reconcile) still finds
+	// comment:7 unlaunched and dispatches it.
 	unresolvedThread := `{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"isResolved":false,"comments":{"totalCount":1,"nodes":[{"databaseId":7}]}}]}}}}}`
 	withCommands(t, []string{openPR(), `[]`, `[{"id":7,"updated_at":"2026-01-02T00:00:00Z","user":{"login":"reviewer"}}]`, `[]`, unresolvedThread}, &calls)
 	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900}
@@ -660,11 +662,189 @@ func TestTickDoesNotRelaunchAddressReviewForStillPendingFeedback(t *testing.T) {
 	}
 }
 
-// TestPendingFeedbackSurvivesRestart is AC 6: a save/load round trip with
+// -- #885: reopen/launch-dedup/restart at the tick boundary -------------------
+//
+// TestPendingFeedbackSurvivesRestart (AC 6: a save/load round trip with
 // SchemaVersion 1 and pre-existing PendingKeys, then a tick, proving the hold
-// reproduces purely from persisted state -- no in-memory-only carry-over
-// field is required.
-func TestPendingFeedbackSurvivesRestart(t *testing.T) {
+// reproduces purely from persisted state) is superseded by the schema-
+// migration tests below: TestLoadMigratesSchema1SeedsLaunchedKeysFromPendingKeys
+// pins the same SchemaVersion-1-round-trip case (now asserting the migrated
+// SchemaVersion 2 and the seeded LaunchedKeys, since a legacy SchemaVersion-1
+// state no longer round-trips as 1 -- load() always migrates it), and
+// TestTickAfterSchemaMigrationDoesNotRelaunchAlreadyPendingKey below carries
+// forward its "the hold reproduces purely from persisted state" tick-level
+// assertion.
+
+// countAddressReviewLaunches counts how many recorded calls are a `cenci run
+// address-review` launch -- shared by every reopen/dedup test below.
+func countAddressReviewLaunches(calls [][]string) int {
+	n := 0
+	for _, c := range calls {
+		if len(c) > 3 && c[1] == "run" && c[2] == "address-review" {
+			n++
+		}
+	}
+	return n
+}
+
+// TestTickReopensAddressedKeyAndDedupsLaunchAcrossTicks is AC 1/AC 2/Decision
+// 3: a previously-addressed key whose thread GitHub now reports unresolved
+// moves back to PendingKeys and fires exactly one address-review launch for
+// the new episode; two further ticks with the thread still unresolved fire
+// no additional launch, proving the dedup persists beyond a single
+// subsequent tick.
+func TestTickReopensAddressedKeyAndDedupsLaunchAcrossTicks(t *testing.T) {
+	pr := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"sha1","closingIssuesReferences":[],"url":"https://example/pr/42"}`
+	s := State{
+		PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60,
+		LastHeadSHA:   "sha1",
+		AddressedKeys: []string{"comment:5"},
+	}
+
+	// Tick 1: the reopen transition itself -- launches exactly once.
+	var calls1 [][]string
+	withCommands(t, []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`, unresolvedThreadFor(5)}, &calls1)
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(s.PendingKeys, []string{"comment:5"}) {
+		t.Fatalf("tick 1: PendingKeys = %v, want [comment:5]: the reopened key must move back to pending", s.PendingKeys)
+	}
+	if len(s.AddressedKeys) != 0 {
+		t.Fatalf("tick 1: AddressedKeys = %v, want empty", s.AddressedKeys)
+	}
+	if !reflect.DeepEqual(s.LaunchedKeys, []string{"comment:5"}) {
+		t.Fatalf("tick 1: LaunchedKeys = %v, want [comment:5]", s.LaunchedKeys)
+	}
+	if n := countAddressReviewLaunches(calls1); n != 1 {
+		t.Fatalf("tick 1: address-review launches = %d, want exactly 1", n)
+	}
+
+	// Tick 2: still unresolved -- no relaunch for the same episode.
+	var calls2 [][]string
+	withCommands(t, []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`, unresolvedThreadFor(5)}, &calls2)
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if n := countAddressReviewLaunches(calls2); n != 0 {
+		t.Fatalf("tick 2: address-review must not relaunch for the same still-unresolved episode: %#v", calls2)
+	}
+	if !reflect.DeepEqual(s.PendingKeys, []string{"comment:5"}) {
+		t.Fatalf("tick 2: PendingKeys = %v, want unchanged [comment:5]", s.PendingKeys)
+	}
+
+	// Tick 3: still unresolved -- still no relaunch, proving the dedup
+	// persists across more than one subsequent tick.
+	var calls3 [][]string
+	withCommands(t, []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`, unresolvedThreadFor(5)}, &calls3)
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if n := countAddressReviewLaunches(calls3); n != 0 {
+		t.Fatalf("tick 3: address-review must not relaunch: %#v", calls3)
+	}
+}
+
+// TestTickReopenLaunchFailureRetriesNextTickAndPreservesReopenState is the
+// Test Strategy's "launch failure on a reopened key" case: the reopen is
+// still recorded into PendingKeys (and out of AddressedKeys) even though the
+// address-review launch itself fails -- "merge safety must not depend on
+// launch success" (Decision 3) -- LaunchedKeys stays unmarked so the very
+// next tick retries the launch.
+func TestTickReopenLaunchFailureRetriesNextTickAndPreservesReopenState(t *testing.T) {
+	pr := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"sha1","closingIssuesReferences":[],"url":"https://example/pr/42"}`
+	s := State{
+		PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60,
+		LastHeadSHA:   "sha1",
+		AddressedKeys: []string{"comment:5"},
+	}
+
+	responses := []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`, unresolvedThreadFor(5)}
+	var calls [][]string
+	originalCommand := command
+	originalExecGh := execGh
+	i := 0
+	execGh = func(args ...string) (string, string, error) {
+		calls = append(calls, append([]string{"gh"}, args...))
+		if i >= len(responses) {
+			return "", "", fmt.Errorf("unexpected command: %s", strings.Join(args, " "))
+		}
+		out := responses[i]
+		i++
+		return out, "", nil
+	}
+	command = func(name string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string{name}, args...))
+		return []byte("boom"), errors.New("exit status 1")
+	}
+	t.Cleanup(func() {
+		command = originalCommand
+		execGh = originalExecGh
+	})
+
+	if _, _, err := tick(&s); err == nil {
+		t.Fatal("tick: err = nil, want the address-review launch failure for the reopened key to surface as a tick error")
+	}
+	if !reflect.DeepEqual(s.PendingKeys, []string{"comment:5"}) {
+		t.Fatalf("PendingKeys = %v, want [comment:5]: merge safety must record the reopen even though the launch failed", s.PendingKeys)
+	}
+	if len(s.AddressedKeys) != 0 {
+		t.Fatalf("AddressedKeys = %v, want empty: the reopened key must leave AddressedKeys regardless of launch success", s.AddressedKeys)
+	}
+	if len(s.LaunchedKeys) != 0 {
+		t.Fatalf("LaunchedKeys = %v, want empty: a failed launch must not mark the key as launched, so the next tick retries", s.LaunchedKeys)
+	}
+
+	// Next tick: LaunchedKeys is still empty, so PendingKeys \ LaunchedKeys
+	// still contains comment:5 -- retry the launch, this time succeeding.
+	var calls2 [][]string
+	withCommands(t, []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`, unresolvedThreadFor(5)}, &calls2)
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if n := countAddressReviewLaunches(calls2); n != 1 {
+		t.Fatalf("retry tick: address-review launches = %d, want exactly 1 (the retried launch for the still-undelivered episode)", n)
+	}
+	if !reflect.DeepEqual(s.LaunchedKeys, []string{"comment:5"}) {
+		t.Fatalf("LaunchedKeys = %v, want [comment:5] after the retried launch succeeds", s.LaunchedKeys)
+	}
+}
+
+// TestLoadMigratesSchema1SeedsLaunchedKeysFromPendingKeys is AC 6's restart
+// case: a legacy schema-1 state file (no LaunchedKeys field at all) must
+// have LaunchedKeys seeded from its existing PendingKeys on load, and
+// SchemaVersion bumped to 2 -- so upgrading a supervisor with in-flight
+// feedback does not fire one spurious address-review launch for work that
+// was already dispatched under the old schema.
+func TestLoadMigratesSchema1SeedsLaunchedKeysFromPendingKeys(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	saved := State{
+		SchemaVersion: 1,
+		PR:            "42",
+		Repo:          "o/r",
+		PendingKeys:   []string{"comment:5", "review:10"},
+	}
+	if err := save(path, saved); err != nil {
+		t.Fatal(err)
+	}
+	got := load(path)
+	if got.SchemaVersion != 2 {
+		t.Fatalf("SchemaVersion = %d, want migrated to 2", got.SchemaVersion)
+	}
+	if !reflect.DeepEqual(got.LaunchedKeys, []string{"comment:5", "review:10"}) {
+		t.Fatalf("LaunchedKeys = %v, want seeded from PendingKeys %v so upgrading mid-episode does not fire a spurious relaunch", got.LaunchedKeys, saved.PendingKeys)
+	}
+}
+
+// TestTickAfterSchemaMigrationDoesNotRelaunchAlreadyPendingKey is the
+// tick-level continuation of the schema-1 migration: immediately after a
+// legacy restart, a tick observing the same still-unresolved pending key
+// must not fire a spurious address-review launch, and the hold itself must
+// reproduce purely from persisted state (formerly
+// TestPendingFeedbackSurvivesRestart's assertion, folded in here since both
+// exercise the exact same schema-1-restart-then-tick shape).
+func TestTickAfterSchemaMigrationDoesNotRelaunchAlreadyPendingKey(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
 	saved := State{
@@ -674,27 +854,97 @@ func TestPendingFeedbackSurvivesRestart(t *testing.T) {
 		Agent:               "codex",
 		IntervalSeconds:     60,
 		CurrentDelaySeconds: 60,
-		LastHeadSHA:         "old-sha",
+		LastHeadSHA:         "sha1",
 		PendingKeys:         []string{"comment:5"},
 		PendingCommentAt:    "2026-01-01T00:00:00Z",
-		PendingHeadSHA:      "old-sha",
+		PendingHeadSHA:      "sha1",
 	}
 	if err := save(path, saved); err != nil {
 		t.Fatal(err)
 	}
-
 	restarted := load(path)
-	if restarted.SchemaVersion != 1 || !reflect.DeepEqual(restarted.PendingKeys, []string{"comment:5"}) {
-		t.Fatalf("restarted state = %#v, want the persisted SchemaVersion/PendingKeys to round-trip", restarted)
+	if !reflect.DeepEqual(restarted.LaunchedKeys, []string{"comment:5"}) {
+		t.Fatalf("test setup: restarted.LaunchedKeys = %v, want [comment:5] seeded by the migration", restarted.LaunchedKeys)
 	}
 
+	pr := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"sha1","closingIssuesReferences":[],"url":"https://example/pr/42"}`
 	var calls [][]string
-	pr := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"new-sha","closingIssuesReferences":[],"url":"https://example/pr/42"}`
 	withCommands(t, []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`, unresolvedThreadFor(5)}, &calls)
 	if _, _, err := tick(&restarted); err != nil {
 		t.Fatal(err)
 	}
+	if n := countAddressReviewLaunches(calls); n != 0 {
+		t.Fatalf("a legacy schema-1 restart migrating PendingKeys into LaunchedKeys must not fire a spurious relaunch on the very next tick: %#v", calls)
+	}
 	if !reflect.DeepEqual(restarted.PendingKeys, []string{"comment:5"}) {
 		t.Fatalf("PendingKeys = %v, want the hold to reproduce from persisted state alone: [comment:5]", restarted.PendingKeys)
+	}
+}
+
+// TestSchema2StateRoundTripsReopenAndLaunchDedupMarker is AC 6's other
+// restart case: a schema-2 state file mid-episode -- a reopened key already
+// pending AND already launched -- must round-trip both PendingKeys and
+// LaunchedKeys independently through save/load.
+func TestSchema2StateRoundTripsReopenAndLaunchDedupMarker(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	want := State{
+		SchemaVersion: 2,
+		PR:            "42",
+		Repo:          "o/r",
+		PendingKeys:   []string{"comment:5"},
+		LaunchedKeys:  []string{"comment:5"},
+	}
+	if err := save(path, want); err != nil {
+		t.Fatal(err)
+	}
+	got := load(path)
+	if got.SchemaVersion != 2 {
+		t.Fatalf("SchemaVersion = %d, want 2 (unchanged, already current)", got.SchemaVersion)
+	}
+	if !reflect.DeepEqual(got.PendingKeys, want.PendingKeys) {
+		t.Fatalf("PendingKeys = %v, want %v", got.PendingKeys, want.PendingKeys)
+	}
+	if !reflect.DeepEqual(got.LaunchedKeys, want.LaunchedKeys) {
+		t.Fatalf("LaunchedKeys = %v, want %v: the launch-dedup marker must survive a restart independent of the reopen itself", got.LaunchedKeys, want.LaunchedKeys)
+	}
+}
+
+// TestTickAfterSchema2RestartDoesNotRelaunchAlreadyLaunchedReopen is the
+// tick-level continuation of the schema-2 round trip: a restart carrying a
+// mid-episode LaunchedKeys marker must not relaunch on the next tick, and
+// the reopen itself must survive the restart unchanged.
+func TestTickAfterSchema2RestartDoesNotRelaunchAlreadyLaunchedReopen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	saved := State{
+		SchemaVersion:       2,
+		PR:                  "42",
+		Repo:                "o/r",
+		Agent:               "codex",
+		IntervalSeconds:     60,
+		CurrentDelaySeconds: 60,
+		LastHeadSHA:         "sha1",
+		PendingKeys:         []string{"comment:5"},
+		LaunchedKeys:        []string{"comment:5"},
+		PendingCommentAt:    "2026-01-01T00:00:00Z",
+		PendingHeadSHA:      "sha1",
+	}
+	if err := save(path, saved); err != nil {
+		t.Fatal(err)
+	}
+	restarted := load(path)
+
+	pr := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"sha1","closingIssuesReferences":[],"url":"https://example/pr/42"}`
+	var calls [][]string
+	withCommands(t, []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`, unresolvedThreadFor(5)}, &calls)
+	if _, _, err := tick(&restarted); err != nil {
+		t.Fatal(err)
+	}
+	if n := countAddressReviewLaunches(calls); n != 0 {
+		t.Fatalf("a restart carrying a mid-episode LaunchedKeys marker must not relaunch on the next tick: %#v", calls)
+	}
+	if !reflect.DeepEqual(restarted.PendingKeys, []string{"comment:5"}) {
+		t.Fatalf("PendingKeys = %v, want unchanged [comment:5] across the restart", restarted.PendingKeys)
 	}
 }

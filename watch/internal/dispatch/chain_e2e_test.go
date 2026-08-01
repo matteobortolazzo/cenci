@@ -324,16 +324,19 @@ func TestAutonomousChain_PositiveEndToEnd(t *testing.T) {
 	}
 
 	// babysit's launch() has three call sites: ci-repair and babysit-attention
-	// (both gated on a FAILING check, babysit.go:279,291 -- never applicable
-	// here, CI is pass-only) and address-review (babysit.go:325), which fires
-	// whenever detectNewFeedbackKeys sees ANY first-time review/comment
-	// activity, independent of the automerge decision itself. Phase F seeds a
-	// fresh PR's first-ever review history (a CHANGES_REQUESTED superseded by
-	// an APPROVED), so exactly that one address-review notification is
-	// genuinely expected on the first tick -- never a second one on the
-	// reload tick, since the reviews are already recorded in AddressedKeys by
-	// then, and never ci-repair/babysit-attention.
-	wantInvocations := []string{"run address-review 103 --agent claude"}
+	// (both gated on a FAILING check, babysit.go -- never applicable here, CI
+	// is pass-only) and address-review, whose #885 launch trigger
+	// (PendingKeys \ LaunchedKeys) is evaluated only *after*
+	// reconcileFeedback's own end-of-tick resolution pass has run, so it
+	// fires only for a key still genuinely pending once that pass completes
+	// -- never for a key that both first appears and resolves within the
+	// very same tick. Phase F seeds a fresh PR's first-ever review history (a
+	// CHANGES_REQUESTED immediately superseded by the same reviewer's later
+	// APPROVED, both already on GitHub by babysit's very first tick), so the
+	// review resolves before the launch trigger is ever evaluated -- zero
+	// address-review invocations are expected on either tick here, and never
+	// ci-repair/babysit-attention either.
+	wantInvocations := []string{}
 	if invs := chainCenciInvocations(t, h.cenciLogPath); !slices.Equal(invs, wantInvocations) {
 		t.Fatalf("phase F: cenci self-exec invocations = %v, want exactly %v", invs, wantInvocations)
 	}

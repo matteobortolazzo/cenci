@@ -447,7 +447,7 @@ func TestFetchReviewThreadsFailsClosedOnGraphQLErrors(t *testing.T) {
 	})
 }
 
-// -- reconcilePendingFeedback: the lazy GraphQL gate (#850) -------------------
+// -- reconcileFeedback: the lazy GraphQL gate (#850) --------------------------
 
 // TestReconcileSkipsGraphQLWhenOnlyReviewKeysPending pins the lazy gate: a
 // PendingKeys set containing only "review:"-prefixed keys must resolve
@@ -465,7 +465,7 @@ func TestReconcileSkipsGraphQLWhenOnlyReviewKeysPending(t *testing.T) {
 	s := &State{Repo: "o/r", PR: "42", PendingKeys: []string{"review:10"}, PendingCommentAt: "2026-01-01T00:00:00Z", PendingHeadSHA: "abc"}
 	reviews := []review{{ID: 10, State: "DISMISSED", SubmittedAt: "2026-01-02T00:00:00Z", User: login("alice")}}
 
-	verdict := reconcilePendingFeedback(s, reviews, true)
+	verdict := reconcileFeedback(s, reviews, true)
 
 	if verdict.Hold != "" {
 		t.Fatalf("verdict.Hold = %q, want empty (the dismissed review resolves cleanly)", verdict.Hold)
@@ -486,17 +486,343 @@ func TestReconcileSkipsGraphQLWhenOnlyReviewKeysPending(t *testing.T) {
 
 // TestReconcileNoPendingKeysLeavesLastCommentAtUnchanged pins the #850
 // security-review guard: with no PendingKeys ever pending (the common,
-// well-formed case), reconcilePendingFeedback must not touch LastCommentAt
+// well-formed case), reconcileFeedback must not touch LastCommentAt
 // at all -- only actually resolving something this tick (len(resolved) > 0)
 // may advance it, preventing a stray/inconsistent PendingCommentAt from
 // silently overwriting LastCommentAt when nothing was reconciled.
 func TestReconcileNoPendingKeysLeavesLastCommentAtUnchanged(t *testing.T) {
 	s := &State{Repo: "o/r", PR: "42", LastCommentAt: "2025-12-01T00:00:00Z"}
-	verdict := reconcilePendingFeedback(s, nil, true)
+	verdict := reconcileFeedback(s, nil, true)
 	if verdict.Hold != "" {
 		t.Fatalf("verdict.Hold = %q, want empty", verdict.Hold)
 	}
 	if s.LastCommentAt != "2025-12-01T00:00:00Z" {
 		t.Fatalf("LastCommentAt = %q, want unchanged: nothing was pending or resolved this tick", s.LastCommentAt)
+	}
+}
+
+// -- #885: reclassify all known feedback (pending AND previously addressed) --
+//
+// classifyFeedback generalizes partitionPendingKeys/classifyPendingKey to
+// also reclassify AddressedKeys against fresh GitHub state: a previously
+// resolved key that GitHub now reports outstanding again returns to pending
+// under its own distinct reasonFeedbackReopened hold (Q2), while an absent
+// addressed key holds under the existing reasonReviewStateUnknown without
+// being treated as reopened (Q1's fail-closed extension). classifyFeedback
+// itself stays pure and I/O-free (feedback.go's existing discipline), so
+// this whole matrix is testable without any `gh` scripting.
+
+// TestLatestEffectiveReviewSameTimestampTieBreakHigherIDWins is AC 4: two
+// same-reviewer reviews sharing an identical SubmittedAt must resolve to the
+// higher-database-ID review, independent of which order the API happens to
+// return them in -- a naive ">" comparison on SubmittedAt alone leaves same-
+// timestamp ties resolved by slice-scan order, which is not guaranteed
+// stable across requests.
+func TestLatestEffectiveReviewSameTimestampTieBreakHigherIDWins(t *testing.T) {
+	ts := "2026-01-01T00:00:00Z"
+	lower := review{ID: 10, State: "CHANGES_REQUESTED", SubmittedAt: ts, User: login("alice")}
+	higher := review{ID: 11, State: "APPROVED", SubmittedAt: ts, User: login("alice")}
+	for _, tc := range []struct {
+		name    string
+		reviews []review
+	}{
+		{"lower ID first in the slice", []review{lower, higher}},
+		{"higher ID first in the slice", []review{higher, lower}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := latestEffectiveReview(tc.reviews, "alice")
+			if !ok {
+				t.Fatal("latestEffectiveReview: ok = false, want true")
+			}
+			if got.ID != 11 || got.State != "APPROVED" {
+				t.Fatalf("latestEffectiveReview = %+v, want the higher-ID review (ID 11, APPROVED) regardless of input order", got)
+			}
+		})
+	}
+}
+
+// TestLatestEffectiveReviewSameTimestampTieBreakIndependentOfWhichStateHasHigherID
+// pins that the tie-break is purely "higher database ID wins", not an
+// accidental "APPROVED beats CHANGES_REQUESTED" shortcut: the case where the
+// higher-ID review is itself CHANGES_REQUESTED must select that one too,
+// again independent of input ordering.
+func TestLatestEffectiveReviewSameTimestampTieBreakIndependentOfWhichStateHasHigherID(t *testing.T) {
+	ts := "2026-01-01T00:00:00Z"
+	for _, tc := range []struct {
+		name      string
+		a, b      review
+		wantID    int64
+		wantState string
+	}{
+		{
+			"higher ID is APPROVED, wins over the lower-ID CHANGES_REQUESTED",
+			review{ID: 10, State: "CHANGES_REQUESTED", SubmittedAt: ts, User: login("alice")},
+			review{ID: 11, State: "APPROVED", SubmittedAt: ts, User: login("alice")},
+			11, "APPROVED",
+		},
+		{
+			"higher ID is CHANGES_REQUESTED, wins over the lower-ID APPROVED",
+			review{ID: 20, State: "APPROVED", SubmittedAt: ts, User: login("bob")},
+			review{ID: 21, State: "CHANGES_REQUESTED", SubmittedAt: ts, User: login("bob")},
+			21, "CHANGES_REQUESTED",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, order := range [][]review{{tc.a, tc.b}, {tc.b, tc.a}} {
+				got, ok := latestEffectiveReview(order, tc.a.User.Login)
+				if !ok {
+					t.Fatal("latestEffectiveReview: ok = false, want true")
+				}
+				if got.ID != tc.wantID || got.State != tc.wantState {
+					t.Fatalf("latestEffectiveReview(order=%v) = %+v, want ID=%d State=%s", order, got, tc.wantID, tc.wantState)
+				}
+			}
+		})
+	}
+}
+
+// TestClassifyFeedbackReopensAddressedCommentKey is AC 1/AC 2: a
+// previously-addressed "comment:"-prefixed key whose fresh GraphQL read now
+// reports isResolved:false moves to Reopened under the distinct
+// reasonFeedbackReopened hold (Q2 rejects collapsing this into the ordinary
+// reasonReviewPending), carrying the reopened key's name in Detail.
+func TestClassifyFeedbackReopensAddressedCommentKey(t *testing.T) {
+	fs := feedbackState{ThreadResolved: map[int64]bool{5: false}, ReviewsComplete: true}
+	got := classifyFeedback(nil, []string{"comment:5"}, fs)
+	if !reflect.DeepEqual(got.Reopened, []string{"comment:5"}) {
+		t.Fatalf("Reopened = %v, want [comment:5]", got.Reopened)
+	}
+	if got.Hold != reasonFeedbackReopened {
+		t.Fatalf("Hold = %q, want %q", got.Hold, reasonFeedbackReopened)
+	}
+	if !strings.Contains(got.Detail, "comment:5") {
+		t.Fatalf("Detail = %q, want it to name the reopened key comment:5", got.Detail)
+	}
+	if len(got.Resolved) != 0 {
+		t.Fatalf("Resolved = %v, want empty", got.Resolved)
+	}
+	if len(got.Pending) != 0 {
+		t.Fatalf("Pending = %v, want empty: the reopened key came from the addressed set, not the pending set", got.Pending)
+	}
+}
+
+// TestClassifyFeedbackAddressedKeyAbsentHoldsAsUnknownNotReopened is Q1's
+// fail-closed extension: an addressed key GitHub no longer reports at all
+// (deleted comment, force-push-purged thread) holds under the existing
+// reasonReviewStateUnknown -- absence is never proof of resolution, but it
+// is also never proof of a reopen, so the key must not appear in Reopened
+// either. It stays addressed (classifyFeedback reports nothing for it at
+// all -- the caller leaves it untouched in AddressedKeys).
+func TestClassifyFeedbackAddressedKeyAbsentHoldsAsUnknownNotReopened(t *testing.T) {
+	fs := feedbackState{ThreadResolved: map[int64]bool{}, ReviewsComplete: true}
+	got := classifyFeedback(nil, []string{"comment:5"}, fs)
+	if len(got.Reopened) != 0 {
+		t.Fatalf("Reopened = %v, want empty: an absent thread must never be treated as reopened", got.Reopened)
+	}
+	if got.Hold != reasonReviewStateUnknown {
+		t.Fatalf("Hold = %q, want %q", got.Hold, reasonReviewStateUnknown)
+	}
+	if !strings.Contains(got.Detail, "comment:5") {
+		t.Fatalf("Detail = %q, want it to identify the offending key (comment:5)", got.Detail)
+	}
+}
+
+// TestClassifyFeedbackReopensAddressedReviewKey pins the review: half of
+// AC 1/AC 2: an addressed "review:"-prefixed key whose reviewer has since
+// submitted a fresh CHANGES_REQUESTED (the new latest effective review,
+// superseding the earlier resolution) also reopens.
+func TestClassifyFeedbackReopensAddressedReviewKey(t *testing.T) {
+	fs := feedbackState{
+		Reviews: []review{
+			{ID: 10, State: "CHANGES_REQUESTED", SubmittedAt: "2026-01-01T00:00:00Z", User: login("alice")},
+			{ID: 12, State: "CHANGES_REQUESTED", SubmittedAt: "2026-01-03T00:00:00Z", User: login("alice")},
+		},
+		ReviewsComplete: true,
+	}
+	got := classifyFeedback(nil, []string{"review:10"}, fs)
+	if !reflect.DeepEqual(got.Reopened, []string{"review:10"}) {
+		t.Fatalf("Reopened = %v, want [review:10]", got.Reopened)
+	}
+	if got.Hold != reasonFeedbackReopened {
+		t.Fatalf("Hold = %q, want %q", got.Hold, reasonFeedbackReopened)
+	}
+}
+
+// TestClassifyFeedbackPrecedenceOrder pins the Implementation Order's exact
+// hold precedence: classification-level holds (reasonReviewStateUnknown /
+// reasonFeedbackUnsupported), scanning the pending set fully before the
+// addressed set, always beat reasonFeedbackReopened -- even when a reopened
+// key is discovered earlier in scan order than the unknown/unsupported one.
+// Only once no unknown/unsupported key exists anywhere does a reopened key
+// actually win the overall Hold.
+func TestClassifyFeedbackPrecedenceOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		pending, addressed []string
+		fs                 feedbackState
+		wantHold           string
+	}{
+		{
+			"an unknown key in the pending set beats a reopened key in the addressed set",
+			[]string{"comment:1"},
+			[]string{"comment:2"},
+			feedbackState{ThreadResolved: map[int64]bool{2: false}, ReviewsComplete: true}, // comment:1 absent -> unknown; comment:2 reopened
+			reasonReviewStateUnknown,
+		},
+		{
+			"an unsupported key in the pending set beats a reopened key in the addressed set",
+			[]string{"label:1"},
+			[]string{"comment:2"},
+			feedbackState{ThreadResolved: map[int64]bool{2: false}, ReviewsComplete: true},
+			reasonFeedbackUnsupported,
+		},
+		{
+			"an unknown key in the addressed set beats a reopened key found earlier in addressed scan order",
+			nil,
+			[]string{"comment:2", "comment:3"}, // comment:2 reopens; comment:3 is absent (unknown)
+			feedbackState{ThreadResolved: map[int64]bool{2: false}, ReviewsComplete: true}, // comment:3 absent from the map entirely
+			reasonReviewStateUnknown,
+		},
+		{
+			"with no unknown/unsupported key anywhere, a reopened key wins the overall hold",
+			nil,
+			[]string{"comment:2"},
+			feedbackState{ThreadResolved: map[int64]bool{2: false}, ReviewsComplete: true},
+			reasonFeedbackReopened,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyFeedback(tc.pending, tc.addressed, tc.fs)
+			if got.Hold != tc.wantHold {
+				t.Fatalf("Hold = %q, want %q", got.Hold, tc.wantHold)
+			}
+		})
+	}
+}
+
+// TestClassifyFeedbackMixedState is AC 5: pending resolved/still-pending,
+// addressed resolved(no-op)/reopened/unknown all in a single pass, asserting
+// the exact Resolved/Pending/Reopened lists (not just the overall Hold) and
+// that the deterministic output order is "original pending order, then
+// reopened in addressed order" (Implementation Order step 2).
+func TestClassifyFeedbackMixedState(t *testing.T) {
+	pending := []string{"comment:1", "comment:2", "review:10"}
+	addressed := []string{"comment:5", "comment:6", "review:20"}
+	fs := feedbackState{
+		ThreadResolved: map[int64]bool{
+			1: true,  // pending -> resolves
+			2: false, // pending -> stays pending
+			5: false, // addressed -> reopens
+			// 6 intentionally absent -> addressed -> unknown
+		},
+		Reviews: []review{
+			{ID: 10, State: "DISMISSED", SubmittedAt: "2026-01-01T00:00:00Z", User: login("carol")}, // pending -> resolves
+			{ID: 20, State: "CHANGES_REQUESTED", SubmittedAt: "2026-01-01T00:00:00Z", User: login("dave")},
+			{ID: 21, State: "CHANGES_REQUESTED", SubmittedAt: "2026-01-03T00:00:00Z", User: login("dave")}, // supersedes 20, still blocking -> addressed review:20 reopens
+		},
+		ReviewsComplete: true,
+	}
+	got := classifyFeedback(pending, addressed, fs)
+
+	wantResolved := []string{"comment:1", "review:10"}
+	if !reflect.DeepEqual(got.Resolved, wantResolved) {
+		t.Errorf("Resolved = %v, want %v", got.Resolved, wantResolved)
+	}
+	wantPending := []string{"comment:2"}
+	if !reflect.DeepEqual(got.Pending, wantPending) {
+		t.Errorf("Pending = %v, want %v", got.Pending, wantPending)
+	}
+	wantReopened := []string{"comment:5", "review:20"}
+	if !reflect.DeepEqual(got.Reopened, wantReopened) {
+		t.Errorf("Reopened = %v, want %v", got.Reopened, wantReopened)
+	}
+	if got.Hold != reasonReviewStateUnknown {
+		t.Errorf("Hold = %q, want %q (comment:6 is absent from the addressed set, which beats the two reopened keys)", got.Hold, reasonReviewStateUnknown)
+	}
+	if !strings.Contains(got.Detail, "comment:6") {
+		t.Errorf("Detail = %q, want it to identify the offending key (comment:6)", got.Detail)
+	}
+}
+
+// TestClassifyFeedbackWithNoAddressedKeysMatchesPendingOnlySemantics pins
+// the Implementation Order's explicit backward-compatibility requirement:
+// "Pending-set keys keep today's semantics exactly." With an empty
+// addressed set, classifyFeedback's Resolved/Pending/Hold output must match
+// the pre-#885 partitionPendingKeys behavior exactly (compare
+// TestPartitionPendingKeysMixedState above).
+func TestClassifyFeedbackWithNoAddressedKeysMatchesPendingOnlySemantics(t *testing.T) {
+	pending := []string{"comment:1", "comment:2", "review:10"}
+	fs := feedbackState{
+		ThreadResolved:  map[int64]bool{1: true, 2: false},
+		Reviews:         []review{{ID: 10, State: "DISMISSED", SubmittedAt: "2026-01-01T00:00:00Z", User: login("bob")}},
+		ReviewsComplete: true,
+	}
+	got := classifyFeedback(pending, nil, fs)
+	wantResolved := []string{"comment:1", "review:10"}
+	wantPending := []string{"comment:2"}
+	if !reflect.DeepEqual(got.Resolved, wantResolved) {
+		t.Errorf("Resolved = %v, want %v", got.Resolved, wantResolved)
+	}
+	if !reflect.DeepEqual(got.Pending, wantPending) {
+		t.Errorf("Pending = %v, want %v", got.Pending, wantPending)
+	}
+	if len(got.Reopened) != 0 {
+		t.Errorf("Reopened = %v, want empty: no addressed set was passed", got.Reopened)
+	}
+	if got.Hold != "" {
+		t.Errorf("Hold = %q, want empty", got.Hold)
+	}
+}
+
+// TestReconcileFeedbackFetchFailureLeavesAddressedKeysUnmovedInEitherDirection
+// is the Test Strategy's "truncated / unreadable thread read with addressed
+// keys present" case: a fetch-level failure (malformed body, or a
+// truncated traversal) must hold under its existing distinct reason and
+// never move any key in either direction -- an addressed key must not
+// spuriously reopen, and a pending key must not spuriously resolve, on an
+// unreliable read.
+func TestReconcileFeedbackFetchFailureLeavesAddressedKeysUnmovedInEitherDirection(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		body     string
+		wantHold string
+	}{
+		{"unreadable: malformed GraphQL body", "not json", reasonFeedbackUnreadable},
+		{
+			"truncated: a thread's comments.totalCount exceeds its fetched node count",
+			threadPage(false, "", threadNode(false, 2, 5)),
+			reasonFeedbackTruncated,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls [][]string
+			scriptedGraphQLCommand(t, []string{tc.body}, &calls)
+			s := &State{Repo: "o/r", PR: "42", PendingKeys: []string{"comment:1"}, AddressedKeys: []string{"comment:5"}}
+			verdict := reconcileFeedback(s, nil, true)
+			if verdict.Hold != tc.wantHold {
+				t.Fatalf("verdict.Hold = %q, want %q", verdict.Hold, tc.wantHold)
+			}
+			if !reflect.DeepEqual(s.PendingKeys, []string{"comment:1"}) {
+				t.Fatalf("PendingKeys = %v, want unchanged [comment:1]", s.PendingKeys)
+			}
+			if !reflect.DeepEqual(s.AddressedKeys, []string{"comment:5"}) {
+				t.Fatalf("AddressedKeys = %v, want unchanged [comment:5]: a fetch failure must never reopen or resolve anything", s.AddressedKeys)
+			}
+		})
+	}
+}
+
+// TestReconcileFeedbackGraphQLGateWidenedToAddressedCommentKeys is Q3: the
+// lazy GraphQL thread fetch must fire whenever ANY known key -- pending or
+// addressed -- is a "comment:"-prefixed key, not just a pending one, so
+// reopen detection works even when PendingKeys itself holds only
+// "review:"-prefixed entries (or is empty).
+func TestReconcileFeedbackGraphQLGateWidenedToAddressedCommentKeys(t *testing.T) {
+	var calls [][]string
+	scriptedGraphQLCommand(t, []string{threadPage(false, "", threadNode(true, 1, 5))}, &calls)
+	s := &State{Repo: "o/r", PR: "42", PendingKeys: nil, AddressedKeys: []string{"comment:5"}}
+	reconcileFeedback(s, nil, true)
+	if len(calls) == 0 {
+		t.Fatal("reconcileFeedback issued no GraphQL call: the lazy gate must fire for an addressed comment: key too, not just a pending one")
 	}
 }

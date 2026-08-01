@@ -1047,7 +1047,7 @@ func TestTickAutomergeHeldOnRepairOrReviewPending(t *testing.T) {
 		name  string
 		setup func(*State)
 		// extraScript is the lazy GraphQL thread fetch (#850): reconcile
-		// runs in tick() via reconcilePendingFeedback unconditionally, right
+		// runs in tick() via reconcileFeedback unconditionally, right
 		// before runAutomerge is even called -- i.e. before runAutomerge's
 		// own labels fetch -- but only the "review feedback pending"
 		// subtest's "comment:1" PendingKeys entry actually triggers it.
@@ -1240,7 +1240,7 @@ func TestTickFeedbackHoldsAutomerge(t *testing.T) {
 			var calls [][]string
 			// The lazy GraphQL thread fetch (tc.extraScript, when a
 			// comment: key is pending) runs in tick() via
-			// reconcilePendingFeedback immediately before runAutomerge is
+			// reconcileFeedback immediately before runAutomerge is
 			// called -- i.e. before runAutomerge's own labels fetch, which
 			// must come last in the script.
 			script := []scriptedCall{
@@ -1566,7 +1566,10 @@ func TestTickRecordsKillSwitchReasonEvenWhenUpstreamReadAlsoFails(t *testing.T) 
 // ever runs) during an automerge-enabled tick must still persist and log
 // exactly one automerge decision -- under reasonWorkflowLaunchFailed --
 // before tick returns the underlying error, rather than silently leaving a
-// stale decision from the previous tick displayed (Decision 7).
+// stale decision from the previous tick displayed (Decision 7). #885 moves
+// the address-review launch after reconcileFeedback's own end-of-tick pass,
+// so the new comment:7 key's lazy GraphQL thread fetch (the 5th scripted gh
+// response) now runs before the launch is even attempted.
 func TestTickRecordsAutomergeHoldWhenAddressReviewLaunchFails(t *testing.T) {
 	withFleetAutomergeEnabled(t, true)
 	var calls [][]string
@@ -1575,6 +1578,7 @@ func TestTickRecordsAutomergeHoldWhenAddressReviewLaunchFails(t *testing.T) {
 		`[]`,
 		`[{"id":7,"updated_at":"2026-01-02T00:00:00Z","user":{"login":"reviewer"}}]`,
 		`[]`,
+		unresolvedThreadFor(7),
 	}
 	originalCommand := command
 	originalExecGh := execGh
@@ -1755,5 +1759,333 @@ func TestTickHoldsAutomergeWhenCommentsDetectionReadPossiblyTruncated(t *testing
 		if len(c) > 2 && c[1] == "pr" && c[2] == "merge" {
 			t.Fatalf("gh pr merge must not be issued while the comments detection read is possibly truncated: %#v", calls)
 		}
+	}
+}
+
+// -- #885: pre-merge revalidation of ALL known feedback (AC 7) ---------------
+//
+// The pre-merge recheck (Decision 9) must reread authoritative GraphQL
+// thread state -- not carry the first pass's already-computed FeedbackHold
+// -- and must do so for previously-addressed keys too, per Q3's widened
+// lazy gate ("any comment: key in pending union addressed"). Every case
+// below sets an addressed "comment:"-prefixed key on State so tick's own
+// first-pass reconcile ALSO fires the widened gate once (hence
+// automergeFirstPassScriptWithFeedbackThread, not the bare
+// automergeFirstPassScript), then asserts the recheck's own independent
+// GraphQL read -- not the first pass's verdict -- decides the final hold.
+// Every subtest asserts the exact AutomergeReason (watch/docs/error-
+// handling.md #446) and that no `gh pr merge` call ever appears in calls
+// (AC 7).
+
+// automergeFirstPassScriptWithFeedbackThread extends automergeFirstPassScript
+// with the widened GraphQL gate's thread-resolution call (Q3): when State
+// carries an addressed "comment:"-prefixed key, tick's own reconcileFeedback
+// call fires the lazy GraphQL fetch immediately after tick's own reviews
+// fetch (position 4), before runAutomerge's labels fetch -- inserted here so
+// first-pass evidence can carry a real addressed comment: key through to the
+// pre-merge recheck.
+func automergeFirstPassScriptWithFeedbackThread(thread string) []scriptedCall {
+	return []scriptedCall{
+		{out: automergeEligiblePR()},
+		{out: `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`},
+		{out: `[]`},
+		{out: `[]`},
+		{out: thread},
+		{out: `{"labels":[{"name":"automerge:ok"}]}`},
+		{out: `{"automerge":{"maxChangedFiles":10,"maxDiffLines":500,"mergeMethod":"squash"}}`},
+		{out: `{"squash":true,"merge":false,"rebase":true}`},
+		{out: queueProbeResponse(false, false, "abc")},
+	}
+}
+
+// automergeRecheckScriptWithFeedbackThreadPages mirrors automergeRecheckScript
+// but inserts the pre-merge revalidation's own fresh GraphQL thread call(s)
+// (this ticket's core change) between the recheck's reviews re-fetch and its
+// labels re-fetch -- the same slot tick's own reconcileFeedback uses.
+// threadPages may hold more than one entry to model a multi-page (or
+// page-cap-exhausted) GraphQL traversal.
+func automergeRecheckScriptWithFeedbackThreadPages(pr, checks, comments, reviews string, threadPages []string, labels, policy, queue string) []scriptedCall {
+	calls := []scriptedCall{{out: pr}, {out: checks}, {out: comments}, {out: reviews}}
+	for _, p := range threadPages {
+		calls = append(calls, scriptedCall{out: p})
+	}
+	calls = append(calls, scriptedCall{out: labels}, scriptedCall{out: policy}, scriptedCall{out: queue})
+	return calls
+}
+
+// automergeRecheckScriptWithFeedbackThread is the single-page convenience
+// wrapper around automergeRecheckScriptWithFeedbackThreadPages.
+func automergeRecheckScriptWithFeedbackThread(pr, checks, comments, reviews, thread, labels, policy, queue string) []scriptedCall {
+	return automergeRecheckScriptWithFeedbackThreadPages(pr, checks, comments, reviews, []string{thread}, labels, policy, queue)
+}
+
+// TestTickPreMergeRecheckRevalidatesFeedbackReopenedSinceFirstPass is AC 1 /
+// AC 3 -- the plan's explicit "this case must fail against the current
+// carry-over implementation" regression: the first pass sees the addressed
+// thread still resolved (so it proceeds to the recheck), but the recheck's
+// own independent GraphQL read reports it isResolved:false since. The
+// pre-merge boundary must hold under the fresh reasonFeedbackReopened
+// verdict, not silently merge on the first pass's already-stale clean
+// verdict.
+func TestTickPreMergeRecheckRevalidatesFeedbackReopenedSinceFirstPass(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	script := automergeFirstPassScriptWithFeedbackThread(resolvedThreadFor(5)) // first pass: thread still resolved
+	script = append(script, automergeRecheckScriptWithFeedbackThread(
+		automergeEligiblePR(),
+		`[{"bucket":"pass","name":"test","state":"SUCCESS"}]`,
+		`[]`,
+		`[]`,
+		unresolvedThreadFor(5), // the recheck's own fresh read: reopened since the first pass
+		`{"labels":[{"name":"automerge:ok"}]}`,
+		`{"automerge":{"maxChangedFiles":10,"maxDiffLines":500,"mergeMethod":"squash"}}`,
+		queueProbeResponse(false, false, "abc"),
+	)...)
+	withScriptedCommands(t, script, &calls)
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900, AddressedKeys: []string{"comment:5"}}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if s.AutomergeReason != reasonFeedbackReopened {
+		t.Fatalf("AutomergeReason = %q, want %q: the pre-merge recheck must reread authoritative thread state, not carry the first pass's already-stale clean verdict", s.AutomergeReason, reasonFeedbackReopened)
+	}
+	if s.AutomergeDecision == "merge" {
+		t.Fatal("AutomergeDecision = \"merge\", want held: the pre-merge recheck found the addressed thread reopened since the first evaluation")
+	}
+	for _, c := range calls {
+		if len(c) > 2 && c[1] == "pr" && c[2] == "merge" {
+			t.Fatalf("gh pr merge must not be issued: the pre-merge recheck found the addressed thread reopened: %#v", calls)
+		}
+	}
+}
+
+// TestTickPreMergeRecheckHoldsWhenAddressedKeyAbsentFromFreshThreadRead pins
+// Q1's fail-closed extension applied at the pre-merge boundary: the
+// recheck's own fresh thread read no longer reports the addressed key at
+// all (deleted comment, force-push-purged thread) -- absence must hold
+// under the existing reasonReviewStateUnknown, never be silently treated as
+// resolved.
+func TestTickPreMergeRecheckHoldsWhenAddressedKeyAbsentFromFreshThreadRead(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	absentThread := threadPage(false, "", threadNode(true, 1, 999)) // an unrelated thread; comment:5 is no longer reported at all
+	script := automergeFirstPassScriptWithFeedbackThread(resolvedThreadFor(5))
+	script = append(script, automergeRecheckScriptWithFeedbackThread(
+		automergeEligiblePR(), `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`,
+		absentThread,
+		`{"labels":[{"name":"automerge:ok"}]}`,
+		`{"automerge":{"maxChangedFiles":10,"maxDiffLines":500,"mergeMethod":"squash"}}`,
+		queueProbeResponse(false, false, "abc"),
+	)...)
+	withScriptedCommands(t, script, &calls)
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900, AddressedKeys: []string{"comment:5"}}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if s.AutomergeReason != reasonReviewStateUnknown {
+		t.Fatalf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonReviewStateUnknown)
+	}
+	for _, c := range calls {
+		if len(c) > 2 && c[1] == "pr" && c[2] == "merge" {
+			t.Fatalf("gh pr merge must not be issued: the recheck found the addressed key absent from a fresh thread read: %#v", calls)
+		}
+	}
+}
+
+// TestTickPreMergeRecheckHoldsOnTruncatedThreadRead covers both truncation
+// shapes at the pre-merge boundary: a per-thread comments.totalCount
+// mismatch, and a page-cap-exhausted traversal that never terminates on a
+// short page -- both must hold under the distinct reasonFeedbackTruncated,
+// never be treated as a complete-but-partial read.
+func TestTickPreMergeRecheckHoldsOnTruncatedThreadRead(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		threadPages []string
+	}{
+		{
+			"totalCount exceeds the fetched node count",
+			[]string{threadPage(false, "", threadNode(false, 2, 5))},
+		},
+		{
+			"page cap exhausted with hasNextPage still true",
+			func() []string {
+				pages := make([]string, maxThreadPages)
+				for i := range pages {
+					pages[i] = threadPage(true, fmt.Sprintf("C%d", i), threadNode(false, 1, 5))
+				}
+				return pages
+			}(),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withFleetAutomergeEnabled(t, true)
+			var calls [][]string
+			script := automergeFirstPassScriptWithFeedbackThread(resolvedThreadFor(5))
+			script = append(script, automergeRecheckScriptWithFeedbackThreadPages(
+				automergeEligiblePR(), `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`,
+				tc.threadPages,
+				`{"labels":[{"name":"automerge:ok"}]}`,
+				`{"automerge":{"maxChangedFiles":10,"maxDiffLines":500,"mergeMethod":"squash"}}`,
+				queueProbeResponse(false, false, "abc"),
+			)...)
+			withScriptedCommands(t, script, &calls)
+
+			s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900, AddressedKeys: []string{"comment:5"}}
+			if _, _, err := tick(&s); err != nil {
+				t.Fatal(err)
+			}
+			if s.AutomergeReason != reasonFeedbackTruncated {
+				t.Fatalf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonFeedbackTruncated)
+			}
+			for _, c := range calls {
+				if len(c) > 2 && c[1] == "pr" && c[2] == "merge" {
+					t.Fatalf("gh pr merge must not be issued: %#v", calls)
+				}
+			}
+		})
+	}
+}
+
+// TestTickPreMergeRecheckHoldsOnUnreadableThreadReadWithFreshConditions pins
+// the plan's explicit merge.go Files-to-Modify instruction: "route a
+// revalidation fetch failure into in.FeedbackHold/FeedbackDetail (so the
+// second evaluation still runs and produces fresh Conditions) rather than
+// the err return path." The recheck's own thread read fails outright
+// (malformed body) -- the pre-merge boundary must still complete a full
+// second evaluateAutomerge pass (a fresh, distinct Conditions set, not the
+// first pass's all-"yes" one, and not the "recheck fetch failed entirely,
+// clear Conditions" path used for a PR-view/checks/comments/reviews-level
+// recheck failure).
+func TestTickPreMergeRecheckHoldsOnUnreadableThreadReadWithFreshConditions(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	script := automergeFirstPassScriptWithFeedbackThread(resolvedThreadFor(5))
+	script = append(script, automergeRecheckScriptWithFeedbackThread(
+		automergeEligiblePR(), `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`,
+		"not json", // the recheck's own thread read fails outright
+		`{"labels":[{"name":"automerge:ok"}]}`,
+		`{"automerge":{"maxChangedFiles":10,"maxDiffLines":500,"mergeMethod":"squash"}}`,
+		queueProbeResponse(false, false, "abc"),
+	)...)
+	withScriptedCommands(t, script, &calls)
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900, AddressedKeys: []string{"comment:5"}}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if s.AutomergeReason != reasonFeedbackUnreadable {
+		t.Fatalf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonFeedbackUnreadable)
+	}
+	if len(s.AutomergeConditions) == 0 {
+		t.Fatal("AutomergeConditions is empty, want a fresh, second-pass Conditions set (the second evaluation still ran)")
+	}
+	found := false
+	for _, c := range s.AutomergeConditions {
+		if c.Key == "review" {
+			found = true
+			if c.Pass {
+				t.Fatalf("condition %q = %+v, want Pass=false: the second pass's own feedback hold must fail this stage", c.Key, c)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("AutomergeConditions = %#v, want a \"review\" stage entry from the fresh second pass", s.AutomergeConditions)
+	}
+	for _, c := range calls {
+		if len(c) > 2 && c[1] == "pr" && c[2] == "merge" {
+			t.Fatalf("gh pr merge must not be issued: %#v", calls)
+		}
+	}
+}
+
+// TestTickPreMergeRecheckHoldsWhenReviewsReadNotProvenComplete pins the
+// Test Strategy's "recheck's reviews read is not proven complete" case: the
+// recheck's own reviews re-fetch (independent of the first pass's) must
+// also be proven complete, not just the first pass's -- a full-page-to-cap
+// reviews read at the pre-merge boundary must hold under
+// reasonReviewsReadTruncated. Unlike the other cases in this section, this
+// does not require an addressed comment: key -- ReviewsComplete is a
+// pre-existing recheck input independent of #885's feedback-reclassification
+// work, pinned here purely as a regression guard through the refactor.
+func TestTickPreMergeRecheckHoldsWhenReviewsReadNotProvenComplete(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	script := automergeFirstPassScript() // no addressed comment: keys: the widened gate never fires on the first pass
+	fullReviewsPage := func() string {
+		items := make([]string, feedbackPageSize)
+		for i := range items {
+			items[i] = fmt.Sprintf(`{"id":%d,"state":"APPROVED","submitted_at":"2025-01-01T00:00:00Z","user":{"login":"filler%d"}}`, i, i)
+		}
+		return "[" + strings.Join(items, ",") + "]"
+	}
+	recheck := []scriptedCall{
+		{out: automergeEligiblePR()},
+		{out: `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`},
+		{out: `[]`}, // comments
+	}
+	for page := 0; page < maxFeedbackPages; page++ {
+		recheck = append(recheck, scriptedCall{out: fullReviewsPage()})
+	}
+	recheck = append(recheck,
+		scriptedCall{out: `{"labels":[{"name":"automerge:ok"}]}`},
+		scriptedCall{out: `{"automerge":{"maxChangedFiles":10,"maxDiffLines":500,"mergeMethod":"squash"}}`},
+		scriptedCall{out: queueProbeResponse(false, false, "abc")},
+	)
+	script = append(script, recheck...)
+	withScriptedCommands(t, script, &calls)
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if s.AutomergeReason != reasonReviewsReadTruncated {
+		t.Fatalf("AutomergeReason = %q, want %q: the recheck's own reviews re-fetch must be proven complete too, not just the first pass's", s.AutomergeReason, reasonReviewsReadTruncated)
+	}
+	for _, c := range calls {
+		if len(c) > 2 && c[1] == "pr" && c[2] == "merge" {
+			t.Fatalf("gh pr merge must not be issued: %#v", calls)
+		}
+	}
+}
+
+// TestTickPreMergeRecheckAllGreenWithAddressedKeysReconfirmedResolvedStillMerges
+// is the Test Strategy's explicit regression: an all-green PR whose
+// addressed keys all re-confirm resolved at both the first pass AND the
+// recheck must still merge -- the new reads must not become a permanent
+// hold on the happy path.
+func TestTickPreMergeRecheckAllGreenWithAddressedKeysReconfirmedResolvedStillMerges(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	script := automergeFirstPassScriptWithFeedbackThread(resolvedThreadFor(5))
+	script = append(script, automergeRecheckScriptWithFeedbackThread(
+		automergeEligiblePR(), `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`,
+		resolvedThreadFor(5), // the recheck's own fresh read: still resolved
+		`{"labels":[{"name":"automerge:ok"}]}`,
+		`{"automerge":{"maxChangedFiles":10,"maxDiffLines":500,"mergeMethod":"squash"}}`,
+		queueProbeResponse(false, false, "abc"),
+	)...)
+	script = append(script,
+		scriptedCall{out: "Merged pull request #42 (o/r)"}, // gh pr merge, zero exit
+		scriptedCall{out: `{"number":42,"title":"Change","state":"MERGED","headRefName":"feature","headRefOid":"abc","baseRefName":"main","mergeable":"MERGEABLE","isDraft":false,"changedFiles":1,"additions":5,"deletions":2,"files":[{"path":"watch/internal/babysit/x.go"}],"url":"https://example/pr/42","closingIssuesReferences":[{"number":9}]}`}, // post-merge verification refetch
+	)
+	withScriptedCommands(t, script, &calls)
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900, AddressedKeys: []string{"comment:5"}}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if s.AutomergeDecision != "merge" {
+		t.Fatalf("AutomergeDecision = %q, want %q: an all-green PR whose addressed keys all re-confirm resolved must still merge, not become a permanent hold", s.AutomergeDecision, "merge")
+	}
+	mergeIssued := false
+	for _, c := range calls {
+		if len(c) > 2 && c[1] == "pr" && c[2] == "merge" {
+			mergeIssued = true
+		}
+	}
+	if !mergeIssued {
+		t.Fatalf("gh pr merge was not issued: %#v", calls)
 	}
 }
