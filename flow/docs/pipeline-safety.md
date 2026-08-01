@@ -131,3 +131,21 @@ fail mid-run or get reused in a new context.
   never collides with `CheckPlan`'s `.plans/<id>-*.md` glob), is validated in place, and only
   then `mv`'d over the draft — a malformed candidate is left on disk for inspection while the
   last valid `awaiting-input` draft stays untouched.
+
+- When creating or maintaining a large procedural-doc inventory or table that enumerates
+  hard-stops, exceptions, or recovery scenarios (e.g. Hard-Stop Inventory in
+  `skills/implement/phases/phase-1-plan.md`), verify before committing that: (1) any summary
+  statement claiming to enumerate all entries (e.g. "exactly one non-restoring exception")
+  accurately reflects all actual entries in the inventory — adding a new entry that changes
+  this count must prompt update of the summary statement; (2) citations to recovery mechanisms
+  explicitly document their full applicability conditions (e.g. "requires existing
+  status: awaiting-input plan on disk") rather than oversimplifying conditional recovery into
+  a single 'universal' backstop — when multiple recovery paths branch on different conditions,
+  the doc must name which mechanism applies to which case. Summary drift and mischaracterized
+  recovery citations cause reviewers to question coverage that is actually present but
+  miscounted, and leave operators looking at the wrong tool when failures occur. Concrete
+  instance: `/cenci:implement`'s `## Hard-Stop Inventory` table (`#880, 3/12 of #661`): the
+  intro sentence must accurately count non-restoring exceptions, and Step 4 of `## Resume From
+  Draft` must explicitly document that its backstop (`RecoveryResumeInterrupted`) requires an
+  existing `status: awaiting-input` draft on disk and that step 1's "no valid draft exists at
+  all" case has a different backstop (reconciler's stage-aware retry per #828).
