@@ -36,10 +36,16 @@ capture lessons, and run the maintenance check
 (`flow/skills/maintain/scripts/check.sh --changed`) when the change touches docs, skills,
 agents, config, or client adapters, with the shell tool working directory set to the verified absolute worktree path on the initial check, every `--write`, and every re-run.
 Core checking remains active regardless of `maintenance.enabled`;
-`maintenance.checkDuringImplement=false` makes all findings report-only, and
+`maintenance.checkDuringImplement=false` makes all findings report-only (including any `fail`,
+which is that setting's deliberate opt-out from the gate below), and
 `maintenance.generatedDocs=false` disables generated-section maintenance. Otherwise,
 auto-repair only drift caused by this same change and route any ambiguous or policy-affecting
-finding through the client's available user-input mechanism — commit, push, and open the PR. Clear the goal
+finding through the client's available user-input mechanism.
+A checker `fail` is CI-blocking: gate on it through the client's available user-input mechanism
+with a fix / stop / explicit push-anyway choice, and never push an unresolved `fail` —
+CI runs the identical `--changed` invocation, so shipping one is a guaranteed red pipeline.
+`warn` and `skip` stay advisory. On a push-anyway override, name the accepted failure in the PR
+body and never render it as a passing check. Then commit, push, and open the PR. Clear the goal
 before any question/error and after PR creation. After a successful PR creation (never on a
 failed `gh pr create`), archive the consumed plan file instead of deleting it. `.plans/` lives
 only in the main checkout (repo root), not in the worktree, so anchor the command to

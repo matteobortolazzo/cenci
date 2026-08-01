@@ -131,6 +131,7 @@ Every `/cenci:implement` run already automatically checks documentation and gene
 indexes affected by the files it changes, and repairs or reports what it finds — no
 setup required. Optional `.cenci/config.json` controls change the policy without
 disabling correctness: `checkDuringImplement: false` keeps the check report-only,
+including CI-blocking `fail` results, which disables the Phase 9 push gate,
 `generatedDocs: false` skips marker-bounded generated-section maintenance, and
 `maintenance.enabled` controls only scheduled/reminder UX.
 

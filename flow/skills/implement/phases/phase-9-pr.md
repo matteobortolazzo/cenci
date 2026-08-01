@@ -2,9 +2,9 @@
 
 Read this file only when Phase 9 starts.
 
-This phase is pre-approved — commit, push, and create the PR without asking for confirmation. The only exceptions are the error cases defined below (rebase conflicts, build/test/lint failures after rebase, push auth/network failures).
+This phase is pre-approved — commit, push, and create the PR without asking for confirmation. The only exceptions are the error cases defined below (rebase conflicts, build/test/lint failures after rebase, an unresolved maintenance `fail`, push auth/network failures).
 
-**Atomicity rule — always restart at Rebase.** Any (re)entry into this phase — a fresh run, or a re-run after an earlier attempt stopped mid-phase — MUST restart at the Rebase step below and run the steps in order: Rebase → build → test → lint → Commit → Push → PR. Never resume directly at Commit, Push, or PR creation, even if a prior turn already reached one of those steps. This guarantees push/PR creation is always immediately preceded, in the same turn, by a passing rebase + build + test + lint on the current tree — main may have moved between turns, and a stale rebase/verify from an earlier turn cannot be trusted. This is a stateless, markdown-level rule (no marker file, no new state): rebase and re-verify are cheap and idempotent, so restarting from the top on every entry is always safe. The Commit step below handles the case where a prior turn already committed (nothing left to stage) so the restart cannot double-commit or error out.
+**Atomicity rule — always restart at Rebase.** Any (re)entry into this phase — a fresh run, or a re-run after an earlier attempt stopped mid-phase — MUST restart at the Rebase step below and run the steps in order: Rebase → build → test → lint → Maintenance Gate → Commit → Push → PR. Never resume directly at Commit, Push, or PR creation, even if a prior turn already reached one of those steps. This guarantees push/PR creation is always immediately preceded, in the same turn, by a passing rebase + build + test + lint on the current tree — main may have moved between turns, and a stale rebase/verify from an earlier turn cannot be trusted. This is a stateless, markdown-level rule (no marker file, no new state): rebase and re-verify are cheap and idempotent, so restarting from the top on every entry is always safe. The Commit step below handles the case where a prior turn already committed (nothing left to stage) so the restart cannot double-commit or error out.
 
 Prerequisites: all required reviews complete, Must Fix/Critical/High items resolved, build, tests, and lint pass.
 
@@ -58,6 +58,16 @@ Skip this section entirely unless `isLastChild` is true. It produces a single ve
 
      If the comment fails after one retry, keep the `hold` verdict regardless (the downgrade below is the safety mechanism; the comment is only its visibility) and report the failed comment together with the gap list in the final session summary so the gaps are never silently lost.
    - The parent stays open for human triage — typically a re-refine of the remaining gaps into new children — and the final session summary reports that parent #`<parentId>` was left open, listing the unmet criteria.
+
+## Maintenance Gate
+
+Run this gate before the Commit step below, on every entry into this phase (the Atomicity rule's ordering). It is the push-side half of Phase 8's CI-parity rule: Phase 8 decides what a maintenance `fail` means, this gate enforces that a `fail` it did not clear never becomes a red PR by default.
+
+Read `$RUN_DIR/maintain-status.txt` — the same file the `## Checklist` rendering below consumes, so read it once and reuse the value. Key the decision on the first line's outcome tag, not on the `fail=<n>` count (the counts describe the final checker run; the tag records what Phase 8 actually did about it):
+
+- If the tag is `halted`, stop before Commit: do not commit, do not push, and do not create the PR. Report the checker's failing lines recorded in the status file and tell the user the run stopped at the maintenance gate, keeping the worktree, branch, and plan file for a Phase 8 re-entry. Phase 8's "Stop" choice normally ends the run before this phase is ever read; this branch exists because a `halted` status can still be reached on a re-entry into Phase 9 from a compacted or resumed session, and a re-entry must not silently convert a stop into a push.
+- If the tag is `overridden`, proceed — the user explicitly accepted a red pipeline at Phase 8. Do not re-ask here (the decision is already recorded); the `## Checklist` and `## Notes` rendering below carries the failure into the PR body honestly.
+- Any other tag (`repaired`, `reported`), a no-tag clean pass, a `maintenance: skipped …` line, a `maintenance: error …` line, or an absent/unknown `$RUN_DIR` — proceed unchanged. A checker crash or lost `RUN_DIR` is already rendered as an unchecked "verify manually before merge" checklist line below; it is not a proven `fail` and must not block the push, exactly as before.
 
 ## Commit
 
@@ -206,11 +216,13 @@ The `## Checklist` Maintenance check line is derived from `$RUN_DIR/maintain-sta
 - summary line has no trailing `— <tag>` at all (the all-clean case: zero non-pass results, nothing to repair/report/halt) → `- [x] Maintenance check passed`
 - summary line shows `— repaired` and no `fail` → `- [x] Maintenance check passed (auto-repaired same-PR drift — see Notes)`
 - summary line shows `— reported` → `- [ ] Maintenance check: findings reported (see Notes)`
+- summary line shows `— overridden` (the user chose "Push anyway" at Phase 8's `fail` question) → `- [ ] Maintenance check: FAILING (user-approved red pipeline — see Notes)` — never render this as a pass, and never omit the line: CI's `flow-maintenance` job will fail on this PR, and the checklist is where a reviewer learns that was a deliberate choice rather than an accident.
+- summary line shows `— halted` → this phase should not have been reached; the Maintenance Gate above stops before Commit. If a re-entry renders a PR body anyway, use `- [ ] Maintenance check: halted (unresolved failure — do not merge)`.
 - file's first line is `maintenance: skipped …` → `- [x] Maintenance check: not applicable`
 - file's first line is `maintenance: error …` (the checker itself crashed with no `summary:` line — see Phase 8's checker-crash guard) → `- [ ] Maintenance check: error (checker execution failed — verify manually before merge)` — never render this as a pass; the checker never produced a real pass/fail summary to report on.
 - `$RUN_DIR` unknown or the file is absent → `- [ ] Maintenance check status unknown (RUN_DIR lost — verify manually before merge)`, mirroring the Review/Security "RUN_DIR lost" honesty rule above.
 
-Any reported or deferred maintenance findings (from a `— reported` status) each append one line to `## Notes`. The Cleanup step's `rm -rf "$RUN_DIR"` already removes `maintain-status.txt` with the rest of the run's artifacts — no new cleanup line is needed.
+Any reported or deferred maintenance findings (from a `— reported` status) each append one line to `## Notes`. An `— overridden` status appends the checker's failing lines the same way, prefixed with "Accepted red pipeline:" so the accepted failure is named, not just counted. The Cleanup step's `rm -rf "$RUN_DIR"` already removes `maintain-status.txt` with the rest of the run's artifacts — no new cleanup line is needed.
 
 `## Screenshots` appears only when `isUiTicket` is true: one `### <name>` + image per captured screen/state, or the fallback note from the Screenshots section above. Omit the section entirely for non-UI work. If the user chose "Proceed without design" at the Design Check, add "Implemented without design spec — extra visual review recommended." to `## Notes`.
 

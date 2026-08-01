@@ -49,9 +49,11 @@ explicit equality with `false` — do not use a jq `//` fallback, because jq tre
 `false` as a fallback candidate.
 
 - When `maintenance.checkDuringImplement` is explicitly `false`, still run and report
-  the checker exactly as below, but all non-pass results are report-only. Do not enter
-  either the auto-repair or must-stop-and-ask branch, do not mutate a finding's target,
-  and record the results for Phase 9 with the `reported` outcome.
+  the checker exactly as below, but all non-pass results are report-only, including any `fail`.
+  Do not enter either the auto-repair or must-stop-and-ask branch, do not mutate a finding's
+  target, do not apply the CI-parity rule below, and record the results for Phase 9 with the
+  `reported` outcome. This is the deliberate opt-out from the hard gate: the run may then open
+  a PR that CI will fail, which is the setting's whole point.
 - When `maintenance.generatedDocs` is explicitly `false`, generated-section maintenance
   is disabled: honor the checker's generated-section skip, do not run `check.sh --write`,
   and continue handling every non-generated correctness result normally.
@@ -90,16 +92,26 @@ text output (stdout+stderr) and exit code.
 
 **Checker-crash guard**: `check.sh` exits 2 (not 0/1) on its own infra errors (missing `jq`, `mktemp` failure, etc.) and in that path never reaches its `summary: pass=... warn=... fail=...` line. Before running the repair-policy decision flow below, check the captured output for that `summary:` line — regardless of exit code, but especially on exit 2. If it is absent, do **not** proceed into the decision flow (there are no parsed results to interpret) and do not fabricate `pass=0 warn=0 fail=0`. Instead write `maintenance: error (checker execution failed) — <captured output/stderr>` as the status file's first line (see Status file below) and stop this sub-step; Phase 9 renders this as an honest "status unknown/errored" rather than a false pass.
 
+**CI-parity rule — a checker `fail` is a hard gate, a `warn` is not**: CI's `flow-maintenance` job runs this exact command (`check.sh --changed <changed files>`) against the same tree and exits non-zero on any `fail`. `--changed` mode already downgrades breaches unrelated to this PR's own changed paths to `warn`, which means every `fail` that survives here is one CI will raise too, so pushing it is a guaranteed red pipeline. Never treat a `fail` as advice to carry forward: it is either cleared in this run or explicitly overridden by the user. `warn` and `skip` are not CI-blocking and stay advisory. This rule is what the `fail`-status routing below implements — do not re-derive it per finding, and do not exempt a finding because its check name looks cosmetic (the checker, not this phase, decides what is a `fail`).
+
 **Repair-policy decision flow** — for each non-pass result the checker reports:
 
-- **Allowed (auto-repair, same PR only)**: a new-skill table row, a broken path caused by this PR's own rename, a stale generated index (`check.sh --write`, only when `maintenance.generatedDocs` is not explicitly `false`), a missing structural-test entry, a documented flag changed by this PR. Apply the fix inside `<worktree-path>`, then re-run the checker to confirm the finding cleared. If the re-run does **not** clear the finding, do not keep retrying or silently treat it as fixed — downgrade it to report-only: carry it forward to Phase 9's `## Notes` like any other reported finding, and reflect that in the status file's `<repaired|reported|halted>` tag (it no longer counts toward "repaired"). An "Allowed" finding must never silently roll into a "repaired"/"pass" status-file line when it didn't actually clear.
-- **Must stop and ask (do not auto-repair)**: two docs express conflicting intended behavior, client-support status is ambiguous, a rule's meaning would change, a security/workflow policy would be weakened, or the required change expands product scope. Route the question through `AskUserQuestion`. Phase 8 is not pre-approved, so halting here is safe (this is why the maintenance check lives in Phase 8, not Phase 9).
-- **Report-only default**: any finding that is neither clearly Allowed nor clearly a must-stop case is **not** silently repaired — record it in the status file and carry it forward to Phase 9's `## Notes`; do not halt.
+- **Allowed (auto-repair, same PR only)**: a new-skill table row, a broken path caused by this PR's own rename, a stale generated index (`check.sh --write`, only when `maintenance.generatedDocs` is not explicitly `false`), a missing structural-test entry, a documented flag changed by this PR. Apply the fix inside `<worktree-path>`, then re-run the checker to confirm the finding cleared. If the re-run does **not** clear the finding, do not keep retrying or silently treat it as fixed, and do not blanket-file it as advice — re-classify it by its status: a surviving `fail` routes to the must-stop-and-ask branch below, a surviving `warn` to the report-only default. Either way it no longer counts toward "repaired", and the status file's `<repaired|reported|halted|overridden>` tag must reflect where it actually landed. An "Allowed" finding must never silently roll into a "repaired"/"pass" status-file line when it didn't actually clear.
+- **Must stop and ask (do not auto-repair)**: **any result whose status is `fail`** that the Allowed branch did not clear (per the CI-parity rule above), plus these ambiguity cases at any status: two docs express conflicting intended behavior, client-support status is ambiguous, a rule's meaning would change, a security/workflow policy would be weakened, or the required change expands product scope. Route the question through `AskUserQuestion`. Phase 8 is not pre-approved, so halting here is safe (this is why the maintenance check lives in Phase 8, not Phase 9).
+- **Report-only default**: any `warn` or `skip` finding that is neither clearly Allowed nor clearly a must-stop case is **not** silently repaired — record it in the status file and carry it forward to Phase 9's `## Notes`; do not halt. A `fail` never reaches this branch.
+
+**The `fail` question**: ask one question per distinct failing check. State the checker's exact `FAIL <check> <target>: <message>` line and its `-> fix:` hint verbatim so the choice is made against the real finding, not a paraphrase, and offer exactly these options in this order: **Fix now**, **Stop**, **Push anyway**.
+
+- **Fix now** — apply the checker's suggested fix inside `<worktree-path>`, then re-run the checker and re-enter this decision flow with the fresh results. A finding that clears this way counts toward `repaired`. If the re-run still reports the same `fail`, ask again rather than looping silently.
+- **Stop** — end the run here. Keep the worktree, the branch, and the plan file so the fix can be made and Phase 8 re-entered; do not proceed to Phase 9.
+- **Push anyway** — the user accepts a known-red pipeline. Proceed to Phase 9, which renders the failure honestly in the PR body rather than as a pass.
+
+Map each choice to the status file: a "Push anyway" override tags the status file `overridden`; a "Stop" choice tags it `halted` and ends the run at Phase 8. Record the checker's failing lines under the tag in both cases, so Phase 9 (or a later re-entry) reports the real finding rather than only its outcome.
 
 **Status file**: write to `$RUN_DIR/maintain-status.txt` a first-line summary, followed by the checker's non-pass lines (if any):
 
 - If the checker reported zero non-pass results (nothing to repair, report, or halt on — the common all-clean case): `maintenance: pass=<n> warn=0 fail=0` with **no** trailing `— <tag>` suffix. This is the only case with no dash-tag; Phase 9 must not require one to recognize a clean pass.
-- Otherwise, append the outcome tag: `maintenance: pass=<n> warn=<n> fail=<n> — <repaired|reported|halted>`.
+- Otherwise, append the outcome tag: `maintenance: pass=<n> warn=<n> fail=<n> — <repaired|reported|halted|overridden>`. The counts are those of the **final** checker run in this phase (after any auto-repair re-run), not the first, so they describe the tree Phase 9 is about to push.
 - If the checker's captured output had no `summary:` line (the checker-crash guard above), the first line is instead `maintenance: error (checker execution failed) — <captured output/stderr>`, with no pass/fail counts.
 
 If `$RUN_DIR` is unknown, skip the file write; Phase 9 handles absence, matching the `review-path.txt` fallback.
