@@ -159,10 +159,29 @@ else
   if [[ "${MKDIR_CONFIRM_COUNT}" -lt 2 ]]; then
     fail "phase-1-plan.md (## Resume From Draft) must restate the mkdir confirm-before-write rule in both step 3 and step 4 (found ${MKDIR_CONFIRM_COUNT} occurrence(s))"
   fi
-  assert_section_contains 'simply retrying this step in a fresh session is safe' \
+  assert_section_contains 'retrying this step in a fresh session afterward is safe' \
     "must document step 5 (planner re-delegation) recovery"
+  # --- #880: step 5's stale-anchor delegation failure now routes through the
+  #     named restoration routine before the retry-is-safe guidance, instead
+  #     of leaving the ticket at bare `Working` -------------------------------
+  assert_section_contains "Run \`## Restore Awaiting-Input State\`'s two commands" \
+    "must route step 5 (planner re-delegation) recovery through the named restoration routine (#880)"
   assert_section_contains 'a retry from whichever call failed is always safe' \
     "must document step 7 (plan/label/artifact ordering) recovery"
+
+  # --- #880: step 3 persist-nonce-before-post reordering (the crash-recovery
+  #     fix this ticket exists for), and step 6's candidate-then-atomic-
+  #     replace conversion. Bidirectional one-to-one hard-stop coverage and
+  #     the full sub-step ordering are pinned in
+  #     flow/tests/resume-abort-contract.test.sh; these assertions pin the
+  #     two headline literals in this file too, per the plan's Files to
+  #     Modify entry for this suite ------------------------------------------
+  assert_section_contains 'persist the fresh `escalationNonce` and clear `escalationCommentId` in one write' \
+    "step 3 must persist the fresh nonce and clear the stale comment ID before posting anything (#880)"
+  assert_section_contains '.plans/.<id>-<slug>.candidate.md' \
+    "step 6 must assemble the finalized plan to the dot-prefixed candidate path, never the draft directly (#880)"
+  assert_section_contains 'atomically `mv` over the draft only on success' \
+    "step 6 must atomically replace the draft only after the candidate validates (#880)"
 
   # --- Resume-mode planner return with further questions --------------------
   assert_section_contains "step 3's incomplete case above" \
@@ -180,17 +199,28 @@ else
   fi
 
   # --- #853: Abort contract -- any stop in this section after `Working` is
-  #     applied must first restore the board, restated at each hard stop
-  #     (flow/docs/pipeline-safety.md's reused-safety-rule-on-a-new-risk-
-  #     profile rule) -------------------------------------------------------
+  #     applied must first restore the board (flow/docs/pipeline-safety.md's
+  #     reused-safety-rule-on-a-new-risk-profile rule). #880 review fix #1:
+  #     every individual hard stop now cites the named `## Restore
+  #     Awaiting-Input State` routine explicitly by name/commands instead of
+  #     repeating this raw disclaimer sentence at each call site -- the
+  #     sentence itself need only be stated once, as the section's own
+  #     contract definition; per-call-site restatement is covered by the
+  #     ROUTINE_CITATION_COUNT check below and by
+  #     flow/tests/resume-abort-contract.test.sh's strengthened bidirectional
+  #     check (window_cites_routine) -------------------------------------
   assert_section_contains '**Abort contract**' \
     "must state an Abort contract"
   ABORT_RESTORE_PHRASE='any stop in this section after `Working` is applied must first run `cenci pipeline await-input <id>` then `cenci pipeline label <id> --transition input-needed`'
   assert_section_contains "${ABORT_RESTORE_PHRASE}" \
     "must state the abort-contract restore sequence verbatim (await-input, then --transition input-needed)"
   ABORT_RESTATE_COUNT=$(grep -c -F -- "${ABORT_RESTORE_PHRASE}" <<<"${RESUME_SECTION}")
-  if [[ "${ABORT_RESTATE_COUNT}" -lt 2 ]]; then
-    fail "phase-1-plan.md (## Resume From Draft) must restate the Abort contract's restore sequence at more than one hard stop (found ${ABORT_RESTATE_COUNT} occurrence(s), want >= 2)"
+  if [[ "${ABORT_RESTATE_COUNT}" -lt 1 ]]; then
+    fail "phase-1-plan.md (## Resume From Draft) must state the Abort contract's restore sequence at least once (found ${ABORT_RESTATE_COUNT} occurrence(s), want >= 1)"
+  fi
+  ROUTINE_CITATION_COUNT=$(grep -coF -- "Restore Awaiting-Input State" <<<"${RESUME_SECTION}")
+  if [[ "${ROUTINE_CITATION_COUNT}" -lt 8 ]]; then
+    fail "phase-1-plan.md (## Resume From Draft) must cite the named ## Restore Awaiting-Input State routine at every hard stop, including steps 1, 2, and 4 (#880) (found ${ROUTINE_CITATION_COUNT} occurrence(s), want >= 8)"
   fi
 
   # --- #853: unknown ⇒ stale literal --------------------------------------

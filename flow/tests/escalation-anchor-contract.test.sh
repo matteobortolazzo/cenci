@@ -91,6 +91,11 @@ PIN_CREATE_JQ='--jq .id'
 PIN_REST_PAGINATE='--paginate'
 PIN_REST_PER_PAGE='per_page=100'
 PIN_READBACK="gh api repos/<owner>/<repo>/issues/<number>/comments/<id> --jq '{id, body}'"
+# #880: persist the nonce (and clear any stale escalationCommentId) before
+# ever posting -- the literal every escalating path's own persist-nonce
+# sub-step restates at its call site (never merely referenced), so a
+# post-then-crash never leaves an unrecorded replacement anchor.
+PIN_PERSIST_BEFORE_POST='persist it into the draft'"'"'s front matter before posting anything'
 
 # =====================================================================
 # flow/skills/implement/phases/phase-1-plan.md -- ## Escalation Anchor
@@ -122,6 +127,8 @@ else
     "must name the REST comment-create call's --jq .id verbatim"
   assert_section_contains "${PIN_READBACK}" \
     "must name the comment body read-back verification call verbatim"
+  assert_section_contains "${PIN_PERSIST_BEFORE_POST}" \
+    "must state the persist-nonce-before-POST ordering rule verbatim (#880)"
 fi
 
 # =====================================================================

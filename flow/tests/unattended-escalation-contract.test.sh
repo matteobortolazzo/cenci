@@ -201,6 +201,32 @@ assert_section_contains "${ESCALATION_SECTION}" "${STEP4_RECOVERY_MARKER}" \
 assert_section_contains "${ESCALATION_SECTION}" "${RESTATED_NOT_REFERENCED_MARKER}" \
   "must restate (not merely reference) ## Persist the Plan's verification/error handling, per flow/docs/pipeline-safety.md"
 
+# =====================================================================
+# #880: the named `## Restore Awaiting-Input State` routine, its
+# `## Hard-Stop Inventory` IDs (HS-U0..HS-U5), and step 0's explicit
+# non-restoring exception. Bidirectional one-to-one hard-stop coverage
+# across all three escalating sections is pinned in
+# flow/tests/resume-abort-contract.test.sh; these assertions pin that steps
+# 1-5's hard stops are routed through the named routine here too, per the
+# plan's Files to Modify entry for this suite.
+# =====================================================================
+
+RESTORE_ROUTINE_NAME_MARKER='## Restore Awaiting-Input State'
+STEP0_EXCEPTION_MARKER='sole justified exception'
+STEP0_NOTHING_TO_RESTORE_MARKER='nothing to restore'
+
+assert_section_contains "${ESCALATION_SECTION}" "${RESTORE_ROUTINE_NAME_MARKER}" \
+  "steps 1-5's hard stops must route through the named ## Restore Awaiting-Input State routine (#880)"
+assert_section_contains "${ESCALATION_SECTION}" "${STEP0_EXCEPTION_MARKER}" \
+  "step 0 must state it is the sole justified exception to the restoration routine (#880)"
+assert_section_contains "${ESCALATION_SECTION}" "${STEP0_NOTHING_TO_RESTORE_MARKER}" \
+  "step 0's exception must state explicitly that there is nothing to restore before any draft exists (#880)"
+
+HS_U_COUNT=$(grep -coE 'HS-U[0-9]+' <<<"${ESCALATION_SECTION}")
+if [[ "${HS_U_COUNT}" -lt 6 ]]; then
+  fail "phase-1-plan.md (## Unattended Escalation Path) must cite a distinct HS-U<n> hard-stop inventory ID at each of steps 0-5 (found ${HS_U_COUNT} occurrence(s), want >= 6)"
+fi
+
 # --- Negative: must not duplicate plan-persist-sections-contract.test.sh's
 #     assert_occurs_once markers, which are pinned to exactly one
 #     file-wide occurrence each (in ## Persist the Plan) ------------------

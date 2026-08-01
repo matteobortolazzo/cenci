@@ -155,6 +155,94 @@ func TestResumeCrossLane_UnknownStaleRuleStatedInPhase1PlanMatchesDraftFreshness
 	}
 }
 
+// -- #880: re-escalation replacement-nonce cross-lane case -----------------
+//
+// Extends the #849 AC6 precedent above to the resume/re-escalation path
+// specifically: `## Resume From Draft` step 3 mints and persists a *fresh
+// replacement* nonce (never reusing the original escalation's), so this test
+// extracts the marker/nonce template from that section -- not from
+// `## Escalation Anchor` -- renders a payload for a genuine replacement
+// nonce, and proves three distinct classifyComments outcomes through the
+// REAL producer template and the REAL consumer parser (the plan's AC5/AC7):
+// (a) the new anchor plus a qualifying reply resumes; (b) a reply attached
+// only to the old/orphaned anchor never resumes, even though that anchor
+// once carried a genuine (now-superseded) marker; (c) the nonce-without-ID
+// intermediate state (#880's reused representation, Q2: escalationNonce set,
+// escalationCommentId absent/0) fails closed without ever consulting the
+// thread. Same hard t.Fatal-never-t.Skip requirement as the #849 test above.
+func TestResumeCrossLane_ReEscalationReplacementNonceThroughRealClassifyComments(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "flow", "skills", "implement", "phases", "phase-1-plan.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("cross-lane (#880): could not read the producer doc at %s: %v -- this is a hard failure, never a skip", path, err)
+	}
+	content := string(data)
+
+	section := extractMarkdownSection(content, "## Resume From Draft")
+	if section == "" {
+		t.Fatalf("cross-lane (#880): could not locate '## Resume From Draft' in %s -- this is a hard failure, never a skip", path)
+	}
+
+	template := escalationAnchorTemplatePattern.FindString(section)
+	if template == "" {
+		t.Fatalf("cross-lane (#880): could not extract the documented replacement-nonce marker/nonce template from %s's '## Resume From Draft' section -- this is a hard failure, never a skip. Expected to find the literal template `<!-- cenci-planner-escalation:<nonce> -->` documented there for the re-escalation's fresh replacement nonce.", path)
+	}
+
+	newNonce := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	oldNonce := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	if !escalationNoncePattern.MatchString(newNonce) || !escalationNoncePattern.MatchString(oldNonce) {
+		t.Fatalf("test setup: fixture nonces do not both match escalationNoncePattern %s", escalationNoncePattern.String())
+	}
+	newRendered := strings.ReplaceAll(template, "<nonce>", newNonce)
+	oldRendered := strings.ReplaceAll(template, "<nonce>", oldNonce)
+	if newRendered == template || oldRendered == template {
+		t.Fatalf("cross-lane (#880): could not render concrete comment bodies from the extracted template %q", template)
+	}
+
+	const oldAnchorID = int64(100)
+	const newAnchorID = int64(200)
+
+	t.Run("NewAnchorPlusQualifyingReply_Answered", func(t *testing.T) {
+		comments := []restIssueComment{
+			{ID: oldAnchorID, Body: "Original question.\n" + oldRendered, Author: restCommentAuthor{Login: "matteobortolazzo", Type: "User"}},
+			{ID: newAnchorID, Body: "Still-open question.\n" + newRendered, Author: restCommentAuthor{Login: "matteobortolazzo", Type: "User"}},
+			{ID: newAnchorID + 1, Body: "Here's my answer.", Author: restCommentAuthor{Login: "octocat", Type: "User"}, AuthorAssociation: "COLLABORATOR"},
+		}
+		got := classifyComments(comments, newAnchorID, newNonce)
+		if got != AnswerProbeAnswered {
+			t.Errorf("classifyComments(new anchor + qualifying reply) = %q, want AnswerProbeAnswered", got)
+		}
+	})
+
+	// A reply positioned only after the OLD anchor (the new anchor is never
+	// posted to this particular thread snapshot) must never resume when
+	// probed against the persisted (new) anchor identity -- the exact stored
+	// comment ID, never a content scan, is the only trusted identity.
+	t.Run("ReplyToOldOrphanedAnchor_NeverResumes", func(t *testing.T) {
+		comments := []restIssueComment{
+			{ID: oldAnchorID, Body: "Original question.\n" + oldRendered, Author: restCommentAuthor{Login: "matteobortolazzo", Type: "User"}},
+			{ID: oldAnchorID + 1, Body: "Here's my answer.", Author: restCommentAuthor{Login: "octocat", Type: "User"}, AuthorAssociation: "COLLABORATOR"},
+		}
+		got := classifyComments(comments, newAnchorID, newNonce)
+		if got != AnswerProbeAnchorMismatch {
+			t.Errorf("classifyComments(reply to old/orphaned anchor only) = %q, want AnswerProbeAnchorMismatch", got)
+		}
+	})
+
+	// Nonce-without-ID (#880 Q2's reused representation): a fresh nonce is
+	// persisted with escalationCommentId cleared/absent -- anchorID <= 0 --
+	// fails closed before the thread is even consulted.
+	t.Run("NonceWithoutID_AnchorUnset", func(t *testing.T) {
+		comments := []restIssueComment{
+			{ID: newAnchorID, Body: "Still-open question.\n" + newRendered, Author: restCommentAuthor{Login: "matteobortolazzo", Type: "User"}},
+		}
+		got := classifyComments(comments, 0, newNonce)
+		if got != AnswerProbeAnchorUnset {
+			t.Errorf("classifyComments(nonce without ID) = %q, want AnswerProbeAnchorUnset", got)
+		}
+	})
+}
+
 // extractMarkdownSection returns the body of the named "## <heading>"
 // section in content, bounded to the next "## "-level heading (fence-aware:
 // a "## " line inside a fenced ``` code block does not end the section) --
