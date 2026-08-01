@@ -1,0 +1,7 @@
+{
+  "subIssues": [
+    { "number": 801, "state": "CLOSED" },
+    { "number": 802, "state": "OPEN" },
+    { "number": 800, "state": "OPEN" }
+  ]
+}

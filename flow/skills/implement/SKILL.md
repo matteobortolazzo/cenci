@@ -164,7 +164,7 @@ After the digest is stored, invoke `cenci pipeline prepare <id>` to record `prep
 - Parent already closed → `isLastChild = false` (skip auto-close)
 - Parent/child links resolve from the native sub-issue graph (`--json parent` for the parentId, `--json subIssues` for siblings); when a ticket predates native linking and has no sub-issue nodes, the gatherer falls back to the `Related to #<parentId>` search
 - Some siblings manually closed → they don't count as open, don't block last-child detection
-- Last child ≠ parent complete — `isLastChild` only selects the run that *may* close the parent; phase 9's Parent Close Gate audits the parent's `### Acceptance Criteria` against delivered evidence before any parent-closing trailer is written, and on gaps the parent stays open with a gap comment (see `phases/phase-9-pr.md`)
+- Last child ≠ parent complete — `isLastChild` only selects the run that *may* close the parent; phase 9's Parent Close Gate audits the parent's `### Acceptance Criteria` against delivered evidence before any parent-closing trailer is written, and on gaps the parent stays open with a gap comment; every phase 9 re-entry re-reconciles the commit/PR/closing-reference trailers to that entry's fresh verdict rather than trusting an earlier attempt's write (see `phases/phase-9-pr.md`)
 
 ## Attachments
 
