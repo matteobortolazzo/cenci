@@ -5,6 +5,7 @@
   "permissions": {
     "allow": [
       "Write",
+      "Edit",
       "Edit(*)",
       "Read(~/.claude/plugins/**)",
       "Read(//tmp/claude*/**)",
