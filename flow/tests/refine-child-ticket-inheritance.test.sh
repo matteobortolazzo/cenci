@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
 # Tests documentation-contract coverage for ticket #798: the tickets
 # /cenci:refine creates — split children (Pass 1) and the companion design
-# ticket — must inherit the parent's milestone and non-lifecycle labels,
-# with a graceful degrade on fetch failure.
+# ticket — must inherit the parent's milestone and non-lifecycle labels.
+#
+# #878 supersedes #798's fetch-failure handling: the parent-metadata fetch
+# now runs unconditionally, before the first write of the run (it also
+# guards the parent's own label write against drift, not only inheritance),
+# so its original graceful-degrade justification ("stopping would abort the
+# split after the parent's body was already rewritten") no longer holds —
+# stopping is now free, same as the Coverage gate. The no-meta fallback
+# payload forms and their three pinned assertions are deleted; a fetch
+# failure after one retry now fails closed with zero writes (D1).
 #
 # This ports the already-tested #635/#756 follow-up inheritance pattern
 # (flow/skills/implement/phases/phase-9-pr.md, flow/skills/address-review/
@@ -57,8 +65,15 @@ MILESTONE_NUMBER_MARKER='.milestone.number'
 SLURPFILE_MARKER='--slurpfile meta'
 CHILD_SEED_MARKER='(["Refined"] +'
 DESIGN_SEED_MARKER='(["Refined","Design"] +'
-GRACEFUL_DEGRADE_MARKER='milestone/label inheritance was skipped'
 PARENT_META_CLEANUP_MARKER='-parent-meta.json'
+# #878: the fetch is now unconditional and runs before the first write; a
+# failure after one retry fails closed with zero writes (D1) rather than
+# degrading to the no-meta fallback forms.
+FAIL_CLOSED_STOP_MARKER='parent cannot be read after one retry'
+# #878: the presence gate must validate fetched content, not just a
+# successful `cat` exit status — a present-but-empty-or-malformed file must
+# be treated the same as an unreadable fetch (D1), never as a good fetch.
+JSON_SHAPE_GATE_MARKER='jq -e '\''has("labels")'\'''
 
 # --- skills/refine/SKILL.md — the inheriting creation sites -----------------
 
@@ -76,18 +91,12 @@ assert_file_contains "${REFINE_SKILL}" "${CHILD_SEED_MARKER}" \
   "must seed the Pass 1 child labels array with Refined plus the carried-over parent labels"
 assert_file_contains "${REFINE_SKILL}" "${DESIGN_SEED_MARKER}" \
   "must seed the design-ticket labels array with Refined,Design plus the carried-over parent labels"
-assert_file_contains "${REFINE_SKILL}" "${GRACEFUL_DEGRADE_MARKER}" \
-  "must graceful-degrade and note the skip when the parent-metadata fetch fails"
 assert_file_contains "${REFINE_SKILL}" "${PARENT_META_CLEANUP_MARKER}" \
   "must list the parent-meta temp file in step 13's explicit rm -f cleanup path list"
-
-# The graceful-degrade path keeps today's hard-coded payloads as the
-# documented no-meta fallback form at both creation sites, so a fetch failure
-# still produces a correct (just un-inherited) child.
-assert_file_contains "${REFINE_SKILL}" 'labels: ["Refined"]}' \
-  "must retain the no-meta Pass 1 fallback payload (labels: [\"Refined\"] only)"
-assert_file_contains "${REFINE_SKILL}" 'labels: ["Refined","Design"]}' \
-  "must retain the no-meta design-ticket fallback payload (labels: [\"Refined\",\"Design\"] only)"
+assert_file_contains "${REFINE_SKILL}" "${FAIL_CLOSED_STOP_MARKER}" \
+  "must fail closed with zero writes when the parent-metadata fetch fails after one retry (#878, D1) rather than graceful-degrading to a no-meta payload"
+assert_file_contains "${REFINE_SKILL}" "${JSON_SHAPE_GATE_MARKER}" \
+  "must validate the fetched parent-meta file's JSON shape, not just a successful cat exit status, so a present-but-empty-or-malformed file fails the presence gate (#878, D1)"
 
 # --- skills/refine/codex.md — portability parity ---------------------------
 

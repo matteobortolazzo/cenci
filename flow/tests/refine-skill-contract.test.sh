@@ -186,8 +186,10 @@ if [[ -n "${skill}" ]]; then
   assert_not_contains "${skill}" "WebFetch" "749 skills/refine/SKILL.md WebFetch grant"
 
   # --- Exhaustive set equality: parse the frontmatter's Bash(...) entries and
-  # compare against the expected least-privilege list (#749: 9 entries), both
-  # sorted so the comparison is order- and locale-independent.
+  # compare against the expected least-privilege list (#749: 9 entries; #878
+  # adds `jq -e` for the D1 presence gate's content-validity check -- the
+  # fetched parent-meta file must jq -e 'has("labels")', not just exit 0 on
+  # `cat`), both sorted so the comparison is order- and locale-independent.
   EXPECTED_BASH_GRANTS='Bash(gh issue view:*)
 Bash(gh issue edit:*)
 Bash(gh label create:*)
@@ -197,7 +199,8 @@ Bash(git remote get-url:*)
 Bash(mktemp -u ${TMPDIR:-/tmp}/cenci/:*)
 Bash(cat ${TMPDIR:-/tmp}/cenci/:*)
 Bash(rm -f ${TMPDIR:-/tmp}/cenci/:*)
-Bash(jq -n:*)'
+Bash(jq -n:*)
+Bash(jq -e:*)'
   allowed_line="$(grep -m1 '^allowed-tools:' "${skill_path}")"
   actual_bash_grants="$(printf '%s\n' "${allowed_line}" | grep -o 'Bash([^)]*)' | LC_ALL=C sort -u)"
   expected_bash_grants="$(printf '%s\n' "${EXPECTED_BASH_GRANTS}" | LC_ALL=C sort -u)"

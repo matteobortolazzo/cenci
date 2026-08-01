@@ -1899,7 +1899,7 @@ in the completion summary so the user can mirror it as columns on their board:
 
 | Label | Applied by | Meaning |
 |---|---|---|
-| `Working` | refine / design / implement (at start) | Actively being refined, designed, or implemented |
+| `Working` | refine (after the confirmation gate) / design / implement (at start) | Actively being refined, designed, or implemented |
 | `Refined` | refine | Ready for design/implementation |
 | `Design` | refine | Design-only ticket — deliverable is a design spec; implement redirects to `/cenci:design` |
 | `Designed` | design | Design spec approved — propagated from the completed design ticket to the implementation tickets that depend on it |

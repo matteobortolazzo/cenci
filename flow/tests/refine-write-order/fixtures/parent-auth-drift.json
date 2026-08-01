@@ -1,0 +1,13 @@
+{
+  "number": 100,
+  "title": "Sample parent ticket",
+  "state": "OPEN",
+  "assignees": [{ "login": "alice" }],
+  "milestone": { "number": 5, "title": "Q3" },
+  "labels": [
+    { "name": "area:backend" },
+    { "name": "priority:p2" },
+    { "name": "team:core" },
+    { "name": "automerge:ok" }
+  ]
+}

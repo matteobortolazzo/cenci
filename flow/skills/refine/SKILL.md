@@ -6,7 +6,7 @@ argument-hint: <ticket-id> [additional context]
 user-invocable: true
 disable-model-invocation: true
 model: sonnet
-allowed-tools: Read, Write, Glob, Task, Bash(gh issue view:*), Bash(gh issue edit:*), Bash(gh label create:*), Bash(gh api user --jq:*), Bash(gh api repos/:*), Bash(git remote get-url:*), Bash(jq -n:*), Bash(mktemp -u ${TMPDIR:-/tmp}/cenci/:*), Bash(cat ${TMPDIR:-/tmp}/cenci/:*), Bash(rm -f ${TMPDIR:-/tmp}/cenci/:*), AskUserQuestion
+allowed-tools: Read, Write, Glob, Task, Bash(gh issue view:*), Bash(gh issue edit:*), Bash(gh label create:*), Bash(gh api user --jq:*), Bash(gh api repos/:*), Bash(git remote get-url:*), Bash(jq -n:*), Bash(jq -e:*), Bash(mktemp -u ${TMPDIR:-/tmp}/cenci/:*), Bash(cat ${TMPDIR:-/tmp}/cenci/:*), Bash(rm -f ${TMPDIR:-/tmp}/cenci/:*), AskUserQuestion
 ---
 
 > **Client dispatch**: In Codex, read `codex-runtime` and `refine/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
@@ -69,26 +69,19 @@ If any of these conditions are true, warn the user and ask for confirmation usin
 
 If the user says no → stop. If yes → proceed normally.
 
-## Ticket Ownership
+## Ownership Inspection (read-only)
 
-Read the `ticket-ownership` reference skill and follow it using the assignees from
-the ticket fetch above. Complete its claim-and-verify contract before adding
-`Working` or starting refinement. Never replace an existing assignee.
-
-## Label "Working"
-
-**Before starting refinement work**, add the "Working" label to signal that the ticket is actively being worked on. `gh issue edit --add-label` fails when the label does not exist in the repository, so ensure it exists first — run each as its own Bash call (`|| true` swallows only the "already exists" error):
-```bash
-gh label create "Working" --repo <owner>/<repo> --color "FBCA04" --description "Actively being refined, designed, or implemented" 2>/dev/null || true
-```
-```bash
-gh issue edit <number> --repo <owner>/<repo> --add-label "Working"
-```
-Apply the same ensure-then-add pattern to every label this skill applies later (`Refined`, `Design`, `Browser`, `ui:visual-check`, `automerge:ok`, …): before the first `--add-label <name>` of a label, run its `gh label create <name> … || true` with the color/description from the lifecycle table in `/cenci:configure`.
+Read the `ticket-ownership` reference skill's `## Inspect ownership (read-only)`
+section only, and follow it using the assignees from the ticket fetch above — this
+performs zero GitHub writes. Record the result as `ownershipState`
+(`unowned` | `owned-by-caller` | `conflict`) for the `## Confirmation Gate`
+manifest below. The claim itself is deferred to the write phase (`## Update Ticket`
+below, `#### Ownership claim (first write)`) — it must not run before the gate's
+confirmation. Never replace an existing assignee.
 
 ## Your Role
 
-You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hunting, question drafting, sizing, and the refined ticket proposal — is delegated to the **refiner** agent (spawned via the `Task` tool), whose `model: opus` frontmatter pin holds for its entire run; a skill-level pin only lasts the invoking turn, so it would silently degrade every follow-up turn of the Q&A loop to the session model. You run the interaction and the writes: relay the refiner's questions to the user, feed answers back, and perform every GitHub mutation yourself. Never perform the refiner's analysis inline, and never delegate a GitHub write or an `AskUserQuestion` to a subagent (see the `subagent-safety` skill).
+You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hunting, question drafting, sizing, and the refined ticket proposal — is delegated to the **refiner** agent (spawned via the `Task` tool), whose `model: opus` frontmatter pin holds for its entire run; a skill-level pin only lasts the invoking turn, so it would silently degrade every follow-up turn of the Q&A loop to the session model. You run the interaction and the writes: relay the refiner's questions to the user, feed answers back, and perform every GitHub mutation yourself, all of them after the `## Confirmation Gate`. Never perform the refiner's analysis inline, and never delegate a GitHub write or an `AskUserQuestion` to a subagent (see the `subagent-safety` skill).
 
 ## Process
 
@@ -140,7 +133,15 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
 
 ## Confirmation Gate
 
-Placed here — between Process step 9 (the proposal is adopted) and `## Update Ticket` below — this gate performs **zero** GitHub writes; it only classifies, asks, computes, and renders. **No proposal-related GitHub write occurs before** its single confirmation. Steps 10-13 below then consume everything this gate computes; they never recompute a verdict or a label set.
+Placed here — between Process step 9 (the proposal is adopted) and `## Update Ticket` below — this gate performs **zero** GitHub writes; it only classifies, asks, computes, and renders. **No GitHub write of any kind occurs before** its single confirmation — the ownership claim, the `Working` label, and every ticket/label/sub-issue mutation all wait for it. Steps 10-13 below then consume everything this gate computes; they never recompute a verdict or a label set. A split proposal must also clear the Coverage gate precondition immediately below before this gate renders anything.
+
+#### Coverage gate — verify the split's acceptance-criteria partition
+
+Before rendering a manifest for a proposal carrying a `### Suggested Split`, run the structural completeness check first, the acceptance-criteria partition check second — both within this same gate, both gating the same pre-render stop point.
+
+**Structural completeness check.** For every child block in the adopted `### Suggested Split`, verify all five subsections are present: `### Goal`, `### Decisions`, `### Assumptions (auto-adopted)`, `### Acceptance criteria`, and `### Dependencies`. Each present subsection must also satisfy its emptiness rule: `### Goal` must contain non-empty prose — never a placeholder or blank section; `### Dependencies` must be non-empty ("None." is a valid value when the child truly has no dependencies); `### Decisions` and `### Assumptions (auto-adopted)` must each be non-empty or exactly "None."; `### Acceptance criteria` may be empty only for a child the partition assigned zero criteria (e.g. a design-only first child). If any child is missing a subsection or violates its emptiness rule, STOP before any child creation — render no manifest, ask no confirmation, create no tickets, run no Pass 2 — and report the violating child's `(K/N)` title and the missing or empty section(s) so the split can be corrected in another refinement round. This check only confirms presence/absence and does not itself judge whether an empty `### Acceptance criteria` section is legitimate — the acceptance-criteria partition check below is the sole verifier of correct assignment, and a child wrongly left empty will surface there as an unassigned criterion.
+
+**Acceptance-criteria partition check.** Only after the structural completeness check passes for every child, verify the proposal partitions the parent's acceptance criteria per `agents/refiner.md`'s **Acceptance-criteria partition** rule: every `- [ ]` item in the proposal's `### Acceptance Criteria` must appear in exactly one child's `### Acceptance criteria` checklist (scoped rewording is fine as long as the mapping is evident), and no criterion may appear under two children. If any criterion is unassigned or duplicated, STOP — render no manifest, ask no confirmation, create no tickets, run no Pass 2 — and report the violating criteria to the user so the split can be corrected in another refinement round. Nothing has been written at this point, so stopping here is free; proceeding would mint children whose closure can no longer prove the parent's criteria (#661), or, per the structural check above, whose `Refined` label is not truthful (#872).
 
 1. **Per-child classification** — only when the adopted proposal carries a `### Suggested Split`. For each proposed child K, apply the `frontend-classification` reference skill to **that child's own block text** (its title, `### Goal`, and `### Acceptance criteria`) — never an inlined keyword list; that skill is the single source of truth. Record `childIsFrontend(K)` and `childVisualCheck(K)` (the visual-check signal subset) per child.
 
@@ -154,22 +155,22 @@ Placed here — between Process step 9 (the proposal is adopted) and `## Update 
    `effective grant(T) = ### Automation verdict for T is exactly "grant" AND NOT isDesignTicket AND NOT browserRequired AND NOT visual-check-signals-match` (each override evaluated for T itself — the parent's own `isDesignTicket`/`browserRequired`/visual-check match for the parent; for a child K, `isDesignTicket(K)` is true only when K is the design-only child produced by a Design-first split (the child seeded with `["Refined","Design"]` in Pass 1) — never derived from or equal to `childIsFrontend(K)` — plus that child's own `childBrowserRequired(K)` and `childVisualCheck(K)`).
    **Fail-closed default preserved**: an absent/empty `### Automation` entry for T, or any value other than exactly `grant`, is `withhold`.
 
-5. **Compute the label set per ticket**: the parent's set is computed per steps 11-12 below (unchanged in shape; steps 11-12 consume the gate-computed values rather than recomputing them); each child's set = inherited non-excluded parent labels + `Refined` [+ `Design` for the design child] [+ `Browser` when `childBrowserRequired(K)`] [+ `ui:visual-check` when `childVisualCheck(K)` and the child is not the design child] [+ `automerge:ok` when its effective grant holds]. The "inherited non-excluded parent labels" shown here and in the manifest below are a preview: they are resolved definitively at write time by step 10's own parent-metadata fetch (the **Parent metadata for inherited labels/milestone** sub-step, run just before Pass 1), which may see a different label set if the parent changed between the gate and the write — this is cosmetic-label drift only. The gate's own `automerge:ok`/`Browser`/`ui:visual-check` computation above is authoritative and does not change at write time.
+5. **Compute the label set per ticket**: the parent's set is computed per steps 11-12 below (unchanged in shape; steps 11-12 consume the gate-computed values rather than recomputing them); each child's set = inherited non-excluded parent labels + `Refined` [+ `Design` for the design child] [+ `Browser` when `childBrowserRequired(K)`] [+ `ui:visual-check` when `childVisualCheck(K)` and the child is not the design child] [+ `automerge:ok` when its effective grant holds]. **Record the gate-time parent snapshot** — the parent's current `labels` and `milestone`, as fetched for this gate — as the basis for "inherited non-excluded parent labels" above; this is a preview, not a promise. It is reconfirmed at write time by `## Update Ticket`'s **Manifest revalidation** sub-step (run before the first write), which re-fetches the parent and diffs it against this gate-time snapshot. That diff is split into two kinds: **authorization-sensitive drift** — a change in `automerge:ok`, `Browser`, or `ui:visual-check` on the parent between the gate and the write — versus **cosmetic drift** — everything else (milestone, `area:*`, priority, team, `Design`, or any other label). The gate's own `automerge:ok`/`Browser`/`ui:visual-check` computation above is authoritative for what this run computed and does not itself change; it is the parent's *current remote state* that may have moved, which is exactly what the revalidation sub-step exists to catch.
 
-6. **Render** the complete adopted proposal, followed by a manifest: one row per ticket to be updated or created, with its title, final label set, and `grant`/`withhold` plus a one-line rationale. If the parent already carries sub-issues from a prior run, state in the manifest that those existing children will not be modified — and note that a child created before this gate existed may still carry a legacy `automerge:ok`/`Browser`/`ui:visual-check` grant inherited under the old behavior; this run does not audit or revoke it, since the unmodified child is untouched by design.
+6. **Render** the complete adopted proposal, followed by a manifest: one row per ticket to be updated or created, with its title, final label set, its milestone, its intended hierarchy/dependencies (`Related to` / `Depends on` / `Parallel with` lines and native sub-issue links), and `grant`/`withhold` plus a one-line rationale. Include a row for the parent's own pending mutations: the ownership claim (or `already owned by you` when `ownershipState` is `owned-by-caller`) and the `Working` label transition. If the parent already carries sub-issues from a prior run, state in the manifest that those existing children will not be modified — and note that a child created before this gate existed may still carry a legacy `automerge:ok`/`Browser`/`ui:visual-check` grant inherited under the old behavior; this run does not audit or revoke it, since the unmodified child is untouched by design.
 
 7. **One confirmation.** Ask, via `AskUserQuestion`:
    "Apply this refinement as shown?"
    Options: "Confirm — apply as shown" / "Decline — make no changes". No adjust loop — a decline requires a fresh `/cenci:refine <id>` run to change anything.
 
-8. **Decline** ⇒ no ticket, label, or sub-issue mutation of any kind; jump straight to step 13's declined-cleanup branch below, and report that `Working` and the assignee claim remain (removing them would itself be a mutation the Decisions section forbids) and that re-running `/cenci:refine <id>` is how to adjust the proposal.
+8. **Decline** ⇒ zero GitHub writes have occurred and none will occur — no ownership claim, no `Working` label, no ticket/label/sub-issue mutation of any kind — so no cleanup mutation is needed: title, body, labels, assignees, milestone, and native sub-issues are state-for-state exactly as they were when this run started. Jump straight to step 13's declined-cleanup branch below, and report that re-running `/cenci:refine <id>` is how to adjust the proposal.
 
 **Confirm** ⇒ continue into `## Update Ticket` below, where steps 10-13 apply every effective verdict and label set exactly as rendered in the manifest.
 
 ## Update Ticket
 
 > **CRITICAL**: This section is mandatory after refinement. Do NOT skip it.
-> **No proposal-related GitHub write occurs before** the human confirms at the `## Confirmation Gate` above — that gate, not the Q&A loop (steps 6-8), is the pre-write authorization boundary. The Q&A loop only shapes the proposal's content; steps 10-13 below execute only after the gate's Confirm branch, and a Decline stops before any of them run (see step 13's declined branch).
+> **No GitHub write of any kind occurs before** the human confirms at the `## Confirmation Gate` above — that gate, not the Q&A loop (steps 6-8), is the pre-write authorization boundary. The Q&A loop only shapes the proposal's content; steps 10-13 below execute only after the gate's Confirm branch, and a Decline stops before any of them run (see step 13's declined branch).
 
 > **Write-failure protocol**: Every *edit* in this section (ticket body/title updates, parent tracking updates, label add/remove) MUST be verified by re-fetching the resource with `gh issue view ... --json ...` and confirming the expected change is actually present — a command exiting 0 is not sufficient proof. Ticket *creation* is the one exception: `--jq .number` on the `gh api repos/...` response returns the new issue number directly — a numeric value is the proof; empty output, non-numeric output, or a non-zero exit is a failed create, so no separate re-fetch is required there. A malformed JSON payload surfaces as an API 4xx parse error and is itself a failed write — handle it with the single documented retry below, not a hand-patch loop. This retry also covers the local `Write` tool call that authors the raw title/body files and the `jq -n --rawfile` invocation that composes the JSON payload from them (see the `shell-rules` skill's canonical snippet): if a raw-file `Write` call fails, or the subsequent `jq` invocation exits non-zero, or the payload file is missing/empty/stale when the `gh api repos/... --input` command is about to read it, retry the failed step (`Write` or `jq`) once before (re-)invoking that `gh api repos/...` command — do not assume a local Write or jq failure is instead an API-side rejection. If the write or the verification fails:
 > 1. Report the error to the user.
@@ -178,7 +179,55 @@ Placed here — between Process step 9 (the proposal is adopted) and `## Update 
 
 **Per-run temp-file token**: The `<token>` used in every temp-file path of this section is the one created in Process step 3 — carry that same literal value forward; never mint a second token mid-run (two tokens in one run would orphan the earlier files from step 13's cleanup list).
 
-**Ensure gate-decided labels exist, before Pass 1.** Step 10's Pass 1 below may seed `automerge:ok`, `Browser`, and/or `ui:visual-check` directly into a child's create payload, and step 11 may add `automerge:ok` to the parent — `gh issue edit --add-label` fails when the label does not exist in the repository, so ensure all three exist now, before any child is created (the ensure-then-add rule already exists at `SKILL.md:87`; this only relocates it ahead of the writes that need it, using the same colors/descriptions as the canonical table at `configure/SKILL.md:715`). Run each ensure as its own Bash call — idempotent (`|| true`), so running one this run doesn't need is harmless:
+### Write order
+
+The canonical, machine-verified order of every GitHub write this skill performs, reached only via the gate's Confirm branch — nothing before this point ever writes:
+
+1. `claim` — the ownership claim, first write (`#### Ownership claim (first write)` below).
+2. `working` — the `Working` label ensure + add (`#### Label "Working"` below).
+3. `parent-body` — the parent ticket's title/body update (step 10).
+4. `child-create:1` immediately followed by its own `child-link:1`, then `child-create:2` immediately followed by its own `child-link:2`, and so on for every split child in dependency order (Pass 1) — every child's create+link pair completes before the next step.
+5. `parent-exec-order` — Pass 2's Execution Order note on the parent body when the split has real ordering (step 10 Pass 2(b)); the companion design ticket's create (when there is no split) happens in this same slot.
+6. `refined` — step 11's `Refined` label add / `Working` label removal.
+7. `visual-check` — step 12's `ui:visual-check` label add (skipped when `isDesignTicket`).
+
+#### Manifest revalidation (read-only — before the first write)
+
+Reached immediately after the gate's Confirm, before the ownership claim, before `Working`, before any other write. Fetch the parent's current milestone and labels **to a file**, as its own Bash call (a fetch failure then surfaces distinctly, before any write), mirroring the same pattern in `implement/phases/phase-9-pr.md`. This fetch is now **unconditional** — it runs on every Confirm, whether or not this run creates split children or a companion design ticket, because it also guards the parent's own label write (steps 11-12) against write-time drift, not only child/design-ticket inheritance. Do not reuse the `labels`/`milestone` already in context from the Context section's fetch or from the gate's own snapshot: both are stale by the time this runs, and externally-sourced label names must never be interpolated into a command line (`docs/skill-authoring.md`) — the file is consumed mechanically by `jq --slurpfile` below, never read back into shell text. The trailing `|| rm -f` is load-bearing: it removes a partially-written file so the presence gate below can never mistake one for a good fetch.
+```bash
+gh issue view <number> --repo <owner>/<repo> --json milestone,labels > ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-parent-meta.json || rm -f ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-parent-meta.json
+```
+
+**Presence gate — fail closed, zero writes (D1).** Read the file back, then validate its content is actually usable — an exit-0 `cat` alone is not proof the fetch produced real data:
+```bash
+cat ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-parent-meta.json
+```
+```bash
+jq -e 'has("labels")' ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-parent-meta.json > /dev/null
+```
+If the `cat` command errors (non-zero exit, e.g. `No such file or directory`), OR the file exists but the `jq -e 'has("labels")'` check fails (empty file, malformed JSON, or valid JSON missing the expected `labels` shape) — treat a present-but-empty-or-malformed file exactly the same as a missing one, never as a good fetch — retry the fetch once. If it errors again by either check — the parent cannot be read after one retry — **STOP**: zero writes have occurred anywhere in this run, so stopping here is free (D1; converges with the fail-closed precedent for the identical fetch at `implement/phases/phase-9-pr.md:263` — that fetch's graceful-degrade rationale no longer applies here now that this fetch precedes every write instead of following one). Report that ticket #`<number>`'s metadata could not be fetched and that re-running `/cenci:refine <number>` is how to retry. Do not claim ownership, do not add `Working`, do not update the parent body, do not create children.
+
+**Drift classification — fail closed on authorization-sensitive drift (D2).** If the fetch succeeds, diff the freshly fetched `labels` against the gate-time parent snapshot recorded at step 5 of the `## Confirmation Gate` above:
+- **Authorization-sensitive drift** — the parent's `automerge:ok`, `Browser`, or `ui:visual-check` labels changed since the gate rendered its manifest: **STOP** — zero writes anywhere in this run — stop and ask for a fresh confirmation: report exactly what changed and tell the user to re-run `/cenci:refine <number>` from scratch. No in-session re-gate: the gate's single confirmation authorizes exactly the manifest it rendered, and re-rendering here would violate "steps 10-13 never recompute a verdict or a label set."
+- **Cosmetic drift** — any other label or milestone change (e.g. `area:*`, priority, team, `Design`, milestone): proceed with the freshly fetched snapshot (not the gate-time one) for every inheritance decision below, and disclose the cosmetic label drift in the **Final Message**.
+- **No drift**: proceed with the freshly fetched snapshot as normal.
+
+#### Ownership claim (first write)
+
+The first GitHub write of the run. Read the `ticket-ownership` reference skill's `## Claim ownership (mutating)` section and follow it — re-verify exclusive ownership as the first action after the gate's Confirm, using a fresh fetch: the `ownershipState` recorded in `## Ownership Inspection (read-only)` above may be stale by the time Confirm is reached, since time has passed for the Q&A loop and the gate's questions. If a conflict is found (a different assignee, or multiple assignees since the inspection), **STOP**: a conflict stops here with zero other writes — no `Working`, no parent body edit, no child creation — and report the observed state exactly as `ticket-ownership` specifies. Otherwise the claim proceeds and this run is now the ticket's sole assignee.
+
+#### Label "Working"
+
+Immediately after the ownership claim succeeds, add the "Working" label to signal that the ticket is actively being worked on. `gh issue edit --add-label` fails when the label does not exist in the repository, so ensure it exists first — run each as its own Bash call (`|| true` swallows only the "already exists" error):
+```bash
+gh label create "Working" --repo <owner>/<repo> --color "FBCA04" --description "Actively being refined, designed, or implemented" 2>/dev/null || true
+```
+```bash
+gh issue edit <number> --repo <owner>/<repo> --add-label "Working"
+```
+Apply the same ensure-then-add pattern to every label this skill applies later (`Refined`, `Design`, `Browser`, `ui:visual-check`, `automerge:ok`, …): before the first `--add-label <name>` of a label, run its `gh label create <name> … || true` with the color/description from the lifecycle table in `/cenci:configure`.
+
+**Ensure gate-decided labels exist, before Pass 1.** Step 10's Pass 1 below may seed `automerge:ok`, `Browser`, and/or `ui:visual-check` directly into a child's create payload, and step 11 may add `automerge:ok` to the parent — `gh issue edit --add-label` fails when the label does not exist in the repository, so ensure all three exist now, before any child is created (the ensure-then-add rule already exists in `#### Label "Working"` above; this only relocates it ahead of the writes that need it, using the same colors/descriptions as the canonical table at `configure/SKILL.md:715`). Run each ensure as its own Bash call — idempotent (`|| true`), so running one this run doesn't need is harmless:
 ```bash
 gh label create "automerge:ok" --repo <owner>/<repo> --color "006B75" --description "Human granted hands-off merge at refinement — babysit may merge this PR without review" 2>/dev/null || true
 ```
@@ -218,20 +267,7 @@ gh label create "ui:visual-check" --repo <owner>/<repo> --color "FEF2C0" --descr
 
    #### Parent metadata for inherited labels/milestone
 
-   Every ticket this skill creates — each split child **and** the companion design ticket — inherits the parent's milestone and its non-lifecycle labels, so a split never drops its children out of the milestone or loses the parent's `area:*`/priority/team labels. Skip this sub-step entirely when this run creates neither split children nor a companion design ticket; there is nothing to inherit into.
-
-   Fetch the parent's milestone and labels **to a file**, as its own Bash call (a fetch failure then surfaces distinctly, before any create), mirroring the same pattern in `implement/phases/phase-9-pr.md`. Do not reuse the `labels`/`milestone` already in context from the Context section's fetch: they are stale (this skill added `Working` to the parent after that fetch), and externally-sourced label names must never be interpolated into a command line (`docs/skill-authoring.md`) — the file is consumed mechanically by `jq --slurpfile` below, never read back into shell text. The trailing `|| rm -f` is load-bearing: it removes a partially-written file so the presence gate below can never mistake one for a good fetch.
-   ```bash
-   gh issue view <number> --repo <owner>/<repo> --json milestone,labels > ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-parent-meta.json || rm -f ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-parent-meta.json
-   ```
-
-   **Presence gate** — choose between the **with-meta** and **no-meta** payload forms at every creation site below by reading the file back:
-   ```bash
-   cat ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-parent-meta.json
-   ```
-   If the command errors (non-zero exit, e.g. `No such file or directory`), the metadata is absent → use the **no-meta** form. If it exits 0 and prints the JSON object, the metadata is present → use the **with-meta** form.
-
-   **On failure: retry once, then graceful-degrade — do NOT STOP.** If the fetch fails, retry it once. If it still fails, fall through to the **no-meta** form at every creation site and record that the **Final Message** must state that `milestone/label inheritance was skipped`. This deliberately differs both from the write-failure protocol governing every other write in this section and from the fail-closed treatment of the same fetch at `implement/phases/phase-9-pr.md` (whose risk was a runaway followup chain, not a missing label): inheritance here is cosmetic — a child created without the parent's milestone is still a correct, complete ticket — and STOPping at this point would abort the split *after* the parent's body was already rewritten, which is strictly worse than an un-inherited child.
+   Every ticket this skill creates — each split child **and** the companion design ticket — inherits the parent's milestone and its non-lifecycle labels, so a split never drops its children out of the milestone or loses the parent's `area:*`/priority/team labels. The fetch is unconditional now — it already ran, before the first write, in `#### Manifest revalidation (read-only — before the first write)` above, whose presence gate and drift classification already ran too. Reuse that same file here (`${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-parent-meta.json`) — do not re-fetch.
 
    **What is inherited.** Carry over every label the parent currently has except the 10 lifecycle/transient and per-ticket-grant markers — `"Refined","Working","Planned","In Review","Implemented","Design","Designed","automerge:ok","Browser","ui:visual-check"` — which are per-ticket state or per-ticket grants, never classification. The labels this skill seeds (`Refined`, plus `Design` for a design-only child or the companion design ticket) are applied on top regardless of what is carried over; each child's own earned `automerge:ok`/`Browser`/`ui:visual-check` (computed at the `## Confirmation Gate` above) are appended separately, per child, in Pass 1 below — never inherited from the parent's current labels. Two invariants carry over verbatim from phase-9's already-tested form, and are the non-obvious parts:
    - the milestone must be the numeric `.milestone.number`, not the title — the REST endpoint requires the id;
@@ -243,13 +279,7 @@ gh label create "ui:visual-check" --repo <owner>/<repo> --color "FEF2C0" --descr
 
    Split tickets must also receive the "Refined" label/tag since they were refined during this session — `/cenci:implement` checks for it as a pre-flight condition.
 
-   #### Coverage gate — verify the split's acceptance-criteria partition
-
-   Before creating any child, run the structural completeness check first, the acceptance-criteria partition check second — both within this same gate, both gating the same pre-create stop point.
-
-   **Structural completeness check.** For every child block in the adopted `### Suggested Split`, verify all five subsections are present: `### Goal`, `### Decisions`, `### Assumptions (auto-adopted)`, `### Acceptance criteria`, and `### Dependencies`. Each present subsection must also satisfy its emptiness rule: `### Goal` must contain non-empty prose — never a placeholder or blank section; `### Dependencies` must be non-empty ("None." is a valid value when the child truly has no dependencies); `### Decisions` and `### Assumptions (auto-adopted)` must each be non-empty or exactly "None."; `### Acceptance criteria` may be empty only for a child the partition assigned zero criteria (e.g. a design-only first child). If any child is missing a subsection or violates its emptiness rule, STOP before any child creation — create no tickets, run no Pass 2 — and report the violating child's `(K/N)` title and the missing or empty section(s) so the split can be corrected in another refinement round. This check only confirms presence/absence and does not itself judge whether an empty `### Acceptance criteria` section is legitimate — the acceptance-criteria partition check below is the sole verifier of correct assignment, and a child wrongly left empty will surface there as an unassigned criterion.
-
-   **Acceptance-criteria partition check.** Only after the structural completeness check passes for every child, verify the proposal partitions the parent's acceptance criteria per `agents/refiner.md`'s **Acceptance-criteria partition** rule: every `- [ ]` item in the proposal's `### Acceptance Criteria` must appear in exactly one child's `### Acceptance criteria` checklist (scoped rewording is fine as long as the mapping is evident), and no criterion may appear under two children. If any criterion is unassigned or duplicated, STOP — create no tickets, run no Pass 2 — and report the violating criteria to the user so the split can be corrected in another refinement round. Unlike the write-failure protocol governing the writes below, nothing has been written at this point, so stopping here is free; proceeding would mint children whose closure can no longer prove the parent's criteria (#661), or, per the structural check above, whose `Refined` label is not truthful (#872).
+   The **Coverage gate — verify the split's acceptance-criteria partition** already ran, pre-render, as a precondition of the `## Confirmation Gate` above — a split that reaches this point already passed both the structural completeness check and the acceptance-criteria partition check, so Pass 1 below never re-verifies them.
 
    #### Pass 1: Create children with numbered titles and dependency info
 
@@ -265,21 +295,15 @@ gh label create "ui:visual-check" --repo <owner>/<repo> --color "FEF2C0" --descr
 
    Capture each created issue number from the command output.
 
-   Use the `Write` tool to create the raw title and body as plain text — `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt` (`<ticket-title> (K/N)`) and `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md` (`Related to #<original-number>\nDepends on #<sibling-number>\nParallel with #<sibling-number>\n\n<ticket-body>\n\n### Acceptance Criteria\n- [ ] <each criterion the split assigned to this child>`) — never a hand-escaped JSON literal; the title is free text and must never be interpolated directly into the command line. `<ticket-body>` here is that child's **full block** from the proposal's `### Suggested Split` — its `### Goal`, `### Decisions`, and `### Assumptions (auto-adopted)` subsections — so the created ticket is plannable without consulting the parent (AC 5); its own `### Acceptance criteria` and `### Dependencies` subsections are not repeated verbatim here, since the checklist appended by this template (sourced from the coverage-gate-verified partition) and the `Depends on #<sibling-number>` / `Parallel with #<sibling-number>` lines above already cover that content. Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet, in whichever of the two forms the presence gate above selected. The parent's label names are externally sourced, so they enter the payload **only** via `--slurpfile` from the fetched metadata file — never interpolated into the command line, and `jq` cannot let slurped content influence the payload's structure.
+   Use the `Write` tool to create the raw title and body as plain text — `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt` (`<ticket-title> (K/N)`) and `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md` (`Related to #<original-number>\nDepends on #<sibling-number>\nParallel with #<sibling-number>\n\n<ticket-body>\n\n### Acceptance Criteria\n- [ ] <each criterion the split assigned to this child>`) — never a hand-escaped JSON literal; the title is free text and must never be interpolated directly into the command line. `<ticket-body>` here is that child's **full block** from the proposal's `### Suggested Split` — its `### Goal`, `### Decisions`, and `### Assumptions (auto-adopted)` subsections — so the created ticket is plannable without consulting the parent (AC 5); its own `### Acceptance criteria` and `### Dependencies` subsections are not repeated verbatim here, since the checklist appended by this template (sourced from the coverage-gate-verified partition) and the `Depends on #<sibling-number>` / `Parallel with #<sibling-number>` lines above already cover that content. Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet. The parent's label names are externally sourced, so they enter the payload **only** via `--slurpfile` from the metadata file fetched in `#### Manifest revalidation (read-only — before the first write)` — never interpolated into the command line, and `jq` cannot let slurped content influence the payload's structure.
 
-   **With-meta** (the parent-metadata fetch above succeeded):
    ```bash
    jq -n --rawfile title ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt --rawfile body ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md --slurpfile meta ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-parent-meta.json '{title: ($title | rtrimstr("\n")), body: $body, labels: (["Refined"] + [$meta[0].labels[].name | select(. as $n | (["Refined","Working","Planned","In Review","Implemented","Design","Designed","automerge:ok","Browser","ui:visual-check"] | index($n)) | not)])} + (if ($meta[0].milestone.number // "") != "" then {milestone: $meta[0].milestone.number} else {} end)' > ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K.json
    ```
 
-   **No-meta** (the fetch still failed after its one retry — the graceful degrade above; `labels` is `["Refined"]` only, no `milestone` key):
-   ```bash
-   jq -n --rawfile title ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt --rawfile body ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md '{title: ($title | rtrimstr("\n")), body: $body, labels: ["Refined"]}' > ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K.json
-   ```
+   **Ordered append for earned labels.** The form above shows the **nothing-earned** case verbatim — `(["Refined"] + […])`. When the Confirmation Gate computed (step 5 above) that this child earns any of `automerge:ok`, `Browser`, or `ui:visual-check`, extend the leading array literal by appending each earned label — in that fixed order for each label the child earned at the gate — onto `"Refined"` before running `jq`; never reorder, and never append a label the gate did not compute for this child. Worked max-case example (a non-design child earning all three): the `labels` value becomes `(["Refined","automerge:ok","Browser","ui:visual-check"] + [$meta[0].labels[].name | select(...)])` — the `select(...)` exclusion clause is unchanged from the base form above.
 
-   **Ordered append for earned labels.** Both forms above show the **nothing-earned** case verbatim — `(["Refined"] + […])` with-meta, `labels: ["Refined"]` no-meta. When the Confirmation Gate computed (step 5 above) that this child earns any of `automerge:ok`, `Browser`, or `ui:visual-check`, extend the leading array literal in whichever form ran by appending each earned label — in that fixed order for each label the child earned at the gate — onto `"Refined"` before running `jq`; never reorder, and never append a label the gate did not compute for this child. Worked max-case example (a non-design child earning all three, with-meta form): the `labels` value becomes `(["Refined","automerge:ok","Browser","ui:visual-check"] + [$meta[0].labels[].name | select(...)])` — the `select(...)` exclusion clause is unchanged from the base form above.
-
-   Then, whichever form ran:
+   Then:
    ```bash
    gh api repos/<owner>/<repo>/issues -X POST --input ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K.json --jq .number
    ```
@@ -305,7 +329,7 @@ gh label create "ui:visual-check" --repo <owner>/<repo> --color "FEF2C0" --descr
 
    Omit `Depends on` / `Parallel with` lines that don't apply (e.g. the first child typically has no dependencies).
 
-   Design-only children (see **Design-first splits** above) additionally carry `"Design"` in that child's JSON `labels` array — the seed array becomes `["Refined","Design"]` in whichever form ran (with-meta: `(["Refined","Design"] + [ …carried-over parent labels… ])`; no-meta: `labels: ["Refined","Design"]`) — and their body includes the `### Design Direction` section from this refinement (that's where `/cenci:design` reads it from). A design-only first child is a real child of the parent → link it as a sub-issue exactly like the others.
+   Design-only children (see **Design-first splits** above) additionally carry `"Design"` in that child's JSON `labels` array — the seed array becomes `(["Refined","Design"] + [ …carried-over parent labels… ])` — and their body includes the `### Design Direction` section from this refinement (that's where `/cenci:design` reads it from). A design-only first child is a real child of the parent → link it as a sub-issue exactly like the others.
 
    #### Pass 2: Final sub-issue verification and (if ordered) an Execution Order note
 
@@ -340,18 +364,13 @@ gh label create "ui:visual-check" --repo <owner>/<repo> --color "FEF2C0" --descr
 
    If `designNeeded` is true, the ticket is **not** being split, and `isDesignTicket` is false, create a dedicated design ticket — design never runs on the implementation ticket itself:
 
-   Use the `Write` tool to create the raw title and body as plain text — `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-title.txt` (`Design: <feature title>`) and `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-body.md` (`Related to #<number>\nBlocks #<number>\n\n### Goal\nProduce the design spec (`.pen` + `DESIGN.md`) for #<number> via `/cenci:design`.\n\n### Design Direction\n<the Design Direction section from this refinement>`) — never a hand-escaped JSON literal; the title is free text and must never be interpolated directly into the command line. Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet, in whichever of the two forms the presence gate in **Parent metadata for inherited labels/milestone** selected — the companion design ticket inherits exactly like a split child, with `["Refined","Design"]` as its seed array, and — same 10-entry exclusion set as Pass 1 above — never `automerge:ok`, `Browser`, or `ui:visual-check`: a design ticket never receives `automerge:ok` (it always fails the `NOT isDesignTicket` override), and never receives `Browser`/`ui:visual-check` either (steps 2 and 12's design skip apply here too):
+   Use the `Write` tool to create the raw title and body as plain text — `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-title.txt` (`Design: <feature title>`) and `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-body.md` (`Related to #<number>\nBlocks #<number>\n\n### Goal\nProduce the design spec (`.pen` + `DESIGN.md`) for #<number> via `/cenci:design`.\n\n### Design Direction\n<the Design Direction section from this refinement>`) — never a hand-escaped JSON literal; the title is free text and must never be interpolated directly into the command line. Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet — the companion design ticket inherits exactly like a split child, with `["Refined","Design"]` as its seed array, and — same 10-entry exclusion set as Pass 1 above — never `automerge:ok`, `Browser`, or `ui:visual-check`: a design ticket never receives `automerge:ok` (it always fails the `NOT isDesignTicket` override), and never receives `Browser`/`ui:visual-check` either (steps 2 and 12's design skip apply here too):
 
-   **With-meta** (the parent-metadata fetch succeeded):
    ```bash
    jq -n --rawfile title ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-title.txt --rawfile body ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-body.md --slurpfile meta ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-parent-meta.json '{title: ($title | rtrimstr("\n")), body: $body, labels: (["Refined","Design"] + [$meta[0].labels[].name | select(. as $n | (["Refined","Working","Planned","In Review","Implemented","Design","Designed","automerge:ok","Browser","ui:visual-check"] | index($n)) | not)])} + (if ($meta[0].milestone.number // "") != "" then {milestone: $meta[0].milestone.number} else {} end)' > ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design.json
    ```
 
-   **No-meta** (the fetch still failed after its one retry — the graceful degrade above; `labels` is `["Refined","Design"]` only, no `milestone` key):
-   ```bash
-   jq -n --rawfile title ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-title.txt --rawfile body ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-body.md '{title: ($title | rtrimstr("\n")), body: $body, labels: ["Refined","Design"]}' > ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design.json
-   ```
-   Then, whichever form ran:
+   Then:
    ```bash
    gh api repos/<owner>/<repo>/issues -X POST --input ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design.json --jq .number
    ```
@@ -428,7 +447,7 @@ gh label create "ui:visual-check" --repo <owner>/<repo> --color "FEF2C0" --descr
    ```bash
    rm -f ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-bundle.md
    ```
-   Report plainly that no ticket, label, or sub-issue mutation occurred, that `Working` and the assignee claim remain (per the gate's step 8), and that re-running `/cenci:refine <number>` is how to adjust the proposal. Skip the rest of this step — do not check the `.ok` marker file, it was never expected to exist.
+   Report plainly that zero GitHub writes occurred (per the gate's step 8 — title, body, labels, assignees, milestone, and native sub-issues are state-for-state unchanged) and that re-running `/cenci:refine <number>` is how to adjust the proposal. Skip the rest of this step — do not check the `.ok` marker file, it was never expected to exist.
 
    For a Confirm run, check whether this run completed successfully by attempting to read the marker file:
    ```bash
@@ -448,7 +467,7 @@ gh label create "ui:visual-check" --repo <owner>/<repo> --color "FEF2C0" --descr
 
 The complete adopted proposal was already rendered once, at the `## Confirmation Gate` above, before any write — do not re-print it here. After steps 10-13 complete, present only a persistence notice plus a per-ticket verdict summary confirming that what was applied matches what was confirmed:
 
-> Ticket #`<n>` updated. Labels: Refined[, Design][, Browser][, ui:visual-check][, automerge:ok]. [Created `N` child tickets: #`<c1>` (automerge: grant|withhold)[, #`<c2>` (automerge: grant|withhold)…].] [Created companion design ticket #`<D>`.] [Note: milestone/label inheritance was skipped — the parent's metadata could not be fetched, so the created tickets carry only their seed labels and no milestone.]
+> Ticket #`<n>` updated. Labels: Refined[, Design][, Browser][, ui:visual-check][, automerge:ok]. [Created `N` child tickets: #`<c1>` (automerge: grant|withhold)[, #`<c2>` (automerge: grant|withhold)…].] [Created companion design ticket #`<D>`.] [Note: cosmetic label drift was detected on the parent between the gate and the write — <what changed>; every applied label and grant/withhold decision above still matches what you confirmed, since only non-authorization-sensitive labels moved.]
 >
 > Every applied label and grant/withhold decision matches what you confirmed at the gate above.
 
