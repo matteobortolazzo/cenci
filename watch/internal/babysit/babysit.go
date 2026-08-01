@@ -17,6 +17,15 @@ import (
 
 const fixCap = 3
 
+// stateSchemaVersion is State's persisted schema version. Version 2 (#885)
+// adds LaunchedKeys, split out of AddressedKeys' old dual role as both
+// resolution truth and launch-dedup marker -- a dedup key must never double
+// as merge authorization. load()'s migration seeds LaunchedKeys from
+// PendingKeys for any state below this version, so a supervisor upgraded
+// mid-episode does not fire one spurious address-review relaunch for work
+// already dispatched under the old schema.
+const stateSchemaVersion = 2
+
 type Options struct {
 	PR, Agent, StateDir string
 	Interval            time.Duration
@@ -35,16 +44,25 @@ type State struct {
 	LastCommentAt       string   `json:"lastCommentTimestamp,omitempty"`
 	AddressedKeys       []string `json:"addressedCommentKeys,omitempty"`
 	PendingKeys         []string `json:"pendingCommentKeys,omitempty"`
-	PendingCommentAt    string   `json:"pendingCommentTimestamp,omitempty"`
+	// LaunchedKeys records which currently-pending keys already had an
+	// address-review workflow dispatched for their *current* resolution
+	// episode (#885). It is launch-dedup bookkeeping ONLY -- a key's
+	// presence here means nothing more than "don't relaunch this episode's
+	// workflow again"; it is never merge authorization, and resolution truth
+	// stays entirely AddressedKeys/PendingKeys' job. A key drops out of
+	// LaunchedKeys the moment reconcileFeedback resolves it, so a later
+	// reopen of the same key starts its new episode unlaunched and is picked
+	// up by tick's PendingKeys-\-LaunchedKeys launch trigger again.
+	LaunchedKeys     []string `json:"launchedFeedbackKeys,omitempty"`
+	PendingCommentAt string   `json:"pendingCommentTimestamp,omitempty"`
 	// PendingHeadSHA is repair-attempt/deduplication metadata only -- it
 	// records the head commit SHA at the moment new feedback was detected --
 	// and is never proof of resolution (#850). A push landing after this SHA
 	// (repair or otherwise) does not, by itself, mean a reviewer accepted
-	// anything; only reconcilePendingFeedback's GitHub-authoritative check
-	// (resolved review thread, or a dismissed/superseded CHANGES_REQUESTED
-	// review) clears a PendingKeys entry. Still written at detection time
-	// (see the new-key append below), just no longer read to decide
-	// resolution.
+	// anything; only reconcileFeedback's GitHub-authoritative check (resolved
+	// review thread, or a dismissed/superseded CHANGES_REQUESTED review)
+	// clears a PendingKeys entry. Still written at detection time (see the
+	// new-key append below), just no longer read to decide resolution.
 	PendingHeadSHA string    `json:"pendingCommentHeadSha,omitempty"`
 	PID            int       `json:"pid,omitempty"`
 	Status         string    `json:"status"`
@@ -180,7 +198,7 @@ func Run(o Options) error {
 		return errors.New("existing supervisor state belongs to different repository or agent")
 	}
 	s.PR = o.PR
-	s.SchemaVersion = 1
+	s.SchemaVersion = stateSchemaVersion
 	s.Repo = repo
 	s.Agent = o.Agent
 	s.IntervalSeconds = int64(o.Interval.Seconds())
@@ -322,21 +340,40 @@ func tick(s *State) (bool, time.Duration, error) {
 	}
 	keys, newest := detectNewFeedbackKeys(s, comments, reviews)
 	if len(keys) > 0 {
-		if err := launch(s, "address-review", s.PR); err != nil {
-			recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
-			return false, 0, err
-		}
 		s.PendingKeys = append(s.PendingKeys, keys...)
 		s.PendingCommentAt = newest
 		s.PendingHeadSHA = pr.HeadRefOID
 		actionable = true
 	}
-	// #850: re-fetch authoritative review-feedback state at the end of tick,
-	// after this tick's new keys are appended and immediately before the
-	// automerge decision (Q6) -- runs unconditionally, regardless of whether
-	// automerge itself is enabled, since the launch-dedup/AddressedKeys
-	// bookkeeping it performs matters independent of automerge.
-	verdict := reconcilePendingFeedback(s, reviews, reviewsComplete)
+	// #850/#885: re-fetch authoritative review-feedback state at the end of
+	// tick, after this tick's new keys are recorded, and immediately before
+	// deciding what (if anything) to (re)launch -- runs unconditionally,
+	// regardless of whether automerge itself is enabled, since the
+	// launch-dedup/AddressedKeys bookkeeping it performs matters independent
+	// of automerge. reconcileFeedback also reclassifies every previously-
+	// addressed key against fresh GitHub state (#885), so a reopened thread
+	// or review is caught here even though its key already lives in
+	// AddressedKeys; verdict.Reopened names any such key.
+	verdict := reconcileFeedback(s, reviews, reviewsComplete)
+	if len(verdict.Reopened) > 0 {
+		actionable = true
+	}
+	// #885: the single per-tick address-review launch trigger, driven by
+	// PendingKeys \ LaunchedKeys -- covers both this tick's brand-new keys
+	// and any key reconcileFeedback just reopened above, exactly once per
+	// resolution episode (Decision 3). A launch failure still leaves the
+	// keys recorded as pending (merge safety must not depend on launch
+	// success) but out of LaunchedKeys, so the very next tick retries --
+	// matching today's effectively-unbounded retry behavior, no
+	// fixCap-style cap.
+	if toLaunch := removeKeys(s.PendingKeys, s.LaunchedKeys); len(toLaunch) > 0 {
+		if err := launch(s, "address-review", s.PR); err != nil {
+			recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
+			return false, 0, err
+		}
+		s.LaunchedKeys = append(s.LaunchedKeys, toLaunch...)
+		actionable = true
+	}
 	if runAutomerge(s, pr, checks, verdict, commentsComplete, reviewsComplete) {
 		actionable = true
 	}
@@ -363,8 +400,8 @@ func launch(s *State, workflow, arg string) error {
 // detectNewFeedbackKeys is the pure, read-only new-feedback detection
 // predicate, extracted out of tick's own inline loop so both tick and the
 // pre-merge re-check (merge.go's recheckAutomergeInputs) share exactly one
-// implementation (#854's rejected "reuse reconcilePendingFeedback"
-// alternative: that function mutates State and re-fetches GraphQL thread
+// implementation (#854's rejected "reuse reconcileFeedback" alternative:
+// that function mutates State and re-fetches GraphQL thread
 // resolution, risking double-bookkeeping and unable to detect feedback that
 // landed strictly between this tick's own fetch and the merge attempt).
 // Given s's already-recorded AddressedKeys/PendingKeys and LastCommentAt, it
@@ -461,6 +498,21 @@ func load(path string) State {
 	b, e := os.ReadFile(path)
 	if e == nil {
 		_ = json.Unmarshal(b, &s)
+	}
+	// Schema migration (#885): a state persisted below stateSchemaVersion
+	// predates LaunchedKeys -- its PendingKeys already represents in-flight
+	// feedback dispatched under the old AddressedKeys-as-dedup scheme, so
+	// seed LaunchedKeys from it here, before Run() (or any other caller)
+	// ever overwrites s.SchemaVersion, so an upgraded supervisor with
+	// in-flight feedback does not fire one spurious address-review relaunch
+	// for work already dispatched. Both the standalone `load()` callers
+	// (BlocksClose, `cenci babysit status`) and Run()'s own startup load see
+	// the migrated value.
+	if s.SchemaVersion < stateSchemaVersion {
+		if len(s.PendingKeys) > 0 {
+			s.LaunchedKeys = append(append([]string{}, s.LaunchedKeys...), s.PendingKeys...)
+		}
+		s.SchemaVersion = stateSchemaVersion
 	}
 	return s
 }
