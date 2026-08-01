@@ -486,7 +486,8 @@ deterministic maintenance checker automatically against doc-affecting changed fi
 every run — repairing safe findings and reporting the rest, no setup required. This is
 core correctness behavior: it still runs when `maintenance.enabled` is false. The optional
 `.cenci/config.json` `maintenance` block controls policy around that check:
-`checkDuringImplement: false` keeps the Phase 8 check but makes every repair report-only;
+`checkDuringImplement: false` keeps the Phase 8 check but makes every repair report-only,
+including CI-blocking `fail` results, which disables the Phase 9 push gate;
 `generatedDocs` controls marker-bounded generated-section maintenance; `remindAfterDays`
 sets reminder cadence; and `maintenance.enabled` gates only optional scheduled-maintenance
 and reminder UX. See [`flow/skills/configure/SKILL.md`](skills/configure/SKILL.md) for the
