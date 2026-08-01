@@ -19,6 +19,7 @@ Each project has its own `AGENTS.md` with project-specific context — ALWAYS re
 - Deliver every change as a PR unless told otherwise: commit in the worktree, push the branch, open a PR. Never commit directly to main.
 - Never use unchecked command substitution for security-critical paths (especially temp directories and config files) — explicitly verify command success before use; unchecked failures silently collapse to root-relative paths and undermine hardening.
 - When implementing from a plan or ticket, cross-check literal implementation against every section's stated intent — not just the Files to Modify wording — per `docs/plan-fidelity.md`.
+- Never report CI green from `conclusion` values — a running check's conclusion is empty, so a conclusion-only scan reads "still running" as "passed" (#900). Read `gh pr checks <pr> --json bucket,name,state`: green needs every bucket `pass`; name any `pending`. See `shell-rules`.
 - When a condition chain validates a config field, verify the subsequent action actually consumes that validated value — don't hardcode the action after checking structure. Validation gates only gate; wiring the value in is separate and can silently disconnect (#824).
 
 ## Build & Test

@@ -85,6 +85,40 @@ plain `--title` argument (out of scope for the `jq` pattern above).
 
 Never print or interpolate authentication tokens into command output.
 
+## Reading PR CI Status
+
+Never derive a PR's CI status from check *conclusions*. `gh pr view --json
+statusCheckRollup` leaves `conclusion` **empty** for a check that is still queued or
+running, so a conclusion-only scan silently reads "still running" as "passed" — the whole
+class of false-green PR reports (#900).
+
+Read the buckets instead, as one standalone call:
+
+```bash
+gh pr checks <pr-number> --repo <owner>/<repo> --json bucket,name,state
+```
+
+`bucket` is the settled classification: `pass`, `fail`, `pending`, `skipping`, or
+`cancel`. Classify strictly, matching what `cenci babysit` enforces before it will
+automerge (`watch/internal/babysit/automerge.go`), so an agent's answer and the
+supervisor's behavior can never disagree:
+
+- **Green** only when at least one check exists *and* every check is in `pass`.
+- Any check in `pending` → the answer is "still running", not green. Report those checks
+  by name and say what is still outstanding; never round them up to a pass.
+- `fail`, `cancel`, `skipping`, or an empty/unrecognized bucket → not green, each
+  reported as itself rather than folded into "failing".
+- **Zero checks** is *unknown*, never green — a PR whose workflows have not been created
+  yet looks identical to a PR with no CI at all.
+
+`gh pr checks` exits **8** while checks are pending and still writes valid JSON to stdout.
+Treat a non-zero exit as a genuine command failure only when the JSON does not decode — an
+exit code alone is neither a CI-failure signal nor a reason to report the read as broken.
+
+State the same distinction in prose: "CI is green" means every check finished and passed.
+While anything is pending, say so — "CI green except `<check>`, still running" — even when
+every finished check passed.
+
 ## Shell Portability
 
 Commands may run through zsh, bash, or another configured login shell. Prefer
