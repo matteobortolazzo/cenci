@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -162,7 +163,21 @@ func runCombinedPass(ctx context.Context, cfg Config, ctrl run.Controller, mut T
 	state.LastDispatched = *prior - before
 	state.LastSkipped = countSkipped(decisions)
 	state.LastError = sanitizeLastError(passError(dispatchErr, reconcileErr))
-	*windows = append(failedWindows(result.Failed), escalatedWindows(result.Escalated)...)
+	if errors.Is(reconcileErr, ErrReconcileStateUnreadable) {
+		// #883: a corruption-held pass produced no verdict -- result.Failed
+		// and result.Escalated are empty because the pass never ran, not
+		// because the tickets recovered. Rebuilding the badge list from them
+		// would clear every failed/escalated badge the last *successful*
+		// pass raised, rendering a held reconciler as "all healthy" in
+		// tmux/waybar -- the exact opposite of the hold's intent. Retain the
+		// previous pass's badges verbatim until a reconcile pass actually
+		// completes. Scoped to the sentinel only: a generic
+		// reconcile_pass_failed (collection error, gh outage) keeps today's
+		// rebuild-from-result behavior.
+		logf(out, "reconcile: state unreadable, retaining %d badge(s) from the last successful pass\n", len(*windows))
+	} else {
+		*windows = append(failedWindows(result.Failed), escalatedWindows(result.Escalated)...)
+	}
 	*headroom = computeHeadroom(cfg)
 	publish(ctx, attention, state, *windows, *headroom)
 }
@@ -179,6 +194,13 @@ func sanitizeLastError(s string) string {
 }
 
 func passError(dispatchErr, reconcileErr error) string {
+	// #883: the corruption sentinel outranks a simultaneous dispatchErr --
+	// unlike a transient dispatch failure, it is the only reason that
+	// persists until a human acts, so it must never be masked by a same-pass
+	// dispatch hiccup.
+	if errors.Is(reconcileErr, ErrReconcileStateUnreadable) {
+		return "reconcile_state_unreadable"
+	}
 	if dispatchErr != nil {
 		return "dispatch_pass_failed"
 	}

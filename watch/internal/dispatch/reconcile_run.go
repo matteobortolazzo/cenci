@@ -2,10 +2,10 @@ package dispatch
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -231,80 +231,6 @@ func countAttempts(repo string, number int) (int, error) {
 	return n, nil
 }
 
-// stateStore persists ReconcileState as JSON on disk.
-type stateStore struct {
-	path string
-}
-
-type reconcileState struct {
-	Observations  map[string]time.Time `json:"observations"`
-	ApplyFailures map[string]int       `json:"applyFailures"`
-}
-
-// DefaultStatePath resolves $XDG_STATE_HOME/cenci/reconcile.json, falling
-// back to ~/.local/state when XDG_STATE_HOME is unset.
-func DefaultStatePath() string {
-	dir := os.Getenv("XDG_STATE_HOME")
-	if dir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return ""
-		}
-		dir = filepath.Join(home, ".local", "state")
-	}
-	return filepath.Join(dir, "cenci", "reconcile.json")
-}
-
-// NewStateStore returns a disk-backed ReconcileStore. An empty path resolves
-// the XDG default.
-func NewStateStore(path string) ReconcileStore {
-	if path == "" {
-		path = DefaultStatePath()
-	}
-	return &stateStore{path: path}
-}
-
-// emptyReconcileState is the zero-value ReconcileState with both maps
-// initialized, so Load never hands a caller a nil map on any error path.
-func emptyReconcileState() ReconcileState {
-	return ReconcileState{Observations: map[string]time.Time{}, ApplyFailures: map[string]int{}}
-}
-
-func (s *stateStore) Load() (ReconcileState, error) {
-	data, err := os.ReadFile(s.path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return emptyReconcileState(), nil
-		}
-		return emptyReconcileState(), err
-	}
-	var st reconcileState
-	if err := json.Unmarshal(data, &st); err != nil {
-		return emptyReconcileState(), err
-	}
-	if st.Observations == nil {
-		st.Observations = map[string]time.Time{}
-	}
-	// Back-compat: a reconcile.json written before #265 has no "applyFailures"
-	// key at all, so st.ApplyFailures unmarshals to nil. Back-fill to an empty
-	// map, mirroring Observations above, so callers never see a nil map.
-	if st.ApplyFailures == nil {
-		st.ApplyFailures = map[string]int{}
-	}
-	return ReconcileState(st), nil
-}
-
-func (s *stateStore) Save(state ReconcileState) error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(reconcileState(state), "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(s.path, data, 0o644)
-}
-
 // reconcileDeps are the collected, impure inputs to a reconcile pass. Separating
 // them from RunReconcileOnce lets applyReconcile be exercised without gh.
 type reconcileDeps struct {
@@ -331,6 +257,18 @@ type reconcileDeps struct {
 func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer, store ReconcileStore) (ReconcileResult, error) {
 	if out == nil {
 		out = os.Stdout
+	}
+
+	// Pre-collection hold probe (#883): reuses the same Load classification
+	// applyReconcile's own authoritative load will use later in this same
+	// pass, so a held pass (unreadable/corrupt/schema-mismatched/invalid
+	// state) burns zero gh issue list/view budget on collection before
+	// applyReconcile inevitably aborts anyway. The loaded state itself is
+	// discarded here -- applyReconcile always reloads it fresh -- so this
+	// probe can never diverge from the abort contract's real coverage.
+	if _, err := store.Load(); err != nil {
+		logf(out, "reconcile: state unreadable, holding pass (no mutations, state not overwritten): %v\n", err)
+		return ReconcileResult{}, err
 	}
 
 	// The reconciler deliberately never runs the local-main sync (#822):
@@ -398,6 +336,13 @@ func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer,
 		Now:             time.Now(),
 		PlanProbes:      planProbes,
 	}, mut, dryRun, out, store)
+	// #883: firstNonNil would let a same-pass collectErr mask the corruption
+	// sentinel whenever collection also failed (a likely co-occurrence, e.g.
+	// both driven by a wider outage) -- the sentinel must win so a held pass
+	// is never misreported as an ordinary reconcile_pass_failed.
+	if errors.Is(applyErr, ErrReconcileStateUnreadable) {
+		return result, applyErr
+	}
 	return result, firstNonNil(collectErr, applyErr)
 }
 
@@ -410,12 +355,17 @@ func applyReconcile(cfg Config, deps reconcileDeps, mut TicketMutator, dryRun bo
 	}
 
 	state, err := store.Load()
-	var firstErr error
 	if err != nil {
-		logf(out, "reconcile: loading state: %v\n", err)
-		state = ReconcileState{}
-		firstErr = err
+		// #883: any non-nil Load error aborts the mutating pass before
+		// Reconcile() ever runs and before the dryRun return below --
+		// default-deny for a third-party ReconcileStore, not only the
+		// sentinel. State is never overwritten (store.Save is unreachable
+		// past this point in the same pass, AC #3), and the corrupt file
+		// survives untouched for manual inspection.
+		logf(out, "reconcile: state unreadable, holding pass (no mutations, state not overwritten): %v\n", err)
+		return ReconcileResult{}, err
 	}
+	var firstErr error
 	obs := state.Observations
 	if obs == nil {
 		obs = map[string]time.Time{}

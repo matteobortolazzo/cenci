@@ -3,6 +3,7 @@ package dispatch
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -198,6 +199,7 @@ func TestSanitizeLastError(t *testing.T) {
 	}{
 		{name: "empty passthrough", input: "", want: ""},
 		{name: "current enum literal unchanged", input: "dispatch_pass_failed", want: "dispatch_pass_failed"},
+		{name: "reconcile_state_unreadable token unchanged (#883)", input: "reconcile_state_unreadable", want: "reconcile_state_unreadable"},
 		{name: "pipe", input: "boom | bang", want: "boom bang"},
 		{name: "newline", input: "line1\nline2", want: "line1 line2"},
 		{name: "CRLF collapses to one space", input: "a\r\nb", want: "a b"},
@@ -210,6 +212,122 @@ func TestSanitizeLastError(t *testing.T) {
 			got := sanitizeLastError(tt.input)
 			if got != tt.want {
 				t.Errorf("sanitizeLastError(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// -- #883: badge retention on a corruption-held reconcile pass (Q2) --
+
+// TestCombinedTickRetainsPriorBadgesWhenReconcileStateUnreadable is the
+// direct regression test for Q2: when reconciliation aborts on the
+// corruption sentinel, result.Failed/result.Escalated are empty because the
+// pass never ran (not because the tickets recovered). runCombinedPass must
+// retain the caller-owned windows slice verbatim rather than rebuilding it
+// from the (empty) result, which would otherwise render a held reconciler as
+// "all healthy" in tmux/waybar.
+func TestCombinedTickRetainsPriorBadgesWhenReconcileStateUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	path := seedDispatchConfig(t, dir, "o/A")
+
+	prior := 0
+	mut := &fakeMutator{}
+	store := &sentinelLoadFailingStore{}
+	attention := make(chan watch.AttentionUpdate, 2)
+	var buf bytes.Buffer
+	ctx := context.Background()
+	state := watch.DispatchState{DaemonRunning: true}
+	windows := []watch.WindowState{
+		{WindowName: "1-implement", Status: "failed"},
+		{WindowName: "2-implement", Status: "escalated"},
+	}
+	var headroom map[string]float64
+
+	combinedTick(ctx, path, fakeController{}, mut, &buf, &prior, store, attention, &state, &windows, &headroom)
+
+	<-attention // start-of-tick
+	<-attention // end-of-tick
+
+	if len(windows) != 2 {
+		t.Fatalf("expected the prior badges to be retained on a corruption-held pass, got %+v", windows)
+	}
+	var foundFailed, foundEscalated bool
+	for _, w := range windows {
+		if w.WindowName == "1-implement" && w.Status == "failed" {
+			foundFailed = true
+		}
+		if w.WindowName == "2-implement" && w.Status == "escalated" {
+			foundEscalated = true
+		}
+	}
+	if !foundFailed || !foundEscalated {
+		t.Errorf("expected both the previous failed and escalated badges to survive unchanged, got %+v", windows)
+	}
+	if state.LastError != "reconcile_state_unreadable" {
+		t.Errorf("state.LastError = %q, want reconcile_state_unreadable", state.LastError)
+	}
+}
+
+// TestCombinedTickClearsPriorBadgesWhenReconcileSucceeds is the anti-catch-all
+// companion to the retention test above: badge retention must be scoped to
+// the corruption sentinel only. A healthy pass (no repos configured, so
+// reconciliation trivially succeeds) must still clear stale badges from a
+// prior pass, exactly like today's behavior.
+func TestCombinedTickClearsPriorBadgesWhenReconcileSucceeds(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	writeDispatchConfig(t, configPath, `{"dispatch":{"loopEnabled":true,"repos":[]}}`)
+
+	prior := 0
+	mut := &fakeMutator{}
+	store := &memStore{}
+	attention := make(chan watch.AttentionUpdate, 2)
+	var buf bytes.Buffer
+	ctx := context.Background()
+	state := watch.DispatchState{DaemonRunning: true}
+	windows := []watch.WindowState{
+		{WindowName: "1-implement", Status: "failed"},
+		{WindowName: "2-implement", Status: "escalated"},
+	}
+	var headroom map[string]float64
+
+	combinedTick(ctx, configPath, fakeController{}, mut, &buf, &prior, store, attention, &state, &windows, &headroom)
+
+	<-attention // start-of-tick
+	<-attention // end-of-tick
+
+	if len(windows) != 0 {
+		t.Errorf("expected prior badges to be cleared once reconciliation actually completes, got %+v", windows)
+	}
+}
+
+// TestPassError is the direct precedence table for passError: the
+// corruption sentinel must outrank a simultaneous dispatchErr (it is the
+// only reason that persists until a human acts, so a same-pass transient
+// dispatch error must never mask it), matching today's existing precedence
+// for every other combination.
+func TestPassError(t *testing.T) {
+	sentinelErr := &StateLoadError{Probe: StateProbeDecodeError, Path: "reconcile.json", Err: errors.New("decode failed")}
+	genericReconcileErr := errors.New("some reconcile failure")
+	dispatchErr := errors.New("some dispatch failure")
+
+	tests := []struct {
+		name         string
+		dispatchErr  error
+		reconcileErr error
+		want         string
+	}{
+		{name: "sentinel outranks a simultaneous dispatch error", dispatchErr: dispatchErr, reconcileErr: sentinelErr, want: "reconcile_state_unreadable"},
+		{name: "dispatch error outranks a generic reconcile error", dispatchErr: dispatchErr, reconcileErr: genericReconcileErr, want: "dispatch_pass_failed"},
+		{name: "generic reconcile error alone", dispatchErr: nil, reconcileErr: genericReconcileErr, want: "reconcile_pass_failed"},
+		{name: "both nil", dispatchErr: nil, reconcileErr: nil, want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := passError(tt.dispatchErr, tt.reconcileErr)
+			if got != tt.want {
+				t.Errorf("passError(%v, %v) = %q, want %q", tt.dispatchErr, tt.reconcileErr, got, tt.want)
 			}
 		})
 	}

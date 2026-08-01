@@ -12,6 +12,8 @@ Captures the lesson from ticket #265: when a bounded-retry counter is added alon
 
 - **Carry the grace observation forward on apply failure**: When an apply mutation fails, the pure engine assumed the observation would clear because the mutation would land. It didn't, so re-inject the original first-seen time from the loaded state rather than letting the grace clock silently restart. This preserves the timing across retries (same pattern as the pure engine's grace-period logic).
 
+- **First observation always defers mutations**: A ticket observed for the first time gets `firstSeen = Now`, so `Now.Sub(firstSeen) == 0 < GracePeriod` on that initial pass regardless of what `Now` is set to in the test. Tests expecting mutations from a single `applyReconcile` call against a virgin ticket will fail silently — either seed a prior observation timestamp in the initial `ReconcileState.Observations` before calling `applyReconcile`, or use a two-pass test where pass 1 records the observation and pass 2 (with advanced time) crosses the grace period. Tickets without prior state are always Write Only on their first pass (#883).
+
 ## Example Pattern
 
 In `applyReconcile`:
@@ -120,3 +122,73 @@ unaffected: each marker is a distinct string, so back-filling the other three
 never inflates the attempt tally.
 
 - **Strip blockquote-prefixed lines before verifying the anchor's marker:** Strip `>`-prefixed blockquote lines from a comment's body before checking whether it contains the escalation anchor's marker. A human using GitHub's "Quote reply" on the escalation comment copies the marker verbatim into their own body's blockquoted lines; if the check does not strip blockquotes first, a quote-reply comment could be misread as carrying a genuine marker of its own (#827; still load-bearing under #849's exact-ID anchor matching, since the stripped check now runs both on the anchor comment's own body and on every candidate answer after it).
+
+## Reconciliation state persistence (#883)
+
+`reconcile.json` (`state.go`) is safety state, not disposable cache: it holds the
+grace-observation map and the apply-retry-failure counters this file's bounded-retry
+lifecycle above depends on. Losing or corrupting it resets grace clocks and apply-retry
+budgets, which can trigger premature or endlessly repeated recovery decisions — the exact
+failure this ticket closes off.
+
+**Abort-before-mutation contract.** `stateStore.Load` classifies every failure into a
+closed `StateProbe` set (`StateProbeReadError`/`StateProbeDecodeError`/
+`StateProbeSchemaError`/`StateProbeInvalid`), wrapped in a `*StateLoadError` whose
+`Unwrap() []error` keeps both the sentinel `ErrReconcileStateUnreadable` and the
+underlying cause reachable via `errors.Is`/`errors.As`. `applyReconcile` treats **any**
+non-nil `Load` error (not only the sentinel — default-deny for a third-party
+`ReconcileStore`) as an abort: it returns before `Reconcile()` ever runs and before the
+`dryRun` early-return, so corruption remains a hold even in dry-run. Because the abort
+happens before `Reconcile()`, `store.Save` is never reached in the same pass — a load
+failure is never overwritten by a later save (AC #3). `StateProbeAbsent` (the zero value,
+"no file yet") is explicitly *not* an abort case: a missing file is valid empty initial
+state, so a first run still reconciles and mutates normally.
+
+**Why the sentinel must outrank `collectErr` in `RunReconcileOnce`.** `RunReconcileOnce`
+returns `firstNonNil(collectErr, applyErr)`; naively, a same-pass `CollectTickets` failure
+(a very likely co-occurrence — both can be driven by the same underlying outage) would
+mask `applyErr`'s corruption sentinel behind the more mundane `reconcile_pass_failed`.
+`RunReconcileOnce` special-cases `errors.Is(applyErr, ErrReconcileStateUnreadable)` before
+falling back to `firstNonNil`, so the sentinel always wins. A cheap pre-collection probe
+(`store.Load()` called once before `CollectTickets`, result discarded) also holds the pass
+*before* burning any `gh issue list`/`gh issue view` budget — it reuses the same `Load`
+classification `applyReconcile`'s own authoritative second load will use, so it can never
+diverge from the abort contract's real coverage. `combined.go`'s `passError` mirrors the
+same precedence: the sentinel outranks a simultaneous `dispatchErr`, because unlike a
+transient dispatch hiccup it is the only reason that persists until a human acts.
+
+**Why a held pass retains badges instead of clearing them.** `runCombinedPass` normally
+rebuilds the caller-owned `*windows` slice from `result.Failed`/`result.Escalated` every
+pass. On a corruption-held pass, both are empty because the pass never ran, not because
+every previously-failed/escalated ticket recovered — rebuilding from them would clear
+every existing badge and render a held reconciler as "all healthy" in `cenci
+status`/waybar/noctalia, exactly the opposite of the hold's intent. `runCombinedPass`
+special-cases `errors.Is(reconcileErr, ErrReconcileStateUnreadable)` to skip the rebuild
+and retain `*windows` verbatim. This is scoped to the sentinel only — a generic
+`reconcile_pass_failed` (a `CollectTickets`/`ReadPlans` outage with a healthy state file)
+keeps the existing rebuild-from-result behavior; broadening the retention to any
+`reconcileErr` would silently mask a genuinely-recovered ticket's badge clearing too.
+
+**Crash-safe `Save`.** `stateStore.Save` writes a same-directory `os.CreateTemp`-named
+temp file (the randomized name defeats a pre-planted symlink at a predictable path, e.g.
+the legacy `path + ".tmp"` shape), fsyncs it, closes it, renames it over the final path,
+then fsyncs the parent directory so the rename itself is durable. Every failure branch
+after `CreateTemp` removes the temp file, so a failed save never leaves a stray `*.tmp`
+behind and the final path is always either the previous complete state or the new
+complete state, never truncated. `writeTemp`/`syncTemp`/`renameTemp` are nil-able
+unexported function fields on `stateStore` (mirroring `GHMutator.createLabel`) that same-
+package tests use to inject a failure at each boundary. `sweepStaleTemps` removes leftover
+temp files older than 1h at the start of `Save`, best-effort and age-gated so it never
+deletes a concurrently in-flight daemon/`--reconcile` cron writer's own temp file.
+
+**Schema version and the `StateProbe` closed set.** `reconcileState.SchemaVersion`
+(`currentReconcileSchema = 1`) distinguishes the current on-disk shape from the legacy
+pre-#883 format (no `schemaVersion` key, decodes to the int zero value — treated
+identically to an explicit `0`). `migrateReconcileState` accepts `0`/`1` and back-fills
+nil maps; any other value (including negative) is `StateProbeSchemaError`.
+`validateReconcileState` then checks integrity invariants migration alone can't establish
+(non-empty ticket keys, non-zero observation timestamps, non-negative apply-failure
+counters) and classifies a violation as `StateProbeInvalid`. Every `StateProbe` value
+besides the zero-value `StateProbeAbsent` is a broken-input class that must default-deny —
+adding a new failure class to `Load` without adding it to this closed set (and to the
+abort contract above) would silently let a new corruption shape slip past the hold.
