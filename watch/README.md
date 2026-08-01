@@ -400,7 +400,9 @@ pass completion without creating an extra pass. The loop publishes live state so
 `last_run_at`, `last_dispatched`, `last_skipped`, `last_error`) now reflects the live
 daemon end-to-end, not just a config fallback. `last_dispatched` counts successful
 spawns (not merely dispatch decisions), and `last_error` is intentionally redacted to
-`dispatch_pass_failed` or `reconcile_pass_failed`; detailed errors stay in daemon logs.
+`dispatch_pass_failed`, `reconcile_pass_failed`, or `reconcile_state_unreadable`
+(ticket #883, a persistent reconciliation-state corruption hold — see "Corrupt
+reconciliation state" below); detailed errors stay in daemon logs.
 
 This daemon-embedded path (`dispatch loop on` alongside a running `cenci daemon`)
 is the canonical way to run dispatch continuously. `cenci dispatch --interval
@@ -891,6 +893,34 @@ cenci dispatch --reconcile
 > **Host requirement:** reconciliation reads each repo's local `.plans/` directory, so run
 > it on the host where plans are persisted. A `Planned` ticket whose plan file lives only
 > on another host is grace-gated but will eventually be marked `plan-invalid`.
+
+**Corrupt reconciliation state (ticket #883).** Reconciliation's grace-observation and
+apply-retry-counter state lives at
+`$XDG_STATE_HOME/cenci/reconcile.json` (falling back to `~/.local/state/cenci/reconcile.json`
+when `XDG_STATE_HOME` is unset). It is safety state, not disposable cache — resetting it
+resets every ticket's grace clock and apply-retry budget, which can trigger premature or
+indefinitely repeated recovery decisions.
+
+Every save is crash-safe: a same-directory randomized temp file is written, fsynced, and
+atomically renamed over the final path (fsyncing the directory too), so a crash mid-save
+always leaves either the previous complete state or the new complete state, never
+truncated JSON.
+
+Any non-absence read failure — unreadable (permission/IO), malformed/truncated JSON,
+unknown/unsupported schema version, or integrity-invalid (empty ticket key, zero-value
+observation timestamp, or a negative apply-failures counter) — holds the **entire
+reconcile pass**: no GitHub label edits or comments are applied, the corrupt file is
+never overwritten by a later save in the same pass, `last_error` reads
+`reconcile_state_unreadable`, and the failed/escalated badges from the last successful
+pass are retained rather than cleared (a held reconciler must never render as "all
+healthy" in `cenci status`/waybar/noctalia). A missing state file is **not** corruption —
+it is valid empty initial state, so a first run still reconciles normally. The **dispatch
+pass continues independently**: reconciliation's hold never blocks new ticket pickup.
+
+**Manual recovery:** inspect `reconcile.json`, then either restore a known-good backup or
+delete the file. Deleting it resets grace clocks and apply-retry counters, but durable
+attempt counts survive as hidden-marker ticket comments, so the retry budget itself is
+not lost. `cenci dispatch --reconcile` exits nonzero the entire time the hold is active.
 
 ## Closing agent windows (`cenci close`)
 

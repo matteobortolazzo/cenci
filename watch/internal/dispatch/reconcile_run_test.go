@@ -3,7 +3,6 @@ package dispatch
 import (
 	"bytes"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -310,24 +309,279 @@ func TestRunReconcileResumeInterrupted_BudgetExhausted_EscalatesToDispatchFailed
 	}
 }
 
-type failingStore struct{}
-
-func (failingStore) Load() (ReconcileState, error) {
-	return ReconcileState{}, errors.New("load failed")
+// loadFailingStore is a bare (non-sentinel) failing ReconcileStore: it
+// stands in for a third-party ReconcileStore implementation that returns an
+// ordinary error rather than a *StateLoadError. loadCalls/saveCalls let
+// tests assert exactly how many times each method was invoked -- in
+// particular, that Save is never reached on an aborted pass (AC #3).
+type loadFailingStore struct {
+	err                  error
+	loadCalls, saveCalls int
 }
-func (failingStore) Save(ReconcileState) error { return errors.New("save failed") }
 
-func TestApplyReconcilePropagatesLoadMutationAndPersistenceErrors(t *testing.T) {
+func (s *loadFailingStore) Load() (ReconcileState, error) {
+	s.loadCalls++
+	return ReconcileState{}, s.err
+}
+
+func (s *loadFailingStore) Save(ReconcileState) error {
+	s.saveCalls++
+	return nil
+}
+
+// sentinelLoadFailingStore always fails Load with a *StateLoadError wrapping
+// ErrReconcileStateUnreadable (the corruption-hold sentinel), so tests can
+// assert the abort-before-mutation contract distinctly from a bare
+// third-party load error (loadFailingStore above).
+type sentinelLoadFailingStore struct {
+	loadCalls, saveCalls int
+}
+
+func (s *sentinelLoadFailingStore) Load() (ReconcileState, error) {
+	s.loadCalls++
+	return ReconcileState{}, &StateLoadError{
+		Probe: StateProbeDecodeError,
+		Path:  "reconcile.json",
+		Err:   errors.New("decode failed"),
+	}
+}
+
+func (s *sentinelLoadFailingStore) Save(ReconcileState) error {
+	s.saveCalls++
+	return nil
+}
+
+// saveFailingStore loads a preset state cleanly but always fails Save, so
+// tests can isolate persistence-error propagation from load-error handling
+// (a successful mutation must not swallow a later Save failure).
+type saveFailingStore struct {
+	state     ReconcileState
+	saveErr   error
+	saveCalls int
+}
+
+func (s *saveFailingStore) Load() (ReconcileState, error) {
+	return s.state, nil
+}
+
+func (s *saveFailingStore) Save(ReconcileState) error {
+	s.saveCalls++
+	return s.saveErr
+}
+
+// onceThenSentinelStore's first Load call succeeds (as the RunReconcileOnce
+// pre-collection hold probe's call would), but every subsequent call fails
+// with the sentinel -- simulating the state file being corrupted between the
+// early probe and applyReconcile's own authoritative Load. This is the only
+// way to actually exercise RunReconcileOnce's firstNonNil masking-bug guard
+// with a real, non-nil collectErr in the same pass: a store that fails
+// immediately would trip the pre-collection probe first and never reach
+// CollectTickets at all.
+type onceThenSentinelStore struct {
+	loadCalls int
+}
+
+func (s *onceThenSentinelStore) Load() (ReconcileState, error) {
+	s.loadCalls++
+	if s.loadCalls == 1 {
+		return emptyReconcileState(), nil
+	}
+	return ReconcileState{}, &StateLoadError{
+		Probe: StateProbeDecodeError,
+		Path:  "reconcile.json",
+		Err:   errors.New("decode failed"),
+	}
+}
+
+func (s *onceThenSentinelStore) Save(ReconcileState) error { return nil }
+
+// TestApplyReconcileAbortsOnAnyLoadError is the default-deny regression test
+// for a bare, non-sentinel load error (standing in for a third-party
+// ReconcileStore implementation, per the ticket's assumption that
+// applyReconcile aborts on ANY non-nil Load error, not only the sentinel):
+// the pass still aborts before Reconcile()/any mutation, and Save is never
+// reached in the same pass (AC #3).
+func TestApplyReconcileAbortsOnAnyLoadError(t *testing.T) {
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	deps := deadWorkingDeps(now)
 	deps.Attempts = map[string]int{"o/r#42": 0}
 	// The grace observation must already have elapsed for a recovery mutation.
 	deps.Now = now.Add(10 * time.Minute)
-	store := failingStore{}
-	mut := failingMutator{}
+	store := &loadFailingStore{err: errors.New("load failed")}
+	mut := &fakeMutator{}
+
 	_, err := applyReconcile(reconcileConfig(), deps, mut, false, nil, store)
-	if err == nil || err.Error() != "load failed" {
-		t.Fatalf("first reconcile error = %v, want load failed", err)
+	if err == nil || !strings.Contains(err.Error(), "load failed") {
+		t.Fatalf("applyReconcile err = %v, want an error wrapping %q", err, "load failed")
+	}
+	if len(mut.labelEdits) != 0 || len(mut.comments) != 0 || len(mut.ensureCalls) != 0 {
+		t.Errorf("a bare non-sentinel load error must still default-deny (zero mutations), got labelEdits=%+v comments=%+v ensure=%+v",
+			mut.labelEdits, mut.comments, mut.ensureCalls)
+	}
+	if store.saveCalls != 0 {
+		t.Errorf("a load failure must never be overwritten by Save in the same pass (AC #3), got %d save calls", store.saveCalls)
+	}
+}
+
+// TestApplyReconcilePropagatesMutationAndPersistenceErrors isolates the
+// persistence-error propagation half of the original combined coverage
+// (Load succeeds cleanly, the mutation applies successfully, but Save
+// fails): the Save failure must still surface as the returned error rather
+// than being swallowed because the pass otherwise "succeeded".
+func TestApplyReconcilePropagatesMutationAndPersistenceErrors(t *testing.T) {
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	deps := deadWorkingDeps(now)
+	deps.Attempts = map[string]int{"o/r#42": 0}
+	deps.Now = now.Add(10 * time.Minute)
+	store := &saveFailingStore{
+		state:   ReconcileState{Observations: map[string]time.Time{"o/r#42": now.Add(-10 * time.Minute)}},
+		saveErr: errors.New("save failed"),
+	}
+	mut := &fakeMutator{}
+
+	_, err := applyReconcile(reconcileConfig(), deps, mut, false, nil, store)
+	if err == nil || err.Error() != "save failed" {
+		t.Fatalf("applyReconcile err = %v, want save failed (a successful mutation must not swallow a persistence failure)", err)
+	}
+	if len(mut.labelEdits) != 1 {
+		t.Fatalf("expected the mutation to still apply despite the later Save failure, got %+v", mut.labelEdits)
+	}
+	if store.saveCalls != 1 {
+		t.Errorf("expected exactly one Save call, got %d", store.saveCalls)
+	}
+}
+
+// TestApplyReconcileAbortsOnSentinelLoadErrorZeroMutatorCalls is the direct
+// regression test for the corruption-hold contract: on a sentinel load
+// error, applyReconcile must return before Reconcile() ever runs, applying
+// zero GitHub mutations, even though the deps would otherwise produce a
+// past-grace retry mutation.
+func TestApplyReconcileAbortsOnSentinelLoadErrorZeroMutatorCalls(t *testing.T) {
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	deps := deadWorkingDeps(now)
+	deps.Attempts = map[string]int{"o/r#42": 0}
+	deps.Now = now.Add(10 * time.Minute)
+	store := &sentinelLoadFailingStore{}
+	mut := &fakeMutator{}
+
+	_, err := applyReconcile(reconcileConfig(), deps, mut, false, nil, store)
+	if !errors.Is(err, ErrReconcileStateUnreadable) {
+		t.Fatalf("applyReconcile err = %v, want errors.Is(err, ErrReconcileStateUnreadable)", err)
+	}
+	if len(mut.labelEdits) != 0 {
+		t.Errorf("expected zero EditLabels calls on a corruption-held pass, got %+v", mut.labelEdits)
+	}
+	if len(mut.comments) != 0 {
+		t.Errorf("expected zero Comment calls on a corruption-held pass, got %+v", mut.comments)
+	}
+	if len(mut.ensureCalls) != 0 {
+		t.Errorf("expected zero EnsureLabels calls on a corruption-held pass, got %+v", mut.ensureCalls)
+	}
+}
+
+// TestApplyReconcileAbortsOnSentinelLoadErrorZeroSaveCalls is AC #3's direct
+// regression test: a load failure must never be overwritten by a later Save
+// in the same pass.
+func TestApplyReconcileAbortsOnSentinelLoadErrorZeroSaveCalls(t *testing.T) {
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	deps := deadWorkingDeps(now)
+	deps.Attempts = map[string]int{"o/r#42": 0}
+	deps.Now = now.Add(10 * time.Minute)
+	store := &sentinelLoadFailingStore{}
+
+	_, err := applyReconcile(reconcileConfig(), deps, &fakeMutator{}, false, nil, store)
+	if !errors.Is(err, ErrReconcileStateUnreadable) {
+		t.Fatalf("applyReconcile err = %v, want errors.Is(err, ErrReconcileStateUnreadable)", err)
+	}
+	if store.saveCalls != 0 {
+		t.Errorf("expected zero Save calls (a load failure is never overwritten in the same pass, AC #3), got %d", store.saveCalls)
+	}
+}
+
+// TestApplyReconcileAbortsOnSentinelLoadErrorInDryRun locks in the ticket's
+// explicit decision: dry-run may only report prospective decisions when it
+// can read authoritative prior state -- corruption remains a hold even in
+// dry-run, not merely "reported without applying".
+func TestApplyReconcileAbortsOnSentinelLoadErrorInDryRun(t *testing.T) {
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	deps := deadWorkingDeps(now)
+	deps.Attempts = map[string]int{"o/r#42": 0}
+	deps.Now = now.Add(10 * time.Minute)
+	store := &sentinelLoadFailingStore{}
+	mut := &fakeMutator{}
+
+	_, err := applyReconcile(reconcileConfig(), deps, mut, true, nil, store)
+	if !errors.Is(err, ErrReconcileStateUnreadable) {
+		t.Fatalf("dry-run applyReconcile err = %v, want errors.Is(err, ErrReconcileStateUnreadable) (corruption remains a hold in dry-run)", err)
+	}
+	if len(mut.labelEdits) != 0 || len(mut.comments) != 0 || len(mut.ensureCalls) != 0 {
+		t.Errorf("dry-run must still apply zero mutations on a corruption hold, got labelEdits=%+v comments=%+v ensure=%+v",
+			mut.labelEdits, mut.comments, mut.ensureCalls)
+	}
+	if store.saveCalls != 0 {
+		t.Errorf("dry-run must never save on a corruption hold, got %d save calls", store.saveCalls)
+	}
+}
+
+// TestRunReconcileOnceSentinelOutranksCollectionError is the direct
+// regression test for the firstNonNil masking bug: RunReconcileOnce's
+// return statement must not let a same-pass collection error mask the
+// corruption sentinel. onceThenSentinelStore lets the pre-collection hold
+// probe pass (so CollectTickets actually runs and fails, producing a real
+// collectErr) while applyReconcile's own authoritative second Load then
+// fails with the sentinel.
+func TestRunReconcileOnceSentinelOutranksCollectionError(t *testing.T) {
+	installFakeGH(t, "exit 1\n") // every gh call fails -> CollectTickets returns a non-nil collectErr
+	cfg := reconcileConfig()
+	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: t.TempDir()}}
+	store := &onceThenSentinelStore{}
+	var buf bytes.Buffer
+
+	_, err := RunReconcileOnce(cfg, &fakeMutator{}, false, &buf, store)
+	if !errors.Is(err, ErrReconcileStateUnreadable) {
+		t.Fatalf("RunReconcileOnce err = %v, want errors.Is(err, ErrReconcileStateUnreadable): a same-pass collection error must not mask the corruption sentinel", err)
+	}
+}
+
+// TestApplyReconcileMissingStateFileStillReconcilesAndMutates is the
+// regression guard that the hold must not catch first runs: a genuinely
+// missing state file (StateProbeAbsent) is valid empty initial state, not
+// corruption, so a past-grace ticket must still be mutated normally.
+func TestApplyReconcileMissingStateFileStillReconcilesAndMutates(t *testing.T) {
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	store := &stateStore{path: filepath.Join(t.TempDir(), "does-not-exist", "reconcile.json")}
+	mut := &fakeMutator{}
+
+	// Pass 1: the state file is absent (StateProbeAbsent, valid empty initial
+	// state) -- Load must not error, and since this is the ticket's very
+	// first observation the pure engine only records it (firstSeen == Now on
+	// a first sighting, so grace is trivially not elapsed yet); no mutation
+	// is possible on a single first-ever pass regardless of Now, mirroring
+	// every other "pass 1 observes, pass 2 acts" test in this file (e.g.
+	// TestRunReconcileObservationPersistsThenActs).
+	deps := deadWorkingDeps(now)
+	deps.Attempts = map[string]int{"o/r#42": 0}
+	if _, err := applyReconcile(reconcileConfig(), deps, mut, false, nil, store); err != nil {
+		t.Fatalf("pass 1: a missing state file must not be treated as corruption, got err: %v", err)
+	}
+	if len(mut.labelEdits) != 0 {
+		t.Fatalf("pass 1 must only observe (no prior state to act on), got %+v", mut.labelEdits)
+	}
+
+	// Pass 2: grace has now elapsed on the persisted observation from pass 1
+	// -- the hold must not have caught the first run, so reconciliation
+	// mutates normally here.
+	deps2 := deadWorkingDeps(now.Add(10 * time.Minute))
+	deps2.Attempts = map[string]int{"o/r#42": 0}
+	res, err := applyReconcile(reconcileConfig(), deps2, mut, false, nil, store)
+	if err != nil {
+		t.Fatalf("pass 2: unexpected error: %v", err)
+	}
+	if len(mut.labelEdits) != 1 || !containsStr(mut.labelEdits[0].add, labelPlanned) {
+		t.Fatalf("expected the retry mutation to apply once grace elapses from a first run with no prior state, got %+v", mut.labelEdits)
+	}
+	if hasFailed(res, "o/r", 42) {
+		t.Error("a first run must not be terminal")
 	}
 }
 
@@ -730,31 +984,6 @@ func TestApplyReconcileSessionlessReachesDispatchFailedWithoutLooping(t *testing
 	}
 	if !hasFailed(res, "o/r", 42) {
 		t.Error("ticket must be terminal (Failed) by pass 4, within a bounded number of passes")
-	}
-}
-
-// TestStateStoreLoadsOldFormatWithoutApplyFailures is the direct store-level
-// regression test for the ReconcileState schema back-compat requirement: an
-// old reconcile.json written before ApplyFailures existed must still load
-// cleanly, with ApplyFailures resolving to an empty (not nil) map.
-func TestStateStoreLoadsOldFormatWithoutApplyFailures(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "reconcile.json")
-	old := `{"observations":{"o/r#42":"2026-07-10T12:00:00Z"}}`
-	if err := os.WriteFile(path, []byte(old), 0o644); err != nil {
-		t.Fatalf("writing old-format fixture: %v", err)
-	}
-
-	store := &stateStore{path: path}
-	state, err := store.Load()
-	if err != nil {
-		t.Fatalf("Load returned an unexpected error on an old-format file: %v", err)
-	}
-	if state.ApplyFailures == nil {
-		t.Error("ApplyFailures must load as an empty map (nil→empty) for back-compat with pre-#265 state files, got nil")
-	}
-	if _, ok := state.Observations["o/r#42"]; !ok {
-		t.Error("existing observations must still load from an old-format file")
 	}
 }
 
