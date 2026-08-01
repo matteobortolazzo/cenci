@@ -105,10 +105,16 @@ func collectRepoTickets(rc RepoConfig, sync MainSync, resolveDeps bool, out io.W
 		return nil, fmt.Errorf("parsing issues for %s: %w", repo, err)
 	}
 
-	openPR, err := openPRIssues(repo)
-	if err != nil {
-		return nil, err
-	}
+	// openPR is the bounded, cursor-paginated open-PR inventory probe
+	// (#881, openpr.go's openPRInventory) -- replacing the single capped
+	// `gh pr list --limit 200` call (openPRIssues, deleted) that silently
+	// treated a hit cap as complete. Per Q1, a non-complete probe is logged
+	// and gates the affected ticket(s) via decide.go's openPRGateSkip; it
+	// is a gate input, not a collection failure, so it never returns an
+	// error here (mirrors resolveAnswerProbes/fetchDependencyState,
+	// dispatch.go:133-137's rule) -- openPRInventory itself does the
+	// bounded logging to out.
+	openPR, openPRProbe := openPRInventory(repo, out)
 
 	// openNumbers is the pass's own collected open-issue set for repo,
 	// consulted by resolveDependencyStates as the fast path (#825): a number
@@ -174,6 +180,7 @@ func collectRepoTickets(rc RepoConfig, sync MainSync, resolveDeps bool, out io.W
 			DependsOn:           dependsOn,
 			DependencyStates:    depStates,
 			DependencyAnomalies: depAnomalies,
+			OpenPRProbe:         openPRProbe,
 		})
 	}
 	return tickets, nil
@@ -200,37 +207,6 @@ func probeStage(dir string, number int) (string, StageProbe) {
 	default:
 		return string(s.Stage), StageProbePresent
 	}
-}
-
-// openPRIssues returns the set of issue numbers with an open linked PR, via each
-// open PR's closingIssuesReferences.
-func openPRIssues(repo string) (map[int]bool, error) {
-	stdout, stderr, err := execGh("pr", "list",
-		"--repo", repo, "--state", "open",
-		"--json", "closingIssuesReferences", "--limit", "200")
-	if err != nil {
-		// Detail is truncated to maxProbeLogDetailBytes (#852 review finding
-		// #3): `--json closingIssuesReferences` stdout on a busy repo can be
-		// large, and a ghTimeout kill mid-stream can leave a large partial
-		// payload in stdout -- both would otherwise flood this error string
-		// unbounded.
-		return nil, fmt.Errorf("gh pr list %s: %w: %s", repo, err, truncateDetail(collapseLines(stdout+stderr), maxProbeLogDetailBytes))
-	}
-	var prs []struct {
-		ClosingIssuesReferences []struct {
-			Number int `json:"number"`
-		} `json:"closingIssuesReferences"`
-	}
-	if err := json.Unmarshal([]byte(stdout), &prs); err != nil {
-		return nil, fmt.Errorf("parsing prs for %s: %w", repo, err)
-	}
-	m := make(map[int]bool)
-	for _, pr := range prs {
-		for _, ref := range pr.ClosingIssuesReferences {
-			m[ref.Number] = true
-		}
-	}
-	return m, nil
 }
 
 func agentFromLabels(labels []string) string {

@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -89,11 +90,21 @@ func TestCurrentGitHubLogin(t *testing.T) {
 	})
 }
 
+// emptyOpenPRPageJSON is the shared `gh api graphql` response fixture for a
+// repo with zero open PRs -- a single, complete page (#881): every fake-gh
+// script in this package that previously served `"pr list") printf '[]'`
+// for the legacy `gh pr list` call now serves this instead, since
+// collectRepoTickets' openPRInventory call shells out to `gh api graphql`
+// (routed on "$1 $2" == "api graphql", matching every other fake-gh branch
+// convention in this package). See openpr_test.go's package doc comment for
+// the full response shape this mirrors.
+const emptyOpenPRPageJSON = `{"data":{"repository":{"pullRequests":{"totalCount":0,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}`
+
 func TestCollectRepoTicketsIncludesAssignees(t *testing.T) {
 	installFakeGH(t, `
 case "$1 $2" in
   "issue list") printf '[{"number":42,"title":"Fix thing","labels":[{"name":"Planned"}],"assignees":[{"login":"octocat"}]}]' ;;
-  "pr list") printf '[]' ;;
+  "api graphql") printf '`+emptyOpenPRPageJSON+`' ;;
   *) exit 1 ;;
 esac
 `)
@@ -107,32 +118,47 @@ esac
 	}
 }
 
-// TestOpenPRIssues_LargeGhOutputOnFailure_ErrorBounded pins #852 review
-// finding #3 for openPRIssues: `--json closingIssuesReferences` stdout on a
-// busy repo can be large, and a ghTimeout kill mid-stream can leave a large
-// partial payload -- the returned error string must be bounded rather than
-// splicing that content in verbatim, exercised via the collectRepoTickets
-// caller since openPRIssues is not directly exported. Uses
-// installFakeGHOnPath (#852 second review round, finding C): installFakeGH
-// replaces PATH wholesale, leaving the shim's `yes`/`tr`/`head` pipeline
-// unresolvable, so it would emit a short error instead of the intended
-// 5000-byte payload and the test would pass even with truncateDetail
-// removed.
-func TestOpenPRIssues_LargeGhOutputOnFailure_ErrorBounded(t *testing.T) {
+// TestOpenPRInventory_LargeGhOutputOnFailure_LogsBoundedAndClassifiesUnreadable
+// retargets the pre-#881 TestOpenPRIssues_LargeGhOutputOnFailure_ErrorBounded
+// (#852 review finding #3) at the new probe: `gh api graphql` stdout/stderr
+// on a busy repo can be large, and a ghTimeout kill mid-stream can leave a
+// large partial payload -- but per Q1, an incomplete/unreadable open-PR
+// probe must now be logged and gate the affected ticket(s), never propagate
+// as a collectRepoTickets error. This fixture is an ordinary nonzero exit
+// with a large STDERR diagnostic (ONE gh call, not a truncated stdout body),
+// so it classifies OpenPRProbeUnreadable (a plain command failure), distinct
+// from OpenPRProbeMalformed's stdout-cap-overflow class (openpr_test.go).
+// Uses installFakeGHOnPath (#852 second review round, finding C):
+// installFakeGH replaces PATH wholesale, leaving the shim's
+// `yes`/`tr`/`head` pipeline unresolvable, so it would emit a short error
+// instead of the intended 5000-byte payload and the test would pass even
+// with truncateDetail removed.
+func TestOpenPRInventory_LargeGhOutputOnFailure_LogsBoundedAndClassifiesUnreadable(t *testing.T) {
 	installFakeGHOnPath(t, `
 case "$1 $2" in
-  "issue list") printf '[]' ;;
-  "pr list") yes x | tr -d '\n' | head -c 5000 >&2; exit 1 ;;
+  "issue list") printf '[{"number":42,"title":"Fix thing"}]' ;;
+  "api graphql") yes x | tr -d '\n' | head -c 5000 >&2; exit 1 ;;
   *) exit 1 ;;
 esac
 `)
 
-	_, err := collectRepoTickets(RepoConfig{Repo: "o/r"}, MainSyncSkipped, true, io.Discard)
-	if err == nil {
-		t.Fatal("expected an error")
+	var buf strings.Builder
+	tickets, err := collectRepoTickets(RepoConfig{Repo: "o/r"}, MainSyncSkipped, true, &buf)
+	if err != nil {
+		t.Fatalf("collectRepoTickets returned unexpected error: %v (Q1: an incomplete/unreadable open-PR probe must gate, never fail the whole collection)", err)
 	}
-	if got := len(err.Error()); got > maxProbeLogDetailBytes+200 {
-		t.Fatalf("error string not bounded: got %d bytes (want roughly <= %d): %q", got, maxProbeLogDetailBytes, err.Error()[:200])
+	if len(tickets) != 1 {
+		t.Fatalf("got %d tickets, want 1: %+v", len(tickets), tickets)
+	}
+	if tickets[0].OpenPRProbe != OpenPRProbeUnreadable {
+		t.Errorf("ticket #%d OpenPRProbe = %q, want OpenPRProbeUnreadable", tickets[0].Number, tickets[0].OpenPRProbe)
+	}
+	logged := buf.String()
+	if got := len(logged); got > maxProbeLogDetailBytes+300 {
+		t.Fatalf("log line not bounded: got %d bytes (want roughly <= %d): %q", got, maxProbeLogDetailBytes, logged[:200])
+	}
+	if !strings.Contains(logged, "o/r") {
+		t.Errorf("expected the bounded diagnostic to name the repo, got %q", logged)
 	}
 }
 
@@ -168,7 +194,7 @@ esac
 const twoIssuesFakeGHScript = `
 case "$1 $2" in
   "issue list") printf '[{"number":10,"title":"First"},{"number":11,"title":"Second"}]' ;;
-  "pr list") printf '[]' ;;
+  "api graphql") printf '` + emptyOpenPRPageJSON + `' ;;
   *) exit 1 ;;
 esac
 `
@@ -740,7 +766,7 @@ func TestCollectRepoTickets_DependsOnResolvesViaOpenSet(t *testing.T) {
 	installFakeGH(t, `
 case "$1 $2" in
   "issue list") printf '[{"number":10,"title":"First","body":"Depends on #11"},{"number":11,"title":"Second","body":""}]' ;;
-  "pr list") printf '[]' ;;
+  "api graphql") printf '`+emptyOpenPRPageJSON+`' ;;
   *) exit 1 ;;
 esac
 `)
@@ -777,7 +803,7 @@ func TestCollectRepoTickets_DependsOnOutsideWindowResolvesViaGhIssueView(t *test
 	installFakeGH(t, `
 case "$1 $2" in
   "issue list") printf '[{"number":10,"title":"First","body":"Depends on #99"}]' ;;
-  "pr list") printf '[]' ;;
+  "api graphql") printf '`+emptyOpenPRPageJSON+`' ;;
   "issue view") printf '{"number":99,"state":"CLOSED"}' ;;
   *) exit 1 ;;
 esac
@@ -805,7 +831,7 @@ func TestCollectRepoTickets_NoDependencyLineLeavesFieldsNil(t *testing.T) {
 	installFakeGH(t, `
 case "$1 $2" in
   "issue list") printf '[{"number":10,"title":"First","body":"just some prose"}]' ;;
-  "pr list") printf '[]' ;;
+  "api graphql") printf '`+emptyOpenPRPageJSON+`' ;;
   *) exit 1 ;;
 esac
 `)
@@ -841,11 +867,11 @@ func TestCollectRepoTickets_ResolveDepsFalse_NeverShellsOutToGhIssueView(t *test
 	installFakeGH(t, fmt.Sprintf(`
 case "$1 $2" in
   "issue list") printf '[{"number":10,"title":"First","body":"Depends on #99"}]' ;;
-  "pr list") printf '[]' ;;
+  "api graphql") printf '%s' ;;
   "issue view") printf 'x' >> "%s"; printf '{"number":99,"state":"OPEN"}' ;;
   *) exit 1 ;;
 esac
-`, marker))
+`, emptyOpenPRPageJSON, marker))
 
 	tickets, err := collectRepoTickets(RepoConfig{Repo: "o/r"}, MainSyncSkipped, false, io.Discard)
 	if err != nil {
@@ -890,6 +916,117 @@ func TestCollectTickets_FixtureOmittingBody_LeavesDependencyFieldsNil(t *testing
 		}
 		if len(tk.DependencyStates) != 0 {
 			t.Errorf("ticket #%d DependencyStates = %v, want nil/empty (body omitted from fixture)", tk.Number, tk.DependencyStates)
+		}
+	}
+}
+
+// -- #881: collector stamping (Q2 guard) and the Q1 pass-error contract -----
+
+// TestCollectRepoTickets_HealthyOpenPRProbe_StampsCompleteExplicitly covers
+// Q2's guard directly: a healthy pass (a single, complete `gh api graphql`
+// page) must stamp Ticket.OpenPRProbe = OpenPRProbeComplete explicitly on
+// every collected ticket -- proving the happy-path tests can never pass
+// merely because OpenPRProbeComplete happens to be the permissive zero
+// value (types.go's Q2 rationale: "empty field == complete, mirroring
+// StageProbe/MainSync/PlanProbe"). Risk mitigation named directly in the
+// plan's Risks section.
+func TestCollectRepoTickets_HealthyOpenPRProbe_StampsCompleteExplicitly(t *testing.T) {
+	installFakeGHOnPath(t, twoIssuesFakeGHScript)
+
+	tickets, err := collectRepoTickets(RepoConfig{Repo: "o/r"}, MainSyncSkipped, true, io.Discard)
+	if err != nil {
+		t.Fatalf("collectRepoTickets returned unexpected error: %v", err)
+	}
+	if len(tickets) != 2 {
+		t.Fatalf("got %d tickets, want 2: %+v", len(tickets), tickets)
+	}
+	for _, tk := range tickets {
+		if tk.OpenPRProbe != OpenPRProbeComplete {
+			t.Errorf("ticket #%d OpenPRProbe = %q, want the explicitly-stamped OpenPRProbeComplete", tk.Number, tk.OpenPRProbe)
+		}
+	}
+}
+
+// TestCollectRepoTickets_OpenPRProbeFailure_GatesUniformlyAcrossEveryTicket
+// covers AC2's nested-truncation requirement that a repo-wide gate holds
+// (a) EVERY ticket in that repo, including one no PR references at all, not
+// only the tickets an overflowing PR happens to close (Q5: "gate the whole
+// repo as incomplete... not just the affected issues") -- proving the
+// collector stamps the SAME non-complete OpenPRProbe value onto every
+// ticket in the repo, mirroring MainSync's existing per-repo stamping
+// convention (TestCollectTickets_StampsMainSyncFromMap).
+func TestCollectRepoTickets_OpenPRProbeFailure_GatesUniformlyAcrossEveryTicket(t *testing.T) {
+	installFakeGHOnPath(t, `
+case "$1 $2" in
+  "issue list") printf '[{"number":10,"title":"First"},{"number":11,"title":"Second, never closed by any PR"}]' ;;
+  "api graphql") printf '{"data":{"repository":{"pullRequests":{"totalCount":1,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"number":5,"closingIssuesReferences":{"pageInfo":{"hasNextPage":true},"nodes":[{"number":10}]}}]}}}}' ;;
+  *) exit 1 ;;
+esac
+`)
+
+	tickets, err := collectRepoTickets(RepoConfig{Repo: "o/r"}, MainSyncSkipped, true, io.Discard)
+	if err != nil {
+		t.Fatalf("collectRepoTickets returned unexpected error: %v (Q1: must gate, never fail collection)", err)
+	}
+	if len(tickets) != 2 {
+		t.Fatalf("got %d tickets, want 2: %+v", len(tickets), tickets)
+	}
+	for _, tk := range tickets {
+		if tk.OpenPRProbe != OpenPRProbeTruncated {
+			t.Errorf("ticket #%d OpenPRProbe = %q, want OpenPRProbeTruncated on EVERY ticket in the repo, including #11 (never referenced by the overflowing PR)", tk.Number, tk.OpenPRProbe)
+		}
+	}
+}
+
+// TestCollectTickets_OpenPRProbeMidPaginationFailure_NeverFailsThePass covers
+// the Q1 pass-error contract directly: a repo whose open-PR probe fails
+// mid-pagination must yield CollectTickets returning a nil error (never
+// joined into the collection-level error dispatch.go's passError renders as
+// dispatch_pass_failed), while the log carries one bounded,
+// newline-collapsed diagnostic line naming the repo.
+func TestCollectTickets_OpenPRProbeMidPaginationFailure_NeverFailsThePass(t *testing.T) {
+	dir := t.TempDir()
+	countFile := filepath.Join(dir, "count")
+	installFakeGHOnPath(t, fmt.Sprintf(`
+case "$1 $2" in
+  "issue list") printf '[{"number":42,"title":"Fix thing"}]' ;;
+  "api graphql")
+    n=$(cat %[1]q 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" > %[1]q
+    if [ "$n" = "1" ]; then
+      printf '{"data":{"repository":{"pullRequests":{"totalCount":150,"pageInfo":{"hasNextPage":true,"endCursor":"c2"},"nodes":[]}}}}'
+    else
+      echo "boom, rate limited" >&2
+      exit 1
+    fi
+    ;;
+  *) exit 1 ;;
+esac
+`, countFile))
+
+	var buf bytes.Buffer
+	tickets, err := CollectTickets([]RepoConfig{{Repo: "o/r"}}, nil, true, &buf)
+	if err != nil {
+		t.Fatalf("CollectTickets returned unexpected error: %v (Q1: an incomplete open-PR probe must gate, never fail the pass)", err)
+	}
+	if len(tickets) != 1 {
+		t.Fatalf("got %d tickets, want 1: %+v", len(tickets), tickets)
+	}
+	if tickets[0].OpenPRProbe != OpenPRProbeUnreadable {
+		t.Errorf("ticket #%d OpenPRProbe = %q, want OpenPRProbeUnreadable", tickets[0].Number, tickets[0].OpenPRProbe)
+	}
+	if got := passError(err, nil); got == "dispatch_pass_failed" {
+		t.Fatalf("passError(%v, nil) = %q, want it to never render dispatch_pass_failed for a gated (not erroring) open-PR probe", err, got)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "o/r") {
+		t.Errorf("expected the bounded diagnostic to name the repo, got %q", logged)
+	}
+	for _, line := range strings.Split(logged, "\n") {
+		if got := len(line); got > maxProbeLogDetailBytes+300 {
+			t.Errorf("log line not bounded: got %d bytes: %q", got, line)
 		}
 	}
 }

@@ -204,9 +204,16 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 			// to a stranded Working ticket.
 			if hasLabel(t.Labels, labelWorking) {
 				if in.Snapshot == nil {
-					if ts, ok := in.Observations[key]; ok {
-						res.NextObservations[key] = ts
-					}
+					deferObservation(in.Observations, res.NextObservations, key)
+					continue
+				}
+				// A non-complete open-PR probe (#881) means t.HasOpenPR
+				// could not actually be proven false -- defer (preserve the
+				// grace observation), mirroring the blind in.Snapshot == nil
+				// guard just above, rather than risking a stray-Working
+				// cleanup on unverified input.
+				if t.OpenPRProbe != OpenPRProbeComplete {
+					deferObservation(in.Observations, res.NextObservations, key)
 					continue
 				}
 				if hasLiveWindow(t.Number, in.Snapshot) || t.HasOpenPR {
@@ -259,9 +266,7 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 			// plan (PlanProbeAbsent, the zero value -- no entry at all) falls
 			// through to the escalation path.
 			if _, gated := planProbeSkip(in.PlanProbes[key]); gated {
-				if ts, ok := in.Observations[key]; ok {
-					res.NextObservations[key] = ts
-				}
+				deferObservation(in.Observations, res.NextObservations, key)
 				continue
 			}
 			// A Planned ticket with a verified-absent local plan file is not
@@ -272,9 +277,7 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 			// snapshot, and require the signal to hold past the grace period
 			// before escalating to plan-invalid.
 			if in.Snapshot == nil {
-				if ts, ok := in.Observations[key]; ok {
-					res.NextObservations[key] = ts
-				}
+				deferObservation(in.Observations, res.NextObservations, key)
 				continue
 			}
 			firstSeen, ok := in.Observations[key]
@@ -308,9 +311,17 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 		// window from a healthy one, so preserve the pending grace observation
 		// untouched and take no action.
 		if in.Snapshot == nil {
-			if ts, ok := in.Observations[key]; ok {
-				res.NextObservations[key] = ts
-			}
+			deferObservation(in.Observations, res.NextObservations, key)
+			continue
+		}
+
+		// A non-complete open-PR probe (#881) means t.HasOpenPR could not
+		// actually be proven false -- defer (preserve the grace
+		// observation), mirroring the blind in.Snapshot == nil guard just
+		// above, rather than risking a retry/failed label mutation on
+		// unverified input.
+		if t.OpenPRProbe != OpenPRProbeComplete {
+			deferObservation(in.Observations, res.NextObservations, key)
 			continue
 		}
 
@@ -460,6 +471,20 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 	}
 
 	return res
+}
+
+// deferObservation preserves key's pending grace-clock observation (if any)
+// from observations into next, without producing a Recovery. Shared by every
+// "must not act on unverified or blind input" guard in Reconcile -- a nil
+// snapshot, a non-complete open-PR probe (#881), or a plan-probe error
+// (#852) -- so a ticket stuck behind a chronically blind/non-complete signal
+// never silently resets its grace clock (watch/docs/dispatch-reconcile.md's
+// "clear the retry counter only for healthy tickets, not deferred verdicts"
+// rule).
+func deferObservation(observations, next map[string]time.Time, key string) {
+	if ts, ok := observations[key]; ok {
+		next[key] = ts
+	}
 }
 
 // hasLiveWindow reports whether the snapshot holds a window for this ticket that

@@ -119,6 +119,21 @@ const (
 	reasonAnswerAnchorMismatch = "escalation anchor comment not found or nonce mismatch"
 )
 
+// Open-PR-inventory-completeness gate skip reasons (#881).
+// reasonOpenPRProbeUnknown is deliberately distinct from every other reason
+// here, for the same reason reasonStageProbeUnknown/reasonMainSyncUnknown/
+// reasonPlanProbeUnknown are each distinct from their siblings above: a
+// regression collapsing the switch's default branch into a known case must
+// be caught by a content-specific assertion (#446/#598).
+const (
+	reasonOpenPRCapExhausted = "open PR state incomplete: pagination cap exhausted"
+	reasonOpenPRTruncated    = "open PR state incomplete: closing-issue references truncated"
+	reasonOpenPRMalformed    = "open PR state unreadable: malformed page"
+	reasonOpenPRTimeout      = "open PR state unreadable: probe timed out"
+	reasonOpenPRUnreadable   = "open PR state unreadable: pagination failed"
+	reasonOpenPRProbeUnknown = "open PR probe unrecognized"
+)
+
 // Inputs is the full, explicit input to Decide. Now is an injected clock value
 // and Snapshot is nil when the daemon is unreachable — both keep Decide pure.
 type Inputs struct {
@@ -302,6 +317,14 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 	}
 	if hasLabel(t.Labels, "Blocked") {
 		return skip("blocked")
+	}
+	// Open-PR-inventory-completeness gate (#881), evaluated immediately
+	// before the ordinary HasOpenPR check below: a non-complete probe means
+	// t.HasOpenPR could not actually be proven false, so it must never fall
+	// through to that check on unverified input -- an affected repo reports
+	// this one uniform reason across all its tickets.
+	if reason, gated := openPRGateSkip(t); gated {
+		return skip(reason)
 	}
 	if t.HasOpenPR {
 		return skip("open PR exists")
@@ -766,6 +789,35 @@ func resumeGateSkip(t Ticket, probe AnswerProbe) (string, bool) {
 		// regression collapsing this branch is caught by assertion, per
 		// #446/#598.
 		return reasonAnswerProbeUnknown, true
+	}
+}
+
+// openPRGateSkip evaluates the open-PR-inventory-completeness gate (#881)
+// for t, with zero I/O -- t.OpenPRProbe was already resolved by the
+// collector's openPRInventory call (collect.go), never here (Decide's own
+// purity contract, mirroring dependencyGateSkip's doc comment above). It
+// returns (reason, true) when the probe could not prove t.HasOpenPR false,
+// and ("", false) only for OpenPRProbeComplete (including the zero value --
+// every pre-#881 Ticket construction site keeps today's ungated behavior).
+func openPRGateSkip(t Ticket) (string, bool) {
+	switch t.OpenPRProbe {
+	case OpenPRProbeComplete:
+		return "", false
+	case OpenPRProbeCapExhausted:
+		return reasonOpenPRCapExhausted, true
+	case OpenPRProbeTruncated:
+		return reasonOpenPRTruncated, true
+	case OpenPRProbeMalformed:
+		return reasonOpenPRMalformed, true
+	case OpenPRProbeTimeout:
+		return reasonOpenPRTimeout, true
+	case OpenPRProbeUnreadable:
+		return reasonOpenPRUnreadable, true
+	default:
+		// Unrecognized OpenPRProbe value: default-deny with its own distinct
+		// reason (not any of the five known reasons above) so a regression
+		// collapsing this branch is caught by assertion, per #446/#598.
+		return reasonOpenPRProbeUnknown, true
 	}
 }
 

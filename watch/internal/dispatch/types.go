@@ -283,6 +283,61 @@ const (
 	PlanProbeStalenessError PlanProbe = "staleness_error"
 )
 
+// OpenPRProbe classifies the collector's bounded, cursor-paginated `gh api
+// graphql` open-PR inventory read (#881, openpr.go's openPRInventory) into a
+// closed set, rather than collapsing distinct failure classes
+// (watch/docs/go-gotchas.md #598, watch/docs/error-handling.md #628):
+// pagination truncation, cap exhaustion, a malformed page, a probe timeout,
+// and a mid-pagination failure are each operationally distinct causes for
+// "this repo's open-PR set could not be proven complete", and collapsing
+// them would lose exactly the attribution an operator needs to fix the
+// underlying cause. OpenPRProbeComplete is the zero value ("") so every
+// pre-#881 Ticket construction site (reconcile paths, the ~100 existing test
+// literals across this package) keeps today's behavior unchanged without
+// being touched -- mirrors StageProbeAbsent/MainSyncSkipped/PlanProbeAbsent
+// above: collectRepoTickets is the sole production construction site and
+// always stamps this field explicitly on every ticket, so the permissive
+// zero value is never what makes a real pass's happy path pass.
+type OpenPRProbe string
+
+const (
+	// OpenPRProbeComplete is the zero value: the traversal reached
+	// pageInfo.hasNextPage == false (the authoritative completeness signal)
+	// without hitting any bound or failure -- every open PR in the repo was
+	// actually seen, so HasOpenPR is trustworthy verbatim.
+	OpenPRProbeComplete OpenPRProbe = ""
+	// OpenPRProbeCapExhausted means either the totalCount pre-flight check
+	// exceeded maxOpenPRRecords (a cheap short-circuit, never a strict
+	// post-traversal equality proof) or the page bound (maxOpenPRPages) was
+	// reached while the server still reported hasNextPage: true -- the repo
+	// legitimately has more open PRs than this probe is bounded to traverse.
+	// A partial inventory still sets HasOpenPR = true for every PR actually
+	// seen; this classification governs the completeness verdict, not the
+	// map contents.
+	OpenPRProbeCapExhausted OpenPRProbe = "cap_exhausted"
+	// OpenPRProbeTruncated means at least one PR's nested
+	// closingIssuesReferences connection itself overflowed its own page
+	// bound (pageInfo.hasNextPage == true on the nested connection) --
+	// distinct from OpenPRProbeCapExhausted, which is the outer
+	// pullRequests connection's own bound. Per Q5, this gates the whole
+	// repo as incomplete, not only the affected PR's issues.
+	OpenPRProbeTruncated OpenPRProbe = "truncated"
+	// OpenPRProbeMalformed means a page's response body could not be
+	// trusted at all: non-JSON stdout, a GraphQL errors[] payload, a
+	// stdout-cap overflow (errGhOutputTruncated), or hasNextPage: true paired
+	// with an empty/non-advancing endCursor (a cursor that never advances
+	// must never be trusted to terminate the loop).
+	OpenPRProbeMalformed OpenPRProbe = "malformed"
+	// OpenPRProbeTimeout means a `gh api graphql` invocation was killed by
+	// execGhBounded's ghTimeout bound (errGhTimeout) -- distinct from an
+	// ordinary command failure (OpenPRProbeUnreadable below).
+	OpenPRProbeTimeout OpenPRProbe = "timeout"
+	// OpenPRProbeUnreadable means an ordinary `gh` command failure occurred
+	// mid-pagination (a nonzero exit not otherwise classified as a timeout
+	// or output truncation) -- the traversal broke, not merely hit a bound.
+	OpenPRProbeUnreadable OpenPRProbe = "unreadable"
+)
+
 // Ticket is one open GitHub issue, as collected from a repo. Labels carry the
 // board state (Planned, Blocked, agent:<name>, ...); Assignees carry GitHub
 // logins; Agent is the pre-resolved agent:<name> value, if any.
@@ -333,6 +388,15 @@ type Ticket struct {
 	// "no anomalies" case -- every pre-#852 Ticket construction site keeps
 	// today's behavior unchanged without being touched.
 	DependencyAnomalies []string
+
+	// OpenPRProbe classifies how HasOpenPR above was obtained
+	// (collector-filled, #881, via openpr.go's openPRInventory; mirrors
+	// StageProbe/MainSync above). Stays OpenPRProbeComplete (the permissive
+	// zero value) when no probe has run for this ticket's repo -- every
+	// pre-#881 Ticket construction site keeps today's behavior unchanged
+	// without being touched; collectRepoTickets, the sole production
+	// construction site, always stamps this field explicitly.
+	OpenPRProbe OpenPRProbe
 }
 
 // Plan is the parsed front matter of one .plans/<id>-<slug>.md file.
