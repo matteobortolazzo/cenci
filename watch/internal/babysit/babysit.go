@@ -95,6 +95,15 @@ type State struct {
 	AutomergeDetail     string            `json:"automergeDetail,omitempty"`
 	AutomergeConditions []conditionResult `json:"automergeConditions,omitempty"`
 	AutomergeCheckedAt  time.Time         `json:"automergeCheckedAt,omitempty"`
+	// AutomergeFailureClass is the orthogonal "cause" axis to
+	// AutomergeReason's "site" axis (#886): AutomergeReason says which stage
+	// of the condition chain (or which upstream read) held or failed,
+	// AutomergeFailureClass says what kind of underlying `gh` failure
+	// produced it (command/timeout/cancelled/truncated/parse), when the hold
+	// stemmed from a `gh` failure at all. recordDecision assigns it
+	// unconditionally on every call so a stale class from a previous failed
+	// tick never survives into a later clean tick's persisted state.
+	AutomergeFailureClass string `json:"automergeFailureClass,omitempty"`
 }
 type prFile struct {
 	Path string `json:"path"`
@@ -440,29 +449,27 @@ func detectNewFeedbackKeys(s *State, comments []comment, reviews []review) (keys
 	return keys, newest
 }
 
-// ghJSON decodes dst from `gh <args...>`'s stdout. A bounded-output
-// truncation (errGhOutputTruncated) is reported unconditionally, even when
-// the truncated stdout still happens to decode successfully as valid JSON
-// (#854 fix, item 3) -- a truncated read is unreliable by construction
-// (watch/docs/error-handling.md's default-deny rule) and must never be
-// silently treated as complete just because it parses. Once truncation is
-// ruled out, ghJSON keeps its pre-existing deliberate tolerance: a non-zero
-// `gh` exit whose stdout still decodes is still success (`gh pr checks`
-// exits 8 while checks are pending, pinned by
-// TestGhJSONAcceptsChecksExitWithValidJSON).
+// ghJSON decodes dst from `gh <args...>`'s stdout. Strict (#886): any
+// non-nil execGh error -- a nonzero exit, a bounded-output truncation
+// (errGhOutputTruncated), a timeout, a cancellation -- fails closed
+// unconditionally, before dst is ever decoded, even when stdout still
+// happens to be complete, valid JSON. This removes the previous "gh pr
+// checks exits 8 while checks are pending, but stdout still decodes, so
+// treat it as success" carve-out entirely: a caller that wants to
+// distinguish a genuine `gh` failure from a checks-pending exit must do so
+// itself, not rely on ghJSON to paper over it (watch/docs/error-handling.md's
+// default-deny rule). Only once execGh itself reported success does ghJSON
+// attempt to decode; a decode failure there is wrapped with errGhDecode so
+// classifyGhFailure resolves it to failureClassParse.
 func ghJSON(dst any, args ...string) error {
 	stdout, stderr, err := execGh(args...)
-	if errors.Is(err, errGhOutputTruncated) {
-		return fmt.Errorf("gh %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(stderr), err)
-	}
-	decodeErr := json.Unmarshal([]byte(stdout), dst)
-	if decodeErr == nil {
-		return nil
-	}
 	if err != nil {
 		return fmt.Errorf("gh %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(stderr), err)
 	}
-	return fmt.Errorf("decode gh output: %w", decodeErr)
+	if decodeErr := json.Unmarshal([]byte(stdout), dst); decodeErr != nil {
+		return fmt.Errorf("gh %s: decode: %w", strings.Join(args, " "), errors.Join(decodeErr, errGhDecode))
+	}
+	return nil
 }
 func repository() (string, error) {
 	stdout, stderr, err := execGh("repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner")

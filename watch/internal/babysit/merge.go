@@ -48,12 +48,15 @@ const mergeQueueQuery = `query($owner:String!,$name:String!,$number:Int!){reposi
 // (#885: this pass rereads authoritative GraphQL thread/review state fresh,
 // it never carries the first pass's already-computed FeedbackHold/
 // FeedbackDetail forward, since a thread or review can be reopened strictly
-// between the two passes), and merge-queue state. Enabled and
-// AllowedMethods carry over unchanged from first (repo settings / local
-// config, not PR state, per the plan's Assumption). revalidateFeedback is
-// read-only -- unlike tick's own reconcileFeedback, it never mutates s, so a
-// reopen discovered here holds this merge attempt but is only persisted (and
-// its address-review relaunch dispatched) by the *next* tick's own reconcile
+// between the two passes), merge-queue state, and -- as its final step, the
+// smallest possible window before `gh pr merge` is ever issued -- a fresh
+// re-read of the fleet automerge.enabled kill switch via loadFleetSwitch
+// (#886), replacing the old "Enabled: first.Enabled" carry-over.
+// AllowedMethods carries over unchanged from first (repo settings, not PR
+// state, per the plan's Assumption). revalidateFeedback is read-only --
+// unlike tick's own reconcileFeedback, it never mutates s, so a reopen
+// discovered here holds this merge attempt but is only persisted (and its
+// address-review relaunch dispatched) by the *next* tick's own reconcile
 // pass; this preserves the "no double-bookkeeping in the recheck" property
 // #854 already established (reconcileFeedback's own doc comment). A
 // revalidateFeedback fetch failure is routed into FeedbackHold/FeedbackDetail
@@ -63,7 +66,10 @@ const mergeQueueQuery = `query($owner:String!,$name:String!,$number:Int!){reposi
 // (PR/checks/comments/reviews), returns a distinct reasonUpstream*Unreadable
 // reason for the caller to hold under (reusing the existing
 // one-decision-per-tick constants, per the plan's Assumption) rather than a
-// new parallel constant set.
+// new parallel constant set. On any kill-switch hold from loadFleetSwitch,
+// returns a zero-value automergeInputs and one of the five
+// reasonKillSwitch* reasons instead (#886) -- distinct from an upstream read
+// failure, since every other read here already succeeded.
 func recheckAutomergeInputs(s *State, first automergeInputs) (automergeInputs, string, error) {
 	var pr prView
 	if err := ghJSON(&pr, "pr", "view", s.PR, "--repo", s.Repo, "--json", prViewFields); err != nil {
@@ -85,7 +91,6 @@ func recheckAutomergeInputs(s *State, first automergeInputs) (automergeInputs, s
 	revalidatedPending, verdict := revalidateFeedback(s, reviews, reviewsComplete)
 
 	in := automergeInputs{
-		Enabled:           first.Enabled,
 		Checks:            checks,
 		RepairPending:     s.RepairPending,
 		FeedbackHold:      verdict.Hold,
@@ -133,6 +138,20 @@ func recheckAutomergeInputs(s *State, first automergeInputs) (automergeInputs, s
 	in.QueueErr = queueErr
 	in.QueueProbed = true
 
+	// The fleet kill switch's final re-read (#886, AC 5/6): the very last
+	// step, after every other upstream read above, so the window between
+	// confirming automerge is still enabled and actually issuing
+	// `gh pr merge` is as small as possible. Any hold here returns a
+	// zero-value automergeInputs -- every other field this function just
+	// spent a full round of `gh` calls populating is discarded, matching the
+	// existing reasonUpstream*Unreadable early-return shape above -- and the
+	// caller (runAutomerge) never issues the merge.
+	killSwitchEnabled, holdReason := loadFleetSwitch()
+	if holdReason != "" {
+		return automergeInputs{}, holdReason, nil
+	}
+	in.Enabled = killSwitchEnabled
+
 	return in, "", nil
 }
 
@@ -168,43 +187,61 @@ func fetchMergeQueueState(repo, pr string) (inQueue, enabled *bool, headRefOID s
 }
 
 // executeMerge issues `gh pr merge <pr> --repo <repo> --squash
-// --match-head-commit <headSHA>` -- never --delete-branch, never
-// --merge/--rebase (epic #661 Decision 4; #854 squash-only) -- and, only on
-// a zero exit, performs exactly one post-merge refetch (Q5: one refetch, no
-// polling), recording success only when that refetch reports state ==
-// MERGED. A zero exit whose refetch reports anything else is an
-// indeterminate failure, never success (Decision 6); a refetch that itself
-// fails to read is a distinct reason from an indeterminate-but-readable
-// non-MERGED state. Returns whether the merge was confirmed, plus decision
-// updated with the final Merge/Reason/Detail.
+// --match-head-commit <headSHA>` exactly once -- never --delete-branch,
+// never --merge/--rebase (epic #661 Decision 4; #854 squash-only) -- then
+// unconditionally performs exactly one post-merge refetch (Q5: one refetch,
+// no polling), regardless of the merge command's own exit code (#886): a
+// client-side timeout or transient network blip can make `gh pr merge`
+// itself report failure even though the merge actually landed, so the
+// refetch -- not the exit code -- is the sole source of truth. Four
+// outcomes: (a) the refetch itself is unreadable -> reasonMergeVerifyUnreadable,
+// never success, regardless of what the merge command reported; (b) the
+// refetch reports state == MERGED -> success, regardless of the merge
+// command's exit code (a nonzero exit here gets a diagnostic Detail noting
+// the discrepancy, since it's otherwise silently lost); (c) the refetch is
+// readable but not MERGED and the merge command exited nonzero ->
+// reasonMergeFailed, with the merge command's own stderr (or stdout, if
+// stderr is empty) as Detail; (d) the refetch is readable but not MERGED and
+// the merge command exited zero -> reasonMergeIndeterminate (Decision 6):
+// the exit status alone is never proof. Returns whether the merge was
+// confirmed, plus decision updated with the final
+// Merge/Reason/Detail/FailureClass.
 func executeMerge(s *State, headSHA string, decision automergeDecision) (bool, automergeDecision) {
-	stdout, stderr, err := execGh("pr", "merge", s.PR, "--repo", s.Repo, "--squash", "--match-head-commit", headSHA)
-	if err != nil {
-		decision.Merge = false
-		decision.Reason = reasonMergeFailed
-		detail := strings.TrimSpace(stderr)
-		if detail == "" {
-			detail = strings.TrimSpace(stdout)
-		}
-		decision.Detail = sanitizeDetail(detail)
-		return false, decision
-	}
+	mergeStdout, mergeStderr, mergeErr := execGh("pr", "merge", s.PR, "--repo", s.Repo, "--squash", "--match-head-commit", headSHA)
 
 	var fresh prView
 	if verifyErr := ghJSON(&fresh, "pr", "view", s.PR, "--repo", s.Repo, "--json", prViewFields); verifyErr != nil {
 		decision.Merge = false
 		decision.Reason = reasonMergeVerifyUnreadable
 		decision.Detail = sanitizeDetail(verifyErr.Error())
+		decision.FailureClass = classifyGhFailure(verifyErr)
 		return false, decision
 	}
-	if fresh.State != "MERGED" {
-		decision.Merge = false
-		decision.Reason = reasonMergeIndeterminate
+
+	if fresh.State == "MERGED" {
+		decision.Merge = true
+		decision.Reason = ""
 		decision.Detail = ""
+		if mergeErr != nil {
+			decision.Detail = sanitizeDetail(fmt.Sprintf("gh pr merge exited nonzero (%v) but PR is MERGED; treating as success", mergeErr))
+		}
+		return true, decision
+	}
+
+	if mergeErr != nil {
+		decision.Merge = false
+		decision.Reason = reasonMergeFailed
+		detail := strings.TrimSpace(mergeStderr)
+		if detail == "" {
+			detail = strings.TrimSpace(mergeStdout)
+		}
+		decision.Detail = sanitizeDetail(detail)
+		decision.FailureClass = classifyGhFailure(mergeErr)
 		return false, decision
 	}
-	decision.Merge = true
-	decision.Reason = ""
+
+	decision.Merge = false
+	decision.Reason = reasonMergeIndeterminate
 	decision.Detail = ""
-	return true, decision
+	return false, decision
 }
