@@ -136,6 +136,8 @@ Screenshots are temporary review aids — never commit them to the repo. Host th
 
 Create the PR with `gh pr create`. Write body content to `${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-pr-body.md` first and read it back; do not use heredocs or a large inline body string.
 
+**Single-deliverable invariant, restated at this write point**: exactly one `gh pr create` per run — the "already exists" recovery below is the only re-entry this step ever takes; never a second/stacked PR for overflow. Scope discovered mid-run beyond the plan belongs in `## Followup Ticket` below, never in a second PR.
+
 If an earlier attempt already created the PR (a re-run re-entering after PR creation ran once), `gh pr create` fails with "a pull request for branch ... already exists." That is not a failure — run `gh pr view <branch> --json url,number -q '.url + " " + (.number | tostring)'` to recover the existing PR URL and number, and continue to Labels/Cleanup as if creation had just succeeded.
 
 If `gh pr create` fails for any other reason (auth, network, validation), show the exact failing command and its error output, and use `AskUserQuestion` ("Created, continue" / "Abort") to let the user resolve the issue and confirm before continuing to Labels/Cleanup, or abort the run — mirroring the Push gate above. On "Created, continue," re-run `gh pr view <branch> --json url,number -q '.url + " " + (.number | tostring)'` to obtain the PR URL/number before proceeding — the same recovery call as the "already exists" case above — since Labels/Cleanup and the Followup Ticket step below need it.
