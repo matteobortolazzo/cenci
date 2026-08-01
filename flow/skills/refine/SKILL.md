@@ -6,7 +6,7 @@ argument-hint: <ticket-id> [additional context]
 user-invocable: true
 disable-model-invocation: true
 model: sonnet
-allowed-tools: Read, Write, Glob, Task, Bash(gh issue view:*), Bash(gh issue edit:*), Bash(gh label create:*), Bash(gh api user --jq:*), Bash(gh api repos/:*), Bash(git remote get-url:*), Bash(jq -n:*), Bash(jq -e:*), Bash(mktemp -u ${TMPDIR:-/tmp}/cenci/:*), Bash(cat ${TMPDIR:-/tmp}/cenci/:*), Bash(rm -f ${TMPDIR:-/tmp}/cenci/:*), AskUserQuestion
+allowed-tools: Read, Write, Glob, Task, Bash(gh issue view:*), Bash(gh issue edit:*), Bash(gh label create:*), Bash(gh api user --jq:*), Bash(gh api repos/:*), Bash(git remote get-url:*), Bash(jq -n:*), Bash(jq -e:*), Bash(mktemp -u ${TMPDIR:-/tmp}/cenci/:*), Bash(cat ${TMPDIR:-/tmp}/cenci/:*), Bash(rm -f ${TMPDIR:-/tmp}/cenci/:*), Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/refine/scripts/ensure-issue.sh":*), AskUserQuestion
 ---
 
 > **Client dispatch**: In Codex, read `codex-runtime` and `refine/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
@@ -267,19 +267,37 @@ gh label create "ui:visual-check" --repo <owner>/<repo> --color "FEF2C0" --descr
 
    #### Parent metadata for inherited labels/milestone
 
-   Every ticket this skill creates — each split child **and** the companion design ticket — inherits the parent's milestone and its non-lifecycle labels, so a split never drops its children out of the milestone or loses the parent's `area:*`/priority/team labels. The fetch is unconditional now — it already ran, before the first write, in `#### Manifest revalidation (read-only — before the first write)` above, whose presence gate and drift classification already ran too. Reuse that same file here (`${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-parent-meta.json`) — do not re-fetch.
+   Every ticket this skill creates — each split child **and** the companion design ticket — inherits the parent's milestone and its non-lifecycle labels, so a split never drops its children out of the milestone or loses the parent's `area:*`/priority/team labels. The fetch is unconditional now — it already ran, before the first write, in `#### Manifest revalidation (read-only — before the first write)` above, whose presence gate and drift classification already ran too. Reuse that same file here (`${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-parent-meta.json`) — do not re-fetch. That file is consumed mechanically by `ensure-issue.sh init`'s own `--parent-meta`/`--slurpfile` merge (see **Creation Checkpoint** below), never read back into shell text.
 
-   **What is inherited.** Carry over every label the parent currently has except the 10 lifecycle/transient and per-ticket-grant markers — `"Refined","Working","Planned","In Review","Implemented","Design","Designed","automerge:ok","Browser","ui:visual-check"` — which are per-ticket state or per-ticket grants, never classification. The labels this skill seeds (`Refined`, plus `Design` for a design-only child or the companion design ticket) are applied on top regardless of what is carried over; each child's own earned `automerge:ok`/`Browser`/`ui:visual-check` (computed at the `## Confirmation Gate` above) are appended separately, per child, in Pass 1 below — never inherited from the parent's current labels. Two invariants carry over verbatim from phase-9's already-tested form, and are the non-obvious parts:
+   **What is inherited.** When given `--parent-meta <file>`, `ensure-issue.sh init` carries over every label the parent currently has except the 10 lifecycle/transient and per-ticket-grant markers — `"Refined","Working","Planned","In Review","Implemented","Design","Designed","automerge:ok","Browser","ui:visual-check"` — which are per-ticket state or per-ticket grants, never classification. The labels this skill seeds (`Refined`, plus `Design` for a design-only child or the companion design ticket) are applied on top regardless of what is carried over; each child's own earned `automerge:ok`/`Browser`/`ui:visual-check` (computed at the `## Confirmation Gate` above) are appended separately, per child, into that child's manifest entry below — never inherited from the parent's current labels. Two invariants carry over verbatim from phase-9's already-tested form, and are the non-obvious parts — both now enforced inside `ensure-issue.sh` rather than inline here:
    - the milestone must be the numeric `.milestone.number`, not the title — the REST endpoint requires the id;
-   - the `milestone` key is omitted entirely via an explicit jq emptiness check, never a bare `//` fallback that would emit `null` (see `docs/shell-scripting-gotchas.md`).
+   - the `milestone` key is resolved via an explicit jq emptiness check, never a bare `//` fallback that would emit `null` (see `docs/shell-scripting-gotchas.md`).
 
-   **`automerge:ok`, `Browser`, and `ui:visual-check` are never inherited.** A split child, the companion design ticket, and (per the followup-creation sites this same ticket also narrows) a followup ticket never inherit a parent's hands-off-merge grant or its browser/visual-check markers — each child's verdict and label set is instead applied explicitly from the gate, independently, at Pass 1 create time (steps 4-5 of the Confirmation Gate above). This closes the leak the old inheritance behavior had: a pre-existing `automerge:ok` already on the parent from a prior run is no longer carried over by the with-meta payload above, because `automerge:ok` is now itself one of the 10 excluded markers.
+   **`automerge:ok`, `Browser`, and `ui:visual-check` are never inherited.** A split child, the companion design ticket, and (per the followup-creation sites this same ticket also narrows) a followup ticket never inherit a parent's hands-off-merge grant or its browser/visual-check markers — each child's verdict and label set is instead applied explicitly from the gate, independently, into that child's manifest entry (steps 4-5 of the Confirmation Gate above). This closes the leak the old inheritance behavior had: a pre-existing `automerge:ok` already on the parent from a prior run is no longer carried over, because `automerge:ok` is now itself one of the 10 excluded markers.
 
    If splitting, create the child tickets using a **two-pass approach**:
 
    Split tickets must also receive the "Refined" label/tag since they were refined during this session — `/cenci:implement` checks for it as a pre-flight condition.
 
    The **Coverage gate — verify the split's acceptance-criteria partition** already ran, pre-render, as a precondition of the `## Confirmation Gate` above — a split that reaches this point already passed both the structural completeness check and the acceptance-criteria partition check, so Pass 1 below never re-verifies them.
+
+   ## Creation Checkpoint
+
+   Every child and the companion design ticket are created through `scripts/ensure-issue.sh` — a deterministic create/recover/repair/link helper, invoked identically here and in `codex.md` via its four subcommands, `ensure-issue.sh init`, `ensure-issue.sh ensure`, `ensure-issue.sh link`, and `ensure-issue.sh clear` — that makes creation recoverably idempotent across timeouts, retries, crashes, and a resumed `/cenci:refine <id>` session. It never performs a duplicate create: each manifest entry mints a nonce at `init` time and embeds a hidden `<!-- cenci-refine-create:<nonce> -->` marker in the created issue's body, so a resumed run recovers the same issue by re-scanning for that exact marker instead of re-POSTing blind.
+
+   **Before the first POST**, initialize the run's checkpoint:
+   ```bash
+   bash "${CLAUDE_PLUGIN_ROOT}/skills/refine/scripts/ensure-issue.sh" init --repo <owner>/<repo> --parent <original-number> --checkpoint .plans/.refine-<original-number>.checkpoint.json --manifest ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-manifest.json
+   ```
+   Add `--parent-meta ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-parent-meta.json` — the file fetched unconditionally, before the first write, in `#### Manifest revalidation (read-only — before the first write)` above; that fetch's presence gate already guarantees the file exists and is valid by the time this step runs, so `--parent-meta` is always passed here, never omitted. The checkpoint lives at `.plans/.refine-<original-number>.checkpoint.json` — keyed by the resource it recovers (this repo and this parent issue), not this run's `<token>`, so a crashed or interrupted run resumes correctly even under a fresh temp-file token on the next attempt (durable recovery state is keyed by the resource it recovers and lives in `.plans/`, never a run-scoped or `/tmp` bookkeeping file — see `docs/pipeline-safety.md`).
+
+   Every later `ensure-issue.sh ensure`/`ensure-issue.sh link` call in Pass 1 and the companion-design block below reads this same checkpoint. If it is missing or corrupt (bad JSON, wrong `schemaVersion`) on any call other than `init`, the script itself exits 11 and does **fail closed** — it never silently re-POSTs. Treat that exit exactly like any other write-failure-protocol STOP: report the error and do not proceed.
+
+   **Once this run completes successfully** (the `.ok` marker in step 12 below is written), clear the checkpoint:
+   ```bash
+   bash "${CLAUDE_PLUGIN_ROOT}/skills/refine/scripts/ensure-issue.sh" clear --checkpoint .plans/.refine-<original-number>.checkpoint.json
+   ```
+   `clear` is idempotent — calling it twice is not an error. A run that STOPped partway through steps 10-12 (per the write-failure protocol) **retains** the checkpoint instead: the next `/cenci:refine <original-number>` invocation resumes from it rather than re-creating already-created issues.
 
    #### Pass 1: Create children with numbered titles and dependency info
 
@@ -293,43 +311,41 @@ gh label create "ui:visual-check" --repo <owner>/<repo> --color "FEF2C0" --descr
    - `Parallel with #<sibling>` lines for children it can run alongside (if applicable)
    - Its own `### Acceptance Criteria` section — the criteria the proposal's split assigned to this child (its slice of the parent's partition, verified by the coverage gate above); omit the section only for a child the split assigned zero criteria (e.g. a design-only first child)
 
-   Capture each created issue number from the command output.
+   For each child K, use the `Write` tool to create the raw title and body as plain text — `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt` (`<ticket-title> (K/N)`) and `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md` (`Related to #<original-number>\nDepends on #<sibling-number>\nParallel with #<sibling-number>\n\n<ticket-body>\n\n### Acceptance Criteria\n- [ ] <each criterion the split assigned to this child>`) — never a hand-escaped JSON literal; the title is free text and must never be interpolated directly into the command line. `<ticket-body>` here is that child's **full block** from the proposal's `### Suggested Split` — its `### Goal`, `### Decisions`, and `### Assumptions (auto-adopted)` subsections — so the created ticket is plannable without consulting the parent (AC 5); its own `### Acceptance criteria` and `### Dependencies` subsections are not repeated verbatim here, since the checklist appended by this template (sourced from the coverage-gate-verified partition) and the `Depends on #<sibling-number>` / `Parallel with #<sibling-number>` lines above already cover that content.
 
-   Use the `Write` tool to create the raw title and body as plain text — `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt` (`<ticket-title> (K/N)`) and `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md` (`Related to #<original-number>\nDepends on #<sibling-number>\nParallel with #<sibling-number>\n\n<ticket-body>\n\n### Acceptance Criteria\n- [ ] <each criterion the split assigned to this child>`) — never a hand-escaped JSON literal; the title is free text and must never be interpolated directly into the command line. `<ticket-body>` here is that child's **full block** from the proposal's `### Suggested Split` — its `### Goal`, `### Decisions`, and `### Assumptions (auto-adopted)` subsections — so the created ticket is plannable without consulting the parent (AC 5); its own `### Acceptance criteria` and `### Dependencies` subsections are not repeated verbatim here, since the checklist appended by this template (sourced from the coverage-gate-verified partition) and the `Depends on #<sibling-number>` / `Parallel with #<sibling-number>` lines above already cover that content. Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet. The parent's label names are externally sourced, so they enter the payload **only** via `--slurpfile` from the metadata file fetched in `#### Manifest revalidation (read-only — before the first write)` — never interpolated into the command line, and `jq` cannot let slurped content influence the payload's structure.
+   Design-only children (see **Design-first splits** above) additionally include `"Design"` in that child's seed `labels` array below, and their body includes the `### Design Direction` section from this refinement (that's where `/cenci:design` reads it from).
 
-   ```bash
-   jq -n --rawfile title ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt --rawfile body ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md --slurpfile meta ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-parent-meta.json '{title: ($title | rtrimstr("\n")), body: $body, labels: (["Refined"] + [$meta[0].labels[].name | select(. as $n | (["Refined","Working","Planned","In Review","Implemented","Design","Designed","automerge:ok","Browser","ui:visual-check"] | index($n)) | not)])} + (if ($meta[0].milestone.number // "") != "" then {milestone: $meta[0].milestone.number} else {} end)' > ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K.json
+   Once every child's raw title/body files are written, use the `Write` tool to create a single manifest, `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-manifest.json` — a JSON array with one object per child, in creation order:
    ```
-
-   **Ordered append for earned labels.** The form above shows the **nothing-earned** case verbatim — `(["Refined"] + […])`. When the Confirmation Gate computed (step 5 above) that this child earns any of `automerge:ok`, `Browser`, or `ui:visual-check`, extend the leading array literal by appending each earned label — in that fixed order for each label the child earned at the gate — onto `"Refined"` before running `jq`; never reorder, and never append a label the gate did not compute for this child. Worked max-case example (a non-design child earning all three): the `labels` value becomes `(["Refined","automerge:ok","Browser","ui:visual-check"] + [$meta[0].labels[].name | select(...)])` — the `select(...)` exclusion clause is unchanged from the base form above.
-
-   Then:
-   ```bash
-   gh api repos/<owner>/<repo>/issues -X POST --input ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K.json --jq .number
+   [{"slot": "child-K-of-N", "titleFile": "${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt", "bodyFile": "${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md", "labels": ["Refined"], "milestone": null}, …]
    ```
-   The `--jq .number` output *is* the new child's issue number — this confirms the API accepted valid JSON, but not that the title text itself is correct (a JSON-escaping mistake can mangle a title while still parsing).
+   `labels` is the child's **seed** array only — `["Refined"]`, or `["Refined","Design"]` for a design-only child — extended with each of `automerge:ok`, `Browser`, `ui:visual-check` the child earned at the Confirmation Gate, appended in that fixed order for each label the child earned at the gate — only the ones this child actually earned; never reorder, and never add one the gate did not compute for this child. `milestone` is always `null` in this manifest — the real inherited milestone is merged in by `ensure-issue.sh init`'s `--parent-meta` handling (see **Creation Checkpoint** above, which always passes `--parent-meta` here), not by this manifest. Call `ensure-issue.sh init` once against this manifest (per **Creation Checkpoint**) before creating any child.
 
-   **Verify the title and label set persisted correctly** by re-fetching the new child and comparing the title against the intended `<ticket-title> (K/N)` and the labels against the gate-computed set for this child — including the **absence** of `automerge:ok`/`Browser`/`ui:visual-check` when the gate did not earn them for this child (a command exiting 0 is not proof they applied correctly — see the write-failure protocol above):
+   For each child K, in the same dependency order, resolve it to exactly one issue:
+   ```bash
+   bash "${CLAUDE_PLUGIN_ROOT}/skills/refine/scripts/ensure-issue.sh" ensure --checkpoint .plans/.refine-<original-number>.checkpoint.json --repo <owner>/<repo> --slot child-K-of-N --title ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt --body ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md
+   ```
+   `ensure-issue.sh ensure` creates the child only when zero marker-bearing candidates exist for its nonce (`gh api repos/<owner>/<repo>/issues -X POST --input <payload> --jq .number`, payload composed via `jq -n --rawfile`), exactly repairs (`-X PATCH --input`) and reverifies a single drifted match against the manifest, or fails closed on ambiguity — never a duplicate create. Its exit code drives the outcome:
+   - **0** — the child now exists (created, or already existed and was verified/repaired); its issue number is in the checkpoint (and in `ensure`'s own `issueNumber=<n>` stdout line). Continue to `link` below.
+   - **1** — this create attempt could not be verified (a client-side timeout or a malformed response from the create). Follow the write-failure protocol: report the error, retry `ensure` once more with the exact same arguments (never a new manifest/nonce — the same checkpoint recovers the same slot via marker scan on retry), then if still failing, STOP — do not create any further children, and do not run Pass 2.
+   - **10** — multiple marker matches: an unresolvable ambiguity. STOP immediately — do not retry, do not create any further children — and report the partial-state list of candidate issue numbers `ensure` printed, so a human can resolve it manually before re-running `/cenci:refine <original-number>`.
+   - **12** — the candidate list itself could not be fetched. Follow the write-failure protocol: report the error, retry once, then if still failing, STOP.
+   - **13** — an existing issue for this slot diverged from the manifest and the repair PATCH itself failed. STOP and report the issue number `ensure` printed for manual reconciliation — do not create any further children.
+   - **11** — the checkpoint is missing or corrupt. STOP immediately (see **Creation Checkpoint** above) — this should not happen mid-run since `init` already succeeded; do not re-run `init` against a fresh manifest, since that would mint new nonces and orphan any issue already created under the old ones. Report to the user for manual recovery.
+
+   **Verify the title and label set persisted correctly** — `ensure` itself already re-fetched and compared these before returning 0, but re-confirm from this orchestration level too, since a JSON-escaping mistake in the manifest could still mangle a title while parsing successfully:
    ```bash
    gh issue view <child-number> --repo <owner>/<repo> --json title,labels --jq '.title, (.labels[].name)'
    ```
-   If the title does not match exactly, or the label set includes a label the gate did not earn for this child or is missing one it did earn, follow the write-failure protocol: report the mismatch, retry the create once (fresh `Write` + `gh api repos/...` re-invocation), then re-verify; if still failing, STOP — do not link this child as a sub-issue, do not create any further children, and do not run Pass 2.
+   If the title does not match exactly, or the label set includes a label the gate did not earn for this child or is missing one it did earn, follow the write-failure protocol: report the mismatch and STOP — do not link this child as a sub-issue, do not create any further children, and do not run Pass 2.
 
-   **Link the child as a native sub-issue of the parent.** Immediately after parsing a child's number (children are created in dependency order, so link each one right after it is created — parent == `<original-number>`):
+   **Link the child as a native sub-issue of the parent**, immediately after `ensure` succeeds for it:
    ```bash
-   gh issue edit <child-number> --repo <owner>/<repo> --parent <original-number>
+   bash "${CLAUDE_PLUGIN_ROOT}/skills/refine/scripts/ensure-issue.sh" link --checkpoint .plans/.refine-<original-number>.checkpoint.json --repo <owner>/<repo> --slot child-K-of-N --parent <original-number>
    ```
-   **Verify from the parent side** — re-fetch the parent's sub-issue list and confirm this child's number is present (idempotent: treat an "already linked" result, i.e. the child already appearing in the list, as success):
-   ```bash
-   gh issue view <original-number> --repo <owner>/<repo> --json subIssues --jq '.subIssues.nodes[].number'
-   ```
-   If the link or its verification fails, follow the write-failure protocol: report the error, retry the `--parent` edit once, then verify again; if still failing, STOP — do not create any further children, and do not run Pass 2. Report the partial state: which children exist and which are linked as sub-issues.
+   `ensure-issue.sh link` is idempotent — it checks the parent's existing sub-issue list first, so an already-linked child is a no-op success, never a duplicate `--parent` edit — and verifies from the parent side before returning 0. Exit **14** means the link failed (or could not be verified): follow the write-failure protocol, report the error, retry `link` once, then if still failing, STOP — do not create any further children, and do not run Pass 2. Report the partial state: which children exist (with issue numbers) and which are linked as sub-issues.
 
-   If creation fails for a child, follow the write-failure protocol: report the error, retry once, and if still failing, STOP — do not create any further children, and do not run Pass 2. Report the partial state to the user: which children (if any) were already created, with their issue numbers.
-
-   Omit `Depends on` / `Parallel with` lines that don't apply (e.g. the first child typically has no dependencies).
-
-   Design-only children (see **Design-first splits** above) additionally carry `"Design"` in that child's JSON `labels` array — the seed array becomes `(["Refined","Design"] + [ …carried-over parent labels… ])` — and their body includes the `### Design Direction` section from this refinement (that's where `/cenci:design` reads it from). A design-only first child is a real child of the parent → link it as a sub-issue exactly like the others.
+   Omit `Depends on` / `Parallel with` lines that don't apply (e.g. the first child typically has no dependencies). A design-only first child is a real child of the parent → link it as a sub-issue exactly like the others.
 
    #### Pass 2: Final sub-issue verification and (if ordered) an Execution Order note
 
@@ -339,7 +355,7 @@ gh label create "ui:visual-check" --repo <owner>/<repo> --color "FEF2C0" --descr
    ```bash
    gh issue view <original-number> --repo <owner>/<repo> --json subIssues,subIssuesSummary --jq '.subIssues.nodes[].number, .subIssuesSummary'
    ```
-   If any child is missing from the list, follow the write-failure protocol: report which child is not linked, retry that child's `gh issue edit <child> --parent <original-number>` once, then verify again; if still failing, STOP and report that children #`<c1>`, #`<c2>`, … exist but child #`<cN>` is not linked as a sub-issue of parent #`<original-number>`, so the user can link it manually with `gh issue edit <cN> --parent <original-number>`.
+   If any child is missing from the list, follow the write-failure protocol: report which child is not linked, retry that child's `ensure-issue.sh link --checkpoint .plans/.refine-<original-number>.checkpoint.json --repo <owner>/<repo> --slot <its-slot> --parent <original-number>` once, then verify again; if still failing, STOP and report that children #`<c1>`, #`<c2>`, … exist but child #`<cN>` is not linked as a sub-issue of parent #`<original-number>`, so the user can link it manually with `gh issue edit <cN> --parent <original-number>`.
 
    **(b) Execution Order (only when the split has real ordering).** If any child `Depends on` another (i.e. the children are not all independent), append a concise **prose** `### Execution Order` section to the parent body — never a `- [ ]` checklist. Use the `Write` tool to create `${TMPDIR:-/tmp}/cenci/issue-<original-number>-<token>.md` with the following content (this uses `<original-number>` — parent == original — with the SAME run token from step 10, not a new one):
    ```
@@ -364,23 +380,28 @@ gh label create "ui:visual-check" --repo <owner>/<repo> --color "FEF2C0" --descr
 
    If `designNeeded` is true, the ticket is **not** being split, and `isDesignTicket` is false, create a dedicated design ticket — design never runs on the implementation ticket itself:
 
-   Use the `Write` tool to create the raw title and body as plain text — `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-title.txt` (`Design: <feature title>`) and `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-body.md` (`Related to #<number>\nBlocks #<number>\n\n### Goal\nProduce the design spec (`.pen` + `DESIGN.md`) for #<number> via `/cenci:design`.\n\n### Design Direction\n<the Design Direction section from this refinement>`) — never a hand-escaped JSON literal; the title is free text and must never be interpolated directly into the command line. Build the payload per the `shell-rules` skill's canonical `jq -n --rawfile` snippet — the companion design ticket inherits exactly like a split child, with `["Refined","Design"]` as its seed array, and — same 10-entry exclusion set as Pass 1 above — never `automerge:ok`, `Browser`, or `ui:visual-check`: a design ticket never receives `automerge:ok` (it always fails the `NOT isDesignTicket` override), and never receives `Browser`/`ui:visual-check` either (steps 2 and 12's design skip apply here too):
+   Use the `Write` tool to create the raw title and body as plain text — `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-title.txt` (`Design: <feature title>`) and `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-body.md` (`Related to #<number>\nBlocks #<number>\n\n### Goal\nProduce the design spec (`.pen` + `DESIGN.md`) for #<number> via `/cenci:design`.\n\n### Design Direction\n<the Design Direction section from this refinement>`) — never a hand-escaped JSON literal; the title is free text and must never be interpolated directly into the command line.
+
+   Then use the `Write` tool to create a single-entry manifest, `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-manifest.json`:
+   ```
+   [{"slot": "design", "titleFile": "${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-title.txt", "bodyFile": "${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-body.md", "labels": ["Refined","Design"], "milestone": null}]
+   ```
+   — the companion design ticket inherits exactly like a split child (see **Creation Checkpoint**/**Parent metadata for inherited labels/milestone** above), with `["Refined","Design"]` as its seed array, and — same 10-entry exclusion set as Pass 1 above — never `automerge:ok`, `Browser`, or `ui:visual-check`: a design ticket never receives `automerge:ok` (it always fails the `NOT isDesignTicket` override), and never receives `Browser`/`ui:visual-check` either (steps 2 and 12's design skip apply here too). `milestone` stays `null` in this manifest for the same reason as Pass 1's: real inheritance is merged in by `ensure-issue.sh init`'s `--parent-meta` handling, not by this manifest.
 
    ```bash
-   jq -n --rawfile title ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-title.txt --rawfile body ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-body.md --slurpfile meta ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-parent-meta.json '{title: ($title | rtrimstr("\n")), body: $body, labels: (["Refined","Design"] + [$meta[0].labels[].name | select(. as $n | (["Refined","Working","Planned","In Review","Implemented","Design","Designed","automerge:ok","Browser","ui:visual-check"] | index($n)) | not)])} + (if ($meta[0].milestone.number // "") != "" then {milestone: $meta[0].milestone.number} else {} end)' > ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design.json
+   bash "${CLAUDE_PLUGIN_ROOT}/skills/refine/scripts/ensure-issue.sh" init --repo <owner>/<repo> --parent <number> --checkpoint .plans/.refine-<number>.checkpoint.json --manifest ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-manifest.json
    ```
-
-   Then:
+   Add `--parent-meta ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-parent-meta.json` — the file fetched unconditionally, before the first write, in `#### Manifest revalidation (read-only — before the first write)` above; that fetch's presence gate already guarantees the file exists and is valid by the time this step runs, so `--parent-meta` is always passed here, never omitted — exactly as **Creation Checkpoint** above.
    ```bash
-   gh api repos/<owner>/<repo>/issues -X POST --input ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design.json --jq .number
+   bash "${CLAUDE_PLUGIN_ROOT}/skills/refine/scripts/ensure-issue.sh" ensure --checkpoint .plans/.refine-<number>.checkpoint.json --repo <owner>/<repo> --slot design --title ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-title.txt --body ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-body.md
    ```
 
-   The `--jq .number` output *is* the new design ticket's issue number `<D>` — this confirms the API accepted valid JSON, but not that the title text itself is correct. **Verify the title and label set persisted correctly** by re-fetching and comparing the title against the intended `Design: <feature title>` and the labels against the exact set `["Refined","Design"]` plus any inherited non-excluded parent labels — including the **absence** of `automerge:ok`, `Browser`, and `ui:visual-check`:
+   `ensure-issue.sh ensure`'s exit codes drive the outcome exactly as documented in Pass 1 above — 0 success with the design ticket's number `<D>` in the checkpoint (and in `ensure`'s own `issueNumber=<n>` stdout line); 1/10/11/12/13 each their own retry-or-STOP per the write-failure protocol. **Verify the title and label set persisted correctly** — `ensure` already re-fetched and compared these before returning 0, but re-confirm from this orchestration level too:
    ```bash
    gh issue view <D> --repo <owner>/<repo> --json title,labels --jq '.title, (.labels[].name)'
    ```
 
-   If creation fails, or the numeric issue number is returned but the re-fetched title does not exactly match or the label set does not exactly match, follow the write-failure protocol: report the error (or mismatch), retry once, and if still failing, STOP and report that the design ticket was not created (or was created with corrupted content — note `<D>` for manual cleanup), so the implementation ticket's body cannot be updated with a dependency line.
+   If creation fails, or the re-fetched title does not exactly match `Design: <feature title>` or the label set does not exactly match `["Refined","Design"]` plus any inherited non-excluded parent labels, follow the write-failure protocol: report the error (or mismatch) and STOP — report that the design ticket was not created (or was created with corrupted content — note `<D>` for manual cleanup), so the implementation ticket's body cannot be updated with a dependency line.
 
    No URL parsing is needed for `<D>`. Append a dependency line to the implementation ticket's body. Use the `Write` tool to create `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>.md` (reusing the bare `issue-<number>-<token>.md` path from step 10, not a `-design` suffixed one) with the implementation ticket's current body plus an appended:
 
@@ -455,13 +476,17 @@ gh label create "ui:visual-check" --repo <owner>/<repo> --color "FEF2C0" --descr
    ```
    If the command errors (non-zero exit, e.g. `No such file or directory`), the marker is absent. If it exits 0 (silently, since the marker is an empty file), the marker is present.
 
-   **If the marker is present** — every write in steps 10-12 succeeded and was verified, so it's safe to delete this run's temp files by explicit path (never a glob — an unmatched glob errors under some shells, and `rm -f` already ignores paths that don't exist, so listing files a given run didn't create — e.g. child/design files when there was no split or companion design ticket — is harmless):
+   **If the marker is present** — every write in steps 10-12 succeeded and was verified. First, clear this run's creation checkpoint (success path only — see **Creation Checkpoint** above; `clear` is idempotent, so it is harmless even when this run created neither split children nor a companion design ticket and no checkpoint was ever initialized):
    ```bash
-   rm -f ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-bundle.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-edit.json ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-edit-title.txt ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-edit-body.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design.json ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-title.txt ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-body.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K.json ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-parent-meta.json ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>.ok
+   bash "${CLAUDE_PLUGIN_ROOT}/skills/refine/scripts/ensure-issue.sh" clear --checkpoint .plans/.refine-<original-number>.checkpoint.json
+   ```
+   Then it's safe to delete this run's temp files by explicit path (never a glob — an unmatched glob errors under some shells, and `rm -f` already ignores paths that don't exist, so listing files a given run didn't create — e.g. child/design files when there was no split or companion design ticket — is harmless). Note `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-parent-meta.json` is deliberately absent from this list — `ensure-issue.sh init` already consumed and removed it itself, when it was passed:
+   ```bash
+   rm -f ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-bundle.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-edit.json ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-edit-title.txt ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-edit-body.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-manifest.json ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-manifest.json ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-title.txt ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-body.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>.ok
    ```
    Repeat the child-K paths (with the actual `K` value substituted) for each child created in Pass 1 this run.
 
-   **If the marker is absent (and this is not the declined branch above)** — an earlier step in 10-12 did not complete successfully (the write-failure protocol already STOPped before reaching this step). Skip cleanup entirely and state explicitly to the user that cleanup was skipped for this reason, preserving the run's `<token>`-scoped temp files for manual recovery.
+   **If the marker is absent (and this is not the declined branch above)** — an earlier step in 10-12 did not complete successfully (the write-failure protocol already STOPped before reaching this step). Skip cleanup entirely, including the checkpoint clear above, and state explicitly to the user that cleanup was skipped for this reason: the run's `<token>`-scoped temp files are preserved for manual recovery, and the creation checkpoint (if one was initialized) is deliberately **retained** so the next `/cenci:refine <original-number>` invocation can resume from it instead of re-creating already-created issues.
 
 ### Final Message
 

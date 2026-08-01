@@ -186,10 +186,11 @@ if [[ -n "${skill}" ]]; then
   assert_not_contains "${skill}" "WebFetch" "749 skills/refine/SKILL.md WebFetch grant"
 
   # --- Exhaustive set equality: parse the frontmatter's Bash(...) entries and
-  # compare against the expected least-privilege list (#749: 9 entries; #878
-  # adds `jq -e` for the D1 presence gate's content-validity check -- the
-  # fetched parent-meta file must jq -e 'has("labels")', not just exit 0 on
-  # `cat`), both sorted so the comparison is order- and locale-independent.
+  # compare against the expected least-privilege list (#749's 10-entry set,
+  # plus #878's `jq -e` for the D1 presence gate's content-validity check --
+  # the fetched parent-meta file must jq -e 'has("labels")', not just exit 0
+  # on `cat` -- plus #876's ensure-issue.sh invocation grant: 12 entries),
+  # both sorted so the comparison is order- and locale-independent.
   EXPECTED_BASH_GRANTS='Bash(gh issue view:*)
 Bash(gh issue edit:*)
 Bash(gh label create:*)
@@ -200,7 +201,8 @@ Bash(mktemp -u ${TMPDIR:-/tmp}/cenci/:*)
 Bash(cat ${TMPDIR:-/tmp}/cenci/:*)
 Bash(rm -f ${TMPDIR:-/tmp}/cenci/:*)
 Bash(jq -n:*)
-Bash(jq -e:*)'
+Bash(jq -e:*)
+Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/refine/scripts/ensure-issue.sh":*)'
   allowed_line="$(grep -m1 '^allowed-tools:' "${skill_path}")"
   actual_bash_grants="$(printf '%s\n' "${allowed_line}" | grep -o 'Bash([^)]*)' | LC_ALL=C sort -u)"
   expected_bash_grants="$(printf '%s\n' "${EXPECTED_BASH_GRANTS}" | LC_ALL=C sort -u)"
@@ -258,6 +260,15 @@ ${actual_bash_grants}"
   # names #738, #740, *and* #749 as the recurrence this guards against.
   # #749: per-verb gh arm (view/edit only -- refine posts no comments and
   # never lists/closes) so a newly-introduced ungranted verb fails here.
+  # #876: the scan also covers scripts/ensure-issue.sh -- the single
+  # `Bash(bash ".../ensure-issue.sh":*)` grant covers everything the script
+  # does internally from Claude's own permission-prompt perspective, but the
+  # script's actual gh/git surface must still fall inside the same
+  # documented least-privilege command set (no new prefixes: the script
+  # never calls `git` at all -- it receives `--repo <owner>/<repo>` as an
+  # argument rather than deriving it itself).
+  ensure_issue_script_path="${FLOW_DIR}/skills/refine/scripts/ensure-issue.sh"
+
   while IFS= read -r cmd; do
     [[ -n "${cmd}" ]] || continue
     case "${cmd}" in
@@ -273,6 +284,26 @@ ${actual_bash_grants}"
       *) fail "740 skills/refine/SKILL.md: ungranted git invocation: [${cmd}]" ;;
     esac
   done < <(grep -oE '\bgit [a-z-]+( [a-z-]+){0,2}' "${skill_path}" | LC_ALL=C sort -u)
+
+  if [[ -f "${ensure_issue_script_path}" ]]; then
+    while IFS= read -r cmd; do
+      [[ -n "${cmd}" ]] || continue
+      case "${cmd}" in
+        "gh issue view"*|"gh issue edit"*|"gh label create"*|"gh api user --jq"*|"gh api repos"*) ;;
+        *) fail "876 skills/refine/scripts/ensure-issue.sh: ungranted gh invocation: [${cmd}]" ;;
+      esac
+    done < <(grep -oE '\bgh api user --jq|\bgh [a-z]+( [a-z]+)?' "${ensure_issue_script_path}" | LC_ALL=C sort -u)
+
+    while IFS= read -r cmd; do
+      [[ -n "${cmd}" ]] || continue
+      case "${cmd}" in
+        "git remote get-url"*) ;;
+        *) fail "876 skills/refine/scripts/ensure-issue.sh: ungranted git invocation: [${cmd}] -- the script must derive nothing from git itself, only its --repo argument" ;;
+      esac
+    done < <(grep -oE '\bgit [a-z-]+( [a-z-]+){0,2}' "${ensure_issue_script_path}" | LC_ALL=C sort -u)
+  else
+    fail "876 skills/refine/scripts/ensure-issue.sh: script not found -- cannot run the invocation-vs-grant scan (${ensure_issue_script_path})"
+  fi
 fi
 
 # --- skills/refine/codex.md -- command-surface parity note ------------------

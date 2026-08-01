@@ -70,6 +70,7 @@ assert_min_occurrences() {
 
 SHELL_RULES="${FLOW_DIR}/skills/shell-rules/SKILL.md"
 REFINE_SKILL="${FLOW_DIR}/skills/refine/SKILL.md"
+REFINE_ENSURE_ISSUE_SCRIPT="${FLOW_DIR}/skills/refine/scripts/ensure-issue.sh"
 MAINTAIN_BACKLOG="${FLOW_DIR}/skills/maintain/modes/backlog.md"
 PHASE_9="${FLOW_DIR}/skills/implement/phases/phase-9-pr.md"
 ADDRESS_REVIEW_SKILL="${FLOW_DIR}/skills/address-review/SKILL.md"
@@ -127,12 +128,36 @@ assert_file_contains "${SHELL_RULES}" "${PR_CREATE_EXAMPLE_MARKER}" \
 # per-site minimums pinning "every site builds via jq -n --rawfile", not an
 # exact form count; the inheritance forms themselves are pinned by
 # flow/tests/refine-child-ticket-inheritance.test.sh.
+#
+# #876 addendum: refine's own child-create and companion-design-create sites
+# are extracted into the deterministic scripts/ensure-issue.sh helper (only
+# the retitle PATCH stays inline in SKILL.md) -- so the occurrence floors
+# for those two extracted sites retarget to the script; SKILL.md's own floor
+# drops to the retitle site alone (1 jq -n / 2 --rawfile).
 # =====================================================================
 
-assert_min_occurrences "${REFINE_SKILL}" "jq -n" 3 \
-  "must build all three payload sites (retitle PATCH, child create, companion design create) via jq -n"
-assert_min_occurrences "${REFINE_SKILL}" "--rawfile" 6 \
-  "must pass raw title/body via --rawfile at all three payload sites (2 per site)"
+assert_min_occurrences "${REFINE_SKILL}" "jq -n" 1 \
+  "must build the retitle PATCH payload site via jq -n (child/design creation now live in scripts/ensure-issue.sh)"
+assert_min_occurrences "${REFINE_SKILL}" "--rawfile" 2 \
+  "must pass raw title/body via --rawfile at the retitle PATCH site"
+
+assert_min_occurrences "${REFINE_ENSURE_ISSUE_SCRIPT}" "jq -n" 2 \
+  "must build both the create and repair payloads via jq -n (#876, extracted from refine/SKILL.md's former child-create and companion-design-create sites)"
+assert_min_occurrences "${REFINE_ENSURE_ISSUE_SCRIPT}" "--rawfile" 4 \
+  "must pass raw title/body via --rawfile at both the create and repair payload sites (#876)"
+
+# The two floor assertions above previously passed vacuously off the
+# script's header documentation comment (lines ~91-100), which itself
+# mentions `jq -n --rawfile title ... --rawfile body ...` once -- that
+# alone satisfied the >=2/>=4 floors even when the real repair call site
+# was still composed via `jq -n --arg` (#876 review finding 5). This
+# strips comment lines first, so only the two live jq -n call sites (in
+# ensure_create and ensure_reconcile) can satisfy the count, and a
+# regression back to --arg at either site fails loudly again.
+NON_COMMENT_RAWFILE_COUNT="$(grep -v '^#' "${REFINE_ENSURE_ISSUE_SCRIPT}" | grep -oF -- '--rawfile' | wc -l | tr -d '[:space:]')"
+if (( NON_COMMENT_RAWFILE_COUNT < 4 )); then
+  fail "ensure-issue.sh must use --rawfile at both the create AND repair payload sites, outside of comments (found ${NON_COMMENT_RAWFILE_COUNT} non-comment occurrence(s), need >= 4)"
+fi
 
 assert_min_occurrences "${MAINTAIN_BACKLOG}" "jq -n" 1 \
   "must build the batch polish-ticket payload via jq -n"

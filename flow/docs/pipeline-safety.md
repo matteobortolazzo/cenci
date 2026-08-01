@@ -64,3 +64,27 @@ fail mid-run or get reused in a new context.
   to `/workspace/...` (main checkout) will violate `guard-main-worktree.sh` safety blocks by
   design. Instead, delegate to `/workspace/.worktrees/<id>-<desc>/.mcp.json` etc. These
   changes will commit and ship with the PR branch exactly as intended.
+
+- Durable recovery state — state a *resumed* run must read back to avoid repeating a
+  destructive or non-idempotent action (e.g., a create) — is keyed by the resource it
+  recovers, not by the run that wrote it, and lives in `.plans/`, never a run-scoped or
+  `/tmp` bookkeeping file. This is the mirror image of the run-scoping rule above (all
+  *transient* shared temp files must be uniquely scoped by worktree path, run ID, or session
+  UUID): a transient temp file's whole purpose is to never collide with, or be mistaken for,
+  another run's — but recovery state has the opposite requirement. It must be *found* by a
+  second, independent invocation (a retry after a crash, a resumed session under a fresh
+  temp-file token, or a different identity resuming a stalled run) that has no memory of the
+  first run's ID or token, so it can only be keyed by the stable identity of the thing it is
+  protecting — here, "this repo's issue #`<parent>`" — never by a per-attempt token that a
+  second invocation has no way to reconstruct. Concrete instance: `/cenci:refine`'s creation
+  checkpoint (`skills/refine/scripts/ensure-issue.sh`, #876, 2/12 of #661), which makes split-
+  child and companion-design-ticket creation recoverably idempotent across timeouts, retries,
+  crashes, and resumed refinement sessions. It lives at
+  `.plans/.refine-<parent>.checkpoint.json` — keyed by the repo and the parent issue number,
+  not by the run's `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-*` scratch-file token — so a
+  crash between a create's POST and the checkpoint write still resolves correctly on the next
+  attempt: the resumed run re-lists marker-bearing candidates for the same nonce and recovers
+  the already-created issue instead of creating a duplicate. A missing or corrupt checkpoint
+  is treated as fail-closed (never a silent re-create), and the checkpoint is cleared only on
+  a run's confirmed success — an aborted run retains it deliberately, so the next attempt has
+  something to resume from.
