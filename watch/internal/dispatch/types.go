@@ -281,6 +281,62 @@ const (
 	// (the commitsBehind seam returned an error) -- must never be treated
 	// as unknown-fresh (0 commits behind); fails closed instead.
 	PlanProbeStalenessError PlanProbe = "staleness_error"
+	// PlanProbeAmbiguous (#884) means two or more claims (any mix of
+	// healthy/broken) attribute themselves to this ticket's plan key --
+	// AC3/AC4: never resolved first-wins, and a broken duplicate never
+	// silently absorbed into a healthy single. Broken input, not absent
+	// input: must default-deny.
+	PlanProbeAmbiguous PlanProbe = "ambiguous"
+	// PlanProbeIDMismatch (#884, Q2) means a plan file's numeric filename
+	// prefix and front-matter ticketId disagree (or the ticketId is
+	// missing entirely, Q4: no legacy exemption) -- both the filename
+	// claim and the front-matter claim are held with this same
+	// classification. Broken input, not absent input: must default-deny.
+	PlanProbeIDMismatch PlanProbe = "id_mismatch"
+	// PlanProbePathAnomaly (#884) means a .plans entry attributable to this
+	// ticket by filename is not a regular file (a symlink, a directory, or
+	// other non-regular entry) -- classified from the directory entry's
+	// type alone, never opened/read. Broken input, not absent input: must
+	// default-deny.
+	PlanProbePathAnomaly PlanProbe = "path_anomaly"
+)
+
+// PlanInventory classifies the collector's per-repo read of the whole
+// `.plans` directory (#884) into a closed set, rather than collapsing
+// distinct failure classes (watch/docs/go-gotchas.md #598,
+// watch/docs/error-handling.md #628): a directory that could not be fully
+// enumerated (unreadable, or a mid-enumeration partial read) can never prove
+// absence for ANY ticket in the repo, so it must hold every pickup in that
+// repo -- ordinary Planned dispatch, resume, and planning pickup alike (Q5)
+// -- rather than only the tickets whose own plan file happened to be
+// unreadable. PlanInventoryVerified is the zero value ("") so every existing
+// Inputs/ReconcileInputs construction site (decide_test.go, reconcile_test.go,
+// chain*_test.go) keeps today's behavior unchanged without being touched --
+// mirrors PlanProbeAbsent/StageProbeAbsent/MainSyncSkipped above. Unlike
+// those permissive zero values, every non-verified value here is a
+// broken-input class that must default-deny (mirrors PlanProbe's own
+// discipline): the two production writers (readPlansForRepos,
+// RunReconcileOnce) are single call sites, each with an explicit "populated
+// for every configured repo, every pass" wiring test, so the permissive zero
+// value is never silently relied upon in production.
+type PlanInventory string
+
+const (
+	// PlanInventoryVerified is the zero value: a proven complete
+	// enumeration of `.plans` for this repo this pass (absent, empty, or a
+	// complete directory listing) -- the true "verified" case.
+	PlanInventoryVerified PlanInventory = ""
+	// PlanInventoryUnreadable means `.plans` itself could not be opened at
+	// all (permission denied, or the path is not a directory) -- a partial
+	// enumeration can never prove no second file claims any given ticket,
+	// so this holds every ticket in the repo (Q5).
+	PlanInventoryUnreadable PlanInventory = "unreadable"
+	// PlanInventoryPartial means directory enumeration started but failed
+	// partway through (a mid-enumeration read error) -- the entries read
+	// before the failure are known, but completeness is not proven, so
+	// this holds every ticket in the repo exactly like
+	// PlanInventoryUnreadable (Q5).
+	PlanInventoryPartial PlanInventory = "partial"
 )
 
 // OpenPRProbe classifies the collector's bounded, cursor-paginated `gh api

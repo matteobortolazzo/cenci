@@ -245,6 +245,13 @@ type reconcileDeps struct {
 	// every repo's ReadPlans call, mirroring dispatchDeps.PlanProbes
 	// (dispatch.go). Threaded straight through to ReconcileInputs.PlanProbes.
 	PlanProbes map[string]PlanProbe
+
+	// PlanInventories maps repo -> the resolved PlanInventory for that
+	// repo's `.plans` directory read this pass (#884), populated from the
+	// same ReadPlans call, mirroring dispatchDeps.PlanInventories
+	// (dispatch.go). Threaded straight through to
+	// ReconcileInputs.PlanInventories.
+	PlanInventories map[string]PlanInventory
 }
 
 // RunReconcileOnce collects tickets, plans, the daemon snapshot, and durable
@@ -289,8 +296,10 @@ func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer,
 
 	var plans []Plan
 	planProbes := map[string]PlanProbe{}
+	planInventories := map[string]PlanInventory{}
 	for _, rc := range cfg.Repos {
-		ps, probes, err := ReadPlans(rc.Repo, rc.Dir, nil, out)
+		scan, err := ReadPlans(rc.Repo, rc.Dir, nil, out)
+		planInventories[rc.Repo] = scan.Inventory
 		if err != nil {
 			logf(out, "reconcile: reading plans in %s: %v\n", rc.Dir, err)
 			if collectErr == nil {
@@ -298,8 +307,8 @@ func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer,
 			}
 			continue
 		}
-		plans = append(plans, ps...)
-		for k, v := range probes {
+		plans = append(plans, scan.Plans...)
+		for k, v := range scan.Probes {
 			planProbes[k] = v
 		}
 	}
@@ -335,6 +344,7 @@ func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer,
 		AttemptsUnknown: attemptsUnknown,
 		Now:             time.Now(),
 		PlanProbes:      planProbes,
+		PlanInventories: planInventories,
 	}, mut, dryRun, out, store)
 	// #883: firstNonNil would let a same-pass collectErr mask the corruption
 	// sentinel whenever collection also failed (a likely co-occurrence, e.g.
@@ -384,6 +394,7 @@ func applyReconcile(cfg Config, deps reconcileDeps, mut TicketMutator, dryRun bo
 		AttemptsUnknown: deps.AttemptsUnknown,
 		Config:          cfg,
 		PlanProbes:      deps.PlanProbes,
+		PlanInventories: deps.PlanInventories,
 	})
 
 	for _, rec := range result.Recoveries {

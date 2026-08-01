@@ -418,6 +418,11 @@ failing gate is the logged skip reason):
 
 1. **local `main` sync** — the ticket's repo's local `main` checkout synced cleanly
    with `origin/main` this pass (see [Local main sync](#local-main-sync) below);
+1.5. **plan inventory** — the repo's whole `.plans` directory was proven completely
+   readable this pass (see [Plan inventory](#plan-inventory) below); an unreadable or
+   partially-read directory holds **every** ticket in the repo, ordinary/resume/
+   planning pickup alike, since a partial enumeration can never prove no second file
+   claims any given ticket;
 2. carries `Planned`, **or** carries `Refined` (and not yet `Planned`) in a
    lean-planning repo with `dispatch.planRefined: true` — a *planning pickup* (see
    [Planning pickup and autonomous re-plan](#planning-pickup-and-autonomous-re-plan)
@@ -547,6 +552,45 @@ with no PR (or a corrupted state file) becomes dispatchable again. Set
 linked worktree rather than the ticket's main checkout, the probe will not see the
 main checkout's pipeline state (the state file lives at the main checkout's git
 root) and the gate fails open there — matching pre-#732 behavior.
+
+#### Plan inventory
+
+Every dispatch pass enumerates each enrolled repo's `.plans` directory exactly once
+per repo, sharing one authoritative contract (`internal/planfile`) with manual
+`cenci pipeline plan-check`, resume-answer probing, and reconciliation, so all four
+consumers select the same plan file or report the same failure — never disagree about
+which plan belongs to a ticket. The directory read resolves to one of five states:
+
+- **absent** — `.plans` does not exist at all. Verified absence.
+- **empty** — `.plans` exists but holds zero entries. Verified absence.
+- **complete** — the directory was fully enumerated; every entry's health and
+  identity is known.
+- **unreadable** — `.plans` could not be opened at all (permission denied, or the
+  path is not a directory). **Holds every ticket in the repo.**
+- **partial** — enumeration started but failed partway through. The entries read
+  before the failure are known, but completeness is not proven. **Holds every
+  ticket in the repo,** exactly like unreadable.
+
+Only `absent` and `empty` are verified absence — the only two states that permit a
+fresh `Refined` planning pickup (see [Planning pickup and autonomous
+re-plan](#planning-pickup-and-autonomous-re-plan) below). `unreadable` and `partial`
+gate rule 1.5 in [Pickup rules and gates](#pickup-rules-and-gates): a directory that
+could not be fully read can never prove that no second file also claims a given
+ticket, so it holds ordinary `Planned` dispatch, resume, and planning pickup alike,
+for every ticket in that repo — not merely the ticket whose own plan file happened to
+be unreadable.
+
+Within a `complete` (or `partial`) read, each entry's identity requires the file's
+numeric filename prefix (`.plans/<id>-<slug>.md`) and its front-matter `ticketId` to
+agree — front matter alone is no longer authoritative. A file whose filename and front
+matter disagree (or whose front matter carries no `ticketId` at all — a legacy plan
+pre-dating the field is no longer exempt) holds **both** the filename's claimed ticket
+and the front matter's claimed ticket, with the same "plan file ticket identity
+mismatch" reason. Two or more claims on one ticket — any mix of healthy and broken
+files — are an ambiguity hold, never resolved first-wins and never silently collapsed
+into a healthy single, regardless of directory sort order. A file with no numeric
+filename prefix at all (a legitimate ticketless plan, `.plans/<slug>.md`) is logged as
+a bounded anomaly but holds nothing — it never gates a real ticket.
 
 #### Open-PR inventory completeness
 
@@ -1188,20 +1232,24 @@ Behavior:
   below `waiting_for_input` (ticket #826 retargeted this gate from
   `waiting_for_plan_approval`, so a ticket already parked at
   `waiting_for_input` — escalated, blocked on a human — is never silently
-  adopted) — and exactly one validly-shaped `.plans/<id>-*.md` exists on disk
-  (front matter's `ticketId`, if present, matching `<id>`, and front
-  matter's `status` NOT `awaiting-input`), the persisted stage is treated as
-  if it were already `waiting_for_plan_approval` before the transition runs,
-  landing directly at `plan_approved` instead of failing with "invalid
-  pipeline transition". The `status: awaiting-input` check (ticket #826)
-  closes a hole the stage retarget alone cannot: if the
-  `.cenci/pipeline/<id>.json` state file itself was deleted, the persisted
-  stage reads as `new`/`prepared` regardless of what the draft on disk says,
-  so a still-awaiting-input draft must be checked directly. This is purely
-  local/offline evidence — no `gh`/`git` freshness re-check — and surfaces a
-  `warnings[]` entry reading `adopted plan file <path> as stage
-  "waiting_for_plan_approval" (persisted stage was "<old-stage>"; no prior
-  plan approval was recorded)`; it is informational, not a failure. Bare
+  adopted) — and exactly one healthy claim resolves for `<id>` under the
+  shared plan-inventory identity contract (see [Plan
+  inventory](#plan-inventory) above; front matter's `status` also must NOT be
+  `awaiting-input`), the persisted stage is treated as if it were already
+  `waiting_for_plan_approval` before the transition runs, landing directly at
+  `plan_approved` instead of failing with "invalid pipeline transition". The
+  `status: awaiting-input` check (ticket #826) closes a hole the stage
+  retarget alone cannot: if the `.cenci/pipeline/<id>.json` state file itself
+  was deleted, the persisted stage reads as `new`/`prepared` regardless of
+  what the draft on disk says, so a still-awaiting-input draft must be
+  checked directly. This is purely local/offline evidence — no `gh`/`git`
+  freshness re-check — and surfaces a `warnings[]` entry reading `adopted
+  plan file <path> as stage "waiting_for_plan_approval" (persisted stage was
+  "<old-stage>"; no prior plan approval was recorded)`; it is informational,
+  not a failure. **Unified identity rule (ticket #884):** a plan file whose
+  front matter carries no `ticketId` at all (a legacy plan pre-dating the
+  field) is no longer exempt from adoption — it needs a `ticketId` line
+  added, or a re-plan (`plan --replan`), to become adoptable again. Bare
   `plan` (no `--approve`) is unaffected and keeps its own strict
   precondition (an ambiguous/missing/malformed plan file, or a `ticketId`
   mismatch, falls back to today's unmodified error, unchanged).
@@ -1277,14 +1325,15 @@ Behavior:
   `PRNumber`, and `--session KEY=VALUE` metadata (repeatable; merges into the
   persisted map without clobbering keys from earlier calls) on the pipeline
   state file.
-- `plan-check` globs `.plans/<id>-*.md`, validates the single match's front
-  matter/required sections/slug, and then — in order — checks
-  `--replan-requested` first, then the front matter's `status` for
-  `awaiting-input` (ticket #826: a draft persisted by the unattended
-  escalation path, blocked on a human answering the open questions on the
-  ticket), and only then (unless either short-circuits) computes a
-  deterministic freshness verdict from git commits-behind (scoped to the
-  plan's `stalenessPaths`) and the ticket's `gh issue view`
+- `plan-check` discovers the ticket's plan via the same shared plan-inventory
+  contract dispatch uses (see [Plan inventory](#plan-inventory) above),
+  validates the single healthy match's front matter/required sections/slug,
+  and then — in order — checks `--replan-requested` first, then the front
+  matter's `status` for `awaiting-input` (ticket #826: a draft persisted by
+  the unattended escalation path, blocked on a human answering the open
+  questions on the ticket), and only then (unless either short-circuits)
+  computes a deterministic freshness verdict from git commits-behind (scoped
+  to the plan's `stalenessPaths`) and the ticket's `gh issue view`
   state/`updatedAt`. The `awaiting-input` check runs with zero `git`/`gh`
   calls, same as `--replan-requested`. It never gates on or mutates the
   persisted pipeline stage — read-only, like `artifact --get`. Its JSON
@@ -1295,15 +1344,21 @@ Behavior:
   - **Exit-code framing deliberately deviates from the other mechanics
     verbs' blanket "errors[] non-empty → exit 1"**: `none` (no plan file
     yet — the everyday first-run outcome) and `multiple` (ambiguous — ask
-    the human which file) both carry a populated `errors[]` for
-    observability but exit `0`, since both are normal continuation
-    branches, not failures. Only an empty/unrecognized `decision` — the
-    plan file exists but is malformed, or its freshness genuinely could
-    not be determined (an invalid/unreachable `planCommitSha`, a git
-    failure, or a `gh issue view` failure) — is a hard-stop domain error
-    and exits `1`. Usage errors (missing/non-numeric `<id>`, unrecognized
-    flag, trailing positional) still exit `2` with a one-line stderr hint,
-    same as every other verb.
+    the human which file; now also covers two or more identity-based claims
+    on the same ticket, not just literal duplicate filenames) both carry a
+    populated `errors[]` for observability but exit `0`, since both are
+    normal continuation branches, not failures. Only an empty/unrecognized
+    `decision` — the plan file exists but is malformed; its freshness
+    genuinely could not be determined (an invalid/unreachable
+    `planCommitSha`, a git failure, or a `gh issue view` failure); the
+    repo's `.plans` directory itself could not be fully read (unreadable or
+    partially enumerated — see [Plan inventory](#plan-inventory) above); or
+    a plan file's numeric filename prefix and front-matter `ticketId`
+    disagree — is a hard-stop domain error and exits `1`. Each of these four
+    sources is detectable via `errors.Is` and carries a content-distinct
+    message. Usage errors (missing/non-numeric `<id>`, unrecognized flag,
+    trailing positional) still exit `2` with a one-line stderr hint, same as
+    every other verb.
 - `--repo-slug OWNER/REPO` (`label` and `plan-check`) and `--slug SLUG`
   (worktree-cleanup, required; worktree, required unless `--attach PATH` is
   given instead) are additional flags on top of the stage commands'

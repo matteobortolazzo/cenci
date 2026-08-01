@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -982,7 +983,7 @@ func TestReadPlansForRepos_DryRunCommitsBehindMatchesPostFastForwardRealPass(t *
 
 	// Dry-run pass: fetch + classify only, never merge.
 	dryRunSyncs := syncMains(repos, io.Discard, true)
-	dryPlans, _, err := readPlansForRepos(repos, dryRunSyncs, io.Discard)
+	dryPlans, _, _, err := readPlansForRepos(repos, dryRunSyncs, io.Discard)
 	if err != nil {
 		t.Fatalf("readPlansForRepos (dry-run) returned unexpected error: %v", err)
 	}
@@ -998,7 +999,7 @@ func TestReadPlansForRepos_DryRunCommitsBehindMatchesPostFastForwardRealPass(t *
 
 	// Real pass: fetch + fast-forward.
 	realSyncs := syncMains(repos, io.Discard, false)
-	realPlans, _, err := readPlansForRepos(repos, realSyncs, io.Discard)
+	realPlans, _, _, err := readPlansForRepos(repos, realSyncs, io.Discard)
 	if err != nil {
 		t.Fatalf("readPlansForRepos (real pass) returned unexpected error: %v", err)
 	}
@@ -1011,6 +1012,122 @@ func TestReadPlansForRepos_DryRunCommitsBehindMatchesPostFastForwardRealPass(t *
 	originHEAD := gitTest(t, origin, "rev-parse", "HEAD")
 	if got := gitTest(t, local, "rev-parse", "HEAD"); got != originHEAD {
 		t.Errorf("real pass must fast-forward local HEAD to origin HEAD, got %s want %s", got, originHEAD)
+	}
+}
+
+// TestReadPlansForRepos_PopulatesInventoryForEveryRepoEveryPass covers #884's
+// wiring requirement: readPlansForRepos' returned map[string]PlanInventory
+// carries an entry for EVERY configured repo, every pass -- including a repo
+// whose `.plans` directory read failed (PlanInventoryUnreadable), which
+// pre-#884 would have silently vanished from every returned map via the old
+// bare `continue` (indistinguishable from verified absence). Two repos: one
+// healthy (a single valid plan file), one whose `.plans` is a regular file
+// (ENOTDIR, ever-present -- no root/permission dependency).
+func TestReadPlansForRepos_PopulatesInventoryForEveryRepoEveryPass(t *testing.T) {
+	healthyDir := t.TempDir()
+	writePlan(t, healthyDir, "42-x.md", "---\nticketId: 42\nstatus: planned\n---\nbody\n")
+
+	brokenDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(brokenDir, ".plans"), []byte("not a directory\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	repos := []RepoConfig{{Repo: "healthy/repo", Dir: healthyDir}, {Repo: "broken/repo", Dir: brokenDir}}
+	plans, _, inventories, err := readPlansForRepos(repos, nil, io.Discard)
+	if err == nil {
+		t.Fatal("readPlansForRepos: want a non-nil error (one repo's .plans directory is unreadable)")
+	}
+	if len(plans) != 1 || plans[0].TicketID != 42 {
+		t.Fatalf("plans = %+v, want exactly the healthy repo's plan for ticket 42", plans)
+	}
+	if got := inventories["healthy/repo"]; got != PlanInventoryVerified {
+		t.Errorf(`inventories["healthy/repo"] = %q, want PlanInventoryVerified`, got)
+	}
+	if got, ok := inventories["broken/repo"]; !ok || got != PlanInventoryUnreadable {
+		t.Errorf(`inventories["broken/repo"] = (%q, present=%v), want (PlanInventoryUnreadable, true) -- a failed read must still be recorded, never silently absent from the map`, got, ok)
+	}
+}
+
+// TestRunReconcileOnce_PopulatesInventoryForEveryRepoEveryPass is
+// TestReadPlansForRepos_PopulatesInventoryForEveryRepoEveryPass's
+// RunReconcileOnce-side twin (Phase 6+7 review finding #7): the plan's Test
+// Strategy claims RunOnce AND RunReconcileOnce both populate PlanInventories
+// for every configured repo every pass, but only RunOnce's readPlansForRepos
+// had a dedicated wiring test -- RunReconcileOnce's own identical inline
+// ReadPlans loop (reconcile_run.go) had no test exercising the
+// collector->deps wiring itself, only applyReconcile's pure-function tests,
+// which construct ReconcileInputs.PlanInventories by hand. Two repos: one
+// healthy (an existing, empty `.plans` -- verified absence) and one broken
+// (`.plans` is a regular file, ENOTDIR). Both repos carry one Planned,
+// not-Working ticket; under testConfig's zero GracePeriod, the healthy
+// repo's ticket must escalate to plan-invalid immediately (its plan
+// inventory really was verified absent), while the broken repo's ticket
+// must defer (grace observation preserved) rather than escalate on an
+// unverified inventory -- a behavioral difference that can only be produced
+// by PlanInventories actually reaching Reconcile through RunReconcileOnce's
+// real collector wiring, not a hand-built fixture.
+func TestRunReconcileOnce_PopulatesInventoryForEveryRepoEveryPass(t *testing.T) {
+	installFakeGH(t, `
+case "$1 $2" in
+  "issue list")
+    case "$*" in
+      *"healthy/repo"*) printf '[{"number":1,"title":"T1","labels":[{"name":"Planned"}],"assignees":[]}]' ;;
+      *"broken/repo"*) printf '[{"number":2,"title":"T2","labels":[{"name":"Planned"}],"assignees":[]}]' ;;
+      *) printf '[]' ;;
+    esac
+    ;;
+  "pr list") printf '[]' ;;
+  *) exit 1 ;;
+esac
+`)
+	serveChainSnapshot(t, watch.StateSnapshot{}) // reachable daemon, no live windows
+
+	healthyDir := t.TempDir() // .plans never created -> verified absent
+	brokenDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(brokenDir, ".plans"), []byte("not a directory\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := testConfig()
+	cfg.Repos = []RepoConfig{
+		{Repo: "healthy/repo", Dir: healthyDir},
+		{Repo: "broken/repo", Dir: brokenDir},
+	}
+
+	mut := &fakeMutator{}
+	store := &memStore{}
+	var buf bytes.Buffer
+	if _, err := RunReconcileOnce(cfg, mut, false, &buf, store); err == nil {
+		t.Fatal("RunReconcileOnce: want a non-nil error (broken/repo's .plans directory is unreadable)")
+	}
+
+	var healthyEdit *labelEdit
+	for i, e := range mut.labelEdits {
+		if e.repo == "healthy/repo" && e.number == 1 {
+			healthyEdit = &mut.labelEdits[i]
+		}
+		if e.repo == "broken/repo" && e.number == 2 {
+			t.Errorf("broken/repo#2 must never mutate on an unverified plan inventory, got %+v", e)
+		}
+	}
+	if healthyEdit == nil {
+		t.Fatalf("expected a label edit for healthy/repo#1 (verified-absent plan, zero grace), got %+v", mut.labelEdits)
+	}
+	if !containsStr(healthyEdit.add, labelPlanInvalid) || !containsStr(healthyEdit.remove, labelPlanned) {
+		t.Errorf("healthy/repo#1 label edit = %+v, want add=[%s] remove=[%s]", healthyEdit, labelPlanInvalid, labelPlanned)
+	}
+
+	// broken/repo#2's gated defer never starts a fresh grace clock on first
+	// sight (it only carries an already-existing one forward, mirroring
+	// planProbeSkip's identical gated-defer shape) -- so on this first pass
+	// it is absent from both Failed and the persisted observations, exactly
+	// like a ticket the pure engine never touched, which is itself proof
+	// the label mutation never fired.
+	if _, ok := store.state.Observations["broken/repo#2"]; ok {
+		t.Errorf("broken/repo#2 must not gain a fresh observation from a gated defer on first sight, got %+v", store.state.Observations)
+	}
+	if _, ok := store.state.Observations["healthy/repo#1"]; ok {
+		t.Errorf("healthy/repo#1's observation must be resolved into an action, not carried forward, got %+v", store.state.Observations)
 	}
 }
 
@@ -1126,10 +1243,19 @@ func TestApplyDispatchRefinedPlanningPickup_IncompleteOpenPRInventory_NeverSpawn
 // scripted fake-gh world (a mid-pagination open-PR probe failure), must
 // produce identical []Decision reasons -- proving dry-run and the real pass
 // consume the same collector-stamped OpenPRProbe verdict, not two
-// independently-computed ones. No repo Dir is configured (MainSync stays at
-// its ungated zero value, MainSyncSkipped), isolating the assertion to the
-// open-PR gate alone.
+// independently-computed ones. The repo Dir points at a real, freshly
+// git-inited-and-cloned checkout (initOriginAndLocal) with no `.plans`
+// directory, so both MainSync (a clean, up-to-date checkout) and the #884
+// plan-inventory gate (a verified-absent `.plans` read) stay ungated,
+// isolating the assertion to the open-PR gate alone. Before #884, an unset
+// Dir was itself sufficient to keep MainSync ungated and ReadPlans was never
+// consulted; #884 made an unset Dir fail closed for plan inventory too, so
+// isolating this test now requires a real repo checkout rather than an
+// empty Dir.
 func TestRunOnce_DryRunAndRealPassProduceIdenticalOpenPRGateReason(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, _ := initOriginAndLocal(t)
+
 	dir := t.TempDir()
 	countFile := filepath.Join(dir, "count")
 	script := fmt.Sprintf(`
@@ -1159,7 +1285,7 @@ esac
 	runPass := func(dryRun bool) []Decision {
 		installFakeGHOnPath(t, script)
 		cfg := testConfig()
-		cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: ""}}
+		cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: local}}
 		var buf bytes.Buffer
 		decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, dryRun, &buf, nil)
 		if err != nil {

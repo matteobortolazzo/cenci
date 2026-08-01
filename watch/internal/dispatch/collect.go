@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -218,190 +216,198 @@ func agentFromLabels(labels []string) string {
 	return ""
 }
 
-// ReadPlans globs <dir>/.plans/*.md, parses each file's flat YAML front matter,
-// stamps repo (owner/repo) onto each plan, and fills CommitsBehind. commitsBehind
-// resolves default-branch commits since a plan's sha, restricted to paths when
-// the plan lists stalenessPaths; nil uses planfile.CommitsBehind against dir.
-// Callers are expected to guarantee a non-nil out, mirroring CollectTickets
-// above (RunOnce/RunReconcileOnce already default it to os.Stdout before
-// calling here).
+// PlanScan is ReadPlans' full result: the healthy plans matched this pass,
+// the per-key PlanProbe classification for every claimed ticket key, and the
+// PlanInventory verdict for the whole `.plans` directory read (#884).
+type PlanScan struct {
+	Plans     []Plan
+	Probes    map[string]PlanProbe
+	Inventory PlanInventory
+}
+
+// ReadPlans enumerates <dir>/.plans via planfile.Read/Select (#884), the
+// single shared identity contract also used by pipeline.CheckPlan and
+// adoptPlanFileStage: the numeric filename prefix and front-matter ticketId
+// must agree for a healthy plan, and two or more claims on one ticket key
+// (any mix of healthy/broken) are an ambiguity hold rather than a first-wins
+// resolution (AC3/AC4). commitsBehind resolves default-branch commits since
+// a plan's sha, restricted to paths when the plan lists stalenessPaths; nil
+// uses planfile.CommitsBehind against dir. Callers are expected to guarantee
+// a non-nil out, mirroring CollectTickets above (RunOnce/RunReconcileOnce
+// already default it to os.Stdout before calling here).
 //
-// The returned map[string]PlanProbe (#852), keyed by planKey(repo,
-// ticketId), lets a caller distinguish a genuinely absent plan (no entry at
-// all -- the zero-value PlanProbeAbsent) from one that exists but is broken
-// in some way (read error, parse error, ticket-id error, staleness error)
-// instead of both collapsing into "no matched Plan", the exact ambiguity
-// this ticket exists to remove: under the stage-aware planning-pickup gate
-// (decide.go), plan == nil used to trigger a real dispatch rather than a
-// no-op skip, so a transient read/parse hiccup on an actually-valid plan
-// file was operationally equivalent to "never planned" and could launch a
-// spurious/duplicate planning session with zero trace (#828 review fix #2);
-// under the reconciler (reconcile.go), it used to escalate to plan-invalid
-// on the very same transient hiccup. A broken-but-present file is logged to
-// out either way, and classified into probes when it can be attributed to a
-// ticket (planFileTicketID falls back to the filename's numeric prefix when
-// front matter can't be trusted); a file whose name doesn't start with
-// digits either is logged but left unattributed -- it could never have
-// matched a ticket under today's front-matter-only TicketID resolution
-// either, so there is no ticket key to gate.
+// PlanScan.Inventory (#884) distinguishes a proven-complete read
+// (PlanInventoryVerified, the zero value) from an unreadable or
+// mid-enumeration-partial `.plans` directory: an incomplete read can never
+// prove absence for ANY ticket in the repo, so ReadPlans returns a non-nil
+// error and an empty Plans/Probes result -- the caller (readPlansForRepos,
+// RunReconcileOnce) is responsible for propagating the repo-wide hold (Q5)
+// rather than treating the failure as if the repo had simply been skipped.
 //
-// probes is written success-wins-over-error, first-wins-among-equals per key
-// (#852 second review round, finding A), so that probes[key] always
-// describes whichever plan file actually wins the planByTicket match below
-// -- not merely "the first file glob-processed for this key". Those are NOT
-// the same "first": plans/planByTicket is first-wins only over files that
-// parsed successfully (a probe-errored file is dropped from plans entirely,
-// never added), so a plain first-wins-over-everything guard on probes alone
-// (the Phase 6+7 review's original fix, finding #1) only closes the
-// healthy-first/broken-second ordering. The reverse ordering -- a broken
-// file that glob-sorts before its healthy duplicate -- still locked in the
-// broken file's error classification even though the healthy file, being
-// the first (and only) file added to plans, is exactly the one
-// planByTicket/Decide/Reconcile will match. See setProbeFirstWins.
-func ReadPlans(repo, dir string, commitsBehind func(sha string, paths []string) (int, error), out io.Writer) ([]Plan, map[string]PlanProbe, error) {
+// PlanScan.Probes (#852/#884), keyed by planKey(repo, ticketId), lets a
+// caller distinguish a genuinely absent plan (no entry at all -- the
+// zero-value PlanProbeAbsent) from one that exists but is broken in some way
+// (read error, parse error, path anomaly, identity mismatch, ambiguity,
+// staleness error) instead of both collapsing into "no matched Plan": under
+// the stage-aware planning-pickup gate (decide.go), plan == nil triggers a
+// real dispatch, so a transient read/parse hiccup on an actually-valid plan
+// file must never be operationally equivalent to "never planned" (#828
+// review fix #2); under the reconciler (reconcile.go), it must never
+// escalate to plan-invalid on the same transient hiccup. A broken-but-
+// present file is logged to out either way. A filename/front-matter
+// identity mismatch (Q2) writes the SAME PlanProbeIDMismatch classification
+// under BOTH claimed keys -- the filename's claim and the front matter's
+// claim -- so neither ticket silently proceeds as if the other's claim did
+// not exist. An unattributable entry (no numeric filename prefix at all --
+// Q1) is logged as a bounded anomaly but claims no key at all.
+func ReadPlans(repo, dir string, commitsBehind func(sha string, paths []string) (int, error), out io.Writer) (PlanScan, error) {
+	// probeStage's dir == "" guard precedent (collect.go:187, this file):
+	// never resolve a repo root from the daemon's own working directory.
+	// Unlike probeStage (which treats an empty dir as the permissive
+	// StageProbeAbsent), an empty repo dir here must fail closed -- a plan
+	// inventory read against the wrong directory must never be reported as
+	// verified absence (#884 review round 2 finding #3). planfile.Read
+	// itself now also guards repoRoot == "" internally (defense-in-depth),
+	// but this early return additionally avoids ever constructing a
+	// ".plans"-relative-to-cwd path or doing any I/O against it.
+	if dir == "" {
+		err := fmt.Errorf("read .plans directory for %s: repo dir is empty", repo)
+		logf(out, "dispatch: .plans directory for %s (repo dir unset) could not be read: %v\n", repo, err)
+		return PlanScan{Inventory: PlanInventoryUnreadable}, err
+	}
+
 	if commitsBehind == nil {
 		commitsBehind = func(sha string, paths []string) (int, error) {
 			return planfile.CommitsBehind(dir, sha, paths)
 		}
 	}
-	matches, err := filepath.Glob(filepath.Join(dir, ".plans", "*.md"))
-	if err != nil {
-		return nil, nil, err
+
+	inv := planfile.Read(dir)
+	if !inv.Complete() {
+		classification := PlanInventoryUnreadable
+		if inv.State == planfile.DirPartial {
+			classification = PlanInventoryPartial
+		}
+		logf(out, "dispatch: .plans directory for %s (%s) could not be fully read (%s): %v\n", repo, dir, inv.State, inv.Err)
+		return PlanScan{Inventory: classification}, fmt.Errorf("read .plans directory for %s: %w", repo, inv.Err)
 	}
-	sort.Strings(matches)
+
+	// Per-file bounded logging for every entry that is not a clean healthy
+	// claim, preserved from the pre-#884 implementation.
+	for _, e := range inv.Entries {
+		if e.Health != planfile.HealthOK {
+			logf(out, "dispatch: plan file %s: %s\n", e.Path, e.Reason)
+		}
+	}
+
+	// Distinct claimed ticket ids, gathered from every entry's attributable
+	// identity -- mirrors planfile.Select's own claim rules (see
+	// inventory_test.go's doc comment) so every claimed key gets exactly
+	// one Select-derived classification below.
+	ids := map[int]bool{}
+	for _, e := range inv.Entries {
+		switch e.Health {
+		case planfile.HealthOK:
+			ids[e.TicketID] = true
+		case planfile.HealthUnreadable, planfile.HealthMalformed, planfile.HealthPathAnomaly:
+			ids[e.FilenameID] = true
+		case planfile.HealthIDMismatch:
+			if e.FilenameID != 0 {
+				ids[e.FilenameID] = true
+			}
+			if e.FrontMatterID != 0 {
+				ids[e.FrontMatterID] = true
+			}
+		}
+	}
+	sortedIDs := make([]int, 0, len(ids))
+	for id := range ids {
+		sortedIDs = append(sortedIDs, id)
+	}
+	sort.Ints(sortedIDs)
 
 	probes := map[string]PlanProbe{}
 	var plans []Plan
-	for _, path := range matches {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			logf(out, "dispatch: plan file %s unreadable: %v\n", path, err)
-			if id, ok := planFileTicketID(path); ok {
-				setProbeFirstWins(probes, planKey(repo, id), PlanProbeReadError)
+	for _, id := range sortedIDs {
+		sel := inv.Select(id)
+		key := planKey(repo, id)
+		switch sel.Result {
+		case planfile.SelectSingle:
+			p := buildPlan(repo, *sel.Entry)
+			if p.PlanCommitSha != "" {
+				n, err := commitsBehind(p.PlanCommitSha, p.StalenessPaths)
+				if err != nil {
+					logf(out, "dispatch: plan file %s: staleness could not be determined: %v\n", p.Path, err)
+					probes[key] = PlanProbeStalenessError
+					plans = append(plans, p)
+					continue
+				}
+				p.CommitsBehind = n
 			}
-			continue
-		}
-		fm, ok := planfile.ParseFrontMatter(string(data))
-		if !ok {
-			logf(out, "dispatch: plan file %s: front matter did not parse\n", path)
-			if id, ok := planFileTicketID(path); ok {
-				setProbeFirstWins(probes, planKey(repo, id), PlanProbeParseError)
-			}
-			continue
-		}
-
-		ticketID := planfile.AtoiSafe(fm["ticketId"])
-		if ticketID <= 0 {
-			id, ok := planFileTicketID(path)
-			if !ok {
-				logf(out, "dispatch: plan file %s: ticket id unresolvable (front matter and filename both unattributable)\n", path)
+			probes[key] = PlanProbeOk
+			plans = append(plans, p)
+		case planfile.SelectAmbiguous:
+			probes[key] = PlanProbeAmbiguous
+			// Phase 6+7 review finding #5: an ambiguous-but-individually-
+			// healthy claim previously never reached the log at all (the
+			// per-entry loop above only logs Health != HealthOK), so an
+			// operator had no log-derived way to find the colliding files.
+			// sel.Reason already names every claiming path (ambiguityReason).
+			logf(out, "dispatch: %s\n", sel.Reason)
+		case planfile.SelectBroken:
+			// Defensive (Phase 6+7 review finding #6): Select's construction
+			// never returns SelectBroken with zero Entries against a
+			// Complete() inventory today, but this guards a future refactor
+			// from turning an index into a panic instead of a bounded
+			// classification.
+			if len(sel.Entries) == 0 {
+				probes[key] = PlanProbeParseError
 				continue
 			}
-			logf(out, "dispatch: plan file %s: ticketId front matter unresolvable, attributed to #%d via filename\n", path, id)
-			ticketID = id
-			key := planKey(repo, ticketID)
-			setProbeFirstWins(probes, key, PlanProbeTicketIDError)
-			continue
+			probes[key] = brokenPlanProbeFor(sel.Entries[0].Health)
 		}
-
-		p := Plan{
-			Repo:                repo,
-			Path:                path,
-			TicketID:            ticketID,
-			Status:              fm["status"],
-			PlanCommitSha:       fm["planCommitSha"],
-			IsChild:             fm["isChild"] == "true",
-			IsLastChild:         fm["isLastChild"] == "true",
-			ParentID:            planfile.AtoiSafe(fm["parentId"]),
-			StalenessPaths:      planfile.SplitPaths(fm["stalenessPaths"]),
-			EscalationNonce:     validEscalationNonce(fm["escalationNonce"]),
-			EscalationCommentID: validEscalationCommentID(fm["escalationCommentId"]),
-		}
-		key := planKey(repo, ticketID)
-		if p.PlanCommitSha != "" {
-			n, err := commitsBehind(p.PlanCommitSha, p.StalenessPaths)
-			if err != nil {
-				logf(out, "dispatch: plan file %s: staleness could not be determined: %v\n", path, err)
-				setProbeFirstWins(probes, key, PlanProbeStalenessError)
-				plans = append(plans, p)
-				continue
-			}
-			p.CommitsBehind = n
-		}
-		setProbeFirstWins(probes, key, PlanProbeOk)
-		plans = append(plans, p)
 	}
-	return plans, probes, nil
+
+	return PlanScan{Plans: plans, Probes: probes, Inventory: PlanInventoryVerified}, nil
 }
 
-// setProbeFirstWins records classification for key in probes, but ONLY a
-// plain first-wins guard (matching Reconcile/Decide's planByTicket
-// first-wins guard, `if _, ok := planByTicket[key]; !ok { ... }`) is not
-// enough (#852 second review round, finding A): plans/planByTicket is
-// first-wins only over successfully-parsed files, since a probe-errored
-// file is dropped from plans entirely. So the rule here has two parts:
-//
-//   - A success (PlanProbeOk / PlanProbeStalenessError) always wins over a
-//     previously-recorded error (PlanProbeReadError / PlanProbeParseError /
-//     PlanProbeTicketIDError) for the same key, regardless of processing
-//     order -- a file that parsed fine and was added to plans is, by
-//     construction, the one planByTicket will match, so its classification
-//     must be the one probes reports even if a broken duplicate for the
-//     same ticket happened to glob-sort (and so get probed) first.
-//   - Among two classifications of the same kind (two successes, or two
-//     errors), the existing first-wins-in-plans order still governs: the
-//     first one recorded is kept, and later ones of the same kind are
-//     ignored.
-//
-// In other words: errors are the only classification ever downgraded/
-// overwritten, and only by a success -- a success is never overwritten by
-// anything.
-func setProbeFirstWins(probes map[string]PlanProbe, key string, classification PlanProbe) {
-	existing, ok := probes[key]
-	if !ok {
-		probes[key] = classification
-		return
-	}
-	if isPlanProbeError(existing) && !isPlanProbeError(classification) {
-		probes[key] = classification
+// buildPlan builds a Plan from a healthy (Health == HealthOK) planfile.Entry.
+func buildPlan(repo string, e planfile.Entry) Plan {
+	fm := e.FrontMatter
+	return Plan{
+		Repo:                repo,
+		Path:                e.Path,
+		TicketID:            e.TicketID,
+		Status:              fm["status"],
+		PlanCommitSha:       fm["planCommitSha"],
+		IsChild:             fm["isChild"] == "true",
+		IsLastChild:         fm["isLastChild"] == "true",
+		ParentID:            planfile.AtoiSafe(fm["parentId"]),
+		StalenessPaths:      planfile.SplitPaths(fm["stalenessPaths"]),
+		EscalationNonce:     validEscalationNonce(fm["escalationNonce"]),
+		EscalationCommentID: validEscalationCommentID(fm["escalationCommentId"]),
 	}
 }
 
-// isPlanProbeError reports whether probe is one of the "broken file" error
-// classifications (read/parse/ticket-id errors) as opposed to a success
-// classification (Ok/StalenessError) -- used by setProbeFirstWins (#852
-// second review round, finding A) to let a success always overwrite a
-// previously-recorded error for the same key.
-func isPlanProbeError(probe PlanProbe) bool {
-	switch probe {
-	case PlanProbeReadError, PlanProbeParseError, PlanProbeTicketIDError:
-		return true
+// brokenPlanProbeFor maps a single claiming entry's Health to the PlanProbe
+// classification ReadPlans records for a SelectBroken key (#884).
+func brokenPlanProbeFor(h planfile.Health) PlanProbe {
+	switch h {
+	case planfile.HealthUnreadable:
+		return PlanProbeReadError
+	case planfile.HealthMalformed:
+		return PlanProbeParseError
+	case planfile.HealthPathAnomaly:
+		return PlanProbePathAnomaly
+	case planfile.HealthIDMismatch:
+		return PlanProbeIDMismatch
 	default:
-		return false
+		// Unreachable given entryClaims' construction (planfile.Select only
+		// ever returns SelectBroken for one of the four classes above), but
+		// default-denies with the most conservative classification rather
+		// than panicking, per watch/docs/error-handling.md's discipline.
+		return PlanProbeParseError
 	}
-}
-
-// planFileTicketID extracts the leading numeric ticket id from a plan
-// file's base name (`.plans/<ticketId>-<slug>.md`), so a probe failure
-// (read/parse error) that leaves front matter unavailable can still be
-// attributed to the right ticket (#852). Returns (0, false) when the name
-// doesn't start with a digit run -- unattributable, since such a file could
-// never have matched a ticket under today's front-matter-only TicketID
-// resolution either.
-func planFileTicketID(path string) (int, bool) {
-	base := filepath.Base(path)
-	i := 0
-	for i < len(base) && base[i] >= '0' && base[i] <= '9' {
-		i++
-	}
-	if i == 0 {
-		return 0, false
-	}
-	n, err := strconv.Atoi(base[:i])
-	if err != nil {
-		return 0, false
-	}
-	return n, true
 }
 
 // validEscalationNonce validates v -- a plan's escalationNonce front-matter

@@ -26,10 +26,18 @@ package main
 // signal to "not stale". Each failure class carries a content-distinct error
 // message (rule #446) so callers/tests can tell them apart via
 // errors.Is(ErrPlanMalformed) or a message-marker check, even though both
-// render as decision "". Usage errors (missing/non-numeric <id>,
-// unrecognized flag, trailing positional) still exit 2 with a one-line
-// stderr hint, per docs/cli-conventions.md, and never reach
-// pipeline.CheckPlan at all.
+// render as decision "". #884 adds two more sources to the same "" decision,
+// per its Q3 (closed decision set, no new plan-check decision string): (3)
+// ErrPlanInventoryUnreadable -- the repo's `.plans` directory itself could
+// not be fully enumerated (unreadable, or a mid-enumeration partial read),
+// so absence can never be proven; (4) ErrPlanIdentityMismatch -- a plan
+// file's numeric filename prefix and front-matter ticketId disagree, or the
+// front matter carries no ticketId at all (Q4: no legacy exemption). All
+// four sources share the same "" decision and exit-1 framing; each is
+// detectable via errors.Is and carries a content-distinct message.
+// Usage errors (missing/non-numeric <id>, unrecognized flag, trailing
+// positional) still exit 2 with a one-line stderr hint, per
+// docs/cli-conventions.md, and never reach pipeline.CheckPlan at all.
 //
 // Decision/exit-code table (ticket #560, extended by #826):
 //
@@ -61,9 +69,18 @@ package main
 //	                                        consuming skill treats "unknown"
 //	                                        exactly like "stale"
 //	none            exit 0, errors: [_]  -- no .plans/<id>-*.md match yet
-//	multiple        exit 0, errors: [_]  -- 2+ matches, ambiguous
-//	"" (unset)      exit 1, errors: [_]  -- ErrPlanMalformed or a
-//	                                        freshness-check failure
+//	multiple        exit 0, errors: [_]  -- 2+ claims, ambiguous (#884: now
+//	                                        also covers identity-based
+//	                                        duplicate claims, with errors[]
+//	                                        naming every claiming path)
+//	"" (unset)      exit 1, errors: [_]  -- ErrPlanMalformed, a
+//	                                        freshness-check failure, an
+//	                                        unreadable/partial `.plans`
+//	                                        inventory (#884:
+//	                                        ErrPlanInventoryUnreadable), or a
+//	                                        filename/front-matter ticket
+//	                                        identity mismatch (#884:
+//	                                        ErrPlanIdentityMismatch)
 import (
 	"encoding/json"
 	"flag"

@@ -71,6 +71,14 @@ type dispatchDeps struct {
 	// Inputs.PlanProbes so Decide can distinguish a verified-absent plan
 	// from one that is broken in some way, without doing any I/O itself.
 	PlanProbes map[string]PlanProbe
+
+	// PlanInventories maps repo -> the resolved PlanInventory for that
+	// repo's `.plans` directory read this pass (#884), populated by
+	// readPlansForRepos alongside PlanProbes above. Threaded straight
+	// through to Inputs.PlanInventories so Decide can hold every ticket in
+	// a repo whose `.plans` directory could not be fully enumerated (Q5),
+	// without doing any I/O itself.
+	PlanInventories map[string]PlanInventory
 }
 
 // RunOnce gathers inputs (tickets, plans, snapshot, clock), runs the pure
@@ -117,7 +125,7 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 		}
 	}
 
-	plans, planProbes, err := readPlansForRepos(cfg.Repos, syncs, out)
+	plans, planProbes, planInventories, err := readPlansForRepos(cfg.Repos, syncs, out)
 	if err != nil && collectErr == nil {
 		collectErr = err
 	}
@@ -138,14 +146,15 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 	answers := resolveAnswerProbes(tickets, indexPlans(plans), out)
 
 	decisions, applyErr := applyDispatch(cfg, dispatchDeps{
-		Tickets:      tickets,
-		Plans:        plans,
-		Snapshot:     snap,
-		Now:          time.Now(),
-		CurrentUser:  currentUser,
-		Answers:      answers,
-		RepoAutonomy: autonomies,
-		PlanProbes:   planProbes,
+		Tickets:         tickets,
+		Plans:           plans,
+		Snapshot:        snap,
+		Now:             time.Now(),
+		CurrentUser:     currentUser,
+		Answers:         answers,
+		RepoAutonomy:    autonomies,
+		PlanProbes:      planProbes,
+		PlanInventories: planInventories,
 	}, ctrl, mut, dryRun, out, prior)
 	return decisions, firstNonNil(collectErr, applyErr)
 }
@@ -163,9 +172,18 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 // real pass would consume, rather than stale local HEAD. A repo absent from
 // syncs (should not happen via RunOnce's own wiring, but defensive) falls
 // back to "HEAD".
-func readPlansForRepos(repos []RepoConfig, syncs map[string]mainSyncResult, out io.Writer) ([]Plan, map[string]PlanProbe, error) {
+//
+// The returned map[string]PlanInventory (#884) is populated for EVERY
+// configured repo, every pass -- including a repo whose directory read
+// failed: unlike the pre-#884 behavior (which `continue`d past a ReadPlans
+// error, leaving that repo silently absent from every returned map and thus
+// indistinguishable from verified absence), a failed read now records its
+// PlanInventoryUnreadable/PlanInventoryPartial classification here so the
+// repo-wide hold (Q5) actually reaches Decide via Inputs.PlanInventories.
+func readPlansForRepos(repos []RepoConfig, syncs map[string]mainSyncResult, out io.Writer) ([]Plan, map[string]PlanProbe, map[string]PlanInventory, error) {
 	var plans []Plan
 	planProbes := map[string]PlanProbe{}
+	planInventories := map[string]PlanInventory{}
 	var firstErr error
 	for _, rc := range repos {
 		ref := "HEAD"
@@ -190,7 +208,8 @@ func readPlansForRepos(repos []RepoConfig, syncs map[string]mainSyncResult, out 
 				return n, nil
 			}
 		}
-		ps, probes, err := ReadPlans(rc.Repo, rc.Dir, commitsBehind, out)
+		scan, err := ReadPlans(rc.Repo, rc.Dir, commitsBehind, out)
+		planInventories[rc.Repo] = scan.Inventory
 		if err != nil {
 			logf(out, "dispatch: reading plans in %s: %v\n", rc.Dir, err)
 			if firstErr == nil {
@@ -198,12 +217,12 @@ func readPlansForRepos(repos []RepoConfig, syncs map[string]mainSyncResult, out 
 			}
 			continue
 		}
-		plans = append(plans, ps...)
-		for k, v := range probes {
+		plans = append(plans, scan.Plans...)
+		for k, v := range scan.Probes {
 			planProbes[k] = v
 		}
 	}
-	return plans, planProbes, firstErr
+	return plans, planProbes, planInventories, firstErr
 }
 
 // applyDispatch runs the pure engine over already-collected deps, logs, spawns
@@ -228,17 +247,18 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 	}
 
 	decisions := Decide(Inputs{
-		Tickets:      deps.Tickets,
-		Plans:        deps.Plans,
-		Snapshot:     deps.Snapshot,
-		Budgets:      buildBudgetProvider(cfg, deps.Now),
-		Now:          deps.Now,
-		Prior:        priorVal,
-		CurrentUser:  deps.CurrentUser,
-		Config:       cfg,
-		Answers:      deps.Answers,
-		RepoAutonomy: deps.RepoAutonomy,
-		PlanProbes:   deps.PlanProbes,
+		Tickets:         deps.Tickets,
+		Plans:           deps.Plans,
+		Snapshot:        deps.Snapshot,
+		Budgets:         buildBudgetProvider(cfg, deps.Now),
+		Now:             deps.Now,
+		Prior:           priorVal,
+		CurrentUser:     deps.CurrentUser,
+		Config:          cfg,
+		Answers:         deps.Answers,
+		RepoAutonomy:    deps.RepoAutonomy,
+		PlanProbes:      deps.PlanProbes,
+		PlanInventories: deps.PlanInventories,
 	})
 
 	// Surface the pinned model in the same log stream as the decision table so

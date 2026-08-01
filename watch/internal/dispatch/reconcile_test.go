@@ -420,6 +420,31 @@ func TestReconcilePlanProbeGate_UnreadablePlan_DefersRatherThanEscalating(t *tes
 	}
 }
 
+// TestReconcilePlanInventoryGate_Unreadable_DefersRatherThanEscalating covers
+// #884's Q5 requirement at the reconciler layer: a Planned, not-Working
+// ticket with a verified-absent plan probe (the zero value, exactly like the
+// "missing" test above) must still defer -- never escalate to plan-invalid
+// -- when the repo's whole `.plans` directory could not be fully enumerated
+// this pass, since an unreadable/partial read can never prove this ticket's
+// plan is genuinely absent.
+func TestReconcilePlanInventoryGate_Unreadable_DefersRatherThanEscalating(t *testing.T) {
+	in := workingInputs()
+	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Planned"}}}
+	in.Plans = nil
+	in.PlanInventories = map[string]PlanInventory{"o/r": PlanInventoryUnreadable}
+
+	res := Reconcile(in)
+	if len(res.Recoveries) != 0 {
+		t.Fatalf("an unverified plan inventory must produce no recovery, got %+v", res.Recoveries)
+	}
+	if hasFailed(res, "o/r", 42) {
+		t.Error("an unverified plan inventory must never be surfaced in Failed (deferred, not failed)")
+	}
+	if ts, ok := res.NextObservations["o/r#42"]; !ok || !ts.Equal(reconcileNow.Add(-10*time.Minute)) {
+		t.Errorf("expected the grace observation preserved at the original first-seen time, got %v (present=%v)", ts, ok)
+	}
+}
+
 // -- #881 (Q3): open-PR probe completeness gates the reconciler's two
 // hasLiveWindow(...) || t.HasOpenPR label-mutation sites (reconcile.go:212,
 // reconcile.go:320) -- mirroring the existing `in.Snapshot == nil` blind
@@ -648,6 +673,73 @@ func TestReconcileCrashedPlanningPickup_RecoversToRefined(t *testing.T) {
 	}
 	if !containsStr(rec.RemoveLabels, labelWorking) || len(rec.RemoveLabels) != 1 {
 		t.Errorf("RemoveLabels = %v, want exactly [%s]", rec.RemoveLabels, labelWorking)
+	}
+}
+
+// TestReconcileCrashedPlanningPickup_UnverifiedInventoryDefers covers #884's
+// Q5 requirement for the stage-aware RecoveryRetry branch, corrected by
+// review round 2 finding #1: a Working+Refined ticket with no matched plan
+// file (otherwise identical to TestReconcileCrashedPlanningPickup_RecoversToRefined,
+// which nils AddLabels) is exactly the realistic shape a real ReadPlans
+// directory-read failure produces (Plans always empty on that error, so
+// planByTicket[key] is always nil) -- it must therefore defer entirely
+// (no recovery at all, grace observation preserved), never fall through to
+// the ordinary +Planned retry: an unverified inventory can never prove the
+// plan is genuinely absent, and falling through to ordinary retry would
+// silently discard whatever unproven plan state (including a possible
+// still-open awaiting-input escalation) the unreadable directory was
+// actually hiding. Before the review-round-2 fix, only the narrower
+// AddLabels-nil branch checked PlanInventories, so this exact realistic
+// scenario (Plans == nil, not just planByTicket[key] == nil for some other
+// reason) fell through to an ordinary +Planned retry instead of deferring --
+// this test pins the corrected top-level gate.
+func TestReconcileCrashedPlanningPickup_UnverifiedInventoryDefers(t *testing.T) {
+	in := workingInputs()
+	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Working", "Refined"}}}
+	in.Plans = nil
+	in.PlanInventories = map[string]PlanInventory{"o/r": PlanInventoryUnreadable}
+	res := Reconcile(in)
+
+	if len(res.Recoveries) != 0 {
+		t.Fatalf("an unverified plan inventory must produce no recovery, got %+v", res.Recoveries)
+	}
+	if hasFailed(res, "o/r", 42) {
+		t.Error("an unverified plan inventory must never be surfaced in Failed (deferred, not failed)")
+	}
+	if ts, ok := res.NextObservations["o/r#42"]; !ok || !ts.Equal(reconcileNow.Add(-10*time.Minute)) {
+		t.Errorf("expected the grace observation preserved at the original first-seen time, got %v (present=%v)", ts, ok)
+	}
+}
+
+// TestReconcileOrdinaryRetry_UnverifiedInventoryDefers is review round 2
+// finding #1's headline regression test: the PLAIN Working+Planned retry
+// path (no Refined label at all, so the stage-aware AddLabels-nil branch's
+// own condition -- hasLabel(Refined) -- never even applies) is the exact
+// realistic shape a real ReadPlans directory-read failure produces for the
+// ordinary "window is gone, re-queue the ticket" case (workingInputs()'s own
+// happy path, TestReconcileWorkingPlannedTicketPastGrace_RecoveryRetryReachable,
+// with Plans forced nil to mimic ReadPlans returning an empty Plans slice on
+// a directory-read error). Before the fix, neither individually-gated branch
+// (inverse-leak, stage-aware AddLabels-nil) applies to this ticket at all --
+// it carries Working, not Planned-without-Working, and it never carries
+// Refined -- so it fell straight through to the ordinary +Planned -Working
+// retry with no PlanInventories check whatsoever, mutating GitHub state on
+// an unproven directory read. Proves the top-level gate, not just the two
+// narrower inner guards, actually reaches this path.
+func TestReconcileOrdinaryRetry_UnverifiedInventoryDefers(t *testing.T) {
+	in := workingInputs() // Working+Planned, ordinary retry shape
+	in.Plans = nil        // mimics ReadPlans returning an empty Plans slice on a directory-read error
+	in.PlanInventories = map[string]PlanInventory{"o/r": PlanInventoryUnreadable}
+	res := Reconcile(in)
+
+	if len(res.Recoveries) != 0 {
+		t.Fatalf("an unverified plan inventory must produce no recovery, got %+v", res.Recoveries)
+	}
+	if hasFailed(res, "o/r", 42) {
+		t.Error("an unverified plan inventory must never be surfaced in Failed (deferred, not failed)")
+	}
+	if ts, ok := res.NextObservations["o/r#42"]; !ok || !ts.Equal(reconcileNow.Add(-10*time.Minute)) {
+		t.Errorf("expected the grace observation preserved at the original first-seen time, got %v (present=%v)", ts, ok)
 	}
 }
 
@@ -880,6 +972,49 @@ func TestReconcileDeadWorkingAwaitingInputPlan_BudgetExhausted_EscalatesToDispat
 	}
 	if !hasFailed(res, "o/r", 42) {
 		t.Error("a budget-exhausted interrupted resume must appear in Failed")
+	}
+}
+
+// TestReconcileDeadWorkingAwaitingInputPlan_UnverifiedInventoryDefers covers
+// #884's Q5 requirement for the RecoveryResumeInterrupted branch (Phase 6+7
+// review finding #2): the same dead Working ticket matched to an
+// awaiting-input draft as the classification test above must instead defer
+// -- no recovery at all, grace observation preserved -- when the repo's
+// whole `.plans` directory could not be fully enumerated this pass, mirroring
+// the inverse-leak and stage-aware-retry gates' identical deferral shape
+// (TestReconcilePlanInventoryGate_Unreadable_DefersRatherThanEscalating).
+func TestReconcileDeadWorkingAwaitingInputPlan_UnverifiedInventoryDefers(t *testing.T) {
+	in := resumeAwaitingInputInputs()
+	in.PlanInventories = map[string]PlanInventory{"o/r": PlanInventoryUnreadable}
+	res := Reconcile(in)
+
+	if len(res.Recoveries) != 0 {
+		t.Fatalf("an unverified plan inventory must produce no recovery, got %+v", res.Recoveries)
+	}
+	if hasFailed(res, "o/r", 42) {
+		t.Error("an unverified plan inventory must never be surfaced in Failed (deferred, not failed)")
+	}
+	if ts, ok := res.NextObservations["o/r#42"]; !ok || !ts.Equal(reconcileNow.Add(-10*time.Minute)) {
+		t.Errorf("expected the grace observation preserved at the original first-seen time, got %v (present=%v)", ts, ok)
+	}
+}
+
+// TestReconcileDeadWorkingAwaitingInputPlan_PartialInventoryDefers is the
+// PlanInventoryPartial sibling of the Unreadable case above -- both
+// non-verified classes must defer identically.
+func TestReconcileDeadWorkingAwaitingInputPlan_PartialInventoryDefers(t *testing.T) {
+	in := resumeAwaitingInputInputs()
+	in.PlanInventories = map[string]PlanInventory{"o/r": PlanInventoryPartial}
+	res := Reconcile(in)
+
+	if len(res.Recoveries) != 0 {
+		t.Fatalf("an unverified (partial) plan inventory must produce no recovery, got %+v", res.Recoveries)
+	}
+	if hasFailed(res, "o/r", 42) {
+		t.Error("an unverified plan inventory must never be surfaced in Failed (deferred, not failed)")
+	}
+	if ts, ok := res.NextObservations["o/r#42"]; !ok || !ts.Equal(reconcileNow.Add(-10*time.Minute)) {
+		t.Errorf("expected the grace observation preserved at the original first-seen time, got %v (present=%v)", ts, ok)
 	}
 }
 

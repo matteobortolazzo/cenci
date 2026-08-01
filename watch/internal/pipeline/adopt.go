@@ -19,21 +19,22 @@ package pipeline
 // neither SetArtifacts nor Reset (withLock is not reentrant in-process, so
 // doing so from here would self-deadlock into ErrLockContention).
 //
-// Reuses planfile.go's existing discovery (.plans/<id>-*.md glob) and
+// Reuses the shared planfile.Read/Select identity contract (#884) and
 // parseAndValidatePlan validation verbatim -- this file does not
-// reimplement front-matter parsing or glob logic.
+// reimplement front-matter parsing or directory-enumeration logic.
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
+
+	"github.com/matteobortolazzo/cenci/watch/internal/planfile"
 )
 
 // adoptPlanFileStage implements the ticket #688 plan's "Detection semantics
-// -- item 1 (exact)" gate, retargeted by ticket #826 (gate 2) and extended
-// with a new gate 7. Adoption is granted only when ALL of the following
-// hold; any failure means no adoption (default-deny, per
+// -- item 1 (exact)" gate, retargeted by ticket #826 (gate 2), extended with
+// gate 7, and unified onto the shared plan-inventory identity contract by
+// ticket #884 (gates 4/6). Adoption is granted only when ALL of the
+// following hold; any failure means no adoption (default-deny, per
 // watch/docs/go-gotchas.md #598, watch/docs/error-handling.md #628) and the
 // caller must fall through to today's unmodified
 // transition()/ErrInvalidTransition (or ErrNotPrepared) behavior, verbatim:
@@ -49,12 +50,22 @@ import (
 //  3. The plan repo root resolves (resolvePlanRepoRoot(o.RepoRoot)); a
 //     resolution failure (e.g. --state-dir used outside a git repo) is
 //     non-fatal and simply means no adoption.
-//  4. `.plans/<id>-*.md` returns EXACTLY ONE match (0 or 2+ means no
-//     adoption -- ambiguity is never resolved silently).
+//  4. planfile.Read(repoRoot).Select(id) resolves exactly one healthy claim
+//     (planfile.SelectSingle) -- an absent, ambiguous, or broken (including
+//     identity-mismatched) inventory means no adoption. This subsumes the
+//     pre-#884 "exactly one .plans/<id>-*.md glob match" gate AND the old
+//     gate 6 below: Select's identity contract already requires the
+//     filename's numeric prefix to equal the front-matter ticketId for a
+//     claim to resolve healthy.
 //  5. That single match passes parseAndValidatePlan -- the identical gate
 //     plan-check applies (front matter, all four required sections, slug).
-//  6. The plan's front-matter ticketId is either absent/0 (pre-dating the
-//     field) or equal to <id>. A mismatch means no adoption.
+//  6. (#884, Q4: unify) A plan file whose front matter carries no ticketId
+//     at all (a legacy plan pre-dating the field) is NO LONGER exempt --
+//     Select's identity contract already denied it at gate (4) above
+//     (HealthIDMismatch, since a missing ticketId can never equal the
+//     filename's numeric prefix), so there is nothing further to check
+//     here. A legacy plan file needs a ticketId line added, or a re-plan
+//     (`plan --replan`), to become adoptable again.
 //  7. The plan's front-matter status is NOT "awaiting-input" (#826). Gate
 //     (2)'s stage retarget alone cannot close this hole: if the
 //     `.cenci/pipeline/<id>.json` state file itself was deleted (or never
@@ -86,34 +97,31 @@ func adoptPlanFileStage(o Opts, s State) (planPath string, ok bool) {
 		return "", false
 	}
 
-	// (4) Exactly one .plans/<id>-*.md match.
-	matches, err := filepath.Glob(filepath.Join(repoRoot, ".plans", o.ID+"-*.md"))
-	if err != nil || len(matches) != 1 {
+	// o.ID is already validated against ^\d+$ by resolveStatePath before
+	// Run's locked closure runs, so strconv.Atoi never fails here in
+	// practice; a conversion failure is treated the same as any other
+	// precondition failure -- no adoption.
+	wantID, convErr := strconv.Atoi(o.ID)
+	if convErr != nil {
 		return "", false
 	}
-	path := matches[0]
 
-	content, err := os.ReadFile(path)
-	if err != nil {
+	// (4)/(6) Exactly one healthy claim under the shared identity contract.
+	sel := planfile.Read(repoRoot).Select(wantID)
+	if sel.Result != planfile.SelectSingle {
 		return "", false
 	}
+	path := sel.Entry.Path
 
 	// (5) The single match must pass the identical validation gate
-	// plan-check applies.
-	fm, meta, err := parseAndValidatePlan(path, string(content))
+	// plan-check applies. Consumes sel.Entry.Content -- the content
+	// planfile.Read already read once during the inventory scan -- instead
+	// of re-opening path (Phase 6+7 review finding #3): a second by-path
+	// os.ReadFile is a TOCTOU window, since identity was proven against the
+	// first read but a second read follows whatever now sits at that path.
+	fm, _, err := parseAndValidatePlan(path, sel.Entry.Content)
 	if err != nil {
 		return "", false
-	}
-
-	// (6) ticketId absent/0, or equal to <id>. o.ID is already validated
-	// against ^\d+$ by resolveStatePath before Run's locked closure runs,
-	// so strconv.Atoi never fails here in practice; a conversion failure is
-	// treated the same as any other precondition failure -- no adoption.
-	if meta.TicketID != 0 {
-		wantID, convErr := strconv.Atoi(o.ID)
-		if convErr != nil || meta.TicketID != wantID {
-			return "", false
-		}
 	}
 
 	// (7) Never adopt a draft still awaiting human input (#826).
