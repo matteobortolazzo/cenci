@@ -420,6 +420,107 @@ func TestReconcilePlanProbeGate_UnreadablePlan_DefersRatherThanEscalating(t *tes
 	}
 }
 
+// -- #881 (Q3): open-PR probe completeness gates the reconciler's two
+// hasLiveWindow(...) || t.HasOpenPR label-mutation sites (reconcile.go:212,
+// reconcile.go:320) -- mirroring the existing `in.Snapshot == nil` blind
+// guard's observation-preserving shape: a non-complete probe means
+// t.HasOpenPR cannot be trusted as "verified false", so the reconciler must
+// never mutate labels on it, but must still preserve whatever grace
+// observation was already pending (never drop it -- watch/docs/dispatch-
+// reconcile.md's "a deferred verdict must carry its observation forward"
+// rule).
+
+// TestReconcileFailurePath_NonCompleteOpenPRProbe_DefersAndPreservesObservation
+// covers the reconcile.go:320 failure-path site: a Working ticket past grace
+// with HasOpenPR == false but a non-complete probe must produce NO Recovery
+// and must preserve its NextObservations entry, rather than proceeding to
+// RecoveryRetry as it would if HasOpenPR were trusted verbatim.
+// workingInputs()'s realistic combined ["Working","Planned"] labels
+// (watch/docs/test-strategy.md line 17 / #828) are used unchanged.
+func TestReconcileFailurePath_NonCompleteOpenPRProbe_DefersAndPreservesObservation(t *testing.T) {
+	in := workingInputs()
+	in.Tickets[0].OpenPRProbe = OpenPRProbeUnreadable
+
+	res := Reconcile(in)
+
+	if len(res.Recoveries) != 0 {
+		t.Fatalf("a non-complete open-PR probe must defer (no recovery), got %+v", res.Recoveries)
+	}
+	if hasFailed(res, "o/r", 42) {
+		t.Error("a deferred ticket must never be surfaced as failed")
+	}
+	wantFirstSeen := reconcileNow.Add(-10 * time.Minute) // workingInputs()'s own Observations entry
+	if ts, ok := res.NextObservations["o/r#42"]; !ok || !ts.Equal(wantFirstSeen) {
+		t.Errorf("expected the prior observation preserved at %v, got %v (present=%v)", wantFirstSeen, ts, ok)
+	}
+}
+
+// TestReconcileFailurePath_CompleteOpenPRProbe_StillProducesRecoveryRetry is
+// the failure path's control case: a complete probe (the ordinary healthy
+// case) must NOT be swallowed by the new guard -- it still produces
+// RecoveryRetry exactly as before #881, proving the guard doesn't silently
+// disable the failure path entirely.
+func TestReconcileFailurePath_CompleteOpenPRProbe_StillProducesRecoveryRetry(t *testing.T) {
+	in := workingInputs()
+	in.Tickets[0].OpenPRProbe = OpenPRProbeComplete // explicit, though also the zero value
+	in.Attempts = map[string]int{"o/r#42": 1}       // 1 < reconcileConfig's budget 2
+
+	res := Reconcile(in)
+	rec := onlyRecovery(t, res)
+	if rec.Kind != RecoveryRetry {
+		t.Errorf("kind = %q, want %q (a complete probe must never disable the failure path)", rec.Kind, RecoveryRetry)
+	}
+}
+
+// TestReconcileInputNeededAndWorking_NonCompleteOpenPRProbe_DefersAndPreservesObservation
+// covers the reconcile.go:212 crash-cleanup site (the Input Needed + Working
+// signature of a crash between the two label edits of a partial resume claim
+// or rollback, #853): a non-complete open-PR probe must produce no Recovery
+// (no stray-Working cleanup fires), must preserve the grace observation, and
+// the ticket must still be recorded into Escalated regardless (per the
+// plan's Q3 resolution: "the ticket is still recorded into Escalated
+// regardless of whether the cleanup recovery itself fires this pass").
+func TestReconcileInputNeededAndWorking_NonCompleteOpenPRProbe_DefersAndPreservesObservation(t *testing.T) {
+	in := workingInputs()
+	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Input Needed", "Working"}, OpenPRProbe: OpenPRProbeUnreadable}}
+	firstSeen := reconcileNow.Add(-10 * time.Minute)
+	in.Observations = map[string]time.Time{"o/r#42": firstSeen}
+
+	res := Reconcile(in)
+
+	if len(res.Recoveries) != 0 {
+		t.Fatalf("a non-complete open-PR probe must defer (no recovery), got %+v", res.Recoveries)
+	}
+	if !hasEscalated(res, "o/r", 42) {
+		t.Error("must still be recorded into Escalated regardless of whether the cleanup recovery fires")
+	}
+	if hasFailed(res, "o/r", 42) {
+		t.Error("must never leak into Failed")
+	}
+	if ts, ok := res.NextObservations["o/r#42"]; !ok || !ts.Equal(firstSeen) {
+		t.Errorf("expected the prior observation preserved at %v, got %v (present=%v)", firstSeen, ts, ok)
+	}
+}
+
+// TestReconcileInputNeededAndWorking_CompleteOpenPRProbe_StillProducesCleanupRecovery
+// is the crash-cleanup site's control case: a complete probe must not be
+// swallowed by the new guard -- the stray-Working cleanup recovery still
+// fires exactly as before #881.
+func TestReconcileInputNeededAndWorking_CompleteOpenPRProbe_StillProducesCleanupRecovery(t *testing.T) {
+	in := workingInputs()
+	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Input Needed", "Working"}, OpenPRProbe: OpenPRProbeComplete}}
+	in.Observations = map[string]time.Time{"o/r#42": reconcileNow.Add(-10 * time.Minute)}
+
+	res := Reconcile(in)
+	rec := onlyRecovery(t, res)
+	if rec.Kind != RecoveryResumeInterrupted {
+		t.Errorf("kind = %q, want %q", rec.Kind, RecoveryResumeInterrupted)
+	}
+	if !hasEscalated(res, "o/r", 42) {
+		t.Error("must still be recorded into Escalated")
+	}
+}
+
 func TestReconcileOrphanPlanReportOnly(t *testing.T) {
 	in := workingInputs()
 	// A plan whose ticket is not open (not in Tickets).

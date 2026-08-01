@@ -423,8 +423,9 @@ failing gate is the logged skip reason):
    [Planning pickup and autonomous re-plan](#planning-pickup-and-autonomous-re-plan)
    below) — **or** carries `Input Needed` with a human answer newer than the
    escalation anchor (see [Escalation auto-resume](#escalation-auto-resume) below);
-   not `Blocked`, has no open linked PR, and its persisted pipeline stage is not
-   `finalized`;
+   not `Blocked`, has a provably-complete open-PR inventory with no open linked PR
+   (see [Open-PR inventory completeness](#open-pr-inventory-completeness) below),
+   and its persisted pipeline stage is not `finalized`;
 3. a matching plan for the ticket exists with `status: planned` (or, on the resume
    path, `status: awaiting-input`) — **skipped for a planning pickup**, which by
    definition has no plan file matched yet;
@@ -546,6 +547,64 @@ with no PR (or a corrupted state file) becomes dispatchable again. Set
 linked worktree rather than the ticket's main checkout, the probe will not see the
 main checkout's pipeline state (the state file lives at the main checkout's git
 root) and the gate fails open there — matching pre-#732 behavior.
+
+#### Open-PR inventory completeness
+
+Ticket #881 replaces the pre-#881 single capped `gh pr list --limit 200` call
+(which silently treated a hit cap as complete) with a bounded, cursor-paginated
+`gh api graphql` traversal of the repo's open PRs' `closingIssuesReferences`,
+100 PRs per page, up to 20 pages (2,000 PRs total) per repo per dispatch/reconcile
+pass. In a repo with more than 200 open PRs, a linked PR outside the old
+capped window could be misclassified as "no open PR" and dispatched again,
+creating duplicate implementation work — this traversal walks every page
+instead of stopping at the first one.
+
+`pageInfo.hasNextPage` — not the cheaper `totalCount` pre-flight check — is the
+authoritative completeness signal: `totalCount` only short-circuits a
+pathologically large repo to one call without wasting the full page budget
+proving what a single number already answered. Explicit `orderBy: {field:
+CREATED_AT, direction: ASC}` cursor paging keeps the traversal deterministic;
+correctness never depends on that order. A partial inventory (the traversal
+stopped early) still counts every PR actually seen toward `HasOpenPR` — strictly
+safer than discarding partial results — while the completeness gate below fires
+regardless, so an incomplete read never quietly reads as "no PR".
+
+When completeness cannot be proven, gate 2 holds **every** ticket in the
+affected repo (never just the tickets a problem PR happens to reference) with
+one of five distinct reasons:
+
+- `open PR state incomplete: pagination cap exhausted` — either the `totalCount`
+  pre-flight exceeded the 2,000-record bound, or the 20-page bound was reached
+  while the server still reported more pages remaining. The repo legitimately
+  has more open PRs than this probe is bounded to traverse.
+- `open PR state incomplete: closing-issue references truncated` — at least one
+  PR's own `closingIssuesReferences` connection (bounded at 50 per PR) itself
+  overflowed. One pathological PR closing more than 50 issues holds the whole
+  repo, not just its own linked issues — an operator-visible hold, not silent
+  truncation.
+- `open PR state unreadable: malformed page` — a non-JSON response body, a
+  GraphQL `errors[]` payload, a response exceeding the probe's bounded stdout
+  cap, or a page reporting more results are available but with no cursor to
+  advance on.
+- `open PR state unreadable: probe timed out` — a `gh api graphql` call was
+  killed by its bound before completing.
+- `open PR state unreadable: pagination failed` — an ordinary `gh` command
+  failure partway through pagination (e.g. a rate limit) — the traversal broke,
+  not merely hit a bound.
+
+The reconciler defers identically: at both the crash-cleanup and ordinary
+failure label-mutation sites, a non-complete probe blocks the label mutation
+entirely (preserving, never dropping, the grace-period clock) rather than
+trusting an unverified `HasOpenPR` — see [Open-PR-inventory-completeness defer
+in `watch/docs/dispatch-reconcile.md`](docs/dispatch-reconcile.md#open-pr-inventory-completeness-defer-ticket-881).
+
+**Remedy for a repo legitimately above the pagination bound:** there is no
+config knob to raise it — a repo with more than 2,000 open PRs (or a single PR
+closing more than 50 issues) needs its open-PR count or linkage brought back
+under the bound (e.g. by closing/merging stale PRs) before this gate clears.
+Dry-run and real dispatch consume the exact same completeness verdict, so
+`--dry-run` surfaces the same hold an operator would otherwise only discover
+mid-pass.
 
 #### Escalation auto-resume
 

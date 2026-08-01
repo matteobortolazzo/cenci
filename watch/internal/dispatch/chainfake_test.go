@@ -713,9 +713,6 @@ func dispatchChainGhCall(t *testing.T, world *ghWorld, args []string, localDir, 
 	case len(args) >= 2 && args[0] == "issue" && args[1] == "list":
 		return chainIssueList(world), "", 0
 
-	case len(args) >= 2 && args[0] == "pr" && args[1] == "list":
-		return chainPRList(world), "", 0
-
 	case len(args) >= 2 && args[0] == "issue" && args[1] == "view":
 		return chainIssueView(world, args)
 
@@ -820,7 +817,17 @@ func assigneeObjs(logins []string) []map[string]string {
 	return out
 }
 
-func chainPRList(world *ghWorld) string {
+// chainOpenPRPage serves one page of #881's `gh api graphql` open-PR
+// inventory query, reusing pageSlice (the same per_page=100 pagination
+// helper the REST-paginated call sites in this file already use) so the
+// fixture reflects world.PRs' open set across as many pages as needed --
+// dispatch.RunOnce's phase E assertion (chain_e2e_test.go, HasOpenPR ==
+// true) exercises this through the real openPRInventory call, not a mock of
+// it. page is 1-indexed, resolved from the request's "cursor" field
+// (graphQLFieldValues) -- this fixture's cursor convention is simply the
+// next page number as a decimal string, since every chain test's PR count
+// never legitimately requires more than a couple of pages.
+func chainOpenPRPage(world *ghWorld, page int) string {
 	var nums []int
 	for n, pr := range world.PRs {
 		if pr.effectiveState() == "OPEN" {
@@ -828,22 +835,27 @@ func chainPRList(world *ghWorld) string {
 		}
 	}
 	sort.Ints(nums)
-	var sb strings.Builder
-	sb.WriteString("[")
-	for i, n := range nums {
-		pr := world.PRs[n]
-		if i > 0 {
-			sb.WriteString(",")
-		}
-		refs := make([]map[string]int, len(pr.ClosingIssues))
-		for j, ci := range pr.ClosingIssues {
-			refs[j] = map[string]int{"number": ci}
-		}
-		refsJSON, _ := json.Marshal(refs)
-		fmt.Fprintf(&sb, `{"closingIssuesReferences":%s}`, refsJSON)
+	items := pageSlice(nums, page)
+	const chainOpenPRPageSize = 100 // mirrors pageSlice's own pageSize constant
+	hasNext := page*chainOpenPRPageSize < len(nums)
+	endCursor := "null"
+	if hasNext {
+		endCursor = strconv.Quote(strconv.Itoa(page + 1))
 	}
-	sb.WriteString("]")
-	return sb.String()
+	var nodes []string
+	for _, n := range items {
+		pr := world.PRs[n]
+		var closingNodes []string
+		for _, ci := range pr.ClosingIssues {
+			closingNodes = append(closingNodes, fmt.Sprintf(`{"number":%d}`, ci))
+		}
+		nodes = append(nodes, fmt.Sprintf(
+			`{"number":%d,"closingIssuesReferences":{"pageInfo":{"hasNextPage":false},"nodes":[%s]}}`,
+			n, strings.Join(closingNodes, ",")))
+	}
+	return fmt.Sprintf(
+		`{"data":{"repository":{"pullRequests":{"totalCount":%d,"pageInfo":{"hasNextPage":%v,"endCursor":%s},"nodes":[%s]}}}}`,
+		len(nums), hasNext, endCursor, strings.Join(nodes, ","))
 }
 
 func chainIssueView(world *ghWorld, args []string) (stdout, stderr string, code int) {
@@ -1071,6 +1083,19 @@ func chainGraphQL(world *ghWorld, args []string) (string, string, int) {
 		}
 		data, _ := json.Marshal(obj)
 		return string(data), "", 0
+
+	// #881: dispatch.openPRInventory's bounded, cursor-paginated open-PR
+	// query -- distinguished from the isInMergeQueue query above by the
+	// presence of the nested closingIssuesReferences field name, which no
+	// other graphql query this fixture serves ever requests.
+	case strings.Contains(query, "closingIssuesReferences"):
+		page := 1
+		if c := fields["cursor"]; c != "" {
+			if n, err := strconv.Atoi(c); err == nil {
+				page = n
+			}
+		}
+		return chainOpenPRPage(world, page), "", 0
 	}
 	return "", "gh: unrecognized graphql query\n", 1
 }

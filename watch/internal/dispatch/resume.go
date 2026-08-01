@@ -234,8 +234,9 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 // (#852 review finding #3) can additionally leave a large partial payload in
 // stdout even on an otherwise-small call. Reused at every execGh call site
 // in this package whose diagnostic detail is not already known-small
-// (currentGitHubLogin/openPRIssues in collect.go, countAttempts in
-// reconcile_run.go, probeEscalationAnswer below).
+// (currentGitHubLogin/collectRepoTickets in collect.go, openPRInventory in
+// openpr.go, countAttempts in reconcile_run.go, probeEscalationAnswer
+// below).
 const maxProbeLogDetailBytes = 500
 
 // truncationMarker is appended by truncateDetail when it cuts content off,

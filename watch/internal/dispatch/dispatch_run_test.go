@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -39,7 +40,7 @@ func TestRunOnceFailsClosedWithoutGitHubIdentity(t *testing.T) {
 	installFakeGH(t, `
 case "$1 $2" in
   "issue list") printf '[{"number":42,"title":"Fix thing","labels":[{"name":"Planned"}],"assignees":[{"login":"octocat"}]}]' ;;
-  "pr list") printf '[]' ;;
+  "api graphql") printf '`+emptyOpenPRPageJSON+`' ;;
   "api user") printf 'not authenticated\n' >&2; exit 1 ;;
   *) exit 1 ;;
 esac
@@ -866,7 +867,7 @@ func runOnceFakeGHWithIdentity(labelsJSON string) string {
 	return `
 case "$1 $2" in
   "issue list") printf '[{"number":42,"title":"Fix thing","labels":[` + labelsJSON + `],"assignees":[{"login":"octocat"}]}]' ;;
-  "pr list") printf '[]' ;;
+  "api graphql") printf '` + emptyOpenPRPageJSON + `' ;;
   "api user") printf 'octocat\n' ;;
   *) exit 1 ;;
 esac
@@ -1039,5 +1040,147 @@ func TestProbeRepoAutonomies_DryRunAndRealPassAgreeUsingSameFreshRef(t *testing.
 	realAutonomy := probeRepoAutonomies(repos, realSyncs, io.Discard)
 	if realAutonomy["o/r"] != RepoAutonomyLean {
 		t.Errorf("real-pass autonomy = %q, want RepoAutonomyLean (post-fast-forward local HEAD blob)", realAutonomy["o/r"])
+	}
+}
+
+// -- #881 AC6: an incomplete open-PR inventory spawns nothing, for both an
+// ordinary Planned pickup and a Refined planning pickup ---------------------
+
+// TestApplyDispatchOrdinaryPlannedPickup_IncompleteOpenPRInventory_NeverSpawnsOrClaims
+// covers AC6's "tests ... prove no implementation/planning process is
+// spawned on incomplete inventory" requirement for the ordinary
+// already-Planned pickup kind: an incomplete OpenPRProbe must gate the
+// ticket before it ever reaches applyDispatch's spawn loop -- zero runFn
+// invocations, zero label mutations.
+func TestApplyDispatchOrdinaryPlannedPickup_IncompleteOpenPRInventory_NeverSpawnsOrClaims(t *testing.T) {
+	stubRunFn(t, func(run.Opts, run.Controller) error {
+		t.Fatal("an incomplete open-PR inventory must never spawn")
+		return nil
+	})
+
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	mut := &fakeMutator{}
+	prior := 0
+	var buf bytes.Buffer
+
+	deps := dispatchableDeps(now)
+	deps.Tickets[0].OpenPRProbe = OpenPRProbeUnreadable
+
+	decisions, err := applyDispatch(testConfig(), deps, fakeController{}, mut, false, &buf, &prior)
+	if err != nil {
+		t.Fatalf("applyDispatch returned unexpected error: %v", err)
+	}
+	if len(decisions) != 1 || decisions[0].Action != ActionSkip {
+		t.Fatalf("decisions = %+v, want a single gated skip", decisions)
+	}
+	if len(mut.labelEdits) != 0 {
+		t.Errorf("expected zero label mutations, got %+v", mut.labelEdits)
+	}
+	if prior != 0 {
+		t.Errorf("prior = %d, want 0 (nothing dispatched)", prior)
+	}
+}
+
+// TestApplyDispatchRefinedPlanningPickup_IncompleteOpenPRInventory_NeverSpawnsOrClaims
+// covers AC6's Refined-planning-pickup half explicitly (Decision.Planning):
+// an incomplete OpenPRProbe must gate a fresh Refined planning candidate
+// exactly like an ordinary Planned pickup -- zero runFn invocations, zero
+// label mutations.
+func TestApplyDispatchRefinedPlanningPickup_IncompleteOpenPRInventory_NeverSpawnsOrClaims(t *testing.T) {
+	stubRunFn(t, func(run.Opts, run.Controller) error {
+		t.Fatal("an incomplete open-PR inventory must never spawn a planning session either")
+		return nil
+	})
+
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	mut := &fakeMutator{}
+	prior := 0
+	var buf bytes.Buffer
+
+	cfg := testConfig()
+	cfg.PlanRefined = true
+	deps := planningDispatchDeps(now)
+	deps.Tickets[0].OpenPRProbe = OpenPRProbeUnreadable
+
+	decisions, err := applyDispatch(cfg, deps, fakeController{}, mut, false, &buf, &prior)
+	if err != nil {
+		t.Fatalf("applyDispatch returned unexpected error: %v", err)
+	}
+	if len(decisions) != 1 || decisions[0].Action != ActionSkip {
+		t.Fatalf("decisions = %+v, want a single gated skip", decisions)
+	}
+	if len(mut.labelEdits) != 0 {
+		t.Errorf("expected zero label mutations, got %+v", mut.labelEdits)
+	}
+	if prior != 0 {
+		t.Errorf("prior = %d, want 0 (nothing dispatched)", prior)
+	}
+}
+
+// -- #881 AC5: dry-run and real dispatch consume the same completeness
+// verdict --------------------------------------------------------------------
+
+// TestRunOnce_DryRunAndRealPassProduceIdenticalOpenPRGateReason covers AC5
+// end-to-end through the real collector: RunOnce(..., dryRun: true, ...) and
+// RunOnce(..., dryRun: false, ...), run in sequence against the same
+// scripted fake-gh world (a mid-pagination open-PR probe failure), must
+// produce identical []Decision reasons -- proving dry-run and the real pass
+// consume the same collector-stamped OpenPRProbe verdict, not two
+// independently-computed ones. No repo Dir is configured (MainSync stays at
+// its ungated zero value, MainSyncSkipped), isolating the assertion to the
+// open-PR gate alone.
+func TestRunOnce_DryRunAndRealPassProduceIdenticalOpenPRGateReason(t *testing.T) {
+	dir := t.TempDir()
+	countFile := filepath.Join(dir, "count")
+	script := fmt.Sprintf(`
+case "$1 $2" in
+  "issue list") printf '[{"number":42,"title":"Fix thing","labels":[{"name":"Planned"}],"assignees":[{"login":"octocat"}]}]' ;;
+  "api graphql")
+    n=$(cat %[1]q 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" > %[1]q
+    if [ $((n %% 2)) = "1" ]; then
+      printf '{"data":{"repository":{"pullRequests":{"totalCount":150,"pageInfo":{"hasNextPage":true,"endCursor":"c2"},"nodes":[]}}}}'
+    else
+      echo "boom" >&2
+      exit 1
+    fi
+    ;;
+  "api user") printf 'octocat\n' ;;
+  *) exit 1 ;;
+esac
+`, countFile)
+
+	stubRunFn(t, func(run.Opts, run.Controller) error {
+		t.Fatal("a gated ticket must never spawn")
+		return nil
+	})
+
+	runPass := func(dryRun bool) []Decision {
+		installFakeGHOnPath(t, script)
+		cfg := testConfig()
+		cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: ""}}
+		var buf bytes.Buffer
+		decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, dryRun, &buf, nil)
+		if err != nil {
+			t.Fatalf("RunOnce returned unexpected error: %v", err)
+		}
+		return decisions
+	}
+
+	dryDecisions := runPass(true)
+	realDecisions := runPass(false)
+
+	if len(dryDecisions) != 1 || len(realDecisions) != 1 {
+		t.Fatalf("dry=%+v real=%+v, want exactly one decision each", dryDecisions, realDecisions)
+	}
+	if dryDecisions[0].Action != ActionSkip {
+		t.Fatalf("dry-run action = %q, want ActionSkip (an incomplete open-PR probe must gate)", dryDecisions[0].Action)
+	}
+	if realDecisions[0].Action != ActionSkip {
+		t.Fatalf("real-pass action = %q, want ActionSkip (an incomplete open-PR probe must gate)", realDecisions[0].Action)
+	}
+	if dryDecisions[0].Reason != realDecisions[0].Reason {
+		t.Fatalf("dry-run reason %q != real-pass reason %q, want identical (AC5)", dryDecisions[0].Reason, realDecisions[0].Reason)
 	}
 }

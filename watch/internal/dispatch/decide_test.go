@@ -1888,3 +1888,166 @@ func TestDecidePlanProbeGate_UnregisteredValueSkipsWithDistinctReason(t *testing
 		}
 	}
 }
+
+// -- #881: open-PR inventory completeness gate (openPRGateSkip) -------------
+//
+// Design note (Phase 3/red): decide.go does not define reason constants or
+// openPRGateSkip yet (that is Phase 4's job), so the exact skip-reason
+// strings below are literal, chosen here as the observable contract Phase 4
+// must satisfy -- mirroring the #851 section's own precedent above (hardcode
+// the literal string, not a not-yet-existing decide.go symbol, since the
+// rendered string is the real downstream/log-facing behavior, independent of
+// whatever Go identifier Phase 4 picks for it):
+//   - OpenPRProbeCapExhausted -> "open PR state incomplete: pagination cap exhausted"
+//   - OpenPRProbeTruncated    -> "open PR state incomplete: closing-issue references truncated"
+//   - OpenPRProbeMalformed    -> "open PR state unreadable: malformed page"
+//   - OpenPRProbeTimeout      -> "open PR state unreadable: probe timed out"
+//   - OpenPRProbeUnreadable   -> "open PR state unreadable: pagination failed"
+//   - unrecognized/default    -> "open PR probe unrecognized"
+//
+// The OpenPRProbe enum constants themselves (types.go, unlike decide.go's
+// reasons) are referenced symbolically below, exactly as openpr_test.go
+// already must: both files need the same not-yet-existing type either way,
+// so there is no decoupling benefit to hardcoding the enum's underlying
+// string the way there is for decide.go's reason text.
+//
+// openPRGateSkip is called in decideTicket immediately BEFORE the existing
+// `if t.HasOpenPR` check (Files to Modify), so an affected repo reports one
+// uniform reason across all its tickets rather than falling through to the
+// ordinary "open PR exists" check on a probe that could not actually prove
+// there is no open PR.
+
+// TestTicketOpenPRProbeZeroValueIsComplete locks in Q2's resolution:
+// OpenPRProbeComplete must be the zero value ("") so every pre-#881 Ticket
+// construction site (reconcile paths, the ~100 existing test literals across
+// this package) keeps today's behavior unchanged without being touched.
+func TestTicketOpenPRProbeZeroValueIsComplete(t *testing.T) {
+	var tk Ticket
+	if tk.OpenPRProbe != OpenPRProbeComplete {
+		t.Errorf("zero-value Ticket.OpenPRProbe = %q, want OpenPRProbeComplete", tk.OpenPRProbe)
+	}
+	if OpenPRProbeComplete != "" {
+		t.Errorf("OpenPRProbeComplete = %q, want the empty string (the zero value)", string(OpenPRProbeComplete))
+	}
+}
+
+// TestDecideOpenPRGate_EachFailureClassSkipsWithDistinctReason covers AC2:
+// every non-complete OpenPRProbe classification gates dispatch with its own
+// content-specific reason (#446/#598) -- never a bare non-empty check, and
+// never collapsing into any other class's reason.
+func TestDecideOpenPRGate_EachFailureClassSkipsWithDistinctReason(t *testing.T) {
+	tests := []struct {
+		name       string
+		probe      OpenPRProbe
+		wantReason string
+	}{
+		{"cap exhausted", OpenPRProbeCapExhausted, "open PR state incomplete: pagination cap exhausted"},
+		{"truncated", OpenPRProbeTruncated, "open PR state incomplete: closing-issue references truncated"},
+		{"malformed", OpenPRProbeMalformed, "open PR state unreadable: malformed page"},
+		{"timeout", OpenPRProbeTimeout, "open PR state unreadable: probe timed out"},
+		{"unreadable", OpenPRProbeUnreadable, "open PR state unreadable: pagination failed"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			in := baseInputs()
+			in.Tickets[0].OpenPRProbe = tc.probe
+			assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, tc.wantReason, ""}})
+		})
+	}
+
+	seen := map[string]string{}
+	for _, tc := range tests {
+		if prior, ok := seen[tc.wantReason]; ok {
+			t.Fatalf("both %q and %q share the reason %q -- must be distinct", prior, tc.name, tc.wantReason)
+		}
+		seen[tc.wantReason] = tc.name
+	}
+}
+
+// TestDecideOpenPRGate_UnrecognizedProbeValueSkipsWithDistinctReason covers
+// openPRGateSkip's `default:` branch -- an unregistered OpenPRProbe value
+// must default-deny with its own distinct reason, not silently collapse
+// into any of the five known classes above, per #598's asserted-default-
+// branch requirement.
+func TestDecideOpenPRGate_UnrecognizedProbeValueSkipsWithDistinctReason(t *testing.T) {
+	in := baseInputs()
+	in.Tickets[0].OpenPRProbe = OpenPRProbe("bogus")
+
+	got := Decide(in)
+	want := "open PR probe unrecognized"
+	assertDecisions(t, got, []wantDecision{{42, ActionSkip, want, ""}})
+	for _, r := range []string{
+		"open PR state incomplete: pagination cap exhausted",
+		"open PR state incomplete: closing-issue references truncated",
+		"open PR state unreadable: malformed page",
+		"open PR state unreadable: probe timed out",
+		"open PR state unreadable: pagination failed",
+	} {
+		if got[0].Reason == r {
+			t.Fatalf("unrecognized OpenPRProbe must not collapse into %q", r)
+		}
+	}
+}
+
+// TestDecideOpenPRGate_OrderingSitsImmediatelyBeforeHasOpenPRCheck proves the
+// gate's placement (Files to Modify: "immediately before the existing `if
+// t.HasOpenPR` check"): a non-complete probe reports its own reason even
+// when HasOpenPR also happens to be true (the probe could not actually prove
+// there is no open PR, so its own incompleteness reason must win), while a
+// complete probe with HasOpenPR true falls through unchanged to today's
+// "open PR exists" skip -- a pure regression guard that the new gate never
+// perturbs the existing check for a healthy probe.
+func TestDecideOpenPRGate_OrderingSitsImmediatelyBeforeHasOpenPRCheck(t *testing.T) {
+	t.Run("non-complete probe reports its own reason even when HasOpenPR is also true", func(t *testing.T) {
+		in := baseInputs()
+		in.Tickets[0].OpenPRProbe = OpenPRProbeUnreadable
+		in.Tickets[0].HasOpenPR = true
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "open PR state unreadable: pagination failed", ""}})
+	})
+
+	t.Run("complete probe with HasOpenPR true falls through to the ordinary open-PR-exists check unchanged", func(t *testing.T) {
+		in := baseInputs()
+		in.Tickets[0].OpenPRProbe = OpenPRProbeComplete
+		in.Tickets[0].HasOpenPR = true
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "open PR exists", ""}})
+	})
+}
+
+// TestDecideOpenPRGate_ZeroValueIsUngated covers Q2's permissive-zero
+// contract end-to-end: a Ticket literal that never sets OpenPRProbe at all
+// (every pre-#881 construction site) dispatches normally, unaffected by the
+// new gate.
+func TestDecideOpenPRGate_ZeroValueIsUngated(t *testing.T) {
+	in := baseInputs() // in.Tickets[0].OpenPRProbe left at its zero value
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+}
+
+// TestDecideOpenPRGate_GatesEveryPickupType covers AC6's explicit
+// requirement to cover both an ordinary Planned pickup and a Refined
+// planning pickup, plus the autonomous re-plan pickup for completeness,
+// mirroring TestDecideMainSyncGate_NewCheckoutStatesGateEveryPickupType
+// (#851)'s "gates ALL pickup types" pattern: an incomplete open-PR inventory
+// must hold every kind of dispatch for the affected ticket, not only the
+// ordinary already-Planned path.
+func TestDecideOpenPRGate_GatesEveryPickupType(t *testing.T) {
+	const wantReason = "open PR state unreadable: pagination failed"
+
+	t.Run("ordinary Planned pickup", func(t *testing.T) {
+		in := baseInputs()
+		in.Tickets[0].OpenPRProbe = OpenPRProbeUnreadable
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, wantReason, ""}})
+	})
+	t.Run("fresh Refined planning candidate", func(t *testing.T) {
+		in := planningCandidateInputs()
+		in.Tickets[0].OpenPRProbe = OpenPRProbeUnreadable
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, wantReason, ""}})
+	})
+	t.Run("autonomous re-plan candidate", func(t *testing.T) {
+		in := baseInputs()
+		in.Config.PlanRefined = true
+		in.RepoAutonomy = leanAutonomy("o/r")
+		in.Plans[0].CommitsBehind = 10 // stale
+		in.Tickets[0].OpenPRProbe = OpenPRProbeUnreadable
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, wantReason, ""}})
+	})
+}
