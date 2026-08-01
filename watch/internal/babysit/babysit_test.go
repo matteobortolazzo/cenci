@@ -29,18 +29,32 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func TestGhJSONAcceptsChecksExitWithValidJSON(t *testing.T) {
-	original := execGh
-	execGh = func(...string) (string, string, error) {
-		return `[{"bucket":"fail","name":"test"}]`, "", errors.New("exit status 1")
-	}
-	t.Cleanup(func() { execGh = original })
-	var checks []check
-	if err := ghJSON(&checks, "pr", "checks", "42"); err != nil {
-		t.Fatal(err)
-	}
-	if len(checks) != 1 || checks[0].Bucket != "fail" {
-		t.Fatalf("checks=%#v", checks)
+// TestGhJSONRejectsNonzeroExitEvenWithValidJSON is the #886 fail-closed
+// rewrite of the deleted TestGhJSONAcceptsChecksExitWithValidJSON: ghJSON no
+// longer tolerates a nonzero gh exit just because stdout still happens to
+// decode as valid JSON, for both `gh pr checks` (the old carve-out's exact
+// exit-8-pending case) and an ordinary non-checks command -- covering AC 1
+// ("non-check gh commands ... fail closed") and AC 2 ("gh pr checks accepts
+// only the documented pending exit with complete valid JSON") together.
+func TestGhJSONRejectsNonzeroExitEvenWithValidJSON(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"gh pr checks exit 8 with valid JSON must now be an error (no more carve-out)", []string{"pr", "checks", "42"}},
+		{"a non-checks command exiting nonzero with valid JSON stdout must also error", []string{"pr", "view", "42"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			original := execGh
+			execGh = func(...string) (string, string, error) {
+				return `[{"bucket":"fail","name":"test"}]`, "", errors.New("exit status 1")
+			}
+			t.Cleanup(func() { execGh = original })
+			var checks []check
+			if err := ghJSON(&checks, tc.args...); err == nil {
+				t.Fatalf("ghJSON(%v): err = nil, want an error: a nonzero gh exit must fail closed even when stdout decodes as valid JSON", tc.args)
+			}
+		})
 	}
 }
 
@@ -63,6 +77,61 @@ func TestGhJSONReturnsErrorWhenOutputTruncatedEvenIfDecodable(t *testing.T) {
 	}
 	if !errors.Is(err, errGhOutputTruncated) {
 		t.Fatalf("ghJSON err = %v, want errors.Is(err, errGhOutputTruncated)", err)
+	}
+}
+
+// TestGhJSONFailureClassification pins that ghJSON's strict rewrite (#886)
+// surfaces execGh's classified sentinel errors unchanged (errors.Is) and
+// that classifyGhFailure resolves each to its own distinct, content-specific
+// class -- never a bare non-empty check (watch/docs/error-handling.md #446).
+func TestGhJSONFailureClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		ghErr   error
+		wantErr error
+		want    string
+	}{
+		{"timeout", errGhTimeout, errGhTimeout, failureClassTimeout},
+		{"cancelled", errGhCancelled, errGhCancelled, failureClassCancelled},
+		{"truncated", errGhOutputTruncated, errGhOutputTruncated, failureClassTruncated},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			original := execGh
+			execGh = func(...string) (string, string, error) { return "", "", tc.ghErr }
+			t.Cleanup(func() { execGh = original })
+			var checks []check
+			err := ghJSON(&checks, "pr", "checks", "42")
+			if err == nil {
+				t.Fatal("ghJSON: err = nil, want an error")
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("ghJSON err = %v, want errors.Is(err, %v)", err, tc.wantErr)
+			}
+			if got := classifyGhFailure(err); got != tc.want {
+				t.Fatalf("classifyGhFailure(ghJSON err) = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGhJSONNonJSONBodyClassifiesAsParse pins ghJSON's decode-failure
+// sentinel (errGhDecode, #886): a zero-exit gh call whose stdout is not
+// valid JSON at all must classify as failureClassParse, distinct from every
+// other failure class.
+func TestGhJSONNonJSONBodyClassifiesAsParse(t *testing.T) {
+	original := execGh
+	execGh = func(...string) (string, string, error) { return "not json", "", nil }
+	t.Cleanup(func() { execGh = original })
+	var checks []check
+	err := ghJSON(&checks, "pr", "checks", "42")
+	if err == nil {
+		t.Fatal("ghJSON: err = nil, want an error on a non-JSON body with a zero gh exit")
+	}
+	if !errors.Is(err, errGhDecode) {
+		t.Fatalf("ghJSON err = %v, want errors.Is(err, errGhDecode)", err)
+	}
+	if got := classifyGhFailure(err); got != failureClassParse {
+		t.Fatalf("classifyGhFailure(ghJSON err) = %q, want %q", got, failureClassParse)
 	}
 }
 

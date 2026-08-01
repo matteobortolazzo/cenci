@@ -33,10 +33,9 @@ var errPaginationFailed = errors.New("paginated fetch failed")
 // (the plan's rejected alternative). complete is true when the traversal
 // terminated on a short (< feedbackPageSize) or empty page; false when the
 // page cap (maxFeedbackPages) was hit while a page was still full-sized,
-// meaning further items may exist beyond what was fetched. Strict: unlike
-// ghJSON's deliberate exit-code tolerance (gh pr checks' exit 8), any `gh`
-// failure or non-JSON page body during pagination is an error, never
-// partial-as-complete.
+// meaning further items may exist beyond what was fetched. Strict, like
+// ghJSON's own #886 rewrite: any `gh` failure or non-JSON page body during
+// pagination is an error, never partial-as-complete.
 func fetchPaged[T any](path string) (items []T, complete bool, err error) {
 	sep := "?"
 	if strings.Contains(path, "?") {
@@ -46,11 +45,17 @@ func fetchPaged[T any](path string) (items []T, complete bool, err error) {
 		pageURL := fmt.Sprintf("%s%sper_page=%d&page=%d", path, sep, feedbackPageSize, page)
 		stdout, stderr, err := execGh("api", pageURL)
 		if err != nil {
-			return nil, false, fmt.Errorf("%w: %s: %s", errPaginationFailed, strings.TrimSpace(stderr), err)
+			// Both %w verbs matter (#886): the first preserves
+			// errPaginationFailed itself, the second preserves err's own
+			// wrapped sentinel chain (errGhTimeout, errGhCancelled, ...) --
+			// the previous "%w: %s: %s" form stringified err with %s,
+			// severing that chain so classifyGhFailure could never see past
+			// errPaginationFailed to the underlying cause.
+			return nil, false, fmt.Errorf("%w: %s: %w", errPaginationFailed, strings.TrimSpace(stderr), err)
 		}
 		var pageItems []T
 		if err := json.Unmarshal([]byte(stdout), &pageItems); err != nil {
-			return nil, false, fmt.Errorf("%w: non-JSON page body: %s", errPaginationFailed, err)
+			return nil, false, fmt.Errorf("%w: non-JSON page body: %w", errPaginationFailed, errors.Join(err, errGhDecode))
 		}
 		items = append(items, pageItems...)
 		if len(pageItems) < feedbackPageSize {

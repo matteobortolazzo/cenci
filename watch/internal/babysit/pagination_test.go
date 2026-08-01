@@ -175,8 +175,8 @@ func TestFetchPagedMidPaginationFailureIsError(t *testing.T) {
 }
 
 // TestFetchPagedNonJSONPageIsError pins that a non-JSON page body -- unlike
-// ghJSON's deliberate "valid JSON on non-zero exit" tolerance -- is always
-// an error for fetchPaged; strict, no exit-code tolerance inherited.
+// ghJSON's now-removed "valid JSON on non-zero exit" tolerance (#886) -- is
+// always an error for fetchPaged; strict, no exit-code tolerance inherited.
 func TestFetchPagedNonJSONPageIsError(t *testing.T) {
 	var calls [][]string
 	withScriptedExecGh(t, []string{"not json"}, &calls)

@@ -1,8 +1,10 @@
 package babysit
 
 import (
+	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -141,5 +143,163 @@ func TestExecGh_UsesNoninteractiveEnv(t *testing.T) {
 	want := "GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 GH_PAGER=cat GIT_TERMINAL_PROMPT=0"
 	if !strings.Contains(stdout, want) {
 		t.Fatalf("stdout = %q, want it to contain %q (the noninteractive env vars)", stdout, want)
+	}
+}
+
+// -- #886: fail-closed classification (ghExitError, ghParentContext, classifyGhFailure) --
+
+// TestExecGh_ParentContextDeadlineClassifiesAsTimeout pins the ghParentContext
+// seam: a `gh` invocation whose *parent* context already carries a short
+// deadline must be killed well before ghTimeout's own 60s bound, and the
+// resulting error must classify as errGhTimeout via errors.Is -- proving
+// execGh reads ctx.Err() (context.DeadlineExceeded) before cancel() fires,
+// rather than merely surfacing a generic "signal: killed" error.
+func TestExecGh_ParentContextDeadlineClassifiesAsTimeout(t *testing.T) {
+	shimDir := t.TempDir()
+	// "exec sleep 5" (never a bare "sleep 5" followed by another line) is
+	// load-bearing here: a bare "sleep 5\nexit 0\n" forks sleep as dash's own
+	// child, and SIGKILLing the shell (Cmd's default Cancel) only reaches
+	// that direct child -- the forked sleep survives as an orphan holding
+	// the output pipe open for its own full 5s, which collides with
+	// ghWaitDelay's own 5s bound and makes execGh's return time track the
+	// script's sleep duration, not ghParentContext's short deadline,
+	// regardless of how correctly ghParentContext itself is wired. "exec
+	// sleep 5" replaces dash's own process image with sleep (no fork), so
+	// SIGKILLing the shell kills the actual sleeping process directly.
+	script := "#!/bin/sh\nexec sleep 5\n"
+	if err := os.WriteFile(filepath.Join(shimDir, "gh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	original := ghParentContext
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	t.Cleanup(cancel)
+	ghParentContext = func() context.Context { return ctx }
+	t.Cleanup(func() { ghParentContext = original })
+
+	start := time.Now()
+	_, _, err := execGh("issue", "list")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("execGh: err = nil, want an error when ghParentContext's own deadline expires")
+	}
+	if !errors.Is(err, errGhTimeout) {
+		t.Fatalf("execGh err = %v, want errors.Is(err, errGhTimeout)", err)
+	}
+	if elapsed >= 3*time.Second {
+		t.Fatalf("execGh took %v, want it bounded by ghParentContext's short deadline, not the full 5s sleep", elapsed)
+	}
+}
+
+// TestExecGh_CancelledParentContextClassifiesAsCancelled pins the other half
+// of the ghParentContext seam: a parent context already cancelled before
+// execGh ever derives its own timeout context from it must classify as
+// errGhCancelled (context.Canceled), distinct from errGhTimeout
+// (context.DeadlineExceeded).
+func TestExecGh_CancelledParentContextClassifiesAsCancelled(t *testing.T) {
+	shimDir := t.TempDir()
+	script := "#!/bin/sh\nsleep 5\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(shimDir, "gh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	original := ghParentContext
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ghParentContext = func() context.Context { return ctx }
+	t.Cleanup(func() { ghParentContext = original })
+
+	_, _, err := execGh("issue", "list")
+	if err == nil {
+		t.Fatal("execGh: err = nil, want an error when ghParentContext is already cancelled")
+	}
+	if !errors.Is(err, errGhCancelled) {
+		t.Fatalf("execGh err = %v, want errors.Is(err, errGhCancelled)", err)
+	}
+}
+
+// TestExecGh_HungGrandchildClassifiesAsTimeout extends
+// TestExecGh_HungGrandchildHoldingStdout_ReturnsWithinWaitDelay (kept intact
+// above) with the classification assertion #886 adds: cmd.WaitDelay forcing
+// the pipes closed (errors.Is(runErr, exec.ErrWaitDelay)) must join
+// errGhTimeout, since a lingering grandchild holding the pipes open is,
+// operationally, indistinguishable from a hang that must be bounded the same
+// way a deadline kill is.
+func TestExecGh_HungGrandchildClassifiesAsTimeout(t *testing.T) {
+	shimDir := t.TempDir()
+	script := "#!/bin/sh\n(sleep 30 &) \nexit 0\n"
+	if err := os.WriteFile(filepath.Join(shimDir, "gh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	start := time.Now()
+	_, _, err := execGh("issue", "list")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("execGh returned nil error; expected the WaitDelay-forced-close error to classify as a timeout")
+	}
+	if !errors.Is(err, errGhTimeout) {
+		t.Fatalf("execGh err = %v, want errors.Is(err, errGhTimeout): exec.ErrWaitDelay must classify as a timeout", err)
+	}
+	if elapsed > 20*time.Second {
+		t.Fatalf("execGh took %v, want it bounded well within ghTimeout thanks to WaitDelay (~%v)", elapsed, ghWaitDelay)
+	}
+}
+
+// TestExecGh_NonzeroExitReturnsGhExitError pins the *ghExitError type: a
+// `gh` invocation that exits nonzero (with no truncation, no timeout, no
+// cancellation) must return an error an errors.As caller can extract the
+// exact exit code from -- ghJSON's strict rewrite needs this to fail closed
+// on a nonzero non-checks exit rather than the old blanket "any decodable
+// stdout is success" tolerance.
+func TestExecGh_NonzeroExitReturnsGhExitError(t *testing.T) {
+	installFakeGH(t, "exit 8\n")
+
+	_, _, err := execGh("pr", "checks", "42")
+	if err == nil {
+		t.Fatal("execGh: err = nil, want an error for a nonzero exit")
+	}
+	var exitErr *ghExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("execGh err = %v, want errors.As(err, &ghExitError{})", err)
+	}
+	if exitErr.ExitCode() != 8 {
+		t.Fatalf("exitErr.ExitCode() = %d, want 8", exitErr.ExitCode())
+	}
+}
+
+// TestClassifyGhFailure_PrecedenceMatrix pins classifyGhFailure's fixed
+// precedence order (cancelled > timeout > truncated > parse > command) --
+// including the specific "joined timeout+truncation" case the plan calls
+// out by name -- plus the fail-closed fallback: any unclassified non-nil
+// error (including exec.ErrNotFound, e.g. `gh` missing from PATH entirely)
+// must still classify as failureClassCommand rather than an empty/unknown
+// class that a caller's " class=" log-line rendering would silently omit.
+func TestClassifyGhFailure_PrecedenceMatrix(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"cancelled alone", errGhCancelled, failureClassCancelled},
+		{"timeout alone", errGhTimeout, failureClassTimeout},
+		{"truncated alone", errGhOutputTruncated, failureClassTruncated},
+		{"parse/decode alone", errGhDecode, failureClassParse},
+		{"unclassified error falls back to command (fail-closed default)", exec.ErrNotFound, failureClassCommand},
+		{"cancelled beats timeout when both are joined", errors.Join(errGhCancelled, errGhTimeout), failureClassCancelled},
+		{"timeout beats truncated when both are joined", errors.Join(errGhTimeout, errGhOutputTruncated), failureClassTimeout},
+		{"truncated beats parse when both are joined", errors.Join(errGhOutputTruncated, errGhDecode), failureClassTruncated},
+		{"parse beats the command-failed fallback when both are joined", errors.Join(errGhDecode, exec.ErrNotFound), failureClassParse},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyGhFailure(tc.err); got != tc.want {
+				t.Fatalf("classifyGhFailure(%v) = %q, want %q", tc.err, got, tc.want)
+			}
+		})
 	}
 }

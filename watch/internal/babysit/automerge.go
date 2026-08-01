@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -145,6 +146,22 @@ const (
 	reasonWorkflowLaunchFailed = "workflow launch failed"
 )
 
+// The five kill-switch recheck reasons (#886): recheckAutomergeInputs' final
+// pre-merge re-read of the fleet automerge.enabled switch (loadFleetSwitch)
+// distinguishes each way that re-read can come back disabled -- distinct
+// from reasonAutomergeDisabled (the first-pass hold in evaluateAutomerge's
+// own "enabled" stage, which never distinguishes *why* it's disabled) so a
+// switch that flips (or a config that breaks) strictly between the first
+// evaluation and the merge attempt is distinguishable in logs/state from an
+// ordinary first-pass disabled tick.
+const (
+	reasonKillSwitchDisabled         = "fleet automerge switch explicitly disabled"
+	reasonKillSwitchConfigMissing    = "fleet automerge config missing"
+	reasonKillSwitchConfigUnreadable = "fleet automerge config unreadable"
+	reasonKillSwitchConfigMalformed  = "fleet automerge config malformed"
+	reasonKillSwitchEnabledAbsent    = "fleet automerge config enabled key absent"
+)
+
 // automergeStageKeys is the fixed, ordered set of condition-chain stages
 // logLine renders -- independent of the order evaluateAutomerge actually
 // reaches them, since a stage not yet reached always renders "-". "queue" is
@@ -175,24 +192,39 @@ type automergeDecision struct {
 	// caller matches on never changes shape.
 	Detail     string
 	Conditions []conditionResult
+	// FailureClass is the orthogonal "cause" axis to Reason's "site" axis
+	// (#886): which kind of underlying `gh` failure (command/timeout/
+	// cancelled/truncated/parse) produced this decision, via
+	// classifyGhFailure, when the hold stemmed from a `gh` failure at all.
+	// "" for every ordinary condition-chain hold and every clean merge.
+	FailureClass string
 }
 
 // logLine renders one line per tick, avoiding the " skip:" / " dispatch "
 // substrings lazyboards classifies decision lines on (mainsync.go:217-219's
-// rule applied to this new log line).
+// rule applied to this new log line). Detail renders on both the merged and
+// held branches (#886) -- a confirmed merge can still carry a diagnostic
+// Detail (e.g. a nonzero `gh pr merge` exit the post-merge refetch
+// overrode), and it must not be silently dropped just because the verdict
+// was ultimately a success. FailureClass renders as " class=<class>" inside
+// the bracketed condition-chain segment, only when non-empty.
 func (d automergeDecision) logLine() string {
 	verdict := "merged"
 	if !d.Merge {
 		verdict = "held: " + d.Reason
-		if d.Detail != "" {
-			verdict += " (" + d.Detail + ")"
-		}
+	}
+	if d.Detail != "" {
+		verdict += " (" + d.Detail + ")"
 	}
 	parts := make([]string, len(automergeStageKeys))
 	for i, k := range automergeStageKeys {
 		parts[i] = k + "=" + conditionSymbol(d.Conditions, k)
 	}
-	return fmt.Sprintf("babysit: automerge PR #%s %s [%s]", d.PR, verdict, strings.Join(parts, " "))
+	bracket := strings.Join(parts, " ")
+	if d.FailureClass != "" {
+		bracket += " class=" + d.FailureClass
+	}
+	return fmt.Sprintf("babysit: automerge PR #%s %s [%s]", d.PR, verdict, bracket)
 }
 
 // conditionSymbol renders "yes"/"no"/"-" for key: "-" when the stage was
@@ -839,24 +871,48 @@ type fleetAutomergeFile struct {
 // loadFleetEnabled reports the fleet-wide automerge.enabled kill switch
 // (default false): missing path, unreadable file, malformed JSON, or an
 // absent/false enabled key all resolve to disabled -- automerge only ever
-// turns on with an explicit "enabled": true.
+// turns on with an explicit "enabled": true. A thin wrapper over
+// loadFleetSwitch, discarding the specific hold reason: the first-pass
+// caller (runAutomerge's own in.Enabled) has never needed to distinguish
+// *why* the switch is off, only recheckAutomergeInputs' final pre-merge
+// re-read does (#886).
 func loadFleetEnabled() bool {
+	enabled, _ := loadFleetSwitch()
+	return enabled
+}
+
+// loadFleetSwitch reports the fleet-wide automerge.enabled kill switch, plus
+// -- when disabled -- which of the five distinct ways it came back disabled
+// (#886): an explicit "enabled": false, a missing config path/file
+// (fleetConfigPath's "" seam value, or os.ReadFile's fs.ErrNotExist --
+// per watch/docs/go-gotchas.md, errors.Is(err, fs.ErrNotExist), never the
+// os/exec-only os.IsNotExist), an unreadable file (e.g. a directory,
+// permission denied), malformed JSON, or a valid JSON document whose
+// "enabled" key is simply absent. holdReason is "" only when enabled is
+// true.
+func loadFleetSwitch() (enabled bool, holdReason string) {
 	path := fleetConfigPath()
 	if path == "" {
-		return false
+		return false, reasonKillSwitchConfigMissing
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return false
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, reasonKillSwitchConfigMissing
+		}
+		return false, reasonKillSwitchConfigUnreadable
 	}
 	var f fleetAutomergeFile
 	if err := json.Unmarshal(data, &f); err != nil {
-		return false
+		return false, reasonKillSwitchConfigMalformed
 	}
 	if f.Automerge.Enabled == nil {
-		return false
+		return false, reasonKillSwitchEnabledAbsent
 	}
-	return *f.Automerge.Enabled
+	if !*f.Automerge.Enabled {
+		return false, reasonKillSwitchDisabled
+	}
+	return true, ""
 }
 
 // -- gh fetch orchestration (#824) -------------------------------------------
@@ -932,6 +988,11 @@ func recordDecision(s *State, d automergeDecision, merged bool) {
 	s.AutomergeReason = d.Reason
 	s.AutomergeDetail = d.Detail
 	s.AutomergeConditions = d.Conditions
+	// Assigned unconditionally, every call (#886): a decision with no
+	// FailureClass (d.FailureClass == "", the ordinary case for every
+	// condition-chain hold and every clean merge) must clear a stale class a
+	// previous failed tick left behind, not merely leave it untouched.
+	s.AutomergeFailureClass = d.FailureClass
 	s.AutomergeCheckedAt = time.Now().UTC()
 	if merged {
 		s.AutomergeDecision = "merge"
@@ -941,12 +1002,12 @@ func recordDecision(s *State, d automergeDecision, merged bool) {
 	fmt.Println(d.logLine())
 }
 
-// recordHold persists reason/detail as a held automerge decision -- shared
-// by tick's upstream-read-failure paths (which never reach runAutomerge or
-// evaluateAutomerge at all) and any other hold recorded outside the pure
-// condition chain.
-func recordHold(s *State, reason, detail string) {
-	recordDecision(s, automergeDecision{Reason: reason, Detail: detail}, false)
+// recordHold persists reason/detail/failureClass as a held automerge
+// decision -- shared by tick's upstream-read-failure paths (which never
+// reach runAutomerge or evaluateAutomerge at all) and any other hold
+// recorded outside the pure condition chain.
+func recordHold(s *State, reason, detail, failureClass string) {
+	recordDecision(s, automergeDecision{Reason: reason, Detail: detail, FailureClass: failureClass}, false)
 }
 
 // recordUpstreamReadFailure records reason as a held automerge decision for
@@ -954,12 +1015,16 @@ func recordHold(s *State, reason, detail string) {
 // the fleet kill switch off, the recorded reason stays reasonAutomergeDisabled
 // even though an upstream read also failed (Q4), matching today's healthy-
 // tick behavior rather than surfacing the specific read failure when
-// automerge was never going to run anyway.
+// automerge was never going to run anyway. FailureClass is set via
+// classifyGhFailure(err) regardless (#886) -- it's the diagnostic cause of
+// the read failure itself, independent of whether automerge was even going
+// to run this tick.
 func recordUpstreamReadFailure(s *State, reason string, err error) {
+	class := classifyGhFailure(err)
 	if !loadFleetEnabled() {
 		reason = reasonAutomergeDisabled
 	}
-	recordHold(s, reason, sanitizeDetail(err.Error()))
+	recordHold(s, reason, sanitizeDetail(err.Error()), class)
 }
 
 // runAutomerge evaluates the automerge condition chain for pr and, on a
@@ -1067,12 +1132,17 @@ func runAutomerge(s *State, pr prView, checks []check, verdict feedbackVerdict, 
 	// detection pass), and merge-queue state -- and re-run the same
 	// evaluator against this freshly-fetched automergeInputs (the plan's
 	// chosen design: one evaluator, one decision shape, one log line).
-	// AllowedMethods and the fleet kill switch carry over unchanged from
-	// the first pass (repo settings / local config, not PR state, per the
-	// plan's Assumption). Only a still-Merge==true second verdict proceeds
-	// to executeMerge; every hold here reuses an existing reason constant
-	// with a "recheck: "-prefixed Detail rather than a parallel constant
-	// set, per the plan's Assumption.
+	// AllowedMethods carries over unchanged from the first pass (repo
+	// settings, not PR state, per the plan's Assumption). The fleet kill
+	// switch, by contrast, is re-read fresh as recheckAutomergeInputs' own
+	// final step, immediately before this point (#886): the smallest
+	// possible window between confirming automerge is still enabled and
+	// actually issuing `gh pr merge`. Only a still-Merge==true second
+	// verdict proceeds to executeMerge; every hold here reuses an existing
+	// reason constant with a "recheck: "-prefixed Detail rather than a
+	// parallel constant set, per the plan's Assumption -- except the fleet
+	// kill-switch holds below, which use their own distinct reasonKillSwitch*
+	// constants instead (#886).
 	if decision.Merge {
 		recheck, failReason, err := recheckAutomergeInputs(s, in)
 		switch {
@@ -1080,6 +1150,7 @@ func runAutomerge(s *State, pr prView, checks []check, verdict feedbackVerdict, 
 			decision.Merge = false
 			decision.Reason = failReason
 			decision.Detail = sanitizeDetail("recheck: " + err.Error())
+			decision.FailureClass = classifyGhFailure(err)
 			// The second pass never ran, so pass 1's Conditions (all "yes",
 			// since decision.Merge was true) would render as a self-
 			// contradictory "held: ... [enabled=yes ... queue=yes]" log line
@@ -1088,6 +1159,20 @@ func runAutomerge(s *State, pr prView, checks []check, verdict feedbackVerdict, 
 			// found a regression" branch below, which sets fresh Conditions
 			// from recheckDecision and must not be touched here.
 			decision.Conditions = nil
+		case failReason != "":
+			// The fleet kill switch itself changed between the first
+			// evaluation and this final pre-merge check (#886, AC 5/6):
+			// unlike the err != nil branch above, recheckAutomergeInputs'
+			// own upstream reads all succeeded here, so this is a genuine
+			// disabled-switch verdict, not an I/O failure -- rendered with a
+			// single synthetic "enabled=no" Condition (mirroring
+			// evaluateAutomerge's own first stage) so the log line reads
+			// naturally, rather than every stage rendering "-" as if nothing
+			// had been reached at all.
+			decision.Merge = false
+			decision.Reason = failReason
+			decision.Detail = ""
+			decision.Conditions = []conditionResult{{Key: "enabled", Reached: true, Pass: false}}
 		default:
 			recheckDecision := evaluateAutomerge(recheck)
 			// The TOCTOU guard (Decision 9): a head commit that changed

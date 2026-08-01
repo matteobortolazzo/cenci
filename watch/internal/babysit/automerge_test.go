@@ -113,6 +113,47 @@ func withFleetAutomergeEnabled(t *testing.T, enabled bool) {
 	t.Cleanup(func() { fleetConfigPath = original })
 }
 
+// withFleetAutomergeSequence installs a fleetConfigPath seam that returns a
+// distinct temp path on each call, serving bodies in order and repeating the
+// last body once exhausted (#886) -- so a test can script the fleet kill
+// switch's first-pass read and its separate final pre-merge recheck read
+// (recheckAutomergeInputs' loadFleetSwitch() call) with different content.
+// Two sentinel bodies get special handling instead of being written as
+// literal file content: "missing" points fleetConfigPath at a path that was
+// never created (os.ReadFile -> fs.ErrNotExist), and "unreadable" points it
+// at a directory rather than a file (os.ReadFile on a directory always fails
+// with EISDIR -- root-proof, unlike chmod 000).
+func withFleetAutomergeSequence(t *testing.T, bodies ...string) {
+	t.Helper()
+	dir := t.TempDir()
+	call := 0
+	original := fleetConfigPath
+	fleetConfigPath = func() string {
+		idx := call
+		if idx >= len(bodies) {
+			idx = len(bodies) - 1
+		}
+		call++
+		switch bodies[idx] {
+		case "missing":
+			return filepath.Join(dir, fmt.Sprintf("missing-%d.json", idx))
+		case "unreadable":
+			sub := filepath.Join(dir, fmt.Sprintf("unreadable-%d", idx))
+			if err := os.MkdirAll(sub, 0700); err != nil {
+				t.Fatal(err)
+			}
+			return sub
+		default:
+			path := filepath.Join(dir, fmt.Sprintf("config-%d.json", idx))
+			if err := os.WriteFile(path, []byte(bodies[idx]), 0600); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}
+	}
+	t.Cleanup(func() { fleetConfigPath = original })
+}
+
 // automergeEligiblePR is a `pr view` fixture with every field the automerge
 // gate chain needs already at its green value: not a draft, MERGEABLE, one
 // changed file matching changedFiles (no truncation), and a base ref distinct
@@ -898,6 +939,11 @@ func TestTickIssuesAutomergeWhenGreenLabeledAndWithinPolicy(t *testing.T) {
 	if s.AutomergeCheckedAt.IsZero() {
 		t.Error("AutomergeCheckedAt was not stamped")
 	}
+	// #886: recordDecision must assign AutomergeFailureClass unconditionally,
+	// so a clean, successful merge tick never carries a stale class forward.
+	if s.AutomergeFailureClass != "" {
+		t.Errorf("AutomergeFailureClass = %q, want empty on a clean successful merge", s.AutomergeFailureClass)
+	}
 }
 
 // TestTickAutomergeSquashOnlyHoldsOnNonSquashPolicy inverts the old
@@ -1113,7 +1159,14 @@ func TestTickAutomergeHeldWhenMergeRejected(t *testing.T) {
 	var calls [][]string
 	script := automergeFirstPassScript()
 	script = append(script, automergeGreenRecheckScript()...)
-	script = append(script, scriptedCall{out: "branch protection required review", err: errors.New("exit status 1")})
+	script = append(script,
+		scriptedCall{out: "branch protection required review", err: errors.New("exit status 1")},
+		// #886: executeMerge now performs the post-merge refetch
+		// unconditionally, even after a nonzero exit -- still OPEN confirms
+		// the rejection was real, matching matrix case (c): merge nonzero
+		// exit + refetch readable non-MERGED => reasonMergeFailed.
+		scriptedCall{out: automergeEligiblePR()},
+	)
 	withScriptedCommands(t, script, &calls)
 
 	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60}
@@ -1133,6 +1186,16 @@ func TestTickAutomergeHeldWhenMergeRejected(t *testing.T) {
 	// another beyond the single generic reasonMergeFailed constant.
 	if !strings.Contains(s.AutomergeDetail, "branch protection required review") {
 		t.Fatalf("AutomergeDetail = %q, want it to contain the captured gh pr merge output", s.AutomergeDetail)
+	}
+	// The merge command's own error ("exit status 1", an otherwise
+	// unclassified failure) must resolve to failureClassCommand -- classifying
+	// this, the package's single most operationally important failure mode,
+	// must not silently stay at the empty zero value.
+	if s.AutomergeFailureClass != failureClassCommand {
+		t.Fatalf("AutomergeFailureClass = %q, want %q", s.AutomergeFailureClass, failureClassCommand)
+	}
+	if n := mergeCallCount(calls); n != 1 {
+		t.Fatalf("gh pr merge calls = %d, want exactly 1: a rejected merge must never be retried within the same tick", n)
 	}
 }
 
@@ -1178,12 +1241,21 @@ func TestTickAutomergeSanitizesRejectedMergeDetail(t *testing.T) {
 	longOutput := "branch protection required review\nsecond line\nthird line: " + strings.Repeat("y", 250)
 	script := automergeFirstPassScript()
 	script = append(script, automergeGreenRecheckScript()...)
-	script = append(script, scriptedCall{out: longOutput, err: errors.New("exit status 1")})
+	script = append(script,
+		scriptedCall{out: longOutput, err: errors.New("exit status 1")},
+		// #886: the now-unconditional post-merge refetch -- still OPEN keeps
+		// this test on the reasonMergeFailed/sanitization path rather than
+		// falling into reasonMergeVerifyUnreadable.
+		scriptedCall{out: automergeEligiblePR()},
+	)
 	withScriptedCommands(t, script, &calls)
 
 	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60}
 	if _, _, err := tick(&s); err != nil {
 		t.Fatal(err)
+	}
+	if s.AutomergeReason != reasonMergeFailed {
+		t.Fatalf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonMergeFailed)
 	}
 	if strings.Contains(s.AutomergeDetail, "\n") {
 		t.Fatalf("AutomergeDetail = %q, must not contain an embedded newline", s.AutomergeDetail)
@@ -1433,6 +1505,32 @@ func TestTickAutomergePreMergeRecheckClearsConditionsWhenRecheckFetchFails(t *te
 	}
 	if len(s.AutomergeConditions) != 0 {
 		t.Fatalf("AutomergeConditions = %#v, want empty: the second pass never completed, so the first pass's all-passing Conditions must not survive onto this held decision", s.AutomergeConditions)
+	}
+}
+
+// TestTickAutomergePreMergeRecheckFetchFailureSetsFailureClass pins the
+// plan's Assumption that failure-class population is scoped to every read
+// site that funnels into recordDecision with a subprocess error, including
+// the recheck's own upstream read -- not just recordUpstreamReadFailure and
+// merge execution/verification (#886). When recheckAutomergeInputs' `gh pr
+// view` re-fetch fails outright (same fixture as
+// TestTickAutomergePreMergeRecheckClearsConditionsWhenRecheckFetchFails),
+// the persisted decision must carry a specific, non-empty
+// classifyGhFailure(err) class -- not just a bare non-empty check, matching
+// the class every other subprocess-error site in this ticket already sets.
+func TestTickAutomergePreMergeRecheckFetchFailureSetsFailureClass(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	script := automergeFirstPassScript()                                    // the first, genuine full-evaluation pass: every stage passes
+	script = append(script, scriptedCall{err: errors.New("exit status 1")}) // the recheck's own `gh pr view` re-fetch fails outright
+	withScriptedCommands(t, script, &calls)
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatalf("tick returned an error on a recheck fetch failure, want nil: %v", err)
+	}
+	if s.AutomergeFailureClass != failureClassCommand {
+		t.Fatalf("AutomergeFailureClass = %q, want %q (classifyGhFailure of the recheck's %q error): a recheck-read failure is a classifiable gh subprocess error at the same kind of read site as recordUpstreamReadFailure, in scope per the plan's Assumption", s.AutomergeFailureClass, failureClassCommand, "exit status 1")
 	}
 }
 
@@ -2087,5 +2185,303 @@ func TestTickPreMergeRecheckAllGreenWithAddressedKeysReconfirmedResolvedStillMer
 	}
 	if !mergeIssued {
 		t.Fatalf("gh pr merge was not issued: %#v", calls)
+	}
+}
+
+// -- #886: fail closed on command ambiguity, merge uncertainty, kill-switch changes --
+
+// mergeCallCount counts how many `gh pr merge` invocations appear in calls.
+func mergeCallCount(calls [][]string) int {
+	n := 0
+	for _, c := range calls {
+		if len(c) > 2 && c[1] == "pr" && c[2] == "merge" {
+			n++
+		}
+	}
+	return n
+}
+
+// hasCondition reports whether conds contains an entry for key that was
+// reached with the given pass value -- used to assert a recheck hold went
+// through the normal condition chain (Conditions populated) rather than the
+// I/O-read-failure branch (Conditions cleared to nil).
+func hasCondition(conds []conditionResult, key string, pass bool) bool {
+	for _, c := range conds {
+		if c.Key == key && c.Reached && c.Pass == pass {
+			return true
+		}
+	}
+	return false
+}
+
+// TestTickAutomergeMergeNonzeroExitButRefetchConfirmsMerged is merge-outcome
+// matrix case (a) (AC 3): a `gh pr merge` invocation that itself exits
+// nonzero (e.g. a client-side timeout or a transient network blip) must
+// still be confirmed as a real success once the unconditional post-merge
+// refetch reports MERGED -- recording merged==true, Reason=="", a non-empty
+// diagnostic Detail (the command reported failure despite the confirmed
+// merge), and exactly ONE `gh pr merge` call (no retry).
+func TestTickAutomergeMergeNonzeroExitButRefetchConfirmsMerged(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	mergedPR := `{"number":42,"title":"Change","state":"MERGED","headRefName":"feature","headRefOid":"abc","baseRefName":"main","mergeable":"MERGEABLE","isDraft":false,"changedFiles":1,"additions":5,"deletions":2,"files":[{"path":"watch/internal/babysit/x.go"}],"url":"https://example/pr/42","closingIssuesReferences":[{"number":9}]}`
+	script := automergeFirstPassScript()
+	script = append(script, automergeGreenRecheckScript()...)
+	script = append(script,
+		scriptedCall{out: "context deadline exceeded", err: errors.New("exit status 1")}, // gh pr merge, nonzero exit
+		scriptedCall{out: mergedPR}, // the unconditional post-merge refetch
+	)
+	withScriptedCommands(t, script, &calls)
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900}
+	terminal, delay, err := tick(&s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if terminal {
+		t.Fatal("tick must not treat the merge-confirming tick itself as terminal")
+	}
+	if delay != 60*time.Second || s.CurrentDelaySeconds != 60 {
+		t.Fatalf("a confirmed merge must reset the backoff delay to the interval: delay=%v state=%d", delay, s.CurrentDelaySeconds)
+	}
+	if s.AutomergeDecision != "merge" {
+		t.Fatalf("AutomergeDecision = %q, want \"merge\": a nonzero gh pr merge exit followed by a MERGED refetch must record confirmed success", s.AutomergeDecision)
+	}
+	if s.AutomergeReason != "" {
+		t.Fatalf("AutomergeReason = %q, want empty on confirmed success", s.AutomergeReason)
+	}
+	if s.AutomergeDetail == "" {
+		t.Fatal("AutomergeDetail = \"\", want a non-empty diagnostic noting the merge command itself reported failure despite the confirmed merge")
+	}
+	if n := mergeCallCount(calls); n != 1 {
+		t.Fatalf("gh pr merge calls = %d, want exactly 1: a nonzero exit followed by a MERGED refetch must never retry the merge command", n)
+	}
+}
+
+// TestTickAutomergeMergeNonzeroExitThenRefetchUnreadableNeverSucceeds is the
+// nonzero-exit half of merge-outcome matrix case (d) (AC 4): regardless of
+// what `gh pr merge` itself reported, an unreadable post-merge refetch must
+// never record success -- distinct from
+// TestTickAutomergePostMergeVerificationReadFailureIsDistinctReason, which
+// only covers the zero-exit half.
+func TestTickAutomergeMergeNonzeroExitThenRefetchUnreadableNeverSucceeds(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	script := automergeFirstPassScript()
+	script = append(script, automergeGreenRecheckScript()...)
+	script = append(script,
+		scriptedCall{out: "context deadline exceeded", err: errors.New("exit status 1")}, // gh pr merge, nonzero exit
+		scriptedCall{out: "rate limited", err: errors.New("exit status 1")},              // the post-merge refetch itself fails
+	)
+	withScriptedCommands(t, script, &calls)
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if s.AutomergeDecision == "merge" {
+		t.Fatal("AutomergeDecision = \"merge\", want held: an unreadable post-merge refetch must never record success, regardless of the merge command's own exit status")
+	}
+	if s.AutomergeReason != reasonMergeVerifyUnreadable {
+		t.Fatalf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonMergeVerifyUnreadable)
+	}
+	if n := mergeCallCount(calls); n != 1 {
+		t.Fatalf("gh pr merge calls = %d, want exactly 1: no retry", n)
+	}
+}
+
+// TestTickAutomergeRecheckKillSwitchHoldsMatrix pins AC 5/6: the final
+// pre-merge re-evaluation re-reads the fleet kill switch as its last step
+// (recheckAutomergeInputs' loadFleetSwitch() call), and every distinct way
+// that re-read can come back disabled -- an explicit false, a config file
+// that vanished, one that is unreadable (a directory), one with malformed
+// JSON, and one whose automerge.enabled key is simply absent -- holds under
+// its own distinct reason and never issues `gh pr merge`, even though the
+// first-pass read (before the two full evaluation-script prefixes below) saw
+// the switch enabled.
+func TestTickAutomergeRecheckKillSwitchHoldsMatrix(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		secondPass string
+		wantReason string
+	}{
+		{"fleet switch flips from enabled to explicitly disabled between passes", `{"automerge":{"enabled":false}}`, reasonKillSwitchDisabled},
+		{"fleet config missing at recheck", "missing", reasonKillSwitchConfigMissing},
+		{"fleet config unreadable (a directory, not chmod 000 -- root-proof) at recheck", "unreadable", reasonKillSwitchConfigUnreadable},
+		{"fleet config malformed JSON at recheck", "{not json", reasonKillSwitchConfigMalformed},
+		{"fleet config's automerge.enabled key absent at recheck", `{"automerge":{}}`, reasonKillSwitchEnabledAbsent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withFleetAutomergeSequence(t, `{"automerge":{"enabled":true}}`, tc.secondPass)
+			var calls [][]string
+			script := automergeFirstPassScript()
+			script = append(script, automergeGreenRecheckScript()...)
+			withScriptedCommands(t, script, &calls)
+
+			s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900}
+			if _, _, err := tick(&s); err != nil {
+				t.Fatal(err)
+			}
+			if n := mergeCallCount(calls); n != 0 {
+				t.Fatalf("gh pr merge calls = %d, want 0: the fleet kill switch changed at recheck time: %#v", n, calls)
+			}
+			if s.AutomergeDecision == "merge" {
+				t.Fatal("AutomergeDecision = \"merge\", want held: an enabled-to-disabled fleet switch change must block the merge")
+			}
+			if s.AutomergeReason != tc.wantReason {
+				t.Fatalf("AutomergeReason = %q, want %q", s.AutomergeReason, tc.wantReason)
+			}
+		})
+	}
+}
+
+// TestTickAutomergeRecheckKillSwitchExplicitDisableRendersEnabledNo pins the
+// kill-switch hold's Conditions rendering: runAutomerge's failReason != ""
+// branch sets a single synthetic enabled=no entry (mirroring
+// evaluateAutomerge's own first stage), distinct from the I/O-read-failure
+// branch that clears Conditions to nil entirely, so the resulting
+// Conditions must contain that genuine enabled=no entry, matching the
+// logLine format a human reads during incident triage.
+func TestTickAutomergeRecheckKillSwitchExplicitDisableRendersEnabledNo(t *testing.T) {
+	withFleetAutomergeSequence(t, `{"automerge":{"enabled":true}}`, `{"automerge":{"enabled":false}}`)
+	var calls [][]string
+	script := automergeFirstPassScript()
+	script = append(script, automergeGreenRecheckScript()...)
+	withScriptedCommands(t, script, &calls)
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if !hasCondition(s.AutomergeConditions, "enabled", false) {
+		t.Fatalf("AutomergeConditions = %#v, want an enabled=no (Reached=true, Pass=false) entry: the recheck must render through the normal condition chain, not clear Conditions like an I/O read failure would", s.AutomergeConditions)
+	}
+}
+
+// TestTickAutomergeFailureClassClearsOnCleanTickAfterFailure pins that
+// recordDecision assigns AutomergeFailureClass unconditionally: a failed
+// tick records a non-empty class, and the very next clean, merge-issuing
+// tick must clear it rather than leave a stale class from the previous
+// failure displayed.
+func TestTickAutomergeFailureClassClearsOnCleanTickAfterFailure(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	withCommands(t, nil, &calls) // pr view fails immediately: no responses scripted
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60}
+	if _, _, err := tick(&s); err == nil {
+		t.Fatal("tick: err = nil, want the pr view failure to surface as a tick error")
+	}
+	if s.AutomergeFailureClass == "" {
+		t.Fatal("AutomergeFailureClass = \"\", want non-empty after a failed upstream read")
+	}
+
+	calls = nil
+	mergedPR := `{"number":42,"title":"Change","state":"MERGED","headRefName":"feature","headRefOid":"abc","baseRefName":"main","mergeable":"MERGEABLE","isDraft":false,"changedFiles":1,"additions":5,"deletions":2,"files":[{"path":"watch/internal/babysit/x.go"}],"url":"https://example/pr/42","closingIssuesReferences":[{"number":9}]}`
+	script := automergeFirstPassScript()
+	script = append(script, automergeGreenRecheckScript()...)
+	script = append(script,
+		scriptedCall{out: "Merged pull request #42 (o/r)"},
+		scriptedCall{out: mergedPR},
+	)
+	withScriptedCommands(t, script, &calls)
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if s.AutomergeFailureClass != "" {
+		t.Fatalf("AutomergeFailureClass = %q, want cleared on the following clean tick, not stale from the previous failure", s.AutomergeFailureClass)
+	}
+}
+
+// TestTickPaginatedReadTimeoutProducesSiteReasonAndTimeoutClass is a
+// regression test for the pagination.go %w-chain fix (#886): previously
+// fetchPaged's mid-pagination failure wrap used "%w: %s: %s" (the trailing
+// %s stringifies the underlying gh error, breaking errors.Is/errors.As from
+// ever reaching it) -- a paginated comments/reviews read that times out must
+// still produce both its own site reason (reasonUpstreamCommentsUnreadable /
+// reasonUpstreamReviewsUnreadable) AND classifyGhFailure(err) ==
+// failureClassTimeout, which was impossible while the chain was broken.
+func TestTickPaginatedReadTimeoutProducesSiteReasonAndTimeoutClass(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		extraOKresp int // how many additional scripted OK responses before the paginated read that times out
+		wantReason  string
+	}{
+		{"comments read times out", 0, reasonUpstreamCommentsUnreadable},
+		{"reviews read times out", 1, reasonUpstreamReviewsUnreadable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withFleetAutomergeEnabled(t, true)
+			responses := []string{automergeEligiblePR(), `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`}
+			for i := 0; i < tc.extraOKresp; i++ {
+				responses = append(responses, `[]`) // comments read completes cleanly before the reviews read times out
+			}
+			var calls [][]string
+			originalCommand := command
+			originalExecGh := execGh
+			i := 0
+			execGh = func(args ...string) (string, string, error) {
+				calls = append(calls, append([]string{"gh"}, args...))
+				if i < len(responses) {
+					out := responses[i]
+					i++
+					return out, "", nil
+				}
+				return "", "", errGhTimeout
+			}
+			command = func(name string, args ...string) ([]byte, error) {
+				calls = append(calls, append([]string{name}, args...))
+				return []byte(""), nil
+			}
+			t.Cleanup(func() {
+				command = originalCommand
+				execGh = originalExecGh
+			})
+
+			s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60}
+			if _, _, err := tick(&s); err == nil {
+				t.Fatal("tick: err = nil, want the timed-out paginated read to surface as a tick error")
+			}
+			if s.AutomergeReason != tc.wantReason {
+				t.Fatalf("AutomergeReason = %q, want %q", s.AutomergeReason, tc.wantReason)
+			}
+			if s.AutomergeFailureClass != failureClassTimeout {
+				t.Fatalf("AutomergeFailureClass = %q, want %q: the paginated-read error chain must preserve errGhTimeout through errPaginationFailed's wrapping (the %%w-chain fix) so classifyGhFailure can still see it", s.AutomergeFailureClass, failureClassTimeout)
+			}
+		})
+	}
+}
+
+// TestAutomergeDecisionLogLineRendersDetailOnMergedBranchAndFailureClass pins
+// two of logLine's #886 changes together: a merged (Merge==true) decision
+// with a non-empty Detail (e.g. matrix case (a)'s "command reported failure
+// despite the confirmed merge" diagnostic) must render that Detail -- the
+// pre-#886 logLine only ever rendered Detail on the held branch -- and a
+// non-empty FailureClass must render as " class=<class>".
+func TestAutomergeDecisionLogLineRendersDetailOnMergedBranchAndFailureClass(t *testing.T) {
+	d := automergeDecision{
+		PR:           "42",
+		Merge:        true,
+		Detail:       "gh pr merge exited nonzero but the refetch confirmed MERGED",
+		FailureClass: failureClassCommand,
+		Conditions:   []conditionResult{{Key: "enabled", Reached: true, Pass: true}},
+	}
+	got := d.logLine()
+	if !strings.Contains(got, "gh pr merge exited nonzero but the refetch confirmed MERGED") {
+		t.Fatalf("logLine() = %q, want it to render Detail on the merged branch too", got)
+	}
+	if !strings.Contains(got, " class="+failureClassCommand) {
+		t.Fatalf("logLine() = %q, want it to render \" class=%s\"", got, failureClassCommand)
+	}
+}
+
+// TestAutomergeDecisionLogLineOmitsClassWhenEmpty pins the other half: an
+// empty FailureClass (the common case -- most holds and every clean merge
+// have no failure class at all) must render no "class=" substring, keeping
+// TestAutomergeDecisionLogLine's pre-#886 exact-format assertion valid.
+func TestAutomergeDecisionLogLineOmitsClassWhenEmpty(t *testing.T) {
+	d := automergeDecision{PR: "42", Merge: false, Reason: reasonLabelMissing}
+	got := d.logLine()
+	if strings.Contains(got, "class=") {
+		t.Fatalf("logLine() = %q, want no class= substring when FailureClass is empty", got)
 	}
 }
