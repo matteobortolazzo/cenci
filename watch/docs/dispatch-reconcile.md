@@ -75,6 +75,41 @@ out to be dead. Every other resume spawn failure rolls the claim back to
 `+Input Needed` `−Working` immediately via `mut.EditLabels`, so the ticket
 stays resumable on the very next pass without waiting on the grace period.
 
+## Open-PR-inventory-completeness defer (ticket #881)
+
+`Reconcile`'s two `hasLiveWindow(...) || t.HasOpenPR` label-mutation sites
+(`reconcile.go:215`'s `Input Needed` + `Working` crash-cleanup branch, and
+`reconcile.go:323`'s ordinary failure path) both additionally guard on
+`t.OpenPRProbe`, mirroring the existing blind `in.Snapshot == nil` guard's
+shape immediately above each: a non-complete probe means `t.HasOpenPR` could
+not actually be proven false this pass, so neither site may mutate a
+ticket's labels on unverified input. Each guard defers exactly like the
+snapshot-nil guard — no `Recovery` is produced, and any pending grace
+observation is preserved (carried into `NextObservations`, never dropped),
+per this doc's existing "clear the retry counter only for healthy tickets,
+not deferred verdicts" rule: a ticket whose open-PR probe is chronically
+non-complete must never quietly reset its grace clock and must resume the
+moment the probe clears.
+
+At the crash-cleanup site (`reconcile.go:215`), the ticket is still recorded
+into `Escalated` regardless of whether the cleanup recovery itself fires
+this pass — deferring the stray-`Working` cleanup must never also drop the
+ticket from the daemon's escalated-tickets view.
+
+A complete probe (`OpenPRProbeComplete`, including the zero value) never
+triggers this guard, so it must never be mistaken for disabling either site
+entirely — both continue to produce their ordinary recovery
+(`RecoveryResumeInterrupted` / `RecoveryRetry`/`RecoveryFailed`) exactly as
+before ticket #881 whenever the probe is complete.
+
+`deferObservation(observations, next, key)` (`reconcile.go`) is the shared
+helper every "must not act on unverified/blind input" guard in `Reconcile`
+calls — the nil-snapshot guard, this section's non-complete-open-PR-probe
+guard (both sites), and the inverse-leak branch's plan-probe-error guard —
+so the "preserve the pending grace observation, no `Recovery`, `continue`"
+shape stays byte-identical across every guard site instead of being
+hand-duplicated per guard.
+
 ## Cenci-authored comment markers
 
 Every comment cenci itself posts to a ticket — the attempt marker on a retry

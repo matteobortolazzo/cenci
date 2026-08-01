@@ -686,7 +686,7 @@ func TestSyncMains_SkippedRepo_LogsNonBlankStatusWord(t *testing.T) {
 const emptyIssuesFakeGH = `
 case "$1 $2" in
   "issue list") printf '[]' ;;
-  "pr list") printf '[]' ;;
+  "api graphql") printf '` + emptyOpenPRPageJSON + `' ;;
   *) exit 1 ;;
 esac
 `
