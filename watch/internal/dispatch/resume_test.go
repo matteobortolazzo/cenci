@@ -27,6 +27,13 @@ func TestClassifyComments(t *testing.T) {
 	const nonce = "0123456789abcdef0123456789abcdef"
 	marker := func(n string) string { return escalationAnchorPrefix + n + " -->" }
 	user := func(login, typ string) restCommentAuthor { return restCommentAuthor{Login: login, Type: typ} }
+	// grantAllPermission is passed to every table case below: this table's
+	// scope is the pre-permission scanning/prefilter behavior (marker/bot/
+	// association), so every candidate that reaches the permission seam is
+	// granted -- unaffected. #882's own permission-specific scanning/
+	// precedence behavior (continue-past-denied, unresolved-outranks-denied,
+	// prefilters never reaching the seam) is covered by the dedicated tests
+	// below this function.
 
 	tests := []struct {
 		name     string
@@ -223,11 +230,144 @@ func TestClassifyComments(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := classifyComments(tc.comments, tc.anchorID, tc.nonce)
+			got := classifyComments(tc.comments, tc.anchorID, tc.nonce, grantAllPermission)
 			if got != tc.want {
 				t.Errorf("classifyComments(...) = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// grantAllPermission is a no-op permission resolver: every candidate is
+// granted current write permission. Used by every classifyComments/
+// probeEscalationAnswer test above and below whose own scope is NOT the
+// permission seam itself (marker/bot/association prefilters, the comments-
+// probe gh call classification, or the resume-gate reason mapping) --
+// direct permission-classification coverage lives in permission_test.go, and
+// resolveAnswerProbes' real permission-cache wiring is covered by the
+// dedicated tests near the bottom of this file.
+func grantAllPermission(string) WritePermission { return WritePermissionGranted }
+
+// -- #882: classifyComments' permission seam ---------------------------------
+
+// TestClassifyComments_ContinuesScanningPastDeniedCommenter covers the plan's
+// Assumptions: the scan no longer stops at the first comment passing the
+// cheap filters -- it continues past a permission-denied commenter so that a
+// genuinely authorized reply later in the thread still resumes (AC1 + AC2
+// read together).
+func TestClassifyComments_ContinuesScanningPastDeniedCommenter(t *testing.T) {
+	marker := escalationAnchorPrefix + testNonce + " -->"
+	comments := []restIssueComment{
+		{ID: 100, Body: "Question.\n" + marker, Author: restCommentAuthor{Login: "cenci-bot", Type: "Bot"}},
+		{ID: 101, Body: "no write access", Author: restCommentAuthor{Login: "denied-user", Type: "User"}, AuthorAssociation: "COLLABORATOR"},
+		{ID: 102, Body: "go with A", Author: restCommentAuthor{Login: "octocat", Type: "User"}, AuthorAssociation: "OWNER"},
+	}
+	permOf := func(login string) WritePermission {
+		if login == "octocat" {
+			return WritePermissionGranted
+		}
+		return WritePermissionDenied
+	}
+	got := classifyComments(comments, 100, testNonce, permOf)
+	if got != AnswerProbeAnswered {
+		t.Fatalf("classifyComments = %q, want AnswerProbeAnswered (a later authorized reply must still resume past an earlier denied commenter)", got)
+	}
+}
+
+// TestClassifyComments_AllCandidatesDenied_Unauthorized covers the terminal
+// verdict when every post-anchor candidate that passes the cheap prefilters
+// is positively denied write permission: AC2/AC3 (read/triage collaborators,
+// former collaborators, unrelated org members).
+func TestClassifyComments_AllCandidatesDenied_Unauthorized(t *testing.T) {
+	marker := escalationAnchorPrefix + testNonce + " -->"
+	comments := []restIssueComment{
+		{ID: 100, Body: "Question.\n" + marker, Author: restCommentAuthor{Login: "cenci-bot", Type: "Bot"}},
+		{ID: 101, Body: "no write access", Author: restCommentAuthor{Login: "octocat", Type: "User"}, AuthorAssociation: "COLLABORATOR"},
+	}
+	permOf := func(string) WritePermission { return WritePermissionDenied }
+	got := classifyComments(comments, 100, testNonce, permOf)
+	if got != AnswerProbeUnauthorized {
+		t.Fatalf("classifyComments = %q, want AnswerProbeUnauthorized", got)
+	}
+}
+
+// TestClassifyComments_UnresolvedPermissionOutranksDeniedForReportedReason
+// pins the plan's Assumptions precedence rule (watch/docs/error-handling.md
+// #850's "unreliable verdict is not the same as resolved deny"): when several
+// post-anchor candidates produce different non-authorized outcomes, an
+// unresolved/error class wins over a positively-denied class for the
+// reported reason -- regardless of scan order. Both deny; only the
+// operator-facing reason differs.
+func TestClassifyComments_UnresolvedPermissionOutranksDeniedForReportedReason(t *testing.T) {
+	marker := escalationAnchorPrefix + testNonce + " -->"
+	permOf := func(login string) WritePermission {
+		if login == "denied-first" {
+			return WritePermissionDenied
+		}
+		return WritePermissionAPIError
+	}
+
+	comments := []restIssueComment{
+		{ID: 100, Body: "Question.\n" + marker, Author: restCommentAuthor{Login: "cenci-bot", Type: "Bot"}},
+		{ID: 101, Body: "reply 1", Author: restCommentAuthor{Login: "denied-first", Type: "User"}, AuthorAssociation: "COLLABORATOR"},
+		{ID: 102, Body: "reply 2", Author: restCommentAuthor{Login: "error-second", Type: "User"}, AuthorAssociation: "COLLABORATOR"},
+	}
+	got := classifyComments(comments, 100, testNonce, permOf)
+	if got != AnswerProbePermissionAPIError {
+		t.Fatalf("classifyComments = %q, want AnswerProbePermissionAPIError (unresolved must outrank a positive denial for the reported reason)", got)
+	}
+
+	// Reverse the scan order -- the outcome must be identical, proving this
+	// is a precedence rule, not a first/last-wins artifact of scan order.
+	commentsReversed := []restIssueComment{
+		{ID: 100, Body: "Question.\n" + marker, Author: restCommentAuthor{Login: "cenci-bot", Type: "Bot"}},
+		{ID: 101, Body: "reply 1", Author: restCommentAuthor{Login: "error-second", Type: "User"}, AuthorAssociation: "COLLABORATOR"},
+		{ID: 102, Body: "reply 2", Author: restCommentAuthor{Login: "denied-first", Type: "User"}, AuthorAssociation: "COLLABORATOR"},
+	}
+	got2 := classifyComments(commentsReversed, 100, testNonce, permOf)
+	if got2 != AnswerProbePermissionAPIError {
+		t.Fatalf("classifyComments (reversed scan order) = %q, want AnswerProbePermissionAPIError", got2)
+	}
+}
+
+// TestClassifyComments_AssociationPrefilterSkipsBeforeAnyPermissionCall
+// proves author_association stays a cheap prefilter run BEFORE the
+// permission seam (the plan's Risks section: "the cheap prefilters run first
+// so a bot/cenci/unassociated comment never triggers a call") -- an
+// unauthorized-association candidate must never even reach permOf.
+func TestClassifyComments_AssociationPrefilterSkipsBeforeAnyPermissionCall(t *testing.T) {
+	marker := escalationAnchorPrefix + testNonce + " -->"
+	comments := []restIssueComment{
+		{ID: 100, Body: "Question.\n" + marker, Author: restCommentAuthor{Login: "cenci-bot", Type: "Bot"}},
+		{ID: 101, Body: "reply", Author: restCommentAuthor{Login: "randomuser", Type: "User"}, AuthorAssociation: "CONTRIBUTOR"},
+	}
+	permOf := func(login string) WritePermission {
+		t.Fatalf("permOf must not be called for a commenter failing the coarse author-association prefilter, got login %q", login)
+		return WritePermissionDenied
+	}
+	got := classifyComments(comments, 100, testNonce, permOf)
+	if got != AnswerProbeWaiting {
+		t.Fatalf("classifyComments = %q, want AnswerProbeWaiting", got)
+	}
+}
+
+// TestClassifyComments_BotAndCenciMarkedCommentsSkipPermissionCall extends
+// the prefilter-before-permission-seam proof to the bot-shape and
+// cenci-marker exclusions.
+func TestClassifyComments_BotAndCenciMarkedCommentsSkipPermissionCall(t *testing.T) {
+	marker := escalationAnchorPrefix + testNonce + " -->"
+	comments := []restIssueComment{
+		{ID: 100, Body: "Question.\n" + marker, Author: restCommentAuthor{Login: "cenci-bot", Type: "Bot"}},
+		{ID: 101, Body: "an automated follow-up", Author: restCommentAuthor{Login: "renovate[bot]", Type: "User"}, AuthorAssociation: "COLLABORATOR"},
+		{ID: 102, Body: "cenci's own follow-up\n<!-- cenci-dispatch-attempt -->", Author: restCommentAuthor{Login: "octocat", Type: "User"}, AuthorAssociation: "OWNER"},
+	}
+	permOf := func(login string) WritePermission {
+		t.Fatalf("permOf must not be called for a bot-shaped or cenci-marked commenter, got login %q", login)
+		return WritePermissionDenied
+	}
+	got := classifyComments(comments, 100, testNonce, permOf)
+	if got != AnswerProbeWaiting {
+		t.Fatalf("classifyComments = %q, want AnswerProbeWaiting", got)
 	}
 }
 
@@ -303,7 +443,7 @@ func TestProbeEscalationAnswer_AnchorUnset_NeverCallsGh(t *testing.T) {
 	installFakeGH(t, "echo 'gh must not be invoked for an unset anchor' >&2\nexit 1\n")
 
 	var buf bytes.Buffer
-	got := probeEscalationAnswer("o/r", 99, 0, "", &answerProbeBudget{}, &buf)
+	got := probeEscalationAnswer("o/r", 99, 0, "", &answerProbeBudget{}, grantAllPermission, &buf)
 	if got != AnswerProbeAnchorUnset {
 		t.Fatalf("probe = %q, want AnswerProbeAnchorUnset", got)
 	}
@@ -316,7 +456,7 @@ func TestProbeEscalationAnswer_NonzeroExit_UnresolvedWithOneCollapsedLogLine(t *
 	installFakeGH(t, "printf 'boom\\nmore boom\\n' >&2\nexit 1\n")
 
 	var buf bytes.Buffer
-	got := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, &buf)
+	got := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, grantAllPermission, &buf)
 	if got != AnswerProbeUnresolved {
 		t.Fatalf("probe = %q, want AnswerProbeUnresolved", got)
 	}
@@ -339,7 +479,7 @@ exit 1
 `)
 
 	var buf bytes.Buffer
-	got := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, &buf)
+	got := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, grantAllPermission, &buf)
 	if got != AnswerProbeUnresolved {
 		t.Fatalf("probe = %q, want AnswerProbeUnresolved", got)
 	}
@@ -353,7 +493,7 @@ func TestProbeEscalationAnswer_MalformedJSON_Unresolved(t *testing.T) {
 	installFakeGH(t, "printf 'not valid json'\n")
 
 	var buf bytes.Buffer
-	got := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, &buf)
+	got := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, grantAllPermission, &buf)
 	if got != AnswerProbeUnresolved {
 		t.Fatalf("probe = %q, want AnswerProbeUnresolved", got)
 	}
@@ -382,7 +522,7 @@ printf '%s'
 `, restCommentsJSON(testNonce)))
 
 	var buf bytes.Buffer
-	got := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, &buf)
+	got := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, grantAllPermission, &buf)
 	if got != AnswerProbeAnswered {
 		t.Fatalf("probe = %q, want AnswerProbeAnswered (stderr noise must not corrupt the decoded stdout JSON)", got)
 	}
@@ -397,7 +537,7 @@ func TestProbeEscalationAnswer_OversizedPaginatePayload_Unresolved(t *testing.T)
 	installFakeGH(t, fmt.Sprintf("yes x | tr -d '\\n' | head -c %d\n", maxProbeStdoutBytes+1000))
 
 	var buf bytes.Buffer
-	got := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, &buf)
+	got := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, grantAllPermission, &buf)
 	if got != AnswerProbeUnresolved {
 		t.Fatalf("probe = %q, want AnswerProbeUnresolved (oversized --paginate payload must fail closed)", got)
 	}
@@ -422,7 +562,7 @@ printf '%s'
 	var buf bytes.Buffer
 	budget := &answerProbeBudget{}
 	for i := 0; i < maxAnswerProbes+extra; i++ {
-		got := probeEscalationAnswer("o/r", 1000+i, 100, testNonce, budget, &buf)
+		got := probeEscalationAnswer("o/r", 1000+i, 100, testNonce, budget, grantAllPermission, &buf)
 		want := AnswerProbeAnswered
 		if i >= maxAnswerProbes {
 			want = AnswerProbeUnresolved
@@ -471,12 +611,30 @@ func TestResolveAnswerProbes_OnlyProbesInputNeededTickets(t *testing.T) {
 	}
 }
 
+// permissionRoutingGhScript builds a fake `gh` shell script that discriminates
+// the write-permission endpoint (`.../collaborators/<login>/permission`) from
+// every other call (routed to commentsBody, e.g. the comments-thread probe),
+// so a single fixture can serve resolveAnswerProbes' real, unmocked
+// permission-cache wiring end to end (#882) -- unlike probeEscalationAnswer's
+// own direct-call tests above, which inject grantAllPermission and never
+// reach a real permission gh call at all.
+func permissionRoutingGhScript(commentsBody, permission string) string {
+	return fmt.Sprintf(`
+case "$*" in
+  */permission) printf '{"permission":%q}' ;;
+  *) printf '%s' ;;
+esac
+`, permission, commentsBody)
+}
+
 // TestResolveAnswerProbes_UsesMatchedPlanAnchorFields covers the plan index
 // wiring end to end: a matched Plan's EscalationCommentID/EscalationNonce
 // are threaded into the REST probe, and a real gh call is made when the
-// anchor is well-formed.
+// anchor is well-formed. The qualifying commenter (octocat) is additionally
+// seeded with write permission via permissionRoutingGhScript (#882): without
+// it, the real (unmocked) permission gate would deny the answer.
 func TestResolveAnswerProbes_UsesMatchedPlanAnchorFields(t *testing.T) {
-	installFakeGH(t, fmt.Sprintf("printf '%s'\n", restCommentsJSON(testNonce)))
+	installFakeGH(t, permissionRoutingGhScript(restCommentsJSON(testNonce), "write"))
 
 	tickets := []Ticket{
 		{Repo: "o/r", Number: 2, Labels: []string{"Input Needed"}},
@@ -487,5 +645,88 @@ func TestResolveAnswerProbes_UsesMatchedPlanAnchorFields(t *testing.T) {
 	got := resolveAnswerProbes(tickets, planByTicket, nil)
 	if got[planKey("o/r", 2)] != AnswerProbeAnswered {
 		t.Errorf("probe = %q, want AnswerProbeAnswered", got[planKey("o/r", 2)])
+	}
+}
+
+// -- #882: resolveAnswerProbes' real per-pass permission-cache wiring -------
+
+// TestResolveAnswerProbes_PermissionCacheDedupesSameLoginAcrossTickets covers
+// the Test Strategy table's resolveAnswerProbes cache/dedup row: one login
+// (octocat) answering two different tickets' escalations in the SAME repo,
+// within a single resolveAnswerProbes pass, must cost exactly one
+// write-permission gh call, not two -- the plan's Assumptions ("cache is
+// constructed inside resolveAnswerProbes").
+func TestResolveAnswerProbes_PermissionCacheDedupesSameLoginAcrossTickets(t *testing.T) {
+	dir := t.TempDir()
+	permCountFile := filepath.Join(dir, "perm.count")
+	script := fmt.Sprintf(`
+case "$*" in
+  */permission)
+    printf 'x' >> %q
+    printf '{"permission":"write"}'
+    ;;
+  *)
+    printf '%s'
+    ;;
+esac
+`, permCountFile, restCommentsJSON(testNonce))
+	installFakeGH(t, script)
+
+	tickets := []Ticket{
+		{Repo: "o/r", Number: 1, Labels: []string{"Input Needed"}},
+		{Repo: "o/r", Number: 2, Labels: []string{"Input Needed"}},
+	}
+	planByTicket := map[string]*Plan{
+		planKey("o/r", 1): {Repo: "o/r", TicketID: 1, EscalationCommentID: 100, EscalationNonce: testNonce},
+		planKey("o/r", 2): {Repo: "o/r", TicketID: 2, EscalationCommentID: 100, EscalationNonce: testNonce},
+	}
+	got := resolveAnswerProbes(tickets, planByTicket, nil)
+	if got[planKey("o/r", 1)] != AnswerProbeAnswered || got[planKey("o/r", 2)] != AnswerProbeAnswered {
+		t.Fatalf("got = %+v, want both tickets AnswerProbeAnswered", got)
+	}
+
+	data, err := os.ReadFile(permCountFile)
+	if err != nil {
+		t.Fatalf("reading permission call-count file: %v", err)
+	}
+	if len(data) != 1 {
+		t.Fatalf("write-permission gh calls = %d, want exactly 1 (same repo+login answering two tickets in one pass must dedupe, #882)", len(data))
+	}
+}
+
+// TestResolveAnswerProbes_PermissionCacheDoesNotPersistAcrossPasses covers
+// the plan's Assumptions: the cache is constructed inside resolveAnswerProbes
+// and dies with the pass -- never persisted, never carried across passes.
+// Two independent resolveAnswerProbes calls for the same ticket/login must
+// each make their own gh call.
+func TestResolveAnswerProbes_PermissionCacheDoesNotPersistAcrossPasses(t *testing.T) {
+	dir := t.TempDir()
+	permCountFile := filepath.Join(dir, "perm.count")
+	script := fmt.Sprintf(`
+case "$*" in
+  */permission)
+    printf 'x' >> %q
+    printf '{"permission":"write"}'
+    ;;
+  *)
+    printf '%s'
+    ;;
+esac
+`, permCountFile, restCommentsJSON(testNonce))
+	installFakeGH(t, script)
+
+	tickets := []Ticket{{Repo: "o/r", Number: 1, Labels: []string{"Input Needed"}}}
+	planByTicket := map[string]*Plan{
+		planKey("o/r", 1): {Repo: "o/r", TicketID: 1, EscalationCommentID: 100, EscalationNonce: testNonce},
+	}
+	resolveAnswerProbes(tickets, planByTicket, nil)
+	resolveAnswerProbes(tickets, planByTicket, nil)
+
+	data, err := os.ReadFile(permCountFile)
+	if err != nil {
+		t.Fatalf("reading permission call-count file: %v", err)
+	}
+	if len(data) != 2 {
+		t.Fatalf("write-permission gh calls across two independent resolveAnswerProbes passes = %d, want exactly 2 (the cache must not persist across passes, #882)", len(data))
 	}
 }

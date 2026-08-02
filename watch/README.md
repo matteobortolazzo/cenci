@@ -673,12 +673,31 @@ misread as a second anchor). A comment counts as a human answer iff it is positi
 after that verified anchor, its own body — also blockquote-stripped — contains no
 `<!-- cenci-` marker, its author login is neither `*[bot]` nor `app/*` and its
 `user.type` is not `"Bot"` (the REST API's first-class bot flag, replacing the
-pre-#849 login-shape-only heuristic), and its author association is one of `OWNER`,
-`MEMBER`, or `COLLABORATOR`. That last check is load-bearing on a public or
-wide-collaborator repo: without it, any GitHub user able to comment on an
-`Input Needed` issue could trigger an unattended `implement` planning session with
-broad tool access — `CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, and `NONE` associations
-are deliberately never authorized. See [Cenci-authored comment markers in
+pre-#849 login-shape-only heuristic), its author association is one of `OWNER`,
+`MEMBER`, or `COLLABORATOR`, AND (#882) the replying login currently holds `admin`
+or `write` permission on this repository, resolved via the authoritative
+`gh api repos/<owner>/<repo>/collaborators/<login>/permission` endpoint (its
+top-level `permission` field is the sole accepted signal — `role_name` is never
+consulted, since custom organization roles would make it an open set). The
+association check alone is now a coarse, cheap prefilter — load-bearing only in
+that it gates whether the write-permission probe is even called, never final
+authorization on its own: `CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, and `NONE`
+associations are still never authorized, but an `OWNER`/`MEMBER`/`COLLABORATOR`
+association no longer suffices by itself either. A read/triage collaborator, a
+removed collaborator, or an organization member without this repository's current
+write access is denied even with a qualifying association — this closes the gap
+where `MEMBER` meant organization membership without repo access, and
+`COLLABORATOR` association did not itself prove current `push`/`maintain`/`admin`.
+Permission is resolved fresh from the authoritative endpoint every pass, cached
+only within that one pass (deduplicating repeat answers from the same login,
+bounded per repository), and never carried across passes — a login's earlier
+authorization is never treated as still current. Any permission-probe failure —
+an API error, a timeout, truncated output, malformed JSON, a missing `permission`
+field, or an unrecognized value — fails closed with its own distinct reason (see
+the reason list below), exactly like an unresolved comments probe. This requires
+the dispatch daemon's own `gh` token to itself have push access to every enrolled
+repository, since the collaborator-permission endpoint requires it. See
+[Cenci-authored comment markers in
 `watch/docs/dispatch-reconcile.md`](docs/dispatch-reconcile.md#cenci-authored-comment-markers)
 for why every comment cenci posts must carry one of these markers.
 
@@ -725,6 +744,26 @@ human-triggered `/cenci:implement <id>` run (see `## Repair Escalation Anchor` i
 when the matched plan's `status` isn't `awaiting-input` (e.g. it was already
 finalized).
 
+**Write-permission reasons (#882).** Once a candidate reply passes the cheap
+association prefilter, its author's CURRENT repository write permission must also
+positively resolve `admin` or `write`; every other outcome fails closed with its
+own distinct reason, never collapsed into a single generic denial: `replying login
+lacks current repository write permission` (the endpoint positively returned
+`read`, `triage`, or `none`), `replying login shape invalid` (the login failed
+GitHub's own login grammar before ever reaching the endpoint — a path-injection
+guard), `write-permission probe failed` (the `gh api .../permission` call itself
+errored), `write-permission probe timed out`, `write-permission probe response
+truncated` (the response exceeded its bounded stdout cap), `write-permission probe
+response malformed` (undecodable JSON), `write-permission probe response missing
+permission field` (e.g. a response carrying only `role_name`, never consulted as a
+substitute), `write-permission probe returned unrecognized value` (a future/unknown
+GitHub permission value, or the internal default-deny case), and `write-permission
+lookup cap reached` (the per-pass, per-repository lookup budget was exhausted).
+When several post-anchor candidates produce different non-authorized outcomes, an
+unresolved/error class is reported over a positively-denied one — both still deny
+resume, only the operator-facing reason differs, since an unreliable verdict is not
+the same as a resolved deny.
+
 **Bot detection now has a real flag, not just a login-shape guess** (#849): the REST
 comments API's `user.type == "Bot"` field is checked alongside the pre-existing
 `*[bot]`/`app/*` login-shape heuristic (`gh issue view --json comments`, the
@@ -762,10 +801,12 @@ that hasn't itself opted into lean planning.
 (plus the existing assignee-ownership gate) as sufficient authorization to
 launch an unattended planning session whose primary input is the ticket's own
 body/comment text. Unlike the [escalation auto-resume](#escalation-auto-resume)
-path (#827), which requires an authorized `authorAssociation` on the human
-reply before resuming, there is no author-authorization check on the issue
-text a planning pickup consumes. Do not enable this flag on a repo that
-accepts externally-authored issues from untrusted parties.
+path (#827/#882), which requires the human reply's author to currently hold
+`admin` or `write` repository permission (resolved via the authoritative
+collaborator-permission endpoint, not merely an `authorAssociation` value read
+off the comment), there is no author-authorization check on the issue text a
+planning pickup consumes. Do not enable this flag on a repo that accepts
+externally-authored issues from untrusted parties.
 
 **Launch shapes.** A planning pickup launches with the bare ticket number
 (`cenci run implement <n>`) since there is no plan file yet for the implement

@@ -144,6 +144,24 @@ const (
 	reasonAnswerAnchorMismatch = "escalation anchor comment not found or nonce mismatch"
 )
 
+// Write-permission gate skip reasons (#882): resumeGateSkip's dedicated
+// cases for every AnswerProbe permission-failure class, each
+// content-distinct from every other reason in this file and from each other
+// (#446/#598) -- a regression collapsing any two of these into the same
+// string must be caught by an exact-string assertion, not a bare
+// non-empty check.
+const (
+	reasonAnswerUnauthorized           = "replying login lacks current repository write permission"
+	reasonAnswerPermissionLoginInvalid = "replying login shape invalid"
+	reasonAnswerPermissionAPIError     = "write-permission probe failed"
+	reasonAnswerPermissionTimeout      = "write-permission probe timed out"
+	reasonAnswerPermissionTruncated    = "write-permission probe response truncated"
+	reasonAnswerPermissionMalformed    = "write-permission probe response malformed"
+	reasonAnswerPermissionMissingField = "write-permission probe response missing permission field"
+	reasonAnswerPermissionUnknownValue = "write-permission probe returned unrecognized value"
+	reasonAnswerPermissionCapExhausted = "write-permission lookup cap reached"
+)
+
 // Open-PR-inventory-completeness gate skip reasons (#881).
 // reasonOpenPRProbeUnknown is deliberately distinct from every other reason
 // here, for the same reason reasonStageProbeUnknown/reasonMainSyncUnknown/
@@ -176,7 +194,14 @@ type Inputs struct {
 	// resolveAnswerProbes (resume.go) before Decide is ever called -- all
 	// I/O for the probe happens in RunOnce, never inside this gate chain
 	// (Decide's own purity contract). A ticket not present in this map (any
-	// non-`Input Needed` ticket) is simply never a resume candidate.
+	// non-`Input Needed` ticket) is simply never a resume candidate. As of
+	// #882, a qualifying comment's author association alone is no longer
+	// sufficient: resolveAnswerProbes also resolves the replying login's
+	// CURRENT repository write permission (permission.go) before this map
+	// can ever record AnswerProbeAnswered -- every permission-failure class
+	// (denied, invalid login, API error, timeout, truncated, malformed,
+	// missing field, unrecognized value, per-repo cap exhausted) has its own
+	// distinct AnswerProbe value and resumeGateSkip reason.
 	Answers map[string]AnswerProbe
 
 	// RepoAutonomy maps repo -> the resolved RepoAutonomy for that repo this
@@ -857,9 +882,27 @@ func resumeGateSkip(t Ticket, probe AnswerProbe) (string, bool) {
 		return reasonAnswerAnchorUnset, true
 	case AnswerProbeAnchorMismatch:
 		return reasonAnswerAnchorMismatch, true
+	case AnswerProbeUnauthorized:
+		return reasonAnswerUnauthorized, true
+	case AnswerProbeLoginInvalid:
+		return reasonAnswerPermissionLoginInvalid, true
+	case AnswerProbePermissionAPIError:
+		return reasonAnswerPermissionAPIError, true
+	case AnswerProbePermissionTimeout:
+		return reasonAnswerPermissionTimeout, true
+	case AnswerProbePermissionTruncated:
+		return reasonAnswerPermissionTruncated, true
+	case AnswerProbePermissionMalformed:
+		return reasonAnswerPermissionMalformed, true
+	case AnswerProbePermissionMissingField:
+		return reasonAnswerPermissionMissingField, true
+	case AnswerProbePermissionUnknownValue:
+		return reasonAnswerPermissionUnknownValue, true
+	case AnswerProbePermissionCapExhausted:
+		return reasonAnswerPermissionCapExhausted, true
 	default:
 		// Unrecognized/missing AnswerProbe value: default-deny with its own
-		// distinct reason (not any of the four known reasons above) so a
+		// distinct reason (not any of the known reasons above) so a
 		// regression collapsing this branch is caught by assertion, per
 		// #446/#598.
 		return reasonAnswerProbeUnknown, true

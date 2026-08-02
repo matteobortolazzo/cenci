@@ -987,6 +987,63 @@ func TestDecideResumeGate(t *testing.T) {
 			wantReason: reasonAnswerProbeUnknown,
 		},
 		{
+			// #882: the replying login was positively denied current
+			// repository write permission (read/triage/none) -- distinct
+			// from every anchor/probe-unresolved reason above.
+			name:       "probe unauthorized (positively denied write permission) skips with its own distinct reason (#882)",
+			mutate:     func(in *Inputs) { in.Answers["o/r#42"] = AnswerProbeUnauthorized },
+			wantAction: ActionSkip,
+			wantReason: reasonAnswerUnauthorized,
+		},
+		{
+			name:       "probe permission login_invalid skips with its own distinct reason (#882)",
+			mutate:     func(in *Inputs) { in.Answers["o/r#42"] = AnswerProbeLoginInvalid },
+			wantAction: ActionSkip,
+			wantReason: reasonAnswerPermissionLoginInvalid,
+		},
+		{
+			name:       "probe permission_api_error skips with its own distinct reason (#882)",
+			mutate:     func(in *Inputs) { in.Answers["o/r#42"] = AnswerProbePermissionAPIError },
+			wantAction: ActionSkip,
+			wantReason: reasonAnswerPermissionAPIError,
+		},
+		{
+			name:       "probe permission_timeout skips with its own distinct reason (#882)",
+			mutate:     func(in *Inputs) { in.Answers["o/r#42"] = AnswerProbePermissionTimeout },
+			wantAction: ActionSkip,
+			wantReason: reasonAnswerPermissionTimeout,
+		},
+		{
+			name:       "probe permission_truncated skips with its own distinct reason (#882)",
+			mutate:     func(in *Inputs) { in.Answers["o/r#42"] = AnswerProbePermissionTruncated },
+			wantAction: ActionSkip,
+			wantReason: reasonAnswerPermissionTruncated,
+		},
+		{
+			name:       "probe permission_malformed skips with its own distinct reason (#882)",
+			mutate:     func(in *Inputs) { in.Answers["o/r#42"] = AnswerProbePermissionMalformed },
+			wantAction: ActionSkip,
+			wantReason: reasonAnswerPermissionMalformed,
+		},
+		{
+			name:       "probe permission_missing_field skips with its own distinct reason (#882)",
+			mutate:     func(in *Inputs) { in.Answers["o/r#42"] = AnswerProbePermissionMissingField },
+			wantAction: ActionSkip,
+			wantReason: reasonAnswerPermissionMissingField,
+		},
+		{
+			name:       "probe permission_unknown_value skips with its own distinct reason (#882)",
+			mutate:     func(in *Inputs) { in.Answers["o/r#42"] = AnswerProbePermissionUnknownValue },
+			wantAction: ActionSkip,
+			wantReason: reasonAnswerPermissionUnknownValue,
+		},
+		{
+			name:       "probe permission_cap_exhausted skips with its own distinct reason (#882)",
+			mutate:     func(in *Inputs) { in.Answers["o/r#42"] = AnswerProbePermissionCapExhausted },
+			wantAction: ActionSkip,
+			wantReason: reasonAnswerPermissionCapExhausted,
+		},
+		{
 			name:       "draft already status: planned (not awaiting-input) skips with a distinct reason",
 			mutate:     func(in *Inputs) { in.Plans[0].Status = "planned" },
 			wantAction: ActionSkip,
@@ -1115,6 +1172,44 @@ func TestDecideResumeGate_AnchorReasonsAreContentDistinct(t *testing.T) {
 	}
 	if gotMismatch != reasonAnswerAnchorMismatch {
 		t.Errorf("AnswerProbeAnchorMismatch reason = %q, want %q", gotMismatch, reasonAnswerAnchorMismatch)
+	}
+}
+
+// TestDecideResumeGate_PermissionReasonsAreAllPairwiseDistinct pins #446/#598
+// for #882's nine new permission-failure skip reasons: every value must
+// resolve to its own exact reason string, never collapsing into a sibling
+// permission-failure reason, an anchor reason, or the shared switch-default
+// reasonAnswerProbeUnknown.
+func TestDecideResumeGate_PermissionReasonsAreAllPairwiseDistinct(t *testing.T) {
+	probes := []AnswerProbe{
+		AnswerProbeWaiting,
+		AnswerProbeUnresolved,
+		AnswerProbeAnchorUnset,
+		AnswerProbeAnchorMismatch,
+		AnswerProbeUnauthorized,
+		AnswerProbeLoginInvalid,
+		AnswerProbePermissionAPIError,
+		AnswerProbePermissionTimeout,
+		AnswerProbePermissionTruncated,
+		AnswerProbePermissionMalformed,
+		AnswerProbePermissionMissingField,
+		AnswerProbePermissionUnknownValue,
+		AnswerProbePermissionCapExhausted,
+		AnswerProbe("bogus-unrecognized-value"),
+	}
+
+	seen := make(map[string]AnswerProbe, len(probes))
+	for _, p := range probes {
+		in := resumeInputs()
+		in.Answers["o/r#42"] = p
+		reason, gated := resumeGateSkip(in.Tickets[0], p)
+		if !gated {
+			t.Fatalf("resumeGateSkip(%q) = (%q, %v), want gated=true for a non-answered probe", p, reason, gated)
+		}
+		if prior, ok := seen[reason]; ok {
+			t.Fatalf("AnswerProbe values %q and %q both produced the identical reason %q, want pairwise-distinct reasons (#446/#598)", prior, p, reason)
+		}
+		seen[reason] = p
 	}
 }
 
@@ -2111,6 +2206,7 @@ func TestDecidePlanInventoryGate_OtherRepoUnaffected(t *testing.T) {
 
 	assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
 }
+
 // TestDecideOpenPRGate_OrderingSitsImmediatelyBeforeHasOpenPRCheck proves the
 // gate's placement (Files to Modify: "immediately before the existing `if
 // t.HasOpenPR` check"): a non-complete probe reports its own reason even

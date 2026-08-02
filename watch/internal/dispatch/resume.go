@@ -101,6 +101,11 @@ type restIssueComment struct {
 func resolveAnswerProbes(tickets []Ticket, planByTicket map[string]*Plan, out io.Writer) map[string]AnswerProbe {
 	answers := make(map[string]AnswerProbe)
 	budget := &answerProbeBudget{}
+	// permCache is the per-pass write-permission cache (#882 plan's
+	// Assumptions): constructed once here, threaded into every probe this
+	// pass via permOf below, and discarded when resolveAnswerProbes returns
+	// -- never persisted, never carried into a future pass.
+	permCache := newPermissionCache()
 	for _, t := range tickets {
 		if !hasLabel(t.Labels, labelInputNeeded) {
 			continue
@@ -111,7 +116,11 @@ func resolveAnswerProbes(tickets []Ticket, planByTicket map[string]*Plan, out io
 			anchorID = p.EscalationCommentID
 			nonce = p.EscalationNonce
 		}
-		answers[planKey(t.Repo, t.Number)] = probeEscalationAnswer(t.Repo, t.Number, anchorID, nonce, budget, out)
+		repo := t.Repo
+		permOf := func(login string) WritePermission {
+			return permCache.resolveWritePermission(repo, login, out)
+		}
+		answers[planKey(t.Repo, t.Number)] = probeEscalationAnswer(t.Repo, t.Number, anchorID, nonce, budget, permOf, out)
 	}
 	return answers
 }
@@ -152,7 +161,14 @@ func validAnchor(anchorID int64, nonce string) bool {
 // Per-pass call budget (#825 review fix #1 precedent): past maxAnswerProbes,
 // no gh call is made at all and the cap-hit line is logged exactly once via
 // budget.logged.
-func probeEscalationAnswer(repo string, number int, anchorID int64, nonce string, budget *answerProbeBudget, out io.Writer) AnswerProbe {
+//
+// permOf (#882) resolves a candidate commenter's CURRENT repository write
+// permission -- the impure permission probe/cache (permission.go) injected
+// as a seam, mirroring ReadPlans' injected commitsBehind closure
+// (dispatch.go:193-210): probeEscalationAnswer/classifyComments stay free of
+// owning the permission cache's lifetime themselves, since it is
+// resolveAnswerProbes' per-pass construction that owns it.
+func probeEscalationAnswer(repo string, number int, anchorID int64, nonce string, budget *answerProbeBudget, permOf func(string) WritePermission, out io.Writer) AnswerProbe {
 	if !validAnchor(anchorID, nonce) {
 		return AnswerProbeAnchorUnset
 	}
@@ -195,7 +211,7 @@ func probeEscalationAnswer(repo string, number int, anchorID int64, nonce string
 		logf(out, "dispatch: escalation answer probe failed for %s#%d: %v (%s)\n", repo, number, err, detail)
 		return AnswerProbeUnresolved
 	}
-	return classifyComments(comments, anchorID, nonce)
+	return classifyComments(comments, anchorID, nonce, permOf)
 }
 
 // cappedBuffer is an io.Writer that stops accumulating bytes once buf would
@@ -285,8 +301,25 @@ func truncateDetail(s string, max int) string {
 // anchor is now identified by ID, but the answer *filter* keeps it and adds
 // the REST-only Type field, AC1/AC4), and carrying an authorized
 // authorAssociation (isAuthorizedAssociation -- OWNER/MEMBER/COLLABORATOR
-// only, AC4). The first such comment is AnswerProbeAnswered; if none
-// qualifies, AnswerProbeWaiting.
+// only, AC4). Unlike pre-#882, an authorized association alone no longer
+// answers: it is a coarse, cheap prefilter that only gates whether permOf is
+// even called (a bot/marker/wrong-association comment never reaches permOf
+// at all, per the plan's Risks section) -- the candidate must ALSO be
+// positively granted CURRENT repository write permission (permOf, #882) for
+// the comment to count as an answer.
+//
+// The scan does NOT stop at the first candidate that passes the cheap
+// prefilters (#882 plan Assumptions): it continues past a permission-denied
+// or permission-unresolved commenter, so a genuinely authorized reply later
+// in the thread still resumes. The first candidate permOf grants is
+// immediately AnswerProbeAnswered. If none is granted, the reported verdict
+// follows a precedence rule (watch/docs/error-handling.md #850's "unreliable
+// verdict is not the same as resolved deny"): an unresolved/error
+// permission-probe class outranks a positively-denied class for the
+// *reported* reason, regardless of scan order -- both deny dispatch either
+// way, only the operator-facing reason differs. If no candidate reaches the
+// permission seam at all (every one filtered out by the cheap checks),
+// AnswerProbeWaiting.
 //
 // Blockquote stripping (stripBlockquoteLines, applied by both isCenciAuthored
 // and the anchor's own marker check) is load-bearing for the same reason it
@@ -294,7 +327,7 @@ func truncateDetail(s string, max int) string {
 // comment copies the marker verbatim into their own reply's `>`-quoted
 // lines, and a raw (unstripped) scan would misclassify that quote-reply
 // (AC3).
-func classifyComments(comments []restIssueComment, anchorID int64, nonce string) AnswerProbe {
+func classifyComments(comments []restIssueComment, anchorID int64, nonce string, permOf func(string) WritePermission) AnswerProbe {
 	if !validAnchor(anchorID, nonce) {
 		return AnswerProbeAnchorUnset
 	}
@@ -319,6 +352,8 @@ func classifyComments(comments []restIssueComment, anchorID int64, nonce string)
 		return AnswerProbeAnchorMismatch
 	}
 
+	deniedSeen := false
+	var unresolvedVerdict AnswerProbe
 	for i := anchorIdx + 1; i < len(sorted); i++ {
 		c := sorted[i]
 		if isCenciAuthored(c.Body) ||
@@ -326,7 +361,30 @@ func classifyComments(comments []restIssueComment, anchorID int64, nonce string)
 			!isAuthorizedAssociation(c.AuthorAssociation) {
 			continue
 		}
-		return AnswerProbeAnswered
+		perm := permOf(c.Author.Login)
+		if perm == WritePermissionGranted {
+			return AnswerProbeAnswered
+		}
+		probe := writePermissionAnswerProbe(perm)
+		if probe == AnswerProbeUnauthorized {
+			deniedSeen = true
+			continue
+		}
+		// Any non-granted, non-denied verdict is an unresolved/error class
+		// (login_invalid, api_error, timeout, truncated, malformed,
+		// missing_field, unknown_value, cap_exhausted) -- the first one
+		// encountered wins the reported reason, per the precedence rule
+		// above; scanning continues regardless, since a later candidate
+		// could still be genuinely granted.
+		if unresolvedVerdict == "" {
+			unresolvedVerdict = probe
+		}
+	}
+	if unresolvedVerdict != "" {
+		return unresolvedVerdict
+	}
+	if deniedSeen {
+		return AnswerProbeUnauthorized
 	}
 	return AnswerProbeWaiting
 }
@@ -343,16 +401,20 @@ func isBotLogin(login string) bool {
 }
 
 // isAuthorizedAssociation reports whether assoc -- a comment's
-// `author_association` value -- is trusted to answer an escalation on
-// behalf of the repo (#827 review fix #1): `OWNER`, `MEMBER`, or
-// `COLLABORATOR`. Deliberately excludes `CONTRIBUTOR`,
-// `FIRST_TIME_CONTRIBUTOR`, `NONE`, and any other/unrecognized value --
-// those are exactly the untrusted arbitrary-commenter case this check
-// exists to close: on a public or wide-collaborator repo, any GitHub user
-// can comment on an `Input Needed` issue, and without this check a login
-// that merely avoids the bot-shape/cenci-marker exclusions would be enough
-// to trigger an unattended `implement` planning session with broad tool
-// access.
+// `author_association` value -- is `OWNER`, `MEMBER`, or `COLLABORATOR`
+// (#827 review fix #1). This is a coarse prefilter, never final
+// authorization (#882): it only gates whether classifyComments even calls
+// the write-permission seam (permOf) for this candidate -- a candidate
+// passing this check must ALSO be positively granted CURRENT repository
+// write permission (`admin` or `write`, resolved via the authoritative
+// collaborator-permission endpoint) before the comment counts as an answer.
+// Deliberately excludes `CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, `NONE`, and
+// any other/unrecognized value from ever reaching the permission seam at
+// all -- those are exactly the untrusted arbitrary-commenter case this check
+// exists to filter out cheaply, before spending a gh call: on a public or
+// wide-collaborator repo, any GitHub user can comment on an `Input Needed`
+// issue, and without this check a login that merely avoids the
+// bot-shape/cenci-marker exclusions would reach the permission probe at all.
 func isAuthorizedAssociation(assoc string) bool {
 	switch assoc {
 	case "OWNER", "MEMBER", "COLLABORATOR":

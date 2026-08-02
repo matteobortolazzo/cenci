@@ -1160,6 +1160,78 @@ func TestProbeRepoAutonomies_DryRunAndRealPassAgreeUsingSameFreshRef(t *testing.
 	}
 }
 
+// -- #882 AC7: a permission-denied or permission-unresolved resume answer
+// spawns nothing and mutates no labels -------------------------------------
+
+// TestApplyDispatchResumeUnauthorizedProbe_NeverSpawnsOrClaims covers AC7's
+// "tests prove no label mutation or process launch occurs for every
+// unauthorized/unknown path" requirement for the positively-denied class
+// (AnswerProbeUnauthorized): the resolved answerer lacks current repository
+// write permission, so the resume gate must skip before applyDispatch's
+// spawn loop -- zero runFn invocations, zero label mutations, quota
+// untouched.
+func TestApplyDispatchResumeUnauthorizedProbe_NeverSpawnsOrClaims(t *testing.T) {
+	stubRunFn(t, func(run.Opts, run.Controller) error {
+		t.Fatal("a permission-denied resume answer must never spawn")
+		return nil
+	})
+
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	mut := &fakeMutator{}
+	prior := 0
+	var buf bytes.Buffer
+
+	deps := resumeDispatchDeps(now)
+	deps.Answers["o/r#42"] = AnswerProbeUnauthorized
+
+	decisions, err := applyDispatch(testConfig(), deps, fakeController{}, mut, false, &buf, &prior)
+	if err != nil {
+		t.Fatalf("applyDispatch returned unexpected error: %v", err)
+	}
+	if len(decisions) != 1 || decisions[0].Action != ActionSkip || decisions[0].Resume {
+		t.Fatalf("decisions = %+v, want a single gated skip with Resume=false", decisions)
+	}
+	if len(mut.labelEdits) != 0 {
+		t.Errorf("expected zero label mutations, got %+v", mut.labelEdits)
+	}
+	if prior != 0 {
+		t.Errorf("prior = %d, want 0 (nothing dispatched)", prior)
+	}
+}
+
+// TestApplyDispatchResumePermissionProbeUnresolved_NeverSpawnsOrClaims covers
+// AC7's other half: an unresolved permission-probe class (here, a permission
+// API error) must gate identically to a positive denial -- zero runFn
+// invocations, zero label mutations, quota untouched.
+func TestApplyDispatchResumePermissionProbeUnresolved_NeverSpawnsOrClaims(t *testing.T) {
+	stubRunFn(t, func(run.Opts, run.Controller) error {
+		t.Fatal("an unresolved permission probe must never spawn a resume")
+		return nil
+	})
+
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	mut := &fakeMutator{}
+	prior := 0
+	var buf bytes.Buffer
+
+	deps := resumeDispatchDeps(now)
+	deps.Answers["o/r#42"] = AnswerProbePermissionAPIError
+
+	decisions, err := applyDispatch(testConfig(), deps, fakeController{}, mut, false, &buf, &prior)
+	if err != nil {
+		t.Fatalf("applyDispatch returned unexpected error: %v", err)
+	}
+	if len(decisions) != 1 || decisions[0].Action != ActionSkip || decisions[0].Resume {
+		t.Fatalf("decisions = %+v, want a single gated skip with Resume=false", decisions)
+	}
+	if len(mut.labelEdits) != 0 {
+		t.Errorf("expected zero label mutations, got %+v", mut.labelEdits)
+	}
+	if prior != 0 {
+		t.Errorf("prior = %d, want 0 (nothing dispatched)", prior)
+	}
+}
+
 // -- #881 AC6: an incomplete open-PR inventory spawns nothing, for both an
 // ordinary Planned pickup and a Refined planning pickup ---------------------
 

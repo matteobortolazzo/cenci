@@ -173,6 +173,14 @@ func TestAutonomousChain_PositiveEndToEnd(t *testing.T) {
 	}
 
 	// -- D. Authorized answer resumes and finalizes the plan -----------------
+	// #882: author_association alone (OWNER, seeded below) is no longer
+	// sufficient authorization -- octocat must also carry a current
+	// repository write permission, resolved through the real write-permission
+	// probe route (chainCollaboratorPermission). Without this seed, the
+	// gate would deny the resume once #882 lands (the plan's Implementation
+	// Order step 5: land this fixture/seed before the gate, not after, or
+	// this existing phase D would fail for the wrong reason).
+	h.seedPermission("octocat", "write")
 	h.addIssueComment(101, "octocat", "User", "OWNER", "Go with approach A.")
 
 	decisions, _ = chainRunOnce(t, cfg, mut, false)
@@ -570,5 +578,55 @@ func TestAutonomousChain_FailedMainSyncStopsDependentPickupAtRepoGate(t *testing
 	}
 	if strings.Contains(got, "dependency") {
 		t.Fatalf("must not fall through to a dependency-gate reason, got %q", got)
+	}
+}
+
+// -- 6. Permission-denied answerer never resumes (#882) ----------------------
+
+// TestAutonomousChain_PermissionDeniedAnswererNeverResumes covers AC2/AC7:
+// an organization member without CURRENT repository write permission cannot
+// resume an escalated ticket even with an otherwise-trusted author
+// association (MEMBER, the pre-#882 sole gate) -- zero label mutation, zero
+// spawn. Drives resolveAnswerProbes/Decide/applyDispatch through the REAL
+// production code against the fake `gh` write-permission route
+// (chainCollaboratorPermission), never a mock of the gate itself.
+func TestAutonomousChain_PermissionDeniedAnswererNeverResumes(t *testing.T) {
+	h := newChainHarness(t)
+	h.commitAndPushConfig(chainRepoConfigLean)
+
+	h.seedIssue(101, "Escalated child", "body", []string{"Input Needed"}, []string{"octocat"})
+	anchorBody := "Question?\n<!-- cenci-planner-escalation:" + chainEscalationNonce + " -->"
+	anchorID := h.addIssueComment(101, "cenci-bot", "Bot", "", anchorBody)
+
+	writeChainPlan(t, h.local, 101, [][2]string{
+		{"status", "awaiting-input"},
+		{"escalationNonce", chainEscalationNonce},
+		{"escalationCommentId", strconv.FormatInt(anchorID, 10)},
+	})
+
+	// octocat carries MEMBER association (the pre-#882 sole authorization
+	// gate) but is seeded with only "read" repository permission -- an
+	// organization member without repository write access, AC2's exact
+	// scenario -- so the reply must never resume even though it would have
+	// under the old author_association-only rule.
+	h.seedPermission("octocat", "read")
+	h.addIssueComment(101, "octocat", "User", "MEMBER", "Go with approach A.")
+
+	stubRunFn(t, func(run.Opts, run.Controller) error {
+		t.Fatal("a permission-denied answerer must never spawn a resume session")
+		return nil
+	})
+
+	cfg := chainConfig(h)
+	decisions, _ := chainRunOnce(t, cfg, &GHMutator{}, false)
+	decision := decisionFor(t, decisions, 101)
+	if decision.Resume {
+		t.Fatalf("decision = %+v, want Resume=false (permission denied)", decision)
+	}
+	if decision.Reason != reasonAnswerUnauthorized {
+		t.Fatalf("decision reason = %q, want %q", decision.Reason, reasonAnswerUnauthorized)
+	}
+	if is := h.world().Issues[101]; !containsStr(is.Labels, "Input Needed") || containsStr(is.Labels, "Working") {
+		t.Fatalf("labels must remain unchanged (+Input Needed, no Working) after a denied answer, got %v", is.Labels)
 	}
 }

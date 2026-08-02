@@ -155,12 +155,15 @@ type AnswerProbe string
 
 const (
 	// AnswerProbeAnswered means a non-bot comment with no `<!-- cenci-`
-	// marker (blockquote-stripped first) and an authorized authorAssociation
-	// (`OWNER`, `MEMBER`, or `COLLABORATOR` -- #827 review fix #1) was found
-	// positioned after the comment classifyComments verified is the anchor
-	// (#849): anchor identity is the persisted EscalationCommentID/
-	// EscalationNonce pair -- the exact stored comment ID whose
-	// blockquote-stripped body contains the exact
+	// marker (blockquote-stripped first), an authorized authorAssociation
+	// (`OWNER`, `MEMBER`, or `COLLABORATOR` -- #827 review fix #1, now a
+	// coarse prefilter only, never final authorization -- #882) AND a
+	// positively-verified CURRENT repository write permission (`admin` or
+	// `write`, resolved via the authoritative collaborator-permission
+	// endpoint, #882) was found positioned after the comment classifyComments
+	// verified is the anchor (#849): anchor identity is the persisted
+	// EscalationCommentID/EscalationNonce pair -- the exact stored comment ID
+	// whose blockquote-stripped body contains the exact
 	// `escalationAnchorPrefix + nonce` marker, never a content scan for "the
 	// last anchor-shaped comment" -- a human answered the escalation.
 	AnswerProbeAnswered AnswerProbe = "answered"
@@ -169,7 +172,11 @@ const (
 	// every comment after it is either cenci-authored (carries a `<!--
 	// cenci-` marker), bot-authored (`*[bot]`/`app/*` login), or lacks an
 	// authorized authorAssociation (`OWNER`, `MEMBER`, or `COLLABORATOR` --
-	// #827 review fix #1) -- still waiting on a human.
+	// #827 review fix #1, a coarse prefilter only -- #882) -- still waiting
+	// on a human. A candidate that passes the association prefilter but is
+	// then positively denied or left unresolved by the write-permission
+	// check (#882) never lands here -- see AnswerProbeUnauthorized and the
+	// permission-failure classes below.
 	AnswerProbeWaiting AnswerProbe = "waiting"
 	// AnswerProbeUnresolved means the probe itself failed: the `gh api
 	// .../comments --paginate` call errored, its JSON was malformed, or the
@@ -192,6 +199,120 @@ const (
 	// nonce marker (#849) -- fails closed rather than falling back to a
 	// content/last-comment scan.
 	AnswerProbeAnchorMismatch AnswerProbe = "anchor_mismatch"
+
+	// AnswerProbeUnauthorized (#882) means every post-anchor candidate that
+	// passed the cheap association prefilter was positively denied CURRENT
+	// repository write permission (the collaborator-permission endpoint's
+	// top-level `permission` resolved to a recognized but insufficient value
+	// -- "read", "triage", or "none") -- distinct from every unresolved
+	// permission-probe class below, per the plan's Assumptions precedence
+	// rule ("unresolved beats denied" only changes which reason is
+	// *reported* when both occur; a lone positive denial reports this
+	// reason).
+	AnswerProbeUnauthorized AnswerProbe = "permission_denied"
+	// AnswerProbeLoginInvalid (#882) means a candidate's author login failed
+	// GitHub's login grammar (githubLoginPattern, permission.go) -- a
+	// path-injection guard that fails closed before the login is ever
+	// interpolated into the collaborator-permission endpoint path, without
+	// spending a gh call.
+	AnswerProbeLoginInvalid AnswerProbe = "permission_login_invalid"
+	// AnswerProbePermissionAPIError (#882) means the write-permission `gh
+	// api .../collaborators/<login>/permission` call itself failed (a
+	// nonzero exit not otherwise classified as a timeout or output
+	// truncation).
+	AnswerProbePermissionAPIError AnswerProbe = "permission_api_error"
+	// AnswerProbePermissionTimeout (#882) means the write-permission probe
+	// was killed by its own bounded timeout (permissionProbeTimeout,
+	// permission.go) -- distinct from an ordinary API error.
+	AnswerProbePermissionTimeout AnswerProbe = "permission_timeout"
+	// AnswerProbePermissionTruncated (#882) means the write-permission
+	// probe's response exceeded its bounded stdout cap
+	// (maxPermissionStdoutBytes, permission.go) -- fails closed rather than
+	// decoding a truncated/corrupted partial payload.
+	AnswerProbePermissionTruncated AnswerProbe = "permission_truncated"
+	// AnswerProbePermissionMalformed (#882) means the write-permission
+	// probe's response body could not be decoded as JSON at all.
+	AnswerProbePermissionMalformed AnswerProbe = "permission_malformed"
+	// AnswerProbePermissionMissingField (#882) means the write-permission
+	// probe's response decoded as JSON but carried no top-level `permission`
+	// field -- e.g. a response carrying only `role_name` (a custom org
+	// role), which per the plan's Q1 must never be consulted as a
+	// substitute signal.
+	AnswerProbePermissionMissingField AnswerProbe = "permission_missing_field"
+	// AnswerProbePermissionUnknownValue (#882) means the write-permission
+	// probe's `permission` field held a value outside both the accepted
+	// granting set (`admin`/`write`) and the recognized denied set
+	// (`read`/`triage`/`none`) -- a future/unrecognized GitHub permission
+	// value fails closed here rather than being silently granted or folded
+	// into a positive denial. Also the default-deny mapping for a
+	// zero-value/unrecognized WritePermission (writePermissionAnswerProbe,
+	// permission.go).
+	AnswerProbePermissionUnknownValue AnswerProbe = "permission_unknown_value"
+	// AnswerProbePermissionCapExhausted (#882) means the per-pass, per-repo
+	// write-permission lookup budget (maxPermissionLookupsPerRepo,
+	// permission.go) was already spent for this candidate's repo -- fails
+	// closed rather than assuming granted or denied.
+	AnswerProbePermissionCapExhausted AnswerProbe = "permission_cap_exhausted"
+)
+
+// WritePermission classifies the resolved outcome of probing a comment
+// author's CURRENT repository write permission (#882, permission.go's
+// fetchWritePermission/permissionCache) into a closed set, rather than
+// collapsing distinct failure classes (watch/docs/go-gotchas.md #598,
+// watch/docs/error-handling.md #628). Like DependencyState/AnswerProbe above,
+// there is deliberately NO permissive zero-value constant here: a caller that
+// forgets to resolve a login's permission (a zero WritePermission("")) must
+// fail closed via writePermissionAnswerProbe's switch default, not be
+// silently treated as granted or denied.
+type WritePermission string
+
+const (
+	// WritePermissionGranted means the collaborator-permission endpoint's
+	// top-level `permission` field resolved to a value in the accepted
+	// granting set (writePermissionGrantingValues: exactly "admin" or
+	// "write", plan Q1) -- the login currently holds CURRENT repository
+	// write authority.
+	WritePermissionGranted WritePermission = "granted"
+	// WritePermissionDenied means `permission` resolved to a recognized but
+	// insufficient value -- "read", "triage", or "none" (an org member,
+	// removed collaborator, or read/triage collaborator with no current
+	// write access) -- a positive, authoritative denial, distinct from every
+	// unresolved/error class below.
+	WritePermissionDenied WritePermission = "denied"
+	// WritePermissionLoginInvalid means the login failed GitHub's login
+	// grammar (githubLoginPattern) before ever being interpolated into the
+	// endpoint path -- a path-injection guard that fails closed without
+	// spending a gh call.
+	WritePermissionLoginInvalid WritePermission = "login_invalid"
+	// WritePermissionAPIError means the `gh api
+	// .../collaborators/<login>/permission` call itself failed (a nonzero
+	// exit not otherwise classified as a timeout or output truncation).
+	WritePermissionAPIError WritePermission = "api_error"
+	// WritePermissionTimeout means the probe was killed by
+	// permissionProbeTimeout's bound (errGhTimeout) -- distinct from an
+	// ordinary API error.
+	WritePermissionTimeout WritePermission = "timeout"
+	// WritePermissionTruncated means the probe's response exceeded
+	// maxPermissionStdoutBytes (errGhOutputTruncated) -- fails closed rather
+	// than decoding a truncated/corrupted partial payload.
+	WritePermissionTruncated WritePermission = "truncated"
+	// WritePermissionMalformed means the response body could not be decoded
+	// as JSON at all.
+	WritePermissionMalformed WritePermission = "malformed"
+	// WritePermissionMissingField means the response decoded as JSON but
+	// carried no top-level `permission` field -- e.g. a response carrying
+	// only `role_name` (a custom org role), which per the plan's Q1 must
+	// never be consulted as a substitute signal.
+	WritePermissionMissingField WritePermission = "missing_field"
+	// WritePermissionUnknownValue means `permission` held a value outside
+	// both the accepted granting set and the recognized denied set -- a
+	// future/unrecognized GitHub permission value fails closed here rather
+	// than being silently granted or folded into a positive denial.
+	WritePermissionUnknownValue WritePermission = "unknown_value"
+	// WritePermissionCapExhausted means the per-pass, per-repo lookup budget
+	// (maxPermissionLookupsPerRepo) was already spent for this login's repo
+	// -- fails closed rather than assuming granted or denied.
+	WritePermissionCapExhausted WritePermission = "cap_exhausted"
 )
 
 // RepoAutonomy classifies the resolved per-repository `planning.autonomy`
