@@ -1,6 +1,6 @@
 {
   "name": "cenci-watch",
-  "version": "0.42.1",
+  "version": "0.42.2",
   "description": "cenci attention layer: send Codex lifecycle events to the shared cenci daemon.",
   "author": {
     "name": "Matteo Bortolazzo",
