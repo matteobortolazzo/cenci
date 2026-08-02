@@ -487,8 +487,13 @@ Each repo's sync lands in one of six outcomes:
 - **`MainSyncSynced`** — `main` is now caught up with (or was already at or ahead
   of) `origin/main`. Ungated: every ticket in the repo proceeds to the next gate.
 - **`MainSyncFetchFailed`** — `git fetch origin` itself failed (network, auth,
-  unresolvable remote). Left ungated deliberately: transient, and self-heals next
-  pass.
+  unresolvable remote). Left ungated for ordinary `Planned` pickup deliberately:
+  transient, and self-heals next pass. #877 changes this for planning pickup and
+  autonomous re-plan specifically — see [Planning pickup and autonomous
+  re-plan](#planning-pickup-and-autonomous-re-plan)'s "Remote-confirmed
+  authorization" note: a fetch failure this pass holds both with a distinct
+  retryable reason, even though ordinary dispatch in the same repo is
+  unaffected.
 - **`MainSyncNotMain`** — the checkout is currently on a branch other than `main`.
   **Gated.**
 - **`MainSyncDetached`** — the checkout's `HEAD` is detached (on no branch at all).
@@ -523,6 +528,15 @@ gates](#pickup-rules-and-gates)) and the repo-local lean-authorization config re
 decision table matches exactly what the subsequent real (fast-forwarded) pass would
 produce. In every other outcome — already up to date, local `main` ahead, or any
 gated state — `FreshRef` is `HEAD`.
+
+**Authorization-ref parity (#877).** `AutonomyRef` is a separate per-repo value
+from `FreshRef`, resolved once per pass alongside it: non-empty (always the
+fully-qualified `refs/remotes/origin/main`) if and only if this pass's `git fetch
+origin` succeeded, empty on every pre-fetch or fetch-failed path. Unlike
+`FreshRef`, `AutonomyRef` never falls back to local `HEAD` — the repo-local
+lean-authorization config read (below) always reads at `AutonomyRef`, so it is
+identical between a dry-run pass and its subsequent real pass (the fetch runs in
+both; only the merge doesn't), giving the same authorization decision either way.
 
 Gate 2's pipeline-stage check reads the ticket's persisted `cenci pipeline` state
 (`.cenci/pipeline/<id>.json`) and skips only on `finalized` — deliberately not "at or
@@ -789,13 +803,30 @@ covers it.
 **Lean-planning repos only.** `dispatch.planRefined` remains the fleet-wide kill
 switch, but it is no longer sufficient authorization on its own (#851): after the
 local main sync above, dispatch also reads the repo's own committed
-`.cenci/config.json` (via `git show <FreshRef>:.cenci/config.json`, never the
-working tree) and requires the literal value `planning.autonomy == "lean"` before
-treating a planning pickup or autonomous re-plan as authorized. A missing,
-unreadable, malformed, or non-`"lean"` repo config denies both with its own
-distinct skip reason — exactly as if `dispatch.planRefined` were `false` for that
-repo. Enabling `dispatch.planRefined` fleet-wide can no longer override a repo
-that hasn't itself opted into lean planning.
+`.cenci/config.json` at the remote-confirmed `AutonomyRef` (via `git show
+refs/remotes/origin/main:.cenci/config.json`, never local `HEAD` and never the
+working tree) and requires the literal value `planning.autonomy == "lean"`
+before treating a planning pickup or autonomous re-plan as authorized. A
+missing, unreadable, malformed, or non-`"lean"` repo config denies both with its
+own distinct skip reason — exactly as if `dispatch.planRefined` were `false` for
+that repo. Enabling `dispatch.planRefined` fleet-wide can no longer override a
+repo that hasn't itself opted into lean planning.
+
+**Remote-confirmed authorization (#877).** The config read above requires a
+successful `git fetch origin` in *this pass* — it is never read from local
+`HEAD`, and a repo whose local `main` checkout is ahead of `origin/main` with
+unpushed commits cannot use its own unpushed config to grant (or revoke)
+authorization; only the fetched remote object counts. Symmetrically, a lean
+grant that was revoked on the remote (`origin/main`'s config no longer says
+`"lean"`) is honored immediately, even if the local checkout's last successful
+pass still has `"lean"` cached in its working tree or `HEAD`. **User-visible
+behavior change:** when `git fetch origin` fails this pass
+(`MainSyncFetchFailed` above), planning pickup and autonomous re-plan are held
+with a distinct retryable reason and launch nothing for that repo — where they
+previously fell back to whatever `planning.autonomy` local `HEAD` last had
+committed. Ordinary `Planned` pickup in the same repo is unaffected by the same
+fetch failure; only freshness-dependent planning/re-plan authorization is gated
+by it.
 
 **Trust boundary.** Enabling `dispatch.planRefined` treats the `Refined` label
 (plus the existing assignee-ownership gate) as sufficient authorization to
@@ -923,7 +954,7 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 | `quietHours` | none | Local-clock window to suppress dispatch; `startHour > endHour` wraps midnight, `start == end` disables |
 | `planStalenessTolerance` | `5` | Max commits a plan may fall behind before it is skipped as stale (see [Path-aware staleness](#path-aware-staleness) for scoping the count via `stalenessPaths`) |
 | `pipelineStageGate` | `true` | Skip tickets whose persisted `cenci pipeline` stage is `finalized` (see [Pickup rules and gates](#pickup-rules-and-gates)); set `false` to disable the gate entirely |
-| `planRefined` | `false` | Enable stage-aware planning pickup of `Refined` tickets and autonomous re-plan of stale plans, in lean-planning repos only (see [Planning pickup and autonomous re-plan](#planning-pickup-and-autonomous-re-plan)); a pure operator assertion, never verified against the repo's own planning config |
+| `planRefined` | `false` | Enable stage-aware planning pickup of `Refined` tickets and autonomous re-plan of stale plans, in lean-planning repos only (see [Planning pickup and autonomous re-plan](#planning-pickup-and-autonomous-re-plan)); the fleet-wide kill switch, gated per-repo against that repo's own remote-confirmed `planning.autonomy` config (#877) |
 | `gracePeriod` | `5m` | How long the failure signal must hold continuously before the reconciler recovers a stranded ticket (Go duration string) |
 | `retryBudget` | `2` | Retries (`Working` → `Planned`) a stranded ticket gets before it is marked `dispatch-failed`; an explicit `0` disables retries |
 | `daemonInterval` | none | Dispatch cadence once the embedded loop is enabled (Go duration string); setting this alone does **not** start dispatch — see `loopEnabled`. Configuration is independently polled at least every 60 seconds; nonpositive values use a 60s internal fallback but are not reported as a configured interval |

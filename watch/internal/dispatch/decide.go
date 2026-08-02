@@ -60,6 +60,13 @@ const (
 	reasonAutonomyMalformed   = "repo config malformed"
 	reasonAutonomyUnreadable  = "repo config unreadable"
 	reasonAutonomyUnknown     = "repo autonomy probe unrecognized"
+	// reasonAutonomyFetchUnconfirmed (#877) is content-distinct from every
+	// reason above, including reasonAutonomyUnknown: it is not an
+	// unrecognized enum value, it is the documented RepoAutonomyFetchUnconfirmed
+	// classification for "no remote-confirmed object this pass" (`git fetch
+	// origin` failed, or the repo carries no syncs entry at all) -- explicitly
+	// retryable, since the very next pass may confirm a fetch.
+	reasonAutonomyFetchUnconfirmed = "remote main not fetched this pass (retryable)"
 )
 
 // Dependency-gate skip reasons (#825). reasonDependencyStateUnknownFmt is
@@ -205,7 +212,7 @@ type Inputs struct {
 	Answers map[string]AnswerProbe
 
 	// RepoAutonomy maps repo -> the resolved RepoAutonomy for that repo this
-	// pass (#851), resolved by probeRepoAutonomies (autonomy.go) before
+	// pass (#851, #877), resolved by probeRepoAutonomies (autonomy.go) before
 	// Decide is ever called -- all I/O for the probe happens in RunOnce,
 	// never inside this gate chain (Decide's own purity contract, mirroring
 	// Answers above). Consulted only when Config.PlanRefined is true AND the
@@ -213,6 +220,15 @@ type Inputs struct {
 	// candidate -- never for an ordinary already-Planned dispatch, and never
 	// at all when PlanRefined is false (dispatch.planRefined remains the
 	// fleet kill switch, but repo-lean alone never authorizes planning).
+	//
+	// #877: every non-fetch-unconfirmed value here is remote-confirmed --
+	// probeRepoAutonomies only ever probes at a repo's confirmed AutonomyRef
+	// (mainSyncResult.AutonomyRef, always the fully-qualified
+	// remoteMainAuthRef when set), never a bare local ref that could be stale
+	// or unpushed. A repo whose fetch did not succeed this pass (or that
+	// carries no syncs entry at all) resolves RepoAutonomyFetchUnconfirmed --
+	// the probe never ran, and the gate denies with its own explicitly
+	// retryable reason, distinct from every other denial.
 	RepoAutonomy map[string]RepoAutonomy
 
 	// PlanProbes maps planKey(repo, ticketId) -> the resolved PlanProbe for
@@ -727,6 +743,8 @@ func autonomyGateSkip(a RepoAutonomy) (string, bool) {
 		return reasonAutonomyMalformed, true
 	case RepoAutonomyUnreadable:
 		return reasonAutonomyUnreadable, true
+	case RepoAutonomyFetchUnconfirmed:
+		return reasonAutonomyFetchUnconfirmed, true
 	default:
 		// Unrecognized/nil-map-miss/zero-value RepoAutonomy: default-deny
 		// with its own distinct reason so a regression collapsing this

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -894,11 +895,18 @@ func isolateDaemonSocket(t *testing.T) {
 // terminates before RunOnce's daemon-reachability check (rule 0's autonomy
 // gate for a planning candidate is evaluated first), so it needs no fake
 // daemon.
+//
+// #877: the config is committed on origin (never local-only) -- the
+// autonomy probe now only ever reads the remote-confirmed
+// refs/remotes/origin/main object (mainSyncResult.AutonomyRef), so a config
+// committed solely to local's main (never pushed) would resolve
+// RepoAutonomyMissing at that ref instead of the intended interactive
+// denial, defeating this test's purpose.
 func TestRunOnce_InteractiveRepoConfigDeniesPlanningPickup(t *testing.T) {
 	mainSyncGitEnv(t)
 	isolateDaemonSocket(t)
-	local, _ := initOriginAndLocal(t)
-	writeCommittedConfig(t, local, interactiveConfigJSON)
+	local, origin := initOriginAndLocal(t)
+	writeCommittedConfig(t, origin, interactiveConfigJSON)
 
 	installFakeGHOnPath(t, runOnceFakeGHWithIdentity(`{"name":"Refined"}`))
 	stubRunFn(t, func(run.Opts, run.Controller) error {
@@ -930,11 +938,16 @@ func TestRunOnce_InteractiveRepoConfigDeniesPlanningPickup(t *testing.T) {
 // the decision terminates at the next gate down the chain
 // ("daemon unreachable") -- proving autonomy passed without requiring a full
 // dispatch to actually fire in this test environment.
+//
+// #877: the config is committed on origin (never local-only) -- see
+// TestRunOnce_InteractiveRepoConfigDeniesPlanningPickup's doc comment for why
+// a local-only commit would no longer exercise the intended verdict now that
+// the probe only ever reads the remote-confirmed ref.
 func TestRunOnce_LeanRepoConfigPassesAutonomyGate(t *testing.T) {
 	mainSyncGitEnv(t)
 	isolateDaemonSocket(t)
-	local, _ := initOriginAndLocal(t)
-	writeCommittedConfig(t, local, leanConfigJSON)
+	local, origin := initOriginAndLocal(t)
+	writeCommittedConfig(t, origin, leanConfigJSON)
 
 	installFakeGHOnPath(t, runOnceFakeGHWithIdentity(`{"name":"Refined"}`))
 	stubRunFn(t, func(run.Opts, run.Controller) error {
@@ -1139,24 +1152,268 @@ esac
 // the identical eligibility verdict, per the ticket's "render the same
 // eligibility/re-plan result that the subsequent real synchronized pass
 // would produce" acceptance criterion.
+//
+// #877 additionally requires dry-run/real to agree on BOTH the
+// authorization ref itself (AutonomyRef -- always the fully-qualified
+// remote-tracking ref in both modes, since the merge, not the fetch, is the
+// only thing dry-run skips) and the staleness verdict (CommitsBehind),
+// computed against that same fetched object -- extended in place here
+// rather than split into a second test, so a regression that breaks parity
+// on only one of the two verdicts cannot hide behind the other still
+// passing.
 func TestProbeRepoAutonomies_DryRunAndRealPassAgreeUsingSameFreshRef(t *testing.T) {
 	mainSyncGitEnv(t)
 	local, origin := initOriginAndLocal(t)
+	planSha := gitTest(t, local, "rev-parse", "HEAD")
 	commitFile(t, origin, "advance.txt", "advance")
 	writeCommittedConfig(t, origin, leanConfigJSON) // committed only on origin
+	writePlan(t, local, "42-x.md", "---\nticketId: 42\nstatus: planned\nplanCommitSha: "+planSha+"\n---\nbody\n")
 
 	repos := []RepoConfig{{Repo: "o/r", Dir: local}}
 
 	dryRunSyncs := syncMains(repos, io.Discard, true)
 	dryAutonomy := probeRepoAutonomies(repos, dryRunSyncs, io.Discard)
+	dryPlans, _, _, err := readPlansForRepos(repos, dryRunSyncs, io.Discard)
+	if err != nil {
+		t.Fatalf("readPlansForRepos (dry-run) returned unexpected error: %v", err)
+	}
 	if dryAutonomy["o/r"] != RepoAutonomyLean {
 		t.Errorf("dry-run autonomy = %q, want RepoAutonomyLean (fetched origin/main blob)", dryAutonomy["o/r"])
+	}
+	if dryRunSyncs["o/r"].AutonomyRef != remoteMainAuthRef {
+		t.Errorf("dry-run AutonomyRef = %q, want %q", dryRunSyncs["o/r"].AutonomyRef, remoteMainAuthRef)
+	}
+	if len(dryPlans) != 1 {
+		t.Fatalf("got %d dry-run plans, want 1: %+v", len(dryPlans), dryPlans)
 	}
 
 	realSyncs := syncMains(repos, io.Discard, false)
 	realAutonomy := probeRepoAutonomies(repos, realSyncs, io.Discard)
+	realPlans, _, _, err := readPlansForRepos(repos, realSyncs, io.Discard)
+	if err != nil {
+		t.Fatalf("readPlansForRepos (real pass) returned unexpected error: %v", err)
+	}
 	if realAutonomy["o/r"] != RepoAutonomyLean {
 		t.Errorf("real-pass autonomy = %q, want RepoAutonomyLean (post-fast-forward local HEAD blob)", realAutonomy["o/r"])
+	}
+	if realSyncs["o/r"].AutonomyRef != remoteMainAuthRef {
+		t.Errorf("real-pass AutonomyRef = %q, want %q -- both dry-run and real fetch, so AutonomyRef must agree", realSyncs["o/r"].AutonomyRef, remoteMainAuthRef)
+	}
+	if len(realPlans) != 1 {
+		t.Fatalf("got %d real-pass plans, want 1: %+v", len(realPlans), realPlans)
+	}
+	if realPlans[0].CommitsBehind != dryPlans[0].CommitsBehind {
+		t.Errorf("real-pass CommitsBehind = %d, want it to match the dry-run's %d", realPlans[0].CommitsBehind, dryPlans[0].CommitsBehind)
+	}
+}
+
+// -- #877: RunOnce end-to-end, fetch-outage gating and a mixed fleet --------
+
+// TestRunOnce_FetchOutage_HoldsPlanningLaunchesNothing_OrdinaryPlannedStillDispatches
+// covers the ticket's core availability tradeoff in one pass: a repo whose
+// `git fetch origin` fails this pass must hold its Refined planning
+// candidate (launching no process at all), while an ordinary, already-
+// approved `Planned` ticket in a DIFFERENT, healthy repo in the very same
+// pass must still dispatch normally -- a fetch outage in one repo must never
+// bleed into ordinary implementation work elsewhere.
+func TestRunOnce_FetchOutage_HoldsPlanningLaunchesNothing_OrdinaryPlannedStillDispatches(t *testing.T) {
+	mainSyncGitEnv(t)
+	serveChainSnapshot(t, watch.StateSnapshot{}) // reachable, idle daemon
+
+	// repoA: a Refined planning candidate whose origin remote is
+	// unresolvable this pass -- MainSyncFetchFailed, AutonomyRef == "".
+	repoA := t.TempDir()
+	gitTest(t, repoA, "init", "-b", "main")
+	commitFile(t, repoA, "base.txt", "base")
+	gitTest(t, repoA, "remote", "add", "origin", filepath.Join(t.TempDir(), "does-not-exist"))
+
+	// repoB: an ordinary, already-Planned, fresh ticket in a healthy repo.
+	repoB, _ := initOriginAndLocal(t)
+	planSha := gitTest(t, repoB, "rev-parse", "HEAD")
+	writePlan(t, repoB, "20-x.md", "---\nticketId: 20\nstatus: planned\nplanCommitSha: "+planSha+"\n---\nbody\n")
+
+	installFakeGHOnPath(t, `
+case "$1 $2" in
+  "issue list")
+    case "$*" in
+      *"o/a"*) printf '[{"number":10,"title":"T10","labels":[{"name":"Refined"}],"assignees":[{"login":"octocat"}]}]' ;;
+      *"o/b"*) printf '[{"number":20,"title":"T20","labels":[{"name":"Planned"}],"assignees":[{"login":"octocat"}]}]' ;;
+      *) printf '[]' ;;
+    esac
+    ;;
+  "api graphql") printf '`+emptyOpenPRPageJSON+`' ;;
+  "api user") printf 'octocat\n' ;;
+  *) exit 1 ;;
+esac
+`)
+
+	var spawnedTickets []string
+	stubRunFn(t, func(opts run.Opts, ctrl run.Controller) error {
+		if opts.WindowTicket == "10" {
+			t.Fatal("a repo whose fetch failed this pass must never spawn a planning session")
+		}
+		spawnedTickets = append(spawnedTickets, opts.WindowTicket)
+		return nil
+	})
+
+	cfg := testConfig()
+	cfg.PlanRefined = true
+	cfg.Repos = []RepoConfig{{Repo: "o/a", Dir: repoA}, {Repo: "o/b", Dir: repoB}}
+
+	var buf bytes.Buffer
+	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil); err != nil {
+		t.Fatalf("RunOnce returned unexpected error: %v", err)
+	}
+
+	log := buf.String()
+	if !strings.Contains(log, "o/a#10 skip: "+reasonAutonomyFetchUnconfirmed) {
+		t.Errorf("expected o/a#10 to be held with the fetch-unconfirmed reason, got log %q", log)
+	}
+	if len(spawnedTickets) != 1 || spawnedTickets[0] != "20" {
+		t.Errorf("spawned tickets = %v, want exactly [\"20\"] (o/b's ordinary Planned pickup unaffected by o/a's fetch outage)", spawnedTickets)
+	}
+}
+
+// TestRunOnce_MixedFleet_RemoteLocalCombinationsAndFailureModes covers the
+// ticket's "mixed-fleet tests cover remote/local combinations, fetch
+// outage, forced stale refs, malformed config, branch changes, and timeout"
+// acceptance criterion in a single six-repo pass, each repo a fresh Refined
+// planning candidate so the RunOnce -> probeRepoAutonomies ->
+// Inputs.RepoAutonomy -> Decide wiring is exercised for every case, not just
+// the pure-function gate.
+func TestRunOnce_MixedFleet_RemoteLocalCombinationsAndFailureModes(t *testing.T) {
+	mainSyncGitEnv(t)
+	serveChainSnapshot(t, watch.StateSnapshot{}) // reachable, idle daemon
+
+	// r1: remote lean, fetch ok -- the sole authorizing case.
+	r1, origin1 := initOriginAndLocal(t)
+	writeCommittedConfig(t, origin1, leanConfigJSON)
+
+	// r2: local-only lean (unpushed), remote interactive, fetch ok -- must
+	// deny; the local grant must never leak through. r2 first fetches +
+	// ff-only merges origin2's interactive commit before adding its own
+	// local-only lean commit on top, so local ends up genuinely AHEAD of
+	// (a descendant of) the fetched origin/main -- committing the local-only
+	// config without first merging origin's own new commit would instead
+	// produce two independently-authored commits off the shared base, a
+	// genuine MainSyncDiverged (caught while writing this test), which would
+	// gate the ticket at rule 0 before autonomy is ever consulted and defeat
+	// this case's purpose.
+	r2, origin2 := initOriginAndLocal(t)
+	writeCommittedConfig(t, origin2, interactiveConfigJSON)
+	gitTest(t, r2, "fetch", "origin")
+	gitTest(t, r2, "merge", "--ff-only", "origin/main")
+	writeCommittedConfig(t, r2, leanConfigJSON) // local ahead, unpushed
+
+	// r3: malformed remote config, fetch ok -- must deny as malformed.
+	r3, origin3 := initOriginAndLocal(t)
+	writeCommittedConfig(t, origin3, malformedConfigJSON)
+
+	// r4: unresolvable remote -- fetch outage, AutonomyRef empty.
+	r4 := t.TempDir()
+	gitTest(t, r4, "init", "-b", "main")
+	commitFile(t, r4, "base.txt", "base")
+	gitTest(t, r4, "remote", "add", "origin", filepath.Join(t.TempDir(), "does-not-exist"))
+
+	// r5: checked-out branch changes mid-pass, AFTER a successful fetch --
+	// MainSyncNotMain gates every pickup in the repo before autonomy is
+	// even consulted (rule 0 fires first).
+	r5, origin5 := initOriginAndLocal(t)
+	commitFile(t, origin5, "advance.txt", "advance")
+
+	// r6: fetch hangs past gitWaitDelay -- forced-close timeout, classified
+	// identically to r4's outage (MainSyncFetchFailed / AutonomyRef empty),
+	// but reached via a different syncMain code path.
+	r6, _ := initOriginAndLocal(t)
+
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shimDir := t.TempDir()
+	script := fmt.Sprintf(`#!/bin/sh
+is_fetch=0
+for arg in "$@"; do
+  if [ "$arg" = "fetch" ]; then is_fetch=1; fi
+done
+if [ "$1" = "-C" ] && [ "$is_fetch" = "1" ]; then
+  if [ "$2" = %[2]q ]; then
+    "%[1]s" "$@"
+    status=$?
+    "%[1]s" -C "$2" checkout -b sneaky-mixed-fleet >/dev/null 2>&1
+    exit $status
+  fi
+  if [ "$2" = %[3]q ]; then
+    (sleep 30 &)
+    exit 0
+  fi
+fi
+exec "%[1]s" "$@"
+`, realGit, r5, r6)
+	if err := os.WriteFile(filepath.Join(shimDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	installFakeGHOnPath(t, `
+case "$1 $2" in
+  "issue list")
+    case "$*" in
+      *"o/r1"*) printf '[{"number":101,"title":"T101","labels":[{"name":"Refined"}],"assignees":[{"login":"octocat"}]}]' ;;
+      *"o/r2"*) printf '[{"number":102,"title":"T102","labels":[{"name":"Refined"}],"assignees":[{"login":"octocat"}]}]' ;;
+      *"o/r3"*) printf '[{"number":103,"title":"T103","labels":[{"name":"Refined"}],"assignees":[{"login":"octocat"}]}]' ;;
+      *"o/r4"*) printf '[{"number":104,"title":"T104","labels":[{"name":"Refined"}],"assignees":[{"login":"octocat"}]}]' ;;
+      *"o/r5"*) printf '[{"number":105,"title":"T105","labels":[{"name":"Refined"}],"assignees":[{"login":"octocat"}]}]' ;;
+      *"o/r6"*) printf '[{"number":106,"title":"T106","labels":[{"name":"Refined"}],"assignees":[{"login":"octocat"}]}]' ;;
+      *) printf '[]' ;;
+    esac
+    ;;
+  "api graphql") printf '`+emptyOpenPRPageJSON+`' ;;
+  "api user") printf 'octocat\n' ;;
+  *) exit 1 ;;
+esac
+`)
+
+	var spawnedTickets []string
+	stubRunFn(t, func(opts run.Opts, ctrl run.Controller) error {
+		spawnedTickets = append(spawnedTickets, opts.WindowTicket)
+		return nil
+	})
+
+	cfg := testConfig()
+	cfg.PlanRefined = true
+	cfg.Repos = []RepoConfig{
+		{Repo: "o/r1", Dir: r1},
+		{Repo: "o/r2", Dir: r2},
+		{Repo: "o/r3", Dir: r3},
+		{Repo: "o/r4", Dir: r4},
+		{Repo: "o/r5", Dir: r5},
+		{Repo: "o/r6", Dir: r6},
+	}
+
+	var buf bytes.Buffer
+	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil); err != nil {
+		t.Fatalf("RunOnce returned unexpected error: %v", err)
+	}
+	log := buf.String()
+
+	if len(spawnedTickets) != 1 || spawnedTickets[0] != "101" {
+		t.Errorf("spawned tickets = %v, want exactly [\"101\"] (the sole remote-lean, fetch-ok repo)", spawnedTickets)
+	}
+	wantSubstrings := map[string]string{
+		"o/r2#102": "o/r2#102 skip: repo autonomy not lean",
+		"o/r3#103": "o/r3#103 skip: repo config malformed",
+		"o/r4#104": "o/r4#104 skip: " + reasonAutonomyFetchUnconfirmed,
+		"o/r5#105": "o/r5#105 skip: " + reasonMainNotMain,
+		"o/r6#106": "o/r6#106 skip: " + reasonAutonomyFetchUnconfirmed,
+	}
+	for name, want := range wantSubstrings {
+		if !strings.Contains(log, want) {
+			t.Errorf("%s: expected log to contain %q, got %q", name, want, log)
+		}
+	}
+	if !strings.Contains(log, "o/r1#101 dispatch") {
+		t.Errorf("expected o/r1#101 to dispatch (the sole remote-lean, fetch-ok repo), got log %q", log)
 	}
 }
 

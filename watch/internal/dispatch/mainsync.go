@@ -129,20 +129,42 @@ func isAncestor(dir, ancestor, descendant string) (bool, error) {
 	return false, fmt.Errorf("git merge-base --is-ancestor %s %s: %w (%s)", ancestor, descendant, err, out)
 }
 
-// mainSyncResult is syncMain's full classified outcome (#851): Status/Detail
-// are the pre-#851 pair (now bundled into a struct rather than two return
-// values), and FreshRef names the git ref that staleness computation
-// (planfile.CommitsBehindRef) and the autonomy probe (probeRepoAutonomy)
-// should both read against for this repo this pass -- "origin/main" only in
-// the dry-run strictly-behind branch (the fetched blob a real pass would
-// fast-forward to), "HEAD" in every other case (including the real,
-// non-dry-run strictly-behind branch, which has already merged into local
-// HEAD by the time it returns). Sharing one FreshRef per repo per pass is
-// what gives dry-run parity with the subsequent real pass (plan Q&A 3).
+// remoteMainAuthRef is the exact object the repo-autonomy probe
+// (autonomy.go) must read `planning.autonomy` authorization from (#877): the
+// fully-qualified remote-tracking ref for origin's main, never the short
+// "origin/main" form. It is deliberately fully-qualified because git's own
+// rev-parse precedence resolves refs/heads/<name> before refs/remotes/<name>
+// -- the short "origin/main" could in principle be shadowed by a local
+// branch literally named "origin/main" (plan Q1), which would let a local,
+// possibly unpushed/malicious grant leak into an authorization decision that
+// must only ever be read from the confirmed remote object.
+//
+// The neighbouring `merge-base --is-ancestor`/`merge --ff-only` calls in
+// this file deliberately KEEP their existing short "origin/main" form below
+// -- they are ordinary fast-forward-sync operations, not the authorization
+// read, and must NOT be "unified" to match this constant.
+const remoteMainAuthRef = "refs/remotes/origin/main"
+
+// mainSyncResult is syncMain's full classified outcome (#851/#877):
+// Status/Detail are the pre-#851 pair (now bundled into a struct rather than
+// two return values). FreshRef names the git ref that staleness computation
+// (planfile.CommitsBehindRef) should read against for this repo this pass --
+// "origin/main" only in the dry-run strictly-behind branch (the fetched blob
+// a real pass would fast-forward to), "HEAD" in every other case (including
+// the real, non-dry-run strictly-behind branch, which has already merged
+// into local HEAD by the time it returns). Sharing one FreshRef per repo per
+// pass is what gives dry-run parity with the subsequent real pass (plan
+// Q&A 3). AutonomyRef (#877) is a distinct field: non-empty if and only if
+// `git fetch origin` succeeded in this pass, and always exactly
+// remoteMainAuthRef when set -- it names the exact object the repo-autonomy
+// probe must read authorization from, and unlike FreshRef it never falls
+// back to local HEAD, so a fetch outage can never silently authorize off a
+// stale or unpushed local grant.
 type mainSyncResult struct {
-	Status   MainSync
-	Detail   string
-	FreshRef string
+	Status      MainSync
+	Detail      string
+	FreshRef    string
+	AutonomyRef string
 }
 
 // syncMain runs the once-per-pass local `main` sync for one enrolled repo
@@ -167,7 +189,8 @@ type mainSyncResult struct {
 // never runs the merge itself.
 func syncMain(dir string, dryRun bool) mainSyncResult {
 	if dir == "" {
-		return mainSyncResult{MainSyncSkipped, "no repo dir configured", "HEAD"}
+		// Pre-fetch: no remote-confirmed object this pass.
+		return mainSyncResult{Status: MainSyncSkipped, Detail: "no repo dir configured", FreshRef: "HEAD", AutonomyRef: ""}
 	}
 
 	// #851: a configured, non-empty Dir that does not exist on disk at all
@@ -175,9 +198,11 @@ func syncMain(dir string, dryRun bool) mainSyncResult {
 	// "not a git repository", MainSyncFailed) -- it gets its own gated state.
 	if _, err := os.Stat(dir); err != nil {
 		if os.IsNotExist(err) {
-			return mainSyncResult{MainSyncMissing, "configured dir does not exist on disk", "HEAD"}
+			// Pre-fetch: no remote-confirmed object this pass.
+			return mainSyncResult{Status: MainSyncMissing, Detail: "configured dir does not exist on disk", FreshRef: "HEAD", AutonomyRef: ""}
 		}
-		return mainSyncResult{MainSyncFailed, fmt.Sprintf("stat %s failed: %v", dir, err), "HEAD"}
+		// Pre-fetch: no remote-confirmed object this pass.
+		return mainSyncResult{Status: MainSyncFailed, Detail: fmt.Sprintf("stat %s failed: %v", dir, err), FreshRef: "HEAD", AutonomyRef: ""}
 	}
 
 	branch, err := execGit(dir, "symbolic-ref", "--short", "HEAD")
@@ -185,17 +210,20 @@ func syncMain(dir string, dryRun bool) mainSyncResult {
 		// symbolic-ref fails both for a detached HEAD and for a dir that
 		// isn't a git repo at all -- rev-parse --git-dir distinguishes them.
 		if _, gitDirErr := execGit(dir, "rev-parse", "--git-dir"); gitDirErr != nil {
-			return mainSyncResult{MainSyncFailed, "not a git repository", "HEAD"}
+			// Pre-fetch: no remote-confirmed object this pass.
+			return mainSyncResult{Status: MainSyncFailed, Detail: "not a git repository", FreshRef: "HEAD", AutonomyRef: ""}
 		}
 		// #851: previously the ungated MainSyncSkipped -- a detached HEAD is
 		// untrustworthy for plan-freshness/pipeline-stage gating exactly like
 		// a non-main checkout, so it now gates every pickup in the repo too.
-		return mainSyncResult{MainSyncDetached, "HEAD is detached", "HEAD"}
+		// Pre-fetch: no remote-confirmed object this pass.
+		return mainSyncResult{Status: MainSyncDetached, Detail: "HEAD is detached", FreshRef: "HEAD", AutonomyRef: ""}
 	}
 	if branch != "main" {
 		// #851: previously the ungated MainSyncSkipped -- see MainSyncDetached
 		// above for the rationale.
-		return mainSyncResult{MainSyncNotMain, fmt.Sprintf("checked-out branch %q is not main", branch), "HEAD"}
+		// Pre-fetch: no remote-confirmed object this pass.
+		return mainSyncResult{Status: MainSyncNotMain, Detail: fmt.Sprintf("checked-out branch %q is not main", branch), FreshRef: "HEAD", AutonomyRef: ""}
 	}
 
 	// -c core.hooksPath=/dev/null (global option, must precede the
@@ -203,8 +231,17 @@ func syncMain(dir string, dryRun bool) mainSyncResult {
 	// repo-supplied git hooks (e.g. a committed/husky-style post-merge hook)
 	// unattended (#822 review round 2 fix #2).
 	if _, err := execGit(dir, "-c", "core.hooksPath=/dev/null", "fetch", "origin"); err != nil {
-		return mainSyncResult{MainSyncFetchFailed, fmt.Sprintf("git fetch origin failed: %v", err), "HEAD"}
+		// Fetch itself failed: no remote-confirmed object this pass.
+		return mainSyncResult{Status: MainSyncFetchFailed, Detail: fmt.Sprintf("git fetch origin failed: %v", err), FreshRef: "HEAD", AutonomyRef: ""}
 	}
+
+	// Every return path below this point is reached only after `git fetch
+	// origin` above succeeded, so each one sets AutonomyRef to
+	// remoteMainAuthRef (#877): the fetch, not the subsequent merge, is what
+	// confirms the remote object -- even a return path whose Status reports a
+	// failure of some later step (a merge-base probe error, a pre-merge
+	// re-check error, or the fast-forward merge itself failing) still had a
+	// successful fetch this pass.
 
 	// localBehindOrEqual: local HEAD is an ancestor of (or equal to)
 	// origin/main. localAheadOrEqual: origin/main is an ancestor of (or
@@ -214,20 +251,20 @@ func syncMain(dir string, dryRun bool) mainSyncResult {
 	// fix #1).
 	localBehindOrEqual, err := isAncestor(dir, "HEAD", "origin/main")
 	if err != nil {
-		return mainSyncResult{MainSyncFailed, fmt.Sprintf("git merge-base --is-ancestor check failed: %v", err), "HEAD"}
+		return mainSyncResult{Status: MainSyncFailed, Detail: fmt.Sprintf("git merge-base --is-ancestor check failed: %v", err), FreshRef: "HEAD", AutonomyRef: remoteMainAuthRef}
 	}
 	localAheadOrEqual, err := isAncestor(dir, "origin/main", "HEAD")
 	if err != nil {
-		return mainSyncResult{MainSyncFailed, fmt.Sprintf("git merge-base --is-ancestor check failed: %v", err), "HEAD"}
+		return mainSyncResult{Status: MainSyncFailed, Detail: fmt.Sprintf("git merge-base --is-ancestor check failed: %v", err), FreshRef: "HEAD", AutonomyRef: remoteMainAuthRef}
 	}
 
 	switch {
 	case localBehindOrEqual && localAheadOrEqual:
-		return mainSyncResult{MainSyncSynced, "already up to date", "HEAD"}
+		return mainSyncResult{Status: MainSyncSynced, Detail: "already up to date", FreshRef: "HEAD", AutonomyRef: remoteMainAuthRef}
 	case localAheadOrEqual:
-		return mainSyncResult{MainSyncSynced, "local main is ahead of origin/main", "HEAD"}
+		return mainSyncResult{Status: MainSyncSynced, Detail: "local main is ahead of origin/main", FreshRef: "HEAD", AutonomyRef: remoteMainAuthRef}
 	case !localBehindOrEqual:
-		return mainSyncResult{MainSyncDiverged, "local main and origin/main have diverged", "HEAD"}
+		return mainSyncResult{Status: MainSyncDiverged, Detail: "local main and origin/main have diverged", FreshRef: "HEAD", AutonomyRef: remoteMainAuthRef}
 	}
 
 	// Strictly behind: there is something to fast-forward. #851: this is the
@@ -236,7 +273,7 @@ func syncMain(dir string, dryRun bool) mainSyncResult {
 	// fetched blob, not stale local HEAD, to match what the subsequent real
 	// pass would render.
 	if dryRun {
-		return mainSyncResult{MainSyncSynced, "would fast-forward origin/main (dry-run, not merged)", "origin/main"}
+		return mainSyncResult{Status: MainSyncSynced, Detail: "would fast-forward origin/main (dry-run, not merged)", FreshRef: "origin/main", AutonomyRef: remoteMainAuthRef}
 	}
 
 	// Re-verify HEAD is still on main immediately before merging (#822
@@ -256,18 +293,21 @@ func syncMain(dir string, dryRun bool) mainSyncResult {
 	// (#822 review round 2 fix #1).
 	branchNow, err := execGit(dir, "symbolic-ref", "--short", "HEAD")
 	if err != nil {
-		return mainSyncResult{MainSyncFailed, fmt.Sprintf("re-verifying HEAD before merge failed: %v", err), "HEAD"}
+		return mainSyncResult{Status: MainSyncFailed, Detail: fmt.Sprintf("re-verifying HEAD before merge failed: %v", err), FreshRef: "HEAD", AutonomyRef: remoteMainAuthRef}
 	}
 	if branchNow != "main" {
-		return mainSyncResult{MainSyncNotMain, "checked-out branch changed before merge", "HEAD"}
+		// Fetch already succeeded before this mid-pass branch change was
+		// discovered (#877): AutonomyRef's invariant is about the fetch, not
+		// the merge, so it must stay set even though the merge never runs.
+		return mainSyncResult{Status: MainSyncNotMain, Detail: "checked-out branch changed before merge", FreshRef: "HEAD", AutonomyRef: remoteMainAuthRef}
 	}
 
 	// Same hook-suppression rationale as the fetch above: a pure fast-forward
 	// still runs post-merge, so this must stay unattended-safe too.
 	if _, err := execGit(dir, "-c", "core.hooksPath=/dev/null", "merge", "--ff-only", "origin/main"); err != nil {
-		return mainSyncResult{MainSyncFailed, fmt.Sprintf("git merge --ff-only origin/main failed: %v", err), "HEAD"}
+		return mainSyncResult{Status: MainSyncFailed, Detail: fmt.Sprintf("git merge --ff-only origin/main failed: %v", err), FreshRef: "HEAD", AutonomyRef: remoteMainAuthRef}
 	}
-	return mainSyncResult{MainSyncSynced, "fast-forwarded to origin/main", "HEAD"}
+	return mainSyncResult{Status: MainSyncSynced, Detail: "fast-forwarded to origin/main", FreshRef: "HEAD", AutonomyRef: remoteMainAuthRef}
 }
 
 // syncMains runs syncMain once per repo in repos, unconditionally logging
@@ -276,10 +316,13 @@ func syncMain(dir string, dryRun bool) mainSyncResult {
 // CollectTickets' best-effort per-repo loop.
 //
 // #851: the return type is now map[string]mainSyncResult (Status/Detail/
-// FreshRef) rather than map[string]MainSync, so downstream readers (the
-// autonomy probe, readPlansForRepos) can resolve the same per-repo FreshRef
-// this pass used. syncStatuses adapts this map back to map[string]MainSync
-// for CollectTickets, whose own signature stays unchanged.
+// FreshRef/AutonomyRef) rather than map[string]MainSync, so downstream
+// readers can resolve the per-repo ref each concern needs this pass:
+// readPlansForRepos reads FreshRef for plan staleness, while the autonomy
+// probe (#877) reads the distinct AutonomyRef for authorization -- the two
+// are no longer the same ref. syncStatuses adapts this map back to
+// map[string]MainSync for CollectTickets, whose own signature stays
+// unchanged.
 //
 // Log lines intentionally avoid the " skip:" / " dispatch " substrings --
 // lazyboards classifies decision lines by matching them (formatDecision's
