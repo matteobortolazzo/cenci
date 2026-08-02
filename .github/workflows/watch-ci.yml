@@ -27,6 +27,7 @@ jobs:
             watch:
               - 'watch/**'
               - 'sandbox/tests/lib/**'
+              - 'flow/tests/adversarial-chain/fixtures/**'
               - '.github/workflows/watch-ci.yml'
               - '!watch/AGENTS.md'
               - '!watch/CLAUDE.md'

@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "repo": "o/r",
+  "login": "octocat",
+  "parent": {
+    "number": 100,
+    "title": "Adversarial chain parent (post-refinement)",
+    "state": "OPEN",
+    "body": "Umbrella ticket for the adversarial-chain fixture graph.\n\n## Execution Order\n1. #101\n2. #102",
+    "labels": ["area:backend", "priority:p2", "team:core", "Refined", "ui:visual-check"],
+    "assignees": [{ "login": "octocat" }],
+    "milestone": { "number": 5, "title": "Epic v1" },
+    "subIssues": [
+      { "number": 101, "state": "OPEN" },
+      { "number": 102, "state": "OPEN" }
+    ]
+  },
+  "children": [
+    {
+      "slot": "1",
+      "number": 101,
+      "title": "Lean child (1/2)",
+      "state": "OPEN",
+      "body": "First child, no dependency.\n\nDelivers the lean, dependency-free half of the split.",
+      "labels": ["Refined"],
+      "assignees": [{ "login": "octocat" }],
+      "milestone": { "number": 5, "title": "Epic v1" },
+      "dependsOn": [],
+      "plan": {
+        "ticketId": 101,
+        "slug": "lean-child",
+        "status": "planned",
+        "isChild": true,
+        "isLastChild": false,
+        "parentId": 100
+      }
+    },
+    {
+      "slot": "2",
+      "number": 102,
+      "title": "Dependent child (2/2)",
+      "state": "OPEN",
+      "body": "Depends on #101\n\nSecond child, builds on the first.",
+      "labels": ["Refined"],
+      "assignees": [{ "login": "octocat" }],
+      "milestone": { "number": 5, "title": "Epic v1" },
+      "dependsOn": [101],
+      "plan": {
+        "ticketId": 102,
+        "slug": "dependent-child",
+        "status": "planned",
+        "isChild": true,
+        "isLastChild": true,
+        "parentId": 100
+      }
+    }
+  ],
+  "writeOrder": [
+    "claim",
+    "working",
+    "parent-body",
+    "child-create:1",
+    "child-link:1",
+    "child-create:2",
+    "child-link:2",
+    "parent-exec-order",
+    "refined",
+    "visual-check"
+  ]
+}
