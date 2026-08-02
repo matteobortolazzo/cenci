@@ -126,8 +126,10 @@ jobs:
       - uses: hadolint/hadolint-action@2a66e89f53d0771bb131a7fa31f3136336094aa6 # v3.4.0
         with:
           dockerfile: sandbox/Dockerfile.base
-          ignore: DL3008,DL3013
+          # DL3066: named USER root/dev switches are intentional throughout the multi-stage build.
+          ignore: DL3008,DL3013,DL3066
       - uses: hadolint/hadolint-action@2a66e89f53d0771bb131a7fa31f3136336094aa6 # v3.4.0
         with:
           dockerfile: sandbox/Dockerfile
-          ignore: DL3008,DL3013
+          # DL3066: named USER root/dev switches are intentional throughout the multi-stage build.
+          ignore: DL3008,DL3013,DL3066
