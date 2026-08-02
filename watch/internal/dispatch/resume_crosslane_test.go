@@ -79,7 +79,7 @@ func TestResumeCrossLane_ProducerTemplateThroughRealClassifyComments(t *testing.
 		{ID: anchorID, Body: "Question text.\n" + rendered, Author: restCommentAuthor{Login: "matteobortolazzo", Type: "User"}},
 		{ID: anchorID + 1, Body: "Here's my answer.", Author: restCommentAuthor{Login: "octocat", Type: "User"}, AuthorAssociation: "COLLABORATOR"},
 	}
-	got := classifyComments(comments, anchorID, nonce)
+	got := classifyComments(comments, anchorID, nonce, grantAllPermission)
 	if got != AnswerProbeAnswered {
 		t.Errorf("classifyComments(real producer template, rendered) = %q, want AnswerProbeAnswered", got)
 	}
@@ -208,7 +208,7 @@ func TestResumeCrossLane_ReEscalationReplacementNonceThroughRealClassifyComments
 			{ID: newAnchorID, Body: "Still-open question.\n" + newRendered, Author: restCommentAuthor{Login: "matteobortolazzo", Type: "User"}},
 			{ID: newAnchorID + 1, Body: "Here's my answer.", Author: restCommentAuthor{Login: "octocat", Type: "User"}, AuthorAssociation: "COLLABORATOR"},
 		}
-		got := classifyComments(comments, newAnchorID, newNonce)
+		got := classifyComments(comments, newAnchorID, newNonce, grantAllPermission)
 		if got != AnswerProbeAnswered {
 			t.Errorf("classifyComments(new anchor + qualifying reply) = %q, want AnswerProbeAnswered", got)
 		}
@@ -223,7 +223,7 @@ func TestResumeCrossLane_ReEscalationReplacementNonceThroughRealClassifyComments
 			{ID: oldAnchorID, Body: "Original question.\n" + oldRendered, Author: restCommentAuthor{Login: "matteobortolazzo", Type: "User"}},
 			{ID: oldAnchorID + 1, Body: "Here's my answer.", Author: restCommentAuthor{Login: "octocat", Type: "User"}, AuthorAssociation: "COLLABORATOR"},
 		}
-		got := classifyComments(comments, newAnchorID, newNonce)
+		got := classifyComments(comments, newAnchorID, newNonce, grantAllPermission)
 		if got != AnswerProbeAnchorMismatch {
 			t.Errorf("classifyComments(reply to old/orphaned anchor only) = %q, want AnswerProbeAnchorMismatch", got)
 		}
@@ -236,11 +236,47 @@ func TestResumeCrossLane_ReEscalationReplacementNonceThroughRealClassifyComments
 		comments := []restIssueComment{
 			{ID: newAnchorID, Body: "Still-open question.\n" + newRendered, Author: restCommentAuthor{Login: "matteobortolazzo", Type: "User"}},
 		}
-		got := classifyComments(comments, 0, newNonce)
+		got := classifyComments(comments, 0, newNonce, grantAllPermission)
 		if got != AnswerProbeAnchorUnset {
 			t.Errorf("classifyComments(nonce without ID) = %q, want AnswerProbeAnchorUnset", got)
 		}
 	})
+}
+
+// -- #882: accepted write-permission set cross-lane parity -------------------
+
+// TestResumeCrossLane_AcceptedPermissionSetStatedInPhase1PlanMatchesGoAcceptedSet
+// extends the #849 AC6 cross-lane precedent to #882's authorization contract:
+// phase-1-plan.md's `## Resume From Draft` section must literally document
+// the exact accepted `permission` value set the plan's Q1 fixes ({"admin",
+// "write"}), matching the real Go closed set (writePermissionGrantingValues,
+// permission.go) -- never a synthetic/duplicated list on either side.
+func TestResumeCrossLane_AcceptedPermissionSetStatedInPhase1PlanMatchesGoAcceptedSet(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "flow", "skills", "implement", "phases", "phase-1-plan.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("cross-lane (#882): could not read the producer doc at %s: %v -- this is a hard failure, never a skip", path, err)
+	}
+	content := string(data)
+
+	section := extractMarkdownSection(content, "## Resume From Draft")
+	if section == "" {
+		t.Fatalf("cross-lane (#882): could not locate '## Resume From Draft' in %s -- this is a hard failure, never a skip", path)
+	}
+
+	if len(writePermissionGrantingValues) == 0 {
+		t.Fatalf("test setup: writePermissionGrantingValues is empty")
+	}
+	for _, v := range writePermissionGrantingValues {
+		if !strings.Contains(section, "`"+v+"`") {
+			t.Errorf("cross-lane (#882): %s's '## Resume From Draft' section does not mention the literal accepted permission value `%s` (the real Go closed set, writePermissionGrantingValues)", path, v)
+		}
+	}
+	// role_name must never be documented as an accepted signal (the plan's
+	// Q1: custom org roles make it an open set).
+	if strings.Contains(section, "`role_name`") {
+		t.Errorf("cross-lane (#882): %s's '## Resume From Draft' section must never document `role_name` as a consulted signal (plan Q1)", path)
+	}
 }
 
 // extractMarkdownSection returns the body of the named "## <heading>"

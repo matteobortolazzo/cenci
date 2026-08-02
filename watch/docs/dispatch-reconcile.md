@@ -131,6 +131,18 @@ helper that forgets to embed a marker would silently become a false
 "answered" trigger — it would look exactly like a human reply and could
 resume a ticket nobody actually answered.
 
+**Passing the association prefilter is necessary but not sufficient (#882).**
+`isAuthorizedAssociation` only narrows the candidate set once the
+marker/bot-shape checks already pass — it is not itself the final
+authorization gate. The replying login must also positively hold `admin` or
+`write` permission on the repository, re-verified every time against the
+authoritative `gh api repos/<owner>/<repo>/collaborators/<login>/permission`
+endpoint (`permission.go`) — a read/triage collaborator, a removed
+collaborator, or an organization member without this repository's write
+access is never authorized to resume an unattended planning session, no
+matter how favorable their author association looks. See `permission.go` and
+`watch/README.md`'s escalation section for the full authorization contract.
+
 **The anchor itself is no longer located by scanning for a marker (#849).**
 Pre-#849, `classifyComments` treated the *last* bot-authored comment
 containing `<!-- cenci-planner-escalation -->` as "the" anchor — a content

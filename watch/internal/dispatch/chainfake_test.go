@@ -140,6 +140,17 @@ type ghWorld struct {
 	RepoSettings ghRepoSettings            `json:"repoSettings"`
 	MergeQueue   map[int]ghMergeQueueState `json:"mergeQueue"` // keyed by PR number
 
+	// Permissions (#882) is the fake collaborator-permission table: keyed by
+	// lowercased login (mirrors GitHub's own case-insensitive login
+	// matching), value the top-level `permission` string GET
+	// .../collaborators/<login>/permission would return ("admin", "write",
+	// "read", "triage", "none", or any other value a test wants to exercise
+	// the unrecognized-value class with). A login with no seeded entry
+	// defaults to "none" in chainCollaboratorPermission -- an org member or
+	// removed collaborator with no repo access still gets HTTP 200
+	// permission:"none", never a 404 (the plan's Assumptions).
+	Permissions map[string]string `json:"permissions"`
+
 	CurrentLogin string `json:"currentLogin"`
 
 	NextCommentID int64 `json:"nextCommentId"`
@@ -160,6 +171,7 @@ func newGhWorld() *ghWorld {
 		PRNotes:      map[int][]ghComment{},
 		Reviews:      map[int][]ghReview{},
 		MergeQueue:   map[int]ghMergeQueueState{},
+		Permissions:  map[string]string{},
 		CurrentLogin: "octocat",
 		RepoSettings: ghRepoSettings{AllowSquash: true},
 	}
@@ -213,6 +225,9 @@ func loadGhWorld(path string) (*ghWorld, error) {
 	}
 	if world.MergeQueue == nil {
 		world.MergeQueue = map[int]ghMergeQueueState{}
+	}
+	if world.Permissions == nil {
+		world.Permissions = map[string]string{}
 	}
 	return world, nil
 }
@@ -348,6 +363,21 @@ func (h *chainHarness) seedReview(pr int, login, state, submittedAt string) int6
 		w.Reviews[pr] = append(w.Reviews[pr], ghReview{ID: id, State: state, Login: login, SubmittedAt: submittedAt})
 	})
 	return id
+}
+
+// seedPermission sets login's current repository write permission (#882's
+// top-level `permission` field from GET .../collaborators/<login>/permission),
+// keyed case-insensitively (mirrors GitHub's own case-insensitive login
+// matching) so a test can seed "octocat" and answer as "Octocat" without
+// drift. A login with no seeded entry defaults to "none" in
+// chainCollaboratorPermission below.
+func (h *chainHarness) seedPermission(login, permission string) {
+	h.mutate(func(w *ghWorld) {
+		if w.Permissions == nil {
+			w.Permissions = map[string]string{}
+		}
+		w.Permissions[strings.ToLower(login)] = permission
+	})
 }
 
 // addIssueComment appends a comment to an issue's comment thread (the
@@ -748,6 +778,9 @@ func dispatchChainGhCall(t *testing.T, world *ghWorld, args []string, localDir, 
 
 	case args[0] == "api" && strings.Contains(joined, "/issues/") && strings.Contains(joined, "/comments"):
 		return chainIssueCommentsAPI(world, args)
+
+	case args[0] == "api" && strings.Contains(joined, "/collaborators/") && strings.HasSuffix(joined, "/permission"):
+		return chainCollaboratorPermission(world, args), "", 0
 
 	case args[0] == "api" && strings.Contains(joined, "/pulls/") && strings.Contains(joined, "/comments"):
 		return chainPRCommentsAPI(world, args)
@@ -1187,19 +1220,46 @@ func chainAllowedMethods(world *ghWorld) string {
 	return string(data)
 }
 
-// extractNumberBetween pulls the integer segment between prefix and suffix
-// substrings out of s, e.g. ("repos/o/r/issues/101/comments?...", "/issues/", "/comments") -> 101.
-func extractNumberBetween(s, prefix, suffix string) int {
+// chainCollaboratorPermission serves #882's write-permission probe route:
+// `gh api repos/<owner>/<repo>/collaborators/<login>/permission`. A login
+// with no seeded world.Permissions entry defaults to "none" (an org member
+// or removed collaborator with no repo access, per the plan's Assumptions --
+// GitHub returns HTTP 200 permission:"none" here, never a 404).
+func chainCollaboratorPermission(world *ghWorld, args []string) string {
+	endpoint := pathArg(args)
+	login := extractStringBetween(endpoint, "/collaborators/", "/permission")
+	permission, ok := world.Permissions[strings.ToLower(login)]
+	if !ok {
+		permission = "none"
+	}
+	data, _ := json.Marshal(map[string]string{"permission": permission})
+	return string(data)
+}
+
+// extractStringBetween pulls the substring between prefix and suffix out of
+// s, e.g. ("repos/o/r/collaborators/octocat/permission", "/collaborators/",
+// "/permission") -> "octocat". Mirrors extractNumberBetween below, for a
+// string segment rather than an integer one.
+func extractStringBetween(s, prefix, suffix string) string {
 	i := strings.Index(s, prefix)
 	if i < 0 {
-		return 0
+		return ""
 	}
 	rest := s[i+len(prefix):]
 	j := strings.Index(rest, suffix)
 	if j < 0 {
-		return 0
+		return ""
 	}
-	n, _ := strconv.Atoi(rest[:j])
+	return rest[:j]
+}
+
+// extractNumberBetween pulls the integer segment between prefix and suffix
+// substrings out of s, e.g. ("repos/o/r/issues/101/comments?...", "/issues/", "/comments") -> 101.
+// Built on extractStringBetween above: an unmatched prefix/suffix yields "",
+// which strconv.Atoi maps to 0, the same not-found sentinel this function
+// already returned before #882 introduced extractStringBetween.
+func extractNumberBetween(s, prefix, suffix string) int {
+	n, _ := strconv.Atoi(extractStringBetween(s, prefix, suffix))
 	return n
 }
 

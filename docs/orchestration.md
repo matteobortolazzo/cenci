@@ -85,9 +85,18 @@ verified by the matching `escalationNonce` marker in that comment's body, not a 
 "the last comment that looks like an anchor" (ticket #849 hardens this after verifying the
 pre-#849 marker-only anchor would silently never resume under an ordinary, non-bot-shaped
 `gh` identity). A qualifying reply is positioned after that verified anchor, marker-free,
-not authored by a `*[bot]`/`app/*` login or the REST API's `user.type == "Bot"`, and posted
-by an author whose association is one of `OWNER`, `MEMBER`, or `COLLABORATOR` — and, when
-found, swaps `+Working` `−Input Needed` in one atomic label call (`ticket #853`: the same
+not authored by a `*[bot]`/`app/*` login or the REST API's `user.type == "Bot"`, posted
+by an author whose association is one of `OWNER`, `MEMBER`, or `COLLABORATOR` (ticket #882:
+a coarse prefilter only, never final authorization), AND currently holds `admin` or `write`
+permission on the repository, resolved via `gh api repos/<owner>/<repo>/collaborators/<login>/permission`
+(the endpoint's authoritative top-level `permission` field; `role_name` is never consulted).
+A read/triage collaborator, a removed collaborator, or an organization member without this
+repository's write access is denied even with an otherwise-qualifying association — and any
+permission-probe failure (API error, timeout, truncated output, malformed JSON, a missing
+`permission` field, or an unrecognized value) fails closed with its own distinct reason,
+exactly like an unresolved comments probe. Permission is resolved fresh every pass — never
+cached across passes, never treated as still current from an earlier resume. When a reply
+qualifies, dispatch swaps `+Working` `−Input Needed` in one atomic label call (`ticket #853`: the same
 transition contract the manual `/cenci:implement <id>` re-run's `pipeline label --transition
 working` uses) before relaunching the planning session against the persisted
 `status: awaiting-input` draft. A draft whose anchor fields are missing, malformed,
