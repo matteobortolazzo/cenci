@@ -1,6 +1,7 @@
 package babysit
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -2287,6 +2288,123 @@ func TestTickAutomergeMergeNonzeroExitThenRefetchUnreadableNeverSucceeds(t *test
 	}
 	if n := mergeCallCount(calls); n != 1 {
 		t.Fatalf("gh pr merge calls = %d, want exactly 1: no retry", n)
+	}
+}
+
+// TestExecuteMerge_RealTimeoutOnMergeCallClassifiesFailureClassTimeout is the
+// package-babysit half of #915's variant (4) split (parent #915's Decisions,
+// AC2; the other half is
+// dispatch.TestAutonomousChain_MergeAcceptedButClientSeesFailureIsSettledByPostMergeRefetch,
+// internal/dispatch/chain_negative_babysit_test.go): a genuine errGhTimeout /
+// failureClassTimeout classification "on the merge call" itself, produced
+// through the REAL execGh (never scripted through the execGh seam, which
+// withScriptedCommands above uses for every other executeMerge test) --
+// mirrors TestExecGh_ParentContextDeadlineClassifiesAsTimeout's PATH-shim
+// technique (gh_test.go), driving executeMerge directly (unexported,
+// in-package) rather than a full tick.
+//
+// A per-call ghParentContext is load-bearing (plan Assumptions): in
+// production ghParentContext is always context.Background(), and the
+// post-merge refetch never inherits the merge call's own expired deadline.
+// A single shared expired context here would make the refetch fail too,
+// misattributing failureClassTimeout to reasonMergeVerifyUnreadable (the
+// refetch's own failure reason) instead of reasonMergeFailed (the merge
+// call's), contradicting #915's "on the merge call" wording. The fake `gh`
+// shim uses "exec sleep 5" (never a bare "sleep 5" followed by another line)
+// for the merge call only -- TestExecGh_ParentContextDeadlineClassifiesAsTimeout's
+// own comment explains why: a bare "sleep 5\nexit 0\n" forks sleep as a
+// child the shell's own SIGKILL never reaches, leaving an orphan holding the
+// output pipe open for the full 5s regardless of ghParentContext's short
+// deadline. Detail is deliberately never asserted non-empty here (plan Step
+// 8): the killed shim writes nothing to either stream before it dies.
+func TestExecuteMerge_RealTimeoutOnMergeCallClassifiesFailureClassTimeout(t *testing.T) {
+	// Defense-in-depth (never expected to matter given the PATH-prepended
+	// shim below, but cheap insurance against a future reordering of the
+	// t.Setenv("PATH", ...) call or the shim install ever letting the real
+	// `gh` binary resolve and act on ambient credentials): neutralize every
+	// gh auth-resolution env var, mirroring dispatch.newChainHarness's
+	// credential-neutralization block (security review #914 finding #1).
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_CONFIG_DIR", t.TempDir())
+	t.Setenv("GH_ENTERPRISE_TOKEN", "")
+	t.Setenv("GITHUB_ENTERPRISE_TOKEN", "")
+	t.Setenv("GH_HOST", "")
+
+	shimDir := t.TempDir()
+	logPath := filepath.Join(shimDir, "invocations.log")
+	quotedLog := "'" + strings.ReplaceAll(logPath, "'", `'\''`) + "'"
+	script := "#!/bin/sh\n" +
+		"echo \"$*\" >> " + quotedLog + "\n" +
+		"if [ \"$1\" = pr ] && [ \"$2\" = merge ]; then\n" +
+		"  exec sleep 5\n" +
+		"fi\n" +
+		// The post-merge refetch's own `gh pr view` response: a minimal,
+		// genuinely-parseable prView body reporting anything other than
+		// MERGED, so executeMerge falls through to the mergeErr != nil ->
+		// reasonMergeFailed branch rather than the "refetch confirms MERGED"
+		// branch.
+		"printf '%s' '{\"number\":42,\"state\":\"OPEN\"}'\n"
+	if err := os.WriteFile(filepath.Join(shimDir, "gh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// PATH-prepended (mirrors TestExecGh_OversizedOutputIsExplicitTruncationError,
+	// never installFakeGH, which replaces PATH wholesale and would make
+	// `sleep`/`[`/`echo` unresolvable inside the shim's own /bin/sh).
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	shortCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	t.Cleanup(cancel)
+	firstCall := true
+	original := ghParentContext
+	ghParentContext = func() context.Context {
+		if firstCall {
+			firstCall = false
+			return shortCtx
+		}
+		return context.Background()
+	}
+	t.Cleanup(func() { ghParentContext = original })
+
+	s := &State{PR: "42", Repo: "o/r"}
+	start := time.Now()
+	merged, decision := executeMerge(s, "abc123", automergeDecision{Merge: true})
+	elapsed := time.Since(start)
+
+	if merged {
+		t.Fatal("executeMerge: merged = true, want false on a genuine merge-call timeout")
+	}
+	if decision.Reason != reasonMergeFailed {
+		t.Fatalf("decision.Reason = %q, want %q", decision.Reason, reasonMergeFailed)
+	}
+	if decision.FailureClass != failureClassTimeout {
+		t.Fatalf("decision.FailureClass = %q, want %q (a genuine errGhTimeout classification through the real execGh)", decision.FailureClass, failureClassTimeout)
+	}
+	if elapsed >= 5*time.Second {
+		t.Fatalf("executeMerge took %v, want it bounded by ghParentContext's short deadline on the merge call, not the shim's full 5s sleep", elapsed)
+	}
+	if elapsed >= ghTimeout {
+		t.Fatalf("executeMerge took %v, want it well within ghTimeout (%v)", elapsed, ghTimeout)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading shim invocation log: %v", err)
+	}
+	var lines []string
+	for _, l := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+		if l != "" {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) != 2 {
+		t.Fatalf("shim invocations = %v, want exactly 2 (the killed merge call, then the post-merge refetch)", lines)
+	}
+	if !strings.HasPrefix(lines[0], "pr merge ") {
+		t.Fatalf("first shim invocation = %q, want a %q-prefixed `gh pr merge` call", lines[0], "pr merge ")
+	}
+	if !strings.HasPrefix(lines[1], "pr view ") {
+		t.Fatalf("second shim invocation = %q, want a %q-prefixed `gh pr view` call (the single authoritative post-merge refetch)", lines[1], "pr view ")
 	}
 }
 
