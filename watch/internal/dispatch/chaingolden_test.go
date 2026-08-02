@@ -39,8 +39,11 @@ type goldenAssignee struct {
 // goldenSubIssue mirrors the fixture's `parent.subIssues[{number,state}]`
 // shape -- the native sub-issue links, asserted here only as a fixture
 // invariant (number-set equality with children). Round-tripping this
-// through ghWorld is #914's (no --json subIssues route on
-// dispatchChainGhCall today).
+// through ghWorld (modeled on ghIssue.SubIssues, never a new --json
+// subIssues route/consumer, per Q3) is asserted by
+// TestAutonomousChain_PositiveEndToEnd's assertGoldenFidelityUnchanged
+// (chain_e2e_test.go), which pins parent.SubIssues byte-identical after
+// every real `gh issue edit` mutation across the full positive scenario.
 type goldenSubIssue struct {
 	Number int    `json:"number"`
 	State  string `json:"state"`
@@ -58,7 +61,10 @@ type goldenPlan struct {
 
 // goldenParent mirrors the fixture's `parent{}` object. Milestone is kept as
 // raw JSON: its sub-schema isn't otherwise consumed by any production type
-// in this package (#914's concern), only checked here for presence.
+// in this package, only checked here for presence. Round-tripping it through
+// ghWorld (modeled on ghIssue.Milestone, never a new gh route/consumer, per
+// Q3) is asserted by TestAutonomousChain_PositiveEndToEnd's
+// assertGoldenFidelityUnchanged (chain_e2e_test.go).
 type goldenParent struct {
 	Number    int              `json:"number"`
 	Title     string           `json:"title"`
@@ -207,11 +213,13 @@ func TestGoldenGraph_SchemaInvariants(t *testing.T) {
 		}
 	}
 
-	// #914: milestone and native sub-issue links are asserted here only as
-	// fixture invariants (presence/non-emptiness); round-tripping either
-	// through ghWorld (a --json subIssues route, a milestone field on
-	// ghIssue) is deferred to #914 per Q1 -- ghWorld is not extended in this
-	// ticket.
+	// Milestone and native sub-issue links are asserted here only as fixture
+	// invariants (presence/non-emptiness); round-tripping either through
+	// ghWorld (ghIssue.Milestone / ghIssue.SubIssues, preservation only, per
+	// Q3 -- never a new gh route/consumer) is
+	// TestAutonomousChain_PositiveEndToEnd's assertGoldenFidelityUnchanged
+	// (chain_e2e_test.go), which pins both byte-identical after every real
+	// `gh issue edit` across the full positive scenario.
 	if !isNonEmptyJSONObject(graph.Parent.Milestone) {
 		t.Error("parent.milestone is missing or empty")
 	}

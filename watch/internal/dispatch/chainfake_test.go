@@ -30,11 +30,14 @@ package dispatch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -56,6 +59,28 @@ type ghIssue struct {
 	Labels    []string `json:"labels"`
 	Assignees []string `json:"assignees"`
 	UpdatedAt string   `json:"updatedAt"`
+
+	// Milestone and SubIssues (#914) are world-model fidelity only: no
+	// production code in this repo consumes either field (Q3), so there is
+	// no new `gh` route or `--json` field-switch entry for them -- they
+	// exist solely so the golden-fixture-seeded positive scenario can assert
+	// both are byte-identical after every real `gh issue edit` mutation
+	// (assertGoldenFidelityUnchanged, chain_e2e_test.go).
+	Milestone *ghMilestone `json:"milestone,omitempty"`
+	SubIssues []ghSubIssue `json:"subIssues,omitempty"`
+}
+
+// ghMilestone mirrors the golden fixture's `{number,title}` milestone shape.
+type ghMilestone struct {
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+}
+
+// ghSubIssue mirrors the golden fixture's native sub-issue link shape
+// (`{number,state}`).
+type ghSubIssue struct {
+	Number int    `json:"number"`
+	State  string `json:"state"`
 }
 
 func (i *ghIssue) effectiveState() string {
@@ -127,6 +152,40 @@ type ghMergeQueueState struct {
 	Enabled      bool `json:"enabled"`
 }
 
+// ghAmbiguity is one declarative, JSON-serializable fault-injection spec
+// (#914 plan): the gh handler runs in a re-exec'd helper process, so a Go
+// closure or parent-process table would be invisible to it -- only
+// something that round-trips through the persisted world JSON works.
+//
+// Route is the chainRouteKey classification of the gh invocation this spec
+// targets ("issue edit", "pr merge", "pr view", "pr checks", "api graphql",
+// ...). OnCall is the 1-indexed ordinal occurrence of that route this spec
+// fires on; zero (the default) matches every occurrence of the route,
+// unconditionally. Kind is one of "ambiguous-success" / "indeterminate" /
+// "truncate" / "timeout" / "state-change". Payload carries the
+// "state-change" kind's named declarative op (e.g. "reopen-review",
+// optionally suffixed "op:value" for parameterized ops).
+type ghAmbiguity struct {
+	Route   string `json:"route"`
+	OnCall  int    `json:"onCall,omitempty"`
+	Kind    string `json:"kind"`
+	Payload string `json:"payload,omitempty"`
+}
+
+// ghOpenPRPageOverride makes #881's `gh api graphql` open-PR inventory page
+// response fully injectable (#914 plan step 2): hasNextPage, endCursor
+// (including a non-advancing malformed-cursor case), a totalCount override
+// (so a cap-exhausted verdict doesn't require seeding 2000+ real PRs), and
+// the nested closingIssuesReferences.pageInfo.hasNextPage. A nil field means
+// "no override, use the real computed default" (chainOpenPRPage's own
+// pageSlice-driven pagination over world.PRs).
+type ghOpenPRPageOverride struct {
+	ForceHasNextPage       *bool   `json:"forceHasNextPage,omitempty"`
+	ForceEndCursor         *string `json:"forceEndCursor,omitempty"`
+	ForceTotalCount        *int    `json:"forceTotalCount,omitempty"`
+	ForceNestedHasNextPage *bool   `json:"forceNestedHasNextPage,omitempty"`
+}
+
 // ghWorld is the full persisted fake-GitHub state, single-repo scoped (this
 // harness always uses one repo, "o/r") for simplicity.
 type ghWorld struct {
@@ -160,6 +219,16 @@ type ghWorld struct {
 	// space-joined, so assertions can pin exact call shapes (e.g. the
 	// squash-only merge argv) without depending on call ordering elsewhere.
 	Invocations []string `json:"invocations"`
+
+	// Ambiguities (#914) is the fault-injection spec list applyAmbiguity
+	// consults on every gh invocation; RouteCalls is the per-route ordinal
+	// counter it bumps to resolve each spec's OnCall selector.
+	Ambiguities []ghAmbiguity  `json:"ambiguities,omitempty"`
+	RouteCalls  map[string]int `json:"routeCalls"`
+
+	// OpenPRPageOverride (#914) makes the open-PR inventory page response
+	// fully injectable; nil means no override anywhere in the page.
+	OpenPRPageOverride *ghOpenPRPageOverride `json:"openPRPageOverride,omitempty"`
 }
 
 func newGhWorld() *ghWorld {
@@ -172,6 +241,7 @@ func newGhWorld() *ghWorld {
 		Reviews:      map[int][]ghReview{},
 		MergeQueue:   map[int]ghMergeQueueState{},
 		Permissions:  map[string]string{},
+		RouteCalls:   map[string]int{},
 		CurrentLogin: "octocat",
 		RepoSettings: ghRepoSettings{AllowSquash: true},
 	}
@@ -229,6 +299,9 @@ func loadGhWorld(path string) (*ghWorld, error) {
 	if world.Permissions == nil {
 		world.Permissions = map[string]string{}
 	}
+	if world.RouteCalls == nil {
+		world.RouteCalls = map[string]int{}
+	}
 	return world, nil
 }
 
@@ -270,6 +343,18 @@ type chainHarness struct {
 	origin       string // origin git repo (bare-equivalent: a plain non-bare repo the local clones from)
 	repo         string // "owner/repo" slug, e.g. "o/r"
 	cenciLogPath string // installFakeCenciProcess's recorded-invocation log
+
+	// testBin (#914) is the real test-binary path (os.Args[0]), captured
+	// BEFORE installFakeCenciProcess overwrites os.Args[0] with a recording
+	// shim -- reExecReconcile spawns this, never the (by-then-mutated)
+	// os.Args[0], to re-exec the actual test binary rather than the cenci
+	// recorder shim.
+	testBin string
+
+	// reconcileCalls (#914) counts reExecReconcile invocations against this
+	// harness: the first call runs a real (non-dry-run) reconcile pass, every
+	// subsequent call is a dry run (see reExecReconcile's doc comment).
+	reconcileCalls int
 }
 
 // newChainHarness wires the full fixture stack: real git origin/local repos,
@@ -283,11 +368,29 @@ type chainHarness struct {
 // shim, but cheap insurance against a future call site or a missing
 // installChainGH call ever letting the real `gh` binary resolve and act on
 // ambient credentials): neutralize every gh auth-resolution env var.
+//
+// XDG_CONFIG_HOME is ALWAYS pinned to a fresh harness-owned temp dir here
+// (security review #914 finding #1), never left to whatever the process
+// happened to inherit: applyStateChangeOp's "disable-fleet-automerge" op
+// (below) reads this var and unconditionally overwrites
+// <dir>/cenci/config.json -- if a developer's ambient XDG_CONFIG_HOME
+// pointed at a real config dir (common) and a future scenario seeded that
+// op, it would silently clobber their real ~/.config/cenci/config.json.
+// setFleetAutomergeEnabled overrides this to its own temp dir for tests that
+// need a specific automerge.enabled value; every other test still gets a
+// harness-scoped (never a real) config dir.
 func newChainHarness(t *testing.T) *chainHarness {
 	t.Helper()
+	// Captured before installFakeCenciProcess (below) overwrites os.Args[0]
+	// with a recording shim -- reExecReconcile needs the REAL test binary.
+	testBin := os.Args[0]
 	t.Setenv("GH_TOKEN", "")
 	t.Setenv("GITHUB_TOKEN", "")
 	t.Setenv("GH_CONFIG_DIR", t.TempDir())
+	t.Setenv("GH_ENTERPRISE_TOKEN", "")
+	t.Setenv("GITHUB_ENTERPRISE_TOKEN", "")
+	t.Setenv("GH_HOST", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	mainSyncGitEnv(t)
 	local, origin := initOriginAndLocal(t)
 
@@ -297,6 +400,7 @@ func newChainHarness(t *testing.T) *chainHarness {
 		local:     local,
 		origin:    origin,
 		repo:      "o/r",
+		testBin:   testBin,
 	}
 	installChainGH(t, h.worldPath, h.local, h.origin, h.repo)
 	h.cenciLogPath = installFakeCenciProcess(t)
@@ -377,6 +481,22 @@ func (h *chainHarness) seedPermission(login, permission string) {
 			w.Permissions = map[string]string{}
 		}
 		w.Permissions[strings.ToLower(login)] = permission
+	})
+}
+
+// seedAmbiguity appends one fault-injection spec to the world's Ambiguities
+// list, mirroring the harness's other seedX helpers above.
+func (h *chainHarness) seedAmbiguity(a ghAmbiguity) {
+	h.mutate(func(w *ghWorld) {
+		w.Ambiguities = append(w.Ambiguities, a)
+	})
+}
+
+// seedOpenPRPageOverride sets the open-PR inventory page-response override,
+// mirroring the harness's other seedX helpers above.
+func (h *chainHarness) seedOpenPRPageOverride(o ghOpenPRPageOverride) {
+	h.mutate(func(w *ghWorld) {
+		w.OpenPRPageOverride = &o
 	})
 }
 
@@ -463,10 +583,11 @@ func writeChainPlan(t *testing.T, dir string, number int, frontMatter [][2]strin
 // -- installChainGH: the PATH-level gh shim ----------------------------------
 
 const (
-	chainGhWorldEnv  = "CENCI_CHAIN_GH_WORLD"
-	chainGhLocalEnv  = "CENCI_CHAIN_GH_LOCAL_DIR"
-	chainGhOriginEnv = "CENCI_CHAIN_GH_ORIGIN_DIR"
-	chainGhRepoEnv   = "CENCI_CHAIN_GH_REPO"
+	chainGhWorldEnv   = "CENCI_CHAIN_GH_WORLD"
+	chainGhLocalEnv   = "CENCI_CHAIN_GH_LOCAL_DIR"
+	chainGhOriginEnv  = "CENCI_CHAIN_GH_ORIGIN_DIR"
+	chainGhRepoEnv    = "CENCI_CHAIN_GH_REPO"
+	chainGhShimDirEnv = "CENCI_CHAIN_GH_SHIM_DIR" // #914 security fix #2: lets a re-exec'd child verify gh resolves inside this dir, not a real ambient gh
 )
 
 // installChainGH writes a `gh` shim that re-execs the current test binary as
@@ -488,6 +609,7 @@ func installChainGH(t *testing.T, worldPath, localDir, originDir, repo string) {
 
 	testBin := os.Args[0]
 	dir := t.TempDir()
+	t.Setenv(chainGhShimDirEnv, dir)
 	script := "#!/bin/sh\nexec " + shellQuoteChain(testBin) +
 		" -test.run='^TestChainGhFakeHelper$' -test.v=false -- \"$@\"\n"
 	path := filepath.Join(dir, "gh")
@@ -531,6 +653,7 @@ func TestChainGhFakeHelper(t *testing.T) {
 
 	var stdout, stderr string
 	var code int
+	var block bool
 	lockErr := withChainWorldLock(worldPath, func() error {
 		world, err := loadGhWorld(worldPath)
 		if err != nil {
@@ -538,7 +661,7 @@ func TestChainGhFakeHelper(t *testing.T) {
 		}
 		world.Invocations = append(world.Invocations, strings.Join(args, " "))
 
-		stdout, stderr, code = dispatchChainGhCall(t, world, args, localDir, originDir)
+		stdout, stderr, code, block = dispatchChainGhCall(t, world, args, localDir, originDir)
 
 		if err := saveGhWorld(worldPath, world); err != nil {
 			return fmt.Errorf("saving world: %w", err)
@@ -547,6 +670,26 @@ func TestChainGhFakeHelper(t *testing.T) {
 	})
 	if lockErr != nil {
 		fmt.Fprintf(os.Stderr, "chain gh fake: %v\n", lockErr)
+		os.Exit(1)
+	}
+
+	if block {
+		// "timeout" ambiguity (#914 Q2): block on a real syscall read from an
+		// os.Pipe read end whose write end is never closed -- never
+		// time.Sleep, so there is no goroutine-asleep panic risk. This
+		// deliberately runs AFTER the world lock above was released and
+		// saved (Risks: blocking while holding the flock would wedge any
+		// concurrent gh call). The parent's own bounded deadline
+		// (dispatch's maxOpenPRProbeDuration, overridden to ~100ms by the
+		// test) kills this process via exec.CommandContext before this read
+		// ever returns, producing a genuine ctx.Err()==DeadlineExceeded ->
+		// errGhTimeout classification.
+		r, _, err := os.Pipe()
+		if err != nil {
+			os.Exit(1)
+		}
+		var buf [1]byte
+		_, _ = r.Read(buf[:])
 		os.Exit(1)
 	}
 
@@ -602,6 +745,227 @@ func chainCenciInvocations(t *testing.T, logPath string) []string {
 	return out
 }
 
+// -- TestChainReconcileHelper / reExecReconcile: re-exec'd reconcile pass ---
+
+const (
+	chainReconcileConfigEnv = "CENCI_CHAIN_RECONCILE_CONFIG"
+	chainReconcileStateEnv  = "CENCI_CHAIN_RECONCILE_STATE"
+	chainReconcileDryRunEnv = "CENCI_CHAIN_RECONCILE_DRYRUN"
+)
+
+// TestChainReconcileHelper is the env-guarded re-exec'd reconcile helper
+// (#914 plan): mirrors TestChainGhFakeHelper's skip-when-unset shape
+// (chainfake_test.go:514) so an ordinary `go test` run leaves it a no-op.
+// When invoked (via reExecReconcile below), it loads dispatch.Config from
+// CENCI_CHAIN_RECONCILE_CONFIG, asserts the chain gh fake's PATH shim is
+// genuinely inherited (never the ambient real gh -- a lost shim would
+// silently defer every verdict or hit real GitHub), runs exactly one
+// RunReconcileOnce pass against CENCI_CHAIN_RECONCILE_STATE, emits a small
+// JSON summary on stdout, and os.Exit's -- never returning to testing.Main,
+// which would otherwise print "PASS"/coverage output into the process's
+// stdout/exit-code contract the caller depends on.
+func TestChainReconcileHelper(t *testing.T) {
+	configPath := os.Getenv(chainReconcileConfigEnv)
+	if configPath == "" {
+		t.Skip("not invoked as the chain reconcile helper")
+		return
+	}
+	statePath := os.Getenv(chainReconcileStateEnv)
+	dryRun := os.Getenv(chainReconcileDryRunEnv) == "true"
+
+	// Child-side assertion (plan Risks: "Fake-gh PATH inheritance in the
+	// child"): the chain gh fake's world-path env var and a resolvable `gh`
+	// on PATH must both be genuinely inherited, or this pass would silently
+	// defer every verdict (nil snapshot) or shell out to a real `gh`.
+	if os.Getenv(chainGhWorldEnv) == "" {
+		fmt.Fprintln(os.Stderr, "chain reconcile helper: chain gh fake world not inherited (lost PATH shim env)")
+		os.Exit(1)
+	}
+	// Security fix #2: exec.LookPath("gh") != nil alone proves nothing -- it
+	// passes just as well for a real ambient /usr/bin/gh. Resolve the exact
+	// path and require it live inside installChainGH's own shim dir
+	// (chainGhShimDirEnv, set by the SAME t.Setenv call that installed the
+	// shim), so a lost/bypassed shim fails loudly instead of silently
+	// deferring every verdict or hitting real GitHub.
+	shimDir := os.Getenv(chainGhShimDirEnv)
+	ghPath, err := exec.LookPath("gh")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "chain reconcile helper: gh not resolvable on PATH: %v\n", err)
+		os.Exit(1)
+	}
+	if shimDir == "" || filepath.Dir(ghPath) != shimDir {
+		fmt.Fprintf(os.Stderr, "chain reconcile helper: gh resolved to %q, not the chain gh fake shim dir %q (lost PATH shim / a real ambient gh took precedence)\n", ghPath, shimDir)
+		os.Exit(1)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "chain reconcile helper: loading config %s: %v\n", configPath, err)
+		os.Exit(1)
+	}
+
+	result, runErr := RunReconcileOnce(cfg, &GHMutator{}, dryRun, os.Stdout, NewStateStore(statePath))
+	summary := struct {
+		Recoveries int    `json:"recoveries"`
+		Failed     int    `json:"failed"`
+		Escalated  int    `json:"escalated"`
+		Error      string `json:"error,omitempty"`
+	}{Recoveries: len(result.Recoveries), Failed: len(result.Failed), Escalated: len(result.Escalated)}
+	if runErr != nil {
+		// A RunReconcileOnce apply-level error (e.g. an injected ambiguity
+		// making `gh issue edit` fail) is an expected, OBSERVABLE outcome
+		// this harness exercises, not an infrastructure failure -- report it
+		// in the summary rather than a nonzero exit, which reExecReconcile's
+		// caller would otherwise treat as this helper itself misbehaving.
+		summary.Error = runErr.Error()
+	}
+	data, _ := json.Marshal(summary)
+	if _, err := fmt.Fprintln(os.Stdout, string(data)); err != nil {
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+// chainReconcileHelperTimeout/chainReconcileHelperWaitDelay bound
+// reExecReconcile's re-exec'd child process (security fix #3), mirroring
+// gh.go's ghTimeout/ghWaitDelay conventions (watch/AGENTS.md's subprocess
+// rule for internal/dispatch/internal/babysit): if the child blocks on the
+// reconcile-state flock -- exactly the risk this test exists to detect --
+// it must be killed within a bounded deadline instead of stalling the whole
+// `go test` binary until the global test timeout. A genuinely healthy pass
+// against this harness's fake gh completes in well under a second, so a few
+// seconds of headroom is ample without ever meaningfully slowing the suite.
+const (
+	chainReconcileHelperTimeout   = 10 * time.Second
+	chainReconcileHelperWaitDelay = 2 * time.Second
+)
+
+// chainReconcileSummary mirrors TestChainReconcileHelper's emitted JSON
+// summary line.
+type chainReconcileSummary struct {
+	Recoveries int    `json:"recoveries"`
+	Failed     int    `json:"failed"`
+	Escalated  int    `json:"escalated"`
+	Error      string `json:"error,omitempty"`
+}
+
+// reExecReconcile spawns TestChainReconcileHelper as a genuine, separate OS
+// process (via h.testBin, captured before installFakeCenciProcess mutates
+// os.Args[0]) against configPath/statePath, proving RunReconcileOnce's
+// crash-safe Load/Save cycle survives a real process boundary (#883's
+// torn-write/held-lock risk) rather than only an in-process call.
+// os.Environ() is passed through explicitly so the child inherits the gh
+// PATH shim, XDG_RUNTIME_DIR (the live snapshot socket), and
+// XDG_STATE_HOME.
+//
+// The FIRST call against a given harness runs a real (non-dry-run) pass, so
+// its own apply-mutation attempt can genuinely land or fail against the
+// fake gh boundary. Every subsequent call is a dry run: it still re-exercises
+// the state file's crash-safe Load path in a fresh process (proving the
+// grace-observation/apply-retry-counter state survives a re-exec), but never
+// attempts a second mutation that would race the counters the first pass
+// already recorded -- mirroring a restart's read-only status probe before
+// resuming normal reconciliation.
+//
+// The child is bounded by chainReconcileHelperTimeout/WaitDelay (security fix
+// #3): a hung reconcile-state flock kills the child instead of stalling `go
+// test` until the global timeout; ctx.Err() == context.DeadlineExceeded is
+// asserted explicitly so a timeout kill is never confused with an ordinary
+// nonzero exit. wantApplyError asserts the child's parsed JSON summary.Error
+// is non-empty (this call's own seeded ambiguity is expected to make an
+// apply attempt fail) or empty (an ordinary pass) -- silent-failure fix #4:
+// without this, an UNEXPECTED reconcile error (unrelated to any
+// intentionally-seeded ambiguity) would look identical to success, since
+// RunReconcileOnce's own error was previously only ever surfaced into
+// summary.Error, never asserted on by the caller.
+func (h *chainHarness) reExecReconcile(t *testing.T, configPath, statePath string, wantApplyError bool) chainReconcileSummary {
+	t.Helper()
+	h.reconcileCalls++
+	dryRun := "false"
+	if h.reconcileCalls > 1 {
+		dryRun = "true"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), chainReconcileHelperTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, h.testBin, "-test.run=^TestChainReconcileHelper$", "-test.v=false")
+	cmd.WaitDelay = chainReconcileHelperWaitDelay
+	cmd.Env = append(append([]string{}, os.Environ()...),
+		chainReconcileConfigEnv+"="+configPath,
+		chainReconcileStateEnv+"="+statePath,
+		chainReconcileDryRunEnv+"="+dryRun,
+	)
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("reconcile helper: timed out after %s -- possible reconcile-state flock hang (the exact risk this test exists to detect), distinct from an ordinary nonzero exit: %s", chainReconcileHelperTimeout, out)
+	}
+	if err != nil {
+		t.Fatalf("reconcile helper: %v: %s", err, out)
+	}
+
+	// RunReconcileOnce's own logf calls write diagnostic lines to os.Stdout
+	// ahead of TestChainReconcileHelper's final JSON summary line -- decode
+	// only the last line, not the whole combined output.
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	lastLine := lines[len(lines)-1]
+	var summary chainReconcileSummary
+	if jsonErr := json.Unmarshal([]byte(lastLine), &summary); jsonErr != nil {
+		t.Fatalf("reconcile helper: decoding JSON summary from output line %q: %v\nfull output:\n%s", lastLine, jsonErr, out)
+	}
+	if wantApplyError && summary.Error == "" {
+		t.Fatalf("reconcile helper: expected a reconcile apply error from the seeded ambiguity, got none; summary=%+v", summary)
+	}
+	if !wantApplyError && summary.Error != "" {
+		t.Fatalf("reconcile helper: unexpected reconcile error %q (not attributable to a seeded ambiguity)", summary.Error)
+	}
+	return summary
+}
+
+// truncateReconcileState is a byte-level torn-write helper: it truncates
+// path (the persisted reconcile state JSON) to half its current length,
+// simulating a crash mid-write so a test can assert stateStore.Load's
+// StateProbeDecodeError classification against a genuinely malformed file,
+// rather than a hand-authored synthetic invalid-JSON fixture.
+func truncateReconcileState(t *testing.T, path string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("truncateReconcileState: reading %s: %v", path, err)
+	}
+	half := len(data) / 2
+	if err := os.WriteFile(path, data[:half], 0o600); err != nil {
+		t.Fatalf("truncateReconcileState: writing %s: %v", path, err)
+	}
+}
+
+// TestTruncateReconcileStateProducesDecodeError is a direct, dedicated test
+// for truncateReconcileState's own behavior (watch/docs/test-strategy.md:
+// an unplanned helper needs direct coverage, not only incidental use
+// elsewhere) -- proving the byte-level torn-write helper actually produces
+// a genuinely undecodable file, classified StateProbeDecodeError by
+// stateStore.Load (mirrors a crash mid-write, #883).
+func TestTruncateReconcileStateProducesDecodeError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "reconcile.json")
+	store := NewStateStore(path)
+	if err := store.Save(ReconcileState{
+		Observations:  map[string]time.Time{"o/r#1": time.Now()},
+		ApplyFailures: map[string]int{"o/r#1": 1},
+	}); err != nil {
+		t.Fatalf("seeding valid state: %v", err)
+	}
+
+	truncateReconcileState(t, path)
+
+	_, err := store.Load()
+	if err == nil {
+		t.Fatal("expected Load to fail against a torn-write-truncated file")
+	}
+	var loadErr *StateLoadError
+	if !errors.As(err, &loadErr) || loadErr.Probe != StateProbeDecodeError {
+		t.Fatalf("Load error = %v, want a StateLoadError with Probe=%q", err, StateProbeDecodeError)
+	}
+}
+
 // -- serveChainSnapshot: a real daemon-socket double -------------------------
 
 // serveChainSnapshot serves snap over a real ipc broadcast server bound at
@@ -635,7 +999,26 @@ func serveChainSnapshot(t *testing.T, snap watch.StateSnapshot) {
 		_ = srv.Close()
 	})
 	go srv.Accept(ctx)
-	time.Sleep(20 * time.Millisecond) // allow the listener goroutine to start
+
+	// Bounded dial-retry (#914 plan: no sleeps anywhere, including this
+	// harness's own former 20ms listener wait): ipc.NewServer already binds
+	// the listener synchronously (net.Listen, above), and Server.Broadcast
+	// caches the snapshot for any client accepted later regardless of
+	// ordering (ipc/server.go's lastState), so this dial merely confirms the
+	// socket is genuinely connectable before returning -- cheap
+	// insurance, never a sleep.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		conn, dialErr := net.Dial("unix", watch.DefaultSocketPath())
+		if dialErr == nil {
+			_ = conn.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("chain snapshot server: socket never became dialable: %v", dialErr)
+		}
+		runtime.Gosched() // trivial nitpick #914 #10: yield instead of busy-spinning between retries
+	}
 	srv.Broadcast(snap)
 }
 
@@ -728,71 +1111,219 @@ func graphQLFieldValues(args []string) map[string]string {
 	return out
 }
 
+// chainRouteKey classifies args into an ambiguity route key -- a coarser
+// classification than dispatchChainGhCall's own switch (it does not
+// distinguish by flag content), so a scenario's Route string ("issue edit",
+// "pr merge", "pr view", "pr checks", "api graphql", ...) matches the call
+// it names regardless of exact flag ordering.
+func chainRouteKey(args []string) string {
+	if len(args) >= 2 {
+		switch {
+		case args[0] == "issue" && args[1] == "edit":
+			return "issue edit"
+		case args[0] == "issue" && args[1] == "view":
+			return "issue view"
+		case args[0] == "issue" && args[1] == "comment":
+			return "issue comment"
+		case args[0] == "issue" && args[1] == "list":
+			return "issue list"
+		case args[0] == "label" && args[1] == "create":
+			return "label create"
+		case args[0] == "pr" && args[1] == "view":
+			return "pr view"
+		case args[0] == "pr" && args[1] == "checks":
+			return "pr checks"
+		case args[0] == "pr" && args[1] == "merge":
+			return "pr merge"
+		case args[0] == "api" && args[1] == "graphql":
+			return "api graphql"
+		}
+	}
+	return strings.Join(args, " ")
+}
+
+// applyAmbiguity bumps world.RouteCalls' per-route ordinal counter for this
+// call and returns the ghAmbiguity (if any) scripted to fire on this
+// specific ordinal: OnCall == 0 matches every call on the route
+// (unconditional); a positive OnCall matches only that 1-indexed ordinal
+// occurrence. A "state-change" kind mutates world immediately here (before
+// the call's own normal handler runs), so a later call within the same or a
+// subsequent pass observes the mutated state; every other kind is applied
+// by dispatchChainGhCall around the normal handler's own result.
+func applyAmbiguity(world *ghWorld, args []string) (ghAmbiguity, bool) {
+	key := chainRouteKey(args)
+	if world.RouteCalls == nil {
+		world.RouteCalls = map[string]int{}
+	}
+	world.RouteCalls[key]++
+	ordinal := world.RouteCalls[key]
+
+	for _, a := range world.Ambiguities {
+		if a.Route != key {
+			continue
+		}
+		if a.OnCall != 0 && a.OnCall != ordinal {
+			continue
+		}
+		if a.Kind == "state-change" {
+			applyStateChangeOp(world, args, a.Payload)
+		}
+		return a, true
+	}
+	return ghAmbiguity{}, false
+}
+
+// applyStateChangeOp applies one of the closed set of named declarative
+// state-change ops a "state-change" ambiguity may request (#914 plan):
+// reopen-review, advance-head-sha, disable-fleet-automerge, add-label
+// (payload "add-label:<name>"), set-pr-state (payload "set-pr-state:
+// <state>"). args[2] is the PR/issue number for every route this fixture
+// serves that a state-change op targets.
+func applyStateChangeOp(world *ghWorld, args []string, payload string) {
+	op, arg, _ := strings.Cut(payload, ":")
+	number := 0
+	if len(args) >= 3 {
+		number, _ = strconv.Atoi(args[2])
+	}
+	switch op {
+	case "reopen-review":
+		if number == 0 {
+			return
+		}
+		world.NextReviewID++
+		world.Reviews[number] = append(world.Reviews[number], ghReview{
+			ID: world.NextReviewID, State: "CHANGES_REQUESTED", Login: "state-change-reviewer",
+			SubmittedAt: time.Now().UTC().Format(time.RFC3339),
+		})
+	case "advance-head-sha":
+		if p := world.PRs[number]; p != nil {
+			p.HeadRefOID += "-advanced"
+		}
+	case "disable-fleet-automerge":
+		dir := os.Getenv("XDG_CONFIG_HOME")
+		if dir == "" {
+			return
+		}
+		cenciDir := filepath.Join(dir, "cenci")
+		if err := os.MkdirAll(cenciDir, 0o755); err != nil {
+			return
+		}
+		_ = os.WriteFile(filepath.Join(cenciDir, "config.json"), []byte(`{"automerge":{"enabled":false}}`), 0o644)
+	case "add-label":
+		if is := world.Issues[number]; is != nil && arg != "" && !containsStr(is.Labels, arg) {
+			is.Labels = append(is.Labels, arg)
+		}
+	case "set-pr-state":
+		if p := world.PRs[number]; p != nil && arg != "" {
+			p.State = arg
+		}
+	}
+}
+
+// chainTruncatePaddingBytes exceeds both babysit's ghOutputCap and
+// dispatch's maxOpenPRStdoutBytes (each 4 MiB) so a single "truncate"
+// ambiguity injection trips either bounded-buffer cap regardless of which
+// package's `gh` caller is consuming it. Generated at emit time only inside
+// dispatchChainGhCall -- never persisted in the world JSON (#914 Risks).
+const chainTruncatePaddingBytes = 5 << 20 // 5 MiB
+
 // dispatchChainGhCall routes one gh invocation's args to its handler,
-// mutating world in place and returning (stdout, stderr, exitCode). Success
-// paths never write to stderr: pipeline.go's own `command` seam uses
-// CombinedOutput, so any stray stderr text on a zero-exit call would corrupt
-// the JSON payload it decodes.
-func dispatchChainGhCall(t *testing.T, world *ghWorld, args []string, localDir, originDir string) (stdout, stderr string, code int) {
+// mutating world in place and returning (stdout, stderr, exitCode, block).
+// block signals the "timeout" ambiguity: the caller (TestChainGhFakeHelper)
+// must block on a real syscall read AFTER releasing the world lock and
+// saving world, never inside this call. Success paths never write to
+// stderr: pipeline.go's own `command` seam uses CombinedOutput, so any stray
+// stderr text on a zero-exit call would corrupt the JSON payload it decodes.
+func dispatchChainGhCall(t *testing.T, world *ghWorld, args []string, localDir, originDir string) (stdout, stderr string, code int, block bool) {
 	if len(args) == 0 {
-		return "", "gh: no arguments\n", 1
+		return "", "gh: no arguments\n", 1, false
 	}
 	joined := strings.Join(args, " ")
 
-	switch {
-	case len(args) >= 2 && args[0] == "issue" && args[1] == "list":
-		return chainIssueList(world), "", 0
+	amb, matched := applyAmbiguity(world, args)
 
-	case len(args) >= 2 && args[0] == "issue" && args[1] == "view":
-		return chainIssueView(world, args)
-
-	case len(args) >= 2 && args[0] == "issue" && args[1] == "edit":
-		return chainIssueEdit(world, args)
-
-	case len(args) >= 2 && args[0] == "issue" && args[1] == "comment":
-		return chainIssueComment(world, args)
-
-	case len(args) >= 2 && args[0] == "label" && args[1] == "create":
-		return "", "", 0 // idempotent no-op: label creation always "succeeds"
-
-	case len(args) >= 2 && args[0] == "pr" && args[1] == "view":
-		return chainPRView(world, args)
-
-	case len(args) >= 2 && args[0] == "pr" && args[1] == "checks":
-		return chainPRChecks(world, args)
-
-	case len(args) >= 2 && args[0] == "pr" && args[1] == "merge":
-		return chainPRMerge(t, world, args, localDir, originDir)
-
-	case len(args) >= 2 && args[0] == "repo" && args[1] == "view":
-		return `{"nameWithOwner":"` + os.Getenv(chainGhRepoEnv) + `"}`, "", 0
-
-	case args[0] == "api" && flagValue(args, "--jq") == ".login":
-		return world.CurrentLogin + "\n", "", 0
-
-	case len(args) >= 2 && args[0] == "api" && args[1] == "graphql":
-		return chainGraphQL(world, args)
-
-	case args[0] == "api" && strings.Contains(joined, "/contents/.cenci/config.json"):
-		return chainRepoContents(t, args, localDir)
-
-	case args[0] == "api" && strings.Contains(joined, "/issues/") && strings.Contains(joined, "/comments"):
-		return chainIssueCommentsAPI(world, args)
-
-	case args[0] == "api" && strings.Contains(joined, "/collaborators/") && strings.HasSuffix(joined, "/permission"):
-		return chainCollaboratorPermission(world, args), "", 0
-
-	case args[0] == "api" && strings.Contains(joined, "/pulls/") && strings.Contains(joined, "/comments"):
-		return chainPRCommentsAPI(world, args)
-
-	case args[0] == "api" && strings.Contains(joined, "/pulls/") && strings.Contains(joined, "/reviews"):
-		return chainPRReviewsAPI(world, args)
-
-	case args[0] == "api" && flagValue(args, "--jq") != "" && strings.HasPrefix(pathArg(args), "repos/"):
-		return chainAllowedMethods(world), "", 0
+	// "timeout" and "truncate" short-circuit before the normal handler:
+	// neither kind cares about the call's own real response content, and
+	// truncate's padding must never be derived from (or leak into) the
+	// persisted world.
+	if matched && amb.Kind == "timeout" {
+		return "", "", 0, true
+	}
+	if matched && amb.Kind == "truncate" {
+		return strings.Repeat("x", chainTruncatePaddingBytes), "", 0, false
 	}
 
-	return "", "chain gh fake: unrecognized invocation: " + joined + "\n", 1
+	// "indeterminate" (feeds babysit's reasonMergeIndeterminate): only
+	// `gh pr merge` currently models this kind -- chainPRMerge below skips
+	// its own state mutation but still reports the ordinary success exit.
+	indeterminateMerge := matched && amb.Kind == "indeterminate"
+
+	switch {
+	case len(args) >= 2 && args[0] == "issue" && args[1] == "list":
+		stdout, stderr, code = chainIssueList(world), "", 0
+
+	case len(args) >= 2 && args[0] == "issue" && args[1] == "view":
+		stdout, stderr, code = chainIssueView(world, args)
+
+	case len(args) >= 2 && args[0] == "issue" && args[1] == "edit":
+		stdout, stderr, code = chainIssueEdit(world, args)
+
+	case len(args) >= 2 && args[0] == "issue" && args[1] == "comment":
+		stdout, stderr, code = chainIssueComment(world, args)
+
+	case len(args) >= 2 && args[0] == "label" && args[1] == "create":
+		stdout, stderr, code = "", "", 0 // idempotent no-op: label creation always "succeeds"
+
+	case len(args) >= 2 && args[0] == "pr" && args[1] == "view":
+		stdout, stderr, code = chainPRView(world, args)
+
+	case len(args) >= 2 && args[0] == "pr" && args[1] == "checks":
+		stdout, stderr, code = chainPRChecks(world, args)
+
+	case len(args) >= 2 && args[0] == "pr" && args[1] == "merge":
+		stdout, stderr, code = chainPRMerge(t, world, args, localDir, originDir, indeterminateMerge)
+
+	case len(args) >= 2 && args[0] == "repo" && args[1] == "view":
+		stdout, stderr, code = `{"nameWithOwner":"`+os.Getenv(chainGhRepoEnv)+`"}`, "", 0
+
+	case args[0] == "api" && flagValue(args, "--jq") == ".login":
+		stdout, stderr, code = world.CurrentLogin+"\n", "", 0
+
+	case len(args) >= 2 && args[0] == "api" && args[1] == "graphql":
+		stdout, stderr, code = chainGraphQL(world, args)
+
+	case args[0] == "api" && strings.Contains(joined, "/contents/.cenci/config.json"):
+		stdout, stderr, code = chainRepoContents(t, args, localDir)
+
+	case args[0] == "api" && strings.Contains(joined, "/issues/") && strings.Contains(joined, "/comments"):
+		stdout, stderr, code = chainIssueCommentsAPI(world, args)
+
+	case args[0] == "api" && strings.Contains(joined, "/collaborators/") && strings.HasSuffix(joined, "/permission"):
+		stdout, stderr, code = chainCollaboratorPermission(world, args), "", 0
+
+	case args[0] == "api" && strings.Contains(joined, "/pulls/") && strings.Contains(joined, "/comments"):
+		stdout, stderr, code = chainPRCommentsAPI(world, args)
+
+	case args[0] == "api" && strings.Contains(joined, "/pulls/") && strings.Contains(joined, "/reviews"):
+		stdout, stderr, code = chainPRReviewsAPI(world, args)
+
+	case args[0] == "api" && flagValue(args, "--jq") != "" && strings.HasPrefix(pathArg(args), "repos/"):
+		stdout, stderr, code = chainAllowedMethods(world), "", 0
+
+	default:
+		return "", "chain gh fake: unrecognized invocation: " + joined + "\n", 1, false
+	}
+
+	if matched && amb.Kind == "ambiguous-success" {
+		// The server accepted the mutation (already landed above, via the
+		// handler's own real mutation of world); the client sees this
+		// failure instead -- writing stderr here is fine, this is no longer
+		// a zero-exit success path.
+		stderr = "chain gh fake: ambiguous success (server accepted the mutation; client sees this failure)\n"
+		code = 1
+	}
+
+	return stdout, stderr, code, false
 }
 
 // pathArg returns the endpoint path argument -- always args[1] for every "api"
@@ -875,6 +1406,29 @@ func chainOpenPRPage(world *ghWorld, page int) string {
 	if hasNext {
 		endCursor = strconv.Quote(strconv.Itoa(page + 1))
 	}
+	totalCount := len(nums)
+
+	// #914 step 2: make hasNextPage/endCursor/totalCount/the nested
+	// closingIssuesReferences.pageInfo.hasNextPage fully injectable -- every
+	// field a real GitHub GraphQL response could report anomalously without
+	// needing to seed thousands of real PRs or a genuinely malformed cursor.
+	override := world.OpenPRPageOverride
+	nestedHasNext := false
+	if override != nil {
+		if override.ForceTotalCount != nil {
+			totalCount = *override.ForceTotalCount
+		}
+		if override.ForceHasNextPage != nil {
+			hasNext = *override.ForceHasNextPage
+		}
+		if override.ForceEndCursor != nil {
+			endCursor = strconv.Quote(*override.ForceEndCursor)
+		}
+		if override.ForceNestedHasNextPage != nil {
+			nestedHasNext = *override.ForceNestedHasNextPage
+		}
+	}
+
 	var nodes []string
 	for _, n := range items {
 		pr := world.PRs[n]
@@ -883,12 +1437,12 @@ func chainOpenPRPage(world *ghWorld, page int) string {
 			closingNodes = append(closingNodes, fmt.Sprintf(`{"number":%d}`, ci))
 		}
 		nodes = append(nodes, fmt.Sprintf(
-			`{"number":%d,"closingIssuesReferences":{"pageInfo":{"hasNextPage":false},"nodes":[%s]}}`,
-			n, strings.Join(closingNodes, ",")))
+			`{"number":%d,"closingIssuesReferences":{"pageInfo":{"hasNextPage":%v},"nodes":[%s]}}`,
+			n, nestedHasNext, strings.Join(closingNodes, ",")))
 	}
 	return fmt.Sprintf(
 		`{"data":{"repository":{"pullRequests":{"totalCount":%d,"pageInfo":{"hasNextPage":%v,"endCursor":%s},"nodes":[%s]}}}}`,
-		len(nums), hasNext, endCursor, strings.Join(nodes, ","))
+		totalCount, hasNext, endCursor, strings.Join(nodes, ","))
 }
 
 func chainIssueView(world *ghWorld, args []string) (stdout, stderr string, code int) {
@@ -1046,8 +1600,13 @@ func chainPRChecks(world *ghWorld, args []string) (string, string, int) {
 // chainPRMerge fails closed exactly like real GitHub would on a draft PR, a
 // PR whose Mergeable state is not MERGEABLE, or a requested merge method
 // (--squash/--merge/--rebase) the repo's settings don't allow -- rather than
-// unconditionally succeeding regardless of world state.
-func chainPRMerge(t *testing.T, world *ghWorld, args []string, localDir, originDir string) (string, string, int) {
+// unconditionally succeeding regardless of world state. indeterminate
+// (#914's "indeterminate" ambiguity kind) skips the merge's own state
+// mutation (world stays genuinely un-merged) while still reporting the
+// ordinary zero-exit success message -- `gh pr merge` exited zero, but the
+// PR never actually flipped to MERGED, feeding babysit's real
+// reasonMergeIndeterminate classification.
+func chainPRMerge(t *testing.T, world *ghWorld, args []string, localDir, originDir string, indeterminate bool) (string, string, int) {
 	t.Helper()
 	if len(args) < 3 {
 		return "", "chain gh fake: unrecognized invocation: " + strings.Join(args, " ") + "\n", 1
@@ -1078,6 +1637,9 @@ func chainPRMerge(t *testing.T, world *ghWorld, args []string, localDir, originD
 	wantSHA := flagValue(args, "--match-head-commit")
 	if wantSHA != "" && wantSHA != p.HeadRefOID {
 		return "", "gh: head commit does not match --match-head-commit\n", 1
+	}
+	if indeterminate {
+		return fmt.Sprintf("✓ Squash and merged pull request #%d\n", pr), "", 0
 	}
 	if localDir != "" && originDir != "" && p.HeadRefName != "" {
 		if err := squashMergeOntoOrigin(t, originDir, localDir, p.HeadRefName); err != nil {
@@ -1299,3 +1861,71 @@ func pageSlice[T any](items []T, page int) []T {
 	}
 	return items[start:end]
 }
+
+// seedFromGoldenGraph seeds the parent + every child issue from #912's
+// golden fixture graph (readGoldenGraph/loginsOf, chaingolden_test.go) into
+// h's world: labels, assignees, body (from h.seedIssue), plus milestone and
+// the parent's native sub-issue links (world-model fidelity only, per Q3 --
+// no new gh route/consumer). Reuses the fixture's own decoder rather than
+// re-decoding the JSON a second time.
+func seedFromGoldenGraph(t *testing.T, h *chainHarness, graph goldenGraph) {
+	t.Helper()
+
+	h.seedIssue(graph.Parent.Number, graph.Parent.Title, graph.Parent.Body, graph.Parent.Labels, loginsOf(graph.Parent.Assignees))
+	parentMilestone := decodeChainGoldenMilestone(t, graph.Parent.Milestone)
+	subIssues := make([]ghSubIssue, len(graph.Parent.SubIssues))
+	for i, si := range graph.Parent.SubIssues {
+		subIssues[i] = ghSubIssue(si)
+	}
+	h.mutate(func(w *ghWorld) {
+		is := w.Issues[graph.Parent.Number]
+		is.Milestone = &ghMilestone{Number: parentMilestone.Number, Title: parentMilestone.Title}
+		is.SubIssues = subIssues
+	})
+
+	for _, c := range graph.Children {
+		h.seedIssue(c.Number, c.Title, c.Body, c.Labels, loginsOf(c.Assignees))
+		childMilestone := decodeChainGoldenMilestone(t, c.Milestone)
+		h.mutate(func(w *ghWorld) {
+			w.Issues[c.Number].Milestone = &ghMilestone{Number: childMilestone.Number, Title: childMilestone.Title}
+		})
+	}
+}
+
+// chainAmbiguityScenario names one ambiguity-injection scenario #915's
+// negative variants drive via t.Run subtests over one shared harness (AC3:
+// one shared ghWorld per scenario group). Kind is the ghAmbiguity.Kind (or,
+// for the pagination variants, the injectable ghOpenPRPageOverride facet)
+// this scenario exercises.
+type chainAmbiguityScenario struct {
+	Name string
+	Kind string
+}
+
+// chainAmbiguityScenarios is the fixed inventory of ambiguity-injection
+// scenarios this ticket's capability self-tests prove (TestChainFake_*
+// above), bounded by construction: chainScenarioCount pins the exact count
+// so the table can never silently grow or shrink without a matching,
+// deliberate update (TestChainFake_ScenarioInventoryIsFixed).
+var chainAmbiguityScenarios = []chainAmbiguityScenario{
+	{Name: "ambiguous-success", Kind: "ambiguous-success"},
+	{Name: "indeterminate", Kind: "indeterminate"},
+	{Name: "truncate-dispatch-boundary", Kind: "truncate"},
+	{Name: "truncate-babysit-boundary", Kind: "truncate"},
+	{Name: "timeout", Kind: "timeout"},
+	// Trivial nitpick #914 #11: "pagination:"-prefixed, a namespace distinct
+	// from ghAmbiguity.Kind's own vocabulary (never passed to
+	// applyAmbiguity -- these route through ghOpenPRPageOverride instead), so
+	// a future ghAmbiguity{Kind: "page-has-next-page"} can never collide
+	// with (and silently no-op against) one of these.
+	{Name: "pagination-has-next-page", Kind: "pagination:has-next-page"},
+	{Name: "pagination-end-cursor-malformed", Kind: "pagination:end-cursor-malformed"},
+	{Name: "pagination-total-count-exceeds-cap", Kind: "pagination:total-count-exceeds-cap"},
+	{Name: "pagination-nested-truncation", Kind: "pagination:nested-truncation"},
+	{Name: "state-change-between-evaluations", Kind: "state-change"},
+}
+
+// chainScenarioCount is the fixed scenario count #916's coverage map cites
+// (AC3). Update this deliberately, alongside chainAmbiguityScenarios itself,
+// whenever the inventory genuinely changes.
+const chainScenarioCount = 10
