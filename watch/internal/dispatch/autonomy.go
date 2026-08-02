@@ -26,10 +26,16 @@ type repoAutonomyProbe struct {
 }
 
 // probeRepoAutonomy resolves dir's per-repository `planning.autonomy`
-// authorization at ref (#851): the repo's committed `.cenci/config.json`,
-// read via `git show <ref>:.cenci/config.json` (never the working tree), is
-// the authoritative grant -- fleet configuration (dispatch.planRefined) can
-// only disable, never independently authorize, lean planning.
+// authorization at ref (#851, #877): the repo's committed
+// `.cenci/config.json`, read via `git show <ref>:.cenci/config.json` (never
+// the working tree), is the authoritative grant -- fleet configuration
+// (dispatch.planRefined) can only disable, never independently authorize,
+// lean planning. Callers of this package's production entry point,
+// probeRepoAutonomies, must always pass a remote-confirmed ref (the fully
+// qualified remoteMainAuthRef, threaded through mainSyncResult.AutonomyRef)
+// -- never a bare local ref that could be stale or unpushed -- so the
+// authorization decision can only ever be traced to an object `git fetch
+// origin` actually confirmed this pass, with no fallback to local HEAD.
 //
 // dir == "" is never probed (mirrors probeStage/syncMain's own dir == ""
 // convention): resolving a repo root from the daemon's own cwd would risk
@@ -136,9 +142,18 @@ func gitFailureDetail(prefix string, err error, stderr string) string {
 }
 
 // probeRepoAutonomies runs probeRepoAutonomy once per repo in repos, reading
-// each one's own resolved FreshRef from syncs (falling back to "HEAD" when a
-// repo has no entry), and unconditionally logs one line per repo. Mirrors
-// syncMains' per-repo map/logging contract.
+// each one's own resolved AutonomyRef from syncs (#877), and unconditionally
+// logs one line per repo. Mirrors syncMains' per-repo map/logging contract.
+//
+// Unlike the pre-#877 FreshRef convention, a repo with no confirmed
+// AutonomyRef this pass -- either an explicit fetch-failure result
+// (AutonomyRef == "") or a syncs map lookup miss for a configured repo (no
+// entry at all) -- is classified RepoAutonomyFetchUnconfirmed WITHOUT
+// running any git command at all: there is deliberately no "HEAD" fallback
+// here (removed by #877), since falling back to local HEAD would let a
+// fetch outage silently authorize off a stale or unpushed local grant. Only
+// when AutonomyRef is non-empty does this call probeRepoAutonomyDetailed, at
+// that exact ref.
 //
 // A RepoAutonomyUnreadable result additionally logs the underlying git
 // failure detail (probeRepoAutonomyDetailed's Detail), so an operator can
@@ -154,10 +169,15 @@ func probeRepoAutonomies(repos []RepoConfig, syncs map[string]mainSyncResult, ou
 	}
 	result := make(map[string]RepoAutonomy, len(repos))
 	for _, rc := range repos {
-		ref := "HEAD"
-		if s, ok := syncs[rc.Repo]; ok && s.FreshRef != "" {
-			ref = s.FreshRef
+		s, ok := syncs[rc.Repo]
+		if !ok || s.AutonomyRef == "" {
+			// No remote-confirmed object this pass (fetch failed, or the repo
+			// has no syncs entry at all) -- never probe.
+			result[rc.Repo] = RepoAutonomyFetchUnconfirmed
+			logf(out, "dispatch: repo autonomy %s: %s\n", rc.Repo, RepoAutonomyFetchUnconfirmed)
+			continue
 		}
+		ref := s.AutonomyRef
 		p := probeRepoAutonomyDetailed(rc.Dir, ref)
 		result[rc.Repo] = p.Autonomy
 		if p.Autonomy == RepoAutonomyUnreadable && p.Detail != "" {

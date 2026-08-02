@@ -163,10 +163,15 @@ automerge → next dependent ticket's stale plan self-heals and gets re-planned
 **lean-planning repos only**: `dispatch.planRefined` remains a fleet-wide kill
 switch, but it is no longer sufficient authorization on its own (#851) —
 dispatch also reads the repo's own committed `planning.autonomy` setting from
-`.cenci/config.json` (never the working tree) and requires the literal value
+`.cenci/config.json` at the remote-confirmed `refs/remotes/origin/main` object
+(never local `HEAD`, never the working tree, and only when this pass's `git
+fetch origin` actually succeeded — #877) and requires the literal value
 `"lean"` before treating a planning pickup or autonomous re-plan as authorized;
 a missing, unreadable, malformed, or non-`"lean"` repo config denies both, with
-its own distinct skip reason. See [cenci-watch's
+its own distinct skip reason, and so does a fetch failure this pass (a
+distinct, retryable reason — ordinary `Planned` pickup in the same repo is
+unaffected). A repo's own unpushed local commits can never grant or revoke this
+authorization; only the fetched remote object counts. See [cenci-watch's
 README](../watch/README.md#planning-pickup-and-autonomous-re-plan) for the
 sibling-serialization and unbounded-re-plan limitations this loop accepts.
 

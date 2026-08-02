@@ -1652,10 +1652,16 @@ and `skills/implement/phases/phase-1-plan.md`'s `## Lean Approval Path`). Schema
 
   `planning.autonomy` has a second consumer besides `skills/implement/phases/phase-1-plan.md`:
   `cenci dispatch`'s pickup gate (`watch/internal/dispatch/autonomy.go`) reads this same
-  committed `.cenci/config.json` field to authorize an unattended planning pickup or
-  autonomous re-plan (`dispatch.planRefined: true`) — only the exact string `"lean"`
-  authorizes either consumer; both default-deny identically on a missing block, missing
-  key, or any other value. See [`watch/README.md`'s Planning pickup and autonomous
+  `.cenci/config.json` field to authorize an unattended planning pickup or autonomous
+  re-plan (`dispatch.planRefined: true`) — only the exact string `"lean"` authorizes
+  either consumer; both default-deny identically on a missing block, missing key, or any
+  other value. Unlike the implement-side consumer above (which reads the local working
+  tree), the dispatch-side consumer reads this field from the remote-confirmed
+  `refs/remotes/origin/main` object, never local `HEAD` or the working tree, and only
+  when that pass's `git fetch origin` actually succeeded (#877) — a committed-but-unpushed
+  `planning` block on local `main` can never authorize unattended planning, and a fetch
+  failure holds the gate with a distinct retryable reason rather than falling back to
+  stale local state. See [`watch/README.md`'s Planning pickup and autonomous
   re-plan](../../../watch/README.md#planning-pickup-and-autonomous-re-plan) for the
   dispatch-side gate.
 

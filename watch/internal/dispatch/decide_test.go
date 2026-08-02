@@ -1605,6 +1605,10 @@ func TestDecideAutonomyGate_Matrix(t *testing.T) {
 		{"missing config denies", RepoAutonomyMissing, ActionSkip, "repo config missing"},
 		{"malformed config denies", RepoAutonomyMalformed, ActionSkip, "repo config malformed"},
 		{"unreadable config denies", RepoAutonomyUnreadable, ActionSkip, "repo config unreadable"},
+		// #877: a repo this pass never confirmed a successful `git fetch
+		// origin` for denies with its own distinct, explicitly retryable
+		// reason -- never silently falls back to a prior pass's verdict.
+		{"fetch unconfirmed denies", RepoAutonomyFetchUnconfirmed, ActionSkip, reasonAutonomyFetchUnconfirmed},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1655,6 +1659,38 @@ func TestDecideAutonomyGate_UnrecognizedValueDefaultDenies(t *testing.T) {
 	assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "repo autonomy probe unrecognized", ""}})
 }
 
+// TestDecideAutonomyGate_UnrecognizedValueDoesNotCollapseIntoFetchUnconfirmed
+// guards against a regression that maps every unrecognized/default case onto
+// the new #877 reasonAutonomyFetchUnconfirmed reason: an unregistered
+// RepoAutonomy value must still resolve the pre-existing
+// reasonAutonomyUnknown, distinct from the new fetch-specific reason
+// (#446/#598 content-specific default-branch assertion).
+func TestDecideAutonomyGate_UnrecognizedValueDoesNotCollapseIntoFetchUnconfirmed(t *testing.T) {
+	in := planningCandidateInputs()
+	in.RepoAutonomy = map[string]RepoAutonomy{"o/r": RepoAutonomy("bogus")}
+	got := Decide(in)
+	if len(got) != 1 {
+		t.Fatalf("got %d decisions, want 1: %+v", len(got), got)
+	}
+	if got[0].Reason != reasonAutonomyUnknown {
+		t.Errorf("reason = %q, want %q", got[0].Reason, reasonAutonomyUnknown)
+	}
+	if got[0].Reason == reasonAutonomyFetchUnconfirmed {
+		t.Fatalf("an unrecognized RepoAutonomy value must not collapse into reasonAutonomyFetchUnconfirmed, got %q", got[0].Reason)
+	}
+}
+
+// TestDecideAutonomyGate_FetchUnconfirmed_HoldsFreshPlanningPickup covers the
+// #877 fetch-gating requirement directly at the planning-pickup site: a repo
+// whose fetch did not succeed this pass (RepoAutonomyFetchUnconfirmed) must
+// hold a fresh Refined planning candidate with its own distinct, explicitly
+// retryable reason.
+func TestDecideAutonomyGate_FetchUnconfirmed_HoldsFreshPlanningPickup(t *testing.T) {
+	in := planningCandidateInputs()
+	in.RepoAutonomy = map[string]RepoAutonomy{"o/r": RepoAutonomyFetchUnconfirmed}
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, reasonAutonomyFetchUnconfirmed, ""}})
+}
+
 // TestDecideAutonomyGate_PlanRefinedFalseIgnoresAutonomyEntirely is the
 // plan's Assumptions-section regression: autonomy is only ever consulted
 // when Config.PlanRefined is true, so every PlanRefined: false decision must
@@ -1686,6 +1722,9 @@ func TestDecideAutonomyGate_OrdinaryPlannedPickupUnaffectedByAutonomy(t *testing
 	autonomies := []RepoAutonomy{
 		RepoAutonomyLean, RepoAutonomyInteractive, RepoAutonomyMissing,
 		RepoAutonomyMalformed, RepoAutonomyUnreadable,
+		// #877: a fetch outage must never hold ordinary already-Planned
+		// implementation work -- only freshness-dependent planning/re-plan.
+		RepoAutonomyFetchUnconfirmed,
 	}
 	for _, a := range autonomies {
 		t.Run(string(a), func(t *testing.T) {
@@ -1714,6 +1753,9 @@ func TestDecideAutonomyGate_ReplanDeniedComposesStaleAndAutonomyReason(t *testin
 		{"missing config", RepoAutonomyMissing, "plan stale, re-plan blocked: repo config missing"},
 		{"malformed config", RepoAutonomyMalformed, "plan stale, re-plan blocked: repo config malformed"},
 		{"unreadable config", RepoAutonomyUnreadable, "plan stale, re-plan blocked: repo config unreadable"},
+		// #877: an autonomous re-plan on a fetch outage composes the same
+		// staleness-plus-autonomy shape, naming the fetch-specific reason.
+		{"fetch unconfirmed", RepoAutonomyFetchUnconfirmed, "plan stale, re-plan blocked: " + reasonAutonomyFetchUnconfirmed},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

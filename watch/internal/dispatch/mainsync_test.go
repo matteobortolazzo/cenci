@@ -742,3 +742,203 @@ func TestRunOnce_SyncsMainOncePerPassIndependentOfTicketCount(t *testing.T) {
 		t.Errorf("local HEAD after RunOnce = %s, want it fast-forwarded to origin HEAD %s", got, originHEAD)
 	}
 }
+
+// -- #877: mainSyncResult.AutonomyRef ----------------------------------------
+//
+// AutonomyRef is the exact object the repo-autonomy probe (autonomy.go) must
+// read authorization from this pass: non-empty if and only if `git fetch
+// origin` succeeded in this pass, and always the fully-qualified
+// refs/remotes/origin/main -- never the short "origin/main" (git's
+// rev-parse precedence resolves refs/heads/<name> before
+// refs/remotes/<name>, so the short form could be shadowed by a local
+// branch of that name; see autonomy_test.go's Q1 regression test).
+
+// TestRemoteMainAuthRef_IsFullyQualified pins the authorization ref
+// constant's literal value.
+func TestRemoteMainAuthRef_IsFullyQualified(t *testing.T) {
+	if remoteMainAuthRef != "refs/remotes/origin/main" {
+		t.Fatalf("remoteMainAuthRef = %q, want %q", remoteMainAuthRef, "refs/remotes/origin/main")
+	}
+}
+
+// TestSyncMain_AutonomyRef_Table asserts mainSyncResult.AutonomyRef across
+// every syncMain outcome family: non-empty and exactly remoteMainAuthRef on
+// every path reached after a successful `git fetch origin` (synced/
+// up-to-date/ahead/diverged/strictly-behind, dry-run and real alike, and a
+// branch change discovered only AFTER the fetch itself already succeeded),
+// and empty ("") on every pre-fetch or fetch-failed path (an unresolvable
+// remote, or a fetch that never completes at all).
+func TestSyncMain_AutonomyRef_Table(t *testing.T) {
+	t.Run("behind origin, real pass: fetched", func(t *testing.T) {
+		mainSyncGitEnv(t)
+		local, origin := initOriginAndLocal(t)
+		commitFile(t, origin, "advance.txt", "advance")
+
+		result := syncMain(local, false)
+		if result.Status != MainSyncSynced {
+			t.Fatalf("status = %q, want MainSyncSynced", result.Status)
+		}
+		if result.AutonomyRef != remoteMainAuthRef {
+			t.Errorf("AutonomyRef = %q, want %q (a real strictly-behind pass fetched successfully)", result.AutonomyRef, remoteMainAuthRef)
+		}
+	})
+
+	t.Run("behind origin, dry run: fetched", func(t *testing.T) {
+		mainSyncGitEnv(t)
+		local, origin := initOriginAndLocal(t)
+		commitFile(t, origin, "advance.txt", "advance")
+
+		result := syncMain(local, true)
+		if result.Status != MainSyncSynced {
+			t.Fatalf("status = %q, want MainSyncSynced", result.Status)
+		}
+		if result.AutonomyRef != remoteMainAuthRef {
+			t.Errorf("AutonomyRef = %q, want %q (dry-run also fetches -- only the merge is skipped)", result.AutonomyRef, remoteMainAuthRef)
+		}
+	})
+
+	t.Run("already up to date: fetched", func(t *testing.T) {
+		mainSyncGitEnv(t)
+		local, _ := initOriginAndLocal(t)
+
+		result := syncMain(local, false)
+		if result.Status != MainSyncSynced {
+			t.Fatalf("status = %q, want MainSyncSynced", result.Status)
+		}
+		if result.AutonomyRef != remoteMainAuthRef {
+			t.Errorf("AutonomyRef = %q, want %q", result.AutonomyRef, remoteMainAuthRef)
+		}
+	})
+
+	t.Run("local ahead: fetched", func(t *testing.T) {
+		mainSyncGitEnv(t)
+		local, _ := initOriginAndLocal(t)
+		commitFile(t, local, "ahead.txt", "local ahead")
+
+		result := syncMain(local, false)
+		if result.Status != MainSyncSynced {
+			t.Fatalf("status = %q, want MainSyncSynced", result.Status)
+		}
+		if result.AutonomyRef != remoteMainAuthRef {
+			t.Errorf("AutonomyRef = %q, want %q (local-ahead still fetched successfully -- but AutonomyRef, unlike FreshRef, never falls back to local HEAD)", result.AutonomyRef, remoteMainAuthRef)
+		}
+	})
+
+	t.Run("diverged: fetched", func(t *testing.T) {
+		mainSyncGitEnv(t)
+		local, origin := initOriginAndLocal(t)
+		commitFile(t, local, "local-only.txt", "local change")
+		commitFile(t, origin, "origin-only.txt", "origin change")
+
+		result := syncMain(local, false)
+		if result.Status != MainSyncDiverged {
+			t.Fatalf("status = %q, want MainSyncDiverged", result.Status)
+		}
+		if result.AutonomyRef != remoteMainAuthRef {
+			t.Errorf("AutonomyRef = %q, want %q (diverged still fetched successfully)", result.AutonomyRef, remoteMainAuthRef)
+		}
+	})
+
+	t.Run("fetch failed (unresolvable remote): empty", func(t *testing.T) {
+		mainSyncGitEnv(t)
+		local := t.TempDir()
+		gitTest(t, local, "init", "-b", "main")
+		commitFile(t, local, "base.txt", "base")
+		gitTest(t, local, "remote", "add", "origin", filepath.Join(t.TempDir(), "does-not-exist"))
+
+		result := syncMain(local, false)
+		if result.Status != MainSyncFetchFailed {
+			t.Fatalf("status = %q, want MainSyncFetchFailed", result.Status)
+		}
+		if result.AutonomyRef != "" {
+			t.Errorf("AutonomyRef = %q, want \"\" (fetch failed, no remote-confirmed object this pass)", result.AutonomyRef)
+		}
+	})
+
+	t.Run("branch changed mid-pass (after a successful fetch): still fetched", func(t *testing.T) {
+		// Reuses the #822 review-fix-#4 TOCTOU shim: the fetch itself
+		// succeeds for real (so AutonomyRef must still be set), and only
+		// the checkout changes afterward, blocking the subsequent merge --
+		// MainSyncNotMain. AutonomyRef's invariant is about the fetch, not
+		// the merge, so it must stay set even though the merge never runs.
+		mainSyncGitEnv(t)
+		local, origin := initOriginAndLocal(t)
+		commitFile(t, origin, "advance.txt", "advance")
+
+		realGit, err := exec.LookPath("git")
+		if err != nil {
+			t.Fatal(err)
+		}
+		shimDir := t.TempDir()
+		script := fmt.Sprintf(`#!/bin/sh
+is_fetch=0
+for arg in "$@"; do
+  if [ "$arg" = "fetch" ]; then is_fetch=1; fi
+done
+if [ "$1" = "-C" ] && [ "$is_fetch" = "1" ]; then
+  "%s" "$@"
+  status=$?
+  "%s" -C "$2" checkout -b sneaky-autonomy-ref >/dev/null 2>&1
+  exit $status
+fi
+exec "%s" "$@"
+`, realGit, realGit, realGit)
+		if err := os.WriteFile(filepath.Join(shimDir, "git"), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+		result := syncMain(local, false)
+		if result.Status != MainSyncNotMain {
+			t.Fatalf("status = %q, want MainSyncNotMain", result.Status)
+		}
+		if result.AutonomyRef != remoteMainAuthRef {
+			t.Errorf("AutonomyRef = %q, want %q (fetch succeeded before the mid-pass branch change blocked only the merge)", result.AutonomyRef, remoteMainAuthRef)
+		}
+	})
+
+	t.Run("fetch timeout (WaitDelay-forced close): empty", func(t *testing.T) {
+		// Mirrors TestExecGit_HungGrandchildHoldingStdout_ReturnsWithinWaitDelay,
+		// but scoped to only the fetch subcommand (via a directory-aware
+		// shim) so the earlier symbolic-ref/rev-parse probes still resolve
+		// for real -- exercising the same forced-close path syncMain would
+		// hit on a genuinely hung `git fetch origin`.
+		mainSyncGitEnv(t)
+		local, _ := initOriginAndLocal(t)
+
+		realGit, err := exec.LookPath("git")
+		if err != nil {
+			t.Fatal(err)
+		}
+		shimDir := t.TempDir()
+		script := fmt.Sprintf(`#!/bin/sh
+is_fetch=0
+for arg in "$@"; do
+  if [ "$arg" = "fetch" ]; then is_fetch=1; fi
+done
+if [ "$is_fetch" = "1" ]; then
+  (sleep 30 &)
+  exit 0
+fi
+exec "%s" "$@"
+`, realGit)
+		if err := os.WriteFile(filepath.Join(shimDir, "git"), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+		start := time.Now()
+		result := syncMain(local, false)
+		elapsed := time.Since(start)
+
+		if result.Status != MainSyncFetchFailed {
+			t.Fatalf("status = %q, detail = %q, want MainSyncFetchFailed", result.Status, result.Detail)
+		}
+		if result.AutonomyRef != "" {
+			t.Errorf("AutonomyRef = %q, want \"\" (fetch never actually completed)", result.AutonomyRef)
+		}
+		if elapsed > 20*time.Second {
+			t.Fatalf("syncMain took %v, want it to return well within gitTimeout thanks to WaitDelay (~%v)", elapsed, gitWaitDelay)
+		}
+	})
+}

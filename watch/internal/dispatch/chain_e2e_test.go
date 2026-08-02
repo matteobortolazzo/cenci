@@ -478,7 +478,14 @@ func TestAutonomousChain_UnresolvedReviewStopsBeforeMerge(t *testing.T) {
 
 func TestAutonomousChain_NonLeanRepoConfigStopsBeforeUnattendedPlanning(t *testing.T) {
 	h := newChainHarness(t)
-	writeCommittedConfig(t, h.local, interactiveConfigJSON)
+	// #877: use commitAndPushConfig (commits on origin, then fetches +
+	// ff-only merges into local), not a bare writeCommittedConfig(h.local,
+	// ...) -- the autonomy probe now only ever reads the remote-confirmed
+	// refs/remotes/origin/main object (mainSyncResult.AutonomyRef), so a
+	// config committed solely to local's main (never pushed) would resolve
+	// RepoAutonomyMissing at that ref instead of the intended interactive
+	// denial, defeating this test's purpose.
+	h.commitAndPushConfig(interactiveConfigJSON)
 
 	h.seedIssue(101, "Lean child", "First child, no dependency.", []string{"Refined"}, []string{"octocat"})
 

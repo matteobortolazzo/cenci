@@ -237,9 +237,9 @@ func TestProbeRepoAutonomy_SharedFreshRefParity_LeanConfigOnOriginMainVisible(t 
 
 // TestProbeRepoAutonomies_MapKeyedByRepoUsingEachSyncsFreshRef covers
 // probeRepoAutonomies' basic per-repo wiring: it loops every repo, reads
-// each one's committed config at its own resolved FreshRef (from the
-// supplied syncs map), and returns a map keyed by repo -- mirroring
-// syncMains' own per-repo map contract.
+// each one's committed config at its own resolved AutonomyRef (#877, from
+// the supplied syncs map -- FreshRef is no longer read here), and returns a
+// map keyed by repo -- mirroring syncMains' own per-repo map contract.
 func TestProbeRepoAutonomies_MapKeyedByRepoUsingEachSyncsFreshRef(t *testing.T) {
 	mainSyncGitEnv(t)
 	localA, _ := initOriginAndLocal(t)
@@ -252,8 +252,8 @@ func TestProbeRepoAutonomies_MapKeyedByRepoUsingEachSyncsFreshRef(t *testing.T) 
 		{Repo: "o/b", Dir: localB},
 	}
 	syncs := map[string]mainSyncResult{
-		"o/a": {Status: MainSyncSynced, FreshRef: "HEAD"},
-		"o/b": {Status: MainSyncSynced, FreshRef: "HEAD"},
+		"o/a": {Status: MainSyncSynced, FreshRef: "HEAD", AutonomyRef: "HEAD"},
+		"o/b": {Status: MainSyncSynced, FreshRef: "HEAD", AutonomyRef: "HEAD"},
 	}
 
 	got := probeRepoAutonomies(repos, syncs, io.Discard)
@@ -275,7 +275,7 @@ func TestProbeRepoAutonomies_LogsAvoidLoadBearingSubstrings(t *testing.T) {
 	writeCommittedConfig(t, local, interactiveConfigJSON)
 
 	repos := []RepoConfig{{Repo: "o/r", Dir: local}}
-	syncs := map[string]mainSyncResult{"o/r": {Status: MainSyncSynced, FreshRef: "HEAD"}}
+	syncs := map[string]mainSyncResult{"o/r": {Status: MainSyncSynced, FreshRef: "HEAD", AutonomyRef: "HEAD"}}
 
 	var buf bytes.Buffer
 	probeRepoAutonomies(repos, syncs, &buf)
@@ -287,5 +287,229 @@ func TestProbeRepoAutonomies_LogsAvoidLoadBearingSubstrings(t *testing.T) {
 		if strings.Contains(line, " skip:") || strings.Contains(line, " dispatch ") {
 			t.Errorf("repo-level autonomy-probe log line must not contain the lazyboards-reserved substrings, got %q", line)
 		}
+	}
+}
+
+// -- #877: AutonomyRef-driven remote authorization ---------------------------
+//
+// #851 read planning.autonomy against each repo's resolved FreshRef, which
+// fell back to local HEAD on every path except the dry-run strictly-behind
+// branch -- so a fetch outage silently fell back to local HEAD, and a
+// local-ahead main's config could grant/revoke lean without ever having been
+// pushed. #877 requires probeRepoAutonomies to consume the new AutonomyRef
+// field instead (non-empty only after a successful `git fetch origin` this
+// pass, and always the fully-qualified refs/remotes/origin/main), removing
+// the "HEAD" map-miss fallback entirely.
+
+// TestProbeRepoAutonomy_RemoteRefAuthoritative_DiffersFromLocalHEAD covers
+// the headline requirement: probing at the fully-qualified remote-tracking
+// ref must read the fetched remote object, not local HEAD, even when the two
+// disagree (here, local HEAD hasn't even merged the commit that carries the
+// config at all).
+func TestProbeRepoAutonomy_RemoteRefAuthoritative_DiffersFromLocalHEAD(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, origin := initOriginAndLocal(t)
+	writeCommittedConfig(t, origin, leanConfigJSON) // committed only on origin, not yet fetched/merged
+	gitTest(t, local, "fetch", "origin")
+
+	if got := probeRepoAutonomy(local, remoteMainAuthRef); got != RepoAutonomyLean {
+		t.Errorf("probeRepoAutonomy(local, remoteMainAuthRef) = %q, want RepoAutonomyLean (the fetched remote object)", got)
+	}
+	if got := probeRepoAutonomy(local, "HEAD"); got != RepoAutonomyMissing {
+		t.Errorf("probeRepoAutonomy(local, \"HEAD\") = %q, want RepoAutonomyMissing (local HEAD never merged the fetched commit)", got)
+	}
+}
+
+// TestProbeRepoAutonomy_RemoteRevokedToInteractive_LocalMainStillLean_DeniesAtRemoteRef
+// covers the ticket's acceptance criterion "remote revocation to interactive
+// is honored even when local main still contains lean after the last
+// successful pass": simulate an earlier successful pass that merged a lean
+// grant into local main, then a remote revocation to interactive -- probing
+// at the remote-authoritative ref must deny even though local HEAD (the
+// stale merge from the prior pass) still reads lean.
+func TestProbeRepoAutonomy_RemoteRevokedToInteractive_LocalMainStillLean_DeniesAtRemoteRef(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, origin := initOriginAndLocal(t)
+	writeCommittedConfig(t, origin, leanConfigJSON)
+	// Simulate an earlier successful pass: fetch + fast-forward merges the
+	// lean grant into local main.
+	gitTest(t, local, "fetch", "origin")
+	gitTest(t, local, "merge", "--ff-only", "origin/main")
+	if got := probeRepoAutonomy(local, "HEAD"); got != RepoAutonomyLean {
+		t.Fatalf("setup invariant broken: local HEAD = %q after the merge, want RepoAutonomyLean", got)
+	}
+
+	// Remote is now revoked to interactive; re-fetch (local main is
+	// deliberately left un-merged here -- #822's fast-forward-only merge is
+	// a separate concern from this test).
+	writeCommittedConfig(t, origin, interactiveConfigJSON)
+	gitTest(t, local, "fetch", "origin")
+
+	if got := probeRepoAutonomy(local, remoteMainAuthRef); got != RepoAutonomyInteractive {
+		t.Errorf("probeRepoAutonomy(local, remoteMainAuthRef) = %q, want RepoAutonomyInteractive (remote revocation honored)", got)
+	}
+	if got := probeRepoAutonomy(local, "HEAD"); got != RepoAutonomyLean {
+		t.Fatalf("setup invariant broken: local HEAD should still read Lean (the revocation was never merged locally), got %q -- otherwise this test isn't actually proving remote-ref authority over a stale local grant", got)
+	}
+}
+
+// TestProbeRepoAutonomy_LocalAheadUnpushedLean_CannotGrant_RemoteRefDenies
+// covers the ticket's "local-ahead main cannot supply the autonomy grant;
+// remote config remains authoritative" acceptance criterion: an unpushed
+// local commit granting lean (local ahead of origin) must never authorize --
+// only the fetched, remote-confirmed object can.
+func TestProbeRepoAutonomy_LocalAheadUnpushedLean_CannotGrant_RemoteRefDenies(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, origin := initOriginAndLocal(t)
+	writeCommittedConfig(t, origin, interactiveConfigJSON)
+	gitTest(t, local, "fetch", "origin")
+	gitTest(t, local, "merge", "--ff-only", "origin/main")
+	// Local-only, unpushed lean grant -- local main is now ahead of origin.
+	writeCommittedConfig(t, local, leanConfigJSON)
+
+	if got := probeRepoAutonomy(local, "HEAD"); got != RepoAutonomyLean {
+		t.Fatalf("setup invariant broken: local HEAD should read Lean (the unpushed local grant), got %q", got)
+	}
+	if got := probeRepoAutonomy(local, remoteMainAuthRef); got != RepoAutonomyInteractive {
+		t.Errorf("probeRepoAutonomy(local, remoteMainAuthRef) = %q, want RepoAutonomyInteractive -- an unpushed local-ahead grant must never authorize", got)
+	}
+}
+
+// TestProbeRepoAutonomy_MalformedRemoteConfig_ReturnsMalformed covers a
+// malformed committed config fetched from origin, probed at the fully
+// qualified remote-tracking ref -- the malformed/unreadable-remote-config
+// half of the ticket's "missing/malformed/unreadable/non-lean remote config
+// denies; no stale fallback" acceptance criterion.
+func TestProbeRepoAutonomy_MalformedRemoteConfig_ReturnsMalformed(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, origin := initOriginAndLocal(t)
+	writeCommittedConfig(t, origin, malformedConfigJSON)
+	gitTest(t, local, "fetch", "origin")
+
+	if got := probeRepoAutonomy(local, remoteMainAuthRef); got != RepoAutonomyMalformed {
+		t.Errorf("probeRepoAutonomy(local, remoteMainAuthRef) = %q, want RepoAutonomyMalformed", got)
+	}
+}
+
+// TestProbeRepoAutonomy_UnreadableRemoteRef_BadFetchedRef_ReturnsUnreadable
+// covers the unreadable-remote-config half of the same acceptance criterion,
+// using the fully-qualified ref form: a ref that does not resolve at all
+// (e.g. a repo that was never fetched, so refs/remotes/origin/main doesn't
+// exist yet) must classify as Unreadable -- the probe itself failed to run,
+// distinct from a resolvable ref with an absent/malformed config.
+func TestProbeRepoAutonomy_UnreadableRemoteRef_BadFetchedRef_ReturnsUnreadable(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, _ := initOriginAndLocal(t)
+	// Deliberately never fetched: refs/remotes/origin/main does not exist in
+	// this clone yet (initOriginAndLocal's `git clone` seeds it, so delete it
+	// to force the unresolvable case).
+	gitTest(t, local, "update-ref", "-d", "refs/remotes/origin/main")
+
+	if got := probeRepoAutonomy(local, remoteMainAuthRef); got != RepoAutonomyUnreadable {
+		t.Errorf("probeRepoAutonomy(local, remoteMainAuthRef) = %q, want RepoAutonomyUnreadable (ref does not resolve)", got)
+	}
+}
+
+// TestProbeRepoAutonomy_Q1_LocalBranchNamedOriginMain_DoesNotShadowRemoteTrackingRef
+// is the plan's Q1 regression test: git's rev-parse precedence resolves
+// refs/heads/<name> before refs/remotes/<name>, so the short "origin/main"
+// string used elsewhere in mainsync.go could, in principle, be shadowed by a
+// local branch literally named "origin/main". The authorization probe must
+// use the fully-qualified refs/remotes/origin/main specifically to close
+// this off: a local branch named "origin/main" carrying a granting lean
+// config must never leak into the authorization decision.
+func TestProbeRepoAutonomy_Q1_LocalBranchNamedOriginMain_DoesNotShadowRemoteTrackingRef(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, origin := initOriginAndLocal(t)
+	writeCommittedConfig(t, origin, interactiveConfigJSON)
+	gitTest(t, local, "fetch", "origin")
+
+	// A local branch literally named "origin/main" (refs/heads/origin/main)
+	// carrying a granting lean config.
+	gitTest(t, local, "checkout", "-b", "origin/main")
+	writeCommittedConfig(t, local, leanConfigJSON)
+	gitTest(t, local, "checkout", "main")
+
+	if got := probeRepoAutonomy(local, remoteMainAuthRef); got != RepoAutonomyInteractive {
+		t.Errorf("probeRepoAutonomy(local, remoteMainAuthRef) = %q, want RepoAutonomyInteractive -- a local branch literally named %q must never shadow the remote-tracking ref", got, "origin/main")
+	}
+	// Regression proof: the short, unqualified "origin/main" string DOES
+	// resolve to the shadowing local branch (git's own rev-parse
+	// precedence), confirming this test actually exercises the shadowing
+	// scenario rather than a vacuous setup.
+	if got := probeRepoAutonomy(local, "origin/main"); got != RepoAutonomyLean {
+		t.Fatalf("probeRepoAutonomy(local, \"origin/main\") = %q, want RepoAutonomyLean -- if this fails, the shadowing-branch setup itself is not exercising ambiguity, invalidating the regression proof above", got)
+	}
+}
+
+// TestProbeRepoAutonomies_FetchUnconfirmed_RunsNoProbeAndDeniesDistinctly
+// covers the ticket's "fetch failure gates freshness-dependent
+// planning/replanning with a distinct retryable reason" decision, at the
+// probe layer: a repo whose AutonomyRef is empty this pass (no successful
+// `git fetch origin`) must deny as the new RepoAutonomyFetchUnconfirmed
+// classification WITHOUT running any git command at all -- proven by
+// pointing Dir at a path that would fail differently (RepoAutonomyUnreadable)
+// if a probe actually ran against it.
+func TestProbeRepoAutonomies_FetchUnconfirmed_RunsNoProbeAndDeniesDistinctly(t *testing.T) {
+	bogusDir := filepath.Join(t.TempDir(), "never-created")
+	repos := []RepoConfig{{Repo: "o/r", Dir: bogusDir}}
+	syncs := map[string]mainSyncResult{"o/r": {Status: MainSyncFetchFailed, AutonomyRef: ""}}
+
+	var buf bytes.Buffer
+	got := probeRepoAutonomies(repos, syncs, &buf)
+
+	if got["o/r"] != RepoAutonomyFetchUnconfirmed {
+		t.Errorf(`probeRepoAutonomies()["o/r"] = %q, want RepoAutonomyFetchUnconfirmed`, got["o/r"])
+	}
+	log := buf.String()
+	if strings.Contains(log, string(RepoAutonomyUnreadable)) {
+		t.Errorf("expected no probe to run at all (no Unreadable outcome from touching the bogus, never-created dir), got log %q", log)
+	}
+	for _, line := range strings.Split(log, "\n") {
+		if line == "" {
+			continue
+		}
+		if strings.Contains(line, " skip:") || strings.Contains(line, " dispatch ") {
+			t.Errorf("repo-level autonomy-probe log line must not contain the lazyboards-reserved substrings, got %q", line)
+		}
+	}
+}
+
+// TestProbeRepoAutonomies_MissingSyncsMapEntry_DeniesFetchUnconfirmedNotHead
+// covers the removed "HEAD" map-miss fallback directly: a repo absent from
+// the syncs map entirely (not merely present with an empty AutonomyRef) must
+// deny as RepoAutonomyFetchUnconfirmed, never silently fall back to probing
+// local HEAD.
+func TestProbeRepoAutonomies_MissingSyncsMapEntry_DeniesFetchUnconfirmedNotHead(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, _ := initOriginAndLocal(t)
+	writeCommittedConfig(t, local, leanConfigJSON) // local HEAD IS lean
+
+	repos := []RepoConfig{{Repo: "o/r", Dir: local}}
+	got := probeRepoAutonomies(repos, map[string]mainSyncResult{}, io.Discard)
+
+	if got["o/r"] != RepoAutonomyFetchUnconfirmed {
+		t.Errorf(`probeRepoAutonomies()["o/r"] = %q, want RepoAutonomyFetchUnconfirmed -- a syncs map miss must no longer fall back to probing local HEAD (which is lean here)`, got["o/r"])
+	}
+}
+
+// TestProbeRepoAutonomies_MissingSyncsMapEntry_NoLongerFallsBackToLocalHEAD is
+// TestProbeRepoAutonomies_MissingSyncsMapEntry_DeniesFetchUnconfirmedNotHead's
+// twin, written using only symbols that already exist in today's production
+// code (RepoAutonomyLean, no RepoAutonomyFetchUnconfirmed reference) so it
+// compiles cleanly against the current, unmodified autonomy.go and fails on
+// assertion rather than on a compile error: today's "HEAD" map-miss fallback
+// (autonomy.go's `ref := "HEAD"` default) wrongly authorizes off local HEAD
+// for a repo this pass never confirmed a fetch for.
+func TestProbeRepoAutonomies_MissingSyncsMapEntry_NoLongerFallsBackToLocalHEAD(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, _ := initOriginAndLocal(t)
+	writeCommittedConfig(t, local, leanConfigJSON) // local HEAD IS lean
+
+	repos := []RepoConfig{{Repo: "o/r", Dir: local}}
+	got := probeRepoAutonomies(repos, map[string]mainSyncResult{}, io.Discard)
+
+	if got["o/r"] == RepoAutonomyLean {
+		t.Errorf(`probeRepoAutonomies()["o/r"] = RepoAutonomyLean via the "HEAD" map-miss fallback -- a repo this pass never confirmed a fetch for must never authorize off local HEAD`)
 	}
 }

@@ -231,6 +231,18 @@ const (
 	// a non-git directory, or any other git command failure distinct from
 	// "path absent from an otherwise-resolvable ref" (RepoAutonomyMissing).
 	RepoAutonomyUnreadable RepoAutonomy = "unreadable"
+	// RepoAutonomyFetchUnconfirmed means probeRepoAutonomies (#877) never ran
+	// the probe at all this pass, because the repo's mainSyncResult carried no
+	// confirmed AutonomyRef -- either `git fetch origin` itself failed this
+	// pass (MainSyncFetchFailed), or the repo had no entry at all in the
+	// syncs map. Distinct from RepoAutonomyUnreadable (the probe ran and the
+	// git command itself failed) and from RepoAutonomyMissing (the probe ran
+	// against a resolvable ref/dir but found no committed config, or dir ==
+	// "" -- never probed for an unrelated reason). Fails closed exactly like
+	// the other non-lean values, with its own distinct reason
+	// (reasonAutonomyFetchUnconfirmed, decide.go) so an operator can tell "no
+	// fetch confirmed this pass, retryable" apart from every other denial.
+	RepoAutonomyFetchUnconfirmed RepoAutonomy = "fetch_unconfirmed"
 )
 
 // PlanProbe classifies the collector's read of one .plans/<ticketId>-*.md

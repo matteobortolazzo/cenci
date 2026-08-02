@@ -101,10 +101,11 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 	// map and never syncs, so a fetch+merge never runs twice per pass.
 	syncs := syncMains(cfg.Repos, out, dryRun)
 
-	// Repo-autonomy probe (#851): reads each repo's committed
-	// `planning.autonomy` at its own resolved FreshRef (from syncs above),
-	// so a Refined planning pickup or autonomous re-plan can no longer be
-	// authorized by dispatch.planRefined alone.
+	// Repo-autonomy probe (#851, #877): reads each repo's committed
+	// `planning.autonomy` at its own resolved AutonomyRef (from syncs above)
+	// -- the remote-confirmed refs/remotes/origin/main object, never local
+	// HEAD or FreshRef -- so a Refined planning pickup or autonomous re-plan
+	// can no longer be authorized by dispatch.planRefined alone.
 	autonomies := probeRepoAutonomies(cfg.Repos, syncs, out)
 
 	tickets, err := CollectTickets(cfg.Repos, syncStatuses(syncs), true, out)
