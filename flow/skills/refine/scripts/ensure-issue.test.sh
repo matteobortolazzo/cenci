@@ -110,6 +110,33 @@ case "${1:-}" in
       jq --argjson n "${NUM}" --argjson p "${PAYLOAD}" --arg login "${LOGIN}" \
         '.nextNumber = (.nextNumber + 1) | .issues += [{number:$n, title:$p.title, body:$p.body, labels:($p.labels // []), milestone:($p.milestone // null), login:$login, parent:null, subIssues:[]}]' \
         "${STORE}" | write_store
+      # Unconditional POST-call counter (#913 AC1): every accepted create
+      # appends one line here, regardless of which branch below runs next,
+      # so "no second POST happened" can be asserted directly rather than
+      # inferred from store_issue_count (which a seeded/forged candidate can
+      # also inflate).
+      printf 'post\n' >> "${CTL}/post-call-count"
+      if [[ -f "${CTL}/crash-after-post" ]]; then
+        # Real mid-`ensure` crash-fidelity proof (#913 Decision 5): the
+        # store write above already landed server-side; now SIGKILL
+        # ensure-issue.sh's own PID before it can reach persist_entry_result
+        # (ensure-issue.sh:630-663). Gated strictly on this control marker
+        # -- via a PID recorded by run_ensure_issue_crashing before the
+        # script is even exec'd -- so a stale/absent PID can never fire a
+        # no-op kill that would masquerade as a crash.
+        TARGET_PID="$(cat "${CTL}/target.pid" 2>/dev/null)" || { echo "fixture gh: crash-after-post set but target.pid could not be read" >&2; exit 92; }
+        [[ -n "${TARGET_PID}" ]] || { echo "fixture gh: crash-after-post set but target.pid was empty" >&2; exit 92; }
+        [[ "${TARGET_PID}" =~ ^[1-9][0-9]*$ ]] || { echo "fixture gh: crash-after-post set but target.pid was not a positive integer" >&2; exit 92; }
+        kill -KILL "${TARGET_PID}" || { echo "fixture gh: crash-after-post kill -KILL ${TARGET_PID} failed" >&2; exit 92; }
+        # Single-shot arming (#913 review finding, PID-reuse hazard): clear
+        # both the marker and the recorded PID immediately after a
+        # successful kill so a later fixture-gh invocation (a future
+        # scenario, or any re-entry that happens to read a stale
+        # target.pid) can never re-fire this kill against a since-recycled,
+        # unrelated PID.
+        rm -f "${CTL}/crash-after-post" "${CTL}/target.pid"
+        exit 92
+      fi
       if [[ -f "${CTL}/simulate-post-timeout" ]]; then
         exit 1
       fi
@@ -229,7 +256,7 @@ GHEOF
 # path under .plans/ (mirroring the real .plans/.refine-<parent>.checkpoint.json
 # location, gitignored, per-checkout).
 make_env() {
-  ROOT="$(mktemp -d)"
+  ROOT="$(mktemp -d)" || { echo "make_env: mktemp -d failed" >&2; exit 2; }
   mkdir -p "${ROOT}/bin" "${ROOT}/ctl" "${ROOT}/.plans" "${ROOT}/inputs"
   write_fixture_gh "${ROOT}/bin"
   printf '{"nextNumber": 500, "issues": []}' > "${ROOT}/store.json"
@@ -251,6 +278,35 @@ run_ensure_issue() {
   CODE=$?
 }
 
+# run_ensure_issue_crashing <args...> -- like run_ensure_issue, but the
+# script runs backgrounded inside a subshell that first records its own
+# (post-exec) PID under ${GH_FIXTURE_CTL_DIR}/target.pid, then execs
+# ensure-issue.sh in place (#913 AC1). Deterministic: the PID is written
+# before the exec'd process can be invoked at all, so there is no race
+# between "PID recorded" and "fixture gh reads target.pid" -- no sleep is
+# needed or used. The fixture gh's `crash-after-post` marker (see
+# write_fixture_gh) SIGKILLs this recorded PID immediately after its create
+# POST lands server-side and before persist_entry_result would run. Sets
+# OUT/CODE exactly like run_ensure_issue; CODE is 137 (128+SIGKILL) when the
+# kill actually fired, and whatever ensure-issue.sh itself would have
+# returned otherwise (see the crash-harness-non-vacuity case below).
+run_ensure_issue_crashing() {
+  local outfile bgpid
+  outfile="$(mktemp "${ROOT}/crash-run-out.XXXXXX")" \
+    || { fail "run_ensure_issue_crashing: mktemp failed for the captured-output scratch file"; return 1; }
+  (
+    cd "${ROOT}" || exit 99
+    export PATH="${ROOT}/bin:${PATH}"
+    echo "${BASHPID}" > "${GH_FIXTURE_CTL_DIR}/target.pid"
+    exec bash "${SCRIPT}" "$@"
+  ) > "${outfile}" 2>&1 &
+  bgpid=$!
+  wait "${bgpid}"
+  CODE=$?
+  OUT="$(cat "${outfile}" 2>/dev/null)"
+  rm -f -- "${outfile}"
+}
+
 # seed_issue <number> <title> <body> <labels-json> <milestone-json> <login> <parent-json> -- writes a
 # server-side issue directly into the store, bypassing ensure-issue.sh
 # entirely, so tests can construct pre-existing state (legacy issues,
@@ -266,6 +322,16 @@ seed_issue() {
 store_issue_count() { jq '.issues | length' "${GH_FIXTURE_STORE}"; }
 store_issue_field() { local n="$1" filter="$2"; jq -c --argjson n "${n}" ".issues[] | select(.number == \$n) | ${filter}" "${GH_FIXTURE_STORE}"; }
 checkpoint_field() { jq -r "$1" "${CHECKPOINT}" 2>/dev/null; }
+# post_call_count -- number of create-POST calls accepted by the fixture gh
+# so far (see write_fixture_gh's unconditional post-call-count counter),
+# asserted directly rather than inferred from store_issue_count (#913 AC1).
+post_call_count() {
+  if [[ -f "${GH_FIXTURE_CTL_DIR}/post-call-count" ]]; then
+    wc -l < "${GH_FIXTURE_CTL_DIR}/post-call-count" | tr -d ' '
+  else
+    echo 0
+  fi
+}
 
 write_manifest() {
   # write_manifest <path> <json-array> -- manifest entries: [{slot,
@@ -733,6 +799,66 @@ run_ensure_issue ensure --checkpoint "${CHECKPOINT}" --repo acme/widgets --slot 
 assert_eq "${CODE}" "0" "crash-recovery: re-run after the simulated crash exits 0 (got: ${OUT})"
 assert_eq "$(store_issue_count)" "1" "crash-recovery: no duplicate issue is created"
 assert_eq "$(checkpoint_field '.entries[0].issueNumber')" "${CREATED_NUM}" "crash-recovery: the same issue number is recovered via marker scan"
+rm -rf "${ROOT}"
+
+# =====================================================================
+# AC1 (#913): real process kill mid-`ensure`, between the create POST
+# landing server-side and persist_entry_result writing the checkpoint
+# (ensure-issue.sh:630-663) -- a genuine crash/restart-fidelity proof
+# against the real on-disk checkpoint, not a simulated failure mode (the
+# simulated variant is AC-7(a) above; #913 Alternatives Considered rejected
+# reusing simulate-post-timeout for exactly this reason). SIGKILL is gated
+# strictly on the `crash-after-post` control marker, fired from inside the
+# fixture gh via run_ensure_issue_crashing's deterministic
+# $BASHPID-before-exec PID handoff (no race, no sleep).
+# =====================================================================
+
+# --- non-vacuity (#913 Test Strategy item 3): without the marker, the
+# crashing harness itself must not report a wait status of 137 -- a
+# silently-not-firing kill must never be able to masquerade as a crash
+# test. ---
+setup_single_entry_env
+run_ensure_issue_crashing ensure --checkpoint "${CHECKPOINT}" --repo acme/widgets --slot child-1-of-1 --title "${ROOT}/inputs/title.txt" --body "${ROOT}/inputs/body.md"
+assert_ne "${CODE}" "137" "crash-harness-non-vacuity: without crash-after-post, run_ensure_issue_crashing must not report wait status 137 (got ${CODE}: ${OUT})"
+assert_eq "${CODE}" "0" "crash-harness-non-vacuity: without crash-after-post, the crashing harness completes the create normally (got ${CODE}: ${OUT})"
+assert_eq "$(checkpoint_field '.entries[0].issueNumber')" "500" "crash-harness-non-vacuity: the un-crashed run still records the created issue number"
+rm -rf "${ROOT}"
+
+# --- Scenario A: crash after POST acceptance, re-entering `ensure`
+# recovers exactly one child via marker scan, with no second POST. ---
+setup_single_entry_env
+touch "${ROOT}/ctl/crash-after-post"
+run_ensure_issue_crashing ensure --checkpoint "${CHECKPOINT}" --repo acme/widgets --slot child-1-of-1 --title "${ROOT}/inputs/title.txt" --body "${ROOT}/inputs/body.md"
+assert_eq "${CODE}" "137" "crash-A: the crashed run reports wait status 137 (SIGKILL) (got ${CODE}: ${OUT})"
+assert_eq "$(store_issue_count)" "1" "crash-A: the create landed server-side despite the kill"
+assert_eq "$(checkpoint_field '.entries[0].issueNumber')" "null" "crash-A: the checkpoint must still show issueNumber == null immediately post-crash -- proves the kill landed before persist_entry_result, not after (a no-op kill would let this pass)"
+assert_eq "$(post_call_count)" "1" "crash-A: exactly one POST landed before the crash"
+run_ensure_issue ensure --checkpoint "${CHECKPOINT}" --repo acme/widgets --slot child-1-of-1 --title "${ROOT}/inputs/title.txt" --body "${ROOT}/inputs/body.md"
+assert_eq "${CODE}" "0" "crash-A: re-entering ensure after the crash recovers cleanly (got ${CODE}: ${OUT})"
+assert_eq "$(store_issue_count)" "1" "crash-A: recovery must not create a duplicate issue"
+assert_eq "$(checkpoint_field '.entries[0].issueNumber')" "500" "crash-A: recovery finds the crashed create via marker scan"
+assert_eq "$(checkpoint_field '.entries[0].verification')" "verified" "crash-A: recovery marks the entry verified"
+assert_eq "$(post_call_count)" "1" "crash-A: recovery must not issue a second POST"
+rm -rf "${ROOT}"
+
+# --- Scenario B: same crash, then a second forged marker-bearing candidate
+# is discovered on re-entry -- fail closed (exit 10), no further POST. ---
+setup_single_entry_env
+MARKER="<!-- cenci-refine-create:${ENTRY_NONCE} -->"
+touch "${ROOT}/ctl/crash-after-post"
+run_ensure_issue_crashing ensure --checkpoint "${CHECKPOINT}" --repo acme/widgets --slot child-1-of-1 --title "${ROOT}/inputs/title.txt" --body "${ROOT}/inputs/body.md"
+assert_eq "${CODE}" "137" "crash-B: the crashed run reports wait status 137 (SIGKILL) (got ${CODE}: ${OUT})"
+assert_eq "$(store_issue_count)" "1" "crash-B: the create landed server-side despite the kill"
+assert_eq "$(checkpoint_field '.entries[0].issueNumber')" "null" "crash-B: the checkpoint must still show issueNumber == null immediately post-crash"
+assert_eq "$(post_call_count)" "1" "crash-B: exactly one POST landed before the crash"
+seed_issue 900 "Add API validation (1/1)" "The canonical child body.
+
+${MARKER}" '["Refined"]' 'null' "cenci-bot"
+run_ensure_issue ensure --checkpoint "${CHECKPOINT}" --repo acme/widgets --slot child-1-of-1 --title "${ROOT}/inputs/title.txt" --body "${ROOT}/inputs/body.md"
+assert_eq "${CODE}" "10" "crash-B: two marker matches after re-entry exits 10 (got ${CODE}: ${OUT})"
+assert_eq "$(store_issue_count)" "2" "crash-B: the crash-created issue plus the seeded forged candidate, no third"
+assert_eq "$(post_call_count)" "1" "crash-B: no second POST is attempted once two candidates are found"
+assert_eq "$(checkpoint_field '.entries[0].issueNumber')" "null" "crash-B: fail-closed must not write an issueNumber into the checkpoint"
 rm -rf "${ROOT}"
 
 # =====================================================================
