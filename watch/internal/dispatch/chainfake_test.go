@@ -164,7 +164,9 @@ type ghMergeQueueState struct {
 // unconditionally. Kind is one of "ambiguous-success" / "indeterminate" /
 // "truncate" / "timeout" / "state-change". Payload carries the
 // "state-change" kind's named declarative op (e.g. "reopen-review",
-// optionally suffixed "op:value" for parameterized ops).
+// optionally suffixed "op:value" for parameterized ops -- e.g. #920's
+// "reopen-review:<login>[:<submittedAt>]", applyStateChangeOp's own doc
+// comment).
 type ghAmbiguity struct {
 	Route   string `json:"route"`
 	OnCall  int    `json:"onCall,omitempty"`
@@ -1175,10 +1177,13 @@ func applyAmbiguity(world *ghWorld, args []string) (ghAmbiguity, bool) {
 
 // applyStateChangeOp applies one of the closed set of named declarative
 // state-change ops a "state-change" ambiguity may request (#914 plan):
-// reopen-review, advance-head-sha, disable-fleet-automerge, add-label
-// (payload "add-label:<name>"), set-pr-state (payload "set-pr-state:
-// <state>"). args[2] is the PR/issue number for every route this fixture
-// serves that a state-change op targets.
+// reopen-review (optionally parameterized "reopen-review[:<login>[:<submittedAt>]]",
+// #920 -- defaulting to "state-change-reviewer" / time.Now() when the login
+// and/or submittedAt segments are omitted, so the existing unparameterized
+// "reopen-review" callers are untouched), advance-head-sha,
+// disable-fleet-automerge, add-label (payload "add-label:<name>"),
+// set-pr-state (payload "set-pr-state:<state>"). args[2] is the PR/issue
+// number for every route this fixture serves that a state-change op targets.
 func applyStateChangeOp(world *ghWorld, args []string, payload string) {
 	op, arg, _ := strings.Cut(payload, ":")
 	number := 0
@@ -1190,10 +1195,25 @@ func applyStateChangeOp(world *ghWorld, args []string, payload string) {
 		if number == 0 {
 			return
 		}
+		// #920: a second Cut on arg splits "<login>:<submittedAt>" -- Cut
+		// only ever splits at the FIRST ":", so an RFC3339 submittedAt's own
+		// embedded colons ("00:00:00Z") are never mis-split. arg == ""
+		// (the pre-#920 unparameterized "reopen-review" payload) keeps both
+		// defaults, matching TestChainFake_StateChangeBetweenEvaluations'
+		// existing behavior exactly.
+		login := "state-change-reviewer"
+		submittedAt := time.Now().UTC().Format(time.RFC3339)
+		if arg != "" {
+			if l, ts, ok := strings.Cut(arg, ":"); ok {
+				login, submittedAt = l, ts
+			} else {
+				login = arg
+			}
+		}
 		world.NextReviewID++
 		world.Reviews[number] = append(world.Reviews[number], ghReview{
-			ID: world.NextReviewID, State: "CHANGES_REQUESTED", Login: "state-change-reviewer",
-			SubmittedAt: time.Now().UTC().Format(time.RFC3339),
+			ID: world.NextReviewID, State: "CHANGES_REQUESTED", Login: login,
+			SubmittedAt: submittedAt,
 		})
 	case "advance-head-sha":
 		if p := world.PRs[number]; p != nil {
@@ -1284,7 +1304,18 @@ func dispatchChainGhCall(t *testing.T, world *ghWorld, args []string, localDir, 
 		stdout, stderr, code = chainPRMerge(t, world, args, localDir, originDir, indeterminateMerge)
 
 	case len(args) >= 2 && args[0] == "repo" && args[1] == "view":
-		stdout, stderr, code = `{"nameWithOwner":"`+os.Getenv(chainGhRepoEnv)+`"}`, "", 0
+		// #920 fix (Q1): honor --jq .nameWithOwner like real `gh` would --
+		// babysit.repository() calls `gh repo view --json nameWithOwner --jq
+		// .nameWithOwner` and expects the scalar slug on stdout, not the raw
+		// JSON object; serving the object unconditionally made every recorded
+		// babysit.State.Repo (and the merge-queue GraphQL probe's owner/name
+		// split) a malformed literal `{"nameWithOwner":"o/r"}`. Every other
+		// caller (no `--jq` flag) still gets the raw JSON object.
+		if flagValue(args, "--jq") == ".nameWithOwner" {
+			stdout, stderr, code = os.Getenv(chainGhRepoEnv)+"\n", "", 0
+		} else {
+			stdout, stderr, code = `{"nameWithOwner":"`+os.Getenv(chainGhRepoEnv)+`"}`, "", 0
+		}
 
 	case args[0] == "api" && flagValue(args, "--jq") == ".login":
 		stdout, stderr, code = world.CurrentLogin+"\n", "", 0
