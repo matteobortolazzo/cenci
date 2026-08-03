@@ -411,6 +411,15 @@ func TestAutonomousChain_SameTimestampReviewTieBreakDecidesReopenByReviewID(t *t
 // feature branch + commit + push is required (plan Assumptions): with
 // HeadRefName "main" the fixture's own squashMergeOntoOrigin would `git
 // commit` with nothing staged and fail the merge for the wrong reason.
+//
+// This is only the chain-level (package dispatch) half of variant (4)'s
+// two-package split (#921 Q5, coverage-map fact for #916): it proves the
+// single authoritative post-merge refetch settles the outcome, never the
+// merge command's own client-visible exit code. It does NOT exercise a real
+// errGhTimeout/failureClassTimeout classification through execGh -- that is
+// the companion half, package babysit's
+// TestExecuteMerge_RealTimeoutOnMergeCallClassifiesFailureClassTimeout
+// (internal/babysit/automerge_test.go).
 func TestAutonomousChain_MergeAcceptedButClientSeesFailureIsSettledByPostMergeRefetch(t *testing.T) {
 	h := newChainHarness(t)
 	h.commitAndPushConfig(chainRepoConfigLean)
