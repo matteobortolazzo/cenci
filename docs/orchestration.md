@@ -58,6 +58,15 @@ current verdict on every re-entry rather than trusting an earlier attempt's writ
 on gaps the last-child PR references the parent as `Related to` and the parent
 stays open with a gap comment). PR-open never applies `Implemented`.
 
+`/cenci:babysit`'s merge is squash-only — no other merge method is ever
+issued — and its evaluation immediately before issuing the merge command
+rereads authoritative, current feedback and CI state (reviews, inline
+comment threads, check runs) rather than trusting an earlier pass's
+verdict; a thread resolved-then-reopened, or a check that regresses,
+between the first pass and the merge attempt holds the merge and returns
+to pending instead of merging on stale evidence
+(`docs/pipeline-coverage-map.md`).
+
 The `Refined → Planned → Working` transitions collapse into a single session on two
 triggers: a ticket judged trivial by `/cenci:implement`'s Trivial-Ticket Triage, or a plan
 produced under `planning.autonomy: "lean"` that comes back with no escalations (the Lean
