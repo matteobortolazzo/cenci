@@ -44,6 +44,12 @@ Once validated, run:
 gh issue view <number> --repo <owner>/<repo> --json number,title,body,labels,state,assignees,milestone,comments
 ```
 
+**Split-child provenance detection:** Determine whether this ticket is itself a child of an earlier split — mirrors `agents/context-gatherer.md`'s parent-child detection. Primary source is the native sub-issue link:
+```bash
+gh issue view <number> --repo <owner>/<repo> --json parent --jq '.parent.number // empty'
+```
+If that returns a number, record `isSplitChild: true` and `parentNumber: <that number>`. **Fallback** (older tickets linked only by convention, or the primary command failing non-zero): if the first non-empty line of the fetched body matches `Related to #<number>`, record `isSplitChild: true` with that number as `parentNumber`. If neither yields a parent, record `isSplitChild: false`. A split child is presumed sized by its parent's refinement — split depth is one (`docs/ticket-sizing.md`) — so this flag drives the bundle's resolved flags (step 4), the **Split-depth guard** in step 9, and the **Oversize split child escalation** at the `## Confirmation Gate`.
+
 ## Attachments
 
 Read the `attachments` reference skill and follow its 4-step procedure to discover, present, download, and load ticket attachments. If no attachments are found or the user selects none, proceed to Pre-flight Checks.
@@ -105,7 +111,7 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
    - The **verbatim** ticket title, body, labels, state, and comments from the fetch above — full text, never a digest or paraphrase (the refiner's decisions require source fidelity; see `docs/skill-authoring.md`).
    - Each attachment's summary alongside its downloaded file path (from the Attachments step).
    - The user context parsed from `$ARGUMENTS`, verbatim (or `None`).
-   - The resolved flags: `isFrontend`, `isDesignTicket`, `pencil.enabled`, `pencil.designPath` (from the resolved config).
+   - The resolved flags: `isFrontend`, `isDesignTicket`, `pencil.enabled`, `pencil.designPath` (from the resolved config), and `isSplitChild` with its `parentNumber` (from the **Split-child provenance detection** in the Context section above; `parentNumber` is omitted when `isSplitChild` is false).
 
    If the `Write` fails, retry once; if it still fails, STOP and report the error — the refiner must never run without the bundle.
 
@@ -129,6 +135,8 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
 
    A `### Suggested Split` in the proposal means each child becomes its own numbered ticket and PR, linked to the parent as a native GitHub sub-issue, with dependency ordering captured in the child bodies (Pass 1/Pass 2 below).
 
+   **Split-depth guard (fail closed).** When `isSplitChild` is true and the adopted proposal nonetheless contains a `### Suggested Split`, STOP immediately — render no Confirmation Gate manifest, ask no confirmation, perform zero GitHub writes — and report that the refiner violated the no-resplit contract for split child #`<number>` (child of #`<parentNumber>`; see `agents/refiner.md`'s **Split children are never split again** rule), and that re-running `/cenci:refine <number>` is how to retry. Split depth is one and grandchild tickets are never created (`docs/ticket-sizing.md`); an L-sized split child is handled by the **Oversize split child escalation** at the `## Confirmation Gate` below, never by another split.
+
    **Design-first splits** (if frontend feature AND `pencil.enabled` is `true` AND `designNeeded` is true): the proposal's split makes the first child a **design-only ticket** (e.g., "Design <feature> screens") that every UI implementation child depends on. It gets the `Design` label in Pass 1, its body includes the `### Design Direction` section from the proposal (that's where `/cenci:design` reads it from), it is executed via `/cenci:design`, and it produces a committed design spec rather than a PR (the one exception to "1 ticket = 1 PR"). When `/cenci:design` completes it, the `Designed` label is propagated to the implementation children that depend on it, satisfying implement's Design gate.
 
 ## Confirmation Gate
@@ -142,6 +150,10 @@ Before rendering a manifest for a proposal carrying a `### Suggested Split`, run
 **Structural completeness check.** For every child block in the adopted `### Suggested Split`, verify all five subsections are present: `### Goal`, `### Decisions`, `### Assumptions (auto-adopted)`, `### Acceptance criteria`, and `### Dependencies`. Each present subsection must also satisfy its emptiness rule: `### Goal` must contain non-empty prose — never a placeholder or blank section; `### Dependencies` must be non-empty ("None." is a valid value when the child truly has no dependencies); `### Decisions` and `### Assumptions (auto-adopted)` must each be non-empty or exactly "None."; `### Acceptance criteria` may be empty only for a child the partition assigned zero criteria (e.g. a design-only first child). If any child is missing a subsection or violates its emptiness rule, STOP before any child creation — render no manifest, ask no confirmation, create no tickets, run no Pass 2 — and report the violating child's `(K/N)` title and the missing or empty section(s) so the split can be corrected in another refinement round. This check only confirms presence/absence and does not itself judge whether an empty `### Acceptance criteria` section is legitimate — the acceptance-criteria partition check below is the sole verifier of correct assignment, and a child wrongly left empty will surface there as an unassigned criterion.
 
 **Acceptance-criteria partition check.** Only after the structural completeness check passes for every child, verify the proposal partitions the parent's acceptance criteria per `agents/refiner.md`'s **Acceptance-criteria partition** rule: every `- [ ]` item in the proposal's `### Acceptance Criteria` must appear in exactly one child's `### Acceptance criteria` checklist (scoped rewording is fine as long as the mapping is evident), and no criterion may appear under two children. If any criterion is unassigned or duplicated, STOP — render no manifest, ask no confirmation, create no tickets, run no Pass 2 — and report the violating criteria to the user so the split can be corrected in another refinement round. Nothing has been written at this point, so stopping here is free; proceeding would mint children whose closure can no longer prove the parent's criteria (#661), or, per the structural check above, whose `Refined` label is not truthful (#872).
+
+**Oversize split child escalation (before rendering).** When `isSplitChild` is true and the adopted proposal's `### Size Estimate` is L, surface the refiner's parent re-partition recommendation before rendering the manifest and ask, via `AskUserQuestion`:
+   "This ticket is a split child of #`<parentNumber>` and still sizes L (budget risk). Split depth is one, so it will not be split again — proceed with it as-is, or decline so parent #`<parentNumber>`'s partition can be redone?"
+   Options: "Proceed — keep the oversize child as-is" / "Decline — redo the parent's partition". **Proceed** ⇒ continue into the numbered steps below with the proposal unchanged (the L reasoning stays in the persisted body's `### Technical Notes`-adjacent sections exactly as the refiner wrote it). **Decline** ⇒ zero GitHub writes have occurred and none will occur — jump to step 13's declined-cleanup branch, and report that re-running `/cenci:refine <parentNumber>` is how to re-partition the parent. Either way this escalation only asks — it never modifies the proposal, and it never splits: this is the human hand-off for an oversize child, replacing any automatic grandchild creation.
 
 1. **Per-child classification** — only when the adopted proposal carries a `### Suggested Split`. For each proposed child K, apply the `frontend-classification` reference skill to **that child's own block text** (its title, `### Goal`, and `### Acceptance criteria`) — never an inlined keyword list; that skill is the single source of truth. Record `childIsFrontend(K)` and `childVisualCheck(K)` (the visual-check signal subset) per child.
 

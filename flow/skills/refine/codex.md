@@ -24,6 +24,20 @@ The pre-confirmation phase performs only read-only GitHub calls (`gh issue view`
 user --jq .login`) and local temp-file writes — no ownership claim, no `Working` label, and no
 ticket/label/sub-issue mutation of any kind runs before the gate below confirms.
 
+**Split-depth guard**: before analyzing, determine split-child provenance — primary source is
+the native sub-issue link, `gh issue view <number> --repo <owner>/<repo> --json parent --jq '.parent.number // empty'`
+(a returned number means this ticket is a split child of that parent); fallback for older
+convention-linked tickets, or a non-zero primary command, is a `Related to #<number>` first
+non-empty body line. A split child is presumed sized by its parent's refinement — split depth
+is one, and grandchild tickets are never created (`docs/ticket-sizing.md`) — so
+never emit `### Suggested Split` for it, regardless of the size estimate. If analysis still concludes L,
+keep the honest L verdict in `### Size Estimate` with an explicit recommendation to
+re-partition the parent instead of splitting further, and the Confirmation Gate below must
+then ask, via the client's available user-input mechanism, whether to
+proceed with the oversize child as-is or decline so the parent's partition can be redone —
+a decline performs zero GitHub writes, and re-running refine against the parent is how to
+redo its partition.
+
 **Confirmation Gate (apply mode, before any GitHub write)**: no ticket, label, or sub-issue mutation of any kind — including the ownership claim and the `Working` label — happens until
 this gate confirms. For
 each proposed split child, apply the `frontend-classification` reference skill to that child's

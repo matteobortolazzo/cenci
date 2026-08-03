@@ -32,7 +32,7 @@ design-only ticket, ready for `/cenci:design`.
 ## Inputs
 
 Each invocation from the refine skill provides:
-- **Bundle path** — a temp file containing the verbatim ticket (title, body, labels, comments), attachment summaries with file paths, the user's steering context, and resolved config flags (`isFrontend`, `isDesignTicket`, `pencil.enabled`, `pencil.designPath`). Read it first, in full — it is the verbatim source of truth for this refinement.
+- **Bundle path** — a temp file containing the verbatim ticket (title, body, labels, comments), attachment summaries with file paths, the user's steering context, and resolved config flags (`isFrontend`, `isDesignTicket`, `pencil.enabled`, `pencil.designPath`, plus `isSplitChild` (with its `parentNumber`) — whether this ticket is itself a child of an earlier split). Read it first, in full — it is the verbatim source of truth for this refinement.
 - **Q&A history** — on rounds after the first, every question you asked so far paired with the user's answer. Treat answers as decisions; never re-ask a settled question.
 
 ## Before Analyzing
@@ -67,7 +67,7 @@ Work through what's missing or ambiguous:
 - Are there security considerations?
 - Is it estimable? If not, what's blocking estimation?
 - If the ticket references existing apps ("like X", "similar to Y"), are the key UX patterns of those references captured (layout model, navigation, interaction patterns)?
-- Does this ticket risk exceeding the implementing agent's context budget (see `docs/ticket-sizing.md`)? If so, should it be split?
+- Does this ticket risk exceeding the implementing agent's context budget (see `docs/ticket-sizing.md`)? If so, should it be split? **If `isSplitChild`** — skip the should-it-be-split question entirely: a split child is presumed sized by its parent's refinement and is never split again (split depth is one; see `docs/ticket-sizing.md`).
 - **If `isDesignTicket`** — focus on design questions (visual direction, screens, states, design-system fit) and skip implementation-only items (API contracts, database changes, PR size).
 
 ## Questions
@@ -161,7 +161,7 @@ Only when questions are `None.`, output the complete proposal. The skill persist
     ### Size Estimate
     <S/M/L> — <reasoning, sized against the context budget in `docs/ticket-sizing.md`>
 
-    ### Suggested Split (only if L — real risk of exceeding the context budget per `docs/ticket-sizing.md`)
+    ### Suggested Split (only if L AND NOT `isSplitChild` — real risk of exceeding the context budget per `docs/ticket-sizing.md`)
 
     Each child is a **decision-complete block** — plannable without undocumented parent context (AC 5), never a one-line description. Ticket #848's own body is the reference shape: every child carries its own `### Goal`, `### Decisions`, `### Assumptions (auto-adopted)`, `### Acceptance criteria`, and `### Dependencies`.
 
@@ -206,6 +206,8 @@ Only when questions are `None.`, output the complete proposal. The skill persist
     #### Execution Order
     - Ticket 1 → first (no dependencies)
     - Ticket 2, Ticket 3 → can start after Ticket 1 (parallel with each other)
+
+**Split children are never split again.** When the bundle's `isSplitChild` flag is true, never emit a `### Suggested Split` section — regardless of the size estimate. If analysis still concludes L, keep the honest L verdict in `### Size Estimate` and state an explicit parent re-partition recommendation naming the parent (e.g. "L on a split child — recommend re-partitioning parent #<parentNumber> rather than splitting further"): an oversize child means the parent's partition was wrong, not that this child should fan out again (split depth is one — `docs/ticket-sizing.md`). The refine skill fails closed on a split proposal for a split child and surfaces the L verdict to the human at its Confirmation Gate.
 
 When analyzing a split, determine which child tickets have data/API/schema dependencies on others (sequential) vs. which touch independent areas (parallel), and annotate each. Do not propose a split for S or M tickets just because they touch multiple independent concerns — the budget-risk-only trigger in `docs/ticket-sizing.md` governs. **Design-first splits** (if frontend feature AND `pencil.enabled` AND `designNeeded`): make the first child a design-only ticket (e.g., "Design <feature> screens") that every UI implementation child depends on, and include the `### Design Direction` section in its described body — the skill labels it `Design` when creating it.
 
