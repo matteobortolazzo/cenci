@@ -46,11 +46,17 @@ Do **not** split on any of these grounds alone:
 
 Splitting is a tool for managing context budget risk, not a tool for organizing work into smaller pieces for its own sake.
 
+## Split children are presumed sized
+
+Split depth is one. A ticket created as a child of a split — a native GitHub sub-issue, or an older ticket carrying the `Related to #<parent>` first-body-line convention — was already sized when its parent's partition was designed, and refinement must never split it again, regardless of its own size estimate. Re-splitting diverges instead of converging: each refinement round adds structure (decision-complete child blocks, per-child criteria, dependency lines), which inflates both structural signals above, and the borderline-rounds-up rule then re-classifies the child as L — a guardless pipeline splits the same work 3-4 levels deep without any real budget signal changing.
+
+When a split child still sizes L, that is a signal the **parent's partition was wrong**, not a trigger for another split. The refiner keeps the honest L verdict and recommends re-partitioning the parent in its `### Size Estimate` reasoning; the refine skill then surfaces the choice to a human — proceed with the oversize child as-is, or decline so the parent's partition can be redone. Grandchild tickets are never created automatically.
+
 ## Mapping to S/M/L
 
 - **S** — comfortably in budget. One ticket, one PR, no split, even if it touches a couple of small independent concerns.
 - **M** — moderate. One ticket, one PR, no split. Note any exploration-depth concerns in the reasoning, but do not split on concern count alone.
-- **L** — budget risk. Only L triggers a split recommendation — because L is the only tier where the estimate indicates the ~200k budget may genuinely be exceeded during implementation.
+- **L** — budget risk. Only L triggers a split recommendation — because L is the only tier where the estimate indicates the ~200k budget may genuinely be exceeded during implementation. Exception: an L estimate on a split child never triggers a split — it triggers the parent re-partition escalation above.
 
 ## For skill/agent authors
 
