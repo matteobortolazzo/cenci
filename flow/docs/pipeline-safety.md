@@ -149,3 +149,11 @@ fail mid-run or get reused in a new context.
   Draft` must explicitly document that its backstop (`RecoveryResumeInterrupted`) requires an
   existing `status: awaiting-input` draft on disk and that step 1's "no valid draft exists at
   all" case has a different backstop (reconciler's stage-aware retry per #828).
+
+- A skill's confirmation gate — not its preceding Q&A/back-and-forth loop — is the true first
+  mutation boundary: no write of any kind (ownership claim, status label, or any other mutation)
+  may occur before that gate's single confirmation, and every write step downstream must consume
+  the gate's already-computed verdict rather than recomputing or re-asking. Concrete instance:
+  `/cenci:refine`'s `## Confirmation Gate` (`skills/refine/SKILL.md`, #878, 3/12 of #661) — its
+  Q&A relay loop only shapes the proposal's content, and `## Update Ticket` explicitly restates
+  that no GitHub write occurs before that gate's Confirm branch.

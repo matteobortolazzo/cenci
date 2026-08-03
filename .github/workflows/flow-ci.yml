@@ -28,6 +28,8 @@ jobs:
             flow:
               - 'flow/**'
               - '.github/workflows/flow-ci.yml'
+              - 'docs/pipeline-coverage-map.md'
+              - 'watch/**/*_test.go'
               - '!flow/AGENTS.md'
               - '!flow/CLAUDE.md'
               - '!flow/README.md'
