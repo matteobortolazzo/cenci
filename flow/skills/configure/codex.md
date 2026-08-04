@@ -54,3 +54,22 @@ Install missing native agents with `PLUGIN_ROOT=<plugin-root> sh
 "${PLUGIN_ROOT}/codex/install-agents.sh" .`. Never overwrite an existing agent file;
 show a diff and ask before updating one. Validate each installed TOML by starting Codex
 with `--strict-config` in a read-only smoke check.
+
+Fleet dispatch enrollment mirrors the Claude procedure's `### Fleet Dispatch Enrollment`
+section exactly. Container guard: In-container, the section asks nothing, runs nothing, and writes nothing
+— the sandbox's `~/.config/cenci/config.json` is a
+container-local volume, not the host file the dispatch daemon reads — Plan mode prints
+the host-side `cenci dispatch enroll --session <name>` fix instead. Main-checkout
+resolution uses the same `git rev-parse --path-format=absolute --git-common-dir` call
+(logging one informational line before falling back to the Scripted Detection root on
+failure), and the
+same three-way branch runs on `cenci dispatch status --json --dir '<main-checkout>'`:
+`enrolled: false` asks the enroll question then the session question;
+`enrolled: true, session: ""` asks only the session question; `enrolled: true, session: "<set>"` skips
+both. The procedure never reads, modifies, or writes ~/.config/cenci/config.json itself
+— every mutation goes through a single combined `cenci dispatch enroll --dir
+'<main-checkout>' --session '<name>'` call, delegation-only, matching the Claude
+procedure. Because the fleet dispatch enroll is a mutation and therefore runs only in the apply step
+(`cenci run configure apply <checkpoint-id> --agent codex`), Plan mode
+gathers the enroll/session answers but never calls `cenci dispatch enroll` itself —
+never during `/plan`.
