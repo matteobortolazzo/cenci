@@ -5,7 +5,7 @@ compatibility: Requires Claude Code settings, plugin environment variables, and 
 argument-hint: [additional context]
 user-invocable: true
 disable-model-invocation: true
-allowed-tools: Read, Write, Edit, Glob, Grep, AskUserQuestion, Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/detect-project.sh"), Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/merge-sandbox-config.sh":*), Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/migrate-project-core.sh":*), Bash(test:*), Bash(which:*), Bash(jq:*), Bash(mv ~/.claude/settings.json.tmp ~/.claude/settings.json), Bash(mkdir -p:*), Bash(rm -f .claude/hooks/check-pending-plans.sh), Bash(rmdir .claude/hooks:*), Bash(gh auth status:*), Bash(gh label list:*), Bash(gh label create:*), Bash(gh pr create:*), Bash(gh pr view:*), Bash(git rev-parse:*), Bash(git add:*), Bash(git commit:*), Bash(git worktree add:*), Bash(git -C:*), Bash(git diff --no-index:*), Bash(rm -f ${TMPDIR:-/tmp}/cenci/cenci-configure-:*)
+allowed-tools: Read, Write, Edit, Glob, Grep, AskUserQuestion, Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/detect-project.sh"), Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/merge-sandbox-config.sh":*), Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/migrate-project-core.sh":*), Bash(test:*), Bash(which:*), Bash(jq:*), Bash(mv ~/.claude/settings.json.tmp ~/.claude/settings.json), Bash(mkdir -p:*), Bash(rm -f .claude/hooks/check-pending-plans.sh), Bash(rmdir .claude/hooks:*), Bash(gh auth status:*), Bash(gh label list:*), Bash(gh label create:*), Bash(gh pr create:*), Bash(gh pr view:*), Bash(git rev-parse:*), Bash(git add:*), Bash(git commit:*), Bash(git worktree add:*), Bash(git -C:*), Bash(git diff --no-index:*), Bash(rm -f ${TMPDIR:-/tmp}/cenci/cenci-configure-:*), Bash(cenci dispatch status:*), Bash(cenci dispatch enroll:*)
 ---
 
 > **Client dispatch**: In Codex, read `codex-runtime` and `configure/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
@@ -609,6 +609,116 @@ Bash call, per `cenci:shell-rules`) and branch:
    (`ng test --watch=false`). Generate these?" Options: "Yes — use this mapping
    (Recommended)", "Change keys or drop projects" (then re-ask with the user's
    adjustments; enforce the reserved-key exclusions above).
+
+### Fleet Dispatch Enrollment
+
+**This section runs on every configure invocation** — there is no install/opt-in
+gate, matching Board Config (lazyboards) above. Its side effect fires immediately at
+question time; nothing here is deferred to the generation step below.
+
+**Container guard (runs first).** Use `detection.inContainer` (already resolved above).
+When it is `true`, this section asks nothing, runs no `cenci dispatch` command, and writes nothing anywhere
+— the sandbox mounts `/home/dev` as a per-repo named volume, so
+the container's `~/.config/cenci/config.json` is not the host file the dispatch daemon
+reads, and an in-container enroll would be a silently dead fleet config. Emit an
+informational message naming that reason and the host-side fix: "Fleet dispatch
+enrollment can't run inside the sandbox — its `~/.config/cenci/config.json` lives in
+the container's `/home/dev` volume, not the file the host dispatch daemon reads. To
+enroll, run `cenci dispatch enroll --session <name>` from the repo root on the host."
+Never claim the repo was enrolled, and never fabricate a host path for `--dir` — the
+workspace is bind-mounted at a container-local path that has no reliable host
+equivalent, so the advisory omits `--dir` entirely and lets the host-side command
+resolve its own working directory. Skip the remainder of this section
+(main-checkout resolution, status probe, questions 11/12) and continue directly to
+the next section (`### Auth Verification`).
+
+**Main-checkout resolution (host runs only).** Run
+`git rev-parse --path-format=absolute --git-common-dir` as its own Bash call (already
+covered by the existing `Bash(git rev-parse:*)` grant) and strip the trailing `/.git` from its output to get
+`<main-checkout>`. If that call fails, log one informational line noting the
+fallback, then use the repository root the Scripted Detection step ran from.
+`<main-checkout>` must always be used below — never
+`<worktree-path>` (see Create Worktree above) and never a bare default: `cenci dispatch
+enroll` defaults its directory to the current directory, which inside a configure run is
+the transient `.worktrees/configure-<slug>` checkout, not the repo.
+
+**Main-checkout path validation (shell safety only).** If the resolved
+`<main-checkout>` value contains a single quote or a newline, log one informational
+line and skip the rest of this section — same skip-to-`### Auth Verification`
+behavior as the container guard above — rather than emit a broken command. This
+mirrors the session-name rule in question 12 below; it is shell-safety only, not
+semantic path validation.
+
+**Status probe.** Run `cenci dispatch status --json --dir '<main-checkout>'` as its own
+Bash call (per `cenci:shell-rules`, never compounded with the resolution call above) and
+parse its stdout as JSON.
+
+- If the command exits non-zero, or its stdout is not parseable JSON, log one
+  informational line and fall through — this never blocks or aborts the configure run.
+- If the parsed object has no `session` key, the installed `cenci` binary predates
+  #933's `status --json` support. Ask nothing, run no `enroll`, and
+  advise the user to update cenci before enrolling (flow and watch version independently — see root
+  `AGENTS.md`).
+
+**Three-way branch** on the parsed object's `enrolled`/`session` fields:
+
+- `enrolled: false` → ask question 11 below.
+- `enrolled: true, session: ""` → the repo is already enrolled but has no session yet —
+  the state lazyboards' board-driven enrollment leaves behind (see the "Fleet dispatch
+  from the board" section of `docs/orchestration.md`), so this is the common repair
+  path, not an edge case. Skip question 11 and ask only question 12.
+- `enrolled: true, session: "<set>"` → skip both questions, log the resolved session
+  quietly, and fall through.
+
+Re-running `/cenci:configure` on an already-configured repo never re-prompts and never
+rewrites the config. If the enrolled `dir` reported by `status --json` differs from the
+resolved `<main-checkout>`, log the mismatch as an informational line only — never
+re-enroll to correct it; the no-rewrite rule wins.
+
+11. **Enroll in fleet dispatch**: ask via `AskUserQuestion`: "Enroll this repo in fleet
+    dispatch? This lets `cenci dispatch` and the fleet dispatch loop pick up approved
+    plans for this repo automatically. `dispatch.*` is a user-level, fleet-wide setting
+    stored in `~/.config/cenci/config.json` — distinct from this repo's
+    `.cenci/config.json` — and the effect is immediate, not part of this PR."
+    - Options: "Yes — enroll this repo", "No — skip"
+    - On "No", write nothing to `~/.config/cenci/config.json` and leave any existing
+      block untouched. A decline is not recorded anywhere — this section re-asks on the
+      next invocation, mirroring the Board Config (lazyboards) precedent. There is no
+      unenroll offer here.
+
+12. **Fleet dispatch session name** (asked via `AskUserQuestion` when question 11 was
+    answered "Yes", or directly when the branch above found `enrolled: true, session:
+    ""`): "What tmux session should fleet dispatch use for this repo? Without one, this
+    repo is skipped on every dispatch pass and the daemon reports
+    `dispatch_session_unconfigured` (#927) — this is not optional." Collect the answer
+    in a single `AskUserQuestion` free-text field only: no pre-filled value and no picker
+    of running sessions. This section never guesses the session name from `$TMUX_PANE`,
+    an attached client, the current pane, running tmux sessions, or the repo/directory
+    name — guessing ambient state is the bug #927 exists to close. Reject the answer and
+    re-ask when it is empty, whitespace-only, or contains a single quote or a newline
+    (shell safety only; semantic validation of the name stays in `cenci dispatch
+    enroll`).
+
+    Once a valid session name is collected, issue a single combined write — both
+    enrollment and session in one call, never two separate writes — as its own Bash
+    call: `cenci dispatch enroll --dir '<main-checkout>' --session '<name>'`, with both
+    `<main-checkout>` and `<name>` single-quoted.
+
+**Scope.** `dispatch.*` lives in `~/.config/cenci/config.json` (or
+`$XDG_CONFIG_HOME/cenci/config.json`) — user-level and fleet-wide, the same file
+`automerge.enabled` above reads from — but `repos[].session` and each repo's enrollment
+are nonetheless per-repo entries inside that fleet-wide file. This section
+never reads, modifies, or writes ~/.config/cenci/config.json itself: every mutation goes through
+`cenci dispatch enroll`, which already owns the atomic, key-preserving write path
+(`EnrollRepo`, `watch/internal/dispatch/enroll.go`), including creating the file and its
+parent directory. The effect is immediate and user-level, so nothing lands in
+`<worktree-path>` and no key is added to this repo's `.cenci/config.json` — this
+section contributes nothing to the configure PR diff.
+
+**Next step.** After a successful enroll, point the user at `cenci dispatch loop on` as
+the explicit next step to start the recurring dispatch loop — that command already
+defaults its interval to `5m` when the user doesn't set one, so this section never asks
+about the dispatch loop's enable flag or interval setting itself.
 
 ### Auth Verification
 

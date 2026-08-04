@@ -392,6 +392,9 @@ toggled from the CLI (`cenci dispatch loop on|off`); while it's on, the status b
 the loop (and daemon reachability) live. Concurrency, quiet hours, and budgets live in
 cenci's own `dispatch` config block — see the
 [cenci-watch README](../watch/README.md#configuration-1).
+`/cenci:configure` is also a fleet dispatch enrollment entry point, alongside the board's
+`d` panel and the CLI verbs above — it asks for this repo's enrollment and required
+per-repo session and delegates every write to `cenci dispatch enroll`.
 
 ## Dispatching into the sandbox
 
