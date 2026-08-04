@@ -2,6 +2,7 @@ package main_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -67,6 +68,82 @@ func TestDispatchEnroll_WritesConfigAndIsIdempotent(t *testing.T) {
 	want = "Already enrolled owner/name (" + dir + ")"
 	if !strings.Contains(string(output), want) {
 		t.Errorf("second enroll output = %q, want to contain %q", output, want)
+	}
+}
+
+// -- #927: the post-enroll session hint --------------------------------------
+//
+// `repos[].session` is now required before a repo's dispatches can spawn
+// anywhere; `cenci dispatch enroll` prints a one-line hint naming the
+// resolved config path and that session must be set, on BOTH the
+// fresh-enrollment and the idempotent "already enrolled" paths (Q&A #1), but
+// never when the repo already has a session configured.
+
+// TestDispatchEnroll_PrintsSessionHintOnFreshEnrollment covers the
+// fresh-enrollment half of Q&A #1.
+func TestDispatchEnroll_PrintsSessionHintOnFreshEnrollment(t *testing.T) {
+	dir := initGitRemote(t, "git@github.com:owner/name.git")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+
+	cmd := exec.Command(binaryPath, "dispatch", "enroll", "--dir", dir, "--config", configPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("enroll: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), configPath) {
+		t.Errorf("output = %q, want the hint naming the resolved config path %q", output, configPath)
+	}
+	if !strings.Contains(string(output), "session") {
+		t.Errorf("output = %q, want a one-line hint that session must be set before the repo will dispatch", output)
+	}
+}
+
+// TestDispatchEnroll_PrintsSessionHintOnIdempotentAlreadyEnrolledPath covers
+// Q&A #1's idempotent-path half: the hint also prints on the "Already
+// enrolled" branch, not only on a changed==true fresh enrollment.
+func TestDispatchEnroll_PrintsSessionHintOnIdempotentAlreadyEnrolledPath(t *testing.T) {
+	dir := initGitRemote(t, "git@github.com:owner/name.git")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+
+	cmd := exec.Command(binaryPath, "dispatch", "enroll", "--dir", dir, "--config", configPath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("first enroll: %v\n%s", err, output)
+	}
+
+	cmd = exec.Command(binaryPath, "dispatch", "enroll", "--dir", dir, "--config", configPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("second enroll: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "Already enrolled") {
+		t.Fatalf("second enroll output = %q, want the idempotent path", output)
+	}
+	if !strings.Contains(string(output), configPath) || !strings.Contains(string(output), "session") {
+		t.Errorf("second enroll output = %q, want the session hint to print on the idempotent path too (Q&A #1)", output)
+	}
+}
+
+// TestDispatchEnroll_NoHintWhenSessionAlreadySet covers the negative case:
+// once a repo's session is already configured, re-enrolling it must not
+// print the hint.
+func TestDispatchEnroll_NoHintWhenSessionAlreadySet(t *testing.T) {
+	dir := initGitRemote(t, "git@github.com:owner/name.git")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	cfgJSON := fmt.Sprintf(`{"dispatch": {"repos": [{"repo": "owner/name", "dir": %q, "session": "work"}]}}`, dir)
+	if err := os.WriteFile(configPath, []byte(cfgJSON), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	cmd := exec.Command(binaryPath, "dispatch", "enroll", "--dir", dir, "--config", configPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("enroll: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "Already enrolled") {
+		t.Fatalf("enroll output = %q, want the idempotent path", output)
+	}
+	if strings.Contains(string(output), "session") {
+		t.Errorf("enroll output = %q, want no session hint when the repo already has a session configured", output)
 	}
 }
 

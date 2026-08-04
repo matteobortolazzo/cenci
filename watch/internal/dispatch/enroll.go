@@ -21,11 +21,13 @@ type RepoIdentity struct {
 }
 
 // RepoEnrollment is the answer to "is this repo enrolled in dispatch, and
-// with which dir".
+// with which dir and session". Session is always empty when Enrolled is
+// false (#927): an unenrolled repo has no configured session to report.
 type RepoEnrollment struct {
 	Repo     string `json:"repo"`
 	Dir      string `json:"dir"`
 	Enrolled bool   `json:"enrolled"`
+	Session  string `json:"session"`
 }
 
 // DetectRepoIdentity resolves owner/name from dir's git remote "origin" and
@@ -147,7 +149,12 @@ func EnrollRepo(path string, identity RepoIdentity) (changed bool, err error) {
 		}
 	}
 	if !found {
-		newRepos = append(newRepos, RepoConfig(identity))
+		// Explicit literal, not a RepoConfig(identity) struct conversion
+		// (#927): RepoIdentity carries no Session, and it must not gain one
+		// just to keep a conversion compiling -- a freshly enrolled entry
+		// round-trips with an empty Session (no --session flag in this
+		// ticket; that's #933).
+		newRepos = append(newRepos, RepoConfig{Repo: identity.Repo, Dir: identity.Dir})
 		changed = true
 	}
 	if !changed {
@@ -202,7 +209,8 @@ func UnenrollRepo(path string, repo string) (changed bool, err error) {
 }
 
 // QueryEnrollment reports whether repo is enrolled in dispatch.repos and, if
-// so, its configured dir. An empty path resolves run.DefaultConfigPath().
+// so, its configured dir and session. An empty path resolves
+// run.DefaultConfigPath().
 func QueryEnrollment(path string, repo string) (RepoEnrollment, error) {
 	path, err := resolveConfigPath(path)
 	if err != nil {
@@ -220,10 +228,18 @@ func QueryEnrollment(path string, repo string) (RepoEnrollment, error) {
 
 	for _, r := range repos {
 		if r.Repo == repo {
-			return RepoEnrollment{Repo: r.Repo, Dir: r.Dir, Enrolled: true}, nil
+			return RepoEnrollment{Repo: r.Repo, Dir: r.Dir, Enrolled: true, Session: r.Session}, nil
 		}
 	}
 	return RepoEnrollment{Repo: repo, Enrolled: false}, nil
+}
+
+// ResolveConfigPath is resolveConfigPath's exported wrapper (#927), so a CLI
+// caller (dispatch_cmd.go's post-enroll session hint) can name the exact
+// config path EnrollRepo/LoadConfig resolved and wrote to, rather than
+// re-deriving the XDG default itself and risking it diverging from --config.
+func ResolveConfigPath(path string) (string, error) {
+	return resolveConfigPath(path)
 }
 
 // resolveConfigPath resolves an empty path via run.DefaultConfigPath(),

@@ -54,7 +54,7 @@ esac
 
 	var buf bytes.Buffer
 	cfg := testConfig()
-	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: t.TempDir()}}
+	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: t.TempDir(), Session: "test-session"}}
 	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil)
 	if err == nil || !strings.Contains(err.Error(), "detecting current GitHub user") {
 		t.Fatalf("error = %v, want current-user detection failure", err)
@@ -123,7 +123,7 @@ func TestApplyDispatchClaimsWorkingLabelAfterSpawn(t *testing.T) {
 	prior := 0
 	var buf bytes.Buffer
 
-	if _, err := applyDispatch(testConfig(), dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
+	if _, err := applyDispatch(dispatchTestConfig(), dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
 		t.Fatalf("applyDispatch returned unexpected error: %v", err)
 	}
 
@@ -171,7 +171,7 @@ func TestApplyDispatchNoClaimOnSpawnFailure(t *testing.T) {
 	prior := 0
 	var buf bytes.Buffer
 
-	_, err := applyDispatch(testConfig(), dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior)
+	_, err := applyDispatch(dispatchTestConfig(), dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior)
 	if err == nil || !strings.Contains(err.Error(), "tmux exploded") {
 		t.Fatalf("spawn failure error = %v, want tmux exploded", err)
 	}
@@ -195,7 +195,7 @@ func TestApplyDispatchClaimFailureLogsAndContinues(t *testing.T) {
 	prior := 0
 	var buf bytes.Buffer
 
-	_, err := applyDispatch(testConfig(), dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior)
+	_, err := applyDispatch(dispatchTestConfig(), dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior)
 	if err == nil || !strings.Contains(err.Error(), "label edit") {
 		t.Fatalf("claim failure error = %v, want label edit error", err)
 	}
@@ -275,7 +275,7 @@ func TestApplyDispatchResumeSwapsLabelBeforeSpawn(t *testing.T) {
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	prior := 0
 
-	if _, err := applyDispatch(testConfig(), resumeDispatchDeps(now), fakeController{}, mut, false, nil, &prior); err != nil {
+	if _, err := applyDispatch(dispatchTestConfig(), resumeDispatchDeps(now), fakeController{}, mut, false, nil, &prior); err != nil {
 		t.Fatalf("applyDispatch returned unexpected error: %v", err)
 	}
 
@@ -310,7 +310,7 @@ func TestApplyDispatchResumeSwapFailurePreventsSpawnAndClaim(t *testing.T) {
 	prior := 0
 	var buf bytes.Buffer
 
-	_, err := applyDispatch(testConfig(), resumeDispatchDeps(now), fakeController{}, mut, false, &buf, &prior)
+	_, err := applyDispatch(dispatchTestConfig(), resumeDispatchDeps(now), fakeController{}, mut, false, &buf, &prior)
 	if err == nil || !strings.Contains(err.Error(), "swap failed") {
 		t.Fatalf("error = %v, want the swap failure surfaced", err)
 	}
@@ -337,7 +337,7 @@ func TestApplyDispatchResumeSpawnFailureAfterGoodSwapDoesNotDoubleEdit(t *testin
 	prior := 0
 	var buf bytes.Buffer
 
-	_, err := applyDispatch(testConfig(), resumeDispatchDeps(now), fakeController{}, mut, false, &buf, &prior)
+	_, err := applyDispatch(dispatchTestConfig(), resumeDispatchDeps(now), fakeController{}, mut, false, &buf, &prior)
 	if err == nil || !strings.Contains(err.Error(), "tmux exploded") {
 		t.Fatalf("error = %v, want tmux exploded", err)
 	}
@@ -377,7 +377,7 @@ func TestApplyDispatchResumeSpawnFailureWithErrWindowSpawned_RetainsWorkingNoRol
 	prior := 0
 	var buf bytes.Buffer
 
-	_, err := applyDispatch(testConfig(), resumeDispatchDeps(now), fakeController{}, mut, false, &buf, &prior)
+	_, err := applyDispatch(dispatchTestConfig(), resumeDispatchDeps(now), fakeController{}, mut, false, &buf, &prior)
 	if err == nil || !errors.Is(err, run.ErrWindowSpawned) {
 		t.Fatalf("error = %v, want errors.Is(_, run.ErrWindowSpawned)", err)
 	}
@@ -406,7 +406,7 @@ func TestApplyDispatchResumeSpawnFailureRollbackAlsoFails_QuotaUntouchedErrorSur
 	prior := 0
 	var buf bytes.Buffer
 
-	_, err := applyDispatch(testConfig(), resumeDispatchDeps(now), fakeController{}, mut, false, &buf, &prior)
+	_, err := applyDispatch(dispatchTestConfig(), resumeDispatchDeps(now), fakeController{}, mut, false, &buf, &prior)
 	if err == nil {
 		t.Fatal("expected an error when both the spawn and the rollback fail")
 	}
@@ -481,7 +481,7 @@ func TestApplyDispatchPassesModelToRunOpts(t *testing.T) {
 	prior := 0
 	var buf bytes.Buffer
 
-	cfg := testConfig()
+	cfg := dispatchTestConfig()
 	cfg.Model = "claude-sonnet-5"
 
 	if _, err := applyDispatch(cfg, dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
@@ -512,7 +512,7 @@ func TestApplyDispatchOmitsModelWhenUnset(t *testing.T) {
 	prior := 0
 	var buf bytes.Buffer
 
-	if _, err := applyDispatch(testConfig(), dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
+	if _, err := applyDispatch(dispatchTestConfig(), dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
 		t.Fatalf("applyDispatch returned unexpected error: %v", err)
 	}
 
@@ -539,7 +539,7 @@ func TestApplyDispatchSetsWindowTicketToTicketNumber(t *testing.T) {
 	prior := 0
 	var buf bytes.Buffer
 
-	if _, err := applyDispatch(testConfig(), dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
+	if _, err := applyDispatch(dispatchTestConfig(), dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
 		t.Fatalf("applyDispatch returned unexpected error: %v", err)
 	}
 
@@ -554,14 +554,16 @@ func TestApplyDispatchSetsWindowTicketToTicketNumber(t *testing.T) {
 // TestFormatDecisionPrefixesRepo locks in the owner/repo prefix on decision
 // lines so multi-repo fleet output is unambiguous, and keeps the ` skip:` /
 // ` dispatch ` substrings intact — downstream consumers (lazyboards) classify
-// lines by matching on them.
+// lines by matching on them. Also covers the #927 session rendering: a
+// dispatch line carries the repo's configured session (or "(unset)"), a skip
+// line is unchanged.
 func TestFormatDecisionPrefixesRepo(t *testing.T) {
 	skip := Decision{
 		Ticket: Ticket{Repo: "o/r", Number: 45},
 		Action: ActionSkip,
 		Reason: "not Planned",
 	}
-	if got, want := formatDecision(skip), "o/r#45 skip: not Planned"; got != want {
+	if got, want := formatDecision(skip, nil), "o/r#45 skip: not Planned"; got != want {
 		t.Errorf("skip line = %q, want %q", got, want)
 	}
 
@@ -572,8 +574,12 @@ func TestFormatDecisionPrefixesRepo(t *testing.T) {
 		Reason: "dispatch",
 		Agent:  "claude",
 	}
-	if got, want := formatDecision(dispatch), "o/r#78 dispatch (claude, 78-add-cache.md): dispatch"; got != want {
+	sessionByRepo := map[string]string{"o/r": "a-work"}
+	if got, want := formatDecision(dispatch, sessionByRepo), `o/r#78 dispatch (claude, 78-add-cache.md, session "a-work"): dispatch`; got != want {
 		t.Errorf("dispatch line = %q, want %q", got, want)
+	}
+	if got, want := formatDecision(dispatch, nil), "o/r#78 dispatch (claude, 78-add-cache.md, session (unset)): dispatch"; got != want {
+		t.Errorf("dispatch line with no configured session = %q, want %q", got, want)
 	}
 }
 
@@ -591,8 +597,8 @@ func TestFormatDecisionRendersResumeLine(t *testing.T) {
 		Reason: "resume — human answered",
 		Agent:  "claude",
 	}
-	got := formatDecision(d)
-	want := "o/r#42 dispatch (claude, 42-slug.md): resume — human answered"
+	got := formatDecision(d, map[string]string{"o/r": "cenci"})
+	want := `o/r#42 dispatch (claude, 42-slug.md, session "cenci"): resume — human answered`
 	if got != want {
 		t.Errorf("resume line = %q, want %q", got, want)
 	}
@@ -646,7 +652,7 @@ func TestApplyDispatchPlanningPickupLaunchArgs(t *testing.T) {
 	prior := 0
 	var buf bytes.Buffer
 
-	cfg := testConfig()
+	cfg := dispatchTestConfig()
 	cfg.PlanRefined = true
 
 	if _, err := applyDispatch(cfg, planningDispatchDeps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
@@ -676,7 +682,7 @@ func TestApplyDispatchReplanLaunchArgs(t *testing.T) {
 	prior := 0
 	var buf bytes.Buffer
 
-	cfg := testConfig()
+	cfg := dispatchTestConfig()
 	cfg.PlanRefined = true
 
 	if _, err := applyDispatch(cfg, replanDispatchDeps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
@@ -705,10 +711,12 @@ func TestApplyDispatchPlanningPickupThreadsModelAndSession(t *testing.T) {
 	mut := &fakeMutator{}
 	prior := 0
 
-	cfg := testConfig()
+	cfg := dispatchTestConfig()
 	cfg.PlanRefined = true
 	cfg.Model = "claude-sonnet-5"
-	cfg.Session = "cenci"
+	// Session (#927): sourced from the repo entry, not a removed fleet-wide
+	// Config.Session field.
+	cfg.Repos[0].Session = "cenci"
 
 	if _, err := applyDispatch(cfg, planningDispatchDeps(now), fakeController{}, mut, false, nil, &prior); err != nil {
 		t.Fatalf("applyDispatch returned unexpected error: %v", err)
@@ -729,7 +737,7 @@ func TestApplyDispatchPlanningPickupClaimsWorkingAfterSpawn(t *testing.T) {
 	prior := 0
 	var buf bytes.Buffer
 
-	cfg := testConfig()
+	cfg := dispatchTestConfig()
 	cfg.PlanRefined = true
 
 	if _, err := applyDispatch(cfg, planningDispatchDeps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
@@ -756,7 +764,7 @@ func TestApplyDispatchReplanClaimsWorkingAfterSpawn(t *testing.T) {
 	prior := 0
 	var buf bytes.Buffer
 
-	cfg := testConfig()
+	cfg := dispatchTestConfig()
 	cfg.PlanRefined = true
 
 	if _, err := applyDispatch(cfg, replanDispatchDeps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
@@ -783,7 +791,7 @@ func TestApplyDispatchPlanningPickupNoClaimOnSpawnFailure(t *testing.T) {
 	prior := 0
 	var buf bytes.Buffer
 
-	cfg := testConfig()
+	cfg := dispatchTestConfig()
 	cfg.PlanRefined = true
 
 	_, err := applyDispatch(cfg, planningDispatchDeps(now), fakeController{}, mut, false, &buf, &prior)
@@ -830,7 +838,7 @@ func TestFormatDecisionRendersPlanningPickupLine(t *testing.T) {
 		Reason:   "plan — Refined, no plan file",
 		Agent:    "claude",
 	}
-	got := formatDecision(d)
+	got := formatDecision(d, nil)
 	if !strings.Contains(got, " dispatch ") {
 		t.Errorf("planning-pickup line %q must carry the load-bearing %q substring, not render as a skip", got, " dispatch ")
 	}
@@ -852,7 +860,7 @@ func TestFormatDecisionRendersReplanLine(t *testing.T) {
 		Reason:   "re-plan — plan stale",
 		Agent:    "claude",
 	}
-	got := formatDecision(d)
+	got := formatDecision(d, nil)
 	if !strings.Contains(got, " dispatch ") {
 		t.Errorf("re-plan line %q must carry the load-bearing %q substring", got, " dispatch ")
 	}
@@ -916,7 +924,7 @@ func TestRunOnce_InteractiveRepoConfigDeniesPlanningPickup(t *testing.T) {
 
 	cfg := testConfig()
 	cfg.PlanRefined = true
-	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: local}}
+	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: local, Session: "test-session"}}
 
 	var buf bytes.Buffer
 	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil); err != nil {
@@ -957,7 +965,7 @@ func TestRunOnce_LeanRepoConfigPassesAutonomyGate(t *testing.T) {
 
 	cfg := testConfig()
 	cfg.PlanRefined = true
-	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: local}}
+	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: local, Session: "test-session"}}
 
 	var buf bytes.Buffer
 	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil); err != nil {
@@ -1103,8 +1111,8 @@ esac
 
 	cfg := testConfig()
 	cfg.Repos = []RepoConfig{
-		{Repo: "healthy/repo", Dir: healthyDir},
-		{Repo: "broken/repo", Dir: brokenDir},
+		{Repo: "healthy/repo", Dir: healthyDir, Session: "test-session"},
+		{Repo: "broken/repo", Dir: brokenDir, Session: "test-session"},
 	}
 
 	mut := &fakeMutator{}
@@ -1258,7 +1266,7 @@ esac
 
 	cfg := testConfig()
 	cfg.PlanRefined = true
-	cfg.Repos = []RepoConfig{{Repo: "o/a", Dir: repoA}, {Repo: "o/b", Dir: repoB}}
+	cfg.Repos = []RepoConfig{{Repo: "o/a", Dir: repoA, Session: "session-a"}, {Repo: "o/b", Dir: repoB, Session: "session-b"}}
 
 	var buf bytes.Buffer
 	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil); err != nil {
@@ -1383,12 +1391,12 @@ esac
 	cfg := testConfig()
 	cfg.PlanRefined = true
 	cfg.Repos = []RepoConfig{
-		{Repo: "o/r1", Dir: r1},
-		{Repo: "o/r2", Dir: r2},
-		{Repo: "o/r3", Dir: r3},
-		{Repo: "o/r4", Dir: r4},
-		{Repo: "o/r5", Dir: r5},
-		{Repo: "o/r6", Dir: r6},
+		{Repo: "o/r1", Dir: r1, Session: "session-r1"},
+		{Repo: "o/r2", Dir: r2, Session: "session-r2"},
+		{Repo: "o/r3", Dir: r3, Session: "session-r3"},
+		{Repo: "o/r4", Dir: r4, Session: "session-r4"},
+		{Repo: "o/r5", Dir: r5, Session: "session-r5"},
+		{Repo: "o/r6", Dir: r6, Session: "session-r6"},
 	}
 
 	var buf bytes.Buffer
@@ -1614,7 +1622,7 @@ esac
 	runPass := func(dryRun bool) []Decision {
 		installFakeGHOnPath(t, script)
 		cfg := testConfig()
-		cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: local}}
+		cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: local, Session: "test-session"}}
 		var buf bytes.Buffer
 		decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, dryRun, &buf, nil)
 		if err != nil {

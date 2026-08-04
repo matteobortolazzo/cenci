@@ -201,6 +201,18 @@ func passError(dispatchErr, reconcileErr error) string {
 	if errors.Is(reconcileErr, ErrReconcileStateUnreadable) {
 		return "reconcile_state_unreadable"
 	}
+	// #927: the per-repo session gate's sentinels outrank the generic
+	// dispatch_pass_failed token (but never reconcile_state_unreadable
+	// above), so a permanent per-repo misconfiguration is distinguishable
+	// from a transient dispatch failure. Unconfigured outranks missing when
+	// both occurred this pass (an arbitrary but stable tie-break -- either
+	// token already tells the operator "go look at the dispatch log").
+	if errors.Is(dispatchErr, ErrSessionUnconfigured) {
+		return "dispatch_session_unconfigured"
+	}
+	if errors.Is(dispatchErr, ErrSessionMissing) {
+		return "dispatch_session_missing"
+	}
 	if dispatchErr != nil {
 		return "dispatch_pass_failed"
 	}

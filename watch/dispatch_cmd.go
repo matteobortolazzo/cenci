@@ -108,6 +108,31 @@ func runDispatchEnroll(args []string) {
 	} else {
 		fmt.Printf("Already enrolled %s (%s)\n", identity.Repo, identity.Dir)
 	}
+
+	// #927: repos[].session is required before this repo's dispatches can
+	// spawn anywhere -- print the hint whenever the resolved session is
+	// still empty after the enroll call completes, on BOTH the
+	// fresh-enrollment and the idempotent "already enrolled" paths above
+	// (Q&A #1). Never printed once the repo already has a session set.
+	enrollment, qerr := dispatch.QueryEnrollment(*configPath, identity.Repo)
+	if qerr != nil {
+		// Non-fatal: the enroll itself already succeeded and its primary
+		// output above is unaffected -- this is additive diagnostic output
+		// only, so a caller can trace why the session hint below never
+		// printed instead of it just silently never appearing.
+		fmt.Fprintf(os.Stderr, "cenci dispatch enroll: checking session hint: %v\n", qerr)
+	} else if enrollment.Session == "" {
+		// ResolveConfigPath errors fall back to the raw --config value
+		// (or its default) for display purposes only -- the hint itself
+		// still prints. Any resolution failure is also surfaced to stderr
+		// (non-fatal) so it is traceable rather than silently swallowed.
+		resolvedPath, perr := dispatch.ResolveConfigPath(*configPath)
+		if perr != nil {
+			resolvedPath = *configPath
+			fmt.Fprintf(os.Stderr, "cenci dispatch enroll: resolving config path: %v\n", perr)
+		}
+		fmt.Printf("Set \"session\" for %s in %s before it will dispatch.\n", identity.Repo, resolvedPath)
+	}
 }
 
 func runDispatchUnenroll(args []string) {

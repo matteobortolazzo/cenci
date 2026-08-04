@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/internal/run"
@@ -29,10 +30,16 @@ func (q QuietHours) Contains(now time.Time) bool {
 }
 
 // RepoConfig binds an owner/repo to the local directory holding its .plans/ and
-// git tree — the directory a dispatched session cd's into.
+// git tree — the directory a dispatched session cd's into — and the tmux
+// session its dispatches target (#927). Session has no `omitempty` so an
+// enrolled entry always advertises the required key on write-back. An empty
+// Session (or one whose configured tmux session is absent) skips every
+// ActionDispatch decision for this repo -- see the per-repo gate in
+// session.go.
 type RepoConfig struct {
-	Repo string `json:"repo"`
-	Dir  string `json:"dir"`
+	Repo    string `json:"repo"`
+	Dir     string `json:"dir"`
+	Session string `json:"session"`
 }
 
 // Config is the resolved dispatch policy: built-in defaults with a config.json
@@ -54,7 +61,25 @@ type Config struct {
 	AgentPreference   []string
 	ClaudeSessionDir  string
 	CodexDBPath       string
-	Session           string // target tmux session for dispatched windows
+
+	// LegacyTopLevelSession (#927) reports whether the config file still
+	// carries a leftover top-level dispatch.session key with a non-empty
+	// (post-trim) value -- the pre-#927 fleet-wide session, now replaced by
+	// per-repo repos[].session. It is read-only detection: the legacy value
+	// is NEVER back-filled onto any repos[] entry, and this field never
+	// gates a pass on its own -- it only drives a once-per-pass deprecation
+	// log line (RunOnce) naming the repos with no session and the resolved
+	// config path. A present-but-empty/whitespace-only legacy value dropped
+	// no real configuration, so it does not set this true (Q&A #2).
+	LegacyTopLevelSession bool
+
+	// Path is the config file LoadConfig actually resolved and read from
+	// (after the run.DefaultConfigPath() fallback), so log lines that name
+	// "the resolved config path" (the per-repo session gate, the legacy
+	// deprecation line) are naming the file that was actually loaded rather
+	// than re-deriving the XDG default and mis-naming it when --config was
+	// passed. Empty when no path could be resolved at all.
+	Path string
 
 	// Reconciler (#46) policy.
 	GracePeriod    time.Duration // how long the failure signal must hold before recovery (default 5m)
@@ -126,14 +151,21 @@ type dispatchFile struct {
 	AgentPreference        []string              `json:"agentPreference"`
 	ClaudeSessionDir       string                `json:"claudeSessionDir"`
 	CodexDBPath            string                `json:"codexDBPath"`
-	Session                string                `json:"session"`
-	GracePeriod            string                `json:"gracePeriod"`       // Go duration string, e.g. "5m"
-	RetryBudget            *int                  `json:"retryBudget"`       // pointer so an explicit 0 (no retries) is distinguishable from unset
-	DaemonInterval         string                `json:"daemonInterval"`    // Go duration string, e.g. "5m"; empty/0 disables the embedded loop
-	LoopEnabled            *bool                 `json:"loopEnabled"`       // pointer so absence resolves to disabled (not inferred from DaemonInterval)
-	ApplyRetryBudget       *int                  `json:"applyRetryBudget"`  // pointer so an explicit 0 is distinguishable from unset
-	PipelineStageGate      *bool                 `json:"pipelineStageGate"` // pointer so an explicit false is distinguishable from unset
-	PlanRefined            *bool                 `json:"planRefined"`       // pointer so an explicit false is distinguishable from unset
+	// LegacySession is detection-only (#927): the old fleet-wide
+	// dispatch.session key, replaced by per-repo repos[].session. It is
+	// never merged into Config -- no field reads its decoded value, only
+	// its presence and (post-trim) emptiness are inspected in LoadConfig --
+	// so a legacy config whose value isn't even a JSON string (a shape a
+	// typed `string` field would fail the whole parse on) is still
+	// tolerated for detection purposes.
+	LegacySession     *json.RawMessage `json:"session"`
+	GracePeriod       string           `json:"gracePeriod"`       // Go duration string, e.g. "5m"
+	RetryBudget       *int             `json:"retryBudget"`       // pointer so an explicit 0 (no retries) is distinguishable from unset
+	DaemonInterval    string           `json:"daemonInterval"`    // Go duration string, e.g. "5m"; empty/0 disables the embedded loop
+	LoopEnabled       *bool            `json:"loopEnabled"`       // pointer so absence resolves to disabled (not inferred from DaemonInterval)
+	ApplyRetryBudget  *int             `json:"applyRetryBudget"`  // pointer so an explicit 0 is distinguishable from unset
+	PipelineStageGate *bool            `json:"pipelineStageGate"` // pointer so an explicit false is distinguishable from unset
+	PlanRefined       *bool            `json:"planRefined"`       // pointer so an explicit false is distinguishable from unset
 }
 
 // LoadConfig returns the default policy with the config.json "dispatch" block
@@ -144,6 +176,7 @@ func LoadConfig(path string) (Config, error) {
 	if path == "" {
 		path = run.DefaultConfigPath()
 	}
+	cfg.Path = path
 	if path == "" {
 		return cfg, nil
 	}
@@ -162,8 +195,26 @@ func LoadConfig(path string) (Config, error) {
 	}
 	if f.Dispatch != nil {
 		cfg = mergeConfig(cfg, *f.Dispatch)
+		cfg.LegacyTopLevelSession = legacyTopLevelSessionSet(f.Dispatch.LegacySession)
 	}
 	return cfg, nil
+}
+
+// legacyTopLevelSessionSet reports whether raw decodes to a non-empty
+// (post-trim) string, per Q&A #2: a present-but-empty or whitespace-only
+// legacy dispatch.session dropped no real configuration, so it must not
+// trigger the deprecation detection. A non-string legacy value (or one that
+// fails to decode) is tolerated as "not set" rather than failing the whole
+// config parse -- detection is best-effort, never load-bearing.
+func legacyTopLevelSessionSet(raw *json.RawMessage) bool {
+	if raw == nil {
+		return false
+	}
+	var s string
+	if err := json.Unmarshal(*raw, &s); err != nil {
+		return false
+	}
+	return strings.TrimSpace(s) != ""
 }
 
 // mergeConfig overlays the file block over base: scalars override when set,
@@ -208,9 +259,9 @@ func mergeConfig(base Config, o dispatchFile) Config {
 	if o.CodexDBPath != "" {
 		base.CodexDBPath = o.CodexDBPath
 	}
-	if o.Session != "" {
-		base.Session = o.Session
-	}
+	// No back-fill of the legacy top-level dispatch.session, ever (#927):
+	// see legacyTopLevelSessionSet for the read-only detection that feeds
+	// Config.LegacyTopLevelSession instead.
 	if d, err := time.ParseDuration(o.GracePeriod); o.GracePeriod != "" && err == nil {
 		base.GracePeriod = d
 	}

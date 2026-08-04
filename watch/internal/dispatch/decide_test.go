@@ -29,6 +29,20 @@ func testConfig() Config {
 	}
 }
 
+// dispatchTestConfig extends testConfig with a single enrolled repo ("o/r")
+// carrying a configured session (#927): the per-repo session gate skips every
+// ActionDispatch decision for a repo with no configured/live session, so any
+// applyDispatch/RunOnce test that expects a real spawn to happen must use
+// this fixture instead of the bare testConfig() (which enrolls no repos at
+// all). testConfig() itself is intentionally left unchanged -- it is also
+// the fixture for the pure-engine suite and RunOnce's empty-pass test, both
+// of which must keep exercising zero enrolled repos.
+func dispatchTestConfig() Config {
+	cfg := testConfig()
+	cfg.Repos = []RepoConfig{{Repo: "o/r", Session: "test-session"}}
+	return cfg
+}
+
 // leanAutonomy builds an Inputs.RepoAutonomy map granting repo the lean
 // classification (#851): dispatch.planRefined alone is insufficient to
 // authorize unattended planning/re-plan -- every existing PlanRefined: true

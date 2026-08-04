@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -122,6 +123,28 @@ func (c *ExecClient) IsGroupedSession(session string) (bool, error) {
 func (c *ExecClient) NewWindow(session, name, shellCommand string) error {
 	_, err := tmuxCmd("new-window", "-d", "-t", session+":", "-n", name, shellCommand)
 	return err
+}
+
+// HasSession reports whether session exists on the tmux server (#927), via
+// `tmux has-session -t =<name>`. The leading `=` forces an exact match --
+// without it, tmux prefix-matches, so a configured "work" would falsely
+// resolve against an unrelated "work-2". A nonzero tmux exit (no such
+// session, or no server running at all) classifies as (false, nil): a normal
+// negative result, not a probe failure. A failure to run tmux at all (e.g.
+// the binary isn't resolvable) is a distinct (false, non-nil error)
+// classification, kept off the daemon-facing Client interface for the same
+// launcher/consumer-facing reason as CurrentSession/IsGroupedSession/NewWindow
+// above.
+func (c *ExecClient) HasSession(session string) (bool, error) {
+	_, err := tmuxCmd("has-session", "-t", "="+session)
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // KillWindow kills the tmux window at target (typically an exact

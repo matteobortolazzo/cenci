@@ -19,6 +19,12 @@ type mockCtrl struct {
 	// optErr, when set, is returned by every SetWindowOption call -- the
 	// post-NewWindow failure ErrWindowSpawned wraps (#853).
 	optErr error
+	// hasSession/hasSessionErr are HasSession's canned return (#927). Run
+	// itself never calls HasSession (that's dispatch's per-repo gate, not the
+	// interactive `cenci run` path), so no existing Run test depends on these;
+	// they exist so mockCtrl keeps satisfying run.Controller.
+	hasSession    bool
+	hasSessionErr error
 
 	windows []winCall
 	options []optCall
@@ -37,6 +43,7 @@ func (m *mockCtrl) SetWindowOption(target, key, value string) error {
 	m.options = append(m.options, optCall{target, key, value})
 	return m.optErr
 }
+func (m *mockCtrl) HasSession(string) (bool, error) { return m.hasSession, m.hasSessionErr }
 
 // noConfigOpts returns Opts pinned to a non-existent config (built-ins only),
 // so tests are deterministic.
