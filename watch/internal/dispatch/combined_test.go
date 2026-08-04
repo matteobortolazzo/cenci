@@ -310,6 +310,9 @@ func TestPassError(t *testing.T) {
 	sentinelErr := &StateLoadError{Probe: StateProbeDecodeError, Path: "reconcile.json", Err: errors.New("decode failed")}
 	genericReconcileErr := errors.New("some reconcile failure")
 	dispatchErr := errors.New("some dispatch failure")
+	unconfiguredErr := fmt.Errorf("dispatch: no target tmux session for o/r: %w", ErrSessionUnconfigured)
+	missingErr := fmt.Errorf("dispatch: configured session %q not found in tmux for o/r: %w", "ghost", ErrSessionMissing)
+	bothSentinelsErr := errors.Join(ErrSessionUnconfigured, ErrSessionMissing)
 
 	tests := []struct {
 		name         string
@@ -321,6 +324,15 @@ func TestPassError(t *testing.T) {
 		{name: "dispatch error outranks a generic reconcile error", dispatchErr: dispatchErr, reconcileErr: genericReconcileErr, want: "dispatch_pass_failed"},
 		{name: "generic reconcile error alone", dispatchErr: nil, reconcileErr: genericReconcileErr, want: "reconcile_pass_failed"},
 		{name: "both nil", dispatchErr: nil, reconcileErr: nil, want: ""},
+
+		// -- #927: dispatch_session_unconfigured / dispatch_session_missing --
+		{name: "session-unconfigured dispatch error", dispatchErr: unconfiguredErr, reconcileErr: nil, want: "dispatch_session_unconfigured"},
+		{name: "session-missing dispatch error", dispatchErr: missingErr, reconcileErr: nil, want: "dispatch_session_missing"},
+		{name: "both session sentinels wrapped together prefers unconfigured", dispatchErr: bothSentinelsErr, reconcileErr: nil, want: "dispatch_session_unconfigured"},
+		{name: "reconcile_state_unreadable outranks session-unconfigured dispatch error (#883)", dispatchErr: unconfiguredErr, reconcileErr: sentinelErr, want: "reconcile_state_unreadable"},
+		{name: "reconcile_state_unreadable outranks session-missing dispatch error (#883)", dispatchErr: missingErr, reconcileErr: sentinelErr, want: "reconcile_state_unreadable"},
+		{name: "session-unconfigured outranks a generic reconcile error", dispatchErr: unconfiguredErr, reconcileErr: genericReconcileErr, want: "dispatch_session_unconfigured"},
+		{name: "session-missing outranks a generic reconcile error", dispatchErr: missingErr, reconcileErr: genericReconcileErr, want: "dispatch_session_missing"},
 	}
 
 	for _, tt := range tests {

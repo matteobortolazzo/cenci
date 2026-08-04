@@ -400,16 +400,23 @@ pass completion without creating an extra pass. The loop publishes live state so
 `last_run_at`, `last_dispatched`, `last_skipped`, `last_error`) now reflects the live
 daemon end-to-end, not just a config fallback. `last_dispatched` counts successful
 spawns (not merely dispatch decisions), and `last_error` is intentionally redacted to
-`dispatch_pass_failed`, `reconcile_pass_failed`, or `reconcile_state_unreadable`
+`dispatch_pass_failed`, `reconcile_pass_failed`, `reconcile_state_unreadable`
 (ticket #883, a persistent reconciliation-state corruption hold — see "Corrupt
-reconciliation state" below); detailed errors stay in daemon logs.
+reconciliation state" below), `dispatch_session_unconfigured`, or
+`dispatch_session_missing` (ticket #927: at least one enrolled repo's `session` is
+unset, or names a tmux session absent from the server); detailed errors stay in
+daemon logs.
 
 This daemon-embedded path (`dispatch loop on` alongside a running `cenci daemon`)
 is the canonical way to run dispatch continuously. `cenci dispatch --interval
 <duration>` (see [Auto-dispatch](#auto-dispatch-cenci-dispatch)) remains a
 separate, standalone loop for running dispatch directly from the CLI without a daemon.
-It stops and exits nonzero on its first config or pass error; one-shot, dry-run, and
-reconcile invocations likewise exit nonzero when their pass fails.
+It stops and exits nonzero on its first config or pass error, except a per-repo
+session skip (`dispatch_session_unconfigured`/`dispatch_session_missing`, ticket
+#927): that is logged and the loop keeps ticking, since it names a single
+misconfigured repo rather than a fleet-wide failure. One-shot, dry-run, and
+reconcile invocations still exit nonzero on any pass error, including a session
+skip — so the misconfiguration is loud interactively.
 
 ### Pickup rules and gates
 
@@ -919,9 +926,8 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 {
   "dispatch": {
     "repos": [
-      { "repo": "owner/name", "dir": "/path/to/repo" }
+      { "repo": "owner/name", "dir": "/path/to/repo", "session": "a-work" }
     ],
-    "session": "work",
     "concurrencyCap": 3,
     "needInputThreshold": 1,
     "dailyQuota": 20,
@@ -946,8 +952,7 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `repos` | — | Repos to scan; each `dir` holds that repo's `.plans/` and git tree, and a dispatched session `cd`s into it. Normally managed via `cenci dispatch enroll`/`unenroll` (see [Enrollment](#enrollment-cenci-dispatch-enrollunenrollstatus)) rather than hand-edited, though hand-editing remains supported. |
-| `session` | current | Target tmux session for dispatched windows |
+| `repos` | — | Repos to scan; each entry requires `repo`, `dir` (holds that repo's `.plans/` and git tree), and `session` (the tmux session that repo's dispatched windows target — never an ambient/current session). Normally managed via `cenci dispatch enroll`/`unenroll` (see [Enrollment](#enrollment-cenci-dispatch-enrollunenrollstatus)) rather than hand-edited, though hand-editing remains supported. A repo whose `session` is empty or names a tmux session that doesn't exist is skipped entirely for that pass (`dispatch: no target tmux session for <repo>; set repos[].session in <config path>`, or the equivalent "not found in tmux" line naming the remedy `tmux new-session -d -s <name>`) — every other enrolled repo still dispatches normally in the same pass. |
 | `concurrencyCap` | `3` | Max concurrent running sessions (counts in-flight windows plus this pass's dispatches) |
 | `needInputThreshold` | `1` | Pause dispatch when at least this many windows await input |
 | `dailyQuota` | `20` | Max dispatches per process run (resets on restart) |

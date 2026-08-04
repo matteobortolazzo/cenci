@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/internal/planfile"
@@ -146,6 +147,11 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 	// dispatch_pass_failed.
 	answers := resolveAnswerProbes(tickets, indexPlans(plans), out)
 
+	// #927: a leftover top-level dispatch.session is read-only detection --
+	// it never gates a pass -- so this logs at most once per pass and never
+	// feeds collectErr/applyErr.
+	logLegacyTopLevelSessionDeprecation(cfg, out)
+
 	decisions, applyErr := applyDispatch(cfg, dispatchDeps{
 		Tickets:         tickets,
 		Plans:           plans,
@@ -157,6 +163,18 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 		PlanProbes:      planProbes,
 		PlanInventories: planInventories,
 	}, ctrl, mut, dryRun, out, prior)
+
+	// #927: the per-repo session gate's sentinel(s) must outrank a same-pass
+	// collectErr (a likely co-occurrence -- both can be driven by the same
+	// underlying outage), mirroring RunReconcileOnce's documented
+	// ErrReconcileStateUnreadable special-case (watch/docs/dispatch-
+	// reconcile.md). errors.Join (rather than returning applyErr alone)
+	// keeps collectErr's own diagnostic text reachable too, while
+	// errors.Is(..., ErrSessionUnconfigured/ErrSessionMissing) still finds
+	// the sentinel through the join.
+	if isSessionSentinel(applyErr) {
+		return decisions, errors.Join(applyErr, collectErr)
+	}
 	return decisions, firstNonNil(collectErr, applyErr)
 }
 
@@ -241,6 +259,7 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 	for _, rc := range cfg.Repos {
 		dirByRepo[rc.Repo] = rc.Dir
 	}
+	sessionByRepo := buildSessionByRepo(cfg.Repos)
 
 	priorVal := 0
 	if prior != nil {
@@ -272,15 +291,25 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 	}
 
 	for _, d := range decisions {
-		logf(out, "%s\n", formatDecision(d))
+		logf(out, "%s\n", formatDecision(d, sessionByRepo))
 	}
 
 	if dryRun {
 		return decisions, nil
 	}
 
+	// #927 per-repo pre-mutation gate: skips every ActionDispatch decision
+	// for a repo whose session is unconfigured or absent from tmux, before
+	// any label mutation for that repo (in particular, before the resume
+	// claim below). Runs after the dryRun return above, so dry-run probes
+	// nothing.
+	skipRepo, sessionErr := gateSessions(decisions, sessionByRepo, ctrl, cfg.Path, out)
+
 	var firstErr error
 	for _, d := range decisions {
+		if skipRepo[d.Ticket.Repo] {
+			continue
+		}
 		// A planning-pickup dispatch (#828) carries Plan == nil by design (no
 		// plan file exists yet) -- admit it alongside the ordinary/resume/
 		// re-plan kinds, all of which carry a non-nil Plan.
@@ -316,8 +345,12 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 			WindowTicket: strconv.Itoa(d.Ticket.Number),
 			Agent:        d.Agent,
 			Model:        cfg.Model,
-			Session:      cfg.Session,
-			Dir:          dirByRepo[d.Ticket.Repo],
+			// Session (#927): resolved from this decision's own repo's
+			// repos[].session -- the gate above already proved it live for
+			// every repo reaching this point. The dispatch spawn path never
+			// consults ctrl.CurrentSession(); config is the only source.
+			Session: sessionByRepo[d.Ticket.Repo],
+			Dir:     dirByRepo[d.Ticket.Repo],
 		}, ctrl)
 		if err != nil {
 			logf(out, "dispatch: #%d run failed: %v\n", d.Ticket.Number, err)
@@ -356,7 +389,17 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 			}
 		}
 	}
-	return decisions, firstErr
+	// #927: the session gate's sentinel(s) must remain discoverable via
+	// errors.Is(err, ErrSessionUnconfigured/ErrSessionMissing) even when a
+	// live-session repo in the same pass hit an unrelated spawn/claim
+	// failure -- but that real per-ticket failure must never be silently
+	// discarded just because a sentinel also fired for a different repo
+	// (previously firstNonNil picked only one of the two, stranding a
+	// ticket at Working with a dead spawn on a correctly-configured repo
+	// while the operator only ever saw "session misconfigured"). errors.Join
+	// tolerates either or both being nil and preserves errors.Is matching
+	// for whichever inputs are non-nil.
+	return decisions, errors.Join(sessionErr, firstErr)
 }
 
 // RunLoop reloads Config from configPath and runs RunOnce immediately and then
@@ -367,13 +410,18 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 // the process exits.
 func RunLoop(configPath string, ctrl run.Controller, mut TicketMutator, interval time.Duration, out io.Writer, modelOverride string) error {
 	prior := 0
-	if err := dispatchTick(configPath, ctrl, mut, out, &prior, modelOverride); err != nil {
+	// #927: a session-gate sentinel is a per-repo misconfiguration, not a
+	// loop-fatal condition -- the pass that produced it already logged the
+	// affected repo(s) via gateSessions, so RunLoop just keeps ticking
+	// instead of terminating the whole fleet loop over one repo's bad
+	// config. Every other error stays fatal exactly as today.
+	if err := dispatchTick(configPath, ctrl, mut, out, &prior, modelOverride); err != nil && !isSessionSentinel(err) {
 		return err
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for range ticker.C {
-		if err := dispatchTick(configPath, ctrl, mut, out, &prior, modelOverride); err != nil {
+		if err := dispatchTick(configPath, ctrl, mut, out, &prior, modelOverride); err != nil && !isSessionSentinel(err) {
 			return err
 		}
 	}
@@ -462,21 +510,37 @@ func logf(out io.Writer, format string, args ...any) {
 
 // formatDecision renders one decision as a single log line, prefixed with
 // owner/repo so multi-repo fleet output is unambiguous. Dispatch lines carry
-// the resolved agent and plan file so the table is self-explanatory. The
-// ` skip:` / ` dispatch ` substrings are load-bearing: downstream consumers
-// (lazyboards) classify lines by matching on them.
-func formatDecision(d Decision) string {
+// the resolved agent, plan file, and (#927) the repo's configured session
+// (or "(unset)") so the table is self-explanatory. The ` skip:` / ` dispatch `
+// substrings are load-bearing: downstream consumers (lazyboards) classify
+// lines by matching on them. Skip lines are unchanged -- they never render a
+// session.
+func formatDecision(d Decision, sessionByRepo map[string]string) string {
 	if d.Action == ActionDispatch && d.Plan != nil {
-		return fmt.Sprintf("%s#%d dispatch (%s, %s): %s",
-			d.Ticket.Repo, d.Ticket.Number, d.Agent, filepath.Base(d.Plan.Path), d.Reason)
+		return fmt.Sprintf("%s#%d dispatch (%s, %s, session %s): %s",
+			d.Ticket.Repo, d.Ticket.Number, d.Agent, filepath.Base(d.Plan.Path), sessionLabel(sessionByRepo[d.Ticket.Repo]), d.Reason)
 	}
 	// A planning-pickup dispatch (#828) carries Plan == nil by design -- no
 	// plan file exists yet -- so it needs its own branch rather than falling
 	// through to the skip: rendering below, which would silently break the
 	// lazyboards " dispatch " substring contract for this dispatch kind.
 	if d.Action == ActionDispatch && d.Planning {
-		return fmt.Sprintf("%s#%d dispatch (%s): %s",
-			d.Ticket.Repo, d.Ticket.Number, d.Agent, d.Reason)
+		return fmt.Sprintf("%s#%d dispatch (%s, session %s): %s",
+			d.Ticket.Repo, d.Ticket.Number, d.Agent, sessionLabel(sessionByRepo[d.Ticket.Repo]), d.Reason)
 	}
 	return fmt.Sprintf("%s#%d skip: %s", d.Ticket.Repo, d.Ticket.Number, d.Reason)
+}
+
+// sessionLabel renders a repo's configured session for formatDecision: the
+// literal "(unset)" for an empty/whitespace-only session (the exact token
+// the #927 AC's dry-run test asserts), else the %q-quoted session name --
+// matching session.go's gateSessions log-line convention -- so a session name
+// containing a newline or the literal " skip: "/" dispatch " substrings can
+// never forge or break the parsed decision-line contract lazyboards depends
+// on.
+func sessionLabel(session string) string {
+	if strings.TrimSpace(session) == "" {
+		return "(unset)"
+	}
+	return fmt.Sprintf("%q", session)
 }

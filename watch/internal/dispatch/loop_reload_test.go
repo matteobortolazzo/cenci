@@ -38,6 +38,12 @@ func (fakeController) IsGroupedSession(session string) (bool, error)      { retu
 func (fakeController) NewWindow(session, name, shellCommand string) error { return nil }
 func (fakeController) SetWindowOption(target, key, value string) error    { return nil }
 
+// HasSession always reports the session as live (#927): the reload tests
+// never construct a scenario meant to exercise the per-repo session gate, so
+// a fixed (true, nil) keeps every existing fakeController-based test's
+// dispatch decisions ungated by session configuration.
+func (fakeController) HasSession(session string) (bool, error) { return true, nil }
+
 // seedDispatchConfig writes a fresh config.json under dir enrolling repo, and
 // returns its path. Using EnrollRepo (rather than hand-written JSON) exercises
 // the same write path the `dispatch enroll` verb and board-driven enrollment

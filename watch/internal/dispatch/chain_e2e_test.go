@@ -62,7 +62,11 @@ const (
 func chainConfig(h *chainHarness) Config {
 	cfg := testConfig()
 	cfg.PlanRefined = true
-	cfg.Repos = []RepoConfig{{Repo: h.repo, Dir: h.local}}
+	// Session (#927): every chain test drives a real dispatch.RunOnce pass
+	// that expects to spawn, so the per-repo session gate must resolve a
+	// configured session here -- fakeController{} (used throughout this
+	// suite) always reports HasSession true, so any non-empty value works.
+	cfg.Repos = []RepoConfig{{Repo: h.repo, Dir: h.local, Session: "chain-session"}}
 	return cfg
 }
 

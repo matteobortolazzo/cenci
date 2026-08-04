@@ -50,6 +50,12 @@ type Controller interface {
 	IsGroupedSession(session string) (bool, error)
 	NewWindow(session, name, shellCommand string) error
 	SetWindowOption(target, key, value string) error
+	// HasSession reports whether session exists on the tmux server (#927):
+	// the dispatch spawn path's per-repo pre-mutation gate uses this to
+	// classify a configured-but-absent session before ever claiming a
+	// ticket Working. It is never consulted by Run itself (:163-176 stays
+	// as-is for the interactive `cenci run` path).
+	HasSession(session string) (bool, error)
 }
 
 // Opts holds the resolved launcher inputs, mirroring the `run` flags.
