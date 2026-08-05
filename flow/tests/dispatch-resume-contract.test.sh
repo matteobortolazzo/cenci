@@ -319,7 +319,7 @@ else
 
   # --- Case (ii)/(iii) post-verification checks the created comment's body,
   #     not just its numeric ID -------------------------------------------
-  REPAIR_BODY_READBACK_COUNT=$(grep -c 'gh api repos/<owner>/<repo>/issues/<number>/comments/<id>' <<<"${REPAIR_SECTION}")
+  REPAIR_BODY_READBACK_COUNT=$(grep -c 'gh api repos/<owner>/<repo>/issues/comments/<id>' <<<"${REPAIR_SECTION}")
   if [[ "${REPAIR_BODY_READBACK_COUNT}" -lt 2 ]]; then
     fail "phase-1-plan.md (## Repair Escalation Anchor) must verify the created comment's body (not just its numeric ID) in both case (ii) and case (iii) (found ${REPAIR_BODY_READBACK_COUNT} occurrence(s))"
   fi
