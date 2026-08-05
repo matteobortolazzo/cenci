@@ -109,6 +109,31 @@ import (
 //	FAKE_OBSERVED_POSTURE_EXIT → combined observed-inspect probe exit code
 //	                     (default 0); nonzero simulates an inspect failure
 //	                     on an otherwise-running container.
+//	FAKE_IMAGE_ID       — `image inspect --format '{{.Id}}' <image>` stdout
+//	                     (ticket #947's printStaleContainerNotice: the
+//	                     freshly built image's ID), told apart by the
+//	                     distinctive `{{.Id}}` format-string token. Defaults
+//	                     to "sha256:fresh".
+//	FAKE_IMAGE_ID_EXIT  — that probe's exit code (default 0); nonzero
+//	                     simulates the image-ID probe itself failing.
+//	FAKE_CONTAINER_IMAGES — space-separated `name=<ref>|<id>` pairs
+//	                     answering the combined per-container probe
+//	                     `inspect --format '{{.Config.Image}}|{{.Image}}'
+//	                     <name>` (ticket #947), told apart by the
+//	                     distinctive `{{.Image}}` format-string token
+//	                     (checked alongside the `cenci-sand.dind` and `.RW`
+//	                     arms below; the format string also contains
+//	                     `{{.Config.Image}}`, which does not collide with
+//	                     any existing token). The fake looks up the
+//	                     requested container's name and emits `${pair#*=}`
+//	                     verbatim as the probe's stdout; a container absent
+//	                     from the list defaults to
+//	                     "cenci-sandbox:latest|<FAKE_IMAGE_ID default>".
+//	                     Must stay byte-parallel with engine_test.go's
+//	                     buildEngine and sandbox_open_test.go's
+//	                     writeScriptedRuntime (#493 keep-in-sync note).
+//	FAKE_INSPECT_IMAGE_EXIT — the per-container combined probe's exit code
+//	                     (default 0); nonzero simulates that probe failing.
 //
 // Every FAKE_<VERB>[_EXIT] var above also has a FAKE_<VERB>_DOCKER/
 // FAKE_<VERB>_PODMAN (or FAKE_<VERB>_EXIT_DOCKER/FAKE_<VERB>_EXIT_PODMAN)
@@ -200,6 +225,13 @@ images)
     fv IMAGES ""
   fi
   ;;
+image)
+  if [ "$2" = inspect ]; then
+    case "$*" in
+    *'{{.Id}}'*) fv IMAGE_ID "sha256:fresh"; exit "$(fe IMAGE_ID)" ;;
+    esac
+  fi
+  ;;
 ps) fv PS ""; exit "$(fe PS)" ;;
 volume)
   case "$2" in
@@ -220,6 +252,24 @@ run)
 inspect)
   case "$*" in
   *'.HostConfig.NetworkMode'*) fvb OBSERVED_POSTURE "cenci-sandbox:latest|bridge|runc||\n\n"; exit "$(fe OBSERVED_POSTURE)" ;;
+  *'{{.Image}}'*)
+    name="$4"
+    result=""
+    found=0
+    for pair in $FAKE_CONTAINER_IMAGES; do
+      case "$pair" in
+      "$name="*)
+        result="${pair#*=}"
+        found=1
+        ;;
+      esac
+    done
+    if [ "$found" = 0 ]; then
+      result="cenci-sandbox:latest|$(fv IMAGE_ID "sha256:fresh")"
+    fi
+    printf '%s\n' "$result"
+    exit "$(fe INSPECT_IMAGE)"
+    ;;
   *'cenci-sand.dind'*) fvb REUSE_POSTURE "|runc|0\nworkspace-vol::/workspace\n\n" ;;
   *State.Status*) fv INSPECT_STATE "running 0"; printf '\n' ;;
   *'.RW'*) fvb INSPECT_MOUNTS "" ;;

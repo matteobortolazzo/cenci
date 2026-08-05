@@ -1513,7 +1513,8 @@ pin — a deliberate behavior change from earlier versions of this command.
 
 ```bash
 # One-shot maintenance verbs
-cenci sandbox build             # build cenci-sandbox:latest (or the repo image if <repo>/.cenci/Dockerfile exists); builds the base first if missing
+cenci sandbox build             # build cenci-sandbox:latest (or the repo image if <repo>/.cenci/Dockerfile exists); builds the base first if missing;
+                                 # names any running sandboxes still on the superseded image
 cenci sandbox build --check     # report freshness only, build nothing (0 = current, non-zero = rebuild needed or error);
                                  # used by the installer to skip its rebuild prompt when nothing needs to rebuild
 cenci sandbox build-base        # build cenci-sandbox-base:<content-hash> + :latest alias
