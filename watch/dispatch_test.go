@@ -1,6 +1,7 @@
 package main_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -142,7 +143,10 @@ func TestDispatchEnroll_NoHintWhenSessionAlreadySet(t *testing.T) {
 	if !strings.Contains(string(output), "Already enrolled") {
 		t.Fatalf("enroll output = %q, want the idempotent path", output)
 	}
-	if strings.Contains(string(output), "session") {
+	// Narrowed from a bare "session" substring (#933): the success line now
+	// legitimately contains "session" (e.g. "→ session work"), so only the
+	// warning's exact wording is a true negative here.
+	if strings.Contains(string(output), "no tmux session set") {
 		t.Errorf("enroll output = %q, want no session hint when the repo already has a session configured", output)
 	}
 }
@@ -166,11 +170,190 @@ func TestDispatchEnroll_OutsideGitRepo_Exits1(t *testing.T) {
 	}
 }
 
+// -- #933: `dispatch enroll --session` ---------------------------------------
+
+// TestDispatchEnroll_WithSessionFlag_SetsSessionAndPrintsArrow covers
+// enrolling a fresh repo with an explicit --session: the effective session
+// is persisted and surfaced in the success line.
+func TestDispatchEnroll_WithSessionFlag_SetsSessionAndPrintsArrow(t *testing.T) {
+	dir := initGitRemote(t, "git@github.com:owner/name.git")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+
+	cmd := exec.Command(binaryPath, "dispatch", "enroll", "--dir", dir, "--config", configPath, "--session", "a-work")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("enroll --session: %v\n%s", err, output)
+	}
+	want := "Enrolled owner/name (" + dir + ") → session a-work"
+	if !strings.Contains(string(output), want) {
+		t.Errorf("enroll --session output = %q, want to contain %q", output, want)
+	}
+
+	got, qerr := dispatch.QueryEnrollment(configPath, "owner/name")
+	if qerr != nil {
+		t.Fatalf("QueryEnrollment: %v", qerr)
+	}
+	if got.Session != "a-work" {
+		t.Errorf("QueryEnrollment.Session = %q, want %q", got.Session, "a-work")
+	}
+}
+
+// TestDispatchEnroll_NoFlagOnAlreadySessioned_PreservesSessionAndBytes covers
+// re-enrolling a repo that already has a session, with no --session flag:
+// the session is left untouched and the config file is never rewritten.
+func TestDispatchEnroll_NoFlagOnAlreadySessioned_PreservesSessionAndBytes(t *testing.T) {
+	dir := initGitRemote(t, "git@github.com:owner/name.git")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	cfgJSON := fmt.Sprintf(`{"dispatch": {"repos": [{"repo": "owner/name", "dir": %q, "session": "work"}]}}`, dir)
+	if err := os.WriteFile(configPath, []byte(cfgJSON), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	bytesBefore, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("reading config: %v", err)
+	}
+
+	cmd := exec.Command(binaryPath, "dispatch", "enroll", "--dir", dir, "--config", configPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("enroll: %v\n%s", err, output)
+	}
+	want := "Already enrolled owner/name (" + dir + ") → session work"
+	if !strings.Contains(string(output), want) {
+		t.Errorf("enroll output = %q, want to contain %q", output, want)
+	}
+
+	got, qerr := dispatch.QueryEnrollment(configPath, "owner/name")
+	if qerr != nil {
+		t.Fatalf("QueryEnrollment: %v", qerr)
+	}
+	if got.Session != "work" {
+		t.Errorf("QueryEnrollment.Session = %q, want unchanged %q", got.Session, "work")
+	}
+
+	bytesAfter, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("reading config: %v", err)
+	}
+	if !bytes.Equal(bytesBefore, bytesAfter) {
+		t.Errorf("config file bytes changed on a no-flag re-enroll of an already-sessioned repo")
+	}
+}
+
+// TestDispatchEnroll_NoFlagOnFreshRepo_WarnsNoTmuxSessionSet covers enrolling
+// a fresh repo with no --session flag: the warning names the exact fix
+// command and the resolved config path.
+func TestDispatchEnroll_NoFlagOnFreshRepo_WarnsNoTmuxSessionSet(t *testing.T) {
+	dir := initGitRemote(t, "git@github.com:owner/name.git")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+
+	cmd := exec.Command(binaryPath, "dispatch", "enroll", "--dir", dir, "--config", configPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("enroll: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "no tmux session set") {
+		t.Errorf("enroll output = %q, want to contain %q", output, "no tmux session set")
+	}
+	if !strings.Contains(string(output), "cenci dispatch enroll --session") {
+		t.Errorf("enroll output = %q, want the literal fix command %q", output, "cenci dispatch enroll --session")
+	}
+	if !strings.Contains(string(output), configPath) {
+		t.Errorf("enroll output = %q, want the resolved config path %q", output, configPath)
+	}
+}
+
+// TestDispatchEnroll_SecondNoFlagEnroll_AlreadyEnrolledAndWarns_NeverWrites
+// covers re-enrolling a still-session-less repo with no --session flag: both
+// the idempotent "Already enrolled" line and the warning print, and the
+// warning is output-only -- it never triggers a write.
+func TestDispatchEnroll_SecondNoFlagEnroll_AlreadyEnrolledAndWarns_NeverWrites(t *testing.T) {
+	dir := initGitRemote(t, "git@github.com:owner/name.git")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+
+	cmd := exec.Command(binaryPath, "dispatch", "enroll", "--dir", dir, "--config", configPath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("first enroll: %v\n%s", err, output)
+	}
+
+	bytesBefore, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("reading config: %v", err)
+	}
+	statBefore, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatalf("stat config: %v", err)
+	}
+
+	cmd = exec.Command(binaryPath, "dispatch", "enroll", "--dir", dir, "--config", configPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("second enroll: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "Already enrolled") {
+		t.Errorf("second enroll output = %q, want the idempotent path", output)
+	}
+	if !strings.Contains(string(output), "no tmux session set") {
+		t.Errorf("second enroll output = %q, want the warning to still print", output)
+	}
+
+	bytesAfter, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("reading config: %v", err)
+	}
+	statAfter, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatalf("stat config: %v", err)
+	}
+	if !bytes.Equal(bytesBefore, bytesAfter) {
+		t.Errorf("config file bytes changed on the second no-flag enroll (warning must be output-only, never a write)")
+	}
+	if !statBefore.ModTime().Equal(statAfter.ModTime()) {
+		t.Errorf("config mtime changed on the second no-flag enroll: before=%v after=%v", statBefore.ModTime(), statAfter.ModTime())
+	}
+}
+
+// TestDispatchEnroll_BlankSessionFlag_Exits2NeverWrites covers the empty and
+// whitespace-only --session cases: both must exit 2 with a one-line stderr,
+// and must never create or modify the config file (no silent clear).
+func TestDispatchEnroll_BlankSessionFlag_Exits2NeverWrites(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		session string
+	}{
+		{"empty", ""},
+		{"whitespace-only", "   "},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := initGitRemote(t, "git@github.com:owner/name.git")
+			configPath := filepath.Join(t.TempDir(), "config.json")
+
+			cmd := exec.Command(binaryPath, "dispatch", "enroll", "--dir", dir, "--config", configPath, "--session", tt.session)
+			output, err := cmd.CombinedOutput()
+
+			exitErr, ok := err.(*exec.ExitError)
+			if !ok {
+				t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
+			}
+			if exitErr.ExitCode() != 2 {
+				t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
+			}
+			if strings.Count(strings.TrimRight(string(output), "\n"), "\n") != 0 {
+				t.Errorf("stderr = %q, want exactly one line", output)
+			}
+			if _, statErr := os.Stat(configPath); !os.IsNotExist(statErr) {
+				t.Errorf("config file must not be created for a blank --session, but %s exists", configPath)
+			}
+		})
+	}
+}
+
 func TestDispatchUnenroll_RemovesRepo_AndNotEnrolledIsNoop(t *testing.T) {
 	dir := initGitRemote(t, "git@github.com:owner/name.git")
 	configPath := filepath.Join(t.TempDir(), "config.json")
 
-	if _, err := dispatch.EnrollRepo(configPath, dispatch.RepoIdentity{Repo: "owner/name", Dir: dir}); err != nil {
+	if _, _, err := dispatch.EnrollRepo(configPath, dispatch.RepoIdentity{Repo: "owner/name", Dir: dir}, ""); err != nil {
 		t.Fatalf("EnrollRepo setup: %v", err)
 	}
 
@@ -204,7 +387,7 @@ func TestDispatchUnenroll_RemovesRepo_AndNotEnrolledIsNoop(t *testing.T) {
 
 func TestDispatchUnenroll_ViaRepoFlag_NoGitRequired(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
-	if _, err := dispatch.EnrollRepo(configPath, dispatch.RepoIdentity{Repo: "owner/name", Dir: "/some/configured/dir"}); err != nil {
+	if _, _, err := dispatch.EnrollRepo(configPath, dispatch.RepoIdentity{Repo: "owner/name", Dir: "/some/configured/dir"}, ""); err != nil {
 		t.Fatalf("EnrollRepo setup: %v", err)
 	}
 
@@ -256,7 +439,7 @@ func TestDispatchUnenroll_RepoAndExplicitDir_Exits2(t *testing.T) {
 func TestDispatchStatusJSON_Enrolled(t *testing.T) {
 	dir := initGitRemote(t, "git@github.com:owner/name.git")
 	configPath := filepath.Join(t.TempDir(), "config.json")
-	if _, err := dispatch.EnrollRepo(configPath, dispatch.RepoIdentity{Repo: "owner/name", Dir: dir}); err != nil {
+	if _, _, err := dispatch.EnrollRepo(configPath, dispatch.RepoIdentity{Repo: "owner/name", Dir: dir}, ""); err != nil {
 		t.Fatalf("EnrollRepo setup: %v", err)
 	}
 
@@ -306,6 +489,32 @@ func TestDispatchStatusJSON_NotEnrolled_DetectedDir(t *testing.T) {
 	}
 }
 
+// TestDispatchStatusJSON_NotEnrolled_IncludesEmptySessionKey covers (#933)
+// that `dispatch status --json` on a not-enrolled repo still advertises a
+// "session" key (schema-agnostic decode), and it is empty.
+func TestDispatchStatusJSON_NotEnrolled_IncludesEmptySessionKey(t *testing.T) {
+	dir := initGitRemote(t, "git@github.com:owner/name.git")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+
+	cmd := exec.Command(binaryPath, "dispatch", "status", "--dir", dir, "--config", configPath, "--json")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("status --json (not enrolled): %v\n%s", err, output)
+	}
+
+	var got map[string]any
+	if uerr := json.Unmarshal(output, &got); uerr != nil {
+		t.Fatalf("unmarshal status --json output %q: %v", output, uerr)
+	}
+	session, ok := got["session"]
+	if !ok {
+		t.Fatalf("status --json output %s missing key %q", output, "session")
+	}
+	if session != "" {
+		t.Errorf("session = %v, want %q", session, "")
+	}
+}
+
 func TestDispatchStatus_HumanOutput(t *testing.T) {
 	dir := initGitRemote(t, "git@github.com:owner/name.git")
 	configPath := filepath.Join(t.TempDir(), "config.json")
@@ -320,7 +529,7 @@ func TestDispatchStatus_HumanOutput(t *testing.T) {
 		t.Errorf("status (not enrolled) output = %q, want to contain %q", output, "Not enrolled: owner/name")
 	}
 
-	if _, err := dispatch.EnrollRepo(configPath, dispatch.RepoIdentity{Repo: "owner/name", Dir: dir}); err != nil {
+	if _, _, err := dispatch.EnrollRepo(configPath, dispatch.RepoIdentity{Repo: "owner/name", Dir: dir}, ""); err != nil {
 		t.Fatalf("EnrollRepo setup: %v", err)
 	}
 
@@ -333,6 +542,48 @@ func TestDispatchStatus_HumanOutput(t *testing.T) {
 	if !strings.Contains(string(output), want) {
 		t.Errorf("status (enrolled) output = %q, want to contain %q", output, want)
 	}
+}
+
+// TestDispatchStatus_HumanOutput_ShowsSessionOrNoSessionHint covers (#933)
+// the two enrolled-human-output shapes: an arrow naming the session when
+// set, and an inline "no tmux session set" hint when it is not.
+func TestDispatchStatus_HumanOutput_ShowsSessionOrNoSessionHint(t *testing.T) {
+	t.Run("session set", func(t *testing.T) {
+		dir := initGitRemote(t, "git@github.com:owner/name.git")
+		configPath := filepath.Join(t.TempDir(), "config.json")
+		cfgJSON := fmt.Sprintf(`{"dispatch": {"repos": [{"repo": "owner/name", "dir": %q, "session": "a-work"}]}}`, dir)
+		if err := os.WriteFile(configPath, []byte(cfgJSON), 0o600); err != nil {
+			t.Fatalf("writing config: %v", err)
+		}
+
+		cmd := exec.Command(binaryPath, "dispatch", "status", "--dir", dir, "--config", configPath)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("status: %v\n%s", err, output)
+		}
+		want := "Enrolled owner/name (" + dir + ") → session a-work"
+		if !strings.Contains(string(output), want) {
+			t.Errorf("status output = %q, want to contain %q", output, want)
+		}
+	})
+
+	t.Run("session unset", func(t *testing.T) {
+		dir := initGitRemote(t, "git@github.com:owner/name.git")
+		configPath := filepath.Join(t.TempDir(), "config.json")
+		if _, _, err := dispatch.EnrollRepo(configPath, dispatch.RepoIdentity{Repo: "owner/name", Dir: dir}, ""); err != nil {
+			t.Fatalf("EnrollRepo setup: %v", err)
+		}
+
+		cmd := exec.Command(binaryPath, "dispatch", "status", "--dir", dir, "--config", configPath)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("status: %v\n%s", err, output)
+		}
+		want := "Enrolled owner/name (" + dir + "); no tmux session set"
+		if !strings.Contains(string(output), want) {
+			t.Errorf("status output = %q, want to contain %q", output, want)
+		}
+	})
 }
 
 // -- dispatch loop on|off|status sub-verb (ticket #219) ---------------------
@@ -509,8 +760,11 @@ func TestDispatchStatusJSON_IncludesLoopKey(t *testing.T) {
 
 	dir := initGitRemote(t, "git@github.com:owner/name.git")
 	configPath := filepath.Join(t.TempDir(), "config.json")
-	if _, err := dispatch.EnrollRepo(configPath, dispatch.RepoIdentity{Repo: "owner/name", Dir: dir}); err != nil {
-		t.Fatalf("EnrollRepo setup: %v", err)
+	// Seeded directly (rather than via EnrollRepo) so this test controls the
+	// exact session value it asserts against below.
+	cfgJSON := fmt.Sprintf(`{"dispatch": {"repos": [{"repo": "owner/name", "dir": %q, "session": "a-work"}]}}`, dir)
+	if err := os.WriteFile(configPath, []byte(cfgJSON), 0o600); err != nil {
+		t.Fatalf("seeding config: %v", err)
 	}
 	if err := dispatch.SetLoopEnabled(configPath, true); err != nil {
 		t.Fatalf("SetLoopEnabled setup: %v", err)
@@ -526,6 +780,7 @@ func TestDispatchStatusJSON_IncludesLoopKey(t *testing.T) {
 		Repo     string              `json:"repo"`
 		Dir      string              `json:"dir"`
 		Enrolled bool                `json:"enrolled"`
+		Session  string              `json:"session"`
 		Loop     watch.DispatchState `json:"loop"`
 	}
 	if uerr := json.Unmarshal(output, &got); uerr != nil {
@@ -541,6 +796,9 @@ func TestDispatchStatusJSON_IncludesLoopKey(t *testing.T) {
 	if !got.Enrolled {
 		t.Errorf("enrolled = %v, want true", got.Enrolled)
 	}
+	if got.Session != "a-work" {
+		t.Errorf("session = %q, want %q", got.Session, "a-work")
+	}
 	if got.Loop.DaemonRunning {
 		t.Errorf("loop.daemon_running = true, want false (no daemon reachable)")
 	}
@@ -555,7 +813,7 @@ func TestDispatchStatusJSON_IncludesLoopKey(t *testing.T) {
 	if uerr := json.Unmarshal(output, &raw); uerr != nil {
 		t.Fatalf("unmarshal status --json output %q as raw map: %v", output, uerr)
 	}
-	for _, key := range []string{"repo", "dir", "enrolled", "loop"} {
+	for _, key := range []string{"repo", "dir", "enrolled", "session", "loop"} {
 		if _, ok := raw[key]; !ok {
 			t.Errorf("status --json output %s missing key %q", output, key)
 		}

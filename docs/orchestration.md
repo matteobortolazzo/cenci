@@ -386,7 +386,10 @@ custom `scope: pr` action that shells out.
 
 Pressing `d` in lazyboards opens the dispatch panel for the current repo: it shows
 enrollment state (`Enter` toggles it, backed by `cenci dispatch enroll|unenroll`)
-and a read-only line for the daemon-owned dispatch loop. `o` triggers a one-off
+and a read-only line for the daemon-owned dispatch loop. The board's `Enter` toggle
+never passes `--session`, so a repo enrolled from the panel has no tmux session set
+and dispatch will skip it — run `cenci dispatch enroll --session <name>` (or hand-edit
+the config) once for that repo before it will dispatch. `o` triggers a one-off
 `cenci dispatch` pass — fleet-wide, across **all** enrolled repos, picking up any
 `Planned` ticket with an approved `.plans/<id>-*.md` file. The recurring loop is
 toggled from the CLI (`cenci dispatch loop on|off`); while it's on, the status bar shows a
