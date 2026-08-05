@@ -90,7 +90,7 @@ PIN_MINT_CMD='openssl rand -hex 16'
 PIN_CREATE_JQ='--jq .id'
 PIN_REST_PAGINATE='--paginate'
 PIN_REST_PER_PAGE='per_page=100'
-PIN_READBACK="gh api repos/<owner>/<repo>/issues/<number>/comments/<id> --jq '{id, body}'"
+PIN_READBACK="gh api repos/<owner>/<repo>/issues/comments/<id> --jq '{id, body}'"
 # #880: persist the nonce (and clear any stale escalationCommentId) before
 # ever posting -- the literal every escalating path's own persist-nonce
 # sub-step restates at its call site (never merely referenced), so a

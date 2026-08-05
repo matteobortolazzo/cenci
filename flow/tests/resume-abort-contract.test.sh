@@ -249,7 +249,7 @@ if [[ -n "${RESUME_SECTION:-}" ]]; then
   RESUME_ORDER_LABEL="phase-1-plan.md (## Resume From Draft step 3 ordering)"
   require_first_offset RO1 "${RESUME_SECTION}" 'persist the fresh `escalationNonce` and clear `escalationCommentId` in one write, verify by re-read' "${RESUME_ORDER_LABEL}"
   require_first_offset RO2 "${RESUME_SECTION}" 'gh api repos/<owner>/<repo>/issues/<number>/comments -F body=@<questions-file> --jq .id' "${RESUME_ORDER_LABEL}"
-  require_first_offset RO3 "${RESUME_SECTION}" "gh api repos/<owner>/<repo>/issues/<number>/comments/<id> --jq '{id, body}'" "${RESUME_ORDER_LABEL}"
+  require_first_offset RO3 "${RESUME_SECTION}" "gh api repos/<owner>/<repo>/issues/comments/<id> --jq '{id, body}'" "${RESUME_ORDER_LABEL}"
   require_first_offset RO4 "${RESUME_SECTION}" 'persist `escalationCommentId`, verify by re-read' "${RESUME_ORDER_LABEL}"
   if ! { [[ "${RO1}" -lt "${RO2}" ]] && [[ "${RO2}" -lt "${RO3}" ]] && [[ "${RO3}" -lt "${RO4}" ]]; }; then
     fail "${RESUME_ORDER_LABEL} violated (expected strictly increasing): persist-nonce=${RO1} post=${RO2} readback=${RO3} persist-comment-id=${RO4}"
@@ -266,7 +266,7 @@ if [[ -n "${REPAIR_SECTION:-}" ]]; then
     CASE_III_LABEL="phase-1-plan.md (## Repair Escalation Anchor case (iii) ordering)"
     require_first_offset C3O1 "${CASE_III}" 'persist it into `escalationNonce`' "${CASE_III_LABEL}"
     require_first_offset C3O2 "${CASE_III}" 'gh api repos/<owner>/<repo>/issues/<number>/comments -F body=@<questions-file> --jq .id' "${CASE_III_LABEL}"
-    require_first_offset C3O3 "${CASE_III}" "gh api repos/<owner>/<repo>/issues/<number>/comments/<id> --jq '{id, body}'" "${CASE_III_LABEL}"
+    require_first_offset C3O3 "${CASE_III}" "gh api repos/<owner>/<repo>/issues/comments/<id> --jq '{id, body}'" "${CASE_III_LABEL}"
     require_first_offset C3O4 "${CASE_III}" 'persist the ID into `escalationCommentId`' "${CASE_III_LABEL}"
     if ! { [[ "${C3O1}" -lt "${C3O2}" ]] && [[ "${C3O2}" -lt "${C3O3}" ]] && [[ "${C3O3}" -lt "${C3O4}" ]]; }; then
       fail "${CASE_III_LABEL} violated (expected strictly increasing): persist-nonce=${C3O1} post=${C3O2} readback=${C3O3} persist-comment-id=${C3O4}"
@@ -281,7 +281,7 @@ if [[ -n "${REPAIR_SECTION:-}" ]]; then
   else
     CASE_II_LABEL="phase-1-plan.md (## Repair Escalation Anchor case (ii) ordering)"
     require_first_offset C2O1 "${CASE_II}" 'gh api repos/<owner>/<repo>/issues/<number>/comments -F body=@<questions-file> --jq .id' "${CASE_II_LABEL}"
-    require_first_offset C2O2 "${CASE_II}" "gh api repos/<owner>/<repo>/issues/<number>/comments/<id> --jq '{id, body}'" "${CASE_II_LABEL}"
+    require_first_offset C2O2 "${CASE_II}" "gh api repos/<owner>/<repo>/issues/comments/<id> --jq '{id, body}'" "${CASE_II_LABEL}"
     require_first_offset C2O3 "${CASE_II}" 'persist the ID into `escalationCommentId`' "${CASE_II_LABEL}"
     if ! { [[ "${C2O1}" -lt "${C2O2}" ]] && [[ "${C2O2}" -lt "${C2O3}" ]]; }; then
       fail "${CASE_II_LABEL} violated (expected strictly increasing): post=${C2O1} readback=${C2O2} persist-comment-id=${C2O3}"

@@ -141,7 +141,7 @@ PIN_REST_CREATE='gh api repos/<owner>/<repo>/issues/<number>/comments -F body=@<
 PIN_FM_NONCE_KEY='escalationNonce'
 PIN_FM_COMMENTID_KEY='escalationCommentId'
 PIN_PERSIST_ID_RECOVERY='the comment is already posted (step 2 succeeded), so do not re-post it'
-PIN_READBACK="gh api repos/<owner>/<repo>/issues/<number>/comments/<id> --jq '{id, body}'"
+PIN_READBACK="gh api repos/<owner>/<repo>/issues/comments/<id> --jq '{id, body}'"
 
 assert_section_contains "${ESCALATION_SECTION}" "${PIN_AWAIT_INPUT_CMD}" \
   "must name the pinned command cenci pipeline await-input <id> verbatim"
