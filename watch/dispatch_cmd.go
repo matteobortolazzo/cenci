@@ -90,7 +90,21 @@ func runDispatchEnroll(args []string) {
 	fs := flag.NewFlagSet("enroll", flag.ExitOnError)
 	dir := fs.String("dir", ".", "repo directory to enroll (default: current directory)")
 	configPath := fs.String("config", "", "path to config.json (default: $XDG_CONFIG_HOME/cenci/config.json)")
+	session := fs.String("session", "", "tmux session this repo's dispatches should target (optional; omit to preserve any existing value)")
 	_ = fs.Parse(args)
+
+	sessionSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "session" {
+			sessionSet = true
+		}
+	})
+
+	trimmedSession := strings.TrimSpace(*session)
+	if sessionSet && trimmedSession == "" {
+		fmt.Fprintln(os.Stderr, "cenci dispatch enroll: --session must not be empty or whitespace-only")
+		os.Exit(2)
+	}
 
 	identity, err := dispatch.DetectRepoIdentity(*dir)
 	if err != nil {
@@ -98,41 +112,39 @@ func runDispatchEnroll(args []string) {
 		os.Exit(1)
 	}
 
-	changed, err := dispatch.EnrollRepo(*configPath, identity)
+	changed, effective, err := dispatch.EnrollRepo(*configPath, identity, trimmedSession)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cenci dispatch enroll: %v\n", err)
 		os.Exit(1)
 	}
-	if changed {
-		fmt.Printf("Enrolled %s (%s)\n", identity.Repo, identity.Dir)
-	} else {
-		fmt.Printf("Already enrolled %s (%s)\n", identity.Repo, identity.Dir)
+
+	verb := "Enrolled"
+	if !changed {
+		verb = "Already enrolled"
 	}
 
-	// #927: repos[].session is required before this repo's dispatches can
-	// spawn anywhere -- print the hint whenever the resolved session is
-	// still empty after the enroll call completes, on BOTH the
-	// fresh-enrollment and the idempotent "already enrolled" paths above
-	// (Q&A #1). Never printed once the repo already has a session set.
-	enrollment, qerr := dispatch.QueryEnrollment(*configPath, identity.Repo)
-	if qerr != nil {
-		// Non-fatal: the enroll itself already succeeded and its primary
-		// output above is unaffected -- this is additive diagnostic output
-		// only, so a caller can trace why the session hint below never
-		// printed instead of it just silently never appearing.
-		fmt.Fprintf(os.Stderr, "cenci dispatch enroll: checking session hint: %v\n", qerr)
-	} else if enrollment.Session == "" {
-		// ResolveConfigPath errors fall back to the raw --config value
-		// (or its default) for display purposes only -- the hint itself
-		// still prints. Any resolution failure is also surfaced to stderr
-		// (non-fatal) so it is traceable rather than silently swallowed.
-		resolvedPath, perr := dispatch.ResolveConfigPath(*configPath)
-		if perr != nil {
-			resolvedPath = *configPath
-			fmt.Fprintf(os.Stderr, "cenci dispatch enroll: resolving config path: %v\n", perr)
-		}
-		fmt.Printf("Set \"session\" for %s in %s before it will dispatch.\n", identity.Repo, resolvedPath)
+	if effective != "" {
+		fmt.Printf("%s %s (%s) → session %s\n", verb, identity.Repo, identity.Dir, effective)
+		return
 	}
+
+	// #927/#933: repos[].session is required before this repo's dispatches
+	// can spawn anywhere -- warn whenever the resulting entry's session is
+	// still empty, driven by that resulting state rather than by whether
+	// --session was passed on this invocation, so it fires on both the
+	// fresh-enrollment and the idempotent "already enrolled" paths above.
+	// ResolveConfigPath errors fall back to the raw --config value (or its
+	// default) for display purposes only -- the warning itself still
+	// prints. Any resolution failure is also surfaced to stderr (non-fatal)
+	// so it is traceable rather than silently swallowed. Exit stays 0: this
+	// is output-only, never a write.
+	resolvedPath, perr := dispatch.ResolveConfigPath(*configPath)
+	if perr != nil {
+		resolvedPath = *configPath
+		fmt.Fprintf(os.Stderr, "cenci dispatch enroll: resolving config path: %v\n", perr)
+	}
+	fmt.Printf("%s %s (%s); no tmux session set -- dispatch will skip this repo until you run: cenci dispatch enroll --session <name> (config: %s)\n",
+		verb, identity.Repo, identity.Dir, resolvedPath)
 }
 
 func runDispatchUnenroll(args []string) {
@@ -205,11 +217,13 @@ func runDispatchStatus(args []string) {
 			Repo     string              `json:"repo"`
 			Dir      string              `json:"dir"`
 			Enrolled bool                `json:"enrolled"`
+			Session  string              `json:"session"`
 			Loop     watch.DispatchState `json:"loop"`
 		}{
 			Repo:     enrollment.Repo,
 			Dir:      enrollment.Dir,
 			Enrolled: enrollment.Enrolled,
+			Session:  enrollment.Session,
 			Loop:     dispatch.ResolveDispatchState(*configPath, watch.DefaultSocketPath(), os.Stderr),
 		}
 		data, err := json.Marshal(out)
@@ -221,10 +235,13 @@ func runDispatchStatus(args []string) {
 		return
 	}
 
-	if enrollment.Enrolled {
-		fmt.Printf("Enrolled %s (%s)\n", enrollment.Repo, enrollment.Dir)
-	} else {
+	switch {
+	case !enrollment.Enrolled:
 		fmt.Printf("Not enrolled: %s\n", enrollment.Repo)
+	case enrollment.Session != "":
+		fmt.Printf("Enrolled %s (%s) → session %s\n", enrollment.Repo, enrollment.Dir, enrollment.Session)
+	default:
+		fmt.Printf("Enrolled %s (%s); no tmux session set\n", enrollment.Repo, enrollment.Dir)
 	}
 }
 

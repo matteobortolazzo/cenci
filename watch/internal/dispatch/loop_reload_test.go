@@ -55,7 +55,7 @@ func (fakeController) HasSession(session string) (bool, error) { return true, ni
 func seedDispatchConfig(t *testing.T, dir, repo string) string {
 	t.Helper()
 	path := filepath.Join(dir, "config.json")
-	if _, err := EnrollRepo(path, RepoIdentity{Repo: repo, Dir: t.TempDir()}); err != nil {
+	if _, _, err := EnrollRepo(path, RepoIdentity{Repo: repo, Dir: t.TempDir()}, ""); err != nil {
 		t.Fatalf("seeding config with %s: %v", repo, err)
 	}
 	if err := SetLoopEnabled(path, true); err != nil {
@@ -127,7 +127,7 @@ func TestDispatchTickReloadPicksUpEnrollment(t *testing.T) {
 
 	// Repo B is enrolled between ticks (e.g. via `dispatch enroll` or the
 	// board-driven flow from lazyboards#260).
-	if _, err := EnrollRepo(path, RepoIdentity{Repo: "o/B", Dir: t.TempDir()}); err != nil {
+	if _, _, err := EnrollRepo(path, RepoIdentity{Repo: "o/B", Dir: t.TempDir()}, ""); err != nil {
 		t.Fatalf("enrolling repo B: %v", err)
 	}
 
@@ -243,7 +243,7 @@ func TestCombinedTickReloadPicksUpEnrollment(t *testing.T) {
 	drainAttention(attention)
 	buf.Reset()
 
-	if _, err := EnrollRepo(path, RepoIdentity{Repo: "o/B", Dir: t.TempDir()}); err != nil {
+	if _, _, err := EnrollRepo(path, RepoIdentity{Repo: "o/B", Dir: t.TempDir()}, ""); err != nil {
 		t.Fatalf("enrolling repo B: %v", err)
 	}
 

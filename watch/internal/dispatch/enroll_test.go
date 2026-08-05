@@ -87,7 +87,7 @@ func TestEnrollRepo_CreatesDispatchBlockInNewFile(t *testing.T) {
 	path := filepath.Join(tmpDir, "nested", "config.json")
 	identity := RepoIdentity{Repo: "owner/name", Dir: "/abs/path/to/repo"}
 
-	changed, err := EnrollRepo(path, identity)
+	changed, _, err := EnrollRepo(path, identity, "")
 	if err != nil {
 		t.Fatalf("EnrollRepo: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestEnrollRepo_PreservesUnknownTopLevelKeys(t *testing.T) {
 }`)
 
 	identity := RepoIdentity{Repo: "owner/name", Dir: "/abs/dir"}
-	changed, err := EnrollRepo(path, identity)
+	changed, _, err := EnrollRepo(path, identity, "")
 	if err != nil {
 		t.Fatalf("EnrollRepo: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestEnrollRepo_PreservesUnknownDispatchKeys(t *testing.T) {
 }`)
 
 	identity := RepoIdentity{Repo: "owner/name", Dir: "/abs/dir"}
-	changed, err := EnrollRepo(path, identity)
+	changed, _, err := EnrollRepo(path, identity, "")
 	if err != nil {
 		t.Fatalf("EnrollRepo: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestEnrollRepo_IdempotentSameRepoDir(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	identity := RepoIdentity{Repo: "owner/name", Dir: "/abs/dir"}
 
-	if changed, err := EnrollRepo(path, identity); err != nil || !changed {
+	if changed, _, err := EnrollRepo(path, identity, ""); err != nil || !changed {
 		t.Fatalf("first EnrollRepo: changed=%v err=%v", changed, err)
 	}
 
@@ -214,7 +214,7 @@ func TestEnrollRepo_IdempotentSameRepoDir(t *testing.T) {
 		t.Fatalf("stat config: %v", err)
 	}
 
-	changed, err := EnrollRepo(path, identity)
+	changed, _, err := EnrollRepo(path, identity, "")
 	if err != nil {
 		t.Fatalf("second EnrollRepo: %v", err)
 	}
@@ -243,11 +243,11 @@ func TestEnrollRepo_UpdatesDirInPlace(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	repo := "owner/name"
 
-	if changed, err := EnrollRepo(path, RepoIdentity{Repo: repo, Dir: "/dir/a"}); err != nil || !changed {
+	if changed, _, err := EnrollRepo(path, RepoIdentity{Repo: repo, Dir: "/dir/a"}, ""); err != nil || !changed {
 		t.Fatalf("first EnrollRepo: changed=%v err=%v", changed, err)
 	}
 
-	changed, err := EnrollRepo(path, RepoIdentity{Repo: repo, Dir: "/dir/b"})
+	changed, _, err := EnrollRepo(path, RepoIdentity{Repo: repo, Dir: "/dir/b"}, "")
 	if err != nil {
 		t.Fatalf("second EnrollRepo: %v", err)
 	}
@@ -264,14 +264,207 @@ func TestEnrollRepo_UpdatesDirInPlace(t *testing.T) {
 	}
 }
 
+// -- EnrollRepo session (#933) --------------------------------------------
+
+// TestEnrollRepo_NewEntryWithSession_SetsSessionAndReturnsEffective covers a
+// brand-new entry enrolled with a non-empty --session: the entry round-trips
+// with that session, and effective reports it.
+func TestEnrollRepo_NewEntryWithSession_SetsSessionAndReturnsEffective(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	identity := RepoIdentity{Repo: "owner/name", Dir: "/abs/dir"}
+
+	changed, effective, err := EnrollRepo(path, identity, "a-work")
+	if err != nil {
+		t.Fatalf("EnrollRepo: %v", err)
+	}
+	if !changed {
+		t.Fatalf("EnrollRepo: want changed=true for a brand-new entry")
+	}
+	if effective != "a-work" {
+		t.Errorf("effective = %q, want %q", effective, "a-work")
+	}
+
+	cfg := mustDecodeConfig(t, path)
+	if len(cfg.Dispatch.Repos) != 1 {
+		t.Fatalf("dispatch.repos = %+v, want exactly one entry", cfg.Dispatch.Repos)
+	}
+	if cfg.Dispatch.Repos[0].Repo != identity.Repo || cfg.Dispatch.Repos[0].Dir != identity.Dir {
+		t.Errorf("dispatch.repos[0] = %+v, want repo=%q dir=%q", cfg.Dispatch.Repos[0], identity.Repo, identity.Dir)
+	}
+	if cfg.Dispatch.Repos[0].Session != "a-work" {
+		t.Errorf("dispatch.repos[0].Session = %q, want %q", cfg.Dispatch.Repos[0].Session, "a-work")
+	}
+}
+
+// TestEnrollRepo_ExistingEntryDifferentSession_UpdatesAndPreservesOtherKeys
+// covers re-enrolling an existing entry with a different --session: the
+// entry's session updates, effective reports the new value, and every other
+// key -- the entry's repo/dir, the dispatch block's other keys
+// (concurrencyCap), and unknown top-level keys -- survives (mirrors
+// TestEnrollRepo_PreservesUnknownDispatchKeys / PreservesUnknownTopLevelKeys).
+func TestEnrollRepo_ExistingEntryDifferentSession_UpdatesAndPreservesOtherKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeFile(t, path, `{
+  "agents": {"claude": {"command": "claude"}},
+  "defaultAgent": "claude",
+  "sandbox": true,
+  "dispatch": {
+    "repos": [{"repo": "owner/name", "dir": "/abs/dir", "session": "old-session"}],
+    "concurrencyCap": 7
+  }
+}`)
+
+	changed, effective, err := EnrollRepo(path, RepoIdentity{Repo: "owner/name", Dir: "/abs/dir"}, "new-session")
+	if err != nil {
+		t.Fatalf("EnrollRepo: %v", err)
+	}
+	if !changed {
+		t.Errorf("changed = false, want true (session differs)")
+	}
+	if effective != "new-session" {
+		t.Errorf("effective = %q, want %q", effective, "new-session")
+	}
+
+	cfg := mustDecodeConfig(t, path)
+	if cfg.DefaultAgent != "claude" {
+		t.Errorf("defaultAgent = %q, want %q", cfg.DefaultAgent, "claude")
+	}
+	if cfg.Sandbox == nil || !*cfg.Sandbox {
+		t.Errorf("sandbox = %v, want true", cfg.Sandbox)
+	}
+	if _, ok := cfg.Agents["claude"]; !ok {
+		t.Errorf("agents = %+v, want key %q preserved", cfg.Agents, "claude")
+	}
+	if cfg.Dispatch.ConcurrencyCap == nil || *cfg.Dispatch.ConcurrencyCap != 7 {
+		t.Errorf("dispatch.concurrencyCap = %v, want 7", cfg.Dispatch.ConcurrencyCap)
+	}
+	if len(cfg.Dispatch.Repos) != 1 {
+		t.Fatalf("dispatch.repos = %+v, want exactly one entry", cfg.Dispatch.Repos)
+	}
+	if cfg.Dispatch.Repos[0].Repo != "owner/name" || cfg.Dispatch.Repos[0].Dir != "/abs/dir" {
+		t.Errorf("dispatch.repos[0] = %+v, want repo=%q dir=%q preserved", cfg.Dispatch.Repos[0], "owner/name", "/abs/dir")
+	}
+	if cfg.Dispatch.Repos[0].Session != "new-session" {
+		t.Errorf("dispatch.repos[0].Session = %q, want %q", cfg.Dispatch.Repos[0].Session, "new-session")
+	}
+}
+
+// TestEnrollRepo_EmptySessionPreservesExistingValue covers the "not
+// provided; leave any existing value alone" contract: passing "" against an
+// entry that already has a session must not change it, and must never write
+// the file (an empty session always means "not provided", never "clear it").
+func TestEnrollRepo_EmptySessionPreservesExistingValue(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeFile(t, path, `{"dispatch": {"repos": [{"repo": "owner/name", "dir": "/abs/dir", "session": "existing-session"}]}}`)
+
+	bytesBefore, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading config: %v", err)
+	}
+	statBefore, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat config: %v", err)
+	}
+
+	changed, effective, err := EnrollRepo(path, RepoIdentity{Repo: "owner/name", Dir: "/abs/dir"}, "")
+	if err != nil {
+		t.Fatalf("EnrollRepo: %v", err)
+	}
+	if changed {
+		t.Errorf("changed = true, want false (session not provided, dir unchanged)")
+	}
+	if effective != "existing-session" {
+		t.Errorf("effective = %q, want %q (the preserved existing session)", effective, "existing-session")
+	}
+
+	bytesAfter, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading config: %v", err)
+	}
+	statAfter, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat config: %v", err)
+	}
+	if !bytes.Equal(bytesBefore, bytesAfter) {
+		t.Errorf("file bytes changed on an empty-session no-op enroll")
+	}
+	if !statBefore.ModTime().Equal(statAfter.ModTime()) {
+		t.Errorf("mtime changed on an empty-session no-op enroll: before=%v after=%v", statBefore.ModTime(), statAfter.ModTime())
+	}
+}
+
+// TestEnrollRepo_SameSessionReenrolled_IsNoop covers re-passing the exact
+// same session value already configured: no write, changed=false, effective
+// reports that (unchanged) session.
+func TestEnrollRepo_SameSessionReenrolled_IsNoop(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeFile(t, path, `{"dispatch": {"repos": [{"repo": "owner/name", "dir": "/abs/dir", "session": "same-session"}]}}`)
+
+	bytesBefore, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading config: %v", err)
+	}
+	statBefore, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat config: %v", err)
+	}
+
+	changed, effective, err := EnrollRepo(path, RepoIdentity{Repo: "owner/name", Dir: "/abs/dir"}, "same-session")
+	if err != nil {
+		t.Fatalf("EnrollRepo: %v", err)
+	}
+	if changed {
+		t.Errorf("changed = true, want false (session re-passed is identical to the existing value)")
+	}
+	if effective != "same-session" {
+		t.Errorf("effective = %q, want %q", effective, "same-session")
+	}
+
+	bytesAfter, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading config: %v", err)
+	}
+	statAfter, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat config: %v", err)
+	}
+	if !bytes.Equal(bytesBefore, bytesAfter) {
+		t.Errorf("file bytes changed on a same-session no-op enroll")
+	}
+	if !statBefore.ModTime().Equal(statAfter.ModTime()) {
+		t.Errorf("mtime changed on a same-session no-op enroll: before=%v after=%v", statBefore.ModTime(), statAfter.ModTime())
+	}
+}
+
+// TestEnrollRepo_SessionlessEntry_EmptySessionReturnsEmptyEffective covers
+// the "must still warn even though nothing changed" AC's library-layer half:
+// re-enrolling an entry that has no session configured, with no --session
+// passed, must report effective=="" (that warning itself is a CLI-layer
+// concern, tested in dispatch_test.go).
+func TestEnrollRepo_SessionlessEntry_EmptySessionReturnsEmptyEffective(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeFile(t, path, `{"dispatch": {"repos": [{"repo": "owner/name", "dir": "/abs/dir"}]}}`)
+
+	changed, effective, err := EnrollRepo(path, RepoIdentity{Repo: "owner/name", Dir: "/abs/dir"}, "")
+	if err != nil {
+		t.Fatalf("EnrollRepo: %v", err)
+	}
+	if changed {
+		t.Errorf("changed = true, want false (dir unchanged, no session provided)")
+	}
+	if effective != "" {
+		t.Errorf("effective = %q, want %q (no session configured, none provided)", effective, "")
+	}
+}
+
 // -- UnenrollRepo -----------------------------------------------------------
 
 func TestUnenrollRepo_RemovesMatchingEntry(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	if _, err := EnrollRepo(path, RepoIdentity{Repo: "owner/a", Dir: "/dir/a"}); err != nil {
+	if _, _, err := EnrollRepo(path, RepoIdentity{Repo: "owner/a", Dir: "/dir/a"}, ""); err != nil {
 		t.Fatalf("EnrollRepo a: %v", err)
 	}
-	if _, err := EnrollRepo(path, RepoIdentity{Repo: "owner/b", Dir: "/dir/b"}); err != nil {
+	if _, _, err := EnrollRepo(path, RepoIdentity{Repo: "owner/b", Dir: "/dir/b"}, ""); err != nil {
 		t.Fatalf("EnrollRepo b: %v", err)
 	}
 
@@ -291,7 +484,7 @@ func TestUnenrollRepo_RemovesMatchingEntry(t *testing.T) {
 
 func TestUnenrollRepo_NotEnrolledIsNoop(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	if _, err := EnrollRepo(path, RepoIdentity{Repo: "owner/a", Dir: "/dir/a"}); err != nil {
+	if _, _, err := EnrollRepo(path, RepoIdentity{Repo: "owner/a", Dir: "/dir/a"}, ""); err != nil {
 		t.Fatalf("EnrollRepo: %v", err)
 	}
 
@@ -336,7 +529,7 @@ func TestUnenrollRepo_MissingConfigFileIsNoop(t *testing.T) {
 func TestQueryEnrollment_Enrolled(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	identity := RepoIdentity{Repo: "owner/name", Dir: "/abs/dir"}
-	if _, err := EnrollRepo(path, identity); err != nil {
+	if _, _, err := EnrollRepo(path, identity, ""); err != nil {
 		t.Fatalf("EnrollRepo: %v", err)
 	}
 
@@ -353,7 +546,7 @@ func TestQueryEnrollment_Enrolled(t *testing.T) {
 func TestQueryEnrollment_NotEnrolled(t *testing.T) {
 	t.Run("file exists but repo absent", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "config.json")
-		if _, err := EnrollRepo(path, RepoIdentity{Repo: "owner/other", Dir: "/dir/other"}); err != nil {
+		if _, _, err := EnrollRepo(path, RepoIdentity{Repo: "owner/other", Dir: "/dir/other"}, ""); err != nil {
 			t.Fatalf("EnrollRepo: %v", err)
 		}
 
@@ -493,7 +686,7 @@ func TestEnrollRepo_DoesNotFollowPreplantedTmpSymlink(t *testing.T) {
 	}
 
 	identity := RepoIdentity{Repo: "owner/name", Dir: "/abs/dir"}
-	changed, err := EnrollRepo(path, identity)
+	changed, _, err := EnrollRepo(path, identity, "")
 	if err != nil {
 		t.Fatalf("EnrollRepo: %v", err)
 	}
@@ -528,7 +721,7 @@ func TestEmptyPath_ResolvesDefaultConfigPath(t *testing.T) {
 
 	identity := RepoIdentity{Repo: "owner/name", Dir: "/abs/dir"}
 
-	changed, err := EnrollRepo("", identity)
+	changed, _, err := EnrollRepo("", identity, "")
 	if err != nil {
 		t.Fatalf("EnrollRepo(\"\", ...): %v", err)
 	}

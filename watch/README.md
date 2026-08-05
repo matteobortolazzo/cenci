@@ -338,16 +338,16 @@ hand-editing `config.json` — this is how lazyboards (and humans) register a re
 dispatch:
 
 ```bash
-cenci dispatch enroll   [--dir <path>] [--config <path>]
+cenci dispatch enroll   [--dir <path>] [--config <path>] [--session <name>]
 cenci dispatch unenroll [--dir <path>] [--config <path>] [--repo owner/name]
 cenci dispatch status   [--dir <path>] [--config <path>] [--json]
 ```
 
 | Verb | Flags | Behavior |
 |------|-------|----------|
-| `enroll` | `--dir` (default cwd), `--config` | Detects `owner/name` and the absolute dir from `--dir`'s git `origin` remote, then adds/updates the `repos` entry. Idempotent: a second run prints `Already enrolled owner/name (dir)` instead of duplicating the entry. |
+| `enroll` | `--dir` (default cwd), `--config`, `--session` | Detects `owner/name` and the absolute dir from `--dir`'s git `origin` remote, then adds/updates the `repos` entry. Idempotent: a second run prints `Already enrolled owner/name (dir)` instead of duplicating the entry. `--session <name>` is optional and sets `repos[].session` — the tmux session that repo's dispatches target (see [Configuration](#configuration)). Omitting it preserves any existing session unchanged (this is how lazyboards' `d`-panel toggle, which never passes `--session`, avoids blanking an already-configured repo). An empty or whitespace-only `--session` is a usage error (exit `2`) rather than a silent clear — there is no un-set verb; unenrolling is how a repo leaves dispatch. Whenever the resulting entry's session is empty — on a fresh enrollment or a no-flag re-enrollment of an already session-less repo — the result line names the consequence and the fix: `Enrolled owner/name (dir); no tmux session set -- dispatch will skip this repo until you run: cenci dispatch enroll --session <name> (config: /abs/path)`. When the resulting entry has a session, the line instead ends `→ session <name>`. |
 | `unenroll` | `--dir`, `--config`, `--repo owner/name` | Removes the `repos` entry. Idempotent: unenrolling a repo that isn't enrolled exits `0` with `Not enrolled: owner/name`. `--repo` unenrolls by name without touching git — use it when the repo's directory has moved or been deleted. `--repo` and an explicitly-passed `--dir` are mutually exclusive (exit `2`) since only one can identify the target. |
-| `status` | `--dir`, `--config`, `--json` | Prints the current enrollment state without mutating anything. `--json` emits a single pinned line: `{"repo":"owner/name","dir":"/abs/path","enrolled":true}`; when not enrolled, `dir` is still the **detected** absolute dir (not empty), even if the config file doesn't exist yet. |
+| `status` | `--dir`, `--config`, `--json` | Prints the current enrollment state without mutating anything. `--json` emits a single pinned line: `{"repo":"owner/name","dir":"/abs/path","enrolled":true,"session":"a-work","loop":{...}}`; when not enrolled, `dir` is still the **detected** absolute dir (not empty) and `session` is empty, even if the config file doesn't exist yet. Human output likewise names the session: `Enrolled owner/name (dir) → session a-work`, or `Enrolled owner/name (dir); no tmux session set` when unset. |
 
 Exit codes are consistent across all three verbs: `0` when the verb ran successfully
 (enrolled/not-enrolled is a result, not a failure), `1` on a detection/IO error

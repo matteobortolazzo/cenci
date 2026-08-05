@@ -116,22 +116,31 @@ func redactURL(url string) string {
 	return "***" + url[at:]
 }
 
-// EnrollRepo idempotently adds (or updates the dir of) identity in
-// dispatch.repos, preserving every other key verbatim. An empty path
-// resolves run.DefaultConfigPath().
-func EnrollRepo(path string, identity RepoIdentity) (changed bool, err error) {
+// EnrollRepo idempotently adds (or updates the dir and/or session of)
+// identity in dispatch.repos, preserving every other key verbatim. An empty
+// path resolves run.DefaultConfigPath().
+//
+// session, when non-empty, sets or updates the entry's tmux session (#933);
+// an empty session means "not provided; leave any existing value alone" --
+// the CLI layer rejects empty/whitespace --session before ever calling in,
+// so an empty string here can never mean "clear it". effective reports the
+// entry's resulting session value (computed before the idempotent-no-write
+// early return, so it is accurate even when nothing changed and the caller
+// still needs it to decide whether to warn).
+func EnrollRepo(path string, identity RepoIdentity, session string) (changed bool, effective string, err error) {
+	session = strings.TrimSpace(session)
 	path, err = resolveConfigPath(path)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 
 	top, err := readRawConfig(path)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	dispatchRaw, repos, err := loadRepos(top)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 
 	newRepos := make([]RepoConfig, len(repos))
@@ -145,29 +154,33 @@ func EnrollRepo(path string, identity RepoIdentity) (changed bool, err error) {
 				newRepos[i].Dir = identity.Dir
 				changed = true
 			}
+			if session != "" && r.Session != session {
+				newRepos[i].Session = session
+				changed = true
+			}
+			effective = strings.TrimSpace(newRepos[i].Session)
 			break
 		}
 	}
 	if !found {
-		// Explicit literal, not a RepoConfig(identity) struct conversion
-		// (#927): RepoIdentity carries no Session, and it must not gain one
-		// just to keep a conversion compiling -- a freshly enrolled entry
-		// round-trips with an empty Session (no --session flag in this
-		// ticket; that's #933).
-		newRepos = append(newRepos, RepoConfig{Repo: identity.Repo, Dir: identity.Dir})
+		// Explicit literal, not a RepoConfig(identity) struct conversion:
+		// RepoIdentity carries no Session, and it must not gain one just to
+		// keep a conversion compiling.
+		newRepos = append(newRepos, RepoConfig{Repo: identity.Repo, Dir: identity.Dir, Session: session})
 		changed = true
+		effective = session
 	}
 	if !changed {
-		return false, nil
+		return false, effective, nil
 	}
 
 	if err := storeRepos(dispatchRaw, newRepos, top); err != nil {
-		return false, err
+		return false, "", err
 	}
 	if err := writeRawConfig(path, top); err != nil {
-		return false, err
+		return false, "", err
 	}
-	return true, nil
+	return true, effective, nil
 }
 
 // UnenrollRepo idempotently removes repo from dispatch.repos. An empty path
@@ -228,16 +241,17 @@ func QueryEnrollment(path string, repo string) (RepoEnrollment, error) {
 
 	for _, r := range repos {
 		if r.Repo == repo {
-			return RepoEnrollment{Repo: r.Repo, Dir: r.Dir, Enrolled: true, Session: r.Session}, nil
+			return RepoEnrollment{Repo: r.Repo, Dir: r.Dir, Enrolled: true, Session: strings.TrimSpace(r.Session)}, nil
 		}
 	}
 	return RepoEnrollment{Repo: repo, Enrolled: false}, nil
 }
 
 // ResolveConfigPath is resolveConfigPath's exported wrapper (#927), so a CLI
-// caller (dispatch_cmd.go's post-enroll session hint) can name the exact
-// config path EnrollRepo/LoadConfig resolved and wrote to, rather than
-// re-deriving the XDG default itself and risking it diverging from --config.
+// caller (dispatch_cmd.go's combined "no tmux session set" warning) can name
+// the exact config path EnrollRepo/LoadConfig resolved and wrote to, rather
+// than re-deriving the XDG default itself and risking it diverging from
+// --config.
 func ResolveConfigPath(path string) (string, error) {
 	return resolveConfigPath(path)
 }

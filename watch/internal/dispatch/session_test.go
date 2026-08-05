@@ -708,18 +708,23 @@ func TestRunOnce_LegacyTopLevelSessionLogsDeprecationLine_NeverGates(t *testing.
 // -- Enroll round-trip -------------------------------------------------------
 
 // TestEnrollRepo_PreservesHandEditedSessionOnExistingEntry covers the AC's
-// "a hand-edited session survives a re-enroll" requirement.
+// "a hand-edited session survives a re-enroll" requirement, and (#933) that
+// the dir-change call's effective return value reports that preserved
+// session.
 func TestEnrollRepo_PreservesHandEditedSessionOnExistingEntry(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	writeFile(t, path, `{"dispatch": {"repos": [{"repo": "o/r", "dir": "/old/dir", "session": "hand-edited"}]}}`)
 
-	changed, err := EnrollRepo(path, RepoIdentity{Repo: "o/r", Dir: "/new/dir"})
+	changed, effective, err := EnrollRepo(path, RepoIdentity{Repo: "o/r", Dir: "/new/dir"}, "")
 	if err != nil {
 		t.Fatalf("EnrollRepo returned unexpected error: %v", err)
 	}
 	if !changed {
 		t.Error("changed = false, want true (dir changed)")
+	}
+	if effective != "hand-edited" {
+		t.Errorf("effective = %q, want the hand-edited session preserved across the dir-change call", effective)
 	}
 
 	cfg, err := LoadConfig(path)
@@ -737,14 +742,43 @@ func TestEnrollRepo_PreservesHandEditedSessionOnExistingEntry(t *testing.T) {
 	}
 }
 
+// TestEnrollRepo_TrimsWhitespaceInReportedSession covers a hand-edited config
+// entry whose session carries stray whitespace (never written by the CLI,
+// which trims before storing, but reachable via a hand edit or external
+// sync). EnrollRepo's effective return and QueryEnrollment's Session must
+// both report the trimmed form, matching buildSessionByRepo's trimming in
+// session.go -- otherwise status/enroll output would claim a repo is
+// configured with a session the dispatch gate treats as unconfigured.
+func TestEnrollRepo_TrimsWhitespaceInReportedSession(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	writeFile(t, path, `{"dispatch": {"repos": [{"repo": "o/r", "dir": "/d", "session": "  padded  "}]}}`)
+
+	_, effective, err := EnrollRepo(path, RepoIdentity{Repo: "o/r", Dir: "/d"}, "")
+	if err != nil {
+		t.Fatalf("EnrollRepo returned unexpected error: %v", err)
+	}
+	if effective != "padded" {
+		t.Errorf("effective = %q, want whitespace-trimmed %q", effective, "padded")
+	}
+
+	got, qerr := QueryEnrollment(path, "o/r")
+	if qerr != nil {
+		t.Fatalf("QueryEnrollment returned unexpected error: %v", qerr)
+	}
+	if got.Session != "padded" {
+		t.Errorf("QueryEnrollment.Session = %q, want whitespace-trimmed %q", got.Session, "padded")
+	}
+}
+
 // TestEnrollRepo_NewEntryRoundTripsWithEmptySession covers the AC's "a newly
 // enrolled entry round-trips with an empty session" requirement -- this
-// ticket adds no --session flag (that's #933).
+// test predates #933's --session flag and passes "" (not provided).
 func TestEnrollRepo_NewEntryRoundTripsWithEmptySession(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 
-	changed, err := EnrollRepo(path, RepoIdentity{Repo: "o/r", Dir: "/abs/dir"})
+	changed, _, err := EnrollRepo(path, RepoIdentity{Repo: "o/r", Dir: "/abs/dir"}, "")
 	if err != nil {
 		t.Fatalf("EnrollRepo returned unexpected error: %v", err)
 	}
