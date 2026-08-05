@@ -26,15 +26,19 @@ type mockCtrl struct {
 	hasSession    bool
 	hasSessionErr error
 
-	windows []winCall
-	options []optCall
+	windows         []winCall
+	options         []optCall
+	groupedSessions []string
 }
 
 type winCall struct{ session, name, cmd string }
 type optCall struct{ target, key, value string }
 
-func (m *mockCtrl) CurrentSession() (string, error)       { return m.session, m.sessionErr }
-func (m *mockCtrl) IsGroupedSession(string) (bool, error) { return m.grouped, m.groupedErr }
+func (m *mockCtrl) CurrentSession() (string, error) { return m.session, m.sessionErr }
+func (m *mockCtrl) IsGroupedSession(session string) (bool, error) {
+	m.groupedSessions = append(m.groupedSessions, session)
+	return m.grouped, m.groupedErr
+}
 func (m *mockCtrl) NewWindow(session, name, cmd string) error {
 	m.windows = append(m.windows, winCall{session, name, cmd})
 	return m.newWindowErr
@@ -74,8 +78,11 @@ func TestRunSpawnsWindowAndPinsName(t *testing.T) {
 		t.Fatalf("expected 1 NewWindow, got %d", len(m.windows))
 	}
 	w := m.windows[0]
-	if w.session != "work" {
-		t.Errorf("session = %q, want work", w.session)
+	if len(m.groupedSessions) != 1 || m.groupedSessions[0] != "=work" {
+		t.Errorf("grouped-session targets = %q, want [=work]", m.groupedSessions)
+	}
+	if w.session != "=work" {
+		t.Errorf("session = %q, want =work", w.session)
 	}
 	if w.name != "40-implement" {
 		t.Errorf("name = %q, want 40-implement", w.name)
@@ -87,12 +94,32 @@ func TestRunSpawnsWindowAndPinsName(t *testing.T) {
 
 	found := false
 	for _, o := range m.options {
-		if o.target == "work:40-implement" && o.key == "automatic-rename" && o.value == "off" {
+		if o.target == "=work:=40-implement" && o.key == "automatic-rename" && o.value == "off" {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("expected automatic-rename off on work:40-implement, got %+v", m.options)
+		t.Errorf("expected automatic-rename off on =work:=40-implement, got %+v", m.options)
+	}
+}
+
+func TestRunTreatsLeadingEqualsAsPartOfRawSessionName(t *testing.T) {
+	m := &mockCtrl{}
+	opts := noConfigOpts(t)
+	opts.Workflow, opts.Ticket, opts.Session = "implement", "40", "=work"
+
+	if err := Run(opts, m); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(m.groupedSessions) != 1 || m.groupedSessions[0] != "==work" {
+		t.Errorf("grouped-session targets = %q, want [==work]", m.groupedSessions)
+	}
+	if len(m.windows) != 1 || m.windows[0].session != "==work" {
+		t.Errorf("window calls = %+v, want the raw name =work encoded as exact target ==work", m.windows)
+	}
+	if len(m.options) != 1 || m.options[0].target != "==work:=40-implement" {
+		t.Errorf("option calls = %+v, want exact target ==work:=40-implement", m.options)
 	}
 }
 
@@ -125,12 +152,12 @@ func TestRunWindowTicketNamesWindowIndependentOfTicket(t *testing.T) {
 
 	found := false
 	for _, o := range m.options {
-		if o.target == "work:42-implement" && o.key == "automatic-rename" && o.value == "off" {
+		if o.target == "=work:=42-implement" && o.key == "automatic-rename" && o.value == "off" {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("expected automatic-rename off on work:42-implement, got %+v", m.options)
+		t.Errorf("expected automatic-rename off on =work:=42-implement, got %+v", m.options)
 	}
 }
 
@@ -305,6 +332,9 @@ func TestRunSetWindowOptionFailureWrapsErrWindowSpawned(t *testing.T) {
 	if !errors.Is(err, ErrWindowSpawned) {
 		t.Errorf("error = %v, want errors.Is(_, ErrWindowSpawned) -- the window was already created before this failure", err)
 	}
+	if strings.Contains(err.Error(), "=work:40-implement") || !strings.Contains(err.Error(), "work:40-implement") {
+		t.Errorf("error = %q, want the human-readable session target without tmux's exact-match marker", err)
+	}
 	if len(m.windows) != 1 {
 		t.Errorf("expected the window to have been created before the failure, got %+v", m.windows)
 	}
@@ -417,8 +447,8 @@ func TestRunUsesExplicitSession(t *testing.T) {
 	if err := Run(opts, m); err != nil {
 		t.Fatalf("Run with explicit session: %v", err)
 	}
-	if len(m.windows) != 1 || m.windows[0].session != "explicit" {
-		t.Errorf("expected spawn into explicit session, got %+v", m.windows)
+	if len(m.windows) != 1 || m.windows[0].session != "=explicit" {
+		t.Errorf("expected spawn into exact explicit session, got %+v", m.windows)
 	}
 }
 

@@ -51,6 +51,39 @@ func TestHasSession_ExactMatchArgumentShape(t *testing.T) {
 	}
 }
 
+// TestLaunchOperationsPreserveExactTargets pins the argv boundary after the
+// run package has normalized a session. Every command must carry the leading
+// exact-match marker through to tmux, including the colon added by NewWindow
+// and the independent exact marker for the post-create window name.
+func TestLaunchOperationsPreserveExactTargets(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "args")
+	installFakeTmuxOnPath(t, "printf '%s\\n' \"$#\" \"$@\" >> "+argsFile+"\nif [ \"$1\" = display-message ]; then echo 0; fi\nexit 0\n")
+
+	client := &ExecClient{}
+	if _, err := client.IsGroupedSession("=work"); err != nil {
+		t.Fatalf("IsGroupedSession returned unexpected error: %v", err)
+	}
+	if err := client.NewWindow("=work", "40-implement", "agent command"); err != nil {
+		t.Fatalf("NewWindow returned unexpected error: %v", err)
+	}
+	if err := client.SetWindowOption("=work:=40-implement", "automatic-rename", "off"); err != nil {
+		t.Fatalf("SetWindowOption returned unexpected error: %v", err)
+	}
+
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("reading recorded args: %v", err)
+	}
+	want := strings.Join([]string{
+		"5", "display-message", "-t", "=work", "-p", "#{session_grouped}",
+		"7", "new-window", "-d", "-t", "=work:", "-n", "40-implement", "agent command",
+		"5", "set-window-option", "-t", "=work:=40-implement", "automatic-rename", "off",
+	}, "\n")
+	if strings.TrimSpace(string(got)) != want {
+		t.Errorf("tmux invocations = %q, want %q", strings.TrimSpace(string(got)), want)
+	}
+}
+
 // TestHasSession_LiveSessionReportsTrue covers the positive classification:
 // a zero tmux exit means the session exists.
 func TestHasSession_LiveSessionReportsTrue(t *testing.T) {
