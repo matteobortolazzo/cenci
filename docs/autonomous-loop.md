@@ -118,7 +118,8 @@ pushed to `origin/main` takes effect on the next pass.
 
 In `~/.config/cenci/config.json`:
 
-```json
+```jsonc
+// ~/.config/cenci/config.json — your machine's fleet config, not the repo's
 {
   "dispatch": {
     "planRefined": true,
@@ -182,7 +183,8 @@ hatch that survives reconfiguration untouched.
 
 Fleet switch, in `~/.config/cenci/config.json`:
 
-```json
+```jsonc
+// ~/.config/cenci/config.json — `enabled` lives here and nowhere else
 {
   "automerge": { "enabled": true }
 }
