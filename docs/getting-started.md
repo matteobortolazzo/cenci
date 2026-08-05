@@ -170,6 +170,19 @@ an approved `.plans/` file and applies `Planned`; implementation or automated di
 (`cenci dispatch`) picks it up and applies the transient `Working` state. PR creation
 applies `In Review`, and merge completion applies `Implemented`.
 
+## 8. Optional: remove the gates
+
+Everything above keeps you in the loop at refinement, at plan review, and at merge.
+Four opt-in switches remove those gates one at a time — up to a chain that runs
+refine → plan → implement → PR → merge → next ticket unattended. All four are off by
+default, per-repo autonomy is committed to the repo (so the repo decides), and the
+per-ticket merge grant stays a human decision.
+
+[The autonomous loop](autonomous-loop.md) has the switch table, a quick start with
+working config for both `~/.config/cenci/config.json` and the repo's
+`.cenci/config.json`, what still stops the machine, and how to read a held-merge log
+line.
+
 ## OpenCode support (additional, opt-in agent)
 
 The installer also detects [OpenCode](https://opencode.ai) and, when found, offers an

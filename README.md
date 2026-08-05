@@ -164,6 +164,20 @@ approved `Planned` ticket by policy. No board or LLM is required for the pickup 
 [Follow the board-orchestration recipe →](docs/orchestration.md) ·
 [See the deterministic demo recipe →](demo.tape)
 
+## Optional: go hands-off
+
+Four opt-in switches remove the human gates one at a time — plans that approve
+themselves, dispatch that starts its own planning sessions, and `cenci babysit`
+merging the PR once CI is green and review feedback is clear. Fully armed, the chain
+runs refine → plan → implement → PR → merge → next ticket with no human touch between
+refinement and merge.
+
+Every switch is off by default and independently reversible, the per-ticket merge
+grant is always a human decision, and each link fails closed. Nothing here changes
+until you turn it on.
+
+[Read the autonomous loop guide →](docs/autonomous-loop.md)
+
 ## Claude Code, Codex, and OpenCode
 
 | Client | Ready today |
@@ -189,6 +203,7 @@ chooses an agent per invocation, while `cenci dispatch` can route tickets by
 | Use tmux, status surfaces, dispatch, or the CLI | [Attention and CLI reference](watch/README.md) |
 | Configure and maintain the container boundary | [Isolation guide](sandbox/README.md) and [security model](SECURITY.md) |
 | Drive cenci from a GitHub board | [Orchestration recipe](docs/orchestration.md) |
+| Let it plan, implement, and merge unattended | [The autonomous loop](docs/autonomous-loop.md) |
 | Check what is available or in development | [Roadmap](docs/roadmap.md) |
 | Contribute | [Contributing guide](CONTRIBUTING.md) |
 | Upgrade from agent-stack | [Migration guide](docs/migrating-to-cenci.md) |

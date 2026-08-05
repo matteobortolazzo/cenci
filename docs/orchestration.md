@@ -7,7 +7,9 @@ This is the supported recipe for driving the whole package from a
 [lazyboards](https://github.com/matteobortolazzo/lazyboards) kanban board — the
 orchestration layer that sits on top of cenci (workflow), cenci-watch (attention),
 and cenci-sandbox (isolation). See the [root overview](../README.md) for the
-architecture; this document is the wiring.
+architecture; this document is the wiring. For the opt-in switches that let this
+lifecycle run unattended — self-approving plans, dispatch-started planning sessions,
+and automerge — start at [The autonomous loop](autonomous-loop.md).
 
 Every card is a GitHub issue. A keypress on a card dispatches a coding-agent workflow
 into a detached tmux window; the agent moves the card across the board by relabelling
