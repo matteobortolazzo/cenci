@@ -27,6 +27,7 @@ jobs:
           filters: |
             flow:
               - 'flow/**'
+              - '.cenci/config.json' # Run the repository activation contract on config-only changes.
               - '.github/workflows/flow-ci.yml'
               - 'docs/pipeline-coverage-map.md'
               - 'watch/**/*_test.go'

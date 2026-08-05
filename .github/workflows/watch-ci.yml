@@ -26,6 +26,7 @@ jobs:
           filters: |
             watch:
               - 'watch/**'
+              - '.cenci/config.json' # Run the real policy-resolver dogfood test on config-only changes.
               - 'sandbox/tests/lib/**'
               - 'flow/tests/adversarial-chain/fixtures/**'
               - '.github/workflows/watch-ci.yml'

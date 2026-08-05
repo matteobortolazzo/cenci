@@ -1,7 +1,8 @@
 # Pipeline coverage map
 
 This document is the committed source of truth tying every acceptance
-criterion in the `#661` idempotent-refine/autonomous-chain split
+criterion in the `#661` idempotent-refine/autonomous-chain split and the
+repository activation that enables the completed chain
 (`#876`-`#886`, `#912`-`#916`) — and every runtime-behavior claim restated by
 this split's reconciled docs — to a named, currently-existing test. It is
 enforced by a fail-closed sync check in `flow/scripts/run-checks.sh`
@@ -221,6 +222,15 @@ be noise, not signal.
 | 4 | The coverage map records each adversarial suite's bounded scenario count and runtime ceiling, and no adversarial suite appears in `run-checks.sh`'s `EXCLUDE` allowlist. | `flow/scripts/run-checks.test.sh::Case 15: An adversarial suite injected into EXCLUDE in the fixture's` |
 | 5 | A final verification run passes `bash scripts/run-checks.sh` in `flow/` and complete `make test` in `watch/` together. | `flow/scripts/run-checks.test.sh`, `TestChainFake_ScenarioInventoryIsFixed` |
 | 6 | `#887` is closed by this child's PR after every sibling closes and the parent-close audit is current; the PR description explicitly flags `#661` as requiring manual/follow-up closure. | none — procedural close-audit criterion, not test-observable; see Followups |
+
+### #661 — repository activation
+
+| AC | Claim | Test |
+|---|---|---|
+| 1 | This repository explicitly authorizes lean planning while missing or malformed authorization remains fail-closed in the runtime implemented by the split. | `flow/tests/repo-activation-config.test.sh`, `TestRunOnce_LeanRepoConfigPassesAutonomyGate` |
+| 2 | Flow, watch, and sandbox each have positive bounded squash policies, while root-owned files remain ineligible without a top-level policy. | `flow/tests/repo-activation-config.test.sh`, `TestRepositoryAutomergePolicyDogfood` |
+| 3 | Representative control-plane, runtime, and supply-chain paths are protected through the production matcher; representative docs and tests remain eligible. | `TestRepositoryAutomergePolicyDogfood` |
+| 4 | Config-only changes trigger both the authored-config contract and the production policy-resolver dogfood test in CI. | `flow/tests/repo-activation-config.test.sh` |
 
 ## Doc-claim coverage
 
