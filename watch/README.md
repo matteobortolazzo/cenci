@@ -796,6 +796,9 @@ rather than guessing.
 
 #### Planning pickup and autonomous re-plan
 
+> Turning this on, and what it combines with: [The autonomous
+> loop](../docs/autonomous-loop.md). This section is the exhaustive gate reference.
+
 Ticket #828 makes gate 2 stage-aware: with `dispatch.planRefined: true` (default
 `false`), a `Refined` ticket with no matched plan file becomes a *planning pickup*
 instead of a terminal `not Planned` skip, and a stale `Planned` plan becomes an
@@ -1179,6 +1182,10 @@ cleanup: 'cenci close {number}'
 
 ### Automerge (`cenci babysit`)
 
+> Turning this on, and what it combines with: [The autonomous
+> loop](../docs/autonomous-loop.md). This section is the exhaustive condition
+> reference.
+
 The same `cenci babysit` supervisor that watches CI and review feedback can also
 merge a PR itself, once every one of these holds on a given tick:
 
@@ -1232,8 +1239,14 @@ merge a PR itself, once every one of these holds on a given tick:
 A denied or held tick is logged once, e.g.:
 
 ```
-babysit: automerge PR #42 held: ticket lacks automerge:ok [enabled=yes label=no ci=- review=- mergeable=- policy=- files=- lines=- protected=- method=- queue=-]
+babysit: automerge PR #42 held: ticket lacks automerge:ok [enabled=yes label=no ci=- review=- mergeable=- headsha=- policy=- files=- filecap=- lines=- protected=- method=- queue=-]
 ```
+
+The bracket renders every condition-chain stage in evaluation order: `yes` passed,
+`no` is the stage that failed, `-` was never reached because an earlier stage
+short-circuited. A trailing `class=<class>` appears when the hold stemmed from a `gh`
+failure. See [The autonomous loop](../docs/autonomous-loop.md#reading-a-decision) for
+a per-key legend.
 
 When every condition passes, babysit merges with `gh pr merge --squash` (never
 `--delete-branch` — a PR worktree still references the branch) after confirming

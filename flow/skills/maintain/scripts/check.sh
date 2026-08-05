@@ -1633,6 +1633,12 @@ check_command_flags() {
 # look config-shaped (contain at least one signal key from the live
 # .cenci/config.json schema) must parse as JSON and use only field names
 # present in that live schema.
+# Scope note: only the per-repo `.cenci/config.json` schema is modeled here.
+# The fleet config (`~/.config/cenci/config.json`, which owns `dispatch` and
+# `automerge.enabled`) is a different schema with no metadata below, so a doc
+# example of it must use a non-`json` fence (```jsonc) to stay out of this
+# check -- otherwise its fleet-only fields are reported as being outside the
+# canonical repo schema, which is true but not the author's error.
 # Canonical .cenci/config.json path/type metadata. Paths use [] for array
 # elements and * for user-defined map keys. Optional fields remain valid even
 # when the repository's live config does not happen to contain them.
@@ -1667,6 +1673,7 @@ CONFIG_SCHEMA=(
   'lazyboards.testCommand|string' 'lazyboards.testKey|string'
   'pencil|object' 'pencil.enabled|boolean' 'pencil.designPath|string'
   'pencil.mode|string' 'pencil.shared|boolean'
+  'planning|object' 'planning.autonomy|string'
   'security|object' 'security.sensitivePaths|array' 'security.sensitivePaths[]|string'
   'maintenance|object' 'maintenance.enabled|boolean'
   'maintenance.checkDuringImplement|boolean' 'maintenance.remindAfterDays|number'
