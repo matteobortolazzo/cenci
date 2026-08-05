@@ -47,6 +47,7 @@ func (e hostOnlyWorkflowError) Unwrap() error {
 // their own mock.
 type Controller interface {
 	CurrentSession() (string, error)
+	// Launch-target methods receive tmux's exact-match session form.
 	IsGroupedSession(session string) (bool, error)
 	NewWindow(session, name, shellCommand string) error
 	SetWindowOption(target, key, value string) error
@@ -202,9 +203,17 @@ func Run(opts Opts, ctrl Controller) error {
 		return err
 	}
 
+	// Every scripted launch operation must use the same exact session target.
+	// The earlier HasSession probe alone cannot close the race where that
+	// session disappears and a same-prefixed sibling remains before launch.
+	// Keep session itself raw for human-facing errors and dry-run output. Always
+	// add the marker here because a raw tmux session name may itself begin with
+	// an equals sign.
+	exactSession := "=" + session
+
 	// 4. Safety guard: refuse grouped sessions — a new window would propagate
 	// to every session in the group.
-	grouped, err := ctrl.IsGroupedSession(session)
+	grouped, err := ctrl.IsGroupedSession(exactSession)
 	if err != nil {
 		return fmt.Errorf("checking session %q: %w", session, err)
 	}
@@ -218,14 +227,15 @@ func Run(opts Opts, ctrl Controller) error {
 	}
 	ensure()
 
-	if err := ctrl.NewWindow(session, name, shellCommand); err != nil {
+	if err := ctrl.NewWindow(exactSession, name, shellCommand); err != nil {
 		return fmt.Errorf("creating window %q in session %q: %w", name, session, err)
 	}
 	// Pin the name so the daemon flags the window ManuallyNamed and preserves
 	// the join key instead of renaming it to the detected task.
-	target := session + ":" + name
+	target := exactSession + ":=" + name
 	if err := ctrl.SetWindowOption(target, "automatic-rename", "off"); err != nil {
-		return fmt.Errorf("setting automatic-rename off on %q: %w: %w", target, err, ErrWindowSpawned)
+		displayTarget := session + ":" + name
+		return fmt.Errorf("setting automatic-rename off on %q: %w: %w", displayTarget, err, ErrWindowSpawned)
 	}
 	return nil
 }

@@ -106,9 +106,9 @@ func (c *ExecClient) CurrentSession() (string, error) {
 	return session, nil
 }
 
-// IsGroupedSession reports whether the given session is part of a session
-// group. New windows propagate to every session in a group, so the launcher
-// refuses to spawn into one.
+// IsGroupedSession reports whether the given exact session target is part of
+// a session group. New windows propagate to every session in a group, so the
+// launcher refuses to spawn into one.
 func (c *ExecClient) IsGroupedSession(session string) (bool, error) {
 	out, err := tmuxCmd("display-message", "-t", session, "-p", "#{session_grouped}")
 	if err != nil {
@@ -117,9 +117,10 @@ func (c *ExecClient) IsGroupedSession(session string) (bool, error) {
 	return strings.TrimSpace(out) == "1", nil
 }
 
-// NewWindow creates a detached window named name in the given session running
-// shellCommand. shellCommand is passed to tmux as a single argument, so it must
-// already be a valid shell command line (see run.shellJoin).
+// NewWindow creates a detached window named name in the given exact session
+// target running shellCommand. shellCommand is passed to tmux as a single
+// argument, so it must already be a valid shell command line (see
+// run.shellJoin).
 func (c *ExecClient) NewWindow(session, name, shellCommand string) error {
 	_, err := tmuxCmd("new-window", "-d", "-t", session+":", "-n", name, shellCommand)
 	return err
