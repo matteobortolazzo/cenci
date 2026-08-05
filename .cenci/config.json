@@ -6,6 +6,9 @@
     "backend": "go1.25",
     "testing": ["go-testing", "shellcheck"]
   },
+  "planning": {
+    "autonomy": "lean"
+  },
   "projects": [
     {
       "slug": "flow",
@@ -15,7 +18,27 @@
       "stack": { "framework": "markdown-shell" },
       "buildCommand": "",
       "testCommand": "",
-      "gateCommand": "bash scripts/run-checks.sh"
+      "gateCommand": "bash scripts/run-checks.sh",
+      "automerge": {
+        "protectedPaths": [
+          "flow/agents/",
+          "flow/skills/",
+          "flow/hooks/",
+          "flow/codex/",
+          "flow/opencode/",
+          "flow/scripts/",
+          "flow/templates/",
+          "flow/.claude-plugin/",
+          "flow/.codex-plugin/",
+          "flow/AGENTS.md",
+          "flow/CLAUDE.md",
+          "*credential*",
+          "*secret*"
+        ],
+        "maxChangedFiles": 8,
+        "maxDiffLines": 400,
+        "mergeMethod": "squash"
+      }
     },
     {
       "slug": "watch",
@@ -31,9 +54,26 @@
       "boardKey": "Rw",
       "testKey": "Tw",
       "automerge": {
-        "protectedPaths": ["watch/internal/sandbox/", "watch/internal/babysit/", "watch/plugin/", "*credential*", "*secret*"],
-        "maxChangedFiles": 15,
-        "maxDiffLines": 800,
+        "protectedPaths": [
+          "watch/internal/",
+          "watch/pkg/",
+          "watch/plugin/",
+          "watch/plugin/.claude-plugin/",
+          "watch/plugin/.codex-plugin/",
+          "watch/main.go",
+          "watch/*_cmd.go",
+          "watch/cli_helpers.go",
+          "watch/go.mod",
+          "watch/go.sum",
+          "watch/Makefile",
+          "watch/.goreleaser.yml",
+          "watch/AGENTS.md",
+          "watch/CLAUDE.md",
+          "*credential*",
+          "*secret*"
+        ],
+        "maxChangedFiles": 10,
+        "maxDiffLines": 500,
         "mergeMethod": "squash"
       }
     },
@@ -45,7 +85,25 @@
       "stack": { "framework": "docker-shell", "testing": "shellcheck" },
       "buildCommand": "docker build",
       "testCommand": "",
-      "gateCommand": "n=0; for t in tests/*.test.sh; do [ \"$t\" = tests/smoke.test.sh ] && continue; bash \"$t\" || exit 1; n=$((n+1)); done; [ \"$n\" -gt 0 ] || exit 1"
+      "gateCommand": "n=0; for t in tests/*.test.sh; do [ \"$t\" = tests/smoke.test.sh ] && continue; bash \"$t\" || exit 1; n=$((n+1)); done; [ \"$n\" -gt 0 ] || exit 1",
+      "automerge": {
+        "protectedPaths": [
+          "sandbox/Dockerfile*",
+          "sandbox/entrypoint.sh",
+          "sandbox/fragments/",
+          "sandbox/lib/",
+          "sandbox/skills/",
+          "sandbox/.claude-plugin/",
+          "sandbox/.codex-plugin/",
+          "sandbox/AGENTS.md",
+          "sandbox/CLAUDE.md",
+          "*credential*",
+          "*secret*"
+        ],
+        "maxChangedFiles": 8,
+        "maxDiffLines": 400,
+        "mergeMethod": "squash"
+      }
     }
   ],
   "guidanceLocation": "AGENTS.md",
