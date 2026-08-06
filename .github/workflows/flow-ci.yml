@@ -17,23 +17,31 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      flow: ${{ steps.filter.outputs.flow }}
-      maintenance: ${{ steps.filter.outputs.maintenance }}
+      flow: ${{ steps.code.outputs.flow == 'true' || steps.extra.outputs.flow == 'true' }}
+      maintenance: ${{ steps.extra.outputs.maintenance }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
-        id: filter
+        id: code
         with:
+          predicate-quantifier: 'every'
+          list-files: json
           filters: |
             flow:
               - 'flow/**'
+              - '!flow/AGENTS.md'
+              - '!flow/CLAUDE.md'
+              - '!flow/README.md'
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
+        id: extra
+        with:
+          list-files: json
+          filters: |
+            flow:
               - '.cenci/config.json' # Run the repository activation contract on config-only changes.
               - '.github/workflows/flow-ci.yml'
               - 'docs/pipeline-coverage-map.md'
               - 'watch/**/*_test.go'
-              - '!flow/AGENTS.md'
-              - '!flow/CLAUDE.md'
-              - '!flow/README.md'
             maintenance:
               - 'flow/skills/**'
               - 'flow/agents/**'
@@ -58,6 +66,28 @@ jobs:
               - '.github/workflows/cenci-maintenance.yml'
               - '.github/workflows/workflow-lint.yml'
               - '.github/workflows/flow-ci.yml'
+      - name: Report paths-filter decision
+        env:
+          CODE_FLOW: ${{ steps.code.outputs.flow }}
+          CODE_FLOW_FILES: ${{ steps.code.outputs.flow_files }}
+          EXTRA_FLOW: ${{ steps.extra.outputs.flow }}
+          EXTRA_FLOW_FILES: ${{ steps.extra.outputs.flow_files }}
+          OUT_FLOW: ${{ steps.code.outputs.flow == 'true' || steps.extra.outputs.flow == 'true' }}
+          OUT_MAINTENANCE: ${{ steps.extra.outputs.maintenance }}
+          OUT_MAINTENANCE_FILES: ${{ steps.extra.outputs.maintenance_files }}
+        run: |
+          {
+            echo "### flow paths-filter decision"
+            echo '```'
+            echo "code  (every) flow = ${CODE_FLOW}"
+            echo "             matched: ${CODE_FLOW_FILES}"
+            echo "extra (some)  flow = ${EXTRA_FLOW}"
+            echo "             matched: ${EXTRA_FLOW_FILES}"
+            echo "job output    flow = ${OUT_FLOW}"
+            echo "job output    maintenance = ${OUT_MAINTENANCE}"
+            echo "             matched: ${OUT_MAINTENANCE_FILES}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   maintenance:
     name: flow-maintenance

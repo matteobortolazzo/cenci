@@ -17,19 +17,45 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      sandbox: ${{ steps.filter.outputs.sandbox }}
+      sandbox: ${{ steps.code.outputs.sandbox == 'true' || steps.extra.outputs.sandbox == 'true' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
-        id: filter
+        id: code
         with:
+          predicate-quantifier: 'every'
+          list-files: json
           filters: |
             sandbox:
               - 'sandbox/**'
-              - 'install.sh'
               - '!sandbox/AGENTS.md'
               - '!sandbox/CLAUDE.md'
               - '!sandbox/README.md'
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
+        id: extra
+        with:
+          list-files: json
+          filters: |
+            sandbox:
+              - 'install.sh'
+      - name: Report paths-filter decision
+        env:
+          CODE_SANDBOX: ${{ steps.code.outputs.sandbox }}
+          CODE_SANDBOX_FILES: ${{ steps.code.outputs.sandbox_files }}
+          EXTRA_SANDBOX: ${{ steps.extra.outputs.sandbox }}
+          EXTRA_SANDBOX_FILES: ${{ steps.extra.outputs.sandbox_files }}
+          OUT_SANDBOX: ${{ steps.code.outputs.sandbox == 'true' || steps.extra.outputs.sandbox == 'true' }}
+        run: |
+          {
+            echo "### sandbox paths-filter decision"
+            echo '```'
+            echo "code  (every) sandbox = ${CODE_SANDBOX}"
+            echo "              matched: ${CODE_SANDBOX_FILES}"
+            echo "extra (some)  sandbox = ${EXTRA_SANDBOX}"
+            echo "              matched: ${EXTRA_SANDBOX_FILES}"
+            echo "job output    sandbox = ${OUT_SANDBOX}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   lint:
     name: sandbox-lint

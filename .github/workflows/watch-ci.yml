@@ -17,22 +17,48 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      watch: ${{ steps.filter.outputs.watch }}
+      watch: ${{ steps.code.outputs.watch == 'true' || steps.extra.outputs.watch == 'true' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
-        id: filter
+        id: code
         with:
+          predicate-quantifier: 'every'
+          list-files: json
           filters: |
             watch:
               - 'watch/**'
+              - '!watch/AGENTS.md'
+              - '!watch/CLAUDE.md'
+              - '!watch/README.md'
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
+        id: extra
+        with:
+          list-files: json
+          filters: |
+            watch:
               - '.cenci/config.json' # Run the real policy-resolver dogfood test on config-only changes.
               - 'sandbox/tests/lib/**'
               - 'flow/tests/adversarial-chain/fixtures/**'
               - '.github/workflows/watch-ci.yml'
-              - '!watch/AGENTS.md'
-              - '!watch/CLAUDE.md'
-              - '!watch/README.md'
+      - name: Report paths-filter decision
+        env:
+          CODE_WATCH: ${{ steps.code.outputs.watch }}
+          CODE_WATCH_FILES: ${{ steps.code.outputs.watch_files }}
+          EXTRA_WATCH: ${{ steps.extra.outputs.watch }}
+          EXTRA_WATCH_FILES: ${{ steps.extra.outputs.watch_files }}
+          OUT_WATCH: ${{ steps.code.outputs.watch == 'true' || steps.extra.outputs.watch == 'true' }}
+        run: |
+          {
+            echo "### watch paths-filter decision"
+            echo '```'
+            echo "code  (every) watch = ${CODE_WATCH}"
+            echo "             matched: ${CODE_WATCH_FILES}"
+            echo "extra (some)  watch = ${EXTRA_WATCH}"
+            echo "             matched: ${EXTRA_WATCH_FILES}"
+            echo "job output    watch = ${OUT_WATCH}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   test:
     name: watch-test
