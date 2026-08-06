@@ -167,8 +167,19 @@ If multiple reviewers flag the same location:
 > "Would you like me to post this review as a PR comment?"
 
 If yes (`<pr-number>` below is the same value as `<number>`, this skill's PR identifier): use the
-`Write` tool to create `${TMPDIR:-/tmp}/cenci/cenci-review-<pr-number>-comment.md` with the `<review
-report>` as its content, then run:
+`Write` tool to create `${TMPDIR:-/tmp}/cenci/cenci-review-<pr-number>-comment.md`, opening with the
+cenci attribution banner (blockquoted) before the `<review report>` content:
+
+```markdown
+> 🤖 **cenci** — review report posted by `/cenci:review` (Phase 4).
+
+<review report>
+```
+
+No `<!-- cenci-<kind> -->` marker is added here (#951 — see `docs/comment-attribution.md`): this
+posts to the PR's own comment thread, and the marker invariant is issue-thread-scoped —
+`classifyComments` (`watch/internal/dispatch/resume.go`) never scans a PR thread, so a marker here
+would never be read by any consumer. Then run:
 ```bash
 gh pr comment <number> --repo <owner>/<repo> --body-file ${TMPDIR:-/tmp}/cenci/cenci-review-<pr-number>-comment.md
 ```

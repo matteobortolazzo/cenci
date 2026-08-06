@@ -52,7 +52,17 @@ Skip this section entirely unless `isLastChild` is true. It produces a single ve
 **Open sub-issue recheck (required before any `close` verdict).** Before this run's verdict is allowed to grant `close`, re-read the `subIssues` list already fetched in step 3 above (no second API call) and require every sub-issue **other than this run's own `<childId>`** to be `CLOSED`. Any other open sub-issue forces `hold`, and the gap comment below names it explicitly. An unreadable or absent sub-issue list also forces `hold` (fail-closed) — a sibling list this run cannot trust must never allow a close. A stale `isLastChild: true` plan front matter is never sufficient: `isLastChild` is a topology signal recorded at plan time and can go stale by the time Phase 9 runs, so this recheck always re-verifies live state regardless of what the front matter says.
 
 4. **Verdict.** Every criterion met, and the open sub-issue recheck above finds no other open sub-issue → `close`: the Commit, PR, and Labels steps below take their `close` branches. One or more unmet criteria, the fetch failure above, or an open sub-issue found by the recheck above → `hold`:
-   - Use the `Write` tool to create the gap report at `${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-parent-gaps.md` — one line per unmet criterion with a one-line reason it is unmet, opening with a sentence that this last-child PR deliberately did not close the parent — then post it on the parent:
+   - Use the `Write` tool to create the gap report at `${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-parent-gaps.md` — opening with the cenci attribution banner (blockquoted), then a sentence that this last-child PR deliberately did not close the parent, then one line per unmet criterion with a one-line reason it is unmet, then the `<!-- cenci-parent-gap-report -->` marker on its own non-blockquoted line (#951 — see `docs/comment-attribution.md`):
+
+     ```markdown
+     > 🤖 **cenci** — parent acceptance-criteria gap report posted by `/cenci:implement` (Phase 9).
+
+     <deliberately-did-not-close sentence, then one line per unmet criterion>
+
+     <!-- cenci-parent-gap-report -->
+     ```
+
+     then post it on the parent:
 
      ```bash
      gh issue comment <parentId> --repo <owner>/<repo> --body-file ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-parent-gaps.md
@@ -445,11 +455,23 @@ Assume the issue is world-readable: never transcribe secret values, credentials,
 
 If the create fails, or `--jq .number` returns empty, non-numeric output, or a non-zero exit, or the re-fetched title does not match, do **not** fabricate `<n>` and do not post any text referencing it — skip the comment below and report the exact error (with the deferred-item list) in the final session summary so the items aren't silently lost.
 
-Ticket mode only, and only when `SKIP_FOLLOWUP_CREATE` is unset: after the followup issue is created successfully — or after this run appended to an existing `MATCH_N` above — comment on the original ticket (this run's ticket ID) with the followup ticket number `<n>` (the `--jq .number` value from a fresh create, or `$MATCH_N` for an append — never a value parsed from a command's output URL):
+Ticket mode only, and only when `SKIP_FOLLOWUP_CREATE` is unset: after the followup issue is created successfully — or after this run appended to an existing `MATCH_N` above — comment on the original ticket (this run's ticket ID) with the followup ticket number `<n>` (the `--jq .number` value from a fresh create, or `$MATCH_N` for an append — never a value parsed from a command's output URL). `Write` the comment body to a scoped staging file — never a fixed path — `${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-tracked-<session-uuid>.md`, opening with the cenci attribution banner (blockquoted) and closing with the `<!-- cenci-followup-tracked -->` marker on its own non-blockquoted line (#951 — see `docs/comment-attribution.md`):
+
+```markdown
+> 🤖 **cenci** — followup tracking note posted by `/cenci:implement` (Phase 9).
+
+Followups tracked in #<n>
+
+<!-- cenci-followup-tracked -->
+```
+
+then post it:
 
 ```bash
-gh issue comment <original-number> --repo <owner>/<repo> --body "Followups tracked in #<n>"
+gh issue comment <original-number> --repo <owner>/<repo> --body-file "${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-tracked-<session-uuid>.md"
 ```
+
+Verify this call succeeded before treating the tracking note as posted. If it fails after one retry, report it — together with the followup ticket number `<n>` — in the final session summary so the tracking note is never silently lost, exactly as the parent gap report's own comment-failure handling above does.
 
 Ticketless mode: skip this comment (there is no original ticket to comment on).
 
@@ -493,6 +515,7 @@ rm -f \
   ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-payload.json \
   ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-search.json \
   ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-existing-body.md \
+  ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-followup-tracked-<session-uuid>.md \
   ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-parent-body.md \
   ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-parent-gaps.md \
   ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-parent-audit.md \

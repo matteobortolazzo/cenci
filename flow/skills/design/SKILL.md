@@ -495,8 +495,10 @@ git commit -m "feat(design): <description>" -- <designPath>/*.pen <designPath>/D
 **If ticket mode:** Post the design reference and key decisions as a ticket comment — this keeps the ticket body owned by its author while still surfacing the design context for humans and for the context-gatherer (which bundles ticket comments during planning).
 
 1. Get the commit SHA: `git rev-parse HEAD`
-2. Write the comment body with the client's file tool (per `shell-rules` — do not use a shell heredoc) to a temp file, e.g. `${TMPDIR:-/tmp}/cenci/design-comment-<number>.md`:
+2. Write the comment body with the client's file tool (per `shell-rules` — do not use a shell heredoc) to a temp file, e.g. `${TMPDIR:-/tmp}/cenci/design-comment-<number>.md`. Every posted design comment opens with the cenci attribution banner (blockquoted) and carries the `<!-- cenci-design-summary -->` marker on its own non-blockquoted line (#951 — see `docs/comment-attribution.md`):
    ```markdown
+   > 🤖 **cenci** — design summary posted by `/cenci:design` (design handoff).
+
    ### Design Reference
    - Design file: `<designPath>/<pen-file-name>`
    - Design spec: `<designPath>/DESIGN.md`
@@ -507,6 +509,8 @@ git commit -m "feat(design): <description>" -- <designPath>/*.pen <designPath>/D
    - Color palette: <from Phase 6 report>
    - Typography: <from Phase 6 report>
    - Layout approach: <from Phase 6 report>
+
+   <!-- cenci-design-summary -->
    ```
 3. Post it:
    ```bash
@@ -539,7 +543,7 @@ gh issue edit <number> --repo <owner>/<repo> --add-label "Designed" --remove-lab
    ```bash
    gh issue edit <dependent> --repo <owner>/<repo> --add-label "Designed"
    ```
-   Also post the same comment from **Step 7B** on each dependent (reuse the temp file written there) via `gh issue comment <dependent> --repo <owner>/<repo> --body-file "${TMPDIR:-/tmp}/cenci/design-comment-<number>.md"`. Implement itself locates `DESIGN.md` via the configured `designPath` (see `implement/SKILL.md`), so this comment is for human/planning context — the context-gatherer bundles ticket comments when implement runs.
+   Also post the same comment from **Step 7B** on each dependent (reuse the temp file written there — same banner, same `<!-- cenci-design-summary -->` marker, one kind for both the ticket's own post and every dependent's, since it is literally the same file) via `gh issue comment <dependent> --repo <owner>/<repo> --body-file "${TMPDIR:-/tmp}/cenci/design-comment-<number>.md"`. Implement itself locates `DESIGN.md` via the configured `designPath` (see `implement/SKILL.md`), so this comment is for human/planning context — the context-gatherer bundles ticket comments when implement runs.
 
 3. **Close the design ticket** — its deliverable is done:
    ```bash

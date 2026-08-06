@@ -342,8 +342,19 @@ gh api repos/<owner>/<repo>/pulls/<number>/comments/<comment-id>/replies -X POST
 (`-X POST` explicit, rather than relying on `gh api`'s input-implies-POST default.)
 
 For general PR review comments, post as a PR comment: use the `Write` tool to create
-`${TMPDIR:-/tmp}/cenci/cenci-<pr-number>-pr-comment.md` with the `<reply text>` as its content, then
-run:
+`${TMPDIR:-/tmp}/cenci/cenci-<pr-number>-pr-comment.md`, opening with the cenci attribution banner
+(blockquoted) before the `<reply text>`:
+
+```markdown
+> 🤖 **cenci** — review reply posted by `/cenci:address-review` (posting replies).
+
+<reply text>
+```
+
+No `<!-- cenci-<kind> -->` marker is added here (#951 — see `docs/comment-attribution.md`): this
+posts to the PR's own comment thread, and the marker invariant is issue-thread-scoped —
+`classifyComments` (`watch/internal/dispatch/resume.go`) never scans a PR thread, so a marker here
+would never be read by any consumer. Then run:
 ```bash
 gh pr comment <number> --repo <owner>/<repo> --body-file ${TMPDIR:-/tmp}/cenci/cenci-<pr-number>-pr-comment.md
 ```
