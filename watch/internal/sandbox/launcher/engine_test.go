@@ -25,6 +25,51 @@ import (
 // never baked at all, distinct from simply not setting it. FAKE_IMAGE_INSPECT_RAW,
 // when set, replaces the whole `image inspect` line verbatim (no `|`
 // separator enforced), to simulate unparsable inspect output.
+//
+// printStaleContainerNotice's three probes (ticket #947) are also scripted:
+//
+//	FAKE_IMAGE_ID       — the freshly built image's ID, answered by the
+//	                      `image inspect --format '{{.Id}}'` probe. Checked
+//	                      BEFORE the label-format branch above, keyed on the
+//	                      distinctive `{{.Id}}` format-string token, so it
+//	                      never intercepts the agent-cli/base-version probe.
+//	                      Defaults to "sha256:fresh".
+//	FAKE_IMAGE_ID_EXIT  — that probe's exit code (default 0); nonzero
+//	                      simulates the image-ID probe itself failing.
+//	FAKE_PS             — `ps --format {{.Names}}` stdout (running
+//	                      containers only); consumed by
+//	                      sandbox.RunningSandboxContainers. Defaults to
+//	                      empty (no running containers).
+//	FAKE_PS_EXIT        — the plain running-only `ps` invocation's exit code
+//	                      (default 0); nonzero simulates the `ps` probe
+//	                      itself failing. Never applied to `ps -a`, which
+//	                      always exits 0.
+//	FAKE_PS_ALL         — `ps -a ...` stdout; returned ONLY for a `ps -a`
+//	                      invocation, never for the plain running-only `ps`
+//	                      above, so a test can script a stopped container
+//	                      here to prove the probe never widens to `-a`.
+//	FAKE_CONTAINER_IMAGES — space-separated `name=<ref>|<id>` pairs, one per
+//	                      container, answering the combined per-container
+//	                      probe `inspect --format
+//	                      '{{.Config.Image}}|{{.Image}}'` (keyed on the
+//	                      distinctive `{{.Image}}` token). The fake looks up
+//	                      the requested container's name and emits
+//	                      `${pair#*=}` verbatim as the probe's stdout —
+//	                      shell builtins only (`for`/`case`/`${var#...}`),
+//	                      since PATH contains only this fake. A pair written
+//	                      without a `|` (e.g. `name=garbage`) or as
+//	                      `name=` naturally produces unparsable/empty probe
+//	                      output with no extra knob. A container absent from
+//	                      the list defaults to
+//	                      "cenci-sandbox:latest|<FAKE_IMAGE_ID default>" —
+//	                      the monolith tag at the fresh ID — so it is silent
+//	                      either way (monolith rebuild: ref matches, ID
+//	                      equal, not stale; per-repo rebuild: ref doesn't
+//	                      match, skipped) and never produces a spurious
+//	                      warning in an existing test.
+//	FAKE_INSPECT_IMAGE_EXIT — the per-container combined probe's exit code
+//	                      (default 0); nonzero simulates that probe failing
+//	                      for whichever container was requested.
 func buildEngine(t *testing.T, imagesMissing bool) (*Engine, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -40,6 +85,12 @@ if [ "$1" = images ]; then
   exit 0
 fi
 if [ "$1" = image ] && [ "$2" = inspect ]; then
+  case "$*" in
+  *'{{.Id}}'*)
+    printf '%s\n' "${FAKE_IMAGE_ID:-sha256:fresh}"
+    exit "${FAKE_IMAGE_ID_EXIT:-0}"
+    ;;
+  esac
   if [ -n "${FAKE_IMAGE_INSPECT_RAW+x}" ]; then
     printf '%s\n' "$FAKE_IMAGE_INSPECT_RAW"
     exit 0
@@ -50,6 +101,37 @@ if [ "$1" = image ] && [ "$2" = inspect ]; then
     base="abc123def456"
   fi
   printf '%s|%s\n' "${FAKE_IMAGE_AGENT_LIFECYCLE:-shared-v2}" "$base"
+  exit 0
+fi
+if [ "$1" = ps ]; then
+  if [ "$2" = "-a" ]; then
+    printf '%s' "$FAKE_PS_ALL"
+    exit 0
+  fi
+  printf '%s' "$FAKE_PS"
+  exit "${FAKE_PS_EXIT:-0}"
+fi
+if [ "$1" = inspect ]; then
+  case "$*" in
+  *'{{.Image}}'*)
+    name="$4"
+    result=""
+    found=0
+    for pair in $FAKE_CONTAINER_IMAGES; do
+      case "$pair" in
+      "$name="*)
+        result="${pair#*=}"
+        found=1
+        ;;
+      esac
+    done
+    if [ "$found" = 0 ]; then
+      result="cenci-sandbox:latest|${FAKE_IMAGE_ID:-sha256:fresh}"
+    fi
+    printf '%s\n' "$result"
+    exit "${FAKE_INSPECT_IMAGE_EXIT:-0}"
+    ;;
+  esac
   exit 0
 fi
 exit 0
@@ -326,6 +408,413 @@ func TestBuildRepoImage_PrintsPluginRefreshHintOnce(t *testing.T) {
 
 	if n := pluginHintCount(e); n != 1 {
 		t.Errorf("plugin refresh hint printed %d times, want 1; output:\n%s", n, e.Stdout.(*bytes.Buffer).String())
+	}
+}
+
+// -- printStaleContainerNotice (ticket #947) --------------------------------
+//
+// staleContainerNoticeSubstring is the load-bearing fragment of the
+// post-rebuild stale-container notice (watch rule #446: assert exact phrase,
+// not a bare non-empty-output check).
+const staleContainerNoticeSubstring = "still use the previous image"
+
+// TestBuildRepoImage_RunningContainerOnOldImage_PrintsStaleNotice pins AC #1:
+// a running sandbox container created from the just-rebuilt image reference,
+// whose create-time image ID differs from the freshly built image's ID,
+// produces a one-line stdout notice naming it.
+func TestBuildRepoImage_RunningContainerOnOldImage_PrintsStaleNotice(t *testing.T) {
+	e, _ := buildEngine(t, false)
+	t.Setenv("FAKE_PS", "claude-cenci-myrepo\n")
+	t.Setenv("FAKE_CONTAINER_IMAGES", "claude-cenci-myrepo=cenci-sandbox-myrepo:latest|sha256:old")
+
+	if err := e.BuildRepoImage("/repo", "cenci-sandbox-myrepo:latest"); err != nil {
+		t.Fatalf("BuildRepoImage: %v", err)
+	}
+
+	out := e.Stdout.(*bytes.Buffer).String()
+	if !strings.Contains(out, staleContainerNoticeSubstring) {
+		t.Errorf("expected a stale-container notice containing %q, got:\n%s", staleContainerNoticeSubstring, out)
+	}
+	if !strings.Contains(out, "claude-cenci-myrepo") {
+		t.Errorf("expected the notice to name claude-cenci-myrepo, got:\n%s", out)
+	}
+	if !strings.Contains(out, "cenci sandbox stop") {
+		t.Errorf("expected the notice to include the `cenci sandbox stop <name>` remedy, got:\n%s", out)
+	}
+}
+
+// TestBuildRepoImage_RunningContainerOnFreshImage_NoStaleNotice pins AC #3: a
+// running container already on the freshly built image ID (cache-hit / no-op
+// rebuild) produces no notice.
+func TestBuildRepoImage_RunningContainerOnFreshImage_NoStaleNotice(t *testing.T) {
+	e, _ := buildEngine(t, false)
+	t.Setenv("FAKE_PS", "claude-cenci-myrepo\n")
+	t.Setenv("FAKE_CONTAINER_IMAGES", "claude-cenci-myrepo=cenci-sandbox-myrepo:latest|sha256:fresh")
+
+	if err := e.BuildRepoImage("/repo", "cenci-sandbox-myrepo:latest"); err != nil {
+		t.Fatalf("BuildRepoImage: %v", err)
+	}
+
+	out := e.Stdout.(*bytes.Buffer).String()
+	if strings.Contains(out, staleContainerNoticeSubstring) {
+		t.Errorf("expected no stale-container notice when the running container is already on the fresh image, got:\n%s", out)
+	}
+}
+
+// TestBuildMonolith_RunningContainerOnOldImage_PrintsStaleNotice pins AC #2:
+// the same notice fires for a monolith rebuild, naming containers still on
+// cenci-sandbox:latest's superseded image ID.
+func TestBuildMonolith_RunningContainerOnOldImage_PrintsStaleNotice(t *testing.T) {
+	e, _ := buildEngine(t, true) // base missing -> built implicitly first
+	t.Setenv("FAKE_PS", "codex-cenci-agentstack\n")
+	t.Setenv("FAKE_CONTAINER_IMAGES", "codex-cenci-agentstack=cenci-sandbox:latest|sha256:old")
+
+	if err := e.BuildMonolith(); err != nil {
+		t.Fatalf("BuildMonolith: %v", err)
+	}
+
+	out := e.Stdout.(*bytes.Buffer).String()
+	if !strings.Contains(out, staleContainerNoticeSubstring) {
+		t.Errorf("expected a stale-container notice containing %q, got:\n%s", staleContainerNoticeSubstring, out)
+	}
+	if !strings.Contains(out, "codex-cenci-agentstack") {
+		t.Errorf("expected the notice to name codex-cenci-agentstack, got:\n%s", out)
+	}
+}
+
+// TestBuildRepoImage_StoppedContainerOnOldImage_NoStaleNotice pins AC #4: a
+// stopped container on the old image produces no notice, because the probe
+// uses running-only `ps` (never `ps -a`) — the stopped container is scripted
+// into FAKE_PS_ALL, which the fake only answers for a `ps -a` invocation, and
+// is deliberately left out of FAKE_PS.
+func TestBuildRepoImage_StoppedContainerOnOldImage_NoStaleNotice(t *testing.T) {
+	e, callLog := buildEngine(t, false)
+	t.Setenv("FAKE_PS_ALL", "claude-cenci-stopped\n")
+	t.Setenv("FAKE_CONTAINER_IMAGES", "claude-cenci-stopped=cenci-sandbox-myrepo:latest|sha256:old")
+
+	if err := e.BuildRepoImage("/repo", "cenci-sandbox-myrepo:latest"); err != nil {
+		t.Fatalf("BuildRepoImage: %v", err)
+	}
+
+	out := e.Stdout.(*bytes.Buffer).String()
+	if strings.Contains(out, staleContainerNoticeSubstring) {
+		t.Errorf("expected no stale-container notice for a stopped container, got:\n%s", out)
+	}
+
+	calls := readCallLog(t, callLog)
+	if containsPrefix(calls, "ps -a") {
+		t.Errorf("expected the probe to never run `ps -a`; calls:\n%s", strings.Join(calls, "\n"))
+	}
+	if containsLineWithAll(calls, "{{.Image}}", "claude-cenci-stopped") {
+		t.Errorf("expected no per-container inspect for a container the running-only ps never listed; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+// TestBuildRepoImage_NonSandboxContainerOnOldImage_NoStaleNotice pins AC #5:
+// a running container whose name fails sandbox.IsSandboxContainerName is
+// never named — RunningSandboxContainers filters it out before the
+// per-container probe ever runs.
+func TestBuildRepoImage_NonSandboxContainerOnOldImage_NoStaleNotice(t *testing.T) {
+	e, callLog := buildEngine(t, false)
+	t.Setenv("FAKE_PS", "some-other-container\n")
+	t.Setenv("FAKE_CONTAINER_IMAGES", "some-other-container=cenci-sandbox-myrepo:latest|sha256:old")
+
+	if err := e.BuildRepoImage("/repo", "cenci-sandbox-myrepo:latest"); err != nil {
+		t.Fatalf("BuildRepoImage: %v", err)
+	}
+
+	out := e.Stdout.(*bytes.Buffer).String()
+	if strings.Contains(out, staleContainerNoticeSubstring) {
+		t.Errorf("expected no stale-container notice for a non-sandbox container name, got:\n%s", out)
+	}
+
+	calls := readCallLog(t, callLog)
+	if containsLineWithAll(calls, "{{.Image}}", "some-other-container") {
+		t.Errorf("expected no per-container inspect for a name that fails IsSandboxContainerName; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+// TestBuildRepoImage_MultipleStaleContainers_OneLineSorted pins AC #6:
+// multiple stale containers are reported on a single line, names sorted
+// lexicographically regardless of `ps`'s reported order.
+func TestBuildRepoImage_MultipleStaleContainers_OneLineSorted(t *testing.T) {
+	e, _ := buildEngine(t, false)
+	t.Setenv("FAKE_PS", "codex-cenci-myrepo\nclaude-cenci-myrepo\n")
+	t.Setenv("FAKE_CONTAINER_IMAGES", "codex-cenci-myrepo=cenci-sandbox-myrepo:latest|sha256:old claude-cenci-myrepo=cenci-sandbox-myrepo:latest|sha256:old2")
+
+	if err := e.BuildRepoImage("/repo", "cenci-sandbox-myrepo:latest"); err != nil {
+		t.Fatalf("BuildRepoImage: %v", err)
+	}
+
+	out := e.Stdout.(*bytes.Buffer).String()
+	if n := strings.Count(out, staleContainerNoticeSubstring); n != 1 {
+		t.Errorf("expected exactly one stale-container notice line, got %d; output:\n%s", n, out)
+	}
+	if !strings.Contains(out, "claude-cenci-myrepo, codex-cenci-myrepo") {
+		t.Errorf("expected the notice to name both containers, sorted lexicographically (claude before codex), got:\n%s", out)
+	}
+}
+
+// TestBuildRepoImage_NoRunningContainers_PrintsNothing pins AC #7: with no
+// running containers at all, no stale-container notice is printed.
+func TestBuildRepoImage_NoRunningContainers_PrintsNothing(t *testing.T) {
+	e, _ := buildEngine(t, false)
+
+	if err := e.BuildRepoImage("/repo", "cenci-sandbox-myrepo:latest"); err != nil {
+		t.Fatalf("BuildRepoImage: %v", err)
+	}
+
+	out := e.Stdout.(*bytes.Buffer).String()
+	if strings.Contains(out, staleContainerNoticeSubstring) {
+		t.Errorf("expected no stale-container notice when nothing is running, got:\n%s", out)
+	}
+}
+
+// TestBuildBase_NeverProbesContainers pins that BuildBase is excluded by
+// construction (ticket Decision): no `ps` and no `inspect` call of any shape
+// at all — BuildBase never even reaches imageCurrent, since it always runs
+// unconditionally.
+func TestBuildBase_NeverProbesContainers(t *testing.T) {
+	e, callLog := buildEngine(t, true)
+
+	if err := e.BuildBase(); err != nil {
+		t.Fatalf("BuildBase: %v", err)
+	}
+
+	calls := readCallLog(t, callLog)
+	for _, c := range calls {
+		if strings.HasPrefix(c, "ps") {
+			t.Errorf("BuildBase must never call ps; calls:\n%s", strings.Join(calls, "\n"))
+		}
+		if strings.Contains(c, "inspect") {
+			t.Errorf("BuildBase must never call inspect; calls:\n%s", strings.Join(calls, "\n"))
+		}
+	}
+}
+
+// TestBuildRepoImage_ContainerProbeFails_WarnsOnStderrAndBuildSucceeds pins
+// AC #9/#10: a failing ps / image inspect / per-container inspect, or
+// unparsable per-container output, prints a warning to stderr naming the
+// failing probe and the build still returns nil (exit status stays 0).
+func TestBuildRepoImage_ContainerProbeFails_WarnsOnStderrAndBuildSucceeds(t *testing.T) {
+	t.Run("exit_nonzero", func(t *testing.T) {
+		e, _ := buildEngine(t, false)
+		var errOut bytes.Buffer
+		e.Stderr = &errOut
+		t.Setenv("FAKE_PS", "claude-cenci-myrepo\n")
+		t.Setenv("FAKE_INSPECT_IMAGE_EXIT", "1")
+
+		if err := e.BuildRepoImage("/repo", "cenci-sandbox-myrepo:latest"); err != nil {
+			t.Fatalf("BuildRepoImage: %v", err)
+		}
+
+		warning := errOut.String()
+		if !strings.Contains(warning, "claude-cenci-myrepo") {
+			t.Errorf("expected the warning to name the failing container, got:\n%s", warning)
+		}
+		if !strings.Contains(warning, "inspect") {
+			t.Errorf("expected the warning to name the failing probe (inspect), got:\n%s", warning)
+		}
+	})
+
+	t.Run("unparsable_single_field", func(t *testing.T) {
+		e, _ := buildEngine(t, false)
+		var errOut bytes.Buffer
+		e.Stderr = &errOut
+		t.Setenv("FAKE_PS", "claude-cenci-myrepo\n")
+		t.Setenv("FAKE_CONTAINER_IMAGES", "claude-cenci-myrepo=garbage")
+
+		if err := e.BuildRepoImage("/repo", "cenci-sandbox-myrepo:latest"); err != nil {
+			t.Fatalf("BuildRepoImage: %v", err)
+		}
+
+		warning := errOut.String()
+		if !strings.Contains(warning, "claude-cenci-myrepo") {
+			t.Errorf("expected the warning to name the failing container, got:\n%s", warning)
+		}
+		if !strings.Contains(warning, "unparsable") {
+			t.Errorf("expected the warning to describe the output as unparsable, got:\n%s", warning)
+		}
+	})
+
+	t.Run("unparsable_empty", func(t *testing.T) {
+		e, _ := buildEngine(t, false)
+		var errOut bytes.Buffer
+		e.Stderr = &errOut
+		t.Setenv("FAKE_PS", "claude-cenci-myrepo\n")
+		t.Setenv("FAKE_CONTAINER_IMAGES", "claude-cenci-myrepo=")
+
+		if err := e.BuildRepoImage("/repo", "cenci-sandbox-myrepo:latest"); err != nil {
+			t.Fatalf("BuildRepoImage: %v", err)
+		}
+
+		warning := errOut.String()
+		if !strings.Contains(warning, "claude-cenci-myrepo") {
+			t.Errorf("expected the warning to name the failing container, got:\n%s", warning)
+		}
+		if !strings.Contains(warning, "unparsable") {
+			t.Errorf("expected the warning to describe the output as unparsable, got:\n%s", warning)
+		}
+	})
+
+	t.Run("image_id_probe_fails", func(t *testing.T) {
+		e, _ := buildEngine(t, false)
+		var errOut bytes.Buffer
+		e.Stderr = &errOut
+		t.Setenv("FAKE_PS", "claude-cenci-myrepo\n")
+		t.Setenv("FAKE_IMAGE_ID_EXIT", "1")
+
+		if err := e.BuildRepoImage("/repo", "cenci-sandbox-myrepo:latest"); err != nil {
+			t.Fatalf("BuildRepoImage: %v", err)
+		}
+
+		warning := errOut.String()
+		if !strings.Contains(warning, "cenci-sandbox-myrepo:latest") {
+			t.Errorf("expected the warning to name the freshly built image, got:\n%s", warning)
+		}
+		if !strings.Contains(warning, "image inspect") {
+			t.Errorf("expected the warning to name the failing probe (image inspect), got:\n%s", warning)
+		}
+	})
+
+	t.Run("ps_fails", func(t *testing.T) {
+		e, _ := buildEngine(t, false)
+		var errOut bytes.Buffer
+		e.Stderr = &errOut
+		t.Setenv("FAKE_PS_EXIT", "1")
+
+		if err := e.BuildRepoImage("/repo", "cenci-sandbox-myrepo:latest"); err != nil {
+			t.Fatalf("BuildRepoImage: %v", err)
+		}
+
+		warning := errOut.String()
+		if !strings.Contains(warning, "docker ps") {
+			t.Errorf("expected the warning to name the failing probe (docker ps), got:\n%s", warning)
+		}
+	})
+}
+
+// TestEnsureImage_RebuildWithRunningContainer_PrintsStaleNotice pins AC #11:
+// the `cenci open` implicit rebuild through EnsureImage -> BuildSelected
+// emits the notice when it attaches to a container on the superseded image.
+func TestEnsureImage_RebuildWithRunningContainer_PrintsStaleNotice(t *testing.T) {
+	e, _ := buildEngine(t, false) // image present, but forced stale below
+	t.Setenv("FAKE_IMAGE_BASE_VERSION", "OLDTAG")
+	t.Setenv("FAKE_PS", "claude-cenci-agentstack\n")
+	t.Setenv("FAKE_CONTAINER_IMAGES", "claude-cenci-agentstack=cenci-sandbox:latest|sha256:old")
+
+	scope := Scope{Image: MonolithImage}
+	if err := e.EnsureImage(scope); err != nil {
+		t.Fatalf("EnsureImage: %v", err)
+	}
+
+	out := e.Stdout.(*bytes.Buffer).String()
+	if !strings.Contains(out, staleContainerNoticeSubstring) {
+		t.Errorf("expected the implicit-rebuild path to print a stale-container notice, got:\n%s", out)
+	}
+	if !strings.Contains(out, "claude-cenci-agentstack") {
+		t.Errorf("expected the notice to name claude-cenci-agentstack, got:\n%s", out)
+	}
+}
+
+// TestCheckSelected_NeverProbesContainers pins AC #12: `--check` never
+// builds and never probes containers. It legitimately still runs the
+// label-format `image inspect` (imageCurrent's freshness read), so this
+// asserts absence of `ps`, of the combined per-container inspect
+// (`{{.Config.Image}}|{{.Image}}`), and of the image-ID inspect (`{{.Id}}`)
+// specifically — not absence of `image inspect` outright.
+func TestCheckSelected_NeverProbesContainers(t *testing.T) {
+	e, callLog := buildEngine(t, false) // image present, current
+
+	scope := Scope{Image: MonolithImage}
+	current, err := e.CheckSelected(scope)
+	if err != nil {
+		t.Fatalf("CheckSelected: %v", err)
+	}
+	if !current {
+		t.Errorf("CheckSelected(current image) current = false, want true")
+	}
+
+	calls := readCallLog(t, callLog)
+	for _, c := range calls {
+		if strings.HasPrefix(c, "ps") {
+			t.Errorf("CheckSelected must never call ps; calls:\n%s", strings.Join(calls, "\n"))
+		}
+		if strings.Contains(c, "{{.Image}}") {
+			t.Errorf("CheckSelected must never run the per-container inspect probe; calls:\n%s", strings.Join(calls, "\n"))
+		}
+		if strings.Contains(c, "{{.Id}}") {
+			t.Errorf("CheckSelected must never run the image-ID inspect probe; calls:\n%s", strings.Join(calls, "\n"))
+		}
+	}
+}
+
+// TestBuildRepoImage_ContainerOnDifferentRepoImage_NoStaleNotice pins the
+// decision (b) guard: a running container whose create-time image reference
+// does NOT match the rebuilt tag produces no notice, even though its image
+// ID differs — this is the cross-image false positive an ID-only comparison
+// would have produced. A filtered-out container is a silent skip, never a
+// probe failure, so stderr must stay empty too.
+func TestBuildRepoImage_ContainerOnDifferentRepoImage_NoStaleNotice(t *testing.T) {
+	e, _ := buildEngine(t, false)
+	var errOut bytes.Buffer
+	e.Stderr = &errOut
+	t.Setenv("FAKE_PS", "claude-cenci-otherrepo\n")
+	t.Setenv("FAKE_CONTAINER_IMAGES", "claude-cenci-otherrepo=cenci-sandbox-otherrepo:latest|sha256:old")
+
+	if err := e.BuildRepoImage("/repo", "cenci-sandbox-myrepo:latest"); err != nil {
+		t.Fatalf("BuildRepoImage: %v", err)
+	}
+
+	out := e.Stdout.(*bytes.Buffer).String()
+	if strings.Contains(out, staleContainerNoticeSubstring) {
+		t.Errorf("expected no stale-container notice for a container on an unrelated repo image, got:\n%s", out)
+	}
+	if errOut.String() != "" {
+		t.Errorf("expected a filtered-out container to be a silent skip, not a probe-failure warning, got stderr:\n%s", errOut.String())
+	}
+}
+
+// TestBuildMonolith_ContainerOnRepoImage_NoStaleNotice pins the same guard
+// for a monolith rebuild (the update-agent / agent-volume-bootstrap blast
+// radius via EnsureMonolithImage), and pins that "cenci-sandbox-velka:latest"
+// does not suffix-match "cenci-sandbox:latest" (the leading "/" in
+// sameImageRef's suffix check is load-bearing).
+func TestBuildMonolith_ContainerOnRepoImage_NoStaleNotice(t *testing.T) {
+	e, _ := buildEngine(t, true) // image missing entirely -> EnsureMonolithImage builds it
+	t.Setenv("FAKE_PS", "claude-cenci-velka\n")
+	t.Setenv("FAKE_CONTAINER_IMAGES", "claude-cenci-velka=cenci-sandbox-velka:latest|sha256:old")
+
+	if err := e.EnsureMonolithImage(); err != nil {
+		t.Fatalf("EnsureMonolithImage: %v", err)
+	}
+
+	out := e.Stdout.(*bytes.Buffer).String()
+	if strings.Contains(out, staleContainerNoticeSubstring) {
+		t.Errorf("expected no stale-container notice for a per-repo-image container on a monolith rebuild, got:\n%s", out)
+	}
+}
+
+// TestBuildRepoImage_PodmanPrefixedImageRef_PrintsStaleNotice guards the
+// false-negative regression a strict-equality reference filter would
+// introduce: podman normalizes local images with a "localhost/" prefix, so
+// sameImageRef must still match "localhost/cenci-sandbox-velka:latest"
+// against the rebuilt tag "cenci-sandbox-velka:latest".
+func TestBuildRepoImage_PodmanPrefixedImageRef_PrintsStaleNotice(t *testing.T) {
+	e, _ := buildEngine(t, false)
+	t.Setenv("FAKE_PS", "claude-cenci-velka\n")
+	t.Setenv("FAKE_CONTAINER_IMAGES", "claude-cenci-velka=localhost/cenci-sandbox-velka:latest|sha256:old")
+
+	if err := e.BuildRepoImage("/repo", "cenci-sandbox-velka:latest"); err != nil {
+		t.Fatalf("BuildRepoImage: %v", err)
+	}
+
+	out := e.Stdout.(*bytes.Buffer).String()
+	if !strings.Contains(out, staleContainerNoticeSubstring) {
+		t.Errorf("expected a stale-container notice for a podman-prefixed matching reference, got:\n%s", out)
+	}
+	if !strings.Contains(out, "claude-cenci-velka") {
+		t.Errorf("expected the notice to name claude-cenci-velka, got:\n%s", out)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -195,6 +196,129 @@ func (e *Engine) printPluginRefreshHint() {
 	_, _ = fmt.Fprintln(e.Stdout, "Note: pipeline plugins (cenci, cenci-watch) are provisioned per home volume, not baked into images — run `cenci sandbox update-plugins` to refresh existing sandboxes.")
 }
 
+// parseSingleLineID default-denies a single-value ID probe's output
+// (watch/docs/error-handling.md #628/#598): empty after trimming, or more
+// than one line, is treated as unparsable rather than a permissive zero
+// value. No "sha256:" prefix is required — podman and docker differ on this.
+func parseSingleLineID(raw string) (string, error) {
+	lines := splitLines(raw)
+	if len(lines) != 1 || lines[0] == "" {
+		return "", fmt.Errorf("unparsable image ID output %q", raw)
+	}
+	return lines[0], nil
+}
+
+// imageID resolves the create-time content ID of the freshly built image, for
+// printStaleContainerNotice's staleness comparison.
+func (e *Engine) imageID(image string) (string, error) {
+	out, err := exec.Command(e.Runtime, "image", "inspect", "--format", "{{.Id}}", image).Output()
+	if err != nil {
+		return "", fmt.Errorf("%s image inspect %s: %w", e.Runtime, image, err)
+	}
+	id, err := parseSingleLineID(string(out))
+	if err != nil {
+		return "", fmt.Errorf("%s image inspect %s: %w", e.Runtime, image, err)
+	}
+	return id, nil
+}
+
+// parseContainerImageLine default-denies the combined per-container inspect
+// probe's output: it must be exactly one line splitting into exactly two
+// non-empty "|"-separated fields (the reference and the create-time image
+// ID). Fewer or more fields, an empty field, or an interior newline are all
+// treated as unparsable — never partially trusted (parseObservedInspect's
+// exactly-N-field precedent, audit_observed.go).
+func parseContainerImageLine(raw string) (ref, id string, err error) {
+	lines := splitLines(raw)
+	if len(lines) != 1 {
+		return "", "", fmt.Errorf("unparsable container image output %q", raw)
+	}
+	parts := strings.Split(lines[0], "|")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", fmt.Errorf("unparsable container image output %q", raw)
+	}
+	return parts[0], parts[1], nil
+}
+
+// containerImage reads a running container's create-time image reference and
+// resolved image ID via a single combined inspect probe, mirroring
+// inspectObservedPosture's multi-field-in-one-probe shape (audit_observed.go).
+func (e *Engine) containerImage(name string) (ref, id string, err error) {
+	out, err := exec.Command(e.Runtime, "inspect", "--format", "{{.Config.Image}}|{{.Image}}", name).Output()
+	if err != nil {
+		return "", "", fmt.Errorf("%s inspect %s: %w", e.Runtime, name, err)
+	}
+	ref, id, err = parseContainerImageLine(string(out))
+	if err != nil {
+		return "", "", fmt.Errorf("%s inspect %s: %w", e.Runtime, name, err)
+	}
+	return ref, id, nil
+}
+
+// sameImageRef reports whether a container's create-time image reference ref
+// names image, tolerating podman's "localhost/" prefix on local images. The
+// leading "/" in the suffix check is load-bearing: it pins the match to a
+// registry/namespace boundary, so "cenci-sandbox-velka:latest" can never
+// suffix-match "cenci-sandbox:latest" — only a genuine "<registry-or-empty>/
+// <image>" form matches.
+func sameImageRef(ref, image string) bool {
+	return ref == image || strings.HasSuffix(ref, "/"+image)
+}
+
+// printStaleContainerNotice names, on e.Stdout, any running sandbox
+// containers created from image's reference whose create-time image ID no
+// longer matches the freshly built image — i.e. containers that will keep
+// running the superseded image until they are stopped and relaunched.
+//
+// The image reference (read via the container's {{.Config.Image}}) is used
+// only as a candidate filter, to avoid flagging containers created from an
+// entirely different image (e.g. a different repo's image, or the monolith,
+// on a multi-repo/multi-purpose host) as a false positive. The staleness
+// test itself remains the image-ID comparison — a cache-hit/no-op rebuild
+// that reuses the same image ID still prints nothing — so the ticket's
+// "Image-ID comparison, not tag comparison" Decision is preserved, not
+// contradicted, by also reading the reference.
+//
+// Every probe failure is non-fatal: it prints a warning to e.Stderr naming
+// the failing probe and continues (the build itself already succeeded).
+// A per-container probe failure or unparsable output is skipped, not
+// treated as "not stale"; a container whose reference simply doesn't match
+// image is a silent skip (not a warning) — this rebuild never superseded
+// that container's image in the first place.
+func (e *Engine) printStaleContainerNotice(image string) {
+	freshID, err := e.imageID(image)
+	if err != nil {
+		_, _ = fmt.Fprintf(e.Stderr, "Warning: could not resolve %s's image ID via %s image inspect (%v); skipping the stale-container check.\n", image, e.Runtime, err)
+		return
+	}
+
+	names, err := sandbox.RunningSandboxContainers(e.Runtime, "")
+	if err != nil {
+		_, _ = fmt.Fprintf(e.Stderr, "Warning: could not list running sandbox containers via %s ps (%v); skipping the stale-container check.\n", e.Runtime, err)
+		return
+	}
+
+	var stale []string
+	for _, name := range names {
+		ref, id, err := e.containerImage(name)
+		if err != nil {
+			_, _ = fmt.Fprintf(e.Stderr, "Warning: could not resolve %s's image via %s inspect (%v); skipping it in the stale-container check.\n", name, e.Runtime, err)
+			continue
+		}
+		if !sameImageRef(ref, image) {
+			continue
+		}
+		if id != freshID {
+			stale = append(stale, name)
+		}
+	}
+	if len(stale) == 0 {
+		return
+	}
+	sort.Strings(stale)
+	_, _ = fmt.Fprintf(e.Stdout, "Note: %s was rebuilt, but these running sandboxes still use the previous image and keep it until relaunched: %s. Run `cenci sandbox stop <name>`, then relaunch.\n", image, strings.Join(stale, ", "))
+}
+
 // BuildBase builds the content-hash-tagged base image (plus the :latest
 // alias tag) from Dockerfile.base.
 func (e *Engine) BuildBase() error {
@@ -252,6 +376,7 @@ func (e *Engine) BuildMonolith() error {
 	}
 	_, _ = fmt.Fprintln(e.Stdout, "Done.")
 	e.printPluginRefreshHint()
+	e.printStaleContainerNotice(MonolithImage)
 	return nil
 }
 
@@ -271,6 +396,7 @@ func (e *Engine) BuildRepoImage(repoRoot, image string) error {
 	}
 	_, _ = fmt.Fprintln(e.Stdout, "Done.")
 	e.printPluginRefreshHint()
+	e.printStaleContainerNotice(image)
 	return nil
 }
 

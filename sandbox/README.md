@@ -138,6 +138,11 @@ cenci sandbox prune             # clean up superseded base tags, dangling images
 cenci sandbox prune --images    # …and prompt ([y/N], default deny) to remove per-repo images too
 ```
 
+A rebuild never touches already-running containers — a container's image is
+fixed at create time — so an existing session keeps running the old image
+until it's stopped and relaunched. `cenci sandbox build` names any running
+sandboxes still on the old image so you know which ones need it.
+
 This is deliberately just a taste: the full launcher reference — every `cenci open`
 flag (`--agent`, `--model`, `--name`, `--shell`, `--dind`, `--no-dind`, `--host-network`,
 `--reseed-creds`), the `cenci sandbox` verbs (`build`, `build-base`, `prune`,

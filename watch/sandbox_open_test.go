@@ -211,6 +211,32 @@ func joinArgv(argv []string) string {
 //	                        the volume exists); `cenci diagnose`'s dind-session
 //	                        probe (#630) treats non-zero as "not a dind
 //	                        session" (scope.DindVolumeName was never created).
+//	FAKE_IMAGE_ID        — `image inspect --format '{{.Id}}' <image>` stdout
+//	                        (ticket #947's printStaleContainerNotice: the
+//	                        freshly built image's ID), told apart by the
+//	                        distinctive `{{.Id}}` format-string token, checked
+//	                        before the plain agent-cli/base-version label
+//	                        answer above (which would otherwise answer any
+//	                        format string, including this one). Defaults to
+//	                        "sha256:fresh".
+//	FAKE_IMAGE_ID_EXIT   — that probe's exit code (default 0); nonzero
+//	                        simulates the image-ID probe itself failing.
+//	FAKE_CONTAINER_IMAGES — space-separated `name=<ref>|<id>` pairs answering
+//	                        the combined per-container probe `inspect
+//	                        --format '{{.Config.Image}}|{{.Image}}' <name>`
+//	                        (ticket #947), told apart by the distinctive
+//	                        `{{.Image}}` format-string token. The fake looks
+//	                        up the requested container's name and emits
+//	                        `${pair#*=}` verbatim as the probe's stdout; a
+//	                        container absent from the list defaults to
+//	                        "cenci-sandbox:latest|<FAKE_IMAGE_ID default>".
+//	                        Must stay byte-parallel with
+//	                        internal/sandbox/launcher/engine_test.go's
+//	                        buildEngine and faketest_test.go's
+//	                        writeFakeRuntime (#493 keep-in-sync note).
+//	FAKE_INSPECT_IMAGE_EXIT — the per-container combined probe's exit code
+//	                        (default 0); nonzero simulates that probe
+//	                        failing.
 //
 // The open path drives the extra verbs: `rm` (exit 0), `run` (prints a
 // container id), container `inspect` (label vs mounts told apart by the
@@ -289,7 +315,15 @@ fvb() {
   if [ "$s" = x ]; then eval "printf '%b' \"\${FAKE_${n}}\""; else printf '%b' "$d"; fi
 }
 case "$1" in
-image) if [ "$2" = inspect ]; then printf '%s|%s\n' "$(fv IMAGE_AGENT_LIFECYCLE "shared-v2")" "$(fv IMAGE_BASE_VERSION "")"; exit "$(fe IMAGE_INSPECT)"; fi ;;
+image)
+  if [ "$2" = inspect ]; then
+    case "$*" in
+    *'{{.Id}}'*) fv IMAGE_ID "sha256:fresh"; exit "$(fe IMAGE_ID)" ;;
+    esac
+    printf '%s|%s\n' "$(fv IMAGE_AGENT_LIFECYCLE "shared-v2")" "$(fv IMAGE_BASE_VERSION "")"
+    exit "$(fe IMAGE_INSPECT)"
+  fi
+  ;;
 build) exit "$(fe BUILD)" ;;
 images)
   if [ -n "$(fset IMAGES)" ]; then
@@ -354,6 +388,24 @@ run) case "$*" in
   printf '%s\n' fake-container-id ;;
 inspect)
   case "$*" in
+  *'{{.Image}}'*)
+    name="$4"
+    result=""
+    found=0
+    for pair in $FAKE_CONTAINER_IMAGES; do
+      case "$pair" in
+      "$name="*)
+        result="${pair#*=}"
+        found=1
+        ;;
+      esac
+    done
+    if [ "$found" = 0 ]; then
+      result="cenci-sandbox:latest|$(fv IMAGE_ID "sha256:fresh")"
+    fi
+    printf '%s\n' "$result"
+    exit "$(fe INSPECT_IMAGE)"
+    ;;
   *'cenci-sand.dind'*) fvb REUSE_POSTURE "|runc|0\nworkspace-vol::/workspace\n\n"; exit "$(fe CONTAINER_INSPECT)" ;;
   *State.Status*) printf '%s\n' "$(fv INSPECT_STATE "running 0")"; exit "$(fe CONTAINER_INSPECT)" ;;
   *Labels*) printf '%s\n' "$(fv INSPECT_LABEL "")" ;;
