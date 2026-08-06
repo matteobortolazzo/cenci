@@ -208,6 +208,7 @@ companion) for every skill, including the internal ones not listed above.
 
 **Core workflow docs**
 - `docs/adapter-contract.md`
+- `docs/comment-attribution.md`
 - `docs/followup-triage.md`
 - `docs/git-workflow.md`
 - `docs/pipeline-safety.md`

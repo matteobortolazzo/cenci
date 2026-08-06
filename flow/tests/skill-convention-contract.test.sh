@@ -323,6 +323,138 @@ else
   done
 fi
 
+# =====================================================================
+# 11. #951 — cenci attribution banners + `<!-- cenci-<kind> -->` markers on
+#     every flow-posted comment. Covers the five non-escalation call sites
+#     (plan-comment, design-summary, parent-gap-report, followup-tracked,
+#     plus the two PR-comment banner-only sites), each marker's exactly-one-
+#     file uniqueness, and the bidirectional registry sync against the new
+#     flow/docs/comment-attribution.md doc. The escalation banner itself and
+#     its own two contract suites are out of scope here (AC #5) — this case
+#     covers only the five non-escalation sites plus the two PR-only sites.
+# =====================================================================
+
+# Pinned literals (byte-exact — see 951-pinned-literals.md's Non-escalation
+# banners + markers / PR comments tables). Each banner line is kept on a
+# single markdown source line, per docs/shell-scripting-gotchas.md's
+# line-wrapping rule.
+PIN_951_PLAN_COMMENT_BANNER='> 🤖 **cenci** — implementation plan posted by `/cenci:implement` (planning).'
+PIN_951_PLAN_COMMENT_MARKER='<!-- cenci-plan-comment -->'
+PIN_951_DESIGN_SUMMARY_BANNER='> 🤖 **cenci** — design summary posted by `/cenci:design` (design handoff).'
+PIN_951_DESIGN_SUMMARY_MARKER='<!-- cenci-design-summary -->'
+PIN_951_PARENT_GAP_BANNER='> 🤖 **cenci** — parent acceptance-criteria gap report posted by `/cenci:implement` (Phase 9).'
+PIN_951_PARENT_GAP_MARKER='<!-- cenci-parent-gap-report -->'
+PIN_951_FOLLOWUP_TRACKED_BANNER='> 🤖 **cenci** — followup tracking note posted by `/cenci:implement` (Phase 9).'
+PIN_951_FOLLOWUP_TRACKED_MARKER='<!-- cenci-followup-tracked -->'
+PIN_951_REVIEW_BANNER='> 🤖 **cenci** — review report posted by `/cenci:review` (Phase 4).'
+PIN_951_ADDRESS_REVIEW_BANNER='> 🤖 **cenci** — review reply posted by `/cenci:address-review` (posting replies).'
+
+# --- 11a. Per-file banner + marker literal presence -----------------------
+
+require_doc phase1_plan_951 "skills/implement/phases/phase-1-plan.md" || true
+if [[ -n "${phase1_plan_951}" ]]; then
+  assert_contains "${phase1_plan_951}" "${PIN_951_PLAN_COMMENT_BANNER}" \
+    "951 flow/skills/implement/phases/phase-1-plan.md ## Persist the Plan planComment step: attribution banner missing"
+  assert_contains "${phase1_plan_951}" "${PIN_951_PLAN_COMMENT_MARKER}" \
+    "951 flow/skills/implement/phases/phase-1-plan.md ## Persist the Plan planComment step: cenci-plan-comment marker missing"
+fi
+
+require_doc design_skill_951 "skills/design/SKILL.md" || true
+if [[ -n "${design_skill_951}" ]]; then
+  assert_contains "${design_skill_951}" "${PIN_951_DESIGN_SUMMARY_BANNER}" \
+    "951 flow/skills/design/SKILL.md Step 7B: attribution banner missing"
+  assert_contains "${design_skill_951}" "${PIN_951_DESIGN_SUMMARY_MARKER}" \
+    "951 flow/skills/design/SKILL.md Step 7B: cenci-design-summary marker missing"
+fi
+
+# phase-9-pr.md was already loaded into ${phase9} by case 9 above; reuse it
+# rather than re-reading the file.
+if [[ -n "${phase9}" ]]; then
+  assert_contains "${phase9}" "${PIN_951_PARENT_GAP_BANNER}" \
+    "951 flow/skills/implement/phases/phase-9-pr.md parent gap report: attribution banner missing"
+  assert_contains "${phase9}" "${PIN_951_PARENT_GAP_MARKER}" \
+    "951 flow/skills/implement/phases/phase-9-pr.md parent gap report: cenci-parent-gap-report marker missing"
+  assert_contains "${phase9}" "${PIN_951_FOLLOWUP_TRACKED_BANNER}" \
+    "951 flow/skills/implement/phases/phase-9-pr.md followups-tracked comment: attribution banner missing"
+  assert_contains "${phase9}" "${PIN_951_FOLLOWUP_TRACKED_MARKER}" \
+    "951 flow/skills/implement/phases/phase-9-pr.md followups-tracked comment: cenci-followup-tracked marker missing"
+fi
+
+require_doc review_skill_951 "skills/review/SKILL.md" || true
+if [[ -n "${review_skill_951}" ]]; then
+  assert_contains "${review_skill_951}" "${PIN_951_REVIEW_BANNER}" \
+    "951 flow/skills/review/SKILL.md Phase 4 report file: attribution banner missing"
+fi
+
+# address-review/SKILL.md was already loaded into ${address_review} by case 2
+# above; reuse it rather than re-reading the file.
+if [[ -n "${address_review}" ]]; then
+  assert_contains "${address_review}" "${PIN_951_ADDRESS_REVIEW_BANNER}" \
+    "951 flow/skills/address-review/SKILL.md general PR comment: attribution banner missing"
+fi
+
+# --- 11b. Each of the four new `<!-- cenci-<kind> -->` markers occurs in
+#     exactly one file under flow/skills/. Scoped to the four non-escalation
+#     marker-bearing sites (plan-comment, design-summary, parent-gap-report,
+#     followup-tracked) — planner-escalation is deliberately excluded here:
+#     it legitimately appears in two files today (phase-1-plan.md, the
+#     producer, and implement/SKILL.md, which restates the same cross-lane
+#     detection rule verbatim per escalation-anchor-contract.test.sh's own
+#     parity requirement), so a same-shaped "exactly one file" check on it
+#     would never pass and is not what this ticket changes. -----------------
+
+assert_marker_in_exactly_one_file() {
+  # $1=marker-substring (fixed string) $2=label
+  local marker="$1" label="$2" count
+  [[ -n "${marker}" ]] || { fail "${label}: empty marker (test bug)"; return; }
+  count="$(grep -rlF -- "${marker}" "${FLOW_DIR}/skills" 2>/dev/null | wc -l | tr -d ' ')"
+  [[ "${count}" -eq 1 ]] || fail "${label}: expected marker '${marker}' in exactly one file under flow/skills/, found in ${count} file(s)"
+}
+
+assert_marker_in_exactly_one_file "cenci-plan-comment" \
+  "951 cenci-plan-comment marker uniqueness"
+assert_marker_in_exactly_one_file "cenci-design-summary" \
+  "951 cenci-design-summary marker uniqueness"
+assert_marker_in_exactly_one_file "cenci-parent-gap-report" \
+  "951 cenci-parent-gap-report marker uniqueness"
+assert_marker_in_exactly_one_file "cenci-followup-tracked" \
+  "951 cenci-followup-tracked marker uniqueness"
+
+# --- 11c. flow/docs/comment-attribution.md must exist and carry the
+#     registry table, plus a bidirectional sync between the `cenci-<kind>`
+#     markers actually found under flow/skills/ and the kinds registered in
+#     that table. watch's four pre-existing kinds (dispatch-attempt,
+#     dispatch-failed, plan-invalid, reconcile-stuck) are recorded in the doc
+#     for reference but never appear under flow/skills/, so they are
+#     excluded from both sides of this comparison — the pinned-literals
+#     doc's own split (a separate "watch's existing kinds" list, not a row
+#     in the shared table) is the precedent this exclusion follows. -------
+
+COMMENT_ATTRIBUTION_PATH="${FLOW_DIR}/docs/comment-attribution.md"
+if [[ ! -f "${COMMENT_ATTRIBUTION_PATH}" ]]; then
+  fail "951 flow/docs/comment-attribution.md: file not found (expected new registry doc)"
+else
+  require_doc comment_attribution_951 "docs/comment-attribution.md" || true
+  if [[ -n "${comment_attribution_951}" ]]; then
+    assert_contains "${comment_attribution_951}" "Kind" \
+      "951 flow/docs/comment-attribution.md: registry table Kind column header missing"
+
+    # Markers actually found under flow/skills/, anchored to the HTML-comment
+    # marker syntax (never a bare "cenci-" prefixed word, which would also
+    # match unrelated temp-file-name literals like cenci-review-<n>-comment.md).
+    FOUND_KINDS_951="$(grep -rohE '<!-- cenci-[a-z-]+' "${FLOW_DIR}/skills" 2>/dev/null | sed 's/^<!-- //' | sort -u)"
+    # Kinds mentioned anywhere in the registry doc, same anchored extraction,
+    # minus watch's four pre-existing kinds (never present under flow/skills/).
+    REGISTRY_KINDS_951="$(grep -rohE '<!-- cenci-[a-z-]+' "${COMMENT_ATTRIBUTION_PATH}" 2>/dev/null | sed 's/^<!-- //' | sort -u | grep -vxF -e 'cenci-dispatch-attempt' -e 'cenci-dispatch-failed' -e 'cenci-plan-invalid' -e 'cenci-reconcile-stuck' || true)"
+
+    SYNC_DIFF_951="$(diff <(echo "${FOUND_KINDS_951}") <(echo "${REGISTRY_KINDS_951}") || true)"
+    if [[ -n "${SYNC_DIFF_951}" ]]; then
+      fail "951 flow/docs/comment-attribution.md: registry table out of sync with markers found under flow/skills/ (diff below, < found only / > registry only):
+${SYNC_DIFF_951}"
+    fi
+  fi
+fi
+
 if [[ "${failures}" -gt 0 ]]; then
   echo "skill-convention-contract.test.sh: ${failures} failure(s)." >&2
   exit 1

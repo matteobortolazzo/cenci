@@ -70,7 +70,9 @@ Two off-ramps exist and both are normal:
 - **`Input Needed`** — planning hit one of five escalation classes (security-sensitive,
   destructive/irreversible, contradicts the refined ticket, genuine product ambiguity,
   scope blowup). It writes a draft plan, posts the question on the ticket, and stops.
-  Answer on the ticket and dispatch resumes it on its next pass — no manual re-run.
+  The posted question opens with a cenci banner telling you that replying on the ticket
+  is what resumes the run. Answer on the ticket and dispatch resumes it on its next pass
+  — no manual re-run.
 - **A held merge** — babysit logs exactly why and retries next tick. Merge by hand any
   time; babysit never fights you for it.
 

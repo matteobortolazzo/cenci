@@ -10,6 +10,7 @@ GitHub Issues for tracking. GitHub for code and PRs.
 - Shared temp files written by phases or agents must be uniquely scoped by worktree path, run ID, or session UUID — never a fixed path. See `docs/pipeline-safety.md`.
 - Multi-phase pipeline safety: a mandatory-restart rule must document recovery/idempotency for every downstream step, and any safety rule reused on a new automated path must be re-evaluated for its new risk profile. See `docs/pipeline-safety.md`.
 - Read `docs/shell-scripting-gotchas.md` before writing verification-critical shell commands, jq fallback chains, or grep-based contract tests.
+- Every flow-posted comment opens with a blockquoted cenci attribution banner; every flow-posted **issue** comment also carries a distinct `<!-- cenci-<kind> -->` marker on its own non-blockquoted line. See `docs/comment-attribution.md`.
 
 ## Build & Test
 
@@ -26,5 +27,6 @@ On-demand topic docs live at `docs/`:
 - `docs/shell-scripting-gotchas.md` — narrow shell/jq/grep pitfalls (CWD persistence, jq fallback semantics, contract-test markers)
 - `docs/adapter-contract.md` — the 8-property behavioral-parity contract client adapters (Claude Code, Codex) must satisfy, and its enforcement points
 - `docs/followup-triage.md` — the `Followup` capture-queue invariant and the `/cenci:maintain backlog` consolidation (merge/batch/supersede) mechanics
+- `docs/comment-attribution.md` — the cenci attribution banner and `<!-- cenci-<kind> -->` marker convention every flow-posted comment follows, its `<kind>` registry, and why the marker must never be blockquoted
 
 `.claude/rules/` is reserved for files explicitly `@`-imported by this AGENTS.md (auto-loaded at session start). It is not used today.

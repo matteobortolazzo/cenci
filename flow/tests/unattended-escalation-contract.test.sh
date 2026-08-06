@@ -142,6 +142,22 @@ PIN_FM_NONCE_KEY='escalationNonce'
 PIN_FM_COMMENTID_KEY='escalationCommentId'
 PIN_PERSIST_ID_RECOVERY='the comment is already posted (step 2 succeeded), so do not re-post it'
 PIN_READBACK="gh api repos/<owner>/<repo>/issues/comments/<id> --jq '{id, body}'"
+# #951: the cenci attribution banner step 2 must open the questions comment
+# with, restated verbatim at this call site (never merely referenced), plus
+# the reworded secrecy sentence that scopes the "nothing else" prohibition to
+# sensitive/untrusted content instead of forbidding the fixed banner. Both
+# banner lines are kept on a single markdown source line each, per
+# docs/shell-scripting-gotchas.md's line-wrapping rule.
+PIN_BANNER_ESC_LINE1='> 🤖 **cenci** — automated question from `/cenci:implement` (lean planning escalation).'
+PIN_BANNER_ESC_LINE2='> Reply on this ticket to answer; `cenci dispatch` relaunches the run once it sees your reply.'
+PIN_SECRECY_NEW='Beyond that fixed banner and the hidden anchor, the comment body must hold the question text and nothing else: never quote file contents, environment or configuration values, credentials, tokens, secrets, or raw command output in it.'
+# The retired sentence this reword replaces -- must no longer appear
+# anywhere in the file once all four sites are reworded. Precise on both
+# ends per docs/shell-scripting-gotchas.md: this is the exact capitalized,
+# colon-terminated old sentence; SECRECY_NEW's own "the comment body..."
+# continuation is lowercase, so this cannot pass vacuously against the
+# fixed text.
+PIN_SECRECY_OLD='The comment body must hold the question text and nothing else:'
 
 assert_section_contains "${ESCALATION_SECTION}" "${PIN_AWAIT_INPUT_CMD}" \
   "must name the pinned command cenci pipeline await-input <id> verbatim"
@@ -173,6 +189,40 @@ assert_section_contains "${ESCALATION_SECTION}" "${PIN_PERSIST_ID_RECOVERY}" \
   "must document the persist-ID-then-verify step's recovery (never re-post a duplicate comment)"
 assert_section_contains "${ESCALATION_SECTION}" "${PIN_READBACK}" \
   "must name step 2's comment body read-back verification call verbatim"
+
+# --- #951: step 2's cenci attribution banner + reworded secrecy sentence,
+#     section-scoped so a match elsewhere in the file cannot vacuously
+#     satisfy it -------------------------------------------------------
+
+assert_section_contains "${ESCALATION_SECTION}" "${PIN_BANNER_ESC_LINE1}" \
+  "step 2 must open the questions comment with the escalation attribution banner line 1 verbatim (#951)"
+assert_section_contains "${ESCALATION_SECTION}" "${PIN_BANNER_ESC_LINE2}" \
+  "step 2 must open the questions comment with the escalation attribution banner line 2 verbatim (#951)"
+assert_section_contains "${ESCALATION_SECTION}" "${PIN_SECRECY_NEW}" \
+  "step 2 must restate the reworded secrecy sentence verbatim, scoping the prohibition to sensitive/untrusted content rather than forbidding the fixed banner (#951)"
+
+# --- #951: whole-file -- the banner literal is restated at all four
+#     escalation call sites (Unattended step 2, Repair (ii), Repair (iii),
+#     Resume step 3's write-questions sub-step), never merely referenced
+#     from one of them ---------------------------------------------------
+
+BANNER_LINE1_COUNT=$(grep -cF -- "${PIN_BANNER_ESC_LINE1}" "${PHASE1_PLAN}" 2>/dev/null || true)
+BANNER_LINE1_COUNT=${BANNER_LINE1_COUNT:-0}
+if [[ "${BANNER_LINE1_COUNT}" -lt 4 ]]; then
+  fail "phase-1-plan.md: escalation banner line 1 must be restated verbatim at all four escalation call sites (found ${BANNER_LINE1_COUNT} occurrence(s), want >= 4) (#951)"
+fi
+BANNER_LINE2_COUNT=$(grep -cF -- "${PIN_BANNER_ESC_LINE2}" "${PHASE1_PLAN}" 2>/dev/null || true)
+BANNER_LINE2_COUNT=${BANNER_LINE2_COUNT:-0}
+if [[ "${BANNER_LINE2_COUNT}" -lt 4 ]]; then
+  fail "phase-1-plan.md: escalation banner line 2 must be restated verbatim at all four escalation call sites (found ${BANNER_LINE2_COUNT} occurrence(s), want >= 4) (#951)"
+fi
+
+# --- #951: negative -- the retired capitalized "nothing else:" sentence
+#     must no longer appear anywhere in the file once all four sites are
+#     reworded to PIN_SECRECY_NEW -----------------------------------------
+
+assert_file_lacks "${PHASE1_PLAN}" "${PIN_SECRECY_OLD}" \
+  "must no longer contain the retired capitalized secrecy sentence anywhere -- all four sites must be reworded to the SECRECY_NEW form (#951)"
 
 # --- Ordering + restated recovery/idempotency per step (flow/docs/pipeline-safety.md
 #     rules 1-2: restate, don't merely reference; document recovery for every
