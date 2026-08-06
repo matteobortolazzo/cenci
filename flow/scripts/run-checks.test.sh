@@ -681,5 +681,111 @@ assert_contains "${out}" "coverage-map sync check"
 assert_contains "${out}" "zero suite-shaped"
 rm -rf "${ROOT}"
 
+# =====================================================================
+# Case 24: flow-ci.yml with TWO paths-filter steps (#950 code/extra split)
+# -- positive, pins the union. run-checks.sh:417-448's awk `flow:`-block
+# extractor was written against a SINGLE `flow:` block; #950 splits the
+# `changes` job's paths-filter step into an `id: code` step
+# (predicate-quantifier: 'every', root + exclusions) and an `id: extra`
+# step (default 'some', OR-ed extra roots) each carrying their own `flow:`
+# block. The awk survives this only because it unions every `flow:` block
+# it finds in the file rather than stopping at the first one -- but
+# nothing pinned that before this case. Both coverage-map registration
+# paths (docs/pipeline-coverage-map.md, watch/**/*_test.go) live ONLY in
+# the second (`extra`) block here, so an extractor that reads just the
+# first block, or that stops at a step boundary, fails this case. Must
+# pass against TODAY's unmodified run-checks.sh, before any workflow edit.
+# =====================================================================
+ROOT="$(mktemp -d)" || { echo "run-checks.test.sh: failed to create fixture root (case 24)." >&2; exit 2; }
+build_coverage_fixture "${ROOT}"
+cat > "${ROOT}/.github/workflows/flow-ci.yml" <<'EOF'
+name: flow-ci
+on:
+  pull_request:
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      flow: ${{ steps.code.outputs.flow == 'true' || steps.extra.outputs.flow == 'true' }}
+    steps:
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
+        id: code
+        with:
+          predicate-quantifier: 'every'
+          filters: |
+            flow:
+              - 'flow/**'
+              - '!flow/AGENTS.md'
+              - '!flow/CLAUDE.md'
+              - '!flow/README.md'
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
+        id: extra
+        with:
+          filters: |
+            flow:
+              - '.cenci/config.json'
+              - '.github/workflows/flow-ci.yml'
+              - 'docs/pipeline-coverage-map.md'
+              - 'watch/**/*_test.go'
+            maintenance:
+              - 'docs/**'
+              - 'AGENTS.md'
+EOF
+out="$(bash "${ROOT}/flow/scripts/run-checks.sh" "${ROOT}/flow" 2>&1)"
+code=$?
+[[ "${code}" -eq 0 ]] || fail "case 24: expected exit 0 for a two-step flow-ci.yml carrying the coverage-map/watch-glob registration only in the second ('extra') flow: block, got ${code}"$'\n'"  actual: ${out}"
+assert_contains "${out}" "coverage-map sync check"
+rm -rf "${ROOT}"
+
+# =====================================================================
+# Case 25: same two-step flow-ci.yml shape as case 24, but with
+# 'docs/pipeline-coverage-map.md' and 'watch/**/*_test.go' removed from
+# BOTH `flow:` blocks -- anti-vacuity companion to case 24. Proves the
+# two-block shape does not silently disable the registration check (i.e.
+# case 24 is not passing merely because the union makes every fixture
+# pass regardless of content). Red-by-construction against its own
+# mutated fixture: the case itself PASSES by correctly observing the
+# failure.
+# =====================================================================
+ROOT="$(mktemp -d)" || { echo "run-checks.test.sh: failed to create fixture root (case 25)." >&2; exit 2; }
+build_coverage_fixture "${ROOT}"
+cat > "${ROOT}/.github/workflows/flow-ci.yml" <<'EOF'
+name: flow-ci
+on:
+  pull_request:
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      flow: ${{ steps.code.outputs.flow == 'true' || steps.extra.outputs.flow == 'true' }}
+    steps:
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
+        id: code
+        with:
+          predicate-quantifier: 'every'
+          filters: |
+            flow:
+              - 'flow/**'
+              - '!flow/AGENTS.md'
+              - '!flow/CLAUDE.md'
+              - '!flow/README.md'
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
+        id: extra
+        with:
+          filters: |
+            flow:
+              - '.cenci/config.json'
+              - '.github/workflows/flow-ci.yml'
+            maintenance:
+              - 'docs/**'
+              - 'AGENTS.md'
+EOF
+out="$(bash "${ROOT}/flow/scripts/run-checks.sh" "${ROOT}/flow" 2>&1)"
+code=$?
+[[ "${code}" -ne 0 ]] || fail "case 25: expected non-zero exit when the coverage-map/watch-glob registration is absent from both flow: blocks, got 0"
+assert_contains "${out}" "coverage-map sync check"
+assert_contains "${out}" "flow-ci.yml"
+rm -rf "${ROOT}"
+
 echo "run-checks.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]

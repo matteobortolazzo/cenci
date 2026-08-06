@@ -58,6 +58,10 @@ jobs:
         run: bash .github/scripts/watch-release-workflow.test.sh
       - name: Run installer identity-regexp drift tests
         run: bash .github/scripts/installer-identity-drift.test.sh
+      - name: Check paths-filter negation/quantifier guard
+        run: bash .github/scripts/check-paths-filters.sh
+      - name: Run paths-filter guard unit tests
+        run: bash .github/scripts/check-paths-filters.test.sh
       - name: Lint GitHub Actions workflows
         uses: docker://rhysd/actionlint:1.7.7
         with:

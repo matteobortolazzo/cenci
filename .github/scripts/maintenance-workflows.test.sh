@@ -23,7 +23,7 @@ for path in \
 do
   contains "$FLOW" "$path" "flow-ci maintenance filter missing $path"
 done
-contains "$FLOW" 'maintenance: ${{ steps.filter.outputs.maintenance }}' "flow-ci missing maintenance output"
+contains "$FLOW" 'maintenance: ${{ steps.extra.outputs.maintenance }}' "flow-ci missing maintenance output"
 contains "$FLOW" "name: flow-maintenance" "flow-ci missing dedicated maintenance job"
 contains "$FLOW" "Run maintain checker (changed files)" "flow-ci missing changed checker"
 contains "$FLOW" "Run maintain checker (full report-only)" "flow-ci missing push-to-main full checker"

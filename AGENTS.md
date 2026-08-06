@@ -54,3 +54,4 @@ On-demand topic docs live in `docs/` at the repo root. Read the file matching yo
 - `docs/plan-fidelity.md` — cross-checking an implementation against a plan or ticket's full stated intent, not just its Files to Modify wording, including refactor phases that would override plan decisions
 - `docs/error-codes.md` — the `CENCI-<AREA>-<SUBAREA>-<NNN>` structured error-identifier naming convention and registered-code index
 - `docs/pipeline-coverage-map.md` — the committed acceptance-criterion/doc-claim-to-named-test coverage map for the `#661` idempotent-refine/autonomous-chain split, enforced by `flow/scripts/run-checks.sh`'s coverage-map sync check
+- `docs/github-actions.md` — conventions and gotchas for authoring `.github/workflows/*.yml`, including the `dorny/paths-filter` negation/quantifier rule enforced by `check-paths-filters.sh`; read before touching any workflow's `paths-filter` step
