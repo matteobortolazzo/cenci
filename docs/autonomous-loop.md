@@ -178,7 +178,12 @@ fallback thresholds.
 - `maxChangedFiles` and `maxDiffLines` are **required** whenever the block exists.
   Missing or non-positive makes the whole block malformed, which denies.
 - `protectedPaths` are globs where `*` matches any character including `/`,
-  case-insensitive. Any changed file matching any pattern denies that PR.
+  case-insensitive. Any changed file matching any pattern denies that PR. A pattern
+  ending in `/` with no trailing `*` matches that directory and everything under it
+  (e.g. `flow/skills/` protects the whole directory, not a literal-string match).
+  Each pattern is anchored against the **whole repo-relative path from the root**, so
+  a bare pattern with no leading `*` (e.g. `install.sh`) only matches a file literally
+  at the repo root — prefix with `*` to match anywhere (e.g. `*install.sh`).
 - `mergeMethod` is read for compatibility, but only `squash` is ever executed —
   `merge` or `rebase` produces a logged hold, not a merge.
 - The block is always read from the **PR's base branch**, so a PR can never widen its
