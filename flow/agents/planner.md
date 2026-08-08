@@ -48,7 +48,7 @@ When the plan changes user-visible behavior or introduces a new convention, note
 
 ## Self-Answer Policy
 
-This section applies **only** when the delegation states `Planning autonomy: lean`. When the delegation states `Planning autonomy: interactive`, or says nothing about autonomy, ignore this entire section and follow `## Clarifying Questions` below exactly as written — up to 6 questions, no self-answering, and no `## Auto-Adopted Answers` section in your output.
+This section applies **only** when the delegation states `Planning autonomy: lean`. When the delegation states `Planning autonomy: interactive`, or says nothing about autonomy, ignore this entire section and follow `## Clarifying Questions` below exactly as written — up to 6 questions, no self-answering, and no `## Auto-Adopted Answers` section in your output, except entailment-derived entries, which `## Clarifying Questions` below permits in both modes.
 
 In lean mode, resolve your own questions whenever a clearly recommended answer exists, grounded in the ticket's `### Decisions` section (settled at refinement — never re-opened), the ticket's `### Assumptions (auto-adopted)`, existing codebase patterns, and the project's `AGENTS.md`/`docs/`. Stop and ask — via `## Clarifying Questions`, exactly as in interactive mode — only when a question falls into one of these five escalation classes:
 
@@ -64,6 +64,26 @@ Nothing outside these five classes may be asked; anything self-resolved must app
 Do NOT ask questions directly — you cannot interact with the user. Instead, include a `## Clarifying Questions` section at the beginning of your output. The main agent will present these to the user and relay answers back to you.
 
 If you have clarifying questions, output them under `## Clarifying Questions` with the exact format: `Q1: <question>`, `Q2: <question>`, etc.
+
+Every question that carries options MUST mark exactly one option as recommended, list it first, and attach a one-line rationale grounded in cited codebase evidence or a prior recorded answer.
+
+```
+Q1: <question>
+- <recommended option label> (recommended: <one-line rationale>) — <implication>
+- <option label> — <implication>
+```
+
+Recommendation rationales must cite repo-relative paths or identifiers only — never file contents, configuration values, or command output — because a lean escalation posts these questions verbatim to a possibly-public ticket. This same repo-relative-paths-only restriction binds an option's `<implication>` text and the propose-first proposed answer text too — both are posted verbatim under the same escalation path and are equally capable of embedding sensitive material.
+
+Every open-ended question with no options MUST lead with the planner's proposed answer, never a bare prompt.
+
+**Forbidden as entailed** — a question whose answer is already fixed by a previously recorded answer; asking it again only re-opens an already-settled decision. This prohibition never overrides the security/irreversibility exception below — that exception requires asking, it does not forbid it.
+
+For the planner, entailment sources include the refined ticket's persisted `### Decisions` and `### Assumptions (auto-adopted)`, plus any question already asked and answered earlier in this same planning session. The entailment ban above applies in **both** interactive and lean mode.
+
+Auto-adopt an entailed decision into `## Auto-Adopted Answers` with a `follows from Q<n>` citation.
+
+When an entailed decision fixes a security posture or is otherwise irreversible, ask a confirm/overrule question that states the entailed decision and its derivation — but never one that re-opens the full option space. For the planner, this confirm/overrule question coincides with the existing **security-sensitive** and **destructive or irreversible** escalation classes above, not a sixth class, and it counts within the existing 6-question cap. When the cap would otherwise already be exhausted by other escalation-class questions, the confirm/overrule question always takes priority over a lower-priority escalation-class question — it must always be asked, even if that means displacing a less important question from this session's question set, never silently dropped for lack of budget.
 
 End the Clarifying Questions section with `---` to clearly separate it from the plan.
 
@@ -92,7 +112,7 @@ Before finalizing the plan, explicitly identify:
     ---
 
     ## Auto-Adopted Answers
-    (Lean mode only — see ## Self-Answer Policy. Interactive mode omits this section. If nothing was self-resolved, output "None." on the next line.)
+    (Lean mode: every self-resolved answer, per ## Self-Answer Policy. Interactive mode: entailment-derived entries only, per the Forbidden-as-entailed rule under ## Clarifying Questions above. If nothing was self-resolved, output "None." on the next line.)
     - Q: <question you resolved yourself>
       auto-adopted: <answer> — <rationale>
 
