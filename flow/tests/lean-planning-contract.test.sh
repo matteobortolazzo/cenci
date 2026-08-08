@@ -39,10 +39,16 @@
 #     `do **not** set `hasPlanFile = true``), and this file's negative
 #     assertions confirm the count of each of those four owned markers stays
 #     at exactly one.
-#   - `never written by a configure prompt` already exists once, verbatim, in
-#     the `security` block precedent this ticket follows — the
-#     configure/SKILL.md assertion below pins the whole `planning`-scoped
-#     sentence, not the bare phrase.
+#   - The configure/SKILL.md assertion below pins the opening line of the
+#     `planning`-scoped rationale paragraph (`### Autonomy Settings` question
+#     13 offers `planning.autonomy` only when absent), not a bare identifier
+#     like `planning.autonomy` itself — that already recurs several times
+#     elsewhere in the same file (the schema bullet, the dispatch-side
+#     consumer paragraph), so a bare-identifier marker would pass vacuously
+#     without proving this specific rationale sentence was authored. Ticket
+#     #965 rewrote this paragraph (it used to read "never written by a
+#     configure prompt", the `security` block's own wording) to describe the
+#     new absent-only question instead — this marker moved with it.
 #
 # Covered files:
 #   - flow/agents/planner.md (## Self-Answer Policy, escalation classes,
@@ -237,15 +243,15 @@ assert_file_contains "${PHASE2_WORKTREE}" "${GATE_CHECK_LEAN_ENTRANCE_MARKER}" \
 
 CONFIGURE_PLANNING_SCHEMA_MARKER='planning.autonomy'
 CONFIGURE_PLANNING_DEFAULT_MARKER='default `"interactive"`'
-CONFIGURE_PLANNING_NEVER_PROMPTED_MARKER='`planning` field is optional and is **never written by a configure prompt**'
+CONFIGURE_PLANNING_OFFERED_WHEN_ABSENT_MARKER='The `planning` field is optional. `### Autonomy Settings` question 13 above asks for it only'
 CONFIGURE_PLANNING_EXAMPLE_JSON_MARKER='"planning": { "autonomy": "interactive" }'
 
 assert_file_contains "${CONFIGURE_SKILL}" "${CONFIGURE_PLANNING_SCHEMA_MARKER}" \
   "must document the planning.autonomy schema line"
 assert_file_contains "${CONFIGURE_SKILL}" "${CONFIGURE_PLANNING_DEFAULT_MARKER}" \
   "must state the \"interactive\" default"
-assert_file_contains "${CONFIGURE_SKILL}" "${CONFIGURE_PLANNING_NEVER_PROMPTED_MARKER}" \
-  "must state planning is never written by a configure prompt, following the security precedent"
+assert_file_contains "${CONFIGURE_SKILL}" "${CONFIGURE_PLANNING_OFFERED_WHEN_ABSENT_MARKER}" \
+  "must state planning.autonomy (question 13, ### Autonomy Settings) is offered only when absent (#965)"
 assert_file_contains "${CONFIGURE_SKILL}" "${CONFIGURE_PLANNING_EXAMPLE_JSON_MARKER}" \
   "must add planning.autonomy to the example config JSON"
 
