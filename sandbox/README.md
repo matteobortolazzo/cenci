@@ -573,9 +573,9 @@ daemons, and the inner `dockerd` is itself an additional daemon and attack surfa
 sandbox with no Docker at all — enable dind only for repos that genuinely need
 in-container Docker; `--no-dind` remains the escape hatch (below) when they don't.
 
-**Host install** (one-time, per machine): dind mode requires **Docker** as the outer
-runtime (not Podman — sysbox-runc is a Docker-only OCI runtime) with `sysbox-runc`
-registered. `cenci doctor` reports whether it's registered.
+**Host install** (one-time, per machine): dind mode requires a **Linux** host running
+**Docker** as the outer runtime (not Podman — sysbox-runc is a Docker-only OCI runtime)
+with `sysbox-runc` registered. `cenci doctor` reports whether it's registered.
 - **Arch Linux**: AUR package `sysbox-ce`, e.g. `yay -S sysbox-ce`
 - **Ubuntu**: download the nestybox `sysbox-ce` `.deb` from
   [github.com/nestybox/sysbox/releases](https://github.com/nestybox/sysbox/releases) and
@@ -607,6 +607,18 @@ repo. `cenci sandbox prune --volumes` includes dind volumes in its stale-volume 
 alongside home and agent-CLI volumes.
 
 **Limitations**:
+- **Linux-only host**: sysbox is a Linux-only OCI runtime that must be installed on the
+  machine running `dockerd`. On macOS `dockerd` lives inside Docker Desktop's LinuxKit VM,
+  which cannot be modified, so `sysbox-runc` can never be registered there. Rather than
+  refusing to launch (which left macOS unable to open a sandbox at all for a dind repo),
+  the launcher **degrades**: it prints a warning naming `CENCI-SANDBOX-DIND-002` and starts
+  the session without nested Docker, so everything that doesn't need Docker still works.
+  `cenci audit` reports the dind source as `platform-unsupported` on such a host. Pass
+  `--no-dind`, or set `"dind": false`, to silence the warning. Getting real nested Docker
+  on a Mac means running Docker Engine inside a Linux VM you control (Lima, Multipass) with
+  `sysbox-ce` installed there and `DOCKER_HOST` pointed at it — cenci does not manage that
+  VM. On Linux, an unregistered `sysbox-runc` is a fixable setup gap and still hard-fails
+  the launch with the install pointers above.
 - **Docker-outer-only**: dind requires the host's resolved container runtime to be Docker; it is not supported when the outer runtime is Podman.
 - **Repo-scope-only**: dind is only available when launching from inside a git repo (repo scope) — not in legacy/default scope.
 - **Self-skips in CI**: installing sysbox on a CI runner is out of scope for cenci; CI environments simply don't have it registered, so dind-dependent tests should not assume it's available there.

@@ -69,6 +69,7 @@ This prevents readers and future implementers from assuming the code is actively
 | `CENCI-SANDBOX-START-003` | Sandbox / Start | The sandbox container did not signal readiness within the readiness-poll budget. Registry-only: registered (message, causes, hints) but not yet wired into any detection path — neither `waitUntilReady` nor `cenci diagnose` attaches it today (see below). Reserved for future use. |
 | `CENCI-SANDBOX-SESSION-001` | Sandbox / Session | No container exists for the requested sandbox session (never launched, launched under a different scope, or already auto-removed by `--rm`). Attached by `cenci diagnose`. |
 | `CENCI-SANDBOX-DIND-001` | Sandbox / Dind | The nested Docker daemon (DinD) failed to start, or crashed/OOMed after starting, without an intentional-shutdown sentinel superseding the marker. Attached by the launcher's before-attach warning and by `cenci diagnose`. |
+| `CENCI-SANDBOX-DIND-002` | Sandbox / Dind | Nested Docker was requested (`--dind` or `sandbox.dind`) on a host that can never register `sysbox-runc` — macOS — so the sandbox launched without it. Attached by the launcher's degrade warning and reported by `cenci audit` as the `platform-unsupported` dind source. |
 | `CENCI-DAEMON-CONN-001` | Daemon / Conn | The cenci daemon's event socket exists but did not answer a read-only dial. Attached by `cenci diagnose`. |
 | `CENCI-DAEMON-SOCKET-001` | Daemon / Socket | The cenci daemon's event socket does not exist at all. Attached by `cenci diagnose`. |
 
@@ -103,3 +104,15 @@ on "Nested Docker:" section attaches a `SeverityDegraded` finding with it
 whenever that marker is present for a dind session. Severity is `Degraded`
 (not fatal) because the agent session still works — only nested Docker
 inside the container is unavailable.
+
+`CENCI-SANDBOX-DIND-002` (#962) is attached by `launch.go`'s
+`warnDindPlatformUnsupported`, printed once during
+`resolveLaunchContext` when a dind request is degraded away because the
+host cannot register `sysbox-runc`. It is `Warning` tier — the only
+registered code that is intentionally warning-tier (`severityForCode`'s
+default branch is otherwise reserved for codeless findings, and
+`diagnose_test.go`'s `warningByDesign` map records the exemption). It
+describes a host capability rather than a failure: the session launched
+and works, and no action on that host can enable nested Docker. This is
+the macOS counterpart to `CENCI-SANDBOX-DIND-001`, which stays reserved
+for an inner `dockerd` that should have started and didn't.

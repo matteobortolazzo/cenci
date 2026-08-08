@@ -784,3 +784,39 @@ func TestWriteExplanation_DindSourceUnknown_NotRenderedAsDisabled(t *testing.T) 
 		t.Errorf("narrative must never print the default-safe baseline line when dind's state is indeterminate, got:\n%s", out)
 	}
 }
+
+// -- 15. dind degraded by the host platform (#962) ---------------------------
+
+// TestWriteExplanation_DindPlatformUnsupported_ExplainsTheDegrade covers the
+// macOS degrade: dind was requested but the host can never register
+// sysbox-runc, so the posture reports DindPosture{Enabled:false,
+// Source:DindSourcePlatformUnsupported}. The narrative must explain that the
+// request was dropped rather than printing the plain "Nested Docker is
+// disabled" sentence, which reads as "nobody asked for it" and leaves the
+// reader without an explanation for why in-container Docker fails. Unlike
+// DindSourceUnknown, this state IS conclusive — dind is definitively off —
+// so the default-safe baseline line must still print.
+func TestWriteExplanation_DindPlatformUnsupported_ExplainsTheDegrade(t *testing.T) {
+	p := baselinePosture()
+	p.Dind = DindPosture{
+		Enabled: false,
+		Source:  DindSourcePlatformUnsupported,
+		Note:    "nested Docker was requested (config) but is unavailable on macOS.",
+	}
+
+	var buf bytes.Buffer
+	if err := p.WriteExplanation(&buf); err != nil {
+		t.Fatalf("WriteExplanation: %v", err)
+	}
+	out := buf.String()
+
+	if strings.Contains(out, "Nested Docker is disabled for this launch") {
+		t.Errorf("narrative rendered a degraded-by-platform dind as a plain \"disabled\", which hides that the launch dropped a request, got:\n%s", out)
+	}
+	if !strings.Contains(out, "requested for this launch but is unavailable on this host") {
+		t.Errorf("expected the narrative to say the dind request was dropped by the host platform, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Boundary weakenings: none (default-safe baseline)") {
+		t.Errorf("expected the default-safe baseline line — a degraded dind is conclusively off, not indeterminate, got:\n%s", out)
+	}
+}

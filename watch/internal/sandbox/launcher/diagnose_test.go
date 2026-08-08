@@ -67,7 +67,16 @@ func TestSeverityForCode_UnregisteredOrEmptyCodeDefaultsWarning(t *testing.T) {
 // this test (silently under-classified as warning) instead of drifting
 // undetected.
 func TestSeverityForCode_AllRegisteredCodesAreExplicitlyMapped(t *testing.T) {
-	warningByDesign := map[errcode.Code]bool{}
+	// CENCI-SANDBOX-DIND-002 (#962) is intentionally warning-tier: it
+	// records a host capability the sandbox never had (macOS cannot
+	// register sysbox-runc), not a failure of this session. The session
+	// itself launched and works — only nested Docker is absent — and no
+	// recovery action on this host can change that, which is exactly what
+	// separates it from DIND-001's degraded tier (a dockerd that should
+	// have started and didn't).
+	warningByDesign := map[errcode.Code]bool{
+		errcode.SandboxDindPlatformUnsupported: true,
+	}
 
 	codes := errcode.AllCodes()
 	if len(codes) == 0 {

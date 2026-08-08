@@ -120,11 +120,12 @@ type launchCtx struct {
 }
 
 // resolveLaunchContext resolves the shared preamble: agent/model
-// defaults+validation, cwd/home, ComputeScope, ResolveDind (a UsageError on
-// conflicting/misplaced --dind flags), container-runtime resolution
-// (mutates e.Runtime only when unset — docker-first under dind, else
-// podman-first), and dindPreflight when dind is on. Both Launch and DryRun
-// call this so their failure modes for these steps can never diverge.
+// defaults+validation, cwd/home, ComputeScope, resolveDindForHost
+// (ResolveDind's flag/config decision plus the macOS platform gate — a
+// UsageError on conflicting/misplaced --dind flags), container-runtime
+// resolution (mutates e.Runtime only when unset — docker-first under dind,
+// else podman-first), and dindPreflight when dind is on. Both Launch and
+// DryRun call this so their failure modes for these steps can never diverge.
 func (e *Engine) resolveLaunchContext(opts Options) (launchCtx, error) {
 	agent := opts.Agent
 	if agent == "" {
@@ -148,9 +149,16 @@ func (e *Engine) resolveLaunchContext(opts Options) (launchCtx, error) {
 	}
 	scope := ComputeScope(agent, opts.Name, cwd, home)
 
-	dindOn, err := ResolveDind(opts, scope)
+	// The host-platform gate runs before runtime resolution on purpose: a
+	// launch degraded off dind has no reason to prefer Docker, so it must
+	// fall through to the normal podman-first ContainerRuntime() below
+	// exactly like any other non-dind launch (#962).
+	dindOn, dindDegraded, err := resolveDindForHost(opts, scope)
 	if err != nil {
 		return launchCtx{}, err
+	}
+	if dindDegraded {
+		e.warnDindPlatformUnsupported()
 	}
 	if e.Runtime == "" {
 		if dindOn {
@@ -550,6 +558,19 @@ func pid1KeepaliveCommand(dindOn bool) string {
 // exit. Read via readHomeVolumeFile by both warnDockerdStartupFailure (before
 // the first agent attach) and diagnose.go's "Nested Docker:" section.
 const dockerdFailureMarkerPath = "/home/dev/.cenci-dockerd-startup-error"
+
+// warnDindPlatformUnsupported prints the one-time, non-fatal warning for a
+// dind request degraded away by the host-platform gate (#962). It is a
+// warning rather than a hard error because the sandbox itself is perfectly
+// usable without nested Docker: hard-failing here left macOS unable to open
+// a sandbox at all for any repo with sandbox.dind set, and the sysbox
+// install pointers dindPreflight offers cannot be followed on a Mac. The
+// text names what was dropped, what breaks because of it, and both ways to
+// silence it — mirroring warnDockerdStartupFailure's warn-and-continue
+// shape (#630).
+func (e *Engine) warnDindPlatformUnsupported() {
+	_, _ = fmt.Fprintf(e.Stderr, "Warning: nested Docker (DinD) is not available on %s [%s]: sysbox-runc is a Linux-only runtime and cannot be registered with Docker Desktop's VM. Launching without it — Docker-dependent work in this session (Testcontainers, docker build/run) will not work. Pass --no-dind, or set \"sandbox\": {\"dind\": false} in .cenci/config.json, to silence this warning.\n", dindHostLabel(), errcode.SandboxDindPlatformUnsupported)
+}
 
 // warnDockerdStartupFailure surfaces a persistent dockerd startup-failure
 // marker as a prominent, non-fatal warning right before the first agent

@@ -1453,3 +1453,67 @@ func TestAudit_ObservedMode_DindLabelUnknown_NotRenderedAsDisabledOrBaseline(t *
 		t.Errorf("JSON output must omit inspectWarning when empty (omitempty) even though dind is indeterminate, got:\n%s", dataJSON)
 	}
 }
+
+// TestAudit_DarwinDindConfig_ReportsPlatformUnsupported pins #962's audit
+// attribution: on macOS a dind repo config resolves off, and the report must
+// say WHY — a plain DindSourceOff would be indistinguishable from "nobody
+// asked for dind", leaving a macOS user auditing a dind repo unable to tell
+// the two apart. Source carries the platform-unsupported value and Note
+// explains the Linux-only sysbox constraint.
+func TestAudit_DarwinDindConfig_ReportsPlatformUnsupported(t *testing.T) {
+	setDindHostOS(t, "darwin")
+	repo := newAuditTestRepo(t)
+	writeFile(t, filepath.Join(repo, ".cenci", "config.json"), `{"sandbox":{"dind":true}}`)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	posture, err := auditEngine().Audit(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Audit on darwin with a dind repo config = %v, want a successful report", err)
+	}
+
+	if posture.Dind.Enabled {
+		t.Error("Dind.Enabled = true on darwin, want false")
+	}
+	if posture.Dind.Source != DindSourcePlatformUnsupported {
+		t.Errorf("Dind.Source = %q, want %q", posture.Dind.Source, DindSourcePlatformUnsupported)
+	}
+	if !strings.Contains(posture.Dind.Note, "macOS") {
+		t.Errorf("Dind.Note = %q, want it to name the platform", posture.Dind.Note)
+	}
+	if posture.Dind.Runtime != "" || posture.Dind.StorageVolume != "" {
+		t.Errorf("Dind runtime/storageVolume = %q/%q, want both empty — no sysbox runtime and no dind volume are applied on a degraded launch", posture.Dind.Runtime, posture.Dind.StorageVolume)
+	}
+
+	// The degrade must reach the human report too, not just the JSON.
+	var buf bytes.Buffer
+	if err := posture.WriteText(&buf); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+	if !strings.Contains(buf.String(), DindSourcePlatformUnsupported) {
+		t.Errorf("WriteText output does not mention %q:\n%s", DindSourcePlatformUnsupported, buf.String())
+	}
+}
+
+// TestAudit_LinuxDindConfig_StaysEnabled is the counterpart regression: the
+// #962 platform gate must never degrade a Linux host's dind posture.
+func TestAudit_LinuxDindConfig_StaysEnabled(t *testing.T) {
+	setDindHostOS(t, "linux")
+	repo := newAuditTestRepo(t)
+	writeFile(t, filepath.Join(repo, ".cenci", "config.json"), `{"sandbox":{"dind":true}}`)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	posture, err := auditEngine().Audit(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	if !posture.Dind.Enabled {
+		t.Fatal("Dind.Enabled = false on linux with a dind repo config, want true")
+	}
+	if posture.Dind.Source != DindSourceConfig {
+		t.Errorf("Dind.Source = %q, want %q", posture.Dind.Source, DindSourceConfig)
+	}
+}
