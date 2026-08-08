@@ -6,20 +6,22 @@ argument-hint: <ticket-id | design description> [additional context]
 user-invocable: true
 disable-model-invocation: true
 model: opus
-allowed-tools: Read, Write, Bash(pencil), Bash(pencil interactive:*), Bash(which pencil:*), Bash(gh issue view:*), Bash(gh issue edit:*), Bash(gh issue comment:*), Bash(gh issue list:*), Bash(gh issue close:*), Bash(gh label create:*), Bash(gh api user --jq:*), Bash(git remote get-url:*), Bash(git add:*), Bash(git commit:*), Bash(git rev-parse:*), Bash(mkdir:*), Bash(mktemp -d:*), Bash(test:*), Glob, Grep, AskUserQuestion, mcp__pencil__get_editor_state, mcp__pencil__get_guidelines, mcp__pencil__batch_get, mcp__pencil__batch_design, mcp__pencil__get_screenshot, mcp__pencil__export_nodes, mcp__pencil__find_empty_space_on_canvas, mcp__pencil__snapshot_layout, mcp__pencil__open_document, mcp__pencil__get_variables, mcp__pencil__set_variables, mcp__pencil__replace_all_matching_properties, mcp__pencil__search_all_unique_properties
+allowed-tools: Read, Write, Bash(pen), Bash(pen interactive:*), Bash(which pen:*), Bash(gh issue view:*), Bash(gh issue edit:*), Bash(gh issue comment:*), Bash(gh issue list:*), Bash(gh issue close:*), Bash(gh label create:*), Bash(gh api user --jq:*), Bash(git remote get-url:*), Bash(git add:*), Bash(git commit:*), Bash(git rev-parse:*), Bash(mkdir:*), Bash(mktemp -d:*), Bash(test:*), Glob, Grep, AskUserQuestion, mcp__pencil__get_app_state, mcp__pencil__execute, mcp__pencil__get_screenshot, mcp__pencil__export_nodes, mcp__pencil__get_guidelines
 ---
 
 > **Client dispatch**: In Codex, read `codex-runtime` and `design/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
 
 > **Interaction rule**: Every question, confirmation, or approval directed at the user — anywhere in this skill, including error recovery — MUST be asked with the `AskUserQuestion` tool. Never ask in plain text. If an instruction says "ask the user" or "confirm", that means `AskUserQuestion`.
 
-<!-- Architecture note: cenci orchestrates Pencil via `pencil interactive` CLI (cenci-driven model).
-     We do NOT use `pencil --agent-config` because:
+> **Pencil API reference**: Before any Pencil call in this skill, in either `cli-app` or `editor` mode, read the `pencil-api` reference skill — it is the single source of truth for the current MCP tool surface, the `execute` idiom catalog, the transport table, and document discipline every Pencil call site below relies on.
+
+<!-- Architecture note: cenci orchestrates Pencil via `pen interactive` CLI (cenci-driven model).
+     We do NOT use `pen --agent-config` because:
      1. cenci needs ticket/worktree/approval workflow integration that agent-config agents lack
      2. agent-config agents have no cenci context (config, CLAUDE.md, docs/)
-     3. For complex designs, we batch via multiple `batch_design` calls within one session
+     3. For complex designs, we batch via multiple `execute` calls within one session
      The Pencil editor is the design engine; Claude Code drives it via CLI subprocess (or MCP as legacy fallback).
-     CLI mode (`pencil interactive`, desktop-app-backed) avoids loading MCP tool schemas into every conversation,
+     CLI mode (`pen interactive`, desktop-app-backed) avoids loading MCP tool schemas into every conversation,
      saving ~3,000-5,000 tokens per conversation and enabling command batching via heredocs. -->
 
 ## Phase 0 — Context Loading
@@ -40,30 +42,32 @@ Read `pencil.designPath` from the config to determine where design files belong.
 
 Read `pencil.mode` from the resolved config and store as `$PENCIL_MODE`. Default: `"editor"` if absent.
 
-**Convention**: All Pencil tool calls in this skill follow `$PENCIL_MODE`:
+**Convention**: All Pencil tool calls in this skill follow `$PENCIL_MODE`, per `pencil-api`'s transport table:
 
-- **`"cli-app"`** (default for new installs): Execute tool calls via a `pencil interactive` heredoc (targeting the desktop app — see Phase 0.5 below for the exact invocation) using the Bash tool. Multiple independent commands can be batched in a single heredoc.
+- **`"cli-app"`** (default for new installs): Execute tool calls via a `pen interactive` heredoc (targeting the desktop app — see Phase 0.5 below for the exact invocation) using the Bash tool. Multiple independent commands can be batched in a single heredoc.
 
   ```bash
-  pencil interactive -a desktop <<'EOF'
-  tool_name({ key: value })
+  pen interactive -a desktop <<'EOF'
+  execute({ input: '<Pencil-script>' })
   another_tool({ key: value })
   EOF
   ```
 
   Split into separate heredoc invocations at **decision boundaries** — where you need to read output before choosing the next action.
 
-- **`"editor"`** (legacy MCP fallback): Call the equivalent `mcp__pencil__<tool>` MCP tool directly (e.g., `mcp__pencil__batch_design`). One tool call per invocation.
+- **`"editor"`** (legacy MCP fallback): Call the equivalent `mcp__pencil__<tool>` MCP tool directly (e.g., `mcp__pencil__execute`). One tool call per invocation.
 
 **Special cases in CLI mode**:
 
 | Operation | CLI mode | Editor (MCP) mode |
 |-----------|----------|-------------------|
 | Screenshots | Use `export_nodes({ nodeIds: [...], outputDir: "<path>", format: "png" })` — writes to disk. Then Read the exported PNG with the Read tool. | Use `get_screenshot(nodeId)` — returns image inline. |
-| Batch reads | Combine multiple `batch_get` + `get_variables` calls in one heredoc | One MCP call per tool |
-| Batch writes | Combine multiple `batch_design` calls in one heredoc (when independent) | One MCP call per tool |
+| Batch reads | Combine multiple `execute` script reads (see `pencil-api`'s idiom catalog) in one heredoc | One MCP call per tool |
+| Batch writes | Combine multiple `execute` script writes in one heredoc (when independent) | One MCP call per tool |
 
-When this skill says "Call `<tool_name>(...)`", execute it according to `$PENCIL_MODE`. Explicit CLI/MCP examples are only given where the modes diverge.
+When this skill says "Call `<tool_name>(...)`" or "run `<Pencil-script>`", execute it according to `$PENCIL_MODE` and the `execute` idiom catalog in `pencil-api`. Explicit CLI/MCP examples are only given where the modes diverge.
+
+**Document-derived values** (node IDs, component names — read back out of the `.pen` document in Step 3B/3C, Step 4A, and Phase 5 Step A) must be validated per `pencil-api`'s idiom catalog before being substituted into any `execute` script below, in either mode — reject and abort the call site rather than interpolating an unvalidated value. This also covers node IDs interpolated into a filesystem path, such as Step 4A's `export_nodes`/`outputDir` and `Read` targets — see `pencil-api`'s narrower node-ID pattern for those sites.
 
 ## Phase 0.5 — Pencil Availability Check
 
@@ -80,39 +84,39 @@ Before doing anything else in this phase — before any Pencil probe, any backgr
 
 If neither check matches, proceed with the normal availability check below.
 
-Before parsing arguments, verify that Pencil is reachable.
+Before parsing arguments, verify that Pencil is reachable. Both modes below use the cheap `execute({ input: 'Print(1)' })` connectivity probe from `pencil-api`'s idiom catalog — `get_app_state` is reserved for session orientation (Phase 2 onward), not spent here.
 
 **CLI-app mode** (`$PENCIL_MODE` is `"cli-app"`):
 
 1. Probe via Bash:
    ```bash
-   pencil interactive -a desktop <<'EOF'
-   get_editor_state({ include_schema: false })
+   pen interactive -a desktop <<'EOF'
+   execute({ input: 'Print(1)' })
    EOF
    ```
-2. **If the call succeeds** → Pencil is available. Check the response for the currently active document file path and store it as `$PENCIL_OPEN_DOC` (set to the file path string if a document is open, or empty if no document is open). Proceed to argument parsing.
+2. **If the call succeeds** → Pencil is available. Proceed to argument parsing.
 3. **If the call fails** → attempt auto-launch:
-   a. Launch Pencil in the background: run the bare command `pencil` with the Bash tool's background-execution mode (the equivalent of `pencil &`). The command string must be exactly `pencil` — never append `&` to it, or the invocation stops matching the exact-match `Bash(pencil)` grant and prompts. Then retry the probe up to 3 times with 3-second pauses between attempts.
+   a. Launch Pencil in the background: run the bare command `pen` with the Bash tool's background-execution mode (the equivalent of `pen &`). The command string must be exactly `pen` — never append `&` to it, or the invocation stops matching the exact-match `Bash(pen)` grant and prompts. Then retry the probe up to 3 times with 3-second pauses between attempts.
       - If a retry succeeds → proceed to argument parsing.
       - If all 3 retries fail → tell the user:
-        "Pencil was launched but the CLI connection could not be established. Ensure Pencil is running and accepting CLI connections."
+        "Could not reach Pencil. Open the Pencil desktop app manually and ensure it's accepting CLI connections, then re-run `/cenci:design`."
         **Stop.**
 
 **Editor mode** (`$PENCIL_MODE` is `"editor"`):
 
-1. Call `get_editor_state(include_schema: false)` as an MCP connectivity probe.
-2. **If the call succeeds** → Pencil MCP is available. Store active document path as `$PENCIL_OPEN_DOC`. Proceed to argument parsing.
+1. Call `mcp__pencil__execute` with `{ input: 'Print(1)' }` as an MCP connectivity probe.
+2. **If the call succeeds** → Pencil MCP is available. Proceed to argument parsing.
 3. **If the call fails** → attempt auto-launch:
-   a. Run `which pencil 2>/dev/null` to check if the `pencil` command is available.
-   b. **If found**: Launch Pencil in the background: run the bare command `pencil` with the Bash tool's background-execution mode (the equivalent of `pencil &`). The command string must be exactly `pencil` — never append `&`. Then retry `get_editor_state(include_schema: false)` up to 3 times with 3-second pauses between attempts.
+   a. Run `which pen 2>/dev/null` to check if the `pen` command is available.
+   b. **If found**: Launch Pencil in the background: run the bare command `pen` with the Bash tool's background-execution mode (the equivalent of `pen &`). The command string must be exactly `pen` — never append `&`. Then retry the `execute({ input: 'Print(1)' })` probe up to 3 times with 3-second pauses between attempts.
       - If a retry succeeds → proceed to argument parsing.
       - If all 3 retries fail → tell the user:
-        "Pencil was launched but the MCP connection could not be established. Check MCP server status in Pencil (View → MCP Server Status) and ensure the Pencil MCP server is listed in your Claude Code MCP configuration."
+        "Could not reach Pencil. Open the Pencil desktop app manually, then re-run `/cenci:design`. Check MCP server status in Pencil (View → MCP Server Status) and ensure the Pencil MCP server is listed in your Claude Code MCP configuration."
         **Stop.**
    c. **If not found**: Tell the user:
-      "The Pencil editor is not running and the `pencil` command is not in PATH. Either:
+      "The Pencil editor is not running and the `pen` command is not in PATH. Either:
       1. Open Pencil manually and ensure its MCP server is connected, or
-      2. Install the `pencil` command from within the Pencil app (File → Install `pencil` command into PATH) for auto-launch support."
+      2. Install the `pen` command (`npm install -g @pen.dev/cli`, or from within the Pencil app: File → Install `pen` command into PATH) for auto-launch support."
       **Stop.**
 
 **Parse `$ARGUMENTS` — Mode Detection:**
@@ -228,12 +232,12 @@ Then:
   > "Found N design files. Which should I use as the design system (or start fresh)?"
   Options: one per `.pen` file path, plus "Start fresh (no design system)"
 
-If using an existing `.pen` file:
-- **If `$PENCIL_OPEN_DOC` is empty** (no document currently open) → call `open_document` with the `.pen` file path, then read its reusable components with `batch_get` using `{reusable: true}` to understand what's available.
-- **If `$PENCIL_OPEN_DOC` is set** (a document is already open) → do **NOT** call `open_document` (calling it with an editor already open spawns a new Pencil instance and disconnects the MCP server). Instead, ask the user via `AskUserQuestion`:
-  > "Pencil already has `<$PENCIL_OPEN_DOC>` open. Please switch to `<target .pen file>` in Pencil (File → Open), then confirm here."
+If using an existing `.pen` file, verify document identity before reading it — no tool creates or opens documents; opening or switching the active document in Pencil is always a human action (see `pencil-api`'s document discipline section). Call `get_app_state` and compare its active document path against the target `.pen` file:
+- **If it already matches** → proceed directly to reading its reusable components with `Get(n=>n.reusable&&Print(n.id,n.name))` (per `pencil-api`'s idiom catalog).
+- **If it does not match** (including no document open) → ask the user via `AskUserQuestion`:
+  > "Please open `<target .pen file>` in Pencil (File → Open), then confirm here."
   Options: "Done, file is open", "Cancel"
-  - If **"Done"** → call `get_editor_state(include_schema: false)` to confirm the correct file is now open and update `$PENCIL_OPEN_DOC`. Then read its reusable components with `batch_get` using `{reusable: true}`.
+  - If **"Done"** → call `get_app_state` again to confirm the correct file is now the active document. If it still doesn't match, ask again once more with the same options; if it still mismatches after that second attempt, treat it as **"Cancel"**. Once confirmed, read its reusable components with `Get(n=>n.reusable&&Print(n.id,n.name))`.
   - If **"Cancel"** → skip design system loading and proceed as if designing from scratch.
 
 **Question 3 — Visual direction:**
@@ -268,49 +272,62 @@ mkdir -p <designPath>
 
 Now create the design using Pencil tools. **All file paths in this phase must be absolute paths** within the repository root.
 
-### Step 3A: Open or Create `.pen` File
+### Step 3A: Verify Document Identity
 
-First, call `get_editor_state(include_schema: false)` and update `$PENCIL_OPEN_DOC` from the response (the document may have changed since Phase 0.5, e.g., user switched files during Phase 2).
+No tool in the current Pencil API creates or opens documents — opening a design-system file or creating a new one is always a human action in the Pencil app (see `pencil-api`'s document discipline section). This step verifies the active document matches what Phase 2/2.5 selected before any read or write in this phase begins.
 
-**If `$PENCIL_OPEN_DOC` is empty** (no document currently open):
-- If a design system `.pen` file was selected in Phase 2 → call `open_document` with the **absolute path** of the `.pen` file (e.g., `<repo-root>/<designPath>/<file>.pen`). Use `get_editor_state` to confirm.
-- If designing from scratch → call `open_document` with `"new"` to create a new empty document. After creation, the file will be saved to `<designPath>`.
+Determine the **target file**:
+- If a design system `.pen` file was selected in Phase 2 → the target is that file's absolute path.
+- If designing from scratch → the target is a new `.pen` file the human will create directly inside `<designPath>` (see the from-scratch branch below).
 
-**If `$PENCIL_OPEN_DOC` is set** (a document is already open):
-- Determine the **target file**: the design system `.pen` file path or `"new"` (if designing from scratch).
-- If `$PENCIL_OPEN_DOC` already matches the target file path → no action needed, proceed.
-- Otherwise → do **NOT** call `open_document` (calling it with an editor already open spawns a new Pencil instance and breaks the connection). Ask the user via `AskUserQuestion`:
-  > "Pencil already has `<$PENCIL_OPEN_DOC>` open. I need to open `<target file or 'a new document'>` instead. Please close the current file in Pencil (File → Close) or switch to the target file (File → Open), then confirm here."
+**If a design system file was selected:**
+- Call `get_app_state` and compare its active document path against the target.
+- **Match** → proceed to Step 3B.
+- **Mismatch** (including no document open) → ask the user via `AskUserQuestion`:
+  > "Pencil's active document doesn't match `<target file>`. Please open it in Pencil (File → Open), then confirm here."
   Options: "Done, ready to proceed", "Cancel design"
-  - If **"Done"** → call `get_editor_state(include_schema: false)` to verify. Update `$PENCIL_OPEN_DOC`.
-    - If the user closed the file (no document open) → now safe to call `open_document` with the target path or `"new"`.
-    - If the user opened the correct target file → proceed without calling `open_document`.
-    - If the wrong file is still open → ask again (loop once, then stop with an error if still wrong).
+  - If **"Done"** → call `get_app_state` again. If it now matches, proceed to Step 3B. If it still mismatches, ask once more with the same options; if it is still mismatched after that second attempt, **Stop** and tell the user design cannot continue without the correct document open. Never proceed to Step 3B on a mismatch.
   - If **"Cancel design"** → **Stop.**
 
-**Important (editor mode only)**: Pass the explicit `filePath` parameter pointing into the repository for all subsequent Pencil MCP tool calls. In CLI mode, the file path is managed by the Pencil desktop app and does not need to be passed explicitly.
+**If designing from scratch:**
+- Before prompting, establish the baseline `.pen` file set for `<designPath>`: reuse the `Glob` (`<designPath>/*.pen`) result already captured during Phase 2's Question 2 discovery scan — nothing in Phase 2.5 (`mkdir -p <designPath>`) adds `.pen` files, so that result is still an accurate baseline. This baseline matters even when it's non-empty: the from-scratch branch is also reached after the user cancels design-system loading in Phase 2/Step 3A, at which point `<designPath>` can already contain other, pre-existing `.pen` files. If no such Glob result exists yet (the user-specified-path route in Phase 2's Question 2 skipped its discovery scan entirely), run `Glob` (`<designPath>/*.pen`) now, before prompting the human to create the new document, so a baseline exists to diff against.
+- Ask the user via `AskUserQuestion`:
+  > "Please create and save a new `.pen` file inside `<designPath>` in Pencil, then confirm here."
+  Options: "Done, file created and saved", "Cancel design"
+  - If **"Cancel design"** → **Stop.**
+  - If **"Done, file created and saved"** → re-run `Glob` (`<designPath>/*.pen`) and diff it against the baseline set captured above to find files present now that were **absent** from the baseline:
+    - **Exactly one new file** → this is the target. Call `get_app_state` and confirm the new file is the active document — on mismatch, apply the same re-ask-once-then-stop handling as the design-system-file branch above. Never proceed to Step 3B on a mismatch.
+    - **No new file, or more than one new file (ambiguous)** → ask the user via `AskUserQuestion` to clarify which file is the new document (or confirm it was actually saved, if none appeared). Never guess by picking the first or most-recently-modified match. Once the user identifies a specific file, call `get_app_state` and confirm that file is the active document before proceeding to Step 3B — on mismatch, apply the same re-ask-once-then-stop handling as the design-system-file branch above.
 
-### Step 3B: Get Editor State
+**Important (both modes)**: no tool in the current Pencil API surface (`pencil-api`'s MCP surface table) accepts a caller-supplied `filePath` parameter to target a specific document — every call always operates on whatever document is currently open in the app. There is no per-call way to redirect a wayward call to the correct document; identity is established purely by what's open when the call runs, which is why it must be verified with `get_app_state` before every read/write batch rather than assumed from the check above (see `pencil-api`'s Document Discipline section).
 
-Call `get_editor_state` with `include_schema: true` to understand the document structure and schema.
+### Step 3B: Inventory the Document
+
+Call `get_app_state({ include_schema: true })` (per `pencil-api`'s MCP surface) to load the full `.pen` schema and `execute` function docs needed for component discovery and later building, alongside session orientation. This call runs unconditionally here, in both the design-system and from-scratch branches — Step 3D's build step needs the schema and `execute` docs either way, not just when a design system file was selected.
+
+Then run the top-level inventory idiom from `pencil-api`'s catalog to understand the document's existing structure before building:
+
+```
+Get((n,c)=>{c.skipChildren();Print(n.id,n.name)})
+```
 
 ### Step 3C: Load Design System Components
 
 If a design system file was selected:
-- Call `batch_get` with `patterns: [{reusable: true}]` and `readDepth: 2` to discover all reusable components
+- Run the reusable discovery idiom, `Get(n=>n.reusable&&Print(n.id,n.name))`, to discover all reusable components. For any component whose full subtree is needed, follow up with the subtree-read idiom, `Print(Get("<id>",{depth:3}))`.
 - Catalog available components (buttons, inputs, cards, navigation, etc.) for use in the design
 
 ### Step 3D: Build the Design
 
-Use `batch_design` to create the design. Follow these rules:
+Use `execute` calls to create the design. Follow these rules:
 
-- **Max 25 operations per `batch_design` call** — split larger designs into multiple calls by logical section (e.g., header first, then content area, then footer)
-- Use reusable components from the design system where available (insert as `type: "ref"`)
+- Split larger designs into multiple `execute` calls by logical section (e.g., header first, then content area, then footer)
+- Use reusable components from the design system where available — insert with the ref-insert idiom, `Insert("<parent>",{type:"ref",ref:"<Comp>",width:"fill_container"})`
 - For new elements not in the design system, create frames and text nodes directly
 - Apply styling from the style guide and Design Direction
-- Use `find_empty_space_on_canvas` when positioning new screens to avoid overlapping existing content
-- Generate images with the `G()` operation where needed (hero images, avatars, illustrations)
-- Set theme variables via `set_variables` if creating a new design system or extending an existing one
+- Run `FindEmptySpace` when positioning new screens to avoid overlapping existing content
+- Generate images with `Generate(nodeId,"ai"|"stock",…)` where needed (hero images, avatars, illustrations)
+- Set theme variables via `SetVariables({...})` if creating a new design system or extending an existing one — always a merge, **never** pass `replace: true`, which would destroy the existing theming instead of extending it
 - Use absolute positioning within flex layouts for floating elements (FABs, modals, overlays, tooltips)
 
 **Build order:**
@@ -332,6 +349,8 @@ If the user requested responsive designs:
 
 ### Step 4A: Screenshot and Inspect
 
+**Re-verify document identity before this batch**: multiple `AskUserQuestion` round-trips happen between Step 3A and here, during which the human could switch Pencil's active document. Call `get_app_state` and compare its active document path against the target file established in Step 3A. Apply the same re-ask-once-then-Stop handling as Step 3A — never proceed to a screenshot or read/write below on a still-mismatched document.
+
 For each screen/component created:
 
 1. Capture a visual snapshot:
@@ -347,11 +366,13 @@ For each screen/component created:
      ```
      If this verification fails, stop the step immediately using the same error-recovery convention as Phase 0/0.5 — do not proceed to `export_nodes` with an unverified directory.
 
+     `<node-id>` below is a document-derived value — validate it against `pencil-api`'s narrower node-ID allowlist pattern before interpolating it, since it lands in a filesystem path (`outputDir`, the `Read` target) as well as the `execute` script; reject and abort rather than interpolating an unvalidated ID.
+
      Substitute the **printed literal path** (never an unsubstituted shell-variable reference — a quoted `<<'EOF'` heredoc never expands shell variables, so leaving one in place would reach `export_nodes` as literal, wrong text instead of the resolved path) into the heredoc's `outputDir`, the subsequent `Read(...)` call, and Step 4B's re-screenshot loop — reuse the same printed path for every screenshot taken during this design session, in both this step and Step 4B:
      ```bash
-     pencil interactive -a desktop <<'EOF'
+     pen interactive -a desktop <<'EOF'
      export_nodes({ nodeIds: ["<node-id>"], outputDir: "<screenshot-dir>", format: "png" })
-     snapshot_layout({ parentId: "<node-id>", problemsOnly: true })
+     execute({ input: 'Get("<node-id>",(n,c)=>c.problems&&Print(n.name,c.problems))' })
      EOF
      ```
      Then: `Read("<screenshot-dir>/<node-id>.png")` to view and analyze.
@@ -362,8 +383,8 @@ For each screen/component created:
    - Visual hierarchy (clear headings, proper spacing, content grouping)
    - Completeness (all specified elements present)
    - Clipping (content cut off or overflowing)
-3. Review `snapshot_layout` output (captured alongside the screenshot) for programmatic layout problems
-4. Fix any issues found via additional `batch_design` calls
+3. Review the layout-check `Get(...,(n,c)=>c.problems&&...)` output (captured alongside the screenshot) for programmatic layout problems
+4. Fix any issues found via additional `execute` calls
 5. Re-screenshot after fixes to confirm they resolved the problems
 
 ### Step 4B: Present to User
@@ -379,14 +400,16 @@ Options:
 
 If **"Request Changes"**:
 1. Ask what needs changing (via `AskUserQuestion` if the user didn't specify inline)
-2. Apply the requested changes via `batch_design`
-3. Re-screenshot and re-validate (loop back to Step 4A)
-4. Re-present the updated design (back to Step 4B)
+2. **Re-verify document identity before this batch**: the Approve/Request-Changes prompt is another `AskUserQuestion` round-trip during which the human could switch Pencil's active document. Call `get_app_state` and compare its active document path against the target file established in Step 3A. Apply the same re-ask-once-then-Stop handling as Step 3A — never proceed to the `execute` calls below on a still-mismatched document.
+3. Apply the requested changes via additional `execute` calls
+4. Re-screenshot and re-validate (loop back to Step 4A)
+5. Re-present the updated design (back to Step 4B)
 
 If **"Start Over"**:
-1. Delete the current design from the canvas
-2. Loop back to Phase 2, Question 3 (visual direction) to take a new direction
-3. Rebuild from Phase 3
+1. **Re-verify document identity before this batch**: the Approve/Request-Changes prompt is another `AskUserQuestion` round-trip during which the human could switch Pencil's active document. Call `get_app_state` and compare its active document path against the target file established in Step 3A. Apply the same re-ask-once-then-Stop handling as Step 3A — never delete anything from the canvas on a still-mismatched document.
+2. Delete the current design from the canvas
+3. Loop back to Phase 2, Question 3 (visual direction) to take a new direction
+4. Rebuild from Phase 3
 
 **Only proceed to Phase 5 after the user selects "Approve".**
 
@@ -396,25 +419,27 @@ After the user approves the design in Phase 4, generate a `DESIGN.md` spec that 
 
 ### Step A: Extract data from .pen file
 
-In CLI mode, batch all reads into a single invocation:
+**Re-verify document identity before this batch**: the Phase 4 approval round-trip happens between Step 3A/4A and here, during which the human could switch Pencil's active document. Call `get_app_state` and compare its active document path against the target file established in Step 3A. Apply the same re-ask-once-then-Stop handling as Step 3A — never proceed to the reads below on a still-mismatched document.
+
+In CLI mode, batch all reads into a single invocation, using the `execute` idioms from `pencil-api`'s catalog:
 
 ```bash
-pencil interactive -a desktop <<'EOF'
-batch_get({ patterns: [{ name: "Screen/.*" }] })
-batch_get({ patterns: [{ reusable: true }], readDepth: 2 })
-batch_get({ patterns: [{ name: "Note:.*" }] })
-get_variables()
+pen interactive -a desktop <<'EOF'
+execute({ input: 'Get((n,c)=>{c.skipChildren();/^Screen\\//.test(n.name)&&Print(n.id,n.name)})' })
+execute({ input: 'Get(n=>n.reusable&&Print(n.id,n.name))' })
+execute({ input: 'Get((n,c)=>{c.skipChildren();/^Note:/.test(n.name)&&Print(n.id,n.name)})' })
+execute({ input: 'Print(GetVariables())' })
 EOF
 ```
 
-In editor mode, call each tool separately via MCP.
+In editor mode, call `mcp__pencil__execute` once per script above via MCP — but not with the same literal string. The `\\/` in `/^Screen\\//` above is escaped for the CLI heredoc form's own string-literal-parsing layer inside `pen interactive`; passed through MCP there is no such extra layer, so the `\\` would survive as a literal backslash and break the regex. In editor mode, use the un-escaped form instead: `mcp__pencil__execute` with `{ input: 'Get((n,c)=>{c.skipChildren();/^Screen\//.test(n.name)&&Print(n.id,n.name)})' }`.
 
 Parse the output into:
 
 1. **Screens**: From the `Screen/.*` results — extract name, node ID. Derive route from the screen name (e.g., `Screen/training-plan` → `/training-plan`). Add a brief description based on the screen content.
-2. **Components**: From the `reusable: true` results — extract name, node ID. Derive the framework component name from the Pencil component name (e.g., `Component/ExerciseCard` → `ExerciseCardComponent` for Angular, `ExerciseCard` for React). Determine UI library usage (e.g., PrimeNG, Material UI, custom) from component structure. Note which screens use each component.
+2. **Components**: From the reusable-node results — extract name, node ID. Derive the framework component name from the Pencil component name (e.g., `Component/ExerciseCard` → `ExerciseCardComponent` for Angular, `ExerciseCard` for React). Determine UI library usage (e.g., PrimeNG, Material UI, custom) from component structure. Note which screens use each component.
 3. **Annotations**: From the `Note:.*` results — extract name, node ID, and topic from the note content.
-4. **Tokens**: From `get_variables()` — categorize variables into Colors, Typography, Radii, and Spacing. Map each to a CSS custom property name (e.g., `$bg-card` → `--bg-card`).
+4. **Tokens**: From `GetVariables()` — categorize variables into Colors, Typography, Radii, and Spacing. Map each to a CSS custom property name (e.g., `$bg-card` → `--bg-card`).
 
 ### Step B: Detect framework from config
 
@@ -451,7 +476,7 @@ Summarize what was created:
 - `DESIGN.md` path, screen count, component count, token count
 
 Include this note at the end of the report:
-> "Note: Pencil does not auto-save. Save the `.pen` file manually in Pencil (Cmd/Ctrl+S) before closing — unsaved `batch_design` changes will be lost. The design file remains open for your review."
+> "Note: Pencil does not auto-save. Save the `.pen` file manually in Pencil (Cmd/Ctrl+S) before closing — unsaved `execute` changes will be lost. The design file remains open for your review."
 
 ## Phase 7 — Commit Design
 
@@ -459,14 +484,14 @@ After Phase 6 reporting is complete, commit the design artifacts on the current 
 
 ### Step 7.0: Manual Save Reminder (REQUIRED)
 
-**Pencil does NOT auto-save `.pen` files.** Changes made via `batch_design` exist only in the open editor until the user manually saves. `git add` reads from disk, so committing without saving captures a stale `.pen` file.
+**Pencil does NOT auto-save `.pen` files.** Changes made via `execute` exist only in the open editor until the user manually saves. `git add` reads from disk, so committing without saving captures a stale `.pen` file.
 
 Before proceeding, prompt the user via `AskUserQuestion`:
 > "Pencil does not auto-save. Please save the `.pen` file in Pencil now (File → Save or Cmd/Ctrl+S), then confirm."
 
 Options: "Saved, proceed", "Cancel commit"
 
-- **"Saved, proceed"** → continue to Step 7A.
+- **"Saved, proceed"** → re-verify document identity before continuing: call `get_app_state` and compare its active document path against the target file established in Step 3A. Apply the same re-ask-once-then-Stop handling as Step 3A — never proceed to Step 7A's `git add` on a still-mismatched document. Once confirmed, continue to Step 7A.
 - **"Cancel commit"** → **Stop.** Do not commit.
 
 ### Step 7A: Commit
@@ -495,7 +520,7 @@ git commit -m "feat(design): <description>" -- <designPath>/*.pen <designPath>/D
 **If ticket mode:** Post the design reference and key decisions as a ticket comment — this keeps the ticket body owned by its author while still surfacing the design context for humans and for the context-gatherer (which bundles ticket comments during planning).
 
 1. Get the commit SHA: `git rev-parse HEAD`
-2. Write the comment body with the client's file tool (per `shell-rules` — do not use a shell heredoc) to a temp file, e.g. `${TMPDIR:-/tmp}/cenci/design-comment-<number>.md`. Every posted design comment opens with the cenci attribution banner (blockquoted) and carries the `<!-- cenci-design-summary -->` marker on its own non-blockquoted line (#951 — see `docs/comment-attribution.md`):
+2. Write the comment body with the client's file tool (per `shell-rules` — do not use a shell heredoc) to a temp file, e.g. `${TMPDIR:-/tmp}/cenci/design-comment-<number>.md`. Every posted design comment opens with the cenci attribution banner (blockquoted) and carries the `<!-- cenci-design-summary -->` marker on its own non-blockquoted line (#951 — see `docs/comment-attribution.md`). Include a `### Screen nodes` subsection listing each screen extracted in Phase 5 Step A by name and node ID; omit the subsection entirely when there are no `Screen/*` nodes (e.g. a component-only or from-scratch design with nothing to list). The same document-derived-value validation rule from `pencil-api`'s `execute` Idiom Catalog section also applies here — validate each screen name and node ID against the allowlist (the name pattern for screen names, the narrower node-ID pattern for node IDs) before including it in this posted comment; reject rather than post an unvalidated value:
    ```markdown
    > 🤖 **cenci** — design summary posted by `/cenci:design` (design handoff).
 
@@ -509,6 +534,10 @@ git commit -m "feat(design): <description>" -- <designPath>/*.pen <designPath>/D
    - Color palette: <from Phase 6 report>
    - Typography: <from Phase 6 report>
    - Layout approach: <from Phase 6 report>
+
+   ### Screen nodes
+   - `<screen-name>` — `<node-id>`
+   - `<screen-name>` — `<node-id>`
 
    <!-- cenci-design-summary -->
    ```
