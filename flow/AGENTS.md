@@ -11,6 +11,9 @@ GitHub Issues for tracking. GitHub for code and PRs.
 - Multi-phase pipeline safety: a mandatory-restart rule must document recovery/idempotency for every downstream step, and any safety rule reused on a new automated path must be re-evaluated for its new risk profile. See `docs/pipeline-safety.md`.
 - Read `docs/shell-scripting-gotchas.md` before writing verification-critical shell commands, jq fallback chains, or grep-based contract tests.
 - Every flow-posted comment opens with a blockquoted cenci attribution banner; every flow-posted **issue** comment also carries a distinct `<!-- cenci-<kind> -->` marker on its own non-blockquoted line. See `docs/comment-attribution.md`.
+- When adding a new instruction touching an existing security/restrictive rule, state precedence for any conflict (e.g., "post verbatim" vs. "never quote sensitive material") and audit every field on that posting path for the same scope — do not restrict only the field the ticket names. (#979)
+- When a procedural doc restates a rule at multiple sites (established pattern, e.g., four restatement points) and you refine the rule, update all sites — not just the one you're currently editing. (#979)
+- When adding a safety-critical rule that competes with capacity limits (e.g., a "confirm/overrule" question within a 6-question cap), explicitly define anti-starvation logic or priority — never allow such a feature to be silently squeezed out when the cap is exhausted. (#979)
 
 ## Build & Test
 

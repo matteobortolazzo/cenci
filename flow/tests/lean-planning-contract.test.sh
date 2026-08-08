@@ -10,6 +10,16 @@
 # exceptions" wording at the hard-stop rule
 # (skills/implement/SKILL.md).
 #
+# Also tests ticket #979 (2/2, sibling of #978): extends `agents/planner.md`
+# to full parity with the refiner's already-landed (commit `dab2aa47`)
+# recommendation/entailment question policy, and wires the matching relay
+# into `skills/implement/phases/phase-1-plan.md`. Several markers in the
+# `#979` block below are asserted against BOTH `PLANNER_AGENT` and
+# `REFINER_AGENT` — this is AC4's cross-file consistency proof: the planner
+# reuses the refiner's shipped sentences verbatim (agent noun swapped)
+# rather than paraphrasing them, so the identical literal string must exist
+# in both files once the planner is edited.
+#
 # Follows the fixture-free, grep-based idiom of
 # flow/tests/refine-automerge-grant.test.sh: `set -uo pipefail`, a `failures`
 # counter, `assert_file_contains`/`assert_file_lacks` helpers built on
@@ -52,19 +62,26 @@
 #
 # Covered files:
 #   - flow/agents/planner.md (## Self-Answer Policy, escalation classes,
-#     ## Auto-Adopted Answers)
+#     ## Auto-Adopted Answers, and — #979 — the ## Clarifying Questions
+#     recommendation/entailment policy)
 #   - flow/skills/implement/phases/phase-1-plan.md (planning.autonomy
 #     delegation line, ## Lean Approval Path, restated error handling,
-#     ## Q&A from Planning template, negative regression guards)
+#     ## Q&A from Planning template, negative regression guards, and —
+#     #979 — the (Recommended)-first interactive relay and the
+#     ## Unattended Escalation Path option/recommendation clause)
 #   - flow/skills/implement/phases/phase-2-worktree.md (Gate Check third
 #     entrance)
 #   - flow/skills/configure/SKILL.md (document-only planning schema block)
 #   - flow/skills/implement/SKILL.md (both checkpoint-free exceptions named)
+#   - flow/agents/refiner.md — #979 only, read-only consistency reference:
+#     several markers below assert the identical literal string against
+#     both agents/planner.md and this file (AC4).
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || { echo "lean-planning-contract.test.sh: failed to resolve script directory." >&2; exit 2; }
 FLOW_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)" || { echo "lean-planning-contract.test.sh: failed to resolve flow directory." >&2; exit 2; }
 PLANNER_AGENT="${FLOW_DIR}/agents/planner.md"
+REFINER_AGENT="${FLOW_DIR}/agents/refiner.md"
 PHASE1_PLAN="${FLOW_DIR}/skills/implement/phases/phase-1-plan.md"
 PHASE2_WORKTREE="${FLOW_DIR}/skills/implement/phases/phase-2-worktree.md"
 CONFIGURE_SKILL="${FLOW_DIR}/skills/configure/SKILL.md"
@@ -264,6 +281,170 @@ HARD_STOP_BOTH_EXCEPTIONS_MARKER='the **Trivial Fast Path** and the **Lean Appro
 
 assert_file_contains "${IMPLEMENT_SKILL}" "${HARD_STOP_BOTH_EXCEPTIONS_MARKER}" \
   "hard-stop-after-planning rule must name both checkpoint-free exceptions"
+
+# =====================================================================
+# #979 — extend the recommendation and entailment policy to the planner
+# (2/2). agents/planner.md's ## Clarifying Questions gains options
+# permitted with a recommended-first option plus a one-line rationale,
+# propose-first for option-less questions, and an entailment ban binding
+# in BOTH modes with `follows from Q<n>` disposition into
+# ## Auto-Adopted Answers. skills/implement/phases/phase-1-plan.md gets
+# the matching relay: (Recommended)-first interactive mapping, a
+# both-modes ## Auto-Adopted Answers parse, and verbatim option/
+# recommendation rendering in the lean escalation comment.
+#
+# AC4 cross-file consistency: markers shared with agents/refiner.md
+# (already shipped, commit dab2aa47) are asserted against BOTH
+# PLANNER_AGENT and REFINER_AGENT below — REFINER_AGENT's half of each
+# pair passes today (unchanged); PLANNER_AGENT's half is the RED half
+# until planner.md is edited.
+# =====================================================================
+
+# --- AC1 (format), shared with refiner.md --------------------------------
+
+RECOMMENDED_FIRST_MUST_MARKER='Every question that carries options MUST mark exactly one option as recommended, list it first, and attach a one-line rationale grounded in cited codebase evidence or a prior recorded answer.'
+OPTION_FORMAT_BLOCK_MARKER='- <recommended option label> (recommended: <one-line rationale>) — <implication>'
+PROPOSE_FIRST_MARKER='proposed answer, never a bare prompt.'
+
+assert_file_contains "${PLANNER_AGENT}" "${RECOMMENDED_FIRST_MUST_MARKER}" \
+  "## Clarifying Questions must require exactly one recommended option, listed first, with a one-line rationale (AC1)"
+assert_file_contains "${REFINER_AGENT}" "${RECOMMENDED_FIRST_MUST_MARKER}" \
+  "refiner.md must still carry the recommended-first MUST sentence verbatim (AC4 consistency reference)"
+assert_file_contains "${PLANNER_AGENT}" "${OPTION_FORMAT_BLOCK_MARKER}" \
+  "## Clarifying Questions must use the exact recommended-option format block (AC1)"
+assert_file_contains "${REFINER_AGENT}" "${OPTION_FORMAT_BLOCK_MARKER}" \
+  "refiner.md must still carry the option format block verbatim (AC4 consistency reference)"
+assert_file_contains "${PLANNER_AGENT}" "${PROPOSE_FIRST_MARKER}" \
+  "an option-less question must lead with the planner's proposed answer, never a bare prompt (AC1)"
+assert_file_contains "${REFINER_AGENT}" "${PROPOSE_FIRST_MARKER}" \
+  "refiner.md must still carry the propose-first sentence verbatim (AC4 consistency reference)"
+
+# --- AC1 (format), planner-specific ---------------------------------------
+
+RATIONALE_SECURITY_MARKER='cite repo-relative paths or identifiers only — never file contents, configuration values, or command output'
+
+assert_file_contains "${PLANNER_AGENT}" "${RATIONALE_SECURITY_MARKER}" \
+  "recommendation rationales must be scoped to repo-relative paths/identifiers only, never file contents/config values/command output (AC1) — a lean escalation posts questions verbatim to a possibly-public ticket"
+
+# --- AC3 (entailment), shared with refiner.md -----------------------------
+
+ENTAILMENT_ANSWER_ALREADY_FIXED_MARKER='a question whose answer is already fixed by a previously recorded answer'
+CONFIRM_OVERRULE_MARKER='ask a confirm/overrule question that states the entailed decision and its derivation — but never one that re-opens the full option space.'
+
+assert_file_contains "${PLANNER_AGENT}" "${ENTAILMENT_ANSWER_ALREADY_FIXED_MARKER}" \
+  "must forbid a question whose answer is already fixed by a previously recorded answer (AC3)"
+assert_file_contains "${REFINER_AGENT}" "${ENTAILMENT_ANSWER_ALREADY_FIXED_MARKER}" \
+  "refiner.md must still carry the entailment-ban sentence verbatim (AC4 consistency reference)"
+assert_file_contains "${PLANNER_AGENT}" "${CONFIRM_OVERRULE_MARKER}" \
+  "must require a confirm/overrule question, never one that re-opens the full option space, on a security-sensitive/irreversible entailed decision (AC3)"
+assert_file_contains "${REFINER_AGENT}" "${CONFIRM_OVERRULE_MARKER}" \
+  "refiner.md must still carry the confirm/overrule sentence verbatim (AC4 consistency reference)"
+
+# --- AC3 (entailment), planner-specific ------------------------------------
+
+BOTH_MODES_ENTAILMENT_MARKER='The entailment ban above applies in **both** interactive and lean mode.'
+FOLLOWS_FROM_QN_MARKER='Auto-adopt an entailed decision into `## Auto-Adopted Answers` with a `follows from Q<n>` citation.'
+NOT_SIXTH_CLASS_TIE_IN_MARKER='coincides with the existing **security-sensitive** and **destructive or irreversible** escalation classes above, not a sixth class'
+ENTAILMENT_SOURCE_MARKER='entailment sources include the refined ticket'"'"'s persisted `### Decisions` and `### Assumptions (auto-adopted)`'
+TRAILING_CLAUSE_CARVEOUT_MARKER='except entailment-derived entries, which `## Clarifying Questions` below permits in both modes'
+
+assert_file_contains "${PLANNER_AGENT}" "${BOTH_MODES_ENTAILMENT_MARKER}" \
+  "the entailment ban must state it applies in both interactive and lean mode (AC3)"
+assert_file_contains "${PLANNER_AGENT}" "${FOLLOWS_FROM_QN_MARKER}" \
+  "an entailed decision's resolution must disposition into ## Auto-Adopted Answers with a follows from Q<n> citation (AC3)"
+assert_file_contains "${PLANNER_AGENT}" "${NOT_SIXTH_CLASS_TIE_IN_MARKER}" \
+  "the confirm/overrule requirement must tie into the existing security-sensitive/destructive-or-irreversible classes, not a sixth class (AC3)"
+assert_file_contains "${PLANNER_AGENT}" "${ENTAILMENT_SOURCE_MARKER}" \
+  "entailment sources must include the refined ticket's persisted ### Decisions and ### Assumptions (auto-adopted) (AC3)"
+assert_file_contains "${PLANNER_AGENT}" "${TRAILING_CLAUSE_CARVEOUT_MARKER}" \
+  "planner.md:51's trailing clause must gain the interactive-mode entailment carve-out, with LEAN_GATE_MARKER's first sentence staying byte-identical (AC3)"
+
+# --- AC2 (relay) in phase-1-plan.md ----------------------------------------
+
+RECOMMENDED_FIRST_MAPPING_MARKER='map it onto the first `AskUserQuestion` option, appending `(Recommended)` to that option label, and carry the rationale into its description'
+RECOMMENDED_FIRST_ADVISORY_MARKER='advisory only, never a re-invocation of the planner'
+BOTH_MODES_AUTOADOPTED_PARSE_MARKER='Parse `## Clarifying Questions` and `## Auto-Adopted Answers` in **both** modes'
+ESCALATION_STEP2_OPTION_BULLETS_MARKER='the option bullets and marked recommendation for each question are included verbatim'
+RATIONALE_SCOPE_MARKER='Recommendation rationales are held to the same scope: repo-relative paths or identifiers only, never pasted file contents, configuration values, or command output.'
+
+assert_file_contains "${PHASE1_PLAN}" "${RECOMMENDED_FIRST_MAPPING_MARKER}" \
+  "the interactive relay bullet (:446) must map a marked recommendation onto the first AskUserQuestion option with the (Recommended) suffix (AC2)"
+assert_file_contains "${PHASE1_PLAN}" "${RECOMMENDED_FIRST_ADVISORY_MARKER}" \
+  "the (Recommended)-first mapping must be advisory only, never a re-invocation of the planner (AC2)"
+assert_file_contains "${PHASE1_PLAN}" "${BOTH_MODES_AUTOADOPTED_PARSE_MARKER}" \
+  "the :444 parse must generalize from lean-only to both modes (AC2, AC3)"
+assert_file_contains "${PHASE1_PLAN}" "${ESCALATION_STEP2_OPTION_BULLETS_MARKER}" \
+  "## Unattended Escalation Path step 2 (:189) must state that each question's option bullets and recommendation post verbatim (AC2)"
+assert_file_contains "${PHASE1_PLAN}" "${RATIONALE_SCOPE_MARKER}" \
+  "## Unattended Escalation Path's secrecy paragraph (:191) must append a sentence scoping recommendation rationales to repo-relative paths/identifiers (AC2)"
+
+# --- AC2 negative: the retired byte-unchanged phrasing at :446 must be
+#     gone once phase-1-plan.md is edited (currently present, so this
+#     assertion correctly FAILS in the red phase) -----------------------
+
+RETIRED_BYTE_UNCHANGED_MARKER='**interactive mode** — byte-unchanged —'
+
+assert_file_lacks "${PHASE1_PLAN}" "${RETIRED_BYTE_UNCHANGED_MARKER}" \
+  "the :446 interactive relay bullet must no longer be marked byte-unchanged once it carries the (Recommended)-first mapping (AC2)"
+
+# --- Regression: #823's markers must remain untouched by the #979 edit ---
+
+assert_file_contains "${PLANNER_AGENT}" "${LEAN_GATE_MARKER}" \
+  "#979 regression: ## Self-Answer Policy's lean-gate sentence must stay byte-identical"
+assert_file_contains "${PLANNER_AGENT}" "${AUTOADOPTED_FORMAT_MARKER}" \
+  "#979 regression: the auto-adopted: <answer> — <rationale> format string must be unchanged"
+assert_file_contains "${PLANNER_AGENT}" "${AUTOADOPTED_HEADING_MARKER}" \
+  "#979 regression: the ## Auto-Adopted Answers heading must be unchanged"
+assert_file_contains "${PLANNER_AGENT}" "${ESCALATION_SECURITY_MARKER}" \
+  "#979 regression: the security-sensitive escalation class must be unchanged"
+assert_file_contains "${PLANNER_AGENT}" "${ESCALATION_DESTRUCTIVE_MARKER}" \
+  "#979 regression: the destructive-or-irreversible escalation class must be unchanged"
+assert_file_contains "${PLANNER_AGENT}" "${ESCALATION_CONTRADICTS_MARKER}" \
+  "#979 regression: the contradicts-the-refined-ticket escalation class must be unchanged"
+assert_file_contains "${PLANNER_AGENT}" "${ESCALATION_AMBIGUITY_MARKER}" \
+  "#979 regression: the genuine-product-ambiguity escalation class must be unchanged"
+assert_file_contains "${PLANNER_AGENT}" "${ESCALATION_SCOPE_MARKER}" \
+  "#979 regression: the scope-blowup escalation class must be unchanged"
+
+# =====================================================================
+# #979 review fixes (Phase 6+7: security-reviewer 3 Low, silent-failure-
+# hunter 1 Warning). All four are prose-only additions to files already
+# edited by the #979 block above.
+# =====================================================================
+
+# --- Fix 1 (security, Low): secrecy takes precedence over the "post
+#     verbatim" requirement at ## Unattended Escalation Path step 2 -----
+
+SECRECY_PRECEDENCE_MARKER='This secrecy rule takes precedence over the verbatim-posting requirement above: if a recommendation rationale would contain file contents, configuration values, credentials, tokens, secrets, or raw command output, drop that rationale — keeping the option label and the recommendation marker — rather than posting it verbatim.'
+
+assert_file_contains "${PHASE1_PLAN}" "${SECRECY_PRECEDENCE_MARKER}" \
+  "## Unattended Escalation Path step 2's secrecy paragraph (:191) must state that secrecy takes precedence over verbatim posting, dropping a sensitive rationale rather than posting it (Fix 1)"
+
+# --- Fix 2 (security, Low): broaden planner.md's rationale-scoping
+#     sentence to also cover an option's <implication> text and the
+#     propose-first proposed answer text ----------------------------------
+
+RATIONALE_SCOPE_BROADENED_MARKER='This same repo-relative-paths-only restriction binds an option'"'"'s `<implication>` text and the propose-first proposed answer text too — both are posted verbatim under the same escalation path and are equally capable of embedding sensitive material.'
+
+assert_file_contains "${PLANNER_AGENT}" "${RATIONALE_SCOPE_BROADENED_MARKER}" \
+  "the rationale-citation security sentence must also scope an option's <implication> text and the propose-first proposed answer text to repo-relative paths/identifiers only (Fix 2)"
+
+# --- Fix 3 (security, Low): restate the rationale-scoping sentence at
+#     the other three secrecy-paragraph restatement sites — case (ii),
+#     case (iii), and ## Resume From Draft step 3's write-questions
+#     sub-step — so all 4 occurrences of the secrecy paragraph carry it,
+#     not just the one at :191 fixed as part of the original #979 AC2 ---
+
+RATIONALE_SCOPE_OCCURRENCE_COUNT="$(grep -cF -- "${RATIONALE_SCOPE_MARKER}" "${PHASE1_PLAN}")"
+[[ "${RATIONALE_SCOPE_OCCURRENCE_COUNT}" -eq 4 ]] || fail "phase-1-plan.md rationale-scoping sentence (Fix 3) must appear at exactly 4 secrecy-paragraph sites (:191, case (ii), case (iii), ## Resume From Draft step 3) — found ${RATIONALE_SCOPE_OCCURRENCE_COUNT}"
+
+# --- Fix 4 (silent-failure, Warning): anti-starvation priority rule for
+#     the confirm/overrule question against the 6-question cap -----------
+
+CONFIRM_OVERRULE_PRIORITY_MARKER='When the cap would otherwise already be exhausted by other escalation-class questions, the confirm/overrule question always takes priority over a lower-priority escalation-class question — it must always be asked, even if that means displacing a less important question from this session'"'"'s question set, never silently dropped for lack of budget.'
+
+assert_file_contains "${PLANNER_AGENT}" "${CONFIRM_OVERRULE_PRIORITY_MARKER}" \
+  "the confirm/overrule question must always take priority over a lower-priority escalation-class question when the 6-question cap would otherwise be exhausted, never silently dropped (Fix 4)"
 
 echo "lean-planning-contract.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]
