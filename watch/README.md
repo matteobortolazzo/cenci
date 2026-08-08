@@ -195,6 +195,7 @@ descriptive slug: `--slug` if given, else the whole description slugified.
 | `--sandbox` / `--no-sandbox` | Sandbox is the default (`claude`→`cenci open`, the container being the mandatory runtime); `--no-sandbox` is the host opt-out. Both override the config default. Exception: `design` is host-only (the Pencil desktop app it drives is unreachable inside the sandbox) — passing `--sandbox` for it is a usage error, exit 2 |
 | `--model <model>` | Model override passed to the agent (substituted into `{model}`, else appended as `--model`) |
 | `--session <name>` | Target tmux session (default: the current session) |
+| `--dir <path>` | Working directory the window starts in (default: current); prepended as a `cd '<dir>' &&` prefix on the launched command, visible in `--dry-run` output too |
 | `--slug <slug>` | Window-name slug for free-text runs; ignored for numeric tickets (named `<number>-<skill>`) |
 | `--config <path>` | Config file (default: `$XDG_CONFIG_HOME/cenci/config.json`) |
 | `--dry-run` | Print the resolved session, window name, and command without spawning |
@@ -1217,6 +1218,21 @@ cleanup: 'cenci close {number}'
 
 The same `cenci babysit` supervisor that watches CI and review feedback can also
 merge a PR itself, once every one of these holds on a given tick:
+
+Arming (`cenci babysit <pr> --agent <agent>`, run from a host tmux pane)
+resolves the tmux session and start directory it will target — the current
+tmux session (`$TMUX_PANE`) and `git rev-parse --show-toplevel`, or the
+explicit `--session`/`--dir` flags when passed — and persists both into the
+state file *before* the first poll. Every later `ci-repair`/`babysit-attention`/
+`address-review` launch targets that recorded session explicitly, rather than
+whatever tmux pane happens to be live by the time a much-later tick actually
+fires; if the recorded session is gone, the launch fails loudly (retried next
+tick) instead of silently falling back to another session or creating one.
+Arming outside tmux still succeeds — it prints a warning that no repair
+window can be opened and records an empty session. The detached supervisor's
+stdout/stderr are written to a `0600` append-mode log file under the state
+directory (one per repo/PR, printed on arming), so a failed repair launch is
+readable there instead of being silently discarded.
 
 - The fleet-wide kill switch `automerge.enabled` is `true` in
   `~/.config/cenci/config.json` (default `false` — off everywhere until set).

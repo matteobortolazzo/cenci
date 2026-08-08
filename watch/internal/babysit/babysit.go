@@ -30,6 +30,16 @@ type Options struct {
 	PR, Agent, StateDir string
 	Interval            time.Duration
 	Once                bool
+	// Session, when set, is the tmux session babysit's launch() calls
+	// target explicitly (#975) -- flag precedence over the arm-time local
+	// tmux resolution, mirroring run.Opts.Session's own "flag > current
+	// tmux session" precedence. The arming parent threads this onto the
+	// detached supervisor child's argv (`cenci babysit ... --session
+	// <name>`); the daemon-spawned path (#977) will set it directly.
+	Session string
+	// Dir, when set, is the working directory babysit's launch() calls
+	// start their windows in (#975), mirroring run.Opts.Dir.
+	Dir string
 }
 type State struct {
 	SchemaVersion       int      `json:"schemaVersion"`
@@ -73,6 +83,18 @@ type State struct {
 	// network-free `git rev-parse` rather than repository()'s `gh` call,
 	// because the close path must make no network calls (#787).
 	RepoRoot string `json:"repoRoot,omitempty"`
+	// LaunchSession is the tmux session every launch() call targets,
+	// resolved once at arm time (#975) rather than inherited from whatever
+	// $TMUX_PANE happens to be live when a much-later tick actually
+	// launches a repair/attention/address-review workflow -- the arming
+	// pane can be long gone by then. Additive; re-resolved on every arm, no
+	// stateSchemaVersion bump needed (contrast #885's LaunchedKeys
+	// migration).
+	LaunchSession string `json:"launchSession,omitempty"`
+	// LaunchDir is the working directory every launch() call's spawned
+	// window starts in, resolved alongside LaunchSession at arm time
+	// (#975).
+	LaunchDir string `json:"launchDir,omitempty"`
 	// ClosingIssues are the issue numbers the supervised PR closes — the
 	// ticket half of BlocksClose's join key (#787).
 	ClosingIssues []int `json:"closingIssues,omitempty"`
@@ -151,6 +173,86 @@ var errNeedsInput = errors.New("human input required")
 
 var command = func(name string, args ...string) ([]byte, error) { return exec.Command(name, args...).CombinedOutput() }
 
+// startSupervisor is a test seam over the detached supervisor child's
+// process start (#975), mirroring the package's existing command/
+// processOwned seam shape (a var pointing at a default func, restorable via
+// t.Cleanup).
+var startSupervisor = defaultStartSupervisor
+
+func defaultStartSupervisor(cmd *exec.Cmd) error {
+	return cmd.Start()
+}
+
+// resolveLaunchTarget resolves the tmux session and start directory every
+// launch() call will target, at arm time (#975): an explicit Options field
+// wins over ambient resolution, mirroring run.Opts's own "flag > current
+// tmux session" precedence -- so a detached child or a `--once` invocation
+// that already carries --session/--dir never re-resolves. Dir falls back
+// from an explicit flag to `git rev-parse --show-toplevel` to os.Getwd(),
+// computed independently of (and stored separately from) RepoRoot. When no
+// session can be resolved at all (armed outside tmux), arming must still
+// succeed -- this only warns to stderr and returns an empty session, which
+// launch() later gates on (AC 6).
+func resolveLaunchTarget(o Options) (session, dir string) {
+	session = strings.TrimSpace(o.Session)
+	if session == "" {
+		if s, err := currentTmuxSession(); err == nil {
+			session = s
+		} else {
+			fmt.Fprintf(os.Stderr, "cenci babysit: %v -- no repair window can be opened until you re-arm from inside a tmux pane\n", err)
+		}
+	}
+	dir = strings.TrimSpace(o.Dir)
+	if dir == "" {
+		dir = gitToplevel()
+		if dir == "" {
+			if wd, err := os.Getwd(); err == nil {
+				dir = wd
+			}
+		}
+	}
+	return session, dir
+}
+
+// gitToplevel runs `git rev-parse --show-toplevel` via the package's command
+// seam, returning "" on any failure -- the shared implementation behind both
+// localRepoRoot and resolveLaunchTarget's dir fallback, which both need the
+// checkout root and both already tolerate a "" result (localRepoRoot's own
+// documented fail-open contract, and resolveLaunchTarget's further
+// os.Getwd() fallback).
+func gitToplevel() string {
+	out, err := command("git", "rev-parse", "--show-toplevel")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// logPath is the detached supervisor's per-repo/PR stdout/stderr log path
+// (#975), sharing statePath's hash-prefix convention: one per repo/PR,
+// keeping the repo name off disk, and staying outside BlocksClose's *.json
+// glob (auto-adopted answer #6).
+func logPath(dir, repo, pr string) string {
+	sum := sha256.Sum256([]byte(repo))
+	return filepath.Join(dir, hex.EncodeToString(sum[:6])+"-"+pr+".log")
+}
+
+// openSupervisorLog opens (creating if needed) the detached supervisor's
+// append-mode, 0600 log file. O_CREATE's mode argument only applies at
+// creation, so an explicit Chmod normalizes a pre-existing looser-permission
+// file to 0600 too (AC 5).
+func openSupervisorLog(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		return nil, err
+	}
+	if err := f.Chmod(0600); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
 func Run(o Options) error {
 	if o.Interval < time.Minute {
 		o.Interval = time.Minute
@@ -178,16 +280,34 @@ func Run(o Options) error {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			return err
 		}
-		cmd := exec.Command(os.Args[0], "babysit", o.PR, "--agent", o.Agent, "--interval", o.Interval.String(), "--state-dir", dir)
+		if err := os.Chmod(dir, 0700); err != nil {
+			return err
+		}
+		session, launchDir := resolveLaunchTarget(o)
+		lp := logPath(dir, repo, o.PR)
+		logFile, err := openSupervisorLog(lp)
+		if err != nil {
+			return fmt.Errorf("open supervisor log %s: %w", lp, err)
+		}
+		cmd := exec.Command(os.Args[0], "babysit", o.PR, "--agent", o.Agent, "--interval", o.Interval.String(), "--state-dir", dir, "--session", session, "--dir", launchDir)
 		cmd.Env = append(os.Environ(), "CENCI_BABYSIT_SUPERVISOR=1")
 		cmd.Stdin = nil
-		cmd.Stdout = nil
-		cmd.Stderr = nil
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-		if err := cmd.Start(); err != nil {
+		if err := startSupervisor(cmd); err != nil {
+			_ = logFile.Close()
 			return fmt.Errorf("start supervisor: %w", err)
 		}
-		fmt.Printf("Babysitting PR #%s in the background (pid %d).\n", o.PR, cmd.Process.Pid)
+		// The parent's own fd is no longer needed once the child inherits it
+		// across Start(); the child keeps writing to the same underlying file
+		// via its own inherited descriptor.
+		_ = logFile.Close()
+		pid := 0
+		if cmd.Process != nil {
+			pid = cmd.Process.Pid
+		}
+		fmt.Printf("Babysitting PR #%s in the background (pid %d). Supervisor log: %s\n", o.PR, pid, lp)
 		return nil
 	}
 	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
@@ -217,6 +337,7 @@ func Run(o Options) error {
 	s.PID = os.Getpid()
 	s.Status = "running"
 	s.RepoRoot = localRepoRoot()
+	s.LaunchSession, s.LaunchDir = resolveLaunchTarget(o)
 	// Persist once *before* the first poll: `cenci close` reads this file to
 	// decide whether a supervisor still owns the ticket, and without an eager
 	// save there is an arm-to-first-poll window (a full interval wide) in
@@ -398,8 +519,33 @@ func tick(s *State) (bool, time.Duration, error) {
 	return false, time.Duration(s.CurrentDelaySeconds) * time.Second, nil
 }
 
+// launch dispatches workflow via a self-exec of `cenci run`, targeting the
+// tmux session recorded at arm time (#975) rather than inheriting whatever
+// $TMUX_PANE/cwd happen to be live when this tick's launch actually fires --
+// the arming pane can be long gone by then. An empty recorded session (armed
+// outside tmux) fails immediately with no probe and no `cenci run` call; a
+// recorded session that no longer exists fails with an error naming it,
+// again issuing zero `cenci run` calls -- never falling back to another
+// session, never creating one (ticket Decision). The probe-error and
+// session-absent branches are kept as separate returns
+// (watch/docs/error-handling.md's rule against collapsing "probe errored"
+// into "condition false").
 func launch(s *State, workflow, arg string) error {
-	out, err := command(os.Args[0], "run", workflow, arg, "--agent", s.Agent)
+	if s.LaunchSession == "" {
+		return fmt.Errorf("launch %s: no tmux session was recorded at arm time; re-arm from a host tmux pane", workflow)
+	}
+	exists, err := tmuxHasSession(s.LaunchSession)
+	if err != nil {
+		return fmt.Errorf("launch %s: checking tmux session %q: %w", workflow, s.LaunchSession, err)
+	}
+	if !exists {
+		return fmt.Errorf("launch %s: recorded tmux session %q no longer exists", workflow, s.LaunchSession)
+	}
+	args := []string{"run", workflow, arg, "--agent", s.Agent, "--session", s.LaunchSession}
+	if s.LaunchDir != "" {
+		args = append(args, "--dir", s.LaunchDir)
+	}
+	out, err := command(os.Args[0], args...)
 	if err != nil {
 		return fmt.Errorf("launch %s: %s: %w", workflow, strings.TrimSpace(string(out)), err)
 	}
@@ -606,11 +752,7 @@ func procfsReadable() bool {
 // network. "" when it cannot be resolved, which makes the guard's repo
 // comparison fail open rather than block on an unknown repo (#787).
 func localRepoRoot() string {
-	out, err := command("git", "rev-parse", "--show-toplevel")
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
+	return gitToplevel()
 }
 
 // ciStatus collapses a PR's check buckets into the guard's verdict: any

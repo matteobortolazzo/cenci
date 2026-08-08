@@ -18,6 +18,7 @@ func runRun(args []string) {
 	noSandbox := fs.Bool("no-sandbox", false, "force a host launch (overrides the sandbox default)")
 	model := fs.String("model", "", "model override passed to the agent")
 	session := fs.String("session", "", "target tmux session (default: current session)")
+	dir := fs.String("dir", "", "working directory the window starts in (default: current)")
 	slug := fs.String("slug", "", "window-name slug for free-text runs (ignored for numeric tickets, which are named <number>-<skill>)")
 	configPath := fs.String("config", "", "path to config.json (default: $XDG_CONFIG_HOME/cenci/config.json)")
 	dryRun := fs.Bool("dry-run", false, "print the resolved session, window name, and command without spawning")
@@ -44,6 +45,7 @@ func runRun(args []string) {
 		Agent:      *agent,
 		Model:      *model,
 		Session:    *session,
+		Dir:        *dir,
 		Slug:       *slug,
 		ConfigPath: *configPath,
 		DryRun:     *dryRun,

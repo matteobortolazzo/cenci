@@ -148,6 +148,30 @@ func TestRunImplementSandboxDryRunStillResolvesSandbox(t *testing.T) {
 	}
 }
 
+// TestRunDirDryRunShowsResolvedDirectory is ticket #975's AC 1: `cenci run
+// --dir <path>` must be accepted, and --dry-run must show the resolved
+// directory via the existing `command:` line's `cd '<dir>' && ` prefix (no
+// new `dir:` output line — auto-adopted answer #1: the prefix already
+// carries the resolved directory verbatim and shell-quoted). The path
+// contains a space so shellQuote's own contract (single-quote only when a
+// word isn't already shell-safe, matching internal/run's shellQuote/isShellSafe
+// and TestRunPrependsDir's identical path choice) is what triggers quoting
+// here, rather than hard-coding quotes production wouldn't actually emit for
+// an all-safe-character path.
+func TestRunDirDryRunShowsResolvedDirectory(t *testing.T) {
+	noCfg := filepath.Join(t.TempDir(), "none.json")
+	cmd := exec.Command(binaryPath, "run", "implement", "40",
+		"--slug", "cenci-run", "--session", "demo", "--config", noCfg, "--dir", "/repo/my project", "--dry-run")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("--dir dry-run failed: %v\n%s", err, output)
+	}
+	s := string(output)
+	if !strings.Contains(s, "cd '/repo/my project' && ") {
+		t.Errorf("expected the command: line's cd prefix to carry the resolved directory, got:\n%s", s)
+	}
+}
+
 func TestRunCodexUsesBuiltinWorkflowTemplate(t *testing.T) {
 	noCfg := filepath.Join(t.TempDir(), "none.json")
 	cmd := exec.Command(binaryPath, "run", "implement", "40",
