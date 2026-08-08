@@ -86,6 +86,48 @@ if [[ -n "${refiner}" ]]; then
   assert_contains "${refiner}" "at most 4 questions per round" "agents/refiner.md"
 fi
 
+# --- #978 — require a recommended option and ban entailed questions ---
+#
+# Why this exists: the refiner's question format let every option stand
+# unranked and every open-ended question land as a bare prompt, so the user
+# had to supply the judgment call the refiner was better placed to make.
+# Separately, nothing stopped a question whose answer already followed from
+# an earlier recorded answer — re-opening a settled decision under a new
+# label. This pins both requirements down: a recommended-first option (or a
+# proposed answer for open-ended questions) on every question, and a new
+# "entailed" forbidden-question category that auto-adopts into
+# `### Decisions` with a `follows from Q<n> (round <m>)` citation, with a
+# required confirm/overrule question only when the entailed decision is
+# irreversible or fixes a security posture. None of these production edits
+# exist yet at RED-phase time — every assertion below is expected to fail
+# until Phase 4 lands agents/refiner.md.
+
+if [[ -n "${refiner}" ]]; then
+  # AC1: every question carrying options must mark exactly one option
+  # recommended, list it first, and attach a grounded one-line rationale —
+  # for all question kinds, not only frontend/design.
+  assert_contains "${refiner}" "Every question that carries options MUST mark exactly one option as recommended, list it first, and attach a one-line rationale grounded in cited codebase evidence or a prior recorded answer." "agents/refiner.md #978 recommended-option requirement"
+  assert_contains "${refiner}" "This applies to every question kind, not only frontend/design questions." "agents/refiner.md #978 applies to all question kinds"
+  assert_contains "${refiner}" "- <recommended option label> (recommended: <one-line rationale>) — <implication>" "agents/refiner.md #978 recommended-option format line"
+
+  # AC1 (retention): the frontend propose-first bullet at :98 survives as an
+  # instance of the general rule, not deleted.
+  assert_contains "${refiner}" "**For frontend tickets — propose design directions instead of asking open-ended questions.**" "agents/refiner.md #978 frontend propose-first bullet retained"
+
+  # AC2: option-less (open-ended) questions must lead with the refiner's
+  # proposed answer, not a bare prompt.
+  assert_contains "${refiner}" "Every open-ended question with no options MUST lead with the refiner's proposed answer, never a bare prompt." "agents/refiner.md #978 open-ended proposed-answer requirement"
+
+  # AC4: entailment joins the forbidden-question list; entailed decisions
+  # auto-adopt into `### Decisions` (never `### Assumptions (auto-adopted)`)
+  # with a follows-from citation, and a confirm/overrule question is
+  # required only when the entailed decision is irreversible or fixes a
+  # security posture, and forbidden from re-opening the full option space.
+  assert_contains "${refiner}" "**Forbidden as entailed** — a question whose answer is already fixed by a previously recorded answer; asking it again only re-opens an already-settled decision." "agents/refiner.md #978 entailment forbidden category"
+  assert_contains "${refiner}" "Auto-adopt an entailed decision into \`### Decisions\` with a \`follows from Q<n> (round <m>)\` citation — never into \`### Assumptions (auto-adopted)\`." "agents/refiner.md #978 entailed decision citation"
+  assert_contains "${refiner}" "When an entailed decision fixes a security posture or is otherwise irreversible, ask a confirm/overrule question that states the entailed decision and its derivation — but never one that re-opens the full option space." "agents/refiner.md #978 entailed confirm/overrule requirement"
+fi
+
 # --- skills/refine/SKILL.md — sonnet orchestrator, delegation, one-question relay ---
 
 require_doc skill "skills/refine/SKILL.md" || true

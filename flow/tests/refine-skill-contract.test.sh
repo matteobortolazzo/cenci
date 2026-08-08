@@ -314,6 +314,41 @@ if [[ -n "${codex}" ]]; then
   assert_not_contains "${codex}" "goes through the client's own web-fetch capability" "749 skills/refine/codex.md stale web-fetch clause"
 fi
 
+# =====================================================================
+# #978 -- require a recommended option and ban entailed questions in the
+# refiner (1/2). Step 6's option-relay rule maps a marked recommendation onto
+# the first `AskUserQuestion` option, appending the `(Recommended)` suffix to
+# that option's label and carrying the rationale into that option's
+# description; the rule is advisory -- a question with no marked
+# recommendation is relayed exactly as today and is never re-invoked.
+# `skills/refine/codex.md` restates both the recommendation requirement and
+# the new entailment forbidden-question category in behavioral parity, via
+# the abstract "client's available user-input mechanism" wording (Codex has
+# no `AskUserQuestion` tool). None of these production edits exist yet at
+# RED-phase time -- every assertion below is expected to fail until Phase 4
+# lands skills/refine/SKILL.md and skills/refine/codex.md.
+# =====================================================================
+
+if [[ -n "${skill}" ]]; then
+  # AC3: step 6's option-relay maps a marked recommendation onto the first
+  # `AskUserQuestion` option, with the `(Recommended)` suffix and the
+  # rationale carried into that option's description.
+  assert_contains "${skill}" "map it onto the first \`AskUserQuestion\` option, appending \`(Recommended)\` to that option's label and carrying the rationale into its description" "978 skills/refine/SKILL.md recommendation relay mapping"
+  # AC3: the rule is advisory -- a question with no marked recommendation is
+  # relayed exactly as today, never re-invoked.
+  assert_contains "${skill}" "advisory: a question with no marked recommendation is relayed exactly as today and never triggers a re-invocation of the refiner" "978 skills/refine/SKILL.md recommendation relay is advisory"
+fi
+
+# `codex` was already read above; reuse it.
+if [[ -n "${codex}" ]]; then
+  # AC5: codex.md restates the recommendation requirement in behavioral
+  # parity.
+  assert_contains "${codex}" "every question with options marks one recommended option first with a one-line rationale, and every open-ended question leads with the refiner's proposed answer" "978 skills/refine/codex.md recommendation requirement restated"
+  # AC5: codex.md restates the entailment category, using the abstract
+  # "client's available user-input mechanism" wording.
+  assert_contains "${codex}" "entailed questions — those already fixed by a recorded answer — are forbidden; auto-adopt them into \`### Decisions\` with a \`follows from Q<n> (round <m>)\` citation, and when the entailed decision fixes a security posture or is otherwise irreversible, ask via the client's available user-input mechanism a confirm/overrule question that states the decision and its derivation without re-opening the full option space" "978 skills/refine/codex.md entailment category restated"
+fi
+
 if [[ "${failures}" -gt 0 ]]; then
   echo "refine-skill-contract.test.sh: ${failures} failure(s)." >&2
   exit 1
