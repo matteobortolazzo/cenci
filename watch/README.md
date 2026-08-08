@@ -418,6 +418,35 @@ misconfigured repo rather than a fleet-wide failure. One-shot, dry-run, and
 reconcile invocations still exit nonzero on any pass error, including a session
 skip — so the misconfiguration is loud interactively.
 
+### Planning-pickup toggle (`cenci dispatch plan-refined on|off|status`)
+
+Toggles and reports the fleet-wide `dispatch.planRefined` switch (see
+[Planning pickup and autonomous re-plan](#planning-pickup-and-autonomous-re-plan))
+without hand-editing `config.json`, mirroring the loop toggle above:
+
+```bash
+cenci dispatch plan-refined on     [--config <path>] [--json]
+cenci dispatch plan-refined off    [--config <path>] [--json]
+cenci dispatch plan-refined status [--config <path>] [--dir <path>] [--json]
+```
+
+`on`/`off` persist the toggle with the same atomic, key-preserving write as
+`enroll` and `loop`, creating the config file (and parent directory) when none
+exists yet. All three verbs then print the resolved state; `--json` emits a
+single pinned object, e.g.
+`{"enabled":true,"config":"/abs/path","repo":"owner/name","repo_autonomy":"lean","authorized":true}`.
+
+Because the fleet flag alone never authorizes a planning pickup (#851/#877),
+`status` run inside a git repository (or with `--dir`) also reports that repo's
+half of the grant chain: `repo_autonomy` is the committed `planning.autonomy`
+verdict read at `refs/remotes/origin/main` **as of the last fetch** (the command
+never fetches; a dispatch pass always fetches first, so its live decision can be
+fresher), and `authorized` is the combined verdict — `true` only when the fleet
+flag is on **and** the remote-confirmed value is exactly `"lean"`. A directory
+that isn't a git repo omits the repo fields; a repo with no fetched
+`origin/main` ref reports `unreadable`, the same fail-closed verdict the
+dispatch gate itself uses.
+
 ### Pickup rules and gates
 
 A ticket is dispatched only when **all** of these hold, evaluated in order (the first
@@ -962,7 +991,7 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 | `quietHours` | none | Local-clock window to suppress dispatch; `startHour > endHour` wraps midnight, `start == end` disables |
 | `planStalenessTolerance` | `5` | Max commits a plan may fall behind before it is skipped as stale (see [Path-aware staleness](#path-aware-staleness) for scoping the count via `stalenessPaths`) |
 | `pipelineStageGate` | `true` | Skip tickets whose persisted `cenci pipeline` stage is `finalized` (see [Pickup rules and gates](#pickup-rules-and-gates)); set `false` to disable the gate entirely |
-| `planRefined` | `false` | Enable stage-aware planning pickup of `Refined` tickets and autonomous re-plan of stale plans, in lean-planning repos only (see [Planning pickup and autonomous re-plan](#planning-pickup-and-autonomous-re-plan)); the fleet-wide kill switch, gated per-repo against that repo's own remote-confirmed `planning.autonomy` config (#877) |
+| `planRefined` | `false` | Enable stage-aware planning pickup of `Refined` tickets and autonomous re-plan of stale plans, in lean-planning repos only (see [Planning pickup and autonomous re-plan](#planning-pickup-and-autonomous-re-plan)); the fleet-wide kill switch, gated per-repo against that repo's own remote-confirmed `planning.autonomy` config (#877); managed via `cenci dispatch plan-refined on\|off\|status` (see [Planning-pickup toggle](#planning-pickup-toggle-cenci-dispatch-plan-refined-onoffstatus)) |
 | `gracePeriod` | `5m` | How long the failure signal must hold continuously before the reconciler recovers a stranded ticket (Go duration string) |
 | `retryBudget` | `2` | Retries (`Working` → `Planned`) a stranded ticket gets before it is marked `dispatch-failed`; an explicit `0` disables retries |
 | `daemonInterval` | none | Dispatch cadence once the embedded loop is enabled (Go duration string); setting this alone does **not** start dispatch — see `loopEnabled`. Configuration is independently polled at least every 60 seconds; nonpositive values use a 60s internal fallback but are not reported as a configured interval |
@@ -1191,6 +1220,12 @@ merge a PR itself, once every one of these holds on a given tick:
 
 - The fleet-wide kill switch `automerge.enabled` is `true` in
   `~/.config/cenci/config.json` (default `false` — off everywhere until set).
+  Managed via `cenci automerge on|off|status` — the same atomic,
+  key-preserving config write as `cenci dispatch loop`, creating the file
+  when none exists. `status` (and every toggle) also prints an informational
+  per-scope summary of the current repo's `.cenci/config.json` policy blocks
+  (working tree; enforcement below always reads the PR's base branch), plus
+  `--json` for scripting.
 - Every issue the PR closes carries the `automerge:ok` label — a human grant made
   at refinement time, per-ticket, with no repo-level default.
 - CI is green, no CI repair is in flight, and no review feedback is pending —

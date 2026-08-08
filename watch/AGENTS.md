@@ -41,7 +41,8 @@ Project topic docs — read the one matching your work area:
   - `daemon_cmd.go` — `daemon start|stop|restart|status` + PID-file management
   - `notify_cmd.go` — `notify` (hook event ingestion)
   - `run_cmd.go` — `run` (dispatch a workflow into a new tmux window)
-  - `dispatch_cmd.go` — `dispatch` (enroll/unenroll/status/loop) + state rendering
+  - `dispatch_cmd.go` — `dispatch` (enroll/unenroll/status/loop/plan-refined) + state rendering
+  - `automerge_cmd.go` — `automerge on|off|status` (fleet-wide `automerge.enabled` toggle + informational repo policy summary)
   - `status_cmd.go` — human `status` + `widget-json` (hidden alias `waybar`) + render helpers
   - `close_cmd.go` — `close` + decision rendering
   - `sandbox_cmd.go` — `sandbox build|build-base|prune|update-agent|update-plugins|reseed-creds|reap-orphans|ls|stop`: flag parsing, usage errors (exit 2), and dispatch into `internal/sandbox` + `internal/sandbox/launcher`

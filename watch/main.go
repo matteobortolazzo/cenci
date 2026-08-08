@@ -64,6 +64,8 @@ Details: docs/migrating-to-cenci.md in the cenci repo.
 		runBabysit(os.Args[2:])
 	case "dispatch":
 		runDispatch(os.Args[2:])
+	case "automerge":
+		runAutomerge(os.Args[2:])
 	case "close":
 		runClose(os.Args[2:])
 	case "pipeline":
@@ -114,7 +116,8 @@ Commands:
   notify                             deliver a hook event to the daemon (used by installed hooks)
   run                                dispatch a workflow into a new tmux window
   babysit                            supervise an open PR until it merges or closes
-  dispatch                           fleet auto-dispatch (enroll/unenroll/status/loop)
+  dispatch                           fleet auto-dispatch (enroll/unenroll/status/loop/plan-refined)
+  automerge on|off|status            toggle or inspect the fleet-wide automerge kill switch (automerge.enabled)
   close                              close a finished/idle agent window
   pipeline                           drive the implement pipeline's stage state machine (prepare|plan|await-input|execute|review|finalize) plus mechanics verbs (label|worktree|worktree-cleanup|artifact|plan-check)
   sandbox                            manage the sandbox container (build|build-base|prune|update-agent|update-plugins|reseed-creds|reap-orphans|ls|stop)
