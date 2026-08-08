@@ -1135,7 +1135,18 @@ func TestTickAutomergeHeldOnRepairOrReviewPending(t *testing.T) {
 			script = append(script, tc.extraScript...)
 			script = append(script, scriptedCall{out: `{"labels":[{"name":"automerge:ok"}]}`})
 			withScriptedCommands(t, script, &calls)
-			s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60}
+			// #975: the "review feedback pending" subtest's unresolved
+			// comment:1 key is still un-launched, so tick's address-review
+			// launch trigger fires before runAutomerge ever runs -- a
+			// recorded session (and a stubbed tmuxHasSession, since
+			// withScriptedCommands doesn't default-stub it like withCommands
+			// does) is required for that launch to succeed and reach the
+			// reasonReviewPending assertion below, rather than short-
+			// circuiting into reasonWorkflowLaunchFailed.
+			originalTmuxHasSession := tmuxHasSession
+			tmuxHasSession = func(string) (bool, error) { return true, nil }
+			t.Cleanup(func() { tmuxHasSession = originalTmuxHasSession })
+			s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60, LaunchSession: "work"}
 			tc.setup(&s)
 			if _, _, err := tick(&s); err != nil {
 				t.Fatal(err)
@@ -1325,8 +1336,16 @@ func TestTickFeedbackHoldsAutomerge(t *testing.T) {
 			script = append(script, tc.extraScript...)
 			script = append(script, scriptedCall{out: `{"labels":[{"name":"automerge:ok"}]}`})
 			withScriptedCommands(t, script, &calls)
+			// #975: every subtest's pendingKeys entry is still un-launched
+			// (a fail-closed feedback hold never clears it), so tick's
+			// address-review launch trigger fires before the feedback-hold
+			// reason is even assigned -- see the identical note on
+			// TestTickAutomergeHeldOnRepairOrReviewPending above.
+			originalTmuxHasSession := tmuxHasSession
+			tmuxHasSession = func(string) (bool, error) { return true, nil }
+			t.Cleanup(func() { tmuxHasSession = originalTmuxHasSession })
 
-			s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60, PendingKeys: tc.pendingKeys}
+			s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60, PendingKeys: tc.pendingKeys, LaunchSession: "work"}
 			if _, _, err := tick(&s); err != nil {
 				t.Fatal(err)
 			}
@@ -1695,12 +1714,19 @@ func TestTickRecordsAutomergeHoldWhenAddressReviewLaunchFails(t *testing.T) {
 		calls = append(calls, append([]string{name}, args...))
 		return []byte("boom"), errors.New("exit status 1")
 	}
+	// #975: a recorded session (plus a stubbed tmuxHasSession) is required so
+	// this launch attempt reaches the command() self-exec below and fails
+	// for the intended reason, rather than short-circuiting on the new
+	// "no session recorded" gate before command() is ever called.
+	originalTmuxHasSession := tmuxHasSession
+	tmuxHasSession = func(string) (bool, error) { return true, nil }
 	t.Cleanup(func() {
 		command = originalCommand
 		execGh = originalExecGh
+		tmuxHasSession = originalTmuxHasSession
 	})
 
-	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900}
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900, LaunchSession: "work"}
 	if _, _, err := tick(&s); err == nil {
 		t.Fatal("tick: err = nil, want the address-review launch failure to still surface as a tick error")
 	}
@@ -1742,12 +1768,16 @@ func TestTickRecordsAutomergeHoldWhenCIRepairLaunchFails(t *testing.T) {
 		calls = append(calls, append([]string{name}, args...))
 		return []byte("boom"), errors.New("exit status 1")
 	}
+	// #975: see the identical note on TestTickRecordsAutomergeHoldWhenAddressReviewLaunchFails.
+	originalTmuxHasSession := tmuxHasSession
+	tmuxHasSession = func(string) (bool, error) { return true, nil }
 	t.Cleanup(func() {
 		command = originalCommand
 		execGh = originalExecGh
+		tmuxHasSession = originalTmuxHasSession
 	})
 
-	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900, FixAttempts: 0}
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900, FixAttempts: 0, LaunchSession: "work"}
 	if _, _, err := tick(&s); err == nil {
 		t.Fatal("tick: err = nil, want the ci-repair launch failure to still surface as a tick error")
 	}
@@ -1789,12 +1819,16 @@ func TestTickRecordsAutomergeHoldWhenBabysitAttentionLaunchFails(t *testing.T) {
 		calls = append(calls, append([]string{name}, args...))
 		return []byte("boom"), errors.New("exit status 1")
 	}
+	// #975: see the identical note on TestTickRecordsAutomergeHoldWhenAddressReviewLaunchFails.
+	originalTmuxHasSession := tmuxHasSession
+	tmuxHasSession = func(string) (bool, error) { return true, nil }
 	t.Cleanup(func() {
 		command = originalCommand
 		execGh = originalExecGh
+		tmuxHasSession = originalTmuxHasSession
 	})
 
-	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900, FixAttempts: fixCap}
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900, FixAttempts: fixCap, LaunchSession: "work"}
 	if _, _, err := tick(&s); err == nil {
 		t.Fatal("tick: err = nil, want the babysit-attention launch failure to still surface as a tick error")
 	}

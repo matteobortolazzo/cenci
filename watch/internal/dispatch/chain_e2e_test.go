@@ -711,10 +711,15 @@ func TestAutonomousChain_UnresolvedReviewStopsBeforeMerge(t *testing.T) {
 	h.seedChecks(103, ghCheck{Bucket: "pass", Name: "build", State: "SUCCESS"})
 	h.seedReview(103, "reviewer", "CHANGES_REQUESTED", "2026-01-01T00:00:00Z")
 
+	// The unresolved CHANGES_REQUESTED review is still un-launched, so
+	// tick's address-review launch trigger fires before automerge's own
+	// hold reason is even evaluated (#975 gates every launch() call on a
+	// recorded tmux session).
+	installFakeTmux(t)
 	restore := chainChdir(t, h.local)
 	defer restore()
 	stateDir := t.TempDir()
-	if err := babysit.Run(babysit.Options{PR: "103", Agent: "claude", StateDir: stateDir, Once: true}); err != nil {
+	if err := babysit.Run(babysit.Options{PR: "103", Agent: "claude", StateDir: stateDir, Once: true, Session: chainFakeTmuxSession}); err != nil {
 		t.Fatalf("babysit.Run returned unexpected error: %v", err)
 	}
 
@@ -1059,15 +1064,17 @@ func TestAutonomousChain_BabysitDecisionStateSurvivesReload(t *testing.T) {
 	h.seedChecks(103, ghCheck{Bucket: "pass", Name: "build", State: "SUCCESS"})
 	h.seedReview(103, "reviewer", "CHANGES_REQUESTED", "2026-01-01T00:00:00Z")
 
+	// See the identical note in TestAutonomousChain_UnresolvedReviewStopsBeforeMerge.
+	installFakeTmux(t)
 	restore := chainChdir(t, h.local)
 	defer restore()
 	stateDir := t.TempDir()
-	if err := babysit.Run(babysit.Options{PR: "103", Agent: "claude", StateDir: stateDir, Once: true}); err != nil {
+	if err := babysit.Run(babysit.Options{PR: "103", Agent: "claude", StateDir: stateDir, Once: true, Session: chainFakeTmuxSession}); err != nil {
 		t.Fatalf("first babysit.Run returned unexpected error: %v", err)
 	}
 	before := readBabysitState(t, stateDir)
 
-	if err := babysit.Run(babysit.Options{PR: "103", Agent: "claude", StateDir: stateDir, Once: true}); err != nil {
+	if err := babysit.Run(babysit.Options{PR: "103", Agent: "claude", StateDir: stateDir, Once: true, Session: chainFakeTmuxSession}); err != nil {
 		t.Fatalf("second babysit.Run returned unexpected error: %v", err)
 	}
 	after := readBabysitState(t, stateDir)

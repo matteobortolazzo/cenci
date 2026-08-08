@@ -621,6 +621,32 @@ func installChainGH(t *testing.T, worldPath, localDir, originDir, repo string) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
+// chainFakeTmuxSession is the fixed session name installFakeTmux's shim
+// reports as present -- callers pass this as babysit.Options.Session (#975)
+// so launch()'s recorded-session gate and tmuxHasSession probe both resolve
+// deterministically instead of depending on this process's real ambient
+// tmux/$TMUX_PANE state.
+const chainFakeTmuxSession = "chain-test-session"
+
+// installFakeTmux writes a `tmux` PATH shim that unconditionally reports
+// chainFakeTmuxSession as present (`has-session` exits 0) and, for
+// completeness, resolves any `display-message -p '#{session_name}'` probe to
+// the same name -- prepended to PATH, never replacing it, mirroring
+// installChainGH. Needed by any chain test whose tick reaches a launch()
+// call: #975 gates every launch on a bounded `tmux has-session -t =<name>`
+// probe of the state's recorded LaunchSession, which would otherwise shell
+// out to a real (and here, absent) tmux server.
+func installFakeTmux(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/sh\ncase \"$1\" in\n  has-session) exit 0 ;;\n  display-message) echo " + chainFakeTmuxSession + " ;;\n  *) exit 0 ;;\nesac\n"
+	path := filepath.Join(dir, "tmux")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 // shellQuoteChain wraps s in single quotes for safe embedding in the shim
 // script, escaping any embedded single quote the POSIX-sh way.
 func shellQuoteChain(s string) string {

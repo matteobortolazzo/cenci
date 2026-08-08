@@ -141,10 +141,21 @@ func TestGhJSONNonJSONBodyClassifiesAsParse(t *testing.T) {
 // for every `gh` invocation and recording every call (both seams) into
 // calls in call order -- preserving the pre-#854 `[]string{"gh", ...}`
 // recorded-call shape so every existing assertion keeps working unchanged.
+//
+// It also installs default stubs for the two #975 tmux seams
+// (currentTmuxSession/tmuxHasSession): a live session name and a true
+// probe are the "everything is fine" defaults, so every pre-existing
+// tick()-driven test keeps exercising its intended branch once launch()
+// starts consulting these seams (Phase 4) instead of failing on the new
+// "no session recorded"/"session gone" gates. Tests that care about the
+// tmux-target resolution/probe behavior itself override them directly,
+// after calling withCommands.
 func withCommands(t *testing.T, responses []string, calls *[][]string) {
 	t.Helper()
 	originalCommand := command
 	originalExecGh := execGh
+	originalCurrentTmuxSession := currentTmuxSession
+	originalTmuxHasSession := tmuxHasSession
 	i := 0
 	command = func(name string, args ...string) ([]byte, error) {
 		*calls = append(*calls, append([]string{name}, args...))
@@ -159,9 +170,13 @@ func withCommands(t *testing.T, responses []string, calls *[][]string) {
 		i++
 		return out, "", nil
 	}
+	currentTmuxSession = func() (string, error) { return "test-session", nil }
+	tmuxHasSession = func(string) (bool, error) { return true, nil }
 	t.Cleanup(func() {
 		command = originalCommand
 		execGh = originalExecGh
+		currentTmuxSession = originalCurrentTmuxSession
+		tmuxHasSession = originalTmuxHasSession
 	})
 }
 
@@ -196,7 +211,7 @@ func TestTickLaunchesAddressReviewForNewFeedback(t *testing.T) {
 	// comment:7 unlaunched and dispatches it.
 	unresolvedThread := `{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"isResolved":false,"comments":{"totalCount":1,"nodes":[{"databaseId":7}]}}]}}}}}`
 	withCommands(t, []string{openPR(), `[]`, `[{"id":7,"updated_at":"2026-01-02T00:00:00Z","user":{"login":"reviewer"}}]`, `[]`, unresolvedThread}, &calls)
-	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900}
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900, LaunchSession: "work"}
 	_, delay, err := tick(&s)
 	if err != nil {
 		t.Fatal(err)
@@ -264,7 +279,7 @@ func TestTickRecordsClosingIssuesAndCIStatus(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var calls [][]string
 			withCommands(t, []string{prWithIssue, tc.checks, `[]`, `[]`}, &calls)
-			s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60}
+			s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60, LaunchSession: "work"}
 			if _, _, err := tick(&s); err != nil {
 				t.Fatal(err)
 			}
@@ -552,6 +567,7 @@ func TestTickUnrelatedPushLeavesFeedbackPending(t *testing.T) {
 		PendingKeys:      []string{"comment:5"},
 		PendingCommentAt: "2026-01-01T00:00:00Z",
 		PendingHeadSHA:   "old-sha",
+		LaunchSession:    "work",
 	}
 	if _, _, err := tick(&s); err != nil {
 		t.Fatal(err)
@@ -580,6 +596,7 @@ func TestTickRepairPushWithoutResolutionLeavesFeedbackPending(t *testing.T) {
 		PendingKeys:      []string{"comment:5"},
 		PendingCommentAt: "2026-01-01T00:00:00Z",
 		PendingHeadSHA:   "pre-repair-sha",
+		LaunchSession:    "work",
 	}
 	if _, _, err := tick(&s); err != nil {
 		t.Fatal(err)
@@ -683,6 +700,7 @@ func TestTickNewFeedbackAfterRepairTrackedIndependently(t *testing.T) {
 		PendingKeys:      []string{"comment:5"},
 		PendingCommentAt: "2026-01-01T00:00:00Z",
 		PendingHeadSHA:   "old-sha",
+		LaunchSession:    "work",
 	}
 	if _, _, err := tick(&s); err != nil {
 		t.Fatal(err)
@@ -702,7 +720,7 @@ func TestTickDoesNotRelaunchAddressReviewForStillPendingFeedback(t *testing.T) {
 
 	var calls [][]string
 	withCommands(t, []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, comments, `[]`, unresolvedThreadFor(5)}, &calls)
-	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60}
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60, LaunchSession: "work"}
 	if _, _, err := tick(&s); err != nil {
 		t.Fatal(err)
 	}
@@ -768,6 +786,7 @@ func TestTickReopensAddressedKeyAndDedupsLaunchAcrossTicks(t *testing.T) {
 		PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60,
 		LastHeadSHA:   "sha1",
 		AddressedKeys: []string{"comment:5"},
+		LaunchSession: "work",
 	}
 
 	// Tick 1: the reopen transition itself -- launches exactly once.
@@ -826,6 +845,7 @@ func TestTickReopenLaunchFailureRetriesNextTickAndPreservesReopenState(t *testin
 		PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60,
 		LastHeadSHA:   "sha1",
 		AddressedKeys: []string{"comment:5"},
+		LaunchSession: "work",
 	}
 
 	responses := []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`, unresolvedThreadFor(5)}
@@ -846,9 +866,16 @@ func TestTickReopenLaunchFailureRetriesNextTickAndPreservesReopenState(t *testin
 		calls = append(calls, append([]string{name}, args...))
 		return []byte("boom"), errors.New("exit status 1")
 	}
+	// #975: a stubbed tmuxHasSession is required so the address-review
+	// launch attempt below reaches the command() self-exec (and fails
+	// there, as intended) rather than short-circuiting on the recorded-
+	// session gate before command() is ever called.
+	originalTmuxHasSession := tmuxHasSession
+	tmuxHasSession = func(string) (bool, error) { return true, nil }
 	t.Cleanup(func() {
 		command = originalCommand
 		execGh = originalExecGh
+		tmuxHasSession = originalTmuxHasSession
 	})
 
 	if _, _, err := tick(&s); err == nil {
@@ -1015,5 +1042,32 @@ func TestTickAfterSchema2RestartDoesNotRelaunchAlreadyLaunchedReopen(t *testing.
 	}
 	if !reflect.DeepEqual(restarted.PendingKeys, []string{"comment:5"}) {
 		t.Fatalf("PendingKeys = %v, want unchanged [comment:5] across the restart", restarted.PendingKeys)
+	}
+}
+
+// -- #975: supervisor log file must not perturb the close guard's glob ------
+
+// TestBlocksCloseIgnoresSupervisorLogFiles pins a #975 regression: the new
+// per-repo/PR supervisor log file (auto-adopted answer #6,
+// "<state-dir>/<sha256(repo)[:6]hex>-<pr>.log") lives beside the state file
+// in the same state directory. BlocksClose's directory scan
+// (filepath.Glob(dir, "*.json")) must keep finding and correctly
+// classifying the real state file even with an unrelated ".log" sibling
+// present -- the log file must never be mistaken for state, and must never
+// cause the real state file to be skipped.
+func TestBlocksCloseIgnoresSupervisorLogFiles(t *testing.T) {
+	stubProcessOwned(t, true)
+	dir := t.TempDir()
+	writeGuardState(t, dir, State{PR: "790", RepoRoot: "/repo/root", ClosingIssues: []int{782}, CIStatus: "failing", PID: 4242, Status: "running"})
+	if err := os.WriteFile(filepath.Join(dir, "aabbcc-790.log"), []byte("supervisor stdout/stderr\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	blocks, reason := BlocksClose("782", "/repo/root", dir)
+	if !blocks {
+		t.Fatal("BlocksClose = false, want the real state file still found alongside its .log sibling")
+	}
+	if !strings.Contains(reason, "#790") {
+		t.Errorf("reason = %q, want it to name PR #790", reason)
 	}
 }

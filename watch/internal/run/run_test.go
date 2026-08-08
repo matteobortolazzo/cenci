@@ -223,6 +223,32 @@ func TestRunPrependsDir(t *testing.T) {
 	}
 }
 
+// TestRunPrependsDirInDryRun is ticket #975's AC 1 dry-run variant of
+// TestRunPrependsDir above: the cd prefix opts.Dir adds must reach dry-run
+// output too, since Dir is prepended into shellCommand unconditionally,
+// before the dry-run print — proving --dry-run shows the resolved
+// directory without spawning anything.
+func TestRunPrependsDirInDryRun(t *testing.T) {
+	m := &mockCtrl{session: "work"}
+	var buf bytes.Buffer
+	opts := noConfigOpts(t)
+	opts.Workflow, opts.Ticket = "implement", "40"
+	opts.Dir = "/repos/my project"
+	opts.DryRun = true
+	opts.Out = &buf
+
+	if err := Run(opts, m); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.windows) != 0 {
+		t.Errorf("dry-run must not spawn, got %+v", m.windows)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "cd '/repos/my project' && ") {
+		t.Errorf("dry-run output missing cd prefix: %q", out)
+	}
+}
+
 // TestRunOpenCodeHostCommandNoSandboxCommandConfigured is the Run()-level
 // analog of TestOpenCodeSandboxWiringOutOfScope: dispatching through the
 // public Run() entry point with --agent opencode (and no --no-sandbox) must

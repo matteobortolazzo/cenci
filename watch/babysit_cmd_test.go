@@ -87,3 +87,21 @@ func TestParseBabysitArgs_OptionsCarryIntervalOnceStateDir(t *testing.T) {
 		t.Errorf("StateDir = %q, want %q", opts.StateDir, "/tmp/x")
 	}
 }
+
+// TestParseBabysitArgs_SessionAndDirCarryThrough is ticket #975's AC 2/3:
+// `cenci babysit <pr> --agent <agent> --session <name> --dir <path>` must
+// parse successfully and carry both new flags through into
+// babysit.Options.Session/Dir unchanged -- the exact flags parent ticket
+// #966 specifies for the daemon-spawn path (#977), landed here.
+func TestParseBabysitArgs_SessionAndDirCarryThrough(t *testing.T) {
+	opts, ok := parseBabysitArgs([]string{"123", "--agent", "claude", "--session", "work", "--dir", "/repo/root"})
+	if !ok {
+		t.Fatal("parseBabysitArgs ok = false, want true")
+	}
+	if opts.Session != "work" {
+		t.Errorf("Session = %q, want %q", opts.Session, "work")
+	}
+	if opts.Dir != "/repo/root" {
+		t.Errorf("Dir = %q, want %q", opts.Dir, "/repo/root")
+	}
+}
