@@ -1869,10 +1869,14 @@ list below — it is a supported optional field, not a legacy one.
 - A per-repo `automerge` block in this repo's `.cenci/config.json` — top-level for a
   single-project repo, or per-`projects[]` entry in a monorepo (falling back to the
   top-level block when a project sets none). Schema:
-  - `automerge.protectedPaths` — an array of glob-pattern strings (same matching rules as
-    `security.sensitivePaths`: `*` matches any characters including `/`, case-insensitive).
-    A changed file matching any pattern denies automerge for that PR. Absent means an empty
-    denylist — a genuine "nothing is protected" statement, not a malformed block.
+  - `automerge.protectedPaths` — an array of glob-pattern strings (`*` matches any
+    characters including `/`, case-insensitive, same as `security.sensitivePaths`).
+    Unlike `security.sensitivePaths`, each pattern here is anchored against the
+    **whole repo-relative path from the root** (not substring-matched), and a pattern
+    ending in `/` with no trailing `*` matches that directory and everything under it
+    — see `docs/autonomous-loop.md`. A changed file matching any pattern denies
+    automerge for that PR. Absent means an empty denylist — a genuine "nothing is
+    protected" statement, not a malformed block.
   - `automerge.maxChangedFiles` — required whenever an `automerge` block is present; a
     missing or non-positive value makes the whole block malformed (denied), it does **not**
     fall back to a built-in default.
