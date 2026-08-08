@@ -2139,7 +2139,7 @@ When migrating from an older config that has `ticketSystem`, `prSystem`, `ticket
    ## Review required — automerge policy
    This PR scaffolds a starter `automerge` policy block (`protectedPaths`, size caps,
    `mergeMethod`). Review it before enabling automerge fleet-wide — see
-   [docs/autonomous-loop.md#3-declare-what-a-merge-is-allowed-to-touch](docs/autonomous-loop.md#3-declare-what-a-merge-is-allowed-to-touch).
+   `docs/autonomous-loop.md#3-declare-what-a-merge-is-allowed-to-touch`.
    ```
    If `gh pr create` fails because a PR for this branch already exists (re-entry after a prior turn already created it), recover the URL with `gh pr view chore/configure-<slug> --json url -q .url` and continue. For any other failure (auth, network, validation), show the exact error and use `AskUserQuestion` ("Created, continue" / "Abort") to let the user resolve it before continuing.
 
