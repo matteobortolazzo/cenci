@@ -5,7 +5,7 @@ compatibility: Requires Claude Code settings, plugin environment variables, and 
 argument-hint: [additional context]
 user-invocable: true
 disable-model-invocation: true
-allowed-tools: Read, Write, Edit, Glob, Grep, AskUserQuestion, Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/detect-project.sh"), Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/merge-sandbox-config.sh":*), Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/migrate-project-core.sh":*), Bash(test:*), Bash(which:*), Bash(jq:*), Bash(mv ~/.claude/settings.json.tmp ~/.claude/settings.json), Bash(mkdir -p:*), Bash(rm -f .claude/hooks/check-pending-plans.sh), Bash(rmdir .claude/hooks:*), Bash(gh auth status:*), Bash(gh label list:*), Bash(gh label create:*), Bash(gh pr create:*), Bash(gh pr view:*), Bash(git rev-parse:*), Bash(git add:*), Bash(git commit:*), Bash(git worktree add:*), Bash(git -C:*), Bash(git diff --no-index:*), Bash(rm -f ${TMPDIR:-/tmp}/cenci/cenci-configure-:*), Bash(cenci dispatch status:*), Bash(cenci dispatch enroll:*)
+allowed-tools: Read, Write, Edit, Glob, Grep, AskUserQuestion, Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/detect-project.sh"), Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/merge-sandbox-config.sh":*), Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/migrate-project-core.sh":*), Bash(pen interactive --help:*), Bash(test:*), Bash(which:*), Bash(jq:*), Bash(mv ~/.claude/settings.json.tmp ~/.claude/settings.json), Bash(mkdir -p:*), Bash(rm -f .claude/hooks/check-pending-plans.sh), Bash(rmdir .claude/hooks:*), Bash(gh auth status:*), Bash(gh label list:*), Bash(gh label create:*), Bash(gh pr create:*), Bash(gh pr view:*), Bash(git rev-parse:*), Bash(git add:*), Bash(git commit:*), Bash(git worktree add:*), Bash(git -C:*), Bash(git diff --no-index:*), Bash(rm -f ${TMPDIR:-/tmp}/cenci/cenci-configure-:*), Bash(cenci dispatch status:*), Bash(cenci dispatch enroll:*)
 ---
 
 > **Client dispatch**: In Codex, read `codex-runtime` and `configure/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
@@ -278,24 +278,31 @@ If no frontend framework is detected, skip this section entirely (do not set `pe
    **If Yes AND single project** (or monorepo with only one frontend project):
    - `pencil.designPath = "designs/"`, `pencil.shared` is omitted
 
-   **After the user confirms Yes** (regardless of monorepo choice), detect `pencil interactive` support:
+   **After the user confirms Yes** (regardless of monorepo choice), detect `pen interactive` support:
 
-   Run `pencil interactive --help 2>/dev/null` and check the exit code:
-   - **Succeeds (exit 0)** → Write `pencil.mode: "cli-app"` to the config. Inform the user:
-     "Pencil `interactive` mode detected. Design skills will use `pencil interactive` to communicate with the Pencil editor — this is more token-efficient than the MCP server.
+   Run `pen interactive --help 2>/dev/null` and check both the exit code **and** the
+   output: require exit 0 **and** the output containing `--app`. The `--app` flag is
+   specific to the npm CLI's (`@pen.dev/cli`) `interactive` subcommand help — a
+   desktop-app-installed `pen` symlink instead launches the GUI application on any
+   unrecognized argument, including `--help`, and can also exit 0 without ever
+   printing `--app`. Checking the exit code alone would misdetect that desktop-symlink
+   host as `cli-app` mode; the combined check is how `cli-app` vs. `editor` mode is
+   auto-detected without that false positive.
+   - **Both conditions hold** → Write `pencil.mode: "cli-app"` to the config. Inform the user:
+     "Pencil `interactive` mode detected. Design skills will use `pen interactive` to communicate with the Pencil editor — this is more token-efficient than the MCP server.
      For maximum token savings, you can disable the Pencil MCP server in your editor settings (Pencil → Preferences → MCP Server). cenci uses the CLI directly and does not need the MCP server."
-   - **Fails or not found** → Write `pencil.mode: "editor"` to the config. Inform the user:
+   - **Either condition fails, or the command is not found** → Write `pencil.mode: "editor"` to the config. Inform the user:
      "Pencil `interactive` mode not available. Design skills will use the Pencil MCP server (requires the MCP connection to be active in your editor).
-     For better token efficiency, install the `pencil` command from within the Pencil app (File → Install `pencil` command into PATH) and re-run `/cenci:configure` — this switches to `cli-app` mode which avoids loading MCP tool schemas into every conversation."
+     For better token efficiency, install the `pen` command (`npm install -g @pen.dev/cli`, or from within the Pencil app: File → Install `pen` command into PATH) and re-run `/cenci:configure` — this switches to `cli-app` mode which avoids loading MCP tool schemas into every conversation."
 
    **Sandbox note** (no extra config value needed): inside the cenci sandbox neither the
    desktop editor nor its MCP server is reachable, so with either mode above the
    pipeline's availability probe (implement's Design Context Loading) falls back at
-   runtime to `pencil interactive` **headless** mode — the CLI's own editor engine, no
-   GUI — using the `pencil` binary baked into the sandbox image by
+   runtime to `pen interactive` **headless** mode — the CLI's own editor engine, no
+   GUI — using the `pen` binary baked into the sandbox image by
    `sandbox/fragments/pencil.dockerfile` (included when `pencil.enabled` is true; see
    question 9). Headless auth comes from the host's `~/.pencil/session-cli.json`
-   (created by `pencil login`, staged into the container automatically) or a
+   (created by `pen login`, staged into the container automatically) or a
    `PEN_CLI_KEY` set in the host environment (forwarded per agent session, never baked
    into the image). This headless fallback covers the *pipeline's* reads only:
    design itself is host-only and refuses to run in-container — `/cenci:design`

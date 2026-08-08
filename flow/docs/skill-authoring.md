@@ -88,6 +88,20 @@ from external or semi-trusted sources.
   patterns like `.` or `..` when the value is used as a standalone path segment —
   explicitly reject dot-only values and patterns containing `..` in addition to the
   regex check.
+- When a validation regex is applied to identifiers or names derived from an external
+  domain (especially legacy code or human-authored values with established naming
+  conventions), verify that the regex *actually matches* the real values in that domain
+  before shipping. If the domain conventionally uses namespace separators or other
+  established characters (e.g., `/` in component names like `Component/ExerciseCard`), a
+  restrictive allowlist regex (e.g. `^[A-Za-z0-9:._-]+$` omitting `/`) will reject
+  every legitimate value at its primary call site, even though the validation was meant
+  to guard that very domain. When the same identifier appears in multiple use contexts
+  (machine-generated IDs for filesystem paths vs. human-authored names for user-facing
+  labels), separate validation patterns may be required — one strict for auto-generated
+  values, one wider for human-authored ones. Always test the regex against
+  representative real-world values from the domain before review, not just theoretical
+  safe characters; caught independently by both code and security reviewers on the same
+  change signals high recurrence risk (#957).
 - When adding a new `cat`-as-boolean-gate pattern (e.g. a cleanup marker file check),
   match the exit-code-semantics documentation style of existing analogous gates in the
   document — don't leave interpretation implicit when precedent already spells it out.
@@ -109,7 +123,7 @@ from external or semi-trusted sources.
 - When writing a contract test for a skill file, never weaken the skill's authoritative
   prose or documented patterns (e.g. a "Convention" section's code example) to satisfy
   the test's search logic. Instead, scope and refine the test's predicates — e.g., if a
-  test needs to find a guarded invocation of `pencil interactive -a desktop` but the
+  test needs to find a guarded invocation of `pen interactive -a desktop` but the
   file also legitimately mentions that pattern in an earlier Convention section, scope
   the test's grep to search only from the guard's phase heading onward (using `tail -n
   +<line_number>` plus line-offset math), not by deleting `-a desktop` from the earlier
@@ -132,3 +146,4 @@ from external or semi-trusted sources.
   signal (#848).
 - When editing multiple skill/procedure documentation files that describe the same behavior from different levels of abstraction (e.g., a high-level session-shape summary in SKILL.md and a detailed authoritative procedure in phase-1-plan.md), cross-check them for factual consistency before committing. Specifically verify that each outcome or branch described in the summary actually matches what the authoritative procedure specifies for that case — e.g., if the summary states "records nothing," verify the procedure doesn't document persistence steps, state transitions, or downstream calls for that path. Summary-vs-procedure inconsistencies can only be caught by cross-file comparison, not by testing or reviewing each file independently, and will silently mislead future readers and implementers.
 - In guard clauses and early-exit branches, use explicit directional language (e.g., "skip to section [name]" or "continue directly to the next section") instead of ambiguous terms like "fall through." When the same document uses "fall through" elsewhere to mean "proceed normally" (the opposite), reusing it in a guard context risks an agent or reviewer misreading the guard's semantics, especially in security-relevant gates. Contract tests should pin the corrected wording to prevent silent regression (#928).
+- When a security-critical procedural rule (e.g., "verify document identity before every read/write batch") is stated once in prose but must be applied at multiple concrete call sites throughout a large procedure file, include an explicit enumeration (in comments or a dedicated checklist section) documenting every location where the rule applies, and verify via grep or manual checklist that each site actually implements it. Partial application across N sites is easy to overlook during review if the rule's statement is a single prose paragraph; even a straightforward wording at the first site can be silently missed at later sites when they're dispersed across dozens of lines or multiple sections. A contract test enumerating every required call site (e.g., `grep -c "verify.*identity"`) paired with a complementary negative test (no unguarded read/write calls exist) makes the requirement explicit and catches omissions on subsequent passes (#957).

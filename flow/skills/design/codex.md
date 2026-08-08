@@ -1,9 +1,13 @@
 # Codex design procedure
 
-Read `project-core` and `codex-runtime`. This workflow is optional: require configured
-Pencil CLI/MCP dependencies. In `/plan`, gather UX decisions and approve the design scope;
-in normal mode update the `.pen` file and DESIGN.md, visually verify, checkpoint results,
-and perform the existing design-ticket label transition.
+Read `project-core` and `codex-runtime`. Also read the `pencil-api` reference skill before
+any Pencil call in this workflow — it documents the current MCP tool surface, the `execute`
+idiom catalog, the transport table, and document discipline. This workflow is optional:
+require configured Pencil CLI/MCP dependencies, driven through the `pen` command-line
+interface (`pen interactive`) or the MCP surface, per `pencil-api`'s transport table. In
+`/plan`, gather UX decisions and approve the design scope; in normal mode update the `.pen`
+file and DESIGN.md, visually verify, checkpoint results, and perform the existing
+design-ticket label transition.
 
 **Sandbox guard (host-only)**: `$cenci:design` is host-only — the Pencil desktop app it
 drives is never reachable inside the cenci sandbox. Before any Pencil probe or

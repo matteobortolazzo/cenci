@@ -126,6 +126,7 @@ companion) for every skill, including the internal ones not listed above.
 | `frontend-classification` | Classify whether a ticket is frontend or UI work. Use when deciding whether design-aware planning, visual verification, UI tests, or screenshot capture applies. | Yes | No | Yes | Yes |
 | `implement` | Run the full cenci plan, test, implementation, review, and pull-request pipeline. | No | Yes | Yes | Yes |
 | `maintain` | Audit and repair structure, documentation, client-portability, and rule/lesson-hygiene drift through a deterministic check plus specialized agents, gated by human approval. | No | Yes | Yes | Yes |
+| `pencil-api` | The current Pencil MCP tool surface, `execute` idiom catalog, transport table, and document-discipline rules. Read before any Pencil call, in either `cli-app` or `editor` mode. | No | No | Yes | No |
 | `pr-comment-filter` | Decide which pull-request review comments are actionable. Use when addressing review feedback, monitoring a PR, or filtering already-handled comments. | Yes | No | Yes | Yes |
 | `project-core` | Resolve cenci's neutral project configuration and shared guidance consistently. | No | No | Yes | No |
 | `refactor` | Analyze a codebase with specialized agents and propose refactoring tickets. | No | Yes | Yes | Yes |
@@ -178,10 +179,11 @@ companion) for every skill, including the internal ones not listed above.
 | `ci-repair` | — | project-core, shell-rules, subagent-safety, testing | — | — |
 | `codex-runtime` | — | — | — | — |
 | `configure` | codex.md | babysit, codex-runtime, implement, project-core, shell-rules, testing, verify-ui | detect-project.sh, merge-sandbox-config.sh | code-reviewer |
-| `design` | codex.md | attachments, codex-runtime, project-core, shell-rules, ticket-ownership, verify-ui | — | — |
+| `design` | codex.md | attachments, codex-runtime, pencil-api, project-core, shell-rules, ticket-ownership, verify-ui | — | — |
 | `frontend-classification` | — | implement, refine | — | — |
 | `implement` | codex.md, phases/phase-1-plan.md, phases/phase-2-worktree.md, phases/phase-3-test-red.md, phases/phase-4-implement-green.md, phases/phase-5-refactor.md, phases/phase-6-7-review.md, phases/phase-8-docs.md, phases/phase-9-pr.md | attachments, babysit, codex-runtime, frontend-classification, project-core, review, shell-rules, subagent-safety, testing, ticket-ownership, verify-ui | run-artifact-dir.sh | code-reviewer, context-gatherer, implementer, lessons-collector, planner, security-reviewer, silent-failure-hunter |
 | `maintain` | codex.md, modes/backlog.md, modes/clients.md, modes/docs.md, modes/rules.md, modes/structure.md | codex-runtime, project-core, shell-rules, subagent-safety, worktrees | check.sh | backlog-maintainer, docs-maintainer, portability-maintainer, rules-maintainer, structure-maintainer |
+| `pencil-api` | — | configure, design, implement, verify-ui | — | — |
 | `pr-comment-filter` | — | address-review, babysit | — | — |
 | `project-core` | — | — | — | — |
 | `refactor` | codex.md | codex-runtime, project-core, shell-rules, subagent-safety | — | — |
