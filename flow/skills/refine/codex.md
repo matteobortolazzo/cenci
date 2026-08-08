@@ -6,7 +6,13 @@ decisions, architecture decisions with a real trade-off, or contradictions/unkno
 codebase cannot resolve — everything else with an obvious recommended answer must be
 auto-adopted, never asked, into the proposal's `### Assumptions (auto-adopted)` section
 (plain `-` bullets, never task-list checkboxes: `- <assumption> — <adopted answer and why
-it is obvious>`). Also carry a `### Decisions` section (integration points, error-handling
+it is obvious>`).
+
+every question with options marks one recommended option first with a one-line rationale, and every open-ended question leads with the refiner's proposed answer.
+
+entailed questions — those already fixed by a recorded answer — are forbidden; auto-adopt them into `### Decisions` with a `follows from Q<n> (round <m>)` citation, and when the entailed decision fixes a security posture or is otherwise irreversible, ask via the client's available user-input mechanism a confirm/overrule question that states the decision and its derivation without re-opening the full option space. This confirm/overrule question is exempt from any per-round question cap and must be asked before a round can conclude with no remaining questions — never deferred, never silently dropped.
+
+Also carry a `### Decisions` section (integration points, error-handling
 convention, backward-compatibility decision, plus any other settled decision) — both
 sections persist into the ticket body alongside `### Acceptance Criteria`, and the planner
 inherits them verbatim and must not re-open them. Carry a per-ticket `### Automation` verdict

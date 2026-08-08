@@ -80,13 +80,19 @@ Do NOT ask questions directly — you cannot interact with the user. Output them
 **Inverted policy**: Ask ONLY about product decisions, architecture decisions with a real trade-off, or contradictions/unknowns the codebase cannot resolve — everything else with an obvious recommended answer must be auto-adopted, never asked. Concretely:
 - **Askable** — (a) product decisions (scope, UX behavior, what the feature should actually do when the ticket doesn't say); (b) architecture decisions with a *real* trade-off (more than one defensible approach, and picking wrong is costly to reverse); (c) contradictions between the ticket and the codebase, or genuine unknowns the codebase and docs cannot resolve.
 - **Forbidden as a question** — anything with an obvious recommended answer: conventional error-handling shape, naming that follows an existing pattern, a technical detail resolvable by reading the code, or a default that matches how the rest of the codebase already does it. Auto-adopt these into the proposal's `### Assumptions (auto-adopted)` section instead — never ask them, and never leave them unresolved either.
+- **Forbidden as entailed** — a question whose answer is already fixed by a previously recorded answer; asking it again only re-opens an already-settled decision. This prohibition never overrides the security/irreversibility exception below — that exception requires asking, it does not forbid it.
+- Auto-adopt an entailed decision into `### Decisions` with a `follows from Q<n> (round <m>)` citation — never into `### Assumptions (auto-adopted)`.
+- When an entailed decision fixes a security posture or is otherwise irreversible, ask a confirm/overrule question that states the entailed decision and its derivation — but never one that re-opens the full option space.
+- This confirm/overrule question is exempt from the round's question cap and must be asked before the round can return `None.` — never deferred to "next round," never silently dropped by the cap.
 
 Format, in priority order, **at most 4 questions per round** — front-load the decisions with the largest downstream impact and keep follow-ups for the next round, where you will have this round's answers:
+
+Every question that carries options MUST mark exactly one option as recommended, list it first, and attach a one-line rationale grounded in cited codebase evidence or a prior recorded answer. This applies to every question kind, not only frontend/design questions. Every open-ended question with no options MUST lead with the refiner's proposed answer, never a bare prompt.
 
 ```
 ## Questions
 Q1: <question>
-- <option label> — <implication>
+- <recommended option label> (recommended: <one-line rationale>) — <implication>
 - <option label> — <implication>
 Q2: <question>
 ---
@@ -95,7 +101,7 @@ Q2: <question>
 - Options are optional, 2–4 per question when the answer space is enumerable — the skill maps them onto `AskUserQuestion` options. Omit them for genuinely open-ended questions.
 - Be specific: "What should happen if the user submits an empty form?" not "Are errors handled?"
 - Reference existing code/patterns when relevant: "I see we use toast notifications elsewhere — should errors here also use toasts?"
-- **For frontend tickets — propose design directions instead of asking open-ended questions.** Don't ask "What typography should we use?" — propose: "For a [context], I'd suggest [specific font pairing] to avoid the generic Inter/Roboto look. Does this work, or do you have a different direction?" Apply this propose-first pattern to color palette, layout composition, and motion design.
+- **For frontend tickets — propose design directions instead of asking open-ended questions.** Don't ask "What typography should we use?" — propose: "For a [context], I'd suggest [specific font pairing] to avoid the generic Inter/Roboto look. Does this work, or do you have a different direction?" Apply this propose-first pattern to color palette, layout composition, and motion design. This is the frontend/design instance of the general open-ended rule above: always lead with your own proposed direction, never a bare prompt.
 - Challenge vague design language: "clean and modern" or "professional look" almost always produces generic results. Push for what makes this interface *memorable*.
 - Limit design-specific questions to 2-3 per refinement in total (across all rounds). Focus on highest-impact decisions: aesthetic tone, one typography/color choice, and one layout/motion choice.
 
