@@ -41,8 +41,9 @@ Extract owner/repo from `git remote get-url origin` (e.g. `git@github.com:owner/
 
 Once validated, run:
 ```bash
-gh issue view <number> --repo <owner>/<repo> --json number,title,body,labels,state,assignees,milestone,comments
+gh issue view <number> --repo <owner>/<repo> --json number,title,body,labels,state,assignees,milestone,comments,author,authorAssociation
 ```
+Each entry in `comments` now also carries its own `author.login` and `authorAssociation` — the bundle written in step 4 below passes these through per comment so the refiner's Design Coverage Check can restrict which comments' ticket-carried screen node references count toward coverage.
 
 **Split-child provenance detection:** Determine whether this ticket is itself a child of an earlier split — mirrors `agents/context-gatherer.md`'s parent-child detection. Primary source is the native sub-issue link:
 ```bash
@@ -103,12 +104,12 @@ You orchestrate backlog refinement. The judgment-heavy analysis — ambiguity hu
 
    If confirmed, set `isDesignTicket = true`. Design-only tickets are routed to `/cenci:design`, not `/cenci:implement`: they skip the browser question (step 8) and the `ui:visual-check` label (step 12), and receive the `Design` label in step 11. The refiner focuses its analysis accordingly via the bundle's `isDesignTicket` flag — design questions (visual direction, screens, states, design-system fit) instead of implementation-only items.
 
-   The **Design Coverage Check** (`.pen`/`DESIGN.md` evaluation and the `designNeeded` determination) is performed by the refiner agent, not here — its result arrives in the proposal's `### Design Coverage` section (step 7). **Design always happens on a dedicated design ticket, never on the implementation ticket itself** — when `designNeeded` is true, the design ticket is created later, either as the first child of a split (see **Design-first splits** in step 9) or as a companion ticket (see **Companion design ticket** in the Update Ticket section).
+   The **Design Coverage Check** (`.pen`/`DESIGN.md` evaluation and the `designNeeded` determination) is performed by the refiner agent, not here — its result arrives in the proposal's `### Design Coverage` section (step 7); a conventions-only DESIGN.md is not itself a coverage gap, so `designNeeded` only goes true when there is genuinely no design to work from. **Design always happens on a dedicated design ticket, never on the implementation ticket itself** — when `designNeeded` is true, the design ticket is created later, either as the first child of a split (see **Design-first splits** in step 9) or as a companion ticket (see **Companion design ticket** in the Update Ticket section).
 
 3. **Create the per-run temp-file token.** Run `mktemp -u ${TMPDIR:-/tmp}/cenci/issue-<number>-XXXXXX` once and capture the trailing random segment as `<token>` (the token is the random suffix only, e.g. `a1b2c3` — not the full mktemp basename). As with `<ticket-id-or-slug>` in the implement phases, carry the literal `<token>` value forward as text into every temp-file path for the rest of this run — do NOT re-derive it per Bash call, and do not use `$$`/shell state (it does not persist across separate Bash tool invocations). `-u` is a dry-run name generator — it only produces a unique-ish suffix, not an atomically-created file — which is why the `Write` tool is what actually creates each temp file in this run. The `<token>` is a **collision-avoidance mechanism only** — it reduces the chance of two concurrent runs picking the same temp-file basename — and is explicitly **not** an atomic reservation (a second run could theoretically generate the same suffix before either run's `Write` call lands) and **not** a security boundary (it provides no protection against a malicious or adversarial process targeting the same path).
 
 4. **Write the context bundle.** Use the `Write` tool to create `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-bundle.md` containing, in order:
-   - The **verbatim** ticket title, body, labels, state, and comments from the fetch above — full text, never a digest or paraphrase (the refiner's decisions require source fidelity; see `docs/skill-authoring.md`).
+   - The **verbatim** ticket title, body, labels, state, and comments from the fetch above — full text, never a digest or paraphrase (the refiner's decisions require source fidelity; see `docs/skill-authoring.md`). Include the ticket's own `author.login`/`authorAssociation` alongside the body, and each comment's `author.login`/`authorAssociation` alongside its body, per the fetch above.
    - Each attachment's summary alongside its downloaded file path (from the Attachments step).
    - The user context parsed from `$ARGUMENTS`, verbatim (or `None`).
    - The resolved flags: `isFrontend`, `isDesignTicket`, `pencil.enabled`, `pencil.designPath` (from the resolved config), and `isSplitChild` with its `parentNumber` (from the **Split-child provenance detection** in the Context section above; `parentNumber` is omitted when `isSplitChild` is false).

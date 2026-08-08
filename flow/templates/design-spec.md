@@ -9,11 +9,15 @@ All designs live in `<design-path>/<pen-file-name>`. Use Pencil MCP tools to rea
 
 ## Screens
 
+**Generated from the pen file, not hand-maintained** — this table is a convenience snapshot, not the authoritative source; the pen file's node tree always wins. In a conventions-only spec (no design-first ticket flow adopted yet) this section may be omitted entirely.
+
 | Screen | Node ID | Route | Description |
 |--------|---------|-------|-------------|
-<!-- Populated from batch_get(patterns: [{name: "Screen/.*"}]) -->
+<!-- Populated via `execute`: Print(Get(n=>n.name.startsWith("Screen/"))) -->
 
 ## Components
+
+**Generated from the pen file, not hand-maintained** — may be omitted in a conventions-only spec. The authoritative design→code mapping source is each component's `context` property on the pen node, not this table: read it directly via `Get(n=>n.reusable&&Print(n.id,n.name,n.context))` when this table is absent or stale.
 
 <!-- Angular variant -->
 <!-- IF framework == angular -->
@@ -35,17 +39,19 @@ All designs live in `<design-path>/<pen-file-name>`. Use Pencil MCP tools to rea
 | Component | Node ID | Code Component | UI Library | Used In |
 |-----------|---------|----------------|------------|---------|
 
-<!-- Populated from batch_get(patterns: [{reusable: true}], readDepth: 2) -->
+<!-- Populated via `execute`: Get(n=>n.reusable&&Print(n.id,n.name,n.context)) -->
 
 ## Annotations
 
+**Generated from the pen file, not hand-maintained** — may be omitted in a conventions-only spec.
+
 | Note | Node ID | Topic |
 |------|---------|-------|
-<!-- Populated from batch_get(patterns: [{name: "Note:.*"}]) -->
+<!-- Populated via `execute`: Print(Get(n=>n.name.startsWith("Note:"))) -->
 
 ## Design Tokens
 
-Variables defined in `<design-path>/<pen-file-name>` — access via `get_variables()`.
+**Generated from the pen file, not hand-maintained** — may be omitted in a conventions-only spec. Variables defined in `<design-path>/<pen-file-name>` — read via `Print(GetVariables())`.
 
 ### Colors
 
@@ -83,21 +89,21 @@ Variables defined in `<design-path>/<pen-file-name>` — access via `get_variabl
 
 ### Design changes
 1. Open `<pen-file-name>` in Pencil
-2. Find screen by node ID from the table above
-3. Use `batch_get(<nodeId>, readDepth: 3)` to inspect structure
-4. Use `batch_design` to modify
-5. Use `get_screenshot(<nodeId>)` to verify
+2. Find the screen node ID — from the Screens table above when present, or via `execute`: `Print(Get(n=>n.name.startsWith("Screen/")))`
+3. Use `Print(Get("<nodeId>",{depth:3}))` via `execute` to inspect structure
+4. Modify via the editor / Pencil MCP design tools
+5. Re-run `Print(Get("<nodeId>",{depth:1}))` to verify the change landed
 
 ### Component changes
 Modify the component once — all screen instances update automatically via refs.
 
 ### Implementation
-1. Read screen node via `batch_get(<nodeId>, readDepth: 3)`
-2. Read variables via `get_variables()` — map to CSS custom properties
-3. Read component structure — map to framework components from the Components table
+1. Read the screen node via `execute`: `Print(Get("<nodeId>",{depth:3}))`
+2. Read variables via `execute`: `Print(GetVariables())` — map to CSS custom properties
+3. Read component structure and each component's `context` property — map to framework components (from the Components table when present, otherwise from `context` directly)
 4. Generate component files following the framework conventions
 
 ### Quick lookups
-- All screens: `batch_get(patterns: [{name: "Screen/.*"}])`
-- All components: `batch_get(patterns: [{reusable: true}])`
-- Specific screen: `batch_get(nodeIds: ["<id>"], readDepth: 3)`
+- All screens: `Print(Get(n=>n.name.startsWith("Screen/")))`
+- All reusable components: `Get(n=>n.reusable&&Print(n.id,n.name,n.context))`
+- Specific screen: `Print(Get("<id>",{depth:3}))`
