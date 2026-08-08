@@ -27,6 +27,9 @@ func runDispatch(args []string) {
 		case "loop":
 			runDispatchLoop(args[1:])
 			return
+		case "plan-refined":
+			runDispatchPlanRefined(args[1:])
+			return
 		default:
 			// A stale/rebuilt binary invoked with a typo'd verb (e.g. "statas")
 			// must never silently fall through to a real dispatch pass: Go's
@@ -295,6 +298,113 @@ func runDispatchLoop(args []string) {
 	}
 
 	fmt.Print(renderDispatchState(state))
+}
+
+// runDispatchPlanRefined implements `cenci dispatch plan-refined
+// on|off|status` (#964): the CLI writer/reader for the fleet-wide
+// dispatch.planRefined planning-pickup switch, mirroring runDispatchLoop's
+// shape. All three verbs print the same resolved state; on/off persist the
+// toggle first. When --dir is inside a git repository, the output also
+// reports that repo's remote-confirmed planning.autonomy verdict and the
+// combined authorization — the fleet flag alone never authorizes a planning
+// pickup (#851/#877), so status makes the full grant chain visible.
+func runDispatchPlanRefined(args []string) {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		fmt.Fprintln(os.Stderr, "cenci dispatch plan-refined: expected a subcommand: on, off, or status")
+		os.Exit(2)
+	}
+	verb := args[0]
+
+	fs := flag.NewFlagSet("plan-refined "+verb, flag.ExitOnError)
+	configPath := fs.String("config", "", "path to config.json (default: $XDG_CONFIG_HOME/cenci/config.json)")
+	dir := fs.String("dir", ".", "repo directory for the autonomy verdict (default: current directory)")
+	jsonOut := fs.Bool("json", false, "print result as JSON")
+	_ = fs.Parse(args[1:])
+
+	rejectExtra("cenci dispatch plan-refined", fs.Args())
+
+	switch verb {
+	case "on":
+		if err := dispatch.SetPlanRefined(*configPath, true); err != nil {
+			fmt.Fprintf(os.Stderr, "cenci dispatch plan-refined: %v\n", err)
+			os.Exit(1)
+		}
+	case "off":
+		if err := dispatch.SetPlanRefined(*configPath, false); err != nil {
+			fmt.Fprintf(os.Stderr, "cenci dispatch plan-refined: %v\n", err)
+			os.Exit(1)
+		}
+	case "status":
+		// no mutation; just resolve and print below.
+	default:
+		fmt.Fprintf(os.Stderr, "cenci dispatch plan-refined: unknown subcommand %q\n", verb)
+		os.Exit(2)
+	}
+
+	resolvedPath, err := dispatch.ResolveConfigPath(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cenci dispatch plan-refined: %v\n", err)
+		os.Exit(1)
+	}
+	enabled, err := dispatch.QueryPlanRefined(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cenci dispatch plan-refined: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Repo fields only render when --dir resolves to a git repo with an
+	// origin remote — status must work from anywhere, so a plain directory
+	// just gets the fleet flag. The autonomy probe reads the committed
+	// config at refs/remotes/origin/main as of the last fetch and fails
+	// closed (unreadable) when that ref doesn't resolve, same as the
+	// dispatch gate itself.
+	var repoName string
+	var autonomy dispatch.RepoAutonomy
+	if identity, derr := dispatch.DetectRepoIdentity(*dir); derr == nil {
+		repoName = identity.Repo
+		autonomy = dispatch.QueryRepoAutonomy(*dir)
+	}
+
+	if *jsonOut {
+		out := struct {
+			Enabled      bool   `json:"enabled"`
+			Config       string `json:"config"`
+			Repo         string `json:"repo,omitempty"`
+			RepoAutonomy string `json:"repo_autonomy,omitempty"`
+			Authorized   *bool  `json:"authorized,omitempty"`
+		}{Enabled: enabled, Config: resolvedPath}
+		if repoName != "" {
+			authorized := enabled && autonomy == dispatch.RepoAutonomyLean
+			out.Repo = repoName
+			out.RepoAutonomy = string(autonomy)
+			out.Authorized = &authorized
+		}
+		data, err := json.Marshal(out)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cenci dispatch plan-refined: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(string(data))
+		return
+	}
+
+	enabledStr := "disabled"
+	if enabled {
+		enabledStr = "enabled"
+	}
+	fmt.Printf("Planning pickup (dispatch.planRefined): %s (config: %s)\n", enabledStr, resolvedPath)
+	if !enabled {
+		fmt.Printf("  enable with: cenci dispatch plan-refined on\n")
+	}
+	if repoName != "" {
+		fmt.Printf("  repo: %s\n", repoName)
+		fmt.Printf("  repo autonomy (planning.autonomy @ origin/main, as of last fetch): %s\n", autonomy)
+		if enabled && autonomy == dispatch.RepoAutonomyLean {
+			fmt.Printf("  authorized: yes — Refined tickets here are picked up for unattended planning\n")
+		} else {
+			fmt.Printf("  authorized: no — needs both the fleet flag and planning.autonomy \"lean\" committed on origin/main\n")
+		}
+	}
 }
 
 // renderDispatchState formats a watch.DispatchState as human-readable text

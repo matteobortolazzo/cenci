@@ -2020,6 +2020,13 @@ final_summary() {
 		fi
 		say "    lazyboards        # kanban board wired to the workflow — see docs/orchestration.md"
 	fi
+	if selected cenci-watch; then
+		say ""
+		say "  Autonomy stays off until you arm it (fleet-wide switches, per machine):"
+		say "    cenci dispatch plan-refined on|off|status   # unattended planning pickup"
+		say "    cenci automerge on|off|status               # hands-off PR merging"
+		say "  Guide: docs/autonomous-loop.md"
+	fi
 	say ""
 	say "  Check installation health: ${BOLD}cenci doctor${RESET}"
 	say "  Update everything later:  ${BOLD}cenci update${RESET}"

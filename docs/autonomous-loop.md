@@ -133,6 +133,17 @@ In `~/.config/cenci/config.json`:
 }
 ```
 
+The switch itself doesn't need hand-editing:
+
+```bash
+cenci dispatch plan-refined on       # or: off
+cenci dispatch plan-refined status   # fleet flag + this repo's remote-confirmed autonomy + combined verdict
+```
+
+writes `planRefined` with an atomic, key-preserving update (creating the file if
+it doesn't exist yet); the tuning fields above (`planStalenessTolerance`, caps,
+quiet hours) remain hand-edited.
+
 `planRefined` turns two terminal skips into work: a `Refined` ticket with no plan
 file becomes a planning pickup, and a `Planned` ticket whose plan has fallen more
 than `planStalenessTolerance` commits behind becomes an autonomous re-plan.
@@ -190,6 +201,13 @@ Fleet switch, in `~/.config/cenci/config.json`:
 {
   "automerge": { "enabled": true }
 }
+```
+
+Or, without hand-editing:
+
+```bash
+cenci automerge on       # or: off
+cenci automerge status   # fleet switch + this repo's per-scope policy summary
 ```
 
 Then, per ticket, grant `automerge:ok` at `/cenci:refine`'s Confirmation Gate. This
@@ -296,10 +314,10 @@ hand.
 
 | To stop… | Do this | Takes effect |
 |---|---|---|
-| All merging, everywhere | `automerge.enabled: false` (or remove the key) | Next tick, including a tick already mid-evaluation |
+| All merging, everywhere | `cenci automerge off` (sets `automerge.enabled: false`) | Next tick, including a tick already mid-evaluation |
 | Merging for one repo | Remove/narrow the repo's `automerge` block on the base branch | Next tick |
 | Merging for one ticket | Remove `automerge:ok` from the issue | Next tick |
-| Autonomous planning, everywhere | `dispatch.planRefined: false` | Next pass |
+| Autonomous planning, everywhere | `cenci dispatch plan-refined off` | Next pass |
 | Autonomous planning for one repo | Push `planning.autonomy` off `"lean"` to `origin/main` | Next pass with a successful fetch |
 | All dispatch | `cenci dispatch loop off` | Immediately; in-flight sessions finish |
 
