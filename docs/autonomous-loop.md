@@ -111,6 +111,9 @@ In the repo's committed `.cenci/config.json`:
 Any value other than the exact string `"lean"` — including a missing block — means
 `"interactive"`, unchanged behavior.
 
+`/cenci:configure` offers `planning.autonomy` when the key is absent, defaulting to
+`interactive`.
+
 **Commit and push this to `main`.** Dispatch reads it from
 `refs/remotes/origin/main` after a successful `git fetch`, never from your working
 tree and never from local `HEAD`. An unpushed local edit grants nothing; a revocation
@@ -189,8 +192,8 @@ the longest matching `path` prefix, then to the top-level block). When one PR sp
 several blocks the effective policy is the *most restrictive* merge: the minimum of
 each cap and the union of every `protectedPaths`.
 
-`/cenci:configure` never writes or removes this block — it's a hand-edited escape
-hatch that survives reconfiguration untouched.
+`/cenci:configure` offers to scaffold this block only when `automerge` is absent — an
+existing block is reported verbatim and never re-prompted, narrowed, or removed.
 
 ### 4. Arm the merge
 

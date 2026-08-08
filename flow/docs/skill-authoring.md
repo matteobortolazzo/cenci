@@ -12,6 +12,7 @@ from external or semi-trusted sources.
   it in a generated artifact that will be built or executed (a Dockerfile `ARG`, CI
   YAML, a shell script). If validation fails, treat the value as unresolved and fall
   through to the documented fallback — never write the raw value.
+- When prose claims a generated artifact is "drawn from," "based on," or "sourced from" another location (e.g., a starter config "seeded from the implement skill's backstop default pattern list"), verify complete fidelity by exhaustively comparing the artifact against the source — not by sampling or spot-checking. Test assertions claiming full coverage must validate every element in the claimed source set, not a representative sample. A narrowed scaffold that samples from the source yet claims comprehensive derivation is a silent correctness gap, only detectable by independent review counting all elements. During PR review, verify that both the generated artifact and its test suite fully reflect the claimed source.
 - Marker-based "merge-safe" regeneration (`# tool:managed-begin` / `# tool:managed-end`)
   must define behavior for malformed marker states too (one marker only, out-of-order,
   duplicate pairs), not just "both present" and "no markers" — route them through the

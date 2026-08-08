@@ -630,7 +630,7 @@ workspace is bind-mounted at a container-local path that has no reliable host
 equivalent, so the advisory omits `--dir` entirely and lets the host-side command
 resolve its own working directory. Skip the remainder of this section
 (main-checkout resolution, status probe, questions 11/12) and continue directly to
-the next section (`### Auth Verification`).
+the next section (`### Autonomy Settings`).
 
 **Main-checkout resolution (host runs only).** Run
 `git rev-parse --path-format=absolute --git-common-dir` as its own Bash call (already
@@ -644,7 +644,7 @@ the transient `.worktrees/configure-<slug>` checkout, not the repo.
 
 **Main-checkout path validation (shell safety only).** If the resolved
 `<main-checkout>` value contains a single quote or a newline, log one informational
-line and skip the rest of this section — same skip-to-`### Auth Verification`
+line and skip the rest of this section — same skip-to-`### Autonomy Settings`
 behavior as the container guard above — rather than emit a broken command. This
 mirrors the session-name rule in question 12 below; it is shell-safety only, not
 semantic path validation.
@@ -719,6 +719,120 @@ section contributes nothing to the configure PR diff.
 the explicit next step to start the recurring dispatch loop — that command already
 defaults its interval to `5m` when the user doesn't set one, so this section never asks
 about the dispatch loop's enable flag or interval setting itself.
+
+### Autonomy Settings
+
+**This section runs on every configure invocation** — there is no container guard: unlike
+Fleet Dispatch Enrollment above, `planning` and `automerge` are repo-committed keys that
+land inside this run's PR, so an in-container run is fine. Both questions below only
+collect an answer; neither writes anything itself — step 6 below performs the actual
+write, overlaying whatever was collected here onto the merged config.
+
+**Absent-only rule.** When `planning` or `automerge` is already present, report the
+existing value verbatim, never re-prompt, never narrow, and never remove it.
+
+**Presence detection**, read from `existingConfig` (already in hand from Existing Config
+Detection above):
+- `planning` is present iff `existingConfig.planning` exists.
+- `automerge` is present iff a top-level `automerge` key exists or any `projects[]` entry
+  carries its own `automerge` key — monorepo automerge can be per-project only, so a
+  top-level-only check would wrongly re-offer the question on a repo whose policy lives
+  entirely in `projects[]`.
+
+13. **Plan approval autonomy** (asked via `AskUserQuestion` only when `planning` is
+    absent): "Should plan approval stay interactive, or switch to lean self-approval?
+    `interactive` keeps today's behavior — the planner asks up to 6 clarifying questions
+    and never self-answers. `lean` lets a plan with no escalations continue straight into
+    implementation in the same session, and also authorizes `cenci dispatch`'s unattended
+    planning pickup and autonomous re-plan once pushed to `main` (see
+    `docs/autonomous-loop.md`'s \"Let plans approve themselves\")."
+    - Options: "Keep `interactive` (Recommended)", "Switch to `lean`"
+    - Declining omits the `planning` key entirely — no `planning` key is written.
+
+14. **Automerge policy block** (asked via `AskUserQuestion` only when `automerge` is
+    absent): "Scaffold a starter `automerge` policy block for this repo? This does not
+    enable automerge by itself — it only seeds a deny-by-default policy that a human must
+    still review, and the fleet-wide `automerge.enabled` switch (see
+    `docs/autonomous-loop.md`) stays off until you flip it separately. This section never
+    invents a risk policy field-by-field — it's a binary choice between no block and a
+    conservative starter block."
+    - Options: "Skip — no block (deny-by-default) (Recommended)", "Scaffold a starter
+      block for hand review"
+    - Declining omits the `automerge` key entirely — no `automerge` key is written.
+    - On "Scaffold a starter block for hand review", seed `protectedPaths` from the union
+      of three sources, deduplicated, additive only, never narrowing any of them: (a) the
+      **full** mandatory baseline of category globs — the complete implement Sensitive-path
+      backstop default pattern list (`flow/skills/implement/SKILL.md`'s built-in defaults,
+      all 36 patterns, verbatim), plus the release/CI path; (b) any confirmed repo-shape
+      paths (e.g. `.cenci/`); and (c) `existingConfig.security.sensitivePaths` when that key
+      is present — the repo owner's own hand-declared sensitive-path patterns (see
+      `security.sensitivePaths` elsewhere in this file), the one signal the built-in
+      defaults can't cover by design. Set tight caps. The template below is the value
+      written to the top-level `automerge` key, verbatim (with `protectedPaths` extended
+      per repo shape and `existingConfig.security.sensitivePaths` when applicable):
+
+<!-- cenci:automerge-scaffold:begin -->
+```json
+{
+  "protectedPaths": [
+    "*auth*",
+    "*login*",
+    "*logout*",
+    "*session*",
+    "*password*",
+    "*passwd*",
+    "*credential*",
+    "*secret*",
+    "*secrets*",
+    "*token*",
+    "*jwt*",
+    "*apikey*",
+    "*api_key*",
+    "*.pem",
+    "*.key",
+    "*.env*",
+    "*oauth*",
+    "*sso*",
+    "*saml*",
+    "*openid*",
+    "*permission*",
+    "*acl*",
+    "*rbac*",
+    "*role*",
+    "*crypto*",
+    "*encrypt*",
+    "*decrypt*",
+    "*sign*",
+    "*hash*",
+    "*payment*",
+    "*billing*",
+    "*invoice*",
+    "*checkout*",
+    "*stripe*",
+    "*migrat*",
+    "*schema*",
+    ".github/",
+    ".cenci/"
+  ],
+  "maxChangedFiles": 10,
+  "maxDiffLines": 400,
+  "mergeMethod": "squash"
+}
+```
+<!-- cenci:automerge-scaffold:end -->
+
+      In a monorepo, this scaffold is always written as a single top-level block (never
+      per-`projects[]` blocks) — a complete, valid, most-restrictive policy on its own
+      that needs no per-project path derivation; the PR-body review flag (below) tells the
+      human to consider splitting it into per-project blocks if that fits the repo better.
+
+**Next step.** Point the user at the fleet-side verbs from #964/#968 as the explicit next
+steps — neither is flipped by this skill:
+- `cenci dispatch plan-refined on|off|status` to let dispatch pick up unattended planning
+  once `planning.autonomy` is `lean` on `origin/main`.
+- `cenci automerge on|off|status` to arm the fleet-wide automerge kill switch once a
+  policy block exists.
+- See `docs/autonomous-loop.md` for the full walkthrough of all four switches.
 
 ### Auth Verification
 
@@ -1606,6 +1720,20 @@ For each MCP selected in question 5:
    - If `existingConfig` is not null: start from the existing object, overwrite each field with the user's answers. This preserves fields the skill doesn't manage.
    - If `existingConfig` is null: create the file fresh.
 
+   **Autonomy Settings wiring.** `planningAnswer`/`automergeAnswer` are overlaid onto
+   `merge-sandbox-config.sh`'s stdout before the write: `planningAnswer` contributes a
+   `planning: { "autonomy": "lean" }` key only when question 13 above was asked and
+   answered `lean`, and `automergeAnswer` contributes the scaffolded `automerge` key only
+   when question 14 above was asked and answered "Scaffold a starter block for hand
+   review" — a declined answer contributes no key. When either question was skipped
+   because its key was already present in `existingConfig`, there is no collected answer
+   to overlay — the existing value simply survives the merge semantics above untouched.
+   After overlaying `planningAnswer`/`automergeAnswer` onto the merge script's stdout,
+   validate the resulting JSON is well-formed (`jq empty`) before writing it — the same
+   fail-closed discipline as the adjacent `sandbox` merge above: if the overlaid result
+   is not valid JSON, do not write it, report the failure, and fall back to the
+   pre-overlay config content (the merge script's stdout as-is).
+
    **Always stamp `configVersion`** on every write (fresh or re-config): set it to `detection.pluginVersion`. If Scripted Detection was unavailable, read `.version` from `${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json` with jq, verifying the command succeeded before using its output. If neither resolves, preserve any existing `configVersion` unchanged and tell the user the stamp could not be refreshed — never invent a version.
 
 ```json
@@ -1659,6 +1787,11 @@ For each MCP selected in question 5:
   }
 }
 ```
+
+(The `planning` value shown above is illustrative of the schema, not something this skill
+writes by default: question 13 (`### Autonomy Settings`) writes the `planning` key only when
+you explicitly choose `lean`, or when it was already present in `existingConfig`; declining —
+keeping `interactive` — writes nothing, since a missing key already resolves to `interactive`.)
 
 `configVersion` records the flow plugin version that last wrote this config (managed by this skill — always overwritten with the current plugin version in step 6, never a question). Consumers:
 - the plugin's SessionStart hook (`hooks/scripts/check-config-staleness.sh`) — nudges the user at session start when the stamp's major.minor is behind the installed plugin (or missing entirely), so they learn a `/cenci:configure` re-run would pick up new configure features without watching the changelog;
@@ -1748,8 +1881,10 @@ overwrite only the fields the skill manages), a hand-added `security` block is *
 untouched** across re-configuration. Do **not** add `security` to the migration-removal list
 below — it is a supported optional field, not a legacy one.
 
-The `planning` field is optional and is **never written by a configure prompt** — there is
-no question for it, following the `security` block precedent above. It is a manually-editable
+The `planning` field is optional. `### Autonomy Settings` question 13 above asks for it only
+when absent, defaulting to `interactive`; when the key is already present, this skill reports
+it verbatim and never re-prompts, narrows, or removes it — merge semantics (step 6) preserve a
+hand-added or previously-written value untouched across reconfiguration either way. It is a
 safety/checkpoint toggle read by the implement skill's Phase 1 (see `skills/implement/SKILL.md`
 and `skills/implement/phases/phase-1-plan.md`'s `## Lean Approval Path`). Schema:
 - `planning.autonomy` — `"lean"` or `"interactive"`, default `"interactive"`. Only the exact
@@ -1854,11 +1989,13 @@ Each project entry's `gateCommand` is optional — unlike `lintCommand`, its pre
 
 Existing single-project configs (no `isMonorepo` field) work unchanged.
 
-The `automerge` field is optional and is **never written by a configure prompt** — there
-is no question for it. It is a manually-editable escape hatch, like `security` and
-`babysitInterval` above, and merge semantics (step 6) preserve a hand-added value
-untouched across reconfiguration. Do **not** add `automerge` to the migration-removal
-list below — it is a supported optional field, not a legacy one.
+The `automerge` field is optional. `### Autonomy Settings` question 14 above offers to
+scaffold a conservative starter block only when absent (top-level or per-`projects[]`);
+when a block is already present, this skill reports it verbatim and never re-prompts,
+narrows, or removes it — merge semantics (step 6) preserve a hand-added or
+previously-scaffolded value untouched across reconfiguration either way. Do **not** add
+`automerge` to the migration-removal list below — it is a supported optional field, not a
+legacy one.
 
 `automerge` is split across two config locations, each with a distinct scope and default:
 
@@ -1995,6 +2132,15 @@ When migrating from an older config that has `ticketSystem`, `prSystem`, `ticket
    ## Testing
    N/A — configuration/tooling only, no application code changed.
    ```
+   Append a `## Review required — automerge policy` section — emitted only when question
+   14 scaffolded a block this run (`### Autonomy Settings`), never on a re-config that
+   reported an existing block verbatim:
+   ```markdown
+   ## Review required — automerge policy
+   This PR scaffolds a starter `automerge` policy block (`protectedPaths`, size caps,
+   `mergeMethod`). Review it before enabling automerge fleet-wide — see
+   [docs/autonomous-loop.md#3-declare-what-a-merge-is-allowed-to-touch](docs/autonomous-loop.md#3-declare-what-a-merge-is-allowed-to-touch).
+   ```
    If `gh pr create` fails because a PR for this branch already exists (re-entry after a prior turn already created it), recover the URL with `gh pr view chore/configure-<slug> --json url -q .url` and continue. For any other failure (auth, network, validation), show the exact error and use `AskUserQuestion` ("Created, continue" / "Abort") to let the user resolve it before continuing.
 
    Delete the PR-body temp file after a successful `gh pr create` (or a successful recovery via `gh pr view`):
@@ -2002,7 +2148,7 @@ When migrating from an older config that has `ticketSystem`, `prSystem`, `ticket
    rm -f ${TMPDIR:-/tmp}/cenci/cenci-configure-<slug>-pr-body.md
    ```
 
-Report what was created and suggest next steps (e.g., "Try `/cenci:refine <ticket-id>` on a ticket"), including the PR URL from step 7. If `sandbox.enabled` is `true`, mention the generated `.cenci/Dockerfile` and that `cenci sandbox build` (run from inside the repo, after the PR merges) builds the repo's own tailored image on top of the shared base. If `lazyboards.enabled` is `true`, list the generated `.lazyboards.yml` In Review actions with their keys, serve, and test commands (e.g., "`W` serves web-client's PR worktree with `ng serve`, `T` runs its tests with `ng test --watch=false`") and point at `docs/orchestration.md` for the board recipe. When the suggest-or-skip branch ran instead, report what happened (added actions, or "already complete — no changes"). If `sandbox.baseVersion` resolved to `null` (unresolved — see the baseVersion resolution in step 5e), the chat summary must explicitly say so (e.g., "Base version could not be auto-detected — see `sandbox/README.md` to pin `BASE_VERSION` manually") rather than leaving it only as an inline Dockerfile comment, so a user who doesn't open the generated file still learns the base version wasn't pinned.
+Report what was created and suggest next steps (e.g., "Try `/cenci:refine <ticket-id>` on a ticket"), including the PR URL from step 7. If question 14 (`### Autonomy Settings`) scaffolded an `automerge` block this run, say so explicitly and flag it for review, then point at the fleet-side next steps: `cenci dispatch plan-refined on` (once `planning.autonomy` is `lean` on `origin/main`) and `cenci automerge on` (once the scaffolded block has been reviewed) — the same verbs named in `### Autonomy Settings`'s own "Next step" block. If `sandbox.enabled` is `true`, mention the generated `.cenci/Dockerfile` and that `cenci sandbox build` (run from inside the repo, after the PR merges) builds the repo's own tailored image on top of the shared base. If `lazyboards.enabled` is `true`, list the generated `.lazyboards.yml` In Review actions with their keys, serve, and test commands (e.g., "`W` serves web-client's PR worktree with `ng serve`, `T` runs its tests with `ng test --watch=false`") and point at `docs/orchestration.md` for the board recipe. When the suggest-or-skip branch ran instead, report what happened (added actions, or "already complete — no changes"). If `sandbox.baseVersion` resolved to `null` (unresolved — see the baseVersion resolution in step 5e), the chat summary must explicitly say so (e.g., "Base version could not be auto-detected — see `sandbox/README.md` to pin `BASE_VERSION` manually") rather than leaving it only as an inline Dockerfile comment, so a user who doesn't open the generated file still learns the base version wasn't pinned.
 
 ### Board lifecycle labels
 

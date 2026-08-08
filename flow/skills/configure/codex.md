@@ -73,3 +73,13 @@ procedure. Because the fleet dispatch enroll is a mutation and therefore runs on
 (`cenci run configure apply <checkpoint-id> --agent codex`), Plan mode
 gathers the enroll/session answers but never calls `cenci dispatch enroll` itself —
 never during `/plan`.
+
+Autonomy Settings mirrors the Claude procedure's `### Autonomy Settings` section: it asks
+about `planning` and `automerge` only when absent — an already-present value (top-level or,
+for `automerge`, any `projects[]` entry) is reported verbatim and never re-prompted, narrowed,
+or removed. It defaults both offers to the conservative answer — `interactive` for planning,
+no automerge block — and the automerge offer stays binary (skip vs. scaffold a starter block
+for hand review), never a field-by-field sub-wizard. Because both keys land in the apply
+step's config write, never during `/plan`, Plan mode only gathers the answers and previews the
+scaffold; the actual `.cenci/config.json` write happens in
+`cenci run configure apply <checkpoint-id> --agent codex`, same as every other field.

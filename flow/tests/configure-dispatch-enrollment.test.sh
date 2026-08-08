@@ -173,7 +173,7 @@ HOST_FIX_COMMAND='cenci dispatch enroll --session <name>` from the repo root on 
 
 # Container guard's exit wording must be unambiguous about stopping (not
 # "fall through", which elsewhere in this section means "continue the run").
-CONTAINER_GUARD_EXIT='Skip the remainder of this section (main-checkout resolution, status probe, questions 11/12) and continue directly to the next section (`### Auth Verification`)'
+CONTAINER_GUARD_EXIT='Skip the remainder of this section (main-checkout resolution, status probe, questions 11/12) and continue directly to the next section (`### Autonomy Settings`)'
 
 # Main-checkout resolution.
 GIT_COMMON_DIR_RESOLUTION='git rev-parse --path-format=absolute --git-common-dir'
