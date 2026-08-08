@@ -145,6 +145,16 @@ func (p Posture) WriteExplanation(w io.Writer) error {
 		_, _ = fmt.Fprintln(bw, "container's cenci-sand.dind label is an unrecognized value, so whether a")
 		_, _ = fmt.Fprintln(bw, "sysbox-isolated Docker daemon runs inside the container is indeterminate. Do")
 		_, _ = fmt.Fprintln(bw, "not read this as disabled.")
+	case p.Dind.Source == DindSourcePlatformUnsupported:
+		// #962: dind WAS requested but this host can never register
+		// sysbox-runc. The plain "disabled" sentence below would be
+		// technically true and practically misleading — it reads as "nobody
+		// asked for it", leaving the reader with no explanation for why
+		// in-container Docker fails.
+		_, _ = fmt.Fprintln(bw, "Nested Docker was requested for this launch but is unavailable on this host —")
+		_, _ = fmt.Fprintln(bw, "sysbox-runc is a Linux-only OCI runtime and cannot be registered with Docker")
+		_, _ = fmt.Fprintln(bw, "Desktop's VM. The sandbox launches without it, so work needing an in-container")
+		_, _ = fmt.Fprintln(bw, "Docker daemon (Testcontainers, docker build/run) will not work in this session.")
 	default:
 		_, _ = fmt.Fprintln(bw, "Nested Docker is disabled for this launch — no sysbox-isolated Docker daemon")
 		_, _ = fmt.Fprintln(bw, "runs inside the container.")

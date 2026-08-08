@@ -177,7 +177,48 @@ docker/podman logs <container> --tail 50
 **Platform notes**: DinD requires the Sysbox container runtime to be
 registered with Docker; on Podman-preferred dual-runtime hosts, `cenci
 doctor` still probes Docker's Sysbox registration independently since dind
-sessions specifically require it.
+sessions specifically require it. This code never appears on macOS — there
+the launch degrades before any inner `dockerd` is attempted, reporting
+`CENCI-SANDBOX-DIND-002` instead.
+
+## CENCI-SANDBOX-DIND-002
+
+**Meaning**: Nested Docker was requested for this launch — by `--dind` or by
+the repo's `sandbox.dind` key in `.cenci/config.json` — but the host can
+never register the `sysbox-runc` OCI runtime, so the sandbox launched
+without it. Attached by the launcher's `warnDindPlatformUnsupported` warning
+and reported by `cenci audit` as the `platform-unsupported` dind source.
+Warning tier, not degraded: the session itself is fully functional, and
+unlike `CENCI-SANDBOX-DIND-001` there is no host-side fix — this is a
+platform capability, not a failed start.
+
+**Common causes**:
+- The host is macOS. Sysbox is a Linux-only runtime that must be installed on
+  the machine running `dockerd`, and on macOS `dockerd` lives inside Docker
+  Desktop's LinuxKit VM, which cannot be modified.
+
+**Diagnostic commands**:
+```bash
+cenci audit                    # dind source: platform-unsupported
+cenci open <shortcut> --dry-run # previews the degraded (non-dind) create argv
+```
+
+**Recovery procedure**:
+1. Nothing is broken — the session runs, only in-container Docker is absent.
+   Work that does not need Docker (Testcontainers, `docker build`/`docker
+   run` in tests) proceeds normally.
+2. To silence the warning for a session, launch with `cenci open <shortcut>
+   --no-dind`.
+3. To silence it for a repo that does not actually need nested Docker, set
+   `"sandbox": {"dind": false}` in `.cenci/config.json`.
+4. To actually get nested Docker on a Mac, run Docker Engine inside a Linux
+   VM you control (Lima, Multipass) with `sysbox-ce` installed there, and
+   point `DOCKER_HOST` at it. Cenci does not manage that VM.
+
+**Platform notes**: Linux hosts never see this code. There an unregistered
+`sysbox-runc` is a fixable setup gap, so `dindPreflight` still hard-fails
+with install pointers (`sysbox-ce` via the Arch AUR, or the nestybox `.deb`
+on Ubuntu) rather than degrading.
 
 ## CENCI-DAEMON-CONN-001
 

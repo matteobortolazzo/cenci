@@ -61,12 +61,17 @@ const (
 // planned flag/config input; DindSourceUnknown is the explicit,
 // non-reassuring attribution for an unrecognized cenci-sand.dind label
 // value — it must never collapse into a confident "disabled" (#598).
+// DindSourcePlatformUnsupported is #962's addition: dind WAS requested (by
+// flag or repo config) but the host can never register sysbox-runc, so the
+// launch degraded to dind-off — an off state that must stay distinguishable
+// from DindSourceOff's "nobody asked for it".
 const (
-	DindSourceFlag     = "flag"
-	DindSourceConfig   = "config"
-	DindSourceOff      = "off"
-	DindSourceObserved = "observed"
-	DindSourceUnknown  = "unknown"
+	DindSourceFlag                = "flag"
+	DindSourceConfig              = "config"
+	DindSourceOff                 = "off"
+	DindSourceObserved            = "observed"
+	DindSourceUnknown             = "unknown"
+	DindSourcePlatformUnsupported = "platform-unsupported"
 )
 
 // Basis enumerates Posture.Basis (ticket #627): whether the report reflects
@@ -340,7 +345,7 @@ func (e *Engine) Audit(opts Options) (Posture, error) {
 	}
 	scope := ComputeScope(agent, opts.Name, cwd, home)
 
-	dindOn, err := ResolveDind(opts, scope)
+	dindOn, dindDegraded, err := resolveDindForHost(opts, scope)
 	if err != nil {
 		return Posture{}, err
 	}
@@ -378,7 +383,7 @@ func (e *Engine) Audit(opts Options) (Posture, error) {
 	allEnvArgs = append(allEnvArgs, mountArgs...)
 	allEnvArgs = append(allEnvArgs, envArgs...)
 
-	planned := buildPlannedPosture(agent, scope, home, opts, dindOn, mounts, allEnvArgs, featureArgs, stagedKinds)
+	planned := buildPlannedPosture(agent, scope, home, opts, dindOn, dindDegraded, mounts, allEnvArgs, featureArgs, stagedKinds)
 
 	// Observed-mode dispatch (ticket #627): only attempted when a runtime is
 	// resolved (e.Runtime != "") — a runtime-less Engine (NewForAudit) always
@@ -423,7 +428,7 @@ func (e *Engine) Audit(opts Options) (Posture, error) {
 // — the single construction site both Audit's runtime-less path and its
 // observed-mode fallback (ps/inspect failure) share, so neither can silently
 // re-derive a different planned posture (audit.go:14-23).
-func buildPlannedPosture(agent string, scope Scope, home string, opts Options, dindOn bool, mounts []MountPosture, allEnvArgs []string, featureArgs []string, stagedKinds map[string]bool) Posture {
+func buildPlannedPosture(agent string, scope Scope, home string, opts Options, dindOn, dindDegraded bool, mounts []MountPosture, allEnvArgs []string, featureArgs []string, stagedKinds map[string]bool) Posture {
 	imageType := ImageTypeMonolith
 	if scope.UsingRepoImage {
 		imageType = ImageTypeRepo
@@ -442,7 +447,7 @@ func buildPlannedPosture(agent string, scope Scope, home string, opts Options, d
 			ReadOnly:      false,
 		},
 		Network: networkPosture(featureArgs),
-		Dind:    dindPosture(dindOn, opts, scope),
+		Dind:    dindPosture(dindOn, dindDegraded, opts, scope),
 
 		Mounts:             mounts,
 		Volumes:            namedVolumes(mounts),
@@ -727,12 +732,30 @@ func dindSourceForOpts(opts Options) string {
 	return DindSourceConfig
 }
 
-// dindPosture classifies dindOn (already resolved by ResolveDind) into its
-// own "Nested Docker (sysbox-isolated)" report section — runtime and
-// storage-volume attribution mirror exactly what assembleRunArgs would
+// dindPosture classifies dindOn (already resolved by resolveDindForHost)
+// into its own "Nested Docker (sysbox-isolated)" report section — runtime
+// and storage-volume attribution mirror exactly what assembleRunArgs would
 // append (scope.DindVolumeName, "--runtime=sysbox-runc") for this launch.
-func dindPosture(dindOn bool, opts Options, scope Scope) DindPosture {
+//
+// platformDegraded distinguishes the two ways dind can be off (#962): a
+// launch that never asked for it (DindSourceOff) and one that asked but
+// runs on a host where sysbox-runc can never exist
+// (DindSourcePlatformUnsupported). Collapsing the second into the first
+// would leave a macOS user auditing a dind repo unable to tell "off because
+// nobody asked" from "off because this host cannot run it" — and only the
+// latter explains why Testcontainers will fail inside the sandbox. Runtime
+// and StorageVolume stay empty in both off states: a degraded launch
+// applies neither.
+func dindPosture(dindOn, platformDegraded bool, opts Options, scope Scope) DindPosture {
 	if !dindOn {
+		if platformDegraded {
+			return DindPosture{
+				Enabled: false,
+				Source:  DindSourcePlatformUnsupported,
+				Note: fmt.Sprintf("nested Docker was requested (%s) but is unavailable on %s: sysbox-runc is a Linux-only OCI runtime and cannot be registered with Docker Desktop's VM. The sandbox launches without it.",
+					dindSourceForOpts(opts), dindHostLabel()),
+			}
+		}
 		return DindPosture{Enabled: false, Source: DindSourceOff}
 	}
 	return DindPosture{

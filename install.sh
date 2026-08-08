@@ -504,7 +504,9 @@ sysbox_runc_version() {
 
 # doctor_sysbox reports whether Docker has the sysbox-runc container runtime
 # registered for nested Docker (dind) sandbox sessions, and (#630) its
-# registered version. This is an informational mirror of Go's
+# registered version. On macOS it short-circuits to a platform statement
+# before probing at all (#962) — see the OS check at the top of the body.
+# This is an informational mirror of Go's
 # sandbox.SysboxRegistered (watch/internal/sandbox/sandbox.go), which probes
 # the exact same `docker info --format '{{json .Runtimes}}'` output for the
 # same "sysbox-runc" key — keep both detections in sync if either changes
@@ -527,6 +529,15 @@ sysbox_runc_version() {
 #      sysbox_runc_version.
 doctor_sysbox() {
 	local runtimes
+	# macOS can never register sysbox-runc: it is a Linux-only runtime
+	# installed on the machine running dockerd, and there dockerd lives
+	# inside Docker Desktop's unmodifiable LinuxKit VM. Reporting "not
+	# registered" there would imply an install that does not exist, so say
+	# what is actually true — and what the launcher does about it (#962).
+	if [ "$OS" = macos ]; then
+		say "    nested Docker (dind) is unavailable on macOS — sysbox-runc is Linux-only; dind repos launch without it (see sandbox/README.md#nested-docker-sysbox)"
+		return 0
+	fi
 	if ! runtimes="$(docker info --format '{{json .Runtimes}}' 2>/dev/null)" || [ -z "$runtimes" ]; then
 		say "    could not query docker info — sysbox-runc status unknown"
 		return 0

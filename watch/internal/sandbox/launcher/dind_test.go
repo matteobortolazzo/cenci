@@ -1,10 +1,13 @@
 package launcher
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/matteobortolazzo/cenci/watch/internal/errcode"
 )
 
 // -- RepoDindConfig ----------------------------------------------------
@@ -288,4 +291,240 @@ func TestResolveDind_Precedence(t *testing.T) {
 			t.Error("ResolveDind with --no-dind and a malformed repo config: on = true, want false")
 		}
 	})
+}
+
+// -- host-platform gate (#962) -------------------------------------------
+
+// setDindHostOS pins the host OS the dind platform gate evaluates against
+// for the duration of one test, so a macOS host can be exercised from any
+// runner (and a linux host from a macOS runner) without build tags.
+func setDindHostOS(t *testing.T, hostOS string) {
+	t.Helper()
+	prev := dindHostOS
+	dindHostOS = hostOS
+	t.Cleanup(func() { dindHostOS = prev })
+}
+
+// TestResolveDindForHost_PlatformGate pins the macOS degrade (#962): sysbox
+// is a Linux-only OCI runtime installed on the machine running dockerd, and
+// on macOS dockerd lives inside Docker Desktop's unmodifiable LinuxKit VM,
+// so sysbox-runc can never be registered there. Rather than hard-failing
+// every launch in a dind repo (which left macOS unable to open a sandbox at
+// all), a dind-on resolution degrades to dind-off with a degraded=true
+// signal for the caller to warn on. Linux resolution is unchanged, and
+// every error class ResolveDind raises still propagates on macOS — the gate
+// only ever downgrades an otherwise-successful dind-ON decision.
+func TestResolveDindForHost_PlatformGate(t *testing.T) {
+	// configRepo builds a repo scope whose .cenci/config.json carries content.
+	configRepo := func(t *testing.T, content string) Scope {
+		t.Helper()
+		repo := t.TempDir()
+		writeFile(t, filepath.Join(repo, ".cenci", "config.json"), content)
+		return Scope{WorkspaceScope: "repo", RepoRoot: repo}
+	}
+
+	t.Run("darwin degrades an on repo config", func(t *testing.T) {
+		setDindHostOS(t, "darwin")
+		on, degraded, err := resolveDindForHost(Options{}, configRepo(t, `{"sandbox":{"dind":true}}`))
+		if err != nil {
+			t.Fatalf("resolveDindForHost on darwin: %v", err)
+		}
+		if on {
+			t.Error("on = true on darwin, want false — sysbox-runc can never be registered there")
+		}
+		if !degraded {
+			t.Error("degraded = false, want true so the caller warns that dind was requested but dropped")
+		}
+	})
+
+	t.Run("darwin degrades an explicit --dind", func(t *testing.T) {
+		setDindHostOS(t, "darwin")
+		scope := Scope{WorkspaceScope: "repo", RepoRoot: t.TempDir()}
+		on, degraded, err := resolveDindForHost(Options{Dind: true}, scope)
+		if err != nil {
+			t.Fatalf("resolveDindForHost with --dind on darwin: %v", err)
+		}
+		if on || !degraded {
+			t.Errorf("--dind on darwin = (on=%v, degraded=%v), want (false, true) — an explicit flag degrades and warns, it never hard-fails", on, degraded)
+		}
+	})
+
+	t.Run("darwin with dind off is not reported as degraded", func(t *testing.T) {
+		setDindHostOS(t, "darwin")
+		scope := Scope{WorkspaceScope: "repo", RepoRoot: t.TempDir()}
+		on, degraded, err := resolveDindForHost(Options{}, scope)
+		if err != nil {
+			t.Fatalf("resolveDindForHost: %v", err)
+		}
+		if on || degraded {
+			t.Errorf("no dind requested on darwin = (on=%v, degraded=%v), want (false, false) — nothing was dropped, so there is nothing to warn about", on, degraded)
+		}
+	})
+
+	t.Run("darwin with --no-dind is not reported as degraded", func(t *testing.T) {
+		setDindHostOS(t, "darwin")
+		on, degraded, err := resolveDindForHost(Options{NoDind: true}, configRepo(t, `{"sandbox":{"dind":true}}`))
+		if err != nil {
+			t.Fatalf("resolveDindForHost with --no-dind on darwin: %v", err)
+		}
+		if on || degraded {
+			t.Errorf("--no-dind on darwin = (on=%v, degraded=%v), want (false, false) — the user already opted out, so no warning is owed", on, degraded)
+		}
+	})
+
+	t.Run("darwin still rejects --dind --no-dind as a usage error", func(t *testing.T) {
+		setDindHostOS(t, "darwin")
+		scope := Scope{WorkspaceScope: "repo", RepoRoot: t.TempDir()}
+		_, degraded, err := resolveDindForHost(Options{Dind: true, NoDind: true}, scope)
+		if err == nil || !IsUsage(err) {
+			t.Fatalf("resolveDindForHost with --dind --no-dind on darwin = %v, want a usage error (exit 2) — the platform gate must not swallow input validation", err)
+		}
+		if degraded {
+			t.Error("degraded = true for a usage error, want false — nothing was degraded, the input was rejected")
+		}
+	})
+
+	t.Run("darwin still rejects --dind outside repo scope as a usage error", func(t *testing.T) {
+		setDindHostOS(t, "darwin")
+		_, _, err := resolveDindForHost(Options{Dind: true}, Scope{WorkspaceScope: "legacy"})
+		if err == nil || !IsUsage(err) {
+			t.Fatalf("resolveDindForHost with --dind in legacy scope on darwin = %v, want a usage error (exit 2)", err)
+		}
+	})
+
+	t.Run("darwin still hard-fails a malformed repo config", func(t *testing.T) {
+		setDindHostOS(t, "darwin")
+		on, degraded, err := resolveDindForHost(Options{}, configRepo(t, `{not valid json`))
+		if err == nil {
+			t.Fatal("resolveDindForHost with a malformed repo config on darwin = nil error, want a hard error — #632's contract must survive the platform gate")
+		}
+		if IsUsage(err) {
+			t.Errorf("malformed-config error on darwin classified as a usage error (exit 2), want a plain hard-fail error (exit 1): %v", err)
+		}
+		if on || degraded {
+			t.Errorf("malformed config on darwin = (on=%v, degraded=%v), want (false, false) alongside the error", on, degraded)
+		}
+	})
+
+	t.Run("linux keeps an on repo config on", func(t *testing.T) {
+		setDindHostOS(t, "linux")
+		on, degraded, err := resolveDindForHost(Options{}, configRepo(t, `{"sandbox":{"dind":true}}`))
+		if err != nil {
+			t.Fatalf("resolveDindForHost on linux: %v", err)
+		}
+		if !on || degraded {
+			t.Errorf("on repo config on linux = (on=%v, degraded=%v), want (true, false) — the platform gate must never touch a Linux host", on, degraded)
+		}
+	})
+
+	t.Run("linux keeps an explicit --dind on", func(t *testing.T) {
+		setDindHostOS(t, "linux")
+		scope := Scope{WorkspaceScope: "repo", RepoRoot: t.TempDir()}
+		on, degraded, err := resolveDindForHost(Options{Dind: true}, scope)
+		if err != nil {
+			t.Fatalf("resolveDindForHost with --dind on linux: %v", err)
+		}
+		if !on || degraded {
+			t.Errorf("--dind on linux = (on=%v, degraded=%v), want (true, false)", on, degraded)
+		}
+	})
+}
+
+// TestResolveLaunchContext_DarwinDegradesDindAndWarns pins the launch-side
+// half of #962: on macOS a dind repo launches (rather than dying in
+// dindPreflight), the resolved context carries DindOn=false, the container
+// runtime is resolved through the normal podman-first ContainerRuntime()
+// path (NOT dind's docker-first ContainerRuntimePreferDocker(), which would
+// pick a Docker the degraded launch has no reason to prefer), and a single
+// warning naming the platform, the errcode, and the --no-dind escape hatch
+// reaches Stderr.
+func TestResolveLaunchContext_DarwinDegradesDindAndWarns(t *testing.T) {
+	setDindHostOS(t, "darwin")
+	repo := newAuditTestRepo(t)
+	writeFile(t, filepath.Join(repo, ".cenci", "config.json"), `{"sandbox":{"dind":true}}`)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	// Both runtimes on PATH, so the resolved runtime actually discriminates
+	// between ContainerRuntime() (podman first) and
+	// ContainerRuntimePreferDocker() (docker first) — with only one present
+	// both helpers would agree and the assertion would prove nothing.
+	fakeDir := t.TempDir()
+	callLog := filepath.Join(fakeDir, "calls.txt")
+	writeFakeRuntime(t, fakeDir, "docker", callLog)
+	writeFakeRuntime(t, fakeDir, "podman", callLog)
+	t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
+
+	stderr := &bytes.Buffer{}
+	eng := &Engine{Stderr: stderr}
+	ctx, err := eng.resolveLaunchContext(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("resolveLaunchContext on darwin with a dind repo config = %v, want a successful degraded launch context", err)
+	}
+	if ctx.DindOn {
+		t.Error("ctx.DindOn = true on darwin, want false")
+	}
+	if eng.Runtime != "podman" {
+		t.Errorf("eng.Runtime = %q, want \"podman\" — a degraded launch resolves the runtime podman-first like any non-dind launch", eng.Runtime)
+	}
+
+	warning := stderr.String()
+	for _, want := range []string{
+		"nested Docker",
+		"macOS",
+		string(errcode.SandboxDindPlatformUnsupported),
+		"--no-dind",
+	} {
+		if !strings.Contains(warning, want) {
+			t.Errorf("warning = %q, want it to contain %q", warning, want)
+		}
+	}
+	if n := strings.Count(warning, string(errcode.SandboxDindPlatformUnsupported)); n != 1 {
+		t.Errorf("warning mentions %s %d times, want exactly 1", errcode.SandboxDindPlatformUnsupported, n)
+	}
+}
+
+// TestResolveLaunchContext_LinuxMissingSysboxStillHardFails is the
+// regression guard for #962's blast radius: the degrade is macOS-only. On
+// Linux an unregistered sysbox-runc is a fixable host-setup problem, so
+// dindPreflight must still hard-fail with its install pointer — and the
+// runtime must still have been resolved docker-first before the preflight
+// ran.
+func TestResolveLaunchContext_LinuxMissingSysboxStillHardFails(t *testing.T) {
+	setDindHostOS(t, "linux")
+	repo := newAuditTestRepo(t)
+	writeFile(t, filepath.Join(repo, ".cenci", "config.json"), `{"sandbox":{"dind":true}}`)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	fakeDir := t.TempDir()
+	callLog := filepath.Join(fakeDir, "calls.txt")
+	writeFakeRuntime(t, fakeDir, "docker", callLog)
+	writeFakeRuntime(t, fakeDir, "podman", callLog)
+	t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_INFO_RUNTIMES", `{"runc":{}}`)
+
+	stderr := &bytes.Buffer{}
+	eng := &Engine{Stderr: stderr}
+	_, err := eng.resolveLaunchContext(Options{Agent: "claude"})
+	if err == nil {
+		t.Fatal("resolveLaunchContext on linux without sysbox = nil error, want the dindPreflight hard failure")
+	}
+	if IsUsage(err) {
+		t.Errorf("missing-sysbox error on linux classified as a usage error (exit 2), want the exit-1 preflight-failure class: %v", err)
+	}
+	if !strings.Contains(err.Error(), "sysbox-runc") {
+		t.Errorf("error = %q, want it to name the sysbox-runc runtime", err.Error())
+	}
+	if !strings.Contains(err.Error(), "sysbox-ce") {
+		t.Errorf("error = %q, want it to keep the host install pointer", err.Error())
+	}
+	if eng.Runtime != "docker" {
+		t.Errorf("eng.Runtime = %q, want \"docker\" — a dind launch still resolves the runtime docker-first on linux", eng.Runtime)
+	}
+	if strings.Contains(stderr.String(), string(errcode.SandboxDindPlatformUnsupported)) {
+		t.Errorf("stderr = %q, want no platform-degrade warning on linux", stderr.String())
+	}
 }

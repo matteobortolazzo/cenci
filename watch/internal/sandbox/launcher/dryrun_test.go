@@ -839,3 +839,46 @@ func TestDryRun_Dind_SuccessfulPreviewShowsSysboxRuntimeWithNoSideEffects(t *tes
 		t.Errorf("expected exactly the sysbox-runc registration probe followed by the read-only containerRunning probe, want zero container/volume side effects; got calls:\n%s", strings.Join(lines, "\n"))
 	}
 }
+
+// TestDryRun_DarwinDindConfig_PreviewsDegradedArgv pins the macOS degrade
+// (#962) end-to-end through the preview surface: with a dind repo config on
+// a macOS host, DryRun must succeed (no dindPreflight hard failure) and its
+// create argv must carry none of the three dind create-time signals —
+// --runtime=sysbox-runc, CENCI_SANDBOX_DIND=1, and the per-repo
+// /var/lib/docker storage volume. The reported Posture must attribute the
+// off state to the host platform rather than rendering as an
+// indistinguishable plain "off".
+func TestDryRun_DarwinDindConfig_PreviewsDegradedArgv(t *testing.T) {
+	setDindHostOS(t, "darwin")
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+	writeFile(t, filepath.Join(repo, ".cenci", "config.json"), `{"sandbox":{"dind":true}}`)
+
+	fakeDir := t.TempDir()
+	callLog := filepath.Join(fakeDir, "calls.txt")
+	writeFakeRuntime(t, fakeDir, "docker", callLog)
+	writeFakeRuntime(t, fakeDir, "podman", callLog)
+	t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
+
+	eng := &Engine{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	plan, err := eng.DryRun(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("DryRun on darwin with a dind repo config = %v, want a successful degraded preview", err)
+	}
+
+	scope := ComputeScope("claude", "", repo, home)
+	joined := strings.Join(plan.CreateArgv, " ")
+	for _, unwanted := range []string{"--runtime=sysbox-runc", "CENCI_SANDBOX_DIND=1", scope.DindVolumeName} {
+		if strings.Contains(joined, unwanted) {
+			t.Errorf("CreateArgv contains %q on a degraded macOS launch, want it absent; got:\n%s", unwanted, joined)
+		}
+	}
+	if plan.Posture.Dind.Enabled {
+		t.Error("Posture.Dind.Enabled = true on darwin, want false")
+	}
+	if plan.Posture.Dind.Source != DindSourcePlatformUnsupported {
+		t.Errorf("Posture.Dind.Source = %q, want %q", plan.Posture.Dind.Source, DindSourcePlatformUnsupported)
+	}
+}

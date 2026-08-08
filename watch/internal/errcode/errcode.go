@@ -90,6 +90,13 @@ const (
 	// failed to start (or crashed/OOMed later) without an intentional
 	// shutdown sentinel superseding it.
 	SandboxDindStartupFailure Code = "CENCI-SANDBOX-DIND-001"
+
+	// SandboxDindPlatformUnsupported is attached when dind was requested
+	// (--dind or the repo's sandbox.dind config) on a host that can never
+	// register sysbox-runc — macOS, where dockerd runs inside Docker
+	// Desktop's unmodifiable LinuxKit VM. The launch proceeds without
+	// nested Docker rather than failing (#962).
+	SandboxDindPlatformUnsupported Code = "CENCI-SANDBOX-DIND-002"
 )
 
 // Daemon reachability codes (CENCI-DAEMON-*), attached by `cenci diagnose`'s
@@ -163,6 +170,17 @@ var registry = map[Code]Entry{
 			"docker/podman logs <container> --tail 50",
 		},
 	},
+	SandboxDindPlatformUnsupported: {
+		Message: "Nested Docker (DinD) is unavailable on this host; the session launched without it.",
+		Causes: []string{
+			"The host is macOS: sysbox-runc is a Linux-only runtime and Docker Desktop's LinuxKit VM cannot register it.",
+			"The repo requests dind via --dind or .cenci/config.json's sandbox.dind key.",
+		},
+		Hints: []string{
+			"cenci open <shortcut> --no-dind to launch without the warning",
+			"set \"sandbox\": {\"dind\": false} in .cenci/config.json for a repo that does not need nested Docker",
+		},
+	},
 	DaemonConnUnreachable: {
 		Message: "The cenci daemon did not answer on its event socket.",
 		Causes: []string{
@@ -197,6 +215,7 @@ var allCodes = []Code{
 	SandboxStartReadinessTimeout,
 	SandboxSessionNotFound,
 	SandboxDindStartupFailure,
+	SandboxDindPlatformUnsupported,
 	DaemonConnUnreachable,
 	DaemonSocketMissing,
 }

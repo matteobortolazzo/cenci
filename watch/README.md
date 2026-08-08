@@ -1560,6 +1560,18 @@ cenci open --dind                # force-enable nested Docker (Sysbox-isolated),
 cenci open --no-dind             # force-disable nested Docker, overriding a repo's sandbox.dind config
 ```
 
+Nested Docker is a **Linux-only host capability**: Sysbox must be installed on
+the machine running `dockerd`, and macOS runs it inside Docker Desktop's
+unmodifiable VM. On macOS a dind request — from `--dind` or from the repo's
+`sandbox.dind` config — therefore does not fail the launch: the sandbox starts
+without nested Docker and prints a warning naming `CENCI-SANDBOX-DIND-002`
+(pass `--no-dind`, or set `"dind": false`, to silence it). Only work that
+actually needs an in-container Docker daemon (Testcontainers, `docker
+build`/`docker run` in tests) is affected. On Linux, an unregistered
+`sysbox-runc` remains a hard launch failure with host install pointers, since
+there it is a fixable setup gap. See
+[the failure atlas](../docs/failure-atlas.md#cenci-sandbox-dind-002).
+
 Beyond the explicit `update-agent` verb, every `cenci open` launch also
 best-effort refreshes an already-populated shared agent-CLI volume when it is
 stale: the default TTL is 24h (override with
@@ -1737,6 +1749,10 @@ Nested Docker (`--dind`, or a repo's `sandbox.dind` config) gets its own
 "Nested Docker (sysbox-isolated)" section, separate from boundary
 weakenings — it runs under its own sysbox-isolated OCI runtime, never
 touching the host's own container runtime, so it is not an equivalent risk.
+On a host that can never register `sysbox-runc` (macOS), that section
+reports `source: platform-unsupported` with a note explaining why — an off
+state deliberately distinct from the plain `off` a repo that never asked for
+dind reports.
 Only `--host-network` is reported as a **boundary weakening**, and the text
 report visually marks it (`⚠`) instead of burying it in a flat list; the
 default-safe baseline (no weakenings active) is reported explicitly, not
