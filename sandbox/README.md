@@ -350,13 +350,13 @@ already exists.
 
 Repos with Pencil design workflows enabled (`pencil.enabled` in `.cenci/config.json`)
 run their `implement`/`verify-ui` design reads inside the sandbox through
-`@pen.dev/cli`'s **headless** mode (`pencil interactive -i <design>.pen`) — the CLI
+`@pen.dev/cli`'s **headless** mode (`pen interactive -i <design>.pen`) — the CLI
 runs the full editor engine with local rendering, so no desktop app, GUI, or MCP
 connection is needed. The CLI itself is baked into the per-repo image by
 `fragments/pencil.dockerfile` (selected by `/cenci:configure`); auth is optional
 staging, never a hard launch requirement:
 
-- `~/.pencil/session-cli.json` — the session created by `pencil login` on the host.
+- `~/.pencil/session-cli.json` — the session created by `pen login` on the host.
   Injected read-only and seeded to `/home/dev/.pencil/session-cli.json` (mode 600) only
   when the volume has none yet (same seed-once staging as the agent credentials;
   `--reseed-creds` forces a re-copy).
