@@ -10,9 +10,10 @@
 # CENCI_SANDBOX_RESEED_CREDS=1 (cenci open --reseed-creds) forces a re-copy for
 # recovery, e.g. after revoking all sessions.
 #
-# Non-rotating tokens (GitHub CLI hosts.yml) don't need this and keep the
-# unconditional copy so host re-auths propagate — but only when the host file
-# actually carries the token; see seed_gh_hosts below.
+# The GitHub CLI (hosts.yml) has no refresh cycle, so its copies never fork
+# into independent chains and this seed-once caution doesn't apply — it keeps
+# the unconditional copy so host re-auths propagate, but only when the host
+# file actually carries the token; see seed_gh_hosts below.
 
 # seed_credential <staged-src> <dest>
 seed_credential() {
@@ -31,9 +32,14 @@ seed_credential() {
 
 # seed_gh_hosts — token-aware seeding of the GitHub CLI's hosts.yml.
 #
-# gh's token doesn't rotate, so the host copy stays canonical and an
-# unconditional copy propagates host re-auths. That only holds when the host
-# file actually carries the token. Under gh's default secure storage the token
+# gh has no refresh cycle, so its copies never fork into the independent token
+# chains #259 guards against, and the host copy stays canonical: an
+# unconditional copy propagates host re-auths. Note this is *not* the same as
+# the token being stable — GitHub issues one OAuth token per user per app, so a
+# fresh `gh auth login` anywhere invalidates every other copy. Overwriting the
+# container copy from a token-carrying host file is the recovery path for that,
+# not a hazard. What the copy does require is that the host file actually
+# carries the token. Under gh's default secure storage the token
 # lives in the host OS keyring and hosts.yml lists the account with no
 # `oauth_token:` at all — and the container can't reach a host keyring (there
 # is no secret-service provider in the image, and a session bus alone doesn't

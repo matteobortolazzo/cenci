@@ -184,8 +184,12 @@ else
 fi
 
 # ── Case 9: GitHub CLI hosts.yml is seeded only when it carries a token ──
-# gh's token doesn't rotate, so the host copy stays canonical — but only when
-# the host file actually holds the token. With gh's default secure storage the
+# gh has no refresh cycle, so its copies never fork into the independent token
+# chains the seed-once contract above guards against, and the host copy stays
+# canonical — but only when the host file actually holds the token. (Canonical
+# is not the same as stable: GitHub issues one OAuth token per user per app, so
+# a fresh `gh auth login` anywhere invalidates every other copy, and the copy
+# below is what recovers from that.) With gh's default secure storage the
 # token lives in the host OS keyring and hosts.yml lists the account with no
 # `oauth_token:` at all. Copying that token-less file into the container is
 # worse than copying nothing: gh's multi-account config migration finds an
