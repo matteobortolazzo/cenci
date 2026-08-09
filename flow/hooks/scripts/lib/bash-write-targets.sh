@@ -10,8 +10,8 @@
 # combined forms of the same operators (`1>`, `2>`, `&>`, `&>>`, `>&`), and
 # every `tee`/`tee -a` operand. Explicitly NOT `cp`, `mv`, `dd of=`, `sed -i`,
 # `truncate`, input redirection (`<`), or "any unquoted `>` unless
-# allowlisted" -- those are out of scope by design (see ticket #795's
-# "Decisions settled during refinement").
+# allowlisted" -- see the "Named residuals" block below for why those verbs
+# are excluded.
 #
 # Known limitation: a `cat <<EOF` heredoc body containing an unquoted `>` is
 # tokenized as a real redirect operator and can produce a spurious
@@ -49,9 +49,16 @@
 #   implement it in this file).
 #
 #   Named residuals, accepted by settled #795 refinement decisions:
-#   - `cp`, `mv`, `dd of=`, `sed -i`, `truncate` are out of detection scope
-#     entirely (per-verb decision; #808 tracks re-examining its rationale
-#     under --dangerously-skip-permissions).
+#   - `cp`, `mv`, `dd of=`, `sed -i`, and `truncate` sit entirely outside
+#     this detection surface: these hooks do not inspect their write
+#     targets at all, so those targets are not protected by these hooks
+#     under --dangerously-skip-permissions. Each verb has a distinct
+#     target grammar with ambiguous target positions, and supporting them
+#     safely would materially expand parser complexity and false-positive
+#     risk without justifying the added maintenance cost. Where normal
+#     client permission rules are active they may add defense in depth,
+#     but they are never the sandbox boundary -- the container itself is.
+#     (#808)
 #   - Out-of-repo-root targets are allowed by guard-main-worktree.sh's Bash
 #     arm outright (Q1a, deliberate — see that script's header).
 #   - A command that evades even bwt_has_write_candidate (e.g. an
