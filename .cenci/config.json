@@ -1,5 +1,5 @@
 {
-  "configVersion": "0.51.1",
+  "configVersion": "0.54.1",
   "branchPattern": "feature/<id>-<description>",
   "isMonorepo": true,
   "stack": {
@@ -129,7 +129,7 @@
   "pinSubagents200K": false,
   "sandbox": {
     "enabled": true,
-    "baseVersion": "1.17.1"
+    "baseVersion": "1.18.1"
   },
   "lazyboards": {
     "enabled": true
