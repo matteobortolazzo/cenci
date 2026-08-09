@@ -309,6 +309,44 @@ An in-container login persists in the home volume and is no longer overwritten
 by a token-less host file on the next start. A host file that *does* carry a
 token still wins, so host re-auths keep propagating as before.
 
+**Which to pick.** Home volumes are per agent *and* per repo
+(`<agent>-cenci-home-<slug>`), so an in-container login covers exactly one
+sandbox — you repeat it for every repo and every agent. The host file is
+bind-mounted read-only into every container the launcher starts, so
+`--insecure-storage` is the only way to log in once and have it reach them all,
+including repos you haven't opened yet.
+
+#### Security tradeoff of `--insecure-storage`
+
+`--insecure-storage` writes the token in plaintext to `~/.config/gh/hosts.yml`
+on the host (mode 600). This repo accepts that tradeoff deliberately, for the
+sharing above. What it actually costs:
+
+- **You lose at-rest encryption.** A locked keyring (machine off, or you logged
+  out) keeps the token encrypted; a file doesn't. Full-disk encryption covers
+  most of this while the machine is off.
+- **You lose accident resistance.** The file travels with anything that sweeps
+  up `~/.config` — backups, dotfile repos, `cp -r`, support bundles. This is the
+  likeliest real leak path, and the strongest reason to prefer the keyring.
+- **You do not lose runtime isolation, because there wasn't any.** The keyring
+  is unlocked by PAM at login, so any process running as you can read the token
+  over D-Bus while your session is active. It is encryption at rest, not a
+  sandbox.
+- **The delta is one plaintext copy, not zero-to-one.** Any container with a
+  working `gh` already holds the token in plaintext in its home volume — a
+  container can't reach a host keyring, so every path that makes `gh` work
+  inside one materializes it on disk somewhere. `--insecure-storage` adds a
+  second copy, in the more backup-exposed location.
+
+**Scope the token — it matters more than where it's stored.** A default
+`gh auth login` token carries `repo`, which is read/write across every private
+repo you can see, handed to agents running with `--dangerously-skip-permissions`.
+Prefer a fine-grained PAT limited to the repos the sandbox touches, with an
+expiry set. That bounds the blast radius far more than the storage choice does.
+
+If you'd rather not have the token on the host filesystem at all, use the
+per-repo in-container login instead and accept repeating it per sandbox.
+
 ### Onboarding prompts
 
 Claude Code's first-run wizard — the theme picker, the terminal "anti-flicker"
