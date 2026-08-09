@@ -17,6 +17,28 @@ user-invocable: false
 - Never start an interactive CLI flow from automation. Pass explicit titles, bodies,
   messages, and other required inputs.
 
+## Background Commands
+
+- Prefer the foreground. Background execution is for a command that must keep running
+  while the agent does other work — a dev server, a desktop app, a file watcher. A
+  slow-but-finite command (a build, a test suite, a formatter) belongs in the foreground
+  with a raised timeout instead; backgrounding one only to skip the wait creates a shell
+  nobody is accountable for.
+- Stop every background shell you start. Before a workflow reports its result, review the
+  shells it started and stop each one still running, using the client's own
+  background-shell control (in Claude Code, the kill/stop tool that takes the shell id
+  returned when the shell was started; in Codex, the recorded process). A command that
+  looks finished is not proof its shell exited — check, then stop.
+- A leaked shell is not free. Claude Code reports still-running background shells on the
+  session's `Stop` event, and cenci-watch deliberately holds such a session at `running`
+  rather than `done` (#698/#699) because it cannot tell an abandoned shell apart from work
+  the session is genuinely waiting on. The hold clears on the session's next event, and an
+  abandoned shell never produces one, so the session reads as still-working until it ends.
+- A process meant to outlive the session is exempt, but only when it detaches for real —
+  its own session/process group and its own log file, never the agent's shell. `cenci
+  babysit` is the reference case: it detaches its own supervisor, so its launching shell
+  exits normally and there is nothing to reap.
+
 ## Search and File Operations
 
 Use the client's native read, search, glob, and patch tools when available. In Codex,

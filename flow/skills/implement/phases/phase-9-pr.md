@@ -531,6 +531,14 @@ This deliberately excludes two other scoped temp locations: the screenshots dir 
 
 Like the plan-file archiving above, this cleanup only runs on the success path (PR created). If the pipeline fails before PR creation, these files are preserved for retry/debugging, same as the plan file.
 
+**Reap this run's background shells.** Last cleanup step: stop every background shell this run started that is still running, in the main agent and in any subagent that reported one. The pipeline's own long gate, build, and test calls are the usual source. Use the client's background-shell control — in Claude Code, the kill/stop tool that takes the shell id returned when the shell was started. The standing rule is the `shell-rules` skill's `## Background Commands` section; this step is where the pipeline enforces it.
+
+Unlike the temp-file cleanup above, this runs on **every** exit from this phase, success or failure — a run that dies before `gh pr create` leaks shells exactly the same way, and the shells hold no state worth preserving for a retry (unlike the plan file and the run's temp files, which are deliberately kept).
+
+This is not cosmetic. Claude Code reports still-running background shells on the session's `Stop` event, and cenci-watch holds such a session at `running` instead of `done` (#698/#699) — it cannot tell an abandoned shell apart from work the session is genuinely waiting on. The hold clears on the session's next event, and an abandoned shell never produces one, so a single leaked shell leaves this ticket's window reporting as still-working for the rest of the session — the exact state this phase exists to end.
+
+The `## Babysit` launch below is exempt: `cenci babysit` detaches its own supervisor into its own session with its own log file, so its launching shell exits normally and never shows up as an in-flight background shell.
+
 ## Babysit
 
 This is the **final** Phase-9 action — do it only after `## Cleanup` above has settled the session's own completion (the plan file was archived). Ordering matters: this step arms an *unattended* `cenci babysit` supervisor that keeps running after this session exits, so the session's own cleanup must be finished before an external watcher is live.
