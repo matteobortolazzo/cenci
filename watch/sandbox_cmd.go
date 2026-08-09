@@ -73,22 +73,6 @@ func newEngine(verb string) *launcher.Engine {
 	return eng
 }
 
-// currentScope computes the launch scope for the current working directory,
-// exiting with a runtime error when cwd or home cannot be resolved.
-func currentScope(verb, agent, instanceName string) launcher.Scope {
-	cwd, err := os.Getwd()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "cenci sandbox %s: %v\n", verb, err)
-		os.Exit(1)
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "cenci sandbox %s: %v\n", verb, err)
-		os.Exit(1)
-	}
-	return launcher.ComputeScope(agent, instanceName, cwd, home)
-}
-
 // runSandboxBuild implements `cenci sandbox build [--check]`:
 // build the image the current directory selects (the repo's own image when
 // .cenci/Dockerfile opts in, otherwise the shared monolith), building the base
@@ -107,7 +91,7 @@ func runSandboxBuild(args []string) {
 	_ = fs.Parse(args)
 	rejectExtraArgs("build", fs)
 
-	scope := currentScope("build", "claude", "")
+	scope := currentScope("cenci sandbox build", "claude", "")
 
 	if *check {
 		current, err := newEngine("build").CheckSelected(scope)
@@ -219,6 +203,8 @@ func runSandboxUpdateAgent(args []string) {
 	// genuine owner, that owner must still be updated (mirroring ls/stop's
 	// partial-result handling) — only an empty owners set (nothing resolved
 	// anywhere) falls through to the bootstrap fallback below.
+	// No running/stopped tie-break applies here: volumes carry no container
+	// status, so there is nothing for OwnersRunningFirst to rank (#761 Q3).
 	var errs []error
 	volumeName := launcher.AgentCLIVolumeName(*agent)
 	owners, err := sandbox.RuntimesWithVolume(runtimes, volumeName)
@@ -380,15 +366,19 @@ func runSandboxUpdatePlugins(args []string) {
 		os.Exit(2)
 	}
 
-	scope := currentScope("update-plugins", *agent, *name)
+	scope := currentScope("cenci sandbox update-plugins", *agent, *name)
 	eng := newEngine("update-plugins")
 
-	// Resolve every runtime that actually owns this scope's target: a
-	// running container wins first; else the runtime(s) holding the scope's
-	// home volume; else fall back to the single preferred runtime (matching
-	// prior behavior when no evidence of prior use exists under either
-	// runtime). A same-name collision (both runtimes have it) runs the
-	// update against both in sequence (Q3) — never silently one.
+	// Resolve every runtime that actually owns this scope's target: among
+	// container owners, a runtime whose copy is currently running is acted
+	// on before a runtime whose copy is merely stopped (OwnersRunningFirst);
+	// when there is no container owner at all, fall back to the runtime(s)
+	// holding the scope's home volume; else fall back to the single
+	// preferred runtime (matching prior behavior when no evidence of prior
+	// use exists under either runtime). A same-name collision (both runtimes
+	// have it) runs the update against both in sequence (Q3) — never
+	// silently one; running-first only changes which owner's update runs
+	// first, never which runtimes are touched.
 	runtimes, err := sandbox.AvailableRuntimes()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cenci sandbox update-plugins: %v\n", err)
@@ -401,11 +391,14 @@ func runSandboxUpdatePlugins(args []string) {
 	// tier only falls through to the next when owners is genuinely empty,
 	// never merely because that tier's query errored on one runtime.
 	var errs []error
-	owners, err := sandbox.RuntimesWithContainer(runtimes, scope.ContainerName)
+	containerOwners, err := sandbox.RuntimesWithContainer(runtimes, scope.ContainerName)
 	if err != nil {
 		errs = append(errs, err)
 	}
-	if len(owners) == 0 {
+	var owners []string
+	if len(containerOwners) > 0 {
+		owners = sandbox.OwnersRunningFirst(containerOwners)
+	} else {
 		var volErr error
 		owners, volErr = sandbox.RuntimesWithVolume(runtimes, scope.VolumeName)
 		if volErr != nil {

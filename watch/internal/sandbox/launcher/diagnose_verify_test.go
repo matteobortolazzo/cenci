@@ -13,7 +13,7 @@ import (
 
 // -- Engine.Verify -------------------------------------------------------
 //
-// `cenci diagnose <session> --verify` re-runs the read-only diagnostic
+// `cenci diagnose --name <session> --verify` re-runs the read-only diagnostic
 // probes behind the recovery commands diagnose surfaces and prints a
 // pass/fail line per check, so an operator can confirm a suggested recovery
 // command actually worked. It reuses daemonStatusFinding/

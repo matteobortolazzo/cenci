@@ -75,7 +75,7 @@ cenci sandbox build
 The build can take several minutes on first run (it pulls the base image and installs
 the SDKs). Report the outcome.
 
-On failure, surface the runtime's error output and stop. `cenci diagnose` diagnoses a running/launched session, not an image build, so it does not help here — if the image builds successfully but a later `cenci open` launch fails instead, run `cenci diagnose <session>` for a read-only report (summarize it for the user rather than pasting it verbatim — it may include secrets, credentials, or host paths) and consult `docs/failure-atlas.md` and `docs/error-codes.md` for `CENCI-*` error codes and their suggested recovery commands before falling back to manual debugging.
+On failure, surface the runtime's error output and stop. `cenci diagnose` diagnoses a running/launched session, not an image build, so it does not help here — if the image builds successfully but a later `cenci open` launch fails instead, run `cenci diagnose --name <session>` for a read-only report (summarize it for the user rather than pasting it verbatim — it may include secrets, credentials, or host paths) and consult `docs/failure-atlas.md` and `docs/error-codes.md` for `CENCI-*` error codes and their suggested recovery commands before falling back to manual debugging.
 
 ### Done
 

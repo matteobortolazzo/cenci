@@ -831,7 +831,7 @@ func TestDiagnose_Collision_SameContainerUnderBothRuntimes_ActsOnBothReportsBoth
 		t.Fatalf("BaseTag: %v", err)
 	}
 
-	cmd := exec.Command(binaryPath, "diagnose", "default")
+	cmd := exec.Command(binaryPath, "diagnose")
 	cmd.Env = append(os.Environ(),
 		"PATH="+fakeDir+":/usr/bin:/bin",
 		"HOME="+home,
@@ -842,10 +842,10 @@ func TestDiagnose_Collision_SameContainerUnderBothRuntimes_ActsOnBothReportsBoth
 		"FAKE_PS_DOCKER=claude-cenci-default\n",
 		"FAKE_PS_PODMAN=claude-cenci-default\n",
 	)
-	cmd.Dir = t.TempDir()
+	cmd.Dir = t.TempDir() // non-git cwd -> legacy "default" scope, --name omitted
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("cenci diagnose default: %v\n%s", err, output)
+		t.Fatalf("cenci diagnose: %v\n%s", err, output)
 	}
 
 	dockerCalls, _ := os.ReadFile(dockerLog)
@@ -859,6 +859,55 @@ func TestDiagnose_Collision_SameContainerUnderBothRuntimes_ActsOnBothReportsBoth
 	out := string(output)
 	if !strings.Contains(out, "docker") || !strings.Contains(out, "podman") {
 		t.Errorf("expected the report to label each owner's runtime, got:\n%s", out)
+	}
+}
+
+// TestDiagnose_RunningFirstTieBreak_RunningOwnerReportedBeforeStoppedOwner
+// pins AC #9: on a same-name collision where one runtime's container is
+// running and the other's is stopped, diagnose orders the running owner's
+// labeled report before the stopped owner's — never the AvailableRuntimes
+// docker-then-podman enumeration order regardless of status. This genuinely
+// fails pre-fix, since diagnose_cmd.go orders owners exactly as
+// RuntimesWithContainer returns them (docker first, unconditionally).
+func TestDiagnose_RunningFirstTieBreak_RunningOwnerReportedBeforeStoppedOwner(t *testing.T) {
+	fakeDir := t.TempDir()
+	writeScriptedRuntimePair(t, fakeDir)
+	assets := writeAssetFixture(t)
+	home := t.TempDir()
+	xdg := t.TempDir()
+	tag, err := launcher.BaseTag(assets)
+	if err != nil {
+		t.Fatalf("BaseTag: %v", err)
+	}
+
+	cmd := exec.Command(binaryPath, "diagnose")
+	cmd.Env = append(os.Environ(),
+		"PATH="+fakeDir+":/usr/bin:/bin",
+		"HOME="+home,
+		"CENCI_SANDBOX_ASSETS="+assets,
+		"XDG_RUNTIME_DIR="+xdg,
+		"FAKE_VOLUMES=cenci-agent-cli-claude\ncenci-agent-cli-codex\n",
+		"FAKE_IMAGE_BASE_VERSION="+tag,
+		// docker's copy is stopped (tab-shaped row passed through verbatim);
+		// podman's copy is running (the fake synthesizes "Up 1 hour" for a
+		// bare name) — sandbox_open_test.go:337-362.
+		"FAKE_PS_DOCKER=claude-cenci-default\tExited (0) 2 hours ago\tcenci-sandbox:latest\n",
+		"FAKE_PS_PODMAN=claude-cenci-default\n",
+	)
+	cmd.Dir = t.TempDir() // non-git cwd -> legacy "default" scope, --name omitted
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cenci diagnose: %v\n%s", err, output)
+	}
+
+	out := string(output)
+	dockerIdx := strings.Index(out, "Runtime: docker")
+	podmanIdx := strings.Index(out, "Runtime: podman")
+	if dockerIdx == -1 || podmanIdx == -1 {
+		t.Fatalf("expected both runtimes labeled in the report, got:\n%s", out)
+	}
+	if podmanIdx > dockerIdx {
+		t.Errorf("expected the running owner (podman) reported before the stopped owner (docker), got docker label at byte %d, podman label at byte %d; full output:\n%s", dockerIdx, podmanIdx, out)
 	}
 }
 
@@ -881,7 +930,7 @@ func TestDiagnose_OneRuntimeContainerQueryFails_HealthyRuntimeStillDiagnosedNonZ
 		t.Fatalf("BaseTag: %v", err)
 	}
 
-	cmd := exec.Command(binaryPath, "diagnose", "default")
+	cmd := exec.Command(binaryPath, "diagnose")
 	cmd.Env = append(os.Environ(),
 		"PATH="+fakeDir+":/usr/bin:/bin",
 		"HOME="+home,
@@ -892,7 +941,7 @@ func TestDiagnose_OneRuntimeContainerQueryFails_HealthyRuntimeStillDiagnosedNonZ
 		"FAKE_PS_EXIT_DOCKER=1", // docker's ps -a container-listing query fails outright
 		"FAKE_PS_PODMAN=claude-cenci-default\n",
 	)
-	cmd.Dir = t.TempDir()
+	cmd.Dir = t.TempDir() // non-git cwd -> legacy "default" scope, --name omitted
 	output, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("expected cenci diagnose to exit non-zero when one runtime's container query fails, output:\n%s", output)

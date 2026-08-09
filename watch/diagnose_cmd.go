@@ -6,13 +6,17 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 
 	"github.com/matteobortolazzo/cenci/watch/internal/sandbox"
 	"github.com/matteobortolazzo/cenci/watch/internal/sandbox/launcher"
 )
 
-// runDiagnose implements `cenci diagnose <session> [--agent
+// diagnoseUsage is the one-line grammar shown on a diagnose usage error (a
+// bad/unknown flag, an invalid --agent, or a leftover positional — the
+// retired <session> form).
+const diagnoseUsage = "usage: cenci diagnose [--name <session>] [--agent claude|codex|opencode] [--verify]"
+
+// runDiagnose implements `cenci diagnose [--name <session>] [--agent
 // claude|codex|opencode] [--verify]`: a read-only report on a sandbox
 // session (container status/exit, the timestamped startup marker, recent
 // logs, daemon/socket reachability, plugin + image versions, and mounted
@@ -24,43 +28,35 @@ import (
 // check instead of the full report, so an operator can confirm a suggested
 // recovery command actually worked.
 //
+// --name selects the sandbox session to diagnose; omitting it diagnoses the
+// default (bare `cenci open`) session for the given agent, using the same
+// scope resolution as `sandbox update-plugins`'s currentScope. There is no
+// positional <session> form — it was fully retired (no deprecation period)
+// so a bare `cenci open` session (no explicit name) is diagnosable too.
+//
 // diagnose is a report, not a pass/fail gate: a successful render exits 0
-// even when it finds fatal/degraded issues. Only usage errors (missing
-// session, unknown flag, invalid --agent) and cwd/home/runtime resolution
+// even when it finds fatal/degraded issues. Only usage errors (unknown flag,
+// invalid --agent, a leftover positional) and cwd/home/runtime resolution
 // failures produce a non-zero exit.
 func runDiagnose(args []string) {
-	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-		fmt.Fprintln(os.Stderr, "cenci diagnose: usage: cenci diagnose <session> [--agent claude|codex|opencode] [--verify]")
-		os.Exit(2)
-	}
-	session := args[0]
-
 	fs := flag.NewFlagSet("diagnose", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	name := fs.String("name", "", "sandbox instance name (default: the bare `cenci open` session for --agent)")
 	agent := fs.String("agent", "claude", "agent whose sandbox session to diagnose (claude, codex, or opencode)")
 	verify := fs.Bool("verify", false, "re-run the read-only diagnostic probes and report pass/fail per verifiable check instead of the full report")
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "cenci diagnose: %v\n", err)
+		fmt.Fprintln(os.Stderr, diagnoseUsage)
 		os.Exit(2)
 	}
-	rejectExtra("cenci diagnose", fs.Args())
+	rejectExtraWithUsage("cenci diagnose", fs.Args(), diagnoseUsage)
 
 	if err := launcher.ValidateAgent(*agent); err != nil {
 		fmt.Fprintf(os.Stderr, "cenci diagnose: %v\n", err)
 		os.Exit(2)
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "cenci diagnose: cannot determine working directory: %v\n", err)
-		os.Exit(1)
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "cenci diagnose: cannot determine home directory: %v\n", err)
-		os.Exit(1)
-	}
-	scope := launcher.ComputeScope(*agent, session, cwd, home)
+	scope := currentScope("cenci diagnose", *agent, *name)
 
 	eng, err := launcher.New(os.Stdin, os.Stdout, os.Stderr)
 	if err != nil {
@@ -68,13 +64,17 @@ func runDiagnose(args []string) {
 		os.Exit(1)
 	}
 
-	// Resolve every runtime that actually owns this scope's target: a
-	// running container wins first; else the runtime(s) holding the scope's
-	// home volume; else fall back to the single preferred runtime — the same
-	// three-tier resolution `cenci sandbox update-plugins` uses (kept
-	// consistent per the ticket's explicit ask), so a same-named container
-	// under both docker and podman is diagnosed on both in sequence and
-	// reported for each (Q3) — never silently one.
+	// Resolve every runtime that actually owns this scope's target: among
+	// container owners, a runtime whose copy is currently running is acted
+	// on before a runtime whose copy is merely stopped (OwnersRunningFirst);
+	// when there is no container owner at all, fall back to the runtime(s)
+	// holding the scope's home volume; else fall back to the single
+	// preferred runtime — the same resolution `cenci sandbox update-plugins`
+	// uses (kept consistent per the ticket's explicit ask), so a same-named
+	// container under both docker and podman is diagnosed on both in
+	// sequence and reported for each (Q3) — never silently one, and
+	// running-first only changes which owner's report is printed first,
+	// never which runtimes are diagnosed.
 	//
 	// A per-runtime enumeration failure (container or volume listing) is
 	// aggregated into ownerErrs rather than aborting immediately: when the
@@ -92,11 +92,14 @@ func runDiagnose(args []string) {
 		fmt.Fprintf(os.Stderr, "warning: dual-runtime enumeration failed, falling back to %s: %v\n", eng.Runtime, availErr)
 	}
 	var ownerErrs []error
-	owners, err := sandbox.RuntimesWithContainer(runtimes, scope.ContainerName)
+	containerOwners, err := sandbox.RuntimesWithContainer(runtimes, scope.ContainerName)
 	if err != nil {
 		ownerErrs = append(ownerErrs, err)
 	}
-	if len(owners) == 0 {
+	var owners []string
+	if len(containerOwners) > 0 {
+		owners = sandbox.OwnersRunningFirst(containerOwners)
+	} else {
 		var volErr error
 		owners, volErr = sandbox.RuntimesWithVolume(runtimes, scope.VolumeName)
 		if volErr != nil {
