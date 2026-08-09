@@ -61,7 +61,13 @@ untracked/gitignored; `mv -n` no-clobber intentionally leaves a pre-existing sam
 archived record, and still reports `ARCHIVE_OK` since the skip itself is not an error). Key the
 final session summary off the marker, not the exit code: report `ARCHIVE_FAILED` (a real
 failure — permissions, disk full, cross-device); `ARCHIVE_SKIPPED` (no plan file for this run)
-and `ARCHIVE_OK` need no special reporting. Then,
+and `ARCHIVE_OK` need no special reporting. On every exit from this step, success or
+failure,
+stop every background shell this run started that is still running
+— an abandoned background process outlives the session, and on clients that report
+in-flight shells at turn end it keeps cenci-watch holding the session at `running`
+instead of `done` (#698/#699), which nothing later clears. The babysit launch below is
+exempt: it detaches its own supervisor, so its launching shell exits normally. Then,
 as the final step once the goal is
 cleared, hand the open PR to the persistent supervisor so it carries the PR to merge and does
 the final `In Review` → `Implemented` relabel: resolve the watch interval from
