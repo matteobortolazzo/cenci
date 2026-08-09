@@ -86,7 +86,7 @@ type goldenChild struct {
 	Labels    []string         `json:"labels"`
 	Assignees []goldenAssignee `json:"assignees"`
 	Milestone json.RawMessage  `json:"milestone"`
-	DependsOn []int            `json:"dependsOn"`
+	DependsOn []int            `json:"blockedBy"`
 	Plan      goldenPlan       `json:"plan"`
 }
 
@@ -191,7 +191,7 @@ func TestGoldenGraph_SchemaInvariants(t *testing.T) {
 		}
 		for _, dep := range c.DependsOn {
 			if !childNumbers[dep] {
-				t.Errorf("child #%d: dependsOn entry #%d does not resolve to any child in the fixture", c.Number, dep)
+				t.Errorf("child #%d: blockedBy entry #%d does not resolve to any child in the fixture", c.Number, dep)
 			}
 		}
 	}
@@ -251,7 +251,7 @@ func loginsOf(assignees []goldenAssignee) []string {
 //     dispatch.Decide's `planning` gate false and fall through to "not
 //     Planned" instead, per decide.go's `plan == nil` requirement).
 //   - the last (dependent) child decides "waiting on dependency #<first>",
-//     gated on the fixture's own body-declared "Depends on #<N>" line.
+//     gated on the fixture's own native blockedBy link.
 //
 // Plan-front-matter round-tripping through pipeline.CheckPlan is a
 // deliberately separate concern, covered by
@@ -269,6 +269,13 @@ func TestGoldenGraph_RoundTripsThroughCollectAndDecide(t *testing.T) {
 
 	for _, c := range graph.Children {
 		h.seedIssue(c.Number, c.Title, c.Body, c.Labels, loginsOf(c.Assignees))
+		// The fixture declares dependencies as GitHub's native blocked-by
+		// links (what /cenci:refine writes), not as a body line, so they must
+		// be seeded into the world explicitly -- seedIssue only carries the
+		// fields that live in the issue body/labels/assignees.
+		h.mutate(func(w *ghWorld) {
+			w.Issues[c.Number].BlockedBy = append([]int{}, c.DependsOn...)
+		})
 	}
 	h.commitAndPushConfig(chainRepoConfigLean)
 
@@ -293,6 +300,9 @@ func TestGoldenGraph_RoundTripsThroughCollectAndDecide(t *testing.T) {
 		if !slices.Equal(is.Labels, c.Labels) {
 			t.Errorf("#%d: world labels = %v, want fixture labels %v", c.Number, is.Labels, c.Labels)
 		}
+		if !slices.Equal(is.BlockedBy, c.DependsOn) {
+			t.Errorf("#%d: world blockedBy = %v, want fixture blockedBy %v", c.Number, is.BlockedBy, c.DependsOn)
+		}
 	}
 
 	firstDecision := decisionFor(t, decisions, firstChild.Number)
@@ -308,11 +318,11 @@ func TestGoldenGraph_RoundTripsThroughCollectAndDecide(t *testing.T) {
 
 	lastDecision := decisionFor(t, decisions, lastChild.Number)
 	if !slices.Equal(lastDecision.Ticket.DependsOn, lastChild.DependsOn) {
-		t.Errorf("#%d: collected Ticket.DependsOn = %v, want fixture dependsOn %v", lastChild.Number, lastDecision.Ticket.DependsOn, lastChild.DependsOn)
+		t.Errorf("#%d: collected Ticket.DependsOn = %v, want fixture blockedBy %v", lastChild.Number, lastDecision.Ticket.DependsOn, lastChild.DependsOn)
 	}
 	wantReason := fmt.Sprintf("waiting on dependency #%d", firstChild.Number)
 	if lastDecision.Reason != wantReason {
-		t.Errorf("#%d decision = %q, want %q (gated on the fixture's own body-declared dependency)", lastChild.Number, lastDecision.Reason, wantReason)
+		t.Errorf("#%d decision = %q, want %q (gated on the fixture's own native blockedBy link)", lastChild.Number, lastDecision.Reason, wantReason)
 	}
 }
 

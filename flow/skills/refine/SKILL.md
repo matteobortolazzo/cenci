@@ -314,17 +314,16 @@ gh label create "ui:visual-check" --repo <owner>/<repo> --color "FEF2C0" --descr
 
    #### Pass 1: Create children with numbered titles and dependency info
 
-   Create children **in dependency order** — independent children first, then children that depend on them (so you have their issue numbers for `Depends on` references).
+   Create children **in dependency order** — independent children first, then children that depend on them (so you have their issue numbers to mark as blockers).
 
    Each child title gets a `(K/N)` suffix, e.g. "Add API validation (1/3)".
 
    Each child body includes:
    - `Related to #<parent>` (links back to parent)
-   - `Depends on #<sibling>` lines for any children it depends on (if applicable)
    - `Parallel with #<sibling>` lines for children it can run alongside (if applicable)
    - Its own `### Acceptance Criteria` section — the criteria the proposal's split assigned to this child (its slice of the parent's partition, verified by the coverage gate above); omit the section only for a child the split assigned zero criteria (e.g. a design-only first child)
 
-   For each child K, use the `Write` tool to create the raw title and body as plain text — `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt` (`<ticket-title> (K/N)`) and `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md` (`Related to #<original-number>\nDepends on #<sibling-number>\nParallel with #<sibling-number>\n\n<ticket-body>\n\n### Acceptance Criteria\n- [ ] <each criterion the split assigned to this child>`) — never a hand-escaped JSON literal; the title is free text and must never be interpolated directly into the command line. `<ticket-body>` here is that child's **full block** from the proposal's `### Suggested Split` — its `### Goal`, `### Decisions`, and `### Assumptions (auto-adopted)` subsections — so the created ticket is plannable without consulting the parent (AC 5); its own `### Acceptance criteria` and `### Dependencies` subsections are not repeated verbatim here, since the checklist appended by this template (sourced from the coverage-gate-verified partition) and the `Depends on #<sibling-number>` / `Parallel with #<sibling-number>` lines above already cover that content.
+   For each child K, use the `Write` tool to create the raw title and body as plain text — `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt` (`<ticket-title> (K/N)`) and `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md` (`Related to #<original-number>\nParallel with #<sibling-number>\n\n<ticket-body>\n\n### Acceptance Criteria\n- [ ] <each criterion the split assigned to this child>`) — never a hand-escaped JSON literal; the title is free text and must never be interpolated directly into the command line. `<ticket-body>` here is that child's **full block** from the proposal's `### Suggested Split` — its `### Goal`, `### Decisions`, and `### Assumptions (auto-adopted)` subsections — so the created ticket is plannable without consulting the parent (AC 5); its own `### Acceptance criteria` and `### Dependencies` subsections are not repeated verbatim here, since the checklist appended by this template (sourced from the coverage-gate-verified partition), the `Parallel with #<sibling-number>` lines above, and the native blocked-by links applied after creation (below) already cover that content.
 
    Design-only children (see **Design-first splits** above) additionally include `"Design"` in that child's seed `labels` array below, and their body includes the `### Design Direction` section from this refinement (that's where `/cenci:design` reads it from).
 
@@ -358,7 +357,21 @@ gh label create "ui:visual-check" --repo <owner>/<repo> --color "FEF2C0" --descr
    ```
    `ensure-issue.sh link` is idempotent — it checks the parent's existing sub-issue list first, so an already-linked child is a no-op success, never a duplicate `--parent` edit — and verifies from the parent side before returning 0. Exit **14** means the link failed (or could not be verified): follow the write-failure protocol, report the error, retry `link` once, then if still failing, STOP — do not create any further children, and do not run Pass 2. Report the partial state: which children exist (with issue numbers) and which are linked as sub-issues.
 
-   Omit `Depends on` / `Parallel with` lines that don't apply (e.g. the first child typically has no dependencies). A design-only first child is a real child of the parent → link it as a sub-issue exactly like the others.
+   **Mark the child's blockers**, immediately after `link` succeeds for it — one `--add-blocked-by` per sibling this child depends on, using GitHub's native issue-dependency relationship (requires `gh` >= 2.94.0). Creating children in dependency order guarantees every blocker already has a number by the time this runs:
+   ```bash
+   gh issue edit <child-number> --repo <owner>/<repo> --add-blocked-by <blocking-sibling-number>
+   ```
+   Several blockers can be applied in one call by repeating the flag, or as a comma-separated list: `--add-blocked-by 200,201`.
+
+   This replaces the former `Depends on #<sibling>` body lines. The dispatch gate reads these native links (`blockedBy`) directly, GitHub renders them as real blockers in the Relationships sidebar, and they survive any later rewrite of the ticket body. Sibling children are always in the same repo, which is what native dependencies support.
+
+   **Verify** each child's blocker set after applying it:
+   ```bash
+   gh issue view <child-number> --repo <owner>/<repo> --json blockedBy --jq '.blockedBy.nodes[].number'
+   ```
+   If the edit or verification fails, follow the write-failure protocol: report the error, retry once, then if still failing, STOP — do not create any further children, and do not run Pass 2. Report which children exist, which are linked as sub-issues, and which blocker links were applied.
+
+   Skip this step entirely for a child with no dependencies (e.g. the first child typically has none), and omit `Parallel with` lines that don't apply. A design-only first child is a real child of the parent → link it as a sub-issue exactly like the others.
 
    #### Pass 2: Final sub-issue verification and (if ordered) an Execution Order note
 
@@ -414,25 +427,24 @@ gh label create "ui:visual-check" --repo <owner>/<repo> --color "FEF2C0" --descr
    gh issue view <D> --repo <owner>/<repo> --json title,labels --jq '.title, (.labels[].name)'
    ```
 
-   If creation fails, or the re-fetched title does not exactly match `Design: <feature title>` or the label set does not exactly match `["Refined","Design"]` plus any inherited non-excluded parent labels, follow the write-failure protocol: report the error (or mismatch) and STOP — report that the design ticket was not created (or was created with corrupted content — note `<D>` for manual cleanup), so the implementation ticket's body cannot be updated with a dependency line.
+   If creation fails, or the re-fetched title does not exactly match `Design: <feature title>` or the label set does not exactly match `["Refined","Design"]` plus any inherited non-excluded parent labels, follow the write-failure protocol: report the error (or mismatch) and STOP — report that the design ticket was not created (or was created with corrupted content — note `<D>` for manual cleanup), so the implementation ticket cannot be marked blocked by it.
 
-   No URL parsing is needed for `<D>`. Append a dependency line to the implementation ticket's body. Use the `Write` tool to create `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>.md` (reusing the bare `issue-<number>-<token>.md` path from step 10, not a `-design` suffixed one) with the implementation ticket's current body plus an appended:
+   No URL parsing is needed for `<D>`. Mark the implementation ticket **blocked by** the design ticket, using GitHub's native issue-dependency relationship (requires `gh` >= 2.94.0):
 
-   ```
-   Depends on #<D> (design)
-   ```
-
-   Then run:
    ```bash
-   gh issue edit <number> --repo <owner>/<repo> --body-file ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>.md
+   gh issue edit <number> --repo <owner>/<repo> --add-blocked-by <D>
    ```
 
-   **Verify** by re-fetching the implementation ticket and confirming the `Depends on #<D> (design)` line is present in the body:
+   This replaces the former `Depends on #<D> (design)` body line. The relationship now lives in GitHub's own Relationships sidebar, which is where the dispatch gate reads it from (`blockedBy`) — so it survives any later rewrite of the ticket body, and shows up in the GitHub UI as a real blocker rather than as prose. The `(design)` annotation the old line carried is not lost: the blocking ticket is identifiable as the design ticket by its `Design` label and its `Design: <feature title>` title.
+
+   Native dependencies are **same-repo** (GitHub does not link issues across unrelated repositories), which matches this step — `<number>` and `<D>` are always in the same repo.
+
+   **Verify** by re-fetching the implementation ticket and confirming #`<D>` appears in its blocked-by set:
    ```bash
-   gh issue view <number> --repo <owner>/<repo> --json body --jq '.body'
+   gh issue view <number> --repo <owner>/<repo> --json blockedBy --jq '.blockedBy.nodes[].number'
    ```
 
-   If the update or verification fails, follow the write-failure protocol: report the error, retry once, and if still failing, STOP and report that the implementation ticket #`<number>` was not updated with the `Depends on #<D> (design)` line — but design ticket #`<D>` exists, so the user can add the dependency line manually.
+   If the update or verification fails, follow the write-failure protocol: report the error, retry once, and if still failing, STOP and report that the implementation ticket #`<number>` was not marked blocked by #`<D>` — but design ticket #`<D>` exists, so the user can add the relationship manually (issue sidebar → Relationships → **Mark as blocked by**).
 
    When `/cenci:design <D>` completes, it closes #<D> and propagates the `Designed` label to this ticket, satisfying implement's Design gate.
 

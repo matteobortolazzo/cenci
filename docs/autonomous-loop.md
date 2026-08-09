@@ -343,7 +343,7 @@ Accepted and documented, not bugs:
   trigger threshold.
 - **Sibling serialization is inert for planning pickups.** It's derived from plan-file
   front matter, which doesn't exist yet for a `Refined` ticket, so several children of
-  one parent can enter planning in the same pass. Declared `Depends on #N` chains
+  one parent can enter planning in the same pass. Declared blocked-by chains
   still serialize.
 - **A persistently failing resume can loop.** A session that claims `Working` and then
   fails restores `Input Needed` in-session, so dispatch re-resumes it next pass, with

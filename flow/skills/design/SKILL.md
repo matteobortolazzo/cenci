@@ -561,12 +561,18 @@ gh issue edit <number> --repo <owner>/<repo> --add-label "Designed" --remove-lab
 **If the ticket carries the "Design" label** (a design-only ticket from `/cenci:refine` — the design spec *is* the deliverable, no implementation follows), additionally:
 
 1. **Find the implementation tickets this design blocks.** Union of:
+   - The design ticket's own native **Blocking** set — the authoritative source, the exact inverse of the `--add-blocked-by` link `/cenci:refine` applies (requires `gh` >= 2.94.0):
+     ```bash
+     gh issue view <number> --repo <owner>/<repo> --json blocking --jq '.blocking.nodes[].number'
+     ```
    - Any `Blocks #<n>` lines in the design ticket's body
-   - Open issues whose body declares the dependency:
+   - Open issues whose body still carries the legacy prose dependency (in-flight tickets refined before native links; drop this query once no open ticket uses the form):
      ```bash
      gh issue list --repo <owner>/<repo> --state open --search "\"Depends on #<number>\" in:body" --json number,title
      ```
-   Deduplicate the two lists.
+   Deduplicate the three lists.
+
+   There is no `blocked-by:` search qualifier, so the native lookup is a direct read of this ticket's own `blocking` field rather than a repo-wide search — which is both cheaper and exact, since it cannot miss a dependent whose body never mentioned the design ticket.
 
 2. **Propagate `Designed` to each dependent.** This is what satisfies implement's Design gate — the gate checks the label on the ticket being implemented, not the ticket body:
    ```bash

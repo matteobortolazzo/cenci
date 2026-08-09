@@ -60,6 +60,13 @@ type ghIssue struct {
 	Assignees []string `json:"assignees"`
 	UpdatedAt string   `json:"updatedAt"`
 
+	// BlockedBy is the issue's native GitHub dependency set -- the numbers
+	// this issue is "Blocked by". Unlike Milestone/SubIssues below this is
+	// NOT fidelity-only: the collector reads it from `gh issue list --json
+	// ...,blockedBy`, so it is rendered into that route's payload by
+	// issueListJSON and drives the dependency gate.
+	BlockedBy []int
+
 	// Milestone and SubIssues (#914) are world-model fidelity only: no
 	// production code in this repo consumes either field (Q3), so there is
 	// no new `gh` route or `--json` field-switch entry for them -- they
@@ -1415,10 +1422,38 @@ func chainIssueList(world *ghWorld) string {
 		assignees, _ := json.Marshal(assigneeObjs(is.Assignees))
 		body, _ := json.Marshal(is.Body)
 		title, _ := json.Marshal(is.Title)
-		fmt.Fprintf(&sb, `{"number":%d,"title":%s,"body":%s,"labels":%s,"assignees":%s}`,
-			is.Number, title, body, labels, assignees)
+		fmt.Fprintf(&sb, `{"number":%d,"title":%s,"body":%s,"labels":%s,"assignees":%s,"blockedBy":%s}`,
+			is.Number, title, body, labels, assignees, blockedByJSON(world, is))
 	}
 	sb.WriteString("]")
+	return sb.String()
+}
+
+// blockedByJSON renders is.BlockedBy as the GraphQL connection shape gh emits
+// for the `blockedBy` --json field: {"nodes":[{number,url,state}],"totalCount"}.
+// Each node's state is read from the world's own copy of the blocking issue,
+// so closing a blocker through a real `gh issue edit` in a scenario flips the
+// dependent's gate exactly as it would against GitHub. A number with no issue
+// in the world renders OPEN -- the conservative direction, matching how a
+// blocker that exists but was never seeded should still hold the dependent.
+func blockedByJSON(world *ghWorld, is *ghIssue) string {
+	if len(is.BlockedBy) == 0 {
+		return `{"nodes":[],"totalCount":0}`
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, `{"totalCount":%d,"nodes":[`, len(is.BlockedBy))
+	for i, n := range is.BlockedBy {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		state := "OPEN"
+		if blocker, ok := world.Issues[n]; ok && blocker.State == "CLOSED" {
+			state = "CLOSED"
+		}
+		fmt.Fprintf(&sb, `{"number":%d,"url":"https://github.com/%s/issues/%d","state":%q}`,
+			n, os.Getenv(chainGhRepoEnv), n, state)
+	}
+	sb.WriteString("]}")
 	return sb.String()
 }
 
@@ -1945,6 +1980,10 @@ func seedFromGoldenGraph(t *testing.T, h *chainHarness, graph goldenGraph) {
 		childMilestone := decodeChainGoldenMilestone(t, c.Milestone)
 		h.mutate(func(w *ghWorld) {
 			w.Issues[c.Number].Milestone = &ghMilestone{Number: childMilestone.Number, Title: childMilestone.Title}
+			// The fixture's blockedBy set is GitHub's native dependency
+			// relationship, which is what /cenci:refine now writes -- unlike
+			// Milestone above it is a real gate input, not fidelity-only.
+			w.Issues[c.Number].BlockedBy = append([]int{}, c.DependsOn...)
 		})
 	}
 }

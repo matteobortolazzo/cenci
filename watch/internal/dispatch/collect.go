@@ -46,15 +46,16 @@ func currentGitHubLogin() (string, error) {
 // every ticket at the ungated zero value (MainSyncSkipped) -- a nil-map
 // lookup is safe in Go and needs no special-casing here.
 //
-// resolveDeps opts this call in or out of "Depends on #N" parsing/resolution
-// (#825 review fix #1), mirroring how mainSync already opts in/out of the
-// local-main sync per call -- a second, independent axis on the same call.
-// RunOnce passes true (dispatch decisions need the gate); RunReconcileOnce
-// passes false, since the reconciler never reads DependsOn/DependencyStates
-// and would otherwise burn its own maxDependencyResolutions gh-call budget
-// on a result it discards. false leaves every ticket's DependsOn/
-// DependencyStates at their nil zero value -- the same "ungated" state a
-// dependency-free issue already gets.
+// resolveDeps opts this call in or out of building the dependency gate input
+// -- both native blocked-by conversion and legacy "Depends on #N"
+// parsing/resolution (#825 review fix #1) -- mirroring how mainSync already
+// opts in/out of the local-main sync per call, a second, independent axis on
+// the same call. RunOnce passes true (dispatch decisions need the gate);
+// RunReconcileOnce passes false, since the reconciler never reads
+// DependsOn/DependencyStates and would otherwise burn its own
+// maxDependencyResolutions gh-call budget on a result it discards. false
+// leaves every ticket's DependsOn/DependencyStates at their nil zero value --
+// the same "ungated" state a dependency-free issue already gets.
 //
 // out receives one log line per gh issue view fallback failure and per
 // pass-wide dependency-resolution cap hit (#825 review fix #3); callers are
@@ -78,15 +79,25 @@ func collectRepoTickets(rc RepoConfig, sync MainSync, resolveDeps bool, out io.W
 	repo := rc.Repo
 	stdout, stderr, err := execGh("issue", "list",
 		"--repo", repo, "--state", "open",
-		"--json", "number,title,body,labels,assignees", "--limit", "200")
+		"--json", "number,title,body,labels,assignees,blockedBy", "--limit", "200")
 	if err != nil {
 		// Detail is truncated to maxProbeLogDetailBytes (#852 second review
-		// round, finding B): `--json number,title,body,labels,assignees
+		// round, finding B): `--json number,title,body,labels,assignees,blockedBy
 		// --limit 200` can return up to 200 full issue bodies (potentially
 		// attacker-authored content on a public repo) in stdout, and a
 		// ghTimeout/WaitDelay kill mid-stream can leave that large partial
 		// payload spliced into this error string verbatim.
-		return nil, fmt.Errorf("gh issue list %s: %w: %s", repo, err, truncateDetail(collapseLines(stdout+stderr), maxProbeLogDetailBytes))
+		detail := truncateDetail(collapseLines(stdout+stderr), maxProbeLogDetailBytes)
+		if isUnknownGhJSONField(stderr) {
+			// A gh predating the blockedBy field rejects the whole call, so
+			// this surfaces as a hard, named collection failure rather than a
+			// silent degradation. Failing the pass is the safe direction: the
+			// alternative -- retrying without blockedBy -- would leave every
+			// natively-declared blocker invisible to the gate and dispatch
+			// blocked tickets as if they were ready.
+			return nil, fmt.Errorf("gh issue list %s: %w (requires gh >= %s for native issue dependencies; upgrade gh): %s", repo, err, minGhVersionNativeDeps, detail)
+		}
+		return nil, fmt.Errorf("gh issue list %s: %w: %s", repo, err, detail)
 	}
 	var issues []struct {
 		Number int    `json:"number"`
@@ -98,6 +109,7 @@ func collectRepoTickets(rc RepoConfig, sync MainSync, resolveDeps bool, out io.W
 		Assignees []struct {
 			Login string `json:"login"`
 		} `json:"assignees"`
+		BlockedBy blockedByConnection `json:"blockedBy"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &issues); err != nil {
 		return nil, fmt.Errorf("parsing issues for %s: %w", repo, err)
@@ -148,20 +160,26 @@ func collectRepoTickets(rc RepoConfig, sync MainSync, resolveDeps bool, out io.W
 		stage, probe := probeStage(rc.Dir, is.Number)
 
 		// resolveDeps==false (the reconciler's call, #825 review fix #1) skips
-		// parseDependsOn/resolveDependencyStates entirely for every issue,
-		// leaving DependsOn/DependencyStates at their nil zero value -- the
-		// reconciler never reads these fields, so resolving them would only
-		// waste the pass's gh issue view budget on a discarded result.
+		// the whole dependency gate input -- native blocked-by conversion and
+		// prose parsing/resolution alike -- for every issue, leaving
+		// DependsOn/DependencyStates at their nil zero value. The reconciler
+		// never reads these fields, so resolving them would only waste the
+		// pass's gh issue view budget on a discarded result. (The native side
+		// costs no gh calls, but is skipped too so that resolveDeps==false
+		// keeps meaning exactly one thing: no dependency gate input at all.)
 		var dependsOn []int
 		var depStates map[int]DependencyState
 		var depAnomalies []string
+		var nativeAnomalies []string
 		if resolveDeps {
-			nums, anomalies := parseDependsOn(is.Body)
-			depAnomalies = anomalies
-			if len(nums) > 0 {
-				dependsOn = nums
-				depStates = resolveDependencyStates(repo, nums, openNumbers, depCache, depBudget, out)
-			}
+			nativeNums, nativeStates, nativeAnoms := nativeDependencies(repo, is.BlockedBy)
+			nativeAnomalies = nativeAnoms
+			proseNums, proseAnoms := parseDependsOn(is.Body)
+			depAnomalies = proseAnoms
+			dependsOn, depStates = mergeDependencies(nativeNums, nativeStates, proseNums,
+				func(nums []int) map[int]DependencyState {
+					return resolveDependencyStates(repo, nums, openNumbers, depCache, depBudget, out)
+				})
 		}
 
 		tickets = append(tickets, Ticket{
@@ -178,7 +196,10 @@ func collectRepoTickets(rc RepoConfig, sync MainSync, resolveDeps bool, out io.W
 			DependsOn:           dependsOn,
 			DependencyStates:    depStates,
 			DependencyAnomalies: depAnomalies,
-			OpenPRProbe:         openPRProbe,
+
+			NativeDependencyAnomalies: nativeAnomalies,
+
+			OpenPRProbe: openPRProbe,
 		})
 	}
 	return tickets, nil

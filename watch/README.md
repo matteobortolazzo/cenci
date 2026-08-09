@@ -482,8 +482,8 @@ failing gate is the logged skip reason):
    human is almost always commits-behind, and applying this gate there would mean
    it could never re-resume; a planning pickup has no plan file to measure
    staleness against in the first place;
-5. **ticket dependency gate** — every `Depends on #N` reference in the ticket's body
-   is closed (else `waiting on dependency #N`, or `dependency #N unresolved` when
+5. **ticket dependency gate** — every issue the ticket is blocked by is closed
+   (else `waiting on dependency #N`, or `dependency #N unresolved` when
    that issue's state couldn't be determined; see
    [Ticket dependency gate](#ticket-dependency-gate) below);
 6. **siblings serialize** — if the plan is a child (`isChild: true`), it waits while
@@ -893,7 +893,7 @@ serialization) is derived entirely from the plan file's `isChild`/`parentId`
 front matter, which doesn't exist yet for a `Refined`-with-no-plan ticket, so it
 is inert for a planning pickup. A parent with several `Refined` children can have
 planning sessions launched for multiple siblings in the same pass, up to
-`concurrencyCap`. The existing `Depends on #N` dependency gate still serializes
+`concurrencyCap`. The existing ticket dependency gate still serializes
 any chain the refiner actually declared, and `concurrencyCap`/`dailyQuota` bound
 the rest — there is no new sibling-detection logic for this case.
 
@@ -923,22 +923,46 @@ touches.
 
 #### Ticket dependency gate
 
-A ticket's body may declare it depends on another same-repo issue with a
-line-anchored `Depends on #N` reference — case-insensitive, tolerant of an optional
-leading `- `/`* ` list marker and arbitrary trailing text (e.g.
-`- Depends on #822 (local main sync) since ...`). `Related to #N` and
-`Parallel with #N` never match — only the literal `Depends on` phrase gates dispatch.
-Only bare same-repo `#N` syntax is recognized; cross-repo `owner/repo#N` references
-are out of scope.
+A ticket declares its blockers using **GitHub's native issue dependencies** — the
+"Blocked by" relationship in the issue sidebar's Relationships section. This is the
+preferred form and the one `/cenci:refine` writes:
 
-Each referenced issue's openness resolves against the pass's own collected open-issue
-set first (no extra API call); a number outside that set falls back to a
-`gh issue view` call, memoized once per repo per pass so N tickets depending on the
-same out-of-window issue cost exactly one call, not N (bounded by a per-pass call
-cap to protect against a ticket body listing an unbounded number of dependencies).
-Gate 5 above blocks the ticket while any referenced issue is still open
+```bash
+gh issue edit <ticket> --repo <owner>/<repo> --add-blocked-by <blocker>
+```
+
+Native links cost nothing extra to read: each blocker's state arrives inline with
+the ticket in the collector's single `gh issue list --json ...,blockedBy` call, so
+no follow-up API call is made per dependency. This requires **gh >= 2.94.0**; an
+older gh does not know the `blockedBy` JSON field and the collector fails the pass
+with an explicit upgrade message rather than silently ignoring every native link.
+
+For **in-flight tickets refined before native links existed**, the legacy body-text
+form is still read: a line-anchored `Depends on #N` reference — case-insensitive,
+tolerant of an optional leading `- `/`* ` list marker and arbitrary trailing text
+(e.g. `- Depends on #822 (local main sync) since ...`). `Related to #N` and
+`Parallel with #N` never match — only the literal `Depends on` phrase gates
+dispatch. Only bare same-repo `#N` syntax is recognized; cross-repo `owner/repo#N`
+references are out of scope. A ticket is gated on the **union** of both sources.
+
+For a legacy prose reference, the issue's openness resolves against the pass's own
+collected open-issue set first (no extra API call); a number outside that set falls
+back to a `gh issue view` call, memoized once per repo per pass so N tickets
+depending on the same out-of-window issue cost exactly one call, not N (bounded by
+a per-pass call cap to protect against a ticket body listing an unbounded number of
+dependencies). A number declared both natively and in prose is never resolved
+twice — the native state wins and no fallback call is made.
+
+Gate 5 above blocks the ticket while any dependency is still open
 (`waiting on dependency #N`) and fails closed with a distinct reason
-(`dependency #N unresolved`) when an issue's state can't be determined at all.
+(`dependency #N unresolved`) when a state can't be determined at all.
+
+Because `DependsOn` is keyed by bare issue number, a native link is only usable
+when it points into the **same repo**. GitHub permits blocked-by links to other
+repos in the same organization, but such a link's number would collide with a
+same-numbered local issue, so it is refused rather than mis-keyed: the ticket is
+gated with `native dependency unusable: "..."` naming the offending URL. The same
+fail-closed reason covers a blocker list GitHub returned only partially.
 
 This gate blocks both planning pickup and implementation pickup (see [Planning
 pickup and autonomous re-plan](#planning-pickup-and-autonomous-re-plan) above,
@@ -946,9 +970,6 @@ ticket #828) — a plan written before its dependency merges is considered stale
 arrival by gate 4's path-aware staleness check in the common case (a same-repo
 dependency touching shared files), so there's little practical benefit to
 planning before a dependency resolves.
-
-Native GitHub `blockedBy` issue links are not recognized; only body-text
-`Depends on #N` references gate dispatch.
 
 ### Configuration
 

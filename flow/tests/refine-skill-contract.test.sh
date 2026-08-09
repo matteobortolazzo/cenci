@@ -92,7 +92,13 @@ if [[ -n "${skill}" ]]; then
 
   # The child-body backlinks are retained (hierarchy != dependency ordering).
   assert_contains "${skill}" "Related to #" "skills/refine/SKILL.md"
-  assert_contains "${skill}" "Depends on #" "skills/refine/SKILL.md"
+
+  # Dependency ordering is expressed as GitHub's native blocked-by
+  # relationship, not as a `Depends on #N` body line — mirroring the native
+  # sub-issue migration asserted above. The write is `--add-blocked-by`; the
+  # read-back verification is the `blockedBy` JSON field.
+  assert_contains "${skill}" "--add-blocked-by" "skills/refine/SKILL.md"
+  assert_contains "${skill}" "--json blockedBy" "skills/refine/SKILL.md"
 fi
 
 # --- agents/context-gatherer.md — detection via the native sub-issue graph ---

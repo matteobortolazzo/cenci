@@ -40,11 +40,11 @@
       "number": 102,
       "title": "Dependent child (2/2)",
       "state": "OPEN",
-      "body": "Depends on #101\n\nSecond child, builds on the first.",
+      "body": "Second child, builds on the first.",
       "labels": ["Refined"],
       "assignees": [{ "login": "octocat" }],
       "milestone": { "number": 5, "title": "Epic v1" },
-      "dependsOn": [101],
+      "blockedBy": [101],
       "plan": {
         "ticketId": 102,
         "slug": "dependent-child",
