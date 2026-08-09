@@ -46,7 +46,7 @@ New → Refined → [Designed] → Planned → Working → In Review → Impleme
 | Working → Input Needed (escalation) | `/cenci:implement` planning (unattended, `planning.autonomy: "lean"`) | Persists a draft `.plans/<id>-*.md` (`status: awaiting-input`), then `+Input Needed` `−Working` (`Refined` retained) |
 | Input Needed → Working (resume) | `cenci dispatch` (auto-resume) or a manual `/cenci:implement <id>` re-run | `+Working` `−Input Needed` (atomic, one label call) once a qualifying human reply is detected after the escalation anchor; `Refined` retained. Reverses to `+Input Needed` `−Working` on a failed auto-resume launch (unless the tmux window was demonstrably created) or on the reconciler's bounded interrupted-resume recovery |
 | Working → In Review | `/cenci:implement` phase 9 | `+In Review` `−Working` when the PR opens |
-| In Review → Implemented | `/cenci:babysit` (on PR merge) | `+Implemented` `−In Review` |
+| In Review → Implemented | `/cenci:babysit` (on PR merge, including merge-time split-parent reconciliation) | `+Implemented` `−In Review` |
 
 `automerge:ok` is a per-ticket grant confirmed at refine's Confirmation Gate, never inherited — a split child, the companion design ticket, and a followup ticket each earn it (or not) on their own merit, never from the parent.
 
@@ -59,6 +59,17 @@ parent's acceptance criteria against delivered evidence, and reconciled to the
 current verdict on every re-entry rather than trusting an earlier attempt's write;
 on gaps the last-child PR references the parent as `Related to` and the parent
 stays open with a gap comment). PR-open never applies `Implemented`.
+
+Parent completion is never inferred from a plan-time `isLastChild` value alone:
+on every merged PR, babysit separately reconciles split-parent completion at merge
+time from the live native GitHub parent/sub-issue graph, so two concurrent sibling
+PRs that both started with `isLastChild: false` still correctly close the parent
+once the second one merges. For each closed issue's native `parent`, once every
+native sub-issue on that parent reads closed, babysit closes and relabels the
+parent to `Implemented` too — unless the parent's comment thread carries a live
+`parent-gap-report` marker (the same one the Parent Close Gate posts above), in
+which case the parent is left open and reported as held for human triage; a stale
+gap report holds the parent indefinitely until a human resolves it.
 
 `/cenci:babysit`'s merge is squash-only — no other merge method is ever
 issued — and its evaluation immediately before issuing the merge command

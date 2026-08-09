@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -233,7 +234,11 @@ func TestTickLaunchesAddressReviewForNewFeedback(t *testing.T) {
 func TestTickMergedRelabelsClosingIssues(t *testing.T) {
 	var calls [][]string
 	merged := `{"number":42,"title":"Done","state":"MERGED","url":"https://example/pr/42","closingIssuesReferences":[{"number":9}]}`
-	withCommands(t, []string{merged, `{}`, `{}`}, &calls)
+	// The 4th response answers #811's new post-relabel parent-relationship
+	// read (`gh issue view 9 --json parent`); a null parent means
+	// reconcileParents does no further work, so this test's original
+	// relabel-only assertions still hold unchanged.
+	withCommands(t, []string{merged, `{}`, `{}`, `{"parent":null}`}, &calls)
 	s := State{PR: "42", Repo: "o/r", Agent: "claude", IntervalSeconds: 60, CurrentDelaySeconds: 60}
 	terminal, _, err := tick(&s)
 	if err != nil || !terminal {
@@ -248,6 +253,262 @@ func TestTickMergedRelabelsClosingIssues(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("issue relabel missing: %#v", calls)
+	}
+}
+
+// prViewCallKey is the exact `pr view` call key tick() issues, shared by the
+// #811 merge-time parent-reconciliation wiring tests below (each needs to
+// script it via the arg-dispatching ghStub, unlike withCommands' sequential
+// queue, since these tests also need to script tick's variable-length
+// downstream reconcileParents calls by their own distinct argument shape).
+func prViewCallKey(pr string) string {
+	return fmt.Sprintf("pr view %s --repo o/r --json %s", pr, prViewFields)
+}
+
+// TestTickMergedNonChildClosingIssueMakesExactlyOneExtraParentRead pins #811
+// items 1 and 4 together: a closing issue that is not itself a split child
+// (its native `parent` relationship is null) leaves the existing per-child
+// relabel untouched, costs exactly one extra `gh` call (the parent-read),
+// and never reaches the parent write/comment-read paths at all.
+func TestTickMergedNonChildClosingIssueMakesExactlyOneExtraParentRead(t *testing.T) {
+	var calls [][]string
+	merged := `{"number":42,"title":"Done","state":"MERGED","url":"https://example/pr/42","closingIssuesReferences":[{"number":9}]}`
+	ghStub(t, &calls, map[string]ghResp{
+		prViewCallKey("42"): {stdout: merged},
+		selfHealKey:         {stdout: `{}`},
+		"issue edit 9 --repo o/r --add-label Implemented --remove-label In Review": {stdout: `{}`},
+		"issue view 9 --repo o/r --json parent":                                    {stdout: `{"parent":null}`},
+	})
+	s := State{PR: "42", Repo: "o/r", Agent: "claude", IntervalSeconds: 60, CurrentDelaySeconds: 60}
+	terminal, _, err := tick(&s)
+	if err != nil || !terminal {
+		t.Fatalf("tick = terminal %v, err %v", terminal, err)
+	}
+	wantEdit := []string{"gh", "issue", "edit", "9", "--repo", "o/r", "--add-label", "Implemented", "--remove-label", "In Review"}
+	found := false
+	for _, c := range calls {
+		if reflect.DeepEqual(c, wantEdit) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("existing per-child issue relabel missing: %#v", calls)
+	}
+	if n := countCalls(calls, "issue view 9 --repo o/r --json parent"); n != 1 {
+		t.Fatalf("parent-relationship reads = %d, want exactly 1: %#v", n, calls)
+	}
+	got := writeCalls(calls)
+	// #811 fix: the write list also legitimately contains tick's own
+	// pre-existing, unconditional "gh label create Implemented" self-heal
+	// call (scripted above via selfHealKey -- an unscripted call would fail
+	// this test outright -- proving it does fire), alongside the pre-existing
+	// child relabel; the substantive #811 property this test pins is that
+	// neither of those pre-existing writes, nor any new one, ever targets
+	// parent #20 (no *parent* write) on a null-parent closing issue.
+	for _, c := range got {
+		if strings.Contains(strings.Join(c, " "), "20") {
+			t.Fatalf("issued a parent-numbered write on a null-parent closing issue: %#v", got)
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("writes = %#v, want exactly the pre-existing self-heal and child relabel", got)
+	}
+	if n := countCalls(calls, "api ", "/comments"); n != 0 {
+		t.Fatalf("comment reads = %d, want 0 when the closing issue has no parent: %#v", n, calls)
+	}
+}
+
+// TestTickMergedParentReadFailureIsNonTerminalAndPreservesChildEdit pins
+// #811 item 2: a failure reading a closing child's own parent relationship
+// must not be swallowed as "no parent", must surface as tick's own
+// non-terminal error (naming the child and the failed operation, so the
+// backoff loop retries), and must never discard the child label transition
+// that already succeeded earlier in the same tick.
+func TestTickMergedParentReadFailureIsNonTerminalAndPreservesChildEdit(t *testing.T) {
+	var calls [][]string
+	merged := `{"number":42,"title":"Done","state":"MERGED","url":"https://example/pr/42","closingIssuesReferences":[{"number":9}]}`
+	ghStub(t, &calls, map[string]ghResp{
+		prViewCallKey("42"): {stdout: merged},
+		selfHealKey:         {stdout: `{}`},
+		"issue edit 9 --repo o/r --add-label Implemented --remove-label In Review": {stdout: `{}`},
+		"issue view 9 --repo o/r --json parent":                                    {err: errors.New("exit status 1: network unreachable")},
+	})
+	s := State{PR: "42", Repo: "o/r", Agent: "claude", IntervalSeconds: 60, CurrentDelaySeconds: 60}
+	terminal, _, err := tick(&s)
+	if err == nil {
+		t.Fatal("tick: err = nil, want a non-terminal error when the child's parent-relationship read fails")
+	}
+	if terminal {
+		t.Fatal("tick: terminal = true, want false so the backoff loop retries a parent-read failure")
+	}
+	if !strings.Contains(err.Error(), "9") || !strings.Contains(err.Error(), reasonParentReadFailed) {
+		t.Fatalf("tick err = %q, want it to name child #9 and %q", err.Error(), reasonParentReadFailed)
+	}
+	wantEdit := []string{"gh", "issue", "edit", "9", "--repo", "o/r", "--add-label", "Implemented", "--remove-label", "In Review"}
+	found := false
+	for _, c := range calls {
+		if reflect.DeepEqual(c, wantEdit) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the already-succeeded child relabel must survive a later parent-read failure in the same tick: %#v", calls)
+	}
+}
+
+// TestTickMergedGapReportHoldIsTerminalWithDistinguishableStdoutLine pins
+// #811 item 9: a parent held by a recorded gap-report comment is a terminal
+// success (tick returns true, 0, nil, exactly like the ordinary
+// "PR merged" case), not an error, but prints one extra distinguishable line
+// naming the held parent before the existing terminal report -- and issues
+// zero parent writes while the child's own relabel is retained.
+func TestTickMergedGapReportHoldIsTerminalWithDistinguishableStdoutLine(t *testing.T) {
+	var calls [][]string
+	merged := `{"number":42,"title":"Done","state":"MERGED","url":"https://example/pr/42","closingIssuesReferences":[{"number":9}]}`
+	script := map[string]ghResp{
+		prViewCallKey("42"): {stdout: merged},
+		selfHealKey:         {stdout: `{}`},
+		"issue edit 9 --repo o/r --add-label Implemented --remove-label In Review": {stdout: `{}`},
+		"issue view 9 --repo o/r --json parent":                                    {stdout: parentReadFor9},
+		graphKey20:                                                                 {stdout: singleClosedGraph20},
+		commentsPage1Key20:                                                         {stdout: commentsJSON("hello\n" + parentGapMarker + "\nmore")},
+	}
+	ghStub(t, &calls, script)
+
+	r, w, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatalf("os.Pipe: %v", pipeErr)
+	}
+	originalStdout := os.Stdout
+	os.Stdout = w
+	s := State{PR: "42", Repo: "o/r", Agent: "claude", IntervalSeconds: 60, CurrentDelaySeconds: 60}
+	terminal, _, err := tick(&s)
+	_ = w.Close()
+	os.Stdout = originalStdout
+	out, readErr := io.ReadAll(r)
+	if readErr != nil {
+		t.Fatalf("read captured stdout: %v", readErr)
+	}
+	if err != nil || !terminal {
+		t.Fatalf("tick = terminal %v, err %v, want terminal success (a gap-report hold is not an error)", terminal, err)
+	}
+	if !strings.Contains(string(out), "20") {
+		t.Fatalf("tick stdout = %q, want a distinguishable line naming held parent #20", string(out))
+	}
+	wantEdit := []string{"gh", "issue", "edit", "9", "--repo", "o/r", "--add-label", "Implemented", "--remove-label", "In Review"}
+	found := false
+	for _, c := range calls {
+		if reflect.DeepEqual(c, wantEdit) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the child relabel must be retained alongside a held parent: %#v", calls)
+	}
+	if n := countCalls(calls, "issue edit 20"); n != 0 {
+		t.Fatalf("parent 20 must never be edited while held by a gap report: %#v", calls)
+	}
+	if n := countCalls(calls, "issue close 20"); n != 0 {
+		t.Fatalf("parent 20 must never be closed while held by a gap report: %#v", calls)
+	}
+}
+
+// TestTickAcrossTwoSeparateMergesClosesParentOnlyAfterSecondChild is the
+// #811 Fix 2 regression: the ticket's core motivating scenario (#791/#793),
+// exercised through the real tick() entry point across two independent
+// merge events -- not reconcileOneParent/reconcileParents directly, and not
+// a single reconcileParents call already holding both children. The first
+// tick merges the PR closing sibling child #5 alone: parent #20 still has
+// an open sibling (#9), so it stays open with zero parent writes. A wholly
+// separate, second tick call then merges the PR closing sibling child #9:
+// now every one of parent #20's sub-issues is CLOSED and no gap report is
+// present, so this second tick closes the parent. Each tick's own full
+// expected call sequence is asserted.
+func TestTickAcrossTwoSeparateMergesClosesParentOnlyAfterSecondChild(t *testing.T) {
+	mergedFirst := `{"number":42,"title":"Child A","state":"MERGED","url":"https://example/pr/42","closingIssuesReferences":[{"number":5}]}`
+	var calls1 [][]string
+	ghStub(t, &calls1, map[string]ghResp{
+		prViewCallKey("42"): {stdout: mergedFirst},
+		selfHealKey:         {stdout: `{}`},
+		"issue edit 5 --repo o/r --add-label Implemented --remove-label In Review": {stdout: `{}`},
+		"issue view 5 --repo o/r --json parent":                                    {stdout: `{"parent":{"number":20}}`},
+		graphKey20:                                                                 {stdout: `{"state":"OPEN","subIssues":{"totalCount":2,"nodes":[{"number":5,"state":"CLOSED"},{"number":9,"state":"OPEN"}]}}`},
+	})
+	s1 := State{PR: "42", Repo: "o/r", Agent: "claude", IntervalSeconds: 60, CurrentDelaySeconds: 60}
+	terminal1, _, err1 := tick(&s1)
+	if err1 != nil || !terminal1 {
+		t.Fatalf("first tick = terminal %v, err %v, want terminal success", terminal1, err1)
+	}
+	wantEdit5 := []string{"gh", "issue", "edit", "5", "--repo", "o/r", "--add-label", "Implemented", "--remove-label", "In Review"}
+	wantParentRead5 := []string{"gh", "issue", "view", "5", "--repo", "o/r", "--json", "parent"}
+	wantGraphRead20 := []string{"gh", "issue", "view", "20", "--repo", "o/r", "--json", "state,subIssues"}
+	wantSelfHeal := []string{"gh", "label", "create", "Implemented", "--repo", "o/r", "--color", "6F42C1", "--description", "PR merged — done"}
+	wantPrView42 := []string{"gh", "pr", "view", "42", "--repo", "o/r", "--json", prViewFields}
+	wantCalls1 := [][]string{wantPrView42, wantSelfHeal, wantEdit5, wantParentRead5, wantGraphRead20}
+	if len(calls1) != len(wantCalls1) {
+		t.Fatalf("first tick calls = %#v, want exactly %#v", calls1, wantCalls1)
+	}
+	for _, w := range wantCalls1 {
+		found := false
+		for _, c := range calls1 {
+			if reflect.DeepEqual(c, w) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("first tick calls = %#v, missing expected call %#v", calls1, w)
+		}
+	}
+	if got := writeCalls(calls1); len(got) != 2 {
+		// The pre-existing self-heal and child #5 relabel are the only two
+		// writes; parent #20 itself must receive zero writes while sibling #9
+		// is still open.
+		t.Fatalf("first tick writes = %#v, want exactly the self-heal and child relabel (no parent-20 write)", got)
+	}
+	for _, c := range calls1 {
+		joined := strings.Join(c, " ")
+		if strings.Contains(joined, "issue edit 20") || strings.Contains(joined, "issue close 20") {
+			t.Fatalf("first tick issued a parent-20 write while sibling #9 is still open: %#v", calls1)
+		}
+	}
+
+	mergedSecond := `{"number":43,"title":"Child B","state":"MERGED","url":"https://example/pr/43","closingIssuesReferences":[{"number":9}]}`
+	var calls2 [][]string
+	ghStub(t, &calls2, map[string]ghResp{
+		prViewCallKey("43"): {stdout: mergedSecond},
+		selfHealKey:         {stdout: `{}`},
+		"issue edit 9 --repo o/r --add-label Implemented --remove-label In Review": {stdout: `{}`},
+		"issue view 9 --repo o/r --json parent":                                    {stdout: parentReadFor9},
+		graphKey20:                                                                 {stdout: allClosedGraph20},
+		commentsPage1Key20:                                                         {stdout: commentsJSON("no marker here")},
+		inReviewSelfHealKey:                                                        {stdout: `{}`},
+		editKey20:                                                                  {stdout: `{}`},
+		closeKey20:                                                                 {stdout: `{}`},
+		verifyKey20:                                                                {stdout: `{"state":"CLOSED"}`},
+	})
+	s2 := State{PR: "43", Repo: "o/r", Agent: "claude", IntervalSeconds: 60, CurrentDelaySeconds: 60}
+	terminal2, _, err2 := tick(&s2)
+	if err2 != nil || !terminal2 {
+		t.Fatalf("second tick = terminal %v, err %v, want terminal success", terminal2, err2)
+	}
+	wantEdit9 := []string{"gh", "issue", "edit", "9", "--repo", "o/r", "--add-label", "Implemented", "--remove-label", "In Review"}
+	wantParentEdit20 := []string{"gh", "issue", "edit", "20", "--repo", "o/r", "--remove-label", "In Review", "--add-label", "Implemented"}
+	wantParentClose20 := []string{"gh", "issue", "close", "20", "--repo", "o/r", "--reason", "completed"}
+	for _, w := range [][]string{wantEdit9, wantParentEdit20, wantParentClose20} {
+		found := false
+		for _, c := range calls2 {
+			if reflect.DeepEqual(c, w) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("second tick calls = %#v, missing expected call %#v", calls2, w)
+		}
+	}
+	editIdx := indexOfCall(calls2, "gh issue edit 20")
+	closeIdx := indexOfCall(calls2, "gh issue close 20")
+	if editIdx < 0 || closeIdx < 0 || closeIdx < editIdx {
+		t.Fatalf("second tick: want parent #20's label edit strictly before its close, got edit=%d close=%d: %#v", editIdx, closeIdx, calls2)
 	}
 }
 

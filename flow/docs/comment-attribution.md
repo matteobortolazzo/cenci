@@ -52,13 +52,25 @@ Every marker-bearing flow comment uses one of the `<kind>` values below;
 `<kind>` is unique per call site so a consumer can tell which flow code path
 produced a given comment. flow's five kinds:
 
-| Kind | File / call site | Marker |
-|---|---|---|
-| `plan-comment` | `skills/implement/phases/phase-1-plan.md` — `## Persist the Plan`'s `planComment` step | `<!-- cenci-plan-comment -->` |
-| `design-summary` | `skills/design/SKILL.md` — Step 7B (Step 7C reuses the same banner-carrying file for each dependent post) | `<!-- cenci-design-summary -->` |
-| `parent-gap-report` | `skills/implement/phases/phase-9-pr.md` — the parent acceptance-criteria gap report | `<!-- cenci-parent-gap-report -->` |
-| `followup-tracked` | `skills/implement/phases/phase-9-pr.md` — the followups-tracked comment | `<!-- cenci-followup-tracked -->` |
-| `planner-escalation` | `skills/implement/phases/phase-1-plan.md` — `## Escalation Anchor` and its four call sites | `<!-- cenci-planner-escalation:<nonce> -->` |
+| Kind | File / call site | Marker | Consumers |
+|---|---|---|---|
+| `plan-comment` | `skills/implement/phases/phase-1-plan.md` — `## Persist the Plan`'s `planComment` step | `<!-- cenci-plan-comment -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`) |
+| `design-summary` | `skills/design/SKILL.md` — Step 7B (Step 7C reuses the same banner-carrying file for each dependent post) | `<!-- cenci-design-summary -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`) |
+| `parent-gap-report` | `skills/implement/phases/phase-9-pr.md` — the parent acceptance-criteria gap report | `<!-- cenci-parent-gap-report -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`); `watch/internal/babysit` (merge-time parent-close gate) |
+| `followup-tracked` | `skills/implement/phases/phase-9-pr.md` — the followups-tracked comment | `<!-- cenci-followup-tracked -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`) |
+| `planner-escalation` | `skills/implement/phases/phase-1-plan.md` — `## Escalation Anchor` and its four call sites | `<!-- cenci-planner-escalation:<nonce> -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`) |
+
+### `parent-gap-report` is a cross-project contract
+
+`parent-gap-report` is the first kind read *by identity* by a non-flow consumer:
+`watch/internal/babysit`'s merge-time parent-close gate (`watch/internal/babysit/parent.go`)
+greps a parent issue's comment thread for the literal `<!-- cenci-parent-gap-report -->`
+string, after `stripBlockquoteLines` strips every blockquoted line, to decide whether to
+hold the parent open at merge time — not merely checking `isCenciAuthored` the way every
+other consumer does. That makes this marker's literal a cross-project contract, not an
+internal flow implementation detail: renaming it in `phase-9-pr.md` without updating the
+matching Go constant silently disables babysit's hold detection, and the parent auto-closes
+on the next merge tick instead.
 
 `watch`'s four pre-existing kinds, recorded here for reference only — they
 are `watch`'s own convention (`cenciMarkerPrefix`,
