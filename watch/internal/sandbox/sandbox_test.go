@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strings"
@@ -460,8 +461,9 @@ func TestRuntimesWithContainer_SingleOwner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RuntimesWithContainer: %v", err)
 	}
-	if len(owners) != 1 || owners[0] != "docker" {
-		t.Errorf("RuntimesWithContainer() = %v, want [docker]", owners)
+	want := []ContainerOwner{{Runtime: "docker", Running: true}}
+	if !reflect.DeepEqual(owners, want) {
+		t.Errorf("RuntimesWithContainer() = %+v, want %+v", owners, want)
 	}
 }
 
@@ -478,8 +480,9 @@ func TestRuntimesWithContainer_BothOwnSameName_ReturnsBothOwners(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RuntimesWithContainer: %v", err)
 	}
-	if len(owners) != 2 || owners[0] != "docker" || owners[1] != "podman" {
-		t.Errorf("RuntimesWithContainer() = %v, want [docker podman] (both owners on a same-name collision)", owners)
+	want := []ContainerOwner{{Runtime: "docker", Running: true}, {Runtime: "podman", Running: true}}
+	if !reflect.DeepEqual(owners, want) {
+		t.Errorf("RuntimesWithContainer() = %+v, want %+v (both owners on a same-name collision)", owners, want)
 	}
 }
 
@@ -517,6 +520,111 @@ func TestRuntimesWithContainer_OneRuntimeQueryFails_AggregatesErrorRatherThanRea
 	}
 	if len(owners) != 0 {
 		t.Errorf("owners = %v, want none reported as owning it despite the docker failure", owners)
+	}
+}
+
+// TestRuntimesWithContainer_TagsRunningVsStoppedStatus pins AC #7/#8: the
+// running/stopped tag on each ContainerOwner is derived from the
+// already-available Container.Status ("Up …" prefix = running; anything
+// else = not running) — no new runtime probe, and any-status semantics are
+// preserved (a stopped container still counts as ownership).
+func TestRuntimesWithContainer_TagsRunningVsStoppedStatus(t *testing.T) {
+	dir := t.TempDir()
+	writeRuntimeStub(t, dir, "docker", "claude-cenci-x\tUp 2 hours\tcenci-sandbox:latest\n", 0, "", 0, "", 0)
+	writeRuntimeStub(t, dir, "podman", "claude-cenci-x\tExited (0) 2 hours ago\tcenci-sandbox:latest\n", 0, "", 0, "", 0)
+	t.Setenv("PATH", dir)
+
+	owners, err := RuntimesWithContainer([]string{"docker", "podman"}, "claude-cenci-x")
+	if err != nil {
+		t.Fatalf("RuntimesWithContainer: %v", err)
+	}
+	want := []ContainerOwner{{Runtime: "docker", Running: true}, {Runtime: "podman", Running: false}}
+	if !reflect.DeepEqual(owners, want) {
+		t.Errorf("RuntimesWithContainer() = %+v, want %+v (docker running, podman stopped, both still owners)", owners, want)
+	}
+}
+
+// TestIsRunningStatus_UpPrefixOnlyIsRunning pins Q2: only the "Up …" status
+// prefix ps -a reports counts as running; every other lifecycle status
+// (Exited/Created/Paused/Restarting/Dead) is not running, without any new
+// runtime probe.
+func TestIsRunningStatus_UpPrefixOnlyIsRunning(t *testing.T) {
+	tests := []struct {
+		status string
+		want   bool
+	}{
+		{"Up 2 hours", true},
+		{"Up 2 hours ago", true},
+		{"Up About a minute", true},
+		{"Exited (0) 2 hours ago", false},
+		{"Created", false},
+		{"Paused", false},
+		{"Restarting (1) 5 seconds ago", false},
+		{"Dead", false},
+		{"", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.status, func(t *testing.T) {
+			if got := isRunningStatus(tc.status); got != tc.want {
+				t.Errorf("isRunningStatus(%q) = %v, want %v", tc.status, got, tc.want)
+			}
+		})
+	}
+}
+
+// -- OwnersRunningFirst (#761's caller-side ordering helper) ----------------
+//
+// OwnersRunningFirst is the pure, shared ordering function diagnose_cmd.go
+// and sandbox_cmd.go's runSandboxUpdatePlugins both call after
+// RuntimesWithContainer resolves ownership: prefer a runtime with a running
+// container, but every owner is still acted on — this only changes the
+// order, never which runtimes are touched.
+
+func TestOwnersRunningFirst_RunningOwnerOrderedBeforeStopped(t *testing.T) {
+	owners := []ContainerOwner{
+		{Runtime: "docker", Running: false},
+		{Runtime: "podman", Running: true},
+	}
+	got := OwnersRunningFirst(owners)
+	want := []string{"podman", "docker"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("OwnersRunningFirst(%+v) = %v, want %v", owners, got, want)
+	}
+}
+
+// TestOwnersRunningFirst_StableOrderWithinSameTier pins that ordering never
+// reorders owners that share the same running/stopped tier.
+func TestOwnersRunningFirst_StableOrderWithinSameTier(t *testing.T) {
+	owners := []ContainerOwner{
+		{Runtime: "docker", Running: true},
+		{Runtime: "podman", Running: true},
+	}
+	got := OwnersRunningFirst(owners)
+	want := []string{"docker", "podman"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("OwnersRunningFirst(%+v) = %v, want %v (stable order within the same tier)", owners, got, want)
+	}
+}
+
+// TestOwnersRunningFirst_NoRunningOwner_PreservesOriginalOrder pins the
+// no-running-owner case: when every owner is stopped, ordering is a no-op —
+// the original enumeration order is preserved (still every owner acted on).
+func TestOwnersRunningFirst_NoRunningOwner_PreservesOriginalOrder(t *testing.T) {
+	owners := []ContainerOwner{
+		{Runtime: "docker", Running: false},
+		{Runtime: "podman", Running: false},
+	}
+	got := OwnersRunningFirst(owners)
+	want := []string{"docker", "podman"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("OwnersRunningFirst(%+v) = %v, want %v (no running owner -> original order preserved)", owners, got, want)
+	}
+}
+
+func TestOwnersRunningFirst_EmptyInput_ReturnsEmpty(t *testing.T) {
+	got := OwnersRunningFirst(nil)
+	if len(got) != 0 {
+		t.Errorf("OwnersRunningFirst(nil) = %v, want empty", got)
 	}
 }
 

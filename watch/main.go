@@ -122,7 +122,7 @@ Commands:
   pipeline                           drive the implement pipeline's stage state machine (prepare|plan|await-input|execute|review|finalize) plus mechanics verbs (label|worktree|worktree-cleanup|artifact|plan-check)
   sandbox                            manage the sandbox container (build|build-base|prune|update-agent|update-plugins|reseed-creds|reap-orphans|ls|stop)
   open [shortcut]                    launch or attach an interactive sandbox session (aliased by the "cn" binary name)
-  diagnose <session>                 read-only report on a sandbox session's container/daemon/version health
+  diagnose [flags]                   read-only report on a sandbox session's container/daemon/version health
   audit [flags]                      read-only report on the effective sandbox security posture the launcher would apply (mounts, env names, network, dind, credential sources, boundary weakenings)
   security explain [flags]           plain-language "why this is/isn't safe" narrative over the same posture cenci audit reports
   support-bundle [--output PATH]     collect a sanitized diagnostic archive (versions, env var names, daemon/container health, logs)

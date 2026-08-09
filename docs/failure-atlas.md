@@ -14,7 +14,7 @@ registered code has no entry here (or when an entry here references a code
 that no longer exists in the registry). When you register a new `Code` in
 `errcode.go`, add a matching entry here in the same change.
 
-After running a recovery command, re-run `cenci diagnose <session> --verify`
+After running a recovery command, re-run `cenci diagnose --name <session> --verify`
 where noted below to confirm the fix actually worked — it re-runs the same
 read-only probe and reports `[pass]`/`[fail]` instead of the full report.
 
@@ -31,7 +31,7 @@ written and persists it to `/home/dev/.cenci-agent-startup-error`, which
 
 **Diagnostic commands**:
 ```bash
-cenci diagnose <session>
+cenci diagnose --name <session>
 docker/podman inspect the agent-CLI volume mount
 ```
 
@@ -63,7 +63,7 @@ to a fully generic message when none did.
 **Diagnostic commands**:
 ```bash
 docker/podman logs <container> --tail 50
-cenci diagnose <session>
+cenci diagnose --name <session>
 ```
 
 **Recovery procedure**:
@@ -98,7 +98,7 @@ code — wiring a detection path for either is left to a follow-up.
 
 **Diagnostic commands**:
 ```bash
-cenci diagnose <session>
+cenci diagnose --name <session>
 docker/podman logs <container> --tail 50
 ```
 
@@ -117,7 +117,7 @@ image layers and plugin caches are warm.
 ## CENCI-SANDBOX-SESSION-001
 
 **Meaning**: No container exists for the requested sandbox session. Attached
-by `cenci diagnose <session>` when its container-existence probe cannot find
+by `cenci diagnose --name <session>` when its container-existence probe cannot find
 a matching container.
 
 **Common causes**:
@@ -128,14 +128,14 @@ a matching container.
 **Diagnostic commands**:
 ```bash
 cenci sandbox ls
-cenci diagnose <session>
+cenci diagnose --name <session>
 ```
 
 **Recovery procedure**:
 1. Run `cenci sandbox ls` to confirm the session's container truly does not
    exist (and to spot a naming/scope mismatch).
 2. Relaunch the session with `cenci open <shortcut>`.
-3. Re-run `cenci diagnose <session> --verify` — it re-runs the same
+3. Re-run `cenci diagnose --name <session> --verify` — it re-runs the same
    container-existence probe and reports `[pass]` once the relaunch
    succeeded.
 
@@ -150,7 +150,7 @@ marker. `sandbox/lib/dind.sh` persists this to
 `/home/dev/.cenci-dockerd-startup-error`. The launcher's
 `warnDockerdStartupFailure` surfaces it as a non-fatal warning right before
 the first agent attach (the session still attaches — only nested Docker is
-unavailable), and `cenci diagnose <session>`'s "Nested Docker:" section
+unavailable), and `cenci diagnose --name <session>`'s "Nested Docker:" section
 always reports it for dind sessions.
 
 **Common causes**:
@@ -160,18 +160,18 @@ always reports it for dind sessions.
 
 **Diagnostic commands**:
 ```bash
-cenci diagnose <session>
+cenci diagnose --name <session>
 docker/podman logs <container> --tail 50
 ```
 
 **Recovery procedure**:
-1. Run `cenci diagnose <session>` to read the captured diagnostic.
+1. Run `cenci diagnose --name <session>` to read the captured diagnostic.
 2. Confirm Sysbox is registered with the runtime (`cenci doctor`) if nested
    Docker never started at all.
 3. Stop and relaunch the session with `--dind` (`cenci sandbox stop
    <session>`, then `cenci open <shortcut> --dind`) once the underlying cause
    is addressed.
-4. Re-run `cenci diagnose <session> --verify` — it re-reads the same marker
+4. Re-run `cenci diagnose --name <session> --verify` — it re-reads the same marker
    and reports `[pass]` once a clean relaunch supersedes the prior failure.
 
 **Platform notes**: DinD requires the Sysbox container runtime to be
@@ -232,14 +232,14 @@ read-only dial. Attached by `cenci diagnose`'s daemon-reachability probe.
 **Diagnostic commands**:
 ```bash
 cenci daemon status
-cenci diagnose <session>
+cenci diagnose --name <session>
 ```
 
 **Recovery procedure**:
 1. Run `cenci daemon status` to confirm the daemon is not running.
 2. Run `cenci daemon restart` (stops any stale process, then spawns a fresh
    daemon and waits for it to become reachable).
-3. Re-run `cenci diagnose <session> --verify` — it re-dials the same event
+3. Re-run `cenci diagnose --name <session> --verify` — it re-dials the same event
    socket and reports `[pass]` once the daemon answers.
 
 **Platform notes**: None specific to this code — the event socket is a Unix
@@ -261,14 +261,14 @@ where the socket file exists but nothing answers).
 **Diagnostic commands**:
 ```bash
 cenci daemon status
-cenci diagnose <session>
+cenci diagnose --name <session>
 ```
 
 **Recovery procedure**:
 1. Run `cenci daemon start` (or let the next hook-triggered `EnsureRunning`
    self-heal spawn it automatically).
 2. Run `cenci daemon status` to confirm it is now running.
-3. Re-run `cenci diagnose <session> --verify` — it re-checks for the same
+3. Re-run `cenci diagnose --name <session> --verify` — it re-checks for the same
    socket path and reports `[pass]` once the daemon has started.
 
 **Platform notes**: On systems where `$XDG_RUNTIME_DIR` is unset, cenci

@@ -1712,19 +1712,22 @@ map and exits 2.
 ## Diagnosing a sandbox session (`cenci diagnose`)
 
 ```bash
-cenci diagnose mysession                    # read-only report on the claude-cenci-mysession session
-cenci diagnose mysession --agent codex      # same, for codex-cenci-mysession
-cenci diagnose mysession --verify           # re-run the diagnostic probes and report pass/fail instead of the full report
+cenci diagnose                              # read-only report on the default (bare `cenci open`) session
+cenci diagnose --name mysession             # read-only report on the claude-cenci-mysession session
+cenci diagnose --name mysession --agent codex      # same, for codex-cenci-mysession
+cenci diagnose --name mysession --verify           # re-run the diagnostic probes and report pass/fail instead of the full report
 ```
 
-`cenci diagnose <session> [--agent claude|codex|opencode]` prints a read-only
-report on a sandbox session: container status/exit, the timestamped startup
-marker (surfaced verbatim, same precedence as `open`'s launch-failure
+`cenci diagnose [--name <session>] [--agent claude|codex|opencode]` prints a
+read-only report on a sandbox session: container status/exit, the timestamped
+startup marker (surfaced verbatim, same precedence as `open`'s launch-failure
 diagnostics), recent container logs, mounted volumes, daemon/event-socket
 reachability, and the image base + plugin manifest versions ("unknown" when a
-best-effort read fails). Every failure is annotated with a registered
-[error code](../docs/error-codes.md) — see the [failure atlas](../docs/failure-atlas.md)
-for its recovery procedure — and a fatal/degraded/warning severity.
+best-effort read fails). Omitting `--name` diagnoses the default session,
+using the same scope resolution as `sandbox update-plugins`. Every failure is
+annotated with a registered [error code](../docs/error-codes.md) — see the
+[failure atlas](../docs/failure-atlas.md) for its recovery procedure — and a
+fatal/degraded/warning severity.
 
 `--verify` re-runs the same read-only probes behind the recovery commands
 diagnose surfaces (daemon reachability, container existence) and prints a
@@ -1736,8 +1739,9 @@ command itself — only the existing read-only dial/inspect probes.
 Unlike `open`, `diagnose` never launches, attaches, or wires the daemon — it
 only reads. It is also a report, not a pass/fail gate: a successful render
 exits 0 even when it finds fatal or degraded issues; only usage errors
-(missing session, unknown flag, invalid `--agent`) and cwd/home/runtime
-resolution failures exit non-zero (2 for usage errors, 1 otherwise).
+(leftover positional argument, unknown flag, invalid `--agent`) and
+cwd/home/runtime resolution failures exit non-zero (2 for usage errors, 1
+otherwise).
 
 Note: recent logs and mount paths in the report may contain sensitive data
 (secrets, credentials, host paths) — review before sharing this output.
@@ -2556,7 +2560,7 @@ For meaning, common causes, diagnostic commands, a recovery procedure, and
 known platform-specific issues per registered error code (the
 `CENCI-<AREA>-<SUBAREA>-<NNN>` identifiers `cenci diagnose` attaches to its
 findings), see the [failure atlas](../docs/failure-atlas.md). After running a
-suggested recovery command, `cenci diagnose <session> --verify` re-runs the
+suggested recovery command, `cenci diagnose --name <session> --verify` re-runs the
 same read-only probe and reports `[pass]`/`[fail]` to confirm it worked.
 
 **No status updates**: Ensure the hook/plugin is loaded (`claude plugin list`, `claude --plugin-dir ./plugin`, or Codex `/hooks`). Check `cenci daemon status` (running/not-running + PID) and that `cenci notify` can reach the event socket (`cenci daemon start -v` shows the socket path).

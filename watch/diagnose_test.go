@@ -13,7 +13,8 @@ import (
 
 // -- diagnose ----------------------------------------------------------
 //
-// `cenci diagnose <session> [--agent claude|codex]` is a read-only report:
+// `cenci diagnose [--name <session>] [--agent claude|codex]` is a read-only
+// report:
 // container status/exit, the timestamped startup marker, recent logs,
 // daemon/socket reachability, plugin + image versions, and mounted volumes,
 // each failure annotated with a registered errcode.Code and a
@@ -65,7 +66,7 @@ func TestDiagnose_RunningReadySession_ExitsZero(t *testing.T) {
 	assets := writeAssetFixture(t)
 	env, _ := diagEnv(t, fakeDir, assets, true)
 
-	cmd := exec.Command(binaryPath, "diagnose", "mysession")
+	cmd := exec.Command(binaryPath, "diagnose", "--name", "mysession")
 	cmd.Env = env
 	cmd.Dir = t.TempDir() // non-git cwd -> legacy scope
 	output, err := cmd.CombinedOutput()
@@ -87,7 +88,7 @@ func TestDiagnose_ExitedContainer_ReportsFatalGenericEntrypointCode(t *testing.T
 	assets := writeAssetFixture(t)
 	env, _ := diagEnv(t, fakeDir, assets, true)
 
-	cmd := exec.Command(binaryPath, "diagnose", "mysession")
+	cmd := exec.Command(binaryPath, "diagnose", "--name", "mysession")
 	cmd.Env = append(env, "FAKE_INSPECT_STATE=exited 1")
 	cmd.Dir = t.TempDir()
 	output, err := cmd.CombinedOutput()
@@ -112,7 +113,7 @@ func TestDiagnose_AgentCLIMissingMarker_SurfacedVerbatimWithTimestamp(t *testing
 	env, _ := diagEnv(t, fakeDir, assets, true)
 
 	const marker = "2026-07-20T10:00:00Z agent CLI not found or not executable at /opt/cenci-agent/current/node_modules/.bin/claude"
-	cmd := exec.Command(binaryPath, "diagnose", "mysession")
+	cmd := exec.Command(binaryPath, "diagnose", "--name", "mysession")
 	cmd.Env = append(env,
 		"FAKE_INSPECT_STATE=exited 1",
 		"FAKE_STARTUP_ERROR="+marker,
@@ -143,7 +144,7 @@ func TestDiagnose_MissingEventSocket_ReportsDegraded(t *testing.T) {
 	assets := writeAssetFixture(t)
 	env, _ := diagEnv(t, fakeDir, assets, false) // no live events socket
 
-	cmd := exec.Command(binaryPath, "diagnose", "mysession")
+	cmd := exec.Command(binaryPath, "diagnose", "--name", "mysession")
 	cmd.Env = env
 	cmd.Dir = t.TempDir()
 	output, err := cmd.CombinedOutput()
@@ -166,7 +167,7 @@ func TestDiagnose_ContainerNotFound_StillReadsHomeVolumeMarkers(t *testing.T) {
 	env, _ := diagEnv(t, fakeDir, assets, true)
 
 	const marker = "generic startup failure: entrypoint trap fired at credential seeding"
-	cmd := exec.Command(binaryPath, "diagnose", "mysession")
+	cmd := exec.Command(binaryPath, "diagnose", "--name", "mysession")
 	cmd.Env = append(env,
 		"FAKE_CONTAINER_INSPECT_EXIT=1", // container already gone (--rm)
 		"FAKE_STARTUP_MARKER="+marker,
@@ -198,7 +199,7 @@ func TestDiagnose_ReportsImageBaseVersionAndUnknownPluginVersionOnReadFailure(t 
 	}
 	env, _ := diagEnv(t, fakeDir, assets, true)
 
-	cmd := exec.Command(binaryPath, "diagnose", "mysession")
+	cmd := exec.Command(binaryPath, "diagnose", "--name", "mysession")
 	cmd.Env = env // FAKE_PLUGIN_MANIFEST left unset -> the manifest read fails/empty
 	cmd.Dir = t.TempDir()
 	output, err := cmd.CombinedOutput()
@@ -221,7 +222,7 @@ func TestDiagnose_PluginManifestVersion_SurfacedWhenReadable(t *testing.T) {
 	env, _ := diagEnv(t, fakeDir, assets, true)
 
 	const manifest = `{"version":"3.4.5-plugin-marker"}`
-	cmd := exec.Command(binaryPath, "diagnose", "mysession")
+	cmd := exec.Command(binaryPath, "diagnose", "--name", "mysession")
 	cmd.Env = append(env, "FAKE_PLUGIN_MANIFEST="+manifest)
 	cmd.Dir = t.TempDir()
 	output, err := cmd.CombinedOutput()
@@ -241,7 +242,7 @@ func TestDiagnose_WorksForBothAgents(t *testing.T) {
 			assets := writeAssetFixture(t)
 			env, _ := diagEnv(t, fakeDir, assets, true)
 
-			cmd := exec.Command(binaryPath, "diagnose", "mysession", "--agent", agent)
+			cmd := exec.Command(binaryPath, "diagnose", "--name", "mysession", "--agent", agent)
 			cmd.Env = env
 			cmd.Dir = t.TempDir()
 			output, err := cmd.CombinedOutput()
@@ -256,14 +257,22 @@ func TestDiagnose_WorksForBothAgents(t *testing.T) {
 	}
 }
 
+// TestDiagnose_UsageErrors_Exit2 covers usage errors under the new --name
+// grammar (AC #6's "--verify continues to work"-adjacent flag-parsing
+// coverage). Each case's wantSubstr is specific to that failure (the actual
+// offending flag name, or ValidateAgent's exact message) rather than the
+// generic "cenci diagnose:" prefix alone, so a case can't pass merely
+// because some other, unrelated usage-error path was hit first (e.g. the
+// retired positional guard, which is pinned separately by
+// TestDiagnose_PositionalArgumentRetired_Exits2WithNewGrammar).
 func TestDiagnose_UsageErrors_Exit2(t *testing.T) {
 	tests := []struct {
-		name string
-		args []string
+		name       string
+		args       []string
+		wantSubstr string
 	}{
-		{"missing session", []string{"diagnose"}},
-		{"unknown flag", []string{"diagnose", "mysession", "--bogus"}},
-		{"bad agent", []string{"diagnose", "mysession", "--agent", "gemini"}},
+		{"unknown flag", []string{"diagnose", "--name", "mysession", "--bogus"}, "bogus"},
+		{"bad agent", []string{"diagnose", "--name", "mysession", "--agent", "gemini"}, `unknown agent "gemini"`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -281,13 +290,67 @@ func TestDiagnose_UsageErrors_Exit2(t *testing.T) {
 				t.Fatalf("expected a usage error exit 2, got %T %v\n%s", err, err, output)
 			}
 			// Distinguishes a real "cenci diagnose:"-prefixed usage error
-			// (missing session / ValidateAgent / unknown flag) from the
-			// generic "cenci: unknown subcommand" fallback main.go prints for
-			// an unrecognized top-level verb — both happen to exit 2, so the
+			// (ValidateAgent / unknown flag) from the generic "cenci:
+			// unknown subcommand" fallback main.go prints for an
+			// unrecognized top-level verb — both happen to exit 2, so the
 			// exit code alone can't tell them apart.
 			if !strings.Contains(string(output), "cenci diagnose:") {
 				t.Errorf("expected a \"cenci diagnose:\"-prefixed usage error, not the generic unknown-subcommand fallback, got:\n%s", output)
 			}
+			if !strings.Contains(string(output), tc.wantSubstr) {
+				t.Errorf("expected the usage error to contain %q (proving --name itself parsed and the failure came from the intended cause), got:\n%s", tc.wantSubstr, output)
+			}
 		})
+	}
+}
+
+// TestDiagnose_DefaultSession_NoNameFlag_ReportsDefaultScope pins AC #2/#6:
+// omitting --name entirely diagnoses the default (bare `cenci open`) session
+// for the given agent, using the same scope resolution as `sandbox
+// update-plugins`'s currentScope — never a usage error.
+func TestDiagnose_DefaultSession_NoNameFlag_ReportsDefaultScope(t *testing.T) {
+	fakeDir := t.TempDir()
+	writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _ := diagEnv(t, fakeDir, assets, true)
+
+	cmd := exec.Command(binaryPath, "diagnose")
+	cmd.Env = env
+	cmd.Dir = t.TempDir() // non-git cwd -> legacy "default" scope
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("diagnose (default session, no --name): %v\n%s", err, output)
+	}
+	out := string(output)
+	if !strings.Contains(out, "claude-cenci-default") {
+		t.Errorf("expected the default scope's container name in the report when --name is omitted, got:\n%s", out)
+	}
+}
+
+// TestDiagnose_PositionalArgumentRetired_Exits2WithNewGrammar pins AC #1:
+// the positional <session> form is fully retired (no deprecation period) —
+// a leftover positional is rejected via the existing rejectExtra path with a
+// usage message naming both the offending argument and the new --name
+// grammar.
+func TestDiagnose_PositionalArgumentRetired_Exits2WithNewGrammar(t *testing.T) {
+	fakeDir := t.TempDir()
+	writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _ := diagEnv(t, fakeDir, assets, true)
+
+	cmd := exec.Command(binaryPath, "diagnose", "mysession")
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("expected the retired positional form to exit 2, got %T %v\n%s", err, err, output)
+	}
+	out := string(output)
+	if !strings.Contains(out, `unexpected argument "mysession"`) {
+		t.Errorf("expected the usage error to name the leftover positional via rejectExtra, got:\n%s", out)
+	}
+	if !strings.Contains(out, "--name") {
+		t.Errorf("expected the usage error to show the new --name grammar, got:\n%s", out)
 	}
 }

@@ -26,6 +26,7 @@ import (
 	"io"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -232,17 +233,44 @@ func AvailableRuntimes() ([]string, error) {
 	return found, nil
 }
 
+// ContainerOwner tags a runtime that owns a container matched by
+// RuntimesWithContainer with whether that runtime's copy is currently
+// running (derived from Container.Status, "Up …" prefix = running). Ordering
+// owners by Running is the caller's job (see OwnersRunningFirst) — this type
+// only carries membership + status, never a ranking.
+type ContainerOwner struct {
+	Runtime string
+	Running bool
+}
+
+// isRunningStatus reports whether status (as reported by `ps -a`'s
+// {{.Status}} column, already parsed by parseContainers) describes a running
+// container. Both docker and podman report a running container's status
+// with an "Up " prefix ("Up 2 hours", "Up 2 hours ago", "Up About a
+// minute"); every other lifecycle status (Exited/Created/Paused/
+// Restarting/Dead) is not running. No new runtime probe is added — this is a
+// pure predicate over the status string ListContainers already fetches.
+func isRunningStatus(status string) bool {
+	return strings.HasPrefix(status, "Up ")
+}
+
 // RuntimesWithContainer reports every runtime in runtimes that has a
-// container named exactly name, so callers can resolve which runtime(s)
-// actually own a scope/container-specific target instead of guessing a
-// single preferred one. On a same-name collision (the container exists
-// independently under more than one runtime) every owning runtime is
-// returned, never silently one (AC #3). A per-runtime listing failure is
-// aggregated into the returned error via errors.Join rather than being read
-// as "this runtime doesn't have it" (AC #4); the failing runtime is simply
-// omitted from owners, never falsely reported as owning or not owning it.
-func RuntimesWithContainer(runtimes []string, name string) ([]string, error) {
-	var owners []string
+// container named exactly name, tagged with whether that runtime's copy is
+// currently running, so callers can resolve which runtime(s) actually own a
+// scope/container-specific target instead of guessing a single preferred
+// one. Membership is any-status: a stopped container still counts as
+// ownership (only Running distinguishes a live copy from a stopped one) — a
+// caller that wants a running-first ordering does so itself, via
+// OwnersRunningFirst; this function's job is membership, not ranking. On a
+// same-name collision (the container exists independently under more than
+// one runtime) every owning runtime is returned, never silently one (AC
+// #3). A per-runtime listing failure is aggregated into the returned error
+// via errors.Join rather than being read as "this runtime doesn't have it"
+// (AC #4); the failing runtime is simply omitted from owners, never falsely
+// reported as owning or not owning it. Same `ps -a` call count as before —
+// no new runtime probe is added to compute Running.
+func RuntimesWithContainer(runtimes []string, name string) ([]ContainerOwner, error) {
+	var owners []ContainerOwner
 	var errs []error
 	for _, rt := range runtimes {
 		containers, err := ListContainers(rt)
@@ -252,12 +280,31 @@ func RuntimesWithContainer(runtimes []string, name string) ([]string, error) {
 		}
 		for _, c := range containers {
 			if c.Name == name {
-				owners = append(owners, rt)
+				owners = append(owners, ContainerOwner{Runtime: rt, Running: isRunningStatus(c.Status)})
 				break
 			}
 		}
 	}
 	return owners, errors.Join(errs...)
+}
+
+// OwnersRunningFirst orders owners so that every owner with a running
+// container comes before every owner with a stopped one, preserving the
+// relative order of owners within each tier (a stable sort) — ordering
+// only, never omission: every owner is still returned, just reordered. When
+// no owner is running, the original order is preserved unchanged. Returns
+// the runtimes in ranked order, ready for a caller's owner loop.
+func OwnersRunningFirst(owners []ContainerOwner) []string {
+	ordered := make([]ContainerOwner, len(owners))
+	copy(ordered, owners)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return ordered[i].Running && !ordered[j].Running
+	})
+	runtimes := make([]string, len(ordered))
+	for i, o := range ordered {
+		runtimes[i] = o.Runtime
+	}
+	return runtimes
 }
 
 // RuntimesWithVolume mirrors RuntimesWithContainer for volumes: every

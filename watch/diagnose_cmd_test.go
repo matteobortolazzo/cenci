@@ -9,7 +9,7 @@ import (
 
 // -- diagnose --verify ---------------------------------------------------
 //
-// `cenci diagnose <session> --verify` re-runs the read-only diagnostic
+// `cenci diagnose [--name <session>] --verify` re-runs the read-only diagnostic
 // probes behind the recovery commands `cenci diagnose` already surfaces
 // (daemon reachability today) and prints a pass/fail line per check, so an
 // operator can confirm a suggested recovery command actually worked.
@@ -28,7 +28,7 @@ func TestDiagnoseVerify_MissingDaemonSocket_ReportsFail(t *testing.T) {
 	assets := writeAssetFixture(t)
 	env, _ := diagEnv(t, fakeDir, assets, false) // no live events socket
 
-	cmd := exec.Command(binaryPath, "diagnose", "mysession", "--verify")
+	cmd := exec.Command(binaryPath, "diagnose", "--name", "mysession", "--verify")
 	cmd.Env = env
 	cmd.Dir = t.TempDir()
 	output, err := cmd.CombinedOutput()
@@ -53,7 +53,7 @@ func TestDiagnoseVerify_DaemonReachable_ReportsPass(t *testing.T) {
 	assets := writeAssetFixture(t)
 	env, _ := diagEnv(t, fakeDir, assets, true) // live events socket
 
-	cmd := exec.Command(binaryPath, "diagnose", "mysession", "--verify")
+	cmd := exec.Command(binaryPath, "diagnose", "--name", "mysession", "--verify")
 	cmd.Env = env
 	cmd.Dir = t.TempDir()
 	output, err := cmd.CombinedOutput()
@@ -82,7 +82,7 @@ func TestDiagnoseVerify_MalformedFlagCombination_Exits2(t *testing.T) {
 	assets := writeAssetFixture(t)
 	env, _ := diagEnv(t, fakeDir, assets, true)
 
-	cmd := exec.Command(binaryPath, "diagnose", "mysession", "--verify", "--nonsense-flag")
+	cmd := exec.Command(binaryPath, "diagnose", "--name", "mysession", "--verify", "--nonsense-flag")
 	cmd.Env = env
 	cmd.Dir = t.TempDir()
 	output, err := cmd.CombinedOutput()
@@ -111,7 +111,7 @@ func TestDiagnoseVerify_NeverLaunchesOrAttaches(t *testing.T) {
 	assets := writeAssetFixture(t)
 	env, _ := diagEnv(t, fakeDir, assets, true)
 
-	cmd := exec.Command(binaryPath, "diagnose", "mysession", "--verify")
+	cmd := exec.Command(binaryPath, "diagnose", "--name", "mysession", "--verify")
 	cmd.Env = env
 	cmd.Dir = t.TempDir()
 	output, err := cmd.CombinedOutput()

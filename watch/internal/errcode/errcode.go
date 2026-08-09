@@ -144,7 +144,7 @@ var registry = map[Code]Entry{
 			"An earlier startup failure went undetected before the readiness poll budget expired.",
 		},
 		Hints: []string{
-			"cenci diagnose <session>",
+			"cenci diagnose --name <session>",
 			"docker/podman logs <container> --tail 50",
 		},
 	},
@@ -166,7 +166,7 @@ var registry = map[Code]Entry{
 			"The inner dockerd crashed or was OOM-killed after starting.",
 		},
 		Hints: []string{
-			"cenci diagnose <session>",
+			"cenci diagnose --name <session>",
 			"docker/podman logs <container> --tail 50",
 		},
 	},
