@@ -387,13 +387,11 @@ seed_opencode_config /home/dev/.config/opencode/opencode.json "file:///home/dev/
 # Claude Code OAuth credentials
 seed_credential /tmp/host-claude-creds/.credentials.json /home/dev/.claude/.credentials.json
 
-# GitHub CLI credentials — non-rotating token, host stays canonical, so an
-# unconditional copy is safe and propagates host re-auths.
-if [[ -f /tmp/host-gh-config/hosts.yml ]]; then
-    mkdir -p /home/dev/.config/gh
-    cp /tmp/host-gh-config/hosts.yml /home/dev/.config/gh/hosts.yml
-    chmod 600 /home/dev/.config/gh/hosts.yml
-fi
+# GitHub CLI credentials — non-rotating token, host stays canonical, so the
+# copy propagates host re-auths. Skipped when the staged file carries no
+# oauth_token (host gh using OS-keyring storage): copying a token-less
+# hosts.yml in aborts gh's config migration and breaks every gh command.
+seed_gh_hosts /tmp/host-gh-config/hosts.yml /home/dev/.config/gh/hosts.yml
 
 # Codex OAuth credentials (ChatGPT sign-in)
 seed_credential /tmp/host-codex-creds/auth.json /home/dev/.codex/auth.json

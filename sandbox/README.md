@@ -248,7 +248,7 @@ is a known limitation, not a bug to work around by widening retention.
 
 ## First-Run Setup
 
-If `~/.claude/.credentials.json` and `~/.config/gh/hosts.yml` exist on the host, they are automatically injected into the container. **No manual auth needed.**
+If `~/.claude/.credentials.json` and `~/.config/gh/hosts.yml` exist on the host, they are automatically injected into the container. **No manual auth needed** — with one exception for the GitHub CLI, see [GitHub CLI auth](#github-cli-auth) below.
 
 Claude (and Codex) OAuth uses rotating refresh tokens: after the sandbox's first
 token refresh, the volume's credentials become an independent login from the
@@ -258,8 +258,10 @@ later starts: each instance stays logged in indefinitely, and using the sandbox
 all day can no longer log your host session out (you may see one final host
 re-login right after a volume is first seeded, then both sides are stable). The
 GitHub CLI token doesn't rotate, so `hosts.yml` is still refreshed from the host
-on every start. OpenCode's `auth.json` (when present) goes through the same
-seed-once staging path — see [OpenCode auth](#opencode-auth) below.
+on every start — as long as it actually carries the token, see
+[GitHub CLI auth](#github-cli-auth). OpenCode's `auth.json` (when present) goes
+through the same seed-once staging path — see
+[OpenCode auth](#opencode-auth) below.
 
 If an instance's login does die (e.g. you revoked all sessions on claude.ai),
 force a one-time re-copy from the host:
@@ -269,6 +271,43 @@ cenci open --reseed-creds
 # or the maintenance-verb alias:
 cenci sandbox reseed-creds
 ```
+
+### GitHub CLI auth
+
+`gh auth login` defaults to **secure storage**: the token goes into the host OS
+keyring and `~/.config/gh/hosts.yml` records only the account name. The
+container has no access to a host keyring — there is no secret-service provider
+in the image, and starting a session bus doesn't supply one.
+
+A token-less `hosts.yml` is worse than none at all: gh's multi-account config
+migration finds an account whose token it can't resolve and aborts, so **every**
+gh command fails — including `gh --version`, and including runs with `GH_TOKEN`
+set, because the migration happens on config load, before auth resolution. The
+error names dbus and reads like a missing package, which it isn't:
+
+```
+failed to migrate config: cowardly refusing to continue with multi account
+migration: couldn't find oauth token for "github.com": dbus: couldn't determine
+address of session bus
+```
+
+So the sandbox **skips** a token-less `hosts.yml` rather than copying it in, and
+warns on startup. gh then starts clean and honours `GH_TOKEN`. To get a real
+login, either store the token in the file on the host and re-open the sandbox:
+
+```bash
+gh auth login --insecure-storage   # on the host; writes oauth_token into hosts.yml
+```
+
+…or log in inside the container:
+
+```bash
+gh auth login                      # inside the sandbox
+```
+
+An in-container login persists in the home volume and is no longer overwritten
+by a token-less host file on the next start. A host file that *does* carry a
+token still wins, so host re-auths keep propagating as before.
 
 ### Onboarding prompts
 
@@ -548,7 +587,7 @@ OpenCode (`--agent opencode`) has no per-flag "skip permissions" equivalent to b
 | `~/.claude/.credentials.json` | `/tmp/host-claude-creds/` (staging) | Claude OAuth tokens (copied to home on start) |
 | `~/.codex/auth.json` (Codex only) | `/tmp/host-codex-creds/` (staging) | Codex OAuth tokens (copied to home on start) |
 | `~/.local/share/opencode/auth.json` (OpenCode only) | `/tmp/host-opencode-creds/` (staging) | OpenCode OAuth tokens (copied to home on start) |
-| `~/.config/gh/hosts.yml` | `/tmp/host-gh-config/` (staging) | GitHub CLI tokens (copied to home on start) |
+| `~/.config/gh/hosts.yml` | `/tmp/host-gh-config/` (staging) | GitHub CLI tokens (copied to home on start, only when the file carries an `oauth_token` — see [GitHub CLI auth](#github-cli-auth)) |
 | `~/.pencil/session-cli.json` | `/tmp/host-pencil-creds/` (staging) | Pencil CLI session for headless design reads (copied to home on start) |
 
 ### MCP servers
