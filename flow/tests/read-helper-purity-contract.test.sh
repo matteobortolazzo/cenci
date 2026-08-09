@@ -15,7 +15,7 @@
 # $(...)" rule. The required shape is a pure `<name>_raw` extractor (no
 # fail() side effect, safe inside $(...)) paired with a `require_<name>`
 # nameref wrapper that calls fail() in the parent shell -- see
-# flow/tests/skill-convention-contract.test.sh:50-78.
+# flow/tests/skill-convention-contract.test.sh:68-96.
 #
 # Three deliberate carve-outs, all proven by this suite's own fixture
 # self-test below:
@@ -890,7 +890,7 @@ done
 [[ "${lib_covered}" -eq 1 ]] || fail "repo scan does not cover ${LIB_COVERAGE_ANCHOR} -- the *.test.sh-only enumeration misses sourced shell libraries under flow/tests/ whose read_*-named helpers execute in the sourcing suite's shell"
 
 for v in "${VIOLATIONS[@]}"; do
-  fail "${v}: read_*-named function calls fail() directly -- restructure into a pure <name>_raw extractor (no fail(), safe inside \$(...)) plus a require_<name> nameref wrapper that calls fail() in the parent shell, per flow/docs/shell-scripting-gotchas.md and flow/tests/skill-convention-contract.test.sh:50-78"
+  fail "${v}: read_*-named function calls fail() directly -- restructure into a pure <name>_raw extractor (no fail(), safe inside \$(...)) plus a require_<name> nameref wrapper that calls fail() in the parent shell, per flow/docs/shell-scripting-gotchas.md and flow/tests/skill-convention-contract.test.sh:68-96"
 done
 
 # =====================================================================

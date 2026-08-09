@@ -146,13 +146,14 @@ extract_skill_deny_raw() {
     return 0
 }
 
-# extract_skill_deny_json_sorted <skill-md-file> <out-file> — extracts the
-# fenced JSON array between the markers, strips the ```json/``` fence
-# lines, and writes the sorted JSON array into <out-file>.
-extract_skill_deny_json_sorted() {
-    local file="$1" out="$2"
-    local raw="${WORK_DIR}/skill-deny-raw.txt"
-    local stripped="${WORK_DIR}/skill-deny-stripped.json"
+# _extract_skill_deny_stripped <skill-md-file> <raw-out-file>
+# <stripped-out-file> — shared first half of extract_skill_deny_json_sorted
+# and extract_skill_deny_json_ordered: extracts the raw marker block,
+# rejects an empty block, and strips the ```json/``` fence lines into
+# <stripped-out-file>. Callers apply their own jq filter (sorted vs
+# insertion-order) to <stripped-out-file>.
+_extract_skill_deny_stripped() {
+    local file="$1" raw="$2" stripped="$3"
     if ! extract_skill_deny_raw "${file}" "${raw}"; then
         return 1
     fi
@@ -162,6 +163,19 @@ extract_skill_deny_json_sorted() {
     fi
     if ! grep -v '^```' "${raw}" > "${stripped}"; then
         EXTRACT_ERR="extracted block contains only fence lines, no JSON content"
+        return 1
+    fi
+    return 0
+}
+
+# extract_skill_deny_json_sorted <skill-md-file> <out-file> — extracts the
+# fenced JSON array between the markers, strips the ```json/``` fence
+# lines, and writes the sorted JSON array into <out-file>.
+extract_skill_deny_json_sorted() {
+    local file="$1" out="$2"
+    local raw="${WORK_DIR}/skill-deny-raw.txt"
+    local stripped="${WORK_DIR}/skill-deny-stripped.json"
+    if ! _extract_skill_deny_stripped "${file}" "${raw}" "${stripped}"; then
         return 1
     fi
     if ! jq -c '. | sort' "${stripped}" > "${out}" 2>/dev/null; then
@@ -333,7 +347,7 @@ fi
 # path-first) x {DELETE, PUT} x {upper, lower} case, which `gh`'s
 # Cobra/pflag argument parsing also accepts but which none of the fourth
 # round's eight forms matched — bringing the gh api destructive-method
-# coverage to 9 syntactic forms total (method-first `-X M`/`-XM`/`-X=M`/
+# coverage to 10 syntactic forms total (method-first `-X M`/`-XM`/`-X=M`/
 # `--method M`/`--method=M` and path-first mirrors of the same, x
 # {DELETE, PUT} x {upper, lower}) and the deny-array total to 194. The
 # floor is raised to 194 to catch regressions; 186, 154, 141, and 101
@@ -379,10 +393,13 @@ done
 # The generic `contains("gh api")` group check above is satisfied by a
 # single surviving entry — it does not prove all ten syntactic forms x
 # {DELETE, PUT} x {upper, lower} case are actually present. This array
-# holds all 40 entries verbatim, in insertion order, so exact-equality
-# presence proves AC #1's full ten-form x two-method x two-case coverage
-# (root AGENTS.md: a claimed assertion must be exercised by an explicit
-# case).
+# holds all 40 entries verbatim. The per-entry membership loop below
+# (`any(.[]; . == $e)`) proves exact PRESENCE of each of the 40 entries in
+# each of the three sources (root AGENTS.md: a claimed assertion must be
+# exercised by an explicit case) — by itself it proves membership only, NOT
+# order or uniqueness (#813). The "gh api deny contract: ordered-slice
+# equality + uniqueness" section further below adds the ordered-slice-
+# equality and whole-array-uniqueness assertions that close that gap.
 GH_API_DENY_FORMS=(
     "Bash(gh api -X DELETE*)"
     "Bash(gh api -X delete*)"
@@ -444,6 +461,225 @@ for i in 0 1 2; do
         fi
     done
 done
+
+# ── gh api deny contract: ordered-slice equality + uniqueness (#813, Q1) ──
+# Confirmed decision (ticket #813 Q1, escalated + settled, not re-openable):
+#   - Ordered equality applies ONLY to the GH_API_DENY_FORMS-matching slice
+#     of each source's deny array (filter the source array down to the
+#     entries that are members of the expected 40-element set, in the
+#     source's own order, then compare that slice to the expected array for
+#     exact ordered equality) — NOT to the full 194-entry array. Pinning the
+#     position of unrelated entries (git config, git clean, ...) in three
+#     files would be churn without security value.
+#   - Uniqueness applies to each FULL deny array (all three sources are
+#     verified duplicate-free today).
+#   - MIN_DENY_LEN=194 and the 40 per-entry membership checks above stay
+#     unchanged.
+#   - A cross-source identity assertion (template == root == skill) is
+#     deliberately OUT OF SCOPE — it would forbid .claude/settings.json from
+#     ever carrying a repo-specific deny entry, a policy decision beyond
+#     this ticket.
+
+echo "case: GH_API_DENY_FORMS has exactly 40 elements"
+if [[ "${#GH_API_DENY_FORMS[@]}" -eq 40 ]]; then
+    pass
+else
+    fail "GH_API_DENY_FORMS: expected exactly 40 elements, found ${#GH_API_DENY_FORMS[@]}"
+fi
+
+echo "case: GH_API_DENY_FORMS has exactly 40 distinct elements (no self-duplicates)"
+if ! GH_API_DENY_FORMS_DISTINCT_COUNT="$(printf '%s\n' "${GH_API_DENY_FORMS[@]}" | sort -u | wc -l | tr -d ' ')"; then
+    fail "GH_API_DENY_FORMS: failed to compute distinct element count: ${GH_API_DENY_FORMS_DISTINCT_COUNT}"
+elif [[ "${GH_API_DENY_FORMS_DISTINCT_COUNT}" -eq 40 ]]; then
+    pass
+else
+    fail "GH_API_DENY_FORMS: expected 40 distinct elements, found ${GH_API_DENY_FORMS_DISTINCT_COUNT}"
+fi
+
+# Materialize GH_API_DENY_FORMS as a JSON array with an explicitly checked
+# exit status (never unchecked command/process substitution for a
+# security-critical extraction — root AGENTS.md).
+GH_API_EXPECTED_JSON="${WORK_DIR}/gh-api-expected.json"
+if ! printf '%s\n' "${GH_API_DENY_FORMS[@]}" | jq -R . | jq -s . > "${GH_API_EXPECTED_JSON}"; then
+    echo "settings-permissions.test.sh: failed to materialize GH_API_DENY_FORMS as JSON at ${GH_API_EXPECTED_JSON}." >&2
+    exit 2
+fi
+
+# extract_deny_ordered <settings-json-file> <out-file> — writes
+# .permissions.deny AS-IS (its own insertion order, not sorted) into
+# <out-file>. extract_sorted_deny's alphabetical sort would destroy the very
+# insertion order the ordered-slice-equality predicate below needs to
+# compare. Returns non-zero and sets EXTRACT_ERR on any failure.
+extract_deny_ordered() {
+    local file="$1" out="$2"
+    EXTRACT_ERR=""
+    rm -f "${out}"
+    if [[ ! -r "${file}" ]]; then
+        EXTRACT_ERR="file not readable: ${file}"
+        return 1
+    fi
+    if ! jq -c '.permissions.deny' "${file}" > "${out}" 2>/dev/null; then
+        rm -f "${out}"
+        EXTRACT_ERR="jq failed to extract .permissions.deny from ${file}"
+        return 1
+    fi
+    return 0
+}
+
+# extract_skill_deny_json_ordered <skill-md-file> <out-file> — same as
+# extract_skill_deny_json_sorted above but preserves the fenced block's own
+# insertion order (no `sort`).
+extract_skill_deny_json_ordered() {
+    local file="$1" out="$2"
+    local raw="${WORK_DIR}/skill-deny-raw-ordered.txt"
+    local stripped="${WORK_DIR}/skill-deny-stripped-ordered.json"
+    if ! _extract_skill_deny_stripped "${file}" "${raw}" "${stripped}"; then
+        return 1
+    fi
+    if ! jq -c '.' "${stripped}" > "${out}" 2>/dev/null; then
+        EXTRACT_ERR="jq could not parse the extracted block as a JSON array"
+        return 1
+    fi
+    return 0
+}
+
+TEMPLATE_DENY_ORDERED="${WORK_DIR}/template-deny-ordered.json"
+CLAUDE_DENY_ORDERED="${WORK_DIR}/claude-deny-ordered.json"
+SKILL_DENY_ORDERED="${WORK_DIR}/skill-deny-ordered.json"
+
+if extract_deny_ordered "${TEMPLATE_SETTINGS}" "${TEMPLATE_DENY_ORDERED}"; then
+    TEMPLATE_ORD_OK=1
+else
+    TEMPLATE_ORD_OK=0
+    fail "flow/templates/settings.json: ${EXTRACT_ERR}"
+fi
+
+if extract_deny_ordered "${CLAUDE_SETTINGS}" "${CLAUDE_DENY_ORDERED}"; then
+    CLAUDE_ORD_OK=1
+else
+    CLAUDE_ORD_OK=0
+    fail ".claude/settings.json: ${EXTRACT_ERR}"
+fi
+
+if extract_skill_deny_json_ordered "${SKILL_MD}" "${SKILL_DENY_ORDERED}"; then
+    SKILL_ORD_OK=1
+else
+    SKILL_ORD_OK=0
+    fail "flow/skills/configure/SKILL.md: ${EXTRACT_ERR}"
+fi
+
+# gh_api_slice_equal_ok <full-deny-json-file> <expected-json-file> — pure
+# predicate, never calls fail() (flow/docs/shell-scripting-gotchas.md's
+# "never call fail() inside $(...)" rule; enforced by
+# flow/tests/read-helper-purity-contract.test.sh). Filters
+# <full-deny-json-file>'s array down to the entries that are members of
+# <expected-json-file>'s set, preserving <full-deny-json-file>'s own order,
+# then compares that filtered slice to <expected-json-file> for exact
+# ordered equality. Returns 0 only on an exact ordered match; returns 1 on
+# any mismatch OR any jq evaluation error, so a broken predicate can never
+# silently report a pass.
+gh_api_slice_equal_ok() {
+    local full="$1" expected="$2" result
+    result="$(jq -n --slurpfile full "${full}" --slurpfile expected "${expected}" \
+        '($expected[0]) as $e
+         | ($full[0] | map(select(. as $x | $e | index($x) != null))) as $slice
+         | ($slice == $e)' 2>/dev/null)" || return 1
+    [[ "${result}" == "true" ]]
+}
+
+# gh_api_array_unique_ok <full-deny-json-file> — pure predicate, same
+# no-fail() contract as above. Returns 0 only when <full-deny-json-file>'s
+# array is duplicate-free; returns 1 on any duplicate OR any jq evaluation
+# error.
+gh_api_array_unique_ok() {
+    local full="$1" result
+    result="$(jq -n --slurpfile full "${full}" \
+        '($full[0] | length) == ($full[0] | unique | length)' 2>/dev/null)" || return 1
+    [[ "${result}" == "true" ]]
+}
+
+DENY_ORDERED_FILES=("${TEMPLATE_DENY_ORDERED}" "${CLAUDE_DENY_ORDERED}" "${SKILL_DENY_ORDERED}")
+DENY_ORD_OKS=("${TEMPLATE_ORD_OK}" "${CLAUDE_ORD_OK}" "${SKILL_ORD_OK}")
+
+for i in 0 1 2; do
+    label="${DENY_LABELS[$i]}"
+    file="${DENY_ORDERED_FILES[$i]}"
+    ok="${DENY_ORD_OKS[$i]}"
+
+    echo "case: ${label} gh api destructive-method forms appear as an ordered slice matching GH_API_DENY_FORMS"
+    if [[ "${ok}" -ne 1 ]]; then
+        fail "${label}: cannot verify gh api ordered-slice equality — ordered extraction failed (see above)"
+    elif gh_api_slice_equal_ok "${file}" "${GH_API_EXPECTED_JSON}"; then
+        pass
+    else
+        if ! actual_slice="$(jq -c --slurpfile expected "${GH_API_EXPECTED_JSON}" '($expected[0]) as $e | map(select(. as $x | $e | index($x) != null))' "${file}" 2>&1)"; then
+            actual_slice="jq failed to compute diagnostic slice: ${actual_slice}"
+        fi
+        fail "${label}: gh api destructive-method forms slice does not match GH_API_DENY_FORMS in order (actual slice: ${actual_slice})"
+    fi
+
+    echo "case: ${label} permissions.deny array is duplicate-free"
+    if [[ "${ok}" -ne 1 ]]; then
+        fail "${label}: cannot verify duplicate-free deny array — ordered extraction failed (see above)"
+    elif gh_api_array_unique_ok "${file}"; then
+        pass
+    else
+        fail "${label}: permissions.deny array contains at least one duplicate entry"
+    fi
+done
+
+# ── Self-tests: gh api ordered-slice + uniqueness predicates are non-vacuous
+# (#813 Implementation Order step 4) ─────────────────────────────────────
+# Derives three deliberately-broken copies of the real extracted (ordered)
+# template deny array, entirely inside WORK_DIR via jq — never touching any
+# shipped configuration file — and asserts the predicates above reject each
+# one. A positive control asserts the unmutated copy is accepted, so this
+# self-test block cannot pass vacuously (e.g. via a predicate that always
+# returns 1).
+if [[ "${TEMPLATE_ORD_OK}" -eq 1 ]]; then
+    echo "case: gh api predicate self-test — positive control (unmutated copy accepted)"
+    if gh_api_slice_equal_ok "${TEMPLATE_DENY_ORDERED}" "${GH_API_EXPECTED_JSON}" \
+        && gh_api_array_unique_ok "${TEMPLATE_DENY_ORDERED}"; then
+        pass
+    else
+        fail "self-test: unmutated flow/templates/settings.json deny array was rejected by the gh api predicates (positive control failed)"
+    fi
+
+    GH_API_SELFTEST_MISSING="${WORK_DIR}/gh-api-selftest-missing.json"
+    echo "case: gh api ordered-slice predicate self-test — missing entry is rejected"
+    if ! jq --arg e "${GH_API_DENY_FORMS[0]}" 'map(select(. != $e))' \
+        "${TEMPLATE_DENY_ORDERED}" > "${GH_API_SELFTEST_MISSING}"; then
+        fail "self-test: failed to materialize missing-entry fixture"
+    elif gh_api_slice_equal_ok "${GH_API_SELFTEST_MISSING}" "${GH_API_EXPECTED_JSON}"; then
+        fail "self-test: gh_api_slice_equal_ok accepted a deny array missing '${GH_API_DENY_FORMS[0]}' (predicate is vacuous)"
+    else
+        pass
+    fi
+
+    GH_API_SELFTEST_SWAPPED="${WORK_DIR}/gh-api-selftest-swapped.json"
+    echo "case: gh api ordered-slice predicate self-test — swapped adjacent pair (within the slice) is rejected"
+    if ! jq --arg a "${GH_API_DENY_FORMS[0]}" --arg b "${GH_API_DENY_FORMS[1]}" \
+        'map(if . == $a then $b elif . == $b then $a else . end)' \
+        "${TEMPLATE_DENY_ORDERED}" > "${GH_API_SELFTEST_SWAPPED}"; then
+        fail "self-test: failed to materialize swapped-pair fixture"
+    elif gh_api_slice_equal_ok "${GH_API_SELFTEST_SWAPPED}" "${GH_API_EXPECTED_JSON}"; then
+        fail "self-test: gh_api_slice_equal_ok accepted a deny array with '${GH_API_DENY_FORMS[0]}' and '${GH_API_DENY_FORMS[1]}' swapped (predicate is vacuous)"
+    else
+        pass
+    fi
+
+    GH_API_SELFTEST_DUPLICATE="${WORK_DIR}/gh-api-selftest-duplicate.json"
+    echo "case: gh api uniqueness predicate self-test — injected duplicate is rejected"
+    if ! jq '. + [.[0]]' "${TEMPLATE_DENY_ORDERED}" > "${GH_API_SELFTEST_DUPLICATE}"; then
+        fail "self-test: failed to materialize duplicate-entry fixture"
+    elif gh_api_array_unique_ok "${GH_API_SELFTEST_DUPLICATE}"; then
+        fail "self-test: gh_api_array_unique_ok accepted a deny array with an injected duplicate entry (predicate is vacuous)"
+    else
+        pass
+    fi
+else
+    fail "self-test: cannot run gh api predicate self-tests — flow/templates/settings.json ordered extraction failed (see above)"
+fi
 
 # ── Negative guard: boundary-unsafe legacy forms (#739, Q3) ──────────────
 # Bash(git push --force:*) and Bash(git push --force*) also match

@@ -32,9 +32,23 @@
 # Case 1 was re-pointed by #796: context7 MCP moves from plugin scope to
 # project scope, pinned to a specific version, and flow/.mcp.json is removed.
 #
+# #813 extends case 1 into the full Context7 migration contract (both
+# permission-pair tool names, the legacy-cleanup enabled-add/dedup and
+# declined-removal steps, unrelated-entry preservation, and the MCP Server
+# Configuration section's merge/never-overwrite, args-only version-refresh,
+# and declined-server entry-removal sentences) and adds two new cases for
+# the repo-root .mcp.json and .claude/settings.json files. Every Context7
+# anchor is an exact (or whitespace-normalized) procedure-text anchor, never
+# a fixture: flow/skills/configure/SKILL.md is a Markdown procedure with no
+# executable migration code to drive, so a fixture harness would have to
+# re-implement the procedure in the test, proving the test's
+# re-implementation rather than the shipped procedure (ticket #813 Q&A).
+#
 # Covered files:
 #   - flow/.mcp.json (asserted absent)
 #   - flow/skills/configure/SKILL.md
+#   - .mcp.json (repo root; #813)
+#   - .claude/settings.json (repo root; #813)
 #   - flow/skills/address-review/SKILL.md
 #   - flow/ (repo-wide, tick.sh + bare slash-commands)
 #   - flow/skills/ (repo-wide, /tmp/claude/ literal)
@@ -95,6 +109,34 @@ assert_not_contains() {
   [[ "${content}" != *"${pattern}"* ]] || fail "${label}: forbidden stale text still present: [${pattern}]"
 }
 
+# assert_contains_ws <content> <required-phrase> <label>
+# Whitespace-insensitive required-phrase match: collapses whitespace runs
+# (space/tab/newline) to a single space in both <content> and
+# <required-phrase> before a literal substring test, so a Markdown line wrap
+# between words (e.g. the Context7 migration procedure's wrapped steps)
+# never breaks a match that would otherwise hold, while the full required
+# word sequence stays mandatory (a dropped word still fails the match).
+# Modeled on _contains_ws_insensitive in flow/tests/parity/contract-lib.sh,
+# including its empty-pattern guard (an empty <required-phrase> would
+# otherwise vacuously match any content via the `*""* ` glob below).
+assert_contains_ws() {
+  local content="$1" phrase="$2" label="$3" normalized_content normalized_phrase
+  if [[ -z "${phrase}" ]]; then
+    fail "${label}: empty required pattern (test bug)"
+    return
+  fi
+  normalized_content="$(printf '%s' "${content}" | tr -s '[:space:]' ' ')" || { fail "${label}: failed to normalize content whitespace"; return; }
+  normalized_phrase="$(printf '%s' "${phrase}" | tr -s '[:space:]' ' ')" || { fail "${label}: failed to normalize phrase whitespace"; return; }
+  [[ "${normalized_content}" == *"${normalized_phrase}"* ]] || fail "${label}: required text missing (whitespace-normalized): [${phrase}]"
+}
+
+# REPO_ROOT — resolved once from FLOW_DIR/.. with a checked cd (root
+# AGENTS.md: never unchecked command substitution for a security-critical
+# path). Needed by the new repo-root .mcp.json / .claude/settings.json
+# cases below (#813) — flow/templates/settings-permissions.test.sh already
+# resolves REPO_ROOT the same way (two levels up from its own script dir).
+REPO_ROOT="$(cd "${FLOW_DIR}/.." && pwd)" || { echo "skill-convention-contract.test.sh: failed to resolve repo root." >&2; exit 2; }
+
 # =====================================================================
 # 1. flow/.mcp.json (removed) + flow/skills/configure/SKILL.md — context7
 #    MCP server moves from plugin scope to project scope, pinned to a
@@ -116,24 +158,59 @@ if [[ -n "${configure_skill}" ]]; then
   assert_not_contains "${configure_skill}" \
     '@upstash/context7-mcp"]' \
     "796 skills/configure/SKILL.md: stale unpinned context7 args marker still present"
-  assert_not_contains "${configure_skill}" \
-    "- **plugin**: Already defined in cenci's" \
-    "796 skills/configure/SKILL.md: stale plugin-scope legend bullet still present"
+  # Vacuity gating (#813, root AGENTS.md): each negative below is preceded
+  # by the positive anchor that proves its host section still exists, so a
+  # section deletion/rename cannot make the negative pass vacuously.
   assert_contains "${configure_skill}" \
     "- **editor**:" \
     "796 skills/configure/SKILL.md: new editor-scope legend bullet missing"
   assert_not_contains "${configure_skill}" \
+    "- **plugin**: Already defined in cenci's" \
+    "796 skills/configure/SKILL.md: stale plugin-scope legend bullet still present"
+  assert_contains "${configure_skill}" \
+    "- **project**: Add to the project's root \`.mcp.json\`." \
+    "813 skills/configure/SKILL.md: project-scoped .mcp.json legend bullet missing"
+  assert_not_contains "${configure_skill}" \
     '${CLAUDE_PLUGIN_ROOT}/.mcp.json' \
     "796 skills/configure/SKILL.md: stale plugin-scoped .mcp.json reference still present"
   assert_contains "${configure_skill}" \
-    "mcp__context7__resolve-library-id" \
-    "796 skills/configure/SKILL.md: new project-scoped context7 tool-permission emit line missing"
+    "- **Context7**: \`mcp__context7__resolve-library-id\`, \`mcp__context7__query-docs\`" \
+    "813 skills/configure/SKILL.md: Known tools Context7 permission-pair entry missing both mcp__context7__resolve-library-id and mcp__context7__query-docs"
   assert_not_contains "${configure_skill}" \
     "mcp__plugin_cenci_context7__resolve-library-id" \
     "796 skills/configure/SKILL.md: stale plugin-scoped context7 tool permission still present"
   assert_contains "${configure_skill}" \
     "mcp__plugin_cenci_context7__*" \
     "796 skills/configure/SKILL.md: legacy plugin-scoped context7 permission cleanup wildcard missing"
+
+  # --- #813: full Context7 migration contract ------------------------------
+  # Legacy cleanup (Context7 scope migration) section.
+  assert_contains "${configure_skill}" \
+    "**Legacy cleanup (Context7 scope migration)**" \
+    "813 skills/configure/SKILL.md: Legacy cleanup (Context7 scope migration) heading missing"
+  assert_contains_ws "${configure_skill}" \
+    "2. If Context7 is enabled this run, ensure the project-scoped \`mcp__context7__resolve-library-id\` and \`mcp__context7__query-docs\` pair is present in \`permissions.allow\` — add whichever is missing, and deduplicate rather than appending a duplicate entry." \
+    "813 skills/configure/SKILL.md: Context7 enabled add/deduplicate step missing"
+  assert_contains "${configure_skill}" \
+    "3. If Context7 is declined this run, remove the pair without adding a replacement." \
+    "813 skills/configure/SKILL.md: Context7 declined removal step missing"
+  assert_contains_ws "${configure_skill}" \
+    "4. **Verify**: after healing, confirm \`permissions.allow\` contains no remaining entry with the \`mcp__plugin_cenci_context7__*\` prefix, and that every non-Context7 entry present before this step is still present unchanged. If either check fails, the heal step above was incomplete or over-broad — fix before continuing." \
+    "813 skills/configure/SKILL.md: Context7 cleanup verify + unrelated-entry preservation step missing"
+
+  # MCP Server Configuration section.
+  assert_contains "${configure_skill}" \
+    "### MCP Server Configuration" \
+    "813 skills/configure/SKILL.md: MCP Server Configuration heading missing"
+  assert_contains "${configure_skill}" \
+    "- If the file already exists, merge into the existing \`mcpServers\` object — never overwrite existing entries, with two field-scoped exceptions:" \
+    "813 skills/configure/SKILL.md: .mcp.json merge/never-overwrite sentence missing"
+  assert_contains "${configure_skill}" \
+    "  - **Version-pin refresh**: for a catalog server whose catalog \`Args\` are version-pinned (e.g. Context7), if an existing entry's \`args\` differ from the catalog value, overwrite **\`args\` only** — every other key (including \`env\` and any user-added keys) is preserved. This is the single explicit, documented exception to \"never overwrite existing entries.\"" \
+    "813 skills/configure/SKILL.md: args-only version-pin-refresh sentence missing"
+  assert_contains "${configure_skill}" \
+    "  - **Declined servers**: for each catalog server recorded \`false\` in \`mcpServers\` (question 5's answer), delete that entry from an existing \`.mcp.json\` if present. If \`mcpServers\` becomes empty as a result, leave the file in place with an empty \`mcpServers\` object — never delete the file. (The \"never create an empty \`.mcp.json\`\" rule above applies to *creating* a new file only, not to editing an existing one down to empty.)" \
+    "813 skills/configure/SKILL.md: declined-server entry-removal sentence missing"
 fi
 
 # =====================================================================
@@ -452,6 +529,87 @@ else
       fail "951 flow/docs/comment-attribution.md: registry table out of sync with markers found under flow/skills/ (diff below, < found only / > registry only):
 ${SYNC_DIFF_951}"
     fi
+  fi
+fi
+
+# =====================================================================
+# 12. Root .mcp.json — context7 pinned with exact args and no `disabled`
+#     key (#813 Context7 migration contract). Each negative below is gated
+#     behind the readability/object-existence check that precedes it, so a
+#     missing file or a renamed/removed context7 entry cannot pass
+#     vacuously.
+# =====================================================================
+
+MCP_JSON_PATH="${REPO_ROOT}/.mcp.json"
+echo "case: root .mcp.json is readable"
+if [[ ! -r "${MCP_JSON_PATH}" ]]; then
+  fail "813 .mcp.json: file not readable: ${MCP_JSON_PATH}"
+else
+  CTX7_OBJECT_OK=0
+  if ctx7_type="$(jq -r '.mcpServers.context7 | type' "${MCP_JSON_PATH}" 2>&1)"; then
+    if [[ "${ctx7_type}" == "object" ]]; then
+      CTX7_OBJECT_OK=1
+    else
+      fail "813 .mcp.json: .mcpServers.context7 is missing or not a JSON object (type: ${ctx7_type})"
+    fi
+  else
+    fail "813 .mcp.json: jq error evaluating .mcpServers.context7's type: ${ctx7_type}"
+  fi
+
+  if [[ "${CTX7_OBJECT_OK}" -eq 1 ]]; then
+    if ctx7_args="$(jq -c '.mcpServers.context7.args' "${MCP_JSON_PATH}" 2>&1)"; then
+      [[ "${ctx7_args}" == '["-y","@upstash/context7-mcp@3.2.5"]' ]] || fail "813 .mcp.json: .mcpServers.context7.args does not equal [\"-y\", \"@upstash/context7-mcp@3.2.5\"] (found: ${ctx7_args})"
+    else
+      fail "813 .mcp.json: jq error evaluating .mcpServers.context7.args: ${ctx7_args}"
+    fi
+
+    if ctx7_has_disabled="$(jq -r '.mcpServers.context7 | has("disabled")' "${MCP_JSON_PATH}" 2>&1)"; then
+      [[ "${ctx7_has_disabled}" == "false" ]] || fail "813 .mcp.json: .mcpServers.context7 carries an inert 'disabled' key"
+    else
+      fail "813 .mcp.json: jq error evaluating .mcpServers.context7's disabled key: ${ctx7_has_disabled}"
+    fi
+  else
+    fail "813 .mcp.json: skipped args/disabled-key checks — .mcpServers.context7 object-existence check failed (see above)"
+  fi
+fi
+
+# =====================================================================
+# 13. Root .claude/settings.json — project-scoped Context7 permissions
+#     present, zero plugin-scoped entries (#813 Context7 migration
+#     contract). The plugin-scoped-entry negative is gated behind the
+#     .permissions.allow array-existence check that precedes it.
+# =====================================================================
+
+CLAUDE_SETTINGS_PATH="${REPO_ROOT}/.claude/settings.json"
+echo "case: root .claude/settings.json is readable"
+if [[ ! -r "${CLAUDE_SETTINGS_PATH}" ]]; then
+  fail "813 .claude/settings.json: file not readable: ${CLAUDE_SETTINGS_PATH}"
+else
+  ALLOW_ARRAY_OK=0
+  if allow_len="$(jq -r '(.permissions.allow // "null") | if type == "array" then (length | tostring) else "not-array" end' "${CLAUDE_SETTINGS_PATH}" 2>&1)"; then
+    if [[ "${allow_len}" =~ ^[0-9]+$ ]] && [[ "${allow_len}" -gt 0 ]]; then
+      ALLOW_ARRAY_OK=1
+    else
+      fail "813 .claude/settings.json: .permissions.allow is not a non-empty array (found: ${allow_len})"
+    fi
+  else
+    fail "813 .claude/settings.json: jq error evaluating .permissions.allow's length: ${allow_len}"
+  fi
+
+  if [[ "${ALLOW_ARRAY_OK}" -eq 1 ]]; then
+    if allow_has_both="$(jq -r '.permissions.allow | (index("mcp__context7__resolve-library-id") != null) and (index("mcp__context7__query-docs") != null)' "${CLAUDE_SETTINGS_PATH}" 2>&1)"; then
+      [[ "${allow_has_both}" == "true" ]] || fail "813 .claude/settings.json: .permissions.allow is missing one or both project-scoped Context7 permissions (mcp__context7__resolve-library-id, mcp__context7__query-docs)"
+    else
+      fail "813 .claude/settings.json: jq error evaluating project-scoped Context7 permission presence: ${allow_has_both}"
+    fi
+
+    if plugin_ctx7_count="$(jq -r '[.permissions.allow[] | select(startswith("mcp__plugin_cenci_context7__"))] | length' "${CLAUDE_SETTINGS_PATH}" 2>&1)"; then
+      [[ "${plugin_ctx7_count}" == "0" ]] || fail "813 .claude/settings.json: .permissions.allow carries ${plugin_ctx7_count} plugin-scoped mcp__plugin_cenci_context7__* entry/entries (expected zero)"
+    else
+      fail "813 .claude/settings.json: jq error evaluating plugin-scoped Context7 entry count: ${plugin_ctx7_count}"
+    fi
+  else
+    fail "813 .claude/settings.json: skipped project-scoped/plugin-scoped Context7 permission checks — .permissions.allow array-existence check failed (see above)"
   fi
 fi
 
