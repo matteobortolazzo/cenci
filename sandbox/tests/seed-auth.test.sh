@@ -183,6 +183,118 @@ else
     fail "entrypoint.sh does not seed /tmp/host-pencil-creds/session-cli.json to /home/dev/.pencil/session-cli.json"
 fi
 
+# ── Case 9: GitHub CLI hosts.yml is seeded only when it carries a token ──
+# gh's token doesn't rotate, so the host copy stays canonical — but only when
+# the host file actually holds the token. With gh's default secure storage the
+# token lives in the host OS keyring and hosts.yml lists the account with no
+# `oauth_token:` at all. Copying that token-less file into the container is
+# worse than copying nothing: gh's multi-account config migration finds an
+# account whose token it cannot resolve and aborts, failing *every* gh
+# invocation (even `gh --version`, even with GH_TOKEN set, because the
+# migration runs on config load before auth resolution). With no hosts.yml,
+# gh runs fine and honours GH_TOKEN.
+HOSTS_WITH_TOKEN=$'github.com:\n    git_protocol: https\n    users:\n        octocat:\n            oauth_token: gho_hosttoken\n    user: octocat\n    oauth_token: gho_hosttoken\n'
+HOSTS_NO_TOKEN=$'github.com:\n    git_protocol: https\n    users:\n        octocat:\n    user: octocat\n'
+
+echo "case: seeds hosts.yml when the staged host file carries an oauth_token"
+STAGED="${TMPDIR_TEST}/case9/hosts.yml"
+DEST="${TMPDIR_TEST}/case9/home/.config/gh/hosts.yml"
+mkdir -p "$(dirname "${STAGED}")"
+printf '%s' "${HOSTS_WITH_TOKEN}" > "${STAGED}"
+seed_gh_hosts "${STAGED}" "${DEST}"
+assert_eq "returns success" "0" "$?"
+assert_eq "copies staged hosts.yml" "${HOSTS_WITH_TOKEN%$'\n'}" "$(cat "${DEST}" 2>/dev/null)"
+assert_eq "sets mode 600" "600" "$(stat -c '%a' "${DEST}" 2>/dev/null)"
+
+echo "case: a token-carrying host file still overwrites an existing hosts.yml"
+STAGED="${TMPDIR_TEST}/case9b/hosts.yml"
+DEST="${TMPDIR_TEST}/case9b/home/.config/gh/hosts.yml"
+mkdir -p "$(dirname "${STAGED}")" "$(dirname "${DEST}")"
+printf '%s' "${HOSTS_WITH_TOKEN}" > "${STAGED}"
+printf 'github.com:\n    oauth_token: gho_containertoken\n' > "${DEST}"
+seed_gh_hosts "${STAGED}" "${DEST}"
+assert_eq "returns success" "0" "$?"
+assert_eq "host re-auth propagates" "${HOSTS_WITH_TOKEN%$'\n'}" "$(cat "${DEST}")"
+
+echo "case: never copies a token-less host file over an existing container login"
+STAGED="${TMPDIR_TEST}/case9c/hosts.yml"
+DEST="${TMPDIR_TEST}/case9c/home/.config/gh/hosts.yml"
+mkdir -p "$(dirname "${STAGED}")" "$(dirname "${DEST}")"
+printf '%s' "${HOSTS_NO_TOKEN}" > "${STAGED}"
+printf 'github.com:\n    oauth_token: gho_containertoken\n' > "${DEST}"
+STDERR_FILE="${TMPDIR_TEST}/case9c/stderr.txt"
+seed_gh_hosts "${STAGED}" "${DEST}" 2> "${STDERR_FILE}"
+assert_eq "returns success" "0" "$?"
+assert_eq "keeps the in-container gh login" \
+    'github.com:
+    oauth_token: gho_containertoken' "$(cat "${DEST}")"
+if grep -qF "keeping this sandbox's own gh login" "${STDERR_FILE}"; then
+    pass
+else
+    fail "expected a warning naming the kept container login, got: $(cat "${STDERR_FILE}")"
+fi
+
+echo "case: a token-less host file with no container login is skipped, not copied"
+STAGED="${TMPDIR_TEST}/case9d/hosts.yml"
+DEST="${TMPDIR_TEST}/case9d/home/.config/gh/hosts.yml"
+mkdir -p "$(dirname "${STAGED}")"
+printf '%s' "${HOSTS_NO_TOKEN}" > "${STAGED}"
+STDERR_FILE="${TMPDIR_TEST}/case9d/stderr.txt"
+seed_gh_hosts "${STAGED}" "${DEST}" 2> "${STDERR_FILE}"
+assert_eq "returns success" "0" "$?"
+if [[ -e "${DEST}" ]]; then
+    fail "token-less hosts.yml must not be copied — it bricks every gh command"
+else
+    pass
+fi
+if grep -qF "gh auth login --insecure-storage" "${STDERR_FILE}"; then
+    pass
+else
+    fail "expected the warning to name the --insecure-storage remedy, got: $(cat "${STDERR_FILE}")"
+fi
+
+echo "case: an oauth_token key with an empty value counts as token-less"
+STAGED="${TMPDIR_TEST}/case9e/hosts.yml"
+DEST="${TMPDIR_TEST}/case9e/home/.config/gh/hosts.yml"
+mkdir -p "$(dirname "${STAGED}")"
+printf 'github.com:\n    user: octocat\n    oauth_token:\n' > "${STAGED}"
+seed_gh_hosts "${STAGED}" "${DEST}" 2>/dev/null
+assert_eq "returns success" "0" "$?"
+if [[ -e "${DEST}" ]]; then
+    fail "an empty oauth_token value must not count as a usable token"
+else
+    pass
+fi
+
+echo "case: missing staged hosts.yml is a no-op"
+STAGED="${TMPDIR_TEST}/case9f/absent.yml"
+DEST="${TMPDIR_TEST}/case9f/home/.config/gh/hosts.yml"
+mkdir -p "$(dirname "${DEST}")"
+printf 'github.com:\n    oauth_token: gho_containertoken\n' > "${DEST}"
+seed_gh_hosts "${STAGED}" "${DEST}"
+assert_eq "returns success" "0" "$?"
+assert_eq "leaves destination untouched" \
+    'github.com:
+    oauth_token: gho_containertoken' "$(cat "${DEST}")"
+
+# ── Case 10: entrypoint wires gh staging → home volume via seed_gh_hosts ──
+# The contract above is meaningless if entrypoint.sh still does its own
+# unconditional `cp` of the staged hosts.yml.
+echo "case: entrypoint.sh seeds the staged gh hosts.yml through seed_gh_hosts"
+if grep -qF "seed_gh_hosts /tmp/host-gh-config/hosts.yml /home/dev/.config/gh/hosts.yml" \
+    "${SCRIPT_DIR}/../entrypoint.sh"; then
+    pass
+else
+    fail "entrypoint.sh does not seed /tmp/host-gh-config/hosts.yml to /home/dev/.config/gh/hosts.yml via seed_gh_hosts"
+fi
+
+echo "case: entrypoint.sh no longer copies the staged hosts.yml unconditionally"
+if grep -qE '^[[:space:]]*cp /tmp/host-gh-config/hosts\.yml' "${SCRIPT_DIR}/../entrypoint.sh"; then
+    fail "entrypoint.sh still contains an unconditional cp of the staged gh hosts.yml"
+else
+    pass
+fi
+
 echo
 echo "Passed: ${PASSES}, Failed: ${FAILURES}"
 [[ "${FAILURES}" -eq 0 ]]
