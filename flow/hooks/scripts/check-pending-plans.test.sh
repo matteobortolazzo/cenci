@@ -83,34 +83,34 @@ assert_eq "${CODE}" "0" "case1b exit"
 assert_eq "${OUT}" "" "case1b empty .plans dir: silent"
 cleanup_fixture
 
-# --- Case 2: one plan file → payload names it ------------------------------
+# --- Case 2: one ticketless plan file → payload names it -------------------
 make_fixture
 mkdir -p "${ROOT}/.plans"
-: > "${ROOT}/.plans/42-foo.md"
+: > "${ROOT}/.plans/foo-fix.md"
 run_hook
 assert_eq "${CODE}" "0" "case2 exit"
 echo "${OUT}" | jq -e '.hookSpecificOutput.hookEventName == "SessionStart"' >/dev/null 2>&1 \
   || fail "case2 output must be SessionStart hookSpecificOutput JSON (got: ${OUT})"
 CTX="$(echo "${OUT}" | jq -r '.hookSpecificOutput.additionalContext')"
-assert_contains "${CTX}" "Pending implementation plan found: 42-foo.md" "case2 names the single plan"
+assert_contains "${CTX}" "Pending ticketless implementation plan: foo-fix.md" "case2 names the single plan"
 assert_contains "${CTX}" "/cenci:implement" "case2 points at implement"
 cleanup_fixture
 
-# --- Case 3: many plan files → payload lists all ---------------------------
+# --- Case 3: many ticketless plan files → payload lists all ----------------
 make_fixture
 mkdir -p "${ROOT}/.plans"
-: > "${ROOT}/.plans/1-a.md"
-: > "${ROOT}/.plans/2-b.md"
-: > "${ROOT}/.plans/3-c.md"
+: > "${ROOT}/.plans/a-one.md"
+: > "${ROOT}/.plans/b-two.md"
+: > "${ROOT}/.plans/c-three.md"
 run_hook
 assert_eq "${CODE}" "0" "case3 exit"
 echo "${OUT}" | jq -e '.hookSpecificOutput.hookEventName == "SessionStart"' >/dev/null 2>&1 \
   || fail "case3 output must be SessionStart hookSpecificOutput JSON (got: ${OUT})"
 CTX="$(echo "${OUT}" | jq -r '.hookSpecificOutput.additionalContext')"
-assert_contains "${CTX}" "Multiple pending plans found" "case3 uses the multiple-plans phrasing"
-assert_contains "${CTX}" "1-a.md" "case3 lists first plan"
-assert_contains "${CTX}" "2-b.md" "case3 lists second plan"
-assert_contains "${CTX}" "3-c.md" "case3 lists third plan"
+assert_contains "${CTX}" "Pending ticketless implementation plans" "case3 uses the multiple-plans phrasing"
+assert_contains "${CTX}" "a-one.md" "case3 lists first plan"
+assert_contains "${CTX}" "b-two.md" "case3 lists second plan"
+assert_contains "${CTX}" "c-three.md" "case3 lists third plan"
 cleanup_fixture
 
 # --- Case 4: files under .plans/done/ are NOT reported ---------------------
@@ -130,7 +130,7 @@ cleanup_fixture
 # covered by an unrelated case.
 make_fixture
 mkdir -p "${ROOT}/.plans"
-: > "${ROOT}/.plans/5-shape.md"
+: > "${ROOT}/.plans/shape-check.md"
 run_hook
 echo "${OUT}" | jq empty >/dev/null 2>&1 || fail "case5 output must be valid JSON (got: ${OUT})"
 echo "${OUT}" | jq -e 'has("hookSpecificOutput")' >/dev/null 2>&1 \
@@ -268,22 +268,23 @@ assert_contains "${CTX}" "...and 5 more" "case14 remainder notice"
 cleanup_fixture
 
 # --- Case 15: byte order (not version order) sorting -----------------------
-# "10-a.md" sorts before "9-a.md" under LC_ALL=C byte order (since '1' < '9'),
-# but after it under version order. Assert directly against the parent-shell
-# CTX variable with a glob ordering pattern — never call fail() from inside a
-# command substitution (flow/docs/shell-scripting-gotchas.md line 42), since
-# a fail() call inside $(...) runs in a subshell and its failures= increment
-# is lost when the subshell exits.
+# "v10-a.md" sorts before "v9-a.md" under LC_ALL=C byte order (since '1' < '9'),
+# but after it under version order. Both names are ticketless (the digits are
+# not a leading `<id>-` prefix), so the scope pass keeps them. Assert directly
+# against the parent-shell CTX variable with a glob ordering pattern — never
+# call fail() from inside a command substitution (flow/docs/
+# shell-scripting-gotchas.md line 42), since a fail() call inside $(...) runs
+# in a subshell and its failures= increment is lost when the subshell exits.
 make_fixture
 mkdir -p "${ROOT}/.plans"
-: > "${ROOT}/.plans/10-a.md"
-: > "${ROOT}/.plans/9-a.md"
+: > "${ROOT}/.plans/v10-a.md"
+: > "${ROOT}/.plans/v9-a.md"
 run_hook
 assert_eq "${CODE}" "0" "case15 exit"
 echo "${OUT}" | jq empty >/dev/null 2>&1 || fail "case15 output must be valid JSON (got: ${OUT})"
 CTX="$(echo "${OUT}" | jq -r '.hookSpecificOutput.additionalContext')"
-if [[ "${CTX}" != *"10-a.md"*"9-a.md"* ]]; then
-  fail "case15 expected byte-order sort (10-a.md before 9-a.md), got: ${CTX}"
+if [[ "${CTX}" != *"v10-a.md"*"v9-a.md"* ]]; then
+  fail "case15 expected byte-order sort (v10-a.md before v9-a.md), got: ${CTX}"
 fi
 cleanup_fixture
 
@@ -362,8 +363,8 @@ cleanup_fixture
 # listed unchanged rather than swept up as "unsafe".
 make_fixture
 mkdir -p "${ROOT}/.plans"
-ACCENT_NAME='19-planificación.md'
-CJK_NAME='19-日本語.md'
+ACCENT_NAME='planificación.md'
+CJK_NAME='日本語.md'
 : > "${ROOT}/.plans/${ACCENT_NAME}"
 : > "${ROOT}/.plans/${CJK_NAME}"
 run_hook
@@ -373,6 +374,82 @@ CTX="$(echo "${OUT}" | jq -r '.hookSpecificOutput.additionalContext')"
 assert_contains "${CTX}" "${ACCENT_NAME}" "case19 accented UTF-8 name intact"
 assert_contains "${CTX}" "${CJK_NAME}" "case19 CJK UTF-8 name intact"
 assert_not_contains "${OUT}" "with unsafe names were omitted" "case19 valid UTF-8 names are not counted as unsafe"
+cleanup_fixture
+
+# --- Case 20: ticket-mode plans are never surfaced -------------------------
+# `cenci pipeline plan-check <id>` discovers `.plans/<id>-<slug>.md` from the
+# ticket ID alone, so re-advertising those here duplicates a lookup the
+# pipeline already performs. A .plans/ holding only ticket-mode plans must
+# produce no payload at all — not even the framing line, which exists only to
+# frame names that follow it.
+make_fixture
+mkdir -p "${ROOT}/.plans"
+: > "${ROOT}/.plans/42-foo.md"
+: > "${ROOT}/.plans/7-bar.md"
+run_hook
+assert_eq "${CODE}" "0" "case20 exit"
+assert_eq "${OUT}" "" "case20 ticket-mode-only .plans/: silent (plan-check owns these)"
+cleanup_fixture
+
+# --- Case 21: mixed .plans/ surfaces only the ticketless name --------------
+make_fixture
+mkdir -p "${ROOT}/.plans"
+: > "${ROOT}/.plans/42-foo.md"
+: > "${ROOT}/.plans/loose-fix.md"
+run_hook
+assert_eq "${CODE}" "0" "case21 exit"
+CTX="$(echo "${OUT}" | jq -r '.hookSpecificOutput.additionalContext')"
+assert_contains "${CTX}" "loose-fix.md" "case21 surfaces the ticketless plan"
+assert_not_contains "${CTX}" "42-foo.md" "case21 omits the ticket-mode plan"
+cleanup_fixture
+
+# --- Case 22: "numeric prefix" means leading digits then "-", not "has a digit"
+# A slug carrying digits mid-name (fix-http2-timeout.md) is ticketless and must
+# still be surfaced; a bare-digits name with no "-" separator likewise is not a
+# ticket-mode filename under the `<id>-<slug>.md` identity contract.
+make_fixture
+mkdir -p "${ROOT}/.plans"
+: > "${ROOT}/.plans/fix-http2-timeout.md"
+: > "${ROOT}/.plans/2026report.md"
+run_hook
+assert_eq "${CODE}" "0" "case22 exit"
+CTX="$(echo "${OUT}" | jq -r '.hookSpecificOutput.additionalContext')"
+assert_contains "${CTX}" "fix-http2-timeout.md" "case22 mid-name digits are ticketless"
+assert_contains "${CTX}" "2026report.md" "case22 leading digits without a - separator are ticketless"
+cleanup_fixture
+
+# --- Case 23: advisory mood, not a standing interrogation directive --------
+# The prior multi-plan wording ("If no explicit implement target was provided,
+# ask which plan to resume using the AskUserQuestion tool") was unconditioned
+# on the user's intent, so it read as an instruction to open every session
+# holding >=2 plans with a plan picker. The payload states availability only.
+make_fixture
+mkdir -p "${ROOT}/.plans"
+: > "${ROOT}/.plans/x-one.md"
+: > "${ROOT}/.plans/y-two.md"
+run_hook
+assert_eq "${CODE}" "0" "case23 exit"
+CTX="$(echo "${OUT}" | jq -r '.hookSpecificOutput.additionalContext')"
+assert_not_contains "${CTX}" "AskUserQuestion" "case23 payload does not name AskUserQuestion as a standing instruction"
+if echo "${CTX}" | grep -qiE 'ask (the user )?which plan'; then
+  fail "case23 payload must not order the agent to ask which plan to resume (got: ${CTX})"
+fi
+assert_contains "${CTX}" "not a task" "case23 payload marks itself as background availability info"
+cleanup_fixture
+
+# --- Case 24: unsafe-name notice still fires for ticketless names ----------
+# The scope pass runs before the control-byte/UTF-8 passes, so an excluded
+# unsafe name must still be counted and reported — but only when it was in
+# scope to begin with (a ticketless name), never for a ticket-mode one.
+make_fixture
+mkdir -p "${ROOT}/.plans"
+: > "${ROOT}/.plans/good-plan.md"
+: > "${ROOT}/.plans/$(printf 'bad\tname')".md
+run_hook
+assert_eq "${CODE}" "0" "case24 exit"
+CTX="$(echo "${OUT}" | jq -r '.hookSpecificOutput.additionalContext')"
+assert_contains "${CTX}" "good-plan.md" "case24 clean ticketless name surfaced"
+assert_contains "${CTX}" "1 plan file(s) with unsafe names were omitted" "case24 unsafe ticketless name counted"
 cleanup_fixture
 
 echo "check-pending-plans.test.sh: failures=${failures}"

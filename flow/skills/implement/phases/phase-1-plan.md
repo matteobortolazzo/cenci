@@ -620,5 +620,5 @@ To discard it and re-plan, re-run /cenci:implement <ticket-id or task> with `rep
 
 If the task risks exceeding the implementing agent's context budget (see `docs/ticket-sizing.md`), consider running /cenci:refine to split it first.
 
-The SessionStart hook will also remind you of pending plans.
+For a ticketless plan, the SessionStart hook will also surface the filename in later sessions. For a ticket-mode plan it stays quiet — /cenci:implement <ticket-id> finds the saved plan on its own.
 ```
