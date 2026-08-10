@@ -329,8 +329,12 @@ func TestAudit_MalformedDindConfig_Exits1(t *testing.T) {
 	}
 }
 
-// TestAuditNoDind_SucceedsDespiteMalformedConfig pins --no-dind as a
-// config-free escape hatch for `cenci audit` too (#632).
+// TestAuditNoDind_SucceedsDespiteMalformedConfig pinned --no-dind as a
+// config-free escape hatch for `cenci audit` too pre-#1002 (#632). #1002
+// narrows it the same way as the launch/dry-run cases: Audit now ALSO
+// resolves sandbox.plugins unconditionally after resolveDindForHost, so the
+// same corrupt config.json --no-dind used to route around now hard-fails the
+// plugins read instead.
 func TestAuditNoDind_SucceedsDespiteMalformedConfig(t *testing.T) {
 	repoRoot := malformedDindRepoEnv(t)
 	home := t.TempDir()
@@ -339,8 +343,45 @@ func TestAuditNoDind_SucceedsDespiteMalformedConfig(t *testing.T) {
 	cmd.Env = auditSecurityEnv(t, home, t.TempDir())
 	cmd.Dir = repoRoot
 	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("cenci audit --no-dind with corrupt config: %v\n%s", err, output)
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected audit --no-dind with a malformed .cenci/config.json to exit 1 (the plugins read still hard-fails on it, #1002), got %T %v\n%s", err, err, output)
+	}
+	if !strings.Contains(string(output), "config.json") {
+		t.Errorf("expected a path-bearing error naming config.json, got:\n%s", output)
+	}
+}
+
+// TestAudit_MalformedSandboxPluginsConfig_Exits1 pins RepoSandboxPlugins'
+// #632-mirroring hard-fail reaching `cenci audit`: a well-formed JSON
+// document whose "sandbox.plugins" value is outside the closed set must
+// hard-fail (exit 1) with a path-bearing, non-usage error naming the
+// offending value, exactly like the dind-config hard-fail above.
+func TestAudit_MalformedSandboxPluginsConfig_Exits1(t *testing.T) {
+	repo := auditRepoDir(t)
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".cenci"), 0o755); err != nil {
+		t.Fatalf("MkdirAll .cenci: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".cenci", "config.json"), []byte(`{"sandbox":{"plugins":["cenci","bogus-plugin"]}}`), 0o644); err != nil {
+		t.Fatalf("write .cenci/config.json: %v", err)
+	}
+
+	cmd := exec.Command(binaryPath, "audit", "--agent", "claude")
+	cmd.Env = auditSecurityEnv(t, home, t.TempDir())
+	cmd.Dir = repo
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected an unrecognized sandbox.plugins value to exit 1 (hard fail, not a usage error), got %T %v\n%s", err, err, output)
+	}
+	if !strings.Contains(string(output), "config.json") {
+		t.Errorf("expected a path-bearing error naming config.json, got:\n%s", output)
+	}
+	if !strings.Contains(string(output), "bogus-plugin") {
+		t.Errorf("expected the error to name the offending value \"bogus-plugin\", got:\n%s", output)
 	}
 }
 

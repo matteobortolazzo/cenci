@@ -46,7 +46,7 @@ cenci <verb> [subverb] [args] [flags]
 - Sandbox-launcher variables are prefixed `CENCI_SANDBOX_`
   (e.g. `CENCI_SANDBOX_AGENT`, `CENCI_SANDBOX_REAP_GRACE_SECS`,
   `CENCI_SANDBOX_RESEED_CREDS`, `CENCI_SANDBOX_ASSETS`, `CENCI_SANDBOX_DIND`,
-  `CENCI_SANDBOX_AGENT_CLI_TTL_HOURS`).
+  `CENCI_SANDBOX_AGENT_CLI_TTL_HOURS`, `CENCI_SANDBOX_PLUGINS`).
 - The in-container gate is the bare `CENCI_SANDBOX=1` — set on every sandbox
   container; hooks and the daemon use it to detect "I am inside the sandbox"
   and skip host-only behavior.

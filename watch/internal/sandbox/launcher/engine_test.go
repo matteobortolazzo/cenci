@@ -1659,9 +1659,21 @@ func TestCheckSelected_BaseVersionDrift_ReturnsFalseNoBuild(t *testing.T) {
 
 // -- RefreshRunningPlugins ------------------------------------------------
 
-const wantClaudeRefreshCmd = `source /usr/local/bin/lib/migrate-settings.sh && heal_plugin_installs /home/dev/.claude/plugins && provision_plugins /home/dev/.claude/plugins cenci matteobortolazzo/cenci cenci cenci-watch && update_plugins /home/dev/.claude/plugins cenci 0 cenci cenci-watch`
+// wantClaudeRefreshCmd/wantCodexRefreshCmd (#1002, red phase): the trailing
+// plugin-list arguments in each provision_*/update_* call now expand
+// ${CENCI_SANDBOX_PLUGINS-cenci cenci-watch} in-container instead of the
+// literal "cenci cenci-watch" pair, so the same command works for
+// RefreshRunningPlugins' repo-less host-wide sweep, the scoped exec path, and
+// the one-shot volume update path -- each container resolves its own list
+// from its own create-time env (or falls back to the default pair when the
+// var is unset, e.g. a legacy container predating this ticket). The THIRD
+// positional "cenci" in "provision_plugins <dir> cenci matteobortolazzo/cenci
+// ..." is the marketplace name, not a plugin, and stays literal -- only the
+// trailing plugin-list portion changes (plan Risks: wrong positional
+// replaced).
+const wantClaudeRefreshCmd = `source /usr/local/bin/lib/migrate-settings.sh && heal_plugin_installs /home/dev/.claude/plugins && provision_plugins /home/dev/.claude/plugins cenci matteobortolazzo/cenci ${CENCI_SANDBOX_PLUGINS-cenci cenci-watch} && update_plugins /home/dev/.claude/plugins cenci 0 ${CENCI_SANDBOX_PLUGINS-cenci cenci-watch}`
 
-const wantCodexRefreshCmd = `source /usr/local/bin/lib/migrate-settings.sh && provision_codex_plugins /home/dev/.codex cenci matteobortolazzo/cenci cenci cenci-watch && update_codex_plugins /home/dev/.codex cenci 0 cenci cenci-watch`
+const wantCodexRefreshCmd = `source /usr/local/bin/lib/migrate-settings.sh && provision_codex_plugins /home/dev/.codex cenci matteobortolazzo/cenci ${CENCI_SANDBOX_PLUGINS-cenci cenci-watch} && update_codex_plugins /home/dev/.codex cenci 0 ${CENCI_SANDBOX_PLUGINS-cenci cenci-watch}`
 
 // refreshRuntimeEngine wires an Engine to a fake docker that answers `ps
 // --format {{.Names}}` with psOutput and fails `exec` calls whose target
