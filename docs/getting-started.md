@@ -183,6 +183,12 @@ working config for both `~/.config/cenci/config.json` and the repo's
 `.cenci/config.json`, what still stops the machine, and how to read a held-merge log
 line.
 
+## Selective adoption
+
+Want the isolation and attention layers on a repo that doesn't use the gated pipeline?
+[Selective adoption](selective-adoption.md) covers the per-repo disable recipe, what you
+lose and how to replace it, and the residual gaps that have no mitigation.
+
 ## OpenCode support (additional, opt-in agent)
 
 The installer also detects [OpenCode](https://opencode.ai) and, when found, offers an
