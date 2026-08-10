@@ -213,3 +213,68 @@ func TestScopeForContainer(t *testing.T) {
 		t.Errorf("expected zero workspace/repo fields, got %+v", scope)
 	}
 }
+
+// TestDindVolumeNameForContainer covers ticket #596: direct coverage of
+// dindVolumeNameForContainer, which mirrors volumeNameForContainer but
+// inserts "dind-" instead of "home-" right after the shared cenciMarker.
+func TestDindVolumeNameForContainer(t *testing.T) {
+	if got := dindVolumeNameForContainer("claude-cenci-myrepo"); got != "claude-cenci-dind-myrepo" {
+		t.Errorf("dindVolumeNameForContainer(%q) = %q, want %q", "claude-cenci-myrepo", got, "claude-cenci-dind-myrepo")
+	}
+	// A --name-suffixed container name.
+	if got := dindVolumeNameForContainer("claude-cenci-my-repo-feature"); got != "claude-cenci-dind-my-repo-feature" {
+		t.Errorf("dindVolumeNameForContainer(%q) = %q, want %q", "claude-cenci-my-repo-feature", got, "claude-cenci-dind-my-repo-feature")
+	}
+	// No "-cenci-" marker to split on: there is no reliable insertion point,
+	// so the function returns empty rather than guessing.
+	if got := dindVolumeNameForContainer("some-other-container"); got != "" {
+		t.Errorf("dindVolumeNameForContainer(%q) = %q, want empty (no cenciMarker)", "some-other-container", got)
+	}
+}
+
+// TestComputeScope_DindVolumeName_RepoNamedAndLegacyEmpty covers ticket
+// #596: Scope.DindVolumeName is populated (repo-scope, --name-suffixed) in
+// repo mode, and stays empty in legacy mode — dind is only ever available in
+// repo scope (#585, see scope.go:31-34's DindVolumeName doc comment).
+func TestComputeScope_DindVolumeName_RepoNamedAndLegacyEmpty(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+
+	parent := t.TempDir()
+	repo := filepath.Join(parent, "My Repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if out, err := exec.Command("git", "-C", repo, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	// macOS TempDir may be a symlink; resolve like git rev-parse does.
+	resolved, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+	home := t.TempDir()
+
+	named := ComputeScope("claude", "feature", resolved, home)
+	if named.WorkspaceScope != "repo" {
+		t.Fatalf("WorkspaceScope = %q, want repo", named.WorkspaceScope)
+	}
+	wantSlug := Slugify(filepath.Base(resolved))
+	wantVolume := "claude-cenci-dind-" + wantSlug + "-feature"
+	if named.DindVolumeName != wantVolume {
+		t.Errorf("repo-scope DindVolumeName = %q, want %q", named.DindVolumeName, wantVolume)
+	}
+
+	// Legacy mode (bare, non-git temp dir): dind is only ever available in
+	// repo scope, so DindVolumeName must stay empty rather than pointing at
+	// a volume dind can never actually use (#585).
+	legacyCwd := t.TempDir()
+	legacy := ComputeScope("claude", "", legacyCwd, home)
+	if legacy.WorkspaceScope != "legacy" {
+		t.Fatalf("WorkspaceScope = %q, want legacy", legacy.WorkspaceScope)
+	}
+	if legacy.DindVolumeName != "" {
+		t.Errorf("legacy-scope DindVolumeName = %q, want empty (dind is only ever available in repo scope, #585)", legacy.DindVolumeName)
+	}
+}

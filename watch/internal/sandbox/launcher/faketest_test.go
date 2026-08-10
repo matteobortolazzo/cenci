@@ -38,6 +38,18 @@ import (
 //	                     registration probe, sandbox.SysboxRegistered);
 //	                     defaults to "{}" (no runtimes registered), mirroring
 //	                     sandbox_open_test.go's writeScriptedRuntime.
+//	FAKE_INFO_EXIT     → `info ...` exit code (default 0); set nonzero to
+//	                     simulate a `docker info` failure (daemon down),
+//	                     distinct from FAKE_INFO_RUNTIMES's stdout-shape
+//	                     control — note the asymmetric naming: `fv
+//	                     INFO_RUNTIMES` controls stdout, `fe INFO` (→
+//	                     FAKE_INFO_EXIT, not FAKE_INFO_RUNTIMES_EXIT) controls
+//	                     the exit code. Must stay byte-parallel with
+//	                     sandbox_open_test.go's writeScriptedRuntime (#493
+//	                     keep-in-sync note). writeAuditFakeRuntime
+//	                     (audit_security_faketest_test.go) deliberately does
+//	                     NOT get this hook: it has no `info` arm at all, and
+//	                     `Audit` never reaches `dindPreflight`.
 //	FAKE_INSPECT_MOUNTS → `inspect --format ...` stdout for the ".RW" mounts
 //	                     format containerHasSharedAgentMount uses (ticket
 //	                     #620's read-only running-container disposition
@@ -239,7 +251,7 @@ volume)
   inspect) exit "$(fe VOLUME_INSPECT)" ;;
   esac
   ;;
-info) fv INFO_RUNTIMES "{}" ;;
+info) fv INFO_RUNTIMES "{}"; exit "$(fe INFO)" ;;
 run)
   case "$*" in
   *'/bin/cat'*)
