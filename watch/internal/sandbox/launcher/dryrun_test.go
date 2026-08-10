@@ -153,9 +153,10 @@ func TestDryRun_AttachArgv_ContainsExecAgentFlagsAndForwardedArgs(t *testing.T) 
 // audit_test.go's TestAudit_SecretLeakRegression_NeverEmitsSecretValues: it
 // seeds real secret VALUES for the forwarded provider keys (never just
 // checking for non-empty output), then asserts WriteText's rendered argv
-// masks the value while keeping the token structurally visible
-// ("CONTEXT7_API_KEY=<redacted>") and never leaks either sentinel value
-// anywhere in the printed output.
+// carries only the bare "-e CONTEXT7_API_KEY" token (ticket #759: the value
+// is supplied by the runtime CLI's own inherited environment, never argv --
+// so there is no "NAME=value" token left for renderArgv to redact) and never
+// leaks either sentinel value anywhere in the printed output.
 func TestDryRun_SecretLeakRegression_NeverEmitsForwardedSecretValues(t *testing.T) {
 	repo := newAuditTestRepo(t)
 	home := t.TempDir()
@@ -179,14 +180,38 @@ func TestDryRun_SecretLeakRegression_NeverEmitsForwardedSecretValues(t *testing.
 	}
 	out := buf.String()
 
-	if !strings.Contains(out, "CONTEXT7_API_KEY=<redacted>") {
-		t.Errorf("expected the redacted CONTEXT7_API_KEY marker in WriteText output, got:\n%s", out)
+	if !strings.Contains(out, "-e CONTEXT7_API_KEY") {
+		t.Errorf("expected the bare -e CONTEXT7_API_KEY token in WriteText output, got:\n%s", out)
+	}
+	if strings.Contains(out, "CONTEXT7_API_KEY=") {
+		t.Errorf("WriteText output must never carry a CONTEXT7_API_KEY= value-bearing token (ticket #759: values are forwarded via the runtime CLI's inherited environment, never argv), got:\n%s", out)
 	}
 	if strings.Contains(out, contextSecret) {
 		t.Errorf("WriteText output leaks the CONTEXT7_API_KEY sentinel value:\n%s", out)
 	}
 	if strings.Contains(out, openaiSecret) {
 		t.Errorf("WriteText output leaks the OPENAI_API_KEY sentinel value:\n%s", out)
+	}
+}
+
+// TestRedactSecretEnv_DirectUnitTest is a direct unit test of
+// redactSecretEnv (ticket #759): after the bare "-e NAME" emission change,
+// this "NAME=value" redaction branch of renderArgv is no longer reachable
+// through any real assembled argv (assembleExecEnv/assembleEnv only ever
+// emit the value-less form for secrets now), so it needs direct coverage to
+// avoid rotting untested.
+func TestRedactSecretEnv_DirectUnitTest(t *testing.T) {
+	got := redactSecretEnv("OPENAI_API_KEY=sk-cenci-test-secret")
+	want := "OPENAI_API_KEY=<redacted>"
+	if got != want {
+		t.Errorf("redactSecretEnv(%q) = %q, want %q", "OPENAI_API_KEY=sk-cenci-test-secret", got, want)
+	}
+
+	if got := redactSecretEnv("TERM=xterm-256color"); got != "TERM=xterm-256color" {
+		t.Errorf("redactSecretEnv(non-secret) = %q, want unchanged", got)
+	}
+	if got := redactSecretEnv("OPENAI_API_KEY"); got != "OPENAI_API_KEY" {
+		t.Errorf("redactSecretEnv(bare token, no '=') = %q, want unchanged", got)
 	}
 }
 

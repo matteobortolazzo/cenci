@@ -544,12 +544,15 @@ func namedVolumes(mounts []MountPosture) []VolumePosture {
 	return volumes
 }
 
-// classifyEnvNames parses every "-e NAME=value" pair out of args (as emitted
-// by assembleVolumeMounts/assembleEnv) into an EnvVarName carrying only the
-// NAME — never the value — with Secret set via isSecretEnvName so a
+// classifyEnvNames parses every "-e" flag's following token out of args (as
+// emitted by assembleVolumeMounts/assembleEnv) into an EnvVarName carrying
+// only the NAME — never the value — with Secret set via isSecretEnvName so a
 // create-time name (e.g. CONTEXT7_API_KEY, emitted here for the create-time
 // env args) gets the same explicit secret classification as its forwarded
-// exec-env counterpart (ticket #598).
+// exec-env counterpart (ticket #598). Handles both the "-e NAME=value" form
+// (non-secret env, e.g. TERM) and the bare "-e NAME" form (provider secret
+// passthroughs, since ticket #759) — the split on "=" is a no-op when the
+// token has none.
 func classifyEnvNames(args []string) []EnvVarName {
 	envs := make([]EnvVarName, 0, len(args)/2)
 	for i := 0; i < len(args); i++ {
@@ -573,7 +576,10 @@ func classifyEnvNames(args []string) []EnvVarName {
 // `cenci open --dry-run`'s redaction (renderArgv/redactSecretEnv in
 // dryrun.go) depend on it. Any new secret "-e" env forward added in
 // assembleExecEnv/assembleEnv MUST also be added here, or it will render
-// unredacted in dry-run output.
+// unredacted in dry-run output. Since ticket #759, these forwards use the
+// bare "-e NAME" (value-less) form — the value is never in argv to begin
+// with, so redaction/classification here is now a defense-in-depth
+// regression guard rather than the only protection.
 var forwardedEnvVarNames = map[string]bool{
 	"CONTEXT7_API_KEY":  true,
 	"ANTHROPIC_API_KEY": true,
