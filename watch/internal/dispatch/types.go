@@ -116,7 +116,8 @@ func (m MainSync) String() string {
 // failure classes (watch/docs/go-gotchas.md #598, watch/docs/error-handling.md
 // #628). Unlike StageProbe/MainSync above, there is deliberately NO zero-value
 // ("unknown") constant here: this gate is opt-in per ticket -- only tickets
-// whose body actually contains a `Depends on #N` line are ever gated at all,
+// that actually declare a dependency (a native "Blocked by" link, or a legacy
+// `Depends on #N` body line) are ever gated at all,
 // and Ticket.DependsOn empty/nil is the true "ungated" case, exercised by
 // every pre-#825 Ticket construction site. A missing classification for a
 // number the ticket DOES declare a dependency on (a DependencyStates map
@@ -556,16 +557,20 @@ type Ticket struct {
 	// itself skipped.
 	MainSync MainSync
 
-	// DependsOn is the set of same-repo issue numbers this ticket's body
-	// declares a "Depends on #N" line for (collector-filled, #825, via
-	// parseDependsOn). Empty/nil, the zero value, is the true "ungated"
-	// case -- every pre-#825 Ticket construction site keeps today's
-	// behavior unchanged without being touched.
+	// DependsOn is the set of same-repo issue numbers this ticket declares a
+	// dependency on (collector-filled), unioned by mergeDependencies from two
+	// sources: GitHub's native "Blocked by" links (nativedeps.go, the
+	// preferred form) and the legacy "Depends on #N" body line (#825, via
+	// parseDependsOn) still carried by in-flight tickets. Native numbers come
+	// first. Empty/nil, the zero value, is the true "ungated" case -- every
+	// pre-#825 Ticket construction site keeps today's behavior unchanged
+	// without being touched.
 	DependsOn []int
 	// DependencyStates classifies each DependsOn entry's resolved openness
-	// (collector-filled, #825, via resolveDependencyStates). A number in
-	// DependsOn with no corresponding key here is treated identically to an
-	// unrecognized DependencyState value by dependencyGateSkip's switch
+	// (collector-filled, #825, via nativeDependencies for natively-linked
+	// numbers and resolveDependencyStates for prose-only leftovers). A number
+	// in DependsOn with no corresponding key here is treated identically to
+	// an unrecognized DependencyState value by dependencyGateSkip's switch
 	// default -- it fails closed, never as satisfied.
 	DependencyStates map[int]DependencyState
 	// DependencyAnomalies records, in body order, one entry per "Depends on
@@ -577,6 +582,19 @@ type Ticket struct {
 	// "no anomalies" case -- every pre-#852 Ticket construction site keeps
 	// today's behavior unchanged without being touched.
 	DependencyAnomalies []string
+	// NativeDependencyAnomalies records, in node order, one entry per native
+	// "Blocked by" link that could not be expressed as a same-repo issue
+	// number -- a cross-repo link (whose bare number would collide with a
+	// same-numbered local issue), or a blocker list gh paged in only
+	// partially (collector-filled, via nativeDependencies). Kept distinct
+	// from DependencyAnomalies above rather than merged into it because the
+	// two describe different failure classes with different operator fixes,
+	// and collapsing distinct failure classes into one bucket is exactly what
+	// watch/docs/go-gotchas.md #598 and watch/docs/error-handling.md #628
+	// forbid; decide.go reports each via its own reason format. Each entry is
+	// truncated to maxDependencyTokenBytes so an attacker-influenceable node
+	// URL can never flood memory or a log line.
+	NativeDependencyAnomalies []string
 
 	// OpenPRProbe classifies how HasOpenPR above was obtained
 	// (collector-filled, #881, via openpr.go's openPRInventory; mirrors

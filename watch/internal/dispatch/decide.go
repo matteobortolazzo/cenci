@@ -87,6 +87,15 @@ const (
 	// DependencyState reason above -- fails closed rather than being
 	// silently dropped as "no dependency declared".
 	reasonDependencyMalformedFmt = "dependency reference malformed: %q"
+	// reasonNativeDependencyAnomalyFmt names a native "Blocked by" link that
+	// could not be expressed as a same-repo issue number (a cross-repo link,
+	// or a partially-paged blocker list; nativedeps.go). Kept distinct from
+	// reasonDependencyMalformedFmt above because the two are different
+	// failure classes with different operator fixes -- a malformed prose
+	// reference is fixed by editing the ticket body, a cross-repo native link
+	// by removing the link or moving the blocker into this repo -- and the
+	// gate switch must not collapse them (#446/#598).
+	reasonNativeDependencyAnomalyFmt = "native dependency unusable: %q"
 )
 
 // Plan-probe gate skip reasons (#852). reasonPlanProbeUnknown is
@@ -503,7 +512,8 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 		}
 	}
 
-	// Pickup rule 5: Depends on #N dependency gate (#825). A plan written
+	// Pickup rule 5: ticket dependency gate (#825), over the merged union of
+	// native blocked-by links and legacy "Depends on #N" lines. A plan written
 	// before its dependency merges is stale on arrival, so this sits right
 	// after plan freshness -- see dependencyGateSkip's doc comment.
 	if reason, gated := dependencyGateSkip(t); gated {
@@ -822,10 +832,13 @@ func planStalenessSkip(probe PlanProbe) (string, bool) {
 	return "", false
 }
 
-// dependencyGateSkip evaluates the Depends-on-#N dependency gate (#825) for
-// t, with zero I/O -- every DependencyState was already resolved by the
-// collector (dependency.go/collect.go), never here (Decide's own purity
-// contract). It returns (reason, true) when the lowest-numbered blocking
+// dependencyGateSkip evaluates the dependency gate (#825) for t, with zero
+// I/O -- every DependencyState was already resolved by the collector
+// (nativedeps.go/dependency.go/collect.go), never here (Decide's own purity
+// contract). The gate is source-agnostic by design: t.DependsOn is already
+// the merged union of GitHub's native "Blocked by" links and any legacy
+// "Depends on #N" body line, so this function needs no notion of which
+// source a number came from. It returns (reason, true) when the lowest-numbered blocking
 // dependency in t.DependsOn should skip dispatch, and ("", false) when every
 // dependency resolves DependencyStateClosed (including the empty/nil
 // DependsOn zero value, the true "ungated" case). Mirrors blockingSibling's
@@ -838,9 +851,22 @@ func planStalenessSkip(probe PlanProbe) (string, bool) {
 // overflowing/out-of-range number) must hold rather than silently dispatch
 // as if the reference never existed. The first anomaly in body order is
 // reported (AC2), naming the malformed token via reasonDependencyMalformedFmt.
+//
+// t.NativeDependencyAnomalies is checked on the same fail-closed principle,
+// and before the numeric loop for the same reason: a native "Blocked by"
+// link that could not be reduced to a same-repo number (cross-repo, or a
+// partially-paged list) leaves a real blocker unrepresented in DependsOn, so
+// the ticket must hold rather than dispatch against a knowingly incomplete
+// blocker set. It is reported via its own reasonNativeDependencyAnomalyFmt
+// and checked after DependencyAnomalies purely for determinism -- a ticket
+// carrying both classes reports the prose one first, a fixed order rather
+// than a meaningful precedence.
 func dependencyGateSkip(t Ticket) (string, bool) {
 	if len(t.DependencyAnomalies) > 0 {
 		return fmt.Sprintf(reasonDependencyMalformedFmt, t.DependencyAnomalies[0]), true
+	}
+	if len(t.NativeDependencyAnomalies) > 0 {
+		return fmt.Sprintf(reasonNativeDependencyAnomalyFmt, t.NativeDependencyAnomalies[0]), true
 	}
 
 	blocking := -1
