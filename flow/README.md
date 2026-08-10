@@ -413,7 +413,7 @@ The skills drive a ticket through a label-based state machine (`gh issue edit`).
 | `Planned` | `/cenci:implement` — Phase 1, when the plan is persisted | Plan on disk (`.plans/`), ready to pick up |
 | `Working` | `/cenci:implement` — at pipeline start | Actively being implemented |
 | `In Review` | `/cenci:implement` — Phase 9, at PR-open | PR is open, under review / CI running |
-| `Implemented` | `/cenci:babysit` — on PR merge | PR merged — done |
+| `Implemented` | `/cenci:babysit` — on PR merge, including split-parent reconciliation from the live sub-issue graph | PR merged — done; a split parent closes only when every native sub-issue is closed and no `parent-gap-report` marker holds it |
 | `Followup` | `/cenci:implement` — Phase 9, and `/cenci:address-review` | Deferred/out-of-scope item captured from a session — triage before working |
 
 `Followup` is a separate capture tag applied to followup tickets created at PR time (and appended to by `address-review`'s Acknowledge action) — it is an untriaged capture queue, never release-blocking, not a board-progression state, and not part of the linear lifecycle below. Items leave the queue only when triaged: grouped and supersede-closed via `/cenci:maintain backlog`, or promoted via `/cenci:refine` (see `flow/docs/followup-triage.md`).
@@ -431,8 +431,13 @@ pass a second argument to change it (for example `42 10m`). Each tick:
 
 1. **Fetches PR state** — if the PR has **merged or closed**, it reports a final summary,
    stops the supervisor, and cleans up. On **merge**, it also performs the `In Review → Implemented`
-   board transition, relabeling every issue the PR closed (from `closingIssuesReferences`).
-   A PR closed **without** merging leaves labels untouched.
+   board transition, relabeling every issue the PR closed (from `closingIssuesReferences`), and
+   reconciles split-parent completion at merge time from the live native GitHub parent/sub-issue
+   graph: for each closed issue's native `parent`, once every native sub-issue on that parent
+   reads closed, the parent closes and relabels to `Implemented` too — unless its comment thread
+   carries a live `parent-gap-report` marker (`docs/comment-attribution.md`), in which case it is
+   left open and reported as held for human triage instead. A PR closed **without** merging leaves
+   labels untouched.
 2. **Auto-fixes red CI** — diagnoses the failing checks, pushes a fix (never force-pushes),
    and retries up to a per-commit cap. When the cap is hit or the cause is ambiguous
    (flaky/infra/external), it escalates to you via a question instead of looping blindly.
@@ -453,7 +458,7 @@ pacing back to the base interval.
   the never-force-push rule all hold — babysit automates the checking and the safe fixes,
   not the decisions.
 
-On merge, babysit performs the `In Review → Implemented` board transition (see the terminal-tick behavior above and the [Board lifecycle](#board-lifecycle) table) — relabeling each issue closed by the merged PR.
+On merge, babysit performs the `In Review → Implemented` board transition (see the terminal-tick behavior above and the [Board lifecycle](#board-lifecycle) table) — relabeling each issue closed by the merged PR — and reconciles split-parent completion at merge time from the live native GitHub parent/sub-issue graph, deferring to any recorded `parent-gap-report` marker rather than auto-closing over it; a stale gap report holds the parent indefinitely until a human resolves it.
 
 ### Maintaining the project
 
@@ -549,7 +554,7 @@ After restarting Claude Code, Bash commands are rewritten through RTK automatica
 
 ## Ticket Splitting
 
-When a ticket is sized M or L during `/cenci:refine`, the skill suggests splitting it into numbered child tickets (e.g., "(1/3)", "(2/3)", "(3/3)") with explicit dependency ordering — which children can be implemented in parallel and which are sequential. Each child references the parent in its body and is linked to the parent as a native GitHub sub-issue, so the parent renders the child enumeration and progress directly in the GitHub UI; dependency ordering lives in the child bodies (and, when non-trivial, a short prose "Execution Order" note on the parent). Children — and the companion design ticket, when one is created — inherit the parent's milestone and every parent label except the lifecycle markers and per-ticket refinement grants (`Refined`, `Working`, `Planned`, `In Review`, `Implemented`, `Design`, `Designed`, `automerge:ok`, `Browser`, `ui:visual-check`), so a split never drops its children out of the milestone. The latter three are never inherited — each child earns them independently, or not, at refine's Confirmation Gate. When `/cenci:implement` creates a PR for the last open child, phase 9's Parent Close Gate audits the parent's acceptance criteria first: the PR closes the parent alongside the child only when every criterion has concrete delivered evidence (in this worktree's diff or a merged sibling PR); on any gap the PR references the parent as `Related to`, the unmet criteria are posted as a comment on the parent, and the parent stays open for triage (#661) — and a retry reconciles the commit trailer, PR body, and GitHub's closing reference to whatever verdict this entry's fresh audit produces, not the verdict an earlier attempt may have written (#879).
+When a ticket is sized M or L during `/cenci:refine`, the skill suggests splitting it into numbered child tickets (e.g., "(1/3)", "(2/3)", "(3/3)") with explicit dependency ordering — which children can be implemented in parallel and which are sequential. Each child references the parent in its body and is linked to the parent as a native GitHub sub-issue, so the parent renders the child enumeration and progress directly in the GitHub UI; dependency ordering lives in the child bodies (and, when non-trivial, a short prose "Execution Order" note on the parent). Children — and the companion design ticket, when one is created — inherit the parent's milestone and every parent label except the lifecycle markers and per-ticket refinement grants (`Refined`, `Working`, `Planned`, `In Review`, `Implemented`, `Design`, `Designed`, `automerge:ok`, `Browser`, `ui:visual-check`), so a split never drops its children out of the milestone. The latter three are never inherited — each child earns them independently, or not, at refine's Confirmation Gate. When `/cenci:implement` creates a PR for the last open child, phase 9's Parent Close Gate audits the parent's acceptance criteria first: the PR closes the parent alongside the child only when every criterion has concrete delivered evidence (in this worktree's diff or a merged sibling PR); on any gap the PR references the parent as `Related to`, the unmet criteria are posted as a comment on the parent, and the parent stays open for triage (#661) — and a retry reconciles the commit trailer, PR body, and GitHub's closing reference to whatever verdict this entry's fresh audit produces, not the verdict an earlier attempt may have written (#879). That trailer only makes the parent eligible: parent completion itself is reconciled by `cenci babysit` at merge time from the live native sub-issue graph plus the gap-report check — a plan-time `isLastChild` value recorded when the plan was written is never what actually closes the parent, since concurrent sibling merges can race past it (#811).
 
 ## Architecture
 

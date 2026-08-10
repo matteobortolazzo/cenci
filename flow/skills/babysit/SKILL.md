@@ -73,5 +73,20 @@ for CI repair or review handling, preserving those workflows' approval gates. La
 repair agents confirm a fix against the project's local gate (`docs/health-gates.md`,
 exit-0-is-healthy) before pushing, so a broken fix is caught locally instead of via a
 CI round-trip. After three failed repair launches it pauses and opens a visible babysit
-window for human direction. A merged PR moves its closing issues from `In Review` to
-`Implemented`; a PR closed without merging leaves labels unchanged.
+window for human direction.
+
+On a merged PR, each closing issue's `In Review` label swaps to `Implemented` first,
+exactly as before. The supervisor then reconciles split-parent completion at merge
+time from the live native GitHub parent/sub-issue graph — never from a plan-time
+`isLastChild` value. For each closed issue's native `parent`, once every native
+`subIssues` node on that parent reads `CLOSED`, the parent is eligible to close, but
+only if its comment thread carries no live (non-blockquoted) `parent-gap-report`
+marker (`docs/comment-attribution.md`): no marker closes and relabels the parent
+`Implemented`; a live marker leaves the parent untouched and reports a
+distinguishable "held by a recorded acceptance-criteria gap report" outcome for
+human triage instead. An unreadable, empty, or truncated sub-issue graph, or an
+unreadable or truncated comment read, fails closed with no parent mutation. An
+already-closed parent is an idempotent no-op. A stale gap report holds the parent
+indefinitely until a human resolves it — by editing or deleting the comment, or by
+closing the parent manually; babysit only detects a recorded gap report, it never
+supersedes or re-audits one. A PR closed without merging leaves labels unchanged.

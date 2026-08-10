@@ -393,10 +393,30 @@ func tick(s *State) (bool, time.Duration, error) {
 	if pr.State == "MERGED" || pr.State == "CLOSED" {
 		if pr.State == "MERGED" {
 			_, _, _ = execGh("label", "create", "Implemented", "--repo", s.Repo, "--color", "6F42C1", "--description", "PR merged — done")
+			var childErrs []error
+			var closedChildren []int
 			for _, i := range pr.ClosingIssuesReferences {
 				if _, stderr, err := execGh("issue", "edit", strconv.Itoa(i.Number), "--repo", s.Repo, "--add-label", "Implemented", "--remove-label", "In Review"); err != nil {
-					return false, 0, fmt.Errorf("label issue #%d: %s: %w", i.Number, strings.TrimSpace(stderr), err)
+					childErrs = append(childErrs, fmt.Errorf("label issue #%d: %s: %w", i.Number, strings.TrimSpace(stderr), err))
+					continue
 				}
+				closedChildren = append(closedChildren, i.Number)
+			}
+			// #811: reconcile every native split-parent this tick's closed
+			// children reach, before the terminal report below -- a held
+			// parent (an unresolved gap report) still prints its own
+			// distinguishable line first, and any graph/comment-read failure
+			// joins alongside childErrs as a non-terminal error rather than
+			// silently discarding the child relabel work that already
+			// succeeded above.
+			outcomes, parentErr := reconcileParents(s.Repo, closedChildren)
+			for _, o := range outcomes {
+				if o.Kind == parentOutcomeHeld {
+					fmt.Printf("Parent #%d held: unresolved acceptance-criteria gap report on its comment thread; not auto-closing\n", o.Parent)
+				}
+			}
+			if err := errors.Join(append(childErrs, parentErr)...); err != nil {
+				return false, 0, err
 			}
 		}
 		fmt.Printf("PR #%s %s: %s %s\n", s.PR, strings.ToLower(pr.State), pr.Title, pr.URL)
