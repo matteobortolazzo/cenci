@@ -1,6 +1,7 @@
 package launcher
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -112,11 +113,12 @@ func DefaultModel(agent string) string {
 // resolution/preflight can never drift between a real launch and its dry-run
 // preview.
 type launchCtx struct {
-	Agent  string
-	Model  string
-	Home   string
-	Scope  Scope
-	DindOn bool
+	Agent   string
+	Model   string
+	Home    string
+	Scope   Scope
+	DindOn  bool
+	Plugins []string
 }
 
 // resolveLaunchContext resolves the shared preamble: agent/model
@@ -160,6 +162,18 @@ func (e *Engine) resolveLaunchContext(opts Options) (launchCtx, error) {
 	if dindDegraded {
 		e.warnDindPlatformUnsupported()
 	}
+
+	// Resolved AFTER resolveDindForHost (so dind's error messages keep
+	// priority on a file malformed for both keys) and BEFORE container-runtime
+	// resolution (#1002). Unconditional — unlike dind's --no-dind escape
+	// hatch, there is no "--no-plugins" flag that skips this read, so a
+	// malformed sandbox.plugins key hard-fails the launch even when --no-dind
+	// routed around dind's own config read (#632's escape hatch narrows here).
+	plugins, err := ResolveSandboxPlugins(scope)
+	if err != nil {
+		return launchCtx{}, err
+	}
+
 	if e.Runtime == "" {
 		if dindOn {
 			e.Runtime, err = sandbox.ContainerRuntimePreferDocker()
@@ -176,7 +190,7 @@ func (e *Engine) resolveLaunchContext(opts Options) (launchCtx, error) {
 		}
 	}
 
-	return launchCtx{Agent: agent, Model: model, Home: home, Scope: scope, DindOn: dindOn}, nil
+	return launchCtx{Agent: agent, Model: model, Home: home, Scope: scope, DindOn: dindOn, Plugins: plugins}, nil
 }
 
 // planArgvs performs the read-only container-disposition probing
@@ -246,7 +260,7 @@ func (e *Engine) planArgvs(ctx launchCtx, opts Options, cenciBin, socketDir stri
 		return nil, attachArgv, true, nil
 	}
 
-	createArgv, err = e.buildRunArgv(ctx.Agent, cenciBin, socketDir, cenciAvailable, ctx.Scope, opts, ctx.Home, ctx.DindOn)
+	createArgv, err = e.buildRunArgv(ctx.Agent, cenciBin, socketDir, cenciAvailable, ctx.Scope, opts, ctx.Home, ctx.DindOn, ctx.Plugins)
 	if err != nil {
 		return nil, nil, false, err
 	}
@@ -298,6 +312,12 @@ func (e *Engine) Launch(opts Options) error {
 	// (#490).
 	execEnvArgs := assembleExecEnv(ctx.Agent)
 
+	// Printed before the create/attach decision below whenever the resolved
+	// plugin list differs from the default pair — never printed for the
+	// common default-pair case, and never on --dry-run (DryRun never calls
+	// Launch, Q&A #3).
+	e.maybePrintSandboxPluginsNote(ctx.Plugins)
+
 	// The disposition decision (attach vs create), the incompatible hard
 	// error, and both argvs come from the shared planArgvs helper so they can
 	// never drift from DryRun's preview of the same decision.
@@ -314,6 +334,7 @@ func (e *Engine) Launch(opts Options) error {
 		if err := e.warnIfUnwired(ctx.Scope.ContainerName, cenciAvailable); err != nil {
 			return err
 		}
+		e.warnSandboxPluginsDrift(ctx)
 		label, err := e.lifecycleLabel(ctx.Scope.ContainerName)
 		if err != nil {
 			return err
@@ -492,10 +513,10 @@ func isSocket(path string) bool {
 // behaviorally identical since docker/podman treat flag order between
 // distinct -v/-e flags as independent — only the trailing image + command
 // (appended by the caller, buildRunArgv, after this returns) must stay last.
-func (e *Engine) assembleRunArgs(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, opts Options, home string, dindOn bool) ([]string, error) {
+func (e *Engine) assembleRunArgs(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, opts Options, home string, dindOn bool, plugins []string) ([]string, error) {
 	args := e.baseRunArgs(scope, dindOn)
 	args = append(args, e.assembleVolumeMounts(agent, cenciBin, socketDir, cenciAvailable, scope, home, dindOn)...)
-	args = append(args, e.assembleEnv(agent, scope, opts, dindOn)...)
+	args = append(args, e.assembleEnv(agent, scope, opts, dindOn, plugins)...)
 
 	credArgs, err := e.validateCredentials(agent, home)
 	if err != nil {
@@ -523,8 +544,8 @@ func (e *Engine) assembleRunArgs(agent, cenciBin, socketDir string, cenciAvailab
 // container. Shared by Launch and DryRun so the create argv can never drift
 // between a real launch and its dry-run preview. The validateCredentials hard
 // error (inside assembleRunArgs) propagates through unchanged.
-func (e *Engine) buildRunArgv(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, opts Options, home string, dindOn bool) ([]string, error) {
-	runArgs, err := e.assembleRunArgs(agent, cenciBin, socketDir, cenciAvailable, scope, opts, home, dindOn)
+func (e *Engine) buildRunArgv(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, opts Options, home string, dindOn bool, plugins []string) ([]string, error) {
+	runArgs, err := e.assembleRunArgs(agent, cenciBin, socketDir, cenciAvailable, scope, opts, home, dindOn, plugins)
 	if err != nil {
 		return nil, err
 	}
@@ -688,9 +709,13 @@ func (e *Engine) assembleVolumeMounts(agent, cenciBin, socketDir string, cenciAv
 
 // assembleEnv builds the non-credential, non-optional-feature -e flags:
 // TERM (with the xterm-256color fallback), the CENCI_SANDBOX marker/agent
-// name, the HOST_UID/HOST_GID/WORKSPACE_SCOPE entrypoint contract, the
-// opt-in reseed-creds flag, and the COLORTERM/CONTEXT7_API_KEY passthroughs.
-func (e *Engine) assembleEnv(agent string, scope Scope, opts Options, dindOn bool) []string {
+// name, CENCI_SANDBOX_PLUGINS (the resolved sandbox.plugins list, space-
+// joined in config order — always set, including for the default list, so
+// its absence in a running container is reserved as the legacy-container
+// signal, #1002), the HOST_UID/HOST_GID/WORKSPACE_SCOPE entrypoint contract,
+// the opt-in reseed-creds flag, and the COLORTERM/CONTEXT7_API_KEY
+// passthroughs.
+func (e *Engine) assembleEnv(agent string, scope Scope, opts Options, dindOn bool, plugins []string) []string {
 	term := os.Getenv("TERM")
 	if term == "" {
 		term = "xterm-256color"
@@ -700,6 +725,7 @@ func (e *Engine) assembleEnv(agent string, scope Scope, opts Options, dindOn boo
 		"-e", "TERM=" + term,
 		"-e", "CENCI_SANDBOX=1",
 		"-e", "CENCI_SANDBOX_AGENT=" + agent,
+		"-e", "CENCI_SANDBOX_PLUGINS=" + sandboxPluginsEnvValue(plugins),
 		"-e", "CENCI_AGENT_CLI=/opt/cenci-agent/current/node_modules/.bin/" + agent,
 		"-e", fmt.Sprintf("HOST_UID=%d", os.Getuid()),
 		"-e", fmt.Sprintf("HOST_GID=%d", os.Getgid()),
@@ -999,6 +1025,87 @@ func (e *Engine) warnIfUnwired(name string, cenciAvailable bool) error {
 	}
 	_, _ = fmt.Fprintf(e.Stderr, "Warning: container '%s' was created without cenci wiring; its sessions will not report to the host status bars. Run '%s stop %s' and relaunch to fix.\n", name, e.Runtime, name)
 	return nil
+}
+
+// maybePrintSandboxPluginsNote prints one informational line to e.Stdout,
+// before Launch's create/attach decision, naming what pipeline plugins this
+// sandbox will provision — but only when the resolved plugins list differs
+// (set-wise) from DefaultSandboxPlugins(); the common default-pair case
+// prints nothing (#1002 AC). The empty-list case gets distinct wording from
+// a narrowed-but-non-empty subset.
+func (e *Engine) maybePrintSandboxPluginsNote(plugins []string) {
+	if !sandboxPluginsDiffer(plugins, sandboxPluginsEnvValue(DefaultSandboxPlugins()), true) {
+		return
+	}
+	if len(plugins) == 0 {
+		_, _ = fmt.Fprintln(e.Stdout, "Note: sandbox.plugins in .cenci/config.json is an empty list — no pipeline plugins will be provisioned in this sandbox.")
+		return
+	}
+	_, _ = fmt.Fprintf(e.Stdout, "Note: sandbox.plugins in .cenci/config.json narrows this sandbox's provisioned pipeline plugins to: %s.\n", strings.Join(plugins, ", "))
+}
+
+// inspectContainerSandboxPluginsTimeout bounds inspectContainerSandboxPlugins'
+// inspect call so a wedged docker/podman daemon can't hang the attach path —
+// this probe is documented (warnSandboxPluginsDrift) to never block the
+// attach, and a timeout expiring must resolve like any other probe failure
+// (ok=false), never as a blocking error (#1002 security review).
+const inspectContainerSandboxPluginsTimeout = 3 * time.Second
+
+// inspectContainerSandboxPlugins is a best-effort, non-blocking probe of a
+// running container's actual create-time CENCI_SANDBOX_PLUGINS env value,
+// used only for the attach-path drift warning (warnSandboxPluginsDrift). It
+// deliberately does NOT reuse or extend inspectReusePosture/
+// parseReusePosture, which fail closed by design (#628/#684) — this probe
+// must never block the attach, so every error or parse failure (including a
+// timeout) swallows into ok=false rather than propagating (#1002). found
+// reports whether the running container carries a CENCI_SANDBOX_PLUGINS
+// entry at all (absent means a legacy container predating this ticket); it
+// is only meaningful when ok is true.
+//
+// The --format template filters server-side (only the CENCI_SANDBOX_PLUGINS
+// entry ever leaves the container runtime and crosses into this process),
+// rather than dumping the container's whole env and filtering in Go — the
+// full env can carry secrets (e.g. CONTEXT7_API_KEY) that have no business
+// transiting the launcher (#1002 security review).
+func (e *Engine) inspectContainerSandboxPlugins(name string) (value string, found, ok bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), inspectContainerSandboxPluginsTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, e.Runtime, "inspect", "--format",
+		`{{range .Config.Env}}{{if eq (index (split . "=") 0) "CENCI_SANDBOX_PLUGINS"}}{{.}}{{end}}{{end}}`, name)
+	// WaitDelay bounds how long Wait (called internally by Output) waits for
+	// stdout/stderr pipes to close after the context kills the process — a
+	// grandchild process could otherwise hold those pipes open indefinitely,
+	// silently defeating the timeout above (watch/docs/go-gotchas.md #26).
+	cmd.WaitDelay = inspectContainerSandboxPluginsTimeout
+	out, err := cmd.Output()
+	if err != nil {
+		return "", false, false
+	}
+	for _, line := range splitLines(string(out)) {
+		if rest, cut := strings.CutPrefix(line, "CENCI_SANDBOX_PLUGINS="); cut {
+			return rest, true, true
+		}
+	}
+	return "", false, true
+}
+
+// warnSandboxPluginsDrift prints a best-effort attach-path warning when
+// ctx's resolved plugin list drifts (set-wise) from an already-running
+// container's actual CENCI_SANDBOX_PLUGINS — never auto-recreating, and
+// never blocking the attach when the probe fails (inspectContainerSandbox
+// Plugins swallows every failure into ok=false). The container's read-back
+// value is rendered with %q (Q&A #7): the launcher validates what it writes
+// against the closed set, but a container created by any other means could
+// carry arbitrary bytes there.
+func (e *Engine) warnSandboxPluginsDrift(ctx launchCtx) {
+	value, found, ok := e.inspectContainerSandboxPlugins(ctx.Scope.ContainerName)
+	if !ok {
+		return
+	}
+	if !sandboxPluginsDiffer(ctx.Plugins, value, found) {
+		return
+	}
+	_, _ = fmt.Fprintf(e.Stderr, "Warning: running container '%s' has a different sandbox plugin list than the resolved config (container has %q); run 'cenci sandbox stop %s' and relaunch to apply the new list.\n", ctx.Scope.ContainerName, value, ctx.Scope.ContainerName)
 }
 
 func (e *Engine) containerStartupState(name string) (status, exitCode string, err error) {

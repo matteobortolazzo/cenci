@@ -180,8 +180,13 @@ func TestOpenDryRun_MalformedDindConfig_Exits1(t *testing.T) {
 	}
 }
 
-// TestOpenDryRunNoDind_SucceedsDespiteMalformedConfig pins --no-dind as a
-// config-free escape hatch for --dry-run too (#632).
+// TestOpenDryRunNoDind_SucceedsDespiteMalformedConfig pinned --no-dind as a
+// config-free escape hatch for --dry-run too pre-#1002 (#632). #1002 narrows
+// it the same way as the real-launch case (sandbox_open_test.go's
+// TestOpenNoDind_SucceedsDespiteMalformedConfig): resolveLaunchContext (which
+// DryRun shares) now ALSO resolves sandbox.plugins unconditionally, so the
+// same corrupt config.json --no-dind used to route around now hard-fails the
+// plugins read instead.
 func TestOpenDryRunNoDind_SucceedsDespiteMalformedConfig(t *testing.T) {
 	repoRoot := malformedDindRepoEnv(t)
 
@@ -194,10 +199,17 @@ func TestOpenDryRunNoDind_SucceedsDespiteMalformedConfig(t *testing.T) {
 	cmd.Env = env
 	cmd.Dir = repoRoot
 	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("open --dry-run --no-dind with corrupt config: %v\n%s", err, output)
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected --dry-run --no-dind with a malformed .cenci/config.json to exit 1 (the plugins read still hard-fails on it, #1002), got %T %v\n%s", err, err, output)
 	}
-	assertOnlyReadOnlyContainerProbeCalls(t, callLogLines(t, callLog))
+	if !strings.Contains(string(output), "config.json") {
+		t.Errorf("expected a path-bearing error naming config.json, got:\n%s", output)
+	}
+	if lines := callLogLines(t, callLog); len(lines) != 0 {
+		t.Errorf("expected no runtime calls once the plugins config read hard-fails, got:\n%s", strings.Join(lines, "\n"))
+	}
 }
 
 func TestOpenDryRun_CodexNoAuth_Exits1(t *testing.T) {

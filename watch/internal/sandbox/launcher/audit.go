@@ -325,7 +325,11 @@ type Posture struct {
 // wrong-typed .cenci/config.json surfaced by RepoDindConfig — is likewise
 // returned unmodified as a hard error (exit 1), not degraded to a warning
 // finding: corrupt stored config must never silently render an audit report
-// under an assumed dind-off posture (#632).
+// under an assumed dind-off posture (#632). The same applies to
+// ResolveSandboxPlugins' resolution of "sandbox.plugins" (#1002), resolved
+// right after dind and passed into assembleEnv alongside dindOn: a
+// malformed or unrecognized plugins value hard-fails Audit exactly like
+// Launch, never silently falling back to the default plugin pair.
 func (e *Engine) Audit(opts Options) (Posture, error) {
 	agent := opts.Agent
 	if agent == "" {
@@ -350,10 +354,15 @@ func (e *Engine) Audit(opts Options) (Posture, error) {
 		return Posture{}, err
 	}
 
+	plugins, err := ResolveSandboxPlugins(scope)
+	if err != nil {
+		return Posture{}, err
+	}
+
 	cenciBin, socketDir, cenciAvailable := cenciWiringReadOnly()
 
 	mountArgs := e.assembleVolumeMounts(agent, cenciBin, socketDir, cenciAvailable, scope, home, dindOn)
-	envArgs := e.assembleEnv(agent, scope, opts, dindOn)
+	envArgs := e.assembleEnv(agent, scope, opts, dindOn, plugins)
 	featureArgs := e.assembleOptionalFeatures(opts)
 
 	// Non-fatal per Audit's contract: a missing codex/opencode credential

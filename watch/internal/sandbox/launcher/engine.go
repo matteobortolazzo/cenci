@@ -191,9 +191,11 @@ func (e *Engine) imageCurrent(image string) (current bool, baseDrift bool, err e
 
 // printPluginRefreshHint reminds after a user-invoked build that the
 // pipeline plugins live in the per-scope home volumes, not in image layers —
-// rebuilding an image never refreshes them.
+// rebuilding an image never refreshes them. The plugin list is per-repo
+// configurable (sandbox.plugins, #1002), so this no longer names a fixed
+// (cenci, cenci-watch) pair.
 func (e *Engine) printPluginRefreshHint() {
-	_, _ = fmt.Fprintln(e.Stdout, "Note: pipeline plugins (cenci, cenci-watch) are provisioned per home volume, not baked into images — run `cenci sandbox update-plugins` to refresh existing sandboxes.")
+	_, _ = fmt.Fprintln(e.Stdout, "Note: pipeline plugins are provisioned per home volume, not baked into images — run `cenci sandbox update-plugins` to refresh existing sandboxes.")
 }
 
 // parseSingleLineID default-denies a single-value ID probe's output
@@ -581,11 +583,15 @@ func (e *Engine) agentVolumeCheckRunArgs(agent string) []string {
 
 // maintenanceRunArgs is retained for plugin maintenance, which legitimately
 // needs the credential-bearing home volume. Agent CLI updates never use it.
-func (e *Engine) maintenanceRunArgs(agent string, scope Scope, command string) []string {
+// plugins sets CENCI_SANDBOX_PLUGINS (space-joined) so the one-shot
+// container's pluginRefreshCommand expansion resolves the same repo-scoped
+// list a real launch would (#1002).
+func (e *Engine) maintenanceRunArgs(agent string, scope Scope, command string, plugins []string) []string {
 	return []string{"run", "--rm", "--user", "root",
 		"-e", fmt.Sprintf("HOST_UID=%d", os.Getuid()),
 		"-e", fmt.Sprintf("HOST_GID=%d", os.Getgid()),
 		"-e", "CENCI_SANDBOX_AGENT=" + agent,
+		"-e", "CENCI_SANDBOX_PLUGINS=" + sandboxPluginsEnvValue(plugins),
 		"-e", "CENCI_AGENT_CLI=/opt/cenci-agent/current/node_modules/.bin/" + agent,
 		"-v", scope.VolumeName + ":/home/dev",
 		"-v", AgentCLIVolumeName(agent) + ":/opt/cenci-agent:ro",
@@ -841,15 +847,25 @@ func (e *Engine) EnsureAgentVolume(agent string, containerRunning bool) error {
 
 // pluginRefreshCommand returns the in-container ttl-0 plugin refresh command
 // (bypassing the entrypoint's 30-minute stamp) for agent, shared by both the
-// running-container and one-shot-volume update paths.
+// running-container and one-shot-volume update paths. The trailing plugin-
+// list arguments expand ${CENCI_SANDBOX_PLUGINS-cenci cenci-watch} in-
+// container (#1002) — the only design that serves RefreshRunningPlugins'
+// repo-less host-wide sweep, since each container resolves its OWN create-
+// time list this way rather than a list resolved host-side for one repo. The
+// single-dash form is load-bearing: it distinguishes "unset" (a legacy
+// container, defaults to the pair) from an explicitly empty value (provision/
+// update nothing), which ${VAR:-default} would collapse together. The third
+// positional "cenci" in provision_plugins/provision_codex_plugins (the
+// marketplace name matteobortolazzo/cenci is registered under) is untouched
+// — only the trailing plugin-list tokens changed.
 func pluginRefreshCommand(agent string) string {
 	switch agent {
 	case "codex":
-		return `source /usr/local/bin/lib/migrate-settings.sh && provision_codex_plugins /home/dev/.codex cenci matteobortolazzo/cenci cenci cenci-watch && update_codex_plugins /home/dev/.codex cenci 0 cenci cenci-watch`
+		return `source /usr/local/bin/lib/migrate-settings.sh && provision_codex_plugins /home/dev/.codex cenci matteobortolazzo/cenci ${CENCI_SANDBOX_PLUGINS-cenci cenci-watch} && update_codex_plugins /home/dev/.codex cenci 0 ${CENCI_SANDBOX_PLUGINS-cenci cenci-watch}`
 	case "opencode":
 		return `source /usr/local/bin/lib/migrate-settings.sh && provision_opencode_plugins /home/dev/.cenci-src matteobortolazzo/cenci && update_opencode_plugins /home/dev/.cenci-src matteobortolazzo/cenci 0`
 	}
-	return `source /usr/local/bin/lib/migrate-settings.sh && heal_plugin_installs /home/dev/.claude/plugins && provision_plugins /home/dev/.claude/plugins cenci matteobortolazzo/cenci cenci cenci-watch && update_plugins /home/dev/.claude/plugins cenci 0 cenci cenci-watch`
+	return `source /usr/local/bin/lib/migrate-settings.sh && heal_plugin_installs /home/dev/.claude/plugins && provision_plugins /home/dev/.claude/plugins cenci matteobortolazzo/cenci ${CENCI_SANDBOX_PLUGINS-cenci cenci-watch} && update_plugins /home/dev/.claude/plugins cenci 0 ${CENCI_SANDBOX_PLUGINS-cenci cenci-watch}`
 }
 
 // refreshRunningContainerPlugins execs agent's ttl-0 plugin refresh command
@@ -867,7 +883,12 @@ func (e *Engine) refreshRunningContainerPlugins(agent, containerName string) err
 
 // UpdatePlugins provisions anything missing, then refreshes plugins with
 // ttl 0 (bypassing the entrypoint's 30-minute stamp) inside the running
-// container, or in a one-shot container against the home volume.
+// container, or in a one-shot container against the home volume. The
+// running-container branch execs into a container that already inherited
+// its create-time CENCI_SANDBOX_PLUGINS env, so it needs no config read
+// (#1002); only the one-shot volume-update branch resolves sandbox.plugins
+// for scope, propagating a malformed-config error unchanged (a running
+// target must never hard-fail on a config problem it doesn't even read).
 func (e *Engine) UpdatePlugins(agent string, scope Scope) error {
 	if err := ValidateAgent(agent); err != nil {
 		return err
@@ -881,8 +902,13 @@ func (e *Engine) UpdatePlugins(agent string, scope Scope) error {
 		return e.refreshRunningContainerPlugins(agent, scope.ContainerName)
 	}
 
+	plugins, err := ResolveSandboxPlugins(scope)
+	if err != nil {
+		return err
+	}
+
 	_, _ = fmt.Fprintf(e.Stdout, "Updating plugins in volume '%s'...\n", scope.VolumeName)
-	args := e.maintenanceRunArgs(agent, scope, pluginRefreshCommand(agent))
+	args := e.maintenanceRunArgs(agent, scope, pluginRefreshCommand(agent), plugins)
 	if err := e.command(args...).Run(); err != nil {
 		return fmt.Errorf("%s run (update-plugins): %w", e.Runtime, err)
 	}

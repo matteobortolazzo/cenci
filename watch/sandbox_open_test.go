@@ -237,6 +237,33 @@ func joinArgv(argv []string) string {
 //	FAKE_INSPECT_IMAGE_EXIT — the per-container combined probe's exit code
 //	                        (default 0); nonzero simulates that probe
 //	                        failing.
+//	FAKE_CONTAINER_ENV   — (#1002) the attach-path CENCI_SANDBOX_PLUGINS
+//	                        drift probe's `inspect --format
+//	                        '{{range .Config.Env}}{{if eq (index (split . "=")
+//	                        0) "CENCI_SANDBOX_PLUGINS"}}{{.}}{{end}}{{end}}'`
+//	                        stdout — the template filters server-side, so the
+//	                        real probe's stdout is either the single raw
+//	                        "CENCI_SANDBOX_PLUGINS=VALUE" line or empty (never
+//	                        the container's whole env — #1002 security
+//	                        review), told apart by the distinctive
+//	                        `.Config.Env` format-string token. Defaults to
+//	                        empty (no CENCI_SANDBOX_PLUGINS line at all — the
+//	                        legacy-container "unset" signal, compared against
+//	                        the default pair, so pre-existing attach tests
+//	                        that never set this stay drift-free). Its exit
+//	                        code is the SEPARATE FAKE_CONTAINER_ENV_EXIT (not
+//	                        FAKE_CONTAINER_INSPECT_EXIT, which every other
+//	                        inspect probe above shares) so a test can fail
+//	                        just this best-effort probe without also failing
+//	                        the compatibility/reuse-posture/readiness probes
+//	                        the attach path depends on — proving the drift
+//	                        probe never blocks the attach. This branch is
+//	                        placed AFTER the existing `*'cenci-sand.dind'*`
+//	                        branch on purpose: inspectReusePosture's own
+//	                        format string also contains the literal
+//	                        `.Config.Env` substring, so matching it first
+//	                        would silently break every reuse-posture test
+//	                        (plan Risks: fake-runtime case-order shadowing).
 //
 // The open path drives the extra verbs: `rm` (exit 0), `run` (prints a
 // container id), container `inspect` (label vs mounts told apart by the
@@ -407,6 +434,7 @@ inspect)
     exit "$(fe INSPECT_IMAGE)"
     ;;
   *'cenci-sand.dind'*) fvb REUSE_POSTURE "|runc|0\nworkspace-vol::/workspace\n\n"; exit "$(fe CONTAINER_INSPECT)" ;;
+  *'.Config.Env'*) fvb CONTAINER_ENV ""; exit "$(fe CONTAINER_ENV)" ;;
   *State.Status*) printf '%s\n' "$(fv INSPECT_STATE "running 0")"; exit "$(fe CONTAINER_INSPECT)" ;;
   *Labels*) printf '%s\n' "$(fv INSPECT_LABEL "")" ;;
   *'.RW'*) fvb AGENT_MOUNTS "cenci-agent-cli-claude|/opt/cenci-agent|false\n"; exit "$(fe CONTAINER_INSPECT)" ;;
@@ -1143,7 +1171,7 @@ func TestSandboxUpdatePluginsCodex_RunsOneShotVolumeUpdate(t *testing.T) {
 	lines := callLogLines(t, callLog)
 	prefix := "run --rm --user root -e HOST_UID=" + itoa(os.Getuid()) +
 		" -e HOST_GID=" + itoa(os.Getgid()) +
-		" -e CENCI_SANDBOX_AGENT=codex -e CENCI_AGENT_CLI=/opt/cenci-agent/current/node_modules/.bin/codex" +
+		" -e CENCI_SANDBOX_AGENT=codex -e CENCI_SANDBOX_PLUGINS=cenci cenci-watch -e CENCI_AGENT_CLI=/opt/cenci-agent/current/node_modules/.bin/codex" +
 		" -v codex-cenci-home-default:/home/dev -v cenci-agent-cli-codex:/opt/cenci-agent:ro cenci-sandbox:latest -c "
 	line, ok := findLineWithPrefix(lines, prefix)
 	if !ok {
@@ -1672,6 +1700,7 @@ func TestOpen_FreshCreate_PinsEntrypointContract(t *testing.T) {
 		"-e TERM=xterm-256color",
 		"-e CENCI_SANDBOX=1",
 		"-e CENCI_SANDBOX_AGENT=claude",
+		"-e CENCI_SANDBOX_PLUGINS=cenci cenci-watch",
 		"-e CENCI_AGENT_CLI=/opt/cenci-agent/current/node_modules/.bin/claude",
 		fmt.Sprintf("-e HOST_UID=%d", os.Getuid()),
 		fmt.Sprintf("-e HOST_GID=%d", os.Getgid()),
@@ -2353,6 +2382,33 @@ func malformedDindRepoEnv(t *testing.T) (repoRoot string) {
 	return resolved
 }
 
+// configuredRepoEnv (#1002) git-inits a temp dir (skipping the test if git
+// isn't available, mirroring malformedDindRepoEnv) and writes config
+// verbatim as its `.cenci/config.json` — a fixture for exercising
+// sandbox.plugins values (valid subsets, the empty array, or a malformed
+// key), as opposed to malformedDindRepoEnv's fixed unparsable-JSON case.
+func configuredRepoEnv(t *testing.T, config string) (repoRoot string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo := t.TempDir()
+	if out, err := exec.Command("git", "-C", repo, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	if err := os.MkdirAll(filepath.Join(repo, ".cenci"), 0o755); err != nil {
+		t.Fatalf("mkdir .cenci: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".cenci", "config.json"), []byte(config), 0o644); err != nil {
+		t.Fatalf("write .cenci/config.json: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatalf("resolve repo path: %v", err)
+	}
+	return resolved
+}
+
 // TestOpen_MalformedDindConfig_Exits1 pins the #632 hard-fail: a corrupt
 // .cenci/config.json must never silently launch with dind off — it must
 // hard-fail the launch (exit 1) with a path-bearing, non-usage error.
@@ -2381,10 +2437,16 @@ func TestOpen_MalformedDindConfig_Exits1(t *testing.T) {
 	}
 }
 
-// TestOpenNoDind_SucceedsDespiteMalformedConfig pins --no-dind as a
-// config-free escape hatch (#632): it must keep working even when the
-// repo's .cenci/config.json is corrupt, because ResolveDind returns before
-// RepoDindConfig is ever reached.
+// TestOpenNoDind_SucceedsDespiteMalformedConfig pinned --no-dind as a
+// config-free escape hatch pre-#1002 (#632): it kept working even with a
+// corrupt repo .cenci/config.json, because ResolveDind returns before
+// RepoDindConfig is ever reached. #1002 narrows that escape hatch (Q&A #1):
+// resolveLaunchContext now ALSO resolves sandbox.plugins unconditionally
+// (after resolveDindForHost, regardless of --no-dind -- there is no
+// "--no-plugins" equivalent), so the same unparsable config.json that
+// --no-dind used to route around is read again for plugins and hard-fails
+// the launch. --no-dind still suppresses dind's own config read; it can no
+// longer make a corrupt config file launchable at all.
 func TestOpenNoDind_SucceedsDespiteMalformedConfig(t *testing.T) {
 	repoRoot := malformedDindRepoEnv(t)
 
@@ -2397,14 +2459,293 @@ func TestOpenNoDind_SucceedsDespiteMalformedConfig(t *testing.T) {
 	cmd.Env = env
 	cmd.Dir = repoRoot
 	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected --no-dind with a malformed .cenci/config.json to exit 1 (the plugins read still hard-fails on it, #1002), got %T %v\n%s", err, err, output)
+	}
+	if !strings.Contains(string(output), "config.json") {
+		t.Errorf("expected a path-bearing error naming config.json, got:\n%s", output)
+	}
+	if lines := callLogLines(t, callLog); len(lines) != 0 {
+		t.Errorf("expected no runtime calls once the plugins config read hard-fails, got:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// -- ticket #1002: sandbox.plugins resolution ------------------------------
+
+// TestOpen_MalformedSandboxPluginsConfig_Exits1 pins RepoSandboxPlugins'
+// #632-mirroring hard-fail reaching `cenci open`: a well-formed JSON
+// document whose "sandbox.plugins" value is outside the closed set must
+// hard-fail the launch (exit 1) with a path-bearing, non-usage error naming
+// the offending value — not silently fall back to the default pair.
+func TestOpen_MalformedSandboxPluginsConfig_Exits1(t *testing.T) {
+	repoRoot := configuredRepoEnv(t, `{"sandbox":{"plugins":["cenci","bogus-plugin"]}}`)
+
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open")
+	cmd.Env = env
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected an unrecognized sandbox.plugins value to exit 1 (hard fail, not a usage error), got %T %v\n%s", err, err, output)
+	}
+	if !strings.Contains(string(output), "config.json") {
+		t.Errorf("expected a path-bearing error naming config.json, got:\n%s", output)
+	}
+	if !strings.Contains(string(output), "bogus-plugin") {
+		t.Errorf("expected the error to name the offending value \"bogus-plugin\", got:\n%s", output)
+	}
+	if lines := callLogLines(t, callLog); len(lines) != 0 {
+		t.Errorf("expected no runtime calls once the plugins config read hard-fails, got:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// TestOpen_FreshCreate_DefaultPluginsSubset_PrintsNoInformationalLine pins
+// the negative half of the AC: when the resolved list equals the default
+// pair (no repo config at all, the common case), nothing is printed about
+// plugin provisioning.
+func TestOpen_FreshCreate_DefaultPluginsSubset_PrintsNoInformationalLine(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = env
+	cmd.Dir = t.TempDir() // non-git cwd -> legacy scope, always the default pair
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("open --no-dind with corrupt config: %v\n%s", err, output)
+		t.Fatalf("open ch: %v\n%s", err, output)
 	}
 
-	lines := callLogLines(t, callLog)
-	if _, ok := findLineWithPrefix(lines, "run --name "); !ok {
-		t.Fatalf("expected --no-dind to still launch a container despite the corrupt config, got calls:\n%s", strings.Join(lines, "\n"))
+	if strings.Contains(string(output), "plugin") {
+		t.Errorf("expected no plugin-provisioning note for the default plugin list, got:\n%s", output)
 	}
+
+	runLine, ok := findLineWithPrefix(callLogLines(t, callLog), "run --name ")
+	if !ok {
+		t.Fatal("expected a container run")
+	}
+	if !strings.Contains(runLine, "-e CENCI_SANDBOX_PLUGINS=cenci cenci-watch") {
+		t.Errorf("expected the default resolved list in the create argv, got:\n%s", runLine)
+	}
+}
+
+// TestOpen_FreshCreate_NarrowedPluginsSubset_PrintsInformationalLine pins
+// the AC's informational line: when the repo config narrows sandbox.plugins
+// away from the default pair, `cenci open` prints one line before the
+// create/attach decision naming what will be provisioned, and the create
+// argv's CENCI_SANDBOX_PLUGINS reflects exactly the narrowed subset.
+func TestOpen_FreshCreate_NarrowedPluginsSubset_PrintsInformationalLine(t *testing.T) {
+	repoRoot := configuredRepoEnv(t, `{"sandbox":{"plugins":["cenci"]}}`)
+
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open")
+	cmd.Env = env
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("open (narrowed sandbox.plugins): %v\n%s", err, output)
+	}
+
+	out := string(output)
+	if !strings.Contains(out, "plugin") {
+		t.Errorf("expected an informational note about the narrowed plugin list, got:\n%s", out)
+	}
+	if strings.Contains(out, "cenci-watch") {
+		t.Errorf("expected the informational note to name only the narrowed subset (not cenci-watch, which was dropped), got:\n%s", out)
+	}
+
+	runLine, ok := findLineWithPrefix(callLogLines(t, callLog), "run --name ")
+	if !ok {
+		t.Fatal("expected a container run")
+	}
+	if !strings.Contains(runLine, "-e CENCI_SANDBOX_PLUGINS=cenci") {
+		t.Errorf("expected the narrowed resolved list in the create argv, got:\n%s", runLine)
+	}
+	if strings.Contains(runLine, "CENCI_SANDBOX_PLUGINS=cenci cenci-watch") {
+		t.Errorf("expected the create argv to carry only the narrowed subset, not the default pair, got:\n%s", runLine)
+	}
+}
+
+// TestOpen_FreshCreate_EmptyPluginsList_PrintsDistinctInformationalLine pins
+// the AC's "distinct wording for the empty list" requirement: an explicitly
+// empty sandbox.plugins array is a valid, non-default resolution and must
+// still print an informational line, worded differently from the narrowed-
+// but-non-empty case above (this test only pins that the line exists and
+// the create argv's CENCI_SANDBOX_PLUGINS is empty; the exact wording is an
+// implementation choice for the next, non-red phase).
+func TestOpen_FreshCreate_EmptyPluginsList_PrintsDistinctInformationalLine(t *testing.T) {
+	repoRoot := configuredRepoEnv(t, `{"sandbox":{"plugins":[]}}`)
+
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open")
+	cmd.Env = env
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("open (empty sandbox.plugins): %v\n%s", err, output)
+	}
+
+	out := string(output)
+	if !strings.Contains(out, "plugin") {
+		t.Errorf("expected an informational note about the empty plugin list, got:\n%s", out)
+	}
+
+	runLine, ok := findLineWithPrefix(callLogLines(t, callLog), "run --name ")
+	if !ok {
+		t.Fatal("expected a container run")
+	}
+	if !strings.Contains(runLine, "-e CENCI_SANDBOX_PLUGINS=") {
+		t.Errorf("expected CENCI_SANDBOX_PLUGINS to still be set (with an empty value) even for the empty list, got:\n%s", runLine)
+	}
+	if strings.Contains(runLine, "-e CENCI_SANDBOX_PLUGINS=cenci") {
+		t.Errorf("expected an empty resolved list in the create argv, got:\n%s", runLine)
+	}
+}
+
+// openAttachEnvFor (#1002) is the shared setup for the attach-path plugins
+// drift tests below: a running, detached-labeled, compatibly-mounted
+// container named containerName (mirroring
+// TestOpen_AttachToRunning_SkipsCreate's fixture) scripted to answer the
+// drift probe with containerEnv (verbatim FAKE_CONTAINER_ENV content — e.g.
+// "CENCI_SANDBOX_PLUGINS=cenci\n", or "" to simulate an absent var / legacy
+// container).
+func openAttachEnvFor(t *testing.T, fakeDir, assets, containerName, containerEnv string) []string {
+	t.Helper()
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+	return append(env,
+		"FAKE_PS="+containerName+"\n",
+		"FAKE_INSPECT_LABEL=detached",
+		"FAKE_INSPECT_MOUNTS=/workspace\n/home/dev\n/run/user/1000/cenci\n",
+		"FAKE_CONTAINER_ENV="+containerEnv,
+	)
+}
+
+// TestOpenAttach_PluginsDrift_WarnsWithStopRemedy pins the AC's attach-path
+// drift warning: when the resolved list (from repo config) differs from the
+// already-running container's actual CENCI_SANDBOX_PLUGINS (read back via
+// the best-effort drift probe), the launcher prints exactly one drift line
+// naming the `cenci sandbox stop <name>` remedy — and never auto-recreates
+// or blocks the attach.
+func TestOpenAttach_PluginsDrift_WarnsWithStopRemedy(t *testing.T) {
+	repoRoot := configuredRepoEnv(t, `{"sandbox":{"plugins":["cenci"]}}`)
+	containerName := "claude-cenci-" + launcher.Slugify(filepath.Base(repoRoot))
+
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env := openAttachEnvFor(t, fakeDir, assets, containerName, "CENCI_SANDBOX_PLUGINS=cenci cenci-watch\n")
+
+	cmd := exec.Command(binaryPath, "open")
+	cmd.Env = env
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("open (attach, plugins drift): %v\n%s", err, output)
+	}
+
+	out := string(output)
+	if !strings.Contains(out, "cenci sandbox stop "+containerName) {
+		t.Errorf("expected the drift warning to name the 'cenci sandbox stop %s' remedy, got:\n%s", containerName, out)
+	}
+	if _, ok := findLineWithPrefix(callLogLines(t, callLog), "run --name "); ok {
+		t.Errorf("expected drift to warn, never auto-recreate the container, got calls:\n%s", strings.Join(callLogLines(t, callLog), "\n"))
+	}
+	attachLine(t, callLogLines(t, callLog))
+}
+
+// TestOpenAttach_PluginsNoDrift_ResolvedMatchesRunning_NoWarning pins the
+// no-drift baseline: when the resolved list (the default pair, no repo
+// config) matches the running container's actual CENCI_SANDBOX_PLUGINS
+// exactly, no drift line is printed.
+func TestOpenAttach_PluginsNoDrift_ResolvedMatchesRunning_NoWarning(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env := openAttachEnvFor(t, fakeDir, assets, "claude-cenci-default", "CENCI_SANDBOX_PLUGINS=cenci cenci-watch\n")
+
+	cmd := exec.Command(binaryPath, "open")
+	cmd.Env = env
+	cmd.Dir = t.TempDir() // legacy scope -> resolved default pair
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("open (attach, no drift, default): %v\n%s", err, output)
+	}
+	if strings.Contains(string(output), "cenci sandbox stop") {
+		t.Errorf("expected no drift warning when the resolved list matches the running container's value, got:\n%s", output)
+	}
+	attachLine(t, callLogLines(t, callLog))
+}
+
+// TestOpenAttach_PluginsNoDrift_LegacyUnsetRunning_ComparesAgainstDefault
+// pins the legacy-container signal (Q&A #5): a running container that
+// carries no CENCI_SANDBOX_PLUGINS at all (predates this ticket) must be
+// treated as if it were created with the default pair — so a launch whose
+// own resolved list IS the default pair sees no drift.
+func TestOpenAttach_PluginsNoDrift_LegacyUnsetRunning_ComparesAgainstDefault(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env := openAttachEnvFor(t, fakeDir, assets, "claude-cenci-default", "") // no CENCI_SANDBOX_PLUGINS line at all
+
+	cmd := exec.Command(binaryPath, "open")
+	cmd.Env = env
+	cmd.Dir = t.TempDir() // legacy scope -> resolved default pair
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("open (attach, legacy unset running env): %v\n%s", err, output)
+	}
+	if strings.Contains(string(output), "cenci sandbox stop") {
+		t.Errorf("expected no drift warning: an unset running CENCI_SANDBOX_PLUGINS (legacy container) must compare against the default pair, which is what this launch resolved to, got:\n%s", output)
+	}
+	attachLine(t, callLogLines(t, callLog))
+}
+
+// TestOpenAttach_PluginsDriftProbeFails_DoesNotBlockAttach pins the AC's
+// "never blocks the attach when the probe or parse fails" requirement: the
+// drift probe's own inspect call failing (a transient runtime error, an
+// unparsable response) must never abort the attach — unlike
+// inspectReusePosture, which deliberately fails closed. The attach must
+// still succeed and no drift warning is owed (the probe couldn't determine
+// anything).
+func TestOpenAttach_PluginsDriftProbeFails_DoesNotBlockAttach(t *testing.T) {
+	repoRoot := configuredRepoEnv(t, `{"sandbox":{"plugins":["cenci"]}}`)
+	containerName := "claude-cenci-" + launcher.Slugify(filepath.Base(repoRoot))
+
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env := append(openAttachEnvFor(t, fakeDir, assets, containerName, "CENCI_SANDBOX_PLUGINS=cenci cenci-watch\n"),
+		"FAKE_CONTAINER_ENV_EXIT=1", // the drift probe itself fails
+	)
+
+	cmd := exec.Command(binaryPath, "open")
+	cmd.Env = env
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("open (attach, drift probe failure must not block attach): %v\n%s", err, output)
+	}
+	if strings.Contains(string(output), "cenci sandbox stop") {
+		t.Errorf("expected no drift warning when the drift probe itself fails (nothing could be determined), got:\n%s", output)
+	}
+	attachLine(t, callLogLines(t, callLog))
 }
 
 // symlinkGitOnlyDir symlinks the real git binary into dir (already holding a
