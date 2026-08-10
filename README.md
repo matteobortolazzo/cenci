@@ -1,23 +1,40 @@
 # cenci
 
-**Let coding agents run longer. Keep the important decisions.**
+**Run coding agents safely. See when they need you. Automate delivery when you are ready.**
 
 [![Claude Code](https://img.shields.io/badge/Claude_Code-supported-d97757?style=flat-square)](#claude-code-codex-and-opencode)
 [![Codex](https://img.shields.io/badge/Codex-supported-10a37f?style=flat-square)](flow/docs/codex.md)
-[![OpenCode](https://img.shields.io/badge/OpenCode-supported-fab040?style=flat-square)](flow/docs/opencode.md)
+[![OpenCode](https://img.shields.io/badge/OpenCode-partial-fab040?style=flat-square)](flow/docs/opencode.md)
 [![Platforms](https://img.shields.io/badge/Linux_%C2%B7_macOS_%C2%B7_WSL2-supported-64748b?style=flat-square)](docs/getting-started.md)
 [![License](https://img.shields.io/badge/license-MIT-8b5cf6?style=flat-square)](LICENSE)
 
-cenci takes a GitHub issue to a tested, reviewed pull request. You approve the intent
-and the plan; the agent works at full permissions inside a per-repository container;
-live state returns to tmux and optional desktop surfaces so you know when to step in.
+cenci is one product with an adoption path: start by making agent sessions visible,
+add repository-scoped isolation, and opt into a guarded GitHub issue-to-merge workflow
+when the project is ready. Agents work at full permissions only inside the container;
+you keep the authorization decisions that cross that boundary or merge code.
 
 [Try it](#quickstart) · [See the workflow](#approve-decisions-not-commands) ·
 [Read the security model](SECURITY.md) · [Browse the docs](#learn-more)
 
 ![cenci combines isolation, workflow, and attention into a safe path from issue to reviewed pull request](docs/assets/cenci-overview.svg)
 
-One install adds three cooperating layers:
+## Choose your starting point
+
+![Four cenci adoption profiles build from agent visibility to a guarded unattended delivery loop](docs/assets/cenci-profiles.svg)
+
+| I want to… | Use | What that gives me |
+|---|---|---|
+| **Observe agents** | Watch | Board-free tmux and desktop status; lazyboards is optional |
+| **Observe + isolate** | Watch + Sandbox | The same attention signals with only the current repository mounted into the agent container |
+| **Take a ticket to a PR** | Watch + Sandbox + Flow | Refinement, planning, tested implementation, specialist review, and PR follow-through |
+| **Run the full loop** | All three + autonomy switches | Dispatch, implementation, babysitting, and conditional automerge, with explicit policy and per-ticket grants |
+
+The current installer reconciles all three internal components; you can use only the
+outcomes you need. Selective installation and installed-set-preserving updates are the
+ordered [2.1 milestone](https://github.com/matteobortolazzo/cenci/milestone/2), tracked
+by [#938](https://github.com/matteobortolazzo/cenci/issues/938).
+
+Those outcomes are built from three cooperating layers:
 
 - **[Isolation](sandbox/README.md):** run the agent at full permissions inside a
   repository-scoped Docker or Podman container.
@@ -46,22 +63,21 @@ documentation, client adapters, and accumulated rules without requiring lazyboar
 
 ## See every session without watching every terminal
 
-![A lazyboards board in a tmux window; in the tmux window list below, cenci-watch marks one agent window blue and running, one red and needing input, and one green and done](docs/assets/cenci-tmux.png)
+![Agent hooks send live session state to cenci, which updates tmux and optional desktop status surfaces](docs/assets/cenci-surfaces.svg)
 
 cenci-watch marks each tmux window `▶` running, `!` needing input, or `✓` done.
-Native Claude Code and Codex hooks update that state immediately; the same signal can
-appear in Linux desktop bars and the macOS menu bar. The board shown above is optional
-[lazyboards](https://github.com/matteobortolazzo/lazyboards), and the surrounding tmux
-theme is user-provided.
+Native Claude Code, Codex, and OpenCode integrations update that state immediately;
+the same signal can appear in Linux desktop bars and the macOS menu bar. No board is
+required.
 
 [Explore tmux, status commands, and desktop integrations →](watch/README.md)
 
 ## Quickstart
 
-Requirements: Linux, macOS, or WSL2; git; curl; jq; Docker or Podman; and Claude Code,
-Codex, or both. [OpenCode](flow/docs/opencode.md) is supported as an additional,
-opt-in agent — it layers on top of an existing Claude Code or Codex install rather
-than standing alone.
+Requirements: Linux, macOS, or WSL2; git; curl; jq; cosign; Docker or Podman; and
+Claude Code, Codex, or both. GitHub delivery also needs an authenticated `gh` CLI.
+[OpenCode](flow/docs/opencode.md) is supported as an additional, opt-in agent — it
+layers on top of an existing Claude Code or Codex install rather than standing alone.
 
 **1. Install and verify.**
 
@@ -166,6 +182,8 @@ approved `Planned` ticket by policy. No board or LLM is required for the pickup 
 
 ## Optional: go hands-off
 
+![The guarded autonomy chain requires explicit planning, dispatch, repository policy, fleet, and per-ticket grants before conditional automerge](docs/assets/cenci-autonomous-loop.svg)
+
 Four opt-in switches remove the human gates one at a time — plans that approve
 themselves, dispatch that starts its own planning sessions, and `cenci babysit`
 merging the PR once CI is green and review feedback is clear. Fully armed, the chain
@@ -174,7 +192,10 @@ refinement and merge.
 
 Every switch is off by default and independently reversible, the per-ticket merge
 grant is always a human decision, and each link fails closed. Nothing here changes
-until you turn it on.
+until you turn it on. The [3.0 Trusted autonomy
+milestone](https://github.com/matteobortolazzo/cenci/milestone/9) tracks the remaining
+correctness and authorization hardening before this becomes the recommended default
+for unattended work.
 
 [Read the autonomous loop guide →](docs/autonomous-loop.md)
 
@@ -184,11 +205,14 @@ until you turn it on.
 |---|---|
 | **Claude Code** | Full gated workflow, sandbox isolation, live monitoring, optional design, and PR babysitting |
 | **Codex** | Sandbox isolation, live monitoring, portable conventions, and PR babysitting; native gated workflow in development |
-| **OpenCode** | Sandbox isolation, live monitoring, and portable engineering conventions via `--agent opencode`; opt-in during install and requires an existing Claude Code or Codex install; no native gated workflow, usage-budget tracking, or PR babysitting yet |
+| **OpenCode** | Direct sandbox sessions, live monitoring, and portable engineering conventions via `--agent opencode`; opt-in during install and requires an existing Claude Code or Codex install; no native gated workflow, workflow dispatch, usage-budget tracking, or corrective PR babysitting yet |
 
-All three clients can share one install, one repository, and one board. `cenci run`
-chooses an agent per invocation, while `cenci dispatch` can route tickets by
+All three clients can share one install, repository, and status surface. Workflow run,
+dispatch, and babysit availability must follow executable client capabilities, not an
 `agent:<name>` label.
+
+A direct OpenCode session is supported; OpenCode pipeline dispatch is not currently a
+supported contract.
 
 [See current delivery status →](docs/roadmap.md) ·
 [Read the Codex implementation guide →](flow/docs/codex.md) ·

@@ -2,12 +2,27 @@
 
 This is the detailed companion to the [README quickstart](../README.md#quickstart) —
 use it for prerequisite detail, verification, troubleshooting, and
-recovery/standalone installs. The steps below are the same install → verify →
-launch → configure → run sequence, just with more depth at each step. cenci is
-one product; the installer manages its three internal components for every
-supported client it detects.
+recovery/standalone installs. Start with the outcome you want, then follow the shared
+install → verify → launch path. cenci is one product; the installer currently manages
+its three internal components for every supported client it detects.
 
 ![cenci combines isolation, workflow, and attention into a safe path from issue to reviewed pull request](assets/cenci-overview.svg)
+
+## Choose an outcome
+
+![Four cenci adoption profiles build from agent visibility to a guarded unattended delivery loop](assets/cenci-profiles.svg)
+
+| Outcome | Layers | Continue with |
+|---|---|---|
+| Observe agent sessions | Watch | [Launch](#4-launch), then the [status surfaces](../watch/README.md) |
+| Observe and isolate | Watch + Sandbox | [Launch](#4-launch), then the [sandbox guide](../sandbox/README.md) |
+| Take a GitHub ticket to a reviewed PR | All three | [Configure](#5-configure-a-project), then [run a ticket](#7-run-a-ticket) |
+| Run dispatch through conditional automerge | All three + four opt-in switches | Finish the gated path first, then read [the autonomous loop](autonomous-loop.md) |
+
+The installer does not offer component selection yet: it reconciles all three and you
+use only the layers you need. Selective installation is tracked in
+[#938](https://github.com/matteobortolazzo/cenci/issues/938) and sequenced in milestone
+[2.1 — Selective setup](https://github.com/matteobortolazzo/cenci/milestone/2).
 
 ## 1. Prerequisites
 
@@ -17,6 +32,7 @@ Install:
 - git
 - curl
 - jq
+- [cosign](https://docs.sigstore.dev/system_config/installation/)
 - Docker or Podman
 - Claude Code, Codex, or both
 
@@ -96,14 +112,8 @@ Run this from a git repository — only that repository root is mounted at
 `/workspace`. cenci-watch needs no separate binary install: the first supported
 client session provisions it and starts the shared host daemon.
 
-Codex users should also make the repository's canonical `CLAUDE.md` instructions
-discoverable by adding this user-level configuration (repository-level Codex config
-does not control fallback instruction discovery):
-
-```toml
-# ~/.codex/config.toml
-project_doc_fallback_filenames = ["CLAUDE.md"]
-```
+Codex reads the repository's canonical `AGENTS.md` guidance directly. Generated
+`CLAUDE.md` files are client adapters, not the shared source of truth.
 
 If Codex reports updated plugin hooks as pending, inspect and trust them with `/hooks`.
 
@@ -172,6 +182,8 @@ applies `In Review`, and merge completion applies `Implemented`.
 
 ## 8. Optional: remove the gates
 
+![The guarded autonomy chain requires explicit planning, dispatch, repository policy, fleet, and per-ticket grants before conditional automerge](assets/cenci-autonomous-loop.svg)
+
 Everything above keeps you in the loop at refinement, at plan review, and at merge.
 Four opt-in switches remove those gates one at a time — up to a chain that runs
 refine → plan → implement → PR → merge → next ticket unattended. All four are off by
@@ -181,9 +193,18 @@ per-ticket merge grant stays a human decision.
 [The autonomous loop](autonomous-loop.md) has the switch table, a quick start with
 working config for both `~/.config/cenci/config.json` and the repo's
 `.cenci/config.json`, what still stops the machine, and how to read a held-merge log
-line.
+line. Treat it as an advanced opt-in while the [3.0 Trusted autonomy
+milestone](https://github.com/matteobortolazzo/cenci/milestone/9) closes the remaining
+correctness and authorization gaps.
 
 ## OpenCode support (additional, opt-in agent)
+
+> **Host-safety notice:** [#1018](https://github.com/matteobortolazzo/cenci/issues/1018)
+> tracks a host OpenCode configuration bug in the current installer. Until it lands,
+> do not accept the OpenCode integration prompt on a corporate or otherwise trusted
+> host. Direct OpenCode support must also not be treated as workflow-dispatch support;
+> [#1019](https://github.com/matteobortolazzo/cenci/issues/1019) makes that boundary
+> fail closed.
 
 The installer also detects [OpenCode](https://opencode.ai) and, when found, offers an
 opt-in integration on top of your existing Claude Code or Codex install — OpenCode is
