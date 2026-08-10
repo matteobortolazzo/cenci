@@ -711,7 +711,7 @@ func TestForwardedEnvVarNames_CoversEverySecretSuffixedEnvName(t *testing.T) {
 		for _, dindOn := range []bool{false, true} {
 			for _, reseed := range []bool{false, true} {
 				opts := Options{Agent: agent, ReseedCreds: reseed}
-				args := (&Engine{}).assembleEnv(agent, scope, opts, dindOn)
+				args := (&Engine{}).assembleEnv(agent, scope, opts, dindOn, DefaultSandboxPlugins())
 				for _, name := range parseDashE(args) {
 					seen[name] = true
 					if looksSecret(name) && !forwardedEnvVarNames[name] {
@@ -772,6 +772,24 @@ func TestAudit_EnvSecretClassification_ContextKeySecretTermNot(t *testing.T) {
 	}
 	if termEnv.Secret {
 		t.Errorf("TERM Env entry Secret = true, want false (not a create-time secret name)")
+	}
+}
+
+// TestClassifyEnvNames_BareSecretToken covers ticket #759: once
+// assembleExecEnv/assembleEnv emit a bare "-e NAME" token (no "=value") for
+// a secret env, classifyEnvNames must still parse the name correctly and
+// mark it Secret:true -- an explicit assertion rather than an inference
+// from other passing tests (AC6).
+func TestClassifyEnvNames_BareSecretToken(t *testing.T) {
+	envs := classifyEnvNames([]string{"-e", "OPENAI_API_KEY"})
+	if len(envs) != 1 {
+		t.Fatalf("classifyEnvNames([-e OPENAI_API_KEY]) = %+v, want exactly one entry", envs)
+	}
+	if envs[0].Name != "OPENAI_API_KEY" {
+		t.Errorf("Name = %q, want %q", envs[0].Name, "OPENAI_API_KEY")
+	}
+	if !envs[0].Secret {
+		t.Errorf("Secret = false, want true for OPENAI_API_KEY")
 	}
 }
 

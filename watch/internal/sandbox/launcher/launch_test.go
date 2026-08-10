@@ -2,6 +2,7 @@ package launcher
 
 import (
 	"bytes"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -84,6 +85,140 @@ func TestAssembleRunArgs_NoCreationTimeTmuxPane(t *testing.T) {
 	for _, a := range args {
 		if strings.Contains(a, "TMUX_PANE") {
 			t.Errorf("container-creation args must not carry TMUX_PANE (goes stale on the shared container, #356); got %q in:\n%s", a, strings.Join(args, " "))
+		}
+	}
+}
+
+// -- ticket #759: provider API key VALUES must never appear in argv ---------
+//
+// `docker exec -e NAME=value ...`/`docker run ... -e NAME=value ...` argv is
+// readable by any host user via `ps` for the entire session (execAttach's
+// syscall.Exec handoff never returns). Both call sites that ever forward a
+// provider API key -- assembleExecEnv (per-exec attach path) and
+// Engine.assembleEnv (container-create path's CONTEXT7_API_KEY forward) --
+// must emit only the bare "-e NAME" token, letting the runtime CLI read the
+// value from its own inherited environment instead. Assertions below use
+// slices.Contains for an exact-token match against a bare "-e NAME" entry,
+// as opposed to strings.Contains against the joined argv, which would also
+// match the value-bearing "NAME=value" form.
+
+// providerSecretEnvNames are the four host env vars whose VALUES must never
+// appear in any assembled argv token (ticket #759's AC list).
+var providerSecretEnvNames = []string{"CONTEXT7_API_KEY", "PEN_CLI_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"}
+
+// TestAssembleExecEnvAndAssembleEnv_NeverEmitProviderSecretValues is the
+// core AC test: with distinct sentinel values set for all four provider
+// secret names, neither assembleExecEnv (every agent) nor Engine.assembleEnv
+// (the create-time CONTEXT7_API_KEY forward) may ever emit a sentinel value
+// anywhere in their argv, or a "NAME=" prefixed token for any of the four
+// names -- only the bare "-e NAME" form. Per-agent scoping (#490) is
+// verified against the actual assembleExecEnv switch: opencode forwards
+// ANTHROPIC_API_KEY+OPENAI_API_KEY, codex forwards OPENAI_API_KEY only,
+// claude forwards neither -- CONTEXT7_API_KEY/PEN_CLI_KEY are unscoped
+// (forwarded for every agent when set).
+func TestAssembleExecEnvAndAssembleEnv_NeverEmitProviderSecretValues(t *testing.T) {
+	sentinels := map[string]string{
+		"CONTEXT7_API_KEY":  "sentinel-secret-value-context7",
+		"PEN_CLI_KEY":       "sentinel-secret-value-pencli",
+		"ANTHROPIC_API_KEY": "sentinel-secret-value-anthropic",
+		"OPENAI_API_KEY":    "sentinel-secret-value-openai",
+	}
+	for _, name := range providerSecretEnvNames {
+		t.Setenv(name, sentinels[name])
+	}
+
+	cases := []struct {
+		agent          string
+		wantExecNames  []string // bare -e NAME tokens assembleExecEnv must emit
+		wantExecAbsent []string // names assembleExecEnv must never emit at all
+	}{
+		{
+			agent:          "claude",
+			wantExecNames:  []string{"CONTEXT7_API_KEY", "PEN_CLI_KEY"},
+			wantExecAbsent: []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY"},
+		},
+		{
+			agent:          "codex",
+			wantExecNames:  []string{"CONTEXT7_API_KEY", "PEN_CLI_KEY", "OPENAI_API_KEY"},
+			wantExecAbsent: []string{"ANTHROPIC_API_KEY"},
+		},
+		{
+			agent:         "opencode",
+			wantExecNames: []string{"CONTEXT7_API_KEY", "PEN_CLI_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.agent, func(t *testing.T) {
+			execArgs := assembleExecEnv(tc.agent)
+			e := &Engine{Runtime: "docker", Stderr: &bytes.Buffer{}}
+			createArgs := e.assembleEnv(tc.agent, Scope{WorkspaceScope: "s"}, Options{}, false, DefaultSandboxPlugins())
+
+			execJoined := strings.Join(execArgs, " ")
+			createJoined := strings.Join(createArgs, " ")
+
+			for _, name := range providerSecretEnvNames {
+				secret := sentinels[name]
+				if strings.Contains(execJoined, secret) {
+					t.Errorf("assembleExecEnv(%q) leaks the %s sentinel value; got: %s", tc.agent, name, execJoined)
+				}
+				if strings.Contains(createJoined, secret) {
+					t.Errorf("assembleEnv(%q) leaks the %s sentinel value; got: %s", tc.agent, name, createJoined)
+				}
+			}
+
+			for _, name := range tc.wantExecNames {
+				if !slices.Contains(execArgs, name) {
+					t.Errorf("assembleExecEnv(%q) missing bare -e %s token; got: %v", tc.agent, name, execArgs)
+				}
+			}
+			for _, name := range tc.wantExecAbsent {
+				if strings.Contains(execJoined, name) {
+					t.Errorf("assembleExecEnv(%q) must never forward %s (per-agent scoping, #490); got: %s", tc.agent, name, execJoined)
+				}
+			}
+
+			// The create-time path only ever forwards CONTEXT7_API_KEY,
+			// unconditionally on agent (assembleEnv's own CONTEXT7_API_KEY
+			// passthrough has no agent gate).
+			if !slices.Contains(createArgs, "CONTEXT7_API_KEY") {
+				t.Errorf("assembleEnv(%q) missing bare -e CONTEXT7_API_KEY token; got: %v", tc.agent, createArgs)
+			}
+
+			for _, args := range [][]string{execArgs, createArgs} {
+				for _, name := range providerSecretEnvNames {
+					for _, tok := range args {
+						if strings.HasPrefix(tok, name+"=") {
+							t.Errorf("found a %q= prefixed token (value-bearing form) in %v; want the bare -e %s token only", name, args, name)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestAssembleExecEnvAndAssembleEnv_EmptyProviderKeys_OmitEntirely pins the
+// non-empty gate (AC2): an explicitly empty host var must never emit even
+// the bare -e NAME token -- both assembleExecEnv and assembleEnv only
+// forward a name when its host value is set and non-empty.
+func TestAssembleExecEnvAndAssembleEnv_EmptyProviderKeys_OmitEntirely(t *testing.T) {
+	for _, name := range providerSecretEnvNames {
+		t.Setenv(name, "")
+	}
+
+	for _, agent := range []string{"claude", "codex", "opencode"} {
+		execArgs := assembleExecEnv(agent)
+		e := &Engine{Runtime: "docker", Stderr: &bytes.Buffer{}}
+		createArgs := e.assembleEnv(agent, Scope{WorkspaceScope: "s"}, Options{}, false, DefaultSandboxPlugins())
+
+		for _, name := range providerSecretEnvNames {
+			if slices.Contains(execArgs, name) {
+				t.Errorf("assembleExecEnv(%q) emitted %s with an empty host value, want entirely absent; got: %v", agent, name, execArgs)
+			}
+			if slices.Contains(createArgs, name) {
+				t.Errorf("assembleEnv(%q) emitted %s with an empty host value, want entirely absent; got: %v", agent, name, createArgs)
+			}
 		}
 	}
 }

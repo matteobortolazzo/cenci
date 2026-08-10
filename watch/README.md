@@ -1716,10 +1716,14 @@ performs (starting the events daemon on demand) that the read-only preview
 never performs itself; when that outcome can't be determined read-only, the
 create argv omits the wiring mounts and the report says so explicitly instead
 of claiming to be exact. Any forwarded secret env var (`OPENAI_API_KEY`,
-`ANTHROPIC_API_KEY`, `CONTEXT7_API_KEY`) renders as `-e NAME=<redacted>` —
-masked but structurally visible — never the actual value; as with `audit`
-(below), mounted host *paths* are shown in full, so review the output before
-sharing it. Trailing `--` forwarded args (e.g. `cenci open -- --api-key
+`ANTHROPIC_API_KEY`, `CONTEXT7_API_KEY`, `PEN_CLI_KEY`) renders as a bare `-e NAME` — no
+`=value` at all, since the runtime CLI (docker/podman) resolves `NAME`
+client-side from its own inherited environment rather than from argv. This
+also means the value never appears in `ps` output while an attached session
+is running (the exec handoff replaces the process image via `syscall.Exec`,
+so the assembled argv is what `ps` shows for the rest of the session); as
+with `audit` (below), mounted host *paths* are shown in full, so review the
+output before sharing it. Trailing `--` forwarded args (e.g. `cenci open -- --api-key
 sk-...`) are echoed verbatim in the attach argv and are **not** redacted, so a
 secret passed as a forwarded flag appears in clear — review those too before
 sharing. Works with agent+model shortcuts, `--dind`, `--host-network`, and a

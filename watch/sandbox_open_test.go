@@ -3191,7 +3191,11 @@ func TestOpenCodex_RemovesStoppedContainerOnSuccessfulCreate(t *testing.T) {
 // staged) and reach the exec-time attach, but it must never appear in the
 // create-time `run --name` args — else it would sit in the container's PID-1
 // environ for the container's whole lifetime, readable via `docker inspect`/
-// `/proc/1/environ` (#510).
+// `/proc/1/environ` (#510). The attach exec argv itself must carry the bare
+// "-e OPENAI_API_KEY" token only, never the secret VALUE — the full argv
+// stays live in `ps` for the whole interactive session via execAttach's
+// syscall.Exec handoff (#759), so the runtime CLI reads the value from its
+// own inherited environment instead.
 func TestOpenCodex_ForwardsProviderKeyPerExecOnly(t *testing.T) {
 	fakeDir := t.TempDir()
 	callLog := writeScriptedRuntimes(t, fakeDir)
@@ -3215,8 +3219,14 @@ func TestOpenCodex_ForwardsProviderKeyPerExecOnly(t *testing.T) {
 	}
 
 	line := attachLine(t, lines)
-	if !strings.Contains(line, "-e OPENAI_API_KEY=sk-cenci-test-secret") {
+	if !strings.Contains(line, "-e OPENAI_API_KEY") {
 		t.Errorf("attach argv missing per-exec OPENAI_API_KEY forwarding:\n%s", line)
+	}
+	if strings.Contains(line, "sk-cenci-test-secret") {
+		t.Errorf("attach argv must never carry the OPENAI_API_KEY secret VALUE (readable via ps for the whole session, #759); got:\n%s", line)
+	}
+	if strings.Contains(line, "OPENAI_API_KEY=") {
+		t.Errorf("attach argv must forward OPENAI_API_KEY value-less (bare -e NAME, letting the runtime CLI read its own inherited environment, #759); got:\n%s", line)
 	}
 }
 
@@ -3254,9 +3264,19 @@ func TestOpenOpencode_FreshCreate_PinsBareInvocationAndScopesProviderKeys(t *tes
 	if !strings.HasSuffix(line, "/opt/cenci-agent/current/node_modules/.bin/opencode") {
 		t.Errorf("attach argv = %q, want a bare opencode invocation with no permission-skip flag and no forced --model", line)
 	}
-	for _, want := range []string{"ANTHROPIC_API_KEY=sk-test-anthropic", "OPENAI_API_KEY=sk-test-openai"} {
-		if !strings.Contains(line, want) {
-			t.Errorf("attach argv missing %q (opencode-only per-exec provider key forwarding):\n%s", want, line)
+	for _, name := range []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY"} {
+		if !strings.Contains(line, "-e "+name) {
+			t.Errorf("attach argv missing bare -e %s (opencode-only per-exec provider key forwarding):\n%s", name, line)
+		}
+	}
+	for _, secret := range []string{"sk-test-anthropic", "sk-test-openai"} {
+		if strings.Contains(line, secret) {
+			t.Errorf("attach argv must never carry a provider key secret VALUE (readable via ps for the whole session, #759); got:\n%s", line)
+		}
+	}
+	for _, forbidden := range []string{"ANTHROPIC_API_KEY=", "OPENAI_API_KEY="} {
+		if strings.Contains(line, forbidden) {
+			t.Errorf("attach argv must forward provider keys value-less (bare -e NAME, #759); got %q in:\n%s", forbidden, line)
 		}
 	}
 }
@@ -3291,6 +3311,44 @@ func TestOpenClaude_NeverForwardsProviderKeys(t *testing.T) {
 		if strings.Contains(line, forbidden) {
 			t.Errorf("claude attach exec args must never carry a provider key (opencode-only forwarding); got %q in:\n%s", forbidden, line)
 		}
+	}
+}
+
+// TestOpenClaude_ForwardsContext7KeyValuelessAtCreateTime pins ticket #759's
+// create-path fix: unlike the provider API keys (per-exec only),
+// CONTEXT7_API_KEY is also forwarded at container-create time
+// (Engine.assembleEnv), but its VALUE must never land in the create-time
+// `run --name` argv — only the bare "-e CONTEXT7_API_KEY" token, letting the
+// entrypoint's own inherited environment supply the value. openTestEnv
+// scrubs CONTEXT7_API_KEY= from the inherited env, and os/exec keeps the
+// last duplicate key, so the sentinel is appended explicitly here.
+func TestOpenClaude_ForwardsContext7KeyValuelessAtCreateTime(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	const context7Secret = "sk-context7-test-secret"
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = append(env, "CONTEXT7_API_KEY="+context7Secret)
+	cmd.Dir = t.TempDir()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("open ch: %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	runLine, ok := findLineWithPrefix(lines, "run --name ")
+	if !ok {
+		t.Fatalf("expected a container run, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(runLine, "-e CONTEXT7_API_KEY") {
+		t.Errorf("create-time run args missing the bare -e CONTEXT7_API_KEY token; got:\n%s", runLine)
+	}
+	if strings.Contains(runLine, context7Secret) {
+		t.Errorf("create-time run args must never carry the CONTEXT7_API_KEY secret VALUE (readable via ps/docker inspect for the container's whole lifetime, #759); got:\n%s", runLine)
+	}
+	if strings.Contains(runLine, "CONTEXT7_API_KEY=") {
+		t.Errorf("create-time run args must forward CONTEXT7_API_KEY value-less (bare -e NAME, #759); got:\n%s", runLine)
 	}
 }
 

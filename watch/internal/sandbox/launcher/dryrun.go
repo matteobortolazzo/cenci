@@ -167,7 +167,11 @@ func (p DryRunPlan) WriteText(w io.Writer) error {
 // token whose NAME is a forwarded secret (forwardedEnvVarNames, the single
 // source of truth audit.go already uses for secret classification) to
 // "-e NAME=<redacted>" — masking the value while keeping the token
-// structurally visible. Every other token, including non-secret env and host
+// structurally visible. Since ticket #759, secret env forwards arrive as a
+// bare "-e NAME" (value-less) token in the first place, so redactSecretEnv
+// no-ops on them and they pass through unchanged; the "NAME=value" redaction
+// path is retained as a regression guard in case a value-bearing form is
+// ever reintroduced. Every other token, including non-secret env and host
 // paths, renders literally (consistent with audit/diagnose's own
 // value-free-but-path-visible discipline).
 func renderArgv(argv []string) string {
@@ -187,7 +191,10 @@ func renderArgv(argv []string) string {
 
 // redactSecretEnv masks the value of a "NAME=value" token to
 // "NAME=<redacted>" when NAME is in forwardedEnvVarNames; every other token
-// (including non-secret "NAME=value" env) passes through unchanged.
+// (including non-secret "NAME=value" env) passes through unchanged. Since
+// ticket #759, secret env forwards arrive as a bare "NAME" (no "=") token,
+// which has no index for '=' below and so passes through unchanged here too
+// — this function only fires if a value-bearing form is ever reintroduced.
 func redactSecretEnv(tok string) string {
 	idx := strings.IndexByte(tok, '=')
 	if idx < 0 {

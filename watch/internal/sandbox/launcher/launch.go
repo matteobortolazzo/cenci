@@ -408,11 +408,28 @@ func buildAgentCmdArgs(agent, model string) []string {
 	}
 }
 
+// appendSecretEnvPassthrough appends a bare "-e NAME" token (no "=value") to
+// args when the named host env var is set and non-empty, and returns args
+// unchanged otherwise. Both docker and podman resolve a value-less "-e NAME"
+// client-side by looking up NAME in their own inherited environment (the
+// docker/podman CLI's process environ, not the container's) — the value
+// itself never becomes part of the assembled argv. Since runAgent hands off
+// via syscall.Exec (execAttach), the exec'd runtime CLI's argv stays visible
+// for the entire session via `ps`; emitting only the bare name keeps a
+// provider secret's value out of that persistently visible argv (#759).
+func appendSecretEnvPassthrough(args []string, name string) []string {
+	if v := os.Getenv(name); v != "" {
+		args = append(args, "-e", name)
+	}
+	return args
+}
+
 // assembleExecEnv builds the per-exec (not create-time) "-e"/"-u" argument
 // list every agent exec session receives: the attach user, pane identity,
 // the CENCI_SANDBOX marker/agent name, and provider API key passthroughs
 // forwarded per-exec only (never baked into the container-lifetime
-// create-time env/PID-1 environ), scoped to the agent that can use them:
+// create-time env/PID-1 environ) as bare "-e NAME" tokens (see
+// appendSecretEnvPassthrough; #759), scoped to the agent that can use them:
 // OpenCode reads ANTHROPIC_API_KEY/OPENAI_API_KEY natively, Codex only
 // OPENAI_API_KEY, and Claude neither (#490). Pure aside from reading host
 // env vars — it depends only on agent, so both Launch and Audit's posture
@@ -423,21 +440,13 @@ func assembleExecEnv(agent string) []string {
 		"-e", "TMUX_PANE=" + os.Getenv("TMUX_PANE"),
 		"-e", "CENCI_SANDBOX=1",
 		"-e", "CENCI_SANDBOX_AGENT=" + agent}
-	if v := os.Getenv("CONTEXT7_API_KEY"); v != "" {
-		execEnvArgs = append(execEnvArgs, "-e", "CONTEXT7_API_KEY="+v)
-	}
-	if v := os.Getenv("PEN_CLI_KEY"); v != "" {
-		execEnvArgs = append(execEnvArgs, "-e", "PEN_CLI_KEY="+v)
-	}
+	execEnvArgs = appendSecretEnvPassthrough(execEnvArgs, "CONTEXT7_API_KEY")
+	execEnvArgs = appendSecretEnvPassthrough(execEnvArgs, "PEN_CLI_KEY")
 	if agent == "opencode" {
-		if v := os.Getenv("ANTHROPIC_API_KEY"); v != "" {
-			execEnvArgs = append(execEnvArgs, "-e", "ANTHROPIC_API_KEY="+v)
-		}
+		execEnvArgs = appendSecretEnvPassthrough(execEnvArgs, "ANTHROPIC_API_KEY")
 	}
 	if agent == "codex" || agent == "opencode" {
-		if v := os.Getenv("OPENAI_API_KEY"); v != "" {
-			execEnvArgs = append(execEnvArgs, "-e", "OPENAI_API_KEY="+v)
-		}
+		execEnvArgs = appendSecretEnvPassthrough(execEnvArgs, "OPENAI_API_KEY")
 	}
 	return execEnvArgs
 }
@@ -714,7 +723,8 @@ func (e *Engine) assembleVolumeMounts(agent, cenciBin, socketDir string, cenciAv
 // its absence in a running container is reserved as the legacy-container
 // signal, #1002), the HOST_UID/HOST_GID/WORKSPACE_SCOPE entrypoint contract,
 // the opt-in reseed-creds flag, and the COLORTERM/CONTEXT7_API_KEY
-// passthroughs.
+// passthroughs. CONTEXT7_API_KEY is forwarded as a bare "-e NAME" token, not
+// "-e NAME=value" — see appendSecretEnvPassthrough (#759).
 func (e *Engine) assembleEnv(agent string, scope Scope, opts Options, dindOn bool, plugins []string) []string {
 	term := os.Getenv("TERM")
 	if term == "" {
@@ -745,9 +755,7 @@ func (e *Engine) assembleEnv(agent string, scope Scope, opts Options, dindOn boo
 	if v := os.Getenv("COLORTERM"); v != "" {
 		args = append(args, "-e", "COLORTERM="+v)
 	}
-	if v := os.Getenv("CONTEXT7_API_KEY"); v != "" {
-		args = append(args, "-e", "CONTEXT7_API_KEY="+v)
-	}
+	args = appendSecretEnvPassthrough(args, "CONTEXT7_API_KEY")
 
 	return args
 }
