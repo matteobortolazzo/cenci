@@ -3,11 +3,14 @@ package launcher
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/matteobortolazzo/cenci/watch/internal/sandbox"
 )
 
 // -- cenci audit (ticket #588) -------------------------------------------
@@ -627,6 +630,111 @@ func TestCredentialStatusText_UnrecognizedProbe_NotRenderedAsAbsent(t *testing.T
 
 // -- env-secret classification (ticket #598) -------------------------------
 
+// TestForwardedEnvVarNames_CoversEverySecretSuffixedEnvName is a completeness
+// guard over forwardedEnvVarNames (audit.go): it enumerates every "-e" name
+// assembleExecEnv/assembleEnv actually emit today, across every supported
+// agent and every dindOn/ReseedCreds combination, and fails any name that
+// looks like a secret (matches the suffix heuristic _KEY$|_TOKEN$|_SECRET$|
+// _PASSWORD$) but is NOT registered in forwardedEnvVarNames — the single
+// source of truth both isSecretEnvName (cenci audit's reporting) and
+// redactSecretEnv (dryrun.go's `cenci open --dry-run` redaction) depend on. A
+// map-miss there would silently render an unredacted secret value in
+// dry-run output.
+//
+// Known blind spots (deliberately out of scope, per ticket #760's Q&A):
+//
+//  1. An oddly-named future secret that matches none of the four suffixes
+//     (_KEY/_TOKEN/_SECRET/_PASSWORD) stays undetected by this heuristic —
+//     accepted tradeoff over a second hand-maintained allowlist, since there
+//     is nothing to keep in sync against a single forwardedEnvVarNames source.
+//  2. A future "-e" forward whose host gate var isn't also t.Setenv'd below
+//     is silently dropped from the enumeration this test drives — whoever
+//     adds a new gated forward to assembleExecEnv/assembleEnv MUST also add
+//     its host env var to the t.Setenv block below, or this test will never
+//     see the emitted name at all.
+//  3. "-e" names emitted OUTSIDE assembleExecEnv/assembleEnv are out of
+//     scope for this test (AC #1): assembleVolumeMounts's XDG_RUNTIME_DIR
+//     forward and buildAgentExecArgv's DISABLE_UPDATES forward (both
+//     launch.go), and engine.go's maintenanceRunArgs. None of the three
+//     emits a secret-suffixed name today.
+func TestForwardedEnvVarNames_CoversEverySecretSuffixedEnvName(t *testing.T) {
+	// Every host gate var assembleExecEnv/assembleEnv currently read behind an
+	// "only forward when set" conditional must be set here, or its forwarded
+	// name never appears in the argv this test parses (blind spot 2 above).
+	t.Setenv("CONTEXT7_API_KEY", "sentinel-context7")
+	t.Setenv("PEN_CLI_KEY", "sentinel-pencil")
+	t.Setenv("ANTHROPIC_API_KEY", "sentinel-anthropic")
+	t.Setenv("OPENAI_API_KEY", "sentinel-openai")
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("COLORTERM", "truecolor")
+
+	secretSuffixes := []string{"_KEY", "_TOKEN", "_SECRET", "_PASSWORD"}
+	looksSecret := func(name string) bool {
+		for _, suffix := range secretSuffixes {
+			if strings.HasSuffix(name, suffix) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// parseDashE parses every token following a "-e" flag in args, handling
+	// both "-e NAME=value" and a bare "-e NAME" (so this test survives #759's
+	// argv-shape change in either landing order) — mirrors classifyEnvNames's
+	// own parse rule (audit.go:544-557).
+	parseDashE := func(args []string) []string {
+		var names []string
+		for i := 0; i < len(args); i++ {
+			if args[i] != "-e" || i+1 >= len(args) {
+				continue
+			}
+			name := args[i+1]
+			if idx := strings.IndexByte(name, '='); idx >= 0 {
+				name = name[:idx]
+			}
+			names = append(names, name)
+		}
+		return names
+	}
+
+	seen := make(map[string]bool)
+	scope := Scope{WorkspaceScope: "repo"}
+
+	for _, agent := range sandbox.SupportedAgents {
+		for _, name := range parseDashE(assembleExecEnv(agent)) {
+			seen[name] = true
+			if looksSecret(name) && !forwardedEnvVarNames[name] {
+				t.Errorf("assembleExecEnv(%q) emitted secret-suffixed env %q, which is NOT registered in forwardedEnvVarNames (watch/internal/sandbox/launcher/audit.go) — register it or dry-run output will leak its value unredacted", agent, name)
+			}
+		}
+
+		for _, dindOn := range []bool{false, true} {
+			for _, reseed := range []bool{false, true} {
+				opts := Options{Agent: agent, ReseedCreds: reseed}
+				args := (&Engine{}).assembleEnv(agent, scope, opts, dindOn)
+				for _, name := range parseDashE(args) {
+					seen[name] = true
+					if looksSecret(name) && !forwardedEnvVarNames[name] {
+						t.Errorf("assembleEnv(%q, dindOn=%t, ReseedCreds=%t) emitted secret-suffixed env %q, which is NOT registered in forwardedEnvVarNames (watch/internal/sandbox/launcher/audit.go) — register it or dry-run output will leak its value unredacted", agent, dindOn, reseed, name)
+					}
+				}
+			}
+		}
+	}
+
+	// Anti-vacuity guard: assert each of the four currently-registered
+	// secrets was actually observed emitted somewhere above. This is a
+	// per-name presence check (not a bare "not empty" — watch/docs/
+	// test-strategy.md #914), and deliberately a SUBSET check rather than set
+	// equality: a legitimately added-and-registered future secret must not
+	// fail this test.
+	for _, want := range []string{"CONTEXT7_API_KEY", "PEN_CLI_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"} {
+		if !seen[want] {
+			t.Errorf("expected %q to be emitted by some agent/branch combination (gate var not driving emission?), got emitted set %v", want, seen)
+		}
+	}
+}
+
 // TestAudit_EnvSecretClassification_ContextKeySecretTermNot covers giving
 // create-time env names the same explicit secret classification semantics
 // as forwarded exec env (isSecretEnvName wrapping forwardedEnvVarNames):
@@ -1196,6 +1304,64 @@ func TestAudit_ObservedMode_MalformedInspect_BasisPlannedWithInspectWarningNoBas
 	}
 	if strings.Contains(buf.String(), "default-safe baseline") {
 		t.Errorf("WriteText output claims the default-safe baseline despite an inspect failure, got:\n%s", buf.String())
+	}
+}
+
+// TestAudit_ObservedMode_InspectExecFailure_BasisPlannedWithInspectWarning
+// covers ticket #681: the container disappearing between `ps` and `inspect`
+// (the combined observed-inspect probe's exec itself failing — a nonzero
+// exit, not a parse failure) must degrade the same way as a malformed
+// response: basis:"planned", a non-empty InspectWarning naming the failure,
+// nil error, and never the reassuring "default-safe baseline" line.
+//
+// The branch discriminator below is required, not optional: exec failure
+// (audit_observed.go:73-75) wraps the raw *exec.ExitError, while a parse
+// failure (audit_observed.go:76-79) wraps the ErrMalformedObservedInspect
+// sentinel — without asserting errors.Is(...) is false here, this test could
+// not be distinguished from the already-covered
+// TestAudit_ObservedMode_MalformedInspect_... parse-failure test above.
+func TestAudit_ObservedMode_InspectExecFailure_BasisPlannedWithInspectWarning(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	scope := ComputeScope("claude", "", repo, home)
+	eng, _ := auditEngineWithFakeRuntime(t)
+	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
+	t.Setenv("FAKE_OBSERVED_POSTURE_EXIT", "1")
+
+	posture, err := eng.Audit(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Audit: %v, want nil error (an inspect exec failure degrades to a warning, never a hard failure)", err)
+	}
+	if posture.Basis != PostureBasisPlanned {
+		t.Errorf("Basis = %q, want %q — an inspect exec failure must never report basis:\"running\"", posture.Basis, PostureBasisPlanned)
+	}
+	if posture.InspectWarning == "" {
+		t.Fatal("InspectWarning is empty, want a non-empty warning that the running container's actual posture could not be verified")
+	}
+	if !strings.Contains(posture.InspectWarning, "exit status") {
+		t.Errorf("InspectWarning = %q, want it to mention the underlying exit status", posture.InspectWarning)
+	}
+
+	var buf bytes.Buffer
+	if err := posture.WriteText(&buf); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+	if strings.Contains(buf.String(), "default-safe baseline") {
+		t.Errorf("WriteText output claims the default-safe baseline despite an inspect exec failure, got:\n%s", buf.String())
+	}
+
+	// Branch discriminator: a direct call must surface a non-sentinel-wrapped
+	// error, proving this test drove the exec-failure branch, not the
+	// already-covered parse-failure branch.
+	_, directErr := eng.inspectObservedPosture(scope.ContainerName)
+	if directErr == nil {
+		t.Fatal("inspectObservedPosture: expected an error when FAKE_OBSERVED_POSTURE_EXIT=1, got nil")
+	}
+	if errors.Is(directErr, ErrMalformedObservedInspect) {
+		t.Errorf("inspectObservedPosture error unexpectedly wraps ErrMalformedObservedInspect (%v) — this indicates the exec-failure path was NOT exercised, only the already-covered parse-failure path", directErr)
 	}
 }
 

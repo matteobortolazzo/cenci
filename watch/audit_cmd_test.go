@@ -496,6 +496,48 @@ func TestAudit_JSONOutput_MalformedInspect_InspectWarningPlannedExit0(t *testing
 	}
 }
 
+// TestAudit_JSONOutput_InspectExecFailure_InspectWarningPlannedExit0 covers
+// ticket #681 at the command level: the container disappearing between `ps`
+// and `inspect` (the combined observed-inspect probe's EXEC itself failing,
+// not a parse failure) must still exit 0 and render basis:"planned" with a
+// non-empty inspectWarning — never a hard failure, never a silent collapse
+// to the default-safe baseline. This exercises FAKE_OBSERVED_POSTURE_EXIT,
+// which writeAuditFakeRuntime (audit_security_faketest_test.go:58) already
+// honours — no fake change needed here.
+func TestAudit_JSONOutput_InspectExecFailure_InspectWarningPlannedExit0(t *testing.T) {
+	repo := auditRepoDir(t)
+	home := t.TempDir()
+	scope := launcher.ComputeScope("claude", "", repo, home)
+
+	// t.Setenv must precede auditFakeRuntimeCmd: cmd.Env snapshots
+	// os.Environ() at construction time.
+	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
+	t.Setenv("FAKE_OBSERVED_POSTURE_EXIT", "1")
+
+	cmd, _ := auditFakeRuntimeCmd(t, repo, home, "audit", "--agent", "claude", "--json")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cenci audit --json (inspect exec failure) must exit 0, got %v\n%s", err, output)
+	}
+
+	var parsed struct {
+		Basis          string `json:"basis"`
+		InspectWarning string `json:"inspectWarning"`
+	}
+	if err := json.Unmarshal(output, &parsed); err != nil {
+		t.Fatalf("cenci audit --json produced invalid JSON: %v\noutput:\n%s", err, output)
+	}
+	if parsed.Basis != "planned" {
+		t.Errorf("basis = %q, want %q on inspect exec failure (never collapse to running)", parsed.Basis, "planned")
+	}
+	if parsed.InspectWarning == "" {
+		t.Errorf("inspectWarning is empty, want a non-empty warning on inspect exec failure")
+	}
+	if strings.Contains(string(output), "default-safe baseline") {
+		t.Errorf("output claims the default-safe baseline despite an inspect exec failure, got:\n%s", output)
+	}
+}
+
 // TestAudit_TextOutput_PsUnreachable_InspectWarningPlannedExit0 covers
 // AC #9's ps/daemon-unreachable case at the command level: exit 0, a
 // visible warning, no default-safe baseline claim.

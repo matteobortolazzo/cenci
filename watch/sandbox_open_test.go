@@ -128,6 +128,15 @@ func joinArgv(argv []string) string {
 //	                        probe reads this, e.g.
 //	                        `{"sysbox-runc":{},"runc":{}}` to simulate a
 //	                        registered sysbox runtime.
+//	FAKE_INFO_EXIT       — `info ...` exit code (default 0); set nonzero to
+//	                        simulate a `docker info` failure (daemon down),
+//	                        distinct from FAKE_INFO_RUNTIMES's stdout-shape
+//	                        control — note the asymmetric naming: `fv
+//	                        INFO_RUNTIMES` controls stdout, `fe INFO` (→
+//	                        FAKE_INFO_EXIT, not FAKE_INFO_RUNTIMES_EXIT)
+//	                        controls the exit code. Must stay byte-parallel
+//	                        with internal/sandbox/launcher/faketest_test.go's
+//	                        writeFakeRuntime (#493 keep-in-sync note).
 //	FAKE_INSPECT_LABEL   — container `inspect` stdout for label lookups
 //	FAKE_INSPECT_MOUNTS  — container `inspect` stdout for mount lookups
 //	FAKE_REUSE_POSTURE   — container `inspect` stdout for the combined
@@ -366,7 +375,7 @@ volume)
   inspect) exit "$(fe VOLUME_INSPECT)" ;;
   esac
   ;;
-info) fv INFO_RUNTIMES "{}" ;;
+info) fv INFO_RUNTIMES "{}"; exit "$(fe INFO)" ;;
 rm) exit 0 ;;
 run) case "$*" in
   *'/bin/cat'*)
@@ -1532,6 +1541,7 @@ func openTestEnv(t *testing.T, fakeDir, assets string) (env []string, home, sock
 		"TERM=xterm-256color",
 		"TMUX_PANE=%7",
 		"COLORTERM=", "CONTEXT7_API_KEY=", "OPENAI_API_KEY=", "CENCI_SANDBOX=",
+		"PEN_CLI_KEY=", "ANTHROPIC_API_KEY=",
 		"FAKE_VOLUMES=cenci-agent-cli-claude\ncenci-agent-cli-codex\n",
 		"FAKE_IMAGE_BASE_VERSION="+tag,
 	)
@@ -2477,6 +2487,46 @@ func TestOpenDind_SysboxNotRegistered_Exits1WithInstallPointer(t *testing.T) {
 		if !strings.Contains(lower, want) {
 			t.Errorf("expected the sysbox install-pointer message to mention %q, got:\n%s", want, output)
 		}
+	}
+	if lines := callLogLines(t, callLog); anyLineContains(lines, "run --name ") {
+		t.Errorf("expected no container to be created when dind preflight fails, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// TestOpenDind_DockerInfoFails_Exits1 covers AC #7: dindPreflight's
+// `docker info` call failing (nonzero exit — the daemon is down) must exit 1
+// with the operator-facing wrapping-chain message ("checking sysbox-runc
+// registration ... docker info: exit status 1"), distinct from the
+// already-covered unregistered-sysbox install-pointer message (asserted
+// absent below so this test can never accidentally pass by hitting that
+// other branch), and must never create a container.
+func TestOpenDind_DockerInfoFails_Exits1(t *testing.T) {
+	repoRoot, _ := dindRepoEnv(t, false)
+
+	fakeDir := t.TempDir()
+	callLog := writeDockerOnlyRuntime(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+	env = append(env, "FAKE_INFO_EXIT=1")
+
+	cmd := exec.Command(binaryPath, "open", "--dind")
+	cmd.Env = env
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected the docker-info-fails dind preflight failure to exit 1, got %T %v\n%s", err, err, output)
+	}
+	out := string(output)
+	if !strings.Contains(out, "checking sysbox-runc registration") {
+		t.Errorf("expected the daemon-down wrapping message to mention checking sysbox-runc registration, got:\n%s", out)
+	}
+	if !strings.Contains(out, "info") {
+		t.Errorf("expected the daemon-down wrapping message to mention the failing `info` call, got:\n%s", out)
+	}
+	if strings.Contains(out, "sysbox-ce") {
+		t.Errorf("expected NOT to hit the already-covered unregistered-sysbox install-pointer message (mentions sysbox-ce), got:\n%s", out)
 	}
 	if lines := callLogLines(t, callLog); anyLineContains(lines, "run --name ") {
 		t.Errorf("expected no container to be created when dind preflight fails, got calls:\n%s", strings.Join(lines, "\n"))
