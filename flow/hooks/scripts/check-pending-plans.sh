@@ -3,6 +3,20 @@
 # implementation plans under .plans/ so a fresh session can offer to resume
 # one via /cenci:implement (#776).
 #
+# Scope: TICKETLESS plans only (`.plans/<slug>.md`, no numeric filename
+# prefix). Ticket-mode plans (`.plans/<id>-<slug>.md`) are found by
+# `cenci pipeline plan-check <id>` from the ticket ID alone, so listing them
+# here duplicates a lookup the pipeline already performs — and, before Phase
+# 9's archive step landed (#783), a backlog of consumed ticket-mode plans made
+# this hook's output almost entirely stale. A ticketless run skips Plan
+# Verification entirely (skills/implement/SKILL.md), so its filename is the
+# only handle that can resume it: that residual gap is why this hook exists.
+#
+# Mood: the payload reports availability, it never instructs the agent to open
+# a session by interrogating the user about plans. The earlier multi-plan
+# wording ("ask which plan to resume using the AskUserQuestion tool") was
+# unconditioned on the user's intent and so fired in unrelated sessions.
+#
 # Hardening (#784): plan filenames are untrusted data read from a directory
 # that can contain arbitrary bytes chosen by whoever wrote the file. This
 # script therefore:
@@ -69,6 +83,33 @@ done < "$LIST"
 if [[ "${#ALL_NAMES[@]}" -eq 0 ]]; then
   exit 0
 fi
+
+# Scope pass: keep only ticketless names. A ticket-mode name is a run of one or
+# more leading digits followed by "-" (the `<id>-<slug>.md` identity contract
+# shared with dispatch.ReadPlans and adoptPlanFileStage). Strip the leading
+# digit run with `%%[!0-9]*` and test the byte that follows it: this is plain
+# parameter expansion, so it is byte-safe on names the passes below will later
+# exclude, and it never mistakes a digit *inside* a slug (fix-http2-timeout.md)
+# for a ticket prefix. Dropped names are silently out of scope — unlike the
+# unsafe-name passes below, they are not an omission the user must repair, so
+# they are deliberately not counted into UNSAFE_COUNT.
+TICKETLESS=()
+for name in "${ALL_NAMES[@]}"; do
+  digits="${name%%[!0-9]*}"
+  if [[ -n "$digits" && "${name:${#digits}:1}" == "-" ]]; then
+    continue
+  fi
+  TICKETLESS+=("$name")
+done
+
+# Nothing ticketless: stay completely silent. This is the common case once
+# Phase 9 archiving is keeping up, and it must emit no payload at all — not
+# even the framing line, which exists only to frame names that follow it.
+if [[ "${#TICKETLESS[@]}" -eq 0 ]]; then
+  exit 0
+fi
+
+ALL_NAMES=("${TICKETLESS[@]}")
 
 # Filter control-character names out before any message is built. Use `case`
 # glob classes, not `[[ =~ ]]` (a shell keyword, not a command — a leading
@@ -146,8 +187,8 @@ if [[ "$SAFE_COUNT" -eq 0 ]]; then
 elif [[ "$SAFE_COUNT" -eq 1 ]]; then
   NAME="${SAFE[0]}"
   CTX="${FRAMING}
-Pending implementation plan found: ${NAME}
-If the user invokes /cenci:implement with an explicit ticket number or plan file, honor that argument and do not ask about unrelated pending plans. Otherwise, offer to resume by invoking: /cenci:implement ${PLANS_DIR}/${NAME}"
+Pending ticketless implementation plan: ${NAME}
+This is background availability information, not a task. Do not raise it unless the user asks to resume or implement it, or their request clearly refers to this work; a session about anything else should ignore it. Ticket-mode plans are omitted here — /cenci:implement <ticket-id> finds those on its own. If the user does want to resume this one, it takes an explicit path: /cenci:implement ${PLANS_DIR}/${NAME}"
 else
   # Build the joined list with an index loop, never a bare "${SAFE[@]}"
   # expansion — on bash 3.2 (macOS) under set -u, expanding an empty array
@@ -170,8 +211,8 @@ else
     LIST_NAMES="${LIST_NAMES}, ...and ${MORE} more"
   fi
   CTX="${FRAMING}
-Multiple pending plans found: ${LIST_NAMES}
-If the user invokes /cenci:implement with an explicit ticket number or plan file, honor that argument and ignore every unrelated pending plan; ticket mode may only auto-detect .plans/<ticket-number>-*.md. Do not ask the user to choose among unrelated plans. If no explicit implement target was provided, ask which plan to resume using the AskUserQuestion tool, then invoke: /cenci:implement .plans/<filename>"
+Pending ticketless implementation plans: ${LIST_NAMES}
+This is background availability information, not a task. Do not raise these unless the user asks to resume or implement one, or their request clearly refers to that work; a session about anything else should ignore them. Ticket-mode plans are omitted here — /cenci:implement <ticket-id> finds those on its own. If the user does want to resume one, it takes an explicit path: /cenci:implement ${PLANS_DIR}/<filename>"
 fi
 
 if [[ "$UNSAFE_COUNT" -gt 0 ]]; then
