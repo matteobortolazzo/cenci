@@ -117,6 +117,43 @@ STUB
   CENCI_BIN="$TMP/stub" "$PLUGIN"
 }
 
+# --- Case 0: runs under macOS system bash (SwiftBar's real interpreter) ----
+#
+# SwiftBar runs plugins with a minimal PATH, so `#!/usr/bin/env bash` resolves to
+# /bin/bash — bash 3.2.57 on macOS, never a Homebrew bash 5. Every other case
+# below invokes the plugin through the dev shell's PATH, so none of them exercise
+# that interpreter. bash 3.2 applies shell quote rules while scanning a `$( ... )`
+# body without exempting a quoted heredoc inside it: with the JXA heredoc inline
+# in a command substitution, one apostrophe in its source (a possessive in a
+# comment) opened a single-quoted string that swallowed the rest of the file, and
+# the plugin died at parse time with "unexpected EOF while looking for matching"
+# on the last line — SwiftBar showed an error and no menu item ever rendered.
+# Assert the real interpreter both parses AND runs the plugin end to end.
+if [ -x /bin/bash ]; then
+  if /bin/bash -n "$PLUGIN" 2>"$TMP/system-bash.err"; then
+    echo "ok   - plugin parses under macOS system bash (/bin/bash)"
+    pass=$((pass + 1))
+  else
+    echo "FAIL - plugin parses under macOS system bash (/bin/bash)"
+    sed 's/^/           /' "$TMP/system-bash.err"
+    fail=$((fail + 1))
+  fi
+
+  cat > "$TMP/system-bash.json" <<'JSON'
+{"text":"▶ 1","tooltip":"work:1 - build (running)","class":"running","alt":"active"}
+JSON
+  cat > "$TMP/system-bash-stub" <<STUB
+#!/usr/bin/env bash
+cat "$TMP/system-bash.json"
+STUB
+  chmod +x "$TMP/system-bash-stub"
+  out="$(CENCI_BIN="$TMP/system-bash-stub" /bin/bash "$PLUGIN" 2>/dev/null)"
+  check "plugin renders rows when run by macOS system bash (/bin/bash)" \
+    "$out" "work:1 - build | sfimage=brain.head.profile.fill sfcolor=blue"
+else
+  echo "skip - /bin/bash not present (system-bash compatibility case)"
+fi
+
 # --- Case 1: need-input present -------------------------------------------
 cat > "$TMP/need-input.json" <<'JSON'
 {"text":"▶ 1  ! 1","tooltip":"work:1 - build (running)\nwork:2 - deploy (need-input)","class":"need-input","alt":"active"}

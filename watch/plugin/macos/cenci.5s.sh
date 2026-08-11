@@ -83,7 +83,19 @@ JSON="$("$BIN" widget-json 2>/dev/null || true)"
 # jq/python/brew). The JSON is passed via env var to dodge quoting issues and the
 # multi-arg-shebang pitfall (macOS collapses `#!/usr/bin/osascript -l JavaScript`
 # args), so osascript is invoked from bash via a heredoc rather than a shebang.
-OUTPUT="$(CENCI_JSON="$JSON" /usr/bin/osascript -l JavaScript <<'JXA'
+#
+# The heredoc MUST stay at the top level of a function body — never inline inside
+# a `$( ... )` command substitution. SwiftBar's minimal PATH makes the
+# `#!/usr/bin/env bash` shebang resolve to /bin/bash, which on macOS is bash
+# 3.2.57, and bash 3.2 applies shell quote rules while scanning a
+# command-substitution body without exempting a quoted heredoc inside it. One
+# apostrophe in the JXA source (a possessive in a comment is enough) then opens a
+# single-quoted string that swallows the rest of the file, and the plugin dies at
+# parse time — "unexpected EOF while looking for matching `"'" on the last line —
+# before producing any output. Calling the function from a small `$( ... )` keeps
+# the JXA body out of that scanner. test.sh pins it with a /bin/bash -n check.
+render_output() {
+  CENCI_JSON="$JSON" /usr/bin/osascript -l JavaScript <<'JXA'
 function run() {
   ObjC.import('Foundation')
   var raw = $.NSProcessInfo.processInfo.environment.objectForKey('CENCI_JSON')
@@ -233,7 +245,9 @@ function run() {
   return lines.join('\n')
 }
 JXA
-)" || true
+}
+
+OUTPUT="$(render_output || true)"
 
 [ -z "$OUTPUT" ] && exit 0
 printf '%s\n' "$OUTPUT"
