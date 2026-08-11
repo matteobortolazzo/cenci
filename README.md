@@ -204,6 +204,7 @@ chooses an agent per invocation, while `cenci dispatch` can route tickets by
 | Configure and maintain the container boundary | [Isolation guide](sandbox/README.md) and [security model](SECURITY.md) |
 | Drive cenci from a GitHub board | [Orchestration recipe](docs/orchestration.md) |
 | Let it plan, implement, and merge unattended | [The autonomous loop](docs/autonomous-loop.md) |
+| Use isolation and attention without the workflow layer | [Selective adoption](docs/selective-adoption.md) |
 | Check what is available or in development | [Roadmap](docs/roadmap.md) |
 | Contribute | [Contributing guide](CONTRIBUTING.md) |
 | Upgrade from agent-stack | [Migration guide](docs/migrating-to-cenci.md) |
