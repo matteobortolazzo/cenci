@@ -42,6 +42,7 @@ bash sandbox/tests/opencode-config.test.sh       # lib/opencode-config.sh openco
 bash sandbox/tests/opencode-plugins.test.sh      # OpenCode cenci-src provisioning + TTL-gated refresh
 bash sandbox/tests/setup-skill-content.test.sh   # sandbox/skills/setup/SKILL.md content accuracy
 bash sandbox/tests/startup-marker.test.sh        # entrypoint.sh timestamped startup-failure marker prefix
+bash sandbox/tests/remap-chown.test.sh           # lib/remap.sh home-volume re-own, skipping nested bind mounts
 ```
 
 CI's `sandbox-test` job discovers and runs every `sandbox/tests/*.test.sh`
