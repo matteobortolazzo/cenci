@@ -115,6 +115,25 @@ write_mountinfo() {
     done
 }
 
+# run_remap <bindir> <mountinfo> <root>
+#   Calls chown_home_tree with the recording fake chown and the mountinfo
+#   fixture scoped to this one invocation. The PATH/CENCI_MOUNTINFO edits are
+#   deliberately confined to the subshell — no case may leak its fake chown or
+#   its fixture into the next — so shellcheck's SC2030/SC2031 flag exactly the
+#   property this harness wants, and are silenced here rather than worked
+#   around. Every case routes through this one helper so the suppression lives
+#   at a single site.
+# shellcheck disable=SC2030,SC2031
+run_remap() {
+    local bindir="$1" mountinfo="$2" root="$3"
+    (
+        PATH="${bindir}:${PATH}"
+        CENCI_MOUNTINFO="${mountinfo}"
+        export PATH CENCI_MOUNTINFO
+        chown_home_tree 502 20 "${root}"
+    )
+}
+
 logged() { grep -Fxq "$1" "${CHOWN_LOG}"; }
 
 assert_chowned() {
@@ -136,12 +155,7 @@ make_fake_chown "${CASE1}/bin"
 write_mountinfo "${CASE1}/mountinfo" \
     "/" "/proc" "${HOME1}" "${HOME1}/.gitconfig" "${HOME1}/mnt" "${HOME1}-other/decoy"
 
-(
-    PATH="${CASE1}/bin:${PATH}"
-    CENCI_MOUNTINFO="${CASE1}/mountinfo"
-    export PATH CENCI_MOUNTINFO
-    chown_home_tree 502 20 "${HOME1}"
-)
+run_remap "${CASE1}/bin" "${CASE1}/mountinfo" "${HOME1}"
 CASE1_RC=$?
 
 if [[ ${CASE1_RC} -eq 0 ]]; then
@@ -175,12 +189,7 @@ CHOWN_LOG="${CASE2}/chown.log"; : >"${CHOWN_LOG}"
 make_fake_chown "${CASE2}/bin"
 write_mountinfo "${CASE2}/mountinfo" "${HOME2}-other/decoy"
 
-(
-    PATH="${CASE2}/bin:${PATH}"
-    CENCI_MOUNTINFO="${CASE2}/mountinfo"
-    export PATH CENCI_MOUNTINFO
-    chown_home_tree 502 20 "${HOME2}"
-)
+run_remap "${CASE2}/bin" "${CASE2}/mountinfo" "${HOME2}"
 
 # Nothing under the home root is a mount here, so the whole tree is chowned —
 # a prefix-only match must not silently prune a real home entry.
@@ -199,12 +208,7 @@ CHOWN_LOG="${CASE3}/chown.log"; : >"${CHOWN_LOG}"
 make_fake_chown "${CASE3}/bin"
 write_mountinfo "${CASE3}/mountinfo" "${HOME3}/my\\040mount"
 
-(
-    PATH="${CASE3}/bin:${PATH}"
-    CENCI_MOUNTINFO="${CASE3}/mountinfo"
-    export PATH CENCI_MOUNTINFO
-    chown_home_tree 502 20 "${HOME3}"
-)
+run_remap "${CASE3}/bin" "${CASE3}/mountinfo" "${HOME3}"
 
 assert_not_chowned "${HOME3}/my mount"
 assert_not_chowned "${HOME3}/my mount/inside"
@@ -219,12 +223,7 @@ make_home_tree "${HOME4}"
 CHOWN_LOG="${CASE4}/chown.log"; : >"${CHOWN_LOG}"
 make_fake_chown "${CASE4}/bin"
 
-(
-    PATH="${CASE4}/bin:${PATH}"
-    CENCI_MOUNTINFO="${CASE4}/does-not-exist"
-    export PATH CENCI_MOUNTINFO
-    chown_home_tree 502 20 "${HOME4}"
-)
+run_remap "${CASE4}/bin" "${CASE4}/does-not-exist" "${HOME4}"
 
 assert_chowned "${HOME4}"
 assert_chowned "${HOME4}/.gitconfig"
@@ -240,12 +239,7 @@ CHOWN_LOG="${CASE5}/chown.log"; : >"${CHOWN_LOG}"
 make_fake_chown "${CASE5}/bin" "${HOME5}/.claude/settings.json"
 write_mountinfo "${CASE5}/mountinfo" "${HOME5}" "${HOME5}/.gitconfig"
 
-(
-    PATH="${CASE5}/bin:${PATH}"
-    CENCI_MOUNTINFO="${CASE5}/mountinfo"
-    export PATH CENCI_MOUNTINFO
-    chown_home_tree 502 20 "${HOME5}"
-) 2>/dev/null
+run_remap "${CASE5}/bin" "${CASE5}/mountinfo" "${HOME5}" 2>/dev/null
 CASE5_RC=$?
 
 if [[ ${CASE5_RC} -ne 0 ]]; then
@@ -262,12 +256,7 @@ CHOWN_LOG="${CASE6}/chown.log"; : >"${CHOWN_LOG}"
 make_fake_chown "${CASE6}/bin" "${HOME6}"
 write_mountinfo "${CASE6}/mountinfo" "${HOME6}"
 
-(
-    PATH="${CASE6}/bin:${PATH}"
-    CENCI_MOUNTINFO="${CASE6}/mountinfo"
-    export PATH CENCI_MOUNTINFO
-    chown_home_tree 502 20 "${HOME6}"
-) 2>/dev/null
+run_remap "${CASE6}/bin" "${CASE6}/mountinfo" "${HOME6}" 2>/dev/null
 CASE6_RC=$?
 
 if [[ ${CASE6_RC} -ne 0 ]]; then
@@ -280,6 +269,7 @@ fi
 
 echo "case: entrypoint.sh sources lib/remap.sh and remaps the home volume through chown_home_tree"
 if grep -q 'lib/remap\.sh' "${ENTRYPOINT}"; then pass; else fail "entrypoint.sh does not source lib/remap.sh"; fi
+# shellcheck disable=SC2016 # literal call site we grep for in entrypoint.sh, not expanded here
 if grep -q 'chown_home_tree "\${HOST_UID}" "\${HOST_GID}" /home/dev' "${ENTRYPOINT}"; then
     pass
 else
