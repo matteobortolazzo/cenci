@@ -15,7 +15,7 @@ intended order; an umbrella issue tracks its children and is not a second unit o
 | 2.0 | [Safety and correctness](https://github.com/matteobortolazzo/cenci/milestone/5) | Close host-boundary, execution-routing, and core observability defects before expanding adoption |
 | 2.1 | [Selective setup](https://github.com/matteobortolazzo/cenci/milestone/2) | Select only the needed layers and keep updates faithful to that installed set |
 | 2.2 | [Corporate-ready sandbox](https://github.com/matteobortolazzo/cenci/milestone/6) | Add controlled proxy/CA, ADO credential, private tooling, and multi-repository support |
-| 2.3 | [One-command workspace](https://github.com/matteobortolazzo/cenci/milestone/7) | Ship the opinionated tmux experience and `cenci up` path |
+| 2.3 | [One-command workspace](https://github.com/matteobortolazzo/cenci/milestone/7) | Ship the opinionated tmux experience and the single-command workspace entry point ([#646](https://github.com/matteobortolazzo/cenci/issues/646)) |
 | 2.4 | [Product clarity](https://github.com/matteobortolazzo/cenci/milestone/8) | Keep onboarding, visuals, prerequisites, and client capability claims coherent |
 | 2.5 | [Refactor round](https://github.com/matteobortolazzo/cenci/milestone/4) | Reduce prompt, installer, and Go maintenance cost before autonomy expands |
 | 3.0 | [Trusted autonomy](https://github.com/matteobortolazzo/cenci/milestone/9) | Make dispatch, CI gates, babysitting, and automerge authorization reliably fail closed |
