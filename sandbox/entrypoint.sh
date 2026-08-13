@@ -105,6 +105,17 @@ if [[ "$(id -u)" -eq 0 ]]; then
         fi
     }
 
+    # chown_home_tree (#1032) — the home volume's re-own below must skip the
+    # mount points nested under /home/dev, or the launcher's read-only
+    # .gitconfig bind mount makes every remap fail with EROFS. Sourced here,
+    # unconditionally, rather than inside the mismatch branch: the remap is
+    # the only caller today, but the root phase is the only place a lib can be
+    # sourced before the drop-to-dev exec.
+    REMAP_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
+    # shellcheck source-path=SCRIPTDIR
+    # shellcheck source=lib/remap.sh
+    source "${REMAP_LIB_DIR}/remap.sh"
+
     CUR_UID="$(id -u dev)"
     CUR_GID="$(id -g dev)"
     if [[ -n "${HOST_UID:-}" && "${HOST_UID}" != "0" && -n "${HOST_GID:-}" && "${HOST_GID}" != "0" ]] \
@@ -120,10 +131,10 @@ if [[ "$(id -u)" -eq 0 ]]; then
         if [[ "${HOST_UID}" != "${CUR_UID}" ]]; then
             usermod -u "${HOST_UID}" dev || { echo "remap: usermod failed — HOST_UID/HOST_GID may collide with a system account already baked into this image; check what account/group already owns that ID inside the container" >&2; flush_boot_log; exit 1; }
         fi
-        chown -R "${HOST_UID}:${HOST_GID}" /home/dev || { echo "remap: chown /home/dev failed — the home volume may predate this cenci-sandbox version; try 'cenci sandbox prune --volumes'" >&2; flush_boot_log; exit 1; }
+        chown_home_tree "${HOST_UID}" "${HOST_GID}" /home/dev || { echo "remap: chown /home/dev failed — the home volume could not be re-owned to ${HOST_UID}:${HOST_GID}; see the chown error above for the path that refused (mount points nested under /home/dev are already skipped)" >&2; flush_boot_log; exit 1; }
         if [[ "${WORKSPACE_SCOPE:-}" == "repo" ]]; then
             find /workspace -mindepth 1 -exec chown -h "${HOST_UID}:${HOST_GID}" {} + \
-                || echo "warning: failed to chown /workspace to ${HOST_UID}:${HOST_GID} — files in this mount may be misowned — the home volume may predate this cenci-sandbox version; try 'cenci sandbox prune --volumes'" >&2
+                || echo "warning: failed to chown /workspace to ${HOST_UID}:${HOST_GID} — files written into this mount may be owned by the wrong user on the host; see the chown error above for the path that refused" >&2
         fi
     elif [[ "${HOST_UID:-}" == "0" || "${HOST_GID:-}" == "0" ]]; then
         echo "warning: HOST_UID/HOST_GID of 0 requested — ignoring remap to avoid running the workload as root" >&2
