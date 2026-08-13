@@ -13,6 +13,11 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHECK_SH="${SCRIPT_DIR}/check-sensitive-files.sh"
+# Interpreter used to invoke the hook. Defaults to sh (the shebang's
+# interpreter); the summary block re-execs this suite once per additional
+# available shell so bash-only bugs cannot hide behind whichever shell
+# /bin/sh happens to be on this host.
+HOOK_SHELL="${HOOK_SHELL:-sh}"
 
 FAILURES=0
 PASSES=0
@@ -30,7 +35,7 @@ pass() {
 # Sets CHECK_EXIT and CHECK_STDERR.
 run_check() {
     local json="$1"
-    CHECK_STDERR="$(echo "${json}" | sh "${CHECK_SH}" 2>&1 >/dev/null)"
+    CHECK_STDERR="$(echo "${json}" | "${HOOK_SHELL}" "${CHECK_SH}" 2>&1 >/dev/null)"
     CHECK_EXIT=$?
 }
 
@@ -39,7 +44,7 @@ run_check() {
 # target must be resolved against the hook process's cwd.
 run_check_in_dir() {
     local cwd="$1" json="$2"
-    CHECK_STDERR="$(cd "${cwd}" && echo "${json}" | sh "${CHECK_SH}" 2>&1 >/dev/null)"
+    CHECK_STDERR="$(cd "${cwd}" && echo "${json}" | "${HOOK_SHELL}" "${CHECK_SH}" 2>&1 >/dev/null)"
     CHECK_EXIT=$?
 }
 
@@ -48,7 +53,7 @@ run_check_in_dir() {
 # PATH missing specific external tools (fail-closed tests).
 run_check_with_path() {
     local path_override="$1" json="$2"
-    CHECK_STDERR="$(echo "${json}" | PATH="${path_override}" sh "${CHECK_SH}" 2>&1 >/dev/null)"
+    CHECK_STDERR="$(echo "${json}" | PATH="${path_override}" "${HOOK_SHELL}" "${CHECK_SH}" 2>&1 >/dev/null)"
     CHECK_EXIT=$?
 }
 
@@ -734,5 +739,21 @@ done <<< "${CS_PATTERNS}"
 
 # ── Summary ──────────────────────────────────────────────────────────
 echo
-echo "passed: ${PASSES}, failed: ${FAILURES}"
+echo "passed: ${PASSES}, failed: ${FAILURES} (shell: ${HOOK_SHELL})"
+
+# The hook's #!/bin/sh shebang resolves to bash on macOS/Arch/Fedora and to
+# dash on Debian/Ubuntu, so a single pass only ever exercises whichever shell
+# this host's /bin/sh happens to be. Re-run the whole case list once per other
+# available shell. Alternates are resolved to absolute paths because
+# run_check_with_path replaces PATH with a curated bin dir that would not
+# contain a bare `bash`/`dash`.
+if [[ -z "${HOOK_SHELL_PINNED:-}" ]]; then
+    for candidate in bash dash; do
+        alt="$(command -v "${candidate}")" || continue
+        [[ "${alt}" == "$(command -v sh)" ]] && continue
+        echo "── re-running under ${alt} ──"
+        HOOK_SHELL_PINNED=1 HOOK_SHELL="${alt}" bash "$0" || exit 1
+    done
+fi
+
 [[ "${FAILURES}" -eq 0 ]]
