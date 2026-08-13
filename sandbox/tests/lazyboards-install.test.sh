@@ -547,8 +547,7 @@ assert_contains "${CASE_OUTPUT}" "update to gh pr checkout {pr_number}"
 # lazyboards' `keymaps:` namespace, instead of claiming bare `- name:` entries
 # "inherit" global actions (they don't — a local `columns:` list replaces the
 # global list entirely, per lazyboards' documented behavior) or emitting the
-# deprecated `actions:`/`columns[].actions:` blocks (which make lazyboards
-# print a deprecation notice on every launch). Scoped to the 5f template
+# unsupported `actions:`/`columns[].actions:` blocks. Scoped to the 5f template
 # region only, since "Designed" and "Implemented" legitimately appear
 # elsewhere in SKILL.md's label/lifecycle tables.
 SKILL_MD="${ROOT}/flow/skills/configure/SKILL.md"
@@ -584,13 +583,13 @@ assert_contains "${ROOT}/flow/skills/configure/SKILL.md" \
     "-c {pr_worktree}/'apps/web-client'"
 assert_not_contains "${ROOT}/flow/skills/configure/SKILL.md" '"cd {pr_worktree}'
 
-echo "case: 5f template binds everything under \`keymaps:\`, never the deprecated actions blocks"
+echo "case: 5f template binds everything under \`keymaps:\`, never an actions block"
 grep -q '^keymaps:$' "${DEDENTED_5F}"
 # The inverse of the pre-migration assertion: neither a top-level `actions:`
 # map nor a per-column `columns[].actions:` block may appear anywhere in the
-# generated template — lazyboards prints a deprecation notice for either.
+# generated template.
 if grep -qE '^[[:space:]]*actions:' "${DEDENTED_5F}"; then
-    echo "FAIL: 5f template still emits a deprecated \`actions:\` block" >&2
+    echo "FAIL: 5f template still emits an \`actions:\` block" >&2
     cat "${DEDENTED_5F}" >&2
     exit 1
 fi
@@ -663,12 +662,12 @@ extract_keymap_column "In Review" >"${IN_REVIEW_COL}"
 assert_contains "${IN_REVIEW_COL}" "name: Open worktree"
 assert_contains "${IN_REVIEW_COL}" 'command: "tmux new-window -d -n pr-{pr_number} -c {pr_worktree}"'
 grep -q '^      W:$' "${IN_REVIEW_COL}"
-# Canonical, space-separated, quoted sequence keys — never the legacy
-# concatenated `Sw`/`Tw` spelling, which `keymaps:` reads as a single key.
+# Canonical, space-separated, quoted sequence keys — never the concatenated
+# `Sw`/`Tw` spelling, which `keymaps:` reads as a single two-character key.
 grep -q '^      "S w":$' "${IN_REVIEW_COL}"
 grep -q '^      "T w":$' "${IN_REVIEW_COL}"
 if grep -qE '^      (S|T)[a-z]+:' "${IN_REVIEW_COL}"; then
-    echo "FAIL: In Review uses legacy concatenated sequence keys" >&2
+    echo "FAIL: In Review uses concatenated sequence keys" >&2
     cat "${IN_REVIEW_COL}" >&2
     exit 1
 fi
@@ -685,9 +684,9 @@ NORMAL_TABLE="${WORK}/skill-5f-keymaps-normal.md"
 DETAIL_TABLE="${WORK}/skill-5f-keymaps-detail.md"
 extract_keymap_table "normal" >"${NORMAL_TABLE}"
 extract_keymap_table "detail" >"${DETAIL_TABLE}"
-# Both tables are required: the legacy top-level `actions:` block dispatched
-# from the card list AND the detail panel, so `keymaps.normal` alone would
-# silently kill these while the detail panel is focused.
+# Both tables are required: board-level launchers must fire from the card list
+# AND the detail panel, so `keymaps.normal` alone would silently kill these
+# while the detail panel is focused.
 # Long-form `cenci open --agent <agent>`, never a one-token shortcut: the
 # shortcut table has exactly one home in docs (watch/README.md's CLI
 # reference) and must not be copied into a generated template — the same rule
@@ -705,15 +704,8 @@ assert_contains "${EXTRACTED_5F}" "lazyboards trust"
 assert_contains "${EXTRACTED_5F}" "keyed to the file's exact"
 assert_contains "${EXTRACTED_5F}" "regeneration"
 
-echo "case: 5f probes the installed lazyboards version against the v0.73.0 keymaps floor without blocking"
-assert_contains "${EXTRACTED_5F}" "lazyboards --version"
-assert_contains "${EXTRACTED_5F}" "v0.73.0"
-assert_contains "${EXTRACTED_5F}" "cenci update --lazyboards"
-assert_contains "${EXTRACTED_5F}" "Never block on"
-
-echo "case: the suggest-or-skip delta reads both the keymaps and the legacy config shapes"
-assert_contains "${EXTRACTED_5F}" "Read both config shapes when matching"
-assert_contains "${EXTRACTED_5F}" "same keys, no deprecation notice"
+echo "case: the suggest-or-skip delta reads the keymaps tables and rewrites in keymaps form"
+assert_contains "${EXTRACTED_5F}" "\`keymaps.normal\`/\`keymaps.detail\`/\`keymaps.columns.<name>\`"
 assert_contains "${EXTRACTED_5F}" "Both rewrite paths always emit \`keymaps:\` form"
 
 echo "case: the .lazyboards.yml file-exists conflict check fires unconditionally regardless of prior lazyboards.enabled state"
@@ -736,8 +728,8 @@ assert_contains "${EXTRACTED_5F}" "in this session"
 
 echo "case: key assignment uses canonical space-separated sequences and honors lazyboards' reserved keys"
 assert_contains "${Q10_REGION}" 'space-separated form and quoted'
-assert_contains "${Q10_REGION}" '`"S b"`'
-assert_contains "${Q10_REGION}" '`"T b"`'
+assert_contains "${Q10_REGION}" "\`\"S b\"\`"
+assert_contains "${Q10_REGION}" "\`\"T b\"\`"
 # The prefix rule is a load-time config error over the fully resolved
 # namespace (built-in defaults included), not a dispatch-order quirk.
 assert_contains "${Q10_REGION}" "load-time config error"

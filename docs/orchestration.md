@@ -256,19 +256,14 @@ which skill is running.
 `columns:`, when you answer its board-config question (step 5f — see
 `flow/skills/configure/SKILL.md`). The file is self-contained and needs no other
 config: lazyboards merges scalar fields and the `keymaps:` tables across a global
-and a local config file, with local keys winning, so a legacy machine-global
-`~/.config/lazyboards/config.yml` left over from an older cenci install is
-harmless — nothing in it can override what's generated here.
+and a local config file, with local keys winning, so a stray machine-global
+`~/.config/lazyboards/config.yml` is harmless — nothing in it can override what's
+generated here.
 
-**Everything is bound in the `keymaps:` namespace** (lazyboards **v0.73.0**+ — an
-older binary ignores the block wholesale and the board comes up with no actions;
-`cenci update --lazyboards` refreshes the binary, and configure probes the installed
-version against this floor and warns without blocking). The older top-level `actions:`
-and per-column `columns[].actions:` blocks still load, but they are deprecated and
-make lazyboards print a deprecation notice on every launch, so cenci never
-generates them. `columns:` remains the board layout — a bare name list, with each
-column's bindings living under `keymaps.columns.<name>` (matched
-case-insensitively, and applied to the card list and the detail panel alike).
+**Everything is bound in the `keymaps:` namespace.** `columns:` is the board
+layout — a bare name list, with each column's bindings living under
+`keymaps.columns.<name>` (matched case-insensitively, and applied to the card list
+and the detail panel alike).
 
 The board-level excerpt below — the two agent-launch actions (`C` Claude, `X`
 Codex) and the auto-close `cleanup` — is emitted in every generated
@@ -279,7 +274,7 @@ top-level scalar, outside `keymaps:`, because it is not a key binding:
 ```yaml
 keymaps:
   # Board-level agent launchers. Emitted in BOTH tables so they fire whether the
-  # card list or the detail panel is focused (what the legacy `actions:` block did).
+  # card list or the detail panel is focused.
   normal:
     C: { name: Claude, type: shell, command: "tmux new-window cenci open --agent claude" }
     X: { name: Codex, type: shell, command: "tmux new-window cenci open --agent codex" }
@@ -292,8 +287,9 @@ keymaps:
 cleanup: "cenci close {number}"
 ```
 
-**Per-column bindings** dispatch a workflow onto the selected card. The key is
-a single uppercase letter (`R`, `Z`, `I`); `cenci run <workflow> {number}`
+**Per-column bindings** dispatch a workflow onto the selected card. The generated
+keys are single letters (`R`, `Z`, `I`) — any key of any case can be bound, there
+is no reserved namespace; `cenci run <workflow> {number}`
 builds the `<number>-<skill>` window and launches the agent.
 `cenci run` chooses `refine`/`design`/`implement` from its built-in Claude templates
 with zero extra config. The design workflow — design dispatches on the host, since the
@@ -364,7 +360,7 @@ letters: a single-project repo gets plain `S` (serve) and `T` (test); a monorepo
 `"S f"`/`"T f"` for a frontend project, or the project slug's first letter when
 neither fits — skipping the board-level keys `C`/`X` claimed above and never reusing
 `W`. Sequences are written space-separated (`"S b"`); the concatenated `Sb` spelling
-belongs to the deprecated `actions:` blocks and is not a sequence inside `keymaps:`.
+is a single two-character key, not a sequence.
 A key that is a strict prefix of another key in the same effective table — built-in
 defaults included — is a load-time config error, not a dispatch quirk, so the whole
 file fails to load. `Planned` also carries local
