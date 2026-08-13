@@ -542,23 +542,25 @@ assert_contains "${CASE_OUTPUT}" "unmanaged lazyboards found at"
 assert_contains "${CASE_OUTPUT}" "Checkout PR action uses the vulnerable git fetch/git switch pattern"
 assert_contains "${CASE_OUTPUT}" "update to gh pr checkout {pr_number}"
 
-# --- Regressions for #406: the 5f per-repo `.lazyboards.yml` template must
-# give New/Refined/Planned explicit LOCAL actions instead of claiming bare
-# `- name:` entries "inherit" global actions (they don't — a local `columns:`
-# list replaces the global list entirely, per lazyboards' documented
-# behavior). Scoped to the 5f template region only, since "Designed" and
-# "Implemented" legitimately appear elsewhere in SKILL.md's label/lifecycle
-# tables.
+# --- Regressions for #406 and the keymaps migration: the 5f per-repo
+# `.lazyboards.yml` template must declare every binding explicitly, in
+# lazyboards' `keymaps:` namespace, instead of claiming bare `- name:` entries
+# "inherit" global actions (they don't — a local `columns:` list replaces the
+# global list entirely, per lazyboards' documented behavior) or emitting the
+# deprecated `actions:`/`columns[].actions:` blocks (which make lazyboards
+# print a deprecation notice on every launch). Scoped to the 5f template
+# region only, since "Designed" and "Implemented" legitimately appear
+# elsewhere in SKILL.md's label/lifecycle tables.
 SKILL_MD="${ROOT}/flow/skills/configure/SKILL.md"
 EXTRACTED_5F="${WORK}/skill-5f-template.md"
 awk '/^5f\. \*\*Generate `\.lazyboards\.yml`\*\*/{f=1} f && /^6\. \*\*Write `\.cenci\/config\.json`\*\*/{exit} f{print}' \
     "${SKILL_MD}" >"${EXTRACTED_5F}"
 
 # DEDENTED_5F holds the fenced ```yaml block from the 5f region, dedented from
-# its 3-space list indent so top-level placement (e.g. the board-level
-# `actions:`/`cleanup:` keys) is provable rather than inferred from a
-# substring. Exits at the first closing fence, so it captures the main
-# template and not the zero-runnable-projects snippet further down.
+# its 3-space list indent so top-level placement (e.g. the `keymaps:` and
+# `cleanup:` keys) is provable rather than inferred from a substring. Exits at
+# the first closing fence, so it captures the main template and not the
+# zero-runnable-projects snippet further down.
 DEDENTED_5F="${WORK}/skill-5f-dedented.md"
 awk '/^   ```yaml$/{f=1;next} f && /^   ```$/{exit} f{sub(/^   /,""); print}' \
     "${EXTRACTED_5F}" >"${DEDENTED_5F}"
@@ -567,56 +569,110 @@ echo "case: docs/orchestration.md's board config block matches the C/X and clean
 ORCH_BLOCK="${WORK}/orchestration-board-config.yml"
 awk '/^## The board config/{s=1} s && /^```yaml$/{f=1; next} f && /^```$/{exit} f{print}' \
     "${ROOT}/docs/orchestration.md" >"${ORCH_BLOCK}"
-C_LINE="$(grep -F 'C: { name: Claude' "${DEDENTED_5F}")"
-X_LINE="$(grep -F 'X: { name: Codex' "${DEDENTED_5F}")"
+# head -1: C/X are emitted twice (keymaps.normal and keymaps.detail), so each
+# grep matches two byte-identical lines — one is enough for the parity check.
+C_LINE="$(grep -F 'C: { name: Claude' "${DEDENTED_5F}" | head -1)"
+X_LINE="$(grep -F 'X: { name: Codex' "${DEDENTED_5F}" | head -1)"
 CLEANUP_LINE="$(grep -F 'cleanup: "cenci close {number}"' "${DEDENTED_5F}")"
 assert_contains "${ORCH_BLOCK}" "${C_LINE}"
 assert_contains "${ORCH_BLOCK}" "${X_LINE}"
 assert_contains "${ORCH_BLOCK}" "${CLEANUP_LINE}"
+assert_contains "${ORCH_BLOCK}" "keymaps:"
 
 echo "case: generated board actions pass shell-escaped worktree paths via tmux -c"
 assert_contains "${ROOT}/flow/skills/configure/SKILL.md" \
     "-c {pr_worktree}/'apps/web-client'"
 assert_not_contains "${ROOT}/flow/skills/configure/SKILL.md" '"cd {pr_worktree}'
 
-# extract_column <name> — prints the lines of a single generated column's
-# block (from its `- name: <name>` line up to, but excluding, the next
-# `- name:` line), mirroring the fenced-block extraction already used above
-# for docs/orchestration.md's board config parity check.
-extract_column() {
-    local col="$1"
-    awk -v col="${col}" '
-        index($0, "- name: " col) > 0 { f=1; print; next }
-        f && index($0, "- name:") > 0 { exit }
+echo "case: 5f template binds everything under \`keymaps:\`, never the deprecated actions blocks"
+grep -q '^keymaps:$' "${DEDENTED_5F}"
+# The inverse of the pre-migration assertion: neither a top-level `actions:`
+# map nor a per-column `columns[].actions:` block may appear anywhere in the
+# generated template — lazyboards prints a deprecation notice for either.
+if grep -qE '^[[:space:]]*actions:' "${DEDENTED_5F}"; then
+    echo "FAIL: 5f template still emits a deprecated \`actions:\` block" >&2
+    cat "${DEDENTED_5F}" >&2
+    exit 1
+fi
+# `columns:` survives as the board layout — a bare name list.
+grep -q '^columns:$' "${DEDENTED_5F}"
+assert_contains "${DEDENTED_5F}" "  - name: In Review"
+
+# extract_keymap_table <mode> — prints one `keymaps.<mode>` table (a 2-space
+# key under `keymaps:`), stopping at the next sibling key. Blank lines inside
+# the table are skipped rather than terminating it.
+extract_keymap_table() {
+    local mode="$1"
+    awk -v mode="${mode}" '
+        $0 ~ "^  " mode ":[[:space:]]*$" { f=1; next }
+        f && /^[[:space:]]*$/ { next }
+        f && $0 !~ /^    / { exit }
         f { print }
-    ' "${EXTRACTED_5F}"
+    ' "${DEDENTED_5F}"
 }
 
-echo "case: 5f template gives the New column a local R (Refine) action"
+# extract_keymap_column <name> — prints one `keymaps.columns.<name>` overlay
+# table (a 4-space key under `keymaps.columns:`), stopping at the next sibling
+# column. The name may be quoted in the template ("In Review").
+extract_keymap_column() {
+    local col="$1"
+    awk -v col="${col}" '
+        $0 ~ "^    \"?" col "\"?:[[:space:]]*$" { f=1; next }
+        f && /^[[:space:]]*$/ { next }
+        f && $0 !~ /^      / { exit }
+        f { print }
+    ' "${DEDENTED_5F}"
+}
+
+echo "case: 5f template gives the New column an R (Refine) binding under keymaps.columns"
 NEW_COL="${WORK}/skill-5f-col-new.md"
-extract_column "New" >"${NEW_COL}"
+extract_keymap_column "New" >"${NEW_COL}"
 assert_contains "${NEW_COL}" "name: Refine"
 assert_contains "${NEW_COL}" 'command: "cenci run refine {number}"'
+grep -q '^      R:$' "${NEW_COL}"
 
-echo "case: 5f template gives the Refined column local I (Implement) and gated D (Design) actions"
+echo "case: 5f template gives the Refined column I (Implement) and pencil-gated Z (Design) bindings"
 REFINED_COL="${WORK}/skill-5f-col-refined.md"
-extract_column "Refined" >"${REFINED_COL}"
+extract_keymap_column "Refined" >"${REFINED_COL}"
 assert_contains "${REFINED_COL}" "name: Implement"
 assert_contains "${REFINED_COL}" 'command: "cenci run implement {number}"'
 assert_contains "${REFINED_COL}" "name: Design"
 assert_contains "${REFINED_COL}" 'command: "cenci run design {number} --no-sandbox"'
+grep -q '^      Z:$' "${REFINED_COL}"
 assert_contains "${EXTRACTED_5F}" "pencil.enabled"
+# Design must never be bound to `D` — that is lazyboards' built-in dispatch
+# panel (view.dispatch), and a user binding silently wins over the default.
+if grep -qE '^      D:' "${REFINED_COL}"; then
+    echo "FAIL: Design is bound to D, shadowing lazyboards' dispatch panel" >&2
+    cat "${REFINED_COL}" >&2
+    exit 1
+fi
 
-echo "case: 5f template gives the Planned column local I (Implement), E (Edit plan), and V (View plan) actions"
+echo "case: 5f template gives the Planned column I (Implement), E (Edit plan), and V (View plan) bindings"
 PLANNED_COL="${WORK}/skill-5f-col-planned.md"
-extract_column "Planned" >"${PLANNED_COL}"
+extract_keymap_column "Planned" >"${PLANNED_COL}"
 assert_contains "${PLANNED_COL}" "name: Implement"
 assert_contains "${PLANNED_COL}" 'command: "cenci run implement {number}"'
 assert_contains "${PLANNED_COL}" "name: Edit plan"
 assert_contains "${PLANNED_COL}" "name: View plan"
 assert_contains "${PLANNED_COL}" '.plans/{number}-*.md'
 
-echo "case: 5f template gives In Review no Checkout PR fallback when there are zero runnable projects"
+echo "case: 5f template always emits W (Open worktree) on In Review, with sequence keys space-separated"
+IN_REVIEW_COL="${WORK}/skill-5f-col-in-review.md"
+extract_keymap_column "In Review" >"${IN_REVIEW_COL}"
+assert_contains "${IN_REVIEW_COL}" "name: Open worktree"
+assert_contains "${IN_REVIEW_COL}" 'command: "tmux new-window -d -n pr-{pr_number} -c {pr_worktree}"'
+grep -q '^      W:$' "${IN_REVIEW_COL}"
+# Canonical, space-separated, quoted sequence keys — never the legacy
+# concatenated `Sw`/`Tw` spelling, which `keymaps:` reads as a single key.
+grep -q '^      "S w":$' "${IN_REVIEW_COL}"
+grep -q '^      "T w":$' "${IN_REVIEW_COL}"
+if grep -qE '^      (S|T)[a-z]+:' "${IN_REVIEW_COL}"; then
+    echo "FAIL: In Review uses legacy concatenated sequence keys" >&2
+    cat "${IN_REVIEW_COL}" >&2
+    exit 1
+fi
+# The zero-runnable-projects fallback keeps W and adds no Checkout PR action.
 assert_not_contains "${EXTRACTED_5F}" \
     'tmux new-window -d -n pr-{pr_number} "gh pr checkout {pr_number}"'
 
@@ -624,17 +680,41 @@ echo "case: 5f template never re-emits Designed or Implemented as generated colu
 assert_not_contains "${EXTRACTED_5F}" "- name: Designed"
 assert_not_contains "${EXTRACTED_5F}" "- name: Implemented"
 
-echo "case: 5f template emits the C/X launch actions at top level, outside \`columns:\`"
-grep -q '^actions:$' "${DEDENTED_5F}"
+echo "case: 5f template emits the C/X launch actions under BOTH keymaps.normal and keymaps.detail"
+NORMAL_TABLE="${WORK}/skill-5f-keymaps-normal.md"
+DETAIL_TABLE="${WORK}/skill-5f-keymaps-detail.md"
+extract_keymap_table "normal" >"${NORMAL_TABLE}"
+extract_keymap_table "detail" >"${DETAIL_TABLE}"
+# Both tables are required: the legacy top-level `actions:` block dispatched
+# from the card list AND the detail panel, so `keymaps.normal` alone would
+# silently kill these while the detail panel is focused.
 # Long-form `cenci open --agent <agent>`, never a one-token shortcut: the
 # shortcut table has exactly one home in docs (watch/README.md's CLI
 # reference) and must not be copied into a generated template — the same rule
 # setup-skill-content.test.sh enforces for skill content (#790, #800).
-assert_contains "${DEDENTED_5F}" 'C: { name: Claude, type: shell, command: "tmux new-window cenci open --agent claude" }'
-assert_contains "${DEDENTED_5F}" 'X: { name: Codex, type: shell, command: "tmux new-window cenci open --agent codex" }'
+for table in "${NORMAL_TABLE}" "${DETAIL_TABLE}"; do
+    assert_contains "${table}" 'C: { name: Claude, type: shell, command: "tmux new-window cenci open --agent claude" }'
+    assert_contains "${table}" 'X: { name: Codex, type: shell, command: "tmux new-window cenci open --agent codex" }'
+done
 
-echo "case: 5f template emits a top-level \`cleanup:\` auto-close action"
+echo "case: 5f template emits a top-level \`cleanup:\` auto-close action, outside keymaps"
 grep -q '^cleanup: "cenci close {number}"$' "${DEDENTED_5F}"
+
+echo "case: 5f offers \`lazyboards trust\` and always states the content-hash caveat"
+assert_contains "${EXTRACTED_5F}" "lazyboards trust"
+assert_contains "${EXTRACTED_5F}" "keyed to the file's exact"
+assert_contains "${EXTRACTED_5F}" "regeneration"
+
+echo "case: 5f probes the installed lazyboards version against the v0.73.0 keymaps floor without blocking"
+assert_contains "${EXTRACTED_5F}" "lazyboards --version"
+assert_contains "${EXTRACTED_5F}" "v0.73.0"
+assert_contains "${EXTRACTED_5F}" "cenci update --lazyboards"
+assert_contains "${EXTRACTED_5F}" "Never block on"
+
+echo "case: the suggest-or-skip delta reads both the keymaps and the legacy config shapes"
+assert_contains "${EXTRACTED_5F}" "Read both config shapes when matching"
+assert_contains "${EXTRACTED_5F}" "same keys, no deprecation notice"
+assert_contains "${EXTRACTED_5F}" "Both rewrite paths always emit \`keymaps:\` form"
 
 echo "case: the .lazyboards.yml file-exists conflict check fires unconditionally regardless of prior lazyboards.enabled state"
 assert_contains "${EXTRACTED_5F}" \
@@ -653,5 +733,18 @@ awk '/^### Board Config \(lazyboards\)$/{f=1} f && /^### Auth Verification$/{exi
 assert_contains "${Q10_REGION}" "in this session"
 assert_contains "${EXTRACTED_5F}" "question 10 was asked and answered Yes"
 assert_contains "${EXTRACTED_5F}" "in this session"
+
+echo "case: key assignment uses canonical space-separated sequences and honors lazyboards' reserved keys"
+assert_contains "${Q10_REGION}" 'space-separated form and quoted'
+assert_contains "${Q10_REGION}" '`"S b"`'
+assert_contains "${Q10_REGION}" '`"T b"`'
+# The prefix rule is a load-time config error over the fully resolved
+# namespace (built-in defaults included), not a dispatch-order quirk.
+assert_contains "${Q10_REGION}" "load-time config error"
+assert_contains "${Q10_REGION}" "built-in defaults"
+# ctrl+c may never be bound *or* unbound.
+assert_contains "${Q10_REGION}" "Never bind or unbind \`ctrl+c\`"
+# Design moved off `D` because `D` is the built-in dispatch panel.
+assert_contains "${Q10_REGION}" "Design is bound to \`Z\`"
 
 echo "passed: opt-in install, explicit update skip, checksum gate, doctor, board-config drift guard, safe board actions"

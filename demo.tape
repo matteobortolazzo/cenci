@@ -36,9 +36,12 @@ Type@5ms `export PATH="$XDG_RUNTIME_DIR/bin:$PATH"` Enter
 # the fake windows (lazyboards#410). The demo is not "inside" any session.
 Type@5ms "unset TMUX" Enter
 Type@5ms "cd ~/Repos/lazyboards-demo" Enter
-# Pin the demo columns to cenci's default board and its column actions, so
+# Pin the demo columns to cenci's default board and its column keymaps, so
 # the recording is deterministic regardless of any personal global config.
-Type@5ms "printf 'working_label: Working\ncenci: true\naction_refresh_delay: 0\ncolumns:\n  - name: New\n    actions:\n      R:\n        name: Refine\n        type: shell\n        command: cenci run refine {number}\n  - name: Refined\n    actions:\n      I:\n        name: Implement\n        type: shell\n        command: cenci run implement {number}\n  - name: Planned\n  - name: In Review\n' > .lazyboards.yml" Enter
+Type@5ms "printf 'working_label: Working\ncenci: true\ncolumns:\n  - name: New\n  - name: Refined\n  - name: Planned\n  - name: In Review\nkeymaps:\n  columns:\n    New:\n      R:\n        name: Refine\n        type: shell\n        command: cenci run refine {number}\n    Refined:\n      I:\n        name: Implement\n        type: shell\n        command: cenci run implement {number}\n' > .lazyboards.yml" Enter
+# A repo-local .lazyboards.yml is untrusted by default, so its shell bindings
+# would be stripped and every key in the recording would silently do nothing.
+Type@5ms "lazyboards trust" Enter
 Type@5ms "clear" Enter
 Show
 
