@@ -141,9 +141,9 @@ jq_err_cleanup
 # line 1, then `cat` passes the remainder straight through, preserving any
 # embedded newlines in a multi-line Bash command.
 FILE_PATH=$(printf '%s\n' "$JQ_OUT" | { IFS= read -r JQ_LINE1; printf '%s' "$JQ_LINE1"; })
-BASH_COMMAND=$(printf '%s\n' "$JQ_OUT" | { IFS= read -r JQ_DISCARD; cat; })
+TOOL_COMMAND=$(printf '%s\n' "$JQ_OUT" | { IFS= read -r JQ_DISCARD; cat; })
 
-[ -z "$FILE_PATH" ] && [ -z "$BASH_COMMAND" ] && exit 0
+[ -z "$FILE_PATH" ] && [ -z "$TOOL_COMMAND" ] && exit 0
 
 # Detect a path resolver able to canonicalize an *existing* path. Prefer
 # realpath; fall back to GNU readlink -f (probed via a known-existing path so
@@ -227,7 +227,7 @@ canonicalize_target() {
 # (unset, relative, non-existent, unresolvable) falls through to that empty
 # default rather than failing closed — this widening is purely additive.
 # Computed unconditionally (shared by both arms below), since it depends only
-# on $TMPDIR/$ROOT, never on FILE_PATH/BASH_COMMAND.
+# on $TMPDIR/$ROOT, never on FILE_PATH/TOOL_COMMAND.
 TMPDIR_ALLOW=""
 if [ -n "${TMPDIR:-}" ]; then
   case "$TMPDIR" in
@@ -398,7 +398,7 @@ if [ -n "$FILE_PATH" ]; then
     echo "before writing anything — see its 'Create Worktree' step."
   } >&2
   exit 2
-elif [ -n "$BASH_COMMAND" ]; then
+elif [ -n "$TOOL_COMMAND" ]; then
   # Bash arm (#795): see the header comment's "Bash arm asymmetry" note for
   # the Q1a repo-root scoping rationale (deliberately more permissive than
   # the Write|Edit arm above for out-of-repo-root targets).
@@ -412,7 +412,7 @@ elif [ -n "$BASH_COMMAND" ]; then
   # shellcheck source=./lib/bash-write-targets.sh
   . "$BWT_LIB"
 
-  bwt_has_write_candidate "$BASH_COMMAND" || exit 0
+  bwt_has_write_candidate "$TOOL_COMMAND" || exit 0
 
   # bwt_extract_targets fails closed (non-zero, no output) when awk is
   # missing from PATH, when the command is too long to safely inspect (#795
@@ -422,7 +422,7 @@ elif [ -n "$BASH_COMMAND" ]; then
   # command). These failure modes get distinct exit codes (3, 4, 5, 6, 7) from
   # bwt_extract_targets so the message here is accurate rather than
   # misreporting one failure as another.
-  BWT_TARGETS=$(bwt_extract_targets "$BASH_COMMAND")
+  BWT_TARGETS=$(bwt_extract_targets "$TOOL_COMMAND")
   BWT_EXTRACT_STATUS=$?
   if [ "$BWT_EXTRACT_STATUS" -ne 0 ]; then
     if [ "$BWT_EXTRACT_STATUS" -eq 4 ]; then
@@ -434,7 +434,7 @@ elif [ -n "$BASH_COMMAND" ]; then
       # write-target position is not supported for direct extraction --
       # handing back the raw un-expanded literal would misreport what bash
       # actually writes to (possibly a main-worktree target).
-      echo "BLOCKED: guard-main-worktree.sh could not inspect this Bash command's write targets: it contains an unquoted brace expansion (e.g. {a,b} or {1..3}) in write-target position, which is not supported for direct extraction: $BASH_COMMAND" >&2
+      echo "BLOCKED: guard-main-worktree.sh could not inspect this Bash command's write targets: it contains an unquoted brace expansion (e.g. {a,b} or {1..3}) in write-target position, which is not supported for direct extraction: $TOOL_COMMAND" >&2
       echo "Rewrite the command without brace expansion (e.g. one command per target) targeting the feature worktree (.worktrees/<id>-<desc>/) or edit manually if needed." >&2
     elif [ "$BWT_EXTRACT_STATUS" -eq 7 ]; then
       # #810 stabilization: a command/process/function substitution appears
@@ -444,7 +444,7 @@ elif [ -n "$BASH_COMMAND" ]; then
       # such a substitution once it is wrapped in an outer double-quoted
       # string (possibly hiding a main-worktree target), so the whole command
       # fails closed unconditionally.
-      echo "BLOCKED: guard-main-worktree.sh could not inspect this Bash command's write targets: a command/process/function substitution appears inside a double-quoted string within a comparison construct, which cannot be safely resolved: $BASH_COMMAND" >&2
+      echo "BLOCKED: guard-main-worktree.sh could not inspect this Bash command's write targets: a command/process/function substitution appears inside a double-quoted string within a comparison construct, which cannot be safely resolved: $TOOL_COMMAND" >&2
       echo "Rewrite the command without a double-quoted nested substitution inside [[ ]] / (( )) (e.g. hoist it to its own statement first) targeting the feature worktree (.worktrees/<id>-<desc>/) or edit manually if needed." >&2
     else
       echo "BLOCKED: guard-main-worktree.sh requires awk (via lib/bash-write-targets.sh) to inspect this Bash command's write targets, but awk was not found on PATH." >&2
@@ -494,16 +494,16 @@ elif [ -n "$BASH_COMMAND" ]; then
   # is an accepted residual of the root-mention scan below (closed by the
   # unconditional tee check above for the tee case specifically).
   if [ -z "$BWT_TARGETS" ]; then
-    if bwt_has_delimited_tee "$BASH_COMMAND"; then
+    if bwt_has_delimited_tee "$TOOL_COMMAND"; then
       {
-        echo "BLOCKED: guard-main-worktree.sh could not extract this Bash command's write targets (unmodelled construct containing a tee invocation); its target may be relative to the main worktree: $BASH_COMMAND"
+        echo "BLOCKED: guard-main-worktree.sh could not extract this Bash command's write targets (unmodelled construct containing a tee invocation); its target may be relative to the main worktree: $TOOL_COMMAND"
         echo "Rewrite the command using a plain, directly-parseable tee form targeting the feature worktree (.worktrees/<id>-<desc>/) or a temp path."
       } >&2
       exit 2
-    elif bwt_zero_parse_suspicious "$BASH_COMMAND"; then
-      BWT_SCAN_TEXT="$BASH_COMMAND"
+    elif bwt_zero_parse_suspicious "$TOOL_COMMAND"; then
+      BWT_SCAN_TEXT="$TOOL_COMMAND"
       if command -v awk >/dev/null 2>&1; then
-        BWT_SCAN_TEXT=$(BWT_SCAN_CMD="$BASH_COMMAND" BWT_SCAN_ROOT="$ROOT" BWT_SCAN_RROOT="$RESOLVED_ROOT" awk '
+        BWT_SCAN_TEXT=$(BWT_SCAN_CMD="$TOOL_COMMAND" BWT_SCAN_ROOT="$ROOT" BWT_SCAN_RROOT="$RESOLVED_ROOT" awk '
           BEGIN {
             s = ENVIRON["BWT_SCAN_CMD"]
             roots[1] = ENVIRON["BWT_SCAN_ROOT"]
@@ -524,7 +524,7 @@ elif [ -n "$BASH_COMMAND" ]; then
       case "$BWT_SCAN_TEXT" in
         *"$ROOT"* | *"$RESOLVED_ROOT"*)
           {
-            echo "BLOCKED: guard-main-worktree.sh could not extract this Bash command's write targets (unmodelled shell construct), and the raw command text mentions the main worktree root ($RESOLVED_ROOT): $BASH_COMMAND"
+            echo "BLOCKED: guard-main-worktree.sh could not extract this Bash command's write targets (unmodelled shell construct), and the raw command text mentions the main worktree root ($RESOLVED_ROOT): $TOOL_COMMAND"
             echo "Rewrite the command using a plain, directly-parseable redirect (>, >>) or tee form targeting the feature worktree (.worktrees/<id>-<desc>/) or a temp path."
           } >&2
           exit 2
@@ -543,7 +543,7 @@ elif [ -n "$BASH_COMMAND" ]; then
 
     if bwt_is_unresolved "$BWT_EXPANDED"; then
       {
-        echo "BLOCKED: guard-main-worktree.sh cannot resolve the Bash write target '$BWT_EXPANDED' in: $BASH_COMMAND"
+        echo "BLOCKED: guard-main-worktree.sh cannot resolve the Bash write target '$BWT_EXPANDED' in: $TOOL_COMMAND"
         echo "Use a literal absolute path, or one of \${TMPDIR:-/tmp}, \$TMPDIR, \$HOME, \$PWD."
       } >&2
       exit 2
@@ -562,7 +562,7 @@ elif [ -n "$BASH_COMMAND" ]; then
         # the repo root, and an allowlisted-looking relative path can be a
         # symlink to protected source.
         {
-          echo "BLOCKED: guard-main-worktree.sh cannot verify the relative Bash write target '$BWT_EXPANDED' in: $BASH_COMMAND"
+          echo "BLOCKED: guard-main-worktree.sh cannot verify the relative Bash write target '$BWT_EXPANDED' in: $TOOL_COMMAND"
           echo "The relative write target cannot be verified against the command's effective cwd or canonicalized safely; use an absolute feature-worktree, plan, design, or temp path."
         } >&2
         exit 2

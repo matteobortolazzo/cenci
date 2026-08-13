@@ -115,9 +115,9 @@ jq_err_cleanup
 # line 1, then `cat` passes the remainder straight through, preserving any
 # embedded newlines in a multi-line Bash command.
 FILE_PATH=$(printf '%s\n' "$JQ_OUT" | { IFS= read -r JQ_LINE1; printf '%s' "$JQ_LINE1"; })
-BASH_COMMAND=$(printf '%s\n' "$JQ_OUT" | { IFS= read -r JQ_DISCARD; cat; })
+TOOL_COMMAND=$(printf '%s\n' "$JQ_OUT" | { IFS= read -r JQ_DISCARD; cat; })
 
-[ -z "$FILE_PATH" ] && [ -z "$BASH_COMMAND" ] && exit 0
+[ -z "$FILE_PATH" ] && [ -z "$TOOL_COMMAND" ] && exit 0
 
 # Detect a path resolver able to canonicalize an *existing* path. Prefer
 # realpath; fall back to GNU readlink -f (probed via a known-existing path so
@@ -290,7 +290,7 @@ if [ -n "$FILE_PATH" ]; then
   check_sensitive "$CANONICAL_PATH"
 
   exit 0
-elif [ -n "$BASH_COMMAND" ]; then
+elif [ -n "$TOOL_COMMAND" ]; then
   # Bash arm (#795): tool_input.command redirection/tee write targets are
   # extracted via the shared lib and checked against the same blocklist as
   # the Write|Edit arm above. Runs unconditionally (Q2) -- no config gate.
@@ -304,7 +304,7 @@ elif [ -n "$BASH_COMMAND" ]; then
   # shellcheck source=./lib/bash-write-targets.sh
   . "$BWT_LIB"
 
-  bwt_has_write_candidate "$BASH_COMMAND" || exit 0
+  bwt_has_write_candidate "$TOOL_COMMAND" || exit 0
 
   # bwt_extract_targets fails closed (non-zero, no output) when awk is
   # missing from PATH, when the command is too long to safely inspect (#795
@@ -314,7 +314,7 @@ elif [ -n "$BASH_COMMAND" ]; then
   # command). These failure modes get distinct exit codes (3, 4, 5, 6, 7) from
   # bwt_extract_targets so the message here is accurate rather than
   # misreporting one failure as another.
-  BWT_TARGETS=$(bwt_extract_targets "$BASH_COMMAND")
+  BWT_TARGETS=$(bwt_extract_targets "$TOOL_COMMAND")
   BWT_EXTRACT_STATUS=$?
   if [ "$BWT_EXTRACT_STATUS" -ne 0 ]; then
     if [ "$BWT_EXTRACT_STATUS" -eq 4 ]; then
@@ -327,7 +327,7 @@ elif [ -n "$BASH_COMMAND" ]; then
       # handing back the raw un-expanded literal would misreport what bash
       # actually writes to. Unconditional: this blocks regardless of whether
       # the raw command also happens to mention a sensitive marker.
-      echo "BLOCKED: check-sensitive-files.sh could not inspect this Bash command's write targets: it contains an unquoted brace expansion (e.g. {a,b} or {1..3}) in write-target position, which is not supported for direct extraction: $BASH_COMMAND" >&2
+      echo "BLOCKED: check-sensitive-files.sh could not inspect this Bash command's write targets: it contains an unquoted brace expansion (e.g. {a,b} or {1..3}) in write-target position, which is not supported for direct extraction: $TOOL_COMMAND" >&2
       echo "Rewrite the command without brace expansion (e.g. one command per target) or edit the file manually if needed." >&2
     elif [ "$BWT_EXTRACT_STATUS" -eq 7 ]; then
       # #810 stabilization: a command/process/function substitution appears
@@ -338,7 +338,7 @@ elif [ -n "$BASH_COMMAND" ]; then
       # string, so the whole command fails closed unconditionally, regardless
       # of whether the raw command also happens to mention a sensitive
       # marker.
-      echo "BLOCKED: check-sensitive-files.sh could not inspect this Bash command's write targets: a command/process/function substitution appears inside a double-quoted string within a comparison construct, which cannot be safely resolved: $BASH_COMMAND" >&2
+      echo "BLOCKED: check-sensitive-files.sh could not inspect this Bash command's write targets: a command/process/function substitution appears inside a double-quoted string within a comparison construct, which cannot be safely resolved: $TOOL_COMMAND" >&2
       echo "Rewrite the command without a double-quoted nested substitution inside [[ ]] / (( )) (e.g. hoist it to its own statement first) or edit the file manually if needed." >&2
     else
       echo "BLOCKED: check-sensitive-files.sh requires awk (via lib/bash-write-targets.sh) to inspect this Bash command's write targets, but awk was not found on PATH." >&2
@@ -355,8 +355,8 @@ elif [ -n "$BASH_COMMAND" ]; then
   # permit. Without this, `{tee,cat} /repo/.env` extracted nothing and was
   # silently allowed (#795 review rounds 1-5, the non-converging root cause).
   if [ -z "$BWT_TARGETS" ]; then
-    if bwt_zero_parse_suspicious "$BASH_COMMAND"; then
-      check_sensitive_raw "$BASH_COMMAND"
+    if bwt_zero_parse_suspicious "$TOOL_COMMAND"; then
+      check_sensitive_raw "$TOOL_COMMAND"
     fi
     exit 0
   fi
@@ -370,7 +370,7 @@ elif [ -n "$BASH_COMMAND" ]; then
 
     if bwt_is_unresolved "$BWT_EXPANDED"; then
       {
-        echo "BLOCKED: check-sensitive-files.sh cannot resolve the Bash write target '$BWT_EXPANDED' in: $BASH_COMMAND"
+        echo "BLOCKED: check-sensitive-files.sh cannot resolve the Bash write target '$BWT_EXPANDED' in: $TOOL_COMMAND"
         echo "Use a literal absolute path, or one of \${TMPDIR:-/tmp}, \$TMPDIR, \$HOME, \$PWD."
       } >&2
       exit 2

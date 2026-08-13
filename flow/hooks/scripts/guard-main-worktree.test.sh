@@ -8,6 +8,11 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GUARD_SH="${SCRIPT_DIR}/guard-main-worktree.sh"
+# Interpreter used to invoke the hook. Defaults to sh (the shebang's
+# interpreter); the summary block re-execs this suite once per additional
+# available shell so bash-only bugs cannot hide behind whichever shell
+# /bin/sh happens to be on this host.
+HOOK_SHELL="${HOOK_SHELL:-sh}"
 
 FAILURES=0
 PASSES=0
@@ -25,7 +30,7 @@ pass() {
 # Sets GUARD_EXIT and GUARD_STDERR.
 run_guard() {
     local cwd="$1" json="$2"
-    GUARD_STDERR="$(cd "${cwd}" && echo "${json}" | sh "${GUARD_SH}" 2>&1 >/dev/null)"
+    GUARD_STDERR="$(cd "${cwd}" && echo "${json}" | "${HOOK_SHELL}" "${GUARD_SH}" 2>&1 >/dev/null)"
     GUARD_EXIT=$?
 }
 
@@ -44,7 +49,7 @@ assert_exit() {
 # Sets GUARD_EXIT and GUARD_STDERR.
 run_guard_with_path() {
     local cwd="$1" path_override="$2" json="$3"
-    GUARD_STDERR="$(cd "${cwd}" && echo "${json}" | PATH="${path_override}" sh "${GUARD_SH}" 2>&1 >/dev/null)"
+    GUARD_STDERR="$(cd "${cwd}" && echo "${json}" | PATH="${path_override}" "${HOOK_SHELL}" "${GUARD_SH}" 2>&1 >/dev/null)"
     GUARD_EXIT=$?
 }
 
@@ -53,7 +58,7 @@ run_guard_with_path() {
 # #749 TMPDIR-widening cases below. Sets GUARD_EXIT and GUARD_STDERR.
 run_guard_with_tmpdir() {
     local cwd="$1" tmpdir_override="$2" json="$3"
-    GUARD_STDERR="$(cd "${cwd}" && echo "${json}" | TMPDIR="${tmpdir_override}" sh "${GUARD_SH}" 2>&1 >/dev/null)"
+    GUARD_STDERR="$(cd "${cwd}" && echo "${json}" | TMPDIR="${tmpdir_override}" "${HOOK_SHELL}" "${GUARD_SH}" 2>&1 >/dev/null)"
     GUARD_EXIT=$?
 }
 
@@ -694,7 +699,7 @@ fi
 # the out-of-root verdict is deterministic regardless of the ambient HOME.
 run_guard_with_home() {
     local cwd="$1" home_override="$2" json="$3"
-    GUARD_STDERR="$(cd "${cwd}" && echo "${json}" | HOME="${home_override}" sh "${GUARD_SH}" 2>&1 >/dev/null)"
+    GUARD_STDERR="$(cd "${cwd}" && echo "${json}" | HOME="${home_override}" "${HOOK_SHELL}" "${GUARD_SH}" 2>&1 >/dev/null)"
     GUARD_EXIT=$?
 }
 
@@ -1192,5 +1197,21 @@ fi
 
 # ── Summary ──────────────────────────────────────────────────────────
 echo
-echo "passed: ${PASSES}, failed: ${FAILURES}"
+echo "passed: ${PASSES}, failed: ${FAILURES} (shell: ${HOOK_SHELL})"
+
+# The hook's #!/bin/sh shebang resolves to bash on macOS/Arch/Fedora and to
+# dash on Debian/Ubuntu, so a single pass only ever exercises whichever shell
+# this host's /bin/sh happens to be. Re-run the whole case list once per other
+# available shell. Alternates are resolved to absolute paths because
+# run_guard_with_path replaces PATH with a curated bin dir that would not
+# contain a bare `bash`/`dash`.
+if [[ -z "${HOOK_SHELL_PINNED:-}" ]]; then
+    for candidate in bash dash; do
+        alt="$(command -v "${candidate}")" || continue
+        [[ "${alt}" == "$(command -v sh)" ]] && continue
+        echo "── re-running under ${alt} ──"
+        HOOK_SHELL_PINNED=1 HOOK_SHELL="${alt}" bash "$0" || exit 1
+    done
+fi
+
 [[ "${FAILURES}" -eq 0 ]]
