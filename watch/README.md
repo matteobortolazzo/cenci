@@ -1330,6 +1330,32 @@ result that isn't `MERGED` on that single refetch is treated as indeterminate,
 never as success. See `flow/skills/configure/SKILL.md`'s `automerge` schema
 section for the full field reference.
 
+Once that refetch confirms `MERGED`, babysit posts one comment to the PR
+recording that the merge was automatic — the cenci attribution banner, the head
+commit `--match-head-commit` pinned the merge to, and the same condition-chain
+bracket the log line above renders, so the durable record on the PR and the
+supervisor log agree verbatim:
+
+```markdown
+> 🤖 **cenci** — merged automatically by `cenci babysit` (automerge policy). No human approved this merge.
+
+Squash-merged, pinned to head commit `abc1234`. Every automerge policy condition below passed on a full re-evaluation immediately before the merge was issued:
+
+    [enabled=yes label=yes ci=yes review=yes mergeable=yes headsha=yes policy=yes files=yes filecap=yes lines=yes protected=yes method=yes queue=yes]
+```
+
+`gh` merges and comments under the operator's own GitHub account, so without
+this comment an automerged PR is indistinguishable from a human clicking
+"Squash and merge". For the same reason the comment is **attribution, never
+proof** — it records what babysit did, it does not authenticate it (see
+`flow/docs/comment-attribution.md`).
+
+The comment is strictly post-hoc: it is posted only after the merge is already
+confirmed, exactly once (a later tick short-circuits on `MERGED` before
+automerge is evaluated at all), and a failed `gh pr comment` is reported in the
+tick's decision detail without ever downgrading the merge or retrying it. Held,
+indeterminate, and unverifiable ticks post nothing.
+
 ## Pipeline stage commands (`cenci pipeline`)
 
 `cenci pipeline <stage> <id>` drives the implement pipeline's state machine —

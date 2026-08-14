@@ -318,6 +318,27 @@ unreadable`, `review feedback state unknown` (GitHub stopped reporting a comment
 thread — deleted or purged), and `unsupported review feedback type`. Merge those by
 hand.
 
+## Knowing a merge was automatic
+
+The log line above lives in the supervisor's own log and expires with it. `gh` merges
+under *your* GitHub account, so on GitHub an automerged PR would otherwise look exactly
+like you clicking "Squash and merge".
+
+So a confirmed merge also leaves a comment on the PR itself: the cenci attribution
+banner, the head commit the merge was pinned to, and the same condition-chain bracket —
+the durable half of the record, readable months later by anyone auditing the ticket.
+
+```markdown
+> 🤖 **cenci** — merged automatically by `cenci babysit` (automerge policy). No human approved this merge.
+```
+
+Two things it deliberately is not. It is **not proof**: the banner literal is public and
+`gh` posts under your identity, so anyone can write a byte-identical comment — it records
+what babysit did, it does not authenticate it. And it is **not part of the merge
+decision**: it is posted after the merge is already confirmed, so a comment that fails to
+post costs you an audit record and nothing else. Held and unconfirmed ticks leave no
+comment at all — if there is no comment, no automerge landed.
+
 ## Turning it off
 
 | To stop… | Do this | Takes effect |
