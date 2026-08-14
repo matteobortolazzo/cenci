@@ -426,6 +426,10 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 				}
 				continue
 			}
+			// Braille specifically, not IsWorkingMarker: this branch reads
+			// Codex's own spinner, and Codex emits braille only. Widening it
+			// to Claude Code's half-circle marker (#1039) would let a glyph
+			// Codex never writes clear a Codex need-input state.
 			if ws.Status == detect.StatusNeedInput && detect.IsBraille(firstRune(p.PaneTitle)) {
 				f.applyStatus(wt, ws, detect.StatusRunning, ws.TaskName)
 				if ws.SessionKey != "" {
@@ -438,7 +442,7 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 			continue
 		}
 		r := firstRune(p.PaneTitle)
-		if detect.IsStatusSymbol(r) && !detect.IsBraille(r) {
+		if detect.IsStatusSymbol(r) && !detect.IsWorkingMarker(r) {
 			// Pane title shows an idle marker (✶ ✻ ✳) — but the title alone
 			// cannot tell "user pressed ESC" from "paused at the prompt while
 			// background work is in flight" (#706). Event state wins: never

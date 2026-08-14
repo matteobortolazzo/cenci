@@ -71,13 +71,39 @@ func TicketFromWindowName(windowName string) string {
 	return windowName[:i]
 }
 
-// IsStatusSymbol reports whether r is a known Claude Code status symbol
-// (braille spinner characters, or the idle/running markers ✶ ✻ ✳).
+// IsStatusSymbol reports whether r is a known Claude Code status symbol: a
+// working marker (braille spinner or half-circle, see IsWorkingMarker) or one
+// of the idle markers ✶ ✻ ✳. Every symbol here is stripped from pane titles by
+// TaskName, so an unrecognised one leaks into the window name cenci sets and
+// renders next to cenci's own status symbol (#1039).
 func IsStatusSymbol(r rune) bool {
-	return IsBraille(r) || r == '✶' || r == '✻' || r == '✳'
+	return IsWorkingMarker(r) || r == '✶' || r == '✻' || r == '✳'
+}
+
+// IsWorkingMarker reports whether r is a status symbol that Claude Code shows
+// only while the agent is working — the braille spinner, or the half-circle
+// marker (◐◑◒◓) it heads the pane title with.
+//
+// The distinction from the idle markers ✶ ✻ ✳ is load-bearing, not cosmetic:
+// internal/frontend/tmux.Frontend.Sweep reads a non-working status symbol in
+// the title as "the user pressed ESC" and flips the session to stopped.
+// Classifying a working marker as idle would flip every mid-turn session the
+// moment its hook events went quiet (a long tool call). Callers that need the
+// braille block specifically — Codex's own spinner — should keep using
+// IsBraille.
+func IsWorkingMarker(r rune) bool {
+	return IsBraille(r) || isHalfCircle(r)
 }
 
 // IsBraille reports whether r is in the Unicode Braille Patterns block (U+2800–U+28FF).
 func IsBraille(r rune) bool {
 	return r >= 0x2800 && r <= 0x28FF
+}
+
+// isHalfCircle reports whether r is one of the four half-filled circles
+// ◐ ◑ ◒ ◓ (U+25D0–U+25D3). The range stops short of U+25D4 (◔, quarter-filled)
+// so the neighbouring circle glyphs in the Geometric Shapes block are not
+// swept up as status symbols.
+func isHalfCircle(r rune) bool {
+	return r >= 0x25D0 && r <= 0x25D3
 }

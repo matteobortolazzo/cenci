@@ -50,13 +50,20 @@ func (f *Frontend) trackWindow(windowTarget string, paneInfo *tmuxc.PaneInfo, se
 	currentName = f.stripCenciPrefix(currentName)
 	currentName = frontend.SanitizeName(currentName)
 
-	// Check if manually named.
+	// Check if manually named. A name still leading with an agent status
+	// symbol came from a previous cenci run, not from the user.
 	autoRename, err := f.client.GetWindowOption(windowTarget, "automatic-rename")
 	manuallyNamed := false
 	if err == nil && autoRename == "off" {
 		r, _ := utf8.DecodeRuneInString(currentName)
 		manuallyNamed = currentName != taskName && !detect.IsStatusSymbol(r)
 	}
+
+	// Drop a residual agent status marker (#1039) so it is not preserved as
+	// the original name and restored on cleanup. This has to run after the
+	// manual-name check above, which reads that very marker as its evidence
+	// that cenci — not the user — chose the name.
+	currentName = frontend.SanitizeName(detect.TaskName(currentName))
 
 	// Save original styles.
 	origStyle, err := f.client.GetWindowOption(windowTarget, "window-status-style")

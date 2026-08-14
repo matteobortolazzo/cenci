@@ -130,6 +130,40 @@ func TestDaemon_SweepIgnoresRunningWithBrailleTitle(t *testing.T) {
 	}
 }
 
+// TestDaemon_SweepIgnoresRunningWithHalfCircleTitle guards the half-circle
+// working marker (◐◑◒◓) against the ESC backstop (#1039). The marker is shown
+// only while the agent is working, so a title carrying it must never be read
+// as an idle title — even once hook events have gone quiet, which is exactly
+// what a long tool call looks like.
+func TestDaemon_SweepIgnoresRunningWithHalfCircleTitle(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "◑ writing tests", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+
+	sess := d.sessions["sess1"]
+	if sess == nil || sess.Status != detect.StatusRunning {
+		t.Fatalf("precondition: expected StatusRunning, got %v", sess.Status)
+	}
+
+	// Age the last event past the backstop's quiescence window so only the
+	// marker's classification keeps the session running.
+	mc.WindowOpts = nil
+	sess.LastEvent = time.Now().Add(-10 * time.Second)
+
+	d.runSweep()
+
+	if sess.Status != detect.StatusRunning {
+		t.Errorf("expected StatusRunning (half-circle marker means working), got %v", sess.Status)
+	}
+}
+
 func TestDaemon_SweepIgnoresNonRunningWindows(t *testing.T) {
 	mc := &tmuxtest.MockClient{
 		Panes: []tmux.PaneInfo{
