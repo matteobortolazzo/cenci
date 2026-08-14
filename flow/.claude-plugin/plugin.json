@@ -1,7 +1,7 @@
 {
   "name": "cenci",
   "description": "cenci workflow layer: portable conventions and Claude Code's gated GitHub ticket-to-PR pipeline",
-  "version": "0.57.0",
+  "version": "0.58.0",
   "author": {
     "name": "Matteo Bortolazzo"
   },
