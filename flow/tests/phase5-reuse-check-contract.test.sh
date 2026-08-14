@@ -25,9 +25,12 @@
 # directly, since the contract under test lives in those docs' prose.
 #
 # Covered files (the only docs this test scans):
-#   - skills/implement/phases/phase-5-refactor.md
-#   - skills/implement/SKILL.md
-#   - skills/implement/codex.md
+#   - skills/implement/phases/phase-5-refactor.md   (the check itself)
+#   - skills/implement/phases/phase-3-test-red.md   (compact mode's operative list)
+#   - skills/implement/phases/phase-6-7-review.md   (report carry-forward)
+#   - skills/implement/phases/phase-9-pr.md         (report rendering)
+#   - skills/implement/SKILL.md                     (config surface)
+#   - skills/implement/codex.md                     (Codex parity)
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || { echo "phase5-reuse-check-contract.test.sh: failed to resolve script directory." >&2; exit 2; }
@@ -63,13 +66,36 @@ require_doc() {
 # assert_contains <content> <required-substring> <label>
 assert_contains() {
   local content="$1" pattern="$2" label="$3"
+  [[ -n "${pattern}" ]] || { fail "${label}: empty required pattern (test bug)"; return; }
   [[ "${content}" == *"${pattern}"* ]] || fail "${label}: required text missing: [${pattern}]"
 }
 
 # assert_not_contains <content> <forbidden-substring> <label>
 assert_not_contains() {
   local content="$1" pattern="$2" label="$3"
+  [[ -n "${pattern}" ]] || { fail "${label}: empty forbidden pattern (test bug)"; return; }
   [[ "${content}" != *"${pattern}"* ]] || fail "${label}: forbidden text present: [${pattern}]"
+}
+
+# extract_section <content> <exact-heading-line> -- prints the body under that
+# heading, up to the next `## ` heading. Pure, safe inside $(...). Assertions
+# scoped through this cannot pass on a match that landed somewhere else in the
+# file, which is the whole point: a contract about compact mode must be pinned
+# to the compact-mode section, not to the document as a whole.
+extract_section() {
+  local content="$1" heading="$2"
+  awk -v h="${heading}" '
+    $0 == h { inside = 1; next }
+    inside && /^## / { exit }
+    inside { print }
+  ' <<<"${content}"
+}
+
+# extract_line <content> <literal-substring> -- prints the first line containing
+# the substring, for assertions that must bind to one specific bullet.
+extract_line() {
+  local content="$1" needle="$2"
+  grep -F -m1 -e "${needle}" <<<"${content}"
 }
 
 # =====================================================================
@@ -93,9 +119,25 @@ if require_doc CONTENT "${FILE}"; then
   # fan out into an unbounded number of searches.
   assert_contains "${CONTENT}" 'at most the 10 largest added units' "${FILE}"
 
+  # Cost accounting -- two searches per unit (name fragment AND body line),
+  # so the real ceiling is 20, not 10. Stating only the unit cap understates
+  # the cost the guards are supposed to bound.
+  assert_contains "${CONTENT}" 'at most 20 searches for the whole check' "${FILE}"
+
   # Cost guard 3 -- each probe is scoped to the affected project, not the
-  # whole monorepo.
+  # whole monorepo...
   assert_contains "${CONTENT}" "Restrict the search to the affected project's directory" "${FILE}"
+
+  # ...and that directory must be derivable from what this phase actually
+  # holds. Phase 2 resolves `projects[].slug` values, not paths, and its
+  # baseline gate is skipped entirely on configs with neither `gateCommand`
+  # nor `projects[]` -- so a scope defined as "the path Phase 2 resolved"
+  # silently has no value on those configs and degrades to the repo-wide
+  # sweep this section forbids. Both the derivation and the no-widening
+  # floor have to be stated here.
+  assert_contains "${CONTENT}" 'Derive that directory from the changed file list this phase already receives' "${FILE}"
+  assert_contains "${CONTENT}" 'the deepest single directory that contains all of them' "${FILE}"
+  assert_contains "${CONTENT}" 'Never fall back to the whole tree' "${FILE}"
 
   # The threshold distinction is the substance of the change: pre-existing
   # duplication keeps the rule of three; duplication this change introduces
@@ -107,7 +149,17 @@ if require_doc CONTENT "${FILE}"; then
   # Bounded by construction: this must never become the refactor skill's
   # repo-wide analyzer sweep running on every ticket.
   assert_contains "${CONTENT}" 'never a repo-wide duplication sweep' "${FILE}"
-  assert_not_contains "${CONTENT}" 'duplication-analyzer' "${FILE}"
+
+  # The structural half of that bound: the check rides inside Phase 5's
+  # existing implementer delegation and spawns nothing of its own. Asserted
+  # as the property (no second delegation inside the section) rather than as
+  # a forbidden mention of `duplication-analyzer` -- prose that names the
+  # analyzer to draw the boundary *strengthens* this contract, and a
+  # forbidden-substring check would fail such an edit while still passing a
+  # section that actually fanned an agent out under a different name.
+  REUSE_SECTION="$(extract_section "${CONTENT}" '## Reuse Check')"
+  assert_contains "${REUSE_SECTION}" 'inside the same delegation' "${FILE} (## Reuse Check)"
+  assert_not_contains "${REUSE_SECTION}" 'Delegate to the' "${FILE} (## Reuse Check)"
 
   # An equivalent that cannot be reused without changing behavior for its
   # existing callers is reported, not silently forced -- rewiring other
@@ -124,6 +176,13 @@ if require_doc CONTENT "${FILE}"; then
   assert_contains "${CONTENT}" '### Considered and discarded' "${FILE}"
   assert_contains "${CONTENT}" 'never** tracked or turned into a Followup ticket' "${FILE}"
 
+  # Naming Phase 9 is not the same as reaching it: Phase 5's summary is
+  # conversation state, and Phase 9 may assemble the PR body in a compacted
+  # or fresh session. The report needs a stable prefix so Phase 6 + 7 can
+  # persist it verbatim into the run artifact Phase 9 reads.
+  assert_contains "${CONTENT}" 'the literal prefix `Reuse Check:`' "${FILE}"
+  assert_contains "${CONTENT}" '$RUN_DIR/reuse-notes.txt' "${FILE}"
+
   # The full-suite/lint verification must cover consolidations made by the
   # Reuse Check, which reads AFTER that paragraph in the file -- so the
   # ordering has to be stated, not left to reading order.
@@ -131,14 +190,65 @@ if require_doc CONTENT "${FILE}"; then
 fi
 
 # =====================================================================
-# SKILL.md -- compact implementation mode folds Phases 3-5 into a single
-# delegation. The Reuse Check must survive that fold rather than being
-# silently dropped with the rest of Phase 5; it is cheap enough that
-# skipping it saves nothing.
+# phase-3-test-red.md -- compact implementation mode folds Phases 3-5 into
+# a single delegation, and THIS is the file the orchestrator reads when it
+# does: its `## Compact Implementation` numbered list is what gets handed to
+# the implementer. A carve-out written only in phase-5-refactor.md is
+# unreachable on this path (SKILL.md: "Read only the file for the phase you
+# are starting"), so the pointer has to live in the list itself.
+# =====================================================================
+FILE="skills/implement/phases/phase-3-test-red.md"
+if require_doc CONTENT "${FILE}"; then
+  COMPACT_SECTION="$(extract_section "${CONTENT}" '## Compact Implementation')"
+
+  # The section is the one that governs compact mode (guards against the
+  # heading being renamed out from under this assertion).
+  assert_contains "${COMPACT_SECTION}" 'cenci.compactImplementation' "${FILE} (## Compact Implementation)"
+
+  # The operative list itself carries the check -- not a mention elsewhere
+  # in the file.
+  assert_contains "${COMPACT_SECTION}" '## Reuse Check' "${FILE} (## Compact Implementation)"
+
+  # ...and points at the single definition rather than restating it, so the
+  # steps and cost guards cannot drift between the two paths.
+  assert_contains "${COMPACT_SECTION}" 'phases/phase-5-refactor.md' "${FILE} (## Compact Implementation)"
+fi
+
+# =====================================================================
+# SKILL.md -- the config-surface statement of the same rule, which is where
+# a reader configuring `compactImplementation` learns the fold does not drop
+# the check. Bound to that bullet specifically: a bare whole-file match would
+# pass on the phrase landing anywhere in ~400 lines.
 # =====================================================================
 FILE="skills/implement/SKILL.md"
 if require_doc CONTENT "${FILE}"; then
-  assert_contains "${CONTENT}" "Phase 5's Reuse Check" "${FILE}"
+  COMPACT_BULLET="$(extract_line "${CONTENT}" '`cenci.compactImplementation: true`')"
+  assert_contains "${COMPACT_BULLET}" "Phase 5's Reuse Check" "${FILE} (compactImplementation bullet)"
+fi
+
+# =====================================================================
+# phase-6-7-review.md / phase-9-pr.md -- the report's carry-forward path.
+# Phase 5 names Phase 9's `### Considered and discarded` as the destination,
+# but Phase 9 is fed from the reviewers' findings and had no instruction to
+# collect a Phase 5 line; Phase 5 also writes no run artifact, and Phase 9
+# may run in a compacted or fresh session. Without a persisted hand-off the
+# report is silently lost, and nothing would fail.
+# =====================================================================
+FILE="skills/implement/phases/phase-6-7-review.md"
+if require_doc CONTENT "${FILE}"; then
+  # Persisted where RUN_DIR first exists, once, alongside the other
+  # artifacts -- not re-appended by each fix-and-rerun cycle.
+  assert_contains "${CONTENT}" '$RUN_DIR/reuse-notes.txt' "${FILE}"
+  assert_contains "${CONTENT}" "Carry Phase 5's Reuse Check report forward" "${FILE}"
+fi
+
+FILE="skills/implement/phases/phase-9-pr.md"
+if require_doc CONTENT "${FILE}"; then
+  # Phase 9 must actually read it, and must fail honestly rather than
+  # silently omitting the entry when RUN_DIR is gone -- the same rule the
+  # Review/Security/Maintenance lines already follow.
+  assert_contains "${CONTENT}" '$RUN_DIR/reuse-notes.txt' "${FILE}"
+  assert_contains "${CONTENT}" 'Reuse Check report unavailable (RUN_DIR lost)' "${FILE}"
 fi
 
 # =====================================================================
@@ -149,6 +259,14 @@ fi
 FILE="skills/implement/codex.md"
 if require_doc CONTENT "${FILE}"; then
   assert_contains "${CONTENT}" 'reuse it rather than re-implementing it' "${FILE}"
+
+  # Parity is not just the check existing: a consolidation is a
+  # behavior-affecting edit, so Codex must re-verify before the reviews the
+  # same way Phase 5 does, and must apply the same never-tracked policy to
+  # the report. Omitting either lets Codex consolidate and walk straight
+  # into review with no re-run, or mint a Followup per unreusable helper.
+  assert_contains "${CONTENT}" 'same full-suite-and-lint run' "${FILE}"
+  assert_contains "${CONTENT}" 'never tracked or turned into a Followup ticket' "${FILE}"
 fi
 
 echo "phase5-reuse-check-contract.test.sh: failures=${failures}"

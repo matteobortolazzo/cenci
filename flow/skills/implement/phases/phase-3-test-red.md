@@ -12,7 +12,8 @@ If `cenci.compactImplementation` is true and the plan is small, low-risk, and co
 2. Run them and report failing test names and failure reasons.
 3. Implement the feature.
 4. Refactor only touched code.
-5. Run full build and tests and report results.
+5. Run Phase 5's `## Reuse Check` — read that one section of `phases/phase-5-refactor.md` (that section only, not the whole file) and follow its steps and cost guards inside this same delegation. Folding Phase 5 away does not drop this check: it is a handful of searches over code already in hand, and it is the only step in the pipeline that sees duplication this change introduces against code outside the diff.
+6. Run full build and tests and report results.
 
 Do not use compact mode for auth, payment, security-sensitive code, data migrations, broad refactors, large UI work, flaky test infrastructure, or unclear requirements.
 
