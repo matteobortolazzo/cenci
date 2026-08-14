@@ -24,6 +24,14 @@ git -C <worktree-path> diff --name-only > "$RUN_DIR/files.txt"
 git -C <worktree-path> diff --stat > "$RUN_DIR/stat.txt"
 ```
 
+**Carry Phase 5's Reuse Check report forward.** Phase 5 (or, in compact mode, Phase 3's folded delegation) reports any near-duplicate it kept in place as one `Reuse Check:` line in its summary. That summary is conversation state, and Phase 9 may assemble the PR body in a compacted or fresh session, so persist those lines here — where `RUN_DIR` first exists — rather than relying on them still being in context:
+
+```bash
+printf '%s\n' "<Reuse Check: line>" ... >> "$RUN_DIR/reuse-notes.txt"
+```
+
+Write nothing when Phase 5 reported none (the common case); Phase 9 treats an absent file as "none". Do this once, on first entry into this phase, alongside the artifacts above — a fix-and-rerun cycle must not append the same lines twice.
+
 For small diffs and `cenci.diffContextMode` not set to `"file"`, inline the diff. For large diffs or file mode, pass reviewers the patch path, changed file list, stat, ticket requirements, and implementation plan. Tell reviewers to read only relevant hunks/files.
 
 Source ticket requirements and plan from the plan file when `hasPlanFile` is true.
