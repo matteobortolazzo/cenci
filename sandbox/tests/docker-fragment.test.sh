@@ -66,6 +66,32 @@ else
     fail "${FRAGMENT} is missing the download.docker.com apt source or its signed-by keyring"
 fi
 
+# ── dev's docker-group membership is baked, not added at runtime ─────────
+# Under sysbox-runc — the only runtime dind ever launches with — the
+# container's rootfs is cloned, so /etc/group edits made *inside* the
+# container are invisible to the Docker daemon's `docker exec -u dev` user
+# resolution. The launcher attaches every agent session with exactly that
+# (assembleExecEnv, watch/internal/sandbox/launcher/launch.go), so the
+# runtime `usermod -aG docker dev` in lib/dind.sh reaches PID 1's own
+# priv-dropped shell but never the agent: the agent lands with groups=dev
+# only and every `docker` call fails with "permission denied while trying to
+# connect to the docker API at unix:///var/run/docker.sock". Image-baked
+# group membership does survive the clone, so the membership has to be
+# established here at build time.
+echo "case: the docker fragment adds dev to the docker group at build time"
+if [[ "${FRAGMENT_CONTENT}" == *"usermod -aG docker dev"* ]]; then
+    pass
+else
+    fail "${FRAGMENT} does not run 'usermod -aG docker dev' — under sysbox-runc a runtime-only group add is invisible to 'docker exec -u dev', so the agent cannot reach the inner daemon's socket"
+fi
+
+echo "case: the docker fragment creates the docker group itself rather than relying on the docker-ce postinst"
+if [[ "${FRAGMENT_CONTENT}" == *"groupadd -f docker"* ]]; then
+    pass
+else
+    fail "${FRAGMENT} does not run 'groupadd -f docker' before adding dev to it — the membership must not depend on the docker-ce package's postinst having created the group"
+fi
+
 echo "case: the docker fragment is USER root / USER dev wrapped like every other fragment"
 if [[ "${FRAGMENT_CONTENT}" == "USER root"* && "${FRAGMENT_CONTENT}" == *"USER dev" ]]; then
     pass
