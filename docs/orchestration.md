@@ -255,27 +255,41 @@ which skill is running.
 `/cenci:configure` generates the whole per-repo `.lazyboards.yml`, including its
 `columns:`, when you answer its board-config question (step 5f — see
 `flow/skills/configure/SKILL.md`). The file is self-contained and needs no other
-config: lazyboards merges scalar fields and the `actions` map across a global and
-a local config file, with local keys winning, so a legacy machine-global
-`~/.config/lazyboards/config.yml` left over from an older cenci install is
-harmless — nothing in it can override what's generated here.
+config: lazyboards merges scalar fields and the `keymaps:` tables across a global
+and a local config file, with local keys winning, so a stray machine-global
+`~/.config/lazyboards/config.yml` is harmless — nothing in it can override what's
+generated here.
+
+**Everything is bound in the `keymaps:` namespace.** `columns:` is the board
+layout — a bare name list, with each column's bindings living under
+`keymaps.columns.<name>` (matched case-insensitively, and applied to the card list
+and the detail panel alike).
 
 The board-level excerpt below — the two agent-launch actions (`C` Claude, `X`
-Codex) and the auto-close `cleanup` — is emitted at the top level of every
-generated `.lazyboards.yml`, outside `columns:`:
+Codex) and the auto-close `cleanup` — is emitted in every generated
+`.lazyboards.yml`. `C`/`X` go in **both** `keymaps.normal` and `keymaps.detail`, so
+they fire whether the card list or the detail panel is focused; `cleanup` is a
+top-level scalar, outside `keymaps:`, because it is not a key binding:
 
 ```yaml
-# Board-level actions (default scope is "card" — they act on the selected card)
-actions:
-  C: { name: Claude, type: shell, command: "tmux new-window cenci open --agent claude" }
-  X: { name: Codex, type: shell, command: "tmux new-window cenci open --agent codex" }
+keymaps:
+  # Board-level agent launchers. Emitted in BOTH tables so they fire whether the
+  # card list or the detail panel is focused.
+  normal:
+    C: { name: Claude, type: shell, command: "tmux new-window cenci open --agent claude" }
+    X: { name: Codex, type: shell, command: "tmux new-window cenci open --agent codex" }
+  detail:
+    C: { name: Claude, type: shell, command: "tmux new-window cenci open --agent claude" }
+    X: { name: Codex, type: shell, command: "tmux new-window cenci open --agent codex" }
 
-# Auto-close a card's agent window when its ticket closes
+# Auto-close a card's agent window when its ticket closes. `cleanup` stays a
+# top-level scalar — it is not a key binding and has no place in `keymaps:`.
 cleanup: "cenci close {number}"
 ```
 
-**Per-column actions** dispatch a workflow onto the selected card. The action key is
-a single uppercase letter (`R`, `D`, `I`); `cenci run <workflow> {number}`
+**Per-column bindings** dispatch a workflow onto the selected card. The generated
+keys are single letters (`R`, `Z`, `I`) — any key of any case can be bound, there
+is no reserved namespace; `cenci run <workflow> {number}`
 builds the `<number>-<skill>` window and launches the agent.
 `cenci run` chooses `refine`/`design`/`implement` from its built-in Claude templates
 with zero extra config. The design workflow — design dispatches on the host, since the
@@ -339,12 +353,17 @@ command, no project path — and is always emitted regardless of whether any pro
 is runnable or testable. Per project, a separate action starts it (**serve**) or
 runs its tests (**test** — `dotnet test`, `npm test`, `go test ./...`,
 `ng test --watch=false`, …) in the same worktree. A one-keypress "run the PR's tests
-before merging" is the payoff. lazyboards now supports multi-key sequences, so serve
+before merging" is the payoff. lazyboards supports multi-key sequences, so serve
 and test keys no longer compete with `W` or with each other for scarce single
 letters: a single-project repo gets plain `S` (serve) and `T` (test); a monorepo gets
-`S`/`T` plus a project mnemonic — `Sb`/`Tb` for a backend project, `Sf`/`Tf` for a
-frontend project, or the project slug's first letter when neither fits — skipping the
-board-level keys `C`/`X` claimed above and never reusing `W`. `Planned` also carries local
+`S`/`T` plus a project mnemonic — `"S b"`/`"T b"` for a backend project,
+`"S f"`/`"T f"` for a frontend project, or the project slug's first letter when
+neither fits — skipping the board-level keys `C`/`X` claimed above and never reusing
+`W`. Sequences are written space-separated (`"S b"`); the concatenated `Sb` spelling
+is a single two-character key, not a sequence.
+A key that is a strict prefix of another key in the same effective table — built-in
+defaults included — is a load-time config error, not a dispatch quirk, so the whole
+file fails to load. `Planned` also carries local
 `E` (Edit plan) and `V` (View plan) actions that open the ticket's saved
 `.plans/<number>-*.md` file in `$EDITOR` and a pager respectively.
 
@@ -353,10 +372,12 @@ to generate one; with an existing file it compares against the recommended actio
 and either suggests the missing actions (e.g. an absent test action) or, when the
 file is already complete, skips silently with a short log line. Because a local
 `columns:` list replaces the global list entirely (it never merges), the generated
-file declares every column and its actions inline: `New` gets a local `R`
-(Refine) action, `Refined` gets local `I` (Implement) and, when `pencil.enabled`
-is on, a gated `D` (Design) action — `cenci run design {number} --no-sandbox`,
-since design dispatches on the host — and `Planned` gets a local `I` (Implement)
+file declares every column and its bindings inline under `keymaps.columns`: `New`
+gets a local `R` (Refine) action, `Refined` gets local `I` (Implement) and, when
+`pencil.enabled` is on, a gated `Z` (Design) action — `cenci run design {number}
+--no-sandbox`, since design dispatches on the host. Design is on `Z`, not `D`:
+`D` is lazyboards' own dispatch panel, and a user binding wins over the built-in
+default, so binding `D` would shadow it. `Planned` gets a local `I` (Implement)
 action so an already-planned ticket can still be manually re-dispatched from the
 board, plus `E` (Edit plan) and `V` (View plan) actions on its saved plan file. `Designed`
 and `Implemented` are labels in the ticket lifecycle but not board columns — only
@@ -365,7 +386,8 @@ runnable projects, `In Review` still carries `W` (Open worktree) — there is no
 Checkout PR fallback beyond it.
 
 **`C` (Claude) and `X` (Codex)** are the two board-level actions in the generated
-`.lazyboards.yml`, at top level. Each opens a fresh agent in a detached tmux window
+`.lazyboards.yml`, bound in `keymaps.normal` and `keymaps.detail`. Each opens a
+fresh agent in a detached tmux window
 via the sandbox launcher (`cenci open --agent claude`, `cenci open --agent codex` — each
 agent's own default model, not a pinned shortcut) so you can start
 an ad-hoc session from the board without leaving it. They take no card variables,
@@ -374,7 +396,7 @@ so they work whether or not a card is selected.
 The dispatch loop is no longer a board action — toggle it from the CLI with
 `cenci dispatch loop on|off` (the board still reflects its state live; see the
 dispatch panel below). Likewise there is no built-in jump-to-agent or annotate
-action; the `{comment}` **comment mode** (Alt+Shift on any key that reads
+action; the `{comment}` **comment mode** (`alt+key` on any key that reads
 `{comment}`) and the `{window}` variable remain available if you want to add your
 own board-level action for either.
 
@@ -382,7 +404,9 @@ Available template variables: `{number}`, `{title}` (slugified), `{tags}`
 (comma-joined labels), `{session}` (`<number>-<slug>`, capped at `session_max_length`),
 `{window}` (live cenci window name, falling back to `{session}`), `{comment}`,
 `{repo_owner}`, `{repo_name}`, `{provider}` — plus, in `scope: pr` actions only,
-`{pr_branch}`, `{pr_number}`, `{pr_url}`, and `{pr_title}`. Actions default to
+`{pr_branch}`, `{pr_number}`, `{pr_url}`, `{pr_title}`, and `{pr_worktree}` (the
+absolute path of the PR branch's registered git worktree, which every generated
+In Review action uses). Actions default to
 `scope: card`; `scope: board` actions (no selected card) may not use card- or
 PR-specific variables. See the
 [lazyboards README](https://github.com/matteobortolazzo/lazyboards#template-variables)
@@ -393,9 +417,42 @@ inside an outer double-quoted string can still carry `$(...)`, backticks, or `\"
 through to the shell. Prefer `{pr_number}` (always a plain integer) for any
 custom `scope: pr` action that shells out.
 
+### Trust: the generated file is inert until you trust it
+
+A repo-local `.lazyboards.yml` is attacker-controlled the moment you clone someone
+else's repo, so lazyboards gates shell execution behind an explicit trust grant.
+An untrusted local file still loads and its non-executing settings still apply
+(columns, labels, keymap rebinds onto built-in commands), but **every `type: shell`
+binding and the `cleanup:` line are silently stripped** — with a notice — before
+they can run. cenci's generated file is entirely shell actions plus `cleanup`, so
+on a fresh clone it comes up completely inert: every key does nothing and no card
+window is ever reaped.
+
+The fix is one argument-free command, run once from the repo root:
+
+```bash
+lazyboards trust     # `lazyboards untrust` revokes it
+```
+
+Two properties matter for a committed, regenerated file like this one:
+
+- **Trust is keyed on the file's exact content hash, not its path.** A single
+  changed byte — a comment, a whitespace tweak, a reviewer's edit to the configure
+  PR — produces a different hash and drops back to untrusted. So trust must be
+  re-granted after the configure PR merges if review touched the file, and after
+  any later `/cenci:configure` regeneration. Because the key is content and not
+  path, the same bytes are trusted from any checkout or worktree of the repo.
+- **It is per-machine and per-person.** The trust store is
+  `~/.config/lazyboards/trust.yml`; committing the config grants nobody anything.
+  Every teammate runs `lazyboards trust` once on their own clone. The global
+  `~/.config/lazyboards/config.yml` is never gated — you wrote it yourself.
+
+See the [lazyboards README](https://github.com/matteobortolazzo/lazyboards#trust-model)
+for the full model.
+
 ## Fleet dispatch from the board
 
-Pressing `d` in lazyboards opens the dispatch panel for the current repo: it shows
+Pressing `D` in lazyboards opens the dispatch panel for the current repo: it shows
 enrollment state (`Enter` toggles it, backed by `cenci dispatch enroll|unenroll`)
 and a read-only line for the daemon-owned dispatch loop. The board's `Enter` toggle
 never passes `--session`, so a repo enrolled from the panel has no tmux session set
@@ -409,7 +466,7 @@ the loop (and daemon reachability) live. Concurrency, quiet hours, and budgets l
 cenci's own `dispatch` config block — see the
 [cenci-watch README](../watch/README.md#configuration-1).
 `/cenci:configure` is also a fleet dispatch enrollment entry point, alongside the board's
-`d` panel and the CLI verbs above — it asks for this repo's enrollment and required
+`D` panel and the CLI verbs above — it asks for this repo's enrollment and required
 per-repo session and delegates every write to `cenci dispatch enroll`.
 
 ## Dispatching into the sandbox

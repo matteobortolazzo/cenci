@@ -59,8 +59,8 @@
       "lintCommand": "make lint",
       "gateCommand": "make test",
       "serveCommand": "go run .",
-      "boardKey": "Rw",
-      "testKey": "Tw",
+      "boardKey": "R w",
+      "testKey": "T w",
       "automerge": {
         "protectedPaths": [
           "watch/internal/",

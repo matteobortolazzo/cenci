@@ -528,9 +528,9 @@ Bash call, per `cenci:shell-rules`) and branch:
     narrower focus or a skip, never authorizes silently regenerating
     `.lazyboards.yml` without asking again this session: "Generate a per-repo
     `.lazyboards.yml` for the lazyboards board? (Wires Refine/Implement keybindings —
-    and, when `pencil.enabled` is on, a Design keybinding — onto the New/Refined/
-    Planned columns, Edit-plan and View-plan keybindings on Planned that open the
-    ticket's saved plan in `$EDITOR` / a pager, plus In Review actions that open a
+    and, when `pencil.enabled` is on, a Design keybinding on `Z` — onto the New/
+    Refined/Planned columns, Edit-plan and View-plan keybindings on Planned that open
+    the ticket's saved plan in `$EDITOR` / a pager, plus In Review actions that open a
     PR's registered worktree in a tmux window (`W`) and, per project, serve or test it
     with a mnemonic key sequence — reviewing a PR becomes a couple of keypresses on
     the card.)"
@@ -569,50 +569,72 @@ Bash call, per `cenci:shell-rules`) and branch:
    As with serve, only the **runner invocation** is embedded — never the raw `test`
    script *contents* from `package.json`.
 
-   **Key assignment**: lazyboards now supports multi-key sequences (e.g. `Sb`, `Sf`),
-   not just single letters, so per-project serve/test actions no longer need to
-   compete for a scarce pool of single uppercase letters.
+   **Key assignment**: any key, of any case, can carry a binding — there is no
+   reserved namespace — and lazyboards supports multi-key sequences, not just
+   single keys, so per-project serve/test actions never have to compete for a
+   scarce pool. A sequence is written in
+   **canonical space-separated form and quoted** — `"S b"`, not `Sb`, which would
+   parse as a single two-character key rather than a two-key sequence.
 
    **`W` is reserved board-wide for Open worktree** — a single action, always emitted
    on `In Review`, that opens the PR's registered worktree in a tmux window with a
    plain shell and runs no command (see the generated example below). `W` is never
    assigned to serve, test, or any other action.
 
-   **Prefix-dispatch constraint**: lazyboards dispatches on the shortest matching
-   key — if any standalone single-letter key (e.g. a lone `S`) is bound anywhere in
-   a column's merged action set (its own actions plus every board-level top-level
-   `actions:` entry, default or user-added), no other key sequence in that column
-   may start with that same letter, since the single-letter binding fires before a
-   longer sequence can be typed. Before assigning the `S`/`T` mnemonic prefixes
-   below, check the existing top-level `actions:` map — including any user-added
-   custom action such as a manually bound `S: Sync` — for a standalone
-   single-letter key sharing the leading letter. If one is claimed, pick a
-   different leading letter for that project's serve/test group instead (e.g. `R`
-   for "Run") and call out the substitution explicitly in the AskUserQuestion
-   mapping prompt below so the user can approve or rename it.
+   **Keys lazyboards claims by default.** A user binding wins over a built-in
+   default, so binding one of these silently replaces the built-in command rather
+   than erroring. Never assign any of them:
+   `?` `q` `n` `e` `c` `o` `r` `p` `x` `d` `P` `m` `A` `G` `D` `s` `f` `a` `/`
+   `j` `k` `l` `h` `tab` `shift+tab` `1`–`9` `ctrl+c`, plus the `g` prefix (`g a`,
+   `g r`). Of the keys cenci generates, only `D` collides — it is lazyboards' own
+   dispatch panel (`view.dispatch`), which is why **Design is bound to `Z`**.
+   `R I E V W C X S T Z` are all free.
+
+   **Never bind or unbind `ctrl+c`.** It always force-quits, ahead of any table
+   lookup; a `ctrl+c` token anywhere in any key or sequence — even as an explicit
+   `~` unbind — is a load-time config error that stops the whole config from
+   loading.
+
+   **Prefix constraint**: a bound key that is a strict, whitespace-boundary prefix
+   of another bound key in the same effective table is a **load-time config error**
+   — lazyboards refuses to load the file at all, rather than the shorter key merely
+   losing at dispatch time. The effective table is the fully resolved namespace:
+   built-in defaults **plus** the user's `keymaps.<mode>` table **plus** that
+   column's `keymaps.columns.<name>` overlay. So the built-in defaults are a prefix
+   source too — a `d`-prefixed sequence (`"d x"`) is invalid because the default
+   `d` (`card.delete`) is already bound, and the `g` prefix is unavailable in the
+   other direction because `g a`/`g r` already exist. Before assigning the `S`/`T`
+   mnemonic prefixes below, check the whole resolved namespace — the default keys
+   above, `keymaps.normal`/`keymaps.detail`, and the target column's own overlay,
+   including any user-added binding such as a manually bound `S: Sync` — for a
+   standalone key sharing the leading letter. If one is claimed, pick a different
+   leading letter for that project's serve/test group instead (e.g. `R` for "Run")
+   and call out the substitution explicitly in the AskUserQuestion mapping prompt
+   below so the user can approve or rename it.
 
    Assign **serve** keys as `S` followed by a project-specific mnemonic letter:
-   pick whichever second letter best identifies the project for its type — e.g. `Sb`
-   for a backend/API project, `Sf` for a frontend project, or the first letter of the
-   project slug when neither fits (e.g. `Sw` for `web-client`, `Sa` for `admin`). For
-   a single-project repo, plain `S` is enough — there's nothing to disambiguate. On a
-   mnemonic collision between two projects, fall back to the next letter of that
-   project's slug.
+   pick whichever second letter best identifies the project for its type — e.g.
+   `"S b"` for a backend/API project, `"S f"` for a frontend project, or the first
+   letter of the project slug when neither fits (e.g. `"S w"` for `web-client`,
+   `"S a"` for `admin`). For a single-project repo, plain `S` is enough — there's
+   nothing to disambiguate. On a mnemonic collision between two projects, fall back
+   to the next letter of that project's slug.
 
-   Assign **test** keys the same way: plain `T` for a single testable project, or `T`
-   + mnemonic (`Tb`, `Tf`, …) for multiple, following the same mnemonic rule as serve.
+   Assign **test** keys the same way: plain `T` for a single testable project, or
+   `T` + mnemonic (`"T b"`, `"T f"`, …) for multiple, following the same mnemonic
+   rule as serve.
 
-   Never use `C` or `X` (the generated file's own top-level `actions:` map claims
-   them for the Claude/Codex board-level launch actions), never use `E` or `V` (the
-   Planned column's Edit-plan and View-plan actions claim them), never reuse a key
-   or key sequence already assigned to a serve action, never repurpose `W` for
-   anything but Open worktree, and never assign a leading letter already bound as a
-   standalone single-letter action anywhere in the file per the prefix-dispatch
-   constraint above.
+   Never use `C` or `X` (the generated file's own `keymaps.normal`/`keymaps.detail`
+   tables claim them for the Claude/Codex board-level launch actions), never use `E`
+   or `V` (the Planned column's Edit-plan and View-plan actions claim them), never
+   use `Z` (Design on `Refined`), never reuse a key or key sequence already assigned
+   to a serve action, never repurpose `W` for anything but Open worktree, and never
+   assign a leading letter already bound as a standalone key anywhere in the
+   resolved namespace per the prefix constraint above.
 
    Present the proposed mapping with AskUserQuestion before generating, e.g.:
-   "Proposed In Review actions: `W` → open PR worktree, `Sb` → api serve
-   (`dotnet run`), `Sf` → web-client serve (`ng serve`), `Tf` → web-client tests
+   "Proposed In Review actions: `W` → open PR worktree, `S b` → api serve
+   (`dotnet run`), `S f` → web-client serve (`ng serve`), `T f` → web-client tests
    (`ng test --watch=false`). Generate these?" Options: "Yes — use this mapping
    (Recommended)", "Change keys or drop projects" (then re-ask with the user's
    adjustments; enforce the reserved-key exclusions above).
@@ -1525,43 +1547,62 @@ For each MCP selected in question 5:
    Config* branch instead runs the **Existing config: suggest or skip** sub-step at
    the end of this section; the generation format below is what both paths write:
 
-   Write `.lazyboards.yml` at the repo root with the confirmed key mapping. The
-   critical lazyboards behavior to honor: a local `columns:` list **replaces** the
-   global column list entirely — it **never merges**. Because the generated file
-   must stand alone, it never relies on inheritance from a global config cenci no
-   longer creates: every emitted column carries its own actions explicitly. `New`,
-   `Refined`, and `Planned` each get local Refine/Implement (and, for `Refined`, a
-   pencil-gated Design) actions, and `Planned` additionally gets an `E` (Edit plan)
-   action. `Designed` and `Implemented` are dropped from the generated file entirely
-   — they are labels in the ticket lifecycle, not board columns.
+   Write `.lazyboards.yml` at the repo root with the confirmed key mapping. Two
+   lazyboards behaviors to honor:
+
+   - A local `columns:` list **replaces** the global column list entirely — it
+     **never merges**. Because the generated file must stand alone, it never relies
+     on inheritance from a global config cenci no longer creates: every column the
+     board should show is declared here. `Designed` and `Implemented` are dropped
+     from the generated file entirely — they are labels in the ticket lifecycle,
+     not board columns.
+   - **Every key binding goes in the `keymaps:` namespace.** Per-column bindings
+     live under `keymaps.columns.<name>` (matched case-insensitively); board-level
+     bindings go in **both** `keymaps.normal` and `keymaps.detail`, since
+     `keymaps.normal` alone would silently kill them while the detail panel is
+     focused. `columns:` itself is the board layout — a bare name list.
 
    ```yaml
    # Generated by /cenci:configure — per-repo lazyboards board config. This file
    # is self-contained and needs no other config: a local `columns:` list REPLACES
-   # the global column list entirely — it never merges — so every column below
-   # carries its actions explicitly, and the board-level actions and `cleanup`
-   # below are declared here too.
+   # the global column list entirely — it never merges — and every key binding
+   # below lives in the `keymaps:` namespace.
    columns:
      - name: New
-       actions:
+     - name: Refined
+     - name: Planned
+     - name: In Review
+
+   keymaps:
+     # Board-level agent launchers. Emitted in BOTH tables so they fire whether the
+     # card list or the detail panel is focused.
+     normal:
+       C: { name: Claude, type: shell, command: "tmux new-window cenci open --agent claude" }
+       X: { name: Codex, type: shell, command: "tmux new-window cenci open --agent codex" }
+     detail:
+       C: { name: Claude, type: shell, command: "tmux new-window cenci open --agent claude" }
+       X: { name: Codex, type: shell, command: "tmux new-window cenci open --agent codex" }
+
+     # Per-column overlays — these apply to normal + detail only, matched
+     # case-insensitively against the column names declared above.
+     columns:
+       New:
          R:
            name: Refine
            type: shell
            command: "cenci run refine {number}"
 
-     - name: Refined
-       actions:
+       Refined:
          I:
            name: Implement
            type: shell
            command: "cenci run implement {number}"
-         D:
+         Z:
            name: Design
            type: shell
            command: "cenci run design {number} --no-sandbox"
 
-     - name: Planned
-       actions:
+       Planned:
          I:
            name: Implement
            type: shell
@@ -1575,30 +1616,25 @@ For each MCP selected in question 5:
            type: shell
            command: 'f=$(ls .plans/{number}-*.md 2>/dev/null | head -1); [ -n "$f" ] && tmux new-window -n plan-{number} "${PAGER:-less} \"$f\""'
 
-     - name: In Review
-       actions:
+       "In Review":
          W:
            name: Open worktree
            type: shell
            scope: pr
            command: "tmux new-window -d -n pr-{pr_number} -c {pr_worktree}"
-         S:
+         "S w":
            name: Serve web-client worktree
            type: shell
            scope: pr
            command: "tmux new-window -d -n pr-{pr_number} -c {pr_worktree}/'apps/web-client' \"ng serve\""
-         T:
+         "T w":
            name: Test web-client worktree
            type: shell
            scope: pr
            command: "tmux new-window -d -n pr-{pr_number} -c {pr_worktree}/'apps/web-client' \"ng test --watch=false\""
 
-   # Board-level actions (default scope is "card" — they act on the selected card)
-   actions:
-     C: { name: Claude, type: shell, command: "tmux new-window cenci open --agent claude" }
-     X: { name: Codex, type: shell, command: "tmux new-window cenci open --agent codex" }
-
-   # Auto-close a card's agent window when its ticket closes
+   # Auto-close a card's agent window when its ticket closes. `cleanup` stays a
+   # top-level scalar — it is not a key binding and has no place in `keymaps:`.
    cleanup: "cenci close {number}"
    ```
 
@@ -1607,10 +1643,12 @@ For each MCP selected in question 5:
      worktree in a tmux window with a plain shell and runs no command — it never
      carries a project path or a serve/test command, even in a monorepo. `W` is
      never reused for serve, test, or any other action.
-   - **`Refined`'s `D` (Design) action is gated on the single top-level
+   - **`Refined`'s `Z` (Design) action is gated on the single top-level
      `pencil.enabled` field** (from `.cenci/config.json` — never a per-project
-     field): emit `D` only when `pencil.enabled` is `true`; when it is `false` or
-     absent, omit `D` and keep only `I` on that column.
+     field): emit `Z` only when `pencil.enabled` is `true`; when it is `false` or
+     absent, omit `Z` and keep only `I` on that column. Design is on `Z`, not `D`:
+     `D` is lazyboards' built-in dispatch panel (`view.dispatch`), and a user
+     binding wins over the default, so binding `D` would shadow the panel.
    - `Planned` gets a local `I` (Implement) action too, so a ticket that already
      passed planning can still be manually re-dispatched straight from the board, plus
      local `E` (Edit plan, opens in `$EDITOR`) and `V` (View plan, opens in
@@ -1621,22 +1659,25 @@ For each MCP selected in question 5:
      `{number}` is a validated integer, safe to interpolate.
    - `Designed` and `Implemented` are **never** re-emitted as generated columns in
      `.lazyboards.yml` — only `New`, `Refined`, `Planned`, and `In Review` appear.
-   - `C` and `X` are board-level Claude/Codex launch actions, emitted at **top
-     level, outside `columns:`**, in the generated file — never inside a column's
-     local `actions:` (they are board-level, not per-column). lazyboards merges the
-     `actions` map and scalar fields across a global and a local config file, with
-     **local keys winning**, so the generated file is self-contained and a legacy
-     `~/.config/lazyboards/config.yml` cannot conflict with it. `cleanup` is a
-     top-level scalar for the same reason: it is always emitted here; delete the
-     line to opt out.
+   - `C` and `X` are board-level Claude/Codex launch actions, emitted under
+     **`keymaps.normal` and `keymaps.detail`** — never under
+     `keymaps.columns.<name>` (they are board-level, not per-column). lazyboards
+     merges `keymaps:` tables and scalar fields across a global and a local config
+     file, with **local keys winning** (and the merged user config always winning
+     over the built-in defaults), so the generated file is self-contained and a
+     stray `~/.config/lazyboards/config.yml` cannot conflict with it. `cleanup` is
+     a top-level scalar for the same reason: it is always emitted here, outside
+     `keymaps:`; delete the line to opt out.
    - One `In Review` **serve** action per runnable project, using the confirmed key
-     (`S` alone for a single runnable project, or `S` + mnemonic — `Sb`, `Sf`, … —
-     for multiple, per the Key assignment rules above) and serve command; action name
-     `Serve <slug> worktree`. One `In Review` **test** action per testable project,
-     using the confirmed test key (`T` alone, or `T` + mnemonic for multiple) and test
-     command; action name `Test <slug> worktree`. All three of `W`, serve, and test
-     use the identical tmux `-c {pr_worktree}` wrapper — only the command, working
-     directory, and key differ.
+     (`S` alone for a single runnable project, or the `S` + mnemonic sequence —
+     `"S b"`, `"S f"`, … — for multiple, per the Key assignment rules above) and
+     serve command; action name `Serve <slug> worktree`. One `In Review` **test**
+     action per testable project, using the confirmed test key (`T` alone, or the
+     `T` + mnemonic sequence for multiple) and test command; action name
+     `Test <slug> worktree`. All three of `W`, serve, and test use the identical
+     tmux `-c {pr_worktree}` wrapper — only the command, working directory, and key
+     differ. Sequence keys are written in canonical **space-separated** form and
+     quoted (`"S w"`), never concatenated (`Sw`).
    - Use tmux's start-directory option rather than embedding the path in a nested
      `cd` command. **Single project**: `tmux new-window -d -n pr-{pr_number} -c
      {pr_worktree} "<serve-command>"`. **Monorepo**: append the project path as a
@@ -1658,14 +1699,33 @@ For each MCP selected in question 5:
      doesn't depend on any project being runnable or testable. If no project in the
      repo has a detected serve or test command, `In Review` still carries just `W`:
      ```yaml
-     - name: In Review
-       actions:
-         W:
-           name: Open worktree
-           type: shell
-           scope: pr
-           command: "tmux new-window -d -n pr-{pr_number} -c {pr_worktree}"
+     keymaps:
+       columns:
+         "In Review":
+           W:
+             name: Open worktree
+             type: shell
+             scope: pr
+             command: "tmux new-window -d -n pr-{pr_number} -c {pr_worktree}"
      ```
+   - **Trust (run after writing the file).** A repo-local `.lazyboards.yml` is
+     attacker-controlled, so lazyboards silently strips every `type: shell` binding
+     **and** the `cleanup:` line until the file's exact content is trusted — and the
+     generated file is entirely shell actions plus `cleanup`, so it is completely
+     inert until then. After the write, ask via `AskUserQuestion`: "Run `lazyboards
+     trust` now so the generated shell actions are honored?" Options: "Yes — run
+     `lazyboards trust` (Recommended)", "No — I'll run it myself". On Yes, run it as
+     its **own** Bash call from the repo root:
+     ```bash
+     lazyboards trust
+     ```
+     **Either way, always print the caveat**: trust is keyed to the file's exact
+     content, not its path, so it must be re-granted after the configure PR merges
+     if review changed a single byte, and again after any later regeneration of the
+     file. A teammate cloning the repo has to run `lazyboards trust` once themselves.
+     (Running `lazyboards trust` inside the worktree trusts the worktree copy's
+     content; the same content at the repo root is trusted too, since the trust store
+     is keyed by content hash, not path.)
    - **Existing config: suggest or skip** (the branch taken from *Board Config*
      above when `.lazyboards.yml` already exists — question 10 is **not** asked and
      the file is **not** blindly overwritten). This file-exists conflict check fires
@@ -1679,45 +1739,55 @@ For each MCP selected in question 5:
         pencil-gated Design on `Refined` (recommended command:
         `cenci run design {number} --no-sandbox`), Edit-plan (`E`) and View-plan (`V`)
         actions on `Planned`, an unconditional `W` (Open worktree) on `In Review`, and
-        per runnable/testable project a serve (`S`/`Sb`/`Sf`/…) and test
-        (`T`/`Tb`/`Tf`/…) In Review action. Outside `columns:`, at top level, it also includes the board-level `C`/`X` launch actions and `cleanup: "cenci close {number}"`.
-     2. Compute the **delta** = recommended actions absent from the existing file.
+        per runnable/testable project a serve (`S`/`"S b"`/`"S f"`/…) and test
+        (`T`/`"T b"`/`"T f"`/…) In Review action. Outside the per-column tables it also includes the board-level `C`/`X` launch actions and `cleanup: "cenci close {number}"`.
+     2. Compute the **delta** = recommended actions absent from the existing file,
+        read from its `keymaps.normal`/`keymaps.detail`/`keymaps.columns.<name>`
+        tables. A concatenated sequence key (`Sw`) and its canonical form (`"S w"`)
+        are the same key, not two.
         Match by column + action intent (name/command) — or, for the column-less
-        top-level `C`/`X`/`cleanup` actions, by intent alone — **not** by raw key,
+        board-level `C`/`X`/`cleanup` actions, by intent alone — **not** by raw key,
         so a user's custom key binding is respected rather than flagged as
         "missing". Before assigning a key to any delta action, apply the
-        prefix-dispatch constraint from the key-assignment step above: if the
-        existing file already binds a standalone single-letter key (default or
-        user-added, e.g. a custom `S: Sync` board-level action) that would
-        prefix-collide with the proposed `S`/`T` key, pick a different leading
-        letter for that action instead.
+        prefix constraint from the key-assignment step above: if the resolved
+        namespace already binds a standalone key (built-in default, or user-added
+        such as a custom `S: Sync` board-level action) that would prefix-collide
+        with the proposed `S`/`T` key, pick a different leading letter for that
+        action instead.
         - **Design-only exception (narrow, do not generalize to other actions)**:
-          an existing `Refined.D` (Design) action whose command lacks
-          `--no-sandbox` still matches by intent, so it is not flagged as
-          "missing" — but it counts toward the delta as an **update** (not an
-          "add"), since its command must become
-          `cenci run design {number} --no-sandbox`. No other action's command is
-          diff-compared this way.
+          an existing Design action whose command lacks `--no-sandbox` still
+          matches by intent, so it is not flagged as "missing" — but it counts
+          toward the delta as an **update** (not an "add"), since its command must
+          become `cenci run design {number} --no-sandbox`. No other action's
+          command is diff-compared this way. Separately, a Design action bound to
+          `D` is always an **update** to `Z` regardless of its command, since `D`
+          is lazyboards' built-in dispatch panel.
      3. **Delta non-empty** → present the concrete additions via `AskUserQuestion`,
         e.g. "`.lazyboards.yml` is missing a PR-worktree test action: `T` → run tests
         (`dotnet test`) in the PR worktree. Add it?" — or, when a leading letter had
         to be substituted for the reason above, surface it explicitly, e.g.
-        "`.lazyboards.yml`'s custom `S` (Sync) action would block `Sw` (serve
-        watch) — proposing `Rw` instead. Add it?" Options: "Apply suggested
+        "`.lazyboards.yml`'s custom `S` (Sync) action would block `"S w"` (serve
+        watch) — proposing `"R w"` instead. Add it?" Options: "Apply suggested
         additions (Recommended)", "Overwrite fully — regenerate from scratch", "Keep
         as-is — no changes", "Show existing — display the current file". **Apply** and
         **Overwrite** both rewrite the whole file — a local `columns:` list *replaces*
         the global list (it never merges, so a partial in-place patch is impossible):
         merge the user's existing custom actions with the missing recommended ones,
-        including the top-level `actions:` map (`C`/`X`) and `cleanup:` scalar, and
+        including the board-level `C`/`X` bindings and the `cleanup:` scalar, and
         carry the existing top-level `provider:`, `repo:`, and `project:` identity
         lines (if present) through unchanged — they are project-identity keys
         lazyboards only reads from the local file. **Keep as-is** leaves the file
-        untouched.
+        untouched. **Both rewrite paths always emit `keymaps:` form** — including
+        for the user's own custom actions carried over, whose concatenated sequence
+        keys (`Rw`) are rewritten space-separated (`"R w"`).
      4. **Delta empty** → do **not** prompt. Emit a small log line
         (`.lazyboards.yml already covers all recommended actions — no changes.`) and
-        move on. Either way, record `lazyboards.enabled: true` in config.json, since a
-        working board config exists.
+        move on.
+
+     In every case above, record `lazyboards.enabled: true` in config.json, since a
+     working board config exists. Whenever this branch **rewrote** the file (case 3),
+     run the trust sub-step above as well — a rewrite changes the file's bytes, so
+     any trust previously granted for it is void.
    - **Committed, not ignored**: `.lazyboards.yml` is committed (same reasoning as
      `.cenci/Dockerfile` — team-shared and reviewed; `{pr_worktree}` keeps it
      portable). Do **not** add it to `.gitignore`.
@@ -1854,7 +1924,8 @@ The `lazyboards` field is present when question 10 was answered Yes **or** a
 `.lazyboards.yml` already existed (the suggest-or-skip branch also records
 `enabled: true`). Schema:
 - `lazyboards.enabled` — `true` if a board config exists (generated or pre-existing); omit `lazyboards` entirely when the user declines question 10 and no file exists (same pattern as `cicd`/`pencil`/`sandbox`)
-- **Single project**: `lazyboards.serveCommand` + `lazyboards.boardKey` record the generated serve action, and `lazyboards.testCommand` + `lazyboards.testKey` record the generated test action (command and its key — a single letter, or a multi-key mnemonic sequence like `Sb`/`Tf` in a monorepo). Omit the test pair when the project is not testable. `W` (Open worktree) is never recorded here — it carries no command and isn't project-specific.
+- **Single project**: `lazyboards.serveCommand` + `lazyboards.boardKey` record the generated serve action, and `lazyboards.testCommand` + `lazyboards.testKey` record the generated test action (command and its key — a single letter, or a multi-key mnemonic sequence like `"S b"`/`"T f"` in a monorepo). Omit the test pair when the project is not testable. `W` (Open worktree) is never recorded here — it carries no command and isn't project-specific.
+- `boardKey`/`testKey` are written in lazyboards' **canonical space-separated** sequence form (`"S b"`, `"T f"`) — the same spelling the generated `.lazyboards.yml` uses. A concatenated value read from `existingConfig` (`"Sb"`, `"Tf"`) is the **same key**, not a different one: normalize it to the space-separated form on write rather than treating it as a distinct binding or as a key collision. A single-letter key (`"S"`, `"T"`) is already canonical and is written unchanged.
 - **Monorepo**: `serveCommand`/`boardKey` and `testCommand`/`testKey` live on each project entry in the `projects` array instead (a project gets the serve pair only when runnable and the test pair only when testable), and the top-level `lazyboards` field carries only `enabled`
 - These recorded values are advisory: the suggest-or-skip analyzer re-derives serve/test commands from the derivation tables above, so a config missing them still works.
 
@@ -1940,8 +2011,8 @@ legacy one.
       "lintCommand": "dotnet format --verify-no-changes",
       "gateCommand": "dotnet build && dotnet test",
       "serveCommand": "dotnet run",
-      "boardKey": "Sb",
-      "testKey": "Tb"
+      "boardKey": "S b",
+      "testKey": "T b"
     },
     {
       "slug": "web-client",
@@ -1955,8 +2026,8 @@ legacy one.
       "gateCommand": "npm run build && npm test -- --watch=false",
       "designPath": "apps/web-client/designs/",
       "serveCommand": "ng serve",
-      "boardKey": "Sf",
-      "testKey": "Tf"
+      "boardKey": "S f",
+      "testKey": "T f"
     }
   ],
   "lazyboards": {
@@ -2159,7 +2230,7 @@ When migrating from an older config that has `ticketSystem`, `prSystem`, `ticket
    rm -f ${TMPDIR:-/tmp}/cenci/cenci-configure-<slug>-pr-body.md
    ```
 
-Report what was created and suggest next steps (e.g., "Try `/cenci:refine <ticket-id>` on a ticket"), including the PR URL from step 7. If question 14 (`### Autonomy Settings`) scaffolded an `automerge` block this run, say so explicitly and flag it for review, then point at the fleet-side next steps: `cenci dispatch plan-refined on` (once `planning.autonomy` is `lean` on `origin/main`) and `cenci automerge on` (once the scaffolded block has been reviewed) — the same verbs named in `### Autonomy Settings`'s own "Next step" block. If `sandbox.enabled` is `true`, mention the generated `.cenci/Dockerfile` and that `cenci sandbox build` (run from inside the repo, after the PR merges) builds the repo's own tailored image on top of the shared base. If `lazyboards.enabled` is `true`, list the generated `.lazyboards.yml` In Review actions with their keys, serve, and test commands (e.g., "`W` serves web-client's PR worktree with `ng serve`, `T` runs its tests with `ng test --watch=false`") and point at `docs/orchestration.md` for the board recipe. When the suggest-or-skip branch ran instead, report what happened (added actions, or "already complete — no changes"). If `sandbox.baseVersion` resolved to `null` (unresolved — see the baseVersion resolution in step 5e), the chat summary must explicitly say so (e.g., "Base version could not be auto-detected — see `sandbox/README.md` to pin `BASE_VERSION` manually") rather than leaving it only as an inline Dockerfile comment, so a user who doesn't open the generated file still learns the base version wasn't pinned.
+Report what was created and suggest next steps (e.g., "Try `/cenci:refine <ticket-id>` on a ticket"), including the PR URL from step 7. If question 14 (`### Autonomy Settings`) scaffolded an `automerge` block this run, say so explicitly and flag it for review, then point at the fleet-side next steps: `cenci dispatch plan-refined on` (once `planning.autonomy` is `lean` on `origin/main`) and `cenci automerge on` (once the scaffolded block has been reviewed) — the same verbs named in `### Autonomy Settings`'s own "Next step" block. If `sandbox.enabled` is `true`, mention the generated `.cenci/Dockerfile` and that `cenci sandbox build` (run from inside the repo, after the PR merges) builds the repo's own tailored image on top of the shared base. If `lazyboards.enabled` is `true`, list the generated `.lazyboards.yml` In Review actions with their keys, serve, and test commands (e.g., "`W` opens web-client's PR worktree, `S w` serves it with `ng serve`, `T w` runs its tests with `ng test --watch=false`") and point at `docs/orchestration.md` for the board recipe. Repeat the trust caveat here too, since this run's file ships as a PR: the generated shell actions and `cleanup` stay inert until `lazyboards trust` is run against the file's exact content, so trust must be re-granted after the PR merges if review changed a byte — and every teammate runs it once on their own clone. When the suggest-or-skip branch ran instead, report what happened (added actions, migrated to `keymaps:`, or "already complete — no changes"). If `sandbox.baseVersion` resolved to `null` (unresolved — see the baseVersion resolution in step 5e), the chat summary must explicitly say so (e.g., "Base version could not be auto-detected — see `sandbox/README.md` to pin `BASE_VERSION` manually") rather than leaving it only as an inline Dockerfile comment, so a user who doesn't open the generated file still learns the base version wasn't pinned.
 
 ### Board lifecycle labels
 
