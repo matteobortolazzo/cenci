@@ -128,12 +128,31 @@ the tree, not because either one carries an attribution banner:
 
 ## PR comments: banner only, no marker
 
-Two call sites post to a **PR** thread rather than the ticket's issue
-thread — `skills/review/SKILL.md`'s Phase 4 report and
-`skills/address-review/SKILL.md`'s general PR comment. Both carry the
+Three call sites post to a **PR** thread rather than the ticket's issue
+thread — `skills/review/SKILL.md`'s Phase 4 report,
+`skills/address-review/SKILL.md`'s general PR comment, and `watch`'s
+post-merge automerge attribution comment
+(`watch/internal/babysit/attribution.go`, #1049). All three carry the
 attribution banner but no `<!-- cenci-<kind> -->` marker. The marker
 invariant this doc documents is issue-thread-scoped: `classifyComments`
 (`watch/internal/dispatch/resume.go`) only ever scans
 `repos/<owner>/<repo>/issues/<number>/comments` on the ticket itself, never a
 PR's own comment thread, so a marker on a PR comment would never be read by
 any consumer — it would be inert weight with no compensating benefit.
+
+The automerge comment is the first PR-thread call site outside `flow/skills/`.
+It follows this doc's banner convention rather than `watch`'s own
+`cenciMarkerPrefix` convention precisely because it posts to a PR thread,
+where the marker half of `watch`'s convention has no consumer either. Its
+banner names the supervisor rather than a skill, since no `/cenci:<skill>`
+invocation produced it:
+
+```markdown
+> 🤖 **cenci** — merged automatically by `cenci babysit` (automerge policy). No human approved this merge.
+```
+
+It is also the one call site that states the not-a-trust-signal rule in the
+comment body itself. Every other banner is read by a human already in the loop;
+this one is read by someone auditing a merge that happened with no human in the
+loop at all, which is exactly the reader most likely to mistake a public,
+forgeable banner for proof of who merged.

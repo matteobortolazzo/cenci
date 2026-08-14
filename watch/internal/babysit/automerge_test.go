@@ -883,6 +883,7 @@ func TestTickIssuesAutomergeWhenGreenLabeledAndWithinPolicy(t *testing.T) {
 	script = append(script,
 		scriptedCall{out: "Merged pull request #42 (o/r)"}, // gh pr merge, zero exit
 		scriptedCall{out: `{"number":42,"title":"Change","state":"MERGED","headRefName":"feature","headRefOid":"abc","baseRefName":"main","mergeable":"MERGEABLE","isDraft":false,"changedFiles":1,"additions":5,"deletions":2,"files":[{"path":"watch/internal/babysit/x.go"}],"url":"https://example/pr/42","closingIssuesReferences":[{"number":9}]}`}, // post-merge verification refetch
+		scriptedCall{out: "https://example/pr/42#issuecomment-1"}, // #1049: the post-merge attribution comment
 	)
 	withScriptedCommands(t, script, &calls)
 
@@ -1378,8 +1379,9 @@ func TestTickAutomergePostMergeVerificationConfirmsMerged(t *testing.T) {
 	script := automergeFirstPassScript()
 	script = append(script, automergeGreenRecheckScript()...)
 	script = append(script,
-		scriptedCall{out: "Merged pull request #42 (o/r)"}, // gh pr merge, zero exit
-		scriptedCall{out: mergedPR},                        // the required post-merge refetch
+		scriptedCall{out: "Merged pull request #42 (o/r)"},        // gh pr merge, zero exit
+		scriptedCall{out: mergedPR},                               // the required post-merge refetch
+		scriptedCall{out: "https://example/pr/42#issuecomment-1"}, // #1049: the post-merge attribution comment
 	)
 	withScriptedCommands(t, script, &calls)
 
@@ -2202,6 +2204,7 @@ func TestTickPreMergeRecheckAllGreenWithAddressedKeysReconfirmedResolvedStillMer
 	script = append(script,
 		scriptedCall{out: "Merged pull request #42 (o/r)"}, // gh pr merge, zero exit
 		scriptedCall{out: `{"number":42,"title":"Change","state":"MERGED","headRefName":"feature","headRefOid":"abc","baseRefName":"main","mergeable":"MERGEABLE","isDraft":false,"changedFiles":1,"additions":5,"deletions":2,"files":[{"path":"watch/internal/babysit/x.go"}],"url":"https://example/pr/42","closingIssuesReferences":[{"number":9}]}`}, // post-merge verification refetch
+		scriptedCall{out: "https://example/pr/42#issuecomment-1"}, // #1049: the post-merge attribution comment
 	)
 	withScriptedCommands(t, script, &calls)
 
@@ -2264,7 +2267,8 @@ func TestTickAutomergeMergeNonzeroExitButRefetchConfirmsMerged(t *testing.T) {
 	script = append(script, automergeGreenRecheckScript()...)
 	script = append(script,
 		scriptedCall{out: "context deadline exceeded", err: errors.New("exit status 1")}, // gh pr merge, nonzero exit
-		scriptedCall{out: mergedPR}, // the unconditional post-merge refetch
+		scriptedCall{out: mergedPR},                               // the unconditional post-merge refetch
+		scriptedCall{out: "https://example/pr/42#issuecomment-1"}, // #1049: the post-merge attribution comment
 	)
 	withScriptedCommands(t, script, &calls)
 
@@ -2534,6 +2538,7 @@ func TestTickAutomergeFailureClassClearsOnCleanTickAfterFailure(t *testing.T) {
 	script = append(script,
 		scriptedCall{out: "Merged pull request #42 (o/r)"},
 		scriptedCall{out: mergedPR},
+		scriptedCall{out: "https://example/pr/42#issuecomment-1"}, // #1049: the post-merge attribution comment
 	)
 	withScriptedCommands(t, script, &calls)
 	if _, _, err := tick(&s); err != nil {

@@ -216,6 +216,16 @@ func (d automergeDecision) logLine() string {
 	if d.Detail != "" {
 		verdict += " (" + d.Detail + ")"
 	}
+	return fmt.Sprintf("babysit: automerge PR #%s %s %s", d.PR, verdict, d.conditionBracket())
+}
+
+// conditionBracket renders the bracketed condition-chain segment shared by
+// logLine above and the post-merge attribution comment (#1049): every stage
+// in automergeStageKeys order, plus the " class=<class>" suffix when
+// FailureClass is non-empty. Extracted so the durable record left on the PR
+// and the line written to the operator's log are the same rendering rather
+// than two independently-drifting ones.
+func (d automergeDecision) conditionBracket() string {
 	parts := make([]string, len(automergeStageKeys))
 	for i, k := range automergeStageKeys {
 		parts[i] = k + "=" + conditionSymbol(d.Conditions, k)
@@ -224,7 +234,7 @@ func (d automergeDecision) logLine() string {
 	if d.FailureClass != "" {
 		bracket += " class=" + d.FailureClass
 	}
-	return fmt.Sprintf("babysit: automerge PR #%s %s [%s]", d.PR, verdict, bracket)
+	return "[" + bracket + "]"
 }
 
 // conditionSymbol renders "yes"/"no"/"-" for key: "-" when the stage was
@@ -1202,6 +1212,13 @@ func runAutomerge(s *State, pr prView, checks []check, verdict feedbackVerdict, 
 	merged := false
 	if decision.Merge {
 		merged, decision = executeMerge(s, in.HeadRefOID, decision)
+		if merged {
+			// #1049: the merge is already confirmed by executeMerge's own
+			// refetch, so this is a pure audit-trail write -- it runs only on
+			// a confirmed merge (never on a held, indeterminate, or
+			// verify-unreadable outcome) and cannot change the verdict.
+			decision = postMergeAttributionComment(s, in.HeadRefOID, decision)
+		}
 	}
 
 	recordDecision(s, decision, merged)
