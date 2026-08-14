@@ -37,6 +37,58 @@ func TestDaemon_ManuallyNamedWindowKeepsOriginalName(t *testing.T) {
 	}
 }
 
+// TestDaemon_ResidualHalfCircleNameIsNotManualName covers the second half of
+// #1039, the state a restart lands in while the leak is live: the window name
+// left on disk still carries the marker ("◑ reading files") and the title has
+// since advanced. trackWindow tells a user rename from cenci's own by asking
+// whether the existing name still leads with a status symbol — with the
+// half-circle unrecognised, the window was misread as manually named, pinning
+// it to the stale name for the rest of the session.
+func TestDaemon_ResidualHalfCircleNameIsNotManualName(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "◑ reading files", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "◑ writing tests", PaneID: "%0"},
+		},
+		WindowOptValues: map[string]string{
+			// Left "off" by the previous cenci run, not set by the user.
+			"main:0:automatic-rename": "off",
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+
+	if name, ok := lastRename(mc.Renames, "main:0"); !ok || name != "writing tests" {
+		t.Errorf("expected rename to 'writing tests' (window not manually named), got %q (found=%v)", name, ok)
+	}
+}
+
+// TestDaemon_ResidualHalfCircleNameNotRestored pins the cleanup side of the
+// same restart case: the marker a previous run leaked into the window name
+// must not be preserved as the original name and handed back on SessionEnd,
+// or the glyph outlives every session that ever touched the window.
+func TestDaemon_ResidualHalfCircleNameNotRestored(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "◑ reading files", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "◑ writing tests", PaneID: "%0"},
+		},
+		WindowOptValues: map[string]string{
+			"main:0:automatic-rename": "off",
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sess1", TmuxPane: "%0"})
+
+	if name, ok := lastRename(mc.Renames, "main:0"); !ok || name != "reading files" {
+		t.Errorf("expected restore to 'reading files' (marker stripped), got %q (found=%v)", name, ok)
+	}
+}
+
 func TestDaemon_ManuallyNamedRestoresOriginalNameOnEnd(t *testing.T) {
 	mc := &tmuxtest.MockClient{
 		Panes: []tmux.PaneInfo{

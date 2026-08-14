@@ -43,6 +43,30 @@ func TestDaemon_SessionStartTracksWindow(t *testing.T) {
 	}
 }
 
+// TestDaemon_StripsHalfCircleMarkerFromWindowName pins the rename side of
+// #1039: Claude Code heads its pane title with a half-circle working marker
+// (◐◑◒◓), which must not survive into the window name — the window would
+// otherwise render as "▶ ◑ writing tests", doubling the status indicator.
+func TestDaemon_StripsHalfCircleMarkerFromWindowName(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "◑ writing tests", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+
+	if name, ok := lastRename(mc.Renames, "main:0"); !ok || name != "writing tests" {
+		t.Errorf("expected rename to 'writing tests', got %q (found=%v)", name, ok)
+	}
+	if v, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-symbol"); !ok || v != "▶" {
+		t.Errorf("expected @cenci-symbol=▶, got %q (found=%v)", v, ok)
+	}
+}
+
 func TestDaemon_UserPromptSubmitSetsRunning(t *testing.T) {
 	mc := &tmuxtest.MockClient{
 		Panes: []tmux.PaneInfo{
