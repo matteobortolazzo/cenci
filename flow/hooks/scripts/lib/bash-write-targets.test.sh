@@ -41,7 +41,7 @@ fi
 # shellcheck source=/dev/null
 . "${LIB_SH}"
 
-for fn in bwt_has_write_candidate bwt_extract_targets bwt_zero_parse_suspicious bwt_has_delimited_tee bwt_is_exempt_device bwt_expand_safe_vars bwt_is_unresolved; do
+for fn in bwt_has_write_candidate bwt_extract_targets bwt_zero_parse_suspicious bwt_has_delimited_tee bwt_is_exempt_device bwt_expand_safe_vars bwt_is_unresolved bwt_is_unresolved_literal bwt_is_apply_patch_payload bwt_apply_patch_targets; do
     if ! command -v "${fn}" >/dev/null 2>&1; then
         fail "lib did not define expected function: ${fn}"
     fi
@@ -1035,6 +1035,480 @@ if [[ -z "${NO_WC_OUT}" ]]; then
     pass
 else
     fail "bwt_extract_targets with no wc on PATH: expected no output, got <${NO_WC_OUT}>"
+fi
+
+# ── Ticket #1036: Codex apply_patch envelope recognition ─────────────
+# On the Codex path, apply_patch reaches PreToolUse hooks as a Bash-matcher
+# tool call whose tool_input.command is the raw patch text (optionally
+# wrapped in a shell `apply_patch <<'EOF' ... EOF` heredoc invocation).
+# bwt_is_apply_patch_payload is a cheap, subprocess-free POSIX `case`
+# pre-filter; bwt_apply_patch_targets is the strict-shape envelope parser
+# that emits the declared Add/Update/Delete File: / Move to: paths. Exit 9
+# ("not the bare shape") is the only non-zero code that is not a block
+# instruction -- callers fall back to the unchanged tokenizer path; exit 8
+# ("recognized but malformed") and exit 3 (awk missing) are both
+# fail-closed, and both must emit nothing on stdout, mirroring
+# bwt_extract_targets' own "non-zero exit -> emits nothing" contract.
+
+AP_BODY_UPDATE="*** Begin Patch
+*** Update File: foo.txt
+@@
+-old
++new
+*** End Patch"
+
+AP_HEREDOC_SQ="apply_patch <<'EOF'
+${AP_BODY_UPDATE}
+EOF"
+
+AP_HEREDOC_DASH_DQ="apply_patch <<-\"EOF\"
+${AP_BODY_UPDATE}
+EOF"
+
+# assert_ap_targets_exit <label> <cmd> <expected-exit> -- like
+# assert_extract_exit, but against bwt_apply_patch_targets.
+assert_ap_targets_exit() {
+    local label="$1" cmd="$2" expected="$3"
+    local actual_out actual_exit
+    actual_out="$(bwt_apply_patch_targets "${cmd}")"
+    actual_exit=$?
+    if [[ "${actual_exit}" -eq "${expected}" ]]; then
+        pass
+    else
+        fail "${label}: bwt_apply_patch_targets exit=${actual_exit}, expected ${expected} (output=<${actual_out}>)"
+    fi
+    if [[ "${expected}" -ne 0 ]]; then
+        if [[ -z "${actual_out}" ]]; then
+            pass
+        else
+            fail "${label}: non-zero apply_patch extraction emitted partial output <${actual_out}>"
+        fi
+    fi
+}
+
+# assert_ap_targets <label> <cmd> <expected-output> -- like assert_targets,
+# but against bwt_apply_patch_targets.
+assert_ap_targets() {
+    local label="$1" cmd="$2" expected="$3"
+    local actual
+    actual="$(bwt_apply_patch_targets "${cmd}")"
+    if [[ "${actual}" == "${expected}" ]]; then
+        pass
+    else
+        fail "${label}: apply_patch_targets(<${cmd}>) = <${actual}>, expected <${expected}>"
+    fi
+}
+
+echo "case: bwt_is_apply_patch_payload -- line-anchored sentinel recognition only"
+assert_false "ordinary command is not an apply_patch payload" bwt_is_apply_patch_payload "git status"
+assert_false "ordinary redirect command is not an apply_patch payload" bwt_is_apply_patch_payload "echo x > file"
+assert_true "bare *** Begin Patch envelope at start-of-string is an apply_patch payload" \
+    bwt_is_apply_patch_payload "${AP_BODY_UPDATE}"
+assert_true "apply_patch <<'EOF' heredoc wrapper is an apply_patch payload" \
+    bwt_is_apply_patch_payload "${AP_HEREDOC_SQ}"
+assert_false "a *** Begin Patch sentinel embedded mid-command (not line-anchored) is not an apply_patch payload" \
+    bwt_is_apply_patch_payload 'echo "*** Begin Patch" > /dev/null'
+assert_true "a sentinel preceded by leading blank/whitespace lines is still recognized" \
+    bwt_is_apply_patch_payload "$(printf '\n  \n%s' "${AP_BODY_UPDATE}")"
+
+echo "case: bwt_apply_patch_targets exit 9 (not the bare shape) emits nothing -- caller falls back to the tokenizer unchanged"
+assert_ap_targets_exit "cd x && apply_patch <<'EOF' ... (shell-composed prefix) returns exit 9" \
+    "cd x && ${AP_HEREDOC_SQ}" 9
+assert_ap_targets_exit "FOO=1 apply_patch <<'EOF' ... (env-assignment prefix) returns exit 9" \
+    "FOO=1 ${AP_HEREDOC_SQ}" 9
+assert_ap_targets_exit "cat p | apply_patch (piped, no heredoc) returns exit 9" \
+    "cat p | apply_patch" 9
+assert_ap_targets_exit "(apply_patch <<'EOF' ...) (subshell-wrapped) returns exit 9" \
+    "(${AP_HEREDOC_SQ}
+)" 9
+# Genuine trailing shell composition: the real heredoc terminator line is a
+# lone "EOF" (an EXACT match), followed by "rm -rf x" on its OWN, separate
+# physical line -- real bash recognizes "EOF" as the terminator here (a line
+# consisting of nothing but the delimiter) and "rm -rf x" genuinely runs as a
+# separate, trailing shell statement. This is the correct shape for "content
+# after the envelope"; unaffected by the Fix 2 terminator-matching rewrite
+# below (#1036 review).
+AP_TRAILING_LINE_AFTER_TERM="${AP_HEREDOC_SQ}
+rm -rf x"
+assert_ap_targets_exit "apply_patch <<'EOF' ... EOF followed by rm -rf x on its own separate line (genuine trailing shell composition) returns exit 9" \
+    "${AP_TRAILING_LINE_AFTER_TERM}" 9
+assert_ap_targets_exit "a *** Begin Patch sentinel embedded mid-command (not line-anchored) returns exit 9" \
+    'echo "*** Begin Patch" > /dev/null' 9
+
+echo "case: bwt_apply_patch_targets exit 8 (recognized but malformed envelope) emits nothing"
+AP_UNQUOTED_HEREDOC="apply_patch <<EOF
+${AP_BODY_UPDATE}
+EOF"
+assert_ap_targets_exit "unquoted <<EOF heredoc delimiter returns exit 8" "${AP_UNQUOTED_HEREDOC}" 8
+
+AP_MISSING_END="*** Begin Patch
+*** Update File: foo.txt
+@@
+-old
++new"
+assert_ap_targets_exit "envelope missing *** End Patch returns exit 8" "${AP_MISSING_END}" 8
+
+AP_MISMATCHED_TERM="apply_patch <<'EOF'
+${AP_BODY_UPDATE}
+DONE"
+assert_ap_targets_exit "heredoc terminator absent/mismatched (DONE instead of EOF) returns exit 8" \
+    "${AP_MISMATCHED_TERM}" 8
+
+AP_ZERO_PATHS="*** Begin Patch
+*** End Patch"
+assert_ap_targets_exit "envelope with zero declared paths returns exit 8" "${AP_ZERO_PATHS}" 8
+
+AP_EMPTY_ADD_PAYLOAD="*** Begin Patch
+*** Add File:
++new line
+*** End Patch"
+assert_ap_targets_exit "*** Add File: with an empty payload returns exit 8" "${AP_EMPTY_ADD_PAYLOAD}" 8
+
+# Fix 2 (#1036 review): bash terminates a heredoc ONLY on a line EXACTLY
+# equal to the delimiter -- never a line merely glued to/prefixed by it. The
+# glued line "EOF; rm -rf x" never exactly matches "EOF", so no terminator is
+# ever found anywhere in the input; real bash treats the entire rest of
+# input as heredoc body (a "delimited by end-of-file" warning, still
+# executing with that body) -- this is envelope-parse territory within the
+# recognized wrapper shape, not shell composition, so this must now return
+# exit 8 (block), never exit 9 (fall back to the tokenizer, which would
+# silently allow an arrow-free body). This reproduces the removed "glued"
+# heuristic's silent-bypass bug.
+assert_ap_targets_exit "heredoc terminator glued to trailing content (EOF; rm -rf x, never an exact match) returns exit 8, not exit 9 (#1036 Fix 2)" \
+    "${AP_HEREDOC_SQ}; rm -rf x" 8
+
+# A delimiter-prefixed-but-not-exact line elsewhere in the input (e.g. a
+# trailing space) must never be mistaken for the terminator either.
+AP_TERM_TRAILING_SPACE_LINE="$(printf 'EOF ')"
+AP_TRAILING_SPACE_TERM="apply_patch <<'EOF'
+${AP_BODY_UPDATE}
+${AP_TERM_TRAILING_SPACE_LINE}"
+assert_ap_targets_exit "heredoc closing line is 'EOF ' (trailing space, never an exact match anywhere) returns exit 8, not exit 9 (#1036 Fix 2)" \
+    "${AP_TRAILING_SPACE_TERM}" 8
+
+# Fix 3 (#1036 review): non-blank content strictly between '*** End Patch'
+# and the heredoc terminator line was previously silently discarded (not
+# extracted as a target, not blocked, exit still 0). A real declared-write
+# directive placed there must now fail closed instead.
+AP_CONTENT_AFTER_END_PATCH="apply_patch <<'EOF'
+*** Begin Patch
+*** Update File: .worktrees/x/ok.txt
+*** End Patch
+*** Update File: AGENTS.md
+EOF"
+assert_ap_targets_exit "a real *** Update File: directive between *** End Patch and the heredoc terminator returns exit 8, not a silent partial exit 0 (#1036 Fix 3)" \
+    "${AP_CONTENT_AFTER_END_PATCH}" 8
+
+# Fix 4 (#1036 review): a declared payload needing more than the single
+# conventional separator-space trim is malformed/ambiguous and must fail
+# closed rather than being silently emitted as if it were a clean path.
+AP_DOUBLE_SPACE_PAYLOAD="*** Begin Patch
+*** Add File:  /etc/passwd
++x
+*** End Patch"
+assert_ap_targets_exit "*** Add File: with a double-space payload (would otherwise misclassify an absolute path as relative) returns exit 8 (#1036 Fix 4)" \
+    "${AP_DOUBLE_SPACE_PAYLOAD}" 8
+
+AP_TRAILING_SPACE_ENV_LINE="$(printf '*** Add File: .env ')"
+AP_TRAILING_SPACE_PAYLOAD="*** Begin Patch
+${AP_TRAILING_SPACE_ENV_LINE}
+*** End Patch"
+assert_ap_targets_exit "*** Add File: with a trailing-space payload (would otherwise evade check-sensitive-files.sh's anchored .env globs) returns exit 8 (#1036 Fix 4)" \
+    "${AP_TRAILING_SPACE_PAYLOAD}" 8
+
+echo "case: bwt_apply_patch_targets exit 0 -- recognized, well-formed envelope"
+assert_ap_targets_exit "bare patch text with no heredoc wrapper returns exit 0" "${AP_BODY_UPDATE}" 0
+assert_ap_targets "bare patch text with no heredoc wrapper emits the declared Update File target" \
+    "${AP_BODY_UPDATE}" "foo.txt"
+
+assert_ap_targets_exit "apply_patch <<'EOF' heredoc-wrapped envelope returns exit 0" "${AP_HEREDOC_SQ}" 0
+assert_ap_targets "apply_patch <<'EOF' heredoc-wrapped envelope emits the declared target" \
+    "${AP_HEREDOC_SQ}" "foo.txt"
+
+assert_ap_targets_exit "apply_patch <<-\"EOF\" heredoc-wrapped envelope returns exit 0" "${AP_HEREDOC_DASH_DQ}" 0
+assert_ap_targets "apply_patch <<-\"EOF\" heredoc-wrapped envelope emits the declared target" \
+    "${AP_HEREDOC_DASH_DQ}" "foo.txt"
+
+AP_CRLF="$(printf '*** Begin Patch\r\n*** Update File: foo.txt\r\n@@\r\n-old\r\n+new\r\n*** End Patch\r\n')"
+assert_ap_targets_exit "CRLF line endings still return exit 0" "${AP_CRLF}" 0
+assert_ap_targets "CRLF line endings emit the target with the trailing CR stripped" "${AP_CRLF}" "foo.txt"
+
+AP_MOVE="*** Begin Patch
+*** Update File: old-name.txt
+*** Move to: new-name.txt
+@@
+-old
++new
+*** End Patch"
+assert_ap_targets_exit "*** Move to: envelope returns exit 0" "${AP_MOVE}" 0
+assert_ap_targets "*** Move to: emits both the preceding Update File source and the Move to destination" \
+    "${AP_MOVE}" "$(printf 'old-name.txt\nnew-name.txt')"
+
+AP_DELETE="*** Begin Patch
+*** Delete File: obsolete.txt
+*** End Patch"
+assert_ap_targets_exit "*** Delete File: envelope returns exit 0" "${AP_DELETE}" 0
+assert_ap_targets "*** Delete File: emits its target" "${AP_DELETE}" "obsolete.txt"
+
+AP_ARROWS_BODY="*** Begin Patch
+*** Update File: src/committee.go
+@@
+-func old() map[string]List<Foo> { return nil }
++func new() map[string]List<Foo> {
++    x := a => b
++    y >> z
++    return committee
++}
+*** End Patch"
+assert_ap_targets_exit "a body full of >, =>, >>, List<Foo>, and \"committee\" still returns exit 0" \
+    "${AP_ARROWS_BODY}" 0
+assert_ap_targets "a body full of >, =>, >>, List<Foo>, and \"committee\" emits exactly the declared path (#1036 false-positive regression)" \
+    "${AP_ARROWS_BODY}" "src/committee.go"
+
+# Fix 1 (#1036 review): real bash strips ALL leading tab characters from
+# every line of a `<<-` heredoc body before apply_patch ever sees it. A
+# tab-indented directive line must therefore still be recognized and its
+# target extracted, never silently dropped.
+AP_TAB="$(printf '\t')"
+AP_TAB_HEREDOC_SQ="apply_patch <<-'EOF'
+*** Begin Patch
+*** Add File: safe.txt
+${AP_TAB}*** Add File: ../../main/AGENTS.md
+*** End Patch
+EOF"
+assert_ap_targets_exit "<<-'EOF' heredoc with a tab-indented *** Add File: line returns exit 0 (#1036 Fix 1)" \
+    "${AP_TAB_HEREDOC_SQ}" 0
+assert_ap_targets "<<-'EOF' heredoc with a tab-indented *** Add File: line includes BOTH targets -- the tab-indented one is no longer silently dropped (#1036 Fix 1)" \
+    "${AP_TAB_HEREDOC_SQ}" "$(printf 'safe.txt\n../../main/AGENTS.md')"
+
+AP_TAB_HEREDOC_DASH_DQ_TARGET="apply_patch <<-\"EOF\"
+*** Begin Patch
+${AP_TAB}*** Update File: tabbed.txt
+*** End Patch
+EOF"
+assert_ap_targets_exit "<<-\"EOF\" heredoc with a tab-indented *** Update File: line returns exit 0 (#1036 Fix 1)" \
+    "${AP_TAB_HEREDOC_DASH_DQ_TARGET}" 0
+assert_ap_targets "<<-\"EOF\" heredoc with a tab-indented *** Update File: line emits the tab-indented target (#1036 Fix 1)" \
+    "${AP_TAB_HEREDOC_DASH_DQ_TARGET}" "tabbed.txt"
+
+# Fix 2 (#1036 review): a line that merely STARTS WITH the delimiter as a
+# substring but is not an exact match (e.g. "EOFOO" for delimiter "EOF")
+# must never be mistaken for the terminator -- the scan must continue past
+# it to find the real, later, exact-match terminator line.
+AP_SUBSTRING_NOT_TERM="apply_patch <<'EOF'
+*** Begin Patch
+*** Update File: foo.txt
+EOFOO
+*** End Patch
+EOF"
+assert_ap_targets_exit "a body line 'EOFOO' that merely starts with delimiter 'EOF' is not treated as the terminator; the real terminator further down is still found (exit 0) (#1036 Fix 2)" \
+    "${AP_SUBSTRING_NOT_TERM}" 0
+assert_ap_targets "a body line 'EOFOO' that merely starts with delimiter 'EOF' does not truncate extraction early" \
+    "${AP_SUBSTRING_NOT_TERM}" "foo.txt"
+
+# Fix B (#1036 second review): real bash's heredoc-terminator matching is
+# byte-exact against the raw line -- it does NOT strip a trailing CR before
+# comparing a candidate line to the delimiter. A line "EOF\r" (delimiter
+# "EOF", CR byte constructed via printf, following the existing "CRLF line
+# endings" precedent above) is therefore NOT a valid terminator to real bash
+# (bash keeps reading past it), even though CR-stripping it first would make
+# it look like an exact match. This decoy line sits immediately after a
+# genuine, well-formed "*** Begin Patch" / "*** Update File:" / "*** End
+# Patch" envelope, with a second, real declared-write directive
+# ("*** Update File: bar.txt") between the decoy and the true, later, bare
+# "EOF" terminator -- content that is still genuinely inside the heredoc body
+# per real bash. A parser that (wrongly) CR-strips before the terminator scan
+# would match the decoy at the earlier position, see "*** Update File:
+# bar.txt" + the real terminator as "trailing content after its (wrong)
+# terminator", and return exit 9 (fall back to the tokenizer -- the tokenizer
+# then sees an arrow-free body and silently allows the write, the same
+# silent-bypass failure class this whole ticket exists to close). The FIXED
+# parser must instead find the true, later, byte-exact "EOF" terminator, at
+# which point "*** Update File: bar.txt" correctly falls in the region
+# between "*** End Patch" and the real terminator -- already-fixed Fix 3
+# territory -- so it must fail closed with exit 8 (recognized envelope,
+# non-blank content after the closing sentinel), never exit 9.
+AP_CR_DECOY_LINE="$(printf 'EOF\r')"
+AP_CR_DECOY_TERM="apply_patch <<'EOF'
+*** Begin Patch
+*** Update File: foo.txt
+*** End Patch
+${AP_CR_DECOY_LINE}
+*** Update File: bar.txt
+EOF"
+assert_ap_targets_exit "a CR-suffixed decoy line ('EOF' + CR byte) is never mistaken for the real terminator; the real, later, byte-exact 'EOF' terminator is found instead, and the real directive between the decoy and it fails closed as Fix-3 trailing content (exit 8, not exit 9) (#1036 second review, Fix B)" \
+    "${AP_CR_DECOY_TERM}" 8
+
+# Fix 3 non-regression: blank-only lines between '*** End Patch' and the
+# heredoc terminator must continue to return exit 0 normally.
+AP_BLANK_AFTER_END_PATCH="apply_patch <<'EOF'
+*** Begin Patch
+*** Update File: foo.txt
+*** End Patch
+
+EOF"
+assert_ap_targets_exit "blank-only lines between *** End Patch and the heredoc terminator still return exit 0 (#1036 Fix 3 non-regression)" \
+    "${AP_BLANK_AFTER_END_PATCH}" 0
+assert_ap_targets "blank-only lines between *** End Patch and the heredoc terminator still emit the declared target" \
+    "${AP_BLANK_AFTER_END_PATCH}" "foo.txt"
+
+# Fix 4 non-regression: the existing single-leading-space convention must
+# continue to work unchanged (already exercised above by AP_BODY_UPDATE /
+# AP_HEREDOC_SQ / AP_HEREDOC_DASH_DQ, restated here explicitly for clarity).
+AP_NORMAL_SPACE_PAYLOAD="*** Begin Patch
+*** Add File: normal.txt
++x
+*** End Patch"
+assert_ap_targets_exit "*** Add File: with the normal single-leading-space convention still returns exit 0 (#1036 Fix 4 non-regression)" \
+    "${AP_NORMAL_SPACE_PAYLOAD}" 0
+assert_ap_targets "*** Add File: with the normal single-leading-space convention still emits the clean path" \
+    "${AP_NORMAL_SPACE_PAYLOAD}" "normal.txt"
+
+# ── #1045 review: pre-filter gating, delimiter spellings, grammar markers ──
+# Four defects found reviewing the #1036 fix. The first is the most
+# instructive: bwt_is_apply_patch_payload is used by both hooks as a GATE in
+# front of bwt_apply_patch_targets, so a shape the pre-filter rejects can
+# never reach the parser -- and #1036's Fix 1 (`<<-` tab-stripping) landed on
+# a shape the column-0-only pre-filter rejected. The Fix 1 cases above pass
+# because they call the parser DIRECTLY. These call the pre-filter too.
+
+echo "case: bwt_is_apply_patch_payload admits every shape the parser accepts (#1045 Fix 7)"
+AP_TAB_INDENTED_SENTINEL="apply_patch <<-'EOF'
+$(printf '\t')*** Begin Patch
+$(printf '\t')*** Add File: .env
+$(printf '\t')+KEY=value
+$(printf '\t')*** End Patch
+$(printf '\t')EOF"
+assert_true "a <<-'EOF' wrapper whose sentinel is tab-indented (the whole point of <<-) is recognized by the pre-filter, so Fix 1's tab-stripping is reachable at all (#1045 Fix 7)" \
+    bwt_is_apply_patch_payload "${AP_TAB_INDENTED_SENTINEL}"
+assert_ap_targets_exit "the same tab-indented-sentinel envelope parses (exit 0)" \
+    "${AP_TAB_INDENTED_SENTINEL}" 0
+assert_ap_targets "the same tab-indented-sentinel envelope emits its declared target" \
+    "${AP_TAB_INDENTED_SENTINEL}" ".env"
+assert_true "a spaced-delimiter wrapper is recognized by the pre-filter" \
+    bwt_is_apply_patch_payload "apply_patch << 'EOF'"
+assert_false "a mid-line sentinel in a command that never says apply_patch is still NOT recognized (non-regression)" \
+    bwt_is_apply_patch_payload 'echo "*** Begin Patch" > /dev/null'
+
+echo "case: bwt_apply_patch_targets accepts every non-expanding heredoc delimiter spelling bash does (#1045 Fix 7)"
+# Each of these is a bare apply_patch invocation with a NON-EXPANDING
+# delimiter -- the body reaches apply_patch verbatim, so the declared paths in
+# the raw text are exactly what gets written. Returning 9 for any of them put
+# a real, parseable envelope into the PERMISSIVE bucket: callers fall back to
+# the tokenizer, an arrow-free diff body yields no write candidate, and the
+# write is silently allowed.
+AP_SPACED_DELIM="apply_patch << 'EOF'
+${AP_BODY_UPDATE}
+EOF"
+assert_ap_targets_exit "apply_patch << 'EOF' (space between << and the delimiter) returns exit 0, not the permissive exit 9 (#1045 Fix 7)" \
+    "${AP_SPACED_DELIM}" 0
+assert_ap_targets "apply_patch << 'EOF' emits its declared target" "${AP_SPACED_DELIM}" "foo.txt"
+
+AP_ESCAPED_DELIM="apply_patch <<\\EOF
+${AP_BODY_UPDATE}
+EOF"
+assert_ap_targets_exit "apply_patch <<\\EOF (backslash-escaped delimiter, non-expanding exactly like quoting) returns exit 0, not the permissive exit 9 (#1045 Fix 7)" \
+    "${AP_ESCAPED_DELIM}" 0
+assert_ap_targets "apply_patch <<\\EOF emits its declared target" "${AP_ESCAPED_DELIM}" "foo.txt"
+
+AP_NO_SPACE_DELIM="apply_patch<<'EOF'
+${AP_BODY_UPDATE}
+EOF"
+assert_ap_targets_exit "apply_patch<<'EOF' (no space after the verb) returns exit 0, not the permissive exit 9 (#1045 Fix 7)" \
+    "${AP_NO_SPACE_DELIM}" 0
+assert_ap_targets "apply_patch<<'EOF' emits its declared target" "${AP_NO_SPACE_DELIM}" "foo.txt"
+
+AP_SPACED_DASH_DELIM="apply_patch <<- 'EOF'
+$(printf '\t')${AP_BODY_UPDATE}
+$(printf '\t')EOF"
+assert_ap_targets_exit "apply_patch <<- 'EOF' (both the dash form and a spaced delimiter) returns exit 0 (#1045 Fix 7)" \
+    "${AP_SPACED_DASH_DELIM}" 0
+
+echo "case: bwt_apply_patch_targets fails closed (exit 8) on a recognized apply_patch invocation whose payload it cannot read (#1045 Fix 7)"
+assert_ap_targets_exit "apply_patch <<<\"\$patch\" (here-STRING, payload is an invisible shell word) returns exit 8, never the permissive exit 9" \
+    'apply_patch <<<"$patch"' 8
+AP_WEIRD_DELIM="apply_patch <<E'OF'
+${AP_BODY_UPDATE}
+EOF"
+assert_ap_targets_exit "apply_patch <<E'OF' (a delimiter spelling this parser cannot classify as expanding or not) returns exit 8" \
+    "${AP_WEIRD_DELIM}" 8
+
+echo "case: bwt_apply_patch_targets keeps exit 9 for shapes the tokenizer genuinely models better (#1045 Fix 7 non-regression)"
+AP_TRAILING_OPERATOR="apply_patch <<'EOF' && rm -rf x
+${AP_BODY_UPDATE}
+EOF"
+assert_ap_targets_exit "extra tokens after the delimiter word (&& rm -rf x) stay exit 9 -- real shell composition, tokenizer path" \
+    "${AP_TRAILING_OPERATOR}" 9
+assert_ap_targets_exit "apply_patch with a file argument and no heredoc at all stays exit 9" \
+    "apply_patch f.patch" 9
+assert_ap_targets_exit "apply_patch with a plain stdin redirect (< f.patch) stays exit 9 -- the envelope text is not in the command" \
+    "apply_patch < f.patch" 9
+
+echo "case: bwt_apply_patch_targets does not mistake the *** End of File chunk marker for a declared path (#1045 Fix 8)"
+# `*** End of File` is part of apply_patch's grammar, emitted whenever a hunk
+# runs to the end of the file. Extracting it as a "target" made callers join
+# it to cwd and hard-block with `BLOCKED: Bash write to <root>/*** End of File`
+# -- an unconditional rejection of an entirely normal patch shape.
+AP_END_OF_FILE_MARKER="*** Begin Patch
+*** Update File: src/app.py
+@@
+-old
++new
+*** End of File
+*** End Patch"
+assert_ap_targets_exit "an envelope whose chunk ends with *** End of File returns exit 0" \
+    "${AP_END_OF_FILE_MARKER}" 0
+assert_ap_targets "*** End of File is skipped -- only the real declared path is emitted (#1045 Fix 8)" \
+    "${AP_END_OF_FILE_MARKER}" "src/app.py"
+
+# Non-regression on the deliberate over-extraction the header documents: an
+# UNKNOWN column-0 `***` line is still emitted verbatim, so it still costs an
+# over-block rather than a silent under-extraction. Only markers the grammar
+# defines are skipped by name.
+AP_UNKNOWN_DIRECTIVE="*** Begin Patch
+*** Update File: src/app.py
+*** Frobnicate File: sneaky.txt
+*** End Patch"
+assert_ap_targets "an UNKNOWN column-0 *** line is still extracted verbatim (over-block preserved)" \
+    "${AP_UNKNOWN_DIRECTIVE}" "$(printf 'src/app.py\n*** Frobnicate File: sneaky.txt')"
+
+echo "case: bwt_is_unresolved_literal -- the apply_patch counterpart of bwt_is_unresolved (#1045 Fix 9)"
+# An apply_patch declared path comes out of a never-expanded heredoc body, so
+# shell-expansion residue is not a thing there: `$`, a backtick, and `(` are
+# ordinary filename characters. Only the degenerate values no real path can
+# take stay fail-closed. (Both are unreachable from the parser today; this is
+# a deliberate invariant backstop, tested at this level for that reason.)
+assert_false "a filename containing '(' is resolvable on the apply_patch path" \
+    bwt_is_unresolved_literal "reports/summary (1).csv"
+assert_false "a filename containing '\$' is resolvable on the apply_patch path" \
+    bwt_is_unresolved_literal 'costs/$5-plan.md'
+assert_false "a filename containing a backtick is resolvable on the apply_patch path" \
+    bwt_is_unresolved_literal 'notes/`draft`.md'
+assert_false "an ordinary relative path is resolvable" bwt_is_unresolved_literal "src/app.py"
+assert_true "an empty target is still unresolved" bwt_is_unresolved_literal ""
+assert_true "a newline-containing target is still unresolved" \
+    bwt_is_unresolved_literal "$(printf 'a\nb')"
+# The tokenizer-path predicate is unchanged -- the same values it must keep
+# rejecting there, it still rejects.
+assert_true "bwt_is_unresolved still rejects '(' on the tokenizer path (non-regression)" \
+    bwt_is_unresolved "reports/summary (1).csv"
+
+echo "case: bwt_apply_patch_targets fails closed with exit 3 when awk is unavailable, emitting nothing"
+AP_AWK_MISSING_BIN="${TEST_ROOT}/bin-no-awk-apply-patch"
+mkdir -p "${AP_AWK_MISSING_BIN}"
+AP_NO_AWK_OUT_FILE="${TEST_ROOT}/bwt-apply-patch-no-awk-out.txt"
+AP_NO_AWK_EXIT=0
+PATH="${AP_AWK_MISSING_BIN}" bwt_apply_patch_targets "${AP_BODY_UPDATE}" >"${AP_NO_AWK_OUT_FILE}" 2>/dev/null || AP_NO_AWK_EXIT=$?
+AP_NO_AWK_OUT="$(cat "${AP_NO_AWK_OUT_FILE}")"
+if [[ "${AP_NO_AWK_EXIT}" -eq 3 ]]; then
+    pass
+else
+    fail "bwt_apply_patch_targets with no awk on PATH: expected exit 3, got ${AP_NO_AWK_EXIT}"
+fi
+if [[ -z "${AP_NO_AWK_OUT}" ]]; then
+    pass
+else
+    fail "bwt_apply_patch_targets with no awk on PATH: expected no output, got <${AP_NO_AWK_OUT}>"
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────

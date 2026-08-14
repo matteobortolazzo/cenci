@@ -1195,6 +1195,334 @@ else
     fail "backslash-newline-spliced double-quoted command substitution: stderr should identify the unsupported construct, got: ${GUARD_STDERR}"
 fi
 
+# ── Ticket #1036: Codex apply_patch envelope recognition ─────────────
+# On the Codex path, apply_patch reaches PreToolUse hooks as a Bash-matcher
+# tool call whose tool_input.command is the raw patch text (optionally
+# wrapped in a shell `apply_patch <<'EOF' ... EOF` heredoc invocation).
+# Neither the shared tokenizer nor this guard previously modelled that
+# grammar: arrow operators/redirects inside the diff BODY tripped the
+# relative-target rejection (false positive), and a patch body with no
+# arrow-shaped characters at all extracted zero targets and silently passed
+# through unchecked (silent bypass). bwt_is_apply_patch_payload /
+# bwt_apply_patch_targets (flow/hooks/scripts/lib/bash-write-targets.sh)
+# recognize the bare apply_patch envelope shape and this guard branches onto
+# them BEFORE the tokenizer ever sees the diff body.
+APPLY_PATCH_REPO="${TEST_ROOT}/apply-patch"
+make_git_repo "${APPLY_PATCH_REPO}"
+mkdir -p "${APPLY_PATCH_REPO}/.cenci"
+touch "${APPLY_PATCH_REPO}/.cenci/config.json"
+
+# (a) all declared targets under <root>/.worktrees/<id>-<desc>/, body
+# containing =>, List<Foo>, >>, "committee" -> exit 0. Proves arrow
+# operators in the diff BODY never trip the relative-target rejection once
+# the envelope is recognized (#1036 AC 1).
+echo "case: apply_patch envelope with all targets under .worktrees/ is allowed despite arrow operators in the diff body (#1036 AC 1)"
+JSON=$(jq -n --arg cmd "*** Begin Patch
+*** Update File: .worktrees/1036-x/src/committee.go
+@@
+-func old() map[string]List<Foo> { return nil }
++func new() map[string]List<Foo> {
++    x := a => b
++    y >> z
++    return committee
++}
+*** End Patch" '{tool_input:{command:$cmd}}')
+run_guard "${APPLY_PATCH_REPO}" "${JSON}"
+assert_exit "apply_patch envelope, all targets in .worktrees/, arrow-heavy body allowed" 0
+
+# (b) *** Update File: AGENTS.md (relative), >-free body, cwd = repo root ->
+# exit 2 with the existing feature-worktree guidance text (#1036 AC 2).
+echo "case: apply_patch envelope declaring a relative main-worktree target is blocked with the existing feature-worktree guidance (#1036 AC 2)"
+JSON=$(jq -n --arg cmd "*** Begin Patch
+*** Update File: AGENTS.md
+*** End Patch" '{tool_input:{command:$cmd}}')
+run_guard "${APPLY_PATCH_REPO}" "${JSON}"
+assert_exit "apply_patch envelope relative AGENTS.md target blocked" 2
+if [[ "${GUARD_STDERR}" == *"targets the main worktree, not a feature worktree"* ]]; then
+    pass
+else
+    fail "apply_patch envelope relative AGENTS.md target blocked: stderr should contain the existing feature-worktree guidance text, got: ${GUARD_STDERR}"
+fi
+
+# (c) absolute <root>/AGENTS.md -> exit 2.
+echo "case: apply_patch envelope declaring an absolute main-worktree target is blocked"
+JSON=$(jq -n --arg cmd "*** Begin Patch
+*** Update File: ${APPLY_PATCH_REPO}/AGENTS.md
+*** End Patch" '{tool_input:{command:$cmd}}')
+run_guard "${APPLY_PATCH_REPO}" "${JSON}"
+assert_exit "apply_patch envelope absolute AGENTS.md target blocked" 2
+
+# (d) relative .worktrees/<id>-x/f.txt from repo-root cwd -> exit 0 (proves
+# the cwd base actually resolves).
+echo "case: apply_patch envelope declaring a relative .worktrees/ target resolves against cwd and is allowed"
+JSON=$(jq -n --arg cmd "*** Begin Patch
+*** Add File: .worktrees/1036-x/f.txt
++new
+*** End Patch" '{tool_input:{command:$cmd}}')
+run_guard "${APPLY_PATCH_REPO}" "${JSON}"
+assert_exit "apply_patch envelope relative .worktrees/ target allowed" 0
+
+# (e) canonicalize-then-decide: relative .worktrees/<id>-x/../../AGENTS.md ->
+# exit 2. Lexical trust would allowlist this via */.worktrees/*;
+# canonicalization must resolve it to <root>/AGENTS.md first. Load-bearing --
+# must not be omitted.
+echo "case: apply_patch envelope target escaping .worktrees/ via .. is blocked -- canonicalize-then-decide, not lexical trust (#1036, load-bearing)"
+JSON=$(jq -n --arg cmd "*** Begin Patch
+*** Update File: .worktrees/1036-x/../../AGENTS.md
+*** End Patch" '{tool_input:{command:$cmd}}')
+run_guard "${APPLY_PATCH_REPO}" "${JSON}"
+assert_exit "apply_patch envelope .worktrees/../../ escape blocked" 2
+
+# (f) *** Update File: in the worktree + *** Move to: into the main worktree
+# -> exit 2 (both Move targets checked).
+echo "case: apply_patch envelope's Move to destination escaping to the main worktree is blocked even though the source is in-worktree"
+JSON=$(jq -n --arg cmd "*** Begin Patch
+*** Update File: .worktrees/1036-x/old.txt
+*** Move to: AGENTS.md
+@@
+-old
++new
+*** End Patch" '{tool_input:{command:$cmd}}')
+run_guard "${APPLY_PATCH_REPO}" "${JSON}"
+assert_exit "apply_patch envelope Move to main-worktree destination blocked" 2
+
+# (g) malformed bare envelope (missing *** End Patch) -> exit 2 with the
+# exit-8 message; and unquoted <<EOF -> exit 2 with the exit-8 message.
+echo "case: malformed bare apply_patch envelope (missing *** End Patch) is blocked with a dedicated message naming the construct"
+JSON=$(jq -n --arg cmd "*** Begin Patch
+*** Update File: AGENTS.md
+@@
+-old
++new" '{tool_input:{command:$cmd}}')
+run_guard "${APPLY_PATCH_REPO}" "${JSON}"
+assert_exit "malformed apply_patch envelope (missing End Patch) blocked" 2
+if [[ "${GUARD_STDERR,,}" == *"apply_patch"* ]]; then
+    pass
+else
+    fail "malformed apply_patch envelope (missing End Patch) blocked: stderr should name the apply_patch construct, got: ${GUARD_STDERR}"
+fi
+
+echo "case: apply_patch heredoc wrapper with an unquoted delimiter (<<EOF) is blocked with a dedicated message naming the construct"
+JSON=$(jq -n --arg cmd "apply_patch <<EOF
+*** Begin Patch
+*** Update File: AGENTS.md
+*** End Patch
+EOF" '{tool_input:{command:$cmd}}')
+run_guard "${APPLY_PATCH_REPO}" "${JSON}"
+assert_exit "apply_patch unquoted heredoc delimiter blocked" 2
+if [[ "${GUARD_STDERR,,}" == *"apply_patch"* ]]; then
+    pass
+else
+    fail "apply_patch unquoted heredoc delimiter blocked: stderr should name the apply_patch construct, got: ${GUARD_STDERR}"
+fi
+
+# (g2) #1036 Fix 6: a malformed envelope whose diff BODY carries secret-
+# shaped material must never have that body echoed into the exit-8 BLOCKED
+# message -- only the first (sentinel) line may appear.
+echo "case: malformed apply_patch envelope whose body contains secret-shaped material does not leak that body into the BLOCKED message (#1036 Fix 6)"
+JSON=$(jq -n --arg cmd "*** Begin Patch
+*** Add File: AGENTS.md
++API_KEY=sk-supersecretvalue12345
+@@ missing end sentinel" '{tool_input:{command:$cmd}}')
+run_guard "${APPLY_PATCH_REPO}" "${JSON}"
+assert_exit "malformed apply_patch envelope with secret-shaped body blocked" 2
+if [[ "${GUARD_STDERR}" == *"sk-supersecretvalue12345"* ]]; then
+    fail "malformed apply_patch envelope with secret-shaped body blocked: BLOCKED message leaked the diff body's secret-shaped content, got: ${GUARD_STDERR}"
+else
+    pass
+fi
+if [[ "${GUARD_STDERR,,}" == *"apply_patch"* && "${GUARD_STDERR}" == *"*** Begin Patch"* ]]; then
+    pass
+else
+    fail "malformed apply_patch envelope with secret-shaped body blocked: stderr should still name the apply_patch construct via its first line, got: ${GUARD_STDERR}"
+fi
+
+# (g3) #1045 review, Fix 9: bwt_is_unresolved models SHELL-EXPANSION residue,
+# which an apply_patch declared path cannot have -- only a non-expanding
+# delimiter is ever accepted, so the body is never expanded and '$', a
+# backtick, and '(' in a declared path are ordinary filename characters.
+# Running that test on them rejected a legitimate write to a real file with
+# "Use a literal absolute path", which it already was. The decision must come
+# from the path itself, exactly as for any other declared target.
+echo "case: an apply_patch declared path containing '(' resolves normally -- inside a feature worktree it is allowed, not rejected as unresolvable (#1045 Fix 9)"
+JSON=$(jq -n --arg cmd "*** Begin Patch
+*** Add File: .worktrees/1036-x/reports/summary (1).csv
++col
+*** End Patch" '{tool_input:{command:$cmd}}')
+run_guard "${APPLY_PATCH_REPO}" "${JSON}"
+assert_exit "apply_patch declared path with '(' inside .worktrees/ allowed" 0
+
+# The SAME shape outside the feature worktree must still block -- on the
+# main-worktree decision, the real one, not on a spurious unresolvable-target
+# rejection. And per #1036 Fix 6 / Fix A, that message must still never carry
+# the diff body, which may itself hold secret material.
+echo "case: the same '('-containing declared path targeting the main worktree is blocked on the main-worktree decision, without leaking the diff body's secret-shaped content (#1045 Fix 9, #1036 Fix A)"
+JSON=$(jq -n --arg cmd "*** Begin Patch
+*** Add File: reports/summary (1).csv
++API_KEY=sk-supersecretvalue12345
+*** End Patch" '{tool_input:{command:$cmd}}')
+run_guard "${APPLY_PATCH_REPO}" "${JSON}"
+assert_exit "apply_patch declared path with '(' in the main worktree blocked" 2
+if [[ "${GUARD_STDERR}" == *"sk-supersecretvalue12345"* ]]; then
+    fail "apply_patch declared path with '(' in the main worktree blocked: BLOCKED message leaked the diff body's secret-shaped content, got: ${GUARD_STDERR}"
+else
+    pass
+fi
+if [[ "${GUARD_STDERR}" == *"targets the main worktree"* && "${GUARD_STDERR}" == *"reports/summary (1).csv"* ]]; then
+    pass
+else
+    fail "apply_patch declared path with '(' in the main worktree blocked: stderr should be the main-worktree message naming the resolved target, got: ${GUARD_STDERR}"
+fi
+
+# (g4) #1045 review, Fix 7: bwt_is_apply_patch_payload gates the parser, so a
+# shape it rejects never reaches bwt_apply_patch_targets at all. The
+# column-0-only sentinel test rejected exactly the shape #1036's Fix 1 exists
+# to handle: a `<<-'EOF'` body written the natural way, with the sentinel
+# tab-indented along with everything else. The command then fell through to
+# bwt_has_write_candidate, which is false for an arrow-free diff body, and the
+# hook exited 0 -- a full guard bypass. Driven end-to-end here (not at the
+# parser, which handled this shape correctly all along).
+echo "case: a <<-'EOF' envelope whose sentinel and directives are tab-indented is recognized end-to-end and blocked on its main-worktree target (#1045 Fix 7)"
+AP_TAB=$'\t'
+JSON=$(jq -n --arg cmd "apply_patch <<-'EOF'
+${AP_TAB}*** Begin Patch
+${AP_TAB}*** Update File: AGENTS.md
+${AP_TAB}*** End Patch
+${AP_TAB}EOF" '{tool_input:{command:$cmd}}')
+run_guard "${APPLY_PATCH_REPO}" "${JSON}"
+assert_exit "tab-indented <<-'EOF' envelope targeting AGENTS.md blocked" 2
+if [[ "${GUARD_STDERR}" == *"targets the main worktree"* ]]; then
+    pass
+else
+    fail "tab-indented <<-'EOF' envelope targeting AGENTS.md blocked: stderr should be the main-worktree message, got: ${GUARD_STDERR}"
+fi
+
+echo "case: the same tab-indented <<-'EOF' envelope targeting a feature worktree is allowed (recognition is not a blanket over-block) (#1045 Fix 7)"
+JSON=$(jq -n --arg cmd "apply_patch <<-'EOF'
+${AP_TAB}*** Begin Patch
+${AP_TAB}*** Add File: .worktrees/1036-x/tabbed.txt
+${AP_TAB}+x
+${AP_TAB}*** End Patch
+${AP_TAB}EOF" '{tool_input:{command:$cmd}}')
+run_guard "${APPLY_PATCH_REPO}" "${JSON}"
+assert_exit "tab-indented <<-'EOF' envelope targeting .worktrees/ allowed" 0
+
+# (g5) #1045 review, Fix 7: the same permissive-bucket bypass, reached through
+# delimiter spellings bash accepts for a bare, non-expanding heredoc.
+echo "case: every non-expanding heredoc delimiter spelling is recognized end-to-end and blocked on its main-worktree target (#1045 Fix 7)"
+for spelling in "apply_patch << 'EOF'" "apply_patch <<\\EOF" "apply_patch<<'EOF'"; do
+    JSON=$(jq -n --arg cmd "${spelling}
+*** Begin Patch
+*** Update File: AGENTS.md
+*** End Patch
+EOF" '{tool_input:{command:$cmd}}')
+    run_guard "${APPLY_PATCH_REPO}" "${JSON}"
+    assert_exit "delimiter spelling <${spelling}> targeting AGENTS.md blocked" 2
+done
+
+echo "case: an apply_patch here-STRING invocation, whose payload this parser cannot see, fails closed rather than falling through to the tokenizer (#1045 Fix 7)"
+JSON=$(jq -n --arg cmd 'apply_patch <<<"$patch"' '{tool_input:{command:$cmd}}')
+run_guard "${APPLY_PATCH_REPO}" "${JSON}"
+assert_exit "apply_patch here-string invocation blocked" 2
+
+# (g6) #1045 review, Fix 8: `*** End of File` is part of apply_patch's chunk
+# grammar, emitted whenever a hunk runs to the end of the file. Extracting it
+# as a declared path made this guard join it to cwd, canonicalize it inside
+# the repo root, and hard-block -- so EVERY patch whose last chunk reaches EOF
+# was rejected, with a nonsensical message naming "*** End of File" as a write
+# target.
+echo "case: an envelope whose chunk ends with the *** End of File marker is allowed when its real target is a feature worktree (#1045 Fix 8)"
+JSON=$(jq -n --arg cmd "*** Begin Patch
+*** Update File: .worktrees/1036-x/src/app.py
+@@
+-old
++new
+*** End of File
+*** End Patch" '{tool_input:{command:$cmd}}')
+run_guard "${APPLY_PATCH_REPO}" "${JSON}"
+assert_exit "envelope with *** End of File marker and a .worktrees/ target allowed" 0
+if [[ "${GUARD_STDERR}" == *"End of File"* ]]; then
+    fail "envelope with *** End of File marker: the marker must never be reported as a write target, got: ${GUARD_STDERR}"
+else
+    pass
+fi
+
+# (h) fall-back proof: cd /elsewhere && apply_patch <<'EOF' ... with a
+# =>-bearing body -> exit 2 via the EXISTING relative-target/zero-parse
+# message, explicitly asserted as NOT the apply_patch exit-8 message.
+echo "case: shell-prefixed apply_patch invocation with arrows in the body falls back to the existing tokenizer path (not the apply_patch exit-8 message)"
+JSON=$(jq -n --arg cmd "cd /elsewhere && apply_patch <<'EOF'
+*** Begin Patch
+*** Update File: foo.go
+@@
+-old := old
++new := old => new
+*** End Patch
+EOF" '{tool_input:{command:$cmd}}')
+run_guard "${APPLY_PATCH_REPO}" "${JSON}"
+assert_exit "shell-prefixed apply_patch with arrow body falls back and blocks" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "shell-prefixed apply_patch with arrow body falls back and blocks: stderr should contain BLOCKED"
+fi
+# The command text itself literally contains the word "apply_patch" (it's
+# part of the raw command being echoed into the BLOCKED message), so the
+# discriminator here is NOT "does stderr mention apply_patch" -- it's which
+# message fired. This must be one of the two PRE-EXISTING relative-target /
+# zero-parse messages (never the new apply_patch-specific exit-8 wording),
+# proving BWT_APPLY_PATCH=0 fell through to the unchanged tokenizer path.
+if [[ "${GUARD_STDERR}" == *"cannot verify the relative Bash write target"* || "${GUARD_STDERR}" == *"unmodelled shell construct"* ]]; then
+    pass
+else
+    fail "shell-prefixed apply_patch with arrow body falls back and blocks: stderr should be one of the existing relative-target/zero-parse messages, got: ${GUARD_STDERR}"
+fi
+
+# (i) documented residual, labelled as such: the same shell-prefixed shape
+# with a >-free body declaring AGENTS.md -> exit 0, unchanged from today's
+# behavior. Pinned so it cannot change silently.
+echo "case: DOCUMENTED RESIDUAL -- shell-prefixed apply_patch invocation with an arrow-free body is not recognized as a write candidate at all and is silently allowed (#1036, pinned, unchanged from today)"
+JSON=$(jq -n --arg cmd "cd /elsewhere && apply_patch <<'EOF'
+*** Begin Patch
+*** Update File: AGENTS.md
+*** End Patch
+EOF" '{tool_input:{command:$cmd}}')
+run_guard "${APPLY_PATCH_REPO}" "${JSON}"
+assert_exit "DOCUMENTED RESIDUAL: shell-prefixed apply_patch, arrow-free body, allowed unchanged" 0
+
+# (j) out-of-root absolute declared target -> exit 0 (Q1a asymmetry
+# preserved).
+echo "case: apply_patch envelope declaring an out-of-repo-root absolute target is allowed (Q1a asymmetry preserved)"
+JSON=$(jq -n --arg cmd "*** Begin Patch
+*** Add File: ${TEST_ROOT}/apply-patch-outside/f.txt
++new
+*** End Patch" '{tool_input:{command:$cmd}}')
+run_guard "${APPLY_PATCH_REPO}" "${JSON}"
+assert_exit "apply_patch envelope out-of-root absolute target allowed (Q1a)" 0
+
+# (k) relative declared target whose ancestor is a dangling symlink -> exit 2
+# (canonicalization failure blocks).
+echo "case: apply_patch envelope declaring a relative target under a dangling symlink ancestor is blocked (canonicalization failure)"
+ln -s "${TEST_ROOT}/apply-patch-nonexistent-target" "${APPLY_PATCH_REPO}/dangling-link"
+JSON=$(jq -n --arg cmd "*** Begin Patch
+*** Update File: dangling-link/sub.txt
+*** End Patch" '{tool_input:{command:$cmd}}')
+run_guard "${APPLY_PATCH_REPO}" "${JSON}"
+assert_exit "apply_patch envelope relative target under dangling symlink blocked" 2
+
+# (l) unconfigured repo -> exit 0 (config gate unchanged).
+echo "case: apply_patch envelope in an unconfigured repo is a no-op (config gate unchanged)"
+APPLY_PATCH_UNCONFIGURED_REPO="${TEST_ROOT}/apply-patch-unconfigured"
+make_git_repo "${APPLY_PATCH_UNCONFIGURED_REPO}"
+JSON=$(jq -n --arg cmd "*** Begin Patch
+*** Update File: AGENTS.md
+@@
+-old
++new => decoy
+*** End Patch" '{tool_input:{command:$cmd}}')
+run_guard "${APPLY_PATCH_UNCONFIGURED_REPO}" "${JSON}"
+assert_exit "apply_patch envelope unconfigured repo no-op" 0
+
 # ── Summary ──────────────────────────────────────────────────────────
 echo
 echo "passed: ${PASSES}, failed: ${FAILURES} (shell: ${HOOK_SHELL})"
