@@ -19,7 +19,15 @@ fi
 # native global skills directory. Pipeline/interactive skills (implement,
 # configure, refine, review, refactor, sync, maintain, design, address-review)
 # must never appear here.
-PORTABLE_SKILLS="attachments babysit frontend-classification pr-comment-filter shell-rules stack-angular stack-dotnet stack-go subagent-safety testing verify-ui worktrees"
+#
+# Deliberately restated rather than sourced from install-skills.sh: this list
+# is the test's independent expectation, so sourcing the script's own value
+# would make the assertion tautological.
+#
+# project-core is a non-user-invocable reference skill but is portable, because
+# `babysit` is directed to consult it and OpenCode delivery resolves no
+# dependencies (#1042).
+PORTABLE_SKILLS="attachments babysit frontend-classification pr-comment-filter project-core shell-rules stack-angular stack-dotnet stack-go subagent-safety testing verify-ui worktrees"
 PIPELINE_SKILLS="implement configure refine review refactor sync maintain design address-review"
 
 HOME_A="$(mktemp -d)"
