@@ -692,6 +692,17 @@ Docker do not carry the engine. Two cases:
   `dockerd`: `entrypoint.sh` writes `~/.cenci-dockerd-startup-error` naming the cause.
   Fix it by re-running `/cenci:configure` and then `cenci sandbox build`.
 
+The fragment also bakes `dev`'s membership of the `docker` group into the image, and that
+placement is load-bearing rather than incidental. sysbox-runc clones the container's
+rootfs, so `/etc/group` edits made *inside* a running container are invisible to the Docker
+daemon's `docker exec -u dev` user resolution — and `docker exec -u dev` is exactly how the
+launcher attaches every agent session. An image built before this was baked in therefore
+starts a healthy inner `dockerd` that the agent still cannot reach: every `docker` call
+fails with `permission denied while trying to connect to the docker API at
+unix:///var/run/docker.sock`, even though `docker` works when run as root in the same
+container and `getent group docker` lists `dev`. The fix is a rebuild — `cenci sandbox
+build` — not a runtime `usermod`, which cannot escape the clone.
+
 **Volume lifecycle**: each repo gets its own persistent Docker storage volume, named
 `<agent>-cenci-dind-<slug>[-<name>]` and mounted at `/var/lib/docker` inside the container —
 so image layers and containers built inside the sandbox survive across sessions for that

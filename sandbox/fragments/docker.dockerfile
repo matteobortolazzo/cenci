@@ -16,4 +16,19 @@ RUN install -m 0755 -d /etc/apt/keyrings \
     && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli docker-ce containerd.io \
     && rm -rf /var/lib/apt/lists/*
 
+# dev's docker-group membership is baked here, at build time, and NOT left to
+# lib/dind.sh's runtime `usermod -aG docker dev`. dind only ever launches under
+# sysbox-runc, which clones the container's rootfs — so /etc/group edits made
+# inside the container are invisible to the Docker daemon's own `docker exec -u
+# dev` user resolution, while image-baked membership survives. Since the
+# launcher attaches every agent session with exactly `docker exec -u dev`
+# (assembleExecEnv, watch/internal/sandbox/launcher/launch.go), a runtime-only
+# group add reaches PID 1's priv-dropped shell but never the agent, which lands
+# with groups=dev and fails every docker call with "permission denied while
+# trying to connect to the docker API at unix:///var/run/docker.sock".
+# `groupadd -f` rather than relying on the docker-ce postinst having created the
+# group: -f is a no-op when it already exists, and dockerd group-owns
+# /var/run/docker.sock by the name `docker`, so the gid it picks does not matter.
+RUN groupadd -f docker && usermod -aG docker dev
+
 USER dev

@@ -7,6 +7,19 @@
 # updated /etc/group membership — no `sg` re-exec needed, unlike the removed
 # DooD socket-group block.
 #
+# That runtime add covers the priv-dropped PID-1 shell ONLY — it is not what
+# gets the agent onto the socket, and must never be relied on as if it were.
+# dind always launches under sysbox-runc, which clones the container's rootfs,
+# so /etc/group edits made in here are invisible to the Docker daemon's own
+# `docker exec -u dev` user resolution; the launcher attaches every agent
+# session with exactly that (assembleExecEnv,
+# watch/internal/sandbox/launcher/launch.go), so the agent lands with
+# groups=dev and every docker call fails with a socket permission error.
+# The membership the agent actually uses is baked into the image at build time
+# by fragments/docker.dockerfile (`groupadd -f docker && usermod -aG docker
+# dev`), which does survive the rootfs clone. The calls below stay as the
+# root-phase belt-and-braces for that image-level guarantee.
+#
 # dockerd itself is launched fire-and-forget: agents don't touch docker until
 # well after startup, and the docker CLI/Testcontainers clients already
 # retry/wait on connect, so blocking container startup on daemon readiness
