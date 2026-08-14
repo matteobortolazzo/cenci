@@ -22,7 +22,8 @@
 # the target) rather than silently misparsing. Heredoc bodies remain
 # unmodelled EXCEPT for the bare apply_patch envelope (#1036): a command that
 # is the whole, strictly-shaped apply_patch envelope (bare `*** Begin Patch`
-# text, or `apply_patch <<'DELIM'`/`<<-"DELIM"` with a quoted delimiter) is
+# text, or `apply_patch <<'DELIM'`/`<<-"DELIM"`/`<<\DELIM` with a
+# non-expanding -- quoted or backslash-escaped -- delimiter) is
 # recognized directly by bwt_is_apply_patch_payload/bwt_apply_patch_targets
 # below, before the diff body ever reaches this tokenizer.
 #
@@ -74,8 +75,13 @@
 #   - apply_patch is modelled ONLY for the bare, strictly-shaped envelope
 #     (#1036): the whole command is nothing but `*** Begin Patch ... *** End
 #     Patch`, optionally wrapped in a bare `apply_patch <<'DELIM'`/
-#     `<<-"DELIM"` heredoc invocation with a quoted delimiter and nothing
-#     else on that line. A SHELL-COMPOSED apply_patch invocation (a `cd`/
+#     `<<-"DELIM"`/`<<\DELIM` heredoc invocation with a non-expanding (quoted
+#     or backslash-escaped) delimiter and nothing else on that line. An
+#     apply_patch invocation whose payload is not a readable heredoc at all
+#     (`apply_patch < f.patch`, `apply_patch f.patch`) is out of scope and
+#     falls back to the tokenizer; a here-STRING form (`apply_patch <<<"$p"`)
+#     is recognized-but-unreadable and fails closed (#1045).
+#     A SHELL-COMPOSED apply_patch invocation (a `cd`/
 #     `&&`/`;`/pipe/subshell/assignment prefix, or any trailing content after
 #     the envelope) is an accepted residual: bwt_apply_patch_targets returns
 #     9 for that shape and callers fall back unchanged to this tokenizer,
@@ -194,6 +200,8 @@
 #   bwt_is_exempt_device <target>        -- true for /dev/null etc.
 #   bwt_expand_safe_vars <target>        -- internal expansion, never eval
 #   bwt_is_unresolved <expanded-target>  -- true if still unresolved
+#   bwt_is_unresolved_literal <target>   -- unresolved test for apply_patch's
+#                                           never-expanded literal paths (#1045)
 #   bwt_is_apply_patch_payload <command> -- cheap apply_patch pre-filter (#1036)
 #   bwt_apply_patch_targets <command>    -- strict apply_patch envelope parser (#1036)
 #   bwt_ap_first_line <command>          -- first line only, for safe BLOCKED messages (#1036)
@@ -491,6 +499,40 @@ bwt_is_unresolved() {
     *'$'* | *'`'* | *'('*) return 0 ;;
   esac
   case "${_bwt_u}" in
+    *"
+"*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# bwt_is_unresolved_literal <target>
+#
+# The apply_patch counterpart of bwt_is_unresolved (Fix 9, #1045 review).
+#
+# bwt_is_unresolved's `$`/backtick/`(` test models SHELL-EXPANSION RESIDUE: on
+# the tokenizer path those characters survived bwt_expand_safe_vars, so the
+# target text is not what bash would actually write to and must fail closed.
+# An apply_patch declared path has no such residue to model. Only a
+# non-expanding delimiter is ever accepted (bwt_apply_patch_targets), so the
+# heredoc body is never shell-expanded and `$`, a backtick, or `(` in a
+# declared path are ordinary filename characters -- `reports/summary (1).csv`
+# is a real, resolvable file, and running the shell-residue test on it blocked
+# a legitimate write with "Use a literal absolute path", which it already was.
+#
+# What DOES remain fail-closed here is the pair of degenerate values no real
+# path can take: empty, or containing a newline. Both are unreachable from
+# bwt_apply_patch_targets today (it exits 8 on an empty declared payload, and
+# its output is line-oriented so a target can never contain a newline) -- this
+# is a deliberate invariant backstop, kept so that a future widening of the
+# parser cannot quietly hand a degenerate value to the callers' path-joining
+# and canonicalization code.
+bwt_is_unresolved_literal() {
+  _bwt_ul="$1"
+  [ -z "${_bwt_ul}" ] && return 0
+  case "${_bwt_ul}" in
     *"
 "*)
       return 0
@@ -1591,21 +1633,42 @@ bwt_ap_first_line() {
 # ---------------------------------------------------------------------------
 # bwt_is_apply_patch_payload <command>
 #
-# Cheap, subprocess-free `case` pre-filter (#1036): true when <command> is
-# line-anchored on the sentinel `*** Begin Patch` -- the literal text appears
-# either at the very start of <command>, or immediately after a newline
-# character. Leading blank/whitespace-only lines before the sentinel are
-# tolerated for free: whatever precedes a newline does not change that the
-# sentinel line itself is still immediately preceded by a newline character.
+# Cheap, subprocess-free `case` pre-filter (#1036): true when <command> either
+# is line-anchored on the sentinel `*** Begin Patch` -- the literal text
+# appears at the very start of <command> or immediately after a newline
+# character -- or mentions the `apply_patch` verb anywhere at all. Leading
+# blank/whitespace-only lines before the sentinel are tolerated for free:
+# whatever precedes a newline does not change that the sentinel line itself is
+# still immediately preceded by a newline character.
+#
 # This is ONLY a pre-filter, same tier as bwt_has_write_candidate -- it never
 # decides the branch outcome on its own; bwt_apply_patch_targets (below) does
-# the real strict-shape/parse decision. A sentinel appearing mid-line (e.g.
-# `echo "*** Begin Patch" > /dev/null`, preceded by a quote character, not a
-# newline or start-of-string) is correctly NOT recognized here.
+# the real strict-shape/parse decision. Because both callers use it as a GATE
+# in front of that parser, the pre-filter must admit EVERY shape the parser
+# accepts, or the parser's own handling of a shape becomes unreachable and the
+# command silently falls through to the tokenizer instead.
 #
-# Every `*` in the quoted pattern literal below is matched literally (quoting
+# Fix 7 (#1045 review): the previous column-0-only sentinel test did exactly
+# that to `<<-` heredocs. A `<<-'EOF'` body is written specifically so it CAN
+# be tab-indented, and the natural spelling indents the `*** Begin Patch`
+# sentinel along with everything else -- so the very shape Fix 1 taught the
+# parser to tab-strip could never reach the parser. It fell through to
+# bwt_has_write_candidate, which is false for an arrow-free diff body, and the
+# hook exited 0: a full guard bypass that the parser-level Fix 1 tests could
+# not see, because they call the parser directly. The verb test below closes
+# it structurally (matching the WRAPPER line, which is never indented) rather
+# than by enumerating indentation spellings the parser might later widen
+# again.
+#
+# Over-admission here is free and deliberate: any command whose first non-blank
+# line is not the strict envelope shape gets exit 9 from the parser and falls
+# back to the tokenizer exactly as before. A sentinel appearing mid-line in a
+# command that never says `apply_patch` (e.g.
+# `echo "*** Begin Patch" > /dev/null`) is still correctly NOT recognized.
+#
+# Every `*` in the quoted pattern literals below is matched literally (quoting
 # strips its glob meaning in a POSIX case pattern) -- only the UNQUOTED `*`
-# characters surrounding the literal (the leading/trailing wildcard spans)
+# characters surrounding the literals (the leading/trailing wildcard spans)
 # are real glob operators.
 bwt_is_apply_patch_payload() {
   case "$1" in
@@ -1614,6 +1677,9 @@ bwt_is_apply_patch_payload() {
   case "$1" in
     *'
 *** Begin Patch'*) return 0 ;;
+  esac
+  case "$1" in
+    *apply_patch*) return 0 ;;
   esac
   return 1
 }
@@ -1625,8 +1691,9 @@ bwt_is_apply_patch_payload() {
 # when the WHOLE command is a bare apply_patch envelope: either literal
 # `*** Begin Patch ... *** End Patch` text with nothing else in the command,
 # or that same text wrapped in a bare `apply_patch <<DELIM`/`apply_patch
-# <<-DELIM` heredoc invocation (quoted or unquoted delimiter) with nothing
-# else on the wrapper line and nothing else in the command. Emits one
+# <<-DELIM` heredoc invocation (any delimiter spelling; only the
+# non-expanding ones parse through to exit 0) with nothing else on the
+# wrapper line and nothing else in the command. Emits one
 # declared target per line (the payload of `*** Add File:`, `*** Update
 # File:`, `*** Delete File:`, and `*** Move to:`, each recorded verbatim
 # minus a trailing CR) on success.
@@ -1636,11 +1703,15 @@ bwt_is_apply_patch_payload() {
 #   0 -- recognized, well-formed envelope; declared targets printed.
 #   3 -- awk is missing from PATH (fail closed, emits nothing).
 #   8 -- RECOGNIZED but malformed: the wrapper/bare line IS the strict shape,
-#        but the envelope itself does not parse (an unquoted heredoc
-#        delimiter -- only `<<'D'`/`<<"D"`/`<<-'D'`/`<<-"D"` are accepted,
-#        since an unquoted delimiter lets the shell expand the heredoc body
-#        so the declared paths in the raw text would not be what actually
-#        gets written; a missing `*** Begin Patch`; a missing `*** End
+#        but the envelope itself does not parse (an EXPANDING heredoc
+#        delimiter -- only the non-expanding `<<'D'`/`<<"D"`/`<<\D` spellings
+#        and their `<<-` variants are accepted, with any amount of whitespace
+#        around the operator, since a bare unquoted delimiter lets the shell
+#        expand the heredoc body so the declared paths in the raw text would
+#        not be what actually gets written; a delimiter spelling this parser
+#        cannot classify either way (`<<E'OF'`); a here-STRING payload
+#        (`<<<"$p"`), whose text this parser cannot see at all; a missing
+#        `*** Begin Patch`; a missing `*** End
 #        Patch`; no line exactly matching the heredoc delimiter -- bash's
 #        real termination rule, checked on the `<<-`-tab-stripped text when
 #        applicable, and against the line's RAW (never CR-stripped) bytes --
@@ -1651,18 +1722,25 @@ bwt_is_apply_patch_payload() {
 #        conventional separator-space trim, i.e. still had leading/trailing
 #        whitespace after it). Callers MUST block on this.
 #   9 -- NOT the strict shape at all (anything before the verb, extra tokens
-#        on the wrapper line, an assignment prefix, a `&&`/`;`/`|`/subshell
-#        operator, or non-whitespace content after the closing sentinel/
-#        terminator). This is the ONLY non-zero code that is NOT a block
-#        instruction -- callers fall back unchanged to the ordinary
-#        bwt_extract_targets tokenizer path.
+#        after the delimiter word on the wrapper line, an assignment prefix, a
+#        `&&`/`;`/`|`/subshell operator, an apply_patch invocation with no
+#        heredoc redirect at all, or non-whitespace content after the closing
+#        sentinel/terminator). This is the ONLY non-zero code that is NOT a
+#        block instruction -- callers fall back unchanged to the ordinary
+#        bwt_extract_targets tokenizer path. It means "the tokenizer can do
+#        better with this command", never "this parser did not recognize a
+#        spelling of its own shape" (#1045 Fix 7).
 #
 # A column-0 `***`-looking line inside the body that is not one of the four
-# recognized directive prefixes is extracted as a target too, verbatim: real
-# hunk content is always prefixed with ` `/`+`/`-`/`@@`, so a genuine
+# recognized directive prefixes, and is not the `*** End of File` chunk
+# marker (#1045 Fix 8), is extracted as a target too, verbatim: real hunk
+# content is always prefixed with ` `/`+`/`-`/`@@`, so a genuine unknown
 # column-0 `***` line really does terminate the hunk as far as the real
-# parser is concerned -- over-extraction here only ever costs an over-block,
-# never a silent under-extraction (which would be a bypass).
+# parser is concerned -- over-extraction of an UNKNOWN line only ever costs
+# an over-block, never a silent under-extraction (which would be a bypass).
+# That trade does not extend to markers the grammar defines: those are
+# skipped by name, because over-extracting one is an unconditional block of
+# an entirely legitimate patch shape.
 #
 # Implementation note: a single `awk` pass over stdin (`printf | awk`, never
 # `ENVIRON`) sidesteps bwt_extract_targets' 100000-byte MAX_ARG_STRLEN
@@ -1718,34 +1796,88 @@ bwt_apply_patch_targets() {
         trimmed = Lclean
         gsub(/^[ \t]+/, "", trimmed)
         gsub(/[ \t]+$/, "", trimmed)
-        nt = split(trimmed, toks, /[ \t]+/)
-        if (nt != 2 || toks[1] != "apply_patch") exit 9
 
-        tok2 = toks[2]
-        if (tok2 ~ /^<<-/) {
+        # Fix 7 (#1045 review): parse the wrapper line STRUCTURALLY -- verb,
+        # then redirect operator, then delimiter word -- instead of requiring
+        # exactly two whitespace-separated tokens. The token-count shape
+        # rejected spellings bash accepts for a bare, non-expanding heredoc on
+        # an otherwise-identical invocation:
+        #   `apply_patch << 'EOF'`  (space after `<<`  -> 3 tokens)
+        #   `apply_patch <<\EOF`    (backslash-escaped -> matched no pattern)
+        #   `apply_patch<<'EOF'`    (no space at all   -> 1 token)
+        # Each returned 9, which is the PERMISSIVE bucket: callers fall back
+        # to the tokenizer, an arrow-free diff body yields no write candidate,
+        # and the write is silently allowed. Exit 9 must mean "shell-composed,
+        # the tokenizer can do better", never "this parser did not recognize a
+        # spelling of its own shape".
+        #
+        # Consequently, once the first non-blank line IS an `apply_patch`
+        # invocation with a heredoc-ish redirect, every remaining failure is
+        # exit 8 (block) rather than exit 9 -- the tokenizer has nothing
+        # better to offer for an apply_patch envelope it also cannot read.
+        # The one exception is genuine trailing shell composition on the
+        # wrapper line (`after` non-empty below), which is exactly the case
+        # the tokenizer DOES model and which keeps its pre-existing exit 9.
+        if (trimmed !~ /^apply_patch([ \t]|<)/) exit 9
+        rest = substr(trimmed, length("apply_patch") + 1)
+        gsub(/^[ \t]+/, "", rest)
+        # Not a heredoc redirect at all (`apply_patch f.patch`,
+        # `apply_patch < f.patch`): the envelope text is not in the command,
+        # so there is nothing here to parse -- unchanged fall-back.
+        if (rest !~ /^<</) exit 9
+
+        if (rest ~ /^<<-/) {
           op = "<<-"
-        } else if (tok2 ~ /^<</) {
+        } else {
           op = "<<"
-        } else {
-          exit 9
         }
-        rest = substr(tok2, length(op) + 1)
+        rest = substr(rest, length(op) + 1)
+        # A third `<` is a here-STRING (`apply_patch <<<"$patch"`), not a
+        # heredoc: the payload is a shell word this parser cannot see, so its
+        # declared targets are unknowable. Recognized invocation, unverifiable
+        # payload -> fail closed.
+        if (substr(rest, 1, 1) == "<") exit 8
+        gsub(/^[ \t]+/, "", rest)
+        if (rest == "") exit 8
 
-        sqpat = "^" sq "[^" sq "]*" sq "$"
-        dqpat = "^" dq "[^" dq "]*" dq "$"
-        if (rest ~ sqpat) {
+        # Split the delimiter word from any trailing content. A quoted
+        # delimiter ends at its closing quote (it may legally contain spaces);
+        # an unquoted one ends at the first whitespace.
+        c = substr(rest, 1, 1)
+        if (c == sq || c == dq) {
+          e = index(substr(rest, 2), c)
+          if (e == 0) exit 8
+          delim = substr(rest, 2, e - 1)
+          after = substr(rest, e + 2)
           quoted = 1
-          delim = substr(rest, 2, length(rest) - 2)
-        } else if (rest ~ dqpat) {
-          quoted = 1
-          delim = substr(rest, 2, length(rest) - 2)
-        } else if (rest ~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
-          quoted = 0
-          delim = rest
         } else {
-          exit 9
+          word = rest
+          sub(/[ \t].*$/, "", word)
+          after = substr(rest, length(word) + 1)
+          if (word ~ /^\\[A-Za-z_][A-Za-z0-9_]*$/) {
+            # `<<\EOF` -- backslash-escaping the delimiter suppresses body
+            # expansion exactly like quoting it does, so the declared paths in
+            # the raw text ARE what apply_patch receives. Accept as quoted.
+            delim = substr(word, 2)
+            quoted = 1
+          } else if (word ~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+            quoted = 0
+            delim = word
+          } else {
+            # A partially-quoted or otherwise unmodelled delimiter spelling
+            # (`<<E'OF'`, `<<"A`). Whether the body expands cannot be decided
+            # here -> fail closed.
+            exit 8
+          }
         }
-        if (delim == "") exit 9
+
+        gsub(/^[ \t]+/, "", after)
+        gsub(/[ \t]+$/, "", after)
+        # Extra tokens after the delimiter word (`apply_patch <<'EOF' && rm x`)
+        # are real shell composition, which the tokenizer models better than
+        # this parser does -- unchanged fall-back.
+        if (after != "") exit 9
+        if (delim == "") exit 8
         if (!quoted) exit 8
 
         shape = "wrapper"
@@ -1863,6 +1995,20 @@ bwt_apply_patch_targets() {
         ln = lines[i]
         sub(/\r$/, "", ln)
         if (substr(ln, 1, 3) != "***") continue
+        # Fix 8 (#1045 review): `*** End of File` belongs to the apply_patch
+        # chunk grammar -- it marks a hunk that runs to the end of the file --
+        # and is not a path. The non-directive fallback below emitted it
+        # verbatim as a "declared target", which guard-main-worktree.sh then
+        # joined to cwd, canonicalized inside the repo root, and hard-blocked
+        # with a nonsensical `BLOCKED: Bash write to <root>/*** End of File`
+        # message -- so EVERY `*** Update File:` patch whose last chunk
+        # reached EOF was rejected. The "over-extraction only ever costs an
+        # over-block" rationale in the header block above holds for UNKNOWN
+        # `***` lines; it does not hold for a marker the grammar defines,
+        # where the over-block is unconditional.
+        # NOTE (apostrophes): this awk program is a single-quoted shell
+        # string, so no comment in it may contain a literal apostrophe.
+        if (ln == "*** End of File") continue
         isDirective = 1
         if (index(ln, "*** Add File:") == 1) {
           p = substr(ln, length("*** Add File:") + 1)

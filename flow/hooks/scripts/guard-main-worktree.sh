@@ -459,7 +459,7 @@ elif [ -n "$TOOL_COMMAND" ]; then
         BWT_AP_FIRST_LINE=$(bwt_ap_first_line "$TOOL_COMMAND")
         {
           echo "BLOCKED: guard-main-worktree.sh recognized this Bash command as an apply_patch envelope (starting: $BWT_AP_FIRST_LINE), but it does not parse."
-          echo "Only two shapes are accepted: bare '*** Begin Patch' ... '*** End Patch' text, or that same text wrapped in an apply_patch <<'DELIM' / apply_patch <<-\"DELIM\" heredoc with a quoted delimiter."
+          echo "Only two shapes are accepted: bare '*** Begin Patch' ... '*** End Patch' text, or that same text wrapped in an apply_patch heredoc whose delimiter does not expand -- apply_patch <<'DELIM', <<\"DELIM\", <<\\DELIM, or their <<- variants."
         } >&2
         exit 2
         ;;
@@ -623,7 +623,21 @@ elif [ -n "$TOOL_COMMAND" ]; then
       BWT_EXPANDED=$(bwt_expand_safe_vars "$BWT_TARGET")
     fi
 
-    if bwt_is_unresolved "$BWT_EXPANDED"; then
+    # #1045 review, Fix 9: which unresolved-test applies depends on the SOURCE
+    # of the target. bwt_is_unresolved models shell-expansion residue, which
+    # only the tokenizer path can have; an apply_patch declared path comes out
+    # of a never-expanded (non-expanding-delimiter) heredoc body, so `$`, a
+    # backtick, and `(` in it are ordinary filename characters and blocking on
+    # them rejected legitimate writes like `reports/summary (1).csv`. See
+    # bwt_is_unresolved_literal for what stays fail-closed on that path.
+    BWT_UNRESOLVED=0
+    if [ "$BWT_APPLY_PATCH" -eq 1 ]; then
+      bwt_is_unresolved_literal "$BWT_EXPANDED" && BWT_UNRESOLVED=1
+    else
+      bwt_is_unresolved "$BWT_EXPANDED" && BWT_UNRESOLVED=1
+    fi
+
+    if [ "$BWT_UNRESOLVED" -eq 1 ]; then
       # #1036 second review, Fix A: this per-target loop runs for BOTH the
       # apply_patch and ordinary-tokenizer sources of BWT_TARGETS, but only
       # the tokenizer's $TOOL_COMMAND is an ordinary shell command safe to

@@ -743,8 +743,9 @@ done <<< "${CS_PATTERNS}"
 # wrapped in a shell `apply_patch <<'EOF' ... EOF` heredoc invocation).
 # check-sensitive-files.sh gains the same pre-tokenizer recognition branch as
 # guard-main-worktree.sh: recognized apply_patch targets are checked against
-# check_sensitive directly (skipping bwt_expand_safe_vars, keeping
-# bwt_is_unresolved), suppressing the raw-text/tokenizer backstop only when
+# check_sensitive directly (skipping bwt_expand_safe_vars, and — since #1045
+# Fix 9 — bwt_is_unresolved too, in favour of bwt_is_unresolved_literal),
+# suppressing the raw-text/tokenizer backstop only when
 # recognition succeeded. Relative-target resolution is inherited unchanged
 # ($(pwd)/<target> -- no policy change here, unlike guard-main-worktree.sh's
 # cwd-join-then-canonicalize exception).
@@ -834,30 +835,99 @@ else
     fail "malformed apply_patch envelope with secret-shaped body blocked: stderr should still name the apply_patch construct via its first line, got: ${CHECK_STDERR}"
 fi
 
-# (e3) #1036 second review, Fix A: the Fix 6 secret-leak fix only covered the
-# exit-8 (malformed envelope) BLOCKED message. On the SUCCESS path (the
-# envelope parses fine and BWT_APPLY_PATCH=1), a declared target that fails
-# bwt_is_unresolved (e.g. a real filename containing '(' -- no malformed
-# envelope required) must ALSO never have the full diff body -- which may
-# itself carry secret material -- echoed into its BLOCKED message.
-echo "case: apply_patch envelope with a well-formed envelope whose declared target fails bwt_is_unresolved does not leak the diff body's secret-shaped content into the BLOCKED message (#1036 second review, Fix A)"
+# (e3) #1045 review, Fix 9: bwt_is_unresolved models SHELL-EXPANSION residue,
+# which an apply_patch declared path cannot have -- only a non-expanding
+# delimiter is ever accepted, so the body is never expanded and '$', a
+# backtick, and '(' in a declared path are ordinary filename characters.
+# Running that test on them rejected a legitimate write to a real file. The
+# decision must come from the blocklist, exactly as for any other target.
+echo "case: an apply_patch declared path containing '(' is checked against the blocklist normally -- a benign one is allowed, not rejected as unresolvable (#1045 Fix 9)"
 JSON=$(jq -n --arg cmd "*** Begin Patch
 *** Add File: reports/summary (1).csv
++col
+*** End Patch" '{tool_input:{command:$cmd}}')
+run_check_in_dir "${APPLY_PATCH_DIR}" "${JSON}"
+assert_exit "benign apply_patch declared path with '(' allowed" 0
+
+# The SAME shape with a SENSITIVE name must still block -- on the blocklist
+# decision, the real one, not on a spurious unresolvable-target rejection.
+# And per #1036 Fix 6 / Fix A, that message must still never carry the diff
+# body, which may itself hold the very secret being refused.
+echo "case: a sensitive apply_patch declared path containing '(' is blocked on the blocklist decision, without leaking the diff body's secret-shaped content (#1045 Fix 9, #1036 Fix A)"
+JSON=$(jq -n --arg cmd "*** Begin Patch
+*** Add File: config (1).env
 +API_KEY=sk-supersecretvalue12345
 *** End Patch" '{tool_input:{command:$cmd}}')
 run_check_in_dir "${APPLY_PATCH_DIR}" "${JSON}"
-assert_exit "apply_patch envelope unresolved target with secret-shaped body blocked" 2
-assert_blocked_stderr "apply_patch envelope unresolved target with secret-shaped body blocked"
+assert_exit "sensitive apply_patch declared path with '(' blocked" 2
+assert_blocked_stderr "sensitive apply_patch declared path with '(' blocked"
 if [[ "${CHECK_STDERR}" == *"sk-supersecretvalue12345"* ]]; then
-    fail "apply_patch envelope unresolved target with secret-shaped body blocked: BLOCKED message leaked the diff body's secret-shaped content, got: ${CHECK_STDERR}"
+    fail "sensitive apply_patch declared path with '(' blocked: BLOCKED message leaked the diff body's secret-shaped content, got: ${CHECK_STDERR}"
 else
     pass
 fi
-if [[ "${CHECK_STDERR}" == *"reports/summary (1).csv"* ]]; then
+if [[ "${CHECK_STDERR}" == *"config (1).env"* ]]; then
     pass
 else
-    fail "apply_patch envelope unresolved target with secret-shaped body blocked: stderr should still name the unresolved target, got: ${CHECK_STDERR}"
+    fail "sensitive apply_patch declared path with '(' blocked: stderr should name the refused target, got: ${CHECK_STDERR}"
 fi
+
+# (e4) #1045 review, Fix 7: bwt_is_apply_patch_payload gates the parser, so a
+# shape it rejects never reaches bwt_apply_patch_targets at all. The
+# column-0-only sentinel test rejected exactly the shape #1036's Fix 1 exists
+# to handle -- a `<<-'EOF'` body written the natural way, with the sentinel
+# tab-indented along with everything else -- and an arrow-free diff body then
+# yields no write candidate, so the secret write was silently allowed. Driven
+# end-to-end here (not at the parser, which handled this shape all along).
+echo "case: a <<-'EOF' envelope whose sentinel and directives are tab-indented is recognized end-to-end and its .env target blocked (#1045 Fix 7)"
+AP_TAB=$'\t'
+JSON=$(jq -n --arg cmd "apply_patch <<-'EOF'
+${AP_TAB}*** Begin Patch
+${AP_TAB}*** Add File: .env
+${AP_TAB}+API_KEY=sk-supersecretvalue12345
+${AP_TAB}*** End Patch
+${AP_TAB}EOF" '{tool_input:{command:$cmd}}')
+run_check_in_dir "${APPLY_PATCH_DIR}" "${JSON}"
+assert_exit "tab-indented <<-'EOF' envelope declaring .env blocked" 2
+assert_blocked_stderr "tab-indented <<-'EOF' envelope declaring .env blocked"
+
+# (e5) #1045 review, Fix 7: the same permissive-bucket bypass, reached through
+# delimiter spellings bash accepts for a bare, non-expanding heredoc. Each
+# returned exit 9 (fall back to the tokenizer), the arrow-free body extracted
+# nothing, and the .env write was silently allowed.
+echo "case: every non-expanding heredoc delimiter spelling is recognized end-to-end and its .env target blocked (#1045 Fix 7)"
+for spelling in "apply_patch << 'EOF'" "apply_patch <<\\EOF" "apply_patch<<'EOF'"; do
+    JSON=$(jq -n --arg cmd "${spelling}
+*** Begin Patch
+*** Add File: .env
++API_KEY=sk-supersecretvalue12345
+*** End Patch
+EOF" '{tool_input:{command:$cmd}}')
+    run_check_in_dir "${APPLY_PATCH_DIR}" "${JSON}"
+    assert_exit "delimiter spelling <${spelling}> declaring .env blocked" 2
+    assert_blocked_stderr "delimiter spelling <${spelling}> declaring .env blocked"
+done
+
+echo "case: an apply_patch here-STRING invocation, whose payload this hook cannot see, fails closed rather than falling through to the tokenizer (#1045 Fix 7)"
+JSON=$(jq -n --arg cmd 'apply_patch <<<"$patch"' '{tool_input:{command:$cmd}}')
+run_check_in_dir "${APPLY_PATCH_DIR}" "${JSON}"
+assert_exit "apply_patch here-string invocation blocked" 2
+assert_blocked_stderr "apply_patch here-string invocation blocked"
+
+# (e6) #1045 review, Fix 8: `*** End of File` is part of apply_patch's chunk
+# grammar, not a path. Extracting it as a declared target made this hook
+# check a phantom "*** End of File" filename on every patch whose last chunk
+# reaches EOF.
+echo "case: an envelope whose chunk ends with the *** End of File marker is allowed when its real target is benign (#1045 Fix 8)"
+JSON=$(jq -n --arg cmd "*** Begin Patch
+*** Update File: src/app.py
+@@
+-old
++new
+*** End of File
+*** End Patch" '{tool_input:{command:$cmd}}')
+run_check_in_dir "${APPLY_PATCH_DIR}" "${JSON}"
+assert_exit "envelope with *** End of File marker and a benign target allowed" 0
 
 # (f) shell-prefixed envelope -> the unchanged pre-existing path. The body's
 # "=>" contains a real ">" so the OLD (unmodified) tokenizer extracts ".env"

@@ -41,7 +41,7 @@ fi
 # shellcheck source=/dev/null
 . "${LIB_SH}"
 
-for fn in bwt_has_write_candidate bwt_extract_targets bwt_zero_parse_suspicious bwt_has_delimited_tee bwt_is_exempt_device bwt_expand_safe_vars bwt_is_unresolved bwt_is_apply_patch_payload bwt_apply_patch_targets; do
+for fn in bwt_has_write_candidate bwt_extract_targets bwt_zero_parse_suspicious bwt_has_delimited_tee bwt_is_exempt_device bwt_expand_safe_vars bwt_is_unresolved bwt_is_unresolved_literal bwt_is_apply_patch_payload bwt_apply_patch_targets; do
     if ! command -v "${fn}" >/dev/null 2>&1; then
         fail "lib did not define expected function: ${fn}"
     fi
@@ -1363,6 +1363,135 @@ assert_ap_targets_exit "*** Add File: with the normal single-leading-space conve
     "${AP_NORMAL_SPACE_PAYLOAD}" 0
 assert_ap_targets "*** Add File: with the normal single-leading-space convention still emits the clean path" \
     "${AP_NORMAL_SPACE_PAYLOAD}" "normal.txt"
+
+# ── #1045 review: pre-filter gating, delimiter spellings, grammar markers ──
+# Four defects found reviewing the #1036 fix. The first is the most
+# instructive: bwt_is_apply_patch_payload is used by both hooks as a GATE in
+# front of bwt_apply_patch_targets, so a shape the pre-filter rejects can
+# never reach the parser -- and #1036's Fix 1 (`<<-` tab-stripping) landed on
+# a shape the column-0-only pre-filter rejected. The Fix 1 cases above pass
+# because they call the parser DIRECTLY. These call the pre-filter too.
+
+echo "case: bwt_is_apply_patch_payload admits every shape the parser accepts (#1045 Fix 7)"
+AP_TAB_INDENTED_SENTINEL="apply_patch <<-'EOF'
+$(printf '\t')*** Begin Patch
+$(printf '\t')*** Add File: .env
+$(printf '\t')+KEY=value
+$(printf '\t')*** End Patch
+$(printf '\t')EOF"
+assert_true "a <<-'EOF' wrapper whose sentinel is tab-indented (the whole point of <<-) is recognized by the pre-filter, so Fix 1's tab-stripping is reachable at all (#1045 Fix 7)" \
+    bwt_is_apply_patch_payload "${AP_TAB_INDENTED_SENTINEL}"
+assert_ap_targets_exit "the same tab-indented-sentinel envelope parses (exit 0)" \
+    "${AP_TAB_INDENTED_SENTINEL}" 0
+assert_ap_targets "the same tab-indented-sentinel envelope emits its declared target" \
+    "${AP_TAB_INDENTED_SENTINEL}" ".env"
+assert_true "a spaced-delimiter wrapper is recognized by the pre-filter" \
+    bwt_is_apply_patch_payload "apply_patch << 'EOF'"
+assert_false "a mid-line sentinel in a command that never says apply_patch is still NOT recognized (non-regression)" \
+    bwt_is_apply_patch_payload 'echo "*** Begin Patch" > /dev/null'
+
+echo "case: bwt_apply_patch_targets accepts every non-expanding heredoc delimiter spelling bash does (#1045 Fix 7)"
+# Each of these is a bare apply_patch invocation with a NON-EXPANDING
+# delimiter -- the body reaches apply_patch verbatim, so the declared paths in
+# the raw text are exactly what gets written. Returning 9 for any of them put
+# a real, parseable envelope into the PERMISSIVE bucket: callers fall back to
+# the tokenizer, an arrow-free diff body yields no write candidate, and the
+# write is silently allowed.
+AP_SPACED_DELIM="apply_patch << 'EOF'
+${AP_BODY_UPDATE}
+EOF"
+assert_ap_targets_exit "apply_patch << 'EOF' (space between << and the delimiter) returns exit 0, not the permissive exit 9 (#1045 Fix 7)" \
+    "${AP_SPACED_DELIM}" 0
+assert_ap_targets "apply_patch << 'EOF' emits its declared target" "${AP_SPACED_DELIM}" "foo.txt"
+
+AP_ESCAPED_DELIM="apply_patch <<\\EOF
+${AP_BODY_UPDATE}
+EOF"
+assert_ap_targets_exit "apply_patch <<\\EOF (backslash-escaped delimiter, non-expanding exactly like quoting) returns exit 0, not the permissive exit 9 (#1045 Fix 7)" \
+    "${AP_ESCAPED_DELIM}" 0
+assert_ap_targets "apply_patch <<\\EOF emits its declared target" "${AP_ESCAPED_DELIM}" "foo.txt"
+
+AP_NO_SPACE_DELIM="apply_patch<<'EOF'
+${AP_BODY_UPDATE}
+EOF"
+assert_ap_targets_exit "apply_patch<<'EOF' (no space after the verb) returns exit 0, not the permissive exit 9 (#1045 Fix 7)" \
+    "${AP_NO_SPACE_DELIM}" 0
+assert_ap_targets "apply_patch<<'EOF' emits its declared target" "${AP_NO_SPACE_DELIM}" "foo.txt"
+
+AP_SPACED_DASH_DELIM="apply_patch <<- 'EOF'
+$(printf '\t')${AP_BODY_UPDATE}
+$(printf '\t')EOF"
+assert_ap_targets_exit "apply_patch <<- 'EOF' (both the dash form and a spaced delimiter) returns exit 0 (#1045 Fix 7)" \
+    "${AP_SPACED_DASH_DELIM}" 0
+
+echo "case: bwt_apply_patch_targets fails closed (exit 8) on a recognized apply_patch invocation whose payload it cannot read (#1045 Fix 7)"
+assert_ap_targets_exit "apply_patch <<<\"\$patch\" (here-STRING, payload is an invisible shell word) returns exit 8, never the permissive exit 9" \
+    'apply_patch <<<"$patch"' 8
+AP_WEIRD_DELIM="apply_patch <<E'OF'
+${AP_BODY_UPDATE}
+EOF"
+assert_ap_targets_exit "apply_patch <<E'OF' (a delimiter spelling this parser cannot classify as expanding or not) returns exit 8" \
+    "${AP_WEIRD_DELIM}" 8
+
+echo "case: bwt_apply_patch_targets keeps exit 9 for shapes the tokenizer genuinely models better (#1045 Fix 7 non-regression)"
+AP_TRAILING_OPERATOR="apply_patch <<'EOF' && rm -rf x
+${AP_BODY_UPDATE}
+EOF"
+assert_ap_targets_exit "extra tokens after the delimiter word (&& rm -rf x) stay exit 9 -- real shell composition, tokenizer path" \
+    "${AP_TRAILING_OPERATOR}" 9
+assert_ap_targets_exit "apply_patch with a file argument and no heredoc at all stays exit 9" \
+    "apply_patch f.patch" 9
+assert_ap_targets_exit "apply_patch with a plain stdin redirect (< f.patch) stays exit 9 -- the envelope text is not in the command" \
+    "apply_patch < f.patch" 9
+
+echo "case: bwt_apply_patch_targets does not mistake the *** End of File chunk marker for a declared path (#1045 Fix 8)"
+# `*** End of File` is part of apply_patch's grammar, emitted whenever a hunk
+# runs to the end of the file. Extracting it as a "target" made callers join
+# it to cwd and hard-block with `BLOCKED: Bash write to <root>/*** End of File`
+# -- an unconditional rejection of an entirely normal patch shape.
+AP_END_OF_FILE_MARKER="*** Begin Patch
+*** Update File: src/app.py
+@@
+-old
++new
+*** End of File
+*** End Patch"
+assert_ap_targets_exit "an envelope whose chunk ends with *** End of File returns exit 0" \
+    "${AP_END_OF_FILE_MARKER}" 0
+assert_ap_targets "*** End of File is skipped -- only the real declared path is emitted (#1045 Fix 8)" \
+    "${AP_END_OF_FILE_MARKER}" "src/app.py"
+
+# Non-regression on the deliberate over-extraction the header documents: an
+# UNKNOWN column-0 `***` line is still emitted verbatim, so it still costs an
+# over-block rather than a silent under-extraction. Only markers the grammar
+# defines are skipped by name.
+AP_UNKNOWN_DIRECTIVE="*** Begin Patch
+*** Update File: src/app.py
+*** Frobnicate File: sneaky.txt
+*** End Patch"
+assert_ap_targets "an UNKNOWN column-0 *** line is still extracted verbatim (over-block preserved)" \
+    "${AP_UNKNOWN_DIRECTIVE}" "$(printf 'src/app.py\n*** Frobnicate File: sneaky.txt')"
+
+echo "case: bwt_is_unresolved_literal -- the apply_patch counterpart of bwt_is_unresolved (#1045 Fix 9)"
+# An apply_patch declared path comes out of a never-expanded heredoc body, so
+# shell-expansion residue is not a thing there: `$`, a backtick, and `(` are
+# ordinary filename characters. Only the degenerate values no real path can
+# take stay fail-closed. (Both are unreachable from the parser today; this is
+# a deliberate invariant backstop, tested at this level for that reason.)
+assert_false "a filename containing '(' is resolvable on the apply_patch path" \
+    bwt_is_unresolved_literal "reports/summary (1).csv"
+assert_false "a filename containing '\$' is resolvable on the apply_patch path" \
+    bwt_is_unresolved_literal 'costs/$5-plan.md'
+assert_false "a filename containing a backtick is resolvable on the apply_patch path" \
+    bwt_is_unresolved_literal 'notes/`draft`.md'
+assert_false "an ordinary relative path is resolvable" bwt_is_unresolved_literal "src/app.py"
+assert_true "an empty target is still unresolved" bwt_is_unresolved_literal ""
+assert_true "a newline-containing target is still unresolved" \
+    bwt_is_unresolved_literal "$(printf 'a\nb')"
+# The tokenizer-path predicate is unchanged -- the same values it must keep
+# rejecting there, it still rejects.
+assert_true "bwt_is_unresolved still rejects '(' on the tokenizer path (non-regression)" \
+    bwt_is_unresolved "reports/summary (1).csv"
 
 echo "case: bwt_apply_patch_targets fails closed with exit 3 when awk is unavailable, emitting nothing"
 AP_AWK_MISSING_BIN="${TEST_ROOT}/bin-no-awk-apply-patch"
