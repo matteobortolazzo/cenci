@@ -114,6 +114,17 @@ assert_has_result() {
   is_ge1 "${n}" || fail "${label}: expected >=1 '${check}' result with status=${status}, got '${n:-N/A}' (report: ${REPORT_JSON})"
 }
 
+# assert_no_result_status <check-id> <status> <label> — asserts a check
+# produced zero results at the given status, while still allowing its other
+# statuses. Distinct from assert_no_result, which requires the category to be
+# absent entirely: a check that always emits a summary `pass` row can only be
+# asserted clean this way.
+assert_no_result_status() {
+  local check="$1" status="$2" label="$3"
+  local n; n="$(count_results "${check}" "${status}")"
+  is_eq0 "${n}" || fail "${label}: expected 0 '${check}' results with status=${status}, got '${n:-N/A}' (report: ${REPORT_JSON})"
+}
+
 assert_no_result() {
   local check="$1" label="$2"
   local n
@@ -555,6 +566,72 @@ EOF
 run_check "${ROOT}"
 assert_has_result "adapter-drift" "fail" "case12 PORTABLE_SKILLS references a nonexistent skill directory"
 assert_all_fixes_present "case12 adapter-drift fail must carry a fix"
+rm -rf "${ROOT}"
+
+# =====================================================================
+# Case 12b: adapter-drift — a portable skill must be self-contained on the
+# OpenCode client. OpenCode delivery is a symlink of the skill directory
+# alone (flow/opencode/install-skills.sh), so a skill in PORTABLE_SKILLS
+# that it is DIRECTED TO CONSULT and that is NOT in PORTABLE_SKILLS ships to
+# OpenCode users pointing at a skill they do not have. Ticket #1042.
+#
+# Direction is the discriminator: a skill that merely names other skills in
+# prose (typically documenting its own callers, e.g. verify-ui naming
+# `implement` and `address-review`) depends on nothing and must not fail —
+# only an outbound "Read `X`"-style directive does.
+#   12b-1: portable -> non-portable *directive* reference fails.
+#   12b-2: the same reference passes once the referenced skill is portable
+#          too, proving the check keys on portability and not merely on the
+#          presence of a cross-skill reference.
+#   12b-3: a prose mention of a non-portable skill, with no consult verb,
+#          does not fail — the false-positive shape that would otherwise make
+#          this gate unusable.
+# =====================================================================
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/flow/skills/neighbor"
+cat > "${ROOT}/flow/skills/neighbor/SKILL.md" <<'EOF'
+---
+name: neighbor
+description: "Neighbor skill referenced by demo in maintain checker fixtures."
+user-invocable: false
+---
+
+Resolves shared configuration for other skills.
+EOF
+printf '\nRead `neighbor` before resolving configuration.\n' >> "${ROOT}/flow/skills/demo/SKILL.md"
+bootstrap_markers "${ROOT}"
+run_check "${ROOT}"
+assert_has_result "adapter-drift" "fail" "case12b-1 portable skill is directed to consult a non-portable skill"
+assert_all_fixes_present "case12b-1 adapter-drift fail must carry a fix"
+
+cat > "${ROOT}/flow/opencode/install-skills.sh" <<'EOF'
+#!/bin/sh
+PORTABLE_SKILLS="demo neighbor"
+EOF
+bootstrap_markers "${ROOT}"
+run_check "${ROOT}"
+assert_no_result_status "adapter-drift" "fail" "case12b-2 both skills portable must not report adapter drift"
+rm -rf "${ROOT}"
+
+# 12b-3: prose mention only — `neighbor` is named as a caller, never consulted.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/flow/skills/neighbor"
+cat > "${ROOT}/flow/skills/neighbor/SKILL.md" <<'EOF'
+---
+name: neighbor
+description: "Neighbor skill referenced by demo in maintain checker fixtures."
+user-invocable: false
+---
+
+Resolves shared configuration for other skills.
+EOF
+printf '\nThis is the single source of truth for the demo rule. `neighbor` and any\nother caller apply exactly this rule — never restate it inline.\n' \
+  >> "${ROOT}/flow/skills/demo/SKILL.md"
+bootstrap_markers "${ROOT}"
+run_check "${ROOT}"
+assert_no_result_status "adapter-drift" "fail" "case12b-3 prose mention of a non-portable skill must not report adapter drift"
 rm -rf "${ROOT}"
 
 # =====================================================================

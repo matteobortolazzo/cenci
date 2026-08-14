@@ -608,6 +608,32 @@ other_skill_refs() {
   done
 }
 
+# portable_dependency_refs <skilldir> <self> — the skills this skill is
+# *directed to consult*, as opposed to skills it merely names in prose.
+#
+# Direction is the whole point and a bare token match cannot see it.
+# other_skill_refs (which backs README's "Reference skills" column) matches
+# any backticked skill name, so it cannot tell "Read `project-core`" — an
+# outbound dependency that breaks when project-core is absent — from
+# "`refine` and `implement` apply exactly this rule", which is a skill
+# documenting its own *callers* and depends on nothing. A descriptive column
+# can tolerate that conflation; a failing gate cannot, so this narrower
+# extractor keys on the consult-verb idiom already used consistently across
+# flow's skills (Read/Use/Follow/Apply/Consult/Load/per/via `X`). Tokens that
+# are not skill names (`--once`, `execute`) drop out on the membership test
+# below, same as in other_skill_refs.
+portable_dependency_refs() {
+  local skilldir="$1" self="$2" all_names tok
+  all_names="$(for d in "$FLOW_DIR"/skills/*/; do basename "$d"; done | sort -u)"
+  grep -hoiE '(read|use|follow|apply|consult|load|per|via)[[:space:]]+(the[[:space:]]+)?`[a-zA-Z0-9_-]+`' \
+    "$skilldir/SKILL.md" "$skilldir/codex.md" \
+    "$skilldir"/phases/*.md "$skilldir"/modes/*.md 2>/dev/null \
+    | grep -oE '`[a-zA-Z0-9_-]+`' | tr -d '`' | sort -u | while read -r tok; do
+    [[ -z "$tok" || "$tok" == "$self" ]] && continue
+    grep -qxF -- "$tok" <<< "$all_names" && printf '%s\n' "$tok"
+  done
+}
+
 agent_refs() {
   local skilldir="$1" all_agents tok
   all_agents="$(for f in "$FLOW_DIR"/agents/*.md; do [[ -f "$f" ]] && fm_field "$f" name; done | sort -u)"
@@ -1100,7 +1126,30 @@ check_adapter_drift() {
       any_fail=1
     fi
   done
-  [[ "$any_fail" -eq 0 ]] && add_result adapter-drift "(repo)" pass "every PORTABLE_SKILLS entry has a matching flow/skills/ directory" ""
+
+  # A portable skill must be self-contained on the OpenCode client. OpenCode
+  # delivery is a symlink of the skill directory alone (opencode/
+  # install-skills.sh) -- there is no dependency resolution -- so a skill in
+  # PORTABLE_SKILLS that references a skill outside it reaches OpenCode users
+  # pointing at a skill they do not have. This is the mechanical half of
+  # docs/skill-authoring.md's "Client surfaces" rule (#1042).
+  #
+  # Only outbound dependencies count -- see portable_dependency_refs for why
+  # this deliberately does not reuse other_skill_refs.
+  local refname
+  for name in $list; do
+    [[ -d "$FLOW_DIR/skills/$name" ]] || continue
+    while read -r refname; do
+      [[ -n "$refname" ]] || continue
+      [[ " ${list} " == *" ${refname} "* ]] && continue
+      add_result adapter-drift "$name" fail \
+        "portable skill '$name' is directed to consult '$refname', which is not in PORTABLE_SKILLS — OpenCode installs '$name' without it" \
+        "add '$refname' to PORTABLE_SKILLS in flow/opencode/install-skills.sh, or remove the '$refname' dependency from flow/skills/$name/"
+      any_fail=1
+    done < <(portable_dependency_refs "$FLOW_DIR/skills/$name/" "$name")
+  done
+
+  [[ "$any_fail" -eq 0 ]] && add_result adapter-drift "(repo)" pass "every PORTABLE_SKILLS entry has a matching flow/skills/ directory and references only portable skills" ""
 }
 
 # check_structural_tests — non-executing discovery assertion (ticket #720).

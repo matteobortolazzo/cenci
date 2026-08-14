@@ -66,24 +66,35 @@ own resolution order.
 
 ## Portable vs. excluded skills
 
-`install-skills.sh` links exactly the 12 skills declared in its `PORTABLE_SKILLS`
+`install-skills.sh` links exactly the 13 skills declared in its `PORTABLE_SKILLS`
 variable — the same skills marked `Yes` in the OpenCode column of the root
 [`README.md`](../README.md#skill-portability) skill-portability table:
 
-`attachments`, `babysit`, `frontend-classification`, `pr-comment-filter`, `shell-rules`,
-`stack-angular`, `stack-dotnet`, `stack-go`, `subagent-safety`, `testing`, `verify-ui`,
-`worktrees`.
+`attachments`, `babysit`, `frontend-classification`, `pr-comment-filter`,
+`project-core`, `shell-rules`, `stack-angular`, `stack-dotnet`, `stack-go`,
+`subagent-safety`, `testing`, `verify-ui`, `worktrees`.
 
 These are portable because each one avoids depending on a Claude Code-only tool or
 approval mechanism.
 
 Pipeline and interactive skills — `implement`, `configure`, `refine`, `design`,
 `maintain`, `address-review`, `review`, `refactor`, `sync`, `codex-runtime`,
-`project-core`, `ci-repair`, `ticket-ownership`, `babysit-attention` — are **not**
+`ci-repair`, `ticket-ownership`, `babysit-attention` — are **not**
 linked. They assume
 Claude Code's interactive approval flow (`AskUserQuestion`, checkpoints, native
 subagents) that OpenCode does not provide, so shipping them would let OpenCode
 mistake a Claude-only pipeline command for a supported workflow.
+
+`project-core` is the exception to that grouping: it is a non-user-invocable reference
+skill, but `babysit` is directed to consult it and this delivery mechanism resolves no
+dependencies, so excluding it shipped `babysit` pointing at a skill OpenCode never
+installed (#1042).
+
+**Authoring against this list.** Adding or changing a skill means deciding its OpenCode
+status deliberately, not by omission — see
+[`skill-authoring.md`](skill-authoring.md#client-surfaces) for the three client surfaces
+a skill change must reconcile, and for the `adapter-drift` check that fails when a
+portable skill is directed to consult a non-portable one.
 
 ## Host installer, update, and doctor
 

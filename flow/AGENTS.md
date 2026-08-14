@@ -24,7 +24,7 @@ GitHub Issues for tracking. GitHub for code and PRs.
 CLI grammar, alias, env-var, and naming conventions: `<repo-root>/docs/cli-conventions.md`.
 On-demand topic docs live at `docs/`:
 - `docs/git-workflow.md` — branching, commits, PRs, versioning
-- `docs/skill-authoring.md` — writing skills that generate/regenerate files, especially with external-sourced values
+- `docs/skill-authoring.md` — the three client surfaces (Claude Code `SKILL.md`, Codex `codex.md`, OpenCode `PORTABLE_SKILLS`) every skill change must reconcile before it is finished; and writing skills that generate/regenerate files, especially with external-sourced values
 - `docs/ticket-sizing.md` — how tickets are sized against the ~200k agent context budget and when to split
 - `docs/pipeline-safety.md` — restart/recovery, risk-profile re-evaluation, and shared-temp-file scoping rules for multi-phase pipelines
 - `docs/shell-scripting-gotchas.md` — narrow shell/jq/grep pitfalls (CWD persistence, jq fallback semantics, contract-test markers)

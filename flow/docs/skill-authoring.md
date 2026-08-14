@@ -1,8 +1,57 @@
-# Skill authoring — generated-file safety
+# Skill authoring
 
-Conventions for markdown skills that generate or regenerate files committed to a
-user's repo (Dockerfiles, CI YAML, config JSON, etc.), especially when values come
-from external or semi-trusted sources.
+Two concerns: which clients a skill change has to reach ("Client surfaces"), and the
+safety conventions for skills that generate or regenerate files committed to a user's
+repo ("Rules" — Dockerfiles, CI YAML, config JSON, etc., especially when values come
+from external or semi-trusted sources).
+
+## Client surfaces
+
+A skill is not one file with one audience. flow ships skills to three clients through
+three different mechanisms, and **a change to a skill is not finished until all three
+have been reconciled** — either updated, or consciously left alone for a reason that is
+written down.
+
+| Client | Delivery | Where it is declared |
+|---|---|---|
+| Claude Code | `skills/<name>/SKILL.md` | every skill, implicitly |
+| Codex | `skills/<name>/codex.md` companion | presence of the file |
+| OpenCode | symlink of the skill directory | `PORTABLE_SKILLS` in `opencode/install-skills.sh` |
+
+Reconciling does not mean "make every skill support every client". Most exclusions are
+correct: the pipeline skills (`implement`, `configure`, `refine`, `design`, `maintain`,
+`address-review`, `review`, `sync`, `ci-repair`, `ticket-ownership`,
+`babysit-attention`) assume Claude Code's interactive approval flow, and `codex-runtime`
+is a Codex-only adapter. What is not acceptable is an exclusion nobody decided — the
+state where a client is missing because the author never considered it. Record the
+reason next to the declaration, the way `install-skills.sh`'s `PORTABLE_SKILLS` comment
+does.
+
+### OpenCode delivery has no dependency resolution
+
+OpenCode installs a symlink to the skill directory and nothing else. A portable skill
+that is **directed to consult** another skill ("Read `project-core`", "Use the
+`shell-rules` skill", "per `pencil-api`") therefore needs that skill to be portable too,
+or OpenCode users receive a skill pointing at one they do not have. `#1042` is the case
+that produced this rule: `babysit` was portable, `project-core` was not, and the
+"Read `project-core`" instruction on OpenCode pointed at nothing.
+
+This is enforced mechanically by the `adapter-drift` check in
+`skills/maintain/scripts/check.sh`. The check keys on **direction**: an outbound consult
+directive fails, while merely naming another skill in prose does not — a skill
+documenting its own callers ("`refine` and `implement` apply exactly this rule") depends
+on nothing and is left alone.
+
+### The Codex companion is not a copy
+
+`codex.md` is a separate procedure for a client with different primitives, not a
+translation of `SKILL.md`. When a change alters *behavior* — a gate, an ordering, a
+safety rule — it belongs in both. When it alters Claude-specific mechanics
+(`AskUserQuestion` wording, subagent dispatch), it usually does not. The pipeline
+skills' behavioral parity has its own narrower contract in
+[`adapter-contract.md`](adapter-contract.md), which is enforced by
+`tests/parity/parity.test.sh`; that contract covers the implement pipeline's eight
+safety properties, not skill authoring generally.
 
 ## Rules
 

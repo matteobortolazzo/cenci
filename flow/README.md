@@ -81,6 +81,7 @@ Codex and OpenCode so neither mistakes a pipeline command for a supported workfl
 | `attachments` | Yes | Yes | Yes | Uses the active client's user-input and file/image tools |
 | `frontend-classification` | Yes | Yes | Yes | Pure classification rule |
 | `pr-comment-filter` | Yes | Yes | Yes | Pure review-filtering rule |
+| `project-core` | Yes | Yes | Yes | Client-neutral config/guidance resolution; portable because `babysit` consults it |
 | `shell-rules` | Yes | Yes | Yes | Shared rules with client-specific approval notes |
 | `stack-angular` | Yes | Yes | Yes | Framework and test conventions |
 | `stack-dotnet` | Yes | Yes | Yes | Framework and test conventions |
@@ -128,7 +129,7 @@ companion) for every skill, including the internal ones not listed above.
 | `maintain` | Audit and repair structure, documentation, client-portability, and rule/lesson-hygiene drift through a deterministic check plus specialized agents, gated by human approval. | No | Yes | Yes | Yes |
 | `pencil-api` | The current Pencil MCP tool surface, `execute` idiom catalog, transport table, and document-discipline rules. Read before any Pencil call, in either `cli-app` or `editor` mode. | No | No | Yes | No |
 | `pr-comment-filter` | Decide which pull-request review comments are actionable. Use when addressing review feedback, monitoring a PR, or filtering already-handled comments. | Yes | No | Yes | Yes |
-| `project-core` | Resolve cenci's neutral project configuration and shared guidance consistently. | No | No | Yes | No |
+| `project-core` | Resolve cenci's neutral project configuration and shared guidance consistently. | Yes | No | Yes | Yes |
 | `refactor` | Analyze a codebase with specialized agents and propose refactoring tickets. | No | Yes | Yes | Yes |
 | `refine` | Refine a ticket interactively until it is ready for planning. | No | Yes | Yes | Yes |
 | `review` | Review code with specialized security, quality, and silent-failure agents. | No | Yes | Yes | Yes |

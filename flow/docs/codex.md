@@ -36,6 +36,14 @@ cenci babysit 123 --agent codex --interval 15m
 
 Pencil design remains optional and requires its CLI/MCP dependencies.
 
+**Authoring for Codex.** A skill reaches Codex through a `skills/<name>/codex.md`
+companion — a separate procedure for a client with different primitives, not a
+translation of `SKILL.md`. See
+[`skill-authoring.md`](skill-authoring.md#client-surfaces) for the three client surfaces
+a skill change must reconcile, and [`adapter-contract.md`](adapter-contract.md) for the
+narrower eight-property behavioral-parity contract the implement pipeline's Claude Code
+and Codex adapters both have to satisfy.
+
 ## Attention behavior
 
 Cenci `need-input` renders a red/dim foreground `!`. A red tmux background without `!`
