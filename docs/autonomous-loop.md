@@ -119,6 +119,21 @@ Any value other than the exact string `"lean"` — including a missing block —
 tree and never from local `HEAD`. An unpushed local edit grants nothing; a revocation
 pushed to `origin/main` takes effect on the next pass.
 
+A plan approved this way says so. Its front matter carries `approval: lean`, and the
+plan comment posted to the ticket opens with the auto-approved banner instead of the
+ordinary one:
+
+```markdown
+> 🤖 **cenci** — implementation plan posted by `/cenci:implement` (planning — auto-approved, no human review).
+```
+
+Two other paths reach a plan without human review and are labelled distinctly:
+`approval: trivial` (triage judged the ticket trivial and skipped planning entirely)
+and `approval: lean-resumed` (planning escalated, you answered the questions on the
+ticket, and the plan those answers produced was never shown to you). `approval: human`
+is the ordinary path where you read the plan and launched the run. Plans written before
+this key existed carry none — that means unrecorded, not unapproved.
+
 ### 2. Let dispatch start planning sessions
 
 In `~/.config/cenci/config.json`:

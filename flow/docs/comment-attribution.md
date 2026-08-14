@@ -84,6 +84,34 @@ appear under `flow/skills/`:
 | `plan-invalid` | `<!-- cenci-plan-invalid -->` |
 | `reconcile-stuck` | `<!-- cenci-reconcile-stuck -->` |
 
+### `plan-comment` is the one kind with two banner forms
+
+Every other kind has exactly one banner literal. `plan-comment` has two,
+selected by the plan's `approval` front-matter key (`skills/implement/phases/phase-1-plan.md`'s
+`## Persist the Plan`). A human-approved plan keeps the original wording:
+
+```markdown
+> 🤖 **cenci** — implementation plan posted by `/cenci:implement` (planning).
+```
+
+Every other `approval` value — `lean`, `trivial`, `lean-resumed` — uses the
+auto-approved variant instead:
+
+```markdown
+> 🤖 **cenci** — implementation plan posted by `/cenci:implement` (planning — auto-approved, no human review).
+```
+
+Only the banner line differs; the `<!-- cenci-plan-comment -->` marker and its
+own non-blockquoted line are identical in both forms, so the marker invariant
+and every `isCenciAuthored` consumer are unaffected by which form was posted.
+The split exists because the plan comment is the only view of a plan most
+readers ever open, and three of the four paths that persist a plan never stop
+for human review — a merged ticket whose plan nobody read should say so in the
+line a thread-scanner actually sees. This is attribution, not authorization:
+like every banner in this doc it is public, forgeable text, and no consumer may
+branch on which form it finds. The machine-readable answer is the `approval`
+key in the plan's own front matter.
+
 ### `planner-escalation` is the one nonce-bearing kind
 
 Every other kind's marker is a fixed literal. `planner-escalation` is the

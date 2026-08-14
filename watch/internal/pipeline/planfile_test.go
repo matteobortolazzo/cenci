@@ -126,6 +126,10 @@ var planFrontMatterOrder = []string{
 	"version", "mode", "ticketId", "ticketTitle", "slug", "isChild",
 	"isLastChild", "parentId", "createdAt", "status", "planCommitSha",
 	"stalenessPaths", "escalationNonce", "escalationCommentId",
+	// approval (#1050) is written by flow's ## Persist the Plan and read by
+	// no Go consumer -- listed so a test can emit it, not because anything
+	// here interprets it. See planfile_approval_test.go.
+	"approval",
 }
 
 func planFrontMatter(fields map[string]string) string {

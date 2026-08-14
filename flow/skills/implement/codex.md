@@ -9,6 +9,13 @@ continues planning. One run persists at most one plan file and opens at most one
 never persist a second plan file or open a second or stacked PR for one ticket.
 Then return an approved plan in the conversation without writing files or labels.
 Stop before mutations and instruct `cenci run implement apply <ticket> --agent codex`.
+This procedure has no autonomous approval path: `/plan` always stops before
+mutations and returns the plan in the conversation for a human to approve, so
+every plan it persists is `approval: human` by construction and needs no
+value branch of its own (`skills/implement/phases/phase-1-plan.md`'s
+`## Persist the Plan` documents the key and the three autonomous values the
+Claude Code paths write). If this procedure ever gains a path that persists a
+plan without that stop, it must write the matching value instead.
 In normal apply mode persist `.plans/<ticket>-<slug>.md`, then verify the
 assembled file contains all four required headings (`## Ticket Details`, `## Implementation
 Plan`, `## Architectural Context`, `## Design Context` — the `requiredPlanSections` list in
