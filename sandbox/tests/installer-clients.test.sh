@@ -1726,7 +1726,7 @@ echo "case: re-running install links OpenCode's portable skills idempotently and
 name=opencode-idempotent
 run_case_opencode "${name}" claude 1.18.3
 [[ "${CASE_EXIT}" -eq 0 ]]
-assert_contains "${CASE_OUTPUT}" "linked: 12, skipped: 0"
+assert_contains "${CASE_OUTPUT}" "linked: 13, skipped: 0"
 [[ -L "${CASE_HOME}/.config/opencode/skills/testing" ]]
 [[ "$(grep -c 'watch/plugin/opencode' "${CASE_HOME}/.config/opencode/opencode.json")" -eq 1 ]]
 
@@ -1739,7 +1739,7 @@ env -i HOME="${CASE_HOME}" PATH="${CASE_BIN}" CALLS_FILE="${CASE_CALLS}" \
 second_run_exit=$?
 set -e
 [[ "${second_run_exit}" -eq 0 ]]
-assert_contains "${second_output}" "linked: 0, skipped: 12"
+assert_contains "${second_output}" "linked: 0, skipped: 13"
 [[ "$(grep -c 'watch/plugin/opencode' "${CASE_HOME}/.config/opencode/opencode.json")" -eq 1 ]]
 
 echo "case: uninstall removes only cenci's OpenCode skill symlinks and plugin entry, preserving the user's own config and skills"
