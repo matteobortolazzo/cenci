@@ -1,6 +1,6 @@
 {
   "name": "cenci-sandbox",
-  "version": "1.19.1",
+  "version": "1.19.2",
   "description": "cenci isolation layer: Docker or Podman launcher for Claude Code and Codex.",
   "author": {
     "name": "Matteo Bortolazzo",
