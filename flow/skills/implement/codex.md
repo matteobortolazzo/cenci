@@ -31,7 +31,16 @@ the same slug and output. Either stop: run `checkpoint.mjs block`, clear the goa
 the distinct diagnostic plus its captured output, and tell the user to fix the baseline gate
 and re-run `cenci run implement apply`.
 Arm
-the native goal, implement test-first, run the configured reviews, fix accepted findings,
+the native goal, implement test-first, then before the reviews run the reuse check: for each
+named unit this change *adds* (helper, constant, fixture — additions only, capped at the 10
+largest, searched by name fragment and by a distinctive body line within the affected
+project's directory only, and skipped outright when the change adds none),
+reuse it rather than re-implementing it when an equivalent already exists,
+consolidating even at two occurrences since one of them is being written
+right now; keep the new code and report the
+near-duplicate when the existing unit cannot be reused without changing behavior for its
+current callers. This is bounded to new code — never a repo-wide duplication sweep.
+Then run the configured reviews, fix accepted findings,
 capture lessons, and run the maintenance check
 (`flow/skills/maintain/scripts/check.sh --changed`) when the change touches docs, skills,
 agents, config, or client adapters, with the shell tool working directory set to the verified absolute worktree path on the initial check, every `--write`, and every re-run.

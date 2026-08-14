@@ -1,6 +1,6 @@
 # Phase 5: Refactor
 
-Read this file only when Phase 5 starts. Skip this separate phase if Phase 3 is running approved compact implementation mode.
+Read this file only when Phase 5 starts. Skip this separate phase if Phase 3 is running approved compact implementation mode — with one carve-out: the `## Reuse Check` below still runs, folded into that single implementer delegation. It is a handful of searches over code the agent is already holding, so skipping it saves nothing worth the gap it opens.
 
 Delegate to the `implementer` agent for focused cleanup of touched code only.
 
@@ -21,7 +21,23 @@ Review changed code for:
 - Complex conditionals that can be simplified.
 - Overly clever code.
 
-Run the full test suite after refactoring, and rerun lint (when `lintCommand` is set) alongside it. An absent `lintCommand` skips the lint step cleanly — no error. Behavior must not change.
+That duplication bullet governs duplication that was *already there* and this change merely touched. Duplication this change **introduces** is governed by `## Reuse Check` below — run it as part of the same delegation, not a separate pass.
+
+Run the full test suite once all cleanup is done — including the `## Reuse Check` below — and rerun lint (when `lintCommand` is set) alongside it. An absent `lintCommand` skips the lint step cleanly — no error. Behavior must not change.
+
+## Reuse Check
+
+Everything above scopes to touched code, which leaves one blind spot: a helper, constant, or fixture added by this change that already exists elsewhere in the repo looks perfectly clean from inside the diff. Nothing in the pipeline sees it — Phase 4 only cares that tests pass, and the Phase 6 + 7 reviewers read the same diff. Close that specific gap here, cheaply. This is a targeted check on new code, **never a repo-wide duplication sweep** — that is `/cenci:refactor`'s job, it fans out dedicated analyzers over a whole scope and emits tickets rather than fixes, and pulling it into every ticket's pipeline is not the trade this step makes.
+
+Tell the implementer to run these steps inside the same delegation:
+
+1. List the **named units this diff adds** — new functions, methods, helpers, exported constants, test fixtures, and setup helpers. Additions only: an edit or rename of an existing unit does not count.
+2. **Skip the rest of this check entirely when that list is empty.** Pure edits, deletions, and config/data-only diffs are the common case and must cost nothing.
+3. For at most the 10 largest added units (by body size), run one search each for an existing equivalent. Search on a behavior-bearing name fragment *and* a distinctive line from the body — a re-implementation rarely reuses the exact name, so a name-only search is the one that misses. Restrict the search to the affected project's directory (the project path Phase 2 resolved) rather than the whole tree; in a monorepo an equivalent in a sibling project is usually not reusable anyway.
+4. On a hit, prefer the existing unit: call it, or widen it when the new use needs one more parameter or one more case. Consolidate here even at **two** occurrences — the rule-of-three threshold above exists because rewriting settled code is risky, and that reasoning does not apply when the second occurrence is the one being written right now and is free to simply not exist.
+5. When the existing equivalent cannot be reused **without changing behavior for its current callers**, keep the new code and report the near-duplicate in one line in this phase's summary. Do not rewire the existing unit's other callers to make it fit — that is outside the ticket's scope. A near-duplicate left in place is a refactor/tech-debt observation, so it lands under Phase 9's `### Considered and discarded` and is **never** tracked or turned into a Followup ticket — the same policy the Phase 6 + 7 reviewers already apply to their own refactor findings.
+
+Any consolidation made here is part of this phase's changes: the same full-suite-and-lint run above covers it, and the same Error Recovery below applies to it.
 
 ## Error Recovery
 
