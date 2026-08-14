@@ -737,6 +737,145 @@ while IFS= read -r CS_PAT; do
     fi
 done <<< "${CS_PATTERNS}"
 
+# ── Ticket #1036: Codex apply_patch envelope recognition ─────────────
+# On the Codex path, apply_patch reaches PreToolUse hooks as a Bash-matcher
+# tool call whose tool_input.command is the raw patch text (optionally
+# wrapped in a shell `apply_patch <<'EOF' ... EOF` heredoc invocation).
+# check-sensitive-files.sh gains the same pre-tokenizer recognition branch as
+# guard-main-worktree.sh: recognized apply_patch targets are checked against
+# check_sensitive directly (skipping bwt_expand_safe_vars, keeping
+# bwt_is_unresolved), suppressing the raw-text/tokenizer backstop only when
+# recognition succeeded. Relative-target resolution is inherited unchanged
+# ($(pwd)/<target> -- no policy change here, unlike guard-main-worktree.sh's
+# cwd-join-then-canonicalize exception).
+APPLY_PATCH_DIR="${BASH_TEST_ROOT}/apply-patch"
+mkdir -p "${APPLY_PATCH_DIR}"
+
+# (a) *** Add File: .env, >-free body -> exit 2.
+echo "case: apply_patch envelope declaring a relative .env Add File target is blocked (#1036 AC 3)"
+JSON=$(jq -n --arg cmd "*** Begin Patch
+*** Add File: .env
++SECRET=1
+*** End Patch" '{tool_input:{command:$cmd}}')
+run_check_in_dir "${APPLY_PATCH_DIR}" "${JSON}"
+assert_exit "apply_patch envelope relative .env Add File blocked" 2
+assert_blocked_stderr "apply_patch envelope relative .env Add File blocked"
+
+# (b) *** Delete File: <root>/config/credentials.yml -> exit 2.
+echo "case: apply_patch envelope declaring an absolute credentials.yml Delete File target is blocked"
+JSON=$(jq -n --arg cmd "*** Begin Patch
+*** Delete File: ${BASH_TEST_ROOT}/config/credentials.yml
+*** End Patch" '{tool_input:{command:$cmd}}')
+run_check "${JSON}"
+assert_exit "apply_patch envelope absolute credentials.yml Delete File blocked" 2
+assert_blocked_stderr "apply_patch envelope absolute credentials.yml Delete File blocked"
+
+# (c) *** Move to: secrets.env (relative) -> exit 2.
+echo "case: apply_patch envelope's relative Move to secrets.env destination is blocked"
+JSON=$(jq -n --arg cmd "*** Begin Patch
+*** Update File: notes.txt
+*** Move to: secrets.env
+@@
+-old
++new
+*** End Patch" '{tool_input:{command:$cmd}}')
+run_check_in_dir "${APPLY_PATCH_DIR}" "${JSON}"
+assert_exit "apply_patch envelope relative Move to secrets.env blocked" 2
+assert_blocked_stderr "apply_patch envelope relative Move to secrets.env blocked"
+
+# (d) a benign worktree-scoped patch whose body is full of >/=> -> exit 0,
+# proving neither check_sensitive_raw nor the tokenizer fires (#1036 AC 1
+# parity).
+echo "case: apply_patch envelope with a benign target and an arrow-heavy body is allowed (neither check_sensitive_raw nor the tokenizer fires) (#1036 AC 1 parity)"
+JSON=$(jq -n --arg cmd "*** Begin Patch
+*** Update File: src/committee.go
+@@
+-func old() map[string]List<Foo> { return nil }
++func new() map[string]List<Foo> {
++    x := a => b
++    y >> z
++    return committee
++}
+*** End Patch" '{tool_input:{command:$cmd}}')
+run_check_in_dir "${APPLY_PATCH_DIR}" "${JSON}"
+assert_exit "apply_patch envelope benign target with arrow-heavy body allowed" 0
+
+# (e) malformed bare envelope -> exit 2.
+echo "case: malformed bare apply_patch envelope (missing *** End Patch) is blocked"
+JSON=$(jq -n --arg cmd "*** Begin Patch
+*** Update File: notes.txt
+@@
+-old
++new" '{tool_input:{command:$cmd}}')
+run_check_in_dir "${APPLY_PATCH_DIR}" "${JSON}"
+assert_exit "malformed apply_patch envelope (missing End Patch) blocked" 2
+assert_blocked_stderr "malformed apply_patch envelope (missing End Patch) blocked"
+
+# (e2) #1036 Fix 6: a malformed envelope whose diff BODY carries
+# secret-shaped material must never have that body echoed into the exit-8
+# BLOCKED message -- this hook exists specifically to refuse such content,
+# so leaking it into stderr/hook transcripts would defeat its own purpose.
+echo "case: malformed apply_patch envelope whose body contains secret-shaped material does not leak that body into the BLOCKED message (#1036 Fix 6)"
+JSON=$(jq -n --arg cmd "*** Begin Patch
+*** Add File: notes.txt
++API_KEY=sk-supersecretvalue12345
+@@ missing end sentinel" '{tool_input:{command:$cmd}}')
+run_check_in_dir "${APPLY_PATCH_DIR}" "${JSON}"
+assert_exit "malformed apply_patch envelope with secret-shaped body blocked" 2
+assert_blocked_stderr "malformed apply_patch envelope with secret-shaped body blocked"
+if [[ "${CHECK_STDERR}" == *"sk-supersecretvalue12345"* ]]; then
+    fail "malformed apply_patch envelope with secret-shaped body blocked: BLOCKED message leaked the diff body's secret-shaped content, got: ${CHECK_STDERR}"
+else
+    pass
+fi
+if [[ "${CHECK_STDERR}" == *"*** Begin Patch"* ]]; then
+    pass
+else
+    fail "malformed apply_patch envelope with secret-shaped body blocked: stderr should still name the apply_patch construct via its first line, got: ${CHECK_STDERR}"
+fi
+
+# (e3) #1036 second review, Fix A: the Fix 6 secret-leak fix only covered the
+# exit-8 (malformed envelope) BLOCKED message. On the SUCCESS path (the
+# envelope parses fine and BWT_APPLY_PATCH=1), a declared target that fails
+# bwt_is_unresolved (e.g. a real filename containing '(' -- no malformed
+# envelope required) must ALSO never have the full diff body -- which may
+# itself carry secret material -- echoed into its BLOCKED message.
+echo "case: apply_patch envelope with a well-formed envelope whose declared target fails bwt_is_unresolved does not leak the diff body's secret-shaped content into the BLOCKED message (#1036 second review, Fix A)"
+JSON=$(jq -n --arg cmd "*** Begin Patch
+*** Add File: reports/summary (1).csv
++API_KEY=sk-supersecretvalue12345
+*** End Patch" '{tool_input:{command:$cmd}}')
+run_check_in_dir "${APPLY_PATCH_DIR}" "${JSON}"
+assert_exit "apply_patch envelope unresolved target with secret-shaped body blocked" 2
+assert_blocked_stderr "apply_patch envelope unresolved target with secret-shaped body blocked"
+if [[ "${CHECK_STDERR}" == *"sk-supersecretvalue12345"* ]]; then
+    fail "apply_patch envelope unresolved target with secret-shaped body blocked: BLOCKED message leaked the diff body's secret-shaped content, got: ${CHECK_STDERR}"
+else
+    pass
+fi
+if [[ "${CHECK_STDERR}" == *"reports/summary (1).csv"* ]]; then
+    pass
+else
+    fail "apply_patch envelope unresolved target with secret-shaped body blocked: stderr should still name the unresolved target, got: ${CHECK_STDERR}"
+fi
+
+# (f) shell-prefixed envelope -> the unchanged pre-existing path. The body's
+# "=>" contains a real ">" so the OLD (unmodified) tokenizer extracts ".env"
+# as a redirect target via its ordinary parse -- proving the shell-prefixed
+# shape truly falls back to today's behavior rather than being silently
+# skipped.
+echo "case: shell-prefixed apply_patch invocation falls back to the existing (unchanged) tokenizer path"
+BASH_CMD_FALLBACK="cd /elsewhere && apply_patch <<'EOF'
+*** Begin Patch
+*** Add File: notes.txt
++old => .env
+*** End Patch
+EOF"
+JSON=$(jq -n --arg cmd "${BASH_CMD_FALLBACK}" '{tool_input:{command:$cmd}}')
+run_check_in_dir "${APPLY_PATCH_DIR}" "${JSON}"
+assert_exit "shell-prefixed apply_patch invocation falls back and blocks via the existing tokenizer path" 2
+assert_blocked_stderr "shell-prefixed apply_patch invocation falls back and blocks via the existing tokenizer path"
+
 # ── Summary ──────────────────────────────────────────────────────────
 echo
 echo "passed: ${PASSES}, failed: ${FAILURES} (shell: ${HOOK_SHELL})"

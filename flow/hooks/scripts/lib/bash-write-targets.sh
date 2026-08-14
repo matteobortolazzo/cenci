@@ -19,7 +19,12 @@
 # bodies. flow's own conventions already route body text through
 # `--body-file` (flow/skills/shell-rules/SKILL.md) rather than heredocs, so
 # the documented pipeline is unaffected; callers fail closed (block, naming
-# the target) rather than silently misparsing.
+# the target) rather than silently misparsing. Heredoc bodies remain
+# unmodelled EXCEPT for the bare apply_patch envelope (#1036): a command that
+# is the whole, strictly-shaped apply_patch envelope (bare `*** Begin Patch`
+# text, or `apply_patch <<'DELIM'`/`<<-"DELIM"` with a quoted delimiter) is
+# recognized directly by bwt_is_apply_patch_payload/bwt_apply_patch_targets
+# below, before the diff body ever reaches this tokenizer.
 #
 # Threat model and accepted residuals (#795 — read before "fixing" a missing
 # construct; this is not an exhaustive bypass list, only the known ones):
@@ -66,6 +71,25 @@
 #     the backstop and is silently allowed. Closing that would require
 #     treating every backslash as suspicious, which was rejected on
 #     false-positive grounds; it is a known, documented residual.
+#   - apply_patch is modelled ONLY for the bare, strictly-shaped envelope
+#     (#1036): the whole command is nothing but `*** Begin Patch ... *** End
+#     Patch`, optionally wrapped in a bare `apply_patch <<'DELIM'`/
+#     `<<-"DELIM"` heredoc invocation with a quoted delimiter and nothing
+#     else on that line. A SHELL-COMPOSED apply_patch invocation (a `cd`/
+#     `&&`/`;`/pipe/subshell/assignment prefix, or any trailing content after
+#     the envelope) is an accepted residual: bwt_apply_patch_targets returns
+#     9 for that shape and callers fall back unchanged to this tokenizer,
+#     which then sees the diff body's own `>`/`tee` text exactly as before
+#     -- an arrow-free declared-write body in that shape is silently allowed
+#     (documented, unchanged from pre-#1036 behavior), while an arrow-bearing
+#     body still blocks (over-block, never a new bypass).
+#   - A recognized apply_patch envelope's RELATIVE declared targets are
+#     resolved against this hook's own process `$(pwd)` (guard-main-
+#     worktree.sh's checked BWT_CWD), trusted as the apply_patch call's
+#     effective working directory -- this is NOT independently verified
+#     against any client-supplied workdir parameter the Codex tool call
+#     might carry (#1036 Q9, accepted residual, deliberately not reopened
+#     in this fix pass).
 #
 #   Comparison-context recognition is intentionally narrow, PERMANENTLY
 #   (#810, round-3 stabilization review — this is a settled design choice,
@@ -170,6 +194,9 @@
 #   bwt_is_exempt_device <target>        -- true for /dev/null etc.
 #   bwt_expand_safe_vars <target>        -- internal expansion, never eval
 #   bwt_is_unresolved <expanded-target>  -- true if still unresolved
+#   bwt_is_apply_patch_payload <command> -- cheap apply_patch pre-filter (#1036)
+#   bwt_apply_patch_targets <command>    -- strict apply_patch envelope parser (#1036)
+#   bwt_ap_first_line <command>          -- first line only, for safe BLOCKED messages (#1036)
 
 # ---------------------------------------------------------------------------
 # bwt_has_write_candidate <command>
@@ -1534,6 +1561,348 @@ bwt_extract_targets() {
         return
       }
       outbuf[outn] = w2
+    }
+  '
+}
+
+# ---------------------------------------------------------------------------
+# bwt_ap_first_line <command>
+#
+# Prints only the FIRST LINE of <command> (#1036 Fix 6). Callers use this
+# exclusively when building an apply_patch exit-8 BLOCKED message: the raw
+# command text for a recognized apply_patch envelope IS the diff body, which
+# may itself contain the exact secret material (e.g. the contents of a
+# `.env` file, an API key) that a caller like check-sensitive-files.sh just
+# correctly refused to write. Interpolating the WHOLE command into a BLOCKED
+# stderr message would surface that secret into hook transcripts/logs,
+# defeating the guard's own purpose (flow/AGENTS.md: no secrets in error
+# responses). The first line alone -- always either the bare
+# `*** Begin Patch` sentinel or the `apply_patch <<'DELIM'`/`<<-"DELIM"`
+# wrapper line -- is envelope syntax, never body content, and is enough for
+# a human to identify which command was blocked without reprinting arbitrary
+# diff text. Uses a POSIX `${var%%pattern}` split on a literal newline
+# (never a subprocess) so this stays as cheap as the other pre-filters here.
+bwt_ap_first_line() {
+  _bwt_afl_nl='
+'
+  printf '%s\n' "${1%%"${_bwt_afl_nl}"*}"
+}
+
+# ---------------------------------------------------------------------------
+# bwt_is_apply_patch_payload <command>
+#
+# Cheap, subprocess-free `case` pre-filter (#1036): true when <command> is
+# line-anchored on the sentinel `*** Begin Patch` -- the literal text appears
+# either at the very start of <command>, or immediately after a newline
+# character. Leading blank/whitespace-only lines before the sentinel are
+# tolerated for free: whatever precedes a newline does not change that the
+# sentinel line itself is still immediately preceded by a newline character.
+# This is ONLY a pre-filter, same tier as bwt_has_write_candidate -- it never
+# decides the branch outcome on its own; bwt_apply_patch_targets (below) does
+# the real strict-shape/parse decision. A sentinel appearing mid-line (e.g.
+# `echo "*** Begin Patch" > /dev/null`, preceded by a quote character, not a
+# newline or start-of-string) is correctly NOT recognized here.
+#
+# Every `*` in the quoted pattern literal below is matched literally (quoting
+# strips its glob meaning in a POSIX case pattern) -- only the UNQUOTED `*`
+# characters surrounding the literal (the leading/trailing wildcard spans)
+# are real glob operators.
+bwt_is_apply_patch_payload() {
+  case "$1" in
+    '*** Begin Patch'*) return 0 ;;
+  esac
+  case "$1" in
+    *'
+*** Begin Patch'*) return 0 ;;
+  esac
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# bwt_apply_patch_targets <command>
+#
+# Strict-shape apply_patch envelope parser (#1036). Recognizes a command ONLY
+# when the WHOLE command is a bare apply_patch envelope: either literal
+# `*** Begin Patch ... *** End Patch` text with nothing else in the command,
+# or that same text wrapped in a bare `apply_patch <<DELIM`/`apply_patch
+# <<-DELIM` heredoc invocation (quoted or unquoted delimiter) with nothing
+# else on the wrapper line and nothing else in the command. Emits one
+# declared target per line (the payload of `*** Add File:`, `*** Update
+# File:`, `*** Delete File:`, and `*** Move to:`, each recorded verbatim
+# minus a trailing CR) on success.
+#
+# Exit codes (mirroring bwt_extract_targets' own fail-closed convention --
+# "non-zero exit -> emits nothing" is a hard invariant here too):
+#   0 -- recognized, well-formed envelope; declared targets printed.
+#   3 -- awk is missing from PATH (fail closed, emits nothing).
+#   8 -- RECOGNIZED but malformed: the wrapper/bare line IS the strict shape,
+#        but the envelope itself does not parse (an unquoted heredoc
+#        delimiter -- only `<<'D'`/`<<"D"`/`<<-'D'`/`<<-"D"` are accepted,
+#        since an unquoted delimiter lets the shell expand the heredoc body
+#        so the declared paths in the raw text would not be what actually
+#        gets written; a missing `*** Begin Patch`; a missing `*** End
+#        Patch`; no line exactly matching the heredoc delimiter -- bash's
+#        real termination rule, checked on the `<<-`-tab-stripped text when
+#        applicable, and against the line's RAW (never CR-stripped) bytes --
+#        see the Fix 1/2/B notes on the function body below;
+#        non-blank content between `*** End Patch` and the heredoc
+#        terminator; zero declared paths; an empty declared path; or a
+#        declared path whose payload needed more than the single
+#        conventional separator-space trim, i.e. still had leading/trailing
+#        whitespace after it). Callers MUST block on this.
+#   9 -- NOT the strict shape at all (anything before the verb, extra tokens
+#        on the wrapper line, an assignment prefix, a `&&`/`;`/`|`/subshell
+#        operator, or non-whitespace content after the closing sentinel/
+#        terminator). This is the ONLY non-zero code that is NOT a block
+#        instruction -- callers fall back unchanged to the ordinary
+#        bwt_extract_targets tokenizer path.
+#
+# A column-0 `***`-looking line inside the body that is not one of the four
+# recognized directive prefixes is extracted as a target too, verbatim: real
+# hunk content is always prefixed with ` `/`+`/`-`/`@@`, so a genuine
+# column-0 `***` line really does terminate the hunk as far as the real
+# parser is concerned -- over-extraction here only ever costs an over-block,
+# never a silent under-extraction (which would be a bypass).
+#
+# Implementation note: a single `awk` pass over stdin (`printf | awk`, never
+# `ENVIRON`) sidesteps bwt_extract_targets' 100000-byte MAX_ARG_STRLEN
+# pre-check, which would otherwise over-block a large but legitimate patch --
+# an apply_patch envelope routinely exceeds that threshold for a
+# multi-hundred-line diff.
+bwt_apply_patch_targets() {
+  command -v awk >/dev/null 2>&1 || return 3
+
+  printf '%s\n' "$1" | awk '
+    { lines[NR] = $0 }
+    END {
+      n = NR
+      sq = sprintf("%c", 39)  # single quote
+      dq = sprintf("%c", 34)  # double quote
+
+      # Fix B (#1036 second review): `lines[]` stays RAW here -- CR is never
+      # stripped globally up front. Real bashs heredoc-terminator matching
+      # is byte-exact against the raw line and does NOT strip a trailing CR
+      # before comparing a candidate line to the delimiter, so a line like
+      # "EOF\r" is NOT a valid terminator to bash (bash keeps reading) even
+      # though `sub(/\r$/, "", ...)` would make it look like an exact match
+      # for delimiter "EOF". Stripping CR upfront over the whole array (the
+      # prior approach) let a decoy CR-suffixed line further up masquerade as
+      # the terminator, making the parser find its boundary EARLIER than
+      # bashs real one -- content genuinely still inside the real heredoc
+      # body then read as "trailing" and could fall back to exit 9 (tokenizer
+      # path), smuggling body content past this parsers own extraction. CR is
+      # instead stripped locally, per line, at every site below that performs
+      # a SENTINEL/blank/directive-payload comparison (never at the
+      # heredoc-terminator scan, Fix 2 below, which must see the raw bytes).
+      # `<<-` tab-stripping (below) still mutates `lines[]` in place and runs
+      # before the terminator scan, matching bashs own `<<-` semantics of
+      # stripping leading tabs from both the body AND the terminator line
+      # itself before the comparison.
+
+      first = 0
+      for (i = 1; i <= n; i++) {
+        t = lines[i]
+        gsub(/[ \t\r]/, "", t)
+        if (t != "") { first = i; break }
+      }
+      if (first == 0) exit 9
+
+      L = lines[first]
+      Lclean = L
+      sub(/\r$/, "", Lclean)
+
+      if (Lclean == "*** Begin Patch") {
+        shape = "bare"
+        beginIdx = first
+      } else {
+        trimmed = Lclean
+        gsub(/^[ \t]+/, "", trimmed)
+        gsub(/[ \t]+$/, "", trimmed)
+        nt = split(trimmed, toks, /[ \t]+/)
+        if (nt != 2 || toks[1] != "apply_patch") exit 9
+
+        tok2 = toks[2]
+        if (tok2 ~ /^<<-/) {
+          op = "<<-"
+        } else if (tok2 ~ /^<</) {
+          op = "<<"
+        } else {
+          exit 9
+        }
+        rest = substr(tok2, length(op) + 1)
+
+        sqpat = "^" sq "[^" sq "]*" sq "$"
+        dqpat = "^" dq "[^" dq "]*" dq "$"
+        if (rest ~ sqpat) {
+          quoted = 1
+          delim = substr(rest, 2, length(rest) - 2)
+        } else if (rest ~ dqpat) {
+          quoted = 1
+          delim = substr(rest, 2, length(rest) - 2)
+        } else if (rest ~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+          quoted = 0
+          delim = rest
+        } else {
+          exit 9
+        }
+        if (delim == "") exit 9
+        if (!quoted) exit 8
+
+        shape = "wrapper"
+        wrapperIdx = first
+
+        # Fix 1 (#1036 review): a `<<-` heredoc strips ALL leading tab
+        # characters from every line of its body before the real shell (and
+        # thus the real apply_patch invocation) ever sees it -- including
+        # the delimiter/terminator line itself, which is why `<<-` alone
+        # permits an indented closing line. Replicate that stripping here as
+        # a single early pass over every remaining RAW line, BEFORE any
+        # comparison (including the Fix B terminator scan below) runs, so
+        # terminator matching (Fix 2 below), sentinel matching (`*** Begin
+        # Patch` below), and directive-prefix matching (the extraction loop
+        # further down) all operate on the exact tab-stripped text bash
+        # itself would parse -- never ad hoc at each comparison site, which
+        # risks missing one. Without this, a tab-indented `*** Add File: ...`
+        # line inside a quoted-delimiter `<<-` body fails the directive
+        # loops exact `***`-prefix check and its target is silently dropped
+        # -- a full guard bypass.
+        if (op == "<<-") {
+          for (i = wrapperIdx + 1; i <= n; i++) sub(/^\t+/, "", lines[i])
+        }
+
+        beginIdx = 0
+        for (i = wrapperIdx + 1; i <= n; i++) {
+          t = lines[i]
+          gsub(/[ \t\r]/, "", t)
+          if (t != "") { beginIdx = i; break }
+        }
+        if (beginIdx == 0) exit 8
+        Bclean = lines[beginIdx]
+        sub(/\r$/, "", Bclean)
+        if (Bclean != "*** Begin Patch") exit 8
+
+        # Fix 2 (#1036 review): bash terminates a heredoc ONLY on a line
+        # that is EXACTLY equal to the delimiter (after any `<<-`
+        # tab-stripping above) -- never on a line that merely starts with,
+        # or is otherwise glued to, the delimiter. If no line anywhere in
+        # the remaining input exactly matches, real bash treats the ENTIRE
+        # REST OF INPUT as heredoc body (emitting only a
+        # "delimited by end-of-file" warning, still executing the command
+        # with that full body) -- so a missing exact terminator is
+        # envelope-parse territory within the recognized wrapper shape, not
+        # shell composition: fail closed (exit 8), matching this functions
+        # existing missing-`*** Begin/End Patch` precedent, rather than
+        # falling back to the tokenizer (exit 9) the way a since-removed
+        # "glued delimiter" heuristic previously (and wrongly) did.
+        #
+        # Fix B (#1036 second review): this comparison is against
+        # lines[i] -- the RAW, never-CR-stripped (but `<<-`-tab-stripped, if
+        # applicable) line text -- deliberately, matching bashs own
+        # byte-exact terminator comparison. A decoy line that merely LOOKS
+        # like the delimiter once CR-stripped (e.g. "EOF\r" for delimiter
+        # "EOF") must never match here; only the true, later, byte-exact
+        # terminator line may.
+        termIdx = 0
+        for (i = beginIdx + 1; i <= n; i++) {
+          if (lines[i] == delim) { termIdx = i; break }
+        }
+        if (termIdx == 0) exit 8
+      }
+
+      if (shape == "bare") {
+        endIdx = 0
+        for (i = beginIdx + 1; i <= n; i++) {
+          Eclean = lines[i]
+          sub(/\r$/, "", Eclean)
+          if (Eclean == "*** End Patch") { endIdx = i; break }
+        }
+        if (endIdx == 0) exit 8
+        bodyLast = endIdx - 1
+        for (i = endIdx + 1; i <= n; i++) {
+          t = lines[i]
+          gsub(/[ \t\r]/, "", t)
+          if (t != "") exit 9
+        }
+      } else {
+        endIdx = 0
+        for (i = beginIdx + 1; i < termIdx; i++) {
+          Eclean = lines[i]
+          sub(/\r$/, "", Eclean)
+          if (Eclean == "*** End Patch") { endIdx = i; break }
+        }
+        if (endIdx == 0) exit 8
+        bodyLast = endIdx - 1
+
+        # Fix 3 (#1036 review): content strictly between `*** End Patch` and
+        # the heredoc terminator line is still inside the heredoc body --
+        # real apply_patch would see it too -- so it must be validated
+        # exactly like the region below already validates content trailing
+        # the terminator, and exactly like the bare-shape branch above
+        # already validates its own equivalent trailing region. Any
+        # non-blank line here means the recognized wrapper shapes body does
+        # not parse as a clean envelope: fail closed (exit 8), consistent
+        # with this functions other envelope-parse-failure-within-
+        # recognized-shape cases (missing `*** Begin/End Patch`, missing
+        # terminator, empty/malformed declared path) -- never silently
+        # dropped as it was before this fix.
+        for (i = endIdx + 1; i < termIdx; i++) {
+          t = lines[i]
+          gsub(/[ \t\r]/, "", t)
+          if (t != "") exit 8
+        }
+
+        for (i = termIdx + 1; i <= n; i++) {
+          t = lines[i]
+          gsub(/[ \t\r]/, "", t)
+          if (t != "") exit 9
+        }
+      }
+
+      outn = 0
+      for (i = beginIdx + 1; i <= bodyLast; i++) {
+        ln = lines[i]
+        sub(/\r$/, "", ln)
+        if (substr(ln, 1, 3) != "***") continue
+        isDirective = 1
+        if (index(ln, "*** Add File:") == 1) {
+          p = substr(ln, length("*** Add File:") + 1)
+        } else if (index(ln, "*** Update File:") == 1) {
+          p = substr(ln, length("*** Update File:") + 1)
+        } else if (index(ln, "*** Delete File:") == 1) {
+          p = substr(ln, length("*** Delete File:") + 1)
+        } else if (index(ln, "*** Move to:") == 1) {
+          p = substr(ln, length("*** Move to:") + 1)
+        } else {
+          isDirective = 0
+          p = ln
+        }
+        if (isDirective) {
+          # Fix 4 (#1036 review): the directive convention is exactly ONE
+          # separator space after the colon -- strip that single
+          # conventional space, then fail closed (exit 8) if trimming ALL
+          # remaining leading/trailing whitespace still changes the string.
+          # This rejects a double-space (`*** Add File:  /etc/passwd`,
+          # which without this check would misclassify the still-space-
+          # prefixed payload as a RELATIVE path even though it is meant to
+          # be absolute) and a trailing space (`*** Add File: .env `, which
+          # would evade check-sensitive-files.sh anchored globs) rather
+          # than silently emitting either as if it were a clean path. A
+          # non-directive column-0 `***` line (the fallback branch above)
+          # is unaffected -- it is extracted verbatim, unchanged.
+          sub(/^ /, "", p)
+          if (p == "") exit 8
+          trimmed = p
+          gsub(/^[ \t]+/, "", trimmed)
+          gsub(/[ \t]+$/, "", trimmed)
+          if (trimmed != p) exit 8
+        }
+        outn++
+        outbuf[outn] = p
+      }
+
+      if (outn == 0) exit 8
+
+      for (k = 1; k <= outn; k++) print outbuf[k]
     }
   '
 }
