@@ -10,10 +10,14 @@ import (
 
 // ResolveAssetDir locates the cenci-sandbox plugin's asset directory — the
 // one holding Dockerfile.base, entrypoint.sh, lib/ (and Dockerfile,
-// fragments/ for the full builds). The bash launcher used its own script
-// location (SCRIPT_DIR); the native launcher ships inside the cenci-watch
-// binary while the assets ship with the cenci-sandbox plugin, so resolution
-// is layered, mirroring install.sh's find_plugin_path:
+// fragments/ for the full builds). fragments/ feeds both the plugin's own
+// pre-composed monolith build and, read-only, fragmentdrift.go's per-repo
+// drift check (#1048) — it compares a repo's committed .cenci/Dockerfile
+// managed block against these installed fragments, but never composes a
+// per-repo Dockerfile itself. The bash launcher used its own script location
+// (SCRIPT_DIR); the native launcher ships inside the cenci-watch binary while
+// the assets ship with the cenci-sandbox plugin, so resolution is layered,
+// mirroring install.sh's find_plugin_path:
 //
 //  1. CENCI_SANDBOX_ASSETS env override (dev checkouts, tests, version-skew
 //     escape hatch). An override that doesn't hold the assets is a hard

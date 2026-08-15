@@ -399,6 +399,7 @@ func (e *Engine) BuildRepoImage(repoRoot, image string) error {
 	_, _ = fmt.Fprintln(e.Stdout, "Done.")
 	e.printPluginRefreshHint()
 	e.printStaleContainerNotice(image)
+	e.warnFragmentDrift(Scope{UsingRepoImage: true, RepoRoot: repoRoot, Image: image})
 	return nil
 }
 
@@ -432,6 +433,7 @@ func (e *Engine) EnsureImage(scope Scope) error {
 		return err
 	}
 	if current {
+		e.warnFragmentDrift(scope)
 		return nil
 	}
 	if baseDrift {

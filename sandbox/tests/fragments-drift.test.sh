@@ -110,6 +110,43 @@ else
     pass
 fi
 
+# Banner-anchor invariant (#1048): watch/internal/sandbox/launcher's
+# fragment-drift detector identifies a marker-less repo block's selected
+# fragments by scanning for each installed fragment's `# ── <title> ───…`
+# banner line (the legacy fallback that keeps working on an already-committed
+# block with no per-fragment markers, e.g. velka's). That anchor is only
+# trustworthy if every fragment carries exactly one such banner line, and no
+# two fragments share one — otherwise "banner present" cannot map back to a
+# single fragment unambiguously. This is an invariant check on the fragments
+# that exist today, not new functionality, so it is expected to pass as-is;
+# a failure here is a real pre-existing violation, not something to silently
+# work around.
+declare -A BANNER_OWNER=()
+for fragment in "${FRAGMENTS[@]}"; do
+    name="$(basename "${fragment}")"
+    if ! content="$(cat "${fragment}")"; then
+        continue
+    fi
+
+    banner_lines="$(grep -c '^# ── ' <<<"${content}")"
+    echo "case: ${name} has exactly one # ── banner line"
+    if [[ "${banner_lines}" -eq 1 ]]; then
+        pass
+    else
+        fail "${name} has ${banner_lines} '# ── ' banner line(s), want exactly 1 — the fragment-drift detector's legacy banner anchor requires exactly one per fragment"
+        continue
+    fi
+
+    banner_line="$(grep '^# ── ' <<<"${content}")"
+    echo "case: ${name}'s banner line is unique across fragments"
+    if [[ -n "${BANNER_OWNER[${banner_line}]+set}" ]]; then
+        fail "${name}'s banner line [${banner_line}] is not unique — also used by ${BANNER_OWNER[${banner_line}]}; the fragment-drift detector's banner anchor cannot distinguish the two fragments"
+    else
+        BANNER_OWNER["${banner_line}"]="${name}"
+        pass
+    fi
+done
+
 echo
 echo "passed: ${PASSES}, failed: ${FAILURES}"
 [[ "${FAILURES}" -eq 0 ]]

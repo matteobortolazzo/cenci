@@ -573,7 +573,13 @@ Every generated image includes the Node fragment so the isolated updater can ins
 npm-distributed agent; it adds the remaining fragments required by the detected stack.
 The fragments are wrapped in
 `# cenci:managed-begin` / `# cenci:managed-end` markers so re-running configure
-regenerates just that block and preserves anything the team appends around it.
+regenerates just that block and preserves anything the team appends around it. Within that
+block, each individual fragment is further wrapped in `# cenci:fragment-begin <name>` /
+`# cenci:fragment-end <name>` markers (`<name>` is the fragment file's basename without
+`.dockerfile`), so tooling can identify exactly which installed fragment a given region of
+the block came from. Blocks generated before this markers change have none — those are
+identified instead by matching each installed fragment's `# ── <title> ──…` banner line
+against the block (see "Stale managed block" below).
 
 **Sync obligation**: `sandbox/fragments/*.dockerfile` is the source of truth for the
 per-stack blocks configure assembles into `.cenci/Dockerfile`; the cenci
@@ -595,6 +601,17 @@ launcher always execs the shared volume's absolute path — but an interactive s
 that repo's container may still see the frozen, image-baked version if it shadows the
 shared one on `PATH`. Rerun `/cenci:configure` to regenerate the managed block and drop
 the stale binary.
+
+**Fragment drift warning:** because a per-repo `.cenci/Dockerfile` is generated once by
+`/cenci:configure` and never recomposed by `cenci sandbox build`, a fragment fix landing in
+this plugin (`fragments/*.dockerfile`) does not reach an already-committed repo Dockerfile
+on its own. `cenci open` and `cenci sandbox build` detect that silently-stale case: if the
+repo's committed managed block still selects a fragment whose installed content has since
+changed, they print a non-fatal stderr warning naming the drifted fragment and
+`/cenci:configure` as the remedy. The warning never blocks a launch or a build, and a
+rebuild alone does not clear it — the repair order is always re-run `/cenci:configure`
+first to regenerate `.cenci/Dockerfile`, then `cenci sandbox build` to rebuild the image
+from the regenerated file.
 
 ### Permission model
 
@@ -700,8 +717,11 @@ launcher attaches every agent session. An image built before this was baked in t
 starts a healthy inner `dockerd` that the agent still cannot reach: every `docker` call
 fails with `permission denied while trying to connect to the docker API at
 unix:///var/run/docker.sock`, even though `docker` works when run as root in the same
-container and `getent group docker` lists `dev`. The fix is a rebuild — `cenci sandbox
-build` — not a runtime `usermod`, which cannot escape the clone.
+container and `getent group docker` lists `dev`. The fix for a per-repo image is to
+re-run `/cenci:configure` (to regenerate `.cenci/Dockerfile` with the fragment that bakes
+the group membership) and then `cenci sandbox build` — not a runtime `usermod`, which
+cannot escape the clone, and not a rebuild alone, since `cenci sandbox build` never
+recomposes `.cenci/Dockerfile` from the installed fragments.
 
 **Volume lifecycle**: each repo gets its own persistent Docker storage volume, named
 `<agent>-cenci-dind-<slug>[-<name>]` and mounted at `/var/lib/docker` inside the container —
