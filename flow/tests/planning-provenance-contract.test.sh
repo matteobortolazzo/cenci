@@ -64,6 +64,7 @@ PLANNER_AGENT="${FLOW_DIR}/agents/planner.md"
 REFINER_AGENT="${FLOW_DIR}/agents/refiner.md"
 REFINE_CODEX="${FLOW_DIR}/skills/refine/codex.md"
 CONTEXT_GATHERER="${FLOW_DIR}/agents/context-gatherer.md"
+REFINE_SKILL="${FLOW_DIR}/skills/refine/SKILL.md"
 IMPLEMENT_SKILL="${FLOW_DIR}/skills/implement/SKILL.md"
 PHASE1_PLAN="${FLOW_DIR}/skills/implement/phases/phase-1-plan.md"
 IMPLEMENT_CODEX="${FLOW_DIR}/skills/implement/codex.md"
@@ -78,6 +79,13 @@ assert_file_contains() {
   [[ -n "$2" ]] || { fail "$3: empty needle"; return; }
   [[ -f "$1" ]] || { fail "$3: file not found: $1"; return; }
   grep -qF -- "$2" "$1" || fail "$(basename "$1") $3 (expected to contain: $2)"
+}
+
+assert_file_lacks() {
+  # $1=file $2=needle $3=description
+  [[ -n "$2" ]] || { fail "$3: empty needle"; return; }
+  [[ -f "$1" ]] || { fail "$3: file not found: $1"; return; }
+  ! grep -qF -- "$2" "$1" || fail "$(basename "$1") $3 (expected NOT to contain: $2)"
 }
 
 assert_occurs_exactly() {
@@ -248,8 +256,10 @@ HS_ROW_COUNT="$(grep -c -- '^| HS-' "${PHASE1_PLAN}")"
 DIGEST_TICKETAUTHOR_TEMPLATE='ticketAuthor: <login> (<AUTHORASSOCIATION>)'
 DIGEST_UNKNOWN_RENDERING='rendered `ticketAuthor: unknown` when the field is absent or unreadable'
 DIGEST_TICKETLESS_OMISSION='omitted entirely in ticketless mode, as `blockers:` already is'
-DIGEST_NO_NEW_GH_CALL='derived solely from §1'"'"'s already-fetched `--json author,authorAssociation` fields (no new `gh` call)'
-SECTION1_JSON_FIELDS='gh issue view <number> --repo <owner>/<repo> --json number,title,body,labels,state,assignees,milestone,comments,author,authorAssociation'
+DIGEST_NO_NEW_GH_CALL='derived solely from §1'"'"'s two ticket reads'
+SECTION1_JSON_FIELDS='gh issue view <number> --repo <owner>/<repo> --json number,title,body,labels,state,assignees,milestone,comments,author'
+SECTION1_ASSOCIATION_CALL="gh api repos/<owner>/<repo>/issues/<number> --jq '.author_association'"
+SECTION1_NO_TOPLEVEL_FIELD='exposes **no** top-level `authorAssociation` field'
 
 assert_file_contains "${CONTEXT_GATHERER}" "${DIGEST_TICKETAUTHOR_TEMPLATE}" \
   "digest template must carry the ticketAuthor: line in the exact <login> (<AUTHORASSOCIATION>) shape (AC6, Q&A round 1 answer)"
@@ -258,9 +268,19 @@ assert_file_contains "${CONTEXT_GATHERER}" "${DIGEST_UNKNOWN_RENDERING}" \
 assert_file_contains "${CONTEXT_GATHERER}" "${DIGEST_TICKETLESS_OMISSION}" \
   "must state the line is omitted entirely in ticketless mode, as blockers: already is (AC6)"
 assert_file_contains "${CONTEXT_GATHERER}" "${DIGEST_NO_NEW_GH_CALL}" \
-  "must state the line is derived solely from §1's already-fetched fields, no new gh call (AC6)"
+  "must state the line is derived solely from §1's ticket reads, never from body/comment text (AC6)"
 assert_file_contains "${CONTEXT_GATHERER}" "${SECTION1_JSON_FIELDS}" \
-  "§1's --json field list must stay unchanged — the digest addition is a rendering change only (Assumptions: No new gh call on the fresh path)"
+  "§1's --json field list must request the ticket's top-level author login"
+assert_file_lacks "${CONTEXT_GATHERER}" "--json number,title,body,labels,state,assignees,milestone,comments,author,authorAssociation" \
+  "§1 must not request a top-level authorAssociation from gh issue view — the field does not exist there and the whole fetch exits non-zero with Unknown JSON field"
+assert_file_contains "${CONTEXT_GATHERER}" "${SECTION1_ASSOCIATION_CALL}" \
+  "§1 must read the ticket's own author association from the REST issue endpoint's author_association"
+assert_file_contains "${CONTEXT_GATHERER}" "${SECTION1_NO_TOPLEVEL_FIELD}" \
+  "§1 must record why gh issue view cannot supply the ticket's own authorAssociation"
+assert_file_lacks "${REFINE_SKILL}" "--json number,title,body,labels,state,assignees,milestone,comments,author,authorAssociation" \
+  "refine's step-1 fetch must not request a top-level authorAssociation from gh issue view either (same invalid field)"
+assert_file_contains "${REFINE_SKILL}" "${SECTION1_ASSOCIATION_CALL}" \
+  "refine must read the ticket's own author association from the REST issue endpoint too"
 
 SKILL_TICKETAUTHOR_STORAGE_MARKER='`ticketAuthor:` — stored **verbatim** and retained for the whole session'
 SKILL_LABELS_SECOND_CONSUMER_MARKER='forwarded unconditionally as the label half of the planner'"'"'s provenance gate'
@@ -282,7 +302,7 @@ assert_file_contains "${PHASE1_PLAN}" "${DELEGATION_NEVER_FROM_BUNDLE_MARKER}" \
   "must state a bundle-carried provenance claim is never accepted (AC7)"
 
 RESUME_PROVENANCE_HEADING='**Provenance (read-only, never a hard stop).**'
-RESUME_GH_CALL='gh issue view <n> --repo <owner>/<repo> --json author,authorAssociation,labels'
+RESUME_GH_CALL="gh api repos/<owner>/<repo>/issues/<n> --jq '{login: .user.login, association: .author_association, labels: [.labels[].name]}'"
 RESUME_BOTH_BRANCHES='forwarded on both the `fresh` and `stale`/`unknown` branches'
 RESUME_DEGRADE_MARKER='a failed read degrading to `ticketAuthor: unknown` (today'"'"'s ask)'
 RESUME_NO_NEW_HS_MARKER='introduces no new `HS-*` row'
@@ -292,7 +312,7 @@ RESUME_NOT_REDERIVE_BLOCKERS_MARKER='not re-deriving `blockers:` (the resume pat
 assert_file_contains "${PHASE1_PLAN}" "${RESUME_PROVENANCE_HEADING}" \
   "## Resume From Draft step 5 must gain the Provenance (read-only, never a hard stop) sub-paragraph (AC9, Files to Modify)"
 assert_file_contains "${PHASE1_PLAN}" "${RESUME_GH_CALL}" \
-  "the resume-path re-derivation must be exactly one gh issue view --json author,authorAssociation,labels call (AC9)"
+  "the resume-path re-derivation must be exactly one read-only call, and must use the REST issue endpoint's author_association — gh issue view --json has no top-level authorAssociation field (AC9)"
 assert_file_contains "${PHASE1_PLAN}" "${RESUME_BOTH_BRANCHES}" \
   "the two facts must be forwarded on both the fresh and stale/unknown branches (AC9)"
 assert_file_contains "${PHASE1_PLAN}" "${RESUME_DEGRADE_MARKER}" \

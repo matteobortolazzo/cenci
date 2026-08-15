@@ -150,7 +150,7 @@ Runs **after** the Pre-flight Check above — the `gh auth status` check is the 
 The gatherer fetches the ticket and comments, performs parent-child detection, discovers attachments, loads design and per-project context, writes the bundle file, and returns a compact digest. From the digest, store:
 
 - `isChild`, `isLastChild`, `parentId` — for commit, PR body, and labeling
-- `labels` — for the Ticket Readiness checks, and separately forwarded unconditionally as the label half of the planner's provenance gate (see `ticketAuthor:` below and `phases/phase-1-plan.md`'s `## Planner Delegation`)
+- `labels` — the raw digest line, stored **verbatim** and retained for the whole session (never normalized to a flag, summarized, or collapsed — `labels: unknown` and `labels: none` are different answers and must stay distinguishable at Phase 1) — for the Ticket Readiness checks, and separately forwarded unconditionally as the label half of the planner's provenance gate (see `ticketAuthor:` below and `phases/phase-1-plan.md`'s `## Planner Delegation`)
 - The attachment list — for the Attachments step
 - `bundlePath` — passed to the planner and appended to the plan file in Phase 1
 - `blockers:` — the raw digest line, stored **verbatim** and retained for the whole session: `## Blocked-Dependency Gate` below classifies it, and Phase 1's `## Planner Delegation` forwards it to the planner unchanged and unconditionally, including `blockers: none` (see `phases/phase-1-plan.md`). Do not summarize it, normalize it, or drop it once the gate has passed — the planner-side backstop depends on the original line still being in hand at Phase 1.
