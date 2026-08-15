@@ -118,6 +118,29 @@ block because this repo's own stack doesn't use them; `fragments-drift.test.sh` 
 (byte-identity for monolith-backed fragments, deliberate absence for the three monolith-less ones), so
 adding a monolith block for one of them means removing it from that suite's `MONOLITH_LESS` list.
 
+**Fragment drift detection (#1048).** A per-repo `.cenci/Dockerfile` is generated once, by
+hand, via `/cenci:configure` — `cenci sandbox build` never recomposes it from
+`fragments/*.dockerfile`, so a fragment fix (a `docker` group add, a CVE bump, ...) never
+reaches an already-committed repo Dockerfile on its own. `watch/internal/sandbox/launcher/fragmentdrift.go`
+closes the silent half of that gap: at freshness-check time (`cenci open` and `cenci
+sandbox build`, scoped to `Scope.UsingRepoImage`), it compares the repo's committed
+`# cenci:managed-begin` … `# cenci:managed-end` block against the installed
+`fragments/*.dockerfile` and prints a non-fatal stderr warning naming any drifted
+fragment and `/cenci:configure` as the remedy. It never auto-rebuilds and never flips
+`imageCurrent`'s freshness verdict — a rebuild alone cannot fix stale fragment content,
+since the build path never writes `.cenci/Dockerfile`.
+
+Per-fragment `# cenci:fragment-begin <name>` / `# cenci:fragment-end <name>` markers
+(emitted by `/cenci:configure` going forward, see `sandbox/README.md`) are the exact
+identification path. Where a repo's block predates those markers, the detector falls back
+to each fragment's `# ── <title> ──…` banner line as a legacy identity anchor. **Treat a
+fragment's banner line as a stable, load-bearing anchor**: rewriting it (not just the body
+below it) silently stops a marker-less, already-committed block from being recognized as
+selecting that fragment, and drift on it goes unreported instead of warned. Keep banner
+text unchanged unless deliberately retiring the legacy fallback for that fragment;
+`fragments-drift.test.sh` asserts every fragment has exactly one banner line and that
+banners are unique across fragments.
+
 ## Dependency version pins
 Image dependency versions are pinned via Dockerfile `ARG`s, all checked daily by
 `.github/workflows/deps-bump.yml`. Three tiers, by breaking-change risk:
@@ -153,7 +176,9 @@ Image dependency versions are pinned via Dockerfile `ARG`s, all checked daily by
     follow-up if it proves stable enough to auto-merge like Go/uv.
   - `PEN_CLI_VERSION` — `fragments/pencil.dockerfile` only (config-selected fragment, no
     monolith block — like `python`/`rust`, this repo's own stack doesn't use it). Bump by
-    hand; affected repos pick it up on their next `cenci sandbox build`.
+    hand; affected repos pick it up by re-running `/cenci:configure` and then `cenci
+    sandbox build` — a rebuild alone does not reach a per-repo `.cenci/Dockerfile`, since
+    that file is generated once, by hand, and never recomposed by the build itself.
 
 ## Reference Docs
 Repo-level conventions live at `<repo-root>/docs/` (read on demand); CLI grammar, alias, env-var, and runtime-object naming rules are in `<repo-root>/docs/cli-conventions.md`. Project-specific notes belong in this file.
