@@ -411,6 +411,81 @@ if [[ -n "${implement}" ]]; then
   assert_not_contains "${implement}" "for a ticket refined before native links" "1055 skills/implement/SKILL.md stale legacy-line framing"
 fi
 
+# =====================================================================
+# #1059 review -- the supplementary design-path prose-line step must not be
+# able to destroy or duplicate the ticket body it prepends to. Four distinct
+# defects are pinned here, each of which verified CLEAN under the step's own
+# checks before the fix (which is exactly why they need a contract test):
+#   1. an unguarded capture redirect posts a truncated fetch as the whole
+#      body, and the length check cannot see it -- it compares the remote
+#      against the same truncated file;
+#   2. a blind recompose-and-retry after a verification failure prepends the
+#      line a second time, and the retry's own checks then pass;
+#   3. a raw byte-length equality assumes a trailing-newline/CRLF round-trip
+#      nothing here establishes, so it fails on good writes;
+#   4. the idempotency check keys on the current <D> only, so a re-refine
+#      stacks a superseded design dependency in front of the live one.
+# =====================================================================
+
+if [[ -n "${skill}" ]]; then
+  # 1. The capture redirect is guarded, exactly like the parent-meta fetch
+  # it mirrors: a shell redirect truncates its target before `gh` runs.
+  assert_contains "${skill}" "-design-dep-orig-body.md || rm -f" \
+    "1059 skills/refine/SKILL.md guarded design-dep body capture redirect"
+  assert_contains "${skill}" "Capture gate — fail closed" \
+    "1059 skills/refine/SKILL.md capture gate before composing from the captured body"
+
+  # 2. The verification-failure retry re-checks idempotency before any
+  # recompose, so it can never prepend the prose line twice.
+  assert_contains "${skill}" "Never recompose blind" \
+    "1059 skills/refine/SKILL.md verification-failure retry must re-check idempotency first"
+
+  # The failure enumeration must name the steps that can actually corrupt
+  # the body (capture + concatenation), not only the ones that cannot.
+  assert_contains "${skill}" "the **capture gate**" \
+    "1059 skills/refine/SKILL.md failure enumeration names the capture gate"
+
+  # 3. Lengths are compared normalized (CRLF folded, trailing newlines
+  # stripped) on both sides -- never as raw byte counts.
+  assert_contains "${skill}" "gsub(\"\\r\\n\";\"\\n\")" \
+    "1059 skills/refine/SKILL.md normalized-length CRLF folding"
+  assert_not_contains "${skill}" "body | length'" \
+    "1059 skills/refine/SKILL.md raw byte-length comparison"
+
+  # 4. A superseded `Depends on #<n> (design)` line is replaced, not stacked.
+  assert_contains "${skill}" "sub(\"^Depends on #[0-9]+ \\\\(design\\\\)" \
+    "1059 skills/refine/SKILL.md superseded design-dependency line is stripped, not stacked"
+
+  # The child-body template and the sentence after it must agree: the first
+  # write carries no `Depends on` line at all, not a bracketed placeholder.
+  assert_not_contains "${skill}" "[Depends on #<blocking-sibling-number> for each blocking sibling]" \
+    "1059 skills/refine/SKILL.md child-body template placeholder contradicting the deferred re-Write"
+fi
+
+if [[ -n "${codex}" ]]; then
+  assert_contains "${codex}" "|| rm -f <orig-body file>" \
+    "1059 skills/refine/codex.md guarded design-dep body capture redirect"
+  assert_contains "${codex}" "Capture gate — fail closed" \
+    "1059 skills/refine/codex.md capture gate before composing from the captured body"
+  assert_contains "${codex}" "never recompose blind" \
+    "1059 skills/refine/codex.md verification-failure retry must re-check idempotency first"
+  assert_contains "${codex}" "normalized length" \
+    "1059 skills/refine/codex.md normalized-length comparison"
+  assert_contains "${codex}" "sub(\"^Depends on #[0-9]+ \\\\(design\\\\)" \
+    "1059 skills/refine/codex.md superseded design-dependency line is stripped, not stacked"
+fi
+
+# The prose line is written only for a ticket that actually has a blocking
+# sibling or a companion design ticket -- never "on every refined ticket".
+if [[ -n "${design}" ]]; then
+  assert_not_contains "${design}" "on every refined ticket, never a transitional form" \
+    "1059 skills/design/SKILL.md overclaim that every refined ticket carries the prose line"
+fi
+if [[ -n "${implement}" ]]; then
+  assert_not_contains "${implement}" "alongside the native link on every refined ticket)" \
+    "1059 skills/implement/SKILL.md overclaim that every refined ticket carries the prose line"
+fi
+
 if [[ "${failures}" -gt 0 ]]; then
   echo "refine-skill-contract.test.sh: ${failures} failure(s)." >&2
   exit 1

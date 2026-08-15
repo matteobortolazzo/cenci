@@ -566,7 +566,7 @@ gh issue edit <number> --repo <owner>/<repo> --add-label "Designed" --remove-lab
      gh issue view <number> --repo <owner>/<repo> --json blocking --jq '.blocking.nodes[].number'
      ```
    - Any `Blocks #<n>` lines in the design ticket's body
-   - Open issues whose body carries the supplementary prose dependency line (`Depends on #<number>` — a permanent, human-visible line `/cenci:refine` writes alongside the native link on every refined ticket, never a transitional form):
+   - Open issues whose body carries the supplementary prose dependency line (`Depends on #<number>` — a permanent, human-visible line `/cenci:refine` writes alongside the native link on every refined ticket that actually has a dependency, i.e. a blocking sibling or a companion design ticket; never a transitional form):
      ```bash
      gh issue list --repo <owner>/<repo> --state open --search "\"Depends on #<number>\" in:body" --json number,title
      ```
