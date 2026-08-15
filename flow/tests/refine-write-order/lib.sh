@@ -320,9 +320,15 @@ classify_drift() {
 # call-sequence, expressed as an abstract op-token stream, against the
 # expected write order: claim -> working -> parent-body ->
 # (child-create:K immediately followed by its own child-link:K, for every
-# child K, all before parent-exec-order) -> parent-exec-order -> refined ->
-# visual-check. An empty sequence ("") is vacuously valid — that is the
-# shape produced whenever zero writes occur at all (decline, an unreadable
+# child K, optionally followed immediately by that same child's own
+# child-blockers:K when K has at least one blocking sibling -- omitted
+# entirely for a child with none -- all before parent-exec-order) ->
+# parent-exec-order -> refined -> visual-check. child-blockers:K is
+# rejected fail-closed as: a duplicate (the same K appearing twice), an
+# orphan (no matching child-link:K anywhere in the sequence), or
+# non-adjacent (not the token immediately following its own child-link:K)
+# (#1055). An empty sequence ("") is vacuously valid — that is the shape
+# produced whenever zero writes occur at all (decline, an unreadable
 # parent, or a post-confirm ownership conflict).
 #
 # On success: prints nothing, returns 0. On failure: prints a distinguishable
@@ -337,7 +343,7 @@ verify_refine_write_order() {
   read -r -a tokens <<<"${flat}"
   local n=${#tokens[@]}
   local claim_i=-1 working_i=-1 body_i=-1 exec_i=-1 refined_i=-1 visual_i=-1
-  local -A create_pos=() link_pos=()
+  local -A create_pos=() link_pos=() blockers_pos=()
   local -a child_positions=()
   local i t k
 
@@ -383,6 +389,20 @@ verify_refine_write_order() {
         [[ -n "${link_pos[${k}]:-}" ]] && { echo "duplicate child-link:${k} op"; return 1; }
         link_pos["${k}"]=${i}
         child_positions+=("${i}")
+        ;;
+      child-blockers:*)
+        k="${t#child-blockers:}"
+        [[ -n "${blockers_pos[${k}]:-}" ]] && { echo "duplicate child-blockers:${k} op"; return 1; }
+        blockers_pos["${k}"]=${i}
+        child_positions+=("${i}")
+        if [[ -z "${link_pos[${k}]:-}" ]]; then
+          echo "child-blockers:${k} has no matching child-link:${k} (orphan)"
+          return 1
+        fi
+        if (( i == 0 )) || [[ "${tokens[i-1]}" != "child-link:${k}" ]]; then
+          echo "child-blockers:${k} not immediately preceded by its own child-link:${k}"
+          return 1
+        fi
         ;;
       *)
         echo "unknown op token: ${t}"

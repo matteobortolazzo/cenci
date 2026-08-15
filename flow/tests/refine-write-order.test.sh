@@ -181,16 +181,28 @@ assert_eq "$(classify_drift "${BASELINE_LABELS}" "${MIXED_DRIFT_LABELS}")" "auth
 # --- 1c. verify_refine_write_order --------------------------------------
 
 GOOD_NO_SPLIT_SEQ="claim working parent-body refined visual-check"
-GOOD_SPLIT_SEQ="claim working parent-body child-create:1 child-link:1 child-create:2 child-link:2 parent-exec-order refined visual-check"
+# The canonical 2-child split: child-blockers:K is optional per child, and
+# child 1 never carries one -- children are created in dependency order, so
+# the first child has no already-created sibling to be blocked by. This is
+# the sequence the docs' `### Write order` sections and the adversarial-chain
+# golden fixture pin, so it must be the one called canonical here too.
+GOOD_SPLIT_SEQ="claim working parent-body child-create:1 child-link:1 child-create:2 child-link:2 child-blockers:2 parent-exec-order refined visual-check"
 
 verify_refine_write_order "${GOOD_NO_SPLIT_SEQ}"; rc=$?
 assert_ok "${rc}" "verify_refine_write_order: the canonical no-split order (claim -> working -> parent-body -> refined -> visual-check) must be accepted"
 
 verify_refine_write_order "${GOOD_SPLIT_SEQ}"; rc=$?
-assert_ok "${rc}" "verify_refine_write_order: the canonical 2-child-split order must be accepted"
+assert_ok "${rc}" "verify_refine_write_order: the canonical 2-child-split order (11 tokens, blockers on child 2 only) must be accepted"
 
 verify_refine_write_order ""; rc=$?
 assert_ok "${rc}" "verify_refine_write_order: the empty sequence (zero writes) must be vacuously accepted -- the shape produced by a decline, a post-confirm ownership conflict, or an unreadable parent"
+
+# Positive (#1055): the oracle is a shape checker, not a dependency-order
+# checker -- a blockers op on EVERY child is still a well-formed shape it
+# must accept, even though the procedure itself cannot emit one for child 1.
+BLOCKERS_EVERY_CHILD_SEQ="claim working parent-body child-create:1 child-link:1 child-blockers:1 child-create:2 child-link:2 child-blockers:2 parent-exec-order refined visual-check"
+verify_refine_write_order "${BLOCKERS_EVERY_CHILD_SEQ}"; rc=$?
+assert_ok "${rc}" "verify_refine_write_order: a shape carrying child-blockers:K on every child must still be accepted -- the oracle checks adjacency/ordering, not which children can have blockers"
 
 # Reject side (non-vacuity): every negative case below is a deliberately
 # broken/reordered COPY of the good sequences above -- never the real doc.
@@ -209,6 +221,26 @@ assert_reason_contains "${rc}" "${reason}" "immediately followed by its own chil
 reason="$(verify_refine_write_order "claim working parent-body child-create:1 child-link:1 parent-exec-order child-create:2 child-link:2 refined visual-check")"; rc=$?
 assert_reason_contains "${rc}" "${reason}" "precede parent-exec-order" \
   "verify_refine_write_order: a child op after parent-exec-order must be rejected"
+
+# Reject side (non-vacuity, #1055): child-blockers:K -- non-adjacent, orphan,
+# duplicate, and placed-after-parent-exec-order cases. Every negative case
+# below is a deliberately broken/reordered COPY of one of the accepted split
+# sequences above, never the real doc.
+reason="$(verify_refine_write_order "claim working parent-body child-create:1 child-link:1 child-create:2 child-link:2 child-blockers:1 child-blockers:2 parent-exec-order refined visual-check")"; rc=$?
+assert_reason_contains "${rc}" "${reason}" "not immediately preceded by its own child-link" \
+  "verify_refine_write_order: a non-adjacent child-blockers:1 (not immediately after its own child-link:1) must be rejected"
+
+reason="$(verify_refine_write_order "claim working parent-body child-create:1 child-link:1 child-blockers:1 child-blockers:3 child-create:2 child-link:2 child-blockers:2 parent-exec-order refined visual-check")"; rc=$?
+assert_reason_contains "${rc}" "${reason}" "no matching child-link" \
+  "verify_refine_write_order: an orphan child-blockers:3 (no matching child-link:3 anywhere) must be rejected"
+
+reason="$(verify_refine_write_order "claim working parent-body child-create:1 child-link:1 child-blockers:1 child-blockers:1 child-create:2 child-link:2 child-blockers:2 parent-exec-order refined visual-check")"; rc=$?
+assert_reason_contains "${rc}" "${reason}" "duplicate child-blockers:1" \
+  "verify_refine_write_order: a duplicate child-blockers:1 must be rejected"
+
+reason="$(verify_refine_write_order "claim working parent-body child-create:1 child-link:1 child-blockers:1 parent-exec-order child-create:2 child-link:2 child-blockers:2 refined visual-check")"; rc=$?
+assert_reason_contains "${rc}" "${reason}" "precede parent-exec-order" \
+  "verify_refine_write_order: child-blockers:2 (with its own child-create:2/child-link:2 pair) placed after parent-exec-order must be rejected"
 
 reason="$(verify_refine_write_order "claim working parent-body child-create:1 child-link:1 refined child-create:2 child-link:2 visual-check")"; rc=$?
 assert_reason_contains "${rc}" "${reason}" "after every child create/link" \
