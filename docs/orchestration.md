@@ -274,13 +274,14 @@ top-level scalar, outside `keymaps:`, because it is not a key binding:
 ```yaml
 keymaps:
   # Board-level agent launchers. Emitted in BOTH tables so they fire whether the
-  # card list or the detail panel is focused.
+  # card list or the detail panel is focused. `window:` opens a tmux window and
+  # `focus: true` switches to it; lazyboards builds and escapes the tmux call.
   normal:
-    C: { name: Claude, type: shell, command: "tmux new-window cenci open --agent claude" }
-    X: { name: Codex, type: shell, command: "tmux new-window cenci open --agent codex" }
+    C: { name: Claude, type: shell, window: "claude", focus: true, command: "cenci open --agent claude" }
+    X: { name: Codex, type: shell, window: "codex", focus: true, command: "cenci open --agent codex" }
   detail:
-    C: { name: Claude, type: shell, command: "tmux new-window cenci open --agent claude" }
-    X: { name: Codex, type: shell, command: "tmux new-window cenci open --agent codex" }
+    C: { name: Claude, type: shell, window: "claude", focus: true, command: "cenci open --agent claude" }
+    X: { name: Codex, type: shell, window: "codex", focus: true, command: "cenci open --agent codex" }
 
 # Auto-close a card's agent window when its ticket closes. `cleanup` stays a
 # top-level scalar — it is not a key binding and has no place in `keymaps:`.
@@ -353,7 +354,12 @@ command, no project path — and is always emitted regardless of whether any pro
 is runnable or testable. Per project, a separate action starts it (**serve**) or
 runs its tests (**test** — `dotnet test`, `npm test`, `go test ./...`,
 `ng test --watch=false`, …) in the same worktree. A one-keypress "run the PR's tests
-before merging" is the payoff. lazyboards supports multi-key sequences, so serve
+before merging" is the payoff. The two differ in where they run, by what they are:
+a serve action keeps running alongside the board in its own detached tmux window
+(lazyboards' `window:`/`cwd:` fields, which build and escape the `tmux new-window`
+call for you), while a test action takes lazyboards' own terminal (`terminal: true`)
+so you watch it to completion with full output and get the board back when it exits
+— no multiplexer required. lazyboards supports multi-key sequences, so serve
 and test keys no longer compete with `W` or with each other for scarce single
 letters: a single-project repo gets plain `S` (serve) and `T` (test); a monorepo gets
 `S`/`T` plus a project mnemonic — `"S b"`/`"T b"` for a backend project,
@@ -365,7 +371,8 @@ A key that is a strict prefix of another key in the same effective table — bui
 defaults included — is a load-time config error, not a dispatch quirk, so the whole
 file fails to load. `Planned` also carries local
 `E` (Edit plan) and `V` (View plan) actions that open the ticket's saved
-`.plans/<number>-*.md` file in `$EDITOR` and a pager respectively.
+`.plans/<number>-*.md` file in `$EDITOR` and a pager respectively — both in
+lazyboards' own terminal, like its built-in card editor.
 
 Configure evaluates lazyboards on **every** run: with no `.lazyboards.yml` it offers
 to generate one; with an existing file it compares against the recommended action set

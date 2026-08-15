@@ -578,8 +578,23 @@ assert_contains "${ORCH_BLOCK}" "${X_LINE}"
 assert_contains "${ORCH_BLOCK}" "${CLEANUP_LINE}"
 assert_contains "${ORCH_BLOCK}" "keymaps:"
 
-echo "case: generated board actions pass shell-escaped worktree paths via tmux -c"
-assert_contains "${ROOT}/flow/skills/configure/SKILL.md" \
+echo "case: generated worktree actions use lazyboards' window:/cwd: fields, never a hand-written tmux call"
+# lazyboards assembles the `tmux new-window` invocation itself and escapes the
+# window name, the working directory, and the command as single shell tokens
+# (action.TmuxNewWindow/WithDir, lazyboards v1.2.1). A template that writes the
+# tmux call by hand puts the escaping of provider-derived values -- worktree
+# paths, PR numbers, project subpaths -- back on the generated file, which is
+# what the `-c {pr_worktree}/'apps/web-client'` spelling existed to work
+# around. No generated action may assemble one.
+if grep -q 'tmux new-window' "${DEDENTED_5F}"; then
+    echo "FAIL: 5f template still hand-writes a tmux new-window invocation" >&2
+    grep -n 'tmux new-window' "${DEDENTED_5F}" >&2
+    exit 1
+fi
+# The monorepo project path is a plain `cwd:` segment now -- no nested POSIX
+# quoting, because cwd: is escaped as one token after expansion.
+assert_contains "${DEDENTED_5F}" 'cwd: "{pr_worktree}/apps/web-client"'
+assert_not_contains "${ROOT}/flow/skills/configure/SKILL.md" \
     "-c {pr_worktree}/'apps/web-client'"
 assert_not_contains "${ROOT}/flow/skills/configure/SKILL.md" '"cd {pr_worktree}'
 
@@ -608,6 +623,19 @@ extract_keymap_table() {
         f && $0 !~ /^    / { exit }
         f { print }
     ' "${DEDENTED_5F}"
+}
+
+# extract_action_block <file> <key-line-regex> — prints one action's field
+# block (8-space fields) out of a column overlay table, stopping at the next
+# sibling key. Used to prove a field lands on the right action rather than
+# merely appearing somewhere in the column.
+extract_action_block() {
+    awk -v key="$2" '
+        $0 ~ key { f=1; next }
+        f && /^[[:space:]]*$/ { next }
+        f && $0 !~ /^        / { exit }
+        f { print }
+    ' "$1"
 }
 
 # extract_keymap_column <name> — prints one `keymaps.columns.<name>` overlay
@@ -655,13 +683,32 @@ assert_contains "${PLANNED_COL}" 'command: "cenci run implement {number}"'
 assert_contains "${PLANNED_COL}" "name: Edit plan"
 assert_contains "${PLANNED_COL}" "name: View plan"
 assert_contains "${PLANNED_COL}" '.plans/{number}-*.md'
+# Both open an interactive pager/editor, so they take lazyboards' own terminal
+# (`terminal: true`) rather than a detached tmux window -- the same shape
+# lazyboards' built-in `e` (edit card) uses, and one that needs no multiplexer.
+EDIT_BLOCK="${WORK}/skill-5f-action-edit.md"
+VIEW_BLOCK="${WORK}/skill-5f-action-view.md"
+extract_action_block "${PLANNED_COL}" '^      E:$' >"${EDIT_BLOCK}"
+extract_action_block "${PLANNED_COL}" '^      V:$' >"${VIEW_BLOCK}"
+assert_contains "${EDIT_BLOCK}" "terminal: true"
+assert_contains "${VIEW_BLOCK}" "terminal: true"
+assert_not_contains "${EDIT_BLOCK}" "window:"
+assert_not_contains "${VIEW_BLOCK}" "window:"
 
 echo "case: 5f template always emits W (Open worktree) on In Review, with sequence keys space-separated"
 IN_REVIEW_COL="${WORK}/skill-5f-col-in-review.md"
 extract_keymap_column "In Review" >"${IN_REVIEW_COL}"
 assert_contains "${IN_REVIEW_COL}" "name: Open worktree"
-assert_contains "${IN_REVIEW_COL}" 'command: "tmux new-window -d -n pr-{pr_number} -c {pr_worktree}"'
 grep -q '^      W:$' "${IN_REVIEW_COL}"
+# W opens a tmux window on the PR's worktree and runs nothing: `window:` is
+# what makes an action open a window, `cwd:` is its start directory, and
+# `command:` is optional exactly here (lazyboards runs the default shell).
+W_BLOCK="${WORK}/skill-5f-action-w.md"
+extract_action_block "${IN_REVIEW_COL}" '^      W:$' >"${W_BLOCK}"
+assert_contains "${W_BLOCK}" 'window: "pr-{pr_number}"'
+assert_contains "${W_BLOCK}" 'cwd: "{pr_worktree}"'
+assert_not_contains "${W_BLOCK}" "command:"
+assert_not_contains "${W_BLOCK}" "terminal:"
 # Canonical, space-separated, quoted sequence keys — never the concatenated
 # `Sw`/`Tw` spelling, which `keymaps:` reads as a single two-character key.
 grep -q '^      "S w":$' "${IN_REVIEW_COL}"
@@ -671,6 +718,23 @@ if grep -qE '^      (S|T)[a-z]+:' "${IN_REVIEW_COL}"; then
     cat "${IN_REVIEW_COL}" >&2
     exit 1
 fi
+
+echo "case: In Review serve actions run in a detached tmux window, test actions in the foreground terminal"
+# The two long-running patterns are not interchangeable: a serve command has to
+# keep running alongside the board (`window:`), a test command is watched to
+# completion and then hands the board back (`terminal: true`). `window:` and
+# `terminal:` are mutually exclusive at load time, so neither block may carry
+# both.
+SERVE_BLOCK="${WORK}/skill-5f-action-serve.md"
+TEST_BLOCK="${WORK}/skill-5f-action-test.md"
+extract_action_block "${IN_REVIEW_COL}" '^      "S w":$' >"${SERVE_BLOCK}"
+extract_action_block "${IN_REVIEW_COL}" '^      "T w":$' >"${TEST_BLOCK}"
+assert_contains "${SERVE_BLOCK}" 'window: "pr-{pr_number}"'
+assert_contains "${SERVE_BLOCK}" 'cwd: "{pr_worktree}/apps/web-client"'
+assert_not_contains "${SERVE_BLOCK}" "terminal:"
+assert_contains "${TEST_BLOCK}" "terminal: true"
+assert_contains "${TEST_BLOCK}" 'cwd: "{pr_worktree}/apps/web-client"'
+assert_not_contains "${TEST_BLOCK}" "window:"
 # The zero-runnable-projects fallback keeps W and adds no Checkout PR action.
 assert_not_contains "${EXTRACTED_5F}" \
     'tmux new-window -d -n pr-{pr_number} "gh pr checkout {pr_number}"'
@@ -692,9 +756,27 @@ extract_keymap_table "detail" >"${DETAIL_TABLE}"
 # reference) and must not be copied into a generated template — the same rule
 # setup-skill-content.test.sh enforces for skill content (#790, #800).
 for table in "${NORMAL_TABLE}" "${DETAIL_TABLE}"; do
-    assert_contains "${table}" 'C: { name: Claude, type: shell, command: "tmux new-window cenci open --agent claude" }'
-    assert_contains "${table}" 'X: { name: Codex, type: shell, command: "tmux new-window cenci open --agent codex" }'
+    assert_contains "${table}" 'C: { name: Claude, type: shell, window: "claude", focus: true, command: "cenci open --agent claude" }'
+    assert_contains "${table}" 'X: { name: Codex, type: shell, window: "codex", focus: true, command: "cenci open --agent codex" }'
 done
+
+echo "case: every generated \`focus:\` sits on an action that also declares \`window:\`"
+# `focus:` without `window:` is a load-time config error -- it only says which
+# window to switch to. In the generated template focus only ever appears on the
+# one-line board launchers, where `window:` is on the same line.
+while IFS= read -r line; do
+    # Comment lines explain the fields, they declare nothing.
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    [[ "${trimmed}" == \#* ]] && continue
+    case "${line}" in
+    *focus:*)
+        if [[ "${line}" != *window:* ]]; then
+            echo "FAIL: 5f template declares focus: without a window: -> ${line}" >&2
+            exit 1
+        fi
+        ;;
+    esac
+done <"${DEDENTED_5F}"
 
 echo "case: 5f template emits a top-level \`cleanup:\` auto-close action, outside keymaps"
 grep -q '^cleanup: "cenci close {number}"$' "${DEDENTED_5F}"
