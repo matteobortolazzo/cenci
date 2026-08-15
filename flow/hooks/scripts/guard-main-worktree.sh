@@ -36,16 +36,62 @@
 # Canonicalizing $TMPDIR itself has no such repo-name hole and automatically
 # covers every skill's convention, not just design's.
 #
-# Bash arm asymmetry (#795, Q1a): the Bash arm below is DELIBERATELY more
-# permissive than the Write|Edit arm above, for ABSOLUTE targets only (#810).
-# An absolute Bash write target that canonicalizes to somewhere OUTSIDE the
-# resolved repo root is allowed outright, never even reaching the
-# allowlist/block logic -- this guard's purpose is keeping THIS repo's main
-# worktree read-only, not blocking every possible Bash write anywhere on the
-# filesystem. This is what lets /cenci:configure's documented `jq '...'
-# ~/.claude/settings.json > ~/.claude/settings.json.tmp` pattern through. An
-# in-root absolute Bash target still falls through to the exact same
-# allowlist/TMPDIR-widening/block logic as the Write|Edit arm.
+# Symmetric out-of-repo-root policy (#1072): BOTH arms below allow an
+# absolute target that canonicalizes to somewhere OUTSIDE the repository's
+# scope root outright, never even reaching the allowlist/block logic -- this
+# guard's purpose is keeping THIS repo's main worktree read-only, not
+# blocking every possible Write/Edit/Bash write anywhere on the filesystem.
+# This is what lets a Claude Code session maintain its own persistent memory
+# (~/.claude/projects/<slug>/memory/...) via Write/Edit, and lets
+# /cenci:configure's documented `jq '...' ~/.claude/settings.json >
+# ~/.claude/settings.json.tmp` Bash pattern through. Canonicalize-before-decide
+# ordering is load-bearing on both arms: the repo-scope decision is always
+# made on the CANONICAL form of the target (resolve_path/canonicalize_target,
+# parent-anchored for not-yet-existing paths), never the lexical (pre-symlink,
+# pre-"..") form -- so a symlink or ".." sequence that lexically starts
+# outside the repo but resolves back into it is still caught, and an in-root
+# absolute target still falls through to the exact same
+# allowlist/TMPDIR-widening/block logic on both arms.
+#
+# "The repository" is scoped to a shared SCOPE_ROOT (computed once below,
+# after the config gate and ROOT resolution), not the literal $ROOT this
+# hook's own `git rev-parse --show-toplevel` call returns. In a real linked
+# feature worktree (`git worktree add .worktrees/<id>-<desc>`), $ROOT is the
+# FEATURE worktree, not the main one -- a literal "outside $ROOT" check would
+# therefore allow main-worktree writes outright whenever the session cwd is
+# inside a feature worktree, gutting the guard's core purpose. SCOPE_ROOT is
+# instead derived from `git rev-parse --git-common-dir`'s parent, adopted only
+# when it is a strict ancestor of the resolved $ROOT (the linked-worktree
+# case); otherwise SCOPE_ROOT falls back to the resolved $ROOT (the ordinary
+# main-worktree-session case, where the two coincide). If the `--git-common-
+# dir` derivation itself errors (the git command fails, or its result cannot
+# be resolved to an existing directory), SCOPE_ROOT_OK is set to 0 and both
+# arms fail closed at their decision site with a "could not be classified"
+# message -- never "targets the main worktree", which is reserved for genuine
+# main-worktree-targeting blocks and is asserted verbatim by
+# flow/tests/parity/contract-lib.sh's drive_worktree_guard. Computing
+# SCOPE_ROOT does NOT itself exit, so the guard stays a no-op for calls that
+# never reach a decision site (unconfigured repos, non-git dirs, Bash calls
+# with no extracted write target).
+#
+# Accepted residual: whenever the common-dir's parent is NOT a strict
+# ancestor of the resolved $ROOT, SCOPE_ROOT falls back to $ROOT and
+# main-worktree writes from that session are allowed. A worktree created
+# OUTSIDE the main worktree (e.g. `git worktree add ../wt` instead of the
+# cenci convention `.worktrees/<id>-<desc>` inside the repo) is the
+# illustrative example, but the same fallback also covers `--separate-git-dir`
+# layouts, bare repos, and submodules -- any layout where the common-dir
+# derivation does not resolve to a genuine ancestor of $ROOT falls into this
+# same residual, not just the one worktree-outside-the-repo example. This
+# follows directly from the derivation rule above and is deliberate, not a
+# bug -- see #1072's Risks.
+#
+# Deliberate remaining differences between the two arms (unaffected by
+# #1072): a non-absolute Write|Edit file_path is always rejected outright,
+# never reaching the scope-root decision; an extracted RELATIVE Bash write
+# target is rejected per #810 Fix 2, with the apply_patch envelope exception
+# per #1036 -- see the "PARSED RELATIVE Bash targets" and "EXCEPTION (#1036)"
+# paragraphs immediately below for the full rationale.
 #
 # PARSED RELATIVE Bash targets get their own, separate policy (#810 Fix 2):
 # this hook process's cwd is not trustworthy evidence of where a relative
@@ -235,12 +281,178 @@ canonicalize_target() {
   lexical_collapse "$_ct_resolved_ancestor/$_ct_tail"
 }
 
+# SCOPE_ROOT derivation (#1072) -- see the header comment's "Symmetric
+# out-of-repo-root policy" paragraph for the full rationale. Computed once
+# here, shared by both arms' repo-scope pre-checks below. Every step is
+# checked explicitly; no unchecked command substitution on this
+# security-critical path (root AGENTS.md). On any derivation error,
+# SCOPE_ROOT_OK is set to 0 and this code does NOT exit -- the flag is
+# consumed only at the two decision sites (the Write|Edit arm's pre-check and
+# the Bash arm's repo-scope pre-check), keeping the guard a no-op for calls
+# that never reach a decision site.
+SCOPE_ROOT_OK=1
+if ! RESOLVED_ROOT=$(resolve_path "$ROOT" 2>/dev/null); then
+  SCOPE_ROOT_OK=0
+  SCOPE_ROOT="$ROOT"
+elif ! SCOPE_CWD=$(pwd) || [ -z "$SCOPE_CWD" ]; then
+  SCOPE_ROOT_OK=0
+  SCOPE_ROOT="$RESOLVED_ROOT"
+else
+  SCOPE_ROOT="$RESOLVED_ROOT"
+  # Not `-C "$ROOT"`: this process's cwd is already guaranteed to be inside
+  # the same repo $ROOT was derived from (the earlier `git -C "$(pwd)"
+  # rev-parse --show-toplevel` config-gate call already succeeded from this
+  # same cwd, and nothing in this script changes directory), and
+  # --git-common-dir's answer does not depend on which subdirectory of the
+  # working tree it is run from -- but when its result IS relative, git
+  # prints it relative to the CURRENT DIRECTORY, not to $ROOT, so it must be
+  # joined against $SCOPE_CWD (never $ROOT) below.
+  if GIT_COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null); then
+    case "$GIT_COMMON_DIR" in
+      /*) ;;
+      *) GIT_COMMON_DIR="$SCOPE_CWD/$GIT_COMMON_DIR" ;;
+    esac
+    if RESOLVED_COMMON_DIR=$(resolve_path "$GIT_COMMON_DIR" 2>/dev/null); then
+      COMMON_DIR_PARENT="${RESOLVED_COMMON_DIR%/*}"
+      [ -z "$COMMON_DIR_PARENT" ] && COMMON_DIR_PARENT="/"
+      if RESOLVED_COMMON_PARENT=$(resolve_path "$COMMON_DIR_PARENT" 2>/dev/null); then
+        case "$RESOLVED_ROOT" in
+          "$RESOLVED_COMMON_PARENT"/*)
+            # $RESOLVED_COMMON_PARENT is a strict ancestor of $RESOLVED_ROOT --
+            # a real linked feature worktree; adopt the main worktree as scope.
+            SCOPE_ROOT="$RESOLVED_COMMON_PARENT"
+            ;;
+          *)
+            # Not a strict ancestor: the ordinary main-worktree-session case
+            # (the two coincide), the accepted out-of-tree-worktree residual
+            # documented above, or a bare/submodule common-dir layout -- keep
+            # SCOPE_ROOT = RESOLVED_ROOT.
+            ;;
+        esac
+      else
+        SCOPE_ROOT_OK=0
+      fi
+    else
+      SCOPE_ROOT_OK=0
+    fi
+  else
+    SCOPE_ROOT_OK=0
+  fi
+fi
+
+# scope_root_blocked_message <path> -- the "could not be classified"
+# fail-closed BLOCKED message shared by both arms' decision sites when
+# SCOPE_ROOT_OK=0 (#1072). Matches the tone of the existing "could not
+# resolve"/"refusing to resolve" carve-out messages above and NEVER says
+# "targets the main worktree" -- that phrase is reserved for genuine
+# main-worktree-targeting blocks (flow/tests/parity/contract-lib.sh's
+# drive_worktree_guard depends on it staying exact).
+scope_root_blocked_message() {
+  echo "BLOCKED: guard-main-worktree.sh: $1 could not be classified -- the repository's main-worktree scope could not be determined (git rev-parse --git-common-dir failed, or its result could not be resolved to an existing directory)." >&2
+}
+
+# scope_precheck <canonical-path> -- the repo-scope pre-check shared by both
+# arms' decision sites (#1072): when SCOPE_ROOT_OK=0, blocks and exits 2 via
+# scope_root_blocked_message (never returns). Otherwise returns 0 when
+# <canonical-path> is equal to, or inside, SCOPE_ROOT (caller falls through
+# to the allowlist), or 1 when it is outside (caller allows the target
+# outright). A plain return code, not a hardcoded exit/continue here: the two
+# call sites need different out-of-scope behavior (the Write|Edit arm exits
+# 0; the Bash arm's per-target loop continues to the next target). A quoted
+# "$SCOPE_ROOT" is matched literally by POSIX sh case patterns, defending
+# against glob metacharacters in the resolved path.
+scope_precheck() {
+  if [ "$SCOPE_ROOT_OK" -eq 0 ]; then
+    scope_root_blocked_message "$1"
+    exit 2
+  fi
+  case "$1" in
+    "$SCOPE_ROOT" | "$SCOPE_ROOT"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# scope_self_protection_denied <canonical-path> -- self-protection denylist
+# (#1072 Fix 3), checked on BOTH arms but ONLY on the out-of-scope path --
+# i.e. only once scope_precheck has already determined the target is OUTSIDE
+# SCOPE_ROOT and is about to be allowed through via scope_precheck's
+# out-of-repo allow. scope_precheck's out-of-repo allow deliberately lets a
+# session write to ANY out-of-repo absolute path (Claude Code's own
+# persistent memory, /cenci:configure's documented
+# `... > ~/.claude/settings.json.tmp` pattern), but a handful of out-of-repo
+# paths are session-security-sensitive regardless of repo scope:
+# ~/.claude/settings*.json (hook definitions -- writable here means arbitrary
+# command execution on the next tool call), ~/.claude/plugins/** (this hook's
+# own script and every other installed plugin -- writable here means
+# self-disable), and ~/.ssh/** (SSH config/authorized_keys tampering).
+# check-sensitive-files.sh (a separate, unconditional hook) does not cover
+# these -- it only matches secret-shaped paths (.env, credentials, *.pem,
+# *.key, id_*, keystore shapes), not hook-config or plugin-script paths.
+#
+# MUST be gated on out-of-scope (regression fixed post-#1072 initial cycle):
+# an EARLIER revision ran this check unconditionally, BEFORE scope_precheck.
+# That let an IN-SCOPE path matching these shapes -- e.g. a real in-repo
+# `<worktree>/.claude/settings.json`, exactly what /cenci:configure writes
+# inside its own feature worktree -- get hard-blocked before ever reaching
+# the ordinary allowlist/block logic below, breaking that documented flow and
+# making a repo's own `.claude/settings.json` unmaintainable via Write/Edit.
+# An in-repo path is NOT "essentially never" a real match for these shapes;
+# it is the normal case for /cenci:configure. The denylist must therefore run
+# strictly after scope_precheck confirms the target is out-of-scope, so an
+# in-scope path is completely unaffected by it and falls through to the
+# existing allowlist/block logic exactly as before this feature was added.
+# Plain glob case patterns (not quoted variable interpolation), matching
+# bash_target_allowed's idiom below -- these are literal patterns, not
+# variables, so ordinary case globbing is exactly what's wanted here.
+#
+# Best-effort defense-in-depth, NOT a complete security boundary: it only
+# catches direct-redirect/Write shapes against this fixed pattern set. It
+# does NOT catch unmodelled Bash write verbs (mv, cp, sed -i, and friends --
+# only Bash-arm redirect/tee-shaped targets are extracted at all), a
+# symlinked ~/.claude or ~/.ssh directory (the pattern match is purely
+# lexical on the canonicalized target path, not a symlink-aware policy
+# decision), or every session-security-sensitive path in general --
+# ~/.gitconfig, ~/.codex/, and shell rc files (.bashrc, .zshrc, etc.) are
+# NOT covered. These are accepted residual gaps for this cycle (#1072
+# follow-up), not bugs to close here -- see also the zero-parse backstop's
+# own documented residual below for the same "defense-in-depth, not a load-
+# bearing guarantee" posture on the Bash arm's unmodelled-construct path.
+scope_self_protection_denied() {
+  case "$1" in
+    */.claude/settings*.json) return 0 ;;
+    */.claude/plugins/*) return 0 ;;
+    */.ssh/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# scope_self_protection_message <path> -- the BLOCKED message shared by both
+# arms' self-protection denylist hit (#1072 Fix 3). Deliberately never says
+# "targets the main worktree" -- these targets are outside the repository
+# entirely; the risk is session self-compromise (hook config, plugin script,
+# or SSH config/keys), not a main-worktree write.
+scope_self_protection_message() {
+  echo "BLOCKED: $1 targets a session-security-sensitive path outside the repository (hook config, plugin script, or SSH config/keys) and is refused regardless of the out-of-repo-scope allow policy." >&2
+}
+
 # Compute the canonicalized TMPDIR-widening allowlist prefix once (#749).
 # Empty TMPDIR_ALLOW means the widening is disabled; every failure mode below
 # (unset, relative, non-existent, unresolvable) falls through to that empty
 # default rather than failing closed — this widening is purely additive.
 # Computed unconditionally (shared by both arms below), since it depends only
-# on $TMPDIR/$ROOT, never on FILE_PATH/TOOL_COMMAND.
+# on $TMPDIR/$SCOPE_ROOT (or $ROOT as its pre-#1072 fallback), never on
+# FILE_PATH/TOOL_COMMAND.
+#
+# #1072 Fix 2: the three containment checks below are measured against
+# $SCOPE_ROOT, not $RESOLVED_ROOT, whenever SCOPE_ROOT_OK=1 — in a feature-
+# worktree session $RESOLVED_ROOT is the FEATURE worktree, so a TMPDIR
+# pointing inside the MAIN worktree (but outside the feature worktree) would
+# otherwise pass all three rejections and become TMPDIR_ALLOW, silently
+# re-opening main-worktree containment via this widening path on both arms.
+# When SCOPE_ROOT_OK=0 (derivation failed), this specific check keeps its
+# pre-#1072 behavior unchanged (measured against $RESOLVED_ROOT) — this is
+# purely additive widening logic, not a decision site, so it does not itself
+# fail closed the way scope_precheck's two call sites do.
 TMPDIR_ALLOW=""
 if [ -n "${TMPDIR:-}" ]; then
   case "$TMPDIR" in
@@ -248,24 +460,29 @@ if [ -n "${TMPDIR:-}" ]; then
       if [ -d "$TMPDIR" ] \
         && RESOLVED_TMPDIR=$(resolve_path "$TMPDIR" 2>/dev/null) \
         && RESOLVED_ROOT=$(resolve_path "$ROOT" 2>/dev/null); then
+        if [ "$SCOPE_ROOT_OK" -eq 1 ]; then
+          TMPDIR_CONTAINMENT_ROOT="$SCOPE_ROOT"
+        else
+          TMPDIR_CONTAINMENT_ROOT="$RESOLVED_ROOT"
+        fi
         # Strip exactly one trailing "/" so TMPDIR=/ collapses to "" — an
         # empty TMPDIR_ALLOW is never used as a case pattern prefix below,
         # so this can't accidentally allowlist "/*".
         RESOLVED_TMPDIR="${RESOLVED_TMPDIR%/}"
-        if [ "$RESOLVED_TMPDIR" = "$RESOLVED_ROOT" ]; then
-          : # TMPDIR resolves to the repo root itself — reject.
+        if [ "$RESOLVED_TMPDIR" = "$TMPDIR_CONTAINMENT_ROOT" ]; then
+          : # TMPDIR resolves to the repo scope root itself — reject.
         else
-          case "$RESOLVED_ROOT" in
+          case "$TMPDIR_CONTAINMENT_ROOT" in
             "$RESOLVED_TMPDIR"/*)
-              : # TMPDIR resolves to an ancestor of $ROOT — reject (would
-                # otherwise allowlist the entire repository).
+              : # TMPDIR resolves to an ancestor of the repo scope root —
+                # reject (would otherwise allowlist the entire repository).
               ;;
             *)
               case "$RESOLVED_TMPDIR" in
-                "$RESOLVED_ROOT"/*)
-                  : # TMPDIR resolves to a path INSIDE $ROOT — reject (would
-                    # otherwise allowlist a main-worktree subtree, defeating
-                    # the guard's purpose).
+                "$TMPDIR_CONTAINMENT_ROOT"/*)
+                  : # TMPDIR resolves to a path INSIDE the repo scope root —
+                    # reject (would otherwise allowlist a main-worktree
+                    # subtree, defeating the guard's purpose).
                   ;;
                 *)
                   TMPDIR_ALLOW="$RESOLVED_TMPDIR"
@@ -360,6 +577,27 @@ if [ -n "$FILE_PATH" ]; then
     FILE_PATH=$(lexical_collapse "$RESOLVED_ANCESTOR/$TAIL")
   fi
 
+  # Repo-scope pre-check (#1072): mirrors the Bash arm's pre-check below --
+  # see the header comment's "Symmetric out-of-repo-root policy" paragraph and
+  # the scope_precheck() helper above. A target outside SCOPE_ROOT is allowed
+  # outright, before ever reaching the allowlist. Made on the CANONICAL
+  # $FILE_PATH computed above, never the lexical form.
+  #
+  # Self-protection denylist (#1072 Fix 3, gated post-regression-fix): only
+  # consulted HERE, in the out-of-scope branch, immediately before the target
+  # would otherwise be allowed through outright. An in-scope $FILE_PATH (e.g.
+  # this worktree's own <worktree>/.claude/settings.json) never reaches this
+  # branch at all -- it falls straight through to the ordinary allowlist/block
+  # logic below, completely unaffected by the denylist. See
+  # scope_self_protection_denied() above for the full rationale.
+  if ! scope_precheck "$FILE_PATH"; then
+    if scope_self_protection_denied "$FILE_PATH"; then
+      scope_self_protection_message "$FILE_PATH"
+      exit 2
+    fi
+    exit 0 # outside the repository entirely -- allowed (#1072).
+  fi
+
   case "$FILE_PATH" in
     # Feature worktrees — the intended write target
     */.worktrees/* | .worktrees/*) exit 0 ;;
@@ -412,9 +650,9 @@ if [ -n "$FILE_PATH" ]; then
   } >&2
   exit 2
 elif [ -n "$TOOL_COMMAND" ]; then
-  # Bash arm (#795): see the header comment's "Bash arm asymmetry" note for
-  # the Q1a repo-root scoping rationale (deliberately more permissive than
-  # the Write|Edit arm above for out-of-repo-root targets).
+  # Bash arm (#795): see the header comment's "Symmetric out-of-repo-root
+  # policy" (#1072) note for the SCOPE_ROOT scoping rationale, shared with the
+  # Write|Edit arm above.
   LIB_DIR="${0%/*}"
   [ "$LIB_DIR" = "$0" ] && LIB_DIR="."
   BWT_LIB="$LIB_DIR/lib/bash-write-targets.sh"
@@ -575,18 +813,32 @@ elif [ -n "$TOOL_COMMAND" ]; then
       } >&2
       exit 2
     elif bwt_zero_parse_suspicious "$TOOL_COMMAND"; then
+      # #1072 Fix 1: $SCOPE_ROOT is added to the roots[] array (and the
+      # BWT_SCAN_TEXT match below), guarded on SCOPE_ROOT_OK=1, ADDITIVE to
+      # $ROOT/$RESOLVED_ROOT (never a replacement) -- in a feature-worktree
+      # session an unparseable/unmodeled Bash write whose raw text names the
+      # MAIN worktree path (not the feature worktree $ROOT/$RESOLVED_ROOT)
+      # previously escaped this backstop entirely, the same Q1 hole
+      # scope_precheck() closes for parsed targets, left open here. When
+      # SCOPE_ROOT_OK=0, BWT_SCAN_SCOPE_ROOT stays empty and is never added
+      # as a root -- an empty/garbage value must never widen the scan.
+      BWT_SCAN_SCOPE_ROOT=""
+      [ "$SCOPE_ROOT_OK" -eq 1 ] && BWT_SCAN_SCOPE_ROOT="$SCOPE_ROOT"
       BWT_SCAN_TEXT="$TOOL_COMMAND"
       if command -v awk >/dev/null 2>&1; then
-        BWT_SCAN_TEXT=$(BWT_SCAN_CMD="$TOOL_COMMAND" BWT_SCAN_ROOT="$ROOT" BWT_SCAN_RROOT="$RESOLVED_ROOT" awk '
+        BWT_SCAN_TEXT=$(BWT_SCAN_CMD="$TOOL_COMMAND" BWT_SCAN_ROOT="$ROOT" BWT_SCAN_RROOT="$RESOLVED_ROOT" BWT_SCAN_SROOT="$BWT_SCAN_SCOPE_ROOT" awk '
           BEGIN {
             s = ENVIRON["BWT_SCAN_CMD"]
-            roots[1] = ENVIRON["BWT_SCAN_ROOT"]
-            roots[2] = ENVIRON["BWT_SCAN_RROOT"]
+            nr = 0
+            roots[++nr] = ENVIRON["BWT_SCAN_ROOT"]
+            roots[++nr] = ENVIRON["BWT_SCAN_RROOT"]
+            if (ENVIRON["BWT_SCAN_SROOT"] != "")
+              roots[++nr] = ENVIRON["BWT_SCAN_SROOT"]
             subs[1] = "/.worktrees"
             subs[2] = "/.plans"
             subs[3] = "/.claude/plans"
             nl = sprintf("%c", 10)
-            for (r = 1; r <= 2; r++)
+            for (r = 1; r <= nr; r++)
               for (p = 1; p <= 3; p++) {
                 t = roots[r] subs[p]
                 while ((idx = index(s, t)) > 0)
@@ -595,15 +847,22 @@ elif [ -n "$TOOL_COMMAND" ]; then
             print s
           }')
       fi
+      BWT_SCAN_HIT=0
       case "$BWT_SCAN_TEXT" in
-        *"$ROOT"* | *"$RESOLVED_ROOT"*)
-          {
-            echo "BLOCKED: guard-main-worktree.sh could not extract this Bash command's write targets (unmodelled shell construct), and the raw command text mentions the main worktree root ($RESOLVED_ROOT): $TOOL_COMMAND"
-            echo "Rewrite the command using a plain, directly-parseable redirect (>, >>) or tee form targeting the feature worktree (.worktrees/<id>-<desc>/) or a temp path."
-          } >&2
-          exit 2
-          ;;
+        *"$ROOT"* | *"$RESOLVED_ROOT"*) BWT_SCAN_HIT=1 ;;
       esac
+      if [ "$BWT_SCAN_HIT" -eq 0 ] && [ "$SCOPE_ROOT_OK" -eq 1 ]; then
+        case "$BWT_SCAN_TEXT" in
+          *"$SCOPE_ROOT"*) BWT_SCAN_HIT=1 ;;
+        esac
+      fi
+      if [ "$BWT_SCAN_HIT" -eq 1 ]; then
+        {
+          echo "BLOCKED: guard-main-worktree.sh could not extract this Bash command's write targets (unmodelled shell construct), and the raw command text mentions the main worktree root ($RESOLVED_ROOT): $TOOL_COMMAND"
+          echo "Rewrite the command using a plain, directly-parseable redirect (>, >>) or tee form targeting the feature worktree (.worktrees/<id>-<desc>/) or a temp path."
+        } >&2
+        exit 2
+      fi
     fi
     exit 0
   fi
@@ -699,17 +958,25 @@ elif [ -n "$TOOL_COMMAND" ]; then
       exit 2
     fi
 
-    # Repo-root scope pre-check (Q1a): a target outside the resolved repo
-    # root is allowed outright -- see the header comment's "Bash arm
-    # asymmetry" note.
-    case "$BWT_CANON" in
-      "$RESOLVED_ROOT" | "$RESOLVED_ROOT"/*)
-        : # equal to, or inside, the repo root -- falls through below.
-        ;;
-      *)
-        continue # outside the repo root entirely -- allowed (Q1a).
-        ;;
-    esac
+    # Repo-scope pre-check (#1072, formerly Q1a): a target outside SCOPE_ROOT
+    # is allowed outright -- see the header comment's "Symmetric
+    # out-of-repo-root policy" note and the scope_precheck() helper above,
+    # shared with the Write|Edit arm.
+    #
+    # Self-protection denylist (#1072 Fix 3, gated post-regression-fix):
+    # mirrored from the Write|Edit arm above -- only consulted HERE, in the
+    # out-of-scope branch, immediately before this target would otherwise be
+    # allowed through via `continue`. An in-scope $BWT_CANON never reaches
+    # this branch -- it falls straight through to bash_target_allowed below,
+    # completely unaffected by the denylist. See scope_self_protection_denied()
+    # above for the full rationale.
+    if ! scope_precheck "$BWT_CANON"; then
+      if scope_self_protection_denied "$BWT_CANON"; then
+        scope_self_protection_message "$BWT_CANON"
+        exit 2
+      fi
+      continue # outside the repository entirely -- allowed (#1072).
+    fi
 
     if ! bash_target_allowed "$BWT_CANON"; then
       {

@@ -391,7 +391,7 @@ Include the server in `.lsp.json` regardless — it activates once the binary is
     Auto-compact compresses conversation history as the context window fills,
     which can lose important context during long sessions. (Recommended: Yes — disable it)"
    - Default: Yes
-   - If Yes: set `"autoCompactEnabled": false` in `~/.claude/settings.json` using jq (create the file if it doesn't exist)
+   - If Yes: set `"autoCompactEnabled": false` in `~/.claude/settings.json` using jq (see step 5c for the exact jq/mv sequence, and its Write-then-mv variant when the file doesn't exist yet)
    - If No: remove the `autoCompactEnabled` key from `~/.claude/settings.json` (if present)
    - Either way, also remove any `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` key from the `env` object in `~/.claude/settings.json`. Earlier versions of this skill set it to `"1"` believing that meant manual-only compaction; Claude Code interprets it as "compact once 1% of the context window is used", so any leftover value causes constant compaction and must be purged.
 
@@ -402,7 +402,7 @@ Include the server in `.lsp.json` regardless — it activates once the binary is
     subagents to Sonnet 200K keeps reviews working while your main session keeps its 1M context.
     (Recommended: Yes if you run a 1M-context session; No otherwise — see the tiering caveat below)"
    - Default: Yes when the session plausibly runs a 1M model; No otherwise
-   - If Yes: merge `{"env": {"CLAUDE_CODE_SUBAGENT_MODEL": "claude-sonnet-5"}}` into `~/.claude/settings.json` using jq (create the file if it doesn't exist). This runs all `Task` subagents on Sonnet 200K regardless of the main session model. (Pin Sonnet, not Opus — Opus is auto-upgraded to 1M on Max/Team/Enterprise plans and would re-trigger the gate.)
+   - If Yes: merge `{"env": {"CLAUDE_CODE_SUBAGENT_MODEL": "claude-sonnet-5"}}` into `~/.claude/settings.json` using jq (see step 5c-bis for the exact jq/mv sequence, and its Write-then-mv variant when the file doesn't exist yet). This runs all `Task` subagents on Sonnet 200K regardless of the main session model. (Pin Sonnet, not Opus — Opus is auto-upgraded to 1M on Max/Team/Enterprise plans and would re-trigger the gate.)
    - If No: remove the `CLAUDE_CODE_SUBAGENT_MODEL` key from the `env` object in `~/.claude/settings.json` (if present)
    - **Tiering caveat (state regardless of answer)**: the pin overrides every agent's `model:` frontmatter — cenci's model tiering (opus refiner/planner/security-reviewer, haiku context-gatherer/structure-analyzer/lessons-collector) is flattened onto the pinned model while it is set. On a standard 200K session the 1M gate never fires, so answer No there to keep the tiering active.
    - **Caveat (state regardless of answer)**: this only affects **new** sessions — restart after configuring. If subagent reviews still fail with the 1M gate even after pinning (the pin didn't strip `[1m]`), run `/model sonnet` for the current session, which always yields 200K.
@@ -1373,9 +1373,17 @@ For each MCP selected in question 5:
      ```bash
      mv ~/.claude/settings.json.tmp ~/.claude/settings.json
      ```
-     If `~/.claude/settings.json` does not exist, use the `Write` tool to create it
-     directly with `{"autoCompactEnabled": false}` as its content — no `jq`/`mv` needed
-     for a file being created from scratch.
+     If `~/.claude/settings.json` does not exist, use the `Write` tool to create
+     `~/.claude/settings.json.tmp` (the same `.tmp` intermediate as the existing-file
+     path above, not the final file) with `{"autoCompactEnabled": false}` as its
+     content, then run the same `mv ~/.claude/settings.json.tmp ~/.claude/settings.json`
+     Bash call shown above (already allowlisted in this skill's frontmatter
+     `allowed-tools`, so no permission change needed) to move it into place. This
+     mirrors the jq+mv two-step pattern used for the existing-file case just above —
+     Write-then-mv instead of jq-then-mv, since there's no existing file for jq to
+     transform — and avoids a direct Write to the live `~/.claude/settings.json`
+     path, which the flow plugin's own `guard-main-worktree.sh` hook now blocks as a
+     self-protection measure for hook-config paths outside the repo (#1072).
    - If enabled (re-enable): remove the setting with two standalone Bash calls (the
      file necessarily already exists on this path — it was written by the "If disabled"
      branch above on an earlier run):
@@ -1416,9 +1424,18 @@ For each MCP selected in question 5:
      ```bash
      mv ~/.claude/settings.json.tmp ~/.claude/settings.json
      ```
-     If `~/.claude/settings.json` does not exist, use the `Write` tool to create it
-     directly with `{"env": {"CLAUDE_CODE_SUBAGENT_MODEL": "claude-sonnet-5"}}` as its
-     content.
+     If `~/.claude/settings.json` does not exist, use the `Write` tool to create
+     `~/.claude/settings.json.tmp` (the same `.tmp` intermediate as the existing-file
+     path above, not the final file) with
+     `{"env": {"CLAUDE_CODE_SUBAGENT_MODEL": "claude-sonnet-5"}}` as its content, then
+     run the same `mv ~/.claude/settings.json.tmp ~/.claude/settings.json` Bash call
+     shown above (already allowlisted in this skill's frontmatter `allowed-tools`, so
+     no permission change needed) to move it into place. This mirrors the jq+mv
+     two-step pattern used for the existing-file case just above — Write-then-mv
+     instead of jq-then-mv, since there's no existing file for jq to transform — and
+     avoids a direct Write to the live `~/.claude/settings.json` path, which the flow
+     plugin's own `guard-main-worktree.sh` hook now blocks as a self-protection
+     measure for hook-config paths outside the repo (#1072).
    - If disabled (unpin): remove the env var key with two standalone Bash calls:
      ```bash
      jq 'del(.env.CLAUDE_CODE_SUBAGENT_MODEL) | if .env == {} then del(.env) else . end' ~/.claude/settings.json > ~/.claude/settings.json.tmp

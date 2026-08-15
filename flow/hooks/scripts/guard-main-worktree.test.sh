@@ -268,33 +268,61 @@ else
 fi
 
 # Case: a symlink planted under an allowlisted directory (.worktrees/) that
-# resolves outside the worktree must be blocked — the literal path string
-# matching the allowlist substring is not enough; it must be resolved first.
-echo "case: symlink under .worktrees/ resolving outside the worktree is blocked"
+# resolves OUTSIDE the repo is now allowed outright (#1072 flips this from a
+# block to an allow -- an out-of-repo canonical target, however it's reached,
+# is out of this guard's scope; see the SCOPE_ROOT header comment). The
+# canonicalize-before-decide intent this case originally pinned (a lexical
+# allowlist-substring match is not enough; the target must be resolved first)
+# is preserved by the in-repo twin immediately below, whose resolved target
+# lands back inside the repo and must still block.
+echo "case: symlink under .worktrees/ resolving outside the repo is allowed (#1072, flipped from blocked)"
 mkdir -p "${TEST_ROOT}/outside"
 mkdir -p "${HARDEN_REPO}/.worktrees"
 ln -s "${TEST_ROOT}/outside" "${HARDEN_REPO}/.worktrees/link"
 run_guard "${HARDEN_REPO}" "{\"tool_input\":{\"file_path\":\"${HARDEN_REPO}/.worktrees/link/evil.txt\"}}"
-assert_exit "symlink escape via .worktrees/" 2
+assert_exit "symlink escape via .worktrees/ to outside the repo allowed (#1072)" 0
+
+# In-repo twin (#1072): the same symlink shape, but resolving to somewhere
+# ELSE inside the repo (not under .worktrees/) -- preserves the original
+# case's canonicalize-before-decide intent: the literal ".worktrees/" path
+# substring is not enough, the resolved target still decides, and a resolved
+# in-repo, non-allowlisted target must still block.
+echo "case: symlink under .worktrees/ resolving to a non-allowlisted in-repo path is blocked (#1072 twin)"
+mkdir -p "${HARDEN_REPO}/protected-dir/existingsub"
+ln -s "${HARDEN_REPO}/protected-dir" "${HARDEN_REPO}/.worktrees/link-inrepo"
+run_guard "${HARDEN_REPO}" "{\"tool_input\":{\"file_path\":\"${HARDEN_REPO}/.worktrees/link-inrepo/evil.txt\"}}"
+assert_exit "symlink escape via .worktrees/ to an in-repo path blocked (#1072 twin)" 2
 if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
     pass
 else
-    fail "symlink escape via .worktrees/: stderr should contain BLOCKED"
+    fail "symlink escape via .worktrees/ to an in-repo path blocked: stderr should contain BLOCKED"
 fi
 
 # Case: a symlinked allowlisted directory whose escape target has an existing
 # ancestor several levels below the symlink itself, but the immediate tail
-# (newdir/) does not exist yet. This must still resolve the symlink by
-# walking up to the nearest existing ancestor (existingsub/), not just the
-# immediate parent — regression test for the ancestor-walk fix (#440).
-echo "case: symlink escape with a multi-level missing tail is blocked"
+# (newdir/) does not exist yet, resolving OUTSIDE the repo, is now allowed
+# (#1072, flipped from blocked) -- must still resolve the symlink by walking
+# up to the nearest existing ancestor (existingsub/), not just the immediate
+# parent (the ancestor-walk fix, #440), before making the now out-of-repo
+# allow decision. The in-repo twin immediately below preserves the original
+# multi-level-missing-tail intent.
+echo "case: symlink escape with a multi-level missing tail resolving outside the repo is allowed (#1072, flipped from blocked)"
 mkdir -p "${TEST_ROOT}/outside/existingsub"
 run_guard "${HARDEN_REPO}" "{\"tool_input\":{\"file_path\":\"${HARDEN_REPO}/.worktrees/link/existingsub/newdir/newfile.txt\"}}"
-assert_exit "symlink escape with multi-level missing tail" 2
+assert_exit "symlink escape with multi-level missing tail, outside repo, allowed (#1072)" 0
+
+# In-repo twin (#1072): same multi-level-missing-tail shape, but the symlink
+# resolves to an in-repo, non-allowlisted directory (the link-inrepo symlink
+# and its existingsub/ ancestor were created by the twin above) -- preserves
+# the original case's intent that the ancestor walk must find existingsub/,
+# not just the immediate parent, before the (still in-repo) block decision.
+echo "case: symlink escape with a multi-level missing tail resolving to an in-repo path is blocked (#1072 twin)"
+run_guard "${HARDEN_REPO}" "{\"tool_input\":{\"file_path\":\"${HARDEN_REPO}/.worktrees/link-inrepo/existingsub/newdir/newfile.txt\"}}"
+assert_exit "symlink escape with multi-level missing tail, in-repo, blocked (#1072 twin)" 2
 if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
     pass
 else
-    fail "symlink escape with multi-level missing tail: stderr should contain BLOCKED"
+    fail "symlink escape with multi-level missing tail, in-repo, blocked: stderr should contain BLOCKED"
 fi
 
 # Case: jq missing from PATH must fail closed (block), not silently fall
@@ -489,9 +517,26 @@ echo "case: TMPDIR unset skips the widening entirely (source write blocked)"
 run_guard "${TMPDIR_REPO}" "{\"tool_input\":{\"file_path\":\"${TMPDIR_REPO}/src/foo.txt\"}}"
 assert_exit "TMPDIR unset: source write blocked" 2
 
-echo "case: TMPDIR unset skips the widening even for a would-be-allowed custom-tmp path"
+# #1072 flips this from a block to an allow: CUSTOM_TMP is a sibling of
+# TMPDIR_REPO under TEST_ROOT (never nested inside it, see the comment
+# above), so this path canonicalizes OUTSIDE the repo regardless of whether
+# TMPDIR widening ever ran -- it is allowed outright under SCOPE_ROOT,
+# independent of TMPDIR being set or unset. This case no longer discriminates
+# "TMPDIR unset genuinely skips widening"; the in-repo twin immediately below
+# preserves that original non-vacuity intent instead.
+echo "case: TMPDIR unset, out-of-repo custom-tmp path is allowed regardless (#1072, flipped from blocked)"
 run_guard "${TMPDIR_REPO}" "{\"tool_input\":{\"file_path\":\"${CUSTOM_TMP}/cenci/design-comment-749.md\"}}"
-assert_exit "TMPDIR unset: custom-tmp path still blocked (proves unset genuinely skips widening)" 2
+assert_exit "TMPDIR unset: out-of-repo custom-tmp path allowed (#1072)" 0
+
+# In-repo twin (#1072): an in-repo, custom-tmp-shaped path (mirrors the
+# ${TMPDIR}/cenci/... convention shape, but lives inside TMPDIR_REPO) with
+# TMPDIR unset -- preserves the original case's intent that without TMPDIR
+# set, the widening genuinely does not fire and a would-be-allowed shape
+# stays blocked.
+echo "case: TMPDIR unset, in-repo custom-tmp-shaped path stays blocked (#1072 twin, preserves original non-vacuity intent)"
+mkdir -p "${TMPDIR_REPO}/custom-tmp-shaped/cenci"
+run_guard "${TMPDIR_REPO}" "{\"tool_input\":{\"file_path\":\"${TMPDIR_REPO}/custom-tmp-shaped/cenci/design-comment-749.md\"}}"
+assert_exit "TMPDIR unset: in-repo custom-tmp-shaped path still blocked (#1072 twin)" 2
 
 echo "case: relative TMPDIR skips the widening"
 run_guard_with_tmpdir "${TMPDIR_REPO}" "relative-tmp" "{\"tool_input\":{\"file_path\":\"${TMPDIR_REPO}/src/foo.txt\"}}"
@@ -541,10 +586,15 @@ assert_exit "cross-file pin: cenci/design-comment-749.md" 0
 # guard-main-worktree.sh must also inspect Bash tool_input.command for
 # `>`/`>>`/`>|`/tee write targets, extracted via the shared
 # flow/hooks/scripts/lib/bash-write-targets.sh lib, behind the same
-# .cenci/config.json / .claude/config.json gate. The Bash arm is
-# deliberately MORE permissive than the Write|Edit arm: an out-of-repo-root
-# target (e.g. $HOME/.claude/settings.json) is allowed (Q1a), unlike the
-# Write|Edit arm.
+# .cenci/config.json / .claude/config.json gate. Historically (#795) the Bash
+# arm was deliberately MORE permissive than the Write|Edit arm here: an
+# out-of-repo-root target (e.g. $HOME/.claude/settings.json) was allowed
+# (Q1a) while the Write|Edit arm blocked every out-of-repo-root target. As of
+# #1072 the Write|Edit arm gains the SAME out-of-repo-root allow (scoped via
+# SCOPE_ROOT, not the raw repo root -- see the SCOPE_ROOT header comment), so
+# this is no longer an asymmetry between the two arms; both now share the
+# out-of-repo-scope allow policy, just measured against SCOPE_ROOT rather
+# than the plain repo root.
 BASH_REPO="${TEST_ROOT}/bash-mode"
 make_git_repo "${BASH_REPO}"
 mkdir -p "${BASH_REPO}/.cenci"
@@ -597,15 +647,88 @@ else
     fail "bash > \$(mktemp) blocked: stderr should contain BLOCKED"
 fi
 
-# Pins Q1a: the Bash arm's repo-root scope pre-check allows a target that
-# resolves outside RESOLVED_ROOT, even though it is a redirect into a
-# genuinely sensitive file -- this is the resolution that lets
-# /cenci:configure's `jq ... ~/.claude/settings.json > ~/.claude/settings.json.tmp`
-# pattern through. Deliberately more permissive than the Write|Edit arm.
-echo "case: Bash command redirecting to \$HOME/.claude/settings.json (out-of-root) is allowed (Q1a)"
-JSON=$(jq -n --arg cmd 'echo x > "$HOME/.claude/settings.json"' '{tool_input:{command:$cmd}}')
+# Pins Q1a: the Bash arm's repo-scope pre-check allows a target that resolves
+# outside SCOPE_ROOT (as of #1072; previously RESOLVED_ROOT), even though it
+# is a redirect near a genuinely sensitive file -- this is the resolution
+# that lets /cenci:configure's documented `jq ... ~/.claude/settings.json >
+# ~/.claude/settings.json.tmp` pattern through. The WRITE target here is
+# deliberately the intermediate `.tmp` file (matching that documented
+# pattern exactly), not the bare `settings.json` itself -- as of #1072 Fix 3
+# the bare `~/.claude/settings.json` shape is now denylisted on BOTH arms
+# regardless of out-of-repo-scope (see the dedicated self-protection
+# denylist cases below), so this case's target was narrowed to the shape
+# that must legitimately stay allowed. As of #1072 the Write|Edit arm allows
+# the same shape of out-of-repo-scope target too (see the SCOPE_ROOT header
+# comment), so this is no longer "more permissive than the Write|Edit arm"
+# -- both arms now share the same out-of-repo-scope allow policy.
+echo "case: Bash command redirecting to \$HOME/.claude/settings.json.tmp (out-of-root) is allowed (Q1a)"
+JSON=$(jq -n --arg cmd 'echo x > "$HOME/.claude/settings.json.tmp"' '{tool_input:{command:$cmd}}')
 run_guard "${BASH_REPO}" "${JSON}"
-assert_exit "bash \$HOME/.claude/settings.json out-of-root allowed (Q1a)" 0
+assert_exit "bash \$HOME/.claude/settings.json.tmp out-of-root allowed (Q1a)" 0
+
+# ── #1072 Fix 3: self-protection denylist for out-of-repo Bash write
+# targets ── mirrors the Write|Edit-arm denylist cases below (the AC 1/2/5
+# section) -- a Bash redirect to a session-security-sensitive out-of-repo
+# path must be blocked outright, not allowed via the same out-of-repo-scope
+# `continue` that lets $HOME/.claude/settings.json.tmp through above. Literal
+# absolute paths (not $HOME expansion) so these cases don't depend on HOME
+# being overridden.
+BASH_SENSITIVE_HOME="${TEST_ROOT}/bash-sensitive-home"
+mkdir -p "${BASH_SENSITIVE_HOME}/.claude/plugins/cenci-flow/hooks/scripts" "${BASH_SENSITIVE_HOME}/.ssh"
+
+echo "case: Bash redirect to ~/.claude/settings.json (out-of-root) is blocked (#1072 Fix 3)"
+JSON=$(jq -n --arg cmd "echo x > ${BASH_SENSITIVE_HOME}/.claude/settings.json" '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "bash settings.json out-of-root blocked (#1072 Fix 3)" 2
+if [[ "${GUARD_STDERR}" == *"session-security-sensitive"* ]]; then
+    pass
+else
+    fail "bash settings.json out-of-root blocked: stderr should contain the self-protection wording, got: ${GUARD_STDERR}"
+fi
+if [[ "${GUARD_STDERR}" == *"targets the main worktree"* ]]; then
+    fail "bash settings.json out-of-root blocked: stderr must not use the main-worktree wording, got: ${GUARD_STDERR}"
+else
+    pass
+fi
+
+echo "case: Bash redirect under ~/.claude/plugins/ (out-of-root) is blocked (#1072 Fix 3)"
+JSON=$(jq -n --arg cmd "echo x > ${BASH_SENSITIVE_HOME}/.claude/plugins/cenci-flow/hooks/scripts/guard-main-worktree.sh" '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "bash .claude/plugins/ out-of-root blocked (#1072 Fix 3)" 2
+
+echo "case: Bash redirect under ~/.ssh/ (out-of-root) is blocked (#1072 Fix 3)"
+JSON=$(jq -n --arg cmd "echo x > ${BASH_SENSITIVE_HOME}/.ssh/authorized_keys" '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "bash .ssh/ out-of-root blocked (#1072 Fix 3)" 2
+
+# ── Regression: an IN-SCOPE Bash write target shaped like a denylist entry
+# must be completely unaffected by the self-protection denylist (post-#1072-
+# Fix-3 HIGH regression fix). Mirrors the Write|Edit-arm regression case
+# above. `.claude/settings.json` is not itself allowlisted by
+# bash_target_allowed (only `.worktrees/`, `.plans/`, `.claude/plans/`, temp
+# paths, and design artifacts are), so the CORRECT pre-existing-logic outcome
+# for this in-repo, non-worktree Bash write target is exit 2 with the
+# ordinary main-worktree BLOCKED wording -- proving the outcome is unchanged
+# from before the self-protection feature existed.
+echo "case: in-repo Bash redirect to <repo>/.claude/settings.json is blocked by the ordinary allowlist/block logic, NOT the self-protection denylist (#1072 regression fix)"
+JSON=$(jq -n --arg cmd "echo x > ${BASH_REPO}/.claude/settings.json" '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "in-repo bash .claude/settings.json blocked by ordinary logic (#1072 regression fix)" 2
+if [[ "${GUARD_STDERR}" == *"targets the main worktree"* ]]; then
+    pass
+else
+    fail "in-repo bash .claude/settings.json blocked: stderr should use the ordinary main-worktree wording, got: ${GUARD_STDERR}"
+fi
+if [[ "${GUARD_STDERR}" == *"session-security-sensitive"* ]]; then
+    fail "in-repo bash .claude/settings.json blocked: stderr must NOT use the self-protection wording (the denylist must not run for an in-scope target), got: ${GUARD_STDERR}"
+else
+    pass
+fi
+
+echo "case: in-repo Bash redirect to <repo>/.worktrees/configure-init/.claude/settings.json (feature-worktree shape) is allowed, NOT blocked by the self-protection denylist (#1072 regression fix)"
+JSON=$(jq -n --arg cmd "echo x > ${BASH_REPO}/.worktrees/configure-init/.claude/settings.json" '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "in-repo bash feature-worktree .claude/settings.json allowed (#1072 regression fix)" 0
 
 # The #749 descendant-of-$ROOT rejection must still apply in Bash mode: a
 # TMPDIR pointed inside the repo must not allowlist writes under it.
@@ -1522,6 +1645,331 @@ JSON=$(jq -n --arg cmd "*** Begin Patch
 *** End Patch" '{tool_input:{command:$cmd}}')
 run_guard "${APPLY_PATCH_UNCONFIGURED_REPO}" "${JSON}"
 assert_exit "apply_patch envelope unconfigured repo no-op" 0
+
+# ── Ticket #1072: Write|Edit targets that canonicalize outside the repo ────
+# The Bash arm already allows absolute targets that canonicalize outside the
+# resolved repo root (#795 Q1a, #810). The Write|Edit arm gains the same
+# allow, gated on a shared SCOPE_ROOT derived from `git rev-parse
+# --git-common-dir` (its parent, adopted only when it is a strict ancestor of
+# the resolved repo root -- a real linked worktree; otherwise SCOPE_ROOT
+# falls back to the resolved repo root). A dedicated repo (OOR_REPO) keeps
+# this section's fixtures order-independent from earlier cases.
+OOR_REPO="${TEST_ROOT}/out-of-repo"
+make_git_repo "${OOR_REPO}"
+mkdir -p "${OOR_REPO}/.cenci"
+touch "${OOR_REPO}/.cenci/config.json"
+
+# AC 1: a ~/.claude/projects/<slug>/memory/<file>.md-shaped absolute path
+# entirely outside the repo -- the reported case (#1072) -- must be allowed.
+# The target file itself exists, exercising the resolve_path("$FILE_PATH")
+# branch (not the not-yet-existing ancestor-walk branch).
+echo "case: out-of-repo ~/.claude/projects/<slug>/memory/<file>.md path is allowed (#1072 AC 1, the reported case)"
+OOR_HOME="${TEST_ROOT}/oor-home"
+mkdir -p "${OOR_HOME}/.claude/projects/-workspace/memory"
+touch "${OOR_HOME}/.claude/projects/-workspace/memory/notes.md"
+run_guard "${OOR_REPO}" "{\"tool_input\":{\"file_path\":\"${OOR_HOME}/.claude/projects/-workspace/memory/notes.md\"}}"
+assert_exit "out-of-repo memory path allowed (#1072 AC 1)" 0
+
+# AC 1: same shape but the tail does not exist yet (multi-level), exercising
+# the parent-anchored ancestor-walk canonicalization on the allow path.
+echo "case: out-of-repo ~/.claude/projects/... path with a not-yet-existing multi-level tail is allowed (#1072 AC 1)"
+run_guard "${OOR_REPO}" "{\"tool_input\":{\"file_path\":\"${OOR_HOME}/.claude/projects/-workspace/memory/newdir/newsub/new.md\"}}"
+assert_exit "out-of-repo memory path, multi-level missing tail, allowed (#1072 AC 1)" 0
+
+# AC 2: a symlink planted OUTSIDE the repo but pointing AT <repo>/src must
+# still be blocked -- the repo-scope decision is made on the CANONICAL form,
+# never the lexical (pre-symlink-resolution) path.
+echo "case: symlink planted outside the repo pointing at <repo>/src is blocked (#1072 AC 2)"
+mkdir -p "${OOR_REPO}/src"
+ln -s "${OOR_REPO}/src" "${TEST_ROOT}/oor-symlink-into-repo"
+run_guard "${OOR_REPO}" "{\"tool_input\":{\"file_path\":\"${TEST_ROOT}/oor-symlink-into-repo/evil.txt\"}}"
+assert_exit "symlink outside repo resolving into <repo>/src blocked (#1072 AC 2)" 2
+if [[ "${GUARD_STDERR}" == *"targets the main worktree"* ]]; then
+    pass
+else
+    fail "symlink outside repo resolving into <repo>/src blocked: stderr should contain the main-worktree block text, got: ${GUARD_STDERR}"
+fi
+
+# AC 2: a ".." sequence that lexically starts outside the repo must still be
+# collapsed BEFORE the repo-scope decision -- it lands back inside the repo
+# here, so it must still block.
+echo "case: <out-of-repo-dir>/../<repo-basename>/src/evil.txt collapses into the repo and is blocked (#1072 AC 2)"
+mkdir -p "${TEST_ROOT}/oor-dotdot-base"
+run_guard "${OOR_REPO}" "{\"tool_input\":{\"file_path\":\"${TEST_ROOT}/oor-dotdot-base/../${OOR_REPO##*/}/src/evil.txt\"}}"
+assert_exit "dot-dot collapse back into the repo blocked (#1072 AC 2)" 2
+if [[ "${GUARD_STDERR}" == *"targets the main worktree"* ]]; then
+    pass
+else
+    fail "dot-dot collapse back into the repo blocked: stderr should contain the main-worktree block text, got: ${GUARD_STDERR}"
+fi
+
+# AC 5 / message accuracy: an out-of-repo path whose ancestor is a dangling
+# symlink must still fail closed via the existing unresolvable-symlink
+# message, never be mislabeled as a main-worktree block.
+echo "case: out-of-repo path under a dangling-symlink ancestor is blocked without the main-worktree message (#1072 AC 5)"
+mkdir -p "${TEST_ROOT}/ac5-outside"
+ln -s "${TEST_ROOT}/ac5-nonexistent-target" "${TEST_ROOT}/ac5-outside/dangling-link"
+run_guard "${OOR_REPO}" "{\"tool_input\":{\"file_path\":\"${TEST_ROOT}/ac5-outside/dangling-link/sub.txt\"}}"
+assert_exit "out-of-repo dangling-symlink ancestor blocked (#1072 AC 5)" 2
+if [[ "${GUARD_STDERR}" == *"targets the main worktree"* ]]; then
+    fail "out-of-repo dangling-symlink ancestor blocked: stderr must not mislabel this as a main-worktree block, got: ${GUARD_STDERR}"
+else
+    pass
+fi
+
+# ── #1072 Fix 3: self-protection denylist for out-of-repo Write|Edit
+# targets ── the out-of-repo allow above (AC 1/2/5) deliberately lets a
+# session write to ANY out-of-repo absolute path -- but a handful of paths
+# are session-security-sensitive regardless of repo scope and must stay
+# blocked even though they are outside SCOPE_ROOT: hook config
+# (~/.claude/settings*.json), this hook's own plugin script
+# (~/.claude/plugins/**), and SSH config/keys (~/.ssh/**). Each case asserts
+# the BLOCKED message uses the new self-protection wording, never the
+# main-worktree wording (these are not main-worktree targets).
+echo "case: out-of-repo Write to ~/.claude/settings.json is blocked (#1072 Fix 3)"
+run_guard "${OOR_REPO}" "{\"tool_input\":{\"file_path\":\"${OOR_HOME}/.claude/settings.json\"}}"
+assert_exit "out-of-repo settings.json blocked (#1072 Fix 3)" 2
+if [[ "${GUARD_STDERR}" == *"session-security-sensitive"* ]]; then
+    pass
+else
+    fail "out-of-repo settings.json blocked: stderr should contain the self-protection wording, got: ${GUARD_STDERR}"
+fi
+if [[ "${GUARD_STDERR}" == *"targets the main worktree"* ]]; then
+    fail "out-of-repo settings.json blocked: stderr must not use the main-worktree wording, got: ${GUARD_STDERR}"
+else
+    pass
+fi
+
+echo "case: out-of-repo Write to ~/.claude/settings.local.json is blocked (#1072 Fix 3)"
+run_guard "${OOR_REPO}" "{\"tool_input\":{\"file_path\":\"${OOR_HOME}/.claude/settings.local.json\"}}"
+assert_exit "out-of-repo settings.local.json blocked (#1072 Fix 3)" 2
+
+echo "case: out-of-repo Write under ~/.claude/plugins/ is blocked (#1072 Fix 3)"
+run_guard "${OOR_REPO}" "{\"tool_input\":{\"file_path\":\"${OOR_HOME}/.claude/plugins/cenci-flow/hooks/scripts/guard-main-worktree.sh\"}}"
+assert_exit "out-of-repo .claude/plugins/ blocked (#1072 Fix 3)" 2
+
+echo "case: out-of-repo Write under ~/.ssh/ is blocked (#1072 Fix 3)"
+run_guard "${OOR_REPO}" "{\"tool_input\":{\"file_path\":\"${OOR_HOME}/.ssh/authorized_keys\"}}"
+assert_exit "out-of-repo .ssh/ blocked (#1072 Fix 3)" 2
+
+# Negative control: an out-of-repo path that merely resembles the denylist
+# shapes (settings.json.tmp, the documented /cenci:configure intermediate
+# file) must NOT be denylisted -- only the exact shapes matter.
+echo "case: out-of-repo Write to ~/.claude/settings.json.tmp is still allowed (#1072 Fix 3 negative control)"
+run_guard "${OOR_REPO}" "{\"tool_input\":{\"file_path\":\"${OOR_HOME}/.claude/settings.json.tmp\"}}"
+assert_exit "out-of-repo settings.json.tmp allowed (#1072 Fix 3 negative control)" 0
+
+# ── Regression: an IN-SCOPE path shaped like a denylist entry must be
+# completely unaffected by the self-protection denylist (post-#1072-Fix-3
+# HIGH regression fix). An earlier revision ran scope_self_protection_denied
+# BEFORE scope_precheck, so this in-repo path -- exactly what /cenci:configure
+# writes inside its own feature worktree -- was wrongly hard-blocked with the
+# self-protection message instead of falling through to the ordinary
+# allowlist/block logic. `.claude/settings.json` is not itself allowlisted
+# below (only `.claude/plans/` is -- see Cases 9-11 above), so the CORRECT
+# pre-existing-logic outcome for this in-repo, non-worktree path is exit 2
+# with the ordinary main-worktree BLOCKED wording -- proving the outcome is
+# unchanged from before the self-protection feature existed, not that this
+# path is newly allowed.
+echo "case: in-repo Write to <repo>/.claude/settings.json is blocked by the ordinary allowlist/block logic, NOT the self-protection denylist (#1072 regression fix)"
+run_guard "${OOR_REPO}" "{\"tool_input\":{\"file_path\":\"${OOR_REPO}/.claude/settings.json\"}}"
+assert_exit "in-repo .claude/settings.json blocked by ordinary logic (#1072 regression fix)" 2
+if [[ "${GUARD_STDERR}" == *"targets the main worktree"* ]]; then
+    pass
+else
+    fail "in-repo .claude/settings.json blocked: stderr should use the ordinary main-worktree wording, got: ${GUARD_STDERR}"
+fi
+if [[ "${GUARD_STDERR}" == *"session-security-sensitive"* ]]; then
+    fail "in-repo .claude/settings.json blocked: stderr must NOT use the self-protection wording (the denylist must not run for an in-scope path), got: ${GUARD_STDERR}"
+else
+    pass
+fi
+
+echo "case: in-repo Write to <repo>/.worktrees/configure-init/.claude/settings.json (feature-worktree shape, /cenci:configure's real flow) is allowed, NOT blocked by the self-protection denylist (#1072 regression fix)"
+run_guard "${OOR_REPO}" "{\"tool_input\":{\"file_path\":\"${OOR_REPO}/.worktrees/configure-init/.claude/settings.json\"}}"
+assert_exit "in-repo feature-worktree .claude/settings.json allowed (#1072 regression fix)" 0
+
+# AC 3 non-regression: a Write|Edit .plans/ path was not previously pinned by
+# a dedicated case (only the Bash-mode arm has one) -- add it here so the
+# SCOPE_ROOT refactor cannot silently regress it. .worktrees/ (Case 4),
+# .claude/plans/ (Cases 9-10), designs/DESIGN.md (the cross-file pin above),
+# the TMPDIR-widening allow cases, and in-repo source writes staying blocked
+# (Case 3) are already pinned elsewhere in this suite.
+echo "case: configured repo still allows .plans/ Write|Edit targets (#1072 AC 3 non-regression)"
+run_guard "${REPO}" "{\"tool_input\":{\"file_path\":\"${REPO}/.plans/1-foo.md\"}}"
+assert_exit "configured repo allows .plans/ Write|Edit target (#1072 AC 3)" 0
+
+# ── Ticket #1072, Q1: SCOPE_ROOT derivation from a real linked worktree ────
+# git rev-parse --show-toplevel from a cwd inside a FEATURE worktree returns
+# the feature worktree, not the main worktree -- a literal "outside ROOT"
+# check would wrongly allow main-worktree writes from a feature-worktree
+# session. SCOPE_ROOT must be derived from `git rev-parse --git-common-dir`'s
+# parent instead. -c user.email/-c user.name on the commit itself (not a
+# persisted git config write) because CI runners may have no global git
+# identity.
+echo "── #1072 Q1: real linked worktree ──"
+Q1_REPO="${TEST_ROOT}/q1-linked-worktree"
+make_git_repo "${Q1_REPO}"
+mkdir -p "${Q1_REPO}/.cenci" "${Q1_REPO}/src"
+touch "${Q1_REPO}/.cenci/config.json"
+echo "package app" > "${Q1_REPO}/src/app.go"
+git -C "${Q1_REPO}" add -A
+git -C "${Q1_REPO}" -c user.email="test@example.com" -c user.name="Test" commit -q -m "init"
+Q1_FEATURE_WORKTREE="${Q1_REPO}/.worktrees/42-x"
+git -C "${Q1_REPO}" worktree add -q -b feat-42-x "${Q1_FEATURE_WORKTREE}" >/dev/null
+mkdir -p "${Q1_FEATURE_WORKTREE}/src"
+
+echo "case: Write to the main worktree's src/app.go from a feature-worktree cwd is blocked (#1072 Q1 regression)"
+run_guard "${Q1_FEATURE_WORKTREE}" "{\"tool_input\":{\"file_path\":\"${Q1_REPO}/src/app.go\"}}"
+assert_exit "main-worktree Write from feature-worktree cwd blocked (#1072 Q1)" 2
+
+echo "case: Write to the feature worktree's own src/app.go from that same cwd is allowed (#1072 Q1)"
+run_guard "${Q1_FEATURE_WORKTREE}" "{\"tool_input\":{\"file_path\":\"${Q1_FEATURE_WORKTREE}/src/app.go\"}}"
+assert_exit "feature-worktree Write allowed (#1072 Q1)" 0
+
+# The load-bearing regression: today the Bash arm's pre-check tests
+# containment against RESOLVED_ROOT (= the FEATURE worktree from this cwd),
+# so a Bash redirect into the MAIN worktree's src/app.go resolves "outside
+# the repo root" from that vantage point and is wrongly allowed outright
+# (Q1a) -- exactly the hole #1072 closes by repointing the Bash arm's
+# pre-check at SCOPE_ROOT too.
+echo "case: Bash redirect to the main worktree's src/app.go from a feature-worktree cwd is blocked (#1072 Q1, Bash-arm tightening)"
+JSON=$(jq -n --arg cmd "echo x > ${Q1_REPO}/src/app.go" '{tool_input:{command:$cmd}}')
+run_guard "${Q1_FEATURE_WORKTREE}" "${JSON}"
+assert_exit "bash redirect to main worktree from feature-worktree cwd blocked (#1072 Q1)" 2
+
+# ── #1072 Fix 1: the empty-parse zero-target backstop must also scan for a
+# MAIN worktree mention (SCOPE_ROOT), not just $ROOT/$RESOLVED_ROOT (the
+# feature worktree from this cwd) -- an unparseable/unmodeled Bash write
+# whose raw text names the main worktree path, but never mentions the
+# feature worktree path at all, previously escaped this backstop entirely.
+# A quoted `>` (inside the echo argument) produces zero extracted targets
+# and trips bwt_zero_parse_suspicious, exactly like the existing
+# allowlisted-subtree-neutralization cases above -- but this raw text
+# mentions ONLY Q1_REPO (the main worktree / SCOPE_ROOT), never
+# Q1_FEATURE_WORKTREE ($ROOT/$RESOLVED_ROOT from this cwd), isolating the
+# fix: pre-#1072 Fix 1 code would not have matched at all here.
+echo "case: zero-parse Bash command whose raw text mentions ONLY the main worktree path (not the feature worktree) is blocked (#1072 Fix 1)"
+JSON=$(jq -n --arg cmd "echo \"a -> b, notes at ${Q1_REPO}/README\"" '{tool_input:{command:$cmd}}')
+run_guard "${Q1_FEATURE_WORKTREE}" "${JSON}"
+assert_exit "zero-parse backstop catches main-worktree-only mention from feature-worktree cwd (#1072 Fix 1)" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "zero-parse backstop catches main-worktree-only mention: stderr should contain BLOCKED, got: ${GUARD_STDERR}"
+fi
+
+# ── #1072 Fix 2: TMPDIR-widening containment checks measured against
+# SCOPE_ROOT, not RESOLVED_ROOT ── in a feature-worktree session, a TMPDIR
+# pointing inside the MAIN worktree (but outside the feature worktree) must
+# not become TMPDIR_ALLOW -- that would silently re-open main-worktree
+# containment via the TMPDIR-widening allowlist path on both arms.
+echo "── #1072 Fix 2: TMPDIR pointing inside the main worktree from a feature-worktree session ──"
+Q1_TMPDIR_INSIDE_MAIN="${Q1_REPO}/tmp"
+mkdir -p "${Q1_TMPDIR_INSIDE_MAIN}"
+
+echo "case: Write to a TMPDIR path inside the main worktree (outside the feature worktree) is blocked, not widened (#1072 Fix 2)"
+run_guard_with_tmpdir "${Q1_FEATURE_WORKTREE}" "${Q1_TMPDIR_INSIDE_MAIN}" "{\"tool_input\":{\"file_path\":\"${Q1_TMPDIR_INSIDE_MAIN}/x.txt\"}}"
+assert_exit "TMPDIR inside main worktree not widened, Write blocked (#1072 Fix 2)" 2
+if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
+    pass
+else
+    fail "TMPDIR inside main worktree not widened: stderr should contain BLOCKED, got: ${GUARD_STDERR}"
+fi
+
+echo "case: Bash redirect to a TMPDIR path inside the main worktree (outside the feature worktree) is blocked, not widened (#1072 Fix 2)"
+JSON=$(jq -n --arg cmd "echo x > ${Q1_TMPDIR_INSIDE_MAIN}/y.txt" '{tool_input:{command:$cmd}}')
+run_guard_with_tmpdir "${Q1_FEATURE_WORKTREE}" "${Q1_TMPDIR_INSIDE_MAIN}" "${JSON}"
+assert_exit "bash TMPDIR inside main worktree not widened, blocked (#1072 Fix 2)" 2
+
+# ── Ticket #1072, Q1 fallback: a main-worktree session (no linked worktree)
+# -- common-dir's parent equals ROOT, so SCOPE_ROOT falls back to ROOT.
+# Asserted explicitly rather than relying on AC1/AC3 to imply it. ──
+echo "── #1072 Q1 fallback: main-worktree session ──"
+Q1_FALLBACK_REPO="${TEST_ROOT}/q1-fallback"
+make_git_repo "${Q1_FALLBACK_REPO}"
+mkdir -p "${Q1_FALLBACK_REPO}/.cenci"
+touch "${Q1_FALLBACK_REPO}/.cenci/config.json"
+
+echo "case: in-repo source write is blocked in a main-worktree session (#1072 Q1 fallback)"
+run_guard "${Q1_FALLBACK_REPO}" "{\"tool_input\":{\"file_path\":\"${Q1_FALLBACK_REPO}/src/foo.txt\"}}"
+assert_exit "main-worktree session in-repo write blocked (#1072 Q1 fallback)" 2
+
+echo "case: out-of-repo write is allowed in a main-worktree session (#1072 Q1 fallback)"
+run_guard "${Q1_FALLBACK_REPO}" "{\"tool_input\":{\"file_path\":\"${TEST_ROOT}/q1-fallback-outside/foo.txt\"}}"
+assert_exit "main-worktree session out-of-repo write allowed (#1072 Q1 fallback)" 0
+
+# ── Ticket #1072, Q1 fail-closed: git rev-parse --git-common-dir itself
+# fails -- SCOPE_ROOT_OK must be set false, and the two decision sites must
+# fail closed (exit 2, "could not be classified", never mislabeled as
+# "targets the main worktree"). The shim passes every OTHER git subcommand
+# through by exec (so the show-toplevel/config-gate calls still succeed) and
+# is kept #!/bin/sh so it survives the dash/sh re-execs the suite performs.
+echo "── #1072 Q1 fail-closed: git rev-parse --git-common-dir fails ──"
+make_git_common_dir_fail_bin() {
+    local dir="$1"
+    shift
+    mkdir -p "${dir}"
+    local real_git
+    real_git="$(command -v git)" || {
+        echo "make_git_common_dir_fail_bin: 'git' not found on PATH" >&2
+        exit 1
+    }
+    cat > "${dir}/git" <<GITSCRIPT
+#!/bin/sh
+if [ "\$1" = "rev-parse" ] && [ "\$2" = "--git-common-dir" ]; then
+    exit 1
+fi
+exec '${real_git}' "\$@"
+GITSCRIPT
+    chmod +x "${dir}/git"
+    local tool real
+    for tool in "$@"; do
+        real="$(command -v "${tool}")" || {
+            echo "make_git_common_dir_fail_bin: '${tool}' not found on PATH" >&2
+            exit 1
+        }
+        ln -s "${real}" "${dir}/${tool}"
+    done
+}
+GIT_CDFAIL_BIN="${TEST_ROOT}/bin-git-common-dir-fail"
+make_git_common_dir_fail_bin "${GIT_CDFAIL_BIN}" sh cat jq realpath mktemp rm
+
+echo "case: git rev-parse --git-common-dir failure fails closed on an out-of-repo Write target (#1072 Q1 fail-closed)"
+run_guard_with_path "${OOR_REPO}" "${GIT_CDFAIL_BIN}" "{\"tool_input\":{\"file_path\":\"${TEST_ROOT}/q1-failclosed-outside/foo.txt\"}}"
+assert_exit "git-common-dir failure fails closed (#1072 Q1)" 2
+if [[ "${GUARD_STDERR}" == *"could not be classified"* ]]; then
+    pass
+else
+    fail "git-common-dir failure fails closed: stderr should contain the could-not-classify wording, got: ${GUARD_STDERR}"
+fi
+if [[ "${GUARD_STDERR}" == *"targets the main worktree"* ]]; then
+    fail "git-common-dir failure fails closed: stderr must never say 'targets the main worktree' for an unclassifiable target, got: ${GUARD_STDERR}"
+else
+    pass
+fi
+
+# #1072 Fix 4: the symmetric Bash-arm fail-closed case -- there was
+# previously no equivalent to the Write|Edit-arm case immediately above for
+# the Bash arm. Reuses the same git-failing shim, but with awk/wc also
+# present (a fresh bin dir, GIT_CDFAIL_BASH_BIN) since the Bash arm's target
+# extraction (bwt_extract_targets) needs both, unlike the Write|Edit arm.
+echo "case: git rev-parse --git-common-dir failure fails closed on an out-of-repo Bash redirect target (#1072 Q1 fail-closed, Bash arm)"
+GIT_CDFAIL_BASH_BIN="${TEST_ROOT}/bin-git-common-dir-fail-bash"
+make_git_common_dir_fail_bin "${GIT_CDFAIL_BASH_BIN}" sh cat jq realpath mktemp rm awk wc
+JSON=$(jq -n --arg cmd "echo x > ${TEST_ROOT}/q1-bash-failclosed-outside/foo.txt" '{tool_input:{command:$cmd}}')
+run_guard_with_path "${OOR_REPO}" "${GIT_CDFAIL_BASH_BIN}" "${JSON}"
+assert_exit "git-common-dir failure fails closed on Bash arm (#1072 Q1, Fix 4)" 2
+if [[ "${GUARD_STDERR}" == *"could not be classified"* ]]; then
+    pass
+else
+    fail "git-common-dir failure fails closed on Bash arm: stderr should contain the could-not-classify wording, got: ${GUARD_STDERR}"
+fi
+if [[ "${GUARD_STDERR}" == *"targets the main worktree"* ]]; then
+    fail "git-common-dir failure fails closed on Bash arm: stderr must never say 'targets the main worktree' for an unclassifiable target, got: ${GUARD_STDERR}"
+else
+    pass
+fi
 
 # ── Summary ──────────────────────────────────────────────────────────
 echo
