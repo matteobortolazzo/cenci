@@ -12,17 +12,29 @@
 #      cross-reference -> `(see §7)`), and a mandatory `blockers:` digest
 #      line with a five-form grammar (none / entry list / incomplete /
 #      unsupported / unknown), same-repo `#<n>` vs cross-repo
-#      `<owner>/<repo>#<n>` ref rendering, and `UNKNOWN` for a non-OPEN/
-#      non-CLOSED node state.
+#      `<owner>/<repo>#<n>` ref rendering, `UNKNOWN` for a non-OPEN/
+#      non-CLOSED node state, a fail-closed `<unresolvable> UNKNOWN`
+#      rendering for a node whose `url`/`number` does not resolve (mirroring
+#      `sameRepoIssueURL`'s own unparseable-URL contract), an explicit note
+#      of the deliberate cross-repo divergence from `nativeDependencies`,
+#      and a placeholder-style (never literal-alternation) digest template
+#      line.
 #   2. flow/skills/implement/SKILL.md -- a new `## Blocked-Dependency Gate`
 #      section between `## Context Gathering (Delegated)` and
 #      `## Attachments` (therefore before `## Ticket Ownership`'s
 #      `cenci pipeline label <id> --transition working`), with ticket/plan-
 #      file/ticketless mode branches, a classification table (OPEN/UNKNOWN/
 #      incomplete -> stop; unsupported -> one warning naming `gh >= 2.94.0`
-#      and proceed; unknown/missing -> fallback probe), an extended
-#      `## Attachments` effective-order sentence, and a fifth named
-#      `## Pipeline` session shape.
+#      and proceed; unknown/missing -> fallback probe), two ownership
+#      branches in the stop wording (not-yet-claimed vs already-claimed,
+#      the latter reporting the residual assignee + `Working`), the
+#      design-ticket routing `### Design Check (hard gate)` would otherwise
+#      lose to this earlier gate, both standing "do not fetch the ticket in
+#      the main agent" rules amended to name this gate's one-field probe,
+#      `blockers:` added to the digest store list (Phase 1 forwards it
+#      verbatim), an extended `## Attachments` effective-order sentence, and
+#      a fifth named `## Pipeline` session shape whose persists-nothing
+#      claim is scoped around the `prepare` call that already ran.
 #   3. flow/agents/planner.md -- a routing rule that an open blocker is never
 #      a clarifying question in either mode, a new `### Blocked Dependencies`
 #      section emitted before `## Clarifying Questions`, no new `gh` call,
@@ -37,16 +49,25 @@
 #      `## Resume From Draft` step 5's re-delegation; a third named
 #      exception in `## Pipeline: Plan Stage` alongside the pinned, unchanged
 #      second-exception substring.
-#   5. flow/skills/implement/codex.md -- one new sentence carrying the same
-#      hard stop, positioned so `parity.test.sh`'s `Stop before mutations`
-#      -> `create the worktree` ordering anchor still holds, and never using
-#      `AskUserQuestion` (carried-forward negative assertion).
+#   5. flow/skills/implement/codex.md -- the same hard stop for the Codex
+#      entrypoint, covering `/plan` *and* `apply` (which persists the plan
+#      file, initializes the checkpoint, creates the worktree, and writes
+#      labels -- the Claude side gates its equivalent plan-file mode with
+#      its own direct probe, so apply must re-check rather than trust
+#      `/plan`'s earlier verdict), positioned so `parity.test.sh`'s
+#      `Stop before mutations` -> `create the worktree` ordering anchor
+#      still holds, and never using `AskUserQuestion` (carried-forward
+#      negative assertion).
 #
 # Fixture-free, grep-based idiom of flow/tests/implement-split-gate-contract.test.sh:
 # `set -uo pipefail`, a `failures` counter, `grep -qF` assert helpers built on
 # a pure-extractor + `require_*` nameref-wrapper split (`fail()` is never
 # called inside `$(...)`), `assert_file_occurs_at_least` for marker-precision
-# cases, and `assert_marker_precedes` for ordering. Auto-discovered by
+# cases, and `assert_marker_precedes` for ordering -- plus
+# `assert_heading_precedes`, a whole-line (`grep -nxF`) variant used wherever
+# both ordered markers also appear as prose mentions earlier in the same
+# file, where the substring variant would compare those mentions and pass
+# regardless of where the real sections sit. Auto-discovered by
 # scripts/run-checks.sh's `*.test.sh` glob -- no registration needed. No
 # `read_*`-named helpers, so this file is trivially compliant with
 # flow/tests/read-helper-purity-contract.test.sh's repo-wide scan (helpers
@@ -257,6 +278,40 @@ assert_marker_precedes() {
   fi
 }
 
+# first_heading_line_in_file <file> <exact-heading-line> -- pure: prints the
+# 1-based line number of the first line that equals the argument *in full*
+# (`grep -nxF`), or nothing if absent. Distinct from
+# first_match_line_in_file's substring match, and the distinction is
+# load-bearing: both `### Blocked-Dependency Stop` and `### Split Gate`
+# appear in phase-1-plan.md as backtick-quoted prose mentions long before
+# their real headings (the `## Pipeline: Plan Stage` third-exception
+# sentence, the `## Lean Approval Path` Split-Gate backstop bullet, and
+# `### Blocked-Dependency Stop`'s own body, which names `### Split Gate`).
+# A substring-based ordering assertion between the two therefore compares
+# prose positions and passes no matter where the real subsections sit --
+# vacuous. Safe inside $(...): no fail() side effect.
+first_heading_line_in_file() {
+  grep -nxF -m1 -- "$2" "$1" 2>/dev/null | cut -d: -f1
+}
+
+# assert_heading_precedes <file> <heading-before> <heading-after> <label> --
+# ordering assertion over whole-line heading matches, so a prose mention of
+# either heading can never satisfy it. Calls fail() directly in the parent
+# shell -- must NOT be invoked via $(...).
+assert_heading_precedes() {
+  local file="$1" before="$2" after="$3" label="$4"
+  local line_before line_after
+  line_before="$(first_heading_line_in_file "${file}" "${before}")"
+  line_after="$(first_heading_line_in_file "${file}" "${after}")"
+  if [[ -z "${line_before}" || -z "${line_after}" ]]; then
+    fail "${label}: could not locate both headings as whole lines to compare ordering (before='${before}' line='${line_before:-<missing>}'; after='${after}' line='${line_after:-<missing>}')"
+    return
+  fi
+  if [[ "${line_before}" -ge "${line_after}" ]]; then
+    fail "${label}: expected heading '${before}' (line ${line_before}) to precede heading '${after}' (line ${line_after})"
+  fi
+}
+
 # first_match_line_in_content <content> <needle> -- content-based sibling of
 # first_match_line_in_file, for ordering assertions scoped to an already-
 # extracted section body (e.g. planner.md's ## Plan Output template, where a
@@ -298,8 +353,14 @@ assert_file_contains "${CONTEXT_GATHERER}" "### 7. Write the bundle file" \
   "must renumber the existing ### 6. Write the bundle file step to ### 7."
 assert_file_contains "${CONTEXT_GATHERER}" "(see §7)" \
   "must update the .pen-path resolution paragraph's stale (see §6) cross-reference to (see §7)"
-assert_file_lacks "${CONTEXT_GATHERER}" "(see §6)" \
-  "must not leave the stale (see §6) cross-reference after renumbering"
+# Scoped to the design-context step that owns the renumbered cross-reference,
+# NOT file-wide: after this ticket, §6 is a real section (Blocking
+# dependencies), so a file-wide ban on the string would reject any future
+# legitimate reference to it and fail this suite for no reason.
+if require_subsection CTX_S4_CONTENT "${CTX_CONTENT}" "### 4. Design context (if a design path was provided)" "context-gatherer.md"; then
+  assert_section_lacks "${CTX_S4_CONTENT}" "(see §6)" \
+    "context-gatherer.md (### 4. Design context) must not leave the stale (see §6) cross-reference after renumbering"
+fi
 
 CTX_GH_CALL='gh issue view <number> --repo <owner>/<repo> --json blockedBy'
 assert_file_contains "${CONTEXT_GATHERER}" "${CTX_GH_CALL}" \
@@ -338,6 +399,27 @@ assert_file_contains "${CONTEXT_GATHERER}" "neither \`OPEN\` nor \`CLOSED\`" \
 assert_file_contains "${CONTEXT_GATHERER}" "nativeDependencyState" \
   "must name nativeDependencyState as the semantic mirror for the UNKNOWN fail-closed default"
 
+# --- Unparseable/missing url fails closed, and the cross-repo divergence
+#     from the Go dispatch gate is documented rather than silent ----------
+
+assert_file_contains "${CONTEXT_GATHERER}" "Unresolvable \`url\` fails closed" \
+  "must define what happens when a blockedBy node's url is absent, unparseable, or not an issue path"
+assert_file_contains "${CONTEXT_GATHERER}" "<unresolvable> UNKNOWN" \
+  "must render an unresolvable-url blocker as <unresolvable> UNKNOWN so the gate's UNKNOWN -> STOP row catches it"
+assert_file_contains "${CONTEXT_GATHERER}" "never omit the node, and never render it \`CLOSED\`" \
+  "must forbid omitting an unresolvable-url blocker or rendering it CLOSED (the two ways a blocked ticket would slip through)"
+assert_file_contains "${CONTEXT_GATHERER}" "Known divergence from the Go gate on cross-repo links" \
+  "must document, not leave silent, that this grammar is laxer than nativeDependencies on cross-repo blockers"
+
+# --- Digest template renders one concrete form, never the placeholder -----
+
+assert_file_contains "${CONTEXT_GATHERER}" "blockers: <exactly one of §6's five forms, rendered — never this placeholder text>" \
+  "digest template's blockers: line must be a placeholder like every other template line, not a literal alternation of all five forms"
+assert_file_contains "${CONTEXT_GATHERER}" "The \`blockers:\` line is rendered, never echoed" \
+  "must tell the gatherer to emit one concrete form, since a template-shaped line reads as unparseable to the gate"
+assert_file_contains "${CONTEXT_GATHERER}" "In ticketless mode there is no ticket to check, so omit the line entirely" \
+  "must state the ticketless-mode behavior as an omission rather than a placeholder or n/a value"
+
 # =====================================================================
 # flow/skills/implement/SKILL.md -- ## Blocked-Dependency Gate
 # =====================================================================
@@ -346,6 +428,28 @@ require_content SKILL_CONTENT "${IMPLEMENT_SKILL}" "SKILL.md"
 
 assert_file_contains "${IMPLEMENT_SKILL}" "## Blocked-Dependency Gate" \
   "must add a new ## Blocked-Dependency Gate section"
+
+# --- The gate's direct probe is a main-agent `gh` call, so both standing
+#     "do not fetch the ticket in the main agent" rules must be amended to
+#     name it -- otherwise the gate is simultaneously required and
+#     forbidden, and a malformed digest silently skips the check ----------
+
+assert_file_contains "${IMPLEMENT_SKILL}" "There are exactly two exceptions, both named and bounded: \`cenci pipeline plan-check\`" \
+  "SKILL.md's ticket-mode no-fetch rule must name the gate's blockedBy probe alongside cenci pipeline plan-check as its second exception"
+assert_file_contains "${IMPLEMENT_SKILL}" "The single exception is \`## Blocked-Dependency Gate\`'s \`gh issue view <number> --repo <owner>/<repo> --json blockedBy\` fallback probe" \
+  "SKILL.md's post-digest 'do not re-fetch the ticket in the main agent' rule must name the gate's fallback probe as its exception"
+assert_file_contains "${IMPLEMENT_SKILL}" "not the precedent for this probe" \
+  "SKILL.md must correct the claim that ### Design Check (hard gate) already issues this idiom -- that command is text shown to the user, not a call the skill makes"
+
+# --- The digest store list must retain the blockers: line, since Phase 1's
+#     ## Planner Delegation forwards it verbatim and unconditionally -------
+
+if require_section GATHERING_SECTION "${SKILL_CONTENT}" "## Context Gathering (Delegated)" "SKILL.md"; then
+  assert_section_contains "${GATHERING_SECTION}" "\`blockers:\` — the raw digest line, stored **verbatim** and retained for the whole session" \
+    "SKILL.md (## Context Gathering) 'From the digest, store:' list must include the blockers: line, which Phase 1 forwards verbatim"
+  assert_section_contains "${GATHERING_SECTION}" "Do not summarize it, normalize it, or drop it once the gate has passed" \
+    "SKILL.md (## Context Gathering) must forbid dropping the blockers: line after the gate passes -- the planner backstop still needs it at Phase 1"
+fi
 
 # --- Placement: after ## Context Gathering (Delegated), before
 #     ## Attachments, therefore before ## Ticket Ownership's
@@ -396,8 +500,31 @@ if require_section GATE_SECTION "${SKILL_CONTENT}" "## Blocked-Dependency Gate" 
   # Stop wording: names every ref+state, no ownership claim/Working/Input
   # Needed/comment/cenci pipeline call/subagent delegation/worktree
   assert_section_contains "${GATE_SECTION}" \
-    "reports every blocking ref and its state, states the run ended before claiming the ticket, and tells the user to re-run once the blockers close — no ownership claim, no \`Working\`, no \`Input Needed\`, no ticket comment, no \`cenci pipeline\` call, no subagent delegation, no worktree" \
+    "reports every blocking ref and its state and tells the user to re-run once the blockers close, and it takes no action of any kind — no ownership claim, no \`Working\`, no \`Input Needed\`, no ticket comment, no \`cenci pipeline\` call, no subagent delegation, no worktree" \
     "SKILL.md (## Blocked-Dependency Gate) stop must name every blocking ref+state and take no ownership/label/comment/pipeline/subagent/worktree action"
+
+  # Ownership branches: the gate also runs in plan-file mode and on re-runs
+  # of an already-claimed ticket, where "the run ended before claiming the
+  # ticket" is false and leaves a stranded assignee + Working label
+  # unreported.
+  assert_section_contains "${GATE_SECTION}" "never assert the unclaimed case unconditionally" \
+    "SKILL.md (## Blocked-Dependency Gate) must not state 'ended before claiming the ticket' unconditionally -- the gate also runs after an earlier session claimed the ticket"
+  assert_section_contains "${GATE_SECTION}" "**Already claimed**" \
+    "SKILL.md (## Blocked-Dependency Gate) must define an already-claimed branch (plan-file mode, or a re-run of a ticket an earlier session claimed)"
+  assert_section_contains "${GATE_SECTION}" "the ticket stays assigned and labelled \`Working\` from that earlier run" \
+    "SKILL.md (## Blocked-Dependency Gate) already-claimed branch must report the residual assignee and Working label"
+  assert_section_contains "${GATE_SECTION}" "Never leave that residual state unreported" \
+    "SKILL.md (## Blocked-Dependency Gate) already-claimed branch must forbid leaving the stranded board state unreported"
+
+  # Design-ticket routing: /cenci:refine links every implementation ticket to
+  # its companion design ticket, so this gate now intercepts exactly the case
+  # ### Design Check (hard gate)'s routing was written for.
+  assert_section_contains "${GATE_SECTION}" "**Name the design-ticket case.**" \
+    "SKILL.md (## Blocked-Dependency Gate) must name the design-ticket case, which /cenci:refine's --add-blocked-by link makes the most common blocked case"
+  assert_section_contains "${GATE_SECTION}" "\`/cenci:design <design-ticket-id>\`" \
+    "SKILL.md (## Blocked-Dependency Gate) must carry ### Design Check (hard gate)'s /cenci:design routing, which this gate would otherwise make unreachable"
+  assert_section_contains "${GATE_SECTION}" "this gate issues no second probe to fetch them" \
+    "SKILL.md (## Blocked-Dependency Gate) must state the design routing conditionally rather than adding a label-fetching probe"
 fi
 
 # --- ## Attachments -- extended effective-order sentence ------------------
@@ -413,10 +540,14 @@ fi
 if require_section PIPELINE_SECTION "${SKILL_CONTENT}" "## Pipeline" "SKILL.md"; then
   assert_section_contains "${PIPELINE_SECTION}" "one of five named shapes" \
     "SKILL.md (## Pipeline) must change 'one of four named shapes' to five"
-  assert_section_contains "${PIPELINE_SECTION}" "like shape 4 it persists nothing" \
-    "SKILL.md (## Pipeline) fifth shape must note it persists nothing like shape (4)"
+  assert_section_contains "${PIPELINE_SECTION}" "like shape 4 it persists nothing **of its own**" \
+    "SKILL.md (## Pipeline) fifth shape must scope its persists-nothing claim to the gate's own actions"
+  assert_section_contains "${PIPELINE_SECTION}" "advanced the ticket's persisted stage to \`prepared\`" \
+    "SKILL.md (## Pipeline) fifth shape must carve out the prepare call that already ran before the gate -- an unqualified 'persists nothing' is false"
   assert_section_contains "${PIPELINE_SECTION}" "can fire before the ticket is even claimed" \
     "SKILL.md (## Pipeline) fifth shape must note it can fire before the ticket is even claimed, unlike every other shape"
+  assert_section_contains "${PIPELINE_SECTION}" "but it is not restricted to that case" \
+    "SKILL.md (## Pipeline) fifth shape must not imply the stop always fires pre-claim -- plan-file mode and re-runs fire post-claim"
 fi
 
 # =====================================================================
@@ -494,8 +625,8 @@ if require_section ROUTE_SECTION "${PHASE1_CONTENT}" "## Route Planner Output" "
     "phase-1-plan.md (## Route Planner Output, Resume-mode note) must state the Blocked-Dependency Stop governs only a fresh Planner Delegation return, never Resume From Draft step 5's re-delegation"
 fi
 
-assert_marker_precedes "${PHASE1_PLAN}" "### Blocked-Dependency Stop" "### Split Gate" \
-  "phase-1-plan.md ### Blocked-Dependency Stop must precede ### Split Gate"
+assert_heading_precedes "${PHASE1_PLAN}" "### Blocked-Dependency Stop" "### Split Gate" \
+  "phase-1-plan.md ### Blocked-Dependency Stop heading must precede the ### Split Gate heading"
 
 # --- ## Pipeline: Plan Stage -- third named exception, without rewording
 #     the existing pinned second-exception substring -----------------------
@@ -524,6 +655,21 @@ assert_marker_precedes "${CODEX_MD}" "Stop before mutations" "create the worktre
   "codex.md 'Stop before mutations' must still precede 'create the worktree' (parity.test.sh's own pinned ordering anchor)"
 assert_file_lacks "${CODEX_MD}" "AskUserQuestion" \
   "must never use AskUserQuestion in the cross-tool-portable codex.md (flow/AGENTS.md critical rule) -- carried-forward negative assertion, not new"
+
+# --- apply-mode parity: the Claude side gates plan-file mode with its own
+#     direct probe, so Codex's apply path (which persists the plan file,
+#     initializes the checkpoint, creates the worktree, and writes labels)
+#     must re-check too -- a blocker linked after /plan otherwise sails
+#     into every mutation the gate exists to prevent ------------------------
+
+assert_file_contains "${CODEX_MD}" "\`apply\` runs the identical check again as its own first step" \
+  "codex.md must gate apply mode too, not only /plan -- apply mutates ticket, checkpoint, worktree, and labels"
+assert_file_contains "${CODEX_MD}" "before it persists the plan file, initializes the checkpoint, creates the worktree, or writes any label" \
+  "codex.md apply-mode check must run before every mutation apply performs"
+assert_file_contains "${CODEX_MD}" "an approved plan is not evidence the dependency is still clear" \
+  "codex.md must state why apply re-checks rather than trusting /plan's earlier verdict"
+assert_file_contains "${CODEX_MD}" "rather than claiming the run stopped before the ticket was claimed" \
+  "codex.md apply-mode stop must report residual assignee/labels instead of asserting the pre-claim wording"
 
 echo "implement-blocked-dependency-gate.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]

@@ -2,7 +2,7 @@
 
 Read `project-core` and `codex-runtime`. In `/plan`, gather context with the read-heavy
 agent and ask material questions.
-An open native blocking dependency is a hard stop before any mutation: check the ticket's `blockedBy` (`gh issue view <ticket> --json blockedBy`) and, if any entry is `OPEN` or otherwise unresolvable, stop immediately, naming every blocking ref and its state (a `gh` that rejects the field is a capability gap — that case warns once and proceeds instead) — no plan persisted, no ticket claim, no worktree; re-run once the blockers close.
+An open native blocking dependency is a hard stop before any mutation: check the ticket's `blockedBy` (`gh issue view <ticket> --json blockedBy`) and, if any entry is `OPEN` or otherwise unresolvable, stop immediately, naming every blocking ref and its state (a `gh` that rejects the field is a capability gap — that case warns once and proceeds instead) — no plan persisted, no ticket claim, no worktree; re-run once the blockers close. `apply` runs the identical check again as its own first step, before it persists the plan file, initializes the checkpoint, creates the worktree, or writes any label: a blocker linked after `/plan` returned would otherwise sail straight into every mutation this gate exists to prevent, and an approved plan is not evidence the dependency is still clear. On that path report whatever assignee and labels an earlier run already left on the ticket rather than claiming the run stopped before the ticket was claimed, and say that nothing later in the run will reconcile them.
 When the planner's output carries a non-empty
 `### Split Recommendation` or a `### Size Estimate` of `L`, the Split Gate asks, via
 the client's available user-input mechanism, whether to stop — split via

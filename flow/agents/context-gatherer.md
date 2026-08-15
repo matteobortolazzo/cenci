@@ -122,6 +122,10 @@ Classify the result into the mandatory `blockers:` digest line (see the Digest t
 
 - `blockers: none` — `.blockedBy.nodes` is empty.
 - `blockers: <ref> <STATE>[, <ref> <STATE>…]` — one entry per node. `<ref>` is `#<n>` when the node's `url` path is exactly `/<owner>/<repo>/issues/<n>` (same-repo, mirroring `sameRepoIssueURL`), otherwise `<owner>/<repo>#<n>` derived from that URL path — a cross-repo blocker is classified from its own inline node state, never treated as unresolvable. `<STATE>` is the node's `state` uppercased, or `UNKNOWN` when it is neither `OPEN` nor `CLOSED` (mirrors `nativeDependencyState`'s fail-closed default).
+
+  **Unresolvable `url` fails closed.** The rendering above assumes the node's `url` parses into an `/<owner>/<repo>/issues/<n>` path. When it does not — `url` absent or empty, `url.Parse` would reject it, the path is not of that shape, or `number` is missing or `<= 0` — never invent a ref, never omit the node, and never render it `CLOSED`. Emit the entry as `<unresolvable> UNKNOWN`, which the implement skill's `## Blocked-Dependency Gate` classifies into its `UNKNOWN → STOP` row. This mirrors `sameRepoIssueURL` exactly, whose doc comment states that *a URL that fails to parse is treated as not-same-repo, so it lands in the anomaly path and fails closed rather than being assumed local* — and `nativeDependencies` then drops that node from the gated set and records an anomaly, which `decide.go` turns into a dispatch skip. The prose path has no anomaly channel, so `UNKNOWN` is how it carries the same fail-closed verdict.
+
+  **Known divergence from the Go gate on cross-repo links.** `nativeDependencies` routes *every* cross-repo blocker into that same anomaly path, so `cenci dispatch` refuses to auto-start a ticket with one, whatever its state. This grammar is deliberately laxer: it classifies a cross-repo blocker from the inline `state` the same payload already returned, so a human-launched `/cenci:implement` proceeds past a `CLOSED` cross-repo blocker that dispatch would still decline to pick up. The two can therefore disagree on the same ticket — intentionally: an unattended dispatcher fails safe by not starting, while an interactive run has a human present to judge a resolved cross-repo link. Only the unparseable-`url` case above is fail-closed in both.
 - `blockers: incomplete <k>/<totalCount>; <entries>` — when `totalCount` is present and exceeds the number of returned nodes.
 - `blockers: unsupported — <exact gh stderr>, collapsed to its first line and truncated to a reasonable length if longer` — gh rejected the field (stderr contains `unknown json field`, matched case-insensitively).
 - `blockers: unknown — <exact gh stderr>, collapsed to its first line and truncated to a reasonable length if longer` — any other gh failure.
@@ -171,7 +175,7 @@ ticket: #<number> — <title> (<state>)
 labels: <comma-separated label names or "none">
 assignees: <comma-separated GitHub logins or "none">
 parent: isChild=<bool> isLastChild=<bool> parentId=<number|null>
-blockers: none | <ref> <STATE>[, <ref> <STATE>…] | incomplete <k>/<totalCount>; <entries> | unsupported — <exact gh stderr> | unknown — <exact gh stderr> (n/a in ticketless mode)
+blockers: <exactly one of §6's five forms, rendered — never this placeholder text>
 affectedProjects: <names or "n/a">
 design: <"ticket" | "design.md" | "pen-only" | "none"> — the ladder case from §4 that resolved design context (matches `designScreenIdSource`), plus the `.pen` path when known, e.g. `design: ticket, .pen: <path>`, `design: design.md, .pen: <path>`, `design: pen-only, .pen: <path>`. `design: none` is the exact sentinel string — no path suffix, no variation — the main agent string-matches `design: none` when case (c) found neither a `.pen` file nor a DESIGN.md.
 attachments:
@@ -181,5 +185,7 @@ summary:
 - <3-6 bullets: goal, key acceptance criteria, notable constraints>
 errors: <exact error text from any failed step, or "none">
 ```
+
+**The `blockers:` line is rendered, never echoed.** Emit one concrete §6 form — `blockers: none`, an entry list, `blockers: incomplete …`, `blockers: unsupported — …`, or `blockers: unknown — …` — and never the placeholder wording from the template above, nor an alternation of several forms. The implement skill's `## Blocked-Dependency Gate` classifies this line literally: a template-shaped line reads as unparseable and costs the main agent a redundant fallback `gh` call. In ticketless mode there is no ticket to check, so omit the line entirely rather than emitting a placeholder or an `n/a` value.
 
 If a step fails (ticket not found, gh error, missing DESIGN.md path), still write the bundle with what you gathered, fill `errors:`, and return the digest — never hang or silently omit the failure.
