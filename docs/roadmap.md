@@ -20,6 +20,7 @@ intended order; an umbrella issue tracks its children and is not a second unit o
 | 2.5 | [Refactor round](https://github.com/matteobortolazzo/cenci/milestone/4) | Reduce prompt, installer, and Go maintenance cost before autonomy expands |
 | 3.0 | [Trusted autonomy](https://github.com/matteobortolazzo/cenci/milestone/9) | Make dispatch, CI gates, babysitting, and automerge authorization reliably fail closed |
 | 3.1 | [Autonomy experience](https://github.com/matteobortolazzo/cenci/milestone/10) | Add a clear Full loop setup/readiness surface over the trusted primitives |
+| 3.2 | [Stacked delivery](https://github.com/matteobortolazzo/cenci/milestone/11) | Let ordered split children be implemented, reviewed, and merged as a stack instead of serially |
 | 4 | [Later exploration](https://github.com/matteobortolazzo/cenci/milestone/3) | Optional integrations, research, and lower-priority improvements |
 
 Finish the milestones in order. Work inside a milestone follows the dependency chain
@@ -50,6 +51,10 @@ in its GitHub description; independent tickets at the same step may proceed toge
   per-ticket merge grant remains explicit.
 - GitHub is the workflow, dispatch, and automerge host today. Watch and Sandbox are the
   layers intended to grow corporate/Azure DevOps connectivity first.
+- Ordered split children are serialized: every PR targets `main`, and a child cannot
+  start until its blocker merges. Stacked delivery is the 3.2 outcome and is gated on
+  GitHub's stacked pull requests leaving public preview; nothing in that milestone ships
+  before 3.0 hardens the gate and merge paths it modifies.
 
 Small bugs and maintenance work stay in the issue tracker rather than being repeated
 here. A user-visible claim moves sections only when the shipped behavior changes.
