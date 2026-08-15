@@ -61,6 +61,9 @@ In lean mode, resolve your own questions whenever a clearly recommended answer e
 Nothing outside these five classes may be asked; anything self-resolved must appear in `## Auto-Adopted Answers` — never asked, never left unresolved, never silently guessed. A question that is genuinely unresolvable from the ticket, codebase, and docs, yet doesn't fit any of these five classes, goes under `### Open Questions` in the plan output instead — never a silent guess, and never asked via a sixth ad-hoc class.
 
 ## Clarifying Questions
+
+Rule: an open blocking dependency is never a clarifying question in either lean or interactive mode. When the delegation's forwarded `blockers:` input names any blocker in state `OPEN`, emit a `### Blocked Dependencies` section at the top of your output, before this `## Clarifying Questions` section, with one `<ref> — OPEN` line per blocker. No new `gh` call from the planner — classify only the forwarded `blockers:` input. A legacy prose `Depends on #<n>` line in the bundle, whose state you cannot confirm, goes under `### Open Questions` — never a stop, never a new `gh` call. This backstop is deliberately scoped to `OPEN` only — `UNKNOWN` and `incomplete <k>/<total>` are already fail-closed by `SKILL.md`'s `## Blocked-Dependency Gate` (the primary gate) before the planner is ever reached, so this rule exists purely as a redundant defense-in-depth layer for `OPEN`, not a second fail-closed check for the other states.
+
 Do NOT ask questions directly — you cannot interact with the user. Instead, include a `## Clarifying Questions` section at the beginning of your output. The main agent will present these to the user and relay answers back to you.
 
 If you have clarifying questions, output them under `## Clarifying Questions` with the exact format: `Q1: <question>`, `Q2: <question>`, etc.
@@ -104,6 +107,10 @@ Before finalizing the plan, explicitly identify:
 - **Open questions** you couldn't resolve from the codebase alone
 
 ## Plan Output
+
+    ### Blocked Dependencies
+    (Only emitted when the forwarded `blockers:` input names an OPEN entry — omit this section entirely otherwise.)
+    <ref> — OPEN
 
     ## Clarifying Questions
     (If no questions, output "None." on the next line.)

@@ -166,9 +166,31 @@ After the digest is stored, invoke `cenci pipeline prepare <id>` to record `prep
 - Some siblings manually closed → they don't count as open, don't block last-child detection
 - Last child ≠ parent complete — `isLastChild` only selects the run that *may* close the parent; phase 9's Parent Close Gate audits the parent's `### Acceptance Criteria` against delivered evidence before any parent-closing trailer is written, and on gaps the parent stays open with a gap comment; every phase 9 re-entry re-reconciles the commit/PR/closing-reference trailers to that entry's fresh verdict rather than trusting an earlier attempt's write (see `phases/phase-9-pr.md`). Parent completion itself is never decided in this phase: `cenci babysit` reconciles split-parent completion at merge time from the live native sub-issue graph, closing the parent only when every sub-issue reads closed and the gap comment above is absent — the same `parent-gap-report` marker this gate posts is the durable signal that defers babysit's merge-time close, so a `hold` verdict here still protects the parent long after this session ends (see the babysit skill's Safety guarantees section)
 
+## Blocked-Dependency Gate
+
+Runs after Context Gathering (Delegated) and before Attachments — therefore before `## Ticket Ownership`'s `cenci pipeline label <id> --transition working` call, so a blocked ticket is never claimed and never picks up `Working`. An open native `blockedBy` dependency is a hard stop, not a question: this gate has no `AskUserQuestion` branch and no override flag — the escape hatch is closing the blocker or removing the link.
+
+**Ticket mode**: classify the digest's `blockers:` line using the classification table below.
+
+**Plan-file mode** (Context Gathering is skipped): issue the same one-field probe directly from the main agent — `gh issue view <number> --repo <owner>/<repo> --json blockedBy`, the same idiom `### Design Check (hard gate)` already uses — then classify identically.
+
+**Ticketless mode**: explicit documented no-op — there is no ticket to check.
+
+Classification:
+
+| Input | Outcome |
+|---|---|
+| `none`, or every entry `CLOSED` | proceed, no prompt, no extra output |
+| any entry `OPEN` | **STOP** |
+| any entry `UNKNOWN`, or `incomplete …` | **STOP** (fail closed) |
+| `unsupported — …` | prints exactly one warning naming `gh >= 2.94.0` and proceeds — explicitly not the fail-closed path |
+| `unknown — …`, or the line missing/unparseable | run the direct probe as a fallback and re-classify; if the fallback itself fails with anything other than the capability error, **STOP** (fail closed) |
+
+The stop reports every blocking ref and its state, states the run ended before claiming the ticket, and tells the user to re-run once the blockers close — no ownership claim, no `Working`, no `Input Needed`, no ticket comment, no `cenci pipeline` call, no subagent delegation, no worktree.
+
 ## Attachments
 
-Runs after Context Gathering (which itself runs after the Pre-flight Check). The effective order is: mode detection → Pre-flight Check → Context Gathering → Attachments → Ticket Readiness.
+Runs after Context Gathering (which itself runs after the Pre-flight Check). The effective order is: mode detection → Pre-flight Check → Context Gathering → Blocked-Dependency Gate → Attachments → Ticket Readiness.
 
 **If ticketless mode:** Skip the Attachments section entirely.
 
@@ -363,12 +385,13 @@ The only reasons to stop mid-pipeline are explicit error gates defined within in
 
 **Single-deliverable invariant**: one run persists at most one plan file and produces exactly one worktree branch and one PR — never a second `.plans/<id>-*.md` for the same ticket, and never a stacked or second PR for it. **Mid-run scope overflow** (Phases 2–9 discovering more work than the plan scoped) is governed by the same invariant: never expand into a second plan, branch, or PR — either complete the planned single PR and capture overflow as Followup items (Phase 9's existing `## Followup Ticket` mechanism), or, when the planned work itself cannot complete within scope, stop at an error gate recommending `/cenci:refine`. The pipeline is not complete until a PR URL has been created and returned to the user — never end with a status summary like "ready for PR" or "branch is ready." The terminal state is a PR that is **open and handed off to the `cenci babysit` supervisor** (Phase 9's final step), which then carries it through CI, review feedback, and the final `In Review` → `Implemented` relabel on merge — implement itself does not carry the PR to merged, so it reports "PR open and being watched," not "done." That babysit hand-off is a best-effort step: a failed watcher launch is reported but never fails Phase 9, since the PR itself is the pipeline's deliverable.
 
-**Hard stop after planning**: Phases 2–9 run only when the skill was invoked with a plan-file argument (`hasPlanFile` set during mode detection). A planning session lands in one of four named shapes:
+**Hard stop after planning**: Phases 2–9 run only when the skill was invoked with a plan-file argument (`hasPlanFile` set during mode detection). A planning session lands in one of five named shapes:
 
 1. **Ends at Phase 1 after `## New Plan`** — the default: a session that creates a new plan **always ends at Phase 1** — after persisting the plan file, do not read `phases/phase-2-worktree.md` or any later phase file. Implementation resumes via `/cenci:implement .plans/<filename>` in a fresh session.
 2. **Trivial Fast Path continues to Phase 2** — the two exceptions are the **Trivial Fast Path** and the **Lean Approval Path**: when Trivial-Ticket Triage judged the ticket trivial, or when `planning.autonomy: "lean"` produced a plan with no escalations, Phase 1 still persists a plan file, but the session does not stop — it continues straight into Phase 2 in the same session (see `phases/phase-1-plan.md`'s `## Trivial Fast Path` and `## Lean Approval Path`, and `phases/phase-2-worktree.md`'s `## Gate Check`).
 3. **Escalation stop** — when lean planning must ask a clarifying question in an unattended run — including a Split-Gate-synthesized split question in lean ticket mode (see `phases/phase-1-plan.md`'s `### Split Gate` lean-ticket branch, which routes here with the gate's synthesized split question as the escalated question, reusing this exact same mechanism) — `## Unattended Escalation Path` persists a draft plan (front matter `status: awaiting-input`), posts the question to the ticket, swaps the board label, and stops. Like shape (1) the session ends at Phase 1; unlike it, there is no complete plan open for direct resume — a human reply on the ticket, then either `cenci dispatch`'s automatic resume or a fresh `/cenci:implement` session, is what moves the ticket forward (see Plan Verification's `awaiting-input` branch above, whose **Answered** sub-branch routes to `## Resume From Draft` rather than stopping again).
 4. **Split Gate stop** — when the planner returns a non-empty `### Split Recommendation` or a `### Size Estimate` of `L` in interactive mode or ticketless mode and the choice is to stop, `phases/phase-1-plan.md`'s `### Split Gate` persists no plan file and makes no `cenci pipeline` call of any kind — it leaves `Working` and the assignee claim in place, ends the turn, and tells the user to run `/cenci:refine <id>` to split the ticket. Unlike shapes (1) and (3), nothing at all is persisted or recorded on this path — the ticket's pipeline stage is left exactly as it was before Phase 1 started. (The Split Gate's lean-ticket-mode route stops differently — see shape (3) above, which it reuses.)
+5. **Blocked-Dependency Gate stop** — when `## Blocked-Dependency Gate` above (or its `### Blocked-Dependency Stop` backstop in `## Route Planner Output`) finds an open native blocker, the run ends before the ticket is claimed: like shape 4 it persists nothing, and unlike every other shape, can fire before the ticket is even claimed — before `## Ticket Ownership`'s assignee claim and `Working` label are ever applied.
 
 | Phase | Instructions |
 |-------|--------------|
