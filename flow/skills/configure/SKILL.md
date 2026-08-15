@@ -1575,13 +1575,14 @@ For each MCP selected in question 5:
 
    keymaps:
      # Board-level agent launchers. Emitted in BOTH tables so they fire whether the
-     # card list or the detail panel is focused.
+     # card list or the detail panel is focused. `window:` opens a tmux window and
+     # `focus: true` switches to it; lazyboards builds and escapes the tmux call.
      normal:
-       C: { name: Claude, type: shell, command: "tmux new-window cenci open --agent claude" }
-       X: { name: Codex, type: shell, command: "tmux new-window cenci open --agent codex" }
+       C: { name: Claude, type: shell, window: "claude", focus: true, command: "cenci open --agent claude" }
+       X: { name: Codex, type: shell, window: "codex", focus: true, command: "cenci open --agent codex" }
      detail:
-       C: { name: Claude, type: shell, command: "tmux new-window cenci open --agent claude" }
-       X: { name: Codex, type: shell, command: "tmux new-window cenci open --agent codex" }
+       C: { name: Claude, type: shell, window: "claude", focus: true, command: "cenci open --agent claude" }
+       X: { name: Codex, type: shell, window: "codex", focus: true, command: "cenci open --agent codex" }
 
      # Per-column overlays — these apply to normal + detail only, matched
      # case-insensitively against the column names declared above.
@@ -1610,28 +1611,35 @@ For each MCP selected in question 5:
          E:
            name: Edit plan
            type: shell
-           command: 'f=$(ls .plans/{number}-*.md 2>/dev/null | head -1); [ -n "$f" ] && tmux new-window -n plan-{number} "$EDITOR \"$f\""'
+           terminal: true
+           command: 'f=$(ls .plans/{number}-*.md 2>/dev/null | head -1); [ -n "$f" ] && ${EDITOR:-vi} "$f"'
          V:
            name: View plan
            type: shell
-           command: 'f=$(ls .plans/{number}-*.md 2>/dev/null | head -1); [ -n "$f" ] && tmux new-window -n plan-{number} "${PAGER:-less} \"$f\""'
+           terminal: true
+           command: 'f=$(ls .plans/{number}-*.md 2>/dev/null | head -1); [ -n "$f" ] && ${PAGER:-less} "$f"'
 
        "In Review":
          W:
            name: Open worktree
            type: shell
            scope: pr
-           command: "tmux new-window -d -n pr-{pr_number} -c {pr_worktree}"
+           window: "pr-{pr_number}"
+           cwd: "{pr_worktree}"
          "S w":
            name: Serve web-client worktree
            type: shell
            scope: pr
-           command: "tmux new-window -d -n pr-{pr_number} -c {pr_worktree}/'apps/web-client' \"ng serve\""
+           window: "pr-{pr_number}"
+           cwd: "{pr_worktree}/apps/web-client"
+           command: "ng serve"
          "T w":
            name: Test web-client worktree
            type: shell
            scope: pr
-           command: "tmux new-window -d -n pr-{pr_number} -c {pr_worktree}/'apps/web-client' \"ng test --watch=false\""
+           terminal: true
+           cwd: "{pr_worktree}/apps/web-client"
+           command: "ng test --watch=false"
 
    # Auto-close a card's agent window when its ticket closes. `cleanup` stays a
    # top-level scalar — it is not a key binding and has no place in `keymaps:`.
@@ -1642,7 +1650,9 @@ For each MCP selected in question 5:
      or not any project is runnable or testable.** It opens the PR's registered
      worktree in a tmux window with a plain shell and runs no command — it never
      carries a project path or a serve/test command, even in a monorepo. `W` is
-     never reused for serve, test, or any other action.
+     never reused for serve, test, or any other action. `command:` is omitted
+     deliberately: on an action that sets `window:`, lazyboards treats "open a
+     window on this directory" as complete and runs the default shell there.
    - **`Refined`'s `Z` (Design) action is gated on the single top-level
      `pencil.enabled` field** (from `.cenci/config.json` — never a per-project
      field): emit `Z` only when `pencil.enabled` is `true`; when it is `false` or
@@ -1651,8 +1661,11 @@ For each MCP selected in question 5:
      binding wins over the default, so binding `D` would shadow the panel.
    - `Planned` gets a local `I` (Implement) action too, so a ticket that already
      passed planning can still be manually re-dispatched straight from the board, plus
-     local `E` (Edit plan, opens in `$EDITOR`) and `V` (View plan, opens in
-     `${PAGER:-less}`) actions on the ticket's persisted plan file. Plan files are
+     local `E` (Edit plan, opens in `${EDITOR:-vi}`) and `V` (View plan, opens in
+     `${PAGER:-less}`) actions on the ticket's persisted plan file. Both carry
+     `terminal: true`, so the editor/pager gets lazyboards' own terminal and the
+     board returns when it exits — the same shape lazyboards' built-in `e` (edit
+     card) uses, and one that needs no multiplexer. Plan files are
      `.plans/<number>-<slug>.md`; the slug isn't derivable from the number, so both
      actions glob `.plans/{number}-*.md` (the same resolution the implement skill
      uses) and no-op when no plan file is present (e.g. already consumed in Phase 9).
@@ -1674,27 +1687,49 @@ For each MCP selected in question 5:
      serve command; action name `Serve <slug> worktree`. One `In Review` **test**
      action per testable project, using the confirmed test key (`T` alone, or the
      `T` + mnemonic sequence for multiple) and test command; action name
-     `Test <slug> worktree`. All three of `W`, serve, and test use the identical
-     tmux `-c {pr_worktree}` wrapper — only the command, working directory, and key
-     differ. Sequence keys are written in canonical **space-separated** form and
-     quoted (`"S w"`), never concatenated (`Sw`).
-   - Use tmux's start-directory option rather than embedding the path in a nested
-     `cd` command. **Single project**: `tmux new-window -d -n pr-{pr_number} -c
-     {pr_worktree} "<serve-command>"`. **Monorepo**: append the project path as a
-     separately POSIX-shell-quoted literal, e.g. `-c
-     {pr_worktree}/'apps/web-client' "<serve-command>"`. Escape any apostrophe in
-     the project path with the standard `'\''` sequence. This is required even for
-     paths that currently contain no spaces or metacharacters.
-   - lazyboards shell-escapes `{pr_worktree}` and `{pr_number}` before expansion.
-     Keep those placeholders outside nested shell quotes so that escaping remains
-     effective. `{pr_worktree}` resolves the PR branch's registered Git worktree at
-     action time, so the file stays machine-independent — never embed absolute
-     paths. `{number}` (used in `command: "cenci run refine {number}"` /
+     `Test <slug> worktree`. Sequence keys are written in canonical
+     **space-separated** form and quoted (`"S w"`), never concatenated (`Sw`).
+   - **Never hand-write a `tmux new-window` invocation.** lazyboards assembles it
+     from four `type: shell` fields and escapes the window name, the working
+     directory, and the command as single shell tokens, so a worktree path or
+     project subpath containing a space, a quote, `;`, or `$(…)` cannot break out
+     of the command line:
+
+     | Field | Meaning |
+     |-------|---------|
+     | `window:` | Window name. Its presence is what makes the action open a window. Template-expanded. |
+     | `cwd:` | Working directory. Template-expanded. Applies to **every** shell action — windowed, `terminal: true`, and plain buffered alike. |
+     | `focus:` | `true` switches to the new window; omitted leaves it detached (what the old `-d` flag did). |
+     | `terminal: true` | Hands the command lazyboards' own terminal: full output and input, board restored on exit. |
+
+     All four are modifiers on `type: shell` and are a **load-time config error**
+     on a `type: url` action, as are the two contradictory combinations:
+     `window:` together with `terminal:`, and `focus:` without a `window:`.
+   - **Pick the run mode by what the command is**, never by how fast it is:
+     a **serve** action keeps running alongside the board, so it takes
+     `window: "pr-{pr_number}"` (detached, no `focus:`); a **test** action is
+     watched to completion and then hands the board back, so it takes
+     `terminal: true`. `W` takes `window:` with no `command:`. All three set
+     `cwd:` — only the key, the run mode, and the command differ.
+   - **The project path is a plain `cwd:` segment, in a monorepo too.**
+     **Single project**: `cwd: "{pr_worktree}"`. **Monorepo**: append the project
+     path directly — `cwd: "{pr_worktree}/apps/web-client"`. No nested POSIX
+     quoting, no `'\''` escaping, and never a `cd <path> && ` prefix in the
+     command: `cwd:` is expanded and then escaped as one token, so quoting it by
+     hand would double-escape it.
+   - `{pr_worktree}` resolves the PR branch's registered Git worktree at action
+     time, so the file stays machine-independent — never embed absolute paths.
+     `{number}` (used in `command: "cenci run refine {number}"` /
      `implement {number}` / `design {number}`) is a validated GitHub issue/PR
      integer, not free text, so it is safe to interpolate without additional
-     escaping.
-   - The `tmux new-window -d` wrapper keeps long-running serve processes from
-     blocking the action's key slot; keep it even for fast commands.
+     escaping. `window:` and `cwd:` are template-expanded like `url:`/`command:`,
+     so they count for scope inference and the scope variable restrictions too — a
+     `{pr_*}` placeholder in either one requires `scope: pr` on that action, and a
+     board-scope action may not reference one at all.
+   - A `window:` action needs a tmux session: outside tmux lazyboards reports
+     `Not inside tmux` in the status bar instead of running anything. A
+     `terminal: true` action has no such dependency and works over a plain SSH
+     session — which is why the `E`/`V` plan actions above use it.
    - **Zero runnable projects**: `W` (Open worktree) is emitted regardless — it
      doesn't depend on any project being runnable or testable. If no project in the
      repo has a detected serve or test command, `In Review` still carries just `W`:
@@ -1706,7 +1741,8 @@ For each MCP selected in question 5:
              name: Open worktree
              type: shell
              scope: pr
-             command: "tmux new-window -d -n pr-{pr_number} -c {pr_worktree}"
+             window: "pr-{pr_number}"
+             cwd: "{pr_worktree}"
      ```
    - **Trust (run after writing the file).** A repo-local `.lazyboards.yml` is
      attacker-controlled, so lazyboards silently strips every `type: shell` binding
@@ -1758,10 +1794,22 @@ For each MCP selected in question 5:
           an existing Design action whose command lacks `--no-sandbox` still
           matches by intent, so it is not flagged as "missing" — but it counts
           toward the delta as an **update** (not an "add"), since its command must
-          become `cenci run design {number} --no-sandbox`. No other action's
-          command is diff-compared this way. Separately, a Design action bound to
-          `D` is always an **update** to `Z` regardless of its command, since `D`
-          is lazyboards' built-in dispatch panel.
+          become `cenci run design {number} --no-sandbox`. Separately, a Design
+          action bound to `D` is always an **update** to `Z` regardless of its
+          command, since `D` is lazyboards' built-in dispatch panel.
+        - **Hand-written tmux (any action, add or carry-over)**: an existing
+          action whose `command:` starts with `tmux new-window` matches by intent
+          — it is not "missing" — but counts toward the delta as an **update** to
+          the `window:`/`cwd:`/`focus:` form, since the hand-written invocation
+          puts the escaping of the worktree path and window name on the config
+          file. Translate it: `-n <name>` → `window:`, `-c <dir>` → `cwd:`
+          (dropping any nested `'…'` quoting and any `cd <dir> && ` prefix in the
+          command), absence of `-d` → `focus: true`, and the remaining shell
+          command → `command:`. Anything the four fields cannot express (a split,
+          an existing window, `send-keys`, shell logic wrapped around the command)
+          stays a plain `command:` and is **not** flagged. These two bullets are
+          the only command-content comparisons in the delta; every other action is
+          matched by intent alone, never diff-compared.
      3. **Delta non-empty** → present the concrete additions via `AskUserQuestion`,
         e.g. "`.lazyboards.yml` is missing a PR-worktree test action: `T` → run tests
         (`dotnet test`) in the PR worktree. Add it?" — or, when a leading letter had
@@ -1779,7 +1827,9 @@ For each MCP selected in question 5:
         lazyboards only reads from the local file. **Keep as-is** leaves the file
         untouched. **Both rewrite paths always emit `keymaps:` form** — including
         for the user's own custom actions carried over, whose concatenated sequence
-        keys (`Rw`) are rewritten space-separated (`"R w"`).
+        keys (`Rw`) are rewritten space-separated (`"R w"`) and whose translatable
+        hand-written `tmux new-window` commands are rewritten into
+        `window:`/`cwd:`/`focus:` per the delta rule above.
      4. **Delta empty** → do **not** prompt. Emit a small log line
         (`.lazyboards.yml already covers all recommended actions — no changes.`) and
         move on.

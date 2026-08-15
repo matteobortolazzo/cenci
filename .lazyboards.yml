@@ -14,25 +14,16 @@ columns:
 
 keymaps:
   # Board-level agent launchers. Emitted in BOTH tables so they fire whether the
-  # card list or the detail panel is focused.
+  # card list or the detail panel is focused. `window:` opens a tmux window and
+  # `focus: true` switches to it; lazyboards builds and escapes the tmux call.
   normal:
-    C: { name: Claude, type: shell, command: "tmux new-window cenci open --agent claude" }
-    X: { name: Codex, type: shell, command: "tmux new-window cenci open --agent codex" }
-    S:
-      {
-        name: Sync,
-        type: shell,
-        command: 'tmux new-window -n sync "cenci open -- ''/sync''"',
-      }
+    C: { name: Claude, type: shell, window: "claude", focus: true, command: "cenci open --agent claude" }
+    X: { name: Codex, type: shell, window: "codex", focus: true, command: "cenci open --agent codex" }
+    S: { name: Sync, type: shell, window: "sync", focus: true, command: "cenci open -- /sync" }
   detail:
-    C: { name: Claude, type: shell, command: "tmux new-window cenci open --agent claude" }
-    X: { name: Codex, type: shell, command: "tmux new-window cenci open --agent codex" }
-    S:
-      {
-        name: Sync,
-        type: shell,
-        command: 'tmux new-window -n sync "cenci open -- ''/sync''"',
-      }
+    C: { name: Claude, type: shell, window: "claude", focus: true, command: "cenci open --agent claude" }
+    X: { name: Codex, type: shell, window: "codex", focus: true, command: "cenci open --agent codex" }
+    S: { name: Sync, type: shell, window: "sync", focus: true, command: "cenci open -- /sync" }
 
   # Per-column overlays — these apply to normal + detail only, matched
   # case-insensitively against the column names declared above.
@@ -57,30 +48,37 @@ keymaps:
       E:
         name: Edit plan
         type: shell
-        command: 'f=$(ls .plans/{number}-*.md 2>/dev/null | head -1); [ -n "$f" ] && tmux new-window -n plan-{number} "$EDITOR \"$f\""'
+        terminal: true
+        command: 'f=$(ls .plans/{number}-*.md 2>/dev/null | head -1); [ -n "$f" ] && ${EDITOR:-vi} "$f"'
       V:
         name: View plan
         type: shell
-        command: 'f=$(ls .plans/{number}-*.md 2>/dev/null | head -1); [ -n "$f" ] && tmux new-window -n plan-{number} "${PAGER:-less} \"$f\""'
+        terminal: true
+        command: 'f=$(ls .plans/{number}-*.md 2>/dev/null | head -1); [ -n "$f" ] && ${PAGER:-less} "$f"'
 
     "In Review":
       W:
         name: Open worktree
         type: shell
         scope: pr
-        command: 'tmux new-window -d -n pr-{pr_number} -c {pr_worktree}'
+        window: "pr-{pr_number}"
+        cwd: "{pr_worktree}"
       # `R`/`T` rather than `S`/`T`: the board-level `S` (Sync) binding above
       # would be a strict prefix of an `S w` sequence — a load-time error.
       "R w":
         name: Run watch worktree
         type: shell
         scope: pr
-        command: 'tmux new-window -d -n pr-{pr_number} -c {pr_worktree}/''watch'' "go run ."'
+        window: "pr-{pr_number}"
+        cwd: "{pr_worktree}/watch"
+        command: "go run ."
       "T w":
         name: Test watch worktree
         type: shell
         scope: pr
-        command: 'tmux new-window -d -n pr-{pr_number} -c {pr_worktree}/''watch'' "make test"'
+        terminal: true
+        cwd: "{pr_worktree}/watch"
+        command: "make test"
 
 # Auto-close a card's agent window when its ticket closes. `cleanup` stays a
 # top-level scalar — it is not a key binding and has no place in `keymaps:`.
