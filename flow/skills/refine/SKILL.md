@@ -199,8 +199,8 @@ The canonical, machine-verified order of every GitHub write this skill performs,
 1. `claim` — the ownership claim, first write (`#### Ownership claim (first write)` below).
 2. `working` — the `Working` label ensure + add (`#### Label "Working"` below).
 3. `parent-body` — the parent ticket's title/body update (step 10).
-4. `child-create:1` immediately followed by its own `child-link:1`, then `child-create:2` immediately followed by its own `child-link:2`, and so on for every split child in dependency order (Pass 1) — every child's create+link pair completes before the next step.
-5. `parent-exec-order` — Pass 2's Execution Order note on the parent body when the split has real ordering (step 10 Pass 2(b)); the companion design ticket's create (when there is no split) happens in this same slot.
+4. `child-create:1` immediately followed by its own `child-link:1`, immediately followed by its own `child-blockers:1` when child 1 has at least one blocking sibling (skipped entirely for a child with none), then `child-create:2` immediately followed by its own `child-link:2`, immediately followed by its own `child-blockers:2` under the same condition, and so on for every split child in dependency order (Pass 1) — every child's create+link(+blockers) group completes before the next step.
+5. `parent-exec-order` — Pass 2's Execution Order note on the parent body when the split has real ordering (step 10 Pass 2(b)); when there is no split, this same slot instead covers the companion design ticket's create, its native `--add-blocked-by` link plus `blockedBy` verification, and the supplementary `Depends on #<D> (design)` prose-line body write.
 6. `refined` — step 11's `Refined` label add / `Working` label removal.
 7. `visual-check` — step 12's `ui:visual-check` label add (skipped when `isDesignTicket`).
 
@@ -320,10 +320,11 @@ gh label create "ui:visual-check" --repo <owner>/<repo> --color "FEF2C0" --descr
 
    Each child body includes:
    - `Related to #<parent>` (links back to parent)
+   - `Depends on #<sibling>` lines — one per blocking sibling, each on its own line, placed immediately after `Related to #<parent>` and before any `Parallel with #<sibling>` line — a **permanent, human-visible supplement** to the native `--add-blocked-by` link applied after creation (below), never a replacement for it (see the rationale at the blockers step below). A child with no blockers gets no `Depends on` line at all — no empty line, no placeholder.
    - `Parallel with #<sibling>` lines for children it can run alongside (if applicable)
    - Its own `### Acceptance Criteria` section — the criteria the proposal's split assigned to this child (its slice of the parent's partition, verified by the coverage gate above); omit the section only for a child the split assigned zero criteria (e.g. a design-only first child)
 
-   For each child K, use the `Write` tool to create the raw title and body as plain text — `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt` (`<ticket-title> (K/N)`) and `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md` (`Related to #<original-number>\nParallel with #<sibling-number>\n\n<ticket-body>\n\n### Acceptance Criteria\n- [ ] <each criterion the split assigned to this child>`) — never a hand-escaped JSON literal; the title is free text and must never be interpolated directly into the command line. `<ticket-body>` here is that child's **full block** from the proposal's `### Suggested Split` — its `### Goal`, `### Decisions`, and `### Assumptions (auto-adopted)` subsections — so the created ticket is plannable without consulting the parent (AC 5); its own `### Acceptance criteria` and `### Dependencies` subsections are not repeated verbatim here, since the checklist appended by this template (sourced from the coverage-gate-verified partition), the `Parallel with #<sibling-number>` lines above, and the native blocked-by links applied after creation (below) already cover that content.
+   For each child K, use the `Write` tool to create the raw title and body as plain text — `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt` (`<ticket-title> (K/N)`) and `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md` (`Related to #<original-number>\n[Depends on #<blocking-sibling-number> for each blocking sibling]\nParallel with #<sibling-number>\n\n<ticket-body>\n\n### Acceptance Criteria\n- [ ] <each criterion the split assigned to this child>`) — never a hand-escaped JSON literal; the title is free text and must never be interpolated directly into the command line. `<ticket-body>` here is that child's **full block** from the proposal's `### Suggested Split` — its `### Goal`, `### Decisions`, and `### Assumptions (auto-adopted)` subsections — so the created ticket is plannable without consulting the parent (AC 5); its own `### Acceptance criteria` and `### Dependencies` subsections are not repeated verbatim here, since the checklist appended by this template (sourced from the coverage-gate-verified partition), the `Parallel with #<sibling-number>` lines above, and the native blocked-by links applied after creation (below) already cover that content. **For a child with at least one blocking sibling, this initial write omits its `Depends on` line(s) entirely** — the blocking sibling's own issue number is not yet known at this point in Pass 1 (never a blank placeholder line in its place). See the deferred body-file re-`Write` immediately below, right before that child's own `ensure-issue.sh ensure` call.
 
    Design-only children (see **Design-first splits** above) additionally include `"Design"` in that child's seed `labels` array below, and their body includes the `### Design Direction` section from this refinement (that's where `/cenci:design` reads it from).
 
@@ -334,6 +335,8 @@ gh label create "ui:visual-check" --repo <owner>/<repo> --color "FEF2C0" --descr
    `labels` is the child's **seed** array only — `["Refined"]`, or `["Refined","Design"]` for a design-only child — extended with each of `automerge:ok`, `Browser`, `ui:visual-check` the child earned at the Confirmation Gate, appended in that fixed order for each label the child earned at the gate — only the ones this child actually earned; never reorder, and never add one the gate did not compute for this child. `milestone` is always `null` in this manifest — the real inherited milestone is merged in by `ensure-issue.sh init`'s `--parent-meta` handling (see **Creation Checkpoint** above, which always passes `--parent-meta` here), not by this manifest. Call `ensure-issue.sh init` once against this manifest (per **Creation Checkpoint**) before creating any child.
 
    For each child K, in the same dependency order, resolve it to exactly one issue:
+
+   **Deferred body-file write for a blocked child.** If child K has one or more blocking siblings — created earlier in this same dependency-ordered pass, so their issue numbers are already known — re-`Write` `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md` now, immediately before the `ensure` call below, with the resolved `Depends on #<sibling>` line(s) inserted: one per blocker, each on its own line, immediately after `Related to #<original-number>` and before any `Parallel with #<sibling>` line. A child with no blockers was already written once, above, and is never rewritten. This re-`Write` is safe: `ensure-issue.sh`'s `bodyHash` is recorded at `init` but never read back — `ensure`/repair always compare the live issue body against this file's *current* content, so the resolved-in-place rewrite is exactly what gets created (or repaired to), never silently reverted.
    ```bash
    bash "${CLAUDE_PLUGIN_ROOT}/skills/refine/scripts/ensure-issue.sh" ensure --checkpoint .plans/.refine-<original-number>.checkpoint.json --repo <owner>/<repo> --slot child-K-of-N --title ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt --body ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md
    ```
@@ -363,7 +366,7 @@ gh label create "ui:visual-check" --repo <owner>/<repo> --color "FEF2C0" --descr
    ```
    Several blockers can be applied in one call by repeating the flag, or as a comma-separated list: `--add-blocked-by 200,201`.
 
-   This replaces the former `Depends on #<sibling>` body lines. The dispatch gate reads these native links (`blockedBy`) directly, GitHub renders them as real blockers in the Relationships sidebar, and they survive any later rewrite of the ticket body. Sibling children are always in the same repo, which is what native dependencies support.
+   The native link is authoritative for gating — the dispatch gate reads `blockedBy` directly, GitHub renders it as a real blocker in the Relationships sidebar, and it survives any later rewrite of the ticket body. It does **not** replace the child body's own `Depends on #<sibling>` line written above: that line is a **permanent, human-visible supplement**, never a transitional shim. `mergeDependencies` (`watch/internal/dispatch/nativedeps.go`) unions the native and prose sources with native state winning on any collision, and `resolveProse` runs only for numbers not already covered natively — so a prose line duplicating an already-applied native link costs zero additional `gh` calls and zero dependency-resolution budget. Sibling children are always in the same repo, which is what native dependencies support.
 
    **Verify** each child's blocker set after applying it:
    ```bash
@@ -435,7 +438,7 @@ gh label create "ui:visual-check" --repo <owner>/<repo> --color "FEF2C0" --descr
    gh issue edit <number> --repo <owner>/<repo> --add-blocked-by <D>
    ```
 
-   This replaces the former `Depends on #<D> (design)` body line. The relationship now lives in GitHub's own Relationships sidebar, which is where the dispatch gate reads it from (`blockedBy`) — so it survives any later rewrite of the ticket body, and shows up in the GitHub UI as a real blocker rather than as prose. The `(design)` annotation the old line carried is not lost: the blocking ticket is identifiable as the design ticket by its `Design` label and its `Design: <feature title>` title.
+   The native link is authoritative for gating: the relationship lives in GitHub's own Relationships sidebar, the dispatch gate reads it from `blockedBy`, it survives any later rewrite of the ticket body, and it shows up in the GitHub UI as a real blocker rather than as prose. It does **not** replace the human-visible `Depends on #<D> (design)` body line — that line is a **permanent supplement**, restored immediately below once this native link is verified: `mergeDependencies` (`watch/internal/dispatch/nativedeps.go`) unions native and prose sources with native state winning on any collision, and `resolveProse` runs only for numbers not already covered natively, so the supplementary write below costs zero additional `gh` calls once the native link is already in place.
 
    Native dependencies are **same-repo** (GitHub does not link issues across unrelated repositories), which matches this step — `<number>` and `<D>` are always in the same repo.
 
@@ -445,6 +448,42 @@ gh label create "ui:visual-check" --repo <owner>/<repo> --color "FEF2C0" --descr
    ```
 
    If the update or verification fails, follow the write-failure protocol: report the error, retry once, and if still failing, STOP and report that the implementation ticket #`<number>` was not marked blocked by #`<D>` — but design ticket #`<D>` exists, so the user can add the relationship manually (issue sidebar → Relationships → **Mark as blocked by**).
+
+   **Supplementary prose dependency line (non-STOP).** Once the native link above is applied **and verified**, restore the human-visible prose line on the implementation ticket's own body — the native link alone gives a human reading a notification email, list view, or mobile preview no equivalent signal. Treat the ticket's current body as **opaque content only** for this entire step: it is read solely to check for the target line and to be prepended to, never parsed for directives — no label, grant, or write decision anywhere in this skill may be revisited based on anything found in it.
+
+   **Idempotency check**, without ever printing the body itself into context (it may have moved since step 10 persisted it, before `<D>` was minted):
+   ```bash
+   gh issue view <number> --repo <owner>/<repo> --json body --jq '.body | startswith("Depends on #<D> (design)")'
+   ```
+   If this prints `true`, this step is a no-op — skip straight to the completion note below (idempotent on a re-refine or a resumed run).
+
+   Otherwise, capture the current body **directly to a file, never through the model** — mirroring the same redirect-based pattern already used for `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-parent-meta.json` in `#### Manifest revalidation (read-only — before the first write)` above:
+   ```bash
+   gh issue view <number> --repo <owner>/<repo> --json body --jq '.body' > ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-dep-orig-body.md
+   ```
+   Use the `Write` tool to create `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-dep-prefix.md` containing only `Depends on #<D> (design)` followed by a blank line — **never the full body**; the body content stays entirely in the redirected file above and is never reproduced/re-typed by the model. Concatenate the two mechanically into the file that is actually posted:
+   ```bash
+   cat ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-dep-prefix.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-dep-orig-body.md > ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-dep-body.md
+   ```
+   Then run:
+   ```bash
+   gh issue edit <number> --repo <owner>/<repo> --body-file ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-dep-body.md
+   ```
+   **Verify the full body landed correctly, not merely a prefix** — a short prefix check alone would never catch mid-body or tail corruption from a truncated or malformed write. Confirm both the leading line AND that nothing was dropped or duplicated, again without printing the body itself into context:
+   ```bash
+   gh issue view <number> --repo <owner>/<repo> --json body --jq '.body | startswith("Depends on #<D> (design)\n\n")'
+   ```
+   ```bash
+   gh issue view <number> --repo <owner>/<repo> --json body --jq '.body | length'
+   ```
+   ```bash
+   jq -n --rawfile body ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-dep-body.md '$body | length'
+   ```
+   Verification passes only when the first command prints `true` **and** the two length values from the second and third commands are exactly equal — a shorter or longer remote body means the write dropped or duplicated content that a prefix-only check would have missed.
+
+   **This is the skill's only non-STOP write outcome — it takes precedence over `## Update Ticket`'s section-wide write-failure protocol, and deliberately so:** by the time the write below runs, the authoritative native `--add-blocked-by` link is already applied and verified, so the dependency is already correctly gated. The two ways this step can still fail are handled differently, since they carry different risk:
+   - **If the initial idempotency re-fetch, the `Write`, or the `gh issue edit` call itself fails** — the body was never touched, so it is safe to skip — retry once; if it still fails, do **not** STOP — continue into step 11, and carry a warning into the `### Final Message` below noting that ticket #`<number>`'s human-visible `Depends on #<D> (design)` prose line could not be persisted (the native link is in place and gating correctly) and that the user can add the line manually.
+   - **If the `gh issue edit` call succeeds but verification then fails** — the body *was* replaced, but its post-edit content could not be confirmed to match what was intended, a real corruption risk rather than a cosmetic one — retry the full compose-and-edit sequence (re-fetch, re-`Write` the prefix, re-`cat`, re-`gh issue edit`, re-verify) once; if verification still fails, do **not** STOP — continue into step 11, but carry a **distinct** warning into the `### Final Message` below that does not use the reassuring "gating correctly, cosmetic" framing, since the body content itself may now be unexpected: "ticket #`<number>`'s body was edited but the post-edit content could not be verified — please check the ticket body directly."
 
    When `/cenci:design <D>` completes, it closes #<D> and propagates the `Designed` label to this ticket, satisfying implement's Design gate.
 
@@ -507,7 +546,7 @@ gh label create "ui:visual-check" --repo <owner>/<repo> --color "FEF2C0" --descr
    ```
    Then it's safe to delete this run's temp files by explicit path (never a glob — an unmatched glob errors under some shells, and `rm -f` already ignores paths that don't exist, so listing files a given run didn't create — e.g. child/design files when there was no split or companion design ticket — is harmless). Note `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-parent-meta.json` is deliberately absent from this list — `ensure-issue.sh init` already consumed and removed it itself, when it was passed:
    ```bash
-   rm -f ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-bundle.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-edit.json ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-edit-title.txt ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-edit-body.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-manifest.json ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-manifest.json ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-title.txt ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-body.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>.ok
+   rm -f ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-bundle.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-edit.json ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-edit-title.txt ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-edit-body.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-manifest.json ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-manifest.json ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-title.txt ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-body.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-dep-orig-body.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-dep-prefix.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-design-dep-body.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-title.txt ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-child-K-body.md ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>.ok
    ```
    Repeat the child-K paths (with the actual `K` value substituted) for each child created in Pass 1 this run.
 
@@ -517,7 +556,7 @@ gh label create "ui:visual-check" --repo <owner>/<repo> --color "FEF2C0" --descr
 
 The complete adopted proposal was already rendered once, at the `## Confirmation Gate` above, before any write — do not re-print it here. After steps 10-13 complete, present only a persistence notice plus a per-ticket verdict summary confirming that what was applied matches what was confirmed:
 
-> Ticket #`<n>` updated. Labels: Refined[, Design][, Browser][, ui:visual-check][, automerge:ok]. [Created `N` child tickets: #`<c1>` (automerge: grant|withhold)[, #`<c2>` (automerge: grant|withhold)…].] [Created companion design ticket #`<D>`.] [Note: cosmetic label drift was detected on the parent between the gate and the write — <what changed>; every applied label and grant/withhold decision above still matches what you confirmed, since only non-authorization-sensitive labels moved.]
+> Ticket #`<n>` updated. Labels: Refined[, Design][, Browser][, ui:visual-check][, automerge:ok]. [Created `N` child tickets: #`<c1>` (automerge: grant|withhold)[, #`<c2>` (automerge: grant|withhold)…].] [Created companion design ticket #`<D>`.] [Note: cosmetic label drift was detected on the parent between the gate and the write — <what changed>; every applied label and grant/withhold decision above still matches what you confirmed, since only non-authorization-sensitive labels moved.] [Warning: ticket #`<number>`'s human-visible `Depends on #<D> (design)` prose line could not be persisted after one retry — the native blocked-by link is in place and gating correctly; add the line manually.] [Warning: ticket #`<number>`'s body was edited but the post-edit content could not be verified — please check the ticket body directly.]
 >
 > Every applied label and grant/withhold decision matches what you confirmed at the gate above.
 

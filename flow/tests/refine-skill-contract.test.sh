@@ -20,6 +20,8 @@
 #   - skills/refine/SKILL.md
 #   - agents/context-gatherer.md
 #   - skills/refine/codex.md
+#   - skills/design/SKILL.md
+#   - skills/implement/SKILL.md
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || { echo "refine-skill-contract.test.sh: failed to resolve script directory." >&2; exit 2; }
@@ -93,10 +95,15 @@ if [[ -n "${skill}" ]]; then
   # The child-body backlinks are retained (hierarchy != dependency ordering).
   assert_contains "${skill}" "Related to #" "skills/refine/SKILL.md"
 
-  # Dependency ordering is expressed as GitHub's native blocked-by
-  # relationship, not as a `Depends on #N` body line — mirroring the native
-  # sub-issue migration asserted above. The write is `--add-blocked-by`; the
-  # read-back verification is the `blockedBy` JSON field.
+  # Dependency ordering is authoritatively expressed as GitHub's native
+  # blocked-by relationship (#1055: this is the gating source of truth, not
+  # a `Depends on #N` body line) — mirroring the native sub-issue migration
+  # asserted above. The write is `--add-blocked-by`; the read-back
+  # verification is the `blockedBy` JSON field. A permanent, human-visible
+  # `Depends on #<sibling>` / `Depends on #<D> (design)` prose line
+  # supplements the native link (never replaces it) so a human reading the
+  # body sees the dependency too -- see the #1055 positive/negative block
+  # below.
   assert_contains "${skill}" "--add-blocked-by" "skills/refine/SKILL.md"
   assert_contains "${skill}" "--json blockedBy" "skills/refine/SKILL.md"
 fi
@@ -353,6 +360,55 @@ if [[ -n "${codex}" ]]; then
   # AC5: codex.md restates the entailment category, using the abstract
   # "client's available user-input mechanism" wording.
   assert_contains "${codex}" "entailed questions — those already fixed by a recorded answer — are forbidden; auto-adopt them into \`### Decisions\` with a \`follows from Q<n> (round <m>)\` citation, and when the entailed decision fixes a security posture or is otherwise irreversible, ask via the client's available user-input mechanism a confirm/overrule question that states the decision and its derivation without re-opening the full option space" "978 skills/refine/codex.md entailment category restated"
+fi
+
+# =====================================================================
+# #1055 -- restore a human-visible `Depends on #<n>` prose dependency line
+# alongside the native `--add-blocked-by` link, as a PERMANENT supplement
+# (never a replacement, never a transitional shim), and correct four stale
+# "legacy/transitional" framings across refine/design/implement. None of
+# these production edits exist yet at RED-phase time (Phase 4's job) -- every
+# positive assertion below is expected to fail until then. The negative
+# assertions may already pass today (the stale strings are still present at
+# RED time) -- that is expected and noted in the phase-3 report, not a bug.
+# =====================================================================
+
+if [[ -n "${skill}" ]]; then
+  # Positive: SKILL.md's child-body template carries the permanent
+  # supplementary prose line for a blocking sibling, and the design-path
+  # step carries its own annotated prose form.
+  assert_contains "${skill}" "Depends on #<sibling>" "1055 skills/refine/SKILL.md child prose dependency line"
+  assert_contains "${skill}" "Depends on #<D> (design)" "1055 skills/refine/SKILL.md design-path prose dependency line"
+
+  # Negative: the "This replaces the former ... body line(s)" framing --
+  # present at two sites (child blockers step and design-path step) -- is
+  # gone. A single substring check covers both occurrences, since either
+  # surviving occurrence would fail this check.
+  assert_not_contains "${skill}" "This replaces the former" "1055 skills/refine/SKILL.md stale replaces-the-former framing"
+fi
+
+# `codex` was already read above; reuse it.
+if [[ -n "${codex}" ]]; then
+  # Positive: codex.md reaches full parity -- the native write, its
+  # verification, and both permanent supplementary prose forms, plus the new
+  # `child-blockers:K` write-order op token.
+  assert_contains "${codex}" "--add-blocked-by" "1055 skills/refine/codex.md native --add-blocked-by write"
+  assert_contains "${codex}" "blockedBy" "1055 skills/refine/codex.md blockedBy verification field"
+  assert_contains "${codex}" "Depends on #<sibling>" "1055 skills/refine/codex.md child prose dependency line"
+  assert_contains "${codex}" "Depends on #<D> (design)" "1055 skills/refine/codex.md design-path prose dependency line"
+  assert_contains "${codex}" "child-blockers:" "1055 skills/refine/codex.md child-blockers:K write-order op token"
+fi
+
+# Positive/negative for the two newly covered docs (design/SKILL.md,
+# implement/SKILL.md), reusing require_doc per the established idiom.
+require_doc design "skills/design/SKILL.md" || true
+if [[ -n "${design}" ]]; then
+  assert_not_contains "${design}" "drop this query once no open ticket uses the form" "1055 skills/design/SKILL.md stale transitional-query framing"
+fi
+
+require_doc implement "skills/implement/SKILL.md" || true
+if [[ -n "${implement}" ]]; then
+  assert_not_contains "${implement}" "for a ticket refined before native links" "1055 skills/implement/SKILL.md stale legacy-line framing"
 fi
 
 if [[ "${failures}" -gt 0 ]]; then

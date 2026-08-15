@@ -61,8 +61,10 @@
     "parent-body",
     "child-create:1",
     "child-link:1",
+    "child-blockers:1",
     "child-create:2",
     "child-link:2",
+    "child-blockers:2",
     "parent-exec-order",
     "refined",
     "visual-check"
