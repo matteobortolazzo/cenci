@@ -208,6 +208,14 @@ func (d *Daemon) runSweep() {
 			sess.Status = a.NewStatus
 			sess.TaskName = a.NewTask
 			sess.AttentionSource = a.AttentionSource
+			// A sweep that moves the session out of running has resolved the
+			// turn the hold was covering — the expired-hold release (#1079)
+			// and the ESC backstop both land here — so the hold ends with it.
+			// Leaving it set would suppress the ESC backstop for the session's
+			// whole remaining life.
+			if a.NewStatus != detect.StatusRunning {
+				sess.BackgroundHold = false
+			}
 			if d.cfg.Verbose && a.AttentionSource != "" {
 				log.Printf("attention: session=%s source=%s", a.SessionKey, a.AttentionSource)
 			}
@@ -215,6 +223,9 @@ func (d *Daemon) runSweep() {
 	}
 	if paneGone && d.reaper != nil {
 		d.reaper.Reap()
+	}
+	if d.backgroundHoldSweep() {
+		changed = true
 	}
 	if d.ttlSweep() {
 		changed = true
@@ -235,6 +246,33 @@ func (d *Daemon) reapOnStartup() {
 	if d.reaper != nil {
 		d.reaper.Reap()
 	}
+}
+
+// backgroundHoldSweep releases paneless sessions whose background hold (#698)
+// has gone silent past frontend.BackgroundHoldTTL, marking them done — the
+// core-side half of the release the tmux sweep performs for pane-backed
+// windows (#1079). Paneless sessions (sandboxed or plain-terminal agents) have
+// no frontend to sweep them, yet they surface in `cenci status` and every
+// read-only widget exactly like tmux-backed ones, so a stuck hold is just as
+// visible there. Reports whether any session changed.
+func (d *Daemon) backgroundHoldSweep() bool {
+	now := d.now()
+	changed := false
+	for key, sess := range d.sessions {
+		if sess.TmuxPane != "" || !sess.BackgroundHold || sess.Status != detect.StatusRunning {
+			continue
+		}
+		if now.Sub(sess.LastEvent) < frontend.BackgroundHoldTTL {
+			continue
+		}
+		if d.cfg.Verbose {
+			log.Printf("sweep: paneless session %s background hold expired after %s of silence, setting done", key, frontend.BackgroundHoldTTL)
+		}
+		sess.Status = detect.StatusDone
+		sess.BackgroundHold = false
+		changed = true
+	}
+	return changed
 }
 
 // ttlSweep expires paneless sessions that have been idle past the configured

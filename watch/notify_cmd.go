@@ -13,18 +13,22 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
 )
 
-// terminalBackgroundTaskStatus lists the background-task states that have
-// finished and can no longer wake the session. Claude Code's task status enum
-// is pending|running|completed|failed|killed|paused, and a Stop event's
+// terminalBackgroundTaskStatus lists the background-task states that cannot
+// wake the session on their own. Claude Code's task status enum is
+// pending|running|completed|failed|killed|paused, and a Stop event's
 // background_tasks array is already documented to carry only in-flight work
-// ("running/pending + backgrounded"). So this excludes exactly the finished
-// states and treats every other value — including one added by a future Claude
-// Code release — as still in flight: a session wrongly held at running recovers
-// on the next event, while one wrongly marked done stays wrong (#698).
+// ("running/pending + backgrounded"). So this excludes exactly the three
+// finished states plus paused — a paused task resumes only when the user or
+// the agent resumes it, and either way that resumption fires its own events
+// (#1079) — and treats every other value, including one added by a future
+// Claude Code release, as still in flight: a session wrongly held at running
+// now recovers on its own after frontend.BackgroundHoldTTL, while one wrongly
+// marked done stays wrong until the next event (#698).
 var terminalBackgroundTaskStatus = map[string]bool{
 	"completed": true,
 	"failed":    true,
 	"killed":    true,
+	"paused":    true,
 }
 
 func runNotify(args []string) {
