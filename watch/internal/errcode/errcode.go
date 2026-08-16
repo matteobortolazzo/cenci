@@ -97,6 +97,16 @@ const (
 	// Desktop's unmodifiable LinuxKit VM. The launch proceeds without
 	// nested Docker rather than failing (#962).
 	SandboxDindPlatformUnsupported Code = "CENCI-SANDBOX-DIND-002"
+
+	// SandboxDindRuntimeCreateFailed is attached when a dind launch's
+	// container create fails with an OCI-runtime create error: sysbox-runc
+	// was registered with Docker (so dindPreflight passed) but could not
+	// actually create the container. The usual cause is an installed
+	// sysbox-ce that predates a host Docker/kernel change — e.g. Docker 29
+	// unsharing a per-container time namespace that sysbox-ce 0.7.0's spec
+	// conversion has no mapping for. Unlike DIND-001 and DIND-002 the
+	// session does not exist at all, so this is fatal (#1077).
+	SandboxDindRuntimeCreateFailed Code = "CENCI-SANDBOX-DIND-003"
 )
 
 // Daemon reachability codes (CENCI-DAEMON-*), attached by `cenci diagnose`'s
@@ -181,6 +191,17 @@ var registry = map[Code]Entry{
 			"set \"sandbox\": {\"dind\": false} in .cenci/config.json for a repo that does not need nested Docker",
 		},
 	},
+	SandboxDindRuntimeCreateFailed: {
+		Message: "The sysbox-runc OCI runtime could not create the sandbox container.",
+		Causes: []string{
+			"The installed sysbox-ce is incompatible with the host's Docker or kernel (e.g. Docker 29 unshares a time namespace sysbox-ce 0.7.0 does not recognize).",
+			"sysbox-runc is registered with Docker but its helper daemons (sysbox-mgr, sysbox-fs) are not running correctly.",
+		},
+		Hints: []string{
+			"docker run --rm --runtime=sysbox-runc alpine true to reproduce outside cenci",
+			"cenci open <shortcut> --no-dind to launch without nested Docker",
+		},
+	},
 	DaemonConnUnreachable: {
 		Message: "The cenci daemon did not answer on its event socket.",
 		Causes: []string{
@@ -216,6 +237,7 @@ var allCodes = []Code{
 	SandboxSessionNotFound,
 	SandboxDindStartupFailure,
 	SandboxDindPlatformUnsupported,
+	SandboxDindRuntimeCreateFailed,
 	DaemonConnUnreachable,
 	DaemonSocketMissing,
 }

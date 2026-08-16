@@ -363,9 +363,13 @@ func (e *Engine) Launch(opts Options) error {
 	// SIGHUP the container and tear down later exec sessions.
 	create := exec.Command(e.Runtime, createArgv...)
 	create.Stdout = nil // cenci-sand discards the container id (>/dev/null)
-	create.Stderr = e.Stderr
+	// Stderr still streams to e.Stderr verbatim; the capture only retains a
+	// bounded copy so createFailureError can tell a dind runtime rejection
+	// apart from an ordinary create failure (#1077).
+	createErr := newCapturedStderr(e.Stderr)
+	create.Stderr = createErr
 	if err := create.Run(); err != nil {
-		return fmt.Errorf("%s run: %w", e.Runtime, err)
+		return e.createFailureError(ctx.DindOn, createErr.String(), err)
 	}
 
 	// The entrypoint performs credential and plugin setup before running the

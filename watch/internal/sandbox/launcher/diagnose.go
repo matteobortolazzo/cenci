@@ -49,7 +49,8 @@ type finding struct {
 // lowest tier, warning, rather than panicking or silently escalating.
 func severityForCode(code errcode.Code) Severity {
 	switch code {
-	case errcode.SandboxStartAgentCLIMissing, errcode.SandboxStartGenericEntrypoint, errcode.SandboxSessionNotFound:
+	case errcode.SandboxStartAgentCLIMissing, errcode.SandboxStartGenericEntrypoint, errcode.SandboxSessionNotFound,
+		errcode.SandboxDindRuntimeCreateFailed:
 		return SeverityFatal
 	case errcode.SandboxStartReadinessTimeout, errcode.DaemonConnUnreachable, errcode.DaemonSocketMissing, errcode.SandboxDindStartupFailure:
 		return SeverityDegraded
