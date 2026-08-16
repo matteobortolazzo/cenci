@@ -98,7 +98,7 @@ the last *published* plugin version, not your working tree — un-merged edits t
 `flow/skills/` only reach it after the plugin version bumps.
 
 `fragments/*.dockerfile` holds the same composable blocks (`dotnet`, `node`, `playwright`,
-`go`, `python`, `rust`, `pencil`, `docker`) as standalone snippets used to assemble per-project images.
+`go`, `python`, `rust`, `pencil`, `docker`, `azure`) as standalone snippets used to assemble per-project images.
 Generated images always include Node so the isolated updater can install either npm package;
 the remaining fragments (including `playwright`, used for `verify-ui`'s Chromium
 screenshot capture) follow the detected project stack — except `pencil`, which is
@@ -109,13 +109,21 @@ seeded once by `entrypoint.sh`) or a per-exec `PEN_CLI_KEY` — never baked into
 config-selected the same way (`sandbox.dind: true`): it carries the Docker CLI, `docker-ce` engine and
 `containerd.io` that the inner daemon needs, and lived in `Dockerfile.base` until #831 — so a `dind: true`
 repo whose `.cenci/Dockerfile` predates that change builds an image with no `dockerd`, which `start_dind`
-reports by name in `~/.cenci-dockerd-startup-error` (non-fatal; the container stays usable). Per-repo images include the shared
+reports by name in `~/.cenci-dockerd-startup-error` (non-fatal; the container stays usable). `azure` is
+config-selected the same way (`sandbox.azure: true`, #1080): it installs the Azure CLI from Microsoft's apt
+repo so an agent can verify `az` syntax with `--help` instead of guessing it, and — unlike `docker` — has **no**
+monolith fallback, so `sandbox.azure` without a per-repo `.cenci/Dockerfile` yields no `az` at all. The same key
+also gates the launcher's Azure credential staging (`ResolveAzure`, `watch/internal/sandbox/launcher/azure.go`):
+the host's `~/.azure` auth files are bind-mounted read-only under `/tmp/host-azure-creds` and seeded once into
+`/home/dev/.azure` by `entrypoint.sh` (`seed_azure_creds`, `lib/seed-auth.sh`) — atomically, since a per-file
+copy could splice the host's profile onto a container-side token cache. Cloud credentials are staged only where
+`az` exists to use them; every other credential is staged for every sandbox. Per-repo images include the shared
 Node runtime, never the agent packages. **Invariant:** each fragment and its corresponding block in `Dockerfile` must stay
 byte-identical — hand-duplicated on every change (e.g. bumping `DOTNET_SDK_VERSION` or adding a
 package to a stack block means editing both `Dockerfile` and `fragments/<stack>.dockerfile`
-identically). The exceptions are `python`, `rust` and `pencil`, which deliberately have **no** monolith
+identically). The exceptions are `python`, `rust`, `pencil` and `azure`, which deliberately have **no** monolith
 block because this repo's own stack doesn't use them; `fragments-drift.test.sh` enforces both directions
-(byte-identity for monolith-backed fragments, deliberate absence for the three monolith-less ones), so
+(byte-identity for monolith-backed fragments, deliberate absence for the four monolith-less ones), so
 adding a monolith block for one of them means removing it from that suite's `MONOLITH_LESS` list.
 
 **Fragment drift detection (#1048).** A per-repo `.cenci/Dockerfile` is generated once, by
@@ -179,6 +187,13 @@ Image dependency versions are pinned via Dockerfile `ARG`s, all checked daily by
     hand; affected repos pick it up by re-running `/cenci:configure` and then `cenci
     sandbox build` — a rebuild alone does not reach a per-repo `.cenci/Dockerfile`, since
     that file is generated once, by hand, and never recomposed by the build itself.
+- **Deliberately unpinned (no ARG, so nothing for `deps-bump.yml` to track)**:
+  - `fragments/docker.dockerfile` and `fragments/azure.dockerfile` install from an apt repo
+    with no version ARG. For Azure this is a decision, not an oversight: the repo publishes
+    one rolling `azure-cli` package and Azure's service-side APIs move under it, so a pinned
+    CLI drifts out of date against the services it targets. Because the version lives in the
+    apt repo rather than in the fragment text, an uncached rebuild alone picks up the current
+    CLI — no `/cenci:configure` re-run needed, unlike `PEN_CLI_VERSION` above.
 
 ## Reference Docs
 Repo-level conventions live at `<repo-root>/docs/` (read on demand); CLI grammar, alias, env-var, and runtime-object naming rules are in `<repo-root>/docs/cli-conventions.md`. Project-specific notes belong in this file.

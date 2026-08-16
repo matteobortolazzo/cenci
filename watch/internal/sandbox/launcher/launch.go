@@ -118,6 +118,7 @@ type launchCtx struct {
 	Home    string
 	Scope   Scope
 	DindOn  bool
+	AzureOn bool
 	Plugins []string
 }
 
@@ -174,6 +175,15 @@ func (e *Engine) resolveLaunchContext(opts Options) (launchCtx, error) {
 		return launchCtx{}, err
 	}
 
+	// Resolved alongside dind/plugins and subject to the same fail-closed rule
+	// (#632): a malformed "sandbox.azure" hard-fails the launch rather than
+	// silently resolving to "no Azure credentials staged", which inside the
+	// sandbox would look like a broken `az login` rather than a config error.
+	azureOn, err := ResolveAzure(scope)
+	if err != nil {
+		return launchCtx{}, err
+	}
+
 	if e.Runtime == "" {
 		if dindOn {
 			e.Runtime, err = sandbox.ContainerRuntimePreferDocker()
@@ -190,7 +200,7 @@ func (e *Engine) resolveLaunchContext(opts Options) (launchCtx, error) {
 		}
 	}
 
-	return launchCtx{Agent: agent, Model: model, Home: home, Scope: scope, DindOn: dindOn, Plugins: plugins}, nil
+	return launchCtx{Agent: agent, Model: model, Home: home, Scope: scope, DindOn: dindOn, AzureOn: azureOn, Plugins: plugins}, nil
 }
 
 // planArgvs performs the read-only container-disposition probing
@@ -260,7 +270,7 @@ func (e *Engine) planArgvs(ctx launchCtx, opts Options, cenciBin, socketDir stri
 		return nil, attachArgv, true, nil
 	}
 
-	createArgv, err = e.buildRunArgv(ctx.Agent, cenciBin, socketDir, cenciAvailable, ctx.Scope, opts, ctx.Home, ctx.DindOn, ctx.Plugins)
+	createArgv, err = e.buildRunArgv(ctx.Agent, cenciBin, socketDir, cenciAvailable, ctx.Scope, opts, ctx.Home, ctx.DindOn, ctx.AzureOn, ctx.Plugins)
 	if err != nil {
 		return nil, nil, false, err
 	}
@@ -526,9 +536,9 @@ func isSocket(path string) bool {
 // behaviorally identical since docker/podman treat flag order between
 // distinct -v/-e flags as independent — only the trailing image + command
 // (appended by the caller, buildRunArgv, after this returns) must stay last.
-func (e *Engine) assembleRunArgs(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, opts Options, home string, dindOn bool, plugins []string) ([]string, error) {
+func (e *Engine) assembleRunArgs(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, opts Options, home string, dindOn, azureOn bool, plugins []string) ([]string, error) {
 	args := e.baseRunArgs(scope, dindOn)
-	args = append(args, e.assembleVolumeMounts(agent, cenciBin, socketDir, cenciAvailable, scope, home, dindOn)...)
+	args = append(args, e.assembleVolumeMounts(agent, cenciBin, socketDir, cenciAvailable, scope, home, dindOn, azureOn)...)
 	args = append(args, e.assembleEnv(agent, scope, opts, dindOn, plugins)...)
 
 	credArgs, err := e.validateCredentials(agent, home)
@@ -557,8 +567,8 @@ func (e *Engine) assembleRunArgs(agent, cenciBin, socketDir string, cenciAvailab
 // container. Shared by Launch and DryRun so the create argv can never drift
 // between a real launch and its dry-run preview. The validateCredentials hard
 // error (inside assembleRunArgs) propagates through unchanged.
-func (e *Engine) buildRunArgv(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, opts Options, home string, dindOn bool, plugins []string) ([]string, error) {
-	runArgs, err := e.assembleRunArgs(agent, cenciBin, socketDir, cenciAvailable, scope, opts, home, dindOn, plugins)
+func (e *Engine) buildRunArgv(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, opts Options, home string, dindOn, azureOn bool, plugins []string) ([]string, error) {
+	runArgs, err := e.assembleRunArgs(agent, cenciBin, socketDir, cenciAvailable, scope, opts, home, dindOn, azureOn, plugins)
 	if err != nil {
 		return nil, err
 	}
@@ -650,12 +660,13 @@ func (e *Engine) baseRunArgs(scope Scope, dindOn bool) []string {
 // and home volumes, git config (read-only, if present), the optional cenci
 // binary + host socket dir wiring (paired with its own XDG_RUNTIME_DIR env
 // under the same cenciAvailable guard as the mount itself),
-// claude credentials staging, GitHub CLI credentials staging, and Pencil CLI
-// session staging (headless design reads). Agent CLIs
+// claude credentials staging, GitHub CLI credentials staging, Pencil CLI
+// session staging (headless design reads), and — only under azureOn, the
+// repo's `sandbox.azure` opt-in — Azure CLI auth staging. Agent CLIs
 // live in the persistent home, so no agent binary is mounted here. Codex
 // credentials are handled separately by validateCredentials, since a missing
 // codex auth source is a hard launch error rather than an optional mount.
-func (e *Engine) assembleVolumeMounts(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, home string, dindOn bool) []string {
+func (e *Engine) assembleVolumeMounts(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, home string, dindOn, azureOn bool) []string {
 	args := []string{
 		"-v", scope.WorkspaceBindHost + ":" + workspaceContainer,
 		"-v", scope.VolumeName + ":/home/dev",
@@ -715,6 +726,22 @@ func (e *Engine) assembleVolumeMounts(agent, cenciBin, socketDir string, cenciAv
 	pencilSession := filepath.Join(home, ".pencil", "session-cli.json")
 	if isRegularFile(pencilSession) {
 		args = append(args, "-v", pencilSession+":/tmp/host-pencil-creds/session-cli.json:ro")
+	}
+
+	// Azure CLI auth (read-only staging — entrypoint seeds into /home/dev only
+	// when the volume has none, since MSAL refresh tokens rotate exactly like
+	// the OAuth chains of #259). Gated on the repo's `sandbox.azure` opt-in,
+	// unlike the credentials above: these reach a cloud subscription, so they
+	// are staged only where an `az` was baked in to use them. Each auth file is
+	// mounted individually rather than binding the whole ~/.azure, so the
+	// container never sees the telemetry, caches and logs that share it.
+	if azureOn {
+		for _, name := range azureCredFiles {
+			src := filepath.Join(home, ".azure", name)
+			if isRegularFile(src) {
+				args = append(args, "-v", src+":"+azureCredsStageDir+"/"+name+":ro")
+			}
+		}
 	}
 
 	return args

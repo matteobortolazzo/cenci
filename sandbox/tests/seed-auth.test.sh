@@ -299,6 +299,126 @@ else
     pass
 fi
 
+# ── Case 11 (#1080): the Azure CLI auth set is seeded atomically ──────
+# `az` splits its auth across several files under ~/.azure that only make
+# sense together: azureProfile.json names the identity, msal_token_cache.json
+# holds that identity's tokens, service_principal_entries.json holds SP
+# secrets. Per-file seeding could splice the host's profile onto a
+# container-side token cache (or the reverse) — two identity chains in one
+# broken login — so the whole set is seeded only when the destination has NO
+# azure credential at all. MSAL refresh tokens rotate like the OAuth chains
+# above, so the same #259 seed-once caution applies.
+
+# azure_staged <dir> — writes a full host-shaped staged credential set.
+azure_staged() {
+    local dir="$1"
+    mkdir -p "${dir}"
+    echo '{"subscriptions":[{"id":"host-sub"}]}' > "${dir}/azureProfile.json"
+    echo '{"RefreshToken":{"host":"chain"}}' > "${dir}/msal_token_cache.json"
+    echo '[{"servicePrincipalId":"host-sp"}]' > "${dir}/service_principal_entries.json"
+}
+
+echo "case: seeds the whole Azure auth set when the destination has none"
+STAGED_DIR="${TMPDIR_TEST}/case11/staged"
+DEST_DIR="${TMPDIR_TEST}/case11/home/.azure"
+azure_staged "${STAGED_DIR}"
+seed_azure_creds "${STAGED_DIR}" "${DEST_DIR}"
+assert_eq "returns success" "0" "$?"
+assert_eq "copies azureProfile.json" '{"subscriptions":[{"id":"host-sub"}]}' "$(cat "${DEST_DIR}/azureProfile.json" 2>/dev/null)"
+assert_eq "copies msal_token_cache.json" '{"RefreshToken":{"host":"chain"}}' "$(cat "${DEST_DIR}/msal_token_cache.json" 2>/dev/null)"
+assert_eq "copies service_principal_entries.json" '[{"servicePrincipalId":"host-sp"}]' "$(cat "${DEST_DIR}/service_principal_entries.json" 2>/dev/null)"
+assert_eq "sets mode 600 on the token cache" "600" "$(stat -c '%a' "${DEST_DIR}/msal_token_cache.json" 2>/dev/null)"
+assert_eq "sets mode 700 on the .azure directory" "700" "$(stat -c '%a' "${DEST_DIR}" 2>/dev/null)"
+
+echo "case: a container-side login blocks the whole set, not just its own files"
+STAGED_DIR="${TMPDIR_TEST}/case11b/staged"
+DEST_DIR="${TMPDIR_TEST}/case11b/home/.azure"
+azure_staged "${STAGED_DIR}"
+mkdir -p "${DEST_DIR}"
+# Only the profile exists in the volume — as after an in-container `az login`
+# whose token cache has not been written back yet. Seeding the host's token
+# cache here would pair the container's identity with the host's tokens.
+echo '{"subscriptions":[{"id":"volume-sub"}]}' > "${DEST_DIR}/azureProfile.json"
+seed_azure_creds "${STAGED_DIR}" "${DEST_DIR}"
+assert_eq "returns success" "0" "$?"
+assert_eq "keeps the volume profile" '{"subscriptions":[{"id":"volume-sub"}]}' "$(cat "${DEST_DIR}/azureProfile.json")"
+assert_eq "does not seed the host token cache alongside it" "absent" "$([[ -e "${DEST_DIR}/msal_token_cache.json" ]] && echo present || echo absent)"
+
+echo "case: CENCI_SANDBOX_RESEED_CREDS=1 forces the Azure set to be re-copied"
+STAGED_DIR="${TMPDIR_TEST}/case11c/staged"
+DEST_DIR="${TMPDIR_TEST}/case11c/home/.azure"
+azure_staged "${STAGED_DIR}"
+mkdir -p "${DEST_DIR}"
+echo '{"subscriptions":[{"id":"volume-dead"}]}' > "${DEST_DIR}/azureProfile.json"
+CENCI_SANDBOX_RESEED_CREDS=1 seed_azure_creds "${STAGED_DIR}" "${DEST_DIR}"
+assert_eq "returns success" "0" "$?"
+assert_eq "overwrites the dead profile" '{"subscriptions":[{"id":"host-sub"}]}' "$(cat "${DEST_DIR}/azureProfile.json")"
+assert_eq "brings the matching token cache with it" '{"RefreshToken":{"host":"chain"}}' "$(cat "${DEST_DIR}/msal_token_cache.json" 2>/dev/null)"
+
+echo "case: an absent staging directory is a no-op"
+DEST_DIR="${TMPDIR_TEST}/case11d/home/.azure"
+seed_azure_creds "${TMPDIR_TEST}/case11d/nonexistent" "${DEST_DIR}"
+assert_eq "returns success" "0" "$?"
+assert_eq "creates no destination" "absent" "$([[ -e "${DEST_DIR}" ]] && echo present || echo absent)"
+
+echo "case: only the auth files are copied, never the rest of ~/.azure"
+STAGED_DIR="${TMPDIR_TEST}/case11e/staged"
+DEST_DIR="${TMPDIR_TEST}/case11e/home/.azure"
+azure_staged "${STAGED_DIR}"
+mkdir -p "${STAGED_DIR}/commands"
+echo 'telemetry' > "${STAGED_DIR}/telemetry.txt"
+echo 'log' > "${STAGED_DIR}/commands/2026-01-01.log"
+seed_azure_creds "${STAGED_DIR}" "${DEST_DIR}"
+assert_eq "returns success" "0" "$?"
+assert_eq "skips telemetry.txt" "absent" "$([[ -e "${DEST_DIR}/telemetry.txt" ]] && echo present || echo absent)"
+assert_eq "skips the commands cache" "absent" "$([[ -e "${DEST_DIR}/commands" ]] && echo present || echo absent)"
+
+echo "case: replaces a dangling symlinked Azure credential on seed"
+STAGED_DIR="${TMPDIR_TEST}/case11f/staged"
+DEST_DIR="${TMPDIR_TEST}/case11f/home/.azure"
+azure_staged "${STAGED_DIR}"
+mkdir -p "${DEST_DIR}"
+ln -s "${TMPDIR_TEST}/case11f/gone.json" "${DEST_DIR}/azureProfile.json"
+seed_azure_creds "${STAGED_DIR}" "${DEST_DIR}"
+assert_eq "returns success" "0" "$?"
+assert_eq "destination is a regular file" "regular" "$([[ -L "${DEST_DIR}/azureProfile.json" ]] && echo symlink || echo regular)"
+assert_eq "holds the staged profile" '{"subscriptions":[{"id":"host-sub"}]}' "$(cat "${DEST_DIR}/azureProfile.json" 2>/dev/null)"
+
+# ── Case 12 (#1080): entrypoint wires the Azure staging → home volume ──
+# The function contract above is meaningless if entrypoint.sh never calls it.
+# The staged path must also match azureCredsStageDir in
+# watch/internal/sandbox/launcher/azure.go, which mounts the files there.
+echo "case: entrypoint.sh seeds the staged Azure credentials into the home volume"
+if grep -qF "seed_azure_creds /tmp/host-azure-creds /home/dev/.azure" \
+    "${SCRIPT_DIR}/../entrypoint.sh"; then
+    pass
+else
+    fail "entrypoint.sh does not seed /tmp/host-azure-creds to /home/dev/.azure"
+fi
+
+echo "case: the launcher stages Azure credentials at the path the entrypoint reads"
+LAUNCHER_AZURE="${SCRIPT_DIR}/../../watch/internal/sandbox/launcher/azure.go"
+if [[ ! -f "${LAUNCHER_AZURE}" ]]; then
+    fail "launcher azure.go not found at ${LAUNCHER_AZURE}"
+elif grep -qF 'azureCredsStageDir = "/tmp/host-azure-creds"' "${LAUNCHER_AZURE}"; then
+    pass
+else
+    fail "launcher azure.go does not stage credentials at /tmp/host-azure-creds — the entrypoint would seed an empty directory"
+fi
+
+echo "case: the launcher's staged file set matches AZURE_CRED_FILES"
+if [[ ! -f "${LAUNCHER_AZURE}" ]]; then
+    fail "launcher azure.go not found at ${LAUNCHER_AZURE}"
+else
+    for azure_file in "${AZURE_CRED_FILES[@]}"; do
+        if grep -qF "\"${azure_file}\"" "${LAUNCHER_AZURE}"; then
+            pass
+        else
+            fail "launcher azure.go never stages ${azure_file}, so seed_azure_creds can never seed it"
+        fi
+    done
+fi
+
 echo
 echo "Passed: ${PASSES}, Failed: ${FAILURES}"
 [[ "${FAILURES}" -eq 0 ]]

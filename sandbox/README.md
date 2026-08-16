@@ -541,7 +541,8 @@ The image is built in two layers:
   Go. This is the image `cenci open` actually runs; agent CLIs live in shared volumes.
 
 `sandbox/fragments/*.dockerfile` holds the same composable blocks (`dotnet`, `node`,
-`playwright`, `go`, `python`, `rust`) used for per-project image composition. Each fragment and
+`playwright`, `go`, `python`, `rust`, `pencil`, `docker`, `azure`) used for per-project image
+composition. Each monolith-backed fragment and
 its corresponding block in `Dockerfile` are kept byte-identical by hand; when you change
 one, change the other the same way.
 
@@ -659,10 +660,40 @@ OpenCode (`--agent opencode`) has no per-flag "skip permissions" equivalent to b
 | `~/.local/share/opencode/auth.json` (OpenCode only) | `/tmp/host-opencode-creds/` (staging) | OpenCode OAuth tokens (copied to home on start) |
 | `~/.config/gh/hosts.yml` | `/tmp/host-gh-config/` (staging) | GitHub CLI tokens (copied to home on start, only when the file carries an `oauth_token` — see [GitHub CLI auth](#github-cli-auth)) |
 | `~/.pencil/session-cli.json` | `/tmp/host-pencil-creds/` (staging) | Pencil CLI session for headless design reads (copied to home on start) |
+| `~/.azure/{azureProfile,msal_token_cache,service_principal_entries}.json` (`sandbox.azure` repos only) | `/tmp/host-azure-creds/` (staging) | Azure CLI login (copied to home on start — see [Azure CLI](#azure-cli)) |
 
 ### MCP servers
 
 MCP servers are picked up from project-scoped `.mcp.json` files inside the workspace (e.g. `./.mcp.json` under the project you're working on). The launcher forwards `CONTEXT7_API_KEY` from the host when set, so `.mcp.json` entries referencing `${CONTEXT7_API_KEY}` resolve correctly inside the container.
+
+### Azure CLI
+
+Repos that work with Azure can bake `az` into their per-repo image by setting
+`sandbox.azure: true` in `.cenci/config.json` (`/cenci:configure` question 9c), which
+selects `fragments/azure.dockerfile`. Without it an agent has no way to check a
+command's real syntax — `az <group> <cmd> --help` is what turns a guessed command into
+a verified one.
+
+Two things to know:
+
+- **There is no monolith fallback.** Unlike dind, the shared `cenci-sandbox:latest`
+  image carries no `az`, so `sandbox.azure` only takes effect together with a per-repo
+  `.cenci/Dockerfile` (question 9). Setting it alone changes the mount plan but leaves
+  the image without a CLI to use it.
+- **Login is staged, not shared.** For `sandbox.azure` repos only, the launcher
+  bind-mounts the host's `~/.azure/azureProfile.json`, `msal_token_cache.json` and
+  `service_principal_entries.json` read-only under `/tmp/host-azure-creds`, and
+  `entrypoint.sh` seeds them into `/home/dev/.azure` (mode 600, directory 700). Nothing
+  else from `~/.azure` — telemetry, command caches, logs — crosses the boundary, and no
+  credential is ever baked into an image layer.
+
+The set is seeded **atomically and only once**: if the volume already holds any Azure
+credential, none are copied. MSAL refresh tokens rotate, so a container that has
+refreshed its own tokens must never be overwritten by the diverged host copy — and a
+per-file copy could pair the host's profile with the container's token cache, producing
+a login that fails in a confusing way. `cenci open --reseed-creds` forces a re-copy for
+recovery. With no host login, `az login` inside the container works normally and
+persists in the home volume.
 
 ### Nested Docker (sysbox)
 

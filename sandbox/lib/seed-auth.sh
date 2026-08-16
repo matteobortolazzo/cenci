@@ -82,3 +82,58 @@ seed_gh_hosts() {
     echo "warning: gh is unauthenticated in this sandbox. The host's ~/.config/gh/hosts.yml names an account but carries no oauth_token, because host gh keeps it in the OS keyring, which the container cannot reach. Not copying that file in: a token-less hosts.yml makes every gh command fail its config migration, even with GH_TOKEN set. Fix it on the host with 'gh auth login --insecure-storage' and re-open the sandbox, or run 'gh auth login' inside the container — an in-container login now persists in the home volume." >&2
     return 0
 }
+
+# seed_azure_creds — seed-once copy of the host's Azure CLI auth state.
+#
+# Unlike the single-file credentials above, `az` splits its auth state across
+# several files under ~/.azure that only make sense together: azureProfile.json
+# names the signed-in identity and its subscriptions, msal_token_cache.json
+# holds the tokens for that identity, and service_principal_entries.json holds
+# service-principal secrets. Seeding them per-file would let a container-side
+# `az login` end up with the host's profile and its own token cache (or the
+# reverse) — two identity chains spliced into one broken login. So the set is
+# seeded atomically: only when the destination has NO azure credential at all.
+#
+# MSAL refresh tokens rotate like the OAuth chains in seed_credential above, so
+# the same #259 seed-once contract applies — a container that has refreshed its
+# tokens is never overwritten by the (now diverged) host copy, and
+# CENCI_SANDBOX_RESEED_CREDS=1 forces a re-copy for recovery.
+#
+# Only auth state crosses the boundary. ~/.azure also holds telemetry, command
+# caches and logs that can run to hundreds of megabytes; none of it is copied.
+AZURE_CRED_FILES=(
+    azureProfile.json
+    msal_token_cache.json
+    service_principal_entries.json
+)
+
+# _azure_dest_has_creds <dest-dir>
+_azure_dest_has_creds() {
+    local dest_dir="$1" name
+    for name in "${AZURE_CRED_FILES[@]}"; do
+        [[ -f "${dest_dir}/${name}" ]] && return 0
+    done
+    return 1
+}
+
+# seed_azure_creds <staged-dir> <dest-dir>
+seed_azure_creds() {
+    local staged_dir="$1" dest_dir="$2" name
+    [[ -d "${staged_dir}" ]] || return 0
+
+    if _azure_dest_has_creds "${dest_dir}" && [[ "${CENCI_SANDBOX_RESEED_CREDS:-0}" != "1" ]]; then
+        return 0
+    fi
+
+    mkdir -p "${dest_dir}"
+    chmod 700 "${dest_dir}"
+    for name in "${AZURE_CRED_FILES[@]}"; do
+        [[ -f "${staged_dir}/${name}" ]] || continue
+        if [[ -L "${dest_dir}/${name}" ]]; then
+            rm -f "${dest_dir}/${name}"
+        fi
+        cp "${staged_dir}/${name}" "${dest_dir}/${name}"
+        chmod 600 "${dest_dir}/${name}"
+    done
+    return 0
+}

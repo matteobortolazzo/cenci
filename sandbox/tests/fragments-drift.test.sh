@@ -35,6 +35,7 @@ MONOLITH_LESS=(
     python.dockerfile
     rust.dockerfile
     pencil.dockerfile
+    azure.dockerfile
 )
 
 FAILURES=0
