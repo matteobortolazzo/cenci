@@ -101,6 +101,7 @@ const (
 	MountKindOpencodeCreds  = "opencode-creds"
 	MountKindGhCreds        = "gh-creds"
 	MountKindPencilCreds    = "pencil-creds"
+	MountKindAzureCreds     = "azure-creds"
 
 	// MountKindUnknown is an explicit sentinel for a mount destination that
 	// doesn't match any case in mountKindForDestination's switch — a visible
@@ -117,6 +118,7 @@ const (
 	CredentialTypeOpencode = "opencode"
 	CredentialTypeGh       = "gh"
 	CredentialTypePencil   = "pencil"
+	CredentialTypeAzure    = "azure"
 )
 
 // Credential probe states for Posture.CredentialSources[].Probe (ticket
@@ -359,9 +361,17 @@ func (e *Engine) Audit(opts Options) (Posture, error) {
 		return Posture{}, err
 	}
 
+	// Same fail-closed treatment as dind and plugins above: a malformed
+	// "sandbox.azure" is a hard error, never an audit report rendered under an
+	// assumed "no Azure credentials staged" posture.
+	azureOn, err := ResolveAzure(scope)
+	if err != nil {
+		return Posture{}, err
+	}
+
 	cenciBin, socketDir, cenciAvailable := cenciWiringReadOnly()
 
-	mountArgs := e.assembleVolumeMounts(agent, cenciBin, socketDir, cenciAvailable, scope, home, dindOn)
+	mountArgs := e.assembleVolumeMounts(agent, cenciBin, socketDir, cenciAvailable, scope, home, dindOn, azureOn)
 	envArgs := e.assembleEnv(agent, scope, opts, dindOn, plugins)
 	featureArgs := e.assembleOptionalFeatures(opts)
 
@@ -498,6 +508,15 @@ func classifyMounts(args []string) []MountPosture {
 // assembleVolumeMounts/validateCredentials ever emit — so classifyMounts
 // never has to guess.
 func mountKindForDestination(destination string) string {
+	// Azure is the one credential staged as a SET of files under a shared
+	// directory (assembleVolumeMounts loops over azureCredFiles), so it is
+	// matched by that directory prefix rather than by one exact destination
+	// per file — adding a file to azureCredFiles then classifies correctly
+	// without a second edit here.
+	if strings.HasPrefix(destination, azureCredsStageDir+"/") {
+		return MountKindAzureCreds
+	}
+
 	switch destination {
 	case workspaceContainer:
 		return MountKindWorkspace
@@ -637,6 +656,14 @@ var credentialSourceSpecs = []struct {
 	}},
 	{CredentialTypePencil, MountKindPencilCreds, func(home string) string {
 		return filepath.Join(home, ".pencil", "session-cli.json")
+	}},
+	// Azure stages a set of files (azureCredFiles), but azureProfile.json is
+	// the one that decides whether there is a login at all — the other two are
+	// the token cache and service-principal secrets belonging to the identity
+	// it names. So it is the probe path; Staged still reflects the whole set,
+	// since every file in it classifies as MountKindAzureCreds.
+	{CredentialTypeAzure, MountKindAzureCreds, func(home string) string {
+		return filepath.Join(home, ".azure", "azureProfile.json")
 	}},
 }
 

@@ -77,7 +77,7 @@ func TestAssembleRunArgs_NoCreationTimeTmuxPane(t *testing.T) {
 		WorkspaceScope:    "repo",
 	}
 
-	args, err := e.assembleRunArgs("claude", "/usr/local/bin/cenci", "/run/user/1000/cenci", true, scope, Options{Agent: "claude"}, home, false, DefaultSandboxPlugins())
+	args, err := e.assembleRunArgs("claude", "/usr/local/bin/cenci", "/run/user/1000/cenci", true, scope, Options{Agent: "claude"}, home, false, false, DefaultSandboxPlugins())
 	if err != nil {
 		t.Fatalf("assembleRunArgs: %v", err)
 	}
@@ -502,7 +502,7 @@ func buildRunArgvTrailingCommand(t *testing.T, dindOn bool) string {
 		WorkspaceScope:    "repo",
 	}
 
-	argv, err := e.buildRunArgv("claude", "/usr/local/bin/cenci", "/run/user/1000/cenci", true, scope, Options{Agent: "claude"}, home, dindOn, DefaultSandboxPlugins())
+	argv, err := e.buildRunArgv("claude", "/usr/local/bin/cenci", "/run/user/1000/cenci", true, scope, Options{Agent: "claude"}, home, dindOn, false, DefaultSandboxPlugins())
 	if err != nil {
 		t.Fatalf("buildRunArgv(dindOn=%v): %v", dindOn, err)
 	}

@@ -24,17 +24,30 @@ enabling or declining the Dockerfile never gates it. Default it to Yes when
 `detection.dindDetected` is true (else No) on a first-ever run; on
 reconfiguration, default to the existing `existingConfig.sandbox.dind` value
 instead, so re-running configure never silently flips an already-made choice.
+
+The Azure CLI (`sandbox.azure`) is asked the same way: its own independent
+Plan-mode question, ungated by the other two. There is no detection behind it
+— an Azure repo can be written in any language — so default it to No on a
+first-ever run and to the existing `existingConfig.sandbox.azure` value on
+reconfiguration. When Yes, the generated `.cenci/Dockerfile` must include
+`sandbox/fragments/azure.dockerfile`, and unlike dind there is no monolith
+fallback: a Yes here with a No to the Dockerfile question leaves the repo with
+no `az` at all, which the user should be told. When Yes, also tell the user
+that `cenci open` stages their host `~/.azure` login read-only and seeds it
+once into the sandbox's home volume.
+
 Produce the `sandbox` field the same way Claude's SKILL.md does — by invoking
 the shared, deterministic merge script rather than hand-merging the object,
-so equivalent Dockerfile/dind answers produce byte-equivalent `sandbox` JSON
-for both clients:
+so equivalent Dockerfile/dind/azure answers produce byte-equivalent `sandbox`
+JSON for both clients:
 
 ```bash
 bash "${PLUGIN_ROOT}/skills/configure/scripts/merge-sandbox-config.sh" \
   <path to existingConfig, or "-" piped from stdin when null> \
   --dockerfile <true|false, from the sandbox Dockerfile question> \
   --base-version <resolved baseVersion, or the literal "null"> \
-  --dind <true|false, from the nested Docker question>
+  --dind <true|false, from the nested Docker question> \
+  --azure <true|false, from the Azure CLI question>
 ```
 
 On success (exit 0), write its stdout as the new `.cenci/config.json` content
@@ -42,8 +55,10 @@ On success (exit 0), write its stdout as the new `.cenci/config.json` content
 (possibly empty) stdout as the new config content — read stderr for the
 cause. The script fails closed (exit 2) for several distinct reasons: `jq`
 missing, an unreadable existing config, invalid existing JSON, a
-missing/invalid `--dockerfile`/`--dind`/`--base-version` value, or an unknown
-argument. If `jq` is genuinely unavailable, fall back to the four merge
+missing/invalid `--dockerfile`/`--dind`/`--azure`/`--base-version` value, or an
+unknown argument. Every boolean flag is required — omitting one would default
+it to false and silently delete an existing opt-in. If `jq` is genuinely
+unavailable, fall back to the merge
 outcomes documented in Claude's `SKILL.md` (same section, "sandbox" field)
 and hand-construct the object from that table; for any other validation
 failure, fix the inputs and retry the script rather than falling back. Never

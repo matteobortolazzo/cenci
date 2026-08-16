@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # merge-sandbox-config.sh — deterministic, client-neutral merge of the
-# `sandbox` config object for /cenci:configure's Q9 (per-repo Dockerfile)
-# and Q9b (nested Docker / dind) answers (#632). Both Claude's SKILL.md and
-# Codex's codex.md invoke this same script so equivalent inputs and answers
-# produce byte-equivalent `sandbox` JSON — a shared executable, not
-# duplicated prose, guarantees the client-neutral contract (ticket #632's
-# acceptance criteria; "prose presence alone is not evidence that generated
-# JSON is correct").
+# `sandbox` config object for /cenci:configure's Q9 (per-repo Dockerfile),
+# Q9b (nested Docker / dind) and Q9c (Azure CLI) answers (#632, #1080). Both
+# Claude's SKILL.md and Codex's codex.md invoke this same script so
+# equivalent inputs and answers produce byte-equivalent `sandbox` JSON — a
+# shared executable, not duplicated prose, guarantees the client-neutral
+# contract (ticket #632's acceptance criteria; "prose presence alone is not
+# evidence that generated JSON is correct").
 #
 # Usage:
 #   merge-sandbox-config.sh <existing-config-path|-> \
 #     --dockerfile <true|false> --base-version <version|null> \
-#     --dind <true|false>
+#     --dind <true|false> --azure <true|false>
 #
 # <existing-config-path|-> is the current .cenci/config.json contents: a
 # file path, or "-" to read from stdin. Absent, empty, or JSON `null`
@@ -28,6 +28,9 @@
 #   --dind false        -> delete sandbox.dind
 #                          (leaves other sandbox keys, including enabled/
 #                          baseVersion, untouched)
+#   --azure true        -> sandbox.azure = true
+#   --azure false       -> delete sandbox.azure
+#                          (leaves every other sandbox key untouched)
 #   an emptied sandbox object ({}) is omitted from the output entirely;
 #   otherwise the merged sandbox object is written back in place of the
 #   original.
@@ -38,7 +41,7 @@
 set -uo pipefail
 
 usage() {
-  echo "usage: merge-sandbox-config.sh <existing-config-path|-> --dockerfile <true|false> --base-version <version|null> --dind <true|false>" >&2
+  echo "usage: merge-sandbox-config.sh <existing-config-path|-> --dockerfile <true|false> --base-version <version|null> --dind <true|false> --azure <true|false>" >&2
   exit 2
 }
 
@@ -51,9 +54,14 @@ shift
 DOCKERFILE=""
 BASE_VERSION=""
 DIND=""
+AZURE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --azure)
+      AZURE="${2:-}"
+      shift 2 || usage
+      ;;
     --dockerfile)
       DOCKERFILE="${2:-}"
       shift 2 || usage
@@ -77,6 +85,11 @@ done
   || { echo "merge-sandbox-config.sh: --dockerfile must be true or false" >&2; exit 2; }
 [[ "$DIND" == "true" || "$DIND" == "false" ]] \
   || { echo "merge-sandbox-config.sh: --dind must be true or false" >&2; exit 2; }
+# Required, not defaulted: an omitted --azure defaulting to false would
+# silently DELETE an existing sandbox.azure and quietly strip Azure support
+# from a repo that had opted in. Fail closed instead, like every other flag.
+[[ "$AZURE" == "true" || "$AZURE" == "false" ]] \
+  || { echo "merge-sandbox-config.sh: --azure must be true or false" >&2; exit 2; }
 [[ -n "$BASE_VERSION" ]] \
   || { echo "merge-sandbox-config.sh: --base-version is required (a version string or the literal \"null\")" >&2; exit 2; }
 
@@ -102,6 +115,7 @@ jq -c \
   --argjson dockerfileOn "$DOCKERFILE" \
   --arg baseVersion "$BASE_VERSION" \
   --argjson dindOn "$DIND" \
+  --argjson azureOn "$AZURE" \
   '
   ($baseVersion | if . == "null" then null else . end) as $bv
   | (.sandbox // {}) as $sandbox
@@ -119,9 +133,16 @@ jq -c \
         ($sandbox2 | del(.dind))
       end
     ) as $sandbox3
-  | if ($sandbox3 | length) == 0 then
+  | (
+      if $azureOn then
+        $sandbox3 + {azure: true}
+      else
+        ($sandbox3 | del(.azure))
+      end
+    ) as $sandbox4
+  | if ($sandbox4 | length) == 0 then
       del(.sandbox)
     else
-      .sandbox = $sandbox3
+      .sandbox = $sandbox4
     end
   ' <<<"$EXISTING"

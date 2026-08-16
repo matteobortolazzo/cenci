@@ -422,6 +422,13 @@ seed_credential /tmp/host-opencode-creds/auth.json /home/dev/.local/share/openco
 # launch.go) takes precedence over this seeded session inside the CLI.
 seed_credential /tmp/host-pencil-creds/session-cli.json /home/dev/.pencil/session-cli.json
 
+# Azure CLI auth — only present when the launcher found host Azure credentials
+# to stage (see assembleVolumeMounts in watch/internal/sandbox/launcher/
+# launch.go); a no-op otherwise, including in images with no `az` at all. The
+# set is seeded atomically, never per-file, so a container-side `az login`
+# never ends up with the host's profile spliced onto its own token cache.
+seed_azure_creds /tmp/host-azure-creds /home/dev/.azure
+
 # ── Verify the shared agent CLI before signaling ready ─────────────
 # The launcher mounts the shared, updater-populated volume read-only at
 # /opt/cenci-agent and execs this absolute path directly (CENCI_AGENT_CLI, or
