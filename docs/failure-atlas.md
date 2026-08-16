@@ -220,6 +220,57 @@ cenci open <shortcut> --dry-run # previews the degraded (non-dind) create argv
 with install pointers (`sysbox-ce` via the Arch AUR, or the nestybox `.deb`
 on Ubuntu) rather than degrading.
 
+## CENCI-SANDBOX-DIND-003
+
+**Meaning**: Nested Docker was on for this launch, so cenci created the
+container with `--runtime=sysbox-runc`, and the container runtime's daemon
+rejected the create with an `OCI runtime create failed` error. Sysbox *is*
+registered with Docker — `dindPreflight` checks registration and passed — it
+simply cannot create containers on this host. Attached by the launcher's
+`createFailureError` (`dindcreate.go`) at the `Launch` create call site.
+Fatal tier, and the only DinD code at that tier: `CENCI-SANDBOX-DIND-001`
+and `CENCI-SANDBOX-DIND-002` both describe a session that launched and works
+without nested Docker, whereas here no container was created and there is no
+session at all.
+
+**Common causes**:
+- The installed `sysbox-ce` predates a change in the host's Docker or kernel.
+  The known instance: Docker 29 unshares a per-container **time namespace**,
+  and `sysbox-ce` 0.7.0's spec conversion has no mapping for that namespace
+  type, so it rejects every container with `namespace {"time" ""} does not
+  exist`.
+- The sysbox helper daemons (`sysbox-mgr`, `sysbox-fs`) are registered but not
+  running correctly, so the runtime binary is reachable while its supporting
+  services are not.
+
+**Diagnostic commands**:
+```bash
+docker run --rm --runtime=sysbox-runc alpine true  # reproduces outside cenci
+systemctl status sysbox sysbox-mgr sysbox-fs
+sysbox-runc --version
+readlink /proc/self/ns/time                        # compare against the value
+docker run --rm alpine readlink /proc/self/ns/time # a container reports
+```
+
+**Recovery procedure**:
+1. Reproduce with the plain `docker run --runtime=sysbox-runc` above. If that
+   fails too, the breakage is host-side and nothing in cenci will fix it.
+2. Update `sysbox-ce` to a release that supports your Docker/kernel
+   (https://github.com/nestybox/sysbox/releases).
+3. If no such release exists yet, the two container time-namespace readouts
+   above will differ. Stop Docker from unsharing it by adding
+   `"features": {"time-namespaces": false}` to `/etc/docker/daemon.json`
+   (keeping any existing `runtimes` block) and restarting the daemon. This is
+   a host-side workaround for an upstream gap; revisit it after a `sysbox-ce`
+   upgrade. Cenci never writes this file itself.
+4. To keep working without nested Docker meanwhile, launch with `cenci open
+   <shortcut> --no-dind`, or set `"sandbox": {"dind": false}` in
+   `.cenci/config.json` for a repo that does not need it.
+
+**Platform notes**: Linux only. On macOS a dind request degrades to
+`CENCI-SANDBOX-DIND-002` before any create is attempted, so this code can
+never be reached there.
+
 ## CENCI-DAEMON-CONN-001
 
 **Meaning**: The cenci daemon's event socket exists but nothing answers a

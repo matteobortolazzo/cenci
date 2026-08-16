@@ -70,6 +70,7 @@ This prevents readers and future implementers from assuming the code is actively
 | `CENCI-SANDBOX-SESSION-001` | Sandbox / Session | No container exists for the requested sandbox session (never launched, launched under a different scope, or already auto-removed by `--rm`). Attached by `cenci diagnose`. |
 | `CENCI-SANDBOX-DIND-001` | Sandbox / Dind | The nested Docker daemon (DinD) failed to start, or crashed/OOMed after starting, without an intentional-shutdown sentinel superseding the marker. Attached by the launcher's before-attach warning and by `cenci diagnose`. |
 | `CENCI-SANDBOX-DIND-002` | Sandbox / Dind | Nested Docker was requested (`--dind` or `sandbox.dind`) on a host that can never register `sysbox-runc` — macOS — so the sandbox launched without it. Attached by the launcher's degrade warning and reported by `cenci audit` as the `platform-unsupported` dind source. |
+| `CENCI-SANDBOX-DIND-003` | Sandbox / Dind | A dind launch's container create was rejected by the OCI runtime: `sysbox-runc` is registered with Docker (so `dindPreflight` passed) but could not create the container. Attached by the launcher's create-failure mapping. |
 | `CENCI-DAEMON-CONN-001` | Daemon / Conn | The cenci daemon's event socket exists but did not answer a read-only dial. Attached by `cenci diagnose`. |
 | `CENCI-DAEMON-SOCKET-001` | Daemon / Socket | The cenci daemon's event socket does not exist at all. Attached by `cenci diagnose`. |
 
@@ -116,3 +117,19 @@ describes a host capability rather than a failure: the session launched
 and works, and no action on that host can enable nested Docker. This is
 the macOS counterpart to `CENCI-SANDBOX-DIND-001`, which stays reserved
 for an inner `dockerd` that should have started and didn't.
+
+`CENCI-SANDBOX-DIND-003` (#1077) is attached by `dindcreate.go`'s
+`createFailureError`, which `launch.go`'s create call site consults when
+`docker run` fails. It fires only when dind was on for that launch *and* the
+create's captured stderr carries the daemon's `OCI runtime create failed`
+wrapper; every other create failure keeps the plain `<runtime> run: %w`
+wording, so an ordinary failure (bad mount, name conflict) is never blamed on
+sysbox. It is the only DinD code at `Fatal` tier: DIND-001 and DIND-002 both
+describe a session that launched and works without nested Docker, whereas here
+the container was never created, so there is no session at all.
+
+The three DinD codes partition by *when* nested Docker failed —
+DIND-002 before the launch (the host can never register `sysbox-runc`),
+DIND-003 during container create (registered but non-functional),
+DIND-001 after create (the container exists, the inner `dockerd` didn't
+start or later died).
