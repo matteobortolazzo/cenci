@@ -2443,7 +2443,18 @@ never renamed, removed, or repurposed, and unknown fields must be ignored (Go's
 | `Notification` (permission_prompt) | NeedInput | Permission dialog shown |
 | `PreToolUse` (when NeedInput) | Running | Permission was granted |
 | `Stop` | Done | Claude finished responding |
+| `Stop` (background work in flight) | Running | Turn ended, but a backgrounded task or a pending wakeup can still resume it |
 | `SessionEnd` | Remove | Restore window, clean up |
+
+A `Stop` that reports in-flight background work — a backgrounded subagent or
+shell task, a `ScheduleWakeup`/`/loop` timer — holds the window at `running`
+rather than `done`, since the session is paused waiting to be woken rather than
+finished. Any event, including the background work's own, re-arms that hold.
+Work that never wakes the session (a backgrounded server, a `tail`) would
+otherwise pin the window at `running` until your next prompt, so the hold
+expires after two minutes of complete event silence and the window falls back
+to `done`. If the work does wake the session later, its next event moves the
+window straight back to `running`.
 
 #### OpenAI Codex
 

@@ -349,9 +349,9 @@ func TestNotifyStopForwardsInFlightBackgroundWork(t *testing.T) {
 }
 
 // TestNotifyStopWithOnlyTerminalBackgroundTasksReportsNoWork asserts the
-// narrow exclusion: only explicitly terminal task states (completed, failed,
-// killed) are discounted. A Stop whose tasks have all finished is an ordinary
-// finished turn.
+// narrow exclusion: only task states that cannot wake the session on their own
+// (completed, failed, killed, paused) are discounted. A Stop whose tasks have
+// all finished — or are all parked — is an ordinary finished turn.
 func TestNotifyStopWithOnlyTerminalBackgroundTasksReportsNoWork(t *testing.T) {
 	for name, tasks := range map[string]string{
 		"absent":    ``,
@@ -359,6 +359,9 @@ func TestNotifyStopWithOnlyTerminalBackgroundTasksReportsNoWork(t *testing.T) {
 		"completed": `,"background_tasks":[{"id":"t1","type":"subagent","status":"completed","description":"d"}]`,
 		"failed":    `,"background_tasks":[{"id":"t1","type":"shell","status":"failed","description":"d"}]`,
 		"killed":    `,"background_tasks":[{"id":"t1","type":"workflow","status":"killed","description":"d"}]`,
+		// #1079: a paused task is resumed by the user or the agent, never by
+		// itself, so it must not hold the session at running.
+		"paused": `,"background_tasks":[{"id":"t1","type":"shell","status":"paused","description":"d"}]`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			socket := filepath.Join(t.TempDir(), "events.sock")
@@ -390,13 +393,12 @@ func TestNotifyStopWithOnlyTerminalBackgroundTasksReportsNoWork(t *testing.T) {
 	}
 }
 
-// TestNotifyStopWithPausedOrPendingBackgroundTaskReportsWork pins the other
-// side of that exclusion: pending and paused work still wakes the session
-// later, and an unrecognized status must count as in flight rather than
-// silently collapsing to "done" — background_tasks is documented to contain
-// only in-flight work.
-func TestNotifyStopWithPausedOrPendingBackgroundTaskReportsWork(t *testing.T) {
-	for _, status := range []string{"pending", "paused", "some_future_status"} {
+// TestNotifyStopWithPendingBackgroundTaskReportsWork pins the other side of
+// that exclusion: pending work still wakes the session later, and an
+// unrecognized status must count as in flight rather than silently collapsing
+// to "done" — background_tasks is documented to contain only in-flight work.
+func TestNotifyStopWithPendingBackgroundTaskReportsWork(t *testing.T) {
+	for _, status := range []string{"pending", "running", "some_future_status"} {
 		t.Run(status, func(t *testing.T) {
 			socket := filepath.Join(t.TempDir(), "events.sock")
 			receiver, err := ipc.NewEventReceiver(socket)

@@ -441,15 +441,42 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 		if ws.Status != detect.StatusRunning {
 			continue
 		}
+		sess, tracked := sessions[ws.SessionKey]
+		if tracked && sess.BackgroundHold {
+			// The core is holding this session at running for background work
+			// that was in flight when the main agent's Stop fired (#698). The
+			// hold outranks the title backstop below — but only while it is
+			// still being re-armed by events. Past BackgroundHoldTTL of total
+			// silence the work is one that will never wake the session, and
+			// the window has been stuck at running ever since the turn ended
+			// (#1079). Release it to done, not stopped: Stop did fire, so the
+			// agent is parked at the prompt rather than interrupted. The pane
+			// title is deliberately not consulted — a stale working marker in
+			// a window whose Stop already fired is exactly the stuck case.
+			if time.Since(sess.LastEvent) < frontend.BackgroundHoldTTL {
+				continue
+			}
+			// Status-only change: each side keeps the task name it already
+			// holds (the core's may be a pinned prompt label, the window's is
+			// title-derived), since nothing about the release renames anything.
+			f.applyStatus(wt, ws, detect.StatusDone, ws.TaskName)
+			if ws.SessionKey != "" {
+				updates = append(updates, frontend.SweepAction{SessionKey: ws.SessionKey, NewStatus: detect.StatusDone, NewTask: sess.TaskName})
+			}
+			if f.cfg.Verbose {
+				log.Printf("sweep: pane %s background hold expired after %s of silence, setting done", ws.PaneID, frontend.BackgroundHoldTTL)
+			}
+			continue
+		}
 		r := firstRune(p.PaneTitle)
 		if detect.IsStatusSymbol(r) && !detect.IsWorkingMarker(r) {
 			// Pane title shows an idle marker (✶ ✻ ✳) — but the title alone
 			// cannot tell "user pressed ESC" from "paused at the prompt while
-			// background work is in flight" (#706). Event state wins: never
-			// flip a session the core holds at running for background work
-			// (#698), and require hook-event quiescence for the ESC backstop.
-			// Untracked windows (no core session) keep the plain backstop.
-			if sess, ok := sessions[ws.SessionKey]; ok && (sess.BackgroundHold || time.Since(sess.LastEvent) < titleStopQuiescence) {
+			// background work is in flight" (#706). Event state wins: require
+			// hook-event quiescence for the ESC backstop (the background-work
+			// hold is handled above). Untracked windows (no core session) keep
+			// the plain backstop.
+			if tracked && time.Since(sess.LastEvent) < titleStopQuiescence {
 				continue
 			}
 			taskName := frontend.SanitizeName(detect.TaskName(p.PaneTitle))

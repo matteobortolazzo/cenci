@@ -27,9 +27,28 @@ type SessionState struct {
 	// held at running because in-flight background work will wake it (#698).
 	// While set, the tmux sweep's idle-title detection must not flip the
 	// session to stopped — the pane legitimately sits at the prompt with an
-	// idle-marker title until the background work wakes it (#706).
+	// idle-marker title until the background work wakes it (#706). The hold
+	// expires after BackgroundHoldTTL of event silence (#1079).
 	BackgroundHold bool
 }
+
+// BackgroundHoldTTL bounds how long a background-held session (#698) may stay
+// at running with no event at all before it is released to done.
+//
+// The hold assumes the reported background work will wake the session. That is
+// true for a subagent or a build, and false for work that never re-invokes the
+// agent — a backgrounded server, a `tail`, a far-future wakeup. Without an
+// expiry the false cases pinned a finished turn at running until the user's
+// next prompt, because a hook event is the only other way out of running and
+// the hold also disables the tmux idle-title backstop (#1079).
+//
+// The window is measured from SessionState.LastEvent, which every event
+// refreshes — including the backgrounded work's own subagent events. So work
+// that is genuinely in flight keeps re-arming the hold for as long as it runs,
+// and only a hold nothing is working behind expires. Two minutes is well past
+// any gap between a live subagent's tool calls while still correcting a stuck
+// window inside the same sitting.
+const BackgroundHoldTTL = 2 * time.Minute
 
 // Key returns the session key used in the daemon's sessions map: the agent
 // session ID when known, otherwise a pane-derived fallback.
