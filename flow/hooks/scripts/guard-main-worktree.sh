@@ -61,8 +61,9 @@
 # therefore allow main-worktree writes outright whenever the session cwd is
 # inside a feature worktree, gutting the guard's core purpose. SCOPE_ROOT is
 # instead derived from `git rev-parse --git-common-dir`'s parent, adopted only
-# when it is a strict ancestor of the resolved $ROOT (the linked-worktree
-# case); otherwise SCOPE_ROOT falls back to the resolved $ROOT (the ordinary
+# when that common dir is a genuine `.git` directory AND its parent is a
+# strict ancestor of the resolved $ROOT (the linked-worktree case);
+# otherwise SCOPE_ROOT falls back to the resolved $ROOT (the ordinary
 # main-worktree-session case, where the two coincide). If the `--git-common-
 # dir` derivation itself errors (the git command fails, or its result cannot
 # be resolved to an existing directory), SCOPE_ROOT_OK is set to 0 and both
@@ -74,17 +75,19 @@
 # never reach a decision site (unconfigured repos, non-git dirs, Bash calls
 # with no extracted write target).
 #
-# Accepted residual: whenever the common-dir's parent is NOT a strict
-# ancestor of the resolved $ROOT, SCOPE_ROOT falls back to $ROOT and
-# main-worktree writes from that session are allowed. A worktree created
-# OUTSIDE the main worktree (e.g. `git worktree add ../wt` instead of the
-# cenci convention `.worktrees/<id>-<desc>` inside the repo) is the
-# illustrative example, but the same fallback also covers `--separate-git-dir`
-# layouts, bare repos, and submodules -- any layout where the common-dir
-# derivation does not resolve to a genuine ancestor of $ROOT falls into this
-# same residual, not just the one worktree-outside-the-repo example. This
-# follows directly from the derivation rule above and is deliberate, not a
-# bug -- see #1072's Risks.
+# Accepted residual: whenever the common dir is not a `.git` directory, or
+# its parent is NOT a strict ancestor of the resolved $ROOT, SCOPE_ROOT falls
+# back to $ROOT and main-worktree writes from that session are allowed. A
+# worktree created OUTSIDE the main worktree (e.g. `git worktree add ../wt`
+# instead of the cenci convention `.worktrees/<id>-<desc>` inside the repo)
+# is the illustrative example, but the same fallback also covers
+# `--separate-git-dir` layouts, bare repos (whose common dir is the bare
+# `<name>.git` directory itself, not a `.git` directory), and submodules --
+# any layout where the common-dir derivation does not resolve to a genuine
+# `.git` directory whose parent is an ancestor of $ROOT falls into this same
+# residual, not just the one worktree-outside-the-repo example. This follows
+# directly from the derivation rule above and is deliberate, not a bug --
+# see #1072's Risks.
 #
 # Deliberate remaining differences between the two arms (unaffected by
 # #1072): a non-absolute Write|Edit file_path is always rejected outright,
@@ -316,19 +319,34 @@ else
       COMMON_DIR_PARENT="${RESOLVED_COMMON_DIR%/*}"
       [ -z "$COMMON_DIR_PARENT" ] && COMMON_DIR_PARENT="/"
       if RESOLVED_COMMON_PARENT=$(resolve_path "$COMMON_DIR_PARENT" 2>/dev/null); then
-        case "$RESOLVED_ROOT" in
-          "$RESOLVED_COMMON_PARENT"/*)
-            # $RESOLVED_COMMON_PARENT is a strict ancestor of $RESOLVED_ROOT --
-            # a real linked feature worktree; adopt the main worktree as scope.
-            SCOPE_ROOT="$RESOLVED_COMMON_PARENT"
-            ;;
-          *)
-            # Not a strict ancestor: the ordinary main-worktree-session case
-            # (the two coincide), the accepted out-of-tree-worktree residual
-            # documented above, or a bare/submodule common-dir layout -- keep
-            # SCOPE_ROOT = RESOLVED_ROOT.
-            ;;
-        esac
+        # Two conditions must BOTH hold to adopt the common dir's parent as
+        # SCOPE_ROOT: the common dir must be a genuine `.git` directory, and
+        # its parent must be a strict ancestor of $RESOLVED_ROOT. The `.git`
+        # basename test is not cosmetic -- in a BARE repository holding its
+        # worktrees inside itself (`git init --bare ~/proj.git` +
+        # `git worktree add ~/proj.git/wt`), the common dir is `~/proj.git`
+        # and its parent `~` IS a strict ancestor of `~/proj.git/wt`, so the
+        # ancestor test alone would adopt the user's entire home directory as
+        # "the repository" -- putting every out-of-repo path under the
+        # main-worktree allowlist and blocking exactly the
+        # ~/.claude/projects/<slug>/memory/... writes #1072 exists to allow.
+        # A linked worktree of an ordinary (non-bare) repository always has a
+        # `.git`-named common dir, so this test costs that case nothing.
+        if [ "${RESOLVED_COMMON_DIR##*/}" = ".git" ]; then
+          case "$RESOLVED_ROOT" in
+            "$RESOLVED_COMMON_PARENT"/*)
+              # $RESOLVED_COMMON_PARENT is a strict ancestor of
+              # $RESOLVED_ROOT -- a real linked feature worktree; adopt the
+              # main worktree as scope.
+              SCOPE_ROOT="$RESOLVED_COMMON_PARENT"
+              ;;
+            *)
+              # Not a strict ancestor: the ordinary main-worktree-session
+              # case (the two coincide) or the accepted out-of-tree-worktree
+              # residual documented above -- keep SCOPE_ROOT = RESOLVED_ROOT.
+              ;;
+          esac
+        fi
       else
         SCOPE_ROOT_OK=0
       fi
@@ -382,9 +400,11 @@ scope_precheck() {
 # `... > ~/.claude/settings.json.tmp` pattern), but a handful of out-of-repo
 # paths are session-security-sensitive regardless of repo scope:
 # ~/.claude/settings*.json (hook definitions -- writable here means arbitrary
-# command execution on the next tool call), ~/.claude/plugins/** (this hook's
-# own script and every other installed plugin -- writable here means
-# self-disable), and ~/.ssh/** (SSH config/authorized_keys tampering).
+# command execution on the next tool call), ~/.claude.json (user-scope
+# mcpServers/enabledPlugins -- same execution risk at the next session
+# start), ~/.claude/plugins/** (this hook's own script and every other
+# installed plugin -- writable here means self-disable), and ~/.ssh/**
+# (SSH config/authorized_keys tampering).
 # check-sensitive-files.sh (a separate, unconditional hook) does not cover
 # these -- it only matches secret-shaped paths (.env, credentials, *.pem,
 # *.key, id_*, keystore shapes), not hook-config or plugin-script paths.
@@ -413,7 +433,8 @@ scope_precheck() {
 # lexical on the canonicalized target path, not a symlink-aware policy
 # decision), or every session-security-sensitive path in general --
 # ~/.gitconfig, ~/.codex/, and shell rc files (.bashrc, .zshrc, etc.) are
-# NOT covered. These are accepted residual gaps for this cycle (#1072
+# NOT covered. Nor is a `.git` DIRECTORY outside the repository (hooks there
+# execute on the next git command in that repo). These are accepted residual gaps for this cycle (#1072
 # follow-up), not bugs to close here -- see also the zero-parse backstop's
 # own documented residual below for the same "defense-in-depth, not a load-
 # bearing guarantee" posture on the Bash arm's unmodelled-construct path.
@@ -421,6 +442,11 @@ scope_self_protection_denied() {
   case "$1" in
     */.claude/settings*.json) return 0 ;;
     */.claude/plugins/*) return 0 ;;
+    # ~/.claude.json is the peer of ~/.claude/settings*.json, not a separate
+    # concern: it is the user-scope Claude Code config holding `mcpServers`
+    # and `enabledPlugins`, so writing it means arbitrary command execution
+    # on the next session start -- the same threat this denylist exists for.
+    */.claude.json) return 0 ;;
     */.ssh/*) return 0 ;;
     *) return 1 ;;
   esac
@@ -432,7 +458,7 @@ scope_self_protection_denied() {
 # entirely; the risk is session self-compromise (hook config, plugin script,
 # or SSH config/keys), not a main-worktree write.
 scope_self_protection_message() {
-  echo "BLOCKED: $1 targets a session-security-sensitive path outside the repository (hook config, plugin script, or SSH config/keys) and is refused regardless of the out-of-repo-scope allow policy." >&2
+  echo "BLOCKED: $1 targets a session-security-sensitive path outside the repository (hook/MCP config, plugin script, or SSH config/keys) and is refused regardless of the out-of-repo-scope allow policy." >&2
 }
 
 # Compute the canonicalized TMPDIR-widening allowlist prefix once (#749).
@@ -847,18 +873,27 @@ elif [ -n "$TOOL_COMMAND" ]; then
             print s
           }')
       fi
+      # BWT_SCAN_HIT_ROOT records WHICH root actually matched, so the message
+      # below names a string that genuinely appears in the command. Naming
+      # $RESOLVED_ROOT unconditionally would be wrong on the SCOPE_ROOT arm:
+      # in a feature-worktree session $RESOLVED_ROOT is the FEATURE worktree,
+      # which the raw text need not mention at all, leaving the agent chasing
+      # a path that isn't there. Defaults to $RESOLVED_ROOT so the
+      # pre-existing message is byte-identical on the pre-#1072 arms.
       BWT_SCAN_HIT=0
+      BWT_SCAN_HIT_ROOT="$RESOLVED_ROOT"
       case "$BWT_SCAN_TEXT" in
-        *"$ROOT"* | *"$RESOLVED_ROOT"*) BWT_SCAN_HIT=1 ;;
+        *"$RESOLVED_ROOT"*) BWT_SCAN_HIT=1 ;;
+        *"$ROOT"*) BWT_SCAN_HIT=1 BWT_SCAN_HIT_ROOT="$ROOT" ;;
       esac
       if [ "$BWT_SCAN_HIT" -eq 0 ] && [ "$SCOPE_ROOT_OK" -eq 1 ]; then
         case "$BWT_SCAN_TEXT" in
-          *"$SCOPE_ROOT"*) BWT_SCAN_HIT=1 ;;
+          *"$SCOPE_ROOT"*) BWT_SCAN_HIT=1 BWT_SCAN_HIT_ROOT="$SCOPE_ROOT" ;;
         esac
       fi
       if [ "$BWT_SCAN_HIT" -eq 1 ]; then
         {
-          echo "BLOCKED: guard-main-worktree.sh could not extract this Bash command's write targets (unmodelled shell construct), and the raw command text mentions the main worktree root ($RESOLVED_ROOT): $TOOL_COMMAND"
+          echo "BLOCKED: guard-main-worktree.sh could not extract this Bash command's write targets (unmodelled shell construct), and the raw command text mentions the main worktree root ($BWT_SCAN_HIT_ROOT): $TOOL_COMMAND"
           echo "Rewrite the command using a plain, directly-parseable redirect (>, >>) or tee form targeting the feature worktree (.worktrees/<id>-<desc>/) or a temp path."
         } >&2
         exit 2

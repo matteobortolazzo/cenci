@@ -1858,6 +1858,16 @@ if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
 else
     fail "zero-parse backstop catches main-worktree-only mention: stderr should contain BLOCKED, got: ${GUARD_STDERR}"
 fi
+# Message accuracy: the BLOCKED text must name the root that ACTUALLY matched
+# (the main worktree / SCOPE_ROOT here), not $RESOLVED_ROOT -- which in this
+# feature-worktree session is Q1_FEATURE_WORKTREE, a string the raw command
+# text never contains, and which would send the agent chasing a path that
+# isn't there.
+if [[ "${GUARD_STDERR}" == *"(${Q1_REPO})"* ]]; then
+    pass
+else
+    fail "zero-parse backstop catches main-worktree-only mention: stderr should name the matched main-worktree root (${Q1_REPO}), got: ${GUARD_STDERR}"
+fi
 
 # ── #1072 Fix 2: TMPDIR-widening containment checks measured against
 # SCOPE_ROOT, not RESOLVED_ROOT ── in a feature-worktree session, a TMPDIR
@@ -1970,6 +1980,56 @@ if [[ "${GUARD_STDERR}" == *"targets the main worktree"* ]]; then
 else
     pass
 fi
+
+# ── #1072 review: SCOPE_ROOT must not adopt an arbitrary ancestor ─────
+# A BARE repository holding its worktrees inside itself reports a common dir
+# of `<base>/proj.git` (the bare repo itself), whose parent `<base>` IS a
+# strict ancestor of the worktree's resolved root. Adopting it would make
+# SCOPE_ROOT the directory CONTAINING the repo -- for a real bare repo at
+# ~/proj.git that is the user's whole home directory, putting every
+# out-of-repo path (including the ~/.claude/projects/<slug>/memory/... writes
+# #1072 exists to allow) under the main-worktree allowlist. The `.git`
+# basename test in the derivation keeps this layout on the documented
+# fall-back-to-$ROOT residual instead.
+echo "── #1072 review: bare-repo common dir must not widen SCOPE_ROOT ──"
+BARE_BASE="${TEST_ROOT}/bare-scope"
+mkdir -p "${BARE_BASE}"
+git init -q --bare "${BARE_BASE}/proj.git"
+git -C "${BARE_BASE}/proj.git" worktree add -q wt1 >/dev/null 2>&1
+BARE_WT="${BARE_BASE}/proj.git/wt1"
+mkdir -p "${BARE_WT}/.cenci" "${BARE_BASE}/sibling"
+touch "${BARE_WT}/.cenci/config.json"
+
+echo "case: a sibling of a bare repo is NOT treated as in-repo (SCOPE_ROOT must not become the bare repo's parent)"
+run_guard "${BARE_WT}" "{\"tool_input\":{\"file_path\":\"${BARE_BASE}/sibling/note.md\"}}"
+assert_exit "bare-repo sibling path allowed, not swallowed by SCOPE_ROOT" 0
+
+echo "case: the bare repo's own worktree still enforces the allowlist (guard is not disabled by the fallback)"
+run_guard "${BARE_WT}" "{\"tool_input\":{\"file_path\":\"${BARE_WT}/src/app.go\"}}"
+assert_exit "bare-repo worktree in-repo source write blocked" 2
+
+# ── #1072 review: ~/.claude.json belongs on the self-protection denylist ──
+# It is the user-scope Claude Code config holding mcpServers/enabledPlugins --
+# the same "writable here means arbitrary command execution" risk as
+# ~/.claude/settings.json's hook definitions, which the denylist already
+# covers.
+echo "case: out-of-repo Write to ~/.claude.json is blocked (self-protection denylist)"
+run_guard "${OOR_REPO}" "{\"tool_input\":{\"file_path\":\"${OOR_HOME}/.claude.json\"}}"
+assert_exit "out-of-repo ~/.claude.json blocked" 2
+if [[ "${GUARD_STDERR}" == *"session-security-sensitive"* ]]; then
+    pass
+else
+    fail "out-of-repo ~/.claude.json blocked: stderr should contain the self-protection wording, got: ${GUARD_STDERR}"
+fi
+
+echo "case: out-of-repo Bash redirect to ~/.claude.json is blocked (self-protection denylist)"
+JSON=$(jq -n --arg cmd "echo x > ${BASH_SENSITIVE_HOME}/.claude.json" '{tool_input:{command:$cmd}}')
+run_guard "${BASH_REPO}" "${JSON}"
+assert_exit "out-of-repo bash ~/.claude.json blocked" 2
+
+echo "case: out-of-repo Write to ~/.claude.json.tmp is still allowed (negative control)"
+run_guard "${OOR_REPO}" "{\"tool_input\":{\"file_path\":\"${OOR_HOME}/.claude.json.tmp\"}}"
+assert_exit "out-of-repo ~/.claude.json.tmp allowed" 0
 
 # ── Summary ──────────────────────────────────────────────────────────
 echo
