@@ -274,6 +274,8 @@ the fast path:
 Anything inconclusive — an unreadable `.plans/` directory, a malformed config —
 fails closed to the interactive path.
 
+Planning also auto-adopts a settled posture: a posture already settled verbatim in a `Refined`, trusted-author ticket's `### Decisions`/`### Assumptions (auto-adopted)` is auto-adopted rather than re-asked — the decision already reached at `/cenci:refine`'s Confirmation Gate is not confirmed a second time. This narrows only the confirm/overrule trigger, never its cap priority, and only when the delegation's forwarded provenance is positively verified (a `Refined` label plus a trusted author association, and a quotable bullet the codebase doesn't contradict); unverifiable provenance falls back to asking: missing provenance, a missing `Refined` label, an untrusted or unrecognized author association, ticketless mode, or a failed resume-time provenance read all ask exactly as before.
+
 **The merge chain is fail-closed at every link.** "Green" is pass-only and strict: at
 least one check must exist and every check's bucket must be exactly `pass`. A
 cancelled, skipped, empty, or unrecognized bucket each hold under their own reason.
