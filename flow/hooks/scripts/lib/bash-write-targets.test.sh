@@ -41,7 +41,7 @@ fi
 # shellcheck source=/dev/null
 . "${LIB_SH}"
 
-for fn in bwt_has_write_candidate bwt_extract_targets bwt_zero_parse_suspicious bwt_has_delimited_tee bwt_is_exempt_device bwt_expand_safe_vars bwt_is_unresolved bwt_is_unresolved_literal bwt_is_apply_patch_payload bwt_apply_patch_targets; do
+for fn in bwt_has_write_candidate bwt_extract_targets bwt_zero_parse_suspicious bwt_has_delimited_tee bwt_has_reparse_verb bwt_has_unmodelled_write_verb bwt_zero_parse_inert bwt_is_exempt_device bwt_expand_safe_vars bwt_is_unresolved bwt_is_unresolved_literal bwt_is_apply_patch_payload bwt_apply_patch_targets; do
     if ! command -v "${fn}" >/dev/null 2>&1; then
         fail "lib did not define expected function: ${fn}"
     fi
@@ -1510,6 +1510,134 @@ if [[ -z "${AP_NO_AWK_OUT}" ]]; then
 else
     fail "bwt_apply_patch_targets with no awk on PATH: expected no output, got <${AP_NO_AWK_OUT}>"
 fi
+
+# ── #1084: writesyntax output mode, bwt_has_reparse_verb, inertness ──
+# The tokenizer already tracked, precisely, whether it committed to any
+# PATH-writing interpretation; it just never reported it, so callers fell
+# back to a quoting-blind `*'>'*` substring test. These cases pin the three
+# distinctions that separation depends on.
+
+# assert_writesyntax <label> <cmd> <expected 0|1>
+assert_writesyntax() {
+    local label="$1" cmd="$2" expected="$3" actual
+    actual="$(bwt_extract_targets "${cmd}" writesyntax)"
+    if [[ "${actual}" == "${expected}" ]]; then
+        pass
+    else
+        fail "${label}: writesyntax(<${cmd}>) = <${actual}>, expected <${expected}>"
+    fi
+}
+
+echo "case: writesyntax mode reports path-writing syntax, not raw '>' characters"
+assert_writesyntax "plain redirect is path-writing" "echo x > /abs/f" 1
+assert_writesyntax "appending redirect is path-writing" "echo x >> /abs/f" 1
+assert_writesyntax "clobbering redirect is path-writing" "echo x >| /abs/f" 1
+assert_writesyntax "&> is path-writing" "cmd &> /abs/f" 1
+assert_writesyntax "tee is path-writing" "echo x | tee /abs/f" 1
+# The three shapes the quoting-blind test could not tell apart from a write.
+assert_writesyntax "single-quoted > is NOT path-writing" \
+    "grep -oP '(?<=>)[^<>{}]{25,}(?=<)' index.njk" 0
+assert_writesyntax "double-quoted > is NOT path-writing" 'echo "a -> b"' 0
+assert_writesyntax "fd-dup 2>&1 is NOT path-writing" "grep -r foo /abs/src 2>&1" 0
+assert_writesyntax "escaped > is NOT path-writing" 'echo a \> b' 0
+# An fd-dup with a NON-numeric operand is a real target and is extracted, so
+# it never reaches the zero-target state this mode exists to refine.
+assert_targets ">& with a filename operand still extracts the target" \
+    "cmd >& /abs/f" "/abs/f"
+
+echo "case: writesyntax mode does not disturb ordinary extraction"
+assert_targets "default mode unchanged by the new parameter" \
+    "echo x > /abs/f" "/abs/f"
+EMPTY_MODE_OUT="$(bwt_extract_targets "echo x > /abs/f" "")"
+if [[ "${EMPTY_MODE_OUT}" == "/abs/f" ]]; then
+    pass
+else
+    fail "explicitly-empty mode argument should behave as default, got <${EMPTY_MODE_OUT}>"
+fi
+
+echo "case: bwt_has_reparse_verb matches delimited verbs only"
+assert_true "eval is a re-parse verb" bwt_has_reparse_verb 'eval "echo x > /abs/f"'
+assert_true "sh -c is a re-parse verb" bwt_has_reparse_verb 'sh -c "echo x > /abs/f"'
+assert_true "/bin/sh is a re-parse verb (path prefix is a boundary)" \
+    bwt_has_reparse_verb '/bin/sh -c "echo x > /abs/f"'
+assert_true "awk is a re-parse verb (its own print > primitive)" \
+    bwt_has_reparse_verb "awk 'BEGIN{print 1 > \"/abs/f\"}'"
+assert_true "xargs is a re-parse verb" bwt_has_reparse_verb 'echo f | xargs -I{} sh -c "echo x > {}"'
+assert_true "find is a re-parse verb (-exec)" bwt_has_reparse_verb 'find . -exec sh -c "echo x > f" \;'
+# Word-boundary negatives: an alnum/underscore/hyphen-embedded verb name can
+# never invoke the verb, so matching it would be a pure over-block.
+assert_false "node_modules does not match 'node'" bwt_has_reparse_verb 'grep -r x /abs/node_modules'
+assert_false "findme does not match 'find'" bwt_has_reparse_verb 'git log --grep=findme'
+assert_false "sh-utils does not match 'sh'" bwt_has_reparse_verb 'ls /abs/sh-utils'
+assert_false "a plain read pipeline has no re-parse verb" \
+    bwt_has_reparse_verb "grep -oP '(?<=>)x' /abs/index.njk | head -60"
+
+echo "case: bwt_has_unmodelled_write_verb keeps today's incidental coverage"
+# `cp <root>/x <root>/AGENTS.md 2>&1` reaches the callers' backstop (the
+# fd-dup supplies the `>`), extracts zero targets, and blocks on the
+# root-mention scan today. The fd-dup is not path-writing and `cp` is not a
+# re-parse verb, so without this second bound #1084 would have silently
+# dropped that (incidental, but real) coverage.
+assert_true "cp is an unmodelled write verb" bwt_has_unmodelled_write_verb "cp /abs/x /abs/AGENTS.md 2>&1"
+assert_true "mv is an unmodelled write verb" bwt_has_unmodelled_write_verb "mv /abs/x /abs/y 2>&1"
+assert_true "rm is an unmodelled write verb" bwt_has_unmodelled_write_verb "rm -rf /abs/build 2>&1"
+assert_false "a plain read pipeline names no write verb" \
+    bwt_has_unmodelled_write_verb "grep -oP '(?<=>)x' /abs/index.njk | head -60"
+# Word boundaries, same rule as the re-parse list.
+assert_false "'components' does not match 'cp'" bwt_has_unmodelled_write_verb 'grep -r x /abs/components'
+assert_false "'formatted' does not match 'mv'" bwt_has_unmodelled_write_verb 'grep -n formatted /abs/f'
+assert_false "a real redirect is never inert (write verb present)" \
+    bwt_zero_parse_inert "cp /abs/x /abs/AGENTS.md 2>&1"
+
+echo "case: bwt_zero_parse_inert proves inertness only for provably-inert commands"
+assert_true "quoted-regex read pipeline is inert" \
+    bwt_zero_parse_inert "cd /abs/src && grep -oP '(?<=>)[^<>{}]{25,}(?=<)' index.njk | head -60"
+assert_true "fd-dup read is inert" bwt_zero_parse_inert "grep -r foo /abs/src 2>&1"
+assert_true "quoted HTML tag read is inert" bwt_zero_parse_inert "grep -n '<div>' /abs/index.njk"
+assert_false "a real redirect is never inert" bwt_zero_parse_inert "echo x > /abs/f"
+assert_false "eval with a quoted redirect is never inert" \
+    bwt_zero_parse_inert 'eval "echo x > /abs/f"'
+assert_false "awk with its own print > is never inert" \
+    bwt_zero_parse_inert "awk 'BEGIN{print 1 > \"/abs/f\"}'"
+assert_false "a tee invocation is never inert" bwt_zero_parse_inert "echo x | tee /abs/f"
+
+echo "case: bwt_zero_parse_inert fails closed when its tooling is unavailable"
+# Every failure shape must yield "not inert", restoring the caller's exact
+# pre-#1084 backstop behavior. Proving inertness is the ONLY path to 0.
+INERT_NO_AWK_BIN="${TEST_ROOT}/bin-no-awk-inert"
+mkdir -p "${INERT_NO_AWK_BIN}"
+INERT_READONLY_CMD="grep -oP '(?<=>)x' /abs/index.njk"
+if PATH="${INERT_NO_AWK_BIN}" bwt_zero_parse_inert "${INERT_READONLY_CMD}"; then
+    fail "bwt_zero_parse_inert with no awk on PATH: must fail closed (not inert), got inert"
+else
+    pass
+fi
+# wc backs bwt_extract_targets' length pre-check; without it the tokenizer
+# returns 5 and inertness must not be claimed either.
+INERT_NO_WC_BIN="${TEST_ROOT}/bin-no-wc-inert"
+mkdir -p "${INERT_NO_WC_BIN}"
+for tool in awk; do
+    ln -sf "$(command -v "${tool}")" "${INERT_NO_WC_BIN}/${tool}"
+done
+if PATH="${INERT_NO_WC_BIN}" bwt_zero_parse_inert "${INERT_READONLY_CMD}"; then
+    fail "bwt_zero_parse_inert with no wc on PATH: must fail closed (not inert), got inert"
+else
+    pass
+fi
+# A brace expansion in write-target position fails the tokenizer closed with
+# exit 6; inertness must never be claimed from a failed scan.
+assert_false "a fail-closed tokenizer exit is never inert" \
+    bwt_zero_parse_inert "echo x > /abs/f{1,2}"
+
+# Non-vacuity: the inert cases above must be decided by BOTH gates, not by
+# one of them accidentally answering for the other. Same read pipeline, one
+# gate flipped at a time.
+echo "case: bwt_zero_parse_inert non-vacuity -- each gate independently denies inertness"
+assert_true "baseline read pipeline is inert" bwt_zero_parse_inert "${INERT_READONLY_CMD}"
+assert_false "same pipeline + a re-parse verb only" \
+    bwt_zero_parse_inert "eval \"${INERT_READONLY_CMD}\""
+assert_false "same pipeline + path-write syntax only" \
+    bwt_zero_parse_inert "${INERT_READONLY_CMD} > /abs/out.txt"
 
 # ── Summary ──────────────────────────────────────────────────────────
 echo

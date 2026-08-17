@@ -838,6 +838,25 @@ elif [ -n "$TOOL_COMMAND" ]; then
         echo "Rewrite the command using a plain, directly-parseable tee form targeting the feature worktree (.worktrees/<id>-<desc>/) or a temp path."
       } >&2
       exit 2
+    elif bwt_zero_parse_inert "$TOOL_COMMAND"; then
+      # #1084: PROVABLY inert -- the tokenizer completed a clean scan,
+      # recognized no path-writing syntax (quoted `>`, an fd-dup, a
+      # comparison-region `>`), and the raw text names no re-parse verb
+      # (`eval`, `sh -c`, `awk`, `xargs`, ...). Skipping the raw-text scan
+      # here is the whole point: bwt_zero_parse_suspicious's `*'>'*` test is
+      # quoting-blind, so a read-only `grep -oP '(?<=>)...' <root>/x` or
+      # `grep -r foo <root>/src 2>&1` was blocked despite writing nothing,
+      # and told to "rewrite using a plain, directly-parseable redirect" --
+      # an instruction to invent a write. Agents, not humans, choose the
+      # command shape, so that misdirection was the expensive half.
+      #
+      # Ordering is load-bearing: this arm sits AFTER the unconditional
+      # delimited-tee block above (#810 Fix 2), so `{tee,cat} AGENTS.md`
+      # -- whose target is relative, with no root string for any scan to
+      # match -- is still blocked before inertness is ever considered.
+      # bwt_zero_parse_inert fails closed on every internal error, so any
+      # failure lands on the elif below with pre-#1084 behavior intact.
+      :
     elif bwt_zero_parse_suspicious "$TOOL_COMMAND"; then
       # #1072 Fix 1: $SCOPE_ROOT is added to the roots[] array (and the
       # BWT_SCAN_TEXT match below), guarded on SCOPE_ROOT_OK=1, ADDITIVE to
@@ -894,7 +913,14 @@ elif [ -n "$TOOL_COMMAND" ]; then
       if [ "$BWT_SCAN_HIT" -eq 1 ]; then
         {
           echo "BLOCKED: guard-main-worktree.sh could not extract this Bash command's write targets (unmodelled shell construct), and the raw command text mentions the main worktree root ($BWT_SCAN_HIT_ROOT): $TOOL_COMMAND"
-          echo "Rewrite the command using a plain, directly-parseable redirect (>, >>) or tee form targeting the feature worktree (.worktrees/<id>-<desc>/) or a temp path."
+          echo "If the command DOES write: rewrite it using a plain, directly-parseable redirect (>, >>) or tee form targeting the feature worktree (.worktrees/<id>-<desc>/) or a temp path."
+          # #1084: an agent reading only the line above takes it as an
+          # instruction and invents a write it never intended -- the same
+          # main-worktree mutation the Write|Edit arm's message spends five
+          # lines forbidding. A command reaching here still carries genuine
+          # write-shaped or re-parsing text, but that text can be a second
+          # shell parse (eval, sh -c) rather than any write of its own.
+          echo "If the command performs NO write -- its write-shaped text comes from a re-parsing verb (eval, sh -c, xargs) or a shell-composed construct -- rewrite it without that text, or read files with your client's file-read tooling instead of a shell pipeline. NEVER add a redirect just to satisfy this message, and never route around it with git checkout/stash/apply or by copying files."
         } >&2
         exit 2
       fi

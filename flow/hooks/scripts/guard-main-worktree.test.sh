@@ -1843,14 +1843,23 @@ assert_exit "bash redirect to main worktree from feature-worktree cwd blocked (#
 # feature worktree from this cwd) -- an unparseable/unmodeled Bash write
 # whose raw text names the main worktree path, but never mentions the
 # feature worktree path at all, previously escaped this backstop entirely.
-# A quoted `>` (inside the echo argument) produces zero extracted targets
+# A quoted `>` (inside the eval argument) produces zero extracted targets
 # and trips bwt_zero_parse_suspicious, exactly like the existing
 # allowlisted-subtree-neutralization cases above -- but this raw text
 # mentions ONLY Q1_REPO (the main worktree / SCOPE_ROOT), never
 # Q1_FEATURE_WORKTREE ($ROOT/$RESOLVED_ROOT from this cwd), isolating the
 # fix: pre-#1072 Fix 1 code would not have matched at all here.
+#
+# #1084 updated this case's COMMAND, never its assertion. It previously used
+# a bare `echo "a -> b, notes at <root>/README"`, which #1084 now proves
+# inert (no path-write syntax, no re-parse verb) and deliberately allows --
+# that command's suspicion was the false positive #1084 exists to remove.
+# The `eval` wrapper restores a genuinely non-inert command with the same
+# shape (quoted `>`, zero extracted targets, main-worktree-only mention), so
+# this case still isolates exactly what it was written to prove: SCOPE_ROOT
+# is among the roots the raw-text backstop scan matches against.
 echo "case: zero-parse Bash command whose raw text mentions ONLY the main worktree path (not the feature worktree) is blocked (#1072 Fix 1)"
-JSON=$(jq -n --arg cmd "echo \"a -> b, notes at ${Q1_REPO}/README\"" '{tool_input:{command:$cmd}}')
+JSON=$(jq -n --arg cmd "eval \"echo a > ${Q1_REPO}/README\"" '{tool_input:{command:$cmd}}')
 run_guard "${Q1_FEATURE_WORKTREE}" "${JSON}"
 assert_exit "zero-parse backstop catches main-worktree-only mention from feature-worktree cwd (#1072 Fix 1)" 2
 if [[ "${GUARD_STDERR}" == *BLOCKED* ]]; then
@@ -2030,6 +2039,97 @@ assert_exit "out-of-repo bash ~/.claude.json blocked" 2
 echo "case: out-of-repo Write to ~/.claude.json.tmp is still allowed (negative control)"
 run_guard "${OOR_REPO}" "{\"tool_input\":{\"file_path\":\"${OOR_HOME}/.claude.json.tmp\"}}"
 assert_exit "out-of-repo ~/.claude.json.tmp allowed" 0
+
+# ── #1084: the zero-parse backstop must not block PROVABLY INERT commands ──
+# The backstop's suspicion test (bwt_zero_parse_suspicious) is a quoting-blind
+# `*'>'*` substring match, so a read-only command whose only `>` characters
+# live inside quotes -- a PCRE lookaround, an HTML tag, an `2>&1` fd-dup --
+# reached the raw-text root-mention scan and was blocked despite writing
+# nothing at all. Agents, not humans, choose the command shape, so this
+# recurred constantly and its remediation text ("rewrite using a plain,
+# directly-parseable redirect") actively misdirects an agent that never
+# intended a write. bwt_zero_parse_inert now proves such a command inert and
+# the guard skips the backstop for it; every case below that is NOT provably
+# inert must keep blocking exactly as before.
+INERT_REPO="${TEST_ROOT}/inert-backstop"
+make_git_repo "${INERT_REPO}"
+mkdir -p "${INERT_REPO}/.cenci" "${INERT_REPO}/src"
+touch "${INERT_REPO}/.cenci/config.json"
+
+echo "── #1084: provably-inert read-only commands are allowed ──"
+
+# The reported case: PCRE lookbehind/lookahead put `>` and `<` inside single
+# quotes, and the `cd` prefix names the repo root, so the root-mention scan hit.
+echo "case: quoted-regex grep naming the repo root is allowed (#1084 reported case)"
+JSON=$(jq -n --arg cmd "cd ${INERT_REPO}/src && grep -oP '(?<=>)[^<>{}]{25,}(?=<)' index.njk | grep -v '^\\s*\$' | head -60" '{tool_input:{command:$cmd}}')
+run_guard "${INERT_REPO}" "${JSON}"
+assert_exit "quoted-regex grep naming repo root allowed (#1084)" 0
+
+# `2>&1` sets mode="fddup", emits nothing, and leaves zero targets -- an
+# fd-dup writes to an already-open fd, never to a path.
+echo "case: 2>&1 on a read naming the repo root is allowed (#1084)"
+JSON=$(jq -n --arg cmd "grep -r foo ${INERT_REPO}/src 2>&1" '{tool_input:{command:$cmd}}')
+run_guard "${INERT_REPO}" "${JSON}"
+assert_exit "2>&1 read naming repo root allowed (#1084)" 0
+
+echo "case: quoted HTML tag text naming the repo root is allowed (#1084)"
+JSON=$(jq -n --arg cmd "grep -n '<div>' ${INERT_REPO}/src/index.njk" '{tool_input:{command:$cmd}}')
+run_guard "${INERT_REPO}" "${JSON}"
+assert_exit "quoted HTML tag grep naming repo root allowed (#1084)" 0
+
+echo "── #1084: non-inert commands must keep blocking (regression controls) ──"
+
+# Real redirect, real target -- never reaches the backstop at all; blocked by
+# the ordinary parsed-target path. Proves the fix did not disarm the guard.
+echo "case: plain in-root redirect still blocked (#1084 control)"
+JSON=$(jq -n --arg cmd "echo x > ${INERT_REPO}/AGENTS.md" '{tool_input:{command:$cmd}}')
+run_guard "${INERT_REPO}" "${JSON}"
+assert_exit "plain in-root redirect still blocked (#1084)" 2
+
+# The re-parse verbs are why "all `>` are quoted" can never mean "inert":
+# quoted text handed to a second shell parse is exactly what the backstop
+# exists for. Each of these has ZERO path-write syntax at this parse level.
+for verb_case in \
+    "eval|eval \"echo x > ${INERT_REPO}/AGENTS.md\"" \
+    "sh -c|sh -c \"echo x > ${INERT_REPO}/AGENTS.md\"" \
+    "bash -c|bash -c \"echo x > ${INERT_REPO}/AGENTS.md\"" \
+    "xargs|echo ${INERT_REPO}/AGENTS.md | xargs -I{} sh -c \"echo x > {}\"" \
+    "awk print >|awk 'BEGIN{print 1 > \"${INERT_REPO}/AGENTS.md\"}'"; do
+    verb_label="${verb_case%%|*}"
+    verb_cmd="${verb_case#*|}"
+    echo "case: re-parse verb '${verb_label}' with quoted redirect still blocked (#1084)"
+    JSON=$(jq -n --arg cmd "${verb_cmd}" '{tool_input:{command:$cmd}}')
+    run_guard "${INERT_REPO}" "${JSON}"
+    assert_exit "re-parse verb '${verb_label}' still blocked (#1084)" 2
+done
+
+# #810 Fix 2's unconditional delimited-tee branch must stay AHEAD of the
+# inert check: `{tee,cat}` brace-expands to a real tee whose target is
+# relative, so there is no root string for any scan to match.
+echo "case: brace-expanded tee still blocked unconditionally (#810 Fix 2 ordering, #1084)"
+JSON=$(jq -n --arg cmd "{tee,cat} ${INERT_REPO}/AGENTS.md" '{tool_input:{command:$cmd}}')
+run_guard "${INERT_REPO}" "${JSON}"
+assert_exit "brace-expanded tee still blocked (#1084)" 2
+
+# Non-vacuity: prove the allowed cases above are decided by the inert check
+# and not by some unrelated early exit. Same quoted-regex shape, but with a
+# re-parse verb wrapped around it -- the ONLY difference -- must block.
+echo "case: non-vacuity -- the same quoted-regex command inside eval blocks (#1084)"
+JSON=$(jq -n --arg cmd "eval \"grep -oP '(?<=>)x' ${INERT_REPO}/src/index.njk\"" '{tool_input:{command:$cmd}}')
+run_guard "${INERT_REPO}" "${JSON}"
+assert_exit "quoted-regex inside eval blocks (#1084 non-vacuity)" 2
+
+echo "── #1084: zero-parse block message must not instruct an agent to write ──"
+# The old remediation text told an agent whose command performs no write to
+# "rewrite the command using a plain, directly-parseable redirect" -- an
+# instruction to invent a write. The message must now say so explicitly.
+JSON=$(jq -n --arg cmd "eval \"echo x > ${INERT_REPO}/AGENTS.md\"" '{tool_input:{command:$cmd}}')
+run_guard "${INERT_REPO}" "${JSON}"
+if [[ "${GUARD_STDERR}" == *"NEVER add a redirect"* ]]; then
+    pass
+else
+    fail "zero-parse message must warn against inventing a redirect, got: ${GUARD_STDERR}"
+fi
 
 # ── Summary ──────────────────────────────────────────────────────────
 echo
