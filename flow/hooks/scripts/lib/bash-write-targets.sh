@@ -302,6 +302,135 @@ bwt_has_delimited_tee() {
 }
 
 # ---------------------------------------------------------------------------
+# bwt_has_reparse_verb <command>
+#
+# True (0) when <command>'s raw text contains a DELIMITED token naming a verb
+# that hands text to a SECOND parse -- another shell (`eval`, `sh -c`), an
+# embedded interpreter with its own write primitives (`awk 'print > f'`,
+# `perl`, `python`), or a wrapper that executes a command string assembled
+# from its own arguments (`xargs`, `find -exec`, `ssh`, `sudo`).
+#
+# This exists for exactly one purpose: bounding bwt_zero_parse_inert below.
+# "Every `>` in this command is quoted" can NEVER mean "this command writes
+# nothing" while a re-parse verb is present, because quoted text handed to a
+# second parse is precisely what the callers empty-parse backstop exists to
+# catch -- `eval "echo x > <root>/AGENTS.md"` has no path-write syntax at
+# THIS parse level and really does write.
+#
+# Deliberately a DENYLIST, and deliberately NOT exhaustive: it is the guard
+# on a widening (a case that would otherwise be blocked becoming allowed), so
+# a verb missing from it costs one layer of defense in depth on a path that
+# already has documented holes -- never a change to the load-bearing parsed-
+# target path, which is unaffected by any of this. Fail-closed in the same
+# direction as bwt_has_delimited_tee: awk missing -> return 0 (assume a verb
+# is present -> not inert -> the caller keeps its pre-#1084 behavior).
+#
+# Word boundaries exclude [A-Za-z0-9_-] on both sides, so `node_modules`,
+# `sh-utils`, and `findme` do not match, while `/bin/sh` and `$(eval ...)`
+# do -- `/`, `.`, `$`, and quotes are all boundaries.
+#
+# NOT included, as a deliberate FP/coverage trade: `git`, `npm`, `make`, and
+# similar VCS/build wrappers. Each has some re-parsing corner (`git submodule
+# foreach`, an npm script), but including them would keep blocking the very
+# commands agents issue most (`git -C <root> diff 2>&1`), and this guard
+# already does not model git's write verbs (`checkout`, `stash`) at all --
+# see the "Named residuals" block in this file's header.
+bwt_has_reparse_verb() {
+  command -v awk >/dev/null 2>&1 || return 0
+  BWT_CMD="$1" awk 'BEGIN {
+    verbs = "eval|exec|source|sh|bash|zsh|ksh|dash|ash|csh|tcsh|fish"
+    verbs = verbs "|xargs|env|nohup|timeout|watch|sudo|su|doas|setsid"
+    verbs = verbs "|unshare|chroot|stdbuf|nice|ionice"
+    verbs = verbs "|ssh|docker|podman|kubectl"
+    verbs = verbs "|awk|gawk|mawk|nawk|sed|perl|python|python2|python3"
+    verbs = verbs "|ruby|node|deno|bun|php|lua|tclsh|Rscript"
+    verbs = verbs "|find|parallel"
+    if (ENVIRON["BWT_CMD"] ~ "(^|[^A-Za-z0-9_-])(" verbs ")([^A-Za-z0-9_-]|$)") exit 0
+    exit 1
+  }'
+}
+
+# ---------------------------------------------------------------------------
+# bwt_has_unmodelled_write_verb <command>
+#
+# True (0) when <command>'s raw text contains a DELIMITED token naming a verb
+# that writes files WITHOUT any redirect or `tee` syntax -- `cp`, `mv`,
+# `dd`, `sed -i`-style in-place editors, `rm`, `mkdir`, `patch`, and friends.
+# This tokenizer deliberately does not model any of them (see the "Named
+# residuals" block in this file's header, and #808).
+#
+# The second bound on bwt_zero_parse_inert below, and the reason it never
+# REMOVES coverage that exists today. A command like
+# `cp <root>/x <root>/AGENTS.md` contains no `>` and no `tee`, so
+# bwt_has_write_candidate rejects it upstream and the callers backstop is
+# never reached at all -- but the same command with a stray `2>&1` appended
+# does reach it, and blocks on the root-mention scan. That coverage is
+# incidental (it depends on an unrelated fd-dup being present), yet it is
+# real, and #1084's widening must not silently drop it: an inert command
+# must name no write verb either.
+#
+# Same fail-closed direction and word-boundary rules as
+# bwt_has_reparse_verb above.
+bwt_has_unmodelled_write_verb() {
+  command -v awk >/dev/null 2>&1 || return 0
+  BWT_CMD="$1" awk 'BEGIN {
+    verbs = "cp|mv|dd|truncate|install|rsync|ln|patch"
+    verbs = verbs "|rm|rmdir|mkdir|touch|chmod|chown|chgrp"
+    verbs = verbs "|tar|unzip|gzip|gunzip|zip"
+    if (ENVIRON["BWT_CMD"] ~ "(^|[^A-Za-z0-9_-])(" verbs ")([^A-Za-z0-9_-]|$)") exit 0
+    exit 1
+  }'
+}
+
+# ---------------------------------------------------------------------------
+# bwt_zero_parse_inert <command>
+#
+# True (0) only when <command> is PROVABLY inert: the tokenizer completed a
+# clean scan, recognized no path-writing syntax at all (see the "writesyntax"
+# output mode of bwt_extract_targets), and the raw text names neither a
+# re-parse verb nor an unmodelled write verb. A caller may then skip its
+# empty-parse backstop entirely.
+#
+# PRECONDITION: call this ONLY after bwt_extract_targets returned 0 with zero
+# targets -- it is the refinement of that ambiguous state (#1084), not a
+# standalone write test. On any other input the answer is meaningless.
+#
+# WHY THIS IS NEEDED: zero targets is byte-identical for "this command
+# genuinely writes nothing" and "the tokenizer met a construct it does not
+# model", and bwt_zero_parse_suspicious separates them with a quoting-blind
+# `*'>'*` substring test. That test matches a PCRE lookaround
+# (`grep -oP '(?<=>)...'`), an HTML tag in a search pattern (`grep '<div>'`),
+# and an fd-dup (`2>&1`) -- so a read-only command naming the repo root was
+# blocked with remediation text instructing the agent to "rewrite using a
+# plain, directly-parseable redirect", i.e. to invent a write it never
+# intended. The tokenizer already tracks quote state and region suppression
+# precisely enough to answer this; it simply never reported it.
+#
+# FAIL-CLOSED IN EVERY DIRECTION: awk or wc missing, a command too long to
+# inspect, a brace-expansion or nested-substitution fail-closed exit, or any
+# unexpected output all yield 1 (not inert), which restores the caller's
+# exact pre-#1084 behavior. Proving inertness is the only path to 0.
+bwt_zero_parse_inert() {
+  # Ordered cheapest-first: each raw-text verb scan needs one awk exec, the
+  # tokenizer needs a full re-scan of the command.
+  if bwt_has_reparse_verb "$1"; then
+    return 1
+  fi
+  if bwt_has_unmodelled_write_verb "$1"; then
+    return 1
+  fi
+  # Explicitly checked, never unchecked command substitution on this
+  # security-critical path (root AGENTS.md): bwt_extract_targets fails closed
+  # with 3/4/5/6/7 and emits nothing, and an empty or unexpected value can
+  # never equal "0" below, so both failure shapes land on "not inert".
+  if ! _bwt_inert_ws=$(bwt_extract_targets "$1" writesyntax); then
+    return 1
+  fi
+  [ "$_bwt_inert_ws" = "0" ] || return 1
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # bwt_is_exempt_device <target>
 #
 # True for /dev/null, /dev/stdout, /dev/stderr, and /dev/fd/* -- flow's own
@@ -645,10 +774,28 @@ bwt_is_unresolved_literal() {
 # non-portable record-separator trick to preserve embedded newlines
 # faithfully) -- ENVIRON values are passed through unprocessed, embedded
 # newlines included.
+#
+# Output mode (#1084): an optional second argument selects what a SUCCESSFUL
+# scan prints. Empty/absent (every pre-#1084 caller) prints the extracted
+# targets, one per line, unchanged. "writesyntax" instead prints a single
+# line -- `1` when the scan recognized PATH-WRITING syntax (a redirect
+# operator taking a filename target, or an armed `tee` invocation), `0` when
+# it did not. Deliberately NOT counted as path-writing: an fd-dup (`2>&1`,
+# `>&2`), which writes to an already-open descriptor and never to a path,
+# and a `>` inside a closed `[[ ]]`/`(( ))` comparison region, which is a
+# comparison operator and never a redirect. The flag is set at exactly the
+# points the scan commits to those interpretations, so it reuses this
+# tokenizer's existing quote/escape/region state rather than re-deriving it
+# with a second parser. Every fail-closed exit (3, 4, 5, 6, 7) applies to
+# this mode identically and still emits nothing, so a caller that treats
+# non-zero as "assume write syntax present" stays fail-closed.
 bwt_extract_targets() {
   command -v awk >/dev/null 2>&1 || return 3
 
   _bwt_cmd="$1"
+  # `${2-}`, not `$2`: this library is sourced by test suites running under
+  # `set -u`, where a bare `$2` on a one-argument call would abort the caller.
+  _bwt_mode="${2-}"
 
   # Fix D (#795 round 2): the OS's MAX_ARG_STRLEN ceiling (128 KiB / 131072
   # bytes on Linux) caps a single env-var string handed to execve. An
@@ -674,7 +821,7 @@ bwt_extract_targets() {
     return 4
   fi
 
-  BWT_CMD="$_bwt_cmd" awk '
+  BWT_CMD="$_bwt_cmd" BWT_MODE="$_bwt_mode" awk '
     BEGIN {
       sq = sprintf("%c", 39)  # single quote
       dq = sprintf("%c", 34)  # double quote
@@ -690,6 +837,16 @@ bwt_extract_targets() {
       wordhas = 0
       mode = "" # "" | "target" | "fddup"
       tee = 0   # 0=not-in-tee 1=tee-options-phase 2=tee-operand-phase
+      # pathwrite (#1084): latched to 1 the moment this scan commits to
+      # interpreting something as syntax that writes to a FILENAME -- a
+      # redirect operator entering mode="target", or a basename-"tee" word
+      # arming the tee operand scan. Never set for mode="fddup" (`2>&1`
+      # writes to an already-open descriptor, never a path) and never
+      # reachable from a suppressed `[[ ]]`/`(( ))` region (that `>` is a
+      # comparison operator and returns to the word accumulator before any
+      # redirect dispatch runs). Reported only in "writesyntax" output mode;
+      # it never affects extraction itself.
+      pathwrite = 0
       # wtilde: 1 when the current word began with a PLAIN UNQUOTED tilde --
       # the only form a real shell tilde-expands. A word whose leading ~
       # arrived via quotes or a backslash escape is a literal filename
@@ -892,14 +1049,17 @@ bwt_extract_targets() {
           if (nc == ">") {
             i++
             mode = "target"
+            pathwrite = 1
           } else if (nc == "|") {
             i++
             mode = "target"
+            pathwrite = 1
           } else if (nc == "&") {
             i++
             mode = "fddup"
           } else {
             mode = "target"
+            pathwrite = 1
           }
           continue
         }
@@ -915,6 +1075,7 @@ bwt_extract_targets() {
             }
             # Bare &> and &>> are both real-target forms, never fd dups.
             mode = "target"
+            pathwrite = 1
           } else {
             # Plain job-control `&` is a statement/command-boundary
             # separator, same as `;`/`|`.
@@ -965,7 +1126,16 @@ bwt_extract_targets() {
       # from inside mark_regions() itself (called once, before this loop
       # starts at all -- see mark_regions()), so outn is guaranteed to still
       # be 0 at that point regardless.
-      for (k = 1; k <= outn; k++) print outbuf[k]
+      #
+      # #1084: "writesyntax" mode reports the pathwrite flag INSTEAD of the
+      # targets, and only from here -- the same "printed only on a fully
+      # successful scan" guarantee the target output has, so every
+      # fail-closed exit above still emits nothing in this mode too.
+      if (ENVIRON["BWT_MODE"] == "writesyntax") {
+        print pathwrite
+      } else {
+        for (k = 1; k <= outn; k++) print outbuf[k]
+      }
     }
 
     # is_boundary_char(lastsig, beforesig) (#810 round-4 security review):
@@ -1580,7 +1750,7 @@ bwt_extract_targets() {
       # suppression above).
       bn = w
       sub(/.*\//, "", bn) # basename, so /usr/bin/tee and ./tee are matched too
-      if (bn == "tee" && !wregion) tee = 1
+      if (bn == "tee" && !wregion) { tee = 1; pathwrite = 1 }
     }
 
     # emit(w) -- buffer an extracted target into outbuf[] (printed only once
