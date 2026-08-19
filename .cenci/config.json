@@ -9,9 +9,6 @@
       "shellcheck"
     ]
   },
-  "planning": {
-    "autonomy": "lean"
-  },
   "projects": [
     {
       "slug": "flow",
