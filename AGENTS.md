@@ -47,7 +47,7 @@ Each plugin versions independently:
 ## Reference Docs
 
 On-demand topic docs live in `docs/` at the repo root. Read the file matching your work area:
-- `docs/autonomous-loop.md` — the user-facing guide to the four opt-in autonomy switches (lean planning, `dispatch.planRefined`, the `automerge` policy block, `automerge.enabled`), their quick start, and the automerge condition-chain legend; read before changing any of those switches' user-visible behavior so the guide stays in sync
+- `docs/autonomous-loop.md` — the user-facing guide to the five opt-in autonomy switches (lean planning, `dispatch.planRefined`, the `automerge` policy block, `automerge.enabled`, `planning.attended`), their quick start, and the automerge condition-chain legend; read before changing any of those switches' user-visible behavior so the guide stays in sync
 - `docs/git-workflow.md` — branching, commits, PRs, versioning
 - `docs/cli-conventions.md` — CLI grammar, alias, env-var, and runtime-object naming; read before touching any user-facing command surface
 - `docs/health-gates.md` — per-project local health gates (`gateCommand`), consumed by the implement pipeline's baseline check and by `babysit`/`ci-repair`; read before adding or changing a project's gate or touching `babysit`/`ci-repair`'s pre-push verification

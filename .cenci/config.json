@@ -114,6 +114,9 @@
       }
     }
   ],
+  "planning": {
+    "autonomy": "lean"
+  },
   "guidanceLocation": "AGENTS.md",
   "mcpServers": {
     "context7": true

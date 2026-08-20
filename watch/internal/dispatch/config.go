@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -117,6 +118,29 @@ type Config struct {
 	// fleet configuration can disable lean planning but can no longer
 	// independently authorize it for a repo that hasn't opted in itself.
 	PlanRefined bool
+
+	// PlanningAttended (#1086) is the fleet-wide "a human is at the keyboard
+	// on this machine" narrowing switch: when true, RunOnce's
+	// narrowAutonomiesAttended step maps every RepoAutonomyLean entry in the
+	// resolved autonomy map to RepoAutonomyAttended before Decide ever runs,
+	// suppressing unattended planning pickups/re-plans for lean repos on
+	// this machine specifically. Resolved leniently by LoadConfig (see
+	// resolvePlanningAttended below): an unparseable planning.attended value
+	// folds to true (the restrictive, safe direction) rather than aborting
+	// the whole config load. Default false -- additive only, so a config
+	// with no "planning" block is byte-identical to today's behavior.
+	PlanningAttended bool
+
+	// PlanningAttendedUnparseable (#1086) reports whether the raw
+	// planning.attended value in the loaded config could not be trusted (a
+	// non-bool value, or "planning" itself not a JSON object) -- set
+	// whenever resolvePlanningAttended had to fold to the restrictive
+	// PlanningAttended=true default rather than reading an explicit value.
+	// RunOnce logs exactly one line naming planning.attended when this is
+	// true, so a broken fleet config is discoverable without ever aborting
+	// the dispatch pass (contrast reloadConfig's whole-file-JSON-corruption
+	// abort path, which this field must never widen).
+	PlanningAttendedUnparseable bool
 }
 
 // DefaultConfig returns the built-in policy used when no config file (or no
@@ -188,7 +212,8 @@ func LoadConfig(path string) (Config, error) {
 		return cfg, fmt.Errorf("reading config %s: %w", path, err)
 	}
 	var f struct {
-		Dispatch *dispatchFile `json:"dispatch"`
+		Dispatch *dispatchFile    `json:"dispatch"`
+		Planning *json.RawMessage `json:"planning"`
 	}
 	if err := json.Unmarshal(data, &f); err != nil {
 		return cfg, fmt.Errorf("parsing config %s: %w", path, err)
@@ -197,7 +222,48 @@ func LoadConfig(path string) (Config, error) {
 		cfg = mergeConfig(cfg, *f.Dispatch)
 		cfg.LegacyTopLevelSession = legacyTopLevelSessionSet(f.Dispatch.LegacySession)
 	}
+	cfg.PlanningAttended, cfg.PlanningAttendedUnparseable = resolvePlanningAttended(f.Planning)
 	return cfg, nil
+}
+
+// resolvePlanningAttended decodes the fleet config's top-level "planning"
+// block leniently (#1086): unlike dispatchFile above, this is deliberately
+// NOT a typed struct, so a malformed value (a non-bool attended, or
+// "planning" itself not even a JSON object) can never fail the whole
+// json.Unmarshal in LoadConfig and abort the pass via reloadConfig
+// (dispatch.go's whole-file-corruption tick-skip path) -- which would also
+// stop ordinary Planned dispatch, an unrelated behavior this key must never
+// perturb. raw is nil when the "planning" key is absent entirely, resolving
+// to (false, false): additive-only, byte-identical to every pre-#1086
+// config. Any decode failure folds to (true, true) -- the restrictive,
+// fail-closed direction -- so an operator-visible mistake in this block
+// narrows planning rather than silently doing nothing.
+func resolvePlanningAttended(raw *json.RawMessage) (attended bool, unparseable bool) {
+	if raw == nil {
+		return false, false
+	}
+	var block map[string]json.RawMessage
+	if err := json.Unmarshal(*raw, &block); err != nil {
+		return true, true
+	}
+	attendedRaw, ok := block["attended"]
+	if !ok {
+		return false, false
+	}
+	// A literal JSON null unmarshals into a non-pointer bool as a silent
+	// no-op (err == nil, b left at its zero value false) -- without this
+	// explicit check that would resolve to (false, false), identical to no
+	// "planning" block at all, contradicting this function's fold-to-true
+	// contract. Detected the same way QueryPlanningAttended (fleet.go)
+	// detects it for its own strict-error path.
+	if bytes.Equal(bytes.TrimSpace(attendedRaw), []byte("null")) {
+		return true, true
+	}
+	var b bool
+	if err := json.Unmarshal(attendedRaw, &b); err != nil {
+		return true, true
+	}
+	return b, false
 }
 
 // legacyTopLevelSessionSet reports whether raw decodes to a non-empty

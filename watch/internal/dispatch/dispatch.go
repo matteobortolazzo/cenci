@@ -109,6 +109,18 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 	// can no longer be authorized by dispatch.planRefined alone.
 	autonomies := probeRepoAutonomies(cfg.Repos, syncs, out)
 
+	// Attended narrowing (#1086), immediately after the probe above and
+	// before anything downstream ever reads the map: maps every
+	// RepoAutonomyLean entry to RepoAutonomyAttended when the fleet
+	// planning.attended switch is on. Runs unconditionally over the whole
+	// map -- not scoped to repos with tickets this pass -- so the logged
+	// narrowed count reflects every enrolled repo, matching
+	// probeRepoAutonomies' own per-repo, per-pass scope. The probe's own log
+	// line above already reported each repo's true committed verdict, so
+	// this step's log line is purely additive discoverability, never a
+	// replacement for it.
+	narrowAutonomiesAttended(autonomies, cfg, out)
+
 	tickets, err := CollectTickets(cfg.Repos, syncStatuses(syncs), true, out)
 	if err != nil {
 		logf(out, "dispatch: collecting tickets: %v\n", err)
@@ -176,6 +188,38 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 		return decisions, errors.Join(applyErr, collectErr)
 	}
 	return decisions, firstNonNil(collectErr, applyErr)
+}
+
+// narrowAutonomiesAttended applies the fleet-wide planning.attended
+// narrowing step (#1086) to autonomies in place: when cfg.PlanningAttended
+// is on, every RepoAutonomyLean entry becomes RepoAutonomyAttended -- a
+// deny, never a grant, and never a mask of any other denial class -- so a
+// fresh Refined planning pickup or autonomous re-plan is suppressed for
+// lean repos while a human is at this machine's keyboard. Runs over every
+// entry already in the map (whatever probeRepoAutonomies populated this
+// pass, over every enrolled repo, not scoped to repos with tickets this
+// pass), never adding or removing repos from it. No-ops entirely, with zero
+// log output, when cfg.PlanningAttended is off -- the byte-identical-when-
+// off AC. Both log lines are prefixed "dispatch: " at column 0 (neither
+// contains the lazyboards-reserved " skip:"/" dispatch " substrings, per
+// formatDecision's doc comment).
+func narrowAutonomiesAttended(autonomies map[string]RepoAutonomy, cfg Config, out io.Writer) {
+	if !cfg.PlanningAttended {
+		return
+	}
+	narrowed := 0
+	for repo, a := range autonomies {
+		if a == RepoAutonomyLean {
+			autonomies[repo] = RepoAutonomyAttended
+			narrowed++
+		}
+	}
+	if narrowed > 0 {
+		logf(out, "dispatch: planning attended mode on (planning.attended); %d lean repo(s) narrowed\n", narrowed)
+	}
+	if cfg.PlanningAttendedUnparseable {
+		logf(out, "dispatch: planning.attended could not be parsed as a bool, folding to attended (restrictive)\n")
+	}
 }
 
 // readPlansForRepos reads every repo's .plans directory (#851), extracted

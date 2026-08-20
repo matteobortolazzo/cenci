@@ -365,6 +365,20 @@ const (
 	// (reasonAutonomyFetchUnconfirmed, decide.go) so an operator can tell "no
 	// fetch confirmed this pass, retryable" apart from every other denial.
 	RepoAutonomyFetchUnconfirmed RepoAutonomy = "fetch_unconfirmed"
+	// RepoAutonomyAttended (#1086) means the fleet-wide planning.attended
+	// switch narrowed this repo's committed RepoAutonomyLean verdict to a
+	// deny for this pass -- produced ONLY by RunOnce's narrowing step
+	// (narrowAutonomiesAttended, dispatch.go), immediately after
+	// probeRepoAutonomies and before Decide ever runs. It is never produced
+	// by the probe itself: probeRepoAutonomyDetailed/probeRepoAutonomies keep
+	// reporting the repo's true committed verdict in their own log line and
+	// via the exported QueryRepoAutonomy status probe, so an operator can
+	// always tell which layer (the repo's own commit, or this machine's
+	// attended flag) caused the deny. Narrowing-only: this value is reached
+	// exclusively from RepoAutonomyLean and never masks any other denial
+	// class (missing/malformed/unreadable/fetch_unconfirmed keep their own
+	// reasons).
+	RepoAutonomyAttended RepoAutonomy = "attended"
 )
 
 // PlanProbe classifies the collector's read of one .plans/<ticketId>-*.md

@@ -273,3 +273,191 @@ func TestPipelineStageGate_ConfigFalse_DispatchesFinalizedTicket(t *testing.T) {
 		t.Fatalf("Decide with pipelineStageGate=false on a finalized ticket = %+v, want a single dispatch decision", got)
 	}
 }
+
+// -- PlanningAttended lenient dispatch-pass reader (#1086) -------------------
+
+// TestLoadConfigPlanningAttended_KeyAbsent_DefaultsFalse locks in the
+// backward-compatible default: no top-level "planning" block at all resolves
+// PlanningAttended false and PlanningAttendedUnparseable false -- additive
+// only, every pre-#1086 config byte-identical in behavior.
+func TestLoadConfigPlanningAttended_KeyAbsent_DefaultsFalse(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"dispatch": {"defaultAgent": "codex"}}`), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.PlanningAttended {
+		t.Errorf("cfg.PlanningAttended = %v, want false when no planning block is present", cfg.PlanningAttended)
+	}
+	if cfg.PlanningAttendedUnparseable {
+		t.Errorf("cfg.PlanningAttendedUnparseable = %v, want false when no planning block is present", cfg.PlanningAttendedUnparseable)
+	}
+}
+
+// TestLoadConfigPlanningAttended_ExplicitTrue locks in that a well-formed
+// "planning": {"attended": true} round-trips cleanly with no unparseable
+// flag set.
+func TestLoadConfigPlanningAttended_ExplicitTrue(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"planning": {"attended": true}}`), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.PlanningAttended {
+		t.Errorf("cfg.PlanningAttended = %v, want true", cfg.PlanningAttended)
+	}
+	if cfg.PlanningAttendedUnparseable {
+		t.Errorf("cfg.PlanningAttendedUnparseable = %v, want false for a well-formed value", cfg.PlanningAttendedUnparseable)
+	}
+}
+
+// TestLoadConfigPlanningAttended_ExplicitFalse locks in that a well-formed
+// "planning": {"attended": false} round-trips cleanly.
+func TestLoadConfigPlanningAttended_ExplicitFalse(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"planning": {"attended": false}}`), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.PlanningAttended {
+		t.Errorf("cfg.PlanningAttended = %v, want false", cfg.PlanningAttended)
+	}
+	if cfg.PlanningAttendedUnparseable {
+		t.Errorf("cfg.PlanningAttendedUnparseable = %v, want false for a well-formed value", cfg.PlanningAttendedUnparseable)
+	}
+}
+
+// TestLoadConfigPlanningAttended_NonBoolAttendedFoldsToTrueAndFlagsUnparseable
+// covers the ticket's headline lenient-reader AC: a non-bool "attended"
+// value (e.g. the string "yes") must never fail the whole config load --
+// LoadConfig succeeds, PlanningAttended resolves to true (the restrictive,
+// safe direction), and PlanningAttendedUnparseable records that the value
+// was not trustworthy so RunOnce can log exactly one line naming
+// planning.attended.
+func TestLoadConfigPlanningAttended_NonBoolAttendedFoldsToTrueAndFlagsUnparseable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"planning": {"attended": "yes"}}`), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig returned an error for a non-bool planning.attended, want success: %v", err)
+	}
+	if !cfg.PlanningAttended {
+		t.Errorf("cfg.PlanningAttended = %v, want true (unparseable folds to the restrictive direction)", cfg.PlanningAttended)
+	}
+	if !cfg.PlanningAttendedUnparseable {
+		t.Error("cfg.PlanningAttendedUnparseable = false, want true for a non-bool attended value")
+	}
+}
+
+// TestLoadConfigPlanningAttended_NullAttendedFoldsToTrueAndFlagsUnparseable
+// covers the sibling AC case: "attended" is a literal JSON null. Go's
+// encoding/json treats unmarshaling null into a non-pointer bool as a
+// successful no-op (leaves it at zero value false), so without an explicit
+// null guard this would silently resolve to (false, false) -- identical to
+// no "planning" block at all -- instead of folding to the restrictive
+// direction like every other unparseable value.
+func TestLoadConfigPlanningAttended_NullAttendedFoldsToTrueAndFlagsUnparseable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"planning": {"attended": null}}`), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig returned an error for a null planning.attended, want success: %v", err)
+	}
+	if !cfg.PlanningAttended {
+		t.Errorf("cfg.PlanningAttended = %v, want true (null attended folds to the restrictive direction)", cfg.PlanningAttended)
+	}
+	if !cfg.PlanningAttendedUnparseable {
+		t.Error("cfg.PlanningAttendedUnparseable = false, want true for a null attended value")
+	}
+}
+
+// TestLoadConfigPlanningAttended_NonObjectPlanningFoldsToTrueAndFlagsUnparseable
+// covers the sibling AC case: "planning" itself is not even an object (a bare
+// number). LoadConfig must still succeed, PlanningAttended resolves true, and
+// PlanningAttendedUnparseable is set.
+func TestLoadConfigPlanningAttended_NonObjectPlanningFoldsToTrueAndFlagsUnparseable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"planning": 3}`), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig returned an error for a non-object planning block, want success: %v", err)
+	}
+	if !cfg.PlanningAttended {
+		t.Errorf("cfg.PlanningAttended = %v, want true (unparseable folds to the restrictive direction)", cfg.PlanningAttended)
+	}
+	if !cfg.PlanningAttendedUnparseable {
+		t.Error("cfg.PlanningAttendedUnparseable = false, want true for a non-object planning block")
+	}
+}
+
+// TestLoadConfigPlanningAttended_DispatchBlockMergeUnaffected covers the AC
+// that a malformed planning block in the same file must never perturb the
+// unrelated dispatch block's ordinary merge.
+func TestLoadConfigPlanningAttended_DispatchBlockMergeUnaffected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	content := `{
+  "planning": {"attended": "yes"},
+  "dispatch": {"defaultAgent": "codex", "concurrencyCap": 7}
+}`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.DefaultAgent != "codex" {
+		t.Errorf("cfg.DefaultAgent = %q, want %q (dispatch block merge unaffected by a malformed planning block)", cfg.DefaultAgent, "codex")
+	}
+	if cfg.ConcurrencyCap != 7 {
+		t.Errorf("cfg.ConcurrencyCap = %d, want 7 (dispatch block merge unaffected by a malformed planning block)", cfg.ConcurrencyCap)
+	}
+	if !cfg.PlanningAttended || !cfg.PlanningAttendedUnparseable {
+		t.Errorf("cfg.PlanningAttended = %v, cfg.PlanningAttendedUnparseable = %v, want (true, true)", cfg.PlanningAttended, cfg.PlanningAttendedUnparseable)
+	}
+}
+
+// TestLoadConfigPlanningAttended_WholeFileCorruptionStillErrors covers the
+// constraint that the new lenient planning reader must never widen
+// reloadConfig's existing tick-skip abort path: whole-file JSON corruption
+// keeps failing LoadConfig exactly as before this ticket.
+func TestLoadConfigPlanningAttended_WholeFileCorruptionStillErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{not json`), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	if _, err := LoadConfig(path); err == nil {
+		t.Error("LoadConfig on malformed whole-file JSON returned nil error, want error (unchanged reloadConfig tick-skip behavior)")
+	}
+}

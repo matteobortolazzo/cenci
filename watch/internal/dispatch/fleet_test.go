@@ -387,6 +387,234 @@ func TestSummarizeRepoPolicy_AbsentAndMalformed(t *testing.T) {
 	})
 }
 
+// -- SetPlanningAttended / QueryPlanningAttended (#1086) --------------------
+
+// rawPlanningBlock decodes just the top-level planning block straight off
+// disk, so assertions target the literal persisted JSON (same idiom as
+// rawAutomerge/rawPlanRefined above).
+type rawPlanningBlock struct {
+	Planning map[string]json.RawMessage `json:"planning"`
+}
+
+func mustDecodeRawPlanningBlock(t *testing.T, path string) rawPlanningBlock {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	var got rawPlanningBlock
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("decoding %s: %v\ncontent:\n%s", path, err, data)
+	}
+	return got
+}
+
+func planningAttendedOnDisk(t *testing.T, path string) *bool {
+	t.Helper()
+	raw := mustDecodeRawPlanningBlock(t, path)
+	attendedRaw, ok := raw.Planning["attended"]
+	if !ok {
+		return nil
+	}
+	var attended bool
+	if err := json.Unmarshal(attendedRaw, &attended); err != nil {
+		t.Fatalf("decoding planning.attended: %v", err)
+	}
+	return &attended
+}
+
+// TestSetPlanningAttended_CreatesFileAndParentDir locks in that arming the
+// fleet switch on a machine with no config file yet creates the file (and
+// its parent directory) rather than erroring — the first-run path for a
+// fresh install, mirroring SetAutomergeEnabled/SetPlanRefined.
+func TestSetPlanningAttended_CreatesFileAndParentDir(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cenci", "config.json")
+
+	if err := SetPlanningAttended(path, true); err != nil {
+		t.Fatalf("SetPlanningAttended: %v", err)
+	}
+
+	got := planningAttendedOnDisk(t, path)
+	if got == nil || !*got {
+		t.Errorf("planning.attended on disk = %v, want true", got)
+	}
+}
+
+// TestSetPlanningAttended_PreservesDispatchAutomergeAndSiblingKeys locks in
+// the raw-map read-modify-write contract shared with
+// SetPlanRefined/SetAutomergeEnabled: toggling planning.attended must
+// preserve an existing dispatch block (including repos), an existing
+// automerge block, any sibling key inside planning, and every other
+// top-level block verbatim.
+func TestSetPlanningAttended_PreservesDispatchAutomergeAndSiblingKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeFile(t, path, `{
+  "defaultAgent": "claude",
+  "dispatch": {
+    "repos": [{"repo": "owner/name", "dir": "/abs/dir"}],
+    "planRefined": true
+  },
+  "automerge": {
+    "enabled": true
+  },
+  "planning": {
+    "attended": false,
+    "note": "hand-written"
+  }
+}`)
+
+	if err := SetPlanningAttended(path, true); err != nil {
+		t.Fatalf("SetPlanningAttended: %v", err)
+	}
+
+	cfg := mustDecodeConfig(t, path)
+	if cfg.DefaultAgent != "claude" {
+		t.Errorf("defaultAgent = %q, want preserved %q", cfg.DefaultAgent, "claude")
+	}
+	if !reposContains(cfg.Dispatch.Repos, "owner/name", "/abs/dir") {
+		t.Errorf("dispatch.repos = %+v, want preserved entry owner/name -> /abs/dir", cfg.Dispatch.Repos)
+	}
+	if got := planRefinedOnDisk(t, path); got == nil || !*got {
+		t.Errorf("dispatch.planRefined on disk = %v, want preserved true", got)
+	}
+	if got := automergeEnabledOnDisk(t, path); got == nil || !*got {
+		t.Errorf("automerge.enabled on disk = %v, want preserved true", got)
+	}
+
+	raw := mustDecodeRawPlanningBlock(t, path)
+	var note string
+	if noteRaw, ok := raw.Planning["note"]; !ok {
+		t.Errorf("planning.note sibling key dropped, got planning block %v", raw.Planning)
+	} else if err := json.Unmarshal(noteRaw, &note); err != nil || note != "hand-written" {
+		t.Errorf("planning.note = %q (err %v), want preserved %q", note, err, "hand-written")
+	}
+
+	got := planningAttendedOnDisk(t, path)
+	if got == nil || !*got {
+		t.Errorf("planning.attended on disk = %v, want true", got)
+	}
+}
+
+// TestSetPlanningAttended_OnTwiceByteIdentical locks in the AC's idempotence
+// requirement: running `on` a second time must leave the file byte-identical
+// to the first run's result.
+func TestSetPlanningAttended_OnTwiceByteIdentical(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeFile(t, path, `{
+  "dispatch": {"repos": [{"repo": "owner/name", "dir": "/abs/dir"}]},
+  "automerge": {"enabled": true}
+}`)
+
+	if err := SetPlanningAttended(path, true); err != nil {
+		t.Fatalf("SetPlanningAttended (first): %v", err)
+	}
+	first, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+
+	if err := SetPlanningAttended(path, true); err != nil {
+		t.Fatalf("SetPlanningAttended (second): %v", err)
+	}
+	second, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+
+	if string(first) != string(second) {
+		t.Errorf("second SetPlanningAttended(true) changed file content:\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+}
+
+// TestSetPlanningAttended_Off locks in that off writes a literal false,
+// distinguishable from unset (AC).
+func TestSetPlanningAttended_Off(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := SetPlanningAttended(path, false); err != nil {
+		t.Fatalf("SetPlanningAttended(false): %v", err)
+	}
+	got := planningAttendedOnDisk(t, path)
+	if got == nil || *got {
+		t.Errorf("planning.attended on disk = %v, want explicit false", got)
+	}
+}
+
+// TestQueryPlanningAttended locks in the strict CLI/status reader semantics
+// (#1086, exact QueryPlanRefined shape): literal true only; missing
+// file/missing planning block/missing attended key are all (false, nil);
+// malformed whole-file JSON and a non-bool attended (string, number, null)
+// are all errors -- a status surface must never render a broken config as a
+// confident "off".
+func TestQueryPlanningAttended(t *testing.T) {
+	t.Run("missing file is (false, nil)", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		attended, err := QueryPlanningAttended(path)
+		if err != nil || attended {
+			t.Errorf("QueryPlanningAttended = (%v, %v), want (false, nil)", attended, err)
+		}
+	})
+	t.Run("no planning block is (false, nil)", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		writeFile(t, path, `{"dispatch": {}}`)
+		attended, err := QueryPlanningAttended(path)
+		if err != nil || attended {
+			t.Errorf("QueryPlanningAttended = (%v, %v), want (false, nil)", attended, err)
+		}
+	})
+	t.Run("planning block with no attended key is (false, nil)", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		writeFile(t, path, `{"planning": {"someOtherKey": true}}`)
+		attended, err := QueryPlanningAttended(path)
+		if err != nil || attended {
+			t.Errorf("QueryPlanningAttended = (%v, %v), want (false, nil)", attended, err)
+		}
+	})
+	t.Run("explicit true is attended", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		writeFile(t, path, `{"planning": {"attended": true}}`)
+		attended, err := QueryPlanningAttended(path)
+		if err != nil || !attended {
+			t.Errorf("QueryPlanningAttended = (%v, %v), want (true, nil)", attended, err)
+		}
+	})
+	t.Run("explicit false is not attended", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		writeFile(t, path, `{"planning": {"attended": false}}`)
+		attended, err := QueryPlanningAttended(path)
+		if err != nil || attended {
+			t.Errorf("QueryPlanningAttended = (%v, %v), want (false, nil)", attended, err)
+		}
+	})
+	t.Run("malformed whole-file JSON is an error", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		writeFile(t, path, `{not json`)
+		if _, err := QueryPlanningAttended(path); err == nil {
+			t.Error("QueryPlanningAttended on malformed JSON returned nil error, want error")
+		}
+	})
+	t.Run("non-bool attended string is an error", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		writeFile(t, path, `{"planning": {"attended": "yes"}}`)
+		if _, err := QueryPlanningAttended(path); err == nil {
+			t.Error("QueryPlanningAttended on non-bool string attended returned nil error, want error")
+		}
+	})
+	t.Run("non-bool attended number is an error", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		writeFile(t, path, `{"planning": {"attended": 3}}`)
+		if _, err := QueryPlanningAttended(path); err == nil {
+			t.Error("QueryPlanningAttended on non-bool numeric attended returned nil error, want error")
+		}
+	})
+	t.Run("non-bool attended null is an error", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		writeFile(t, path, `{"planning": {"attended": null}}`)
+		if _, err := QueryPlanningAttended(path); err == nil {
+			t.Error("QueryPlanningAttended on null attended returned nil error, want error")
+		}
+	})
+}
+
 // -- QueryRepoAutonomy -----------------------------------------------------
 
 // TestQueryRepoAutonomy_NonRepoIsUnreadable locks in that the exported

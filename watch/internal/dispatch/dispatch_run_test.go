@@ -981,6 +981,220 @@ func TestRunOnce_LeanRepoConfigPassesAutonomyGate(t *testing.T) {
 	}
 }
 
+// -- planning.attended fleet switch RunOnce narrowing wiring (#1086) --------
+
+// TestRunOnce_AttendedNarrowsLeanRepoDeniesPlanningPickup covers the
+// dispatchDeps.RepoAutonomy narrowing wiring end-to-end through RunOnce
+// (#1086): a real enrolled repo whose committed .cenci/config.json IS lean,
+// with the fleet planning.attended switch on, must be denied with the
+// attended-specific reason -- not the interactive denial
+// (reasonAutonomyInteractive) and not a silent "not Planned" -- proving
+// RunOnce's narrowing step is actually wired between probeRepoAutonomies and
+// Decide, not merely present on the struct. The once-per-pass narrowing log
+// line names exactly one lean repo narrowed and never carries the
+// lazyboards-reserved " skip:"/" dispatch " substrings.
+func TestRunOnce_AttendedNarrowsLeanRepoDeniesPlanningPickup(t *testing.T) {
+	mainSyncGitEnv(t)
+	isolateDaemonSocket(t)
+	local, origin := initOriginAndLocal(t)
+	writeCommittedConfig(t, origin, leanConfigJSON)
+
+	installFakeGHOnPath(t, runOnceFakeGHWithIdentity(`{"name":"Refined"}`))
+	stubRunFn(t, func(run.Opts, run.Controller) error {
+		t.Fatal("an attended-narrowed repo must never spawn")
+		return nil
+	})
+
+	cfg := testConfig()
+	cfg.PlanRefined = true
+	cfg.PlanningAttended = true
+	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: local, Session: "test-session"}}
+
+	var buf bytes.Buffer
+	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil); err != nil {
+		t.Fatalf("RunOnce returned unexpected error: %v", err)
+	}
+
+	log := buf.String()
+	if !strings.Contains(log, reasonAutonomyAttended) {
+		t.Errorf("expected the attended denial reason logged, got %q", log)
+	}
+	if strings.Contains(log, reasonAutonomyInteractive) {
+		t.Errorf("a lean repo narrowed by attended must never be denied with the interactive reason, got %q", log)
+	}
+	if strings.Contains(log, "not Planned") {
+		t.Errorf("must be denied via the autonomy gate specifically, not fall through to \"not Planned\", got %q", log)
+	}
+
+	const wantNarrowLine = "dispatch: planning attended mode on (planning.attended); 1 lean repo(s) narrowed"
+	if !strings.Contains(log, wantNarrowLine) {
+		t.Errorf("expected the narrowing count log line %q, got log:\n%s", wantNarrowLine, log)
+	}
+	for _, line := range strings.Split(log, "\n") {
+		if !strings.Contains(line, "planning attended mode on") {
+			continue
+		}
+		if strings.Contains(line, " skip:") || strings.Contains(line, " dispatch ") {
+			t.Errorf("narrowing log line must not contain the lazyboards-reserved substrings, got %q", line)
+		}
+	}
+}
+
+// TestRunOnce_AttendedNarrowing_DryRunAndRealPassIdentical covers the AC
+// that the narrowing applies identically in `cenci dispatch --dry-run` and
+// in a real pass: an attended-narrowed lean repo denies the same Refined
+// planning candidate with the same reason regardless of dryRun.
+func TestRunOnce_AttendedNarrowing_DryRunAndRealPassIdentical(t *testing.T) {
+	mainSyncGitEnv(t)
+	isolateDaemonSocket(t)
+
+	runPass := func(dryRun bool) []Decision {
+		local, origin := initOriginAndLocal(t)
+		writeCommittedConfig(t, origin, leanConfigJSON)
+		installFakeGHOnPath(t, runOnceFakeGHWithIdentity(`{"name":"Refined"}`))
+		stubRunFn(t, func(run.Opts, run.Controller) error {
+			t.Fatal("an attended-narrowed repo must never spawn")
+			return nil
+		})
+
+		cfg := testConfig()
+		cfg.PlanRefined = true
+		cfg.PlanningAttended = true
+		cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: local, Session: "test-session"}}
+
+		var buf bytes.Buffer
+		decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, dryRun, &buf, nil)
+		if err != nil {
+			t.Fatalf("RunOnce returned unexpected error: %v", err)
+		}
+		return decisions
+	}
+
+	dryDecisions := runPass(true)
+	realDecisions := runPass(false)
+
+	if len(dryDecisions) != 1 || len(realDecisions) != 1 {
+		t.Fatalf("dry=%+v real=%+v, want exactly one decision each", dryDecisions, realDecisions)
+	}
+	if dryDecisions[0].Action != ActionSkip || realDecisions[0].Action != ActionSkip {
+		t.Fatalf("dry action = %q, real action = %q, want both ActionSkip (attended denies)", dryDecisions[0].Action, realDecisions[0].Action)
+	}
+	if dryDecisions[0].Reason != reasonAutonomyAttended || realDecisions[0].Reason != reasonAutonomyAttended {
+		t.Fatalf("dry reason = %q, real reason = %q, want both %q", dryDecisions[0].Reason, realDecisions[0].Reason, reasonAutonomyAttended)
+	}
+}
+
+// TestRunOnce_AttendedOff_LogByteIdenticalToNoPlanningBlock covers the
+// byte-identity AC (#1086): a fleet config with an explicit
+// "planning": {"attended": false} and a fleet config with no top-level
+// "planning" block at all must produce byte-identical RunOnce log output --
+// no narrowing-step log line, no RepoAutonomy narrowing, over the same
+// (lean, Refined-candidate) fleet.
+func TestRunOnce_AttendedOff_LogByteIdenticalToNoPlanningBlock(t *testing.T) {
+	mainSyncGitEnv(t)
+
+	runPass := func(planningBlockJSON string) string {
+		isolateDaemonSocket(t)
+		local, origin := initOriginAndLocal(t)
+		writeCommittedConfig(t, origin, leanConfigJSON)
+
+		installFakeGHOnPath(t, runOnceFakeGHWithIdentity(`{"name":"Refined"}`))
+		stubRunFn(t, func(run.Opts, run.Controller) error {
+			t.Fatal("no live daemon is wired up in this test; a spawn here would mean a snapshot leaked in unexpectedly")
+			return nil
+		})
+
+		configPath := filepath.Join(t.TempDir(), "config.json")
+		content := `{"dispatch": {"planRefined": true}` + planningBlockJSON + `}`
+		if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+			t.Fatalf("writing config: %v", err)
+		}
+		cfg, err := LoadConfig(configPath)
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: local, Session: "test-session"}}
+
+		var buf bytes.Buffer
+		if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil); err != nil {
+			t.Fatalf("RunOnce returned unexpected error: %v", err)
+		}
+		return buf.String()
+	}
+
+	withExplicitFalse := runPass(`, "planning": {"attended": false}`)
+	withNoBlock := runPass("")
+
+	if withExplicitFalse != withNoBlock {
+		t.Errorf("log output differs between explicit attended:false and no planning block:\nexplicit false:\n%s\nno block:\n%s", withExplicitFalse, withNoBlock)
+	}
+}
+
+// TestRunOnce_PlanningAttendedUnparseable_LogsOnceAndOrdinaryDispatchUnaffected
+// covers the AC: a malformed planning.attended value (e.g. the string "yes")
+// must never abort the pass -- LoadConfig succeeds, folds to attended (the
+// restrictive direction), RunOnce logs exactly one line naming
+// planning.attended, and an ordinary already-Planned ticket in the same pass
+// still dispatches normally (the fold only narrows the autonomy map; it
+// never gates ordinary Planned dispatch).
+func TestRunOnce_PlanningAttendedUnparseable_LogsOnceAndOrdinaryDispatchUnaffected(t *testing.T) {
+	mainSyncGitEnv(t)
+	serveChainSnapshot(t, watch.StateSnapshot{}) // reachable, idle daemon
+
+	repo, _ := initOriginAndLocal(t)
+	planSha := gitTest(t, repo, "rev-parse", "HEAD")
+	writePlan(t, repo, "20-x.md", "---\nticketId: 20\nstatus: planned\nplanCommitSha: "+planSha+"\n---\nbody\n")
+
+	installFakeGHOnPath(t, `
+case "$1 $2" in
+  "issue list") printf '[{"number":20,"title":"T20","labels":[{"name":"Planned"}],"assignees":[{"login":"octocat"}]}]' ;;
+  "api graphql") printf '`+emptyOpenPRPageJSON+`' ;;
+  "api user") printf 'octocat\n' ;;
+  *) exit 1 ;;
+esac
+`)
+
+	var spawnedTickets []string
+	stubRunFn(t, func(opts run.Opts, ctrl run.Controller) error {
+		spawnedTickets = append(spawnedTickets, opts.WindowTicket)
+		return nil
+	})
+
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"planning": {"attended": "yes"}}`), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.PlanningAttendedUnparseable {
+		t.Fatalf("test setup sanity check: cfg.PlanningAttendedUnparseable = %v, want true", cfg.PlanningAttendedUnparseable)
+	}
+	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: repo, Session: "test-session"}}
+
+	var buf bytes.Buffer
+	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil); err != nil {
+		t.Fatalf("RunOnce returned unexpected error: %v", err)
+	}
+
+	log := buf.String()
+	if count := strings.Count(log, "planning.attended"); count != 1 {
+		t.Errorf("log mentions planning.attended %d times, want exactly 1:\n%s", count, log)
+	}
+	for _, line := range strings.Split(log, "\n") {
+		if !strings.Contains(line, "planning.attended") {
+			continue
+		}
+		if strings.Contains(line, " skip:") || strings.Contains(line, " dispatch ") {
+			t.Errorf("unparseable-value log line must not contain the lazyboards-reserved substrings, got %q", line)
+		}
+	}
+	if len(spawnedTickets) != 1 || spawnedTickets[0] != "20" {
+		t.Errorf("spawned tickets = %v, want exactly [\"20\"] (an unparseable planning.attended value must not block ordinary Planned dispatch)", spawnedTickets)
+	}
+}
+
 // TestReadPlansForRepos_DryRunCommitsBehindMatchesPostFastForwardRealPass
 // covers the plan's Implementation Order step 8 dry-run parity test at the
 // readPlansForRepos seam: origin ahead by N commits past a plan's
