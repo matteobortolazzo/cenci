@@ -52,7 +52,10 @@ A decline performs zero GitHub writes, and re-running refine against the parent 
 redo its partition; authorizing the third option is the only way `resplitAuthorized` is ever
 set — it sets it for the remainder of this run and re-runs the analysis, routing any resulting
 `### Suggested Split` through the same Confirmation Gate and write phase as any other split
-proposal, with no special-cased bypass.
+proposal, with no special-cased bypass. Because the ask above is scoped to `resplitAuthorized`
+not already being set, a re-derived proposal that still concludes L on the same split child
+does not re-trigger the ask on this second pass — it flows straight to the Confirmation
+Gate's normal manifest/confirm step instead, which is what prevents an infinite re-ask loop.
 
 **Confirmation Gate (apply mode, before any GitHub write)**: no ticket, label, or sub-issue mutation of any kind — including the ownership claim and the `Working` label — happens until
 this gate confirms. For

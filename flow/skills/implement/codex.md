@@ -3,17 +3,24 @@
 Read `project-core` and `codex-runtime`. In `/plan`, gather context with the read-heavy
 agent and ask material questions.
 An open native blocking dependency is a hard stop before any mutation: check the ticket's `blockedBy` (`gh issue view <ticket> --json blockedBy`) and, if any entry is `OPEN` or otherwise unresolvable, stop immediately, naming every blocking ref and its state (a `gh` that rejects the field is a capability gap — that case warns once and proceeds instead) — no plan persisted, no ticket claim, no worktree; re-run once the blockers close. `apply` runs the identical check again as its own first step, before it persists the plan file, initializes the checkpoint, creates the worktree, or writes any label: a blocker linked after `/plan` returned would otherwise sail straight into every mutation this gate exists to prevent, and an approved plan is not evidence the dependency is still clear. On that path report whatever assignee and labels an earlier run already left on the ticket rather than claiming the run stopped before the ticket was claimed, and say that nothing later in the run will reconcile them.
+Split-child provenance for this gate is derived the same way `skills/refine/codex.md`'s
+Split-depth guard derives it: `gh issue view <ticket> --repo <owner>/<repo> --json parent --jq '.parent.number // empty'` (a returned number means this ticket is a split child of
+that parent, giving `isChild`/`parentId`), falling back to a `Related to #<number>` first
+non-empty body line for older convention-linked tickets or a non-zero primary command —
+run once during context gathering, before the Split Gate is ever evaluated.
 When the planner's output carries a non-empty
 `### Split Recommendation` or a `### Size Estimate` of `L`, the Split Gate asks, via
 the client's available user-input mechanism, whether to stop — split via
 `/cenci:refine`, persisting nothing — or proceed as a single PR; only Proceed
 continues planning. When the ticket is itself a split child (`isChild` true), the stop
 option instead points at the **parent** — `/cenci:refine <parentId>`, never the child's
-own `/cenci:refine <id>`, which is a dead end under the refine skill's split-depth guard
-— and stopping additionally posts a best-effort, non-blocking evidence comment (the
+own `/cenci:refine <id>`, which is a dead end under the refine skill's split-depth guard.
+Two call sites — this interactive/ticketless Stop outcome, and the equivalent lean-mode
+unattended escalation for that same split child (fired unconditionally, before any human
+has answered) — additionally post a best-effort, non-blocking evidence comment (the
 planner's `### Size Estimate`/`### Split Recommendation`, verbatim, marked
 `<!-- cenci-oversize-child -->`) to the parent ticket; a failure to post is reported but
-never blocks the stop outcome, and this write never happens for a non-child ticket
+never blocks either outcome, and this write never happens for a non-child ticket
 (`skills/implement/phases/phase-1-plan.md`'s `### Split Gate` is authoritative for the
 exact procedure). One run persists at most one plan file and opens at most one PR:
 never persist a second plan file or open a second or stacked PR for one ticket.

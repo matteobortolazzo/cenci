@@ -59,7 +59,7 @@ produced a given comment. flow's six kinds:
 | `parent-gap-report` | `skills/implement/phases/phase-9-pr.md` — the parent acceptance-criteria gap report | `<!-- cenci-parent-gap-report -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`); `watch/internal/babysit` (merge-time parent-close gate) |
 | `followup-tracked` | `skills/implement/phases/phase-9-pr.md` — the followups-tracked comment | `<!-- cenci-followup-tracked -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`) |
 | `planner-escalation` | `skills/implement/phases/phase-1-plan.md` — `## Escalation Anchor` and its four call sites | `<!-- cenci-planner-escalation:<nonce> -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`) |
-| `oversize-child` | `skills/implement/phases/phase-1-plan.md` — the Split Gate's split-child Stop branch | `<!-- cenci-oversize-child -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`) |
+| `oversize-child` | `skills/implement/phases/phase-1-plan.md` — the Split Gate's split-child Stop branch and its lean-ticket-mode escalation branch (two call sites) | `<!-- cenci-oversize-child -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`) |
 
 ### `parent-gap-report` is a cross-project contract
 

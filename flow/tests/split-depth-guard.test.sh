@@ -100,6 +100,10 @@ SKILL_GATE_RESPLIT_REINVOKE_MARKER='re-invoke the refiner agent (`Task` tool) wi
 SKILL_GATE_RESPLIT_FLAG_MARKER='`resplitAuthorized: true`'
 SKILL_GATE_RESPLIT_NORMAL_PATH_MARKER='exactly as any other split proposal; there is no special-cased bypass of any of those checks for an authorized resplit'
 SKILL_GUARD_UNAUTHORIZED_MARKER='STOP immediately unless `resplitAuthorized` was set earlier in this same run'
+# code-review fix #1 (opus, PR #1093) — infinite-loop prevention: the
+# escalation's own trigger must skip once resplitAuthorized is already set.
+SKILL_GATE_TRIGGER_SKIP_MARKER='`resplitAuthorized` is not already set for this run, and the adopted proposal'\''s `### Size Estimate` is L'
+SKILL_GATE_LOOP_EXPLANATION_MARKER='Why the `resplitAuthorized`-not-already-set clause prevents an infinite loop.'
 
 # skills/refine/codex.md — portability parity
 CODEX_GUARD_HEADING_MARKER='**Split-depth guard**'
@@ -108,6 +112,8 @@ CODEX_ESCALATION_MARKER="proceed with the oversize child as-is or decline so the
 # #1093 (PR 3/3) — third escalation option mirror
 CODEX_RESPLIT_OPTION_MARKER='or explicitly authorize splitting this child anyway (human-authorized; creates grandchildren)'
 CODEX_RESPLIT_GUARD_MARKER='unless `resplitAuthorized` was set earlier in this run'
+# code-review fix #1 (opus, PR #1093) — infinite-loop prevention mirror
+CODEX_LOOP_EXPLANATION_MARKER='which is what prevents an infinite re-ask loop'
 
 # docs/ticket-sizing.md — one-level split-depth rule
 SIZING_SECTION_HEADING_MARKER='## Split children are presumed sized'
@@ -123,11 +129,11 @@ SIZING_AUTH_929_MARKER='the #929 incident was about automatic recursive splittin
 assert_file_contains "${REFINER_AGENT}" "${REFINER_INPUT_FLAG_MARKER}" \
   "must document isSplitChild/parentNumber among the bundle's resolved flags"
 assert_file_contains "${REFINER_AGENT}" "${REFINER_NO_RESPLIT_MARKER}" \
-  "must forbid emitting a Suggested Split for a split child at any size estimate"
+  "must forbid emitting a Suggested Split for an unauthorized split child, regardless of size estimate (resplitAuthorized is the sole exception)"
 assert_file_contains "${REFINER_AGENT}" "${REFINER_REPARTITION_MARKER}" \
   "must route an L split child to parent re-partition instead of another split"
 assert_file_contains "${REFINER_AGENT}" "${REFINER_SPLIT_HEADER_MARKER}" \
-  "must gate the Suggested Split section header on NOT isSplitChild"
+  "must gate the Suggested Split section header on (NOT isSplitChild OR resplitAuthorized)"
 assert_file_lacks "${REFINER_AGENT}" "${REFINER_OLD_SPLIT_HEADER}" \
   "must not retain the pre-#929 unguarded Suggested Split header"
 assert_file_contains "${REFINER_AGENT}" "${REFINER_RESPLIT_AUTH_INPUT_MARKER}" \
@@ -175,14 +181,37 @@ assert_file_contains "${REFINE_SKILL}" "${SKILL_GATE_RESPLIT_NORMAL_PATH_MARKER}
   "must route an authorized resplit through the normal split path with no special-cased bypass"
 assert_file_contains "${REFINE_SKILL}" "${SKILL_GUARD_UNAUTHORIZED_MARKER}" \
   "must state the split-depth guard STOPs unless resplitAuthorized was set earlier in this same run"
+assert_file_contains "${REFINE_SKILL}" "${SKILL_GATE_TRIGGER_SKIP_MARKER}" \
+  "must skip the oversize escalation's own trigger when resplitAuthorized is already set this run (prevents an infinite re-ask loop)"
+assert_file_contains "${REFINE_SKILL}" "${SKILL_GATE_LOOP_EXPLANATION_MARKER}" \
+  "must explain why the resplitAuthorized-not-already-set clause prevents an infinite escalation loop"
 
 # --- Negative: unauthorized resplit must still fail closed -----------------
 # The STOP report text (already pinned above as SKILL_FAIL_CLOSED_STOP_MARKER)
 # must remain reachable specifically on the *unauthorized* branch -- proving
-# the exception did not silently swallow the fail-closed default.
+# the exception did not silently swallow the fail-closed default. Scoped, not
+# file-wide (code-review nitpick, PR #1093): the guard paragraph is written as
+# a single source line per docs/shell-scripting-gotchas.md, so both branches'
+# bold headers live on that same line -- extract the substring between the
+# unauthorized and authorized branch headers and assert the STOP text falls
+# strictly inside that span, mirroring the sed-extracted-snippet pattern at
+# implement-split-gate-contract.test.sh's non-child-Stop-branch negative check.
 SKILL_GUARD_UNAUTHORIZED_BRANCH_MARKER='When the guard fires (`resplitAuthorized` not set)'
+SKILL_GUARD_AUTHORIZED_BRANCH_MARKER='When `resplitAuthorized` was set'
 assert_file_contains "${REFINE_SKILL}" "${SKILL_GUARD_UNAUTHORIZED_BRANCH_MARKER}" \
   "must explicitly name the unauthorized branch as where the fail-closed STOP applies"
+GUARD_LINE="$(grep -F -- 'Split-depth guard (fail closed)' "${REFINE_SKILL}" || true)"
+if [[ -z "${GUARD_LINE}" ]]; then
+  fail "skills/refine/SKILL.md: could not locate the Split-depth guard paragraph for the scoped unauthorized-branch negative check"
+elif [[ "${GUARD_LINE}" != *"${SKILL_GUARD_UNAUTHORIZED_BRANCH_MARKER}"* || "${GUARD_LINE}" != *"${SKILL_GUARD_AUTHORIZED_BRANCH_MARKER}"* ]]; then
+  fail "skills/refine/SKILL.md: could not locate both the unauthorized and authorized branch headers in the Split-depth guard paragraph"
+else
+  UNAUTHORIZED_SNIPPET="${GUARD_LINE#*"${SKILL_GUARD_UNAUTHORIZED_BRANCH_MARKER}"}"
+  UNAUTHORIZED_SNIPPET="${UNAUTHORIZED_SNIPPET%%"${SKILL_GUARD_AUTHORIZED_BRANCH_MARKER}"*}"
+  if [[ "${UNAUTHORIZED_SNIPPET}" != *"${SKILL_FAIL_CLOSED_STOP_MARKER}"* ]]; then
+    fail "skills/refine/SKILL.md: the fail-closed STOP text must be reachable specifically within the guard's unauthorized branch, not merely somewhere in the file"
+  fi
+fi
 
 # --- skills/refine/codex.md -------------------------------------------------
 
@@ -191,13 +220,15 @@ assert_file_contains "${REFINE_CODEX}" "${CODEX_GUARD_HEADING_MARKER}" \
 assert_file_contains "${REFINE_CODEX}" "${SKILL_DETECT_CMD_MARKER}" \
   "must mirror the native parent-field provenance detection"
 assert_file_contains "${REFINE_CODEX}" "${CODEX_NO_RESPLIT_MARKER}" \
-  "must mirror the no-resplit rule for split children"
+  "must mirror the no-resplit rule for split children (now conditional on resplitAuthorized, not absolute)"
 assert_file_contains "${REFINE_CODEX}" "${CODEX_ESCALATION_MARKER}" \
   "must mirror the oversize-child escalation semantics"
 assert_file_contains "${REFINE_CODEX}" "${CODEX_RESPLIT_OPTION_MARKER}" \
   "must mirror the third human-authorized resplit escalation option"
 assert_file_contains "${REFINE_CODEX}" "${CODEX_RESPLIT_GUARD_MARKER}" \
   "must mirror the resplitAuthorized exception on the split-depth guard"
+assert_file_contains "${REFINE_CODEX}" "${CODEX_LOOP_EXPLANATION_MARKER}" \
+  "must mirror the infinite-loop-prevention explanation for the resplitAuthorized-gated escalation ask"
 
 # --- docs/ticket-sizing.md --------------------------------------------------
 
