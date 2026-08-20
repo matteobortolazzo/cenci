@@ -38,14 +38,24 @@ the native sub-issue link, `gh issue view <number> --repo <owner>/<repo> --json 
 (a returned number means this ticket is a split child of that parent); fallback for older
 convention-linked tickets, or a non-zero primary command, is a `Related to #<number>` first
 non-empty body line. A split child is presumed sized by its parent's refinement — split depth
-is one, and grandchild tickets are never created (`docs/ticket-sizing.md`) — so
-never emit `### Suggested Split` for it, regardless of the size estimate. If analysis still concludes L,
+is one, and grandchild tickets are never created automatically (`docs/ticket-sizing.md`) — so
+never emit `### Suggested Split` for it, regardless of the size estimate, unless `resplitAuthorized` was set earlier in this run.
+That exception is granted only by the human explicitly choosing the Confirmation Gate's third
+oversize-escalation option below, and by no other means; nothing else ever sets it, and the
+analysis itself never sets it. If analysis still concludes L and `resplitAuthorized` is not set,
 keep the honest L verdict in `### Size Estimate` with an explicit recommendation to
 re-partition the parent instead of splitting further, and the Confirmation Gate below must
 then ask, via the client's available user-input mechanism, whether to
 proceed with the oversize child as-is or decline so the parent's partition can be redone —
-a decline performs zero GitHub writes, and re-running refine against the parent is how to
-redo its partition.
+or explicitly authorize splitting this child anyway (human-authorized; creates grandchildren).
+A decline performs zero GitHub writes, and re-running refine against the parent is how to
+redo its partition; authorizing the third option is the only way `resplitAuthorized` is ever
+set — it sets it for the remainder of this run and re-runs the analysis, routing any resulting
+`### Suggested Split` through the same Confirmation Gate and write phase as any other split
+proposal, with no special-cased bypass. Because the ask above is scoped to `resplitAuthorized`
+not already being set, a re-derived proposal that still concludes L on the same split child
+does not re-trigger the ask on this second pass — it flows straight to the Confirmation
+Gate's normal manifest/confirm step instead, which is what prevents an infinite re-ask loop.
 
 **Confirmation Gate (apply mode, before any GitHub write)**: no ticket, label, or sub-issue mutation of any kind — including the ownership claim and the `Working` label — happens until
 this gate confirms. For

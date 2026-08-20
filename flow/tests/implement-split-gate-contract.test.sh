@@ -214,6 +214,36 @@ STOP_RETAIN_MARKER='leaves `Working` and the assignee claim in place'
 LEAN_ROUTE_MARKER='route to `## Unattended Escalation Path` with the synthesized split question'
 PIN_AWAIT_INPUT_CMD='cenci pipeline await-input <id>'
 
+# --- #1093 (PR 3/3) -- split-child-aware Stop option, parent-comment
+#     feedback write, and the new cenci-oversize-child marker -------------
+CHILD_STOP_OPTION_LABEL='**"Stop — re-partition parent #`<parentId>` via /cenci:refine `<parentId>` (Recommended)"**'
+NEVER_CHILD_REFINE_MARKER='Never tell the user to run `/cenci:refine <id>` against the child here'
+FEEDBACK_HEADING_MARKER='#### Feedback to the parent (split-child Stop branch and lean-ticket-mode escalation branch, new write)'
+FEEDBACK_TWO_CALL_SITES_MARKER='**Two call sites**: the interactive/ticketless split-child Stop branch above, and the lean-ticket-mode branch below'
+FEEDBACK_ONE_NEW_WRITE_MARKER='this is the one new write this ticket adds anywhere in the Split Gate, and it never runs for a non-child ticket'
+OVERSIZE_CHILD_MARKER='<!-- cenci-oversize-child -->'
+OVERSIZE_CHILD_BANNER_MARKER='oversize split-child evidence posted by `/cenci:implement` (planning — Split Gate)'
+FEEDBACK_VERIFY_MARKER='Verify by the created comment'\''s own identity — never by scanning the parent'\''s thread.'
+FEEDBACK_NONBLOCKING_MARKER='this write is best-effort feedback, not authorization-gating, so a failure here must never prevent the child'
+FEEDBACK_IDEMPOTENCY_HEADING_MARKER='Idempotency: no dedup, by design.'
+FEEDBACK_IDEMPOTENCY_MARKER='posts a new comment on the parent each time'
+LEAN_CHILD_QUESTION_MARKER='This is a split child of #`<parentId>`; the plan still sizes L / still recommends a split — re-partition parent #`<parentId>` via `/cenci:refine <parentId>`, or proceed as a single PR anyway?'
+LEAN_UNCONDITIONAL_WRITE_MARKER='run the **Feedback to the parent** write above unconditionally, immediately before this branch routes to `## Unattended Escalation Path`'
+
+# code-review fixes #2/#3/#6 (opus, PR #1093):
+#   #2 -- secrecy-rule precedence (#826) restated on this new posting site
+#   #3 -- identity-based verification (never a bare thread-wide marker grep)
+#   #6 -- defined comment body for every Split Gate trigger case
+SECRECY_HEADING_MARKER='**Secrecy rule (restated from `## Escalation Anchor`, #826) — takes precedence over the verbatim-posting requirement above.**'
+SECRECY_NEVER_QUOTE_MARKER='never quote file contents, environment or configuration values, credentials, tokens, secrets, or raw command output in it'
+SECRECY_DROP_MARKER='drop the offending content from what gets posted — keep the section heading and the rest of the safe text'
+IDENTITY_POST_CMD_MARKER='gh api repos/<owner>/<repo>/issues/<parentId>/comments -F body=@"${TMPDIR:-/tmp}/cenci/cenci-oversize-child-<id>-<session-uuid>.md" --jq .id'
+IDENTITY_READBACK_CMD_MARKER='gh api repos/<owner>/<repo>/issues/comments/<id> --jq '\''{id, body}'\'''
+IDENTITY_NEVER_SCAN_MARKER='so a bare marker grep across the *whole* thread would report success on any pre-existing match even when this specific post just failed'
+UNDEFINED_CONTENT_HEADING_MARKER='**Every trigger case gets a defined body — never an empty or placeholder-laden post.**'
+UNDEFINED_CONTENT_SUBSTITUTE_MARKER='substitute a one-line statement of the L size estimate for that section'\''s content'
+UNDEFINED_CONTENT_AMBIGUOUS_MARKER='state that plainly in the `### Size Estimate` section instead of leaving it empty'
+
 if require_section ROUTE_SECTION "${PHASE1_CONTENT}" "## Route Planner Output" "phase-1-plan.md"; then
   assert_section_contains "${ROUTE_SECTION}" "### Split Gate" \
     "phase-1-plan.md (## Route Planner Output) must add a new ### Split Gate subsection"
@@ -235,6 +265,80 @@ if require_section ROUTE_SECTION "${PHASE1_CONTENT}" "## Route Planner Output" "
   RESUME_EXEMPTION_MARKER='the Split Gate does not apply on the resume-mode re-plan return'
   assert_section_contains "${ROUTE_SECTION}" "${RESUME_EXEMPTION_MARKER}" \
     "phase-1-plan.md (## Route Planner Output, Resume-mode note) must state the Split Gate does not apply on the resume-mode re-plan return"
+
+  # --- #1093 (PR 3/3): split-child-aware Stop option (parent-directed,
+  #     never child-directed), the new parent-comment feedback write, its
+  #     marker, and the lean-branch parent-naming wording. ----------------
+  assert_section_contains "${ROUTE_SECTION}" "${CHILD_STOP_OPTION_LABEL}" \
+    "phase-1-plan.md (### Split Gate) split-child Stop option must redirect to /cenci:refine <parentId>, never the child"
+  assert_section_contains "${ROUTE_SECTION}" "${NEVER_CHILD_REFINE_MARKER}" \
+    "phase-1-plan.md (### Split Gate) split-child Stop branch must explicitly forbid pointing the user at /cenci:refine <id> for the child"
+  assert_section_contains "${ROUTE_SECTION}" "${FEEDBACK_HEADING_MARKER}" \
+    "phase-1-plan.md (### Split Gate) must add the Feedback to the parent subsection, naming both its call sites"
+  assert_section_contains "${ROUTE_SECTION}" "${FEEDBACK_TWO_CALL_SITES_MARKER}" \
+    "phase-1-plan.md (### Split Gate) must explicitly enumerate the two call sites for the parent-comment write"
+  assert_section_contains "${ROUTE_SECTION}" "${FEEDBACK_ONE_NEW_WRITE_MARKER}" \
+    "phase-1-plan.md (### Split Gate) must state the parent-comment write is the one new write and never runs for a non-child ticket"
+  assert_section_contains "${ROUTE_SECTION}" "${OVERSIZE_CHILD_MARKER}" \
+    "phase-1-plan.md (### Split Gate) must embed the <!-- cenci-oversize-child --> marker"
+  assert_section_contains "${ROUTE_SECTION}" "${OVERSIZE_CHILD_BANNER_MARKER}" \
+    "phase-1-plan.md (### Split Gate) must carry the oversize split-child evidence attribution banner"
+  assert_section_contains "${ROUTE_SECTION}" "${FEEDBACK_VERIFY_MARKER}" \
+    "phase-1-plan.md (### Split Gate) must verify the parent comment post by the created comment's own identity, not a thread-wide scan"
+  assert_section_contains "${ROUTE_SECTION}" "${FEEDBACK_NONBLOCKING_MARKER}" \
+    "phase-1-plan.md (### Split Gate) must state the parent-comment write is best-effort/non-blocking"
+
+  # code-review fix #2 (opus, PR #1093): the #826 secrecy rule must be
+  # restated verbatim on this new posting site, with explicit precedence
+  # over the verbatim-posting requirement.
+  assert_section_contains "${ROUTE_SECTION}" "${SECRECY_HEADING_MARKER}" \
+    "phase-1-plan.md (### Split Gate) must restate the #826 secrecy rule with explicit precedence over verbatim-posting"
+  assert_section_contains "${ROUTE_SECTION}" "${SECRECY_NEVER_QUOTE_MARKER}" \
+    "phase-1-plan.md (### Split Gate) secrecy rule must forbid quoting file contents, config values, credentials, tokens, secrets, or command output"
+  assert_section_contains "${ROUTE_SECTION}" "${SECRECY_DROP_MARKER}" \
+    "phase-1-plan.md (### Split Gate) secrecy rule must direct dropping offending content rather than posting it verbatim"
+
+  # code-review fix #3 (opus, PR #1093): verification must be identity-based
+  # (the specific created comment), never a bare marker grep over the whole
+  # parent thread -- which would false-positive whenever the parent already
+  # carries an earlier oversize-child comment (expected, per Idempotency).
+  assert_section_contains "${ROUTE_SECTION}" "${IDENTITY_POST_CMD_MARKER}" \
+    "phase-1-plan.md (### Split Gate) must post via the REST comments API returning the new comment's own numeric ID"
+  assert_section_contains "${ROUTE_SECTION}" "${IDENTITY_READBACK_CMD_MARKER}" \
+    "phase-1-plan.md (### Split Gate) must read back the specific created comment by its own ID, mirroring ## Escalation Anchor's pattern"
+  assert_section_contains "${ROUTE_SECTION}" "${IDENTITY_NEVER_SCAN_MARKER}" \
+    "phase-1-plan.md (### Split Gate) must explain why a thread-wide marker scan would false-positive on a genuinely failed post"
+  assert_section_lacks "${ROUTE_SECTION}" \
+    "gh issue view <parentId> --repo <owner>/<repo> --json comments --jq '.comments[].body'" \
+    "phase-1-plan.md (### Split Gate) must NOT verify via a bare thread-wide comments scan (superseded by identity-based verification)"
+
+  # code-review fix #6 (opus, PR #1093): every Split Gate trigger case
+  # (non-empty Split Recommendation, L-alone, and the missing/malformed
+  # Size Estimate ambiguous-fires-too case) must get a defined comment body.
+  assert_section_contains "${ROUTE_SECTION}" "${UNDEFINED_CONTENT_HEADING_MARKER}" \
+    "phase-1-plan.md (### Split Gate) must state every trigger case gets a defined comment body"
+  assert_section_contains "${ROUTE_SECTION}" "${UNDEFINED_CONTENT_SUBSTITUTE_MARKER}" \
+    "phase-1-plan.md (### Split Gate) must substitute a one-line L-size statement when no Split Recommendation text was returned"
+  assert_section_contains "${ROUTE_SECTION}" "${UNDEFINED_CONTENT_AMBIGUOUS_MARKER}" \
+    "phase-1-plan.md (### Split Gate) must state the missing/malformed Size Estimate case plainly instead of posting an empty section"
+  assert_section_contains "${ROUTE_SECTION}" "${FEEDBACK_IDEMPOTENCY_HEADING_MARKER}" \
+    "phase-1-plan.md (### Split Gate) must explicitly document idempotency behavior for the parent-comment write"
+  assert_section_contains "${ROUTE_SECTION}" "${FEEDBACK_IDEMPOTENCY_MARKER}" \
+    "phase-1-plan.md (### Split Gate) must state a retried Stop reaches this write again and posts a new comment each time, by design"
+  assert_section_contains "${ROUTE_SECTION}" "${LEAN_CHILD_QUESTION_MARKER}" \
+    "phase-1-plan.md (### Split Gate) lean-ticket branch must name the parent in the synthesized split question for a split child"
+  assert_section_contains "${ROUTE_SECTION}" "${LEAN_UNCONDITIONAL_WRITE_MARKER}" \
+    "phase-1-plan.md (### Split Gate) lean-ticket branch must run the parent-comment write unconditionally before routing to ## Unattended Escalation Path"
+
+  # Negative: the non-child Stop branch must remain write-free -- extract
+  # just that branch's prose (from its own bold header to the split-child
+  # Stop branch's bold header) and confirm no gh write call appears in it.
+  NONCHILD_STOP_SNIPPET="$(sed -n '/\*\*Stop branch, non-child\*\*/,/\*\*Stop branch, split child\*\*/p' "${PHASE1_PLAN}")"
+  if [[ -z "${NONCHILD_STOP_SNIPPET}" ]]; then
+    fail "phase-1-plan.md: could not locate the non-child Stop branch snippet for the write-free negative check"
+  elif [[ "${NONCHILD_STOP_SNIPPET}" == *"gh issue comment"* ]]; then
+    fail "phase-1-plan.md (### Split Gate) non-child Stop branch must remain write-free (found 'gh issue comment')"
+  fi
 
   # Both no-questions bullets must carry the "only after the ### Split Gate
   # below passes" pointer text that wires the gate into the routing order --
@@ -292,6 +396,10 @@ SKILL_INVARIANT_MARKER='one run persists at most one plan file and produces exac
 SKILL_OVERFLOW_MARKER='capture overflow as Followup items'
 SKILL_OVERFLOW_ERROR_GATE_MARKER='stop at an error gate recommending `/cenci:refine`'
 SKILL_FOURTH_SHAPE_MARKER='4. **Split Gate stop'
+# code-review fix #4 (opus, PR #1093): shape (3)'s write enumeration must
+# also name the parent-evidence write -- it is not Stop-branch-only.
+SKILL_SHAPE3_ADDENDUM_MARKER='**Split-child addendum**: when the Split-Gate-synthesized question is for a split child, this path also runs the same best-effort, non-blocking parent-evidence write shape (4) below describes'
+SKILL_SHAPE4_TWO_SITES_MARKER='that subsection has two call sites, this Stop branch and shape (3)'\''s lean-ticket-mode escalation branch'
 
 if require_section PIPELINE_SECTION "${SKILL_CONTENT}" "## Pipeline" "SKILL.md"; then
   assert_section_contains "${PIPELINE_SECTION}" "${SKILL_INVARIANT_MARKER}" \
@@ -302,6 +410,10 @@ if require_section PIPELINE_SECTION "${SKILL_CONTENT}" "## Pipeline" "SKILL.md";
     "SKILL.md (## Pipeline) must state the mid-run scope-overflow rule's other disjunctive outcome (stop at an error gate recommending /cenci:refine)"
   assert_section_contains "${PIPELINE_SECTION}" "${SKILL_FOURTH_SHAPE_MARKER}" \
     "SKILL.md (## Pipeline) must add a fourth named planning-session shape for the Split Gate stop"
+  assert_section_contains "${PIPELINE_SECTION}" "${SKILL_SHAPE3_ADDENDUM_MARKER}" \
+    "SKILL.md (## Pipeline) shape (3) must name the parent-evidence write for a split-child escalation, not just shape (4)"
+  assert_section_contains "${PIPELINE_SECTION}" "${SKILL_SHAPE4_TWO_SITES_MARKER}" \
+    "SKILL.md (## Pipeline) shape (4) must state the Feedback subsection has two call sites, not just this Stop branch"
 fi
 
 # =====================================================================
@@ -343,6 +455,33 @@ assert_file_occurs_at_least "${CODEX_MD}" "${CODEX_CLIENT_MECHANISM_MARKER}" 2 \
   "must route the Split Gate's stop/proceed choice through a second use of the portable client user-input-mechanism phrasing, never AskUserQuestion"
 assert_file_lacks "${CODEX_MD}" "AskUserQuestion" \
   "must never use AskUserQuestion in the cross-tool-portable codex.md (flow/AGENTS.md critical rule)"
+
+# code-review fix #5 (opus, PR #1093): codex.md branches on isChild/parentId
+# but never derived them anywhere -- it must state the derivation (mirroring
+# refine/codex.md's own recipe), not just gate on an unwired value (#824).
+CODEX_PROVENANCE_DERIVATION_MARKER="Split-child provenance for this gate is derived the same way \`skills/refine/codex.md\`'s"
+CODEX_PROVENANCE_CMD_MARKER="--json parent --jq '.parent.number // empty'"
+assert_file_contains "${CODEX_MD}" "${CODEX_PROVENANCE_DERIVATION_MARKER}" \
+  "must state where isChild/parentId are derived from on this surface, mirroring refine/codex.md's provenance recipe"
+assert_file_contains "${CODEX_MD}" "${CODEX_PROVENANCE_CMD_MARKER}" \
+  "must name the native parent-field command used to derive isChild/parentId"
+
+# code-review fix #4 (opus, PR #1093): codex.md's wording must name both
+# call sites for the parent-evidence write, not just the Stop outcome.
+CODEX_TWO_SITES_MARKER='Two call sites — this interactive/ticketless Stop outcome, and the equivalent lean-mode'
+assert_file_contains "${CODEX_MD}" "${CODEX_TWO_SITES_MARKER}" \
+  "must name both call sites (Stop outcome and lean-mode escalation) for the parent-evidence write"
+
+# =====================================================================
+# flow/docs/comment-attribution.md -- oversize-child registry row must name
+# both call sites (code-review fix #4, opus, PR #1093), mirroring the
+# planner-escalation row's "and its four call sites" pattern.
+# =====================================================================
+
+COMMENT_ATTRIBUTION_DOC="${FLOW_DIR}/docs/comment-attribution.md"
+OVERSIZE_CHILD_REGISTRY_ROW_MARKER='the Split Gate'\''s split-child Stop branch and its lean-ticket-mode escalation branch (two call sites)'
+assert_file_contains "${COMMENT_ATTRIBUTION_DOC}" "${OVERSIZE_CHILD_REGISTRY_ROW_MARKER}" \
+  "comment-attribution.md's oversize-child registry row must name both call sites, not just the Stop branch"
 
 # =====================================================================
 # Negative: must not reuse plan-persist-sections-contract.test.sh's four
