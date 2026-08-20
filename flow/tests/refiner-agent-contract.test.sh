@@ -152,6 +152,7 @@ if [[ -n "${skill}" ]]; then
   # sentence as forbidden so a regression back to it fails the test).
   assert_contains "${skill}" "Present the round's questions in a single \`AskUserQuestion\` call" "skills/refine/SKILL.md"
   assert_not_contains "${skill}" "Ask exactly ONE question per \`AskUserQuestion\` call" "skills/refine/SKILL.md"
+  assert_not_contains "${skill}" "Never combine multiple refiner questions into a single \`AskUserQuestion\` call" "skills/refine/SKILL.md"
   # Context flows through the token-scoped verbatim bundle, and the bundle is
   # cleaned up with the run's other temp files.
   bundle_count="$(printf '%s' "${skill}" | grep -c -- "-bundle.md")"

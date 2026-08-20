@@ -121,6 +121,7 @@ CHILD_PLANNABLE_STANDALONE_MARKER='plannable without undocumented parent context
 # --- Block 5: Safety overrides per child ------------------------------------
 CHILD_OWN_BLOCK_TEXT_MARKER="that child's own block text"
 CHILD_BROWSER_QUESTION_MARKER='Does child (K/N)'
+CHILD_BROWSER_QUESTION_BATCH_MARKER='Batch up to 4 children per `AskUserQuestion` call, one question per child, in child order'
 CHILD_DESIGN_SKIP_MARKER='Skip entirely for a design-only child'
 PARENT_ANSWER_NOT_PROPAGATED_MARKER='is never propagated to any child'
 
@@ -212,14 +213,17 @@ assert_file_contains "${REFINER_AGENT}" "${CHILD_PLANNABLE_STANDALONE_MARKER}" \
 
 # =====================================================================
 # Block 5: Safety overrides per child — per-child frontend-classification,
-# per-child browser question, the design-child skip, and the explicit
-# non-propagation of the parent's step-8 answer.
+# per-child browser question (batched up to 4 per AskUserQuestion call,
+# mirroring step 6's batched-round rule), the design-child skip, and the
+# explicit non-propagation of the parent's step-8 answer.
 # =====================================================================
 
 assert_file_contains "${REFINE_SKILL}" "${CHILD_OWN_BLOCK_TEXT_MARKER}" \
   "must apply frontend-classification to each child's own block text, never an inlined keyword list"
 assert_file_contains "${REFINE_SKILL}" "${CHILD_BROWSER_QUESTION_MARKER}" \
   "must ask the browser question once per flagged child, scoped to that child"
+assert_file_contains "${REFINE_SKILL}" "${CHILD_BROWSER_QUESTION_BATCH_MARKER}" \
+  "must batch up to 4 children per AskUserQuestion call, one question per child, in child order, mirroring step 6's batched-round rule"
 assert_file_contains "${REFINE_SKILL}" "${CHILD_DESIGN_SKIP_MARKER}" \
   "must skip the per-child browser question entirely for a design-only child"
 assert_file_contains "${REFINE_SKILL}" "${PARENT_ANSWER_NOT_PROPAGATED_MARKER}" \
