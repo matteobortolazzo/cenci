@@ -7,7 +7,15 @@ When the planner's output carries a non-empty
 `### Split Recommendation` or a `### Size Estimate` of `L`, the Split Gate asks, via
 the client's available user-input mechanism, whether to stop — split via
 `/cenci:refine`, persisting nothing — or proceed as a single PR; only Proceed
-continues planning. One run persists at most one plan file and opens at most one PR:
+continues planning. When the ticket is itself a split child (`isChild` true), the stop
+option instead points at the **parent** — `/cenci:refine <parentId>`, never the child's
+own `/cenci:refine <id>`, which is a dead end under the refine skill's split-depth guard
+— and stopping additionally posts a best-effort, non-blocking evidence comment (the
+planner's `### Size Estimate`/`### Split Recommendation`, verbatim, marked
+`<!-- cenci-oversize-child -->`) to the parent ticket; a failure to post is reported but
+never blocks the stop outcome, and this write never happens for a non-child ticket
+(`skills/implement/phases/phase-1-plan.md`'s `### Split Gate` is authoritative for the
+exact procedure). One run persists at most one plan file and opens at most one PR:
 never persist a second plan file or open a second or stacked PR for one ticket.
 Then return an approved plan in the conversation without writing files or labels.
 Stop before mutations and instruct `cenci run implement apply <ticket> --agent codex`.

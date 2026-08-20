@@ -214,6 +214,21 @@ STOP_RETAIN_MARKER='leaves `Working` and the assignee claim in place'
 LEAN_ROUTE_MARKER='route to `## Unattended Escalation Path` with the synthesized split question'
 PIN_AWAIT_INPUT_CMD='cenci pipeline await-input <id>'
 
+# --- #1093 (PR 3/3) -- split-child-aware Stop option, parent-comment
+#     feedback write, and the new cenci-oversize-child marker -------------
+CHILD_STOP_OPTION_LABEL='**"Stop — re-partition parent #`<parentId>` via /cenci:refine `<parentId>` (Recommended)"**'
+NEVER_CHILD_REFINE_MARKER='Never tell the user to run `/cenci:refine <id>` against the child here'
+FEEDBACK_HEADING_MARKER='#### Feedback to the parent (split-child Stop branch, new write)'
+FEEDBACK_ONE_NEW_WRITE_MARKER='this is the one new write this ticket adds anywhere in the Split Gate, and it never runs for a non-child ticket'
+OVERSIZE_CHILD_MARKER='<!-- cenci-oversize-child -->'
+OVERSIZE_CHILD_BANNER_MARKER='oversize split-child evidence posted by `/cenci:implement` (planning — Split Gate)'
+FEEDBACK_VERIFY_MARKER='Verify by re-fetch.'
+FEEDBACK_NONBLOCKING_MARKER='this write is best-effort feedback, not authorization-gating, so a failure here must never prevent the child'
+FEEDBACK_IDEMPOTENCY_HEADING_MARKER='Idempotency: no dedup, by design.'
+FEEDBACK_IDEMPOTENCY_MARKER='posts a new comment on the parent each time'
+LEAN_CHILD_QUESTION_MARKER='This is a split child of #`<parentId>`; the plan still sizes L / still recommends a split — re-partition parent #`<parentId>` via `/cenci:refine <parentId>`, or proceed as a single PR anyway?'
+LEAN_UNCONDITIONAL_WRITE_MARKER='run the **Feedback to the parent** write above unconditionally, immediately before this branch routes to `## Unattended Escalation Path`'
+
 if require_section ROUTE_SECTION "${PHASE1_CONTENT}" "## Route Planner Output" "phase-1-plan.md"; then
   assert_section_contains "${ROUTE_SECTION}" "### Split Gate" \
     "phase-1-plan.md (## Route Planner Output) must add a new ### Split Gate subsection"
@@ -235,6 +250,44 @@ if require_section ROUTE_SECTION "${PHASE1_CONTENT}" "## Route Planner Output" "
   RESUME_EXEMPTION_MARKER='the Split Gate does not apply on the resume-mode re-plan return'
   assert_section_contains "${ROUTE_SECTION}" "${RESUME_EXEMPTION_MARKER}" \
     "phase-1-plan.md (## Route Planner Output, Resume-mode note) must state the Split Gate does not apply on the resume-mode re-plan return"
+
+  # --- #1093 (PR 3/3): split-child-aware Stop option (parent-directed,
+  #     never child-directed), the new parent-comment feedback write, its
+  #     marker, and the lean-branch parent-naming wording. ----------------
+  assert_section_contains "${ROUTE_SECTION}" "${CHILD_STOP_OPTION_LABEL}" \
+    "phase-1-plan.md (### Split Gate) split-child Stop option must redirect to /cenci:refine <parentId>, never the child"
+  assert_section_contains "${ROUTE_SECTION}" "${NEVER_CHILD_REFINE_MARKER}" \
+    "phase-1-plan.md (### Split Gate) split-child Stop branch must explicitly forbid pointing the user at /cenci:refine <id> for the child"
+  assert_section_contains "${ROUTE_SECTION}" "${FEEDBACK_HEADING_MARKER}" \
+    "phase-1-plan.md (### Split Gate) must add the Feedback to the parent subsection"
+  assert_section_contains "${ROUTE_SECTION}" "${FEEDBACK_ONE_NEW_WRITE_MARKER}" \
+    "phase-1-plan.md (### Split Gate) must state the parent-comment write is the one new write and never runs for a non-child ticket"
+  assert_section_contains "${ROUTE_SECTION}" "${OVERSIZE_CHILD_MARKER}" \
+    "phase-1-plan.md (### Split Gate) must embed the <!-- cenci-oversize-child --> marker"
+  assert_section_contains "${ROUTE_SECTION}" "${OVERSIZE_CHILD_BANNER_MARKER}" \
+    "phase-1-plan.md (### Split Gate) must carry the oversize split-child evidence attribution banner"
+  assert_section_contains "${ROUTE_SECTION}" "${FEEDBACK_VERIFY_MARKER}" \
+    "phase-1-plan.md (### Split Gate) must verify the parent comment post by re-fetch"
+  assert_section_contains "${ROUTE_SECTION}" "${FEEDBACK_NONBLOCKING_MARKER}" \
+    "phase-1-plan.md (### Split Gate) must state the parent-comment write is best-effort/non-blocking"
+  assert_section_contains "${ROUTE_SECTION}" "${FEEDBACK_IDEMPOTENCY_HEADING_MARKER}" \
+    "phase-1-plan.md (### Split Gate) must explicitly document idempotency behavior for the parent-comment write"
+  assert_section_contains "${ROUTE_SECTION}" "${FEEDBACK_IDEMPOTENCY_MARKER}" \
+    "phase-1-plan.md (### Split Gate) must state a retried Stop reaches this write again and posts a new comment each time, by design"
+  assert_section_contains "${ROUTE_SECTION}" "${LEAN_CHILD_QUESTION_MARKER}" \
+    "phase-1-plan.md (### Split Gate) lean-ticket branch must name the parent in the synthesized split question for a split child"
+  assert_section_contains "${ROUTE_SECTION}" "${LEAN_UNCONDITIONAL_WRITE_MARKER}" \
+    "phase-1-plan.md (### Split Gate) lean-ticket branch must run the parent-comment write unconditionally before routing to ## Unattended Escalation Path"
+
+  # Negative: the non-child Stop branch must remain write-free -- extract
+  # just that branch's prose (from its own bold header to the split-child
+  # Stop branch's bold header) and confirm no gh write call appears in it.
+  NONCHILD_STOP_SNIPPET="$(sed -n '/\*\*Stop branch, non-child\*\*/,/\*\*Stop branch, split child\*\*/p' "${PHASE1_PLAN}")"
+  if [[ -z "${NONCHILD_STOP_SNIPPET}" ]]; then
+    fail "phase-1-plan.md: could not locate the non-child Stop branch snippet for the write-free negative check"
+  elif [[ "${NONCHILD_STOP_SNIPPET}" == *"gh issue comment"* ]]; then
+    fail "phase-1-plan.md (### Split Gate) non-child Stop branch must remain write-free (found 'gh issue comment')"
+  fi
 
   # Both no-questions bullets must carry the "only after the ### Split Gate
   # below passes" pointer text that wires the gate into the routing order --

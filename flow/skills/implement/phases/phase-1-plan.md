@@ -461,16 +461,60 @@ This stop is evaluated **first** — before the clarifying-questions bullets, be
 
 Evaluated immediately after the clarifying-questions bullets above resolve (whether via `AskUserQuestion`, `## Unattended Escalation Path`, or the planner returning no questions at all), and always before any persist call or `## Lean Approval Path` routing is executed. The gate fires when the planner output contains a non-empty, non-"None" `### Split Recommendation` **or** a `### Size Estimate` of `L` — either condition alone is sufficient; ambiguity fires, per the conservative default already used elsewhere in this file. If `### Size Estimate` is missing from the planner's output entirely, or its value is not one of `S`/`M`/`L`, treat this as ambiguous and fire the gate too — mirroring this file's own sensitive-path-backstop fail-closed idiom, a missing or malformed estimate is never read as "doesn't trigger."
 
-**Interactive mode, and ticketless mode** (mirrors the existing ticketless-behaves-as-interactive fallback in the bullets above): present the choice via `AskUserQuestion`, with the recommended option ordered first:
+**Split-child provenance is already in hand.** `isChild` and `parentId` were stored from the context-gatherer digest (ticket mode) or the `plan-check` `plan` metadata (plan-file mode) earlier in this same session, well before the Split Gate is ever reached — see `## Persist the Plan`'s front-matter reference below, which sources the same two values from the same place. The Split Gate below consumes them directly; it never re-derives or re-fetches them.
+
+**Interactive mode, and ticketless mode** (mirrors the existing ticketless-behaves-as-interactive fallback in the bullets above): present the choice via `AskUserQuestion`, with the recommended option ordered first. The Stop option's label and its redirect target depend on whether this ticket is itself a split child.
+
+**Non-child ticket** (`isChild` false, or ticketless mode, which carries no `isChild` at all):
 
 1. **"Stop — split via /cenci:refine (Recommended)"**
 2. **"Proceed as a single PR anyway"**
 
-**Stop branch**: persist nothing, no `cenci pipeline` call of any kind — this session leaves `Working` and the assignee claim in place (no further mutation, mirroring `skills/refine/SKILL.md`'s Confirmation Gate decline branch), ends the turn, and tells the user to run `/cenci:refine <id>` to split the ticket before re-attempting `/cenci:implement`.
+**Split-child ticket** (`isChild` true): the child's own `/cenci:refine <id>` is a guaranteed dead end here — `skills/refine/SKILL.md`'s Split-depth guard fails closed on a split proposal for a split child unless a human explicitly authorizes a resplit from inside that refine session, a decision this gate cannot make on the child's behalf — so the Stop option must never point at the child. Point at the parent instead:
 
-**Proceed branch**: continue the normal single-plan flow below unchanged. Record the gate's choice as a `Q:`/`A:` pair in `## Q&A from Planning` (e.g. `Q: Split the oversized plan? / A: Proceed as a single PR anyway.`), and keep the planner's `### Split Recommendation` verbatim in the persisted plan for audit — exactly one plan file is still ever written.
+1. **"Stop — re-partition parent #`<parentId>` via /cenci:refine `<parentId>` (Recommended)"**
+2. **"Proceed as a single PR anyway"**
 
-**Lean ticket mode** (`planning.autonomy` is exactly `"lean"` and this is ticket mode): never `AskUserQuestion` — route to `## Unattended Escalation Path` with the synthesized split question (the planner's `### Split Recommendation`, or a one-line statement of the `L` size estimate when no split text was returned) as the escalated question, exactly as that section already handles any other escalation; its `cenci pipeline await-input` mechanics belong to that section alone and are never inlined here.
+**Stop branch, non-child**: persist nothing, no `cenci pipeline` call of any kind — this session leaves `Working` and the assignee claim in place (no further mutation, mirroring `skills/refine/SKILL.md`'s Confirmation Gate decline branch), ends the turn, and tells the user to run `/cenci:refine <id>` to split the ticket before re-attempting `/cenci:implement`.
+
+**Stop branch, split child**: first, run the **Feedback to the parent** write below — post the planner's sizing evidence to parent #`<parentId>`. Then, regardless of whether that write succeeded or failed, persist nothing on the child, no `cenci pipeline` call of any kind — this session leaves `Working` and the assignee claim in place exactly as the non-child Stop branch does — ends the turn, and tells the user to run `/cenci:refine <parentId>` (the **parent**, never the child) to re-partition before re-attempting `/cenci:implement`. Never tell the user to run `/cenci:refine <id>` against the child here — that instruction belongs to the non-child branch only.
+
+**Proceed branch**: continue the normal single-plan flow below unchanged, for a non-child and a split-child ticket alike. Record the gate's choice as a `Q:`/`A:` pair in `## Q&A from Planning` (e.g. `Q: Split the oversized plan? / A: Proceed as a single PR anyway.`), and keep the planner's `### Split Recommendation` verbatim in the persisted plan for audit — exactly one plan file is still ever written.
+
+#### Feedback to the parent (split-child Stop branch, new write)
+
+The non-child Stop branch above is unchanged and still performs zero writes; this is the one new write this ticket adds anywhere in the Split Gate, and it never runs for a non-child ticket. Because the planner did real exploration to conclude this child is still oversized, that evidence should reach the parent's next refinement automatically rather than requiring the user to re-type it — post it as a comment on the **parent**, never the child, following the same "restate verbatim, never summarize" discipline `## Escalation Anchor` already applies to escalation comments ("Posted questions must ensure the option bullets and marked recommendation... are included verbatim, never summarized or reworded"), and the same mechanical staging-file pattern `## Persist the Plan`'s `planComment` step already uses in this file:
+
+1. `Write` a staging file, uniquely scoped by session — never a fixed path — `"${TMPDIR:-/tmp}/cenci/cenci-oversize-child-<id>-<session-uuid>.md"`, opening with the cenci attribution banner (blockquoted), then a blank line, then the planner's `### Size Estimate` and `### Split Recommendation` sections **verbatim** — never summarized or reworded — then a blank line, then the hidden marker on its own non-blockquoted line:
+
+   ```markdown
+   > 🤖 **cenci** — oversize split-child evidence posted by `/cenci:implement` (planning — Split Gate).
+
+   ### Size Estimate
+   <planner's ### Size Estimate section, verbatim>
+
+   ### Split Recommendation
+   <planner's ### Split Recommendation section, verbatim>
+
+   <!-- cenci-oversize-child -->
+   ```
+
+   Confirm the `Write` succeeded before continuing — a failed `Write` must never be followed by an attempt to post a staging file that was never created.
+2. Post the staging file:
+   ```bash
+   gh issue comment <parentId> --repo <owner>/<repo> --body-file "${TMPDIR:-/tmp}/cenci/cenci-oversize-child-<id>-<session-uuid>.md"
+   ```
+3. **Verify by re-fetch.** Confirm the comment landed and carries the marker before treating the post as done:
+   ```bash
+   gh issue view <parentId> --repo <owner>/<repo> --json comments --jq '.comments[].body' | grep -qF -- '<!-- cenci-oversize-child -->'
+   ```
+4. `rm -f "${TMPDIR:-/tmp}/cenci/cenci-oversize-child-<id>-<session-uuid>.md"` regardless of outcome — unconditional cleanup, mirroring the `planComment` staging file's own cleanup.
+
+**Failure handling: retry-once-then-report, non-blocking.** If the `Write`, the post, or the re-fetch verification fails, retry that one step once; if it still fails, stop retrying and do not block the Stop branch on it — this write is best-effort feedback, not authorization-gating, so a failure here must never prevent the child's Stop outcome (leaving `Working` and the assignee claim in place, telling the user to re-partition the parent) from completing normally. Report the failure in the same final message as the Stop outcome, e.g. "Note: could not post the sizing evidence to parent #`<parentId>`; you may want to paste it manually when you refine the parent."
+
+**Idempotency: no dedup, by design.** Per `docs/pipeline-safety.md`, a mandatory-restart context needs its own recovery/idempotency documented explicitly. Re-entering the Split Gate (a retried `/cenci:implement <id>` run for the same child) re-evaluates from scratch — the child's plan file was never persisted on this branch, so there is nothing on disk to resume, and the whole planner delegation reruns. This write carries no anchor and no dedup check: unlike `plan-comment`'s marker (checked once per plan) or `planner-escalation`'s nonce (a durable anchor a later session must relocate by exact identity), nothing ever reads this comment back, and the child persists no state recording that it was posted. A retried Split Gate run that reaches Stop again for the same child therefore posts a new comment on the parent each time — by design, not oversight: each retry reran the planner delegation from scratch, so its `### Size Estimate`/`### Split Recommendation` reasoning may genuinely differ from a prior attempt's, and there is no durable child-side state to key a dedup check against. A duplicate comment on the parent is cheap, informational noise a human refining the parent can freely skip past — never a correctness or safety issue, unlike a duplicated ticket-creation write.
+
+**Lean ticket mode** (`planning.autonomy` is exactly `"lean"` and this is ticket mode): never `AskUserQuestion` — route to `## Unattended Escalation Path` with the synthesized split question (the planner's `### Split Recommendation`, or a one-line statement of the `L` size estimate when no split text was returned) as the escalated question, exactly as that section already handles any other escalation; its `cenci pipeline await-input` mechanics belong to that section alone and are never inlined here. **When the ticket is a split child** (`isChild` true), the synthesized question must name the parent instead of the generic non-child wording: "This is a split child of #`<parentId>`; the plan still sizes L / still recommends a split — re-partition parent #`<parentId>` via `/cenci:refine <parentId>`, or proceed as a single PR anyway?" — never a bare `/cenci:refine <id>` pointer at the child. This lean path has no interactive Stop/Proceed choice of its own to gate the parent-feedback write on — this session stops unattended immediately after posting the escalation question (`## Unattended Escalation Path` step 6), before any human has answered — so, when the ticket is a split child, run the **Feedback to the parent** write above unconditionally, immediately before this branch routes to `## Unattended Escalation Path`, rather than deferring it to an answer this session will never see. The two writes are independent: the parent comment does not depend on, and is never gated by, whichever answer the human eventually gives on the child's own escalation.
 
 **Resume-mode note**: the routing bullets above apply only to a fresh planner delegation from `## Planner Delegation`. When the planner was instead re-delegated from `## Resume From Draft`'s step 5 and returns further, non-"None" `## Clarifying Questions`, none of the routing above applies — that is a resume-mode planner return with further questions, and it routes back to `## Resume From Draft`'s own step 3 re-escalation path, never to `AskUserQuestion` and never to `## Unattended Escalation Path`. Separately, the Split Gate does not apply on the resume-mode re-plan return: a planner re-delegated from `## Resume From Draft` step 5 proceeds straight to step 6's persist even when it returns `### Size Estimate: L` or a non-empty `### Split Recommendation` — the gate governs only a fresh `## Planner Delegation` return, never this resume path. Likewise, the `### Blocked-Dependency Stop` above does not apply here: this stop governs only a fresh `## Planner Delegation` return, never `## Resume From Draft` step 5's re-delegation (which passes the draft, not a digest, so it carries no `blockers:` input; a blocked resume is already stopped at pre-flight before `Working` is applied).
 
