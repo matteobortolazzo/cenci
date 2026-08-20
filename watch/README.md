@@ -435,7 +435,7 @@ cenci dispatch plan-refined status [--config <path>] [--dir <path>] [--json]
 `enroll` and `loop`, creating the config file (and parent directory) when none
 exists yet. All three verbs then print the resolved state; `--json` emits a
 single pinned object, e.g.
-`{"enabled":true,"config":"/abs/path","repo":"owner/name","repo_autonomy":"lean","authorized":true}`.
+`{"enabled":true,"config":"/abs/path","repo":"owner/name","repo_autonomy":"lean","authorized":true,"attended":false}`.
 
 Because the fleet flag alone never authorizes a planning pickup (#851/#877),
 `status` run inside a git repository (or with `--dir`) also reports that repo's
@@ -443,10 +443,48 @@ half of the grant chain: `repo_autonomy` is the committed `planning.autonomy`
 verdict read at `refs/remotes/origin/main` **as of the last fetch** (the command
 never fetches; a dispatch pass always fetches first, so its live decision can be
 fresher), and `authorized` is the combined verdict — `true` only when the fleet
-flag is on **and** the remote-confirmed value is exactly `"lean"`. A directory
+flag is on, the fleet-wide [attended mode](#attended-mode-cenci-planning-attended-onoffstatus)
+switch is off, **and** the remote-confirmed value is exactly `"lean"`. A directory
 that isn't a git repo omits the repo fields; a repo with no fetched
 `origin/main` ref reports `unreadable`, the same fail-closed verdict the
-dispatch gate itself uses.
+dispatch gate itself uses. A malformed fleet `planning` block makes `status`
+exit 1 with the error on stderr, same as a malformed `dispatch` block — never a
+silent, confidently-wrong verdict.
+
+### Attended mode (`cenci planning attended on|off|status`)
+
+Toggles and reports the fleet-wide `planning.attended` narrowing switch — "a
+human is at the keyboard on this machine right now" — without hand-editing
+`config.json`:
+
+```bash
+cenci planning attended on     [--config <path>] [--json]
+cenci planning attended off    [--config <path>] [--json]
+cenci planning attended status [--config <path>] [--dir <path>] [--json]
+```
+
+`planning.attended` lives in its own top-level `planning` block in
+`~/.config/cenci/config.json` — **fleet-scoped**, and distinct from the
+repo-committed `planning.autonomy` key in each repo's own `.cenci/config.json`;
+the two files silently ignore each other's key of the same parent-block name.
+When on, every dispatch pass on this machine narrows any repo whose committed
+`planning.autonomy` resolves `"lean"` to a deny for that pass, suppressing
+unattended `Refined` planning pickups and autonomous re-plans there — it can
+only ever *reduce* what a repo already opted into, never grant lean to a repo
+that hasn't. `on`/`off` persist the toggle with the same atomic,
+key-preserving write every fleet switch here uses, creating the config file
+(and parent directory) when none exists yet.
+
+`status` prints the fleet flag, and — inside a git repository or with `--dir`
+— that repo's remote-confirmed `planning.autonomy` verdict
+(`repo_autonomy`, unnarrowed: this probe always reports the repo's true
+committed value, never the attended-narrowed one), `dispatch.planRefined`
+(`plan_refined`), and the same three-factor combined `authorized` verdict
+`cenci dispatch plan-refined status` prints — the two commands can never
+disagree about whether a repo's pickups would actually fire. `--json` emits
+`{"attended":true,"config":"/abs/path","repo":"owner/name","repo_autonomy":"lean","authorized":false,"plan_refined":true}`.
+A malformed `planning` block makes `status` exit 1 with the error on stderr,
+never a silent "off".
 
 ### Pickup rules and gates
 
@@ -852,6 +890,13 @@ own distinct skip reason — exactly as if `dispatch.planRefined` were `false` f
 that repo. Enabling `dispatch.planRefined` fleet-wide can no longer override a
 repo that hasn't itself opted into lean planning.
 
+A machine can additionally narrow its own lean repos further with the
+fleet-wide [`planning.attended` switch](#attended-mode-cenci-planning-attended-onoffstatus)
+(#1086): when on, a lean repo's planning pickups and autonomous re-plans are
+suppressed on that machine specifically, with their own distinct skip reason
+naming attended mode as the cause — for when a human is sitting at this
+machine's keyboard and could just answer a clarifying question instead.
+
 **Remote-confirmed authorization (#877).** The config read above requires a
 successful `git fetch origin` in *this pass* — it is never read from local
 `HEAD`, and a repo whose local `main` checkout is ahead of `origin/main` with
@@ -1028,6 +1073,22 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 
 An agent is routed per ticket from an `agent:<name>` label, falling back to
 `defaultAgent`, then to the `agentPreference` list.
+
+A separate top-level `"planning"` block (sibling to `"dispatch"`, not nested
+inside it) carries the fleet-scoped [attended mode](#attended-mode-cenci-planning-attended-onoffstatus)
+switch:
+
+```json
+{
+  "planning": {
+    "attended": false
+  }
+}
+```
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `attended` | `false` | Fleet-wide narrowing switch: when `true`, suppresses unattended `Refined` planning pickups and autonomous re-plans for every lean-planning repo on this machine (see [Planning pickup and autonomous re-plan](#planning-pickup-and-autonomous-re-plan)); managed via `cenci planning attended on\|off\|status` (see [Attended mode](#attended-mode-cenci-planning-attended-onoffstatus)). **Distinct from** the repo-committed `planning.autonomy` key in each repo's own `.cenci/config.json` — same parent block name, different file, different purpose; each file silently ignores the other's key |
 
 ### Usage budgets
 

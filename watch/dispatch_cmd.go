@@ -308,6 +308,14 @@ func runDispatchLoop(args []string) {
 // reports that repo's remote-confirmed planning.autonomy verdict and the
 // combined authorization — the fleet flag alone never authorizes a planning
 // pickup (#851/#877), so status makes the full grant chain visible.
+//
+// #1086: the combined verdict is now three-factor (attended + planRefined +
+// repo autonomy), reading the fleet-wide planning.attended switch via the
+// same strict QueryPlanningAttended reader `cenci planning attended status`
+// uses, so the two commands can never disagree about whether a repo's
+// pickups would actually fire. A malformed planning block therefore also
+// exits 1 here (Q3) — a status surface must never render a broken config as
+// a confident authorized state.
 func runDispatchPlanRefined(args []string) {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
 		fmt.Fprintln(os.Stderr, "cenci dispatch plan-refined: expected a subcommand: on, off, or status")
@@ -351,10 +359,15 @@ func runDispatchPlanRefined(args []string) {
 		fmt.Fprintf(os.Stderr, "cenci dispatch plan-refined: %v\n", err)
 		os.Exit(1)
 	}
+	attended, err := dispatch.QueryPlanningAttended(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cenci dispatch plan-refined: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Repo fields only render when --dir resolves to a git repo with an
 	// origin remote — status must work from anywhere, so a plain directory
-	// just gets the fleet flag. The autonomy probe reads the committed
+	// just gets the fleet flags. The autonomy probe reads the committed
 	// config at refs/remotes/origin/main as of the last fetch and fails
 	// closed (unreadable) when that ref doesn't resolve, same as the
 	// dispatch gate itself.
@@ -372,9 +385,10 @@ func runDispatchPlanRefined(args []string) {
 			Repo         string `json:"repo,omitempty"`
 			RepoAutonomy string `json:"repo_autonomy,omitempty"`
 			Authorized   *bool  `json:"authorized,omitempty"`
-		}{Enabled: enabled, Config: resolvedPath}
+			Attended     bool   `json:"attended"`
+		}{Enabled: enabled, Config: resolvedPath, Attended: attended}
 		if repoName != "" {
-			authorized := enabled && autonomy == dispatch.RepoAutonomyLean
+			authorized := planningAttendedAuthorized(attended, enabled, autonomy)
 			out.Repo = repoName
 			out.RepoAutonomy = string(autonomy)
 			out.Authorized = &authorized
@@ -399,10 +413,11 @@ func runDispatchPlanRefined(args []string) {
 	if repoName != "" {
 		fmt.Printf("  repo: %s\n", repoName)
 		fmt.Printf("  repo autonomy (planning.autonomy @ origin/main, as of last fetch): %s\n", autonomy)
-		if enabled && autonomy == dispatch.RepoAutonomyLean {
+		fmt.Printf("  attended (planning.attended): %v\n", attended)
+		if planningAttendedAuthorized(attended, enabled, autonomy) {
 			fmt.Printf("  authorized: yes — Refined tickets here are picked up for unattended planning\n")
 		} else {
-			fmt.Printf("  authorized: no — needs both the fleet flag and planning.autonomy \"lean\" committed on origin/main\n")
+			fmt.Printf("  authorized: no — needs attended off, the fleet flag on, and planning.autonomy \"lean\" committed on origin/main\n")
 		}
 	}
 }

@@ -67,6 +67,22 @@ const (
 	// origin` failed, or the repo carries no syncs entry at all) -- explicitly
 	// retryable, since the very next pass may confirm a fetch.
 	reasonAutonomyFetchUnconfirmed = "remote main not fetched this pass (retryable)"
+	// reasonAutonomyAttended (#1086) is content-distinct from every reason
+	// above, including reasonAutonomyInteractive: it names the fleet-wide
+	// planning.attended switch as the specific cause of the denial (a human
+	// is at the keyboard on this machine, so unattended planning pickups are
+	// suppressed here), rather than the misleading "repo autonomy not lean"
+	// -- the repo IS lean; this machine's own attended flag is what narrowed
+	// it. Produced only for RepoAutonomyAttended, which RunOnce's narrowing
+	// step (never the probe) is the sole producer of. Deliberately does NOT
+	// contain the literal phrase "planning attended mode on" -- that exact
+	// phrase is reserved for narrowAutonomiesAttended's once-per-pass
+	// narrowing-count log line (dispatch.go), and every per-ticket skip
+	// line already carries the lazyboards-reserved " skip:" substring
+	// (formatDecision), so this reason's text must never let a decision
+	// line collide with a consumer's "is this the narrowing summary line"
+	// substring match.
+	reasonAutonomyAttended = "attended mode on for this repo"
 )
 
 // Dependency-gate skip reasons (#825). reasonDependencyStateUnknownFmt is
@@ -755,6 +771,8 @@ func autonomyGateSkip(a RepoAutonomy) (string, bool) {
 		return reasonAutonomyUnreadable, true
 	case RepoAutonomyFetchUnconfirmed:
 		return reasonAutonomyFetchUnconfirmed, true
+	case RepoAutonomyAttended:
+		return reasonAutonomyAttended, true
 	default:
 		// Unrecognized/nil-map-miss/zero-value RepoAutonomy: default-deny
 		// with its own distinct reason so a regression collapsing this

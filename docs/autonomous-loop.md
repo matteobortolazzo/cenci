@@ -3,7 +3,7 @@
 > Refine a ticket, walk away, review the merged PR.
 
 cenci's default posture is human-gated: you approve the refined ticket, you approve
-the plan, you approve the merge. Four opt-in switches remove those gates one at a
+the plan, you approve the merge. Five opt-in switches remove those gates one at a
 time, up to a loop that runs **refine → plan → implement → PR → merge → next ticket**
 with no human touch between refinement and merge.
 
@@ -12,7 +12,7 @@ the machine, and how to read a decision when it doesn't do what you expected. Th
 exhaustive reference for each piece lives elsewhere — see
 [Where the details live](#where-the-details-live) at the bottom.
 
-## The four switches
+## The five switches
 
 Nothing here is on by default, and no switch implies another. Each one is
 independently reversible.
@@ -23,11 +23,17 @@ independently reversible.
 | 2 | `dispatch.planRefined: true` | `~/.config/cenci/config.json` | `false` | The **manual planning launch**. `cenci dispatch` starts planning sessions for `Refined` tickets and re-plans stale plans by itself. |
 | 3 | `automerge` policy block | repo `.cenci/config.json` (committed) | absent = deny | Nothing on its own — it *defines* the risk envelope automerge is allowed to act inside. |
 | 4 | `automerge.enabled: true` | `~/.config/cenci/config.json` | `false` | The **merge gate**. `cenci babysit` merges the PR itself once every condition holds. |
+| 5 | `planning.attended: true` | `~/.config/cenci/config.json` | `false` | The **inverse of switch 2, per machine**: suppresses unattended planning pickups/re-plans for lean repos on this machine specifically, for when a human is at the keyboard right now and could just answer a clarifying question instead. |
 
 Switches 1 and 3 are per-repo and committed, so the repo decides its own autonomy.
 Switches 2 and 4 are fleet-wide kill switches on your machine: they can only ever
 *permit* what a repo already opted into, never grant it. Turning on `planRefined`
 fleet-wide does nothing to a repo that hasn't committed `planning.autonomy: "lean"`.
+Switch 5 is fleet-wide too, but runs the other direction: it can only ever *narrow*
+what a repo already opted into (turning `"lean"` into a denial on this machine),
+never grant lean to a repo that hasn't committed it, and never mask a distinct
+reason a repo was already denied for (missing/malformed config, an unreadable
+probe, an unconfirmed fetch each keep their own reason).
 
 ## What the loop looks like
 
@@ -171,6 +177,15 @@ than `planStalenessTolerance` commits behind becomes an autonomous re-plan.
 > `planRefined` for a repo that accepts issues from untrusted parties. (The
 > `Input Needed` resume path is stricter: the replying author must currently hold
 > `admin` or `write` on the repo, re-resolved every pass.)
+
+> **Attended mode (switch 5).** When you're sitting at this machine's keyboard and
+> could just answer a clarifying question yourself, `cenci planning attended on`
+> suppresses unattended planning pickups/re-plans for lean repos here — narrowing
+> only, per machine: it never grants lean to a repo that hasn't committed it, and a
+> repo whose commit was already denied for another reason keeps that reason. `cenci
+> planning attended status` shows the fleet flag, this repo's remote-confirmed
+> autonomy, `dispatch.planRefined`, and the same combined verdict `dispatch
+> plan-refined status` prints — the two commands can never disagree.
 
 ### 3. Declare what a merge is allowed to touch
 
@@ -365,6 +380,7 @@ comment at all — if there is no comment, no automerge landed.
 | Merging for one ticket | Remove `automerge:ok` from the issue | Next tick |
 | Autonomous planning, everywhere | `cenci dispatch plan-refined off` | Next pass |
 | Autonomous planning for one repo | Push `planning.autonomy` off `"lean"` to `origin/main` | Next pass with a successful fetch |
+| Autonomous planning on this machine only, while a human is around | `cenci planning attended on` | Next pass |
 | All dispatch | `cenci dispatch loop off` | Immediately; in-flight sessions finish |
 
 A revocation pushed to `origin/main` is honored even if your local checkout still has

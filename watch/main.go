@@ -66,6 +66,8 @@ Details: docs/migrating-to-cenci.md in the cenci repo.
 		runDispatch(os.Args[2:])
 	case "automerge":
 		runAutomerge(os.Args[2:])
+	case "planning":
+		runPlanning(os.Args[2:])
 	case "close":
 		runClose(os.Args[2:])
 	case "pipeline":
@@ -118,6 +120,7 @@ Commands:
   babysit                            supervise an open PR until it merges or closes
   dispatch                           fleet auto-dispatch (enroll/unenroll/status/loop/plan-refined)
   automerge on|off|status            toggle or inspect the fleet-wide automerge kill switch (automerge.enabled)
+  planning attended on|off|status    toggle or inspect the fleet-wide planning.attended narrowing switch (suppresses unattended lean-planning pickups on this machine)
   close                              close a finished/idle agent window
   pipeline                           drive the implement pipeline's stage state machine (prepare|plan|await-input|execute|review|finalize) plus mechanics verbs (label|worktree|worktree-cleanup|artifact|plan-check)
   sandbox                            manage the sandbox container (build|build-base|prune|update-agent|update-plugins|reseed-creds|reap-orphans|ls|stop)

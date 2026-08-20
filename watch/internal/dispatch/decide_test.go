@@ -1895,6 +1895,96 @@ func TestDecideAutonomyGate_ReplanLeanDispatches(t *testing.T) {
 	assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "re-plan — plan stale", "claude"}})
 }
 
+// -- planning.attended fleet switch (#1086) ----------------------------------
+//
+// RepoAutonomyAttended is produced only by RunOnce's narrowing step (never by
+// the probe), mapping RepoAutonomyLean -> RepoAutonomyAttended when the fleet
+// planning.attended switch is on. Decide/autonomyGateSkip need no notion of
+// "attended is on" -- they only need a case for the new closed-set value,
+// exactly like every other RepoAutonomy denial class.
+
+// TestAutonomyGateSkip_AttendedDenies pins the direct unit-level mapping:
+// autonomyGateSkip denies RepoAutonomyAttended with its own distinct reason,
+// reasonAutonomyAttended, naming attended mode as the cause rather than
+// falling through to the misleading "repo autonomy not lean"
+// (reasonAutonomyInteractive) message the ticket forbids.
+func TestAutonomyGateSkip_AttendedDenies(t *testing.T) {
+	reason, gated := autonomyGateSkip(RepoAutonomyAttended)
+	if !gated {
+		t.Fatal("autonomyGateSkip(RepoAutonomyAttended) = (_, false), want gated")
+	}
+	if reason != reasonAutonomyAttended {
+		t.Errorf("reason = %q, want %q", reason, reasonAutonomyAttended)
+	}
+	if reason == reasonAutonomyInteractive {
+		t.Fatal("attended must not reuse reasonAutonomyInteractive (misleading: the repo IS lean)")
+	}
+}
+
+// TestDecideAutonomyGate_AttendedDeniesFreshPlanningPickup covers the AC: a
+// fresh Refined planning candidate whose repo autonomy has been narrowed to
+// RepoAutonomyAttended (attended mode on, lean -> attended) is denied with
+// the attended-specific reason, not the generic "repo autonomy not lean".
+func TestDecideAutonomyGate_AttendedDeniesFreshPlanningPickup(t *testing.T) {
+	in := planningCandidateInputs()
+	in.RepoAutonomy = map[string]RepoAutonomy{"o/r": RepoAutonomyAttended}
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, reasonAutonomyAttended, ""}})
+}
+
+// TestDecideAutonomyGate_ReplanDeniedComposesStaleAndAttendedReason covers
+// the AC: an autonomous re-plan candidate stale beyond tolerance in an
+// attended-narrowed repo composes the staleness fact with the attended
+// reason ("plan stale, re-plan blocked: <attended reason>"), mirroring every
+// other denying RepoAutonomy class, rather than either the flag-off literal
+// "plan stale, re-plan" or the bare attended reason alone.
+func TestDecideAutonomyGate_ReplanDeniedComposesStaleAndAttendedReason(t *testing.T) {
+	in := baseInputs()
+	in.Config.PlanRefined = true
+	in.RepoAutonomy = map[string]RepoAutonomy{"o/r": RepoAutonomyAttended}
+	in.Plans[0].CommitsBehind = 10 // stale
+	want := "plan stale, re-plan blocked: " + reasonAutonomyAttended
+	got := Decide(in)
+	assertDecisions(t, got, []wantDecision{{42, ActionSkip, want, ""}})
+	if got[0].Reason == "plan stale, re-plan" {
+		t.Fatalf("a denied re-plan must not collapse into the flag-off literal %q", "plan stale, re-plan")
+	}
+}
+
+// TestDecideAutonomyGate_OtherClassesUnmaskedByAttended pins the
+// narrowing-only invariant's decide.go half: adding RepoAutonomyAttended to
+// autonomyGateSkip's switch must never collapse any pre-existing denying
+// class's reason into reasonAutonomyAttended -- interactive/missing/
+// malformed/unreadable/fetch_unconfirmed each keep their own byte-for-byte
+// reason.
+func TestDecideAutonomyGate_OtherClassesUnmaskedByAttended(t *testing.T) {
+	tests := []struct {
+		autonomy   RepoAutonomy
+		wantReason string
+	}{
+		{RepoAutonomyInteractive, reasonAutonomyInteractive},
+		{RepoAutonomyMissing, reasonAutonomyMissing},
+		{RepoAutonomyMalformed, reasonAutonomyMalformed},
+		{RepoAutonomyUnreadable, reasonAutonomyUnreadable},
+		{RepoAutonomyFetchUnconfirmed, reasonAutonomyFetchUnconfirmed},
+	}
+	for _, tc := range tests {
+		t.Run(string(tc.autonomy), func(t *testing.T) {
+			in := planningCandidateInputs()
+			in.RepoAutonomy = map[string]RepoAutonomy{"o/r": tc.autonomy}
+			got := Decide(in)
+			if len(got) != 1 {
+				t.Fatalf("got %d decisions, want 1: %+v", len(got), got)
+			}
+			if got[0].Reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", got[0].Reason, tc.wantReason)
+			}
+			if got[0].Reason == reasonAutonomyAttended {
+				t.Fatalf("must not collapse into reasonAutonomyAttended, got %q", got[0].Reason)
+			}
+		})
+	}
+}
+
 // -- #852 AC2: mixed valid and malformed dependency lines --------------------
 
 // TestDecideDependencyGate_MixedValidAndMalformedDependency_HeldWithTruncatedToken

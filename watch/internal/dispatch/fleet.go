@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -143,6 +144,88 @@ func QueryPlanRefined(path string) (bool, error) {
 		return false, fmt.Errorf("parsing dispatch block: %w", err)
 	}
 	return block.PlanRefined != nil && *block.PlanRefined, nil
+}
+
+// SetPlanningAttended idempotently sets the fleet-wide planning.attended
+// switch (#1086) -- a distinct top-level "planning" block from the
+// repo-committed .cenci/config.json's own "planning.autonomy" key, which
+// this file never reads or writes -- preserving every other top-level block
+// (dispatch, automerge) and every sibling key inside the planning block
+// verbatim, mirroring SetPlanRefined above. An empty path resolves
+// run.DefaultConfigPath().
+func SetPlanningAttended(path string, enabled bool) error {
+	path, err := resolveConfigPath(path)
+	if err != nil {
+		return err
+	}
+
+	top, err := readRawConfig(path)
+	if err != nil {
+		return err
+	}
+
+	planningRaw := map[string]json.RawMessage{}
+	if raw, ok := top["planning"]; ok {
+		if err := json.Unmarshal(raw, &planningRaw); err != nil {
+			return fmt.Errorf("parsing planning block: %w", err)
+		}
+	}
+
+	enabledRaw, err := json.Marshal(enabled)
+	if err != nil {
+		return fmt.Errorf("marshaling planning.attended: %w", err)
+	}
+	planningRaw["attended"] = enabledRaw
+
+	planningBlockRaw, err := json.Marshal(planningRaw)
+	if err != nil {
+		return fmt.Errorf("marshaling planning block: %w", err)
+	}
+	top["planning"] = planningBlockRaw
+
+	return writeRawConfig(path, top)
+}
+
+// QueryPlanningAttended reports the fleet-wide planning.attended switch with
+// QueryPlanRefined's exact strict semantics: literal true only; a missing
+// file, a missing planning block, or a missing attended key is (false, nil);
+// malformed whole-file JSON or a non-bool attended value is an error -- a
+// status surface must never render a broken config as a confident "off". A
+// literal JSON null is deliberately treated the same as any other non-bool
+// value here (an explicit error), NOT the same as a missing key: a *bool
+// field decode (QueryPlanRefined's own idiom) would silently fold null into
+// "unset", which would let a config that explicitly nulled out attended
+// render as a confident "off" -- exactly the failure mode this strict reader
+// exists to prevent. An empty path resolves run.DefaultConfigPath().
+func QueryPlanningAttended(path string) (bool, error) {
+	path, err := resolveConfigPath(path)
+	if err != nil {
+		return false, err
+	}
+	top, err := readRawConfig(path)
+	if err != nil {
+		return false, err
+	}
+	raw, ok := top["planning"]
+	if !ok {
+		return false, nil
+	}
+	var planningRaw map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &planningRaw); err != nil {
+		return false, fmt.Errorf("parsing planning block: %w", err)
+	}
+	attendedRaw, ok := planningRaw["attended"]
+	if !ok {
+		return false, nil
+	}
+	if bytes.Equal(bytes.TrimSpace(attendedRaw), []byte("null")) {
+		return false, fmt.Errorf("parsing planning.attended: must be a bool, got null")
+	}
+	var attended bool
+	if err := json.Unmarshal(attendedRaw, &attended); err != nil {
+		return false, fmt.Errorf("parsing planning.attended: %w", err)
+	}
+	return attended, nil
 }
 
 // QueryRepoAutonomy reports dir's committed planning.autonomy verdict at
