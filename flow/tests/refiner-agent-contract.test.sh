@@ -142,11 +142,17 @@ if [[ -n "${skill}" ]]; then
   # Delegation to the refiner agent must be explicit, via the Task tool.
   assert_contains "${skill}" "Task" "skills/refine/SKILL.md"
   assert_contains "${skill}" "refiner" "skills/refine/SKILL.md"
-  # The one-question interaction contract — the exact sentence, not a keyword
-  # (step 6's old "ONE question at a time" wording was ignored in practice;
-  # this is the enforceable replacement the orchestrator must follow).
-  assert_contains "${skill}" "Ask exactly ONE question per \`AskUserQuestion\` call" "skills/refine/SKILL.md"
-  assert_contains "${skill}" "Never combine multiple refiner questions into a single \`AskUserQuestion\` call" "skills/refine/SKILL.md"
+  # The batched-round interaction contract — the exact sentence, not a
+  # keyword (step 6's old "ONE question at a time" wording was ignored in
+  # practice, since the refiner already drafts a whole round of up to 4
+  # questions before seeing any answer — relaying them one at a time gained
+  # nothing and just slowed the user down; AskUserQuestion supports up to 4
+  # questions in a single call, matching the refiner's per-round cap exactly.
+  # This pins the batched replacement, and pins the old one-at-a-time
+  # sentence as forbidden so a regression back to it fails the test).
+  assert_contains "${skill}" "Present the round's questions in a single \`AskUserQuestion\` call" "skills/refine/SKILL.md"
+  assert_not_contains "${skill}" "Ask exactly ONE question per \`AskUserQuestion\` call" "skills/refine/SKILL.md"
+  assert_not_contains "${skill}" "Never combine multiple refiner questions into a single \`AskUserQuestion\` call" "skills/refine/SKILL.md"
   # Context flows through the token-scoped verbatim bundle, and the bundle is
   # cleaned up with the run's other temp files.
   bundle_count="$(printf '%s' "${skill}" | grep -c -- "-bundle.md")"

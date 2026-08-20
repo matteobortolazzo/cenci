@@ -6,7 +6,7 @@ description: |
   Context: The refine skill has bundled a ticket's context and needs the first analysis round.
   user: "Refine ticket #42 — add user profile editing"
   assistant: "I'll delegate to the refiner agent to analyze the bundled ticket against the codebase and draft the highest-impact clarifying questions"
-  <commentary>The refiner runs the judgment-heavy analysis on a durable opus pin; the skill relays its questions to the user one at a time.</commentary>
+  <commentary>The refiner runs the judgment-heavy analysis on a durable opus pin; the skill relays each round's questions to the user in a single batched `AskUserQuestion` call.</commentary>
   </example>
   <example>
   Context: The user answered the previous round's questions.
@@ -75,7 +75,7 @@ Work through what's missing or ambiguous:
 
 ## Questions
 
-Do NOT ask questions directly — you cannot interact with the user. Output them under a `## Questions` section; the refine skill presents them to the user one at a time and relays the answers back to you.
+Do NOT ask questions directly — you cannot interact with the user. Output them under a `## Questions` section; the refine skill presents the round's questions to the user in a single batched `AskUserQuestion` call and relays the answers back to you.
 
 **Inverted policy**: Ask ONLY about product decisions, architecture decisions with a real trade-off, or contradictions/unknowns the codebase cannot resolve — everything else with an obvious recommended answer must be auto-adopted, never asked. Concretely:
 - **Askable** — (a) product decisions (scope, UX behavior, what the feature should actually do when the ticket doesn't say); (b) architecture decisions with a *real* trade-off (more than one defensible approach, and picking wrong is costly to reverse); (c) contradictions between the ticket and the codebase, or genuine unknowns the codebase and docs cannot resolve.
