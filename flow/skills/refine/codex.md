@@ -112,7 +112,7 @@ before that child's own `ensure-issue.sh ensure` call; a child with no blockers 
 never rewritten (`ensure-issue.sh`'s `bodyHash` is recorded at `init` but never read back, so this
 in-place rewrite is safe). Each child body then carries its own `### Acceptance Criteria` section —
 its slice of the parent's partition — after the dependency lines and description, plus that
-child's own `### Decisions` and `### Assumptions (auto-adopted)` persisted from its
+child's own `### Size`, `### Decisions` and `### Assumptions (auto-adopted)` persisted from its
 `### Suggested Split` block.
 
 **Creation checkpoint (idempotent create/recover/repair/link, #876)**: every split child and the

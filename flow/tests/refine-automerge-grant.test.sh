@@ -86,22 +86,26 @@ CONFIGURE_VISUALCHECK_ROW_MARKER='| `ui:visual-check` | `FEF2C0` |'
 CODEX_ASSUMPTIONS_MARKER='Assumptions (auto-adopted)'
 CODEX_AUTOMERGE_GRANT_MARKER='automerge:ok'
 
-# Negative-space coverage for "### Automation is never persisted into the
-# ticket body": step 10's body-file section list names ### Updated
-# Description, ### Acceptance Criteria, ### Assumptions (auto-adopted),
-# ### Decisions, ### Technical Notes, plus the design sections, in that
-# order — this marker is the exact substring that would appear if a future
-# edit mistakenly appended ### Automation to that same enumerated list
-# (the natural insertion point being right after ### Technical Notes, the
-# last always-persisted item before the "when present" design sections).
-# The correct file instead has `### Technical Notes`, plus `### Design
-# Coverage`... with no `### Automation` spliced in, so this must NOT match.
-AUTOMATION_IN_BODY_SECTION_LIST_MARKER='`### Technical Notes`, `### Automation`, plus `### Design Coverage`'
-
-# Positive coverage (refine evidence/sizing fix, PR 2 of 3): ### Size Estimate
-# now IS persisted into the parent body, inserted right after ### Technical
-# Notes and before the "when present" design sections.
-SIZE_ESTIMATE_IN_BODY_SECTION_LIST_MARKER='`### Technical Notes`, `### Size Estimate`, plus `### Design Coverage`'
+# Coverage for "### Automation is never persisted into the ticket body",
+# and (as of the refine evidence/sizing fix, PR 2 of 3) "### Size Estimate
+# IS persisted, right after ### Technical Notes": a single whole-list
+# POSITIVE pin, rather than a positional negative one. A positional
+# negative marker (asserting a specific two-name adjacency like "`###
+# Technical Notes`, `### Automation`, plus ...`" is absent) goes silently
+# vacuous the moment a legitimate new section is inserted into that same
+# slot — which is exactly what this PR did by inserting `### Size
+# Estimate` right after `### Technical Notes`. A future regression that
+# persists `### Automation` could then land on either side of `### Size
+# Estimate` (`` `### Size Estimate`, `### Automation`, plus ... `` or ``
+# `### Automation`, `### Size Estimate`, plus ... ``) and neither would
+# trip the old two-name marker. This marker instead pins the ENTIRE
+# ordered section list, from `### Updated Description` through `###
+# Design Direction` when present, as one exact substring — position-
+# independent: an insertion (`### Automation` or anything else) anywhere
+# within that span breaks the exact-substring match, so this is both the
+# positive "### Size Estimate is in the right place" pin and the
+# negative "### Automation is nowhere in the list" pin at once.
+FULL_BODY_SECTION_LIST_MARKER='`### Updated Description`, `### Acceptance Criteria`, `### Assumptions (auto-adopted)`, `### Decisions`, `### Technical Notes`, `### Size Estimate`, plus `### Design Coverage`/`### Design Direction` when present'
 
 # --- agents/refiner.md — question-policy inversion + new sections ----------
 
@@ -149,10 +153,8 @@ assert_file_contains "${REFINE_CODEX}" "${CODEX_AUTOMERGE_GRANT_MARKER}" \
 
 # --- skills/refine/SKILL.md — step 10 must never persist ### Automation ----
 
-assert_file_lacks "${REFINE_SKILL}" "${AUTOMATION_IN_BODY_SECTION_LIST_MARKER}" \
-  "step-10 body-file section list must not also name ### Automation among the persisted sections"
-assert_file_contains "${REFINE_SKILL}" "${SIZE_ESTIMATE_IN_BODY_SECTION_LIST_MARKER}" \
-  "step-10 body-file section list must persist ### Size Estimate right after ### Technical Notes"
+assert_file_contains "${REFINE_SKILL}" "${FULL_BODY_SECTION_LIST_MARKER}" \
+  "step-10 body-file section list must be exactly this ordered list (### Size Estimate persisted right after ### Technical Notes, ### Automation nowhere in it)"
 
 echo "refine-automerge-grant.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]

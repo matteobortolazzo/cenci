@@ -81,6 +81,7 @@ CODEX_STRUCTURE_MARKER='first verify each child block is structurally complete'
 CODEX_STRUCTURE_SIX_SECTIONS_MARKER='all six subsections present (`### Goal`, `### Size`, `### Decisions`, `### Assumptions (auto-adopted)`, `### Acceptance criteria`, `### Dependencies`)'
 CODEX_STRUCTURE_ORDER_MARKER='before the acceptance-criteria partition check'
 CODEX_STRUCTURE_SIZE_EMPTINESS_MARKER='`### Size` a real `<S/M> — <reasoning>` value, never empty and never the "None." sentinel'
+CODEX_PASS1_SIZE_PERSIST_MARKER='own `### Size`, `### Decisions` and `### Assumptions (auto-adopted)` persisted from its'
 
 # --- skills/refine/SKILL.md -------------------------------------------------
 
@@ -130,6 +131,8 @@ assert_file_contains "${REFINE_CODEX}" "${CODEX_STRUCTURE_ORDER_MARKER}" \
   "must mirror the structural check running before the partition check"
 assert_file_contains "${REFINE_CODEX}" "${CODEX_STRUCTURE_SIZE_EMPTINESS_MARKER}" \
   "must mirror the Size emptiness rule"
+assert_file_contains "${REFINE_CODEX}" "${CODEX_PASS1_SIZE_PERSIST_MARKER}" \
+  "must mirror ### Size flowing through into each child's persisted body alongside Decisions and Assumptions"
 
 echo "split-decision-completeness.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]

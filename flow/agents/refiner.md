@@ -178,7 +178,7 @@ Only when questions are `None.`, output the complete proposal. The skill persist
 
     **Ground each child's sizing in evidence.** Each child's `### Size` must be grounded in a bounded enumeration of files/components affected by that child — found via Glob/Grep during exploration (`## Before Analyzing` step 3) and cited by name — never a generic guess untethered from what was actually found in the codebase.
 
-    **A split child's `### Size` is never L.** L on a split child means the parent's partition was wrong, not that this child should be split further (see "Split children are never split again" below) — so `### Size` on a child is always S or M, never L.
+    **A split child's `### Size` is never L.** L on a split child means the parent's partition was wrong, not that this child should be split further (see "Split children are never split again" below) — so `### Size` on a child is always S or M, never L. If a child's evidence-grounded enumeration genuinely sizes L, re-partition the split until every child is S or M — never write a smaller size than the enumeration supports.
 
     **"None." sentinel rule**: `### Decisions`, `### Assumptions (auto-adopted)`, and `### Dependencies` are always present in every child block, even when genuinely empty — when a child has no scoped decision, assumption, or dependency, write exactly "None." rather than omitting the subsection or leaving it blank, so the coverage gate's structural completeness check (`skills/refine/SKILL.md`) is deterministic. `### Size` joins this "always present, never omitted" list too, but it is never itself the "None." sentinel: a child is always part of a split of an L-sized parent, so it always has a real size — write its actual `<S/M> — <reasoning>` value, never "None."
 
